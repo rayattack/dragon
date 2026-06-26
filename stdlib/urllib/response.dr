@@ -1,0 +1,32 @@
+"""urllib.response - file-like wrappers returned by urllib (Python parity).
+
+`addinfourl(headers, url, code)` exposes a `urlopen`-style response's
+metadata: `info()` returns the headers dict, `geturl()` the request URL,
+`getcode()` the HTTP status. The underlying file body is held by the
+caller (`http.client.HTTPResponse`).
+"""
+
+
+class addinfourl {
+    headers: dict[str, str]
+    url: str
+    code: int
+
+    def(headers: dict[str, str], url: str, code: int = 0) {
+        self.headers = headers
+        self.url = url
+        self.code = code
+    }
+
+    def info() -> dict[str, str] {
+        return self.headers
+    }
+
+    def geturl() -> str {
+        return self.url
+    }
+
+    def getcode() -> int {
+        return self.code
+    }
+}

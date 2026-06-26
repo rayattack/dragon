@@ -1,0 +1,79 @@
+"""mimetypes - guess a file's MIME type from its name/extension.
+
+Pure Dragon, concrete `str` operations. Covers the common extension table;
+`guess_type` returns the type or "" when unknown (CPython returns None, but
+Dragon's static str avoids Optional here - "" is the unknown sentinel).
+"""
+
+from os.path import splitext
+
+
+# Extension (lowercase, with dot) -> MIME type. Populated once on first use by
+# _ensure_mime_table (an imported module's top-level imperative statements do
+# not run, and a multi-line `{...}` literal is impossible because NEWLINE is not
+# suppressed inside braces - so the table is built lazily, not rebuilt per call).
+_MIME_TABLE: dict[str, str] = {}
+_mime_built: bool = false
+
+
+def _ensure_mime_table() {
+    global _mime_built
+    if _mime_built {
+        return
+    }
+    _MIME_TABLE[".txt"] = "text/plain"
+    _MIME_TABLE[".html"] = "text/html"
+    _MIME_TABLE[".htm"] = "text/html"
+    _MIME_TABLE[".css"] = "text/css"
+    _MIME_TABLE[".csv"] = "text/csv"
+    _MIME_TABLE[".js"] = "text/javascript"
+    _MIME_TABLE[".json"] = "application/json"
+    _MIME_TABLE[".xml"] = "application/xml"
+    _MIME_TABLE[".pdf"] = "application/pdf"
+    _MIME_TABLE[".zip"] = "application/zip"
+    _MIME_TABLE[".gz"] = "application/gzip"
+    _MIME_TABLE[".tar"] = "application/x-tar"
+    _MIME_TABLE[".png"] = "image/png"
+    _MIME_TABLE[".jpg"] = "image/jpeg"
+    _MIME_TABLE[".jpeg"] = "image/jpeg"
+    _MIME_TABLE[".gif"] = "image/gif"
+    _MIME_TABLE[".svg"] = "image/svg+xml"
+    _MIME_TABLE[".ico"] = "image/x-icon"
+    _MIME_TABLE[".webp"] = "image/webp"
+    _MIME_TABLE[".mp3"] = "audio/mpeg"
+    _MIME_TABLE[".wav"] = "audio/x-wav"
+    _MIME_TABLE[".mp4"] = "video/mp4"
+    _MIME_TABLE[".woff"] = "font/woff"
+    _MIME_TABLE[".woff2"] = "font/woff2"
+    _MIME_TABLE[".ttf"] = "font/ttf"
+    _MIME_TABLE[".md"] = "text/markdown"
+    _MIME_TABLE[".py"] = "text/x-python"
+    _MIME_TABLE[".dr"] = "text/x-dragon"
+    _mime_built = true
+}
+
+
+def guess_type(name: str) -> str {
+    """Return the MIME type for `name`, or "" if unknown."""
+    _ensure_mime_table()
+    root: str = ""
+    ext: str = ""
+    root, ext = splitext(name)
+    lower: str = ext.lower()
+    if lower in _MIME_TABLE {
+        return _MIME_TABLE[lower]
+    }
+    return ""
+}
+
+
+def guess_extension(mime: str) -> str {
+    """Return a canonical extension (with dot) for a MIME type, or ""."""
+    _ensure_mime_table()
+    for ext in _MIME_TABLE {
+        if _MIME_TABLE[ext] == mime {
+            return ext
+        }
+    }
+    return ""
+}

@@ -1,0 +1,69 @@
+"""linecache - line-by-line cached read of a file."""
+
+from unittest import TestCase, main
+import linecache
+import os
+from os.path import join, exists
+from io import make
+
+
+class LineCacheTests(TestCase) {
+    def _make(path: str, body: str) -> None {
+        if exists(path) {
+            os.remove(path)
+        }
+        with make(path) as w {
+            w.write(body)
+        }
+    }
+
+    def test_getline_basic() {
+        path: str = "/tmp/dr_linecache_a.txt"
+        self._make(path, "alpha\nbeta\ngamma\n")
+        linecache.clearcache()
+        self.assertEqual(linecache.getline(path, 1).strip(), "alpha")
+        self.assertEqual(linecache.getline(path, 2).strip(), "beta")
+        self.assertEqual(linecache.getline(path, 3).strip(), "gamma")
+        os.remove(path)
+    }
+
+    def test_out_of_range_and_missing() {
+        path: str = "/tmp/dr_linecache_b.txt"
+        self._make(path, "only one\n")
+        linecache.clearcache()
+        self.assertEqual(linecache.getline(path, 0), "")
+        self.assertEqual(linecache.getline(path, 99), "")
+        self.assertEqual(linecache.getline("/no/such/file/xyz", 1), "")
+        os.remove(path)
+    }
+
+    def test_cache_survives_file_removal() {
+        path: str = "/tmp/dr_linecache_c.txt"
+        self._make(path, "cached\n")
+        linecache.clearcache()
+        linecache.getline(path, 1)
+        os.remove(path)
+        # Still in cache - Python parity: linecache doesn't auto-refresh.
+        self.assertEqual(linecache.getline(path, 1).strip(), "cached")
+        linecache.checkcache(path)
+        # After checkcache, the stale entry is dropped.
+        self.assertEqual(linecache.getline(path, 1), "")
+    }
+
+    def test_updatecache() {
+        path: str = "/tmp/dr_linecache_d.txt"
+        self._make(path, "first\n")
+        linecache.clearcache()
+        self.assertEqual(linecache.getline(path, 1).strip(), "first")
+        self._make(path, "second\n")
+        # getline still serves the old cached line.
+        self.assertEqual(linecache.getline(path, 1).strip(), "first")
+        # updatecache forces a reload.
+        linecache.updatecache(path)
+        self.assertEqual(linecache.getline(path, 1).strip(), "second")
+        os.remove(path)
+    }
+}
+
+
+main([LineCacheTests()])

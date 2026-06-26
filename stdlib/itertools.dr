@@ -1,0 +1,79 @@
+"""itertools - iterator building blocks (Python `itertools`, monomorphic subset).
+
+Dragon has no generic functions, so these are concrete `int`-list variants
+(the common case; mirrors operator.dr's monomorphic policy). They return eager
+`list[int]` rather than lazy iterators - sufficient for finite inputs and free
+of boxing. Lazy/infinite forms (count, cycle) and arbitrary-type variants await
+a generic-functions language feature.
+"""
+
+
+def accumulate(iterable: list[int]) -> list[int] {
+    """Running sums: accumulate([1,2,3,4]) -> [1, 3, 6, 10]."""
+    out: list[int] = []
+    total: int = 0
+    first: bool = True
+    for x in iterable {
+        if first {
+            total = x
+            first = False
+        } else {
+            total = total + x
+        }
+        out.append(total)
+    }
+    return out
+}
+
+
+def chain(a: list[int], b: list[int]) -> list[int] {
+    """Concatenate two int sequences."""
+    out: list[int] = []
+    for x in a { out.append(x) }
+    for y in b { out.append(y) }
+    return out
+}
+
+
+def repeat(value: int, times: int) -> list[int] {
+    """`value` repeated `times` times."""
+    out: list[int] = []
+    i: int = 0
+    while i < times {
+        out.append(value)
+        i = i + 1
+    }
+    return out
+}
+
+
+def islice(iterable: list[int], start: int, stop: int) -> list[int] {
+    """Slice [start, stop) of a sequence."""
+    out: list[int] = []
+    i: int = start
+    n: int = len(iterable)
+    while i < stop and i < n {
+        out.append(iterable[i])
+        i = i + 1
+    }
+    return out
+}
+
+
+def pairwise(iterable: list[int]) -> list[tuple[int, int]] {
+    """Successive overlapping pairs: pairwise([1,2,3]) -> [(1,2),(2,3)]."""
+    out: list[tuple[int, int]] = []
+    n: int = len(iterable)
+    i: int = 1
+    while i < n {
+        out.append((iterable[i - 1], iterable[i]))
+        i = i + 1
+    }
+    return out
+}
+
+
+def take(iterable: list[int], n: int) -> list[int] {
+    """First `n` elements (or fewer)."""
+    return islice(iterable, 0, n)
+}

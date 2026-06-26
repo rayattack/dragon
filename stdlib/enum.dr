@@ -1,0 +1,51 @@
+"""
+Support for enumerations (Python `enum` module parity).
+
+`Enum`, `IntEnum`, and `StrEnum` are compiler-recognized base-class markers.
+A class deriving one of them has its members lowered, at compile time, to
+singleton instances carrying `.name` and `.value` - member access is a global
+load, `==` is pointer identity (plain `Enum`) or value equality (`IntEnum` /
+`StrEnum`), iteration walks a pre-built member list, and `Color(v)` looks the
+member up by value. There is no runtime metaclass and no reflection: the
+synthesis (see synthesizeEnumMethods in src/codegen/Classes.cpp) is pure
+type-specialized codegen, so enums cost nothing a hand-written class wouldn't.
+
+`from enum import Enum` is REQUIRED - these markers are NOT free builtins
+(Python parity; mirrors `from threading import Lock`). The native `enum Name {
+A, B, C }` keyword remains a separate, faster int-constant form for hot paths.
+
+    from enum import Enum, IntEnum, StrEnum, auto
+
+    class Color(Enum) {
+        RED: int = 1
+        GREEN: int = 2
+        BLUE: int = auto()      # 3 (previous value + 1)
+    }
+
+    Color.RED.value             # 1
+    Color.RED.name              # "RED"
+    str(Color.RED)              # "Color.RED"
+    Color(2)                    # Color.GREEN (lookup by value)
+    for c in Color { ... }      # iterate members in definition order
+"""
+
+# Inert marker base classes. They are never instantiated and carry no state;
+# the compiler recognizes the base name and rewrites the deriving class. Kept
+# as real (empty) declarations so `from enum import Enum` resolves through the
+# normal module-export path and the names are import-gated (not builtins).
+class Enum {
+}
+
+class IntEnum {
+}
+
+class StrEnum {
+}
+
+# `auto()` is a compile-time sentinel. The enum synthesis recognizes the call in
+# a member initializer and substitutes "previous value + 1" (or, for StrEnum,
+# the lowercased member name). It is never actually invoked at runtime; this
+# definition exists only so the call type-checks (returns int) and resolves.
+def auto() -> int {
+    return 0
+}

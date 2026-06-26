@@ -1,0 +1,88 @@
+# test/dr/test_slice_return_rc.dr - slice-return reference counting.
+#
+# A function returning a SLICE (`return s[a:b]`, `return xs[a:b]`) returns a
+# FRESH +1 owned object (dragon_{str,list,bytes}_slice). The concrete-return
+# path used to incref it as if it were a borrowed element read (`return d[k]` /
+# `return lst[i]`), making +2 and leaking one object per call - e.g.
+# os.path.basename's `return path[idx+1:]` leaked its result on every call. The
+# fix carves slices out of the subscript-return incref (mirroring
+# isBorrowedHeapExpr), so a slice return transfers its single +1 unchanged.
+#
+# Pins: (1) slice returns produce correct values across many calls (leak-freedom
+# itself is verified under the ASan/LSan build), and (2) ELEMENT-read returns
+# still incref - the returned value must survive the source container being
+# dropped, else the carve-out would have introduced a use-after-free.
+
+from unittest import TestCase, main
+
+
+def tail(s: str) -> str { return s[1:] }
+def head3(s: str) -> str { return s[:3] }
+def mid(xs: list[int]) -> list[int] { return xs[1:3] }
+
+# Element-read returns - must STILL incref (value outlives the container).
+def dget(d: dict[str, str], k: str) -> str { return d[k] }
+def lget(xs: list[str], i: int) -> str { return xs[i] }
+
+
+class SliceReturnRcTests(TestCase) {
+    def test_str_slice_values() {
+        # Bind the slice results to locals before asserting: passing an owned
+        # temp directly as a method argument leaks via a SEPARATE, still-open
+        # issue (#3 method-arg release), which would muddy this slice-return test.
+        const s: str = "hello world"
+        const t: str = tail(s)
+        const h: str = head3(s)
+        self.assertEqual(t, "ello world")
+        self.assertEqual(h, "hel")
+    }
+
+    def test_str_slice_loop() {
+        # Stress the (formerly leaking) slice-return path; values stay correct
+        # and the source is untouched.
+        const s: str = "abcdef"
+        i: int = 0
+        acc: int = 0
+        while i < 1000 {
+            const t: str = tail(s)
+            acc = acc + len(t)      # len("bcdef") == 5
+            i = i + 1
+        }
+        self.assertEqual(acc, 5000)
+        self.assertEqual(s, "abcdef")
+    }
+
+    def test_list_slice_return() {
+        const xs: list[int] = [10, 20, 30, 40]
+        const sub: list[int] = mid(xs)
+        self.assertEqual(len(sub), 2)
+        self.assertEqual(sub[0], 20)
+        self.assertEqual(sub[1], 30)
+        self.assertEqual(len(xs), 4)
+    }
+
+    def test_element_read_return_outlives_source() {
+        # The element-read return path must still incref: the returned value has
+        # to survive the source being dropped. A missing incref would free the
+        # heap value out from under `v` (use-after-free, caught under ASan).
+        const piece: str = "stored"
+        d: dict[str, str] = {}
+        d["k"] = piece + "-value"          # heap string (concat), not a literal
+        const v: str = dget(d, "k")
+        d = {}                             # drop the source dict + its value ref
+        # Churn the allocator to reuse any wrongly-freed slot.
+        j: int = 0
+        while j < 200 { const junk: str = piece + "-churn"; j = j + 1 }
+        self.assertEqual(v, "stored-value")
+
+        xs: list[str] = [piece + "-elem", "y", "z"]
+        const e: str = lget(xs, 0)
+        xs = []
+        j = 0
+        while j < 200 { const junk2: str = piece + "-churn2"; j = j + 1 }
+        self.assertEqual(e, "stored-elem")
+    }
+}
+
+
+main([SliceReturnRcTests()])

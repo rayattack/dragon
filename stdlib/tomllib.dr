@@ -1,0 +1,283 @@
+# tomllib.dr - Dragon standard library: TOML parser (read-only)
+#
+# Pure Dragon implementation of a TOML parser matching the Python 3.11+
+# tomllib module. Supports a practical subset of TOML: sections, dotted
+# keys, strings, integers, floats, booleans, and comments.
+# Does not support: arrays of tables, inline tables, multi-line strings,
+# or datetime values.
+
+extern "C" def dragon_str_to_int(s: str) -> int
+extern "C" def dragon_str_to_float(s: str) -> float
+
+#===----------------------------------------------------------------------===#
+# Internal helpers
+#===----------------------------------------------------------------------===#
+
+def _strip(s: str) -> str {
+    # Strip leading and trailing spaces, tabs, and carriage returns.
+    return s.strip(" \t\r")
+}
+
+def _strip_comment(line: str) -> str {
+    # Remove trailing comments from a line. A # outside of a quoted
+    # string marks the start of a comment.
+    in_string: bool = false
+    i: int = 0
+    while i < len(line) {
+        const ch: str = line[i:i + 1]
+        if ch == "\"" {
+            in_string = not in_string
+        } else {
+            if ch == "#" {
+                if not in_string {
+                    return _strip(line[:i])
+                }
+            }
+        }
+        i = i + 1
+    }
+    return line
+}
+
+def _unquote(s: str) -> str {
+    # Remove surrounding double quotes from a string if present.
+    # Also handles basic string escapes.
+    if len(s) < 2 { return s }
+    if s[0:1] == "\"" {
+        if s[len(s) - 1:len(s)] == "\"" {
+            const inner: str = s[1:len(s) - 1]
+            # Process escape sequences
+            result: str = ""
+            i: int = 0
+            while i < len(inner) {
+                const ch: str = inner[i:i + 1]
+                if ch == "\\" {
+                    if i + 1 < len(inner) {
+                        const next: str = inner[i + 1:i + 2]
+                        if next == "n" {
+                            result = result + "\n"
+                            i = i + 2
+                        } else {
+                            if next == "t" {
+                                result = result + "\t"
+                                i = i + 2
+                            } else {
+                                if next == "\\" {
+                                    result = result + "\\"
+                                    i = i + 2
+                                } else {
+                                    if next == "\"" {
+                                        result = result + "\""
+                                        i = i + 2
+                                    } else {
+                                        result = result + ch
+                                        i = i + 1
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        result = result + ch
+                        i = i + 1
+                    }
+                } else {
+                    result = result + ch
+                    i = i + 1
+                }
+            }
+            return result
+        }
+    }
+    # Also handle single-quoted (literal) strings
+    if s[0:1] == "'" {
+        if s[len(s) - 1:len(s)] == "'" {
+            return s[1:len(s) - 1]
+        }
+    }
+    return s
+}
+
+def _parse_value(raw: str) -> str {
+    # Parse a TOML value and return its string representation.
+    # Strings are unquoted; booleans, numbers returned as-is.
+    const val: str = _strip(raw)
+    if len(val) == 0 { return "" }
+
+    # Quoted string
+    const first: str = val[0:1]
+    if first == "\"" { return _unquote(val) }
+    if first == "'" { return _unquote(val) }
+
+    # Boolean
+    if val == "true" { return "true" }
+    if val == "false" { return "false" }
+
+    # Number (integer or float) - return as-is for typed getters
+    return val
+}
+
+#===----------------------------------------------------------------------===#
+# TomlDoc class - holds parsed TOML data as flat dotted key-value pairs
+#===----------------------------------------------------------------------===#
+
+class TomlDoc {
+    def() {
+        self.keys: list[str] = []
+        self.values: list[str] = []
+    }
+
+    def _find(key: str) -> int {
+        # Return the index of a key, or -1 if not found.
+        i: int = 0
+        while i < len(self.keys) {
+            if self.keys[i] == key {
+                return i
+            }
+            i = i + 1
+        }
+        return 0 - 1
+    }
+
+    def _set(key: str, value: str) {
+        # Set or overwrite a key-value pair.
+        const idx: int = self._find(key)
+        if idx >= 0 {
+            self.values[idx] = value
+        } else {
+            self.keys.append(key)
+            self.values.append(value)
+        }
+    }
+
+    def get(key: str) -> str {
+        # Return the string value for the given dotted key.
+        # Raises ValueError if the key is not found.
+        const idx: int = self._find(key)
+        if idx < 0 {
+            raise ValueError(f"TOML key not found: {key}")
+        }
+        return self.values[idx]
+    }
+
+    def get_int(key: str) -> int {
+        # Return the integer value for the given key.
+        const val: str = self.get(key)
+        # TOML allows underscores in integers (e.g. 1_000) - strip them
+        cleaned: str = ""
+        i: int = 0
+        while i < len(val) {
+            const ch: str = val[i:i + 1]
+            if ch != "_" {
+                cleaned = cleaned + ch
+            }
+            i = i + 1
+        }
+        return dragon_str_to_int(cleaned)
+    }
+
+    def get_float(key: str) -> float {
+        # Return the float value for the given key.
+        const val: str = self.get(key)
+        # TOML allows underscores in floats - strip them
+        cleaned: str = ""
+        i: int = 0
+        while i < len(val) {
+            const ch: str = val[i:i + 1]
+            if ch != "_" {
+                cleaned = cleaned + ch
+            }
+            i = i + 1
+        }
+        return dragon_str_to_float(cleaned)
+    }
+
+    def get_bool(key: str) -> bool {
+        # Return the boolean value for the given key.
+        const val: str = self.get(key)
+        if val == "true" { return true }
+        return false
+    }
+
+    def has(key: str) -> bool {
+        # Check whether the given dotted key exists.
+        return self._find(key) >= 0
+    }
+
+    def all_keys() -> list[str] {
+        # Return a list of all dotted keys in insertion order.
+        result: list[str] = []
+        i: int = 0
+        while i < len(self.keys) {
+            result.append(self.keys[i])
+            i = i + 1
+        }
+        return result
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# Parser
+#===----------------------------------------------------------------------===#
+
+def loads(text: str) -> TomlDoc {
+    # Parse a TOML string and return a TomlDoc.
+    # Supports: [section] headers, dotted keys, strings, integers,
+    # floats, booleans, and # comments.
+    doc: TomlDoc = TomlDoc()
+    const lines: list[str] = text.split("\n")
+    current_prefix: str = ""
+
+    i: int = 0
+    while i < len(lines) {
+        raw: str = _strip(lines[i])
+
+        # Skip empty lines and full-line comments
+        if len(raw) == 0 {
+            i = i + 1
+        } else {
+            if raw[0:1] == "#" {
+                i = i + 1
+            } else {
+                # Section header: [name] or [a.b.c]
+                if raw[0:1] == "[" {
+                    # Ensure it's not an array of tables [[...]]
+                    if len(raw) > 1 {
+                        if raw[1:2] == "[" {
+                            # Array of tables - skip (unsupported)
+                            i = i + 1
+                        } else {
+                            # Standard table
+                            const close: int = raw.find("]")
+                            if close > 0 {
+                                current_prefix = _strip(raw[1:close])
+                            }
+                            i = i + 1
+                        }
+                    } else {
+                        i = i + 1
+                    }
+                } else {
+                    # Key-value pair
+                    # Strip trailing comment
+                    const cleaned: str = _strip_comment(raw)
+                    const eq_pos: int = cleaned.find("=")
+                    if eq_pos > 0 {
+                        const raw_key: str = _strip(cleaned[:eq_pos])
+                        const raw_val: str = _strip(cleaned[eq_pos + 1:])
+                        const value: str = _parse_value(raw_val)
+
+                        # Build the full dotted key
+                        full_key: str = raw_key
+                        if len(current_prefix) > 0 {
+                            full_key = current_prefix + "." + raw_key
+                        }
+                        doc._set(full_key, value)
+                    }
+                    i = i + 1
+                }
+            }
+        }
+    }
+
+    return doc
+}

@@ -1,0 +1,114 @@
+# logging.dr - Dragon standard library: simple structured logging
+#
+# Provides a Logger class plus module-level convenience functions
+# (debug/info/warning/error/critical). Output goes to stderr by default
+# with a fixed `LEVEL [name] message` format. Level filtering matches
+# Python's numeric levels: DEBUG=10, INFO=20, WARNING=30, ERROR=40,
+# CRITICAL=50.
+#
+# Scope (v0.0.2): single-handler, line-oriented, no rotating files,
+# no per-handler formatters. Sufficient for stdlib-internal logging
+# and library/server logs. The "root" level is held in a module
+# variable rather than a module-level Logger instance - a cross-module
+# class-instance global has known forward-decl gaps in v0.0.2.
+
+extern "C" def dragon_log_stderr(msg: str)
+
+#===----------------------------------------------------------------------===#
+# Levels
+#===----------------------------------------------------------------------===#
+
+const NOTSET: int = 0
+const DEBUG: int = 10
+const INFO: int = 20
+const WARNING: int = 30
+const ERROR: int = 40
+const CRITICAL: int = 50
+
+def _level_name(level: int) -> str {
+    if level >= CRITICAL  { return "CRITICAL" }
+    if level >= ERROR     { return "ERROR" }
+    if level >= WARNING   { return "WARNING" }
+    if level >= INFO      { return "INFO" }
+    if level >= DEBUG     { return "DEBUG" }
+    return "NOTSET"
+}
+
+#===----------------------------------------------------------------------===#
+# Module-level threshold (used by module-level convenience funcs and the
+# default Logger). Mutated via basicConfig().
+#===----------------------------------------------------------------------===#
+
+_root_level: int = WARNING
+
+def basicConfig(level: int) -> None {
+    global _root_level
+    _root_level = level
+}
+
+def _emit_to_stderr(name: str, level: int, message: str) -> None {
+    if level < _root_level {
+        return
+    }
+    const line: str = (_level_name(level) + " ["
+                     + name + "] " + message)
+    dragon_log_stderr(line)
+}
+
+#===----------------------------------------------------------------------===#
+# Logger
+#===----------------------------------------------------------------------===#
+
+class Logger {
+    name: str
+    level: int
+
+    def(name: str) {
+        self.name = name
+        self.level = NOTSET
+    }
+
+    def setLevel(level: int) -> None {
+        self.level = level
+    }
+
+    def isEnabledFor(level: int) -> bool {
+        const threshold: int = self.level if self.level > 0 else _root_level
+        return level >= threshold
+    }
+
+    def _emit(level: int, message: str) -> None {
+        const threshold: int = self.level if self.level > 0 else _root_level
+        if level < threshold {
+            return
+        }
+        const line: str = (_level_name(level) + " ["
+                         + self.name + "] " + message)
+        dragon_log_stderr(line)
+    }
+
+    def debug(message: str) -> None    { self._emit(DEBUG, message) }
+    def info(message: str) -> None     { self._emit(INFO, message) }
+    def warning(message: str) -> None  { self._emit(WARNING, message) }
+    def error(message: str) -> None    { self._emit(ERROR, message) }
+    def critical(message: str) -> None { self._emit(CRITICAL, message) }
+    def log(level: int, message: str) -> None { self._emit(level, message) }
+}
+
+def getLogger(name: str) -> Logger {
+    if len(name) == 0 {
+        return Logger("root")
+    }
+    return Logger(name)
+}
+
+#===----------------------------------------------------------------------===#
+# Module-level convenience helpers - write straight to stderr without
+# allocating a Logger. Useful for top-level scripts.
+#===----------------------------------------------------------------------===#
+
+def debug(message: str) -> None    { _emit_to_stderr("root", DEBUG,    message) }
+def info(message: str) -> None     { _emit_to_stderr("root", INFO,     message) }
+def warning(message: str) -> None  { _emit_to_stderr("root", WARNING,  message) }
+def error(message: str) -> None    { _emit_to_stderr("root", ERROR,    message) }
+def critical(message: str) -> None { _emit_to_stderr("root", CRITICAL, message) }

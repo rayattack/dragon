@@ -1,0 +1,51 @@
+# test/dr/test_concurrency_capture.dr - fire/thread block capture (Bug 2).
+#
+# Regression guard for the live-audit finding: a `fire { ... }` or `thread { ... }`
+# block that references an enclosing local used to emit invalid cross-function
+# IR ("Referring to an instruction in another function"). The fix marshals the
+# captured locals as spawn args (read-only borrow; the racy nonlocal-mutate case
+# is a compile error, tested separately by the compiler suite). Heap captures
+# are exercised to pin the refcount/no-double-free path.
+
+from unittest import TestCase, main
+
+def fire_int_capture() -> int {
+    n: int = 10
+    t: Task[int] = fire { return n + 1 }
+    return t.join()
+}
+
+def fire_str_capture() -> int {
+    s: str = "hello"
+    t: Task[int] = fire { return len(s) }
+    return t.join()
+}
+
+def fire_no_capture() -> int {
+    t: Task[int] = fire { return 42 }
+    return t.join()
+}
+
+def thread_int_capture() -> int {
+    out: list[int] = [0]
+    n: int = 5
+    thread { out[0] = n * n }
+    return out[0]
+}
+
+def thread_str_capture() -> int {
+    out: list[int] = [0]
+    s: str = "dragon"
+    thread { out[0] = len(s) }
+    return out[0]
+}
+
+class ConcurrencyCaptureTests(TestCase) {
+    def test_fire_captures_int() { self.assertEqual(fire_int_capture(), 11) }
+    def test_fire_captures_str() { self.assertEqual(fire_str_capture(), 5) }
+    def test_fire_no_capture() { self.assertEqual(fire_no_capture(), 42) }
+    def test_thread_captures_int() { self.assertEqual(thread_int_capture(), 25) }
+    def test_thread_captures_str() { self.assertEqual(thread_str_capture(), 6) }
+}
+
+main([ConcurrencyCaptureTests()])

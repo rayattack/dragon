@@ -1,0 +1,287 @@
+"""Shared core for the Dragon database stdlib (Decision 032).
+
+This module holds everything the backend drivers agree on and depend on, with
+*no* knowledge of any specific backend - so the drivers (`database.sqlite`,
+`database.postgres`, `database.mysql`) can import it without an import cycle
+(the package root `database` imports both this and the drivers, and defines the
+`open(dsn)` dispatcher).
+
+Contents (Decision 049 surface):
+  - `SQL`           - the structured `template[SQL]` content type.
+  - the error hierarchy (`DatabaseError` and friends).
+  - `Results`       - the outcome of `run`: rows (SELECT) + `xid`/`ran` (DML),
+                      with the typed fetch verbs `one[T]`/`all[T]`/`val[T]`.
+  - `Connection`    - the abstract base every backend subclasses. It carries the
+                      read sugar `one[T]`/`all[T]`/`val[T]`, `runs`, and the
+                      transaction surface, expressed once on top of the
+                      per-backend `run`/`raw` primitives (virtual dispatch, D026).
+  - `Tx`            - a `with db.transaction() as tx { ... }` scope.
+
+Result rows are `dict[str, Any]` (column name -> native value). The typed fetch
+verbs materialize each row via the call-site `**`-spread (D047): `T` is supplied
+explicitly (`db.one[Customer](sql)`) or inferred from the binding annotation
+(`c: Customer = db.one(sql)`); a bare `row: dict[str, Any] = db.one(sql)` infers
+`T = dict[str, Any]`, which copies the row.
+"""
+
+from template import Template
+
+#===----------------------------------------------------------------------===#
+# SQL - the structured `template[SQL]` content type (Decision 032).
+#
+# Homed here under D032's domain co-location rule: SQL is a database query DSL,
+# not generic markup, so it ships with the module that consumes it.
+# `from database import SQL` brings it into scope for `template[SQL]` (the
+# package root re-exports it from here).
+#
+# Unlike HTML/CSS/JSON/... (escape-and-concat), `template[SQL] { ... }` lowers
+# to a prepared statement: the literal text becomes a dialect-free canonical
+# `$$N` form and every !{expr} becomes a bound parameter - never string-
+# concatenated, so injection-safety is carried by the type, not by per-query
+# discipline. Each backend rewrites the canonical `$$N` to its own placeholder
+# dialect (`?N+1` for SQLite, `$N+1` for Postgres, `?` for MySQL).
+#===----------------------------------------------------------------------===#
+
+extern "C" def dragon_str_fnv1a(s: str) -> int
+
+
+class SQL(Template) {
+    def(canonical: str, phash: int, params: list[Any]) {
+        self.canonical = canonical
+        self.hash = phash
+        self.params = params
+    }
+
+    def to_str() -> str {
+        return self.canonical
+    }
+
+    def __str__() -> str {
+        return self.canonical
+    }
+
+    # `build` is the opt-in signal that switches this content type from escape-
+    # and-concat to parameter-extraction lowering. `template[SQL]` sites are
+    # lowered directly by the compiler (interned canonical + native param pack)
+    # and do NOT call this. It survives as the runtime fallback for content
+    # types/contexts the compiler does not constant-fold: given an already-
+    # assembled canonical `$$N` text and its native-typed `params`, it produces
+    # the `SQL` value. Hashing goes through dragon_str_fnv1a so a runtime-built
+    # canonical collides in-cache with the compiler's folded constant for the
+    # same text.
+    @staticmethod
+    def build(canonical: str, params: list[Any]) -> SQL {
+        return SQL(canonical, dragon_str_fnv1a(canonical), params)
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# Error hierarchy (D032 §Error model). `DatabaseError` is the common root so
+# `except DatabaseError` catches anything a driver raises.
+#===----------------------------------------------------------------------===#
+
+class DatabaseError(Exception) {}
+class ConnectionError(DatabaseError) {}
+class QueryError(DatabaseError) {}
+class NoRows(QueryError) {}
+class MultipleRows(QueryError) {}
+class TxError(DatabaseError) {}
+
+#===----------------------------------------------------------------------===#
+# Results - the outcome of running a statement (D049). Carries the fetched rows
+# (a SELECT) and the write outcome of a DML statement: `xid` (last-insert id)
+# and `ran` (rows affected). The typed fetch verbs materialize rows via the
+# call-site `**`-spread (D047): `T = dict[str, Any]` copies the row; `T = <class>`
+# builds an instance. T is supplied explicitly or inferred from the call context.
+#===----------------------------------------------------------------------===#
+
+class Results {
+    def(rows: list[dict[str, Any]], xid: int, ran: int) {
+        self._rows = rows
+        self.xid = xid
+        self.ran = ran
+    }
+
+    # all[T] - every row as a T. `all[dict[str, Any]]` (the bare-call inference)
+    # copies each row dict; `all[Customer]` builds instances.
+    def all[T]() -> list[T] {
+        out: list[T] = []
+        for r in self._rows {
+            out.append(T(**r))
+        }
+        return out
+    }
+
+    # one[T] - exactly one row as a T; raises NoRows / MultipleRows otherwise.
+    def one[T]() -> T {
+        if len(self._rows) == 0 {
+            raise NoRows("query returned no rows")
+        }
+        if len(self._rows) > 1 {
+            raise MultipleRows("query returned more than one row")
+        }
+        return T(**self._rows[0])
+    }
+
+    # val[T] - first column of the single result row, typed as T. Enforces
+    # single-row semantics like one(); rows are dict[str, Any] keyed in column
+    # order and Dragon dicts preserve insertion order, so the first key is the
+    # first column.
+    def val[T]() -> T {
+        if len(self._rows) == 0 {
+            raise NoRows("query returned no rows")
+        }
+        if len(self._rows) > 1 {
+            raise MultipleRows("query returned more than one row")
+        }
+        row: dict[str, Any] = self._rows[0]
+        for k in row {
+            v: Any = row[k]
+            return v
+        }
+        raise QueryError("scalar query returned a row with no columns")
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# Connection - the abstract base returned (as a concrete subclass) by open().
+#
+# Backends override the two primitives `run` / `raw` (and `close`); the read
+# sugar `one[T]` / `all[T]` / `val[T]`, `runs`, and the transaction surface are
+# written once here on top of `run`. Because the receiver is the base type but
+# `run` is overridden, the calls dispatch through the D026 vtable to the real
+# backend - so `db.one[T](...)` on a PgConnection runs Postgres's `run`, with
+# zero duplication across drivers.
+#===----------------------------------------------------------------------===#
+
+class Connection {
+    # --- Backend primitives: every driver MUST override these. ---
+
+    # run - execute one statement (SELECT or DML). The Results carries the rows
+    # (SELECT) and/or `xid` + `ran` (DML).
+    def run(sql: SQL) -> Results {
+        raise NotImplementedError("Connection.run must be overridden by a backend driver")
+    }
+
+    # raw - the explicit escape hatch: a verbatim text statement (DDL /
+    # maintenance / multi-statement), no parameters. Use template[SQL] + run for
+    # anything parameterized.
+    def raw(text: str) -> Results {
+        raise NotImplementedError("Connection.raw must be overridden by a backend driver")
+    }
+
+    def close() -> int {
+        return 0
+    }
+
+    # --- Read sugar, written once over run(): db.X[T](sql) == db.run(sql).X[T](). ---
+
+    def all[T](sql: SQL) -> list[T] {
+        return self.run(sql).all[T]()
+    }
+
+    def one[T](sql: SQL) -> T {
+        return self.run(sql).one[T]()
+    }
+
+    def val[T](sql: SQL) -> T {
+        return self.run(sql).val[T]()
+    }
+
+    # runs - run a batch of statements, returning an aggregate Results (total
+    # `ran`, last `xid`). Build the batch from one canonical for prepared-stmt
+    # cache reuse: `db.runs([template[SQL] { insert ... values(!{v}) } for v in vs])`.
+    def runs(stmts: list[SQL]) -> Results {
+        total: int = 0
+        last: int = 0
+        for s in stmts {
+            res: Results = self.run(s)
+            total = total + res.ran
+            last = res.xid
+        }
+        return Results([], last, total)
+    }
+
+    # --- Transactions. `__exit__` has no exception args, so the contract is
+    # explicit-commit / auto-rollback: call `tx.commit()` to commit; any exit
+    # without it (normal fall-through or a raised exception) rolls back. ---
+
+    def commit() -> int {
+        self.raw("COMMIT")
+        return 0
+    }
+
+    def rollback() -> int {
+        self.raw("ROLLBACK")
+        return 0
+    }
+
+    def transaction() -> Tx {
+        return Tx(self)
+    }
+
+    def __enter__() -> Connection {
+        return self
+    }
+
+    def __exit__() -> int {
+        self.close()
+        return 0
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# Tx - a transaction scope bound by `with db.transaction() as tx { ... }`.
+# `__enter__` issues BEGIN; `__exit__` rolls back unless `tx.commit()` was
+# called. `__exit__` runs on both the normal and the exception path but cannot
+# see the exception, so "commit only when explicitly asked" is the safe
+# contract (an uncommitted scope - including one unwound by a raise - rolls
+# back). Forwards the read/run surface to the pinned connection.
+#===----------------------------------------------------------------------===#
+
+class Tx {
+    def(conn: Connection) {
+        self.conn = conn
+        self._done = false
+    }
+
+    def __enter__() -> Tx {
+        self.conn.raw("BEGIN")
+        return self
+    }
+
+    def __exit__() -> int {
+        if not self._done {
+            self.conn.raw("ROLLBACK")
+        }
+        return 0
+    }
+
+    def commit() -> int {
+        self.conn.raw("COMMIT")
+        self._done = true
+        return 0
+    }
+
+    def rollback() -> int {
+        self.conn.raw("ROLLBACK")
+        self._done = true
+        return 0
+    }
+
+    def run(sql: SQL) -> Results {
+        return self.conn.run(sql)
+    }
+
+    def all[T](sql: SQL) -> list[T] {
+        return self.conn.run(sql).all[T]()
+    }
+
+    def one[T](sql: SQL) -> T {
+        return self.conn.run(sql).one[T]()
+    }
+
+    def val[T](sql: SQL) -> T {
+        return self.conn.run(sql).val[T]()
+    }
+}

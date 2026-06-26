@@ -1,0 +1,57 @@
+"""functools - higher-order helpers (Python `functools`, monomorphic subset).
+
+Dragon has no generic functions (see operator.dr), so `reduce` is provided as
+concrete `int` / `float` variants rather than one generic definition. `cache` /
+`lru_cache` are a separate compiler-synthesized decorator (see ADR 042/043
+follow-up), not defined here. `partial`/`wraps` need first-class closure
+capture over arbitrary signatures and await a generic-functions language
+feature - intentionally omitted rather than shipped as `Any`-boxed stubs.
+"""
+
+
+def reduce(function: Callable[[int, int], int], iterable: list[int]) -> int {
+    """Apply `function` cumulatively, left to right: ((a op b) op c)...
+
+    Uses the first element as the initial accumulator (Python parity for the
+    no-initializer form). Raises ValueError on an empty sequence.
+    """
+    n: int = len(iterable)
+    if n == 0 {
+        raise ValueError("reduce() of empty iterable with no initial value")
+    }
+    acc: int = iterable[0]
+    i: int = 1
+    while i < n {
+        acc = function(acc, iterable[i])
+        i = i + 1
+    }
+    return acc
+}
+
+
+def reduce_init(function: Callable[[int, int], int], iterable: list[int],
+                initial: int) -> int {
+    """`reduce` with an explicit initial accumulator (the 3-arg form)."""
+    acc: int = initial
+    for x in iterable {
+        acc = function(acc, x)
+    }
+    return acc
+}
+
+
+def reduce_f(function: Callable[[float, float], float],
+             iterable: list[float]) -> float {
+    """Float variant of `reduce` (no-initializer form)."""
+    n: int = len(iterable)
+    if n == 0 {
+        raise ValueError("reduce() of empty iterable with no initial value")
+    }
+    acc: float = iterable[0]
+    i: int = 1
+    while i < n {
+        acc = function(acc, iterable[i])
+        i = i + 1
+    }
+    return acc
+}

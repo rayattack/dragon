@@ -1,0 +1,80 @@
+"""Decision 044 - generic classes, monomorphized to native representation.
+
+`Box[int]` stores an `i64`, `Box[str]` a `ptr`, `Box[float]` an `f64` - each a
+distinct stamped class, no boxing (verified at the IR level by the GoogleTest
+companion). Here we assert the user-visible behavior: values round-trip at their
+native type, construction works both explicitly (`Box[int](v)`) and inferred
+from the binding annotation (`b: Box[int] = Box(v)`), and a mutating container
+(`Stack[T]`) push/pops correctly.
+"""
+
+from unittest import TestCase, main
+
+class Box[T] {
+    def(v: T) {
+        self.value = v
+    }
+    def get() -> T {
+        return self.value
+    }
+    def set(v: T) {
+        self.value = v
+    }
+}
+
+class Stack[T] {
+    items: list[T] = []
+    def push(x: T) {
+        self.items.append(x)
+    }
+    def pop() -> T {
+        return self.items.pop()
+    }
+    def size() -> int {
+        return len(self.items)
+    }
+}
+
+class GenericsBasicTests(TestCase) {
+    def test_box_int_explicit() {
+        b: Box[int] = Box[int](5)
+        self.assertEqual(b.get(), 5)
+        b.set(9)
+        self.assertEqual(b.get(), 9)
+    }
+
+    def test_box_str() {
+        b: Box[str] = Box[str]("hello")
+        self.assertEqual(b.get(), "hello")
+    }
+
+    def test_box_float() {
+        b: Box[float] = Box[float](3.5)
+        self.assertEqual(b.get(), 3.5)
+    }
+
+    def test_box_inferred_from_annotation() {
+        b: Box[int] = Box(42)
+        self.assertEqual(b.get(), 42)
+    }
+
+    def test_stack_push_pop() {
+        s: Stack[int] = Stack[int]()
+        s.push(1)
+        s.push(2)
+        s.push(3)
+        self.assertEqual(s.size(), 3)
+        self.assertEqual(s.pop(), 3)
+        self.assertEqual(s.pop(), 2)
+        self.assertEqual(s.size(), 1)
+    }
+
+    def test_two_instantiations_independent() {
+        bi: Box[int] = Box[int](1)
+        bs: Box[str] = Box[str]("x")
+        self.assertEqual(bi.get(), 1)
+        self.assertEqual(bs.get(), "x")
+    }
+}
+
+main([GenericsBasicTests()])

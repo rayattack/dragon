@@ -1,0 +1,565 @@
+# websocket.dr - RFC 6455 WebSocket handshake + frame codec (pure .dr).
+#
+# This is the W2 codec core: the network-independent pieces (handshake
+# accept-key, frame parse/build, fragmentation reassembly) live in pure
+# `bytes` arithmetic so they unit-test without a socket. The `WebSocket`
+# handle ties the codec to a connection fd via the existing binary socket
+# runtime (`dragon_nb_recv_bytes` / `dragon_nb_send_bytes`) - the only
+# runtime surface this touches. The server router performs the HTTP
+# `101 Switching Protocols` upgrade (using `compute_accept_key` /
+# `is_websocket_upgrade` from here) and hands the raw fd to `WebSocket(fd)`.
+#
+# Frame format (RFC 6455 §5.2):
+#
+#  0 1 2 3
+#  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+#  +-+-+-+-+-------+-+-------------+-------------------------------+
+#  |F|R|R|R| opcode|M| Payload len | Extended payload length |
+#  |I|S|S|S| (4) |A| (7) | (16/64) |
+#  |N|V|V|V| |S| | (if payload len==126/127) |
+#  | |1|2|3| |K| | |
+#  +-+-+-+-+-------+-+-------------+ - - - - - - - - - - - - - - - +
+#  : Masking-key (4 octets, if MASK set) ... Payload ... :
+#
+# Client->server frames are ALWAYS masked; we unmask on parse. Server->client
+# frames are never masked; `build_frame` leaves MASK clear by default.
+
+import hashlib
+import base64
+
+# Binary-safe, scheduler-yielding socket I/O (the W1 runtime surface). recv
+# may short-read; `_recv_exact` loops it. send writes the whole buffer.
+extern "C" def dragon_nb_recv_bytes(fd: int, max_len: int) -> bytes
+extern "C" def dragon_nb_send_bytes(fd: int, data: bytes) -> int
+extern "C" def dragon_close_fd(fd: int)
+
+#===----------------------------------------------------------------------===#
+# Opcodes (RFC 6455 §5.2) and the handshake GUID (§1.3).
+#===----------------------------------------------------------------------===#
+
+const OPCODE_CONT: int = 0x0
+const OPCODE_TEXT: int = 0x1
+const OPCODE_BINARY: int = 0x2
+const OPCODE_CLOSE: int = 0x8
+const OPCODE_PING: int = 0x9
+const OPCODE_PONG: int = 0xA
+
+# The magic GUID appended to Sec-WebSocket-Key before SHA-1 (RFC 6455 §4.2.2).
+const _WS_GUID: str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+#===----------------------------------------------------------------------===#
+# Handshake helpers.
+#===----------------------------------------------------------------------===#
+
+# compute_accept_key(key) = base64(sha1(key + GUID)).
+#
+# `key` is the client's Sec-WebSocket-Key header value; the return is the
+# Sec-WebSocket-Accept header the server echoes in its 101 response. RFC 6455
+# §1.3 example: compute_accept_key("dGhlIHNhbXBsZSBub25jZQ==") ==
+# "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=".
+def compute_accept_key(key: str) -> str {
+    combined: str = key + _WS_GUID
+    digest: bytes = hashlib.sha1(combined.encode("utf-8")).digest()
+    encoded: bytes = base64.b64encode(digest)
+    return encoded.decode("utf-8")
+}
+
+# Detect a WebSocket upgrade request from its (lowercased-key) headers.
+#
+# RFC 6455 §4.2.1 requires: `Upgrade: websocket` (case-insensitive token),
+# `Connection` containing the `Upgrade` token (it may be a comma list, e.g.
+# "keep-alive, Upgrade"), and a `Sec-WebSocket-Key`. Header keys are assumed
+# already lowercased by the HTTP layer (server.dr lowercases on parse); values
+# are compared case-insensitively.
+def is_websocket_upgrade(headers: dict[str, str]) -> bool {
+    if "upgrade" not in headers {
+        return False
+    }
+    if "connection" not in headers {
+        return False
+    }
+    if "sec-websocket-key" not in headers {
+        return False
+    }
+    upgrade_val: str = headers["upgrade"].lower()
+    if "websocket" not in upgrade_val {
+        return False
+    }
+    connection_val: str = headers["connection"].lower()
+    if "upgrade" not in connection_val {
+        return False
+    }
+    return True
+}
+
+#===----------------------------------------------------------------------===#
+# Frame - a decoded WebSocket frame.
+#===----------------------------------------------------------------------===#
+
+class Frame {
+    fin: bool
+    opcode: int
+    payload: bytes
+
+    def(fin: bool, opcode: int, payload: bytes) {
+        self.fin = fin
+        self.opcode = opcode
+        self.payload = payload
+    }
+
+    def is_control() -> bool {
+        # Control frames (close/ping/pong) have the high opcode bit set
+        # (RFC 6455 §5.5). They are never fragmented and carry <=125 bytes.
+        return (self.opcode & 0x08) != 0
+    }
+
+    def is_text() -> bool {
+        return self.opcode == OPCODE_TEXT
+    }
+
+    def is_binary() -> bool {
+        return self.opcode == OPCODE_BINARY
+    }
+}
+
+# IncompleteFrameError - raised by parse_frame when `data` does not yet hold a
+# full frame. A streaming caller catches this, reads more bytes, and retries.
+class IncompleteFrameError(Exception) {}
+
+# ProtocolError - raised on a malformed / disallowed frame (e.g. RSV bits set,
+# reserved opcode). Per RFC 6455 §7.4.1 the connection should close with 1002.
+class ProtocolError(Exception) {}
+
+#===----------------------------------------------------------------------===#
+# Frame codec.
+#===----------------------------------------------------------------------===#
+
+# parse_frame(data) -> Frame. Decodes exactly one frame from the front of
+# `data` (RFC 6455 §5.2). Unmasks the payload if the MASK bit is set
+# (client->server frames are always masked). Raises IncompleteFrameError if
+# `data` is shorter than the full frame, ProtocolError on a malformed header.
+#
+# This parses a single frame; trailing bytes in `data` (a second frame) are
+# ignored here. `frame_length(data)` reports how many bytes this frame
+# consumed so a buffered reader can advance past it.
+def parse_frame(data: bytes) -> Frame {
+    n: int = len(data)
+    if n < 2 {
+        raise IncompleteFrameError("need at least 2 bytes for a frame header")
+    }
+
+    b0: int = data[0]
+    b1: int = data[1]
+
+    fin: bool = (b0 & 0x80) != 0
+    rsv: int = b0 & 0x70
+    if rsv != 0 {
+        # No extensions negotiated, so any reserved bit is a protocol error.
+        raise ProtocolError("reserved RSV bits set with no extension negotiated")
+    }
+    opcode: int = b0 & 0x0F
+
+    masked: bool = (b1 & 0x80) != 0
+    length: int = b1 & 0x7F
+
+    # Cursor past the 2 header bytes; advance over extended length + mask key.
+    offset: int = 2
+
+    if length == 126 {
+        if n < offset + 2 {
+            raise IncompleteFrameError("need 2 bytes for 16-bit extended length")
+        }
+        length = (data[offset] << 8) | data[offset + 1]
+        offset = offset + 2
+    } else if length == 127 {
+        if n < offset + 8 {
+            raise IncompleteFrameError("need 8 bytes for 64-bit extended length")
+        }
+        length = (data[offset] << 56) | (data[offset + 1] << 48) | (data[offset + 2] << 40) | (data[offset + 3] << 32) | (data[offset + 4] << 24) | (data[offset + 5] << 16) | (data[offset + 6] << 8) | data[offset + 7]
+        offset = offset + 8
+    }
+
+    # Control frames must be <=125 bytes and not fragmented (RFC 6455 §5.5).
+    if (opcode & 0x08) != 0 {
+        if length > 125 {
+            raise ProtocolError("control frame payload exceeds 125 bytes")
+        }
+        if not fin {
+            raise ProtocolError("control frame must not be fragmented")
+        }
+    }
+
+    mask_key: list[int] = [0, 0, 0, 0]
+    if masked {
+        if n < offset + 4 {
+            raise IncompleteFrameError("need 4 bytes for masking key")
+        }
+        mask_key[0] = data[offset]
+        mask_key[1] = data[offset + 1]
+        mask_key[2] = data[offset + 2]
+        mask_key[3] = data[offset + 3]
+        offset = offset + 4
+    }
+
+    if n < offset + length {
+        raise IncompleteFrameError("payload not fully buffered")
+    }
+
+    # Extract and (if masked) XOR-unmask the payload: out[i] = in[i] ^ key[i%4].
+    payload_bytes: list[int] = [0] * length
+    i: int = 0
+    if masked {
+        while i < length {
+            payload_bytes[i] = data[offset + i] ^ mask_key[i & 3]
+            i = i + 1
+        }
+    } else {
+        while i < length {
+            payload_bytes[i] = data[offset + i]
+            i = i + 1
+        }
+    }
+
+    return Frame(fin, opcode, bytes(payload_bytes))
+}
+
+# frame_length(data) -> int. The total byte length of the single frame at the
+# front of `data` (header + extended length + mask + payload), so a buffered
+# reader knows how far to advance after parse_frame. Raises IncompleteFrameError
+# if the header needed to compute the length is not yet buffered.
+def frame_length(data: bytes) -> int {
+    n: int = len(data)
+    if n < 2 {
+        raise IncompleteFrameError("need at least 2 bytes for a frame header")
+    }
+    b1: int = data[1]
+    masked: bool = (b1 & 0x80) != 0
+    length: int = b1 & 0x7F
+    offset: int = 2
+    if length == 126 {
+        if n < offset + 2 {
+            raise IncompleteFrameError("need 2 bytes for 16-bit extended length")
+        }
+        length = (data[offset] << 8) | data[offset + 1]
+        offset = offset + 2
+    } else if length == 127 {
+        if n < offset + 8 {
+            raise IncompleteFrameError("need 8 bytes for 64-bit extended length")
+        }
+        length = (data[offset] << 56) | (data[offset + 1] << 48) | (data[offset + 2] << 40) | (data[offset + 3] << 32) | (data[offset + 4] << 24) | (data[offset + 5] << 16) | (data[offset + 6] << 8) | data[offset + 7]
+        offset = offset + 8
+    }
+    if masked {
+        offset = offset + 4
+    }
+    return offset + length
+}
+
+# build_frame(opcode, payload, fin=True, mask=False, mask_key=b"") -> bytes.
+#
+# Encodes one frame (RFC 6455 §5.2). Servers send unmasked frames (the default).
+# `mask=True` is provided for completeness / client-side use; when set, a 4-byte
+# `mask_key` is required (pass 4 bytes) and the payload is XOR-masked. The length
+# field uses the minimal encoding: 7-bit (<126), 16-bit (<=0xFFFF), else 64-bit.
+def build_frame(opcode: int, payload: bytes, fin: bool = True, mask: bool = False, mask_key: bytes = b"") -> bytes {
+    out: list[int] = []
+
+    b0: int = opcode & 0x0F
+    if fin {
+        b0 = b0 | 0x80
+    }
+    out.append(b0)
+
+    length: int = len(payload)
+    mask_bit: int = 0
+    if mask {
+        mask_bit = 0x80
+    }
+
+    if length < 126 {
+        out.append(mask_bit | length)
+    } else if length <= 0xFFFF {
+        out.append(mask_bit | 126)
+        out.append((length >> 8) & 0xFF)
+        out.append(length & 0xFF)
+    } else {
+        out.append(mask_bit | 127)
+        out.append((length >> 56) & 0xFF)
+        out.append((length >> 48) & 0xFF)
+        out.append((length >> 40) & 0xFF)
+        out.append((length >> 32) & 0xFF)
+        out.append((length >> 24) & 0xFF)
+        out.append((length >> 16) & 0xFF)
+        out.append((length >> 8) & 0xFF)
+        out.append(length & 0xFF)
+    }
+
+    if mask {
+        if len(mask_key) != 4 {
+            raise ProtocolError("build_frame: mask=True requires a 4-byte mask_key")
+        }
+        out.append(mask_key[0])
+        out.append(mask_key[1])
+        out.append(mask_key[2])
+        out.append(mask_key[3])
+        i: int = 0
+        while i < length {
+            out.append(payload[i] ^ mask_key[i & 3])
+            i = i + 1
+        }
+    } else {
+        i: int = 0
+        while i < length {
+            out.append(payload[i])
+            i = i + 1
+        }
+    }
+
+    return bytes(out)
+}
+
+# Convenience builders for the common server-side message kinds.
+def build_text_frame(text: str, fin: bool = True) -> bytes {
+    return build_frame(OPCODE_TEXT, text.encode("utf-8"), fin)
+}
+
+def build_binary_frame(payload: bytes, fin: bool = True) -> bytes {
+    return build_frame(OPCODE_BINARY, payload, fin)
+}
+
+def build_close_frame(code: int = 1000, reason: str = "") -> bytes {
+    # Close payload (RFC 6455 §5.5.1): 2-byte big-endian status code + UTF-8
+    # reason. An empty close (code 0) sends a zero-length payload.
+    if code == 0 {
+        return build_frame(OPCODE_CLOSE, b"")
+    }
+    body: list[int] = [(code >> 8) & 0xFF, code & 0xFF]
+    reason_bytes: bytes = reason.encode("utf-8")
+    i: int = 0
+    while i < len(reason_bytes) {
+        body.append(reason_bytes[i])
+        i = i + 1
+    }
+    return build_frame(OPCODE_CLOSE, bytes(body))
+}
+
+def build_ping_frame(payload: bytes = b"") -> bytes {
+    return build_frame(OPCODE_PING, payload)
+}
+
+def build_pong_frame(payload: bytes = b"") -> bytes {
+    return build_frame(OPCODE_PONG, payload)
+}
+
+#===----------------------------------------------------------------------===#
+# Fragmentation reassembly.
+#===----------------------------------------------------------------------===#
+
+# MessageReassembler accumulates a fragmented data message (RFC 6455 §5.4):
+# an initial TEXT or BINARY frame with FIN=0, followed by CONT frames, the last
+# with FIN=1. Control frames (ping/pong/close) may be interleaved and are NOT
+# fed here - the caller handles them out-of-band and keeps reassembling.
+#
+# Usage: feed each non-control data frame; when `add` returns True the message
+# is complete and `message()` / `opcode` hold the result.
+class MessageReassembler {
+    opcode: int            # opcode of the message being assembled (TEXT/BINARY)
+    _buffer: bytes
+    _active: bool          # True between the initial frame and the FIN frame
+
+    def() {
+        self.opcode = 0
+        self._buffer = b""
+        self._active = False
+    }
+
+    # Feed one data frame. Returns True when the message is complete (this was
+    # the FIN frame). Raises ProtocolError on an out-of-order fragment.
+    def add(frame: Frame) -> bool {
+        if frame.opcode == OPCODE_CONT {
+            if not self._active {
+                raise ProtocolError("CONT frame with no message in progress")
+            }
+            self._buffer = self._buffer + frame.payload
+        } else {
+            # An initial data frame (TEXT/BINARY).
+            if self._active {
+                raise ProtocolError("new data frame while a fragmented message is in progress")
+            }
+            self.opcode = frame.opcode
+            self._buffer = frame.payload
+            self._active = True
+        }
+        if frame.fin {
+            self._active = False
+            return True
+        }
+        return False
+    }
+
+    def message() -> bytes {
+        return self._buffer
+    }
+
+    def reset() -> None {
+        self.opcode = 0
+        self._buffer = b""
+        self._active = False
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# WebSocket - connection handle owning a post-upgrade fd.
+#===----------------------------------------------------------------------===#
+
+# Constructed by the server router AFTER it has written the 101 response
+# (`WebSocket(client_fd)`). It owns the fd for the rest of the connection's
+# life: HTTP framing is over, every read/write is a WebSocket frame. Frame I/O
+# uses the binary socket runtime; the framing math lives entirely in
+# parse_frame / build_frame so it stays unit-testable without a socket.
+class WebSocket {
+    fd: int
+    # `closed` tracks the CLOSE *handshake* (a close frame has been sent, by us
+    # or echoed in response to the peer's) - it gates re-sending a close frame.
+    # `_fd_closed` tracks the underlying *fd* (dragon_close_fd called) - it gates
+    # closing the socket. They are SEPARATE: a CLOSE received mid-recv echoes a
+    # close frame (sets `closed`) but must NOT itself drop the fd, while the
+    # serve loop's backstop close() must still free the fd afterward. Conflating
+    # the two leaks the fd on every graceful close (the early-out on `closed`
+    # would skip dragon_close_fd entirely).
+    closed: bool
+    _fd_closed: bool
+    _inbuf: bytes          # bytes read but not yet consumed by a full frame
+
+    def(fd: int) {
+        self.fd = fd
+        self.closed = False
+        self._fd_closed = False
+        self._inbuf = b""
+    }
+
+    # Read raw bytes from the socket into the inbound buffer. Returns the
+    # number of bytes added; 0 means EOF / peer closed. Scheduler-yielding.
+    def _fill() -> int {
+        chunk: bytes = dragon_nb_recv_bytes(self.fd, 65536)
+        got: int = len(chunk)
+        if got > 0 {
+            self._inbuf = self._inbuf + chunk
+        }
+        return got
+    }
+
+    # Read one complete frame off the wire (looping recv until a full frame is
+    # buffered). Returns None on EOF before a full frame arrives. Control frames
+    # are returned to the caller as-is; `recv()` handles ping/close.
+    def recv_frame() -> Frame {
+        while True {
+            # Try to decode a frame from whatever is already buffered.
+            if len(self._inbuf) >= 2 {
+                try {
+                    frame: Frame = parse_frame(self._inbuf)
+                    consumed: int = frame_length(self._inbuf)
+                    self._inbuf = self._inbuf[consumed:]
+                    return frame
+                } except IncompleteFrameError as e {
+                    # Fall through to read more bytes.
+                }
+            }
+            got: int = self._fill()
+            if got == 0 {
+                raise IncompleteFrameError("connection closed before a full frame arrived")
+            }
+        }
+        # Unreachable; satisfies the type checker.
+        raise IncompleteFrameError("unreachable")
+    }
+
+    # Receive one complete application message as bytes, transparently
+    # reassembling fragments and answering control frames:
+    #  - PING -> reply PONG (same payload), keep reading
+    #  - CLOSE -> echo close, mark closed, raise IncompleteFrameError
+    #  - PONG -> ignored (unsolicited / heartbeat reply)
+    # Returns the full TEXT/BINARY message payload.
+    def recv() -> bytes {
+        assembler: MessageReassembler = MessageReassembler()
+        while True {
+            frame: Frame = self.recv_frame()
+            if frame.opcode == OPCODE_PING {
+                self._send_raw(build_pong_frame(frame.payload))
+                continue
+            }
+            if frame.opcode == OPCODE_PONG {
+                continue
+            }
+            if frame.opcode == OPCODE_CLOSE {
+                # Echo the close per RFC 6455 §5.5.1 exactly once, then signal
+                # teardown by raising. We do NOT drop the fd here - the serve
+                # loop's backstop close() does that (and, seeing `closed`, won't
+                # send a second, redundant close frame). Raising unwinds the
+                # handler's read loop straight to that backstop.
+                if not self.closed {
+                    self.closed = True
+                    self._send_raw(build_close_frame(1000, ""))
+                }
+                raise IncompleteFrameError("peer closed the connection")
+            }
+            done: bool = assembler.add(frame)
+            if done {
+                return assembler.message()
+            }
+        }
+        raise IncompleteFrameError("unreachable")
+    }
+
+    # Receive a text message decoded to str (UTF-8). Convenience over recv().
+    def recv_text() -> str {
+        return self.recv().decode("utf-8")
+    }
+
+    # Write a pre-built frame to the socket (whole-buffer send).
+    def _send_raw(frame_bytes: bytes) -> int {
+        return dragon_nb_send_bytes(self.fd, frame_bytes)
+    }
+
+    # Send a text message (single unmasked TEXT frame).
+    def send(data: str) -> int {
+        return self._send_raw(build_text_frame(data))
+    }
+
+    # Send a binary message (single unmasked BINARY frame).
+    def send_bytes(data: bytes) -> int {
+        return self._send_raw(build_binary_frame(data))
+    }
+
+    # Send a ping (optionally with an application payload <=125 bytes).
+    def ping(payload: bytes = b"") -> int {
+        return self._send_raw(build_ping_frame(payload))
+    }
+
+    # Close the underlying fd exactly once. Separate from the close-frame
+    # handshake so the two idempotency guards don't interfere: whether or not a
+    # close frame was sent, the fd is freed here on the first call and never
+    # touched again.
+    def _shutdown() -> None {
+        if not self._fd_closed {
+            self._fd_closed = True
+            dragon_close_fd(self.fd)
+        }
+    }
+
+    # Initiate the close handshake (send a close frame, once) and drop the fd.
+    # Fully idempotent and leak-free: a second call - or a call after recv()
+    # already echoed an inbound CLOSE (which set `closed` but left the fd open)
+    # - sends no further frame and still guarantees the fd is freed exactly
+    # once. This is the serve loop's backstop, so an abrupt client disconnect
+    # (recv raised IncompleteFrameError, `closed` still False) also reaches here
+    # and frees the fd. Sends to an already-reset peer return -1 (SIGPIPE is
+    # ignored process-wide), never raising, so _shutdown always runs.
+    def close(code: int = 1000, reason: str = "") -> None {
+        if not self.closed {
+            self.closed = True
+            self._send_raw(build_close_frame(code, reason))
+        }
+        self._shutdown()
+    }
+}

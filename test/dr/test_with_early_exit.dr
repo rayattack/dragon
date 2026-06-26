@@ -1,0 +1,159 @@
+# test/dr/test_with_early_exit.dr - `with` cleanup on early exit (leaks.md #5).
+#
+# `__exit__` / lock-release used to run ONLY on the normal fall-through and the
+# longjmp (exception) paths. An early `return`/`break`/`continue` inside the
+# body branched straight to the function epilogue / loop target, so:
+#  - return -> __exit__ / release SKIPPED (a `with Lock(): return` held the
+#  lock forever; `with cm() as f: return` leaked the resource);
+#  - break/continue -> additionally produced INVALID IR (a terminator was
+#  appended after the body's branch), so it would not even compile.
+# The fix unifies finally-bodies and with-cleanups into ONE ordered exit-cleanup
+# stack that return/break/continue replay innermost-first before jumping, so the
+# same __exit__/release/finally runs on every exit edge. One stack (not two) so a
+# `with` nested in a try-finally and vice-versa interleave in the correct order.
+
+from unittest import TestCase, main
+from threading import Lock
+
+# A context manager that records the order in which __exit__ runs.
+exit_order: list[str] = []
+
+class CM {
+    tag: str = ""
+    def(t: str) { self.tag = t }
+    def __enter__() -> CM { return self }
+    def __exit__() -> int { exit_order.append(self.tag); return 0 }
+}
+
+def ret_in_with() -> int {
+    with CM("ret") as c { return 1 }
+    return 0
+}
+
+def break_in_with() -> int {
+    n: int = 0
+    while n < 5 {
+        with CM("brk") as c { break }
+        n = n + 1
+    }
+    return n
+}
+
+def continue_in_with() -> int {
+    n: int = 0
+    hits: int = 0
+    while n < 3 {
+        with CM("cont") as c {
+            n = n + 1
+            continue
+        }
+        hits = hits + 1            # never reached (continue skips it)
+    }
+    return hits
+}
+
+def nested_with() -> int {
+    with CM("outer") as a {
+        with CM("inner") as b { return 7 }
+    }
+    return 0
+}
+
+def with_inside_finally() -> int {
+    try {
+        with CM("wif_exit") as c { return 1 }
+    } finally {
+        exit_order.append("wif_finally")
+    }
+    return 0
+}
+
+def finally_inside_with() -> int {
+    with CM("fiw_exit") as c {
+        try {
+            return 2
+        } finally {
+            exit_order.append("fiw_finally")
+        }
+    }
+    return 0
+}
+
+# Lock-specific: an early return must RELEASE the lock (else a re-acquire on the
+# same thread deadlocks). Reaching the assertion proves the release happened.
+def lock_released_on_return(l: Lock) {
+    with l { return }
+}
+
+
+class WithEarlyExitTests(TestCase) {
+    def test_return_runs_exit() {
+        exit_order.clear()
+        const r: int = ret_in_with()
+        self.assertEqual(r, 1)
+        self.assertEqual(len(exit_order), 1)
+        self.assertEqual(exit_order[0], "ret")
+    }
+
+    def test_break_runs_exit() {
+        exit_order.clear()
+        const n: int = break_in_with()
+        self.assertEqual(n, 0)                 # broke on first iteration
+        self.assertEqual(len(exit_order), 1)
+        self.assertEqual(exit_order[0], "brk")
+    }
+
+    def test_continue_runs_exit_each_iteration() {
+        exit_order.clear()
+        const hits: int = continue_in_with()
+        self.assertEqual(hits, 0)              # continue always skipped the tail
+        self.assertEqual(len(exit_order), 3)   # __exit__ ran once per iteration
+    }
+
+    def test_nested_with_exits_innermost_first() {
+        exit_order.clear()
+        const r: int = nested_with()
+        self.assertEqual(r, 7)
+        self.assertEqual(len(exit_order), 2)
+        self.assertEqual(exit_order[0], "inner")
+        self.assertEqual(exit_order[1], "outer")
+    }
+
+    def test_with_inside_finally_order() {
+        # return runs the inner __exit__ THEN the enclosing finally.
+        exit_order.clear()
+        const r: int = with_inside_finally()
+        self.assertEqual(r, 1)
+        self.assertEqual(len(exit_order), 2)
+        self.assertEqual(exit_order[0], "wif_exit")
+        self.assertEqual(exit_order[1], "wif_finally")
+    }
+
+    def test_finally_inside_with_order() {
+        # return runs the inner finally THEN the enclosing __exit__.
+        exit_order.clear()
+        const r: int = finally_inside_with()
+        self.assertEqual(r, 2)
+        self.assertEqual(len(exit_order), 2)
+        self.assertEqual(exit_order[0], "fiw_finally")
+        self.assertEqual(exit_order[1], "fiw_exit")
+    }
+
+    def test_lock_released_on_early_return() {
+        # If the lock were not released on the early return, acquiring it again
+        # on this thread would deadlock; reaching the assertion proves release.
+        # NOTE: the bound `g: Lock` leaks its lock object under LSan - a separate,
+        # pre-existing lock-object-lifetime gap (a bare `Lock()` not wrapped in a
+        # `with` is never freed), NOT this #5 fix, which releases AND frees on
+        # early exit (inline `with Lock(): return` is LSan-clean). This test runs
+        # in normal mode (the dr_ ctest tier); the no-deadlock check is its point.
+        g: Lock = Lock()
+        lock_released_on_return(g)
+        with g {
+            self.assertEqual(1, 1)
+        }
+    }
+}
+
+
+main([WithEarlyExitTests()])

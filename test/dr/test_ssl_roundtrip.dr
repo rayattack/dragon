@@ -1,0 +1,268 @@
+# test/dr/test_ssl_roundtrip.dr - live TLS over loopback (ADR 038, Phase 6).
+#
+# Exercises the real handshake end-to-end: a server presents a cert on a
+# dedicated OS thread (threading.Thread) while the client connects on the main
+# thread. Per ADR 038 §8 the v1 I/O model is "blocking on blocking fds", so the
+# two endpoints MUST run on separate OS threads - a green thread (`fire`) would
+# block its scheduler carrier, and `thread { }` joins at block exit (synchronous,
+# so the server's accept() would deadlock the client). A manual Thread is the
+# right tier here.
+#
+# Fixtures are embedded ECDSA P-256 PEM (an in-policy curve), materialized to
+# temp files because mbedTLS's cert/key loaders take file paths. They are:
+#  - a test CA (valid 2026..2126),
+#  - a leaf for CN/SAN=localhost,127.0.0.1 chained to the CA (valid 100y),
+#  - an expired leaf (notAfter 2020) chained to the CA.
+# This keeps the suite self-contained and offline - no openssl at test time.
+#
+# Covered: happy-path round-trip + peer-verified; and the three cert-verify
+# negatives (untrusted chain, hostname mismatch, expired cert) each asserting
+# SSLCertVerificationError, mirroring CPython's ssl negative tests.
+
+from unittest import TestCase, main
+from socket import TcpListener, TcpStream
+from ssl import SSLContext, SSLSocket, SSLCertVerificationError
+from ssl import PROTOCOL_TLS_CLIENT, PROTOCOL_TLS_SERVER
+from threading import Thread
+from io import make
+from tempfile import mktemp
+from time import monotonic
+
+
+def _materialize(pem: str, suffix: str) -> str {
+    const path: str = mktemp("dragon_tls_", suffix)
+    with make(path) as w {
+        w.write(pem)
+    }
+    return path
+}
+
+
+#===----------------------------------------------------------------------===#
+# Embedded fixtures (ECDSA P-256). See file header for what each is.
+#===----------------------------------------------------------------------===#
+
+const CA_PEM: str = """-----BEGIN CERTIFICATE-----
+MIIBmjCCAT+gAwIBAgIUBZMgeHUPsiIZRdPawrSBNFUF4akwCgYIKoZIzj0EAwIw
+GTEXMBUGA1UEAwwORHJhZ29uIFRlc3QgQ0EwIBcNMjYwNTI0MDE0MTE0WhgPMjEy
+NjA0MzAwMTQxMTRaMBkxFzAVBgNVBAMMDkRyYWdvbiBUZXN0IENBMFkwEwYHKoZI
+zj0CAQYIKoZIzj0DAQcDQgAEVXXFl+C9jHMfQlOj2k50xUE7m+KT0PPKDZblL8J9
+lQqX4Bgocbg+M2VJGxQZY4JpVPszSIv4hVNZstxiSgO0EaNjMGEwHQYDVR0OBBYE
+FPTG2Wn7kC/iKw/Xxo5v8K5JwjJQMB8GA1UdIwQYMBaAFPTG2Wn7kC/iKw/Xxo5v
+8K5JwjJQMA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgEGMAoGCCqGSM49
+BAMCA0kAMEYCIQDj8hr/N8M2m43G15Wnm4PA+8VZ3GJX8zToNzNtBHrXmwIhAMtQ
+tDYW38KpkgCKn/RAAf5f0TpBs4e2FRsRCq4fcGKK
+-----END CERTIFICATE-----
+"""
+
+const VALID_CERT_PEM: str = """-----BEGIN CERTIFICATE-----
+MIIBwTCCAWegAwIBAgIUEsa2hBmB+x3ZcK6ORE4R3XW0OUQwCgYIKoZIzj0EAwIw
+GTEXMBUGA1UEAwwORHJhZ29uIFRlc3QgQ0EwIBcNMjYwNTI0MDE0MTE0WhgPMjEy
+NjA0MzAwMTQxMTRaMBQxEjAQBgNVBAMMCWxvY2FsaG9zdDBZMBMGByqGSM49AgEG
+CCqGSM49AwEHA0IABA7DKByjyphKMn2p+WK26Bu3OHGo2tHVmywxWoP5kA3E0UOl
+kmc2zmUK9nb6HICoz7w3ZeqSs74eLWpkc9mR0AWjgY8wgYwwCQYDVR0TBAIwADAO
+BgNVHQ8BAf8EBAMCB4AwEwYDVR0lBAwwCgYIKwYBBQUHAwEwGgYDVR0RBBMwEYIJ
+bG9jYWxob3N0hwR/AAABMB0GA1UdDgQWBBRg9A0ytSLDFooaFdzIAMsQRXCUDTAf
+BgNVHSMEGDAWgBT0xtlp+5Av4isP18aOb/CuScIyUDAKBggqhkjOPQQDAgNIADBF
+AiEAxjwpp77kGFuKWXWckV3QQlwaaeolaVWwmLlTwgYHWL0CIBvHH5NmJP/g1X5V
+/h7w/cN1Pxw/ZY+Jm0K1JY3PWp16
+-----END CERTIFICATE-----
+"""
+
+const VALID_KEY_PEM: str = """-----BEGIN EC PRIVATE KEY-----
+MHcCAQEEIMSgVF/NzvMlaJ2xWkLzyNVz1K/tHeFlgPiEip8FfmgXoAoGCCqGSM49
+AwEHoUQDQgAEDsMoHKPKmEoyfan5YrboG7c4caja0dWbLDFag/mQDcTRQ6WSZzbO
+ZQr2dvocgKjPvDdl6pKzvh4tamRz2ZHQBQ==
+-----END EC PRIVATE KEY-----
+"""
+
+const EXPIRED_CERT_PEM: str = """-----BEGIN CERTIFICATE-----
+MIIBrDCCAVOgAwIBAgICEAAwCgYIKoZIzj0EAwIwGTEXMBUGA1UEAwwORHJhZ29u
+IFRlc3QgQ0EwHhcNMTkwMTAxMDAwMDAwWhcNMjAwMTAxMDAwMDAwWjAUMRIwEAYD
+VQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAASc+j6wkhgV
+BSPMcrjFt9jw8VPy7G8/A1PKdj0z2VPAuV4Mn16N6/hpo7Rjtz/Iwj7tgEb+jxZl
+l0tsj7ULh9gco4GPMIGMMAkGA1UdEwQCMAAwDgYDVR0PAQH/BAQDAgeAMBMGA1Ud
+JQQMMAoGCCsGAQUFBwMBMBoGA1UdEQQTMBGCCWxvY2FsaG9zdIcEfwAAATAdBgNV
+HQ4EFgQUCOtbWpipJlcpjqft1bp+S3CFjs0wHwYDVR0jBBgwFoAU9MbZafuQL+Ir
+D9fGjm/wrknCMlAwCgYIKoZIzj0EAwIDRwAwRAIgSFUiXI3zjfsBNm3bU0fwaDWM
+4cLMdLQQUoS3H35KDhwCIEmunCv1UP2aor8gCGOLLcFg/HnGcfySQ3x0OtDWATqO
+-----END CERTIFICATE-----
+"""
+
+const EXPIRED_KEY_PEM: str = """-----BEGIN EC PRIVATE KEY-----
+MHcCAQEEIMGKvqbmOhhNHnA0h8dqTwoMHD6u2zWy8qt6ty3bBNHRoAoGCCqGSM49
+AwEHoUQDQgAEnPo+sJIYFQUjzHK4xbfY8PFT8uxvPwNTynY9M9lTwLleDJ9ejev4
+aaO0Y7c/yMI+7YBG/o8WZZdLbI+1C4fYHA==
+-----END EC PRIVATE KEY-----
+"""
+
+# Temp paths the cert material is written to (mbedTLS loaders take file paths).
+const ca_file: str = _materialize(CA_PEM, ".crt")
+const valid_cert_file: str = _materialize(VALID_CERT_PEM, ".crt")
+const valid_key_file: str = _materialize(VALID_KEY_PEM, ".key")
+const expired_cert_file: str = _materialize(EXPIRED_CERT_PEM, ".crt")
+const expired_key_file: str = _materialize(EXPIRED_KEY_PEM, ".key")
+
+const SERVER_REPLY: str = "HELLO-FROM-DRAGON-TLS"
+const PORT: int = 19443
+
+# One listener, bound once, shared across the sequential tests. Each test starts
+# a one-shot server thread that does exactly one accept; tests join before
+# returning, so only one connection is in flight at a time.
+const g_listener: TcpListener = TcpListener("127.0.0.1", PORT)
+
+
+#===----------------------------------------------------------------------===#
+# Server side - runs on a dedicated OS thread (no-arg Thread target).
+#===----------------------------------------------------------------------===#
+
+# Accept one connection, present `certfile`/`keyfile`, echo a fixed reply. A
+# handshake that the client rejects fails here too (the client sends a fatal
+# alert); that is expected for the negative tests, so it is swallowed rather
+# than crashing the thread.
+def _serve_once(certfile: str, keyfile: str) -> None {
+    try {
+        const conn: TcpStream = g_listener.do_accept()
+        const sctx: SSLContext = SSLContext(PROTOCOL_TLS_SERVER)
+        sctx.load_cert_chain(certfile, keyfile)
+        const tls: SSLSocket = sctx.wrap_socket(conn, True, "")
+        const req: bytes = tls.recv(4096)
+        tls.send(SERVER_REPLY)
+        tls.close()
+    } except Exception {
+        # Negative tests intentionally make the handshake fail here.
+    }
+}
+
+def server_valid() -> int {
+    _serve_once(valid_cert_file, valid_key_file)
+    return 0
+}
+
+def server_expired() -> int {
+    _serve_once(expired_cert_file, expired_key_file)
+    return 0
+}
+
+# R1: a TLS read must be bounded by an idle timeout, so a peer that handshakes
+# then goes silent is dropped instead of pinning the server. Captures whether
+# do_recv_timeout returned empty (timeout) and how long it waited; read after
+# join(). Runs on a real OS thread, so it exercises the off-vthread bounded-poll
+# fallback path of the TLS recv timeout.
+class _TlsProbe {
+    timed_out: bool
+    elapsed_ms: float
+    def() {
+        self.timed_out = false
+        self.elapsed_ms = 0.0
+    }
+}
+const g_probe: _TlsProbe = _TlsProbe()
+
+def server_recv_timeout() -> int {
+    try {
+        const conn: TcpStream = g_listener.do_accept()
+        const sctx: SSLContext = SSLContext(PROTOCOL_TLS_SERVER)
+        sctx.load_cert_chain(valid_cert_file, valid_key_file)
+        const tls: SSLSocket = sctx.wrap_socket(conn, True, "")
+        const t0: float = monotonic()
+        const data: str = tls.do_recv_timeout(4096, 300)
+        const t1: float = monotonic()
+        g_probe.elapsed_ms = (t1 - t0) * 1000.0
+        g_probe.timed_out = len(data) == 0
+        tls.close()
+    } except Exception {
+    }
+    return 0
+}
+
+
+g_listener.do_bind()
+g_listener.do_listen(16)
+
+
+#===----------------------------------------------------------------------===#
+# Tests
+#===----------------------------------------------------------------------===#
+
+class TlsLoopbackTests(TestCase) {
+    # Happy path: client trusts the CA and the hostname matches -> handshake
+    # succeeds, peer verifies, and the encrypted echo round-trips.
+    def test_roundtrip_and_peer_verified() {
+        const th: Thread = Thread(server_valid)
+        th.start()
+
+        const ctx: SSLContext = SSLContext(PROTOCOL_TLS_CLIENT)
+        ctx.load_verify_locations(ca_file, "")
+        const raw: TcpStream = TcpStream.open("127.0.0.1", PORT)
+        const s: SSLSocket = ctx.wrap_socket(raw, False, "localhost")
+        s.send("ping")
+        const resp: bytes = s.recv(4096)
+        self.assertEqual(resp.decode("utf-8"), SERVER_REPLY)
+        self.assertTrue(s.getpeer_verified())
+        s.close()
+        th.join()
+    }
+
+    # Untrusted chain: client has no CA in its store -> verification fails.
+    def test_untrusted_chain_rejected() {
+        const th: Thread = Thread(server_valid)
+        th.start()
+        self.assertRaises(SSLCertVerificationError, lambda () -> None {
+            const ctx: SSLContext = SSLContext(PROTOCOL_TLS_CLIENT)
+            const raw: TcpStream = TcpStream.open("127.0.0.1", PORT)
+            ctx.wrap_socket(raw, False, "localhost")
+        })
+        th.join()
+    }
+
+    # Hostname mismatch: CA is trusted, but the requested name is not in the
+    # cert's SAN -> verification fails (RFC 6125).
+    def test_hostname_mismatch_rejected() {
+        const th: Thread = Thread(server_valid)
+        th.start()
+        self.assertRaises(SSLCertVerificationError, lambda () -> None {
+            const ctx: SSLContext = SSLContext(PROTOCOL_TLS_CLIENT)
+            ctx.load_verify_locations(ca_file, "")
+            const raw: TcpStream = TcpStream.open("127.0.0.1", PORT)
+            ctx.wrap_socket(raw, False, "wrong.example.com")
+        })
+        th.join()
+    }
+
+    # Expired leaf: CA is trusted and the hostname matches, but the cert's
+    # validity window is in the past -> verification fails.
+    def test_expired_cert_rejected() {
+        const th: Thread = Thread(server_expired)
+        th.start()
+        self.assertRaises(SSLCertVerificationError, lambda () -> None {
+            const ctx: SSLContext = SSLContext(PROTOCOL_TLS_CLIENT)
+            ctx.load_verify_locations(ca_file, "")
+            const raw: TcpStream = TcpStream.open("127.0.0.1", PORT)
+            ctx.wrap_socket(raw, False, "localhost")
+        })
+        th.join()
+    }
+
+    # R1: after a successful handshake the client sends nothing; the server's
+    # do_recv_timeout(300) must fire (~300ms) with an empty result rather than
+    # blocking forever - the encrypted-path slowloris defense.
+    def test_recv_timeout_on_silent_peer() {
+        const th: Thread = Thread(server_recv_timeout)
+        th.start()
+        const ctx: SSLContext = SSLContext(PROTOCOL_TLS_CLIENT)
+        ctx.load_verify_locations(ca_file, "")
+        const raw: TcpStream = TcpStream.open("127.0.0.1", PORT)
+        const s: SSLSocket = ctx.wrap_socket(raw, False, "localhost")
+        # Handshake complete; deliberately send NOTHING and keep the socket open
+        # while the server waits, so the server's read times out (not EOF).
+        th.join()
+        s.close()
+        self.assertTrue(g_probe.timed_out)
+        self.assertTrue(g_probe.elapsed_ms >= 150.0)   # actually waited
+        self.assertTrue(g_probe.elapsed_ms < 3000.0)   # but did fire
+    }
+}
+
+
+main([TlsLoopbackTests()])

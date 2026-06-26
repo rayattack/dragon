@@ -1,0 +1,118 @@
+# test/dr/test_http_cookie_serialize.dr - W4 Set-Cookie multi-value (R2).
+#
+# Response.cookie() APPENDS to a list (cookies are repeatable - a dict would
+# collapse two cookies into one). This guards that two cookie() calls emit two
+# DISTINCT `set-cookie:` lines through serialize(), on both publicly reachable
+# serialize paths: the normal path and the chunked (transfer-encoding) path. A
+# regression to append-vs-overwrite (or a path that forgets _cookie_lines()) is
+# caught here.
+#
+# The third path, _serialize_no_body() (the headers-only 101 upgrade response),
+# is reached here by subclassing Response to flip the protected _no_body flag -
+# D045 permits a subclass to touch a protected member, and the subclass inherits
+# Response's constructor across modules (so its fields are initialized).
+
+from unittest import TestCase, main
+from http.server import Response
+
+# Count non-overlapping occurrences of `needle` in `haystack` (str.find has no
+# start-offset arg here, so re-slice past each hit).
+def _count(haystack: str, needle: str) -> int {
+    count: int = 0
+    rest: str = haystack
+    while true {
+        const p: int = rest.find(needle)
+        if p < 0 {
+            break
+        }
+        count = count + 1
+        rest = rest[p + len(needle):]
+    }
+    return count
+}
+
+# Subclass solely to reach the protected _no_body flag (the 101 upgrade path).
+# Has no ctor of its own - it relies on inheriting Response's def() across the
+# module boundary, which also guards that cross-module ctor inheritance works.
+class _NoBodyResponse(Response) {
+    def flip_no_body() -> None {
+        self._no_body = true
+    }
+}
+
+
+class CookieSerializeTests(TestCase) {
+    # Normal path: two cookies -> two distinct set-cookie lines.
+    def test_two_cookies_normal_path() {
+        const res: Response = Response()
+        res.text("hi")
+        res.cookie("a", "1")
+        res.cookie("b", "2")
+        const out: str = res.serialize()
+        self.assertEqual(_count(out, "set-cookie:"), 2)
+        self.assertIn("set-cookie: a=1", out)
+        self.assertIn("set-cookie: b=2", out)
+    }
+
+    # Chunked path: the same two lines survive transfer-encoding: chunked framing.
+    def test_two_cookies_chunked_path() {
+        const res: Response = Response()
+        res.cookie("a", "1")
+        res.cookie("b", "2")
+        res.chunk("streamed")          # flips _chunked
+        const out: str = res.serialize()
+        self.assertEqual(_count(out, "set-cookie:"), 2)
+        self.assertIn("transfer-encoding: chunked", out)
+        self.assertIn("set-cookie: a=1", out)
+        self.assertIn("set-cookie: b=2", out)
+    }
+
+    # Three cookies -> three distinct lines (proves it's not a fixed two-slot bug).
+    def test_three_cookies() {
+        const res: Response = Response()
+        res.text("hi")
+        res.cookie("a", "1")
+        res.cookie("b", "2")
+        res.cookie("c", "3")
+        const out: str = res.serialize()
+        self.assertEqual(_count(out, "set-cookie:"), 3)
+    }
+
+    # Cookie attributes ride along on each line independently.
+    def test_cookie_attributes_per_line() {
+        const res: Response = Response()
+        res.cookie("sid", "abc", 3600, "/", true, true, "Strict")
+        res.cookie("theme", "dark")
+        const out: str = res.serialize()
+        self.assertEqual(_count(out, "set-cookie:"), 2)
+        self.assertIn("set-cookie: sid=abc", out)
+        self.assertIn("Max-Age=3600", out)
+        self.assertIn("HttpOnly", out)
+        self.assertIn("SameSite=Strict", out)
+        self.assertIn("set-cookie: theme=dark", out)
+    }
+
+    # No-body (101) path: emits the cookies but NO content-length.
+    def test_two_cookies_no_body_path() {
+        const res: _NoBodyResponse = _NoBodyResponse()
+        res.cookie("a", "1")
+        res.cookie("b", "2")
+        res.flip_no_body()
+        const out: str = res.serialize()
+        self.assertEqual(_count(out, "set-cookie:"), 2)
+        self.assertNotIn("content-length", out)
+        self.assertIn("set-cookie: a=1", out)
+        self.assertIn("set-cookie: b=2", out)
+    }
+
+    # No cookies -> no set-cookie line at all (the empty-list base case).
+    def test_no_cookies_no_line() {
+        const res: Response = Response()
+        res.text("hi")
+        const out: str = res.serialize()
+        self.assertEqual(_count(out, "set-cookie:"), 0)
+    }
+}
+
+
+main([CookieSerializeTests()])

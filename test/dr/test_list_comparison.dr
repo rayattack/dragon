@@ -1,0 +1,98 @@
+# test/dr/test_list_comparison.dr - lexicographic ordering of lists.
+#
+# Regression guard: native `list < list` (also <=, >, >=) lowered to a
+# pointer-address comparison (silently wrong - `[1,2] < [1,3]` returned False).
+# The fix routes list ordering through dragon_list_cmp, which compares
+# element-wise (recursing via dragon_box_cmp for nested lists) and raises
+# TypeError on an incomparable element pair - matching Python. Covers single
+# (BinaryExpr) and chained (ChainedCompExpr) forms, plus Any-boxed lists.
+
+from unittest import TestCase, main
+
+
+class ListComparisonTests(TestCase) {
+    def test_basic_ordering() {
+        a: list[int] = [1, 2]
+        b: list[int] = [1, 3]
+        self.assertTrue(a < b)
+        self.assertFalse(b < a)
+        self.assertTrue(b > a)
+        self.assertTrue(a <= b)
+        self.assertFalse(a >= b)
+    }
+
+    def test_equal_lists() {
+        a: list[int] = [1, 2, 3]
+        b: list[int] = [1, 2, 3]
+        self.assertTrue(a <= b)
+        self.assertTrue(a >= b)
+        self.assertFalse(a < b)
+        self.assertFalse(a > b)
+    }
+
+    def test_prefix_is_less() {
+        a: list[int] = [1, 2]
+        b: list[int] = [1, 2, 3]
+        self.assertTrue(a < b)
+        self.assertTrue(b > a)
+    }
+
+    def test_first_differing_element_decides() {
+        # [5] < [1, 9] is False even though the left is shorter - the first
+        # element already settles it (5 > 1).
+        a: list[int] = [5]
+        b: list[int] = [1, 9]
+        self.assertFalse(a < b)
+        self.assertTrue(a > b)
+    }
+
+    def test_str_lists() {
+        a: list[str] = ["a", "b"]
+        b: list[str] = ["a", "c"]
+        self.assertTrue(a < b)
+    }
+
+    def test_float_lists() {
+        a: list[float] = [1.5, 2.0]
+        b: list[float] = [1.5, 2.5]
+        self.assertTrue(a < b)
+    }
+
+    def test_nested_lists() {
+        a: list[list[int]] = [[1, 2], [3]]
+        b: list[list[int]] = [[1, 2], [4]]
+        self.assertTrue(a < b)
+    }
+
+    def test_chained_ordering() {
+        a: list[int] = [1]
+        b: list[int] = [2]
+        c: list[int] = [3]
+        self.assertTrue(a < b < c)
+        # [5] < [1] is False, so the whole chain is False.
+        x: list[int] = [5]
+        self.assertFalse(x < b < c)
+    }
+
+    def test_any_boxed_lists() {
+        x: Any = [1, 2]
+        y: Any = [1, 3]
+        self.assertTrue(x < y)
+        self.assertFalse(y < x)
+    }
+
+    def test_incomparable_elements_raise() {
+        a: list[Any] = [1]
+        b: list[Any] = ["a"]
+        raised: bool = False
+        try {
+            print(a < b)
+        } except TypeError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+}
+
+
+main([ListComparisonTests()])

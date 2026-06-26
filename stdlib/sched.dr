@@ -1,0 +1,164 @@
+"""sched - general-purpose event scheduler (Python parity).
+
+Pure Dragon. Python's `sched.scheduler(timefunc, delayfunc)` runs events
+ordered by `(time, priority)`. Dragon's API matches the shape, with:
+
+- The event payload is `Callable[[], None]` - no `*args/**kwargs`
+  forwarding (closures capture state instead).
+- `timefunc` / `delayfunc` default to `time.perf_counter` and an
+  internal sleep wrapper.
+
+Event handles returned by `enter` / `enterabs` are integer ids; pass
+them to `cancel` to remove an event.
+"""
+
+from time import perf_counter, sleep_float
+
+
+class _SchedEvent {
+    eid: int
+    when: float
+    priority: int
+    action: Callable[[], None]
+    cancelled: bool
+
+    def(eid: int, when: float, priority: int, action: Callable[[], None]) {
+        self.eid = eid
+        self.when = when
+        self.priority = priority
+        self.action = action
+        self.cancelled = false
+    }
+}
+
+
+def _default_sleep(seconds: float) -> None {
+    if seconds > 0.0 {
+        sleep_float(seconds)
+    }
+}
+
+
+class scheduler {
+    _events: list[_SchedEvent]
+    _next_id: int
+    _timefunc: Callable[[], float]
+    _delayfunc: Callable[[float], None]
+
+    def(timefunc: Callable[[], float] = perf_counter,
+        delayfunc: Callable[[float], None] = _default_sleep) {
+        self._events = []
+        self._next_id = 0
+        self._timefunc = timefunc
+        self._delayfunc = delayfunc
+    }
+
+    def _insert(ev: _SchedEvent) -> None {
+        # Linear-insert keeping list ordered by (when, priority).
+        i: int = 0
+        n: int = len(self._events)
+        while i < n {
+            cur: _SchedEvent = self._events[i]
+            if cur.when > ev.when or (cur.when == ev.when and cur.priority > ev.priority) {
+                break
+            }
+            i += 1
+        }
+        self._events.insert(i, ev)
+    }
+
+    def enterabs(when: float, priority: int, action: Callable[[], None]) -> int {
+        """Schedule `action` for absolute time `when` (from `timefunc`)."""
+        eid: int = self._next_id
+        self._next_id += 1
+        ev: _SchedEvent = _SchedEvent(eid, when, priority, action)
+        self._insert(ev)
+        return eid
+    }
+
+    def enter(delay: float, priority: int, action: Callable[[], None]) -> int {
+        """Schedule `action` for `delay` seconds from now."""
+        return self.enterabs(self._timefunc() + delay, priority, action)
+    }
+
+    def cancel(eid: int) -> bool {
+        for ev in self._events {
+            if ev.eid == eid and not ev.cancelled {
+                ev.cancelled = true
+                return true
+            }
+        }
+        return false
+    }
+
+    def empty() -> bool {
+        for ev in self._events {
+            if not ev.cancelled {
+                return false
+            }
+        }
+        return true
+    }
+
+    def queue() -> list[_SchedEvent] {
+        out: list[_SchedEvent] = []
+        for ev in self._events {
+            if not ev.cancelled {
+                out.append(ev)
+            }
+        }
+        return out
+    }
+
+    def run(blocking: bool = true) -> float {
+        """Run scheduled events until empty (or - `blocking=False` - until
+        the next-up event isn't due yet). Returns the remaining wait if
+        not blocking; 0.0 otherwise.
+        """
+        while true {
+            ev: _SchedEvent = _next_live(self._events)
+            if ev.eid < 0 {
+                return 0.0
+            }
+            now: float = self._timefunc()
+            if ev.when > now {
+                if not blocking {
+                    return ev.when - now
+                }
+                self._delayfunc(ev.when - now)
+            }
+            _remove_event(self._events, ev.eid)
+            ev.action()
+        }
+        return 0.0
+    }
+}
+
+
+def _next_live(events: list[_SchedEvent]) -> _SchedEvent {
+    """Return the first non-cancelled event, or a sentinel with eid=-1."""
+    for ev in events {
+        if not ev.cancelled {
+            return ev
+        }
+    }
+    return _SchedEvent(-1, 0.0, 0, _noop)
+}
+
+
+def _remove_event(events: list[_SchedEvent], eid: int) -> None {
+    i: int = 0
+    n: int = len(events)
+    while i < n {
+        if events[i].eid == eid {
+            del events[i]
+            return
+        }
+        i += 1
+    }
+}
+
+
+def _noop() -> None {
+    return
+}

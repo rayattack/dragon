@@ -1,0 +1,159 @@
+"""D045 - enforced member privacy, behavioral (positive) end-to-end.
+
+The REJECTION cases (cross-class `__private`, cross-package `_protected`,
+unrecognized `__dunder__`) cannot live in a compile-and-run file - they are
+compile errors - so they are covered in TypeCheckerTest/InteropTest. This file
+proves the legitimate side compiles AND runs:
+  * a `__private` field is reached only through the class's own methods
+    (encapsulation that actually holds);
+  * a `_protected` member is reachable from a subclass and from a same-package
+    (same-file) free function;
+  * protocol dunders (`__str__`, `__len__`, `__eq__`, `__enter__`/`__exit__`)
+    still dispatch through `str()` / `len()` / `==` / `with` after the privacy
+    pass - the reserved-namespace carve-out works.
+"""
+
+from unittest import TestCase, main
+
+# __private: the balance is mutated/read ONLY via methods. Outside code cannot
+# touch self.__balance (enforced at compile time; see the negative tests).
+class Account {
+    __balance: int
+    def(opening: int) {
+        self.__balance = opening
+    }
+    def deposit(amount: int) -> None {
+        self.__balance = self.__balance + amount
+    }
+    def withdraw(amount: int) -> bool {
+        if amount > self.__balance {
+            return false
+        }
+        self.__balance = self.__balance - amount
+        return true
+    }
+    def balance() -> int {
+        return self.__balance
+    }
+}
+
+# _protected: same-package code and subclasses share it. Logger declares
+# _prefix; AuditLogger (subclass) reads it directly.
+class Logger {
+    _prefix: str
+    _count: int
+    def(prefix: str) {
+        self._prefix = prefix
+        self._count = 0
+    }
+    def line(msg: str) -> str {
+        self._count = self._count + 1
+        return self._prefix + ": " + msg
+    }
+}
+
+class AuditLogger(Logger) {
+    def(prefix: str) {
+        super(prefix)
+    }
+    # Reaches the inherited _protected members directly (subclass access).
+    def banner() -> str {
+        return "[" + self._prefix + "]#" + str(self._count)
+    }
+}
+
+# Same-package (same-file) free function reaching a _protected member - legal
+# under the `_` tier even though it is not a method of Logger.
+def prefix_of(lg: Logger) -> str {
+    return lg._prefix
+}
+
+# Protocol dunders must still be public/dispatched after D045.
+class Tag {
+    _name: str
+    def(name: str) {
+        self._name = name
+    }
+    def __str__() -> str {
+        return "Tag(" + self._name + ")"
+    }
+    def __len__() -> int {
+        return len(self._name)
+    }
+    def __eq__(other: Tag) -> bool {
+        return self._name == other._name
+    }
+}
+
+# Context-manager dunders (__enter__/__exit__) drive `with`.
+class Guard {
+    _open: bool
+    def() {
+        self._open = false
+    }
+    def __enter__() -> Guard {
+        self._open = true
+        return self
+    }
+    def __exit__() -> int {
+        self._open = false
+        return 0
+    }
+    def is_open() -> bool {
+        return self._open
+    }
+}
+
+class PrivacyTests(TestCase) {
+    def test_private_encapsulated_via_methods() {
+        a: Account = Account(100)
+        a.deposit(50)
+        ok: bool = a.withdraw(30)
+        self.assertTrue(ok)
+        self.assertEqual(a.balance(), 120)
+        self.assertFalse(a.withdraw(9999))   # overdraw refused
+        self.assertEqual(a.balance(), 120)
+    }
+
+    def test_protected_reachable_from_subclass() {
+        al: AuditLogger = AuditLogger("audit")
+        al.line("first")
+        al.line("second")
+        self.assertEqual(al.banner(), "[audit]#2")
+    }
+
+    def test_protected_reachable_same_package_function() {
+        lg: Logger = Logger("svc")
+        self.assertEqual(prefix_of(lg), "svc")
+        self.assertEqual(lg.line("hi"), "svc: hi")
+    }
+
+    def test_str_dunder_still_dispatches() {
+        t: Tag = Tag("blue")
+        self.assertEqual(str(t), "Tag(blue)")
+    }
+
+    def test_len_dunder_still_dispatches() {
+        t: Tag = Tag("green")
+        self.assertEqual(len(t), 5)
+    }
+
+    def test_eq_dunder_still_dispatches() {
+        a: Tag = Tag("x")
+        b: Tag = Tag("x")
+        c: Tag = Tag("y")
+        self.assertTrue(a == b)
+        self.assertFalse(a == c)
+    }
+
+    def test_context_manager_dunders_drive_with() {
+        g: Guard = Guard()
+        self.assertFalse(g.is_open())
+        with g {
+            self.assertTrue(g.is_open())
+        }
+        self.assertFalse(g.is_open())
+    }
+}
+
+main([PrivacyTests()])

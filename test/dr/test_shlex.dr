@@ -1,0 +1,41 @@
+"""shlex - POSIX split / quote / join round-trips against CPython behaviour."""
+
+from unittest import TestCase, main
+import shlex
+from shlex import split, quote, join
+
+
+class ShlexTests(TestCase) {
+    def test_split_basic() {
+        parts: list[str] = split("ls -la /tmp")
+        self.assertEqual(len(parts), 3)
+        self.assertEqual(parts[0], "ls")
+        self.assertEqual(parts[2], "/tmp")
+    }
+
+    def test_split_quotes() {
+        self.assertEqual(split("echo 'hello world' foo"),
+                         ["echo", "hello world", "foo"])
+        self.assertEqual(split("a \"b c\" d"), ["a", "b c", "d"])
+    }
+
+    def test_split_empty() {
+        self.assertEqual(len(split("")), 0)
+        self.assertEqual(len(split("   ")), 0)
+    }
+
+    def test_quote() {
+        self.assertEqual(quote("plain"), "plain")
+        self.assertEqual(quote(""), "''")
+        self.assertEqual(quote("has space"), "'has space'")
+        self.assertEqual(quote("it's"), "'it'\"'\"'s'")
+    }
+
+    def test_join_roundtrip() {
+        args: list[str] = ["gcc", "-o", "my app", "main.c"]
+        self.assertEqual(split(join(args)), args)
+    }
+}
+
+
+main([ShlexTests()])

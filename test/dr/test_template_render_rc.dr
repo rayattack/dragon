@@ -1,0 +1,79 @@
+"""template render temp leaks - leaks.md #10.
+
+Three per-render leaks in the typed-template (`template[X] { ... }`) lowering,
+all now closed (verified leak-free under LSan with high-iteration probes; this
+test locks in that the fixes did not corrupt the rendered output):
+
+  1. An OWNED interpolation temp (`!{str(n)}`, `!{a + b}`) was misclassified as
+     borrowed, so the auto-escape filter never released it.
+  2. The final concat string was wrapped in the content-type instance
+     (`HTML_new(result)`) - which retains it - but the owned temp was never
+     dropped afterwards.
+  3. A block-interp `!{ for ... { :{ ... } } }` built a list[str] buffer, joined
+     it (a borrow), and never freed the buffer or its fragments.
+
+Kept intentionally light (small loops) so it runs fast in normal AND ASan mode;
+the leak magnitudes are proven by the scratch probes, not by iteration count.
+"""
+
+from unittest import TestCase, main
+from html import HTML
+
+
+def render_row(label: str, n: int) -> str {
+    # Interpolates an OWNED temp (str(n)) and a borrowed param (label) into a
+    # typed template, then wraps in HTML - exercises leaks #1 and #2.
+    h: HTML = template[HTML] { <li>!{label} #!{str(n)}</li> }
+    return h.to_str()
+}
+
+
+def render_list(items: list[str]) -> str {
+    # Block-interp buffer (leak #3).
+    h: HTML = template[HTML] {
+        <ul>!{ for it in items { :{ <li>!{it}</li> } } }</ul>
+    }
+    return h.to_str()
+}
+
+
+class TemplateRenderRcTests(TestCase) {
+    def test_owned_interp_temp_render_correct() {
+        out: str = ""
+        i: int = 0
+        while i < 20 {
+            out = render_row("item", i)
+            i = i + 1
+        }
+        # str(n) interpolation must render correctly (the escape released the
+        # owned temp without corrupting it). strip() ignores template-formatting
+        # whitespace - this guards content integrity, not exact spacing.
+        self.assertEqual(out.strip(), "<li>item #19</li>")
+    }
+
+    def test_typed_wrap_render_correct() {
+        # The wrapped HTML still produces the right string after the owned concat
+        # temp is dropped (and the borrowed `&` is auto-escaped).
+        out: str = render_row("x&y", 3)
+        self.assertEqual(out.strip(), "<li>x&amp;y #3</li>")
+    }
+
+    def test_block_interp_buffer_render_correct() {
+        items: list[str] = ["a", "b", "c"]
+        out: str = ""
+        i: int = 0
+        while i < 20 {
+            out = render_list(items)
+            i = i + 1
+        }
+        # Each fragment appended + joined; buffer freed per render, output stable.
+        const trimmed: str = out.strip()
+        self.assertTrue(trimmed.startswith("<ul>"))
+        self.assertTrue(trimmed.endswith("</ul>"))
+        self.assertTrue("<li>a</li>" in out)
+        self.assertTrue("<li>c</li>" in out)
+    }
+}
+
+
+main([TemplateRenderRcTests()])

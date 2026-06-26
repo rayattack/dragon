@@ -1,0 +1,93 @@
+"""http.cookiejar - store / select / render cookies."""
+
+from unittest import TestCase, main
+from http.cookiejar import Cookie, CookieJar, parse_set_cookie
+
+
+class CookieJarTests(TestCase) {
+    def test_set_and_get() {
+        jar: CookieJar = CookieJar()
+        jar.set_cookie(Cookie("sid", "abc", "example.com", "/"))
+        c: Cookie = jar.get_cookie("sid", "example.com", "/")
+        self.assertEqual(c.value, "abc")
+    }
+
+    def test_replace_existing() {
+        jar: CookieJar = CookieJar()
+        jar.set_cookie(Cookie("sid", "old", "x", "/"))
+        jar.set_cookie(Cookie("sid", "new", "x", "/"))
+        self.assertEqual(jar.__len__(), 1)
+        self.assertEqual(jar.get_cookie("sid", "x", "/").value, "new")
+    }
+
+    def test_cookies_for_filters_by_domain_and_path() {
+        jar: CookieJar = CookieJar()
+        jar.set_cookie(Cookie("a", "1", "x.com", "/"))
+        jar.set_cookie(Cookie("b", "2", "x.com", "/api"))
+        jar.set_cookie(Cookie("c", "3", "y.com", "/"))
+        sent_root: list[Cookie] = jar.cookies_for("x.com", "/", false)
+        self.assertEqual(len(sent_root), 1)
+        self.assertEqual(sent_root[0].name, "a")
+        sent_api: list[Cookie] = jar.cookies_for("x.com", "/api/data", false)
+        # Both / and /api match /api/data prefix.
+        self.assertEqual(len(sent_api), 2)
+    }
+
+    def test_secure_only_on_https() {
+        jar: CookieJar = CookieJar()
+        jar.set_cookie(Cookie("sid", "x", "x.com", "/", 0, true, false))
+        sent_http: list[Cookie] = jar.cookies_for("x.com", "/", false)
+        sent_https: list[Cookie] = jar.cookies_for("x.com", "/", true)
+        self.assertEqual(len(sent_http), 0)
+        self.assertEqual(len(sent_https), 1)
+    }
+
+    def test_cookie_header_format() {
+        jar: CookieJar = CookieJar()
+        jar.set_cookie(Cookie("a", "1", "x", "/"))
+        jar.set_cookie(Cookie("b", "2", "x", "/"))
+        h: str = jar.cookie_header("x", "/", false)
+        self.assertTrue("a=1" in h)
+        self.assertTrue("b=2" in h)
+        self.assertTrue("; " in h)
+    }
+
+    def test_clear_expired() {
+        jar: CookieJar = CookieJar()
+        jar.set_cookie(Cookie("session", "x", "y", "/", 0))      # no expiry
+        jar.set_cookie(Cookie("stale", "x", "y", "/", 100))      # past
+        jar.set_cookie(Cookie("fresh", "x", "y", "/", 9999999999))
+        removed: int = jar.clear_expired(1000)
+        self.assertEqual(removed, 1)
+        self.assertEqual(jar.__len__(), 2)
+    }
+
+    def test_clear_session_cookies() {
+        jar: CookieJar = CookieJar()
+        jar.set_cookie(Cookie("sess", "x", "y", "/", 0))
+        jar.set_cookie(Cookie("perm", "x", "y", "/", 9999999999))
+        jar.clear_session_cookies()
+        self.assertEqual(jar.__len__(), 1)
+        self.assertEqual(jar.all()[0].name, "perm")
+    }
+
+    def test_parse_set_cookie_basic() {
+        c: Cookie = parse_set_cookie("sid=abc; Path=/; Secure", "x.com")
+        self.assertEqual(c.name, "sid")
+        self.assertEqual(c.value, "abc")
+        self.assertEqual(c.path, "/")
+        self.assertTrue(c.secure)
+        self.assertFalse(c.http_only)
+        self.assertEqual(c.domain, "x.com")
+    }
+
+    def test_parse_set_cookie_with_domain_and_httponly() {
+        c: Cookie = parse_set_cookie("k=v; Domain=foo.com; HttpOnly; Path=/api")
+        self.assertEqual(c.domain, "foo.com")
+        self.assertEqual(c.path, "/api")
+        self.assertTrue(c.http_only)
+    }
+}
+
+
+main([CookieJarTests()])

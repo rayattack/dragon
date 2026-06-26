@@ -1,0 +1,157 @@
+"""List concatenation, augmented concatenation, reverse-aware sorting, and
+extend() across element types (bugs.md #4, #5, #6).
+
+#4 `sorted(xs, reverse=True)` / `xs.sort(reverse=True)` silently ignored the
+   flag and returned ascending order. Now a reverse-aware runtime sort
+   (dragon_list_sort_ex / dragon_sorted_ex) honors it - and because the sort is
+   stable in either direction, a runtime `reverse=<bool>` works too.
+#5 `xs.extend(ys)` failed type-check: extend was registered taking the element
+   type T instead of list[T]. Now it takes list[T].
+#6 `list + list` errored ("unsupported operand types") and `list += list`
+   crashed the LLVM verifier ("add ptr"). Now `+` builds a fresh list via
+   dragon_list_concat (copy + extend) and `+=` does Python's in-place extend.
+
+All three are exercised across int / str / float (the three monomorphic list
+variants - DragonList / DragonListPtr / DragonListF64) and homogeneous
+list[Any] (the box variant), since each variant has a distinct runtime layout.
+"""
+
+from unittest import TestCase, main
+
+
+class ListConcatSortExtendTests(TestCase) {
+    # ---- #4: reverse-aware sorting ----
+    def test_sorted_reverse_int() {
+        self.assertEqual(sorted([3, 1, 2], reverse=True), [3, 2, 1])
+        self.assertEqual(sorted([3, 1, 2], reverse=False), [1, 2, 3])
+        self.assertEqual(sorted([3, 1, 2]), [1, 2, 3])
+    }
+
+    def test_sorted_reverse_str() {
+        self.assertEqual(sorted(["b", "a", "c"], reverse=True), ["c", "b", "a"])
+    }
+
+    def test_sorted_reverse_float() {
+        self.assertEqual(sorted([3.5, 1.5, 2.5], reverse=True), [3.5, 2.5, 1.5])
+    }
+
+    def test_sorted_reverse_dynamic_flag() {
+        flag: bool = True
+        self.assertEqual(sorted([3, 1, 2], reverse=flag), [3, 2, 1])
+        flag = False
+        self.assertEqual(sorted([3, 1, 2], reverse=flag), [1, 2, 3])
+    }
+
+    def test_sorted_does_not_mutate_input() {
+        xs: list[int] = [3, 1, 2]
+        sorted(xs, reverse=True)
+        self.assertEqual(xs, [3, 1, 2])
+    }
+
+    def test_list_sort_reverse_inplace() {
+        nums: list[int] = [5, 2, 8, 1]
+        nums.sort(reverse=True)
+        self.assertEqual(nums, [8, 5, 2, 1])
+        nums.sort()
+        self.assertEqual(nums, [1, 2, 5, 8])
+    }
+
+    # ---- #5: extend ----
+    def test_extend_int() {
+        xs: list[int] = [1, 2]
+        xs.extend([3, 4])
+        self.assertEqual(xs, [1, 2, 3, 4])
+    }
+
+    def test_extend_str() {
+        ss: list[str] = ["a"]
+        ss.extend(["b", "c"])
+        self.assertEqual(ss, ["a", "b", "c"])
+    }
+
+    def test_extend_float() {
+        fs: list[float] = [1.0]
+        fs.extend([2.0, 3.0])
+        self.assertEqual(fs, [1.0, 2.0, 3.0])
+    }
+
+    def test_extend_variable() {
+        xs: list[int] = [1]
+        ys: list[int] = [2, 3]
+        xs.extend(ys)
+        self.assertEqual(xs, [1, 2, 3])
+    }
+
+    # ---- #6: list + list ----
+    def test_concat_int() {
+        a: list[int] = [1, 2]
+        b: list[int] = [3, 4]
+        self.assertEqual(a + b, [1, 2, 3, 4])
+    }
+
+    def test_concat_str() {
+        self.assertEqual(["x"] + ["y", "z"], ["x", "y", "z"])
+    }
+
+    def test_concat_float() {
+        self.assertEqual([1.0] + [2.0], [1.0, 2.0])
+    }
+
+    def test_concat_chained() {
+        a: list[int] = [1, 2]
+        b: list[int] = [3, 4]
+        self.assertEqual(a + b + [5], [1, 2, 3, 4, 5])
+    }
+
+    def test_concat_empty_adoption() {
+        self.assertEqual([] + [7], [7])
+        self.assertEqual([8] + [], [8])
+    }
+
+    def test_concat_does_not_mutate_operands() {
+        a: list[int] = [1, 2]
+        b: list[int] = [3, 4]
+        c: list[int] = a + b
+        self.assertEqual(a, [1, 2])
+        self.assertEqual(b, [3, 4])
+        self.assertEqual(c, [1, 2, 3, 4])
+    }
+
+    # ---- #6: list += list (in-place extend) ----
+    def test_augconcat_variable() {
+        a: list[int] = [1, 2]
+        b: list[int] = [3, 4]
+        a += b
+        self.assertEqual(a, [1, 2, 3, 4])
+    }
+
+    def test_augconcat_literal() {
+        a: list[int] = [1, 2]
+        a += [9]
+        self.assertEqual(a, [1, 2, 9])
+    }
+
+    def test_augconcat_str() {
+        ss: list[str] = ["a"]
+        ss += ["b", "c"]
+        self.assertEqual(ss, ["a", "b", "c"])
+    }
+
+    # ---- list[Any] (box variant), homogeneous operations ----
+    def test_any_concat() {
+        a: list[Any] = [1, "two", 3.0]
+        b: list[Any] = [True, "four"]
+        c: list[Any] = a + b
+        self.assertEqual(len(c), 5)
+    }
+
+    def test_any_augconcat_and_extend() {
+        a: list[Any] = [1, "two"]
+        x: list[Any] = [100, "x"]
+        a.extend(x)
+        a += [99]
+        self.assertEqual(len(a), 5)
+    }
+}
+
+main([ListConcatSortExtendTests()])

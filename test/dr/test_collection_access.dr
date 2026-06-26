@@ -1,0 +1,38 @@
+"""Dot-access on a list-subscript result.
+
+`lst[i].key` where lst is a list[dict[...]] or list[TypedDict] must route to a
+dict get (Dragon dicts and TypedDicts both support `d.key` dot-access), not the
+string path. Regression for the bug where the element's dict/TypedDict type was
+not tracked through `list[T][i]`, so `lst[0].id` emitted dragon_str_index and
+mis-read the element as a string.
+"""
+
+from unittest import TestCase, main
+
+class Point(TypedDict) {
+    id: int
+    name: str
+    score: float
+}
+
+class CollectionAccessTests(TestCase) {
+    def test_list_typeddict_subscript_dot() {
+        lst: list[Point] = [
+            Point({id: 1, name: "a", score: 2.5}),
+            Point({id: 2, name: "b", score: 9.0}),
+        ]
+        self.assertEqual(lst[0].id, 1)
+        self.assertEqual(lst[0].name, "a")
+        self.assertAlmostEqual(lst[0].score, 2.5)
+        self.assertEqual(lst[1].id, 2)
+        self.assertEqual(lst[1].name, "b")
+    }
+
+    def test_list_dict_subscript_dot() {
+        ds: list[dict[str, int]] = [{"x": 10}, {"x": 20}]
+        self.assertEqual(ds[0].x, 10)
+        self.assertEqual(ds[1].x, 20)
+    }
+}
+
+main([CollectionAccessTests()])

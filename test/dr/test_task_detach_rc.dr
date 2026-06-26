@@ -1,0 +1,171 @@
+"""Task scope-exit lifetime - leaks.md #2 (bound-Task tail + conditional-await).
+
+Source of truth: a bound `Task[T]` is owned by its SCOPE. `await t` / `t.join()`
+CONSUME it (the runtime frees the vthread) and codegen then blanks t's slot to
+NULL; at scope exit the scope frees whatever Task is STILL in its slot - i.e. the
+abandoned ones. So:
+  - bound + never used        -> abandoned -> scope frees it (no leak)
+  - bound + is_alive-polled   -> abandoned -> scope frees it (no leak)
+  - bound + await on SOME paths, dropped on others -> the drop path's scope frees
+    it; the await path emptied the slot so the scope-exit detach is a no-op (no
+    double-free) - this is the conditional-await case that used to leak
+  - returned / passed / stored / captured -> TRANSFERRED -> the new owner frees it
+A second `await t` / `t.is_alive()` after a consume reads the emptied slot (NULL ->
+0 / false), NOT the freed struct - closing a latent use-after-await UAF. All cases
+below are ASan/LSan-clean (no leak, no UAF, no double-free); the leak/UAF
+magnitudes are A/B-proven in the scratch probes.
+"""
+
+from unittest import TestCase, main
+
+
+def square(n: int) -> int {
+    return n * n
+}
+
+
+# ESCAPE via return - TRANSFERRED, not detached here (the caller owns + awaits it).
+def make_task(n: int) -> Task[int] {
+    t: Task[int] = fire square(n)
+    return t
+}
+
+
+def consume(task: Task[int]) -> int {
+    return await task
+}
+
+
+# ESCAPE via argument pass-through - TRANSFERRED to the callee.
+def make_and_pass(n: int) -> int {
+    t: Task[int] = fire square(n)
+    return consume(t)
+}
+
+
+# Bound fire-and-forget: never used -> abandoned -> freed at scope exit.
+def fire_unused(n: int) -> None {
+    t: Task[int] = fire square(n)
+}
+
+
+# is_alive-polled, never joined: a pure read; abandoned -> freed at scope exit.
+def poll_no_join(n: int) -> int {
+    t: Task[int] = fire square(n)
+    spins: int = 0
+    while t.is_alive() {
+        spins = spins + 1
+        if spins > 1000000 {
+            return spins
+        }
+    }
+    return spins
+}
+
+
+# CONDITIONAL await (the case that used to leak): awaited when `c`, abandoned
+# otherwise. On the await path the consume empties the slot (scope-exit detach is
+# a no-op); on the drop path the scope frees the still-held handle. No leak on
+# EITHER path, no double-free.
+def conditional(n: int, c: bool) -> int {
+    t: Task[int] = fire square(n)
+    if c {
+        return await t
+    }
+    return 0 - 1
+}
+
+
+# Use-after-await: reading the slot after consuming it must NOT touch freed memory
+# (it reads NULL -> is_alive() false), and the result stays correct.
+def use_after_await(n: int) -> int {
+    t: Task[int] = fire square(n)
+    r: int = await t
+    if t.is_alive() {
+        return 0 - 1
+    }
+    return r
+}
+
+
+class TaskDetachRcTests(TestCase) {
+    def test_returned_task_awaited_by_caller() {
+        i: int = 1
+        total: int = 0
+        while i <= 50 {
+            t: Task[int] = make_task(i)
+            total = total + await t
+            i = i + 1
+        }
+        self.assertEqual(total, 42925)   # sum of squares 1..50
+    }
+
+    def test_passed_task_joined_in_callee() {
+        total: int = 0
+        i: int = 1
+        while i <= 50 {
+            total = total + make_and_pass(i)
+            i = i + 1
+        }
+        self.assertEqual(total, 42925)
+    }
+
+    def test_straightline_join_still_correct() {
+        # await consumes + empties the slot; scope-exit detach is a no-op. Result
+        # must be correct and there must be no double-free.
+        i: int = 1
+        total: int = 0
+        while i <= 50 {
+            t: Task[int] = fire square(i)
+            total = total + await t
+            i = i + 1
+        }
+        self.assertEqual(total, 42925)
+    }
+
+    def test_bound_fire_and_forget_does_not_crash() {
+        i: int = 0
+        while i < 50 {
+            fire_unused(i)
+            i = i + 1
+        }
+        self.assertTrue(True)
+    }
+
+    def test_is_alive_poll_no_join_detached() {
+        i: int = 0
+        while i < 50 {
+            const _spins: int = poll_no_join(i)
+            i = i + 1
+        }
+        self.assertTrue(True)
+    }
+
+    def test_conditional_await_both_paths() {
+        # The await path and the drop path must BOTH be leak-free and crash-free.
+        i: int = 1
+        awaited: int = 0
+        dropped: int = 0
+        while i <= 50 {
+            awaited = awaited + conditional(i, True)    # await path -> i*i
+            dropped = dropped + conditional(i, False)   # drop path -> -1
+            i = i + 1
+        }
+        self.assertEqual(awaited, 42925)   # sum of squares 1..50
+        self.assertEqual(dropped, 0 - 50)  # -1 each, 50 times
+    }
+
+    def test_use_after_await_no_uaf() {
+        # is_alive() after await reads the emptied slot (false), not freed memory.
+        i: int = 1
+        total: int = 0
+        while i <= 50 {
+            total = total + use_after_await(i)
+            i = i + 1
+        }
+        self.assertEqual(total, 42925)
+    }
+}
+
+
+main([TaskDetachRcTests()])

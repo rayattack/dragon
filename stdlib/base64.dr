@@ -1,0 +1,182 @@
+# base64.dr - RFC 4648 Base64 encoding / decoding
+#
+# Python parity: matches the surface of `base64.b64encode`,
+# `base64.b64decode`, and the URL-safe variants. Inputs and outputs are
+# `bytes` to match Python; convenience accepts `str` on encode by encoding
+# UTF-8 first, since registry tokens, hashes, and signatures are all
+# byte-oriented but token APIs are convenient with strings.
+#
+# Algorithm: standard 6-bit grouping over 24-bit windows, with `=` padding
+# for tail groups of 1 or 2 bytes. Decoding tolerates either padding present
+# or absent (Python is strict, but jose / JWS commonly elides padding).
+
+
+const _STD_ALPHABET: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+const _URL_ALPHABET: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+const _PAD: int = 0x3D                 # '='
+
+
+# Build a 256-entry decode table for the given alphabet. Invalid byte values
+# map to -1; '=' maps to -2 so the decoder can distinguish padding from junk.
+def _build_decode_table(alphabet: str) -> list[int] {
+    t: list[int] = [0] * 256
+    i: int = 0
+    while i < 256 {
+        t[i] = -1
+        i = i + 1
+    }
+    j: int = 0
+    while j < len(alphabet) {
+        t[ord(alphabet[j])] = j
+        j = j + 1
+    }
+    t[_PAD] = -2
+    return t
+}
+
+const _STD_DECODE: list[int] = _build_decode_table(_STD_ALPHABET)
+const _URL_DECODE: list[int] = _build_decode_table(_URL_ALPHABET)
+
+
+# --- Encode -----------------------------------------------------------------
+
+def _encode_into(data: bytes, alphabet: str) -> bytes {
+    n: int = len(data)
+    if n == 0 {
+        return bytes()
+    }
+    # Output length is always 4 * ceil(n / 3) (with `=` padding to align).
+    out_len: int = 4 * ((n + 2) // 3)
+    out: list[int] = [0] * out_len
+    i: int = 0
+    o: int = 0
+    while i + 2 < n {
+        a: int = data[i]
+        b: int = data[i + 1]
+        c: int = data[i + 2]
+        out[o] = ord(alphabet[a >> 2])
+        out[o + 1] = ord(alphabet[((a & 0x03) << 4) | (b >> 4)])
+        out[o + 2] = ord(alphabet[((b & 0x0F) << 2) | (c >> 6)])
+        out[o + 3] = ord(alphabet[c & 0x3F])
+        i = i + 3
+        o = o + 4
+    }
+    rem: int = n - i
+    if rem == 1 {
+        a: int = data[i]
+        out[o] = ord(alphabet[a >> 2])
+        out[o + 1] = ord(alphabet[(a & 0x03) << 4])
+        out[o + 2] = _PAD
+        out[o + 3] = _PAD
+    } else if rem == 2 {
+        a: int = data[i]
+        b: int = data[i + 1]
+        out[o] = ord(alphabet[a >> 2])
+        out[o + 1] = ord(alphabet[((a & 0x03) << 4) | (b >> 4)])
+        out[o + 2] = ord(alphabet[(b & 0x0F) << 2])
+        out[o + 3] = _PAD
+    }
+    return bytes(out)
+}
+
+
+def b64encode(data: bytes) -> bytes {
+    return _encode_into(data, _STD_ALPHABET)
+}
+
+
+def standard_b64encode(data: bytes) -> bytes {
+    return _encode_into(data, _STD_ALPHABET)
+}
+
+
+def urlsafe_b64encode(data: bytes) -> bytes {
+    return _encode_into(data, _URL_ALPHABET)
+}
+
+
+# --- Decode -----------------------------------------------------------------
+
+# Decode `data` using the supplied 256-entry decode table. Whitespace
+# (\r \n \t space) is ignored. Padding is optional. Any other invalid byte
+# raises ValueError.
+def _decode_with(data: bytes, table: list[int]) -> bytes {
+    n: int = len(data)
+    out: list[int] = []
+    quad: list[int] = [0, 0, 0, 0]
+    qi: int = 0
+    i: int = 0
+    pad_count: int = 0
+    while i < n {
+        ch: int = data[i]
+        i = i + 1
+        if ch == 0x20 or ch == 0x09 or ch == 0x0A or ch == 0x0D {
+            continue
+        }
+        v: int = table[ch & 0xFF]
+        if v == -1 {
+            raise ValueError(f"invalid base64 character: 0x{ch:02x}")
+        }
+        if v == -2 {
+            pad_count = pad_count + 1
+            quad[qi] = -2
+        } else {
+            if pad_count > 0 {
+                raise ValueError("base64 data after padding")
+            }
+            quad[qi] = v
+        }
+        qi = qi + 1
+        if qi == 4 {
+            # Emit 1, 2, or 3 bytes depending on how many `=` slots we saw.
+            a: int = quad[0]
+            b: int = quad[1]
+            c: int = quad[2]
+            d: int = quad[3]
+            out.append(((a << 2) | (b >> 4)) & 0xFF)
+            if c != -2 {
+                out.append((((b & 0x0F) << 4) | (c >> 2)) & 0xFF)
+            }
+            if d != -2 {
+                out.append((((c & 0x03) << 6) | d) & 0xFF)
+            }
+            qi = 0
+            pad_count = 0
+            quad[0] = 0
+            quad[1] = 0
+            quad[2] = 0
+            quad[3] = 0
+        }
+    }
+    # Handle unpadded tail (RFC 4648 §3.2 - strict requires padding, but
+    # jose / JWS commonly elides it; we accept both).
+    if qi == 2 {
+        a: int = quad[0]
+        b: int = quad[1]
+        out.append(((a << 2) | (b >> 4)) & 0xFF)
+    } else if qi == 3 {
+        a: int = quad[0]
+        b: int = quad[1]
+        c: int = quad[2]
+        out.append(((a << 2) | (b >> 4)) & 0xFF)
+        out.append((((b & 0x0F) << 4) | (c >> 2)) & 0xFF)
+    } else if qi == 1 {
+        raise ValueError("base64 input has dangling byte")
+    }
+    return bytes(out)
+}
+
+
+def b64decode(data: bytes) -> bytes {
+    return _decode_with(data, _STD_DECODE)
+}
+
+
+def standard_b64decode(data: bytes) -> bytes {
+    return _decode_with(data, _STD_DECODE)
+}
+
+
+def urlsafe_b64decode(data: bytes) -> bytes {
+    return _decode_with(data, _URL_DECODE)
+}

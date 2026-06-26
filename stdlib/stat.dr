@@ -1,0 +1,74 @@
+"""stat - interpret os.stat() st_mode bits (Python `stat` parity).
+
+Pure Dragon: integer constants + concrete `int -> bool/str` predicates, no
+generics. Constants use hex; the octal value is shown in comments.
+"""
+
+# File type mask and type values.
+const S_IFMT: int = 0xF000    # 0o170000 bit mask for the file type
+const S_IFSOCK: int = 0xC000  # 0o140000 socket
+const S_IFLNK: int = 0xA000   # 0o120000 symbolic link
+const S_IFREG: int = 0x8000   # 0o100000 regular file
+const S_IFBLK: int = 0x6000   # 0o060000 block device
+const S_IFDIR: int = 0x4000   # 0o040000 directory
+const S_IFCHR: int = 0x2000   # 0o020000 character device
+const S_IFIFO: int = 0x1000   # 0o010000 FIFO
+
+# Permission / special bits.
+const S_ISUID: int = 0x800    # 0o4000 set-user-ID
+const S_ISGID: int = 0x400    # 0o2000 set-group-ID
+const S_ISVTX: int = 0x200    # 0o1000 sticky bit
+const S_IRWXU: int = 0x1C0    # 0o700 owner rwx
+const S_IRUSR: int = 0x100    # 0o400 owner read
+const S_IWUSR: int = 0x80     # 0o200 owner write
+const S_IXUSR: int = 0x40     # 0o100 owner execute
+const S_IRWXG: int = 0x38     # 0o070 group rwx
+const S_IRGRP: int = 0x20     # 0o040 group read
+const S_IWGRP: int = 0x10     # 0o020 group write
+const S_IXGRP: int = 0x8      # 0o010 group execute
+const S_IRWXO: int = 0x7      # 0o007 other rwx
+const S_IROTH: int = 0x4      # 0o004 other read
+const S_IWOTH: int = 0x2      # 0o002 other write
+const S_IXOTH: int = 0x1      # 0o001 other execute
+
+
+def S_IFMT_OF(mode: int) -> int { return mode & S_IFMT }
+def S_IMODE(mode: int) -> int { return mode & 0xFFF }  # permission bits (0o7777)
+
+def S_ISDIR(mode: int) -> bool  { return (mode & S_IFMT) == S_IFDIR }
+def S_ISREG(mode: int) -> bool  { return (mode & S_IFMT) == S_IFREG }
+def S_ISLNK(mode: int) -> bool  { return (mode & S_IFMT) == S_IFLNK }
+def S_ISCHR(mode: int) -> bool  { return (mode & S_IFMT) == S_IFCHR }
+def S_ISBLK(mode: int) -> bool  { return (mode & S_IFMT) == S_IFBLK }
+def S_ISFIFO(mode: int) -> bool { return (mode & S_IFMT) == S_IFIFO }
+def S_ISSOCK(mode: int) -> bool { return (mode & S_IFMT) == S_IFSOCK }
+
+
+def filemode(mode: int) -> str {
+    """Convert a file's mode to an `ls -l`-style string, e.g. '-rwxr-xr-x'."""
+    # Type character.
+    out: str = "?"
+    if S_ISDIR(mode)  { out = "d" }
+    elif S_ISLNK(mode)  { out = "l" }
+    elif S_ISBLK(mode)  { out = "b" }
+    elif S_ISCHR(mode)  { out = "c" }
+    elif S_ISFIFO(mode) { out = "p" }
+    elif S_ISSOCK(mode) { out = "s" }
+    elif S_ISREG(mode)  { out = "-" }
+
+    # Permission triples.
+    bits: list[int] = [S_IRUSR, S_IWUSR, S_IXUSR,
+                       S_IRGRP, S_IWGRP, S_IXGRP,
+                       S_IROTH, S_IWOTH, S_IXOTH]
+    chars: list[str] = ["r", "w", "x", "r", "w", "x", "r", "w", "x"]
+    i: int = 0
+    while i < 9 {
+        if (mode & bits[i]) != 0 {
+            out = out + chars[i]
+        } else {
+            out = out + "-"
+        }
+        i = i + 1
+    }
+    return out
+}

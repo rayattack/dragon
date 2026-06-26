@@ -1,0 +1,174 @@
+# Dragon release pipeline.
+#
+# Builds the compiler on Linux, macOS (Apple Silicon + Intel) and Windows,
+# turns each build into native installers via CPack (config lives in the root
+# CMakeLists.txt), renames the artifacts to the scheme the download page
+# (dragonlang-org/src/views/www.dr) links to, and publishes them to a GitHub
+# Release.
+#
+# Triggers:
+#   * pushing a tag like `v0.0.1`            -> publishes a release for that tag
+#   * manual "Run workflow" (workflow_dispatch) with a tag input -> same
+#
+# Asset naming (consumed verbatim by www.dr):
+#   dragon-<ver>-linux-x86_64.{deb,rpm,tar.gz}
+#   dragon-<ver>-macos-arm64.{dmg,tar.gz}
+#   dragon-<ver>-macos-x86_64.{dmg,tar.gz}
+#   dragon-<ver>-windows-x86_64.{msi,zip}
+#
+# IMPORTANT: `LLVM_VERSION` below must match the LLVM the codebase compiles
+# against. The local dev tree currently uses a custom LLVM build; pin this to
+# the release series you support before cutting a real tag.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.0.1)'
+        required: true
+        default: 'v0.0.1'
+
+permissions:
+  contents: write          # create the release + upload assets
+
+env:
+  LLVM_VERSION: '18'       # <-- align with the codebase's required LLVM major
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    # One bad platform shouldn't sink the others; partial releases are fine.
+    continue-on-error: ${{ matrix.experimental == true }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04,  target: linux-x86_64,  experimental: false }
+          - { os: macos-14,      target: macos-arm64,   experimental: false }
+          - { os: macos-13,      target: macos-x86_64,  experimental: false }
+          - { os: windows-2022,  target: windows-x86_64, experimental: true }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- Resolve the version from the tag (strip the leading 'v') ----------
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          REF="${{ github.event.inputs.tag || github.ref_name }}"
+          VER="${REF#v}"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VER"   >> "$GITHUB_OUTPUT"
+          echo "Building Dragon $VER"
+
+      # ---- Toolchain ---------------------------------------------------------
+      - name: Install LLVM
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: ${{ env.LLVM_VERSION }}
+          # Cache the download between runs.
+          cached: true
+
+      - name: Install build + packaging tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # rpm: cpack RPM generator; file/dpkg-dev: deb metadata; zlib: runtime dep.
+          sudo apt-get install -y cmake ninja-build rpm file dpkg-dev zlib1g-dev
+
+      - name: Install build tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cmake ninja
+
+      - name: Install build + packaging tools (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install ninja -y
+          # WiX toolset 3.x provides the candle/light CPack WIX generator needs.
+          choco install wixtoolset -y
+          echo "C:\Program Files (x86)\WiX Toolset v3.11\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      # ---- Configure + build -------------------------------------------------
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DDRAGON_BUILD_TESTS=OFF \
+            -DLLVM_DIR="$LLVM_PATH/lib/cmake/llvm"
+
+      - name: Build
+        shell: bash
+        run: cmake --build build --config Release -j
+
+      # ---- Package -----------------------------------------------------------
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        working-directory: build
+        run: |
+          cpack -G DEB -B "$PWD/dist"
+          cpack -G RPM -B "$PWD/dist"
+          cpack -G TGZ -B "$PWD/dist"
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        working-directory: build
+        run: |
+          cpack -G DragNDrop -B "$PWD/dist"
+          cpack -G TGZ       -B "$PWD/dist"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        working-directory: build
+        shell: bash
+        run: |
+          cpack -G WIX -B "$PWD/dist"
+          cpack -G ZIP -B "$PWD/dist"
+
+      # ---- Normalize artifact names to what www.dr links to ------------------
+      - name: Rename artifacts
+        id: rename
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="${{ steps.ver.outputs.version }}"
+          T="${{ matrix.target }}"
+          mkdir -p out
+          shopt -s nullglob
+          pick() {  # pick <glob> <dest-extension>
+            local g="$1" ext="$2"
+            local files=( build/dist/*.$g )
+            if [ ${#files[@]} -eq 0 ]; then
+              echo "no .$g produced (skipping)"; return 0
+            fi
+            cp "${files[0]}" "out/dragon-${VER}-${T}.${ext}"
+            echo "  -> dragon-${VER}-${T}.${ext}"
+          }
+          case "$T" in
+            linux-*)   pick deb deb;    pick rpm rpm;    pick "tar.gz" "tar.gz" ;;
+            macos-*)   pick dmg dmg;                     pick "tar.gz" "tar.gz" ;;
+            windows-*) pick msi msi;                     pick zip zip ;;
+          esac
+          # Checksums alongside each artifact.
+          ( cd out && for f in *; do
+              if command -v sha256sum >/dev/null; then sha256sum "$f" > "$f.sha256";
+              else shasum -a 256 "$f" > "$f.sha256"; fi
+            done )
+          ls -la out
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: Dragon ${{ steps.ver.outputs.version }}
+          draft: true                # review before going public
+          fail_on_unmatched_files: false
+          files: out/*

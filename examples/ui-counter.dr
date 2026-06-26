@@ -1,0 +1,46 @@
+"""Reactive desktop counter (the design spec).
+
+A complete reactive UI in pure Dragon: a module-global `Signal`, a handler, and
+one `HTML` view. The compiler does the wiring -
+
+  * `onclick="!{bump}"`  extracts the handler to `window.dr.invoke(<id>)` (#3)
+  * `!{count()}`         wraps the value in `<span data-dr="N">` and binds it, so
+                         the node auto-patches on every `count.set(...)`     (#4)
+
+No manual node ids, no `eval_js`, no virtual DOM - the patched node is exactly
+the one whose Signal changed. Reactive interpolations read module-global Signals.
+
+Build (Linux - GTK3 + webkit2gtk-4.1):
+
+    INCS=( $(pkg-config --cflags-only-I webkit2gtk-4.1 | sed 's/-I/-I /g') )
+    LIBS=( $(pkg-config --libs-only-l webkit2gtk-4.1) )
+    dragon build examples/ui-counter.dr \\
+        --cc-source stdlib/ui/desktop/webview_linux.cpp \\
+        "${INCS[@]}" "${LIBS[@]}" -lpthread -o ui-counter
+"""
+
+import ui
+from html import HTML
+from ui import Signal
+from ui.desktop import Window
+
+count: Signal[int] = Signal(0)
+
+def bump() -> None {
+    count.set(count() + 1)
+}
+
+view: HTML = template[HTML] {
+<!doctype html>
+<html>
+  <body style="font-family:system-ui;text-align:center;margin-top:3rem">
+    <h1>Count: !{count()}</h1>
+    <button onclick="!{bump}" style="font-size:1.2rem;padding:.5rem 1rem">+1</button>
+  </body>
+</html>
+}
+
+win: Window = Window("Dragon Counter", 360, 240)
+win.body = view
+win.show()
+ui.App.run()

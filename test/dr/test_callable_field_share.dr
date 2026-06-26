@@ -1,0 +1,81 @@
+# test/dr/test_callable_field_share.dr - C2 fix: tag-gated mark-shared for a
+# Callable field that holds a BARE function pointer.
+#
+# Passing an instance across a `fire` boundary emits dragon_mark_shared_deep,
+# which runs the class's __dragon_mark_shared_<Class> enumerator over its fields.
+# A Callable field can hold a bare LLVM fn pointer (no header). The enumerator
+# used to route it through dragon_mark_shared_worklist_push, which reads AND
+# atomic-ORs gc_flags at offset 9 - on a bare code pointer that is a write into
+# read-only .text (SIGSEGV / corruption) whenever the stray code byte has the
+# HEAP_OBJ bit set. It now goes through the tag-gated dragon_mark_shared_callable
+# (gates on type_tag == DRAGON_TAG_CLOSURE first, like dragon_incref_callable, so
+# a bare fn pointer is a clean no-op). This is the stdlib HTTP-server shape: a
+# Route holds a handler Callable and the server shares route state into
+# per-connection green threads.
+#
+# Correctness / no-crash is asserted here; memory-cleanliness is verified by
+# running this file under the ASan build.
+
+from unittest import TestCase, main
+
+
+def inc(x: int) -> int { return x + 1 }
+def dbl(x: int) -> int { return x * 2 }
+
+def mk(n: int) -> Callable[[int], int] {
+    def adder(x: int) -> int { return x + n }
+    return adder
+}
+
+
+class Op {
+    name: str
+    fn: Callable[[int], int]
+    def(name: str, fn: Callable[[int], int]) {
+        self.name = name
+        self.fn = fn
+    }
+    def call(x: int) -> int { return self.fn(x) }
+}
+
+
+def run_op(o: Op, v: int) -> int { return o.fn(v) }
+
+
+class CallableFieldShareTests(TestCase) {
+    def test_bare_fn_field_shared_to_fire() {
+        # o.fn is a BARE fn pointer (top-level def). `fire run_op(o, _)` shares
+        # `o`, so mark_shared_deep walks o.fn - the corruption site.
+        const o: Op = Op("inc", inc)
+        t: Task[int] = fire run_op(o, 41)
+        const r: int = await t
+        self.assertEqual(r, 42)
+        # Field intact + still callable on the main side after sharing.
+        self.assertEqual(o.fn(7), 8)
+        self.assertEqual(o.name, "inc")
+    }
+
+    def test_closure_field_shared_to_fire() {
+        # Same path, but the field holds a real DragonClosure (header'd): the tag
+        # matches, so it is still marked + pushed and its env preserved.
+        const o: Op = Op("add5", mk(5))
+        t: Task[int] = fire run_op(o, 10)
+        const r: int = await t
+        self.assertEqual(r, 15)
+        self.assertEqual(o.fn(100), 105)
+    }
+
+    def test_many_bare_fn_ops_shared() {
+        const a: Op = Op("inc", inc)
+        const b: Op = Op("dbl", dbl)
+        t1: Task[int] = fire run_op(a, 10)
+        t2: Task[int] = fire run_op(b, 10)
+        const r1: int = await t1
+        const r2: int = await t2
+        self.assertEqual(r1, 11)
+        self.assertEqual(r2, 20)
+    }
+}
+
+
+main([CallableFieldShareTests()])

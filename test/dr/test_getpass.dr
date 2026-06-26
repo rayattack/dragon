@@ -1,0 +1,55 @@
+"""getpass - automated coverage for the non-interactive surface.
+
+What is verified here (no terminal required, runs under ctest):
+  * getuser() returns a non-empty login name (env vars or getpwuid fallback).
+  * The GetPassWarning category constant matches the Python name.
+  * Under ctest, stdin is not a terminal, so isatty(0) == 0 - i.e. getpass()
+    would take the documented GetPassWarning echo-fallback branch. We assert
+    that branch *condition* rather than calling getpass(), because the
+    fallback reads a line via input() which would block on / consume the
+    harness stdin.
+
+MANUAL TTY TEST (cannot be automated - needs a real terminal):
+    Build dragon, then in an interactive shell run a one-off file:
+
+        from getpass import getpass
+        pw: str = getpass("Secret: ")
+        print("len=" + str(len(pw)))
+
+    Type a password and press Enter. Expected:
+      - the characters you type are NOT echoed,
+      - a newline is printed after Enter,
+      - the printed length matches what you typed,
+      - the terminal echoes normally again afterward (state restored even if
+        you press Ctrl-D / Ctrl-C mid-entry).
+"""
+
+from unittest import TestCase, main
+from getpass import getpass, getuser, GetPassWarning, isatty
+
+
+class GetPassTests(TestCase) {
+    def test_getuser_nonempty() {
+        # The current process always has a login identity: one of LOGNAME /
+        # USER / LNAME / USERNAME is set in any normal shell, and getpwuid is
+        # the guaranteed fallback. Either way the name must be non-empty.
+        const who: str = getuser()
+        self.assertTrue(len(who) > 0)
+    }
+
+    def test_getpasswarning_constant() {
+        # Dragon's warnings module uses string category names; this one must
+        # match CPython's class name exactly so call sites read identically.
+        self.assertEqual(GetPassWarning, "GetPassWarning")
+    }
+
+    def test_stdin_not_a_tty_under_ctest() {
+        # Sanity-check the environment assumption behind this test file: the
+        # CTest harness does not attach a terminal to fd 0, so getpass() would
+        # take its echo-fallback path. isatty returns 0 for a non-tty fd.
+        self.assertEqual(isatty(0), 0)
+    }
+}
+
+
+main([GetPassTests()])

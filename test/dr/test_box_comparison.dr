@@ -1,0 +1,76 @@
+# test/dr/test_box_comparison.dr - ordering comparison on Any/Union (box).
+#
+# Regression guard for a compiler crash: `a < b` (also <=, >, >=) on two Any
+# values emitted an ICmp on a {tag,payload} struct and aborted codegen
+# (ICmpInst::AssertOK). `==`/`!=` already had a handler (dragon_box_eq); ordering
+# did not. The fix routes ordering through dragon_box_cmp (numeric by value, str
+# /bytes lexicographic; TypeError for incomparable pairs), for both single
+# (BinaryExpr) and chained (ChainedCompExpr) comparisons.
+
+from unittest import TestCase, main
+
+
+class BoxComparisonTests(TestCase) {
+    def test_numeric_ordering() {
+        a: Any = 5
+        b: Any = 7
+        self.assertTrue(a < b)
+        self.assertTrue(a <= b)
+        self.assertFalse(a > b)
+        self.assertFalse(a >= b)
+        self.assertTrue(b > a)
+    }
+
+    def test_int_float_promotion_ordering() {
+        a: Any = 2
+        b: Any = 2.5
+        self.assertTrue(a < b)
+        self.assertFalse(a >= b)
+    }
+
+    def test_str_ordering() {
+        a: Any = "abc"
+        b: Any = "abd"
+        self.assertTrue(a < b)
+        self.assertFalse(a >= b)
+        self.assertTrue(b > a)
+    }
+
+    def test_bytes_ordering_prefix_tiebreak() {
+        a: Any = b"ab"
+        b: Any = b"abc"
+        self.assertTrue(a < b)
+        self.assertFalse(b < a)
+    }
+
+    def test_equality_still_works() {
+        a: Any = 5
+        b: Any = 5
+        self.assertTrue(a == b)
+        self.assertFalse(a != b)
+    }
+
+    def test_chained_ordering() {
+        a: Any = 1
+        b: Any = 2
+        c: Any = 3
+        self.assertTrue(a < b < c)
+        self.assertFalse(a < c < b)
+        self.assertTrue(a <= b <= c)
+    }
+
+    def test_incomparable_raises_typeerror() {
+        a: Any = 5
+        b: Any = "x"
+        raised: bool = False
+        try {
+            print(a < b)
+        } except TypeError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+}
+
+
+main([BoxComparisonTests()])

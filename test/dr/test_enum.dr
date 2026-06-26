@@ -1,0 +1,128 @@
+"""enum - class-based Enum / IntEnum / StrEnum (Python `enum` parity).
+
+Members lower to singleton instances carrying .name/.value; iteration walks
+the members in definition order; `C(v)` looks a member up by value; plain Enum
+compares by identity, IntEnum/StrEnum compare by value. The native `enum`
+keyword (fast int constants) remains a separate form and is exercised for
+coexistence. See decisions/043-enum-import-gated-intrinsic.md.
+"""
+
+from unittest import TestCase, main
+from enum import Enum, IntEnum, StrEnum, auto
+
+
+class Color(Enum) {
+    RED: int = 1
+    GREEN: int = 2
+    BLUE: int = 3
+}
+
+class Mixed(Enum) {
+    A: int = auto()      # 1
+    B: int = 10
+    C: int = auto()      # 11 (resumes after explicit)
+    D: int = auto()      # 12
+}
+
+class Priority(IntEnum) {
+    LOW: int = 1
+    MEDIUM: int = 5
+    HIGH: int = 10
+}
+
+class FileMode(StrEnum) {
+    READ: str = "r"
+    WRITE: str = "w"
+    APPEND: str = "a"
+}
+
+# Native `enum` keyword - fast int constants, must coexist with class enums.
+enum Token { LPAREN, RPAREN, COMMA }
+
+
+class EnumTests(TestCase) {
+    def test_member_name_value() {
+        self.assertEqual(Color.RED.value, 1)
+        self.assertEqual(Color.GREEN.value, 2)
+        self.assertEqual(Color.BLUE.value, 3)
+        self.assertEqual(Color.RED.name, "RED")
+        self.assertEqual(Color.BLUE.name, "BLUE")
+    }
+
+    def test_str() {
+        self.assertEqual(str(Color.RED), "Color.RED")
+        self.assertEqual(str(Color.BLUE), "Color.BLUE")
+    }
+
+    def test_auto_numbering() {
+        self.assertEqual(Mixed.A.value, 1)
+        self.assertEqual(Mixed.B.value, 10)
+        self.assertEqual(Mixed.C.value, 11)
+        self.assertEqual(Mixed.D.value, 12)
+    }
+
+    def test_iteration_order() {
+        names: list[str] = []
+        for c in Color {
+            names.append(c.name)
+        }
+        self.assertEqual(len(names), 3)
+        self.assertEqual(names[0], "RED")
+        self.assertEqual(names[1], "GREEN")
+        self.assertEqual(names[2], "BLUE")
+    }
+
+    def test_value_lookup() {
+        got: Color = Color(2)
+        self.assertEqual(got.name, "GREEN")
+        self.assertEqual(got.value, 2)
+        # Lookup returns the SAME singleton (identity).
+        self.assertTrue(Color(1) == Color.RED)
+    }
+
+    def test_value_lookup_invalid_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            bad: Color = Color(99)
+        })
+    }
+
+    def test_identity_equality() {
+        self.assertTrue(Color.RED == Color.RED)
+        self.assertFalse(Color.RED == Color.GREEN)
+        self.assertTrue(Color.RED != Color.GREEN)
+    }
+
+    def test_intenum_compares_to_int() {
+        self.assertTrue(Priority.LOW == 1)
+        self.assertTrue(Priority.HIGH == 10)
+        self.assertFalse(Priority.LOW == 10)
+        # member-vs-member still correct
+        self.assertTrue(Priority.LOW == Priority.LOW)
+        self.assertFalse(Priority.LOW == Priority.HIGH)
+    }
+
+    def test_intenum_ordering() {
+        self.assertTrue(Priority.LOW < Priority.HIGH)
+        self.assertTrue(Priority.HIGH > Priority.MEDIUM)
+        self.assertTrue(Priority.LOW <= Priority.LOW)
+        self.assertTrue(Priority.MEDIUM >= Priority.LOW)
+    }
+
+    def test_strenum_compares_to_str() {
+        self.assertTrue(FileMode.READ == "r")
+        self.assertTrue(FileMode.WRITE == "w")
+        self.assertFalse(FileMode.READ == "w")
+        self.assertEqual(FileMode.APPEND.value, "a")
+        self.assertEqual(FileMode.READ.name, "READ")
+    }
+
+    def test_native_keyword_coexists() {
+        # Native enum keyword stays fast int constants.
+        self.assertEqual(Token.LPAREN, 0)
+        self.assertEqual(Token.RPAREN, 1)
+        self.assertEqual(Token.COMMA, 2)
+    }
+}
+
+
+main([EnumTests()])

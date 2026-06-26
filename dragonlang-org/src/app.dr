@@ -1,0 +1,77 @@
+# app.dr - the Dragon package registry web app (accounts + browse + API).
+#
+# Run with cwd = dragonlang-org/ so `static/` and `data/` resolve:
+#   dragon run src/app.dr        (or via server/run.sh once pointed here)
+#
+# Mounts the egg (package) registry. The marketing landing and the docs book
+# are folded in under task 7 (this entry is structured to absorb them: add
+# their route registrations here and their render modules under src/).
+
+from http.server import Router, Request, Response, Context
+from deps import SECRET
+from controllers.eggs.web import login_page, login_submit, signup_page, signup_submit, logout, account_page, token_create, token_revoke, index_page, search_page, detail_page
+from controllers.eggs.api import api_publish, api_download, api_search, api_yank, api_eggs, api_fetch, api_log_checkpoint, api_log, api_log_pubkey, api_log_inclusion, api_log_consistency
+from views.www import render_landing, render_download, render_benchmarks
+from controllers.docs.docs import docs_redirect, docs_page
+
+const PORT: int = 2018
+const HOST: str = "127.0.0.1"
+
+# Thin wrappers adapting the no-arg marketing renderers to the handler signature.
+def landing(req: Request, res: Response, ctx: Context) -> None {
+    res.html(render_landing(req.session.get("uname", "")))
+}
+def download(req: Request, res: Response, ctx: Context) -> None {
+    const ua: str = req.headers["user-agent"] if "user-agent" in req.headers else ""
+    res.html(render_download(ua, req.session.get("uname", "")))
+}
+def benchmarks(req: Request, res: Response, ctx: Context) -> None {
+    res.html(render_benchmarks(req.session.get("uname", "")))
+}
+
+const app: Router = Router(PORT, HOST)
+
+# Signed-cookie sessions (no server-side store). CSRF on forms is handled
+# manually in the web controllers so the bearer-token API stays exempt.
+app.enable_sessions(SECRET, "dragon_session", 0, false, "Lax")
+
+# Static assets (CSS/JS/logo) shared with the rest of the site.
+app.ASSETS("static", "/assets/*")
+
+# Site (marketing + docs book)
+app.GET('/', landing)
+app.GET('/download', download)
+app.GET('/benchmarks', benchmarks)
+app.GET('/docs', docs_redirect)
+app.GET('/docs/:slug', docs_page)
+
+# Browse packages
+app.GET('/eggs', index_page)
+app.GET('/eggs/search', search_page)
+app.GET('/eggs/:name', detail_page)
+
+# Accounts
+app.GET('/login', login_page)
+app.POST('/login', login_submit)
+app.GET('/signup', signup_page)
+app.POST('/signup', signup_submit)
+app.GET('/logout', logout)
+app.GET('/account', account_page)
+app.POST('/account/tokens/create', token_create)
+app.POST('/account/tokens/revoke', token_revoke)
+
+# Registry API (bearer token)
+app.POST('/api/publish', api_publish)
+app.GET('/api/packages/:name/:version', api_download)
+app.GET('/api/eggs/:name', api_eggs)
+app.GET('/api/fetch/:name/:version', api_fetch)
+app.GET('/api/log/checkpoint', api_log_checkpoint)
+app.GET('/api/log/pubkey', api_log_pubkey)
+app.GET('/api/log/inclusion/:name/:version', api_log_inclusion)
+app.GET('/api/log/consistency', api_log_consistency)
+app.GET('/api/log', api_log)
+app.GET('/api/search', api_search)
+app.POST('/api/yank/:name/:version', api_yank)
+
+print(f"Dragon registry: http://{HOST}:{PORT}/   (/eggs | /login | /account | /api/*)")
+app.listen()

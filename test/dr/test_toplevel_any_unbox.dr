@@ -1,0 +1,69 @@
+# test/dr/test_toplevel_any_unbox.dr - narrowing an `Any` into a MODULE-GLOBAL
+# typed slot and then using it.
+#
+# Regression guard for a codegen bug: a bare module-top-level `const s: T = anyVal`
+# (and `s = anyVal`) stored the whole 16-byte {tag,payload} box into the native
+# (8-byte) global slot, so a later read got the TAG as the value (a bogus
+# pointer) and any USE segfaulted - while the same narrow inside a function /
+# block, or guarded by isinstance, worked. Fixed by unboxing box->native in the
+# module-global store paths (AnnAssign + reassignment), mirroring the local path.
+#
+# These narrows run at MODULE TOP LEVEL (when the file loads, before main): if the
+# bug were present the program would crash on load, before any assertion. The
+# TestCase then asserts the globals were computed correctly.
+
+from unittest import TestCase, main
+from json import loads
+
+# --- Top-level Any -> native narrows + uses (the exact crashing shapes) ---
+
+const _str_box: Any = "hello"
+const _gstr: str = _str_box                 # AnnAssign narrow at module scope
+const _glen: int = len(_gstr)               # USE at module scope
+
+const _int_box: Any = 42
+const _gint: int = _int_box
+const _gint2: int = _gint + 1
+
+const _float_box: Any = 2.5
+const _gfloat: float = _float_box
+
+# Astral (kind=4) string decoded from JSON, narrowed + used at top level.
+const _astral_box: Any = loads("\"a\\ud83d\\ude00b\"")
+const _gastral: str = _astral_box
+const _galen: int = len(_gastral)
+
+# Bare reassignment (no annotation) of a native global from an Any global.
+_reassigned: str = "x"
+const _re_box: Any = "world!"
+_reassigned = _re_box
+const _relen: int = len(_reassigned)
+
+
+class TopLevelAnyUnboxTests(TestCase) {
+    def test_str_narrow_and_len() {
+        self.assertEqual(_gstr, "hello")
+        self.assertEqual(_glen, 5)
+    }
+
+    def test_int_narrow() {
+        self.assertEqual(_gint, 42)
+        self.assertEqual(_gint2, 43)
+    }
+
+    def test_float_narrow() {
+        self.assertEqual(_gfloat, 2.5)
+    }
+
+    def test_astral_str_narrow() {
+        self.assertEqual(_galen, 3)             # 'a', , 'b'
+    }
+
+    def test_bare_reassign_narrow() {
+        self.assertEqual(_reassigned, "world!")
+        self.assertEqual(_relen, 6)
+    }
+}
+
+
+main([TopLevelAnyUnboxTests()])

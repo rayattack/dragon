@@ -1,0 +1,50 @@
+# test/dr/test_scrypt.dr - Known-answer tests for hashlib.scrypt (RFC 7914 §12).
+#
+# scrypt is a native Dragon implementation (mbedTLS ships no scrypt). These
+# vectors lock the full pipeline: PBKDF2 bookends + ROMix/BlockMix/Salsa20-8.
+# Vector 1 is RFC 7914 §12 canonical (N=16,r=1,p=1). The r=8 and r=4/p=2
+# vectors (kept at N=16 so the suite stays fast) exercise BlockMix reordering
+# and p>1 parallel blocks; expected values from CPython's reference scrypt.
+
+from unittest import TestCase, main
+from hashlib import scrypt
+
+const _V1: str = "77d6576238657b203b19ca42c18a0497f16b4844e3074ae8dfdffa3fede21442fcd0069ded0948f8326a753a0fc81f17e8d3e0fb2e0d3628cf35e20c38d18906"
+const _R8: str = "e2b1883717d879f495cb7d86aa1eb8697e724978e8fc819881b007fbba2cf86bfb90a4f560643a55df2464cfc75ddd4fa6e88c3a669a3bfd1078e647adfb56ae"
+const _R4P2: str = "ddfe4e8aa715322b6cf3d55a6df6fa3e3dcec0d30ac069a998d23d7a33dd8aff9806061829977a418f3216b66852fc4847cddf4cb0ae10abbbaac8fc82220796"
+
+class ScryptTests(TestCase) {
+    def test_rfc7914_vector1() {
+        const dk: bytes = scrypt(b"", b"", 16, 1, 1, 0, 64)
+        self.assertEqual(dk.hex(), _V1)
+    }
+
+    def test_r8_blockmix_reorder() {
+        const dk: bytes = scrypt(b"", b"", 16, 8, 1, 0, 64)
+        self.assertEqual(dk.hex(), _R8)
+    }
+
+    def test_r4_p2_parallel() {
+        const dk: bytes = scrypt(b"pw", b"salt", 16, 4, 2, 0, 64)
+        self.assertEqual(dk.hex(), _R4P2)
+    }
+
+    def test_dklen_short() {
+        # A shorter derived key is just the prefix length the caller asked for.
+        const dk: bytes = scrypt(b"", b"", 16, 1, 1, 0, 16)
+        self.assertEqual(len(dk), 16)
+        self.assertEqual(dk.hex(), _V1[0:32])
+    }
+
+    def test_rejects_non_power_of_two_n() {
+        raised: bool = false
+        try {
+            const dk: bytes = scrypt(b"x", b"y", 1000, 1, 1, 0, 32)
+        } except ValueError {
+            raised = true
+        }
+        self.assertTrue(raised)
+    }
+}
+
+main([ScryptTests()])

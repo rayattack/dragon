@@ -1,0 +1,6 @@
+def main() -> None {
+    name: str = "world"
+    print(f"Hello, {name}!")
+}
+
+main()

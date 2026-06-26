@@ -1,0 +1,286 @@
+# multipart.dr - Dragon standard library: multipart/form-data parsing
+#
+# Parses `multipart/form-data` request bodies (RFC 2046 / RFC 7578) into a
+# list of `Part`s. Pure Dragon, binary-safe: part bodies are collected as
+# `bytes` VERBATIM, so non-UTF-8 payloads (images, archives, arbitrary
+# uploads) survive untouched. Header lines are ASCII by the spec, so they are
+# decoded to `str` only for `Content-Disposition` / `Content-Type` parsing -
+# the part data is never decoded.
+#
+# This is the network-independent core (W3 of the web go-live plan). It does
+# NOT touch sockets or `Request`; the server wires `Request.form()` /
+# `Request.files()` onto `parse_multipart` separately.
+
+#===----------------------------------------------------------------------===#
+# Wire constants
+#===----------------------------------------------------------------------===#
+
+const _CRLF: str = "\r\n"
+const _HEADER_SEP: str = "\r\n\r\n"   # blank line separating headers from body
+const _DASH: str = "--"
+
+#===----------------------------------------------------------------------===#
+# Part - one parsed multipart entry
+#===----------------------------------------------------------------------===#
+
+class Part {
+    # name - the form field name (from Content-Disposition `name=`).
+    # filename - the client-supplied file name, or "" when absent (a plain
+    #  non-file field). Presence of a filename is how callers
+    #  distinguish file parts from ordinary form fields.
+    # content_type - the part's Content-Type, or "" when the part carried none
+    #  (browsers omit it for plain text fields).
+    # data - the part body, VERBATIM bytes (binary-safe).
+    #
+    # Fields are declared in the class body (not just assigned in the ctor) so
+    # their types are visible to *other* modules - server.dr reads part.name /
+    # part.data, and cross-module field access needs the declared type to
+    # resolve (an undeclared field miscompiles the access).
+    name: str
+    filename: str
+    content_type: str
+    data: bytes
+
+    def(name: str, filename: str, content_type: str, data: bytes) {
+        self.name = name
+        self.filename = filename
+        self.content_type = content_type
+        self.data = data
+    }
+
+    # True when this part is a file upload (carries a filename).
+    def is_file() -> bool {
+        return len(self.filename) > 0
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# Content-Type boundary extraction
+#===----------------------------------------------------------------------===#
+
+def boundary_from_content_type(content_type: str) -> str {
+    # Pull the `boundary=...` token out of a Content-Type header value such as
+    # `multipart/form-data; boundary=----WebKitFormBoundaryABC123` or the
+    # quoted form `multipart/form-data; boundary="abc 123"`. Returns "" when no
+    # boundary token is present.
+    #
+    # Per RFC 2045 the boundary value runs to the next `;` or end-of-string,
+    # and may be wrapped in double quotes (which permit spaces). We locate the
+    # `boundary=` token, take the remainder, stop at the first unquoted `;`,
+    # and strip surrounding quotes.
+    const key: str = "boundary="
+    const idx: int = content_type.find(key)
+    if idx < 0 {
+        return ""
+    }
+    rest: str = content_type[idx + len(key):]
+    rest = rest.strip()
+    if len(rest) == 0 {
+        return ""
+    }
+
+    if rest[0] == "\"" {
+        # Quoted value: take everything up to the closing quote.
+        const close: int = rest[1:].find("\"")
+        if close < 0 {
+            # Unterminated quote - take the remainder after the opening quote.
+            return rest[1:]
+        }
+        return rest[1:close + 1]
+    }
+
+    # Unquoted value: ends at the next `;` (followed by further parameters).
+    const semi: int = rest.find(";")
+    if semi >= 0 {
+        return rest[0:semi].strip()
+    }
+    return rest
+}
+
+#===----------------------------------------------------------------------===#
+# Content-Disposition parameter extraction
+#===----------------------------------------------------------------------===#
+
+def _parse_param_value(after: str) -> str {
+    # Parse the value following `param=`: a quoted string, or a bare token up
+    # to the next `;`.
+    if len(after) == 0 {
+        return ""
+    }
+    if after[0] == "\"" {
+        const close: int = after[1:].find("\"")
+        if close < 0 {
+            return after[1:]
+        }
+        return after[1:close + 1]
+    }
+    const semi: int = after.find(";")
+    if semi >= 0 {
+        return after[0:semi].strip()
+    }
+    return after.strip()
+}
+
+def _extract_param(header_value: str, param: str) -> str {
+    # Extract a `param="..."` (or `param=...`) token's value from a header
+    # value like `form-data; name="field"; filename="a.txt"`. Returns "" when
+    # the parameter is absent. The match requires the parameter name to be
+    # preceded by a `;`, a space, or start-of-string boundary and followed by
+    # `=`, so `name=` does not spuriously match `filename=`.
+    const needle: str = param + "="
+    search_from: int = 0
+    const hv_len: int = len(header_value)
+
+    while search_from < hv_len {
+        const found: int = header_value[search_from:].find(needle)
+        if found < 0 {
+            return ""
+        }
+        const at: int = search_from + found
+        # Boundary check: the char before `param` must be start, a space, or
+        # a `;` - otherwise this is a suffix of a longer parameter name.
+        is_token_start: bool = at == 0
+        if not is_token_start {
+            const prev: str = header_value[at - 1:at]
+            if prev == ";" or prev == " " {
+                is_token_start = true
+            }
+        }
+        if is_token_start {
+            const after: str = header_value[at + len(needle):]
+            return _parse_param_value(after)
+        }
+        search_from = at + len(needle)
+    }
+    return ""
+}
+
+#===----------------------------------------------------------------------===#
+# Per-part header parsing
+#===----------------------------------------------------------------------===#
+
+def _parse_part_headers(header_block: str) -> dict[str, str] {
+    # Parse a part's header block (CRLF-separated `Key: Value` lines) into a
+    # dict keyed by lowercased header name. Header names are case-insensitive
+    # per RFC 7230; values keep their original case (filenames matter).
+    result: dict[str, str] = {}
+    const lines: list[str] = header_block.split(_CRLF)
+    for line in lines {
+        if len(line) == 0 {
+            continue
+        }
+        const colon: int = line.find(":")
+        if colon < 0 {
+            continue
+        }
+        const key: str = line[0:colon].strip().lower()
+        const value: str = line[colon + 1:].strip()
+        result[key] = value
+    }
+    return result
+}
+
+#===----------------------------------------------------------------------===#
+# Body parsing
+#===----------------------------------------------------------------------===#
+
+def _bytes_of(s: str) -> bytes {
+    # ASCII/UTF-8 encode a literal delimiter string to bytes for binary-safe
+    # searching against the (possibly non-UTF-8) body.
+    return s.encode()
+}
+
+def _parse_one_part(segment: bytes) -> Part {
+    # Parse a single multipart segment (the bytes BETWEEN dash-boundary
+    # delimiters). On the wire each segment is:
+    #  \r\n <header-lines> \r\n\r\n <body> \r\n
+    # The leading \r\n follows the boundary; the trailing \r\n precedes the
+    # next boundary. We strip both framing CRLFs, split headers from body at
+    # the first \r\n\r\n, and keep the body bytes verbatim.
+    seg: bytes = segment
+
+    # Strip the leading CRLF that follows the boundary line.
+    const lead: bytes = _bytes_of(_CRLF)
+    if seg.startswith(lead) {
+        seg = seg[2:]
+    }
+
+    # Strip the trailing CRLF that precedes the next boundary line.
+    if seg.endswith(lead) {
+        seg = seg[0:len(seg) - 2]
+    }
+
+    # Split headers from body at the first blank line (\r\n\r\n).
+    const sep: bytes = _bytes_of(_HEADER_SEP)
+    const sep_at: int = seg.find(sep)
+
+    header_str: str = ""
+    body: bytes = bytes()
+    if sep_at < 0 {
+        # No header terminator - treat the whole segment as headers with an
+        # empty body (degenerate, but don't lose data: keep nothing as body).
+        header_str = seg.decode()
+        body = bytes()
+    } else {
+        header_str = seg[0:sep_at].decode()
+        body = seg[sep_at + len(_HEADER_SEP):]
+    }
+
+    const headers: dict[str, str] = _parse_part_headers(header_str)
+
+    name: str = ""
+    filename: str = ""
+    content_type: str = ""
+
+    if "content-disposition" in headers {
+        const cd: str = headers["content-disposition"]
+        name = _extract_param(cd, "name")
+        filename = _extract_param(cd, "filename")
+    }
+    if "content-type" in headers {
+        content_type = headers["content-type"]
+    }
+
+    return Part(name, filename, content_type, body)
+}
+
+def parse_multipart(body: bytes, boundary: str) -> list[Part] {
+    # Parse a `multipart/form-data` body into its constituent `Part`s.
+    #
+    #  body - the FULL request body bytes (W1 guarantees the whole body
+    #  is buffered; a truncated body parses truncated garbage).
+    #  boundary - the boundary token (WITHOUT the leading `--`), as returned
+    #  by `boundary_from_content_type`.
+    #
+    # Splitting on the dash-boundary delimiter (`--<boundary>`) is binary-safe
+    # and yields: an (empty) preamble, one segment per part, and a trailing
+    # segment beginning with `--` (the close-delimiter marker). We keep only
+    # the real part segments. Part bodies are returned VERBATIM.
+    parts: list[Part] = []
+    if len(boundary) == 0 {
+        return parts
+    }
+
+    const delim: bytes = _bytes_of(_DASH + boundary)
+    const segments: list[bytes] = body.split(delim)
+    const dashes: bytes = _bytes_of(_DASH)
+
+    i: int = 0
+    const n: int = len(segments)
+    while i < n {
+        const segment: bytes = segments[i]
+        i = i + 1
+        # Skip the empty preamble before the first boundary.
+        if len(segment) == 0 {
+            continue
+        }
+        # Skip the close-delimiter tail: the final segment begins with `--`
+        # (the wire form is `--<boundary>--`). Anything starting with `--`
+        # after a boundary is the terminator, not a part.
+        if segment.startswith(dashes) {
+            continue
+        }
+        parts.append(_parse_one_part(segment))
+    }
+    return parts
+}

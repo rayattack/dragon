@@ -1,0 +1,40 @@
+# test/dr/test_closure_capture_longjmp.dr - regression for a fixed SIGSEGV.
+#
+# Bug (fixed 2026-05-31): a capturing-lambda literal sets the one-shot
+# `lastClosureCallableType` codegen flag (consumed to mark an assigned var
+# VarKind::Closure). When the lambda was consumed as a CALL ARGUMENT instead of
+# a direct assignment RHS - e.g. `assertRaises(ValueError, lambda () { ... })` -
+# the flag was never cleared. The NEXT annotated assignment emitted (even in a
+# DIFFERENT function), like `x: int = 42` inside make_int_closure, then read the
+# stale flag and mis-marked the int `x` as a Closure. make_int_closure's
+# capture machinery then emitted dragon_incref(42), dereferencing 42 as a heap
+# pointer -> SIGSEGV. Fix: reset lastClosureCallableType at each assign
+# visitor's entry (src/codegen/Assign.cpp) so it reflects only that RHS.
+#
+# This needs the full confluence to reproduce: the def-escaping-closure CALL in
+# one test method AND the capturing+raising lambda handed to assertRaises in
+# another. (Either alone, or a non-capturing/non-raising lambda, never tripped
+# it - see test_closure_escape.dr for the simpler closure cases.)
+
+from unittest import TestCase, main
+
+def make_int_closure() -> Callable[[], int] {
+    x: int = 42
+    def get() -> int { return x }
+    return get
+}
+
+class CaptureLongjmpTests(TestCase) {
+    def test_calls_escaping_closure() {
+        const g: Callable[[], int] = make_int_closure()
+        self.assertEqual(g(), 42)
+    }
+
+    def test_raising_capturing_lambda_in_assertRaises() {
+        msg: str = "notanint"
+        self.assertRaises(ValueError, lambda () -> None { n: int = int(msg) })
+    }
+}
+
+
+main([CaptureLongjmpTests()])

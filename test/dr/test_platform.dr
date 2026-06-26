@@ -1,0 +1,33 @@
+"""platform - structural checks (values are environment-dependent)."""
+
+from unittest import TestCase, main
+import platform
+
+
+class PlatformTests(TestCase) {
+    def test_nonempty() {
+        self.assertTrue(platform.system() != "")
+        self.assertTrue(platform.machine() != "")
+        self.assertTrue(platform.release() != "")
+    }
+
+    def test_platform_combines() {
+        p: str = platform.platform()
+        self.assertTrue(platform.system() in p)
+        self.assertTrue(platform.machine() in p)
+    }
+
+    def test_uname_tuple() {
+        s: str = ""
+        n: str = ""
+        r: str = ""
+        v: str = ""
+        m: str = ""
+        s, n, r, v, m = platform.uname()
+        self.assertEqual(s, platform.system())
+        self.assertEqual(m, platform.machine())
+    }
+}
+
+
+main([PlatformTests()])

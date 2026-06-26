@@ -1,0 +1,481 @@
+# hashlib.dr - Dragon standard library: cryptographic hash functions
+#
+# Python-compatible hashlib API wrapping Dragon's native crypto runtime.
+# Supports SHA-256, SHA-1, and MD5 with incremental update and copy.
+#
+# Input is `bytes` and `digest()` returns `bytes` - matching CPython (crypto
+# input is binary, not text). `hexdigest()` returns the hex `str`. (The str->hex
+# convenience helpers live separately in `crypto.dr`.)
+#
+# Also provides pbkdf2_hmac (RFC 8018), built on stdlib hmac - the key
+# derivation SCRAM-SHA-256 auth (Postgres/MySQL) needs.
+
+import hmac
+
+# Raw-digest primitives (mbedTLS-backed): bytes in, bytes out.
+extern "C" def dragon_sha256_bytes(data: bytes) -> bytes
+extern "C" def dragon_sha224_bytes(data: bytes) -> bytes
+extern "C" def dragon_sha512_bytes(data: bytes) -> bytes
+extern "C" def dragon_sha384_bytes(data: bytes) -> bytes
+extern "C" def dragon_sha1_bytes(data: bytes) -> bytes
+extern "C" def dragon_md5_bytes(data: bytes) -> bytes
+
+#===----------------------------------------------------------------------===#
+# Algorithm dispatch - the single keyed-lookup point. Every entry below
+# (digest / digest_size / block_size / hexdigest / pbkdf2) routes through these
+# instead of repeating the per-algorithm if-ladder.
+#===----------------------------------------------------------------------===#
+
+const _ALGORITHMS: list[str] = ["md5", "sha1", "sha224", "sha256", "sha384", "sha512"]
+
+def _raw_digest(algorithm: str, data: bytes) -> bytes {
+    match algorithm {
+        case "sha256" { return dragon_sha256_bytes(data) }
+        case "sha224" { return dragon_sha224_bytes(data) }
+        case "sha512" { return dragon_sha512_bytes(data) }
+        case "sha384" { return dragon_sha384_bytes(data) }
+        case "sha1" { return dragon_sha1_bytes(data) }
+        case "md5" { return dragon_md5_bytes(data) }
+        case _ { raise ValueError(f"unsupported hash algorithm: {algorithm}") }
+    }
+}
+
+def _digest_size(algorithm: str) -> int {
+    match algorithm {
+        case "sha256" { return 32 }
+        case "sha224" { return 28 }
+        case "sha512" { return 64 }
+        case "sha384" { return 48 }
+        case "sha1" { return 20 }
+        case "md5" { return 16 }
+        case _ { raise ValueError(f"unsupported hash algorithm: {algorithm}") }
+    }
+}
+
+def _block_size(algorithm: str) -> int {
+    # SHA-384/512 process 1024-bit (128-byte) blocks; the rest use 512-bit.
+    match algorithm {
+        case "sha512" { return 128 }
+        case "sha384" { return 128 }
+        case "sha256" { return 64 }
+        case "sha224" { return 64 }
+        case "sha1" { return 64 }
+        case "md5" { return 64 }
+        case _ { raise ValueError(f"unsupported hash algorithm: {algorithm}") }
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# Hash class - Python-compatible incremental hashing
+#===----------------------------------------------------------------------===#
+
+class Hash {
+    def(algorithm: str, data: bytes) {
+        self.algorithm = algorithm
+        self.data = data
+    }
+
+    def digest() -> bytes {
+        # Raw digest (bytes) of all data fed so far - Python parity.
+        return _raw_digest(self.algorithm, self.data)
+    }
+
+    def hexdigest() -> str {
+        # Hex-encoded digest of all data fed so far.
+        return self.digest().hex()
+    }
+
+    def digest_size() -> int {
+        # Return the size of the hash output in bytes.
+        return _digest_size(self.algorithm)
+    }
+
+    def name() -> str {
+        # Return the canonical name of the hash algorithm.
+        return self.algorithm
+    }
+
+    def update(more: bytes) {
+        # Append data to the hash input. The digest is computed lazily
+        # over the entire accumulated data when digest()/hexdigest() is called.
+        self.data += more
+    }
+
+    def copy() -> Hash {
+        # Return an independent copy of this hash object with the same
+        # algorithm and accumulated data.
+        return Hash(self.algorithm, self.data)
+    }
+
+    def block_size() -> int {
+        # Return the internal block size of the hash algorithm in bytes.
+        return _block_size(self.algorithm)
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# Factory functions - Python-compatible API
+#===----------------------------------------------------------------------===#
+
+def sha256(data: bytes = b"") -> Hash {
+    # Create a SHA-256 hash object, optionally initialized with data.
+    return Hash("sha256", data)
+}
+
+def sha224(data: bytes = b"") -> Hash {
+    # Create a SHA-224 hash object, optionally initialized with data.
+    return Hash("sha224", data)
+}
+
+def sha512(data: bytes = b"") -> Hash {
+    # Create a SHA-512 hash object, optionally initialized with data.
+    return Hash("sha512", data)
+}
+
+def sha384(data: bytes = b"") -> Hash {
+    # Create a SHA-384 hash object, optionally initialized with data.
+    return Hash("sha384", data)
+}
+
+def sha1(data: bytes = b"") -> Hash {
+    # Create a SHA-1 hash object, optionally initialized with data.
+    return Hash("sha1", data)
+}
+
+def md5(data: bytes = b"") -> Hash {
+    # Create an MD5 hash object, optionally initialized with data.
+    return Hash("md5", data)
+}
+
+def new(algorithm: str, data: bytes = b"") -> Hash {
+    # Generic constructor. Algorithm must be one of the supported names
+    # (see algorithms_available): sha256/sha224/sha512/sha384/sha1/md5.
+    if not (algorithm in _ALGORITHMS) {
+        raise ValueError(f"unsupported hash algorithm: {algorithm}")
+    }
+    return Hash(algorithm, data)
+}
+
+#===----------------------------------------------------------------------===#
+# Convenience functions
+#===----------------------------------------------------------------------===#
+
+def hexdigest(algorithm: str, data: bytes = b"") -> str {
+    # One-shot hash: hex digest of data using the given algorithm.
+    return _raw_digest(algorithm, data).hex()
+}
+
+def algorithms_available() -> list[str] {
+    # Return the list of supported hash algorithm names.
+    result: list[str] = []
+    for a in _ALGORITHMS {
+        result.append(a)
+    }
+    return result
+}
+
+#===----------------------------------------------------------------------===#
+# PBKDF2 (RFC 8018 §5.2) - password-based key derivation over HMAC.
+#===----------------------------------------------------------------------===#
+
+# pbkdf2_hmac(hash_name, password, salt, iterations, dklen=0) -> bytes
+#
+# Python parity (hashlib.pbkdf2_hmac). Derives a key from `password`+`salt` by
+# `iterations` rounds of HMAC-`hash_name`. `dklen <= 0` means "the hash's
+# digest size" (CPython's dklen=None). This is the primitive SCRAM-SHA-256
+# uses to compute the SaltedPassword for Postgres/MySQL auth.
+#
+#  DK = T_1 || T_2 || ... (truncated to dklen)
+#  T_i = U_1 xor U_2 xor ... xor U_c
+#  U_1 = HMAC(P, S || INT_32_BE(i)); U_j = HMAC(P, U_{j-1})
+def pbkdf2_hmac(hash_name: str, password: bytes, salt: bytes,
+                iterations: int, dklen: int = 0) -> bytes {
+    if iterations < 1 {
+        raise ValueError("iterations must be a positive integer")
+    }
+    dlen: int = _digest_size(hash_name)
+    out_len: int = dklen
+    if out_len <= 0 {
+        out_len = dlen
+    }
+
+    result: list[int] = []
+    block_index: int = 1
+    while len(result) < out_len {
+        # First HMAC input is the salt with the big-endian block counter.
+        ib: list[int] = [
+            (block_index >> 24) & 0xFF,
+            (block_index >> 16) & 0xFF,
+            (block_index >> 8) & 0xFF,
+            block_index & 0xFF
+        ]
+        u: bytes = hmac.digest(password, salt + bytes(ib), hash_name)
+        # T_i starts as U_1, then XOR-accumulates U_2..U_c (each fed from prev).
+        t: list[int] = [0] * dlen
+        j: int = 0
+        while j < dlen {
+            t[j] = u[j]
+            j = j + 1
+        }
+        k: int = 1
+        while k < iterations {
+            u = hmac.digest(password, u, hash_name)
+            j = 0
+            while j < dlen {
+                t[j] = t[j] ^ u[j]
+                j = j + 1
+            }
+            k = k + 1
+        }
+        j = 0
+        while j < dlen {
+            result.append(t[j])
+            j = j + 1
+        }
+        block_index = block_index + 1
+    }
+    return bytes(result[0:out_len])
+}
+
+#===----------------------------------------------------------------------===#
+# scrypt (RFC 7914) - memory-hard password-based KDF.
+#===----------------------------------------------------------------------===#
+#
+# Python parity (hashlib.scrypt). mbedTLS ships no scrypt, so this is a native
+# Dragon implementation: PBKDF2-HMAC-SHA256 bookends around the memory-hard
+# ROMix(BlockMix(Salsa20/8)) core, all on little-endian 32-bit words held as
+# i64 (masked to 0xFFFFFFFF). KAT: RFC 7914 §12. Salsa20/8 mutates its 16-word
+# block in place to keep the hot-loop allocation count down.
+
+const _U32: int = 0xFFFFFFFF
+
+def _rotl32(x: int, c: int) -> int {
+    return ((x << c) | (x >> (32 - c))) & _U32
+}
+
+# Salsa20/8 core - transforms the 16-word block at b[off..off+16] in place.
+# `x` is a caller-owned 16-word scratch (overwritten here); reusing it across
+# the ~2rN calls per ROMix is what keeps this off the allocator hot path.
+def _salsa20_8(b: list[int], off: int, x: list[int]) -> None {
+    i: int = 0
+    while i < 16 {
+        x[i] = b[off + i]
+        i = i + 1
+    }
+    r: int = 0
+    while r < 4 {                       # 8 rounds, two per iteration
+        # column round
+        x[4]  = x[4]  ^ _rotl32((x[0]  + x[12]) & _U32, 7)
+        x[8]  = x[8]  ^ _rotl32((x[4]  + x[0])  & _U32, 9)
+        x[12] = x[12] ^ _rotl32((x[8]  + x[4])  & _U32, 13)
+        x[0]  = x[0]  ^ _rotl32((x[12] + x[8])  & _U32, 18)
+        x[9]  = x[9]  ^ _rotl32((x[5]  + x[1])  & _U32, 7)
+        x[13] = x[13] ^ _rotl32((x[9]  + x[5])  & _U32, 9)
+        x[1]  = x[1]  ^ _rotl32((x[13] + x[9])  & _U32, 13)
+        x[5]  = x[5]  ^ _rotl32((x[1]  + x[13]) & _U32, 18)
+        x[14] = x[14] ^ _rotl32((x[10] + x[6])  & _U32, 7)
+        x[2]  = x[2]  ^ _rotl32((x[14] + x[10]) & _U32, 9)
+        x[6]  = x[6]  ^ _rotl32((x[2]  + x[14]) & _U32, 13)
+        x[10] = x[10] ^ _rotl32((x[6]  + x[2])  & _U32, 18)
+        x[3]  = x[3]  ^ _rotl32((x[15] + x[11]) & _U32, 7)
+        x[7]  = x[7]  ^ _rotl32((x[3]  + x[15]) & _U32, 9)
+        x[11] = x[11] ^ _rotl32((x[7]  + x[3])  & _U32, 13)
+        x[15] = x[15] ^ _rotl32((x[11] + x[7])  & _U32, 18)
+        # row round
+        x[1]  = x[1]  ^ _rotl32((x[0]  + x[3])  & _U32, 7)
+        x[2]  = x[2]  ^ _rotl32((x[1]  + x[0])  & _U32, 9)
+        x[3]  = x[3]  ^ _rotl32((x[2]  + x[1])  & _U32, 13)
+        x[0]  = x[0]  ^ _rotl32((x[3]  + x[2])  & _U32, 18)
+        x[6]  = x[6]  ^ _rotl32((x[5]  + x[4])  & _U32, 7)
+        x[7]  = x[7]  ^ _rotl32((x[6]  + x[5])  & _U32, 9)
+        x[4]  = x[4]  ^ _rotl32((x[7]  + x[6])  & _U32, 13)
+        x[5]  = x[5]  ^ _rotl32((x[4]  + x[7])  & _U32, 18)
+        x[11] = x[11] ^ _rotl32((x[10] + x[9])  & _U32, 7)
+        x[8]  = x[8]  ^ _rotl32((x[11] + x[10]) & _U32, 9)
+        x[9]  = x[9]  ^ _rotl32((x[8]  + x[11]) & _U32, 13)
+        x[10] = x[10] ^ _rotl32((x[9]  + x[8])  & _U32, 18)
+        x[12] = x[12] ^ _rotl32((x[15] + x[14]) & _U32, 7)
+        x[13] = x[13] ^ _rotl32((x[12] + x[15]) & _U32, 9)
+        x[14] = x[14] ^ _rotl32((x[13] + x[12]) & _U32, 13)
+        x[15] = x[15] ^ _rotl32((x[14] + x[13]) & _U32, 18)
+        r = r + 1
+    }
+    i = 0
+    while i < 16 {
+        b[off + i] = (b[off + i] + x[i]) & _U32   # add original (b untouched above)
+        i = i + 1
+    }
+}
+
+# BlockMix_{Salsa20/8,r}: read `bw` (2r blocks = 32r words) and write the RFC 7914
+# even-then-odd reordering into `out`. `out` MAY alias `bw`: every word of bw is
+# consumed into `y` before any word of `out` is written, so in-place operation is
+# safe. `rx` (16-word running block), `y` (32r-word reorder scratch) and
+# `scratch` (16-word Salsa) are caller-owned and reused across all 2N calls per
+# ROMix - this is the allocation-free hot path (the perf pass).
+def _blockmix(bw: list[int], out: list[int], r: int,
+              rx: list[int], y: list[int], scratch: list[int]) -> None {
+    const twor: int = 2 * r
+    const last: int = (twor - 1) * 16
+    i: int = 0
+    while i < 16 {
+        rx[i] = bw[last + i]
+        i = i + 1
+    }
+    blk: int = 0
+    while blk < twor {
+        const bb: int = blk * 16
+        i = 0
+        while i < 16 {
+            rx[i] = rx[i] ^ bw[bb + i]
+            i = i + 1
+        }
+        _salsa20_8(rx, 0, scratch)
+        const ob: int = blk * 16
+        i = 0
+        while i < 16 {
+            y[ob + i] = rx[i]
+            i = i + 1
+        }
+        blk = blk + 1
+    }
+    pos: int = 0
+    j: int = 0
+    while j < r {                       # even blocks Y[0], Y[2], ...
+        const src: int = (2 * j) * 16
+        i = 0
+        while i < 16 {
+            out[pos * 16 + i] = y[src + i]
+            i = i + 1
+        }
+        pos = pos + 1
+        j = j + 1
+    }
+    j = 0
+    while j < r {                       # odd blocks Y[1], Y[3], ...
+        const src2: int = (2 * j + 1) * 16
+        i = 0
+        while i < 16 {
+            out[pos * 16 + i] = y[src2 + i]
+            i = i + 1
+        }
+        pos = pos + 1
+        j = j + 1
+    }
+}
+
+# ROMix_{r}(bw, n): the memory-hard mixing. n must be a power of two so the
+# Integerify-mod-n reduces to a mask on the first word of the last block. Every
+# work buffer is allocated ONCE here and reused; _blockmix runs in place (its
+# `out` aliases `x`), so the 2N BlockMix calls allocate nothing - only the V
+# array and a few fixed scratch buffers are ever heap-allocated.
+def _romix(bw: list[int], r: int, n: int) -> list[int] {
+    const nwords: int = 32 * r
+    x: list[int] = [0] * nwords
+    i: int = 0
+    while i < nwords {
+        x[i] = bw[i]
+        i = i + 1
+    }
+    rx: list[int] = [0] * 16               # BlockMix running block
+    y: list[int] = [0] * nwords            # BlockMix reorder scratch
+    scratch: list[int] = [0] * 16          # Salsa20/8 scratch
+    v: list[int] = [0] * (n * nwords)
+    k: int = 0
+    while k < n {
+        const base: int = k * nwords
+        i = 0
+        while i < nwords {
+            v[base + i] = x[i]
+            i = i + 1
+        }
+        _blockmix(x, x, r, rx, y, scratch)         # X = BlockMix(X), in place
+        k = k + 1
+    }
+    k = 0
+    while k < n {
+        const j: int = x[(2 * r - 1) * 16] & (n - 1)   # Integerify(X) mod n
+        const vb: int = j * nwords
+        i = 0
+        while i < nwords {
+            x[i] = x[i] ^ v[vb + i]
+            i = i + 1
+        }
+        _blockmix(x, x, r, rx, y, scratch)
+        k = k + 1
+    }
+    return x
+}
+
+def _le32_words(b: bytes) -> list[int] {
+    const n: int = len(b)
+    w: list[int] = []
+    i: int = 0
+    while i < n {
+        w.append((b[i] | (b[i + 1] << 8) | (b[i + 2] << 16) | (b[i + 3] << 24)) & _U32)
+        i = i + 4
+    }
+    return w
+}
+
+def _words_le32_bytes(w: list[int]) -> bytes {
+    out: list[int] = []
+    for word in w {
+        out.append(word & 0xFF)
+        out.append((word >> 8) & 0xFF)
+        out.append((word >> 16) & 0xFF)
+        out.append((word >> 24) & 0xFF)
+    }
+    return bytes(out)
+}
+
+# scrypt(password, salt, n, r, p, maxmem=0, dklen=64) -> bytes
+#
+# Python parity (hashlib.scrypt). `n` is the CPU/memory cost (power of two > 1),
+# `r` the block size, `p` the parallelization. `maxmem<=0` applies CPython's
+# default 32 MiB cap on the scrypt-defined working set (128*r*n bytes).
+def scrypt(password: bytes, salt: bytes, n: int, r: int, p: int,
+           maxmem: int = 0, dklen: int = 64) -> bytes {
+    if n < 2 or (n & (n - 1)) != 0 {
+        raise ValueError("scrypt: n must be a power of two greater than 1")
+    }
+    if r < 1 or p < 1 {
+        raise ValueError("scrypt: r and p must be >= 1")
+    }
+    if dklen < 1 {
+        raise ValueError("scrypt: dklen must be >= 1")
+    }
+    limit: int = maxmem
+    if limit <= 0 {
+        limit = 32 * 1024 * 1024
+    }
+    if 128 * r * n > limit {
+        raise ValueError("scrypt: memory limit exceeded")
+    }
+
+    const blen: int = p * 128 * r
+    const b0: bytes = pbkdf2_hmac("sha256", password, salt, 1, blen)
+    bwords: list[int] = _le32_words(b0)
+
+    const wpb: int = 32 * r                # words per p-block
+    i: int = 0
+    while i < p {
+        const base: int = i * wpb
+        blk: list[int] = [0] * wpb
+        j: int = 0
+        while j < wpb {
+            blk[j] = bwords[base + j]
+            j = j + 1
+        }
+        const mixed: list[int] = _romix(blk, r, n)
+        j = 0
+        while j < wpb {
+            bwords[base + j] = mixed[j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    const bmixed: bytes = _words_le32_bytes(bwords)
+    return pbkdf2_hmac("sha256", password, bmixed, 1, dklen)
+}

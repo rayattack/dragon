@@ -1,0 +1,518 @@
+"""struct - pack/unpack primitive values to/from bytes (CPython `struct` parity).
+
+The public surface is `pack(fmt, *args) -> bytes`, `unpack(fmt, data) -> list`,
+and `calcsize(fmt) -> int`, driven by the familiar format mini-language:
+
+    byte order:  '<' little-endian   '>' / '!' big-endian (network)
+                 '=' / '@' / (none)  native (little-endian on supported targets)
+    formats:     x pad   b/B int8    ?  bool    h/H int16   i/I/l/L int32
+                 q/Q int64   f float32   d float64   s char[] (count = length)
+                 c single char
+
+The float formats are the reason this module needs compiler support: an IEEE-754
+value's raw bytes are recovered via the `__float_bits` / `__float32_bits`
+reinterpret intrinsics (a register-level bitcast, no numeric conversion). Every
+other format is plain integer arithmetic. This unlocks the whole binary-protocol
+class in pure Dragon - msgpack (`>d`), BSON (`<d`), CBOR, protobuf, the MySQL
+binary wire rows, `.npy`, audio - without an FFI dependency.
+
+`unpack` returns a `list` (CPython returns a tuple; Dragon has no variadic-arity
+runtime tuple, so a `list[Any]` is the expressible analog - index access and
+iteration are identical).
+
+Stage 1 (the `pack_*` / `unpack_*` monomorphic helpers below) is the branch-free
+fast engine; performance-sensitive callers (e.g. the MySQL driver) call those
+directly and skip the format-string parse entirely.
+"""
+
+
+# struct.error - raised on a malformed format or an argument that doesn't fit.
+class error(Exception) {}
+
+
+#===----------------------------------------------------------------------===#
+# Stage 1 - monomorphic pack/unpack engine. No format parsing, no boxing.
+# `unpack_*` read a value from `data` at byte offset `o`; `pack_*` return the
+# value's bytes. Little-endian (`_le`) and big-endian (`_be`) variants.
+#===----------------------------------------------------------------------===#
+
+# --- unsigned reads -------------------------------------------------------
+
+def unpack_u8(data: bytes, o: int) -> int {
+    return data[o]
+}
+def unpack_u16_le(data: bytes, o: int) -> int {
+    return data[o] | (data[o + 1] << 8)
+}
+def unpack_u16_be(data: bytes, o: int) -> int {
+    return (data[o] << 8) | data[o + 1]
+}
+def unpack_u32_le(data: bytes, o: int) -> int {
+    return data[o] | (data[o + 1] << 8) | (data[o + 2] << 16) | (data[o + 3] << 24)
+}
+def unpack_u32_be(data: bytes, o: int) -> int {
+    return (data[o] << 24) | (data[o + 1] << 16) | (data[o + 2] << 8) | data[o + 3]
+}
+def unpack_u64_le(data: bytes, o: int) -> int {
+    lo: int = unpack_u32_le(data, o)
+    hi: int = unpack_u32_le(data, o + 4)
+    return lo | (hi << 32)
+}
+def unpack_u64_be(data: bytes, o: int) -> int {
+    hi: int = unpack_u32_be(data, o)
+    lo: int = unpack_u32_be(data, o + 4)
+    return (hi << 32) | lo
+}
+
+# --- signed reads (sign-extend from the field width) ----------------------
+
+def _sext(v: int, bits: int) -> int {
+    # If the sign bit is set, subtract 2**bits to get the negative value.
+    half: int = 1 << (bits - 1)
+    if (v & half) != 0 {
+        return v - (1 << bits)
+    }
+    return v
+}
+def unpack_i8(data: bytes, o: int) -> int {
+    return _sext(data[o], 8)
+}
+def unpack_i16_le(data: bytes, o: int) -> int {
+    return _sext(unpack_u16_le(data, o), 16)
+}
+def unpack_i16_be(data: bytes, o: int) -> int {
+    return _sext(unpack_u16_be(data, o), 16)
+}
+def unpack_i32_le(data: bytes, o: int) -> int {
+    return _sext(unpack_u32_le(data, o), 32)
+}
+def unpack_i32_be(data: bytes, o: int) -> int {
+    return _sext(unpack_u32_be(data, o), 32)
+}
+# i64: a Dragon int IS i64, so the unsigned read already carries the correct
+# two's-complement value - no sign-extension step needed.
+def unpack_i64_le(data: bytes, o: int) -> int {
+    return unpack_u64_le(data, o)
+}
+def unpack_i64_be(data: bytes, o: int) -> int {
+    return unpack_u64_be(data, o)
+}
+
+# --- float reads (bitcast the integer payload) ----------------------------
+
+def unpack_f32_le(data: bytes, o: int) -> float {
+    return __float32_from_bits(unpack_u32_le(data, o))
+}
+def unpack_f32_be(data: bytes, o: int) -> float {
+    return __float32_from_bits(unpack_u32_be(data, o))
+}
+def unpack_f64_le(data: bytes, o: int) -> float {
+    return __float_from_bits(unpack_u64_le(data, o))
+}
+def unpack_f64_be(data: bytes, o: int) -> float {
+    return __float_from_bits(unpack_u64_be(data, o))
+}
+
+# --- writes (append the value's bytes to a list[int] accumulator) ---------
+# Appending into a shared list avoids per-field bytes allocation; the public
+# pack() builds one list then converts once.
+
+def emit_u8(out: list[int], v: int) {
+    out.append(v & 0xFF)
+}
+def emit_u16_le(out: list[int], v: int) {
+    out.append(v & 0xFF)
+    out.append((v >> 8) & 0xFF)
+}
+def emit_u16_be(out: list[int], v: int) {
+    out.append((v >> 8) & 0xFF)
+    out.append(v & 0xFF)
+}
+def emit_u32_le(out: list[int], v: int) {
+    out.append(v & 0xFF)
+    out.append((v >> 8) & 0xFF)
+    out.append((v >> 16) & 0xFF)
+    out.append((v >> 24) & 0xFF)
+}
+def emit_u32_be(out: list[int], v: int) {
+    out.append((v >> 24) & 0xFF)
+    out.append((v >> 16) & 0xFF)
+    out.append((v >> 8) & 0xFF)
+    out.append(v & 0xFF)
+}
+def emit_u64_le(out: list[int], v: int) {
+    emit_u32_le(out, v & 0xFFFFFFFF)
+    emit_u32_le(out, (v >> 32) & 0xFFFFFFFF)
+}
+def emit_u64_be(out: list[int], v: int) {
+    emit_u32_be(out, (v >> 32) & 0xFFFFFFFF)
+    emit_u32_be(out, v & 0xFFFFFFFF)
+}
+def emit_f32(out: list[int], v: float, little: bool) {
+    bits: int = __float32_bits(v)
+    if little {
+        emit_u32_le(out, bits)
+    } else {
+        emit_u32_be(out, bits)
+    }
+}
+def emit_f64(out: list[int], v: float, little: bool) {
+    bits: int = __float_bits(v)
+    if little {
+        emit_u64_le(out, bits)
+    } else {
+        emit_u64_be(out, bits)
+    }
+}
+
+# Single-value byte builders (convenience for callers that want one field).
+def pack_u16_le(v: int) -> bytes {
+    out: list[int] = []
+    emit_u16_le(out, v)
+    return bytes(out)
+}
+def pack_u32_le(v: int) -> bytes {
+    out: list[int] = []
+    emit_u32_le(out, v)
+    return bytes(out)
+}
+def pack_u64_le(v: int) -> bytes {
+    out: list[int] = []
+    emit_u64_le(out, v)
+    return bytes(out)
+}
+def pack_f64_le(v: float) -> bytes {
+    out: list[int] = []
+    emit_f64(out, v, True)
+    return bytes(out)
+}
+def pack_f64_be(v: float) -> bytes {
+    out: list[int] = []
+    emit_f64(out, v, False)
+    return bytes(out)
+}
+
+
+#===----------------------------------------------------------------------===#
+# Stage 2 - the CPython-parity facade. Parses the format mini-language and
+# dispatches to the Stage 1 engine.
+#===----------------------------------------------------------------------===#
+
+# Byte size of one element of format char `code` (0 for a bad code).
+def _code_size(code: str) -> int {
+    if code == "x" or code == "b" or code == "B" or code == "c" or code == "?" {
+        return 1
+    }
+    if code == "h" or code == "H" {
+        return 2
+    }
+    if code == "i" or code == "I" or code == "l" or code == "L" or code == "f" {
+        return 4
+    }
+    if code == "q" or code == "Q" or code == "d" {
+        return 8
+    }
+    return 0
+}
+
+# Resolve the leading byte-order char: True = little-endian. Native ('=', '@',
+# or no prefix) is little-endian on the targets Dragon supports.
+def _is_little(fmt: str) -> bool {
+    if len(fmt) == 0 {
+        return True
+    }
+    c: str = fmt[0]
+    if c == ">" or c == "!" {
+        return False
+    }
+    return True
+}
+
+# Strip the optional leading byte-order char.
+def _body(fmt: str) -> str {
+    if len(fmt) == 0 {
+        return fmt
+    }
+    c: str = fmt[0]
+    if c == "<" or c == ">" or c == "!" or c == "=" or c == "@" {
+        return fmt[1:]
+    }
+    return fmt
+}
+
+def _is_digit(c: str) -> bool {
+    return c >= "0" and c <= "9"
+}
+
+# calcsize(fmt) - total packed byte size.
+def calcsize(fmt: str) -> int {
+    body: str = _body(fmt)
+    total: int = 0
+    i: int = 0
+    n: int = len(body)
+    while i < n {
+        c: str = body[i]
+        if c == " " {
+            i = i + 1
+            continue
+        }
+        count: int = 1
+        has_count: bool = False
+        if _is_digit(c) {
+            count = 0
+            while i < n and _is_digit(body[i]) {
+                count = count * 10 + (ord(body[i]) - 48)
+                i = i + 1
+            }
+            has_count = True
+            if i >= n {
+                raise error("repeat count given without format specifier")
+            }
+            c = body[i]
+        }
+        if c == "s" {
+            # count is the byte length of a single string field.
+            if has_count {
+                total = total + count
+            } else {
+                total = total + 1
+            }
+        } else {
+            sz: int = _code_size(c)
+            if sz == 0 {
+                raise error("bad char in struct format: " + c)
+            }
+            total = total + sz * count
+        }
+        i = i + 1
+    }
+    return total
+}
+
+# Emit one numeric field of code `c` (value `a`, already narrowed to Any) into
+# `out`, honoring endianness `little`.
+def _emit_one(out: list[int], c: str, a: Any, little: bool) {
+    if c == "f" or c == "d" {
+        # Float field - accept int or float argument (CPython coerces int).
+        fv: float = 0.0
+        if isinstance(a, float) {
+            fv = a
+        } else if isinstance(a, int) {
+            iv: int = a
+            fv = float(iv)
+        } else {
+            raise error("required argument is not a float")
+        }
+        if c == "f" {
+            emit_f32(out, fv, little)
+        } else {
+            emit_f64(out, fv, little)
+        }
+        return
+    }
+    # Integer / bool field.
+    v: int = 0
+    if isinstance(a, bool) {
+        b: bool = a
+        if b {
+            v = 1
+        }
+    } else if isinstance(a, int) {
+        v = a
+    } else {
+        raise error("required argument is not an integer")
+    }
+    sz: int = _code_size(c)
+    if sz == 1 {
+        emit_u8(out, v)
+    } else if sz == 2 {
+        if little {
+            emit_u16_le(out, v)
+        } else {
+            emit_u16_be(out, v)
+        }
+    } else if sz == 4 {
+        if little {
+            emit_u32_le(out, v)
+        } else {
+            emit_u32_be(out, v)
+        }
+    } else {
+        if little {
+            emit_u64_le(out, v)
+        } else {
+            emit_u64_be(out, v)
+        }
+    }
+}
+
+# pack(fmt, *args) -> bytes
+def pack(fmt: str, *args: Any) -> bytes {
+    little: bool = _is_little(fmt)
+    body: str = _body(fmt)
+    out: list[int] = []
+    ai: int = 0                # cursor into args
+    i: int = 0
+    n: int = len(body)
+    while i < n {
+        c: str = body[i]
+        if c == " " {
+            i = i + 1
+            continue
+        }
+        count: int = 1
+        has_count: bool = False
+        if _is_digit(c) {
+            count = 0
+            while i < n and _is_digit(body[i]) {
+                count = count * 10 + (ord(body[i]) - 48)
+                i = i + 1
+            }
+            has_count = True
+            c = body[i]
+        }
+        if c == "x" {
+            # pad bytes - no argument consumed.
+            k: int = 0
+            while k < count {
+                out.append(0)
+                k = k + 1
+            }
+        } else if c == "s" {
+            # one string/bytes argument, fixed field width `count`.
+            width: int = 1
+            if has_count {
+                width = count
+            }
+            raw: bytes = bytes()
+            sa: Any = args[ai]
+            if isinstance(sa, str) {
+                sv: str = sa
+                raw = sv.encode("utf-8")
+            } else {
+                bv: bytes = sa
+                raw = bv
+            }
+            ai = ai + 1
+            k: int = 0
+            while k < width {
+                if k < len(raw) {
+                    out.append(raw[k])
+                } else {
+                    out.append(0)        # zero-pad to the field width
+                }
+                k = k + 1
+            }
+        } else {
+            # numeric / bool - `count` repetitions, one arg each.
+            if _code_size(c) == 0 {
+                raise error("bad char in struct format: " + c)
+            }
+            r: int = 0
+            while r < count {
+                _emit_one(out, c, args[ai], little)
+                ai = ai + 1
+                r = r + 1
+            }
+        }
+        i = i + 1
+    }
+    return bytes(out)
+}
+
+# Read one numeric/bool field of code `c` from `data` at offset `o`.
+def _read_one(data: bytes, o: int, c: str, little: bool) -> Any {
+    if c == "b" {
+        return unpack_i8(data, o)
+    }
+    if c == "B" {
+        return unpack_u8(data, o)
+    }
+    if c == "?" {
+        return data[o] != 0
+    }
+    if c == "h" {
+        if little { return unpack_i16_le(data, o) }
+        return unpack_i16_be(data, o)
+    }
+    if c == "H" {
+        if little { return unpack_u16_le(data, o) }
+        return unpack_u16_be(data, o)
+    }
+    if c == "i" or c == "l" {
+        if little { return unpack_i32_le(data, o) }
+        return unpack_i32_be(data, o)
+    }
+    if c == "I" or c == "L" {
+        if little { return unpack_u32_le(data, o) }
+        return unpack_u32_be(data, o)
+    }
+    if c == "q" {
+        if little { return unpack_i64_le(data, o) }
+        return unpack_i64_be(data, o)
+    }
+    if c == "Q" {
+        if little { return unpack_u64_le(data, o) }
+        return unpack_u64_be(data, o)
+    }
+    if c == "f" {
+        if little { return unpack_f32_le(data, o) }
+        return unpack_f32_be(data, o)
+    }
+    if c == "d" {
+        if little { return unpack_f64_le(data, o) }
+        return unpack_f64_be(data, o)
+    }
+    raise error("bad char in struct format: " + c)
+}
+
+# unpack(fmt, data) -> list (CPython returns a tuple; see module docstring).
+def unpack(fmt: str, data: bytes) -> list[Any] {
+    little: bool = _is_little(fmt)
+    body: str = _body(fmt)
+    result: list[Any] = []
+    o: int = 0
+    i: int = 0
+    n: int = len(body)
+    while i < n {
+        c: str = body[i]
+        if c == " " {
+            i = i + 1
+            continue
+        }
+        count: int = 1
+        has_count: bool = False
+        if _is_digit(c) {
+            count = 0
+            while i < n and _is_digit(body[i]) {
+                count = count * 10 + (ord(body[i]) - 48)
+                i = i + 1
+            }
+            has_count = True
+            c = body[i]
+        }
+        if c == "x" {
+            o = o + count
+        } else if c == "s" {
+            width: int = 1
+            if has_count {
+                width = count
+            }
+            result.append(data[o:o + width])
+            o = o + width
+        } else {
+            sz: int = _code_size(c)
+            if sz == 0 {
+                raise error("bad char in struct format: " + c)
+            }
+            r: int = 0
+            while r < count {
+                result.append(_read_one(data, o, c, little))
+                o = o + sz
+                r = r + 1
+            }
+        }
+        i = i + 1
+    }
+    return result
+}

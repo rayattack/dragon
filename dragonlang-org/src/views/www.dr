@@ -1,0 +1,440 @@
+# Dragon marketing pages - www.dr
+#
+# The landing page, the download page, and the (stubbed) login page for
+# dragonlang.org, plus the shared top-nav and footer used across the whole
+# site (docs included). Like the rest of the site this is dogfood: every
+# fragment is a `template[HTML]` block (spec-32). Interpolated values are
+# auto-escaped (XSS-safe); an HTML value spliced into an HTML template is
+# inserted raw automatically (the type tracks that it is already safe), so
+# `| raw` appears ONLY where a trusted `str` carries literal markup (an HTML
+# entity, the syntax highlighter's output). No string-built markup anywhere.
+#
+# Imported by src/app.dr and the docs controller, which wire the routes.
+
+from html import HTML
+from highlight import highlight
+
+
+# --- Release configuration (single source of truth) --------------------------
+#
+# Point GITHUB_REPO at the public repository (e.g. "dragon-lang/dragon") and
+# set DRAGON_VERSION to the released tag. Every download button on the site
+# then lights up automatically, pointing at the matching GitHub Release asset.
+# While GITHUB_REPO is empty the buttons render as "coming soon" - the page
+# is fully functional before any binary ships, by design.
+const GITHUB_REPO: str = ""              # "owner/name"; empty => no public releases yet
+const DRAGON_VERSION: str = "0.0.1"      # mirrors include/dragon.h VERSION (pre-release)
+
+
+def _repo_url() -> str {
+    if len(GITHUB_REPO) == 0 {
+        return ""
+    }
+    return "https://github.com/" + GITHUB_REPO
+}
+
+
+def _release_base() -> str {
+    # The GitHub Releases download URL convention:
+    #   https://github.com/<owner>/<repo>/releases/download/v<ver>/<asset>
+    if len(GITHUB_REPO) == 0 {
+        return ""
+    }
+    return _repo_url() + "/releases/download/v" + DRAGON_VERSION + "/"
+}
+
+
+def _asset_url(asset: str) -> str {
+    const base: str = _release_base()
+    if len(base) == 0 {
+        return ""
+    }
+    return base + asset
+}
+
+
+# Best-effort platform sniff from the User-Agent so the download page can
+# pre-highlight the visitor's OS server-side. app.js refines this client-side
+# (navigator.platform) once the page loads; this just picks a sensible default.
+def _detect_os(ua: str) -> str {
+    const low: str = ua.lower()
+    if "windows" in low {
+        return "windows"
+    }
+    if "mac os" in low or "macintosh" in low or "darwin" in low {
+        return "macos"
+    }
+    if "linux" in low or "x11" in low or "android" in low {
+        return "linux"
+    }
+    return ""
+}
+
+
+# --- Shared chrome (top-nav + footer) ----------------------------------------
+
+def _nav_item(href: str, label: str, key: str, active: str) -> HTML {
+    const cls: str = "nav-link nav-active" if key == active else "nav-link"
+    return template[HTML] { <a class="!{cls}" href="!{href}">!{label}</a> }
+}
+
+
+# Account + Logout when signed in (the username drives the label); Login when
+# signed out. The user nav is in the same slot on every page so the header keeps
+# its shape regardless of auth state.
+def _nav_user(active: str, username: str) -> HTML {
+    if len(username) > 0 {
+        return template[HTML] {
+          !{_nav_item("/account", username, "account", active)}
+          <a class="nav-link" href="/logout">Logout</a>
+        }
+    }
+    return _nav_item("/login", "Login", "login", active)
+}
+
+
+# The site top bar. `active` is one of "home" | "docs" | "eggs" | "bench" |
+# "download" | "login" | "account" (or "" for none) and highlights the current
+# section; `username` is "" when signed out. Shared by EVERY page - marketing,
+# docs, and the registry - so the header (theme toggle included) is identical
+# everywhere, logged in or not.
+def topbar(active: str, username: str) -> HTML {
+    const repo: str = _repo_url()
+    github: HTML = template[HTML] {  }
+    if len(repo) > 0 {
+        github = template[HTML] { <a class="nav-link" href="!{repo}">GitHub</a> }
+    }
+    return template[HTML] {
+      <header class="topbar">
+        <a class="brand" href="/"><img class="brand-logo" src="/assets/dr.png" alt=""><span class="brand-name">Dragon</span></a>
+        <nav class="nav-links">
+          !{_nav_item("/docs/0001-foreword", "Docs", "docs", active)}
+          !{_nav_item("/eggs", "Packages", "eggs", active)}
+          !{_nav_item("/benchmarks", "Benchmarks", "bench", active)}
+          !{_nav_item("/download", "Download", "download", active)}
+          !{github}
+          !{_nav_user(active, username)}
+          <button id="theme-toggle" class="theme-toggle" aria-label="Toggle theme">&#9728;</button>
+        </nav>
+      </header>
+    }
+}
+
+
+def footer(username: str) -> HTML {
+    const repo: str = _repo_url()
+    github: HTML = template[HTML] {  }
+    if len(repo) > 0 {
+        github = template[HTML] { <a href="!{repo}">GitHub</a> }
+    }
+    # Mirror the top bar's user state so the footer is never out of sync with it.
+    user_link: HTML = template[HTML] { <a href="/login">Login</a> }
+    if len(username) > 0 {
+        user_link = template[HTML] { <a href="/account">Account</a> <a href="/logout">Logout</a> }
+    }
+    return template[HTML] {
+      <footer class="site-footer">
+        <div class="footer-inner">
+          <span class="footer-brand">Dragon</span>
+          <span class="footer-tag">The snake that became a dragon.</span>
+          <nav class="footer-links">
+            <a href="/docs/0001-foreword">Docs</a>
+            <a href="/eggs">Packages</a>
+            <a href="/benchmarks">Benchmarks</a>
+            <a href="/download">Download</a>
+            !{github}
+            !{user_link}
+          </nav>
+        </div>
+      </footer>
+    }
+}
+
+
+# The full HTML document for a marketing page: <head> + shared top bar +
+# `body` (the page's <main>) + shared footer + the theme script. `title` is
+# auto-escaped; `top`/`body`/`foot` are HTML and compose automatically.
+def page_shell(title: str, active: str, username: str, body: HTML) -> HTML {
+    const top: HTML = topbar(active, username)
+    const foot: HTML = footer(username)
+    return template[HTML] {
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>!{title}</title>
+    <link rel="icon" type="image/png" href="/assets/dr.png">
+    <link rel="apple-touch-icon" href="/assets/dr.png">
+    <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body class="www-body">
+    !{top}
+    !{body}
+    !{foot}
+    <script src="/assets/app.js"></script>
+</body>
+</html>
+    }
+}
+
+
+# --- Landing page ------------------------------------------------------------
+
+# A short, representative Dragon program for the hero code sample. It is text
+# fed to the syntax highlighter - never compiled - so it can show off flavour
+# (mandatory types, Python-like syntax, colorless green threads) freely.
+const _SAMPLE: str = """# Typed like Rust, reads like Python, runs on green threads.
+class Greeter {
+    def(name: str) {
+        self.name = name
+    }
+    def hello() -> str {
+        return f"Hello, {self.name}!"
+    }
+}
+
+def work(n: int) -> int {
+    return n * n
+}
+
+g: Greeter = Greeter("Dragon")
+print(g.hello())
+
+# Fire three green threads; await collects their results. No async/sync split.
+tasks: list[Task[int]] = []
+i: int = 0
+while i < 3 {
+    tasks.append(fire work(i))
+    i = i + 1
+}
+for t in tasks {
+    print(await t)
+}
+"""
+
+
+# A single feature card. `icon` is a trusted HTML entity, so it is the one slot
+# that opts out of escaping with `| raw`; the title and body are plain text.
+def _feature(icon: str, title: str, body: str) -> HTML {
+    return template[HTML] {
+      <div class="feature">
+        <div class="feature-icon">!{icon | raw}</div>
+        <h3>!{title}</h3>
+        <p>!{body}</p>
+      </div>
+    }
+}
+
+
+# --- Benchmarks (shared by the landing teaser and the /benchmarks page) -------
+#
+# Live results from the project's `versus/` suite. `kind` drives the verdict
+# pill colour: "win" (Dragon faster), "loss" (slower), "tie" (within noise).
+# Numbers are honest on purpose - the losses stay visible. `name`/`verdict`
+# carry trusted HTML entities (e.g. &#215;) so they opt out with `| raw`.
+def _bench_row(name: str, dragon: str, rust: str, kind: str, verdict: str) -> HTML {
+    return template[HTML] {
+      <tr>
+        <td class="b-name">!{name | raw}</td>
+        <td class="b-num">!{dragon}</td>
+        <td class="b-num">!{rust}</td>
+        <td><span class="v-pill v-!{kind}">!{verdict | raw}</span></td>
+      </tr>
+    }
+}
+
+
+def _bench_table() -> HTML {
+    return template[HTML] {
+      <table class="bench-table">
+        <thead><tr><th>Benchmark</th><th>Dragon</th><th>Rust</th><th>Verdict</th></tr></thead>
+        <tbody>
+          !{_bench_row("Fibonacci (recursive, n=42)", "0.848s", "0.986s", "win", "Dragon 1.16&#215; faster")}
+          !{_bench_row("Mandelbrot (float, 1600&#178;, 100 iter)", "0.421s", "0.452s", "win", "Dragon 1.07&#215; faster")}
+          !{_bench_row("Sieve of Eratosthenes (1M)", "0.007s", "0.006s", "tie", "tie (noise)")}
+          !{_bench_row("String concat (10k)", "0.003s", "0.003s", "tie", "tie (noise)")}
+          !{_bench_row("Object creation (1M)", "0.002s", "0.003s", "tie", "tie (noise)")}
+          !{_bench_row("Parallel sum (8&#215;30M fork-join)", "0.174s", "0.149s", "loss", "Dragon 1.17&#215; slower")}
+          !{_bench_row("Dictionary / hashmap (3M str-key ops)", "1.144s", "0.666s", "loss", "Dragon 1.72&#215; slower")}
+          !{_bench_row("Binary trees (alloc/GC churn, depth 14)", "0.255s", "0.095s", "loss", "Dragon 2.68&#215; slower")}
+        </tbody>
+      </table>
+    }
+}
+
+
+def render_landing(username: str) -> HTML {
+    # The highlighter returns trusted HTML (a <span>-marked-up code block); it is
+    # a `str`, so it opts out of escaping with `| raw` inside the <pre><code>.
+    const sample_html: str = highlight("dragon", _SAMPLE)
+    const body: HTML = template[HTML] {
+      <main class="www">
+        <section class="lp-hero">
+          <img class="lp-logo" src="/assets/dr.png" alt="Dragon logo">
+          <h1 class="lp-title">The Dragon Programming Language</h1>
+          <p class="lp-tagline">Reads like Python. Faster than Rust.</p>
+          <div class="lp-cta">
+            <a class="btn btn-primary" href="/download">Download</a>
+            <a class="btn btn-secondary" href="/docs/0001-foreword">Get Started</a>
+          </div>
+          <div class="lp-term"><span class="lp-term-prompt">$</span> dragon run hello.dr</div>
+        </section>
+        <section class="lp-why">
+          <h2>Why Dragon?</h2>
+          <div class="lp-features">
+            !{_feature("&#9889;", "Fast", "Compiles to native code through LLVM. Dragon targets C-class performance with no interpreter and no GC pauses on the hot path.")}
+            !{_feature("&#128274;", "Typed", "Type annotations are mandatory and checked ahead of time. Mistakes become compile errors, not 2 a.m. pages.")}
+            !{_feature("&#128013;", "Familiar", "Syntax and standard-library APIs mirror Python 3, so the language reads like code you already know.")}
+            !{_feature("&#129525;", "Concurrent", "Colorless green threads: fire a task, await it anywhere. One way to write code, scheduled M:N for free.")}
+          </div>
+        </section>
+        <section class="lp-sample">
+          <h2>Looks like Python. Runs like C.</h2>
+          <pre class="lp-code"><code>!{sample_html | raw}</code></pre>
+        </section>
+        <section class="lp-bench">
+          <h2>Faster than Rust on compute</h2>
+          <p class="lp-bench-sub">Best-of-3, all <code>-O2</code>. We lead on compute-bound work and stay honest about the allocation and hashmap gaps we're still closing.</p>
+          <div class="bench-wrap">!{_bench_table()}</div>
+          <p class="lp-bench-link"><a href="/benchmarks">Full results &amp; methodology &rarr;</a></p>
+        </section>
+        <section class="lp-cta-bottom">
+          <h2>Ready to breathe fire?</h2>
+          <div class="lp-cta">
+            <a class="btn btn-primary" href="/download">Download Dragon</a>
+            <a class="btn btn-secondary" href="/docs/0001-foreword">Read the book</a>
+          </div>
+        </section>
+      </main>
+    }
+    return page_shell("Dragon - a typed, compiled language that reads like Python", "home", username, body)
+}
+
+
+# --- Download page -----------------------------------------------------------
+
+# One download control. Renders a real <a> when the asset URL is known, or an
+# inert "coming soon" chip while GITHUB_REPO is unset / the asset isn't built.
+def _dl_btn(label: str, asset: str, primary: bool) -> HTML {
+    const url: str = _asset_url(asset)
+    const base_cls: str = "dl-btn dl-btn-primary" if primary else "dl-btn"
+    if len(url) == 0 {
+        return template[HTML] {
+          <span class="!{base_cls} dl-soon" title="Not published yet">!{label}</span>
+        }
+    }
+    return template[HTML] {
+      <a class="!{base_cls}" href="!{url}">!{label}</a>
+    }
+}
+
+
+# A platform card. `icon` is a trusted entity (`| raw`); `buttons` and `rec` are
+# composed HTML fragments; the rest are plain text.
+def _dl_card(os_id: str, os_name: str, icon: str, featured: bool, soon: bool, buttons: HTML, note: str) -> HTML {
+    const fcls: str = "dl-card featured" if featured else "dl-card"
+    rec: HTML = template[HTML] { <div class="dl-rec" style="display:none">Recommended for your system</div> }
+    if featured {
+        rec = template[HTML] { <div class="dl-rec">Recommended for your system</div> }
+    }
+    # "coming soon" lives on the far right of the header row, one per card,
+    # rather than repeated inside every button.
+    soon_badge: HTML = template[HTML] {  }
+    if soon {
+        soon_badge = template[HTML] { <span class="dl-soon-badge">coming soon</span> }
+    }
+    return template[HTML] {
+      <div class="!{fcls}" data-os="!{os_id}">
+        !{rec}
+        <div class="dl-os"><span class="dl-os-icon">!{icon | raw}</span><h3>!{os_name}</h3>!{soon_badge}</div>
+        <div class="dl-btns">!{buttons}</div>
+        <p class="dl-note">!{note}</p>
+      </div>
+    }
+}
+
+
+def render_download(ua: str, username: str) -> HTML {
+    const os_guess: str = _detect_os(ua)
+
+    # Linux: .deb is the primary, .rpm + portable tarball secondary.
+    const lin: HTML = template[HTML] {
+      !{_dl_btn("Download .deb", "dragon-" + DRAGON_VERSION + "-linux-x86_64.deb", true)}
+      !{_dl_btn(".rpm (Fedora / RHEL)", "dragon-" + DRAGON_VERSION + "-linux-x86_64.rpm", false)}
+      !{_dl_btn(".tar.gz (portable)", "dragon-" + DRAGON_VERSION + "-linux-x86_64.tar.gz", false)}
+    }
+    # macOS: Apple Silicon .dmg primary; Intel .dmg + tarball secondary.
+    const mac: HTML = template[HTML] {
+      !{_dl_btn("Download .dmg (Apple Silicon)", "dragon-" + DRAGON_VERSION + "-macos-arm64.dmg", true)}
+      !{_dl_btn(".dmg (Intel)", "dragon-" + DRAGON_VERSION + "-macos-x86_64.dmg", false)}
+      !{_dl_btn(".tar.gz (portable)", "dragon-" + DRAGON_VERSION + "-macos-arm64.tar.gz", false)}
+    }
+    # Windows: .msi installer primary; portable .zip secondary.
+    const win: HTML = template[HTML] {
+      !{_dl_btn("Download .msi", "dragon-" + DRAGON_VERSION + "-windows-x86_64.msi", true)}
+      !{_dl_btn(".zip (portable)", "dragon-" + DRAGON_VERSION + "-windows-x86_64.zip", false)}
+    }
+
+    const repo: str = _repo_url()
+    const soon: bool = len(repo) == 0
+    src_extra: HTML = template[HTML] {
+      <li><strong>Prebuilt installers.</strong> The cards above are marked <em>coming soon</em> until the release pipeline publishes its first signed build - they go live the moment the assets land.</li>
+    }
+    if len(repo) > 0 {
+        src_extra = template[HTML] {
+          <li><strong>All releases &amp; checksums.</strong> Browse every build on the <a href="!{repo}/releases">GitHub Releases page</a>.</li>
+        }
+    }
+
+    const body: HTML = template[HTML] {
+      <main class="www www-brand">
+        <section class="dl-head">
+          <h1>Download Dragon</h1>
+          <p class="dl-ver">Current version <strong>!{DRAGON_VERSION}</strong></p>
+        </section>
+        <div class="dl-grid">
+          !{_dl_card("linux", "Linux", "&#128039;", os_guess == "linux", soon, lin, "x86-64. Bundles the stdlib; needs a C compiler (gcc/clang) on PATH for linking.")}
+          !{_dl_card("macos", "macOS", "&#127822;", os_guess == "macos", soon, mac, "Universal builds for Apple Silicon and Intel. Requires the Xcode command-line tools.")}
+          !{_dl_card("windows", "Windows", "&#128421;", os_guess == "windows", soon, win, "x86-64 MSI. Adds dragon to PATH; needs a C compiler (MSVC or clang) for linking.")}
+        </div>
+        <section class="dl-source">
+          <h2>Other ways to install</h2>
+          <ul>
+            <li><strong>Build from source.</strong> Clone the repository and build with CMake and LLVM 17 - see the <a href="/docs/0003-installation">installation guide</a>.</li>
+            !{src_extra}
+          </ul>
+        </section>
+      </main>
+    }
+    return page_shell("Download Dragon", "download", username, body)
+}
+
+
+# --- Benchmarks page ---------------------------------------------------------
+
+def render_benchmarks(username: str) -> HTML {
+    const body: HTML = template[HTML] {
+      <main class="www">
+        <section class="dl-head">
+          <h1>Benchmarks</h1>
+          <p class="dl-ver">Dragon vs Rust &middot; best-of-3 &middot; all <code>-O2</code> &middot; same machine</p>
+        </section>
+        <div class="bench-wrap">!{_bench_table()}</div>
+        <section class="bench-notes">
+          <h2>Where we stand</h2>
+          <p>We beat Rust on <strong>compute-bound</strong> work. Recursive integer math (fib) and tight float loops (mandelbrot) are where the LLVM backend is already at or ahead of <code>rustc</code>. On fib we also beat Go and Java, and trail C/C++ by only ~12%.</p>
+          <p>The three sub-10&nbsp;ms rows &mdash; sieve, string concat, object creation &mdash; are <strong>noise, not signal</strong>. They finish in 2&ndash;7&nbsp;ms, dominated by process startup rather than the workload. Worth noting: object creation at 2&nbsp;ms means the old GC-tracking overhead no longer shows up at this scale.</p>
+          <h2>Three gaps we're closing</h2>
+          <ol>
+            <li><strong>Binary trees (2.68&#215; slower)</strong> &mdash; the worst, and pure alloc/free churn, so it measures the <em>refcount runtime</em>, not codegen. Every node is two atomic ops under mutexes. The acyclic-skip-tracking / escape-analysis work is the fix; binary-trees is the canary that moves when it lands.</li>
+            <li><strong>Dicts (1.72&#215; slower)</strong> &mdash; string-keyed hashmap. We trail Rust, Go and Java here; the hash + string-key path in <code>DragonDict</code> is the suspect, not the loop.</li>
+            <li><strong>Parallel sum (1.17&#215; slower)</strong> &mdash; the closest gap. Green-thread fork-join carries a little more overhead than Rust's threads; we still beat Java and sit near Go.</li>
+          </ol>
+          <h2>Bottom line</h2>
+          <p>Faster than Rust on raw compute, even on the micro-benchmarks &mdash; and we lose on allocation-heavy (binary-trees) and hashmap (dicts) workloads. Per our first commandment (<em>speed is king</em>), the refcount/alloc path is the highest-leverage target, and it's what we're working on next. These numbers are re-run and updated as the runtime improves.</p>
+        </section>
+      </main>
+    }
+    return page_shell("Benchmarks - Dragon", "bench", username, body)
+}

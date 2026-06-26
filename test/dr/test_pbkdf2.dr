@@ -1,0 +1,48 @@
+# test/dr/test_pbkdf2.dr - Known-answer tests for PBKDF2-HMAC (RFC 8018).
+#
+# PBKDF2-HMAC-SHA256 vectors are the widely-published "password"/"salt" set
+# (also used by RFC 7914's scrypt examples). PBKDF2 is the key-derivation
+# primitive SCRAM-SHA-256 auth (Postgres/MySQL, D032 Phase 2+) builds on, so
+# pin it before layering SCRAM on top. dklen=0 means "the hash's digest size".
+
+from unittest import TestCase, main
+from hashlib import pbkdf2_hmac
+
+class Pbkdf2Sha256Tests(TestCase) {
+    def test_c1() {
+        self.assertEqual(pbkdf2_hmac("sha256", b"password", b"salt", 1).hex(),
+            "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b")
+    }
+
+    def test_c2() {
+        self.assertEqual(pbkdf2_hmac("sha256", b"password", b"salt", 2).hex(),
+            "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43")
+    }
+
+    def test_c4096() {
+        self.assertEqual(pbkdf2_hmac("sha256", b"password", b"salt", 4096).hex(),
+            "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a")
+    }
+
+    # dklen > digest size exercises the multi-block T_1||T_2 concatenation path.
+    def test_dklen_64_multiblock() {
+        self.assertEqual(pbkdf2_hmac("sha256", b"passwd", b"salt", 1, 64).hex(),
+            "55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc49ca9cccf179b645991664b39d77ef317c71b845b1e30bd509112041d3a19783")
+    }
+
+    # dklen=0 defaults to the digest size (32 for sha256) - same as c1.
+    def test_default_dklen_is_digest_size() {
+        dk: bytes = pbkdf2_hmac("sha256", b"password", b"salt", 1, 0)
+        self.assertEqual(len(dk), 32)
+        self.assertEqual(dk.hex(),
+            "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b")
+    }
+
+    def test_zero_iterations_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            pbkdf2_hmac("sha256", b"p", b"s", 0)
+        })
+    }
+}
+
+main([Pbkdf2Sha256Tests()])

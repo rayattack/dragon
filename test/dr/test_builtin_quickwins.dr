@@ -1,0 +1,110 @@
+"""Regression tests for the builtin/codegen quick-wins pass (2026-05-27).
+
+Each block guards a gap from missing.md that was root-caused and fixed:
+  1. pow / round / divmod were rejected by Sema ("undefined name") even though
+     CodeGen handlers existed; divmod additionally printed garbage because it
+     was typed list[any] instead of tuple[int,int].
+  2. `from math import sqrt as root` failed codegen ("Unknown function: root")
+     because the alias bucket mapped the rename to the per-module-mangled
+     symbol while the extern "C" function keeps its bare C symbol.
+  3. `del d[key]` was a no-op (no SubscriptExpr branch / no runtime delete).
+  4. abs(float) and `int ** float` hit LLVM verify failures (int-only codegen
+     paths fed f64 operands).
+"""
+
+from unittest import TestCase, main
+from math import sqrt as root
+from math import isqrt as iq
+
+
+class NumericBuiltins(TestCase) {
+    def test_pow() {
+        self.assertEqual(pow(2, 10), 1024)
+        self.assertEqual(pow(3, 0), 1)
+    }
+
+    def test_round() {
+        self.assertEqual(round(2.7), 3)
+        self.assertEqual(round(2.4), 2)
+    }
+
+    def test_divmod_tuple() {
+        q, r = divmod(17, 5)
+        self.assertEqual(q, 3)
+        self.assertEqual(r, 2)
+    }
+
+    def test_divmod_floor_semantics() {
+        # Python floor-division semantics for negatives: divmod(-7, 3) == (-3, 2)
+        q, r = divmod(-7, 3)
+        self.assertEqual(q, -3)
+        self.assertEqual(r, 2)
+    }
+}
+
+
+class ImportAlias(TestCase) {
+    def test_extern_c_alias() {
+        # `sqrt` is extern "C"; the `as root` rename must still resolve.
+        self.assertAlmostEqual(root(16.0), 4.0)
+    }
+
+    def test_dr_function_alias() {
+        # `isqrt` is a regular .dr function; aliasing still works.
+        self.assertEqual(iq(17), 4)
+    }
+}
+
+
+class DictDelete(TestCase) {
+    def test_del_str_keyed() {
+        d: dict[str, int] = {"a": 1, "b": 2, "c": 3}
+        del d["b"]
+        self.assertEqual(len(d), 2)
+        self.assertTrue("a" in d)
+        self.assertFalse("b" in d)
+        self.assertEqual(d["c"], 3)
+    }
+
+    def test_del_int_keyed() {
+        di: dict[int, str] = {1: "x", 2: "y", 3: "z"}
+        del di[2]
+        self.assertEqual(len(di), 2)
+        self.assertFalse(2 in di)
+        self.assertEqual(di[3], "z")
+    }
+
+    def test_del_str_value_no_corruption() {
+        # str values are owned (decref'd on delete); subsequent reads stay valid.
+        ds: dict[str, str] = {"k1": "v1", "k2": "v2"}
+        del ds["k1"]
+        self.assertEqual(len(ds), 1)
+        self.assertEqual(ds["k2"], "v2")
+    }
+}
+
+
+class FloatNumerics(TestCase) {
+    def test_abs_float() {
+        self.assertAlmostEqual(abs(-3.5), 3.5)
+        self.assertAlmostEqual(abs(3.5), 3.5)
+    }
+
+    def test_abs_int() {
+        self.assertEqual(abs(-7), 7)
+        self.assertEqual(abs(7), 7)
+    }
+
+    def test_int_pow_float() {
+        const n: int = 9
+        self.assertAlmostEqual(n ** 0.5, 3.0)
+    }
+
+    def test_float_pow() {
+        self.assertAlmostEqual(2.0 ** 0.5, 1.4142135, 5)
+        self.assertAlmostEqual(2.0 ** 10.0, 1024.0)
+    }
+}
+
+
+main([NumericBuiltins(), ImportAlias(), DictDelete(), FloatNumerics()])

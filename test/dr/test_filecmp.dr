@@ -1,0 +1,90 @@
+"""filecmp - file/directory comparison."""
+
+from unittest import TestCase, main
+import filecmp
+import os
+from os.path import join, exists
+from io import make
+import shutil
+
+
+def _write(path: str, body: str) -> None {
+    with make(path) as w {
+        w.write(body)
+    }
+}
+
+
+def _setup(root: str) -> None {
+    if exists(root) {
+        shutil.rmtree(root)
+    }
+    os.mkdir(root, 493)
+    os.mkdir(join(root, "L"), 493)
+    os.mkdir(join(root, "R"), 493)
+    _write(join(join(root, "L"), "same.txt"), "identical")
+    _write(join(join(root, "R"), "same.txt"), "identical")
+    _write(join(join(root, "L"), "diff.txt"), "alpha")
+    _write(join(join(root, "R"), "diff.txt"), "BETA")
+    _write(join(join(root, "L"), "only_l.txt"), "L")
+    _write(join(join(root, "R"), "only_r.txt"), "R")
+    os.mkdir(join(join(root, "L"), "subdir"), 493)
+    os.mkdir(join(join(root, "R"), "subdir"), 493)
+}
+
+
+class FileCmpTests(TestCase) {
+    def test_cmp_identical_deep() {
+        root: str = "/tmp/dr_filecmp_1"
+        _setup(root)
+        a: str = join(join(root, "L"), "same.txt")
+        b: str = join(join(root, "R"), "same.txt")
+        self.assertTrue(filecmp.cmp(a, b, false))
+        shutil.rmtree(root)
+    }
+
+    def test_cmp_different() {
+        root: str = "/tmp/dr_filecmp_2"
+        _setup(root)
+        a: str = join(join(root, "L"), "diff.txt")
+        b: str = join(join(root, "R"), "diff.txt")
+        self.assertFalse(filecmp.cmp(a, b, false))
+        shutil.rmtree(root)
+    }
+
+    def test_cmp_missing() {
+        self.assertFalse(filecmp.cmp("/no/such/x", "/no/such/y", false))
+    }
+
+    def test_cmpfiles() {
+        root: str = "/tmp/dr_filecmp_3"
+        _setup(root)
+        L: str = join(root, "L")
+        R: str = join(root, "R")
+        out: dict[str, list[str]] = filecmp.cmpfiles(L, R, ["same.txt", "diff.txt", "ghost.txt"], false)
+        self.assertEqual(out["match"], ["same.txt"])
+        self.assertEqual(out["mismatch"], ["diff.txt"])
+        self.assertEqual(out["errors"], ["ghost.txt"])
+        shutil.rmtree(root)
+    }
+
+    def test_dircmp() {
+        root: str = "/tmp/dr_filecmp_4"
+        _setup(root)
+        L: str = join(root, "L")
+        R: str = join(root, "R")
+        dc: filecmp.dircmp = filecmp.dircmp(L, R)
+        # left_only/right_only contain the unique files.
+        self.assertTrue("only_l.txt" in dc.left_only)
+        self.assertTrue("only_r.txt" in dc.right_only)
+        # same.txt is identical, diff.txt is not.
+        self.assertTrue("same.txt" in dc.same_files)
+        self.assertTrue("diff.txt" in dc.diff_files)
+        # common_dirs contains subdir.
+        self.assertTrue("subdir" in dc.common_dirs)
+        shutil.rmtree(root)
+    }
+}
+
+
+main([FileCmpTests()])

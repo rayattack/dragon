@@ -1,0 +1,395 @@
+# statistics.dr - Dragon standard library: statistical functions
+#
+# Provides common statistical calculations on lists of floats (and ints).
+# Mirrors a subset of Python's statistics module.
+# Pure Dragon - only extern dependency is sqrt from libm.
+
+#===----------------------------------------------------------------------===#
+# libm dependency
+#===----------------------------------------------------------------------===#
+
+extern "C" def sqrt(x: float) -> float
+
+#===----------------------------------------------------------------------===#
+# Internal helpers
+#===----------------------------------------------------------------------===#
+
+def _sorted_float(data: list[float]) -> list[float] {
+    # Insertion sort - returns a new sorted list (ascending).
+    result: list[float] = []
+    i: int = 0
+    while i < len(data) {
+        result.append(data[i])
+        i = i + 1
+    }
+    # In-place insertion sort on the copy
+    i = 1
+    while i < len(result) {
+        const key: float = result[i]
+        j: int = i - 1
+        while j >= 0 and result[j] > key {
+            result[j + 1] = result[j]
+            j = j - 1
+        }
+        result[j + 1] = key
+        i = i + 1
+    }
+    return result
+}
+#===----------------------------------------------------------------------===#
+# Averages and measures of central location
+#===----------------------------------------------------------------------===#
+
+def mean(data: list[float]) -> float {
+    if len(data) == 0 {
+        raise ValueError("mean requires at least one data point")
+    }
+    total: float = 0.0
+    i: int = 0
+    while i < len(data) {
+        total = total + data[i]
+        i = i + 1
+    }
+    return total / float(len(data))
+}
+
+def fmean(data: list[float]) -> float {
+    # Python compatibility alias for mean
+    return mean(data)
+}
+
+def geometric_mean(data: list[float]) -> float {
+    # Geometric mean = (product of values)^(1/n)
+    # Computed via exp(mean(log(values))) for numerical stability.
+    if len(data) == 0 {
+        raise ValueError("geometric_mean requires at least one data point")
+    }
+    # Use log/exp approach: compute sum of logs, then exp(sum/n)
+    log_sum: float = 0.0
+    i: int = 0
+    while i < len(data) {
+        if data[i] <= 0.0 {
+            raise ValueError("geometric_mean requires all positive values")
+        }
+        # Compute natural log via series approximation
+        log_sum = log_sum + _ln(data[i])
+        i = i + 1
+    }
+    return _exp(log_sum / float(len(data)))
+}
+
+def harmonic_mean(data: list[float]) -> float {
+    # Harmonic mean = n / sum(1/x_i)
+    if len(data) == 0 {
+        raise ValueError("harmonic_mean requires at least one data point")
+    }
+    reciprocal_sum: float = 0.0
+    i: int = 0
+    while i < len(data) {
+        if data[i] <= 0.0 {
+            raise ValueError("harmonic_mean requires all positive values")
+        }
+        reciprocal_sum = reciprocal_sum + (1.0 / data[i])
+        i = i + 1
+    }
+    return float(len(data)) / reciprocal_sum
+}
+
+#===----------------------------------------------------------------------===#
+# Median
+#===----------------------------------------------------------------------===#
+
+def median(data: list[float]) -> float {
+    if len(data) == 0 {
+        raise ValueError("median requires at least one data point")
+    }
+    const sorted: list[float] = _sorted_float(data)
+    const n: int = len(sorted)
+    const mid: int = n // 2
+    if n - (n // 2) * 2 == 1 {
+        # Odd length
+        return sorted[mid]
+    }
+    # Even length - average of two middle elements
+    return (sorted[mid - 1] + sorted[mid]) / 2.0
+}
+
+def median_low(data: list[float]) -> float {
+    # For odd n, returns the middle value.
+    # For even n, returns the lower of the two middle values.
+    if len(data) == 0 {
+        raise ValueError("median_low requires at least one data point")
+    }
+    const sorted: list[float] = _sorted_float(data)
+    const n: int = len(sorted)
+    const mid: int = n // 2
+    if n - (n // 2) * 2 == 1 {
+        return sorted[mid]
+    }
+    return sorted[mid - 1]
+}
+
+def median_high(data: list[float]) -> float {
+    # For odd n, returns the middle value.
+    # For even n, returns the higher of the two middle values.
+    if len(data) == 0 {
+        raise ValueError("median_high requires at least one data point")
+    }
+    const sorted: list[float] = _sorted_float(data)
+    const n: int = len(sorted)
+    const mid: int = n // 2
+    return sorted[mid]
+}
+
+#===----------------------------------------------------------------------===#
+# Mode
+#===----------------------------------------------------------------------===#
+
+def mode_float(data: list[float]) -> float {
+    # Returns the most common value. On ties, returns the first seen.
+    if len(data) == 0 {
+        raise ValueError("mode_float requires at least one data point")
+    }
+    # Track unique values and their counts with parallel lists
+    values: list[float] = []
+    counts: list[int] = []
+
+    i: int = 0
+    while i < len(data) {
+        const val: float = data[i]
+        # Search for val in values list
+        found: bool = false
+        j: int = 0
+        while j < len(values) {
+            if values[j] == val {
+                counts[j] = counts[j] + 1
+                found = true
+                j = len(values)  # break
+            }
+            j = j + 1
+        }
+        if not found {
+            values.append(val)
+            counts.append(1)
+        }
+        i = i + 1
+    }
+
+    # Find the value with the highest count
+    best_idx: int = 0
+    best_count: int = counts[0]
+    k: int = 1
+    while k < len(counts) {
+        if counts[k] > best_count {
+            best_count = counts[k]
+            best_idx = k
+        }
+        k = k + 1
+    }
+    return values[best_idx]
+}
+
+def mode_int(data: list[int]) -> int {
+    # Returns the most common int value. On ties, returns the first seen.
+    if len(data) == 0 {
+        raise ValueError("mode_int requires at least one data point")
+    }
+    values: list[int] = []
+    counts: list[int] = []
+
+    i: int = 0
+    while i < len(data) {
+        const val: int = data[i]
+        found: bool = false
+        j: int = 0
+        while j < len(values) {
+            if values[j] == val {
+                counts[j] = counts[j] + 1
+                found = true
+                j = len(values)  # break
+            }
+            j = j + 1
+        }
+        if not found {
+            values.append(val)
+            counts.append(1)
+        }
+        i = i + 1
+    }
+
+    best_idx: int = 0
+    best_count: int = counts[0]
+    k: int = 1
+    while k < len(counts) {
+        if counts[k] > best_count {
+            best_count = counts[k]
+            best_idx = k
+        }
+        k = k + 1
+    }
+    return values[best_idx]
+}
+
+#===----------------------------------------------------------------------===#
+# Variance and standard deviation
+#===----------------------------------------------------------------------===#
+
+def variance(data: list[float]) -> float {
+    # Sample variance (Bessel's correction: divide by n-1)
+    if len(data) < 2 {
+        raise ValueError("variance requires at least two data points")
+    }
+    const m: float = mean(data)
+    sum_sq: float = 0.0
+    i: int = 0
+    while i < len(data) {
+        const diff: float = data[i] - m
+        sum_sq = sum_sq + diff * diff
+        i = i + 1
+    }
+    return sum_sq / float(len(data) - 1)
+}
+
+def pvariance(data: list[float]) -> float {
+    # Population variance (divide by n)
+    if len(data) < 1 {
+        raise ValueError("pvariance requires at least one data point")
+    }
+    const m: float = mean(data)
+    sum_sq: float = 0.0
+    i: int = 0
+    while i < len(data) {
+        const diff: float = data[i] - m
+        sum_sq = sum_sq + diff * diff
+        i = i + 1
+    }
+    return sum_sq / float(len(data))
+}
+
+def stdev(data: list[float]) -> float {
+    # Sample standard deviation
+    return sqrt(variance(data))
+}
+
+def pstdev(data: list[float]) -> float {
+    # Population standard deviation
+    return sqrt(pvariance(data))
+}
+
+#===----------------------------------------------------------------------===#
+# Quantiles
+#===----------------------------------------------------------------------===#
+
+def quantiles(data: list[float], n: int) -> list[float] {
+    # Return n-1 cut points that divide data into n equal-probability intervals.
+    # Uses exclusive method (Method 3 in Python docs).
+    if len(data) < 2 {
+        raise ValueError("quantiles requires at least two data points")
+    }
+    if n < 1 {
+        raise ValueError("n must be at least 1")
+    }
+    const sorted: list[float] = _sorted_float(data)
+    const m: int = len(sorted)
+
+    result: list[float] = []
+    i: int = 1
+    while i < n {
+        # Index into the sorted array (1-based fractional position)
+        # idx = i * m / n (as float)
+        const idx: float = float(i) * float(m) / float(n)
+        const lo: int = int(idx) - 1
+        const frac: float = idx - float(int(idx))
+
+        if lo < 0 {
+            result.append(sorted[0])
+        } else {
+            if lo >= m - 1 {
+                result.append(sorted[m - 1])
+            } else {
+                # Linear interpolation between sorted[lo] and sorted[lo+1]
+                const val: float = sorted[lo] + (sorted[lo + 1] - sorted[lo]) * frac
+                result.append(val)
+            }
+        }
+        i = i + 1
+    }
+    return result
+}
+
+#===----------------------------------------------------------------------===#
+# Internal math helpers (to avoid circular import with math.dr)
+#===----------------------------------------------------------------------===#
+
+def _ln(x: float) -> float {
+    # Natural logarithm via Halley's method: converges cubically.
+    # ln(x) where x > 0.
+    # Reduce range: x = m * 2^k, compute ln(m) + k*ln(2)
+    const LN2: float = 0.6931471805599453
+
+    # Range reduction: normalize to [0.5, 2)
+    k: int = 0
+    m: float = x
+    while m >= 2.0 {
+        m = m / 2.0
+        k = k + 1
+    }
+    while m < 0.5 {
+        m = m * 2.0
+        k = k - 1
+    }
+
+    # Now compute ln(m) using series: ln(m) = 2 * atanh((m-1)/(m+1))
+    # atanh(z) = z + z^3/3 + z^5/5 + ...
+    const z: float = (m - 1.0) / (m + 1.0)
+    const z2: float = z * z
+    result: float = 0.0
+    term: float = z
+    i: int = 0
+    while i < 30 {
+        result = result + term / float(2 * i + 1)
+        term = term * z2
+        i = i + 1
+    }
+    return 2.0 * result + float(k) * LN2
+}
+
+def _exp(x: float) -> float {
+    # Exponential function via Taylor series with range reduction.
+    # exp(x) = 2^k * exp(r) where r = x - k*ln(2), |r| < ln(2)/2
+    const LN2: float = 0.6931471805599453
+
+    # Range reduction
+    k: int = int(x / LN2)
+    if x < 0.0 {
+        k = k - 1
+    }
+    const r: float = x - float(k) * LN2
+
+    # Taylor series for exp(r): 1 + r + r^2/2! + r^3/3! + ...
+    result: float = 1.0
+    term: float = 1.0
+    i: int = 1
+    while i <= 25 {
+        term = term * r / float(i)
+        result = result + term
+        i = i + 1
+    }
+
+    # Multiply by 2^k
+    pow2: float = 1.0
+    if k >= 0 {
+        j: int = 0
+        while j < k {
+            pow2 = pow2 * 2.0
+            j = j + 1
+        }
+    } else {
+        j: int = 0
+        while j < 0 - k {
+            pow2 = pow2 / 2.0
+            j = j + 1
+        }
+    }
+    return result * pow2
+}

@@ -1,0 +1,24 @@
+"""Module-qualified call chaining.
+
+`mod.func(args).method()` where the module function's declared return type is a
+class must carry that return type so the chained method dispatches. Exercised
+through a real stdlib module: hashlib.sha256(bytes) returns a Hash, and the
+chained .hexdigest() / .digest_size() must resolve. Regression for the bug where
+the qualified call's return type was dropped and the chain returned 0.
+"""
+
+from unittest import TestCase, main
+import hashlib
+
+class QualifiedChainTests(TestCase) {
+    def test_qualified_chain_to_str_method() {
+        self.assertEqual(hashlib.sha256(b"abc").hexdigest(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+    }
+
+    def test_qualified_chain_to_int_method() {
+        self.assertEqual(hashlib.sha256(b"abc").digest_size(), 32)
+    }
+}
+
+main([QualifiedChainTests()])

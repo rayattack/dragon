@@ -1,0 +1,70 @@
+"""Generic method on a generic-class instantiation - double monomorphization.
+
+`Container[int].wrap[str]` needs the class type param `T` AND the method type
+param `U` bound at once. The engine composes both frames into a single
+substitution and stamps a distinct NATIVE specialization per (class-args,
+method-args) pair - zero boxing, zero runtime dispatch (D044): the emitted
+symbols are `Container[int]_wrap[str]` etc., identical in shape to hand-written
+monomorphic methods. Covers a method using only `U`, a method using BOTH `T`
+and `U`, multiple class instantiations sharing one method, inferred-`U` from the
+binding, and a transitive nested instantiation inside the method body.
+"""
+
+from unittest import TestCase, main
+
+
+class Container[T] {
+    def(v: T) { self.v = v }
+    def wrap[U](x: U) -> U { return x }
+    def pair[U](x: U) -> tuple[T, U] { return (self.v, x) }
+}
+
+class Inner[T] {
+    def(v: T) { self.v = v }
+    def get() -> T { return self.v }
+}
+
+class Outer[T] {
+    def() { }
+    def build[U](x: U) -> U {
+        inner: Inner[U] = Inner[U](x)
+        return inner.get()
+    }
+}
+
+
+class DoubleMonoTests(TestCase) {
+    def test_method_param_only() {
+        c: Container[int] = Container[int](42)
+        self.assertEqual(c.wrap[str]("hi"), "hi")
+        self.assertEqual(c.wrap[int](7), 7)
+    }
+
+    def test_both_class_and_method_params() {
+        c: Container[int] = Container[int](7)
+        p: tuple[int, str] = c.pair[str]("hi")
+        self.assertEqual(p[0], 7)      # T = int (from the class instantiation)
+        self.assertEqual(p[1], "hi")   # U = str (from the method call)
+    }
+
+    def test_multiple_class_instantiations_share_method() {
+        a: Container[int] = Container[int](1)
+        b: Container[str] = Container[str]("z")
+        self.assertEqual(a.wrap[int](5), 5)
+        self.assertEqual(b.wrap[str]("x"), "x")
+        self.assertEqual(a.wrap[str]("from-int"), "from-int")
+    }
+
+    def test_inferred_method_param() {
+        c: Container[int] = Container[int](7)
+        r: str = c.wrap("inferred")   # U inferred from the binding annotation
+        self.assertEqual(r, "inferred")
+    }
+
+    def test_transitive_nested_instantiation() {
+        o: Outer[int] = Outer[int]()
+        self.assertEqual(o.build[str]("via-inner"), "via-inner")
+    }
+}
+
+main([DoubleMonoTests()])

@@ -1,0 +1,86 @@
+# test/dr/test_borrow_arg_rc.dr - #3 class A, borrow-callee arg temps. An owned
+# heap temporary passed to a builtin that BORROWS it (str/bytes methods, the
+# list/dict/set query methods, and borrow builtins like len/int/sorted) must be
+# released after the call. Transfer callees (list.append, dict set) keep adopting
+# the +1 and are intentionally NOT drained.
+#
+# Each owned-temp arg here is a fresh `"x" + str(i)` concat (a +1 the callee never
+# stores), exercised in a bounded loop. This pins behaviour and ensures a drain
+# regression that double-frees crashes HERE rather than corrupting the heap
+# silently; leak-freedom itself is verified under the ASan/LSan build (the bug
+# class that motivated this was a heap-use-after-free from a wrong-kind decref).
+
+from unittest import TestCase, main
+
+
+def list_len_default(items: list[int] = [10, 20, 30]) -> int {
+    # Dragon evaluates the default per-call, so each omitting call mints a fresh
+    # owned list temp; fillDefaultArgs must route it into the caller's drain.
+    return len(items)
+}
+
+
+class BorrowArgRcTests(TestCase) {
+    def test_str_method_owned_temp_args() {
+        hits: int = 0
+        i: int = 0
+        while i < 500 {
+            s: str = "alpha beta alpha"
+            # owned-temp args to borrow str methods (sub / old+new / sep)
+            n: int = s.find("al" + str(i % 1))          # "al0" not found -> -1
+            r: str = s.replace("a" + str(i % 1), "A")    # owned old, literal new
+            parts: list[str] = s.split(" " + str(i % 1)) # owned sep
+            if n < 0 {
+                hits = hits + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(hits, 500)
+    }
+
+    def test_collection_borrow_method_owned_temp_args() {
+        total: int = 0
+        i: int = 0
+        while i < 500 {
+            xs: list[str] = ["x", "y", "z"]
+            c: int = xs.count("q" + str(i % 1))            # owned arg, not present
+            d: dict[str, int] = {"k": 1}
+            v: int = d.get("z" + str(i % 1), 7)            # owned key, absent -> 7
+            st: set[str] = {"m", "n"}
+            u: set[str] = st.union({"p" + str(i % 1)})     # owned set arg
+            total = total + c + v + len(u)
+            i = i + 1
+        }
+        # c=0, v=7, len(union)=3 each iter -> 10 * 500
+        self.assertEqual(total, 5000)
+    }
+
+    def test_builtin_borrow_owned_temp_args() {
+        total: int = 0
+        i: int = 0
+        while i < 500 {
+            n: int = len("ab" + str(i % 1))     # owned-temp str -> len
+            v: int = int("4" + str(i % 1))      # owned-temp str -> int ("40")
+            sm: int = sum([1, 2, i])            # owned-temp list -> sum
+            total = total + n + v + sm
+            i = i + 1
+        }
+        # n=3 ("ab0"), v=40 ("40"), sm=3+i; sum_{i=0}^{499}(46+i) = 23000 + 124750
+        self.assertEqual(total, 147750)
+    }
+
+    def test_default_arg_owned_temp() {
+        # An omitted heap default ([10,20,30]) is synthesized per call and must be
+        # released after the call (fillDefaultArgs -> argTemps drain).
+        total: int = 0
+        i: int = 0
+        while i < 500 {
+            total = total + list_len_default()   # omits items -> fresh default temp
+            i = i + 1
+        }
+        self.assertEqual(total, 1500)            # len == 3, * 500
+    }
+}
+
+
+main([BorrowArgRcTests()])

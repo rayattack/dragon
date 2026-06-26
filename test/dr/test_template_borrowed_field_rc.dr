@@ -1,0 +1,118 @@
+"""Regression test for the borrowed-slot reassignment over-decref (2026-06-19).
+
+Reassigning a heap-refcounted PARAMETER (or any borrowed slot - loop variable,
+capture, self) used to decref the slot's incoming value on the first write. The
+incoming value is borrowed (the caller owns it), so the decref stole a refcount
+from a caller-owned object. Benign when the argument was an owned temporary
+(freed anyway), but it corrupted long-lived references - the classic break being
+a class field interpolated into a `template[HTML]`:
+
+    template[HTML] { <span>!{chapter.title}</span> }
+
+auto-escapes `chapter.title` via `HTML.escape(s)`, whose body is `s = s.replace(...)`.
+`str.replace` always returns a fresh string, so the first `s = ...` dropped a
+refcount on the *field* itself. Rendered repeatedly (e.g. a docs sidebar built
+from a module-global `const list[Chapter]`), the field's string was freed and its
+heap slot reused, surfacing as gibberish/garbage in later renders.
+
+The fix: the first reassignment of a borrowed slot must not decref the borrowed
+value (it is the caller's), and the slot becomes owned thereafter.
+"""
+
+from unittest import TestCase, main
+from html import HTML
+
+
+# A long-lived holder whose string field is borrowed when interpolated.
+class Node {
+    def(label: str) {
+        self.label = label
+    }
+}
+
+
+def render(n: Node) -> HTML {
+    # Auto-escapes n.label (a borrowed field) - the over-decref site.
+    return template[HTML] { <span class="x">!{n.label}</span> }
+}
+
+
+# Mirrors HTML.escape's shape: reassign a borrowed str parameter via replace,
+# which always returns a fresh string.
+def munge(s: str) -> str {
+    s = s.replace("&", "&amp;")
+    s = s.replace("<", "&lt;")
+    return s
+}
+
+
+class BorrowedFieldRCTests(TestCase) {
+    def test_template_html_escape_preserves_field() {
+        # Module-globalish long-lived list of holders with heap-string fields.
+        nodes: list[Node] = [Node(f"alpha{0}"), Node(f"beta{1}"),
+                             Node(f"gamma{2}"), Node(f"delta{3}")]
+        # Render each node's escaped field far more times than any refcount margin.
+        r: int = 0
+        while r < 300 {
+            for nd in nodes {
+                const h: HTML = render(nd)
+            }
+            r = r + 1
+        }
+        # The borrowed fields must be intact (not freed / reused).
+        self.assertEqual(nodes[0].label, "alpha0")
+        self.assertEqual(nodes[1].label, "beta1")
+        self.assertEqual(nodes[2].label, "gamma2")
+        self.assertEqual(nodes[3].label, "delta3")
+    }
+
+    def test_direct_escape_preserves_field() {
+        nodes: list[Node] = [Node(f"one{1}"), Node(f"two{2}"), Node(f"three{3}")]
+        r: int = 0
+        while r < 300 {
+            for nd in nodes {
+                const e: str = HTML.escape(nd.label)
+                self.assertTrue(len(e) >= 0)
+            }
+            r = r + 1
+        }
+        self.assertEqual(nodes[0].label, "one1")
+        self.assertEqual(nodes[1].label, "two2")
+        self.assertEqual(nodes[2].label, "three3")
+    }
+
+    def test_reassigned_borrowed_param_preserves_arg() {
+        nodes: list[Node] = [Node(f"k{0}"), Node(f"k{1}")]
+        r: int = 0
+        while r < 300 {
+            for nd in nodes {
+                const out: str = munge(nd.label)
+                self.assertTrue(len(out) >= 1)
+            }
+            r = r + 1
+        }
+        self.assertEqual(nodes[0].label, "k0")
+        self.assertEqual(nodes[1].label, "k1")
+    }
+
+    def test_escape_of_owned_temporary_still_works() {
+        # The owned-temporary path must remain correct (no leak, no double free):
+        # escaping a fresh concatenation and a string carrying escapable chars.
+        r: int = 0
+        while r < 300 {
+            const a: str = "a&b"
+            const b: str = "<c>"
+            const e: str = HTML.escape(a + b)
+            self.assertEqual(e, "a&amp;b&lt;c&gt;")
+        }
+        # A field that actually contains escapable characters is escaped but the
+        # stored field is untouched.
+        const n: Node = Node("x&y<z>")
+        const h: HTML = render(n)
+        self.assertEqual(n.label, "x&y<z>")
+        self.assertEqual(h.to_str(), "<span class=\"x\">x&amp;y&lt;z&gt;</span>")
+    }
+}
+
+
+main([BorrowedFieldRCTests()])

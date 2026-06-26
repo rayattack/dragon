@@ -1,0 +1,90 @@
+"""Regression tests for container membership and search.
+
+Covers the fixes for four bugs found while documenting the Collections chapter:
+  1. `x in list` had no codegen branch - always returned False.
+  2. list search (in / .index / .count / .remove) compared string elements by
+     pointer, not value, so a freshly built equal string was never found.
+  3. an empty set() + .add(str) hashed strings by pointer (and leaked them),
+     so membership of an added string returned False.
+  4. the set(list) constructor was unimplemented ("Unknown function: set").
+
+All assertions exercise the `in` operator / search methods directly rather than
+assertIn, so the operator lowering itself is under test.
+"""
+
+from unittest import TestCase, main
+
+
+class ListMembership(TestCase) {
+    def test_int_in() {
+        const xs: list[int] = [1, 2, 3]
+        self.assertTrue(2 in xs)
+        self.assertFalse(9 in xs)
+        self.assertTrue(9 not in xs)
+    }
+
+    def test_str_in_value_equality() {
+        const xs: list[str] = ["apple", "pear", "fig"]
+        const built: str = "pe" + "ar"           # distinct pointer, equal value
+        self.assertTrue(built in xs)
+        self.assertTrue("fig" in xs)
+        self.assertFalse("kiwi" in xs)
+    }
+
+    def test_index_and_count_str() {
+        const xs: list[str] = ["a", "b", "a"]
+        self.assertEqual(xs.index("b"), 1)
+        self.assertEqual(xs.count("a"), 2)
+    }
+
+    def test_float_in() {
+        const xs: list[float] = [1.5, 2.5]
+        self.assertTrue(2.5 in xs)
+        self.assertFalse(9.9 in xs)
+    }
+
+    def test_remove_str_by_value() {
+        m: list[str] = ["a", "b", "c"]
+        m.remove("b")
+        self.assertEqual(len(m), 2)
+        self.assertFalse("b" in m)
+        self.assertTrue("c" in m)
+    }
+}
+
+
+class SetMembership(TestCase) {
+    def test_empty_set_add_str() {
+        s: set[str] = set()
+        s.add("def")
+        s.add("class")
+        self.assertEqual(len(s), 2)
+        self.assertTrue("def" in s)
+        self.assertFalse("xyz" in s)
+    }
+
+    def test_int_set() {
+        n: set[int] = set()
+        n.add(5)
+        self.assertTrue(5 in n)
+        self.assertFalse(9 in n)
+    }
+
+    def test_set_from_list_dedups() {
+        const words: list[str] = ["a", "b", "a", "c"]
+        const fl: set[str] = set(words)
+        self.assertEqual(len(fl), 3)
+        self.assertTrue("a" in fl)
+        self.assertFalse("z" in fl)
+    }
+
+    def test_set_literal_add() {
+        lit: set[str] = {"x", "y"}
+        lit.add("z")
+        self.assertTrue("x" in lit)
+        self.assertTrue("z" in lit)
+    }
+}
+
+
+main([ListMembership(), SetMembership()])

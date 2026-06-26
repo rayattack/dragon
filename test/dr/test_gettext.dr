@@ -1,0 +1,60 @@
+"""gettext - `.po` parser + singular/plural lookup."""
+
+from unittest import TestCase, main
+import gettext
+from gettext import GNUTranslations
+import os
+from os.path import exists
+from io import make
+
+
+_PO_SAMPLE: str = "# Sample .po\nmsgid \"hello\"\nmsgstr \"hola\"\n\nmsgid \"%d apple\"\nmsgid_plural \"%d apples\"\nmsgstr[0] \"%d manzana\"\nmsgstr[1] \"%d manzanas\"\n"
+
+
+def _write(path: str, body: str) -> None {
+    if exists(path) {
+        os.remove(path)
+    }
+    with make(path) as w {
+        w.write(body)
+    }
+}
+
+
+class GettextTests(TestCase) {
+    def test_basic_lookup() {
+        path: str = "/tmp/dr_gettext_1.po"
+        _write(path, _PO_SAMPLE)
+        t: GNUTranslations = GNUTranslations(path)
+        self.assertEqual(t.gettext("hello"), "hola")
+        self.assertEqual(t.gettext("missing"), "missing")
+        os.remove(path)
+    }
+
+    def test_ngettext_singular_and_plural() {
+        path: str = "/tmp/dr_gettext_2.po"
+        _write(path, _PO_SAMPLE)
+        t: GNUTranslations = GNUTranslations(path)
+        self.assertEqual(t.ngettext("%d apple", "%d apples", 1), "%d manzana")
+        self.assertEqual(t.ngettext("%d apple", "%d apples", 5), "%d manzanas")
+    }
+
+    def test_install_module_level() {
+        path: str = "/tmp/dr_gettext_3.po"
+        _write(path, _PO_SAMPLE)
+        t: GNUTranslations = GNUTranslations(path)
+        gettext.install(t)
+        self.assertEqual(gettext.gettext("hello"), "hola")
+        self.assertEqual(gettext.ngettext("%d apple", "%d apples", 1), "%d manzana")
+        os.remove(path)
+    }
+
+    def test_missing_file_safe() {
+        # Empty catalog - fallback to msgid.
+        t: GNUTranslations = GNUTranslations("/no/such/dr_zzz.po")
+        self.assertEqual(t.gettext("hello"), "hello")
+    }
+}
+
+
+main([GettextTests()])

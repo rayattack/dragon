@@ -1,0 +1,20 @@
+# frames demo: read a CSV, group + aggregate, sort, and pretty-print.
+# Run:  dragon run packages/frames/example.dr
+
+from frames import read_csv, DataFrame
+
+const csv: str = "city,product,units,price\nNY,apple,10,1.5\nLA,apple,5,1.4\nNY,pear,3,2.0\nLA,pear,8,1.9\nNY,apple,7,1.5"
+
+const df: DataFrame = read_csv(csv, true)
+print("=== raw (" + str(df.nrows()) + " rows x " + str(df.ncols()) + " cols) ===")
+print(df.show())
+
+print("")
+print("=== total units by city, highest first ===")
+const by_city: DataFrame = df.groupby("city").sum("units").sort_values("units", false)
+print(by_city.show())
+
+print("")
+print("=== only rows with units >= 7 ===")
+const big: DataFrame = df.filter(df.col("units").ge(7.0))
+print(big.show())

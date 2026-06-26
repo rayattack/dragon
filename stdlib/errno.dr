@@ -1,0 +1,227 @@
+# errno.dr - symbolic constants for POSIX error numbers
+#
+# Mirrors CPython's `errno` module. Values are Linux/glibc canonicals, which
+# also match the values used by Dragon's runtime (libuv, libc) on supported
+# platforms. macOS / BSD divergences are noted; if they bite, swap on the
+# Dragon side once `platform` ships and dispatch by uname.
+#
+# Pure Dragon - no C dependencies.
+
+#===----------------------------------------------------------------------===#
+# Standard POSIX errno values (asm-generic/errno-base.h + errno.h, Linux)
+#===----------------------------------------------------------------------===#
+
+const EPERM: int = 1            # Operation not permitted
+const ENOENT: int = 2           # No such file or directory
+const ESRCH: int = 3            # No such process
+const EINTR: int = 4            # Interrupted system call
+const EIO: int = 5              # I/O error
+const ENXIO: int = 6            # No such device or address
+const E2BIG: int = 7            # Argument list too long
+const ENOEXEC: int = 8          # Exec format error
+const EBADF: int = 9            # Bad file number
+const ECHILD: int = 10          # No child processes
+const EAGAIN: int = 11          # Try again / non-blocking would block
+const EWOULDBLOCK: int = 11     # Same as EAGAIN on Linux
+const ENOMEM: int = 12          # Out of memory
+const EACCES: int = 13          # Permission denied
+const EFAULT: int = 14          # Bad address
+const ENOTBLK: int = 15         # Block device required
+const EBUSY: int = 16           # Device or resource busy
+const EEXIST: int = 17          # File exists
+const EXDEV: int = 18           # Cross-device link
+const ENODEV: int = 19          # No such device
+const ENOTDIR: int = 20         # Not a directory
+const EISDIR: int = 21          # Is a directory
+const EINVAL: int = 22          # Invalid argument
+const ENFILE: int = 23          # File table overflow
+const EMFILE: int = 24          # Too many open files
+const ENOTTY: int = 25          # Not a typewriter
+const ETXTBSY: int = 26         # Text file busy
+const EFBIG: int = 27           # File too large
+const ENOSPC: int = 28          # No space left on device
+const ESPIPE: int = 29          # Illegal seek
+const EROFS: int = 30           # Read-only file system
+const EMLINK: int = 31          # Too many links
+const EPIPE: int = 32           # Broken pipe
+const EDOM: int = 33            # Math arg out of domain of func
+const ERANGE: int = 34          # Math result not representable
+
+const EDEADLK: int = 35         # Resource deadlock would occur
+const EDEADLOCK: int = 35       # Same as EDEADLK on Linux
+const ENAMETOOLONG: int = 36    # File name too long
+const ENOLCK: int = 37          # No record locks available
+const ENOSYS: int = 38          # Function not implemented
+const ENOTEMPTY: int = 39       # Directory not empty
+const ELOOP: int = 40           # Too many symbolic links encountered
+const ENOMSG: int = 42          # No message of desired type
+const EIDRM: int = 43           # Identifier removed
+
+const ENOSTR: int = 60          # Device not a stream
+const ENODATA: int = 61         # No data available
+const ETIME: int = 62           # Timer expired
+const ENOSR: int = 63           # Out of streams resources
+const EREMOTE: int = 66         # Object is remote
+const ENOLINK: int = 67         # Link has been severed
+const EPROTO: int = 71          # Protocol error
+const EMULTIHOP: int = 72       # Multihop attempted
+const EBADMSG: int = 74         # Not a data message
+const EOVERFLOW: int = 75       # Value too large for defined data type
+const EILSEQ: int = 84          # Illegal byte sequence
+
+const EUSERS: int = 87          # Too many users
+const ENOTSOCK: int = 88        # Socket operation on non-socket
+const EDESTADDRREQ: int = 89    # Destination address required
+const EMSGSIZE: int = 90        # Message too long
+const EPROTOTYPE: int = 91      # Protocol wrong type for socket
+const ENOPROTOOPT: int = 92     # Protocol not available
+const EPROTONOSUPPORT: int = 93 # Protocol not supported
+const ESOCKTNOSUPPORT: int = 94 # Socket type not supported
+const EOPNOTSUPP: int = 95      # Operation not supported on transport endpoint
+const ENOTSUP: int = 95         # Same as EOPNOTSUPP on Linux
+const EPFNOSUPPORT: int = 96    # Protocol family not supported
+const EAFNOSUPPORT: int = 97    # Address family not supported by protocol
+const EADDRINUSE: int = 98      # Address already in use
+const EADDRNOTAVAIL: int = 99   # Cannot assign requested address
+const ENETDOWN: int = 100       # Network is down
+const ENETUNREACH: int = 101    # Network is unreachable
+const ENETRESET: int = 102      # Network dropped connection because of reset
+const ECONNABORTED: int = 103   # Software caused connection abort
+const ECONNRESET: int = 104     # Connection reset by peer
+const ENOBUFS: int = 105        # No buffer space available
+const EISCONN: int = 106        # Transport endpoint is already connected
+const ENOTCONN: int = 107       # Transport endpoint is not connected
+const ESHUTDOWN: int = 108      # Cannot send after transport endpoint shutdown
+const ETOOMANYREFS: int = 109   # Too many references: cannot splice
+const ETIMEDOUT: int = 110      # Connection timed out
+const ECONNREFUSED: int = 111   # Connection refused
+const EHOSTDOWN: int = 112      # Host is down
+const EHOSTUNREACH: int = 113   # No route to host
+const EALREADY: int = 114       # Operation already in progress
+const EINPROGRESS: int = 115    # Operation now in progress
+const ESTALE: int = 116         # Stale file handle
+const EDQUOT: int = 122         # Quota exceeded
+
+const ECANCELED: int = 125      # Operation canceled
+const EOWNERDEAD: int = 130     # Owner died
+const ENOTRECOVERABLE: int = 131 # State not recoverable
+
+#===----------------------------------------------------------------------===#
+# Reverse lookup: code -> symbolic name
+#===----------------------------------------------------------------------===#
+# Built lazily on first access via errorcode().
+
+_errorcode_cache: dict[int, str] = {}
+
+def _build_errorcode() -> dict[int, str] {
+    d: dict[int, str] = {}
+    d[1] = "EPERM"
+    d[2] = "ENOENT"
+    d[3] = "ESRCH"
+    d[4] = "EINTR"
+    d[5] = "EIO"
+    d[6] = "ENXIO"
+    d[7] = "E2BIG"
+    d[8] = "ENOEXEC"
+    d[9] = "EBADF"
+    d[10] = "ECHILD"
+    d[11] = "EAGAIN"
+    d[12] = "ENOMEM"
+    d[13] = "EACCES"
+    d[14] = "EFAULT"
+    d[15] = "ENOTBLK"
+    d[16] = "EBUSY"
+    d[17] = "EEXIST"
+    d[18] = "EXDEV"
+    d[19] = "ENODEV"
+    d[20] = "ENOTDIR"
+    d[21] = "EISDIR"
+    d[22] = "EINVAL"
+    d[23] = "ENFILE"
+    d[24] = "EMFILE"
+    d[25] = "ENOTTY"
+    d[26] = "ETXTBSY"
+    d[27] = "EFBIG"
+    d[28] = "ENOSPC"
+    d[29] = "ESPIPE"
+    d[30] = "EROFS"
+    d[31] = "EMLINK"
+    d[32] = "EPIPE"
+    d[33] = "EDOM"
+    d[34] = "ERANGE"
+    d[35] = "EDEADLK"
+    d[36] = "ENAMETOOLONG"
+    d[37] = "ENOLCK"
+    d[38] = "ENOSYS"
+    d[39] = "ENOTEMPTY"
+    d[40] = "ELOOP"
+    d[42] = "ENOMSG"
+    d[43] = "EIDRM"
+    d[60] = "ENOSTR"
+    d[61] = "ENODATA"
+    d[62] = "ETIME"
+    d[63] = "ENOSR"
+    d[66] = "EREMOTE"
+    d[67] = "ENOLINK"
+    d[71] = "EPROTO"
+    d[72] = "EMULTIHOP"
+    d[74] = "EBADMSG"
+    d[75] = "EOVERFLOW"
+    d[84] = "EILSEQ"
+    d[87] = "EUSERS"
+    d[88] = "ENOTSOCK"
+    d[89] = "EDESTADDRREQ"
+    d[90] = "EMSGSIZE"
+    d[91] = "EPROTOTYPE"
+    d[92] = "ENOPROTOOPT"
+    d[93] = "EPROTONOSUPPORT"
+    d[94] = "ESOCKTNOSUPPORT"
+    d[95] = "EOPNOTSUPP"
+    d[96] = "EPFNOSUPPORT"
+    d[97] = "EAFNOSUPPORT"
+    d[98] = "EADDRINUSE"
+    d[99] = "EADDRNOTAVAIL"
+    d[100] = "ENETDOWN"
+    d[101] = "ENETUNREACH"
+    d[102] = "ENETRESET"
+    d[103] = "ECONNABORTED"
+    d[104] = "ECONNRESET"
+    d[105] = "ENOBUFS"
+    d[106] = "EISCONN"
+    d[107] = "ENOTCONN"
+    d[108] = "ESHUTDOWN"
+    d[109] = "ETOOMANYREFS"
+    d[110] = "ETIMEDOUT"
+    d[111] = "ECONNREFUSED"
+    d[112] = "EHOSTDOWN"
+    d[113] = "EHOSTUNREACH"
+    d[114] = "EALREADY"
+    d[115] = "EINPROGRESS"
+    d[116] = "ESTALE"
+    d[122] = "EDQUOT"
+    d[125] = "ECANCELED"
+    d[130] = "EOWNERDEAD"
+    d[131] = "ENOTRECOVERABLE"
+    return d
+}
+
+def errorcode(code: int) -> str {
+    # Symbolic name for an errno code, or empty string when unknown.
+    # Python exposes `errno.errorcode` as a dict; use this function plus the
+    # exposed `errorcode_dict()` helper for parity.
+    if len(_errorcode_cache) == 0 {
+        _errorcode_cache = _build_errorcode()
+    }
+    if code in _errorcode_cache {
+        return _errorcode_cache[code]
+    }
+    return ""
+}
+
+def errorcode_dict() -> dict[int, str] {
+    # Full code-to-name map (matches Python's errno.errorcode dict).
+    if len(_errorcode_cache) == 0 {
+        _errorcode_cache = _build_errorcode()
+    }
+    return _errorcode_cache
+}

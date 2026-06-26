@@ -1,0 +1,331 @@
+"""subprocess - spawn child processes with pipe capture (Python parity subset).
+
+POSIX only (Windows deferred per D019). `shell=False` semantics only: `args` is
+always a `list[str]` argv vector - there is NO shell-string parsing, so a
+program that wants shell features passes them explicitly, e.g.
+`run(["/bin/sh", "-c", "echo $HOME"])` (the SHELL is executed; the string is not
+parsed by this module).
+
+Public surface mirrors CPython's `subprocess`:
+- `run(args, capture_output=False, check=False, input=b"", cwd="")` -> CompletedProcess
+- `check_output(args, cwd="")` -> bytes
+- `call(args, cwd="")` -> int
+- `Popen(args, cwd, capture_stdout, capture_stderr, capture_stdin)` with
+  `communicate(input)`, `wait()`, `poll()`, `send_signal(sig)`, `terminate()`,
+  `kill()`
+- `CompletedProcess(args, returncode, stdout, stderr)`
+- `CalledProcessError(returncode, cmd, output)` raised when `check=True` and the
+  child exits non-zero.
+
+The fork+pipe+dup2+execvp dance is a native runtime primitive
+(`lib/Runtime/runtime_subprocess.cpp`): a child between fork() and execvp() may
+not run the Dragon allocator or the green-thread scheduler, so that wiring lives
+in C. Everything else - the status decode, the blocking drain orchestration, the
+exception types and the run/check_output/call front ends - is pure Dragon.
+
+Tier-1: `communicate()` now multiplexes stdin/stdout/stderr through a single
+poll(2)-driven native pump (`dragon_subprocess_pump`) so a child that fills its
+stderr pipe while we drain stdout - or one fed more stdin than a pipe buffer
+holds - can never deadlock. It also takes a `timeout=` budget; on expiry the
+child is killed and reaped and `TimeoutExpired` is raised carrying the partial
+output captured so far (Python parity). The pump yields to the green-thread
+scheduler between poll slices so it does not monopolise the carrier OS thread
+(see knownRisks for the residual reactor-park follow-up)."""
+
+
+# Native spawn + the poll(2) concurrent pump. spawn returns
+# [pid, stdin_w_fd, stdout_r_fd, stderr_r_fd] (-1 where not captured).
+extern "C" def dragon_subprocess_spawn(argv: list[str], cap_in: intc, cap_out: intc, cap_err: intc, cwd: str) -> list[int]
+extern "C" def dragon_subprocess_drain(fd: intc) -> bytes
+extern "C" def dragon_subprocess_write(fd: intc, data: bytes) -> int
+extern "C" def dragon_subprocess_close(fd: intc)
+
+# Concurrent drain+feed. Multiplexes all captured fds with poll(2): feeds
+# `stdin_data` to `in_fd` while draining `out_fd`/`err_fd` to EOF, bounded by
+# `timeout_ms` (< 0 = no timeout). CLOSES every captured fd on the way out.
+# Returns a list[bytes] of length 3: [stdout, stderr, flag] where flag is one
+# byte - 0 = completed within budget, 1 = timed out (partial output returned).
+extern "C" def dragon_subprocess_pump(in_fd: intc, stdin_data: bytes, out_fd: intc, err_fd: intc, timeout_ms: int) -> list[bytes]
+
+# waitpid + kill come straight from libc / the os runtime helper.
+extern "C" def dragon_waitpid(pid: intc, options: intc) -> list[int]
+extern "C" def kill(pid: intc, sig: intc) -> intc
+
+
+# Signal numbers used by terminate()/kill() (Linux/glibc values, Python parity).
+const SIGTERM: int = 15
+const SIGKILL: int = 9
+
+# waitpid flag: return immediately if no child has exited (for poll()).
+const _WNOHANG: int = 1
+
+
+#===----------------------------------------------------------------------===#
+# Status decode - translate a raw waitpid() status into a Python returncode.
+#===----------------------------------------------------------------------===#
+
+def _decode_status(status: int) -> int {
+    """A clean exit yields its exit code (0..255); death by signal N yields -N.
+
+    Mirrors CPython's Popen.returncode convention. Layout is the glibc wait
+    status: low 7 bits are the terminating signal (0 if exited normally), and
+    for a normal exit the next 8 bits are the exit code."""
+    const sig: int = status & 0x7F
+    if sig == 0 {
+        # WIFEXITED: returncode = WEXITSTATUS(status)
+        return (status >> 8) & 0xFF
+    }
+    if sig == 0x7F {
+        # WIFSTOPPED - not reachable without WUNTRACED; treat as 0 defensively.
+        return 0
+    }
+    # WIFSIGNALED: Python reports -signal.
+    return 0 - sig
+}
+
+
+#===----------------------------------------------------------------------===#
+# Exceptions
+#===----------------------------------------------------------------------===#
+
+class SubprocessError(Exception) {}
+
+
+class TimeoutExpired(SubprocessError) {
+    """Raised by communicate(timeout=)/run(timeout=) when the child does not
+    finish within the budget. The child has been killed and reaped by the time
+    this propagates. `output`/`stderr` carry whatever was captured before the
+    deadline (Python parity: TimeoutExpired exposes the partial streams)."""
+    cmd: list[str]
+    timeout: int
+    output: bytes
+    stderr: bytes
+
+    def(cmd: list[str], timeout: int, output: bytes = b"", stderr: bytes = b"") {
+        self.cmd = cmd
+        self.timeout = timeout
+        self.output = output
+        self.stderr = stderr
+    }
+}
+
+
+class CalledProcessError(SubprocessError) {
+    """Raised by run(check=True) / check_output when the child exits non-zero."""
+    returncode: int
+    cmd: list[str]
+    output: bytes
+
+    def(returncode: int, cmd: list[str], output: bytes = b"") {
+        self.returncode = returncode
+        self.cmd = cmd
+        self.output = output
+    }
+}
+
+
+#===----------------------------------------------------------------------===#
+# CompletedProcess - the result object returned by run().
+#===----------------------------------------------------------------------===#
+
+class CompletedProcess {
+    args: list[str]
+    returncode: int
+    stdout: bytes
+    stderr: bytes
+
+    def(args: list[str], returncode: int, stdout: bytes = b"", stderr: bytes = b"") {
+        self.args = args
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+    }
+
+    def check_returncode() {
+        """Raise CalledProcessError if the child exited non-zero (Python parity)."""
+        if self.returncode != 0 {
+            raise CalledProcessError(self.returncode, self.args, self.stdout)
+        }
+    }
+}
+
+
+#===----------------------------------------------------------------------===#
+# Popen - the low-level handle. Spawns at construction time.
+#===----------------------------------------------------------------------===#
+
+class Popen {
+    args: list[str]
+    pid: int
+    returncode: int          # -1 == still running / not yet reaped
+    _stdin_fd: int
+    _stdout_fd: int
+    _stderr_fd: int
+    _reaped: bool
+
+    def(args: list[str], cwd: str = "", capture_stdout: bool = true, capture_stderr: bool = true, capture_stdin: bool = false) {
+        if len(args) == 0 {
+            raise ValueError("Popen: args must be a non-empty list[str]")
+        }
+        self.args = args
+        self.returncode = -1
+        self._reaped = false
+        const ci: int = 1 if capture_stdin else 0
+        const co: int = 1 if capture_stdout else 0
+        const ce: int = 1 if capture_stderr else 0
+        const r: list[int] = dragon_subprocess_spawn(args, ci, co, ce, cwd)
+        if r[0] < 0 {
+            raise OSError(f"failed to spawn '{args[0]}'")
+        }
+        self.pid = r[0]
+        self._stdin_fd = r[1]
+        self._stdout_fd = r[2]
+        self._stderr_fd = r[3]
+    }
+
+    def communicate(input: bytes = b"", timeout: int = -1) -> tuple[bytes, bytes] {
+        """Feed `input` to the child's stdin (if captured) while concurrently
+        draining stdout and stderr to EOF, then wait for exit. Returns
+        (stdout_bytes, stderr_bytes).
+
+        The drain is a single poll(2) multiplex over all captured fds
+        (`dragon_subprocess_pump`), so a child that fills one pipe while the
+        parent services another can never deadlock - the deadlock the Tier-0
+        serial drain was prone to.
+
+        `timeout` is a millisecond budget; `timeout < 0` (default) waits
+        indefinitely. On expiry the child is killed and reaped and
+        `TimeoutExpired` is raised carrying the partial output captured so far
+        (Python parity)."""
+        # The pump owns the I/O loop AND closes every captured fd it is handed.
+        # Pass -1 for any stream we did not capture (the pump treats -1 as
+        # nothing-to-write / already-at-EOF).
+        const r: list[bytes] = dragon_subprocess_pump(self._stdin_fd, input, self._stdout_fd, self._stderr_fd, timeout)
+        # Pump has closed our ends; forget them so wait()/close paths are no-ops.
+        self._stdin_fd = -1
+        self._stdout_fd = -1
+        self._stderr_fd = -1
+        const out: bytes = r[0]
+        const err: bytes = r[1]
+        const flag: bytes = r[2]
+        const timed_out: bool = len(flag) > 0 and flag[0] != 0
+        if timed_out {
+            # Kill the child, reap it (so it is not left a zombie), then raise.
+            self.kill()
+            self.wait()
+            raise TimeoutExpired(self.args, timeout, out, err)
+        }
+        self.wait()
+        return (out, err)
+    }
+
+    def wait() -> int {
+        """Block until the child exits and return its returncode."""
+        if self._reaped {
+            return self.returncode
+        }
+        const r: list[int] = dragon_waitpid(self.pid, 0)
+        if r[0] < 0 {
+            raise OSError(f"waitpid({self.pid}) failed")
+        }
+        self.returncode = _decode_status(r[1])
+        self._reaped = true
+        return self.returncode
+    }
+
+    def poll() -> int {
+        """Non-blocking check. Returns the returncode if the child has exited,
+        or -1 if it is still running (Python returns None; Dragon uses -1)."""
+        if self._reaped {
+            return self.returncode
+        }
+        const r: list[int] = dragon_waitpid(self.pid, _WNOHANG)
+        # WNOHANG: r == [0, 0] means "still running" (the runtime returns the
+        # waitpid pid, which is 0 when no child has changed state).
+        if r[0] == 0 {
+            return -1
+        }
+        if r[0] < 0 {
+            raise OSError(f"waitpid({self.pid}) failed")
+        }
+        self.returncode = _decode_status(r[1])
+        self._reaped = true
+        return self.returncode
+    }
+
+    def send_signal(sig: int) {
+        """Deliver `sig` to the child via kill(2)."""
+        kill(self.pid, sig)
+    }
+
+    def terminate() {
+        """Send SIGTERM (Python parity)."""
+        kill(self.pid, SIGTERM)
+    }
+
+    def kill() {
+        """Send SIGKILL (Python parity)."""
+        kill(self.pid, SIGKILL)
+    }
+}
+
+
+#===----------------------------------------------------------------------===#
+# High-level front ends
+#===----------------------------------------------------------------------===#
+
+def run(args: list[str], capture_output: bool = false, check: bool = false, input: bytes = b"", cwd: str = "", timeout: int = -1) -> CompletedProcess {
+    """Run `args` to completion and return a CompletedProcess.
+
+    `capture_output=True` captures stdout+stderr into the result. `input`
+    feeds the child's stdin (a captured-stdin pipe is opened automatically when
+    `input` is non-empty). `check=True` raises CalledProcessError on non-zero
+    exit. `timeout` is a millisecond budget (`< 0` = no timeout); on expiry the
+    child is killed and reaped and `TimeoutExpired` is raised (Python parity).
+
+    When a timeout is requested the child's stdout/stderr are captured even if
+    `capture_output=False`: the pump must hold at least one of the child's
+    pipes so its open/EOF state tracks the child's liveness, which is what the
+    deadline watches."""
+    const want_stdin: bool = len(input) > 0
+    const timed: bool = timeout >= 0
+    # Capture is needed either because the caller asked, or to give the pump a
+    # liveness fd to time the child against.
+    const cap: bool = capture_output or timed
+    const proc: Popen = Popen(args, cwd, cap, cap, want_stdin)
+    out: bytes = b""
+    err: bytes = b""
+    if cap or want_stdin {
+        const both: tuple[bytes, bytes] = proc.communicate(input, timeout)
+        out = both[0]
+        err = both[1]
+    } else {
+        proc.wait()
+    }
+    # Only surface captured streams the caller actually asked for.
+    final_out: bytes = out if capture_output else b""
+    final_err: bytes = err if capture_output else b""
+    const cp: CompletedProcess = CompletedProcess(args, proc.returncode, final_out, final_err)
+    if check {
+        cp.check_returncode()
+    }
+    return cp
+}
+
+
+def check_output(args: list[str], cwd: str = "") -> bytes {
+    """Run `args`, capture stdout, and return it. Raises CalledProcessError on
+    non-zero exit (Python parity)."""
+    const cp: CompletedProcess = run(args, true, false, b"", cwd)
+    if cp.returncode != 0 {
+        raise CalledProcessError(cp.returncode, args, cp.stdout)
+    }
+    return cp.stdout
+}
+
+
+def call(args: list[str], cwd: str = "") -> int {
+    """Run `args` to completion and return the returncode (Python parity)."""
+    const cp: CompletedProcess = run(args, false, false, b"", cwd)
+    return cp.returncode
+}

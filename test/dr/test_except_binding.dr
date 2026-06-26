@@ -1,0 +1,75 @@
+"""Unified `except X as e` binding semantics (smells.md except-as fork).
+
+Previously `e` was a plain message STRING for a builtin exception but a typed
+INSTANCE for a user exception - one syntax, two semantics. Pythonic code that
+treated builtin `e` as an exception object was silently handed a str (and
+str-only ops like `e.upper()` silently worked).
+
+Now `e` has ONE meaning for both kinds: it IS the exception. `str(e)` /
+`print(e)` / f"{e}" yield the message for builtin and user exceptions alike;
+user exceptions additionally expose their declared fields. Using a builtin
+`e` directly AS a str ('m: str = e', 'e.upper()') is a compile error - the
+TypeChecker binds builtin handlers to an opaque exception instance type.
+Codegen is unchanged (zero runtime cost; the binding still carries the
+message under the hood).
+"""
+
+from unittest import TestCase, main
+
+
+class AppError(Exception) {
+    code: int
+    def(code: int) {
+        self.code = code
+    }
+}
+
+
+class ExceptBindingTests(TestCase) {
+    def test_builtin_str_of_e_is_message() {
+        msg: str = ""
+        try {
+            x: int = 1 // 0
+        } except ZeroDivisionError as e {
+            msg = str(e)
+        }
+        self.assertTrue("division by zero" in msg)
+    }
+
+    def test_builtin_fstring_of_e_is_message() {
+        out: str = ""
+        try {
+            xs: list[int] = [1]
+            y: int = xs[5]
+        } except IndexError as e {
+            out = f"{e}"
+        }
+        self.assertTrue("IndexError" in out)
+    }
+
+    def test_user_exception_fields_and_message() {
+        code: int = 0
+        msg: str = ""
+        try {
+            raise AppError(42)
+        } except AppError as e {
+            code = e.code
+            msg = str(e)
+        }
+        self.assertEqual(code, 42)
+        self.assertNotEqual(msg, "")
+    }
+
+    def test_parent_catch_still_binds() {
+        got: str = ""
+        try {
+            x: int = 1 // 0
+        } except ArithmeticError as e {
+            got = str(e)
+        }
+        self.assertTrue("division" in got)
+    }
+}
+
+
+main([ExceptBindingTests()])

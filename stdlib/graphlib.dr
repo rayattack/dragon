@@ -1,0 +1,170 @@
+# graphlib.dr - Dragon standard library: graph algorithms
+#
+# Provides topological sorting via Kahn's algorithm. Uses parallel lists
+# as an adjacency structure since .dr mode operates on typed lists.
+# Matches a simplified version of Python's graphlib.TopologicalSorter.
+#
+# Pure Dragon - no C dependencies.
+
+#===----------------------------------------------------------------------===#
+# TopologicalSorter class
+#===----------------------------------------------------------------------===#
+
+class TopologicalSorter {
+    def() {
+        # Nodes in the graph (unique entries).
+        self.nodes: list[int] = []
+        # Edges represented as parallel lists: edge_from[i] -> edge_to[i]
+        # means edge_from[i] must come before edge_to[i] in the ordering.
+        # (edge_from[i] is a predecessor/dependency of edge_to[i])
+        self.edge_from: list[int] = []
+        self.edge_to: list[int] = []
+    }
+
+    def add_node(node: int) {
+        # Add a node with no dependencies. If it already exists, this is a no-op.
+        if _list_contains(self.nodes, node) == false {
+            self.nodes.append(node)
+        }
+    }
+
+    def add_edge(from_node: int, to_node: int) {
+        # Add a dependency edge: from_node must come before to_node.
+        # Both nodes are added to the graph if not already present.
+        if _list_contains(self.nodes, from_node) == false {
+            self.nodes.append(from_node)
+        }
+        if _list_contains(self.nodes, to_node) == false {
+            self.nodes.append(to_node)
+        }
+        self.edge_from.append(from_node)
+        self.edge_to.append(to_node)
+    }
+
+    def static_order() -> list[int] {
+        # Return a topological ordering using Kahn's algorithm.
+        # Raises ValueError if a cycle is detected.
+        const num_nodes: int = len(self.nodes)
+        const num_edges: int = len(self.edge_from)
+
+        # Compute in-degree for each node.
+        # in_degree[i] corresponds to self.nodes[i].
+        in_degree: list[int] = []
+        i: int = 0
+        while i < num_nodes {
+            in_degree.append(0)
+            i = i + 1
+        }
+
+        # Count incoming edges for each node.
+        e: int = 0
+        while e < num_edges {
+            const to_node: int = self.edge_to[e]
+            const to_idx: int = _index_of(self.nodes, to_node)
+            if to_idx >= 0 {
+                in_degree[to_idx] = in_degree[to_idx] + 1
+            }
+            e = e + 1
+        }
+
+        # Initialize queue with all zero in-degree nodes.
+        queue: list[int] = []
+        i = 0
+        while i < num_nodes {
+            if in_degree[i] == 0 {
+                queue.append(self.nodes[i])
+            }
+            i = i + 1
+        }
+
+        result: list[int] = []
+        while len(queue) > 0 {
+            # Dequeue from front (shift operation).
+            const node: int = queue[0]
+            _remove_front(queue)
+            result.append(node)
+
+            # For each edge from this node, decrement in-degree of target.
+            e = 0
+            while e < num_edges {
+                if self.edge_from[e] == node {
+                    const target: int = self.edge_to[e]
+                    const target_idx: int = _index_of(self.nodes, target)
+                    if target_idx >= 0 {
+                        in_degree[target_idx] = in_degree[target_idx] - 1
+                        if in_degree[target_idx] == 0 {
+                            queue.append(target)
+                        }
+                    }
+                }
+                e = e + 1
+            }
+        }
+
+        if len(result) != num_nodes {
+            raise ValueError("cycle detected in graph")
+        }
+
+        return result
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# Internal utility helpers
+#===----------------------------------------------------------------------===#
+
+def _list_contains(items: list[int], value: int) -> bool {
+    # Check if value exists in items.
+    i: int = 0
+    while i < len(items) {
+        if items[i] == value {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+def _index_of(items: list[int], value: int) -> int {
+    # Return the index of value in items, or -1 if not found.
+    i: int = 0
+    while i < len(items) {
+        if items[i] == value {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+def _remove_front(items: list[int]) {
+    # Remove the first element of a list by shifting all elements left.
+    const n: int = len(items)
+    i: int = 0
+    while i < n - 1 {
+        items[i] = items[i + 1]
+        i = i + 1
+    }
+    items.pop()
+}
+
+#===----------------------------------------------------------------------===#
+# Module-level convenience functions
+#===----------------------------------------------------------------------===#
+
+def topological_sort(nodes: list[int], edge_from: list[int], edge_to: list[int]) -> list[int] {
+    # Convenience function for one-shot topological sort.
+    # edge_from[i] must come before edge_to[i].
+    const sorter: TopologicalSorter = TopologicalSorter()
+    i: int = 0
+    while i < len(nodes) {
+        sorter.add_node(nodes[i])
+        i = i + 1
+    }
+    i = 0
+    while i < len(edge_from) {
+        sorter.add_edge(edge_from[i], edge_to[i])
+        i = i + 1
+    }
+    return sorter.static_order()
+}

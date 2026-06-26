@@ -1,0 +1,69 @@
+# test/dr/test_hmac.dr - Known-answer tests for HMAC (RFC 2104).
+#
+# HMAC-SHA-256 vectors: RFC 4231 §4. HMAC-SHA-1 vectors: RFC 2202 §3.
+# The large-key cases (TC6/TC7) exercise hmac._normalize_key's "hash the key
+# when it exceeds the block size" path - a common place for off-by-one bugs.
+# HMAC-SHA-256 backs token signing; HMAC-SHA-1 is the inner primitive of TOTP.
+
+from unittest import TestCase, main
+from hmac import new, HMAC
+
+class HmacSha256Tests(TestCase) {
+    def test_rfc4231_tc1() {
+        key: bytes = bytes([0x0b] * 20)
+        self.assertEqual(new(key, b"Hi There", "sha256").hexdigest(),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7")
+    }
+
+    def test_rfc4231_tc2() {
+        self.assertEqual(
+            new(b"Jefe", b"what do ya want for nothing?", "sha256").hexdigest(),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843")
+    }
+
+    def test_rfc4231_tc3() {
+        key: bytes = bytes([0xaa] * 20)
+        data: bytes = bytes([0xdd] * 50)
+        self.assertEqual(new(key, data, "sha256").hexdigest(),
+            "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe")
+    }
+
+    def test_rfc4231_tc6_large_key() {
+        key: bytes = bytes([0xaa] * 131)
+        self.assertEqual(
+            new(key, b"Test Using Larger Than Block-Size Key - Hash Key First", "sha256").hexdigest(),
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54")
+    }
+
+    def test_rfc4231_tc7_large_key_and_data() {
+        key: bytes = bytes([0xaa] * 131)
+        data: bytes = b"This is a test using a larger than block-size key and a larger than block-size data. The key needs to be hashed before being used by the HMAC algorithm."
+        self.assertEqual(new(key, data, "sha256").hexdigest(),
+            "9b09ffa71b942fcb27635fbcd5b0e944bfdc63644f0713938a7f51535c3a35e2")
+    }
+
+    def test_incremental_equiv() {
+        h: HMAC = new(b"key", b"", "sha256")
+        h.update(b"The quick brown fox ")
+        h.update(b"jumps over the lazy dog")
+        one_shot: str = new(b"key",
+            b"The quick brown fox jumps over the lazy dog", "sha256").hexdigest()
+        self.assertEqual(h.hexdigest(), one_shot)
+    }
+}
+
+class HmacSha1Tests(TestCase) {
+    def test_rfc2202_tc1() {
+        key: bytes = bytes([0x0b] * 20)
+        self.assertEqual(new(key, b"Hi There", "sha1").hexdigest(),
+            "b617318655057264e28bc0b6fb378c8ef146be00")
+    }
+
+    def test_rfc2202_tc2() {
+        self.assertEqual(
+            new(b"Jefe", b"what do ya want for nothing?", "sha1").hexdigest(),
+            "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79")
+    }
+}
+
+main([HmacSha256Tests(), HmacSha1Tests()])

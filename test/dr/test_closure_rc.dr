@@ -1,0 +1,136 @@
+# test/dr/test_closure_rc.dr - closure / Callable reference-counting (T39).
+#
+# Regression guard for making VarKind::Closure a fully refcounted kind: a
+# `: Callable` local / param / field / list element / dict value is a heap
+# DragonClosure (or a bare fn ptr) that must be RC'd via the tag-gated
+# dragon_{in,de}cref_callable. These cases were leaking (closure + env) or, in
+# the bare-fn-in-container case, crashing on generic dragon_decref of a
+# headerless fn ptr. The correctness (right values, no crash) is asserted here;
+# the leak/double-free freedom is verified under ASan separately.
+
+from unittest import TestCase, main
+
+
+def mk(n: int) -> Callable[[int], int] {
+    def adder(x: int) -> int { return x + n }
+    return adder
+}
+
+def inc(x: int) -> int { return x + 1 }
+def dec(x: int) -> int { return x - 1 }
+def apply(f: Callable[[int], int], v: int) -> int { return f(v) }
+def identity(f: Callable[[int], int]) -> Callable[[int], int] { return f }
+
+
+class Box {
+    fn: Callable[[int], int]
+    def(f: Callable[[int], int]) { self.fn = f }
+    def get() -> Callable[[int], int] { return self.fn }
+    def call(x: int) -> int { return self.fn(x) }
+    def set(f: Callable[[int], int]) { self.fn = f }
+}
+
+class Picker {
+    f: Callable[[int], int]
+    def(flag: bool) {
+        if flag { self.f = mk(10) } else { self.f = mk(20) }
+    }
+    def call(x: int) -> int { return self.f(x) }
+}
+
+
+class ClosureRcTests(TestCase) {
+    def test_reassign_local() {
+        g: Callable[[int], int] = mk(1)
+        g = mk(2)
+        self.assertEqual(g(10), 12)
+    }
+
+    def test_pop_into_local() {
+        fs: list[Callable[[int], int]] = [mk(1), mk(2), mk(3)]
+        p: Callable[[int], int] = fs.pop()
+        self.assertEqual(p(10), 13)
+    }
+
+    def test_field_init_from_param() {
+        b: Box = Box(mk(7))
+        self.assertEqual(b.call(3), 10)
+    }
+
+    def test_field_get_returns_owning_ref() {
+        b: Box = Box(mk(5))
+        h: Callable[[int], int] = b.get()
+        self.assertEqual(h(10), 15)
+    }
+
+    def test_field_setter_overwrite() {
+        b: Box = Box(inc)
+        b.set(mk(100))
+        self.assertEqual(b.call(1), 101)
+    }
+
+    def test_conditional_ctor_field_init() {
+        p: Picker = Picker(True)
+        q: Picker = Picker(False)
+        self.assertEqual(p.call(1), 11)
+        self.assertEqual(q.call(1), 21)
+    }
+
+    def test_param_borrow_then_call_original() {
+        g: Callable[[int], int] = mk(5)
+        self.assertEqual(apply(g, 10), 15)
+        self.assertEqual(g(1), 6)
+    }
+
+    def test_return_borrowed_param() {
+        g: Callable[[int], int] = mk(7)
+        h: Callable[[int], int] = identity(g)
+        self.assertEqual(h(3), 10)
+        self.assertEqual(g(3), 10)
+    }
+
+    def test_iterate_list_of_closures() {
+        fs: list[Callable[[int], int]] = [mk(1), mk(2), mk(3)]
+        total: int = 0
+        for f in fs { total = total + f(10) }
+        self.assertEqual(total, 36)
+    }
+
+    def test_bare_fns_in_list() {
+        # A list[Callable] may hold bare top-level functions (no closure header).
+        fs: list[Callable[[int], int]] = [inc, mk(10), dec]
+        self.assertEqual(fs[0](5), 6)
+        self.assertEqual(fs[1](5), 15)
+        self.assertEqual(fs[2](5), 4)
+    }
+
+    def test_list_subscript_overwrite() {
+        fs: list[Callable[[int], int]] = [mk(1), mk(2)]
+        fs[1] = mk(100)
+        self.assertEqual(fs[0](0), 1)
+        self.assertEqual(fs[1](0), 100)
+    }
+
+    def test_dict_of_closures() {
+        d: dict[str, Callable[[int], int]] = {}
+        d["a"] = mk(1)
+        d["b"] = mk(2)
+        d["a"] = mk(9)   # overwrite - old closure released
+        f: Callable[[int], int] = d["a"]
+        self.assertEqual(f(0), 9)
+    }
+
+    def test_dict_with_bare_fn() {
+        d: dict[str, Callable[[int], int]] = {}
+        d["op"] = inc
+        self.assertEqual(d["op"](10), 11)
+    }
+
+    def test_immediate_chained_call() {
+        self.assertEqual(mk(5)(10), 15)
+        self.assertEqual(identity(mk(20))(2), 22)
+    }
+}
+
+
+main([ClosureRcTests()])

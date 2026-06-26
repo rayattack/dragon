@@ -1,0 +1,99 @@
+"""fileinput - iterate over lines from many input streams (Python parity).
+
+Pure Dragon over `io.open`. Provides the common `for line in
+fileinput.input(files): ...` pattern: concatenated lines across one or
+more files, with line/file metadata accessible via accessor methods on a
+`FileInput` instance.
+
+Differences from CPython:
+- No stdin support (`sys.stdin` lacks a line-iter surface today). Pass
+  an explicit list of paths.
+- No inplace edit (`inplace=True`) - would need `os.rename` + temp file.
+"""
+
+from io import open
+
+
+class FileInput {
+    files: list[str]
+    _all_lines: list[str]
+    _line_to_file: list[int]
+    _line_no_in_file: list[int]
+    _pos: int
+
+    def(files: list[str]) {
+        self.files = files
+        self._all_lines = []
+        self._line_to_file = []
+        self._line_no_in_file = []
+        self._pos = 0
+        for i in range(len(files)) {
+            lines: list[str] = open(files[i]).lines()
+            for k in range(len(lines)) {
+                self._all_lines.append(lines[k])
+                self._line_to_file.append(i)
+                self._line_no_in_file.append(k + 1)
+            }
+        }
+    }
+
+    def __iter__() -> FileInput {
+        self._pos = 0
+        return self
+    }
+
+    def __next__() -> str {
+        if self._pos >= len(self._all_lines) {
+            raise StopIteration("end of input")
+        }
+        line: str = self._all_lines[self._pos]
+        self._pos += 1
+        return line
+    }
+
+    def filename() -> str {
+        """Path of the file that produced the most recent line."""
+        if self._pos == 0 or self._pos > len(self._all_lines) {
+            return ""
+        }
+        return self.files[self._line_to_file[self._pos - 1]]
+    }
+
+    def lineno() -> int {
+        """Cumulative 1-based line number across all files."""
+        return self._pos
+    }
+
+    def filelineno() -> int {
+        """1-based line number within the current file."""
+        if self._pos == 0 or self._pos > len(self._all_lines) {
+            return 0
+        }
+        return self._line_no_in_file[self._pos - 1]
+    }
+
+    def isfirstline() -> bool {
+        return self.filelineno() == 1
+    }
+
+    def nextfile() -> None {
+        """Advance past all remaining lines of the current file."""
+        if self._pos == 0 {
+            return
+        }
+        current: int = self._line_to_file[self._pos - 1]
+        while self._pos < len(self._all_lines) and self._line_to_file[self._pos] == current {
+            self._pos += 1
+        }
+    }
+
+    def close() -> None {
+        self._pos = len(self._all_lines)
+    }
+}
+
+
+def input(files: list[str]) -> FileInput {
+    """Open `files` for line iteration."""
+    return FileInput(files)
+}

@@ -1,0 +1,2 @@
+# collections/collections.dr - Package root for Dragon collections module
+# Re-exports concurrent collections for `from collections import SyncList, SyncDict`

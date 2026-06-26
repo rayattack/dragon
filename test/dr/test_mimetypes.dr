@@ -1,0 +1,32 @@
+"""mimetypes - guess_type / guess_extension over the common table."""
+
+from unittest import TestCase, main
+import mimetypes
+from mimetypes import guess_type, guess_extension
+
+
+class MimetypesTests(TestCase) {
+    def test_guess_type() {
+        self.assertEqual(guess_type("foo.png"), "image/png")
+        self.assertEqual(guess_type("index.html"), "text/html")
+        self.assertEqual(guess_type("data.json"), "application/json")
+    }
+
+    def test_case_insensitive() {
+        self.assertEqual(guess_type("A/B/C.HTML"), "text/html")
+        self.assertEqual(guess_type("photo.JPG"), "image/jpeg")
+    }
+
+    def test_unknown() {
+        self.assertEqual(guess_type("noext"), "")
+        self.assertEqual(guess_type("file.zzz"), "")
+    }
+
+    def test_guess_extension() {
+        self.assertEqual(guess_extension("application/json"), ".json")
+        self.assertEqual(guess_extension("image/png"), ".png")
+    }
+}
+
+
+main([MimetypesTests()])

@@ -1,0 +1,234 @@
+# reprlib.dr - alternative repr() with output-size limits.
+#
+# Useful for logging and pprint, where dumping a 1M-element list verbatim is
+# noise. The Repr class holds per-type caps and produces truncated output
+# matching Python's `reprlib`.
+#
+# Adaptation: Dragon's static typing means we can't dispatch by runtime type
+# the way CPython does. The `repr_*` helpers below are typed entry points;
+# pick the one that matches your value, or call repr_str() / repr_int() for
+# scalars.
+#
+# Pure Dragon - no C dependencies.
+
+#===----------------------------------------------------------------------===#
+# Repr - holds the size caps applied during truncation
+#===----------------------------------------------------------------------===#
+
+class Repr {
+    def(maxlevel: int = 6,
+        maxtuple: int = 6,
+        maxlist: int = 6,
+        maxdict: int = 4,
+        maxset: int = 6,
+        maxstring: int = 30,
+        maxlong: int = 40,
+        maxother: int = 30,
+        fillvalue: str = "...") {
+        self.maxlevel = maxlevel
+        self.maxtuple = maxtuple
+        self.maxlist = maxlist
+        self.maxdict = maxdict
+        self.maxset = maxset
+        self.maxstring = maxstring
+        self.maxlong = maxlong
+        self.maxother = maxother
+        self.fillvalue = fillvalue
+    }
+
+    #-------------------------------------------------------------------#
+    # Scalars
+    #-------------------------------------------------------------------#
+
+    def repr_int(value: int) -> str {
+        const s: str = str(value)
+        if len(s) <= self.maxlong {
+            return s
+        }
+        const left: int = self.maxlong // 2
+        const right: int = self.maxlong - left - len(self.fillvalue)
+        if right <= 0 {
+            return s[0:self.maxlong] + self.fillvalue
+        }
+        return s[0:left] + self.fillvalue + s[len(s) - right:len(s)]
+    }
+
+    def repr_float(value: float) -> str {
+        return str(value)
+    }
+
+    def repr_bool(value: bool) -> str {
+        if value { return "True" }
+        return "False"
+    }
+
+    def repr_str(value: str) -> str {
+        # Quote and escape, then truncate to maxstring keeping the trailing
+        # quote so output is still well-formed.
+        const escaped: str = _escape_str(value)
+        const quoted: str = "'" + escaped + "'"
+        if len(quoted) <= self.maxstring {
+            return quoted
+        }
+        const i: int = (self.maxstring - len(self.fillvalue)) // 2
+        if i < 1 {
+            return "'" + self.fillvalue + "'"
+        }
+        return "'" + escaped[0:i] + self.fillvalue + escaped[len(escaped) - i:len(escaped)] + "'"
+    }
+
+    #-------------------------------------------------------------------#
+    # Containers (typed entry points)
+    #-------------------------------------------------------------------#
+
+    def repr_list_int(value: list[int]) -> str {
+        return _join_truncated_int(value, self.maxlist, self.fillvalue, "[", "]")
+    }
+
+    def repr_list_str(value: list[str]) -> str {
+        return _join_truncated_str(value, self.maxlist, self.fillvalue, "[", "]")
+    }
+
+    def repr_tuple_int(value: list[int]) -> str {
+        # Dragon tuples and lists share the same access shape at this layer;
+        # accept list[int] as the source of values.
+        return _join_truncated_int(value, self.maxtuple, self.fillvalue, "(", ")")
+    }
+
+    def repr_dict_str_int(value: dict[str, int]) -> str {
+        keys: list[str] = []
+        for k in value {
+            keys.append(k)
+        }
+        const total: int = len(keys)
+        if total == 0 {
+            return "{}"
+        }
+        out: str = "{"
+        const cap: int = self.maxdict
+        i: int = 0
+        const stop: int = min(cap, total)
+        while i < stop {
+            if i > 0 { out = out + ", " }
+            const k: str = keys[i]
+            out = out + self.repr_str(k) + ": " + self.repr_int(value[k])
+            i = i + 1
+        }
+        if total > cap {
+            out = out + ", " + self.fillvalue
+        }
+        return out + "}"
+    }
+
+    def repr_dict_str_str(value: dict[str, str]) -> str {
+        keys: list[str] = []
+        for k in value {
+            keys.append(k)
+        }
+        const total: int = len(keys)
+        if total == 0 {
+            return "{}"
+        }
+        out: str = "{"
+        const cap: int = self.maxdict
+        i: int = 0
+        const stop: int = min(cap, total)
+        while i < stop {
+            if i > 0 { out = out + ", " }
+            const k: str = keys[i]
+            out = out + self.repr_str(k) + ": " + self.repr_str(value[k])
+            i = i + 1
+        }
+        if total > cap {
+            out = out + ", " + self.fillvalue
+        }
+        return out + "}"
+    }
+}
+
+
+#===----------------------------------------------------------------------===#
+# Module-level singleton + convenience proxies (match Python's `aRepr`)
+#===----------------------------------------------------------------------===#
+
+aRepr: Repr = Repr()
+
+
+def repr_int(value: int) -> str { return aRepr.repr_int(value) }
+def repr_float(value: float) -> str { return aRepr.repr_float(value) }
+def repr_bool(value: bool) -> str { return aRepr.repr_bool(value) }
+def repr_str(value: str) -> str { return aRepr.repr_str(value) }
+def repr_list_int(value: list[int]) -> str { return aRepr.repr_list_int(value) }
+def repr_list_str(value: list[str]) -> str { return aRepr.repr_list_str(value) }
+def repr_dict_str_int(value: dict[str, int]) -> str { return aRepr.repr_dict_str_int(value) }
+def repr_dict_str_str(value: dict[str, str]) -> str { return aRepr.repr_dict_str_str(value) }
+
+
+#===----------------------------------------------------------------------===#
+# Internal helpers
+#===----------------------------------------------------------------------===#
+
+def _escape_str(s: str) -> str {
+    out: str = ""
+    i: int = 0
+    while i < len(s) {
+        const c: str = s[i]
+        if c == "'" {
+            out = out + "\\'"
+        } else if c == "\\" {
+            out = out + "\\\\"
+        } else if c == "\n" {
+            out = out + "\\n"
+        } else if c == "\r" {
+            out = out + "\\r"
+        } else if c == "\t" {
+            out = out + "\\t"
+        } else {
+            out = out + c
+        }
+        i = i + 1
+    }
+    return out
+}
+
+
+def _join_truncated_int(value: list[int], cap: int, fillvalue: str,
+                         open_s: str, close_s: str) -> str {
+    const total: int = len(value)
+    if total == 0 {
+        return open_s + close_s
+    }
+    out: str = open_s
+    const stop: int = min(cap, total)
+    i: int = 0
+    while i < stop {
+        if i > 0 { out = out + ", " }
+        out = out + str(value[i])
+        i = i + 1
+    }
+    if total > cap {
+        out = out + ", " + fillvalue
+    }
+    return out + close_s
+}
+
+
+def _join_truncated_str(value: list[str], cap: int, fillvalue: str,
+                         open_s: str, close_s: str) -> str {
+    const total: int = len(value)
+    if total == 0 {
+        return open_s + close_s
+    }
+    out: str = open_s
+    const stop: int = min(cap, total)
+    i: int = 0
+    while i < stop {
+        if i > 0 { out = out + ", " }
+        out = out + repr_str(value[i])
+        i = i + 1
+    }
+    if total > cap {
+        out = out + ", " + fillvalue
+    }
+    return out + close_s
+}

@@ -1,0 +1,218 @@
+"""http.cookiejar - RFC 6265 cookie jar (Python parity, common subset).
+
+Pure Dragon, built on `http.cookies` for parsing. Tracks cookies across
+requests, scoped by domain + path. Supports:
+
+- `add_cookie_header(request)` - pick all cookies whose domain/path
+  match `request.url` and produce a `Cookie:` header
+- `extract_cookies(response, request)` - read `Set-Cookie:` headers
+  from a response, store with domain/path inferred from the request
+- `clear` / `clear_session_cookies` / `__len__`
+
+Persistence (`MozillaCookieJar`, `LWPCookieJar`) is intentionally not
+modelled - they need a file format spec; defer until requested.
+"""
+
+
+class Cookie {
+    name: str
+    value: str
+    domain: str
+    path: str
+    expires: int           # 0 = session cookie
+    secure: bool
+    http_only: bool
+
+    def(name: str, value: str, domain: str = "", path: str = "/",
+        expires: int = 0, secure: bool = false, http_only: bool = false) {
+        self.name = name
+        self.value = value
+        self.domain = domain
+        self.path = path
+        self.expires = expires
+        self.secure = secure
+        self.http_only = http_only
+    }
+
+    def is_expired(now: int) -> bool {
+        return self.expires > 0 and self.expires < now
+    }
+}
+
+
+class CookieJar {
+    _cookies: list[Cookie]
+
+    def() {
+        self._cookies = []
+    }
+
+    def set_cookie(c: Cookie) -> None {
+        """Insert or replace a cookie matched by (domain, path, name)."""
+        i: int = 0
+        n: int = len(self._cookies)
+        while i < n {
+            cur: Cookie = self._cookies[i]
+            if cur.domain == c.domain and cur.path == c.path and cur.name == c.name {
+                self._cookies[i] = c
+                return
+            }
+            i += 1
+        }
+        self._cookies.append(c)
+    }
+
+    def get_cookie(name: str, domain: str = "", path: str = "/") -> Cookie {
+        """Return the cookie matching (name, domain, path); sentinel if missing."""
+        for c in self._cookies {
+            if c.name == name and (domain == "" or c.domain == domain) and c.path == path {
+                return c
+            }
+        }
+        return Cookie("", "")
+    }
+
+    def cookies_for(domain: str, path: str = "/", secure_channel: bool = false) -> list[Cookie] {
+        """Return cookies that would be sent to (domain, path) on a request.
+
+        Matches when stored.domain == domain (no suffix-match - CPython
+        does, but Dragon defers wildcard matching until ADR-007 ports it)
+        and stored.path is a prefix of `path`.
+        """
+        out: list[Cookie] = []
+        for c in self._cookies {
+            if c.domain != domain {
+                continue
+            }
+            if not path.startswith(c.path) {
+                continue
+            }
+            if c.secure and not secure_channel {
+                continue
+            }
+            out.append(c)
+        }
+        return out
+    }
+
+    def cookie_header(domain: str, path: str = "/", secure_channel: bool = false) -> str {
+        """Render the `Cookie:` header value for a request to (domain, path)."""
+        parts: list[str] = []
+        for c in self.cookies_for(domain, path, secure_channel) {
+            parts.append(c.name + "=" + c.value)
+        }
+        return "; ".join(parts)
+    }
+
+    def clear() -> None {
+        self._cookies = []
+    }
+
+    def clear_session_cookies() -> None {
+        kept: list[Cookie] = []
+        for c in self._cookies {
+            if c.expires > 0 {
+                kept.append(c)
+            }
+        }
+        self._cookies = kept
+    }
+
+    def clear_expired(now: int) -> int {
+        """Drop expired cookies, returning the count removed."""
+        kept: list[Cookie] = []
+        dropped: int = 0
+        for c in self._cookies {
+            if c.is_expired(now) {
+                dropped += 1
+            } else {
+                kept.append(c)
+            }
+        }
+        self._cookies = kept
+        return dropped
+    }
+
+    def __len__() -> int {
+        return len(self._cookies)
+    }
+
+    def all() -> list[Cookie] {
+        out: list[Cookie] = []
+        for c in self._cookies {
+            out.append(c)
+        }
+        return out
+    }
+}
+
+
+def parse_set_cookie(header: str, default_domain: str = "", default_path: str = "/") -> Cookie {
+    """Parse one `Set-Cookie:` header value into a `Cookie`.
+
+    Recognized attributes: Domain, Path, Expires (raw int parse -
+    callers can replace with a proper date parser), Secure, HttpOnly.
+    """
+    parts: list[str] = header.split(";")
+    if len(parts) == 0 {
+        return Cookie("", "")
+    }
+    first: str = parts[0].strip()
+    eq: int = first.find("=")
+    if eq < 0 {
+        return Cookie("", "")
+    }
+    name: str = first[0:eq].strip()
+    value: str = first[eq + 1:len(first)].strip()
+    domain: str = default_domain
+    path: str = default_path
+    expires: int = 0
+    secure: bool = false
+    http_only: bool = false
+    i: int = 1
+    while i < len(parts) {
+        attr: str = parts[i].strip()
+        lc: str = attr.lower()
+        if lc == "secure" {
+            secure = true
+        } elif lc == "httponly" {
+            http_only = true
+        } else {
+            ae: int = attr.find("=")
+            if ae > 0 {
+                k: str = attr[0:ae].strip().lower()
+                v: str = attr[ae + 1:len(attr)].strip()
+                if k == "domain" {
+                    domain = v
+                } elif k == "path" {
+                    path = v
+                } elif k == "expires" or k == "max-age" {
+                    expires = _safe_int(v)
+                }
+            }
+        }
+        i += 1
+    }
+    return Cookie(name, value, domain, path, expires, secure, http_only)
+}
+
+
+def _safe_int(s: str) -> int {
+    """Best-effort int parse; non-numeric → 0."""
+    if s == "" { return 0 }
+    n: int = len(s)
+    i: int = 0
+    if s[0:1] == "-" or s[0:1] == "+" {
+        i = 1
+    }
+    if i >= n { return 0 }
+    j: int = i
+    while j < n {
+        ch: str = s[j:j + 1]
+        if not ch.isdigit() {
+            return 0
+        }
+        j += 1
+    }
+    return int(s)
+}

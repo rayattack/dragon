@@ -1,0 +1,84 @@
+# test/dr/test_closure_escape.dr - D027 escaping-closure dispatch (Bug 1).
+#
+# Regression guard for the live-audit finding: a closure (capturing nested def)
+# returned from a factory and CALLED AFTER the factory frame returns used to be
+# dispatched as a bare function pointer - the call executed the DragonClosure
+# object as code and SIGSEGV'd. The fix marks a var bound to a closure-returning
+# call as VarKind::Closure so the call site unpacks fn+env.
+#
+# Also pins the no-regression invariant: a function that returns a BARE function
+# pointer must NOT be mis-marked as a closure (which would crash the other way).
+
+from unittest import TestCase, main
+
+def make_int_closure() -> Callable[[], int] {
+    x: int = 42
+    def get() -> int { return x }
+    return get
+}
+
+def make_list_closure() -> Callable[[], int] {
+    acc: list[int] = [10, 20, 30]
+    def total() -> int {
+        s: int = 0
+        for v in acc { s = s + v }
+        return s
+    }
+    return total
+}
+
+def _bare_const() -> int { return 7 }
+def pick_bare() -> Callable[[], int] { return _bare_const }
+
+# Higher-order: a Callable received as a PARAMETER must dispatch correctly
+# whether it holds a real closure or a bare fn (the value is wrapped into a
+# DragonClosure at the call site, so the tag is always reliable - no .text
+# guess, no crash).
+def call_it(f: Callable[[], int]) -> int { return f() + 1 }
+def make_adder(n: int) -> Callable[[int], int] {
+    def add(x: int) -> int { return x + n }
+    return add
+}
+def apply1(f: Callable[[int], int], v: int) -> int { return f(v) }
+
+class ClosureEscapeTests(TestCase) {
+    # Escaping closure capturing an int local - the canonical reported crash.
+    def test_escaping_int_capture() {
+        const g: Callable[[], int] = make_int_closure()
+        self.assertEqual(g(), 42)
+    }
+
+    # Escaping closure capturing a heap list - exercises the refcount path; the
+    # captured list must outlive the factory frame and stay valid across calls.
+    def test_escaping_list_capture() {
+        const g: Callable[[], int] = make_list_closure()
+        self.assertEqual(g(), 60)
+        self.assertEqual(g(), 60)
+    }
+
+    # A bare-fn-returning factory must keep bare-fn dispatch (no mis-mark).
+    def test_bare_fn_return_not_mismarked() {
+        const h: Callable[[], int] = pick_bare()
+        self.assertEqual(h(), 7)
+    }
+
+    # A CLOSURE passed as an argument (the reported SIGSEGV) - dispatched via
+    # the runtime closure path inside the callee.
+    def test_closure_passed_as_arg() {
+        self.assertEqual(call_it(make_int_closure()), 43)
+    }
+
+    # A BARE fn passed as an argument to a Callable param - wrapped into a
+    # DragonClosure at the call site, so the callee's reliable closure dispatch
+    # calls it correctly (no .text tag guess).
+    def test_bare_fn_passed_as_arg() {
+        self.assertEqual(call_it(_bare_const), 8)
+    }
+
+    # A closure WITH arguments passed as an argument.
+    def test_closure_with_args_as_arg() {
+        self.assertEqual(apply1(make_adder(10), 5), 15)
+    }
+}
+
+main([ClosureEscapeTests()])

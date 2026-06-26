@@ -1,0 +1,186 @@
+# warnings.dr - issue warnings without aborting.
+#
+# Mirrors the surface of CPython's `warnings`: warn(), filterwarnings(),
+# simplefilter(), resetwarnings(), formatwarning(), and a small filter list
+# the runtime walks when warn() is called.
+#
+# Adaptation: Dragon's `warnings` uses string category names instead of
+# exception class objects. The category constants below match Python's class
+# names exactly so `warn("msg", UserWarning)` reads identically.
+#
+# Filter actions:
+#  "default" - print the first occurrence of (message, category, module)
+#  "error" - promote to a raised RuntimeError
+#  "always" - print every occurrence
+#  "module" - print the first occurrence per module
+#  "once" - print the first occurrence regardless of context
+#  "ignore" - drop silently
+#
+# Pure Dragon - uses dragon_log_stderr from the runtime.
+
+extern "C" def dragon_log_stderr(msg: str)
+
+#===----------------------------------------------------------------------===#
+# Category constants (string-based; mirror Python's class names)
+#===----------------------------------------------------------------------===#
+
+const Warning: str = "Warning"
+const UserWarning: str = "UserWarning"
+const DeprecationWarning: str = "DeprecationWarning"
+const PendingDeprecationWarning: str = "PendingDeprecationWarning"
+const SyntaxWarning: str = "SyntaxWarning"
+const RuntimeWarning: str = "RuntimeWarning"
+const FutureWarning: str = "FutureWarning"
+const ImportWarning: str = "ImportWarning"
+const UnicodeWarning: str = "UnicodeWarning"
+const BytesWarning: str = "BytesWarning"
+const ResourceWarning: str = "ResourceWarning"
+
+#===----------------------------------------------------------------------===#
+# Filter state
+#===----------------------------------------------------------------------===#
+# Each filter is a tuple-shaped tiny dict: action, message_substr, category.
+# A category of "" matches all categories. message_substr matches anywhere
+# in the warning text - empty matches all.
+
+class _Filter {
+    def(action: str, message: str, category: str) {
+        self.action = action
+        self.message = message
+        self.category = category
+    }
+}
+
+_filters: list[_Filter] = [_Filter("default", "", "")]
+
+# Tracks (category|message|once_key) we've already emitted under "once" /
+# "module" / "default" actions so we avoid duplicates.
+_seen: dict[str, bool] = {}
+
+
+def _matches(f: _Filter, message: str, category: str) -> bool {
+    if f.category != "" {
+        if f.category != category {
+            return False
+        }
+    }
+    if f.message != "" {
+        if f.message in message {
+            return True
+        }
+        return False
+    }
+    return True
+}
+
+
+def _resolve_action(message: str, category: str) -> str {
+    # Walk filters in order; first match wins. Default fallback is "default".
+    i: int = 0
+    while i < len(_filters) {
+        const f: _Filter = _filters[i]
+        if _matches(f, message, category) {
+            return f.action
+        }
+        i = i + 1
+    }
+    return "default"
+}
+
+
+#===----------------------------------------------------------------------===#
+# Public API
+#===----------------------------------------------------------------------===#
+
+def formatwarning(message: str, category: str, filename: str, lineno: int) -> str {
+    # Match Python's "filename:lineno: Category: message\n" shape.
+    if filename == "" {
+        return category + ": " + message
+    }
+    return filename + ":" + str(lineno) + ": " + category + ": " + message
+}
+
+
+def showwarning(message: str, category: str, filename: str, lineno: int) -> None {
+    # Hook point: in Python this is overridable; here we simply emit.
+    dragon_log_stderr(formatwarning(message, category, filename, lineno))
+}
+
+
+def _emit(message: str, category: str, filename: str, lineno: int) -> None {
+    # Shared body for warn / warn_explicit: resolve the filter action, honour
+    # ignore/error, dedup once/default/module by a (location, category, message)
+    # key, then hand off to showwarning. The dedup key is internal, so warn()'s
+    # empty filename/0 lineno still yield a stable per-(category,message) key.
+    const action: str = _resolve_action(message, category)
+    if action == "ignore" {
+        return
+    }
+    if action == "error" {
+        raise RuntimeError(category + ": " + message)
+    }
+    if action == "once" or action == "default" or action == "module" {
+        const key: str = filename + "|" + str(lineno) + "|" + category + "|" + message
+        if key in _seen {
+            return
+        }
+        _seen[key] = True
+    }
+    showwarning(message, category, filename, lineno)
+}
+
+
+def warn(message: str, category: str = "UserWarning") -> None {
+    _emit(message, category, "", 0)
+}
+
+
+def warn_explicit(message: str, category: str, filename: str, lineno: int) -> None {
+    _emit(message, category, filename, lineno)
+}
+
+
+def filterwarnings(action: str, message: str = "", category: str = "", append: bool = False) -> None {
+    # Insert a filter. By default new filters take precedence (prepend).
+    const f: _Filter = _Filter(action, message, category)
+    if append {
+        _filters.append(f)
+        return
+    }
+    # Prepend - Dragon lists don't have insert(0); rebuild.
+    new_list: list[_Filter] = [f]
+    i: int = 0
+    while i < len(_filters) {
+        new_list.append(_filters[i])
+        i = i + 1
+    }
+    _set_filters(new_list)
+}
+
+
+def simplefilter(action: str, category: str = "", append: bool = False) -> None {
+    # Replace all filters with a single one (matching Python).
+    if append {
+        _filters.append(_Filter(action, "", category))
+        return
+    }
+    _set_filters([_Filter(action, "", category)])
+}
+
+
+def resetwarnings() -> None {
+    _set_filters([_Filter("default", "", "")])
+    _reset_seen()
+}
+
+
+def _set_filters(new_filters: list[_Filter]) -> None {
+    global _filters
+    _filters = new_filters
+}
+
+
+def _reset_seen() -> None {
+    global _seen
+    _seen = {}
+}

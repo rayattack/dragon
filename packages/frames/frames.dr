@@ -1,0 +1,788 @@
+# frames.dr - typed dataframes for Dragon
+#
+# Design (the "pandas without the cruft" core):
+#   * A column is a `Series`: one homogeneous dtype, stored in a native Dragon
+#     list (`list[int]` -> DragonListI64, `list[float]` -> DragonListF64,
+#     `list[str]` -> DragonListPtr). No per-element boxing.
+#   * A `DataFrame` is just a list of Series. Heterogeneity lives *across*
+#     columns, never inside one - so the only tag is `Series.dtype`, one per
+#     column, exactly the tagged-value pattern json.dr uses.
+#   * Deliberately omitted (the cruft): object dtype, dynamic column injection,
+#     implicit index alignment, inplace mutation, MultiIndex.
+#
+# Pure Dragon. Reductions (`sum`/`mean`/`min`/`max`/`std`) return float for a
+# uniform typed API regardless of int vs float column.
+
+from csv import parse_rows, format_row
+from math import sqrt
+
+# str <-> number conversion (same externs json.dr uses)
+extern "C" def dragon_str_to_int(s: str) -> int
+extern "C" def dragon_str_to_float(s: str) -> float
+
+#===----------------------------------------------------------------------===#
+# dtype tags
+#===----------------------------------------------------------------------===#
+
+const DT_INT: int = 0
+const DT_FLOAT: int = 1
+const DT_STR: int = 2
+
+def dtype_name(dt: int) -> str {
+    if dt == DT_INT { return "int" }
+    elif dt == DT_FLOAT { return "float" }
+    return "str"
+}
+
+#===----------------------------------------------------------------------===#
+# Series - one typed column
+#===----------------------------------------------------------------------===#
+
+class Series {
+    def(name: str, dtype: int) {
+        self.name: str = name
+        self.dtype: int = dtype
+        # Exactly one of these is populated, selected by `dtype`.
+        self.idata: list[int] = []
+        self.fdata: list[float] = []
+        self.sdata: list[str] = []
+    }
+
+    def size() -> int {
+        if self.dtype == DT_FLOAT { return len(self.fdata) }
+        elif self.dtype == DT_STR { return len(self.sdata) }
+        return len(self.idata)
+    }
+
+    def is_numeric() -> bool {
+        return self.dtype == DT_INT or self.dtype == DT_FLOAT
+    }
+
+    #--- element access ---#
+
+    def get_int(i: int) -> int { return self.idata[i] }
+    def get_float(i: int) -> float { return self.fdata[i] }
+    def get_str(i: int) -> str { return self.sdata[i] }
+
+    def as_str(i: int) -> str {
+        if self.dtype == DT_FLOAT { return str(self.fdata[i]) }
+        elif self.dtype == DT_STR { return self.sdata[i] }
+        return str(self.idata[i])
+    }
+
+    # Numeric value at row i as float (int columns promote). Caller ensures numeric.
+    def _numf(i: int) -> float {
+        if self.dtype == DT_FLOAT { return self.fdata[i] }
+        return float(self.idata[i])
+    }
+
+    def _check_numeric() {
+        if self.dtype == DT_STR {
+            raise ValueError(f"column '{self.name}' is not numeric")
+        }
+    }
+
+    #--- reductions (numeric, return float) ---#
+
+    def sum() -> float {
+        self._check_numeric()
+        total: float = 0.0
+        i: int = 0
+        const n: int = self.size()
+        while i < n {
+            total = total + self._numf(i)
+            i = i + 1
+        }
+        return total
+    }
+
+    def count() -> int {
+        return self.size()
+    }
+
+    def mean() -> float {
+        const n: int = self.size()
+        if n == 0 { raise ValueError("mean of empty column") }
+        return self.sum() / float(n)
+    }
+
+    def min() -> float {
+        self._check_numeric()
+        const n: int = self.size()
+        if n == 0 { raise ValueError("min of empty column") }
+        m: float = self._numf(0)
+        i: int = 1
+        while i < n {
+            const v: float = self._numf(i)
+            if v < m { m = v }
+            i = i + 1
+        }
+        return m
+    }
+
+    def max() -> float {
+        self._check_numeric()
+        const n: int = self.size()
+        if n == 0 { raise ValueError("max of empty column") }
+        m: float = self._numf(0)
+        i: int = 1
+        while i < n {
+            const v: float = self._numf(i)
+            if v > m { m = v }
+            i = i + 1
+        }
+        return m
+    }
+
+    def std() -> float {
+        self._check_numeric()
+        const n: int = self.size()
+        if n < 2 { raise ValueError("std requires at least 2 values") }
+        const mu: float = self.mean()
+        ss: float = 0.0
+        i: int = 0
+        while i < n {
+            const d: float = self._numf(i) - mu
+            ss = ss + d * d
+            i = i + 1
+        }
+        return sqrt(ss / float(n - 1))
+    }
+
+    #--- comparison masks (for DataFrame.filter) ---#
+
+    def gt(x: float) -> list[bool] {
+        self._check_numeric()
+        out: list[bool] = []
+        i: int = 0
+        const n: int = self.size()
+        while i < n {
+            out.append(self._numf(i) > x)
+            i = i + 1
+        }
+        return out
+    }
+
+    def lt(x: float) -> list[bool] {
+        self._check_numeric()
+        out: list[bool] = []
+        i: int = 0
+        const n: int = self.size()
+        while i < n {
+            out.append(self._numf(i) < x)
+            i = i + 1
+        }
+        return out
+    }
+
+    def ge(x: float) -> list[bool] {
+        self._check_numeric()
+        out: list[bool] = []
+        i: int = 0
+        const n: int = self.size()
+        while i < n {
+            out.append(self._numf(i) >= x)
+            i = i + 1
+        }
+        return out
+    }
+
+    def le(x: float) -> list[bool] {
+        self._check_numeric()
+        out: list[bool] = []
+        i: int = 0
+        const n: int = self.size()
+        while i < n {
+            out.append(self._numf(i) <= x)
+            i = i + 1
+        }
+        return out
+    }
+
+    def eq_num(x: float) -> list[bool] {
+        self._check_numeric()
+        out: list[bool] = []
+        i: int = 0
+        const n: int = self.size()
+        while i < n {
+            out.append(self._numf(i) == x)
+            i = i + 1
+        }
+        return out
+    }
+
+    def eq_str(v: str) -> list[bool] {
+        out: list[bool] = []
+        i: int = 0
+        const n: int = self.size()
+        while i < n {
+            out.append(self.sdata[i] == v)
+            i = i + 1
+        }
+        return out
+    }
+
+    #--- reorder/subset by row indices (workhorse for filter/sort/join) ---#
+
+    def take(idx: list[int]) -> Series {
+        out: Series = Series(self.name, self.dtype)
+        k: int = 0
+        const m: int = len(idx)
+        while k < m {
+            const i: int = idx[k]
+            if self.dtype == DT_FLOAT {
+                out.fdata.append(self.fdata[i])
+            } elif self.dtype == DT_STR {
+                out.sdata.append(self.sdata[i])
+            } else {
+                out.idata.append(self.idata[i])
+            }
+            k = k + 1
+        }
+        return out
+    }
+
+    # Three-way compare of rows i and j (ascending sense): -1, 0, or 1.
+    def _cmp(i: int, j: int) -> int {
+        if self.dtype == DT_FLOAT {
+            const af: float = self.fdata[i]
+            const bf: float = self.fdata[j]
+            if af < bf { return -1 }
+            if af > bf { return 1 }
+            return 0
+        } elif self.dtype == DT_STR {
+            const a: str = self.sdata[i]
+            const b: str = self.sdata[j]
+            if a < b { return -1 }
+            if a > b { return 1 }
+            return 0
+        }
+        const ai: int = self.idata[i]
+        const bi: int = self.idata[j]
+        if ai < bi { return -1 }
+        if ai > bi { return 1 }
+        return 0
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# Series factories
+#===----------------------------------------------------------------------===#
+
+def int_series(name: str, data: list[int]) -> Series {
+    s: Series = Series(name, DT_INT)
+    s.idata = data
+    return s
+}
+
+def float_series(name: str, data: list[float]) -> Series {
+    s: Series = Series(name, DT_FLOAT)
+    s.fdata = data
+    return s
+}
+
+def str_series(name: str, data: list[str]) -> Series {
+    s: Series = Series(name, DT_STR)
+    s.sdata = data
+    return s
+}
+
+#===----------------------------------------------------------------------===#
+# DataFrame
+#===----------------------------------------------------------------------===#
+
+class DataFrame {
+    def(cols: list[Series]) {
+        self.cols: list[Series] = cols
+    }
+
+    def ncols() -> int { return len(self.cols) }
+
+    def nrows() -> int {
+        if len(self.cols) == 0 { return 0 }
+        return self.cols[0].size()
+    }
+
+    def colnames() -> list[str] {
+        out: list[str] = []
+        i: int = 0
+        while i < len(self.cols) {
+            out.append(self.cols[i].name)
+            i = i + 1
+        }
+        return out
+    }
+
+    def has(name: str) -> bool {
+        i: int = 0
+        while i < len(self.cols) {
+            if self.cols[i].name == name { return true }
+            i = i + 1
+        }
+        return false
+    }
+
+    def col(name: str) -> Series {
+        i: int = 0
+        while i < len(self.cols) {
+            if self.cols[i].name == name { return self.cols[i] }
+            i = i + 1
+        }
+        raise ValueError(f"no column named '{name}'")
+    }
+
+    def select(names: list[str]) -> DataFrame {
+        out: list[Series] = []
+        i: int = 0
+        while i < len(names) {
+            out.append(self.col(names[i]))
+            i = i + 1
+        }
+        return DataFrame(out)
+    }
+
+    def drop(names: list[str]) -> DataFrame {
+        out: list[Series] = []
+        c: int = 0
+        while c < len(self.cols) {
+            const nm: str = self.cols[c].name
+            keep: bool = true
+            j: int = 0
+            while j < len(names) {
+                if names[j] == nm { keep = false }
+                j = j + 1
+            }
+            if keep { out.append(self.cols[c]) }
+            c = c + 1
+        }
+        return DataFrame(out)
+    }
+
+    def filter(mask: list[bool]) -> DataFrame {
+        idx: list[int] = []
+        i: int = 0
+        while i < len(mask) {
+            if mask[i] { idx.append(i) }
+            i = i + 1
+        }
+        out: list[Series] = []
+        c: int = 0
+        while c < len(self.cols) {
+            out.append(self.cols[c].take(idx))
+            c = c + 1
+        }
+        return DataFrame(out)
+    }
+
+    # Stable sort of all rows by one column (merge sort, O(n log n)).
+    def sort_values(by: str, ascending: bool = true) -> DataFrame {
+        const key: Series = self.col(by)
+        const idx: list[int] = _argsort(key, ascending)
+        out: list[Series] = []
+        c: int = 0
+        while c < len(self.cols) {
+            out.append(self.cols[c].take(idx))
+            c = c + 1
+        }
+        return DataFrame(out)
+    }
+
+    def groupby(by: str) -> GroupBy {
+        return GroupBy(self, by)
+    }
+
+    # Inner join on a shared key column. Right-side `on` column is dropped from
+    # the result. Non-key columns that collide by name are kept as-is (v1).
+    def join(other: DataFrame, on: str) -> DataFrame {
+        const lkey: Series = self.col(on)
+        const rkey: Series = other.col(on)
+
+        # index right rows by key string
+        rindex: dict[str, list[int]] = {}
+        j: int = 0
+        const rn: int = other.nrows()
+        while j < rn {
+            const k: str = rkey.as_str(j)
+            if k in rindex {
+                rindex[k].append(j)
+            } else {
+                fresh: list[int] = [j]
+                rindex[k] = fresh
+            }
+            j = j + 1
+        }
+
+        # pair up matching rows
+        lidx: list[int] = []
+        ridx: list[int] = []
+        i: int = 0
+        const ln: int = self.nrows()
+        while i < ln {
+            const k: str = lkey.as_str(i)
+            if k in rindex {
+                const matches: list[int] = rindex[k]
+                m: int = 0
+                while m < len(matches) {
+                    lidx.append(i)
+                    ridx.append(matches[m])
+                    m = m + 1
+                }
+            }
+            i = i + 1
+        }
+
+        out: list[Series] = []
+        c: int = 0
+        while c < len(self.cols) {
+            out.append(self.cols[c].take(lidx))
+            c = c + 1
+        }
+        c = 0
+        while c < len(other.cols) {
+            const oc: Series = other.cols[c]
+            if oc.name != on {
+                out.append(oc.take(ridx))
+            }
+            c = c + 1
+        }
+        return DataFrame(out)
+    }
+
+    def to_csv() -> str {
+        lines: list[str] = []
+        lines.append(format_row(self.colnames(), ","))
+        const nr: int = self.nrows()
+        r: int = 0
+        while r < nr {
+            row: list[str] = []
+            c: int = 0
+            while c < len(self.cols) {
+                row.append(self.cols[c].as_str(r))
+                c = c + 1
+            }
+            lines.append(format_row(row, ","))
+            r = r + 1
+        }
+        return "\n".join(lines)
+    }
+
+    def show() -> str {
+        const names: list[str] = self.colnames()
+        const nc: int = len(names)
+        const nr: int = self.nrows()
+
+        # column display widths
+        widths: list[int] = []
+        c: int = 0
+        while c < nc {
+            w: int = len(names[c])
+            r: int = 0
+            while r < nr {
+                const cell: str = self.cols[c].as_str(r)
+                if len(cell) > w { w = len(cell) }
+                r = r + 1
+            }
+            widths.append(w)
+            c = c + 1
+        }
+
+        lines: list[str] = []
+
+        # header
+        hparts: list[str] = []
+        c = 0
+        while c < nc {
+            hparts.append(names[c].ljust(widths[c]))
+            c = c + 1
+        }
+        lines.append("  ".join(hparts))
+
+        # separator
+        sparts: list[str] = []
+        c = 0
+        while c < nc {
+            sparts.append(_dashes(widths[c]))
+            c = c + 1
+        }
+        lines.append("  ".join(sparts))
+
+        # rows (numbers right-aligned, strings left-aligned)
+        r: int = 0
+        while r < nr {
+            parts: list[str] = []
+            c = 0
+            while c < nc {
+                const cell: str = self.cols[c].as_str(r)
+                if self.cols[c].dtype == DT_STR {
+                    parts.append(cell.ljust(widths[c]))
+                } else {
+                    parts.append(cell.rjust(widths[c]))
+                }
+                c = c + 1
+            }
+            lines.append("  ".join(parts))
+            r = r + 1
+        }
+
+        return "\n".join(lines)
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# GroupBy - split-apply-combine on one key column
+#===----------------------------------------------------------------------===#
+
+class GroupBy {
+    def(df: DataFrame, by: str) {
+        self.df: DataFrame = df
+        self.by: str = by
+        self.keys: list[str] = []          # display key per group (first appearance order)
+        self.groups: list[list[int]] = []  # source row indices per group
+
+        const key: Series = df.col(by)
+        const n: int = df.nrows()
+        seen: dict[str, int] = {}
+        i: int = 0
+        while i < n {
+            const k: str = key.as_str(i)
+            if k in seen {
+                const g: int = seen[k]
+                self.groups[g].append(i)
+            } else {
+                seen[k] = len(self.groups)
+                self.keys.append(k)
+                fresh: list[int] = [i]
+                self.groups.append(fresh)
+            }
+            i = i + 1
+        }
+    }
+
+    # Key column for the result, reusing the original dtype (take first row of each group).
+    def _key_col() -> Series {
+        firstidx: list[int] = []
+        g: int = 0
+        while g < len(self.groups) {
+            firstidx.append(self.groups[g][0])
+            g = g + 1
+        }
+        return self.df.col(self.by).take(firstidx)
+    }
+
+    # op: 0 = sum, 1 = mean
+    def _agg(value: str, op: int) -> DataFrame {
+        const src: Series = self.df.col(value)
+        if not src.is_numeric() {
+            raise ValueError(f"cannot aggregate non-numeric column '{value}'")
+        }
+        vals: list[float] = []
+        g: int = 0
+        while g < len(self.groups) {
+            const rows: list[int] = self.groups[g]
+            total: float = 0.0
+            j: int = 0
+            while j < len(rows) {
+                total = total + src._numf(rows[j])
+                j = j + 1
+            }
+            if op == 1 {
+                vals.append(total / float(len(rows)))
+            } else {
+                vals.append(total)
+            }
+            g = g + 1
+        }
+        cols: list[Series] = [self._key_col(), float_series(value, vals)]
+        return DataFrame(cols)
+    }
+
+    def sum(value: str) -> DataFrame { return self._agg(value, 0) }
+    def mean(value: str) -> DataFrame { return self._agg(value, 1) }
+
+    def count() -> DataFrame {
+        counts: list[int] = []
+        g: int = 0
+        while g < len(self.groups) {
+            counts.append(len(self.groups[g]))
+            g = g + 1
+        }
+        cols: list[Series] = [self._key_col(), int_series("count", counts)]
+        return DataFrame(cols)
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# Helpers
+#===----------------------------------------------------------------------===#
+
+# Stable merge-sort of row indices by a key column. O(n log n).
+def _argsort(key: Series, ascending: bool) -> list[int] {
+    const n: int = key.size()
+    base: list[int] = []
+    i: int = 0
+    while i < n {
+        base.append(i)
+        i = i + 1
+    }
+    return _msort(key, base, ascending)
+}
+
+def _msort(key: Series, idx: list[int], ascending: bool) -> list[int] {
+    const n: int = len(idx)
+    if n <= 1 { return idx }
+    const mid: int = n // 2
+    const left: list[int] = _msort(key, idx[0:mid], ascending)
+    const right: list[int] = _msort(key, idx[mid:n], ascending)
+
+    out: list[int] = []
+    a: int = 0
+    b: int = 0
+    while a < len(left) and b < len(right) {
+        const c: int = key._cmp(left[a], right[b])
+        take_left: bool = c <= 0
+        if not ascending {
+            take_left = c >= 0
+        }
+        if take_left {
+            out.append(left[a])
+            a = a + 1
+        } else {
+            out.append(right[b])
+            b = b + 1
+        }
+    }
+    while a < len(left) {
+        out.append(left[a])
+        a = a + 1
+    }
+    while b < len(right) {
+        out.append(right[b])
+        b = b + 1
+    }
+    return out
+}
+
+def _dashes(n: int) -> str {
+    parts: list[str] = []
+    i: int = 0
+    while i < n {
+        parts.append("-")
+        i = i + 1
+    }
+    return "".join(parts)
+}
+
+def _looks_int(s: str) -> bool {
+    if len(s) == 0 { return false }
+    start: int = 0
+    if s[0:1] == "-" {
+        if len(s) == 1 { return false }
+        start = 1
+    }
+    i: int = start
+    while i < len(s) {
+        if not s[i:i + 1].isdigit() { return false }
+        i = i + 1
+    }
+    return true
+}
+
+def _looks_float(s: str) -> bool {
+    if len(s) == 0 { return false }
+    start: int = 0
+    if s[0:1] == "-" {
+        if len(s) == 1 { return false }
+        start = 1
+    }
+    dots: int = 0
+    digits: int = 0
+    i: int = start
+    while i < len(s) {
+        const ch: str = s[i:i + 1]
+        if ch == "." {
+            dots = dots + 1
+        } elif ch.isdigit() {
+            digits = digits + 1
+        } else {
+            return false
+        }
+        i = i + 1
+    }
+    return dots == 1 and digits >= 1
+}
+
+#===----------------------------------------------------------------------===#
+# read_csv - parse + per-column dtype inference (int -> float -> str)
+#===----------------------------------------------------------------------===#
+
+def read_csv(text: str, header: bool = true) -> DataFrame {
+    const rows: list[list[str]] = parse_rows(text, ",")
+    empty: list[Series] = []
+    if len(rows) == 0 { return DataFrame(empty) }
+
+    const ncol: int = len(rows[0])
+    names: list[str] = []
+    start: int = 0
+    if header {
+        names = rows[0]
+        start = 1
+    } else {
+        j: int = 0
+        while j < ncol {
+            names.append(f"col{j}")
+            j = j + 1
+        }
+    }
+
+    cols: list[Series] = []
+    c: int = 0
+    while c < ncol {
+        # gather the raw string cells for this column
+        cells: list[str] = []
+        r: int = start
+        while r < len(rows) {
+            const row: list[str] = rows[r]
+            if c < len(row) {
+                cells.append(row[c])
+            } else {
+                cells.append("")
+            }
+            r = r + 1
+        }
+
+        # infer dtype across the whole column
+        all_int: bool = len(cells) > 0
+        all_float: bool = len(cells) > 0
+        k: int = 0
+        while k < len(cells) {
+            const cell: str = cells[k]
+            const li: bool = _looks_int(cell)
+            if not li { all_int = false }
+            if not li and not _looks_float(cell) { all_float = false }
+            k = k + 1
+        }
+
+        if all_int {
+            idata: list[int] = []
+            k = 0
+            while k < len(cells) {
+                idata.append(dragon_str_to_int(cells[k]))
+                k = k + 1
+            }
+            cols.append(int_series(names[c], idata))
+        } elif all_float {
+            fdata: list[float] = []
+            k = 0
+            while k < len(cells) {
+                fdata.append(dragon_str_to_float(cells[k]))
+                k = k + 1
+            }
+            cols.append(float_series(names[c], fdata))
+        } else {
+            cols.append(str_series(names[c], cells))
+        }
+        c = c + 1
+    }
+
+    return DataFrame(cols)
+}

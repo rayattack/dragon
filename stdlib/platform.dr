@@ -1,0 +1,53 @@
+"""platform - access to underlying platform identifying data (Python parity).
+
+Pure Dragon over the runtime's `uname(2)` accessors (already used by `os`).
+Covers the common `platform` functions; CPython-version helpers are omitted
+(no CPython here).
+"""
+
+extern "C" def dragon_uname_sysname() -> str
+extern "C" def dragon_uname_nodename() -> str
+extern "C" def dragon_uname_release() -> str
+extern "C" def dragon_uname_version() -> str
+extern "C" def dragon_uname_machine() -> str
+
+
+def system() -> str {
+    """OS name, e.g. "Linux" / "Darwin"."""
+    return dragon_uname_sysname()
+}
+
+def node() -> str {
+    """Network node name (hostname)."""
+    return dragon_uname_nodename()
+}
+
+def release() -> str {
+    """OS release, e.g. "6.17.0"."""
+    return dragon_uname_release()
+}
+
+def version() -> str {
+    """OS version string."""
+    return dragon_uname_version()
+}
+
+def machine() -> str {
+    """Machine type, e.g. "x86_64"."""
+    return dragon_uname_machine()
+}
+
+def processor() -> str {
+    """Processor name (best effort: the machine type)."""
+    return dragon_uname_machine()
+}
+
+def platform() -> str {
+    """A single string identifying the platform, e.g. "Linux-6.17.0-x86_64"."""
+    return system() + "-" + release() + "-" + machine()
+}
+
+def uname() -> tuple[str, str, str, str, str] {
+    """(system, node, release, version, machine)."""
+    return (system(), node(), release(), version(), machine())
+}

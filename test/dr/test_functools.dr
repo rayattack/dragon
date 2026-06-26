@@ -1,0 +1,37 @@
+"""functools - reduce (monomorphic int/float) with operator-style callables."""
+
+from unittest import TestCase, main
+import functools
+from functools import reduce, reduce_init, reduce_f
+
+
+class FunctoolsTests(TestCase) {
+    def test_reduce_sum() {
+        self.assertEqual(reduce(lambda (a: int, b: int) -> int { return a + b },
+                                [1, 2, 3, 4, 5]), 15)
+    }
+
+    def test_reduce_max() {
+        self.assertEqual(reduce(lambda (a: int, b: int) -> int {
+                                    if a > b { return a }
+                                    return b
+                                }, [3, 7, 2, 9, 4]), 9)
+    }
+
+    def test_reduce_init() {
+        self.assertEqual(reduce_init(lambda (a: int, b: int) -> int { return a * b },
+                                     [1, 2, 3, 4], 1), 24)
+        # init participates even for an empty sequence
+        self.assertEqual(reduce_init(lambda (a: int, b: int) -> int { return a + b },
+                                     [], 42), 42)
+    }
+
+    def test_reduce_float() {
+        got: float = reduce_f(lambda (a: float, b: float) -> float { return a + b },
+                              [1.5, 2.5, 1.0])
+        self.assertAlmostEqual(got, 5.0)
+    }
+}
+
+
+main([FunctoolsTests()])

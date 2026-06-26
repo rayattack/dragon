@@ -1,0 +1,29 @@
+"""signal - constants accessed both module-qualified and via from-import."""
+
+from unittest import TestCase, main
+import signal
+
+
+class SignalTests(TestCase) {
+    def test_qualified_constants() {
+        # Module-qualified access (gap #7 verification).
+        self.assertEqual(signal.SIGINT, 2)
+        self.assertEqual(signal.SIGKILL, 9)
+        self.assertEqual(signal.SIGTERM, 15)
+        self.assertEqual(signal.SIG_DFL, 0)
+        self.assertEqual(signal.SIG_IGN, 1)
+    }
+
+    def test_strsignal() {
+        msg: str = signal.strsignal_of(signal.SIGTERM)
+        self.assertTrue(len(msg) > 0)
+    }
+
+    def test_alarm_returns_previous() {
+        prev: int = signal.alarm_secs(0)
+        self.assertEqual(prev, 0)
+    }
+}
+
+
+main([SignalTests()])

@@ -1,0 +1,51 @@
+# test/dr/test_md5.dr - Known-answer tests for runtime MD5.
+#
+# Vectors: the full RFC 1321 Appendix A.5 test suite. MD5 is legacy/parity
+# only - never a TLS security primitive (ADR 038 §2) - but it's exposed via
+# hashlib for non-security uses (etags, legacy interop), so it must be correct.
+# These vectors also exercise the runtime's little-endian length padding.
+
+from unittest import TestCase, main
+from hashlib import md5, new, Hash
+
+class Md5Tests(TestCase) {
+    def test_rfc1321_suite() {
+        self.assertEqual(md5(b"").hexdigest(),
+            "d41d8cd98f00b204e9800998ecf8427e")
+        self.assertEqual(md5(b"a").hexdigest(),
+            "0cc175b9c0f1b6a831c399e269772661")
+        self.assertEqual(md5(b"abc").hexdigest(),
+            "900150983cd24fb0d6963f7d28e17f72")
+        self.assertEqual(md5(b"message digest").hexdigest(),
+            "f96b697d7cb7938d525a2f31aaf161d0")
+        self.assertEqual(md5(b"abcdefghijklmnopqrstuvwxyz").hexdigest(),
+            "c3fcd3d76192e4007dfb496cca67e13b")
+        self.assertEqual(
+            md5(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789").hexdigest(),
+            "d174ab98d277d9f5a5611c2c9f419d9f")
+        self.assertEqual(
+            md5(b"12345678901234567890123456789012345678901234567890123456789012345678901234567890").hexdigest(),
+            "57edf4a22be3c955ac49da2e2107b67a")
+    }
+
+    def test_new_constructor() {
+        self.assertEqual(new("md5", b"abc").hexdigest(),
+            "900150983cd24fb0d6963f7d28e17f72")
+    }
+
+    def test_metadata() {
+        h: Hash = md5(b"abc")
+        self.assertEqual(h.digest_size(), 16)
+        self.assertEqual(h.block_size(), 64)
+        self.assertEqual(h.name(), "md5")
+    }
+
+    def test_incremental_equiv() {
+        h: Hash = md5(b"")
+        h.update(b"ab")
+        h.update(b"c")
+        self.assertEqual(h.hexdigest(), "900150983cd24fb0d6963f7d28e17f72")
+    }
+}
+
+main([Md5Tests()])

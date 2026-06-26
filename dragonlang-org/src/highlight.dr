@@ -1,0 +1,495 @@
+# Server-side syntax highlighter for fenced code blocks.
+#
+# A small hand-written lexer per language family. It walks the code once,
+# classifies each token, and wraps it in <span class="tok-..."> so app.css can
+# color it. Output is always HTML-escaped; an unrecognized language falls back
+# to a generic C-family pass, and plain/text falls back to bare escaping.
+#
+# This is the dogfood: the docs site highlights its own code samples with a
+# highlighter written in Dragon, no client-side JS and no third-party library.
+#
+# Token classes (see app.css): tok-comment, tok-string, tok-number, tok-kw,
+# tok-type, tok-builtin, tok-const, tok-fn, tok-decorator, tok-self, tok-var,
+# tok-op, tok-prompt.
+
+
+# --- keyword / type / builtin tables (Dragon + Python share these) ---
+#
+# Declared as set literals: literal sets hash string members correctly and
+# `w in S` is an O(1) test. They are written one-per-line because `.dr` mode
+# keeps newlines significant inside `{ }` (braces are blocks), so a set literal
+# cannot span lines; the larger tables are split across a few sets and combined
+# in the `_is_*` predicates below.
+
+const _KW: set[str] = {"if", "elif", "else", "while", "for", "break", "continue", "return", "pass", "yield", "raise", "try", "except", "catch", "finally", "with", "import", "from", "as", "fire", "thread", "async", "await", "template", "def", "class", "lambda", "global", "nonlocal", "assert", "del", "const", "static", "extern", "and", "or", "not", "is", "in", "match", "case", "default"}
+
+const _CONST: set[str] = {"True", "False", "None", "Ellipsis", "NotImplemented", "true", "false"}
+
+const _TYPE1: set[str] = {"int", "float", "complex", "bool", "str", "bytes", "bytearray", "list", "tuple", "set", "dict", "frozenset", "range", "object", "void", "ptr", "intc"}
+const _TYPE2: set[str] = {"Optional", "List", "Dict", "Set", "Tuple", "Any", "Union", "Callable", "Iterable", "Iterator", "Generator", "Sequence", "Mapping", "Type", "TypeVar", "IO", "TextIO", "BinaryIO", "Pattern", "Match", "NoReturn", "SyncList", "SyncDict", "Task", "Lock", "Thread"}
+const _TYPE3: set[str] = {"HTML", "SQL", "CSS", "JSON", "URL", "XML", "Template", "Connection", "Request", "Response", "Router", "Context"}
+const _TYPE4: set[str] = {"Exception", "BaseException", "ValueError", "TypeError", "KeyError", "IndexError", "RuntimeError", "StopIteration", "OSError", "IOError", "FileNotFoundError", "ZeroDivisionError", "AttributeError", "NameError", "NotImplementedError", "AssertionError", "ImportError", "DatabaseError", "ConnectionError", "QueryError", "NoRows", "MultipleRows"}
+
+const _BUILTIN1: set[str] = {"abs", "all", "any", "bin", "callable", "chr", "classmethod", "compile", "delattr", "dir", "divmod", "enumerate", "eval", "exec", "filter", "format", "getattr", "globals", "hasattr", "hash", "help", "hex", "id"}
+const _BUILTIN2: set[str] = {"input", "isinstance", "issubclass", "iter", "len", "locals", "map", "max", "min", "next", "oct", "open", "ord", "pow", "print", "property", "repr", "reversed", "round", "setattr", "slice", "sorted", "staticmethod", "sum", "super", "vars", "zip"}
+
+const _SH_KW: set[str] = {"if", "then", "elif", "else", "fi", "for", "while", "until", "do", "done", "case", "esac", "in", "function", "select", "time", "return", "break", "continue", "local", "export", "readonly", "declare", "set", "unset", "source", "eval", "exec", "trap", "shift"}
+const _SH_BUILTIN: set[str] = {"echo", "printf", "read", "cd", "pwd", "exit", "test", "true", "false", "kill", "sleep", "alias", "type", "command", "make", "cmake", "git"}
+
+const _C_KW1: set[str] = {"auto", "break", "case", "char", "const", "continue", "default", "do", "double", "else", "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long", "register", "return", "short", "signed", "sizeof", "static", "struct", "switch", "typedef", "union", "unsigned", "void", "volatile", "while"}
+const _C_KW2: set[str] = {"class", "namespace", "template", "typename", "public", "private", "protected", "virtual", "override", "new", "delete", "nullptr", "bool", "true", "false", "using", "this", "constexpr", "uint64_t", "int64_t", "size_t", "std"}
+
+const _OPS: str = "+-*/%=<>!&|^~"
+
+
+def _is_type(w: str) -> bool {
+    return w in _TYPE1 or w in _TYPE2 or w in _TYPE3 or w in _TYPE4
+}
+
+def _is_builtin(w: str) -> bool {
+    return w in _BUILTIN1 or w in _BUILTIN2
+}
+
+def _is_ckw(w: str) -> bool {
+    return w in _C_KW1 or w in _C_KW2
+}
+
+
+# --- character predicates ---
+
+def _is_ident_start(c: str) -> bool {
+    return (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_"
+}
+
+def _is_ident_char(c: str) -> bool {
+    return _is_ident_start(c) or (c >= "0" and c <= "9")
+}
+
+def _is_digit(c: str) -> bool {
+    return c >= "0" and c <= "9"
+}
+
+def _is_ws(c: str) -> bool {
+    return c == " " or c == "\t" or c == "\n" or c == "\r"
+}
+
+
+def _esc(s: str) -> str {
+    out: str = ""
+    i: int = 0
+    const n: int = len(s)
+    while i < n {
+        const c: str = s[i]
+        if c == "&" {
+            out = out + "&amp;"
+        } elif c == "<" {
+            out = out + "&lt;"
+        } elif c == ">" {
+            out = out + "&gt;"
+        } elif c == "\"" {
+            out = out + "&quot;"
+        } else {
+            out = out + c
+        }
+        i = i + 1
+    }
+    return out
+}
+
+
+def _span(cls: str, text: str) -> str {
+    return "<span class=\"" + cls + "\">" + _esc(text) + "</span>"
+}
+
+
+# Index just past a string literal whose opening quote is at `code[i]`.
+# Handles triple-quoted strings and backslash escapes; a single-quoted string
+# that hits a newline before its close is treated as ending at the newline
+# (so a stray quote in prose doesn't swallow the rest of the block).
+def _string_end(code: str, i: int, n: int) -> int {
+    const q: str = code[i]
+    const triple: bool = i + 2 < n and code[i + 1] == q and code[i + 2] == q
+    if triple {
+        j: int = i + 3
+        while j < n {
+            if code[j] == "\\" and j + 1 < n {
+                j = j + 2
+                continue
+            }
+            if code[j] == q and j + 1 < n and code[j + 1] == q and j + 2 < n and code[j + 2] == q {
+                return j + 3
+            }
+            j = j + 1
+        }
+        return n
+    }
+    j: int = i + 1
+    while j < n {
+        if code[j] == "\\" and j + 1 < n {
+            j = j + 2
+            continue
+        }
+        if code[j] == q {
+            return j + 1
+        }
+        if code[j] == "\n" {
+            return j
+        }
+        j = j + 1
+    }
+    return n
+}
+
+
+# Classify a bare identifier `word` (ending at code[j]) for the Dragon/Python
+# lexer. Returns the token class, or "" to emit the word unstyled.
+def _classify_dragon(word: str, code: str, j: int, n: int) -> str {
+    if word in _KW {
+        return "tok-kw"
+    }
+    if word in _CONST {
+        return "tok-const"
+    }
+    if word == "self" or word == "cls" {
+        return "tok-self"
+    }
+    if _is_type(word) {
+        return "tok-type"
+    }
+    if _is_builtin(word) {
+        return "tok-builtin"
+    }
+    # A name immediately followed by "(" reads as a call/definition target.
+    k: int = j
+    while k < n and (code[k] == " " or code[k] == "\t") {
+        k = k + 1
+    }
+    if k < n and code[k] == "(" {
+        return "tok-fn"
+    }
+    return ""
+}
+
+
+# Dragon (and Python - close enough) tokenizer.
+def _hl_dragon(code: str) -> str {
+    out: str = ""
+    i: int = 0
+    const n: int = len(code)
+    while i < n {
+        const c: str = code[i]
+
+        if _is_ws(c) {
+            out = out + c
+            i = i + 1
+            continue
+        }
+
+        # Line comment: # ... to end of line.
+        if c == "#" {
+            j: int = i
+            while j < n and code[j] != "\n" {
+                j = j + 1
+            }
+            out = out + _span("tok-comment", code[i:j])
+            i = j
+            continue
+        }
+
+        # String literal.
+        if c == "\"" or c == "'" {
+            const e: int = _string_end(code, i, n)
+            out = out + _span("tok-string", code[i:e])
+            i = e
+            continue
+        }
+
+        # Number (decimal, hex, float, with underscores - coarse but enough).
+        if _is_digit(c) {
+            j: int = i
+            while j < n and (_is_ident_char(code[j]) or code[j] == ".") {
+                j = j + 1
+            }
+            out = out + _span("tok-number", code[i:j])
+            i = j
+            continue
+        }
+
+        # Decorator @name (possibly dotted).
+        if c == "@" {
+            j: int = i + 1
+            while j < n and (_is_ident_char(code[j]) or code[j] == ".") {
+                j = j + 1
+            }
+            out = out + _span("tok-decorator", code[i:j])
+            i = j
+            continue
+        }
+
+        # Identifier, keyword, or a string prefix (f"...", r'...', rb"...").
+        if _is_ident_start(c) {
+            j: int = i
+            while j < n and _is_ident_char(code[j]) {
+                j = j + 1
+            }
+            const word: str = code[i:j]
+            const is_prefix: bool = word == "f" or word == "r" or word == "b" or word == "rb" or word == "br" or word == "fr" or word == "rf"
+            if is_prefix and j < n and (code[j] == "\"" or code[j] == "'") {
+                const e: int = _string_end(code, j, n)
+                out = out + _span("tok-string", code[i:e])
+                i = e
+                continue
+            }
+            const cls: str = _classify_dragon(word, code, j, n)
+            if len(cls) == 0 {
+                out = out + _esc(word)
+            } else {
+                out = out + _span(cls, word)
+            }
+            i = j
+            continue
+        }
+
+        # Operator run.
+        if c in _OPS {
+            j: int = i
+            while j < n and code[j] in _OPS {
+                j = j + 1
+            }
+            out = out + _span("tok-op", code[i:j])
+            i = j
+            continue
+        }
+
+        # Punctuation / anything else: emit escaped, unstyled.
+        out = out + _esc(c)
+        i = i + 1
+    }
+    return out
+}
+
+
+# Shell tokenizer. Highlights comments, strings, $variables, numbers, the
+# leading "$"/"#" prompt, and a small set of shell keywords/builtins.
+def _hl_bash(code: str) -> str {
+    out: str = ""
+    i: int = 0
+    const n: int = len(code)
+    while i < n {
+        const c: str = code[i]
+
+        if _is_ws(c) {
+            out = out + c
+            i = i + 1
+            continue
+        }
+
+        # A "$ " or "# " at the start of a line is a prompt, not code.
+        const at_line_start: bool = i == 0 or code[i - 1] == "\n"
+        if at_line_start and (c == "$" or c == "#") and i + 1 < n and code[i + 1] == " " {
+            out = out + _span("tok-prompt", c)
+            i = i + 1
+            continue
+        }
+
+        # Comment (after whitespace or at a fresh line).
+        if c == "#" and (i == 0 or _is_ws(code[i - 1])) {
+            j: int = i
+            while j < n and code[j] != "\n" {
+                j = j + 1
+            }
+            out = out + _span("tok-comment", code[i:j])
+            i = j
+            continue
+        }
+
+        # String.
+        if c == "\"" or c == "'" {
+            const e: int = _string_end(code, i, n)
+            out = out + _span("tok-string", code[i:e])
+            i = e
+            continue
+        }
+
+        # Variable: $name or ${...}.
+        if c == "$" and i + 1 < n {
+            if code[i + 1] == "{" {
+                j: int = i + 2
+                while j < n and code[j] != "}" {
+                    j = j + 1
+                }
+                if j < n {
+                    j = j + 1
+                }
+                out = out + _span("tok-var", code[i:j])
+                i = j
+                continue
+            }
+            if _is_ident_start(code[i + 1]) {
+                j: int = i + 1
+                while j < n and _is_ident_char(code[j]) {
+                    j = j + 1
+                }
+                out = out + _span("tok-var", code[i:j])
+                i = j
+                continue
+            }
+        }
+
+        if _is_digit(c) {
+            j: int = i
+            while j < n and _is_ident_char(code[j]) {
+                j = j + 1
+            }
+            out = out + _span("tok-number", code[i:j])
+            i = j
+            continue
+        }
+
+        if _is_ident_start(c) {
+            j: int = i
+            while j < n and _is_ident_char(code[j]) {
+                j = j + 1
+            }
+            const word: str = code[i:j]
+            if word in _SH_KW {
+                out = out + _span("tok-kw", word)
+            } elif word in _SH_BUILTIN {
+                out = out + _span("tok-builtin", word)
+            } else {
+                out = out + _esc(word)
+            }
+            i = j
+            continue
+        }
+
+        if c in _OPS {
+            j: int = i
+            while j < n and code[j] in _OPS {
+                j = j + 1
+            }
+            out = out + _span("tok-op", code[i:j])
+            i = j
+            continue
+        }
+
+        out = out + _esc(c)
+        i = i + 1
+    }
+    return out
+}
+
+
+# Generic C-family fallback: // and /* */ comments, strings, numbers, and a
+# C/C++ keyword set. Used for cpp/c/llvm and any unknown language.
+def _hl_generic(code: str) -> str {
+    out: str = ""
+    i: int = 0
+    const n: int = len(code)
+    while i < n {
+        const c: str = code[i]
+
+        if _is_ws(c) {
+            out = out + c
+            i = i + 1
+            continue
+        }
+
+        # Line comment //
+        if c == "/" and i + 1 < n and code[i + 1] == "/" {
+            j: int = i
+            while j < n and code[j] != "\n" {
+                j = j + 1
+            }
+            out = out + _span("tok-comment", code[i:j])
+            i = j
+            continue
+        }
+
+        # Block comment /* ... */
+        if c == "/" and i + 1 < n and code[i + 1] == "*" {
+            j: int = i + 2
+            while j < n {
+                if code[j] == "*" and j + 1 < n and code[j + 1] == "/" {
+                    j = j + 2
+                    break
+                }
+                j = j + 1
+            }
+            out = out + _span("tok-comment", code[i:j])
+            i = j
+            continue
+        }
+
+        if c == "\"" or c == "'" {
+            const e: int = _string_end(code, i, n)
+            out = out + _span("tok-string", code[i:e])
+            i = e
+            continue
+        }
+
+        if _is_digit(c) {
+            j: int = i
+            while j < n and (_is_ident_char(code[j]) or code[j] == ".") {
+                j = j + 1
+            }
+            out = out + _span("tok-number", code[i:j])
+            i = j
+            continue
+        }
+
+        if _is_ident_start(c) {
+            j: int = i
+            while j < n and _is_ident_char(code[j]) {
+                j = j + 1
+            }
+            const word: str = code[i:j]
+            if _is_ckw(word) {
+                out = out + _span("tok-kw", word)
+            } else {
+                # Call target?
+                k: int = j
+                while k < n and (code[k] == " " or code[k] == "\t") {
+                    k = k + 1
+                }
+                if k < n and code[k] == "(" {
+                    out = out + _span("tok-fn", word)
+                } else {
+                    out = out + _esc(word)
+                }
+            }
+            i = j
+            continue
+        }
+
+        if c in _OPS {
+            j: int = i
+            while j < n and code[j] in _OPS {
+                j = j + 1
+            }
+            out = out + _span("tok-op", code[i:j])
+            i = j
+            continue
+        }
+
+        out = out + _esc(c)
+        i = i + 1
+    }
+    return out
+}
+
+
+# Highlight `code` written in `lang`, returning HTML-escaped markup with token
+# spans. `lang` is the fence info string's first word (e.g. "dragon", "bash").
+def highlight(lang: str, code: str) -> str {
+    if lang == "dragon" or lang == "dr" or lang == "python" or lang == "py" {
+        return _hl_dragon(code)
+    }
+    if lang == "bash" or lang == "sh" or lang == "shell" or lang == "zsh" or lang == "console" {
+        return _hl_bash(code)
+    }
+    if lang == "" or lang == "text" or lang == "txt" or lang == "plain" or lang == "output" {
+        return _esc(code)
+    }
+    return _hl_generic(code)
+}

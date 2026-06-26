@@ -1,0 +1,50 @@
+"""timeit - measure that the callable runs the requested number of times."""
+
+from unittest import TestCase, main
+import timeit
+
+
+_counter: int = 0
+
+
+def _bump() -> None {
+    global _counter
+    _counter += 1
+}
+
+
+class TimeitTests(TestCase) {
+    def test_timeit_runs_n_times() {
+        global _counter
+        _counter = 0
+        elapsed: float = timeit.timeit(_bump, 1000)
+        self.assertEqual(_counter, 1000)
+        self.assertTrue(elapsed >= 0.0)
+    }
+
+    def test_timeit_zero_is_zero() {
+        global _counter
+        _counter = 0
+        elapsed: float = timeit.timeit(_bump, 0)
+        self.assertEqual(_counter, 0)
+        self.assertEqual(elapsed, 0.0)
+    }
+
+    def test_repeat_yields_n_measurements() {
+        global _counter
+        _counter = 0
+        measurements: list[float] = timeit.repeat(_bump, 3, 100)
+        self.assertEqual(len(measurements), 3)
+        # Counter was bumped 3 * 100 = 300 times.
+        self.assertEqual(_counter, 300)
+    }
+
+    def test_default_timer_monotonic() {
+        t1: float = timeit.default_timer()
+        t2: float = timeit.default_timer()
+        self.assertTrue(t2 >= t1)
+    }
+}
+
+
+main([TimeitTests()])

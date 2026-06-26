@@ -1,0 +1,109 @@
+# test/dr/test_sha512.dr - Known-answer tests for the SHA-2 wide family
+# (SHA-224 / SHA-384 / SHA-512) added to the mbedTLS-backed runtime.
+#
+# Vectors:
+#  - Digests: NIST FIPS 180-2 ("", "abc", and the 112-byte two-block message).
+#  - HMAC: RFC 4231 Test Case 2 (key="Jefe", "what do ya want for nothing?").
+#
+# Covers all three exposure layers: hashlib (bytes-in/bytes-out + incremental),
+# crypto.dr (str-in/hex-out convenience), and hmac (wide-digest HMAC). Locks the
+# truncation behaviour (SHA-224 = SHA-256/28, SHA-384 = SHA-512/48) so a future
+# streaming rewrite can't silently regress the wide variants.
+
+from unittest import TestCase, main
+from hashlib import sha224, sha384, sha512, new, Hash, hexdigest
+from crypto import sha224 as hsha224, sha384 as hsha384, sha512 as hsha512
+import hmac
+
+# --- SHA-224 ---
+const _224_EMPTY: str = "d14a028c2a3a2bc9476102bb288234c415a2b01f828ea62ac5b3e42f"
+const _224_ABC: str   = "23097d223405d8228642a477bda255b32aadbce4bda0b3f7e36c9da7"
+
+# --- SHA-384 ---
+const _384_EMPTY: str = "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b"
+const _384_ABC: str   = "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7"
+
+# --- SHA-512 ---
+const _512_EMPTY: str = "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"
+const _512_ABC: str   = "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+# FIPS 180-2 two-block (112-byte) message.
+const _512_LONG: str  = "8e959b75dae313da8cf4f72814fc143f8f7779c6eb9f7fa17299aeadb6889018501d289e4900f7e4331b99dec4b5433ac7d329eeb6dd26545e96e55b874be909"
+
+# RFC 4231 Test Case 2 HMAC tags.
+const _HMAC224: str = "a30e01098bc6dbbf45690f3a7e9e6d0f8bbea2a39e6148008fd05e44"
+const _HMAC384: str = "af45d2e376484031617f78d2b58a6b1b9c7ef464f5a01b47e42ec3736322445e8e2240ca5e69e2c78b3239ecfab21649"
+const _HMAC512: str = "164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea2505549758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737"
+
+
+class ShaWideTests(TestCase) {
+    def test_sha224() {
+        self.assertEqual(sha224(b"").hexdigest(), _224_EMPTY)
+        self.assertEqual(sha224(b"abc").hexdigest(), _224_ABC)
+    }
+
+    def test_sha384() {
+        self.assertEqual(sha384(b"").hexdigest(), _384_EMPTY)
+        self.assertEqual(sha384(b"abc").hexdigest(), _384_ABC)
+    }
+
+    def test_sha512() {
+        self.assertEqual(sha512(b"").hexdigest(), _512_EMPTY)
+        self.assertEqual(sha512(b"abc").hexdigest(), _512_ABC)
+    }
+
+    def test_sha512_multiblock() {
+        msg: bytes = b"abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu"
+        self.assertEqual(sha512(msg).hexdigest(), _512_LONG)
+    }
+
+    def test_new_constructor() {
+        self.assertEqual(new("sha512", b"abc").hexdigest(), _512_ABC)
+        self.assertEqual(new("sha384", b"abc").hexdigest(), _384_ABC)
+        self.assertEqual(new("sha224", b"abc").hexdigest(), _224_ABC)
+    }
+
+    def test_one_shot_hexdigest() {
+        self.assertEqual(hexdigest("sha512", b"abc"), _512_ABC)
+    }
+
+    def test_metadata() {
+        h: Hash = sha512(b"abc")
+        self.assertEqual(h.digest_size(), 64)
+        self.assertEqual(h.block_size(), 128)
+        self.assertEqual(h.name(), "sha512")
+
+        h2: Hash = sha384(b"abc")
+        self.assertEqual(h2.digest_size(), 48)
+        self.assertEqual(h2.block_size(), 128)
+
+        h3: Hash = sha224(b"abc")
+        self.assertEqual(h3.digest_size(), 28)
+        self.assertEqual(h3.block_size(), 64)
+    }
+
+    def test_incremental_equiv() {
+        h: Hash = sha512(b"")
+        h.update(b"a")
+        h.update(b"b")
+        h.update(b"c")
+        self.assertEqual(h.hexdigest(), _512_ABC)
+    }
+
+    # crypto.dr str-in / hex-out convenience mirrors the hashlib digests.
+    def test_crypto_str_helpers() {
+        self.assertEqual(hsha512("abc"), _512_ABC)
+        self.assertEqual(hsha384("abc"), _384_ABC)
+        self.assertEqual(hsha224("abc"), _224_ABC)
+    }
+
+    # RFC 4231 Test Case 2 - wide-digest HMAC through the runtime.
+    def test_hmac_wide() {
+        key: bytes = b"Jefe"
+        msg: bytes = b"what do ya want for nothing?"
+        self.assertEqual(hmac.new(key, msg, "sha512").hexdigest(), _HMAC512)
+        self.assertEqual(hmac.new(key, msg, "sha384").hexdigest(), _HMAC384)
+        self.assertEqual(hmac.new(key, msg, "sha224").hexdigest(), _HMAC224)
+    }
+}
+
+main([ShaWideTests()])

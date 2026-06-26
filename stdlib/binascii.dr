@@ -1,0 +1,121 @@
+# binascii.dr - Convert between binary and ASCII representations
+#
+# Python parity: hexlify / unhexlify (also exported as b2a_hex / a2b_hex)
+# plus CRC32 over bytes. The hex helpers are the workhorse for SHA-256
+# fingerprints in the registry (D022). CRC32 is used by gzip and tar.
+
+
+const _HEX_LOWER: str = "0123456789abcdef"
+
+
+# --- Hex --------------------------------------------------------------------
+
+def hexlify(data: bytes) -> bytes {
+    n: int = len(data)
+    out: list[int] = [0] * (n * 2)
+    i: int = 0
+    o: int = 0
+    while i < n {
+        v: int = data[i]
+        out[o] = ord(_HEX_LOWER[(v >> 4) & 0x0F])
+        out[o + 1] = ord(_HEX_LOWER[v & 0x0F])
+        i = i + 1
+        o = o + 2
+    }
+    return bytes(out)
+}
+
+
+def b2a_hex(data: bytes) -> bytes {
+    return hexlify(data)
+}
+
+
+def _hex_value(ch: int) -> int {
+    if ch >= 0x30 and ch <= 0x39 { return ch - 0x30 }
+    if ch >= 0x61 and ch <= 0x66 { return ch - 0x61 + 10 }
+    if ch >= 0x41 and ch <= 0x46 { return ch - 0x41 + 10 }
+    return -1
+}
+
+
+def unhexlify(data: bytes | str) -> bytes {
+    # Python parity: accepts both bytes-like and str. Dispatch happens at
+    # function entry - the boxed-union ABI (D030 Phase 4) passes data in
+    # two registers, the tag-compare is a single predicted-not-taken
+    # branch for the common bytes-path, and the hot decode loop runs on
+    # native bytes in _unhexlify_impl with no union juggling.
+    if isinstance(data, str) {
+        return _unhexlify_impl(data.encode("ascii"))
+    } else {
+        return _unhexlify_impl(data)
+    }
+}
+
+
+def _unhexlify_impl(buf: bytes) -> bytes {
+    n: int = len(buf)
+    if n % 2 != 0 {
+        raise ValueError("odd-length hex string")
+    }
+    out: list[int] = [0] * (n // 2)
+    i: int = 0
+    o: int = 0
+    while i < n {
+        hi: int = _hex_value(buf[i])
+        lo: int = _hex_value(buf[i + 1])
+        if hi < 0 or lo < 0 {
+            raise ValueError("non-hexadecimal digit")
+        }
+        out[o] = (hi << 4) | lo
+        i = i + 2
+        o = o + 1
+    }
+    return bytes(out)
+}
+
+
+def a2b_hex(data: bytes | str) -> bytes {
+    return unhexlify(data)
+}
+
+
+# --- CRC32 ------------------------------------------------------------------
+#
+# Standard IEEE 802.3 CRC32 with reflected input/output, polynomial 0xEDB88320.
+# This is what gzip and PNG use.
+
+def _build_crc32_table() -> list[int] {
+    t: list[int] = [0] * 256
+    i: int = 0
+    while i < 256 {
+        c: int = i
+        k: int = 0
+        while k < 8 {
+            if c & 1 != 0 {
+                c = (c >> 1) ^ 0xEDB88320
+            } else {
+                c = c >> 1
+            }
+            k = k + 1
+        }
+        t[i] = c
+        i = i + 1
+    }
+    return t
+}
+
+const _CRC32_TABLE: list[int] = _build_crc32_table()
+
+
+def crc32(data: bytes, value: int = 0) -> int {
+    c: int = (~value) & 0xFFFFFFFF
+    n: int = len(data)
+    i: int = 0
+    while i < n {
+        idx: int = (c ^ data[i]) & 0xFF
+        c = (c >> 8) ^ _CRC32_TABLE[idx]
+        i = i + 1
+    }
+    return (~c) & 0xFFFFFFFF
+}

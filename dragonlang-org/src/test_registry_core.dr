@@ -1,0 +1,256 @@
+"""Headless behavior tests for the registry core (auth service + tokens).
+Run:  dragon run dragonlang-org/src/test_registry_core.dr"""
+
+from unittest import TestCase, main
+from hashlib import hexdigest
+from binascii import unhexlify
+from crypto import ed25519_verify
+from merkle import root as merkle_root, verify_inclusion as merkle_verify_inclusion, verify_consistency as merkle_verify_consistency
+from storage.db import Db
+from storage.blobs import BlobStore
+from services.auth import AuthService, AuthResult
+from services.registry import RegistryService, PublishResult, PackageSummary
+from services.translog import TranslogService, Checkpoint
+from models.records import Token, Version, LogEntry
+
+const BLOB_DIR: str = "/tmp/dragon_regtest_blobs"
+# Exactly 32 bytes: the Ed25519 seed the log signs with.
+const TEST_SEED: bytes = b"registry-test-ed25519-seed-32by!"
+
+class AuthTests(TestCase) {
+    def _svc() -> AuthService {
+        db: Db = Db(":memory:")
+        return AuthService(db)
+    }
+
+    def test_register_and_login() {
+        const a: AuthService = self._svc()
+        const r: AuthResult = a.register("alice", "alice@example.com", "hunter2pass")
+        self.assertTrue(r.ok)
+        self.assertTrue(r.user_id > 0)
+
+        const good: AuthResult = a.login("alice", "hunter2pass")
+        self.assertTrue(good.ok)
+        self.assertEqual(good.user_id, r.user_id)
+
+        const bad: AuthResult = a.login("alice", "wrongpass!")
+        self.assertFalse(bad.ok)
+
+        const nouser: AuthResult = a.login("ghost", "whatever1")
+        self.assertFalse(nouser.ok)
+    }
+
+    def test_duplicate_username_rejected() {
+        const a: AuthService = self._svc()
+        self.assertTrue(a.register("bob", "bob@example.com", "password1").ok)
+        const dup: AuthResult = a.register("bob", "other@example.com", "password2")
+        self.assertFalse(dup.ok)
+        self.assertEqual(dup.error, "username already taken")
+    }
+
+    def test_short_password_rejected() {
+        const a: AuthService = self._svc()
+        const r: AuthResult = a.register("carol", "carol@example.com", "short")
+        self.assertFalse(r.ok)
+    }
+
+    def test_token_issue_verify_revoke() {
+        const a: AuthService = self._svc()
+        const r: AuthResult = a.register("dave", "dave@example.com", "password1")
+        const tok: str = a.issue_token(r.user_id, "ci-laptop")
+        self.assertTrue(tok.startswith("dgn_"))
+        self.assertEqual(a.verify_token(tok), r.user_id)
+        self.assertEqual(a.verify_token("dgn_bogustoken"), 0)
+
+        const toks: list[Token] = a.list_tokens(r.user_id)
+        self.assertEqual(len(toks), 1)
+        self.assertEqual(toks[0].label, "ci-laptop")
+
+        self.assertTrue(a.revoke_token(r.user_id, toks[0].id))
+        self.assertEqual(a.verify_token(tok), 0)
+    }
+}
+
+class RegistryTests(TestCase) {
+    # Fresh in-memory DB + an owner (uid 1) + a registry over a temp blob dir.
+    def _reg() -> RegistryService {
+        db: Db = Db(":memory:")
+        a: AuthService = AuthService(db)
+        a.register("owner", "owner@example.com", "password1")
+        tlog: TranslogService = TranslogService(db, TEST_SEED)
+        return RegistryService(db, BlobStore(BLOB_DIR), tlog)
+    }
+
+    def test_publish_then_browse() {
+        const reg: RegistryService = self._reg()
+        const r: PublishResult = reg.publish(1, "frames", "0.1.0", "Typed dataframes", b"tarball-bytes-v1")
+        self.assertTrue(r.ok)
+        self.assertTrue(r.hash.startswith("sha256:"))
+
+        const vs: list[Version] = reg.get_versions("frames")
+        self.assertEqual(len(vs), 1)
+        self.assertEqual(vs[0].version, "0.1.0")
+
+        # blob is stored and round-trips
+        self.assertTrue(reg.blobs.has(r.hash))
+        self.assertEqual(reg.blobs.get(r.hash).decode("utf-8"), "tarball-bytes-v1")
+
+        # resolve hash for download
+        self.assertEqual(reg.resolve_hash("frames", "0.1.0"), r.hash)
+        self.assertEqual(reg.resolve_hash("frames", "9.9.9"), "")
+    }
+
+    def test_content_addressing_is_deterministic() {
+        const reg: RegistryService = self._reg()
+        const r1: PublishResult = reg.publish(1, "alpha", "1.0.0", "", b"same-bytes")
+        const r2: PublishResult = reg.publish(1, "beta", "1.0.0", "", b"same-bytes")
+        # identical content -> identical hash
+        self.assertEqual(r1.hash, r2.hash)
+        # ... and that hash is a REAL sha256 digest, not the "sha256:{}" the
+        # escaped-quote f-string bug produced (which made every hash identical).
+        self.assertEqual(len(r1.hash), 71)            # "sha256:" + 64 hex chars
+        self.assertTrue(r1.hash.startswith("sha256:"))
+        self.assertFalse("{" in r1.hash)
+        # different content -> different hash
+        const r3: PublishResult = reg.publish(1, "gamma", "1.0.0", "", b"other-bytes")
+        self.assertFalse(r1.hash == r3.hash)
+    }
+
+    def test_duplicate_version_rejected() {
+        const reg: RegistryService = self._reg()
+        self.assertTrue(reg.publish(1, "frames", "0.1.0", "", b"v1").ok)
+        const dup: PublishResult = reg.publish(1, "frames", "0.1.0", "", b"v1-again")
+        self.assertFalse(dup.ok)
+    }
+
+    def test_ownership_enforced() {
+        const reg: RegistryService = self._reg()
+        # second user
+        const a2: AuthService = AuthService(reg.db)
+        const r2: AuthResult = a2.register("intruder", "x@example.com", "password2")
+        self.assertTrue(reg.publish(1, "frames", "0.1.0", "", b"v1").ok)
+        const stolen: PublishResult = reg.publish(r2.user_id, "frames", "0.2.0", "", b"v2")
+        self.assertFalse(stolen.ok)
+        self.assertEqual(stolen.error, "you do not own this package")
+    }
+
+    def test_search_and_yank() {
+        const reg: RegistryService = self._reg()
+        reg.publish(1, "frames", "1.0.0", "Typed dataframes", b"a")
+        reg.publish(1, "frames", "1.1.0", "Typed dataframes", b"b")
+        reg.publish(1, "webby", "0.1.0", "An HTTP toolkit", b"c")
+
+        const hits: list[PackageSummary] = reg.search("frame")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].name, "frames")
+        self.assertEqual(hits[0].latest, "1.1.0")   # most recent
+
+        # description search matches too
+        self.assertEqual(len(reg.search("HTTP")), 1)
+
+        # soft-yank 1.1.0: still resolves (pinned reproducibility), but "latest"
+        # falls back to the newest non-yanked version (1.0.0).
+        self.assertTrue(reg.yank(1, "frames", "1.1.0", 1, "deprecated"))
+        self.assertFalse(reg.yank(99, "frames", "1.0.0", 1, ""))   # not the owner
+        self.assertEqual(reg.resolve_hash("frames", "1.1.0"), reg.resolve_hash("frames", "1.1.0"))
+        self.assertTrue(len(reg.resolve_hash("frames", "1.1.0")) > 0)
+        const hits2: list[PackageSummary] = reg.search("frame")
+        self.assertEqual(hits2[0].latest, "1.0.0")   # soft-yanked 1.1.0 dropped from latest
+    }
+
+    def test_security_yank_marks_version() {
+        const reg: RegistryService = self._reg()
+        reg.publish(1, "evil", "1.0.0", "", b"backdoor")
+        self.assertTrue(reg.yank(1, "evil", "1.0.0", 2, "CVE-2026-0001 backdoor"))
+        const vs: list[Version] = reg.find_version("evil", "1.0.0")
+        self.assertEqual(len(vs), 1)
+        self.assertEqual(vs[0].yanked, 2)
+        self.assertEqual(vs[0].yank_reason, "CVE-2026-0001 backdoor")
+    }
+}
+
+class TranslogTests(TestCase) {
+    def _reg() -> RegistryService {
+        db: Db = Db(":memory:")
+        a: AuthService = AuthService(db)
+        a.register("owner", "owner@example.com", "password1")
+        tlog: TranslogService = TranslogService(db, TEST_SEED)
+        return RegistryService(db, BlobStore(BLOB_DIR), tlog)
+    }
+
+    def test_publish_appends_verifiable_leaf() {
+        const reg: RegistryService = self._reg()
+        const r: PublishResult = reg.publish(1, "frames", "0.1.0", "", b"bytes-v1")
+        const leaves: list[LogEntry] = reg.translog.leaf_for("frames", "0.1.0")
+        self.assertEqual(len(leaves), 1)
+        const lf: LogEntry = leaves[0]
+        # the log commits to the exact published hash...
+        self.assertEqual(lf.pkg_hash, r.hash)
+        # ...and the leaf hash is the client-recomputable binding of
+        # (name, version, hash, ts, published_by).
+        const recomputed: str = reg.translog.leaf_hash("frames", "0.1.0", r.hash, lf.ts, lf.published_by)
+        self.assertEqual(recomputed, lf.leaf_hash)
+    }
+
+    def test_merkle_root_and_inclusion() {
+        const reg: RegistryService = self._reg()
+        reg.publish(1, "a", "1.0.0", "", b"aa")
+        reg.publish(1, "b", "1.0.0", "", b"bb")
+        reg.publish(1, "c", "1.0.0", "", b"cc")
+        const cp: Checkpoint = reg.translog.checkpoint()
+        self.assertEqual(cp.size, 3)
+        # the checkpoint root is the Merkle root over the leaf-hash leaves.
+        const entries: list[LogEntry] = reg.translog.entries()
+        leaves: list[bytes] = []
+        for e in entries {
+            leaves.append(e.leaf_hash.encode("utf-8"))
+        }
+        self.assertEqual(merkle_root(leaves).hex(), cp.root)
+        # an inclusion proof for leaf "b" (index 1) verifies against that root.
+        const ip: tuple[int, list[str]] = reg.translog.inclusion("b", "1.0.0", 3)
+        self.assertEqual(ip[0], 1)
+        proof: list[bytes] = []
+        for ph in ip[1] {
+            proof.append(unhexlify(ph.encode("utf-8")))
+        }
+        const root: bytes = unhexlify(cp.root.encode("utf-8"))
+        self.assertTrue(merkle_verify_inclusion(leaves[1], 1, 3, proof, root))
+        # tampering the leaf data fails the same proof.
+        self.assertFalse(merkle_verify_inclusion(b"not-the-leaf", 1, 3, proof, root))
+    }
+
+    def test_consistency_proof_append_only() {
+        const reg: RegistryService = self._reg()
+        reg.publish(1, "a", "1.0.0", "", b"aa")
+        reg.publish(1, "b", "1.0.0", "", b"bb")
+        const root2: str = reg.translog.root_hex()   # tree of size 2
+        reg.publish(1, "c", "1.0.0", "", b"cc")
+        reg.publish(1, "d", "1.0.0", "", b"dd")
+        const cp: Checkpoint = reg.translog.checkpoint()  # size 4
+        const cproof: list[str] = reg.translog.consistency(2, 4)
+        proof: list[bytes] = []
+        for ph in cproof {
+            proof.append(unhexlify(ph.encode("utf-8")))
+        }
+        self.assertTrue(merkle_verify_consistency(2, 4, proof,
+            unhexlify(root2.encode("utf-8")), unhexlify(cp.root.encode("utf-8"))))
+    }
+
+    def test_checkpoint_ed25519_signature() {
+        const reg: RegistryService = self._reg()
+        reg.publish(1, "a", "1.0.0", "", b"aa")
+        const cp: Checkpoint = reg.translog.checkpoint()
+        const pub: bytes = reg.translog.public_key
+        const body: bytes = (str(cp.size) + "\n" + cp.root).encode("utf-8")
+        const sig: bytes = unhexlify(cp.signature.encode("utf-8"))
+        # the real checkpoint verifies under the registry's public key...
+        self.assertTrue(ed25519_verify(pub, body, sig))
+        # ...and a forged root (what a MITM/rogue mirror would serve) does not.
+        const forged_body: bytes = ("999\n" + cp.root).encode("utf-8")
+        self.assertFalse(ed25519_verify(pub, forged_body, sig))
+        # key_id is a stable 16-hex fingerprint of the public key.
+        self.assertEqual(len(cp.key_id), 16)
+    }
+}
+
+main([AuthTests(), RegistryTests(), TranslogTests()])

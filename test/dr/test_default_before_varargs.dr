@@ -1,0 +1,76 @@
+"""A default parameter BEFORE `*args`, plus keyword binding to a variadic
+callee's regular params (bugs.md #3).
+
+`def f(a: int, b: int = 10, *xs: int)` called as `f(1)` produced an LLVM
+"Operand is null" verify crash: the call-site marshaller pushed the *args list
+into b's slot and left the real *args slot null. The fix pads the omitted
+regular-param slots with nullptr so the *args list lands in its own slot and
+fillDefaultArgs fills the gaps.
+
+The same variadic call path now also binds keyword arguments that name a
+regular parameter (`f(a=1)` / `f(1, b=5)`) - mirroring the non-variadic D040
+binding - and splits the rest into **kwargs. A missing required param before
+*args, or an unexpected keyword to a *args-only callee, is now a clean
+compile-time error instead of a codegen crash.
+"""
+
+from unittest import TestCase, main
+
+
+def f(a: int, b: int = 10, *xs: int) -> int {
+    s: int = a + b
+    for x in xs {
+        s = s + x
+    }
+    return s
+}
+
+def two_defaults(a: int, b: int = 10, c: int = 20, *xs: int) -> int {
+    s: int = a + b + c
+    for x in xs {
+        s = s + x
+    }
+    return s
+}
+
+def with_kwargs(a: int, b: int = 2, **kw: int) -> int {
+    return a + b + len(kw)
+}
+
+
+class DefaultBeforeVarargsTests(TestCase) {
+    def test_positional_default_used() {
+        self.assertEqual(f(1), 11)
+    }
+
+    def test_positional_default_overridden() {
+        self.assertEqual(f(1, 2), 3)
+    }
+
+    def test_positional_with_varargs() {
+        self.assertEqual(f(1, 2, 3, 4), 10)
+    }
+
+    def test_two_defaults() {
+        self.assertEqual(two_defaults(1), 31)
+        self.assertEqual(two_defaults(1, 2), 23)
+        self.assertEqual(two_defaults(1, 2, 3), 6)
+        self.assertEqual(two_defaults(1, 2, 3, 4, 5), 15)
+    }
+
+    def test_keyword_fills_required() {
+        self.assertEqual(f(a=5), 15)
+    }
+
+    def test_keyword_overrides_default() {
+        self.assertEqual(f(a=5, b=1), 6)
+        self.assertEqual(f(1, b=5), 6)
+    }
+
+    def test_kwargs_split_from_regular_params() {
+        self.assertEqual(with_kwargs(a=1), 3)
+        self.assertEqual(with_kwargs(1, b=5, x=9, y=8), 8)
+    }
+}
+
+main([DefaultBeforeVarargsTests()])

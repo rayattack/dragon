@@ -1,0 +1,176 @@
+"""http.multipart - parse multipart/form-data bodies into Parts (W3).
+
+Builds literal `bytes` payloads (no network) and verifies field/file parsing,
+binary-verbatim survival (0x00 / 0xFF), multi-file forms, and the boundary
+edge cases (trailing `--`, CRLF framing, quoted `boundary=`)."""
+
+from unittest import TestCase, main
+from http.multipart import parse_multipart, boundary_from_content_type, Part
+
+
+# --- helpers: build wire payloads ------------------------------------------
+
+const CRLF: str = "\r\n"
+
+
+def _open(boundary: str) -> bytes {
+    # Leading dash-boundary + CRLF that opens the first part.
+    return ("--" + boundary + CRLF).encode()
+}
+
+
+def _close(boundary: str) -> bytes {
+    # CRLF before the close-delimiter, then `--boundary--` + CRLF terminator.
+    return (CRLF + "--" + boundary + "--" + CRLF).encode()
+}
+
+
+def _sep(boundary: str) -> bytes {
+    # CRLF (ends previous part body) + dash-boundary + CRLF (opens next part).
+    return (CRLF + "--" + boundary + CRLF).encode()
+}
+
+
+class HttpMultipartTests(TestCase) {
+    def test_boundary_from_content_type_plain() {
+        const b: str = boundary_from_content_type(
+            "multipart/form-data; boundary=----WebKitFormBoundaryABC123")
+        self.assertEqual(b, "----WebKitFormBoundaryABC123")
+    }
+
+    def test_boundary_from_content_type_quoted() {
+        # Quoted value may contain spaces; surrounding quotes are stripped.
+        const b: str = boundary_from_content_type(
+            "multipart/form-data; boundary=\"abc 123\"")
+        self.assertEqual(b, "abc 123")
+    }
+
+    def test_boundary_from_content_type_trailing_param() {
+        # An unquoted boundary stops at the next `;` parameter.
+        const b: str = boundary_from_content_type(
+            "multipart/form-data; boundary=xYz; charset=utf-8")
+        self.assertEqual(b, "xYz")
+    }
+
+    def test_boundary_from_content_type_absent() {
+        self.assertEqual(boundary_from_content_type("text/plain"), "")
+    }
+
+    def test_text_field_and_file_part() {
+        # One text field + one file part -> two Parts with correct metadata.
+        const boundary: str = "BoUnDaRy42"
+        body: bytes = _open(boundary)
+        body = body + ("Content-Disposition: form-data; name=\"field1\"" + CRLF + CRLF).encode()
+        body = body + "hello world".encode()
+        body = body + _sep(boundary)
+        body = body + ("Content-Disposition: form-data; name=\"file1\"; filename=\"note.txt\"" + CRLF).encode()
+        body = body + ("Content-Type: text/plain" + CRLF + CRLF).encode()
+        body = body + "file contents".encode()
+        body = body + _close(boundary)
+
+        const parts: list[Part] = parse_multipart(body, boundary)
+        self.assertEqual(len(parts), 2)
+
+        # Field part: name set, no filename, no content-type, body verbatim.
+        self.assertEqual(parts[0].name, "field1")
+        self.assertEqual(parts[0].filename, "")
+        self.assertEqual(parts[0].content_type, "")
+        self.assertEqual(parts[0].data.decode(), "hello world")
+        self.assertFalse(parts[0].is_file())
+
+        # File part: name + filename + content-type, body verbatim.
+        self.assertEqual(parts[1].name, "file1")
+        self.assertEqual(parts[1].filename, "note.txt")
+        self.assertEqual(parts[1].content_type, "text/plain")
+        self.assertEqual(parts[1].data.decode(), "file contents")
+        self.assertTrue(parts[1].is_file())
+    }
+
+    def test_binary_file_survives_verbatim() {
+        # A file part whose body contains NUL (0x00) and 0xFF must round-trip
+        # byte-for-byte - multipart parsing is binary-safe, not text-decoded.
+        const boundary: str = "----Bin----"
+        # Payload includes 0x00, 0xFF, an embedded CR/LF, and high bytes.
+        const payload: bytes = bytes([0, 255, 13, 10, 65, 0, 254, 127, 128])
+
+        body: bytes = _open(boundary)
+        body = body + ("Content-Disposition: form-data; name=\"img\"; filename=\"x.bin\"" + CRLF).encode()
+        body = body + ("Content-Type: application/octet-stream" + CRLF + CRLF).encode()
+        body = body + payload
+        body = body + _close(boundary)
+
+        const parts: list[Part] = parse_multipart(body, boundary)
+        self.assertEqual(len(parts), 1)
+        const got: bytes = parts[0].data
+
+        # Length and every byte must match the original payload exactly.
+        self.assertEqual(len(got), len(payload))
+        i: int = 0
+        while i < len(payload) {
+            self.assertEqual(got[i], payload[i])
+            i = i + 1
+        }
+        # Spot-check the boundary bytes the parser must NOT have mangled.
+        self.assertEqual(got[0], 0)      # NUL preserved
+        self.assertEqual(got[1], 255)    # 0xFF preserved
+        self.assertEqual(got[6], 254)    # 0xFE preserved
+        self.assertEqual(got[8], 128)    # high bit preserved
+    }
+
+    def test_multi_file_form() {
+        # Two file parts in one form: both filenames + bodies recovered.
+        const boundary: str = "multi-file-bnd"
+        body: bytes = _open(boundary)
+        body = body + ("Content-Disposition: form-data; name=\"a\"; filename=\"a.dat\"" + CRLF).encode()
+        body = body + ("Content-Type: application/octet-stream" + CRLF + CRLF).encode()
+        body = body + bytes([1, 2, 3])
+        body = body + _sep(boundary)
+        body = body + ("Content-Disposition: form-data; name=\"b\"; filename=\"b.dat\"" + CRLF).encode()
+        body = body + ("Content-Type: application/octet-stream" + CRLF + CRLF).encode()
+        body = body + bytes([9, 8, 7, 6])
+        body = body + _close(boundary)
+
+        const parts: list[Part] = parse_multipart(body, boundary)
+        self.assertEqual(len(parts), 2)
+
+        self.assertEqual(parts[0].name, "a")
+        self.assertEqual(parts[0].filename, "a.dat")
+        self.assertEqual(len(parts[0].data), 3)
+        self.assertEqual(parts[0].data[0], 1)
+        self.assertEqual(parts[0].data[2], 3)
+
+        self.assertEqual(parts[1].name, "b")
+        self.assertEqual(parts[1].filename, "b.dat")
+        self.assertEqual(len(parts[1].data), 4)
+        self.assertEqual(parts[1].data[0], 9)
+        self.assertEqual(parts[1].data[3], 6)
+    }
+
+    def test_quoted_boundary_end_to_end() {
+        # A boundary containing spaces (only legal in quoted form) parses both
+        # the Content-Type token and the body delimited by that boundary.
+        const ct: str = "multipart/form-data; boundary=\"sp ace bnd\""
+        const boundary: str = boundary_from_content_type(ct)
+        self.assertEqual(boundary, "sp ace bnd")
+
+        body: bytes = _open(boundary)
+        body = body + ("Content-Disposition: form-data; name=\"k\"" + CRLF + CRLF).encode()
+        body = body + "v".encode()
+        body = body + _close(boundary)
+
+        const parts: list[Part] = parse_multipart(body, boundary)
+        self.assertEqual(len(parts), 1)
+        self.assertEqual(parts[0].name, "k")
+        self.assertEqual(parts[0].data.decode(), "v")
+    }
+
+    def test_empty_boundary_returns_no_parts() {
+        # Defensive: no boundary token -> no parts (rather than mis-splitting).
+        const body: bytes = "garbage".encode()
+        const parts: list[Part] = parse_multipart(body, "")
+        self.assertEqual(len(parts), 0)
+    }
+}
+
+
+main([HttpMultipartTests()])

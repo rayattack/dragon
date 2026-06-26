@@ -1,0 +1,53 @@
+"""Decision 044 - generic free functions, monomorphized per concrete argument.
+
+`def first[T](xs: list[T]) -> T` is stamped once per element type. Type arguments
+are supplied either by inference from the argument (`first(nums)`) or explicitly
+at the call site (`first[int](nums)`). Multi-parameter generics (`pair[K, V]`)
+and a `T`-in-return-only function exercise the unifier and the explicit path.
+"""
+
+from unittest import TestCase, main
+
+def first[T](xs: list[T]) -> T {
+    return xs[0]
+}
+
+def last[T](xs: list[T]) -> T {
+    return xs[len(xs) - 1]
+}
+
+def identity[T](x: T) -> T {
+    return x
+}
+
+class GenericsFunctionTests(TestCase) {
+    def test_first_int_inferred() {
+        nums: list[int] = [10, 20, 30]
+        self.assertEqual(first(nums), 10)
+    }
+
+    def test_first_str_inferred() {
+        words: list[str] = ["a", "b", "c"]
+        self.assertEqual(first(words), "a")
+    }
+
+    def test_first_explicit_type_arg() {
+        nums: list[int] = [7, 8, 9]
+        self.assertEqual(first[int](nums), 7)
+    }
+
+    def test_last_inferred() {
+        nums: list[int] = [1, 2, 3, 99]
+        self.assertEqual(last(nums), 99)
+    }
+
+    def test_identity_int() {
+        self.assertEqual(identity[int](5), 5)
+    }
+
+    def test_identity_str() {
+        self.assertEqual(identity[str]("z"), "z")
+    }
+}
+
+main([GenericsFunctionTests()])

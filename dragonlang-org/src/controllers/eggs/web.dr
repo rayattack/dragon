@@ -1,0 +1,181 @@
+# web.dr - browser-facing controllers for accounts + package browsing.
+#
+# Sessions: the signed cookie carries uid + uname. CSRF is handled manually
+# (stateless csrf_token/csrf_verify over the session sid) so the token-
+# authenticated /api endpoints stay exempt from cookie-based CSRF.
+
+from http.server import Router, Request, Response, Context
+from secrets import token_urlsafe, compare_digest
+from deps import AUTH, REG
+from services.auth import AuthResult
+from models.records import Token
+from views.eggs.pages import render_login, render_signup, render_account, render_index, render_search, render_detail, render_not_found
+
+#--- session helpers ------------------------------------------------------#
+
+def _uid(req: Request) -> int {
+    const s: str = req.session.get("uid", "")
+    if len(s) == 0 {
+        return 0
+    }
+    return int(s)
+}
+
+def _uname(req: Request) -> str {
+    return req.session.get("uname", "")
+}
+
+# Synchronizer-token CSRF: a random token lives in the session and forms echo
+# it in a hidden field. Uses only the public session API (no protected sid),
+# and reading it on a form GET persists the session cookie for the POST.
+def _csrf(req: Request) -> str {
+    t: str = req.session.get("csrf", "")
+    if len(t) == 0 {
+        t = token_urlsafe(24)
+        req.session.set("csrf", t)
+    }
+    return t
+}
+
+def _check_csrf(req: Request) -> bool {
+    const expected: str = req.session.get("csrf", "")
+    if len(expected) == 0 {
+        return false
+    }
+    const f: dict[str, str] = req.form()
+    const got: str = f.get("csrf_token", "")
+    return compare_digest(expected.encode("utf-8"), got.encode("utf-8"))
+}
+
+# 303 See Other: a POST handler redirects to a GET target (not 307, which would
+# replay the POST against a GET-only route).
+def _see_other(res: Response, url: str) -> None {
+    res.status = 303
+    res.set_header("location", url)
+}
+
+#--- auth -----------------------------------------------------------------#
+
+def login_page(req: Request, res: Response, ctx: Context) -> None {
+    res.html(render_login(_csrf(req), ""))
+}
+
+def login_submit(req: Request, res: Response, ctx: Context) -> None {
+    if not _check_csrf(req) {
+        res.status = 400
+        res.html(render_login(_csrf(req), "Session expired - please try again."))
+        return
+    }
+    const f: dict[str, str] = req.form()
+    const username: str = f.get("username", "")
+    const password: str = f.get("password", "")
+    const r: AuthResult = AUTH.login(username, password)
+    if not r.ok {
+        res.status = 401
+        res.html(render_login(_csrf(req), r.error))
+        return
+    }
+    req.session.set("uid", str(r.user_id))
+    req.session.set("uname", username)
+    _see_other(res, "/account")
+}
+
+def signup_page(req: Request, res: Response, ctx: Context) -> None {
+    res.html(render_signup(_csrf(req), ""))
+}
+
+def signup_submit(req: Request, res: Response, ctx: Context) -> None {
+    if not _check_csrf(req) {
+        res.status = 400
+        res.html(render_signup(_csrf(req), "Session expired - please try again."))
+        return
+    }
+    const f: dict[str, str] = req.form()
+    const username: str = f.get("username", "")
+    const email: str = f.get("email", "")
+    const password: str = f.get("password", "")
+    const r: AuthResult = AUTH.register(username, email, password)
+    if not r.ok {
+        res.status = 400
+        res.html(render_signup(_csrf(req), r.error))
+        return
+    }
+    req.session.set("uid", str(r.user_id))
+    req.session.set("uname", username)
+    _see_other(res, "/account")
+}
+
+def logout(req: Request, res: Response, ctx: Context) -> None {
+    req.session.clear()
+    _see_other(res, "/")
+}
+
+#--- account + tokens -----------------------------------------------------#
+
+def account_page(req: Request, res: Response, ctx: Context) -> None {
+    const uid: int = _uid(req)
+    if uid == 0 {
+        _see_other(res, "/login")
+        return
+    }
+    const toks: list[Token] = AUTH.list_tokens(uid)
+    res.html(render_account(_uname(req), toks, "", _csrf(req)))
+}
+
+def token_create(req: Request, res: Response, ctx: Context) -> None {
+    const uid: int = _uid(req)
+    if uid == 0 {
+        _see_other(res, "/login")
+        return
+    }
+    if not _check_csrf(req) {
+        res.status = 400
+        res.html(render_account(_uname(req), AUTH.list_tokens(uid), "", _csrf(req)))
+        return
+    }
+    const f: dict[str, str] = req.form()
+    label: str = f.get("label", "")
+    if len(label) == 0 {
+        label = "token"
+    }
+    const plaintext: str = AUTH.issue_token(uid, label)
+    # Render directly (not PRG) so the one-time plaintext is shown exactly once.
+    res.html(render_account(_uname(req), AUTH.list_tokens(uid), plaintext, _csrf(req)))
+}
+
+def token_revoke(req: Request, res: Response, ctx: Context) -> None {
+    const uid: int = _uid(req)
+    if uid == 0 {
+        _see_other(res, "/login")
+        return
+    }
+    if not _check_csrf(req) {
+        _see_other(res, "/account")
+        return
+    }
+    const f: dict[str, str] = req.form()
+    const tid: str = f.get("token_id", "0")
+    AUTH.revoke_token(uid, int(tid))
+    _see_other(res, "/account")
+}
+
+#--- browse ---------------------------------------------------------------#
+
+def index_page(req: Request, res: Response, ctx: Context) -> None {
+    res.html(render_index(REG.search(""), _uname(req)))
+}
+
+def search_page(req: Request, res: Response, ctx: Context) -> None {
+    const q: str = req.query_str("q", "")
+    res.html(render_search(q, REG.search(q), _uname(req)))
+}
+
+def detail_page(req: Request, res: Response, ctx: Context) -> None {
+    const name: str = req.params.get("name", "")
+    if not REG.has_package(name) {
+        res.status = 404
+        res.html(render_not_found(_uname(req)))
+        return
+    }
+    res.html(render_detail(name, REG.describe(name), REG.get_versions(name), _uname(req)))
+}

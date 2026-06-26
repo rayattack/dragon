@@ -1,0 +1,48 @@
+class Node {
+    left: Node
+    right: Node
+    def(l: Node, r: Node) {
+        self.left = l
+        self.right = r
+    }
+}
+
+def make(depth: int) -> Node {
+    if depth == 0 {
+        return Node(None, None)
+    }
+    return Node(make(depth - 1), make(depth - 1))
+}
+
+def check(node: Node) -> int {
+    if node.left == None {
+        return 1
+    }
+    return 1 + check(node.left) + check(node.right)
+}
+
+min_depth: int = 4
+max_depth: int = 14
+total: int = 0
+
+# Long-lived stretch tree (allocated, checked, then dropped at scope exit).
+total = total + check(make(max_depth + 1))
+
+depth: int = min_depth
+while depth <= max_depth {
+    # iterations = 2^(max_depth - depth + min_depth)
+    iterations: int = 1
+    shift: int = max_depth - depth + min_depth
+    k: int = 0
+    while k < shift {
+        iterations = iterations * 2
+        k = k + 1
+    }
+    i: int = 0
+    while i < iterations {
+        total = total + check(make(depth))
+        i = i + 1
+    }
+    depth = depth + 2
+}
+print(total)

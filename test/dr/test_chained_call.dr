@@ -1,0 +1,66 @@
+# test/dr/test_chained_call.dr - calling a callable VALUE (not a Name/Attribute).
+#
+# Regression guard: a call whose callee is itself a value-producing expression
+# returned 0. visit(CallExpr) only dispatched NameExpr / AttributeExpr callees;
+# every other callee shape fell through to a `lastValue = 0` stub. The fix
+# evaluates the callee to a DragonClosure / bare fn pointer and emits a runtime-
+# discriminated indirect call (closure-with-env vs bare fn), so both the
+# immediate-chained form `make_adder(5)(10)` and a callable read from a
+# container `funcs[i](x)` dispatch correctly.
+
+from unittest import TestCase, main
+
+
+def make_adder(n: int) -> Callable[[int], int] {
+    def adder(x: int) -> int { return x + n }
+    return adder
+}
+
+def make_scaler(a: int, b: int) -> Callable[[int], int] {
+    def f(x: int) -> int { return x * a + b }
+    return f
+}
+
+def inc(x: int) -> int { return x + 1 }
+def dec(x: int) -> int { return x - 1 }
+
+
+class ChainedCallTests(TestCase) {
+    def test_immediate_chained_call() {
+        # The original repro: make_adder(5)(10) -> 0 before the fix.
+        self.assertEqual(make_adder(5)(10), 15)
+    }
+
+    def test_immediate_chained_multi_param() {
+        self.assertEqual(make_scaler(2, 3)(10), 23)
+    }
+
+    def test_chained_equals_stored() {
+        # The stored form already worked; the immediate form must agree.
+        g: Callable[[int], int] = make_adder(7)
+        self.assertEqual(make_adder(7)(3), g(3))
+    }
+
+    def test_nested_chained_call() {
+        # The inner make_adder(1)(2) = 3 feeds the outer make_adder(3)(10) = 13.
+        self.assertEqual(make_adder(make_adder(1)(2))(10), 13)
+    }
+
+    def test_call_closure_from_list() {
+        # Callee is a SubscriptExpr over a list of capturing closures.
+        fs: list[Callable[[int], int]] = [make_adder(10), make_adder(20)]
+        self.assertEqual(fs[0](5), 15)
+        self.assertEqual(fs[1](5), 25)
+    }
+
+    def test_call_bare_fn_from_list() {
+        # Callee is a SubscriptExpr over a list of BARE functions (no env) -
+        # the runtime closure-vs-bare discrimination must handle both.
+        fs: list[Callable[[int], int]] = [inc, dec]
+        self.assertEqual(fs[0](10), 11)
+        self.assertEqual(fs[1](10), 9)
+    }
+}
+
+
+main([ChainedCallTests()])

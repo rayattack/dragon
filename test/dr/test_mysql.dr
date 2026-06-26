@@ -1,0 +1,66 @@
+"""D032 MySQL backend end-to-end, against a live server.
+
+Exercises the real wire-protocol driver: `database.open("mysql://...")` with
+the connection handshake (caching_sha2_password fast path + the
+mysql_native_password auth switch), binary-protocol prepared statements
+(COM_STMT_PREPARE/EXECUTE) with template[SQL] param binding, binary result-row
+decode (FLOAT/DOUBLE via struct), and the shared base-class surface
+(one / scalar) dispatching to MySqlConnection.
+
+Self-gating: if no MySQL is reachable / auth fails, the body raises
+ConnectionError before any assertion runs, which is caught and reported as a
+skip. AssertionError is not a ConnectionError, so a genuine wrong-answer still
+propagates. All writes go to a TEMPORARY table that vanishes on disconnect.
+"""
+
+from unittest import TestCase, main
+import database
+from database import SQL, ConnectionError
+
+const DSN: str = "mysql://root:eldorad0@127.0.0.1:3306/"
+
+
+class MySqlTests(TestCase) {
+    def test_mysql_live() {
+        try {
+            db: database.Connection = database.open(DSN)
+            db.raw("create database if not exists dragontest")
+            db.raw("use dragontest")
+            db.raw("create temporary table dr_my_test(id int auto_increment primary key, name varchar(64), score double, flag tinyint)")
+
+            # Parameterized insert (binary prepared statement) - injection-safe.
+            nm: str = "'; drop table dr_my_test; --"
+            sc: float = 9.5
+            fl: int = 1
+            res: database.Results = db.run(template[SQL] {
+                insert into dr_my_test(name, score, flag) values(!{nm}, !{sc}, !{fl})
+            })
+            self.assertEqual(res.ran, 1)
+            self.assertEqual(res.xid, 1)
+
+            # Parameterized query with a bound predicate; verify typed decode.
+            minscore: float = 5.0
+            rows: list[dict[str, Any]] = db.all(template[SQL] {
+                select id, name, score, flag from dr_my_test where score > !{minscore}
+            })
+            self.assertEqual(len(rows), 1)
+            r: dict[str, Any] = rows[0]
+            self.assertEqual(r["id"], 1)
+            self.assertEqual(r["name"], "'; drop table dr_my_test; --")  # stored verbatim
+            got: float = r["score"]
+            self.assertAlmostEqual(got, 9.5)                              # DOUBLE binary decode
+            self.assertEqual(r["flag"], 1)
+
+            # scalar + one (shared base methods, virtual-dispatched to MySqlConnection).
+            cnt: int = db.val(template[SQL] { select count(*) as n from dr_my_test })
+            self.assertEqual(cnt, 1)                                      # table survived the payload
+            one: dict[str, Any] = db.one(template[SQL] { select name from dr_my_test })
+            self.assertEqual(one["name"], "'; drop table dr_my_test; --")
+            db.close()
+        } except ConnectionError {
+            print("skip: mysql not reachable at", DSN)
+        }
+    }
+}
+
+main([MySqlTests()])

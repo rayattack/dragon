@@ -1,0 +1,46 @@
+"""urllib.error - exception classes raised by urllib (Python parity).
+
+Pure Dragon. Mirrors CPython's `URLError(reason)`, `HTTPError(url, code,
+msg, headers)`, and `ContentTooShortError(reason, content)`. Subclasses
+preserve the Python attribute names so `except URLError as e: e.reason`
+and `except HTTPError as e: e.code` port cleanly.
+"""
+
+
+class URLError(Exception) {
+    reason: str
+    filename: str
+
+    def(reason: str, filename: str = "") {
+        self.reason = reason
+        self.filename = filename
+    }
+}
+
+
+class HTTPError(URLError) {
+    url: str
+    code: int
+    msg: str
+    headers: dict[str, str]
+
+    def(url: str, code: int, msg: str, headers: dict[str, str]) {
+        self.url = url
+        self.code = code
+        self.msg = msg
+        self.headers = headers
+        self.reason = msg
+        self.filename = url
+    }
+}
+
+
+class ContentTooShortError(URLError) {
+    content: str
+
+    def(reason: str, content: str) {
+        self.reason = reason
+        self.filename = ""
+        self.content = content
+    }
+}

@@ -1,0 +1,136 @@
+# test/dr/test_closure_cycle_rc.dr - leaks.md #11: the cycle collector can now
+# see through closures + their captured environments.
+#
+# A closure stored in a field/container that captures the holder back is a real
+# reference cycle (instance/list -> closure -> env -> back-edge). Before the fix
+# the trial-deletion collector never visited Closure/Env nodes, so the cycle was
+# uncollectable - an UNBOUNDED leak (RSS-proven; LSan was structurally blind to
+# it because the leaked objects stay pinned in the runtime gc_tracked[] root).
+#
+# The LEAK direction is verified externally by RSS A/B (it is invisible to LSan):
+#  - self-mutating callback churn: 5k vs 200k iters -> flat (was 3MB -> 51MB).
+#  - closure-captures-its-list churn: 5k vs 200k -> flat (was 4MB -> 69MB).
+# This unittest pins the DANGEROUS direction the collector must never get wrong:
+# a LIVE, still-reachable cycle must SURVIVE a forced collection and stay usable
+# (a premature free would be a use-after-free / wrong value). dragon_gc_collect
+# forces a deterministic collection mid-test.
+
+from unittest import TestCase, main
+
+extern "C" def dragon_gc_collect() -> int
+
+
+class Node {
+    n: int
+    cb: Callable[[], int]
+    def(seed: int) {
+        self.n = seed
+        # mutating self-capture: env increfs `self` back -> the genuine cycle.
+        self.cb = lambda () -> int { self.n = self.n + 1; return self.n }
+    }
+}
+
+
+class Handler {
+    n: int
+    cb: Callable[[int], int]
+    def(seed: int) {
+        self.n = seed
+        # bound-method closure capturing self, stored back in self -> cycle.
+        self.cb = getattr(self, "act")
+    }
+    def act(x: int) -> int { return self.n + x }
+}
+
+
+class ClosureCycleTests(TestCase) {
+    def test_live_instance_cycles_survive_collection() {
+        # Many live instance->closure->env->self cycles held in a list root.
+        live: list[Node] = []
+        i: int = 0
+        while i < 300 {
+            live.append(Node(i))
+            i = i + 1
+        }
+        dragon_gc_collect()
+        dragon_gc_collect()
+        # Each cb() mutates+reads self.n -> seed+1. Wrong-collection => UAF/garbage.
+        total: int = 0
+        j: int = 0
+        while j < 300 {
+            nd: Node = live[j]
+            total = total + nd.cb()
+            j = j + 1
+        }
+        # sum(seed+1 for seed in 0..299) = sum(1..300) = 45150
+        self.assertEqual(total, 45150)
+    }
+
+    def test_shared_closure_two_holders_survives() {
+        # One closure held by two live nodes - must not be double-collected.
+        shared_cb: Callable[[], int] = lambda () -> int { return 99 }
+        a: Node = Node(1)
+        b: Node = Node(2)
+        a.cb = shared_cb
+        b.cb = shared_cb
+        dragon_gc_collect()
+        self.assertEqual(a.cb() + b.cb(), 198)
+    }
+
+    def test_live_list_capture_cycle_survives() {
+        # xs -> closure -> env -> xs, kept alive via `keep`, collected, then read.
+        keep: list[Callable[[], int]] = []
+        xs: list[Callable[[], int]] = []
+        c2: Callable[[], int] = lambda () -> int { return len(xs) + 5 }
+        xs.append(c2)
+        keep.append(c2)
+        dragon_gc_collect()
+        fn: Callable[[], int] = keep[0]
+        self.assertEqual(fn(), 6)
+    }
+
+    def test_bound_method_cycle_survives() {
+        # instance -> bound-method closure -> env -> self, held live, collected.
+        live: list[Handler] = []
+        i: int = 0
+        while i < 150 {
+            live.append(Handler(i))
+            i = i + 1
+        }
+        dragon_gc_collect()
+        total: int = 0
+        j: int = 0
+        while j < 150 {
+            h: Handler = live[j]
+            total = total + h.cb(1)
+            j = j + 1
+        }
+        # sum(seed+1 for seed in 0..149) = sum(1..150) = 11325
+        self.assertEqual(total, 11325)
+    }
+
+    def test_drop_half_keeps_live() {
+        # Keep even-seed nodes alive, drop the rest, collect, use the kept ones.
+        kept: list[Node] = []
+        k: int = 0
+        while k < 400 {
+            nd: Node = Node(k)
+            if k % 2 == 0 { kept.append(nd) }
+            k = k + 1
+        }
+        dragon_gc_collect()
+        dragon_gc_collect()
+        s: int = 0
+        m: int = 0
+        while m < 200 {
+            nd2: Node = kept[m]
+            s = s + nd2.cb()
+            m = m + 1
+        }
+        # cb() -> seed+1 for even seeds 0,2,...,398 = sum of first 200 odds = 200^2
+        self.assertEqual(s, 40000)
+    }
+}
+
+
+main([ClosureCycleTests()])

@@ -1,0 +1,121 @@
+"""D032 database stdlib (SQLite backend) end-to-end.
+
+Exercises the Phase 1 surface via the real driver: template[SQL] parameter
+binding, native-typed dict[str, Any] rows, the Customer(**row) typed-conversion
+gate, and the structural injection-safety guarantee (a payload reaches a bound
+param, never the SQL text - the table survives).
+"""
+
+from unittest import TestCase, main
+import database
+from database import SQL
+
+class Customer(TypedDict) {
+    id: int
+    name: str
+}
+
+class DatabaseTests(TestCase) {
+    def test_query_params_and_types() {
+        db: database.Connection = database.open("sqlite::memory:")
+        db.raw("create table t(id integer primary key, name text, score real)")
+        nm: str = "dragon"
+        sc: float = 9.5
+        db.run(template[SQL] { insert into t(name, score) values(!{nm}, !{sc}) })
+        rows: list[dict[str, Any]] = db.all(template[SQL] { select id, name, score from t })
+        self.assertEqual(len(rows), 1)
+        r: dict[str, Any] = rows[0]
+        self.assertEqual(r["id"], 1)
+        self.assertEqual(r["name"], "dragon")
+        got: float = r["score"]
+        self.assertAlmostEqual(got, 9.5)
+        db.close()
+    }
+
+    def test_injection_safe() {
+        db: database.Connection = database.open("sqlite::memory:")
+        db.raw("create table t(id integer primary key, name text)")
+        evil: str = "'; DROP TABLE t; --"
+        db.run(template[SQL] { insert into t(name) values(!{evil}) })
+        cnt: int = db.val(template[SQL] { select count(*) from t })
+        self.assertEqual(cnt, 1)                       # table survived
+        row: dict[str, Any] = db.one(template[SQL] { select name from t })
+        self.assertEqual(row["name"], "'; DROP TABLE t; --")  # stored verbatim
+        db.close()
+    }
+
+    def test_typed_row_conversion() {
+        db: database.Connection = database.open("sqlite::memory:")
+        db.raw("create table c(id integer primary key, name text)")
+        a: str = "Ada"
+        db.run(template[SQL] { insert into c(name) values(!{a}) })
+        # D049 typed fetch: db.all[Customer] materializes rows into Customer directly.
+        customers: list[Customer] = db.all[Customer](template[SQL] { select id, name from c })
+        self.assertEqual(len(customers), 1)
+        self.assertEqual(customers[0].id, 1)        # list[TypedDict] subscript dot-access
+        self.assertEqual(customers[0].name, "Ada")
+        # Inferred single-row typed fetch (T from the binding annotation).
+        only: Customer = db.one(template[SQL] { select id, name from c where id = 1 })
+        self.assertEqual(only.name, "Ada")
+        db.close()
+    }
+
+    def test_transaction() {
+        # D049 transaction(): explicit commit persists; an uncommitted scope
+        # (here unwound by a raise) rolls back. xid/ran ride on the Results.
+        db: database.Connection = database.open("sqlite::memory:")
+        db.raw("create table tx(id integer primary key, n int)")
+        with db.transaction() as t {
+            t.run(template[SQL] { insert into tx(n) values(1) })
+            t.run(template[SQL] { insert into tx(n) values(2) })
+            t.commit()
+        }
+        self.assertEqual(db.val[int](template[SQL] { select count(*) from tx }), 2)
+        try {
+            with db.transaction() as t2 {
+                t2.run(template[SQL] { insert into tx(n) values(3) })
+                raise ValueError("boom")
+            }
+        } except ValueError {
+            pass
+        }
+        self.assertEqual(db.val[int](template[SQL] { select count(*) from tx }), 2)  # rolled back
+        ins: database.Results = db.run(template[SQL] { insert into tx(n) values(9) })
+        self.assertEqual(ins.ran, 1)                 # rows affected on the Results
+        self.assertTrue(ins.xid > 0)                 # a last-insert rowid was assigned
+        self.assertEqual(db.val[int](template[SQL] { select count(*) from tx }), 3)  # 1,2,9
+        db.close()
+    }
+
+    def test_with_block() {
+        # `with database.open(...) as db` - generic read verbs must work on the
+        # with-bound connection. Regression: the `as` variable was left untyped by
+        # the TypeChecker, so generic-method stamping (db.all[T]/val[T]) failed and
+        # those reads silently returned empty while writes (run/raw) worked.
+        with database.open("sqlite::memory:") as db {
+            db.raw("create table w(id integer primary key, name text)")
+            nm: str = "Ada"
+            db.run(template[SQL] { insert into w(name) values(!{nm}) })
+            self.assertEqual(db.val[int](template[SQL] { select count(*) from w }), 1)
+            people: list[Customer] = db.all[Customer](template[SQL] { select id, name from w })
+            self.assertEqual(len(people), 1)
+            self.assertEqual(people[0].name, "Ada")
+        }
+    }
+
+    def test_pool() {
+        # Phase 5: a connection pool acquires/reuses/releases connections, all
+        # sharing the unified Connection surface (virtual dispatch).
+        pool: database.Pool = database.Pool("sqlite::memory:", 2)
+        c1: database.Connection = pool.acquire()
+        self.assertEqual(c1.val[int](template[SQL] { select 1 as n }), 1)
+        pool.release(c1)
+        # A second acquire reuses the released connection (idle set non-empty).
+        c2: database.Connection = pool.acquire()
+        self.assertEqual(c2.val[int](template[SQL] { select 2 as n }), 2)
+        pool.release(c2)
+        pool.close()
+    }
+}
+
+main([DatabaseTests()])

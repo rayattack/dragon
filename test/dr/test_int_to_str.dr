@@ -1,0 +1,49 @@
+"""str(int) - hand-rolled itoa fast path (replaced snprintf).
+
+Guards the edge cases of the manual decimal conversion: zero, single digit,
+negatives, the sign boundary, and INT64_MIN (whose magnitude has no positive
+counterpart - handled by negating in unsigned). INT64_MIN can't be written as a
+literal (the lexer parses the positive magnitude first, which overflows), so it
+is built at runtime.
+"""
+
+from unittest import TestCase, main
+
+class IntToStrTests(TestCase) {
+    def test_small_and_zero() {
+        self.assertEqual(str(0), "0")
+        self.assertEqual(str(7), "7")
+        self.assertEqual(str(10), "10")
+        self.assertEqual(str(100), "100")
+    }
+
+    def test_negatives() {
+        self.assertEqual(str(-1), "-1")
+        self.assertEqual(str(-7), "-7")
+        self.assertEqual(str(-42), "-42")
+        self.assertEqual(str(-123456789), "-123456789")
+    }
+
+    def test_int64_bounds() {
+        self.assertEqual(str(9223372036854775807), "9223372036854775807")
+        mn: int = -9223372036854775807
+        mn = mn - 1   # INT64_MIN, computed (cannot be a literal)
+        self.assertEqual(str(mn), "-9223372036854775808")
+    }
+
+    def test_in_fstring_and_concat() {
+        x: int = -305
+        self.assertEqual(f"val={x}", "val=-305")
+        self.assertEqual("n=" + str(2000000000), "n=2000000000")
+    }
+
+    def test_len_of_conversion() {
+        # length must match the digit count (no stray NUL / off-by-one)
+        self.assertEqual(len(str(0)), 1)
+        self.assertEqual(len(str(-1)), 2)
+        self.assertEqual(len(str(12345)), 5)
+        self.assertEqual(len(str(-12345)), 6)
+    }
+}
+
+main([IntToStrTests()])

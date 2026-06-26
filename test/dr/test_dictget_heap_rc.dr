@@ -1,0 +1,136 @@
+# test/dr/test_dictget_heap_rc.dr - dict.get on a HEAP-valued dict: reference
+# counting (leaks.md #19).
+#
+# `dict.get(k)` / `.get(k, default)` on a dict whose VALUES are heap objects
+# (list/dict/set/tuple/bytes/instance) used to return a BORROW: the stored value
+# with no incref. A binding then OWNED it (`g: list[int] = d.get(k)`) and decref'd
+# it at scope exit, dropping the dict's only reference and freeing the value the
+# dict still held -> use-after-free on the next read (proven: heap-use-after-free
+# in dragon_list_len). The fix routes heap-valued get through owned-returning
+# getters (dragon_dict_get_ptr / _get_ptr_default / dragon_dict_int_get_owned /
+# _owned_default) that incref on return, mirroring the str path's existing
+# dragon_dict_get_str_default. The getter is picked at COMPILE TIME from the
+# statically-known value type - monomorphic, no box, no runtime tag check.
+#
+# Pins, with leak-freedom AND UAF-freedom verified under the ASan/LSan build:
+#  (1) binding a get result and dropping it leaves the dict's value alive,
+#  (2) the 2-arg default form is balanced whether the key is present (stored
+#  returned, default temp drained) or absent (default returned), and
+#  (3) the get result OWNS its own ref - it outlives the source dict being
+#  dropped (a missing incref would free it out from under the binding).
+# Inner `if True { }` blocks force the early scope-exit decref that triggered the
+# original UAF - the exact "a scope that ends frees what it held" invariant.
+
+from unittest import TestCase, main
+
+
+class DictGetHeapRcTests(TestCase) {
+    def test_str_keyed_get_keeps_dict_value() {
+        d: dict[str, list[int]] = {"a": [1, 2, 3]}
+        # 1-arg get (dragon_dict_get_ptr): bind in an inner scope, let it die.
+        if True {
+            g: list[int] = d.get("a")
+            self.assertEqual(len(g), 3)
+            self.assertEqual(g[0], 1)
+        }
+        # The dict's stored value must still be alive after g was freed.
+        again: list[int] = d.get("a")
+        self.assertEqual(len(again), 3)
+        self.assertEqual(again[2], 3)
+    }
+
+    def test_str_keyed_get_default_present_and_absent() {
+        d: dict[str, list[int]] = {"a": [1, 2, 3]}
+        # 2-arg default, key PRESENT: stored value returned, default temp drained.
+        if True {
+            h: list[int] = d.get("a", [0])
+            self.assertEqual(len(h), 3)
+        }
+        # 2-arg default, key ABSENT: the default list is what gets returned/bound.
+        if True {
+            m: list[int] = d.get("zzz", [9, 9])
+            self.assertEqual(len(m), 2)
+            self.assertEqual(m[0], 9)
+        }
+        again: list[int] = d.get("a")
+        self.assertEqual(len(again), 3)
+    }
+
+    def test_int_keyed_get_keeps_dict_value() {
+        d: dict[int, list[int]] = {7: [4, 5, 6, 7]}
+        # 1-arg get (dragon_dict_int_get_owned).
+        if True {
+            g: list[int] = d.get(7)
+            self.assertEqual(len(g), 4)
+            self.assertEqual(g[1], 5)
+        }
+        again: list[int] = d.get(7)
+        self.assertEqual(len(again), 4)
+    }
+
+    def test_int_keyed_get_default_present_and_absent() {
+        d: dict[int, list[int]] = {7: [4, 5, 6, 7]}
+        # key PRESENT (dragon_dict_int_get_owned_default, stored returned).
+        if True {
+            h: list[int] = d.get(7, [0])
+            self.assertEqual(len(h), 4)
+        }
+        # key ABSENT (default returned).
+        if True {
+            m: list[int] = d.get(99, [1, 2, 3])
+            self.assertEqual(len(m), 3)
+        }
+        again: list[int] = d.get(7)
+        self.assertEqual(len(again), 4)
+    }
+
+    def test_get_result_outlives_dropped_dict() {
+        # The dual property: the get result OWNS its ref, so it survives the
+        # SOURCE dict being dropped. A missing incref would free the list out
+        # from under `keep` (use-after-free, caught under ASan).
+        d: dict[str, list[int]] = {"k": [7, 8, 9, 10]}
+        keep: list[int] = d.get("k")
+        d = {}                                  # drop the dict + its ref to the list
+        # Churn the allocator to reuse any wrongly-freed slot.
+        i: int = 0
+        while i < 200 {
+            junk: list[int] = [i, i, i]
+            i = i + 1
+        }
+        self.assertEqual(len(keep), 4)
+        self.assertEqual(keep[3], 10)
+    }
+
+    def test_get_loop_stress() {
+        # Hammer the (formerly UAF/leaking) get path; values stay correct and the
+        # dict's stored value is untouched across many bind-and-drop cycles.
+        d: dict[str, list[int]] = {"a": [1, 2, 3]}
+        acc: int = 0
+        i: int = 0
+        while i < 1000 {
+            if True {
+                g: list[int] = d.get("a")
+                acc = acc + len(g)              # +3 each iteration
+            }
+            i = i + 1
+        }
+        self.assertEqual(acc, 3000)
+        again: list[int] = d.get("a")
+        self.assertEqual(len(again), 3)
+    }
+
+    def test_set_valued_get_generality() {
+        # Not list-specific: every heap value kind routes through the owned
+        # getter. A set-valued dict must behave identically.
+        d: dict[str, set[int]] = {"s": {1, 2, 3}}
+        if True {
+            g: set[int] = d.get("s")
+            self.assertEqual(len(g), 3)
+        }
+        again: set[int] = d.get("s")
+        self.assertEqual(len(again), 3)
+    }
+}
+
+
+main([DictGetHeapRcTests()])

@@ -1,0 +1,134 @@
+# collections/concurrent.dr - Thread-safe collection wrappers
+#
+# These are Dragon class wrappers around the builtin SyncList/SyncDict
+# runtime types. They provide the same API but can be extended with
+# custom methods, decorators, and subclassing.
+
+extern "C" def dragon_synclist_new() -> ptr
+extern "C" def dragon_synclist_append(sl: ptr, val: int)
+extern "C" def dragon_synclist_get(sl: ptr, idx: int) -> int
+extern "C" def dragon_synclist_set(sl: ptr, idx: int, val: int)
+extern "C" def dragon_synclist_pop(sl: ptr, idx: int) -> int
+extern "C" def dragon_synclist_len(sl: ptr) -> int
+extern "C" def dragon_synclist_clear(sl: ptr)
+extern "C" def dragon_synclist_remove(sl: ptr, val: int)
+extern "C" def dragon_synclist_insert(sl: ptr, idx: int, val: int)
+extern "C" def dragon_synclist_index(sl: ptr, val: int) -> int
+extern "C" def dragon_synclist_count(sl: ptr, val: int) -> int
+extern "C" def dragon_synclist_sort(sl: ptr)
+extern "C" def dragon_synclist_reverse(sl: ptr)
+extern "C" def dragon_synclist_destroy(sl: ptr)
+
+extern "C" def dragon_syncdict_new() -> ptr
+extern "C" def dragon_syncdict_set(sd: ptr, key: str, val: int)
+extern "C" def dragon_syncdict_get(sd: ptr, key: str) -> int
+extern "C" def dragon_syncdict_get_default(sd: ptr, key: str, default_val: int) -> int
+extern "C" def dragon_syncdict_len(sd: ptr) -> int
+extern "C" def dragon_syncdict_has_key(sd: ptr, key: str) -> int
+extern "C" def dragon_syncdict_pop(sd: ptr, key: str) -> int
+extern "C" def dragon_syncdict_clear(sd: ptr)
+extern "C" def dragon_syncdict_destroy(sd: ptr)
+
+#===----------------------------------------------------------------------===#
+# ConcurrentList - Thread-safe list wrapper
+#===----------------------------------------------------------------------===#
+
+class ConcurrentList {
+    def() {
+        self._handle = dragon_synclist_new()
+    }
+
+    def append(val: int) {
+        dragon_synclist_append(self._handle, val)
+    }
+
+    def get(idx: int) -> int {
+        return dragon_synclist_get(self._handle, idx)
+    }
+
+    def set(idx: int, val: int) {
+        dragon_synclist_set(self._handle, idx, val)
+    }
+
+    def pop(idx: int) -> int {
+        return dragon_synclist_pop(self._handle, idx)
+    }
+
+    def len() -> int {
+        return dragon_synclist_len(self._handle)
+    }
+
+    def clear() {
+        dragon_synclist_clear(self._handle)
+    }
+
+    def remove(val: int) {
+        dragon_synclist_remove(self._handle, val)
+    }
+
+    def insert(idx: int, val: int) {
+        dragon_synclist_insert(self._handle, idx, val)
+    }
+
+    def index(val: int) -> int {
+        return dragon_synclist_index(self._handle, val)
+    }
+
+    def count(val: int) -> int {
+        return dragon_synclist_count(self._handle, val)
+    }
+
+    def sort() {
+        dragon_synclist_sort(self._handle)
+    }
+
+    def reverse() {
+        dragon_synclist_reverse(self._handle)
+    }
+
+    def destroy() {
+        dragon_synclist_destroy(self._handle)
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# ConcurrentDict - Thread-safe dict wrapper
+#===----------------------------------------------------------------------===#
+
+class ConcurrentDict {
+    def() {
+        self._handle = dragon_syncdict_new()
+    }
+
+    def set(key: str, val: int) {
+        dragon_syncdict_set(self._handle, key, val)
+    }
+
+    def get(key: str) -> int {
+        return dragon_syncdict_get(self._handle, key)
+    }
+
+    def get_default(key: str, default_val: int) -> int {
+        return dragon_syncdict_get_default(self._handle, key, default_val)
+    }
+
+    def len() -> int {
+        return dragon_syncdict_len(self._handle)
+    }
+
+    def has_key(key: str) -> int {
+        return dragon_syncdict_has_key(self._handle, key)
+    }
+
+    def pop(key: str) -> int {
+        return dragon_syncdict_pop(self._handle, key)
+    }
+
+    def clear() {
+        dragon_syncdict_clear(self._handle)
+    }
+
+    def destroy() {
+        dragon_syncdict_destroy(self._handle)
+    }
+}

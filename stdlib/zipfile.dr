@@ -1,0 +1,507 @@
+"""zipfile - PKWARE ZIP archive read/write (CPython `zipfile` parity).
+
+Pure Dragon over the system zlib FFI. ZIP entries store RAW DEFLATE streams
+(RFC 1951 - no zlib/gzip header or trailer), so this module calls the raw
+entry points `dragon_zlib_compress_raw` / `dragon_zlib_decompress_raw`
+(deflateInit2/inflateInit2 with windowBits = -15) rather than the wrapped
+`dragon_zlib_compress` the gzip/tar paths use. The CRC-32 a ZIP carries
+out-of-band in each header is the IEEE 802.3 CRC from `binascii`.
+
+Tier-0 scope: single-shot in memory. `mode='r'` slurps the whole archive and
+parses the central directory; `mode='w'` buffers each entry and flushes the
+central directory on `close()`. Methods STORED (0) and DEFLATED (8) only;
+encryption, ZIP64, and streaming are explicit non-goals.
+
+Binary layout (all multi-byte fields little-endian):
+  local file header        signature 0x04034b50, 30 fixed bytes + name + extra
+  central directory header signature 0x02014b50, 46 fixed bytes + name + extra + comment
+  end of central directory signature 0x06054b50, 22 fixed bytes + comment
+"""
+
+
+from os.path import join, dirname
+
+import struct
+import binascii
+
+
+extern "C" def dragon_zlib_compress_raw(src: bytes, level: int) -> bytes
+extern "C" def dragon_zlib_decompress_raw(src: bytes) -> bytes
+extern "C" def dragon_read_file_bytes(path: str) -> bytes
+extern "C" def dragon_write_file_bytes(path: str, data: bytes) -> int
+extern "C" def dragon_makedirs(path: str, mode: intc) -> intc
+
+
+#===----------------------------------------------------------------------===#
+# Constants
+#===----------------------------------------------------------------------===#
+
+# Compression methods (PKWARE APPNOTE §4.4.5). Only these two are supported.
+const ZIP_STORED: int = 0
+const ZIP_DEFLATED: int = 8
+
+# Record signatures (APPNOTE §4.3). Stored little-endian on the wire.
+const _SIG_LOCAL: int = 0x04034b50
+const _SIG_CENTRAL: int = 0x02014b50
+const _SIG_EOCD: int = 0x06054b50
+
+# Version-needed-to-extract: 2.0 (=20) is the floor that supports DEFLATE.
+const _VERSION_NEEDED: int = 20
+# Version-made-by: low byte = ZIP spec version (3.0 -> 30); high byte = host
+# OS (0 = MS-DOS / FAT). 0x001E = (host 0 << 8) | 30.
+const _VERSION_MADE_BY: int = 0x001E
+
+# DOS epoch is 1980-01-01 00:00:00; that is the default mtime CPython writes
+# when no date_time is supplied. A DOS date of 0 is invalid, so we never emit
+# one - an unspecified entry gets the epoch.
+const _DOS_EPOCH_DATE_TIME: tuple[int, int, int, int, int, int] = (1980, 1, 1, 0, 0, 0)
+
+
+#===----------------------------------------------------------------------===#
+# DOS date/time packing (APPNOTE §4.4.6) - MS-DOS 16-bit date + 16-bit time.
+#===----------------------------------------------------------------------===#
+
+# Pack a 6-tuple (year, month, day, hour, minute, second) into the DOS
+# (mdate, mtime) pair. Seconds have 2-second resolution (the low bit is the
+# 2-second count). Years before 1980 clamp to the DOS epoch.
+def _dos_pack(dt: tuple[int, int, int, int, int, int]) -> tuple[int, int] {
+    year: int = dt[0]
+    if year < 1980 {
+        year = 1980
+    }
+    dosdate: int = ((year - 1980) << 9) | (dt[1] << 5) | dt[2]
+    dostime: int = (dt[3] << 11) | (dt[4] << 5) | (dt[5] // 2)
+    return (dosdate & 0xFFFF, dostime & 0xFFFF)
+}
+
+
+# Unpack the DOS (dosdate, dostime) fields back into a 6-tuple.
+def _dos_unpack(dosdate: int, dostime: int) -> tuple[int, int, int, int, int, int] {
+    year: int = ((dosdate >> 9) & 0x7F) + 1980
+    month: int = (dosdate >> 5) & 0x0F
+    day: int = dosdate & 0x1F
+    hour: int = (dostime >> 11) & 0x1F
+    minute: int = (dostime >> 5) & 0x3F
+    second: int = (dostime & 0x1F) * 2
+    return (year, month, day, hour, minute, second)
+}
+
+
+#===----------------------------------------------------------------------===#
+# ZipInfo - one archive member's metadata (CPython zipfile.ZipInfo parity).
+#===----------------------------------------------------------------------===#
+
+class ZipInfo {
+    filename: str
+    date_time: tuple[int, int, int, int, int, int]
+    compress_type: int
+    compress_size: int
+    file_size: int
+    CRC: int
+    header_offset: int
+    flag_bits: int
+
+    def(name: str) {
+        self.filename = name
+        self.date_time = _DOS_EPOCH_DATE_TIME
+        self.compress_type = ZIP_STORED
+        self.compress_size = 0
+        self.file_size = 0
+        self.CRC = 0
+        # Byte offset of this entry's local file header within the archive.
+        # Recorded on write so the central directory can point at it; set on
+        # read so a future random-access path could seek to it.
+        self.header_offset = 0
+        # General-purpose bit flag. We always emit 0 (no encryption, sizes
+        # known up front so no data descriptor / streaming bit 3).
+        self.flag_bits = 0
+    }
+}
+
+
+#===----------------------------------------------------------------------===#
+# ZipFile
+#===----------------------------------------------------------------------===#
+
+class ZipFile {
+    filename: str
+    mode: str
+    closed: bool
+    _infos: list[ZipInfo]
+    _data: list[bytes]
+    _offset: int
+    _local: bytes
+
+    def(path: str, open_mode: str) {
+        self.filename = path
+        self.mode = open_mode
+        self.closed = False
+        # Field types are declared in the class body above; the constructor
+        # only assigns (bare `=`). The class-body `list[ZipInfo]` / `list[bytes]`
+        # declarations carry the element class so iteration yields typed loop
+        # vars (mirrors stdlib/netrc.dr's tuple-field pattern).
+        self._infos = []
+        # Per-entry raw stored bytes (post-compression), parallel to _infos.
+        # On read these are the entry's on-disk compressed payload; on write
+        # they are what writestr produced.
+        self._data = []
+        # Write-mode running offset of the next local header (= bytes emitted
+        # so far into the local-headers region).
+        self._offset = 0
+        # Accumulated local-headers region for the write path.
+        self._local = bytes()
+    }
+
+    # --- read paths -------------------------------------------------------
+
+    def namelist() -> list[str] {
+        out: list[str] = []
+        for info in self._infos {
+            out.append(info.filename)
+        }
+        return out
+    }
+
+    def infolist() -> list[ZipInfo] {
+        return self._infos
+    }
+
+    def getinfo(name: str) -> ZipInfo {
+        for info in self._infos {
+            if info.filename == name {
+                return info
+            }
+        }
+        raise KeyError(f"There is no item named '{name}' in the archive")
+    }
+
+    # Return the index of `name` in _infos, or raise KeyError. read()/extract
+    # use this so they can pull the parallel _data entry.
+    def _index_of(name: str) -> int {
+        i: int = 0
+        while i < len(self._infos) {
+            if self._infos[i].filename == name {
+                return i
+            }
+            i = i + 1
+        }
+        raise KeyError(f"There is no item named '{name}' in the archive")
+    }
+
+    # Decompress (or pass through) the stored payload for `name` and verify
+    # its CRC-32 against the central-directory value.
+    def read(name: str) -> bytes {
+        idx: int = self._index_of(name)
+        info: ZipInfo = self._infos[idx]
+        raw: bytes = self._data[idx]
+        plain: bytes = bytes()
+        if info.compress_type == ZIP_STORED {
+            plain = raw
+        } else if info.compress_type == ZIP_DEFLATED {
+            plain = dragon_zlib_decompress_raw(raw)
+        } else {
+            raise ValueError(f"zipfile: unsupported compression method {info.compress_type} for '{name}'")
+        }
+        # Integrity check - a corrupt member must not silently decode.
+        actual: int = binascii.crc32(plain, 0)
+        if actual != info.CRC {
+            raise ValueError(f"Bad CRC-32 for file '{name}'")
+        }
+        return plain
+    }
+
+    def extract(name: str, path: str = ".") -> str {
+        target: str = join(path, name)
+        # ZIP names use '/' as the separator; a directory entry ends in '/'
+        # and carries no payload - create the dir and stop (no read()).
+        if len(name) > 0 and name[len(name) - 1:len(name)] == "/" {
+            dragon_makedirs(target, 0o755)
+            return target
+        }
+        data: bytes = self.read(name)
+        parent: str = dirname(target)
+        if len(parent) > 0 {
+            dragon_makedirs(parent, 0o755)
+        }
+        dragon_write_file_bytes(target, data)
+        return target
+    }
+
+    def extractall(path: str = ".") -> None {
+        for info in self._infos {
+            self.extract(info.filename, path)
+        }
+    }
+
+    # Parse an in-memory archive: read the EOCD to find the central directory,
+    # then walk the central directory headers. For each entry we re-read its
+    # local file header to find where the compressed payload begins (the local
+    # header's name/extra lengths can differ from the central record's), and
+    # slice out the stored bytes.
+    def _parse(raw: bytes) -> None {
+        n: int = len(raw)
+        eocd: int = self._find_eocd(raw, n)
+        if eocd < 0 {
+            raise ValueError("File is not a zip file")
+        }
+        # EOCD fixed fields (offsets relative to the EOCD signature):
+        #  +10 total entries (this disk, u16), +12 total entries (u16),
+        #  +16 central-directory offset (u32).
+        total: int = struct.unpack_u16_le(raw, eocd + 10)
+        cd_off: int = struct.unpack_u32_le(raw, eocd + 16)
+
+        pos: int = cd_off
+        count: int = 0
+        while count < total and pos + 46 <= n {
+            sig: int = struct.unpack_u32_le(raw, pos)
+            if sig != _SIG_CENTRAL {
+                break
+            }
+            # Central directory header fixed-field offsets (from its sig):
+            #  +10 method, +12 dostime, +14 dosdate, +16 crc32,
+            #  +20 comp size, +24 uncomp size, +28 name len, +30 extra len,
+            #  +32 comment len, +42 local-header offset.
+            method: int = struct.unpack_u16_le(raw, pos + 10)
+            dostime: int = struct.unpack_u16_le(raw, pos + 12)
+            dosdate: int = struct.unpack_u16_le(raw, pos + 14)
+            crc: int = struct.unpack_u32_le(raw, pos + 16)
+            comp_size: int = struct.unpack_u32_le(raw, pos + 20)
+            uncomp_size: int = struct.unpack_u32_le(raw, pos + 24)
+            name_len: int = struct.unpack_u16_le(raw, pos + 28)
+            extra_len: int = struct.unpack_u16_le(raw, pos + 30)
+            comment_len: int = struct.unpack_u16_le(raw, pos + 32)
+            local_off: int = struct.unpack_u32_le(raw, pos + 42)
+
+            name_bytes: bytes = raw[pos + 46:pos + 46 + name_len]
+            name: str = name_bytes.decode("utf-8")
+
+            info: ZipInfo = ZipInfo(name)
+            info.compress_type = method
+            info.compress_size = comp_size
+            info.file_size = uncomp_size
+            info.CRC = crc
+            info.date_time = _dos_unpack(dosdate, dostime)
+            info.header_offset = local_off
+
+            # Locate the payload via the LOCAL header (its name/extra lengths
+            # are authoritative for where the data starts).
+            data: bytes = self._read_local_payload(raw, local_off, comp_size)
+            self._infos.append(info)
+            self._data.append(data)
+
+            pos = pos + 46 + name_len + extra_len + comment_len
+            count = count + 1
+        }
+    }
+
+    # Scan backwards for the EOCD signature. The EOCD sits at the very end of
+    # the file (its 22 fixed bytes plus a variable comment of up to 65535
+    # bytes); a backward scan finds it without a comment-length guess.
+    def _find_eocd(raw: bytes, n: int) -> int {
+        if n < 22 {
+            return -1
+        }
+        # Earliest the 22-byte EOCD could start, allowing a max-length comment.
+        lo: int = n - 22 - 65535
+        if lo < 0 {
+            lo = 0
+        }
+        i: int = n - 22
+        while i >= lo {
+            if struct.unpack_u32_le(raw, i) == _SIG_EOCD {
+                return i
+            }
+            i = i - 1
+        }
+        return -1
+    }
+
+    # Given a local-header offset, skip its 30 fixed bytes + name + extra and
+    # slice out `comp_size` payload bytes.
+    def _read_local_payload(raw: bytes, local_off: int, comp_size: int) -> bytes {
+        # Local header name/extra lengths live at +26 / +28 from its sig.
+        name_len: int = struct.unpack_u16_le(raw, local_off + 26)
+        extra_len: int = struct.unpack_u16_le(raw, local_off + 28)
+        start: int = local_off + 30 + name_len + extra_len
+        return raw[start:start + comp_size]
+    }
+
+    # --- write paths ------------------------------------------------------
+
+    # Add a member from in-memory bytes. Mirrors CPython
+    # ZipFile.writestr(name, data, compress_type). DEFLATED that fails to beat
+    # STORED falls back to STORED (CPython does the same so a tiny/random
+    # input never inflates).
+    def writestr(name: str, data: bytes, compress_type: int = ZIP_DEFLATED) -> None {
+        if self.closed {
+            raise ValueError("Attempt to write to ZIP archive that was already closed")
+        }
+        if self.mode[0:1] != "w" {
+            raise ValueError("write() requires mode 'w'")
+        }
+
+        crc: int = binascii.crc32(data, 0)
+        file_size: int = len(data)
+
+        method: int = compress_type
+        stored: bytes = data
+        if compress_type == ZIP_DEFLATED {
+            comp: bytes = dragon_zlib_compress_raw(data, -1)
+            if len(comp) < file_size {
+                stored = comp
+            } else {
+                # Compression didn't help - store verbatim (CPython parity).
+                method = ZIP_STORED
+                stored = data
+            }
+        } else if compress_type != ZIP_STORED {
+            raise ValueError(f"zipfile: unsupported compression method {compress_type}")
+        }
+        comp_size: int = len(stored)
+
+        info: ZipInfo = ZipInfo(name)
+        info.compress_type = method
+        info.compress_size = comp_size
+        info.file_size = file_size
+        info.CRC = crc
+        info.header_offset = self._offset
+
+        # Emit the local file header followed by the stored payload.
+        header: bytes = self._build_local_header(info, name)
+        self._local += header
+        self._local += stored
+        self._offset = self._offset + len(header) + comp_size
+
+        self._infos.append(info)
+        self._data.append(stored)
+    }
+
+    # Add a filesystem file. arcname controls the stored name; default = the
+    # source filename (matches CPython, which strips a leading slash/drive -
+    # for Tier-0 we keep the name verbatim). Reads the file eagerly.
+    def write(filename: str, arcname: str = "") -> None {
+        name: str = arcname
+        if len(name) == 0 {
+            name = filename
+        }
+        data: bytes = dragon_read_file_bytes(filename)
+        self.writestr(name, data, ZIP_DEFLATED)
+    }
+
+    # Build the 30-byte fixed local file header + name (no extra field).
+    def _build_local_header(info: ZipInfo, name: str) -> bytes {
+        name_bytes: bytes = name.encode("utf-8")
+        dos: tuple[int, int] = _dos_pack(info.date_time)
+        out: list[int] = []
+        struct.emit_u32_le(out, _SIG_LOCAL)
+        struct.emit_u16_le(out, _VERSION_NEEDED)         # version needed
+        struct.emit_u16_le(out, info.flag_bits)          # general purpose flag
+        struct.emit_u16_le(out, info.compress_type)      # method
+        struct.emit_u16_le(out, dos[1])                  # mod time (DOS)
+        struct.emit_u16_le(out, dos[0])                  # mod date (DOS)
+        struct.emit_u32_le(out, info.CRC)                # crc-32
+        struct.emit_u32_le(out, info.compress_size)      # compressed size
+        struct.emit_u32_le(out, info.file_size)          # uncompressed size
+        struct.emit_u16_le(out, len(name_bytes))         # file name length
+        struct.emit_u16_le(out, 0)                       # extra field length
+        i: int = 0
+        while i < len(name_bytes) {
+            out.append(name_bytes[i])
+            i = i + 1
+        }
+        return bytes(out)
+    }
+
+    # Build the 46-byte fixed central directory header + name (no extra/comment).
+    def _build_central_header(info: ZipInfo) -> bytes {
+        name_bytes: bytes = info.filename.encode("utf-8")
+        dos: tuple[int, int] = _dos_pack(info.date_time)
+        out: list[int] = []
+        struct.emit_u32_le(out, _SIG_CENTRAL)
+        struct.emit_u16_le(out, _VERSION_MADE_BY)        # version made by
+        struct.emit_u16_le(out, _VERSION_NEEDED)         # version needed
+        struct.emit_u16_le(out, info.flag_bits)          # general purpose flag
+        struct.emit_u16_le(out, info.compress_type)      # method
+        struct.emit_u16_le(out, dos[1])                  # mod time (DOS)
+        struct.emit_u16_le(out, dos[0])                  # mod date (DOS)
+        struct.emit_u32_le(out, info.CRC)                # crc-32
+        struct.emit_u32_le(out, info.compress_size)      # compressed size
+        struct.emit_u32_le(out, info.file_size)          # uncompressed size
+        struct.emit_u16_le(out, len(name_bytes))         # file name length
+        struct.emit_u16_le(out, 0)                       # extra field length
+        struct.emit_u16_le(out, 0)                       # file comment length
+        struct.emit_u16_le(out, 0)                       # disk number start
+        struct.emit_u16_le(out, 0)                       # internal attributes
+        struct.emit_u32_le(out, 0)                       # external attributes
+        struct.emit_u32_le(out, info.header_offset)      # local header offset
+        i: int = 0
+        while i < len(name_bytes) {
+            out.append(name_bytes[i])
+            i = i + 1
+        }
+        return bytes(out)
+    }
+
+    # Build the 22-byte end-of-central-directory record (no comment).
+    def _build_eocd(count: int, cd_size: int, cd_offset: int) -> bytes {
+        out: list[int] = []
+        struct.emit_u32_le(out, _SIG_EOCD)
+        struct.emit_u16_le(out, 0)                       # this disk number
+        struct.emit_u16_le(out, 0)                       # disk with central dir
+        struct.emit_u16_le(out, count & 0xFFFF)          # entries this disk
+        struct.emit_u16_le(out, count & 0xFFFF)          # total entries
+        struct.emit_u32_le(out, cd_size)                 # central dir size
+        struct.emit_u32_le(out, cd_offset)               # central dir offset
+        struct.emit_u16_le(out, 0)                       # comment length
+        return bytes(out)
+    }
+
+    # Finalize a write-mode archive: emit central directory headers after the
+    # local-headers region, then the EOCD, and write the whole thing to disk.
+    def close() -> None {
+        if self.closed {
+            return
+        }
+        self.closed = True
+        if self.mode[0:1] != "w" {
+            return
+        }
+        central: bytes = bytes()
+        for info in self._infos {
+            central += self._build_central_header(info)
+        }
+        cd_offset: int = len(self._local)
+        cd_size: int = len(central)
+        eocd: bytes = self._build_eocd(len(self._infos), cd_size, cd_offset)
+        archive: bytes = self._local + central + eocd
+        dragon_write_file_bytes(self.filename, archive)
+    }
+
+    def __enter__() -> ZipFile {
+        return self
+    }
+
+    def __exit__() -> None {
+        self.close()
+    }
+}
+
+
+#===----------------------------------------------------------------------===#
+# Factory
+#===----------------------------------------------------------------------===#
+
+# Open a ZIP archive. mode 'r' reads + parses the central directory eagerly;
+# mode 'w' creates a fresh archive that flushes on close().
+def open(filename: str, mode: str = "r") -> ZipFile {
+    direction: str = mode[0:1]
+    if direction != "r" and direction != "w" {
+        raise ValueError(f"zipfile: mode must start with 'r' or 'w', got '{mode}'")
+    }
+    zf: ZipFile = ZipFile(filename, mode)
+    if direction == "r" {
+        raw: bytes = dragon_read_file_bytes(filename)
+        zf._parse(raw)
+    }
+    return zf
+}

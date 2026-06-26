@@ -1,0 +1,39 @@
+# db.dr - the registry database: a database.Connection plus the schema.
+#
+# Queries are template[SQL] values (see services/), so every interpolated value
+# is a bound parameter - the injection-prone string path does not exist. Schema
+# DDL has no parameters, so it goes through conn.raw().
+#
+# `dsn` is a database DSN: "sqlite://data/registry.sqlite" or ":memory:".
+
+from database import open as db_open, Connection
+
+class Db {
+    def(dsn: str) {
+        self.conn: Connection = db_open(dsn)
+        self.init_schema()
+    }
+
+    def init_schema() {
+        self.conn.raw("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, created_at INTEGER NOT NULL)")
+        self.conn.raw("CREATE TABLE IF NOT EXISTS tokens (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, label TEXT NOT NULL, token_hash TEXT UNIQUE NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL DEFAULT 0, revoked INTEGER NOT NULL DEFAULT 0)")
+        self.conn.raw("CREATE TABLE IF NOT EXISTS packages (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL, owner_id INTEGER NOT NULL, description TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL)")
+        # yanked: 0 = live, 1 = soft-yank (deprecated; dropped from "latest" and
+        # range resolution, but a pinned exact version still resolves for
+        # reproducibility), 2 = security-yank (download hard-fails). yank_reason
+        # carries the message shown on a blocked/deprecated version.
+        self.conn.raw("CREATE TABLE IF NOT EXISTS versions (id INTEGER PRIMARY KEY AUTOINCREMENT, package_id INTEGER NOT NULL, version TEXT NOT NULL, hash TEXT NOT NULL, yanked INTEGER NOT NULL DEFAULT 0, yank_reason TEXT NOT NULL DEFAULT '', published_at INTEGER NOT NULL, published_by INTEGER NOT NULL, UNIQUE(package_id, version))")
+        # Append-only transparency log (the design spec Section 11). seq is monotonic;
+        # leaf_hash binds the published (name,version,hash); chain_head chains
+        # each leaf to all prior history so any rewrite is detectable on audit.
+        self.conn.raw("CREATE TABLE IF NOT EXISTS transparency_log (seq INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, version TEXT NOT NULL, pkg_hash TEXT NOT NULL, published_by INTEGER NOT NULL, ts INTEGER NOT NULL, leaf_hash TEXT NOT NULL, chain_head TEXT NOT NULL)")
+        # Optional author signature over the tarball (the design spec Section 9): an
+        # Ed25519 public key (signed_by) + detached signature, both hex. Kept in a
+        # side table so the version row / materialization is unchanged.
+        self.conn.raw("CREATE TABLE IF NOT EXISTS version_signatures (name TEXT NOT NULL, version TEXT NOT NULL, signed_by TEXT NOT NULL, signature TEXT NOT NULL, UNIQUE(name, version))")
+    }
+
+    def close() {
+        self.conn.close()
+    }
+}

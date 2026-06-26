@@ -1,0 +1,471 @@
+# connection.dr - Dragon HTTP connection lifecycle: readers + request framing.
+#
+# This is the W1 keystone, split out of server.dr at the natural producer/
+# consumer boundary: server.dr's Router consumes a ConnReader + RequestReader;
+# everything about *how bytes come off the wire* and *how a complete HTTP/1.1
+# request is framed* lives here. Pure Dragon; the only runtime surface is raw
+# socket read/write (dragon_nb_recv_bytes / dragon_nb_send) and the TLS stream.
+#
+# The data-loss bug this fixes: the old handlers did one 64 KB read and parsed
+# whatever arrived, silently truncating any body larger than 64 KB or split
+# across packets. RequestReader instead buffers until the whole request is
+# present (Content-Length or chunked), de-chunking as needed.
+
+from ssl import SSLSocket
+
+# Binary-safe recv: returns DragonBytes verbatim (no UTF-8 decode), so a body
+# fragmented across reads - or one carrying high bytes mid-UTF-8 - is
+# reassembled byte-for-byte. dragon_nb_recv_str silently corrupts split
+# multibyte sequences (each chunk is UTF-8-decoded independently), so the
+# connection read path buffers in `bytes`, not `str`. May short-read.
+extern "C" def dragon_nb_recv_bytes(fd: int, max_len: int) -> bytes
+# Timeout-capable recv (R1): abandons the wait after `ms` of silence and returns
+# b"" (the EOF signal), so a peer that stalls mid-read can't pin the green thread
+# (slowloris defense). `ms <= 0` behaves exactly like dragon_nb_recv_bytes.
+extern "C" def dragon_nb_recv_timeout(fd: int, max_len: int, ms: int) -> bytes
+extern "C" def dragon_nb_send(fd: int, buf: str, length: int) -> int
+extern "C" def dragon_close_fd(fd: int)
+
+# Byte-level buffer search (returns -1 when not found; unlike bytes.index()
+# which raises). Locates the \r\n\r\n header terminator and chunk-size CRLFs in
+# the raw byte buffer without decoding it.
+extern "C" def dragon_bytes_find(h: bytes, n: bytes) -> int
+
+# String ops used by the (ASCII-only) header-framing path.
+extern "C" def dragon_str_concat(a: str, b: str) -> str
+extern "C" def dragon_str_contains(a: str, b: str) -> int
+extern "C" def dragon_str_find(haystack: str, needle: str) -> int
+extern "C" def dragon_str_lower(s: str) -> str
+extern "C" def dragon_str_strip(s: str) -> str
+extern "C" def dragon_str_startswith(s: str, prefix: str) -> int
+extern "C" def dragon_str_join(sep: str, parts: list) -> str
+extern "C" def dragon_str_byte_len_pub(s: str) -> int
+extern "C" def dragon_int_to_str(n: int) -> str
+extern "C" def dragon_ord(s: str) -> int
+extern "C" def dragon_str_to_int(s: str) -> int
+
+
+#===----------------------------------------------------------------------===#
+# Connection readers - transport abstraction (W1)
+#===----------------------------------------------------------------------===#
+#
+# The plaintext and TLS paths differ only in how raw bytes come off the wire.
+# `ConnReader` is the single seam: the keep-alive read loop is written once
+# against the base type and dispatches through the vtable (D026) exactly once
+# per `recv` - the per-byte / per-header parsing below stays in monomorphic
+# static `.dr`, so the indirect call is at the connection boundary, not the
+# hot path.
+#
+# `recv(max_len)` returns RAW BYTES (`bytes`, never `str`): a body fragmented
+# across reads - or one carrying high bytes mid-UTF-8 - must reassemble
+# byte-for-byte. `dragon_nb_recv_str` would UTF-8-decode each chunk in
+# isolation and shred any multibyte sequence that straddles a read boundary,
+# so buffering happens in `bytes`. An empty result means EOF (peer closed).
+
+class ConnReader {
+    # Read up to `max_len` bytes. Returns b"" on EOF / closed connection.
+    # Subclasses override; the base is never used directly.
+    def recv(max_len: int) -> bytes {
+        return b""
+    }
+
+    # Read up to `max_len` bytes, abandoning the wait after `timeout_ms` ms of
+    # silence (R1 idle/read timeout). A timeout returns b"" - the SAME EOF
+    # signal recv() uses - so the framer tears the connection down either way
+    # (a clean keep-alive end between requests, or `bad`/truncated mid-body).
+    # The base delegates to recv(): the MemoryReader test fake has no real wire
+    # to time out on, so it keeps recv()'s semantics. FdReader and TlsReader both
+    # override with their real timeout-aware reads. `timeout_ms <= 0` = no timeout.
+    def recv_timeout(max_len: int, timeout_ms: int) -> bytes {
+        return self.recv(max_len)
+    }
+
+    # Send a fully-serialized HTTP response (raw bytes already, kind=1 str).
+    # On the wire the byte count - not the code-point count - is authoritative,
+    # which is why callers pass `dragon_str_byte_len_pub`.
+    def send(data: str) -> int {
+        return 0
+    }
+
+    def close() -> None {
+    }
+
+    # The raw socket fd backing this reader, or -1 if there isn't one. This is
+    # the single seam by which a connection-takeover handler (W2 WebSocket)
+    # reaches the descriptor: after the HTTP upgrade, WebSocket frame I/O is
+    # binary and goes straight through the fd (ConnReader.send only carries a
+    # str, which can't represent a binary frame). Named socket_fd (NOT fd) so
+    # it doesn't collide with FdReader's `fd` field. Transports with no real fd
+    # (TlsReader, MemoryReader) inherit -1, so a WebSocket upgrade is rejected
+    # over them - plaintext ws:// only (wss:// is out of scope).
+    def socket_fd() -> int {
+        return -1
+    }
+}
+
+# Plaintext TCP reader - wraps the green-thread-aware non-blocking socket I/O.
+# Every recv/send yields the carrier thread on EAGAIN instead of blocking, so a
+# slow client parks this vthread without stalling the scheduler.
+class FdReader(ConnReader) {
+    fd: int
+
+    def(fd: int) {
+        self.fd = fd
+    }
+
+    def recv(max_len: int) -> bytes {
+        return dragon_nb_recv_bytes(self.fd, max_len)
+    }
+
+    # Real timeout-aware read on the live socket (R1). dragon_nb_recv_timeout
+    # parks the vthread on the reactor with a deadline; if the peer stays silent
+    # past timeout_ms the reactor wakes it with an empty result (b"") instead of
+    # leaving it blocked forever. timeout_ms <= 0 falls through to a plain read.
+    def recv_timeout(max_len: int, timeout_ms: int) -> bytes {
+        return dragon_nb_recv_timeout(self.fd, max_len, timeout_ms)
+    }
+
+    def send(data: str) -> int {
+        return dragon_nb_send(self.fd, data, dragon_str_byte_len_pub(data))
+    }
+
+    def close() -> None {
+        dragon_close_fd(self.fd)
+    }
+
+    # Expose the underlying socket fd for connection takeover (W2). After a
+    # WebSocket upgrade the handler does binary frame I/O directly on this fd.
+    def socket_fd() -> int {
+        return self.fd
+    }
+}
+
+# TLS reader - wraps an already-handshaken SSLSocket. do_recv returns a
+# byte-safe `str`; re-encode it to `bytes` so the buffering layer is uniform.
+# For pure-ASCII (typical) headers .encode() is a verbatim byte copy.
+class TlsReader(ConnReader) {
+    tls: SSLSocket
+
+    def(tls: SSLSocket) {
+        self.tls = tls
+    }
+
+    def recv(max_len: int) -> bytes {
+        const s: str = self.tls.do_recv(max_len)
+        return s.encode("utf-8")
+    }
+
+    # R1: bound the encrypted read by the idle timeout too, so a stalled HTTPS
+    # peer is dropped instead of pinning the green thread (the BIO recv parks on
+    # the reactor with a deadline). timeout_ms <= 0 -> plain read.
+    def recv_timeout(max_len: int, timeout_ms: int) -> bytes {
+        const s: str = self.tls.do_recv_timeout(max_len, timeout_ms)
+        return s.encode("utf-8")
+    }
+
+    def send(data: str) -> int {
+        return self.tls.do_send(data)
+    }
+
+    def close() -> None {
+        self.tls.close()
+    }
+}
+
+# In-memory reader for tests - yields canned byte chunks from a list, then EOF.
+# Lets RequestReader be exercised with zero sockets: fragmentation, large
+# bodies, chunked framing and header/body split points are all reproducible by
+# choosing how the chunks are diced. `sent` captures everything written back so
+# response-side assertions need no network either.
+class MemoryReader(ConnReader) {
+    chunks: list[bytes]
+    idx: int
+    sent: str
+    closed: bool
+
+    def(chunks: list[bytes]) {
+        self.chunks = chunks
+        self.idx = 0
+        self.sent = ""
+        self.closed = false
+    }
+
+    def recv(max_len: int) -> bytes {
+        if self.idx >= len(self.chunks) {
+            return b""
+        }
+        const c: bytes = self.chunks[self.idx]
+        self.idx = self.idx + 1
+        return c
+    }
+
+    def send(data: str) -> int {
+        self.sent = dragon_str_concat(self.sent, data)
+        return dragon_str_byte_len_pub(data)
+    }
+
+    def close() -> None {
+        self.closed = true
+    }
+}
+
+
+#===----------------------------------------------------------------------===#
+# RequestReader - frames complete HTTP/1.1 requests off a ConnReader (W1)
+#===----------------------------------------------------------------------===#
+#
+# Per request:
+#  1. read until the \r\n\r\n header terminator is in the buffer;
+#  2. parse just enough header to learn the framing (Content-Length OR
+#  Transfer-Encoding: chunked);
+#  3. keep reading until the whole body is buffered;
+#  4. de-chunk a chunked body into a contiguous buffer.
+# All buffering is byte-exact (`bytes`). One `RequestReader` persists across a
+# keep-alive connection so bytes belonging to the *next* pipelined request that
+# arrive in the same read aren't dropped - they stay in `self.buf`.
+
+# Small hex parser for chunk sizes. Stops at the first non-hex byte (the
+# chunk-size line may carry `;ext` parameters after the size, which we ignore).
+def _parse_chunk_size(s: str) -> int {
+    n: int = 0
+    i: int = 0
+    const limit: int = len(s)
+    while i < limit {
+        const c: int = dragon_ord(s[i:i + 1])
+        d: int = 0
+        if c >= 48 and c <= 57 {            # 0-9
+            d = c - 48
+        } elif c >= 97 and c <= 102 {       # a-f
+            d = c - 97 + 10
+        } elif c >= 65 and c <= 70 {        # A-F
+            d = c - 65 + 10
+        } else {
+            break
+        }
+        n = n * 16 + d
+        i = i + 1
+    }
+    return n
+}
+
+# Outcome of one read_request() call. `ok` distinguishes a framed request from
+# a clean EOF (peer closed between requests - normal for keep-alive) or a
+# malformed/oversize request that should 400-and-close.
+class FramedRequest {
+    ok: bool
+    eof: bool
+    bad: bool
+    # Full request bytes (head + de-chunked body), ready for the HTTP parser.
+    raw: bytes
+    # De-chunked body in isolation - byte-faithful, the verbatim upload bytes.
+    # W3 (multipart / file uploads) reads this directly rather than the
+    # UTF-8-decoded Request.body, so binary parts survive intact.
+    body: bytes
+
+    def(ok: bool, eof: bool, bad: bool, raw: bytes, body: bytes) {
+        self.ok = ok
+        self.eof = eof
+        self.bad = bad
+        self.raw = raw
+        self.body = body
+    }
+}
+
+# Default ceilings - generous for real apps, finite so a hostile client can't
+# drive unbounded allocation. The body cap matches the runtime HTTP parser's
+# own 1 MiB limit (dragon_http_parse_request), so a body the reader accepts is
+# one the parser will also accept.
+const _MAX_HEADER_BYTES: int = 65536          # 64 KiB of request line + headers
+const _MAX_BODY_BYTES: int = 1048576          # 1 MiB body (matches parser cap)
+const _RECV_CHUNK: int = 65536                # per-recv ask
+
+class RequestReader {
+    reader: ConnReader
+    # Leftover bytes already pulled off the wire that belong to a later
+    # request (HTTP/1.1 pipelining) - carried across read_request() calls.
+    buf: bytes
+    # Idle/read timeout in ms applied to every wire read (R1). 0 = no timeout
+    # (the default, so direct RequestReader(...) construction in tests keeps its
+    # blocking semantics). The Router sets this from its configured timeout in
+    # serve_connection so a stalled peer's read is bounded.
+    idle_timeout_ms: int
+
+    def(reader: ConnReader) {
+        self.reader = reader
+        self.buf = b""
+        self.idle_timeout_ms = 0
+    }
+
+    # Fill `self.buf` until it contains `needle`, or EOF. Returns the index of
+    # `needle` in buf, or -1 on EOF-before-found / -2 on oversize.
+    def _read_until(needle: bytes, cap: int) -> int {
+        pos: int = dragon_bytes_find(self.buf, needle)
+        while pos < 0 {
+            if len(self.buf) > cap {
+                return -2                      # oversize sentinel
+            }
+            const chunk: bytes = self.reader.recv_timeout(_RECV_CHUNK, self.idle_timeout_ms)
+            if len(chunk) == 0 {
+                return -1                      # EOF / idle timeout before terminator
+            }
+            self.buf = self.buf + chunk
+            pos = dragon_bytes_find(self.buf, needle)
+        }
+        return pos
+    }
+
+    # Ensure `self.buf` holds at least `total` bytes, reading more as needed.
+    # Returns false on EOF before reaching `total`.
+    def _fill_to(total: int) -> bool {
+        while len(self.buf) < total {
+            const chunk: bytes = self.reader.recv_timeout(_RECV_CHUNK, self.idle_timeout_ms)
+            if len(chunk) == 0 {
+                return false                   # EOF / idle timeout mid-body -> truncated
+            }
+            self.buf = self.buf + chunk
+        }
+        return true
+    }
+
+    # Read one complete HTTP/1.1 request. Returns a FramedRequest; the caller
+    # inspects .eof / .bad / .ok. Body framing is Content-Length first, then
+    # Transfer-Encoding: chunked, else no body (GET/HEAD/etc.).
+    def read_request() -> FramedRequest {
+        const empty: bytes = b""
+        const crlf2: bytes = b"\r\n\r\n"
+
+        # 1. Header terminator.
+        const hpos: int = self._read_until(crlf2, _MAX_HEADER_BYTES)
+        if hpos == -1 {
+            # Clean EOF with nothing (or a partial) buffered - peer closed.
+            return FramedRequest(false, true, false, empty, empty)
+        }
+        if hpos == -2 {
+            return FramedRequest(false, false, true, empty, empty)
+        }
+
+        const head_end: int = hpos + 4         # include the \r\n\r\n
+        const head_bytes: bytes = self.buf[0:head_end]
+        # Headers are ASCII on the wire, so decoding the head is a verbatim
+        # byte copy (kind=1) - safe to slice/search as a str.
+        const head: str = head_bytes.decode("utf-8")
+
+        # 2. Framing. Lowercase header scan against the raw head.
+        const head_l: str = dragon_str_lower(head)
+        cl: int = -1
+        const clpos: int = dragon_str_find(head_l, "\r\ncontent-length:")
+        if clpos >= 0 {
+            const vstart: int = clpos + 17     # past "\r\ncontent-length:"
+            const lineend: int = dragon_str_find(head_l[vstart:], "\r\n")
+            const vend: int = len(head_l) if lineend < 0 else vstart + lineend
+            cl = dragon_str_to_int(dragon_str_strip(head[vstart:vend]))
+        }
+        chunked: bool = false
+        const tepos: int = dragon_str_find(head_l, "\r\ntransfer-encoding:")
+        if tepos >= 0 {
+            const teline: str = head_l[tepos:]
+            if dragon_str_contains(teline, "chunked") != 0 {
+                chunked = true
+            }
+        }
+
+        # 3 + 4. Pull the body.
+        if chunked {
+            return self._read_chunked(head_end, head_bytes)
+        }
+
+        body_len: int = 0
+        if cl > 0 {
+            if cl > _MAX_BODY_BYTES {
+                return FramedRequest(false, false, true, empty, empty)
+            }
+            body_len = cl
+        }
+        const need: int = head_end + body_len
+        if not self._fill_to(need) {
+            # Connection died mid-body - truncated request, don't serve it.
+            return FramedRequest(false, false, true, empty, empty)
+        }
+        const raw: bytes = self.buf[0:need]
+        const body: bytes = self.buf[head_end:need]
+        # Retain anything beyond this request for the next read (pipelining).
+        self.buf = self.buf[need:]
+        return FramedRequest(true, false, false, raw, body)
+    }
+
+    # De-chunk a Transfer-Encoding: chunked body. Reassembles the chunk-data
+    # runs into a contiguous body and synthesizes a Content-Length head so the
+    # downstream HTTP parser (which is not handed a chunked stream) sees a
+    # plain, fully-buffered request.
+    def _read_chunked(head_end: int, head_bytes: bytes) -> FramedRequest {
+        const empty: bytes = b""
+        const crlf: bytes = b"\r\n"
+        body: bytes = b""
+        # _read_until / _fill_to operate on absolute self.buf offsets, so we
+        # consume from the front as we go to keep offsets simple.
+        self.buf = self.buf[head_end:]
+
+        while true {
+            # chunk-size line up to CRLF.
+            const szpos: int = self._read_until(crlf, _MAX_HEADER_BYTES)
+            if szpos < 0 {
+                return FramedRequest(false, false, true, empty, empty)
+            }
+            const szline: str = self.buf[0:szpos].decode("utf-8")
+            const size: int = _parse_chunk_size(dragon_str_strip(szline))
+            # Drop the size line + CRLF.
+            self.buf = self.buf[szpos + 2:]
+            if size == 0 {
+                # Last chunk. Consume the trailing CRLF (and any trailers up to
+                # the final blank line) then stop.
+                const endpos: int = self._read_until(crlf, _MAX_HEADER_BYTES)
+                if endpos >= 0 {
+                    self.buf = self.buf[endpos + 2:]
+                }
+                break
+            }
+            if len(body) + size > _MAX_BODY_BYTES {
+                return FramedRequest(false, false, true, empty, empty)
+            }
+            # Ensure the chunk data + its trailing CRLF are buffered.
+            if not self._fill_to(size + 2) {
+                return FramedRequest(false, false, true, empty, empty)
+            }
+            body = body + self.buf[0:size]
+            self.buf = self.buf[size + 2:]      # drop data + trailing CRLF
+        }
+
+        # Rebuild a Content-Length head from the original head, stripping the
+        # Transfer-Encoding line so the parser frames the synthesized body.
+        const head: str = head_bytes.decode("utf-8")
+        const rebuilt_head: str = _rewrite_chunked_head(head, len(body))
+        const raw: bytes = rebuilt_head.encode("utf-8") + body
+        return FramedRequest(true, false, false, raw, body)
+    }
+}
+
+# Strip the Transfer-Encoding header and append an accurate Content-Length so
+# the (non-streaming) HTTP parser sees a plain request. Operates on the head
+# string (request line + headers + final \r\n\r\n).
+def _rewrite_chunked_head(head: str, body_len: int) -> str {
+    const lines: list[str] = head.split("\r\n")
+    out: list[str] = []
+    for line in lines {
+        const low: str = dragon_str_lower(line)
+        if dragon_str_startswith(low, "transfer-encoding:") != 0 {
+            continue
+        }
+        if dragon_str_startswith(low, "content-length:") != 0 {
+            continue
+        }
+        if len(line) == 0 {
+            continue                            # drop blank lines; re-add below
+        }
+        out.append(line)
+    }
+    rebuilt: str = dragon_str_join("\r\n", out)
+    rebuilt = dragon_str_concat(rebuilt, "\r\ncontent-length: ")
+    rebuilt = dragon_str_concat(rebuilt, dragon_int_to_str(body_len))
+    rebuilt = dragon_str_concat(rebuilt, "\r\n\r\n")
+    return rebuilt
+}

@@ -1,0 +1,367 @@
+# datetime.dr - Dragon standard library: date and time
+#
+# Provides timedelta, date, time, and datetime classes with arithmetic,
+# comparisons, and ISO-8601 formatting. Decomposition of Unix timestamps
+# uses Howard Hinnant's days-from-civil algorithm in pure Dragon - no
+# C library calls beyond what `time` already exposes.
+#
+# Scope (v0.0.2): UTC-only. Local-timezone helpers and tzinfo are deferred.
+
+from time import now_float
+
+#===----------------------------------------------------------------------===#
+# Day arithmetic (Howard Hinnant: days-from-civil)
+#===----------------------------------------------------------------------===#
+
+def _days_from_civil(y: int, m: int, d: int) -> int {
+    # Days since 1970-01-01 for a proleptic Gregorian (y, m, d).
+    if m <= 2 {
+        y = y - 1
+    }
+    const era: int = (y if y >= 0 else y - 399) // 400
+    const yoe: int = y - era * 400
+    const mp: int = m - 3 if m > 2 else m + 9
+    const doy: int = (153 * mp + 2) // 5 + d - 1
+    const doe: int = yoe * 365 + yoe // 4 - yoe // 100 + doy
+    return era * 146097 + doe - 719468
+}
+
+def _civil_from_days(z: int) -> tuple[int, int, int] {
+    # Inverse of _days_from_civil. Returns (year, month, day).
+    z = z + 719468
+    const era: int = (z if z >= 0 else z - 146096) // 146097
+    const doe: int = z - era * 146097
+    const yoe: int = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
+    const y0: int = yoe + era * 400
+    const doy: int = doe - (365 * yoe + yoe // 4 - yoe // 100)
+    const mp: int = (5 * doy + 2) // 153
+    const d: int = doy - (153 * mp + 2) // 5 + 1
+    const m: int = mp + 3 if mp < 10 else mp - 9
+    const y: int = y0 + 1 if m <= 2 else y0
+    return (y, m, d)
+}
+
+def _is_leap_year(y: int) -> bool {
+    return (y % 4 == 0) and (y % 100 != 0 or y % 400 == 0)
+}
+
+def _days_in_month(y: int, m: int) -> int {
+    if m == 2 {
+        return 29 if _is_leap_year(y) else 28
+    }
+    if m == 4 or m == 6 or m == 9 or m == 11 {
+        return 30
+    }
+    return 31
+}
+
+def _pad2(n: int) -> str {
+    if n < 10 {
+        return "0" + str(n)
+    }
+    return str(n)
+}
+
+def _pad4(n: int) -> str {
+    if n < 10    { return "000" + str(n) }
+    if n < 100   { return "00" + str(n) }
+    if n < 1000  { return "0" + str(n) }
+    return str(n)
+}
+
+def _pad6(n: int) -> str {
+    if n < 10       { return "00000" + str(n) }
+    if n < 100      { return "0000" + str(n) }
+    if n < 1000     { return "000" + str(n) }
+    if n < 10000    { return "00" + str(n) }
+    if n < 100000   { return "0" + str(n) }
+    return str(n)
+}
+
+#===----------------------------------------------------------------------===#
+# timedelta - duration in days/seconds/microseconds
+#===----------------------------------------------------------------------===#
+
+const SECONDS_PER_DAY: int = 86400
+const MICROS_PER_SECOND: int = 1000000
+const SECONDS_PER_HOUR: int = 3600
+const SECONDS_PER_MINUTE: int = 60
+
+class timedelta {
+    days: int
+    seconds: int       # [0, 86400)
+    microseconds: int  # [0, 1_000_000)
+
+    def(days: int, seconds: int, microseconds: int) {
+        # Normalize to canonical form: 0 <= seconds < 86400, 0 <= microseconds < 1_000_000
+        const us_carry: int = microseconds // MICROS_PER_SECOND
+        microseconds = microseconds - us_carry * MICROS_PER_SECOND
+        seconds = seconds + us_carry
+        const s_carry: int = seconds // SECONDS_PER_DAY
+        seconds = seconds - s_carry * SECONDS_PER_DAY
+        days = days + s_carry
+        if microseconds < 0 {
+            microseconds = microseconds + MICROS_PER_SECOND
+            seconds = seconds - 1
+        }
+        if seconds < 0 {
+            seconds = seconds + SECONDS_PER_DAY
+            days = days - 1
+        }
+        self.days = days
+        self.seconds = seconds
+        self.microseconds = microseconds
+    }
+
+    def total_seconds() -> float {
+        return (float(self.days) * float(SECONDS_PER_DAY)
+             + float(self.seconds)
+             + float(self.microseconds) / float(MICROS_PER_SECOND))
+    }
+
+    def __add__(other: timedelta) -> timedelta {
+        return timedelta(self.days + other.days,
+                         self.seconds + other.seconds,
+                         self.microseconds + other.microseconds)
+    }
+
+    def __sub__(other: timedelta) -> timedelta {
+        return timedelta(self.days - other.days,
+                         self.seconds - other.seconds,
+                         self.microseconds - other.microseconds)
+    }
+
+    def __neg__() -> timedelta {
+        return timedelta(-self.days, -self.seconds, -self.microseconds)
+    }
+
+    def __eq__(other: timedelta) -> bool {
+        return (self.days == other.days
+            and self.seconds == other.seconds
+            and self.microseconds == other.microseconds)
+    }
+
+    def __lt__(other: timedelta) -> bool {
+        if self.days != other.days { return self.days < other.days }
+        if self.seconds != other.seconds { return self.seconds < other.seconds }
+        return self.microseconds < other.microseconds
+    }
+
+    def __repr__() -> str {
+        return ("timedelta(days=" + str(self.days)
+            + ", seconds=" + str(self.seconds)
+            + ", microseconds=" + str(self.microseconds) + ")")
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# date - calendar date (UTC, proleptic Gregorian)
+#===----------------------------------------------------------------------===#
+
+class date {
+    year: int
+    month: int
+    day: int
+
+    def(year: int, month: int, day: int) {
+        self.year = year
+        self.month = month
+        self.day = day
+    }
+
+    def toordinal() -> int {
+        # Days since 0001-01-01 (Python compatibility).
+        # Our internal helper uses 1970-01-01 epoch; shift by 719162.
+        return _days_from_civil(self.year, self.month, self.day) + 719162
+    }
+
+    def isoformat() -> str {
+        return _pad4(self.year) + "-" + _pad2(self.month) + "-" + _pad2(self.day)
+    }
+
+    def __repr__() -> str {
+        return "date(" + str(self.year) + ", " + str(self.month) + ", " + str(self.day) + ")"
+    }
+
+    def __eq__(other: date) -> bool {
+        return (self.year == other.year
+            and self.month == other.month
+            and self.day == other.day)
+    }
+
+    def __lt__(other: date) -> bool {
+        if self.year != other.year   { return self.year < other.year }
+        if self.month != other.month { return self.month < other.month }
+        return self.day < other.day
+    }
+}
+
+def date_today() -> date {
+    # Today's date in UTC (no timezone conversion).
+    const ts: float = now_float()
+    const days: int = int(ts) // SECONDS_PER_DAY
+    const ymd: tuple[int, int, int] = _civil_from_days(days)
+    return date(ymd[0], ymd[1], ymd[2])
+}
+
+def date_fromtimestamp(ts: float) -> date {
+    const days: int = int(ts) // SECONDS_PER_DAY
+    const ymd: tuple[int, int, int] = _civil_from_days(days)
+    return date(ymd[0], ymd[1], ymd[2])
+}
+
+#===----------------------------------------------------------------------===#
+# time - wall-clock time of day (no date, no timezone)
+#===----------------------------------------------------------------------===#
+
+class time_of_day {
+    hour: int
+    minute: int
+    second: int
+    microsecond: int
+
+    def(hour: int, minute: int, second: int, microsecond: int) {
+        self.hour = hour
+        self.minute = minute
+        self.second = second
+        self.microsecond = microsecond
+    }
+
+    def isoformat() -> str {
+        const base: str = _pad2(self.hour) + ":" + _pad2(self.minute) + ":" + _pad2(self.second)
+        if self.microsecond > 0 {
+            return base + "." + _pad6(self.microsecond)
+        }
+        return base
+    }
+
+    def __repr__() -> str {
+        return ("time(" + str(self.hour) + ", " + str(self.minute) + ", "
+            + str(self.second) + ", " + str(self.microsecond) + ")")
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# datetime - combined date + time (UTC)
+#===----------------------------------------------------------------------===#
+
+class datetime {
+    year: int
+    month: int
+    day: int
+    hour: int
+    minute: int
+    second: int
+    microsecond: int
+
+    def(year: int, month: int, day: int,
+        hour: int, minute: int, second: int, microsecond: int) {
+        self.year = year
+        self.month = month
+        self.day = day
+        self.hour = hour
+        self.minute = minute
+        self.second = second
+        self.microsecond = microsecond
+    }
+
+    def date_part() -> date {
+        return date(self.year, self.month, self.day)
+    }
+
+    def time_part() -> time_of_day {
+        return time_of_day(self.hour, self.minute, self.second, self.microsecond)
+    }
+
+    def timestamp() -> float {
+        # Seconds since Unix epoch (UTC).
+        const days: int = _days_from_civil(self.year, self.month, self.day)
+        const wall: int = self.hour * SECONDS_PER_HOUR + self.minute * SECONDS_PER_MINUTE + self.second
+        return float(days) * float(SECONDS_PER_DAY) + float(wall) + float(self.microsecond) / float(MICROS_PER_SECOND)
+    }
+
+    def isoformat() -> str {
+        const base: str = (_pad4(self.year) + "-" + _pad2(self.month) + "-" + _pad2(self.day)
+                         + "T" + _pad2(self.hour) + ":" + _pad2(self.minute) + ":" + _pad2(self.second))
+        if self.microsecond > 0 {
+            return base + "." + _pad6(self.microsecond)
+        }
+        return base
+    }
+
+    def __repr__() -> str {
+        return ("datetime(" + str(self.year) + ", " + str(self.month) + ", "
+            + str(self.day) + ", " + str(self.hour) + ", "
+            + str(self.minute) + ", " + str(self.second) + ", "
+            + str(self.microsecond) + ")")
+    }
+
+    def __eq__(other: datetime) -> bool {
+        return (self.year == other.year
+            and self.month == other.month
+            and self.day == other.day
+            and self.hour == other.hour
+            and self.minute == other.minute
+            and self.second == other.second
+            and self.microsecond == other.microsecond)
+    }
+
+    def __lt__(other: datetime) -> bool {
+        # Compare as Unix timestamps for correctness across calendar boundaries.
+        return self.timestamp() < other.timestamp()
+    }
+
+    def __add__(td: timedelta) -> datetime {
+        # datetime + timedelta -> datetime
+        const total_us: int = self.microsecond + td.microseconds
+        const us_carry: int = total_us // MICROS_PER_SECOND
+        const new_us: int = total_us - us_carry * MICROS_PER_SECOND
+
+        const total_s: int = (self.hour * SECONDS_PER_HOUR + self.minute * SECONDS_PER_MINUTE + self.second
+                            + td.seconds + us_carry)
+        const s_carry: int = total_s // SECONDS_PER_DAY
+        const wall: int = total_s - s_carry * SECONDS_PER_DAY
+
+        const days: int = (_days_from_civil(self.year, self.month, self.day)
+                         + td.days + s_carry)
+        const ymd: tuple[int, int, int] = _civil_from_days(days)
+        const h: int = wall // SECONDS_PER_HOUR
+        const m: int = (wall - h * SECONDS_PER_HOUR) // SECONDS_PER_MINUTE
+        const s: int = wall - h * SECONDS_PER_HOUR - m * SECONDS_PER_MINUTE
+        return datetime(ymd[0], ymd[1], ymd[2], h, m, s, new_us)
+    }
+
+    def __sub__(other: datetime) -> timedelta {
+        # datetime - datetime -> timedelta
+        const my_days: int = _days_from_civil(self.year, self.month, self.day)
+        const ot_days: int = _days_from_civil(other.year, other.month, other.day)
+        const my_wall: int = self.hour * SECONDS_PER_HOUR + self.minute * SECONDS_PER_MINUTE + self.second
+        const ot_wall: int = other.hour * SECONDS_PER_HOUR + other.minute * SECONDS_PER_MINUTE + other.second
+        return timedelta(my_days - ot_days,
+                         my_wall - ot_wall,
+                         self.microsecond - other.microsecond)
+    }
+}
+
+def datetime_fromtimestamp(ts: float) -> datetime {
+    const whole: int = int(ts)
+    const frac_us: int = int((ts - float(whole)) * float(MICROS_PER_SECOND))
+    const days: int = whole // SECONDS_PER_DAY
+    const wall: int = whole - days * SECONDS_PER_DAY
+    const ymd: tuple[int, int, int] = _civil_from_days(days)
+    const h: int = wall // SECONDS_PER_HOUR
+    const m: int = (wall - h * SECONDS_PER_HOUR) // SECONDS_PER_MINUTE
+    const s: int = wall - h * SECONDS_PER_HOUR - m * SECONDS_PER_MINUTE
+    return datetime(ymd[0], ymd[1], ymd[2], h, m, s, frac_us)
+}
+
+def datetime_now() -> datetime {
+    # Current UTC datetime with sub-second precision from time.now_float().
+    const ts: float = now_float()
+    return datetime_fromtimestamp(ts)
+}
+
+def datetime_utcnow() -> datetime {
+    # Alias for datetime_now() - UTC-only in v0.0.2.
+    return datetime_now()
+}

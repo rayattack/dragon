@@ -1,0 +1,59 @@
+# test/dr/test_static_arg_rc.dr - #3 class A: owned heap-temp arguments passed to
+# a static method (`Class.method(str(i))`) must be released after the call, not
+# leaked. The static-method dispatch path built its args with no argTemps drain,
+# so every owned-temp arg (a `str()` result, a concat, a slice, ...) leaked once
+# per call. A/B under LSan: with the drain, clean; reverting it leaks 2 str
+# objects per iteration (297KB / 8000 objs over 4000 iters).
+#
+# This test exercises the path in a bounded loop and asserts correctness, so a
+# regression that double-frees (the dangerous failure mode of the fix) crashes
+# here instead of silently leaking. Leak-freedom itself is verified under the
+# ASan/LSan build.
+
+from unittest import TestCase, main
+
+
+class Mathy {
+    @staticmethod
+    def combine(a: str, b: str) -> int {
+        return len(a) + len(b)
+    }
+
+    @staticmethod
+    def first_char(s: str) -> str {
+        return s[0:1]
+    }
+}
+
+
+class StaticArgRcTests(TestCase) {
+    def test_owned_temp_str_args() {
+        # str(i) / str(i*7) are owned str temporaries -> typed str params.
+        total: int = 0
+        i: int = 0
+        while i < 1000 {
+            total = total + Mathy.combine(str(i), str(i * 7))
+            i = i + 1
+        }
+        # 0..999 -> len(str(i)) sums are stable; just pin it ran and is positive.
+        self.assertEqual(total > 0, True)
+    }
+
+    def test_owned_temp_slice_arg() {
+        # s[0:1] returns a fresh owned slice -> passed as an owned-temp arg.
+        seen: int = 0
+        i: int = 0
+        while i < 1000 {
+            c: str = Mathy.first_char(str(i) + "z")
+            if c == "1" {
+                seen = seen + 1
+            }
+            i = i + 1
+        }
+        # Values starting with '1': 1, 10-19, 100-199 = 1 + 10 + 100 = 111.
+        self.assertEqual(seen, 111)
+    }
+}
+
+
+main([StaticArgRcTests()])

@@ -1,0 +1,54 @@
+"""Regression test for the string-literal DragonObjectHeader fix.
+
+ASCII string literals are emitted as immortal DragonString constants with a real
+header, so dragon_is_heap_string / _eq / _len / _concat / decref read in-bounds
+data (no OOB read off a bare C global) and incref/decref no-op on the immortal
+sentinel. Previously a literal compared/decref'd against a heap string could
+layout-dependently misbehave or corrupt the heap.
+"""
+
+from unittest import TestCase, main
+
+class StringLiteralHeaderTests(TestCase) {
+    def test_eq_is_commutative_literal_vs_heap() {
+        # `parts[1]` is a heap substring from split(); `"b"` is a literal. The
+        # comparison must be correct AND commutative (the non-commutative `==`
+        # was the original smoking gun).
+        const parts: list[str] = "a$b$c".split("$")
+        self.assertTrue(parts[1] == "b")
+        self.assertTrue("b" == parts[1])
+        self.assertFalse(parts[1] == "x")
+        self.assertFalse("x" == parts[1])
+        self.assertEqual(parts[0], "a")
+        self.assertEqual(parts[2], "c")
+    }
+
+    def test_literal_through_dict_decref() {
+        # A literal stored as a dict value, read back, then both the local and
+        # the dict are decref'd at scope exit - must not double-free / fault.
+        d: dict[str, str] = {}
+        d["k"] = "value-literal"
+        const v: str = d["k"]
+        self.assertEqual(v, "value-literal")
+        self.assertEqual(d.get("k", "missing"), "value-literal")
+        self.assertEqual(d.get("absent", "fallback-literal"), "fallback-literal")
+    }
+
+    def test_len_and_concat() {
+        const s: str = "hello"
+        self.assertEqual(len(s), 5)
+        self.assertEqual(s + " world", "hello world")
+        self.assertEqual(len(""), 0)
+        self.assertTrue("" == "")
+    }
+
+    def test_literal_list_roundtrip() {
+        # Literals into a list and back - exercises append/decref of literals.
+        xs: list[str] = ["one", "two", "three"]
+        self.assertEqual(len(xs), 3)
+        self.assertEqual(xs[1], "two")
+        self.assertTrue("two" == xs[1])
+    }
+}
+
+main([StringLiteralHeaderTests()])

@@ -1,0 +1,52 @@
+# test/dr/test_cross_module_ctor_inheritance.dr - a subclass of an IMPORTED class
+# with no constructor of its own must inherit (and run) the imported parent's
+# constructor, exactly as it does for a local parent.
+#
+# Regression guard for a codegen bug: the synthesized child constructor resolved
+# the parent's __init__ under the CHILD's module instead of the parent's, so for
+# an imported parent the lookup missed and the parent ctor silently never ran -
+# every inherited field stayed zero-initialized (a Response subclass had status
+# 0 and a null _cookies list, crashing on the first cookie()). Fixed by resolving
+# the parent __init__ under classOwningModule[parent].
+
+from unittest import TestCase, main
+from http.server import Response
+
+# No ctor of its own -> must inherit Response.def() across the module boundary.
+class CustomResponse(Response) {
+    def tag() -> str {
+        return "custom"
+    }
+}
+
+class CrossModuleCtorTests(TestCase) {
+    # The imported parent's def() ran: status defaults to 200 (not 0), and the
+    # default content-type header is present.
+    def test_inherited_ctor_runs() {
+        const r: CustomResponse = CustomResponse()
+        self.assertEqual(r.status, 200)
+        const out: str = r.serialize()
+        self.assertIn("200 OK", out)
+        self.assertIn("content-type:", out)
+    }
+
+    # Inherited fields are real (not zero/null): the parent ctor initialized
+    # _cookies to an empty list, so cookie() appends instead of crashing.
+    def test_inherited_mutable_fields_initialized() {
+        const r: CustomResponse = CustomResponse()
+        r.cookie("k", "v")
+        const out: str = r.serialize()
+        self.assertIn("set-cookie: k=v", out)
+    }
+
+    # The subclass's own method coexists with the inherited surface.
+    def test_subclass_method_and_inherited_method() {
+        const r: CustomResponse = CustomResponse()
+        self.assertEqual(r.tag(), "custom")
+        r.text("hello")                 # inherited from Response
+        self.assertIn("hello", r.serialize())
+    }
+}
+
+
+main([CrossModuleCtorTests()])

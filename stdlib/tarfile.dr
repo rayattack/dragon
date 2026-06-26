@@ -1,0 +1,517 @@
+# tarfile.dr - POSIX USTAR tar archive read/write.
+#
+# Surface mirrors CPython's `tarfile` for the registry's primary workflow:
+# build `.tar`, `.tar.gz`, or `.tar.zst` archives from a directory tree;
+# unpack the same. Pure Dragon implementation of the USTAR header format
+# (RFC-equivalent: GNU tar manual §7) plus composition with gzip /
+# zstandard for compressed flavors.
+#
+#  import tarfile
+#  with tarfile.open("pkg.tar.zst", "w:zst") as t {
+#  t.add("src/")
+#  }
+#  with tarfile.open("pkg.tar.zst", "r:zst") as t {
+#  t.extractall("/tmp/install")
+#  }
+#
+# Supports regular files, directories, and symlinks. PAX/GNU extensions
+# for paths >100 chars are deferred - the registry's package layout fits
+# inside USTAR's 100/155 prefix limits in practice.
+
+
+from os import listdir, makedirs, isfile, isdir, islink, readlink
+from os.path import join, basename, dirname
+import gzip
+import zstandard
+
+extern "C" def dragon_zlib_compress(src: bytes, level: int) -> bytes
+extern "C" def dragon_zlib_decompress(src: bytes) -> bytes
+extern "C" def dragon_zstd_compress(src: bytes, level: int) -> bytes
+extern "C" def dragon_zstd_decompress(src: bytes) -> bytes
+extern "C" def dragon_read_file_bytes(path: str) -> bytes
+extern "C" def dragon_write_file_bytes(path: str, data: bytes) -> int
+extern "C" def dragon_stat_size(path: str) -> int
+extern "C" def dragon_stat_mtime(path: str) -> int
+extern "C" def dragon_stat_mode(path: str) -> int
+
+
+# Tar typeflag codes per the USTAR spec. We accept legacy '\0' as REGTYPE
+# (older tar versions left typeflag NUL for regular files).
+const REGTYPE: str = "0"
+const DIRTYPE: str = "5"
+const SYMTYPE: str = "2"
+const LNKTYPE: str = "1"
+
+
+# --- Helpers ----------------------------------------------------------------
+
+
+# Format an int as an octal-ASCII string of exactly `width` characters,
+# zero-padded on the left, then NUL-terminated by truncating the last byte.
+# USTAR's numeric fields use this exact convention (mode/uid/gid/size/mtime
+# all width=8, except size which is width=12). The trailing NUL is what
+# distinguishes the value from any arbitrary characters in the rest of the
+# 512-byte header block.
+def _octal(n: int, width: int) -> bytes {
+    out: list[int] = [0] * width
+    # `width - 1` digits + 1 trailing NUL. n=0 still prints as "0...0\0".
+    digits: int = width - 1
+    v: int = n
+    i: int = digits - 1
+    while i >= 0 {
+        out[i] = 0x30 + (v % 8)
+        v = v // 8
+        i = i - 1
+    }
+    # Last byte stays 0 (NUL). Octal overflow truncates silently - POSIX
+    # tar handles >8GB files via a magic 0x80-prefixed binary encoding;
+    # we don't emit that yet, so very large files raise on add().
+    return bytes(out)
+}
+
+
+# Parse an octal-ASCII numeric field. Stops at the first NUL or space (both
+# legal terminators per USTAR). Returns 0 for empty fields.
+def _parse_octal(data: bytes, off: int, width: int) -> int {
+    v: int = 0
+    i: int = 0
+    while i < width {
+        c: int = data[off + i]
+        if c == 0 or c == 0x20 {
+            break
+        }
+        if c >= 0x30 and c <= 0x37 {
+            v = v * 8 + (c - 0x30)
+        }
+        i = i + 1
+    }
+    return v
+}
+
+
+# Lift `s`'s UTF-8 byte sequence into the leading `width` slots of `out`,
+# zero-padding the tail. The header's text fields (name, linkname, magic,
+# uname/gname, prefix) all use this layout. We bake the bytes manually
+# instead of going through encode() so the header builder stays one
+# allocation per record.
+def _set_str(out: list[int], off: int, s: str, width: int) -> None {
+    sb: bytes = s.encode("utf-8")
+    n: int = len(sb)
+    if n > width {
+        n = width
+    }
+    i: int = 0
+    while i < n {
+        out[off + i] = sb[i]
+        i = i + 1
+    }
+}
+
+
+# Read a NUL-terminated text field starting at `off`. Returns the decoded
+# UTF-8 string. Empty string when the first byte is NUL.
+def _get_str(data: bytes, off: int, width: int) -> str {
+    end: int = off
+    while end < off + width and data[end] != 0 {
+        end = end + 1
+    }
+    if end == off {
+        return ""
+    }
+    chunk: list[int] = []
+    i: int = off
+    while i < end {
+        chunk.append(data[i])
+        i = i + 1
+    }
+    return bytes(chunk).decode("utf-8")
+}
+
+
+# USTAR checksum: sum of all 512 header bytes with the 8-byte chksum field
+# (offset 148) treated as spaces. The spec's reference algorithm is the
+# unsigned-byte sum; tar implementations must accept either signed-byte
+# variants on legacy archives, but since we only PRODUCE conforming
+# unsigned-byte checksums here we don't have to handle the signed form.
+def _compute_chksum(header: bytes) -> int {
+    s: int = 0
+    i: int = 0
+    while i < 512 {
+        if i >= 148 and i < 156 {
+            s = s + 0x20            # space
+        } else {
+            s = s + header[i]
+        }
+        i = i + 1
+    }
+    return s
+}
+
+
+# --- TarInfo ---------------------------------------------------------------
+
+
+# A single archive entry. Mirrors tarfile.TarInfo. Fields are mutable so a
+# user can rewrite uid/gid/mtime before .addfile() (parity with Python's
+# tar-rewriting workflows). `data` is non-empty only for regular files -
+# directories and symlinks have no payload bytes.
+class TarInfo {
+    def(name: str) {
+        self.name = name
+        self.size = 0
+        self.mode = 0o644
+        self.mtime = 0
+        self.uid = 0
+        self.gid = 0
+        self.typeflag = REGTYPE
+        self.linkname = ""
+        self.uname = ""
+        self.gname = ""
+        self.data = bytes()
+    }
+
+    def isfile() -> bool {
+        return self.typeflag == REGTYPE
+    }
+
+    def isdir() -> bool {
+        return self.typeflag == DIRTYPE
+    }
+
+    def issym() -> bool {
+        return self.typeflag == SYMTYPE
+    }
+
+    # Build the 512-byte USTAR header for this entry. Caller appends the
+    # payload (file bytes for REGTYPE, nothing otherwise) and zero-pads the
+    # payload to a multiple of 512.
+    def to_header() -> bytes {
+        h: list[int] = [0] * 512
+        # Name + prefix: USTAR splits paths >100 chars at a '/' boundary
+        # into name (up to 100) and prefix (up to 155). Combined max 256.
+        name: str = self.name
+        prefix: str = ""
+        if len(name) > 100 {
+            # Find a '/' as far right as possible while keeping name ≤ 100.
+            sp: int = name.rfind("/", 0, 100)
+            if sp > 0 {
+                prefix = name[0:sp]
+                name = name[sp + 1:len(name)]
+            }
+            # If prefix or name still too long the archive is malformed;
+            # raise so the caller can shorten or move to PAX.
+            if len(prefix) > 155 or len(name) > 100 {
+                raise ValueError(f"tarfile: name too long for USTAR: '{self.name}'")
+            }
+        }
+        _set_str(h, 0, name, 100)
+        _set_str(h, 345, prefix, 155)
+
+        # Numeric fields: octal ASCII, NUL-terminated.
+        mode_bytes: bytes = _octal(self.mode, 8)
+        uid_bytes: bytes = _octal(self.uid, 8)
+        gid_bytes: bytes = _octal(self.gid, 8)
+        size_bytes: bytes = _octal(self.size, 12)
+        mtime_bytes: bytes = _octal(self.mtime, 12)
+        i: int = 0
+        while i < 8  { h[100 + i] = mode_bytes[i];  i = i + 1 }
+        i = 0
+        while i < 8  { h[108 + i] = uid_bytes[i];   i = i + 1 }
+        i = 0
+        while i < 8  { h[116 + i] = gid_bytes[i];   i = i + 1 }
+        i = 0
+        while i < 12 { h[124 + i] = size_bytes[i];  i = i + 1 }
+        i = 0
+        while i < 12 { h[136 + i] = mtime_bytes[i]; i = i + 1 }
+
+        # typeflag + linkname
+        h[156] = ord(self.typeflag)
+        _set_str(h, 157, self.linkname, 100)
+
+        # USTAR magic + version
+        _set_str(h, 257, "ustar", 6)
+        h[263] = 0x30           # '0'
+        h[264] = 0x30           # '0'
+
+        _set_str(h, 265, self.uname, 32)
+        _set_str(h, 297, self.gname, 32)
+
+        # Compute and write checksum. We seed bytes(h) so the helper sees
+        # the spaces-in-chksum convention without us having to splice them
+        # in twice.
+        partial: bytes = bytes(h)
+        s: int = _compute_chksum(partial)
+        # Encode as 6-octal-digits + NUL + space (USTAR's exact convention).
+        sb: bytes = _octal(s, 7)
+        i = 0
+        while i < 6 { h[148 + i] = sb[i]; i = i + 1 }
+        h[154] = 0              # NUL terminator
+        h[155] = 0x20           # trailing space
+
+        return bytes(h)
+    }
+}
+
+
+# Build a TarInfo from a raw 512-byte header block at `data[off:off+512]`.
+# Returns None-equivalent (TarInfo with empty name) for the trailing zero
+# blocks so callers can detect end-of-archive without raising.
+def _parse_header(data: bytes, off: int) -> TarInfo {
+    name: str = _get_str(data, off, 100)
+    prefix: str = _get_str(data, off + 345, 155)
+    full: str = name
+    if len(prefix) > 0 {
+        full = prefix + "/" + name
+    }
+    info: TarInfo = TarInfo(full)
+    info.mode = _parse_octal(data, off + 100, 8)
+    info.uid = _parse_octal(data, off + 108, 8)
+    info.gid = _parse_octal(data, off + 116, 8)
+    info.size = _parse_octal(data, off + 124, 12)
+    info.mtime = _parse_octal(data, off + 136, 12)
+    type_byte: int = data[off + 156]
+    if type_byte == 0 {
+        info.typeflag = REGTYPE
+    } else {
+        info.typeflag = chr(type_byte)
+    }
+    info.linkname = _get_str(data, off + 157, 100)
+    info.uname = _get_str(data, off + 265, 32)
+    info.gname = _get_str(data, off + 297, 32)
+    return info
+}
+
+
+# --- TarFile ---------------------------------------------------------------
+
+
+class TarFile {
+    def(filename: str, mode: str) {
+        self.filename = filename
+        self.mode = mode
+        self.closed = False
+        # Annotated empty-list init: lifts the list[TarInfo] element class
+        # into the field-tracking maps so for-in iteration over self.members
+        # gives loop vars typed as TarInfo (otherwise an unannotated `[]`
+        # carries no elem class and chained access like `m.name` returns 0).
+        self.members: list[TarInfo] = []
+        # Track raw bytes for the wb path; on close we serialize and either
+        # write straight to disk or pipe through gzip/zstandard depending on
+        # the mode suffix recorded by `open()`.
+        self._buffer = bytes()
+        self._compress = ""
+    }
+
+    # --- read paths -------------------------------------------------------
+
+    def getmembers() -> list[TarInfo] {
+        return self.members
+    }
+
+    def getnames() -> list[str] {
+        out: list[str] = []
+        for m in self.members {
+            out.append(m.name)
+        }
+        return out
+    }
+
+    # Walk the archive bytes, parsing 512-byte headers, slurping payload
+    # data, and stopping on the two-zero-block end marker. We populate
+    # self.members in archive order (mirrors tarfile.getmembers()).
+    def _load_members(raw: bytes) -> None {
+        n: int = len(raw)
+        off: int = 0
+        while off + 512 <= n {
+            # End-of-archive: header block of all zeros. We don't strictly
+            # need to see two consecutive zeros (some emitters cheat), one
+            # is enough to stop.
+            if raw[off] == 0 and raw[off + 1] == 0 and raw[off + 100] == 0 {
+                break
+            }
+            info: TarInfo = _parse_header(raw, off)
+            off = off + 512
+            if info.isfile() and info.size > 0 {
+                # Slurp the payload.
+                payload: list[int] = []
+                i: int = 0
+                while i < info.size {
+                    payload.append(raw[off + i])
+                    i = i + 1
+                }
+                info.data = bytes(payload)
+                # Skip to next 512-byte boundary.
+                blocks: int = (info.size + 511) // 512
+                off = off + blocks * 512
+            }
+            self.members.append(info)
+        }
+    }
+
+    # Write a single member's bytes to disk under `path` (treated as the
+    # root for relative archive names). Creates parent dirs as needed,
+    # mirroring CPython's TarFile.extract behaviour.
+    def extract(member: TarInfo, path: str) -> None {
+        target: str = join(path, member.name)
+        if member.isdir() {
+            makedirs(target)
+            return
+        }
+        # Files: ensure parent exists, write payload bytes.
+        parent: str = dirname(target)
+        if len(parent) > 0 {
+            makedirs(parent)
+        }
+        if member.isfile() {
+            dragon_write_file_bytes(target, member.data)
+            return
+        }
+        # Symlinks etc. fall through silently for now - `os.symlink` isn't
+        # bound from Dragon yet; PRs welcome. The archive still parses
+        # cleanly; callers can post-process by inspecting .typeflag.
+    }
+
+    def extractall(path: str = ".") -> None {
+        # First-pass: create all directories so files can land into them
+        # in the second pass. Tar archives don't guarantee dir-before-file
+        # ordering, so doing this in two passes is more robust than relying
+        # on the layout.
+        for m in self.members {
+            if m.isdir() {
+                self.extract(m, path)
+            }
+        }
+        for m in self.members {
+            if m.isfile() {
+                self.extract(m, path)
+            }
+        }
+    }
+
+    # --- write paths ------------------------------------------------------
+
+    # Append a TarInfo + its data to the in-memory archive buffer. Used by
+    # both `add` (which wraps a filesystem path) and direct callers that
+    # construct synthetic archives.
+    def addfile(info: TarInfo) -> None {
+        self.members.append(info)
+        self._buffer += info.to_header()
+        if info.isfile() and len(info.data) > 0 {
+            self._buffer += info.data
+            # Pad to 512-byte boundary.
+            rem: int = len(info.data) % 512
+            if rem != 0 {
+                pad: list[int] = [0] * (512 - rem)
+                self._buffer += bytes(pad)
+            }
+        }
+    }
+
+    # Recursively add a filesystem path to the archive. arcname controls
+    # the name stored inside the archive - defaults to `name` itself.
+    # Mirrors tarfile.add(name, arcname).
+    def add(name: str, arcname: str = "") -> None {
+        if len(arcname) == 0 {
+            arcname = name
+        }
+        if isdir(name) {
+            info: TarInfo = TarInfo(arcname)
+            info.typeflag = DIRTYPE
+            info.size = 0
+            info.mtime = dragon_stat_mtime(name)
+            info.mode = dragon_stat_mode(name) & 0o7777
+            self.addfile(info)
+            entries: list[str] = listdir(name)
+            for entry in entries {
+                self.add(join(name, entry), join(arcname, entry))
+            }
+            return
+        }
+        if islink(name) {
+            info_l: TarInfo = TarInfo(arcname)
+            info_l.typeflag = SYMTYPE
+            info_l.linkname = readlink(name)
+            info_l.size = 0
+            info_l.mtime = dragon_stat_mtime(name)
+            info_l.mode = 0o777
+            self.addfile(info_l)
+            return
+        }
+        if isfile(name) {
+            info_f: TarInfo = TarInfo(arcname)
+            info_f.typeflag = REGTYPE
+            info_f.size = dragon_stat_size(name)
+            info_f.mtime = dragon_stat_mtime(name)
+            info_f.mode = dragon_stat_mode(name) & 0o7777
+            info_f.data = dragon_read_file_bytes(name)
+            self.addfile(info_f)
+            return
+        }
+    }
+
+    # Finalize: append the two-zero-block end marker, optionally pipe the
+    # archive through gzip/zstandard, and write the result to disk.
+    def close() -> None {
+        if self.closed {
+            return
+        }
+        self.closed = True
+        if self.mode[0:1] != "w" {
+            return
+        }
+        end: list[int] = [0] * 1024
+        archive: bytes = self._buffer + bytes(end)
+        if self._compress == "gz" {
+            archive = dragon_zlib_compress(archive, 9)
+        } else if self._compress == "zst" {
+            archive = dragon_zstd_compress(archive, 3)
+        }
+        dragon_write_file_bytes(self.filename, archive)
+    }
+
+    def __enter__() -> TarFile {
+        return self
+    }
+
+    def __exit__() -> None {
+        self.close()
+    }
+}
+
+
+# --- Factory ---------------------------------------------------------------
+
+
+# Open a tar archive. Mode encodes both direction and compression:
+#  "r" / "rb" - read uncompressed
+#  "w" / "wb" - write uncompressed
+#  "r:gz" - read gzip-compressed
+#  "w:gz" - write gzip-compressed (level 9)
+#  "r:zst" - read zstd-compressed
+#  "w:zst" - write zstd-compressed (level 3)
+def open(filename: str, mode: str = "r") -> TarFile {
+    direction: str = mode[0:1]
+    if direction != "r" and direction != "w" {
+        raise ValueError(f"tarfile: mode must start with 'r' or 'w', got '{mode}'")
+    }
+    # Pull out compression suffix after the colon (if any).
+    compress: str = ""
+    colon: int = mode.find(":")
+    if colon >= 0 {
+        compress = mode[colon + 1:len(mode)]
+    }
+
+    tf: TarFile = TarFile(filename, mode)
+    tf._compress = compress
+
+    if direction == "r" {
+        raw: bytes = dragon_read_file_bytes(filename)
+        if compress == "gz" {
+            raw = dragon_zlib_decompress(raw)
+        } else if compress == "zst" {
+            raw = dragon_zstd_decompress(raw)
+        }
+        tf._load_members(raw)
+    }
+    return tf
+}

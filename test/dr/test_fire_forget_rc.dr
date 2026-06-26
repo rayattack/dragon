@@ -1,0 +1,54 @@
+# test/dr/test_fire_forget_rc.dr - #2: a discarded `fire fn()` (fire-and-forget)
+# must free its vthread on completion, not leak the struct + its ~2MB coroutine
+# stack. This is exactly the stdlib HTTP server's per-connection pattern
+# (`fire self._handle_connection(fd)`), so the leak was unbounded under load.
+#
+# Codegen detaches a discarded fire; the runtime refcounts the vthread (one ref
+# for the running coro, one for the Task handle) so the LAST release frees - the
+# worker drops the coro ref on completion, detach drops the handle ref. This pins
+# that every fire-and-forget actually RUNS (no silent drop) and doesn't crash
+# (the detach vs worker-release race is safe). Leak-freedom is verified under the
+# ASan/LSan build (with the fix: clean; reverting the detach reproduces leaks).
+
+from unittest import TestCase, main
+from time import sleep_ms
+from threading import Lock
+
+counter: int = 0
+lk: Lock = Lock()
+
+def bump() -> int {
+    global counter
+    with lk { counter = counter + 1 }
+    return 0
+}
+
+def read_counter() -> int {
+    c: int = 0
+    with lk { c = counter }
+    return c
+}
+
+
+class FireForgetTests(TestCase) {
+    def test_fire_and_forget_runs_and_frees() {
+        global counter
+        with lk { counter = 0 }
+        n: int = 0
+        while n < 500 {
+            fire bump()          # discarded fire-and-forget - the #2 path
+            n = n + 1
+        }
+        # Let the workers drain; each vthread frees itself on completion. Bounded
+        # wait so a regression (work silently dropped) fails instead of hanging.
+        waited: int = 0
+        while read_counter() < 500 and waited < 400 {
+            sleep_ms(5)
+            waited = waited + 1
+        }
+        self.assertEqual(read_counter(), 500)
+    }
+}
+
+
+main([FireForgetTests()])

@@ -1,0 +1,51 @@
+"""urllib.robotparser - parse robots.txt + can_fetch."""
+
+from unittest import TestCase, main
+from urllib.robotparser import RobotFileParser
+
+
+class RobotParserTests(TestCase) {
+    def test_disallow_all() {
+        body: str = "User-agent: *\nDisallow: /\n"
+        rp: RobotFileParser = RobotFileParser()
+        rp.parse(body)
+        self.assertFalse(rp.can_fetch("MyBot", "http://x/anything"))
+    }
+
+    def test_specific_disallow_path() {
+        body: str = "User-agent: *\nDisallow: /private/\nAllow: /\n"
+        rp: RobotFileParser = RobotFileParser()
+        rp.parse(body)
+        self.assertFalse(rp.can_fetch("Crawler", "http://x/private/secret.html"))
+        self.assertTrue(rp.can_fetch("Crawler", "http://x/public/index.html"))
+    }
+
+    def test_useragent_specific_rules() {
+        body: str = "User-agent: BadBot\nDisallow: /\nUser-agent: *\nDisallow: /admin/\n"
+        rp: RobotFileParser = RobotFileParser()
+        rp.parse(body)
+        # BadBot is fully blocked.
+        self.assertFalse(rp.can_fetch("BadBot", "http://x/page"))
+        # Other bots: only /admin blocked.
+        self.assertTrue(rp.can_fetch("GoodBot", "http://x/page"))
+        self.assertFalse(rp.can_fetch("GoodBot", "http://x/admin/users"))
+    }
+
+    def test_crawl_delay() {
+        body: str = "User-agent: *\nCrawl-delay: 5.0\n"
+        rp: RobotFileParser = RobotFileParser()
+        rp.parse(body)
+        self.assertEqual(rp.crawl_delay("AnyBot"), 5.0)
+    }
+
+    def test_comments_ignored() {
+        body: str = "# Site rules\nUser-agent: *  # all bots\nDisallow: /tmp/  # temporary\n"
+        rp: RobotFileParser = RobotFileParser()
+        rp.parse(body)
+        self.assertFalse(rp.can_fetch("Bot", "http://x/tmp/scratch"))
+        self.assertTrue(rp.can_fetch("Bot", "http://x/index.html"))
+    }
+}
+
+
+main([RobotParserTests()])

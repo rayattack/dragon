@@ -1,0 +1,102 @@
+"""Dict construction via `**` spread - literal `{...}` and `dict(...)` forms.
+
+Spread sources seed the dict's key/value types (so a leading/all-spread literal
+types correctly instead of dict[<unknown>, <unknown>]), and `dict(**a, **b)` /
+`dict(x=1, **d)` construct a dict equivalent to the corresponding literal - an
+honest copy (Python semantics: the result is independent of its sources).
+
+Also covers the D049 materialization shape: a single generic method
+`def one[T]() -> T { return T(**row) }` serving BOTH a typed class fetch
+(`T(**row)`) and the untyped `T = dict[str, Any]` path (`dict(**row)`).
+"""
+
+from unittest import TestCase, main
+
+class Customer {
+    id: int
+    name: str
+    def(id: int, name: str) {
+        self.id = id
+        self.name = name
+    }
+}
+
+class Results {
+    rows: list[dict[str, Any]]
+    def(rows: list[dict[str, Any]]) {
+        self.rows = rows
+    }
+    def one[T]() -> T {
+        return T(**self.rows[0])
+    }
+}
+
+class DictSpreadTests(TestCase) {
+    def test_literal_single_spread() {
+        d: dict[str, int] = {"y": 2}
+        m: dict[str, int] = {**d}
+        self.assertEqual(len(m), 1)
+        self.assertEqual(m["y"], 2)
+    }
+
+    def test_literal_multi_spread() {
+        a: dict[str, int] = {"x": 1, "y": 2}
+        b: dict[str, int] = {"z": 3}
+        m: dict[str, int] = {**a, **b}
+        self.assertEqual(len(m), 3)
+        self.assertEqual(m["z"], 3)
+    }
+
+    def test_literal_mixed() {
+        d: dict[str, int] = {"y": 2}
+        m: dict[str, int] = {"x": 1, **d}
+        self.assertEqual(len(m), 2)
+        self.assertEqual(m["x"], 1)
+    }
+
+    def test_call_single_spread() {
+        row: dict[str, Any] = {"id": 1, "name": "a"}
+        m: dict[str, Any] = dict(**row)
+        self.assertEqual(len(m), 2)
+    }
+
+    def test_call_multi_spread() {
+        a: dict[str, int] = {"x": 1, "y": 2}
+        b: dict[str, int] = {"z": 3}
+        m: dict[str, int] = dict(**a, **b)
+        self.assertEqual(len(m), 3)
+        self.assertEqual(m["z"], 3)
+    }
+
+    def test_call_mixed_kwargs_and_spread() {
+        d: dict[str, int] = {"y": 2}
+        m: dict[str, int] = dict(x=1, **d)
+        self.assertEqual(len(m), 2)
+        self.assertEqual(m["x"], 1)
+    }
+
+    def test_call_is_a_copy_not_alias() {
+        # dict(**a) is an independent copy (Python semantics): mutating the result
+        # must not touch the source.
+        a: dict[str, int] = {"x": 1}
+        m: dict[str, int] = dict(**a)
+        m["x"] = 99
+        self.assertEqual(a["x"], 1)
+        self.assertEqual(m["x"], 99)
+    }
+
+    def test_d049_typed_materialization() {
+        res: Results = Results([{"id": 1, "name": "alice"}])
+        c: Customer = res.one[Customer]()
+        self.assertEqual(c.id, 1)
+        self.assertEqual(c.name, "alice")
+    }
+
+    def test_d049_untyped_dict_path() {
+        res: Results = Results([{"id": 2, "name": "bob"}])
+        row: dict[str, Any] = res.one()      # T = dict[str, Any] -> dict(**row)
+        self.assertEqual(row["name"], "bob")
+    }
+}
+
+main([DictSpreadTests()])

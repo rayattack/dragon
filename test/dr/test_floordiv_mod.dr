@@ -1,0 +1,80 @@
+"""Integer floor-division (//) and modulo (%) - Python floor semantics.
+
+Regression for the codegen change that inlines `%` and `//` for a VARIABLE
+divisor (previously only a constant divisor was inlined; a variable divisor
+emitted a per-use call to dragon_mod_int / dragon_floordiv_int). The inline form
+emits srem/sdiv + a branchless floor-correction `select`, guarded by a `b == 0`
+branch whose cold path keeps the runtime call (which still errors on ÷0).
+
+The result must track the sign of the DIVISOR (floor), not C's truncation:
+  -7 // 3 == -3,  -7 % 3 == 2,  7 // -3 == -3,  7 % -3 == -2.
+
+Divisors here come through function parameters, so at codegen they are not
+ConstantInt - this is exactly the inline variable-divisor path. The `_const`
+tests pin the constant fast path (literal divisor) in parallel.
+"""
+
+from unittest import TestCase, main
+
+# Parameters defeat constant-folding: `b` is a runtime value, so these exercise
+# the inline guarded path (icmp b==0 -> srem/sdiv + select).
+def vmod(a: int, b: int) -> int { return a % b }
+def vdiv(a: int, b: int) -> int { return a // b }
+
+class FloorDivModTests(TestCase) {
+    def test_mod_variable_divisor_all_signs() {
+        self.assertEqual(vmod(7, 3), 1)
+        self.assertEqual(vmod(-7, 3), 2)
+        self.assertEqual(vmod(7, -3), -2)
+        self.assertEqual(vmod(-7, -3), -1)
+        self.assertEqual(vmod(6, 3), 0)
+        self.assertEqual(vmod(-6, 3), 0)
+    }
+
+    def test_floordiv_variable_divisor_all_signs() {
+        self.assertEqual(vdiv(7, 3), 2)
+        self.assertEqual(vdiv(-7, 3), -3)
+        self.assertEqual(vdiv(7, -3), -3)
+        self.assertEqual(vdiv(-7, -3), 2)
+        self.assertEqual(vdiv(6, 3), 2)
+        self.assertEqual(vdiv(-6, 3), -2)
+    }
+
+    def test_mod_constant_divisor() {
+        # Literal divisor -> the constant inline fast path.
+        self.assertEqual(7 % 3, 1)
+        self.assertEqual(-7 % 3, 2)
+        self.assertEqual(7 % -3, -2)
+        self.assertEqual(-7 % -3, -1)
+    }
+
+    def test_floordiv_constant_divisor() {
+        self.assertEqual(7 // 3, 2)
+        self.assertEqual(-7 // 3, -3)
+        self.assertEqual(7 // -3, -3)
+        self.assertEqual(-7 // -3, 2)
+    }
+
+    def test_aug_assign_variable_divisor() {
+        # `%=` / `//=` go through emitIntAugOp, which now also inlines.
+        m: int = -7
+        d: int = vmod(0, 1)   # 0, but a runtime value to keep the divisor variable
+        d = 3
+        m %= d
+        self.assertEqual(m, 2)
+        q: int = -7
+        q //= d
+        self.assertEqual(q, -3)
+    }
+
+    def test_identity_a_eq_div_times_b_plus_mod() {
+        # The defining invariant: a == (a // b) * b + (a % b), for any signs.
+        b: int = -3
+        a: int = -20
+        self.assertEqual(vdiv(a, b) * b + vmod(a, b), a)
+        a = 20
+        self.assertEqual(vdiv(a, b) * b + vmod(a, b), a)
+    }
+}
+
+main([FloorDivModTests()])

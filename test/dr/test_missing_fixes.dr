@@ -1,0 +1,285 @@
+"""Regression tests for the language gaps fixed from missing.md (2026-05-29).
+
+Each TestCase pins a bug that was reproduced against the docs dogfood and then
+root-caused. Behaviour is asserted directly (not via skipped/xfail) so a
+regression re-breaks the build. Grouped by the missing.md section.
+"""
+
+from typing import Union, Optional
+from unittest import TestCase, main
+
+
+# --- shared fixtures: defined before the TestCases that reference them ---
+class Animal {
+    def() {}
+}
+class Dog(Animal) {
+    def() {}
+}
+
+# T31: module-global union (declared at module top level).
+g: int | str = 5
+
+
+class FloatRepr(TestCase) {
+    """T30/T28: scalar/str/f-string floats keep `.0`, round-trip precision."""
+    def test_whole_number_keeps_dot_zero() {
+        self.assertEqual(str(1.0), "1.0")
+        self.assertEqual(str(4.0), "4.0")
+        self.assertEqual(str(-5.0), "-5.0")
+    }
+    def test_shortest_round_trip() {
+        self.assertEqual(str(0.1), "0.1")
+        self.assertEqual(str(1.0 / 3.0), "0.3333333333333333")
+    }
+    def test_scientific() {
+        self.assertEqual(str(1e16), "1e+16")
+        self.assertEqual(str(1e-5), "1e-05")
+    }
+    def test_container_float_precision() {
+        const xs: list[float] = [1.0, 2.5, 0.1]
+        self.assertEqual(str(xs), "[1.0, 2.5, 0.1]")
+    }
+}
+
+
+class FormatSpecs(TestCase) {
+    """T27/T28: the Python format mini-language."""
+    def test_alignment() {
+        self.assertEqual(f"[{42:<6}]", "[42    ]")
+        self.assertEqual(f"[{42:>6}]", "[    42]")
+        self.assertEqual(f"[{42:^6}]", "[  42  ]")
+    }
+    def test_sign_and_grouping() {
+        self.assertEqual(f"{42:+}", "+42")
+        self.assertEqual(f"{1234567:,}", "1,234,567")
+    }
+    def test_zero_pad_and_alt() {
+        self.assertEqual(f"{42:06}", "000042")
+        self.assertEqual(f"{42:#x}", "0x2a")
+        self.assertEqual(f"{42:08b}", "00101010")
+    }
+    def test_int_with_float_type() {
+        self.assertEqual(f"{42:e}", "4.200000e+01")
+    }
+    def test_float_specs() {
+        self.assertEqual(f"{3.14159:.2f}", "3.14")
+        self.assertEqual(f"{0.875:.1%}", "87.5%")
+        self.assertEqual(f"{1234567.891:,.2f}", "1,234,567.89")
+    }
+    def test_custom_fill() {
+        self.assertEqual(f"{7:*^9}", "****7****")
+    }
+}
+
+
+class FStringEscapes(TestCase) {
+    """T29: backslash escapes are processed inside f-strings."""
+    def test_newline_and_tab() {
+        const name: str = "world"
+        self.assertEqual(f"a\n{name}", "a\nworld")
+        self.assertEqual(f"x\ty", "x\ty")
+    }
+}
+
+
+class StringMethods(TestCase) {
+    """T24/T25/T26: strip(chars), split(maxsplit), rsplit."""
+    def test_strip_charset() {
+        self.assertEqual("xxhixx".strip("x"), "hi")
+        self.assertEqual("xxhixx".lstrip("x"), "hixx")
+        self.assertEqual("xxhixx".rstrip("x"), "xxhi")
+    }
+    def test_split_maxsplit() {
+        self.assertEqual("a,b,c,d".split(",", 1), ["a", "b,c,d"])
+        self.assertEqual("a,b,c,d".split(",", 2), ["a", "b", "c,d"])
+    }
+    def test_rsplit() {
+        self.assertEqual("a,b,c".rsplit(","), ["a", "b", "c"])
+        self.assertEqual("a,b,c,d".rsplit(",", 1), ["a,b,c", "d"])
+    }
+}
+
+
+class Builtins(TestCase) {
+    """T19/T18/T23: min/max varargs, tuple(list), truthiness."""
+    def test_min_max_varargs() {
+        self.assertEqual(min(5, 2, 8, 1, 9), 1)
+        self.assertEqual(max(1, 2, 3), 3)
+    }
+    def test_tuple_from_list() {
+        const t: tuple = tuple([1, 2, 3])
+        self.assertEqual(str(t), "(1, 2, 3)")
+        const ts: tuple = tuple(["a", "b"])
+        self.assertEqual(str(ts), "('a', 'b')")
+    }
+    def test_truthiness() {
+        self.assertFalse(bool(""))
+        self.assertTrue(bool("x"))
+        self.assertFalse(bool([]))
+        const e: list[int] = []
+        self.assertFalse(bool(e))
+        self.assertTrue(not e)
+    }
+}
+
+
+class Isinstance(TestCase) {
+    """T22/T32: inheritance walk + else-branch / is-None narrowing."""
+    def test_inheritance_chain() {
+        const d: Dog = Dog()
+        self.assertTrue(isinstance(d, Animal))
+        self.assertTrue(isinstance(d, Dog))
+        const a: Animal = Animal()
+        self.assertFalse(isinstance(a, Dog))
+    }
+    def test_else_narrow() {
+        const v: int | str = "hi"
+        if isinstance(v, int) {
+            self.assertTrue(False)
+        } else {
+            self.assertEqual(v.upper(), "HI")
+        }
+    }
+    def test_is_none_narrow() {
+        const r: int | None = 5
+        if r is None {
+            self.assertTrue(False)
+        } else {
+            self.assertEqual(r + 1, 6)
+        }
+    }
+}
+
+
+class ListConversions(TestCase) {
+    """T21: list()/sorted()/reversed() preserve element type."""
+    def test_list_range() {
+        const a: list[int] = list(range(3))
+        self.assertEqual(a, [0, 1, 2])
+        const b: list[int] = list(range(2, 8))
+        self.assertEqual(b, [2, 3, 4, 5, 6, 7])
+        const c: list[int] = list(range(0, 10, 2))
+        self.assertEqual(c, [0, 2, 4, 6, 8])
+    }
+    def test_sorted_reversed() {
+        const ys: list[int] = [3, 1, 2]
+        self.assertEqual(sorted(ys), [1, 2, 3])
+        self.assertEqual(list(reversed(ys)), [2, 1, 3])
+    }
+}
+
+
+class DictAndEnumerate(TestCase) {
+    """T4/T6: dict.get value typing + enumerate/zip element typing."""
+    def test_dict_get_str_value() {
+        const cfg: dict[str, str] = {"host": "localhost"}
+        self.assertEqual(f"{cfg.get('host', '?')}", "localhost")
+    }
+    def test_enumerate_str() {
+        const xs: list[str] = ["a", "b", "c"]
+        const seen: list[str] = []
+        for i, s in enumerate(xs) {
+            seen.append(s)
+        }
+        self.assertEqual(seen, ["a", "b", "c"])
+    }
+    def test_zip_mixed() {
+        const a: list[str] = ["x", "y"]
+        const b: list[int] = [10, 20]
+        const keys: list[str] = []
+        const vals: list[int] = []
+        for k, v in zip(a, b) {
+            keys.append(k)
+            vals.append(v)
+        }
+        self.assertEqual(keys, ["x", "y"])
+        self.assertEqual(vals, [10, 20])
+    }
+}
+
+
+class Exceptions(TestCase) {
+    """T8/T9: try/finally re-raises; except tuple matches any."""
+    def test_finally_reraises() {
+        const ran: list[str] = []
+        try {
+            try {
+                raise ValueError("x")
+            } finally {
+                ran.append("cleanup")
+            }
+            ran.append("after")
+        } except ValueError {
+            ran.append("caught")
+        }
+        # finally ran AND the exception propagated (not swallowed).
+        self.assertEqual(ran, ["cleanup", "caught"])
+    }
+    def test_except_tuple() {
+        const hits: list[str] = []
+        try { raise ValueError("v") } except (ValueError, KeyError) { hits.append("a") }
+        try { raise KeyError("k") } except (ValueError, KeyError) { hits.append("b") }
+        self.assertEqual(hits, ["a", "b"])
+    }
+}
+
+
+class UnionAlias(TestCase) {
+    """T3/T31: Union[]/Optional[] alias + module-global union reassign."""
+    def test_union_optional() {
+        const u: Union[int, str] = 42
+        self.assertEqual(str(u), "42")
+        const o: Optional[int] = None
+        self.assertTrue(o is None)
+    }
+}
+
+
+class CatchableBuiltinErrors(TestCase) {
+    """T7: builtin runtime errors are catchable (route through setjmp, not exit)."""
+    def test_zero_division() {
+        const ran: list[str] = []
+        try { const x: int = 10 // 0 } except ZeroDivisionError { ran.append("div") }
+        try { const y: int = 5 % 0 } except ZeroDivisionError { ran.append("mod") }
+        self.assertEqual(ran, ["div", "mod"])
+    }
+    def test_index_error() {
+        const xs: list[int] = [1, 2, 3]
+        const ran: list[str] = []
+        try { const x: int = xs[99] } except IndexError { ran.append("idx") }
+        self.assertEqual(ran, ["idx"])
+    }
+    def test_key_error() {
+        const d: dict[str, int] = {"a": 1}
+        const ran: list[str] = []
+        try { const x: int = d["missing"] } except KeyError { ran.append("key") }
+        self.assertEqual(ran, ["key"])
+    }
+    def test_base_class_catch() {
+        # KeyError < LookupError < Exception - base handler matches.
+        const d: dict[str, int] = {"a": 1}
+        const ran: list[str] = []
+        try { const x: int = d["nope"] } except Exception { ran.append("base") }
+        self.assertEqual(ran, ["base"])
+    }
+}
+
+
+class GlobalUnion(TestCase) {
+    def test_global_reassign() {
+        global g
+        g = "hello"
+        self.assertEqual(str(g), "hello")
+        if isinstance(g, str) {
+            self.assertEqual(g.upper(), "HELLO")
+        }
+        g = 99
+        self.assertEqual(str(g), "99")
+    }
+}
+
+
+main([FloatRepr(), FormatSpecs(), FStringEscapes(), StringMethods(), Builtins(),
+      Isinstance(), ListConversions(), DictAndEnumerate(), Exceptions(),
+      UnionAlias(), CatchableBuiltinErrors(), GlobalUnion()])

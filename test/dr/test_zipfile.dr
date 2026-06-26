@@ -1,0 +1,192 @@
+"""zipfile - PKWARE ZIP read/write round-trip + binary fidelity + CRC.
+
+Builds a real .zip on disk with a STORED entry, a DEFLATED entry (highly
+compressible text), and a binary entry carrying 0x00 / 0xFF / embedded data;
+closes it; reopens it; and asserts namelist + infolist match, every payload
+reads back byte-for-byte, the CRC validates (read() raises on mismatch), and
+the deflated entry's compress_size is strictly smaller than its file_size for
+compressible input. Also checks the on-disk signatures (local 0x04034b50,
+end-of-central-directory 0x06054b50) are present, proving a conforming PKWARE
+container - not just a self-consistent blob."""
+
+from unittest import TestCase, main
+import zipfile
+import os
+from os.path import join, exists
+import shutil
+import binascii
+import struct
+
+
+extern "C" def dragon_read_file_bytes(path: str) -> bytes
+
+
+const _ROOT: str = "/tmp/dr_zipfile_test"
+
+
+# A long, highly repetitive string that deflate crushes - guarantees the
+# DEFLATED branch is exercised and beats STORED.
+def _compressible() -> bytes {
+    parts: list[int] = []
+    i: int = 0
+    while i < 2000 {
+        # ASCII 'A'..'A' repeated - maximal redundancy.
+        parts.append(0x41)
+        i = i + 1
+    }
+    return bytes(parts)
+}
+
+
+# Binary payload with the bytes a naive text path would corrupt: NUL, 0xFF,
+# CR, LF, high bytes, plus an embedded ASCII run.
+def _binary() -> bytes {
+    return bytes([0, 255, 13, 10, 0x48, 0x69, 0, 254, 127, 128, 65, 66, 67])
+}
+
+
+class ZipFileTests(TestCase) {
+    def _archive_path() -> str {
+        return join(_ROOT, "round.zip")
+    }
+
+    def _build() -> str {
+        if exists(_ROOT) {
+            shutil.rmtree(_ROOT)
+        }
+        os.mkdir(_ROOT, 493)
+        path: str = self._archive_path()
+
+        zf: zipfile.ZipFile = zipfile.open(path, "w")
+        # 1) STORED entry - short, incompressible-enough to keep verbatim.
+        zf.writestr("stored.txt", "hi".encode("utf-8"), zipfile.ZIP_STORED)
+        # 2) DEFLATED entry - compressible text.
+        zf.writestr("deflated.txt", _compressible(), zipfile.ZIP_DEFLATED)
+        # 3) Binary entry - DEFLATED method requested; bytes must survive.
+        zf.writestr("blob.bin", _binary(), zipfile.ZIP_DEFLATED)
+        zf.close()
+        return path
+    }
+
+    def test_namelist_and_count() {
+        path: str = self._build()
+        zf: zipfile.ZipFile = zipfile.open(path, "r")
+        names: list[str] = zf.namelist()
+        self.assertEqual(len(names), 3)
+        self.assertEqual(names[0], "stored.txt")
+        self.assertEqual(names[1], "deflated.txt")
+        self.assertEqual(names[2], "blob.bin")
+        infos: list[zipfile.ZipInfo] = zf.infolist()
+        self.assertEqual(len(infos), 3)
+        zf.close()
+        shutil.rmtree(_ROOT)
+    }
+
+    def test_stored_roundtrip() {
+        path: str = self._build()
+        zf: zipfile.ZipFile = zipfile.open(path, "r")
+        got: bytes = zf.read("stored.txt")
+        self.assertEqual(got.decode("utf-8"), "hi")
+        info: zipfile.ZipInfo = zf.getinfo("stored.txt")
+        self.assertEqual(info.compress_type, zipfile.ZIP_STORED)
+        self.assertEqual(info.file_size, 2)
+        self.assertEqual(info.compress_size, 2)
+        zf.close()
+        shutil.rmtree(_ROOT)
+    }
+
+    def test_deflated_roundtrip_and_smaller() {
+        path: str = self._build()
+        original: bytes = _compressible()
+        zf: zipfile.ZipFile = zipfile.open(path, "r")
+        got: bytes = zf.read("deflated.txt")
+        # Byte-for-byte recovery of the uncompressed payload.
+        self.assertEqual(len(got), len(original))
+        i: int = 0
+        while i < len(original) {
+            self.assertEqual(got[i], original[i])
+            i = i + 1
+        }
+        info: zipfile.ZipInfo = zf.getinfo("deflated.txt")
+        self.assertEqual(info.compress_type, zipfile.ZIP_DEFLATED)
+        self.assertEqual(info.file_size, len(original))
+        # The whole point of DEFLATE: compressed is strictly smaller.
+        self.assertTrue(info.compress_size < info.file_size)
+        zf.close()
+        shutil.rmtree(_ROOT)
+    }
+
+    def test_binary_survives_verbatim() {
+        path: str = self._build()
+        payload: bytes = _binary()
+        zf: zipfile.ZipFile = zipfile.open(path, "r")
+        got: bytes = zf.read("blob.bin")
+        self.assertEqual(len(got), len(payload))
+        j: int = 0
+        while j < len(payload) {
+            self.assertEqual(got[j], payload[j])
+            j = j + 1
+        }
+        # Spot-check the dangerous bytes.
+        self.assertEqual(got[0], 0)       # NUL preserved
+        self.assertEqual(got[1], 255)     # 0xFF preserved
+        self.assertEqual(got[6], 0)       # embedded NUL preserved
+        self.assertEqual(got[7], 254)     # 0xFE preserved
+        self.assertEqual(got[9], 128)     # high bit preserved
+        zf.close()
+        shutil.rmtree(_ROOT)
+    }
+
+    def test_crc_matches_binascii() {
+        path: str = self._build()
+        zf: zipfile.ZipFile = zipfile.open(path, "r")
+        # The CRC stored in the central directory must equal an independent
+        # IEEE-802.3 CRC-32 over the decompressed bytes.
+        data: bytes = zf.read("deflated.txt")
+        info: zipfile.ZipInfo = zf.getinfo("deflated.txt")
+        self.assertEqual(info.CRC, binascii.crc32(data, 0))
+        zf.close()
+        shutil.rmtree(_ROOT)
+    }
+
+    def test_signatures_present() {
+        path: str = self._build()
+        raw: bytes = dragon_read_file_bytes(path)
+        # The archive must open with a local file header signature and end
+        # (modulo the empty comment) with the EOCD signature.
+        self.assertEqual(struct.unpack_u32_le(raw, 0), 0x04034b50)
+        eocd_at: int = len(raw) - 22
+        self.assertEqual(struct.unpack_u32_le(raw, eocd_at), 0x06054b50)
+        shutil.rmtree(_ROOT)
+    }
+
+    def test_extract_writes_file() {
+        path: str = self._build()
+        zf: zipfile.ZipFile = zipfile.open(path, "r")
+        out_dir: str = join(_ROOT, "out")
+        os.mkdir(out_dir, 493)
+        target: str = zf.extract("deflated.txt", out_dir)
+        self.assertTrue(exists(target))
+        on_disk: bytes = dragon_read_file_bytes(target)
+        self.assertEqual(len(on_disk), len(_compressible()))
+        zf.close()
+        shutil.rmtree(_ROOT)
+    }
+
+    def test_missing_name_raises() {
+        path: str = self._build()
+        zf: zipfile.ZipFile = zipfile.open(path, "r")
+        raised: bool = false
+        try {
+            zf.read("nope.txt")
+        } except KeyError {
+            raised = true
+        }
+        self.assertTrue(raised)
+        zf.close()
+        shutil.rmtree(_ROOT)
+    }
+}
+
+
+main([ZipFileTests()])

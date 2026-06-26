@@ -1,0 +1,38 @@
+"""http.cookies - parse a Cookie header and render Set-Cookie lines."""
+
+from unittest import TestCase, main
+from http.cookies import parse, SimpleCookie
+
+
+class HttpCookiesTests(TestCase) {
+    def test_parse() {
+        d: dict[str, str] = parse("sessionid=abc123; theme=dark; lang=\"en\"")
+        self.assertEqual(d["sessionid"], "abc123")
+        self.assertEqual(d["theme"], "dark")
+        self.assertEqual(d["lang"], "en")   # quotes stripped
+    }
+
+    def test_parse_empty_and_malformed() {
+        d: dict[str, str] = parse("  ; =noname; good=1 ;")
+        self.assertEqual(d["good"], "1")
+        self.assertFalse("noname" in d)
+    }
+
+    def test_simplecookie() {
+        c: SimpleCookie = SimpleCookie()
+        c.set("a", "1")
+        c.set("b", "2")
+        self.assertEqual(c.get("a"), "1")
+        self.assertEqual(c.output(), "Set-Cookie: a=1\nSet-Cookie: b=2")
+    }
+
+    def test_load() {
+        c: SimpleCookie = SimpleCookie()
+        c.load("x=10; y=20")
+        self.assertEqual(c.get("x"), "10")
+        self.assertEqual(c.get("y"), "20")
+    }
+}
+
+
+main([HttpCookiesTests()])

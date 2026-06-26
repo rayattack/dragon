@@ -1,0 +1,265 @@
+"""io module: Reader/Writer file I/O, BytesIO, StringIO, codecs, newlines.
+
+Coverage:
+  - str.encode / bytes.decode honor encoding+errors (UTF-8/ASCII, strict/
+    replace); strict raises on invalid input (was a silent Latin-1 corruption).
+  - Reader: text()/bytes()/lines() whole-file (self-closing, leak-free), line()
+    and take() streaming, `for line in r`, idempotent close, spent-reader yields
+    empty, missing file raises FileNotFoundError.
+  - Writer: write(str) UTF-8-encoded and write(bytes) verbatim (overload),
+    line()/lines(); make() truncates, push() appends.
+  - BytesIO / StringIO in-memory streams.
+  - normalize_newlines."""
+
+from unittest import TestCase, main
+from io import open, make, push, Reader, Writer, BytesIO, StringIO, normalize_newlines
+
+
+class CodecTests(TestCase) {
+    def test_utf8_roundtrip() {
+        const s: str = "café ☃ 🐉"
+        const b: bytes = s.encode()
+        self.assertEqual(b.decode(), s)
+        self.assertEqual(len(b), 14)            # UTF-8 byte length
+    }
+
+    def test_decode_strict_raises_on_invalid() {
+        const bad: bytes = bytes([0xFF, 0xFE, 0x41])
+        raised: bool = false
+        try {
+            const x: str = bad.decode("utf-8")
+        } except UnicodeDecodeError as e {
+            raised = true
+        }
+        self.assertTrue(raised)
+    }
+
+    def test_decode_replace() {
+        const bad: bytes = bytes([0xFF, 0xFE, 0x41])
+        const r: str = bad.decode("utf-8", "replace")
+        self.assertEqual(len(r), 3)             # U+FFFD, U+FFFD, 'A'
+    }
+
+    def test_ascii_encode_strict_raises() {
+        raised: bool = false
+        try {
+            const y: bytes = "café".encode("ascii")
+        } except UnicodeEncodeError as e {
+            raised = true
+        }
+        self.assertTrue(raised)
+    }
+
+    def test_ascii_encode_replace() {
+        self.assertEqual("café".encode("ascii", "replace").decode("ascii"), "caf?")
+    }
+
+    def test_unknown_encoding_raises_lookup() {
+        raised: bool = false
+        try {
+            const z: bytes = "x".encode("latin-1")
+        } except LookupError as e {
+            raised = true
+        }
+        self.assertTrue(raised)
+    }
+}
+
+
+class ReaderWriterTests(TestCase) {
+    def test_text_roundtrip_non_ascii() {
+        const p: str = "/tmp/dragon_test_rw_a.txt"
+        with make(p) as w {
+            w.write("café ☃\n")
+            w.line("two")
+        }
+        const whole: str = open(p).text()
+        self.assertIn("café ☃", whole)
+        self.assertIn("two", whole)
+    }
+
+    def test_make_truncates_push_appends() {
+        const p: str = "/tmp/dragon_test_rw_b.txt"
+        with make(p) as w {
+            w.write("first\n")
+        }
+        with push(p) as w {
+            w.write("second\n")
+        }
+        self.assertEqual(open(p).text(), "first\nsecond\n")
+        # make() truncates the prior content.
+        with make(p) as w {
+            w.write("fresh\n")
+        }
+        self.assertEqual(open(p).text(), "fresh\n")
+    }
+
+    def test_bytes_write_and_read_verbatim() {
+        const p: str = "/tmp/dragon_test_rw_c.bin"
+        const raw: bytes = bytes([0, 255, 128, 65, 10])
+        with make(p) as w {
+            const n: int = w.write(raw)         # bytes overload
+            self.assertEqual(n, 5)
+        }
+        const back: bytes = open(p).bytes()
+        self.assertEqual(len(back), 5)
+        self.assertEqual(back[1], 255)          # 0xFF preserved (no codec)
+        self.assertEqual(back[3], 65)
+    }
+
+    def test_write_str_and_bytes_overload() {
+        # write(str) UTF-8-encodes; write(bytes) is verbatim. For an ASCII
+        # payload both land the same three bytes on disk.
+        const ps: str = "/tmp/dragon_test_rw_s.txt"
+        const pb: str = "/tmp/dragon_test_rw_d.bin"
+        with make(ps) as w {
+            const a: int = w.write("ABC")
+        }
+        with make(pb) as w {
+            const b: int = w.write(b"ABC")
+        }
+        self.assertEqual(open(ps).text(), "ABC")
+        const bb: bytes = open(pb).bytes()
+        self.assertEqual(len(bb), 3)
+        self.assertEqual(bb[0], 65)             # 'A'
+    }
+
+    def test_lines_and_streaming_line() {
+        const p: str = "/tmp/dragon_test_rw_e.txt"
+        with make(p) as w {
+            w.line("a")
+            w.line("b")
+            w.line("c")
+        }
+        const ls: list[str] = open(p).lines()
+        self.assertEqual(len(ls), 3)
+        self.assertEqual(ls[0].strip(), "a")
+        with open(p) as r {
+            const l1: str = r.line()
+            self.assertTrue(l1.endswith("\n"))
+            self.assertEqual(l1.strip(), "a")
+        }
+    }
+
+    def test_iteration_counts_lines() {
+        const p: str = "/tmp/dragon_test_rw_f.txt"
+        with make(p) as w {
+            w.line("x")
+            w.line("y")
+            w.line("z")
+        }
+        count: int = 0
+        with open(p) as r {
+            for line in r {
+                count = count + 1
+            }
+        }
+        self.assertEqual(count, 3)
+    }
+
+    def test_take_does_not_split() {
+        const p: str = "/tmp/dragon_test_rw_g.txt"
+        with make(p) as w {
+            w.write("hello world")
+        }
+        with open(p) as r {
+            const head: str = r.take(5)
+            self.assertEqual(head, "hello")
+        }
+    }
+
+    def test_idempotent_close_and_spent_reader() {
+        const p: str = "/tmp/dragon_test_rw_h.txt"
+        with make(p) as w {
+            w.write("data")
+        }
+        const r: Reader = open(p)
+        const first: str = r.text()             # consumes + self-closes
+        self.assertEqual(first, "data")
+        self.assertTrue(r.closed)
+        self.assertEqual(r.text(), "")          # spent reader yields empty
+        const z: int = r.close()                # idempotent: no double fclose
+        self.assertEqual(z, 0)
+    }
+
+    def test_missing_file_raises() {
+        raised: bool = false
+        try {
+            const r: Reader = open("/tmp/dragon_test_rw_nope_42.txt")
+        } except FileNotFoundError as e {
+            raised = true
+        }
+        self.assertTrue(raised)
+    }
+}
+
+
+class BytesIOTests(TestCase) {
+    def test_write_getvalue_read() {
+        const bio: BytesIO = BytesIO()
+        bio.write(bytes([72, 105]))
+        bio.write(bytes([33]))
+        self.assertEqual(bio.getvalue().decode(), "Hi!")
+        bio.seek(0)
+        self.assertEqual(len(bio.read(2)), 2)
+        self.assertEqual(bio.tell(), 2)
+    }
+
+    def test_initial_and_overwrite() {
+        const bio: BytesIO = BytesIO(bytes([65, 66, 67]))   # ABC
+        bio.seek(1)
+        bio.write(bytes([90]))                              # overwrite B -> Z
+        self.assertEqual(bio.getvalue().decode(), "AZC")
+    }
+
+    def test_truncate() {
+        const bio: BytesIO = BytesIO(bytes([1, 2, 3, 4, 5]))
+        bio.truncate(2)
+        self.assertEqual(len(bio.getvalue()), 2)
+    }
+}
+
+
+class StringIOTests(TestCase) {
+    def test_build_fast_path() {
+        const sio: StringIO = StringIO()
+        i: int = 0
+        while i < 5 {
+            sio.write("ab")
+            i = i + 1
+        }
+        self.assertEqual(sio.getvalue(), "ababababab")
+        self.assertEqual(sio.tell(), 10)
+    }
+
+    def test_overwrite_at_cursor() {
+        const sio: StringIO = StringIO("hello")
+        sio.write("XY")
+        self.assertEqual(sio.getvalue(), "XYllo")          # Python parity
+    }
+
+    def test_read_and_readline() {
+        const sio: StringIO = StringIO("one\ntwo\nthree")
+        self.assertEqual(sio.readline().strip(), "one")
+        self.assertEqual(sio.readline().strip(), "two")
+        self.assertEqual(sio.read().strip(), "three")
+    }
+
+    def test_non_ascii() {
+        const sio: StringIO = StringIO()
+        sio.write("café ")
+        sio.write("☃")
+        self.assertEqual(sio.getvalue(), "café ☃")
+    }
+}
+
+
+class NewlineTests(TestCase) {
+    def test_normalize() {
+        self.assertEqual(normalize_newlines("a\r\nb\rc"), "a\nb\nc")
+        self.assertEqual(normalize_newlines("plain\n"), "plain\n")
+    }
+}
+
+
+main([CodecTests(), ReaderWriterTests(), BytesIOTests(), StringIOTests(), NewlineTests()])

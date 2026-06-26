@@ -1,0 +1,135 @@
+# argparse.dr - Dragon standard library: command-line argument parsing
+#
+# Subset of Python's argparse:
+#  parser = ArgumentParser("prog", "description")
+#  parser.add_argument("--port", "int", "8080", "listen port")
+#  parser.add_argument("--debug", "bool", "false", "enable debug mode")
+#  parser.add_argument("path", "str", "", "input path")
+#  args = parser.parse_args(sys.argv())
+#  port: int = int(args["port"])
+#
+# Scope (v0.0.2): single ArgumentParser, no subparsers, no nargs, no choices.
+# Defaults and types are stored as strings; user converts at use site.
+# Boolean optional args (`--flag`) are present-or-absent - passing the flag
+# sets the value to the literal string "true"; absence keeps the default.
+
+class ArgSpec {
+    name: str
+    arg_type: str
+    default: str
+    help: str
+    is_optional: bool
+    is_flag: bool
+
+    def(name: str, arg_type: str, default: str, help: str,
+        is_optional: bool, is_flag: bool) {
+        self.name = name
+        self.arg_type = arg_type
+        self.default = default
+        self.help = help
+        self.is_optional = is_optional
+        self.is_flag = is_flag
+    }
+}
+
+def _strip_dashes(name: str) -> str {
+    if name.startswith("--") {
+        return name[2:]
+    }
+    if name.startswith("-") {
+        return name[1:]
+    }
+    return name
+}
+
+class ArgumentParser {
+    prog: str
+    description: str
+    specs: list[ArgSpec]
+
+    def(prog: str, description: str) {
+        self.prog = prog
+        self.description = description
+        self.specs = []
+    }
+
+    def add_argument(name: str, arg_type: str, default: str, help: str) -> None {
+        const opt: bool = name.startswith("-")
+        const flag: bool = opt and arg_type == "bool"
+        const canonical: str = _strip_dashes(name)
+        self.specs.append(ArgSpec(canonical, arg_type, default, help, opt, flag))
+    }
+
+    def _find_optional(key: str) -> ArgSpec {
+        for s in self.specs {
+            if s.is_optional and s.name == key {
+                return s
+            }
+        }
+        return ArgSpec(key, "str", "", "", true, false)
+    }
+
+    def parse_args(args: list[str]) -> dict[str, str] {
+        start: int = 0
+        if len(args) > 0 {
+            const first: str = args[0]
+            if first.startswith("/") {
+                start = 1
+            }
+        }
+
+        const result: dict[str, str] = {}
+        for s in self.specs {
+            result[s.name] = s.default
+        }
+
+        const positionals: list[str] = []
+        const n: int = len(args)
+        i: int = start
+        while i < n {
+            const a: str = args[i]
+            if a.startswith("--") {
+                const key: str = a[2:]
+                const spec: ArgSpec = self._find_optional(key)
+                if spec.is_flag {
+                    result[spec.name] = "true"
+                    i = i + 1
+                } else {
+                    if i + 1 >= n {
+                        i = i + 1
+                    } else {
+                        result[spec.name] = args[i + 1]
+                        i = i + 2
+                    }
+                }
+            } elif a.startswith("-") and len(a) >= 2 {
+                const key: str = a[1:]
+                const spec: ArgSpec = self._find_optional(key)
+                if spec.is_flag {
+                    result[spec.name] = "true"
+                    i = i + 1
+                } else {
+                    if i + 1 >= n {
+                        i = i + 1
+                    } else {
+                        result[spec.name] = args[i + 1]
+                        i = i + 2
+                    }
+                }
+            } else {
+                positionals.append(a)
+                i = i + 1
+            }
+        }
+
+        const pos_specs: list[ArgSpec] = []
+        for s in self.specs {
+            if not s.is_optional { pos_specs.append(s) }
+        }
+        const bound: int = len(positionals) if len(positionals) < len(pos_specs) else len(pos_specs)
+        for j in range(bound) {
+            result[pos_specs[j].name] = positionals[j]
+        }
+        return result
+    }
+}

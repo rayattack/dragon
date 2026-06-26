@@ -1,0 +1,563 @@
+# message.dr - Dragon HTTP request representation + routing primitives.
+#
+# Split out of server.dr at a clean producer/consumer boundary (R5): this module
+# is the LEAF of the http package's dependency graph - it depends only on sibling
+# value modules (urllib.parse, http.multipart, http.sessions) and NEVER on
+# server.dr. server.dr (Response + Router + serve loop) imports from here in one
+# direction, so there is no import cycle.
+#
+# What lives here:
+#  - Request - the parsed inbound HTTP request + typed accessors.
+#  - Context - per-request state bag.
+#  - Type validators - _is_int_str / _is_float_str / _validate_type ... : the
+#  textual type checks Request's param_*/query_* accessors
+#  and the Router's typed-segment matching both rely on.
+#  - Route matching - _match_route / _middleware_matches : pure functions over
+#  path segments (no Router/Response coupling).
+#  - Parsing helpers - _split_path / _parse_query_string / _parse_cookies.
+#  - _NO_SESSION - the shared empty-Session default for Request.session.
+#
+# Response (which references Router in its deferred-task callable type) and the
+# Router/route-registration surface stay in server.dr - moving them here would
+# create the very Request<->Response<->Router cycle this split is designed to avoid.
+
+from urllib.parse import unquote_plus, parse_qsl
+from http.multipart import parse_multipart, boundary_from_content_type, Part
+from http.sessions import Session
+from json import loads_bytes
+
+extern "C" def dragon_str_contains(a: str, b: str) -> int
+extern "C" def dragon_str_find(haystack: str, needle: str) -> int
+extern "C" def dragon_str_strip(s: str) -> str
+extern "C" def dragon_str_lower(s: str) -> str
+extern "C" def dragon_str_join(sep: str, parts: list) -> str
+extern "C" def dragon_ord(s: str) -> int
+extern "C" def dragon_str_to_int(s: str) -> int
+extern "C" def dragon_str_to_float(s: str) -> float
+
+
+#===----------------------------------------------------------------------===#
+# Path helpers
+#===----------------------------------------------------------------------===#
+
+def _split_path(path: str) -> list[str] {
+    # Split "/a/b/c" into ["a", "b", "c"], filtering empty segments
+    const parts: list[str] = path.split("/")
+    const result: list[str] = []
+    for part in parts {
+        if len(part) > 0 {
+            result.append(part)
+        }
+    }
+    return result
+}
+
+
+#===----------------------------------------------------------------------===#
+# Type validators (pure Dragon)
+#===----------------------------------------------------------------------===#
+#
+# URL decoding (`_url_decode`) and query-string parsing (`_parse_query_string`)
+# now live in urllib.parse - see unquote_plus / parse_qsl. The previous
+# in-house variants were ASCII-only and didn't reassemble multibyte UTF-8
+# percent-sequences (`%E2%9C%93` for produced mojibake). Routing /
+# Request.form() now go through urllib.parse.
+
+def _is_digit_char(c: int) -> bool {
+    return c >= 48 and c <= 57
+}
+
+def _is_hex_char(c: int) -> bool {
+    if c >= 48 and c <= 57 {
+        return true
+    }
+    if c >= 65 and c <= 70 {
+        return true
+    }
+    if c >= 97 and c <= 102 {
+        return true
+    }
+    return false
+}
+
+def _is_int_str(s: str) -> bool {
+    # Optional sign followed by one-or-more digits.
+    const n: int = len(s)
+    if n == 0 {
+        return false
+    }
+    start: int = 0
+    const first: int = dragon_ord(s[0:1])
+    if first == 43 or first == 45 {     # '+' or '-'
+        start = 1
+        if n == 1 {
+            return false
+        }
+    }
+    i: int = start
+    while i < n {
+        if not _is_digit_char(dragon_ord(s[i:i + 1])) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+def _is_float_str(s: str) -> bool {
+    # Optional sign, digits, optional fractional, optional exponent.
+    const n: int = len(s)
+    if n == 0 {
+        return false
+    }
+    i: int = 0
+    const first: int = dragon_ord(s[0:1])
+    if first == 43 or first == 45 {
+        i = 1
+    }
+    saw_digit: bool = false
+    while i < n {
+        const c: int = dragon_ord(s[i:i + 1])
+        if not _is_digit_char(c) {
+            break
+        }
+        saw_digit = true
+        i = i + 1
+    }
+    if i < n and dragon_ord(s[i:i + 1]) == 46 {  # '.'
+        i = i + 1
+        while i < n {
+            const c2: int = dragon_ord(s[i:i + 1])
+            if not _is_digit_char(c2) {
+                break
+            }
+            saw_digit = true
+            i = i + 1
+        }
+    }
+    if not saw_digit {
+        return false
+    }
+    if i < n {
+        const ec: int = dragon_ord(s[i:i + 1])
+        if ec == 101 or ec == 69 {  # 'e' or 'E'
+            i = i + 1
+            if i < n {
+                const sg: int = dragon_ord(s[i:i + 1])
+                if sg == 43 or sg == 45 {
+                    i = i + 1
+                }
+            }
+            saw_exp_digit: bool = false
+            while i < n {
+                const ec2: int = dragon_ord(s[i:i + 1])
+                if not _is_digit_char(ec2) {
+                    return false
+                }
+                saw_exp_digit = true
+                i = i + 1
+            }
+            if not saw_exp_digit {
+                return false
+            }
+        } else {
+            return false
+        }
+    }
+    return true
+}
+
+def _is_bool_str(s: str) -> bool {
+    return s == "true" or s == "false" or s == "True" or s == "False"
+}
+
+def _is_uuid_str(s: str) -> bool {
+    # 8-4-4-4-12 hex with hyphens, lowercase or uppercase.
+    if len(s) != 36 {
+        return false
+    }
+    i: int = 0
+    while i < 36 {
+        const c: int = dragon_ord(s[i:i + 1])
+        if i == 8 or i == 13 or i == 18 or i == 23 {
+            if c != 45 {                 # '-'
+                return false
+            }
+        } else {
+            if not _is_hex_char(c) {
+                return false
+            }
+        }
+        i = i + 1
+    }
+    return true
+}
+
+def _validate_type(value: str, type_name: str) -> bool {
+    # Returns true if `value` parses cleanly as the named type.
+    if type_name == "str" or len(type_name) == 0 {
+        return true
+    }
+    if type_name == "int" {
+        return _is_int_str(value)
+    }
+    if type_name == "float" {
+        return _is_float_str(value)
+    }
+    if type_name == "bool" {
+        return _is_bool_str(value)
+    }
+    if type_name == "uuid" {
+        return _is_uuid_str(value)
+    }
+    # Unknown type - accept as-is (forward compatibility).
+    return true
+}
+
+def _match_route(pattern_segs: list[str], path_segs: list[str],
+                 param_names: list[str], param_types: list[str]) -> tuple[bool, dict[str, str]] {
+    # Returns (matched: bool, params: dict). Typed param segments
+    # ":id:int", ":id:float", ":id:bool", ":id:uuid" only match if the
+    # provided value parses as the named type - otherwise this route
+    # is skipped and the next is tried.
+    params: dict[str, str] = {}
+    const empty: dict[str, str] = {}
+    pi: int = 0  # param index
+
+    if len(pattern_segs) != len(path_segs) {
+        # Check for wildcard at end
+        if len(pattern_segs) > 0 and pattern_segs[len(pattern_segs) - 1] == "*" {
+            if len(path_segs) >= len(pattern_segs) - 1 {
+                # Match leading segments before wildcard
+                j: int = 0
+                while j < len(pattern_segs) - 1 {
+                    if j >= len(path_segs) {
+                        return (false, empty)
+                    }
+                    const ps: str = pattern_segs[j]
+                    const rs_raw: str = path_segs[j]
+                    const rs: str = unquote_plus(rs_raw)
+                    if len(ps) > 0 and ps[0] == ":" {
+                        if pi < len(param_names) {
+                            const t: str = param_types[pi] if pi < len(param_types) else "str"
+                            if not _validate_type(rs, t) {
+                                return (false, empty)
+                            }
+                            params[param_names[pi]] = rs
+                            pi = pi + 1
+                        }
+                    } elif ps != rs {
+                        return (false, empty)
+                    }
+                    j = j + 1
+                }
+                # Capture the wildcard remainder into params["*"]
+                const rest_parts: list[str] = []
+                k: int = len(pattern_segs) - 1
+                while k < len(path_segs) {
+                    rest_parts.append(unquote_plus(path_segs[k]))
+                    k = k + 1
+                }
+                params["*"] = dragon_str_join("/", rest_parts)
+                return (true, params)
+            }
+        }
+        return (false, empty)
+    }
+
+    i: int = 0
+    while i < len(pattern_segs) {
+        const pseg: str = pattern_segs[i]
+        const rseg: str = unquote_plus(path_segs[i])
+        if len(pseg) > 0 and pseg[0] == ":" {
+            # Parameter segment - extract value, validate type
+            if pi < len(param_names) {
+                const t: str = param_types[pi] if pi < len(param_types) else "str"
+                if not _validate_type(rseg, t) {
+                    return (false, empty)
+                }
+                params[param_names[pi]] = rseg
+                pi = pi + 1
+            }
+        } elif pseg == "*" {
+            # Wildcard at last position - capture rest
+            const rest_parts: list[str] = []
+            w: int = i
+            while w < len(path_segs) {
+                rest_parts.append(unquote_plus(path_segs[w]))
+                w = w + 1
+            }
+            params["*"] = dragon_str_join("/", rest_parts)
+            return (true, params)
+        } elif pseg != rseg {
+            return (false, empty)
+        }
+        i = i + 1
+    }
+    return (true, params)
+}
+
+def _middleware_matches(mw_segs: list[str], path_segs: list[str]) -> bool {
+    # Middleware patterns: exact match, or /* wildcard at end
+    if len(mw_segs) == 0 {
+        return true
+    }
+    i: int = 0
+    while i < len(mw_segs) {
+        if mw_segs[i] == "*" {
+            return true
+        }
+        if i >= len(path_segs) {
+            return false
+        }
+        if mw_segs[i] != path_segs[i] {
+            return false
+        }
+        i = i + 1
+    }
+    return len(mw_segs) == len(path_segs)
+}
+
+def _parse_query_string(qs: str) -> dict[str, str] {
+    # Server-side single-value flattening of urllib.parse.parse_qsl. CPython's
+    # parse_qs returns dict[str, list[str]] (multi-value), but the heaven-style
+    # Request.query / Request.form contracts here are dict[str, str] - last
+    # write wins, matching what existing handlers already expect. Pairs with
+    # an empty value are kept (so `?flag` and `?flag=` both expose `flag`).
+    result: dict[str, str] = {}
+    items: list[tuple[str, str]] = parse_qsl(qs, True)
+    for kv in items {
+        result[kv[0]] = kv[1]
+    }
+    return result
+}
+
+def _parse_cookies(header: str) -> dict[str, str] {
+    # Parse "name=value; name2=value2" into a dict
+    result: dict[str, str] = {}
+    if len(header) == 0 {
+        return result
+    }
+    const pairs: list[str] = header.split("; ")
+    for pair in pairs {
+        const eq_pos: int = dragon_str_find(pair, "=")
+        if eq_pos >= 0 {
+            const name: str = dragon_str_strip(pair[0:eq_pos])
+            const value: str = dragon_str_strip(pair[eq_pos + 1:])
+            result[name] = value
+        }
+    }
+    return result
+}
+
+
+# Shared empty session used as the default for `Request.session` so handlers
+# never face a None (avoiding the `ClassInstance | None` field round-trip and
+# keeping the disabled path zero-allocation - it's just a pointer copy). When
+# sessions are enabled the router replaces req.session with a real one per
+# request. Do NOT mutate this in a sessions-disabled app (writes are ignored
+# and would alias across requests).
+_NO_SESSION: Session = Session("")
+
+
+#===----------------------------------------------------------------------===#
+# Request - parsed HTTP request
+#===----------------------------------------------------------------------===#
+
+class Request {
+    def(method: str, path: str, url: str, body: str,
+         headers: dict[str, str], query: dict[str, str],
+         params: dict[str, str], http_version: str,
+         body_bytes: bytes = b"") {
+        self.method = method
+        self.path = path
+        self.url = url
+        self.body = body
+        # Verbatim request body bytes (W1 RequestReader keeps these byte-exact;
+        # `body` is the lenient-decoded text view). multipart/file uploads MUST
+        # use body_bytes - UTF-8 decoding a binary part corrupts it (W3).
+        self.body_bytes = body_bytes
+        self.headers = headers
+        self.query = query
+        self.params = params
+        self.http_version = http_version
+        self.route = ""
+
+        # Derived fields
+        self.host = headers["host"] if "host" in headers else ""
+        self.scheme = headers["x-forwarded-proto"] if "x-forwarded-proto" in headers else "http"
+        self.cookies = _parse_cookies(headers["cookie"] if "cookie" in headers else "")
+
+        # Set by the router during dispatch
+        self.app = none
+        self.mounted = none
+        # Subdomain extracted from the Host header (e.g. "api" for
+        # "api.example.com"). Empty string when no subdomain is present
+        # (apex request) or when no Host header was sent. Set by the
+        # router right before handler dispatch - never by user code.
+        self.subdomain = ""
+
+        # Session wiring (W5). `session` is ALWAYS a valid Session - the shared
+        # empty placeholder until the router loads a real one (when sessions are
+        # enabled) - so handlers never need a None check. _session_sid carries
+        # the id decoded from the signed cookie (or a freshly minted one);
+        # _csrf_token is the per-session token minted for forms when CSRF is on.
+        self.session: Session = _NO_SESSION
+        self._session_sid: str = ""
+        self._session_was_new: bool = false
+        self._csrf_token: str = ""
+    }
+
+    def json() -> Any {
+        # Parse the request body as JSON into a boxed Any tree (D048): objects ->
+        # dict[str, Any], arrays -> list[Any], scalars boxed. Decodes the VERBATIM
+        # body bytes (not the lenient-decoded `body` str), so a body with high
+        # bytes round-trips byte-exact. Raises ValueError (with the byte offset)
+        # on malformed JSON. The raw body is still available as `req.body`; for a
+        # known shape, prefer `T(**json.loads_obj(req.body))`.
+        return loads_bytes(self.body_bytes)
+    }
+
+    def form() -> dict[str, str] {
+        const ct: str = self.headers["content-type"] if "content-type" in self.headers else ""
+        if dragon_str_contains(dragon_str_lower(ct), "multipart/form-data") != 0 {
+            const result: dict[str, str] = {}
+            for part in self._multipart_parts() {
+                if not part.is_file() {
+                    result[part.name] = part.data.decode("utf-8")
+                }
+            }
+            return result
+        }
+        return _parse_query_string(self.body)
+    }
+
+    def files() -> list[Part] {
+        const out: list[Part] = []
+        const ct: str = self.headers["content-type"] if "content-type" in self.headers else ""
+        if dragon_str_contains(dragon_str_lower(ct), "multipart/form-data") == 0 {
+            return out
+        }
+        for part in self._multipart_parts() {
+            if part.is_file() {
+                out.append(part)
+            }
+        }
+        return out
+    }
+
+    def _multipart_parts() -> list[Part] {
+        const ct: str = self.headers["content-type"] if "content-type" in self.headers else ""
+        const boundary: str = boundary_from_content_type(ct)
+        if boundary == "" {
+            const empty: list[Part] = []
+            return empty
+        }
+        return parse_multipart(self.body_bytes, boundary)
+    }
+
+    # --- Typed parameter accessors ---
+    #
+    # The router validates the textual form of typed segments at match
+    # time, so calling these for a route that declared the matching type
+    # is guaranteed to succeed. Calling them on an untyped param raises
+    # an error if the value isn't actually parseable.
+
+    def param_int(name: str) -> int {
+        if name not in self.params {
+            raise ValueError(f"missing route param: {name}")
+        }
+        const v: str = self.params[name]
+        if not _is_int_str(v) {
+            raise ValueError(f"param {name}={v} is not int")
+        }
+        return dragon_str_to_int(v)
+    }
+
+    def param_float(name: str) -> float {
+        if name not in self.params {
+            raise ValueError(f"missing route param: {name}")
+        }
+        const v: str = self.params[name]
+        if not _is_float_str(v) {
+            raise ValueError(f"param {name}={v} is not float")
+        }
+        return dragon_str_to_float(v)
+    }
+
+    def param_bool(name: str) -> bool {
+        if name not in self.params {
+            raise ValueError(f"missing route param: {name}")
+        }
+        const v: str = self.params[name]
+        return v == "true" or v == "True"
+    }
+
+    def query_int(name: str, default: int = 0) -> int {
+        if name not in self.query {
+            return default
+        }
+        const v: str = self.query[name]
+        if not _is_int_str(v) {
+            return default
+        }
+        return dragon_str_to_int(v)
+    }
+
+    def query_float(name: str, default: float = 0.0) -> float {
+        if name not in self.query {
+            return default
+        }
+        const v: str = self.query[name]
+        if not _is_float_str(v) {
+            return default
+        }
+        return dragon_str_to_float(v)
+    }
+
+    def query_bool(name: str, default: bool = false) -> bool {
+        if name not in self.query {
+            return default
+        }
+        const v: str = self.query[name]
+        return v == "true" or v == "True"
+    }
+
+    def query_str(name: str, default: str = "") -> str {
+        if name not in self.query {
+            return default
+        }
+        return self.query[name]
+    }
+}
+
+
+#===----------------------------------------------------------------------===#
+# Context - per-request state bag
+#===----------------------------------------------------------------------===#
+
+class Context {
+    def() {
+        self._data = {}
+    }
+
+    def keep(key: str, value: str) -> None {
+        self._data[key] = value
+    }
+
+    def peek(key: str) -> str {
+        if key in self._data {
+            return self._data[key]
+        }
+        return ""
+    }
+
+    def unkeep(key: str) -> str {
+        if key in self._data {
+            const val: str = self._data[key]
+            del self._data[key]
+            return val
+        }
+        return ""
+    }
+}

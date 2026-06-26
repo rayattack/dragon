@@ -1,0 +1,297 @@
+"""WebSocket server integration (W2) - real loopback sockets + the handshake.
+
+The frame codec itself is unit-tested in test_http_websocket.dr; this drives the
+*server wiring*: the HTTP→WebSocket upgrade through Router, and the post-upgrade
+frame I/O over a live fd.
+
+Two layers:
+  1. Socket-free handshake checks (MemoryReader) - the 101 Switching Protocols
+     response: status line, the RFC 6455 §1.3 accept-key vector, the upgrade
+     headers, NO content-length, and the non-matching-path fall-through.
+  2. Real loopback-socket round trips - a Router served on a `fire` green thread,
+     a client on the main thread: masked client frames echoed back unmasked, the
+     close handshake, and an fd-leak smoke test under connection churn (the
+     accepted fd numbers must stay bounded, proving each fd is freed exactly
+     once - the regression guard for the recv()-CLOSE / close() fd leak)."""
+
+from unittest import TestCase, main
+from http.server import Router, Request, Response, Context
+from http.server import ConnReader, FdReader, MemoryReader
+from http.websocket import WebSocket
+from http.websocket import build_frame, parse_frame, frame_length, Frame
+from http.websocket import IncompleteFrameError
+from socket import TcpListener, TcpStream
+
+# Opcodes (RFC 6455 §5.2) - hardcoded here so the client side doesn't depend on
+# websocket.dr's internal const visibility.
+const _OP_TEXT: int = 0x1
+const _OP_CLOSE: int = 0x8
+
+# The RFC 6455 §1.3 worked example: key "dGhlIHNhbXBsZSBub25jZQ==" yields accept
+# "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=". Reused as the literal upgrade request line.
+const _RFC_KEY: str = "dGhlIHNhbXBsZSBub25jZQ=="
+const _RFC_ACCEPT: str = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+
+def _upgrade_get(path: str) -> str {
+    return f"GET {path} HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {_RFC_KEY}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+}
+
+# An upgrade request asking for a specific WebSocket version (used to test the
+# RFC 6455 §4.4 version-negotiation path).
+def _upgrade_get_ver(path: str, ver: str) -> str {
+    return f"GET {path} HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {_RFC_KEY}\r\nSec-WebSocket-Version: {ver}\r\n\r\n"
+}
+
+
+#===----------------------------------------------------------------------===#
+# Handlers (top-level - no captured locals)
+#===----------------------------------------------------------------------===#
+
+# Echo every text message back until the peer closes (recv_text raises
+# IncompleteFrameError on a CLOSE frame or EOF, unwinding out of the loop into
+# the serve loop's backstop ws.close()).
+def _ws_echo(ws: WebSocket) -> None {
+    while True {
+        const msg: str = ws.recv_text()
+        ws.send(msg)
+    }
+}
+
+
+#===----------------------------------------------------------------------===#
+# Server runner - accept N connections, serve each through the real Router loop
+#===----------------------------------------------------------------------===#
+
+# Runs on a `fire` green thread. Serves connections sequentially over a real
+# FdReader (so reader.socket_fd() returns a live fd and the WebSocket does true
+# socket I/O). Records each accepted fd into `fds` so the test can assert fd
+# reuse (no leak). Sequential is sufficient: the client fully closes each
+# connection before opening the next.
+def _ws_accept_serve(lis: TcpListener, app: Router, n: int, fds: list[int]) -> None {
+    i: int = 0
+    while i < n {
+        const conn: TcpStream = lis.do_accept()
+        fds.append(conn.fd)
+        const reader: ConnReader = FdReader(conn.fd)
+        app.serve_connection(reader)
+        i = i + 1
+    }
+}
+
+
+#===----------------------------------------------------------------------===#
+# Minimal masking WebSocket client (clients MUST mask - RFC 6455 §5.3)
+#===----------------------------------------------------------------------===#
+
+class _WsClient {
+    stream: TcpStream
+    inbuf: bytes
+
+    def(stream: TcpStream) {
+        self.stream = stream
+        self.inbuf = b""
+    }
+
+    def send_text(text: str) -> None {
+        const f: bytes = build_frame(_OP_TEXT, text.encode("utf-8"), True, True,
+                                     bytes([0xAA, 0xBB, 0xCC, 0xDD]))
+        self.stream.send_bytes(f)
+    }
+
+    def send_close(code: int) -> None {
+        const payload: bytes = bytes([(code >> 8) & 0xFF, code & 0xFF])
+        const f: bytes = build_frame(_OP_CLOSE, payload, True, True,
+                                     bytes([0x11, 0x22, 0x33, 0x44]))
+        self.stream.send_bytes(f)
+    }
+
+    # Read one complete frame (server->client frames are unmasked). Raises
+    # IncompleteFrameError on EOF before a full frame arrives.
+    def recv_frame() -> Frame {
+        while True {
+            if len(self.inbuf) >= 2 {
+                try {
+                    const fr: Frame = parse_frame(self.inbuf)
+                    const consumed: int = frame_length(self.inbuf)
+                    self.inbuf = self.inbuf[consumed:]
+                    return fr
+                } except IncompleteFrameError as e {
+                    # fall through to read more
+                }
+            }
+            const chunk: bytes = self.stream.recv_bytes(4096)
+            if len(chunk) == 0 {
+                raise IncompleteFrameError("eof before a full frame")
+            }
+            self.inbuf = self.inbuf + chunk
+        }
+        raise IncompleteFrameError("unreachable")
+    }
+}
+
+# Read an HTTP response head (up to and including the blank-line terminator).
+def _recv_handshake(stream: TcpStream) -> str {
+    buf: str = ""
+    i: int = 0
+    while i < 200 {
+        if "\r\n\r\n" in buf {
+            return buf
+        }
+        const chunk: str = stream.do_recv(1024)
+        if len(chunk) == 0 {
+            return buf
+        }
+        buf = buf + chunk
+        i = i + 1
+    }
+    return buf
+}
+
+
+#===----------------------------------------------------------------------===#
+# Tests
+#===----------------------------------------------------------------------===#
+
+class WebSocketServerTests(TestCase) {
+    # --- Layer 1: socket-free handshake response (MemoryReader) ---
+
+    def test_handshake_101_response() {
+        const app: Router = Router()
+        app.ws("/echo", _ws_echo)
+        const reader: MemoryReader = MemoryReader([_upgrade_get("/echo").encode("utf-8")])
+        app.serve_connection(reader)
+        const sent: str = reader.sent
+        self.assertIn("101 Switching Protocols", sent)
+        self.assertIn("sec-websocket-accept: " + _RFC_ACCEPT, sent)
+        self.assertIn("upgrade: websocket", sent)
+        self.assertIn("connection: Upgrade", sent)
+        # A 101 carries no body framing.
+        self.assertNotIn("content-length", sent)
+        self.assertNotIn("content-type", sent)
+    }
+
+    def test_upgrade_on_unregistered_path_falls_through_to_404() {
+        # An upgrade request to a path with no ws route is just an unrouted GET.
+        const app: Router = Router()
+        app.ws("/echo", _ws_echo)
+        const reader: MemoryReader = MemoryReader([_upgrade_get("/nope").encode("utf-8")])
+        app.serve_connection(reader)
+        self.assertIn("404", reader.sent)
+        self.assertNotIn("101", reader.sent)
+    }
+
+    def test_plain_get_on_ws_path_is_not_upgraded() {
+        # A normal GET (no Upgrade headers) to a ws-only path does NOT upgrade;
+        # with no HTTP route registered it 404s rather than handshaking.
+        const app: Router = Router()
+        app.ws("/echo", _ws_echo)
+        const req: str = "GET /echo HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+        const reader: MemoryReader = MemoryReader([req.encode("utf-8")])
+        app.serve_connection(reader)
+        self.assertNotIn("101", reader.sent)
+        self.assertIn("404", reader.sent)
+    }
+
+    # RFC 6455 §4.4: an upgrade asking for a version we don't speak gets 426
+    # Upgrade Required advertising version 13 - never a bogus 101.
+    def test_unsupported_version_gets_426() {
+        const app: Router = Router()
+        app.ws("/echo", _ws_echo)
+        const reader: MemoryReader = MemoryReader([_upgrade_get_ver("/echo", "8").encode("utf-8")])
+        app.serve_connection(reader)
+        self.assertIn("426 Upgrade Required", reader.sent)   # full status line, not just "426"
+        self.assertIn("sec-websocket-version: 13", reader.sent)
+        self.assertNotIn("101", reader.sent)
+    }
+
+    # Version 13 (the only one we support) still handshakes normally.
+    def test_supported_version_13_handshakes() {
+        const app: Router = Router()
+        app.ws("/echo", _ws_echo)
+        const reader: MemoryReader = MemoryReader([_upgrade_get_ver("/echo", "13").encode("utf-8")])
+        app.serve_connection(reader)
+        self.assertIn("101 Switching Protocols", reader.sent)
+    }
+
+    # --- Layer 2: real loopback socket round trips ---
+
+    def test_echo_and_close_handshake() {
+        const app: Router = Router()
+        app.ws("/echo", _ws_echo)
+        const lis: TcpListener = TcpListener("127.0.0.1", 8971)
+        lis.do_bind()
+        lis.do_listen(64)
+        const fds: list[int] = []
+        const t: Task[None] = fire _ws_accept_serve(lis, app, 1, fds)
+
+        const stream: TcpStream = TcpStream.open("127.0.0.1", 8971)
+        stream.do_send(_upgrade_get("/echo"))
+        const resp: str = _recv_handshake(stream)
+        self.assertIn("101 Switching Protocols", resp)
+        self.assertIn("sec-websocket-accept: " + _RFC_ACCEPT, resp)
+
+        const client: _WsClient = _WsClient(stream)
+        # Masked text frame -> unmasked echo.
+        client.send_text("hello dragon")
+        const echo: Frame = client.recv_frame()
+        self.assertTrue(echo.is_text())
+        self.assertEqual(echo.payload.decode("utf-8"), "hello dragon")
+
+        # Close handshake: client CLOSE -> server echoes CLOSE -> socket EOFs.
+        client.send_close(1000)
+        const closing: Frame = client.recv_frame()
+        self.assertEqual(closing.opcode, _OP_CLOSE)
+        const tail: bytes = stream.recv_bytes(64)
+        self.assertEqual(len(tail), 0)            # server closed the fd
+
+        stream.close()
+        await t
+        lis.close()
+    }
+
+    def test_no_fd_leak_under_churn() {
+        # Open/upgrade/close many connections in sequence. With the fd freed
+        # exactly once per connection, the OS reuses the same descriptor each
+        # iteration, so the accepted fd numbers stay bounded. The pre-fix leak
+        # (recv()-CLOSE set `closed`, then close() short-circuited and never
+        # called dragon_close_fd) made them climb by ~1 per connection.
+        const app: Router = Router()
+        app.ws("/echo", _ws_echo)
+        const lis: TcpListener = TcpListener("127.0.0.1", 8972)
+        lis.do_bind()
+        lis.do_listen(128)
+        const fds: list[int] = []
+        const N: int = 60
+        const t: Task[None] = fire _ws_accept_serve(lis, app, N, fds)
+
+        last_upgraded: bool = false
+        i: int = 0
+        while i < N {
+            const c: TcpStream = TcpStream.open("127.0.0.1", 8972)
+            c.do_send(_upgrade_get("/echo"))
+            const resp: str = _recv_handshake(c)
+            if i == N - 1 {
+                last_upgraded = "101 Switching Protocols" in resp
+            }
+            c.close()                              # abrupt close, no WS close frame
+            i = i + 1
+        }
+        await t
+        lis.close()
+
+        # The Nth connection still upgraded - no fd exhaustion.
+        self.assertTrue(last_upgraded)
+        # Accepted-fd numbers stayed bounded (reuse), proving no per-connection
+        # leak. With the bug, max-min would be ~N-1 (=59).
+        self.assertEqual(len(fds), N)
+        mn: int = fds[0]
+        mx: int = fds[0]
+        for f in fds {
+            if f < mn { mn = f }
+            if f > mx { mx = f }
+        }
+        self.assertTrue(mx - mn < 10)
+    }
+}
+
+main([WebSocketServerTests()])

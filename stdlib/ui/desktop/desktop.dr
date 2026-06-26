@@ -1,0 +1,60 @@
+"""ui.desktop - desktop windows over the system webview (Decision 031).
+
+`Window` wraps the platform webview shell (an opaque `ptr` handle) behind a typed
+Dragon API. The shell is selected at link time; on Linux it is webview_linux.cpp
+(GTK3 + webkit2gtk-4.1). The per-platform `extern "C"` surface is intentionally
+flat and stable so the `.dr` layer never changes when a new platform is added.
+"""
+
+from html import HTML
+
+extern "C" def dragon_webview_init()
+extern "C" def dragon_webview_window_new(title: str, width: intc, height: intc) -> ptr
+extern "C" def dragon_webview_load_html(handle: ptr, html: str)
+extern "C" def dragon_webview_show(handle: ptr)
+
+
+class Window {
+    """A top-level desktop window hosting a webview document.
+
+    The document is the window's `body` - an `HTML` value, exactly the markup
+    type the [template system](/docs/1202-html-css-xml) produces and the web
+    framework's `res.body` carries. Assigning it paints the window:
+
+        win.body = template[HTML] { <h1>Hello</h1> }
+
+    The setter loads the markup into the OS webview; the getter returns the
+    document currently shown. There is no `str` seam - views are typed `HTML`
+    end to end, so interpolations are escaped for the right context and a
+    component can splice another component without double-escaping.
+    """
+
+    handle: ptr
+    _body: HTML
+
+    def(title: str, width: int, height: int) {
+        # gtk_init is idempotent; calling it per-window is safe and keeps the
+        # Window self-contained until a dedicated App.init() phase exists.
+        dragon_webview_init()
+        self.handle = dragon_webview_window_new(title, width, height)
+        self._body = HTML("")
+    }
+
+    @property
+    def body() -> HTML {
+        """The HTML document currently shown in the window."""
+        return self._body
+    }
+
+    @body.setter
+    def body(view: HTML) -> None {
+        """Paint `view` into the window's webview (replaces the current body)."""
+        self._body = view
+        dragon_webview_load_html(self.handle, view.to_str())
+    }
+
+    def show() -> None {
+        """Realize and display the window."""
+        dragon_webview_show(self.handle)
+    }
+}

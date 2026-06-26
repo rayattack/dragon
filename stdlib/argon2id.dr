@@ -1,0 +1,131 @@
+"""argon2id.dr - Dragon standard library: Argon2id password hashing (RFC 9106).
+
+Argon2id is the OWASP-recommended password hash: memory-hard (resists GPU/ASIC
+cracking) and side-channel resistant (the data-independent first half thwarts
+cache-timing attacks). The memory-hard core lives in the runtime
+(lib/Runtime/runtime_argon2id.cpp) - a from-scratch BLAKE2b plus the Argon2
+compression/fill/finalize, bit-exact to RFC 9106. This module is the thin,
+argon2-cffi/Python-flavoured API over that primitive.
+
+The default cost parameters (t=3, m=64 MiB, p=1) follow the argon2-cffi
+`PasswordHasher` low-level defaults; tune them up for your hardware.
+
+  hash_raw(...)   -> raw tag bytes
+  verify_raw(...) -> bool, constant-time
+  hash(...)       -> PHC encoded string  $argon2id$v=19$m=..,t=..,p=..$<salt>$<tag>
+  verify(...)     -> bool, parses + re-derives from the encoded string
+"""
+
+import base64
+# Constant-time byte comparison lives in hmac (one shared impl, no timing leak).
+from hmac import compare_digest as _ct_equal
+
+# Memory-hard core (runtime). Validates params and raises ValueError on bad
+# input; wipes all intermediate memory before returning the raw tag.
+extern "C" def dragon_argon2id_raw(password: bytes, salt: bytes, secret: bytes,
+                                   ad: bytes, t_cost: int, m_cost_kib: int,
+                                   parallelism: int, tag_len: int) -> bytes
+
+const ARGON2_VERSION: int = 0x13     # 19, the current RFC 9106 version
+
+#===----------------------------------------------------------------------===#
+# Raw API (bytes in, bytes out) - argon2-cffi low_level.hash_secret_raw shape
+#===----------------------------------------------------------------------===#
+
+def hash_raw(password: bytes, salt: bytes, time_cost: int = 3,
+             memory_cost: int = 65536, parallelism: int = 1,
+             hash_len: int = 32, secret: bytes = b"", ad: bytes = b"") -> bytes {
+    """Derive the raw Argon2id tag (`hash_len` bytes) for `password`+`salt`.
+
+    `memory_cost` is in KiB (so the 65536 default = 64 MiB), `time_cost` is the
+    number of passes, `parallelism` the lane count. `secret` (a server-side
+    pepper) and `ad` (associated data) are optional and default to empty.
+    """
+    return dragon_argon2id_raw(password, salt, secret, ad, time_cost,
+                               memory_cost, parallelism, hash_len)
+}
+
+def verify_raw(expected: bytes, password: bytes, salt: bytes,
+               time_cost: int = 3, memory_cost: int = 65536,
+               parallelism: int = 1, hash_len: int = 32,
+               secret: bytes = b"", ad: bytes = b"") -> bool {
+    """Re-derive the tag for `password` and constant-time compare it to
+    `expected`. Returns True on a match, False otherwise."""
+    computed: bytes = dragon_argon2id_raw(password, salt, secret, ad, time_cost,
+                                          memory_cost, parallelism, hash_len)
+    return _ct_equal(computed, expected)
+}
+
+#===----------------------------------------------------------------------===#
+# PHC encoded-string API - $argon2id$v=19$m=..,t=..,p=..$<b64salt>$<b64tag>
+#===----------------------------------------------------------------------===#
+#
+# The PHC string format uses standard base64 with the trailing '=' padding
+# stripped (B64 in the PHC spec). We strip on encode and re-pad on decode.
+
+def _b64_nopad(data: bytes) -> str {
+    s: str = base64.b64encode(data).decode("utf-8")
+    # drop PHC's omitted '=' padding
+    while len(s) > 0 and s[len(s) - 1] == "=" {
+        s = s[0:len(s) - 1]
+    }
+    return s
+}
+
+def _b64_decode_nopad(s: str) -> bytes {
+    # restore the padding base64 needs (length must be a multiple of 4)
+    padded: str = s
+    while len(padded) % 4 != 0 {
+        padded = padded + "="
+    }
+    return base64.b64decode(padded.encode("utf-8"))
+}
+
+def hash(password: bytes, salt: bytes, time_cost: int = 3,
+         memory_cost: int = 65536, parallelism: int = 1,
+         hash_len: int = 32, secret: bytes = b"", ad: bytes = b"") -> str {
+    """Hash `password` and return a self-describing PHC string of the form
+    `$argon2id$v=19$m=<KiB>,t=<passes>,p=<lanes>$<b64salt>$<b64tag>`. The cost
+    parameters and salt are embedded, so verify() needs only the string + the
+    password (plus any secret/ad, which are never stored)."""
+    tag: bytes = dragon_argon2id_raw(password, salt, secret, ad, time_cost,
+                                     memory_cost, parallelism, hash_len)
+    params: str = f"m={memory_cost},t={time_cost},p={parallelism}"
+    salt_b64: str = _b64_nopad(salt)
+    tag_b64: str = _b64_nopad(tag)
+    return f"$argon2id$v={ARGON2_VERSION}$" + params + "$" + salt_b64 + "$" + tag_b64
+}
+
+def verify(encoded: str, password: bytes, secret: bytes = b"",
+           ad: bytes = b"") -> bool {
+    """Parse a PHC `$argon2id$...` string, re-derive the tag from `password`
+    using its embedded parameters/salt, and constant-time compare. Returns
+    False (never raises) when the string is malformed or not argon2id."""
+    parts: list[str] = encoded.split("$")
+    # parts == ["", "argon2id", "v=19", "m=..,t=..,p=..", "<salt>", "<tag>"]
+    if len(parts) != 6 {
+        return false
+    }
+    if parts[1] != "argon2id" {
+        return false
+    }
+    if parts[2] != f"v={ARGON2_VERSION}" {
+        return false
+    }
+
+    cost_fields: list[str] = parts[3].split(",")
+    if len(cost_fields) != 3 {
+        return false
+    }
+    memory_cost: int = int(cost_fields[0][2:])    # strip "m="
+    time_cost: int = int(cost_fields[1][2:])      # strip "t="
+    parallelism: int = int(cost_fields[2][2:])    # strip "p="
+
+    salt: bytes = _b64_decode_nopad(parts[4])
+    expected: bytes = _b64_decode_nopad(parts[5])
+    hash_len: int = len(expected)
+
+    computed: bytes = dragon_argon2id_raw(password, salt, secret, ad, time_cost,
+                                          memory_cost, parallelism, hash_len)
+    return _ct_equal(computed, expected)
+}

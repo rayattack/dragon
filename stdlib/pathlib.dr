@@ -1,0 +1,149 @@
+# pathlib.dr - Dragon standard library: object-oriented filesystem paths
+#
+# Path class wraps os.path utilities with attribute-style access:
+#  Path("foo/bar.txt").suffix == ".txt"
+#  Path("foo") / "bar.txt" == Path("foo/bar.txt")
+#
+# Scope (v0.0.2): POSIX-style separators only. PurePath / WindowsPath
+# specializations are deferred.
+
+from os.path import join, basename, dirname, splitext, abspath, isabs, exists, isfile, isdir, islink, getsize
+
+# Path is path manipulation only. To read or write a file's contents, use the
+# io surface on the path string: `open(p.raw).text()`, `make(p.raw).write(s)`.
+
+class Path {
+    raw: str
+
+    def(p: str) {
+        self.raw = p
+    }
+
+    #===-------------------------------------------------------------------===#
+    # Properties
+    #===-------------------------------------------------------------------===#
+
+    @property
+    def name() -> str {
+        return basename(self.raw)
+    }
+
+    @property
+    def stem() -> str {
+        const parts: list[str] = splitext(basename(self.raw))
+        return parts[0]
+    }
+
+    @property
+    def suffix() -> str {
+        const parts: list[str] = splitext(basename(self.raw))
+        return parts[1]
+    }
+
+    @property
+    def parent() -> Path {
+        return Path(dirname(self.raw))
+    }
+
+    @property
+    def parts() -> list[str] {
+        const result: list[str] = []
+        if len(self.raw) == 0 {
+            return result
+        }
+        if isabs(self.raw) {
+            result.append("/")
+        }
+        const segs: list[str] = self.raw.split("/")
+        for s in segs {
+            if len(s) > 0 {
+                result.append(s)
+            }
+        }
+        return result
+    }
+
+    #===-------------------------------------------------------------------===#
+    # Predicates
+    #===-------------------------------------------------------------------===#
+
+    def exists() -> bool {
+        return exists(self.raw)
+    }
+
+    def is_file() -> bool {
+        return isfile(self.raw)
+    }
+
+    def is_dir() -> bool {
+        return isdir(self.raw)
+    }
+
+    def is_symlink() -> bool {
+        return islink(self.raw)
+    }
+
+    def is_absolute() -> bool {
+        return isabs(self.raw)
+    }
+
+    def absolute() -> Path {
+        return Path(abspath(self.raw))
+    }
+
+    def size() -> int {
+        return getsize(self.raw)
+    }
+
+    #===-------------------------------------------------------------------===#
+    # Path composition
+    #===-------------------------------------------------------------------===#
+
+    def joinpath(other: str) -> Path {
+        return Path(join(self.raw, other))
+    }
+
+    def __truediv__(other: str) -> Path {
+        # Path("foo") / "bar" -> Path("foo/bar")
+        return Path(join(self.raw, other))
+    }
+
+    def with_suffix(new_suffix: str) -> Path {
+        # Replace the extension. Empty new_suffix removes it.
+        const parts: list[str] = splitext(self.raw)
+        return Path(parts[0] + new_suffix)
+    }
+
+    def with_name(new_name: str) -> Path {
+        const parent_str: str = dirname(self.raw)
+        if len(parent_str) == 0 {
+            return Path(new_name)
+        }
+        return Path(join(parent_str, new_name))
+    }
+
+    #===-------------------------------------------------------------------===#
+    # String conversion + dunders
+    #===-------------------------------------------------------------------===#
+
+    def __str__() -> str {
+        return self.raw
+    }
+
+    def __repr__() -> str {
+        return "Path('" + self.raw + "')"
+    }
+
+    def __eq__(other: Path) -> bool {
+        return self.raw == other.raw
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# Module-level helper
+#===----------------------------------------------------------------------===#
+
+def cwd() -> Path {
+    # Current working directory as a Path. Wraps os.path.abspath(".").
+    return Path(abspath("."))
+}

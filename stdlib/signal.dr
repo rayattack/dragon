@@ -1,0 +1,89 @@
+"""signal - POSIX signal numbers + delivery helpers (Python parity subset).
+
+Pure FFI over libc. Exposes:
+- Signal-number constants (SIGINT, SIGTERM, SIGKILL, ...)
+- `raise_signal(sig)` - deliver a signal to the current process
+- `kill_pid(pid, sig)` - `kill(2)`
+- `strsignal_of(sig)` - system message text
+- `alarm_secs(seconds)` - `alarm(2)` scheduler for SIGALRM
+- `wait_for_signal()` - `pause(2)`
+
+Handler installation (`signal.signal(sig, handler)`) is not modelled -
+POSIX `signal(3)` takes a C-function pointer, and Dragon closures don't
+lower to a stable C ABI at this layer.
+"""
+
+
+extern "C" def kill(pid: intc, sig: intc) -> intc
+extern "C" def raise(sig: intc) -> intc as _libc_raise
+extern "C" def alarm(seconds: intc) -> intc
+extern "C" def pause() -> intc
+extern "C" def strsignal(sig: intc) -> str
+
+
+# POSIX-standard signal numbers (Linux/glibc values).
+const SIGHUP: int = 1
+const SIGINT: int = 2
+const SIGQUIT: int = 3
+const SIGILL: int = 4
+const SIGTRAP: int = 5
+const SIGABRT: int = 6
+const SIGIOT: int = 6
+const SIGBUS: int = 7
+const SIGFPE: int = 8
+const SIGKILL: int = 9
+const SIGUSR1: int = 10
+const SIGSEGV: int = 11
+const SIGUSR2: int = 12
+const SIGPIPE: int = 13
+const SIGALRM: int = 14
+const SIGTERM: int = 15
+const SIGSTKFLT: int = 16
+const SIGCHLD: int = 17
+const SIGCONT: int = 18
+const SIGSTOP: int = 19
+const SIGTSTP: int = 20
+const SIGTTIN: int = 21
+const SIGTTOU: int = 22
+const SIGURG: int = 23
+const SIGXCPU: int = 24
+const SIGXFSZ: int = 25
+const SIGVTALRM: int = 26
+const SIGPROF: int = 27
+const SIGWINCH: int = 28
+const SIGIO: int = 29
+const SIGPWR: int = 30
+const SIGSYS: int = 31
+
+const SIG_DFL: int = 0
+const SIG_IGN: int = 1
+
+
+def raise_signal(sig: int) -> int {
+    """Deliver `sig` to the current process. Returns 0 on success."""
+    return _libc_raise(sig)
+}
+
+
+def kill_pid(pid: int, sig: int) -> int {
+    """`kill(2)` - deliver `sig` to `pid`. Returns 0 on success."""
+    return kill(pid, sig)
+}
+
+
+def alarm_secs(seconds: int) -> int {
+    """`alarm(2)` - schedule SIGALRM. Returns previous alarm's remaining seconds."""
+    return alarm(seconds)
+}
+
+
+def wait_for_signal() -> int {
+    """`pause(2)` - sleep until any signal arrives. Always returns -1."""
+    return pause()
+}
+
+
+def strsignal_of(sig: int) -> str {
+    """Human-readable text for `sig` (e.g. "Terminated" for SIGTERM)."""
+    return strsignal(sig)
+}

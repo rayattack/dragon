@@ -1,0 +1,207 @@
+"""ui - Dragon UI toolkit (Decision 031).
+
+Public surface: `App` (lifecycle / main loop), `Window` (via `ui.desktop`), and the
+reactive `Signal` primitives (added in the reactivity phase). The renderer is the
+operating system's webview; the platform shell lives in C++ as the only
+"unexpressible platform glue" (stdlib/ui/desktop/webview_<platform>.cpp), exposed
+here through `extern "C"`. Everything above the shell is `.dr`.
+
+Phase 0 (this file + ui.desktop): open a window, load HTML, run the loop. The
+JS<->Dragon bridge, the targeted-patch re-render protocol, and `Signal`/`effect`
+land in the following phases.
+"""
+
+extern "C" def dragon_webview_run()
+extern "C" def dragon_webview_run_timeout(ms: intc)
+extern "C" def dragon_webview_set_handler(fn: ptr)
+extern "C" def dragon_webview_eval_js(js: str)
+extern "C" def dragon_json_escape_str(s: str) -> str
+
+
+class App {
+    """Application lifecycle. Hands control to the platform UI run loop."""
+
+    @staticmethod
+    def run() -> None {
+        """Enter the UI run loop; returns when the last window closes."""
+        dragon_webview_set_handler(_ui_dispatch)
+        dragon_webview_run()
+    }
+
+    @staticmethod
+    def run_timeout(ms: int) -> None {
+        """Run the loop, then auto-quit after `ms` (smoke tests / timed demos)."""
+        dragon_webview_set_handler(_ui_dispatch)
+        dragon_webview_run_timeout(ms)
+    }
+}
+
+
+#===----------------------------------------------------------------------===#
+# Event-handler bridge (Decision 031).
+#
+# The compiler extracts an event-attribute interpolation - `<button
+# onclick="!{handler}">` - into `register_callback(handler)` (run at render time,
+# returning an integer id) and emits `window.dr.invoke(<id>)` into the HTML. The
+# webview shell delivers each invoke message to `_ui_dispatch`, which calls the
+# registered handler by id. `register_callback` is invoked from compiler-generated
+# template code, so its name/signature are load-bearing.
+#===----------------------------------------------------------------------===#
+
+_ui_callbacks: list[Callable[[], None]] = []
+
+def register_callback(fn: Callable[[], None]) -> int {
+    """Register an extracted event handler; returns the id the template emits
+    into `window.dr.invoke()`. Called by compiler-generated template code."""
+    cid: int = len(_ui_callbacks)
+    _ui_callbacks.append(fn)
+    return cid
+}
+
+def _ui_dispatch(msg: str) -> None {
+    """Webview JS->Dragon message handler: `msg` is a callback id; invoke it."""
+    cid: int = int(msg)
+    if cid >= 0 and cid < len(_ui_callbacks) {
+        _ui_callbacks[cid]()
+    }
+}
+
+
+#===----------------------------------------------------------------------===#
+# Reactivity (Decision 031): fine-grained signals + effects.
+#
+# A Signal is a reactive cell. Reading it inside a running effect subscribes that
+# effect; writing it re-runs every subscribed effect. No virtual DOM, no diff -
+# the effect that re-runs is exactly the one that touches the changed node.
+#
+# Effects are no-arg closures kept in a module-global registry, referenced by an
+# integer id, and invoked BY INDEX (`_effects[eid]()`). The for-loop form
+# (`for f in _effects { f() }`) once miscompiled but is now fixed (bugs.md #17,
+# 2026-06-08); index dispatch is kept here only because subscribers are tracked as
+# ids, not as the closures themselves.
+#===----------------------------------------------------------------------===#
+
+_effects: list[Callable[[], None]] = []
+_active_effect: int = -1
+
+def _run_effect(eid: int) -> None {
+    global _active_effect
+    prev: int = _active_effect
+    _active_effect = eid
+    _effects[eid]()
+    _active_effect = prev
+}
+
+
+class Signal[T] {
+    """A reactive value. Construct it directly - `count: Signal[int] = Signal(0)`
+    - and the binding annotation pins `T` (generic-ctor inference, the `Box(99)`
+    rule). Read with `s()` (Python parity via __call__) - which subscribes the
+    currently-running effect - and write with `s.set(v)`, which re-runs every
+    subscribed effect."""
+
+    _value: T
+    _subs: list[int]
+
+    def(initial: T) {
+        self._value = initial
+        self._subs = []
+    }
+
+    def _read() -> T {
+        if _active_effect >= 0 {
+            if _active_effect not in self._subs {
+                self._subs.append(_active_effect)
+            }
+        }
+        return self._value
+    }
+
+    def __call__() -> T {
+        return self._read()
+    }
+
+    def get() -> T {
+        return self._read()
+    }
+
+    def set(v: T) -> None {
+        self._value = v
+        i: int = 0
+        while i < len(self._subs) {
+            _run_effect(self._subs[i])
+            i = i + 1
+        }
+    }
+}
+
+
+def effect(fn: Callable[[], None]) -> None {
+    """Run `fn` now (recording every Signal it reads) and re-run it automatically
+    whenever any of those signals changes."""
+    eid: int = len(_effects)
+    _effects.append(fn)
+    _run_effect(eid)
+}
+
+
+#===----------------------------------------------------------------------===#
+# Reactive DOM bindings (Decision 031, rollout #4): targeted node patches.
+#
+# When the compiler sees a reactive value interpolated into template text -
+# `<h1>!{count()}</h1>` where `count` is a module-global Signal - it lowers the
+# slot to: (1) a synthesized `() -> str` render closure that re-evaluates the
+# interpolation, (2) a `bind_text(render)` call returning a fresh node id, and
+# (3) the markup `<span data-dr="<id>">initial</span>`. `bind_text` registers
+# the render as an effect that patches DOM node `<id>` on every dependency
+# change. No virtual DOM, no diff: the patched node is exactly the one whose
+# signal changed. `bind_text`/`_next_node_id` are invoked from compiler-
+# generated template code, so their names/signatures are load-bearing.
+#===----------------------------------------------------------------------===#
+
+_node_id_counter: int = 0
+
+def _next_node_id() -> int {
+    """Allocate a process-unique DOM node id. A runtime counter (not a compile-
+    time constant) so the same reactive template rendered twice gets distinct
+    `data-dr` ids - no collision when one is patched."""
+    global _node_id_counter
+    nid: int = _node_id_counter
+    _node_id_counter = _node_id_counter + 1
+    return nid
+}
+
+def __patch_text_js(node_id: int, value: str) -> str {
+    """Build the JS for a single text patch. `node_id` is an int (safe to
+    inline); `value` is JSON-encoded (quoted + escaped) so an arbitrary string -
+    quotes, newlines, `</script>`, anything - can never break out of the literal
+    or inject script. Never raw-concat the value."""
+    return "window.dr._patch({op:'text',id:'" + str(node_id) +
+           "',value:" + dragon_json_escape_str(value) + "})"
+}
+
+def __patch_text(node_id: int, value: str) -> None {
+    """Push a targeted text patch to DOM node `node_id` in the current window."""
+    # Bind the built script to a local so block-scope cleanup frees it. An
+    # `extern "C"` callee is assumed to borrow its args (Dragon can't know
+    # whether a foreign function takes ownership, so it never releases an
+    # owned temp passed straight into one) - `dragon_webview_eval_js` only
+    # reads the script, so the owning local is the right place to drop it.
+    js: str = __patch_text_js(node_id, value)
+    dragon_webview_eval_js(js)
+}
+
+def bind_text(render: Callable[[], str]) -> int {
+    """Bind a reactive text slot: register `render` (a `() -> str` re-evaluator
+    of the interpolation) as an effect that patches its DOM node on every signal
+    change, and return the node id the template emits into `data-dr`. The first
+    run records the signal subscriptions; its patch is a no-op against the DOM,
+    which isn't loaded until the run loop starts (the initial value is baked into
+    the markup), so subsequent `Signal.set()` calls drive every live update."""
+    node_id: int = _next_node_id()
+    patcher: Callable[[], None] = lambda () -> None { __patch_text(node_id, render()) }
+    eid: int = len(_effects)
+    _effects.append(patcher)
+    _run_effect(eid)
+    return node_id
+}

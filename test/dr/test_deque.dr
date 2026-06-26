@@ -1,0 +1,34 @@
+"""deque - collections.deque end-to-end (D044 wiring of the runtime container).
+
+The runtime (dragon_deque_*) and codegen ctor/method dispatch already existed
+but were unreachable: `deque()` was an undefined name, `deque[int]` an unknown
+generic type, and `from collections import deque` failed. This locks in the
+wiring - bare construction, the import spelling, the iterable constructor, and
+append/appendleft/pop/popleft/len.
+"""
+
+from unittest import TestCase, main
+from collections import deque
+
+
+class DequeTests(TestCase) {
+    def test_append_both_ends_and_pop() {
+        d: deque[int] = deque()
+        d.append(1)
+        d.append(2)
+        d.appendleft(0)
+        self.assertEqual(len(d), 3)
+        self.assertEqual(d.popleft(), 0)
+        self.assertEqual(d.pop(), 2)
+        self.assertEqual(len(d), 1)
+    }
+
+    def test_from_iterable() {
+        d: deque[int] = deque([10, 20, 30])
+        self.assertEqual(len(d), 3)
+        self.assertEqual(d.popleft(), 10)
+        self.assertEqual(d.pop(), 30)
+    }
+}
+
+main([DequeTests()])

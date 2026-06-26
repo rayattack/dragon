@@ -1,0 +1,31 @@
+width: int = 1600
+height: int = 1600
+maxiter: int = 100
+count: int = 0
+
+py: int = 0
+while py < height {
+    ci: float = 2.0 * py / height - 1.0
+    px: int = 0
+    while px < width {
+        cr: float = 2.0 * px / width - 1.5
+        zr: float = 0.0
+        zi: float = 0.0
+        zr2: float = 0.0
+        zi2: float = 0.0
+        it: int = 0
+        while it < maxiter and zr2 + zi2 <= 4.0 {
+            zi = 2.0 * zr * zi + ci
+            zr = zr2 - zi2 + cr
+            zr2 = zr * zr
+            zi2 = zi * zi
+            it = it + 1
+        }
+        if zr2 + zi2 <= 4.0 {
+            count = count + 1
+        }
+        px = px + 1
+    }
+    py = py + 1
+}
+print(count)

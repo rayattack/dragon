@@ -1,0 +1,119 @@
+# test/dr/test_method_generators.dr - generator methods (`yield` in a method).
+#
+# A method whose body contains `yield` is lowered as a generator: the method
+# function is the wrapper that returns the generator object, with `self` threaded
+# into the body (emitGeneratorFn, shared with free-function generators). For-loops
+# recognize `self.gen()` / `obj.gen()` / `Class.gen()` (AttributeExpr calls) as
+# generator iterables. Before this, such a loop silently ran zero times.
+
+from unittest import TestCase, main
+
+
+class Counter {
+    limit: int
+    start: int
+    def(start: int, limit: int) {
+        self.start = start
+        self.limit = limit
+    }
+    # instance method generator reading two fields
+    def values() {
+        k: int = self.start
+        while k < self.limit {
+            yield k
+            k = k + 1
+        }
+    }
+    # generator yielding owned heap strings, using a field
+    def labels() {
+        k: int = self.start
+        while k < self.limit {
+            yield "v" + str(k)
+            k = k + 1
+        }
+    }
+    # consumes its own generator method via `for x in self.values()`
+    def total() -> int {
+        t: int = 0
+        for x in self.values() {
+            t = t + x
+        }
+        return t
+    }
+    # a generator method whose body raises mid-iteration (exercises the
+    # coroutine-abandon path shared with free-function generators)
+    def upto_or_raise(bad: int) {
+        k: int = self.start
+        while k < self.limit {
+            if k == bad {
+                raise ValueError("hit bad")
+            }
+            yield k
+            k = k + 1
+        }
+    }
+}
+
+
+class Squares {
+    @staticmethod
+    def of(n: int) {
+        k: int = 0
+        while k < n {
+            yield k * k
+            k = k + 1
+        }
+    }
+}
+
+
+class MethodGeneratorTests(TestCase) {
+    def test_self_generator_in_method() {
+        c: Counter = Counter(0, 5)
+        self.assertEqual(c.total(), 10)   # 0+1+2+3+4
+    }
+
+    def test_external_obj_generator() {
+        c: Counter = Counter(2, 6)
+        s: int = 0
+        for x in c.values() {
+            s = s + x
+        }
+        self.assertEqual(s, 14)            # 2+3+4+5
+    }
+
+    def test_heap_yield_with_field() {
+        c: Counter = Counter(0, 3)
+        out: list[str] = []
+        for v in c.labels() {
+            out.append(v)
+        }
+        self.assertEqual(out, ["v0", "v1", "v2"])
+    }
+
+    def test_static_method_generator() {
+        s: int = 0
+        for v in Squares.of(4) {
+            s = s + v
+        }
+        self.assertEqual(s, 14)            # 0+1+4+9
+    }
+
+    def test_method_generator_body_raise_caught() {
+        c: Counter = Counter(0, 10)
+        seen: int = 0
+        caught: int = 0
+        try {
+            for x in c.upto_or_raise(3) {
+                seen = seen + 1
+            }
+        } except ValueError {
+            caught = 1
+        }
+        self.assertEqual(seen, 3)          # yielded 0,1,2 then raised at 3
+        self.assertEqual(caught, 1)
+    }
+}
+
+
+main([MethodGeneratorTests()])

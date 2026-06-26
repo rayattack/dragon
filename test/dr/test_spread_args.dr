@@ -1,0 +1,332 @@
+"""C9-B - general call-site spread (`*tuple` / `*list` / `**dict`), decisions/047.
+
+Covers spread into free functions, class constructors, and instance/static
+methods (incl. virtual dispatch), plus vararg-param forwarding:
+  - `*tuple` static spread: homogeneous, heterogeneous, leading-positional,
+    float (native f64), boxed `Any` params, heap (str) elements, + named kwarg.
+  - `*list[T]` dynamic spread: typed loads + runtime length-mismatch raise.
+  - `**dict` spread: bind-by-name, optional-defaulted, missing-required raise,
+    unexpected-key raise.
+  - mixed `f(*t, **d)`; `*args`-as-`list` forwarding into a fixed-arity callee.
+
+Cost model: `*tuple` is compile-time/free (per-element typed loads, static
+arity, no runtime check); `*list` adds a runtime length check; `**dict` does
+one hash lookup per parameter. Writing `*`/`**` is the explicit opt-in.
+"""
+
+from unittest import TestCase, main
+
+
+def add3(a: int, b: int, c: int) -> int {
+    return a + b + c
+}
+
+def describe(n: int, label: str) -> str {
+    return label + "=" + str(n)
+}
+
+def addf(x: float, y: float) -> float {
+    return x + y
+}
+
+def cat2(x: str, y: str) -> str {
+    return x + y
+}
+
+def greet(name: str, greeting: str) -> str {
+    return greeting + ", " + name
+}
+
+def show_any(a: Any, b: Any) -> str {
+    return str(a) + "/" + str(b)
+}
+
+def with_default(a: int, b: int, c: int = 100) -> int {
+    return a + b + c
+}
+
+
+class Point {
+    x: int
+    y: int
+    def(x: int, y: int) {
+        self.x = x
+        self.y = y
+    }
+    def manhattan() -> int { return self.x + self.y }
+}
+
+
+class Calc {
+    base: int
+    def(base: int) { self.base = base }
+    def add3(a: int, b: int, c: int) -> int { return self.base + a + b + c }
+    def tag(n: int, label: str) -> str { return label + ":" + str(n + self.base) }
+}
+
+
+class Wrap {
+    c: Calc
+    def(c: Calc) { self.c = c }
+    # self.field.method(*tuple) - attribute-chain receiver
+    def run(t: tuple[int, int, int]) -> int { return self.c.add3(*t) }
+}
+
+
+class Animal {
+    def combine(a: int, b: int) -> str { return "animal:" + str(a + b) }
+}
+
+class Dog(Animal) {
+    def combine(a: int, b: int) -> str { return "dog:" + str(a * b) }
+}
+
+
+class TupleSpreadDirectTests(TestCase) {
+    def test_homogeneous_int() {
+        coords: tuple[int, int, int] = (10, 20, 30)
+        self.assertEqual(add3(*coords), 60)
+    }
+
+    def test_heterogeneous() {
+        pair: tuple[int, str] = (7, "seven")
+        self.assertEqual(describe(*pair), "seven=7")
+    }
+
+    def test_leading_positional_then_spread() {
+        rest: tuple[int, int] = (5, 6)
+        self.assertEqual(add3(1, *rest), 12)
+    }
+
+    def test_float_tuple_native_f64() {
+        fs: tuple[float, float] = (1.5, 2.25)
+        self.assertEqual(addf(*fs), 3.75)
+    }
+
+    def test_str_heap_elements() {
+        ss: tuple[str, str] = ("foo", "bar")
+        self.assertEqual(cat2(*ss), "foobar")
+    }
+
+    def test_into_any_box_params() {
+        mixed: tuple[int, str] = (42, "hello")
+        self.assertEqual(show_any(*mixed), "42/hello")
+    }
+
+    def test_spread_with_named_kwarg() {
+        who: tuple[str] = ("Ada",)
+        self.assertEqual(greet(*who, greeting="Hi"), "Hi, Ada")
+    }
+
+    def test_spread_fills_before_default() {
+        ab: tuple[int, int] = (1, 2)
+        self.assertEqual(with_default(*ab), 103)        # c defaults to 100
+    }
+
+    def test_spread_overrides_default_via_full_tuple() {
+        abc: tuple[int, int, int] = (1, 2, 3)
+        self.assertEqual(with_default(*abc), 6)
+    }
+}
+
+
+class TupleSpreadCtorTests(TestCase) {
+    def test_single_ctor() {
+        coords: tuple[int, int] = (3, 4)
+        p: Point = Point(*coords)
+        self.assertEqual(p.manhattan(), 7)
+    }
+
+    def test_ctor_leading_positional_then_spread() {
+        rest: tuple[str] = ("hp",)
+        c: Calc = Calc(50)
+        # heterogeneous tuple as a ctor arg via spread is covered by methods;
+        # here just confirm a leading-positional + spread ctor builds correctly.
+        coords: tuple[int] = (9,)
+        p: Point = Point(1, *coords)
+        self.assertEqual(p.manhattan(), 10)
+    }
+}
+
+
+class TupleSpreadMethodTests(TestCase) {
+    def test_instance_method() {
+        c: Calc = Calc(100)
+        xs: tuple[int, int, int] = (1, 2, 3)
+        self.assertEqual(c.add3(*xs), 106)
+    }
+
+    def test_instance_method_heterogeneous() {
+        c: Calc = Calc(100)
+        het: tuple[int, str] = (5, "hp")
+        self.assertEqual(c.tag(*het), "hp:105")
+    }
+
+    def test_attribute_chain_receiver() {
+        w: Wrap = Wrap(Calc(10))
+        yy: tuple[int, int, int] = (7, 8, 9)
+        self.assertEqual(w.run(yy), 34)
+    }
+
+    def test_virtual_dispatch_with_spread() {
+        pets: list[Animal] = [Animal(), Dog()]
+        t: tuple[int, int] = (3, 4)
+        out: list[str] = []
+        for p in pets {
+            out.append(p.combine(*t))
+        }
+        self.assertEqual(out, ["animal:7", "dog:12"])
+    }
+}
+
+
+def _add3_too_few() -> None {
+    xs: list[int] = [1, 2]                  # need 3 -> runtime TypeError
+    r: int = add3(*xs)
+}
+
+def _add3_too_many() -> None {
+    xs: list[int] = [1, 2, 3, 4]            # need 3 -> runtime TypeError
+    r: int = add3(*xs)
+}
+
+
+def cfg(host: str, port: int, debug: bool = False) -> str {
+    return host + ":" + str(port) + "/" + str(debug)
+}
+
+def two_ints(a: int, b: int) -> int { return a + b }
+
+def four_ints(a: int, b: int, c: int, d: int) -> int {
+    return a * 1000 + b * 100 + c * 10 + d
+}
+
+def forward_sum(*args: int) -> int {
+    # `args` is a list[int] here; re-spread it into a fixed-arity callee.
+    return add3(*args)
+}
+
+def count_args(*args: int) -> int {
+    return len(args)
+}
+
+
+def _cfg_missing_required() -> None {
+    d: dict[str, Any] = {"host": "h"}       # 'port' absent -> runtime TypeError
+    s: str = cfg(**d)
+}
+
+def _cfg_unexpected_key() -> None {
+    d: dict[str, Any] = {"host": "h", "port": 80, "extra": 9}
+    s: str = cfg(**d)
+}
+
+
+class ListSpreadTests(TestCase) {
+    def test_homogeneous_int() {
+        xs: list[int] = [10, 20, 30]
+        self.assertEqual(add3(*xs), 60)
+    }
+
+    def test_leading_positional_then_list() {
+        ys: list[int] = [5, 6]
+        self.assertEqual(add3(1, *ys), 12)
+    }
+
+    def test_float_list() {
+        fs: list[float] = [1.5, 2.25]
+        self.assertEqual(addf(*fs), 3.75)
+    }
+
+    def test_str_list_heap() {
+        ss: list[str] = ["foo", "bar"]
+        self.assertEqual(cat2(*ss), "foobar")
+    }
+
+    def test_list_into_ctor() {
+        pc: list[int] = [3, 4]
+        p: Point = Point(*pc)
+        self.assertEqual(p.manhattan(), 7)
+    }
+
+    def test_list_into_method() {
+        c: Calc = Calc(100)
+        ml: list[int] = [1, 2, 3]
+        self.assertEqual(c.add3(*ml), 106)
+    }
+
+    def test_wrong_length_too_few_raises() {
+        # Bare top-level helpers (not capturing lambdas) - assertRaises' callee
+        # escapes to a foreign setjmp frame; a closure capture would segfault.
+        self.assertRaises(TypeError, _add3_too_few)
+    }
+
+    def test_wrong_length_too_many_raises() {
+        self.assertRaises(TypeError, _add3_too_many)
+    }
+}
+
+
+class DictSpreadTests(TestCase) {
+    def test_all_keys_present() {
+        d: dict[str, Any] = {"host": "localhost", "port": 8080, "debug": True}
+        self.assertEqual(cfg(**d), "localhost:8080/True")
+    }
+
+    def test_optional_defaulted() {
+        d: dict[str, Any] = {"host": "h", "port": 99}    # debug absent
+        self.assertEqual(cfg(**d), "h:99/False")
+    }
+
+    def test_concrete_int_dict() {
+        d: dict[str, int] = {"a": 3, "b": 4}
+        self.assertEqual(two_ints(**d), 7)
+    }
+
+    def test_dict_into_ctor() {
+        d: dict[str, int] = {"x": 10, "y": 20}
+        p: Point = Point(**d)
+        self.assertEqual(p.manhattan(), 30)
+    }
+
+    def test_dict_into_method() {
+        c: Calc = Calc(100)
+        d: dict[str, int] = {"a": 1, "b": 2, "c": 3}
+        self.assertEqual(c.add3(**d), 106)
+    }
+
+    def test_missing_required_raises() {
+        self.assertRaises(TypeError, _cfg_missing_required)
+    }
+
+    def test_unexpected_key_raises() {
+        self.assertRaises(TypeError, _cfg_unexpected_key)
+    }
+}
+
+
+class MixedSpreadTests(TestCase) {
+    def test_tuple_then_dict() {
+        t: tuple[int, int] = (1, 2)
+        d: dict[str, int] = {"c": 3, "d": 4}
+        self.assertEqual(four_ints(*t, **d), 1234)
+    }
+}
+
+
+class ForwardingTests(TestCase) {
+    # `*args: T` binds as `list[T]` in the body (matches codegen's packing), so
+    # the packed varargs can be re-spread into a fixed-arity callee.
+    def test_vararg_list_forward() {
+        self.assertEqual(forward_sum(1, 2, 3), 6)
+    }
+
+    def test_vararg_len() {
+        self.assertEqual(count_args(10, 20, 30, 40), 4)
+    }
+}
+
+
+main([TupleSpreadDirectTests(), TupleSpreadCtorTests(),
+      TupleSpreadMethodTests(), ListSpreadTests(),
+      DictSpreadTests(), MixedSpreadTests(), ForwardingTests()])

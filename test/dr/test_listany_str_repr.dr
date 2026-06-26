@@ -1,0 +1,49 @@
+# test/dr/test_listany_str_repr.dr - str()/f-string repr of a list[Any].
+#
+# Regression guard for a silent miscompile distinct from print(list[Any]):
+# str(xs) and f"{xs}" lowered to dragon_list_to_str, which reads a list[Any]
+# (a DragonListBox, 16-byte {tag,payload} elements) at the 8-byte DragonList
+# stride - so str([42, "hi", [9, 8]]) rendered garbage like `[0, 42, 1]`
+# (interleaved tags/payloads) instead of `[42, 'hi', [9, 8]]`. print(xs) was
+# already fixed (general container dispatch); str()/f-string went through a
+# separate codegen path (containerToStrFunc) that still picked the 8B builder.
+# The fix routes list[Any] to dragon_list_box_to_str, which renders each
+# element via dragon_repr_value (recursing into nested list[Any]).
+#
+# These assertions FAIL (garbage string) on the pre-fix compiler.
+
+from unittest import TestCase, main
+
+
+class ListAnyStrReprTests(TestCase) {
+    def test_str_scalar_mix() {
+        xs: list[Any] = [42, "hi", True]
+        self.assertEqual(str(xs), "[42, 'hi', True]")
+    }
+
+    def test_str_nested_list() {
+        # The exact repro: a nested list element must render recursively, not
+        # as a raw pointer or interleaved tag/payload garbage.
+        xs: list[Any] = [42, "hi", [9, 8]]
+        self.assertEqual(str(xs), "[42, 'hi', [9, 8]]")
+    }
+
+    def test_fstring_interpolation() {
+        # f-string interpolation shares the str() lowering path.
+        xs: list[Any] = [1, "two", 3]
+        self.assertEqual(f"val={xs}", "val=[1, 'two', 3]")
+    }
+
+    def test_str_empty() {
+        xs: list[Any] = []
+        self.assertEqual(str(xs), "[]")
+    }
+
+    def test_str_none_and_float() {
+        xs: list[Any] = [None, 3.5, "x"]
+        self.assertEqual(str(xs), "[None, 3.5, 'x']")
+    }
+}
+
+
+main([ListAnyStrReprTests()])

@@ -1,0 +1,84 @@
+# test/dr/test_ssl.dr - `ssl` module surface tests (no live peer).
+#
+# Phase 6 of ADR 038. Exercises the Python-parity surface that needs no socket:
+# the PROTOCOL_*/CERT_* constants, SSLContext construction, create_default_context
+# loading the bundled trust store, the SSLError exception hierarchy (SSLError <
+# OSError; every *Error leaf < SSLError, matched parent-first like CPython), and
+# the bad-input failure paths (a missing cert/CA file must raise SSLError, not
+# segfault or silently succeed). Handshake + round-trip behavior is covered by
+# test_ssl_roundtrip.dr.
+
+from unittest import TestCase, main
+from ssl import SSLContext, SSLError, SSLCertVerificationError, SSLZeroReturnError, SSLWantReadError, SSLWantWriteError, create_default_context, PROTOCOL_TLS_CLIENT, PROTOCOL_TLS_SERVER, CERT_NONE, CERT_OPTIONAL, CERT_REQUIRED
+
+
+class SslConstantsTests(TestCase) {
+    def test_protocol_constants() {
+        self.assertEqual(PROTOCOL_TLS_CLIENT, 0)
+        self.assertEqual(PROTOCOL_TLS_SERVER, 1)
+    }
+    def test_cert_mode_constants() {
+        self.assertEqual(CERT_NONE, 0)
+        self.assertEqual(CERT_OPTIONAL, 1)
+        self.assertEqual(CERT_REQUIRED, 2)
+    }
+}
+
+class SslContextTests(TestCase) {
+    def test_construct_client_and_server() {
+        const c: SSLContext = SSLContext(PROTOCOL_TLS_CLIENT)
+        self.assertIsNotNone(c)
+        const s: SSLContext = SSLContext(PROTOCOL_TLS_SERVER)
+        self.assertIsNotNone(s)
+    }
+    def test_create_default_context() {
+        # Loads the bundled Mozilla CA bundle (or a system bundle); must not raise.
+        const ctx: SSLContext = create_default_context()
+        self.assertIsNotNone(ctx)
+    }
+    def test_set_verify_mode_paths() {
+        const c: SSLContext = SSLContext(PROTOCOL_TLS_CLIENT)
+        c.set_verify_mode(CERT_NONE)
+        c.set_verify_mode(CERT_OPTIONAL)
+        c.set_verify_mode(CERT_REQUIRED)
+    }
+}
+
+class SslBadInputTests(TestCase) {
+    def test_load_cert_chain_missing_file_raises() {
+        self.assertRaises(SSLError, lambda () -> None {
+            const c: SSLContext = SSLContext(PROTOCOL_TLS_SERVER)
+            c.load_cert_chain("/nonexistent/dragon-test-cert.pem")
+        })
+    }
+    def test_load_verify_locations_missing_file_raises() {
+        self.assertRaises(SSLError, lambda () -> None {
+            const c: SSLContext = SSLContext(PROTOCOL_TLS_CLIENT)
+            c.load_verify_locations("/nonexistent/dragon-test-ca.pem", "")
+        })
+    }
+}
+
+class SslExceptionHierarchyTests(TestCase) {
+    # ssl.dr declares SSLError(OSError) and derives every leaf from SSLError.
+    # assertRaises matches subclasses parent-first, so each leaf is catchable
+    # as SSLError and SSLError is catchable as OSError.
+    def test_cert_verify_is_ssl_error() {
+        self.assertRaises(SSLError, lambda () -> None { raise SSLCertVerificationError("verify") })
+    }
+    def test_zero_return_is_ssl_error() {
+        self.assertRaises(SSLError, lambda () -> None { raise SSLZeroReturnError("eof") })
+    }
+    def test_want_read_is_ssl_error() {
+        self.assertRaises(SSLError, lambda () -> None { raise SSLWantReadError("again") })
+    }
+    def test_want_write_is_ssl_error() {
+        self.assertRaises(SSLError, lambda () -> None { raise SSLWantWriteError("again") })
+    }
+    def test_ssl_error_is_os_error() {
+        self.assertRaises(OSError, lambda () -> None { raise SSLError("io") })
+    }
+}
+
+
+main([SslConstantsTests(), SslContextTests(), SslBadInputTests(), SslExceptionHierarchyTests()])

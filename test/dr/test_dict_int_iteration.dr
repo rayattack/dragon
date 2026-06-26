@@ -1,0 +1,108 @@
+"""Iteration and lookup over int-keyed dicts (bugs.md #1 and #2).
+
+Before the fix, every int-keyed `dict[int, V]` iteration treated the i64 key as
+a string pointer: `for k in d` / `d.items()` IntToPtr'd the key (1 → address
+0x1) and SIGSEGV'd on use, and a list/set/dict comprehension over a bare dict
+walked the DragonDict bytes as a list (also a crash). `.get`/`.has_key` routed
+to the str-keyed runtime (`const char*` key) and failed LLVM verification.
+
+The fix binds int keys as native i64 (VarKind::Int) in the for-loop and
+items()-unpack paths, converts a bare-dict comprehension iterable to its keys
+list via dragon_dict_keys (owned temp, decref'd after the loop), and routes the
+get/has_key family to the dragon_dict_int_* variants. Str-keyed dicts are
+unaffected - the path forks on the statically-tracked key kind.
+"""
+
+from unittest import TestCase, main
+
+
+class DictIntIterationTests(TestCase) {
+    def test_for_key_loop() {
+        d: dict[int, str] = {1: "a", 2: "b", 3: "c"}
+        total: int = 0
+        for k in d {
+            total = total + k
+        }
+        self.assertEqual(total, 6)
+    }
+
+    def test_for_key_loop_subscript() {
+        d: dict[int, int] = {10: 100, 20: 200}
+        total: int = 0
+        for k in d {
+            total = total + k + d[k]
+        }
+        self.assertEqual(total, 330)
+    }
+
+    def test_items_unpack() {
+        d: dict[int, str] = {1: "a", 2: "b"}
+        keysum: int = 0
+        joined: str = ""
+        for k, v in d.items() {
+            keysum = keysum + k
+            joined = joined + v
+        }
+        self.assertEqual(keysum, 3)
+        self.assertEqual(joined, "ab")
+    }
+
+    def test_list_comprehension() {
+        d: dict[int, str] = {1: "a", 2: "b", 3: "c"}
+        ks: list[int] = [k for k in d]
+        self.assertEqual(len(ks), 3)
+        self.assertEqual(ks[0], 1)
+        self.assertEqual(ks[2], 3)
+    }
+
+    def test_list_comprehension_filtered() {
+        d: dict[int, int] = {1: 1, 2: 2, 3: 3, 4: 4}
+        evens: list[int] = [k for k in d if k % 2 == 0]
+        self.assertEqual(len(evens), 2)
+        self.assertEqual(evens[0], 2)
+        self.assertEqual(evens[1], 4)
+    }
+
+    def test_set_comprehension() {
+        d: dict[int, str] = {1: "a", 2: "b", 3: "c"}
+        s: set[int] = {k for k in d}
+        self.assertEqual(len(s), 3)
+    }
+
+    def test_dict_comprehension() {
+        d: dict[int, str] = {1: "a", 2: "b"}
+        out: dict[int, int] = {k: k * 10 for k in d}
+        self.assertEqual(out[1], 10)
+        self.assertEqual(out[2], 20)
+    }
+
+    def test_get_with_default() {
+        d: dict[int, str] = {1: "a", 2: "b"}
+        self.assertEqual(d.get(1, "z"), "a")
+        self.assertEqual(d.get(99, "missing"), "missing")
+    }
+
+    def test_get_single_arg() {
+        d: dict[int, str] = {1: "a"}
+        self.assertEqual(d.get(1), "a")
+    }
+
+    def test_has_key() {
+        d: dict[int, str] = {1: "a", 2: "b"}
+        self.assertTrue(d.has_key(1))
+        self.assertFalse(d.has_key(99))
+    }
+
+    def test_str_keyed_unaffected() {
+        d: dict[str, int] = {"x": 1, "y": 2}
+        joined: str = ""
+        for k in d {
+            joined = joined + k
+        }
+        self.assertEqual(joined, "xy")
+        ks: list[str] = [k for k in d]
+        self.assertEqual(len(ks), 2)
+    }
+}
+
+main([DictIntIterationTests()])

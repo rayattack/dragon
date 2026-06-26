@@ -1,0 +1,304 @@
+# api.dr - the registry HTTP API the `dragon` CLI talks to.
+#
+# Auth is a bearer publish token (Authorization: Bearer dgn_...), so these
+# endpoints are inherently CSRF-proof. Responses are built as Dragon dicts/lists
+# and serialized with json.dumps - no string concatenation, no manual escaping.
+
+from http.server import Router, Request, Response, Context
+from base64 import b64decode, b64encode
+from json import dumps
+from deps import AUTH, REG, TLOG
+from services.registry import PublishResult, PackageSummary
+from services.translog import Checkpoint
+from models.records import Version, LogEntry
+
+def _bearer(req: Request) -> str {
+    const h: str = req.headers.get("authorization", "")
+    const prefix: str = "Bearer "
+    if h.startswith(prefix) {
+        return h[len(prefix):]
+    }
+    return ""
+}
+
+def _fail(res: Response, status: int, msg: str) -> None {
+    res.status = status
+    err: dict[str, Any] = {}
+    err["ok"] = false
+    err["error"] = msg
+    res.json(dumps(err))
+}
+
+# POST /api/publish?name=..&version=..   body = base64(tarball), desc in header.
+def api_publish(req: Request, res: Response, ctx: Context) -> None {
+    const uid: int = AUTH.verify_token(_bearer(req))
+    if uid == 0 {
+        _fail(res, 401, "invalid or missing publish token")
+        return
+    }
+    const name: str = req.query_str("name", "")
+    const version: str = req.query_str("version", "")
+    const desc: str = req.headers.get("x-egg-description", "")
+    const tarball: bytes = b64decode(req.body.encode("utf-8"))
+    # Optional author signature (dragon push --sign): Ed25519 pubkey + detached
+    # signature over the tarball, both hex.
+    const signed_by: str = req.headers.get("x-egg-pubkey", "")
+    const signature: str = req.headers.get("x-egg-signature", "")
+    const r: PublishResult = REG.publish(uid, name, version, desc, tarball, signed_by, signature)
+    if not r.ok {
+        _fail(res, 400, r.error)
+        return
+    }
+    res.status = 201
+    out: dict[str, Any] = {}
+    out["ok"] = true
+    out["name"] = name
+    out["version"] = version
+    out["hash"] = r.hash
+    res.json(dumps(out))
+}
+
+# GET /api/packages/:name/:version  -> the tarball bytes
+def api_download(req: Request, res: Response, ctx: Context) -> None {
+    const name: str = req.params.get("name", "")
+    const version: str = req.params.get("version", "")
+    const vers: list[Version] = REG.find_version(name, version)
+    if len(vers) == 0 {
+        _fail(res, 404, "no such package version")
+        return
+    }
+    const v: Version = vers[0]
+    # Security-yank: refuse the bytes (410 Gone) unless the caller explicitly
+    # overrides with ?force=1. A soft-yank (1) still downloads - a pinned hash
+    # must stay reproducible.
+    if v.yanked == 2 {
+        if req.query_str("force", "") != "1" {
+            _fail(res, 410, "security-yanked: " + v.yank_reason)
+            return
+        }
+    }
+    if not REG.blobs.has(v.hash) {
+        _fail(res, 404, "no such package version")
+        return
+    }
+    res.file(REG.blobs.path(v.hash))
+    res.set_header("content-type", "application/octet-stream")
+    res.set_header("x-content-hash", v.hash)
+    if v.yanked != 0 {
+        res.set_header("x-yanked", str(v.yanked))
+    }
+}
+
+# GET /api/search?q=...
+def api_search(req: Request, res: Response, ctx: Context) -> None {
+    const q: str = req.query_str("q", "")
+    const results: list[PackageSummary] = REG.search(q)
+    rows: list[dict[str, str]] = []
+    i: int = 0
+    while i < len(results) {
+        const p: PackageSummary = results[i]
+        row: dict[str, str] = {}
+        row["name"] = p.name
+        row["latest"] = p.latest
+        row["description"] = p.description
+        rows.append(row)
+        i = i + 1
+    }
+    out: dict[str, Any] = {}
+    out["results"] = rows
+    res.json(dumps(out))
+}
+
+# POST /api/yank/:name/:version   (bearer token, owner only)
+def api_yank(req: Request, res: Response, ctx: Context) -> None {
+    const uid: int = AUTH.verify_token(_bearer(req))
+    if uid == 0 {
+        _fail(res, 401, "invalid or missing publish token")
+        return
+    }
+    const name: str = req.params.get("name", "")
+    const version: str = req.params.get("version", "")
+    # ?severity=soft (default) | security ; ?reason=<message shown to clients>
+    const sev_str: str = req.query_str("severity", "soft")
+    sev: int = 1
+    if sev_str == "security" { sev = 2 }
+    const reason: str = req.query_str("reason", "")
+    if REG.yank(uid, name, version, sev, reason) {
+        out: dict[str, Any] = {}
+        out["ok"] = true
+        res.json(dumps(out))
+    } else {
+        _fail(res, 404, "not found or not owner")
+    }
+}
+
+# GET /api/eggs/:name  -> JSON version list for the CLI's `grab` to pick from.
+# "latest" is the newest non-yanked version (mirrors search's latest).
+def api_eggs(req: Request, res: Response, ctx: Context) -> None {
+    const name: str = req.params.get("name", "")
+    const vers: list[Version] = REG.get_versions(name)
+    if len(vers) == 0 {
+        _fail(res, 404, "no such package")
+        return
+    }
+    rows: list[dict[str, Any]] = []
+    latest: str = ""
+    i: int = 0
+    while i < len(vers) {
+        const v: Version = vers[i]
+        row: dict[str, Any] = {}
+        row["version"] = v.version
+        row["hash"] = v.hash
+        row["yanked"] = v.yanked
+        rows.append(row)
+        if v.yanked == 0 {
+            latest = v.version   # get_versions is ordered by id, so this ends on the newest live one
+        }
+        i = i + 1
+    }
+    out: dict[str, Any] = {}
+    out["ok"] = true
+    out["name"] = name
+    out["latest"] = latest
+    out["versions"] = rows
+    res.json(dumps(out))
+}
+
+# GET /api/fetch/:name/:version  -> JSON { hash, tarball(base64) } for the CLI.
+# Binary travels base64-encoded (the string HTTP client cannot carry raw bytes),
+# symmetric with publish. The client recomputes sha256 and verifies it against
+# the hash pinned in dragon.drs - the registry is never trusted for integrity.
+def api_fetch(req: Request, res: Response, ctx: Context) -> None {
+    const name: str = req.params.get("name", "")
+    const version: str = req.params.get("version", "")
+    const vers: list[Version] = REG.find_version(name, version)
+    if len(vers) == 0 {
+        _fail(res, 404, "no such package version")
+        return
+    }
+    const v: Version = vers[0]
+    if v.yanked == 2 {
+        if req.query_str("force", "") != "1" {
+            _fail(res, 410, "security-yanked: " + v.yank_reason)
+            return
+        }
+    }
+    if not REG.blobs.has(v.hash) {
+        _fail(res, 404, "no such package version")
+        return
+    }
+    const tarball: bytes = REG.blobs.get(v.hash)
+    out: dict[str, Any] = {}
+    out["ok"] = true
+    out["name"] = name
+    out["version"] = version
+    out["hash"] = v.hash
+    out["yanked"] = v.yanked
+    out["tarball"] = b64encode(tarball).decode("utf-8")
+    # Transparency receipt: the append-only log's leaf for this (name, version).
+    # The client recomputes leaf_hash from (name, version, hash, ts, published_by)
+    # and confirms the log commits to the exact bytes it is installing.
+    const leaves: list[LogEntry] = TLOG.leaf_for(name, version)
+    if len(leaves) > 0 {
+        const lf: LogEntry = leaves[0]
+        log: dict[str, Any] = {}
+        log["seq"] = lf.seq
+        log["ts"] = lf.ts
+        log["published_by"] = lf.published_by
+        log["leaf_hash"] = lf.leaf_hash
+        log["chain_head"] = lf.chain_head
+        out["log"] = log
+    }
+    # Author signature, if the version was published with `dragon push --sign`.
+    const sig: tuple[str, str] = REG.signature_for(name, version)
+    out["signed_by"] = sig[0]
+    out["signature"] = sig[1]
+    res.json(dumps(out))
+}
+
+# GET /api/log/checkpoint -> the Ed25519-signed log head (size + Merkle root).
+def api_log_checkpoint(req: Request, res: Response, ctx: Context) -> None {
+    const cp: Checkpoint = TLOG.checkpoint()
+    out: dict[str, Any] = {}
+    out["ok"] = true
+    out["size"] = cp.size
+    out["root"] = cp.root
+    out["signature"] = cp.signature
+    out["key_id"] = cp.key_id
+    res.json(dumps(out))
+}
+
+# GET /api/log/inclusion/:name/:version?tree_size=N -> an O(log n) proof that the
+# package's leaf is in the size-N Merkle tree (N defaults to the current size).
+def api_log_inclusion(req: Request, res: Response, ctx: Context) -> None {
+    const name: str = req.params.get("name", "")
+    const version: str = req.params.get("version", "")
+    const sz: int = TLOG.size()
+    ts: int = sz
+    const tsq: str = req.query_str("tree_size", "")
+    if len(tsq) > 0 { ts = int(tsq) }
+    const ip: tuple[int, list[str]] = TLOG.inclusion(name, version, ts)
+    if ip[0] < 0 {
+        _fail(res, 404, "no such package version in the log")
+        return
+    }
+    out: dict[str, Any] = {}
+    out["ok"] = true
+    out["index"] = ip[0]
+    out["size"] = ts
+    out["proof"] = ip[1]
+    res.json(dumps(out))
+}
+
+# GET /api/log/consistency?from=M&to=N -> an O(log n) proof the size-M tree is a
+# prefix of the size-N tree (the log only ever appended). `to` defaults to size.
+def api_log_consistency(req: Request, res: Response, ctx: Context) -> None {
+    const sz: int = TLOG.size()
+    m: int = int(req.query_str("from", "0"))
+    n: int = sz
+    const toq: str = req.query_str("to", "")
+    if len(toq) > 0 { n = int(toq) }
+    out: dict[str, Any] = {}
+    out["ok"] = true
+    out["from"] = m
+    out["to"] = n
+    out["proof"] = TLOG.consistency(m, n)
+    res.json(dumps(out))
+}
+
+# GET /api/log/pubkey -> the registry's Ed25519 log public key + key_id, so a
+# client can verify checkpoint signatures (and pin the key trust-on-first-use).
+def api_log_pubkey(req: Request, res: Response, ctx: Context) -> None {
+    out: dict[str, Any] = {}
+    out["ok"] = true
+    out["pubkey"] = TLOG.public_key_hex()
+    out["key_id"] = TLOG.key_id()
+    res.json(dumps(out))
+}
+
+# GET /api/log -> the full append-only log (sequence order) for audit / scan.
+# A client recomputes the chain over these leaves and checks the final head
+# against /api/log/checkpoint, then confirms each installed dep is present.
+def api_log(req: Request, res: Response, ctx: Context) -> None {
+    const entries: list[LogEntry] = TLOG.entries()
+    rows: list[dict[str, Any]] = []
+    i: int = 0
+    while i < len(entries) {
+        const e: LogEntry = entries[i]
+        row: dict[str, Any] = {}
+        row["seq"] = e.seq
+        row["name"] = e.name
+        row["version"] = e.version
+        row["pkg_hash"] = e.pkg_hash
+        row["published_by"] = e.published_by
+        row["ts"] = e.ts
+        row["leaf_hash"] = e.leaf_hash
+        row["chain_head"] = e.chain_head
+        rows.append(row)
+        i = i + 1
+    }
+    out: dict[str, Any] = {}
+    out["ok"] = true
+    out["entries"] = rows
+    res.json(dumps(out))
+}

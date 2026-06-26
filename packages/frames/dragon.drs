@@ -1,0 +1,16 @@
+# frames - typed dataframes for Dragon
+#
+# The critical paths of pandas, none of the cruft. Columns are homogeneous and
+# native-typed (no per-element boxing); a DataFrame is a tagged collection of
+# columns - one dtype tag per column, the same pattern json.dr uses for values.
+{
+  name = 'frames'
+  version = '0.1.0'
+  description = 'Typed dataframes for Dragon - the critical paths of pandas, none of the cruft.'
+  authors = ['Tersoo <tersoo.ortserga@getreliancehealth.com>']
+  license = 'MIT'
+  dragon = '>=0.2.0'
+
+  eggs = {
+  }
+}

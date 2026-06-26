@@ -1,0 +1,8 @@
+# Resolver-test fixture egg - src/ LAYOUT (root at src/eggnest.dr), resolved via
+# the .dragon-entry hint. Also imports a sibling submodule to exercise
+# hint-relative submodule resolution (eggnest.helper -> src/helper.dr).
+from eggnest.helper import bump
+
+def nest_val() -> int {
+    return bump(10)
+}

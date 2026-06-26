@@ -1,0 +1,246 @@
+"""match - class/type-test patterns (`case TypeName()`).
+
+The `Class` pattern kind existed in the AST but was unimplemented: the parser
+errored on `case int()` and codegen never matched it. This covers the type-test
+slice - discriminating a Union subject at runtime via the box tag, an `Any`
+subject likewise, a `Class | None` Optional via a non-null check, the subclass
+chain, OR-of-type-tests, and the wildcard fallback. Field destructuring
+(`case Point(x, y)`) is a separate increment and errors cleanly at check time.
+"""
+
+from unittest import TestCase, main
+
+
+def describe(v: int | str) -> str {
+    match v {
+        case int() { return "int" }
+        case str() { return "str" }
+    }
+    return "?"
+}
+
+def classify(value: int | str) -> str {
+    match value {
+        case 0 { return "zero" }          # literal on a union subject
+        case int() { return "int" }
+        case "" { return "empty" }        # str literal on a union subject
+        case str() { return "str" }
+    }
+    return "?"
+}
+
+def kind(v: Any) -> str {
+    match v {
+        case int() | bool() { return "intish" }
+        case float() { return "float" }
+        case _ { return "other" }
+    }
+    return "?"
+}
+
+
+class Animal { def() {} }
+class Dog(Animal) { def() {} }
+
+def species(a: Animal | None) -> str {
+    match a {
+        case Animal() { return "animal" }
+        case None { return "none" }
+    }
+    return "?"
+}
+
+
+# #1 in-arm narrowing: a `case T()` scalar type-test on a bare-name union/Any
+# subject narrows that name to T inside the arm, so the body uses the value at
+# its matched native type (unboxed) - e.g. arithmetic on the int, `.upper()` on
+# the str. Before narrowing, `v + 1` in a `case int()` arm was a type error.
+def narrow_add(v: int | str) -> str {
+    match v {
+        case int() { return str(v + 1) }       # v is int here
+        case str() { return v.upper() }         # v is str here
+    }
+    return "?"
+}
+
+def narrow_float(v: int | float) -> float {
+    match v {
+        case int() { return float(v + 1) }
+        case float() { return v * 2.0 }
+    }
+    return 0.0
+}
+
+def narrow_any(v: Any) -> str {
+    match v {
+        case int() { return str(v + 10) }
+        case str() { return v + "!" }
+        case _ { return "other" }
+    }
+    return "?"
+}
+
+
+# #2 exhaustiveness (positive side, dogfooded): an exhaustive union match needs
+# no `case _` - every member is covered, so the compiler accepts it AND every
+# value reaches an arm. An open-type match (bare int) may intentionally fall
+# through with no `_`. Both COMPILE and RUN, so they belong here, not in a gtest.
+def exhaustive_no_wildcard(v: int | str) -> str {
+    match v {
+        case int() { return "i" }
+        case str() { return "s" }
+    }
+    return "unreached"
+}
+
+def open_fallthrough(x: int) -> str {
+    out: str = "none"
+    match x {
+        case 1 { out = "one" }
+        case 2 { out = "two" }
+    }
+    return out
+}
+
+
+class MatchExhaustivenessTests(TestCase) {
+    def test_exhaustive_union_reaches_an_arm() {
+        self.assertEqual(exhaustive_no_wildcard(5), "i")
+        self.assertEqual(exhaustive_no_wildcard("x"), "s")
+    }
+
+    def test_open_type_intentional_fallthrough() {
+        self.assertEqual(open_fallthrough(1), "one")
+        self.assertEqual(open_fallthrough(99), "none")   # falls through harmlessly
+    }
+}
+
+
+class MatchNarrowingTests(TestCase) {
+    def test_scalar_narrowing_union() {
+        self.assertEqual(narrow_add(7), "8")        # used as int
+        self.assertEqual(narrow_add("hi"), "HI")    # used as str
+    }
+
+    def test_float_narrowing() {
+        self.assertEqual(narrow_float(4), 5.0)
+        self.assertEqual(narrow_float(2.5), 5.0)
+    }
+
+    def test_any_narrowing() {
+        self.assertEqual(narrow_any(5), "15")
+        self.assertEqual(narrow_any("hey"), "hey!")
+        self.assertEqual(narrow_any(3.5), "other")
+    }
+}
+
+
+# #4 positional field destructuring: `case T(p0, p1, ...)` binds the first N
+# declared fields (constructor/declaration order) by static offset - no runtime
+# __match_args__. Covers: plain capture, literal sub-pattern on a field, mixed
+# field types, destructuring out of a union (box) and an Optional, and a
+# subclass destructuring inherited + own fields.
+class Point {
+    def(x: int, y: int) { self.x = x; self.y = y }
+}
+class Item {
+    def(name: str, qty: int) { self.name = name; self.qty = qty }
+}
+class Creature {
+    def(name: str) { self.name = name }
+}
+class Hound(Creature) {
+    def(name: str, breed: str) { self.name = name; self.breed = breed }
+}
+
+def sum_point(p: Point) -> int {
+    match p {
+        case Point(a, b) { return a + b }
+    }
+    return -1
+}
+
+def classify_point(p: Point) -> str {
+    match p {
+        case Point(0, y) { return "on-x-axis" }   # literal field 0, capture field 1
+        case Point(a, b) { return "general" }
+    }
+    return "?"
+}
+
+def describe_item(it: Item) -> str {
+    match it {
+        case Item(n, q) { return n + " x" + str(q) }   # str field + int field
+    }
+    return "?"
+}
+
+def union_destructure(v: int | Point) -> int {
+    match v {
+        case Point(a, b) { return a + b }   # destructure out of a box subject
+        case int() { return v }
+    }
+    return -1
+}
+
+def dog_breed(d: Hound) -> str {
+    match d {
+        case Hound(n, br) { return n + ":" + br }   # inherited `name` + own `breed`
+    }
+    return "?"
+}
+
+
+class MatchDestructuringTests(TestCase) {
+    def test_basic_capture() {
+        self.assertEqual(sum_point(Point(3, 4)), 7)
+    }
+
+    def test_literal_subpattern() {
+        self.assertEqual(classify_point(Point(0, 9)), "on-x-axis")
+        self.assertEqual(classify_point(Point(2, 9)), "general")
+    }
+
+    def test_mixed_field_types() {
+        self.assertEqual(describe_item(Item("widget", 5)), "widget x5")
+    }
+
+    def test_destructure_from_union() {
+        self.assertEqual(union_destructure(Point(2, 8)), 10)
+        self.assertEqual(union_destructure(5), 5)
+    }
+
+    def test_inherited_fields() {
+        self.assertEqual(dog_breed(Hound("Rex", "Lab")), "Rex:Lab")
+    }
+}
+
+
+class MatchTypePatternTests(TestCase) {
+    def test_union_discrimination() {
+        self.assertEqual(describe(42), "int")
+        self.assertEqual(describe("hi"), "str")
+    }
+
+    def test_literals_and_type_tests_on_union() {
+        self.assertEqual(classify(0), "zero")    # literal arm wins over case int()
+        self.assertEqual(classify(42), "int")
+        self.assertEqual(classify(""), "empty")
+        self.assertEqual(classify("hi"), "str")
+    }
+
+    def test_any_with_or_and_wildcard() {
+        self.assertEqual(kind(7), "intish")
+        self.assertEqual(kind(3.5), "float")
+        self.assertEqual(kind("x"), "other")
+    }
+
+    def test_class_optional_and_subclass() {
+        d: Dog = Dog()
+        self.assertEqual(species(d), "animal")   # subclass matches case Animal()
+        self.assertEqual(species(none), "none")
+    }
+}
+
+main([MatchTypePatternTests(), MatchNarrowingTests(),
+      MatchExhaustivenessTests(), MatchDestructuringTests()])

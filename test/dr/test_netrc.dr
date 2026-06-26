@@ -1,0 +1,90 @@
+"""netrc - parse a real `.netrc`-style file."""
+
+from unittest import TestCase, main
+import netrc
+from netrc import NetrcParseError
+import os
+from os.path import exists
+from io import make
+
+
+def _write(path: str, body: str) -> None {
+    if exists(path) {
+        os.remove(path)
+    }
+    with make(path) as w {
+        w.write(body)
+    }
+}
+
+
+class NetrcTests(TestCase) {
+    def test_single_machine() {
+        path: str = "/tmp/dr_netrc_1"
+        _write(path,
+"machine example.com\n" +
+"  login alice\n" +
+"  password s3cret\n")
+        nrc: netrc.netrc = netrc.netrc(path)
+        auth: tuple[str, str, str] = nrc.authenticators("example.com")
+        self.assertEqual(auth[0], "alice")
+        self.assertEqual(auth[2], "s3cret")
+        os.remove(path)
+    }
+
+    def test_multiple_machines_and_default() {
+        path: str = "/tmp/dr_netrc_2"
+        _write(path,
+"machine a.example\n" +
+"  login user_a\n" +
+"  password pw_a\n" +
+"machine b.example\n" +
+"  login user_b\n" +
+"  password pw_b\n" +
+"  account acct_b\n" +
+"default\n" +
+"  login anon\n" +
+"  password guest\n")
+        nrc: netrc.netrc = netrc.netrc(path)
+        a: tuple[str, str, str] = nrc.authenticators("a.example")
+        b: tuple[str, str, str] = nrc.authenticators("b.example")
+        d: tuple[str, str, str] = nrc.authenticators("c.unknown")
+        self.assertEqual(a[0], "user_a")
+        self.assertEqual(a[2], "pw_a")
+        self.assertEqual(b[0], "user_b")
+        self.assertEqual(b[1], "acct_b")
+        self.assertEqual(b[2], "pw_b")
+        # Default kicks in for unknown hosts.
+        self.assertEqual(d[0], "anon")
+        self.assertEqual(d[2], "guest")
+        os.remove(path)
+    }
+
+    def test_missing_file_raises() {
+        raised: bool = false
+        try {
+            nrc: netrc.netrc = netrc.netrc("/no/such/netrc/dr_zzz")
+        } except NetrcParseError {
+            raised = true
+        }
+        self.assertTrue(raised)
+    }
+
+    def test_unknown_host_no_default() {
+        path: str = "/tmp/dr_netrc_3"
+        _write(path,
+"machine a.example\n" +
+"  login u\n" +
+"  password p\n")
+        nrc: netrc.netrc = netrc.netrc(path)
+        miss: tuple[str, str, str] = nrc.authenticators("c.unknown")
+        # No default - all three fields empty.
+        self.assertEqual(miss[0], "")
+        self.assertEqual(miss[1], "")
+        self.assertEqual(miss[2], "")
+        os.remove(path)
+    }
+}
+
+
+main([NetrcTests()])

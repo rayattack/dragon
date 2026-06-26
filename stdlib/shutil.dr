@@ -1,0 +1,90 @@
+"""shutil - high-level file operations (Python `shutil`, common subset).
+
+Pure Dragon over `os` / `os.path` / `io`. Covers copyfile/copy/copytree,
+move, rmtree, which. `copyfile` is binary-exact (whole-file bytes I/O).
+disk_usage (statvfs) is omitted.
+"""
+
+import os
+from os.path import join, isdir, isfile, exists, basename, islink
+from os import listdir, access, X_OK
+from io import open, make
+
+
+def copyfile(src: str, dst: str) -> str {
+    """Copy the contents of `src` to `dst` byte-for-byte; return `dst`."""
+    with make(dst) as w {
+        w.write(open(src).bytes())
+    }
+    return dst
+}
+
+
+def copy(src: str, dst: str) -> str {
+    """Copy `src` to file or directory `dst`; return the destination path."""
+    target: str = dst
+    if isdir(dst) {
+        target = join(dst, basename(src))
+    }
+    return copyfile(src, target)
+}
+
+
+def copytree(src: str, dst: str) -> str {
+    """Recursively copy directory `src` to a new directory `dst`."""
+    os.mkdir(dst, 0o755)
+    for name in listdir(src) {
+        s: str = join(src, name)
+        d: str = join(dst, name)
+        if isdir(s) {
+            copytree(s, d)
+        } else {
+            copyfile(s, d)
+        }
+    }
+    return dst
+}
+
+
+def rmtree(path: str) -> None {
+    """Recursively delete a directory tree."""
+    for name in listdir(path) {
+        full: str = join(path, name)
+        if isdir(full) and not islink(full) {
+            rmtree(full)
+        } else {
+            os.remove(full)
+        }
+    }
+    os.rmdir(path)
+}
+
+
+def move(src: str, dst: str) -> str {
+    """Move `src` to `dst` (rename); return the destination path."""
+    target: str = dst
+    if isdir(dst) {
+        target = join(dst, basename(src))
+    }
+    os.rename(src, target)
+    return target
+}
+
+
+def which(cmd: str) -> str {
+    """Return the full path of an executable `cmd` on PATH, or "" if none."""
+    path_env: str = os.getenv("PATH")
+    if path_env == "" {
+        return ""
+    }
+    for d in path_env.split(":") {
+        if d == "" {
+            continue
+        }
+        candidate: str = join(d, cmd)
+        if isfile(candidate) and access(candidate, X_OK) == 0 {
+            return candidate
+        }
+    }
+    return ""
+}

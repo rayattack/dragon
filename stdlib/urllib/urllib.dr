@@ -1,0 +1,8 @@
+# urllib package root.
+#
+# Dragon mirrors CPython's `urllib` namespace: the parsing primitives live in
+# `urllib.parse`, and the high-level HTTP client lives in `urllib.request`.
+# This file is intentionally minimal - submodules are imported directly:
+#
+#  from urllib.parse import urlsplit, parse_qs, quote
+#  from urllib.request import urlopen, Request

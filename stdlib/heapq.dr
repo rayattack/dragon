@@ -1,0 +1,221 @@
+# heapq.dr - Dragon standard library: heap queue (priority queue) algorithm
+#
+# Provides min-heap operations on list[int]. The heap invariant is that
+# heap[k] <= heap[2*k+1] and heap[k] <= heap[2*k+2] for all k, counting
+# elements from zero. The smallest element is always at heap[0].
+#
+# Pure Dragon - no C dependencies.
+
+#===----------------------------------------------------------------------===#
+# Internal helpers
+#===----------------------------------------------------------------------===#
+
+def _siftdown(heap: list[int], startpos: int, pos: int) {
+    # Sift a newly added element up the tree until heap invariant is restored.
+    # Move the item at pos up toward startpos by swapping with its parent
+    # whenever it is smaller.
+    const newitem: int = heap[pos]
+    curpos: int = pos
+    while curpos > startpos {
+        const parentpos: int = (curpos - 1) // 2
+        const parent: int = heap[parentpos]
+        if newitem < parent {
+            heap[curpos] = parent
+            curpos = parentpos
+        } else {
+            break
+        }
+    }
+    heap[curpos] = newitem
+}
+
+def _siftup(heap: list[int], pos: int) {
+    # Sift the element at pos down the tree by swapping with its smallest
+    # child until the heap invariant is restored.
+    const endpos: int = len(heap)
+    const startpos: int = pos
+    const newitem: int = heap[pos]
+    # Bubble up the smaller child until hitting a leaf.
+    childpos: int = 2 * pos + 1
+    curpos: int = pos
+    while childpos < endpos {
+        # Pick the smaller child.
+        const rightpos: int = childpos + 1
+        if rightpos < endpos {
+            if heap[rightpos] < heap[childpos] {
+                childpos = rightpos
+            }
+        }
+        # Move the smaller child up.
+        heap[curpos] = heap[childpos]
+        curpos = childpos
+        childpos = 2 * curpos + 1
+    }
+    # The element that was at pos is now placed at curpos; sift it up
+    # to its correct location (this is the standard two-phase approach).
+    heap[curpos] = newitem
+    _siftdown(heap, startpos, curpos)
+}
+
+#===----------------------------------------------------------------------===#
+# Public API
+#===----------------------------------------------------------------------===#
+
+def heappush(heap: list[int], item: int) {
+    # Push item onto heap, maintaining the heap invariant.
+    heap.append(item)
+    _siftdown(heap, 0, len(heap) - 1)
+}
+
+def heappop(heap: list[int]) -> int {
+    # Pop the smallest item off the heap, maintaining the heap invariant.
+    const n: int = len(heap)
+    if n == 0 {
+        raise ValueError("heap is empty")
+    }
+    const lastelt: int = heap[n - 1]
+    if n > 1 {
+        # Move the last element to the root, shrink, then sift it down.
+        const returnitem: int = heap[0]
+        heap[0] = lastelt
+        heap.pop()
+        _siftup(heap, 0)
+        return returnitem
+    }
+    # Only one element - remove and return it.
+    heap.pop()
+    return lastelt
+}
+
+def heapify(items: list[int]) {
+    # Transform list into a heap, in-place, in O(n) time.
+    const n: int = len(items)
+    # Start from the last parent node and sift down each one.
+    i: int = n // 2 - 1
+    while i >= 0 {
+        _siftup(items, i)
+        i = i - 1
+    }
+}
+
+def heappushpop(heap: list[int], item: int) -> int {
+    # Push item on the heap, then pop and return the smallest item.
+    # More efficient than heappush followed by heappop.
+    const n: int = len(heap)
+    if n > 0 {
+        if item > heap[0] {
+            # item is larger than current min, so we swap them.
+            const returnitem: int = heap[0]
+            heap[0] = item
+            _siftup(heap, 0)
+            return returnitem
+        }
+    }
+    # item is smaller than or equal to everything on the heap (or heap is empty).
+    return item
+}
+
+def heapreplace(heap: list[int], item: int) -> int {
+    # Pop and return the smallest item, then push the new item.
+    # The heap size does not change. Raises ValueError if heap is empty.
+    const n: int = len(heap)
+    if n == 0 {
+        raise ValueError("heap is empty")
+    }
+    const returnitem: int = heap[0]
+    heap[0] = item
+    _siftup(heap, 0)
+    return returnitem
+}
+
+def nsmallest(n: int, items: list[int]) -> list[int] {
+    # Return the n smallest elements from items, in ascending order.
+    # Uses a heap-based approach.
+    const size: int = len(items)
+    if n <= 0 {
+        result: list[int] = []
+        return result
+    }
+    if n >= size {
+        # Return all items sorted.
+        return _sorted_copy(items)
+    }
+    # Build a max-heap of size n, then scan the rest.
+    # Simpler approach: copy, heapify, pop n times.
+    copy: list[int] = _copy_list(items)
+    heapify(copy)
+    result: list[int] = []
+    i: int = 0
+    while i < n {
+        const val: int = heappop(copy)
+        result.append(val)
+        i = i + 1
+    }
+    return result
+}
+
+def nlargest(n: int, items: list[int]) -> list[int] {
+    # Return the n largest elements from items, in descending order.
+    const size: int = len(items)
+    if n <= 0 {
+        result: list[int] = []
+        return result
+    }
+    if n >= size {
+        # Return all items sorted descending.
+        const sorted_asc: list[int] = _sorted_copy(items)
+        return _reverse_list(sorted_asc)
+    }
+    # Negate all values, use min-heap to get n smallest of negated = n largest.
+    neg: list[int] = []
+    i: int = 0
+    while i < size {
+        neg.append(0 - items[i])
+        i = i + 1
+    }
+    heapify(neg)
+    result: list[int] = []
+    i = 0
+    while i < n {
+        const val: int = heappop(neg)
+        result.append(0 - val)
+        i = i + 1
+    }
+    return result
+}
+
+#===----------------------------------------------------------------------===#
+# Internal utility helpers
+#===----------------------------------------------------------------------===#
+
+def _copy_list(items: list[int]) -> list[int] {
+    result: list[int] = []
+    i: int = 0
+    while i < len(items) {
+        result.append(items[i])
+        i = i + 1
+    }
+    return result
+}
+
+def _sorted_copy(items: list[int]) -> list[int] {
+    # Return a sorted copy using heapsort.
+    copy: list[int] = _copy_list(items)
+    heapify(copy)
+    result: list[int] = []
+    while len(copy) > 0 {
+        const val: int = heappop(copy)
+        result.append(val)
+    }
+    return result
+}
+
+def _reverse_list(items: list[int]) -> list[int] {
+    result: list[int] = []
+    i: int = len(items) - 1
+    while i >= 0 {
+        result.append(items[i])
+        i = i - 1
+    }
+    return result
+}

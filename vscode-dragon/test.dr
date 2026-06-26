@@ -1,0 +1,190 @@
+# Dragon language test file - showcases syntax highlighting
+
+const MAX_HP: int = 100
+const PI: float = 3.14159
+
+type Handler = Callable[Request, Response]
+
+class Player {
+    static count: int = 0
+    static const TEAM_SIZE: int = 5
+
+    self(name: str, hp: int) {
+        self.name = name
+        self.hp = hp
+        Player.count = Player.count + 1
+    }
+
+    self(name: str) {
+        self.name = name
+        self.hp = MAX_HP
+        Player.count = Player.count + 1
+    }
+
+    def is_alive() -> bool {
+        return self.hp > 0
+    }
+
+    def __str__() -> str {
+        return f"{self.name} (HP: {self.hp})"
+    }
+
+    def __eq__(other: Player) -> bool {
+        return self.name == other.name
+    }
+
+    static def get_count() -> int {
+        return Player.count
+    }
+
+    @classmethod
+    def from_defaults() -> Player {
+        return Player("Unknown")
+    }
+}
+
+def fib(n: int) -> int {
+    if n <= 1 {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+# Pattern matching
+match fib(5) {
+    case 0 {
+        print("zero")
+    }
+    case 5 {
+        print("five")
+    }
+    case _ {
+        print("other")
+    }
+}
+
+# Try/catch with exception hierarchy
+try {
+    x = int("hello")
+} catch ValueError as e {
+    print("caught it")
+} catch ArithmeticError {
+    print("math error")
+}
+
+# User-defined exceptions
+class AppError(Exception) {
+    self(msg: str) {
+        self.msg = msg
+    }
+}
+
+# Lambda and builtins
+nums = [1, 2, 3, 4, 5]
+total = sum(nums)
+evens = filter(lambda x { x % 2 == 0 }, nums)
+squares = [x ** 2 for x in nums]
+
+# Dict with bare keys and dot access
+config = {name: "Dragon", version: 1, debug: True}
+print(config.name)
+config.debug = False
+
+# Bytes
+data: bytes = b"\x48\x65\x6c\x6c\x6f"
+decoded: str = data.decode()
+encoded: bytes = "hello".encode()
+
+# f-strings
+name = "Dragon"
+greeting = f"Hello, {name}!"
+print(greeting)
+
+# Context manager (dunder protocol)
+class FileGuard {
+    self(path: str) {
+        self.path = path
+    }
+
+    def __enter__() -> FileGuard {
+        print(f"opening {self.path}")
+        return self
+    }
+
+    def __exit__() -> int {
+        print(f"closing {self.path}")
+        return 0
+    }
+}
+
+with FileGuard("/tmp/test.txt") as f {
+    print("writing...")
+}
+
+# Container protocol (dunders)
+class Stack {
+    self() {
+        self.items = [0, 0, 0]
+        self.n = 0
+    }
+
+    def __len__() -> int {
+        return self.n
+    }
+
+    def __getitem__(i: int) -> int {
+        return self.items[i]
+    }
+
+    def __contains__(v: int) -> bool {
+        return v > 0
+    }
+}
+
+# C FFI: extern declarations
+extern "C" def puts(s: str) -> int
+
+extern "C" from "curl" {
+    def curl_easy_init() -> ptr;
+    def curl_easy_cleanup(handle: ptr) -> void;
+}
+
+# Threading with fire keyword
+def compute(n: int) -> int {
+    return n * n + 1
+}
+
+t1 = fire compute(10)
+t2 = fire compute(20)
+
+r1: int = t1.result()
+r2: int = t2.result()
+print(f"Results: {r1}, {r2}")
+
+# Lock for thread synchronization
+m = Lock()
+m.acquire()
+# critical section
+m.release()
+
+# Classes and inheritance
+class Animal {
+    self(species: str) {
+        self.species = species
+    }
+}
+
+class Dragon(Animal) {
+    self(name: str) {
+        super("dragon")
+        self.name = name
+    }
+
+    def roar() -> str {
+        return f"{self.name} says Roar!"
+    }
+}
+
+d = Dragon("Smaug")
+print(d.roar())
+print(Player.get_count())

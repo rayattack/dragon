@@ -1,0 +1,9 @@
+# Dragon package manifest (dragon.drs)
+{
+  name = 'dragon'
+  version = '0.1.0'
+  entry = 'main.dr'
+
+  eggs = {
+  }
+}

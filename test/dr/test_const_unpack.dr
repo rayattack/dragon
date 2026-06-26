@@ -1,0 +1,56 @@
+"""const multi-target tuple unpack (bugs.md #14, smells.md const-unpack item).
+
+`const q: int, r: int = divmod(7, 2)` used to fail to parse ("const
+declaration must have an initializer" on the comma) while the plain
+`q, r = divmod(7, 2)` form worked - the const keyword changed whether
+unpacking was available at all.
+
+The parser now accepts one or more `name: type` pairs after `const` and
+lowers the multi-target form onto the existing tuple-unpack AssignStmt path
+with a synthesized tuple[...] annotation: Sema declares each name const
+(fresh declaration, redeclaration is an error), the TypeChecker binds each
+name at its annotated element type and checks the RHS tuple against the
+annotation, and CodeGen reuses the one unpack implementation unchanged.
+"""
+
+from unittest import TestCase, main
+
+
+class ConstUnpackTests(TestCase) {
+    def test_divmod_unpack() {
+        const q: int, r: int = divmod(7, 2)
+        self.assertEqual(q, 3)
+        self.assertEqual(r, 1)
+    }
+
+    def test_mixed_types() {
+        const name: str, val: float = ("pi", 3.14)
+        self.assertEqual(name, "pi")
+        self.assertEqual(val, 3.14)
+    }
+
+    def test_three_targets() {
+        const a: int, b: str, c: bool = (42, "x", true)
+        self.assertEqual(a, 42)
+        self.assertEqual(b, "x")
+        self.assertTrue(c)
+    }
+
+    def test_function_return() {
+        const lo: int, hi: int = self._range_pair()
+        self.assertEqual(hi - lo, 90)
+    }
+
+    def _range_pair() -> tuple[int, int] {
+        return (10, 100)
+    }
+
+    def test_const_values_usable_in_expressions() {
+        const w: int, h: int = (3, 4)
+        area: int = w * h
+        self.assertEqual(area, 12)
+    }
+}
+
+
+main([ConstUnpackTests()])

@@ -1,0 +1,156 @@
+# sqlite.dr - Dragon standard library: SQLite3 database
+#
+# Uses the bundled sqlite3 amalgamation - no external dependencies.
+# All C functions use intc (C's int = i32) for correct ABI.
+
+extern "C" def malloc(size: int) -> ptr
+extern "C" def free(p: ptr)
+
+# SQLite3 C API (linked from bundled amalgamation)
+extern "C" def sqlite3_open(filename: str, ppDb: ptr) -> intc
+extern "C" def sqlite3_close(db: ptr) -> intc
+extern "C" def sqlite3_exec(db: ptr, sql: str, callback: ptr, arg: ptr, errmsg: ptr) -> intc
+extern "C" def sqlite3_prepare_v2(db: ptr, sql: str, nByte: intc, ppStmt: ptr, pzTail: ptr) -> intc
+extern "C" def sqlite3_step(stmt: ptr) -> intc
+extern "C" def sqlite3_finalize(stmt: ptr) -> intc
+extern "C" def sqlite3_reset(stmt: ptr) -> intc
+extern "C" def sqlite3_column_count(stmt: ptr) -> intc
+extern "C" def sqlite3_column_int(stmt: ptr, iCol: intc) -> intc
+extern "C" def sqlite3_column_double(stmt: ptr, iCol: intc) -> float
+extern "C" def sqlite3_column_text(stmt: ptr, iCol: intc) -> str
+extern "C" def sqlite3_column_type(stmt: ptr, iCol: intc) -> intc
+extern "C" def sqlite3_bind_int(stmt: ptr, index: intc, value: intc) -> intc
+extern "C" def sqlite3_bind_double(stmt: ptr, index: intc, value: float) -> intc
+extern "C" def sqlite3_bind_text(stmt: ptr, index: intc, value: str, n: intc, destructor: ptr) -> intc
+extern "C" def sqlite3_bind_null(stmt: ptr, index: intc) -> intc
+extern "C" def sqlite3_errmsg(db: ptr) -> str
+extern "C" def sqlite3_changes(db: ptr) -> intc
+extern "C" def sqlite3_last_insert_rowid(db: ptr) -> int
+
+# Runtime helper to dereference a pointer-to-pointer
+extern "C" def dragon_ptr_deref(pp: ptr) -> ptr
+
+# SQLite constants
+# SQLITE_OK = 0, SQLITE_ROW = 100, SQLITE_DONE = 101
+# Column types: SQLITE_INTEGER = 1, SQLITE_FLOAT = 2, SQLITE_TEXT = 3,
+#  SQLITE_BLOB = 4, SQLITE_NULL = 5
+
+#===----------------------------------------------------------------------===#
+# Database - SQLite3 database connection
+#===----------------------------------------------------------------------===#
+
+class Database {
+    def(path: str) {
+        self.dbpp = malloc(8)
+        const rc: int = sqlite3_open(path, self.dbpp)
+        self.db = dragon_ptr_deref(self.dbpp)
+        self.path = path
+        self.ok = rc == 0
+    }
+
+    def execute(sql: str) -> int {
+        return sqlite3_exec(self.db, sql, none, none, none)
+    }
+
+    def errmsg() -> str {
+        # sqlite3_errmsg returns a pointer into SQLite-owned memory that is
+        # invalidated by the next API call. `+ ""` forces a Dragon-owned copy
+        # (a non-heap source operand always takes dragon_str_concat's fresh-
+        # alloc path), so the returned string outlives the next sqlite3 call.
+        return sqlite3_errmsg(self.db) + ""
+    }
+
+    def changes() -> int {
+        return sqlite3_changes(self.db)
+    }
+
+    def last_insert_id() -> int {
+        return sqlite3_last_insert_rowid(self.db)
+    }
+
+    def prepare(sql: str) -> Cursor {
+        return Cursor(self.db, sql)
+    }
+
+    def close() -> int {
+        const rc: int = sqlite3_close(self.db)
+        free(self.dbpp)
+        return rc
+    }
+
+    def __enter__() -> Database {
+        return self
+    }
+
+    def __exit__() -> int {
+        self.close()
+        return 0
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# Cursor - Prepared statement wrapper
+#===----------------------------------------------------------------------===#
+
+class Cursor {
+    def(db: ptr, sql: str) {
+        self.stmtpp = malloc(8)
+        self.rc = sqlite3_prepare_v2(db, sql, -1, self.stmtpp, none)
+        self.stmt = dragon_ptr_deref(self.stmtpp)
+        self.db = db
+    }
+
+    def bind_int(index: int, value: int) -> int {
+        return sqlite3_bind_int(self.stmt, index, value)
+    }
+
+    def bind_float(index: int, value: float) -> int {
+        return sqlite3_bind_double(self.stmt, index, value)
+    }
+
+    def bind_text(index: int, value: str) -> int {
+        return sqlite3_bind_text(self.stmt, index, value, -1, none)
+    }
+
+    def bind_null(index: int) -> int {
+        return sqlite3_bind_null(self.stmt, index)
+    }
+
+    def step() -> int {
+        return sqlite3_step(self.stmt)
+    }
+
+    def reset() -> int {
+        return sqlite3_reset(self.stmt)
+    }
+
+    def column_count() -> int {
+        return sqlite3_column_count(self.stmt)
+    }
+
+    def column_int(index: int) -> int {
+        return sqlite3_column_int(self.stmt, index)
+    }
+
+    def column_float(index: int) -> float {
+        return sqlite3_column_double(self.stmt, index)
+    }
+
+    def column_text(index: int) -> str {
+        # The pointer returned by sqlite3_column_text is owned by SQLite and is
+        # invalidated by the next step()/reset()/finalize() (or another column
+        # access). `+ ""` copies the bytes into a Dragon-owned string now, so the
+        # value survives the rest of the cursor's lifetime.
+        return sqlite3_column_text(self.stmt, index) + ""
+    }
+
+    def column_type(index: int) -> int {
+        return sqlite3_column_type(self.stmt, index)
+    }
+
+    def finalize() -> int {
+        const rc: int = sqlite3_finalize(self.stmt)
+        free(self.stmtpp)
+        return rc
+    }
+}

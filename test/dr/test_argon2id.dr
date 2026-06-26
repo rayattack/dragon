@@ -1,0 +1,85 @@
+# test/dr/test_argon2id.dr - Known-answer tests for Argon2id (RFC 9106).
+#
+# Argon2id is a from-scratch native implementation (mbedTLS ships no BLAKE2b or
+# Argon2). The canonical KAT below is the RFC 9106 §5.3 Argon2id test vector,
+# which exercises the entire pipeline: BLAKE2b, the H' variable-length hash, the
+# G compression over 1024-byte blocks, the data-independent (first two slices of
+# pass 0) + data-dependent indexing, the t-pass/p-lane/4-slice fill, and the
+# lane-XOR finalize. A byte-exact match proves the wiring computes standard
+# Argon2id, not a variant.
+#
+#  password = 32 x 0x01, salt = 16 x 0x02, secret = 8 x 0x03, ad = 12 x 0x04
+#  t = 3, m = 32 KiB, p = 4, tag_len = 32, version = 0x13
+#  tag = 0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659
+
+from unittest import TestCase, main
+from argon2id import hash_raw, verify_raw, hash, verify
+
+const RFC_TAG: str = "0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659"
+
+class Argon2idTests(TestCase) {
+    def test_rfc9106_vector() {
+        const password: bytes = bytes([0x01] * 32)
+        const salt: bytes = bytes([0x02] * 16)
+        const secret: bytes = bytes([0x03] * 8)
+        const ad: bytes = bytes([0x04] * 12)
+        const tag: bytes = hash_raw(password, salt, 3, 32, 4, 32, secret, ad)
+        self.assertEqual(tag.hex(), RFC_TAG)
+    }
+
+    def test_verify_raw_roundtrip() {
+        # hash then verify_raw must accept the same inputs.
+        const password: bytes = b"correct horse battery staple"
+        const salt: bytes = bytes([0x10] * 16)
+        const tag: bytes = hash_raw(password, salt, 2, 64, 1, 32)
+        self.assertTrue(verify_raw(tag, password, salt, 2, 64, 1, 32))
+    }
+
+    def test_one_bit_password_change_fails() {
+        # A single-bit difference in the password must fail verification.
+        const salt: bytes = bytes([0x10] * 16)
+        const tag: bytes = hash_raw(b"correct horse battery staple", salt, 2, 64, 1, 32)
+        # last byte 'e'(0x65) -> 'd'(0x64): a one-bit flip in the password.
+        self.assertFalse(verify_raw(tag, b"correct horse battery stapld", salt, 2, 64, 1, 32))
+    }
+
+    def test_verify_raw_wrong_salt_fails() {
+        const password: bytes = b"hunter2"
+        const tag: bytes = hash_raw(password, bytes([0x20] * 16), 2, 64, 1, 32)
+        self.assertFalse(verify_raw(tag, password, bytes([0x21] * 16), 2, 64, 1, 32))
+    }
+
+    def test_hash_len_honoured() {
+        const tag: bytes = hash_raw(b"pw", bytes([0x02] * 16), 1, 32, 1, 64)
+        self.assertEqual(len(tag), 64)
+    }
+
+    def test_phc_encoded_roundtrip() {
+        # The self-describing PHC string round-trips through verify().
+        const password: bytes = b"s3cr3t-passphrase"
+        const salt: bytes = bytes([0x33] * 16)
+        const encoded: str = hash(password, salt, 2, 64, 1, 32)
+        self.assertTrue(encoded.startswith("$argon2id$v=19$m=64,t=2,p=1$"))
+        self.assertTrue(verify(encoded, password))
+        self.assertFalse(verify(encoded, b"wrong-passphrase"))
+    }
+
+    def test_phc_malformed_returns_false() {
+        # A non-argon2id / malformed string verifies False, never raises.
+        self.assertFalse(verify("not-a-phc-string", b"pw"))
+        self.assertFalse(verify("$argon2i$v=19$m=64,t=2,p=1$AAAA$BBBB", b"pw"))
+    }
+
+    def test_rejects_low_memory() {
+        # m_cost must be >= 8 * parallelism KiB (RFC 9106 minimum).
+        raised: bool = false
+        try {
+            const tag: bytes = hash_raw(b"pw", bytes([0x02] * 16), 1, 4, 2, 32)
+        } except ValueError {
+            raised = true
+        }
+        self.assertTrue(raised)
+    }
+}
+
+main([Argon2idTests()])

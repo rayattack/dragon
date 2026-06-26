@@ -1,0 +1,357 @@
+# threading.dr - Dragon standard library: threading primitives (pthread wrappers)
+#
+# Provides Lock, RWLock, Semaphore, Barrier, Condition, and Event classes.
+# All synchronization primitives support context managers (with statement).
+# All C functions use intc for correct ABI.
+
+#===----------------------------------------------------------------------===#
+# POSIX threading extern declarations
+#===----------------------------------------------------------------------===#
+
+extern "C" def malloc(size: int) -> ptr
+extern "C" def free(p: ptr)
+extern "C" def memset(s: ptr, c: intc, n: int) -> ptr
+
+# pthread mutex - 40 bytes on x86_64 Linux
+extern "C" def pthread_mutex_init(mtx: ptr, attr: ptr) -> intc
+extern "C" def pthread_mutex_lock(mtx: ptr) -> intc
+extern "C" def pthread_mutex_trylock(mtx: ptr) -> intc
+extern "C" def pthread_mutex_unlock(mtx: ptr) -> intc
+extern "C" def pthread_mutex_destroy(mtx: ptr) -> intc
+
+# pthread rwlock - 56 bytes on x86_64 Linux
+extern "C" def pthread_rwlock_init(rw: ptr, attr: ptr) -> intc
+extern "C" def pthread_rwlock_rdlock(rw: ptr) -> intc
+extern "C" def pthread_rwlock_wrlock(rw: ptr) -> intc
+extern "C" def pthread_rwlock_tryrdlock(rw: ptr) -> intc
+extern "C" def pthread_rwlock_trywrlock(rw: ptr) -> intc
+extern "C" def pthread_rwlock_unlock(rw: ptr) -> intc
+extern "C" def pthread_rwlock_destroy(rw: ptr) -> intc
+# Timed acquire (deadline math + macOS fallback live in the C runtime) - return 1 if acquired, 0 on timeout.
+extern "C" def dragon_rwlock_timedrdlock_sec(rw: ptr, seconds: float) -> intc
+extern "C" def dragon_rwlock_timedwrlock_sec(rw: ptr, seconds: float) -> intc
+
+# pthread condition variable - 48 bytes on x86_64 Linux
+extern "C" def pthread_cond_init(cond: ptr, attr: ptr) -> intc
+extern "C" def pthread_cond_wait(cond: ptr, mtx: ptr) -> intc
+extern "C" def pthread_cond_signal(cond: ptr) -> intc
+extern "C" def pthread_cond_broadcast(cond: ptr) -> intc
+extern "C" def pthread_cond_destroy(cond: ptr) -> intc
+
+# pthread barrier - 32 bytes on x86_64 Linux
+extern "C" def pthread_barrier_init(barrier: ptr, attr: ptr, count: intc) -> intc
+extern "C" def pthread_barrier_wait(barrier: ptr) -> intc
+extern "C" def pthread_barrier_destroy(barrier: ptr) -> intc
+
+# Semaphore via sem_t - 32 bytes on x86_64 Linux
+extern "C" def sem_init(sem: ptr, pshared: intc, value: intc) -> intc
+extern "C" def sem_wait(sem: ptr) -> intc
+extern "C" def sem_trywait(sem: ptr) -> intc
+extern "C" def sem_post(sem: ptr) -> intc
+extern "C" def sem_destroy(sem: ptr) -> intc
+# Timed wait (deadline math + macOS fallback live in the C runtime) - return 1 if a permit was taken, 0 on timeout.
+extern "C" def dragon_sem_timedwait_sec(sem: ptr, seconds: float) -> intc
+
+# pthread thread - 8 bytes (pthread_t is unsigned long on x86_64 Linux)
+extern "C" def pthread_create(thread: ptr, attr: ptr, start_routine: ptr, arg: ptr) -> intc
+extern "C" def pthread_join(thread: int, retval: ptr) -> intc
+extern "C" def pthread_detach(thread: int) -> intc
+extern "C" def pthread_self() -> int
+
+# Atomics (runtime helpers)
+extern "C" def dragon_atomic_load(p: ptr) -> int
+extern "C" def dragon_atomic_store(p: ptr, val: int)
+extern "C" def dragon_atomic_add(p: ptr, val: int) -> int
+
+#===----------------------------------------------------------------------===#
+# Struct allocation sizes. The extern comments above give the true x86_64-Linux
+# pthread struct sizes; we malloc these (>= true size, padded for margin and
+# other platforms' layouts) and zero them before init. Change only if a target
+# ABI needs more room.
+#===----------------------------------------------------------------------===#
+
+const _MUTEX_SIZE: int = 64       # pthread_mutex_t (true 40, padded)
+const _RWLOCK_SIZE: int = 64      # pthread_rwlock_t (true 56, padded)
+const _COND_SIZE: int = 48        # pthread_cond_t
+const _BARRIER_SIZE: int = 32     # pthread_barrier_t
+const _SEM_SIZE: int = 32         # sem_t
+const _EVENT_FLAG_SIZE: int = 8   # one i64 atomic flag
+
+#===----------------------------------------------------------------------===#
+# Lock - Basic mutex (most common synchronization primitive)
+#
+# Lock is a compiler intrinsic (see CallBuiltins/CallMethods + TypeChecker
+# LockType), NOT a Dragon class. `Lock()` lowers to a single dragon_lock_new()
+# allocation returning a raw pthread_mutex_t* - no class instance, no GC
+# tracking - and `.acquire(blocking=...)/.release()` plus `with lock { }`
+# lower directly to dragon_lock_* runtime calls. This is the fast path
+# (commandment #1); a Dragon class would add an instance + second malloc.
+# It needs no import: `lock: Lock = Lock()` works anywhere.
+# API matches Python threading.Lock: acquire() blocks; acquire(blocking=False)
+# tries once and returns whether the lock was taken.
+#===----------------------------------------------------------------------===#
+
+#===----------------------------------------------------------------------===#
+# RWLock - Reader-Writer Lock
+#===----------------------------------------------------------------------===#
+
+class RWLock {
+    def() {
+        self.rw = malloc(_RWLOCK_SIZE)
+        memset(self.rw, 0, _RWLOCK_SIZE)
+        pthread_rwlock_init(self.rw, none)
+    }
+
+    # Acquire the lock. A shared read lock by default; pass write=True for the
+    # exclusive write lock. blocking=False tries once and returns whether it was
+    # taken (never waits). blocking=True with timeout>=0 waits up to `timeout`
+    # seconds and returns False if it could not be taken in time. Mirrors
+    # Lock.acquire's shape so every primitive in this module acquires the same way.
+    def acquire(write: bool = False, blocking: bool = True, timeout: float = -1.0) -> bool {
+        if not blocking {
+            if write {
+                return pthread_rwlock_trywrlock(self.rw) == 0
+            }
+            return pthread_rwlock_tryrdlock(self.rw) == 0
+        }
+        if timeout < 0.0 {
+            if write {
+                return pthread_rwlock_wrlock(self.rw) == 0
+            }
+            return pthread_rwlock_rdlock(self.rw) == 0
+        }
+        if write {
+            return dragon_rwlock_timedwrlock_sec(self.rw, timeout) == 1
+        }
+        return dragon_rwlock_timedrdlock_sec(self.rw, timeout) == 1
+    }
+
+    def release() -> int {
+        return pthread_rwlock_unlock(self.rw)
+    }
+
+    def destroy() -> int {
+        const result: int = pthread_rwlock_destroy(self.rw)
+        free(self.rw)
+        return result
+    }
+
+    def __enter__() -> RWLock {
+        self.acquire(write=True)
+        return self
+    }
+
+    def __exit__() -> int {
+        self.release()
+        return 0
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# Semaphore - Counting Semaphore
+#===----------------------------------------------------------------------===#
+
+class Semaphore {
+    def(value: int) {
+        self.sem = malloc(_SEM_SIZE)
+        memset(self.sem, 0, _SEM_SIZE)
+        sem_init(self.sem, 0, value)
+    }
+
+    # Take one permit. blocking=False tries once and returns whether a permit
+    # was available (never waits). blocking=True with timeout>=0 waits up to
+    # `timeout` seconds and returns False if no permit became free in time.
+    # Same shape as Lock.acquire / RWLock.acquire.
+    def acquire(blocking: bool = True, timeout: float = -1.0) -> bool {
+        if not blocking {
+            return sem_trywait(self.sem) == 0
+        }
+        if timeout < 0.0 {
+            return sem_wait(self.sem) == 0
+        }
+        return dragon_sem_timedwait_sec(self.sem, timeout) == 1
+    }
+
+    def release() -> int {
+        return sem_post(self.sem)
+    }
+
+    def destroy() -> int {
+        const result: int = sem_destroy(self.sem)
+        free(self.sem)
+        return result
+    }
+
+    def __enter__() -> Semaphore {
+        self.acquire()
+        return self
+    }
+
+    def __exit__() -> int {
+        self.release()
+        return 0
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# Barrier - Thread Barrier
+#===----------------------------------------------------------------------===#
+
+class Barrier {
+    def(count: int) {
+        self.bar = malloc(_BARRIER_SIZE)
+        memset(self.bar, 0, _BARRIER_SIZE)
+        pthread_barrier_init(self.bar, none, count)
+        self.count = count
+    }
+
+    def wait() -> int {
+        return pthread_barrier_wait(self.bar)
+    }
+
+    def destroy() -> int {
+        const result: int = pthread_barrier_destroy(self.bar)
+        free(self.bar)
+        return result
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# Condition - Condition Variable (used with a Lock or internal mutex)
+#===----------------------------------------------------------------------===#
+
+class Condition {
+    def() {
+        self.cond = malloc(_COND_SIZE)
+        memset(self.cond, 0, _COND_SIZE)
+        pthread_cond_init(self.cond, none)
+        self.mtx = malloc(_MUTEX_SIZE)
+        memset(self.mtx, 0, _MUTEX_SIZE)
+        pthread_mutex_init(self.mtx, none)
+    }
+
+    def acquire() -> int {
+        return pthread_mutex_lock(self.mtx)
+    }
+
+    def release() -> int {
+        return pthread_mutex_unlock(self.mtx)
+    }
+
+    def wait() -> int {
+        return pthread_cond_wait(self.cond, self.mtx)
+    }
+
+    def notify() -> int {
+        return pthread_cond_signal(self.cond)
+    }
+
+    def notify_all() -> int {
+        return pthread_cond_broadcast(self.cond)
+    }
+
+    def destroy() -> int {
+        pthread_cond_destroy(self.cond)
+        pthread_mutex_destroy(self.mtx)
+        free(self.cond)
+        free(self.mtx)
+        return 0
+    }
+
+    def __enter__() -> Condition {
+        self.acquire()
+        return self
+    }
+
+    def __exit__() -> int {
+        self.release()
+        return 0
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# Event - Simple signaling mechanism (one-shot or resettable)
+#===----------------------------------------------------------------------===#
+
+class Event {
+    def() {
+        self.flag = malloc(_EVENT_FLAG_SIZE)
+        memset(self.flag, 0, _EVENT_FLAG_SIZE)
+        self.cond = malloc(_COND_SIZE)
+        memset(self.cond, 0, _COND_SIZE)
+        pthread_cond_init(self.cond, none)
+        self.mtx = malloc(_MUTEX_SIZE)
+        memset(self.mtx, 0, _MUTEX_SIZE)
+        pthread_mutex_init(self.mtx, none)
+    }
+
+    def is_set() -> bool {
+        return dragon_atomic_load(self.flag) != 0
+    }
+
+    def set() -> int {
+        pthread_mutex_lock(self.mtx)
+        dragon_atomic_store(self.flag, 1)
+        pthread_cond_broadcast(self.cond)
+        pthread_mutex_unlock(self.mtx)
+        return 0
+    }
+
+    def clear() -> int {
+        dragon_atomic_store(self.flag, 0)
+        return 0
+    }
+
+    def wait() -> int {
+        pthread_mutex_lock(self.mtx)
+        while dragon_atomic_load(self.flag) == 0 {
+            pthread_cond_wait(self.cond, self.mtx)
+        }
+        pthread_mutex_unlock(self.mtx)
+        return 0
+    }
+
+    def destroy() -> int {
+        pthread_cond_destroy(self.cond)
+        pthread_mutex_destroy(self.mtx)
+        free(self.cond)
+        free(self.mtx)
+        free(self.flag)
+        return 0
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# Thread - Manual OS thread (Python threading.Thread API)
+#===----------------------------------------------------------------------===#
+
+extern "C" def dragon_osthread_new(fn: ptr, args: ptr, nargs: int) -> ptr
+extern "C" def dragon_osthread_start(handle: ptr) -> int
+extern "C" def dragon_osthread_join(handle: ptr) -> int
+extern "C" def dragon_osthread_is_alive(handle: ptr) -> int
+
+class Thread {
+    def(target: ptr) {
+        self.handle = dragon_osthread_new(target, none, 0)
+    }
+
+    def start() -> int {
+        return dragon_osthread_start(self.handle)
+    }
+
+    def join() -> int {
+        return dragon_osthread_join(self.handle)
+    }
+
+    def is_alive() -> bool {
+        return dragon_osthread_is_alive(self.handle) != 0
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# Thread utilities
+#===----------------------------------------------------------------------===#
+
+def current_thread_id() -> int {
+    return pthread_self()
+}

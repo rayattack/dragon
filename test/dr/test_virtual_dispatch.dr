@@ -1,0 +1,60 @@
+"""D026 virtual method dispatch.
+
+A base-typed variable / receiver holding a subclass instance must dispatch to
+the subclass override (via vtable), while leaf / inherited / non-overridden
+calls stay direct (devirtualized). Regression for the bug where dispatch
+resolved on the declared (static) type and called the base method.
+"""
+
+from unittest import TestCase, main
+
+class Animal {
+    def(n: str) { self.nm = n }
+    def speak() -> str { return "..." }
+    def name() -> str { return self.nm }      # never overridden -> direct
+}
+class Dog(Animal) {
+    def(n: str) { self.nm = n }
+    def speak() -> str { return "woof" }
+}
+class Puppy(Dog) {
+    def(n: str) { self.nm = n }
+    def speak() -> str { return "yip" }        # override two levels deep
+}
+def make(k: str) -> Animal {
+    if k == "dog" { return Dog("rex") }
+    if k == "puppy" { return Puppy("bit") }
+    return Animal("a")
+}
+
+class VirtualDispatchTests(TestCase) {
+    def test_base_typed_var_dispatches_to_subclass() {
+        a: Animal = make("dog")
+        self.assertEqual(a.speak(), "woof")
+    }
+
+    def test_inherited_non_overridden_method() {
+        a: Animal = make("dog")
+        self.assertEqual(a.name(), "rex")
+    }
+
+    def test_inline_receiver_two_level_override() {
+        self.assertEqual(make("puppy").speak(), "yip")
+    }
+
+    def test_leaf_exact_type_devirtualized() {
+        d: Dog = Dog("fido")
+        self.assertEqual(d.speak(), "woof")
+    }
+
+    def test_list_polymorphism() {
+        zoo: list[Animal] = [Dog("x"), Puppy("y"), Animal("z")]
+        out: list[str] = []
+        for an in zoo { out.append(an.speak()) }
+        self.assertEqual(out[0], "woof")
+        self.assertEqual(out[1], "yip")
+        self.assertEqual(out[2], "...")
+    }
+}
+
+main([VirtualDispatchTests()])

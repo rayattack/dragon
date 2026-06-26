@@ -1,0 +1,709 @@
+"""MySQL backend for the Dragon database stdlib (Decision 032, Phase 3).
+
+`MySqlConnection` speaks the MySQL client/server protocol directly over a
+`socket.TcpStream` - no libmysqlclient, no C dependency. It is constructed by
+`database.open()` for `mysql://` DSNs.
+
+What it implements:
+  - The connection handshake with `mysql_native_password` (SHA1) and the
+    `caching_sha2_password` fast path (SHA256), including the mid-handshake
+    auth-method switch. Both use only Dragon's crypto stdlib.
+  - Prepared statements via the BINARY protocol (COM_STMT_PREPARE /
+    COM_STMT_EXECUTE / COM_STMT_CLOSE): `template[SQL]` `$$N` placeholders are
+    rewritten to MySQL's `?` and bound as typed binary params - the payload is
+    never spliced into the SQL text, so injection-safety is structural.
+  - Binary result-row decoding via `struct` (the f64<->bytes reinterpret
+    primitive): MySQL sends prepared-statement rows in binary, so FLOAT/DOUBLE
+    columns arrive as raw little-endian IEEE-754 - there is no text option.
+  - column-type -> Dragon type mapping into `dict[str, Any]` rows.
+
+Auth note: `caching_sha2_password` *full* auth (cold server-side cache) requires
+either RSA (not exposed in Dragon's crypto surface) or a TLS channel; this
+driver does the fast path and the `mysql_native_password` switch. A cold
+caching_sha2 account raises a clear ConnectionError pointing at TLS as the fix.
+"""
+
+from database.base import Connection, SQL, Results, QueryError, ConnectionError
+from socket import TcpStream
+from hashlib import sha1, sha256
+import struct
+
+#===----------------------------------------------------------------------===#
+# Command + type constants.
+#===----------------------------------------------------------------------===#
+
+const COM_QUERY: int = 0x03
+const COM_STMT_PREPARE: int = 0x16
+const COM_STMT_EXECUTE: int = 0x17
+const COM_STMT_CLOSE: int = 0x19
+
+# Capability flags we advertise.
+const CLIENT_LONG_PASSWORD: int = 0x1
+const CLIENT_PROTOCOL_41: int = 0x200
+const CLIENT_SECURE_CONNECTION: int = 0x8000
+const CLIENT_PLUGIN_AUTH: int = 0x80000
+const CLIENT_DEPRECATE_EOF: int = 0x1000000
+const CLIENT_CONNECT_WITH_DB: int = 0x8
+
+# Column / param types (subset we decode).
+const MT_TINY: int = 1
+const MT_SHORT: int = 2
+const MT_LONG: int = 3
+const MT_FLOAT: int = 4
+const MT_DOUBLE: int = 5
+const MT_NULL: int = 6
+const MT_TIMESTAMP: int = 7
+const MT_LONGLONG: int = 8
+const MT_INT24: int = 9
+const MT_DATE: int = 10
+const MT_TIME: int = 11
+const MT_DATETIME: int = 12
+const MT_YEAR: int = 13
+const MT_NEWDECIMAL: int = 246
+const MT_VAR_STRING: int = 253
+const MT_STRING: int = 254
+
+
+# A lenenc integer decoded from a buffer: its value plus the byte width it
+# consumed (so the caller can advance). Returned as a 2-int list to dodge the
+# lack of a variadic-arity runtime tuple.
+def _lenenc(b: bytes, o: int) -> list[int] {
+    first: int = b[o]
+    if first < 0xFB {
+        return [first, 1]
+    }
+    if first == 0xFC {
+        return [struct.unpack_u16_le(b, o + 1), 3]
+    }
+    if first == 0xFD {
+        return [b[o + 1] | (b[o + 2] << 8) | (b[o + 3] << 16), 4]
+    }
+    # 0xFE: 8-byte
+    return [struct.unpack_u64_le(b, o + 1), 9]
+}
+
+# Encode a length-encoded integer.
+def _put_lenenc(v: int) -> bytes {
+    if v < 0xFB {
+        return bytes([v])
+    }
+    if v < 0x10000 {
+        return bytes([0xFC, v & 0xFF, (v >> 8) & 0xFF])
+    }
+    if v < 0x1000000 {
+        return bytes([0xFD, v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF])
+    }
+    out: list[int] = [0xFE]
+    i: int = 0
+    while i < 8 {
+        out.append((v >> (8 * i)) & 0xFF)
+        i = i + 1
+    }
+    return bytes(out)
+}
+
+
+class MySqlConnection(Connection) {
+    def(dsn: str) {
+        # Parse mysql://user:password@host:port/dbname
+        rest: str = dsn
+        if rest.startswith("mysql://") {
+            rest = rest[8:]
+        }
+        user: str = "root"
+        password: str = ""
+        host: str = "127.0.0.1"
+        port: int = 3306
+        dbname: str = ""
+
+        at: int = rest.rfind("@")
+        hostpart: str = rest
+        if at >= 0 {
+            userinfo: str = rest[0:at]
+            hostpart = rest[at + 1:]
+            colon: int = userinfo.find(":")
+            if colon >= 0 {
+                user = userinfo[0:colon]
+                password = userinfo[colon + 1:]
+            } else {
+                user = userinfo
+            }
+        }
+        slash: int = hostpart.find("/")
+        hostport: str = hostpart
+        if slash >= 0 {
+            hostport = hostpart[0:slash]
+            dbname = hostpart[slash + 1:]
+        }
+        hc: int = hostport.find(":")
+        if hc >= 0 {
+            host = hostport[0:hc]
+            port = int(hostport[hc + 1:])
+        } else if hostport != "" {
+            host = hostport
+        }
+
+        self.dbname = dbname
+        self.seq = 0
+        self._affected = 0       # declared here so it is a real instance field
+        self._had_resultset = false   # last _run saw a result set (SELECT) vs an OK packet (DML)
+        self._stmt_cache: dict[str, int] = {}   # canonical SQL -> server stmt id
+        self._rbuf = bytes()     # socket read buffer (header+body served from one recv)
+        self._rpos = 0           # consumed offset into _rbuf
+        self.sock = TcpStream.open(host, port)
+        self._authenticate(user, password, dbname)
+    }
+
+    #--- Packet framing -----------------------------------------------------#
+
+    def _recv_exact(n: int) -> bytes {
+        # Serve `n` bytes from the read buffer, refilling from the socket in large
+        # chunks. A packet's 4-byte header and its body then come from one recv,
+        # and a result set's many row packets batch into a few recvs - one syscall
+        # per refill instead of two per packet.
+        while (len(self._rbuf) - self._rpos) < n {
+            if self._rpos == len(self._rbuf) {
+                self._rbuf = bytes()           # fully drained: reset, no copy
+                self._rpos = 0
+            } else if self._rpos > 0 {
+                self._rbuf = self._rbuf[self._rpos:]   # drop consumed prefix
+                self._rpos = 0
+            }
+            chunk: bytes = self.sock.recv_bytes(65536)
+            if len(chunk) == 0 {
+                raise ConnectionError("mysql: server closed the connection")
+            }
+            self._rbuf = self._rbuf + chunk
+        }
+        out: bytes = self._rbuf[self._rpos:self._rpos + n]
+        self._rpos = self._rpos + n
+        return out
+    }
+
+    # Read one protocol packet, tracking the sequence id so the next write can
+    # use seq+1 (MySQL rejects out-of-order packets).
+    def _read_packet() -> bytes {
+        hdr: bytes = self._recv_exact(4)
+        plen: int = hdr[0] | (hdr[1] << 8) | (hdr[2] << 16)
+        self.seq = hdr[3]
+        return self._recv_exact(plen)
+    }
+
+    def _write_packet(seq: int, payload: bytes) {
+        n: int = len(payload)
+        hdr: bytes = bytes([n & 0xFF, (n >> 8) & 0xFF, (n >> 16) & 0xFF, seq & 0xFF])
+        self.sock.send_bytes(hdr + payload)
+        self.seq = seq
+    }
+
+    # Send a fresh command (resets the sequence to 0).
+    def _command(cmd: int, body: bytes) {
+        self._write_packet(0, bytes([cmd]) + body)
+    }
+
+    def _err_text(p: bytes) -> str {
+        # ERR packet: 0xFF + 2-byte code + (#SQLSTATE 6 bytes) + message.
+        msg_off: int = 3
+        if len(p) > 9 and p[3] == 35 {       # '#' SQLSTATE marker
+            msg_off = 9
+        }
+        return p[msg_off:].decode("utf-8")
+    }
+
+    #--- Authentication -----------------------------------------------------#
+
+    def _xor(a: bytes, b: bytes) -> bytes {
+        out: list[int] = []
+        i: int = 0
+        while i < len(a) {
+            out.append(a[i] ^ b[i])
+            i = i + 1
+        }
+        return bytes(out)
+    }
+    # mysql_native_password: SHA1(pw) XOR SHA1(salt + SHA1(SHA1(pw)))
+    def _scramble_native(password: str, salt: bytes) -> bytes {
+        if password == "" {
+            return bytes()
+        }
+        s1: bytes = sha1(password.encode("utf-8")).digest()
+        t: bytes = sha1(salt + sha1(s1).digest()).digest()
+        return self._xor(s1, t)
+    }
+    # caching_sha2_password fast path: SHA256(pw) XOR SHA256(SHA256(SHA256(pw)) + salt)
+    def _scramble_csha2(password: str, salt: bytes) -> bytes {
+        if password == "" {
+            return bytes()
+        }
+        a: bytes = sha256(password.encode("utf-8")).digest()
+        c: bytes = sha256(sha256(a).digest() + salt).digest()
+        return self._xor(a, c)
+    }
+
+    def _authenticate(user: str, password: str, dbname: str) {
+        hs: bytes = self._read_packet()
+        # parse server salt + advertised plugin
+        o: int = 1
+        while hs[o] != 0 {
+            o = o + 1
+        }
+        o = o + 1 + 4                       # server version NUL + connection id
+        salt1: bytes = hs[o:o + 8]
+        o = o + 8 + 1 + 2 + 1 + 2 + 2       # salt1 filler caplo charset status caphi
+        authlen: int = hs[o]
+        o = o + 1 + 10                      # authlen byte + reserved
+        salt: bytes = salt1 + hs[o:o + (authlen - 9)]
+
+        caps: int = CLIENT_LONG_PASSWORD | CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION | CLIENT_PLUGIN_AUTH | CLIENT_DEPRECATE_EOF
+        if dbname != "" {
+            caps = caps | CLIENT_CONNECT_WITH_DB
+        }
+        nul: bytes = bytes([0])
+        resp: bytes = struct.pack_u32_le(caps) + struct.pack_u32_le(16777216) + bytes([45])
+        i: int = 0
+        while i < 23 {
+            resp = resp + nul
+            i = i + 1
+        }
+        resp = resp + user.encode("utf-8") + nul
+        scr: bytes = self._scramble_csha2(password, salt)
+        resp = resp + bytes([len(scr)]) + scr
+        if dbname != "" {
+            resp = resp + dbname.encode("utf-8") + nul
+        }
+        resp = resp + "caching_sha2_password".encode("utf-8") + nul
+        self._write_packet(self.seq + 1, resp)
+
+        authed: bool = False
+        while not authed {
+            r: bytes = self._read_packet()
+            if r[0] == 0x00 {
+                authed = True
+            } else if r[0] == 0xFF {
+                raise ConnectionError("mysql auth failed: " + self._err_text(r))
+            } else if r[0] == 0xFE {
+                # Auth Switch Request: 0xFE + plugin NUL + salt(EOF).
+                j: int = 1
+                while r[j] != 0 {
+                    j = j + 1
+                }
+                plugin: str = r[1:j].decode("utf-8")
+                ns: bytes = r[j + 1:]
+                if len(ns) > 0 and ns[len(ns) - 1] == 0 {
+                    ns = ns[0:len(ns) - 1]
+                }
+                sw: bytes = bytes()
+                if plugin == "mysql_native_password" {
+                    sw = self._scramble_native(password, ns)
+                } else {
+                    sw = self._scramble_csha2(password, ns)
+                }
+                self._write_packet(self.seq + 1, sw)
+            } else if r[0] == 0x01 {
+                # AuthMoreData: 0x03 = fast-auth success (OK follows);
+                # 0x04 = full auth required (needs RSA or TLS - not available).
+                if r[1] != 0x03 {
+                    raise ConnectionError("mysql: caching_sha2_password full auth requires TLS (server-side cache miss); use a mysql_native_password account or a TLS DSN")
+                }
+            }
+        }
+    }
+
+    #--- Prepared-statement helpers ----------------------------------------#
+
+    # Rewrite the canonical `$$N` placeholders to MySQL's positional `?`.
+    # Descending N avoids the `$$1`-prefix-of-`$$10` hazard.
+    def _to_mysql(canonical: str, nparams: int) -> str {
+        sql: str = canonical
+        k: int = nparams - 1
+        while k >= 0 {
+            sql = sql.replace("$$" + str(k), "?")
+            k = k - 1
+        }
+        return sql
+    }
+
+    # Parse a column-definition packet, returning [name, type]. `name` is the
+    # 5th lenenc string; `type` is the 1-byte type past the fixed-length block.
+    def _parse_column_def(p: bytes) -> dict[str, Any] {
+        o: int = 0
+        f: int = 0
+        name: str = ""
+        while f < 5 {                       # catalog schema table org_table name
+            li: list[int] = _lenenc(p, o)
+            slen: int = li[0]
+            o = o + li[1]
+            if f == 4 {
+                name = p[o:o + slen].decode("utf-8")
+            }
+            o = o + slen
+            f = f + 1
+        }
+        # org_name (lenenc string), then lenenc fixed-length (0x0c).
+        on: list[int] = _lenenc(p, o)
+        o = o + on[1] + on[0]
+        fl: list[int] = _lenenc(p, o)
+        o = o + fl[1]
+        # charset(2) column_length(4) type(1) ...
+        ctype: int = p[o + 6]
+        flags: int = struct.unpack_u16_le(p, o + 7)
+        col: dict[str, Any] = {}
+        col["name"] = name
+        col["type"] = ctype
+        col["unsigned"] = (flags & 0x20) != 0
+        return col
+    }
+
+    # A packet is the EOF / OK terminator (DEPRECATE_EOF folds EOF into OK):
+    # header 0xFE with a short body.
+    def _is_eof(p: bytes) -> bool {
+        return p[0] == 0xFE and len(p) < 9
+    }
+
+    # Bind a single param into the EXECUTE body: appends its type (2 bytes) to
+    # `types` and its binary value to `values`. NULL sets the null bitmap bit.
+    def _bind_param(p: Any, types: list[int], values: list[int], null_bitmap: list[int], idx: int) {
+        if isinstance(p, bool) {
+            types.append(MT_TINY)
+            types.append(0)
+            b: bool = p
+            if b {
+                values.append(1)
+            } else {
+                values.append(0)
+            }
+        } else if isinstance(p, int) {
+            types.append(MT_LONGLONG)
+            types.append(0)
+            iv: int = p
+            k: int = 0
+            while k < 8 {
+                values.append((iv >> (8 * k)) & 0xFF)
+                k = k + 1
+            }
+        } else if isinstance(p, float) {
+            types.append(MT_DOUBLE)
+            types.append(0)
+            fv: float = p
+            db: bytes = struct.pack_f64_le(fv)
+            k: int = 0
+            while k < 8 {
+                values.append(db[k])
+                k = k + 1
+            }
+        } else if isinstance(p, str) {
+            types.append(MT_VAR_STRING)
+            types.append(0)
+            sv: str = p
+            sb: bytes = sv.encode("utf-8")
+            lb: bytes = _put_lenenc(len(sb))
+            k: int = 0
+            while k < len(lb) {
+                values.append(lb[k])
+                k = k + 1
+            }
+            k = 0
+            while k < len(sb) {
+                values.append(sb[k])
+                k = k + 1
+            }
+        } else {
+            # NULL: set the bitmap bit, emit type NULL, no value bytes.
+            types.append(MT_NULL)
+            types.append(0)
+            null_bitmap[idx >> 3] = null_bitmap[idx >> 3] | (1 << (idx & 7))
+        }
+    }
+
+    # Decode one binary-protocol column value at offset `o`; returns
+    # [value, nextoffset] (value boxed as Any).
+    def _decode_value(data: bytes, o: int, ctype: int) -> dict[str, Any] {
+        r: dict[str, Any] = {}
+        if ctype == MT_TINY {
+            r["v"] = struct.unpack_i8(data, o)
+            r["n"] = o + 1
+        } else if ctype == MT_SHORT or ctype == MT_YEAR {
+            r["v"] = struct.unpack_i16_le(data, o)
+            r["n"] = o + 2
+        } else if ctype == MT_LONG or ctype == MT_INT24 {
+            r["v"] = struct.unpack_i32_le(data, o)
+            r["n"] = o + 4
+        } else if ctype == MT_LONGLONG {
+            r["v"] = struct.unpack_i64_le(data, o)
+            r["n"] = o + 8
+        } else if ctype == MT_FLOAT {
+            r["v"] = struct.unpack_f32_le(data, o)
+            r["n"] = o + 4
+        } else if ctype == MT_DOUBLE {
+            r["v"] = struct.unpack_f64_le(data, o)
+            r["n"] = o + 8
+        } else if ctype == MT_DATE or ctype == MT_DATETIME or ctype == MT_TIMESTAMP {
+            r2: dict[str, Any] = self._decode_datetime(data, o)
+            r["v"] = r2["v"]
+            r["n"] = r2["n"]
+        } else {
+            # String-like: VAR_STRING / STRING / NEWDECIMAL / BLOB / etc.
+            li: list[int] = _lenenc(data, o)
+            slen: int = li[0]
+            start: int = o + li[1]
+            raw: str = data[start:start + slen].decode("utf-8")
+            if ctype == MT_NEWDECIMAL {
+                r["v"] = float(raw)            # numeric -> float (matches PG NUMERIC)
+            } else {
+                r["v"] = raw
+            }
+            r["n"] = start + slen
+        }
+        return r
+    }
+
+    # Zero-pad a 0-99 value to two digits. Defined before its caller so the
+    # type checker (which registers methods in source order) resolves its `str`
+    # return type inside _decode_datetime's string-building chain.
+    def _pad2(v: int) -> str {
+        if v < 10 {
+            return "0" + str(v)
+        }
+        return str(v)
+    }
+
+    # Binary DATE/DATETIME/TIMESTAMP: 1-byte length then components. Rendered as
+    # an ISO-ish string (the dict[str, Any] vehicle has no native date type).
+    def _decode_datetime(data: bytes, o: int) -> dict[str, Any] {
+        ln: int = data[o]
+        r: dict[str, Any] = {}
+        if ln == 0 {
+            r["v"] = ""
+            r["n"] = o + 1
+            return r
+        }
+        year: int = struct.unpack_u16_le(data, o + 1)
+        month: int = data[o + 3]
+        day: int = data[o + 4]
+        s: str = str(year) + "-" + self._pad2(month) + "-" + self._pad2(day)
+        if ln >= 7 {
+            hour: int = data[o + 5]
+            minute: int = data[o + 6]
+            sec: int = data[o + 7]
+            s = s + " " + self._pad2(hour) + ":" + self._pad2(minute) + ":" + self._pad2(sec)
+        }
+        r["v"] = s
+        r["n"] = o + 1 + ln
+        return r
+    }
+
+    # Prepare `sql_text` (already in MySQL `?` dialect), drain its param- and
+    # column-definition packets, and return the server statement id.
+    def _prepare(sql_text: str, nparams: int) -> int {
+        self._command(COM_STMT_PREPARE, sql_text.encode("utf-8"))
+        head: bytes = self._read_packet()
+        if head[0] == 0xFF {
+            raise QueryError(self._err_text(head))
+        }
+        stmt_id: int = struct.unpack_u32_le(head, 1)
+        num_cols: int = struct.unpack_u16_le(head, 5)
+        np: int = struct.unpack_u16_le(head, 7)
+        # Drain param-definition packets (CLIENT_DEPRECATE_EOF => no EOF).
+        pi: int = 0
+        while pi < np {
+            self._read_packet()
+            pi = pi + 1
+        }
+        # Drain column-definition packets. The result set after EXECUTE carries
+        # its own column defs, so these are consumed only to clear the wire.
+        ci: int = 0
+        while ci < num_cols {
+            self._read_packet()
+            ci = ci + 1
+        }
+        return stmt_id
+    }
+
+    # The cached server statement id for `canonical`, preparing it on first use.
+    # Keyed by the dialect-free canonical text, so a repeated `template[SQL]`
+    # site is prepared once and only EXECUTEd thereafter (the dominant win for
+    # insert/select loops). Cached ids are closed in close().
+    def _get_stmt(canonical: str, nparams: int) -> int {
+        if canonical in self._stmt_cache {
+            return self._stmt_cache[canonical]
+        }
+        sql: str = self._to_mysql(canonical, nparams)
+        sid: int = self._prepare(sql, nparams)
+        self._stmt_cache[canonical] = sid
+        return sid
+    }
+
+    # Execute the (cached) prepared statement for `canonical` with `params`,
+    # returning result rows. DDL/empty result sets return []. Records affected
+    # rows in self._affected. The statement is NOT closed - it stays cached.
+    def _run(canonical: str, params: list[Any]) -> list[dict[str, Any]] {
+        nparams: int = len(params)
+        stmt_id: int = self._get_stmt(canonical, nparams)
+
+        # COM_STMT_EXECUTE.
+        body: list[int] = []
+        b0: bytes = struct.pack_u32_le(stmt_id)
+        k: int = 0
+        while k < 4 { body.append(b0[k]); k = k + 1 }
+        body.append(0)                          # flags = CURSOR_TYPE_NO_CURSOR
+        body.append(1); body.append(0); body.append(0); body.append(0)   # iteration count = 1
+        if nparams > 0 {
+            nb_len: int = (nparams + 7) >> 3
+            null_bitmap: list[int] = [0] * nb_len
+            types: list[int] = []
+            values: list[int] = []
+            i: int = 0
+            while i < nparams {
+                self._bind_param(params[i], types, values, null_bitmap, i)
+                i = i + 1
+            }
+            k = 0
+            while k < nb_len { body.append(null_bitmap[k]); k = k + 1 }
+            body.append(1)                      # new-params-bound flag
+            k = 0
+            while k < len(types) { body.append(types[k]); k = k + 1 }
+            k = 0
+            while k < len(values) { body.append(values[k]); k = k + 1 }
+        }
+        self._command(COM_STMT_EXECUTE, bytes(body))
+
+        rows: list[dict[str, Any]] = []
+        self._affected = 0
+        first: bytes = self._read_packet()
+        if first[0] == 0xFF {
+            raise QueryError(self._err_text(first))
+        }
+        if first[0] == 0x00 {
+            # OK packet (no result set): affected rows is a lenenc int at [1].
+            ar: list[int] = _lenenc(first, 1)
+            self._affected = ar[0]
+            self._had_resultset = false
+        } else {
+            self._had_resultset = true
+            # Result set: `first` is the lenenc column count; column defs follow.
+            rci: int = 0
+            rnames: list[str] = []
+            rtypes: list[int] = []
+            rcc: list[int] = _lenenc(first, 0)
+            rcount: int = rcc[0]
+            while rci < rcount {
+                rdef: dict[str, Any] = self._parse_column_def(self._read_packet())
+                rname: str = rdef["name"]
+                rtype: int = rdef["type"]
+                rnames.append(rname)
+                rtypes.append(rtype)
+                rci = rci + 1
+            }
+            # Binary rows until the EOF/OK terminator.
+            reading: bool = True
+            while reading {
+                pkt: bytes = self._read_packet()
+                if self._is_eof(pkt) {
+                    reading = False
+                } else if pkt[0] == 0xFF {
+                    raise QueryError(self._err_text(pkt))
+                } else {
+                    rows.append(self._decode_binary_row(pkt, rnames, rtypes))
+                }
+            }
+        }
+        return rows
+    }
+
+    # Decode one binary-protocol result row into a dict[str, Any].
+    def _decode_binary_row(pkt: bytes, names: list[str], ctypes: list[int]) -> dict[str, Any] {
+        ncol: int = len(names)
+        # null bitmap: (ncol + 7 + 2) / 8 bytes, starting after the 0x00 header.
+        nb_len: int = (ncol + 9) >> 3
+        o: int = 1 + nb_len
+        row: dict[str, Any] = {}
+        c: int = 0
+        while c < ncol {
+            nm: str = names[c]
+            # column c's null bit is at bit (c + 2).
+            bitpos: int = c + 2
+            isnull: bool = (pkt[1 + (bitpos >> 3)] & (1 << (bitpos & 7))) != 0
+            if isnull {
+                row[nm] = none
+            } else {
+                dv: dict[str, Any] = self._decode_value(pkt, o, ctypes[c])
+                row[nm] = dv["v"]
+                no: int = dv["n"]              # unbox Any -> int before advancing
+                o = no
+            }
+            c = c + 1
+        }
+        return row
+    }
+
+    #--- Connection surface -------------------------------------------------#
+
+    # run - one COM_STMT_EXECUTE via _run, which captures the result rows (SELECT)
+    # or the OK-packet affected count (DML) and records which in _had_resultset.
+    # last_insert_id needs its own round-trip, so it is fetched ONLY for a write
+    # (no result set) - a SELECT never pays it, matching the old query() cost.
+    def run(sql: SQL) -> Results {
+        rows: list[dict[str, Any]] = self._run(sql.canonical, sql.params)
+        aff: int = self._affected
+        xid: int = 0
+        if not self._had_resultset {
+            # Capture before _last_insert_id()'s own query resets self._affected.
+            xid = self._last_insert_id()
+        }
+        return Results(rows, xid, aff)
+    }
+
+    # raw - verbatim text query (DDL / maintenance / transaction control), no
+    # params. Drains the response; rows are not surfaced through this escape hatch.
+    def raw(text: str) -> Results {
+        self._command(COM_QUERY, text.encode("utf-8"))
+        empty: list[dict[str, Any]] = []
+        # Drain the response: OK / ERR, or a result set (col count, defs, rows).
+        p: bytes = self._read_packet()
+        if p[0] == 0xFF {
+            raise QueryError(self._err_text(p))
+        }
+        if p[0] == 0x00 {
+            # OK packet: affected rows is a lenenc int at [1].
+            ar: list[int] = _lenenc(p, 1)
+            return Results(empty, 0, ar[0])
+        }
+        if self._is_eof(p) {
+            return Results(empty, 0, 0)
+        }
+        cc: list[int] = _lenenc(p, 0)
+        ncol: int = cc[0]
+        ci: int = 0
+        while ci < ncol {
+            self._read_packet()
+            ci = ci + 1
+        }
+        draining: bool = True
+        while draining {
+            r: bytes = self._read_packet()
+            if self._is_eof(r) or r[0] == 0xFF {
+                draining = False
+            }
+        }
+        return Results(empty, 0, 0)
+    }
+
+    def _last_insert_id() -> int {
+        rows: list[dict[str, Any]] = self._run("select last_insert_id() as id", [])
+        if len(rows) == 0 {
+            return 0
+        }
+        iid: int = rows[0]["id"]               # unbox Any -> int
+        return iid
+    }
+
+    def close() -> int {
+        # Release every cached prepared statement, then quit.
+        for canonical in self._stmt_cache {
+            self._command(COM_STMT_CLOSE, struct.pack_u32_le(self._stmt_cache[canonical]))
+        }
+        self._command(0x01, bytes())       # COM_QUIT
+        self.sock.close()
+        return 0
+    }
+}

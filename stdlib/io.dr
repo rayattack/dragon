@@ -1,0 +1,553 @@
+# io.dr - Dragon standard library: file I/O
+#
+# Wraps C stdio via extern "C". Provides the File class with context-manager
+# support, read/write/seek operations, and error handling; the in-memory
+# streams BytesIO / StringIO; and whole-file convenience free functions.
+# All C functions use intc for correct ABI.
+
+#===----------------------------------------------------------------------===#
+# C stdio extern declarations
+#===----------------------------------------------------------------------===#
+
+extern "C" def fopen(path: str, mode: str) -> ptr
+extern "C" def fclose(handle: ptr) -> intc
+extern "C" def fread(buf: ptr, size: int, count: int, handle: ptr) -> int
+extern "C" def fwrite(buf: str, size: int, count: int, handle: ptr) -> int
+extern "C" def fseek(handle: ptr, offset: int, whence: intc) -> intc
+extern "C" def ftell(handle: ptr) -> int
+extern "C" def fflush(handle: ptr) -> intc
+extern "C" def feof(handle: ptr) -> intc
+extern "C" def ferror(handle: ptr) -> intc
+extern "C" def rewind(handle: ptr)
+extern "C" def fgets(buf: ptr, size: intc, handle: ptr) -> ptr
+extern "C" def fputs(s: str, handle: ptr) -> intc
+extern "C" def fgetc(handle: ptr) -> intc
+extern "C" def fileno(handle: ptr) -> intc
+extern "C" def ftruncate(fd: intc, length: int) -> intc
+extern "C" def isatty(fd: intc) -> intc
+
+# Memory
+extern "C" def malloc(size: int) -> ptr
+extern "C" def free(p: ptr)
+extern "C" def memset(s: ptr, c: intc, n: int) -> ptr
+extern "C" def strlen(s: ptr) -> int
+
+# Wrap a raw byte buffer (UTF-8 bytes from a file, recv buffer, etc.) into a
+# heap-tracked DragonString. Required for any FFI path that needs to return a
+# `str`: a raw `malloc`'d ptr returned as `str` has no `DragonObjectHeader`,
+# so the caller's scope-exit `dragon_decref_str` reads the 16 bytes preceding
+# the buffer as a fake header - and (depending on what those bytes happen to
+# be) free()s a misaligned non-heap address. The runtime auto-detects the
+# input's kind: pure-ASCII bytes stay as kind=1 (byte-for-byte copy); any
+# byte ≥ 0x80 triggers UTF-8 decode -> kind=4 with one cp per slot, so
+# `len()` returns code-point count and downstream string ops match Python.
+extern "C" def dragon_string_alloc(src: ptr, byte_len: int) -> str
+
+# Wrap a raw byte buffer as real `bytes` (no codec - verbatim copy). Backs
+# File.read_bytes so binary reads return the distinct bytes type instead of a
+# str that silently UTF-8-decodes (and corrupts) arbitrary bytes.
+extern "C" def dragon_bytes_new(data: ptr, len: int) -> bytes
+
+# UTF-8-safe file text helpers. read_text never returns a code point split mid
+# multibyte sequence (it tops up the trailing bytes); write_text encodes the
+# str to UTF-8 before writing (a bare fwrite of a non-ASCII str writes its raw
+# UCS-4 buffer); readline grows without a fixed line-length cap and decodes the
+# whole line in one pass. See lib/Runtime/runtime_fileio.cpp.
+extern "C" def dragon_file_read_text(handle: ptr, size: int) -> str
+extern "C" def dragon_file_write_text(handle: ptr, s: str) -> int
+extern "C" def dragon_file_write_bytes(handle: ptr, data: bytes) -> int
+extern "C" def dragon_file_readline(handle: ptr) -> str
+
+# Seek constants: SEEK_SET=0, SEEK_CUR=1, SEEK_END=2
+const SEEK_SET: int = 0
+const SEEK_CUR: int = 1
+const SEEK_END: int = 2
+
+#===----------------------------------------------------------------------===#
+# Reader - read an existing file. Returned by open().
+#
+# Read-only by type: there is no write method, so "write to a thing you opened
+# for reading" is a compile error, never a runtime UnsupportedOperation.
+#
+# The whole-file readers (text/bytes/lines) consume the file and then close
+# their own FILE*, so `open(p).text()` is leak-free with no `with` and no
+# finalizer (Dragon has none). Reading again after that yields empty - the file
+# is spent. The streaming reads (line/take, `for line in r`) leave the handle
+# open for the next call; scope them with `with open(p) as r { ... }`.
+#===----------------------------------------------------------------------===#
+
+class Reader {
+    def(path: str) {
+        self.handle = fopen(path, "r")
+        # fopen returns NULL for a missing file / bad path / perms. Raise a
+        # catchable FileNotFoundError instead of crashing later in fread.
+        if not self.handle {
+            raise FileNotFoundError("[Errno 2] No such file or directory: '" + path + "'")
+        }
+        self.path = path
+        self.closed = false
+    }
+
+    def text() -> str {
+        # Whole file as UTF-8 text, then close (the file is consumed).
+        if self.closed {
+            return ""
+        }
+        fseek(self.handle, 0, SEEK_END)
+        const size: int = ftell(self.handle)
+        fseek(self.handle, 0, SEEK_SET)
+        const buf: ptr = malloc(size + 1)
+        memset(buf, 0, size + 1)
+        const n: int = fread(buf, 1, size, self.handle)
+        const result: str = dragon_string_alloc(buf, n)
+        free(buf)
+        self.close()
+        return result
+    }
+
+    def bytes() -> bytes {
+        # Whole file as raw bytes (no UTF-8 decode), then close.
+        if self.closed {
+            return dragon_bytes_new(malloc(1), 0)
+        }
+        fseek(self.handle, 0, SEEK_END)
+        const size: int = ftell(self.handle)
+        fseek(self.handle, 0, SEEK_SET)
+        const buf: ptr = malloc(size + 1)
+        const n: int = fread(buf, 1, size, self.handle)
+        const result: bytes = dragon_bytes_new(buf, n)
+        free(buf)
+        self.close()
+        return result
+    }
+
+    def lines() -> list[str] {
+        # Every line (each keeps its trailing newline), then close.
+        out: list[str] = []
+        if self.closed {
+            return out
+        }
+        while true {
+            const line: str = dragon_file_readline(self.handle)
+            if len(line) == 0 { break }
+            out.append(line)
+        }
+        self.close()
+        return out
+    }
+
+    def line() -> str {
+        # One line including the trailing newline; "" at EOF. Streaming - does
+        # not close. Use inside `with open(p) as r { ... }`.
+        if self.closed {
+            return ""
+        }
+        return dragon_file_readline(self.handle)
+    }
+
+    def take(n: int) -> str {
+        # Up to n bytes of text; never splits a UTF-8 code point (the runtime
+        # tops up trailing continuation bytes). Streaming - does not close.
+        if self.closed {
+            return ""
+        }
+        return dragon_file_read_text(self.handle, n)
+    }
+
+    def close() -> int {
+        # Idempotent: a self-close in text()/bytes()/lines() followed by a
+        # `with` exit must never double-fclose.
+        if self.closed {
+            return 0
+        }
+        self.closed = true
+        return fclose(self.handle)
+    }
+
+    def __enter__() -> Reader {
+        return self
+    }
+
+    def __exit__() -> int {
+        self.close()
+        return 0
+    }
+
+    def __iter__() -> Reader {
+        return self
+    }
+
+    def __next__() -> str {
+        # `for line in open(p)` - lazy, one line per iteration, memory-bounded.
+        if self.closed {
+            raise StopIteration("end of file")
+        }
+        const ln: str = dragon_file_readline(self.handle)
+        if len(ln) == 0 {
+            raise StopIteration("end of file")
+        }
+        return ln
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# Writer - write a file. Returned by make() (truncate/replace) and push()
+# (append).
+#
+# Write-only by type: reading from a Writer is a compile error. write() is
+# overloaded on str (UTF-8 encoded) and bytes (verbatim).
+#
+# A Writer holds its FILE* open for the life of the handle, and Dragon has no
+# finalizer, so a Writer MUST be scoped - `with make(p) as w { ... }` - or
+# closed explicitly. A bare `make(p).write(x)` leaks the handle (write() can't
+# self-close: the caller may write more).
+#===----------------------------------------------------------------------===#
+
+class Writer {
+    def(path: str, mode: str) {
+        self.handle = fopen(path, mode)
+        if not self.handle {
+            raise FileNotFoundError("[Errno 2] No such file or directory: '" + path + "'")
+        }
+        self.path = path
+        self.closed = false
+    }
+
+    def write(data: str) -> int {
+        # UTF-8-encode the text before writing (a bare fwrite of a non-ASCII
+        # str would emit its raw UCS-4 buffer).
+        return dragon_file_write_text(self.handle, data)
+    }
+
+    def write(data: bytes) -> int {
+        # Verbatim binary write - no codec touches the buffer.
+        return dragon_file_write_bytes(self.handle, data)
+    }
+
+    def line(data: str) -> int {
+        const a: int = self.write(data)
+        const b: int = self.write("\n")
+        return a + b
+    }
+
+    def lines(items: list[str]) -> int {
+        # Write each item verbatim (no separators added). Returns total bytes.
+        total: int = 0
+        for item in items {
+            total = total + self.write(item)
+        }
+        return total
+    }
+
+    def flush() -> int {
+        return fflush(self.handle)
+    }
+
+    def close() -> int {
+        if self.closed {
+            return 0
+        }
+        self.closed = true
+        return fclose(self.handle)
+    }
+
+    def __enter__() -> Writer {
+        return self
+    }
+
+    def __exit__() -> int {
+        self.close()
+        return 0
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# BytesIO - in-memory binary stream
+#
+# A growable binary buffer presenting the File read/seek API, so the same code
+# parses bytes from disk or from memory. `bytes` is immutable, so the internal
+# accumulator is a list[int] (Dragon's native growable byte buffer), materia-
+# lized to `bytes` only on read()/getvalue(). No zero-copy view (getbuffer):
+# Dragon has no memoryview/bytearray, and getvalue() + the ADR-041 bytes FFI
+# accessor cover the real need.
+#===----------------------------------------------------------------------===#
+
+class BytesIO {
+    def(initial: bytes = b"") {
+        self._buf: list[int] = []
+        const n: int = len(initial)
+        i: int = 0
+        while i < n {
+            self._buf.append(initial[i])
+            i = i + 1
+        }
+        self._pos: int = 0
+    }
+
+    def write(data: bytes) -> int {
+        const n: int = len(data)
+        i: int = 0
+        while i < n {
+            if self._pos < len(self._buf) {
+                self._buf[self._pos] = data[i]
+            } else {
+                self._buf.append(data[i])
+            }
+            self._pos = self._pos + 1
+            i = i + 1
+        }
+        return n
+    }
+
+    def read(size: int = -1) -> bytes {
+        const total: int = len(self._buf)
+        end: int = total
+        if size >= 0 {
+            const want: int = self._pos + size
+            if want < total {
+                end = want
+            }
+        }
+        out: list[int] = []
+        i: int = self._pos
+        while i < end {
+            out.append(self._buf[i])
+            i = i + 1
+        }
+        self._pos = end
+        return bytes(out)
+    }
+
+    def getvalue() -> bytes {
+        return bytes(self._buf)
+    }
+
+    def seek(offset: int, whence: int = SEEK_SET) -> int {
+        if whence == SEEK_SET {
+            self._pos = offset
+        } elif whence == SEEK_CUR {
+            self._pos = self._pos + offset
+        } else {
+            self._pos = len(self._buf) + offset
+        }
+        return self._pos
+    }
+
+    def tell() -> int {
+        return self._pos
+    }
+
+    def truncate(size: int = -1) -> int {
+        target: int = size
+        if size < 0 {
+            target = self._pos
+        }
+        new_buf: list[int] = []
+        i: int = 0
+        while i < target and i < len(self._buf) {
+            new_buf.append(self._buf[i])
+            i = i + 1
+        }
+        self._buf = new_buf
+        return target
+    }
+
+    def readable() -> bool { return true }
+    def writable() -> bool { return true }
+    def seekable() -> bool { return true }
+
+    def close() -> int { return 0 }
+
+    def __enter__() -> BytesIO { return self }
+    def __exit__() -> int { return 0 }
+}
+
+#===----------------------------------------------------------------------===#
+# StringIO - in-memory text stream
+#
+# A growable text buffer presenting the File read/seek API. The dominant use -
+# build a large string with many write()s then getvalue() - is the #1 win over
+# chained `+` concatenation: writes at the end accumulate into a list[str] and
+# are joined exactly once (O(n) instead of O(n^2)). A positioned read/seek/
+# write at the cursor (the rarer overwrite case) flattens once and splices.
+# seek()/tell() are in CODE POINTS (str is UCS-4), a deliberate, documented
+# divergence from CPython's opaque text cookie.
+#===----------------------------------------------------------------------===#
+
+class StringIO {
+    def(initial: str = "") {
+        self._chunks: list[str] = []
+        if len(initial) > 0 {
+            self._chunks.append(initial)
+        }
+        self._len: int = len(initial)
+        self._pos: int = 0
+        self._flat: str = initial
+        self._dirty: bool = false
+    }
+
+    def _join() -> str {
+        if self._dirty {
+            self._flat = "".join(self._chunks)
+            self._dirty = false
+        }
+        return self._flat
+    }
+
+    def write(s: str) -> int {
+        const slen: int = len(s)
+        if self._pos == self._len {
+            # Append at end - fast path, defer the join.
+            self._chunks.append(s)
+            self._len = self._len + slen
+            self._pos = self._len
+            self._dirty = true
+        } else {
+            # Overwrite at the cursor - flatten once and splice.
+            const cur: str = self._join()
+            const head: str = cur[0:self._pos]
+            const tail_start: int = self._pos + slen
+            tail: str = ""
+            if tail_start < len(cur) {
+                tail = cur[tail_start:len(cur)]
+            }
+            self._flat = head + s + tail
+            self._chunks = []
+            self._chunks.append(self._flat)
+            self._len = len(self._flat)
+            self._pos = self._pos + slen
+            self._dirty = false
+        }
+        return slen
+    }
+
+    def getvalue() -> str {
+        return self._join()
+    }
+
+    def read(size: int = -1) -> str {
+        const cur: str = self._join()
+        const total: int = self._len
+        if self._pos >= total {
+            return ""
+        }
+        end: int = total
+        if size >= 0 {
+            const want: int = self._pos + size
+            if want < total {
+                end = want
+            }
+        }
+        const out: str = cur[self._pos:end]
+        self._pos = end
+        return out
+    }
+
+    def readline() -> str {
+        const cur: str = self._join()
+        const total: int = self._len
+        if self._pos >= total {
+            return ""
+        }
+        i: int = self._pos
+        while i < total {
+            if cur[i:i + 1] == "\n" {
+                break
+            }
+            i = i + 1
+        }
+        end: int = i
+        if i < total {
+            end = i + 1
+        }
+        const out: str = cur[self._pos:end]
+        self._pos = end
+        return out
+    }
+
+    def readlines() -> list[str] {
+        out: list[str] = []
+        while true {
+            const ln: str = self.readline()
+            if len(ln) == 0 { break }
+            out.append(ln)
+        }
+        return out
+    }
+
+    def writelines(lines: list[str]) -> int {
+        total: int = 0
+        for line in lines {
+            total = total + self.write(line)
+        }
+        return total
+    }
+
+    def seek(offset: int, whence: int = SEEK_SET) -> int {
+        if whence == SEEK_SET {
+            self._pos = offset
+        } elif whence == SEEK_CUR {
+            self._pos = self._pos + offset
+        } else {
+            self._pos = self._len + offset
+        }
+        return self._pos
+    }
+
+    def tell() -> int {
+        return self._pos
+    }
+
+    def truncate(size: int = -1) -> int {
+        const cur: str = self._join()
+        target: int = size
+        if size < 0 {
+            target = self._pos
+        }
+        if target < self._len {
+            self._flat = cur[0:target]
+            self._chunks = []
+            self._chunks.append(self._flat)
+            self._len = target
+            self._dirty = false
+        }
+        return target
+    }
+
+    def readable() -> bool { return true }
+    def writable() -> bool { return true }
+    def seekable() -> bool { return true }
+
+    def close() -> int { return 0 }
+
+    def __enter__() -> StringIO { return self }
+    def __exit__() -> int { return 0 }
+}
+
+#===----------------------------------------------------------------------===#
+# The file-I/O surface: open / make / push
+#
+# One door per intent. The verb picks the mode (no stringly-typed "r"/"w"/"a"):
+#  open(p) -> Reader read an existing file
+#  make(p) -> Writer create or replace it (truncate)
+#  push(p) -> Writer append to it
+#===----------------------------------------------------------------------===#
+
+def open(path: str) -> Reader {
+    return Reader(path)
+}
+
+def make(path: str) -> Writer {
+    return Writer(path, "w")
+}
+
+def push(path: str) -> Writer {
+    return Writer(path, "a")
+}
+
+def normalize_newlines(text: str) -> str {
+    # The universal-newline read semantic as an explicit, opt-in str op: CRLF
+    # and a lone CR both collapse to LF. Dragon has no hidden per-stream
+    # newline-translation mode, so callers normalize at the point they want it.
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+}

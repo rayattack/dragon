@@ -1,0 +1,215 @@
+"""gettext - minimal `.po` message-catalog reader (Python parity).
+
+Pure Dragon. Parses a single `.po` file into a name->translation dict
+and exposes the Python lookup interface: `gettext(s)` returns the
+translation or `s` unchanged. The compiled `.mo` binary format is **not**
+supported - `.po` is the human-editable source which Dragon code can
+ship directly.
+
+API (subset):
+- `GNUTranslations(path)` - load and parse a `.po`
+- `gettext(msgid)` - return the translation or the msgid fallback
+- `ngettext(msgid, msgid_plural, n)` - singular/plural choice (n != 1 → plural)
+- module-level `install(translations)` so global `gettext(s)` lookups work
+"""
+
+from io import open
+from os.path import exists
+
+
+class GNUTranslations {
+    _catalog: dict[str, str]
+    _plural: dict[str, list[str]]
+    filename: str
+
+    def(path: str = "") {
+        self._catalog = {}
+        self._plural = {}
+        self.filename = path
+        if path != "" {
+            if not exists(path) {
+                return
+            }
+            self._parse(open(path).text())
+        }
+    }
+
+    def _parse(body: str) -> None {
+        cur_id: str = ""
+        cur_id_plural: str = ""
+        cur_strs: list[str] = []
+        in_id: bool = false
+        in_id_plural: bool = false
+        in_strs: bool = false
+        str_idx: int = -1
+
+        for raw in body.split("\n") {
+            line: str = raw.strip()
+            if line == "" or line.startswith("#") {
+                if cur_id != "" or len(cur_strs) > 0 {
+                    self._flush(cur_id, cur_id_plural, cur_strs)
+                    cur_id = ""
+                    cur_id_plural = ""
+                    cur_strs = []
+                }
+                in_id = false
+                in_id_plural = false
+                in_strs = false
+                str_idx = -1
+                continue
+            }
+            if line.startswith("msgid_plural ") {
+                in_id = false
+                in_id_plural = true
+                in_strs = false
+                cur_id_plural = _unquote(line[13:len(line)].strip())
+                continue
+            }
+            if line.startswith("msgid ") {
+                if cur_id != "" or len(cur_strs) > 0 {
+                    self._flush(cur_id, cur_id_plural, cur_strs)
+                    cur_id_plural = ""
+                    cur_strs = []
+                }
+                in_id = true
+                in_id_plural = false
+                in_strs = false
+                str_idx = -1
+                cur_id = _unquote(line[6:len(line)].strip())
+                continue
+            }
+            if line.startswith("msgstr[") {
+                in_id = false
+                in_id_plural = false
+                in_strs = true
+                rb: int = line.find("]")
+                idx: int = int(line[7:rb])
+                str_idx = idx
+                rest: str = line[rb + 1:len(line)].strip()
+                while len(cur_strs) <= idx {
+                    cur_strs.append("")
+                }
+                cur_strs[idx] = _unquote(rest)
+                continue
+            }
+            if line.startswith("msgstr ") {
+                in_id = false
+                in_id_plural = false
+                in_strs = true
+                str_idx = 0
+                if len(cur_strs) == 0 {
+                    cur_strs.append("")
+                }
+                cur_strs[0] = _unquote(line[7:len(line)].strip())
+                continue
+            }
+            # Continuation line (a bare `"..."`).
+            if line.startswith("\"") {
+                extra: str = _unquote(line)
+                if in_id {
+                    cur_id = cur_id + extra
+                } elif in_id_plural {
+                    cur_id_plural = cur_id_plural + extra
+                } elif in_strs and str_idx >= 0 and str_idx < len(cur_strs) {
+                    cur_strs[str_idx] = cur_strs[str_idx] + extra
+                }
+            }
+        }
+        if cur_id != "" or len(cur_strs) > 0 {
+            self._flush(cur_id, cur_id_plural, cur_strs)
+        }
+    }
+
+    def _flush(msgid: str, msgid_plural: str, strs: list[str]) -> None {
+        if msgid == "" and msgid_plural == "" {
+            return
+        }
+        if msgid_plural == "" {
+            if len(strs) > 0 {
+                self._catalog[msgid] = strs[0]
+            }
+        } else {
+            self._plural[msgid] = strs
+        }
+    }
+
+    def gettext(msgid: str) -> str {
+        if msgid in self._catalog {
+            return self._catalog[msgid]
+        }
+        return msgid
+    }
+
+    def ngettext(msgid: str, msgid_plural: str, n: int) -> str {
+        if msgid in self._plural {
+            forms: list[str] = self._plural[msgid]
+            idx: int = 1
+            if n == 1 { idx = 0 }
+            if idx >= len(forms) { idx = len(forms) - 1 }
+            if idx < 0 { idx = 0 }
+            if idx < len(forms) and forms[idx] != "" {
+                return forms[idx]
+            }
+        }
+        if n == 1 { return msgid }
+        return msgid_plural
+    }
+}
+
+
+def _unquote(s: str) -> str {
+    """Strip surrounding double quotes and decode `\n` / `\t` / `\"`."""
+    if len(s) < 2 or s[0:1] != "\"" {
+        return s
+    }
+    inner: str = s[1:len(s) - 1]
+    out: list[str] = []
+    i: int = 0
+    n: int = len(inner)
+    while i < n {
+        ch: str = inner[i:i + 1]
+        if ch == "\\" and i + 1 < n {
+            nx: str = inner[i + 1:i + 2]
+            if nx == "n" {
+                out.append("\n")
+            } elif nx == "t" {
+                out.append("\t")
+            } elif nx == "r" {
+                out.append("\r")
+            } elif nx == "\\" {
+                out.append("\\")
+            } elif nx == "\"" {
+                out.append("\"")
+            } else {
+                out.append(nx)
+            }
+            i += 2
+            continue
+        }
+        out.append(ch)
+        i += 1
+    }
+    return "".join(out)
+}
+
+
+# Module-level "current translation" - `install` sets it, `gettext` reads it.
+_current: GNUTranslations = GNUTranslations()
+
+
+def install(translations: GNUTranslations) -> None {
+    """Make `translations` the target of module-level `gettext(s)`."""
+    global _current
+    _current = translations
+}
+
+
+def gettext(msgid: str) -> str {
+    """Module-level lookup against the installed catalog."""
+    return _current.gettext(msgid)
+}
+
+
+def ngettext(msgid: str, msgid_plural: str, n: int) -> str {
+    return _current.ngettext(msgid, msgid_plural, n)
+}

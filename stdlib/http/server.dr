@@ -1,0 +1,1933 @@
+# server.dr - Dragon HTTP server: Router + Response (request-side types in http.message)
+#
+# TODO: HTTP/2 would be nice but not soon
+# Pure Dragon implementation of HTTP routing and request handling.
+# Uses runtime C functions for socket I/O and HTTP parsing only.
+
+# URL parsing primitives live in urllib.parse (D036). The server keeps only
+# parse_qsl here - used by the signed-cookie session decoder below; the
+# request-side query/route parsing moved to http.message alongside Request.
+from urllib.parse import parse_qsl
+from socket import TcpStream
+from ssl import SSLContext, SSLSocket, PROTOCOL_TLS_SERVER
+from time import monotonic
+# Connection lifecycle (W1) - the transport-agnostic reader hierarchy and the
+# HTTP/1.1 request framer live in the sibling module (split for file size +
+# a clean producer/consumer boundary). Re-exported so existing importers and
+# W2/W3 can `from http.server import ConnReader, RequestReader, ...`.
+from http.connection import ConnReader, FdReader, TlsReader, MemoryReader
+from http.connection import RequestReader, FramedRequest
+# Request representation + routing primitives (R5). Request/Context and the
+# pure validators / route-matchers live in the sibling http.message module -
+# the leaf of the http dependency graph - imported one-directionally here so
+# Response + Router build and dispatch them without an import cycle.
+from http.message import Request, Context, _split_path, _validate_type
+from http.message import _match_route, _middleware_matches, _parse_query_string
+# WebSocket support (W2). The handshake helpers + frame codec + connection
+# handle live in the sibling module (no circular import - websocket.dr depends
+# only on hashlib/base64). _build_response performs the 101 upgrade; serve_connection
+# hands the matched handler a live WebSocket over the taken-over fd.
+from http.websocket import WebSocket, is_websocket_upgrade, compute_accept_key
+# Sessions + CSRF (W5/W7). The signing/crypto core lives in http.sessions; the
+# server wires the cookie load-in / Set-Cookie-out middleware onto it here.
+from http.sessions import Session, sign_session, verify_session, new_session_id
+from http.sessions import csrf_token, csrf_verify, SessionStore
+from urllib.parse import urlencode
+# Typed HTML responses (D032): res.html takes an HTML value (the type produced
+# by template[HTML]), so the already-escaped markup flows through to the wire
+# without a .to_str() at every call site. html.dr depends only on template.dr,
+# so this is a one-directional import - no cycle with the http stack.
+from html import HTML
+
+extern "C" def dragon_string_alloc(src: str, length: int) -> str
+extern "C" def dragon_str_concat(a: str, b: str) -> str
+extern "C" def dragon_str_contains(a: str, b: str) -> int
+extern "C" def dragon_str_eq(a: str, b: str) -> int
+extern "C" def dragon_str_len(s: str) -> int
+extern "C" def dragon_str_find(haystack: str, needle: str) -> int
+# Wire-byte length: HTTP content-length and nb_send sizes are bytes, not
+# code points. `len(str)` returns cp count, which silently truncates UCS-4
+# (kind=4) bodies on the wire - em-dashes, accented characters, etc.
+extern "C" def dragon_str_byte_len_pub(s: str) -> int
+extern "C" def dragon_str_split(s: str, delim: str) -> list
+extern "C" def dragon_str_lower(s: str) -> str
+extern "C" def dragon_str_strip(s: str) -> str
+extern "C" def dragon_str_startswith(s: str, prefix: str) -> int
+extern "C" def dragon_int_to_str(n: int) -> str
+extern "C" def dragon_chr(code: int) -> str
+extern "C" def dragon_ord(s: str) -> int
+extern "C" def dragon_str_to_int(s: str) -> int
+extern "C" def dragon_str_to_float(s: str) -> float
+
+# Non-blocking I/O (green-thread-aware). The per-connection read/write path
+# now lives behind ConnReader (http.connection); the server keeps only the
+# accept-loop + fd-lifecycle calls here.
+extern "C" def dragon_nb_accept(server_fd: int, addr: ptr, addrlen: ptr) -> int
+extern "C" def dragon_close_fd(fd: int)
+extern "C" def dragon_setsockopt_reuse(fd: int)
+
+# Atomic counter ops for the live-connection cap. The accept loop (one thread)
+# increments; each connection's green thread (possibly a different OS worker)
+# decrements, so the counter must be atomic to avoid lost updates.
+extern "C" def dragon_atomic_load(p: ptr) -> int
+extern "C" def dragon_atomic_store(p: ptr, val: int)
+extern "C" def dragon_atomic_add(p: ptr, val: int) -> int
+
+# HTTP parsing (llhttp). The buffer is `ptr` (a raw byte buffer at the C ABI),
+# fed from the verbatim request bytes via dragon_bytes_data - NOT a decoded str.
+# A binary request body (file upload) is not valid UTF-8; decoding it to a str
+# expands high bytes and desyncs the byte-oriented parser from Content-Length.
+extern "C" def dragon_http_parse_request(buf: ptr, length: int) -> ptr
+extern "C" def dragon_bytes_data(b: bytes) -> ptr
+extern "C" def dragon_http_parsed_method(handle: ptr) -> str
+extern "C" def dragon_http_parsed_url(handle: ptr) -> str
+extern "C" def dragon_http_parsed_body(handle: ptr) -> str
+extern "C" def dragon_http_parsed_header_count(handle: ptr) -> int
+extern "C" def dragon_http_parsed_header_key(handle: ptr, idx: int) -> str
+extern "C" def dragon_http_parsed_header_value(handle: ptr, idx: int) -> str
+extern "C" def dragon_http_parsed_ok(handle: ptr) -> int
+extern "C" def dragon_http_parsed_version(handle: ptr) -> str
+extern "C" def dragon_http_parsed_free(handle: ptr)
+extern "C" def dragon_http_build_response(status: int, headers: str, body: str) -> str
+
+# W6 (gzip responses). dragon_zlib_compress emits RFC-1952 gzip (same symbol
+# gzip.dr/tarfile.dr use). dragon_str_from_bytes wraps the compressed bytes as a
+# kind=1 (byte-exact) str so the str-based send path writes them verbatim - a
+# 67-byte payload stays 67 bytes (no UTF-8 re-decode, unlike bytes.decode()).
+extern "C" def dragon_zlib_compress(src: bytes, level: int) -> bytes
+extern "C" def dragon_str_from_bytes(b: bytes) -> str
+
+# Socket syscalls
+extern "C" def socket(domain: intc, type: intc, protocol: intc) -> intc
+extern "C" def bind(fd: intc, addr: ptr, addrlen: intc) -> intc
+extern "C" def listen(fd: intc, backlog: intc) -> intc
+extern "C" def malloc(size: int) -> ptr
+extern "C" def free(p: ptr)
+extern "C" def dragon_sockaddr_in_new(port: intc, addr: str) -> ptr
+extern "C" def dragon_sockaddr_in_size() -> intc
+
+# File I/O
+extern "C" def dragon_file_open(filename: str, mode: str) -> ptr
+extern "C" def dragon_file_read(handle: ptr) -> str
+extern "C" def dragon_file_read_bytes(handle: ptr) -> str
+extern "C" def dragon_file_close(handle: ptr)
+extern "C" def dragon_stat_isfile(path: str) -> int
+
+# Additional string ops
+extern "C" def dragon_str_endswith(s: str, suffix: str) -> int
+extern "C" def dragon_str_join(sep: str, parts: list) -> str
+
+# Green thread spawning
+extern "C" def dragon_vthread_spawn(fn: ptr, args: ptr, nargs: int) -> ptr
+
+#===----------------------------------------------------------------------===#
+# Helper functions
+#===----------------------------------------------------------------------===#
+
+def _build_headers(headers: dict[str, str], body: str) -> str {
+    # Build "Key: Value\r\n" string from headers dict
+    # Auto-adds content-length
+    result: str = ""
+    for key in headers {
+        result = dragon_str_concat(result,
+            dragon_str_concat(key,
+                dragon_str_concat(": ",
+                    dragon_str_concat(headers[key], "\r\n"))))
+    }
+    # content-length is a BYTE count on the wire (RFC 9110). Use the
+    # byte-length helper, not `len()` which returns code-point count and
+    # silently undercounts kind=4 (UCS-4) bodies - every non-ASCII char
+    # produces a 4-byte cp but counts as 1 cp.
+    result = dragon_str_concat(result,
+        dragon_str_concat("content-length: ",
+            dragon_str_concat(dragon_int_to_str(dragon_str_byte_len_pub(body)), "\r\n")))
+    return result
+}
+
+# Extension -> MIME type mapping. Built in a function because `.dr` `{}` does not
+# suppress NEWLINE tokens - multi-line dict literals at module scope don't parse.
+def _build_mime_types() -> dict[str, str] {
+    m: dict[str, str] = {}
+    m[".html"] = "text/html"
+    m[".htm"] = "text/html"
+    m[".css"] = "text/css"
+    m[".js"] = "application/javascript"
+    m[".mjs"] = "application/javascript"
+    m[".json"] = "application/json"
+    m[".xml"] = "application/xml"
+    m[".txt"] = "text/plain"
+    m[".csv"] = "text/csv"
+    m[".png"] = "image/png"
+    m[".jpg"] = "image/jpeg"
+    m[".jpeg"] = "image/jpeg"
+    m[".gif"] = "image/gif"
+    m[".svg"] = "image/svg+xml"
+    m[".ico"] = "image/x-icon"
+    m[".webp"] = "image/webp"
+    m[".avif"] = "image/avif"
+    m[".woff"] = "font/woff"
+    m[".woff2"] = "font/woff2"
+    m[".ttf"] = "font/ttf"
+    m[".otf"] = "font/otf"
+    m[".eot"] = "application/vnd.ms-fontobject"
+    m[".pdf"] = "application/pdf"
+    m[".zip"] = "application/zip"
+    m[".gz"] = "application/gzip"
+    m[".tar"] = "application/x-tar"
+    m[".wasm"] = "application/wasm"
+    m[".mp4"] = "video/mp4"
+    m[".webm"] = "video/webm"
+    m[".ogg"] = "video/ogg"
+    m[".mp3"] = "audio/mpeg"
+    m[".wav"] = "audio/wav"
+    m[".flac"] = "audio/flac"
+    m[".yaml"] = "text/yaml"
+    m[".yml"] = "text/yaml"
+    m[".md"] = "text/markdown"
+    m[".map"] = "application/json"
+    return m
+}
+
+const _MIME_TYPES: dict[str, str] = _build_mime_types()
+
+def _guess_mime_type(filepath: str) -> str {
+    # Extract extension from filepath and look up MIME type
+    const dot_pos: int = dragon_str_find(filepath, ".")
+    if dot_pos < 0 {
+        return "application/octet-stream"
+    }
+    # Walk to the last dot
+    pos: int = dot_pos
+    next_dot: int = dragon_str_find(filepath[pos + 1:], ".")
+    while next_dot >= 0 {
+        pos = pos + 1 + next_dot
+        next_dot = dragon_str_find(filepath[pos + 1:], ".")
+    }
+    const ext: str = dragon_str_lower(filepath[pos:])
+    if ext in _MIME_TYPES {
+        return _MIME_TYPES[ext]
+    }
+    return "application/octet-stream"
+}
+
+#===----------------------------------------------------------------------===#
+# Security helpers
+#===----------------------------------------------------------------------===#
+
+# Safe path canonicalization (copies the libc result into a Dragon string).
+extern "C" def dragon_realpath(path: str) -> str
+# File byte size (st_size), or -1 if the path can't be stat'd.
+extern "C" def dragon_stat_size(path: str) -> int
+
+# Reject CR/LF and other control characters in a header name or value. An
+# attacker who can inject "\r\n" into a Location/Set-Cookie/custom header can
+# split the response and forge a second response (header injection / response
+# splitting -> XSS, cache poisoning, session fixation). Fail closed: raise so a
+# malicious value never reaches the wire. Returns the value unchanged when safe.
+def _reject_ctl(value: str, what: str) -> str {
+    i: int = 0
+    const n: int = len(value)
+    while i < n {
+        const c: int = dragon_ord(value[i])
+        if c < 32 or c == 127 {
+            raise ValueError(f"illegal control character in HTTP {what}")
+        }
+        i = i + 1
+    }
+    return value
+}
+
+# True when `wildcard` (a URL-decoded static-asset path) is lexically safe: no
+# absolute path, no "\0"/backslash, and no ".." segment that could climb out of
+# the assets root. The realpath containment check in serve_static is the
+# authoritative guard; this rejects the obvious traversals before any stat.
+def _safe_asset_path(wildcard: str) -> bool {
+    if len(wildcard) == 0 { return false }
+    if dragon_str_startswith(wildcard, "/") { return false }   # absolute
+    if dragon_str_contains(wildcard, "\\") == 1 { return false }  # backslash
+    # control chars (incl. embedded NUL that would truncate the C path)
+    i: int = 0
+    const n: int = len(wildcard)
+    while i < n {
+        if dragon_ord(wildcard[i]) < 32 { return false }
+        i = i + 1
+    }
+    # reject any ".." path segment
+    const parts: list = dragon_str_split(wildcard, "/")
+    for seg in parts {
+        if seg == ".." { return false }
+    }
+    return true
+}
+
+# True when the resolved `filepath` lives inside the resolved `base_folder`.
+# Both are canonicalized (symlinks + ".." collapsed) and the file must equal the
+# base or sit under "base/". Defeats traversal that survives the lexical check
+# (e.g. via a symlink inside the assets dir pointing outside it).
+def _path_within_base(base_folder: str, filepath: str) -> bool {
+    const rbase: str = dragon_realpath(base_folder)
+    const rfile: str = dragon_realpath(filepath)
+    if len(rbase) == 0 or len(rfile) == 0 { return false }
+    if rfile == rbase { return true }
+    return dragon_str_startswith(rfile, dragon_str_concat(rbase, "/")) == 1
+}
+
+#===----------------------------------------------------------------------===#
+# Response - HTTP response builder
+#===----------------------------------------------------------------------===#
+
+class Response {
+    def() {
+        self.status = 200
+        # Default-on hardening header: nosniff stops a browser from MIME-
+        # sniffing a response into an executable type (e.g. treating a
+        # text/plain body as HTML/JS). Overridable via set_header / del.
+        self._headers = {"content-type": "text/plain", "x-content-type-options": "nosniff"}
+        self.body = ""
+        self._aborted = false
+        self._deferred: list[Callable[[Router], None]] = []
+        # Connection lifecycle (W1):
+        #  _close - force the connection shut after this response
+        #  (sets `Connection: close`).
+        #  _chunked - emit the body with Transfer-Encoding: chunked so a
+        #  handler can stream incrementally (see chunk()/serialize).
+        #  _chunks - accumulated chunk payloads when _chunked is on.
+        #  _takeover - a handler set this to signal "stop HTTP-framing this
+        #  connection after the response is sent" - the W2
+        #  WebSocket upgrade hook. The server hands the live
+        #  ConnReader to _takeover_fn and exits the keep-alive
+        #  loop without closing the fd.
+        self._close: bool = false
+        self._chunked: bool = false
+        self._chunks: list[str] = []
+        self._takeover: bool = false
+        self._takeover_fn: Callable[[ConnReader], None] | None = none
+        # W2 WebSocket upgrade. `_no_body` makes serialize() emit a headers-only
+        # response (status line + headers + blank line, NO content-length and NO
+        # body) - required for `101 Switching Protocols`, which must not carry a
+        # message body (RFC 7230 §3.3.2). `_ws_handler`, when set, is the matched
+        # ws-route handler the serve loop runs against a live WebSocket after the
+        # 101 is on the wire; it takes the WebSocket (not a ConnReader), so it
+        # can't reuse `_takeover_fn`'s signature - hence a dedicated field.
+        self._no_body: bool = false
+        self._ws_handler: Callable[[WebSocket], None] | None = none
+        # Cookies are repeatable (one `Set-Cookie:` line each) - a dict would
+        # collapse multiple cookies to one. cookie() appends here; both
+        # serialize paths emit one line per entry (W4).
+        self._cookies: list[str] = []
+        # Request Accept-Encoding, threaded in by _build_response so serialize
+        # can decide whether to gzip the body (W6). Empty = no negotiation.
+        self._accept_encoding: str = ""
+    }
+
+    # Public read of the response headers. Returns a *copy* so callers can't
+    # mutate the response's internal dict by accident - writes go through the
+    # setter (`res.headers = "key", "value"`) or `set_header(key, value)`.
+    @property
+    def headers() -> dict[str, str] {
+        const out: dict[str, str] = {}
+        for k in self._headers {
+            out[k] = self._headers[k]
+        }
+        return out
+    }
+
+    # `res.headers = "name", "value"` - Python parses the RHS as a tuple, so
+    # the setter gets a `tuple[str, str]`. One tuple-arg keeps the call site
+    # short and reads naturally; multi-key updates loop with this same form.
+    @headers.setter
+    def headers(kv: tuple[str, str]) -> None {
+        self._headers[kv[0]] = kv[1]
+    }
+
+    def json(data: str) -> Response {
+        # charset=utf-8 on every text-bearing type: without it old UAs may
+        # content-sniff (e.g. as UTF-7) and turn a benign body into an XSS vector.
+        self._headers["content-type"] = "application/json; charset=utf-8"
+        self.body = data
+        return self
+    }
+
+    def text(data: str) -> Response {
+        self._headers["content-type"] = "text/plain; charset=utf-8"
+        self.body = data
+        return self
+    }
+
+    def html(data: HTML) -> Response {
+        self._headers["content-type"] = "text/html; charset=utf-8"
+        self.body = data.to_str()
+        return self
+    }
+
+    def redirect(url: str, permanent: bool = false) -> None {
+        # Reject CR/LF in the Location value - a reflected redirect target
+        # (?next=...) with "\r\n" would split the response (header injection).
+        _reject_ctl(url, "redirect location")
+        if permanent {
+            self.status = 308
+        } else {
+            self.status = 307
+        }
+        self._headers["location"] = url
+    }
+
+    def abort(payload: str = "") -> None {
+        self._aborted = true
+        if payload != "" {
+            self.status = 404
+            self.body = payload
+        }
+    }
+
+    def set_header(key: str, value: str) -> Response {
+        # Two-arg method form for header writes - use this when the caller
+        # already has the key/value as separate variables and the tuple-
+        # shorthand setter would force an unnecessary tuple construction.
+        # Reject CR/LF in both name and value to prevent header injection.
+        _reject_ctl(key, "header name")
+        _reject_ctl(value, "header value")
+        self._headers[key] = value
+        return self
+    }
+
+    def cookie(name: str, value: str, max_age: int = 0,
+               path: str = "/", secure: bool = false,
+               httponly: bool = false, samesite: str = "Lax") -> Response {
+        # Validate every attacker-influenced part so a value containing "\r\n"
+        # (header injection) or "; Domain=evil.com"/"; HttpOnly" (attribute
+        # injection that widens scope or flips flags) can't be smuggled in.
+        _reject_ctl(name, "cookie name")
+        _reject_ctl(value, "cookie value")
+        _reject_ctl(path, "cookie path")
+        # ';' would inject extra cookie attributes; reject in the caller-
+        # controlled name/value/path.
+        if dragon_str_contains(name, ";") == 1 or dragon_str_contains(value, ";") == 1 or dragon_str_contains(path, ";") == 1 {
+            raise ValueError("illegal ';' in cookie name/value/path")
+        }
+        # SameSite is a closed set; reject anything else rather than emit it raw.
+        if samesite != "Strict" and samesite != "Lax" and samesite != "None" {
+            raise ValueError("cookie samesite must be Strict, Lax, or None")
+        }
+        # Build Set-Cookie header value
+        cookie_str: str = f"{name}={value}; Path={path}; SameSite={samesite}"
+        if max_age > 0 {
+            cookie_str = f"{cookie_str}; Max-Age={max_age}"
+        }
+        if secure {
+            cookie_str = f"{cookie_str}; Secure"
+        }
+        if httponly {
+            cookie_str = f"{cookie_str}; HttpOnly"
+        }
+        self._cookies.append(cookie_str)
+        return self
+    }
+
+    # One `set-cookie: <value>\r\n` line per queued cookie. Returns "" when no
+    # cookies were set, so both serialize paths can concat unconditionally.
+    def _cookie_lines() -> str {
+        out: str = ""
+        for c in self._cookies {
+            out = dragon_str_concat(out,
+                dragon_str_concat("set-cookie: ",
+                    dragon_str_concat(c, "\r\n")))
+        }
+        return out
+    }
+
+    def file(filepath: str) -> Response {
+        # Serve a file from disk with auto-detected content type. Read
+        # raw bytes (kind=1, no UTF-8 decode) so binary files - PNG, JPG,
+        # WOFF2, ZIP - travel verbatim. Text files are pure-ASCII or
+        # UTF-8 already, so the raw read is correct for them too.
+        if not dragon_stat_isfile(filepath) {
+            self.status = 404
+            self.body = "Not Found"
+            return self
+        }
+        # Cap the in-memory read: file() slurps the whole file, so an
+        # unbounded read of a huge (or special, e.g. /proc/kcore) file would
+        # exhaust memory. Refuse with 413 above the ceiling.
+        const fsize: int = dragon_stat_size(filepath)
+        if fsize > _MAX_FILE_RESPONSE_BYTES {
+            self.status = 413
+            self.body = "Payload Too Large"
+            return self
+        }
+        const fh: ptr = dragon_file_open(filepath, "rb")
+        const contents: str = dragon_file_read_bytes(fh)
+        dragon_file_close(fh)
+        self._headers["content-type"] = _guess_mime_type(filepath)
+        self.body = contents
+        return self
+    }
+
+    def defer(task: Callable[[Router], None]) -> None {
+        # Schedule a task to run after the response is sent
+        self._deferred.append(task)
+    }
+
+    def out(status: int, body: str) -> Response {
+        # Convenience: set status + body in one call
+        self.status = status
+        self.body = body
+        return self
+    }
+
+    # --- Connection lifecycle controls (W1) ---
+
+    def close_connection() -> Response {
+        # Force this connection shut after the response (emits Connection:
+        # close). Use for error paths or one-shot endpoints.
+        self._close = true
+        return self
+    }
+
+    # Switch this response into Transfer-Encoding: chunked mode and append one
+    # chunk. Handlers call chunk() repeatedly to stream a body incrementally
+    # instead of buffering it whole; serialize() then frames each piece as
+    # `{hex-len}\r\n{data}\r\n` and terminates with the `0\r\n\r\n` last-chunk.
+    def chunk(data: str) -> Response {
+        self._chunked = true
+        if dragon_str_byte_len_pub(data) > 0 {
+            self._chunks.append(data)
+        }
+        return self
+    }
+
+    # --- Connection takeover seam (W2 hook) ---
+    #
+    # A handler that wants to take the raw connection away from HTTP framing
+    # (the 101 Switching Protocols / WebSocket upgrade case) calls takeover()
+    # with a callback. After the response is sent, the keep-alive loop invokes
+    # `fn(reader)` with the live ConnReader and then EXITS without closing the
+    # fd - the callback now owns the connection for the rest of its life.
+    def takeover(fn: Callable[[ConnReader], None]) -> Response {
+        self._takeover = true
+        self._takeover_fn = fn
+        self._close = true        # never resume HTTP framing on this fd
+        return self
+    }
+
+    def serialize() -> str {
+        if self._no_body {
+            return self._serialize_no_body()
+        }
+        if self._chunked {
+            return self._serialize_chunked()
+        }
+        # Build headers string. `_build_headers` iterates the dict, so we
+        # pass `self._headers` directly - the property getter returns a copy
+        # we don't want to pay for on every response.
+        if self._close {
+            self._headers["connection"] = "close"
+        }
+        # W6: negotiate gzip. Compress when the client advertised gzip, the
+        # content-type is compressible, we haven't already encoded, and the body
+        # clears the min size. Compress self.body (str) -> bytes -> wrap the gzip
+        # bytes back into a kind=1 str so the byte-oriented send path writes them
+        # verbatim. Condition is parenthesized so it can span lines (`()`
+        # suppresses NEWLINE in .dr). _build_headers then recomputes
+        # content-length from the new (kind=1, byte-exact) body automatically.
+        if (dragon_str_contains(dragon_str_lower(self._accept_encoding), "gzip") != 0
+            and ("content-encoding" not in self._headers)
+            and _is_compressible(self._headers["content-type"] if "content-type" in self._headers else "")
+            and dragon_str_byte_len_pub(self.body) >= _GZIP_MIN_BODY) {
+            const raw: bytes = self.body.encode("utf-8")
+            const gz: bytes = dragon_zlib_compress(raw, 9)
+            self.body = dragon_str_from_bytes(gz)
+            self._headers["content-encoding"] = "gzip"
+            self._headers["vary"] = "Accept-Encoding"
+        }
+        const header_str: str = dragon_str_concat(
+            _build_headers(self._headers, self.body), self._cookie_lines())
+        return dragon_http_build_response(self.status, header_str, self.body)
+    }
+
+    # Build a chunked response: status line + headers (no content-length, plus
+    # Transfer-Encoding: chunked) + the encoded chunk stream. Body chunks are
+    # whatever the handler accumulated via chunk(); any value left in self.body
+    # is emitted as a leading chunk so res.text(...).chunk(...) composes.
+    def _serialize_chunked() -> str {
+        header_str: str = ""
+        for key in self._headers {
+            if dragon_str_lower(key) == "content-length" {
+                continue
+            }
+            header_str = dragon_str_concat(header_str,
+                dragon_str_concat(key,
+                    dragon_str_concat(": ",
+                        dragon_str_concat(self._headers[key], "\r\n"))))
+        }
+        header_str = dragon_str_concat(header_str, "transfer-encoding: chunked\r\n")
+        header_str = dragon_str_concat(header_str, self._cookie_lines())
+        if self._close {
+            header_str = dragon_str_concat(header_str, "connection: close\r\n")
+        }
+
+        body_out: str = ""
+        if dragon_str_byte_len_pub(self.body) > 0 {
+            body_out = _encode_chunk(self.body)
+        }
+        for piece in self._chunks {
+            body_out = dragon_str_concat(body_out, _encode_chunk(piece))
+        }
+        # Last-chunk marker + final CRLF.
+        body_out = dragon_str_concat(body_out, "0\r\n\r\n")
+        return dragon_http_build_response(self.status, header_str, body_out)
+    }
+
+    # Headers-only serialization for a body-less response - the `101 Switching
+    # Protocols` WebSocket handshake. The generic path (_build_headers) always
+    # appends a content-length, which a 101 must NOT carry (RFC 7230 §3.3.2:
+    # no message body, no framing header), so this path emits the status line +
+    # the upgrade headers + the blank-line terminator only. content-length is
+    # filtered defensively in case a caller left one on the header dict.
+    def _serialize_no_body() -> str {
+        header_str: str = ""
+        for key in self._headers {
+            if dragon_str_lower(key) == "content-length" {
+                continue
+            }
+            header_str = dragon_str_concat(header_str,
+                dragon_str_concat(key,
+                    dragon_str_concat(": ",
+                        dragon_str_concat(self._headers[key], "\r\n"))))
+        }
+        header_str = dragon_str_concat(header_str, self._cookie_lines())
+        return dragon_http_build_response(self.status, header_str, "")
+    }
+}
+
+# Frame one chunk for a Transfer-Encoding: chunked body: hex byte-length line,
+# CRLF, the payload, CRLF. The size is the WIRE byte count (kind-aware), not
+# the code-point count, so multibyte payloads frame correctly.
+def _encode_chunk(data: str) -> str {
+    const n: int = dragon_str_byte_len_pub(data)
+    out: str = dragon_str_concat(_int_to_hex(n), "\r\n")
+    out = dragon_str_concat(out, data)
+    out = dragon_str_concat(out, "\r\n")
+    return out
+}
+
+# Lowercase hex of a non-negative int, no prefix (chunk-size line format).
+def _int_to_hex(n: int) -> str {
+    if n == 0 {
+        return "0"
+    }
+    const digits: str = "0123456789abcdef"
+    v: int = n
+    out: str = ""
+    while v > 0 {
+        const d: int = v % 16
+        out = dragon_str_concat(digits[d:d + 1], out)
+        v = v // 16
+    }
+    return out
+}
+
+
+#===----------------------------------------------------------------------===#
+# Route - a single registered route
+#===----------------------------------------------------------------------===#
+
+class Route {
+    def(method: str, pattern: str, handler: Callable[[Request, Response, Context], None]) {
+        self.method = method
+        self.pattern = pattern
+        self.handler = handler
+
+        # Strip optional query-hint suffix "?k1:t1&k2:t2" - these annotate
+        # the handler's expected query types so coercion fails with 400 instead
+        # of silently returning a junk value.
+        path_part: str = pattern
+        self.query_types: dict[str, str] = {}
+        const qmark: int = dragon_str_find(pattern, "?")
+        if qmark >= 0 {
+            path_part = pattern[0:qmark]
+            const hints: str = pattern[qmark + 1:]
+            const hint_pairs: list[str] = hints.split("&")
+            for hp in hint_pairs {
+                if len(hp) == 0 {
+                    continue
+                }
+                const colon: int = dragon_str_find(hp, ":")
+                if colon >= 0 {
+                    self.query_types[hp[0:colon]] = hp[colon + 1:]
+                } else {
+                    self.query_types[hp] = "str"
+                }
+            }
+        }
+
+        # Parse the path portion into segments for matching.
+        self.segments = _split_path(path_part)
+        self.param_names = []
+        self.param_types = []
+        for seg in self.segments {
+            if len(seg) > 0 and seg[0] == ":" {
+                # Typed param :name:type or just :name
+                const colon2: int = dragon_str_find(seg[1:], ":")
+                if colon2 >= 0 {
+                    self.param_names.append(seg[1:colon2 + 1])
+                    self.param_types.append(seg[colon2 + 2:])
+                } else {
+                    self.param_names.append(seg[1:])
+                    self.param_types.append("str")
+                }
+            }
+        }
+    }
+}
+
+
+#===----------------------------------------------------------------------===#
+# WsRoute - a single registered WebSocket route (W2)
+#===----------------------------------------------------------------------===#
+#
+# Parallel to Route, but the handler takes a WebSocket (not Request/Response/
+# Context) - a different callable type, so it can't share Route's `handler`
+# field. Path-segment + typed-param parsing mirrors Route exactly (so ws routes
+# support `/room/:id` style params), minus the query-hint suffix (WS upgrades
+# are bare GETs with no query coercion). Matched by _match_ws, which ignores the
+# method since every upgrade arrives as GET.
+
+class WsRoute {
+    def(pattern: str, handler: Callable[[WebSocket], None]) {
+        self.pattern = pattern
+        self.handler = handler
+        self.segments = _split_path(pattern)
+        self.param_names = []
+        self.param_types = []
+        for seg in self.segments {
+            if len(seg) > 0 and seg[0] == ":" {
+                const colon2: int = dragon_str_find(seg[1:], ":")
+                if colon2 >= 0 {
+                    self.param_names.append(seg[1:colon2 + 1])
+                    self.param_types.append(seg[colon2 + 2:])
+                } else {
+                    self.param_names.append(seg[1:])
+                    self.param_types.append("str")
+                }
+            }
+        }
+    }
+}
+
+
+#===----------------------------------------------------------------------===#
+# MiddlewareEntry - a registered BEFORE or AFTER hook
+#===----------------------------------------------------------------------===#
+
+class MiddlewareEntry {
+    def(pattern: str, handler: Callable[[Request, Response, Context], None], kind: str) {
+        self.pattern = pattern
+        self.handler = handler
+        self.kind = kind
+        self.segments = _split_path(pattern)
+    }
+}
+
+
+#===----------------------------------------------------------------------===#
+# SubdomainContext - chained registration helper for a single subdomain
+#===----------------------------------------------------------------------===#
+#
+# Returned by `Router.subdomain(name)`. Every verb on this proxy forwards to
+# the underlying Router with the bound subdomain name baked in, so app code
+# reads as `api = app.subdomain("api"); api.GET(...)` rather than passing
+# the subdomain string to every call. Matches heaven's SubdomainContext API.
+
+class SubdomainContext {
+    def(app: Router, name: str) {
+        self.app = app
+        self.name = name
+    }
+
+    def GET(route: str, handler: Callable[[Request, Response, Context], None]) -> None {
+        self.app.GET(route, handler, self.name)
+    }
+    def POST(route: str, handler: Callable[[Request, Response, Context], None]) -> None {
+        self.app.POST(route, handler, self.name)
+    }
+    def PUT(route: str, handler: Callable[[Request, Response, Context], None]) -> None {
+        self.app.PUT(route, handler, self.name)
+    }
+    def PATCH(route: str, handler: Callable[[Request, Response, Context], None]) -> None {
+        self.app.PATCH(route, handler, self.name)
+    }
+    def DELETE(route: str, handler: Callable[[Request, Response, Context], None]) -> None {
+        self.app.DELETE(route, handler, self.name)
+    }
+    def HEAD(route: str, handler: Callable[[Request, Response, Context], None]) -> None {
+        self.app.HEAD(route, handler, self.name)
+    }
+    def OPTIONS(route: str, handler: Callable[[Request, Response, Context], None]) -> None {
+        self.app.OPTIONS(route, handler, self.name)
+    }
+    def CONNECT(route: str, handler: Callable[[Request, Response, Context], None]) -> None {
+        self.app.CONNECT(route, handler, self.name)
+    }
+    def TRACE(route: str, handler: Callable[[Request, Response, Context], None]) -> None {
+        self.app.TRACE(route, handler, self.name)
+    }
+    def HTTP(route: str, handler: Callable[[Request, Response, Context], None]) -> None {
+        self.app.HTTP(route, handler, self.name)
+    }
+    def BEFORE(pattern: str, handler: Callable[[Request, Response, Context], None]) -> None {
+        self.app.BEFORE(pattern, handler, self.name)
+    }
+    def AFTER(pattern: str, handler: Callable[[Request, Response, Context], None]) -> None {
+        self.app.AFTER(pattern, handler, self.name)
+    }
+    def ws(route: str, handler: Callable[[WebSocket], None]) -> None {
+        self.app.ws(route, handler, self.name)
+    }
+    def ASSETS(folder: str, route: str = "") -> None {
+        self.app.ASSETS(folder, route, self.name)
+    }
+}
+
+
+#===----------------------------------------------------------------------===#
+# Router - HTTP method registration, route matching, middleware
+#===----------------------------------------------------------------------===#
+
+# Keep-alive guards (W1). A connection serves at most _MAX_REQUESTS_PER_CONN
+# requests and lives at most _KEEPALIVE_TIMEOUT_SECS of wall-clock time; past
+# either bound the next loop iteration closes the connection so a long-lived or
+# request-flooding client can't pin a green thread forever. These bound the
+# connection at the LOOP boundary; the per-read idle timeout below (R1) bounds a
+# peer that goes silent *inside* a recv - the slowloris case the loop-boundary
+# checks can't reach.
+const _MAX_REQUESTS_PER_CONN: int = 1000
+const _KEEPALIVE_TIMEOUT_SECS: int = 30
+
+# Idle/read timeout (R1), in ms, applied to every wire read of a connection. A
+# peer that stops sending mid-request is dropped after this much silence rather
+# than holding a green thread open indefinitely. Mandatory by default (30s,
+# matching the connection lifetime); tune per-Router with set_idle_timeout(),
+# or pass 0 to disable (e.g. for a long-poll endpoint that legitimately idles).
+const _IDLE_TIMEOUT_MS: int = 30000
+
+# Max concurrent connections the accept loop will hold open (DoS guard). Each
+# fired connection vthread costs ~70-100 KB resident, so an unbounded accept
+# loop lets a single host OOM the server with a connection flood. Above this,
+# new accepts are closed immediately. Tune per-Router with set_max_connections().
+const _MAX_CONNECTIONS: int = 1024
+
+# Max bytes Response.file() will read into memory. A request that resolves to a
+# huge file (e.g. /proc/kcore via path traversal, or a multi-GB upload) would
+# otherwise malloc the whole thing. Above this, file() returns 413. Streaming
+# large bodies is a separate feature; this is the safety ceiling.
+const _MAX_FILE_RESPONSE_BYTES: int = 52428800  # 50 MiB
+
+# W6 gzip: only compress bodies at/above this size - below it the ~20B gzip
+# header plus CPU cost outweighs the savings (matches nginx gzip_min_length).
+const _GZIP_MIN_BODY: int = 1400
+
+# Content-types worth compressing. Already-compressed formats (png/jpeg/zip/
+# woff2/mp4...) gain nothing, so this is an allow-list by prefix, not a deny
+# list. A free function (not a const dict) for the same NEWLINE reason as the
+# other table builders here.
+def _is_compressible(content_type: str) -> bool {
+    const ct: str = dragon_str_lower(content_type)
+    if dragon_str_startswith(ct, "text/") != 0 { return true }
+    if dragon_str_contains(ct, "application/json") != 0 { return true }
+    if dragon_str_contains(ct, "application/javascript") != 0 { return true }
+    if dragon_str_contains(ct, "application/xml") != 0 { return true }
+    if dragon_str_contains(ct, "image/svg") != 0 { return true }
+    return false
+}
+
+# Serialize a session's data dict into the signed-cookie payload (urlencoded,
+# percent-encoding any literal '|' so the sid|data separator stays unambiguous).
+def _session_encode(s: Session) -> str {
+    return urlencode(s.data)
+}
+
+# Rebuild a Session from a decoded "sid|data" payload. Writes go straight to
+# .data (NOT .set) so a freshly-loaded, untouched session stays clean (dirty
+# stays false) and emits no needless Set-Cookie on the way out.
+def _session_decode(sid: str, payload: str) -> Session {
+    const s: Session = Session(sid)
+    const items: list[tuple[str, str]] = parse_qsl(payload, true)
+    # Writes go straight to .data (NOT .set) so a freshly-loaded session stays
+    # clean (dirty stays false) and emits no needless Set-Cookie on the way out.
+    for k, v in items {
+        s.data[k] = v
+    }
+    return s
+}
+
+class Router {
+    # TLS context, assigned only by listen_tls() (declared here so the field
+    # exists even before TLS is enabled - guarded by _tls_enabled below).
+    _ssl_context: SSLContext
+
+    def(port: int = 8000, host: str = "0.0.0.0", apex: str = "") {
+        self.host = host
+        self.port = port
+        # Apex domain (e.g. "example.com"). When set, _extract_subdomain
+        # strips it from the Host header to find the subdomain prefix.
+        # When empty, the first label of the Host header is treated as
+        # the subdomain (matches local-dev `api.localhost:8000` patterns).
+        self.apex = apex
+        # Per-subdomain buckets. Default ("") holds routes registered
+        # without a subdomain - matches heaven's DEFAULT bucket. Wildcard
+        # ("*") catches any unrecognized Host header. Bucketing means
+        # request dispatch scans only routes for the matched subdomain
+        # (O(routes/subdomain)), not the full table (O(total_routes)).
+        self._routes_by_sd: dict[str, list[Route]] = {}
+        self._before_by_sd: dict[str, list[MiddlewareEntry]] = {}
+        self._after_by_sd: dict[str, list[MiddlewareEntry]] = {}
+        # W2: per-subdomain WebSocket routes, parallel to _routes_by_sd. Kept
+        # separate (not folded into _routes_by_sd with a pseudo-method) because
+        # WsRoute's handler has a different callable type than Route's.
+        self._ws_routes_by_sd: dict[str, list[WsRoute]] = {}
+        self._routes_by_sd[""] = []
+        self._before_by_sd[""] = []
+        self._after_by_sd[""] = []
+        self._ws_routes_by_sd[""] = []
+        self._storage: dict[str, str] = {}
+        self._config: dict[str, str] = {}
+        self._on_startup: list[Callable[[Router], None]] = []
+        self._on_shutdown: list[Callable[[Router], None]] = []
+        self._server_fd: int = -1
+        # TLS off until listen_tls() configures _ssl_context.
+        self._tls_enabled: bool = False
+        # Session + CSRF config (W5/W7). Everything off until enable_sessions /
+        # enable_csrf is called, so a router that never enables them pays nothing
+        # (the dispatch gates are plain bool checks).
+        self._session_enabled: bool = false
+        self._session_secret: bytes = b""
+        self._session_cookie_name: str = "dragon_session"
+        self._session_max_age: int = 0
+        self._session_secure: bool = false
+        self._session_samesite: str = "Lax"
+        # Optional server-side store (R3). `none` (default) keeps the pure
+        # signed-cookie model: the HMAC-signed cookie carries the session data
+        # itself - zero server state, leak-free by construction, the fast path.
+        # When a SessionStore is supplied, the cookie carries only the signed
+        # (tamper-proof) sid and the data lives in the store - Flask-Session
+        # parity for callers who outgrow the ~4 KB cookie ceiling or want
+        # server-side revocation. Virtual dispatch (D026) routes load/save/delete
+        # to the concrete backend; the default MemoryStore is dev-only.
+        self._session_store: SessionStore | None = none
+        self._csrf_enabled: bool = false
+        self._csrf_header_name: str = "x-csrf-token"
+        # Idle/read timeout (R1) for every connection this router serves. See
+        # _IDLE_TIMEOUT_MS; override with set_idle_timeout().
+        self._idle_timeout_ms: int = _IDLE_TIMEOUT_MS
+        # Live-connection cap (DoS guard). _conn_cell is an 8-byte heap counter
+        # mutated atomically (the accept loop and connection vthreads run on
+        # different OS threads). 0 max disables the cap.
+        self._max_connections: int = _MAX_CONNECTIONS
+        self._conn_cell: ptr = malloc(8)
+        dragon_atomic_store(self._conn_cell, 0)
+        # Host allowlist. Empty = accept any Host (dev default). When non-empty,
+        # a request whose Host (sans port) is not listed gets 421, blocking
+        # Host-header attacks (poisoned absolute URLs / password-reset links).
+        self._allowed_hosts: list[str] = []
+    }
+
+    # Cap the number of simultaneously-open connections (DoS guard). 0 disables.
+    def set_max_connections(n: int) -> None {
+        self._max_connections = n
+    }
+
+    # Restrict which Host headers the server will serve. Pass the hostnames your
+    # app answers for (without port); anything else is rejected with 421. Leave
+    # unset (empty) only in development.
+    def set_allowed_hosts(hosts: list[str]) -> None {
+        self._allowed_hosts = hosts
+    }
+
+    # True if `host_hdr` (a raw Host header, possibly "host:port") is permitted.
+    # Case-insensitive; port is ignored. Always true when no allowlist is set.
+    def _host_allowed(host_hdr: str) -> bool {
+        if len(self._allowed_hosts) == 0 { return true }
+        const colon: int = dragon_str_find(host_hdr, ":")
+        const hostname: str = host_hdr if colon < 0 else host_hdr[0:colon]
+        const lower: str = dragon_str_lower(hostname)
+        for h in self._allowed_hosts {
+            if dragon_str_lower(h) == lower { return true }
+        }
+        return false
+    }
+
+    # Set the per-connection idle/read timeout in milliseconds (R1). A read that
+    # waits longer than this for the peer to send tears the connection down. Pass
+    # 0 to disable (e.g. a long-poll/SSE endpoint that legitimately stays idle).
+    def set_idle_timeout(ms: int) -> None {
+        self._idle_timeout_ms = ms
+    }
+
+    # --- Sessions + CSRF (W5/W7) ---
+    #
+    # Two interchangeable models, selected by whether a store is passed:
+    #  1. Signed-cookie (default, `store=none`): the HMAC-signed cookie itself
+    #  carries the session, so there is NO server-side store to grow
+    #  unbounded - leak-free by construction, zero state, the fast path.
+    #  2. Server-side store (`store=MemoryStore()` or a custom SessionStore):
+    #  the cookie carries only the signed sid; data lives in the store.
+    # All wiring is Router methods (self is typed) + bare top-level helpers; no
+    # capturing closures.
+
+    def enable_sessions(secret: bytes, cookie_name: str = "dragon_session",
+                        max_age: int = 0, secure: bool = false,
+                        samesite: str = "Lax",
+                        store: SessionStore | None = none) -> None {
+        self._session_secret = secret
+        self._session_cookie_name = cookie_name
+        self._session_max_age = max_age
+        self._session_secure = secure
+        self._session_samesite = samesite
+        # `none` -> signed-cookie model; a SessionStore -> server-side model. The
+        # field is the single switch read by _load_session / _save_session.
+        self._session_store = store
+        self._session_enabled = true
+    }
+
+    def enable_csrf(header_name: str = "x-csrf-token") -> None {
+        # CSRF builds on sessions: the token is HMAC(sid) under the session
+        # secret, verified on unsafe methods (anything but GET/HEAD/OPTIONS/TRACE).
+        self._csrf_header_name = dragon_str_lower(header_name)
+        self._csrf_enabled = true
+    }
+
+    def _load_session(req: Request) -> None {
+        # Decode the signed cookie into req.session, or start fresh. A forged or
+        # expired cookie makes verify_session RAISE; sid/loaded are declared
+        # OUTSIDE the try so the setjmp/longjmp unwind can't strand a half-built
+        # object, and the except falls through to a fresh session.
+        sid: str = ""
+        loaded: bool = false
+        const store: SessionStore | None = self._session_store
+        const cookie_val: str = req.cookies[self._session_cookie_name] if self._session_cookie_name in req.cookies else ""
+        if cookie_val != "" {
+            try {
+                const payload: str = verify_session(cookie_val, self._session_secret)
+                if store != none {
+                    # Server-side store: the signed cookie payload IS the sid (no
+                    # embedded data, no '|'). The signature already proved it
+                    # authentic, so load the data straight from the store. Clear
+                    # `dirty` so a freshly-loaded session a handler never touches
+                    # emits no needless re-save / Set-Cookie (the store may hand
+                    # back the live object with its last-save dirty flag intact) -
+                    # mirroring the signed-cookie path's clean-on-load semantics.
+                    sid = payload
+                    req.session = store.load(sid)
+                    req.session.dirty = false
+                    loaded = true
+                } else {
+                    # Signed-cookie: payload == "<sid>|<urlencoded-data>".
+                    const bar: int = payload.find("|")
+                    if bar >= 0 {
+                        sid = payload[0:bar]
+                        req.session = _session_decode(sid, payload[bar + 1:])
+                        loaded = true
+                    }
+                }
+            } except Exception {
+                loaded = false
+            }
+        }
+        if not loaded {
+            sid = new_session_id()
+            req.session = Session(sid)
+            req._session_was_new = true
+        }
+        req._session_sid = sid
+        if self._csrf_enabled {
+            req._csrf_token = csrf_token(sid, self._session_secret)
+        }
+    }
+
+    def _save_session(req: Request, res: Response) -> None {
+        # Re-emit the cookie ONLY when the handler changed the session. A clean
+        # session (incl. a brand-new one nobody wrote to) emits nothing - no
+        # cookie storm on static traffic, and (store mode) no empty store rows.
+        # HttpOnly is always on.
+        if not req.session.dirty {
+            return
+        }
+        const store: SessionStore | None = self._session_store
+        payload: str = ""
+        if store != none {
+            # Server-side store: persist the data, then sign ONLY the sid into
+            # the cookie. Keeps the cookie tiny + constant-size regardless of how
+            # much the session holds, and lets the store own retention/eviction.
+            store.save(req._session_sid, req.session)
+            payload = req._session_sid
+        } else {
+            # Signed-cookie: the cookie carries "<sid>|<urlencoded-data>".
+            payload = req._session_sid + "|" + _session_encode(req.session)
+        }
+        const signed: str = sign_session(payload, self._session_secret, self._session_max_age)
+        res.cookie(self._session_cookie_name, signed, self._session_max_age,
+                   "/", self._session_secure, true, self._session_samesite)
+    }
+
+    def _csrf_ok(req: Request) -> bool {
+        # Safe methods never require a token (they must not mutate state).
+        if req.method == "GET" or req.method == "HEAD" or req.method == "OPTIONS" or req.method == "TRACE" {
+            return true
+        }
+        # Token from the configured header first, then a "csrf_token" form field
+        # (classic HTML-form CSRF). Verified against the session's sid.
+        token: str = req.headers[self._csrf_header_name] if self._csrf_header_name in req.headers else ""
+        if token == "" {
+            const f: dict[str, str] = req.form()
+            token = f["csrf_token"] if "csrf_token" in f else ""
+        }
+        return csrf_verify(token, req._session_sid, self._session_secret)
+    }
+
+    # --- Subdomain registration ---
+
+    def subdomain(name: str) -> SubdomainContext {
+        # Idempotent. Re-registering the same subdomain re-uses the
+        # existing buckets (so two `app.subdomain("api")` calls share
+        # routes) - heaven parity.
+        self._ensure_sd(name)
+        return SubdomainContext(self, name)
+    }
+
+    def _ensure_sd(name: str) -> None {
+        # Lazy bucket creation. Verb calls with a fresh subdomain name
+        # auto-register the bucket; users don't have to call subdomain()
+        # before app.GET("/p", h, "api") - though they can, when chained
+        # SubdomainContext registration reads better.
+        if name not in self._routes_by_sd {
+            self._routes_by_sd[name] = []
+            self._before_by_sd[name] = []
+            self._after_by_sd[name] = []
+            self._ws_routes_by_sd[name] = []
+        }
+    }
+
+    # --- HTTP method registration ---
+    #
+    # Every verb takes an optional `subdomain` string. The default ""
+    # routes into the default bucket so existing single-domain apps
+    # ( app.GET("/p", h) ) keep working unchanged.
+
+    def GET(route: str, handler: Callable[[Request, Response, Context], None],
+            subdomain: str = "") -> None {
+        self._ensure_sd(subdomain)
+        self._routes_by_sd[subdomain].append(Route("GET", route, handler))
+    }
+
+    def POST(route: str, handler: Callable[[Request, Response, Context], None],
+             subdomain: str = "") -> None {
+        self._ensure_sd(subdomain)
+        self._routes_by_sd[subdomain].append(Route("POST", route, handler))
+    }
+
+    def PUT(route: str, handler: Callable[[Request, Response, Context], None],
+            subdomain: str = "") -> None {
+        self._ensure_sd(subdomain)
+        self._routes_by_sd[subdomain].append(Route("PUT", route, handler))
+    }
+
+    def PATCH(route: str, handler: Callable[[Request, Response, Context], None],
+              subdomain: str = "") -> None {
+        self._ensure_sd(subdomain)
+        self._routes_by_sd[subdomain].append(Route("PATCH", route, handler))
+    }
+
+    def DELETE(route: str, handler: Callable[[Request, Response, Context], None],
+               subdomain: str = "") -> None {
+        self._ensure_sd(subdomain)
+        self._routes_by_sd[subdomain].append(Route("DELETE", route, handler))
+    }
+
+    def HEAD(route: str, handler: Callable[[Request, Response, Context], None],
+             subdomain: str = "") -> None {
+        self._ensure_sd(subdomain)
+        self._routes_by_sd[subdomain].append(Route("HEAD", route, handler))
+    }
+
+    def OPTIONS(route: str, handler: Callable[[Request, Response, Context], None],
+                subdomain: str = "") -> None {
+        self._ensure_sd(subdomain)
+        self._routes_by_sd[subdomain].append(Route("OPTIONS", route, handler))
+    }
+
+    def CONNECT(route: str, handler: Callable[[Request, Response, Context], None],
+                subdomain: str = "") -> None {
+        self._ensure_sd(subdomain)
+        self._routes_by_sd[subdomain].append(Route("CONNECT", route, handler))
+    }
+
+    def TRACE(route: str, handler: Callable[[Request, Response, Context], None],
+              subdomain: str = "") -> None {
+        self._ensure_sd(subdomain)
+        self._routes_by_sd[subdomain].append(Route("TRACE", route, handler))
+    }
+
+    def HTTP(route: str, handler: Callable[[Request, Response, Context], None],
+             subdomain: str = "") -> None {
+        # Register the same handler for all standard HTTP methods
+        self.GET(route, handler, subdomain)
+        self.POST(route, handler, subdomain)
+        self.PUT(route, handler, subdomain)
+        self.PATCH(route, handler, subdomain)
+        self.DELETE(route, handler, subdomain)
+        self.HEAD(route, handler, subdomain)
+        self.OPTIONS(route, handler, subdomain)
+        self.CONNECT(route, handler, subdomain)
+        self.TRACE(route, handler, subdomain)
+    }
+
+    # --- WebSocket registration (W2) ---
+
+    # Register a WebSocket endpoint. A GET to `route` carrying the WebSocket
+    # upgrade headers is answered with `101 Switching Protocols`, after which
+    # `handler` is run against a live WebSocket for the rest of the connection
+    # (see _build_response / serve_connection). The handler owns the socket - it
+    # typically loops on ws.recv()/recv_text() until the peer closes. Mirrors
+    # the HTTP verbs' optional `subdomain` bucket.
+    def ws(route: str, handler: Callable[[WebSocket], None],
+           subdomain: str = "") -> None {
+        self._ensure_sd(subdomain)
+        self._ws_routes_by_sd[subdomain].append(WsRoute(route, handler))
+    }
+
+    # --- Middleware ---
+
+    def BEFORE(pattern: str, handler: Callable[[Request, Response, Context], None],
+               subdomain: str = "") -> None {
+        self._ensure_sd(subdomain)
+        self._before_by_sd[subdomain].append(MiddlewareEntry(pattern, handler, "before"))
+    }
+
+    def AFTER(pattern: str, handler: Callable[[Request, Response, Context], None],
+              subdomain: str = "") -> None {
+        self._ensure_sd(subdomain)
+        self._after_by_sd[subdomain].append(MiddlewareEntry(pattern, handler, "after"))
+    }
+
+    # --- Lifecycle hooks ---
+
+    def ONCE(handler: Callable[[Router], None]) -> None {
+        # Shorthand: registers a startup hook
+        self._on_startup.append(handler)
+    }
+
+    def ON(event: str, handler: Callable[[Router], None]) -> None {
+        # Register a lifecycle hook for startup or shutdown
+        if event == "startup" {
+            self._on_startup.append(handler)
+        } elif event == "shutdown" {
+            self._on_shutdown.append(handler)
+        }
+    }
+
+    # --- App storage ---
+
+    def keep(key: str, value: str) -> None {
+        self._storage[key] = value
+    }
+
+    def peek(key: str) -> str {
+        if key in self._storage {
+            return self._storage[key]
+        }
+        return ""
+    }
+
+    def unkeep(key: str) -> str {
+        # Remove and return a value from app storage
+        if key in self._storage {
+            const val: str = self._storage[key]
+            del self._storage[key]
+            return val
+        }
+        return ""
+    }
+
+    # --- Configuration ---
+
+    def CONFIG(key: str) -> str {
+        if key in self._config {
+            return self._config[key]
+        }
+        return ""
+    }
+
+    # --- Router mounting ---
+
+    def mount(prefix: str, router: Router) -> None {
+        # Merge another router's routes under a path prefix, preserving
+        # subdomain assignments. Each child bucket is merged into the
+        # corresponding bucket on `self`, creating the bucket if absent.
+        # e.g. app.mount("/v1/users", users_router)
+        for sd in router._routes_by_sd {
+            self._ensure_sd(sd)
+            for route in router._routes_by_sd[sd] {
+                const full_pattern: str = prefix if route.pattern == "/" else f"{prefix}{route.pattern}"
+                self._routes_by_sd[sd].append(Route(route.method, full_pattern, route.handler))
+            }
+        }
+        for sd in router._before_by_sd {
+            self._ensure_sd(sd)
+            for mw in router._before_by_sd[sd] {
+                const full_pattern: str = prefix if mw.pattern == "/" else f"{prefix}{mw.pattern}"
+                self._before_by_sd[sd].append(MiddlewareEntry(full_pattern, mw.handler, "before"))
+            }
+        }
+        for sd in router._after_by_sd {
+            self._ensure_sd(sd)
+            for mw in router._after_by_sd[sd] {
+                const full_pattern: str = prefix if mw.pattern == "/" else f"{prefix}{mw.pattern}"
+                self._after_by_sd[sd].append(MiddlewareEntry(full_pattern, mw.handler, "after"))
+            }
+        }
+
+        # Merge lifecycle hooks (not subdomain-scoped - they fire app-wide)
+        for hook in router._on_startup {
+            self._on_startup.append(hook)
+        }
+        for hook in router._on_shutdown {
+            self._on_shutdown.append(hook)
+        }
+    }
+
+    # --- Static file serving ---
+
+    def ASSETS(folder: str, route: str = "", subdomain: str = "") -> None {
+        # Serve static files from a directory under the given subdomain.
+        # e.g. app.ASSETS("public", "/static/*")
+        #  app.ASSETS("public", subdomain="*") # wildcard subdomain
+        const serve_route: str = route if route != "" else f"/{folder}/*"
+        const base_folder: str = folder
+
+        def serve_static(req: Request, res: Response, ctx: Context) -> None {
+            const wildcard: str = req.params["*"] if "*" in req.params else ""
+            if wildcard == "" {
+                res.status = 404
+                res.text("Not Found")
+                return
+            }
+            # The wildcard is the URL-DECODED tail, so "%2e%2e%2fetc%2fpasswd"
+            # arrives as "../etc/passwd". Reject obvious traversal lexically...
+            if not _safe_asset_path(wildcard) {
+                res.status = 404
+                res.text("Not Found")
+                return
+            }
+            const filepath: str = f"{base_folder}/{wildcard}"
+            if not dragon_stat_isfile(filepath) {
+                res.status = 404
+                res.text("Not Found")
+                return
+            }
+            # ...then confirm the resolved file is genuinely inside the assets
+            # root (collapses symlinks + any residual "..") before serving.
+            if not _path_within_base(base_folder, filepath) {
+                res.status = 404
+                res.text("Not Found")
+                return
+            }
+            res.file(filepath)
+        }
+
+        self.GET(serve_route, serve_static, subdomain)
+    }
+
+    # --- Subdomain extraction ---
+
+    # Parse the subdomain out of a `Host:` header. Strategy:
+    #  1. Strip port (`:8000`).
+    #  2. If `self.apex` is configured (e.g., "example.com") and the host
+    #  ends with it, return the leading prefix ("api" for
+    #  "api.example.com"). The apex itself returns "".
+    #  3. Otherwise, return the first label (everything before the first
+    #  dot), or "" if the host has no dot. This handles
+    #  `api.localhost:8000` style local-dev cases without configuration.
+    def _extract_subdomain(host: str) -> str {
+        if len(host) == 0 {
+            return ""
+        }
+        const colon: int = dragon_str_find(host, ":")
+        const hostname: str = host if colon < 0 else host[0:colon]
+
+        if len(self.apex) > 0 and dragon_str_endswith(hostname, self.apex) {
+            const cut: int = len(hostname) - len(self.apex)
+            if cut <= 0 {
+                return ""
+            }
+            const prefix: str = hostname[0:cut]
+            if dragon_str_endswith(prefix, ".") {
+                return prefix[0:len(prefix) - 1]
+            }
+            return prefix
+        }
+
+        const dot: int = dragon_str_find(hostname, ".")
+        if dot < 0 {
+            return ""
+        }
+        return hostname[0:dot]
+    }
+
+    # Resolve which subdomain bucket should service a given Host. Order:
+    # exact match -> wildcard "*" -> default "". Returns the bucket key to
+    # use for both route and middleware lookups so a single Host parse
+    # serves all three (routes/before/after).
+    def _resolve_sd_bucket(host_subdomain: str) -> str {
+        if host_subdomain in self._routes_by_sd {
+            return host_subdomain
+        }
+        if "*" in self._routes_by_sd {
+            return "*"
+        }
+        return ""
+    }
+
+    # --- Route matching ---
+
+    # Matches `method`+`path` against registered routes within the given
+    # subdomain bucket. Mutates `params_out` with extracted route parameters
+    # on a hit. Returns the matched Route, or none when no route matches.
+    def _match(method: str, path: str, sd: str, params_out: dict[str, str]) -> Route | None {
+        if sd not in self._routes_by_sd {
+            return none
+        }
+        for route in self._routes_by_sd[sd] {
+            if route.method != method {
+                continue
+            }
+            const result: tuple[bool, dict[str, str]] = _match_route(
+                route.segments, _split_path(path),
+                route.param_names, route.param_types)
+            if result[0] {
+                # Copy extracted params into caller's dict.
+                const matched: dict[str, str] = result[1]
+                for k in matched {
+                    params_out[k] = matched[k]
+                }
+                return route
+            }
+        }
+        return none
+    }
+
+    # Match a WebSocket upgrade path against registered ws routes in the given
+    # subdomain bucket. A copy of _match that ignores the HTTP method (every
+    # upgrade is a GET), populating `params_out` with any path params on a hit.
+    def _match_ws(path: str, sd: str, params_out: dict[str, str]) -> WsRoute | None {
+        if sd not in self._ws_routes_by_sd {
+            return none
+        }
+        for route in self._ws_routes_by_sd[sd] {
+            const result: tuple[bool, dict[str, str]] = _match_route(
+                route.segments, _split_path(path),
+                route.param_names, route.param_types)
+            if result[0] {
+                const matched: dict[str, str] = result[1]
+                for k in matched {
+                    params_out[k] = matched[k]
+                }
+                return route
+            }
+        }
+        return none
+    }
+
+    # --- Middleware matching ---
+
+    def _match_before(path: str, sd: str) -> list {
+        const matched: list = []
+        if sd not in self._before_by_sd {
+            return matched
+        }
+        for mw in self._before_by_sd[sd] {
+            if _middleware_matches(mw.segments, _split_path(path)) {
+                matched.append(mw)
+            }
+        }
+        return matched
+    }
+
+    def _match_after(path: str, sd: str) -> list {
+        const matched: list = []
+        if sd not in self._after_by_sd {
+            return matched
+        }
+        for mw in self._after_by_sd[sd] {
+            if _middleware_matches(mw.segments, _split_path(path)) {
+                matched.append(mw)
+            }
+        }
+        return matched
+    }
+
+    # --- Server loop ---
+
+    def listen(callback: Callable[[], None] | None = none) -> None {
+        # Create TCP socket
+        const fd: int = socket(2, 1, 0)
+        dragon_setsockopt_reuse(fd)
+
+        # Bind
+        const addr: ptr = dragon_sockaddr_in_new(self.port, self.host)
+        const addrlen: int = dragon_sockaddr_in_size()
+        const bind_result: int = bind(fd, addr, addrlen)
+        free(addr)
+
+        if bind_result < 0 {
+            print(f"Error: cannot bind to {self.host}:{self.port} - port may already be in use")
+            dragon_close_fd(fd)
+            return
+        }
+
+        # Listen
+        listen(fd, 128)
+        self._server_fd = fd
+
+        # Run startup hooks
+        for hook in self._on_startup {
+            hook(self)
+        }
+
+        if callback != none {
+            callback()
+        }
+
+        # Accept loop - each connection gets a green thread. TLS connections
+        # are handed to the TLS handler (handshake + encrypted I/O); plain
+        # connections to the raw handler.
+        while true {
+            const client_fd: int = dragon_nb_accept(fd, none, none)
+            if client_fd >= 0 {
+                # Connection cap: bump the atomic counter; if we're already at
+                # the ceiling, undo and drop the connection immediately rather
+                # than spawning another ~80 KB green thread (flood -> OOM guard).
+                const prev: int = dragon_atomic_add(self._conn_cell, 1)
+                if self._max_connections > 0 and prev >= self._max_connections {
+                    dragon_atomic_add(self._conn_cell, -1)
+                    dragon_close_fd(client_fd)
+                } else {
+                    if self._tls_enabled {
+                        fire self._handle_connection_tls(client_fd)
+                    } else {
+                        fire self._handle_connection(client_fd)
+                    }
+                }
+            }
+        }
+    }
+
+    # Serve over HTTPS. Builds a TLS server context from a PEM cert chain +
+    # private key (CPython's ssl.SSLContext.load_cert_chain), then runs the
+    # normal accept loop with TLS wrapping per connection. `keyfile` defaults
+    # to `certfile` (a combined cert+key PEM).
+    def listen_tls(certfile: str, keyfile: str = "",
+                   callback: Callable[[], None] | None = none) -> None {
+        const ctx: SSLContext = SSLContext(PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(certfile, keyfile)
+        self._ssl_context = ctx
+        self._tls_enabled = True
+        self.listen(callback)
+    }
+
+    def shutdown() -> None {
+        # Run shutdown hooks and close server socket
+        for hook in self._on_shutdown {
+            hook(self)
+        }
+        if self._server_fd >= 0 {
+            dragon_close_fd(self._server_fd)
+            self._server_fd = -1
+        }
+    }
+
+    # Parse a raw request, route it, run middleware + handler, and return the
+    # finished Response. Pure of transport I/O - both the plain (_handle_
+    # connection) and TLS (_handle_connection_tls) paths feed it the request
+    # bytes and serialize/send the Response over their own socket. Deferred
+    # tasks live on the returned res._deferred and run after the send.
+    def _build_response(raw_bytes: bytes, body_bytes: bytes = b"") -> Response {
+        # Parse HTTP request from the VERBATIM request bytes (head ASCII, body
+        # opaque). Feeding the byte-oriented llhttp parser the raw buffer keeps
+        # Content-Length aligned for binary bodies (file uploads); a decoded str
+        # would expand high bytes and desync the parser.
+        const parsed: ptr = dragon_http_parse_request(dragon_bytes_data(raw_bytes), len(raw_bytes))
+        if not dragon_http_parsed_ok(parsed) {
+            dragon_http_parsed_free(parsed)
+            const bad: Response = Response()
+            bad.status = 400
+            bad.text("Bad Request")
+            return bad
+        }
+
+        # Extract parsed fields
+        const method: str = dragon_http_parsed_method(parsed)
+        const url: str = dragon_http_parsed_url(parsed)
+        const body: str = dragon_http_parsed_body(parsed)
+        const version: str = dragon_http_parsed_version(parsed)
+
+        # Extract headers into dict
+        headers: dict[str, str] = {}
+        const header_count: int = dragon_http_parsed_header_count(parsed)
+        i: int = 0
+        while i < header_count {
+            const key: str = dragon_http_parsed_header_key(parsed, i)
+            const val: str = dragon_http_parsed_header_value(parsed, i)
+            headers[key] = val
+            i = i + 1
+        }
+        dragon_http_parsed_free(parsed)
+
+        # Split URL into path and query string
+        const qmark: int = dragon_str_find(url, "?")
+        const path: str = url if qmark < 0 else url[0:qmark]
+        const query_str: str = "" if qmark < 0 else url[qmark + 1:]
+        const query: dict[str, str] = _parse_query_string(query_str)
+
+        # Resolve the subdomain bucket for this request. The raw Host-
+        # derived subdomain goes onto Request.subdomain (so handlers can
+        # see what the client asked for), but routing uses the resolved
+        # bucket (exact -> "*" -> "") so unknown subdomains still get a
+        # chance via the wildcard.
+        const host_hdr: str = headers["host"] if "host" in headers else ""
+        # Host allowlist (when configured): reject a request whose Host is not
+        # one we serve, before any routing. Blocks Host-header poisoning of
+        # absolute URLs (password-reset links, cache keys).
+        if not self._host_allowed(host_hdr) {
+            const bad_host: Response = Response()
+            bad_host.status = 421
+            bad_host.text("Misdirected Request")
+            bad_host._close = true
+            return bad_host
+        }
+        const raw_sd: str = self._extract_subdomain(host_hdr)
+        const target_sd: str = self._resolve_sd_bucket(raw_sd)
+
+        # W2: WebSocket upgrade handshake - checked BEFORE normal routing. A GET
+        # carrying the Upgrade: websocket headers that matches a registered ws
+        # route short-circuits into a `101 Switching Protocols` response: the
+        # matched handler is stashed on the response (_ws_handler) and serve_connection
+        # hands it a live WebSocket after the 101 is on the wire. The 101 carries
+        # the RFC 6455 §4.2.2 accept token and NO content-length/body (_no_body).
+        # An upgrade request that matches no ws route falls through to normal
+        # routing (typically 404), exactly like any other unrouted GET.
+        if method == "GET" and is_websocket_upgrade(headers) {
+            ws_params: dict[str, str] = {}
+            const ws_route: WsRoute | None = self._match_ws(path, target_sd, ws_params)
+            if ws_route != none {
+                # RFC 6455 §4.4: we speak only version 13. A client asking for any
+                # other version gets 426 Upgrade Required advertising the version
+                # we support, instead of a bogus 101 it can't actually talk.
+                const ws_ver: str = headers["sec-websocket-version"] if "sec-websocket-version" in headers else ""
+                if ws_ver != "13" {
+                    const ver: Response = Response()
+                    ver.status = 426
+                    ver._headers["sec-websocket-version"] = "13"
+                    ver.text("Upgrade Required")
+                    return ver
+                }
+                const ws_key: str = headers["sec-websocket-key"]
+                const up: Response = Response()
+                up.status = 101
+                # A 101 has no representation - drop the default content-type and
+                # the nosniff hardening header so only the upgrade headers go out
+                # (no content-type/content-length on a protocol switch).
+                del up._headers["content-type"]
+                del up._headers["x-content-type-options"]
+                up._headers["upgrade"] = "websocket"
+                up._headers["connection"] = "Upgrade"
+                up._headers["sec-websocket-accept"] = compute_accept_key(ws_key)
+                up._no_body = true
+                up._takeover = true        # exempt from keep-alive close-stamping
+                up._ws_handler = ws_route.handler
+                return up
+            }
+        }
+
+        # Match route - _match populates `params` on a hit, returns the
+        # matched Route or none on miss.
+        params: dict[str, str] = {}
+        const route: Route | None = self._match(method, path, target_sd, params)
+
+        # Build request/response/context
+        const req: Request = Request(method, path, url, body, headers, query, params, version, body_bytes)
+        const res: Response = Response()
+        const ctx: Context = Context()
+
+        # Inject app reference + raw subdomain (the actual host prefix,
+        # not the resolved bucket - handlers care about what the client
+        # asked for, not which bucket served them).
+        req.app = self
+        req.subdomain = raw_sd
+
+        # W5: load the signed-cookie session before any middleware/handler runs
+        # so they see req.session. Pure signed-cookie - the cookie is
+        # authoritative, no server-side store to grow.
+        if self._session_enabled {
+            self._load_session(req)
+        }
+
+        if route == none {
+            # No matching route - 404
+            res.status = 404
+            res.text("Not Found")
+        } else {
+            req.route = route.pattern
+
+            # Validate declared query types up front. If any hint fails
+            # we return 400 with a precise message - this is the single
+            # place where typed-query failures stop the pipeline.
+            query_ok: bool = true
+            for qkey in route.query_types {
+                const qtype: str = route.query_types[qkey]
+                if qkey in query {
+                    if not _validate_type(query[qkey], qtype) {
+                        res.status = 400
+                        res.text(f"Bad Request: query parameter '{qkey}' is not {qtype}")
+                        query_ok = false
+                        break
+                    }
+                }
+            }
+
+            if query_ok {
+                # Run BEFORE middleware (subdomain-scoped)
+                const before_mw: list = self._match_before(path, target_sd)
+                for mw in before_mw {
+                    if res._aborted {
+                        break
+                    }
+                    mw.handler(req, res, ctx)
+                }
+
+                # W7: CSRF guard on unsafe methods - after BEFORE-mw (so a hook
+                # can abort first) and before the handler (so a bad token never
+                # reaches it).
+                if self._csrf_enabled and not res._aborted {
+                    if not self._csrf_ok(req) {
+                        res.status = 403
+                        res.text("CSRF token invalid or missing")
+                        res.abort()
+                    }
+                }
+
+                # Run handler (if not aborted)
+                if not res._aborted {
+                    route.handler(req, res, ctx)
+                }
+
+                # Run AFTER middleware (always runs, even on abort)
+                const after_mw: list = self._match_after(path, target_sd)
+                for mw in after_mw {
+                    mw.handler(req, res, ctx)
+                }
+
+                # W5: emit Set-Cookie if the handler changed the session.
+                if self._session_enabled {
+                    self._save_session(req, res)
+                }
+            }
+        }
+        # W6: thread the request's Accept-Encoding through so serialize() can
+        # decide whether to gzip the body. Header keys are lowercased by the
+        # parser (same convention as headers["host"] above).
+        res._accept_encoding = headers["accept-encoding"] if "accept-encoding" in headers else ""
+        return res
+    }
+
+    # Plaintext connection: wrap the fd in an FdReader and run the shared
+    # keep-alive loop. One green thread per connection (spawned by listen()).
+    def _handle_connection(client_fd: int) -> None {
+        # finally guarantees the live-connection counter is decremented even if
+        # serve_connection raises, so the cap can't drift up and wedge accepts.
+        try {
+            const reader: ConnReader = FdReader(client_fd)
+            self.serve_connection(reader)
+        } finally {
+            dragon_atomic_add(self._conn_cell, -1)
+        }
+    }
+
+    # HTTPS variant: TLS-wrap the accepted fd, then run the SAME keep-alive loop
+    # over the encrypted stream via a TlsReader. A handshake failure (non-TLS
+    # client, unsupported cipher) closes the connection without taking down the
+    # server.
+    def _handle_connection_tls(client_fd: int) -> None {
+        const raw_stream: TcpStream = TcpStream(client_fd)
+        try {
+            const tls: SSLSocket = self._ssl_context.wrap_socket(raw_stream, True, "")
+            const reader: ConnReader = TlsReader(tls)
+            self.serve_connection(reader)
+        } except Exception {
+            # wrap_socket frees its own conn on handshake failure; just drop
+            # the underlying fd so a bad client can't leak descriptors.
+            dragon_close_fd(client_fd)
+        } finally {
+            # Always release the connection slot (mirror _handle_connection).
+            dragon_atomic_add(self._conn_cell, -1)
+        }
+    }
+
+    # The single keep-alive loop shared by the plaintext and TLS paths (W1).
+    # `reader` is the transport-agnostic ConnReader; everything below frames,
+    # routes and serializes identically regardless of transport.
+    #
+    # Per iteration: read one complete request -> build the response -> serialize
+    # -> send -> decide whether to keep the connection alive. The connection is
+    # kept alive when the client is HTTP/1.1, did not send `Connection: close`,
+    # the handler did not request close, and neither the per-connection request
+    # cap nor the connection lifetime deadline has been reached. Bounded so an
+    # idle/abusive peer can't pin a green thread indefinitely.
+    def serve_connection(reader: ConnReader) -> None {
+        const rr: RequestReader = RequestReader(reader)
+        # Per-read idle timeout (R1): a peer that goes silent mid-request is
+        # dropped after this much inactivity, inside recv - not just at the loop
+        # boundary below. Honored on both the plaintext (FdReader) and TLS
+        # (TlsReader) paths; the in-memory test reader has no wire to time out on.
+        rr.idle_timeout_ms = self._idle_timeout_ms
+        # Connection lifetime deadline: once a connection has lived this long it
+        # stops accepting further pipelined requests on the next loop boundary.
+        const deadline: float = monotonic() + float(_KEEPALIVE_TIMEOUT_SECS)
+        served: int = 0
+
+        while true {
+            const fr: FramedRequest = rr.read_request()
+            if fr.eof {
+                # Peer closed cleanly between requests - normal keep-alive end.
+                break
+            }
+            if fr.bad {
+                # Malformed / truncated / oversize - 400 then close.
+                const bad: Response = Response()
+                bad.status = 400
+                bad.text("Bad Request")
+                bad._close = true
+                const bs: str = bad.serialize()
+                reader.send(bs)
+                break
+            }
+
+            # Wrap the assembled request as a verbatim str for the keep-alive
+            # header scan below. Headers are ASCII; we must NOT UTF-8-validate
+            # the body, which may be binary (a file upload is not valid UTF-8 -
+            # bytes.decode("utf-8") would raise). dragon_str_from_bytes wraps
+            # the bytes byte-for-byte (kind=1, no codec), so the ASCII head is
+            # searchable and the binary body rides along harmlessly. The byte-
+            # faithful body lives on fr.body for consumers that need it (W3).
+            const raw_str: str = dragon_str_from_bytes(fr.raw)
+            const res: Response = self._build_response(fr.raw, fr.body)
+
+            served = served + 1
+
+            # Decide keep-alive BEFORE serializing so a connection we're about
+            # to close advertises `Connection: close` (RFC 9112 §9.6). A
+            # takeover response is exempt - it carries its own upgrade headers
+            # (e.g. Connection: Upgrade) and must not be stamped with close.
+            keep_alive: bool = true
+            if not self._wants_keepalive(raw_str) {
+                keep_alive = false
+            }
+            if served >= _MAX_REQUESTS_PER_CONN {
+                keep_alive = false
+            }
+            if monotonic() >= deadline {
+                keep_alive = false
+            }
+            if res._close and not res._takeover {
+                keep_alive = false
+            }
+            if not keep_alive and not res._takeover {
+                res._close = true
+            }
+
+            const response_str: str = res.serialize()
+            reader.send(response_str)
+
+            # Deferred tasks run after the response is on the wire.
+            for task in res._deferred {
+                task(self)
+            }
+
+            # WebSocket upgrade (W2): the 101 is now on the wire. Hand the raw
+            # fd to a WebSocket and run the matched handler. The WebSocket OWNS
+            # the fd from here - we RETURN without the trailing reader.close()
+            # below so the fd is freed exactly once (by ws.close()), never
+            # double-closed. The handler is wrapped in try/except so an abrupt
+            # client disconnect (recv -> IncompleteFrameError) or any handler
+            # error still reaches ws.close(), guaranteeing the fd is released
+            # (no descriptor leak under churn).
+            if res._ws_handler != none {
+                const wfd: int = reader.socket_fd()
+                if wfd >= 0 {
+                    const ws: WebSocket = WebSocket(wfd)
+                    # Seed the inbound buffer with any bytes the framer already
+                    # over-read past the request head (a pipelined first frame),
+                    # so no client data is lost across the HTTP->WS boundary.
+                    ws._inbuf = rr.buf
+                    rr.buf = b""
+                    const handler: Callable[[WebSocket], None] | None = res._ws_handler
+                    if handler != none {
+                        try {
+                            handler(ws)
+                        } except Exception {
+                            # Abrupt disconnect / handler error - fall through to
+                            # close so the fd is always freed exactly once.
+                        }
+                    }
+                    ws.close()
+                    return
+                }
+                # No raw fd (TLS / in-memory transport): wss:// is out of scope,
+                # so we can't take this connection over. Close and stop.
+                reader.close()
+                return
+            }
+
+            # Connection takeover (W2 upgrade): hand the live reader to the
+            # callback and stop HTTP-framing this fd entirely. The callback now
+            # owns the connection; we do NOT close it here.
+            if res._takeover {
+                const fn: Callable[[ConnReader], None] | None = res._takeover_fn
+                if fn != none {
+                    fn(reader)
+                }
+                return
+            }
+
+            if not keep_alive {
+                break
+            }
+        }
+
+        reader.close()
+    }
+
+    # HTTP/1.1 defaults to persistent connections unless the client opts out
+    # with `Connection: close`; HTTP/1.0 defaults to close unless it opts in
+    # with `Connection: keep-alive`. Parsed straight off the raw request head
+    # (case-insensitive) - cheap and avoids re-walking the header dict.
+    def _wants_keepalive(raw_str: str) -> bool {
+        const head_l: str = dragon_str_lower(raw_str)
+        const cpos: int = dragon_str_find(head_l, "\r\nconnection:")
+        const is_http11: bool = dragon_str_contains(head_l, "http/1.1") != 0
+        if cpos >= 0 {
+            const cline: str = head_l[cpos:]
+            const nlend: int = dragon_str_find(cline, "\r\n\r\n")
+            const cval: str = cline if nlend < 0 else cline[0:nlend]
+            if dragon_str_contains(cval, "close") != 0 {
+                return false
+            }
+            if dragon_str_contains(cval, "keep-alive") != 0 {
+                return true
+            }
+        }
+        return is_http11
+    }
+}
+
+

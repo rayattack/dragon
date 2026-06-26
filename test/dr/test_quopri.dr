@@ -1,0 +1,58 @@
+"""quopri - round-trip + CPython KAT vectors."""
+
+from unittest import TestCase, main
+import quopri
+
+
+class QuopriTests(TestCase) {
+    def test_ascii_passthrough() {
+        self.assertEqual(quopri.encodestring("hello"), "hello")
+        self.assertEqual(quopri.decodestring("hello"), "hello")
+    }
+
+    def test_equals_is_escaped() {
+        # '=' encodes to =3D
+        self.assertEqual(quopri.encodestring("a=b"), "a=3Db")
+        self.assertEqual(quopri.decodestring("a=3Db"), "a=b")
+    }
+
+    def test_non_printable_escaped() {
+        # Byte 0x01 -> =01
+        self.assertEqual(quopri.encodestring(chr(1)), "=01")
+        self.assertEqual(quopri.decodestring("=01"), chr(1))
+    }
+
+    def test_quotetabs_default() {
+        # Default: spaces and tabs are NOT quoted.
+        self.assertEqual(quopri.encodestring("a b\tc"), "a b\tc")
+    }
+
+    def test_quotetabs_true() {
+        self.assertEqual(quopri.encodestring("a b\tc", true), "a=20b=09c")
+        self.assertEqual(quopri.decodestring("a=20b=09c"), "a b\tc")
+    }
+
+    def test_round_trip_extended_ascii() {
+        # Bytes 0x80..0x90 (UTF-8 representation of non-ASCII via direct bytes).
+        original: str = ""
+        for i in range(128, 145) {
+            original = original + chr(i)
+        }
+        encoded: str = quopri.encodestring(original)
+        decoded: str = quopri.decodestring(encoded)
+        self.assertEqual(decoded, original)
+    }
+
+    def test_soft_line_break_decoded() {
+        # CPython parity: an "=\n" soft break disappears on decode.
+        self.assertEqual(quopri.decodestring("foo=\nbar"), "foobar")
+    }
+
+    def test_lowercase_hex_decoded() {
+        # CPython accepts lowercase hex too.
+        self.assertEqual(quopri.decodestring("=3d"), "=")
+    }
+}
+
+
+main([QuopriTests()])

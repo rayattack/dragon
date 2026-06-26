@@ -1,0 +1,106 @@
+"""http server form handling - Request.form() / Request.files() (W3 wiring).
+
+End-to-end through the real keep-alive loop (via an in-memory ConnReader), not
+the parser in isolation: builds a full multipart/form-data POST, drives it
+through Router.serve_connection, and asserts (via the response body the handler
+writes) that the handler saw the right text fields and binary file parts.
+Covers the verbatim-bytes request-parse path - a binary file body is not valid
+UTF-8 and must reach the handler byte-exact."""
+
+from unittest import TestCase, main
+from http.server import Router, Request, Response, Context
+from http.connection import MemoryReader
+from http.multipart import Part
+
+const CRLF: bytes = bytes([13, 10])
+
+
+# Handler reports what it parsed back through the response body (the robust
+# handler->test channel). Top-level function - no captured locals.
+def _form_handler(req: Request, res: Response, ctx: Context) -> None {
+    const fields: dict[str, str] = req.form()
+    const files: list[Part] = req.files()
+    title: str = fields["title"] if "title" in fields else ""
+    fname: str = ""
+    flen: int = 0
+    b0: int = -1
+    b1: int = -1
+    if len(files) > 0 {
+        const f: Part = files[0]
+        fname = f.filename
+        flen = len(f.data)
+        if flen > 0 { b0 = f.data[0] }
+        if flen > 1 { b1 = f.data[1] }
+    }
+    res.text(f"fields={len(fields)} files={len(files)} title={title} fname={fname} flen={flen} b0={b0} b1={b1}")
+}
+
+
+def _urlenc_handler(req: Request, res: Response, ctx: Context) -> None {
+    res.text(f"fields={len(req.form())}")
+}
+
+
+def _build_multipart(boundary: str, file_bytes: bytes) -> bytes {
+    const b: bytes = boundary.encode()
+    parts: bytes = b"--" + b + CRLF
+    parts = parts + b'Content-Disposition: form-data; name="title"' + CRLF + CRLF
+    parts = parts + b"Hello W3" + CRLF
+    parts = parts + b"--" + b + CRLF
+    parts = parts + b'Content-Disposition: form-data; name="avatar"; filename="a.bin"' + CRLF
+    parts = parts + b"Content-Type: application/octet-stream" + CRLF + CRLF
+    parts = parts + file_bytes + CRLF
+    parts = parts + b"--" + b + b"--" + CRLF
+
+    head: bytes = b"POST /upload HTTP/1.1" + CRLF + b"Host: x" + CRLF
+    head = head + (b"Content-Type: multipart/form-data; boundary=" + b) + CRLF
+    head = head + (b"Content-Length: " + str(len(parts)).encode()) + CRLF
+    head = head + b"Connection: close" + CRLF + CRLF
+    return head + parts
+}
+
+
+def _serve(app: Router, request: bytes) -> str {
+    const reader: MemoryReader = MemoryReader([request])
+    app.serve_connection(reader)
+    return reader.sent
+}
+
+
+class HttpFormTests(TestCase) {
+    def test_text_field_and_file_parsed() {
+        const app: Router = Router()
+        app.POST("/upload", _form_handler)
+        const sent: str = _serve(app, _build_multipart("----dragonW3", b"PLAINTEXT"))
+        self.assertIn("200", sent)
+        self.assertIn("fields=1", sent)
+        self.assertIn("files=1", sent)
+        self.assertIn("title=Hello W3", sent)
+        self.assertIn("fname=a.bin", sent)
+    }
+
+    def test_binary_file_bytes_verbatim() {
+        # 0x00 and 0xFF are not valid UTF-8 - they must survive byte-exact.
+        const app: Router = Router()
+        app.POST("/upload", _form_handler)
+        const sent: str = _serve(app, _build_multipart("----dragonW3", bytes([0, 255, 1, 254, 2, 253])))
+        self.assertIn("flen=6", sent)
+        self.assertIn("b0=0", sent)
+        self.assertIn("b1=255", sent)
+    }
+
+    def test_urlencoded_form_still_works() {
+        const app: Router = Router()
+        app.POST("/u", _urlenc_handler)
+        const body: bytes = b"a=1&b=2&c=3"
+        head: bytes = b"POST /u HTTP/1.1" + CRLF + b"Host: x" + CRLF
+        head = head + b"Content-Type: application/x-www-form-urlencoded" + CRLF
+        head = head + (b"Content-Length: " + str(len(body)).encode()) + CRLF
+        head = head + b"Connection: close" + CRLF + CRLF
+        const sent: str = _serve(app, head + body)
+        self.assertIn("fields=3", sent)
+    }
+}
+
+
+main([HttpFormTests()])

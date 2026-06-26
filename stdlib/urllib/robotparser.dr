@@ -1,0 +1,173 @@
+"""urllib.robotparser - parse robots.txt (Python parity).
+
+Pure Dragon. Recognizes `User-agent:`, `Allow:`, `Disallow:`, and
+`Crawl-delay:` directives - the common subset that web crawlers
+implement. `can_fetch(useragent, url)` returns True if the path is
+permitted by the most-specific matching rule.
+"""
+
+from urllib.parse import urlparse, ParseResult
+
+
+class _Rule {
+    path: str
+    allow: bool
+
+    def(path: str, allow: bool) {
+        self.path = path
+        self.allow = allow
+    }
+}
+
+
+class _Entry {
+    useragents: list[str]
+    rules: list[_Rule]
+    crawl_delay: float
+
+    def() {
+        self.useragents = []
+        self.rules = []
+        self.crawl_delay = 0.0
+    }
+
+    def applies_to(useragent: str) -> bool {
+        lc: str = useragent.lower()
+        for ua in self.useragents {
+            if ua == "*" {
+                return true
+            }
+            if lc.find(ua.lower()) >= 0 {
+                return true
+            }
+        }
+        return false
+    }
+
+    def allowance(path: str) -> bool {
+        # CPython's spec: the longest matching prefix wins; ties go to
+        # Allow over Disallow. An empty Disallow path = allow everything.
+        best_match_len: int = -1
+        best_allow: bool = true
+        for rule in self.rules {
+            if rule.path == "" {
+                if not rule.allow {
+                    continue
+                }
+            }
+            if path.startswith(rule.path) {
+                if len(rule.path) > best_match_len {
+                    best_match_len = len(rule.path)
+                    best_allow = rule.allow
+                } elif len(rule.path) == best_match_len and rule.allow {
+                    best_allow = true
+                }
+            }
+        }
+        return best_allow
+    }
+}
+
+
+class RobotFileParser {
+    url: str
+    _entries: list[_Entry]
+    _default_entry: _Entry
+    _has_default: bool
+
+    def(url: str = "") {
+        self.url = url
+        self._entries = []
+        self._default_entry = _Entry()
+        self._has_default = false
+    }
+
+    def parse(content: str) -> None {
+        cur: _Entry = _Entry()
+        in_entry: bool = false
+        for raw_line in content.split("\n") {
+            line: str = raw_line
+            hash_pos: int = line.find("#")
+            if hash_pos >= 0 {
+                line = line[0:hash_pos]
+            }
+            line = line.strip()
+            if line == "" {
+                if in_entry {
+                    self._commit(cur)
+                    cur = _Entry()
+                    in_entry = false
+                }
+                continue
+            }
+            colon: int = line.find(":")
+            if colon < 0 {
+                continue
+            }
+            key: str = line[0:colon].strip().lower()
+            val: str = line[colon + 1:len(line)].strip()
+            if key == "user-agent" {
+                if len(cur.rules) > 0 {
+                    self._commit(cur)
+                    cur = _Entry()
+                }
+                cur.useragents.append(val)
+                in_entry = true
+            } elif key == "disallow" {
+                cur.rules.append(_Rule(val, false))
+                in_entry = true
+            } elif key == "allow" {
+                cur.rules.append(_Rule(val, true))
+                in_entry = true
+            } elif key == "crawl-delay" {
+                cur.crawl_delay = float(val)
+                in_entry = true
+            }
+        }
+        if in_entry {
+            self._commit(cur)
+        }
+    }
+
+    def _commit(entry: _Entry) -> None {
+        for ua in entry.useragents {
+            if ua == "*" {
+                self._default_entry = entry
+                self._has_default = true
+                return
+            }
+        }
+        self._entries.append(entry)
+    }
+
+    def can_fetch(useragent: str, url: str) -> bool {
+        """Return True if `useragent` is allowed to fetch `url`."""
+        parsed: ParseResult = urlparse(url)
+        path: str = parsed.path
+        if path == "" {
+            path = "/"
+        }
+        for entry in self._entries {
+            if entry.applies_to(useragent) {
+                return entry.allowance(path)
+            }
+        }
+        if self._has_default {
+            return self._default_entry.allowance(path)
+        }
+        return true
+    }
+
+    def crawl_delay(useragent: str) -> float {
+        """Return the crawl-delay (seconds) for `useragent`, or 0.0."""
+        for entry in self._entries {
+            if entry.applies_to(useragent) {
+                return entry.crawl_delay
+            }
+        }
+        if self._has_default {
+            return self._default_entry.crawl_delay
+        }
+        return 0.0
+    }
+}

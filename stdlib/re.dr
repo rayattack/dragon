@@ -1,0 +1,284 @@
+# re.dr - Dragon standard library: regular expressions
+#
+# Uses bundled PCRE2 (10.44) - no external dependencies.
+# Provides Pattern class for compiled regex, plus convenience functions
+# for match, search, sub, findall, and split.
+# C functions use intc for correct ABI.
+
+#===----------------------------------------------------------------------===#
+# C and PCRE2 extern declarations
+#===----------------------------------------------------------------------===#
+
+extern "C" def malloc(size: int) -> ptr
+extern "C" def free(p: ptr)
+extern "C" def memset(s: ptr, c: intc, n: int) -> ptr
+extern "C" def memcpy(dst: ptr, src: ptr, n: int) -> ptr
+
+# PCRE2 C API (linked from bundled static library)
+extern "C" def pcre2_compile_8(pattern: str, length: int, options: intc,
+                                errorcode: ptr, erroroffset: ptr, ccontext: ptr) -> ptr
+extern "C" def pcre2_match_data_create_from_pattern_8(code: ptr, gcontext: ptr) -> ptr
+extern "C" def pcre2_match_8(code: ptr, subject: str, length: int, startoffset: int,
+                              options: intc, match_data: ptr, mcontext: ptr) -> intc
+extern "C" def pcre2_get_ovector_pointer_8(match_data: ptr) -> ptr
+extern "C" def pcre2_match_data_free_8(match_data: ptr)
+extern "C" def pcre2_code_free_8(code: ptr)
+
+# Runtime helpers for match extraction and ovector access
+extern "C" def dragon_re_get_match(subject: str, ovector: ptr, index: intc) -> str
+extern "C" def dragon_re_ovector_get(ovector: ptr, index: intc) -> int
+
+# PCRE2 options (common flags)
+const PCRE2_CASELESS: int = 1
+const PCRE2_MULTILINE: int = 2
+const PCRE2_DOTALL: int = 4
+
+#===----------------------------------------------------------------------===#
+# Pattern - Compiled regular expression
+#===----------------------------------------------------------------------===#
+
+class Pattern {
+    def(pattern: str) {
+        const errcode: ptr = malloc(8)
+        const erroffset: ptr = malloc(8)
+        self.code = pcre2_compile_8(pattern, len(pattern), 0, errcode, erroffset, none)
+        self.pattern = pattern
+        free(errcode)
+        free(erroffset)
+    }
+
+    def match(subject: str) -> int {
+        const md: ptr = pcre2_match_data_create_from_pattern_8(self.code, none)
+        const rc: int = pcre2_match_8(self.code, subject, len(subject), 0, 0, md, none)
+        pcre2_match_data_free_8(md)
+        return rc
+    }
+
+    def find(subject: str) -> str {
+        const md: ptr = pcre2_match_data_create_from_pattern_8(self.code, none)
+        const rc: int = pcre2_match_8(self.code, subject, len(subject), 0, 0, md, none)
+        if rc < 1 {
+            pcre2_match_data_free_8(md)
+            return ""
+        }
+        const ovector: ptr = pcre2_get_ovector_pointer_8(md)
+        const result: str = dragon_re_get_match(subject, ovector, 0)
+        pcre2_match_data_free_8(md)
+        return result
+    }
+
+    def group(subject: str, index: int) -> str {
+        const md: ptr = pcre2_match_data_create_from_pattern_8(self.code, none)
+        const rc: int = pcre2_match_8(self.code, subject, len(subject), 0, 0, md, none)
+        if rc < 1 {
+            pcre2_match_data_free_8(md)
+            return ""
+        }
+        const ovector: ptr = pcre2_get_ovector_pointer_8(md)
+        const result: str = dragon_re_get_match(subject, ovector, index)
+        pcre2_match_data_free_8(md)
+        return result
+    }
+
+    def findall(subject: str) -> list[str] {
+        results: list[str] = []
+        offset: int = 0
+        const slen: int = len(subject)
+        while offset < slen {
+            const md: ptr = pcre2_match_data_create_from_pattern_8(self.code, none)
+            const rc: int = pcre2_match_8(self.code, subject, slen, offset, 0, md, none)
+            if rc < 1 {
+                pcre2_match_data_free_8(md)
+                break
+            }
+            const ovector: ptr = pcre2_get_ovector_pointer_8(md)
+            const matched: str = dragon_re_get_match(subject, ovector, 0)
+            results.append(matched)
+            # Advance past the match
+            const match_end: int = dragon_re_ovector_get(ovector, 1)
+            if match_end <= offset {
+                offset = offset + 1
+            } else {
+                offset = match_end
+            }
+            pcre2_match_data_free_8(md)
+        }
+        return results
+    }
+
+    def split(subject: str) -> list[str] {
+        parts: list[str] = []
+        offset: int = 0
+        const slen: int = len(subject)
+        while offset <= slen {
+            const md: ptr = pcre2_match_data_create_from_pattern_8(self.code, none)
+            const rc: int = pcre2_match_8(self.code, subject, slen, offset, 0, md, none)
+            if rc < 1 {
+                pcre2_match_data_free_8(md)
+                # No more matches - add remainder
+                parts.append(subject[offset:])
+                break
+            }
+            const ovector: ptr = pcre2_get_ovector_pointer_8(md)
+            const match_start: int = dragon_re_ovector_get(ovector, 0)
+            const match_end: int = dragon_re_ovector_get(ovector, 1)
+            # Add text before the match
+            parts.append(subject[offset:match_start])
+            if match_end <= offset {
+                offset = offset + 1
+            } else {
+                offset = match_end
+            }
+            pcre2_match_data_free_8(md)
+        }
+        return parts
+    }
+
+    # Expand backreferences in a replacement template against the current
+    # match. Supports `\1`..`\9` and `\g<N>` (numbered groups); `\\` collapses
+    # to a single backslash. `ngroups` is the match's group count (the `rc`
+    # from pcre2_match_8): group 0 is the whole match, 1..ngroups-1 the
+    # captures. An out-of-range or non-participating group expands to "".
+    # Named `\g<name>` is not handled here - PCRE2's name->number lookup is not
+    # exposed through the current externs (dragon_re_get_match is index-only).
+    def _expand(tmpl: str, subject: str, ovector: ptr, ngroups: int) -> str {
+        # Accumulate into a list and join once - avoids the O(n^2) of repeated
+        # `out = out + ch` on immutable strings.
+        parts: list[str] = []
+        i: int = 0
+        const tlen: int = len(tmpl)
+        while i < tlen {
+            const ch: str = tmpl[i]
+            if ch == "\\" and i + 1 < tlen {
+                const nxt: str = tmpl[i + 1]
+                if nxt == "\\" {
+                    parts.append("\\")
+                    i = i + 2
+                } else if nxt >= "0" and nxt <= "9" {
+                    const gid: int = int(nxt)
+                    if gid < ngroups {
+                        parts.append(dragon_re_get_match(subject, ovector, gid))
+                    }
+                    i = i + 2
+                } else if nxt == "g" and i + 2 < tlen and tmpl[i + 2] == "<" {
+                    # \g<N> - scan to the closing '>' and parse the digits.
+                    j: int = i + 3
+                    digits: str = ""
+                    while j < tlen and tmpl[j] != ">" {
+                        digits = digits + tmpl[j]
+                        j = j + 1
+                    }
+                    if j < tlen and len(digits) > 0 and self._all_digits(digits) {
+                        const gid2: int = int(digits)
+                        if gid2 < ngroups {
+                            parts.append(dragon_re_get_match(subject, ovector, gid2))
+                        }
+                        i = j + 1
+                    } else {
+                        # Malformed \g<...> - emit the backslash literally.
+                        parts.append(ch)
+                        i = i + 1
+                    }
+                } else {
+                    # Unknown escape - preserve the backslash and the next char.
+                    parts.append(ch)
+                    i = i + 1
+                }
+            } else {
+                parts.append(ch)
+                i = i + 1
+            }
+        }
+        return "".join(parts)
+    }
+
+    def _all_digits(s: str) -> bool {
+        if len(s) == 0 {
+            return False
+        }
+        i: int = 0
+        while i < len(s) {
+            if s[i] < "0" or s[i] > "9" {
+                return False
+            }
+            i = i + 1
+        }
+        return True
+    }
+
+    def sub(replacement: str, subject: str) -> str {
+        result: str = ""
+        offset: int = 0
+        const slen: int = len(subject)
+        while offset < slen {
+            const md: ptr = pcre2_match_data_create_from_pattern_8(self.code, none)
+            const rc: int = pcre2_match_8(self.code, subject, slen, offset, 0, md, none)
+            if rc < 1 {
+                pcre2_match_data_free_8(md)
+                result = result + subject[offset:]
+                break
+            }
+            const ovector: ptr = pcre2_get_ovector_pointer_8(md)
+            const match_start: int = dragon_re_ovector_get(ovector, 0)
+            const match_end: int = dragon_re_ovector_get(ovector, 1)
+            # Add text before the match
+            result = result + subject[offset:match_start]
+            # Add replacement with backreferences expanded against this match
+            result = result + self._expand(replacement, subject, ovector, rc)
+            if match_end <= offset {
+                offset = offset + 1
+            } else {
+                offset = match_end
+            }
+            pcre2_match_data_free_8(md)
+        }
+        return result
+    }
+
+    def destroy() {
+        pcre2_code_free_8(self.code)
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# Module-level convenience functions
+#===----------------------------------------------------------------------===#
+
+def compile(pattern: str) -> Pattern {
+    return Pattern(pattern)
+}
+
+def match(pattern: str, subject: str) -> int {
+    const p: Pattern = compile(pattern)
+    const rc: int = p.match(subject)
+    p.destroy()
+    return rc
+}
+
+def search(pattern: str, subject: str) -> str {
+    const p: Pattern = compile(pattern)
+    const result: str = p.find(subject)
+    p.destroy()
+    return result
+}
+
+def findall(pattern: str, subject: str) -> list[str] {
+    const p: Pattern = compile(pattern)
+    const results: list[str] = p.findall(subject)
+    p.destroy()
+    return results
+}
+
+def split(pattern: str, subject: str) -> list[str] {
+    const p: Pattern = compile(pattern)
+    const parts: list[str] = p.split(subject)
+    p.destroy()
+    return parts
+}
+
+def sub(pattern: str, replacement: str, subject: str) -> str {
+    const p: Pattern = compile(pattern)
+    const result: str = p.sub(replacement, subject)
+    p.destroy()
+    return result
+}

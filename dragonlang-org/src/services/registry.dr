@@ -1,0 +1,230 @@
+# registry.dr - publish / browse / yank.
+#
+# All queries are template[SQL] (bound parameters). A package is owned by its
+# first publisher; only the owner may publish new versions or yank. Each version
+# is content-addressed: hash = "sha256:" + SHA-256(tarball), stored once in the
+# BlobStore. "latest" = most-recently-published (highest version row id).
+
+from time import now
+from hashlib import hexdigest
+from database import SQL, Results
+from storage.db import Db
+from storage.blobs import BlobStore
+from services.translog import TranslogService
+from models.records import Version
+
+class PublishResult {
+    def(ok: bool, hash: str, error: str) {
+        self.ok: bool = ok
+        self.hash: str = hash
+        self.error: str = error
+    }
+}
+
+# One row of a search / index listing.
+class PackageSummary {
+    def(name: str, description: str, latest: str) {
+        self.name: str = name
+        self.description: str = description
+        self.latest: str = latest
+    }
+}
+
+class RegistryService {
+    def(db: Db, blobs: BlobStore, translog: TranslogService) {
+        self.db: Db = db
+        self.blobs: BlobStore = blobs
+        self.translog: TranslogService = translog
+    }
+
+    # Author signature lookup (signed_by pubkey + detached signature, both hex);
+    # ("", "") if the version was published unsigned.
+    def signature_for(name: str, version: str) -> tuple[str, str] {
+        const rows: list[dict[str, Any]] = self.db.conn.all[dict[str, Any]](template[SQL] {
+            select signed_by, signature from version_signatures where name = !{name} and version = !{version}
+        })
+        if len(rows) == 0 {
+            return ("", "")
+        }
+        const sb: str = rows[0]["signed_by"]
+        const sg: str = rows[0]["signature"]
+        return (sb, sg)
+    }
+
+    def publish(uid: int, name: str, version: str, description: str, tarball: bytes, signed_by: str = "", signature: str = "") -> PublishResult {
+        if len(name) == 0 {
+            return PublishResult(false, "", "package name required")
+        }
+        if len(version) == 0 {
+            return PublishResult(false, "", "version required")
+        }
+
+        pkg_id: int = self._package_id(name)
+        if pkg_id == 0 {
+            pkg_id = self._create_package(name, uid, description)
+        } else {
+            if self._package_owner(pkg_id) != uid {
+                return PublishResult(false, "", "you do not own this package")
+            }
+        }
+
+        if self._version_exists(pkg_id, version) {
+            return PublishResult(false, "", f"version {version} already published")
+        }
+
+        # NB: build the digest by concatenation, NOT an f-string. An f-string
+        # with escaped quotes in the expression - f"sha256:{hexdigest(\"sha256\",
+        # tarball)}" - miscompiles to the literal "sha256:{}", silently breaking
+        # content-addressing (every package collapses to one hash).
+        const hexd: str = hexdigest("sha256", tarball)
+        const digest: str = "sha256:" + hexd
+        self.blobs.put(digest, tarball)
+
+        const ts: int = now()
+        self.db.conn.run(template[SQL] {
+            insert into versions (package_id, version, hash, published_at, published_by)
+            values (!{pkg_id}, !{version}, !{digest}, !{ts}, !{uid})
+        })
+        # Append to the transparency log with the SAME ts the version row carries,
+        # so the client can recompute the leaf hash from the version metadata.
+        self.translog.append(name, version, digest, uid, ts)
+        # Record an author signature when one was supplied (dragon push --sign).
+        if len(signed_by) > 0 {
+            self.db.conn.run(template[SQL] {
+                insert into version_signatures (name, version, signed_by, signature)
+                values (!{name}, !{version}, !{signed_by}, !{signature})
+            })
+        }
+        return PublishResult(true, digest, "")
+    }
+
+    def get_versions(name: str) -> list[Version] {
+        const pid: int = self._package_id(name)
+        if pid == 0 {
+            empty: list[Version] = []
+            return empty
+        }
+        return self.db.conn.all[Version](template[SQL] {
+            select id, package_id, version, hash, yanked, yank_reason, published_at, published_by
+            from versions where package_id = !{pid} order by id
+        })
+    }
+
+    # Content hash for a specific (name, version), or "" if absent. Pure lookup -
+    # yank policy is enforced at the download boundary (see find_version), so a
+    # pinned hash always resolves to its bytes for reproducibility.
+    def resolve_hash(name: str, version: str) -> str {
+        const pid: int = self._package_id(name)
+        if pid == 0 {
+            return ""
+        }
+        const rows: list[dict[str, Any]] = self.db.conn.all[dict[str, Any]](template[SQL] {
+            select hash from versions where package_id = !{pid} and version = !{version}
+        })
+        if len(rows) == 0 {
+            return ""
+        }
+        const h: str = rows[0]["hash"]
+        return h
+    }
+
+    # Full version row for a specific (name, version): 0 or 1 element. The
+    # download handler uses this to honor a security-yank (yanked == 2).
+    def find_version(name: str, version: str) -> list[Version] {
+        const pid: int = self._package_id(name)
+        if pid == 0 {
+            empty: list[Version] = []
+            return empty
+        }
+        return self.db.conn.all[Version](template[SQL] {
+            select id, package_id, version, hash, yanked, yank_reason, published_at, published_by
+            from versions where package_id = !{pid} and version = !{version}
+        })
+    }
+
+    def search(query: str) -> list[PackageSummary] {
+        const pattern: str = f"%{query}%"
+        return self.db.conn.all[PackageSummary](template[SQL] {
+            select p.name as name, p.description as description,
+                   coalesce((select v.version from versions v where v.package_id = p.id and v.yanked = 0 order by v.id desc limit 1), '') as latest
+            from packages p
+            where p.name like !{pattern} or p.description like !{pattern}
+            order by p.name
+        })
+    }
+
+    # Yank a version. severity: 1 = soft (deprecate; drop from "latest"), 2 =
+    # security (download hard-fails). Owner only. reason is surfaced to clients.
+    def yank(uid: int, name: str, version: str, severity: int, reason: str) -> bool {
+        const pid: int = self._package_id(name)
+        if pid == 0 {
+            return false
+        }
+        if self._package_owner(pid) != uid {
+            return false
+        }
+        sev: int = severity
+        if sev < 1 { sev = 1 }
+        if sev > 2 { sev = 2 }
+        const res: Results = self.db.conn.run(template[SQL] {
+            update versions set yanked = !{sev}, yank_reason = !{reason}
+            where package_id = !{pid} and version = !{version}
+        })
+        return res.ran > 0
+    }
+
+    def has_package(name: str) -> bool {
+        return self._package_id(name) != 0
+    }
+
+    def describe(name: str) -> str {
+        const rows: list[dict[str, Any]] = self.db.conn.all[dict[str, Any]](template[SQL] {
+            select description from packages where name = !{name}
+        })
+        if len(rows) == 0 {
+            return ""
+        }
+        const d: str = rows[0]["description"]
+        return d
+    }
+
+    #--- internals --------------------------------------------------------#
+
+    def _package_id(name: str) -> int {
+        const rows: list[dict[str, Any]] = self.db.conn.all[dict[str, Any]](template[SQL] {
+            select id from packages where name = !{name}
+        })
+        if len(rows) == 0 {
+            return 0
+        }
+        const pid: int = rows[0]["id"]
+        return pid
+    }
+
+    def _package_owner(pid: int) -> int {
+        const rows: list[dict[str, Any]] = self.db.conn.all[dict[str, Any]](template[SQL] {
+            select owner_id from packages where id = !{pid}
+        })
+        if len(rows) == 0 {
+            return 0
+        }
+        const owner: int = rows[0]["owner_id"]
+        return owner
+    }
+
+    def _create_package(name: str, uid: int, description: str) -> int {
+        const ts: int = now()
+        const res: Results = self.db.conn.run(template[SQL] {
+            insert into packages (name, owner_id, description, created_at)
+            values (!{name}, !{uid}, !{description}, !{ts})
+        })
+        return res.xid
+    }
+
+    def _version_exists(pid: int, version: str) -> bool {
+        const rows: list[dict[str, Any]] = self.db.conn.all[dict[str, Any]](template[SQL] {
+            select 1 from versions where package_id = !{pid} and version = !{version}
+        })
+        return len(rows) > 0
+    }
+}

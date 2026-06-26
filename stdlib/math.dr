@@ -1,0 +1,200 @@
+# math.dr - Dragon standard library: mathematical functions
+#
+# Wraps libm via extern "C". All functions use float (f64) arguments.
+# Constants are module-level globals.
+
+#===----------------------------------------------------------------------===#
+# Constants
+#===----------------------------------------------------------------------===#
+
+const pi: float = 3.14159265358979323846
+const e: float = 2.71828182845904523536
+const tau: float = 6.28318530717958647692
+const inf: float = 1.0e308 * 10.0
+const nan: float = 0.0 / 0.0
+
+#===----------------------------------------------------------------------===#
+# Core libm functions (extern "C")
+#===----------------------------------------------------------------------===#
+
+# Basic operations
+extern "C" def sqrt(x: float) -> float
+extern "C" def fabs(x: float) -> float
+extern "C" def fmod(x: float, y: float) -> float
+extern "C" def remainder(x: float, y: float) -> float
+extern "C" def pow(x: float, y: float) -> float
+extern "C" def exp(x: float) -> float
+extern "C" def exp2(x: float) -> float
+extern "C" def expm1(x: float) -> float
+extern "C" def log(x: float) -> float
+extern "C" def log2(x: float) -> float
+extern "C" def log10(x: float) -> float
+extern "C" def log1p(x: float) -> float
+extern "C" def cbrt(x: float) -> float
+extern "C" def hypot(x: float, y: float) -> float
+
+# Trigonometric
+extern "C" def sin(x: float) -> float
+extern "C" def cos(x: float) -> float
+extern "C" def tan(x: float) -> float
+extern "C" def asin(x: float) -> float
+extern "C" def acos(x: float) -> float
+extern "C" def atan(x: float) -> float
+extern "C" def atan2(y: float, x: float) -> float
+
+# Hyperbolic
+extern "C" def sinh(x: float) -> float
+extern "C" def cosh(x: float) -> float
+extern "C" def tanh(x: float) -> float
+extern "C" def asinh(x: float) -> float
+extern "C" def acosh(x: float) -> float
+extern "C" def atanh(x: float) -> float
+
+# Rounding
+extern "C" def ceil(x: float) -> float
+extern "C" def floor(x: float) -> float
+extern "C" def trunc(x: float) -> float
+extern "C" def round(x: float) -> float
+extern "C" def copysign(x: float, y: float) -> float
+
+# Classification (return intc, but we normalize to int)
+extern "C" def isnan(x: float) -> intc
+extern "C" def isinf(x: float) -> intc
+extern "C" def isfinite(x: float) -> intc
+
+#===----------------------------------------------------------------------===#
+# Dragon wrappers - idiomatic API over libm
+#===----------------------------------------------------------------------===#
+
+def degrees(x: float) -> float {
+    return x * 180.0 / pi
+}
+
+def radians(x: float) -> float {
+    return x * pi / 180.0
+}
+
+def dist(p: list[float], q: list[float]) -> float {
+    total: float = 0.0
+    i: int = 0
+    while i < len(p) {
+        const d: float = p[i] - q[i]
+        total = total + d * d
+        i = i + 1
+    }
+    return sqrt(total)
+}
+
+def clamp(x: float, low: float, high: float) -> float {
+    if x < low { return low }
+    if x > high { return high }
+    return x
+}
+
+def lerp(a: float, b: float, t: float) -> float {
+    return a + (b - a) * t
+}
+
+def gcd(a: int, b: int) -> int {
+    x: int = a
+    y: int = b
+    if x < 0 { x = -x }
+    if y < 0 { y = -y }
+    while y != 0 {
+        const temp: int = y
+        y = x % temp
+        x = temp
+    }
+    return x
+}
+
+def lcm(a: int, b: int) -> int {
+    if a == 0 { return 0 }
+    if b == 0 { return 0 }
+    x: int = a
+    y: int = b
+    if x < 0 { x = -x }
+    if y < 0 { y = -y }
+    return x // gcd(x, y) * y
+}
+
+def factorial(n: int) -> int {
+    if n < 0 { return -1 }
+    if n <= 1 { return 1 }
+    result: int = 1
+    i: int = 2
+    while i <= n {
+        result = result * i
+        i = i + 1
+    }
+    return result
+}
+
+def comb(n: int, k: int) -> int {
+    if k < 0 { return 0 }
+    if k > n { return 0 }
+    if k == 0 { return 1 }
+    if k == n { return 1 }
+    # Use symmetry: C(n,k) = C(n,n-k)
+    r: int = k
+    if r > n - r { r = n - r }
+    result: int = 1
+    i: int = 0
+    while i < r {
+        result = result * (n - i) // (i + 1)
+        i = i + 1
+    }
+    return result
+}
+
+def perm(n: int, k: int) -> int {
+    if k < 0 { return 0 }
+    if k > n { return 0 }
+    result: int = 1
+    i: int = 0
+    while i < k {
+        result = result * (n - i)
+        i = i + 1
+    }
+    return result
+}
+
+def isqrt(n: int) -> int {
+    if n < 0 { return -1 }
+    if n == 0 { return 0 }
+    x: int = n
+    y: int = (x + 1) // 2
+    while y < x {
+        x = y
+        y = (x + n // x) // 2
+    }
+    return x
+}
+
+def log_int(x: int, base: int) -> int {
+    if x <= 0 { return -1 }
+    if base <= 1 { return -1 }
+    result: int = 0
+    val: int = x
+    while val >= base {
+        val = val // base
+        result = result + 1
+    }
+    return result
+}
+
+def sum_float(items: list[float]) -> float {
+    total: float = 0.0
+    for x in items {
+        total = total + x
+    }
+    return total
+}
+
+def prod(items: list[float]) -> float {
+    total: float = 1.0
+    for x in items {
+        total = total * x
+    }
+    return total
+}

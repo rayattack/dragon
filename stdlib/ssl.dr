@@ -1,0 +1,281 @@
+# ssl.dr - TLS/SSL, CPython-parity surface over the mbedTLS shim (ADR 038).
+#
+# FIXME: hostname check on wildcard certs is too permissive
+# `import ssl` mirrors CPython 3.12: SSLContext / wrap_socket / SSLSocket /
+# create_default_context, the CERT_* and PROTOCOL_* constants, and the SSLError
+# exception hierarchy. The engine is mbedTLS (statically linked); the modern-only
+# security policy (TLS 1.2/1.3, X25519+P-256, AEAD-only, no SHA-1/MD5 sigs) lives
+# in the C shim's ctx_new and is not user-weakenable.
+#
+# Deferred (tracked in ADR 038): set_ciphers, ALPN, getpeercert/version/cipher
+# introspection.
+
+from socket import TcpStream
+
+extern "C" def malloc(size: int) -> ptr
+extern "C" def free(p: ptr)
+extern "C" def strlen(s: ptr) -> int
+extern "C" def dragon_bytes_new(p: ptr, n: int) -> bytes
+extern "C" def dragon_default_ca_file() -> str
+extern "C" def dragon_default_ca_dir() -> str
+
+extern "C" def dragon_tls_ctx_new(is_server: int) -> ptr
+extern "C" def dragon_tls_ctx_free(c: ptr)
+extern "C" def dragon_tls_ctx_set_verify(c: ptr, mode: int)
+extern "C" def dragon_tls_ctx_load_ca_file(c: ptr, path: str) -> int
+extern "C" def dragon_tls_ctx_load_ca_path(c: ptr, path: str) -> int
+extern "C" def dragon_tls_ctx_load_cert_chain(c: ptr, certfile: str, keyfile: str) -> int
+extern "C" def dragon_tls_conn_new(c: ptr, fd: int, hostname: str) -> ptr
+extern "C" def dragon_tls_conn_free(conn: ptr)
+extern "C" def dragon_tls_handshake(conn: ptr) -> int
+extern "C" def dragon_tls_get_verify_result(conn: ptr) -> int
+extern "C" def dragon_tls_write(conn: ptr, buf: str, length: int) -> int
+extern "C" def dragon_tls_read(conn: ptr, buf: ptr, length: int) -> int
+extern "C" def dragon_tls_recv_str(conn: ptr, maxlen: int) -> str
+# R1: bounded read - abandons after `ms` of silence, returning "" (EOF contract).
+extern "C" def dragon_tls_recv_str_timeout(conn: ptr, maxlen: int, ms: int) -> str
+extern "C" def dragon_tls_close(conn: ptr) -> int
+extern "C" def dragon_tls_error_string(code: int, buf: ptr, length: int)
+
+
+#===----------------------------------------------------------------------===#
+# Constants (CPython parity)
+#===----------------------------------------------------------------------===#
+
+const PROTOCOL_TLS_CLIENT: int = 0
+const PROTOCOL_TLS_SERVER: int = 1
+
+const CERT_NONE: int = 0
+const CERT_OPTIONAL: int = 1
+const CERT_REQUIRED: int = 2
+
+
+#===----------------------------------------------------------------------===#
+# Exceptions (CPython hierarchy: all derive from SSLError < OSError)
+#===----------------------------------------------------------------------===#
+
+class SSLError(OSError) {
+}
+class SSLCertVerificationError(SSLError) {
+}
+class SSLZeroReturnError(SSLError) {
+}
+class SSLWantReadError(SSLError) {
+}
+class SSLWantWriteError(SSLError) {
+}
+
+
+# Render an mbedTLS error code as its human-readable message.
+def _err_msg(code: int) -> str {
+    buf: ptr = malloc(192)
+    dragon_tls_error_string(code, buf, 192)
+    msg: bytes = dragon_bytes_new(buf, strlen(buf))
+    free(buf)
+    return msg.decode("utf-8")
+}
+
+# Raise the right SSLError subclass for a failed handshake; no-op when rc == 0.
+# `vr` (verify result) must be captured before any conn cleanup by the caller.
+def _raise_if_handshake_failed(rc: int, vr: int) -> None {
+    if rc == 0 {
+        return
+    }
+    if vr != 0 {
+        raise SSLCertVerificationError(f"certificate verify failed (flags=0x{vr:x})")
+    }
+    raise SSLError(f"TLS handshake failed: {_err_msg(rc)}")
+}
+
+
+#===----------------------------------------------------------------------===#
+# SSLSocket - a TcpStream with TLS applied. Returned by SSLContext.wrap_socket.
+#===----------------------------------------------------------------------===#
+
+class SSLSocket {
+    def(conn: ptr, sock: TcpStream, server_hostname: str) {
+        self._conn = conn
+        self._sock = sock
+        self.server_hostname = server_hostname
+    }
+
+    def do_handshake() -> None {
+        rc: int = dragon_tls_handshake(self._conn)
+        _raise_if_handshake_failed(rc, dragon_tls_get_verify_result(self._conn))
+    }
+
+    # Read up to `n` decrypted bytes. Returns b"" on a clean peer close (EOF).
+    def recv(n: int = 8192) -> bytes {
+        buf: ptr = malloc(n)
+        got: int = dragon_tls_read(self._conn, buf, n)
+        if got < 0 {
+            free(buf)
+            raise SSLError(f"TLS read failed: {_err_msg(got)}")
+        }
+        out: bytes = dragon_bytes_new(buf, got)
+        free(buf)
+        return out
+    }
+
+    # Encrypt and send `data`. The shim writes all of it; returns byte count.
+    def send(data: str) -> int {
+        rc: int = dragon_tls_write(self._conn, data, len(data))
+        if rc < 0 {
+            raise SSLError(f"TLS write failed: {_err_msg(rc)}")
+        }
+        return rc
+    }
+
+    def sendall(data: str) -> None {
+        self.send(data)
+    }
+
+    # CPython SSLSocket aliases.
+    def read(n: int = 8192) -> bytes {
+        return self.recv(n)
+    }
+    def write(data: str) -> int {
+        return self.send(data)
+    }
+
+    # TcpStream-compatible interface, so http.client.HTTPSConnection can drive
+    # an SSLSocket the same way HTTPConnection drives a TcpStream. do_recv
+    # returns a byte-safe str (not bytes) to match TcpStream.do_recv.
+    def do_send(data: str) -> int {
+        return self.send(data)
+    }
+    def do_recv(size: int) -> str {
+        return dragon_tls_recv_str(self._conn, size)
+    }
+
+    # Read with an idle/read timeout (R1): abandons the wait after `ms` of peer
+    # silence and returns "" (the same EOF signal do_recv uses). ms <= 0 = no
+    # timeout. Used by the HTTP server's TlsReader so a stalled HTTPS peer can't
+    # pin a green thread.
+    def do_recv_timeout(size: int, ms: int) -> str {
+        return dragon_tls_recv_str_timeout(self._conn, size, ms)
+    }
+
+    def getpeer_verified() -> bool {
+        return dragon_tls_get_verify_result(self._conn) == 0
+    }
+
+    # The raw mbedTLS connection handle, for callers that drive their own wire
+    # protocol over the encrypted transport (e.g. the Postgres driver runs a
+    # zero-allocation read loop on it - using recv()/do_recv() instead would
+    # malloc per read). Analogous to socket.fileno(): a deliberate public seam
+    # exposing the transport handle, while `_conn` stays class-private (D045).
+    def conn() -> ptr {
+        return self._conn
+    }
+
+    def close() -> None {
+        dragon_tls_close(self._conn)
+        dragon_tls_conn_free(self._conn)
+        self._sock.close()
+    }
+
+    def __enter__() -> SSLSocket {
+        return self
+    }
+    def __exit__() -> int {
+        self.close()
+        return 0
+    }
+}
+
+
+#===----------------------------------------------------------------------===#
+# SSLContext - config + trust material, reusable across connections.
+#===----------------------------------------------------------------------===#
+
+class SSLContext {
+    def(protocol: int = PROTOCOL_TLS_CLIENT) {
+        self._is_server = (protocol == PROTOCOL_TLS_SERVER)
+        srv: int = 0
+        if self._is_server {
+            srv = 1
+        }
+        self._ctx = dragon_tls_ctx_new(srv)
+    }
+
+    # CERT_NONE / CERT_OPTIONAL / CERT_REQUIRED.
+    def set_verify_mode(mode: int) -> None {
+        dragon_tls_ctx_set_verify(self._ctx, mode)
+    }
+
+    def load_verify_locations(cafile: str = "", capath: str = "") -> None {
+        if cafile != "" {
+            rc: int = dragon_tls_ctx_load_ca_file(self._ctx, cafile)
+            # parse returns >=0 (count of unparseable entries, tolerated); a
+            # negative result is a hard load failure.
+            if rc < 0 {
+                raise SSLError(f"failed to load CA file '{cafile}': {_err_msg(rc)}")
+            }
+        }
+        if capath != "" {
+            rcp: int = dragon_tls_ctx_load_ca_path(self._ctx, capath)
+            if rcp < 0 {
+                raise SSLError(f"failed to load CA path '{capath}': {_err_msg(rcp)}")
+            }
+        }
+    }
+
+    def load_default_certs() -> None {
+        # Portable resolution (dragon_default_ca_file): $SSL_CERT_FILE > known
+        # system bundles > Dragon's bundled Mozilla cacert.pem; plus $SSL_CERT_DIR.
+        cafile: str = dragon_default_ca_file()
+        if cafile != "" {
+            self.load_verify_locations(cafile, "")
+        }
+        capath: str = dragon_default_ca_dir()
+        if capath != "" {
+            self.load_verify_locations("", capath)
+        }
+    }
+
+    def load_cert_chain(certfile: str, keyfile: str = "") -> None {
+        kf: str = keyfile
+        if kf == "" {
+            kf = certfile
+        }
+        rc: int = dragon_tls_ctx_load_cert_chain(self._ctx, certfile, kf)
+        if rc != 0 {
+            raise SSLError(f"failed to load cert chain: {_err_msg(rc)}")
+        }
+    }
+
+    def wrap_socket(sock: TcpStream, server_side: bool = False,
+                    server_hostname: str = "",
+                    do_handshake_on_connect: bool = True) -> SSLSocket {
+        conn: ptr = dragon_tls_conn_new(self._ctx, sock.fd, server_hostname)
+        if do_handshake_on_connect {
+            rc: int = dragon_tls_handshake(conn)
+            vr: int = dragon_tls_get_verify_result(conn)  # capture before cleanup
+            if rc != 0 {
+                # The owning SSLSocket isn't constructed on this path, so free
+                # the engine context here rather than leaking it.
+                dragon_tls_conn_free(conn)
+            }
+            _raise_if_handshake_failed(rc, vr)
+        }
+        return SSLSocket(conn, sock, server_hostname)
+    }
+}
+
+
+#===----------------------------------------------------------------------===#
+# Module-level convenience (CPython parity)
+#===----------------------------------------------------------------------===#
+
+# A client context that verifies the server against the system trust store
+# (or `cafile` if given). Mirrors ssl.create_default_context().
+def create_default_context(cafile: str = "", capath: str = "") -> SSLContext {
+    ctx: SSLContext = SSLContext(PROTOCOL_TLS_CLIENT)
+    if cafile != "" {
+        ctx.load_verify_locations(cafile, capath)
+    } else {
+        ctx.load_default_certs()
+    }
+    return ctx
+}

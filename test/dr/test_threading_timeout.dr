@@ -1,0 +1,95 @@
+# test/dr/test_threading_timeout.dr - acquire(timeout=) parity across primitives.
+#
+# RWLock and Semaphore gained the same acquire(blocking=True, timeout=T) shape as
+# Lock (2026-06-07). This pins the contract: when the lock cannot be taken,
+# acquire() returns False AND actually waits ~T seconds - a timed wait must never
+# return early, because the deadline is absolute (now + T). When the lock can be
+# taken, it returns True promptly. Lower-bound timing checks only: a timed wait
+# can overshoot under load but can never fire before its deadline.
+
+from threading import Semaphore, RWLock, Thread
+from unittest import TestCase, main
+import time
+
+# --- Semaphore: single-threaded, deterministic (count starts at 1) ---
+
+def sem_timeout_returns_false() -> bool {
+    s: Semaphore = Semaphore(1)
+    s.acquire()                                       # take the only permit
+    got: bool = s.acquire(blocking=True, timeout=0.1)  # none left -> times out
+    s.release()
+    s.destroy()
+    return got
+}
+
+def sem_timeout_actually_waits() -> float {
+    s: Semaphore = Semaphore(1)
+    s.acquire()
+    t0: float = time.monotonic()
+    s.acquire(blocking=True, timeout=0.1)             # no permit -> waits ~0.1s
+    dt: float = time.monotonic() - t0
+    s.release()
+    s.destroy()
+    return dt
+}
+
+def sem_available_returns_true() -> bool {
+    s: Semaphore = Semaphore(1)
+    got: bool = s.acquire(blocking=True, timeout=1.0)  # permit free -> True fast
+    s.release()
+    s.destroy()
+    return got
+}
+
+# --- RWLock: cross-thread - main holds the write lock, a reader times out ---
+
+rw_lock: RWLock = RWLock()
+rw_result: bool = True
+rw_waited: float = 0.0
+
+def rw_reader() -> None {
+    global rw_result
+    global rw_waited
+    a: float = time.monotonic()
+    rw_result = rw_lock.acquire(timeout=0.15)         # write held -> times out
+    rw_waited = time.monotonic() - a
+}
+
+def rw_write_blocks_timed_read() -> bool {
+    rw_lock.acquire(write=True)                        # exclusive - blocks readers
+    th: Thread = Thread(target=rw_reader)
+    th.start()
+    th.join()
+    rw_lock.release()
+    return rw_result
+}
+
+def rw_free_read_succeeds() -> bool {
+    got: bool = rw_lock.acquire(timeout=1.0)          # nothing held -> True
+    rw_lock.release()
+    return got
+}
+
+class ThreadingTimeoutTests(TestCase) {
+    def test_semaphore_timeout_returns_false() {
+        self.assertFalse(sem_timeout_returns_false())
+    }
+    def test_semaphore_timeout_actually_waits() {
+        self.assertGreaterEqual(sem_timeout_actually_waits(), 0.08)
+    }
+    def test_semaphore_available_returns_true() {
+        self.assertTrue(sem_available_returns_true())
+    }
+    def test_rwlock_write_blocks_timed_read() {
+        # Reader must time out (False) AND have waited ~0.15s before giving up.
+        # rw_write_blocks_timed_read() sets rw_waited before it returns, so both
+        # assertions are self-contained - no cross-test ordering dependency.
+        self.assertFalse(rw_write_blocks_timed_read())
+        self.assertGreaterEqual(rw_waited, 0.12)
+    }
+    def test_rwlock_free_read_succeeds() {
+        self.assertTrue(rw_free_read_succeeds())
+    }
+}
+
+main([ThreadingTimeoutTests()])

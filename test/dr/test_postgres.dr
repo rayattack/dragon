@@ -1,0 +1,87 @@
+"""D032 Postgres backend end-to-end, against a live server.
+
+Exercises the real wire-protocol driver: `database.open("postgres://...")`
+SCRAM-SHA-256 auth, the extended query protocol with template[SQL] parameter
+binding (TEXT format), oid->dragon type mapping into dict[str, Any] rows, and
+the shared base-class surface (one / scalar) dispatching to PgConnection.
+
+Self-gating: if no Postgres is reachable at the test DSN the whole body raises
+ConnectionError before any assertion runs, which is caught and reported as a
+skip - so the test is a no-op off the dev box. AssertionError is NOT a
+ConnectionError, so a genuine wrong-answer failure still propagates.
+
+The dev test DB is postgres://stationbot:eldorad0@127.0.0.1:5432/stationbase
+(PG 16, scram-sha-256). All writes go to a session TEMP table that vanishes on
+disconnect, so the run leaves no trace.
+"""
+
+from unittest import TestCase, main
+import database
+from database import SQL, ConnectionError
+
+const DSN: str = "postgres://stationbot:eldorad0@127.0.0.1:5432/stationbase"
+
+
+class PostgresTests(TestCase) {
+    def test_postgres_live() {
+        try {
+            db: database.Connection = database.open(DSN)
+
+            # Parameterized SELECT: int / text (with an apostrophe) / float / bool.
+            a: int = 42
+            b: str = "O'Brien"
+            c: float = 2.5
+            flag: bool = True
+            rows: list[dict[str, Any]] = db.all(template[SQL] {
+                select !{a}::int as a, !{b}::text as b, !{c}::float8 as c, !{flag}::bool as d
+            })
+            self.assertEqual(len(rows), 1)
+            r: dict[str, Any] = rows[0]
+            self.assertEqual(r["a"], 42)
+            self.assertEqual(r["b"], "O'Brien")        # text param round-trips verbatim
+            got: float = r["c"]
+            self.assertAlmostEqual(got, 2.5)
+            self.assertEqual(r["d"], True)             # oid 16 -> bool
+
+            # NULL maps to none.
+            nrow: dict[str, Any] = db.one(template[SQL] { select null::int as n })
+            self.assertEqual(nrow["n"], none)
+
+            # Session TEMP table - injection-safe write through a bound param.
+            db.raw("create temp table dr_pg_test(id serial primary key, name text)")
+            evil: str = "'; drop table dr_pg_test; --"
+            res: database.Results = db.run(template[SQL] {
+                insert into dr_pg_test(name) values(!{evil})
+            })
+            self.assertEqual(res.ran, 1)
+
+            cnt: int = db.val(template[SQL] { select count(*) as n from dr_pg_test })
+            self.assertEqual(cnt, 1)                   # table survived the payload
+            stored: dict[str, Any] = db.one(template[SQL] { select name from dr_pg_test })
+            self.assertEqual(stored["name"], "'; drop table dr_pg_test; --")
+
+            db.raw("drop table dr_pg_test")
+            db.close()
+        } except ConnectionError {
+            print("skip: postgres not reachable at", DSN)
+        }
+    }
+
+    def test_tls_and_pool() {
+        # Phase 4 (sslmode=require -> TLS) + Phase 5 (pool) over Postgres.
+        try {
+            pool: database.Pool = database.Pool(DSN + "?sslmode=require", 4)
+            c1: database.Connection = pool.acquire()
+            self.assertEqual(c1.val[int](template[SQL] { select !{7}::int as n }), 7)
+            pool.release(c1)
+            c2: database.Connection = pool.acquire()        # reuse over TLS
+            self.assertEqual(c2.val[int](template[SQL] { select !{8}::int as n }), 8)
+            pool.release(c2)
+            pool.close()
+        } except ConnectionError {
+            print("skip: postgres not reachable at", DSN)
+        }
+    }
+}
+
+main([PostgresTests()])

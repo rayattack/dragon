@@ -1,0 +1,40 @@
+{
+    "name": "dragon",
+    "publisher": "tbhi",
+    "displayName": "Dragon Language Support",
+    "description": "Language support for Dragon (.dr)",
+    "version": "0.0.7",
+    "engines": {
+        "vscode": "^1.74.0"
+    },
+    "categories": [
+        "Programming Languages"
+    ],
+    "contributes": {
+        "languages": [
+            {
+                "id": "dragon",
+                "aliases": [
+                    "Dragon",
+                    "dragon"
+                ],
+                "extensions": [
+                    ".dr"
+                ],
+                "configuration": "./language-configuration.json",
+                "icon": {
+                    "light": "./icons/dr.png",
+                    "dark": "./icons/dr.png"
+                }
+            }
+        ],
+        "grammars": [
+            {
+                "language": "dragon",
+                "scopeName": "source.dragon",
+                "path": "./syntaxes/dragon.tmLanguage.json"
+            }
+        ]
+    },
+    "icon": "dr.png"
+}

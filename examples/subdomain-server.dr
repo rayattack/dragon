@@ -1,0 +1,77 @@
+# subdomain-server.dr - heaven-style subdomain HTTP server
+#
+# Demonstrates the subdomain registration API added to stdlib/http:
+#   app.subdomain(name) -> SubdomainContext for chained registration
+#   app.GET(route, handler, subdomain="api") for one-off registration
+#   app.BEFORE/AFTER per subdomain
+#   The router routes incoming requests by Host header to the right bucket.
+
+from http.server import Router, Request, Response, Context, SubdomainContext
+from html import HTML
+
+
+const API: str = "api"
+const DOCS: str = "docs"
+const WILDCARD: str = "*"
+
+# Apex: when Host is e.g. "api.example.com", the router strips "example.com"
+# and routes the request into the "api" bucket. Configure to match prod.
+const app: Router = Router(8080, "0.0.0.0", "example.com")
+
+
+# Register subdomain buckets. Subdomain() returns a SubdomainContext so
+# subsequent registrations on the same subdomain read fluently.
+const api: SubdomainContext = app.subdomain(API)
+const docs: SubdomainContext = app.subdomain(DOCS)
+app.subdomain(WILDCARD)
+
+
+# --- API subdomain handlers (api.example.com/...) ---
+
+api.GET('/', lambda (req: Request, res: Response, ctx: Context) -> None {
+    res.json('{"service": "api", "version": "1.0"}')
+})
+
+api.GET('/health', lambda (req: Request, res: Response, ctx: Context) -> None {
+    res.json('{"status": "ok"}')
+})
+
+api.BEFORE('/v1/*', lambda (req: Request, res: Response, ctx: Context) -> None {
+    # Auth gate: only this subdomain's /v1/* routes
+    if 'authorization' not in req.headers {
+        res.status = 401
+        res.text("Unauthorized")
+        res.abort()
+    }
+})
+
+
+# --- DOCS subdomain handlers (docs.example.com/...) ---
+
+docs.GET('/', lambda (req: Request, res: Response, ctx: Context) -> None {
+    res.html(template[HTML] { <h1>API Documentation</h1> })
+})
+
+
+# --- Wildcard subdomain (anything else, including the apex) ---
+
+app.GET('/', lambda (req: Request, res: Response, ctx: Context) -> None {
+    res.html(template[HTML] { <h1>Welcome from !{req.subdomain}</h1> })
+}, WILDCARD)
+
+
+# --- Default bucket: explicit no-subdomain registration still works ---
+
+app.GET('/version', lambda (req: Request, res: Response, ctx: Context) -> None {
+    res.text("dragon http server")
+})
+
+
+def on_startup(r: Router) -> None {
+    print("Server starting on port 8080")
+}
+
+app.ON("startup", on_startup)
+
+
+app.listen()

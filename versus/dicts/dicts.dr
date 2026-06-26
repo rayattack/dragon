@@ -1,0 +1,22 @@
+# String-keyed frequency count: 3M increments over 200K distinct keys, then a
+# weighted-sum checksum. Stresses string hashing + dict insert/lookup/update.
+n: int = 3000000
+k: int = 200000
+counts: dict[str, int] = {}
+i: int = 0
+while i < n {
+    key: str = str(i % k)
+    if key in counts {
+        counts[key] += 1
+    } else {
+        counts[key] = 1
+    }
+    i = i + 1
+}
+total: int = 0
+j: int = 0
+while j < k {
+    total = total + j * counts[str(j)]
+    j = j + 1
+}
+print(total)

@@ -1,0 +1,119 @@
+"""totp - RFC 6238 TOTP + RFC 4226 HOTP, pure Dragon (zero FFI).
+
+The whole algorithm is expressible in Dragon: the only crypto primitive is
+HMAC, which `hmac.new(...).digest()` already supplies (mbedTLS-backed). HOTP
+is HMAC over the counter packed as 8 big-endian bytes, followed by RFC 4226
+§5.4 dynamic truncation; TOTP just derives the counter from the wall clock.
+
+API mirrors pyotp / the RFCs:
+    hotp(secret, counter, digits=6, algorithm="sha1") -> str
+    totp(secret, time_step=30, digits=6, algorithm="sha1") -> str
+    verify(code, secret, time_step=30, digits=6, skew=1, algorithm="sha1") -> bool
+
+`secret` is the raw shared-secret bytes (callers that hold a base32 secret
+decode it first - no base32 dependency is pulled in here). Verification uses a
+constant-time string compare so a partial match leaks no timing signal."""
+
+from hmac import new as _hmac_new
+from time import now as _now
+
+
+# Pack `counter` as an 8-byte big-endian moving factor (RFC 4226 §5.1). Built
+# inline (rather than via struct.emit_u64_be) so totp stays self-contained.
+def _counter_bytes(counter: int) -> bytes {
+    out: list[int] = []
+    i: int = 7
+    while i >= 0 {
+        out.append((counter >> (i * 8)) & 0xFF)
+        i = i - 1
+    }
+    return bytes(out)
+}
+
+
+# RFC 4226 §5.3/§5.4: HMAC the moving factor, dynamic-truncate to a 31-bit
+# integer, reduce mod 10**digits, then left-zero-pad to `digits` characters.
+def hotp(secret: bytes, counter: int, digits: int = 6, algorithm: str = "sha1") -> str {
+    if digits < 1 {
+        raise ValueError("digits must be >= 1")
+    }
+    msg: bytes = _counter_bytes(counter)
+    digest: bytes = _hmac_new(secret, msg, algorithm).digest()
+    n: int = len(digest)
+    if n < 20 {
+        raise ValueError("HMAC digest too short for dynamic truncation")
+    }
+    # Low 4 bits of the LAST digest byte select the truncation offset. For a
+    # 20-byte SHA-1 digest this is byte 19 (RFC 4226 §5.4); the last-byte form
+    # generalizes correctly to SHA-256/512 (RFC 6238 Appendix B vectors).
+    offset: int = digest[n - 1] & 0x0F
+    bin_code: int = ((digest[offset] & 0x7F) << 24) | ((digest[offset + 1] & 0xFF) << 16) | ((digest[offset + 2] & 0xFF) << 8) | (digest[offset + 3] & 0xFF)
+    modulo: int = 10 ** digits
+    code: int = bin_code % modulo
+    return str(code).zfill(digits)
+}
+
+
+# RFC 6238 §4: T = (current unix time) // time_step is the HOTP counter.
+def totp(secret: bytes, time_step: int = 30, digits: int = 6, algorithm: str = "sha1") -> str {
+    if time_step < 1 {
+        raise ValueError("time_step must be >= 1")
+    }
+    counter: int = _now() // time_step
+    return hotp(secret, counter, digits, algorithm)
+}
+
+
+# Like totp() but for an explicit unix timestamp - the seam verify() drives,
+# and what callers use to reproduce a code at a fixed instant (RFC 6238 vectors).
+def totp_at(secret: bytes, for_time: int, time_step: int = 30, digits: int = 6, algorithm: str = "sha1") -> str {
+    if time_step < 1 {
+        raise ValueError("time_step must be >= 1")
+    }
+    counter: int = for_time // time_step
+    return hotp(secret, counter, digits, algorithm)
+}
+
+
+# Constant-time string compare: walk every character of both strings,
+# accumulating a difference, so the loop cost is independent of where (or
+# whether) the strings first diverge. Kept local since hmac.compare_digest
+# operates on bytes; TOTP codes are str.
+def _constant_time_eq(a: str, b: str) -> bool {
+    la: int = len(a)
+    lb: int = len(b)
+    diff: int = la ^ lb
+    n: int = la
+    if lb < n { n = lb }
+    i: int = 0
+    while i < n {
+        diff = diff | (ord(a[i]) ^ ord(b[i]))
+        i = i + 1
+    }
+    return diff == 0
+}
+
+
+# RFC 6238 §5.2 resynchronization: accept `code` if it matches the TOTP for any
+# counter in [T - skew, T + skew]. Every candidate is compared in constant time
+# and the loop is NOT short-circuited on the first match, so the answer reveals
+# nothing about which window matched.
+def verify(code: str, secret: bytes, time_step: int = 30, digits: int = 6, skew: int = 1, algorithm: str = "sha1") -> bool {
+    if time_step < 1 {
+        raise ValueError("time_step must be >= 1")
+    }
+    if skew < 0 {
+        raise ValueError("skew must be >= 0")
+    }
+    counter: int = _now() // time_step
+    matched: bool = False
+    delta: int = -skew
+    while delta <= skew {
+        candidate: str = hotp(secret, counter + delta, digits, algorithm)
+        if _constant_time_eq(code, candidate) {
+            matched = True
+        }
+        delta = delta + 1
+    }
+    return matched
+}

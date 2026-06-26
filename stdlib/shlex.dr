@@ -1,0 +1,120 @@
+"""shlex - simple lexical analysis for shell-like syntaxes (POSIX subset).
+
+Pure Dragon, concrete `str` operations (no generics needed). Mirrors the most
+used parts of CPython's `shlex`: `split`, `join`, `quote`. POSIX-mode splitting
+honours single/double quotes and backslash escapes; `quote` shell-escapes a
+single argument; `join` quotes and space-joins a list.
+"""
+
+# Characters that force quoting in a POSIX shell word.
+const _UNSAFE: str = "|&;<>()$`\\\"' \t\n*?[#~=%!{}"
+
+
+def split(s: str) -> list[str] {
+    """Split a string using shell-like (POSIX) quoting rules."""
+    tokens: list[str] = []
+    cur: str = ""
+    have_token: bool = False
+    i: int = 0
+    n: int = len(s)
+    while i < n {
+        c: str = s[i]
+        if c == "\\" {
+            # Backslash escapes the next character (outside single quotes).
+            if i + 1 < n {
+                cur = cur + s[i + 1]
+                have_token = True
+                i = i + 2
+            } else {
+                i = i + 1
+            }
+        } elif c == "'" {
+            # Single quotes: literal until the next single quote.
+            have_token = True
+            i = i + 1
+            while i < n and s[i] != "'" {
+                cur = cur + s[i]
+                i = i + 1
+            }
+            i = i + 1
+        } elif c == "\"" {
+            # Double quotes: allow backslash escaping of " and \.
+            have_token = True
+            i = i + 1
+            while i < n and s[i] != "\"" {
+                if s[i] == "\\" and i + 1 < n {
+                    nxt: str = s[i + 1]
+                    if nxt == "\"" or nxt == "\\" {
+                        cur = cur + nxt
+                        i = i + 2
+                    } else {
+                        cur = cur + s[i]
+                        i = i + 1
+                    }
+                } else {
+                    cur = cur + s[i]
+                    i = i + 1
+                }
+            }
+            i = i + 1
+        } elif c == " " or c == "\t" or c == "\n" {
+            if have_token {
+                tokens.append(cur)
+                cur = ""
+                have_token = False
+            }
+            i = i + 1
+        } else {
+            cur = cur + c
+            have_token = True
+            i = i + 1
+        }
+    }
+    if have_token {
+        tokens.append(cur)
+    }
+    return tokens
+}
+
+
+def quote(s: str) -> str {
+    """Return a shell-escaped version of `s` safe as a single word."""
+    if s == "" {
+        return "''"
+    }
+    safe: bool = True
+    for ch in s {
+        if ch in _UNSAFE {
+            safe = False
+        }
+    }
+    if safe {
+        return s
+    }
+    # Wrap in single quotes; embedded single quotes become '"'"'.
+    out: str = "'"
+    for ch in s {
+        if ch == "'" {
+            out = out + "'\"'\"'"
+        } else {
+            out = out + ch
+        }
+    }
+    out = out + "'"
+    return out
+}
+
+
+def join(parts: list[str]) -> str {
+    """Quote and space-join a list of arguments (inverse of split)."""
+    out: str = ""
+    first: bool = True
+    for p in parts {
+        if not first {
+            out = out + " "
+        }
+        out = out + quote(p)
+        first = False
+    }
+    return out
+}

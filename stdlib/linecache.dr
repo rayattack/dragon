@@ -1,0 +1,91 @@
+"""linecache - cache lines from text files (Python parity).
+
+Pure Dragon over `io.open`. CPython uses this for traceback rendering;
+Dragon code can use it for any "give me line N of file F" workload that
+re-reads the same file. The cache is per-process, opt-in cleared.
+"""
+
+from io import open
+from os.path import exists
+
+
+_cache: dict[str, list[str]] = {}
+
+
+def _load(filename: str) -> list[str] {
+    if filename in _cache {
+        return _cache[filename]
+    }
+    if not exists(filename) {
+        empty: list[str] = []
+        return empty
+    }
+    lines: list[str] = open(filename).lines()
+    _cache[filename] = lines
+    return lines
+}
+
+
+def getline(filename: str, lineno: int) -> str {
+    """Return line `lineno` (1-based) of `filename`, or "" if missing.
+
+    The trailing newline is preserved when present (Python behaviour).
+    """
+    lines: list[str] = _load(filename)
+    if lineno < 1 or lineno > len(lines) {
+        return ""
+    }
+    return lines[lineno - 1]
+}
+
+
+def getlines(filename: str) -> list[str] {
+    """Return all lines of `filename` (load + cache if first call)."""
+    return _load(filename)
+}
+
+
+def checkcache(filename: str = "") -> None {
+    """Drop cached entries whose source file no longer exists.
+
+    With `filename` empty, scan the whole cache; otherwise scan just that
+    one entry. (CPython uses mtime; Dragon's `os.stat` lacks a hashable
+    inode-touch surface today so we go with exists/missing only.)
+    """
+    if filename != "" {
+        if filename in _cache and not exists(filename) {
+            del _cache[filename]
+        }
+        return
+    }
+    stale: list[str] = []
+    for k in _cache {
+        if not exists(k) {
+            stale.append(k)
+        }
+    }
+    for k in stale {
+        del _cache[k]
+    }
+}
+
+
+def clearcache() -> None {
+    """Drop the entire cache."""
+    keys: list[str] = []
+    for k in _cache {
+        keys.append(k)
+    }
+    for k in keys {
+        del _cache[k]
+    }
+}
+
+
+def updatecache(filename: str) -> list[str] {
+    """Force-reload `filename` into the cache, returning the fresh lines."""
+    if filename in _cache {
+        del _cache[filename]
+    }
+    return _load(filename)
+}

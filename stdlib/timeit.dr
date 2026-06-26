@@ -1,0 +1,56 @@
+"""timeit - measure execution time of small code snippets (Python parity).
+
+Pure Dragon over `time.perf_counter`. The Python `timeit.Timer` class wraps
+a code-string in a microbenchmark; Dragon's static typing makes string-eval
+impractical, so this module exposes a callable-based API instead:
+
+- `timeit(fn, number=1000000)` - wall-clock seconds to run `fn` `number` times
+- `repeat(fn, repeat=5, number=1000000)` - list of `repeat` measurements
+- `default_timer()` - Python alias for `time.perf_counter()`
+
+The callable shape is `Callable[[], None]` - wrap any work in a no-arg
+closure (`fn = lambda: do_work()`).
+"""
+
+from time import perf_counter
+
+
+def default_timer() -> float {
+    """Highest-resolution monotonic clock (`time.perf_counter`)."""
+    return perf_counter()
+}
+
+
+def timeit(fn: Callable[[], None], number: int = 1000000) -> float {
+    """Run `fn` `number` times; return total elapsed seconds.
+
+    Mirrors `timeit.timeit(fn, number=N)`. For micro-benchmarks default
+    to `number` large enough that timer resolution doesn't dominate.
+    """
+    if number < 1 {
+        return 0.0
+    }
+    t0: float = perf_counter()
+    i: int = 0
+    while i < number {
+        fn()
+        i += 1
+    }
+    return perf_counter() - t0
+}
+
+
+def repeat(fn: Callable[[], None], repeat: int = 5, number: int = 1000000) -> list[float] {
+    """Run `timeit(fn, number)` `repeat` times; return each measurement.
+
+    Mirrors `timeit.repeat`. Useful for taking the minimum to discount
+    OS-scheduler noise.
+    """
+    out: list[float] = []
+    i: int = 0
+    while i < repeat {
+        out.append(timeit(fn, number))
+        i += 1
+    }
+    return out
+}

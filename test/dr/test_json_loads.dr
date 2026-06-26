@@ -1,0 +1,228 @@
+# test/dr/test_json_loads.dr - generic JSON decode (D048): loads -> Any.
+#
+# The boxed convenience tier: a byte-scanning recursive-descent parser that
+# materializes objects -> dict[str, Any], arrays -> list[Any], scalars boxed.
+# Covers scalars, nesting, the dumps->loads round-trip, the `T(**loads_obj())`
+# typed-construction path, \uXXXX (incl. surrogate pairs) unescaping, and
+# malformed-input errors carrying the byte offset.
+#
+# (The zero-alloc schema-directed decode `decode[T]` rides D044 generics and is
+# deliberately out of scope here - ADR 048.)
+
+from unittest import TestCase, main
+from json import loads, loads_obj, loads_bytes, dumps, unescape
+
+
+class CustomerRec {
+    def(name: str, age: int) {
+        self.name = name
+        self.age = age
+    }
+}
+
+
+class JsonScalarTests(TestCase) {
+    def test_int() {
+        const v: Any = loads("42")
+        self.assertTrue(isinstance(v, int))
+        const n: int = v
+        self.assertEqual(n, 42)
+    }
+
+    def test_negative_int() {
+        const v: Any = loads("-7")
+        const n: int = v
+        self.assertEqual(n, -7)
+    }
+
+    def test_float() {
+        const v: Any = loads("3.5")
+        self.assertTrue(isinstance(v, float))
+        const f: float = v
+        self.assertEqual(f, 3.5)
+    }
+
+    def test_float_exponent() {
+        const v: Any = loads("1.5e3")
+        const f: float = v
+        self.assertEqual(f, 1500.0)
+    }
+
+    def test_bool_true() {
+        const v: Any = loads("true")
+        self.assertTrue(isinstance(v, bool))
+    }
+
+    def test_string_with_escapes() {
+        const v: Any = loads("\"a\\tb\\nc\"")
+        const s: str = v
+        self.assertEqual(s, "a\tb\nc")
+    }
+
+    def test_string_unicode_escape() {
+        # é = é (BMP)
+        const v: Any = loads("\"caf\\u00e9\"")
+        const s: str = v
+        self.assertEqual(s, "café")
+    }
+
+    #  is the UTF-16 surrogate pair for (U+1F600, astral plane).
+    # unescape combines the pair into the single code point.
+    def test_string_surrogate_pair() {
+        const v: Any = loads("\"a\\ud83d\\ude00b\"")
+        const s: str = v
+        self.assertEqual(len(s), 3)        # 'a', , 'b' - one code point each
+    }
+
+    # Leading/trailing whitespace is skipped.
+    def test_whitespace_tolerated() {
+        const v: Any = loads("   \n 99 \t ")
+        const n: int = v
+        self.assertEqual(n, 99)
+    }
+}
+
+
+class JsonObjectTests(TestCase) {
+    def test_flat_object() {
+        const v: Any = loads("{\"name\": \"Ada\", \"age\": 36, \"active\": true}")
+        self.assertTrue(isinstance(v, dict))
+        const m: dict[str, Any] = v
+        const name: str = m["name"]
+        const age: int = m["age"]
+        self.assertEqual(name, "Ada")
+        self.assertEqual(age, 36)
+        self.assertTrue("active" in m)
+    }
+
+    def test_empty_object() {
+        const v: Any = loads("{}")
+        const m: dict[str, Any] = v
+        self.assertEqual(len(m), 0)
+    }
+
+    def test_nested_object() {
+        const v: Any = loads("{\"a\": {\"b\": {\"c\": 5}}}")
+        const m: dict[str, Any] = v
+        const a: dict[str, Any] = m["a"]
+        const b: dict[str, Any] = a["b"]
+        const c: int = b["c"]
+        self.assertEqual(c, 5)
+    }
+}
+
+
+class JsonArrayTests(TestCase) {
+    def test_int_array() {
+        const v: Any = loads("[1, 2, 3]")
+        self.assertTrue(isinstance(v, list))
+        const xs: list[Any] = v
+        self.assertEqual(len(xs), 3)
+        const first: int = xs[0]
+        self.assertEqual(first, 1)
+    }
+
+    def test_empty_array() {
+        const v: Any = loads("[]")
+        const xs: list[Any] = v
+        self.assertEqual(len(xs), 0)
+    }
+
+    def test_array_of_objects() {
+        const v: Any = loads("[{\"x\": 1}, {\"x\": 2}]")
+        const xs: list[Any] = v
+        const sum: int = _sum_x(xs)
+        self.assertEqual(sum, 3)
+    }
+}
+
+
+# Helper: sum the "x" field across a list of objects (exercises nested narrowing).
+def _sum_x(xs: list[Any]) -> int {
+    total: int = 0
+    for item in xs {
+        if isinstance(item, dict) {
+            const m: dict[str, Any] = item
+            const x: int = m["x"]
+            total = total + x
+        }
+    }
+    return total
+}
+
+
+class JsonRoundTripTests(TestCase) {
+    def test_dumps_loads_object() {
+        const orig: dict[str, Any] = {}
+        orig["k"] = "v"
+        orig["n"] = 7
+        const back: Any = loads(dumps(orig))
+        const m: dict[str, Any] = back
+        const k: str = m["k"]
+        const n: int = m["n"]
+        self.assertEqual(k, "v")
+        self.assertEqual(n, 7)
+    }
+
+    # loads_bytes is the entry Request.json_any() uses (verbatim body bytes).
+    def test_loads_bytes() {
+        const v: Any = loads_bytes(b"{\"ok\": true}")
+        const m: dict[str, Any] = v
+        self.assertTrue("ok" in m)
+    }
+}
+
+
+class JsonTypedConstructionTests(TestCase) {
+    # The interim schema-directed path that works today: loads_obj -> dict[str,
+    # Any] spread into a class ctor (D032/D047). The zero-alloc version awaits D044.
+    def test_construct_from_loads_obj() {
+        const row: dict[str, Any] = loads_obj("{\"name\": \"Grace\", \"age\": 45}")
+        const c: CustomerRec = CustomerRec(**row)
+        self.assertEqual(c.name, "Grace")
+        self.assertEqual(c.age, 45)
+    }
+
+    def test_loads_obj_rejects_non_object() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const r: dict[str, Any] = loads_obj("[1, 2, 3]")
+        })
+    }
+}
+
+
+class JsonErrorTests(TestCase) {
+    def test_empty_input_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const v: Any = loads("")
+        })
+    }
+
+    def test_truncated_array_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const v: Any = loads("[1, 2")
+        })
+    }
+
+    def test_unterminated_string_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const v: Any = loads("\"abc")
+        })
+    }
+
+    def test_trailing_data_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const v: Any = loads("42 99")
+        })
+    }
+
+    def test_missing_value_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const v: Any = loads("{\"a\": }")
+        })
+    }
+}
+
+
+main([JsonScalarTests(), JsonObjectTests(), JsonArrayTests(),
+      JsonRoundTripTests(), JsonTypedConstructionTests(), JsonErrorTests()])

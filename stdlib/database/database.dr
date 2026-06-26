@@ -1,0 +1,127 @@
+"""database - Dragon standard database library (Decision 032).
+
+Queries are `template[SQL]` values, never strings: the literal text is a
+constant-folded canonical `$$N` form and every `!{expr}` is a bound parameter.
+`db.run` and the read sugar `db.one`/`all`/`val` accept ONLY a `SQL` value - a
+bare `str` is rejected by the type system, so the injection-prone path does not
+exist at any call site. The one explicit escape hatch is `db.raw` (no params,
+verbatim text for DDL / maintenance).
+
+Result rows are `dict[str, Any]` (column name -> native value). The read verbs
+take an optional `[T]` (Decision 049): `db.all[Customer](sql)` / `db.one(sql)`
+materialize via the compiler's bulk `**`-spread (D047) - `T` explicit or inferred
+from the binding annotation; a bare `dict[str, Any]` annotation yields raw rows.
+
+This is the package root. It re-exports the shared core from `database.base`
+(so `from database import SQL, Connection, Results, ...` keeps working) and
+dispatches `open(dsn)` to the backend driver for the DSN scheme:
+  - `postgres://` / `postgresql://`  -> `database.postgres.PgConnection`
+  - `mysql://`                        -> `database.mysql.MySqlConnection`
+  - `sqlite://PATH`, `sqlite::memory:`, `:memory:`, bare path -> SqliteConnection
+
+All backends share one interface: the `run` / `raw` primitives plus the
+`one[T]` / `all[T]` / `val[T]` / `runs` / `transaction` surface on the base
+`Connection`, dispatched to the concrete driver via the D026 vtable.
+"""
+
+from database.base import Connection, SQL, Results, Tx, DatabaseError, ConnectionError, QueryError, NoRows, MultipleRows, TxError
+from database.sqlite import SqliteConnection
+from database.postgres import PgConnection
+from database.mysql import MySqlConnection
+from threading import Lock
+
+
+# open(dsn) - connect by DSN, routing on the scheme to the backend driver.
+# The dispatch lives in `_open` so other code in this module (the Pool) can
+# reach it by an unambiguous name: a bare `open(...)` call resolves to the
+# builtin file `open`, not to this module-level function.
+def open(dsn: str) -> Connection {
+    return _open(dsn)
+}
+
+def _open(dsn: str) -> Connection {
+    if dsn.startswith("postgres://") or dsn.startswith("postgresql://") {
+        return PgConnection(dsn)
+    }
+    if dsn.startswith("mysql://") {
+        return MySqlConnection(dsn)
+    }
+    # SQLite (default): sqlite://PATH, sqlite::memory:, :memory:, or bare path.
+    path: str = dsn
+    if dsn.startswith("sqlite://") {
+        path = dsn[9:]
+    } else if dsn.startswith("sqlite:") {
+        path = dsn[7:]
+    }
+    if path == "" {
+        path = ":memory:"
+    }
+    return SqliteConnection(path)
+}
+
+
+#===----------------------------------------------------------------------===#
+# Pool - a thread-safe connection pool (D032 Phase 5).
+#
+# `acquire()` reuses an idle connection or opens a fresh one; `release(conn)`
+# returns it to the pool (closing it instead when the idle set is already at
+# `max_idle`, so the pool never grows without bound). A `threading.Lock`
+# guards the idle list so the pool is safe to share across green threads and
+# OS threads; the lock is never held across a connect or a query (only around
+# the list mutation), so acquiring one connection never blocks another's work.
+#
+#  pool: database.Pool = database.Pool("postgres://...", 8)
+#  conn: database.Connection = pool.acquire()
+#  rows: list[dict[str, Any]] = conn.all(template[SQL] { ... })
+#  pool.release(conn)
+#===----------------------------------------------------------------------===#
+
+class Pool {
+    def(dsn: str, max_idle: int = 8) {
+        self.dsn = dsn
+        self.max_idle = max_idle
+        self.idle: list[Connection] = []
+        self.lock = Lock()
+    }
+
+    # Borrow a connection: reuse an idle one, else open a fresh one. The
+    # connect happens outside the lock so concurrent acquirers don't serialize.
+    def acquire() -> Connection {
+        self.lock.acquire()
+        n: int = len(self.idle)
+        if n > 0 {
+            conn: Connection = self.idle[n - 1]
+            self.idle = self.idle[0:n - 1]
+            self.lock.release()
+            return conn
+        }
+        self.lock.release()
+        return _open(self.dsn)
+    }
+
+    # Return a connection. Kept for reuse while under max_idle; otherwise closed
+    # (outside the lock) so the idle set stays bounded.
+    def release(conn: Connection) {
+        self.lock.acquire()
+        if len(self.idle) < self.max_idle {
+            self.idle.append(conn)
+            self.lock.release()
+        } else {
+            self.lock.release()
+            conn.close()
+        }
+    }
+
+    # Close every pooled (idle) connection. In-flight (acquired) connections are
+    # the caller's to close/release.
+    def close() {
+        self.lock.acquire()
+        i: int = 0
+        while i < len(self.idle) {
+            self.idle[i].close()
+            i = i + 1
+        }
+        self.idle = []
+        self.lock.release()
+    }
+}

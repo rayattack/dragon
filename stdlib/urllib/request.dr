@@ -1,0 +1,143 @@
+# urllib/request.dr - High-level HTTP convenience over http.client.
+#
+# Surface mirrors CPython's urllib.request for the common path:
+#
+#  from urllib.request import urlopen, Request
+#  resp = urlopen("http://example.com/")
+#  body = resp.read()
+#
+#  req = Request("http://example.com/", data="ping=1", method="POST")
+#  req.add_header("User-Agent", "Dragon/0.2")
+#  resp = urlopen(req)
+#
+# `urlopen` follows up to MAX_REDIRECTS 3xx redirects (matching Python's
+# default). HTTPS is not yet wired - `urlopen("https://...")` raises until
+# the `ssl` module lands. Returns the underlying http.client.HTTPResponse
+# object so callers can inspect status / headers / read().
+
+from urllib.parse import urlsplit, urljoin, SplitResult
+from http.client import HTTPConnection, HTTPResponse
+
+
+const MAX_REDIRECTS: int = 5
+
+
+# Capture the call-time configuration of an HTTP request so urlopen can
+# replay it across redirects. Mirrors urllib.request.Request - full_url is
+# mutable so a caller can rewrite the target before opening, headers are a
+# dict the user can extend with add_header().
+class Request {
+    def(url: str, data: str, method: str) {
+        self.full_url = url
+        self.data = data
+        self.method = method
+        self.headers = {}
+    }
+
+    def add_header(key: str, value: str) -> None {
+        self.headers[key] = value
+    }
+
+    def get_method() -> str {
+        if len(self.method) > 0 {
+            return self.method
+        }
+        # Python's default: POST when data is present, otherwise GET.
+        if len(self.data) > 0 {
+            return "POST"
+        }
+        return "GET"
+    }
+}
+
+
+def _new_request(url: str) -> Request {
+    # Convenience constructor used by urlopen(str). Empty data + empty
+    # method routes through Request.get_method's GET default.
+    return Request(url, "", "")
+}
+
+
+# Crack a URL into the (host, port, path-with-query) triple used to drive
+# HTTPConnection. Defaults: port 80 for http (and would be 443 for https,
+# raised below), path "/" when the URL has no path.
+def _split_target(url: str) -> tuple[str, int, str] {
+    sr: SplitResult = urlsplit(url)
+    if sr.scheme != "http" {
+        if sr.scheme == "https" {
+            raise ValueError("urllib.request: https not supported yet (ssl module pending)")
+        }
+        raise ValueError(f"urllib.request: unsupported scheme '{sr.scheme}'")
+    }
+    netloc: str = sr.netloc
+    host: str = netloc
+    port: int = 80
+    colon: int = netloc.rfind(":")
+    if colon > 0 {
+        host = netloc[0:colon]
+        port_str: str = netloc[colon + 1:len(netloc)]
+        port = int(port_str)
+    }
+    # Strip credentials from host if present (`user@host`).
+    at: int = host.find("@")
+    if at >= 0 {
+        host = host[at + 1:len(host)]
+    }
+    path: str = sr.path
+    if len(path) == 0 {
+        path = "/"
+    }
+    if len(sr.query) > 0 {
+        path = path + "?" + sr.query
+    }
+    return (host, port, path)
+}
+
+
+# Issue a single HTTP request and return the response. The caller owns the
+# returned HTTPResponse and must close it (urlopen_request closes the
+# intermediate responses it follows through redirects).
+def _do_request(req: Request) -> HTTPResponse {
+    target: tuple[str, int, str] = _split_target(req.full_url)
+    host: str = target[0]
+    port: int = target[1]
+    path: str = target[2]
+    conn: HTTPConnection = HTTPConnection(host, port)
+    method: str = req.get_method()
+    conn.request(method, path, req.data, req.headers)
+    return conn.getresponse()
+}
+
+
+# The entry point. Accept either a raw URL string or a Request, follow
+# redirects up to MAX_REDIRECTS, and hand back the final HTTPResponse.
+def urlopen(target: str) -> HTTPResponse {
+    return urlopen_request(_new_request(target))
+}
+
+
+def urlopen_request(req: Request) -> HTTPResponse {
+    redirects: int = 0
+    while redirects <= MAX_REDIRECTS {
+        resp: HTTPResponse = _do_request(req)
+        # 3xx with a Location header: follow once, swap method to GET on 303
+        # to match RFC 7231. 301/302/307/308 keep the original method.
+        if resp.status >= 300 and resp.status < 400 {
+            location: str = resp.getheader("Location", "")
+            if len(location) > 0 {
+                resp.close()
+                # Resolve relative redirects against the previous target so
+                # `Location: /next` works the same as a full URL.
+                req.full_url = urljoin(req.full_url, location)
+                if resp.status == 303 {
+                    req.method = "GET"
+                    req.data = ""
+                }
+                redirects = redirects + 1
+                continue
+            }
+        }
+        return resp
+    }
+    raise ValueError(f"urllib.request: too many redirects (>{MAX_REDIRECTS})")
+}

@@ -1,0 +1,117 @@
+# test/dr/test_method_overload_and_class_narrowing.dr - three compiler fixes:
+#
+# 1. isinstance narrowing for a CLASS arm: `isinstance(x, SomeClass)` on a
+#  `SomeClass | str` union now narrows. The class type was resolved through the
+#  value scope (which never holds class names), so narrowing was silently OFF
+#  for every user class - only builtin arms (str/int/...) worked. Now the class
+#  is resolved through the type registry, like a type annotation.
+# 2. A METHOD parameter typed `SomeClass | str`: the str-arm narrowing used to
+#  store the raw 16-byte union box straight into a native (ptr) field and
+#  segfault (method params never populated union member kinds, so the else
+#  branch could not unbox). Methods now track union member kinds like free
+#  functions, so the narrowed str is stored correctly.
+# 3. Method overloading by parameter type/arity (ADR 010): same-name methods
+#  resolve at the call site by argument arity then type. Resolution is fully
+#  compile-time - the emitted call is a direct call to one monomorphic function,
+#  so there is no runtime dispatch cost.
+
+from unittest import TestCase, main
+
+
+class Tag {
+    def(name: str) {
+        self.name = name
+    }
+    def render() -> str {
+        return "<" + self.name + ">"
+    }
+}
+
+
+# (1) class-arm narrowing in a free function: then = Tag, fall-through = str.
+def describe(x: Tag | str) -> str {
+    if isinstance(x, Tag) {
+        return "tag:" + x.render()
+    }
+    return "str:" + x
+}
+
+
+# (2) a method with a `Tag | str` param, assigning the narrowed value to a field
+# in both the class arm and the str (else) arm.
+class Sink {
+    def() {
+        self.out = ""
+    }
+    def put(x: Tag | str) -> None {
+        if isinstance(x, Tag) {
+            self.out = x.render()
+        } else {
+            self.out = x
+        }
+    }
+}
+
+
+# (3) overloaded methods: by type (same arity) and by arity.
+class Ovl {
+    def() {
+        self.n = 0
+    }
+    def f(a: str) -> str {
+        return "s:" + a
+    }
+    def f(a: Tag) -> str {
+        return "t:" + a.render()
+    }
+    def g(a: int) -> int {
+        return a + 1
+    }
+    def g(a: int, b: int) -> int {
+        return a + b
+    }
+}
+
+
+class MethodOverloadAndNarrowingTests(TestCase) {
+    def test_class_arm_narrow_to_class() {
+        self.assertEqual(describe(Tag("b")), "tag:<b>")
+    }
+    def test_class_arm_narrow_to_str() {
+        self.assertEqual(describe("hi"), "str:hi")
+    }
+    def test_method_union_param_str_arm() {
+        s: Sink = Sink()
+        s.put("plain")
+        self.assertEqual(s.out, "plain")
+    }
+    def test_method_union_param_class_arm() {
+        s: Sink = Sink()
+        s.put(Tag("i"))
+        self.assertEqual(s.out, "<i>")
+    }
+    def test_method_union_param_both_calls() {
+        # the str-then-class sequence previously corrupted memory / segfaulted.
+        s: Sink = Sink()
+        s.put("a")
+        self.assertEqual(s.out, "a")
+        s.put(Tag("x"))
+        self.assertEqual(s.out, "<x>")
+    }
+    def test_overload_by_type_str() {
+        o: Ovl = Ovl()
+        self.assertEqual(o.f("hi"), "s:hi")
+    }
+    def test_overload_by_type_class() {
+        o: Ovl = Ovl()
+        self.assertEqual(o.f(Tag("p")), "t:<p>")
+    }
+    def test_overload_by_arity() {
+        o: Ovl = Ovl()
+        self.assertEqual(o.g(10), 11)
+        self.assertEqual(o.g(10, 20), 30)
+    }
+}
+
+
+main([MethodOverloadAndNarrowingTests()])

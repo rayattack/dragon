@@ -1,0 +1,79 @@
+# test/dr/test_merkle.dr - RFC 6962 Merkle tree exhaustive small-tree KAT.
+#
+# Cross-checks proof GENERATION (recursive MTH/PATH/SUBPROOF) against proof
+# VERIFICATION (iterative decomposition) for every tree size, leaf index, and
+# (m <= n) consistency pair up to N - the standard way CT implementations are
+# validated - plus negative cases (wrong leaf / wrong root / rewritten tree).
+
+from unittest import TestCase, main
+from merkle import root, inclusion_proof, verify_inclusion, consistency_proof, verify_consistency
+
+def _leaves(n: int) -> list[bytes] {
+    out: list[bytes] = []
+    i: int = 0
+    while i < n {
+        out.append(("leaf-" + str(i)).encode("utf-8"))
+        i = i + 1
+    }
+    return out
+}
+
+class MerkleTests(TestCase) {
+    def test_inclusion_round_trips_all_small_trees() {
+        const N: int = 12
+        size: int = 1
+        while size <= N {
+            const lvs: list[bytes] = _leaves(size)
+            const r: bytes = root(lvs)
+            idx: int = 0
+            while idx < size {
+                const p: list[bytes] = inclusion_proof(lvs, idx)
+                self.assertTrue(verify_inclusion(lvs[idx], idx, size, p, r))
+                # a different leaf at the same position must not verify
+                self.assertFalse(verify_inclusion(("x" + str(idx)).encode("utf-8"), idx, size, p, r))
+                idx = idx + 1
+            }
+            size = size + 1
+        }
+    }
+
+    def test_inclusion_wrong_root_rejected() {
+        const lvs: list[bytes] = _leaves(7)
+        const r: bytes = root(lvs)
+        const other: bytes = root(_leaves(8))
+        const p: list[bytes] = inclusion_proof(lvs, 3)
+        self.assertTrue(verify_inclusion(lvs[3], 3, 7, p, r))
+        self.assertFalse(verify_inclusion(lvs[3], 3, 7, p, other))
+    }
+
+    def test_consistency_round_trips_all_small_trees() {
+        const N: int = 12
+        n: int = 1
+        while n <= N {
+            const big: list[bytes] = _leaves(n)
+            const rn: bytes = root(big)
+            m: int = 0
+            while m <= n {
+                const rm: bytes = root(_leaves(m))
+                const proof: list[bytes] = consistency_proof(big, m, n)
+                self.assertTrue(verify_consistency(m, n, proof, rm, rn))
+                m = m + 1
+            }
+            n = n + 1
+        }
+    }
+
+    def test_consistency_rewrite_rejected() {
+        const five: list[bytes] = _leaves(5)
+        const seven: list[bytes] = _leaves(7)
+        const proof: list[bytes] = consistency_proof(seven, 5, 7)
+        self.assertTrue(verify_consistency(5, 7, proof, root(five), root(seven)))
+        # a "new" tree whose history was rewritten (leaf 0 changed) is NOT an
+        # append of the size-5 tree, so the same proof must fail against it.
+        forged: list[bytes] = _leaves(7)
+        forged[0] = b"rewritten"
+        self.assertFalse(verify_consistency(5, 7, proof, root(five), root(forged)))
+    }
+}
+
+main([MerkleTests()])

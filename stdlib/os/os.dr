@@ -1,0 +1,774 @@
+# os.dr - Dragon standard library: operating system interface
+#
+# Wraps POSIX/libc via extern "C". Provides file system operations,
+# environment access, process management, and path utilities.
+# See spec/os.md for Python parity tracking.
+
+#===----------------------------------------------------------------------===#
+# POSIX / libc extern declarations
+#===----------------------------------------------------------------------===#
+
+# File system
+extern "C" def getcwd(buf: ptr, size: int) -> str as _libc_getcwd
+extern "C" def chdir(path: str) -> intc
+extern "C" def mkdir(path: str, mode: intc) -> intc
+extern "C" def rmdir(path: str) -> intc
+extern "C" def unlink(path: str) -> intc
+extern "C" def rename(oldpath: str, newpath: str) -> intc
+extern "C" def access(path: str, mode: intc) -> intc
+extern "C" def chmod(path: str, mode: intc) -> intc
+extern "C" def link(oldpath: str, newpath: str) -> intc
+extern "C" def symlink(target: str, linkpath: str) -> intc
+extern "C" def truncate(path: str, length: int) -> intc
+extern "C" def kill(pid: intc, sig: intc) -> intc
+
+# Directory listing
+extern "C" def opendir(path: str) -> ptr
+extern "C" def closedir(dirp: ptr) -> intc
+extern "C" def dragon_readdir_name(dirp: ptr) -> str
+
+# Environment
+extern "C" def getenv(name: str) -> str
+extern "C" def setenv(name: str, value: str, overwrite: intc) -> intc
+extern "C" def unsetenv(name: str) -> intc
+extern "C" def dragon_environ_dict() -> dict[str, str]
+
+# Process
+extern "C" def getpid() -> intc
+extern "C" def getppid() -> intc
+extern "C" def getuid() -> intc
+extern "C" def getgid() -> intc
+extern "C" def geteuid() -> intc
+extern "C" def getegid() -> intc
+extern "C" def system(cmd: str) -> intc
+extern "C" def _exit(status: intc)
+extern "C" def isatty(fd: intc) -> intc
+
+# Runtime helpers (stat, readdir, uname, etc.)
+extern "C" def dragon_stat_size(path: str) -> int
+extern "C" def dragon_stat_mtime(path: str) -> int
+extern "C" def dragon_stat_atime(path: str) -> int
+extern "C" def dragon_stat_ctime(path: str) -> int
+extern "C" def dragon_stat_mode(path: str) -> int
+extern "C" def dragon_stat_isfile(path: str) -> intc
+extern "C" def dragon_stat_isdir(path: str) -> intc
+extern "C" def dragon_stat_islink(path: str) -> intc
+extern "C" def dragon_stat_dev(path: str) -> int
+extern "C" def dragon_stat_ino(path: str) -> int
+extern "C" def dragon_lstat_size(path: str) -> int
+extern "C" def dragon_lstat_mtime(path: str) -> int
+extern "C" def dragon_lstat_atime(path: str) -> int
+extern "C" def dragon_lstat_ctime(path: str) -> int
+extern "C" def dragon_lstat_mode(path: str) -> int
+extern "C" def dragon_lstat_isfile(path: str) -> intc
+extern "C" def dragon_lstat_isdir(path: str) -> intc
+extern "C" def dragon_lstat_dev(path: str) -> int
+extern "C" def dragon_lstat_ino(path: str) -> int
+extern "C" def dragon_chown(path: str, uid: intc, gid: intc) -> intc
+extern "C" def dragon_chroot(path: str) -> intc
+
+# Process management - direct libc FFI for plain int->int syscalls, wrapper
+# FFI only where Dragon can't build the C-side argv array or status out-arg.
+extern "C" def fork() -> intc
+extern "C" def umask(mask: intc) -> intc
+extern "C" def getpgrp() -> intc
+extern "C" def setpgid(pid: intc, pgid: intc) -> intc
+extern "C" def setsid() -> intc
+extern "C" def dragon_execv(path: str, argv: list[str]) -> intc
+extern "C" def dragon_execvp(file: str, argv: list[str]) -> intc
+extern "C" def dragon_waitpid(pid: intc, options: intc) -> list[int]
+extern "C" def dragon_readlink(path: str) -> str
+extern "C" def dragon_makedirs(path: str, mode: intc) -> intc
+extern "C" def dragon_uname_sysname() -> str
+extern "C" def dragon_uname_nodename() -> str
+extern "C" def dragon_uname_release() -> str
+extern "C" def dragon_uname_version() -> str
+extern "C" def dragon_uname_machine() -> str
+extern "C" def dragon_getlogin() -> str
+
+# normpath/relpath are implemented natively in os.path; delegate to avoid
+# duplicating the logic (ADR 042 - these moved out of the C++ runtime).
+from os.path import join as _join, basename as _basename, dirname as _dirname, split as _split, ext as _ext, splitext as _splitext, abspath as _abspath, isabs as _isabs, normpath as _normpath, relpath as _relpath, expanduser as _expanduser, expandvars as _expandvars, splitdrive as _splitdrive, commonprefix as _commonprefix, commonpath as _commonpath
+
+# Memory (used internally)
+extern "C" def malloc(size: int) -> ptr
+extern "C" def free(p: ptr)
+
+#===----------------------------------------------------------------------===#
+# Constants
+#===----------------------------------------------------------------------===#
+
+# Access mode flags
+const F_OK: int = 0
+const R_OK: int = 4
+const W_OK: int = 2
+const X_OK: int = 1
+
+# Module attributes
+const sep: str = "/"
+const linesep: str = "\n"
+const name: str = "posix"
+
+#===----------------------------------------------------------------------===#
+# File system operations
+#===----------------------------------------------------------------------===#
+
+# Python parity: os.getcwd() is the 0-arg current-working-directory call.
+# The libc 2-arg `getcwd(buf, size)` is bound as `_libc_getcwd` (C symbol still
+# `getcwd`); glibc's getcwd(NULL, 0) mallocs and returns the path.
+def getcwd() -> str {
+    return _libc_getcwd(none, 0)
+}
+
+def cwd() -> str {
+    return getcwd()
+}
+
+def chdir_to(path: str) -> int {
+    const rc: int = chdir(path)
+    if rc != 0 {
+        raise OSError(f"Cannot change directory to '{path}'")
+    }
+    return 0
+}
+
+def remove(path: str) -> int {
+    const rc: int = unlink(path)
+    if rc != 0 {
+        raise OSError(f"Cannot remove '{path}'")
+    }
+    return 0
+}
+
+def makedirs(path: str) -> int {
+    const rc: int = dragon_makedirs(path, 0o755)
+    if rc != 0 {
+        raise OSError(f"Cannot create directory '{path}'")
+    }
+    return 0
+}
+
+def removedirs(path: str) -> int {
+    # Python parity: remove the leaf directory, then prune empty parent
+    # directories until we hit a non-empty one. Errors during pruning are
+    # ignored (CPython documents this - non-empty parents are expected).
+    const rc: int = rmdir(path)
+    if rc != 0 {
+        raise OSError(f"Cannot remove directory '{path}'")
+    }
+    head: str = path_dirname(path)
+    while len(head) > 0 and head != "/" {
+        const rc2: int = rmdir(head)
+        if rc2 != 0 { break }
+        head = path_dirname(head)
+    }
+    return 0
+}
+
+def renames(src: str, dst: str) -> int {
+    # Python parity: rename(src, dst), creating any missing parent dirs in
+    # dst's path and pruning empty parents from src's path afterwards.
+    const dst_parent: str = path_dirname(dst)
+    if len(dst_parent) > 0 and not exists(dst_parent) {
+        makedirs(dst_parent)
+    }
+    const rc: int = rename(src, dst)
+    if rc != 0 {
+        raise OSError(f"Cannot rename '{src}' to '{dst}'")
+    }
+    src_parent: str = path_dirname(src)
+    while len(src_parent) > 0 and src_parent != "/" {
+        const rc2: int = rmdir(src_parent)
+        if rc2 != 0 { break }
+        src_parent = path_dirname(src_parent)
+    }
+    return 0
+}
+
+def chown_path(path: str, uid: int, gid: int) -> int {
+    const rc: int = dragon_chown(path, uid, gid)
+    if rc != 0 {
+        raise OSError(f"Cannot chown '{path}'")
+    }
+    return 0
+}
+
+def chroot_to(path: str) -> int {
+    const rc: int = dragon_chroot(path)
+    if rc != 0 {
+        raise OSError(f"Cannot chroot to '{path}'")
+    }
+    return 0
+}
+
+def rename_path(src: str, dst: str) -> int {
+    const rc: int = rename(src, dst)
+    if rc != 0 {
+        raise OSError(f"Cannot rename '{src}' to '{dst}'")
+    }
+    return 0
+}
+
+def replace(src: str, dst: str) -> int {
+    # On POSIX, rename() atomically replaces dst if it exists
+    const rc: int = rename(src, dst)
+    if rc != 0 {
+        raise OSError(f"Cannot replace '{src}' to '{dst}'")
+    }
+    return 0
+}
+
+def link_to(src: str, dst: str) -> int {
+    const rc: int = link(src, dst)
+    if rc != 0 {
+        raise OSError(f"Cannot create hard link '{dst}' -> '{src}'")
+    }
+    return 0
+}
+
+def symlink_to(target: str, linkpath: str) -> int {
+    const rc: int = symlink(target, linkpath)
+    if rc != 0 {
+        raise OSError(f"Cannot create symlink '{linkpath}' -> '{target}'")
+    }
+    return 0
+}
+
+def readlink_path(path: str) -> str {
+    const result: str = dragon_readlink(path)
+    if len(result) == 0 {
+        raise OSError(f"Cannot read symlink '{path}'")
+    }
+    return result
+}
+
+def truncate_file(path: str, length: int) -> int {
+    const rc: int = truncate(path, length)
+    if rc != 0 {
+        raise OSError(f"Cannot truncate '{path}'")
+    }
+    return 0
+}
+
+def chmod_path(path: str, mode: int) -> int {
+    const rc: int = chmod(path, mode)
+    if rc != 0 {
+        raise OSError(f"Cannot chmod '{path}'")
+    }
+    return 0
+}
+
+#===----------------------------------------------------------------------===#
+# File properties & stat
+#===----------------------------------------------------------------------===#
+
+def exists(path: str) -> bool {
+    return access(path, F_OK) == 0
+}
+
+def isfile(path: str) -> bool {
+    if access(path, F_OK) != 0 { return false }
+    return dragon_stat_isfile(path) != 0
+}
+
+def isdir(path: str) -> bool {
+    if access(path, F_OK) != 0 { return false }
+    return dragon_stat_isdir(path) != 0
+}
+
+def islink(path: str) -> bool {
+    return dragon_stat_islink(path) != 0
+}
+
+def readlink(path: str) -> str {
+    # CPython parity: os.readlink(path) returns the link target as a str.
+    return dragon_readlink(path)
+}
+
+def can_read(path: str) -> bool {
+    return access(path, R_OK) == 0
+}
+
+def can_write(path: str) -> bool {
+    return access(path, W_OK) == 0
+}
+
+def can_exec(path: str) -> bool {
+    return access(path, X_OK) == 0
+}
+
+def getsize(path: str) -> int {
+    if access(path, F_OK) != 0 {
+        raise OSError(f"No such file: '{path}'")
+    }
+    return dragon_stat_size(path)
+}
+
+def getmtime(path: str) -> int {
+    if access(path, F_OK) != 0 {
+        raise OSError(f"No such file: '{path}'")
+    }
+    return dragon_stat_mtime(path)
+}
+
+def getatime(path: str) -> int {
+    if access(path, F_OK) != 0 {
+        raise OSError(f"No such file: '{path}'")
+    }
+    return dragon_stat_atime(path)
+}
+
+def getctime(path: str) -> int {
+    if access(path, F_OK) != 0 {
+        raise OSError(f"No such file: '{path}'")
+    }
+    return dragon_stat_ctime(path)
+}
+
+def getmode(path: str) -> int {
+    if access(path, F_OK) != 0 {
+        raise OSError(f"No such file: '{path}'")
+    }
+    return dragon_stat_mode(path)
+}
+
+#===----------------------------------------------------------------------===#
+# lstat - like stat but does not follow symbolic links
+#===----------------------------------------------------------------------===#
+
+def lstat_size(path: str) -> int {
+    const r: int = dragon_lstat_size(path)
+    if r < 0 {
+        raise OSError(f"lstat failed: '{path}'")
+    }
+    return r
+}
+
+def lstat_mtime(path: str) -> int {
+    const r: int = dragon_lstat_mtime(path)
+    if r < 0 {
+        raise OSError(f"lstat failed: '{path}'")
+    }
+    return r
+}
+
+def lstat_atime(path: str) -> int {
+    const r: int = dragon_lstat_atime(path)
+    if r < 0 {
+        raise OSError(f"lstat failed: '{path}'")
+    }
+    return r
+}
+
+def lstat_ctime(path: str) -> int {
+    const r: int = dragon_lstat_ctime(path)
+    if r < 0 {
+        raise OSError(f"lstat failed: '{path}'")
+    }
+    return r
+}
+
+def lstat_mode(path: str) -> int {
+    const r: int = dragon_lstat_mode(path)
+    if r < 0 {
+        raise OSError(f"lstat failed: '{path}'")
+    }
+    return r
+}
+
+def lstat_isfile(path: str) -> bool {
+    return dragon_lstat_isfile(path) != 0
+}
+
+def lstat_isdir(path: str) -> bool {
+    return dragon_lstat_isdir(path) != 0
+}
+
+#===----------------------------------------------------------------------===#
+# samefile / ismount - Python parity (os.path.samefile, os.path.ismount)
+#===----------------------------------------------------------------------===#
+
+def samefile(p1: str, p2: str) -> bool {
+    # Two paths are the same file iff they share both st_dev and st_ino.
+    # Uses stat() (follows symlinks) - matches Python's os.path.samefile.
+    if access(p1, 0) != 0 {
+        raise OSError(f"No such file: '{p1}'")
+    }
+    if access(p2, 0) != 0 {
+        raise OSError(f"No such file: '{p2}'")
+    }
+    const dev1: int = dragon_stat_dev(p1)
+    const ino1: int = dragon_stat_ino(p1)
+    const dev2: int = dragon_stat_dev(p2)
+    const ino2: int = dragon_stat_ino(p2)
+    return dev1 == dev2 and ino1 == ino2
+}
+
+def ismount(path: str) -> bool {
+    # POSIX semantics matching CPython's posixpath.ismount: a path is a mount
+    # point if its parent has a different st_dev, or if `path` and `path/..`
+    # are the same i-node (the filesystem root).
+    if access(path, F_OK) != 0 { return false }
+    if dragon_stat_islink(path) != 0 { return false }
+    const dev1: int = dragon_lstat_dev(path)
+    const ino1: int = dragon_lstat_ino(path)
+    const parent: str = path + "/.."
+    const dev2: int = dragon_lstat_dev(parent)
+    const ino2: int = dragon_lstat_ino(parent)
+    if dev1 != dev2 { return true }
+    if ino1 == ino2 { return true }
+    return false
+}
+
+def listdir(path: str) -> list[str] {
+    const dirp: ptr = opendir(path)
+    result: list[str] = []
+    while true {
+        const name: str = dragon_readdir_name(dirp)
+        if name == "" { break }
+        if name != "." {
+            if name != ".." {
+                result.append(name)
+            }
+        }
+    }
+    closedir(dirp)
+    return result
+}
+
+#===----------------------------------------------------------------------===#
+# scandir / DirEntry - Python parity (os.scandir / os.DirEntry)
+#===----------------------------------------------------------------------===#
+
+class DirEntry {
+    def(name: str, path: str) {
+        self.name = name
+        self.path = path
+    }
+
+    def is_file() -> bool {
+        return isfile(self.path)
+    }
+
+    def is_dir() -> bool {
+        return isdir(self.path)
+    }
+
+    def is_symlink() -> bool {
+        return islink(self.path)
+    }
+
+    def stat_size() -> int {
+        return getsize(self.path)
+    }
+
+    def stat_mtime() -> int {
+        return getmtime(self.path)
+    }
+
+    def stat_mode() -> int {
+        return getmode(self.path)
+    }
+
+    def inode() -> int {
+        return dragon_stat_ino(self.path)
+    }
+}
+
+# Python parity: returns a list of DirEntry - one per child of `path`,
+# excluding "." and "..". CPython exposes an iterator/context-manager; until
+# Dragon has a generator+with idiom for this case, a list is the simplest
+# faithful shape that reuses the existing readdir loop and supports `for x in`.
+def scandir(path: str) -> list[DirEntry] {
+    const dirp: ptr = opendir(path)
+    result: list[DirEntry] = []
+    while true {
+        const name: str = dragon_readdir_name(dirp)
+        if name == "" { break }
+        if name != "." {
+            if name != ".." {
+                const full: str = path_join(path, name)
+                const entry: DirEntry = DirEntry(name, full)
+                result.append(entry)
+            }
+        }
+    }
+    closedir(dirp)
+    return result
+}
+
+#===----------------------------------------------------------------------===#
+# Directory walking (recursive traversal)
+#===----------------------------------------------------------------------===#
+
+def walk_files(top: str) -> list[str] {
+    result: list[str] = []
+    const entries: list[str] = listdir(top)
+    i: int = 0
+    while i < len(entries) {
+        const full: str = path_join(top, entries[i])
+        if isdir(full) {
+            const sub: list[str] = walk_files(full)
+            j: int = 0
+            while j < len(sub) {
+                result.append(sub[j])
+                j = j + 1
+            }
+        } else {
+            result.append(full)
+        }
+        i = i + 1
+    }
+    return result
+}
+
+def walk_dirs(top: str) -> list[str] {
+    result: list[str] = []
+    const entries: list[str] = listdir(top)
+    i: int = 0
+    while i < len(entries) {
+        const full: str = path_join(top, entries[i])
+        if isdir(full) {
+            result.append(full)
+            const sub: list[str] = walk_dirs(full)
+            j: int = 0
+            while j < len(sub) {
+                result.append(sub[j])
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    return result
+}
+
+#===----------------------------------------------------------------------===#
+# Environment operations
+#===----------------------------------------------------------------------===#
+
+# os.environ - a dict[str, str] snapshot of the environment (Python parity:
+# `os.environ["PATH"]`, `for k in os.environ`). Built once on import. Use
+# os.getenv(name) / os.environ_get(name, default) for single, possibly-absent
+# lookups without a KeyError.
+const environ: dict[str, str] = dragon_environ_dict()
+
+def environ_get(name: str, default: str) -> str {
+    const val: str = getenv(name)
+    if len(val) == 0 { return default }
+    return val
+}
+
+def setenv_val(name: str, value: str) -> int {
+    return setenv(name, value, 1)
+}
+
+def unsetenv_val(name: str) -> int {
+    return unsetenv(name)
+}
+
+# Python parity: os.get_exec_path() - split $PATH on the platform's
+# path separator (":" on POSIX). Falls back to /usr/local/bin:/usr/bin:/bin
+# (CPython's os.defpath) when PATH is unset.
+def get_exec_path() -> list[str] {
+    const raw: str = getenv("PATH")
+    const src: str = raw if len(raw) > 0 else "/usr/local/bin:/usr/bin:/bin"
+    return src.split(":")
+}
+
+#===----------------------------------------------------------------------===#
+# Process operations
+#===----------------------------------------------------------------------===#
+
+def pid() -> int {
+    return getpid()
+}
+
+def ppid() -> int {
+    return getppid()
+}
+
+def uid() -> int {
+    return getuid()
+}
+
+def gid() -> int {
+    return getgid()
+}
+
+def euid() -> int {
+    return geteuid()
+}
+
+def egid() -> int {
+    return getegid()
+}
+
+def run(cmd: str) -> int {
+    return system(cmd)
+}
+
+def exit_now(status: int) {
+    _exit(status)
+}
+
+def is_terminal(fd: int) -> bool {
+    return isatty(fd) != 0
+}
+
+def kill_proc(target_pid: int, sig: int) -> int {
+    const rc: int = kill(target_pid, sig)
+    if rc != 0 {
+        raise OSError(f"Cannot send signal {sig} to process {target_pid}")
+    }
+    return 0
+}
+
+#===----------------------------------------------------------------------===#
+# fork / exec / waitpid / process group / session
+#===----------------------------------------------------------------------===#
+
+def fork_proc() -> int {
+    # Returns child pid in parent, 0 in child, raises OSError on failure.
+    const r: int = fork()
+    if r < 0 {
+        raise OSError("fork failed")
+    }
+    return r
+}
+
+def execv_path(path: str, argv: list[str]) -> int {
+    # On success the process image is replaced and this never returns; if
+    # dragon_execv returns at all, the exec failed.
+    dragon_execv(path, argv)
+    raise OSError(f"execv failed: '{path}'")
+}
+
+def execvp_path(file: str, argv: list[str]) -> int {
+    dragon_execvp(file, argv)
+    raise OSError(f"execvp failed: '{file}'")
+}
+
+def waitpid_proc(target_pid: int, options: int) -> list[int] {
+    # Returns [pid, status]. Raises OSError if the underlying call failed
+    # (the runtime encodes that as [-1, errno]).
+    const r: list[int] = dragon_waitpid(target_pid, options)
+    if r[0] < 0 {
+        raise OSError(f"waitpid({target_pid}) failed")
+    }
+    return r
+}
+
+def umask_set(mask: int) -> int {
+    return umask(mask)
+}
+
+def getpgrp_id() -> int {
+    return getpgrp()
+}
+
+# POSIX `setpgrp()`: make this process the leader of its own group. Equivalent
+# to setpgid(0, 0) - works on every POSIX system without depending on the
+# BSD-vs-XPG signature mismatch in the libc setpgrp() symbol.
+def setpgrp_self() -> int {
+    const r: int = setpgid(0, 0)
+    if r < 0 {
+        raise OSError("setpgrp failed")
+    }
+    return r
+}
+
+def setsid_proc() -> int {
+    const r: int = setsid()
+    if r < 0 {
+        raise OSError("setsid failed")
+    }
+    return r
+}
+
+def login_name() -> str {
+    return dragon_getlogin()
+}
+
+def uname_sysname() -> str {
+    return dragon_uname_sysname()
+}
+
+def uname_nodename() -> str {
+    return dragon_uname_nodename()
+}
+
+def uname_release() -> str {
+    return dragon_uname_release()
+}
+
+def uname_version() -> str {
+    return dragon_uname_version()
+}
+
+def uname_machine() -> str {
+    return dragon_uname_machine()
+}
+
+#===----------------------------------------------------------------------===#
+# Path utilities (os.path equivalent)
+#===----------------------------------------------------------------------===#
+
+def path_join(a: str, b: str) -> str {
+    return _join(a, b)
+}
+
+def path_basename(path: str) -> str {
+    return _basename(path)
+}
+
+def path_dirname(path: str) -> str {
+    return _dirname(path)
+}
+
+def path_split(path: str) -> list[str] {
+    return _split(path)
+}
+
+def path_ext(path: str) -> str {
+    return _ext(path)
+}
+
+def path_splitext(path: str) -> list[str] {
+    return _splitext(path)
+}
+
+def abspath(path: str) -> str {
+    return _abspath(path)
+}
+
+def path_isabs(path: str) -> bool {
+    return _isabs(path)
+}
+
+def path_normpath(path: str) -> str {
+    return _normpath(path)
+}
+
+def path_relpath(path: str, start: str) -> str {
+    return _relpath(path, start)
+}
+
+def path_expanduser(path: str) -> str {
+    return _expanduser(path)
+}
+
+def path_expandvars(path: str) -> str {
+    return _expandvars(path)
+}
+
+def path_splitdrive(path: str) -> list[str] {
+    return _splitdrive(path)
+}
+
+def path_commonprefix(paths: list[str]) -> str {
+    return _commonprefix(paths)
+}
+
+def path_commonpath(paths: list[str]) -> str {
+    return _commonpath(paths)
+}

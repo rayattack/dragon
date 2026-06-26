@@ -1,0 +1,430 @@
+# os/path.dr - Dragon standard library: path utilities
+#
+# Python-compatible os.path submodule. Usage:
+#  from os.path import join, basename, isabs
+#
+# These are the same functions as os.dr's path_* variants
+# but with shorter names, matching Python's os.path API.
+
+# Safe canonicalization wrapper: copies the libc result into a Dragon string
+# and frees the libc buffer. The bare `extern realpath` (which returns a
+# malloc'd char* the runtime would mis-treat as a DragonString) corrupted the
+# heap on every call.
+extern "C" def dragon_realpath(path: str) -> str
+extern "C" def access(path: str, mode: intc) -> intc
+extern "C" def getenv(name: str) -> str
+extern "C" def dragon_stat_size(path: str) -> int
+extern "C" def dragon_stat_mtime(path: str) -> int
+extern "C" def dragon_stat_atime(path: str) -> int
+extern "C" def dragon_stat_ctime(path: str) -> int
+extern "C" def dragon_stat_isfile(path: str) -> intc
+extern "C" def dragon_stat_isdir(path: str) -> intc
+extern "C" def dragon_stat_islink(path: str) -> intc
+extern "C" def dragon_stat_dev(path: str) -> int
+extern "C" def dragon_stat_ino(path: str) -> int
+extern "C" def dragon_lstat_dev(path: str) -> int
+extern "C" def dragon_lstat_ino(path: str) -> int
+extern "C" def getcwd(buf: ptr, size: int) -> str
+
+#===----------------------------------------------------------------------===#
+# Path manipulation
+#===----------------------------------------------------------------------===#
+
+def join(a: str, b: str) -> str {
+    if len(a) == 0 { return b }
+    if a.endswith("/") { return a + b }
+    return a + "/" + b
+}
+
+def basename(path: str) -> str {
+    const idx: int = path.rfind("/")
+    if idx < 0 { return path }
+    return path[idx + 1:]
+}
+
+def dirname(path: str) -> str {
+    const idx: int = path.rfind("/")
+    if idx < 0 { return "" }
+    return path[:idx]
+}
+
+def split(path: str) -> list[str] {
+    return [dirname(path), basename(path)]
+}
+
+def ext(path: str) -> str {
+    const base: str = basename(path)
+    const idx: int = base.rfind(".")
+    if idx < 0 { return "" }
+    return base[idx:]
+}
+
+def splitext(path: str) -> list[str] {
+    const e: str = ext(path)
+    if len(e) == 0 {
+        return [path, ""]
+    }
+    const stem: str = path[:len(path) - len(e)]
+    return [stem, e]
+}
+
+def abspath(path: str) -> str {
+    return dragon_realpath(path)
+}
+
+def isabs(path: str) -> bool {
+    return path.startswith("/")
+}
+
+# Normalize a path: collapse repeated "/", drop ".", and resolve ".."
+# against the preceding component. Matches Python's POSIX os.path.normpath
+# except that "//" is collapsed to "/" (Dragon does not preserve the POSIX
+# implementation-defined double-slash root).
+def normpath(path: str) -> str {
+    if len(path) == 0 { return "." }
+    const is_abs: bool = path.startswith("/")
+    comps: list[str] = []
+    const segs: list[str] = path.split("/")
+    for seg in segs {
+        if len(seg) == 0 { continue }
+        if seg == "." { continue }
+        if seg == ".." {
+            if len(comps) > 0 and comps[len(comps) - 1] != ".." {
+                comps.pop()
+            } elif not is_abs {
+                # leading ".." in a relative path is preserved; for an
+                # absolute path ".." at the root is discarded.
+                comps.append("..")
+            }
+            continue
+        }
+        comps.append(seg)
+    }
+    result: str = ""
+    if is_abs { result = "/" }
+    i: int = 0
+    while i < len(comps) {
+        if i > 0 { result = result + "/" }
+        result = result + comps[i]
+        i = i + 1
+    }
+    if len(result) == 0 { return "." }
+    return result
+}
+
+# Split a path into its non-empty "/"-separated segments.
+def _segments(p: str) -> list[str] {
+    parts: list[str] = []
+    const segs: list[str] = p.split("/")
+    for s in segs {
+        if len(s) > 0 { parts.append(s) }
+    }
+    return parts
+}
+
+# Path to `path` relative to `start`. Both are normalized and made absolute
+# (against the cwd) before the common-prefix walk, matching os.path.relpath.
+def relpath(path: str, start: str) -> str {
+    const npath: str = normpath(path)
+    const nstart: str = normpath(start)
+
+    abspath: str = npath
+    if not npath.startswith("/") {
+        abspath = getcwd(none, 0) + "/" + npath
+    }
+    absstart: str = nstart
+    if not nstart.startswith("/") {
+        absstart = getcwd(none, 0) + "/" + nstart
+    }
+
+    const np: str = normpath(abspath)
+    const ns: str = normpath(absstart)
+    const p_parts: list[str] = _segments(np)
+    const s_parts: list[str] = _segments(ns)
+
+    common: int = 0
+    while common < len(p_parts) and common < len(s_parts) and p_parts[common] == s_parts[common] {
+        common = common + 1
+    }
+
+    const ups: int = len(s_parts) - common
+    result: str = ""
+    i: int = 0
+    while i < ups {
+        if len(result) > 0 { result = result + "/" }
+        result = result + ".."
+        i = i + 1
+    }
+    j: int = common
+    while j < len(p_parts) {
+        if len(result) > 0 { result = result + "/" }
+        result = result + p_parts[j]
+        j = j + 1
+    }
+    if len(result) == 0 { return "." }
+    return result
+}
+
+def expanduser(path: str) -> str {
+    if path.startswith("~/") {
+        const home: str = getenv("HOME")
+        if len(home) > 0 {
+            return home + path[1:]
+        }
+    }
+    if path == "~" {
+        const home: str = getenv("HOME")
+        if len(home) > 0 {
+            return home
+        }
+    }
+    return path
+}
+
+# Expand $VAR and ${VAR} from environment. Unknown vars stay literal.
+def expandvars(path: str) -> str {
+    const n: int = len(path)
+    if n == 0 { return path }
+    const VAR_CHARS: str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+    result: str = ""
+    i: int = 0
+    while i < n {
+        const ch: str = path[i:i + 1]
+        if ch != "$" {
+            result = result + ch
+            i = i + 1
+            continue
+        }
+        if i + 1 >= n {
+            result = result + ch
+            i = i + 1
+            continue
+        }
+        const next_ch: str = path[i + 1:i + 2]
+        if next_ch == "{" {
+            # ${VAR} - locate closing brace
+            j: int = i + 2
+            while j < n {
+                if path[j:j + 1] == "}" { break }
+                j = j + 1
+            }
+            if j >= n {
+                result = result + ch
+                i = i + 1
+                continue
+            }
+            const name: str = path[i + 2:j]
+            const val: str = getenv(name)
+            if len(val) > 0 {
+                result = result + val
+            } else {
+                result = result + path[i:j + 1]
+            }
+            i = j + 1
+        } else {
+            # $VAR - read alphanumeric/underscore name
+            j: int = i + 1
+            while j < n {
+                const c: str = path[j:j + 1]
+                if VAR_CHARS.find(c) < 0 { break }
+                j = j + 1
+            }
+            if j == i + 1 {
+                result = result + ch
+                i = i + 1
+                continue
+            }
+            const name: str = path[i + 1:j]
+            const val: str = getenv(name)
+            if len(val) > 0 {
+                result = result + val
+            } else {
+                result = result + path[i:j]
+            }
+            i = j
+        }
+    }
+    return result
+}
+
+# Split path into (drive, tail). POSIX always returns ["", path].
+def splitdrive(path: str) -> list[str] {
+    return ["", path]
+}
+
+# Longest character-level common prefix of paths. Note: character-level,
+# so commonprefix(["/usr/lib", "/usr/local"]) returns "/usr/l" - use
+# commonpath() for path-segment-aware behaviour.
+def commonprefix(paths: list[str]) -> str {
+    if len(paths) == 0 { return "" }
+    const ref: str = paths[0]
+    minlen: int = len(ref)
+    i: int = 1
+    while i < len(paths) {
+        if len(paths[i]) < minlen { minlen = len(paths[i]) }
+        i = i + 1
+    }
+    j: int = 0
+    while j < minlen {
+        const ch: str = ref[j:j + 1]
+        i = 1
+        while i < len(paths) {
+            if paths[i][j:j + 1] != ch {
+                return ref[:j]
+            }
+            i = i + 1
+        }
+        j = j + 1
+    }
+    return ref[:minlen]
+}
+
+# Longest common sub-path of paths (segment-aware). Raises ValueError
+# on empty input or mixed absolute/relative paths.
+def commonpath(paths: list[str]) -> str {
+    if len(paths) == 0 {
+        raise ValueError("commonpath() arg is an empty sequence")
+    }
+    const first_abs: bool = paths[0].startswith("/")
+    i: int = 1
+    while i < len(paths) {
+        if paths[i].startswith("/") != first_abs {
+            raise ValueError("Can't mix absolute and relative paths")
+        }
+        i = i + 1
+    }
+
+    all_parts: list[list[str]] = []
+    minlen: int = -1
+    i = 0
+    while i < len(paths) {
+        parts: list[str] = []
+        const segs: list[str] = paths[i].split("/")
+        for s in segs {
+            if len(s) > 0 { parts.append(s) }
+        }
+        all_parts.append(parts)
+        if minlen < 0 or len(parts) < minlen { minlen = len(parts) }
+        i = i + 1
+    }
+
+    common: int = 0
+    while common < minlen {
+        const target: str = all_parts[0][common]
+        mismatch: bool = false
+        i = 1
+        while i < len(all_parts) {
+            if all_parts[i][common] != target {
+                mismatch = true
+                break
+            }
+            i = i + 1
+        }
+        if mismatch { break }
+        common = common + 1
+    }
+
+    if common == 0 {
+        if first_abs { return "/" }
+        return ""
+    }
+    result: str = ""
+    if first_abs { result = "/" }
+    j: int = 0
+    while j < common {
+        if j > 0 { result = result + "/" }
+        result = result + all_parts[0][j]
+        j = j + 1
+    }
+    return result
+}
+
+#===----------------------------------------------------------------------===#
+# Path queries (stat-based)
+#===----------------------------------------------------------------------===#
+
+def exists(path: str) -> bool {
+    return access(path, 0) == 0
+}
+
+def isfile(path: str) -> bool {
+    if access(path, 0) != 0 { return false }
+    return dragon_stat_isfile(path) != 0
+}
+
+def isdir(path: str) -> bool {
+    if access(path, 0) != 0 { return false }
+    return dragon_stat_isdir(path) != 0
+}
+
+def islink(path: str) -> bool {
+    return dragon_stat_islink(path) != 0
+}
+
+def getsize(path: str) -> int {
+    if access(path, 0) != 0 {
+        raise OSError(f"No such file: '{path}'")
+    }
+    return dragon_stat_size(path)
+}
+
+def getmtime(path: str) -> int {
+    if access(path, 0) != 0 {
+        raise OSError(f"No such file: '{path}'")
+    }
+    return dragon_stat_mtime(path)
+}
+
+def getatime(path: str) -> int {
+    if access(path, 0) != 0 {
+        raise OSError(f"No such file: '{path}'")
+    }
+    return dragon_stat_atime(path)
+}
+
+def getctime(path: str) -> int {
+    if access(path, 0) != 0 {
+        raise OSError(f"No such file: '{path}'")
+    }
+    return dragon_stat_ctime(path)
+}
+
+#===----------------------------------------------------------------------===#
+# samefile / ismount (Python: os.path.samefile, os.path.ismount)
+#===----------------------------------------------------------------------===#
+
+def samefile(p1: str, p2: str) -> bool {
+    if access(p1, 0) != 0 {
+        raise OSError(f"No such file: '{p1}'")
+    }
+    if access(p2, 0) != 0 {
+        raise OSError(f"No such file: '{p2}'")
+    }
+    const dev1: int = dragon_stat_dev(p1)
+    const ino1: int = dragon_stat_ino(p1)
+    const dev2: int = dragon_stat_dev(p2)
+    const ino2: int = dragon_stat_ino(p2)
+    return dev1 == dev2 and ino1 == ino2
+}
+
+def ismount(path: str) -> bool {
+    if access(path, 0) != 0 { return false }
+    if dragon_stat_islink(path) != 0 { return false }
+    const dev1: int = dragon_lstat_dev(path)
+    const ino1: int = dragon_lstat_ino(path)
+    const parent: str = path + "/.."
+    const dev2: int = dragon_lstat_dev(parent)
+    const ino2: int = dragon_lstat_ino(parent)
+    if dev1 != dev2 { return true }
+    if ino1 == ino2 { return true }
+    return false
+}
+
+#===----------------------------------------------------------------------===#
+# Constants
+#===----------------------------------------------------------------------===#
+
+const sep: str = "/"
+const extsep: str = "."
+const pardir: str = ".."
+const curdir: str = "."

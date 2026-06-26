@@ -1,0 +1,45 @@
+# blobs.dr - content-addressed tarball storage on disk.
+#
+# A published package version is stored once, under its SHA-256 digest. Two
+# uploads with identical bytes collapse to one blob (the registry is an
+# immutable content store, per the design spec).
+
+from os import makedirs
+from os.path import join, exists
+from io import open, make
+
+class BlobStore {
+    def(root: str) {
+        self.root: str = root
+        if not exists(root) {
+            makedirs(root)
+        }
+    }
+
+    # digest is "sha256:<hex>"; the hex is the on-disk filename.
+    def _path(digest: str) -> str {
+        const hex: str = digest.replace("sha256:", "")
+        return join(self.root, hex + ".tar.zst")
+    }
+
+    # Public accessor so a download handler can serve the blob via Response.file.
+    def path(digest: str) -> str {
+        return self._path(digest)
+    }
+
+    def put(digest: str, data: bytes) -> str {
+        const p: str = self._path(digest)
+        with make(p) as w {
+            w.write(data)
+        }
+        return p
+    }
+
+    def has(digest: str) -> bool {
+        return exists(self._path(digest))
+    }
+
+    def get(digest: str) -> bytes {
+        return open(self._path(digest)).bytes()
+    }
+}

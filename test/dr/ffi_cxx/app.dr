@@ -1,0 +1,35 @@
+"""ADR 041 - external-contributor FFI: --cc-source C++ shim + marshalling primitives.
+
+Built by ctest with:
+    dragon run app.dr --cc-source shim.cpp
+
+Verifies two things end to end:
+  1. A C++ shim (shim.cpp, uses std::string) compiles via --cc-source and links -
+     proving the cc->c++ link-driver switch works.
+  2. The blessed FFI accessors dragon_str_to_utf8_bytes / dragon_bytes_data hand
+     a correct, NUL-terminated UTF-8 buffer to C, for both non-ASCII and ASCII text.
+"""
+
+# Blessed FFI marshalling primitives (ADR 041 stable set).
+extern "C" def dragon_str_to_utf8_bytes(s: str) -> bytes
+extern "C" def dragon_bytes_data(b: bytes) -> ptr
+extern "C" def dragon_bytes_len(b: bytes) -> int
+
+# The C++ shim, compiled + linked via --cc-source.
+extern "C" def shim_strlen(s: ptr) -> int
+
+# "héllo" is 5 code points but 6 UTF-8 bytes (é -> 0xC3 0xA9). A correct
+# str->UTF-8 conversion must report 6, and the buffer must be NUL-terminated so
+# the shim's std::string strlen sees exactly 6 bytes.
+text: str = "héllo"
+buf: bytes = dragon_str_to_utf8_bytes(text)
+assert len(text) == 5
+assert dragon_bytes_len(buf) == 6
+assert shim_strlen(dragon_bytes_data(buf)) == 6
+
+# Pure-ASCII path: byte length == code-point length, zero transcoding.
+ascii_buf: bytes = dragon_str_to_utf8_bytes("opencv")
+assert dragon_bytes_len(ascii_buf) == 6
+assert shim_strlen(dragon_bytes_data(ascii_buf)) == 6
+
+print("ffi_cxx_shim: OK")

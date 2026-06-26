@@ -1,0 +1,134 @@
+"""quopri - quoted-printable encode/decode (RFC 1521, Python parity).
+
+Pure Dragon. Operates on `str` payloads (Dragon's str is byte-clean for
+ASCII; non-ASCII source bytes are encoded via UTF-8 by the caller). The
+implementation follows CPython's quopri.py:
+
+- `encodestring(s, quotetabs=False)` - return the quoted-printable form
+- `decodestring(s)` - reverse the encoding
+- `encode_byte` / `decode_byte` are not exposed (CPython internals)
+"""
+
+import string
+
+
+_HEX: str = "0123456789ABCDEF"
+
+
+def _hex_value(ch: str) -> int {
+    """Return the int value of a single hex digit, or -1 if not hex."""
+    code: int = ord(ch)
+    if code >= 48 and code <= 57 {        # 0..9
+        return code - 48
+    }
+    if code >= 65 and code <= 70 {        # A..F
+        return code - 55
+    }
+    if code >= 97 and code <= 102 {       # a..f
+        return code - 87
+    }
+    return -1
+}
+
+
+def _quote(ch: str) -> str {
+    """Render a single byte as `=XX`."""
+    c: int = ord(ch)
+    return "=" + _HEX[(c >> 4) & 0xF:((c >> 4) & 0xF) + 1] + _HEX[c & 0xF:(c & 0xF) + 1]
+}
+
+
+def _needs_quote(ch: str, quotetabs: bool) -> bool {
+    code: int = ord(ch)
+    if code == 9 or code == 32 {           # tab / space
+        return quotetabs
+    }
+    if code < 33 or code > 126 {           # non-printable / outside ASCII printable
+        return true
+    }
+    if code == 61 {                        # '='
+        return true
+    }
+    return false
+}
+
+
+def encodestring(s: str, quotetabs: bool = false) -> str {
+    """Return `s` encoded as quoted-printable.
+
+    `quotetabs=True` forces tabs and spaces to be escaped (useful when the
+    body must not be mangled by transport).
+    """
+    parts: list[str] = []
+    line_len: int = 0
+    n: int = len(s)
+    i: int = 0
+    while i < n {
+        ch: str = s[i:i + 1]
+        code: int = ord(ch)
+        encoded: str = ""
+        if code == 10 {                    # LF flushes the line
+            parts.append("\n")
+            line_len = 0
+            i += 1
+            continue
+        }
+        if code == 13 {                    # CR - let LF handle line-end logic
+            i += 1
+            continue
+        }
+        if _needs_quote(ch, quotetabs) {
+            encoded = _quote(ch)
+        } else {
+            encoded = ch
+        }
+        # Soft-wrap at 75 cols (RFC limit is 76; reserve 1 for `=` continuation).
+        if line_len + len(encoded) > 75 {
+            parts.append("=\n")
+            line_len = 0
+        }
+        parts.append(encoded)
+        line_len += len(encoded)
+        i += 1
+    }
+    return "".join(parts)
+}
+
+
+def decodestring(s: str) -> str {
+    """Decode a quoted-printable `s` back to its original bytes."""
+    out: list[str] = []
+    n: int = len(s)
+    i: int = 0
+    while i < n {
+        ch: str = s[i:i + 1]
+        if ch == "=" and i + 1 < n {
+            nxt: str = s[i + 1:i + 2]
+            if nxt == "\n" {
+                # Soft line break - skip.
+                i += 2
+                continue
+            }
+            if nxt == "\r" and i + 2 < n and s[i + 2:i + 3] == "\n" {
+                i += 3
+                continue
+            }
+            if i + 2 < n {
+                hi: int = _hex_value(nxt)
+                lo: int = _hex_value(s[i + 2:i + 3])
+                if hi >= 0 and lo >= 0 {
+                    out.append(chr((hi << 4) | lo))
+                    i += 3
+                    continue
+                }
+            }
+            # Malformed: emit the '=' literally and advance one.
+            out.append(ch)
+            i += 1
+            continue
+        }
+        out.append(ch)
+        i += 1
+    }
+    return "".join(out)
+}

@@ -1,0 +1,124 @@
+# syslog.dr - Dragon standard library: POSIX syslog interface
+#
+# FFI bindings to the POSIX syslog(3) API for system logging.
+# Provides both low-level extern "C" wrappers and high-level
+# convenience functions for each severity level.
+# Linux/macOS only - not available on Windows.
+
+#===----------------------------------------------------------------------===#
+# POSIX syslog FFI declarations
+#===----------------------------------------------------------------------===#
+
+extern "C" def openlog(ident: str, option: intc, facility: intc)
+extern "C" def syslog(priority: intc, format: str)
+extern "C" def closelog()
+
+#===----------------------------------------------------------------------===#
+# Priority constants (severity levels)
+#===----------------------------------------------------------------------===#
+
+const LOG_EMERG: int = 0
+const LOG_ALERT: int = 1
+const LOG_CRIT: int = 2
+const LOG_ERR: int = 3
+const LOG_WARNING: int = 4
+const LOG_NOTICE: int = 5
+const LOG_INFO: int = 6
+const LOG_DEBUG: int = 7
+
+#===----------------------------------------------------------------------===#
+# Facility constants
+#===----------------------------------------------------------------------===#
+
+const LOG_KERN: int = 0
+const LOG_USER: int = 8
+const LOG_MAIL: int = 16
+const LOG_DAEMON: int = 24
+const LOG_AUTH: int = 32
+const LOG_SYSLOG: int = 40
+const LOG_LPR: int = 48
+const LOG_NEWS: int = 56
+const LOG_UUCP: int = 64
+const LOG_CRON: int = 72
+const LOG_LOCAL0: int = 128
+const LOG_LOCAL1: int = 136
+const LOG_LOCAL2: int = 144
+const LOG_LOCAL3: int = 152
+const LOG_LOCAL4: int = 160
+const LOG_LOCAL5: int = 168
+const LOG_LOCAL6: int = 176
+const LOG_LOCAL7: int = 184
+
+#===----------------------------------------------------------------------===#
+# Option constants (for openlog)
+#===----------------------------------------------------------------------===#
+
+const LOG_PID: int = 1
+const LOG_CONS: int = 2
+const LOG_ODELAY: int = 4
+const LOG_NDELAY: int = 8
+const LOG_NOWAIT: int = 16
+const LOG_PERROR: int = 32
+
+#===----------------------------------------------------------------------===#
+# Wrapper functions - Dragon-friendly API
+#===----------------------------------------------------------------------===#
+
+def syslog_open(ident: str, option: int, facility: int) {
+    # Open a connection to the system logger.
+    openlog(ident, option, facility)
+}
+
+def syslog_log(priority: int, message: str) {
+    # Send a message to the system logger at the given priority level.
+    syslog(priority, message)
+}
+
+def syslog_close() {
+    # Close the connection to the system logger.
+    closelog()
+}
+
+#===----------------------------------------------------------------------===#
+# Convenience functions - one per severity level
+#===----------------------------------------------------------------------===#
+
+def emergency(msg: str) {
+    # LOG_EMERG: system is unusable.
+    syslog(LOG_EMERG, msg)
+}
+
+def alert(msg: str) {
+    # LOG_ALERT: action must be taken immediately.
+    syslog(LOG_ALERT, msg)
+}
+
+def critical(msg: str) {
+    # LOG_CRIT: critical conditions.
+    syslog(LOG_CRIT, msg)
+}
+
+def error(msg: str) {
+    # LOG_ERR: error conditions.
+    syslog(LOG_ERR, msg)
+}
+
+def warning(msg: str) {
+    # LOG_WARNING: warning conditions.
+    syslog(LOG_WARNING, msg)
+}
+
+def notice(msg: str) {
+    # LOG_NOTICE: normal but significant condition.
+    syslog(LOG_NOTICE, msg)
+}
+
+def info(msg: str) {
+    # LOG_INFO: informational message.
+    syslog(LOG_INFO, msg)
+}
+
+def debug(msg: str) {
+    # LOG_DEBUG: debug-level message.
+    syslog(LOG_DEBUG, msg)
+}

@@ -1,0 +1,33 @@
+"""stat - st_mode bit predicates and filemode() against known values."""
+
+from unittest import TestCase, main
+import stat
+from stat import S_ISDIR, S_ISREG, S_ISLNK, S_IMODE, filemode
+
+
+class StatTests(TestCase) {
+    def test_type_predicates() {
+        # 0o100755 regular file rwxr-xr-x
+        self.assertTrue(S_ISREG(0x81ED))
+        self.assertFalse(S_ISDIR(0x81ED))
+        # 0o040755 directory
+        self.assertTrue(S_ISDIR(0x41ED))
+        self.assertFalse(S_ISREG(0x41ED))
+        # 0o120777 symlink
+        self.assertTrue(S_ISLNK(0xA1FF))
+    }
+
+    def test_imode() {
+        # permission bits of 0o100755 == 0o755 == 0x1ED
+        self.assertEqual(S_IMODE(0x81ED), 0x1ED)
+    }
+
+    def test_filemode() {
+        self.assertEqual(filemode(0x81ED), "-rwxr-xr-x")
+        self.assertEqual(filemode(0x41FF), "drwxrwxrwx")
+        self.assertEqual(filemode(0x81A4), "-rw-r--r--")  # 0o100644
+    }
+}
+
+
+main([StatTests()])

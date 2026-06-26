@@ -1,0 +1,145 @@
+# auth.dr - accounts and publish tokens.
+#
+# All queries are template[SQL]: every `!{x}` is a bound parameter, never spliced
+# text. Passwords are argon2id (per-user random salt, PHC string stored). Publish
+# tokens are shown once; only their SHA-256 is stored, so a DB leak reveals no
+# usable token.
+
+from time import now
+from argon2id import hash as argon_hash, verify as argon_verify
+from secrets import token_urlsafe, token_bytes
+from hashlib import hexdigest
+from database import SQL, Results
+from storage.db import Db
+from models.records import User, Token, UserAuth
+
+# Outcome of a register/login attempt. `user_id` is 0 on failure.
+class AuthResult {
+    def(ok: bool, user_id: int, error: str) {
+        self.ok: bool = ok
+        self.user_id: int = user_id
+        self.error: str = error
+    }
+}
+
+def _token_hash(plaintext: str) -> str {
+    return hexdigest("sha256", plaintext.encode("utf-8"))
+}
+
+class AuthService {
+    def(db: Db) {
+        self.db: Db = db
+    }
+
+    #--- accounts ---------------------------------------------------------#
+
+    def register(username: str, email: str, password: str) -> AuthResult {
+        if len(username) < 2 {
+            return AuthResult(false, 0, "username too short")
+        }
+        if len(password) < 8 {
+            return AuthResult(false, 0, "password must be at least 8 characters")
+        }
+        if self._username_taken(username) {
+            return AuthResult(false, 0, "username already taken")
+        }
+        if self._email_taken(email) {
+            return AuthResult(false, 0, "email already registered")
+        }
+
+        const salt: bytes = token_bytes(16)
+        const ph: str = argon_hash(password.encode("utf-8"), salt)
+        const ts: int = now()
+        const res: Results = self.db.conn.run(template[SQL] {
+            insert into users (username, email, password_hash, created_at)
+            values (!{username}, !{email}, !{ph}, !{ts})
+        })
+        return AuthResult(true, res.xid, "")
+    }
+
+    def login(username: str, password: str) -> AuthResult {
+        const rows: list[UserAuth] = self.db.conn.all[UserAuth](template[SQL] {
+            select id, password_hash from users where username = !{username}
+        })
+        if len(rows) == 0 {
+            return AuthResult(false, 0, "invalid username or password")
+        }
+        const ph: str = rows[0].password_hash
+        if not argon_verify(ph, password.encode("utf-8")) {
+            return AuthResult(false, 0, "invalid username or password")
+        }
+        return AuthResult(true, rows[0].id, "")
+    }
+
+    def get_user(uid: int) -> User {
+        const users: list[User] = self.db.conn.all[User](template[SQL] {
+            select id, username, email, password_hash, created_at from users where id = !{uid}
+        })
+        if len(users) == 0 {
+            raise ValueError(f"no user with id {uid}")
+        }
+        return users[0]
+    }
+
+    def _username_taken(username: str) -> bool {
+        const rows: list[dict[str, Any]] = self.db.conn.all[dict[str, Any]](template[SQL] {
+            select 1 from users where username = !{username}
+        })
+        return len(rows) > 0
+    }
+
+    def _email_taken(email: str) -> bool {
+        const rows: list[dict[str, Any]] = self.db.conn.all[dict[str, Any]](template[SQL] {
+            select 1 from users where email = !{email}
+        })
+        return len(rows) > 0
+    }
+
+    #--- publish tokens ---------------------------------------------------#
+
+    # Returns the plaintext token - the ONLY time it is ever available.
+    def issue_token(uid: int, label: str) -> str {
+        const plaintext: str = f"dgn_{token_urlsafe(24)}"
+        const th: str = _token_hash(plaintext)
+        const ts: int = now()
+        self.db.conn.run(template[SQL] {
+            insert into tokens (user_id, label, token_hash, created_at)
+            values (!{uid}, !{label}, !{th}, !{ts})
+        })
+        return plaintext
+    }
+
+    # Returns the owning user id for a valid, non-revoked token, else 0.
+    def verify_token(plaintext: str) -> int {
+        const th: str = _token_hash(plaintext)
+        const rows: list[dict[str, Any]] = self.db.conn.all[dict[str, Any]](template[SQL] {
+            select id, user_id, revoked from tokens where token_hash = !{th}
+        })
+        if len(rows) == 0 {
+            return 0
+        }
+        const revoked: int = rows[0]["revoked"]
+        if revoked != 0 {
+            return 0
+        }
+        const tid: int = rows[0]["id"]
+        const uid: int = rows[0]["user_id"]
+        const ts: int = now()
+        self.db.conn.run(template[SQL] { update tokens set last_used_at = !{ts} where id = !{tid} })
+        return uid
+    }
+
+    def revoke_token(uid: int, tid: int) -> bool {
+        const res: Results = self.db.conn.run(template[SQL] {
+            update tokens set revoked = 1 where id = !{tid} and user_id = !{uid}
+        })
+        return res.ran > 0
+    }
+
+    def list_tokens(uid: int) -> list[Token] {
+        return self.db.conn.all[Token](template[SQL] {
+            select id, user_id, label, created_at, last_used_at, revoked
+            from tokens where user_id = !{uid} order by id
+        })
+    }
+}

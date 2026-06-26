@@ -1,0 +1,107 @@
+"""`**dict` spread into variadic callees (bugs.md #7, the D047 deferral).
+
+`f(**d)` into a callee declaring `**kwargs` used to error "call-site spread
+into this callable is not supported" (only fixed-arity targets accepted a
+`**dict`). The variadic call path now: binds regular params by NAME from the
+spread source (required/default machinery shared with the fixed-arity path),
+raises TypeError for a spread key naming an already-filled slot or duplicating
+an explicit keyword, flows the remaining entries into the callee's kwargs dict
+via one excluding copy (dragon_dict_copy_excluding), and rejects stray keys at
+runtime for a *args-only callee.
+
+The same pass fixed a pre-existing per-call leak: the packed *args list and
+**kwargs dict are call-site-owned temporaries and are now released after the
+call (callees borrow their params; return/store paths take their own refs).
+"""
+
+from unittest import TestCase, main
+
+
+def total(**kw: int) -> int {
+    t: int = 0
+    for k in kw {
+        t = t + kw[k]
+    }
+    return t
+}
+
+def greet(name: str, **opts: str) -> str {
+    out: str = name
+    for k in opts {
+        out = out + "," + opts[k]
+    }
+    return out
+}
+
+def head_count(a: int, *xs: int) -> int {
+    return a * 100 + len(xs)
+}
+
+def keep(**kw: int) -> dict[str, int] {
+    return kw
+}
+
+
+class KwargsSpreadTests(TestCase) {
+    def test_pure_spread() {
+        d: dict[str, int] = {"a": 1, "b": 2, "c": 3}
+        self.assertEqual(total(**d), 6)
+    }
+
+    def test_explicit_plus_spread() {
+        d: dict[str, int] = {"a": 1, "b": 2}
+        self.assertEqual(total(x=10, **d), 13)
+    }
+
+    def test_spread_binds_regular_param() {
+        self.assertEqual(greet(**{"name": "scale", "extra": "x"}), "scale,x")
+    }
+
+    def test_positional_plus_spread_to_kwargs() {
+        o: dict[str, str] = {"tone": "warm"}
+        self.assertEqual(greet("dragon", **o), "dragon,warm")
+    }
+
+    def test_duplicate_regular_param_raises() {
+        caught: bool = false
+        try {
+            s: str = greet("dup", **{"name": "x"})
+        } except TypeError {
+            caught = true
+        }
+        self.assertTrue(caught)
+    }
+
+    def test_missing_required_raises() {
+        caught: bool = false
+        try {
+            s: str = greet(**{"opt": "x"})
+        } except TypeError {
+            caught = true
+        }
+        self.assertTrue(caught)
+    }
+
+    def test_spread_into_args_only_callee() {
+        self.assertEqual(head_count(**{"a": 7}), 700)
+    }
+
+    def test_stray_key_into_args_only_raises() {
+        caught: bool = false
+        try {
+            n: int = head_count(**{"a": 1, "stray": 2})
+        } except TypeError {
+            caught = true
+        }
+        self.assertTrue(caught)
+    }
+
+    def test_returned_kwargs_survive_callsite_release() {
+        r: dict[str, int] = keep(a=1, b=2)
+        self.assertEqual(len(r), 2)
+        self.assertEqual(r["b"], 2)
+    }
+}
+
+
+main([KwargsSpreadTests()])

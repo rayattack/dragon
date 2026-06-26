@@ -1,0 +1,182 @@
+# uuid.dr - Dragon standard library: UUID generation
+#
+# Provides UUID v4 (random) generation and UUID string utilities.
+# Uses libc rand()/srand() for randomness - not cryptographically secure.
+
+#===----------------------------------------------------------------------===#
+# C extern declarations
+#===----------------------------------------------------------------------===#
+
+extern "C" def rand() -> intc
+extern "C" def srand(seed: intc)
+extern "C" def time(tloc: ptr) -> int
+
+const RAND_MAX: int = 2147483647
+
+#===----------------------------------------------------------------------===#
+# Internal state
+#===----------------------------------------------------------------------===#
+
+_seeded: bool = false
+
+def _ensure_seeded() {
+    if _seeded == false {
+        srand(time(none))
+        _seeded = true
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# Hex helpers
+#===----------------------------------------------------------------------===#
+
+def _hex_char(v: int) -> str {
+    # Map 0-15 to "0"-"f".
+    return f"{v:x}"
+}
+
+def _rand_hex_char() -> str {
+    # Return one random hex character.
+    return _hex_char(rand() % 16)
+}
+
+def _rand_hex(n: int) -> str {
+    # Return a string of n random hex characters.
+    result: str = ""
+    i: int = 0
+    while i < n {
+        result = result + _rand_hex_char()
+        i = i + 1
+    }
+    return result
+}
+
+#===----------------------------------------------------------------------===#
+# UUID v4 generation
+#===----------------------------------------------------------------------===#
+
+def uuid4() -> str {
+    # Generate a random UUID v4 string.
+    # Format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
+    # Version nibble (position 13) is always '4'.
+    # Variant nibble (position 19) is one of '8','9','a','b'.
+    _ensure_seeded()
+
+    # 8 hex chars
+    const p1: str = _rand_hex(8)
+    # 4 hex chars
+    const p2: str = _rand_hex(4)
+    # 4xxx: version nibble is '4', then 3 random hex
+    const p3: str = "4" + _rand_hex(3)
+    # yxxx: variant nibble is 8/9/a/b, then 3 random hex
+    const variant: int = 8 + rand() % 4
+    const p4: str = _hex_char(variant) + _rand_hex(3)
+    # 12 hex chars
+    const p5: str = _rand_hex(12)
+
+    return f"{p1}-{p2}-{p3}-{p4}-{p5}"
+}
+
+#===----------------------------------------------------------------------===#
+# UUID utilities
+#===----------------------------------------------------------------------===#
+
+def uuid_hex(uuid: str) -> str {
+    # Strip dashes from a UUID string, returning 32 hex characters.
+    result: str = ""
+    i: int = 0
+    while i < len(uuid) {
+        const ch: str = uuid[i:i + 1]
+        if ch != "-" {
+            result = result + ch
+        }
+        i = i + 1
+    }
+    return result
+}
+
+def uuid_version(uuid: str) -> int {
+    # Extract the version digit from a UUID string.
+    # The version char is at position 14 (the char after the second dash).
+    const ch: str = uuid[14:15]
+    if ch == "0" { return 0 }
+    if ch == "1" { return 1 }
+    if ch == "2" { return 2 }
+    if ch == "3" { return 3 }
+    if ch == "4" { return 4 }
+    if ch == "5" { return 5 }
+    return -1
+}
+
+def _is_hex_char(ch: str) -> bool {
+    # Return true if ch is a valid hex digit.
+    if ch == "0" { return true }
+    if ch == "1" { return true }
+    if ch == "2" { return true }
+    if ch == "3" { return true }
+    if ch == "4" { return true }
+    if ch == "5" { return true }
+    if ch == "6" { return true }
+    if ch == "7" { return true }
+    if ch == "8" { return true }
+    if ch == "9" { return true }
+    if ch == "a" { return true }
+    if ch == "b" { return true }
+    if ch == "c" { return true }
+    if ch == "d" { return true }
+    if ch == "e" { return true }
+    if ch == "f" { return true }
+    if ch == "A" { return true }
+    if ch == "B" { return true }
+    if ch == "C" { return true }
+    if ch == "D" { return true }
+    if ch == "E" { return true }
+    if ch == "F" { return true }
+    return false
+}
+
+def uuid_is_valid(uuid: str) -> bool {
+    # Validate UUID format: 8-4-4-4-12, all hex digits, version 1-5.
+    if len(uuid) != 36 { return false }
+
+    # Check dash positions: 8, 13, 18, 23
+    if uuid[8:9] != "-" { return false }
+    if uuid[13:14] != "-" { return false }
+    if uuid[18:19] != "-" { return false }
+    if uuid[23:24] != "-" { return false }
+
+    # Check all non-dash characters are hex
+    i: int = 0
+    while i < 36 {
+        if i != 8 {
+            if i != 13 {
+                if i != 18 {
+                    if i != 23 {
+                        if _is_hex_char(uuid[i:i + 1]) == false {
+                            return false
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    # Check version nibble (position 14) is 1-5
+    const ver: int = uuid_version(uuid)
+    if ver < 1 { return false }
+    if ver > 5 { return false }
+
+    return true
+}
+
+def uuid_compare(a: str, b: str) -> int {
+    # Lexicographic comparison of two UUID strings.
+    # Returns -1 if a < b, 0 if a == b, 1 if a > b.
+    # Compare on hex-only (stripped) form for canonical ordering.
+    const ha: str = uuid_hex(a)
+    const hb: str = uuid_hex(b)
+    if ha < hb { return -1 }
+    if ha > hb { return 1 }
+    return 0
+}

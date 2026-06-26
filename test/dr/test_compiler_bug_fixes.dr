@@ -1,0 +1,243 @@
+"""Regression tests for the 2026-05-30 compiler-bugs.md fix campaign.
+
+Covers the runtime-behavior fixes (the check-time-only diagnostics - L4, M1,
+M2, M3, C9 - are compile errors, not runtime behavior, so they're verified by
+their repros in the campaign, not here):
+
+  H5  - set ordering operators (< <= > >=), single and chained
+  issubclass - single-inheritance hierarchy fold
+  C4  - len()/repr of inline set-method results (union/intersection/.../copy)
+  C5  - nested-container repr (list of list/dict, dict of list)
+  L3  - partition()/rpartition() return a 3-tuple
+  map - map(f, xs) over int/float/str callables
+  H12 - ternary expressions with mixed-type arms (no crash, correct value)
+  object - `object` annotation behaves as Any
+"""
+
+from unittest import TestCase, main
+
+
+class SetOrderingTests(TestCase) {
+    def test_subset_superset_bound() {
+        a: set[int] = {1, 2}
+        b: set[int] = {1, 2, 3}
+        d: set[int] = {1, 2}
+        self.assertTrue(a <= b)
+        self.assertTrue(a <= d)        # equal is a (non-proper) subset
+        self.assertTrue(a < b)         # proper subset
+        self.assertFalse(a < d)        # equal is not a proper subset
+        self.assertTrue(b >= a)
+        self.assertTrue(b > a)
+        self.assertFalse(a > b)
+    }
+
+    def test_disjoint() {
+        a: set[int] = {1, 2}
+        c: set[int] = {3, 4}
+        self.assertFalse(a <= c)
+        self.assertFalse(a >= c)
+    }
+
+    def test_inline_literals() {
+        self.assertTrue({1, 2} <= {1, 2, 3})
+        self.assertFalse({1, 2} <= {3, 4})
+        self.assertTrue({1, 2} < {1, 2, 3})
+        self.assertTrue({1, 2, 3} > {1, 2})
+    }
+
+    def test_chained() {
+        a: set[int] = {1}
+        b: set[int] = {1, 2}
+        c: set[int] = {1, 2, 3}
+        self.assertTrue(a < b < c)
+        self.assertTrue(a <= b <= c)
+    }
+}
+
+
+class IssubclassTests(TestCase) {
+    def test_hierarchy() {
+        self.assertTrue(issubclass(Dog, Animal))
+        self.assertFalse(issubclass(Animal, Dog))
+        self.assertTrue(issubclass(Dog, Dog))
+        self.assertTrue(issubclass(Dog, object))
+        self.assertFalse(issubclass(Cat, Dog))
+    }
+}
+
+
+class Animal {
+    def() { }
+}
+class Dog(Animal) {
+    def() { }
+}
+class Cat(Animal) {
+    def() { }
+}
+
+
+class InlineSetMethodTests(TestCase) {
+    def test_len_of_inline_result() {
+        a: set[int] = {1, 2}
+        b: set[int] = {3, 4}
+        c: set[int] = {1, 2, 3}
+        self.assertEqual(len(a.union(b)), 4)
+        self.assertEqual(len(a.intersection(b)), 0)
+        self.assertEqual(len(a.difference(b)), 2)
+        self.assertEqual(len(a.symmetric_difference(b)), 4)
+        self.assertEqual(len(a.copy()), 2)
+        self.assertEqual(len(a.union(c)), 3)
+    }
+}
+
+
+class NestedReprTests(TestCase) {
+    def test_nested_list() {
+        x: list[list[int]] = [[1, 2], [3, 4]]
+        self.assertEqual(str(x), "[[1, 2], [3, 4]]")
+    }
+
+    def test_dict_of_list() {
+        d: dict[str, list[int]] = {"a": [1, 2]}
+        self.assertEqual(str(d), "{'a': [1, 2]}")
+    }
+}
+
+
+class PartitionTests(TestCase) {
+    def test_partition_tuple() {
+        # L3: partition returns a 3-tuple, so its repr uses parens (not list
+        # brackets). assertEqual on whole tuples would compare by identity, so
+        # assert the repr - that is precisely the behavior L3 fixed.
+        self.assertEqual(str("k=v".partition("=")), "('k', '=', 'v')")
+        self.assertEqual(str("no-sep".partition("=")), "('no-sep', '', '')")
+    }
+
+    def test_rpartition_and_unpack() {
+        k, sep, v = "name=dragon".partition("=")
+        self.assertEqual(k, "name")
+        self.assertEqual(v, "dragon")
+    }
+}
+
+
+def dbl(x: int) -> int {
+    return x * 2
+}
+def halve(x: int) -> float {
+    return x / 2.0
+}
+
+
+class MapTests(TestCase) {
+    def test_map_int() {
+        nums: list[int] = [1, 2, 3]
+        r: list[int] = map(dbl, nums)
+        self.assertEqual(r[0], 2)
+        self.assertEqual(r[1], 4)
+        self.assertEqual(r[2], 6)
+    }
+
+    def test_map_float() {
+        nums: list[int] = [2, 4]
+        r: list[float] = map(halve, nums)
+        self.assertEqual(r[0], 1.0)
+        self.assertEqual(r[1], 2.0)
+    }
+}
+
+
+class TernaryTests(TestCase) {
+    def test_numeric() {
+        n: int = 5
+        i: int = 7 if n > 0 else 9
+        self.assertEqual(i, 7)
+        f: float = 1.5 if n > 0 else 3
+        self.assertEqual(f, 1.5)
+        g: float = 1.5 if n < 0 else 3
+        self.assertEqual(g, 3.0)
+    }
+
+    def test_str_int_to_any() {
+        n: int = 5
+        s: Any = "yes" if n > 0 else n
+        self.assertEqual(s, "yes")
+    }
+
+    def test_str_none() {
+        n: int = 5
+        x: Any = "x" if n > 0 else None
+        self.assertEqual(x, "x")
+        y: Any = "x" if n < 0 else None
+        self.assertIsNone(y)
+    }
+
+    def test_object_alias() {
+        v: object = "hi"
+        self.assertEqual(v, "hi")
+    }
+}
+
+
+# Decorator factory (`@register("name")`) whose inner decorator captures the
+# factory argument: the inner decorator is a capturing closure, and the
+# decorator-application lowering used to call it as a bare function pointer
+# (jumping into the closure struct -> SIGSEGV). It now routes through the same
+# closure-vs-bare runtime discrimination as any Callable-value call.
+_handlers: dict[str, Callable[[int], int]] = {}
+
+def register(name: str) -> Callable[[Callable[[int], int]], Callable[[int], int]] {
+    def deco(fn: Callable[[int], int]) -> Callable[[int], int] {
+        global _handlers
+        _handlers[name] = fn
+        return fn
+    }
+    return deco
+}
+
+@register("square")
+def reg_square(x: int) -> int { return x * x }
+
+def multiply(factor: int) -> Callable[[Callable[[int], int]], Callable[[int], int]] {
+    def deco(fn: Callable[[int], int]) -> Callable[[int], int] {
+        def wrapper(x: int) -> int { return fn(x) * factor }
+        return wrapper
+    }
+    return deco
+}
+
+@multiply(10)
+def inc(x: int) -> int { return x + 1 }
+
+def tag(label: str) -> Callable[[Callable[[int], int]], Callable[[int], int]] {
+    def deco(fn: Callable[[int], int]) -> Callable[[int], int] { return fn }
+    return deco
+}
+
+@tag("noop")
+def tagged_square(x: int) -> int { return x * x }
+
+
+class DecoratorFactoryTests(TestCase) {
+    def test_capturing_factory_registers_and_calls() {
+        # the captured `name` keyed the handler, and the decorated fn still runs
+        self.assertEqual(_handlers["square"](6), 36)
+        self.assertEqual(reg_square(6), 36)
+    }
+
+    def test_wrapping_factory() {
+        # @multiply(10) wraps inc: (4 + 1) * 10
+        self.assertEqual(inc(4), 50)
+    }
+
+    def test_non_capturing_factory() {
+        # inner decorator captures nothing -> bare fn ptr, must still work
+        self.assertEqual(tagged_square(6), 36)
+    }
+}
+
+
+main([SetOrderingTests(), IssubclassTests(), InlineSetMethodTests(),
+      NestedReprTests(), PartitionTests(), MapTests(), TernaryTests(),
+      DecoratorFactoryTests()])

@@ -1,0 +1,221 @@
+# test/dr/test_dictsetdefault_heap_rc.dr - dict.setdefault on a HEAP-valued dict:
+# reference counting (leaks.md #20).
+#
+# `setdefault` carried the same borrow-return UAF as `.get` (#19): the key-present
+# branch returned the stored value with NO incref, so a binding
+# `g: list[int] = d.setdefault(k, [])` freed the dict's stored value at scope
+# exit -> use-after-free. It was ALSO doubly broken on insert: the generic path
+# stored the default with TAG_INT, so a heap value the dict retained was never
+# decref'd on dealloc (leak) and was invisible to the cycle collector. The fix
+# routes heap-valued setdefault through owned-returning runtime variants
+# (dragon_dict_setdefault_ptr / dragon_dict_int_setdefault_owned) that incref the
+# stored value on the present branch, and on the absent branch store the default
+# with its proper heap tag + incref it twice (one ref the dict's retained copy
+# keeps, one the binding owns) - matched by the same owned-temp drain the #19
+# get-default call site uses. The getter is picked at COMPILE TIME from the
+# statically-known value type - monomorphic, no box, no runtime tag check.
+#
+# Pins, with leak-/UAF-freedom verified under the ASan/LSan build:
+#  (1) key PRESENT returns the EXISTING value (not the default) and the dict's
+#  value survives binding-and-drop; the discarded default temp is freed;
+#  (2) key ABSENT inserts the default, returns it, and a later read sees it;
+#  (3) a BORROWED default (a variable) aliases correctly and every owner (dict,
+#  binding, source var) stays live;
+#  (4) the result OWNS its ref - it outlives the source dict being dropped.
+
+from unittest import TestCase, main
+
+
+class DictSetdefaultHeapRcTests(TestCase) {
+    def test_str_present_returns_existing_keeps_value() {
+        d: dict[str, list[int]] = {"a": [1, 2, 3]}
+        # Key present: returns the EXISTING [1,2,3], discards the owned default.
+        if True {
+            g: list[int] = d.setdefault("a", [9, 9])
+            self.assertEqual(len(g), 3)
+            self.assertEqual(g[0], 1)
+        }
+        # The dict's stored value must still be alive after g was freed.
+        again: list[int] = d.get("a")
+        self.assertEqual(len(again), 3)
+    }
+
+    def test_str_absent_inserts_and_returns() {
+        d: dict[str, list[int]] = {"a": [1, 2, 3]}
+        # Key absent: inserts [7,7,7,7], returns it.
+        if True {
+            g: list[int] = d.setdefault("z", [7, 7, 7, 7])
+            self.assertEqual(len(g), 4)
+        }
+        # The inserted value must now be in the dict and survive the bind+drop.
+        again: list[int] = d.get("z")
+        self.assertEqual(len(again), 4)
+        self.assertEqual(again[0], 7)
+    }
+
+    def test_str_absent_borrowed_default_aliases() {
+        # A BORROWED default (a variable): setdefault stores the SAME object and
+        # returns it, so dict, binding, and the source var all alias one list.
+        # Every owner must stay live (the runtime increfs for the dict + binding;
+        # the source var keeps its own ref, no drain).
+        d: dict[str, list[int]] = {}
+        seed: list[int] = [5, 5, 5]
+        r: list[int] = d.setdefault("k", seed)
+        self.assertEqual(len(r), 3)
+        # Drop r's scope is the method; drop the dict's ref and check seed lives.
+        d = {}
+        i: int = 0
+        while i < 200 {
+            junk: list[int] = [i, i]
+            i = i + 1
+        }
+        self.assertEqual(len(seed), 3)      # source var survives the dict dying
+        self.assertEqual(seed[1], 5)
+    }
+
+    def test_int_keyed_present_and_absent() {
+        d: dict[int, list[int]] = {7: [4, 5, 6, 7]}
+        # present
+        if True {
+            g: list[int] = d.setdefault(7, [0])
+            self.assertEqual(len(g), 4)
+        }
+        # absent -> insert
+        if True {
+            h: list[int] = d.setdefault(9, [1, 2, 3])
+            self.assertEqual(len(h), 3)
+        }
+        a7: list[int] = d.get(7)
+        a9: list[int] = d.get(9)
+        self.assertEqual(len(a7), 4)
+        self.assertEqual(len(a9), 3)
+    }
+
+    def test_result_outlives_dropped_dict() {
+        # The result OWNS its ref, so it survives the source dict being dropped.
+        # A missing incref would free the list out from under `keep` (UAF).
+        d: dict[str, list[int]] = {"k": [8, 8, 8, 8, 8]}
+        keep: list[int] = d.setdefault("k", [0])     # present -> existing, owned
+        d = {}                                        # drop the dict + its ref
+        i: int = 0
+        while i < 200 {
+            junk: list[int] = [i, i, i]
+            i = i + 1
+        }
+        self.assertEqual(len(keep), 5)
+        self.assertEqual(keep[4], 8)
+    }
+
+    def test_loop_stress() {
+        # Hammer both branches: first iteration inserts, the rest hit the present
+        # path; values stay correct and the stored value is never freed early.
+        d: dict[str, list[int]] = {}
+        acc: int = 0
+        i: int = 0
+        while i < 1000 {
+            if True {
+                g: list[int] = d.setdefault("a", [1, 2, 3])
+                acc = acc + len(g)                    # +3 each iteration
+            }
+            i = i + 1
+        }
+        self.assertEqual(acc, 3000)
+        again: list[int] = d.get("a")
+        self.assertEqual(len(again), 3)
+    }
+
+    def test_set_valued_generality() {
+        # Not list-specific: a set-valued dict routes through the owned setdefault.
+        d: dict[str, set[int]] = {}
+        if True {
+            g: set[int] = d.setdefault("s", {1, 2, 3})
+            self.assertEqual(len(g), 3)
+        }
+        again: set[int] = d.get("s")
+        self.assertEqual(len(again), 3)
+    }
+
+    def test_borrowed_key_on_insert_survives() {
+        # The key-on-insert dangle: keys are block-locals (the dict only BORROWS
+        # them at the call site). The fix increfs a borrowed heap key so the dict
+        # owns a real ref; without it each stored key dangles once its source
+        # scope ends -> use-after-free when the keys are read back (ASan-caught).
+        d: dict[str, list[int]] = {}
+        i: int = 0
+        while i < 50 {
+            kk: str = "key" + str(i)        # block-local; freed each iteration
+            d.setdefault(kk, [i, i])
+            i = i + 1
+        }
+        self.assertEqual(len(d), 50)
+        # Read every stored key back (reads the key bytes - freed if dangling).
+        total: int = 0
+        for k in d.keys() {
+            total = total + len(k)          # key0..key9: 10*4; key10..key49: 40*5
+        }
+        self.assertEqual(total, 240)
+        # Look up by an equal-but-distinct-identity string (probes stored keys).
+        probe: str = "key7"
+        got: list[int] = d.get(probe)
+        self.assertEqual(len(got), 2)
+    }
+
+    def test_borrowed_key_present_branch_balanced() {
+        # Present branch with a borrowed key: the call site increfs the incoming
+        # key, so the runtime MUST release it on the present path or each call
+        # leaks one key (LSan-caught). Hammer an existing key built fresh (owned
+        # temp -> local -> borrowed) many times; values stay correct, no leak.
+        d: dict[str, list[int]] = {"seed": [1]}
+        acc: int = 0
+        i: int = 0
+        while i < 500 {
+            kk: str = "se" + "ed"           # builds "seed" (already present)
+            g: list[int] = d.setdefault(kk, [9, 9])
+            acc = acc + len(g)              # present -> [1], len 1
+            i = i + 1
+        }
+        self.assertEqual(acc, 500)
+        self.assertEqual(len(d), 1)
+    }
+
+    # The key-on-insert dangle is independent of the VALUE type: a SCALAR-valued
+    # dict (no value UAF) still dangled its borrowed key on insert through the
+    # generic dragon_dict_setdefault path (#20a). These pin the scalar path.
+
+    def test_scalar_borrowed_key_on_insert_survives() {
+        d: dict[str, int] = {}
+        i: int = 0
+        while i < 50 {
+            kk: str = "key" + str(i)        # block-local borrowed key
+            d.setdefault(kk, i)
+            i = i + 1
+        }
+        self.assertEqual(len(d), 50)
+        total: int = 0
+        for k in d.keys() {
+            total = total + len(k)          # key0..key9: 10*4; key10..key49: 40*5
+        }
+        self.assertEqual(total, 240)
+        got: int = d.get("key7")            # probe a stored key by equal value
+        self.assertEqual(got, 7)
+    }
+
+    def test_scalar_borrowed_key_present_balanced() {
+        # Present branch, scalar value, borrowed key: the shared runtime releases
+        # the incref'd key (else a key leak per call, LSan-caught).
+        d: dict[str, int] = {"seed": 1}
+        acc: int = 0
+        i: int = 0
+        while i < 500 {
+            kk: str = "se" + "ed"
+            v: int = d.setdefault(kk, 9)    # present -> 1
+            acc = acc + v
+            i = i + 1
+        }
+        self.assertEqual(acc, 500)
+        self.assertEqual(len(d), 1)
+    }
+}
+
+
+main([DictSetdefaultHeapRcTests()])

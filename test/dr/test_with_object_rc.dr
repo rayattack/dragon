@@ -1,0 +1,78 @@
+# test/dr/test_with_object_rc.dr - the `with` context-manager OBJECT is released
+# at with-exit (leaks.md #8).
+#
+# Each `with CM()` used to leak the manager instance: the constructor temp the
+# `with` owns AND the second ref `__enter__` returns (the `as` binding, which the
+# return convention increfs) were never decref'd, so one CM instance leaked per
+# use (a single use happened to read clean only because the last instance stayed
+# reachable at exit). The fix decrefs BOTH refs on every exit path - normal,
+# exception, and early return/break/continue. These tests pin that __enter__ /
+# __exit__ run the right number of times across many uses; leak-freedom (no
+# per-use CM leak) AND double-free-freedom are verified under the ASan/LSan build
+# (a loop amplifies any per-use leak; an over-decref shows as a heap-use-after-
+# free / double-free).
+
+from unittest import TestCase, main
+
+enters: list[int] = []
+exits: list[int] = []
+
+class CM {
+    def() {}
+    def __enter__() -> CM { enters.append(1); return self }
+    def __exit__() -> int { exits.append(1); return 0 }
+}
+
+def normal_use() -> None { with CM() as c { y: int = 1 } }
+def early_return() -> int { with CM() as c { return 1 } return 0 }
+def via_exception() -> int {
+    try { with CM() as c { raise ValueError("x") } } except ValueError { return 1 }
+    return 0
+}
+def nested() -> None { with CM() as a { with CM() as b { y: int = 1 } } }
+def anonymous() -> None { with CM() { y: int = 1 } }
+
+
+class WithObjectRcTests(TestCase) {
+    def test_enter_exit_balanced_over_many_uses() {
+        enters.clear()
+        exits.clear()
+        i: int = 0
+        while i < 500 { normal_use(); i = i + 1 }
+        self.assertEqual(len(enters), 500)
+        self.assertEqual(len(exits), 500)   # every CM entered + exited (and freed - LSan)
+    }
+
+    def test_early_return_runs_exit() {
+        exits.clear()
+        const r: int = early_return()
+        self.assertEqual(r, 1)
+        self.assertEqual(len(exits), 1)     # __exit__ ran + object freed on early return
+    }
+
+    def test_exception_runs_exit() {
+        exits.clear()
+        const r: int = via_exception()
+        self.assertEqual(r, 1)
+        self.assertEqual(len(exits), 1)     # __exit__ ran + object freed on the exception path
+    }
+
+    def test_nested_both_exit() {
+        enters.clear()
+        exits.clear()
+        nested()
+        self.assertEqual(len(enters), 2)
+        self.assertEqual(len(exits), 2)
+    }
+
+    def test_anonymous_no_asvar() {
+        enters.clear()
+        exits.clear()
+        anonymous()
+        self.assertEqual(len(enters), 1)
+        self.assertEqual(len(exits), 1)     # discarded __enter__ result also freed
+    }
+}
+
+
+main([WithObjectRcTests()])

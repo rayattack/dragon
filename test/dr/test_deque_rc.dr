@@ -1,0 +1,102 @@
+"""deque refcount / teardown - leaks.md #9 (+ #17 deque source-list).
+
+Before the fix:
+  - dragon_dealloc had NO DRAGON_TAG_DEQUE case, so EVERY deque local (even a
+    plain deque[int]) leaked its struct + circular buffer when decref'd at scope
+    exit.
+  - dragon_deque_destroy's TAG_STR/BYTES/LIST/DICT whitelist excluded
+    TAG_CLOSURE, so a deque[Callable] leaked every closure + its captured env.
+  - the deque(iterable) ctor never drained an owned list-literal source temp,
+    so `deque([1,2,3])` leaked one list + buffer per call.
+
+These are leak/teardown fixes (LSan/ASan), but the cases below also assert that
+the values survive use and that `deque(borrowed_var)` does NOT double-free its
+source (the source list stays usable afterwards).
+"""
+
+from unittest import TestCase, main
+from collections import deque
+
+calls: list[str] = []
+
+
+def bump(x: int) -> int {
+    calls.append("c")
+    return x + 1
+}
+
+
+class DequeRcTests(TestCase) {
+    def test_int_deque_local_churn() {
+        # Exercises the missing dealloc case: many short-lived deque[int]
+        # locals. Correctness must hold while the teardown is balanced.
+        i: int = 0
+        total: int = 0
+        while i < 200 {
+            d: deque[int] = deque([1, 2, 3])
+            d.append(i)
+            total = total + d.pop()
+            i = i + 1
+        }
+        # Last appended value popped back each iteration: sum 0..199.
+        self.assertEqual(total, 19900)
+    }
+
+    def test_str_deque_heap_elements() {
+        d: deque[str] = deque()
+        i: int = 0
+        while i < 50 {
+            d.append("item-" + str(i))
+            i = i + 1
+        }
+        self.assertEqual(len(d), 50)
+        self.assertEqual(d.popleft(), "item-0")
+        self.assertEqual(d.pop(), "item-49")
+        self.assertEqual(len(d), 48)
+    }
+
+    def test_callable_deque_closures() {
+        # deque[Callable] holding capturing closures - each closure + env must be
+        # released on teardown (the whitelist used to skip TAG_CLOSURE).
+        d: deque[Callable[[int], int]] = deque()
+        base: int = 10
+        d.append(lambda (x: int) -> int { return x + base })
+        d.append(lambda (x: int) -> int { return x * base })
+        f: Callable[[int], int] = d.popleft()
+        self.assertEqual(f(5), 15)
+        g: Callable[[int], int] = d.pop()
+        self.assertEqual(g(5), 50)
+    }
+
+    def test_deque_from_borrowed_list_no_double_free() {
+        # deque(xs) borrows xs (copies + increfs elements); xs must NOT be freed
+        # by the ctor and must stay usable afterwards.
+        xs: list[int] = [7, 8, 9]
+        d: deque[int] = deque(xs)
+        self.assertEqual(len(d), 3)
+        # Source list still alive and correct after constructing the deque.
+        self.assertEqual(xs[0], 7)
+        self.assertEqual(xs[2], 9)
+        self.assertEqual(len(xs), 3)
+        # And the deque has an independent copy.
+        self.assertEqual(d.popleft(), 7)
+        self.assertEqual(xs[0], 7)
+    }
+
+    def test_bounded_deque_eviction_balanced() {
+        # A bounded deque drops the far end on overflow - the evicted element's
+        # ref must be released (decref-on-evict), and teardown frees the rest.
+        b: deque[str] = deque(maxlen=3)
+        i: int = 0
+        while i < 100 {
+            b.append("v" + str(i))
+            i = i + 1
+        }
+        self.assertEqual(len(b), 3)
+        self.assertEqual(b.popleft(), "v97")
+        self.assertEqual(b.pop(), "v99")
+    }
+}
+
+
+main([DequeRcTests()])

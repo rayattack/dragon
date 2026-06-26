@@ -1,0 +1,59 @@
+"""colorsys - RGB <-> HSV/YIQ round-trips and known anchor colours."""
+
+from unittest import TestCase, main
+import colorsys
+from colorsys import rgb_to_hsv, hsv_to_rgb, rgb_to_yiq, yiq_to_rgb
+
+
+class ColorsysTests(TestCase) {
+    def test_rgb_to_hsv_red() {
+        h: float = 0.0
+        s: float = 0.0
+        v: float = 0.0
+        h, s, v = rgb_to_hsv(1.0, 0.0, 0.0)
+        self.assertAlmostEqual(h, 0.0)
+        self.assertAlmostEqual(s, 1.0)
+        self.assertAlmostEqual(v, 1.0)
+    }
+
+    def test_rgb_to_hsv_green() {
+        h: float = 0.0
+        s: float = 0.0
+        v: float = 0.0
+        h, s, v = rgb_to_hsv(0.0, 1.0, 0.0)
+        self.assertAlmostEqual(h, 1.0 / 3.0)
+        self.assertAlmostEqual(s, 1.0)
+        self.assertAlmostEqual(v, 1.0)
+    }
+
+    def test_hsv_roundtrip() {
+        r: float = 0.0
+        g: float = 0.0
+        b: float = 0.0
+        h: float = 0.0
+        s: float = 0.0
+        v: float = 0.0
+        h, s, v = rgb_to_hsv(0.2, 0.4, 0.6)
+        r, g, b = hsv_to_rgb(h, s, v)
+        self.assertAlmostEqual(r, 0.2)
+        self.assertAlmostEqual(g, 0.4)
+        self.assertAlmostEqual(b, 0.6)
+    }
+
+    def test_yiq_roundtrip() {
+        r: float = 0.0
+        g: float = 0.0
+        b: float = 0.0
+        y: float = 0.0
+        i: float = 0.0
+        q: float = 0.0
+        y, i, q = rgb_to_yiq(0.3, 0.5, 0.7)
+        r, g, b = yiq_to_rgb(y, i, q)
+        self.assertAlmostEqual(r, 0.3)
+        self.assertAlmostEqual(g, 0.5)
+        self.assertAlmostEqual(b, 0.7)
+    }
+}
+
+
+main([ColorsysTests()])

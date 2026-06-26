@@ -1,0 +1,5 @@
+# Resolver-test fixture egg - FLAT layout (.drx/eggflat/eggflat.dr), no hint.
+# Exercises the `.drx/` tier's default <pkg>/<pkg>.dr convention fallback.
+def flat_val() -> int {
+    return 7
+}

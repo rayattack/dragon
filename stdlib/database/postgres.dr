@@ -1,0 +1,599 @@
+"""Postgres backend for the Dragon database stdlib (Decision 032, Phase 2).
+
+`PgConnection` speaks the Postgres v3 frontend/backend wire protocol directly
+over a `socket.TcpStream` - no libpq, no C dependency. It is constructed by
+`database.open()` for `postgres://` / `postgresql://` DSNs.
+
+What it implements:
+  - StartupMessage + SASL `SCRAM-SHA-256` mutual authentication (PBKDF2 + HMAC +
+    SHA-256, all from the Dragon crypto stdlib; server signature verified).
+  - The extended query protocol (Parse / Bind / Describe / Execute / Sync) with
+    `template[SQL]` parameters bound as TEXT-format values - the canonical `$$N`
+    placeholders are rewritten to Postgres's `$N+1`, and the payload never
+    touches the SQL text, so injection-safety is structural.
+  - oid -> Dragon type mapping for result columns (int / float / bool / str /
+    NULL) into `dict[str, Any]` rows.
+
+Postgres returns result columns in TEXT format here, so no binary float decode
+is needed (that requirement is unique to the MySQL binary protocol).
+
+The socket I/O rides the scheduler-yielding `recv_bytes`/`send_bytes` path, so a
+PgConnection used from a `fire` green thread cooperates with the runtime
+scheduler for free (ADR 038 Phase 8).
+"""
+
+from database.base import Connection, SQL, Results, QueryError, ConnectionError
+from socket import TcpStream
+from ssl import SSLContext, SSLSocket, PROTOCOL_TLS_CLIENT, CERT_NONE
+from hmac import digest as hmac_digest
+from hashlib import pbkdf2_hmac, sha256
+from base64 import b64encode, b64decode
+from urllib.parse import urlsplit, SplitResult
+import secrets
+
+# Raw TLS I/O for the optional encrypted transport (see _maybe_tls). buf is a
+# `void*` at the C ABI, so a `ptr` from dragon_bytes_data and a `str` are
+# interchangeable - these reuse the same symbols ssl.dr declares.
+extern "C" def malloc(size: int) -> ptr
+extern "C" def free(p: ptr)
+extern "C" def dragon_tls_write(conn: ptr, buf: ptr, length: int) -> int
+extern "C" def dragon_tls_read(conn: ptr, buf: ptr, length: int) -> int
+extern "C" def dragon_tls_close(conn: ptr) -> int
+extern "C" def dragon_tls_conn_free(conn: ptr)
+extern "C" def dragon_bytes_data(b: bytes) -> ptr
+extern "C" def dragon_bytes_new(data: ptr, length: int) -> bytes
+
+#===----------------------------------------------------------------------===#
+# Wire primitives. Postgres frames are big-endian; lengths are Int32 and count
+# their own 4 bytes. These are pure integer arithmetic (no float bytes), so
+# they need nothing from `struct`.
+#===----------------------------------------------------------------------===#
+
+const NUL: bytes = bytes([0])
+
+# Frontend message type bytes.
+const FE_PASSWORD: int = 112   # 'p' - SASLInitialResponse / SASLResponse
+const FE_QUERY: int = 81       # 'Q' - simple Query
+const FE_PARSE: int = 80       # 'P'
+const FE_BIND: int = 66        # 'B'
+const FE_DESCRIBE: int = 68    # 'D'
+const FE_EXECUTE: int = 69     # 'E'
+const FE_SYNC: int = 83        # 'S'
+
+# Backend message type bytes.
+const BE_AUTH: int = 82            # 'R'
+const BE_ERROR: int = 69           # 'E'
+const BE_ROW_DESCRIPTION: int = 84 # 'T'
+const BE_DATA_ROW: int = 68        # 'D'
+const BE_COMMAND_COMPLETE: int = 67 # 'C'
+const BE_READY_FOR_QUERY: int = 90 # 'Z'
+
+# Type oids we map to native Dragon values; everything else stays str.
+const OID_BOOL: int = 16
+const OID_INT8: int = 20
+const OID_INT2: int = 21
+const OID_INT4: int = 23
+const OID_FLOAT4: int = 700
+const OID_FLOAT8: int = 701
+const OID_NUMERIC: int = 1700
+
+
+def _be16(v: int) -> bytes {
+    return bytes([(v >> 8) & 0xFF, v & 0xFF])
+}
+def _be32(v: int) -> bytes {
+    return bytes([(v >> 24) & 0xFF, (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF])
+}
+def _rd_u16(b: bytes, o: int) -> int {
+    return (b[o] << 8) | b[o + 1]
+}
+def _rd_u32(b: bytes, o: int) -> int {
+    return (b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]
+}
+def _xor_bytes(a: bytes, b: bytes) -> bytes {
+    out: list[int] = []
+    i: int = 0
+    while i < len(a) {
+        out.append(a[i] ^ b[i])
+        i = i + 1
+    }
+    return bytes(out)
+}
+
+# A typed frontend message: type byte + Int32 length (self-inclusive) + payload.
+def _msg(mtype: int, payload: bytes) -> bytes {
+    return bytes([mtype]) + _be32(4 + len(payload)) + payload
+}
+
+
+# A received backend message: a one-byte type and its already-read payload
+# (the framing length is consumed by _read_msg).
+class PgMsg {
+    def(mtype: int, payload: bytes) {
+        self.mtype = mtype
+        self.payload = payload
+    }
+}
+
+# Look up `key` in a `&`-joined `k=v` query string; return `fallback` if absent.
+def _query_value(query: str, key: str, fallback: str) -> str {
+    pairs: list[str] = query.split("&")
+    i: int = 0
+    while i < len(pairs) {
+        kv: str = pairs[i]
+        eq: int = kv.find("=")
+        if eq >= 0 and kv[0:eq] == key {
+            return kv[eq + 1:]
+        }
+        i = i + 1
+    }
+    return fallback
+}
+
+
+class PgConnection(Connection) {
+    def(dsn: str) {
+        # Parse postgres://user:password@host:port/dbname?params
+        parts: SplitResult = urlsplit(dsn)
+        netloc: str = parts.netloc
+        user: str = "postgres"
+        password: str = ""
+        host: str = "127.0.0.1"
+        port: int = 5432
+
+        at: int = netloc.rfind("@")
+        hostport: str = netloc
+        if at >= 0 {
+            userinfo: str = netloc[0:at]
+            hostport = netloc[at + 1:]
+            colon: int = userinfo.find(":")
+            if colon >= 0 {
+                user = userinfo[0:colon]
+                password = userinfo[colon + 1:]
+            } else {
+                user = userinfo
+            }
+        }
+        hc: int = hostport.find(":")
+        if hc >= 0 {
+            host = hostport[0:hc]
+            port = int(hostport[hc + 1:])
+        } else if hostport != "" {
+            host = hostport
+        }
+        dbname: str = parts.path
+        if dbname.startswith("/") {
+            dbname = dbname[1:]
+        }
+        if dbname == "" {
+            dbname = user
+        }
+        # sslmode: disable | prefer (default) | require. `prefer`/`require`
+        # send an SSLRequest before the startup; `require` fails if refused.
+        sslmode: str = _query_value(parts.query, "sslmode", "prefer")
+
+        self.user = user
+        self.dbname = dbname
+        self._affected = 0
+        self._stmt_cache: dict[str, str] = {}   # canonical SQL -> prepared stmt name
+        self._stmt_seq = 0                       # source of unique statement names
+        self._rbuf = bytes()                     # socket read buffer
+        self._rpos = 0                           # consumed offset into _rbuf
+        self.tls_conn = none           # set when the transport is TLS-wrapped
+        self.sock = TcpStream.open(host, port)
+        if sslmode != "disable" {
+            self._maybe_tls(host, sslmode)
+        }
+        self._authenticate(user, password, dbname)
+    }
+
+    # Negotiate TLS via the Postgres SSLRequest (Int32 length 8 + the magic
+    # 80877103). On 'S' the socket is wrapped (encrypt-only; sslmode=require
+    # does not verify the cert - verify-full is a later refinement). On 'N' a
+    # `require` connection fails; `prefer` continues in plaintext on the same
+    # socket (the SSLRequest consumed nothing else).
+    def _maybe_tls(host: str, sslmode: str) {
+        self.sock.send_bytes(_be32(8) + _be32(80877103))
+        resp: bytes = self.sock.recv_bytes(1)
+        if len(resp) == 0 {
+            raise ConnectionError("postgres: no response to SSLRequest")
+        }
+        if resp[0] == 83 {             # 'S'
+            ctx: SSLContext = SSLContext(PROTOCOL_TLS_CLIENT)
+            ctx.set_verify_mode(CERT_NONE)
+            sslsock: SSLSocket = ctx.wrap_socket(self.sock, False, host, True)
+            self.tls_conn = sslsock.conn()
+        } else {
+            if sslmode == "require" {
+                raise ConnectionError("postgres: server refused SSL but sslmode=require")
+            }
+        }
+    }
+
+    #--- Low-level framing (transparently plaintext or TLS) -----------------#
+
+    def _send(data: bytes) -> int {
+        if self.tls_conn != none {
+            return dragon_tls_write(self.tls_conn, dragon_bytes_data(data), len(data))
+        }
+        return self.sock.send_bytes(data)
+    }
+
+    # Read up to `want` bytes from whichever transport is active.
+    def _recv_chunk(want: int) -> bytes {
+        if self.tls_conn != none {
+            b: ptr = malloc(want)
+            got: int = dragon_tls_read(self.tls_conn, b, want)
+            if got <= 0 {
+                free(b)
+                return bytes()
+            }
+            out: bytes = dragon_bytes_new(b, got)
+            free(b)
+            return out
+        }
+        return self.sock.recv_bytes(want)
+    }
+
+    def _recv_exact(n: int) -> bytes {
+        # Serve `n` bytes from the read buffer, refilling in large chunks. A
+        # message's 5-byte header and body then come from one recv, and the
+        # several backend messages answering one pipelined statement batch into
+        # a single recv - one syscall per refill instead of two per message.
+        while (len(self._rbuf) - self._rpos) < n {
+            if self._rpos == len(self._rbuf) {
+                self._rbuf = bytes()           # fully drained: reset, no copy
+                self._rpos = 0
+            } else if self._rpos > 0 {
+                self._rbuf = self._rbuf[self._rpos:]   # drop consumed prefix
+                self._rpos = 0
+            }
+            chunk: bytes = self._recv_chunk(65536)
+            if len(chunk) == 0 {
+                raise ConnectionError("postgres: server closed the connection")
+            }
+            self._rbuf = self._rbuf + chunk
+        }
+        out: bytes = self._rbuf[self._rpos:self._rpos + n]
+        self._rpos = self._rpos + n
+        return out
+    }
+
+    def _read_msg() -> PgMsg {
+        hdr: bytes = self._recv_exact(5)
+        mlen: int = _rd_u32(hdr, 1)
+        payload: bytes = self._recv_exact(mlen - 4)
+        return PgMsg(hdr[0], payload)
+    }
+
+    # Extract the human-readable 'M' field from an ErrorResponse payload (a
+    # sequence of <code byte><cstring> fields, terminated by a 0 byte).
+    def _error_text(payload: bytes) -> str {
+        o: int = 0
+        msg: str = "postgres error"
+        while o < len(payload) and payload[o] != 0 {
+            code: int = payload[o]
+            o = o + 1
+            start: int = o
+            while o < len(payload) and payload[o] != 0 {
+                o = o + 1
+            }
+            val: str = payload[start:o].decode("utf-8")
+            o = o + 1
+            if code == 77 {            # 'M' - primary human-readable message
+                msg = val
+            }
+        }
+        return msg
+    }
+
+    #--- SCRAM-SHA-256 authentication --------------------------------------#
+
+    def _authenticate(user: str, password: str, dbname: str) {
+        # StartupMessage: protocol 196608 (3.0) + key/value params + final NUL.
+        params: bytes = "user".encode("utf-8") + NUL + user.encode("utf-8") + NUL + "database".encode("utf-8") + NUL + dbname.encode("utf-8") + NUL + NUL
+        body: bytes = _be32(196608) + params
+        self._send(_be32(4 + len(body)) + body)
+
+        # Expect AuthenticationSASL (R, code 10) advertising SCRAM-SHA-256.
+        self._read_msg()
+
+        # client-first
+        nonce: str = secrets.token_hex(18)
+        client_first_bare: str = "n=,r=" + nonce
+        client_first: str = "n,," + client_first_bare
+        cf: bytes = client_first.encode("utf-8")
+        sasl_init: bytes = "SCRAM-SHA-256".encode("utf-8") + NUL + _be32(len(cf)) + cf
+        self._send(_msg(FE_PASSWORD, sasl_init))
+
+        # server-first: AuthenticationSASLContinue (R, code 11).
+        m2: PgMsg = self._read_msg()
+        sfirst: str = m2.payload[4:].decode("utf-8")     # skip the 4-byte auth code
+        sparts: list[str] = sfirst.split(",")
+        srv_nonce: str = sparts[0][2:]
+        salt: bytes = b64decode(sparts[1][2:].encode("utf-8"))
+        iters: int = int(sparts[2][2:])
+
+        # Proof. SaltedPassword = PBKDF2(password, salt, iters); the rest is the
+        # standard SCRAM client-proof construction (RFC 5802).
+        salted: bytes = pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iters)
+        client_key: bytes = hmac_digest(salted, "Client Key".encode("utf-8"), "sha256")
+        stored_key: bytes = sha256(client_key).digest()
+        client_final_bare: str = "c=biws,r=" + srv_nonce
+        auth_msg: str = client_first_bare + "," + sfirst + "," + client_final_bare
+        client_sig: bytes = hmac_digest(stored_key, auth_msg.encode("utf-8"), "sha256")
+        proof: bytes = _xor_bytes(client_key, client_sig)
+        client_final: bytes = client_final_bare.encode("utf-8") + ",p=".encode("utf-8") + b64encode(proof)
+        self._send(_msg(FE_PASSWORD, client_final))
+
+        # server-final: AuthenticationSASLFinal (R, code 12) carries v=ServerSignature.
+        m3: PgMsg = self._read_msg()
+        if m3.mtype == BE_ERROR {
+            raise ConnectionError(self._error_text(m3.payload))
+        }
+        server_v: str = m3.payload[4:].decode("utf-8")
+        server_key: bytes = hmac_digest(salted, "Server Key".encode("utf-8"), "sha256")
+        server_sig: bytes = hmac_digest(server_key, auth_msg.encode("utf-8"), "sha256")
+        expect_v: str = "v=" + b64encode(server_sig).decode("utf-8")
+        if server_v != expect_v {
+            raise ConnectionError("postgres: server signature verification failed")
+        }
+
+        # Drain AuthenticationOk + ParameterStatus/BackendKeyData until the
+        # first ReadyForQuery; surface any ErrorResponse along the way.
+        ready: bool = False
+        while not ready {
+            m: PgMsg = self._read_msg()
+            if m.mtype == BE_READY_FOR_QUERY {
+                ready = True
+            } else if m.mtype == BE_ERROR {
+                raise ConnectionError(self._error_text(m.payload))
+            }
+        }
+    }
+
+    #--- Query execution ----------------------------------------------------#
+
+    # Rewrite the dialect-free canonical `$$N` placeholders to Postgres's
+    # `$N+1`. Descending N avoids the `$$1`-is-a-prefix-of-`$$10` hazard.
+    def _to_pg(canonical: str, nparams: int) -> str {
+        sql: str = canonical
+        k: int = nparams - 1
+        while k >= 0 {
+            sql = sql.replace("$$" + str(k), "$" + str(k + 1))
+            k = k - 1
+        }
+        return sql
+    }
+
+    # TEXT-format encoding of one bound parameter. None is handled by the
+    # caller (it sends an Int32 length of -1 with no bytes).
+    def _param_text(p: Any) -> str {
+        if isinstance(p, bool) {
+            b: bool = p
+            if b {
+                return "t"
+            }
+            return "f"
+        } else if isinstance(p, int) {
+            iv: int = p
+            return str(iv)
+        } else if isinstance(p, float) {
+            fv: float = p
+            return str(fv)
+        } else if isinstance(p, str) {
+            sv: str = p
+            return sv
+        }
+        return ""
+    }
+
+    def _all_digits(s: str) -> bool {
+        if len(s) == 0 {
+            return False
+        }
+        i: int = 0
+        while i < len(s) {
+            if s[i] < "0" or s[i] > "9" {
+                return False
+            }
+            i = i + 1
+        }
+        return True
+    }
+
+    def _next_name() -> str {
+        n: int = self._stmt_seq
+        self._stmt_seq = n + 1
+        return "drs" + str(n)
+    }
+
+    # Build the whole extended-protocol pipeline for one statement into a single
+    # buffer and send it in ONE write (vs five separate sends), then read the
+    # response stream. `parse` controls whether a Parse precedes the Bind - for a
+    # cached named statement the Parse is sent only on first use. Collects result
+    # rows (typed by column oids) and records the CommandComplete affected-row
+    # count in self._affected.
+    def _pipeline(name: str, sql: str, params: list[Any], parse: bool) -> list[dict[str, Any]] {
+        np: int = len(params)
+        nb: bytes = name.encode("utf-8")
+        out: bytes = bytes()
+        if parse {
+            out = out + _msg(FE_PARSE, nb + NUL + sql.encode("utf-8") + NUL + _be16(0))
+        }
+        # Bind: unnamed portal, statement `name`, 0 param-format codes (=> all
+        # text), then the params, then 0 result-format codes (=> all text).
+        bind: bytes = NUL + nb + NUL + _be16(0) + _be16(np)
+        i: int = 0
+        while i < np {
+            p: Any = params[i]
+            if isinstance(p, bool) or isinstance(p, int) or isinstance(p, float) or isinstance(p, str) {
+                pv: bytes = self._param_text(p).encode("utf-8")
+                bind = bind + _be32(len(pv)) + pv
+            } else {
+                bind = bind + _be32(0xFFFFFFFF)    # NULL - Int32 length of -1
+            }
+            i = i + 1
+        }
+        bind = bind + _be16(0)
+        out = out + _msg(FE_BIND, bind)
+        out = out + _msg(FE_DESCRIBE, "P".encode("utf-8") + NUL)   # describe portal
+        out = out + _msg(FE_EXECUTE, NUL + _be32(0))               # unlimited rows
+        out = out + _msg(FE_SYNC, bytes())
+        self._send(out)                                            # one syscall
+
+        names: list[str] = []
+        oids: list[int] = []
+        rows: list[dict[str, Any]] = []
+        self._affected = 0
+        done: bool = False
+        while not done {
+            m: PgMsg = self._read_msg()
+            if m.mtype == BE_ROW_DESCRIPTION {
+                p: bytes = m.payload
+                nf: int = _rd_u16(p, 0)
+                o: int = 2
+                f: int = 0
+                while f < nf {
+                    start: int = o
+                    while p[o] != 0 {
+                        o = o + 1
+                    }
+                    names.append(p[start:o].decode("utf-8"))
+                    o = o + 1
+                    # field layout past the name NUL: tableoid(4) colno(2)
+                    # typeoid(4) typelen(2) typemod(4) format(2) - typeoid at +6.
+                    oids.append(_rd_u32(p, o + 6))
+                    o = o + 18
+                    f = f + 1
+                }
+            } else if m.mtype == BE_DATA_ROW {
+                p: bytes = m.payload
+                nc: int = _rd_u16(p, 0)
+                o: int = 2
+                row: dict[str, Any] = {}
+                c: int = 0
+                while c < nc {
+                    ln: int = _rd_u32(p, o)
+                    o = o + 4
+                    nm: str = names[c]
+                    if ln == 0xFFFFFFFF {
+                        row[nm] = none
+                    } else {
+                        raw: str = p[o:o + ln].decode("utf-8")
+                        o = o + ln
+                        oid: int = oids[c]
+                        if oid == OID_BOOL {
+                            row[nm] = raw == "t"
+                        } else if oid == OID_INT8 or oid == OID_INT2 or oid == OID_INT4 {
+                            row[nm] = int(raw)
+                        } else if oid == OID_FLOAT4 or oid == OID_FLOAT8 or oid == OID_NUMERIC {
+                            row[nm] = float(raw)
+                        } else {
+                            row[nm] = raw
+                        }
+                    }
+                    c = c + 1
+                }
+                rows.append(row)
+            } else if m.mtype == BE_COMMAND_COMPLETE {
+                # Tag like "INSERT 0 5" / "UPDATE 3" / "DELETE 2" / "SELECT 7":
+                # the trailing token is the affected/returned row count.
+                tag: str = m.payload[0:len(m.payload) - 1].decode("utf-8")
+                tparts: list[str] = tag.split(" ")
+                last: str = tparts[len(tparts) - 1]
+                if self._all_digits(last) {
+                    self._affected = int(last)
+                }
+            } else if m.mtype == BE_READY_FOR_QUERY {
+                done = True
+            } else if m.mtype == BE_ERROR {
+                # Drain to ReadyForQuery so the connection stays usable.
+                etext: str = self._error_text(m.payload)
+                draining: bool = True
+                while draining {
+                    em: PgMsg = self._read_msg()
+                    if em.mtype == BE_READY_FOR_QUERY {
+                        draining = False
+                    }
+                }
+                raise QueryError(etext)
+            }
+        }
+        return rows
+    }
+
+    # query()/exec() path: Parse a statement once per canonical text and reuse it
+    # by name on every later call (the SQL.hash field anticipates this cache).
+    # DDL / transaction-control go through exec_raw on the unnamed statement,
+    # since utility statements can't be reused as named prepared statements.
+    def _run(canonical: str, params: list[Any]) -> list[dict[str, Any]] {
+        if canonical in self._stmt_cache {
+            return self._pipeline(self._stmt_cache[canonical], "", params, False)
+        }
+        name: str = self._next_name()
+        sql: str = self._to_pg(canonical, len(params))
+        rows: list[dict[str, Any]] = self._pipeline(name, sql, params, True)
+        self._stmt_cache[canonical] = name
+        return rows
+    }
+
+    # run - one extended-protocol round-trip via _run, which captures both the
+    # result rows and the CommandComplete affected-row count (self._affected).
+    # Postgres has no implicit last-insert-id; the portable idiom is
+    # `INSERT ... RETURNING id`, whose returned row _run captures - _returned_id
+    # surfaces it as `xid` (0 without a RETURNING clause). No extra round-trip.
+    def run(sql: SQL) -> Results {
+        rows: list[dict[str, Any]] = self._run(sql.canonical, sql.params)
+        return Results(rows, self._returned_id(rows), self._affected)
+    }
+
+    # Extract a last-insert-id from the rows produced by a RETURNING clause.
+    # Prefers a column literally named "id" (the conventional `RETURNING id`);
+    # otherwise falls back to the first column of the first row. Non-integer
+    # returned values (or no rows) yield 0.
+    def _returned_id(rows: list[dict[str, Any]]) -> int {
+        if len(rows) == 0 {
+            return 0
+        }
+        row: dict[str, Any] = rows[0]
+        if "id" in row {
+            v: Any = row["id"]
+            if isinstance(v, int) {
+                iv: int = v
+                return iv
+            }
+            return 0
+        }
+        for k in row {
+            fv: Any = row[k]
+            if isinstance(fv, int) {
+                fid: int = fv
+                return fid
+            }
+            return 0
+        }
+        return 0
+    }
+
+    # raw - the explicit escape hatch: verbatim text through the extended
+    # protocol with an empty parameter list (DDL / maintenance / transaction
+    # control). Unnamed statement, not cached: utility statements cannot be
+    # reused as named prepared statements.
+    def raw(text: str) -> Results {
+        self._pipeline("", text, [], True)
+        empty: list[dict[str, Any]] = []
+        return Results(empty, 0, self._affected)
+    }
+
+    def close() -> int {
+        # Terminate ('X' = 88), then tear down TLS (if any) + the socket.
+        self._send(_msg(88, bytes()))
+        if self.tls_conn != none {
+            dragon_tls_close(self.tls_conn)
+            dragon_tls_conn_free(self.tls_conn)
+        }
+        self.sock.close()
+        return 0
+    }
+}

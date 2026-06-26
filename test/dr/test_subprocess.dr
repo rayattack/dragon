@@ -1,0 +1,188 @@
+"""subprocess - behavioral tests (POSIX spawn + pipe capture).
+
+Exercises the public Tier-0 surface end to end against real system binaries
+(/bin/echo, /bin/sh, /bin/cat, /bin/true, /bin/false):
+- stdout capture round-trips verbatim (the `b"hello\\n"` KAT)
+- a non-zero exit surfaces as the right returncode, and check=True raises
+- communicate() feeds stdin and echoes it back through /bin/cat
+- check_output / call / Popen.wait / poll front ends behave like CPython.
+
+Tier-1 additions:
+- communicate() multiplexes stdin/stdout/stderr so a child that fills its
+  stderr pipe while we feed >128 KB of stdin and drain >128 KB of stdout
+  round-trips without deadlock (the serial-drain failure mode).
+- communicate(timeout=)/run(timeout=) raise TimeoutExpired and reap the child."""
+
+from unittest import TestCase, main
+from subprocess import run, check_output, call, Popen, CompletedProcess, CalledProcessError, TimeoutExpired
+
+
+class SubprocessTests(TestCase) {
+    def test_run_capture_stdout() {
+        # KAT: echo writes its arg plus a trailing newline to stdout.
+        const cp: CompletedProcess = run(["/bin/echo", "hello"], true)
+        self.assertEqual(cp.returncode, 0)
+        self.assertEqual(cp.stdout.decode(), "hello\n")
+        # And byte-exact (capture is binary-safe, not text-decoded).
+        const want: bytes = b"hello\n"
+        self.assertEqual(len(cp.stdout), len(want))
+        i: int = 0
+        while i < len(want) {
+            self.assertEqual(cp.stdout[i], want[i])
+            i = i + 1
+        }
+    }
+
+    def test_nonzero_exit_returncode() {
+        # /bin/sh is EXECUTED (this is argv, not shell-string parsing); the
+        # script exits 3, which must surface as returncode 3.
+        const cp: CompletedProcess = run(["/bin/sh", "-c", "exit 3"])
+        self.assertEqual(cp.returncode, 3)
+    }
+
+    def test_check_true_raises_on_nonzero() {
+        raised: bool = false
+        captured_code: int = -1
+        try {
+            const cp: CompletedProcess = run(["/bin/sh", "-c", "exit 3"], false, true)
+        } except CalledProcessError as e {
+            raised = true
+            captured_code = e.returncode
+        }
+        self.assertTrue(raised)
+        self.assertEqual(captured_code, 3)
+    }
+
+    def test_check_true_passes_on_zero() {
+        # check=True with a clean exit must NOT raise.
+        const cp: CompletedProcess = run(["/bin/true"], false, true)
+        self.assertEqual(cp.returncode, 0)
+    }
+
+    def test_communicate_feeds_stdin() {
+        # cat echoes stdin to stdout verbatim; communicate() must round-trip it.
+        const proc: Popen = Popen(["/bin/cat"], "", true, true, true)
+        const both: tuple[bytes, bytes] = proc.communicate(b"ping pong 123")
+        self.assertEqual(both[0].decode(), "ping pong 123")
+        self.assertEqual(proc.returncode, 0)
+    }
+
+    def test_communicate_binary_safe() {
+        # Feed bytes including NUL and 0xFF through cat; must survive verbatim.
+        const payload: bytes = bytes([0, 255, 65, 66, 0, 254, 128])
+        const proc: Popen = Popen(["/bin/cat"], "", true, false, true)
+        const both: tuple[bytes, bytes] = proc.communicate(payload)
+        const got: bytes = both[0]
+        self.assertEqual(len(got), len(payload))
+        i: int = 0
+        while i < len(payload) {
+            self.assertEqual(got[i], payload[i])
+            i = i + 1
+        }
+    }
+
+    def test_check_output() {
+        const out: bytes = check_output(["/bin/echo", "captured"])
+        self.assertEqual(out.decode(), "captured\n")
+    }
+
+    def test_check_output_raises_on_nonzero() {
+        raised: bool = false
+        try {
+            const out: bytes = check_output(["/bin/false"])
+        } except CalledProcessError {
+            raised = true
+        }
+        self.assertTrue(raised)
+    }
+
+    def test_call_returns_code() {
+        self.assertEqual(call(["/bin/true"]), 0)
+        self.assertEqual(call(["/bin/false"]), 1)
+    }
+
+    def test_wait_is_idempotent() {
+        const proc: Popen = Popen(["/bin/echo", "x"], "", true, true, false)
+        const both: tuple[bytes, bytes] = proc.communicate(b"")
+        # wait() after communicate() already reaped - must return the same code.
+        self.assertEqual(proc.wait(), 0)
+        self.assertEqual(proc.wait(), 0)
+        self.assertEqual(both[0].decode(), "x\n")
+    }
+
+    def test_cwd_changes_directory() {
+        # `pwd` run with cwd="/" must report "/".
+        const cp: CompletedProcess = run(["/bin/sh", "-c", "pwd"], true, false, b"", "/")
+        self.assertEqual(cp.stdout.decode(), "/\n")
+    }
+
+    def test_concurrent_drain_no_deadlock() {
+        # The Tier-0 serial drain (write stdin -> close -> read stdout fully ->
+        # read stderr fully) DEADLOCKS here: the child blasts 200 KB to stderr
+        # FIRST (filling the 64 KB stderr pipe and blocking) before it ever
+        # copies stdin to stdout, so a parent that reads stdout first wedges
+        # while the child wedges on stderr. The concurrent pump drains both
+        # plus feeds >128 KB of stdin, so nobody stalls.
+        #
+        # KAT: stdin = 200000 * 0x41 ('A'); cat echoes it verbatim to stdout
+        # (=> stdout == stdin), and `dd if=/dev/zero` writes 200000 * 0x00 to
+        # stderr.
+        const N: int = 200000
+        const payload: bytes = bytes([65] * N)
+        const proc: Popen = Popen(["/bin/sh", "-c", "dd if=/dev/zero bs=1000 count=200 status=none >&2; cat"], "", true, true, true)
+        const both: tuple[bytes, bytes] = proc.communicate(payload)
+        const out: bytes = both[0]
+        const err: bytes = both[1]
+        self.assertEqual(proc.returncode, 0)
+        # stdout is the verbatim stdin echo.
+        self.assertEqual(len(out), N)
+        self.assertEqual(out[0], 65)
+        self.assertEqual(out[N - 1], 65)
+        # stderr is 200 KB of NUL from /dev/zero.
+        self.assertEqual(len(err), N)
+        self.assertEqual(err[0], 0)
+        self.assertEqual(err[N - 1], 0)
+    }
+
+    def test_communicate_timeout_raises_and_reaps() {
+        # `sleep 5` keeps its stdout/stderr pipes open well past a 200 ms
+        # budget, so the pump times out. communicate() must kill+reap the child
+        # and raise TimeoutExpired carrying the (empty) partial output.
+        const proc: Popen = Popen(["/bin/sh", "-c", "sleep 5"], "", true, true, false)
+        raised: bool = false
+        captured_timeout: int = -1
+        try {
+            const both: tuple[bytes, bytes] = proc.communicate(b"", 200)
+        } except TimeoutExpired as e {
+            raised = true
+            captured_timeout = e.timeout
+        }
+        self.assertTrue(raised)
+        self.assertEqual(captured_timeout, 200)
+        # The child was reaped inside communicate(): poll() returns the already
+        # known returncode (negative == killed by signal), never -1 "running".
+        self.assertTrue(proc.poll() != -1)
+    }
+
+    def test_run_timeout_raises() {
+        # run(timeout=) parity: a slow child raises TimeoutExpired.
+        raised: bool = false
+        try {
+            const cp: CompletedProcess = run(["/bin/sh", "-c", "sleep 5"], true, false, b"", "", 200)
+        } except TimeoutExpired {
+            raised = true
+        }
+        self.assertTrue(raised)
+    }
+
+    def test_run_timeout_fast_child_ok() {
+        # A child that finishes inside the budget must NOT raise; output is
+        # captured normally.
+        const cp: CompletedProcess = run(["/bin/echo", "quick"], true, false, b"", "", 5000)
+        self.assertEqual(cp.returncode, 0)
+        self.assertEqual(cp.stdout.decode(), "quick\n")
+    }
+}
+
+
+main([SubprocessTests()])

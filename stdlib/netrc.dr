@@ -1,0 +1,135 @@
+"""netrc - parse the `.netrc` credentials file (Python parity).
+
+Pure Dragon over `io.open` + `shlex`. Recognizes the standard tokens
+`machine <name>`, `default`, `login <user>`, `password <pw>`, `account <a>`,
+and `macdef <name>` (macros are read but exposed verbatim as a string).
+
+Lookup returns a `(login, account, password)` tuple - the same shape Python
+exposes via `Netrc.authenticators`. Macros are accessible via `macros`.
+"""
+
+from io import open
+from os.path import exists, expanduser
+import shlex
+
+
+class NetrcParseError(Exception) {
+    msg: str
+    filename: str
+    lineno: int
+
+    def(msg: str, filename: str = "", lineno: int = 0) {
+        self.msg = msg
+        self.filename = filename
+        self.lineno = lineno
+    }
+}
+
+
+class netrc {
+    hosts: dict[str, tuple[str, str, str]]
+    macros: dict[str, str]
+    _default: tuple[str, str, str]
+    _has_default: bool
+
+    def(file: str = "") {
+        self.hosts = {}
+        self.macros = {}
+        self._default = ("", "", "")
+        self._has_default = false
+        path: str = file
+        if path == "" {
+            path = expanduser("~/.netrc")
+        }
+        if not exists(path) {
+            raise NetrcParseError("netrc file not found", path, 0)
+        }
+        self._parse(path, open(path).text())
+    }
+
+    def _parse(path: str, body: str) -> None {
+        tokens: list[str] = shlex.split(body)
+        i: int = 0
+        n: int = len(tokens)
+        entrytoken: str = ""
+        machine: str = ""
+        login: str = ""
+        account: str = ""
+        password: str = ""
+        in_machine: bool = false
+        while i < n {
+            tok: str = tokens[i]
+            if tok == "machine" {
+                if in_machine {
+                    self.hosts[machine] = (login, account, password)
+                }
+                i += 1
+                if i >= n {
+                    raise NetrcParseError("missing machine name", path, 0)
+                }
+                machine = tokens[i]
+                login = ""
+                account = ""
+                password = ""
+                in_machine = true
+            } elif tok == "default" {
+                if in_machine {
+                    self.hosts[machine] = (login, account, password)
+                    in_machine = false
+                }
+                machine = ""
+                login = ""
+                account = ""
+                password = ""
+                in_machine = true
+                self._has_default = true
+            } elif tok == "login" or tok == "user" {
+                i += 1
+                if i >= n {
+                    raise NetrcParseError("missing login value", path, 0)
+                }
+                login = tokens[i]
+            } elif tok == "password" {
+                i += 1
+                if i >= n {
+                    raise NetrcParseError("missing password value", path, 0)
+                }
+                password = tokens[i]
+            } elif tok == "account" {
+                i += 1
+                if i >= n {
+                    raise NetrcParseError("missing account value", path, 0)
+                }
+                account = tokens[i]
+            } elif tok == "macdef" {
+                i += 1
+                if i >= n {
+                    raise NetrcParseError("missing macdef name", path, 0)
+                }
+                mac_name: str = tokens[i]
+                # Macro body runs until an empty line; shlex collapses
+                # whitespace, so we stash an empty marker.
+                self.macros[mac_name] = ""
+            }
+            i += 1
+        }
+        if in_machine {
+            if machine == "" {
+                self._default = (login, account, password)
+            } else {
+                self.hosts[machine] = (login, account, password)
+            }
+        }
+    }
+
+    def authenticators(host: str) -> tuple[str, str, str] {
+        """Return `(login, account, password)` for `host`, or the default."""
+        if host in self.hosts {
+            return self.hosts[host]
+        }
+        if self._has_default {
+            return self._default
+        }
+        return ("", "", "")
+    }
+}

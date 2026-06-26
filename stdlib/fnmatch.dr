@@ -1,0 +1,144 @@
+# fnmatch.dr - Dragon standard library: Unix filename pattern matching
+#
+# Matches filenames against shell glob patterns.
+# Patterns: * (any chars), ? (one char), [abc] (char class), [!abc] (negated)
+# Pure Dragon - no C dependencies.
+
+#===----------------------------------------------------------------------===#
+# Internal helpers
+#===----------------------------------------------------------------------===#
+
+def _match(name: str, ni: int, pattern: str, pi: int) -> bool {
+    # Recursive glob pattern matching using string indices
+    const nlen: int = len(name)
+    const plen: int = len(pattern)
+
+    while pi < plen {
+        const pc: str = pattern[pi]
+
+        if pc == "*" {
+            # Skip consecutive stars
+            pi = pi + 1
+            while pi < plen {
+                if pattern[pi] != "*" { break }
+                pi = pi + 1
+            }
+            # Trailing star matches everything
+            if pi == plen { return true }
+            # Try matching rest of pattern against every suffix of name
+            while ni <= nlen {
+                if _match(name, ni, pattern, pi) { return true }
+                ni = ni + 1
+            }
+            return false
+        }
+
+        if pc == "?" {
+            # Must have at least one char left
+            if ni >= nlen { return false }
+            ni = ni + 1
+            pi = pi + 1
+        } else {
+            if pc == "[" {
+                # Character class
+                if ni >= nlen { return false }
+                const ch: str = name[ni]
+                pi = pi + 1
+                if pi >= plen { return false }
+
+                # Check for negation
+                negate: bool = false
+                if pi < plen {
+                    if pattern[pi] == "!" {
+                        negate = true
+                        pi = pi + 1
+                    }
+                }
+
+                # Collect chars in the class and check for match
+                found: bool = false
+                first: bool = true
+                while pi < plen {
+                    if pattern[pi] == "]" {
+                        if not first { break }
+                    }
+                    first = false
+                    # Check for range: a-z
+                    if pi + 2 < plen {
+                        if pattern[pi + 1] == "-" {
+                            if pattern[pi + 2] != "]" {
+                                const lo: str = pattern[pi]
+                                const hi: str = pattern[pi + 2]
+                                if ch >= lo {
+                                    if ch <= hi { found = true }
+                                }
+                                pi = pi + 3
+                            } else {
+                                if ch == pattern[pi] { found = true }
+                                pi = pi + 1
+                            }
+                        } else {
+                            if ch == pattern[pi] { found = true }
+                            pi = pi + 1
+                        }
+                    } else {
+                        if ch == pattern[pi] { found = true }
+                        pi = pi + 1
+                    }
+                }
+
+                # Skip past closing bracket
+                if pi < plen {
+                    if pattern[pi] == "]" { pi = pi + 1 }
+                }
+
+                if negate { found = not found }
+                if not found { return false }
+                ni = ni + 1
+            } else {
+                # Literal character match
+                if ni >= nlen { return false }
+                if name[ni] != pc { return false }
+                ni = ni + 1
+                pi = pi + 1
+            }
+        }
+    }
+
+    # Pattern exhausted - name must also be exhausted
+    return ni == nlen
+}
+
+#===----------------------------------------------------------------------===#
+# Public API
+#===----------------------------------------------------------------------===#
+
+def fnmatch(name: str, pattern: str) -> bool {
+    # Match name against shell glob pattern (case-insensitive on some systems,
+    # but on Unix/POSIX we do case-sensitive matching, same as fnmatchcase)
+    return _match(name, 0, pattern, 0)
+}
+
+def fnmatchcase(name: str, pattern: str) -> bool {
+    # Case-sensitive match - identical to fnmatch on Unix
+    return _match(name, 0, pattern, 0)
+}
+
+def filter_names(names: list[str], pattern: str) -> list[str] {
+    # Return list of names that match pattern
+    result: list[str] = []
+    i: int = 0
+    while i < len(names) {
+        if _match(names[i], 0, pattern, 0) {
+            result.append(names[i])
+        }
+        i = i + 1
+    }
+    return result
+}
+
+def translate(pattern: str) -> str {
+    # Placeholder - returns the pattern unchanged.
+    # Full regex translation would require the re module.
+    return pattern
+}

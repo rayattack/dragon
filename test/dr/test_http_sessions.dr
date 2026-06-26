@@ -1,0 +1,272 @@
+# test/dr/test_http_sessions.dr - Behavioral tests for http.sessions (W5 + W7).
+#
+# Covers the network-independent signing/crypto core:
+#  (a) sign_session -> verify_session round-trips and returns the payload;
+#  (b) a token with a flipped byte in the signature is REJECTED;
+#  (c) an expired token is rejected (real time-based path: sign with a 1s
+#  lifetime, sleep 2s via the runtime clock, then verify);
+#  (d) MemoryStore save -> load round-trips a Session (incl. via a base-typed
+#  SessionStore receiver, exercising D026 virtual dispatch);
+#  (e) csrf_verify accepts a freshly-minted csrf_token and rejects a tampered one.
+#
+# verify_session signals failure by RAISING ValueError (never a sentinel
+# string), so tamper/expiry cases assert via assertRaises.
+#
+# NOTE on test shape: the failure-path checks pass *bare named module-level
+# functions* to assertRaises rather than `lambda () -> None { ... }` closures.
+# A capturing lambda crashes when a longjmp exception unwinds back through its
+# frame to assertRaises' setjmp - a pre-existing compiler bug in the
+# closure-capture + exception-unwinding interaction, unrelated to this module
+# (it reproduces with `unittest` + builtin `int()` alone). A bare top-level
+# function reference carries no captured environment, so it sidesteps the bug
+# and still exercises the exact verify_session reject path. See the final report.
+
+from unittest import TestCase, main
+from time import sleep_secs
+from http.sessions import sign_session, verify_session, new_session_id
+from http.sessions import Session, SessionStore, MemoryStore
+from http.sessions import csrf_token, csrf_verify
+
+
+const _KEY: bytes = b"0123456789abcdef0123456789abcdef"
+const _OTHER_KEY: bytes = b"ffffffffffffffffffffffffffffffff"
+
+
+# Flip the first character of `s` to a different one so the result != s.
+def _flip_first(s: str) -> str {
+    if len(s) == 0 {
+        return "X"
+    }
+    if s[0] == "A" {
+        return "B" + s[1:len(s)]
+    }
+    return "A" + s[1:len(s)]
+}
+
+
+# --- Failure-path helpers (bare refs handed to assertRaises) ----------------
+# Each builds its corrupt/expired token and calls verify_session in its OWN
+# frame, so verify's raise is caught by assertRaises without a capturing
+# closure on the unwind path.
+
+def _verify_tampered_signature() -> None {
+    tok: str = sign_session("payload", _KEY)
+    parts: list[str] = tok.split(".")
+    verify_session(parts[0] + "." + parts[1] + "." + _flip_first(parts[2]), _KEY)
+}
+
+def _verify_tampered_payload() -> None {
+    tok: str = sign_session("payload", _KEY)
+    parts: list[str] = tok.split(".")
+    verify_session(_flip_first(parts[0]) + "." + parts[1] + "." + parts[2], _KEY)
+}
+
+def _verify_tampered_expiry() -> None {
+    # Editing the expiry segment to extend the lifetime must fail - the MAC
+    # covers the expiry too, so it cannot be forged without the key.
+    tok: str = sign_session("payload", _KEY, 60)
+    parts: list[str] = tok.split(".")
+    verify_session(parts[0] + "." + _flip_first(parts[1]) + "." + parts[2], _KEY)
+}
+
+def _verify_wrong_key() -> None {
+    tok: str = sign_session("payload", _KEY)
+    verify_session(tok, _OTHER_KEY)
+}
+
+def _verify_malformed() -> None {
+    verify_session("not-a-token", _KEY)
+}
+
+def _verify_expired() -> None {
+    # Real time-based expiry: 1-second lifetime, advance the clock past it via
+    # the runtime sleep, then verify must raise.
+    tok: str = sign_session("payload", _KEY, 1)
+    sleep_secs(2)
+    verify_session(tok, _KEY)
+}
+
+
+class SignVerifyTests(TestCase) {
+    def test_roundtrip_returns_payload() {
+        payload: str = "user=tersoo;role=admin"
+        tok: str = sign_session(payload, _KEY)
+        self.assertEqual(verify_session(tok, _KEY), payload)
+    }
+
+    def test_roundtrip_empty_payload() {
+        # An empty payload round-trips to "" - and the failure path RAISES
+        # (never returns ""), so a forgery can't masquerade as empty.
+        tok: str = sign_session("", _KEY)
+        self.assertEqual(verify_session(tok, _KEY), "")
+    }
+
+    def test_roundtrip_with_future_expiry() {
+        payload: str = "sid=abc123"
+        tok: str = sign_session(payload, _KEY, 3600)
+        self.assertEqual(verify_session(tok, _KEY), payload)
+    }
+
+    def test_token_has_three_segments() {
+        tok: str = sign_session("x", _KEY)
+        parts: list[str] = tok.split(".")
+        self.assertEqual(len(parts), 3)
+    }
+
+    def test_tampered_signature_rejected() {
+        self.assertRaises(ValueError, _verify_tampered_signature)
+    }
+
+    def test_tampered_payload_rejected() {
+        self.assertRaises(ValueError, _verify_tampered_payload)
+    }
+
+    def test_tampered_expiry_rejected() {
+        self.assertRaises(ValueError, _verify_tampered_expiry)
+    }
+
+    def test_wrong_key_rejected() {
+        self.assertRaises(ValueError, _verify_wrong_key)
+    }
+
+    def test_malformed_token_rejected() {
+        self.assertRaises(ValueError, _verify_malformed)
+    }
+
+    def test_expired_token_rejected() {
+        self.assertRaises(ValueError, _verify_expired)
+    }
+}
+
+
+class SessionIdTests(TestCase) {
+    def test_id_nonempty() {
+        sid: str = new_session_id()
+        self.assertGreater(len(sid), 0)
+    }
+    def test_id_urlsafe_no_padding() {
+        sid: str = new_session_id()
+        self.assertNotIn("=", sid)
+    }
+    def test_ids_differ() {
+        a: str = new_session_id()
+        b: str = new_session_id()
+        self.assertNotEqual(a, b)
+    }
+}
+
+
+class SessionObjectTests(TestCase) {
+    def test_set_get() {
+        s: Session = Session("sid1")
+        s.set("user", "tersoo")
+        self.assertEqual(s.get("user"), "tersoo")
+    }
+    def test_get_default() {
+        s: Session = Session("sid1")
+        self.assertEqual(s.get("missing", "fallback"), "fallback")
+    }
+    def test_fresh_session_clean() {
+        s: Session = Session("sid1")
+        self.assertFalse(s.dirty)
+    }
+    def test_set_marks_dirty() {
+        s: Session = Session("sid1")
+        s.set("k", "v")
+        self.assertTrue(s.dirty)
+    }
+    def test_has_and_delete() {
+        s: Session = Session("sid1")
+        s.set("k", "v")
+        self.assertTrue(s.has("k"))
+        s.delete("k")
+        self.assertFalse(s.has("k"))
+    }
+    def test_keys() {
+        s: Session = Session("sid1")
+        s.set("a", "1")
+        s.set("b", "2")
+        self.assertEqual(len(s.keys()), 2)
+    }
+}
+
+
+class MemoryStoreTests(TestCase) {
+    def test_save_load_roundtrip() {
+        ms: MemoryStore = MemoryStore()
+        sid: str = "sess-xyz"
+        s: Session = ms.load(sid)        # fresh empty session
+        s.set("count", "7")
+        ms.save(sid, s)
+
+        loaded: Session = ms.load(sid)
+        self.assertEqual(loaded.get("count"), "7")
+    }
+
+    def test_roundtrip_via_base_receiver() {
+        # D026: a SessionStore-typed receiver dispatches to MemoryStore.load.
+        ms: MemoryStore = MemoryStore()
+        sid: str = "sess-base"
+        s: Session = ms.load(sid)
+        s.set("role", "admin")
+        ms.save(sid, s)
+
+        store: SessionStore = ms
+        loaded: Session = store.load(sid)
+        self.assertEqual(loaded.get("role"), "admin")
+    }
+
+    def test_delete() {
+        ms: MemoryStore = MemoryStore()
+        sid: str = "sess-del"
+        s: Session = Session(sid)
+        s.set("k", "v")
+        ms.save(sid, s)
+        self.assertTrue(ms.exists(sid))
+        ms.delete(sid)
+        self.assertFalse(ms.exists(sid))
+    }
+
+    def test_load_missing_returns_fresh() {
+        ms: MemoryStore = MemoryStore()
+        s: Session = ms.load("never-saved")
+        self.assertFalse(s.has("anything"))
+        self.assertFalse(s.dirty)
+    }
+}
+
+
+class CsrfTests(TestCase) {
+    def test_verify_accepts_fresh_token() {
+        sid: str = "session-id-123"
+        tok: str = csrf_token(sid, _KEY)
+        self.assertTrue(csrf_verify(tok, sid, _KEY))
+    }
+
+    def test_verify_rejects_tampered_token() {
+        sid: str = "session-id-123"
+        tok: str = csrf_token(sid, _KEY)
+        self.assertFalse(csrf_verify(tok + "x", sid, _KEY))
+    }
+
+    def test_verify_rejects_wrong_session() {
+        # A token bound to one session must not validate for another.
+        tok: str = csrf_token("session-A", _KEY)
+        self.assertFalse(csrf_verify(tok, "session-B", _KEY))
+    }
+
+    def test_verify_rejects_wrong_key() {
+        sid: str = "session-id-123"
+        tok: str = csrf_token(sid, _KEY)
+        self.assertFalse(csrf_verify(tok, sid, _OTHER_KEY))
+    }
+}
+
+
+main([
+    SignVerifyTests(),
+    SessionIdTests(),
+    SessionObjectTests(),
+    MemoryStoreTests(),
+    CsrfTests(),
+])

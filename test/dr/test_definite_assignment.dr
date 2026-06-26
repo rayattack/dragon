@@ -1,0 +1,108 @@
+"""Definite-assignment: the patterns the analysis ACCEPTS must still compile and
+run with correct values.
+
+The pass rejects reading a no-initializer local before it is assigned on every
+path, and a constructor that leaves an own-declared non-defaulted field unset.
+Those rejection cases are compile errors, so they live in the GoogleTest suite
+(DefiniteAssignmentTest); this file is the positive side - every valid shape the
+pass must let through, exercised at runtime so a future over-eager change that
+starts rejecting them is caught here too.
+"""
+
+from unittest import TestCase, main
+
+
+class Engine {
+    name: str
+    def(name: str) {
+        self.name = name
+    }
+    def label() -> str {
+        return self.name
+    }
+}
+
+
+# Deferred-init field: `engine` is assigned by install(), not the constructor.
+# The pass allows this (a non-ctor method initializes it).
+class Car {
+    wheels: int
+    engine: Engine
+    def(wheels: int) {
+        self.wheels = wheels
+    }
+    def install() {
+        self.engine = Engine("v8")
+    }
+    def sound() -> str {
+        return self.engine.label()
+    }
+}
+
+
+class Locals(TestCase) {
+    def test_assigned_in_both_branches() {
+        x: int
+        if self.flag() {
+            x = 1
+        } else {
+            x = 2
+        }
+        self.assertEqual(x, 1)
+    }
+
+    def flag() -> bool {
+        return True
+    }
+
+    def test_else_returns_guard() {
+        self.assertEqual(self.guarded(True), 7)
+    }
+
+    def guarded(c: bool) -> int {
+        x: int
+        if c {
+            x = 7
+        } else {
+            return 0
+        }
+        return x
+    }
+
+    def test_while_true_break_assigns() {
+        n: int
+        i: int = 0
+        while True {
+            n = 99
+            i += 1
+            if i >= 1 {
+                break
+            }
+        }
+        self.assertEqual(n, 99)
+    }
+
+    def test_assigned_then_read() {
+        s: str
+        s = "hello"
+        self.assertEqual(s, "hello")
+    }
+}
+
+
+class Fields(TestCase) {
+    def test_all_fields_assigned() {
+        e: Engine = Engine("rotary")
+        self.assertEqual(e.label(), "rotary")
+    }
+
+    def test_deferred_init_field() {
+        c: Car = Car(4)
+        c.install()
+        self.assertEqual(c.sound(), "v8")
+        self.assertEqual(c.wheels, 4)
+    }
+}
+
+
+main([Locals(), Fields()])

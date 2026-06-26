@@ -1,0 +1,71 @@
+"""sched - priority-ordered event scheduler."""
+
+from unittest import TestCase, main
+import sched
+
+
+_log: list[str] = []
+
+
+def _alpha() -> None { global _log; _log.append("alpha") }
+def _beta() -> None { global _log; _log.append("beta") }
+def _gamma() -> None { global _log; _log.append("gamma") }
+
+
+class SchedTests(TestCase) {
+    def test_run_in_priority_order() {
+        global _log
+        _log = []
+        # Use defaults - exercises gap #6 (cross-module default-param resolution).
+        s: sched.scheduler = sched.scheduler()
+        # All three share the SAME absolute time so PRIORITY is the tiebreaker.
+        # (enter() stamps an increasing perf_counter() per call, which would
+        # order purely by time and never exercise priority - matching Python's
+        # sched semantics.) when=0.0 is already in the past, so they fire now.
+        s.enterabs(0.0, 3, _gamma)
+        s.enterabs(0.0, 1, _alpha)
+        s.enterabs(0.0, 2, _beta)
+        s.run(true)
+        self.assertEqual(_log, ["alpha", "beta", "gamma"])
+        self.assertTrue(s.empty())
+    }
+
+    def test_cancel_removes_event() {
+        global _log
+        _log = []
+        s: sched.scheduler = sched.scheduler()
+        eid_a: int = s.enter(0.0, 1, _alpha)
+        s.enter(0.0, 2, _beta)
+        ok: bool = s.cancel(eid_a)
+        self.assertTrue(ok)
+        s.run(true)
+        self.assertEqual(_log, ["beta"])
+    }
+
+    def test_cancel_unknown_returns_false() {
+        s: sched.scheduler = sched.scheduler()
+        s.enter(0.0, 1, _alpha)
+        self.assertFalse(s.cancel(999))
+    }
+
+    def test_queue_excludes_cancelled() {
+        s: sched.scheduler = sched.scheduler()
+        eid_a: int = s.enter(0.0, 1, _alpha)
+        s.enter(0.0, 2, _beta)
+        s.cancel(eid_a)
+        q: list[sched._SchedEvent] = s.queue()
+        self.assertEqual(len(q), 1)
+        self.assertEqual(q[0].priority, 2)
+    }
+
+    def test_non_blocking_returns_wait() {
+        s: sched.scheduler = sched.scheduler()
+        s.enter(60.0, 1, _alpha)
+        wait: float = s.run(false)
+        self.assertTrue(wait > 0.0)
+        self.assertFalse(s.empty())
+    }
+}
+
+
+main([SchedTests()])

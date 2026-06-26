@@ -1,0 +1,199 @@
+"""SQLite backend for the Dragon database stdlib (Decision 032, Phase 1).
+
+`SqliteConnection` drives the bundled SQLite amalgamation (no external
+dependency) behind the shared `Connection` interface from `database.base`.
+It is constructed by `database.open()` for `sqlite://PATH`, `sqlite::memory:`,
+`:memory:`, or a bare filesystem path.
+
+C ints are i32 (intc); rowids and bound/read integers use the 64-bit variants
+so Dragon's i64 `int` round-trips losslessly.
+"""
+
+from database.base import Connection, SQL, Results, QueryError, ConnectionError
+
+#===----------------------------------------------------------------------===#
+# SQLite C API (bundled amalgamation).
+#===----------------------------------------------------------------------===#
+
+extern "C" def malloc(size: int) -> ptr
+extern "C" def free(p: ptr)
+extern "C" def dragon_ptr_deref(pp: ptr) -> ptr
+
+extern "C" def sqlite3_open(filename: str, ppDb: ptr) -> intc
+extern "C" def sqlite3_close(db: ptr) -> intc
+extern "C" def sqlite3_exec(db: ptr, sql: str, cb: ptr, arg: ptr, errmsg: ptr) -> intc
+extern "C" def sqlite3_prepare_v2(db: ptr, sql: str, nByte: intc, ppStmt: ptr, pzTail: ptr) -> intc
+extern "C" def sqlite3_step(stmt: ptr) -> intc
+extern "C" def sqlite3_finalize(stmt: ptr) -> intc
+extern "C" def sqlite3_reset(stmt: ptr) -> intc
+extern "C" def sqlite3_column_count(stmt: ptr) -> intc
+extern "C" def sqlite3_column_name(stmt: ptr, iCol: intc) -> str
+extern "C" def sqlite3_column_type(stmt: ptr, iCol: intc) -> intc
+extern "C" def sqlite3_column_int64(stmt: ptr, iCol: intc) -> int
+extern "C" def sqlite3_column_double(stmt: ptr, iCol: intc) -> float
+extern "C" def sqlite3_column_text(stmt: ptr, iCol: intc) -> str
+extern "C" def sqlite3_column_bytes(stmt: ptr, iCol: intc) -> intc
+# Copies `byte_len` bytes from a raw C pointer into a fresh Dragon string. Unlike
+# `"" + cstr`, this never feeds the foreign pointer to dragon_is_heap_string (which
+# would OOB-read a bogus header and corrupt the heap), so it is the correct way to
+# ingest SQLite's borrowed column text.
+extern "C" def dragon_string_alloc(src: str, byte_len: int) -> str
+extern "C" def sqlite3_bind_int64(stmt: ptr, index: intc, value: int) -> intc
+extern "C" def sqlite3_bind_double(stmt: ptr, index: intc, value: float) -> intc
+extern "C" def sqlite3_bind_text(stmt: ptr, index: intc, value: str, n: intc, dtor: ptr) -> intc
+extern "C" def sqlite3_bind_null(stmt: ptr, index: intc) -> intc
+extern "C" def sqlite3_errmsg(db: ptr) -> str
+extern "C" def sqlite3_changes(db: ptr) -> intc
+extern "C" def sqlite3_last_insert_rowid(db: ptr) -> int
+
+# SQLite result codes / column types.
+const SQLITE_OK: int = 0
+const SQLITE_ROW: int = 100
+const SQLITE_DONE: int = 101
+const SQLITE_INTEGER: int = 1
+const SQLITE_FLOAT: int = 2
+const SQLITE_TEXT: int = 3
+const SQLITE_NULL: int = 5
+
+
+class SqliteConnection(Connection) {
+    def(path: str) {
+        self.dbpp = malloc(8)
+        const rc: int = sqlite3_open(path, self.dbpp)
+        self.db = dragon_ptr_deref(self.dbpp)
+        if rc != SQLITE_OK {
+            raise ConnectionError("cannot open database: " + path)
+        }
+    }
+
+    # Rewrite the dialect-free canonical `$$N` placeholders to SQLite's numbered
+    # `?N+1` form. Descending N avoids the `$$1`-is-a-prefix-of-`$$10` hazard.
+    def _to_sqlite(canonical: str, nparams: int) -> str {
+        sql: str = canonical
+        k: int = nparams - 1
+        while k >= 0 {
+            sql = sql.replace("$$" + str(k), "?" + str(k + 1))
+            k = k - 1
+        }
+        return sql
+    }
+
+    # Prepare + bind the SQL value's params, returning the statement handle.
+    def _prepare(sql: SQL) -> ptr {
+        nparams: int = len(sql.params)
+        text: str = self._to_sqlite(sql.canonical, nparams)
+        stmtpp: ptr = malloc(8)
+        const rc: int = sqlite3_prepare_v2(self.db, text, -1, stmtpp, none)
+        stmt: ptr = dragon_ptr_deref(stmtpp)
+        free(stmtpp)
+        if rc != SQLITE_OK {
+            raise QueryError(sqlite3_errmsg(self.db))
+        }
+        # Bind params by their native type (carried in each Any box's tag).
+        i: int = 0
+        while i < nparams {
+            p: Any = sql.params[i]
+            idx: int = i + 1
+            if isinstance(p, bool) {
+                b: bool = p
+                if b {
+                    sqlite3_bind_int64(stmt, idx, 1)
+                } else {
+                    sqlite3_bind_int64(stmt, idx, 0)
+                }
+            } else if isinstance(p, int) {
+                iv: int = p
+                sqlite3_bind_int64(stmt, idx, iv)
+            } else if isinstance(p, float) {
+                fv: float = p
+                sqlite3_bind_double(stmt, idx, fv)
+            } else if isinstance(p, str) {
+                sv: str = p
+                # -1 = NUL-terminated; the DragonString outlives the step, so
+                # the static (none) destructor is safe (no copy needed).
+                sqlite3_bind_text(stmt, idx, sv, -1, none)
+            } else {
+                sqlite3_bind_null(stmt, idx)
+            }
+            i = i + 1
+        }
+        return stmt
+    }
+
+    # Read the current row of a stepped statement into a `dict[str, Any]`
+    # keyed by column name. Each value is stored at its native type (the
+    # dict[str, Any] tags it on insert), so int/float/str/NULL round-trip.
+    def _read_row(stmt: ptr, names: list[str]) -> dict[str, Any] {
+        row: dict[str, Any] = {}
+        ncol: int = len(names)
+        c: int = 0
+        while c < ncol {
+            ct: int = sqlite3_column_type(stmt, c)
+            nm: str = names[c]
+            if ct == SQLITE_INTEGER {
+                row[nm] = sqlite3_column_int64(stmt, c)
+            } else if ct == SQLITE_FLOAT {
+                row[nm] = sqlite3_column_double(stmt, c)
+            } else if ct == SQLITE_TEXT {
+                # Copy out of SQLite's buffer (valid only until the next step).
+                # Use the explicit byte length + dragon_string_alloc so the
+                # borrowed C pointer is never handled as a Dragon string.
+                const blen: int = sqlite3_column_bytes(stmt, c)
+                row[nm] = dragon_string_alloc(sqlite3_column_text(stmt, c), blen)
+            } else {
+                row[nm] = none
+            }
+            c = c + 1
+        }
+        return row
+    }
+
+    def _column_names(stmt: ptr) -> list[str] {
+        ncol: int = sqlite3_column_count(stmt)
+        names: list[str] = []
+        c: int = 0
+        while c < ncol {
+            names.append("" + sqlite3_column_name(stmt, c))
+            c = c + 1
+        }
+        return names
+    }
+
+    # run - step the prepared statement, collecting any result rows, then report
+    # the write outcome (changes + last-insert rowid). One primitive serves both
+    # SELECT (rows populated) and DML (rows empty, xid/ran populated). Both
+    # last_insert_rowid and changes are local C calls - no extra round-trip.
+    def run(sql: SQL) -> Results {
+        stmt: ptr = self._prepare(sql)
+        names: list[str] = self._column_names(stmt)
+        rows: list[dict[str, Any]] = []
+        rc: int = sqlite3_step(stmt)
+        while rc == SQLITE_ROW {
+            rows.append(self._read_row(stmt, names))
+            rc = sqlite3_step(stmt)
+        }
+        sqlite3_finalize(stmt)
+        if rc != SQLITE_DONE and rc != SQLITE_ROW {
+            raise QueryError(sqlite3_errmsg(self.db))
+        }
+        return Results(rows, sqlite3_last_insert_rowid(self.db), sqlite3_changes(self.db))
+    }
+
+    # raw - verbatim text (DDL / maintenance / multi-statement). sqlite3_exec
+    # runs every statement and does not surface rows here; the Results carries
+    # the write outcome only.
+    def raw(text: str) -> Results {
+        const rc: int = sqlite3_exec(self.db, text, none, none, none)
+        if rc != SQLITE_OK {
+            raise QueryError(sqlite3_errmsg(self.db))
+        }
+        empty: list[dict[str, Any]] = []
+        return Results(empty, sqlite3_last_insert_rowid(self.db), sqlite3_changes(self.db))
+    }
+
+    def close() -> int {
+        const rc: int = sqlite3_close(self.db)
+        free(self.dbpp)
+        return rc
+    }
+}

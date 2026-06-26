@@ -1,0 +1,75 @@
+# test/dr/test_narrowing_generics_repr.dr - two silent-miscompile fixes.
+#
+# 1. isinstance FALL-THROUGH narrowing: after `if isinstance(x, T) { return }`
+#  (the Python early-return idiom), code in the SAME scope sees `x` narrowed to
+#  the else-type - previously `x` stayed the union and a method call on it
+#  returned garbage (`x.upper()` -> 0).
+# 2. A generic call's resolved return type survived a re-check pass, so an
+#  annotation-less `print(take([..], 2))` / `take(...)[0]` knows it is a list
+#  (the type was being clobbered to <unknown> on the second type-check pass,
+#  making print render the list pointer as an empty string).
+
+from unittest import TestCase, main
+
+
+def describe(x: int | str) -> str {
+    if isinstance(x, int) {
+        return f"doubled: {x * 2}"
+    }
+    # fall-through: x is narrowed to str here
+    return f"upper: {x.upper()}"
+}
+
+
+def describe3(x: int | str | bool) -> str {
+    if isinstance(x, int) {
+        return f"int: {x}"
+    }
+    # else-type is still str|bool (a union) - must NOT wrongly narrow to one kind
+    return "other"
+}
+
+
+def take[T](xs: list[T], n: int) -> list[T] {
+    out: list[T] = []
+    i: int = 0
+    while i < n {
+        out.append(xs[i])
+        i = i + 1
+    }
+    return out
+}
+
+
+class NarrowingGenericsTests(TestCase) {
+    def test_fallthrough_narrow_int() {
+        self.assertEqual(describe(21), "doubled: 42")
+    }
+    def test_fallthrough_narrow_str() {
+        self.assertEqual(describe("hi"), "upper: HI")
+    }
+    def test_three_member_union_fallthrough() {
+        self.assertEqual(describe3(7), "int: 7")
+        self.assertEqual(describe3("x"), "other")
+    }
+
+    # The generic result is a list[int]/list[str] at the (annotation-less) use
+    # site - exercised by subscripting/len, which only work when the call's
+    # element type is resolved.
+    def test_generic_call_result_typed_int() {
+        first_two: list[int] = take([10, 20, 30, 40], 2)
+        self.assertEqual(first_two, [10, 20])
+    }
+    def test_generic_call_result_typed_str() {
+        r: list[str] = take(["a", "b", "c"], 2)
+        self.assertEqual(r, ["a", "b"])
+    }
+    def test_generic_call_inline_subscript() {
+        # the call result is used inline (no binding) - its element type must be
+        # resolved for the subscript to read an int, not garbage
+        self.assertEqual(take([5, 6, 7], 2)[1], 6)
+    }
+}
+
+
+main([NarrowingGenericsTests()])

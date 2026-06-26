@@ -1,0 +1,109 @@
+# test/dr/test_ospath.dr - normpath / relpath behavioral parity.
+#
+# These two functions moved out of the C++ runtime (dragon_normpath /
+# dragon_relpath) into native Dragon in stdlib/os/path.dr (ADR 042). This
+# suite pins their behavior so the port can't silently regress, and checks
+# that os.dr's flat path_* variants still delegate correctly.
+#
+# relpath assertions use absolute inputs only, so results don't depend on the
+# process cwd. Expected values match Python's posixpath, except that normpath
+# collapses "//" to "/" (Dragon does not preserve the POSIX double-slash root).
+
+from unittest import TestCase, main
+from os.path import normpath, relpath
+import os
+
+class NormpathTests(TestCase) {
+    def test_empty_is_dot() {
+        self.assertEqual(normpath(""), ".")
+    }
+
+    def test_dot_is_dot() {
+        self.assertEqual(normpath("."), ".")
+    }
+
+    def test_root() {
+        self.assertEqual(normpath("/"), "/")
+    }
+
+    def test_double_slash_collapses() {
+        self.assertEqual(normpath("//"), "/")
+    }
+
+    def test_collapse_repeated_sep() {
+        self.assertEqual(normpath("/foo//bar"), "/foo/bar")
+    }
+
+    def test_drop_current_dir() {
+        self.assertEqual(normpath("/foo/./bar"), "/foo/bar")
+        self.assertEqual(normpath("./a"), "a")
+        self.assertEqual(normpath("a/./b"), "a/b")
+    }
+
+    def test_resolve_parent_dir() {
+        self.assertEqual(normpath("/foo/../bar"), "/bar")
+        self.assertEqual(normpath("foo/../bar"), "bar")
+        self.assertEqual(normpath("a/b/c/../../d"), "a/d")
+    }
+
+    def test_relative_collapses_to_dot() {
+        self.assertEqual(normpath("foo/.."), ".")
+    }
+
+    def test_leading_parent_preserved_when_relative() {
+        self.assertEqual(normpath("../foo"), "../foo")
+    }
+
+    def test_parent_at_abs_root_discarded() {
+        self.assertEqual(normpath("/foo/../.."), "/")
+    }
+
+    def test_trailing_slash_stripped() {
+        self.assertEqual(normpath("/a/b/c/"), "/a/b/c")
+    }
+
+    def test_triple_dot_is_a_name() {
+        self.assertEqual(normpath("..."), "...")
+    }
+}
+
+class RelpathTests(TestCase) {
+    def test_child() {
+        self.assertEqual(relpath("/a/b/c", "/a/b"), "c")
+    }
+
+    def test_sibling() {
+        self.assertEqual(relpath("/a/b/c", "/a/b/d"), "../c")
+    }
+
+    def test_diverging_branch() {
+        self.assertEqual(relpath("/a/b/c", "/a/x/y"), "../../b/c")
+    }
+
+    def test_same_path_is_dot() {
+        self.assertEqual(relpath("/a/b", "/a/b"), ".")
+    }
+
+    def test_ancestor() {
+        self.assertEqual(relpath("/a", "/a/b/c"), "../..")
+    }
+
+    def test_deeper_child() {
+        self.assertEqual(relpath("/usr/local/bin", "/usr"), "local/bin")
+    }
+}
+
+class OsFlatVariantTests(TestCase) {
+    # os.dr exposes flat path_* names that delegate to os.path's natives.
+    def test_path_normpath_delegates() {
+        self.assertEqual(os.path_normpath("/foo/../bar"), "/bar")
+        self.assertEqual(os.path_normpath("a/b/c/../../d"), "a/d")
+    }
+
+    def test_path_relpath_delegates() {
+        self.assertEqual(os.path_relpath("/a/b/c", "/a/x/y"), "../../b/c")
+        self.assertEqual(os.path_relpath("/usr/local/bin", "/usr"), "local/bin")
+    }
+}
+
+main([NormpathTests(), RelpathTests(), OsFlatVariantTests()])

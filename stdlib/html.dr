@@ -1,0 +1,235 @@
+# html.dr - Dragon standard library: HTML escaping and utilities
+#
+# Provides functions for escaping/unescaping HTML entities, stripping tags,
+# and encoding/decoding individual character entities.
+# Pure Dragon - no C dependencies.
+#
+# Also home to the angle-bracket markup `template[X]` content types (D032
+# domain co-location): HTML, CSS, and XML. They all auto-escape each !{expr}
+# and concatenate, differing only in the escape table - so they live together
+# in the markup/presentation domain. The module-level `escape(s)` above and a
+# content type's `@staticmethod escape` are distinct namespaces and do not
+# collide.
+
+from template import Template
+
+#===----------------------------------------------------------------------===#
+# Escaping
+#===----------------------------------------------------------------------===#
+
+def escape(s: str) -> str {
+    # Replace special HTML characters with their entity equivalents.
+    # & must be replaced first to avoid double-escaping.
+    result: str = s
+    result = result.replace("&", "&amp;")
+    result = result.replace("<", "&lt;")
+    result = result.replace(">", "&gt;")
+    result = result.replace("\"", "&quot;")
+    result = result.replace("'", "&#x27;")
+    return result
+}
+
+#===----------------------------------------------------------------------===#
+# Unescaping
+#===----------------------------------------------------------------------===#
+
+def unescape(s: str) -> str {
+    # Replace HTML entities with their character equivalents.
+    result: str = ""
+    i: int = 0
+    const n: int = len(s)
+
+    while i < n {
+        const ch: str = s[i]
+
+        if ch == "&" {
+            const rest: str = s[i:]
+            const semi_pos: int = rest.find(";")
+
+            if semi_pos > 0 {
+                const entity: str = rest[:semi_pos + 1]
+                const decoded: str = decode_entity(entity)
+                result = result + decoded
+                i = i + semi_pos + 1
+            } else {
+                result = result + ch
+                i = i + 1
+            }
+        } else {
+            result = result + ch
+            i = i + 1
+        }
+    }
+
+    return result
+}
+
+#===----------------------------------------------------------------------===#
+# Tag stripping
+#===----------------------------------------------------------------------===#
+
+def strip_tags(s: str) -> str {
+    result: str = ""
+    in_tag: bool = false
+    i: int = 0
+    const n: int = len(s)
+
+    while i < n {
+        const ch: str = s[i]
+        if in_tag {
+            if ch == ">" {
+                in_tag = false
+            }
+        } else {
+            if ch == "<" {
+                in_tag = true
+            } else {
+                result = result + ch
+            }
+        }
+        i = i + 1
+    }
+
+    return result
+}
+
+#===----------------------------------------------------------------------===#
+# Entity helpers
+#===----------------------------------------------------------------------===#
+
+def encode_entity(ch: str) -> str {
+    if ch == "&" { return "&amp;" }
+    if ch == "<" { return "&lt;" }
+    if ch == ">" { return "&gt;" }
+    if ch == "\"" { return "&quot;" }
+    if ch == "'" { return "&#x27;" }
+    return ch
+}
+
+def decode_entity(entity: str) -> str {
+    # Named entities
+    if entity == "&amp;" { return "&" }
+    if entity == "&lt;" { return "<" }
+    if entity == "&gt;" { return ">" }
+    if entity == "&quot;" { return "\"" }
+    if entity == "&apos;" { return "'" }
+
+    # Numeric entities: &#NNN; or &#xHH;
+    if entity.startswith("&#") {
+        if entity.endswith(";") {
+            const inner: str = entity[2:len(entity) - 1]
+
+            if inner.startswith("x") {
+                const hex_str: str = inner[1:]
+                const code: int = _hex_to_int(hex_str)
+                return _code_to_char(code)
+            } else {
+                if len(inner) > 0 {
+                    if inner.isdigit() {
+                        const code: int = int(inner)
+                        return _code_to_char(code)
+                    }
+                }
+            }
+        }
+    }
+
+    return entity
+}
+
+#===----------------------------------------------------------------------===#
+# Internal helpers
+#===----------------------------------------------------------------------===#
+
+def _code_to_char(code: int) -> str {
+    # Printable ASCII (32..126) maps directly; anything else stays a numeric entity.
+    if code >= 32 and code <= 126 {
+        return chr(code)
+    }
+    return f"&#{code};"
+}
+
+def _hex_to_int(s: str) -> int {
+    result: int = 0
+    i: int = 0
+    const n: int = len(s)
+
+    while i < n {
+        const ch: str = s[i]
+        result = result * 16
+        const digit: int = _hex_digit_value(ch)
+        result = result + digit
+        i = i + 1
+    }
+
+    return result
+}
+
+def _hex_digit_value(ch: str) -> int {
+    # Hex digit -> 0..15 (0 for a non-hex char, matching the prior behaviour).
+    const c: int = ord(ch)
+    if c >= 48 and c <= 57 { return c - 48 }      # 0-9
+    if c >= 97 and c <= 102 { return c - 87 }     # a-f
+    if c >= 65 and c <= 70 { return c - 55 }      # A-F
+    return 0
+}
+
+#===----------------------------------------------------------------------===#
+# template[X] content types - markup family (D032 domain co-location).
+#
+# Each auto-escapes every !{expr} via its `escape` static method, then the
+# compiler concatenates the escaped segments into the instance's string. A
+# user `class MyHTML(HTML)` inherits HTML's escape automatically.
+#===----------------------------------------------------------------------===#
+
+class HTML(Template) {
+    def(inner: str) {
+        self._inner = inner
+    }
+
+    @staticmethod
+    def escape(s: str) -> str {
+        s = s.replace("&", "&amp;")
+        s = s.replace("<", "&lt;")
+        s = s.replace(">", "&gt;")
+        s = s.replace('"', "&quot;")
+        s = s.replace("'", "&#x27;")
+        return s
+    }
+}
+
+
+class CSS(Template) {
+    def(inner: str) {
+        self._inner = inner
+    }
+
+    @staticmethod
+    def escape(s: str) -> str {
+        s = s.replace("\\", "\\\\")
+        s = s.replace('"', '\\"')
+        s = s.replace("'", "\\'")
+        s = s.replace("<", "\\<")
+        s = s.replace(">", "\\>")
+        s = s.replace("&", "\\&")
+        return s
+    }
+}
+
+
+class XML(Template) {
+    def(inner: str) {
+        self._inner = inner
+    }
+
+    @staticmethod
+    def escape(s: str) -> str {
+        s = s.replace("&", "&amp;")
+        s = s.replace("<", "&lt;")
+        s = s.replace(">", "&gt;")
+        s = s.replace('"', "&quot;")
+        s = s.replace("'", "&apos;")
+        return s
+    }
+}
+

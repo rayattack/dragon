@@ -1,0 +1,58 @@
+# test/dr/test_asymmetric.dr - RSA + ECDSA sign/verify (crypto.dr superset).
+#
+# One sign/verify pair serves both algorithms; the PEM key type selects RSA
+# (PKCS#1 v1.5) vs EC (ECDSA). ECDSA signatures are non-deterministic, so the
+# correctness oracle is round-trip verify plus negative cases (tampered message,
+# cross-key, wrong hash). Test keys are ephemeral RSA-2048 / EC-P256 pairs.
+
+from unittest import TestCase, main
+from crypto import sign, verify
+
+const RSA_PRIV: bytes = b"-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCFI36XQ0wQnQNB\neh1tIb41z8NrH+huOkND+9+AFwc79eXEQBEtd88+cHOdJzGd8rCcgvfliYNbzA9I\ne6c4m1y0W6YJWKX3ejnQgWkKnOsKb6KxG9mqyFJWr4WikluQa+uUgpCfioHkJ4Z+\ngYj8vd9CXdg60rsB+LX8C/D+XifUDhbS82ttbi/VPwhGvCGANkmOs8YiHeB4lHoA\nEqn8Ldjjz0dR1ANLDZp/4X8Zpp8/J1R1+riy9VLDqyKy7JBiy8MsOnAFddDc5p63\nQo0yAwKwpQdfupx1PzRMp90ckl8AxTG1cYgAajS7IAp1jNlgAz8AaGpbl8dJe+wL\n/FAb0SpzAgMBAAECggEADqDmmmEoZ5TmPtis3gj8mMtcuesAw10Ud1D37t+Dic42\nsjhQityPVq7NYow5Z+o6sd+0CYeb+XHzkJpsNmHfrujOVq2OWCGZCPSxzBrkumSn\nYsAKy7iEpNtWmr/BCXPKJ9WsD/43JRCbYaVYSLOQvH6KMSBmsCHvK6P2P+9W1KDq\nbk6kE43kWNNO0hvcjP+pwyHO/Lg74CHUOZFLhq9FYMWMA0NDTQoxJeiSHHmg6CpK\nxkapel7ZE+0PfIKuLH2r/A/Gb/ySQfgHqy0yu1NZ4D8yNDD1m4J6zAogXhTMCykS\nUegVjZ/oacqhUTXT1gcORtgzYUf9aiNXrknvcjjk/QKBgQC8JPyPOQUW4IpGtw6G\nw5fqnTE3RngheuJVOGG3ijW7LrstwMnFPUgHQ6WEF2JW6MHcGc6KJufD4Mze+tUM\nwcapWnf08820RZ4DciByXMkdfJ5xnNygLuewdCh5Y/zm+l6o8ZwuHnIzlLDOBpfq\n26QLT7GYRfhJnG8sLcinGYcjvQKBgQC1J+1If9P/jXWNYvQxK/hRj0RZwsuIqs/w\n3GAhHnjVb4fc7zY/NFJXHsKjBfksKJBApgVnaROXhXnAenswHNDGo3NcbRnBSZlz\nl928mlyjwuqPdG9SKwwO22jddaWBCGq8ZfaWUxbC1U35TNoTre3voW8KTECe8Q/6\nsGhMLzhR7wKBgQCJ2E9yX8RqzniA9v2dnxBexGyaovbBENdiuLxfTNOxILvi+aza\n5dsv90/9R2S1aDMgn4fDkF2eFcYEWKJfhlmXGsFopne/7IGo5KUBJRn0kKlFdDfw\n5Gy7y18cETXpxOY1wU88OvJQ+E/RouMLH4FBCFKFzj3rMMIDDEhGpV1twQKBgGhV\ne4ri3EV1wntQv5VGXrkSi2orD7BBuItfURoiA7PhjV1IhHS4fKfidnUP7qdpIVOq\nirg5Q2hkHnAl2qcmIXQWFU3pJAk3i2KQ18tVF//VNeSzSZ4IXuR7p5TMuiprn5Ws\nH+4KIrTJxyPLCFqHNN9rmZlTu3APJIXcbeVa2NQPAoGAT2KTgdgoct4gXNIyz/q1\ngWo3ro/cSupmU1Ct4cxdqQH4eAqdP7Eu1qITu15f+yxUitriXfJUWvz8zsBFMVWm\nfSNTGev5l77Kb/gaVyu6sc5wUbU6Ch+4v9ZtazzafkUjrdEgsSKxnY9bKeXkjvPr\noVUFsga5I/tn86WzBnf5Vmg=\n-----END PRIVATE KEY-----\n"
+const RSA_PUB: bytes = b"-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAhSN+l0NMEJ0DQXodbSG+\nNc/Dax/objpDQ/vfgBcHO/XlxEARLXfPPnBznScxnfKwnIL35YmDW8wPSHunOJtc\ntFumCVil93o50IFpCpzrCm+isRvZqshSVq+FopJbkGvrlIKQn4qB5CeGfoGI/L3f\nQl3YOtK7Afi1/Avw/l4n1A4W0vNrbW4v1T8IRrwhgDZJjrPGIh3geJR6ABKp/C3Y\n489HUdQDSw2af+F/GaafPydUdfq4svVSw6sisuyQYsvDLDpwBXXQ3Oaet0KNMgMC\nsKUHX7qcdT80TKfdHJJfAMUxtXGIAGo0uyAKdYzZYAM/AGhqW5fHSXvsC/xQG9Eq\ncwIDAQAB\n-----END PUBLIC KEY-----\n"
+
+const EC_PRIV: bytes = b"-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgkW1nk2cEXa1IzJjo\nBm/7HribpNczjCjwbuQPlNC7BhGhRANCAAT6W/R6hC4oW2i+J04pjdGvi/6LXtwr\ny203IaNI60NAQnrCUp1EzgMM3KErQP4fhpd5VBL9nTI6YD0yqQ5wmnzL\n-----END PRIVATE KEY-----\n"
+const EC_PUB: bytes = b"-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE+lv0eoQuKFtovidOKY3Rr4v+i17c\nK8ttNyGjSOtDQEJ6wlKdRM4DDNyhK0D+H4aXeVQS/Z0yOmA9MqkOcJp8yw==\n-----END PUBLIC KEY-----\n"
+
+const MSG: bytes = b"The quick brown fox jumps over the lazy dog"
+const TAMPERED: bytes = b"The quick brown fox jumps over the lazy dGg"
+
+
+class AsymmetricTests(TestCase) {
+    def test_rsa_roundtrip() {
+        const sig: bytes = sign(RSA_PRIV, MSG)
+        self.assertTrue(verify(RSA_PUB, MSG, sig))
+    }
+
+    def test_ecdsa_roundtrip() {
+        const sig: bytes = sign(EC_PRIV, MSG)
+        self.assertTrue(verify(EC_PUB, MSG, sig))
+    }
+
+    def test_rsa_rejects_tampered_message() {
+        const sig: bytes = sign(RSA_PRIV, MSG)
+        self.assertFalse(verify(RSA_PUB, TAMPERED, sig))
+    }
+
+    def test_ecdsa_rejects_tampered_message() {
+        const sig: bytes = sign(EC_PRIV, MSG)
+        self.assertFalse(verify(EC_PUB, TAMPERED, sig))
+    }
+
+    def test_cross_key_rejected() {
+        # An RSA signature must not verify under the EC public key, nor vice versa.
+        const rsa_sig: bytes = sign(RSA_PRIV, MSG)
+        self.assertFalse(verify(EC_PUB, MSG, rsa_sig))
+        const ec_sig: bytes = sign(EC_PRIV, MSG)
+        self.assertFalse(verify(RSA_PUB, MSG, ec_sig))
+    }
+
+    def test_hash_choice_must_match() {
+        # A signature made under sha512 must not verify when checked as sha256.
+        const sig: bytes = sign(RSA_PRIV, MSG, "sha512")
+        self.assertTrue(verify(RSA_PUB, MSG, sig, "sha512"))
+        self.assertFalse(verify(RSA_PUB, MSG, sig, "sha256"))
+    }
+}
+
+main([AsymmetricTests()])

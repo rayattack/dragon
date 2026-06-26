@@ -1,0 +1,10 @@
+{
+    "iconDefinitions": {
+        "dragon_icon": {
+            "iconPath": "./icons/dr.png"
+        }
+    },
+    "fileExtensions": {
+        "dr": "dragon_icon"
+    }
+}

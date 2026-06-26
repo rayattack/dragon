@@ -1,0 +1,14 @@
+name = "Dragon"
+grammar = "dragon"
+path_suffixes = ["dr"]
+line_comments = ["# "]
+block_comment = { start = '"""', prefix = "", end = '"""', tab_size = 0 }
+tab_size = 4
+hard_tabs = false
+brackets = [
+    { start = "{", end = "}", close = true, newline = true },
+    { start = "[", end = "]", close = true, newline = true },
+    { start = "(", end = ")", close = true, newline = true },
+    { start = "\"", end = "\"", close = true, newline = false, not_in = ["comment", "string"] },
+    { start = "'", end = "'", close = true, newline = false, not_in = ["comment", "string"] },
+]

@@ -1,0 +1,248 @@
+# pages.dr - HTML for the egg (package) registry: auth + browse.
+#
+# Built with the `template[HTML]` content type (spec-32): bare `!{expr}` is
+# auto-escaped (XSS-safe), `!{frag | raw}` injects a trusted HTML fragment, and
+# `!{ for x in xs { :{ ... } } }` loops markup in place. No manual escaping, no
+# string concatenation.
+
+from html import HTML
+from views.www import page_shell
+from models.records import Token, Version
+from services.registry import PackageSummary
+
+#--- small text helpers (values are auto-escaped where interpolated) ------#
+
+def _latest(p: PackageSummary) -> str {
+    if len(p.latest) == 0 {
+        return "-"
+    }
+    return p.latest
+}
+
+def _token_status(t: Token) -> str {
+    if t.revoked != 0 {
+        return "revoked"
+    }
+    return "active"
+}
+
+def _ver_status(v: Version) -> str {
+    if v.yanked == 2 {
+        return "security-yanked"
+    }
+    if v.yanked == 1 {
+        return "yanked"
+    }
+    return "live"
+}
+
+def _short_hash(h: str) -> str {
+    if len(h) > 19 {
+        return h[0:19] + "..."
+    }
+    return h
+}
+
+#--- reusable HTML fragments ----------------------------------------------#
+
+def _error_box(error: str) -> HTML {
+    if len(error) == 0 {
+        return template[HTML] {  }
+    }
+    return template[HTML] { <p class="form-error">!{error}</p> }
+}
+
+def _search_box(query: str) -> HTML {
+    return template[HTML] {
+      <form method="get" action="/eggs/search" class="egg-search">
+        <input name="q" placeholder="Search packages" value="!{query}">
+        <button class="btn btn-primary" type="submit">Search</button>
+      </form>
+    }
+}
+
+def _pkg_list(packages: list[PackageSummary], empty_msg: str) -> HTML {
+    if len(packages) == 0 {
+        return template[HTML] { <p class="egg-empty">!{empty_msg}</p> }
+    }
+    return template[HTML] {
+      <ul class="egg-list">!{ for p in packages { :{
+        <li class="egg-card">
+          <a class="egg-name" href="/eggs/!{p.name}">!{p.name}</a>
+          <span class="egg-ver">!{_latest(p)}</span>
+          <p class="egg-desc">!{p.description}</p>
+        </li>
+      } } }</ul>
+    }
+}
+
+def _newtoken_box(new_token: str) -> HTML {
+    if len(new_token) == 0 {
+        return template[HTML] {  }
+    }
+    return template[HTML] {
+      <div class="token-new"><strong>New token (copy it now):</strong><code>!{new_token}</code></div>
+    }
+}
+
+def _revoke_cell(t: Token, csrf: str) -> HTML {
+    if t.revoked != 0 {
+        return template[HTML] {  }
+    }
+    return template[HTML] {
+      <form method="post" action="/account/tokens/revoke" class="inline">
+        <input type="hidden" name="csrf_token" value="!{csrf}">
+        <input type="hidden" name="token_id" value="!{t.id}">
+        <button class="btn btn-secondary btn-sm" type="submit">Revoke</button>
+      </form>
+    }
+}
+
+def _token_table(tokens: list[Token], csrf: str) -> HTML {
+    if len(tokens) == 0 {
+        return template[HTML] { <p class="acct-empty">No tokens yet.</p> }
+    }
+    return template[HTML] {
+      <table class="token-table">
+        <thead><tr><th>Label</th><th>Status</th><th></th></tr></thead>
+        <tbody>!{ for t in tokens { :{
+          <tr>
+            <td>!{t.label}</td>
+            <td>!{_token_status(t)}</td>
+            <td>!{_revoke_cell(t, csrf)}</td>
+          </tr>
+        } } }</tbody>
+      </table>
+    }
+}
+
+def _version_table(versions: list[Version]) -> HTML {
+    if len(versions) == 0 {
+        return template[HTML] { <p class="egg-empty">No versions published.</p> }
+    }
+    return template[HTML] {
+      <table class="ver-table">
+        <thead><tr><th>Version</th><th>Status</th><th>Hash</th></tr></thead>
+        <tbody>!{ for v in versions { :{
+          <tr><td>!{v.version}</td><td>!{_ver_status(v)}</td><td><code>!{_short_hash(v.hash)}</code></td></tr>
+        } } }</tbody>
+      </table>
+    }
+}
+
+#--- pages -----------------------------------------------------------------#
+
+def render_login(csrf: str, error: str) -> HTML {
+    const body: HTML = template[HTML] {
+      <main class="www www-brand">
+        <section class="auth-card">
+          <img class="auth-logo" src="/assets/dr.png" alt="Dragon">
+          <h1>Log in</h1>
+          !{_error_box(error)}
+          <form method="post" action="/login">
+            <input type="hidden" name="csrf_token" value="!{csrf}">
+            <label>Username<input name="username" autocomplete="username" placeholder="yourname" autofocus></label>
+            <label>Password<input name="password" type="password" autocomplete="current-password" placeholder="your password"></label>
+            <button class="btn btn-primary" type="submit">Log in</button>
+          </form>
+          <p class="auth-alt">No account yet? <a href="/signup">Create one</a>.</p>
+        </section>
+      </main>
+    }
+    return page_shell("Log in - Dragon", "login", "", body)
+}
+
+def render_signup(csrf: str, error: str) -> HTML {
+    const body: HTML = template[HTML] {
+      <main class="www www-brand">
+        <section class="auth-card">
+          <img class="auth-logo" src="/assets/dr.png" alt="Dragon">
+          <h1>Create an account</h1>
+          !{_error_box(error)}
+          <form method="post" action="/signup">
+            <input type="hidden" name="csrf_token" value="!{csrf}">
+            <label>Username<input name="username" autocomplete="username" placeholder="pick a username" autofocus></label>
+            <label>Email<input name="email" type="email" autocomplete="email" placeholder="you@example.com"></label>
+            <label>Password<input name="password" type="password" autocomplete="new-password" placeholder="at least 8 characters"></label>
+            <button class="btn btn-primary" type="submit">Sign up</button>
+          </form>
+          <p class="auth-alt">Already registered? <a href="/login">Log in</a>.</p>
+        </section>
+      </main>
+    }
+    return page_shell("Sign up - Dragon", "login", "", body)
+}
+
+def render_account(username: str, tokens: list[Token], new_token: str, csrf: str) -> HTML {
+    const body: HTML = template[HTML] {
+      <main class="www www-brand">
+        <section class="acct">
+          <h1>!{username}</h1>
+          <h2>Publish tokens</h2>
+          <p class="acct-hint">Use a token with <code>dragon push</code>. It is shown once - store it now.</p>
+          !{_newtoken_box(new_token)}
+          !{_token_table(tokens, csrf)}
+          <form method="post" action="/account/tokens/create" class="token-create">
+            <input type="hidden" name="csrf_token" value="!{csrf}">
+            <label>New token label<input name="label" placeholder="ci-laptop"></label>
+            <button class="btn btn-primary" type="submit">Create token</button>
+          </form>
+        </section>
+      </main>
+    }
+    return page_shell("Account - Dragon", "account", username, body)
+}
+
+def render_index(packages: list[PackageSummary], username: str) -> HTML {
+    const body: HTML = template[HTML] {
+      <main class="www www-brand">
+        <section class="egg-head">
+          <h1>Packages</h1>
+          <p class="egg-sub">Eggs published to the Dragon registry. Install with <code>dragon grab &lt;name&gt;</code>.</p>
+          !{_search_box("")}
+        </section>
+        !{_pkg_list(packages, "No packages published yet.")}
+      </main>
+    }
+    return page_shell("Packages - Dragon", "eggs", username, body)
+}
+
+def render_search(query: str, results: list[PackageSummary], username: str) -> HTML {
+    const body: HTML = template[HTML] {
+      <main class="www www-brand">
+        <section class="egg-head">
+          <h1>Search</h1>
+          !{_search_box(query)}
+        </section>
+        !{_pkg_list(results, "No packages match your search.")}
+      </main>
+    }
+    return page_shell("Search - Dragon", "eggs", username, body)
+}
+
+def render_detail(name: str, description: str, versions: list[Version], username: str) -> HTML {
+    const body: HTML = template[HTML] {
+      <main class="www www-brand">
+        <section class="egg-detail">
+          <h1>!{name}</h1>
+          <p class="egg-desc">!{description}</p>
+          <div class="egg-install"><code>dragon grab !{name}</code></div>
+          <h2>Versions</h2>
+          !{_version_table(versions)}
+        </section>
+      </main>
+    }
+    return page_shell(name + " - Dragon packages", "eggs", username, body)
+}
+
+def render_not_found(username: str) -> HTML {
+    const body: HTML = template[HTML] {
+      <main class="www www-brand">
+        <section class="egg-head">
+          <h1>Package not found</h1>
+          <p><a href="/eggs">Back to packages</a></p>
+        </section>
+      </main>
+    }
+    return page_shell("Not found - Dragon", "eggs", username, body)
+}

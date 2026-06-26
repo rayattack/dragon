@@ -1,0 +1,74 @@
+"""http.cookies - parse and render HTTP cookie headers (common subset).
+
+Pure Dragon, concrete `str`/`dict` operations. `parse` reads a `Cookie:`
+request header into a name->value dict; `SimpleCookie` accumulates name/value
+pairs and renders `Set-Cookie:` lines via `output()`. Attribute morsels
+(path/domain/expires/...) beyond a plain value are not modelled.
+"""
+
+
+def parse(header: str) -> dict[str, str] {
+    """Parse a `Cookie:` header value ("a=1; b=2") into a name->value dict."""
+    out: dict[str, str] = {}
+    for part in header.split(";") {
+        piece: str = part.strip()
+        if piece == "" {
+            continue
+        }
+        eq: int = piece.find("=")
+        if eq < 0 {
+            continue
+        }
+        key: str = piece[0:eq].strip()
+        val: str = piece[eq + 1:len(piece)].strip()
+        # Strip surrounding double quotes if present.
+        if len(val) >= 2 and val[0] == "\"" and val[len(val) - 1] == "\"" {
+            val = val[1:len(val) - 1]
+        }
+        if key != "" {
+            out[key] = val
+        }
+    }
+    return out
+}
+
+
+class SimpleCookie {
+    data: dict[str, str]
+    order: list[str]
+
+    def() {
+        self.data = {}
+        self.order = []
+    }
+
+    def set(key: str, value: str) -> None {
+        if key not in self.data {
+            self.order.append(key)
+        }
+        self.data[key] = value
+    }
+
+    def get(key: str) -> str {
+        if key in self.data {
+            return self.data[key]
+        }
+        return ""
+    }
+
+    def load(header: str) -> None {
+        parsed: dict[str, str] = parse(header)
+        for k in parsed {
+            self.set(k, parsed[k])
+        }
+    }
+
+    def output() -> str {
+        """Render one `Set-Cookie:` line per stored pair, newline-joined."""
+        lines: list[str] = []
+        for k in self.order {
+            lines.append("Set-Cookie: " + k + "=" + self.data[k])
+        }
+        return "\n".join(lines)
+    }
+}

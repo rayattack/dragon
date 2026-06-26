@@ -1,0 +1,287 @@
+# configparser.dr - Dragon standard library: INI file parser
+#
+# Pure Dragon implementation of a configuration file parser compatible
+# with the standard INI format. Supports sections, key-value pairs with
+# = or : delimiters, comments (# and ;), and whitespace stripping.
+# Data is stored as parallel lists for section names, keys, and values.
+
+#===----------------------------------------------------------------------===#
+# Internal helpers
+#===----------------------------------------------------------------------===#
+
+def _strip(s: str) -> str {
+    # Strip leading and trailing spaces, tabs, and carriage returns.
+    return s.strip(" \t\r")
+}
+
+def _find_separator(line: str) -> int {
+    # Find the position of the first = or : separator in a line.
+    # Returns -1 if no separator is found.
+    i: int = 0
+    while i < len(line) {
+        const ch: str = line[i:i + 1]
+        if ch == "=" {
+            return i
+        }
+        if ch == ":" {
+            return i
+        }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+def _is_comment(line: str) -> bool {
+    # Check if a line is a comment (starts with # or ;).
+    if len(line) == 0 { return false }
+    const ch: str = line[0:1]
+    if ch == "#" { return true }
+    if ch == ";" { return true }
+    return false
+}
+
+def _is_section_header(line: str) -> bool {
+    # Check if a line is a section header (starts with [ and ends with ]).
+    if len(line) < 3 { return false }
+    if line[0:1] == "[" {
+        if line[len(line) - 1:len(line)] == "]" {
+            return true
+        }
+    }
+    return false
+}
+
+def _extract_section_name(line: str) -> str {
+    # Extract the section name from a header line like [section].
+    return _strip(line[1:len(line) - 1])
+}
+
+#===----------------------------------------------------------------------===#
+# ConfigParser class
+#===----------------------------------------------------------------------===#
+
+class ConfigParser {
+    def() {
+        # Parallel lists: for each section index i,
+        #  section_names[i] is the section name
+        #  section_keys[i] is the list of keys in that section
+        #  section_values[i] is the list of values in that section
+        self.section_names: list[str] = []
+        self.section_keys: list[list[str]] = []
+        self.section_values: list[list[str]] = []
+    }
+
+    def _find_section(name: str) -> int {
+        # Return the index of the section, or -1 if not found.
+        i: int = 0
+        while i < len(self.section_names) {
+            if self.section_names[i] == name {
+                return i
+            }
+            i = i + 1
+        }
+        return 0 - 1
+    }
+
+    def _find_key(section_idx: int, key: str) -> int {
+        # Return the index of the key within a section, or -1 if not found.
+        const keys: list[str] = self.section_keys[section_idx]
+        i: int = 0
+        while i < len(keys) {
+            if keys[i] == key {
+                return i
+            }
+            i = i + 1
+        }
+        return 0 - 1
+    }
+
+    #--- Parsing ---#
+
+    def read_string(text: str) {
+        # Parse an INI-format string and populate the parser.
+        # Supports [section] headers, key=value and key:value pairs,
+        # and # or ; comment lines. Whitespace is stripped from keys
+        # and values.
+        const lines: list[str] = text.split("\n")
+        current_section: str = ""
+        has_section: bool = false
+
+        i: int = 0
+        while i < len(lines) {
+            const raw_line: str = _strip(lines[i])
+
+            # Skip empty lines and comments
+            if len(raw_line) == 0 {
+                i = i + 1
+            } else {
+                if _is_comment(raw_line) {
+                    i = i + 1
+                } else {
+                    if _is_section_header(raw_line) {
+                        # New section
+                        current_section = _extract_section_name(raw_line)
+                        has_section = true
+                        const idx: int = self._find_section(current_section)
+                        if idx < 0 {
+                            self.section_names.append(current_section)
+                            empty_keys: list[str] = []
+                            empty_vals: list[str] = []
+                            self.section_keys.append(empty_keys)
+                            self.section_values.append(empty_vals)
+                        }
+                        i = i + 1
+                    } else {
+                        # Key-value pair
+                        if has_section {
+                            const sep: int = _find_separator(raw_line)
+                            if sep > 0 {
+                                const key: str = _strip(raw_line[:sep])
+                                const value: str = _strip(raw_line[sep + 1:])
+                                self.set(current_section, key, value)
+                            }
+                        }
+                        i = i + 1
+                    }
+                }
+            }
+        }
+    }
+
+    #--- Query methods ---#
+
+    def sections() -> list[str] {
+        # Return a list of all section names.
+        result: list[str] = []
+        i: int = 0
+        while i < len(self.section_names) {
+            result.append(self.section_names[i])
+            i = i + 1
+        }
+        return result
+    }
+
+    def has_section(name: str) -> bool {
+        # Check whether the named section exists.
+        return self._find_section(name) >= 0
+    }
+
+    def has_option(section: str, key: str) -> bool {
+        # Check whether the given key exists in the named section.
+        const idx: int = self._find_section(section)
+        if idx < 0 { return false }
+        return self._find_key(idx, key) >= 0
+    }
+
+    def get(section: str, key: str) -> str {
+        # Return the string value of a key in a section.
+        # Raises ValueError if the section or key is not found.
+        const idx: int = self._find_section(section)
+        if idx < 0 {
+            raise ValueError(f"section not found: {section}")
+        }
+        const kidx: int = self._find_key(idx, key)
+        if kidx < 0 {
+            raise ValueError(f"key not found: {key}")
+        }
+        return self.section_values[idx][kidx]
+    }
+
+    def get_int(section: str, key: str) -> int {
+        # Return the integer value of a key.
+        const val: str = self.get(section, key)
+        return int(val)
+    }
+
+    def get_float(section: str, key: str) -> float {
+        # Return the float value of a key.
+        const val: str = self.get(section, key)
+        return float(val)
+    }
+
+    def get_bool(section: str, key: str) -> bool {
+        # Return the boolean value of a key.
+        # Recognizes: true, yes, on, 1 (case-sensitive) as true.
+        # Everything else is false.
+        const val: str = self.get(section, key)
+        if val == "true" { return true }
+        if val == "yes" { return true }
+        if val == "on" { return true }
+        if val == "1" { return true }
+        return false
+    }
+
+    #--- Mutation methods ---#
+
+    def set(section: str, key: str, value: str) {
+        # Set a key-value pair in a section. Creates the section if needed.
+        # If the key already exists, its value is overwritten.
+        idx: int = self._find_section(section)
+        if idx < 0 {
+            self.add_section(section)
+            idx = self._find_section(section)
+        }
+        const kidx: int = self._find_key(idx, key)
+        if kidx >= 0 {
+            # Overwrite existing value
+            self.section_values[idx][kidx] = value
+        } else {
+            # Append new key-value pair
+            self.section_keys[idx].append(key)
+            self.section_values[idx].append(value)
+        }
+    }
+
+    def add_section(name: str) {
+        # Add a new empty section. No-op if the section already exists.
+        const idx: int = self._find_section(name)
+        if idx < 0 {
+            self.section_names.append(name)
+            empty_keys: list[str] = []
+            empty_vals: list[str] = []
+            self.section_keys.append(empty_keys)
+            self.section_values.append(empty_vals)
+        }
+    }
+
+    #--- Iteration and serialization ---#
+
+    def items(section: str) -> list[list[str]] {
+        # Return a list of [key, value] pairs for the named section.
+        const idx: int = self._find_section(section)
+        if idx < 0 {
+            raise ValueError(f"section not found: {section}")
+        }
+        result: list[list[str]] = []
+        const keys: list[str] = self.section_keys[idx]
+        const vals: list[str] = self.section_values[idx]
+        i: int = 0
+        while i < len(keys) {
+            pair: list[str] = [keys[i], vals[i]]
+            result.append(pair)
+            i = i + 1
+        }
+        return result
+    }
+
+    def to_string() -> str {
+        # Serialize the entire configuration back to INI format.
+        result: str = ""
+        i: int = 0
+        while i < len(self.section_names) {
+            if i > 0 {
+                result = result + "\n"
+            }
+            result = result + "[" + self.section_names[i] + "]\n"
+            const keys: list[str] = self.section_keys[i]
+            const vals: list[str] = self.section_values[i]
+            j: int = 0
+            while j < len(keys) {
+                result = result + keys[j] + " = " + vals[j] + "\n"
+                j = j + 1
+            }
+            i = i + 1
+        }
+        return result
+    }
+}

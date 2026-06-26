@@ -1,0 +1,1837 @@
+# drs.dr - Dragon standard library: Dragon Script (.drs) parser
+#
+# Per Decision 023. Returns native dict[str, Any] / list[Any] values made
+# possible by D039 (Native Any). No box-dict workaround layer - values
+# round-trip through Dragon's actual type system.
+#
+# Surface: single-quoted/backtick/triple-quoted strings (double quotes are
+# rejected), bare and typed key=value, nested {}, lists, numbers, bools, None;
+# header bindings (use/include), ${} expressions, and if/else + for; dumps()
+# emits a dict[str, Any] back to .drs text; parse errors carry line/column.
+
+#===----------------------------------------------------------------------===#
+# Extern C helpers
+#===----------------------------------------------------------------------===#
+
+extern "C" def dragon_str_to_int(s: str) -> int
+extern "C" def dragon_str_to_float(s: str) -> float
+extern "C" def dragon_int_to_str(value: int) -> str
+extern "C" def dragon_float_to_str(value: float) -> str
+extern "C" def dragon_file_open(path: str, mode: str) -> ptr
+extern "C" def dragon_file_read(handle: ptr) -> str
+extern "C" def dragon_file_close(handle: ptr)
+extern "C" def dragon_dict_keys(d: dict) -> list[str]
+extern "C" def dragon_raise_exc(code: int, msg: str)
+
+#===----------------------------------------------------------------------===#
+# Token type constants
+#===----------------------------------------------------------------------===#
+
+const TK_EOF: int = 0
+const TK_LBRACE: int = 1
+const TK_RBRACE: int = 2
+const TK_LBRACKET: int = 3
+const TK_RBRACKET: int = 4
+const TK_EQUALS: int = 5
+const TK_COLON: int = 6
+const TK_COMMA: int = 7
+const TK_STRING: int = 8
+const TK_RAW_STRING: int = 9
+const TK_INT: int = 10
+const TK_FLOAT: int = 11
+const TK_TRUE: int = 12
+const TK_FALSE: int = 13
+const TK_NONE: int = 14
+const TK_IDENT: int = 15
+const TK_DOLLAR_BRACE: int = 16
+const TK_IF: int = 17
+const TK_ELSE: int = 18
+const TK_FOR: int = 19
+const TK_IN: int = 20
+const TK_RANGE: int = 21
+const TK_USE: int = 22
+const TK_INCLUDE: int = 23
+const TK_AND: int = 24
+const TK_OR: int = 25
+const TK_NOT: int = 26
+const TK_QUESTION: int = 27
+const TK_TERNARY_COLON: int = 28
+const TK_EQ_EQ: int = 29
+const TK_NOT_EQ: int = 30
+const TK_LT: int = 31
+const TK_GT: int = 32
+const TK_LT_EQ: int = 33
+const TK_GT_EQ: int = 34
+const TK_PLUS: int = 35
+const TK_MINUS: int = 36
+const TK_STAR: int = 37
+const TK_SLASH: int = 38
+const TK_PERCENT: int = 39
+const TK_LPAREN: int = 40
+const TK_RPAREN: int = 41
+const TK_NEWLINE: int = 42
+
+#===----------------------------------------------------------------------===#
+# Character predicates
+#===----------------------------------------------------------------------===#
+
+def _is_digit(ch: str) -> bool {
+    return ch in "0123456789"
+}
+
+def _is_alpha(ch: str) -> bool {
+    return ch in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_"
+}
+
+def _is_alnum(ch: str) -> bool {
+    if _is_alpha(ch) { return true }
+    if _is_digit(ch) { return true }
+    return false
+}
+
+#===----------------------------------------------------------------------===#
+# Error reporting (Phase 6)
+#===----------------------------------------------------------------------===#
+
+def _err(msg: str, line: int, col: int) -> None {
+    full: str = msg + " at line " + dragon_int_to_str(line) + ", column " + dragon_int_to_str(col)
+    dragon_raise_exc(80, full)
+}
+
+#===----------------------------------------------------------------------===#
+# Phase 0: Tokenizer
+#
+# Returns a flat list[int] with 4 ints per token: [type, start, end, line].
+# Comments (# line, /* block */) are discarded. Double quotes raise a clear
+# parse error per D023 design rule.
+#===----------------------------------------------------------------------===#
+
+def _tokenize(src: str) -> list[int] {
+    tokens: list[int] = []
+    n: int = len(src)
+    i: int = 0
+    line: int = 1
+    line_start: int = 0
+    while i < n {
+        ch: str = src[i:i+1]
+
+        if ch == " " { i = i + 1; continue }
+        if ch == "\t" { i = i + 1; continue }
+        if ch == "\r" { i = i + 1; continue }
+
+        if ch == "\n" {
+            tokens.append(TK_NEWLINE)
+            tokens.append(i)
+            tokens.append(i + 1)
+            tokens.append(line)
+            i = i + 1
+            line = line + 1
+            line_start = i
+            continue
+        }
+
+        # Line comment (#...)
+        if ch == "#" {
+            while i < n {
+                c2: str = src[i:i+1]
+                if c2 == "\n" { break }
+                i = i + 1
+            }
+            continue
+        }
+
+        # Block comment (/*...*/) - falls through to TK_SLASH if not /*
+        if ch == "/" {
+            if i + 1 < n {
+                nxt: str = src[i+1:i+2]
+                if nxt == "*" {
+                    i = i + 2
+                    while i + 1 < n {
+                        c3: str = src[i:i+1]
+                        c4: str = src[i+1:i+2]
+                        if c3 == "*" {
+                            if c4 == "/" {
+                                i = i + 2
+                                break
+                            }
+                        }
+                        if c3 == "\n" {
+                            line = line + 1
+                            line_start = i + 1
+                        }
+                        i = i + 1
+                    }
+                    continue
+                }
+            }
+            tokens.append(TK_SLASH)
+            tokens.append(i)
+            tokens.append(i + 1)
+            tokens.append(line)
+            i = i + 1
+            continue
+        }
+
+        # Double quote - forbidden
+        if ch == "\"" {
+            col: int = i - line_start + 1
+            _err("Double quotes are not allowed in .drs files. Use single quotes or backticks instead", line, col)
+        }
+
+        # Single-quoted string (also triple-quoted '''...''')
+        if ch == "'" {
+            is_triple: bool = false
+            if i + 2 < n {
+                a: str = src[i+1:i+2]
+                b: str = src[i+2:i+3]
+                if a == "'" {
+                    if b == "'" { is_triple = true }
+                }
+            }
+            start_pos: int = i
+            start_line: int = line
+            if is_triple {
+                i = i + 3
+                while i + 2 < n {
+                    p: str = src[i:i+1]
+                    q: str = src[i+1:i+2]
+                    r: str = src[i+2:i+3]
+                    if p == "'" {
+                        if q == "'" {
+                            if r == "'" {
+                                i = i + 3
+                                tokens.append(TK_STRING)
+                                tokens.append(start_pos)
+                                tokens.append(i)
+                                tokens.append(start_line)
+                                break
+                            }
+                        }
+                    }
+                    if p == "\n" {
+                        line = line + 1
+                        line_start = i + 1
+                    }
+                    i = i + 1
+                }
+                continue
+            }
+            i = i + 1
+            while i < n {
+                c5: str = src[i:i+1]
+                if c5 == "\\" {
+                    i = i + 2
+                    continue
+                }
+                if c5 == "'" {
+                    i = i + 1
+                    tokens.append(TK_STRING)
+                    tokens.append(start_pos)
+                    tokens.append(i)
+                    tokens.append(start_line)
+                    break
+                }
+                if c5 == "\n" {
+                    line = line + 1
+                    line_start = i + 1
+                }
+                i = i + 1
+            }
+            continue
+        }
+
+        # Backtick raw string (also triple-backtick ```...```)
+        if ch == "`" {
+            is_triple_r: bool = false
+            if i + 2 < n {
+                a2: str = src[i+1:i+2]
+                b2: str = src[i+2:i+3]
+                if a2 == "`" {
+                    if b2 == "`" { is_triple_r = true }
+                }
+            }
+            start_pos2: int = i
+            start_line2: int = line
+            if is_triple_r {
+                i = i + 3
+                while i + 2 < n {
+                    p2: str = src[i:i+1]
+                    q2: str = src[i+1:i+2]
+                    r2: str = src[i+2:i+3]
+                    if p2 == "`" {
+                        if q2 == "`" {
+                            if r2 == "`" {
+                                i = i + 3
+                                tokens.append(TK_RAW_STRING)
+                                tokens.append(start_pos2)
+                                tokens.append(i)
+                                tokens.append(start_line2)
+                                break
+                            }
+                        }
+                    }
+                    if p2 == "\n" {
+                        line = line + 1
+                        line_start = i + 1
+                    }
+                    i = i + 1
+                }
+                continue
+            }
+            i = i + 1
+            while i < n {
+                c6: str = src[i:i+1]
+                if c6 == "`" {
+                    i = i + 1
+                    tokens.append(TK_RAW_STRING)
+                    tokens.append(start_pos2)
+                    tokens.append(i)
+                    tokens.append(start_line2)
+                    break
+                }
+                if c6 == "\n" {
+                    line = line + 1
+                    line_start = i + 1
+                }
+                i = i + 1
+            }
+            continue
+        }
+
+        # Number - int or float. Negative handled at parse-time (unary minus).
+        if _is_digit(ch) {
+            num_start: int = i
+            is_float: bool = false
+            while i < n {
+                c7: str = src[i:i+1]
+                if _is_digit(c7) { i = i + 1; continue }
+                if c7 == "." {
+                    if is_float { break }
+                    if i + 1 < n {
+                        nxt2: str = src[i+1:i+2]
+                        if _is_digit(nxt2) {
+                            is_float = true
+                            i = i + 1
+                            continue
+                        }
+                    }
+                    break
+                }
+                break
+            }
+            if is_float { tokens.append(TK_FLOAT) } else { tokens.append(TK_INT) }
+            tokens.append(num_start)
+            tokens.append(i)
+            tokens.append(line)
+            continue
+        }
+
+        # Identifier or keyword
+        if _is_alpha(ch) {
+            id_start: int = i
+            while i < n {
+                c8: str = src[i:i+1]
+                if _is_alnum(c8) { i = i + 1; continue }
+                break
+            }
+            id_text: str = src[id_start:i]
+            tk: int = TK_IDENT
+            if id_text == "true" { tk = TK_TRUE }
+            if id_text == "false" { tk = TK_FALSE }
+            if id_text == "None" { tk = TK_NONE }
+            if id_text == "if" { tk = TK_IF }
+            if id_text == "else" { tk = TK_ELSE }
+            if id_text == "for" { tk = TK_FOR }
+            if id_text == "in" { tk = TK_IN }
+            if id_text == "range" { tk = TK_RANGE }
+            if id_text == "use" { tk = TK_USE }
+            if id_text == "include" { tk = TK_INCLUDE }
+            if id_text == "and" { tk = TK_AND }
+            if id_text == "or" { tk = TK_OR }
+            if id_text == "not" { tk = TK_NOT }
+            tokens.append(tk)
+            tokens.append(id_start)
+            tokens.append(i)
+            tokens.append(line)
+            continue
+        }
+
+        # ${...}
+        if ch == "$" {
+            if i + 1 < n {
+                nxt3: str = src[i+1:i+2]
+                if nxt3 == "{" {
+                    tokens.append(TK_DOLLAR_BRACE)
+                    tokens.append(i)
+                    tokens.append(i + 2)
+                    tokens.append(line)
+                    i = i + 2
+                    continue
+                }
+            }
+        }
+
+        # Punctuation
+        if ch == "{" { tokens.append(TK_LBRACE); tokens.append(i); tokens.append(i + 1); tokens.append(line); i = i + 1; continue }
+        if ch == "}" { tokens.append(TK_RBRACE); tokens.append(i); tokens.append(i + 1); tokens.append(line); i = i + 1; continue }
+        if ch == "[" { tokens.append(TK_LBRACKET); tokens.append(i); tokens.append(i + 1); tokens.append(line); i = i + 1; continue }
+        if ch == "]" { tokens.append(TK_RBRACKET); tokens.append(i); tokens.append(i + 1); tokens.append(line); i = i + 1; continue }
+        if ch == "(" { tokens.append(TK_LPAREN); tokens.append(i); tokens.append(i + 1); tokens.append(line); i = i + 1; continue }
+        if ch == ")" { tokens.append(TK_RPAREN); tokens.append(i); tokens.append(i + 1); tokens.append(line); i = i + 1; continue }
+        if ch == "," { tokens.append(TK_COMMA); tokens.append(i); tokens.append(i + 1); tokens.append(line); i = i + 1; continue }
+        if ch == ":" { tokens.append(TK_COLON); tokens.append(i); tokens.append(i + 1); tokens.append(line); i = i + 1; continue }
+        if ch == "?" { tokens.append(TK_QUESTION); tokens.append(i); tokens.append(i + 1); tokens.append(line); i = i + 1; continue }
+        if ch == "+" { tokens.append(TK_PLUS); tokens.append(i); tokens.append(i + 1); tokens.append(line); i = i + 1; continue }
+        if ch == "-" { tokens.append(TK_MINUS); tokens.append(i); tokens.append(i + 1); tokens.append(line); i = i + 1; continue }
+        if ch == "*" { tokens.append(TK_STAR); tokens.append(i); tokens.append(i + 1); tokens.append(line); i = i + 1; continue }
+        if ch == "%" { tokens.append(TK_PERCENT); tokens.append(i); tokens.append(i + 1); tokens.append(line); i = i + 1; continue }
+        if ch == "=" {
+            if i + 1 < n {
+                nxt4: str = src[i+1:i+2]
+                if nxt4 == "=" {
+                    tokens.append(TK_EQ_EQ); tokens.append(i); tokens.append(i + 2); tokens.append(line); i = i + 2; continue
+                }
+            }
+            tokens.append(TK_EQUALS); tokens.append(i); tokens.append(i + 1); tokens.append(line); i = i + 1; continue
+        }
+        if ch == "!" {
+            if i + 1 < n {
+                nxt5: str = src[i+1:i+2]
+                if nxt5 == "=" {
+                    tokens.append(TK_NOT_EQ); tokens.append(i); tokens.append(i + 2); tokens.append(line); i = i + 2; continue
+                }
+            }
+        }
+        if ch == "<" {
+            if i + 1 < n {
+                nxt6: str = src[i+1:i+2]
+                if nxt6 == "=" {
+                    tokens.append(TK_LT_EQ); tokens.append(i); tokens.append(i + 2); tokens.append(line); i = i + 2; continue
+                }
+            }
+            tokens.append(TK_LT); tokens.append(i); tokens.append(i + 1); tokens.append(line); i = i + 1; continue
+        }
+        if ch == ">" {
+            if i + 1 < n {
+                nxt7: str = src[i+1:i+2]
+                if nxt7 == "=" {
+                    tokens.append(TK_GT_EQ); tokens.append(i); tokens.append(i + 2); tokens.append(line); i = i + 2; continue
+                }
+            }
+            tokens.append(TK_GT); tokens.append(i); tokens.append(i + 1); tokens.append(line); i = i + 1; continue
+        }
+
+        col2: int = i - line_start + 1
+        _err("Unexpected character '" + ch + "'", line, col2)
+    }
+    tokens.append(TK_EOF)
+    tokens.append(n)
+    tokens.append(n)
+    tokens.append(line)
+    return tokens
+}
+
+#===----------------------------------------------------------------------===#
+# Token-stream helpers
+#===----------------------------------------------------------------------===#
+
+def _tk(tokens: list[int], pos: list[int]) -> int {
+    p: int = pos[0]
+    return tokens[p * 4]
+}
+
+def _tk_start(tokens: list[int], pos: list[int]) -> int {
+    p: int = pos[0]
+    return tokens[p * 4 + 1]
+}
+
+def _tk_end(tokens: list[int], pos: list[int]) -> int {
+    p: int = pos[0]
+    return tokens[p * 4 + 2]
+}
+
+def _tk_line(tokens: list[int], pos: list[int]) -> int {
+    p: int = pos[0]
+    return tokens[p * 4 + 3]
+}
+
+def _tk_text(src: str, tokens: list[int], pos: list[int]) -> str {
+    return src[_tk_start(tokens, pos):_tk_end(tokens, pos)]
+}
+
+def _adv(pos: list[int]) -> None {
+    pos[0] = pos[0] + 1
+}
+
+def _skip_nl(tokens: list[int], pos: list[int]) -> None {
+    while _tk(tokens, pos) == TK_NEWLINE {
+        _adv(pos)
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# String content extractors
+#===----------------------------------------------------------------------===#
+
+def _unescape(s: str) -> str {
+    out: str = ""
+    n: int = len(s)
+    i: int = 0
+    while i < n {
+        ch: str = s[i:i+1]
+        if ch == "\\" {
+            if i + 1 < n {
+                nxt: str = s[i+1:i+2]
+                if nxt == "n" { out = out + "\n"; i = i + 2; continue }
+                if nxt == "t" { out = out + "\t"; i = i + 2; continue }
+                if nxt == "r" { out = out + "\r"; i = i + 2; continue }
+                if nxt == "\\" { out = out + "\\"; i = i + 2; continue }
+                if nxt == "'" { out = out + "'"; i = i + 2; continue }
+                out = out + nxt
+                i = i + 2
+                continue
+            }
+        }
+        out = out + ch
+        i = i + 1
+    }
+    return out
+}
+
+def _str_content(src: str, tokens: list[int], pos: list[int]) -> str {
+    s: int = _tk_start(tokens, pos)
+    e: int = _tk_end(tokens, pos)
+    if e - s >= 6 {
+        if src[s:s+3] == "'''" {
+            return _unescape(src[s+3:e-3])
+        }
+    }
+    return _unescape(src[s+1:e-1])
+}
+
+def _raw_content(src: str, tokens: list[int], pos: list[int]) -> str {
+    s: int = _tk_start(tokens, pos)
+    e: int = _tk_end(tokens, pos)
+    if e - s >= 6 {
+        if src[s:s+3] == "```" {
+            return src[s+3:e-3]
+        }
+    }
+    return src[s+1:e-1]
+}
+
+#===----------------------------------------------------------------------===#
+# Helper: skip a type annotation token sequence `: type` (with optional
+# generic args). Dragon's runtime doesn't enforce drs annotations; they're
+# documentation. We accept and discard.
+#===----------------------------------------------------------------------===#
+
+def _skip_type_ann(tokens: list[int], pos: list[int]) -> None {
+    _skip_nl(tokens, pos)
+    if _tk(tokens, pos) != TK_COLON { return }
+    _adv(pos)
+    if _tk(tokens, pos) == TK_IDENT {
+        _adv(pos)
+        if _tk(tokens, pos) == TK_LBRACKET {
+            depth: int = 1
+            _adv(pos)
+            while depth > 0 {
+                tt: int = _tk(tokens, pos)
+                if tt == TK_EOF {
+                    _err("Unterminated type annotation", _tk_line(tokens, pos), 1)
+                }
+                if tt == TK_LBRACKET { depth = depth + 1 }
+                if tt == TK_RBRACKET { depth = depth - 1 }
+                _adv(pos)
+            }
+        }
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# Phase 3: Expression evaluator for ${...} blocks.
+#
+# Recursive-descent with operator precedence (lowest at the top):
+#  ternary -> or -> and -> not -> comparison -> add/sub -> mul/div/mod
+#  -> unary -> primary (literals, idents, parens)
+#
+# Each level returns Any (boxed value). Arithmetic / comparison helpers tag-
+# dispatch on the operands - int + int -> int, float + float -> float,
+# int + float -> float (promotion), str + str -> str concat.
+#===----------------------------------------------------------------------===#
+
+# Truthiness for box values, per Python semantics.
+def _box_truthy(v: Any) -> bool {
+    if v is None { return false }
+    if isinstance(v, bool) { return v }
+    if isinstance(v, int) {
+        n: int = v
+        return n != 0
+    }
+    if isinstance(v, float) {
+        f: float = v
+        return f != 0.0
+    }
+    if isinstance(v, str) {
+        s: str = v
+        return len(s) > 0
+    }
+    if isinstance(v, list) {
+        l: list[Any] = v
+        return len(l) > 0
+    }
+    if isinstance(v, dict) {
+        d: dict[str, Any] = v
+        return len(d) > 0
+    }
+    return true
+}
+
+def _box_to_int(v: Any) -> int {
+    if isinstance(v, int) { return v }
+    if isinstance(v, bool) {
+        b: bool = v
+        if b { return 1 } else { return 0 }
+    }
+    if isinstance(v, float) {
+        f: float = v
+        return int(f)
+    }
+    if isinstance(v, str) {
+        s: str = v
+        return dragon_str_to_int(s)
+    }
+    return 0
+}
+
+def _box_to_str(v: Any) -> str {
+    if isinstance(v, str) { return v }
+    if isinstance(v, int) {
+        n: int = v
+        return dragon_int_to_str(n)
+    }
+    if isinstance(v, float) {
+        f: float = v
+        return dragon_float_to_str(f)
+    }
+    if isinstance(v, bool) {
+        b: bool = v
+        if b { return "true" } else { return "false" }
+    }
+    if v is None { return "None" }
+    return ""
+}
+
+def _box_eq(a: Any, b: Any) -> bool {
+    if isinstance(a, str) {
+        if isinstance(b, str) {
+            sa: str = a
+            sb: str = b
+            return sa == sb
+        }
+        return false
+    }
+    if isinstance(a, int) {
+        if isinstance(b, int) {
+            ia: int = a
+            ib: int = b
+            return ia == ib
+        }
+        if isinstance(b, float) {
+            ia2: int = a
+            fb: float = b
+            return ia2 == fb
+        }
+        return false
+    }
+    if isinstance(a, float) {
+        if isinstance(b, float) {
+            fa: float = a
+            fb2: float = b
+            return fa == fb2
+        }
+        if isinstance(b, int) {
+            fa2: float = a
+            ib2: int = b
+            return fa2 == ib2
+        }
+        return false
+    }
+    if isinstance(a, bool) {
+        if isinstance(b, bool) {
+            ba: bool = a
+            bb: bool = b
+            return ba == bb
+        }
+        return false
+    }
+    if a is None {
+        if b is None { return true }
+        return false
+    }
+    return false
+}
+
+# Primary: literal, variable ref, parenthesised expression.
+def _eval_primary(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any]) -> Any {
+    _skip_nl(tokens, pos)
+    tk: int = _tk(tokens, pos)
+    if tk == TK_INT {
+        t: str = _tk_text(src, tokens, pos)
+        _adv(pos)
+        return dragon_str_to_int(t)
+    }
+    if tk == TK_FLOAT {
+        t2: str = _tk_text(src, tokens, pos)
+        _adv(pos)
+        return dragon_str_to_float(t2)
+    }
+    if tk == TK_STRING {
+        s: str = _str_content(src, tokens, pos)
+        _adv(pos)
+        return s
+    }
+    if tk == TK_RAW_STRING {
+        r: str = _raw_content(src, tokens, pos)
+        _adv(pos)
+        return r
+    }
+    if tk == TK_TRUE { _adv(pos); return true }
+    if tk == TK_FALSE { _adv(pos); return false }
+    if tk == TK_NONE { _adv(pos); return None }
+    if tk == TK_LPAREN {
+        _adv(pos)
+        v: Any = _eval_ternary(src, tokens, pos, bindings)
+        if _tk(tokens, pos) != TK_RPAREN {
+            _err("Expected ')' in expression", _tk_line(tokens, pos), 1)
+        }
+        _adv(pos)
+        return v
+    }
+    if tk == TK_IDENT {
+        name: str = _tk_text(src, tokens, pos)
+        _adv(pos)
+        if name in bindings {
+            return bindings[name]
+        }
+        _err("Undefined variable '" + name + "' in expression", _tk_line(tokens, pos), 1)
+    }
+    _err("Unexpected token in expression", _tk_line(tokens, pos), 1)
+    return None
+}
+
+# Unary: -expr, not expr (not is handled at a separate precedence level).
+def _eval_unary(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any]) -> Any {
+    if _tk(tokens, pos) == TK_MINUS {
+        _adv(pos)
+        v: Any = _eval_unary(src, tokens, pos, bindings)
+        if isinstance(v, int) {
+            n: int = v
+            return 0 - n
+        }
+        if isinstance(v, float) {
+            f: float = v
+            return 0.0 - f
+        }
+        _err("Unary '-' requires a numeric operand", _tk_line(tokens, pos), 1)
+    }
+    return _eval_primary(src, tokens, pos, bindings)
+}
+
+# Multiplication, division, modulo.
+def _eval_mul(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any]) -> Any {
+    left: Any = _eval_unary(src, tokens, pos, bindings)
+    while true {
+        tk: int = _tk(tokens, pos)
+        if tk != TK_STAR {
+            if tk != TK_SLASH {
+                if tk != TK_PERCENT { break }
+            }
+        }
+        _adv(pos)
+        right: Any = _eval_unary(src, tokens, pos, bindings)
+        # Numeric dispatch; floats promote.
+        lf: bool = isinstance(left, float)
+        rf: bool = isinstance(right, float)
+        if lf or rf {
+            la: float = _box_to_int(left)
+            ra: float = _box_to_int(right)
+            if lf { la = left }
+            if rf { ra = right }
+            if tk == TK_STAR { left = la * ra }
+            if tk == TK_SLASH {
+                if ra == 0.0 { _err("Division by zero", _tk_line(tokens, pos), 1) }
+                left = la / ra
+            }
+            if tk == TK_PERCENT {
+                if ra == 0.0 { _err("Modulo by zero", _tk_line(tokens, pos), 1) }
+                left = la - (ra * (la / ra))
+            }
+        } else {
+            li: int = _box_to_int(left)
+            ri: int = _box_to_int(right)
+            if tk == TK_STAR { left = li * ri }
+            if tk == TK_SLASH {
+                if ri == 0 { _err("Division by zero", _tk_line(tokens, pos), 1) }
+                left = li / ri
+            }
+            if tk == TK_PERCENT {
+                if ri == 0 { _err("Modulo by zero", _tk_line(tokens, pos), 1) }
+                left = li % ri
+            }
+        }
+    }
+    return left
+}
+
+# Addition, subtraction (also string concat for `+`).
+def _eval_add(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any]) -> Any {
+    left: Any = _eval_mul(src, tokens, pos, bindings)
+    while true {
+        tk: int = _tk(tokens, pos)
+        if tk != TK_PLUS {
+            if tk != TK_MINUS { break }
+        }
+        _adv(pos)
+        right: Any = _eval_mul(src, tokens, pos, bindings)
+        # String concat: only when both sides are strings.
+        if tk == TK_PLUS {
+            if isinstance(left, str) {
+                if isinstance(right, str) {
+                    ls: str = left
+                    rs: str = right
+                    left = ls + rs
+                    continue
+                }
+            }
+        }
+        lf: bool = isinstance(left, float)
+        rf: bool = isinstance(right, float)
+        if lf or rf {
+            la: float = _box_to_int(left)
+            ra: float = _box_to_int(right)
+            if lf { la = left }
+            if rf { ra = right }
+            if tk == TK_PLUS { left = la + ra } else { left = la - ra }
+        } else {
+            li: int = _box_to_int(left)
+            ri: int = _box_to_int(right)
+            if tk == TK_PLUS { left = li + ri } else { left = li - ri }
+        }
+    }
+    return left
+}
+
+# Comparison: ==, !=, <, >, <=, >=
+def _eval_cmp(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any]) -> Any {
+    left: Any = _eval_add(src, tokens, pos, bindings)
+    tk: int = _tk(tokens, pos)
+    if tk == TK_EQ_EQ {
+        _adv(pos)
+        right: Any = _eval_add(src, tokens, pos, bindings)
+        return _box_eq(left, right)
+    }
+    if tk == TK_NOT_EQ {
+        _adv(pos)
+        r2: Any = _eval_add(src, tokens, pos, bindings)
+        return not _box_eq(left, r2)
+    }
+    if tk == TK_LT {
+        _adv(pos)
+        r3: Any = _eval_add(src, tokens, pos, bindings)
+        if isinstance(left, float) {
+            la: float = left
+            ra: float = _box_to_int(r3)
+            if isinstance(r3, float) { ra = r3 }
+            return la < ra
+        }
+        if isinstance(r3, float) {
+            la2: float = _box_to_int(left)
+            ra2: float = r3
+            return la2 < ra2
+        }
+        li: int = _box_to_int(left)
+        ri: int = _box_to_int(r3)
+        return li < ri
+    }
+    if tk == TK_GT {
+        _adv(pos)
+        r4: Any = _eval_add(src, tokens, pos, bindings)
+        if isinstance(left, float) {
+            la3: float = left
+            ra3: float = _box_to_int(r4)
+            if isinstance(r4, float) { ra3 = r4 }
+            return la3 > ra3
+        }
+        if isinstance(r4, float) {
+            la4: float = _box_to_int(left)
+            ra4: float = r4
+            return la4 > ra4
+        }
+        li2: int = _box_to_int(left)
+        ri2: int = _box_to_int(r4)
+        return li2 > ri2
+    }
+    if tk == TK_LT_EQ {
+        _adv(pos)
+        r5: Any = _eval_add(src, tokens, pos, bindings)
+        if isinstance(left, float) {
+            la5: float = left
+            ra5: float = _box_to_int(r5)
+            if isinstance(r5, float) { ra5 = r5 }
+            return la5 <= ra5
+        }
+        if isinstance(r5, float) {
+            la6: float = _box_to_int(left)
+            ra6: float = r5
+            return la6 <= ra6
+        }
+        li3: int = _box_to_int(left)
+        ri3: int = _box_to_int(r5)
+        return li3 <= ri3
+    }
+    if tk == TK_GT_EQ {
+        _adv(pos)
+        r6: Any = _eval_add(src, tokens, pos, bindings)
+        if isinstance(left, float) {
+            la7: float = left
+            ra7: float = _box_to_int(r6)
+            if isinstance(r6, float) { ra7 = r6 }
+            return la7 >= ra7
+        }
+        if isinstance(r6, float) {
+            la8: float = _box_to_int(left)
+            ra8: float = r6
+            return la8 >= ra8
+        }
+        li4: int = _box_to_int(left)
+        ri4: int = _box_to_int(r6)
+        return li4 >= ri4
+    }
+    return left
+}
+
+# Logical not
+def _eval_not(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any]) -> Any {
+    if _tk(tokens, pos) == TK_NOT {
+        _adv(pos)
+        v: Any = _eval_not(src, tokens, pos, bindings)
+        return not _box_truthy(v)
+    }
+    return _eval_cmp(src, tokens, pos, bindings)
+}
+
+def _eval_and(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any]) -> Any {
+    left: Any = _eval_not(src, tokens, pos, bindings)
+    while _tk(tokens, pos) == TK_AND {
+        _adv(pos)
+        right: Any = _eval_not(src, tokens, pos, bindings)
+        if _box_truthy(left) {
+            left = right
+        }
+    }
+    return left
+}
+
+def _eval_or(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any]) -> Any {
+    left: Any = _eval_and(src, tokens, pos, bindings)
+    while _tk(tokens, pos) == TK_OR {
+        _adv(pos)
+        right: Any = _eval_and(src, tokens, pos, bindings)
+        if not _box_truthy(left) {
+            left = right
+        }
+    }
+    return left
+}
+
+# Top-level expression entry - supports ternary `cond ? then_v : else_v`.
+def _eval_ternary(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any]) -> Any {
+    cond: Any = _eval_or(src, tokens, pos, bindings)
+    if _tk(tokens, pos) == TK_QUESTION {
+        _adv(pos)
+        then_v: Any = _eval_or(src, tokens, pos, bindings)
+        if _tk(tokens, pos) != TK_COLON {
+            _err("Expected ':' in ternary expression", _tk_line(tokens, pos), 1)
+        }
+        _adv(pos)
+        else_v: Any = _eval_or(src, tokens, pos, bindings)
+        if _box_truthy(cond) { return then_v }
+        return else_v
+    }
+    return cond
+}
+
+# Convenience: tokenize an expression substring and evaluate.
+def _eval_expr_text(expr_src: str, bindings: dict[str, Any]) -> Any {
+    toks: list[int] = _tokenize(expr_src)
+    p: list[int] = [0]
+    return _eval_ternary(expr_src, toks, p, bindings)
+}
+
+# String interpolation: scan a parsed-string `s` for `${expr}` markers and
+# replace each with the stringified evaluated value.
+def _interp_str(s: str, bindings: dict[str, Any]) -> str {
+    n: int = len(s)
+    out: str = ""
+    i: int = 0
+    while i < n {
+        ch: str = s[i:i+1]
+        if ch == "$" {
+            if i + 1 < n {
+                if s[i+1:i+2] == "{" {
+                    # Find matching '}' (no nesting allowed inside ${...} per spec)
+                    j: int = i + 2
+                    depth: int = 1
+                    while j < n {
+                        cj: str = s[j:j+1]
+                        if cj == "{" { depth = depth + 1 }
+                        if cj == "}" {
+                            depth = depth - 1
+                            if depth == 0 { break }
+                        }
+                        j = j + 1
+                    }
+                    if depth != 0 {
+                        return out + s[i:n]
+                    }
+                    expr_text: str = s[i+2:j]
+                    v: Any = _eval_expr_text(expr_text, bindings)
+                    out = out + _box_to_str(v)
+                    i = j + 1
+                    continue
+                }
+            }
+        }
+        out = out + ch
+        i = i + 1
+    }
+    return out
+}
+
+#===----------------------------------------------------------------------===#
+# Phase 1 + 3 + 4: Recursive-descent value parser with header bindings,
+# ${} expressions, `if/else`, `for`, and `use` composition.
+#
+# _parse_value returns Any directly (no intermediate box-dict). Nested
+# objects and lists are materialized as dict[str, Any] and list[Any] so the
+# whole tree is uniformly typed.
+#===----------------------------------------------------------------------===#
+
+def _parse_value(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any]) -> Any {
+    _skip_nl(tokens, pos)
+    tk: int = _tk(tokens, pos)
+
+    if tk == TK_STRING {
+        s: str = _str_content(src, tokens, pos)
+        _adv(pos)
+        # Phase 3: interpolate ${} markers in single-quoted strings.
+        return _interp_str(s, bindings)
+    }
+    if tk == TK_RAW_STRING {
+        r: str = _raw_content(src, tokens, pos)
+        _adv(pos)
+        return r
+    }
+    if tk == TK_INT {
+        txt: str = _tk_text(src, tokens, pos)
+        _adv(pos)
+        return dragon_str_to_int(txt)
+    }
+    if tk == TK_FLOAT {
+        ftxt: str = _tk_text(src, tokens, pos)
+        _adv(pos)
+        return dragon_str_to_float(ftxt)
+    }
+    if tk == TK_MINUS {
+        _adv(pos)
+        nxt_tk: int = _tk(tokens, pos)
+        if nxt_tk == TK_INT {
+            ntxt: str = _tk_text(src, tokens, pos)
+            _adv(pos)
+            return 0 - dragon_str_to_int(ntxt)
+        }
+        if nxt_tk == TK_FLOAT {
+            nftxt: str = _tk_text(src, tokens, pos)
+            _adv(pos)
+            return 0.0 - dragon_str_to_float(nftxt)
+        }
+        _err("Expected a number after '-'", _tk_line(tokens, pos), 1)
+    }
+    if tk == TK_TRUE { _adv(pos); return true }
+    if tk == TK_FALSE { _adv(pos); return false }
+    if tk == TK_NONE { _adv(pos); return None }
+
+    # Phase 3: ${...} expression as a value.
+    if tk == TK_DOLLAR_BRACE {
+        _adv(pos)
+        v: Any = _eval_ternary(src, tokens, pos, bindings)
+        if _tk(tokens, pos) != TK_RBRACE {
+            _err("Expected '}' to close ${} expression", _tk_line(tokens, pos), 1)
+        }
+        _adv(pos)
+        return v
+    }
+
+    # Phase 4: for-expression - produces a list.
+    #  for IDENT in iter [if cond] { body }
+    if tk == TK_FOR {
+        return _parse_for_expr(src, tokens, pos, bindings)
+    }
+
+    # Nested object - supports `if/else`, `for`, `use`, `${}` inside.
+    if tk == TK_LBRACE {
+        _adv(pos)
+        obj: dict[str, Any] = {}
+        _parse_object_body(src, tokens, pos, bindings, obj)
+        return obj
+    }
+
+    # List
+    if tk == TK_LBRACKET {
+        _adv(pos)
+        items: list[Any] = []
+        while true {
+            _skip_nl(tokens, pos)
+            curr2: int = _tk(tokens, pos)
+            if curr2 == TK_RBRACKET { _adv(pos); break }
+            if curr2 == TK_EOF {
+                _err("Unterminated list - expected ']'", _tk_line(tokens, pos), 1)
+            }
+            if curr2 == TK_COMMA { _adv(pos); continue }
+            iv: Any = _parse_value(src, tokens, pos, bindings)
+            items.append(iv)
+            _skip_nl(tokens, pos)
+            if _tk(tokens, pos) == TK_COMMA { _adv(pos) }
+        }
+        return items
+    }
+
+    _err("Unexpected token in value position", _tk_line(tokens, pos), 1)
+    return None
+}
+
+# Phase 4: parse `for IDENT in iter [if cond] { body }` as a value.
+# `iter` may be `range(N)` or any expression that evaluates to a list.
+def _parse_for_expr(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any]) -> Any {
+    # tk is currently TK_FOR
+    _adv(pos)
+    _skip_nl(tokens, pos)
+    if _tk(tokens, pos) != TK_IDENT {
+        _err("Expected loop variable after 'for'", _tk_line(tokens, pos), 1)
+    }
+    loop_name: str = _tk_text(src, tokens, pos)
+    _adv(pos)
+    _skip_nl(tokens, pos)
+    if _tk(tokens, pos) != TK_IN {
+        _err("Expected 'in' after loop variable '" + loop_name + "'", _tk_line(tokens, pos), 1)
+    }
+    _adv(pos)
+    _skip_nl(tokens, pos)
+    # Iterable: `range(N)` or an expression yielding a list.
+    iter_list: list[Any] = []
+    if _tk(tokens, pos) == TK_RANGE {
+        _adv(pos)
+        if _tk(tokens, pos) != TK_LPAREN {
+            _err("Expected '(' after 'range'", _tk_line(tokens, pos), 1)
+        }
+        _adv(pos)
+        n_box: Any = _eval_ternary(src, tokens, pos, bindings)
+        if _tk(tokens, pos) != TK_RPAREN {
+            _err("Expected ')' after range argument", _tk_line(tokens, pos), 1)
+        }
+        _adv(pos)
+        n: int = _box_to_int(n_box)
+        if n > _DRS_MAX_RANGE {
+            _err("range(" + str(n) + ") exceeds the .drs limit of " + str(_DRS_MAX_RANGE) + " - a manifest cannot generate an unbounded list", _tk_line(tokens, pos), 1)
+        }
+        ri: int = 0
+        while ri < n {
+            iter_list.append(ri)
+            ri = ri + 1
+        }
+    } else {
+        # Any expression - must evaluate to a list.
+        iter_box: Any = _eval_ternary(src, tokens, pos, bindings)
+        if isinstance(iter_box, list) {
+            iter_list = iter_box
+        } else {
+            _err("for-expression iterable must be a list", _tk_line(tokens, pos), 1)
+        }
+    }
+    # Optional filter: `if cond`
+    has_filter: bool = false
+    filter_start: int = pos[0]
+    _skip_nl(tokens, pos)
+    if _tk(tokens, pos) == TK_IF {
+        _adv(pos)
+        has_filter = true
+        filter_start = pos[0]
+        # Skip past the filter expression - we'll re-tokenize for each iter.
+        # Strategy: find the body's `{` and remember the filter token range.
+        depth: int = 0
+        while true {
+            tt: int = _tk(tokens, pos)
+            if tt == TK_LBRACE { break }
+            if tt == TK_EOF {
+                _err("Unterminated for-expression filter", _tk_line(tokens, pos), 1)
+            }
+            _adv(pos)
+        }
+    }
+    _skip_nl(tokens, pos)
+    if _tk(tokens, pos) != TK_LBRACE {
+        _err("Expected '{' to start for-expression body", _tk_line(tokens, pos), 1)
+    }
+    body_lbrace_pos: int = pos[0]
+    _adv(pos)
+    # The body is exactly one value-producing expression OR a `{...}` block.
+    # We re-tokenize per iteration by setting pos back to body_lbrace_pos + 1
+    # after each loop. Easier path: capture body's source range and re-parse.
+    body_start_tok: int = pos[0]
+    # Advance through the body to find its matching '}'. Both `{` and `${`
+    # open brace-balanced regions that close on `}`; counting only TK_LBRACE
+    # would let `${expr}` short-close the body at its own `}`.
+    bdepth: int = 1
+    while bdepth > 0 {
+        tt2: int = _tk(tokens, pos)
+        if tt2 == TK_EOF {
+            _err("Unterminated for-expression body", _tk_line(tokens, pos), 1)
+        }
+        if tt2 == TK_LBRACE { bdepth = bdepth + 1 }
+        if tt2 == TK_DOLLAR_BRACE { bdepth = bdepth + 1 }
+        if tt2 == TK_RBRACE { bdepth = bdepth - 1 }
+        _adv(pos)
+    }
+    body_end_tok: int = pos[0] - 1  # position of the closing '}'
+    # Now iterate; for each element, re-parse the body with the loop var bound.
+    result: list[Any] = []
+    local_bindings: dict[str, Any] = bindings
+    i_iter: int = 0
+    while i_iter < len(iter_list) {
+        elem: Any = iter_list[i_iter]
+        local_bindings[loop_name] = elem
+        # Filter check
+        if has_filter {
+            fp: list[int] = [filter_start]
+            fv: Any = _eval_ternary(src, tokens, fp, local_bindings)
+            if not _box_truthy(fv) {
+                i_iter = i_iter + 1
+                continue
+            }
+        }
+        bp: list[int] = [body_start_tok]
+        body_val: Any = _parse_value(src, tokens, bp, local_bindings)
+        result.append(body_val)
+        i_iter = i_iter + 1
+    }
+    return result
+}
+
+# Phase 1 + 4: parse the body of an object (used for nested objects AND the
+# root payload). Handles `key = value`, `use NAME`, and `if cond { ... } [else { ... }]`.
+def _parse_object_body(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any], obj: dict[str, Any]) -> None {
+    while true {
+        _skip_nl(tokens, pos)
+        curr: int = _tk(tokens, pos)
+        if curr == TK_RBRACE { _adv(pos); return }
+        if curr == TK_EOF {
+            _err("Unterminated object - expected '}'", _tk_line(tokens, pos), 1)
+        }
+        if curr == TK_COMMA { _adv(pos); continue }
+
+        # `use NAME` - merge a header binding (which must be a dict) into the
+        # current object. Later keys override.
+        if curr == TK_USE {
+            _adv(pos)
+            _skip_nl(tokens, pos)
+            if _tk(tokens, pos) != TK_IDENT {
+                _err("Expected binding name after 'use'", _tk_line(tokens, pos), 1)
+            }
+            uname: str = _tk_text(src, tokens, pos)
+            _adv(pos)
+            if uname in bindings {
+                src_v: Any = bindings[uname]
+                if isinstance(src_v, dict) {
+                    sd: dict[str, Any] = src_v
+                    ukeys: list[str] = dragon_dict_keys(sd)
+                    ui: int = 0
+                    while ui < len(ukeys) {
+                        uk: str = ukeys[ui]
+                        obj[uk] = sd[uk]
+                        ui = ui + 1
+                    }
+                } else {
+                    _err("'use " + uname + "' requires a dict binding", _tk_line(tokens, pos), 1)
+                }
+            } else {
+                _err("'use' references undefined binding '" + uname + "'", _tk_line(tokens, pos), 1)
+            }
+            _skip_nl(tokens, pos)
+            if _tk(tokens, pos) == TK_COMMA { _adv(pos) }
+            continue
+        }
+
+        # `if cond { ... } else { ... }` - conditional bindings into current obj
+        if curr == TK_IF {
+            _parse_if_into_obj(src, tokens, pos, bindings, obj)
+            _skip_nl(tokens, pos)
+            if _tk(tokens, pos) == TK_COMMA { _adv(pos) }
+            continue
+        }
+
+        # key = value
+        key: str = ""
+        if curr == TK_IDENT {
+            key = _tk_text(src, tokens, pos)
+            _adv(pos)
+        } else {
+            if curr == TK_STRING {
+                key = _str_content(src, tokens, pos)
+                _adv(pos)
+            } else {
+                _err("Expected key (identifier or string)", _tk_line(tokens, pos), 1)
+            }
+        }
+        _skip_type_ann(tokens, pos)
+        _skip_nl(tokens, pos)
+        if _tk(tokens, pos) != TK_EQUALS {
+            _err("Expected '=' after key '" + key + "'", _tk_line(tokens, pos), 1)
+        }
+        _adv(pos)
+        _skip_nl(tokens, pos)
+        v: Any = _parse_value(src, tokens, pos, bindings)
+        obj[key] = v
+        _skip_nl(tokens, pos)
+        if _tk(tokens, pos) == TK_COMMA { _adv(pos) }
+    }
+}
+
+# Parse `if cond { ... } [else { ... }]` - evaluates cond at parse time and
+# recurses into the matching branch, merging its bindings into `obj`.
+def _parse_if_into_obj(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any], obj: dict[str, Any]) -> None {
+    _adv(pos)  # consume 'if'
+    _skip_nl(tokens, pos)
+    cond_v: Any = _eval_ternary(src, tokens, pos, bindings)
+    _skip_nl(tokens, pos)
+    if _tk(tokens, pos) != TK_LBRACE {
+        _err("Expected '{' after 'if' condition", _tk_line(tokens, pos), 1)
+    }
+    _adv(pos)
+    if _box_truthy(cond_v) {
+        _parse_object_body(src, tokens, pos, bindings, obj)
+        # Skip an optional else branch
+        _skip_nl(tokens, pos)
+        if _tk(tokens, pos) == TK_ELSE {
+            _adv(pos)
+            _skip_nl(tokens, pos)
+            if _tk(tokens, pos) != TK_LBRACE {
+                _err("Expected '{' after 'else'", _tk_line(tokens, pos), 1)
+            }
+            _adv(pos)
+            # Skip the else body
+            depth: int = 1
+            while depth > 0 {
+                tt: int = _tk(tokens, pos)
+                if tt == TK_EOF {
+                    _err("Unterminated else branch", _tk_line(tokens, pos), 1)
+                }
+                if tt == TK_LBRACE { depth = depth + 1 }
+                if tt == TK_RBRACE { depth = depth - 1 }
+                _adv(pos)
+            }
+        }
+    } else {
+        # Skip the then body
+        depth2: int = 1
+        while depth2 > 0 {
+            tt2: int = _tk(tokens, pos)
+            if tt2 == TK_EOF {
+                _err("Unterminated then branch", _tk_line(tokens, pos), 1)
+            }
+            if tt2 == TK_LBRACE { depth2 = depth2 + 1 }
+            if tt2 == TK_RBRACE { depth2 = depth2 - 1 }
+            _adv(pos)
+        }
+        _skip_nl(tokens, pos)
+        if _tk(tokens, pos) == TK_ELSE {
+            _adv(pos)
+            _skip_nl(tokens, pos)
+            if _tk(tokens, pos) != TK_LBRACE {
+                _err("Expected '{' after 'else'", _tk_line(tokens, pos), 1)
+            }
+            _adv(pos)
+            _parse_object_body(src, tokens, pos, bindings, obj)
+        }
+    }
+}
+
+# Header zone `if/else` - same parser but merges into the `bindings` dict.
+def _parse_if_into_bindings(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any]) -> None {
+    _parse_if_into_obj(src, tokens, pos, bindings, bindings)
+}
+
+#===----------------------------------------------------------------------===#
+# Top-level parser.
+#
+# Header zone: header bindings ( `ident = value` ) up to the bare `{` that
+# opens the root payload. Phase 1 collects bindings into a symbol table that
+# Phase 2/3/4 will reference via `use` / `${}` / `if`.
+#===----------------------------------------------------------------------===#
+
+# Hard limits on an evaluated .drs document. A manifest is parsed by the package
+# resolver BEFORE the package is trusted, so an `include`/`for` in a fetched
+# dependency's dragon.drs runs on the consumer's machine. Bound the two ways a
+# hostile manifest could abuse that: an unbounded `for i in range(N)` (memory /
+# CPU exhaustion) and a long include chain (the path traversal is blocked
+# separately in _include_drs).
+const _DRS_MAX_RANGE: int = 1000000
+const _DRS_MAX_INCLUDES: int = 64
+
+# Directory portion of `path` (everything before the last '/'); "" if none.
+def _drs_dirname(path: str) -> str {
+    i: int = len(path) - 1
+    while i >= 0 {
+        if path[i:i + 1] == "/" {
+            return path[0:i]
+        }
+        i = i - 1
+    }
+    return ""
+}
+
+# True if an include target would escape its package directory. A confined
+# include may only name a file BELOW the base dir: no absolute path, no `~`
+# home expansion, and no `..` parent-directory hop in any component. This is
+# what stops a fetched manifest doing `include '/etc/passwd'` or
+# `include '../../other-pkg/secret.drs'`.
+def _drs_unsafe_include(p: str) -> bool {
+    if len(p) == 0 {
+        return true
+    }
+    if p[0:1] == "/" {
+        return true
+    }
+    if len(p) >= 2 {
+        if p[0:2] == "~/" {
+            return true
+        }
+    }
+    if p == ".." {
+        return true
+    }
+    if len(p) >= 3 {
+        if p[0:3] == "../" {
+            return true
+        }
+        if p[len(p) - 3:] == "/.." {
+            return true
+        }
+    }
+    if "/../" in p {
+        return true
+    }
+    return false
+}
+
+# Phase 2: include another .drs file and merge its header bindings. `base_dir`
+# is the directory of the ROOT document; every include in the chain resolves
+# relative to it and is confined under it (so an intermediate include can't walk
+# the chain out of the package). An empty base_dir means the document was parsed
+# from a string (loads/parse), which has no filesystem anchor - includes are
+# rejected outright rather than silently resolving against the process cwd.
+def _include_drs(ipath: str, bindings: dict[str, Any], seen: dict[str, bool], base_dir: str) -> None {
+    if len(base_dir) == 0 {
+        dragon_raise_exc(80, "include is not allowed when parsing .drs from a string (no base directory to confine it to): '" + ipath + "'")
+    }
+    if _drs_unsafe_include(ipath) {
+        dragon_raise_exc(80, "unsafe include path (absolute or parent-directory traversal is not allowed): '" + ipath + "'")
+    }
+    if len(seen) >= _DRS_MAX_INCLUDES {
+        dragon_raise_exc(80, "too many includes (limit " + str(_DRS_MAX_INCLUDES) + ")")
+    }
+    const full: str = base_dir + "/" + ipath
+    if full in seen {
+        dragon_raise_exc(80, "Circular include: '" + ipath + "'")
+    }
+    seen[full] = true
+    h: ptr = dragon_file_open(full, "r")
+    content: str = dragon_file_read(h)
+    dragon_file_close(h)
+    # Parse the included file's header (and ignore its payload - includes
+    # only carry bindings, not data). Nested includes stay confined to base_dir.
+    toks: list[int] = _tokenize(content)
+    p: list[int] = [0]
+    _parse_header_into(content, toks, p, bindings, seen, base_dir)
+}
+
+# Header zone parser - handles `name = value`, `include`, `if/else`, `for`.
+# Mutates `bindings` in place. Returns when it hits a TK_LBRACE (root payload)
+# or TK_EOF. Reusable for include-loaded files (which have no payload).
+def _parse_header_into(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any], seen: dict[str, bool], base_dir: str) -> None {
+    while true {
+        _skip_nl(tokens, pos)
+        tk: int = _tk(tokens, pos)
+        if tk == TK_LBRACE { return }
+        if tk == TK_EOF { return }
+
+        # include 'path'
+        if tk == TK_INCLUDE {
+            _adv(pos)
+            _skip_nl(tokens, pos)
+            it: int = _tk(tokens, pos)
+            if it != TK_STRING {
+                if it != TK_RAW_STRING {
+                    _err("Expected string path after 'include'", _tk_line(tokens, pos), 1)
+                }
+            }
+            ipath: str = ""
+            if it == TK_STRING { ipath = _str_content(src, tokens, pos) }
+            if it == TK_RAW_STRING { ipath = _raw_content(src, tokens, pos) }
+            _adv(pos)
+            _include_drs(ipath, bindings, seen, base_dir)
+            continue
+        }
+
+        # if/else in header - merge bindings from the matching branch.
+        if tk == TK_IF {
+            _parse_if_into_bindings(src, tokens, pos, bindings)
+            continue
+        }
+
+        # for in header - produces a list and assigns it to a temp name?
+        # The spec uses `name = for ... { ... }`. Plain `for ...` at header
+        # level isn't useful (no target). Treat as a value-bound name=for
+        # already covered below; pure `for` standalone in header is an error.
+
+        # name = value
+        if tk == TK_IDENT {
+            hkey: str = _tk_text(src, tokens, pos)
+            _adv(pos)
+            _skip_type_ann(tokens, pos)
+            _skip_nl(tokens, pos)
+            if _tk(tokens, pos) != TK_EQUALS {
+                _err("Expected '=' after header key '" + hkey + "'", _tk_line(tokens, pos), 1)
+            }
+            _adv(pos)
+            _skip_nl(tokens, pos)
+            hval: Any = _parse_value(src, tokens, pos, bindings)
+            bindings[hkey] = hval
+            continue
+        }
+
+        _err("Unexpected token in header", _tk_line(tokens, pos), 1)
+    }
+}
+
+def _parse_drs(src: str) -> dict[str, Any] {
+    empty: dict[str, Any] = {}
+    return _parse_drs_env(src, empty)
+}
+
+# Same as _parse_drs but seeds the header `bindings` with caller-supplied
+# environment vars first, so in-file conditionals (`if platform == 'linux'`)
+# resolve against the build environment. In-file header bindings declared
+# after seeding may still override them.
+# base_dir confines `include` to a package directory (the dir of the loaded
+# file). It defaults to "" for the string-input entry points (loads/parse/...),
+# where there is no filesystem anchor and includes are therefore rejected.
+def _parse_drs_env(src: str, env: dict[str, Any], base_dir: str = "") -> dict[str, Any] {
+    tokens: list[int] = _tokenize(src)
+    pos: list[int] = [0]
+    bindings: dict[str, Any] = {}
+    ekeys: list[str] = dragon_dict_keys(env)
+    ei: int = 0
+    while ei < len(ekeys) {
+        bindings[ekeys[ei]] = env[ekeys[ei]]
+        ei = ei + 1
+    }
+    seen: dict[str, bool] = {}
+
+    _parse_header_into(src, tokens, pos, bindings, seen, base_dir)
+
+    _skip_nl(tokens, pos)
+    tk: int = _tk(tokens, pos)
+    if tk == TK_EOF {
+        _err("Missing root payload - .drs files require a top-level '{' block", _tk_line(tokens, pos), 1)
+    }
+    if tk != TK_LBRACE {
+        _err("Expected '{' to begin root payload", _tk_line(tokens, pos), 1)
+    }
+    _adv(pos)
+    payload: dict[str, Any] = {}
+    _parse_object_body(src, tokens, pos, bindings, payload)
+
+    _skip_nl(tokens, pos)
+    tail: int = _tk(tokens, pos)
+    if tail != TK_EOF {
+        _err("Unexpected content after root payload", _tk_line(tokens, pos), 1)
+    }
+    return payload
+}
+
+#===----------------------------------------------------------------------===#
+# Phase 5: dumps() - emit dict[str, Any] back to .drs text.
+#===----------------------------------------------------------------------===#
+
+def _indent(level: int) -> str {
+    out: str = ""
+    i: int = 0
+    while i < level {
+        out = out + "  "
+        i = i + 1
+    }
+    return out
+}
+
+def _escape_str(s: str) -> str {
+    out: str = ""
+    n: int = len(s)
+    i: int = 0
+    while i < n {
+        ch: str = s[i:i+1]
+        if ch == "\\" { out = out + "\\\\"; i = i + 1; continue }
+        if ch == "'" { out = out + "\\'"; i = i + 1; continue }
+        if ch == "\n" { out = out + "\\n"; i = i + 1; continue }
+        if ch == "\t" { out = out + "\\t"; i = i + 1; continue }
+        out = out + ch
+        i = i + 1
+    }
+    return out
+}
+
+# Dragon doesn't have forward declarations, so the recursive emitter is one
+# function that branches on the value's runtime type. dict/list cases inline
+# their walk and recurse via this same function.
+def _dump_value(v: Any, level: int) -> str {
+    if isinstance(v, bool) {
+        if v { return "true" } else { return "false" }
+    }
+    if isinstance(v, int) {
+        return dragon_int_to_str(v)
+    }
+    if isinstance(v, float) {
+        return dragon_float_to_str(v)
+    }
+    if isinstance(v, str) {
+        return "'" + _escape_str(v) + "'"
+    }
+    if v is None {
+        return "None"
+    }
+    if isinstance(v, dict) {
+        nested: dict[str, Any] = v
+        keys: list[str] = dragon_dict_keys(nested)
+        n: int = len(keys)
+        if n == 0 { return "{}" }
+        out: str = "{\n"
+        i: int = 0
+        while i < n {
+            k: str = keys[i]
+            cv: Any = nested[k]
+            out = out + _indent(level + 1) + k + " = " + _dump_value(cv, level + 1) + "\n"
+            i = i + 1
+        }
+        out = out + _indent(level) + "}"
+        return out
+    }
+    if isinstance(v, list) {
+        items: list[Any] = v
+        m: int = len(items)
+        if m == 0 { return "[]" }
+        lout: str = "["
+        j: int = 0
+        while j < m {
+            if j > 0 { lout = lout + ", " }
+            lout = lout + _dump_value(items[j], level)
+            j = j + 1
+        }
+        lout = lout + "]"
+        return lout
+    }
+    return "None"
+}
+
+#===----------------------------------------------------------------------===#
+# Public API
+#===----------------------------------------------------------------------===#
+
+def loads(source: str) -> dict[str, Any] {
+    return _parse_drs(source)
+}
+
+def load(path: str) -> dict[str, Any] {
+    handle: ptr = dragon_file_open(path, "r")
+    content: str = dragon_file_read(handle)
+    dragon_file_close(handle)
+    # Confine any `include` in this file to the file's own directory.
+    empty: dict[str, Any] = {}
+    return _parse_drs_env(content, empty, _drs_dirname(path))
+}
+
+def dumps(data: dict[str, Any]) -> str {
+    return _dump_value(data, 0)
+}
+
+#===----------------------------------------------------------------------===#
+# Schema-directed binding + environment injection (D022 Phase 0 dependency).
+#
+# Dragon has no runtime reflection (D036 blocks inspect/types), so parse()
+# does NOT materialize a typed instance - it validates the parsed
+# dict[str, Any] against an explicit Schema descriptor and returns the
+# validated dict. This is the speed-correct form: the descriptor is plain
+# data, every field check is a direct isinstance, and no type metadata is
+# kept live at runtime.
+#===----------------------------------------------------------------------===#
+
+# Raised by parse()/parse_with() on a schema violation (missing required
+# field, wrong type, or an unknown/typo'd key). Distinct from the parse-level
+# error (code 80 / TypeError) so callers can `except DragonScriptSchemaError`.
+class DragonScriptSchemaError(Exception) {}
+
+# One declared field in a Schema. type_tag is one of:
+# "str" | "int" | "float" | "bool" | "list" | "dict" | "any".
+class SchemaField {
+    name: str
+    type_tag: str
+    required: bool
+    has_default: bool
+    default: Any
+
+    def(name: str, type_tag: str, required: bool, has_default: bool, default: Any) {
+        self.name = name
+        self.type_tag = type_tag
+        self.required = required
+        self.has_default = has_default
+        self.default = default
+    }
+}
+
+# A manifest/document schema: an ordered list of field specs. Built fluently:
+#  s: Schema = Schema()
+#  s.field("name", "str", true).field("version", "str", true).optional("entry", "str", "main.dr")
+class Schema {
+    fields: list[SchemaField]
+    allow_unknown: bool
+
+    def() {
+        self.fields = []
+        self.allow_unknown = false
+    }
+
+    # Declare a field of the given type tag; required gates missing-key errors.
+    def field(name: str, type_tag: str, required: bool) -> Schema {
+        self.fields.append(SchemaField(name, type_tag, required, false, None))
+        return self
+    }
+
+    # Declare an optional field with a default supplied when the key is absent.
+    def optional(name: str, type_tag: str, default: Any) -> Schema {
+        self.fields.append(SchemaField(name, type_tag, false, true, default))
+        return self
+    }
+
+    # Permit keys not named in the schema (disables typo detection).
+    def allow_extra() -> Schema {
+        self.allow_unknown = true
+        return self
+    }
+}
+
+def _type_tag_ok(v: Any, tag: str) -> bool {
+    if tag == "any" { return true }
+    if tag == "str" { return isinstance(v, str) }
+    if tag == "bool" { return isinstance(v, bool) }
+    if tag == "int" {
+        if isinstance(v, bool) { return false }
+        return isinstance(v, int)
+    }
+    if tag == "float" {
+        if isinstance(v, int) { return true }
+        return isinstance(v, float)
+    }
+    if tag == "list" { return isinstance(v, list) }
+    if tag == "dict" { return isinstance(v, dict) }
+    return false
+}
+
+def _type_name(v: Any) -> str {
+    if isinstance(v, bool) { return "bool" }
+    if isinstance(v, int) { return "int" }
+    if isinstance(v, float) { return "float" }
+    if isinstance(v, str) { return "str" }
+    if isinstance(v, list) { return "list" }
+    if isinstance(v, dict) { return "dict" }
+    if v is None { return "None" }
+    return "unknown"
+}
+
+def _validate(schema: Schema, data: dict[str, Any]) -> dict[str, Any] {
+    known: dict[str, bool] = {}
+    fi: int = 0
+    nf: int = len(schema.fields)
+    while fi < nf {
+        f: SchemaField = schema.fields[fi]
+        known[f.name] = true
+        if f.name in data {
+            v: Any = data[f.name]
+            if not _type_tag_ok(v, f.type_tag) {
+                raise DragonScriptSchemaError("field '" + f.name + "' expected " + f.type_tag + ", got " + _type_name(v))
+            }
+        } else {
+            if f.required {
+                raise DragonScriptSchemaError("missing required field '" + f.name + "'")
+            }
+            if f.has_default {
+                data[f.name] = f.default
+            }
+        }
+        fi = fi + 1
+    }
+    if not schema.allow_unknown {
+        dkeys: list[str] = dragon_dict_keys(data)
+        di: int = 0
+        nd: int = len(dkeys)
+        while di < nd {
+            k: str = dkeys[di]
+            if not (k in known) {
+                raise DragonScriptSchemaError("unknown field '" + k + "' (not declared in schema)")
+            }
+            di = di + 1
+        }
+    }
+    return data
+}
+
+# Parse `content` and validate it against `schema`. Returns the validated
+# dict[str, Any] (defaults filled in). Raises DragonScriptSchemaError on a
+# missing required field, a wrong-typed field, or an unknown key.
+def parse(schema: Schema, content: str) -> dict[str, Any] {
+    empty: dict[str, Any] = {}
+    data: dict[str, Any] = _parse_drs_env(content, empty)
+    return _validate(schema, data)
+}
+
+# Like parse(), but seeds header bindings with `env` so manifest conditionals
+# (`if platform == 'linux'`) resolve against the build environment.
+def parse_with(schema: Schema, content: str, env: dict[str, Any]) -> dict[str, Any] {
+    data: dict[str, Any] = _parse_drs_env(content, env)
+    return _validate(schema, data)
+}
+
+# Parse with env injection but no schema; returns the raw dict[str, Any].
+def loads_with(source: str, env: dict[str, Any]) -> dict[str, Any] {
+    return _parse_drs_env(source, env)
+}
+
+# Build a build-environment context for parse_with()/loads_with(). Named
+# params cover the common keys; for arbitrary keys pass a dict[str, Any]
+# literal directly to parse_with()/loads_with().
+def envs(platform: str = "", arch: str = "", os: str = "", cpu_count: int = 0) -> dict[str, Any] {
+    e: dict[str, Any] = {}
+    if platform != "" { e["platform"] = platform }
+    if arch != "" { e["arch"] = arch }
+    if os != "" { e["os"] = os }
+    if cpu_count != 0 { e["cpu_count"] = cpu_count }
+    return e
+}

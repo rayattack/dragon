@@ -1,0 +1,162 @@
+"""filecmp - compare files and directories (Python parity).
+
+Pure Dragon. Implements the common subset:
+- `cmp(a, b, shallow=True)` - file-level compare (size+mtime "shallow", or
+  full text contents)
+- `cmpfiles(d1, d2, names)` - bulk compare for sibling pairs in two dirs
+- `dircmp(d1, d2)` - directory-tree compare returning common/left_only/
+  right_only/diff_files/same_files
+
+CPython's `dircmp` also exposes `funny_files` (compare errored), `common_dirs`,
+and lazy attributes - these are computed eagerly here.
+"""
+
+import os
+from os.path import exists, isfile, isdir, join, getsize, getmtime
+from io import open
+
+
+_stat_cache: dict[str, list[int]] = {}
+
+
+def _stat_key(path: str) -> list[int] {
+    """`[size, mtime]` for shallow compare."""
+    if path in _stat_cache {
+        return _stat_cache[path]
+    }
+    key: list[int] = [getsize(path), getmtime(path)]
+    _stat_cache[path] = key
+    return key
+}
+
+
+def clear_cache() -> None {
+    """Drop the `cmp(shallow=True)` stat cache."""
+    keys: list[str] = []
+    for k in _stat_cache {
+        keys.append(k)
+    }
+    for k in keys {
+        del _stat_cache[k]
+    }
+}
+
+
+def cmp(a: str, b: str, shallow: bool = True) -> bool {
+    """Return True if `a` and `b` have equal contents.
+
+    `shallow=True` only compares `os.stat` size + mtime (cheap, may
+    false-positive after a touch). `shallow=False` reads both files and
+    compares text byte-for-byte.
+    """
+    if not exists(a) or not exists(b) {
+        return false
+    }
+    if shallow {
+        sa: list[int] = _stat_key(a)
+        sb: list[int] = _stat_key(b)
+        return sa[0] == sb[0] and sa[1] == sb[1]
+    }
+    if getsize(a) != getsize(b) {
+        return false
+    }
+    return open(a).text() == open(b).text()
+}
+
+
+def cmpfiles(d1: str, d2: str, names: list[str], shallow: bool = true) -> dict[str, list[str]] {
+    """For each `name` in `names`, compare `d1/name` to `d2/name`.
+
+    Returns a `dict[str, list[str]]` with keys "match" / "mismatch" /
+    "errors". Names where either side is missing land in `errors`.
+    """
+    match_list: list[str] = []
+    mismatch_list: list[str] = []
+    errors_list: list[str] = []
+    result: dict[str, list[str]] = {"match": match_list, "mismatch": mismatch_list, "errors": errors_list}
+    for name in names {
+        a: str = join(d1, name)
+        b: str = join(d2, name)
+        if not isfile(a) or not isfile(b) {
+            result["errors"].append(name)
+            continue
+        }
+        if cmp(a, b, shallow) {
+            result["match"].append(name)
+        } else {
+            result["mismatch"].append(name)
+        }
+    }
+    return result
+}
+
+
+class dircmp {
+    left: str
+    right: str
+    left_only: list[str]
+    right_only: list[str]
+    common: list[str]
+    common_files: list[str]
+    common_dirs: list[str]
+    same_files: list[str]
+    diff_files: list[str]
+
+    def(left: str, right: str) {
+        self.left = left
+        self.right = right
+        self.left_only = []
+        self.right_only = []
+        self.common = []
+        self.common_files = []
+        self.common_dirs = []
+        self.same_files = []
+        self.diff_files = []
+        self._compute()
+    }
+
+    def _compute() -> None {
+        left_names: list[str] = []
+        right_names: list[str] = []
+        if isdir(self.left) {
+            left_names = os.listdir(self.left)
+        }
+        if isdir(self.right) {
+            right_names = os.listdir(self.right)
+        }
+        left_set: dict[str, bool] = {}
+        for name in left_names {
+            left_set[name] = true
+        }
+        right_set: dict[str, bool] = {}
+        for name in right_names {
+            right_set[name] = true
+        }
+        for name in left_names {
+            if name in right_set {
+                self.common.append(name)
+            } else {
+                self.left_only.append(name)
+            }
+        }
+        for name in right_names {
+            if name not in left_set {
+                self.right_only.append(name)
+            }
+        }
+        for name in self.common {
+            a: str = join(self.left, name)
+            b: str = join(self.right, name)
+            if isdir(a) and isdir(b) {
+                self.common_dirs.append(name)
+            } elif isfile(a) and isfile(b) {
+                self.common_files.append(name)
+                if cmp(a, b, false) {
+                    self.same_files.append(name)
+                } else {
+                    self.diff_files.append(name)
+                }
+            }
+        }
+    }
+}

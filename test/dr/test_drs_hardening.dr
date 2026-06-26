@@ -1,0 +1,73 @@
+# test/dr/test_drs_hardening.dr - D022/D023 untrusted-manifest hardening.
+#
+# A dependency's dragon.drs is evaluated by the package resolver BEFORE the
+# package is trusted, so an `include`/`for` in it runs on the consumer's
+# machine. These tests pin the guards added for that threat:
+#  - range(N) is capped so a manifest cannot generate an unbounded list
+#  (memory/CPU exhaustion);
+#  - includes are rejected when parsing from a string (no filesystem anchor);
+#  - file includes are confined to the document's own directory - no absolute
+#  path and no parent-directory (`..`) traversal out of the package.
+# Legit small ranges and same-directory includes must still work.
+
+from unittest import TestCase, main
+from drs import loads, load
+from io import make
+from tempfile import mkdtemp
+from os import makedirs
+from os.path import join
+
+# Failure-path helpers: bare module-level zero-arg fns handed to assertRaises,
+# so the raise unwinds cleanly without a capturing closure on the path.
+def _range_bomb() -> None {
+    d: dict[str, Any] = loads("{\n  xs = for i in range(99999999) { i }\n}")
+}
+def _include_from_string() -> None {
+    d: dict[str, Any] = loads("include 'x.drs'\n{\n  a = 1\n}")
+}
+
+# One temp package dir, built once and shared. base.drs is a sibling include
+# (legit); evil_abs.drs / sub/evil_parent.drs are the traversal attacks.
+def _setup_dir() -> str {
+    d: str = mkdtemp("drs_harden_", "")
+    makedirs(join(d, "sub"))
+    with make(join(d, "base.drs")) as w { n0: int = w.write("shared = 'hello'\n") }
+    with make(join(d, "uses.drs")) as w { n1: int = w.write("include 'base.drs'\n{\n  greeting = ${shared}\n}\n") }
+    with make(join(d, "evil_abs.drs")) as w { n2: int = w.write("include '/etc/passwd'\n{\n  a = 1\n}\n") }
+    with make(join(join(d, "sub"), "evil_parent.drs")) as w { n3: int = w.write("include '../base.drs'\n{\n  a = 1\n}\n") }
+    return d
+}
+const _DIR: str = _setup_dir()
+
+def _include_absolute() -> None {
+    d: dict[str, Any] = load(join(_DIR, "evil_abs.drs"))
+}
+def _include_parent() -> None {
+    d: dict[str, Any] = load(join(join(_DIR, "sub"), "evil_parent.drs"))
+}
+
+class DrsHardeningTests(TestCase) {
+    def test_range_capped() {
+        self.assertRaises(Exception, _range_bomb)
+    }
+    def test_string_include_rejected() {
+        self.assertRaises(Exception, _include_from_string)
+    }
+    def test_absolute_include_rejected() {
+        self.assertRaises(Exception, _include_absolute)
+    }
+    def test_parent_traversal_include_rejected() {
+        self.assertRaises(Exception, _include_parent)
+    }
+    def test_small_range_still_works() {
+        const d: dict[str, Any] = loads("{\n  xs = for i in range(3) { 8080 + i }\n}")
+        const xs: list[Any] = d["xs"]
+        self.assertEqual(len(xs), 3)
+    }
+    def test_confined_sibling_include_works() {
+        const d: dict[str, Any] = load(join(_DIR, "uses.drs"))
+        self.assertEqual(d["greeting"], "hello")
+    }
+}
+
+main([DrsHardeningTests()])

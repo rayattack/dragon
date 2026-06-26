@@ -1,0 +1,60 @@
+# deps.dr - composition root.
+#
+# Creates the single Db connection, the auth + registry services, and the
+# session secret, as module-level singletons. Controllers import these. Module
+# top-level code runs once on import, so the schema is created exactly once.
+#
+# Run the server with cwd = dragonlang-org/ so `data/` lands beside the site.
+
+from os import makedirs, getenv
+from os.path import exists, join
+from binascii import unhexlify
+from storage.db import Db
+from storage.blobs import BlobStore
+from services.auth import AuthService
+from services.registry import RegistryService
+from services.translog import TranslogService
+
+const DATA_DIR: str = "data"
+
+# Session/CSRF HMAC key. Loaded from DRAGON_REGISTRY_SECRET; the process refuses
+# to start without it (fail closed) so a known dev key can never reach prod.
+# Must be at least 32 bytes of entropy (generate: `dragon run tools/egg/egg.dr keygen`
+# or `head -c 48 /dev/urandom | base64`).
+def _load_secret() -> bytes {
+    const raw: str = getenv("DRAGON_REGISTRY_SECRET")
+    if len(raw) < 32 {
+        raise ValueError("DRAGON_REGISTRY_SECRET is unset or too short (need >= 32 bytes); refusing to start with a default key")
+    }
+    return raw.encode("utf-8")
+}
+
+const SECRET: bytes = _load_secret()
+
+# Ed25519 seed (32 bytes, hex-encoded) that signs the transparency-log
+# checkpoints. Loaded from DRAGON_LOG_SIGNING_KEY; fail closed so a registry can
+# never serve unsigned/forgeable checkpoints. Generate one with
+# `head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'`.
+def _load_signing_key() -> bytes {
+    const raw: str = getenv("DRAGON_LOG_SIGNING_KEY")
+    if len(raw) < 64 {
+        raise ValueError("DRAGON_LOG_SIGNING_KEY is unset or too short (need a 64-hex / 32-byte Ed25519 seed); refusing to start")
+    }
+    return unhexlify(raw[0:64].encode("utf-8"))
+}
+
+const LOG_SIGNING_KEY: bytes = _load_signing_key()
+
+def _ensure_data() -> str {
+    if not exists(DATA_DIR) {
+        makedirs(DATA_DIR)
+    }
+    return DATA_DIR
+}
+
+# Force the data dir to exist before sqlite3_open (which won't create parents).
+const _READY: str = _ensure_data()
+const DB: Db = Db(join(DATA_DIR, "registry.sqlite"))
+const AUTH: AuthService = AuthService(DB)
+const TLOG: TranslogService = TranslogService(DB, LOG_SIGNING_KEY)
+const REG: RegistryService = RegistryService(DB, BlobStore(join(DATA_DIR, "blobs")), TLOG)

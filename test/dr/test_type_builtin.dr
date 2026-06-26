@@ -1,0 +1,54 @@
+"""type(x) returns the type's NAME as a str (e.g. "int", "Dog"). Two root-cause
+regressions are pinned here:
+
+  1. Boxing a type(x) result into Any carried TAG_INT (so `print(any)` showed a
+     raw pointer): `type`'s declared return type was Any, not str, so the box
+     tag fell back to int. Fixed by declaring type() -> str.
+  2. type() on a literal returned "object": the name was derived only from the
+     argument's VarKind, which a literal (no NameExpr) doesn't have. Fixed by
+     deriving the name from the argument's static type first.
+
+assertEqual boxes each argument into Any, so every case below also exercises
+the Any-boxing path that regression #1 broke.
+"""
+
+from unittest import TestCase, main
+
+class Dog {
+    name: str
+    def(name: str) {
+        self.name = name
+    }
+}
+
+class TypeBuiltinTests(TestCase) {
+    def test_literals() {
+        self.assertEqual(type(5), "int")
+        self.assertEqual(type("hi"), "str")
+        self.assertEqual(type(3.5), "float")
+        self.assertEqual(type(True), "bool")
+    }
+
+    def test_variables() {
+        n: int = 7
+        s: str = "z"
+        xs: list[int] = [1, 2]
+        self.assertEqual(type(n), "int")
+        self.assertEqual(type(s), "str")
+        self.assertEqual(type(xs), "list")
+    }
+
+    def test_instance() {
+        d: Dog = Dog("rex")
+        self.assertEqual(type(d), "Dog")
+    }
+
+    def test_boxed_into_any() {
+        a: Any = type(Dog("rex"))
+        self.assertEqual(a, "Dog")
+        b: Any = type(42)
+        self.assertEqual(b, "int")
+    }
+}
+
+main([TypeBuiltinTests()])

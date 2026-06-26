@@ -1,0 +1,377 @@
+# http/client.dr - HTTP/1.1 client.
+#
+# CPython parity for the calling surface most code touches:
+#
+#  conn = HTTPConnection("example.com", 80)
+#  conn.request("GET", "/api/foo")
+#  resp = conn.getresponse()
+#  print(resp.status, resp.reason)
+#  body = resp.read()
+#  conn.close()
+#
+# Built on Dragon's `socket.TcpStream`. Plain HTTP only; HTTPS comes once the
+# `ssl` module lands. Bodies are returned as `str` (bytes-clean for ASCII;
+# binary downloads will need a future bytes-typed read path).
+
+from socket import TcpStream
+from ssl import SSLContext, SSLSocket, create_default_context
+from urllib.parse import urlsplit, SplitResult
+
+extern "C" def dragon_int_to_str(n: int) -> str
+
+
+# Map status codes to canonical reason phrases per RFC 7231 + IANA registry
+# additions. Used when a response line lacks a reason phrase or for client
+# code that only got a status code from a redirect chain.
+def _reason_for(status: int) -> str {
+    if status == 200 { return "OK" }
+    if status == 201 { return "Created" }
+    if status == 202 { return "Accepted" }
+    if status == 204 { return "No Content" }
+    if status == 301 { return "Moved Permanently" }
+    if status == 302 { return "Found" }
+    if status == 303 { return "See Other" }
+    if status == 304 { return "Not Modified" }
+    if status == 307 { return "Temporary Redirect" }
+    if status == 308 { return "Permanent Redirect" }
+    if status == 400 { return "Bad Request" }
+    if status == 401 { return "Unauthorized" }
+    if status == 403 { return "Forbidden" }
+    if status == 404 { return "Not Found" }
+    if status == 405 { return "Method Not Allowed" }
+    if status == 409 { return "Conflict" }
+    if status == 410 { return "Gone" }
+    if status == 422 { return "Unprocessable Entity" }
+    if status == 429 { return "Too Many Requests" }
+    if status == 500 { return "Internal Server Error" }
+    if status == 502 { return "Bad Gateway" }
+    if status == 503 { return "Service Unavailable" }
+    if status == 504 { return "Gateway Timeout" }
+    return ""
+}
+
+
+# Parse a status line: `HTTP/1.1 200 OK\r\n` -> (200, "OK").
+# A missing reason phrase falls back to the IANA canonical phrase.
+def _parse_status_line(line: str) -> tuple[int, str] {
+    sp1: int = line.find(" ")
+    if sp1 < 0 {
+        raise ValueError("invalid HTTP status line: '" + line + "'")
+    }
+    sp2: int = line.find(" ", sp1 + 1)
+    code_str: str = ""
+    reason: str = ""
+    if sp2 < 0 {
+        code_str = line[sp1 + 1:len(line)]
+    } else {
+        code_str = line[sp1 + 1:sp2]
+        reason = line[sp2 + 1:len(line)]
+    }
+    status: int = int(code_str)
+    if len(reason) == 0 {
+        reason = _reason_for(status)
+    }
+    return (status, reason)
+}
+
+
+# Split a `Header-Name: value` line into a (key, value) pair. Both sides are
+# whitespace-stripped. Header names are normalized to title-case so the
+# returned dict is comparable across servers - Python's HTTPMessage exposes
+# them case-insensitively via getheader(), but we go further by storing
+# canonical case so direct dict access matches CPython's most common pattern.
+def _parse_header_line(line: str) -> tuple[str, str] {
+    colon: int = line.find(":")
+    if colon < 0 {
+        return ("", "")
+    }
+    key: str = line[0:colon].strip()
+    val: str = line[colon + 1:len(line)].strip()
+    return (key, val)
+}
+
+
+class HTTPResponse {
+    def(stream: TcpStream, status: int, reason: str, headers: dict[str, str], body: str) {
+        self.stream = stream
+        self.status = status
+        self.reason = reason
+        self.headers = headers
+        self._body = body
+        self._consumed = False
+    }
+
+    # Return the response body once. CPython's read() also accepts an `amt`
+    # argument; that streams from the socket. We've already buffered the
+    # full body into self._body, so a subsequent read() returns "" - the
+    # contract matches Python (a fully-consumed response is empty on re-read).
+    def read() -> str {
+        if self._consumed {
+            return ""
+        }
+        self._consumed = True
+        return self._body
+    }
+
+    # Case-insensitive single-header lookup. Mirrors HTTPResponse.getheader.
+    def getheader(name: str, default: str = "") -> str {
+        target: str = name.lower()
+        for k in self.headers {
+            if k.lower() == target {
+                return self.headers[k]
+            }
+        }
+        return default
+    }
+
+    def getheaders() -> list[tuple[str, str]] {
+        out: list[tuple[str, str]] = []
+        for k in self.headers {
+            out.append((k, self.headers[k]))
+        }
+        return out
+    }
+
+    def close() -> None {
+        self.stream.close()
+    }
+}
+
+
+class HTTPConnection {
+    def(host: str, port: int) {
+        self.host = host
+        self.port = port
+        self.stream = TcpStream(0)
+        self._connected = False
+    }
+
+    def connect() -> None {
+        if self._connected {
+            return
+        }
+        self.stream = TcpStream.open(self.host, self.port)
+        self._connected = True
+    }
+
+    # Send `method url HTTP/1.1` plus host/connection headers, optional body.
+    # `headers` overrides defaults; the only headers we always set are Host
+    # (from self.host:port) and Connection: close (so getresponse() can read
+    # until EOF without parsing Content-Length / chunked yet - that's a
+    # follow-up).
+    def request(method: str, url: str, body: str, headers: dict[str, str]) -> None {
+        self.connect()
+        host_hdr: str = self.host
+        if self.port != 80 and self.port != 443 {
+            host_hdr = self.host + ":" + dragon_int_to_str(self.port)
+        }
+        req: str = method + " " + url + " HTTP/1.1\r\n"
+        req = req + "Host: " + host_hdr + "\r\n"
+        req = req + "Connection: close\r\n"
+        if len(body) > 0 {
+            req = req + "Content-Length: " + dragon_int_to_str(len(body)) + "\r\n"
+        }
+        for k in headers {
+            req = req + k + ": " + headers[k] + "\r\n"
+        }
+        req = req + "\r\n"
+        if len(body) > 0 {
+            req = req + body
+        }
+        self.stream.do_send(req)
+    }
+
+    # Read the full response off the socket and parse it. Connection: close
+    # means we read until EOF (zero-byte recv). When Content-Length / chunked
+    # parsing lands, this can early-exit instead.
+    def getresponse() -> HTTPResponse {
+        raw: str = ""
+        while True {
+            chunk: str = self.stream.do_recv(8192)
+            if len(chunk) == 0 {
+                break
+            }
+            raw = raw + chunk
+        }
+        # Find header/body boundary.
+        sep: int = raw.find("\r\n\r\n")
+        if sep < 0 {
+            raise ValueError("malformed HTTP response: no header terminator")
+        }
+        head: str = raw[0:sep]
+        body: str = raw[sep + 4:len(raw)]
+
+        lines: list[str] = head.split("\r\n")
+        if len(lines) == 0 {
+            raise ValueError("malformed HTTP response: empty head")
+        }
+        status_pair: tuple[int, str] = _parse_status_line(lines[0])
+        status: int = status_pair[0]
+        reason: str = status_pair[1]
+
+        headers: dict[str, str] = {}
+        i: int = 1
+        while i < len(lines) {
+            line: str = lines[i]
+            if len(line) > 0 {
+                kv: tuple[str, str] = _parse_header_line(line)
+                if len(kv[0]) > 0 {
+                    headers[kv[0]] = kv[1]
+                }
+            }
+            i = i + 1
+        }
+        return HTTPResponse(self.stream, status, reason, headers, body)
+    }
+
+    def close() -> None {
+        if self._connected {
+            self.stream.close()
+            self._connected = False
+        }
+    }
+}
+
+
+#===----------------------------------------------------------------------===#
+# HTTPS - same shape as HTTPConnection/HTTPResponse but over an ssl.SSLSocket.
+# Separate classes (not a shared base) because Dragon dispatches methods on the
+# static type, so a TcpStream/SSLSocket common base wouldn't dispatch through
+# the http logic. The status/header parse helpers (_parse_*) are shared.
+#===----------------------------------------------------------------------===#
+
+class HTTPSResponse {
+    def(stream: SSLSocket, status: int, reason: str, headers: dict[str, str], body: str) {
+        self.stream = stream
+        self.status = status
+        self.reason = reason
+        self.headers = headers
+        self._body = body
+        self._consumed = False
+    }
+
+    def read() -> str {
+        if self._consumed {
+            return ""
+        }
+        self._consumed = True
+        return self._body
+    }
+
+    def getheader(name: str, default: str = "") -> str {
+        target: str = name.lower()
+        for k in self.headers {
+            if k.lower() == target {
+                return self.headers[k]
+            }
+        }
+        return default
+    }
+
+    def getheaders() -> list[tuple[str, str]] {
+        out: list[tuple[str, str]] = []
+        for k in self.headers {
+            out.append((k, self.headers[k]))
+        }
+        return out
+    }
+
+    def close() -> None {
+        self.stream.close()
+    }
+}
+
+
+class HTTPSConnection {
+    host: str
+    port: int
+    _ctx: SSLContext
+    stream: SSLSocket
+    _connected: bool
+
+    def(host: str, port: int) {
+        self.host = host
+        self.port = port
+        self._ctx = create_default_context()
+        self._connected = False
+        # self.stream (declared above) is assigned on the first connect().
+    }
+
+    def connect() -> None {
+        if self._connected {
+            return
+        }
+        raw: TcpStream = TcpStream.open(self.host, self.port)
+        # server_hostname drives SNI + certificate hostname verification.
+        self.stream = self._ctx.wrap_socket(raw, False, self.host)
+        self._connected = True
+    }
+
+    def request(method: str, url: str, body: str, headers: dict[str, str]) -> None {
+        self.connect()
+        host_hdr: str = self.host
+        if self.port != 80 and self.port != 443 {
+            host_hdr = self.host + ":" + dragon_int_to_str(self.port)
+        }
+        req: str = method + " " + url + " HTTP/1.1\r\n"
+        req = req + "Host: " + host_hdr + "\r\n"
+        req = req + "Connection: close\r\n"
+        if len(body) > 0 {
+            req = req + "Content-Length: " + dragon_int_to_str(len(body)) + "\r\n"
+        }
+        for k in headers {
+            req = req + k + ": " + headers[k] + "\r\n"
+        }
+        req = req + "\r\n"
+        if len(body) > 0 {
+            req = req + body
+        }
+        self.stream.do_send(req)
+    }
+
+    def getresponse() -> HTTPSResponse {
+        raw: str = ""
+        while True {
+            chunk: str = self.stream.do_recv(8192)
+            if len(chunk) == 0 {
+                break
+            }
+            raw = raw + chunk
+        }
+        sep: int = raw.find("\r\n\r\n")
+        if sep < 0 {
+            raise ValueError("malformed HTTP response: no header terminator")
+        }
+        head: str = raw[0:sep]
+        body: str = raw[sep + 4:len(raw)]
+
+        lines: list[str] = head.split("\r\n")
+        if len(lines) == 0 {
+            raise ValueError("malformed HTTP response: empty head")
+        }
+        status_pair: tuple[int, str] = _parse_status_line(lines[0])
+        status: int = status_pair[0]
+        reason: str = status_pair[1]
+
+        headers: dict[str, str] = {}
+        i: int = 1
+        while i < len(lines) {
+            line: str = lines[i]
+            if len(line) > 0 {
+                kv: tuple[str, str] = _parse_header_line(line)
+                if len(kv[0]) > 0 {
+                    headers[kv[0]] = kv[1]
+                }
+            }
+            i = i + 1
+        }
+        return HTTPSResponse(self.stream, status, reason, headers, body)
+    }
+
+    def close() -> None {
+        if self._connected {
+            self.stream.close()
+            self._connected = False
+        }
+    }
+}

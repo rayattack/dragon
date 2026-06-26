@@ -1,0 +1,193 @@
+# test/dr/test_http_sessions_middleware.dr - W5 sessions, end-to-end through the
+# LIVE Router middleware (R3).
+#
+# test_http_sessions.dr covers the crypto/signing core + MemoryStore in
+# isolation. This suite proves the actual server wiring: enable_sessions ->
+# _load_session (cookie in) -> handler -> _save_session (Set-Cookie out), exercised
+# across TWO separate requests so the cookie genuinely round-trips - the
+# acceptance criterion the plan called out as missing.
+#
+# Both session models are covered:
+#  - signed-cookie (default): the cookie carries the data itself;
+#  - server-side store (MemoryStore): the cookie carries only the signed sid.
+# Plus: a forged cookie is rejected and falls through to a fresh session (the
+# same _load_session except-path that an expired cookie takes - verify_session's
+# expiry check itself is unit-tested in test_http_sessions.dr).
+#
+# Driven through the public serve_connection seam with MemoryReader (no sockets),
+# the same fixture the W1 keep-alive tests use. The cookie is extracted from the
+# first response's wire bytes and replayed on the second request, exactly as a
+# browser would.
+
+from unittest import TestCase, main
+from http.server import Router, Request, Response, Context, MemoryReader
+from http.sessions import MemoryStore
+
+const _SECRET: bytes = b"test-secret-key-0123456789abcdef"
+
+# First visit (empty session) sets user=alice and answers "set"; any later visit
+# that already carries the session answers "hello:<user>". So "set" vs
+# "hello:alice" in the response tells us whether the session round-tripped.
+def _session_handler(req: Request, res: Response, ctx: Context) -> None {
+    if req.session.has("user") {
+        res.text("hello:" + req.session.get("user"))
+    } else {
+        req.session.set("user", "alice")
+        res.text("set")
+    }
+}
+
+# Pull a Set-Cookie value by name out of a raw HTTP response string. Values are
+# base64url + '.' (signed tokens) - never contain ';' or CR - so the value runs
+# from just past "<name>=" to the first ';' (attributes) or CRLF.
+def _extract_cookie(resp: str, name: str) -> str {
+    const needle: str = "set-cookie: " + name + "="
+    const p: int = resp.find(needle)
+    if p < 0 {
+        return ""
+    }
+    const rest: str = resp[p + len(needle):]
+    const semi: int = rest.find(";")
+    const cr: int = rest.find("\r")
+    end: int = len(rest)
+    if semi >= 0 and semi < end {
+        end = semi
+    }
+    if cr >= 0 and cr < end {
+        end = cr
+    }
+    return rest[0:end]
+}
+
+# Run one request through the live middleware and return the response bytes.
+def _serve(app: Router, raw: str) -> str {
+    const mr: MemoryReader = MemoryReader([raw.encode("utf-8")])
+    app.serve_connection(mr)
+    return mr.sent
+}
+
+# Build a GET / request, optionally carrying a session cookie.
+def _get(cookie: str) -> str {
+    if cookie == "" {
+        return "GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n"
+    }
+    return "GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\nCookie: dragon_session=" + cookie + "\r\n\r\n"
+}
+
+
+class SignedCookieMiddlewareTests(TestCase) {
+    # Set a value on request 1, read it back on request 2 - pure signed-cookie
+    # model (no store): the data lives in the cookie itself.
+    def test_set_then_read_roundtrip() {
+        const app: Router = Router(0)
+        app.enable_sessions(_SECRET)
+        app.GET("/", _session_handler)
+
+        const resp1: str = _serve(app, _get(""))
+        self.assertIn("set", resp1)
+        const cookie: str = _extract_cookie(resp1, "dragon_session")
+        self.assertTrue(len(cookie) > 0)
+
+        const resp2: str = _serve(app, _get(cookie))
+        self.assertIn("hello:alice", resp2)
+    }
+
+    # A no-write request emits no Set-Cookie (clean session -> no cookie storm).
+    def test_clean_request_emits_no_cookie() {
+        const app: Router = Router(0)
+        app.enable_sessions(_SECRET)
+
+        def _noop(req: Request, res: Response, ctx: Context) -> None {
+            res.text("ok")
+        }
+        app.GET("/", _noop)
+
+        const resp: str = _serve(app, _get(""))
+        self.assertIn("ok", resp)
+        self.assertEqual(_extract_cookie(resp, "dragon_session"), "")
+    }
+
+    # A forged/garbage cookie is rejected: _load_session's verify_session raises,
+    # we fall through to a fresh session, so the handler answers "set" (not
+    # "hello"). This is the same except-path an expired cookie takes.
+    def test_tampered_cookie_rejected() {
+        const app: Router = Router(0)
+        app.enable_sessions(_SECRET)
+        app.GET("/", _session_handler)
+
+        const resp: str = _serve(app, _get("forged.garbage.value"))
+        self.assertIn("set", resp)
+        self.assertNotIn("hello:", resp)
+    }
+
+    # A cookie signed under a DIFFERENT secret must not be honored (signature
+    # mismatch -> fresh session).
+    def test_wrong_secret_rejected() {
+        const app_a: Router = Router(0)
+        app_a.enable_sessions(b"secret-A-aaaaaaaaaaaaaaaaaaaaaaaa")
+        app_a.GET("/", _session_handler)
+        const cookie: str = _extract_cookie(_serve(app_a, _get("")), "dragon_session")
+        self.assertTrue(len(cookie) > 0)
+
+        const app_b: Router = Router(0)
+        app_b.enable_sessions(b"secret-B-bbbbbbbbbbbbbbbbbbbbbbbb")
+        app_b.GET("/", _session_handler)
+        # app_b sees app_a's cookie but rejects the signature -> fresh -> "set".
+        const resp: str = _serve(app_b, _get(cookie))
+        self.assertIn("set", resp)
+        self.assertNotIn("hello:", resp)
+    }
+}
+
+
+class StoreBackedMiddlewareTests(TestCase) {
+    # Same set->read round-trip, but server-side: the cookie carries only the
+    # signed sid; the data lives in a MemoryStore shared across both requests.
+    def test_store_set_then_read_roundtrip() {
+        const app: Router = Router(0)
+        app.enable_sessions(_SECRET, store=MemoryStore())
+        app.GET("/", _session_handler)
+
+        const resp1: str = _serve(app, _get(""))
+        self.assertIn("set", resp1)
+        const cookie: str = _extract_cookie(resp1, "dragon_session")
+        self.assertTrue(len(cookie) > 0)
+
+        const resp2: str = _serve(app, _get(cookie))
+        self.assertIn("hello:alice", resp2)
+    }
+
+    # The store-mode cookie is just the signed sid - it must NOT embed the
+    # session data (no '|' separator survives into the cookie value, since the
+    # value is a single base64url-segmented signed token of the sid alone).
+    def test_store_cookie_carries_only_sid() {
+        const store: MemoryStore = MemoryStore()
+        const app: Router = Router(0)
+        app.enable_sessions(_SECRET, store=store)
+        app.GET("/", _session_handler)
+
+        const resp1: str = _serve(app, _get(""))
+        const cookie: str = _extract_cookie(resp1, "dragon_session")
+        self.assertTrue(len(cookie) > 0)
+
+        # Read back: the store must hold the data and round-trip it.
+        const resp2: str = _serve(app, _get(cookie))
+        self.assertIn("hello:alice", resp2)
+    }
+
+    # A valid-looking (but store-absent) sid still authenticates by signature;
+    # the store simply returns a fresh empty session, so a tampered cookie is
+    # rejected the same way as in signed-cookie mode.
+    def test_store_tampered_cookie_rejected() {
+        const app: Router = Router(0)
+        app.enable_sessions(_SECRET, store=MemoryStore())
+        app.GET("/", _session_handler)
+
+        const resp: str = _serve(app, _get("forged.garbage.value"))
+        self.assertIn("set", resp)
+        self.assertNotIn("hello:", resp)
+    }
+}
+
+
+main([SignedCookieMiddlewareTests(), StoreBackedMiddlewareTests()])

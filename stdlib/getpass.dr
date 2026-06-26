@@ -1,0 +1,98 @@
+"""getpass - portable password input and current-user lookup.
+
+Mirrors CPython's `getpass`:
+
+    from getpass import getpass, getuser
+    pw: str = getpass()                  # "Password: " prompt, echo disabled
+    pw2: str = getpass("PIN: ")          # custom prompt
+    who: str = getuser()                 # current login name
+
+POSIX termios backs the no-echo read (Windows is deferred per D019). When
+standard input is not a terminal, the password cannot be hidden; matching
+CPython we emit a GetPassWarning and fall back to a plain echoing read,
+still returning whatever was typed.
+
+The security-critical terminal dance (save attrs -> clear ECHO -> read ->
+restore on every exit path) lives in the native shim `dragon_getpass_read`
+(lib/Runtime/runtime_getpass.cpp) so restoration is guaranteed even on EOF,
+EINTR, or error - it can never be left half-applied by Dragon control flow.
+"""
+
+import warnings
+
+#===----------------------------------------------------------------------===#
+# Native shim (lib/Runtime/runtime_getpass.cpp) + libc isatty
+#===----------------------------------------------------------------------===#
+
+# Read one line with echo disabled, restoring terminal state on every path.
+# Degrades to an echoing read when fd 0 is not a tty.
+extern "C" def dragon_getpass_read(prompt: str) -> str
+
+# getpwuid(getuid())->pw_name; "" when the uid has no passwd entry.
+extern "C" def dragon_getpass_pwname() -> str
+
+# libc: 1 when fd refers to a terminal, 0 otherwise.
+extern "C" def isatty(fd: intc) -> intc
+
+# libc: read an environment variable; returns "" when unset.
+extern "C" def getenv(name: str) -> str
+
+#===----------------------------------------------------------------------===#
+# Constants
+#===----------------------------------------------------------------------===#
+
+# CPython exposes GetPassWarning as a UserWarning subclass; Dragon's warnings
+# module uses string category names, so this matches by name (see warnings.dr).
+const GetPassWarning: str = "GetPassWarning"
+
+# Stdin file descriptor - the stream getpass reads from when checking for a tty.
+const _STDIN_FD: int = 0
+
+#===----------------------------------------------------------------------===#
+# Public API
+#===----------------------------------------------------------------------===#
+
+def getpass(prompt: str = "Password: ") -> str {
+    """Prompt for a password with echoing turned off.
+
+    When standard input is a terminal, the password is read with echo
+    disabled and the terminal is restored afterward. Otherwise a
+    GetPassWarning is issued and the line is read with echo on (the input
+    cannot be hidden) - the typed value is still returned.
+
+    The prompt is written to the controlling terminal (/dev/tty) when one is
+    available, else to stderr, so it stays visible even with stdout redirected.
+    """
+    if isatty(_STDIN_FD) != 0 {
+        # Terminal available: the native shim hides input and restores state.
+        return dragon_getpass_read(prompt)
+    }
+
+    # No tty: cannot suppress echo. Warn (CPython parity) and fall back to a
+    # plain read. `input` echoes; that is the documented, unavoidable behavior.
+    warnings.warn("Can not control echo on the terminal.", GetPassWarning)
+    return input(prompt)
+}
+
+def getuser() -> str {
+    """Return the name of the user logged in on the controlling terminal.
+
+    Checks the environment variables LOGNAME, USER, LNAME and USERNAME in
+    order (matching CPython), returning the first that is set. Falls back to
+    the system password database (getpwuid) when none are present.
+    """
+    const logname: str = getenv("LOGNAME")
+    if len(logname) > 0 { return logname }
+
+    const user: str = getenv("USER")
+    if len(user) > 0 { return user }
+
+    const lname: str = getenv("LNAME")
+    if len(lname) > 0 { return lname }
+
+    const username: str = getenv("USERNAME")
+    if len(username) > 0 { return username }
+
+    # Last resort: getpwuid(getuid())->pw_name.
+    return dragon_getpass_pwname()
+}

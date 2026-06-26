@@ -1,0 +1,361 @@
+# sessions.dr - Dragon standard library: HTTP sessions + CSRF (W5 + W7)
+#
+# The network-independent crypto/signing core for server-side and signed-cookie
+# sessions, plus the CSRF token helper that pairs with it. Pure Dragon; the only
+# privileged surface it touches is the crypto runtime (via `hmac`) and the OS
+# CSPRNG (via `secrets`). It does NOT touch sockets, `Request`, or `Response` -
+# the server wires the middleware (cookie load on the way in, `Set-Cookie` on
+# the way out) onto this API separately.
+#
+# Design (matches Flask/itsdangerous signed-cookie convention):
+#  - A signed token is three base64url segments joined by '.':
+#  b64url(payload) "." b64url(expiry) "." b64url(hmac)
+#  where `expiry` is the ASCII decimal absolute expiry epoch (seconds), or
+#  "0" for "never expires". The HMAC-SHA-256 is computed over the *signing
+#  input* `b64url(payload) "." b64url(expiry)` so BOTH the payload and the
+#  expiry are authenticated - flipping any byte of either invalidates the
+#  signature.
+#  - Verification recomputes the MAC and compares with `secrets.compare_digest`
+#  (constant-time) - never a plain `==`, which would leak a timing oracle on
+#  the matching prefix. On any failure (tamper, expiry, malformed shape) it
+#  raises a `ValueError` with a clear reason rather than returning a sentinel
+#  string, so callers cannot mistake a forged token for an empty-but-valid
+#  payload. (See `verify_session` for the exact contract.)
+#
+# CSRF (W7): `csrf_token` = HMAC-SHA-256 over the session id (base64url'd);
+# `csrf_verify` recomputes and compares constant-time. Same primitives as the
+# session signer - that is why it lives here.
+
+from time import now
+from base64 import urlsafe_b64encode, urlsafe_b64decode
+from hmac import new as _hmac_new
+from secrets import compare_digest, token_urlsafe
+from threading import Lock
+
+
+#===----------------------------------------------------------------------===#
+# Wire constants
+#===----------------------------------------------------------------------===#
+
+const _SEP: str = "."                 # segment separator in a signed token
+const _DIGEST: str = "sha256"         # HMAC algorithm backing the signature
+
+
+#===----------------------------------------------------------------------===#
+# base64url helpers (str <-> str), padding-stripped like JWS / Flask cookies
+#===----------------------------------------------------------------------===#
+
+def _b64url_encode_str(s: str) -> str {
+    # Encode a UTF-8 string to padding-free base64url text.
+    encoded: bytes = urlsafe_b64encode(s.encode("utf-8"))
+    out: str = encoded.decode("utf-8")
+    # Strip trailing '=' padding (matches secrets.token_urlsafe / JWS).
+    end: int = len(out)
+    while end > 0 and out[end - 1] == "=" {
+        end = end - 1
+    }
+    return out[0:end]
+}
+
+def _b64url_encode_bytes(b: bytes) -> str {
+    # Encode raw bytes (e.g. an HMAC digest) to padding-free base64url text.
+    encoded: bytes = urlsafe_b64encode(b)
+    out: str = encoded.decode("utf-8")
+    end: int = len(out)
+    while end > 0 and out[end - 1] == "=" {
+        end = end - 1
+    }
+    return out[0:end]
+}
+
+def _b64url_decode_str(s: str) -> str {
+    # Decode padding-free base64url text back to a UTF-8 string. The base64
+    # decoder tolerates missing padding (base64.dr §3.2), so no re-padding is
+    # needed here.
+    raw: bytes = urlsafe_b64decode(s.encode("utf-8"))
+    return raw.decode("utf-8")
+}
+
+
+#===----------------------------------------------------------------------===#
+# Signed-cookie session token: sign / verify
+#===----------------------------------------------------------------------===#
+
+def _sign_input(b64_payload: str, b64_expiry: str) -> bytes {
+    # The exact bytes the HMAC is taken over: "<b64payload>.<b64expiry>".
+    # Authenticating the expiry segment (not just the payload) is what stops an
+    # attacker from extending a token's lifetime without the key.
+    return (b64_payload + _SEP + b64_expiry).encode("utf-8")
+}
+
+
+def sign_session(payload: str, key: bytes, max_age_seconds: int = 0) -> str {
+    # Produce a signed, tamper-evident token carrying `payload`.
+    #
+    #  payload - opaque application string (e.g. a session id or a
+    #  small serialized blob). Stored base64url-encoded.
+    #  key - the signing key (app secret). Keep it secret; rotating
+    #  it invalidates every outstanding token.
+    #  max_age_seconds - token lifetime. 0 (default) means "never expires";
+    #  any positive value embeds an absolute expiry epoch
+    #  `now() + max_age_seconds` that `verify_session` checks.
+    #
+    # Returns "<b64url(payload)>.<b64url(expiry)>.<b64url(hmac)>".
+    b64_payload: str = _b64url_encode_str(payload)
+
+    expiry_epoch: int = 0
+    if max_age_seconds > 0 {
+        expiry_epoch = now() + max_age_seconds
+    }
+    b64_expiry: str = _b64url_encode_str(str(expiry_epoch))
+
+    mac: bytes = _hmac_new(key, _sign_input(b64_payload, b64_expiry), _DIGEST).digest()
+    b64_sig: str = _b64url_encode_bytes(mac)
+
+    return b64_payload + _SEP + b64_expiry + _SEP + b64_sig
+}
+
+
+def verify_session(token: str, key: bytes) -> str {
+    # Verify a token produced by `sign_session` and return its decoded payload.
+    #
+    # Raises `ValueError` (never returns a partial/sentinel result) when the
+    # token is:
+    #  - malformed (not exactly three '.'-separated segments);
+    #  - signature-mismatched (wrong key, or any byte of payload/expiry/sig
+    #  was altered) - the MAC is recomputed and compared constant-time;
+    #  - expired (the embedded expiry epoch is non-zero and in the past).
+    #
+    # Returning the payload only on full success - and raising otherwise - means
+    # a forged token can never be mistaken for a valid empty payload.
+    parts: list[str] = token.split(_SEP)
+    if len(parts) != 3 {
+        raise ValueError("invalid session token: bad shape")
+    }
+    b64_payload: str = parts[0]
+    b64_expiry: str = parts[1]
+    b64_sig: str = parts[2]
+
+    # Recompute the MAC over the same signing input and compare constant-time.
+    # We compare the base64url *text* of each digest (equal-length on a match),
+    # which keeps compare_digest's timing-safety guarantee intact.
+    expected: bytes = _hmac_new(key, _sign_input(b64_payload, b64_expiry), _DIGEST).digest()
+    expected_sig: str = _b64url_encode_bytes(expected)
+    if not compare_digest(expected_sig.encode("utf-8"), b64_sig.encode("utf-8")) {
+        raise ValueError("invalid session token: signature mismatch")
+    }
+
+    # Signature is authentic, so the expiry segment is trustworthy. A malformed
+    # expiry on an *authentic* token can only be a bug on the producing side; we
+    # still guard the parse so a bad value surfaces as a clear error.
+    expiry_epoch: int = 0
+    try {
+        expiry_epoch = int(_b64url_decode_str(b64_expiry))
+    } except Exception as e {
+        raise ValueError("invalid session token: bad expiry")
+    }
+    if expiry_epoch > 0 and now() > expiry_epoch {
+        raise ValueError("session token expired")
+    }
+
+    return _b64url_decode_str(b64_payload)
+}
+
+
+#===----------------------------------------------------------------------===#
+# Session ids
+#===----------------------------------------------------------------------===#
+
+def new_session_id(nbytes: int = 32) -> str {
+    # A fresh, URL-safe, cryptographically-random session identifier. 32 bytes
+    # of CSPRNG entropy -> ~43 base64url chars, comfortably collision-resistant.
+    return token_urlsafe(nbytes)
+}
+
+
+#===----------------------------------------------------------------------===#
+# Session - dict-like holder of session values with a dirty flag
+#===----------------------------------------------------------------------===#
+
+class Session {
+    # sid - this session's id (the key under which a server-side store
+    #  persists it; also the value placed in the cookie).
+    # data - the session's key/value contents (str -> str). Higher-level
+    #  callers serialize richer values into strings as needed.
+    # dirty - True once any mutation happened, so the middleware knows whether
+    #  it must re-emit `Set-Cookie` / re-`save()` on the way out. A
+    #  freshly-loaded, untouched session stays clean (no needless write).
+    sid: str
+    data: dict[str, str]
+    dirty: bool
+
+    def(sid: str) {
+        self.sid = sid
+        self.data = {}
+        self.dirty = False
+    }
+
+    def get(key: str, default: str = "") -> str {
+        # Return the value for `key`, or `default` if absent. A read never
+        # marks the session dirty.
+        if key in self.data {
+            return self.data[key]
+        }
+        return default
+    }
+
+    def set(key: str, value: str) {
+        # Store `value` under `key` and mark the session dirty.
+        self.data[key] = value
+        self.dirty = True
+    }
+
+    def has(key: str) -> bool {
+        return key in self.data
+    }
+
+    def delete(key: str) {
+        # Remove `key` if present, marking the session dirty when it changes.
+        if key in self.data {
+            del self.data[key]
+            self.dirty = True
+        }
+    }
+
+    def keys() -> list[str] {
+        return self.data.keys()
+    }
+
+    def clear() {
+        # Drop all contents (e.g. on logout) and mark dirty.
+        self.data = {}
+        self.dirty = True
+    }
+}
+
+
+#===----------------------------------------------------------------------===#
+# Pluggable server-side store
+#===----------------------------------------------------------------------===#
+
+class SessionStore {
+    # Base interface for server-side session persistence. Subclass and override
+    # all three methods; D026 virtual dispatch routes a base-typed receiver to
+    # the concrete backend. The base impls raise so an incomplete subclass fails
+    # loudly rather than silently dropping data.
+    #
+    # A future DB/redis-backed store implements this same surface - the in-memory
+    # `MemoryStore` below is the default; nothing here is hard-wired to a dict.
+    def load(sid: str) -> Session {
+        raise NotImplementedError("SessionStore.load must be overridden")
+    }
+
+    def save(sid: str, session: Session) {
+        raise NotImplementedError("SessionStore.save must be overridden")
+    }
+
+    def delete(sid: str) {
+        raise NotImplementedError("SessionStore.delete must be overridden")
+    }
+}
+
+
+class MemoryStore(SessionStore) {
+    # Default in-memory store backed by a dict. Suitable for single-process /
+    # development use; a multi-process deployment swaps in a DB-backed store
+    # implementing the same `SessionStore` surface.
+    #
+    # Concurrency: the HTTP server runs one green thread per connection on an M:N
+    # OS-worker pool, so two requests bearing the SAME sid can hit this store in
+    # genuine parallel. Two invariants keep that safe:
+    #  1. `load` returns a per-request SNAPSHOT (a fresh Session with copied
+    #  data), never the live stored object - so concurrent requests never
+    #  share one Session/dict and can't corrupt each other's state (and the
+    #  middleware's `dirty = false` reset touches only the caller's copy).
+    #  2. `lock` guards the `_sessions` dict against concurrent structural
+    #  mutation (insert/rehash/delete) from other workers.
+    # Cross-request last-writer-wins on the same sid is inherent to any store
+    # without per-key versioning (a DB/Redis store has the same race absent a
+    # transaction) and is the expected session semantics.
+    _sessions: dict[str, Session]
+    lock: Lock
+
+    def() {
+        self._sessions = {}
+        self.lock = Lock()
+    }
+
+    def load(sid: str) -> Session {
+        # Per-request snapshot: copy the stored data into a fresh Session so the
+        # caller owns an isolated object. A missing sid yields a fresh empty one
+        # (so callers can load -> mutate -> save without a separate "create").
+        #
+        # Lock discipline: the critical section holds ONLY non-raising dict ops
+        # (an `in` check + indexing a key proven present in the same lock hold).
+        # The copy loop - which could in principle raise (and Dragon exceptions
+        # are longjmp, with no `finally` here to release on unwind) - runs
+        # OUTSIDE the lock. That is race-free: `stored` is kept alive by the
+        # local reference, and neither save() (replaces the map entry) nor
+        # delete() (removes it) mutates the stored object in place.
+        const fresh: Session = Session(sid)
+        stored: Session = fresh
+        has: bool = false
+        self.lock.acquire()
+        if sid in self._sessions {
+            stored = self._sessions[sid]      # key present -> does not raise
+            has = true
+        }
+        self.lock.release()
+        if has {
+            for k in stored.data {
+                fresh.data[k] = stored.data[k]
+            }
+        }
+        return fresh
+    }
+
+    def save(sid: str, session: Session) {
+        # Store the caller's (already per-request, isolated) session under the
+        # lock. The request hands it over here and does not mutate it afterwards,
+        # so no further copy is needed; the next load() snapshots from it.
+        self.lock.acquire()
+        self._sessions[sid] = session
+        self.lock.release()
+    }
+
+    def delete(sid: str) {
+        self.lock.acquire()
+        if sid in self._sessions {
+            del self._sessions[sid]
+        }
+        self.lock.release()
+    }
+
+    def exists(sid: str) -> bool {
+        self.lock.acquire()
+        const present: bool = sid in self._sessions
+        self.lock.release()
+        return present
+    }
+}
+
+
+#===----------------------------------------------------------------------===#
+# CSRF helper (W7) - same hmac + constant-time-compare primitives
+#===----------------------------------------------------------------------===#
+
+def csrf_token(session_id: str, key: bytes) -> str {
+    # Mint a CSRF token bound to `session_id`: HMAC-SHA-256 over the id, returned
+    # as padding-free base64url text. The token is safe to embed in forms /
+    # headers; it reveals nothing about the key and cannot be forged without it.
+    mac: bytes = _hmac_new(key, session_id.encode("utf-8"), _DIGEST).digest()
+    return _b64url_encode_bytes(mac)
+}
+
+
+def csrf_verify(token: str, session_id: str, key: bytes) -> bool {
+    # True iff `token` is a valid CSRF token for `session_id` under `key`.
+    # Recomputes the expected token and compares constant-time - never `==`.
+    expected: str = csrf_token(session_id, key)
+    return compare_digest(expected.encode("utf-8"), token.encode("utf-8"))
+}

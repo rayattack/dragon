@@ -1,0 +1,122 @@
+# tempfile.dr - Dragon standard library: temporary file and directory creation
+#
+# Provides functions for creating temporary files and directories.
+# Wraps POSIX/libc via extern "C".
+
+#===----------------------------------------------------------------------===#
+# POSIX / libc extern declarations
+#===----------------------------------------------------------------------===#
+
+extern "C" def getenv(name: str) -> str
+extern "C" def access(path: str, mode: intc) -> intc
+extern "C" def mkdir(path: str, mode: intc) -> intc
+extern "C" def unlink(path: str) -> intc
+extern "C" def rmdir(path: str) -> intc
+
+# OS CSPRNG bytes (getrandom/getentropy/BCryptGenRandom). Temp names MUST come
+# from the CSPRNG, not rand() seeded by time*31+pid: a guessable seed lets a
+# local attacker predict the name and pre-plant a symlink at it.
+extern "C" def dragon_urandom(n: int) -> bytes
+
+# Atomically create a fresh file with O_CREAT|O_EXCL|O_NOFOLLOW and mode 0600.
+# Returns 0 on success, -1 if it exists / is a symlink / on error. Replaces the
+# racy _exists()-then-fopen("w") pattern (TOCTOU + symlink-follow + 0644).
+extern "C" def dragon_create_excl(path: str) -> intc
+
+#===----------------------------------------------------------------------===#
+# Internal helpers
+#===----------------------------------------------------------------------===#
+
+def _random_name(length: int) -> str {
+    # Generate a random alphanumeric string from the OS CSPRNG.
+    const chars: str = "abcdefghijklmnopqrstuvwxyz0123456789"
+    const nchars: int = 36
+    const raw: bytes = dragon_urandom(length)
+    result: str = ""
+    i: int = 0
+    while i < length {
+        const idx: int = raw[i] % nchars
+        result = result + chars[idx]
+        i = i + 1
+    }
+    return result
+}
+
+def _exists(path: str) -> bool {
+    return access(path, 0) == 0
+}
+
+#===----------------------------------------------------------------------===#
+# Public API
+#===----------------------------------------------------------------------===#
+
+def gettempdir() -> str {
+    # Return the default temporary directory.
+    # Checks TMPDIR, TEMP, TMP environment variables, falls back to /tmp.
+    const tmpdir: str = getenv("TMPDIR")
+    if len(tmpdir) > 0 { return tmpdir }
+
+    const temp: str = getenv("TEMP")
+    if len(temp) > 0 { return temp }
+
+    const tmp: str = getenv("TMP")
+    if len(tmp) > 0 { return tmp }
+
+    return "/tmp"
+}
+
+def mktemp(prefix: str, suffix: str) -> str {
+    # DEPRECATED (as in CPython): returns a name WITHOUT creating the file, so
+    # there is an unavoidable race between this call and whoever opens the path
+    # - an attacker can create the file (or a symlink) in the gap. Prefer
+    # mkstemp, which creates the file atomically. Kept for API parity; names now
+    # come from the CSPRNG so the path is at least unguessable.
+    const tmpdir: str = gettempdir()
+    attempts: int = 0
+    while attempts < 100 {
+        const name: str = prefix + _random_name(8) + suffix
+        path: str = tmpdir + "/" + name
+        if not _exists(path) { return path }
+        attempts = attempts + 1
+    }
+    # Fallback: return last generated path even if it exists
+    return tmpdir + "/" + prefix + _random_name(8) + suffix
+}
+
+def mkstemp(prefix: str, suffix: str) -> str {
+    # Create a temporary file and return its path. The file is created
+    # ATOMICALLY with O_CREAT|O_EXCL|O_NOFOLLOW and mode 0600 (owner-only), so
+    # there is no check-then-create window and a pre-planted symlink cannot
+    # redirect the create. Each attempt uses a fresh CSPRNG name.
+    const tmpdir: str = gettempdir()
+    attempts: int = 0
+    while attempts < 100 {
+        const name: str = prefix + _random_name(8) + suffix
+        const path: str = tmpdir + "/" + name
+        if dragon_create_excl(path) == 0 {
+            return path
+        }
+        attempts = attempts + 1
+    }
+    raise OSError("mkstemp: could not create a unique temporary file")
+}
+
+def mkdtemp(prefix: str, suffix: str) -> str {
+    # Create a temporary directory and return its path.
+    # Uses mode 0o700 (448 decimal) for owner-only access.
+    const tmpdir: str = gettempdir()
+    attempts: int = 0
+    while attempts < 100 {
+        const name: str = prefix + _random_name(8) + suffix
+        const path: str = tmpdir + "/" + name
+        if not _exists(path) {
+            const rc: int = mkdir(path, 0o700)
+            if rc == 0 { return path }
+        }
+        attempts = attempts + 1
+    }
+    # Last resort
+    const fallback: str = tmpdir + "/" + prefix + _random_name(8) + suffix
+    mkdir(fallback, 0o700)
+    return fallback
+}

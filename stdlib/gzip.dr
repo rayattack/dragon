@@ -1,0 +1,95 @@
+# gzip.dr - gzip compression / decompression.
+#
+# Surface mirrors CPython's `gzip` module for the bytes-in / bytes-out path
+# (the 80% case in registry workflows: pack a tarball, gzip it, write to
+# disk). File-handle GzipFile keeps parity for code ported from Python.
+#
+# Compression level matches zlib's scale (0=store, 1=fastest, 9=best). The
+# default mirrors CPython: gzip.compress uses 9, gzip.open uses 9. Anything
+# in between (-1 = library default of 6) is also accepted.
+
+
+extern "C" def dragon_zlib_compress(src: bytes, level: int) -> bytes
+extern "C" def dragon_zlib_decompress(src: bytes) -> bytes
+extern "C" def dragon_read_file_bytes(path: str) -> bytes
+extern "C" def dragon_write_file_bytes(path: str, data: bytes) -> int
+
+
+const _DEFAULT_LEVEL: int = 9
+
+
+def compress(data: bytes, compresslevel: int = _DEFAULT_LEVEL) -> bytes {
+    return dragon_zlib_compress(data, compresslevel)
+}
+
+
+def decompress(data: bytes) -> bytes {
+    return dragon_zlib_decompress(data)
+}
+
+
+# File-like wrapper around a gzip-on-disk file. Buffered, single-pass: read
+# pulls the whole file into memory then decompresses; write buffers writes
+# in memory and compresses-and-flushes on close. Streaming chunked IO is a
+# follow-up - registry tarballs are well under any sensible RAM ceiling.
+class GzipFile {
+    def(filename: str, mode: str, compresslevel: int) {
+        self.filename = filename
+        self.mode = mode
+        self.compresslevel = compresslevel
+        self.closed = False
+        # Read mode: pull the file off disk and decompress eagerly so .read()
+        # can hand back a precomputed bytes blob in one call. Write mode
+        # starts with an empty buffer that .write() appends to until close.
+        if mode == "rb" or mode == "r" {
+            raw: bytes = dragon_read_file_bytes(filename)
+            self._buffer = dragon_zlib_decompress(raw)
+        } else if mode == "wb" or mode == "w" {
+            self._buffer = bytes()
+        } else {
+            raise ValueError(f"gzip: unsupported mode '{mode}'")
+        }
+    }
+
+    def read() -> bytes {
+        if self.closed {
+            raise ValueError("gzip: read() on closed file")
+        }
+        return self._buffer
+    }
+
+    def write(data: bytes) -> int {
+        if self.closed {
+            raise ValueError("gzip: write() on closed file")
+        }
+        self._buffer += data
+        return len(data)
+    }
+
+    def close() -> None {
+        if self.closed {
+            return
+        }
+        self.closed = True
+        # On close in write mode, gzip the accumulated buffer and flush
+        # it to disk in a single fwrite. Read mode just frees its buffer
+        # (the GC handles that when the object dies).
+        if self.mode == "wb" or self.mode == "w" {
+            compressed: bytes = dragon_zlib_compress(self._buffer, self.compresslevel)
+            dragon_write_file_bytes(self.filename, compressed)
+        }
+    }
+
+    def __enter__() -> GzipFile {
+        return self
+    }
+
+    def __exit__() -> None {
+        self.close()
+    }
+}
+
+
+def open(filename: str, mode: str = "rb", compresslevel: int = _DEFAULT_LEVEL) -> GzipFile {
+    return GzipFile(filename, mode, compresslevel)
+}

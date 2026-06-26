@@ -1,0 +1,85 @@
+"""Regression test for empty / NULL string-operand handling in the runtime.
+
+dragon_str_concat / _append_inplace / _replace_n used to substitute "" for a NULL
+operand BEFORE probing dragon_is_heap_string, so the probe read the header of a
+header-less rodata literal out of bounds (and append_inplace's fallback decref'd
+that "" the same way). The probe is now routed through the single NULL-guarded
+dragon_str_is_heap and runs on the ORIGINAL pointer, with "" materialized only
+afterward for the byte-copy paths (where the matching length is already 0).
+
+These assertions pin the observable behavior of the empty-operand paths so the
+reordering can't silently regress. Run under the ASan build to confirm the OOB
+read is gone.
+"""
+
+from unittest import TestCase, main
+
+class StringEmptyOperandTests(TestCase) {
+    def test_concat_empty_ascii() {
+        const e: str = ""
+        self.assertEqual(e + "x", "x")
+        self.assertEqual("x" + e, "x")
+        self.assertEqual(e + e, "")
+        self.assertEqual(len(e + e), 0)
+        self.assertEqual("a" + e + "b", "ab")
+    }
+
+    def test_concat_empty_with_kind4_operand() {
+        # "aλb" has a code point > 0xFF (U+03BB), so it is stored kind=4. With an
+        # empty operand the kind=4 code-point copy loop runs for the non-empty
+        # side only (the empty side's length is 0), which is exactly the path the
+        # reorder touched.
+        const u: str = "aλb"
+        const e: str = ""
+        self.assertEqual(e + u, "aλb")
+        self.assertEqual(u + e, "aλb")
+        self.assertEqual(len(u + e), 3)
+        self.assertEqual(len(e + u), 3)
+    }
+
+    def test_append_inplace_empty() {
+        # `+=` lowers to dragon_str_append_inplace (consumes the LHS reference).
+        s: str = "ab"
+        s += ""
+        self.assertEqual(s, "ab")
+        t: str = ""
+        t += "xy"
+        self.assertEqual(t, "xy")
+        t += ""
+        self.assertEqual(t, "xy")
+    }
+
+    def test_append_inplace_accumulate_from_empty() {
+        # Accumulator starting at "" exercises the in-place grow path from empty.
+        acc: str = ""
+        i: int = 0
+        while i < 5 {
+            acc += "ab"
+            i = i + 1
+        }
+        self.assertEqual(acc, "ababababab")
+        self.assertEqual(len(acc), 10)
+    }
+
+    def test_replace_empty_args() {
+        const s: str = "hello"
+        # Dragon treats replace("", _) as a no-op (kind-correct copy), unlike
+        # CPython which inserts between every char. Pin Dragon's documented
+        # behavior so the olen==0 early-return path stays correct.
+        self.assertEqual(s.replace("", "-"), "hello")
+        # Empty replacement (nlen == 0) deletes matches.
+        self.assertEqual(s.replace("l", ""), "heo")
+        # Empty subject.
+        const e: str = ""
+        self.assertEqual(e.replace("a", "b"), "")
+        self.assertEqual(e.replace("", "b"), "")
+    }
+
+    def test_replace_kind4_empty_new() {
+        const s: str = "aλbλc"
+        self.assertEqual(s.replace("λ", ""), "abc")
+        self.assertEqual(len(s.replace("λ", "")), 3)
+    }
+}
+
+main([StringEmptyOperandTests()])

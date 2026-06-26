@@ -1,0 +1,28 @@
+
+
+
+def my_function(age: int) {
+    
+    await submit_to_server();
+}
+
+
+async def submit_to_server() {
+}
+
+
+def count_to_ten(start: int) -> int {
+  number: int = 0;
+  while(number < 10) {
+    number++;
+  }
+  return number;
+}
+
+
+def main(){
+  fire count_to_ten(10);
+  await submit_to_server();
+}
+
+

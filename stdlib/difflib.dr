@@ -1,0 +1,113 @@
+"""difflib - sequence similarity (Python `difflib`, string subset).
+
+Pure Dragon. `ratio` implements the Ratcliff-Obershelp similarity CPython's
+SequenceMatcher uses (2*M/T over recursively-found longest matching blocks),
+so scores match CPython for strings. `get_close_matches` ranks candidates by
+that ratio. Operates on `str` (the common case); list[str] line-diffs
+(unified_diff/ndiff) await generic sequences.
+"""
+
+
+def _longest_match(a: str, alo: int, ahi: int,
+                   b: str, blo: int, bhi: int) -> list[int] {
+    """Return [besti, bestj, bestsize]: longest common block in the ranges."""
+    besti: int = alo
+    bestj: int = blo
+    bestsize: int = 0
+    i: int = alo
+    while i < ahi {
+        j: int = blo
+        while j < bhi {
+            # length of the common run starting at a[i], b[j]
+            k: int = 0
+            while (i + k) < ahi and (j + k) < bhi and a[i + k] == b[j + k] {
+                k = k + 1
+            }
+            if k > bestsize {
+                besti = i
+                bestj = j
+                bestsize = k
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return [besti, bestj, bestsize]
+}
+
+
+def _match_count(a: str, alo: int, ahi: int,
+                b: str, blo: int, bhi: int) -> int {
+    """Total matched characters via recursive Ratcliff-Obershelp blocks."""
+    if alo >= ahi or blo >= bhi {
+        return 0
+    }
+    m: list[int] = _longest_match(a, alo, ahi, b, blo, bhi)
+    size: int = m[2]
+    if size == 0 {
+        return 0
+    }
+    besti: int = m[0]
+    bestj: int = m[1]
+    left: int = _match_count(a, alo, besti, b, blo, bestj)
+    right: int = _match_count(a, besti + size, ahi, b, bestj + size, bhi)
+    return left + size + right
+}
+
+
+def ratio(a: str, b: str) -> float {
+    """Similarity in [0.0, 1.0]: 2*M / (len(a) + len(b))."""
+    la: int = len(a)
+    lb: int = len(b)
+    total: int = la + lb
+    if total == 0 {
+        return 1.0
+    }
+    matches: int = _match_count(a, 0, la, b, 0, lb)
+    return 2.0 * float(matches) / float(total)
+}
+
+
+def get_close_matches(word: str, possibilities: list[str],
+                      n: int = 3, cutoff: float = 0.6) -> list[str] {
+    """The `n` best matches for `word` among `possibilities`, ratio >= cutoff,
+    best first."""
+    cand_words: list[str] = []
+    cand_scores: list[float] = []
+    for p in possibilities {
+        score: float = ratio(word, p)
+        if score >= cutoff {
+            cand_words.append(p)
+            cand_scores.append(score)
+        }
+    }
+    # Selection sort by score descending (small candidate sets).
+    result: list[str] = []
+    taken: int = 0
+    m: int = len(cand_words)
+    used: list[bool] = []
+    k: int = 0
+    while k < m {
+        used.append(False)
+        k = k + 1
+    }
+    while taken < n and taken < m {
+        best_idx: int = -1
+        best_val: float = -1.0
+        i: int = 0
+        while i < m {
+            if not used[i] and cand_scores[i] > best_val {
+                best_val = cand_scores[i]
+                best_idx = i
+            }
+            i = i + 1
+        }
+        if best_idx < 0 {
+            return result
+        }
+        used[best_idx] = True
+        result.append(cand_words[best_idx])
+        taken = taken + 1
+    }
+    return result
+}

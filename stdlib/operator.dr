@@ -1,0 +1,156 @@
+# operator.dr - function versions of Python operators
+#
+# Mirrors CPython's `operator` module: arithmetic, comparison, logical, and
+# sequence operators surfaced as plain functions that can be passed to higher
+# order constructs (functools.reduce, sorted's key, map/filter).
+#
+# Dragon's static typing forces monomorphic signatures, so the arithmetic and
+# comparison ops are provided as `int` variants (the common case). Float and
+# string variants are exposed under suffixed names where the operator is
+# ambiguous; they keep the same semantics as Python's `__add__` / `__lt__`.
+#
+# Pure Dragon - no C dependencies.
+
+#===----------------------------------------------------------------------===#
+# Comparison operators
+#===----------------------------------------------------------------------===#
+
+def lt(a: int, b: int) -> bool { return a < b }
+def le(a: int, b: int) -> bool { return a <= b }
+def eq(a: int, b: int) -> bool { return a == b }
+def ne(a: int, b: int) -> bool { return a != b }
+def gt(a: int, b: int) -> bool { return a > b }
+def ge(a: int, b: int) -> bool { return a >= b }
+
+def lt_f(a: float, b: float) -> bool { return a < b }
+def le_f(a: float, b: float) -> bool { return a <= b }
+def eq_f(a: float, b: float) -> bool { return a == b }
+def ne_f(a: float, b: float) -> bool { return a != b }
+def gt_f(a: float, b: float) -> bool { return a > b }
+def ge_f(a: float, b: float) -> bool { return a >= b }
+
+def lt_s(a: str, b: str) -> bool { return a < b }
+def le_s(a: str, b: str) -> bool { return a <= b }
+def eq_s(a: str, b: str) -> bool { return a == b }
+def ne_s(a: str, b: str) -> bool { return a != b }
+def gt_s(a: str, b: str) -> bool { return a > b }
+def ge_s(a: str, b: str) -> bool { return a >= b }
+
+#===----------------------------------------------------------------------===#
+# Logical operators
+#===----------------------------------------------------------------------===#
+
+def not_(a: bool) -> bool { return not a }
+
+def truth(a: int) -> bool { return a != 0 }
+def truth_s(a: str) -> bool { return len(a) > 0 }
+
+def is_(a: int, b: int) -> bool { return a == b }
+def is_not(a: int, b: int) -> bool { return a != b }
+
+#===----------------------------------------------------------------------===#
+# Arithmetic operators (int)
+#===----------------------------------------------------------------------===#
+
+def add(a: int, b: int) -> int { return a + b }
+def sub(a: int, b: int) -> int { return a - b }
+def mul(a: int, b: int) -> int { return a * b }
+def floordiv(a: int, b: int) -> int { return a // b }
+def truediv(a: int, b: int) -> float { return a / b }
+def mod(a: int, b: int) -> int { return a % b }
+def pow_(a: int, b: int) -> int { return a ** b }
+def neg(a: int) -> int { return -a }
+def pos(a: int) -> int { return +a }
+def abs_(a: int) -> int {
+    if a < 0 { return -a }
+    return a
+}
+
+def and_(a: int, b: int) -> int { return a & b }
+def or_(a: int, b: int) -> int { return a | b }
+def xor(a: int, b: int) -> int { return a ^ b }
+def inv(a: int) -> int { return ~a }
+def invert(a: int) -> int { return ~a }
+def lshift(a: int, b: int) -> int { return a << b }
+def rshift(a: int, b: int) -> int { return a >> b }
+
+def index(a: int) -> int { return a }
+
+#===----------------------------------------------------------------------===#
+# Arithmetic operators (float)
+#===----------------------------------------------------------------------===#
+
+def add_f(a: float, b: float) -> float { return a + b }
+def sub_f(a: float, b: float) -> float { return a - b }
+def mul_f(a: float, b: float) -> float { return a * b }
+def truediv_f(a: float, b: float) -> float { return a / b }
+def neg_f(a: float) -> float { return -a }
+def pos_f(a: float) -> float { return +a }
+def abs_f(a: float) -> float {
+    if a < 0.0 { return -a }
+    return a
+}
+
+#===----------------------------------------------------------------------===#
+# Sequence / string operators
+#===----------------------------------------------------------------------===#
+
+def concat(a: str, b: str) -> str { return a + b }
+
+def contains(seq: list[int], val: int) -> bool {
+    i: int = 0
+    while i < len(seq) {
+        if seq[i] == val { return True }
+        i = i + 1
+    }
+    return False
+}
+
+def contains_s(s: str, sub: str) -> bool { return sub in s }
+
+def countOf(seq: list[int], val: int) -> int {
+    count: int = 0
+    i: int = 0
+    while i < len(seq) {
+        if seq[i] == val { count = count + 1 }
+        i = i + 1
+    }
+    return count
+}
+
+def indexOf(seq: list[int], val: int) -> int {
+    # First index where seq[i] == val. ValueError if not found.
+    i: int = 0
+    while i < len(seq) {
+        if seq[i] == val { return i }
+        i = i + 1
+    }
+    raise ValueError("sequence.index(x): x not in sequence")
+}
+
+def length_hint(seq: list[int], default: int = 0) -> int { return len(seq) }
+
+def getitem(seq: list[int], idx: int) -> int { return seq[idx] }
+def setitem(seq: list[int], idx: int, val: int) -> None { seq[idx] = val }
+
+#===----------------------------------------------------------------------===#
+# In-place operators
+#===----------------------------------------------------------------------===#
+# Pure-functional shape: each returns the new value (Dragon's lists/dicts are
+# mutated through their own methods, so iadd/isub on int returns the result
+# matching `a += b` semantics).
+
+def iadd(a: int, b: int) -> int { return a + b }
+def isub(a: int, b: int) -> int { return a - b }
+def imul(a: int, b: int) -> int { return a * b }
+def ifloordiv(a: int, b: int) -> int { return a // b }
+def itruediv(a: int, b: int) -> float { return a / b }
+def imod(a: int, b: int) -> int { return a % b }
+def ipow(a: int, b: int) -> int { return a ** b }
+def iand(a: int, b: int) -> int { return a & b }
+def ior(a: int, b: int) -> int { return a | b }
+def ixor(a: int, b: int) -> int { return a ^ b }
+def ilshift(a: int, b: int) -> int { return a << b }
+def irshift(a: int, b: int) -> int { return a >> b }
+
+def iconcat(a: str, b: str) -> str { return a + b }

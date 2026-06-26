@@ -1,0 +1,117 @@
+# hmac.dr - Keyed-Hashing for Message Authentication (RFC 2104)
+#
+# Python-parity HMAC backed by the runtime's mbedTLS engine (ADR 038 Phase 7).
+# HMAC-SHA-256 backs token signing; HMAC-SHA-1 is the inner primitive of TOTP
+# (RFC 6238). mbedTLS's dragon_hmac performs the full RFC 2104 construction -
+# including block-size key normalization - so this module only buffers the
+# message and delegates the keyed hash (no hand-rolled ipad/opad two-pass).
+
+from binascii import hexlify, unhexlify
+
+
+# Computes HMAC-<name> over (key, msg) in the runtime via mbedtls_md_hmac.
+extern "C" def dragon_hmac(name: str, key: bytes, msg: bytes) -> bytes
+
+
+# Block / digest sizes for the supported algorithms - exposed as the
+# HMAC.block_size / HMAC.digest_size attributes (Python parity).
+def _block_size(name: str) -> int {
+    # SHA-384/512 hash 128-byte blocks; the rest use 64.
+    if name == "sha256" { return 64 }
+    if name == "sha224" { return 64 }
+    if name == "sha512" { return 128 }
+    if name == "sha384" { return 128 }
+    if name == "sha1"   { return 64 }
+    if name == "md5"    { return 64 }
+    raise ValueError(f"unsupported HMAC algorithm: {name}")
+}
+
+def _digest_size(name: str) -> int {
+    if name == "sha256" { return 32 }
+    if name == "sha224" { return 28 }
+    if name == "sha512" { return 64 }
+    if name == "sha384" { return 48 }
+    if name == "sha1"   { return 20 }
+    if name == "md5"    { return 16 }
+    raise ValueError(f"unsupported HMAC algorithm: {name}")
+}
+
+
+class HMAC {
+    def(key: bytes, name: str) {
+        self.name = name
+        # _block_size validates `name`, rejecting unsupported algorithms early.
+        self.block_size = _block_size(name)
+        self.digest_size = _digest_size(name)
+        # Raw key - mbedTLS normalizes it to the block size internally.
+        self.key = key
+        # Buffered message - Python's hmac is incremental; we mirror it and
+        # compute the keyed hash once in digest().
+        self.buf = bytes()
+    }
+
+    def update(more: bytes) -> None {
+        self.buf += more
+    }
+
+    def digest() -> bytes {
+        return dragon_hmac(self.name, self.key, self.buf)
+    }
+
+    def hexdigest() -> str {
+        return hexlify(self.digest()).decode("utf-8")
+    }
+
+    def copy() -> HMAC {
+        c: HMAC = HMAC(self.key, self.name)
+        c.buf = self.buf
+        return c
+    }
+}
+
+
+def new(key: bytes, msg: bytes = b"", digestmod: str = "sha256") -> HMAC {
+    h: HMAC = HMAC(key, digestmod)
+    if len(msg) > 0 {
+        h.update(msg)
+    }
+    return h
+}
+
+
+# Constant-time byte comparison. Useful for verifying tokens / MACs without
+# leaking timing information about the matching prefix. Stays pure-Dragon -
+# it is a comparison utility, not part of the crypto engine.
+def compare_digest(a: bytes, b: bytes) -> bool {
+    la: int = len(a)
+    lb: int = len(b)
+    diff: int = la ^ lb
+    n: int = la
+    if lb < n { n = lb }
+    i: int = 0
+    while i < n {
+        diff = diff | (a[i] ^ b[i])
+        i = i + 1
+    }
+    return diff == 0
+}
+
+
+# Runtime constant-time string equality (never early-exits, unlike `==` which
+# lowers to strcmp and leaks the shared-prefix length via timing). Returns 1/0.
+extern "C" def dragon_str_eq_const(a: str, b: str) -> int
+
+
+# Constant-time comparison for `str` tokens (auth tokens, signatures expressed
+# as hex/base64 text). Use this instead of `==` whenever the comparison is
+# security-sensitive and an operand is attacker-influenced - `==` is fast but
+# its early-exit timing reveals how many leading characters matched. For raw
+# MAC bytes, prefer compare_digest(bytes, bytes) above.
+def compare_digest_str(a: str, b: str) -> bool {
+    return dragon_str_eq_const(a, b) == 1
+}
+
+
+def digest(key: bytes, msg: bytes, digestmod: str) -> bytes {
+    return new(key, msg, digestmod).digest()
+}

@@ -1,0 +1,74 @@
+# records.dr - plain data records for the egg registry domain.
+# These mirror the DB rows; services build them from cursors.
+
+# Minimal row for the login lookup (id + password hash).
+class UserAuth {
+    def(id: int, password_hash: str) {
+        self.id: int = id
+        self.password_hash: str = password_hash
+    }
+}
+
+class User {
+    def(id: int, username: str, email: str, password_hash: str, created_at: int) {
+        self.id: int = id
+        self.username: str = username
+        self.email: str = email
+        self.password_hash: str = password_hash
+        self.created_at: int = created_at
+    }
+}
+
+# `revoked` mirrors the DB column (0/1) so `conn.all[Token]` materializes via T(**row).
+class Token {
+    def(id: int, user_id: int, label: str, created_at: int, last_used_at: int, revoked: int) {
+        self.id: int = id
+        self.user_id: int = user_id
+        self.label: str = label
+        self.created_at: int = created_at
+        self.last_used_at: int = last_used_at
+        self.revoked: int = revoked
+    }
+}
+
+class Package {
+    def(id: int, name: str, owner_id: int, description: str, created_at: int) {
+        self.id: int = id
+        self.name: str = name
+        self.owner_id: int = owner_id
+        self.description: str = description
+        self.created_at: int = created_at
+    }
+}
+
+# One leaf of the append-only transparency log. `leaf_hash` binds
+# (name,version,pkg_hash,ts,published_by); `chain_head` = sha256(prev_head +
+# leaf_hash), so the sequence is tamper-evident. Mirrors the DB columns for
+# `conn.all[LogEntry]` materialization (T(**row)).
+class LogEntry {
+    def(seq: int, name: str, version: str, pkg_hash: str, published_by: int, ts: int, leaf_hash: str, chain_head: str) {
+        self.seq: int = seq
+        self.name: str = name
+        self.version: str = version
+        self.pkg_hash: str = pkg_hash
+        self.published_by: int = published_by
+        self.ts: int = ts
+        self.leaf_hash: str = leaf_hash
+        self.chain_head: str = chain_head
+    }
+}
+
+# `yanked` (0 live / 1 soft / 2 security) and `yank_reason` mirror the DB columns
+# so `conn.all[Version]` materializes via T(**row).
+class Version {
+    def(id: int, package_id: int, version: str, hash: str, yanked: int, yank_reason: str, published_at: int, published_by: int) {
+        self.id: int = id
+        self.package_id: int = package_id
+        self.version: str = version
+        self.hash: str = hash
+        self.yanked: int = yanked
+        self.yank_reason: str = yank_reason
+        self.published_at: int = published_at
+        self.published_by: int = published_by
+    }
+}

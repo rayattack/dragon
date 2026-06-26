@@ -1,0 +1,94 @@
+"""tuple-unpack source-temp release - leaks.md #17a.
+
+Before the fix, simple tuple unpacking (`a, b = <rhs>`) extracted each element
+(borrowed from dragon_tuple_get / dragon_list_get, then increfed into its slot)
+and returned WITHOUT freeing the owned RHS container temp. So `q, r =
+divmod(...)` / `k, s, v = line.partition("=")` leaked the source tuple's struct
++ buffer + its element refs, once per unpack.
+
+The fix drops the RHS container when it is an OWNED temp (a call result or a
+tuple/list literal). The cases below assert:
+  - the unpacked VALUES are correct (the drain is balanced, not over-eager),
+  - heap str elements SURVIVE the source-tuple free (no UAF - they are owned by
+    their slots afterward),
+  - a BORROWED source (a named var) is NOT freed by the unpack (no double-free),
+    and stays usable afterward.
+"""
+
+from unittest import TestCase, main
+
+
+def two() -> tuple[int, int] {
+    return (11, 22)
+}
+
+
+class TupleUnpackRcTests(TestCase) {
+    def test_divmod_unpack_values() {
+        q: int = 0
+        r: int = 0
+        i: int = 0
+        acc: int = 0
+        while i < 300 {
+            q, r = divmod(i, 7)
+            acc = acc + q + r
+            i = i + 1
+        }
+        # divmod(i,7): q*7 + r == i, so sum of (q+r) is bounded and deterministic.
+        self.assertEqual(q, 42)   # divmod(299,7) = (42, 5)
+        self.assertEqual(r, 5)
+    }
+
+    def test_partition_heap_elements_survive() {
+        # The 3 str elements must outlive the source tuple's free.
+        k: str = ""
+        sep: str = ""
+        v: str = ""
+        i: int = 0
+        while i < 200 {
+            line: str = "key" + str(i) + "=value"
+            k, sep, v = line.partition("=")
+            i = i + 1
+        }
+        self.assertEqual(k, "key199")
+        self.assertEqual(sep, "=")
+        self.assertEqual(v, "value")
+        # And the captured strings are still valid (a premature free would have
+        # corrupted these reads).
+        self.assertEqual(len(sep), 1)
+    }
+
+    def test_owned_tuple_call_result_unpack() {
+        a: int = 0
+        b: int = 0
+        i: int = 0
+        while i < 100 {
+            a, b = two()
+            i = i + 1
+        }
+        self.assertEqual(a, 11)
+        self.assertEqual(b, 22)
+    }
+
+    def test_borrowed_source_not_double_freed() {
+        # Unpacking a NAMED tuple var must NOT free the source - it stays usable.
+        t: tuple[int, int] = (7, 9)
+        a: int = 0
+        b: int = 0
+        a, b = t
+        self.assertEqual(a, 7)
+        self.assertEqual(b, 9)
+        # Source still alive and correct after the unpack.
+        self.assertEqual(t[0], 7)
+        self.assertEqual(t[1], 9)
+        # Unpack it a second time - still valid (not freed by the first unpack).
+        c: int = 0
+        d: int = 0
+        c, d = t
+        self.assertEqual(c, 7)
+        self.assertEqual(d, 9)
+    }
+}
+
+
+main([TupleUnpackRcTests()])

@@ -1,0 +1,40 @@
+# template.dr - Dragon standard library: the Template protocol base.
+#
+# `template[X] { ... }` content types subclass `Template`. Per Decision 032's
+# domain-co-location rule, the concrete content types live in the module that
+# owns their domain - not here:
+#
+#  HTML / CSS / XML -> html (from html import HTML, CSS, XML)
+#  JSON -> json (from json import JSON)
+#  URL -> urllib.parse (from urllib.parse import URL)
+#  SQL -> database (from database import SQL)
+#
+# This file holds only the base protocol every content type extends. The base
+# has no special compiler status - user-defined types subclass it identically,
+# and the compiler's only requirement (TypeChecker) is that a `template[X]`
+# content type extends `Template`.
+
+
+class Template {
+    def(inner: str) {
+        self._inner = inner
+    }
+
+    @staticmethod
+    def escape(s: str) -> str {
+        return s
+    }
+
+    @staticmethod
+    def validate(content: str) -> None {
+        pass
+    }
+
+    def to_str() -> str {
+        return self._inner
+    }
+
+    def __str__() -> str {
+        return self._inner
+    }
+}

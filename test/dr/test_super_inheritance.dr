@@ -1,0 +1,84 @@
+"""`.dr` keyword-form super: `super(args)` ctor delegation + `super.method()`.
+
+Dragon's `.dr` surface drops Python's `super()` proxy call. The canonical forms
+mirror the nameless `def()` constructor: `super(args)` invokes the parent ctor,
+`super.method(args)` dispatches to a parent method. Parent-ctor delegation is
+opt-in (Python parity) - a child ctor that never calls `super(...)` does NOT run
+the parent ctor, so inherited fields hold their zero/None default. The Python
+spellings (`super().__init__()`, `super().method()`) are a compile error in `.dr`
+and are exercised separately in `.py`-mode GoogleTests.
+"""
+
+from unittest import TestCase, main
+
+class Animal {
+    name: str
+    legs: int
+    def(n: str, l: int) {
+        self.name = n
+        self.legs = l
+    }
+    def describe() -> str {
+        return self.name + " has " + str(self.legs) + " legs"
+    }
+    def sound() -> str {
+        return "..."
+    }
+}
+
+class Dog(Animal) {
+    breed: str
+    def(n: str, b: str) {
+        super(n, 4)          # delegate to Animal.__init__
+        self.breed = b
+    }
+    def sound() -> str {
+        return "woof"
+    }
+    # super.method(): call the parent's version of an overridden method.
+    def full() -> str {
+        return super.describe() + " (" + self.breed + ", " + self.sound() + ")"
+    }
+}
+
+# Child that deliberately skips super(...): parent ctor must NOT auto-run.
+class Cat(Animal) {
+    indoor: bool
+    def(i: bool) {
+        self.indoor = i
+    }
+}
+
+class SuperTests(TestCase) {
+    def test_ctor_delegation_runs_parent_ctor() {
+        d: Dog = Dog("Rex", "Lab")
+        self.assertEqual(d.name, "Rex")     # set by super(n, 4)
+        self.assertEqual(d.legs, 4)         # set by super(n, 4)
+        self.assertEqual(d.breed, "Lab")    # set by Dog ctor
+    }
+
+    def test_super_method_dispatch() {
+        d: Dog = Dog("Rex", "Lab")
+        # super.describe() reaches the parent method even though Dog overrides sound()
+        self.assertEqual(d.full(), "Rex has 4 legs (Lab, woof)")
+    }
+
+    def test_override_still_virtual() {
+        d: Dog = Dog("Rex", "Lab")
+        self.assertEqual(d.sound(), "woof")     # Dog's override
+        self.assertEqual(d.describe(), "Rex has 4 legs")  # inherited, unoverridden
+    }
+
+    def test_opt_in_skip_leaves_defaults() {
+        # Cat ctor never calls super(...): the parent ctor does not run, so the
+        # parent's int field keeps its zero default - the unambiguous witness
+        # that base init was skipped (Python parity: no implicit base chaining).
+        # A typed `str` field is non-optional, so its unset value is a null str
+        # (still TAG_STR), not None, and is intentionally not asserted here.
+        c: Cat = Cat(true)
+        self.assertTrue(c.indoor)
+        self.assertEqual(c.legs, 0)
+    }
+}
+
+main([SuperTests()])

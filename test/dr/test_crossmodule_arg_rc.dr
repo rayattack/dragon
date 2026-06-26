@@ -1,0 +1,60 @@
+# test/dr/test_crossmodule_arg_rc.dr - #3 (H3): owned-temp argument release on a
+# cross-module `module.fn(...)` attribute call.
+#
+# The `mod.fn(...)` attribute-call path built no argTemps, so an owned heap
+# temporary argument (e.g. `os.path_normpath(a + "/bar")`) leaked once per call
+# (the callee borrows its args). It now classifies each arg with the shared
+# argTempDecrefKind and releases owned temps after the call - exactly like the
+# same-module direct-call path. (The `from os.path import f; f(...)` name-alias
+# form already routed through the canonical path and was never affected.)
+#
+# This pins correctness: owned temps produce the right result, and a BORROWED
+# Name argument must NOT be released (a double-free would crash / corrupt under
+# the loop). Leak-freedom itself is verified under the ASan/LSan build:
+# with the fix the call site shows no dragon_str_concat leak; reverting the
+# release reproduces one leaked concat per call.
+
+from unittest import TestCase, main
+import os
+
+
+class CrossModuleArgRcTests(TestCase) {
+    def test_owned_temp_arg() {
+        # `a + "/bar"` is a fresh owned concat temp passed to a cross-module fn.
+        const a: str = "/foo/.."
+        const r: str = os.path_normpath(a + "/bar")
+        self.assertEqual(r, "/bar")
+        # `a` must remain valid (not freed as if the callee owned it).
+        self.assertEqual(a, "/foo/..")
+    }
+
+    def test_borrowed_name_arg_not_freed() {
+        # A borrowed Name arg must NOT be released by the caller. If it were, the
+        # repeated passes below would decref a live string to free and corrupt.
+        p: str = "/x/y/../z"
+        i: int = 0
+        while i < 500 {
+            const r: str = os.path_normpath(p)
+            self.assertEqual(r, "/x/z")
+            i = i + 1
+        }
+        self.assertEqual(p, "/x/y/../z")
+    }
+
+    def test_owned_temp_arg_loop() {
+        # Stress the owned-temp release path; a double-free would crash/corrupt.
+        const base: str = "/a/b/.."
+        i: int = 0
+        acc: int = 0
+        while i < 500 {
+            const r: str = os.path_normpath(base + "/c")
+            acc = acc + len(r)   # "/a/c" -> 4
+            i = i + 1
+        }
+        self.assertEqual(acc, 2000)
+        self.assertEqual(base, "/a/b/..")
+    }
+}
+
+
+main([CrossModuleArgRcTests()])

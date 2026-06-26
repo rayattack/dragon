@@ -1,0 +1,426 @@
+# textwrap.dr - text wrapping and filling.
+#
+# Mirrors CPython's `textwrap`: TextWrapper class plus wrap/fill/dedent/indent
+# /shorten module functions. Behaviour matches Python for the default flag
+# combination; advanced features (fix_sentence_endings, break_on_hyphens) are
+# included as flags but the algorithms are intentionally simple - not a full
+# port of CPython's regex-driven splitter.
+#
+# Pure Dragon - no C dependencies.
+
+
+#===----------------------------------------------------------------------===#
+# TextWrapper
+#===----------------------------------------------------------------------===#
+
+class TextWrapper {
+    def(width: int = 70,
+        initial_indent: str = "",
+        subsequent_indent: str = "",
+        expand_tabs: bool = True,
+        replace_whitespace: bool = True,
+        drop_whitespace: bool = True,
+        break_long_words: bool = True,
+        tabsize: int = 8,
+        max_lines: int = -1,
+        placeholder: str = " [...]") {
+        self.width = width
+        self.initial_indent = initial_indent
+        self.subsequent_indent = subsequent_indent
+        self.expand_tabs = expand_tabs
+        self.replace_whitespace = replace_whitespace
+        self.drop_whitespace = drop_whitespace
+        self.break_long_words = break_long_words
+        self.tabsize = tabsize
+        self.max_lines = max_lines
+        self.placeholder = placeholder
+    }
+
+    def _munge(text: str) -> str {
+        out: str = text
+        if self.expand_tabs {
+            out = _expand_tabs(out, self.tabsize)
+        }
+        if self.replace_whitespace {
+            out = _replace_whitespace(out)
+        }
+        return out
+    }
+
+    def _split_words(text: str) -> list[str] {
+        # Whitespace-delimited tokens; preserves internal punctuation.
+        words: list[str] = []
+        cur: str = ""
+        i: int = 0
+        while i < len(text) {
+            const c: str = text[i]
+            if c == " " or c == "\t" or c == "\n" {
+                if len(cur) > 0 {
+                    words.append(cur)
+                    cur = ""
+                }
+                if not self.drop_whitespace {
+                    words.append(c)
+                }
+            } else {
+                cur = cur + c
+            }
+            i = i + 1
+        }
+        if len(cur) > 0 {
+            words.append(cur)
+        }
+        return words
+    }
+
+    def wrap(text: str) -> list[str] {
+        const munged: str = self._munge(text)
+        const words: list[str] = self._split_words(munged)
+
+        lines: list[str] = []
+        if len(words) == 0 {
+            return lines
+        }
+
+        cur: str = self.initial_indent
+        indent: str = self.subsequent_indent
+        cur_indent: str = self.initial_indent
+        i: int = 0
+
+        while i < len(words) {
+            const w: str = words[i]
+            const w_len: int = len(w)
+
+            # Word longer than the available column width. break_long_words
+            # splits it; otherwise emit it as-is on its own line.
+            if w_len > self.width - len(cur_indent) {
+                if self.break_long_words {
+                    # Fill the current line, then keep slicing.
+                    remaining: str = w
+                    while len(remaining) > 0 {
+                        const free: int = self.width - len(cur)
+                        if free <= 0 {
+                            lines.append(cur)
+                            cur = indent
+                            cur_indent = indent
+                            continue
+                        }
+                        if len(remaining) <= free {
+                            cur = cur + remaining
+                            remaining = ""
+                        } else {
+                            cur = cur + remaining[0:free]
+                            remaining = remaining[free:len(remaining)]
+                            lines.append(cur)
+                            cur = indent
+                            cur_indent = indent
+                        }
+                    }
+                    i = i + 1
+                    continue
+                }
+            }
+
+            # Does the next word fit?
+            const sep: str = _word_sep(cur, cur_indent)
+            const projected: int = len(cur) + len(sep) + w_len
+            if projected <= self.width {
+                cur = cur + sep + w
+                i = i + 1
+                continue
+            }
+
+            # Doesn't fit: flush and start a fresh line.
+            if len(cur) > 0 and cur != cur_indent {
+                lines.append(cur)
+            }
+            cur = indent + w
+            cur_indent = indent
+            i = i + 1
+        }
+
+        if len(cur) > 0 and cur != cur_indent {
+            lines.append(cur)
+        }
+
+        # max_lines truncation with placeholder.
+        if self.max_lines >= 0 {
+            if len(lines) > self.max_lines {
+                kept: list[str] = []
+                j: int = 0
+                while j < self.max_lines {
+                    kept.append(lines[j])
+                    j = j + 1
+                }
+                if len(kept) > 0 {
+                    const last: str = kept[self.max_lines - 1]
+                    kept[self.max_lines - 1] = last + self.placeholder
+                }
+                return kept
+            }
+        }
+
+        return lines
+    }
+
+    def fill(text: str) -> str {
+        const lines: list[str] = self.wrap(text)
+        return _join_lines(lines)
+    }
+}
+
+
+#===----------------------------------------------------------------------===#
+# Module-level convenience functions
+#===----------------------------------------------------------------------===#
+
+def wrap(text: str, width: int = 70) -> list[str] {
+    const tw: TextWrapper = TextWrapper(width)
+    return tw.wrap(text)
+}
+
+
+def fill(text: str, width: int = 70) -> str {
+    const tw: TextWrapper = TextWrapper(width)
+    return tw.fill(text)
+}
+
+
+def dedent(text: str) -> str {
+    # Strip the longest run of leading whitespace common to every non-empty
+    # line (matching Python's `textwrap.dedent`).
+    const lines: list[str] = _split_lines_keepends(text)
+    if len(lines) == 0 {
+        return text
+    }
+
+    margin: str = ""
+    have_margin: bool = False
+    i: int = 0
+    while i < len(lines) {
+        const line: str = lines[i]
+        const stripped: str = _lstrip_ws(line)
+        if len(stripped) == 0 {
+            # Blank line - ignore for margin computation, like Python.
+            i = i + 1
+            continue
+        }
+        const indent: str = line[0:len(line) - len(stripped)]
+        if not have_margin {
+            margin = indent
+            have_margin = True
+        } else {
+            margin = _common_prefix(margin, indent)
+            if len(margin) == 0 {
+                break
+            }
+        }
+        i = i + 1
+    }
+
+    if not have_margin {
+        return text
+    }
+    if len(margin) == 0 {
+        return text
+    }
+
+    out: str = ""
+    i = 0
+    while i < len(lines) {
+        const line: str = lines[i]
+        if _starts_with(line, margin) {
+            out = out + line[len(margin):len(line)]
+        } else {
+            # Blank line - keep its original whitespace.
+            out = out + line
+        }
+        i = i + 1
+    }
+    return out
+}
+
+
+def indent(text: str, prefix: str) -> str {
+    # Add `prefix` to every non-empty line.
+    const lines: list[str] = _split_lines_keepends(text)
+    out: str = ""
+    i: int = 0
+    while i < len(lines) {
+        const line: str = lines[i]
+        const stripped: str = _strip_ws(line)
+        if len(stripped) > 0 {
+            out = out + prefix + line
+        } else {
+            out = out + line
+        }
+        i = i + 1
+    }
+    return out
+}
+
+
+def shorten(text: str, width: int, placeholder: str = " [...]") -> str {
+    # Collapse all whitespace into single spaces, then truncate.
+    const collapsed: str = _replace_whitespace(text)
+    const trimmed: str = _strip_ws(collapsed)
+    if len(trimmed) <= width {
+        return trimmed
+    }
+    if width < len(placeholder) {
+        return placeholder[0:width]
+    }
+    # Walk back to the nearest word boundary so we don't slice mid-word.
+    cut: int = width - len(placeholder)
+    if cut < 0 { cut = 0 }
+    j: int = cut
+    while j > 0 {
+        if trimmed[j - 1] == " " {
+            break
+        }
+        j = j - 1
+    }
+    if j == 0 {
+        # No whitespace found - hard-truncate.
+        return trimmed[0:cut] + placeholder
+    }
+    return _rstrip_ws(trimmed[0:j]) + placeholder
+}
+
+
+#===----------------------------------------------------------------------===#
+# Internal helpers
+#===----------------------------------------------------------------------===#
+
+def _expand_tabs(text: str, tabsize: int) -> str {
+    out: list[str] = []
+    col: int = 0
+    i: int = 0
+    while i < len(text) {
+        const c: str = text[i]
+        if c == "\t" {
+            const fill_n: int = tabsize - (col % tabsize)
+            j: int = 0
+            while j < fill_n {
+                out.append(" ")
+                j = j + 1
+            }
+            col = col + fill_n
+        } else if c == "\n" {
+            out.append(c)
+            col = 0
+        } else {
+            out.append(c)
+            col = col + 1
+        }
+        i = i + 1
+    }
+    return "".join(out)
+}
+
+
+def _replace_whitespace(text: str) -> str {
+    out: list[str] = []
+    i: int = 0
+    while i < len(text) {
+        const c: str = text[i]
+        if c == "\t" or c == "\n" or c == "\r" or c == " " {
+            out.append(" ")
+        } else {
+            out.append(c)
+        }
+        i = i + 1
+    }
+    return "".join(out)
+}
+
+
+def _is_ws(c: str) -> bool {
+    return c == " " or c == "\t" or c == "\n" or c == "\r"
+}
+
+
+def _lstrip_ws(s: str) -> str {
+    i: int = 0
+    while i < len(s) {
+        if not _is_ws(s[i]) { break }
+        i = i + 1
+    }
+    return s[i:len(s)]
+}
+
+
+def _rstrip_ws(s: str) -> str {
+    j: int = len(s)
+    while j > 0 {
+        if not _is_ws(s[j - 1]) { break }
+        j = j - 1
+    }
+    return s[0:j]
+}
+
+
+def _strip_ws(s: str) -> str {
+    return _rstrip_ws(_lstrip_ws(s))
+}
+
+
+def _starts_with(s: str, prefix: str) -> bool {
+    if len(prefix) > len(s) { return False }
+    return s[0:len(prefix)] == prefix
+}
+
+
+def _common_prefix(a: str, b: str) -> str {
+    const upper: int = len(a)
+    const limit: int = len(b)
+    const stop: int = min(upper, limit)
+    i: int = 0
+    while i < stop {
+        if a[i] != b[i] { break }
+        i = i + 1
+    }
+    return a[0:i]
+}
+
+
+def _split_lines_keepends(text: str) -> list[str] {
+    out: list[str] = []
+    cur: str = ""
+    i: int = 0
+    while i < len(text) {
+        const c: str = text[i]
+        cur = cur + c
+        if c == "\n" {
+            out.append(cur)
+            cur = ""
+        }
+        i = i + 1
+    }
+    if len(cur) > 0 {
+        out.append(cur)
+    }
+    return out
+}
+
+
+def _join_lines(lines: list[str]) -> str {
+    out: str = ""
+    i: int = 0
+    while i < len(lines) {
+        if i > 0 { out = out + "\n" }
+        out = out + lines[i]
+        i = i + 1
+    }
+    return out
+}
+
+
+def _word_sep(cur: str, cur_indent: str) -> str {
+    # Insert a space between words except when the line still equals its
+    # indent (i.e. this is the first word on the line).
+    if cur == cur_indent {
+        return ""
+    }
+    return " "
+}

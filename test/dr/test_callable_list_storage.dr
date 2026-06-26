@@ -1,0 +1,66 @@
+# test/dr/test_callable_list_storage.dr - regression for the ADR 046 fix.
+#
+# Bug (fixed 2026-06-07): a Callable stored in a list[Callable] used the
+# non-refcounting i64 append - Type::Kind::Function fell through to the int path
+# in list.append codegen (src/codegen/CallMethods.cpp). A bare fn passed through
+# a Callable param and then appended (the effect-registry pattern) was stored
+# WITHOUT ownership and freed by the caller's post-call decref -> use-after-free
+# -> SIGSEGV on the index-call. (Storing a bare fn literal directly happened to
+# survive only when its .text byte at offset 8 != TAG_CLOSURE.)
+#
+# Fix: Function elements append via dragon_list_append_ptr (refcounted, like
+# str/instance), and a bare fn literal is wrapped into a DragonClosure(fn, null)
+# first so every list[Callable] element is a uniform refcounted closure - the
+# value-call dispatch unwraps env==null -> bare call (ADR 046).
+
+from unittest import TestCase, main
+
+log: list[str] = []
+
+def emit_x() -> None { log.append("x") }
+def emit_y() -> None { log.append("y") }
+
+# Append a Callable that arrived as a parameter (the registry pattern that crashed).
+def register(fns: list[Callable[[], None]], f: Callable[[], None]) -> None {
+    fns.append(f)
+}
+
+class CallableListTests(TestCase) {
+    def test_bare_fn_literal_then_index_call() {
+        fns: list[Callable[[], None]] = []
+        fns.append(emit_x)
+        fns[0]()
+        self.assertEqual(log[len(log) - 1], "x")
+    }
+
+    def test_fn_through_param_then_index_call() {
+        fns: list[Callable[[], None]] = []
+        register(fns, emit_y)
+        fns[0]()
+        self.assertEqual(log[len(log) - 1], "y")
+    }
+
+    def test_capturing_closure_in_list() {
+        fns: list[Callable[[], None]] = []
+        tag: str = "z"
+        fns.append(lambda () -> None { log.append(tag) })
+        fns[0]()
+        self.assertEqual(log[len(log) - 1], "z")
+    }
+
+    def test_repeated_index_calls_stable() {
+        # The stored closure must survive many calls (it is owned by the list,
+        # not freed after the first dispatch).
+        fns: list[Callable[[], None]] = []
+        register(fns, emit_x)
+        i: int = 0
+        while i < 5 {
+            fns[0]()
+            i = i + 1
+        }
+        self.assertEqual(log[len(log) - 1], "x")
+        self.assertEqual(log[len(log) - 3], "x")
+    }
+}
+
+main([CallableListTests()])

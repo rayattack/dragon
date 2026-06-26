@@ -1,0 +1,112 @@
+"""Bounded type parameters (`T: Bound`).
+
+A bounded `T: B` lifts the unbounded-`T` restriction inside the generic body:
+members, methods, and operators that the bound `B` provides may be used on a
+`T`-typed value (type-checked against `B`, dispatched to the concrete argument
+after monomorphization). Each instantiation requires the concrete type argument
+to be `B` or a subclass - enforced at the instantiation site, so a violating
+argument is a clean compile error, never a miscompile (the negative cases live
+in TypeCheckerTest.Bounded* as must-not-compile checks).
+
+Covered here (behavioral / value assertions): method + attribute access on a
+bounded free-function `T`; subclass dispatch (the concrete arg's override runs,
+not the bound's); inferred type args; a bounded generic CLASS; a bounded generic
+METHOD declaring its own `T`; and operator (dunder) dispatch through a bounded T.
+"""
+
+from unittest import TestCase, main
+
+class Animal {
+    name: str
+    def(name: str) {
+        self.name = name
+    }
+    def speak() -> str {
+        return self.name + " makes a sound"
+    }
+}
+
+class Dog(Animal) {
+    def(name: str) {
+        self.name = name
+    }
+    def speak() -> str {
+        return self.name + " says woof"
+    }
+}
+
+class Vec {
+    x: int
+    def(x: int) {
+        self.x = x
+    }
+    def __add__(other: Vec) -> Vec {
+        return Vec(self.x + other.x)
+    }
+    def val() -> int {
+        return self.x
+    }
+}
+
+# bounded free function - method + attribute access on T
+def describe[T: Animal](x: T) -> str {
+    return x.name + ": " + x.speak()
+}
+
+# bounded generic class - stores a T, calls its bound method
+class Shelter[T: Animal] {
+    occupant: T
+    def(occupant: T) {
+        self.occupant = occupant
+    }
+    def announce() -> str {
+        return self.occupant.speak()
+    }
+}
+
+class Registry {
+    # bounded generic METHOD declaring its own T: Animal
+    def loudest[T: Animal](a: T) -> str {
+        return a.speak()
+    }
+}
+
+# operator (dunder) dispatch through a bounded T, returning T (closed under +)
+def sum_pair[T: Vec](a: T, b: T) -> T {
+    return a + b
+}
+
+class BoundedGenericsTests(TestCase) {
+    def test_method_and_attr_on_bound() {
+        a: Animal = Animal("Critter")
+        self.assertEqual(describe[Animal](a), "Critter: Critter makes a sound")
+    }
+
+    def test_subclass_arg_dispatches_override() {
+        d: Dog = Dog("Rex")
+        # T = Dog: the override runs, not Animal.speak
+        self.assertEqual(describe[Dog](d), "Rex: Rex says woof")
+    }
+
+    def test_inferred_type_arg() {
+        d: Dog = Dog("Fido")
+        self.assertEqual(describe(d), "Fido: Fido says woof")
+    }
+
+    def test_bounded_generic_class() {
+        s: Shelter[Dog] = Shelter[Dog](Dog("Bingo"))
+        self.assertEqual(s.announce(), "Bingo says woof")
+    }
+
+    def test_bounded_generic_method() {
+        r: Registry = Registry()
+        self.assertEqual(r.loudest[Dog](Dog("Spot")), "Spot says woof")
+    }
+
+    def test_operator_dunder_on_bound() {
+        v: Vec = sum_pair[Vec](Vec(2), Vec(40))
+        self.assertEqual(v.val(), 42)
+    }
+}
+
+main([BoundedGenericsTests()])

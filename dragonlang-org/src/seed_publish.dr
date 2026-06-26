@@ -1,0 +1,11 @@
+# seed_publish.dr - create a publisher account + token for the demo, print it.
+# Run with cwd = dragonlang-org/. Imports deps so the data dir + DB exist.
+from deps import AUTH
+from services.auth import AuthResult
+
+const r: AuthResult = AUTH.register("frames-team", "team@dragonlang.org", "publishpass1")
+if r.ok {
+    print("TOKEN=" + AUTH.issue_token(r.user_id, "demo-publish"))
+} else {
+    print("REGISTER_FAILED=" + r.error)
+}

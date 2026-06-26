@@ -1,0 +1,24 @@
+"""urllib.response - addinfourl metadata exposes headers / url / code."""
+
+from unittest import TestCase, main
+from urllib.response import addinfourl
+
+
+class UrllibResponseTests(TestCase) {
+    def test_addinfourl_basics() {
+        hdrs: dict[str, str] = {"Content-Type": "text/plain"}
+        r: addinfourl = addinfourl(hdrs, "http://example/test", 200)
+        self.assertEqual(r.geturl(), "http://example/test")
+        self.assertEqual(r.getcode(), 200)
+        self.assertEqual(r.info()["Content-Type"], "text/plain")
+    }
+
+    def test_addinfourl_default_code() {
+        empty: dict[str, str] = {}
+        r: addinfourl = addinfourl(empty, "http://x")
+        self.assertEqual(r.getcode(), 0)
+    }
+}
+
+
+main([UrllibResponseTests()])

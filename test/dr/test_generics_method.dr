@@ -1,0 +1,172 @@
+"""Decision 044+ - generic METHODS (a method declaring its OWN type parameter).
+
+`def m[T](...)` on a class is monomorphized exactly like a generic free function:
+each concrete use site (`recv.m[int](...)` explicit, or `recv.m(x)` inferred)
+stamps a specialization into the owning class body, reached through ordinary
+method dispatch (so D026 vtable/MRO and inheritance keep working). This is the
+language feature underpinning the D049 `db.all[T]` / `db.one[T]` fetch surface.
+
+Covered: identity + `list[T]` return shapes; explicit and inferred type args;
+constructing `T(...)` inside the body; a generic method inherited from a base and
+called on a subclass (MRO walk); a method calling a sibling generic method via
+`self`; and multi-parameter `[K, V]` methods.
+"""
+
+from unittest import TestCase, main
+
+class Customer {
+    id: int
+    name: str
+    def(id: int, name: str) {
+        self.id = id
+        self.name = name
+    }
+}
+
+class Repo {
+    # identity - isolates the mechanism from any T-construction
+    def cast[T](x: T) -> T {
+        return x
+    }
+    # list[T] return - the db.all[T] result shape
+    def wrap[T](x: T) -> list[T] {
+        ys: list[T] = []
+        ys.append(x)
+        return ys
+    }
+    # construct T(...) inside the body - substitutes to the concrete ctor
+    def make[T](n: int) -> list[T] {
+        out: list[T] = []
+        i: int = 0
+        while i < n {
+            out.append(T(i, "row"))
+            i = i + 1
+        }
+        return out
+    }
+    # a method calling a sibling generic method through self
+    def cast_via_self[T](x: T) -> T {
+        return self.cast[T](x)
+    }
+    # multiple type parameters
+    def second[K, V](k: K, v: V) -> V {
+        return v
+    }
+    # comprehension that CONSTRUCTS T per element - the db.all[T] materialization
+    # shape `[T(**r) for r in rows]`. Regression: the comprehension element type
+    # must infer as T (not <unknown>), so the body types as list[T].
+    def fetch[T](rows: list[dict[str, Any]]) -> list[T] {
+        return [T(**r) for r in rows]
+    }
+    # comprehension with POSITIONAL T(...) construction
+    def gather[T](xs: list[int]) -> list[T] {
+        return [T(x, "g") for x in xs]
+    }
+}
+
+class Base {
+    def echo[T](x: T) -> T {
+        return x
+    }
+}
+
+class Derived(Base) {
+    tag: int
+    def(t: int) {
+        self.tag = t
+    }
+}
+
+class GenericsMethodTests(TestCase) {
+    def test_cast_explicit() {
+        r: Repo = Repo()
+        self.assertEqual(r.cast[int](7), 7)
+    }
+
+    def test_cast_inferred() {
+        r: Repo = Repo()
+        self.assertEqual(r.cast("hi"), "hi")
+    }
+
+    def test_wrap_explicit_int() {
+        r: Repo = Repo()
+        xs: list[int] = r.wrap[int](3)
+        self.assertEqual(len(xs), 1)
+        self.assertEqual(xs[0], 3)
+    }
+
+    def test_wrap_inferred_str() {
+        r: Repo = Repo()
+        ss: list[str] = r.wrap("z")
+        self.assertEqual(ss[0], "z")
+    }
+
+    def test_make_constructs_T() {
+        r: Repo = Repo()
+        custs: list[Customer] = r.make[Customer](3)
+        self.assertEqual(len(custs), 3)
+        self.assertEqual(custs[0].name, "row")
+        self.assertEqual(custs[2].id, 2)
+    }
+
+    def test_self_call() {
+        r: Repo = Repo()
+        self.assertEqual(r.cast_via_self[int](99), 99)
+    }
+
+    def test_multi_param_explicit() {
+        r: Repo = Repo()
+        self.assertEqual(r.second[str, int]("k", 5), 5)
+    }
+
+    def test_multi_param_inferred() {
+        r: Repo = Repo()
+        self.assertEqual(r.second("a", 9), 9)
+    }
+
+    def test_inherited_generic_method_int() {
+        d: Derived = Derived(5)
+        self.assertEqual(d.echo[int](42), 42)
+    }
+
+    def test_inherited_generic_method_inferred() {
+        d: Derived = Derived(5)
+        self.assertEqual(d.echo("hello"), "hello")
+    }
+
+    def test_comprehension_spread_materialization() {
+        r: Repo = Repo()
+        rows: list[dict[str, Any]] = [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
+        custs: list[Customer] = r.fetch[Customer](rows)
+        self.assertEqual(len(custs), 2)
+        self.assertEqual(custs[0].id, 1)
+        self.assertEqual(custs[0].name, "alice")
+        self.assertEqual(custs[1].name, "bob")
+    }
+
+    def test_comprehension_positional_construction() {
+        r: Repo = Repo()
+        cs: list[Customer] = r.gather[Customer]([5, 6, 7])
+        self.assertEqual(len(cs), 3)
+        self.assertEqual(cs[2].id, 7)
+        self.assertEqual(cs[0].name, "g")
+    }
+
+    # D049 optional-[T]: a bracket-less call infers T from the binding annotation
+    # (no [T] needed). This is the surface that makes `c: Customer = db.one()` and
+    # `rows: list[Customer] = db.all()` work without explicit type args.
+    def test_bracketless_infers_T_from_annotation() {
+        r: Repo = Repo()
+        cs: list[Customer] = r.gather([8, 9])   # infer T=Customer from list[Customer]
+        self.assertEqual(len(cs), 2)
+        self.assertEqual(cs[1].id, 9)
+    }
+
+    def test_bracketless_scalar_infers_from_annotation() {
+        r: Repo = Repo()
+        x: int = r.cast(5)        # infer T=int from arg (already worked)
+        self.assertEqual(x, 5)
+    }
+}
+
+main([GenericsMethodTests()])

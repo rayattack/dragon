@@ -1,0 +1,262 @@
+"""http.websocket - RFC 6455 handshake + frame codec conformance.
+
+W2 codec core: the network-independent pieces (handshake accept-key, frame
+parse/build, fragmentation reassembly, control frames) tested against the
+canonical RFC 6455 vectors with literal `bytes` - no sockets. The `WebSocket`
+handle's frame I/O is exercised indirectly through parse_frame / build_frame
+(its socket calls need a live fd and belong to an integration test).
+"""
+
+from unittest import TestCase, main
+from http.websocket import compute_accept_key, is_websocket_upgrade
+from http.websocket import parse_frame, build_frame, frame_length
+from http.websocket import build_text_frame, build_binary_frame
+from http.websocket import build_close_frame, build_ping_frame, build_pong_frame
+from http.websocket import Frame, MessageReassembler
+from http.websocket import ProtocolError, IncompleteFrameError
+from http.websocket import OPCODE_CONT, OPCODE_TEXT, OPCODE_BINARY
+from http.websocket import OPCODE_CLOSE, OPCODE_PING, OPCODE_PONG
+
+
+class WebSocketTests(TestCase) {
+    # -- Handshake ------------------------------------------------------
+
+    def test_accept_key_rfc_vector() {
+        # RFC 6455 §1.3 canonical example.
+        accept: str = compute_accept_key("dGhlIHNhbXBsZSBub25jZQ==")
+        self.assertEqual(accept, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+    }
+
+    def test_is_websocket_upgrade_positive() {
+        # Connection may be a comma list ("keep-alive, Upgrade"); detection is
+        # case-insensitive on values.
+        headers: dict[str, str] = {"upgrade": "websocket", "connection": "keep-alive, Upgrade", "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ=="}
+        self.assertTrue(is_websocket_upgrade(headers))
+    }
+
+    def test_is_websocket_upgrade_case_insensitive() {
+        headers: dict[str, str] = {"upgrade": "WebSocket", "connection": "UPGRADE", "sec-websocket-key": "x"}
+        self.assertTrue(is_websocket_upgrade(headers))
+    }
+
+    def test_is_websocket_upgrade_negatives() {
+        # Wrong protocol token.
+        h1: dict[str, str] = {"upgrade": "h2c", "connection": "Upgrade", "sec-websocket-key": "x"}
+        self.assertFalse(is_websocket_upgrade(h1))
+        # Missing key.
+        h2: dict[str, str] = {"upgrade": "websocket", "connection": "Upgrade"}
+        self.assertFalse(is_websocket_upgrade(h2))
+        # Connection header lacks the Upgrade token.
+        h3: dict[str, str] = {"upgrade": "websocket", "connection": "keep-alive", "sec-websocket-key": "x"}
+        self.assertFalse(is_websocket_upgrade(h3))
+        # Plain GET - no upgrade headers at all.
+        h4: dict[str, str] = {"host": "example.com"}
+        self.assertFalse(is_websocket_upgrade(h4))
+    }
+
+    # -- Frame round-trip (build -> parse) ------------------------------
+
+    def test_text_frame_roundtrip() {
+        framed: bytes = build_text_frame("Hello")
+        f: Frame = parse_frame(framed)
+        self.assertEqual(f.opcode, OPCODE_TEXT)
+        self.assertTrue(f.fin)
+        self.assertEqual(f.payload, b"Hello")
+        self.assertTrue(f.is_text())
+        self.assertFalse(f.is_control())
+        # Unmasked "Hello": 0x81 0x05 + 'Hello'. Header+payload = 7 bytes.
+        self.assertEqual(frame_length(framed), 7)
+    }
+
+    def test_binary_frame_roundtrip() {
+        payload: bytes = bytes([0x00, 0xFF, 0x10, 0x7F, 0x80])
+        framed: bytes = build_binary_frame(payload)
+        f: Frame = parse_frame(framed)
+        self.assertEqual(f.opcode, OPCODE_BINARY)
+        self.assertTrue(f.is_binary())
+        self.assertEqual(f.payload, payload)
+    }
+
+    def test_build_frame_exact_bytes() {
+        # Unmasked single text frame "Hello" is the canonical 0x81 0x05 ...
+        framed: bytes = build_text_frame("Hello")
+        self.assertEqual(framed.hex(), "81" + "05" + b"Hello".hex())
+    }
+
+    # -- Masked client frame (RFC 6455 §5.7) ----------------------------
+
+    def test_masked_client_frame_unmasks() {
+        # The exact masked "Hello" example from RFC 6455 §5.7: FIN+TEXT, MASK
+        # set, 4-byte key 0x37fa213d, masked payload.
+        masked: bytes = bytes([0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d,
+                               0x7f, 0x9f, 0x4d, 0x51, 0x58])
+        f: Frame = parse_frame(masked)
+        self.assertEqual(f.opcode, OPCODE_TEXT)
+        self.assertTrue(f.fin)
+        self.assertEqual(f.payload, b"Hello")
+        self.assertEqual(f.payload.decode("utf-8"), "Hello")
+        self.assertEqual(frame_length(masked), 11)
+    }
+
+    def test_masked_roundtrip_via_build() {
+        # A client-side build (mask=True) parses back to the cleartext payload.
+        key: bytes = bytes([0x01, 0x02, 0x03, 0x04])
+        framed: bytes = build_frame(OPCODE_BINARY, b"masked-data", True, True, key)
+        f: Frame = parse_frame(framed)
+        self.assertEqual(f.payload, b"masked-data")
+        self.assertEqual(f.opcode, OPCODE_BINARY)
+    }
+
+    # -- Extended length encodings --------------------------------------
+
+    def test_extended_length_16bit() {
+        # 200-byte payload uses the 126 + 16-bit length form.
+        big: bytes = bytes([0x41] * 200)
+        framed: bytes = build_binary_frame(big)
+        # Second byte must be 126 (0x7E) with no mask bit.
+        self.assertEqual(framed[1], 126)
+        f: Frame = parse_frame(framed)
+        self.assertEqual(len(f.payload), 200)
+        self.assertEqual(f.payload, big)
+        self.assertEqual(frame_length(framed), 4 + 200)
+    }
+
+    def test_extended_length_64bit() {
+        # 70000-byte payload uses the 127 + 64-bit length form.
+        big: bytes = bytes([0x42] * 70000)
+        framed: bytes = build_binary_frame(big)
+        self.assertEqual(framed[1], 127)
+        f: Frame = parse_frame(framed)
+        self.assertEqual(len(f.payload), 70000)
+        self.assertEqual(f.payload, big)
+        self.assertEqual(frame_length(framed), 10 + 70000)
+    }
+
+    # -- Fragmentation reassembly (RFC 6455 §5.4) -----------------------
+
+    def test_fragmented_message_reassembles() {
+        # Initial TEXT frame FIN=0 "Hel", then CONT FIN=1 "lo" -> "Hello".
+        frag1: bytes = build_frame(OPCODE_TEXT, b"Hel", False)
+        frag2: bytes = build_frame(OPCODE_CONT, b"lo", True)
+        asm: MessageReassembler = MessageReassembler()
+        done1: bool = asm.add(parse_frame(frag1))
+        self.assertFalse(done1)
+        done2: bool = asm.add(parse_frame(frag2))
+        self.assertTrue(done2)
+        self.assertEqual(asm.message(), b"Hello")
+        self.assertEqual(asm.opcode, OPCODE_TEXT)
+    }
+
+    def test_fragmented_three_parts() {
+        f1: bytes = build_frame(OPCODE_BINARY, b"aa", False)
+        f2: bytes = build_frame(OPCODE_CONT, b"bb", False)
+        f3: bytes = build_frame(OPCODE_CONT, b"cc", True)
+        asm: MessageReassembler = MessageReassembler()
+        self.assertFalse(asm.add(parse_frame(f1)))
+        self.assertFalse(asm.add(parse_frame(f2)))
+        self.assertTrue(asm.add(parse_frame(f3)))
+        self.assertEqual(asm.message(), b"aabbcc")
+        self.assertEqual(asm.opcode, OPCODE_BINARY)
+    }
+
+    def test_reassembler_reset() {
+        asm: MessageReassembler = MessageReassembler()
+        self.assertTrue(asm.add(parse_frame(build_text_frame("one"))))
+        self.assertEqual(asm.message(), b"one")
+        asm.reset()
+        self.assertTrue(asm.add(parse_frame(build_text_frame("two"))))
+        self.assertEqual(asm.message(), b"two")
+    }
+
+    # -- Control frames -------------------------------------------------
+
+    def test_ping_recognized_by_opcode() {
+        ping: bytes = build_ping_frame(b"ping-payload")
+        f: Frame = parse_frame(ping)
+        self.assertEqual(f.opcode, OPCODE_PING)
+        self.assertTrue(f.is_control())
+        self.assertFalse(f.is_text())
+        self.assertEqual(f.payload, b"ping-payload")
+    }
+
+    def test_pong_recognized_by_opcode() {
+        pong: bytes = build_pong_frame(b"abc")
+        f: Frame = parse_frame(pong)
+        self.assertEqual(f.opcode, OPCODE_PONG)
+        self.assertTrue(f.is_control())
+    }
+
+    def test_close_frame_carries_code_and_reason() {
+        framed: bytes = build_close_frame(1000, "bye")
+        f: Frame = parse_frame(framed)
+        self.assertEqual(f.opcode, OPCODE_CLOSE)
+        self.assertTrue(f.is_control())
+        # Payload = 2-byte BE status code + UTF-8 reason.
+        code: int = (f.payload[0] << 8) | f.payload[1]
+        self.assertEqual(code, 1000)
+        self.assertEqual(f.payload[2:], b"bye")
+    }
+
+    def test_empty_close_frame() {
+        # Code 0 -> zero-length close payload.
+        framed: bytes = build_close_frame(0, "")
+        f: Frame = parse_frame(framed)
+        self.assertEqual(f.opcode, OPCODE_CLOSE)
+        self.assertEqual(len(f.payload), 0)
+    }
+
+    # -- Error / edge handling ------------------------------------------
+
+    def test_incomplete_frame_raises() {
+        # A lone first header byte cannot be a full frame.
+        self.assertRaises(IncompleteFrameError, lambda () -> None {
+            parse_frame(bytes([0x81]))
+        })
+        # Header says 5-byte payload but only 2 are present.
+        self.assertRaises(IncompleteFrameError, lambda () -> None {
+            parse_frame(bytes([0x81, 0x05, 0x48, 0x65]))
+        })
+    }
+
+    def test_rsv_bits_rejected() {
+        # RSV1 set with no negotiated extension is a protocol error.
+        self.assertRaises(ProtocolError, lambda () -> None {
+            parse_frame(bytes([0xC1, 0x00]))
+        })
+    }
+
+    def test_control_frame_too_large_rejected() {
+        # A PING (0x89) claiming a 126-byte payload violates the <=125 control
+        # limit (RFC 6455 §5.5): 0x89, len=126 -> 16-bit ext length 0x007E,
+        # then 126 payload bytes so the length check (not buffering) trips.
+        # The frame is built inside the lambda with no captured local: the
+        # assertRaises callable escapes to a foreign stack frame, and a closure
+        # that captures an enclosing local segfaults there (escape-closure gap,
+        # reported separately). Building inline keeps the test on solid ground.
+        self.assertRaises(ProtocolError, lambda () -> None {
+            hdr: list[int] = [0x89, 126, 0x00, 126]
+            j: int = 0
+            while j < 126 {
+                hdr.append(0x00)
+                j = j + 1
+            }
+            parse_frame(bytes(hdr))
+        })
+    }
+
+    def test_two_frames_in_buffer_advance() {
+        # parse_frame decodes the first frame; frame_length reports how far to
+        # advance so the second frame can be parsed from the tail.
+        first: bytes = build_text_frame("AB")
+        second: bytes = build_text_frame("CD")
+        buf: bytes = first + second
+        f1: Frame = parse_frame(buf)
+        self.assertEqual(f1.payload, b"AB")
+        consumed: int = frame_length(buf)
+        rest: bytes = buf[consumed:]
+        f2: Frame = parse_frame(rest)
+        self.assertEqual(f2.payload, b"CD")
+    }
+}
+
+main([WebSocketTests()])

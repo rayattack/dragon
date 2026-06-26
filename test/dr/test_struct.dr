@@ -1,0 +1,73 @@
+"""struct - pack/unpack/calcsize against known CPython byte patterns.
+
+Covers the float-bits reinterpret primitive (the only part needing compiler
+support), endianness, signed/unsigned integers, the string field, and the
+round-trip identity. Byte patterns are the exact values CPython's struct
+produces, so this doubles as a conformance check.
+"""
+
+from unittest import TestCase, main
+import struct
+from struct import pack, unpack, calcsize
+
+
+class StructTests(TestCase) {
+    def test_float_patterns() {
+        # IEEE-754 double / single, both byte orders.
+        self.assertEqual(pack(">d", 1.0).hex(), "3ff0000000000000")
+        self.assertEqual(pack("<d", 1.0).hex(), "000000000000f03f")
+        self.assertEqual(pack(">f", 3.5).hex(), "40600000")
+        self.assertEqual(pack("<f", 3.5).hex(), "00006040")
+    }
+
+    def test_int_patterns() {
+        self.assertEqual(pack(">hIb", 0x1234, 0xDEADBEEF, -1).hex(), "1234deadbeefff")
+        self.assertEqual(pack("<q", -1).hex(), "ffffffffffffffff")
+        self.assertEqual(pack(">q", 1).hex(), "0000000000000001")
+        self.assertEqual(pack("<i", -2).hex(), "feffffff")
+    }
+
+    def test_string_field() {
+        # 5s: one string arg, fixed 5-byte field, zero-padded.
+        self.assertEqual(pack("5s", "hi").hex(), "6869000000")
+        # truncation to the field width.
+        self.assertEqual(pack("3s", "hello").hex(), "68656c")
+    }
+
+    def test_unpack_roundtrip() {
+        vals: list[Any] = unpack(">dhb", pack(">dhb", 2.5, -7, 100))
+        self.assertEqual(len(vals), 3)
+        gotd: float = vals[0]
+        self.assertAlmostEqual(gotd, 2.5)
+        self.assertEqual(vals[1], -7)
+        self.assertEqual(vals[2], 100)
+    }
+
+    def test_unpack_known_bytes() {
+        # big-endian double for pi.
+        pi: list[Any] = unpack(">d", bytes([0x40, 0x09, 0x21, 0xfb, 0x54, 0x44, 0x2d, 0x18]))
+        got: float = pi[0]
+        self.assertAlmostEqual(got, 3.141592653589793)
+        # signed 16-bit 0xFFFF little-endian -> -1.
+        self.assertEqual(unpack("<h", bytes([0xFF, 0xFF]))[0], -1)
+        # unsigned 16-bit same bytes -> 65535.
+        self.assertEqual(unpack("<H", bytes([0xFF, 0xFF]))[0], 65535)
+    }
+
+    def test_calcsize() {
+        self.assertEqual(calcsize(">dhb"), 11)
+        self.assertEqual(calcsize("10s"), 10)
+        self.assertEqual(calcsize("<3i"), 12)
+        self.assertEqual(calcsize(">qQfd"), 28)
+    }
+
+    def test_stage1_helpers() {
+        # The monomorphic engine the MySQL driver calls directly.
+        self.assertEqual(struct.unpack_u16_le(bytes([0x34, 0x12]), 0), 0x1234)
+        self.assertEqual(struct.unpack_u32_be(bytes([0, 0, 0x12, 0x34]), 0), 0x1234)
+        f: float = struct.unpack_f64_le(struct.pack_f64_le(2.71828), 0)
+        self.assertAlmostEqual(f, 2.71828)
+    }
+}
+
+main([StructTests()])

@@ -1,0 +1,54 @@
+"""call-site spread into *args - forwarding a *list into a variadic parameter.
+
+Fixed-arity spread (add(*xs)) and *args packing (total(1, 2, 3)) already worked;
+this covers the remaining case from the gap audit: spreading an existing list
+into a `*args: T` parameter. The list is bulk-extended into the pack via
+dragon_list_extend (one tag-reconciling C loop), not per-element IR appends.
+Covers int, float, str, and the mixed loose-args-still-work form.
+"""
+
+from unittest import TestCase, main
+
+
+def total(*args: int) -> int {
+    s: int = 0
+    for x in args { s = s + x }
+    return s
+}
+
+def favg(*xs: float) -> float {
+    s: float = 0.0
+    for x in xs { s = s + x }
+    return s
+}
+
+def joiner(*parts: str) -> str {
+    out: str = ""
+    for p in parts { out = out + p }
+    return out
+}
+
+
+class VarargsSpreadTests(TestCase) {
+    def test_int_spread() {
+        ys: list[int] = [1, 2, 3]
+        self.assertEqual(total(*ys), 6)
+    }
+
+    def test_float_spread() {
+        fs: list[float] = [1.5, 2.5, 4.0]
+        self.assertEqual(favg(*fs), 8.0)
+    }
+
+    def test_str_spread() {
+        ws: list[str] = ["a", "b", "c"]
+        self.assertEqual(joiner(*ws), "abc")
+    }
+
+    def test_packing_still_works() {
+        self.assertEqual(total(1, 2, 3), 6)
+        self.assertEqual(joiner("X", "Y"), "XY")
+    }
+}
+
+main([VarargsSpreadTests()])

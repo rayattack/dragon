@@ -1,0 +1,96 @@
+# test/dr/test_drs_schema.dr - D023/D022 schema-bind + env-injection tests.
+#
+# Covers drs.parse(Schema, content): field reads, default-fill for absent
+# optionals, and the three validation failures (missing-required, wrong-type,
+# unknown/typo key) each raising a catchable DragonScriptSchemaError. Plus
+# envs()/parse_with()/loads_with() seeding header bindings so in-file
+# conditionals (`if platform == 'linux'`) resolve against the build env.
+#
+# Failure-path checks pass bare module-level zero-arg functions to
+# assertRaises (which wants Callable[[], None]); each builds its bad input and
+# calls parse in its own frame, so the raise unwinds cleanly to assertRaises'
+# setjmp without a capturing closure on the path.
+
+from unittest import TestCase, main
+from drs import parse, parse_with, loads_with, envs, Schema, DragonScriptSchemaError
+
+def _manifest_schema() -> Schema {
+    s: Schema = Schema()
+    s.field("name", "str", true)
+    s.field("version", "str", true)
+    s.optional("entry", "str", "main.dr")
+    s.field("eggs", "dict", false)
+    return s
+}
+
+# --- Failure-path helpers (bare refs handed to assertRaises) ---
+
+def _missing_required() -> None {
+    s: Schema = _manifest_schema()
+    d: dict[str, Any] = parse(s, "{ version = '0.1.0' }")
+}
+
+def _wrong_type() -> None {
+    s: Schema = _manifest_schema()
+    d: dict[str, Any] = parse(s, "{ name = 5\n version = '0.1.0' }")
+}
+
+def _unknown_key() -> None {
+    s: Schema = _manifest_schema()
+    d: dict[str, Any] = parse(s, "{ name = 'x'\n version = '0.1.0'\n nam = 'typo' }")
+}
+
+
+class SchemaParseTests(TestCase) {
+    def test_parse_reads_fields() {
+        s: Schema = _manifest_schema()
+        src: str = "{\n  name = 'myapp'\n  version = '0.1.0'\n  eggs = { http = { version = '^1.0' } }\n}"
+        d: dict[str, Any] = parse(s, src)
+        self.assertEqual(d["name"], "myapp")
+        self.assertEqual(d["version"], "0.1.0")
+    }
+
+    def test_default_filled_when_absent() {
+        s: Schema = _manifest_schema()
+        d: dict[str, Any] = parse(s, "{ name = 'myapp'\n version = '0.1.0' }")
+        self.assertEqual(d["entry"], "main.dr")
+    }
+
+    def test_missing_required_raises() {
+        self.assertRaises(DragonScriptSchemaError, _missing_required)
+    }
+
+    def test_wrong_type_raises() {
+        self.assertRaises(DragonScriptSchemaError, _wrong_type)
+    }
+
+    def test_unknown_key_raises() {
+        self.assertRaises(DragonScriptSchemaError, _unknown_key)
+    }
+}
+
+
+class EnvInjectionTests(TestCase) {
+    def test_envs_linux_branch() {
+        e: dict[str, Any] = envs(platform="linux")
+        d: dict[str, Any] = loads_with("{ if platform == 'linux' { kind = 'penguin' } else { kind = 'other' } }", e)
+        self.assertEqual(d["kind"], "penguin")
+    }
+
+    def test_envs_other_branch() {
+        e: dict[str, Any] = envs(platform="mac")
+        d: dict[str, Any] = loads_with("{ if platform == 'linux' { kind = 'penguin' } else { kind = 'other' } }", e)
+        self.assertEqual(d["kind"], "other")
+    }
+
+    def test_parse_with_seeds_conditional() {
+        s: Schema = Schema()
+        s.field("kind", "str", true)
+        e: dict[str, Any] = envs(platform="linux", arch="x86_64")
+        d: dict[str, Any] = parse_with(s, "{ if platform == 'linux' { kind = 'penguin' } else { kind = 'other' } }", e)
+        self.assertEqual(d["kind"], "penguin")
+    }
+}
+
+
+main([SchemaParseTests(), EnvInjectionTests()])

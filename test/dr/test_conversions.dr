@@ -1,0 +1,41 @@
+"""float(str) parsing + None/float boxing in Any.
+
+Regressions: (1) float("3.5") used to reinterpret the str pointer as an f64 bit
+pattern (garbage) instead of parsing; (2) a None value boxed into dict[str, Any]
+read back as int 0 instead of None (missing TAG_NONE case). Both are exactly the
+shapes the database drivers hit on float / NULL columns.
+"""
+
+from unittest import TestCase, main
+
+class ConversionTests(TestCase) {
+    def test_float_from_string() {
+        x: float = float("3.5")
+        y: float = float("-2.25")
+        self.assertAlmostEqual(x, 3.5)
+        self.assertAlmostEqual(x + y, 1.25)
+    }
+
+    def test_float_str_into_dict_any() {
+        d: dict[str, Any] = {}
+        d["f"] = float("3.5")
+        got: float = d["f"]
+        self.assertAlmostEqual(got, 3.5)
+    }
+
+    def test_none_in_dict_any_roundtrip() {
+        d: dict[str, Any] = {}
+        d["n"] = none
+        self.assertIsNone(d["n"])
+    }
+
+    def test_none_str_overwrite_cleanup() {
+        d: dict[str, Any] = {}
+        d["k"] = none
+        d["k"] = "s"
+        d["k"] = none          # exercise the none<->str overwrite cleanup path
+        self.assertIsNone(d["k"])
+    }
+}
+
+main([ConversionTests()])

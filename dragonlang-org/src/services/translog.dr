@@ -1,0 +1,189 @@
+# translog.dr - append-only, hash-chained transparency log (the design spec Section 11).
+#
+# Every published version is appended as a leaf:
+#   leaf_hash  = sha256(name \n version \n pkg_hash \n ts \n uid)
+#   chain_head = sha256(prev_chain_head + leaf_hash)
+#
+# The chain makes the log tamper-evident: altering or reordering any past leaf
+# changes every subsequent chain_head, so an auditor - or a client running
+# `dragon scan` - that recomputes the chain detects the rewrite. A checkpoint is
+# the {size, chain_head} pair plus an Ed25519 signature over it: ANY client can
+# verify, with the registry's published public key, that a checkpoint (and the
+# log head it commits to) genuinely came from this registry, so a MITM or rogue
+# mirror cannot forge the log a client sees on first acquisition (the design spec
+# addendum B - "verify the registry, do not trust it"). `key_id` is a short
+# fingerprint of the public key so clients can detect key rotation.
+
+from hashlib import hexdigest
+from crypto import ed25519_sign, ed25519_public_key
+from database import SQL, Results
+from storage.db import Db
+from models.records import LogEntry
+from merkle import root as merkle_root, inclusion_proof, consistency_proof
+
+# A signed log head. `root` is the hex RFC-6962 Merkle root over all leaves;
+# `signature` is hex(Ed25519(seed, "size\nroot")), verifiable against the
+# registry's public key (GET /api/log/pubkey). Clients verify a single leaf with
+# an O(log n) inclusion proof against this root (no full-log download), and the
+# log's append-only property with an O(log n) consistency proof.
+class Checkpoint {
+    def(size: int, root: str, signature: str, key_id: str) {
+        self.size: int = size
+        self.root: str = root
+        self.signature: str = signature
+        self.key_id: str = key_id
+    }
+}
+
+class TranslogService {
+    # signing_key is the 32-byte Ed25519 seed (private). The public key is
+    # derived once and published via the API for client verification.
+    def(db: Db, signing_key: bytes) {
+        self.db: Db = db
+        self.signing_key: bytes = signing_key
+        self.public_key: bytes = ed25519_public_key(signing_key)
+    }
+
+    # Short, stable fingerprint of the public key (first 16 hex of its sha256).
+    def key_id() -> str {
+        return hexdigest("sha256", self.public_key)[0:16]
+    }
+
+    def public_key_hex() -> str {
+        return self.public_key.hex()
+    }
+
+    # The leaf hash MUST be computed identically here and on the client, so the
+    # client can confirm the log commits to the exact (name, version, hash) it
+    # is installing. Keep this formula in lockstep with egg.dr's _leaf_hash.
+    def leaf_hash(name: str, version: str, pkg_hash: str, ts: int, uid: int) -> str {
+        const inp: str = name + "\n" + version + "\n" + pkg_hash + "\n" + str(ts) + "\n" + str(uid)
+        return "sha256:" + hexdigest("sha256", inp.encode("utf-8"))
+    }
+
+    def _chain(prev: str, leaf: str) -> str {
+        return "sha256:" + hexdigest("sha256", (prev + leaf).encode("utf-8"))
+    }
+
+    def _head() -> str {
+        const rows: list[dict[str, Any]] = self.db.conn.all[dict[str, Any]](template[SQL] {
+            select chain_head from transparency_log order by seq desc limit 1
+        })
+        if len(rows) == 0 {
+            return ""
+        }
+        const h: str = rows[0]["chain_head"]
+        return h
+    }
+
+    # Append a leaf for a freshly-published version. Returns the new chain head.
+    def append(name: str, version: str, pkg_hash: str, uid: int, ts: int) -> str {
+        const prev: str = self._head()
+        const leaf: str = self.leaf_hash(name, version, pkg_hash, ts, uid)
+        const head: str = self._chain(prev, leaf)
+        self.db.conn.run(template[SQL] {
+            insert into transparency_log (name, version, pkg_hash, published_by, ts, leaf_hash, chain_head)
+            values (!{name}, !{version}, !{pkg_hash}, !{uid}, !{ts}, !{leaf}, !{head})
+        })
+        return head
+    }
+
+    # The single log leaf for a (name, version): 0 or 1 element.
+    def leaf_for(name: str, version: str) -> list[LogEntry] {
+        return self.db.conn.all[LogEntry](template[SQL] {
+            select seq, name, version, pkg_hash, published_by, ts, leaf_hash, chain_head
+            from transparency_log where name = !{name} and version = !{version}
+        })
+    }
+
+    def size() -> int {
+        const rows: list[dict[str, Any]] = self.db.conn.all[dict[str, Any]](template[SQL] {
+            select count(*) as n from transparency_log
+        })
+        const n: int = rows[0]["n"]
+        return n
+    }
+
+    # The ordered Merkle leaves: each entry's leaf_hash string as bytes. The
+    # client recomputes its own leaf_hash and verifies inclusion against the root.
+    def _merkle_leaves() -> list[bytes] {
+        const entries: list[LogEntry] = self.entries()
+        out: list[bytes] = []
+        for e in entries {
+            out.append(e.leaf_hash.encode("utf-8"))
+        }
+        return out
+    }
+
+    def root_hex() -> str {
+        return merkle_root(self._merkle_leaves()).hex()
+    }
+
+    # The signed head: clients verify the Ed25519 signature against the published
+    # public key, then verify inclusion/consistency proofs against `root`.
+    def checkpoint() -> Checkpoint {
+        const sz: int = self.size()
+        const r: str = self.root_hex()
+        const msg: str = str(sz) + "\n" + r
+        const sig: bytes = ed25519_sign(self.signing_key, msg.encode("utf-8"))
+        return Checkpoint(sz, r, sig.hex(), self.key_id())
+    }
+
+    # Inclusion proof for (name, version) in the tree of `tree_size` leaves.
+    # Returns (index, proof_hex); index is -1 if the leaf is not in that prefix.
+    def inclusion(name: str, version: str, tree_size: int) -> tuple[int, list[str]] {
+        const entries: list[LogEntry] = self.entries()
+        idx: int = -1
+        i: int = 0
+        while i < tree_size and i < len(entries) {
+            if entries[i].name == name {
+                if entries[i].version == version {
+                    idx = i
+                    i = tree_size
+                }
+            }
+            i = i + 1
+        }
+        empty: list[str] = []
+        if idx < 0 {
+            return (idx, empty)
+        }
+        leaves: list[bytes] = []
+        j: int = 0
+        while j < tree_size {
+            leaves.append(entries[j].leaf_hash.encode("utf-8"))
+            j = j + 1
+        }
+        const p: list[bytes] = inclusion_proof(leaves, idx)
+        out: list[str] = []
+        for x in p {
+            out.append(x.hex())
+        }
+        return (idx, out)
+    }
+
+    # Consistency proof that the size-`m` tree is a prefix of the size-`n` tree.
+    def consistency(m: int, n: int) -> list[str] {
+        const all: list[bytes] = self._merkle_leaves()
+        sub: list[bytes] = []
+        j: int = 0
+        while j < n and j < len(all) {
+            sub.append(all[j])
+            j = j + 1
+        }
+        const p: list[bytes] = consistency_proof(sub, m, n)
+        out: list[str] = []
+        for x in p {
+            out.append(x.hex())
+        }
+        return out
+    }
+
+    # All leaves in sequence order - for audit / `dragon scan` chain recompute.
+    def entries() -> list[LogEntry] {
+        return self.db.conn.all[LogEntry](template[SQL] {
+            select seq, name, version, pkg_hash, published_by, ts, leaf_hash, chain_head
+            from transparency_log order by seq
+        })
+    }
+}

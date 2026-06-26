@@ -1,0 +1,56 @@
+"""Forward-referenced class field access inside another class's method.
+
+Regression: when class A's method referenced class B (`b: B = B(); b.field` /
+`b.method()`) and B was defined textually AFTER A, every B field access compiled
+to offset 0 → silent 0/garbage (a wrong-answer bug). Cause: method bodies were
+codegen'd in class-definition order, before a later class's field-layout metadata
+was registered. Fixed by a class-layout pre-pass (register all layouts before any
+body). NOTE: the helper classes (Buf, Counter) are defined BELOW the TestCase that
+uses them - that ordering is the whole point; do not move them up.
+"""
+
+from unittest import TestCase, main
+
+class ForwardRefTests(TestCase) {
+    def test_int_field_read() {
+        c: Counter = Counter()
+        self.assertEqual(c.n, 42)        # read a field set in the ctor
+    }
+
+    def test_method_call_and_str_field() {
+        b: Buf = Buf()
+        b.add("ab")
+        b.add("cd")
+        self.assertEqual(b.s, "abcd")    # method that mutates a heap field
+        self.assertEqual(len(b.s), 4)
+    }
+
+    def test_field_mutation_via_method() {
+        c: Counter = Counter()
+        c.bump()
+        c.bump()
+        c.bump()
+        self.assertEqual(c.n, 45)        # 42 + 3
+    }
+}
+
+# Defined AFTER ForwardRefTests on purpose (forward reference from its methods).
+class Counter {
+    def() {
+        self.n: int = 42
+    }
+    def bump() {
+        self.n += 1
+    }
+}
+
+class Buf {
+    def() {
+        self.s: str = ""
+    }
+    def add(x: str) {
+        self.s += x
+    }
+}
+
+main([ForwardRefTests()])

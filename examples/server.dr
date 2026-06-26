@@ -1,0 +1,46 @@
+from http.server import Router, Request, Response, Context
+
+
+const port: int = 9090
+const app: Router = Router(port, "0.0.0.0")
+
+
+def upper(val: str) -> str {
+    return val.upper();
+}
+
+
+app.GET('/customers', lambda (req: Request, res: Response, ctx: Context) -> None {
+  my_dict = {
+    name: 'fatima'
+  }
+  my_dict.name
+})
+
+
+app.GET('/', lambda (req: Request, res: Response, ctx: Context) -> None {
+    const welcome: str = 'yoo!!';
+    res.headers = 'Content-Type', 'application/html'
+    res.body = template {
+        <html>
+            <head></head>
+            <body>
+                <h1>!{ welcome | upper }</h1>
+                <p style="color: red">Testing out template functionality</p>
+            <body>
+        </html>
+    }
+});
+
+
+app.GET('/pricing', lambda (req: Request, res: Response, ctx: Context) -> None {
+    res.body = template('pricing.html');
+});
+
+
+app.GET('/v1/customers/:id', lambda (req: Request, res: Response, ctx: Context) -> None {
+});
+
+
+print(f'Server started on port: {port}')
+app.listen();

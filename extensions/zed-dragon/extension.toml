@@ -1,0 +1,11 @@
+id = "dragon"
+name = "Dragon"
+version = "0.0.1"
+schema_version = 1
+authors = ["tbhi"]
+description = "Dragon language support for Zed - syntax highlighting, brackets, and indentation"
+repository = "https://github.com/tbhi/zed-dragon"
+
+[grammars.dragon]
+repository = "file:///home/work/Documents/dragon/tree-sitter-dragon"
+commit = "719842e254251ea2cad680dae7db9972d212b056"

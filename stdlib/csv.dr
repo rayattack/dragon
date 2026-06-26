@@ -1,0 +1,201 @@
+# csv.dr - Dragon standard library: CSV parsing and writing
+#
+# Provides functions for reading and writing CSV (comma-separated values)
+# data. Supports quoted fields, escaped quotes, and configurable delimiters.
+# Pure Dragon - no C dependencies.
+
+#===----------------------------------------------------------------------===#
+# Constants
+#===----------------------------------------------------------------------===#
+
+const COMMA: str = ","
+const TAB: str = "\t"
+const QUOTE: str = "\""
+const NEWLINE: str = "\n"
+
+#===----------------------------------------------------------------------===#
+# Parsing
+#===----------------------------------------------------------------------===#
+
+def parse_row(line: str, delimiter: str) -> list[str] {
+    # Split a single CSV line into fields, handling quoted fields.
+    # Quoted fields may contain delimiters and escaped quotes ("").
+    # Example: "hello","wor,ld" -> ["hello", "wor,ld"]
+    fields: list[str] = []
+    current: str = ""
+    in_quotes: bool = false
+    i: int = 0
+    const n: int = len(line)
+
+    while i < n {
+        const ch: str = line[i]
+
+        if in_quotes {
+            # Inside a quoted field
+            if ch == "\"" {
+                # Check for escaped quote ""
+                if i + 1 < n {
+                    const next: str = line[i + 1]
+                    if next == "\"" {
+                        # Escaped quote - emit single quote
+                        current = current + "\""
+                        i = i + 2
+                    } else {
+                        # Closing quote
+                        in_quotes = false
+                        i = i + 1
+                    }
+                } else {
+                    # Quote at end of line - closing quote
+                    in_quotes = false
+                    i = i + 1
+                }
+            } else {
+                current = current + ch
+                i = i + 1
+            }
+        } else {
+            # Outside a quoted field
+            if ch == "\"" {
+                # Opening quote - only valid at start of field
+                in_quotes = true
+                i = i + 1
+            } else {
+                if ch == delimiter {
+                    fields.append(current)
+                    current = ""
+                    i = i + 1
+                } else {
+                    current = current + ch
+                    i = i + 1
+                }
+            }
+        }
+    }
+
+    # Append the last field
+    fields.append(current)
+    return fields
+}
+
+def parse_rows(text: str, delimiter: str) -> list[list[str]] {
+    # Split CSV text into rows of fields on line boundaries. NOTE: this splits
+    # on "\n" first, so a newline inside a quoted field is NOT preserved - the
+    # record is broken across rows. Use parse_row on a single line when a field
+    # may contain embedded newlines.
+    rows: list[list[str]] = []
+    const lines: list[str] = text.split("\n")
+    i: int = 0
+    const n: int = len(lines)
+
+    while i < n {
+        const line: str = lines[i]
+        # Skip empty trailing lines
+        if i == n - 1 {
+            if len(line) == 0 {
+                i = i + 1
+            } else {
+                const row: list[str] = parse_row(line, delimiter)
+                rows.append(row)
+                i = i + 1
+            }
+        } else {
+            const row: list[str] = parse_row(line, delimiter)
+            rows.append(row)
+            i = i + 1
+        }
+    }
+
+    return rows
+}
+
+def parse_row_simple(line: str, delimiter: str) -> list[str] {
+    # Simple split with no quote handling, for maximum performance.
+    return line.split(delimiter)
+}
+
+#===----------------------------------------------------------------------===#
+# Writing
+#===----------------------------------------------------------------------===#
+
+def quote_field(field: str, delimiter: str) -> str {
+    # Quote a field if it contains the delimiter, a double quote, or a newline.
+    # Internal quotes are escaped by doubling them.
+    const has_delim: bool = field.contains(delimiter)
+    const has_quote: bool = field.contains("\"")
+    const has_newline: bool = field.contains("\n")
+
+    if has_delim or has_quote or has_newline {
+        # Escape internal quotes by doubling them
+        escaped: str = field.replace("\"", "\"\"")
+        return "\"" + escaped + "\""
+    }
+
+    return field
+}
+
+def format_row(fields: list[str], delimiter: str) -> str {
+    # Format a list of fields into a single CSV line.
+    # Fields are quoted only when necessary.
+    result: str = ""
+    i: int = 0
+    const n: int = len(fields)
+
+    while i < n {
+        if i > 0 {
+            result = result + delimiter
+        }
+        result = result + quote_field(fields[i], delimiter)
+        i = i + 1
+    }
+
+    return result
+}
+
+def format_rows(rows: list[list[str]], delimiter: str) -> str {
+    # Format multiple rows into a complete CSV text string.
+    # Rows are separated by newlines.
+    result: str = ""
+    i: int = 0
+    const n: int = len(rows)
+
+    while i < n {
+        if i > 0 {
+            result = result + "\n"
+        }
+        result = result + format_row(rows[i], delimiter)
+        i = i + 1
+    }
+
+    return result
+}
+
+#===----------------------------------------------------------------------===#
+# Convenience helpers
+#===----------------------------------------------------------------------===#
+
+def field_count(line: str, delimiter: str) -> int {
+    # Return the number of fields in a CSV line.
+    const fields: list[str] = parse_row(line, delimiter)
+    return len(fields)
+}
+
+def has_header(text: str, delimiter: str) -> bool {
+    # Heuristic: returns true if the first row contains no purely numeric fields.
+    # This is a simple guess, not definitive.
+    const rows: list[list[str]] = parse_rows(text, delimiter)
+    if len(rows) == 0 { return false }
+
+    const header: list[str] = rows[0]
+    i: int = 0
+    while i < len(header) {
+        const field: str = header[i]
+        if len(field) > 0 {
+            if field.isdigit() {
+                return false
+            }
+        }
+        i = i + 1
+    }
+    return true
+}

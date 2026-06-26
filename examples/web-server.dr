@@ -1,0 +1,34 @@
+from http.server import Router, Request, Response, Context
+
+
+const port: int = 8080
+const app: Router = Router(port, "0.0.0.0")
+
+
+app.GET('/', lambda (req: Request, res: Response, ctx: Context) -> None {
+    res.body = template {
+        <html>
+            <head><title>Dragon</title></head>
+            <body>
+                <h1>Hello from Dragon!</h1>
+                <p>Visit <a href="/hello/world">/hello/world</a></p>
+            </body>
+        </html>
+    }
+});
+
+
+app.GET('/hello/:name', lambda (req: Request, res: Response, ctx: Context) -> None {
+    name: str = req.params["name"]
+    res.body = f"Hello, {name}!"
+});
+
+
+app.GET('/health', lambda (req: Request, res: Response, ctx: Context) -> None {
+    res.headers["content-type"] = "application/json"
+    res.body = '{"status": "ok"}'
+});
+
+
+print(f"Server started on http://localhost:{port}")
+app.listen();

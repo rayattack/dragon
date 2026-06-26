@@ -1,0 +1,34 @@
+# test/dr/test_egg_resolve.dr - D022 `.drx/` resolver-tier regression test.
+#
+# Guards the ModuleResolver `.drx/` tier (step 3 of the first-egg path): imports
+# resolve out of a committed `test/dr/.drx/` fixture, between the source dir and
+# the stdlib. Covers both egg layouts:
+#  * eggflat - flat `.drx/eggflat/eggflat.dr` via the default <pkg>/<pkg>.dr
+#  convention (no hint file).
+#  * eggnest - `src/` layout `.drx/eggnest/src/eggnest.dr` resolved through the
+#  `.dragon-entry` hint, plus a hint-relative submodule
+#  (eggnest.helper -> src/helper.dr).
+#
+# The fixture .dr files live under test/dr/.drx/ and are NOT matched by the
+# test_*.dr glob, so they never run as standalone tests - they exist only to be
+# imported here. drxDir is sourceDir + ".drx" = test/dr/.drx for this file.
+
+from unittest import TestCase, main
+from eggflat import flat_val
+from eggnest import nest_val
+
+
+class EggResolveTests(TestCase) {
+    def test_flat_layout_resolves() {
+        # .drx/eggflat/eggflat.dr (default convention, no hint)
+        self.assertEqual(flat_val(), 7)
+    }
+
+    def test_src_layout_and_submodule_resolve() {
+        # .drx/eggnest/src/eggnest.dr (via hint) + eggnest.helper submodule
+        self.assertEqual(nest_val(), 11)
+    }
+}
+
+
+main([EggResolveTests()])

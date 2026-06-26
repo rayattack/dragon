@@ -1,0 +1,64 @@
+# test/dr/test_sha256.dr - Known-answer tests for runtime SHA-256.
+#
+# Vectors: NIST FIPS 180-2 Appendix B (the canonical "", "abc", and 56-byte
+# multi-block messages). First consumer of stdlib/unittest.dr.
+#
+# test_incremental_equiv locks hashlib.Hash.update() to the one-shot digest so
+# the eventual streaming rewrite (ADR 038 Phase 2) cannot silently regress.
+
+from unittest import TestCase, main
+from hashlib import sha256, new, Hash
+
+const _EMPTY: str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+const _ABC: str   = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+const _LONG: str  = "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+
+class Sha256Tests(TestCase) {
+    def test_empty() {
+        self.assertEqual(sha256(b"").hexdigest(), _EMPTY)
+    }
+
+    def test_abc() {
+        self.assertEqual(sha256(b"abc").hexdigest(), _ABC)
+    }
+
+    def test_long_56byte() {
+        msg: bytes = b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+        self.assertEqual(sha256(msg).hexdigest(), _LONG)
+    }
+
+    def test_new_constructor() {
+        self.assertEqual(new("sha256", b"abc").hexdigest(), _ABC)
+    }
+
+    def test_metadata() {
+        h: Hash = sha256(b"abc")
+        self.assertEqual(h.digest_size(), 32)
+        self.assertEqual(h.block_size(), 64)
+        self.assertEqual(h.name(), "sha256")
+    }
+
+    def test_incremental_equiv() {
+        h: Hash = sha256(b"")
+        h.update(b"a")
+        h.update(b"b")
+        h.update(b"c")
+        self.assertEqual(h.hexdigest(), _ABC)
+    }
+
+    def test_update_after_initial() {
+        h: Hash = sha256(b"a")
+        h.update(b"bc")
+        self.assertEqual(h.hexdigest(), _ABC)
+    }
+
+    def test_copy_independent() {
+        h: Hash = sha256(b"ab")
+        c: Hash = h.copy()
+        c.update(b"c")
+        self.assertEqual(h.hexdigest(), sha256(b"ab").hexdigest())
+        self.assertEqual(c.hexdigest(), _ABC)
+    }
+}
+
+main([Sha256Tests()])

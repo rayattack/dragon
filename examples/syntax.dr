@@ -1,0 +1,20 @@
+
+async def some_function() -> none {
+    print('This will run in another thread');
+}
+thread {
+    # inside here we have code that runs in another thread
+    # automatically
+    name: str = 'you'
+    await some_function()
+}
+
+
+async def templater() -> str {
+    return template {
+        <html>
+            <button>
+            </button>
+        </html>
+    | html }
+}

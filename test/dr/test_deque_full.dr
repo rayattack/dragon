@@ -1,0 +1,99 @@
+"""deque finished wiring (bugs.md #10, smells.md deque item).
+
+Was half-wired: print(deque) read the DragonDeque header as a list (garbage
+pointers), maxlen was accepted but ignored, and `in` on a deque[str] routed to
+dragon_list_contains (misread circular buffer + pointer compare, always
+False). Empty pop/popleft printed to stderr and returned 0 instead of raising.
+
+Now: DragonDeque carries elem_tag + maxlen; repr/print/str/f-string route
+through a tag-aware dragon_repr_deque (Python `deque([...], maxlen=N)` form);
+append/appendleft enforce maxlen with Python discard semantics (append drops
+left, appendleft drops right, maxlen=0 discards everything) and the deque owns
+one ref per heap element (owned arg temps are released at the call site, the
+maxlen discard and destroy decref); `in` uses tag-aware content equality over
+the circular window; empty pop raises catchable IndexError.
+"""
+
+from unittest import TestCase, main
+from collections import deque
+
+
+class DequeFullTests(TestCase) {
+    def test_append_pop_int() {
+        d: deque[int] = deque()
+        d.append(1)
+        d.append(2)
+        d.appendleft(0)
+        self.assertEqual(len(d), 3)
+        self.assertEqual(d.popleft(), 0)
+        self.assertEqual(d.pop(), 2)
+    }
+
+    def test_repr_int() {
+        d: deque[int] = deque([1, 2, 3])
+        self.assertEqual(str(d), "deque([1, 2, 3])")
+    }
+
+    def test_repr_str_and_fstring() {
+        s: deque[str] = deque()
+        s.append("alpha")
+        s.append("beta")
+        self.assertEqual(f"{s}", "deque(['alpha', 'beta'])")
+    }
+
+    def test_contains_str_value_equality() {
+        s: deque[str] = deque()
+        s.append("alpha")
+        s.append("beta")
+        self.assertTrue("beta" in s)
+        self.assertFalse("gamma" in s)
+    }
+
+    def test_contains_int() {
+        d: deque[int] = deque([10, 20])
+        self.assertTrue(20 in d)
+        self.assertFalse(30 in d)
+    }
+
+    def test_maxlen_keeps_rightmost_on_construct() {
+        b: deque[int] = deque([1, 2, 3, 4, 5], maxlen=3)
+        self.assertEqual(str(b), "deque([3, 4, 5], maxlen=3)")
+    }
+
+    def test_maxlen_append_discards_left() {
+        b: deque[int] = deque([1, 2, 3], maxlen=3)
+        b.append(4)
+        self.assertEqual(str(b), "deque([2, 3, 4], maxlen=3)")
+    }
+
+    def test_maxlen_appendleft_discards_right() {
+        b: deque[int] = deque([1, 2, 3], maxlen=3)
+        b.appendleft(0)
+        self.assertEqual(str(b), "deque([0, 1, 2], maxlen=3)")
+    }
+
+    def test_empty_pop_raises_indexerror() {
+        e: deque[int] = deque()
+        caught: bool = false
+        try {
+            x: int = e.pop()
+        } except IndexError {
+            caught = true
+        }
+        self.assertTrue(caught)
+    }
+
+    def test_empty_popleft_raises_indexerror() {
+        e: deque[int] = deque()
+        caught: bool = false
+        try {
+            x: int = e.popleft()
+        } except IndexError {
+            caught = true
+        }
+        self.assertTrue(caught)
+    }
+}
+
+
+main([DequeFullTests()])

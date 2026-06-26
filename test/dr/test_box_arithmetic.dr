@@ -1,0 +1,132 @@
+# test/dr/test_box_arithmetic.dr - arithmetic on Any/Union (box) operands.
+#
+# Regression guard for a silent codegen gap: arithmetic on a {tag,payload} box
+# (`int + Any`, `for v in list[Any]: total += v`, etc.) emitted a native binop
+# on a 16-byte struct operand (`add i64 %total, %dragon.box`) and failed LLVM
+# verification. The fix routes any arithmetic with a box operand through the
+# runtime dragon_box_binop, which dispatches on the runtime tags (numeric tower
+# + str/bytes/list ops) and returns a result box; a native target slot unboxes
+# it with a runtime TypeError check (so promotion and type errors match Python).
+
+from unittest import TestCase, main
+
+
+class BoxArithmeticTests(TestCase) {
+    def test_sum_list_any_into_int() {
+        # The original repro.
+        xs: list[Any] = [1, 2, 3, 4]
+        total: int = 0
+        for v in xs {
+            total += v
+        }
+        self.assertEqual(total, 10)
+    }
+
+    def test_int_promotes_into_float_accumulator() {
+        xs: list[Any] = [1, 2, 3]
+        ftot: float = 0.0
+        for v in xs {
+            ftot += v
+        }
+        self.assertEqual(ftot, 6.0)
+    }
+
+    def test_numeric_tower() {
+        a: Any = 10
+        b: Any = 3
+        self.assertEqual(a + b, 13)
+        self.assertEqual(a - b, 7)
+        self.assertEqual(a * b, 30)
+        self.assertEqual(a // b, 3)
+        self.assertEqual(a % b, 1)
+        self.assertEqual(a ** b, 1000)
+    }
+
+    def test_true_division_is_float() {
+        a: Any = 10
+        b: Any = 4
+        self.assertEqual(a / b, 2.5)
+    }
+
+    def test_mixed_int_float_promotes() {
+        a: Any = 10
+        f: Any = 2.5
+        self.assertEqual(a + f, 12.5)
+        self.assertEqual(f * a, 25.0)
+    }
+
+    def test_negative_floordiv_and_mod_python_semantics() {
+        # Floor toward -inf; mod sign follows divisor (not C truncation).
+        a: Any = -7
+        b: Any = 2
+        self.assertEqual(a // b, -4)
+        self.assertEqual(a % b, 1)
+    }
+
+    def test_str_concat_and_repeat() {
+        a: Any = "ab"
+        b: Any = "cd"
+        self.assertEqual(a + b, "abcd")
+        self.assertEqual(a * 3, "ababab")
+    }
+
+    def test_bytes_concat_and_repeat() {
+        a: Any = b"xy"
+        n: Any = 2
+        self.assertEqual(a + b"z", b"xyz")
+        self.assertEqual(a * n, b"xyxy")
+    }
+
+    def test_list_any_repeat() {
+        xs: list[Any] = [1, 2]
+        self.assertEqual(xs * 2, [1, 2, 1, 2])
+    }
+
+    def test_box_result_into_typed_str_slot() {
+        a: Any = "ab"
+        b: Any = "cd"
+        res: str = a + b
+        self.assertEqual(res, "abcd")
+    }
+
+    def test_typeerror_str_plus_int() {
+        a: Any = "x"
+        b: Any = 5
+        raised: bool = False
+        try {
+            c: Any = a + b
+            print(c)
+        } except TypeError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+
+    def test_typeerror_float_any_into_int_slot() {
+        # Result float can't land in an int slot - runtime TypeError.
+        total: int = 0
+        v: Any = 2.5
+        raised: bool = False
+        try {
+            total += v
+        } except TypeError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+
+    def test_zero_division() {
+        a: Any = 7
+        b: Any = 0
+        raised: bool = False
+        try {
+            c: Any = a // b
+        } except ZeroDivisionError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+}
+
+
+main([BoxArithmeticTests()])

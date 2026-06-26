@@ -1,0 +1,67 @@
+"""Regression tests for container display and dict comprehensions.
+
+Covers the fixes for:
+  - f-string / str() of a container rendered empty (it was fed to str_concat as
+    if the container pointer were a string).
+  - dict comprehension used the loop variable's NAME as a literal key
+    (`{k: v for k in xs}` produced `{'k': v}`); int-keyed comprehensions also
+    failed to compile.
+"""
+
+from unittest import TestCase, main
+
+
+class ContainerRepr(TestCase) {
+    def test_list_repr() {
+        const xs: list[int] = [1, 2, 3]
+        self.assertEqual(str(xs), "[1, 2, 3]")
+        self.assertEqual(f"{xs}", "[1, 2, 3]")
+    }
+
+    def test_str_list_quotes_elements() {
+        const ss: list[str] = ["a", "b"]
+        self.assertEqual(str(ss), "['a', 'b']")
+    }
+
+    def test_dict_repr() {
+        const d: dict[str, int] = {"x": 1, "y": 2}
+        self.assertEqual(f"{d}", "{'x': 1, 'y': 2}")
+    }
+
+    def test_tuple_repr_uses_tags() {
+        const t: tuple[int, str] = (5, "hi")
+        self.assertEqual(f"{t}", "(5, 'hi')")
+    }
+
+    def test_nested_list_repr() {
+        const n: list[list[int]] = [[1, 2], [3]]
+        self.assertEqual(str(n), "[[1, 2], [3]]")
+    }
+}
+
+
+class DictComprehension(TestCase) {
+    def test_str_key_uses_value_not_name() {
+        const d: dict[str, int] = {k: len(k) for k in ["a", "bb", "ccc"]}
+        self.assertEqual(len(d), 3)
+        self.assertEqual(d["a"], 1)
+        self.assertEqual(d["bb"], 2)
+        self.assertEqual(d["ccc"], 3)
+    }
+
+    def test_int_keys() {
+        const c: dict[int, int] = {n: n * n for n in [1, 2, 3]}
+        self.assertEqual(len(c), 3)
+        self.assertEqual(c[2], 4)
+        self.assertEqual(c[3], 9)
+    }
+
+    def test_expression_key() {
+        const d: dict[str, int] = {k + "!": 1 for k in ["p", "q"]}
+        self.assertEqual(d["p!"], 1)
+        self.assertEqual(d["q!"], 1)
+    }
+}
+
+
+main([ContainerRepr(), DictComprehension()])

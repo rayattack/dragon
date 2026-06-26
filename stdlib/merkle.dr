@@ -1,0 +1,256 @@
+# merkle.dr - RFC 6962 (Certificate Transparency) Merkle tree.
+#
+# A binary Merkle tree over an ordered list of leaves, with the standard
+# 0x00 (leaf) / 0x01 (interior) domain separation that blocks second-preimage
+# attacks. It provides the two proofs a transparency log needs:
+#  - INCLUSION: prove a single leaf is in the tree committed to by `root`,
+#  with an O(log n) audit path (no full-log download).
+#  - CONSISTENCY: prove a tree of size m is a prefix of a tree of size n,
+#  i.e. the log only ever appended - it was never rewritten.
+#
+# Generation (recursive MTH/PATH/SUBPROOF) follows RFC 6962 section 2.1
+# verbatim; verification uses the iterative decomposition (as in Trillian's
+# reference verifier). The two are known-compatible and are cross-checked
+# exhaustively in test/dr/test_merkle.dr.
+
+from hashlib import sha256
+from secrets import compare_digest
+
+#--- node hashing (domain-separated) --------------------------------------#
+
+# Leaf hash: SHA256(0x00 || data).
+def leaf_hash(data: bytes) -> bytes {
+    return sha256(b"\x00" + data).digest()
+}
+
+# Interior node hash: SHA256(0x01 || left || right).
+def _node(left: bytes, right: bytes) -> bytes {
+    return sha256(b"\x01" + left + right).digest()
+}
+
+#--- small integer helpers ------------------------------------------------#
+
+# Largest power of two strictly less than n (n >= 2).
+def _split(n: int) -> int {
+    k: int = 1
+    while (k << 1) < n {
+        k = k << 1
+    }
+    return k
+}
+
+# Number of bits needed to represent x (bit_length); 0 for x == 0.
+def _bit_len(x: int) -> int {
+    n: int = 0
+    v: int = x
+    while v > 0 {
+        n = n + 1
+        v = v >> 1
+    }
+    return n
+}
+
+# Population count (number of set bits).
+def _popcount(x: int) -> int {
+    c: int = 0
+    v: int = x
+    while v > 0 {
+        c = c + (v & 1)
+        v = v >> 1
+    }
+    return c
+}
+
+# Count of trailing zero bits; 0 for x == 0.
+def _trailing_zeros(x: int) -> int {
+    if x == 0 {
+        return 0
+    }
+    n: int = 0
+    v: int = x
+    while (v & 1) == 0 {
+        n = n + 1
+        v = v >> 1
+    }
+    return n
+}
+
+#--- Merkle Tree Hash (root) ----------------------------------------------#
+
+# MTH over leaves[lo:hi] (RFC 6962 section 2.1).
+def _mth(leaves: list[bytes], lo: int, hi: int) -> bytes {
+    const n: int = hi - lo
+    if n == 0 {
+        return sha256(b"").digest()
+    }
+    if n == 1 {
+        return leaf_hash(leaves[lo])
+    }
+    const k: int = _split(n)
+    return _node(_mth(leaves, lo, lo + k), _mth(leaves, lo + k, hi))
+}
+
+def root(leaves: list[bytes]) -> bytes {
+    return _mth(leaves, 0, len(leaves))
+}
+
+#--- inclusion proof ------------------------------------------------------#
+
+# Audit path for the leaf at absolute index m within leaves[lo:hi].
+def _path(leaves: list[bytes], lo: int, hi: int, m: int) -> list[bytes] {
+    const n: int = hi - lo
+    out: list[bytes] = []
+    if n <= 1 {
+        return out
+    }
+    const k: int = _split(n)
+    if m < k {
+        const sub: list[bytes] = _path(leaves, lo, lo + k, m)
+        for s in sub {
+            out.append(s)
+        }
+        out.append(_mth(leaves, lo + k, hi))
+    } else {
+        const sub2: list[bytes] = _path(leaves, lo + k, hi, m - k)
+        for s in sub2 {
+            out.append(s)
+        }
+        out.append(_mth(leaves, lo, lo + k))
+    }
+    return out
+}
+
+def inclusion_proof(leaves: list[bytes], index: int) -> list[bytes] {
+    return _path(leaves, 0, len(leaves), index)
+}
+
+# Verify that `leaf` (raw leaf data) at `index` in a tree of `size` leaves is
+# committed to by `root_hash`, using `proof`. Returns false on any mismatch.
+def verify_inclusion(leaf: bytes, index: int, size: int, proof: list[bytes], root_hash: bytes) -> bool {
+    if index >= size {
+        return false
+    }
+    const inner: int = _bit_len(index ^ (size - 1))
+    const border: int = _popcount(index >> inner)
+    if len(proof) != inner + border {
+        return false
+    }
+    res: bytes = leaf_hash(leaf)
+    i: int = 0
+    while i < inner {
+        const h: bytes = proof[i]
+        if ((index >> i) & 1) == 0 {
+            res = _node(res, h)
+        } else {
+            res = _node(h, res)
+        }
+        i = i + 1
+    }
+    while i < inner + border {
+        res = _node(proof[i], res)
+        i = i + 1
+    }
+    return compare_digest(res, root_hash)
+}
+
+#--- consistency proof ----------------------------------------------------#
+
+# SUBPROOF(m, leaves[lo:hi], b) per RFC 6962 section 2.1.2.
+def _subproof(leaves: list[bytes], lo: int, hi: int, m: int, b: bool) -> list[bytes] {
+    const n: int = hi - lo
+    out: list[bytes] = []
+    if m == n {
+        if not b {
+            out.append(_mth(leaves, lo, hi))
+        }
+        return out
+    }
+    const k: int = _split(n)
+    if m <= k {
+        const s1: list[bytes] = _subproof(leaves, lo, lo + k, m, b)
+        for s in s1 {
+            out.append(s)
+        }
+        out.append(_mth(leaves, lo + k, hi))
+    } else {
+        const s2: list[bytes] = _subproof(leaves, lo + k, hi, m - k, false)
+        for s in s2 {
+            out.append(s)
+        }
+        out.append(_mth(leaves, lo, lo + k))
+    }
+    return out
+}
+
+# Consistency proof that the size-`m` tree is a prefix of the size-`n` tree.
+def consistency_proof(leaves: list[bytes], m: int, n: int) -> list[bytes] {
+    empty: list[bytes] = []
+    if m == 0 or m >= n {
+        return empty
+    }
+    return _subproof(leaves, 0, n, m, true)
+}
+
+# Verify a consistency proof: that `old_root` (tree of size m) is consistent
+# with `new_root` (tree of size n, m <= n). Returns false on any mismatch.
+def verify_consistency(m: int, n: int, proof: list[bytes], old_root: bytes, new_root: bytes) -> bool {
+    if m > n {
+        return false
+    }
+    if m == n {
+        if len(proof) != 0 {
+            return false
+        }
+        return compare_digest(old_root, new_root)
+    }
+    if m == 0 {
+        # An empty tree is a prefix of any tree; nothing to prove.
+        return len(proof) == 0
+    }
+    # `border` is computed from the FULL decomposition inner; `inner` is then
+    # reduced by `shift` for the combine loop (RFC 6962 / Trillian verifier).
+    const decomp_inner: int = _bit_len((m - 1) ^ (n - 1))
+    const border: int = _popcount((m - 1) >> decomp_inner)
+    const shift: int = _trailing_zeros(m)
+    const inner: int = decomp_inner - shift
+    # If m is a power of two the seed is old_root itself; otherwise it is the
+    # first proof element.
+    seed: bytes = old_root
+    start: int = 0
+    if m != (1 << shift) {
+        if len(proof) == 0 {
+            return false
+        }
+        seed = proof[0]
+        start = 1
+    }
+    if len(proof) != start + inner + border {
+        return false
+    }
+    hash1: bytes = seed
+    hash2: bytes = seed
+    mask: int = (m - 1) >> shift
+    i: int = 0
+    while i < inner {
+        const h: bytes = proof[start + i]
+        if (mask & 1) == 0 {
+            hash2 = _node(hash2, h)
+        } else {
+            hash1 = _node(h, hash1)
+            hash2 = _node(h, hash2)
+        }
+        mask = mask >> 1
+        i = i + 1
+    }
+    j: int = inner
+    while j < inner + border {
+        const hb: bytes = proof[start + j]
+        hash1 = _node(hb, hash1)
+        hash2 = _node(hb, hash2)
+        j = j + 1
+    }
+    if not compare_digest(hash1, old_root) {
+        return false
+    }
+    return compare_digest(hash2, new_root)
+}

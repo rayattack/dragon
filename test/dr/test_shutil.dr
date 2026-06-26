@@ -1,0 +1,72 @@
+"""shutil - copy/copytree/move/rmtree/which against a real temp tree."""
+
+from unittest import TestCase, main
+import shutil
+import os
+from os.path import join, exists, isfile
+from io import open, make
+
+
+def _write(path: str, body: str) -> None {
+    with make(path) as w {
+        w.write(body)
+    }
+}
+
+
+class ShutilTests(TestCase) {
+    def _setup(root: str) -> None {
+        # Fresh tree: <root>/a.txt and <root>/sub/b.txt
+        if exists(root) {
+            shutil.rmtree(root)
+        }
+        os.mkdir(root, 493)
+        os.mkdir(join(root, "sub"), 493)
+        _write(join(root, "a.txt"), "alpha")
+        _write(join(join(root, "sub"), "b.txt"), "beta")
+    }
+
+    def test_copyfile() {
+        root: str = "/tmp/dr_shutil_cf"
+        self._setup(root)
+        dst: str = join(root, "a_copy.txt")
+        shutil.copyfile(join(root, "a.txt"), dst)
+        self.assertTrue(isfile(dst))
+        self.assertEqual(open(dst).text(), "alpha")
+        shutil.rmtree(root)
+    }
+
+    def test_copytree_and_rmtree() {
+        root: str = "/tmp/dr_shutil_ct"
+        tree: str = "/tmp/dr_shutil_ct_dst"
+        self._setup(root)
+        if exists(tree) { shutil.rmtree(tree) }
+        shutil.copytree(root, tree)
+        self.assertTrue(isfile(join(tree, "a.txt")))
+        self.assertTrue(isfile(join(join(tree, "sub"), "b.txt")))
+        shutil.rmtree(tree)
+        self.assertFalse(exists(tree))
+        shutil.rmtree(root)
+    }
+
+    def test_move() {
+        root: str = "/tmp/dr_shutil_mv"
+        self._setup(root)
+        src: str = join(root, "a.txt")
+        dst: str = join(root, "moved.txt")
+        shutil.move(src, dst)
+        self.assertFalse(exists(src))
+        self.assertTrue(isfile(dst))
+        shutil.rmtree(root)
+    }
+
+    def test_which() {
+        # `sh` is present on every POSIX system used for CI.
+        found: str = shutil.which("sh")
+        self.assertTrue(found != "")
+        self.assertEqual(shutil.which("dr_no_such_binary_zzz"), "")
+    }
+}
+
+
+main([ShutilTests()])

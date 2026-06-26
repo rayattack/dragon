@@ -1,0 +1,49 @@
+# http.dr - Dragon HTTP package root
+#
+# Usage:
+#  from http import HTTPServer
+#  from http.server import Router, Request, Response, Context
+
+from http.server import Router, Request, Response, Context
+
+
+#===----------------------------------------------------------------------===#
+# HTTPServer - status code constants and lifecycle event names
+#===----------------------------------------------------------------------===#
+
+class HTTPServer {
+    # 2xx Success
+    static const OK: int = 200
+    static const CREATED: int = 201
+    static const ACCEPTED: int = 202
+    static const NO_CONTENT: int = 204
+
+    # 3xx Redirection
+    static const MOVED_PERMANENTLY: int = 301
+    static const FOUND: int = 302
+    static const NOT_MODIFIED: int = 304
+    static const TEMPORARY_REDIRECT: int = 307
+    static const PERMANENT_REDIRECT: int = 308
+
+    # 4xx Client Error
+    static const BAD_REQUEST: int = 400
+    static const UNAUTHORIZED: int = 401
+    static const FORBIDDEN: int = 403
+    static const NOT_FOUND: int = 404
+    static const METHOD_NOT_ALLOWED: int = 405
+    static const CONFLICT: int = 409
+    static const GONE: int = 410
+    static const PAYLOAD_TOO_LARGE: int = 413
+    static const UNPROCESSABLE_ENTITY: int = 422
+    static const TOO_MANY_REQUESTS: int = 429
+
+    # 5xx Server Error
+    static const INTERNAL_SERVER_ERROR: int = 500
+    static const BAD_GATEWAY: int = 502
+    static const SERVICE_UNAVAILABLE: int = 503
+    static const GATEWAY_TIMEOUT: int = 504
+
+    # Lifecycle event names
+    static const STARTUP: str = "startup"
+    static const SHUTDOWN: str = "shutdown"
+}

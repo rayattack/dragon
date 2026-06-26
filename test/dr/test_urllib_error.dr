@@ -1,0 +1,77 @@
+"""urllib.error - exception hierarchy with typed Python-parity fields."""
+
+from unittest import TestCase, main
+from urllib.error import URLError, HTTPError, ContentTooShortError
+
+
+class URLErrorTests(TestCase) {
+    def test_url_error_fields() {
+        raised: bool = false
+        reason: str = ""
+        filename: str = ""
+        try {
+            raise URLError("connection refused", "/tmp/sock")
+        } except URLError as e {
+            raised = true
+            reason = e.reason
+            filename = e.filename
+        }
+        self.assertTrue(raised)
+        self.assertEqual(reason, "connection refused")
+        self.assertEqual(filename, "/tmp/sock")
+    }
+
+    def test_url_error_default_filename() {
+        try {
+            raise URLError("timeout")
+        } except URLError as e {
+            self.assertEqual(e.reason, "timeout")
+            self.assertEqual(e.filename, "")
+        }
+    }
+
+    def test_http_error_is_url_error_and_has_fields() {
+        caught: bool = false
+        code: int = 0
+        msg: str = ""
+        url: str = ""
+        try {
+            hdrs: dict[str, str] = {"Content-Type": "text/html"}
+            raise HTTPError("http://x/y", 404, "Not Found", hdrs)
+        } except URLError as e {
+            caught = true
+            # URLError-level view of an HTTPError.
+            self.assertEqual(e.reason, "Not Found")
+            self.assertEqual(e.filename, "http://x/y")
+        }
+        self.assertTrue(caught)
+    }
+
+    def test_http_error_typed_fields() {
+        hdrs: dict[str, str] = {"X": "y"}
+        h: HTTPError = HTTPError("http://x", 500, "Server Error", hdrs)
+        self.assertEqual(h.url, "http://x")
+        self.assertEqual(h.code, 500)
+        self.assertEqual(h.msg, "Server Error")
+        self.assertEqual(h.headers["X"], "y")
+    }
+
+    def test_content_too_short() {
+        c: ContentTooShortError = ContentTooShortError("got 100 of 200", "partial-data")
+        self.assertEqual(c.reason, "got 100 of 200")
+        self.assertEqual(c.content, "partial-data")
+    }
+
+    def test_content_too_short_is_url_error() {
+        caught: bool = false
+        try {
+            raise ContentTooShortError("short", "x")
+        } except URLError {
+            caught = true
+        }
+        self.assertTrue(caught)
+    }
+}
+
+
+main([URLErrorTests()])

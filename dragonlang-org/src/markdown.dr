@@ -1,0 +1,586 @@
+# Minimal markdown→HTML renderer.
+#
+# Covers what the in-tree docs/ and  pages actually use: ATX headings,
+# fenced code blocks, paragraphs, unordered/ordered lists, blockquotes, inline
+# code, bold/italic, and links. Tables and HTML pass-through are out of scope.
+#
+# All output is HTML-escaped; the only place the source is emitted verbatim is
+# inside <pre><code>, where escaping still applies but no inline parsing runs.
+# Fenced code blocks are additionally tokenized and colored by highlight.dr.
+
+from highlight import highlight
+
+
+def _html_escape(s: str) -> str {
+    out: str = ""
+    i: int = 0
+    while i < len(s) {
+        const c: str = s[i]
+        if c == "&" {
+            out = out + "&amp;"
+        } elif c == "<" {
+            out = out + "&lt;"
+        } elif c == ">" {
+            out = out + "&gt;"
+        } elif c == "\"" {
+            out = out + "&quot;"
+        } else {
+            out = out + c
+        }
+        i = i + 1
+    }
+    return out
+}
+
+
+def _starts_with(s: str, prefix: str) -> bool {
+    if len(prefix) > len(s) {
+        return false
+    }
+    i: int = 0
+    while i < len(prefix) {
+        if s[i] != prefix[i] {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+
+def _strip(s: str) -> str {
+    n: int = len(s)
+    if n == 0 {
+        return s
+    }
+    lo: int = 0
+    while lo < n {
+        const c: str = s[lo]
+        if c == " " or c == "\t" or c == "\r" or c == "\n" {
+            lo = lo + 1
+        } else {
+            break
+        }
+    }
+    hi: int = n
+    while hi > lo {
+        const c: str = s[hi - 1]
+        if c == " " or c == "\t" or c == "\r" or c == "\n" {
+            hi = hi - 1
+        } else {
+            break
+        }
+    }
+    return s[lo:hi]
+}
+
+
+def _rstrip(s: str) -> str {
+    n: int = len(s)
+    hi: int = n
+    while hi > 0 {
+        const c: str = s[hi - 1]
+        if c == " " or c == "\t" or c == "\r" or c == "\n" {
+            hi = hi - 1
+        } else {
+            break
+        }
+    }
+    return s[0:hi]
+}
+
+
+# --- Inline rendering (single line, no block context) ---
+#
+# Walks the line left-to-right, emitting escaped text by default and switching
+# into one of the small set of inline constructs when a marker appears. Each
+# construct must close on the same line; a stray opener is emitted literally.
+
+def _render_inline(line: str) -> str {
+    out: str = ""
+    i: int = 0
+    n: int = len(line)
+    while i < n {
+        const c: str = line[i]
+
+        # Inline code `…`
+        if c == "`" {
+            const close: int = line.find("`", i + 1)
+            if close > i {
+                const code: str = line[i + 1:close]
+                out = out + "<code>" + _html_escape(code) + "</code>"
+                i = close + 1
+                continue
+            }
+            out = out + "&#96;"
+            i = i + 1
+            continue
+        }
+
+        # Bold **…**
+        if c == "*" and i + 1 < n and line[i + 1] == "*" {
+            const close: int = line.find("**", i + 2)
+            if close > i {
+                const inner: str = line[i + 2:close]
+                out = out + "<strong>" + _render_inline(inner) + "</strong>"
+                i = close + 2
+                continue
+            }
+        }
+
+        # Italic *…*  (only when not the start of **)
+        if c == "*" {
+            const close: int = line.find("*", i + 1)
+            if close > i and (close + 1 >= n or line[close + 1] != "*") {
+                const inner: str = line[i + 1:close]
+                out = out + "<em>" + _render_inline(inner) + "</em>"
+                i = close + 1
+                continue
+            }
+        }
+
+        # Link [text](url)
+        if c == "[" {
+            const closeB: int = line.find("]", i + 1)
+            if closeB > i and closeB + 1 < n and line[closeB + 1] == "(" {
+                const closeP: int = line.find(")", closeB + 2)
+                if closeP > closeB {
+                    const text: str = line[i + 1:closeB]
+                    const url: str = line[closeB + 2:closeP]
+                    out = out + "<a href=\"" + _html_escape(url) + "\">"
+                    out = out + _render_inline(text) + "</a>"
+                    i = closeP + 1
+                    continue
+                }
+            }
+        }
+
+        # Default: escape and emit one char
+        if c == "&" {
+            out = out + "&amp;"
+        } elif c == "<" {
+            out = out + "&lt;"
+        } elif c == ">" {
+            out = out + "&gt;"
+        } else {
+            out = out + c
+        }
+        i = i + 1
+    }
+    return out
+}
+
+
+# --- Tables (GitHub-flavored markdown) ---
+#
+# A table has a header row, a separator line of dashes/pipes, and zero or more
+# body rows - each line bounded by `|` characters and split into cells on
+# inner `|`s. The separator line may contain `:---`, `:---:`, or `---:` for
+# left/center/right alignment but we currently emit the same `<th>` / `<td>`
+# regardless; CSS handles visual alignment by column index if needed later.
+
+def _is_table_row(line: str) -> bool {
+    # A pipe-bounded row: stripped, starts with `|`, contains at least one
+    # additional `|`. Non-table single-pipe lines (e.g. inline `|` in
+    # paragraphs without bookend pipes) are rejected.
+    const s: str = _strip(line)
+    if len(s) < 2 {
+        return false
+    }
+    if s[0] != "|" {
+        return false
+    }
+    return s.find("|", 1) >= 0
+}
+
+def _split_table_row(line: str) -> list[str] {
+    # Split a `|a|b|c|` row into ["a", "b", "c"]. The bookend pipes produce
+    # empty leading and trailing cells which we discard. Cells are stripped
+    # of surrounding whitespace.
+    const s: str = _strip(line)
+    const raw: list[str] = s.split("|")
+    const out: list[str] = []
+    i: int = 0
+    while i < len(raw) {
+        const cell: str = _strip(raw[i])
+        # Drop the empty bookend cells that come from the leading/trailing `|`.
+        if i == 0 and len(cell) == 0 {
+            i = i + 1
+            continue
+        }
+        if i == len(raw) - 1 and len(cell) == 0 {
+            i = i + 1
+            continue
+        }
+        out.append(cell)
+        i = i + 1
+    }
+    return out
+}
+
+def _is_table_separator(line: str) -> bool {
+    # Separator line: pipe-bounded, every cell is dashes (with optional
+    # leading/trailing colon and surrounding spaces). One `---` minimum per
+    # cell. `_split_table_row` handles the trim, so we only need to inspect
+    # the cell contents.
+    if not _is_table_row(line) {
+        return false
+    }
+    const cells: list[str] = _split_table_row(line)
+    if len(cells) == 0 {
+        return false
+    }
+    i: int = 0
+    while i < len(cells) {
+        const c: str = _strip(cells[i])
+        if len(c) == 0 {
+            return false
+        }
+        # Allow leading `:` and trailing `:` for alignment markers.
+        lo: int = 0
+        hi: int = len(c)
+        if c[0] == ":" {
+            lo = 1
+        }
+        if hi > lo and c[hi - 1] == ":" {
+            hi = hi - 1
+        }
+        if hi - lo < 1 {
+            return false
+        }
+        j: int = lo
+        while j < hi {
+            if c[j] != "-" {
+                return false
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return true
+}
+
+
+def _is_digits(s: str) -> bool {
+    if len(s) == 0 {
+        return false
+    }
+    i: int = 0
+    while i < len(s) {
+        const c: str = s[i]
+        if c < "0" or c > "9" {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+
+# First whitespace-delimited word of a fence info string, e.g. "dragon" from
+# "dragon" or "dragon title=...". Lowercased so "Dragon" and "BASH" route too.
+def _first_word(s: str) -> str {
+    i: int = 0
+    const n: int = len(s)
+    while i < n and (s[i] == " " or s[i] == "\t") {
+        i = i + 1
+    }
+    j: int = i
+    while j < n and s[j] != " " and s[j] != "\t" {
+        j = j + 1
+    }
+    return s[i:j].lower()
+}
+
+
+# Render one fenced code block: the language class plus the highlighted body.
+# The body is highlighted as a unit (one pass over the whole block) so the
+# tokenizer sees multi-line constructs whole.
+def _render_code_block(lang: str, lines: list[str]) -> str {
+    body: str = ""
+    i: int = 0
+    while i < len(lines) {
+        if i > 0 {
+            body = body + "\n"
+        }
+        body = body + lines[i]
+        i = i + 1
+    }
+    open_tag: str = "<pre><code>"
+    if len(lang) > 0 {
+        open_tag = "<pre><code class=\"language-" + _html_escape(lang) + "\">"
+    }
+    return open_tag + highlight(lang, body) + "</code></pre>\n"
+}
+
+
+# --- Block rendering ---
+#
+# Stateful: walks lines top-to-bottom, opens and closes <ul>/<ol>/<blockquote>
+# wrappers as runs of like-kind lines start and end. Fenced code blocks
+# (```...```) consume verbatim until the matching fence; everything else is
+# either a heading, list item, or paragraph.
+
+def render(md: str) -> str {
+    const lines: list[str] = md.split("\n")
+    out: str = ""
+    in_ul: bool = false
+    in_ol: bool = false
+    in_quote: bool = false
+    in_code: bool = false
+    code_lang: str = ""
+    code_lines: list[str] = []
+    para: list[str] = []
+
+    def close_para() -> None {
+        nonlocal out, para
+        if len(para) > 0 {
+            joined: str = ""
+            j: int = 0
+            while j < len(para) {
+                if j > 0 {
+                    joined = joined + " "
+                }
+                joined = joined + _render_inline(para[j])
+                j = j + 1
+            }
+            out = out + "<p>" + joined + "</p>\n"
+            para = []
+        }
+    }
+
+    def close_lists() -> None {
+        nonlocal out, in_ul, in_ol, in_quote
+        if in_ul {
+            out = out + "</ul>\n"
+            in_ul = false
+        }
+        if in_ol {
+            out = out + "</ol>\n"
+            in_ol = false
+        }
+        if in_quote {
+            out = out + "</blockquote>\n"
+            in_quote = false
+        }
+    }
+
+    i: int = 0
+    while i < len(lines) {
+        const raw: str = _rstrip(lines[i])
+
+        if in_code {
+            if _starts_with(_strip(raw), "```") {
+                out = out + _render_code_block(code_lang, code_lines)
+                in_code = false
+                code_lines = []
+                code_lang = ""
+            } else {
+                code_lines.append(raw)
+            }
+            i = i + 1
+            continue
+        }
+
+        if _starts_with(_strip(raw), "```") {
+            close_para()
+            close_lists()
+            const fence: str = _strip(raw)
+            code_lang = _first_word(fence[3:]) if len(fence) > 3 else ""
+            code_lines = []
+            in_code = true
+            i = i + 1
+            continue
+        }
+
+        const stripped: str = _strip(raw)
+
+        if len(stripped) == 0 {
+            close_para()
+            close_lists()
+            i = i + 1
+            continue
+        }
+
+        # GFM tables. Need the next line to be a separator (`|---|---|`)
+        # before we commit - otherwise a single pipe-leading line is just
+        # a paragraph that happens to start with `|`.
+        const is_table_start: bool = _is_table_row(raw) and i + 1 < len(lines) and _is_table_separator(lines[i + 1])
+        if is_table_start {
+            close_para()
+            close_lists()
+            const headers: list[str] = _split_table_row(raw)
+            out = out + "<table>\n<thead><tr>"
+            h: int = 0
+            while h < len(headers) {
+                out = out + "<th>" + _render_inline(headers[h]) + "</th>"
+                h = h + 1
+            }
+            out = out + "</tr></thead>\n<tbody>\n"
+            i = i + 2  # skip header + separator
+            while i < len(lines) and _is_table_row(_rstrip(lines[i])) {
+                const cells: list[str] = _split_table_row(_rstrip(lines[i]))
+                out = out + "<tr>"
+                c: int = 0
+                while c < len(cells) {
+                    out = out + "<td>" + _render_inline(cells[c]) + "</td>"
+                    c = c + 1
+                }
+                out = out + "</tr>\n"
+                i = i + 1
+            }
+            out = out + "</tbody>\n</table>\n"
+            continue
+        }
+
+        # Headings: # … ######
+        if _starts_with(stripped, "# ") {
+            close_para(); close_lists()
+            out = out + "<h1>" + _render_inline(stripped[2:]) + "</h1>\n"
+            i = i + 1
+            continue
+        }
+        if _starts_with(stripped, "## ") {
+            close_para(); close_lists()
+            out = out + "<h2>" + _render_inline(stripped[3:]) + "</h2>\n"
+            i = i + 1
+            continue
+        }
+        if _starts_with(stripped, "### ") {
+            close_para(); close_lists()
+            out = out + "<h3>" + _render_inline(stripped[4:]) + "</h3>\n"
+            i = i + 1
+            continue
+        }
+        if _starts_with(stripped, "#### ") {
+            close_para(); close_lists()
+            out = out + "<h4>" + _render_inline(stripped[5:]) + "</h4>\n"
+            i = i + 1
+            continue
+        }
+
+        # Horizontal rule
+        if stripped == "---" or stripped == "***" or stripped == "___" {
+            close_para(); close_lists()
+            out = out + "<hr>\n"
+            i = i + 1
+            continue
+        }
+
+        # Blockquote
+        if _starts_with(stripped, "> ") {
+            close_para()
+            if in_ul { out = out + "</ul>\n"; in_ul = false }
+            if in_ol { out = out + "</ol>\n"; in_ol = false }
+            if not in_quote {
+                out = out + "<blockquote>\n"
+                in_quote = true
+            }
+            out = out + "<p>" + _render_inline(stripped[2:]) + "</p>\n"
+            i = i + 1
+            continue
+        }
+
+        # Unordered list. After the bullet marker, gather continuation lines
+        # that are wrapped onto subsequent lines (typical in 80-column source).
+        # Continuation lines either start with whitespace (the conventional
+        # GFM indent under the bullet) OR are non-empty, non-special lines
+        # immediately following - paragraph rewrap. A blank line, a new
+        # bullet, or any block-level marker (heading, fence, hr, blockquote)
+        # closes the current item.
+        if _starts_with(stripped, "- ") or _starts_with(stripped, "* ") {
+            close_para()
+            if in_ol { out = out + "</ol>\n"; in_ol = false }
+            if in_quote { out = out + "</blockquote>\n"; in_quote = false }
+            if not in_ul {
+                out = out + "<ul>\n"
+                in_ul = true
+            }
+            item: str = stripped[2:]
+            i = i + 1
+            while i < len(lines) {
+                const next_raw: str = _rstrip(lines[i])
+                const next_strip: str = _strip(next_raw)
+                if len(next_strip) == 0 { break }
+                if _starts_with(next_strip, "- ") { break }
+                if _starts_with(next_strip, "* ") { break }
+                if _starts_with(next_strip, "# ") { break }
+                if _starts_with(next_strip, "## ") { break }
+                if _starts_with(next_strip, "### ") { break }
+                if _starts_with(next_strip, "#### ") { break }
+                if _starts_with(next_strip, "```") { break }
+                if _starts_with(next_strip, "> ") { break }
+                if next_strip == "---" or next_strip == "***" or next_strip == "___" { break }
+                # Numbered "N. " also closes the bullet - different list kind.
+                const ndot: int = next_strip.find(". ")
+                if ndot > 0 and ndot < 4 {
+                    const nprefix: str = next_strip[0:ndot]
+                    if _is_digits(nprefix) { break }
+                }
+                # GFM table starts also close.
+                const tbl_close: bool = _is_table_row(next_strip) and i + 1 < len(lines) and _is_table_separator(lines[i + 1])
+                if tbl_close { break }
+                item = item + " " + next_strip
+                i = i + 1
+            }
+            out = out + "<li>" + _render_inline(item) + "</li>\n"
+            continue
+        }
+
+        # Ordered list (only matches "N. " for small N to keep it cheap).
+        # Same continuation-line gathering as the unordered branch.
+        const dot: int = stripped.find(". ")
+        if dot > 0 and dot < 4 {
+            const prefix: str = stripped[0:dot]
+            if _is_digits(prefix) {
+                close_para()
+                if in_ul { out = out + "</ul>\n"; in_ul = false }
+                if in_quote { out = out + "</blockquote>\n"; in_quote = false }
+                if not in_ol {
+                    out = out + "<ol>\n"
+                    in_ol = true
+                }
+                item: str = stripped[dot + 2:]
+                i = i + 1
+                while i < len(lines) {
+                    const next_raw: str = _rstrip(lines[i])
+                    const next_strip: str = _strip(next_raw)
+                    if len(next_strip) == 0 { break }
+                    if _starts_with(next_strip, "- ") { break }
+                    if _starts_with(next_strip, "* ") { break }
+                    if _starts_with(next_strip, "# ") { break }
+                    if _starts_with(next_strip, "## ") { break }
+                    if _starts_with(next_strip, "### ") { break }
+                    if _starts_with(next_strip, "#### ") { break }
+                    if _starts_with(next_strip, "```") { break }
+                    if _starts_with(next_strip, "> ") { break }
+                    if next_strip == "---" or next_strip == "***" or next_strip == "___" { break }
+                    const ndot: int = next_strip.find(". ")
+                    if ndot > 0 and ndot < 4 {
+                        const nprefix: str = next_strip[0:ndot]
+                        if _is_digits(nprefix) { break }
+                    }
+                    const tbl_close: bool = _is_table_row(next_strip) and i + 1 < len(lines) and _is_table_separator(lines[i + 1])
+                    if tbl_close { break }
+                    item = item + " " + next_strip
+                    i = i + 1
+                }
+                out = out + "<li>" + _render_inline(item) + "</li>\n"
+                continue
+            }
+        }
+
+        # Default: paragraph line
+        close_lists()
+        para.append(stripped)
+        i = i + 1
+    }
+
+    close_para()
+    close_lists()
+    if in_code {
+        out = out + _render_code_block(code_lang, code_lines)
+    }
+    return out
+}
+

@@ -1,0 +1,60 @@
+# test/dr/test_http_json_body.dr - Request.json() through the live server.
+#
+# Proves the D048 generic decoder is wired into the HTTP request path: a POST
+# with a JSON body, parsed via req.json() into a boxed Any tree, end to end
+# through serve_connection (MemoryReader, no sockets).
+
+from unittest import TestCase, main
+from http.server import Router, Request, Response, Context, MemoryReader
+
+def _greet(req: Request, res: Response, ctx: Context) -> None {
+    const body: Any = req.json()
+    if isinstance(body, dict) {
+        const m: dict[str, Any] = body
+        const name: str = m["name"]
+        const age: int = m["age"]
+        res.text("hello:" + name + ":" + str(age))
+    } else {
+        res.text("not-object")
+    }
+}
+
+def _post(path: str, body: str) -> str {
+    # Content-Length is the byte count; the bodies here are ASCII so len == bytes.
+    const clen: str = str(len(body))
+    return "POST " + path + " HTTP/1.1\r\nHost: h\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: " + clen + "\r\n\r\n" + body
+}
+
+
+class JsonBodyTests(TestCase) {
+    def test_json_body_object() {
+        const app: Router = Router(0)
+        app.POST("/x", _greet)
+        const mr: MemoryReader = MemoryReader([_post("/x", "{\"name\": \"Ada\", \"age\": 36}").encode("utf-8")])
+        app.serve_connection(mr)
+        self.assertIn("hello:Ada:36", mr.sent)
+    }
+
+    def test_json_body_nested() {
+        const app: Router = Router(0)
+
+        def _sum(req: Request, res: Response, ctx: Context) -> None {
+            const body: Any = req.json()
+            const m: dict[str, Any] = body
+            const items: list[Any] = m["items"]
+            total: int = 0
+            for it in items {
+                const n: int = it
+                total = total + n
+            }
+            res.text("sum:" + str(total))
+        }
+        app.POST("/sum", _sum)
+        const mr: MemoryReader = MemoryReader([_post("/sum", "{\"items\": [1, 2, 3, 4]}").encode("utf-8")])
+        app.serve_connection(mr)
+        self.assertIn("sum:10", mr.sent)
+    }
+}
+
+
+main([JsonBodyTests()])

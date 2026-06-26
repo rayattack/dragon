@@ -1,0 +1,35 @@
+"""difflib - Ratcliff-Obershelp ratio + get_close_matches vs CPython values."""
+
+from unittest import TestCase, main
+import difflib
+from difflib import ratio, get_close_matches
+
+
+class DifflibTests(TestCase) {
+    def test_ratio_exact_and_empty() {
+        self.assertAlmostEqual(ratio("abcd", "abcd"), 1.0)
+        self.assertAlmostEqual(ratio("", ""), 1.0)
+        self.assertAlmostEqual(ratio("abc", ""), 0.0)
+    }
+
+    def test_ratio_known_values() {
+        # CPython SequenceMatcher reference values.
+        self.assertAlmostEqual(ratio("abcd", "abce"), 0.75)
+        self.assertAlmostEqual(ratio("kitten", "sitting"), 0.6153846, 6)
+    }
+
+    def test_get_close_matches() {
+        got: list[str] = get_close_matches("appel", ["ape", "apple", "peach", "puppy"])
+        self.assertEqual(got[0], "apple")
+        self.assertEqual(len(got), 2)
+    }
+
+    def test_get_close_matches_cutoff_n() {
+        got: list[str] = get_close_matches("wrd", ["word", "words", "ward", "xyz"], 2, 0.5)
+        self.assertEqual(len(got), 2)
+        self.assertEqual(got[0], "word")
+    }
+}
+
+
+main([DifflibTests()])

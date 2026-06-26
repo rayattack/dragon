@@ -1,0 +1,48 @@
+# test/dr/test_sha1.dr - Known-answer tests for runtime SHA-1.
+#
+# Vectors: FIPS 180-2 / RFC 3174 ("", "abc", and the 56-byte multi-block
+# message). SHA-1 is legacy/parity only - never a TLS security primitive
+# (ADR 038 §2) - but it backs HMAC-SHA-1 (TOTP) so its bytes must be correct.
+
+from unittest import TestCase, main
+from hashlib import sha1, new, Hash
+
+const _EMPTY: str = "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+const _ABC: str   = "a9993e364706816aba3e25717850c26c9cd0d89d"
+const _LONG: str  = "84983e441c3bd26ebaae4aa1f95129e5e54670f1"
+
+class Sha1Tests(TestCase) {
+    def test_empty() {
+        self.assertEqual(sha1(b"").hexdigest(), _EMPTY)
+    }
+
+    def test_abc() {
+        self.assertEqual(sha1(b"abc").hexdigest(), _ABC)
+    }
+
+    def test_long_56byte() {
+        msg: bytes = b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+        self.assertEqual(sha1(msg).hexdigest(), _LONG)
+    }
+
+    def test_new_constructor() {
+        self.assertEqual(new("sha1", b"abc").hexdigest(), _ABC)
+    }
+
+    def test_metadata() {
+        h: Hash = sha1(b"abc")
+        self.assertEqual(h.digest_size(), 20)
+        self.assertEqual(h.block_size(), 64)
+        self.assertEqual(h.name(), "sha1")
+    }
+
+    def test_incremental_equiv() {
+        h: Hash = sha1(b"")
+        h.update(b"a")
+        h.update(b"b")
+        h.update(b"c")
+        self.assertEqual(h.hexdigest(), _ABC)
+    }
+}
+
+main([Sha1Tests()])

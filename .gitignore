@@ -1,0 +1,54 @@
+# --- Build output ---
+build/
+build-asan/
+build*/
+cmake-build-*/
+
+# --- CMake / CTest generated files ---
+Testing/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+_CPack_Packages/
+CPackConfig.cmake
+CPackSourceConfig.cmake
+
+# --- Compiled artifacts ---
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.pdb
+
+# --- Registry / site runtime state and SECRETS (never publish) ---
+/data/
+**/data/
+*.sqlite
+*.sqlite3
+*.db
+.session-secret
+*.session-secret
+.log-signing-key
+*signing-key
+*.private
+
+# --- Compiled binaries with no extension (rebuildable from .dr source) ---
+/examples/pypy
+/examples/server
+/test/dr/test_template_borrowed_field_rc
+
+# --- Editor / OS / tooling ---
+.ignore/
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db

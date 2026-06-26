@@ -1,0 +1,326 @@
+# Dragon `unittest` - Python-parity test framework
+#
+# Status: v1 - drives self-test migration off GoogleTest for `.dr`-side tests.
+# Powered by D033 method reflection (dir / getattr) and D039 deep `Any`
+# equality. See tests.md for design rationale.
+#
+# Quick start:
+#  import unittest
+#
+#  class CalculatorTests(TestCase) {
+#  def test_addition() { self.assertEqual(2 + 2, 4) }
+#  def test_subtraction() { self.assertEqual(5 - 2, 3) }
+#  }
+#
+#  unittest.main([CalculatorTests()])
+#
+# What works:
+#  - `assertEqual` / `assertNotEqual` over Any (deep list/dict/bytes compare).
+#  - `assertTrue` / `assertFalse` / `assertIsNone` / `assertIsNotNone`.
+#  - `assertIn` / `assertNotIn` over `str` containment (substring) and
+#  scalar-in-list via the Dragon `in` operator's existing dispatch.
+#  - `assertGreater` / `assertLess` / `assertGreaterEqual` / `assertLessEqual`.
+#  - `assertAlmostEqual` (float / int with `places` arg, default 7).
+#  - `assertRaises(exc_type, fn)` callable form: passes if `fn()` raises
+#  anything. `exc_type` is currently a type-of-record hint; precise type
+#  matching is deferred (would need an exposed `dragon_exc_class_to_code`).
+#  - `TestRunner.run(case)` walks `dir(case)` for `test_*` methods, calls
+#  each via `getattr` bind, prints `ok` / `FAIL` lines, accumulates totals.
+#  - `unittest.main(cases)` runs every case, prints a summary, exits 1 on
+#  failure (so CI / `dragon run` propagate non-zero on a failed suite).
+#
+# Deferred (tracked in tests.md):
+#  - `with self.assertRaises(ValueError) { ... }` context-manager form.
+#  - Auto-discovery of TestCase subclasses (needs D025 module-level
+#  class enumeration); for now callers pass a `list[TestCase]`.
+#  - `setUp` / `tearDown` per-test fixtures (call manually until kwargs +
+#  reflection-driven hook detection are available).
+
+from sys import exit
+
+# ---------------------------------------------------------------------------
+# Per-suite tallies. TestRunner.run owns one; TestCase.assert* call into the
+# owning runner via `self._runner` so we don't need a thread-local singleton.
+# ---------------------------------------------------------------------------
+
+class TestResult {
+    runs_total: int
+    failures_total: int
+    errors_total: int
+    current_test: str
+    current_failed: bool
+
+    def() {
+        self.runs_total = 0
+        self.failures_total = 0
+        self.errors_total = 0
+        self.current_test = ""
+        self.current_failed = False
+    }
+
+    def begin_test(name: str) {
+        self.current_test = name
+        self.current_failed = False
+        self.runs_total = self.runs_total + 1
+    }
+
+    def record_failure(msg: str) {
+        if not self.current_failed {
+            # First failure for this test counts once; subsequent assert
+            # failures still print but don't double-bump the counter.
+            self.failures_total = self.failures_total + 1
+            self.current_failed = True
+        }
+        print(f"FAIL: {self.current_test}: {msg}")
+    }
+
+    def record_error(msg: str) {
+        self.errors_total = self.errors_total + 1
+        self.current_failed = True
+        print(f"ERROR: {self.current_test}: {msg}")
+    }
+
+    def passed() -> bool {
+        return self.failures_total == 0 and self.errors_total == 0
+    }
+}
+
+# ---------------------------------------------------------------------------
+# TestCase - subclass and add `test_*` methods. Assertion methods all funnel
+# through `_fail` so the runner sees a single failure per test even if the
+# test keeps asserting after the first miss.
+# ---------------------------------------------------------------------------
+
+class TestCase {
+    # Borrowed from TestRunner.run while a test is in flight. NULL outside.
+    _result: TestResult
+
+    def() {
+        self._result = TestResult()  # placeholder; runner swaps in its own
+    }
+
+    def _fail(msg: str) {
+        if self._result {
+            self._result.record_failure(msg)
+        } else {
+            print(f"FAIL (no runner): {msg}")
+        }
+    }
+
+    def _fail_with(label: str, msg: str, default: str) {
+        # Shared failure tail for the assert* helpers: caller's msg if given,
+        # else the assert-specific default. Called only on the failure path, so
+        # building `default` at the call site costs nothing on a passing assert.
+        extra: str = msg
+        if extra == "" {
+            extra = default
+        }
+        self._fail(f"{label}: {extra}")
+    }
+
+    # -- Equality --------------------------------------------------------
+
+    # GENERIC (monomorphized), cmd #3: operands flow at their NATIVE type T - no
+    # Any box, no per-call leak of a boxed temporary, and a direct typed `!=`
+    # instead of dragon_box_eq dispatch. Both operands share T, so mismatched
+    # concrete types (assertEqual(1, "x")) are a compile error, as they should be
+    # (like `name: int = "boy"`). A typed `!=` still recurses into lists/dicts/
+    # bytes, so assertEqual([1,2,3], [1,2,3]) passes on distinct allocations.
+    # Enabled once the operations that fed it spurious `Any` were made honest:
+    # deque pop/popleft -> element type, tuple-unpack targets -> element types,
+    # dict dot-key access -> value type.
+    def assertEqual[T](first: T, second: T, msg: str = "") {
+        if first != second {
+            self._fail_with("assertEqual", msg, f"{first} != {second}")
+        }
+    }
+
+    def assertNotEqual[T](first: T, second: T, msg: str = "") {
+        if first == second {
+            self._fail_with("assertNotEqual", msg, f"{first} == {second}")
+        }
+    }
+
+    # -- Truthiness ------------------------------------------------------
+
+    def assertTrue(value: bool, msg: str = "") {
+        if not value {
+            self._fail_with("assertTrue", msg, "value is falsy")
+        }
+    }
+
+    def assertFalse(value: bool, msg: str = "") {
+        if value {
+            self._fail_with("assertFalse", msg, "value is truthy")
+        }
+    }
+
+    # -- None checks (Any-typed so None comparisons hit the box-eq path) --
+
+    def assertIsNone(value: Any, msg: str = "") {
+        if value != None {
+            self._fail_with("assertIsNone", msg, f"{value} is not None")
+        }
+    }
+
+    def assertIsNotNone(value: Any, msg: str = "") {
+        if value == None {
+            self._fail_with("assertIsNotNone", msg, "value is None")
+        }
+    }
+
+    # -- Containment (delegates to Dragon `in` over str / list) ----------
+
+    def assertIn(needle: str, haystack: str, msg: str = "") {
+        if not (needle in haystack) {
+            self._fail_with("assertIn", msg, f"'{needle}' not found in '{haystack}'")
+        }
+    }
+
+    def assertNotIn(needle: str, haystack: str, msg: str = "") {
+        if needle in haystack {
+            self._fail_with("assertNotIn", msg, f"'{needle}' unexpectedly found in '{haystack}'")
+        }
+    }
+
+    # -- Ordering --------------------------------------------------------
+
+    # Params are `float` so both int and float arguments work: `int <: float`
+    # (numeric widening) lets an int arg coerce at the call site, while float
+    # arguments compare natively. An int-only signature crashed LLVM
+    # verification when handed floats.
+
+    def assertGreater(first: float, second: float, msg: str = "") {
+        if not (first > second) {
+            self._fail_with("assertGreater", msg, f"{first} not greater than {second}")
+        }
+    }
+
+    def assertLess(first: float, second: float, msg: str = "") {
+        if not (first < second) {
+            self._fail_with("assertLess", msg, f"{first} not less than {second}")
+        }
+    }
+
+    def assertGreaterEqual(first: float, second: float, msg: str = "") {
+        if not (first >= second) {
+            self._fail_with("assertGreaterEqual", msg, f"{first} not >= {second}")
+        }
+    }
+
+    def assertLessEqual(first: float, second: float, msg: str = "") {
+        if not (first <= second) {
+            self._fail_with("assertLessEqual", msg, f"{first} not <= {second}")
+        }
+    }
+
+    # -- Float comparison ------------------------------------------------
+
+    def assertAlmostEqual(first: float, second: float, places: int = 7, msg: str = "") {
+        # round-trip the diff to `places` decimal places. abs() on float
+        # avoids a builtin-arg overload mismatch (abs() on int returns int).
+        diff: float = first - second
+        if diff < 0.0 {
+            diff = -diff
+        }
+        tol: float = 1.0
+        i: int = 0
+        while i < places {
+            tol = tol / 10.0
+            i = i + 1
+        }
+        if diff > tol {
+            self._fail_with("assertAlmostEqual", msg, f"{first} != {second} within {places} places")
+        }
+    }
+
+    # -- Exception expectation (callable form) ---------------------------
+
+    def assertRaises(exc_type: type, fn: Callable[[], None], msg: str = "") {
+        # Precise type matching via the integer-code + [lo,hi] range model:
+        # `exc_type` is the expected exception's type code (first-class
+        # exception value), and __exc_matches range-checks the currently
+        # caught exception against it inside the handler. A subclass of the
+        # expected type matches (parent-range), mirroring Python.
+        raised: bool = False
+        matched: bool = False
+        try {
+            fn()
+        } except Exception as e {
+            raised = True
+            matched = __exc_matches(exc_type)
+        }
+        if not raised {
+            self._fail_with("assertRaises", msg, "callable did not raise")
+        } else if not matched {
+            self._fail("assertRaises: callable raised the wrong exception type")
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Runner: walks dir(case) for `test_*` names, binds each via getattr, calls,
+# tallies. Catches uncaught exceptions inside a test as errors (distinct from
+# assertion failures).
+# ---------------------------------------------------------------------------
+
+class TestRunner {
+    result: TestResult
+
+    def() {
+        self.result = TestResult()
+    }
+
+    def run(case: TestCase) {
+        case._result = self.result
+        names: list[str] = dir(case)
+        for name in names {
+            if name.startswith("test_") {
+                self.result.begin_test(name)
+                method: Callable[[], None] = getattr(case, name)
+                try {
+                    method()
+                } except Exception as e {
+                    self.result.record_error(str(e))
+                }
+                if not self.result.current_failed {
+                    print(f"ok: {name}")
+                }
+            }
+        }
+    }
+
+    def summary() {
+        ran: int = self.result.runs_total
+        failed: int = self.result.failures_total
+        errored: int = self.result.errors_total
+        print(f"Ran {ran} test(s); failures: {failed}, errors: {errored}")
+        if self.result.passed() {
+            print("OK")
+        } else {
+            print("FAILED")
+        }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Module entry point. Until D025 unlocks module-level class enumeration the
+# caller hands us a list of pre-instantiated test cases - explicit and
+# debuggable (no decorator magic). Returns exit code: 0 on pass, 1 on fail.
+# ---------------------------------------------------------------------------
+
+def main(cases: list[TestCase]) -> int {
+    runner: TestRunner = TestRunner()
+    for c in cases {
+        runner.run(c)
+    }
+    runner.summary()
+    code: int = 0
+    if not runner.result.passed() {
+        code = 1
+    }
+    # Terminate with the suite's status so `dragon run` / CTest see a non-zero
+    # exit on failure. CPython's unittest.main() likewise exits the process.
+    exit(code)
+    return code
+}

@@ -1,0 +1,127 @@
+# test/dr/test_http_recv_timeout.dr - W1 residual: idle/read timeout (R1).
+#
+# Proves the timeout-capable recv end to end over a REAL loopback socket (the
+# only way to exercise the runtime primitive + reactor deadline path - an
+# in-memory fake can't trigger a kernel-level stall). A server vthread reads from
+# a peer that goes silent; the read must abandon after the timeout instead of
+# blocking forever (slowloris defense), and the connection must be torn down.
+#
+# Mirrors test_socket_vthread.dr's structure: bind/listen synchronously, run the
+# server handler on a `fire` green thread, drive the client from the main thread.
+
+from unittest import TestCase, main
+from socket import TcpListener, TcpStream
+from http.server import Router, Request, Response, Context
+from http.connection import FdReader
+from time import monotonic
+
+# Mutable result carrier the fired server writes its observations into.
+class _Probe {
+    timed_out: bool
+    elapsed_ms: float
+    got: str
+
+    def() {
+        self.timed_out = false
+        self.elapsed_ms = 0.0
+        self.got = ""
+    }
+}
+
+# Accept one connection and do a single timeout-bounded read, recording whether
+# it timed out (empty result) and how long it waited.
+def _recv_once(lis: TcpListener, probe: _Probe, timeout_ms: int) -> None {
+    const conn: TcpStream = lis.do_accept()
+    const reader: FdReader = FdReader(conn.fd)
+    const t0: float = monotonic()
+    const data: bytes = reader.recv_timeout(4096, timeout_ms)
+    const t1: float = monotonic()
+    probe.elapsed_ms = (t1 - t0) * 1000.0
+    probe.timed_out = len(data) == 0
+    probe.got = data.decode("utf-8")
+    conn.close()
+}
+
+# A handler that should never run for a stalled mid-body request (the framer
+# rejects the truncated request before dispatch).
+def _never(req: Request, res: Response, ctx: Context) -> None {
+    res.text("handled")
+}
+
+# Accept one connection and run the full keep-alive loop with a short idle
+# timeout, so a stalled mid-body client is dropped by serve_connection itself.
+def _serve_once(lis: TcpListener, app: Router) -> None {
+    const conn: TcpStream = lis.do_accept()
+    app.serve_connection(FdReader(conn.fd))
+}
+
+
+class RecvTimeoutTests(TestCase) {
+    # A peer that connects then sends nothing: the bounded read fires ~timeout_ms
+    # later with an empty result - not instantly (that would be a false EOF) and
+    # not never (the bug this fixes).
+    def test_silent_peer_times_out() {
+        lis: TcpListener = TcpListener("127.0.0.1", 54480)
+        lis.do_bind()
+        lis.do_listen(8)
+        const probe: _Probe = _Probe()
+        t: Task[None] = fire _recv_once(lis, probe, 250)
+
+        const c: TcpStream = TcpStream.open("127.0.0.1", 54480)
+        # Send NOTHING - keep the socket open and silent while the server waits.
+        await t
+        c.close()
+        lis.close()
+
+        self.assertTrue(probe.timed_out)
+        self.assertTrue(probe.elapsed_ms >= 150.0)   # actually waited
+        self.assertTrue(probe.elapsed_ms < 3000.0)   # but did fire
+    }
+
+    # When data DOES arrive, the bounded read returns it - no false timeout.
+    def test_data_arrives_no_false_timeout() {
+        lis: TcpListener = TcpListener("127.0.0.1", 54481)
+        lis.do_bind()
+        lis.do_listen(8)
+        const probe: _Probe = _Probe()
+        t: Task[None] = fire _recv_once(lis, probe, 2000)
+
+        const c: TcpStream = TcpStream.open("127.0.0.1", 54481)
+        c.do_send("hello")
+        await t
+        c.close()
+        lis.close()
+
+        self.assertFalse(probe.timed_out)
+        self.assertEqual(probe.got, "hello")
+    }
+
+    # End to end through serve_connection: a client that sends a partial body and
+    # then stalls is dropped after the idle timeout rather than pinning the green
+    # thread. The framer returns `bad` (truncated) -> 400 + close.
+    def test_serve_connection_drops_stalled_midbody() {
+        lis: TcpListener = TcpListener("127.0.0.1", 54482)
+        lis.do_bind()
+        lis.do_listen(8)
+        const app: Router = Router(0)
+        app.set_idle_timeout(250)
+        app.POST("/x", _never)
+        t: Task[None] = fire _serve_once(lis, app)
+
+        const c: TcpStream = TcpStream.open("127.0.0.1", 54482)
+        # Promise 100 body bytes, deliver 9, then stall.
+        c.do_send("POST /x HTTP/1.1\r\nHost: h\r\nContent-Length: 100\r\n\r\nonly-a-few")
+        # The server times out mid-body, sends 400, closes. The client read
+        # returns that response (then EOF) instead of hanging forever.
+        const resp: str = c.do_recv(4096)
+        await t
+        c.close()
+        lis.close()
+
+        self.assertIn("400", resp)
+        self.assertNotIn("handled", resp)
+    }
+}
+
+
+main([RecvTimeoutTests()])

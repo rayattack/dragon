@@ -1,0 +1,229 @@
+# socket.dr - Dragon standard library: TCP/UDP networking (BSD socket wrappers)
+#
+# Uses runtime helpers for sockaddr_in struct packing since Dragon
+# cannot directly construct C structs. No external dependencies.
+# All C functions use intc (C's int = i32) for correct ABI.
+
+extern "C" def malloc(size: int) -> ptr
+extern "C" def free(p: ptr)
+extern "C" def memset(s: ptr, c: intc, n: int) -> ptr
+
+# BSD socket syscalls (all in libc)
+extern "C" def socket(domain: intc, type: intc, protocol: intc) -> intc
+extern "C" def bind(fd: intc, addr: ptr, addrlen: intc) -> intc
+extern "C" def listen(fd: intc, backlog: intc) -> intc
+extern "C" def close(fd: intc) -> intc
+extern "C" def setsockopt(fd: intc, level: intc, optname: intc, optval: ptr, optlen: intc) -> intc
+extern "C" def shutdown(fd: intc, how: intc) -> intc
+
+# Scheduler-aware TCP I/O (runtime_concurrency.cpp). These set the fd
+# non-blocking and yield the current green thread on EAGAIN instead of blocking
+# the carrier OS thread, resuming when the fd is ready (ADR 038 Phase 8). The
+# API stays blocking (CPython parity) - only the mechanism underneath yields;
+# off a green thread they fall back to poll(). Replace the raw libc
+# accept/connect/send/recv so socket work issued from a `fire` vthread scales.
+extern "C" def dragon_nb_accept(server_fd: int, addr: ptr, addrlen: ptr) -> int
+extern "C" def dragon_nb_connect(fd: int, addr: ptr, addrlen: int) -> int
+extern "C" def dragon_nb_send(fd: int, buf: str, length: int) -> int
+extern "C" def dragon_nb_recv_str(fd: int, max_len: int) -> str
+# Binary (bytes) variants - same scheduler-yielding path, but DragonBytes-typed
+# for binary wire protocols (Postgres/MySQL, D032). recv_bytes may short-read.
+extern "C" def dragon_nb_recv_bytes(fd: int, max_len: int) -> bytes
+extern "C" def dragon_nb_send_bytes(fd: int, data: bytes) -> int
+
+# Runtime helpers for sockaddr_in construction and data transfer
+extern "C" def dragon_sockaddr_in_new(port: intc, addr: str) -> ptr
+extern "C" def dragon_sockaddr_in_size() -> intc
+extern "C" def dragon_ptr_write_i32(p: ptr, offset: intc, val: intc)
+extern "C" def dragon_recv_to_str(fd: intc, buf: ptr, length: int, flags: intc) -> str
+extern "C" def dragon_udp_sendto(fd: intc, buf: str, length: int, flags: intc, addr: ptr, addrlen: intc) -> int
+extern "C" def dragon_resolve4(host: str) -> str
+
+# BSD socket constants (Linux values). The libc calls above take these; they
+# are also the public Python-parity names (socket.AF_INET, socket.SOCK_STREAM, ...).
+const AF_INET: int = 2
+const SOCK_STREAM: int = 1
+const SOCK_DGRAM: int = 2
+const SOL_SOCKET: int = 1
+const SO_REUSEADDR: int = 2
+const IPPROTO_TCP: int = 6
+const TCP_NODELAY: int = 1
+const SHUT_RD: int = 0
+const SHUT_WR: int = 1
+const SHUT_RDWR: int = 2
+
+
+# Resolve a hostname to a dotted IPv4 address string (Python parity). Literal
+# IPv4 addresses pass through unchanged; returns "" if the name can't be
+# resolved. IPv4-only - matches the AF_INET sockets this module creates.
+def gethostbyname(host: str) -> str {
+    return dragon_resolve4(host)
+}
+
+#===----------------------------------------------------------------------===#
+# TcpListener - Server-side TCP socket
+#===----------------------------------------------------------------------===#
+
+class TcpListener {
+    def(host: str, port: int) {
+        # Widen the intc from socket() to int so self.fd flows to both the intc
+        # libc calls (bind/listen/close) and the int dragon_nb_* helpers.
+        const sfd: int = socket(AF_INET, SOCK_STREAM, 0)
+        self.fd = sfd
+        self.host = host
+        self.port = port
+        # Set SO_REUSEADDR
+        const optval: ptr = malloc(4)
+        memset(optval, 0, 4)
+        dragon_ptr_write_i32(optval, 0, 1)
+        setsockopt(self.fd, SOL_SOCKET, SO_REUSEADDR, optval, 4)
+        free(optval)
+    }
+
+    def do_bind() -> int {
+        const addr: ptr = dragon_sockaddr_in_new(self.port, self.host)
+        const addrlen: int = dragon_sockaddr_in_size()
+        const rc: int = bind(self.fd, addr, addrlen)
+        free(addr)
+        return rc
+    }
+
+    def do_listen(backlog: int) -> int {
+        return listen(self.fd, backlog)
+    }
+
+    def do_accept() -> TcpStream {
+        const client_fd: int = dragon_nb_accept(self.fd, none, none)
+        return TcpStream(client_fd)
+    }
+
+    def close() -> int {
+        return close(self.fd)
+    }
+
+    def __enter__() -> TcpListener {
+        return self
+    }
+
+    def __exit__() -> int {
+        self.close()
+        return 0
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# TcpStream - Bidirectional TCP connection
+#===----------------------------------------------------------------------===#
+
+class TcpStream {
+    def(fd: int) {
+        self.fd = fd
+        # Disable Nagle's algorithm (TCP_NODELAY). Request/response wire protocols
+        # (MySQL/Postgres prepared statements, HTTP) send a small packet and then
+        # wait for the reply; with Nagle on, the kernel holds that small send
+        # until a prior segment is ACKed, and the peer's delayed-ACK won't arrive
+        # for ~40ms - so every round-trip stalls ~40ms. Both client (open) and
+        # accepted (do_accept) streams flow through here, so both get it.
+        const optval: ptr = malloc(4)
+        memset(optval, 0, 4)
+        dragon_ptr_write_i32(optval, 0, 1)
+        setsockopt(self.fd, IPPROTO_TCP, TCP_NODELAY, optval, 4)
+        free(optval)
+    }
+
+    @staticmethod
+    def open(host: str, port: int) -> TcpStream {
+        # Resolve hostnames to an IPv4 address (literal IPs pass through).
+        const ip: str = dragon_resolve4(host)
+        const fd: int = socket(AF_INET, SOCK_STREAM, 0)
+        const addr: ptr = dragon_sockaddr_in_new(port, ip)
+        const addrlen: int = dragon_sockaddr_in_size()
+        dragon_nb_connect(fd, addr, addrlen)
+        free(addr)
+        return TcpStream(fd)
+    }
+
+    def do_send(data: str) -> int {
+        return dragon_nb_send(self.fd, data, len(data))
+    }
+
+    def do_recv(size: int) -> str {
+        return dragon_nb_recv_str(self.fd, size)
+    }
+
+    # Binary I/O - for protocols that aren't text. send_bytes writes all of
+    # `data` (yielding); recv_bytes reads up to `size` bytes (may short-read,
+    # so length-prefixed protocols loop it into a read-exact helper).
+    def send_bytes(data: bytes) -> int {
+        return dragon_nb_send_bytes(self.fd, data)
+    }
+
+    def recv_bytes(size: int) -> bytes {
+        return dragon_nb_recv_bytes(self.fd, size)
+    }
+
+    def do_shutdown(how: int) -> int {
+        return shutdown(self.fd, how)
+    }
+
+    def close() -> int {
+        return close(self.fd)
+    }
+
+    def __enter__() -> TcpStream {
+        return self
+    }
+
+    def __exit__() -> int {
+        self.close()
+        return 0
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# UdpSocket - Datagram communication
+#===----------------------------------------------------------------------===#
+
+class UdpSocket {
+    def(host: str, port: int) {
+        self.fd = socket(AF_INET, SOCK_DGRAM, 0)
+        self.host = host
+        self.port = port
+    }
+
+    def do_bind() -> int {
+        const addr: ptr = dragon_sockaddr_in_new(self.port, self.host)
+        const addrlen: int = dragon_sockaddr_in_size()
+        const rc: int = bind(self.fd, addr, addrlen)
+        free(addr)
+        return rc
+    }
+
+    def sendto(data: str, host: str, port: int) -> int {
+        const addr: ptr = dragon_sockaddr_in_new(port, host)
+        const addrlen: int = dragon_sockaddr_in_size()
+        const rc: int = dragon_udp_sendto(self.fd, data, len(data), 0, addr, addrlen)
+        free(addr)
+        return rc
+    }
+
+    def recvfrom(size: int) -> str {
+        const buf: ptr = malloc(size + 1)
+        memset(buf, 0, size + 1)
+        const result: str = dragon_recv_to_str(self.fd, buf, size, 0)
+        return result
+    }
+
+    def close() -> int {
+        return close(self.fd)
+    }
+
+    def __enter__() -> UdpSocket {
+        return self
+    }
+
+    def __exit__() -> int {
+        self.close()
+        return 0
+    }
+}

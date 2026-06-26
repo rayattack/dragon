@@ -1,0 +1,74 @@
+"""fileinput - line iteration across multiple files."""
+
+from unittest import TestCase, main
+import fileinput
+import os
+from os.path import exists
+from io import make
+
+
+def _write(path: str, body: str) -> None {
+    if exists(path) {
+        os.remove(path)
+    }
+    with make(path) as w {
+        w.write(body)
+    }
+}
+
+
+class FileInputTests(TestCase) {
+    def test_concatenates_lines() {
+        _write("/tmp/dr_fi_a.txt", "a1\na2\n")
+        _write("/tmp/dr_fi_b.txt", "b1\n")
+        fi: fileinput.FileInput = fileinput.input(["/tmp/dr_fi_a.txt", "/tmp/dr_fi_b.txt"])
+        collected: list[str] = []
+        for line in fi {
+            collected.append(line.strip())
+        }
+        self.assertEqual(len(collected), 3)
+        self.assertEqual(collected[0], "a1")
+        self.assertEqual(collected[1], "a2")
+        self.assertEqual(collected[2], "b1")
+        os.remove("/tmp/dr_fi_a.txt")
+        os.remove("/tmp/dr_fi_b.txt")
+    }
+
+    def test_metadata_during_iteration() {
+        _write("/tmp/dr_fi_m1.txt", "x\ny\n")
+        _write("/tmp/dr_fi_m2.txt", "z\n")
+        fi: fileinput.FileInput = fileinput.input(["/tmp/dr_fi_m1.txt", "/tmp/dr_fi_m2.txt"])
+        seen_files: list[str] = []
+        seen_lineno: list[int] = []
+        seen_filelineno: list[int] = []
+        for line in fi {
+            seen_files.append(fi.filename())
+            seen_lineno.append(fi.lineno())
+            seen_filelineno.append(fi.filelineno())
+        }
+        self.assertEqual(seen_files[0], "/tmp/dr_fi_m1.txt")
+        self.assertEqual(seen_files[2], "/tmp/dr_fi_m2.txt")
+        self.assertEqual(seen_lineno, [1, 2, 3])
+        self.assertEqual(seen_filelineno, [1, 2, 1])
+        os.remove("/tmp/dr_fi_m1.txt")
+        os.remove("/tmp/dr_fi_m2.txt")
+    }
+
+    def test_isfirstline_and_nextfile() {
+        _write("/tmp/dr_fi_n1.txt", "1\n2\n3\n")
+        _write("/tmp/dr_fi_n2.txt", "x\n")
+        fi: fileinput.FileInput = fileinput.input(["/tmp/dr_fi_n1.txt", "/tmp/dr_fi_n2.txt"])
+        line1: str = fi.__next__()
+        self.assertTrue(fi.isfirstline())
+        fi.__next__()
+        fi.nextfile()
+        line_next: str = fi.__next__()
+        self.assertEqual(line_next.strip(), "x")
+        self.assertTrue(fi.isfirstline())
+        os.remove("/tmp/dr_fi_n1.txt")
+        os.remove("/tmp/dr_fi_n2.txt")
+    }
+}
+
+
+main([FileInputTests()])

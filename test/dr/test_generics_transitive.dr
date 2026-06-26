@@ -1,0 +1,91 @@
+"""Decision 044 - transitive instantiation + composition with Any.
+
+Instantiating `Outer[int]` must auto-stamp the `Inner[int]` it holds (the
+worklist follows the dependency). `Pair[K, V]` exercises multi-parameter
+stamping. `Box[Any]` composes the monomorphized container with the D039 box for
+a genuinely heterogeneous element - monomorphize the container, box the element.
+"""
+
+from unittest import TestCase, main
+
+class Inner[T] {
+    def(v: T) {
+        self.v = v
+    }
+    def get() -> T {
+        return self.v
+    }
+}
+
+class Outer[T] {
+    def(v: T) {
+        self.inner = Inner[T](v)
+    }
+    def unwrap() -> T {
+        return self.inner.get()
+    }
+}
+
+class Pair[K, V] {
+    def(k: K, v: V) {
+        self.key = k
+        self.val = v
+    }
+    def get_key() -> K {
+        return self.key
+    }
+    def get_val() -> V {
+        return self.val
+    }
+}
+
+class Box[T] {
+    def(v: T) {
+        self.value = v
+    }
+    def get() -> T {
+        return self.value
+    }
+}
+
+class GenericsTransitiveTests(TestCase) {
+    def test_outer_auto_stamps_inner() {
+        o: Outer[int] = Outer[int](99)
+        self.assertEqual(o.unwrap(), 99)
+    }
+
+    def test_outer_str() {
+        o: Outer[str] = Outer[str]("deep")
+        self.assertEqual(o.unwrap(), "deep")
+    }
+
+    def test_pair_multi_param() {
+        p: Pair[str, int] = Pair[str, int]("age", 30)
+        self.assertEqual(p.get_key(), "age")
+        self.assertEqual(p.get_val(), 30)
+    }
+
+    def test_box_any_holds_int() {
+        b: Box[Any] = Box[Any](7)
+        self.assertEqual(b.get(), 7)
+    }
+
+    def test_box_union_explicit() {
+        b: Box[int | str] = Box[int | str](5)
+        self.assertEqual(b.get(), 5)
+    }
+
+    def test_box_union_inferred() {
+        b: Box[int | str] = Box(11)
+        self.assertEqual(b.get(), 11)
+    }
+
+    def test_box_nested_generic() {
+        inner: Box[int] = Box[int](3)
+        outer: Box[Box[int]] = Box[Box[int]](inner)
+        got: Box[int] = outer.get()
+        self.assertEqual(got.get(), 3)
+    }
+}
+
+main([GenericsTransitiveTests()])
