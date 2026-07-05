@@ -98,8 +98,14 @@ DragonList* dragon_subprocess_spawn(DragonList* argv, int cap_in, int cap_out,
     // space via copy-on-write.
     int n = (int)dragon_list_len(argv);
     char** args = (char**)malloc((size_t)(n + 1) * sizeof(char*));
-    if (!args) {
+    // Parallel array of UTF-8 temporaries we own and must free. owned[i] is
+    // non-NULL only when arg i needed encoding (a wide/UCS-4 string); a raw
+    // (already-UTF-8) arg leaves owned[i] == NULL and args[i] borrows the
+    // DragonString bytes directly. calloc'd so an early-exit free is safe.
+    char** owned = (char**)calloc((size_t)(n > 0 ? n : 1), sizeof(char*));
+    if (!args || !owned) {
         int e = ENOMEM;
+        free(args); free(owned);
         if (cap_in)  { close(in_pipe[0]);  close(in_pipe[1]); }
         if (cap_out) { close(out_pipe[0]); close(out_pipe[1]); }
         if (cap_err) { close(err_pipe[0]); close(err_pipe[1]); }
@@ -107,14 +113,27 @@ DragonList* dragon_subprocess_spawn(DragonList* argv, int cap_in, int cap_out,
         dragon_list_append(result, -1); dragon_list_append(result, -1);
         return result;
     }
+    // Encode each arg to UTF-8 in the PARENT (malloc is safe here; the child
+    // reads the finished vector via copy-on-write). A DragonString element may
+    // be UCS-4 storage - handing that raw pointer to execvp feeds the child
+    // wide chars, so a non-ASCII arg like "café" arrives truncated at the
+    // first embedded NUL. dragon_str_to_utf8_alloc returns NULL for a string
+    // that is already UTF-8 bytes ("use the raw pointer") and a fresh buffer
+    // otherwise.
     for (int i = 0; i < n; i++) {
-        args[i] = (char*)(uintptr_t)dragon_list_load(argv, i);
+        const char* raw = (const char*)(uintptr_t)dragon_list_load(argv, i);
+        int64_t blen = 0;
+        char* enc = dragon_str_to_utf8_alloc(raw, &blen);
+        if (enc) { owned[i] = enc; args[i] = enc; }
+        else     { args[i] = (char*)(uintptr_t)raw; }
     }
     args[n] = nullptr;
 
     pid_t pid = fork();
     if (pid < 0) {
         int e = errno;
+        for (int i = 0; i < n; i++) free(owned[i]);
+        free(owned);
         free(args);
         if (cap_in)  { close(in_pipe[0]);  close(in_pipe[1]); }
         if (cap_out) { close(out_pipe[0]); close(out_pipe[1]); }
@@ -155,6 +174,10 @@ DragonList* dragon_subprocess_spawn(DragonList* argv, int cap_in, int cap_out,
     }
 
     // ---- PARENT: close the child-side ends, keep our own ends --------------
+    // Free the UTF-8 temporaries. Safe post-fork: the child has its own COW
+    // copy, so releasing the parent's does not disturb the exec'd argv.
+    for (int i = 0; i < n; i++) free(owned[i]);
+    free(owned);
     free(args);
     int64_t stdin_w  = -1;
     int64_t stdout_r = -1;

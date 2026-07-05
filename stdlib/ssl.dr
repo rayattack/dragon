@@ -97,6 +97,9 @@ class SSLSocket {
         self._conn = conn
         self._sock = sock
         self.server_hostname = server_hostname
+        # Guards close() against a double free. There is no null-ptr literal to
+        # reset _conn to, so track closed-ness explicitly. See close().
+        self._closed = False
     }
 
     def do_handshake() -> None {
@@ -170,6 +173,15 @@ class SSLSocket {
     }
 
     def close() -> None {
+        # Idempotent. `with ... as s` calls __exit__ -> close(), and callers
+        # routinely also call close() themselves (or close twice); without this
+        # guard the second call passes the already-freed _conn back into
+        # dragon_tls_close (use-after-free of conn->ssl) and dragon_tls_conn_free
+        # (double free). The engine handle is freed exactly once now.
+        if self._closed {
+            return
+        }
+        self._closed = True
         dragon_tls_close(self._conn)
         dragon_tls_conn_free(self._conn)
         self._sock.close()

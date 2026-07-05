@@ -712,9 +712,15 @@ DragonList* dragon_dict_values(DragonDict* d) {
 /// (`for v in cfg.values()`) gives the receiver an Any-typed loop var, so
 /// isinstance narrowing and tag-dispatched print all work correctly.
 ///
-/// Each box entry borrows the dict's payload - same as dragon_dict_get_box's
-/// borrow contract. The resulting DragonListBox is short-lived and walks the
-/// dict in insertion order.
+/// OWNED contract: each box entry co-owns its payload (incref'd here). It has
+/// to - a DragonListBox is a normal refcounted object, and when its refcount
+/// hits 0, dragon_list_box_destroy DECREFS every refcounted payload. The old
+/// "borrow contract" comment lied: codegen disposes of the values() result as
+/// an owned temp (scope cleanup emits dragon_decref on it), so box destroy
+/// released references the box never took, dropping the dict's values to
+/// refcount 0 while the dict still pointed at them. One `for v in d.values()`
+/// over a dict[str, Any] with heap values was a use-after-free in the dict's
+/// own destroy (ASan-verified).
 DragonListBox* dragon_dict_values_box(DragonDict* d) {
     int64_t n = d ? d->used : 0;
     DragonListBox* lb = dragon_list_box_new(n);
@@ -723,10 +729,18 @@ DragonListBox* dragon_dict_values_box(DragonDict* d) {
         if (d->entries[i].dead) continue;
         int64_t tag = (int64_t)d->entries[i].tag;
         int64_t payload = d->entries[i].value;
-        // Borrow contract: the dict still owns the +1 on refcounted payloads;
-        // the iteration view doesn't add a fresh ref. If a downstream consumer
-        // stores into a longer-lived slot, the codegen path increfs at that
-        // store site - matches dragon_dict_get_box.
+        // Co-own the payload with an incref that is the EXACT inverse of what
+        // dragon_list_box_destroy -> dragon_listbox_decref_elem will drop:
+        // STR/LIST/DICT/BYTES only. Deliberately NOT dragon_incref_tagged,
+        // which would also incref a TAG_CLOSURE payload that box destroy does
+        // not decref - that asymmetry would leak a closure-valued entry. If
+        // the box destroy ever learns TAG_CLOSURE, mirror it here too.
+        if (payload) {
+            if (tag == TAG_STR)
+                dragon_incref_str((const char*)(uintptr_t)payload);
+            else if (tag == TAG_LIST || tag == TAG_DICT || tag == TAG_BYTES)
+                dragon_incref((void*)(uintptr_t)payload);
+        }
         dragon_list_box_append(lb, tag, payload);
     }
     return lb;
@@ -950,12 +964,24 @@ void dragon_dict_update(DragonDict* d, DragonDict* other) {
         // Incref the value before inserting - dict_set_tagged does not incref
         // on insert, so the destination dict needs its own reference.
         dragon_incref_tagged(other->entries[i].value, other->entries[i].tag);
-        // d takes its OWN ref to each str key (set_tagged stores the pointer
-        // without increfing). Without this, d's keys would be owned by `other`
-        // and dangle when `other` dies - and d's destroy would double-free.
-        if (other->keys_are_ptr) dragon_incref_str(other->entries[i].key);
-        dragon_dict_set_tagged(d, other->entries[i].key,
-                               other->entries[i].value, other->entries[i].tag);
+        // Key dispatch by the SOURCE dict's key flavor. An int-keyed dict
+        // stores a raw i64 in the key slot; routing it through the str-keyed
+        // setter made dict_hash() dereference that integer as a char* (wild
+        // read -> SEGV) and flipped keys_are_ptr on the destination, so its
+        // destroy would decref int keys as strings. The int setter hashes the
+        // i64 directly and never touches keys_are_ptr.
+        if (other->keys_are_ptr) {
+            // d takes its OWN ref to each str key (set_tagged stores the
+            // pointer without increfing). Without this, d's keys would be
+            // owned by `other` and dangle when `other` dies - and d's destroy
+            // would double-free.
+            dragon_incref_str(other->entries[i].key);
+            dragon_dict_set_tagged(d, other->entries[i].key,
+                                   other->entries[i].value, other->entries[i].tag);
+        } else {
+            dragon_dict_int_set_tagged(d, (int64_t)(uintptr_t)other->entries[i].key,
+                                       other->entries[i].value, other->entries[i].tag);
+        }
     }
 }
 
@@ -1038,14 +1064,22 @@ DragonDict* dragon_dict_copy_excluding(DragonDict* d, const char** names,
         }
         int64_t val = d->entries[i].value;
         uint8_t tag = d->entries[i].tag;
-        if (val) {
-            if (tag == TAG_STR)
-                dragon_incref_str((const char*)(uintptr_t)val);
-            else if (tag == TAG_LIST || tag == TAG_DICT || tag == TAG_BYTES)
-                dragon_incref((void*)(uintptr_t)val);
+        // dragon_incref_tagged is the single source of truth for per-tag RC:
+        // it covers STR/LIST/DICT/BYTES like the old hand-rolled chain AND
+        // DRAGON_TAG_CLOSURE, which the chain missed - a copied dict[str,
+        // Callable] had both dicts decref_callable the same closure on
+        // destroy while only one ref existed (double free).
+        if (val) dragon_incref_tagged(val, tag);
+        // Key dispatch by key flavor: an int-keyed dict stores a raw i64 in
+        // the key slot; the str setter would dereference it as a char* in
+        // dict_hash (SEGV) and poison keys_are_ptr on the copy.
+        if (d->keys_are_ptr) {
+            dragon_incref_str(d->entries[i].key);
+            dragon_dict_set_tagged(copy, d->entries[i].key, val, tag);
+        } else {
+            dragon_dict_int_set_tagged(copy, (int64_t)(uintptr_t)d->entries[i].key,
+                                       val, tag);
         }
-        if (d->keys_are_ptr) dragon_incref_str(d->entries[i].key);
-        dragon_dict_set_tagged(copy, d->entries[i].key, val, tag);
     }
     return copy;
 }
@@ -1058,17 +1092,25 @@ DragonDict* dragon_dict_copy(DragonDict* d) {
             if (d->entries[i].dead) continue;
             int64_t val = d->entries[i].value;
             uint8_t tag = d->entries[i].tag;
-            // Incref copied values: both old and new dict own references
-            if (val) {
-                if (tag == TAG_STR)
-                    dragon_incref_str((const char*)(uintptr_t)val);
-                else if (tag == TAG_LIST || tag == TAG_DICT || tag == TAG_BYTES)
-                    dragon_incref((void*)(uintptr_t)val);
+            // Incref copied values: both old and new dict own references.
+            // dragon_incref_tagged covers STR/LIST/DICT/BYTES like the old
+            // hand-rolled chain AND DRAGON_TAG_CLOSURE, which the chain
+            // missed (dict[str, Callable].copy() double-freed closures).
+            if (val) dragon_incref_tagged(val, tag);
+            // Key dispatch by key flavor: an int-keyed dict stores a raw i64
+            // in the key slot; the str setter dereferenced it as a char* in
+            // dict_hash (SEGV on the first key) and flipped keys_are_ptr on
+            // the copy, so even a surviving copy would decref ints as
+            // strings on destroy.
+            if (d->keys_are_ptr) {
+                // The copy takes its OWN ref to each str key (mirrors the
+                // value incref) so both dicts release independently.
+                dragon_incref_str(d->entries[i].key);
+                dragon_dict_set_tagged(copy, d->entries[i].key, val, tag);
+            } else {
+                dragon_dict_int_set_tagged(copy,
+                    (int64_t)(uintptr_t)d->entries[i].key, val, tag);
             }
-            // The copy takes its OWN ref to each str key (mirrors the value
-            // incref above) so both dicts can independently release on destroy.
-            if (d->keys_are_ptr) dragon_incref_str(d->entries[i].key);
-            dragon_dict_set_tagged(copy, d->entries[i].key, val, tag);
         }
     }
     return copy;

@@ -6,8 +6,25 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Find LLVM
+# Find LLVM.
+# Find LLVM.
+#
+# No version arg on find_package. LLVM's LLVMConfigVersion.cmake matches the
+# major version *exactly*, so that `find_package(LLVM 22)` will reject both older
+# 21 and a newer trunk (23) tree. We want a floor with no ceiling, so we find any
+# LLVM and assert the niminum.
+#
+# Floor is 21: the codegen uses the Triple-based Module API
+# (Module::setTargetTriple(Triple) / getTargetTriple() -> const Triple&,
+# createTargetMachine(const Triple&, ...)) that landed in LLVM 21. Anything
+# older needs the string-based overloads instead. This accepts 21, 22, and
+# trunk; CI and releases build against the latest packaged release (22).
 find_package(LLVM REQUIRED CONFIG)
+if(LLVM_PACKAGE_VERSION VERSION_LESS 21.0)
+    message(FATAL_ERROR
+        "Dragon requires LLVM >= 21 (found ${LLVM_PACKAGE_VERSION}). The codegen "
+        "uses the Triple-based Module API introduced in LLVM 21.")
+endif()
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 
@@ -68,7 +85,9 @@ set(DRAGON_SOURCES
 add_library(dragon_lib STATIC ${DRAGON_SOURCES})
 target_include_directories(dragon_lib PUBLIC ${CMAKE_SOURCE_DIR}/include)
 
-# Get LLVM libraries
+# Get LLVM libraries. Dragon is a pure AOT compiler (build Module -> PassBuilder
+# -> addPassesToEmitFile -> object -> system linker); it has no JIT, so the ORC
+# components are not linked.
 llvm_map_components_to_libnames(LLVM_LIBS
     core
     support
@@ -80,7 +99,6 @@ llvm_map_components_to_libnames(LLVM_LIBS
     passes
     target
     native
-    orcjit
 )
 
 target_link_libraries(dragon_lib PUBLIC ${LLVM_LIBS})
@@ -95,22 +113,22 @@ set_target_properties(dragon_llhttp PROPERTIES C_STANDARD 11 POSITION_INDEPENDEN
 target_compile_options(dragon_llhttp PRIVATE -w)
 
 # Runtime library (split into domain-specific TUs)
-# ┌───────────────────────────────────────────────────────────────────────────┐
-# │ DRAGON_ASAN - DEBUG / UAF-HUNTING ONLY. NEVER enable for a release or a     │
-# │ benchmark.                                                                  │
-# │                                                                             │
-# │ OFF by default (and for every packaged build), so the normal build is       │
-# │ byte-identical whether or not this option exists - zero effect on shipped   │
-# │ code or compiler size when off.                                             │
-# │                                                                             │
-# │ When ON it builds a SECOND, AddressSanitizer-instrumented copy of the       │
-# │ runtime that ONLY compiled user programs link (the `dragon` compiler keeps  │
-# │ the normal runtime, so compiling stays clean and fast). Use it solely to    │
-# │ chase use-after-free / double-free / heap-overflow in the runtime - e.g.    │
-# │ refcount work. Instrumented programs run ~2× slower. Recipe:                │
-# │   cmake -DDRAGON_ASAN=ON -B build-asan && cmake --build build-asan          │
-# │   ASAN_OPTIONS=detect_leaks=0:fast_unwind_on_fatal=1 ./your_program         │
-# └───────────────────────────────────────────────────────────────────────────┘
+# =============================================================================
+#  DRAGON_ASAN - DEBUG / UAF-HUNTING ONLY. NEVER enable for a release or a     
+#  benchmark.                                                                  
+#                                                                              
+#  OFF by default (and for every packaged build), so the normal build is       
+#  byte-identical whether or not this option exists - zero effect on shipped   
+#  code or compiler size when off.                                             
+#                                                                              
+#  When ON it builds a SECOND, AddressSanitizer-instrumented copy of the       
+#  runtime that ONLY compiled user programs link (the `dragon` compiler keeps  
+#  the normal runtime, so compiling stays clean and fast). Use it solely to    
+#  chase use-after-free / double-free / heap-overflow in the runtime - e.g.    
+#  refcount work. Instrumented programs run ~2× slower. Recipe:                
+#    cmake -DDRAGON_ASAN=ON -B build-asan && cmake --build build-asan          
+#    ASAN_OPTIONS=detect_leaks=0:fast_unwind_on_fatal=1 ./your_program         
+# =============================================================================
 option(DRAGON_ASAN "Link compiled programs against an AddressSanitizer runtime (DEBUG/UAF-hunting only, never ship)" OFF)
 
 add_library(dragon_runtime STATIC

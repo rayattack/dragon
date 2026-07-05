@@ -197,18 +197,24 @@ void CodeGen::visit(StringLiteral& node) {
                     impl_->builder->CreateCall(
                         impl_->runtimeFuncs["dragon_decref_str"], {prev});
                 }
-                // Decref conversion result consumed by this concat (heap-allocated
-                // by dragon_int_to_str etc.). parts[k] is heap if it came from a
-                // runtime call, not a GlobalString. Check if it's a CallInst.
+                // Decref only OWNED converstion results consumed by this concat
+                // (dragon_int_to_str etc.). The old `isa<CallInst>` heuristic was
+                // wrong: a borrowed interpolation like {d['k']} lowers to
+                // dragon_dict_get_str_ptr - ALSO a CallInst, but the dict keeps
+                // that +1 - so decref'ing it here freed the dict's stored value
+                // (f"x {d['k']} y" -> UAF, then d['k'] reads freed memory).
+                // isOwnedStrResult knows the borrowed str returners and excludes
+                // them.
                 if (impl_->options.gcMode == GCMode::RC &&
-                    llvm::isa<llvm::CallInst>(parts[k])) {
+                    impl_->isOwnedStrResult(parts[k])) {
                     impl_->builder->CreateCall(
                         impl_->runtimeFuncs["dragon_decref_str"], {parts[k]});
                 }
             }
-            // Also decref parts[0] if it was a conversion call (not a literal)
+            // Also decref parts[0] if it was an OWNED conversion result (not a
+            // literal and not a borrowed dict/field/foreign string).
             if (parts.size() > 1 && impl_->options.gcMode == GCMode::RC &&
-                llvm::isa<llvm::CallInst>(parts[0])) {
+                impl_->isOwnedStrResult(parts[0])) {
                 impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_decref_str"], {parts[0]});
             }

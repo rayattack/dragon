@@ -905,6 +905,22 @@ const char* dragon_instance_get_doc(void* instance) {
     return desc->doc;
 }
 
+/// Get the class name for an instance: header.class_id → descriptor → name.
+/// Returns the descriptor's .rodata name C-string, or NULL when the instance
+/// is null / has no class_id / the class isn't registered. Used by the box
+/// printers (runtime_box.cpp) to render a class instance that reached a box
+/// under the TAG_BYTES/TAG_LIST value-tag collision as `<ClassName instance>`
+/// instead of misreading its bytes. Read-only lookup; allocates nothing.
+const char* dragon_instance_class_name(void* instance) {
+    if (!instance) return NULL;
+    DragonObjectHeader* h = (DragonObjectHeader*)instance;
+    uint16_t cid = h->class_id;
+    if (cid == 0 || cid >= DRAGON_MAX_CLASS_IDS) return NULL;
+    DragonClassDescriptor* desc = __class_descriptor_table[cid];
+    if (!desc) return NULL;
+    return desc->name;
+}
+
 // ADR 025 removal: dragon_isinstance_runtime() was deleted. isinstance() is
 // resolved statically at codegen time - the 2nd arg must name a class known at
 // compile time (a literal class or a compile-time alias). The inheritance walk

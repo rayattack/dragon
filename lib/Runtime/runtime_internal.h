@@ -445,6 +445,19 @@ typedef struct DragonVThread {
     int64_t     result;
     volatile int8_t done;
     volatile int8_t yield_reason;
+    // I/O park handshake (see dragon_io_arm_park / dragon_io_wake /
+    // scheduler worker loop). Resolves the "wakeup armed before the yield
+    // completes" race: without it the reactor could scheduler_enqueue() a
+    // vthread whose coroutine had not yet reached mco_yield (still MCO_RUNNING),
+    // giving a lost wakeup (a worker drops a non-suspended coro) or a
+    // double-enqueue (reactor + the resuming worker both re-queue). States:
+    //   0 PARK_NONE  - not in an I/O/sleep wait (a cooperative yield stays here)
+    //   1 PARK_ARMED - request posted, coro about to / in the middle of yielding
+    //   2 PARK_PARKED- worker confirmed the coro is suspended; reactor may enqueue
+    //   3 PARK_FIRED - reactor fired before the worker parked; worker enqueues
+    // Exactly one of {worker, reactor} wins the ARMED transition, so the vthread
+    // is enqueued exactly once, always after the coroutine is suspended.
+    volatile int32_t park_state;
     // Set by the I/O reactor to 1 when a deadline-bearing fd watch fired due to
     // its timeout rather than the fd becoming ready (R1 idle/read timeout). The
     // waiter (dragon_nb_recv_timeout) clears it to 0 before each watch and reads

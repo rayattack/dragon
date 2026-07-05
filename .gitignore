@@ -4,6 +4,13 @@ build-asan/
 build*/
 cmake-build-*/
 
+# Personal DEbug notes
+*.notes.h
+*.notes.cpp
+*.notes.dr
+
+decisions/
+
 # --- CMake / CTest generated files ---
 Testing/
 CMakeCache.txt

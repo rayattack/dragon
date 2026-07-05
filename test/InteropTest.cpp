@@ -122,6 +122,16 @@ static int compileAndRun(const std::string& dir,
         for (auto& [modName, exports] : allExports) {
             modTc.registerExternalModule(modName, exports, moduleFilepaths[modName]);
         }
+        // D044 cross-module generics - mirror the real Driver (Driver.cpp): a
+        // module must see earlier deps' generic TEMPLATES so it can instantiate
+        // them. Without this the harness compiled a call to an imported generic
+        // (e.g. unittest.dr's assertEqual[T]) without stamping the template, so
+        // the body's `!=` never fired and `assertEqual(1, 2)` silently passed -
+        // making the interop suite assert on a program the real CLI never
+        // produces.
+        for (auto* prior : depModules) {
+            modTc.registerExternalGenerics(*prior);
+        }
         modTc.check(*mod.ast);
         if (modTc.hasErrors()) return -5;
         allExports[mod.name] = modTc.getExports();
@@ -135,6 +145,12 @@ static int compileAndRun(const std::string& dir,
         TypeChecker entryTc;
         for (auto& [modName, exports] : allExports) {
             entryTc.registerExternalModule(modName, exports, moduleFilepaths[modName]);
+        }
+        // D044 cross-module generics - see the dep loop above. The entry module
+        // must see every dependency's generic templates so a call like
+        // assertEqual[T] gets stamped; this is the exact step Driver.cpp runs.
+        for (auto* dep : depModules) {
+            entryTc.registerExternalGenerics(*dep);
         }
         entryTc.check(*module);
         if (entryTc.hasErrors()) return -5;

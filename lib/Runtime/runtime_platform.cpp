@@ -50,7 +50,18 @@ void* dragon_sockaddr_in_new(int64_t port, const char* addr) {
     if (addr && strcmp(addr, "0.0.0.0") == 0) {
         sa->sin_addr.s_addr = INADDR_ANY;
     } else if (addr) {
-        inet_pton(AF_INET, addr, &sa->sin_addr);
+        // inet_pton returns 1 only for a well-formed dotted-quad. 0 means the
+        // string wasn't a valid address, -1 an address-family error. Ignoring
+        // it left sin_addr as the memset 0 - i.e. 0.0.0.0 - so a typo'd or
+        // empty host (dragon_resolve4 returns "" on DNS failure) silently
+        // became bind-to-all-interfaces for a server or INADDR_ANY for a
+        // client. Reject it instead of binding somewhere the caller never asked.
+        if (inet_pton(AF_INET, addr, &sa->sin_addr) != 1) {
+            free(sa);
+            dragon_raise_exc_cstr(50 /* OSError */,
+                                  "invalid IPv4 address (host did not resolve?)");
+            return nullptr;
+        }
     }
     return (void*)sa;
 }
@@ -403,7 +414,16 @@ void dragon_http_parsed_free(void* handle) {
     if (!s) return;
     free(s->url);
     free(s->body);
-    for (int i = 0; i < s->num_headers; i++) {
+    // Free ALL header slots, not just [0, num_headers). num_headers only
+    // counts *committed* headers; on a request that never reaches
+    // on_message_complete (a malformed or half-received request - remotely
+    // triggerable), http_on_header_field has already realloc'd the key (and
+    // maybe the value) of the IN-FLIGHT slot at index num_headers, which the
+    // old `i < num_headers` loop skipped. A flood of such requests leaked that
+    // slot every time -> unbounded server RSS growth. Unused slots are NULL
+    // (the state was calloc'd) and free(NULL) is a no-op, so scanning the full
+    // fixed array is safe and closes the leak regardless of which callback ran last.
+    for (int i = 0; i < DRAGON_HTTP_MAX_HEADERS; i++) {
         free(s->header_keys[i]);
         free(s->header_vals[i]);
     }
@@ -984,12 +1004,24 @@ int32_t dragon_execv(const char* path, DragonList* argv) {
 #else
     int n = (int)dragon_list_len(argv);
     char** args = (char**)malloc((size_t)(n + 1) * sizeof(char*));
-    if (!args) { errno = ENOMEM; return -1; }
+    char** owned = (char**)calloc((size_t)(n > 0 ? n : 1), sizeof(char*));
+    if (!args || !owned) { free(args); free(owned); errno = ENOMEM; return -1; }
+    // Encode each arg to UTF-8: a UCS-4 DragonString handed raw to execv would
+    // reach the new image as wide chars, silently corrupting a non-ASCII arg.
+    // dragon_str_to_utf8_alloc returns NULL when the raw pointer is already
+    // UTF-8 (borrow it), else a fresh buffer we own.
     for (int i = 0; i < n; i++) {
-        args[i] = (char*)(uintptr_t)dragon_list_load(argv, i);
+        const char* raw = (const char*)(uintptr_t)dragon_list_load(argv, i);
+        int64_t blen = 0;
+        char* enc = dragon_str_to_utf8_alloc(raw, &blen);
+        if (enc) { owned[i] = enc; args[i] = enc; }
+        else     { args[i] = (char*)(uintptr_t)raw; }
     }
     args[n] = NULL;
     int rc = execv(path, args);
+    // Only reached if execv FAILED (success replaces the process image).
+    for (int i = 0; i < n; i++) free(owned[i]);
+    free(owned);
     free(args);
     return (int32_t)rc;
 #endif
@@ -1003,12 +1035,22 @@ int32_t dragon_execvp(const char* file, DragonList* argv) {
 #else
     int n = (int)dragon_list_len(argv);
     char** args = (char**)malloc((size_t)(n + 1) * sizeof(char*));
-    if (!args) { errno = ENOMEM; return -1; }
+    char** owned = (char**)calloc((size_t)(n > 0 ? n : 1), sizeof(char*));
+    if (!args || !owned) { free(args); free(owned); errno = ENOMEM; return -1; }
+    // See dragon_execv: encode UCS-4 args to UTF-8 so a non-ASCII argument is
+    // not truncated at its first embedded NUL when the new image reads argv.
     for (int i = 0; i < n; i++) {
-        args[i] = (char*)(uintptr_t)dragon_list_load(argv, i);
+        const char* raw = (const char*)(uintptr_t)dragon_list_load(argv, i);
+        int64_t blen = 0;
+        char* enc = dragon_str_to_utf8_alloc(raw, &blen);
+        if (enc) { owned[i] = enc; args[i] = enc; }
+        else     { args[i] = (char*)(uintptr_t)raw; }
     }
     args[n] = NULL;
     int rc = execvp(file, args);
+    // Only reached if execvp FAILED (success replaces the process image).
+    for (int i = 0; i < n; i++) free(owned[i]);
+    free(owned);
     free(args);
     return (int32_t)rc;
 #endif

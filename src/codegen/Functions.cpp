@@ -1017,9 +1017,15 @@ void CodeGen::visit(FunctionDecl& node) {
             auto paramKind = impl_->typeExprToKind(node.params[idx].type.get());
             impl_->setVar(paramName, alloca, paramKind);
             impl_->trackPtrParam(paramName, node.params[idx].type.get());
-            // GC: async body params are OWNED (not borrowed) - the wrapper's
-            // atomic incref transferred ownership to this body function.
-            // emitScopeCleanup will decref them when the body returns.
+            // GC: async/fire body params are BORROWED, exactly like a normal
+            // function's params (see the sync path below). The reference the
+            // body relies on is the spawn-site atomic-incref, which the fire
+            // trampoline atomic-decrefs post-call. If the body ALSO decref'd its
+            // params (which it did while they were left un-borrowed), that extra
+            // decref plus the trampoline's dropped the caller's object to rc 0 -
+            // a UAF of `xs` after `await` for `fire worker(xs)`.
+            if (Impl::isHeapKind(paramKind))
+                impl_->scopes.back().borrowed.insert(paramName);
             idx++;
         }
 

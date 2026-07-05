@@ -578,20 +578,30 @@ DragonBytes* dragon_argon2id_raw(DragonBytes* pwd, DragonBytes* salt,
                                  DragonBytes* secret, DragonBytes* ad,
                                  int64_t t_cost, int64_t m_cost_kib,
                                  int64_t parallelism, int64_t tag_len) {
+    // Every parameter below is narrowed to uint32_t before use. The guards
+    // must therefore reject anything that would CHANGE VALUE when narrowed,
+    // not just anything below the minimum. A bare `< 1` / `< min` test lets a
+    // value >= 2^32 through: it truncates (e.g. 2^32 -> 0), and a zero cost
+    // silently produces a password-independent tag while a zero m_cost makes
+    // the fill loop write past a calloc(0). Each upper bound is the RFC 9106
+    // ceiling for that field (all 2^32 - 1 except parallelism's 2^24 - 1), so
+    // the guard both fixes the truncation and documents the real domain.
     if (parallelism < 1 || parallelism > 0xFFFFFF) {
         dragon_raise_exc_cstr(90, "argon2id: parallelism must be in [1, 2^24)");
         return nullptr;
     }
-    if (tag_len < 4) {
-        dragon_raise_exc_cstr(90, "argon2id: tag length must be >= 4 bytes");
+    if (tag_len < 4 || tag_len > 0xFFFFFFFFLL) {
+        dragon_raise_exc_cstr(90, "argon2id: tag length must be in [4, 2^32) bytes");
         return nullptr;
     }
-    if (t_cost < 1) {
-        dragon_raise_exc_cstr(90, "argon2id: time cost must be >= 1");
+    if (t_cost < 1 || t_cost > 0xFFFFFFFFLL) {
+        dragon_raise_exc_cstr(90, "argon2id: time cost must be in [1, 2^32)");
         return nullptr;
     }
-    if (m_cost_kib < 8 * parallelism) {
-        dragon_raise_exc_cstr(90, "argon2id: memory cost must be >= 8 * parallelism KiB");
+    // 8*parallelism is at most 8 * (2^24 - 1) < 2^32, so this lower bound is
+    // exact; the upper bound stops the m -> 0 truncation / calloc(0) overflow.
+    if (m_cost_kib < 8 * parallelism || m_cost_kib > 0xFFFFFFFFLL) {
+        dragon_raise_exc_cstr(90, "argon2id: memory cost must be in [8*parallelism, 2^32) KiB");
         return nullptr;
     }
 

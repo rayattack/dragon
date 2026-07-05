@@ -1058,7 +1058,13 @@ int64_t dragon_str_eq(const char* a, const char* b) {
     if (la != lb) return 0;
     bool a_k1 = (!da || da->kind == 1);
     bool b_k1 = (!db || db->kind == 1);
-    if (a_k1 && b_k1) return strcmp(a, b) == 0 ? 1 : 0;
+    // Both kind=1: compare all `la` bytes with memcmp, NOT strcmp. strcmp stops
+    // at the first NUL, so two equal-length kind=1 strings that share a prefix
+    // up to an embedded NUL but differ afterwards - e.g. "ab\0cd" vs "ab\0ce" -
+    // wrongly compared equal (and comparing a token/hash byte string this way
+    // could accept a wrong secret). Lengths already match, and each buffer holds
+    // la bytes + a terminator, so memcmp neither under- nor over-reads.
+    if (a_k1 && b_k1) return memcmp(a, b, (size_t)la) == 0 ? 1 : 0;
     for (int64_t i = 0; i < la; ++i) {
         if (dragon_str_cp_at(a, da, i) != dragon_str_cp_at(b, db, i)) return 0;
     }
@@ -1103,7 +1109,16 @@ int64_t dragon_str_cmp(const char* a, const char* b) {
     int64_t lb = db ? db->len : (int64_t)strlen(b);
     bool a_k1 = (!da || da->kind == 1);
     bool b_k1 = (!db || db->kind == 1);
-    if (a_k1 && b_k1) return (int64_t)strcmp(a, b);
+    // Both kind=1: memcmp over the shorter length + length tiebreak, NOT strcmp.
+    // strcmp would stop ordering at an embedded NUL (same class as the eq bug
+    // above). memcmp compares raw bytes lexicographically, which for kind=1
+    // (byte==code point) is the correct code-point ordering.
+    if (a_k1 && b_k1) {
+        int64_t n0 = la < lb ? la : lb;
+        int c = memcmp(a, b, (size_t)n0);
+        if (c != 0) return c < 0 ? -1 : 1;
+        return la == lb ? 0 : (la < lb ? -1 : 1);
+    }
     int64_t n = la < lb ? la : lb;
     for (int64_t i = 0; i < n; ++i) {
         uint32_t ca = dragon_str_cp_at(a, da, i);

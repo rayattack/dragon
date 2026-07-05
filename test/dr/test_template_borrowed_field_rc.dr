@@ -104,6 +104,7 @@ class BorrowedFieldRCTests(TestCase) {
             const b: str = "<c>"
             const e: str = HTML.escape(a + b)
             self.assertEqual(e, "a&amp;b&lt;c&gt;")
+            r = r + 1
         }
         # A field that actually contains escapable characters is escaped but the
         # stored field is untouched.

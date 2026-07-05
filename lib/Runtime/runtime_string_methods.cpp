@@ -238,30 +238,56 @@ const char* dragon_str_replace_n(const char* s, const char* old_s, const char* n
     bool o_k1 = (!dold || dold->kind == 1);
     bool n_k1 = (!dnew || dnew->kind == 1);
 
-    // All-kind=1 fast path: byte-level memcpy, identical to pre-Unicode perf.
+    // All-kind=1 fast path: byte-level memcpy. Search and copy are bounded by
+    // the KNOWN lengths (slen/olen), never by NUL termination - a kind=1 string
+    // may legitimately contain an embedded '\0' (code point 0 is stored as a
+    // single ASCII byte), and the old strstr/strlen version stopped there,
+    // treating "a\0b" as "a": it under-counted matches and truncated the tail.
+    // memchr on the first old byte + memcmp keeps the fast path fast for the
+    // common no-NUL case while staying correct when a NUL is present.
     if (s_k1 && o_k1 && n_k1) {
-        size_t count = 0;
-        const char* p = s;
-        while ((p = strstr(p, old_s))) {
-            count++;
-            p += olen;
-            if (max_count >= 0 && (int64_t)count >= max_count) break;
+        int64_t count = 0;
+        int64_t i = 0;
+        while (i + olen <= slen) {
+            const void* hit = memchr(s + i, (unsigned char)old_s[0], (size_t)(slen - i - olen + 1));
+            if (!hit) break;
+            int64_t j = (const char*)hit - s;
+            if (memcmp(s + j, old_s, (size_t)olen) == 0) {
+                count++;
+                i = j + olen;
+                if (max_count >= 0 && count >= max_count) break;
+            } else {
+                i = j + 1;
+            }
         }
-        int64_t rlen = slen + (int64_t)count * (nlen - olen);
+        int64_t rlen = slen + count * (nlen - olen);
         DragonString* out = dragon_string_alloc_raw(rlen);
         char* w = out->data;
-        p = s;
+        int64_t pos = 0;
         int64_t done = 0;
-        while (*p) {
-            if (max_count >= 0 && done >= max_count) { size_t tail = strlen(p); memcpy(w, p, tail); w += tail; break; }
-            const char* f = strstr(p, old_s);
-            if (!f) { size_t tail = strlen(p); memcpy(w, p, tail); w += tail; break; }
-            memcpy(w, p, f - p); w += f - p;
-            memcpy(w, new_s, nlen); w += nlen;
-            p = f + olen;
+        while (pos <= slen) {
+            int64_t f = -1;
+            if (!(max_count >= 0 && done >= max_count)) {
+                int64_t k = pos;
+                while (k + olen <= slen) {
+                    const void* hit = memchr(s + k, (unsigned char)old_s[0], (size_t)(slen - k - olen + 1));
+                    if (!hit) break;
+                    int64_t j = (const char*)hit - s;
+                    if (memcmp(s + j, old_s, (size_t)olen) == 0) { f = j; break; }
+                    k = j + 1;
+                }
+            }
+            if (f < 0) {  // copy the (length-bounded) tail and finish
+                memcpy(w, s + pos, (size_t)(slen - pos)); w += slen - pos;
+                break;
+            }
+            memcpy(w, s + pos, (size_t)(f - pos)); w += f - pos;
+            memcpy(w, new_s, (size_t)nlen); w += nlen;
+            pos = f + olen;
             done++;
         }
         *w = '\0';
+        out->len = w - out->data;
         return out->data;
     }
 
@@ -322,13 +348,34 @@ const char* dragon_str_replace(const char* s, const char* old_s, const char* new
 
 const char* dragon_str_repeat(const char* s, int64_t n) {
     if (!s || n <= 0) return dragon_string_alloc("", 0);
-    size_t len = strlen(s);
-    if (len > 0 && (size_t)n > (size_t)INT64_MAX / len) {
+    DragonString* in = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
+    // kind=1 (ASCII/Latin-1): byte copy is correct, but size by ds->len - NOT
+    // strlen - so an embedded NUL in a kind=1 string doesn't truncate the unit.
+    if (!in || in->kind == 1) {
+        int64_t len = in ? in->len : (int64_t)strlen(s);
+        if (len > 0 && (uint64_t)n > (uint64_t)INT64_MAX / (uint64_t)len) {
+            dragon_raise_exc_cstr(43, "MemoryError: string repeat too large");
+        }
+        int64_t total = len * n;
+        DragonString* ds = dragon_string_alloc_raw(total);
+        for (int64_t i = 0; i < n; i++) memcpy(ds->data + i * len, s, (size_t)len);
+        ds->data[total] = '\0';
+        ds->len = total;
+        return ds->data;
+    }
+    // kind=4: the storage is one uint32 per code point, so strlen/memcpy of
+    // raw bytes duplicated the first byte of the first cp. Repeat CODE POINTS.
+    int64_t len = in->len;
+    if (len > 0 && (uint64_t)n > (uint64_t)INT64_MAX / (uint64_t)len) {
         dragon_raise_exc_cstr(43, "MemoryError: string repeat too large");
     }
-    DragonString* ds = dragon_string_alloc_raw((int64_t)(len * n));
-    for (int64_t i = 0; i < n; i++) memcpy(ds->data + i * len, s, len);
-    ds->data[len * n] = '\0';
+    int64_t total = len * n;
+    DragonString* ds = dragon_string_alloc_ucs4(total);
+    uint32_t* dst = (uint32_t*)ds->data;
+    const uint32_t* src = (const uint32_t*)in->data;
+    int64_t w = 0;
+    for (int64_t i = 0; i < n; i++)
+        for (int64_t j = 0; j < len; j++) dst[w++] = src[j];
     return ds->data;
 }
 
@@ -369,20 +416,40 @@ const char* dragon_str_removesuffix(const char* s, const char* suffix) {
 // vector into the malloc arg (sizeof(DragonString) + w + 1).
 static constexpr int64_t DRAGON_STR_MAX_WIDTH = 1LL << 28;
 
+// Padding helpers below take width in CODE POINTS and an ASCII `fill` byte.
+// The width comparison must use the code-point count (ds->len), not strlen -
+// strlen on a UCS-4 string is the byte length up to the first embedded NUL, so
+// "café".center(8) saw length 1 and, worse, memcpy'd the raw UCS-4 storage
+// into a kind=1 byte result, emitting "c" surrounded by fill. For a kind=4
+// source we now build a UCS-4 result and write the fill as a code point.
+
 const char* dragon_str_center(const char* s, int64_t w, char fill) {
     if (!s) return dragon_string_alloc("", 0);
     if (w > DRAGON_STR_MAX_WIDTH) {
         dragon_raise_exc_cstr(22, "OverflowError: width too large");
         return dragon_string_alloc("", 0);
     }
-    size_t len = strlen(s);
-    if ((int64_t)len >= w) return dragon_string_alloc(s, (int64_t)len);
+    DragonString* in = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
+    int64_t len = in ? in->len : (int64_t)strlen(s);
+    if (len >= w) return dragon_str_slice(s, 0, len, 1);  // kind-correct copy
     int64_t pad = w - len, left = pad / 2, right = pad - left;
-    DragonString* ds = dragon_string_alloc_raw(w);
-    memset(ds->data, fill, left);
-    memcpy(ds->data + left, s, len);
-    memset(ds->data + left + len, fill, right);
-    ds->data[w] = '\0';
+    if (!in || in->kind == 1) {
+        DragonString* ds = dragon_string_alloc_raw(w);
+        memset(ds->data, fill, (size_t)left);
+        memcpy(ds->data + left, s, (size_t)len);
+        memset(ds->data + left + len, fill, (size_t)right);
+        ds->data[w] = '\0';
+        ds->len = w;
+        return ds->data;
+    }
+    DragonString* ds = dragon_string_alloc_ucs4(w);
+    uint32_t* dst = (uint32_t*)ds->data;
+    const uint32_t* src = (const uint32_t*)in->data;
+    uint32_t fcp = (uint32_t)(unsigned char)fill;
+    int64_t k = 0;
+    for (int64_t i = 0; i < left; i++)  dst[k++] = fcp;
+    for (int64_t i = 0; i < len; i++)   dst[k++] = src[i];
+    for (int64_t i = 0; i < right; i++) dst[k++] = fcp;
     return ds->data;
 }
 
@@ -392,12 +459,24 @@ const char* dragon_str_ljust(const char* s, int64_t w, char fill) {
         dragon_raise_exc_cstr(22, "OverflowError: width too large");
         return dragon_string_alloc("", 0);
     }
-    size_t len = strlen(s);
-    if ((int64_t)len >= w) return dragon_string_alloc(s, (int64_t)len);
-    DragonString* ds = dragon_string_alloc_raw(w);
-    memcpy(ds->data, s, len);
-    memset(ds->data + len, fill, w - len);
-    ds->data[w] = '\0';
+    DragonString* in = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
+    int64_t len = in ? in->len : (int64_t)strlen(s);
+    if (len >= w) return dragon_str_slice(s, 0, len, 1);
+    if (!in || in->kind == 1) {
+        DragonString* ds = dragon_string_alloc_raw(w);
+        memcpy(ds->data, s, (size_t)len);
+        memset(ds->data + len, fill, (size_t)(w - len));
+        ds->data[w] = '\0';
+        ds->len = w;
+        return ds->data;
+    }
+    DragonString* ds = dragon_string_alloc_ucs4(w);
+    uint32_t* dst = (uint32_t*)ds->data;
+    const uint32_t* src = (const uint32_t*)in->data;
+    uint32_t fcp = (uint32_t)(unsigned char)fill;
+    int64_t k = 0;
+    for (int64_t i = 0; i < len; i++)     dst[k++] = src[i];
+    for (int64_t i = 0; i < w - len; i++) dst[k++] = fcp;
     return ds->data;
 }
 
@@ -407,12 +486,24 @@ const char* dragon_str_rjust(const char* s, int64_t w, char fill) {
         dragon_raise_exc_cstr(22, "OverflowError: width too large");
         return dragon_string_alloc("", 0);
     }
-    size_t len = strlen(s);
-    if ((int64_t)len >= w) return dragon_string_alloc(s, (int64_t)len);
-    DragonString* ds = dragon_string_alloc_raw(w);
-    memset(ds->data, fill, w - len);
-    memcpy(ds->data + w - len, s, len);
-    ds->data[w] = '\0';
+    DragonString* in = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
+    int64_t len = in ? in->len : (int64_t)strlen(s);
+    if (len >= w) return dragon_str_slice(s, 0, len, 1);
+    if (!in || in->kind == 1) {
+        DragonString* ds = dragon_string_alloc_raw(w);
+        memset(ds->data, fill, (size_t)(w - len));
+        memcpy(ds->data + w - len, s, (size_t)len);
+        ds->data[w] = '\0';
+        ds->len = w;
+        return ds->data;
+    }
+    DragonString* ds = dragon_string_alloc_ucs4(w);
+    uint32_t* dst = (uint32_t*)ds->data;
+    const uint32_t* src = (const uint32_t*)in->data;
+    uint32_t fcp = (uint32_t)(unsigned char)fill;
+    int64_t k = 0;
+    for (int64_t i = 0; i < w - len; i++) dst[k++] = fcp;
+    for (int64_t i = 0; i < len; i++)     dst[k++] = src[i];
     return ds->data;
 }
 
@@ -808,8 +899,15 @@ const char* dragon_str_slice(const char* s, int64_t start, int64_t stop, int64_t
     int64_t cp_count = in ? in->len : (int64_t)strlen(s);
     dragon_slice_indices(cp_count, &start, &stop, step);
     if (!in || in->kind == 1) {
-        // ASCII / Latin-1 fast path: cp index == byte index, byte-for-byte copy.
-        DragonString* ds = dragon_string_alloc_raw(cp_count);
+        // ASCII / Latin-1 fast path: cp index == byte index, byte-for-byte copy
+        // Allocate the OUTPUT length, not the source length. The old code sized
+        // the result at cp_count (the whole source), so slicing a 1 MB string
+        // into 10k small fields (split()) requested ~10 GB and each field
+        // RETAINED a source-sized buffer. Count the produced chars first.
+        int64_t out_count = 0;
+        if (step > 0) { for (int64_t i = start; i < stop; i += step) out_count++; }
+        else          { for (int64_t i = start; i > stop; i += step) out_count++; }
+        DragonString* ds = dragon_string_alloc_raw(out_count);
         int64_t w = 0;
         if (step > 0) { for (int64_t i = start; i < stop; i += step) ds->data[w++] = s[i]; }
         else { for (int64_t i = start; i > stop; i += step) ds->data[w++] = s[i]; }
@@ -1022,20 +1120,28 @@ const char* dragon_str_join(const char* sep, DragonList* l) {
 DragonList* dragon_str_splitlines(const char* s) {
     DragonList* r = dragon_list_new_tagged(8, TAG_STR);
     if (!s) return r;
-    const char* start = s;
-    while (*s) {
-        if (*s == '\n' || *s == '\r') {
-            size_t len = s - start;
-            const char* w = dragon_string_alloc(start, (int64_t)len);
+    // Iterate over CODE POINTS, not bytes. The old byte scan walked UCS-4
+    // storage (4 bytes/cp with embedded NULs) as C bytes: it found the 0x0A/
+    // 0x0D byte of a newline but then dragon_string_alloc copied raw wide bytes
+    // as a kind=1 string, corrupting every non-ASCII line. Each line is cut with
+    // dragon_str_slice, which preserves the source kind.
+    DragonString* in = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
+    int64_t n = in ? in->len : (int64_t)strlen(s);
+    int64_t start = 0;
+    int64_t i = 0;
+    while (i < n) {
+        uint32_t cp = dragon_str_cp_at(s, in, i);
+        if (cp == '\n' || cp == '\r') {
+            const char* w = dragon_str_slice(s, start, i, 1);
             dragon_list_append(r, (int64_t)w);
-            if (*s == '\r' && *(s+1) == '\n') s++;
-            s++;
-            start = s;
-        } else { s++; }
+            // Treat "\r\n" as one line break.
+            if (cp == '\r' && i + 1 < n && dragon_str_cp_at(s, in, i + 1) == '\n') i++;
+            i++;
+            start = i;
+        } else { i++; }
     }
-    if (s > start) {
-        size_t len = s - start;
-        const char* w = dragon_string_alloc(start, (int64_t)len);
+    if (start < n) {
+        const char* w = dragon_str_slice(s, start, n, 1);
         dragon_list_append(r, (int64_t)w);
     }
     return r;
@@ -1044,49 +1150,73 @@ DragonList* dragon_str_splitlines(const char* s) {
 // L3: partition()/rpartition() return a 3-TUPLE (Python parity), not a list, so
 // print() renders ('a', '=', 'b') with parens. Build a DragonTuple directly
 // (TAG_STR elements) - no intermediate list to free.
+// partition/rpartition search and split by CODE POINTS. The old strstr/strlen
+// approach searched raw storage bytes: on a UCS-4 haystack or separator the
+// embedded NULs made strstr miss (or match at the wrong offset), and the
+// dragon_string_alloc pieces re-decoded wide bytes as kind=1. dragon_str_find_cp
+// returns a code-point index; dragon_str_slice cuts kind-correct pieces; the
+// separator piece is a kind-correct copy of the whole separator.
 DragonTuple* dragon_str_partition(const char* s, const char* sep) {
     DragonTuple* r = dragon_tuple_new(3);
     if (!s || !sep) {
-        dragon_tuple_set_tagged(r, 0, (int64_t)dragon_string_alloc(s ? s : "", s ? (int64_t)strlen(s) : 0), TAG_STR);
+        DragonString* si = s && dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
+        int64_t sn = s ? (si ? si->len : (int64_t)strlen(s)) : 0;
+        dragon_tuple_set_tagged(r, 0, (int64_t)(s ? dragon_str_slice(s, 0, sn, 1) : dragon_string_alloc("", 0)), TAG_STR);
         dragon_tuple_set_tagged(r, 1, (int64_t)dragon_string_alloc("", 0), TAG_STR);
         dragon_tuple_set_tagged(r, 2, (int64_t)dragon_string_alloc("", 0), TAG_STR);
         return r;
     }
-    const char* p = strstr(s, sep);
-    if (!p) {
-        dragon_tuple_set_tagged(r, 0, (int64_t)dragon_string_alloc(s, (int64_t)strlen(s)), TAG_STR);
+    DragonString* si = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
+    DragonString* pi = dragon_is_heap_string(sep) ? dragon_string_from_data(sep) : NULL;
+    int64_t sn = si ? si->len : (int64_t)strlen(s);
+    int64_t sl = pi ? pi->len : (int64_t)strlen(sep);
+    int64_t at = (sl == 0) ? -1 : dragon_str_find_cp(s, sep, 0);
+    if (at < 0) {
+        dragon_tuple_set_tagged(r, 0, (int64_t)dragon_str_slice(s, 0, sn, 1), TAG_STR);
         dragon_tuple_set_tagged(r, 1, (int64_t)dragon_string_alloc("", 0), TAG_STR);
         dragon_tuple_set_tagged(r, 2, (int64_t)dragon_string_alloc("", 0), TAG_STR);
         return r;
     }
-    size_t sl = strlen(sep);
-    dragon_tuple_set_tagged(r, 0, (int64_t)dragon_string_alloc(s, (int64_t)(p - s)), TAG_STR);
-    dragon_tuple_set_tagged(r, 1, (int64_t)dragon_string_alloc(sep, (int64_t)sl), TAG_STR);
-    dragon_tuple_set_tagged(r, 2, (int64_t)dragon_string_alloc(p + sl, (int64_t)strlen(p + sl)), TAG_STR);
+    dragon_tuple_set_tagged(r, 0, (int64_t)dragon_str_slice(s, 0, at, 1), TAG_STR);
+    dragon_tuple_set_tagged(r, 1, (int64_t)dragon_str_slice(sep, 0, sl, 1), TAG_STR);
+    dragon_tuple_set_tagged(r, 2, (int64_t)dragon_str_slice(s, at + sl, sn, 1), TAG_STR);
     return r;
 }
 
 DragonTuple* dragon_str_rpartition(const char* s, const char* sep) {
     DragonTuple* r = dragon_tuple_new(3);
     if (!s || !sep) {
+        DragonString* si = s && dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
+        int64_t sn = s ? (si ? si->len : (int64_t)strlen(s)) : 0;
         dragon_tuple_set_tagged(r, 0, (int64_t)dragon_string_alloc("", 0), TAG_STR);
         dragon_tuple_set_tagged(r, 1, (int64_t)dragon_string_alloc("", 0), TAG_STR);
-        dragon_tuple_set_tagged(r, 2, (int64_t)dragon_string_alloc(s ? s : "", s ? (int64_t)strlen(s) : 0), TAG_STR);
+        dragon_tuple_set_tagged(r, 2, (int64_t)(s ? dragon_str_slice(s, 0, sn, 1) : dragon_string_alloc("", 0)), TAG_STR);
         return r;
     }
-    size_t sl = strlen(sep);
-    const char* last = nullptr;
-    const char* p = s;
-    while ((p = strstr(p, sep))) { last = p; p += (sl > 0 ? sl : 1); }
-    if (!last) {
+    DragonString* si = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
+    DragonString* pi = dragon_is_heap_string(sep) ? dragon_string_from_data(sep) : NULL;
+    int64_t sn = si ? si->len : (int64_t)strlen(s);
+    int64_t sl = pi ? pi->len : (int64_t)strlen(sep);
+    // Walk every code-point match; keep the last.
+    int64_t last = -1;
+    if (sl > 0) {
+        int64_t pos = 0;
+        for (;;) {
+            int64_t at = dragon_str_find_cp(s, sep, pos);
+            if (at < 0) break;
+            last = at;
+            pos = at + sl;
+        }
+    }
+    if (last < 0) {
         dragon_tuple_set_tagged(r, 0, (int64_t)dragon_string_alloc("", 0), TAG_STR);
         dragon_tuple_set_tagged(r, 1, (int64_t)dragon_string_alloc("", 0), TAG_STR);
-        dragon_tuple_set_tagged(r, 2, (int64_t)dragon_string_alloc(s, (int64_t)strlen(s)), TAG_STR);
+        dragon_tuple_set_tagged(r, 2, (int64_t)dragon_str_slice(s, 0, sn, 1), TAG_STR);
         return r;
     }
-    dragon_tuple_set_tagged(r, 0, (int64_t)dragon_string_alloc(s, (int64_t)(last - s)), TAG_STR);
-    dragon_tuple_set_tagged(r, 1, (int64_t)dragon_string_alloc(sep, (int64_t)sl), TAG_STR);
-    dragon_tuple_set_tagged(r, 2, (int64_t)dragon_string_alloc(last + sl, (int64_t)strlen(last + sl)), TAG_STR);
+    dragon_tuple_set_tagged(r, 0, (int64_t)dragon_str_slice(s, 0, last, 1), TAG_STR);
+    dragon_tuple_set_tagged(r, 1, (int64_t)dragon_str_slice(sep, 0, sl, 1), TAG_STR);
+    dragon_tuple_set_tagged(r, 2, (int64_t)dragon_str_slice(s, last + sl, sn, 1), TAG_STR);
     return r;
 }
 

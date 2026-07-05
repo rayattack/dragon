@@ -66,8 +66,23 @@ int64_t dragon_write_file_bytes(const char* path, DragonBytes* data) {
     if (data && data->len > 0) {
         size_t w = std::fwrite(data->data, 1, (size_t)data->len, f);
         n = (int64_t)w;
+        // A short fwrite means the write actually failed (e.g. ENOSPC). Do
+        // NOT return the partial count as if it were success: the callers
+        // (gzip/tarfile/zipfile writers) ignore the return value, so a
+        // truncated file would masquerade as a complete one. Close and raise.
+        if ((int64_t)w != data->len) {
+            std::fclose(f);
+            dragon_raise_exc_cstr(50, "write_file_bytes: short write (disk full?)");
+            return 0;
+        }
     }
-    std::fclose(f);
+    // fclose flushes the stdio buffer; a disk-full error can surface HERE and
+    // nowhere earlier, so an unchecked fclose is the same silent-truncation
+    // bug one layer down. Treat a non-zero fclose as a write failure.
+    if (std::fclose(f) != 0) {
+        dragon_raise_exc_cstr(50, "write_file_bytes: close failed (write not flushed)");
+        return 0;
+    }
     return n;
 }
 

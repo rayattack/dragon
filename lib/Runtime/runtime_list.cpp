@@ -247,6 +247,11 @@ void dragon_list_remove(DragonList* list, int64_t value) {
                 else if (list->elem_tag == TAG_LIST || list->elem_tag == TAG_DICT ||
                          list->elem_tag == TAG_BYTES)
                     dragon_decref_dispatch((void*)(uintptr_t)elem);
+                else if (list->elem_tag == DRAGON_TAG_CLOSURE)
+                    // T39: list[Callable] element. dragon_list_delitem already
+                    // releases closures on removal; remove() missed this arm,
+                    // leaking one closure + env per cbs.remove(f).
+                    dragon_decref_callable((void*)(uintptr_t)elem);
             }
             return;
         }
@@ -385,15 +390,21 @@ void dragon_list_extend(DragonList* list, DragonList* other) {
         }
     }
     bool tags_match = (list->elem_tag == other->elem_tag);
-    for (int64_t i = 0; i < other->size; i++) {
+    // Snapshot the source length BEFORE the loop. Self-extend (`l.extend(l)`
+    // or `l += l`, both of which reach here with list == other) otherwise
+    // re-reads other->size through the aliased pointer every iteration; each
+    // append bumps it, so the loop never terminates and allocates until the
+    // machine is out of memory. Python's l.extend(l) doubles the list and
+    // stops - snapshotting the pre-call length gives exactly that semantics.
+    int64_t n = other->size;
+    for (int64_t i = 0; i < n; i++) {
         int64_t elem = dragon_list_load(other, i);
-        if (elem && tags_match) {
-            if (other->elem_tag == TAG_STR)
-                dragon_incref_str((const char*)(uintptr_t)elem);
-            else if (other->elem_tag == TAG_LIST || other->elem_tag == TAG_DICT ||
-                     other->elem_tag == TAG_BYTES)
-                dragon_incref((void*)(uintptr_t)elem);
-        }
+        // dragon_incref_tagged is the single source of truth for per-tag RC:
+        // STR/LIST/DICT/BYTES like the old chain, PLUS DRAGON_TAG_CLOSURE.
+        // The old chain skipped closures while dragon_list_destroy decrefs
+        // them, so extending a list[Callable] set up a double-free of every
+        // shared closure on teardown.
+        if (elem && tags_match) dragon_incref_tagged(elem, other->elem_tag);
         dragon_list_append(list, elem);
     }
 }
@@ -522,14 +533,12 @@ DragonList* dragon_list_copy(DragonList* list) {
     DragonList* copy = dragon_list_new_tagged(list->size > 0 ? list->size : 8, list->elem_tag);
     for (int64_t i = 0; i < list->size; i++) {
         int64_t elem = dragon_list_load(list, i);
-        // Incref copied elements: both old and new list own references
-        if (elem) {
-            if (list->elem_tag == TAG_STR)
-                dragon_incref_str((const char*)(uintptr_t)elem);
-            else if (list->elem_tag == TAG_LIST || list->elem_tag == TAG_DICT ||
-                     list->elem_tag == TAG_BYTES)
-                dragon_incref((void*)(uintptr_t)elem);
-        }
+        // Incref copied elements: both old and new list own references.
+        // dragon_incref_tagged covers STR/LIST/DICT/BYTES like the old chain
+        // AND DRAGON_TAG_CLOSURE, which the chain missed - so copying a
+        // list[Callable] left both lists decref'ing the same closure on
+        // destroy (double-free / UAF, ASan-verified via fs.copy()).
+        if (elem) dragon_incref_tagged(elem, list->elem_tag);
         dragon_list_append(copy, elem);
     }
     return copy;
@@ -650,12 +659,13 @@ DragonList* dragon_list_repeat(DragonList* src, int64_t count) {
         for (int64_t i = 0; i < src->size; i++) {
             int64_t val = dragon_list_load(src, i);
             dragon_list_store(result, c * src->size + i, val);
-            if (val) {
-                if (src->elem_tag == TAG_STR)
-                    dragon_incref_str((const char*)(uintptr_t)val);
-                else
-                    dragon_incref((void*)(uintptr_t)val);
-            }
+            // dragon_incref_tagged, not a bare dragon_incref. A list[Callable]
+            // element may be a bare function pointer with no object header
+            // (T39); the generic dragon_incref read/wrote refcount bytes inside
+            // the function's .text (read-only) -> SIGSEGV on `[f] * 3`. The
+            // tagged path routes closures through the tag-gated
+            // dragon_incref_callable, which is safe on a headerless fn ptr.
+            if (val) dragon_incref_tagged(val, src->elem_tag);
         }
     }
     return result;
@@ -960,7 +970,11 @@ void dragon_list_box_extend(DragonListBox* dst, DragonListBox* src) {
         }
         return;
     }
-    for (int64_t i = 0; i < src->size; ++i) {
+    // Snapshot the source length: `anyList.extend(anyList)` / `+=` self-alias
+    // would otherwise grow src->size every append and never terminate (OOM).
+    // Matches the same fix in dragon_list_extend.
+    int64_t n = src->size;
+    for (int64_t i = 0; i < n; ++i) {
         DragonListBoxElem e = src->data[i];
         dragon_incref_tagged(e.payload, (uint8_t)e.tag);
         dragon_list_box_append(dst, e.tag, e.payload);

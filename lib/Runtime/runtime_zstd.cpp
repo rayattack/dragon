@@ -98,6 +98,11 @@ DragonBytes* dragon_zstd_decompress(DragonBytes* src) {
         return nullptr;
     }
     size_t used = 0;
+    // r holds the last ZSTD_decompressStream return. It is 0 only when a
+    // frame has been fully decoded; any other value means "more input
+    // expected". Start at a nonzero sentinel so an input that never reaches
+    // end-of-frame is treated as incomplete. See the post-loop check.
+    size_t r = 1;
     ZSTD_inBuffer in = { src->data, (size_t)src->len, 0 };
     while (in.pos < in.size) {
         if (cap - used < outBlock) {
@@ -122,7 +127,7 @@ DragonBytes* dragon_zstd_decompress(DragonBytes* src) {
             cap = newCap;
         }
         ZSTD_outBuffer out = { buf + used, cap - used, 0 };
-        size_t r = ZSTD_decompressStream(ds, &out, &in);
+        r = ZSTD_decompressStream(ds, &out, &in);
         if (ZSTD_isError(r)) {
             const char* msg = ZSTD_getErrorName(r);
             ZSTD_freeDStream(ds);
@@ -134,6 +139,18 @@ DragonBytes* dragon_zstd_decompress(DragonBytes* src) {
         if (r == 0) break;          // frame complete
     }
     ZSTD_freeDStream(ds);
+    // Truncated frame: the loop drained all input (in.pos == in.size) but
+    // ZSTD never signalled end-of-frame (the last r was nonzero, meaning it
+    // still expected more bytes). Unlike zlib, zstd's streaming API does not
+    // raise on premature end - it just stops producing output - so without
+    // this check we would hand the caller a SHORT (often empty) payload and
+    // report success. That is silent data loss on a corrupt/clipped archive
+    // or a half-received network message. Raise instead.
+    if (r != 0) {
+        std::free(buf);
+        dragon_raise_exc_cstr(50, "zstd: truncated or incomplete frame");
+        return nullptr;
+    }
     DragonBytes* result = dragon_bytes_new(buf, (int64_t)used);
     std::free(buf);
     return result;

@@ -37,10 +37,6 @@ void CodeGen::visit(ListCompExpr& node) {
     // --- Helper lambda: emit the innermost body (element eval + condition + append) ---
     // This is called from the innermost loop body.
     auto emitInnermostBody = [&]() {
-        // Evaluate the element expression
-        node.element->accept(*this);
-        llvm::Value* elemVal = impl_->lastValue;
-
         // D030 Phase 3.C: pick the typed append matching the result list's
         // variant (chosen at allocation by elemTag at the visit head).
         bool isF64 = (elemTag == 2);
@@ -49,32 +45,65 @@ void CodeGen::visit(ListCompExpr& node) {
                               : isPtr ? "dragon_list_append_ptr"
                                       : "dragon_list_append";
 
-        // Promote string literals to heap DragonStrings when stored in str-typed lists.
-        if (elemTag == 1 && elemVal->getType()->isPointerTy()) { // TAG_STR
-            elemVal = impl_->ensureHeapString(elemVal, node.element.get());
-        }
+        // Evaluate the element, coerce it, co-own it if borrowed, and append.
+        // Kept in a lambda so it runs ONLY on the branch that keeps the element
+        // - the element must not be evaluated for a filtered-out item (see the
+        // condition handling below).
+        auto evalCoerceAppend = [&]() {
+            node.element->accept(*this);
+            llvm::Value* elemVal = impl_->lastValue;
 
-        // Coerce element to the variant's native type.
-        if (isF64) {
-            if (elemVal->getType() == impl_->i64Type)
-                elemVal = impl_->builder->CreateSIToFP(elemVal, impl_->f64Type);
-            else if (elemVal->getType() == impl_->i1Type)
-                elemVal = impl_->builder->CreateUIToFP(elemVal, impl_->f64Type);
-        } else if (isPtr) {
-            if (!elemVal->getType()->isPointerTy())
-                elemVal = impl_->builder->CreateIntToPtr(elemVal, impl_->i8PtrType);
-        } else {
-            // Legacy i64 path for int / bool / untyped result lists.
-            if (elemVal->getType() == impl_->i1Type) {
-                elemVal = impl_->builder->CreateZExt(elemVal, impl_->i64Type);
-            } else if (elemVal->getType() == impl_->f64Type) {
-                elemVal = impl_->builder->CreateBitCast(elemVal, impl_->i64Type);
-            } else if (elemVal->getType()->isPointerTy()) {
-                elemVal = impl_->builder->CreatePtrToInt(elemVal, impl_->i64Type);
+            // Promote string literals to heap DragonStrings for str-typed lists.
+            if (elemTag == 1 && elemVal->getType()->isPointerTy()) { // TAG_STR
+                elemVal = impl_->ensureHeapString(elemVal, node.element.get());
             }
-        }
+
+            // dragon_list_append_ptr ADOPTS the reference (it does not incref).
+            // A BORROWED element - the loop variable, a field, or a container
+            // read like xs[i] - must therefore be incref'd so the result list
+            // co-owns it; otherwise both the source container and the result
+            // list decref the same +1 at scope exit (double free). Owned temps
+            // (a concat, str(), or the ensureHeapString dup above) transfer
+            // their +1 and need no incref. Done while elemVal is still a
+            // pointer, before any ptrtoint coercion.
+            if (isPtr && impl_->options.gcMode == GCMode::RC &&
+                elemVal->getType()->isPointerTy() &&
+                Impl::isBorrowedHeapExpr(node.element.get())) {
+                impl_->builder->CreateCall(
+                    impl_->runtimeFuncs[elemTag == 1 ? "dragon_incref_str"
+                                                     : "dragon_incref"],
+                    {elemVal});
+            }
+
+            // Coerce element to the variant's native type.
+            if (isF64) {
+                if (elemVal->getType() == impl_->i64Type)
+                    elemVal = impl_->builder->CreateSIToFP(elemVal, impl_->f64Type);
+                else if (elemVal->getType() == impl_->i1Type)
+                    elemVal = impl_->builder->CreateUIToFP(elemVal, impl_->f64Type);
+            } else if (isPtr) {
+                if (!elemVal->getType()->isPointerTy())
+                    elemVal = impl_->builder->CreateIntToPtr(elemVal, impl_->i8PtrType);
+            } else {
+                // Legacy i64 path for int / bool / untyped result lists.
+                if (elemVal->getType() == impl_->i1Type) {
+                    elemVal = impl_->builder->CreateZExt(elemVal, impl_->i64Type);
+                } else if (elemVal->getType() == impl_->f64Type) {
+                    elemVal = impl_->builder->CreateBitCast(elemVal, impl_->i64Type);
+                } else if (elemVal->getType()->isPointerTy()) {
+                    elemVal = impl_->builder->CreatePtrToInt(elemVal, impl_->i64Type);
+                }
+            }
+            llvm::Value* curList = impl_->builder->CreateLoad(impl_->i8PtrType, listAlloca);
+            impl_->builder->CreateCall(impl_->runtimeFuncs[appendFn], {curList, elemVal});
+        };
 
         if (node.condition) {
+            // Evaluate the FILTER FIRST, and only evaluate/append the element on
+            // the keep branch. The old code evaluated the element before the
+            // condition, so `[10 // x for x in nums if x != 0]` divided by the
+            // excluded 0, and an owned element temp built for a filtered-out
+            // item leaked (it was computed but neither appended nor decref'd).
             node.condition->accept(*this);
             llvm::Value* filterCond = impl_->lastValue;
             if (filterCond->getType() == impl_->i64Type) {
@@ -89,14 +118,12 @@ void CodeGen::visit(ListCompExpr& node) {
             impl_->builder->CreateCondBr(filterCond, appendBB, skipBB);
 
             impl_->builder->SetInsertPoint(appendBB);
-            llvm::Value* curList = impl_->builder->CreateLoad(impl_->i8PtrType, listAlloca);
-            impl_->builder->CreateCall(impl_->runtimeFuncs[appendFn], {curList, elemVal});
+            evalCoerceAppend();
             impl_->builder->CreateBr(skipBB);
 
             impl_->builder->SetInsertPoint(skipBB);
         } else {
-            llvm::Value* curList = impl_->builder->CreateLoad(impl_->i8PtrType, listAlloca);
-            impl_->builder->CreateCall(impl_->runtimeFuncs[appendFn], {curList, elemVal});
+            evalCoerceAppend();
         }
     };
 
@@ -449,9 +476,9 @@ void CodeGen::visit(DictCompExpr& node) {
         }
         llvm::Value* compTagVal = llvm::ConstantInt::get(impl_->i64Type, compTag);
 
-        // dragon_dict_set_tagged stores the key/value pointers directly and
-        // expects the caller to hand over exactly one owned ref each (see the
-        // identical discipline in Assign.cpp's dict-store path). A BORROWED
+        // dragon_dict_set_tagged stores key/value pointers directly and expects
+        // caller to hand over exactly one owned ref each (see identical discipline
+        // in Assign.cpp's dict-store path). A BORROWED
         // key/value - the comp loop var, a field read - must be incref'd; a
         // literal key must be heap-promoted; an owned temp (f-string, concat)
         // already carries its +1 and passes through. Without this the dict's

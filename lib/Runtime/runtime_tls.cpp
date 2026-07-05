@@ -300,7 +300,11 @@ void* dragon_tls_conn_new(void* ctx_handle, int64_t fd, const char* server_hostn
         return nullptr;
     }
     DragonTlsConn* conn = (DragonTlsConn*)calloc(1, sizeof(DragonTlsConn));
-    if (!conn) return nullptr;
+    if (!conn) {
+        dragon_raise_exc_cstr(50 /* OSError; SSLError derives from it */,
+                         "ssl: out of memory allocating TLS connection");
+        return nullptr;
+    }
     conn->fd = (int)fd;
     // An accepted fd doesn't inherit O_NONBLOCK from its listener, so set it
     // here - the BIO relies on EAGAIN to know when to yield to the scheduler.
@@ -308,11 +312,13 @@ void* dragon_tls_conn_new(void* ctx_handle, int64_t fd, const char* server_hostn
     mbedtls_ssl_init(&conn->ssl);
     if (mbedtls_ssl_setup(&conn->ssl, &c->conf) != 0) {
         dragon_tls_conn_free(conn);
+        dragon_raise_exc_cstr(50, "ssl: SSL/TLS engine setup failed");
         return nullptr;
     }
     if (!empty_hostname) {
         if (mbedtls_ssl_set_hostname(&conn->ssl, server_hostname) != 0) {
             dragon_tls_conn_free(conn);
+            dragon_raise_exc_cstr(50, "ssl: failed to set server hostname (SNI)");
             return nullptr;
         }
     }
@@ -398,6 +404,11 @@ const char* dragon_tls_recv_str_timeout(void* handle, int64_t maxlen, int64_t ms
 }
 
 int64_t dragon_tls_close(void* handle) {
+    // Defensive NULL guard, matching dragon_tls_conn_free: close_notify
+    // dereferences conn->ssl, so a NULL handle would SEGV here. The Dragon
+    // SSLSocket.close() is now idempotent (it won't re-enter with a live
+    // handle), but this keeps the C entry point safe on its own.
+    if (!handle) return 0;
     DragonTlsConn* conn = (DragonTlsConn*)handle;
     int ret;
     do {

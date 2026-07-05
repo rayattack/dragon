@@ -410,16 +410,21 @@ static const char* dragon_exc_name_for_code(int code) {
 void dragon_vthread_log_uncaught() {
     int code = 0;
     const char* msg = NULL;
+    void* obj = NULL;
     if (EXC_VT) {
         code = EXC_VT->exc_type;
         msg = EXC_VT->exc_msg;
+        obj = EXC_VT->exc_obj;
         EXC_VT->exc_type = 0;
         EXC_VT->exc_msg = NULL;
+        EXC_VT->exc_obj = NULL;
     } else {
         code = __dragon_exc_type;
         msg = __dragon_exc_msg;
+        obj = __dragon_exc_obj;
         __dragon_exc_type = 0;
         __dragon_exc_msg = NULL;
+        __dragon_exc_obj = NULL;
     }
     fprintf(stderr, "vthread terminated by uncaught %s: %s\n",
             dragon_exc_name_for_code(code), msg ? msg : "");
@@ -427,6 +432,16 @@ void dragon_vthread_log_uncaught() {
     // The slot owned the message (dragon_exc_msg_set); release it now that
     // it's been logged and the slot is cleared.
     dragon_decref_str_dispatch(msg);
+    // Release the attached exception INSTANCE too. A typed raise
+    // (`raise MyError(...)` -> dragon_raise_exc_obj) carries a +1 that the
+    // unwind cleanup deliberately SKIPS (keep_obj) because a matching
+    // `except ... as e` handler is expected to take it. When the raise is
+    // uncaught in a fired vthread there is no handler, so that +1 lands here -
+    // and was previously never released, leaking the instance (and its typed
+    // fields) on every uncaught vthread exception: unbounded RSS on a server
+    // whose handler green-threads can throw. exc_obj is a class instance, freed
+    // with the generic object decref (same as the DCLEAN_OBJ unwind case).
+    if (obj) dragon_decref_dispatch(obj);
 }
 
 //===----------------------------------------------------------------------===//

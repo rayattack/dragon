@@ -1754,6 +1754,18 @@ void CodeGen::emitVarArgCall(llvm::Function* func, CallExpr& node) {
                 val = impl_->builder->CreateBitCast(val, impl_->i64Type);
             } else if (val->getType()->isPointerTy()) {
                 tag = 1; // TAG_STR (default for pointers)
+                // This kwargs dict-set ADOPTS one ref (its destroy decrefs the
+                // value), so a BORROWED source - a local, field, or subscript,
+                // e.g. `f(a=s)` - must be incref'd here or the kwargs dict frees
+                // the caller's string out from under it (UAF of `s`). Owned
+                // temporaries (a concat / str() result) already carry the +1 the
+                // set consumes. Mirrors the dict-literal value path in
+                // Collections.cpp.
+                if (impl_->options.gcMode == GCMode::RC &&
+                    Impl::isBorrowedHeapExpr(node.kwArgs[ki].second.get())) {
+                    impl_->builder->CreateCall(
+                        impl_->runtimeFuncs["dragon_incref_str"], {val});
+                }
                 val = impl_->builder->CreatePtrToInt(val, impl_->i64Type);
             }
             auto* keyStr = impl_->builder->CreateGlobalString(kwName);

@@ -281,6 +281,64 @@ static void scheduler_enqueue(DragonVThread* vt) {
     pthread_mutex_unlock(&__scheduler->lock);
 }
 
+// --- I/O park handshake (see DragonVThread::park_state) ---------------------
+// PARK states.
+#define PARK_NONE   0
+#define PARK_ARMED  1
+#define PARK_PARKED 2
+#define PARK_FIRED  3
+
+// Called by every scheduler-parking path (via io_post_request) right BEFORE the
+// request becomes visible to the reactor, marking that this vthread is about to
+// suspend for I/O. Release so the reactor thread sees a coherent view.
+static inline void dragon_io_arm_park(DragonVThread* vt) {
+    __atomic_store_n(&vt->park_state, PARK_ARMED, __ATOMIC_RELEASE);
+}
+
+// Called by the reactor when a watched fd/timer fires, INSTEAD of enqueuing
+// directly. Enqueues iff the worker has already confirmed the coro is parked;
+// otherwise it hands the enqueue duty to the worker (which will observe FIRED
+// when it finishes parking). Idempotent against a spurious second fire (a
+// NONE/FIRED state simply does nothing). This is the reactor half of the
+// exactly-once, park-then-enqueue guarantee.
+static void dragon_io_wake(DragonVThread* vt) {
+    for (;;) {
+        int32_t st = __atomic_load_n(&vt->park_state, __ATOMIC_ACQUIRE);
+        if (st == PARK_PARKED) {
+            if (__atomic_compare_exchange_n(&vt->park_state, &st, PARK_NONE,
+                                            false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                vt->yield_reason = YIELD_COOP;
+                scheduler_enqueue(vt);
+                return;
+            }
+            continue;  // st reloaded; retry
+        }
+        if (st == PARK_ARMED) {
+            if (__atomic_compare_exchange_n(&vt->park_state, &st, PARK_FIRED,
+                                            false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                return;  // worker will enqueue when it finishes parking
+            }
+            continue;
+        }
+        return;  // NONE or FIRED: nothing to do (guards a stray double-fire)
+    }
+}
+
+// Called by the worker AFTER mco_resume returns and the coro is suspended, to
+// finish the park for an I/O/sleep yield. Returns true if the worker must
+// enqueue the vthread now (the reactor already fired during the yield window);
+// false if the vthread is safely parked and the reactor will enqueue on fire.
+static bool dragon_vthread_finish_park(DragonVThread* vt) {
+    int32_t expected = PARK_ARMED;
+    if (__atomic_compare_exchange_n(&vt->park_state, &expected, PARK_PARKED,
+                                    false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        return false;  // parked; reactor owns the enqueue
+    }
+    // expected == PARK_FIRED: reactor fired before we parked -> we enqueue.
+    __atomic_store_n(&vt->park_state, PARK_NONE, __ATOMIC_RELEASE);
+    return true;
+}
+
 static DragonVThread* scheduler_dequeue() {
     // Caller must hold __scheduler->lock
     DragonVThread* vt = __scheduler->head;
@@ -393,12 +451,23 @@ static void* scheduler_worker(void* arg) {
             // is_alive / join reads), wake any joiner, and drop the coro ref -
             // which frees the vthread if its handle was already detached/joined.
             vthread_mark_done_and_release(vt);
-        } else if (vt->yield_reason == YIELD_COOP) {
-            // Cooperative yield - re-enqueue immediately
+        } else if (__atomic_load_n(&vt->park_state, __ATOMIC_ACQUIRE) == PARK_NONE) {
+            // Cooperative yield (never armed for I/O) - re-enqueue immediately.
+            // Keyed on park_state, NOT vt->yield_reason: the reactor overwrites
+            // yield_reason to YIELD_COOP when it fires, so a yield_reason test
+            // here raced with the reactor and could re-enqueue an I/O-parked
+            // vthread the reactor had ALSO enqueued (the double-enqueue half of
+            // the armed-before-yield bug).
             scheduler_enqueue(vt);
+        } else {
+            // I/O / sleep park. Complete the handshake now that the coro is
+            // suspended. If the reactor already fired during the yield window,
+            // WE enqueue (it deferred to us); otherwise the vthread is parked
+            // and the reactor will enqueue exactly once when the fd/timer fires.
+            if (dragon_vthread_finish_park(vt)) {
+                scheduler_enqueue(vt);
+            }
         }
-        // YIELD_IO / YIELD_SLEEP: do NOT re-enqueue.
-        // The I/O event loop or timer callback will re-enqueue when ready.
     }
     return NULL;
 }
@@ -665,6 +734,11 @@ static int win_make_socketpair(SOCKET out[2]) {
 #endif
 
 static void io_post_request(IoRequest* req) {
+    // Arm the park BEFORE the request becomes visible to the reactor. Every
+    // scheduler-parking path (fd watch, deadline watch, sleep) funnels through
+    // here immediately before its mco_yield, so this is the one place that
+    // marks "this vthread is about to suspend for I/O" for the park handshake.
+    if (req->vt) dragon_io_arm_park(req->vt);
     pthread_mutex_lock(&__io_pending_lock);
     req->next = __io_pending_head;
     __io_pending_head = req;
@@ -804,9 +878,12 @@ static void* io_thread_entry(void*) {
                     // side-list entry so the expiry scan won't double-fire it.
                     io_deadline_remove(req);
                 }
-                req->vt->yield_reason = YIELD_COOP;
-                scheduler_enqueue(req->vt);
+                // Park handshake: enqueue via dragon_io_wake, which enqueues only
+                // once the coro is confirmed suspended (or hands off to the
+                // parking worker). Direct scheduler_enqueue here raced the yield.
+                DragonVThread* wv = req->vt;
                 free(req);
+                dragon_io_wake(wv);
             }
         }
         // Fire any deadline-bearing fd watches whose timeout has elapsed. The fd
@@ -820,9 +897,9 @@ static void* io_thread_entry(void*) {
                     *pp = req->dl_next;            // unlink before freeing
                     epoll_ctl(__io_epfd, EPOLL_CTL_DEL, req->fd, NULL);
                     req->vt->io_timed_out = 1;
-                    req->vt->yield_reason = YIELD_COOP;
-                    scheduler_enqueue(req->vt);
+                    DragonVThread* wv = req->vt;
                     free(req);
+                    dragon_io_wake(wv);
                 } else {
                     pp = &req->dl_next;
                 }
@@ -901,9 +978,12 @@ static void* io_thread_entry(void*) {
                     // Resolved by readiness before its deadline.
                     io_deadline_remove(req);
                 }
-                req->vt->yield_reason = YIELD_COOP;
-                scheduler_enqueue(req->vt);
+                // Park handshake (see dragon_io_wake) - enqueue only once the
+                // coro is confirmed parked. Was a direct scheduler_enqueue that
+                // raced the yield.
+                DragonVThread* wv = req->vt;
                 free(req);
+                dragon_io_wake(wv);
             }
         }
         // Fire deadline-bearing fd watches whose timeout elapsed: cancel the
@@ -921,9 +1001,9 @@ static void* io_thread_entry(void*) {
                     EV_SET(&dk, req->fd, filter, EV_DELETE, 0, 0, NULL);
                     kevent(__io_epfd, &dk, 1, NULL, 0, NULL);
                     req->vt->io_timed_out = 1;
-                    req->vt->yield_reason = YIELD_COOP;
-                    scheduler_enqueue(req->vt);
+                    DragonVThread* wv = req->vt;
                     free(req);
+                    dragon_io_wake(wv);
                 } else {
                     pp = &req->dl_next;
                 }
@@ -1060,11 +1140,13 @@ static void* io_thread_entry(void*) {
                 IoRequest* req = __io_active[idx].req;
                 if (!req) continue;            // already taken this tick
                 req->vt->io_timed_out = 0;     // resolved by readiness, not timeout
-                req->vt->yield_reason = YIELD_COOP;
-                scheduler_enqueue(req->vt);
+                // Park handshake (see dragon_io_wake): enqueue only once the
+                // coro is confirmed parked. Was a direct enqueue that raced the yield.
+                DragonVThread* wv = req->vt;
                 free(req);
                 __io_active[idx].req = nullptr; // tombstone so the expiry scan skips it
                 to_remove.push_back(idx);
+                dragon_io_wake(wv);
             }
             pthread_mutex_unlock(&__io_active_lock);
         }
@@ -1079,11 +1161,11 @@ static void* io_thread_entry(void*) {
             if (e.deadline_ms > 0 && e.deadline_ms <= now) {
                 if (e.req->event_type != IO_EVENT_TIMER)
                     e.req->vt->io_timed_out = 1;   // fd watch timed out (R1)
-                e.req->vt->yield_reason = YIELD_COOP;
-                scheduler_enqueue(e.req->vt);
+                DragonVThread* wv = e.req->vt;
                 free(e.req);
                 e.req = nullptr;
                 to_remove.push_back(i);
+                dragon_io_wake(wv);
             }
         }
         // Remove fired/ready entries - sort descending so erase doesn't shift.

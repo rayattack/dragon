@@ -1,13 +1,9 @@
 # Dragon release pipeline.
 #
-# Builds the compiler on Linux, macOS (Apple Silicon + Intel) and Windows,
-# turns each build into native installers via CPack (config lives in the root
-# CMakeLists.txt), renames the artifacts to the scheme the download page
-# (dragonlang-org/src/views/www.dr) links to, and publishes them to a GitHub
-# Release.
+# This is required to build the compiler on Linux, macOS (Apple Silicon + Intel) and Windows,
 #
 # Triggers:
-#   * pushing a tag like `v0.0.1`            -> publishes a release for that tag
+#   * If you push a tag like `v0.0.1`            -> publishes a release for that tag
 #   * manual "Run workflow" (workflow_dispatch) with a tag input -> same
 #
 # Asset naming (consumed verbatim by www.dr):
@@ -16,9 +12,12 @@
 #   dragon-<ver>-macos-x86_64.{dmg,tar.gz}
 #   dragon-<ver>-windows-x86_64.{msi,zip}
 #
-# IMPORTANT: `LLVM_VERSION` below must match the LLVM the codebase compiles
-# against. The local dev tree currently uses a custom LLVM build; pin this to
-# the release series you support before cutting a real tag.
+# LLVM: the codebase builds against a released LLVM (>= 21). The reusable
+# .github/actions/setup-llvm installs it from apt.llvm.org (Linux) or Homebrew
+# (macOS); LLVM is statically linked, so the produced .deb/.rpm/.dmg do not
+# depend on a system libLLVM. Windows still builds LLVM (the release branch)
+# from source and caches it, and stays experimental.
+#
 
 name: Release
 
@@ -35,9 +34,6 @@ on:
 
 permissions:
   contents: write          # create the release + upload assets
-
-env:
-  LLVM_VERSION: '18'       # <-- align with the codebase's required LLVM major
 
 jobs:
   build:
@@ -69,23 +65,17 @@ jobs:
           echo "Building Dragon $VER"
 
       # ---- Toolchain ---------------------------------------------------------
-      - name: Install LLVM
-        uses: KyleMayes/install-llvm-action@v2
-        with:
-          version: ${{ env.LLVM_VERSION }}
-          # Cache the download between runs.
-          cached: true
-
       - name: Install build + packaging tools (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          # rpm: cpack RPM generator; file/dpkg-dev: deb metadata; zlib: runtime dep.
-          sudo apt-get install -y cmake ninja-build rpm file dpkg-dev zlib1g-dev
+          # rpm: cpack RPM generator; file/dpkg-dev: deb metadata; zlib/zstd:
+          # REQUIRED by Dragon's CMake (find_package/find_library).
+          sudo apt-get install -y cmake ninja-build rpm file dpkg-dev zlib1g-dev libzstd-dev
 
       - name: Install build tools (macOS)
         if: runner.os == 'macOS'
-        run: brew install cmake ninja
+        run: brew install cmake ninja zstd
 
       - name: Install build + packaging tools (Windows)
         if: runner.os == 'Windows'
@@ -96,6 +86,16 @@ jobs:
           choco install wixtoolset -y
           echo "C:\Program Files (x86)\WiX Toolset v3.11\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
 
+      # Put MSVC on PATH so the bash-driven LLVM/Dragon Ninja builds find a compiler.
+      - name: Set up MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # ---- LLVM (pinned trunk snapshot, built once + cached) -----------------
+      - name: Setup LLVM
+        id: llvm
+        uses: ./.github/actions/setup-llvm
+
       # ---- Configure + build -------------------------------------------------
       - name: Configure
         shell: bash
@@ -103,7 +103,7 @@ jobs:
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DDRAGON_BUILD_TESTS=OFF \
-            -DLLVM_DIR="$LLVM_PATH/lib/cmake/llvm"
+            -DLLVM_DIR="${{ steps.llvm.outputs.llvm-dir }}"
 
       - name: Build
         shell: bash

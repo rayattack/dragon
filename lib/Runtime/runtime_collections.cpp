@@ -565,6 +565,41 @@ DragonSet* dragon_set_from_list(DragonList* list) {
     return s;
 }
 
+/// Backward-shift deletion (Knuth 6.4, Algorithm R) for the linear-probe
+/// table. Empties `idx` and re-packs the probe cluster after it so every
+/// remaining element is still reachanle from its home slot. This is what
+/// keeps deletion from leaving "deleted" (state 2) tombstones behind:
+/// a tombstone satisfies neither the `== 1` (live) nor the `== 0` (never used)
+/// probe test, so an add/remove workload used to fill the table with state-2
+/// slots until a memebership MISS, whose scan only stops at a state-0 slot
+/// thus probed forever. With the cluster re-packed instead, every non-live slot
+/// is genuinelyempty and every probe thus terminates.
+static void dragon_set_delete_slot(DragonSet* s, int64_t idx) {
+    s->states[idx] = 0;
+    s->buckets[idx] = 0;
+    int64_t hole = idx;
+    int64_t j = idx;
+    for (;;) {
+        j = (j + 1) % s->capacity;
+        if (s->states[j] != 1) break;  // end of the probe cluster
+        int64_t home = (int64_t)(dragon_set_hash(s->buckets[j], s->elem_tag)
+                                 % (uint64_t)s->capacity);
+        // The element at j stays put iff its home lies cyclically in
+        // (hole, j]: then its probe path never crosses the hole. Otherwise
+        // the hole would cut it off from lookups, so move it into the hole
+        // and continue with the slot it vacated as the new hole.
+        bool stays = (hole < j) ? (home > hole && home <= j)
+                                : (home > hole || home <= j);
+        if (!stays) {
+            s->buckets[hole] = s->buckets[j];
+            s->states[hole] = 1;
+            s->states[j] = 0;
+            s->buckets[j] = 0;
+            hole = j;
+        }
+    }
+}
+
 void dragon_set_add(DragonSet* s, int64_t val) {
     if (s->count * 2 >= s->capacity) dragon_set_grow(s);
     uint64_t h = dragon_set_hash(val, s->elem_tag);
@@ -604,11 +639,12 @@ void dragon_set_remove(DragonSet* s, int64_t val) {
     while (s->states[idx] != 0) {
         if (s->states[idx] == 1 &&
             dragon_set_value_eq(s->buckets[idx], val, s->elem_tag)) {
-            s->states[idx] = 2;  // deleted
-            s->count--;
-            // Decref the stored value (which may differ from `val` for strings:
-            // the set holds its own heap copy or shared intern, both refcounted).
+            // Capture the stored value BEFORE the shift re-packs the cluster
+            // (it may differ from `val` for strings: the set holds its own
+            // heap copy or shared intern, both refcounted).
             int64_t stored = s->buckets[idx];
+            s->count--;
+            dragon_set_delete_slot(s, idx);
             if (stored && s->elem_tag == TAG_STR)
                 dragon_decref_str_dispatch((const char*)(uintptr_t)stored);
             else if (stored && (s->elem_tag == TAG_LIST || s->elem_tag == TAG_DICT || s->elem_tag == TAG_BYTES))
@@ -627,9 +663,9 @@ void dragon_set_discard(DragonSet* s, int64_t val) {
     while (s->states[idx] != 0) {
         if (s->states[idx] == 1 &&
             dragon_set_value_eq(s->buckets[idx], val, s->elem_tag)) {
-            s->states[idx] = 2;
-            s->count--;
             int64_t stored = s->buckets[idx];
+            s->count--;
+            dragon_set_delete_slot(s, idx);
             if (stored && s->elem_tag == TAG_STR)
                 dragon_decref_str_dispatch((const char*)(uintptr_t)stored);
             else if (stored && (s->elem_tag == TAG_LIST || s->elem_tag == TAG_DICT || s->elem_tag == TAG_BYTES))
@@ -767,9 +803,13 @@ int64_t dragon_set_pop(DragonSet* s) {
     }
     for (int64_t i = 0; i < s->capacity; i++) {
         if (s->states[i] == 1) {
-            s->states[i] = 2;
+            // Ownership of the stored value transfers to the caller (no
+            // decref here), same as before; only the slot bookkeeping moved
+            // to the tombstone-free delete.
+            int64_t v = s->buckets[i];
             s->count--;
-            return s->buckets[i];
+            dragon_set_delete_slot(s, i);
+            return v;
         }
     }
     exit(1);  // unreachable

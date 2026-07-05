@@ -1343,13 +1343,21 @@ struct CodeGen::Impl {
     int64_t inferPtrValueTag(Expr* expr);
 
     /// Promote a string literal to a heap-allocated DragonString via dragon_string_dup.
-    /// If the expression is a StringLiteral or a NameExpr with VarKind::StrLiteral,
-    /// calls dragon_string_dup to create a refcounted copy. Otherwise returns val as-is.
+    /// If the expression is a TRUE compile-time StringLiteral (headerless rodata
+    /// pointer) or a NameExpr with VarKind::StrLiteral, calls dragon_string_dup to
+    /// create a refcounted copy. Otherwise returns val as-is.
+    ///
+    /// An f-string parses as a StringLiteral node too (isFString=true), but its
+    /// VALUE is already an owned +1 heap string built at runtime by the concat
+    /// chain. It must NOT be dup'd here: the container setter then adopts the
+    /// dup while the original +1 is orphaned - one leaked string per
+    /// list-literal element, list.append, dict-literal value, d[k]=v (key and
+    /// value), and xs[i]=v, every time the stored value is an f-string.
     llvm::Value* ensureHeapString(llvm::Value* val, Expr* expr) {
         if (options.gcMode != GCMode::RC) return val;
         bool isLiteral = false;
-        if (dynamic_cast<StringLiteral*>(expr)) {
-            isLiteral = true;
+        if (auto* sl = dynamic_cast<StringLiteral*>(expr)) {
+            isLiteral = !sl->isFString;
         } else if (auto* nameExpr = dynamic_cast<NameExpr*>(expr)) {
             isLiteral = (lookupVarKind(nameExpr->name) == VarKind::StrLiteral);
         }

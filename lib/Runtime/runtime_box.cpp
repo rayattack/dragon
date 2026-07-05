@@ -46,6 +46,13 @@ int64_t dragon_list_eq(void* a, void* b);
 int64_t dragon_dict_eq(DragonDict* a, DragonDict* b);
 int64_t dragon_bytes_eq(DragonBytes* a, DragonBytes* b);
 
+// Class-name lookup for an instance pointer (header.class_id -> descriptor
+// name), defined in runtime_builtins.cpp. Returns a .rodata C string or NULL.
+// Used to render a class instance that reached a box under the TAG_BYTES /
+// TAG_CLASS value-tag collision (see the header-gate comment in the printers
+// below) as `<ClassName instance>` instead of misreading it as bytes.
+const char* dragon_instance_class_name(void* instance);
+
 // DragonBox (the `%dragon.box = { i64, i64 }` Any/Union value) is defined once
 // in runtime_internal.h.
 
@@ -98,37 +105,82 @@ void dragon_print_box_raw(DragonBox box) {
             break;
         case TAG_LIST: {
             // The box's payload may be a DragonList (monomorphic) OR a
-            // DragonListBox (list[Any] with 16B/elem stride). Dispatch by
-            // the object's header type_tag so we pick the right printer.
+            // DragonListBox (list[Any] with 16B/elem stride) OR - because
+            // codegen packs tuple and set into value-tag 5 as well - a
+            // DragonTuple / DragonSet. Dispatch by the object's REAL header
+            // type_tag; the value-tag alone cannot tell these apart, and
+            // reading a set/tuple through DragonList offsets walks wild memory
+            // (a set's `states` pointer read as `size` -> huge loop bound).
             DragonObjectHeader* h = (DragonObjectHeader*)(uintptr_t)value;
             if (!h) { printf("None"); break; }
-            if (h->type_tag == DRAGON_TAG_LIST_BOX) {
-                dragon_print_list_box_raw((DragonListBox*)h);
-            } else {
-                // A monomorphic DragonList/F64/Ptr reached through a box still
-                // carries its element kind in `elem_tag`; render tag-aware so a
-                // nested list[str]/list[float] doesn't print payloads as ints.
-                dragon_print_list_nested_raw((DragonList*)h);
+            switch (h->type_tag) {
+                case DRAGON_TAG_LIST_BOX:
+                    dragon_print_list_box_raw((DragonListBox*)h);
+                    break;
+                case DRAGON_TAG_LIST:
+                    // A monomorphic DragonList carries its element kind in
+                    // `elem_tag`; render tag-aware so a nested list[str] /
+                    // list[float] doesn't print payloads as ints.
+                    dragon_print_list_nested_raw((DragonList*)h);
+                    break;
+                default:
+                    // Tuple/set (or any future type collapsed into tag 5)
+                    // reached here without a dedicated raw printer in this TU.
+                    // Print a safe, honest placeholder rather than misread the
+                    // struct. (A full tuple/set repr through box printing is a
+                    // follow-up; not crashing / not lying is the contract.)
+                    printf("<%s object at 0x%llx>",
+                           dragon_instance_class_name(h) ? dragon_instance_class_name(h)
+                                                         : "object",
+                           (unsigned long long)value);
+                    break;
             }
             break;
         }
         case TAG_DICT: {
-            DragonDict* d = (DragonDict*)(uintptr_t)value;
-            if (d) dragon_print_dict_raw(d);
-            else printf("None");
+            // Same header gate: only a real dict goes to the dict printer.
+            DragonObjectHeader* h = (DragonObjectHeader*)(uintptr_t)value;
+            if (!h) { printf("None"); break; }
+            if (h->type_tag == DRAGON_TAG_DICT) {
+                dragon_print_dict_raw((DragonDict*)h);
+            } else {
+                printf("<%s object at 0x%llx>",
+                       dragon_instance_class_name(h) ? dragon_instance_class_name(h)
+                                                     : "object",
+                       (unsigned long long)value);
+            }
             break;
         }
         case TAG_BYTES: {
-            auto* bv = (DragonBytes*)(uintptr_t)value;
-            printf("b'");
-            if (bv) for (int64_t bi = 0; bi < bv->len; bi++) {
-                uint8_t c = bv->data[bi];
-                if (c >= 32 && c < 127 && c != '\\' && c != '\'') printf("%c", c);
-                else if (c == '\\') printf("\\\\");
-                else if (c == '\'') printf("\\'");
-                else printf("\\x%02x", c);
+            // value-tag 7 (TAG_BYTES) is ALSO how codegen tags a class
+            // instance (varKindToTag: ClassInstance -> 7). A real DragonBytes
+            // object has header type_tag == DRAGON_TAG_BYTES; a class instance
+            // has DRAGON_TAG_CLASS. Trusting the value-tag and reading `bv->len`
+            // /`bv->data` off a class instance dumped hundreds of KB of adjacent
+            // process memory as fake "bytes" (verified: `print(Dog("rex"))`
+            // emitted b'rex\x00...' + a 668 KB OOB spill) - a memory-safety
+            // disclosure AND a silent lie. Gate on the real header.
+            DragonObjectHeader* h = (DragonObjectHeader*)(uintptr_t)value;
+            if (h && h->type_tag == DRAGON_TAG_BYTES) {
+                auto* bv = (DragonBytes*)h;
+                printf("b'");
+                for (int64_t bi = 0; bi < bv->len; bi++) {
+                    uint8_t c = bv->data[bi];
+                    if (c >= 32 && c < 127 && c != '\\' && c != '\'') printf("%c", c);
+                    else if (c == '\\') printf("\\\\");
+                    else if (c == '\'') printf("\\'");
+                    else printf("\\x%02x", c);
+                }
+                printf("'");
+            } else if (!h) {
+                printf("None");
+            } else {
+                // Class instance boxed into Any. Mirror the direct-print
+                // fallback for a dunder-less instance (`<ClassName instance>`).
+                const char* nm = dragon_instance_class_name(h);
+                if (nm) printf("<%s instance>", nm);
+                else    printf("<object at 0x%llx>", (unsigned long long)value);
             }
-            printf("'");
             break;
         }
         default:
@@ -181,8 +233,17 @@ const char* dragon_box_to_str(DragonBox box) {
         case TAG_LIST: {
             // Tag the container by its address; richer container formatting
             // (`[1, 2, 3]`) is a follow-up if/when print(list[Any]) gets a
-            // string-returning sibling. For now this beats crashing.
-            snprintf(buf, sizeof(buf), "<list 0x%llx>", (unsigned long long)box.payload);
+            // string-returning sibling. TODO: Not optimal, revisit later but
+            // for now this beats crashing. Gate on the real header so a tuple/set
+            // (also value-tag 5) is not mislabelled `<list ...>`.
+            DragonObjectHeader* h = (DragonObjectHeader*)(uintptr_t)box.payload;
+            const char* nm = (h && h->type_tag != DRAGON_TAG_LIST &&
+                              h->type_tag != DRAGON_TAG_LIST_BOX)
+                                 ? dragon_instance_class_name(h) : nullptr;
+            if (nm) snprintf(buf, sizeof(buf), "<%s object at 0x%llx>", nm,
+                             (unsigned long long)box.payload);
+            else    snprintf(buf, sizeof(buf), "<list 0x%llx>",
+                             (unsigned long long)box.payload);
             return dragon_string_alloc(buf, (int64_t)strlen(buf));
         }
         case TAG_DICT: {
@@ -190,7 +251,20 @@ const char* dragon_box_to_str(DragonBox box) {
             return dragon_string_alloc(buf, (int64_t)strlen(buf));
         }
         case TAG_BYTES: {
-            snprintf(buf, sizeof(buf), "<bytes 0x%llx>", (unsigned long long)box.payload);
+            // value-tag 7 is bytes OR a class instance (varKindToTag collision).
+            // Mislabelling an instance as `<bytes 0x...>` is a silent lie; name
+            // it honestly via its class descriptor when the header says it is
+            // not really bytes.
+            DragonObjectHeader* h = (DragonObjectHeader*)(uintptr_t)box.payload;
+            if (h && h->type_tag != DRAGON_TAG_BYTES) {
+                const char* nm = dragon_instance_class_name(h);
+                if (nm) snprintf(buf, sizeof(buf), "<%s instance>", nm);
+                else    snprintf(buf, sizeof(buf), "<object at 0x%llx>",
+                                 (unsigned long long)box.payload);
+            } else {
+                snprintf(buf, sizeof(buf), "<bytes 0x%llx>",
+                         (unsigned long long)box.payload);
+            }
             return dragon_string_alloc(buf, (int64_t)strlen(buf));
         }
         default: {

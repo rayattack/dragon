@@ -67,8 +67,10 @@ These exact names are what `dragonlang-org/src/views/www.dr` links to once
 3. Push a matching tag, e.g. `git tag v0.0.1 && git push origin v0.0.1`.
 4. Review the draft release the workflow creates, then publish.
 
-> **LLVM in CI.** `LLVM_VERSION` in the workflow must match the LLVM the
-> codebase compiles against (the local dev tree uses a custom build). Pin it
-> before tagging - the Windows job in particular depends on a usable prebuilt
-> LLVM, and is marked experimental so a failure there won't block the
-> Linux/macOS artifacts.
+> **LLVM in CI.** Dragon builds against a released LLVM (>= 21; the floor is
+> enforced in the root `CMakeLists.txt`). `.github/actions/setup-llvm` installs
+> it from apt.llvm.org (Linux) or Homebrew (macOS) via its `llvm-major` input
+> (default `22`); bump that input to move onto a newer release. LLVM is linked
+> statically, so the resulting `.deb`/`.rpm`/`.dmg` carry no system-libLLVM
+> dependency. The Windows job builds the LLVM release branch from source and is
+> marked experimental, so a failure there won't block the Linux/macOS artifacts.
