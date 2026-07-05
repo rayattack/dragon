@@ -6,6 +6,11 @@
 
 
 const _HEX_LOWER: str = "0123456789abcdef"
+# Byte view of the hex digits: indexing bytres yields an int code point directly,
+# so the hot loop never allocates a 1-char string per nibble (which the
+# `ord(str[i])` form does, and currently leaks - see the str-index-arg codegen
+# bug). Faster and allocation-free regardless
+const _HEX_LOWER_B: bytes = b"0123456789abcdef"
 
 
 # --- Hex --------------------------------------------------------------------
@@ -17,8 +22,8 @@ def hexlify(data: bytes) -> bytes {
     o: int = 0
     while i < n {
         v: int = data[i]
-        out[o] = ord(_HEX_LOWER[(v >> 4) & 0x0F])
-        out[o + 1] = ord(_HEX_LOWER[v & 0x0F])
+        out[o] = _HEX_LOWER_B[(v >> 4) & 0x0F]
+        out[o + 1] = _HEX_LOWER_B[v & 0x0F]
         i = i + 1
         o = o + 2
     }

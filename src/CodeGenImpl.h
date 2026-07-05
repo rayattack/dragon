@@ -160,13 +160,6 @@ struct CodeGen::Impl {
     bool taskLocalTransferEscapes(Stmt* s, const std::string& name);
     // A nested def / lambda / fire / thread body referencing `name` is a
     // capture ⇒ escape. Also covers ctor self-escape via target="self".
-
-    // D027.1: per-function set of names this function OWNS as cell-boxed.
-    // Outer-scope reads/writes for these names route through cell ops, the
-    // alloca holds the cell ptr, and on scope exit the cell is decref'd
-    // (which drops the held heap value via the TAG_CELL dealloc path).
-    // Recomputed at the start of each FunctionDecl/LambdaExpr codegen as
-    // (∪ nested-fn mutatedCapturedVars) − this-fn mutatedCapturedVars.
     std::unordered_set<std::string> cellPromotedLocals;
 
     // Current function being generated
@@ -186,19 +179,6 @@ struct CodeGen::Impl {
                                       // loop body, not ones enclosing the loop.
     };
     std::stack<LoopInfo> loopStack;
-
-    // Active try/with exception frames (dragon_exc_push_frame), innermost last.
-    // An entry is present while that try/with BODY is being emitted; it records
-    // the function the frame belongs to. The normal body-exit pops the runtime
-    // frame, but an early exit via return/break/continue sets a terminator that
-    // bypasses that pop - so those statements must emit one dragon_exc_pop_frame
-    // per frame they escape, or the per-vthread exception stack leaks an entry
-    // every time (eventually "exceeded maximum nested try/except depth", and
-    // before that a stale longjmp target -> an unhandled/mis-dispatched raise).
-    // Keying entries by function gives free per-function isolation: nested
-    // functions / lambdas / comprehensions are emitted inline but balance their
-    // own push/pops, so the suffix matching currentFunction is exactly the
-    // current function's live frames.
     std::vector<llvm::Function*> tryFrameFuncs;
 
     // Count of the current function's live try/with exception frames (the
@@ -1690,13 +1670,25 @@ struct CodeGen::Impl {
     // borrowed.
     static bool isBorrowedHeapExpr(Expr* expr) {
         if (auto* sub = dynamic_cast<SubscriptExpr*>(expr)) {
-            // An element read (xs[i], d[k]) borrows the container's reference,
-            // but a SLICE (s[1:4], xs[a:b]) calls dragon_str_slice /
+            // A SLICE (s[1:4], xs[a:b]) calls dragon_str_slice /
             // dragon_list_slice / dragon_bytes_slice, all of which return a
-            // FRESH +1 object the consumer owns. Treating it as a borrow adds
-            // an extra incref on store (and skips the arg-temp decref), leaking
-            // one object per evaluation.
-            return dynamic_cast<SliceExpr*>(sub->index.get()) == nullptr;
+            // FRESH +1 object the consumer owns - never a borrow. Treating it as
+            // a borrow adds an extra incref on store (and skips the arg-temp
+            // decref), leaking one object per evaluation.
+            if (dynamic_cast<SliceExpr*>(sub->index.get()) != nullptr)
+                return false;
+            // A STRING element read (s[i]) is likewise OWNED, not borrowed:
+            // strings are immutable, so dragon_str_index mallocs a fresh 1-char
+            // string - there is no interior reference to hand back. Same fresh
+            // +1 as a slice, so the same rule applies; misclassifying it as a
+            // borrow leaked one 1-char string per evaluation (ord(s[i]),
+            // c = s[i], len(s[i]), and binascii.hexlify's ord(HEX[n]) hot loop).
+            // list / dict / set element reads (xs[i], d[k]) DO borrow the
+            // container's stored reference, so they stay borrowed.
+            if (sub->object && sub->object->type &&
+                sub->object->type->kind() == Type::Kind::Str)
+                return false;
+            return true;
         }
         return dynamic_cast<NameExpr*>(expr) != nullptr ||
                dynamic_cast<AttributeExpr*>(expr) != nullptr;

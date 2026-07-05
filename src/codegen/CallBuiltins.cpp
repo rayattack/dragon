@@ -1088,8 +1088,13 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
     // G.4: ord(char)
     if (name == "ord" && node.args.size() == 1) {
         node.args[0]->accept(*this);
+        // ord borrows its arg (reads the code point, returns an int). An owned
+        // heap-string temp - notably ord(s[i]), which mallocs a fresh 1-char
+        // string - must be released after the call or it leaks once per call
+        // Mirrors chr below; the common tail drains argTemps
+        llvm::Value* arg = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
         impl_->lastValue = impl_->builder->CreateCall(
-            impl_->runtimeFuncs["dragon_ord"], {impl_->lastValue}, "ord");
+            impl_->runtimeFuncs["dragon_ord"], {arg}, "ord");
         return true;
     }
 

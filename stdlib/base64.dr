@@ -25,9 +25,13 @@ def _build_decode_table(alphabet: str) -> list[int] {
         t[i] = -1
         i = i + 1
     }
+    # Index the byte view (int code points) rather than ord(alphabet[j]): the
+    # str-subscript form allocates a 1-char string per char (and currently
+    # leaks it - str-index-arg codegen bug). bytes[j] is a scalar
+    const ab: bytes = alphabet.encode()
     j: int = 0
     while j < len(alphabet) {
-        t[ord(alphabet[j])] = j
+        t[ab[j]] = j
         j = j + 1
     }
     t[_PAD] = -2
@@ -38,13 +42,17 @@ const _STD_DECODE: list[int] = _build_decode_table(_STD_ALPHABET)
 const _URL_DECODE: list[int] = _build_decode_table(_URL_ALPHABET)
 
 
-# --- Encode -----------------------------------------------------------------
+# --- Encode --------------------------------------------------------------------
 
 def _encode_into(data: bytes, alphabet: str) -> bytes {
     n: int = len(data)
     if n == 0 {
         return bytes()
     }
+    # Byte view of the alphabet: ab[i] is an int code point, so the encode loop
+    # never allocates a 1-char string per output symbol the way ord(alphabet[i])
+    # does (which currently leaks - str-index-arg codegen bug)
+    const ab: bytes = alphabet.encode()
     # Output length is always 4 * ceil(n / 3) (with `=` padding to align).
     out_len: int = 4 * ((n + 2) // 3)
     out: list[int] = [0] * out_len
@@ -54,26 +62,26 @@ def _encode_into(data: bytes, alphabet: str) -> bytes {
         a: int = data[i]
         b: int = data[i + 1]
         c: int = data[i + 2]
-        out[o] = ord(alphabet[a >> 2])
-        out[o + 1] = ord(alphabet[((a & 0x03) << 4) | (b >> 4)])
-        out[o + 2] = ord(alphabet[((b & 0x0F) << 2) | (c >> 6)])
-        out[o + 3] = ord(alphabet[c & 0x3F])
+        out[o] = ab[a >> 2]
+        out[o + 1] = ab[((a & 0x03) << 4) | (b >> 4)]
+        out[o + 2] = ab[((b & 0x0F) << 2) | (c >> 6)]
+        out[o + 3] = ab[c & 0x3F]
         i = i + 3
         o = o + 4
     }
     rem: int = n - i
     if rem == 1 {
         a: int = data[i]
-        out[o] = ord(alphabet[a >> 2])
-        out[o + 1] = ord(alphabet[(a & 0x03) << 4])
+        out[o] = ab[a >> 2]
+        out[o + 1] = ab[(a & 0x03) << 4]
         out[o + 2] = _PAD
         out[o + 3] = _PAD
     } else if rem == 2 {
         a: int = data[i]
         b: int = data[i + 1]
-        out[o] = ord(alphabet[a >> 2])
-        out[o + 1] = ord(alphabet[((a & 0x03) << 4) | (b >> 4)])
-        out[o + 2] = ord(alphabet[(b & 0x0F) << 2])
+        out[o] = ab[a >> 2]
+        out[o + 1] = ab[((a & 0x03) << 4) | (b >> 4)]
+        out[o + 2] = ab[(b & 0x0F) << 2]
         out[o + 3] = _PAD
     }
     return bytes(out)
