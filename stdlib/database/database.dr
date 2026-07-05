@@ -53,8 +53,15 @@ def _open(dsn: str) -> Connection {
     } else if dsn.startswith("sqlite:") {
         path = dsn[7:]
     }
+    # Empty path means in-memory. Return the literal straight to the ctor rather
+    # than reassigning `path = ":memory:"`: `path` may hold an OWNED slice here
+    # (dsn[7:] / dsn[9:]), and a slot that is owned-string on one branch and a
+    # string LITERAL on another has its cleanup-kind collapsed to StrLiteral
+    # (lexically-last wins), so scope cleanup skips the decref and the slice
+    # leaks once per open. Passing the literal directly sidesteps the mixed-kind
+    # slot entirely
     if path == "" {
-        path = ":memory:"
+        return SqliteConnection(":memory:")
     }
     return SqliteConnection(path)
 }

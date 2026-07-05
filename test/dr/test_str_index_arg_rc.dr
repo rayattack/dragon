@@ -1,0 +1,94 @@
+"""str element-read ownership - the str-index-arg leak (2026-07-05).
+
+`s[i]` calls dragon_str_index, which mallocs a FRESH owned 1-char string
+(strings are immutable, so indexing must materialize a new one). Codegen
+classified every non-slice subscript as a BORROW - correct for list[i] / d[k]
+(they hand back the container's stored reference), wrong for str[i]. So an owned
+1-char string leaked once per evaluation on:
+
+  - a builtin borrow-arg:  ord(s[i]), len(s[i])
+  - a plain store:         c = s[i]
+  - binascii.hexlify's `ord(_HEX[...])` hot loop -> every HMAC.hexdigest leaked
+    ~64 one-char strings (the amebo signature path bled ~4.4 MB/s at 1k ev/s).
+
+Fixed by treating a STRING element-read as OWNED (like a slice) in
+isBorrowedHeapExpr, plus routing ord's argument through trackBorrowTemp so the
+owned temp is drained. This test locks in the rendered VALUES across
+high-iteration loops; leak-freedom itself is proven under LSan by the scratch
+probes (ord(s[i]) / c=s[i] / len(s[i]) all went from 500k-1M leaks to 0)
+"""
+
+from unittest import TestCase, main
+
+const HEX: str = "0123456789abcdef"
+
+
+def sum_ord(n: int) -> int {
+    # ord(s[i]): owned 1-char temp fed straight into a borrow builtin
+    acc: int = 0
+    i: int = 0
+    while i < n {
+        acc = acc + ord(HEX[i & 15])
+        i = i + 1
+    }
+    return acc
+}
+
+
+def last_char(s: str, reps: int) -> str {
+    # c = s[i]: owned temp stored into a slot, repeatedly
+    c: str = ""
+    i: int = 0
+    while i < reps {
+        c = s[len(s) - 1]
+        i = i + 1
+    }
+    return c
+}
+
+
+class StrIndexArgRcTests(TestCase) {
+    def test_ord_of_index_value() {
+        # Sum of ord over one full HEX cycle, computed independently
+        expect: int = 0
+        j: int = 0
+        while j < 16 {
+            expect = expect + ord(HEX[j])
+            j = j + 1
+        }
+        # The value must scale exactly across many cycles - a freed/resued temp
+        # would corrupt the running sum
+        self.assertEqual(sum_ord(16), expect)
+        self.assertEqual(sum_ord(160), expect * 10)
+    }
+
+    def test_assign_index_value() {
+        # The stored character must stay correct after may reassingments.
+        self.assertEqual(last_char("dragon", 300), "n")
+        self.assertEqual(last_char("0123456789abcdef", 300), "f")
+    }
+
+    def test_len_of_index_is_one() {
+        total: int = 0
+        i: int = 0
+        while i < 300 {
+            total = total + len(HEX[i & 15])
+            i = i + 1
+        }
+        self.assertEqual(total, 300)
+    }
+
+    def test_index_char_roundtrip() {
+        # ord -> chr must round-trip the exact character across the alphabet,
+        # esercising ord(s[i]) (borrow arg) and chr(...) (owned result) together
+        i: int = 0
+        while i < 16 {
+            const code: int = ord(HEX[i])
+            self.assertEqual(chr(code), HEX[i])
+            i = i + 1
+        }
+    }
+}
+
+
+main([StrIndexArgRcTests()])
