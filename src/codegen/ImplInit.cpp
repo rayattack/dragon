@@ -1206,6 +1206,11 @@ void CodeGen::Impl::declareRuntimeFunctions() {
     // i64 dragon_class_register_mark_shared(i64 class_id, ptr fn)
     getOrDeclareRuntime("dragon_class_register_mark_shared",
         llvm::FunctionType::get(i64Type, {i64Type, i8PtrType}, false));
+    // void dragon_mark_shared_boxed(i64 tag, i64 payload) -- tag dispatched
+    // mark for union/nay box stored into a module global (str lef or tag gated
+    // clsure / deep or header carrying hepa tags)
+    getOrDeclareRuntime("dragon_mark_shared_boxed",
+        llvm::FunctionType::get(voidType, {i64Type, i64Type}, false));
 
     // --- GC Phase 5: cycle collector integration ---
     // i64 dragon_class_register_dealloc(ptr fn) -- returns class_id

@@ -418,6 +418,19 @@ void CodeGen::visit(ClassDecl& node) {
                                             } else if (cn == "bool") {
                                                 fieldType = impl_->i1Type;
                                                 fieldKind = Impl::VarKind::Bool;
+                                            } else if (cn == "Lock" && !impl_->classNames.count("Lock")) {
+                                                // Intrinsic Lock field: `self._lock = Lock()`.
+                                                // Lock is not a user class, so without this the
+                                                // field will stay untagged and `self._lock.acquire()`
+                                                // / `with self._lock` will fall through to generic
+                                                // paths that SILENTLY drop - the "lock" never locks
+                                                // (found by the concurrent mutation dectector on
+                                                // Router._storage_lock). Tag with the same "__Lock" sentinel
+                                                // the local variable path uses so attribute receiver
+                                                // dispatch reaches dragon_lock_acquire/release.
+                                                fieldType = impl_->i8PtrType;
+                                                fieldKind = Impl::VarKind::Other;
+                                                impl_->classFieldClassName[node.name][attrExpr->attribute] = "__Lock";
                                             } else if (impl_->classNames.count(cn)) {
                                                 // User class constructor: `self.x = Foo(args)`.
                                                 // Track both kind and concrete class name so a
@@ -570,6 +583,22 @@ void CodeGen::visit(ClassDecl& node) {
                                     impl_->classFieldCallableType
                                         [node.name][attrExpr->attribute] =
                                         impl_->callableTypeExprToFnType(cte);
+                                }
+                                // Intrinsic Lock field, annotated form:
+                                // `self._lock: Lock = Lock()`. Same tagging as
+                                // the unannotated ctor-scan branch (see the
+                                // cn == "Lock" case above) so field-receiver
+                                // acquire/release/with dispatch works instead
+                                // of silently dropping the calls.
+                                if (auto* lockNamed = dynamic_cast<NamedTypeExpr*>(
+                                        annAssign->annotation.get())) {
+                                    if (lockNamed->name == "Lock" &&
+                                        !impl_->classNames.count("Lock")) {
+                                        fieldType = impl_->i8PtrType;
+                                        fieldKind = Impl::VarKind::Other;
+                                        impl_->classFieldClassName
+                                            [node.name][attrExpr->attribute] = "__Lock";
+                                    }
                                 }
                                 // `self.x: list[T] = ...` - record the element
                                 // kind (and class name when T is a class) so

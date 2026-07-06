@@ -37,6 +37,32 @@ void dragon_gc_go_concurrent(void) {
     __atomic_store_n(&gc_concurrent, 1, __ATOMIC_RELEASE);
 }
 
+// Concurrent-mutation detector trip wire (see runtime_internal.h). A second
+// vthread entered a structural mutation of the same SHARED container while
+// another was still inside its own. Continuing would corrupt the heap
+// (silently, or as "realloc(): invalid next size" much later, far from the
+// bug) - stop at the first overlap with an actionable message instead
+void dragon_fatal_concurrent_mutation(const char* kind) {
+    fprintf(stderr,
+        "DRAGON FATAL: concurrent mutation of a shared %s\n"
+        "\n"
+        "Two vthreads mutated the same globally-reachable %s at the same\n"
+        "time. Reads of shared state are always safe and lock-free, but\n"
+        "unsynchronized concurrent MUTATION corrupts memory, so the runtime\n"
+        "stops at the first overlap it detects. Guard every mutation of\n"
+        "shared state with a Lock:\n"
+        "\n"
+        "    from threading import Lock\n"
+        "    lock: Lock = Lock()\n"
+        "\n"
+        "    with lock {\n"
+        "        SHARED[key] = value\n"
+        "    }\n",
+        kind, kind);
+    fflush(stderr);
+    abort();
+}
+
 // Tracked-set array helpers (defined below near gc_track). Caller must hold
 // exclusion: gc_lock in concurrent mode, or be the sole mutator thread.
 static inline void gc_tracked_append(DragonObjectHeader* h, void* obj);
@@ -1088,6 +1114,7 @@ static void shared_walk_list(DragonList* l, DragonSharedWorklist* w) {
 static void shared_walk_dict(DragonDict* d, DragonSharedWorklist* w) {
     if (!d || d->size == 0) return;
     for (int64_t i = 0; i < d->size; i++) {
+        if (d->entries[i].dead) continue;  // tombstone: key/value cleared
         int8_t tag = d->entries[i].tag;
         int64_t v = d->entries[i].value;
         if (v) {
@@ -1095,8 +1122,13 @@ static void shared_walk_dict(DragonDict* d, DragonSharedWorklist* w) {
             else if (tag == TAG_LIST || tag == TAG_DICT || tag == TAG_BYTES)
                 dragon_mark_shared_worklist_push(w, (void*)(uintptr_t)v);
         }
-        // Dict keys are interned strings - also mark.
-        if (d->entries[i].key) dragon_mark_shared_str(d->entries[i].key);
+        // Keys are DragonStrings ONLY when keys_are_ptr == 1. An int-keyed
+        // dict stores the i64 key cast into the pointer slot (see the
+        // keys_are_ptr contract in runtime_internal.h) - treating it as a
+        // string header reads wild memory (int-keyed dict module globals,
+        // CodeGenE2E.DictEqIntKeyed).
+        if (d->keys_are_ptr && d->entries[i].key)
+            dragon_mark_shared_str(d->entries[i].key);
     }
 }
 
@@ -1176,6 +1208,28 @@ void dragon_mark_shared_deep(void* obj) {
         }
     }
     shared_worklist_free(&w);
+}
+
+// SHARED-mark a boxed {tag, payload} value stored into a module-global
+// Union/Any slot. Mirrors emitUnionIncref's dispatch exactly: tag 1 (STR) is
+// a string leaf; tag 10 (CLOSURE) may be a bare fn pointer (a code address
+// with NO header), so gate on the closure type_tag exactly like
+// dragon_incref_callable before touching gc_flags; tag >= 5 is a
+// header-carrying heap object (list/dict/bytes/set/tuple/instance) that
+// dragon_incref would already write to, so the deep mark is safe on it
+void dragon_mark_shared_boxed(int64_t tag, int64_t payload) {
+    if (!payload) return;
+    if (tag == TAG_STR) {
+        dragon_mark_shared_str((const char*)(uintptr_t)payload);
+        return;
+    }
+    if (tag == DRAGON_TAG_CLOSURE) {
+        DragonObjectHeader* h = (DragonObjectHeader*)(uintptr_t)payload;
+        if (h->type_tag != DRAGON_TAG_CLOSURE) return;  // bare fn ptr: no-op
+        dragon_mark_shared(h);
+        return;
+    }
+    if (tag >= TAG_LIST) dragon_mark_shared_deep((void*)(uintptr_t)payload);
 }
 
 } // extern "C"

@@ -663,6 +663,62 @@ extern int gc_concurrent;
 // that can allocate/free Dragon heap objects.
 void dragon_gc_go_concurrent(void);
 
+//===----------------------------------------------------------------------===//
+// Concurrent-mutation detector for SHARED containers (best-effort, Go-style)
+//===----------------------------------------------------------------------===//
+//
+// Contract: reads of shared state are lock-free and safe; STRUCTURAL mutation
+// of shared state must be serialized by the program (threading.Lock). An
+// unlocked concurrent mutation corrupts memory silently ("realloc(): invalid
+// next size", torn dense arrays). Rather than corrupt, the runtime detects
+// the overlap and aborts loudly at the first colliding mutation, exactly like
+// Go's "concurrent map writes" fatal error.
+//
+// Mechanism: structural mutators of dict/list/set/deque wrap their mutation
+// section in begin/end. begin sets GC_FLAG_MUTATING; a second mutator seeing
+// the bit already set has caught a real overlap (vthreads never yield inside
+// a container op, so same-worker green threads can NEVER interleave inside a
+// mutation window - only true OS-parallel mutators collide).
+//
+// Cost: gated first on the gc_concurrent latch (a single-OS-thread program
+// pays one relaxed load + predicted branch, no RMW) and then on
+// GC_FLAG_SHARED (request-local containers skip the RMW too). Only mutations
+// of actually-shared containers in an actually-multi-threaded program pay
+// the two flag RMWs, and those mutations are supposed to be under a Lock.
+//
+// Placement rules (each instrumented site verified individually):
+//   - begin AFTER any validation that can raise, OR end explicitly on the
+//     raise branch first: a longjmp does not run C++ destructors, and a
+//     stranded MUTATING bit would false-abort the next mutation.
+//   - end BEFORE decref-of-old sections where practical: today no user
+//     finalizer can run inside a decref (class deallocs are generated
+//     field-releases only), but if user __del__ ever lands, a finalizer
+//     re-mutating the same container would self-collide with the guard.
+//   - Wrappers that delegate to an instrumented core (dict_set, dict_update,
+//     setdefault, list_sort) are NOT instrumented - nesting would self-abort.
+#define GC_FLAG_MUTATING 0x10
+
+// Report the collision and abort. Defined in runtime_core.cpp. Never returns.
+void dragon_fatal_concurrent_mutation(const char* kind);
+
+// Arm the detector for a structural mutation of `h`. Returns whether it was
+// armed (caller must pass that to dragon_shared_mut_end on EVERY exit path
+// that follows, except a longjmp-raise path, which must end BEFORE raising).
+static inline bool dragon_shared_mut_begin(DragonObjectHeader* h, const char* kind) {
+    if (!__atomic_load_n(&gc_concurrent, __ATOMIC_RELAXED)) return false;
+    if (!(dragon_gc_flags_load(h) & GC_FLAG_SHARED)) return false;
+    uint8_t prev = (uint8_t)__atomic_fetch_or(&h->gc_flags, GC_FLAG_MUTATING,
+                                              __ATOMIC_ACQUIRE);
+    if (prev & GC_FLAG_MUTATING) dragon_fatal_concurrent_mutation(kind);
+    return true;
+}
+
+static inline void dragon_shared_mut_end(DragonObjectHeader* h, bool armed) {
+    if (armed)
+        __atomic_fetch_and(&h->gc_flags, (uint8_t)~GC_FLAG_MUTATING,
+                           __ATOMIC_RELEASE);
+}
+
 // Per-OS-thread exception state (TLS)
 extern __thread jmp_buf     __dragon_exc_stack[DRAGON_EXC_STACK_SIZE];
 extern __thread int         __dragon_exc_sp;

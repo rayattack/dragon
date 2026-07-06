@@ -9,6 +9,7 @@
 # request-side query/route parsing moved to http.message alongside Request.
 from urllib.parse import parse_qsl
 from socket import TcpStream
+from threading import Lock
 from ssl import SSLContext, SSLSocket, PROTOCOL_TLS_SERVER
 from time import monotonic
 # Connection lifecycle (W1) - the transport-agnostic reader hierarchy and the
@@ -891,6 +892,13 @@ class Router {
         self._after_by_sd[""] = []
         self._ws_routes_by_sd[""] = []
         self._storage: dict[str, str] = {}
+        # App storage is mutated from request handlers, which run on green
+        # threads spread across OS workers. Reads of shared state are lock free
+        # but MUTATION must be serialized or the dict corrupts (& runtime's conncurrent
+        # mutation dector abors). keep/peek/unkeep take this lock so the documented API
+        # honors the cntract out of the box. peek locks too, an unlocked read racing a
+        # concurrent rehash can walk freed entries
+        self._storage_lock: Lock = Lock()
         self._config: dict[str, str] = {}
         self._on_startup: list[Callable[[Router], None]] = []
         self._on_shutdown: list[Callable[[Router], None]] = []
@@ -1229,24 +1237,31 @@ class Router {
     # --- App storage ---
 
     def keep(key: str, value: str) -> None {
-        self._storage[key] = value
+        with self._storage_lock {
+            self._storage[key] = value
+        }
     }
 
     def peek(key: str) -> str {
-        if key in self._storage {
-            return self._storage[key]
+        with self._storage_lock {
+            if key in self._storage {
+                return self._storage[key]
+            }
+            return ""
         }
-        return ""
     }
 
     def unkeep(key: str) -> str {
-        # Remove and return a value from app storage
-        if key in self._storage {
-            const val: str = self._storage[key]
-            del self._storage[key]
-            return val
+        # Remove and return a value from app storage. Check-then-delete is
+        # atomic under the lock (no TOCTOU between handlers).
+        with self._storage_lock {
+            if key in self._storage {
+                const val: str = self._storage[key]
+                del self._storage[key]
+                return val
+            }
+            return ""
         }
-        return ""
     }
 
     # --- Configuration ---

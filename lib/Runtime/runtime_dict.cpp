@@ -188,6 +188,10 @@ static inline void dragon_dict_release_key(const DragonDict* d, const char* key)
 }
 
 void dragon_dict_set_tagged(DragonDict* d, const char* key, int64_t value, int64_t tag) {
+    // Concurrent-mutation detector (runtime_internal.h): whole op is the
+    // window, like Go's hashWriting. No raise can occur below; ends before
+    // the old-value decrefs (update branch) / at function exit (insert).
+    bool mut_armed = dragon_shared_mut_begin(&d->header, "dict");
     // This is the str-key path: the dict owns one ref per key (see
     // dragon_dict_release_key). Mark the dict str-keyed so destroy/clear/del
     // release keys; int-keyed dicts go through dragon_dict_int_set_tagged and
@@ -236,6 +240,9 @@ void dragon_dict_set_tagged(DragonDict* d, const char* key, int64_t value, int64
         int64_t old_val = d->entries[idx].value;
         d->entries[idx].value = value;
         d->entries[idx].tag = (int8_t)tag;
+        // Structural work done - close the window before the drop (see the
+        // placement rules in runtime_internal.h).
+        dragon_shared_mut_end(&d->header, mut_armed);
         if (old_val && old_tag == TAG_STR) {
             dragon_decref_str_dispatch((const char*)(uintptr_t)old_val);
         } else if (old_val && (old_tag == TAG_LIST || old_tag == TAG_DICT || old_tag == TAG_BYTES)) {
@@ -267,6 +274,7 @@ void dragon_dict_set_tagged(DragonDict* d, const char* key, int64_t value, int64
     d->indices[slot] = ei;
     d->size++;
     d->used++;
+    dragon_shared_mut_end(&d->header, mut_armed);
 }
 
 void dragon_dict_set(DragonDict* d, const char* key, int64_t value) {
@@ -809,6 +817,9 @@ int64_t dragon_dict_popitem(DragonDict* d) {
         dragon_raise_exc_cstr(42, "KeyError: 'popitem(): dictionary is empty'");
         return 0;
     }
+    // Concurrent-mutation detector: armed after the raise-y validation
+    // (a longjmp would strand the bit), covers scan + tombstone + compact
+    bool mut_armed = dragon_shared_mut_begin(&d->header, "dict");
     // LIFO: the most-recently-inserted LIVE entry. Scan back over any trailing
     // tombstones (a prior pop/del may have left dead slots at the tail).
     int64_t lastIdx = d->size - 1;
@@ -841,6 +852,7 @@ int64_t dragon_dict_popitem(DragonDict* d) {
         while (d->size > 0 && d->entries[d->size - 1].dead) d->size--;
     }
     dict_maybe_compact(d);
+    dragon_shared_mut_end(&d->header, mut_armed);
     return (int64_t)t;
 }
 
@@ -849,10 +861,14 @@ int64_t dragon_dict_popitem(DragonDict* d) {
 /// dead slots are reclaimed by lazy compaction. Insertion order of surviving
 /// entries is unchanged because their dense positions never move.
 int64_t dragon_dict_pop(DragonDict* d, const char* key) {
+    // Concurrent-mutation detector: window covers probe + tombstone +
+    // compact; released explicitly before the raise (longjmp skips ends).
+    bool mut_armed = dragon_shared_mut_begin(&d->header, "dict");
     uint64_t h = dict_hash(key);
     int64_t slot = dict_probe(d, key, h);
     int64_t idx = d->indices[slot];
     if (idx < 0) {
+        dragon_shared_mut_end(&d->header, mut_armed);
         dragon_raise_keyerror(key);
         return 0;
     }
@@ -865,15 +881,21 @@ int64_t dragon_dict_pop(DragonDict* d, const char* key) {
     d->entries[idx].value = 0;
     d->used--;
     dict_maybe_compact(d);
+    dragon_shared_mut_end(&d->header, mut_armed);
     return val;
 }
 
 /// Pop key with default
 int64_t dragon_dict_pop_default(DragonDict* d, const char* key, int64_t def) {
+    // Concurrent-mutation detector - see dragon_dict_pop.
+    bool mut_armed = dragon_shared_mut_begin(&d->header, "dict");
     uint64_t h = dict_hash(key);
     int64_t slot = dict_probe(d, key, h);
     int64_t idx = d->indices[slot];
-    if (idx < 0) return def;
+    if (idx < 0) {
+        dragon_shared_mut_end(&d->header, mut_armed);
+        return def;
+    }
     int64_t val = d->entries[idx].value;
     // Caller receives only the VALUE; the dict's owned key is dropped.
     dragon_dict_release_key(d, d->entries[idx].key);
@@ -883,6 +905,7 @@ int64_t dragon_dict_pop_default(DragonDict* d, const char* key, int64_t def) {
     d->entries[idx].value = 0;
     d->used--;
     dict_maybe_compact(d);
+    dragon_shared_mut_end(&d->header, mut_armed);
     return val;
 }
 
@@ -891,10 +914,13 @@ int64_t dragon_dict_pop_default(DragonDict* d, const char* key, int64_t def) {
 /// dragon_dict_destroy / dragon_dict_clear - values are owned, keys are not).
 /// Missing key raises KeyError, matching dragon_dict_get / Python semantics.
 void dragon_dict_del(DragonDict* d, const char* key) {
+    // Concurrent-mutation detector - see dragon_dict_pop.
+    bool mut_armed = dragon_shared_mut_begin(&d->header, "dict");
     uint64_t h = dict_hash(key);
     int64_t slot = dict_probe(d, key, h);
     int64_t idx = d->indices[slot];
     if (idx < 0) {
+        dragon_shared_mut_end(&d->header, mut_armed);
         dragon_raise_keyerror(key);
         return;
     }
@@ -911,6 +937,8 @@ void dragon_dict_del(DragonDict* d, const char* key) {
     d->entries[idx].value = 0;
     d->used--;
     dict_maybe_compact(d);
+    // Structural work done - close the window before the drops.
+    dragon_shared_mut_end(&d->header, mut_armed);
     if (val && tag == TAG_STR) {
         dragon_decref_str_dispatch((const char*)(uintptr_t)val);
     } else if (val && (tag == TAG_LIST || tag == TAG_DICT || tag == TAG_BYTES)) {
@@ -924,6 +952,11 @@ void dragon_dict_del(DragonDict* d, const char* key) {
 /// Clear all entries
 void dragon_dict_clear(DragonDict* d) {
     if (d) {
+        // Concurrent-mutation detector: whole teardown loop is the window.
+        // The per-entry decrefs stay INSIDE it (restructuring them out would
+        // need a temp buffer); today no user finalizer can run inside a
+        // decref, so self-collision is impossible - revisit if __del__ lands.
+        bool mut_armed = dragon_shared_mut_begin(&d->header, "dict");
         // Reentrancy hardening: null each slot's owned value/key and capture
         // them locally BEFORE dropping their refs, so a finalizer that
         // re-reads this dict during a drop observes an emptied slot, never a
@@ -953,6 +986,7 @@ void dragon_dict_clear(DragonDict* d) {
         d->size = 0;
         d->used = 0;
         for (int64_t i = 0; i < d->index_size; i++) d->indices[i] = DICT_EMPTY;
+        dragon_shared_mut_end(&d->header, mut_armed);
     }
 }
 
@@ -1204,6 +1238,8 @@ static int64_t dict_probe_i64(DragonDict* d, int64_t key, uint64_t h) {
 }
 
 void dragon_dict_int_set_tagged(DragonDict* d, int64_t key, int64_t value, int64_t tag) {
+    // Concurrent-mutation detector - see dragon_dict_set_tagged.
+    bool mut_armed = dragon_shared_mut_begin(&d->header, "dict");
     // Acyclic-skip enrollment (int-keyed dict): identical to the str-keyed setter.
     // int keys are non-pointers (leaves), so only a traceable VALUE makes the dict
     // cyclic-capable. This is the SECOND dict insert path - it must gate too, or a
@@ -1234,6 +1270,7 @@ void dragon_dict_int_set_tagged(DragonDict* d, int64_t key, int64_t value, int64
         int64_t old_val = d->entries[idx].value;
         d->entries[idx].value = value;
         d->entries[idx].tag = (int8_t)tag;
+        dragon_shared_mut_end(&d->header, mut_armed);
         if (old_val && old_tag == TAG_STR) {
             dragon_decref_str_dispatch((const char*)(uintptr_t)old_val);
         } else if (old_val && (old_tag == TAG_LIST || old_tag == TAG_DICT || old_tag == TAG_BYTES)) {
@@ -1259,6 +1296,7 @@ void dragon_dict_int_set_tagged(DragonDict* d, int64_t key, int64_t value, int64
     d->indices[slot] = ei;
     d->size++;
     d->used++;
+    dragon_shared_mut_end(&d->header, mut_armed);
 }
 
 void dragon_dict_int_set(DragonDict* d, int64_t key, int64_t value) {
@@ -1391,10 +1429,13 @@ int64_t dragon_dict_int_has_key(DragonDict* d, int64_t key) {
 }
 
 int64_t dragon_dict_int_pop(DragonDict* d, int64_t key) {
+    // Concurrent-mutation detector - see dragon_dict_pop.
+    bool mut_armed = dragon_shared_mut_begin(&d->header, "dict");
     uint64_t h = dict_hash_i64(key);
     int64_t slot = dict_probe_i64(d, key, h);
     int64_t idx = d->indices[slot];
     if (idx < 0) {
+        dragon_shared_mut_end(&d->header, mut_armed);
         dragon_raise_keyerror_int(key);
         return 0;
     }
@@ -1405,14 +1446,20 @@ int64_t dragon_dict_int_pop(DragonDict* d, int64_t key) {
     d->entries[idx].value = 0;
     d->used--;
     dict_maybe_compact(d);
+    dragon_shared_mut_end(&d->header, mut_armed);
     return val;
 }
 
 int64_t dragon_dict_int_pop_default(DragonDict* d, int64_t key, int64_t def) {
+    // Concurrent-mutation detector - see dragon_dict_pop.
+    bool mut_armed = dragon_shared_mut_begin(&d->header, "dict");
     uint64_t h = dict_hash_i64(key);
     int64_t slot = dict_probe_i64(d, key, h);
     int64_t idx = d->indices[slot];
-    if (idx < 0) return def;
+    if (idx < 0) {
+        dragon_shared_mut_end(&d->header, mut_armed);
+        return def;
+    }
     int64_t val = d->entries[idx].value;
     d->indices[slot] = DICT_TOMBSTONE;
     d->entries[idx].dead = 1;
@@ -1420,15 +1467,19 @@ int64_t dragon_dict_int_pop_default(DragonDict* d, int64_t key, int64_t def) {
     d->entries[idx].value = 0;
     d->used--;
     dict_maybe_compact(d);
+    dragon_shared_mut_end(&d->header, mut_armed);
     return val;
 }
 
 /// `del d[key]` for int-keyed dicts. See dragon_dict_del for the str twin.
 void dragon_dict_int_del(DragonDict* d, int64_t key) {
+    // Concurrent-mutation detector - see dragon_dict_pop.
+    bool mut_armed = dragon_shared_mut_begin(&d->header, "dict");
     uint64_t h = dict_hash_i64(key);
     int64_t slot = dict_probe_i64(d, key, h);
     int64_t idx = d->indices[slot];
     if (idx < 0) {
+        dragon_shared_mut_end(&d->header, mut_armed);
         dragon_raise_keyerror_int(key);
         return;
     }
@@ -1443,6 +1494,7 @@ void dragon_dict_int_del(DragonDict* d, int64_t key) {
     d->entries[idx].value = 0;
     d->used--;
     dict_maybe_compact(d);
+    dragon_shared_mut_end(&d->header, mut_armed);
     if (val && tag == TAG_STR) {
         dragon_decref_str_dispatch((const char*)(uintptr_t)val);
     } else if (val && (tag == TAG_LIST || tag == TAG_DICT || tag == TAG_BYTES)) {

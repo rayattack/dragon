@@ -60,6 +60,9 @@ DragonList* dragon_list_new(int64_t capacity) {
 /// Append a value to the list. Width-aware: bool lists store one byte,
 /// everything else stores an 8-byte slot.
 void dragon_list_append(DragonList* list, int64_t value) {
+    // Concurrent-mutation detector (runtime_internal.h): grow + store is the
+    // window; no raise below (OOM aborts). extend() rides on this guard.
+    bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     if (list->size >= list->capacity) {
         int64_t new_cap = list->capacity * 2;
         // Realloc into a temp: on NULL the original buffer is still valid;
@@ -78,6 +81,7 @@ void dragon_list_append(DragonList* list, int64_t value) {
             dragon_mark_shared_deep((void*)(uintptr_t)value);
     }
     dragon_list_store(list, list->size++, value);
+    dragon_shared_mut_end(&list->header, mut_armed);
 }
 
 /// Get element at index (supports negative indexing). Bool elements are
@@ -98,6 +102,8 @@ void dragon_list_set(DragonList* list, int64_t index, int64_t value) {
         dragon_raise_exc_cstr(41, "IndexError: list assignment index out of range");
         return;
     }
+    // Concurrent-mutation detector: armed after the raise-y validation.
+    bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     // Capture the old element, store the new one, THEN drop the old ref.
     // Reentrancy hardening: the slot must hold `value` before the decref so a
     // finalizer that re-reads list[index] during the drop sees the new value,
@@ -112,6 +118,8 @@ void dragon_list_set(DragonList* list, int64_t index, int64_t value) {
             dragon_mark_shared_deep((void*)(uintptr_t)value);
     }
     dragon_list_store(list, index, value);
+    // Structural work done - close the window before the drop.
+    dragon_shared_mut_end(&list->header, mut_armed);
     if (old && old != value) {
         if (list->elem_tag == TAG_STR)
             dragon_decref_str_dispatch((const char*)(uintptr_t)old);
@@ -190,6 +198,8 @@ void dragon_print_list_bool(DragonList* list) {
 
 /// Insert value at index, shifting elements right
 void dragon_list_insert(DragonList* list, int64_t index, int64_t value) {
+    // Concurrent-mutation detector: no raise below (index clamps, OOM aborts).
+    bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     if (index < 0) index += list->size;
     if (index < 0) index = 0;
     if (index > list->size) index = list->size;
@@ -219,6 +229,7 @@ void dragon_list_insert(DragonList* list, int64_t index, int64_t value) {
     }
     dragon_list_store(list, index, value);
     list->size++;
+    dragon_shared_mut_end(&list->header, mut_armed);
 }
 
 // Tag-aware element equality (defined below; used by remove/index/count/
@@ -227,6 +238,10 @@ static bool dragon_list_elem_eq(DragonList* list, int64_t a, int64_t b);
 
 /// Remove first occurrence of value (ValueError if not found)
 void dragon_list_remove(DragonList* list, int64_t value) {
+    // Concurrent-mutation detector: window covers the search too (a
+    // concurrent shift would invalidate the scan). Not-found path exits the
+    // process (no longjmp), so the stranded bit is moot there.
+    bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     for (int64_t i = 0; i < list->size; i++) {
         int64_t elem = dragon_list_load(list, i);
         if (dragon_list_elem_eq(list, elem, value)) {
@@ -241,6 +256,8 @@ void dragon_list_remove(DragonList* list, int64_t value) {
                     base + (size_t)(i + 1) * list->elem_size,
                     (size_t)(list->size - 1 - i) * list->elem_size);
             list->size--;
+            // Structural work done - close the window before the drop.
+            dragon_shared_mut_end(&list->header, mut_armed);
             if (elem) {
                 if (list->elem_tag == TAG_STR)
                     dragon_decref_str_dispatch((const char*)(uintptr_t)elem);
@@ -271,12 +288,15 @@ int64_t dragon_list_pop(DragonList* list, int64_t index) {
         dragon_raise_exc_cstr(41, "IndexError: pop index out of range");
         return 0;
     }
+    // Concurrent-mutation detector: armed after the raise-y validation.
+    bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     int64_t val = dragon_list_load(list, index);
     uint8_t* base = (uint8_t*)list->data;
     memmove(base + (size_t)index * list->elem_size,
             base + (size_t)(index + 1) * list->elem_size,
             (size_t)(list->size - 1 - index) * list->elem_size);
     list->size--;
+    dragon_shared_mut_end(&list->header, mut_armed);
     return val;
 }
 
@@ -297,10 +317,13 @@ double dragon_list_pop_f64(DragonListF64* list, int64_t index) {
         dragon_raise_exc_cstr(41, "IndexError: pop index out of range");
         return 0.0;
     }
+    // Concurrent-mutation detector: armed after the raise-y validation.
+    bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     double val = list->data[index];
     memmove(list->data + index, list->data + index + 1,
             (size_t)(list->size - 1 - index) * sizeof(double));
     list->size--;
+    dragon_shared_mut_end(&list->header, mut_armed);
     return val;
 }
 
@@ -317,6 +340,8 @@ void dragon_list_delitem(DragonList* list, int64_t index) {
         dragon_raise_exc_cstr(41, "IndexError: list assignment index out of range");
         return;
     }
+    // Concurrent-mutation detector: armed after the raise-y validation.
+    bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     int64_t elem = dragon_list_load(list, index);
     // Reentrancy hardening: bulk-shift the tail down and shrink BEFORE
     // decref'ing the removed element, so a finalizer running during the drop
@@ -327,6 +352,8 @@ void dragon_list_delitem(DragonList* list, int64_t index) {
             base + (size_t)(index + 1) * list->elem_size,
             (size_t)(list->size - 1 - index) * list->elem_size);
     list->size--;
+    // Structural work done - close the window before the drop.
+    dragon_shared_mut_end(&list->header, mut_armed);
     if (elem) {
         if (list->elem_tag == TAG_STR)
             dragon_decref_str_dispatch((const char*)(uintptr_t)elem);
@@ -340,6 +367,9 @@ void dragon_list_delitem(DragonList* list, int64_t index) {
 
 /// Clear all elements (decref heap-typed elements first)
 void dragon_list_clear(DragonList* list) {
+    // Concurrent-mutation detector: whole teardown is the window; decrefs
+    // stay inside (see dragon_dict_clear for the rationale).
+    bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     if (list->elem_tag == TAG_STR || list->elem_tag == TAG_LIST ||
         list->elem_tag == TAG_DICT || list->elem_tag == TAG_BYTES ||
         list->elem_tag == DRAGON_TAG_CLOSURE) {  // T39: dragon_decref_tagged handles closures
@@ -356,6 +386,7 @@ void dragon_list_clear(DragonList* list) {
         }
     }
     list->size = 0;
+    dragon_shared_mut_end(&list->header, mut_armed);
 }
 
 /// Extend list with all elements from another list. Reconciles elem_tag so
@@ -474,6 +505,8 @@ int64_t dragon_list_contains(DragonList* list, int64_t value) {
 /// sorts the distinction is unobservable, but it matters the moment a key
 /// projection is added, so we get it right here at zero extra cost.
 void dragon_list_sort_ex(DragonList* list, int64_t reverse) {
+    // Concurrent-mutation detector: the whole in-place sort is the window.
+    bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     // Comparator switches on the list's element tag - sorting a list of
     // strings by their raw i64 representation orders by pointer address
     // (i.e. randomly), so str/bytes need a content-aware compare.  Floats
@@ -512,6 +545,7 @@ void dragon_list_sort_ex(DragonList* list, int64_t reverse) {
         }
         dragon_list_store(list, j + 1, key);
     }
+    dragon_shared_mut_end(&list->header, mut_armed);
 }
 
 /// Ascending in-place sort (thin wrapper; the historical entry point).
@@ -521,11 +555,14 @@ void dragon_list_sort(DragonList* list) {
 
 /// Reverse list in-place
 void dragon_list_reverse(DragonList* list) {
+    // Concurrent-mutation detector: the whole in-place swap is the window.
+    bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     for (int64_t i = 0, j = list->size - 1; i < j; i++, j--) {
         int64_t tmp = dragon_list_load(list, i);
         dragon_list_store(list, i, dragon_list_load(list, j));
         dragon_list_store(list, j, tmp);
     }
+    dragon_shared_mut_end(&list->header, mut_armed);
 }
 
 /// Shallow copy (returns new list)
@@ -715,10 +752,17 @@ void dragon_list_set_f64(DragonListF64* list, int64_t index, double value) {
         dragon_raise_exc_cstr(41, "IndexError: list assignment index out of range");
         return;
     }
+    // Concurrent-mutation detector: a plain 8-byte element store cannot
+    // corrupt structure, but a concurrent shrink (pop/remove) can free the
+    // buffer under this store - keep the same window discipline.
+    bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     list->data[index] = value;
+    dragon_shared_mut_end(&list->header, mut_armed);
 }
 
 void dragon_list_append_f64(DragonListF64* list, double value) {
+    // Concurrent-mutation detector - see dragon_list_append.
+    bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     if (list->size >= list->capacity) {
         int64_t new_cap = list->capacity * 2;
         double* tmp = (double*)realloc(list->data, (size_t)new_cap * sizeof(double));
@@ -727,6 +771,7 @@ void dragon_list_append_f64(DragonListF64* list, double value) {
         list->capacity = new_cap;
     }
     list->data[list->size++] = value;
+    dragon_shared_mut_end(&list->header, mut_armed);
 }
 
 /// list[<heap>] - allocate with native pointer storage. elem_tag selects the
@@ -766,6 +811,8 @@ void dragon_list_set_ptr(DragonListPtr* list, int64_t index, void* value) {
         dragon_raise_exc_cstr(41, "IndexError: list assignment index out of range");
         return;
     }
+    // Concurrent-mutation detector: armed after the raise-y validation.
+    bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     void* old = list->data[index];
     // Write barrier: if the parent list is SHARED across threads, the new
     // value transitively becomes SHARED too (so future plain RC ops on it
@@ -780,6 +827,8 @@ void dragon_list_set_ptr(DragonListPtr* list, int64_t index, void* value) {
     // ref, so a finalizer that re-reads list[index] during the drop sees
     // `value`, never the freed `old`.
     list->data[index] = value;
+    // Structural work done - close the window before the drop.
+    dragon_shared_mut_end(&list->header, mut_armed);
     if (old && old != value) {
         if (list->elem_tag == TAG_STR)
             dragon_decref_str_dispatch((const char*)old);
@@ -794,6 +843,8 @@ void dragon_list_set_ptr(DragonListPtr* list, int64_t index, void* value) {
 /// Caller is responsible for incref'ing if `value` is borrowed (matches the
 /// existing append semantics for the I64 polymorphic path).
 void dragon_list_append_ptr(DragonListPtr* list, void* value) {
+    // Concurrent-mutation detector - see dragon_list_append.
+    bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     if (list->size >= list->capacity) {
         int64_t new_cap = list->capacity * 2;
         void** tmp = (void**)realloc(list->data, (size_t)new_cap * sizeof(void*));
@@ -808,6 +859,7 @@ void dragon_list_append_ptr(DragonListPtr* list, void* value) {
             dragon_mark_shared_deep(value);
     }
     list->data[list->size++] = value;
+    dragon_shared_mut_end(&list->header, mut_armed);
 }
 
 //===----------------------------------------------------------------------===//
@@ -902,12 +954,15 @@ void dragon_list_box_set(DragonListBox* list, int64_t index, int64_t tag, int64_
         dragon_raise_exc_cstr(41, "IndexError: list assignment index out of range");
         return;
     }
+    // Concurrent-mutation detector: armed after the raise-y validation.
+    bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     // Reentrancy hardening: capture the old element, write the new {tag,
     // payload}, THEN drop the old ref - so a finalizer re-reading list[index]
     // during the drop sees the new element, never the freed payload.
     DragonListBoxElem old_elem = list->data[index];
     list->data[index].tag = tag;
     list->data[index].payload = payload;
+    dragon_shared_mut_end(&list->header, mut_armed);
     dragon_listbox_decref_elem(&old_elem);
 }
 
@@ -922,6 +977,8 @@ void dragon_list_box_delitem(DragonListBox* list, int64_t index) {
         dragon_raise_exc_cstr(41, "IndexError: list assignment index out of range");
         return;
     }
+    // Concurrent-mutation detector: armed after the raise-y validation.
+    bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     // Reentrancy hardening: capture the element, shift the tail down and
     // shrink, THEN drop the ref - so a finalizer running during the drop
     // can't observe the freed slot.
@@ -929,12 +986,16 @@ void dragon_list_box_delitem(DragonListBox* list, int64_t index) {
     memmove(&list->data[index], &list->data[index + 1],
             (size_t)(list->size - 1 - index) * sizeof(DragonListBoxElem));
     list->size--;
+    dragon_shared_mut_end(&list->header, mut_armed);
     dragon_listbox_decref_elem(&old_elem);
 }
 
 /// Refcount-aware append: takes ownership of one reference on a refcounted
 /// payload (caller increfs borrowed inputs).
 void dragon_list_box_append(DragonListBox* list, int64_t tag, int64_t payload) {
+    // Concurrent-mutation detector - see dragon_list_append. box_extend and
+    // box_concat ride on this guard.
+    bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     if (list->size >= list->capacity) {
         int64_t new_cap = list->capacity * 2;
         DragonListBoxElem* tmp = (DragonListBoxElem*)realloc(list->data,
@@ -946,6 +1007,7 @@ void dragon_list_box_append(DragonListBox* list, int64_t tag, int64_t payload) {
     list->data[list->size].tag = tag;
     list->data[list->size].payload = payload;
     list->size++;
+    dragon_shared_mut_end(&list->header, mut_armed);
 }
 
 /// In-place extend of a list[Any] by another (`anyList.extend(o)` / `+=`).
@@ -1022,12 +1084,15 @@ DragonBoxValue dragon_list_box_pop(DragonListBox* list, int64_t index) {
         dragon_raise_exc_cstr(41, "IndexError: pop index out of range");
         return {};
     }
+    // Concurrent-mutation detector: armed after the raise-y validation.
+    bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     DragonBoxValue v;
     v.tag = list->data[index].tag;
     v.payload = list->data[index].payload;
     memmove(&list->data[index], &list->data[index + 1],
             (size_t)(list->size - 1 - index) * sizeof(DragonListBoxElem));
     list->size--;
+    dragon_shared_mut_end(&list->header, mut_armed);
     return v;
 }
 
@@ -1036,6 +1101,9 @@ DragonBoxValue dragon_list_box_pop(DragonListBox* list, int64_t index) {
 /// compare by content, matching Python). Decrefs the removed element (the
 /// list owned it); 16-byte memmove shifts the tail.
 void dragon_list_box_remove(DragonListBox* list, int64_t tag, int64_t payload) {
+    // Concurrent-mutation detector: window covers the search (see
+    // dragon_list_remove); not-found exits the process, no longjmp.
+    bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     DragonBoxAbi needle{tag, payload};
     for (int64_t i = 0; i < list->size; i++) {
         DragonBoxAbi cur{list->data[i].tag, list->data[i].payload};
@@ -1046,6 +1114,7 @@ void dragon_list_box_remove(DragonListBox* list, int64_t tag, int64_t payload) {
             memmove(&list->data[i], &list->data[i + 1],
                     (size_t)(list->size - 1 - i) * sizeof(DragonListBoxElem));
             list->size--;
+            dragon_shared_mut_end(&list->header, mut_armed);
             dragon_listbox_decref_elem(&old_elem);
             return;
         }
@@ -1059,6 +1128,8 @@ void dragon_list_box_remove(DragonListBox* list, int64_t tag, int64_t payload) {
 /// caller owns the incref on a refcounted payload (Model B, like append).
 /// 16-byte memmove opens the gap.
 void dragon_list_box_insert(DragonListBox* list, int64_t index, int64_t tag, int64_t payload) {
+    // Concurrent-mutation detector: no raise below (index clamps, OOM aborts).
+    bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     if (index < 0) index += list->size;
     if (index < 0) index = 0;
     if (index > list->size) index = list->size;
@@ -1075,6 +1146,7 @@ void dragon_list_box_insert(DragonListBox* list, int64_t index, int64_t tag, int
     list->data[index].tag = tag;
     list->data[index].payload = payload;
     list->size++;
+    dragon_shared_mut_end(&list->header, mut_armed);
 }
 
 /// Read element `i` of any list variant (DragonList[I64], DragonListF64,

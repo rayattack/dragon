@@ -224,6 +224,7 @@ static void dragon_json_escape(DragonStrBuf* out, const char* s) {
 }
 
 static void dragon_json_list(DragonStrBuf* out, DragonList* l);
+static void dragon_json_list_box(DragonStrBuf* out, DragonListBox* l);
 static void dragon_json_dict(DragonStrBuf* out, DragonDict* d);
 
 static void dragon_json_value(DragonStrBuf* out, int64_t val, uint8_t tag) {
@@ -237,7 +238,21 @@ static void dragon_json_value(DragonStrBuf* out, int64_t val, uint8_t tag) {
         }
         case TAG_BOOL: sb_puts(out, val ? "true" : "false"); break;
         case TAG_NONE: sb_puts(out, "null"); break;
-        case TAG_LIST: dragon_json_list(out, (DragonList*)(uintptr_t)val); break;
+        case TAG_LIST: {
+            // TAG_LIST covers BOTH list layouts: monomorphic DragonList
+            // (8-byte slots, one list-level elem_tag) and DragonListBox /
+            // list[Any] (16-byte {tag, payload} elements). Dispatch on the
+            // header's type_tag - walking a box with the monomorphic stride
+            // reads tag words as values and one stride past the element
+            // region (json.dumps of a list[Any] [1,2,3] rendered "[0, 1, 0]";
+            // ASan heap-buffer-overflow in dragon_json_list).
+            DragonObjectHeader* h = (DragonObjectHeader*)(uintptr_t)val;
+            if (val && h->type_tag == DRAGON_TAG_LIST_BOX)
+                dragon_json_list_box(out, (DragonListBox*)(uintptr_t)val);
+            else
+                dragon_json_list(out, (DragonList*)(uintptr_t)val);
+            break;
+        }
         case TAG_DICT: dragon_json_dict(out, (DragonDict*)(uintptr_t)val); break;
         default: {  // TAG_INT
             char tmp[32]; snprintf(tmp, sizeof(tmp), "%lld", (long long)val);
@@ -254,6 +269,18 @@ static void dragon_json_list(DragonStrBuf* out, DragonList* l) {
         for (int64_t i = 0; i < l->size; i++) {
             if (i > 0) sb_puts(out, ", ");
             dragon_json_value(out, dragon_list_load(l, i), l->elem_tag);
+        }
+    }
+    sb_putc(out, ']');
+}
+
+// list[Any]: every element carries its own {tag, payload}; recurse per tag.
+static void dragon_json_list_box(DragonStrBuf* out, DragonListBox* l) {
+    sb_putc(out, '[');
+    if (l) {
+        for (int64_t i = 0; i < l->size; i++) {
+            if (i > 0) sb_puts(out, ", ");
+            dragon_json_value(out, l->data[i].payload, (uint8_t)l->data[i].tag);
         }
     }
     sb_putc(out, ']');
@@ -601,11 +628,17 @@ static void dragon_set_delete_slot(DragonSet* s, int64_t idx) {
 }
 
 void dragon_set_add(DragonSet* s, int64_t val) {
+    // Concurrent-mutation detector (runtime_internal.h): grow + probe +
+    // store is the window; no raise below. Set union/ior ride on this guard.
+    bool mut_armed = dragon_shared_mut_begin(&s->header, "set");
     if (s->count * 2 >= s->capacity) dragon_set_grow(s);
     uint64_t h = dragon_set_hash(val, s->elem_tag);
     int64_t idx = (int64_t)(h % (uint64_t)s->capacity);
     while (s->states[idx] == 1) {
-        if (dragon_set_value_eq(s->buckets[idx], val, s->elem_tag)) return; // dedup
+        if (dragon_set_value_eq(s->buckets[idx], val, s->elem_tag)) {
+            dragon_shared_mut_end(&s->header, mut_armed);
+            return; // dedup
+        }
         idx = (idx + 1) % s->capacity;
     }
     // Incref: the set now owns a reference to this value
@@ -620,6 +653,7 @@ void dragon_set_add(DragonSet* s, int64_t val) {
     s->buckets[idx] = val;
     s->states[idx] = 1;
     s->count++;
+    dragon_shared_mut_end(&s->header, mut_armed);
 }
 
 int64_t dragon_set_contains(DragonSet* s, int64_t val) {
@@ -634,6 +668,9 @@ int64_t dragon_set_contains(DragonSet* s, int64_t val) {
 }
 
 void dragon_set_remove(DragonSet* s, int64_t val) {
+    // Concurrent-mutation detector: window covers the probe (a concurrent
+    // cluster re-pack invalidates it); not-found exits the process
+    bool mut_armed = dragon_shared_mut_begin(&s->header, "set");
     uint64_t h = dragon_set_hash(val, s->elem_tag);
     int64_t idx = (int64_t)(h % (uint64_t)s->capacity);
     while (s->states[idx] != 0) {
@@ -645,6 +682,7 @@ void dragon_set_remove(DragonSet* s, int64_t val) {
             int64_t stored = s->buckets[idx];
             s->count--;
             dragon_set_delete_slot(s, idx);
+            dragon_shared_mut_end(&s->header, mut_armed);
             if (stored && s->elem_tag == TAG_STR)
                 dragon_decref_str_dispatch((const char*)(uintptr_t)stored);
             else if (stored && (s->elem_tag == TAG_LIST || s->elem_tag == TAG_DICT || s->elem_tag == TAG_BYTES))
@@ -658,6 +696,8 @@ void dragon_set_remove(DragonSet* s, int64_t val) {
 }
 
 void dragon_set_discard(DragonSet* s, int64_t val) {
+    // Concurrent-mutation detector - see dragon_set_remove.
+    bool mut_armed = dragon_shared_mut_begin(&s->header, "set");
     uint64_t h = dragon_set_hash(val, s->elem_tag);
     int64_t idx = (int64_t)(h % (uint64_t)s->capacity);
     while (s->states[idx] != 0) {
@@ -666,6 +706,7 @@ void dragon_set_discard(DragonSet* s, int64_t val) {
             int64_t stored = s->buckets[idx];
             s->count--;
             dragon_set_delete_slot(s, idx);
+            dragon_shared_mut_end(&s->header, mut_armed);
             if (stored && s->elem_tag == TAG_STR)
                 dragon_decref_str_dispatch((const char*)(uintptr_t)stored);
             else if (stored && (s->elem_tag == TAG_LIST || s->elem_tag == TAG_DICT || s->elem_tag == TAG_BYTES))
@@ -674,6 +715,7 @@ void dragon_set_discard(DragonSet* s, int64_t val) {
         }
         idx = (idx + 1) % s->capacity;
     }
+    dragon_shared_mut_end(&s->header, mut_armed);
 }
 
 int64_t dragon_set_len(DragonSet* s) {
@@ -682,6 +724,9 @@ int64_t dragon_set_len(DragonSet* s) {
 
 void dragon_set_clear(DragonSet* s) {
     if (s) {
+        // Concurrent-mutation detector: whole teardown is the window; decrefs
+        // stay inside (see dragon_dict_clear for the rationale).
+        bool mut_armed = dragon_shared_mut_begin(&s->header, "set");
         // Decref elements before clearing
         uint8_t tag = s->elem_tag;
         if (tag == TAG_STR) {
@@ -697,6 +742,7 @@ void dragon_set_clear(DragonSet* s) {
         }
         memset(s->states, 0, s->capacity);
         s->count = 0;
+        dragon_shared_mut_end(&s->header, mut_armed);
     }
 }
 
@@ -1448,6 +1494,9 @@ DragonDeque* dragon_deque_new(int64_t maxlen, int64_t elem_tag) {
 void dragon_deque_append(DragonDeque* d, int64_t value, int64_t tag) {
     if (tag) d->elem_tag = (uint8_t)tag;
     if (d->maxlen == 0) return;  // Python: maxlen-0 deque silently discards
+    // Concurrent-mutation detector: no raise below; the bounded-eviction
+    // decref stays inside (see dragon_dict_clear for the rationale).
+    bool mut_armed = dragon_shared_mut_begin(&d->header, "deque");
     dragon_incref_tagged(value, d->elem_tag);
     if (d->maxlen > 0 && d->size == d->maxlen) {
         int64_t old = d->data[d->head];
@@ -1459,12 +1508,15 @@ void dragon_deque_append(DragonDeque* d, int64_t value, int64_t tag) {
     int64_t idx = (d->head + d->size) % d->capacity;
     d->data[idx] = value;
     d->size++;
+    dragon_shared_mut_end(&d->header, mut_armed);
 }
 
 /// Append to left end; a full bounded deque discards from the RIGHT (Python).
 void dragon_deque_appendleft(DragonDeque* d, int64_t value, int64_t tag) {
     if (tag) d->elem_tag = (uint8_t)tag;
     if (d->maxlen == 0) return;
+    // Concurrent-mutation detector - see dragon_deque_append.
+    bool mut_armed = dragon_shared_mut_begin(&d->header, "deque");
     dragon_incref_tagged(value, d->elem_tag);
     if (d->maxlen > 0 && d->size == d->maxlen) {
         d->size--;
@@ -1475,6 +1527,7 @@ void dragon_deque_appendleft(DragonDeque* d, int64_t value, int64_t tag) {
     d->head = (d->head - 1 + d->capacity) % d->capacity;
     d->data[d->head] = value;
     d->size++;
+    dragon_shared_mut_end(&d->header, mut_armed);
 }
 
 /// Remove and return from left end (O(1)). Ownership of the element's ref
@@ -1482,9 +1535,12 @@ void dragon_deque_appendleft(DragonDeque* d, int64_t value, int64_t tag) {
 int64_t dragon_deque_popleft(DragonDeque* d) {
     if (!d || d->size == 0)
         dragon_raise_exc_cstr(41, "IndexError: pop from an empty deque");
+    // Concurrent-mutation detector: armed after the raise-y validation.
+    bool mut_armed = dragon_shared_mut_begin(&d->header, "deque");
     int64_t val = d->data[d->head];
     d->head = (d->head + 1) % d->capacity;
     d->size--;
+    dragon_shared_mut_end(&d->header, mut_armed);
     return val;
 }
 
@@ -1493,9 +1549,13 @@ int64_t dragon_deque_popleft(DragonDeque* d) {
 int64_t dragon_deque_pop(DragonDeque* d) {
     if (!d || d->size == 0)
         dragon_raise_exc_cstr(41, "IndexError: pop from an empty deque");
+    // Concurrent-mutation detector: armed after the raise-y validation.
+    bool mut_armed = dragon_shared_mut_begin(&d->header, "deque");
     d->size--;
     int64_t idx = (d->head + d->size) % d->capacity;
-    return d->data[idx];
+    int64_t val = d->data[idx];
+    dragon_shared_mut_end(&d->header, mut_armed);
+    return val;
 }
 
 /// Heap-element pop variants: identical TRANSFER semantics to pop/popleft (the

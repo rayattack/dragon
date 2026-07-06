@@ -647,6 +647,40 @@ bool TypeChecker::tryInstantiateGenericCall(
                 return true;
             }
         }
+        // Same re-visit case for a stamped generic METHOD: retargeting renamed
+        // the AttributeExpr's attribute to the stamped name (`cast[int]` - '['
+        // is impossible in a user-defined name) and collapsed the wrapping
+        // SubscriptExpr. A second inference over the same node - a bare
+        // reassignment (`x = r.cast[int](42)`) re-infers its RHS, and re-check
+        // passes walk the shared AST - must NOT fall through to normal
+        // attribute dispatch: that reported "type 'Repo' has no attribute
+        // 'cast[int]'" while the const-declaration form compiled. Restore the
+        // recorded return type (declaring-class key first, walking the MRO for
+        // inherited stamps, then the bare name) or keep the type the first
+        // pass already set on the node
+        if (auto* at2 = dynamic_cast<AttributeExpr*>(node.callee.get())) {
+            if (at2->attribute.find('[') != std::string::npos) {
+                if (const ClassType* cls = receiverClass(at2->object.get())) {
+                    const ClassType* c = cls;
+                    for (int guard = 0; c && guard < 256; ++guard) {
+                        auto it = impl_->stampedCallReturnType.find(
+                            c->name + "." + at2->attribute);
+                        if (it != impl_->stampedCallReturnType.end()) {
+                            node.type = it->second;
+                            return true;
+                        }
+                        c = c->parentClass &&
+                            c->parentClass->kind() == Type::Kind::Class
+                                ? static_cast<const ClassType*>(c->parentClass.get())
+                                : nullptr;
+                    }
+                }
+                auto bit = impl_->stampedCallReturnType.find(at2->attribute);
+                if (bit != impl_->stampedCallReturnType.end())
+                    node.type = bit->second;
+                return true;
+            }
+        }
         return false;  // not a generic call - normal dispatch handles it
     }
 
@@ -851,8 +885,14 @@ bool TypeChecker::tryInstantiateGenericCall(
                           : impl_->unknownType;
     // Remember the result type under the stamped callee name so a later re-visit
     // of this expr (after retargeting) can restore it (see the !decl path above).
-    if (argsAreConcrete(args) && !isMethodCall && node.type)
-        impl_->stampedCallReturnType[stampedName] = node.type;
+    // Methods key on the declaring/stamped-scope class too ("Repo.cast[int]") so
+    // same-named stamps on different classes cannot collide.
+    if (argsAreConcrete(args) && node.type) {
+        if (isMethodCall)
+            impl_->stampedCallReturnType[owningClass + "." + stampedName] = node.type;
+        else
+            impl_->stampedCallReturnType[stampedName] = node.type;
+    }
     return true;
 }
 

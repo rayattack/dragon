@@ -416,10 +416,14 @@ void CodeGen::visit(WithStmt& node) {
                                   // pthread_mutex (leaks.md bare-Lock item). A
                                   // named `with g:` lock is owned by its scope -
                                   // release only, never destroy here.
-        if (auto* nm = dynamic_cast<NameExpr*>(item.contextExpr.get())) {
-            auto it = impl_->varClassNames.find(nm->name);
-            if (it != impl_->varClassNames.end() && it->second == "__Lock")
-                isLockCtx = true;
+        if (impl_->isLockExpr(item.contextExpr.get())) {
+            // Covers a tagged local/global (`with glock`) AND a Lock-typed
+            // instance field (`with self._storage_lock`) - the NameExpr-only
+            // check let field locks fall to the generic non-class context
+            // path, which binds the value and SILENTLY SKIPS acquire/release
+            // (the "critical section" ran unlocked; found by the concurrent-
+            // mutation detector on Router._storage_lock).
+            isLockCtx = true;
         } else if (auto* ce = dynamic_cast<CallExpr*>(item.contextExpr.get())) {
             if (auto* cn = dynamic_cast<NameExpr*>(ce->callee.get()))
                 if (cn->name == "Lock") { isLockCtx = true; isLockTemp = true; }

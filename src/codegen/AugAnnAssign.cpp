@@ -1032,22 +1032,6 @@ void CodeGen::visit(AnnAssignStmt& node) {
                     impl_->storeWithRCOverwrite(
                         gv, gv->getValueType(), val, oldKind, varKind, rhsBorrowed, name->name);
                 }
-                // A module-global str constant is program-lifetime and is read from the http server's os
-                // worker threads. Dragons's default refcount is non-atomic, so a shared global with a live
-                // frecount races. Concurrent incref/decref tears the count, the string is freed early and
-                // anotherworker reads freed memory (heap use after free / `unaligned tcache chunk`).
-                // Promote the stored value to immortal so coros-thread reads never touch its
-                // refcount - lock-free and zero-cost. Gated to a string-literal
-                // RHS: provably constant and never needs freeing, so immortality
-                // introduces no leak even if the global is later re-assigned.
-                if (impl_->options.gcMode == GCMode::RC &&
-                    varKind == Impl::VarKind::Str &&
-                    dynamic_cast<StringLiteral*>(node.value.get())) {
-                    auto* stored = impl_->builder->CreateLoad(
-                        gv->getValueType(), gv, name->name + ".imm");
-                    impl_->builder->CreateCall(
-                        impl_->runtimeFuncs["dragon_str_make_immortal"], {stored});
-                }
             }
             // GV is already zero-initialized by its initializer (no explicit store needed for default)
 
@@ -1100,6 +1084,61 @@ void CodeGen::visit(AnnAssignStmt& node) {
                         if (impl_->options.gcMode == GCMode::RC && impl_->classNames.count(cls))
                             impl_->moduleGlobalKinds[name->name] = Impl::VarKind::ClassInstance;
                     }
+                }
+            }
+
+            // A module global is read from every vthread by name, it never
+            // crosses a `fire` boundary, so the fire-site mark never sees it
+            // i.e. (emitAtomicIncref). Dragon's default refcount is
+            // nay atomic so two handler vthreads on different OS workers doing
+            // plain incref/decref on the same unmarked global tear the count,
+            // the object is freed early, and another worker reads freed
+            // memory (heap use-after-free / `unaligned tcache chunk`).
+            // Runs after the ClassInstance kind fix-ups above so instances
+            // route to their per-class deep walker.
+            //   - const str: promote to IMMORTAL - zero RC traffic forever.
+            //     Sound because `const` reassignment is a compile error and
+            //     str is an immutable leaf, so the value is program-lifetime
+            //     anyway. Generalizes the earlier literal-RHS-only promotion
+            //     (a literal RHS stays immortal-promoted even without const:
+            //     a literal never needs freeing on reassignment).
+            //   - non-const str: mark SHARED (immortalizing a reassignable
+            //     slot would leak every replaced value).
+            //   - containers/instances: mark SHARED deep, never immortal -
+            //     the SHARED store barriers in list/dict then propagate the
+            //     flag to values inserted later, which immortality would not.
+            //   - Union box slot: tag-dispatched mark of the payload.
+            if (impl_->options.gcMode == GCMode::RC && node.value) {
+                Impl::VarKind storedKind = varKind;
+                auto mgkIt = impl_->moduleGlobalKinds.find(name->name);
+                if (mgkIt != impl_->moduleGlobalKinds.end())
+                    storedKind = mgkIt->second;
+                if (storedKind == Impl::VarKind::Str &&
+                    gv->getValueType()->isPointerTy()) {
+                    auto* stored = impl_->builder->CreateLoad(
+                        gv->getValueType(), gv, name->name + ".shr");
+                    if (node.isConst ||
+                        dynamic_cast<StringLiteral*>(node.value.get()))
+                        impl_->builder->CreateCall(
+                            impl_->runtimeFuncs["dragon_str_make_immortal"],
+                            {stored});
+                    else
+                        impl_->builder->CreateCall(
+                            impl_->runtimeFuncs["dragon_mark_shared_str"],
+                            {stored});
+                } else if (storedKind == Impl::VarKind::Union &&
+                           gv->getValueType() == impl_->boxType) {
+                    auto* box = impl_->builder->CreateLoad(
+                        impl_->boxType, gv, name->name + ".shrbox");
+                    impl_->builder->CreateCall(
+                        impl_->runtimeFuncs["dragon_mark_shared_boxed"],
+                        {impl_->boxTag(box, name->name + ".shrtag"),
+                         impl_->boxPayloadI64(box, name->name + ".shrpay")});
+                } else if (Impl::isHeapKind(storedKind) &&
+                           gv->getValueType()->isPointerTy()) {
+                    auto* stored = impl_->builder->CreateLoad(
+                        gv->getValueType(), gv, name->name + ".shr");
+                    impl_->emitMarkSharedGlobal(stored, storedKind);
                 }
             }
         } else {

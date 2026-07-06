@@ -1137,6 +1137,14 @@ void CodeGen::visit(AssignStmt& node) {
                                                            impl_->boxTag(val, "nt"));
                             }
                             impl_->builder->CreateStore(val, gv);
+                            // D018 completion: the payload is now reachable from
+                            // every vthread via the global - mark it SHARED so
+                            // its refcount ops route to the atomic path.
+                            if (impl_->options.gcMode == GCMode::RC)
+                                impl_->builder->CreateCall(
+                                    impl_->runtimeFuncs["dragon_mark_shared_boxed"],
+                                    {impl_->boxTag(val, "shr.tag"),
+                                     impl_->boxPayloadI64(val, "shr.pay")});
                         } else {
                             auto* newTag = impl_->emitTagForExpr(node.value.get(), *this);
                             if (impl_->options.gcMode == GCMode::RC) {
@@ -1147,6 +1155,11 @@ void CodeGen::visit(AssignStmt& node) {
                                     impl_->emitUnionIncref(impl_->nativeToPayloadI64(val), newTag);
                             }
                             impl_->builder->CreateStore(impl_->makeBox(newTag, val), gv);
+                            // D018 completion: same as the box-valued branch.
+                            if (impl_->options.gcMode == GCMode::RC)
+                                impl_->builder->CreateCall(
+                                    impl_->runtimeFuncs["dragon_mark_shared_boxed"],
+                                    {newTag, impl_->nativeToPayloadI64(val)});
                         }
                         continue;
                     }
@@ -1175,6 +1188,8 @@ void CodeGen::visit(AssignStmt& node) {
                         gv, gvType, val, oldKind, newKind, rhsBorrowed, name->name);
                     if (newKind != Impl::VarKind::Other)
                         impl_->moduleGlobalKinds[name->name] = newKind;
+                    // const reassignment is compile error, so mark shred never immortal
+                    impl_->emitMarkSharedGlobal(val, newKind);
                     continue;
                 }
                 // Module-level new var in main(): create GlobalVariable (no local alloca)
@@ -1257,6 +1272,23 @@ void CodeGen::visit(AssignStmt& node) {
                     if (impl_->lastValueIsType) {
                         impl_->moduleGlobalKinds[name->name] = Impl::VarKind::Type;
                         impl_->lastValueIsType = false;
+                    }
+                    // `X = ...` at module top level) is reachable from every
+                    // vthread by name. Mark the stored graph SHARED; runs
+                    // after the Closure/Type kind fix-ups above so callables
+                    // route through the tag-gated path and class descriptors
+                    // are skipped. A literal-kind global is RC-inert on reads,
+                    // but promote it to immortal anyway (no-op for rodata
+                    // strings, permanent for heap-materialized literals) so no
+                    // residual refcount traffic can race.
+                    {
+                        Impl::VarKind sharedKind = impl_->moduleGlobalKinds[name->name];
+                        if (sharedKind == Impl::VarKind::StrLiteral &&
+                            val->getType()->isPointerTy())
+                            impl_->builder->CreateCall(
+                                impl_->runtimeFuncs["dragon_str_make_immortal"], {val});
+                        else
+                            impl_->emitMarkSharedGlobal(val, sharedKind);
                     }
                     // ADR 025 removal: class-as-value aliasing is dropped.
                     // Binding a class name to a variable is rejected, so nothing

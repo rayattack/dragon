@@ -307,6 +307,26 @@ void CodeGen::visit(DictExpr& node) {
                 {dict, key, pval, llvm::ConstantInt::get(impl_->i64Type, tag)});
             continue;
         }
+        // Any / Union value: it is a {tag, payload} box. dragon_dict_set_tagged
+        // wants (payload:i64, tag:i64), so we extract both from the box - passing
+        // the whole %dragon.box where an i64 payload is expected is an LLVM
+        // verification failure (e.g. `d: dict[str, Any] = {"k": anyVal}`). RC:
+        // a heap payload boxed from a BORROWED source needs the dict to own its
+        // own ref (tag-dispatched union incref, a no-op on int/float/bool),
+        // mirroring the pointer path above; an owned box temporary already
+        // carries the +1 the dict adopts.
+        if (val->getType() == impl_->boxType) {
+            llvm::Value* btag = impl_->boxTag(val, "dv.tag");
+            llvm::Value* bpayload = impl_->boxPayloadI64(val, "dv.payload");
+            if (impl_->options.gcMode == GCMode::RC &&
+                Impl::isBorrowedHeapExpr(entry.second.get())) {
+                impl_->emitUnionIncref(bpayload, btag);
+            }
+            impl_->builder->CreateCall(
+                impl_->runtimeFuncs["dragon_dict_set_tagged"],
+                {dict, key, bpayload, btag});
+            continue;
+        }
         // Int / Bool value: legacy i64-tagged path.
         int64_t tag = 0;
         if (val->getType() == impl_->i1Type) {

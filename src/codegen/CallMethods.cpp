@@ -93,14 +93,28 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
     }
 
     // Lock method dispatch (Python threading.Lock shape): acquire(blocking=...),
-    // release(), destroy().
-    if (auto* objName = dynamic_cast<NameExpr*>(attr.object.get())) {
-        auto lIt = impl_->varClassNames.find(objName->name);
-        if (lIt != impl_->varClassNames.end() && lIt->second == "__Lock") {
+    // release(), destroy(). isLockExpr covers a tagged local/global receiver
+    // AND a Lock-typed instance field (`self._lock.acquire()`) - the old
+    // NameExpr-only check let field receivers fall through to the generic
+    // instance path, which silently DROPPED the calls (the "lock" never
+    // locked; found by the concurrent-mutation detector).
+    if (impl_->isLockExpr(attr.object.get())) {
+        llvm::Value* handle = nullptr;
+        if (auto* objName = dynamic_cast<NameExpr*>(attr.object.get())) {
             llvm::Value* handlePtr = impl_->lookupVar(objName->name);
             if (!handlePtr) handlePtr = impl_->lookupModuleGlobal(objName->name);
-            if (handlePtr) {
-                auto* handle = impl_->builder->CreateLoad(impl_->i8PtrType, handlePtr, "lock.handle");
+            if (handlePtr)
+                handle = impl_->builder->CreateLoad(impl_->i8PtrType, handlePtr, "lock.handle");
+        } else {
+            // Field receiver: evaluate the attribute expression - the field
+            // slot holds the dragon_lock_new() pointer.
+            attr.object->accept(*this);
+            handle = impl_->lastValue;
+            if (handle && !handle->getType()->isPointerTy())
+                handle = impl_->builder->CreateIntToPtr(handle, impl_->i8PtrType, "lock.handle");
+        }
+        {
+            if (handle) {
                 if (method == "acquire") {
                     // Python shape: acquire(blocking=True, timeout=-1) -> bool.
                     // `blocking`/`timeout` come from positional args[0]/[1] or

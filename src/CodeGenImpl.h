@@ -1093,6 +1093,16 @@ struct CodeGen::Impl {
     // access). Returns "" if the expression is not a known class instance.
     std::string resolveExprClassName(Expr* expr);
 
+    /// Is `e` a receiver expression denoting the intrinsic Lock? Covers a
+    /// tagged local/global (`lock.acquire()`, `with glock`) via varClassNames,
+    /// AND a Lock-typed instance field (`self._lock.acquire()`,
+    /// `with app._storage_lock`) via classFieldClassName - the NameExpr-only
+    /// check silently missed fields: the acquire/release/with lowering fell
+    /// through to generic paths that DROPPED the calls, so the "lock" never
+    /// locked (found by the concurrent-mutation detector on
+    /// Router._storage_lock). Defined in codegen/ImplMethods.cpp.
+    bool isLockExpr(Expr* e);
+
     // Resolve the VarKind of an arbitrary expression. Used by print() and
     // other dispatch sites that need to know if a non-NameExpr argument is
     // a string / bool / float / etc. - without this, a subscript like
@@ -1659,6 +1669,35 @@ struct CodeGen::Impl {
         } else {
             builder->CreateCall(runtimeFuncs["dragon_mark_shared_deep"], {val});
             builder->CreateCall(runtimeFuncs["dragon_incref_atomic"], {val});
+        }
+    }
+
+    /// D018 completion: a value stored into a MODULE GLOBAL is reachable from
+    /// every vthread BY NAME - it never crosses a `fire` boundary, so the
+    /// fire-site mark (emitAtomicIncref above) never sees it. Two handler
+    /// vthreads on different OS workers then run plain non-atomic
+    /// incref/decref on the same object: torn refcount, premature free, heap
+    /// use-after-free (the /copy-a-global-to-a-local server crash). Mark the
+    /// stored graph SHARED at the global-store site instead; the SHARED store
+    /// barriers in list/dict keep the invariant for values inserted later.
+    /// Cold path: module globals are stored once at init / rarely reassigned.
+    ///
+    /// StrLiteral is not a heap kind (literal-backed, immortal-promoted), so
+    /// it falls out at isHeapKind. A Closure value can be a bare fn pointer
+    /// (code address, NO header) - route it through the tag-gated boxed
+    /// variant; mark_shared_deep would atomic-OR gc_flags into .text.
+    void emitMarkSharedGlobal(llvm::Value* val, VarKind kind) {
+        if (options.gcMode != GCMode::RC) return;
+        if (!isHeapKind(kind)) return;
+        if (!val->getType()->isPointerTy()) return;
+        if (kind == VarKind::Str) {
+            builder->CreateCall(runtimeFuncs["dragon_mark_shared_str"], {val});
+        } else if (kind == VarKind::Closure) {
+            auto* asI64 = builder->CreatePtrToInt(val, i64Type, "shr.clos.i64");
+            builder->CreateCall(runtimeFuncs["dragon_mark_shared_boxed"],
+                {llvm::ConstantInt::get(i64Type, 10), asI64});
+        } else {
+            builder->CreateCall(runtimeFuncs["dragon_mark_shared_deep"], {val});
         }
     }
 

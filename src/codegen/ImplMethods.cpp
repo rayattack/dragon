@@ -254,6 +254,27 @@ bool CodeGen::Impl::isExprDefinitelyNonNeg(Expr* e) const {
         return false;
     }
 
+bool CodeGen::Impl::isLockExpr(Expr* e) {
+    if (auto* nm = dynamic_cast<NameExpr*>(e)) {
+        auto it = varClassNames.find(nm->name);
+        return it != varClassNames.end() && it->second == "__Lock";
+    }
+    if (auto* at = dynamic_cast<AttributeExpr*>(e)) {
+        std::string owner;
+        if (auto* on = dynamic_cast<NameExpr*>(at->object.get())) {
+            if (on->name == "self" && !currentClassName.empty())
+                owner = currentClassName;
+        }
+        if (owner.empty()) owner = resolveExprClassName(at->object.get());
+        if (owner.empty()) return false;
+        auto cit = classFieldClassName.find(owner);
+        if (cit == classFieldClassName.end()) return false;
+        auto fit = cit->second.find(at->attribute);
+        return fit != cit->second.end() && fit->second == "__Lock";
+    }
+    return false;
+}
+
 std::string CodeGen::Impl::resolveExprClassName(Expr* expr) {
         if (auto* nameExpr = dynamic_cast<NameExpr*>(expr)) {
             auto it = varClassNames.find(nameExpr->name);
