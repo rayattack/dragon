@@ -1,0 +1,32 @@
+from unittest import TestCase, main
+
+def mk() -> bytes {
+    out: list[int] = []
+    out.append(122)
+    return bytes(out)
+}
+
+class BoxOperandDrainRC(TestCase) {
+    def test_box_binop_owned_native_operands() {
+        a: Any = b"xy"
+        i: int = 0
+        while i < 2000 {
+            r: Any = a + mk()          # owned call-result operand
+            s: Any = a + b"z"          # owned bytes-literal operand
+            self.assertEqual(r, b"xyz")
+            self.assertEqual(s, b"xyz")
+            i = i + 1
+        }
+    }
+
+    def test_box_binop_borrowed_operands_survive() {
+        a: Any = b"xy"
+        tail: bytes = b"z"
+        r: Any = a + tail
+        self.assertEqual(r, b"xyz")
+        # tail must still be alive and intact after the op (no over-drain).
+        self.assertEqual(len(tail), 1)
+    }
+}
+
+main([BoxOperandDrainRC()])

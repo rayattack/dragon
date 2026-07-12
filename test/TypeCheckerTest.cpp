@@ -252,6 +252,59 @@ TEST(TypeCheckerTest, ListLiteralAnyAcceptsHeterogeneous) {
 }
 
 //===----------------------------------------------------------------------===//
+// List representation invariance wrt Any: list[T] and list[Any] have
+// different element layouts (monomorphized 8B/elem vs boxed 16B/elem), so a
+// concrete list VALUE must never flow as list[Any] - only a fresh literal is
+// admitted, by being retyped and BUILT as a box list.
+//===----------------------------------------------------------------------===//
+
+TEST(TypeCheckerTest, NamedConcreteListNotAssignableToListAny) {
+    EXPECT_TRUE(checkHasErrors(
+        "names: list[str] = [\"a\", \"b\"]\n"
+        "xs: list[Any] = names\n"));
+}
+
+TEST(TypeCheckerTest, ConcreteListArgNotAssignableToListAnyParam) {
+    EXPECT_TRUE(checkHasErrors(
+        "def first(xs: list[Any]) -> int {\n"
+        "    return len(xs)\n"
+        "}\n"
+        "def run() -> None {\n"
+        "    names: list[str] = [\"a\", \"b\"]\n"
+        "    n: int = first(names)\n"
+        "}\n"));
+}
+
+TEST(TypeCheckerTest, FreshLiteralStillAssignableToListAny) {
+    EXPECT_FALSE(checkHasErrors("xs: list[Any] = [\"a\", \"b\"]\n"));
+}
+
+TEST(TypeCheckerTest, FreshLiteralArgStillPassableToListAnyParam) {
+    EXPECT_FALSE(checkHasErrors(
+        "def first(xs: list[Any]) -> int {\n"
+        "    return len(xs)\n"
+        "}\n"
+        "def run() -> None {\n"
+        "    n: int = first([\"a\", \"b\"])\n"
+        "}\n"));
+}
+
+TEST(TypeCheckerTest, ListAnyNotAssignableToConcreteList) {
+    // The reverse view is equally unsound (boxed elements read natively).
+    EXPECT_TRUE(checkHasErrors(
+        "xs: list[Any] = [\"a\", \"b\"]\n"
+        "names: list[str] = xs\n"));
+}
+
+TEST(TypeCheckerTest, DictValueCovarianceToAnyStillAllowed) {
+    // Dicts have ONE uniform tagged representation - dict[K, V] may still
+    // flow as dict[K, Any].
+    EXPECT_FALSE(checkHasErrors(
+        "m: dict[str, int] = {\"a\": 1}\n"
+        "d: dict[str, Any] = m\n"));
+}
+
+//===----------------------------------------------------------------------===//
 // Positional argument type checking (catches str passed to int param, etc.)
 //===----------------------------------------------------------------------===//
 
@@ -1873,4 +1926,35 @@ TEST(TypeCheckerTest, AnnotatedAnyMixedListOk) {
 
 TEST(TypeCheckerTest, MixedListAgainstIntAnnotationRejected) {
     EXPECT_TRUE(checkHasErrors("xs: list[int] = [1, \"a\"]\n"));
+}
+
+//===----------------------------------------------------------------------===//
+// Lambda bodies are type-checked (2026-07-11). visit(LambdaExpr) used to build
+// the FunctionType from the annotations and skip the body entirely, so
+// `bad: int = "boy"` inside a lambda compiled clean and generic method calls
+// in handlers were never stamped (silent empty results at runtime). The
+// runtime half of the fix is dogfooded in test/dr/test_lambda_body_types.dr.
+//===----------------------------------------------------------------------===//
+
+TEST(TypeCheckerTest, LambdaBodyBadBindingRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "f: Callable[[], int] = lambda () -> int {\n"
+        "    bad: int = \"boy\"\n"
+        "    return bad\n"
+        "}\n"));
+}
+
+TEST(TypeCheckerTest, LambdaBodyReturnTypeMismatchRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "f: Callable[[], int] = lambda () -> int {\n"
+        "    return \"boy\"\n"
+        "}\n"));
+}
+
+TEST(TypeCheckerTest, LambdaBodyWellTypedOk) {
+    EXPECT_TRUE(checkOk(
+        "f: Callable[[int], int] = lambda (n: int) -> int {\n"
+        "    doubled: int = n * 2\n"
+        "    return doubled\n"
+        "}\n"));
 }

@@ -1,0 +1,47 @@
+from unittest import TestCase, main
+
+
+def takes(s: str) -> int {
+    return len(s)
+}
+
+
+class WalrusOwnershipTests(TestCase) {
+    def test_walrus_arg_then_use() {
+        b: str = "bcd"
+        n: int = takes(x := "a" + b)
+        self.assertEqual[str](x, "abcd")
+        self.assertEqual(n, 4)
+    }
+
+    def test_walrus_bare_assign_both_alive() {
+        b: str = "q"
+        y: str = (x := "p" + b)
+        self.assertEqual[str](x, "pq")
+        self.assertEqual(y, "pq")
+    }
+
+    def test_walrus_borrowed_value() {
+        s: str = "held"
+        n: int = takes(x := s)
+        self.assertEqual[str](x, "held")
+        self.assertEqual(n, 4)
+        self.assertEqual(s, "held")
+    }
+
+    def test_walrus_churn() {
+        i: int = 0
+        total: int = 0
+        while i < 500 {
+            total = total + takes(w := "n" + str(i))
+            total = total + len(w)
+            i = i + 1
+        }
+        # len("n" + str(i)) counted twice per iteration:
+        # 10 * 2 + 90 * 3 + 400 * 4 = 1890, doubled = 3780
+        self.assertEqual(total, 3780)
+    }
+}
+
+
+main([WalrusOwnershipTests()])

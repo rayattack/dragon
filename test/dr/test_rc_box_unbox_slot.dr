@@ -1,0 +1,65 @@
+from unittest import TestCase, main
+
+const N: int = 3000
+
+class BoxUnboxSlotRc(TestCase) {
+    # OWNED (dragon_box_subscript): unbox into a str slot must release the +1.
+    def test_any_subscript_unbox_str() {
+        i: int = 0
+        while i < N {
+            const m: Any = {"k": "value"}
+            const nm: str = m["k"]
+            self.assertEqual(nm, "value")
+            i = i + 1
+        }
+    }
+
+    # OWNED, non-heap payload: unbox into int slot (tag-gated release is a no-op).
+    def test_any_subscript_unbox_int() {
+        i: int = 0
+        while i < N {
+            const m: Any = {"n": 42}
+            const x: int = m["n"]
+            self.assertEqual(x, 42)
+            i = i + 1
+        }
+    }
+
+    # BORROWED (amebo's exact pattern): dict[str,Any] element via dragon_dict_get_box
+    # unboxed to str - must stay leak-free AND not double-free (no UAF).
+    def test_typed_dict_any_unbox_str() {
+        i: int = 0
+        while i < N {
+            const d: dict[str, Any] = {"action": "order.placed"}
+            const a: str = d["action"]
+            self.assertEqual(a, "order.placed")
+            i = i + 1
+        }
+    }
+
+    # OWNED, plain reassignment (Assign.cpp path, not const/AnnAssign): the same
+    # unbox-owned-box-into-str-slot must release the +1.
+    def test_any_subscript_plain_reassign() {
+        nm: str = "init"
+        i: int = 0
+        while i < N {
+            const m: Any = {"k": "value"}
+            nm = m["k"]
+            self.assertEqual(nm, "value")
+            i = i + 1
+        }
+    }
+
+    # BORROWED: list[Any] element via dragon_list_box_get unboxed to str.
+    def test_listany_unbox_str() {
+        i: int = 0
+        while i < N {
+            const xs: list[Any] = ["x", "yy", "zzz"]
+            const s: str = xs[1]
+            self.assertEqual(s, "yy")
+            i = i + 1
+        }
+    }
+}
+
+main([BoxUnboxSlotRc()])

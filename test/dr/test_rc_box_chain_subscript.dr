@@ -1,0 +1,113 @@
+from unittest import TestCase, main
+
+
+class BoxChainSubscriptTests(TestCase) {
+    def test_chained_any_subscript() {
+        obj: Any = {"b": [4, 5, 6]}
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(obj["b"][2], 6)
+            i = i + 1
+        }
+    }
+
+    def test_chained_any_subscript_str_elem() {
+        # Inner element is a heap str: the outer read takes its own reference
+        # BEFORE the intermediate box is released (use-after-free guard).
+        obj: Any = {"b": ["p", "q", "rrrrrrrrrrrrrrrrrr"]}
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(obj["b"][2], "rrrrrrrrrrrrrrrrrr")
+            i = i + 1
+        }
+    }
+
+    def test_chained_borrowed_receiver_guard() {
+        # dict[str, Any] read is dragon_dict_get_box = a BORROWED intermediate.
+        # Releasing it would be a use-after-free. Must stay untouched.
+        d: dict[str, Any] = {"b": [7, 8, 9]}
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(d["b"][1], 8)
+            i = i + 1
+        }
+        self.assertEqual(d["b"][0], 7)
+    }
+
+    def test_chained_into_typed_slot() {
+        obj: Any = {"b": [4, 5, 6]}
+        i: int = 0
+        total: int = 0
+        while i < 3000 {
+            x: int = obj["b"][2]
+            total = total + x
+            i = i + 1
+        }
+        self.assertEqual(total, 18000)
+    }
+
+    def test_triple_chain() {
+        # Two intermediates, both owned: obj["a"] (+1 on the middle list) and
+        # obj["a"][0] (+1 on the inner list) - both must be released.
+        obj: Any = {"a": [[1, 2], [3, 4]]}
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(obj["a"][0][1], 2)
+            i = i + 1
+        }
+    }
+
+
+    def test_owned_subscript_index() {
+        # Index is an owned box_subscript result: +1 per iteration on the key
+        # string held by `keys` - leaked as a refcount surplus at scope exit.
+        keys: Any = {"i": "key-wwwwwwwwwwwwwwwwww"}
+        d: Any = {"key-wwwwwwwwwwwwwwwwww": 42}
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(d[keys["i"]], 42)
+            i = i + 1
+        }
+    }
+
+    def test_fresh_binop_index() {
+        # Index is a FRESH box_binop concat: one owned heap str per iteration,
+        # leaked each time if the index box is not released.
+        k1: Any = "key-"
+        k2: Any = "wwwwwwwwwwwwwwwwww"
+        d: Any = {"key-wwwwwwwwwwwwwwwwww": 42}
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(d[k1 + k2], 42)
+            i = i + 1
+        }
+    }
+
+    def test_owned_int_index() {
+        # Owned box index with a scalar payload: the release is a no-op.
+        idxs: Any = [2, 0]
+        a: Any = [10, 20, 30]
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(a[idxs[0]], 30)
+            i = i + 1
+        }
+    }
+
+    def test_borrowed_index_guard() {
+        # dict[str, Any] element read is dragon_dict_get_box = BORROWED.
+        # Releasing it would be a use-after-free. Must stay untouched.
+        bor: dict[str, Any] = {"i": "key-wwwwwwwwwwwwwwwwww"}
+        d: Any = {"key-wwwwwwwwwwwwwwwwww": 42}
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(d[bor["i"]], 42)
+            i = i + 1
+        }
+        v: str = bor["i"]
+        self.assertEqual(v, "key-wwwwwwwwwwwwwwwwww")
+    }
+}
+
+
+main([BoxChainSubscriptTests()])

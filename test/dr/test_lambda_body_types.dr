@@ -1,0 +1,78 @@
+from unittest import TestCase, main
+
+
+class Store {
+    def(seed: int) {
+        self._seed = seed
+    }
+
+    def grab[T]() -> list[T] {
+        out: list[T] = []
+        out.append(T(self._seed))
+        return out
+    }
+
+    def pair[T](extra: T) -> list[T] {
+        out: list[T] = []
+        out.append(T(self._seed))
+        out.append(extra)
+        return out
+    }
+
+    def plain() -> int {
+        return self._seed
+    }
+}
+
+store: Store = Store(7)
+
+class LambdaBodyTypeTests(TestCase) {
+
+    def test_explicit_generic_method_in_lambda() {
+        f: Callable[[], int] = lambda () -> int {
+            rows: list[int] = store.grab[int]()
+            return rows[0] if len(rows) == 1 else -1
+        }
+        self.assertEqual(f(), 7)
+    }
+
+    def test_bare_inference_generic_method_in_lambda() {
+        g: Callable[[], int] = lambda () -> int {
+            rows: list[int] = store.grab()
+            return rows[0] if len(rows) == 1 else -1
+        }
+        self.assertEqual(g(), 7)
+    }
+
+    def test_generic_method_with_args_in_lambda() {
+        h: Callable[[int], int] = lambda (extra: int) -> int {
+            rows: list[int] = store.pair[int](extra)
+            return rows[0] + rows[1] if len(rows) == 2 else -1
+        }
+        self.assertEqual(h(35), 42)
+    }
+
+    def test_non_generic_method_in_lambda_still_works() {
+        p: Callable[[], int] = lambda () -> int {
+            return store.plain()
+        }
+        self.assertEqual(p(), 7)
+    }
+
+    def test_loop_statements_in_lambda_body() {
+        # Statements inside lambda bodies are on the newly-checked walk;
+        # a loop with typed locals must both check and run correctly.
+        q: Callable[[list[int]], int] = lambda (xs: list[int]) -> int {
+            total: int = 0
+            for x in xs {
+                total = total + x
+            }
+            return total
+        }
+        rows: list[int] = store.pair[int](35)
+        self.assertEqual(q(rows), 42)
+    }
+}
+
+
+main([LambdaBodyTypeTests()])

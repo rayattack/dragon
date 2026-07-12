@@ -1,0 +1,51 @@
+from unittest import TestCase, main
+
+const N: int = 3000
+
+class Sink {
+    def take[T](x: T) -> int {
+        # Generic, borrow-only: never retains x.
+        return 1
+    }
+}
+
+class GenericMethodArgRc(TestCase) {
+    # OWNED str result to a generic method.
+    def test_owned_str_result_arg() {
+        s: Sink = Sink()
+        i: int = 0
+        while i < N {
+            const r: int = s.take(("ab" + "cd").upper())
+            self.assertEqual(r, 1)
+            i = i + 1
+        }
+    }
+
+    # OWNED box result (Any subscript) passed as a generic-method arg.
+    # (Unbox-into-a-typed-slot, `x: str = m[k]`, is a separate consumer tracked
+    # by test_rc_box_unbox_slot.dr - deliberately not exercised here so this
+    # file isolates the generic-method arg-drain.)
+    def test_owned_box_result_arg() {
+        s: Sink = Sink()
+        i: int = 0
+        while i < N {
+            const m: Any = {"k": "value"}
+            const r: int = s.take(m["k"])
+            self.assertEqual(r, 1)
+            i = i + 1
+        }
+    }
+
+    # The crypto-KAT idiom: owned str results (bytes.hex()) as generic
+    # self.assertEqual args.
+    def test_assertequal_owned_hex() {
+        i: int = 0
+        while i < N {
+            const b: bytes = "hello".encode()
+            self.assertEqual(b.hex(), "68656c6c6f")
+            i = i + 1
+        }
+    }
+}
+
+main([GenericMethodArgRc()])

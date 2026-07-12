@@ -1,0 +1,34 @@
+from unittest import TestCase, main
+
+
+def loads_ints() -> dict[str, int] {
+    return {"k": 42, "j": 7}
+}
+
+
+class DictRecvScalarTests(TestCase) {
+    def test_owned_dict_receiver_int_val() {
+        i: int = 0
+        total: int = 0
+        while i < 3000 {
+            v: int = loads_ints()["k"]
+            total = total + v
+            i = i + 1
+        }
+        self.assertEqual(total, 126000)
+    }
+
+    def test_borrowed_receiver_guard() {
+        # A slot receiver is borrowed - must never be released
+        d: dict[str, int] = {"k": 9}
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(d["k"], 9)
+            i = i + 1
+        }
+        self.assertEqual(d["k"], 9)
+    }
+}
+
+
+main([DictRecvScalarTests()])

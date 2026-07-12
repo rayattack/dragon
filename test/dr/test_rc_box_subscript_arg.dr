@@ -1,0 +1,69 @@
+from unittest import TestCase, main
+
+const N: int = 3000
+
+def sink_any(x: Any) -> int {
+    # Borrow x (do not store it): the callee never retains, so the caller's
+    # owned box temp is the caller's to release
+    return 1
+}
+
+class BoxSubscriptArgRc(TestCase) {
+    # OWNED: dragon_box_subscript returns +1; passed as a bare Any arg -> drain
+    def test_any_subscript_as_arg_no_leak() {
+        i: int = 0
+        while i < N {
+            const m: Any = {"name": "Ada", "age": 42}
+            const r: int = sink_any(m["name"])
+            self.assertEqual(r, 1)
+            i = i + 1
+        }
+    }
+
+    # UAF guard: the container's own reference must survive the arg drain
+    def test_container_survives_arg_drain() {
+        const m: Any = {"name": "Ada"}
+        const r: int = sink_any(m["name"])
+        self.assertEqual(r, 1)
+        const again: str = m["name"]
+        self.assertEqual(again, "Ada")
+    }
+
+    # BORROWED (amebo's path): dict[str,Any] element via dragon_dict_get_box is
+    # a borrow - must NOT be drained (no double-free), and no leak (container owns)
+    def test_typed_dict_any_borrowed_as_arg() {
+        i: int = 0
+        while i < N {
+            const d: dict[str, Any] = {"action": "order.placed", "n": 7}
+            const r: int = sink_any(d["action"])
+            self.assertEqual(r, 1)
+            const a: str = d["action"]
+            self.assertEqual(a, "order.placed")
+            i = i + 1
+        }
+    }
+
+    # BORROWED: list[Any] element via dragon_list_box_get.
+    def test_listany_borrowed_as_arg() {
+        i: int = 0
+        while i < N {
+            const xs: list[Any] = ["x", "y", "z"]
+            const r: int = sink_any(xs[1])
+            self.assertEqual(r, 1)
+            i = i + 1
+        }
+    }
+
+    # OWNED: dragon_box_binop (Any + str) result passed as a bare Any arg.
+    def test_box_binop_as_arg() {
+        i: int = 0
+        while i < N {
+            const a: Any = "pre-"
+            const r: int = sink_any(a + "post")
+            self.assertEqual(r, 1)
+            i = i + 1
+        }
+    }
+}
+
+main([BoxSubscriptArgRc()])

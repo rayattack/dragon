@@ -1,0 +1,77 @@
+from unittest import TestCase, main
+
+
+class Dog {
+    name: str = ""
+    def(n: str) { self.name = n }
+}
+
+
+class Shelter[T] {
+    occupant: T
+    def(o: T) { self.occupant = o }
+}
+
+
+def mklist() -> list[int] {
+    return [1, 2]
+}
+
+
+class Probe(TestCase) {
+    def test_chained_list_concat() {
+        a: list[int] = [1, 2]
+        b: list[int] = [3, 4]
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(a + b + [5], [1, 2, 3, 4, 5])
+            i = i + 1
+        }
+    }
+
+    def test_list_temp_to_generic_method() {
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(mklist(), [1, 2])
+            i = i + 1
+        }
+    }
+
+    def test_builtin_arg_temps() {
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(type(Dog("rex")), "Dog")
+            self.assertFalse(bool([]))
+            t: tuple = tuple([1, 2, 3])
+            self.assertEqual(len(t), 3)
+            i = i + 1
+        }
+    }
+
+    def test_generic_ctor_arg_temp() {
+        i: int = 0
+        while i < 3000 {
+            s: Shelter[Dog] = Shelter[Dog](Dog("Bingo"))
+            self.assertEqual(s.occupant.name, "Bingo")
+            i = i + 1
+        }
+    }
+
+    def test_borrowed_guards() {
+        # Slot args to generic methods and borrowed getters must stay
+        # undrained (the prior A/B-proven UAF family).
+        xs: list[int] = [1, 2]
+        d: dict[int, str] = {1: "one-wwwwwwwwwwwwww"}
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(xs, [1, 2])
+            self.assertEqual(d[1], "one-wwwwwwwwwwwwww")
+            i = i + 1
+        }
+        self.assertEqual(xs[0], 1)
+        self.assertEqual(d[1], "one-wwwwwwwwwwwwww")
+    }
+}
+
+
+main([Probe()])

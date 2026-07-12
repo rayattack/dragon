@@ -1,0 +1,174 @@
+from unittest import TestCase, main
+
+
+class Keeper {
+    v: Any
+    def(v: Any) {
+        self.v = v
+    }
+    def replace(nv: Any) {
+        self.v = nv
+    }
+}
+
+
+class DoubleKeeper {
+    a: Any
+    b: Any
+    def(v: Any) {
+        self.a = v
+        self.b = v
+    }
+}
+
+
+def sink(x: Any) -> int {
+    return 1
+}
+
+
+def echo(x: Any) -> Any {
+    return x
+}
+
+
+class ABase {
+    def m(v: Any) -> int {
+        return 1
+    }
+}
+
+
+class AStore(ABase) {
+    kept: Any
+    def() {
+        self.kept = 0
+    }
+    def m(v: Any) -> int {
+        self.kept = v
+        return 2
+    }
+}
+
+
+def call_m(a: ABase, v: Any) -> int {
+    return a.m(v)
+}
+
+
+class AnyOwnershipTests(TestCase) {
+    def test_borrowed_alias_survives_instance_death() {
+        p: Any = "alias " + str(1)
+        k: Keeper = Keeper(p)
+        k = Keeper(0)
+        narrowed: int = 0
+        if isinstance(p, str) {
+            const s: str = p
+            self.assertEqual(s, "alias 1")
+            narrowed = 1
+        }
+        self.assertEqual(narrowed, 1)
+    }
+
+    def test_double_adopt_two_fields() {
+        p: Any = "dbl " + str(2)
+        d: DoubleKeeper = DoubleKeeper(p)
+        d = DoubleKeeper(0)
+        narrowed: int = 0
+        if isinstance(p, str) {
+            const s: str = p
+            self.assertEqual(s, "dbl 2")
+            narrowed = 1
+        }
+        self.assertEqual(narrowed, 1)
+    }
+
+    def test_owned_temp_to_borrow_any_param_churn() {
+        total: int = 0
+        i: int = 0
+        while i < 1000 {
+            total = total + sink("t" + str(i))
+            i = i + 1
+        }
+        self.assertEqual(total, 1000)
+    }
+
+    def test_owned_temp_via_method_store_churn() {
+        k: Keeper = Keeper(0)
+        i: int = 0
+        while i < 1000 {
+            k.replace("v" + str(i))
+            i = i + 1
+        }
+        const back: Any = k.v
+        narrowed: int = 0
+        if isinstance(back, str) {
+            const s: str = back
+            self.assertEqual(s, "v999")
+            narrowed = 1
+        }
+        self.assertEqual(narrowed, 1)
+    }
+
+    def test_direct_field_assign_owned_temp_churn() {
+        k: Keeper = Keeper(0)
+        i: int = 0
+        while i < 1000 {
+            k.v = "d" + str(i)
+            i = i + 1
+        }
+        const back: Any = k.v
+        narrowed: int = 0
+        if isinstance(back, str) {
+            const s: str = back
+            self.assertEqual(s, "d999")
+            narrowed = 1
+        }
+        self.assertEqual(narrowed, 1)
+    }
+
+    def test_ctor_owned_temp_churn() {
+        i: int = 0
+        while i < 1000 {
+            k: Keeper = Keeper("c" + str(i))
+            i = i + 1
+        }
+    }
+
+    def test_borrowed_native_str_into_field() {
+        s: str = "keep " + str(6)
+        k: Keeper = Keeper(0)
+        k.v = s
+        k = Keeper(0)
+        self.assertEqual(s, "keep 6")
+    }
+
+    def test_echo_roundtrip() {
+        p: Any = echo("e" + str(3))
+        narrowed: int = 0
+        if isinstance(p, str) {
+            const s: str = p
+            self.assertEqual(s, "e3")
+            narrowed = 1
+        }
+        self.assertEqual(narrowed, 1)
+    }
+
+    def test_virtual_override_stores_param() {
+        b: AStore = AStore()
+        n: int = call_m(b, "vs " + str(4))
+        self.assertEqual(n, 2)
+        const back: Any = b.kept
+        narrowed: int = 0
+        if isinstance(back, str) {
+            const s: str = back
+            self.assertEqual(s, "vs 4")
+            narrowed = 1
+        }
+        self.assertEqual(narrowed, 1)
+    }
+
+}
+
+
+main([AnyOwnershipTests()])

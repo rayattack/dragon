@@ -1,0 +1,83 @@
+from unittest import TestCase, main
+from threading import Lock
+
+class LockBox {
+    own _lk: Lock
+    n: int = 0
+    def(n: int) {
+        self._lk = Lock()
+        self.n = n
+    }
+    def bump() -> int {
+        with self._lk {
+            self.n = self.n + 1
+        }
+        return self.n
+    }
+}
+
+class OwnFieldTests(TestCase) {
+    def test_lock_field_released_on_death() {
+        # 3000 instances, each with a pthread mutex: without the own release
+        # this leaks 3000 * 40B of dragon_lock_new.
+        i: int = 0
+        total: int = 0
+        while i < 3000 {
+            b: LockBox = LockBox(i)
+            total = total + b.bump()
+            i = i + 1
+        }
+        self.assertEqual(total, 4501500)
+    }
+
+    def test_del_of_lock_local() {
+        # del releases a proven sole-owner local EARLY; scope exit would
+        # otherwise release it anyway (2.10).
+        g: Lock = Lock()
+        with g {
+            self.assertEqual(1, 1)
+        }
+        del g
+        self.assertTrue(True)
+    }
+
+    def test_bare_local_lock_scope_exit() {
+        # No del, no with, no own: the scope owns a bare Lock local (ADR
+        # 2.10) - leak-free purely from scope exit. The 40-byte-per-Lock
+        # leak family is unwritable now.
+        i: int = 0
+        while i < 3000 {
+            lk: Lock = Lock()
+            lk.acquire()
+            lk.release()
+            i = i + 1
+        }
+        self.assertTrue(True)
+    }
+
+    def test_del_then_scope_exit_no_double_destroy() {
+        # del destroys and nulls the slot; the scope-exit release is
+        # null-gated, so the pair frees exactly once.
+        i: int = 0
+        while i < 3000 {
+            lk: Lock = Lock()
+            del lk
+            i = i + 1
+        }
+        self.assertTrue(True)
+    }
+
+    def test_lock_local_del_in_loop_scope() {
+        i: int = 0
+        while i < 3000 {
+            l: Lock = Lock()
+            l.acquire()
+            l.release()
+            del l
+            i = i + 1
+        }
+        self.assertTrue(True)
+    }
+}
+
+main([OwnFieldTests()])

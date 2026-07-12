@@ -1,0 +1,64 @@
+from unittest import TestCase, main
+from threading import Lock
+
+class Sink {
+    own _payload: str
+    def(own payload: str) {
+        self._payload = own payload
+    }
+    def read() -> str {
+        return self._payload
+    }
+}
+
+def consume(own s: str) -> int {
+    # callee owns s; nothing consumes it onward, so the callee's scope
+    # exit releases it.
+    return len(s)
+}
+
+class OwnParamTests(TestCase) {
+    def test_move_into_consuming_fn() {
+        i: int = 0
+        total: int = 0
+        while i < 3000 {
+            b: str = "payload-" + str(i)
+            total = total + consume(own b)
+            i = i + 1
+        }
+        self.assertTrue(total > 0)
+    }
+
+    def test_move_into_ctor_and_own_field() {
+        i: int = 0
+        while i < 3000 {
+            p: str = "boxed-" + str(i)
+            s: Sink = Sink(own p)
+            self.assertTrue(len(s.read()) > 5)
+            i = i + 1
+        }
+    }
+
+    def test_fresh_temp_exemption() {
+        # A nameless fresh temp passes an own param without the keyword.
+        n: int = consume("fresh-" + "temp")
+        self.assertEqual(n, 10)
+    }
+
+    def test_conditional_move_closed_with_del() {
+        # ADR case 13's fix shape: del closes the non-moving path.
+        i: int = 0
+        while i < 3000 {
+            x: str = "job-" + str(i)
+            if i % 2 == 0 {
+                consume(own x)
+            } else {
+                del x
+            }
+            i = i + 1
+        }
+        self.assertTrue(True)
+    }
+}
+
+main([OwnParamTests()])

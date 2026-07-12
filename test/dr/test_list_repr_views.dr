@@ -1,0 +1,187 @@
+"""list representation views - the monomorphized/boxed split at the Any boundary.
+
+Dragon monomorphizes concrete lists (list[str] stores raw pointers at 8B/elem)
+and boxes dynamic ones (list[Any] stores {tag, payload} at 16B/elem). The box
+tag alone says "some list", so before this fix ordinary code silently read one
+layout at the other's stride:
+
+    const d: dict[str, Any] = {"required": ["a", "b"]}   # nested literal was
+    const xs: list[Any] = d["required"]                  # built monomorphized,
+    const s: str = xs[0]                                 # read at box stride
+                                                         # -> "b", OOB, or SEGV
+
+You did nothing wrong - the fix makes the compiler do two things:
+  1. a container LITERAL flowing into an Any context is BORN boxed
+     (recursively), so the reads above are correct;
+  2. unboxing an Any into a typed list view verifies the representation
+     (dragon_list_view_check) and raises TypeError instead of misreading;
+     flowing a concrete list VARIABLE as list[Any] is a compile error.
+"""
+
+from unittest import TestCase, main
+import json
+
+
+def anylist_returner() -> list[Any] {
+    # a fresh literal blessed against the declared return type - born boxed
+    return ["r1", "r2"]
+}
+
+
+class TestBornBoxedLiterals(TestCase) {
+    def test_nested_in_dict_literal() -> None {
+        const d: dict[str, Any] = {"required": ["a", "b", "c", "d", "e", "f"]}
+        const xs: list[Any] = d["required"]
+        # index 0 AND an index past size/2 (the old 16B-stride OOB zone)
+        const first: str = xs[0]
+        const last: str = xs[5]
+        self.assertEqual(first, "a")
+        self.assertEqual(last, "f")
+        self.assertEqual(len(xs), 6)
+    }
+
+    def test_nested_in_list_literal() -> None {
+        const l: list[Any] = [["a", "b"], [1, 2]]
+        const inner: list[Any] = l[0]
+        const s: str = inner[0]
+        self.assertEqual(s, "a")
+        const nums: list[Any] = l[1]
+        const n: int = nums[1]
+        self.assertEqual(n, 2)
+    }
+
+    def test_deep_nesting_through_dict_values() -> None {
+        const d: dict[str, Any] = {"outer": {"inner": ["x", "y"]}}
+        const mid: dict[str, Any] = d["outer"]
+        const xs: list[Any] = mid["inner"]
+        const s: str = xs[1]
+        self.assertEqual(s, "y")
+    }
+
+    def test_subscript_assigned_literal() -> None {
+        d: dict[str, Any] = {}
+        d["k"] = ["a", "b"]
+        const xs: list[Any] = d["k"]
+        const s: str = xs[1]
+        self.assertEqual(s, "b")
+    }
+
+    def test_appended_literal() -> None {
+        l: list[Any] = []
+        l.append(["a", "b"])
+        const inner: list[Any] = l[0]
+        const s: str = inner[0]
+        self.assertEqual(s, "a")
+    }
+
+    def test_returned_literal() -> None {
+        const xs: list[Any] = anylist_returner()
+        const s: str = xs[1]
+        self.assertEqual(s, "r2")
+    }
+
+    def test_json_dumps_of_nested_literal() -> None {
+        const d: dict[str, Any] = {"type": "object", "required": ["a", "b"]}
+        self.assertEqual(json.dumps(d), '{"type": "object", "required": ["a", "b"]}')
+    }
+}
+
+
+class TestMatchingViews(TestCase) {
+    def test_native_roundtrip_concrete_type() -> None {
+        # a concrete list stored through Any and read back at ITS type is a
+        # view (same pointer), not a copy
+        names: list[str] = ["a", "b"]
+        d: dict[str, Any] = {}
+        d["k"] = names
+        const back: list[str] = d["k"]
+        self.assertEqual(back[0], "a")
+        self.assertEqual(back[1], "b")
+    }
+
+    def test_loads_built_as_anylist() -> None {
+        const schema: dict[str, Any] = json.loads_obj('{"k": ["a", "b"]}')
+        const xs: list[Any] = schema["k"]
+        out: str = ""
+        for r in xs {
+            const s: str = r
+            out = out + s
+        }
+        self.assertEqual(out, "ab")
+    }
+
+    def test_dict_value_covariance_is_uniform() -> None {
+        # dicts have ONE tagged representation - a dict[str, int] read back
+        # through Any works (no list-style split)
+        m: dict[str, int] = {"a": 1, "b": 2}
+        holder: dict[str, Any] = {"m": m}
+        const back: dict[str, Any] = holder["m"]
+        const v: int = back["a"]
+        self.assertEqual(v, 1)
+    }
+}
+
+
+class TestCrossViewsRaise(TestCase) {
+    def test_boxlist_as_concrete_raises() -> None {
+        # json.loads builds boxed-element lists; a monomorphized view over one
+        # must raise, never misread
+        const schema: dict[str, Any] = json.loads_obj('{"k": ["a", "b"]}')
+        caught: bool = False
+        try {
+            const names: list[str] = schema["k"]
+            self.assertEqual(len(names), -1)  # unreachable
+        } except {
+            caught = True
+        }
+        self.assertEqual(caught, True)
+    }
+
+    def test_native_as_anylist_raises() -> None {
+        # a concrete list VARIABLE stored through Any then viewed as list[Any]
+        names: list[str] = ["a", "b"]
+        d: dict[str, Any] = {}
+        d["k"] = names
+        caught: bool = False
+        try {
+            const xs: list[Any] = d["k"]
+            self.assertEqual(len(xs), -1)  # unreachable
+        } except {
+            caught = True
+        }
+        self.assertEqual(caught, True)
+    }
+
+    def test_wrong_concrete_elem_raises() -> None {
+        # list[str] through Any viewed as list[int]: pointer-as-int misread
+        # before the fix, TypeError now
+        names: list[str] = ["a", "b"]
+        d: dict[str, Any] = {}
+        d["k"] = names
+        caught: bool = False
+        try {
+            const xs: list[int] = d["k"]
+            self.assertEqual(len(xs), -1)  # unreachable
+        } except {
+            caught = True
+        }
+        self.assertEqual(caught, True)
+    }
+
+    def test_elem_narrow_tag_check() -> None {
+        # narrowing a box-list ELEMENT to the wrong scalar raises
+        const any_l: Any = json.loads('[1, 2]')
+        const xs: list[Any] = any_l
+        caught: bool = False
+        try {
+            const s: str = xs[0]
+            self.assertEqual(s, "unreachable")
+        } except {
+            caught = True
+        }
+        self.assertEqual(caught, True)
+    }
+}
+
+
+main([TestBornBoxedLiterals(), TestMatchingViews(), TestCrossViewsRaise()])

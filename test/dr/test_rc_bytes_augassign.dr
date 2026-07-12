@@ -1,0 +1,29 @@
+from unittest import TestCase, main
+
+def make_block(i: int) -> bytes {
+    out: list[int] = []
+    out.append(i % 256)
+    out.append((i + 1) % 256)
+    return bytes(out)
+}
+
+class BytesAugAssignRC(TestCase) {
+    def test_bytes_augassign_owned_rhs() {
+        i: int = 0
+        while i < 2000 {
+            acc: bytes = b""
+            acc += make_block(i)
+            acc += make_block(i + 7)
+            self.assertEqual(len(acc), 4)
+            i = i + 1
+        }
+    }
+
+    def test_bytes_augassign_literal_rhs() {
+        acc: bytes = b"ab"
+        acc += b"cd"
+        self.assertEqual(len(acc), 4)
+    }
+}
+
+main([BytesAugAssignRC()])

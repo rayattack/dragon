@@ -1,0 +1,29 @@
+from unittest import TestCase, main
+
+extern "C" def dragon_str_concat(a: str, b: str) -> str
+
+class FwdRefArgDrainRC(TestCase) {
+    def test_forward_ref_result_as_extern_arg() {
+        i: int = 0
+        while i < 2000 {
+            body: str = ""
+            body = dragon_str_concat(body, fwd_helper(i))
+            self.assertTrue(len(body) > 5)
+            i = i + 1
+        }
+    }
+
+    def test_forward_ref_result_type_is_concrete() {
+        # The pre-pass must give the call its real str type: string methods
+        # dispatch on it directly (an Unknown/Any result could not)
+        s: str = fwd_helper(7).upper()
+        self.assertEqual(s, "CHUNK7")
+    }
+}
+
+# Defined AFTER its callers - the forward-reference shape under test
+def fwd_helper(n: int) -> str {
+    return "chunk" + str(n)
+}
+
+main([FwdRefArgDrainRC()])

@@ -1,0 +1,97 @@
+from unittest import TestCase, main
+from json import loads
+
+
+# borrow-only sinks: the argument is only read, never retained
+def _takes_any(x: Any) -> int { return 1 }
+def _is_str(x: Any) -> bool { return isinstance(x, str) }
+def _is_str_hop(y: Any) -> bool { return _is_str(y) }          # transitive borrow
+def _is_str_two_hops(z: Any) -> bool { return _is_str_hop(z) }  # 2-hop transitive
+
+
+# An escaping sink: the ctor/method STORE the Any into a field (adopt the temp's
+# +1). Draining the caller temp here would be a use-after-free.
+class Box {
+    v: Any
+    def(v: Any) { self.v = v }
+    def replace(v: Any) -> None { self.v = v }
+    def get() -> Any { return self.v }
+}
+
+
+class AnyBorrowDrainTests(TestCase) {
+    # Direct borrow-only call with an owned box temp, looped to amplify any leak.
+    def test_direct_borrow_drained() {
+        i: int = 0
+        while i < 2000 {
+            self.assertEqual(_takes_any(loads("\"ada\"")), 1)
+            i = i + 1
+        }
+    }
+
+    # A LIST-payload owned temp into a borrow param (the boxed-container path).
+    def test_container_payload_borrow_drained() {
+        i: int = 0
+        while i < 2000 {
+            self.assertTrue(not _is_str(loads("[1, 2, 3]")))
+            i = i + 1
+        }
+    }
+
+    # Transitive: the param is passed on to another borrow-only function. The
+    # analysis must see through one and two hops.
+    def test_transitive_borrow_drained() {
+        i: int = 0
+        while i < 2000 {
+            self.assertTrue(_is_str_hop(loads("\"x\"")))
+            self.assertTrue(_is_str_two_hops(loads("\"y\"")))
+            i = i + 1
+        }
+    }
+
+    # Bound local: p owns the box and is released at scope exit; the call must
+    # NOT also drain it (a double-decref would corrupt or crash). The value must
+    # survive the borrow call intact.
+    def test_bound_local_not_double_freed() {
+        i: int = 0
+        while i < 2000 {
+            const p: Any = loads("\"bound\"")
+            self.assertEqual(_takes_any(p), 1)
+            self.assertTrue(isinstance(p, str))   # p still valid after the call
+            i = i + 1
+        }
+    }
+
+    # Escaping via a field store: constructing with an inline owned temp, then
+    # reading the field back. If the temp were wrongly drained, this read would
+    # see freed memory. The stored value must round-trip.
+    def test_field_store_not_drained() {
+        i: int = 0
+        while i < 2000 {
+            const b: Box = Box(loads("\"stored\""))
+            const back: Any = b.get()
+            self.assertTrue(isinstance(back, str))
+            const s: str = back
+            self.assertEqual(s, "stored")
+            i = i + 1
+        }
+    }
+
+    # Escaping via a method store that OVERWRITES a prior field value: exercises
+    # the field-overwrite decref plus the new adopt. Both stored values must be
+    # correct in turn, with no double-free of the replaced one.
+    def test_field_overwrite_not_drained() {
+        i: int = 0
+        while i < 2000 {
+            const b: Box = Box(loads("\"first\""))
+            b.replace(loads("\"second\""))
+            const back: Any = b.get()
+            const s: str = back
+            self.assertEqual(s, "second")
+            i = i + 1
+        }
+    }
+}
+
+
+main([AnyBorrowDrainTests()])

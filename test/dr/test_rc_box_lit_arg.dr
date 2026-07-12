@@ -1,0 +1,66 @@
+from unittest import TestCase, main
+
+
+class BoxLitArgTests(TestCase) {
+    def test_owned_box_first_arg_lit_second() {
+        """
+        # First arg: OWNED dragon_box_subscript result (drained by the call).
+        # Second arg: str literal boxed borrow-only (must not dup, must not leak
+        """
+        m: Any = {"k": "some-longish-value-xxxxxxxxxxxxxxxxxxxx"}
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(m["k"], "some-longish-value-xxxxxxxxxxxxxxxxxxxx")
+            i = i + 1
+        }
+    }
+
+    def test_borrowed_box_first_arg_lit_second() {
+        """
+        dict[str, Any] element read is dragon_dict_get_box = BORROWED.
+        Draining it would be a use-after-free (amebo's payload[k] pattern)
+        """
+        d: dict[str, Any] = {"k": "borrowed-value-yyyyyyyyyyyyyyyyyy"}
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(d["k"], "borrowed-value-yyyyyyyyyyyyyyyyyy")
+            i = i + 1
+        }
+        v: str = d["k"]
+        self.assertEqual(v, "borrowed-value-yyyyyyyyyyyyyyyyyy")
+    }
+
+    def test_borrowed_str_getter_guard() {
+        """
+        dict[int, str] getter returns a BORROWED str; isOwnedStrResult
+        false-positives on it (prior A/B-proven UAF). Must stay undrained.
+        """
+        d: dict[int, str] = {1: "one-zzzzzzzzzzzzzzzz"}
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(d[1], "one-zzzzzzzzzzzzzzzz")
+            i = i + 1
+        }
+        self.assertEqual(d[1], "one-zzzzzzzzzzzzzzzz")
+    }
+
+    def test_listany_remove_lit_search() {
+        """
+        list[Any].remove("lit") boxes the literal borrow-only for the
+        dragon_box_eq equality search (the other takesOwnership=false
+        caller). The search must still match heap-stored elements against a
+        literal payload, and must not leak a dup per call
+        """
+        i: int = 0
+        while i < 3000 {
+            xs: list[Any] = ["keep-me", "drop-me-wwwwwwwwwwwwwwww", 7]
+            xs.remove("drop-me-wwwwwwwwwwwwwwww")
+            self.assertEqual(len(xs), 2)
+            self.assertEqual(xs[0], "keep-me")
+            i = i + 1
+        }
+    }
+}
+
+
+main([BoxLitArgTests()])

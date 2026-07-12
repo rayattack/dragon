@@ -1,0 +1,47 @@
+from unittest import TestCase, main
+
+class Holder {
+    _h: dict[str, str] = {}
+    def(h: dict[str, str]) {
+        self._h = h
+    }
+    def info() -> dict[str, str] {
+        return self._h
+    }
+}
+
+class OwnedRecvSubscriptRC(TestCase) {
+    def test_method_result_receiver() {
+        i: int = 0
+        while i < 2000 {
+            hdrs: dict[str, str] = {"Content-Type": "text/plain-" + str(i)}
+            r: Holder = Holder(hdrs)
+            v: str = r.info()["Content-Type"]
+            self.assertTrue(len(v) > 10)
+            i = i + 1
+        }
+    }
+
+    def test_get_chain_receiver() {
+        i: int = 0
+        while i < 2000 {
+            cfg: dict[str, dict[str, str]] = {"db": {"host": "local-" + str(i)}}
+            h: str = cfg.get("db")["host"]
+            self.assertTrue(len(h) > 6)
+            i = i + 1
+        }
+    }
+
+    def test_named_receiver_still_borrows() {
+        d: dict[str, str] = {"k": "v" + "0"}
+        i: int = 0
+        while i < 2000 {
+            v: str = d["k"]
+            self.assertEqual(v, "v0")
+            i = i + 1
+        }
+        self.assertEqual(d["k"], "v0")
+    }
+}
+
+main([OwnedRecvSubscriptRC()])

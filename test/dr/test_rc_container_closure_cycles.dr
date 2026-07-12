@@ -1,0 +1,63 @@
+from unittest import TestCase, main
+
+extern "C" def dragon_gc_collect() -> int
+extern "C" def dragon_gc_set_threshold(n: int) -> None
+
+
+def spin_dict_cycles(count: int) -> int {
+    i: int = 0
+    while i < count {
+        d: dict[str, Callable[[], int]] = {}
+        d["cb"] = lambda () -> int { return len(d) }
+        i = i + 1
+    }
+    return i
+}
+
+
+def spin_tuple_cycles(count: int) -> int {
+    i: int = 0
+    while i < count {
+        xs: list[tuple[Callable[[], int], int]] = []
+        c: Callable[[], int] = lambda () -> int { return len(xs) }
+        t: tuple[Callable[[], int], int] = (c, i)
+        xs.append(t)
+        i = i + 1
+    }
+    return i
+}
+
+
+class ContainerClosureCycleTests(TestCase) {
+    def test_dropped_dict_closure_cycles_are_collected() {
+        dragon_gc_set_threshold(1000000)
+        made: int = spin_dict_cycles(300)
+        collected: int = dragon_gc_collect()
+        self.assertEqual(made, 300)
+        # 3 tracked objects per cycle (dict + closure + env); before the fix
+        # this was 0. Assert at least one object per dropped cycle so the
+        # test stays robust to future enrollment tuning.
+        self.assertTrue(collected >= 300)
+    }
+
+    def test_dropped_tuple_closure_cycles_are_collected() {
+        dragon_gc_set_threshold(1000000)
+        made: int = spin_tuple_cycles(300)
+        collected: int = dragon_gc_collect()
+        self.assertEqual(made, 300)
+        # 4 tracked objects per cycle (list + tuple + closure + env).
+        self.assertTrue(collected >= 300)
+    }
+
+    def test_live_dict_closure_cycle_survives() {
+        d: dict[str, Callable[[], int]] = {}
+        d["cb"] = lambda () -> int { return len(d) }
+        dragon_gc_collect()
+        dragon_gc_collect()
+        cb: Callable[[], int] = d["cb"]
+        self.assertEqual(cb(), 1)
+    }
+}
+
+
+main([ContainerClosureCycleTests()])

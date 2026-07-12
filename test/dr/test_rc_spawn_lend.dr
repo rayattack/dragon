@@ -1,0 +1,67 @@
+from unittest import TestCase, main
+
+class Op {
+    name: str
+    def(n: str) { self.name = n }
+    def read() -> int { return len(self.name) }
+}
+
+def work(o: Op) -> int {
+    return o.read()
+}
+
+def sum_of(o: Op, k: int) -> int {
+    return o.read() + k
+}
+
+def consume(own o: Op) -> int {
+    return o.read()
+}
+
+class SpawnLendTests(TestCase) {
+    def test_lend_then_await_then_use() {
+        # The joined-Task borrow door: o crosses as a plain borrow, is
+        # untouchable while lent, and revives at the await
+        i: int = 0
+        while i < 2000 {
+            o: Op = Op("payload")
+            t: Task[int] = fire work(o)
+            const r: int = await t
+            self.assertEqual(r, 7)
+            self.assertEqual(o.read(), 7)
+            i = i + 1
+        }
+    }
+
+    def test_two_tasks_two_lends() {
+        a: Op = Op("aa")
+        b: Op = Op("bbb")
+        t1: Task[int] = fire work(a)
+        t2: Task[int] = fire work(b)
+        const r1: int = await t1
+        const r2: int = await t2
+        self.assertEqual(r1 + r2, 5)
+        self.assertEqual(a.read() + b.read(), 5)
+    }
+
+    def test_await_fire_inline() {
+        # `await fire f(o)`: the borrow window IS the await.
+        o: Op = Op("xyz")
+        const r: int = await fire sum_of(o, 10)
+        self.assertEqual(r, 13)
+        self.assertEqual(o.read(), 3)
+    }
+
+    def test_move_door_still_works() {
+        i: int = 0
+        while i < 2000 {
+            o: Op = Op("gone")
+            t: Task[int] = fire consume(own o)
+            const r: int = await t
+            self.assertEqual(r, 4)
+            i = i + 1
+        }
+    }
+}
+
+main([SpawnLendTests()])

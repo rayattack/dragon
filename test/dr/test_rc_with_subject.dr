@@ -1,0 +1,129 @@
+from unittest import TestCase, main
+
+
+class Guard {
+    _open: bool
+    hits: int
+    def() {
+        self._open = false
+        self.hits = 0
+    }
+    def __enter__() -> Guard {
+        self._open = true
+        self.hits = self.hits + 1
+        return self
+    }
+    def __exit__() -> int {
+        self._open = false
+        return 0
+    }
+    def is_open() -> bool {
+        return self._open
+    }
+}
+
+
+class Holder {
+    g: Guard
+    def() {
+        self.g = Guard()
+    }
+}
+
+
+def enter_and_raise(g: Guard) -> int {
+    with g {
+        raise ValueError("boom")
+    }
+    return 0
+}
+
+
+def exit_early(g: Guard) -> int {
+    with g {
+        return 7
+    }
+}
+
+
+class WithSubjectTests(TestCase) {
+    def test_bound_local_subject_reused() {
+        g: Guard = Guard()
+        self.assertFalse(g.is_open())
+        with g {
+            self.assertTrue(g.is_open())
+        }
+        self.assertFalse(g.is_open())
+        with g {
+            self.assertTrue(g.is_open())
+        }
+        self.assertEqual(g.hits, 2)
+    }
+
+    def test_fresh_temp_subject() {
+        n: int = 0
+        with Guard() {
+            n = n + 1
+        }
+        self.assertEqual(n, 1)
+    }
+
+    def test_as_binding_subject() {
+        opened: bool = false
+        with Guard() as g {
+            opened = g.is_open()
+        }
+        self.assertTrue(opened)
+    }
+
+    def test_attribute_subject() {
+        h: Holder = Holder()
+        with h.g {
+            self.assertTrue(h.g.is_open())
+        }
+        self.assertFalse(h.g.is_open())
+        self.assertEqual(h.g.hits, 1)
+    }
+
+    def test_exception_path_bound_subject() {
+        g: Guard = Guard()
+        caught: int = 0
+        try {
+            n: int = enter_and_raise(g)
+        } except ValueError {
+            caught = 1
+        }
+        self.assertEqual(caught, 1)
+        self.assertFalse(g.is_open())
+        self.assertEqual(g.hits, 1)
+    }
+
+    def test_early_return_bound_subject() {
+        g: Guard = Guard()
+        self.assertEqual(exit_early(g), 7)
+        self.assertFalse(g.is_open())
+        with g {
+            self.assertTrue(g.is_open())
+        }
+        self.assertEqual(g.hits, 2)
+    }
+
+    def test_with_churn() {
+        i: int = 0
+        n: int = 0
+        while i < 500 {
+            g: Guard = Guard()
+            with g {
+                n = n + 1
+            }
+            with Guard() {
+                n = n + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(n, 1000)
+    }
+}
+
+
+main([WithSubjectTests()])

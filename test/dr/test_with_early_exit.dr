@@ -1,17 +1,3 @@
-# test/dr/test_with_early_exit.dr - `with` cleanup on early exit (leaks.md #5).
-#
-# `__exit__` / lock-release used to run ONLY on the normal fall-through and the
-# longjmp (exception) paths. An early `return`/`break`/`continue` inside the
-# body branched straight to the function epilogue / loop target, so:
-#  - return -> __exit__ / release SKIPPED (a `with Lock(): return` held the
-#  lock forever; `with cm() as f: return` leaked the resource);
-#  - break/continue -> additionally produced INVALID IR (a terminator was
-#  appended after the body's branch), so it would not even compile.
-# The fix unifies finally-bodies and with-cleanups into ONE ordered exit-cleanup
-# stack that return/break/continue replay innermost-first before jumping, so the
-# same __exit__/release/finally runs on every exit edge. One stack (not two) so a
-# `with` nested in a try-finally and vice-versa interleave in the correct order.
-
 from unittest import TestCase, main
 from threading import Lock
 
@@ -142,16 +128,17 @@ class WithEarlyExitTests(TestCase) {
     def test_lock_released_on_early_return() {
         # If the lock were not released on the early return, acquiring it again
         # on this thread would deadlock; reaching the assertion proves release.
-        # NOTE: the bound `g: Lock` leaks its lock object under LSan - a separate,
-        # pre-existing lock-object-lifetime gap (a bare `Lock()` not wrapped in a
-        # `with` is never freed), NOT this #5 fix, which releases AND frees on
-        # early exit (inline `with Lock(): return` is LSan-clean). This test runs
-        # in normal mode (the dr_ ctest tier); the no-deadlock check is its point.
+        # The bound `g: Lock` used to leak its mutex (a bare Lock() had no
+        # owner of last resort - AUDIT 2.3); `del g` is the docs/001-memory.md
+        # answer: a compiler-PROVEN sole-owner release, so this test is now
+        # LSan-clean end to end. The plain-arg pass above stays a borrow and
+        # does not block the proof.
         g: Lock = Lock()
         lock_released_on_return(g)
         with g {
             self.assertEqual(1, 1)
         }
+        del g
     }
 }
 

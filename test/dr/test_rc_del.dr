@@ -1,0 +1,48 @@
+from unittest import TestCase, main
+def digest(s: str) -> int {
+    return len(s)
+}
+class G(TestCase) {
+    def test_del_after_call() {
+        i: int = 0
+        while i < 3000 {
+            buf: str = "payload-" + str(i)
+            d: int = digest(buf)
+            del buf
+            self.assertTrue(d > 8)
+            i = i + 1
+        }
+    }
+    def test_del_scalar() {
+        n: int = 42
+        del n
+        m: int = 7
+        self.assertEqual(m, 7)
+    }
+    def test_rebind_after_del() {
+        x: str = "a" + "b"
+        del x
+        x = "c" + "d"
+        self.assertEqual(x, "cd")
+    }
+    def test_del_all_branches() {
+        c: bool = True
+        x: str = "a" + "b"
+        if c {
+            del x
+        } else {
+            del x
+        }
+        y: str = "ok"
+        self.assertEqual(y, "ok")
+    }
+    def test_del_container_elem_still_works() {
+        d: dict[str, int] = {"a": 1, "b": 2}
+        del d["a"]
+        self.assertEqual(len(d), 1)
+        xs: list[int] = [1, 2, 3]
+        del xs[0]
+        self.assertEqual(len(xs), 2)
+    }
+}
+main([G()])

@@ -1,0 +1,70 @@
+from unittest import TestCase, main
+
+class DubTests(TestCase) {
+    def test_snapshot_iteration_fixes_the_repro() {
+        # The user's live repro: remove() used to shift tmp2 past the cursor
+        # and the loop printed ['a', 'tmp2', 'b'] silently
+        names: list[str] = ["a", "tmp1", "tmp2", "b"]
+        for name in dub names {
+            if name.startswith("tmp") {
+                names.remove(name)
+            }
+        }
+        self.assertEqual(names, ["a", "b"])
+    }
+
+    def test_dub_is_independent() {
+        i: int = 0
+        while i < 3000 {
+            base: list[int] = [1, 2, 3]
+            mine: list[int] = dub base
+            mine.append(4)
+            self.assertEqual(len(base), 3)
+            self.assertEqual(len(mine), 4)
+            i = i + 1
+        }
+    }
+
+    def test_dub_nested_is_deep() {
+        base: list[list[int]] = [[1, 2], [3, 4]]
+        mine: list[list[int]] = dub base
+        inner: list[int] = mine[0]
+        inner.append(99)
+        self.assertEqual(len(base[0]), 2)
+        self.assertEqual(len(mine[0]), 3)
+    }
+
+    def test_dub_str_identity_retain() {
+        i: int = 0
+        while i < 3000 {
+            s: str = "payload-" + str(i)
+            t: str = dub s
+            self.assertEqual(t, s)
+            i = i + 1
+        }
+    }
+
+    def test_dub_dict() {
+        base: dict[str, int] = {"a": 1}
+        mine: dict[str, int] = dub base
+        mine["b"] = 2
+        self.assertEqual(len(base), 1)
+        self.assertEqual(len(mine), 2)
+    }
+
+    def test_collect_then_apply_still_compiles() {
+        names: list[str] = ["a", "tmp1", "b"]
+        doomed: list[str] = []
+        for name in names {
+            if name.startswith("tmp") {
+                doomed.append(name)
+            }
+        }
+        for d in doomed {
+            names.remove(d)
+        }
+        self.assertEqual(names, ["a", "b"])
+    }
+}
+
+main([DubTests()])

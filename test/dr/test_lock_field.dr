@@ -1,53 +1,14 @@
-"""Lock as an instance field - the silently-dropped acquire (2026-07-06).
-
-If you have the code elow:
-
-    from threading import Lock
-
-    class Cache {
-        def() {
-            self._lock: Lock = Lock()
-            self._d: dict[str, int] = {}
-        }
-
-        def put(k: str, v: int) -> None {
-            with self._lock {          # or self._lock.acquire()/release()
-                self._d[k] = v
-            }
-        }
-    }
-
-Lock is supposed to be a compiler intrinsic, not a Dragon class, and its
-method/with dispatch only recognises a plan name receiver locak.acquire.
-A Lock stored in an instance FIELD fell through to the generic path which bound
-the value and emitted nada/nyet/nothing for acquire or release, this means the
-compiled put() contained no locking at all. Single threaded code behaved similarly i.e.
-no-op lock returns the right values, so nothing looked wrong until 2 vthread on different
-os workers entered put(0 at once and the dict corrupted - or, after the current mutation
-dectector landed, aborted wth dragon fatal: concurrent mutation of a shared dict even
-though the code took the lcok
-
-BEFORE: `with self._lock { ... }` and `self._lock.acquire()` compiled to
-zero lock calls; two fired workers collided inside the dict.
-AFTER: the ctor scan tags Lock-typed fields (classFieldClassName ->
-"__Lock") and both the method dispatch and the with-lowering accept
-attribute receivers, so field locks reach dragon_lock_acquire/release.
-
-This suite runs 2 OS-parallel vthreads hammering one shared object; the
-exact final count is only reachable if the field lock really serializes
-(and it doubles as a detector no-false-positive check: an unlocked overlap
-would abort the whole file).
-
-One line: a Lock field now locks; before, it silently did not.
-"""
-
 from unittest import TestCase, main
 from threading import Lock
 
 
 class WithBox {
+    # E15 (docs/002 2.10): a Lock field must be declared own - a raw mutex
+    # has no refcount, so a non-own Lock field has no owner to destroy it.
+    own _lock: Lock
+
     def() {
-        self._lock: Lock = Lock()
+        self._lock = Lock()
         self._d: dict[str, int] = {}
     }
 
@@ -66,8 +27,10 @@ class WithBox {
 
 
 class AcquireBox {
+    own _lock: Lock
+
     def() {
-        self._lock: Lock = Lock()
+        self._lock = Lock()
         self._d: dict[str, int] = {}
     }
 

@@ -1,0 +1,60 @@
+from unittest import TestCase, main
+
+
+def make(n: int) -> Callable[[], int] {
+    return lambda () -> int { return n }
+}
+
+
+def tuple_literal_once(n: int) -> int {
+    # Borrowed Callable in a tuple literal: codegen increfs it into the
+    # tuple; tuple destroy must give that ref back (and must NOT double-free
+    # f, which scope cleanup releases after the tuple)
+    f: Callable[[], int] = make(n)
+    t: tuple[Callable[[], int], int] = (f, n)
+    return f() + len(t)
+}
+
+
+class TupleCallableRcTests(TestCase) {
+    def test_dict_items_churn() {
+        total: int = 0
+        i: int = 0
+        while i < 500 {
+            d: dict[str, Callable[[], int]] = {}
+            d["a"] = make(i)
+            d["b"] = make(i + 1)
+            total = total + len(d.items())
+            i = i + 1
+        }
+        self.assertEqual(total, 1000)
+    }
+
+    def test_tuple_from_list_churn() {
+        total: int = 0
+        i: int = 0
+        while i < 500 {
+            fns: list[Callable[[], int]] = []
+            fns.append(make(i))
+            fns.append(make(i + 1))
+            t: tuple[Callable[[], int], Callable[[], int]] = tuple(fns)
+            total = total + len(t)
+            i = i + 1
+        }
+        self.assertEqual(total, 1000)
+    }
+
+    def test_tuple_literal_borrowed_closure() {
+        total: int = 0
+        i: int = 0
+        while i < 500 {
+            total = total + tuple_literal_once(i)
+            i = i + 1
+        }
+        # sum(i + 2 for i in 0..499) = 124750 + 1000
+        self.assertEqual(total, 125750)
+    }
+}
+
+
+main([TupleCallableRcTests()])

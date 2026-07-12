@@ -1,0 +1,61 @@
+from unittest import TestCase, main
+
+
+def sysname() -> str {
+    p: str = "Lin"
+    return p + "ux-wwwwwwwwwwwwwwww"
+}
+
+
+class Probe(TestCase) {
+    def test_neq_owned_lhs() {
+        i: int = 0
+        while i < 3000 {
+            self.assertTrue(sysname() != "")
+            i = i + 1
+        }
+    }
+
+    def test_eq_owned_lhs() {
+        i: int = 0
+        while i < 3000 {
+            self.assertTrue(sysname() == "Linux-wwwwwwwwwwwwwwww")
+            i = i + 1
+        }
+    }
+
+    def test_in_owned_lhs() {
+        hay: str = "xxLinux-wwwwwwwwwwwwwwwwyy"
+        i: int = 0
+        while i < 3000 {
+            self.assertTrue(sysname() in hay)
+            i = i + 1
+        }
+    }
+
+    def test_asserteq_owned_arg() {
+        i: int = 0
+        while i < 3000 {
+            self.assertEqual(sysname(), "Linux-wwwwwwwwwwwwwwww")
+            i = i + 1
+        }
+    }
+
+    def test_borrowed_guards() {
+        # Slot operands and borrowed getters must NOT be drained.
+        s: str = "abc-wwwwwwwwwwwwwwww"
+        d: dict[int, str] = {1: "one-wwwwwwwwwwwwwwww"}
+        i: int = 0
+        while i < 3000 {
+            self.assertTrue(s != "")
+            self.assertTrue(d[1] != "")
+            self.assertTrue(s in "xxabc-wwwwwwwwwwwwwwwwyy")
+            i = i + 1
+        }
+        self.assertEqual(s, "abc-wwwwwwwwwwwwwwww")
+        self.assertEqual(d[1], "one-wwwwwwwwwwwwwwww")
+    }
+}
+
+
+main([Probe()])

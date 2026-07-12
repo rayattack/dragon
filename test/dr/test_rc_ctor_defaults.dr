@@ -1,0 +1,43 @@
+from unittest import TestCase, main
+
+
+class Base {
+    items: list[int] = []
+    tag: str = "base " + str(0)
+}
+
+
+class Derived(Base) {
+    items: list[int] = [7]
+    tag: str = "derived " + str(1)
+}
+
+
+class CtorDefaultsTests(TestCase) {
+    def test_derived_default_wins() {
+        d: Derived = Derived()
+        self.assertEqual(len(d.items), 1)
+        self.assertEqual(d.items[0], 7)
+        self.assertEqual(d.tag, "derived 1")
+    }
+
+    def test_base_default_intact() {
+        b: Base = Base()
+        self.assertEqual(len(b.items), 0)
+        self.assertEqual(b.tag, "base 0")
+    }
+
+    def test_construction_churn() {
+        i: int = 0
+        total: int = 0
+        while i < 2000 {
+            d: Derived = Derived()
+            total = total + len(d.items)
+            i = i + 1
+        }
+        self.assertEqual(total, 2000)
+    }
+}
+
+
+main([CtorDefaultsTests()])

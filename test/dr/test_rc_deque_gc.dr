@@ -1,0 +1,62 @@
+from unittest import TestCase, main
+from collections import deque
+
+extern "C" def dragon_gc_collect() -> int
+
+
+class DequeGcTests(TestCase) {
+    def test_live_deque_of_lists_survives_collection() {
+        d: deque[list[int]] = deque()
+        i: int = 0
+        while i < 50 {
+            xs: list[int] = [i, i + 1, i + 2]
+            d.append(xs)
+            i = i + 1
+        }
+        dragon_gc_collect()
+        dragon_gc_collect()
+        total: int = 0
+        while len(d) > 0 {
+            ys: list[int] = d.pop()
+            total = total + ys[0]
+        }
+        # sum 0..49
+        self.assertEqual(total, 1225)
+    }
+
+    def test_live_deque_of_closures_survives_collection() {
+        fns: deque[Callable[[], int]] = deque()
+        j: int = 0
+        while j < 20 {
+            k: int = j
+            fns.append(lambda () -> int { return k })
+            j = j + 1
+        }
+        dragon_gc_collect()
+        csum: int = 0
+        while len(fns) > 0 {
+            f: Callable[[], int] = fns.pop()
+            csum = csum + f()
+        }
+        # sum 0..19
+        self.assertEqual(csum, 190)
+    }
+
+    def test_bounded_deque_eviction_stays_balanced() {
+        # Bounded deque of lists: eviction decref + gc tracking must not
+        # double-release or leak under churn.
+        d: deque[list[int]] = deque([], maxlen=4)
+        i: int = 0
+        while i < 200 {
+            d.append([i])
+            i = i + 1
+        }
+        dragon_gc_collect()
+        self.assertEqual(len(d), 4)
+        last: list[int] = d.pop()
+        self.assertEqual(last[0], 199)
+    }
+}
+
+
+main([DequeGcTests()])

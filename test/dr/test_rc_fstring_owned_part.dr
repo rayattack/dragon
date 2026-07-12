@@ -1,0 +1,32 @@
+from unittest import TestCase, main
+
+class FstringOwnedPartRC(TestCase) {
+    def test_single_part_owned_call() {
+        i: int = 0
+        while i < 2000 {
+            cfg: dict[str, str] = {"host": "localhost-" + str(i)}
+            s: str = f"{cfg.get('host', '?')}"
+            self.assertTrue(len(s) > 8)
+            i = i + 1
+        }
+    }
+
+    def test_single_part_borrowed_name() {
+        base: str = "kept" + "!"
+        i: int = 0
+        while i < 2000 {
+            s: str = f"{base}"
+            self.assertEqual(s, "kept!")
+            i = i + 1
+        }
+        self.assertEqual(base, "kept!")
+    }
+
+    def test_multi_part_owned_call() {
+        cfg: dict[str, str] = {"host": "h1"}
+        s: str = f"host={cfg.get('host', '?')}!"
+        self.assertEqual(s, "host=h1!")
+    }
+}
+
+main([FstringOwnedPartRC()])

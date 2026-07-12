@@ -1,0 +1,139 @@
+from unittest import TestCase, main
+
+
+class AppError(Exception) {
+    code: int
+    payload: str
+    def(code: int, payload: str) {
+        self.code = code
+        self.payload = payload
+    }
+}
+
+
+class WrapError(Exception) {
+    note: str
+    def(note: str) {
+        self.note = note
+    }
+}
+
+
+def boom(n: int) {
+    raise AppError(n, "payload " + str(n))
+}
+
+
+def raise_saved(n: int) {
+    saved: AppError = AppError(n, "saved " + str(n))
+    raise saved
+}
+
+
+class ExcInstanceTests(TestCase) {
+    def test_unbound_catch_churn() {
+        caught: int = 0
+        i: int = 0
+        while i < 2000 {
+            try {
+                boom(i)
+            } except AppError {
+                caught = caught + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(caught, 2000)
+    }
+
+    def test_bound_catch_reads_fields() {
+        code: int = 0
+        got: str = ""
+        try {
+            boom(41)
+        } except AppError as e {
+            code = e.code
+            got = e.payload
+        }
+        self.assertEqual(code, 41)
+        self.assertEqual(got, "payload 41")
+    }
+
+    def test_bound_catch_churn() {
+        total: int = 0
+        i: int = 0
+        while i < 2000 {
+            try {
+                boom(i)
+            } except AppError as e {
+                total = total + e.code
+            }
+            i = i + 1
+        }
+        self.assertEqual(total, 1999000)
+    }
+
+    def test_raise_inside_bound_handler() {
+        caught: int = 0
+        i: int = 0
+        while i < 500 {
+            try {
+                try {
+                    boom(i)
+                } except AppError as e {
+                    raise WrapError("wrapped " + str(e.code))
+                }
+            } except WrapError as w {
+                caught = caught + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(caught, 500)
+    }
+
+    def test_reraise_binding() {
+        code: int = 0
+        try {
+            try {
+                boom(7)
+            } except AppError as e {
+                raise e
+            }
+        } except AppError as e2 {
+            code = e2.code
+        }
+        self.assertEqual(code, 7)
+    }
+
+    def test_raise_saved_local_churn() {
+        caught: int = 0
+        i: int = 0
+        while i < 500 {
+            try {
+                raise_saved(i)
+            } except AppError {
+                caught = caught + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(caught, 500)
+    }
+
+    def test_finally_reraise_keeps_instance() {
+        code: int = 0
+        ran_finally: int = 0
+        try {
+            try {
+                boom(9)
+            } finally {
+                ran_finally = 1
+            }
+        } except AppError as e {
+            code = e.code
+        }
+        self.assertEqual(ran_finally, 1)
+        self.assertEqual(code, 9)
+    }
+}
+
+
+main([ExcInstanceTests()])

@@ -38,6 +38,11 @@ add_executable(dragon_definite_assignment_tests DefiniteAssignmentTest.cpp)
 target_link_libraries(dragon_definite_assignment_tests PRIVATE dragon_lib gtest_main)
 add_test(NAME DefiniteAssignmentTests COMMAND dragon_definite_assignment_tests)
 
+# --- Ownership (del/own/dub) Tests ---
+add_executable(dragon_ownership_tests OwnershipCheckTest.cpp)
+target_link_libraries(dragon_ownership_tests PRIVATE dragon_lib gtest_main)
+add_test(NAME OwnershipTests COMMAND dragon_ownership_tests)
+
 # --- TypeChecker Tests ---
 add_executable(dragon_typechecker_tests TypeCheckerTest.cpp)
 target_link_libraries(dragon_typechecker_tests PRIVATE dragon_lib gtest_main)
@@ -129,3 +134,4 @@ add_test(NAME dr_ffi_cxx_shim
     COMMAND $<TARGET_FILE:dragon> run
         ${CMAKE_CURRENT_SOURCE_DIR}/dr/ffi_cxx/app.dr
         --cc-source ${CMAKE_CURRENT_SOURCE_DIR}/dr/ffi_cxx/shim.cpp)
+
