@@ -19,6 +19,13 @@ syn keyword dragonKeyword       fire thread async await
 " Storage modifiers
 syn keyword dragonStorage       const static extern
 
+" Ownership modifiers. `own` and `dub` are contextual keywords (they may be
+" ordinary identifiers elsewhere), so highlight them only in modifier position:
+" immediately before an identifier. That matches every real site - `own d: T`,
+" `own field: T`, `f(own x)`, `f(dub x)` - and leaves a variable named `own`
+" (followed by `=`, `.`, `(`, or end-of-line) alone. `del` stays a keyword.
+syn match  dragonStorage        "\<\%(own\|dub\)\>\ze\s\+\h"
+
 " Logical operators
 syn keyword dragonOperator      and or not is
 
@@ -109,6 +116,74 @@ syn match  dragonTypeAnnotation "->\s*\zs[a-zA-Z_][a-zA-Z0-9_\[\], ]*"
 syn match  dragonOperatorSym    "[+\-*/%@&|^~<>=!]\+"
 syn match  dragonArrow          "->"
 
+" ── Typed templates: embedded HTML / SQL / JSON / CSS / XML ──────────────────
+" A `template[TYPE] { ... }` block is brace-DEPTH delimited by the Dragon lexer.
+" Vim has no depth counter, so we rebuild it: literal `{ }` pairs in content are
+" balanced contained regions (so a brace pair never ends the template early; a
+" LONE `}` still does, exactly matching the lexer). Two sigils switch mode:
+"   !{ expr }   breaks OUT of content into Dragon code   (content -> code)
+"   :{ frag }   breaks BACK into content from inside code (code -> content)
+"   !!{  !!}    literal escapes for a stray { or }
+" Content mode embeds the target grammar; code mode is Dragon (contains=TOP).
+
+" Pull the embedded grammars into clusters. `syn include` needs b:current_syntax
+" unset between includes or the second one silently no-ops.
+syn include @dragonHtml syntax/html.vim
+unlet! b:current_syntax
+syn include @dragonSql  syntax/sql.vim
+unlet! b:current_syntax
+syn include @dragonJson syntax/json.vim
+unlet! b:current_syntax
+syn include @dragonCss  syntax/css.vim
+unlet! b:current_syntax
+syn include @dragonXml  syntax/xml.vim
+unlet! b:current_syntax
+
+" Escapes are shared across all content types.
+syn match  dragonTplEscape "!!{\|!!}" contained
+
+" Dragon code inside interpolations. NOTE: we must NOT use `contains=TOP` here -
+" TOP silently suppresses the explicitly-listed contained brace/fragment regions
+" (verified with vim-textmate-style probes), which would let the interpolation's
+" `end=}` fire on an inner loop brace. Instead enumerate the real Dragon groups.
+syn cluster dragonCode contains=dragonKeyword,dragonStorage,dragonOperator,dragonConstant,dragonBuiltin,dragonType,dragonException,dragonSelf,dragonString,dragonNumber,dragonComment,dragonDecorator,dragonOperatorSym,dragonArrow,dragonTypeAnnotation,dragonTemplateHtml,dragonTemplateSql,dragonTemplateJson,dragonTemplateCss,dragonTemplateXml
+
+" Balanced `{ }` code block inside `!{ ... }` (loop / if bodies). Per content
+" type so a `:{}` inside it re-enters the right grammar.
+syn region dragonTplCodeBraceHtml matchgroup=NONE start="{" end="}" contained transparent contains=@dragonCode,dragonTplFragmentHtml,dragonTplCodeBraceHtml,dragonTplEscape
+syn region dragonTplCodeBraceSql  matchgroup=NONE start="{" end="}" contained transparent contains=@dragonCode,dragonTplFragmentSql,dragonTplCodeBraceSql,dragonTplEscape
+syn region dragonTplCodeBraceJson matchgroup=NONE start="{" end="}" contained transparent contains=@dragonCode,dragonTplFragmentJson,dragonTplCodeBraceJson,dragonTplEscape
+syn region dragonTplCodeBraceCss  matchgroup=NONE start="{" end="}" contained transparent contains=@dragonCode,dragonTplFragmentCss,dragonTplCodeBraceCss,dragonTplEscape
+syn region dragonTplCodeBraceXml  matchgroup=NONE start="{" end="}" contained transparent contains=@dragonCode,dragonTplFragmentXml,dragonTplCodeBraceXml,dragonTplEscape
+
+" `!{ ... }` interpolation: content -> Dragon code.
+syn region dragonTplInterpHtml matchgroup=dragonTplDelim start="!{" end="}" contained contains=@dragonCode,dragonTplFragmentHtml,dragonTplCodeBraceHtml,dragonTplEscape
+syn region dragonTplInterpSql  matchgroup=dragonTplDelim start="!{" end="}" contained contains=@dragonCode,dragonTplFragmentSql,dragonTplCodeBraceSql,dragonTplEscape
+syn region dragonTplInterpJson matchgroup=dragonTplDelim start="!{" end="}" contained contains=@dragonCode,dragonTplFragmentJson,dragonTplCodeBraceJson,dragonTplEscape
+syn region dragonTplInterpCss  matchgroup=dragonTplDelim start="!{" end="}" contained contains=@dragonCode,dragonTplFragmentCss,dragonTplCodeBraceCss,dragonTplEscape
+syn region dragonTplInterpXml  matchgroup=dragonTplDelim start="!{" end="}" contained contains=@dragonCode,dragonTplFragmentXml,dragonTplCodeBraceXml,dragonTplEscape
+
+" `:{ ... }` fragment: code -> content mode (re-embeds the grammar).
+syn region dragonTplFragmentHtml matchgroup=dragonTplDelim start=":{" end="}" contained contains=@dragonHtml,dragonTplInterpHtml,dragonTplEscape,dragonTplLitBraceHtml
+syn region dragonTplFragmentSql  matchgroup=dragonTplDelim start=":{" end="}" contained contains=@dragonSql,dragonTplInterpSql,dragonTplEscape,dragonTplLitBraceSql
+syn region dragonTplFragmentJson matchgroup=dragonTplDelim start=":{" end="}" contained contains=@dragonJson,dragonTplInterpJson,dragonTplEscape,dragonTplLitBraceJson
+syn region dragonTplFragmentCss  matchgroup=dragonTplDelim start=":{" end="}" contained contains=@dragonCss,dragonTplInterpCss,dragonTplEscape,dragonTplLitBraceCss
+syn region dragonTplFragmentXml  matchgroup=dragonTplDelim start=":{" end="}" contained contains=@dragonXml,dragonTplInterpXml,dragonTplEscape,dragonTplLitBraceXml
+
+" Balanced literal `{ }` inside content: keeps a brace pair from ending the block.
+syn region dragonTplLitBraceHtml matchgroup=NONE start="{" end="}" contained transparent contains=@dragonHtml,dragonTplInterpHtml,dragonTplEscape,dragonTplLitBraceHtml
+syn region dragonTplLitBraceSql  matchgroup=NONE start="{" end="}" contained transparent contains=@dragonSql,dragonTplInterpSql,dragonTplEscape,dragonTplLitBraceSql
+syn region dragonTplLitBraceJson matchgroup=NONE start="{" end="}" contained transparent contains=@dragonJson,dragonTplInterpJson,dragonTplEscape,dragonTplLitBraceJson
+syn region dragonTplLitBraceCss  matchgroup=NONE start="{" end="}" contained transparent contains=@dragonCss,dragonTplInterpCss,dragonTplEscape,dragonTplLitBraceCss
+syn region dragonTplLitBraceXml  matchgroup=NONE start="{" end="}" contained transparent contains=@dragonXml,dragonTplInterpXml,dragonTplEscape,dragonTplLitBraceXml
+
+" The template[TYPE] { ... } blocks themselves.
+syn region dragonTemplateHtml matchgroup=dragonTemplate start="\<template\[HTML\]\s*{" end="}" contains=@dragonHtml,dragonTplInterpHtml,dragonTplEscape,dragonTplLitBraceHtml
+syn region dragonTemplateSql  matchgroup=dragonTemplate start="\<template\[SQL\]\s*{"  end="}" contains=@dragonSql,dragonTplInterpSql,dragonTplEscape,dragonTplLitBraceSql
+syn region dragonTemplateJson matchgroup=dragonTemplate start="\<template\[JSON\]\s*{" end="}" contains=@dragonJson,dragonTplInterpJson,dragonTplEscape,dragonTplLitBraceJson
+syn region dragonTemplateCss  matchgroup=dragonTemplate start="\<template\[CSS\]\s*{"  end="}" contains=@dragonCss,dragonTplInterpCss,dragonTplEscape,dragonTplLitBraceCss
+syn region dragonTemplateXml  matchgroup=dragonTemplate start="\<template\[XML\]\s*{"  end="}" contains=@dragonXml,dragonTplInterpXml,dragonTplEscape,dragonTplLitBraceXml
+
 " Highlight links
 hi def link dragonKeyword       Keyword
 hi def link dragonStorage       StorageClass
@@ -129,5 +204,8 @@ hi def link dragonClass         Type
 hi def link dragonTypeAnnotation Type
 hi def link dragonOperatorSym   Operator
 hi def link dragonArrow         Operator
+hi def link dragonTemplate      Keyword
+hi def link dragonTplDelim      Special
+hi def link dragonTplEscape     SpecialChar
 
 let b:current_syntax = "dragon"

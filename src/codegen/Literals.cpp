@@ -416,147 +416,41 @@ void CodeGen::visit(TemplateExpr& node) {
         }
     };
 
-    const std::string& val = node.body;
+    const std::string& val = node.body;  // kept for event-attr / reactive context scans
     std::vector<llvm::Value*> parts;
-    size_t i = 0;
-    while (i < val.size()) {
-        if (val[i] == '!' && i + 1 < val.size() && val[i+1] == '!' &&
-            i + 2 < val.size() && val[i+2] == '{') {
-            // Escaped !!{ -> literal !{
-            parts.push_back(impl_->emitStringLiteralBytes("!{"));
-            i += 3;
-        } else if (val[i] == '!' && i + 1 < val.size() && val[i+1] == '!' &&
-                   i + 2 < val.size() && val[i+2] == '}') {
-            // Escaped !!} -> literal }
-            parts.push_back(impl_->emitStringLiteralBytes("}"));
-            i += 3;
-        } else if (val[i] == '!' && i + 1 < val.size() && val[i+1] == '{') {
-            // Template interpolation: !{expr}
-            const size_t bangPos = i;  // #3: for event-attr (onclick=!{h}) detection
-            size_t start = i + 2;
-            int depth = 1;
-            size_t j = start;
-            while (j < val.size() && depth > 0) {
-                if (val[j] == '{') depth++;
-                else if (val[j] == '}') depth--;
-                if (depth > 0) j++;
-            }
-            std::string exprText = val.substr(start, j - start);
-            i = j + 1;
+    // Lower each pre-parsed segment. The Parser split node.body into
+    // templateParts once and the TypeChecker walked every interpolation, so
+    // each `!{expr}` now flows AT its native type - a `!{p[0]}` tuple-subscript
+    // materializes the value, not the raw i64 pointer it used to print.
+    for (auto& tp : node.templateParts) {
+        if (tp.kind == TemplatePart::Kind::Literal) {
+            // Literal text must go through emitStringLiteralBytes because
+            // template bodies often carry UTF-8 (accents, box-drawing) a raw
+            // C-string would misdecode once a kind=4 operand joins the chain.
+            if (!tp.literal.empty())
+                parts.push_back(impl_->emitStringLiteralBytes(tp.literal));
+        } else {
+            const size_t bangPos = tp.bangPos;  // #3: event-attr (onclick=!{h}) detection
+            const std::string& exprText = tp.exprText;
 
-            // Check for pipe filter: "expr | filter_name"
-            // Scan from right to find a top-level '|' - one outside any parens,
-            // brackets, OR braces. Braces matter because a block interpolation
-            // (`!{ for x in xs { :{ ...!{e | raw}... } } }`) nests `:{...}` and
-            // `!{...}` whose own `| filter` lives inside `{`-depth > 0; without
-            // tracking `{`/`}` here, that inner pipe was mis-read as THIS
-            // interpolation's filter, corrupting the block parse so the entire
-            // `!{...}` fell through as literal text. A block interp has no
-            // top-level pipe (its content is always inside the loop/if braces),
-            // so it correctly resolves to no filter and the inner pipes are
-            // handled when each `:{...}` fragment is visited recursively.
-            std::string filterName;
-            std::string parseText = exprText;
-            {
-                int parenDepth = 0;
-                int lastPipe = -1;
-                for (size_t fi = 0; fi < parseText.size(); fi++) {
-                    if (parseText[fi] == '(' || parseText[fi] == '[' ||
-                        parseText[fi] == '{') parenDepth++;
-                    else if (parseText[fi] == ')' || parseText[fi] == ']' ||
-                             parseText[fi] == '}') parenDepth--;
-                    else if (parseText[fi] == '|' && parenDepth == 0) {
-                        lastPipe = (int)fi;
-                    }
-                }
-                if (lastPipe >= 0) {
-                    // Extract filter name (trim whitespace)
-                    std::string rawFilter = parseText.substr(lastPipe + 1);
-                    size_t fs = rawFilter.find_first_not_of(" \t\n\r");
-                    size_t fe = rawFilter.find_last_not_of(" \t\n\r");
-                    if (fs != std::string::npos && fe != std::string::npos) {
-                        filterName = rawFilter.substr(fs, fe - fs + 1);
-                    }
-                    parseText = parseText.substr(0, lastPipe);
-                    // Trim trailing whitespace from expression
-                    size_t te = parseText.find_last_not_of(" \t\n\r");
-                    if (te != std::string::npos) {
-                        parseText = parseText.substr(0, te + 1);
-                    }
+            // D017 Phase 4.B `!{*expr}` spread sugar desugars to `| join`
+            // (empty sep). The Parser recorded the raw filter + spread flag;
+            // apply the join defaulting and the combined-filter rejection here.
+            std::string filterName = tp.filterName;
+            if (tp.isSpread) {
+                if (filterName.empty()) {
+                    filterName = "join";  // implicit empty sep
+                } else if (filterName != "raw") {
+                    impl_->addError(
+                        "Template spread `!{*expr}` cannot be combined with "
+                        "an explicit `| " + filterName + "` filter",
+                        node.location());
                 }
             }
 
-            // (No format-spec stripping in templates. f-strings allow
-            // `{x:.2f}`; templates do NOT - the colon is needed for
-            // `:{ content alias }` recognition and for declarations like
-            // `!{x: int = compute()}` inside block-interp. Numeric format
-            // can be expressed in Dragon code: `!{f"{x:.2f}"}` or
-            // `!{format(x, ".2f")}`.)
-
-            // D017 Phase 4.B `!{*expr}` spread sugar - desugars to `| join`
-            // with an empty separator. Detect a leading `*` (after trimming
-            // whitespace) and rewrite the filter. Forbidden in combination
-            // with an explicit `| join(...)` filter (would be ambiguous).
-            bool isSpread = false;
-            {
-                size_t ws = parseText.find_first_not_of(" \t\n\r");
-                if (ws != std::string::npos && parseText[ws] == '*') {
-                    isSpread = true;
-                    parseText = parseText.substr(ws + 1);
-                    if (filterName.empty()) {
-                        filterName = "join";  // implicit empty sep
-                    } else if (filterName != "raw") {
-                        impl_->addError(
-                            "Template spread `!{*expr}` cannot be combined with "
-                            "an explicit `| " + filterName + "` filter",
-                            node.location());
-                    }
-                }
-            }
-
-            // Use Lexer + Parser to parse the body of the `!{...}`. The
-            // `inTemplateInterpolation` flag makes the inline lexer recognize
-            // `:{` as TEMPLATE_CONTENT_OPEN so block-mode statements can
-            // contain `:{ ... }` content fragments (D017 Phase 4.B).
-            LexerOptions fLexOpts;
-            fLexOpts.filename = "<template>";
-            fLexOpts.inTemplateInterpolation = true;
-            Lexer fLexer(parseText, fLexOpts);
-            auto fTokens = fLexer.tokenize();
-            ParserOptions fOpts;
-            fOpts.isDragonFile = true;
-
-            // Try expression mode first. If parseExpression fails (e.g., the
-            // body starts with a statement keyword like `for` or `if`), or
-            // if there are tokens left over after the expression, fall back
-            // to block mode (D017 Phase 4.B §"Detection: try expression
-            // first, fall back to block").
-            //
-            // To keep the implementation simple, we use parseModule() for
-            // both modes: if it yields exactly one ExprStmt, that's
-            // expression mode; otherwise it's block mode. parseModule
-            // produces an AST that the visitor can walk regardless of which
-            // mode we landed in, and the single-ExprStmt path keeps the
-            // existing stringify/auto-escape logic untouched.
-            Parser fParser(std::move(fTokens), fOpts);
-            auto fModule = fParser.parseModule();
-
-            std::unique_ptr<Expr> fExpr;
-            std::vector<std::unique_ptr<Stmt>> blockStmts;
-            bool blockMode = false;
-            if (fModule && !fParser.hasErrors()) {
-                if (fModule->body.size() == 1) {
-                    if (auto* es = dynamic_cast<ExprStmt*>(fModule->body[0].get())) {
-                        fExpr = std::move(es->expr);
-                    } else {
-                        blockMode = true;
-                        blockStmts = std::move(fModule->body);
-                    }
-                } else if (!fModule->body.empty()) {
-                    blockMode = true;
-                    blockStmts = std::move(fModule->body);
-                }
-            }
+            bool blockMode = (tp.kind == TemplatePart::Kind::Block);
+            auto& blockStmts = tp.blockStmts;
+            Expr* fExpr = tp.expr.get();
 
             if (blockMode) {
                 // Block-interp lowering: allocate a runtime list[str] buffer,
@@ -592,7 +486,7 @@ void CodeGen::visit(TemplateExpr& node) {
 
             if (fExpr) {
                 // Check for class instance __str__ before visiting
-                std::string fClassName = impl_->resolveExprClassName(fExpr.get());
+                std::string fClassName = impl_->resolveExprClassName(fExpr);
 
                 // Visit the expression to generate LLVM IR
                 fExpr->accept(*this);
@@ -605,7 +499,7 @@ void CodeGen::visit(TemplateExpr& node) {
                 // unambiguous callable (a lambda literal or a bare function value),
                 // so `onclick="!{a_js_string}"` still interpolates normally.
                 if (isEventAttrContext(val, bangPos) &&
-                    (dynamic_cast<LambdaExpr*>(fExpr.get()) ||
+                    (dynamic_cast<LambdaExpr*>(fExpr) ||
                      llvm::isa<llvm::Function>(exprVal))) {
                     auto* regFn = impl_->module->getFunction("ui__register_callback");
                     if (!regFn) {
@@ -650,7 +544,7 @@ void CodeGen::visit(TemplateExpr& node) {
                 {
                     bool inAttr = !precedingAttrName(val, bangPos).empty();
                     bool signalRead = false, localRef = false;
-                    if (!inAttr) analyzeReactive(fExpr.get(), signalRead, localRef);
+                    if (!inAttr) analyzeReactive(fExpr, signalRead, localRef);
                     if (signalRead) {
                         auto* bindFn = impl_->module->getFunction("ui__bind_text");
                         if (!bindFn) {
@@ -704,7 +598,7 @@ void CodeGen::visit(TemplateExpr& node) {
                             impl_->builder->SetInsertPoint(rEntry);
                             impl_->pushScope();
 
-                            std::string rcls = impl_->resolveExprClassName(fExpr.get());
+                            std::string rcls = impl_->resolveExprClassName(fExpr);
                             fExpr->accept(*this);
                             llvm::Value* rval = impl_->lastValue;
                             llvm::Value* rstr = emitStringify(rval, rcls, /*wantOwned=*/true);
@@ -900,21 +794,6 @@ void CodeGen::visit(TemplateExpr& node) {
             } else {
                 // Parse failed; emit raw text as fallback
                 parts.push_back(impl_->emitStringLiteralBytes("!{" + exprText + "}"));
-            }
-        } else {
-            // Literal text segment - must go through emitStringLiteralBytes
-            // because template bodies often contain UTF-8 (em-dashes, accents,
-            // etc.) and a raw global C-string would be misread as Latin-1 by
-            // dragon_str_concat once any kind=4 operand joins the chain.
-            size_t start = i;
-            while (i < val.size()) {
-                if (val[i] == '!' && i + 1 < val.size() &&
-                    (val[i+1] == '{' || val[i+1] == '!')) break;
-                i++;
-            }
-            std::string text = val.substr(start, i - start);
-            if (!text.empty()) {
-                parts.push_back(impl_->emitStringLiteralBytes(text));
             }
         }
     }
@@ -1155,11 +1034,18 @@ void CodeGen::visit(TemplateFileExpr& node) {
                          std::istreambuf_iterator<char>());
     file.close();
 
-    // Delegate to TemplateExpr logic by creating a temporary node
+    // Delegate to TemplateExpr logic by creating a temporary node. The Parser
+    // never saw this file's contents, so parse the body into parts here. These
+    // parts are NOT type-checked (the file is read at codegen time, after the
+    // TypeChecker has run), so a file-template interpolation whose lowering
+    // needs a static type stays untyped - the same pre-existing limitation as
+    // before; inline `template[X] { ... }` interpolations are fully typed.
     TemplateExpr tmp;
     tmp.setLocation(node.location());
     tmp.body = std::move(content);
     tmp.contentType = node.contentType;
+    tmp.templateParts = Parser::parseTemplateBody(
+        tmp.body, tmp.location(), /*isDragonFile=*/true);
     visit(tmp);
 }
 

@@ -77,6 +77,8 @@ Then in Neovim, install the Tree-sitter parser:
 - Definitions: `def`, `class`, `lambda`, `self()` constructors
 - Concurrency: `fire`, `thread`, `async`, `await`
 - Storage: `const`, `static`, `extern`
+- Ownership: `own`, `dub` (contextual, in modifier position), `del`
+- Typed templates: embedded HTML/SQL/JSON/CSS/XML inside `template[HTML] { ... }`, `template[SQL] { ... }`, etc., with `!{expr}` interpolation and `:{ ... }` fragments highlighted through arbitrary nesting (regex `syntax/dragon.vim`)
 - Built-in functions: `print`, `len`, `range`, `map`, `filter`, `zip`, `sum`, `super`, `Lock`, etc.
 - Built-in types: `int`, `float`, `str`, `bool`, `bytes`, `list`, `dict`, `tuple`, `set`, `void`, `ptr`
 - Stdlib types: `Optional`, `Union`, `Callable`, `Thread`, `SyncList`, `SyncDict`, etc.

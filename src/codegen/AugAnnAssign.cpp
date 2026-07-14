@@ -1059,6 +1059,16 @@ void CodeGen::visit(AnnAssignStmt& node) {
                     // listViewWantElemTag (DragonList vs DragonListBox).
                     if (val->getType() == impl_->boxType &&
                         gv->getValueType() != impl_->boxType) {
+                        // A BORROWED box unboxed into an owned heap-pointer global
+                        // must take its own reference (mirror of the local Phase 7a
+                        // fix): else the global adopts a value the source container
+                        // still owns and dangles when that container is freed.
+                        // isBorrowedHeapExpr(expr) is false for a ternary source, so
+                        // key the incref off the box's real ownership instead.
+                        if (impl_->options.gcMode == GCMode::RC &&
+                            !impl_->isOwnedBoxResult(val) &&
+                            gv->getValueType()->isPointerTy())
+                            rhsBorrowed = true;
                         llvm::Value* unboxed = impl_->unboxBoxResultChecked(
                             val, gv->getValueType(), varKind,
                             impl_->listViewWantElemTag(node.annotation.get()));
@@ -1343,6 +1353,9 @@ void CodeGen::visit(AnnAssignStmt& node) {
                 bool ownedBoxUnboxed = false;
                 llvm::Value* ownedBoxPayload = nullptr;
                 llvm::Value* ownedBoxTag = nullptr;
+                // A BORROWED box unboxed into an owned HEAP slot (str/list/dict/
+                // instance) must take its own reference (see the store below).
+                bool borrowedBoxToHeapSlot = false;
                 if (val->getType() == impl_->boxType && allocType != impl_->boxType) {
                     int64_t expectedTag = -1;
                     const char* tagName = "value";
@@ -1398,12 +1411,27 @@ void CodeGen::visit(AnnAssignStmt& node) {
                         auto* payloadI64 = impl_->boxPayloadI64(val, "ub.payload");
                         // Capture the OWNED box's +1 before `val` is reassigned to
                         // the bare payload; released after the store below.
-                        if (impl_->options.gcMode == GCMode::RC &&
-                            impl_->isOwnedBoxResult(val)) {
+                        bool boxIsOwned = impl_->options.gcMode == GCMode::RC &&
+                                          impl_->isOwnedBoxResult(val);
+                        if (boxIsOwned) {
                             ownedBoxUnboxed = true;
                             ownedBoxPayload = payloadI64;
                             ownedBoxTag = tagV;
                         }
+                        // A BORROWED box (dragon_dict_get_box / list_box_get, or a
+                        // ternary/PHI whose arms include one) unboxed into an owned
+                        // HEAP slot (str/list/dict/instance) yields a borrowed
+                        // payload: the container still holds the +1. The slot must
+                        // take its OWN reference, else scope cleanup decrefs a value
+                        // the container still owns - a double-free that surfaces when
+                        // the container is destroyed (dragon_dict_destroy reads the
+                        // freed string header). isBorrowedHeapExpr(expr) below is
+                        // false for a ternary source, so key the incref off the box's
+                        // real ownership instead. Scalar slots (int/float/bool) copy
+                        // the payload and need no ref - gate on the pointer slot.
+                        if (impl_->options.gcMode == GCMode::RC && !boxIsOwned &&
+                            allocType == impl_->i8PtrType)
+                            borrowedBoxToHeapSlot = true;
                         if (allocType == impl_->i64Type) {
                             val = payloadI64;
                         } else if (allocType == impl_->f64Type) {
@@ -1460,7 +1488,8 @@ void CodeGen::visit(AnnAssignStmt& node) {
                 // RC: incref new heap payload (conditional on tag), decref old
                 // box's payload (conditional on its tag) by loading the old
                 // box and extracting tag. Then store the new box.
-                bool rhsBorrowed = Impl::isBorrowedHeapExpr(node.value.get());
+                bool rhsBorrowed = Impl::isBorrowedHeapExpr(node.value.get()) ||
+                                   borrowedBoxToHeapSlot;
                 if (varKind == Impl::VarKind::Union) {
                     // D039 Phase 2: if RHS is already a box (e.g. dict[str, Any]
                     // read via dragon_dict_get_box), forward it directly -

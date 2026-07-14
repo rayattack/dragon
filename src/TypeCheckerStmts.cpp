@@ -114,6 +114,18 @@ bool TypeChecker::tryExpectedTypeLiteral(Expr* value, const std::shared_ptr<Type
             // would be built monomorphized and then walked at the box stride.
             for (auto& el : lit->elements)
                 boxNestedContainerLiteralForAny(el.get());
+        } else if (base->kind() == Type::Kind::List ||
+                   base->kind() == Type::Kind::Dict) {
+            // base is a CONCRETE container (e.g. `list[dict[str, Any]]`): a
+            // nested container-literal element must be BUILT in base's exact
+            // representation, so an Any-typed slot nested INSIDE it (the
+            // dict[str, Any] value here) is born boxed rather than
+            // monomorphized. Recursing at the precise base type - not the Any
+            // hammer - keeps concrete nested types (list[str], ...) native and
+            // only boxes the slots base actually spells as Any. Idempotent on a
+            // literal already matching base; a no-op on a named variable.
+            for (auto& el : lit->elements)
+                tryExpectedTypeLiteral(el.get(), base);
         }
         lit->type = expected;  // fresh literal -> sound covariant retype
         return true;
@@ -133,10 +145,19 @@ bool TypeChecker::tryExpectedTypeLiteral(Expr* value, const std::shared_ptr<Type
         }
         // Same Any propagation for dict VALUES (dicts themselves have one
         // uniform tagged representation, but a nested list literal in an Any
-        // value slot must still be born boxed).
-        if (dt.valueType && dt.valueType->kind() == Type::Kind::Any)
+        // value slot must still be born boxed). Braces are load-bearing: the
+        // trailing `else if` must bind to THIS `if`, not the inner `if (v)`.
+        if (dt.valueType && dt.valueType->kind() == Type::Kind::Any) {
             for (auto& [k, v] : lit->entries)
                 if (v) boxNestedContainerLiteralForAny(v.get());
+        } else if (dt.valueType && (dt.valueType->kind() == Type::Kind::List ||
+                                    dt.valueType->kind() == Type::Kind::Dict)) {
+            // Concrete-container value type (`dict[str, dict[str, Any]]`):
+            // recurse so a nested container-literal value is built in the value
+            // type's exact representation and its own Any slots born boxed.
+            for (auto& [k, v] : lit->entries)
+                if (v) tryExpectedTypeLiteral(v.get(), dt.valueType);
+        }
         lit->type = expected;
         return true;
     }
@@ -1009,6 +1030,20 @@ void TypeChecker::visit(ReturnStmt& node) {
         // the same covariance-at-construction rule the assign sites apply.
         if (!impl_->returnTypeStack.empty()) {
             auto& expected = impl_->returnTypeStack.back();
+            // A fresh container literal returned into a dict[K, Any] / list[Any]
+            // target must be BUILT in the box representation (nested list
+            // literals born list[Any]), exactly as the assign sites force via
+            // tryExpectedTypeLiteral. Unlike lists, `dict[K, V] <: dict[K, Any]`
+            // (the Any-only relaxation) PASSES the assignability check below, so
+            // the error-fallback `tryExpectedTypeLiteral` never fires and a
+            // nested list value stays monomorphized (list[str]) while stored
+            // under an Any tag - read back as list[Any] it walks the wrong
+            // stride (view-check raise). Force the born-box retype here. Scoped
+            // to literals: tryExpectedTypeLiteral is a no-op on a named variable
+            // (only ListExpr/DictExpr are retyped), so a NAMED list[str] value
+            // returned into an Any slot still follows the invariance rule.
+            if (annotationElementIsAny(expected))
+                tryExpectedTypeLiteral(node.value.get(), expected);
             if (expected->kind() != Type::Kind::Unknown &&
                 retType->kind() != Type::Kind::Unknown &&
                 !retType->isAssignableTo(*expected) &&

@@ -265,10 +265,7 @@ void CodeGen::visit(LambdaExpr& node) {
         impl_->setVar(paramName, alloca, paramKind);
         impl_->trackPtrParam(paramName, node.params[idx].type.get());
         if (paramKind == Impl::VarKind::ClassInstance) {
-            if (auto* named = dynamic_cast<NamedTypeExpr*>(node.params[idx].type.get())) {
-                if (impl_->classNames.count(named->name))
-                    impl_->varClassNames[paramName] = named->name;
-            }
+            impl_->bindClassVar(paramName, node.params[idx].type.get());
         }
         if (Impl::isHeapKind(paramKind))
             impl_->scopes.back().borrowed.insert(paramName);
@@ -1262,10 +1259,7 @@ void CodeGen::visit(FunctionDecl& node) {
         }
         // Track class name for class-typed parameters (enables field access)
         if (paramKind == Impl::VarKind::ClassInstance) {
-            if (auto* named = dynamic_cast<NamedTypeExpr*>(node.params[astIdx].type.get())) {
-                if (impl_->classNames.count(named->name))
-                    impl_->varClassNames[paramName] = named->name;
-            }
+            impl_->bindClassVar(paramName, node.params[astIdx].type.get());
         }
         // GC: mark params as borrowed - caller owns the reference. An `own`
         // param is the exception (docs/002 2.8): the caller MOVED its +1 in,
@@ -1551,10 +1545,7 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
         impl_->setVar(paramName, alloca, paramKind);
         impl_->trackPtrParam(paramName, node.params[idx].type.get());
         if (paramKind == Impl::VarKind::ClassInstance) {
-            if (auto* named = dynamic_cast<NamedTypeExpr*>(node.params[idx].type.get())) {
-                if (impl_->classNames.count(named->name))
-                    impl_->varClassNames[paramName] = named->name;
-            }
+            impl_->bindClassVar(paramName, node.params[idx].type.get());
         }
         if (Impl::isHeapKind(paramKind))
             impl_->scopes.back().borrowed.insert(paramName);

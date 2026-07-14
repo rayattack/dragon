@@ -105,6 +105,15 @@
   "extern"
 ] @keyword.modifier
 
+; ─── Ownership modifiers ─────────────────────────────────────
+; `own` and `dub` are contextual keywords (plain identifiers to the grammar),
+; so match them by text - the same mechanism used for builtins below. `del` is
+; a real keyword, handled above. This is inert until the tree-sitter grammar
+; parses these positions; it never breaks query compilation (references only
+; `identifier`).
+((identifier) @keyword.modifier
+  (#match? @keyword.modifier "^(own|dub)$"))
+
 ; ─── Functions ───────────────────────────────────────────────
 
 ; Function definition

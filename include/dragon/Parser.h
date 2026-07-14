@@ -48,6 +48,17 @@ public:
     /// Parse a single expression (for REPL)
     std::unique_ptr<Expr> parseExpression();
 
+    /// Parse a template body (the text between the outer braces of a
+    /// `template[X] { ... }` or `:{ ... }` content alias) into structured
+    /// TemplateParts: literal text runs, `!{expr}` interpolations, and
+    /// `!{ ...statements... }` block interpolations. Runs once so the
+    /// TypeChecker and CodeGen walk one shared, typed AST instead of
+    /// re-lexing the raw body at each stage. `isDragonFile` selects the sub-
+    /// parser surface for the interpolation bodies. Static because it builds
+    /// its own sub-lexers/sub-parsers and needs no outer parser state.
+    static std::vector<TemplatePart> parseTemplateBody(
+        const std::string& body, const SourceLocation& loc, bool isDragonFile);
+
     /// Parse a single statement
     std::unique_ptr<Stmt> parseStatement();
 

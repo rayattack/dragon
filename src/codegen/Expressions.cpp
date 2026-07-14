@@ -567,18 +567,41 @@ void CodeGen::visit(BinaryExpr& node) {
                     impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {bv});
                 return;
             }
+            // Drop owned bytes operand temps consumed only by the comparison
+            // (`h == "ONYX1".encode()`, `(a + b) != c`). The runtime eq/cmp
+            // helpers only READ their operands, so a fresh +1 on either side
+            // leaks once per evaluation - the exact mirror of the str-compare
+            // path below, which bytes previously lacked. isBorrowedHeapExpr
+            // screens out borrowed Names/fields/element reads; isOwnedPtrResult
+            // confirms a genuinely-owned pointer result; bytes carry a
+            // DragonObjectHeader so dragon_decref dispatches to bytes free.
+            auto releaseOwnedBytesCmpOperands = [&]() {
+                if (impl_->options.gcMode != GCMode::RC) return;
+                if (!Impl::isBorrowedHeapExpr(node.left.get()) &&
+                    impl_->isOwnedPtrResult(lhs))
+                    impl_->builder->CreateCall(
+                        impl_->runtimeFuncs["dragon_decref"], {lhs});
+                if (!Impl::isBorrowedHeapExpr(node.right.get()) &&
+                    impl_->isOwnedPtrResult(rhs))
+                    impl_->builder->CreateCall(
+                        impl_->runtimeFuncs["dragon_decref"], {rhs});
+            };
             if (op == TokenType::EQUAL_EQUAL) {
-                impl_->lastValue = impl_->builder->CreateCall(
+                auto* eq = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_bytes_eq"], {lhs, rhs}, "byteseq");
-                impl_->lastValue = impl_->builder->CreateICmpNE(
-                    impl_->lastValue, llvm::ConstantInt::get(impl_->i64Type, 0));
+                auto* res = impl_->builder->CreateICmpNE(
+                    eq, llvm::ConstantInt::get(impl_->i64Type, 0));
+                releaseOwnedBytesCmpOperands();
+                impl_->lastValue = res;
                 return;
             }
             if (op == TokenType::NOT_EQUAL) {
-                impl_->lastValue = impl_->builder->CreateCall(
+                auto* eq = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_bytes_eq"], {lhs, rhs}, "byteseq");
-                impl_->lastValue = impl_->builder->CreateICmpEQ(
-                    impl_->lastValue, llvm::ConstantInt::get(impl_->i64Type, 0));
+                auto* res = impl_->builder->CreateICmpEQ(
+                    eq, llvm::ConstantInt::get(impl_->i64Type, 0));
+                releaseOwnedBytesCmpOperands();
+                impl_->lastValue = res;
                 return;
             }
             if (op == TokenType::LESS || op == TokenType::GREATER ||
@@ -586,14 +609,17 @@ void CodeGen::visit(BinaryExpr& node) {
                 auto* cmp = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_bytes_cmp"], {lhs, rhs}, "bytescmp");
                 auto zero = llvm::ConstantInt::get(impl_->i64Type, 0);
+                llvm::Value* res;
                 if (op == TokenType::LESS)
-                    impl_->lastValue = impl_->builder->CreateICmpSLT(cmp, zero);
+                    res = impl_->builder->CreateICmpSLT(cmp, zero);
                 else if (op == TokenType::GREATER)
-                    impl_->lastValue = impl_->builder->CreateICmpSGT(cmp, zero);
+                    res = impl_->builder->CreateICmpSGT(cmp, zero);
                 else if (op == TokenType::LESS_EQUAL)
-                    impl_->lastValue = impl_->builder->CreateICmpSLE(cmp, zero);
+                    res = impl_->builder->CreateICmpSLE(cmp, zero);
                 else
-                    impl_->lastValue = impl_->builder->CreateICmpSGE(cmp, zero);
+                    res = impl_->builder->CreateICmpSGE(cmp, zero);
+                releaseOwnedBytesCmpOperands();
+                impl_->lastValue = res;
                 return;
             }
         }

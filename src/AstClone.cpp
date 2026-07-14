@@ -452,6 +452,24 @@ std::unique_ptr<Expr> cloneExpr(const Expr* e, const TypeSubst& subst) {
         r->body = n->body;
         r->contentType = n->contentType;
         r->isContentAlias = n->isContentAlias;
+        // Deep-clone the pre-parsed interpolations so a template inside a
+        // generic body keeps its typed AST after monomorphization (mirrors the
+        // fstringParts clone above); without this the clone would carry `body`
+        // but no parts and lower to empty output.
+        for (auto& part : n->templateParts) {
+            TemplatePart tp;
+            tp.kind = part.kind;
+            tp.literal = part.literal;
+            tp.expr = cloneExpr(part.expr.get(), subst);
+            for (auto& s : part.blockStmts)
+                tp.blockStmts.push_back(cloneStmt(s.get(), subst));
+            tp.filterName = part.filterName;
+            tp.isSpread = part.isSpread;
+            tp.exprText = part.exprText;
+            tp.bangPos = part.bangPos;
+            tp.parseFailed = part.parseFailed;
+            r->templateParts.push_back(std::move(tp));
+        }
         setLoc(r, *e);
         return r;
     }

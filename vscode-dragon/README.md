@@ -8,6 +8,9 @@ VS Code support for the Dragon programming language.
 - Python-like syntax with curly braces
 - Highlights for keywords, builtins, stdlib types, and Dragon-specific syntax
 - `const`, `static`, `extern` storage modifiers
+- `own`, `dub`, `del` ownership keywords
+- Embedded syntax highlighting inside typed templates: `template[HTML]`, `template[SQL]`, `template[JSON]`, `template[CSS]`, `template[XML]`
+- `!{expr}` interpolation and `:{ ... }` markup fragments highlighted through arbitrary nesting
 - `fire` keyword for thread spawning
 - `Lock()` threading primitive
 - `extern "C"` FFI declarations with `ptr` type

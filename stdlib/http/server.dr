@@ -1475,8 +1475,11 @@ class Router {
 
     # --- Middleware matching ---
 
-    def _match_before(path: str, sd: str) -> list {
-        const matched: list = []
+    def _match_before(path: str, sd: str) -> list[MiddlewareEntry] {
+        # Concrete element type: a bare `list` would box each MiddlewareEntry to
+        # Any, and calling `mw.handler` on the boxed instance mishandles its
+        # refcount (heap UAF after a few requests). Monomorphized, nothing boxes.
+        const matched: list[MiddlewareEntry] = []
         if sd not in self._before_by_sd {
             return matched
         }
@@ -1488,8 +1491,9 @@ class Router {
         return matched
     }
 
-    def _match_after(path: str, sd: str) -> list {
-        const matched: list = []
+    def _match_after(path: str, sd: str) -> list[MiddlewareEntry] {
+        # See _match_before: concrete element type keeps MiddlewareEntry unboxed.
+        const matched: list[MiddlewareEntry] = []
         if sd not in self._after_by_sd {
             return matched
         }
@@ -1732,7 +1736,7 @@ class Router {
 
             if query_ok {
                 # Run BEFORE middleware (subdomain-scoped)
-                const before_mw: list = self._match_before(path, target_sd)
+                const before_mw: list[MiddlewareEntry] = self._match_before(path, target_sd)
                 for mw in before_mw {
                     if res._aborted {
                         break
@@ -1757,7 +1761,7 @@ class Router {
                 }
 
                 # Run AFTER middleware (always runs, even on abort)
-                const after_mw: list = self._match_after(path, target_sd)
+                const after_mw: list[MiddlewareEntry] = self._match_after(path, target_sd)
                 for mw in after_mw {
                     mw.handler(req, res, ctx)
                 }

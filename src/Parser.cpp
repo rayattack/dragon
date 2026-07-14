@@ -56,6 +56,149 @@ std::unique_ptr<Stmt> Parser::parseStatement() {
     return statement();
 }
 
+std::vector<TemplatePart> Parser::parseTemplateBody(
+        const std::string& body, const SourceLocation& loc, bool isDragonFile) {
+    std::vector<TemplatePart> out;
+    const std::string& val = body;
+    size_t i = 0;
+    while (i < val.size()) {
+        if (val[i] == '!' && i + 1 < val.size() && val[i+1] == '!' &&
+            i + 2 < val.size() && val[i+2] == '{') {
+            // Escaped !!{ -> literal !{
+            TemplatePart p;
+            p.kind = TemplatePart::Kind::Literal;
+            p.literal = "!{";
+            out.push_back(std::move(p));
+            i += 3;
+        } else if (val[i] == '!' && i + 1 < val.size() && val[i+1] == '!' &&
+                   i + 2 < val.size() && val[i+2] == '}') {
+            // Escaped !!} -> literal }
+            TemplatePart p;
+            p.kind = TemplatePart::Kind::Literal;
+            p.literal = "}";
+            out.push_back(std::move(p));
+            i += 3;
+        } else if (val[i] == '!' && i + 1 < val.size() && val[i+1] == '{') {
+            // Template interpolation: !{expr}
+            const size_t bangPos = i;
+            size_t start = i + 2;
+            int depth = 1;
+            size_t j = start;
+            while (j < val.size() && depth > 0) {
+                if (val[j] == '{') depth++;
+                else if (val[j] == '}') depth--;
+                if (depth > 0) j++;
+            }
+            std::string exprText = val.substr(start, j - start);
+            i = j + 1;
+
+            // Pipe filter: rightmost top-level '|' (outside any (), [], {}).
+            // Braces matter for block interpolations whose inner `!{e | raw}`
+            // pipes live at brace-depth > 0.
+            std::string filterName;
+            std::string parseText = exprText;
+            {
+                int parenDepth = 0;
+                int lastPipe = -1;
+                for (size_t fi = 0; fi < parseText.size(); fi++) {
+                    if (parseText[fi] == '(' || parseText[fi] == '[' ||
+                        parseText[fi] == '{') parenDepth++;
+                    else if (parseText[fi] == ')' || parseText[fi] == ']' ||
+                             parseText[fi] == '}') parenDepth--;
+                    else if (parseText[fi] == '|' && parenDepth == 0) {
+                        lastPipe = (int)fi;
+                    }
+                }
+                if (lastPipe >= 0) {
+                    std::string rawFilter = parseText.substr(lastPipe + 1);
+                    size_t fs = rawFilter.find_first_not_of(" \t\n\r");
+                    size_t fe = rawFilter.find_last_not_of(" \t\n\r");
+                    if (fs != std::string::npos && fe != std::string::npos) {
+                        filterName = rawFilter.substr(fs, fe - fs + 1);
+                    }
+                    parseText = parseText.substr(0, lastPipe);
+                    size_t te = parseText.find_last_not_of(" \t\n\r");
+                    if (te != std::string::npos) {
+                        parseText = parseText.substr(0, te + 1);
+                    }
+                }
+            }
+
+            // `!{*expr}` spread sugar - record the marker; CodeGen defaults it
+            // to `| join` (empty sep) and rejects combining it with a filter.
+            bool isSpread = false;
+            {
+                size_t ws = parseText.find_first_not_of(" \t\n\r");
+                if (ws != std::string::npos && parseText[ws] == '*') {
+                    isSpread = true;
+                    parseText = parseText.substr(ws + 1);
+                }
+            }
+
+            // Sub-lex + sub-parse the interpolation body. inTemplateInterpolation
+            // makes `:{` a TEMPLATE_CONTENT_OPEN so block-mode statements can
+            // hold `:{ ... }` content fragments (D017 Phase 4.B). Nested content
+            // aliases created below recurse through primary() -> parseTemplateBody.
+            LexerOptions fLexOpts;
+            fLexOpts.filename = "<template>";
+            fLexOpts.inTemplateInterpolation = true;
+            Lexer fLexer(parseText, fLexOpts);
+            auto fTokens = fLexer.tokenize();
+            ParserOptions fOpts;
+            fOpts.isDragonFile = isDragonFile;
+            Parser fParser(std::move(fTokens), fOpts);
+            auto fModule = fParser.parseModule();
+
+            TemplatePart p;
+            p.kind = TemplatePart::Kind::Interpolation;
+            p.bangPos = bangPos;
+            p.exprText = std::move(exprText);
+            p.filterName = std::move(filterName);
+            p.isSpread = isSpread;
+
+            // Expression mode = exactly one ExprStmt; anything else is a block
+            // interpolation (`for`/`if` + `:{}` fragments). parseModule handles
+            // both and yields an AST the later stages walk uniformly.
+            if (fModule && !fParser.hasErrors()) {
+                if (fModule->body.size() == 1) {
+                    if (auto* es = dynamic_cast<ExprStmt*>(fModule->body[0].get())) {
+                        p.expr = std::move(es->expr);
+                    } else {
+                        p.kind = TemplatePart::Kind::Block;
+                        p.blockStmts = std::move(fModule->body);
+                    }
+                } else if (!fModule->body.empty()) {
+                    p.kind = TemplatePart::Kind::Block;
+                    p.blockStmts = std::move(fModule->body);
+                } else {
+                    p.parseFailed = true;
+                }
+            } else {
+                p.parseFailed = true;
+            }
+            if (p.expr) p.expr->setLocation(loc);
+            out.push_back(std::move(p));
+        } else {
+            // Literal text run - stored raw (template text is literal by design;
+            // escapes are NOT processed, matching the original CodeGen scan).
+            size_t start = i;
+            while (i < val.size()) {
+                if (val[i] == '!' && i + 1 < val.size() &&
+                    (val[i+1] == '{' || val[i+1] == '!')) break;
+                i++;
+            }
+            std::string text = val.substr(start, i - start);
+            if (!text.empty()) {
+                TemplatePart p;
+                p.kind = TemplatePart::Kind::Literal;
+                p.literal = std::move(text);
+                out.push_back(std::move(p));
+            }
+        }
+    }
+    return out;
+}
+
 const std::vector<ParserDiagnostic>& Parser::diagnostics() const {
     return impl_->diagnostics;
 }
@@ -656,6 +799,8 @@ std::unique_ptr<Expr> Parser::primary() {
         expr->setLocation(loc);
         expr->body = std::move(body);
         expr->contentType = std::move(contentType);
+        expr->templateParts = parseTemplateBody(
+            expr->body, loc, /*isDragonFile=*/true);
         return expr;
     }
 
@@ -674,6 +819,8 @@ std::unique_ptr<Expr> Parser::primary() {
         expr->setLocation(loc);
         expr->body = previous().lexeme();
         expr->isContentAlias = true;
+        expr->templateParts = parseTemplateBody(
+            expr->body, loc, /*isDragonFile=*/true);
         return expr;
     }
 
@@ -1033,6 +1180,12 @@ std::unique_ptr<Expr> Parser::parseList() {
 }
 
 std::unique_ptr<Expr> Parser::parseDict() {
+    // Newlines inside a { } collection literal are insignificant, but the lexer
+    // deliberately does NOT suppress them here the way it does inside ( ) and
+    // [ ] - it cannot tell a dict/set literal from a code block. So skip them at
+    // every structural point, giving multi-line dict/set literals the implicit
+    // line continuation developers expect.
+    skipNewlines();
     if (match(TokenType::RIGHT_BRACE)) {
         return std::make_unique<DictExpr>();
     }
@@ -1046,6 +1199,7 @@ std::unique_ptr<Expr> Parser::parseDict() {
 
     // Helper: parse a dict key in .dr mode (bare-key + computed key support)
     auto parseDictKey = [&]() -> std::unique_ptr<Expr> {
+        skipNewlines();
         if (impl_->options.isDragonFile) {
             // Bare key: identifier followed by colon -> string literal
             if (check(TokenType::IDENTIFIER) && peekNext().type() == TokenType::COLON) {
@@ -1069,7 +1223,9 @@ std::unique_ptr<Expr> Parser::parseDict() {
         auto dict = std::make_unique<DictExpr>();
         // null key = spread entry sentinel
         dict->entries.emplace_back(nullptr, std::move(spreadVal));
+        skipNewlines();
         while (match(TokenType::COMMA)) {
+            skipNewlines();
             if (check(TokenType::RIGHT_BRACE)) break;
             if (match(TokenType::POWER)) {
                 auto sv = expression();
@@ -1080,6 +1236,7 @@ std::unique_ptr<Expr> Parser::parseDict() {
                 auto v = expression();
                 dict->entries.emplace_back(std::move(k), std::move(v));
             }
+            skipNewlines();
         }
         consume(TokenType::RIGHT_BRACE, "Expect '}' after dict");
         return dict;
@@ -1116,8 +1273,10 @@ std::unique_ptr<Expr> Parser::parseDict() {
         first = expression();
     }
 
+    skipNewlines();
     if (match(TokenType::COLON)) {
         auto val = orExpr();
+        skipNewlines();
         // Check for dict comprehension: {k: v for k in iterable}
         if (check(TokenType::FOR)) {
             auto comp = std::make_unique<DictCompExpr>();
@@ -1171,12 +1330,15 @@ std::unique_ptr<Expr> Parser::parseDict() {
                 }
                 comp->extraClauses.push_back(std::move(clause));
             }
+            skipNewlines();
             consume(TokenType::RIGHT_BRACE, "Expect '}' after dict comprehension");
             return comp;
         }
         auto dict = std::make_unique<DictExpr>();
         dict->entries.emplace_back(std::move(first), std::move(val));
+        skipNewlines();
         while (match(TokenType::COMMA)) {
+            skipNewlines();
             if (check(TokenType::RIGHT_BRACE)) break;
             if (match(TokenType::POWER)) {
                 // **expr spread inside dict
@@ -1188,6 +1350,7 @@ std::unique_ptr<Expr> Parser::parseDict() {
                 auto v = expression();
                 dict->entries.emplace_back(std::move(k), std::move(v));
             }
+            skipNewlines();
         }
         consume(TokenType::RIGHT_BRACE, "Expect '}' after dict");
         return dict;
@@ -1227,15 +1390,20 @@ std::unique_ptr<Expr> Parser::parseDict() {
             }
             comp->extraClauses.push_back(std::move(clause));
         }
+        skipNewlines();
         consume(TokenType::RIGHT_BRACE, "Expect '}' after set comprehension");
         return comp;
     }
     auto set = std::make_unique<SetExpr>();
     if (first) set->elements.push_back(std::move(first));
+    skipNewlines();
     while (match(TokenType::COMMA)) {
+        skipNewlines();
         if (check(TokenType::RIGHT_BRACE)) break;
         set->elements.push_back(expression());
+        skipNewlines();
     }
+    skipNewlines();
     consume(TokenType::RIGHT_BRACE, "Expect '}' after set");
     return set;
 }

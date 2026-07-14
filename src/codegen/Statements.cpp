@@ -266,6 +266,45 @@ void CodeGen::visit(IfStmt& node) {
         return Impl::VarKind::Union;  // 3+ members: stay union in else
     };
 
+    // The class an `isinstance(x, SomeClass)` condition narrows to, or "" if the
+    // condition is not a class-arm isinstance. detectNarrowing returns only the
+    // VarKind (ClassInstance) - the NAME is needed so the narrowed `x.method()`
+    // dispatches directly to `SomeClass`'s method instead of falling to the
+    // "class unknown" vtable path, which guesses the callee from an arbitrary
+    // same-named method (wrong dispatch / wrong-arity IR when classes collide).
+    auto narrowClassName = [this](Expr* cond) -> std::string {
+        auto* call = dynamic_cast<CallExpr*>(cond);
+        if (!call) return "";
+        auto* callee = dynamic_cast<NameExpr*>(call->callee.get());
+        if (!callee || callee->name != "isinstance" || call->args.size() != 2)
+            return "";
+        auto* typeName = dynamic_cast<NameExpr*>(call->args[1].get());
+        if (!typeName) return "";
+        return impl_->classNames.count(typeName->name) ? typeName->name : "";
+    };
+
+    // Record a narrowed class name (+owning module) for the branch body and
+    // return a restorer. varClassNames/varClassOwningModule are program-wide
+    // and NOT scope-managed (unlike the VarKind set via setVar), so the entry
+    // must be restored when the narrowed branch ends or it would leak onto the
+    // union var after the block.
+    auto applyClassNarrow = [this](const std::string& var,
+                                   const std::string& cls) -> std::function<void()> {
+        if (var.empty() || cls.empty()) return []{};
+        bool hadCN = impl_->varClassNames.count(var) > 0;
+        std::string oldCN = hadCN ? impl_->varClassNames[var] : std::string();
+        bool hadOM = impl_->varClassOwningModule.count(var) > 0;
+        std::string oldOM = hadOM ? impl_->varClassOwningModule[var] : std::string();
+        impl_->varClassNames[var] = cls;
+        impl_->varClassOwningModule[var] = impl_->resolveClassOwningModule(cls);
+        return [this, var, hadCN, oldCN, hadOM, oldOM] {
+            if (hadCN) impl_->varClassNames[var] = oldCN;
+            else impl_->varClassNames.erase(var);
+            if (hadOM) impl_->varClassOwningModule[var] = oldOM;
+            else impl_->varClassOwningModule.erase(var);
+        };
+    };
+
     node.condition->accept(*this);
     llvm::Value* cond = impl_->toBool(impl_->lastValue, node.condition.get());
 
@@ -327,9 +366,15 @@ void CodeGen::visit(IfStmt& node) {
             impl_->setVar(narrowVar, localAlloca, narrowKind);
         }
     }
+    // Record the narrowed class name so `x.method()` in the then-body dispatches
+    // directly to the isinstance'd class (restored after the branch).
+    auto restoreThenNarrow = applyClassNarrow(
+        narrowVar, narrowKind == Impl::VarKind::ClassInstance
+                       ? narrowClassName(node.condition.get()) : std::string());
     for (auto& stmt : node.thenBody) stmt->accept(*this);
     impl_->emitScopeCleanup();
     impl_->popScope();
+    restoreThenNarrow();
     // Did the then-branch unconditionally terminate (return/raise/...)? If so it
     // does NOT fall through to the merge, which enables fall-through narrowing
     // below (the Python early-return idiom).
@@ -367,9 +412,14 @@ void CodeGen::visit(IfStmt& node) {
                 impl_->setVar(elifNarrowVar, existingAlloca, elifNarrowKind);
             }
         }
+        auto restoreElifNarrow = applyClassNarrow(
+            elifNarrowVar, elifNarrowKind == Impl::VarKind::ClassInstance
+                               ? narrowClassName(node.elifClauses[i].first.get())
+                               : std::string());
         for (auto& stmt : node.elifClauses[i].second) stmt->accept(*this);
         impl_->emitScopeCleanup();
         impl_->popScope();
+        restoreElifNarrow();
         if (!impl_->builder->GetInsertBlock()->getTerminator())
             impl_->builder->CreateBr(mergeBB);
     }
@@ -1300,6 +1350,30 @@ void CodeGen::visit(FromImportStmt& node) {
                 if (impl_->module->getFunction(bare)) mangled = bare;
             }
             bucket[localName] = mangled;
+
+            // If the imported name is a CLASS defined by node.module, pin the
+            // local name to that module for class resolution too. The
+            // importedClassAliasesByModule map is consulted first by
+            // resolveClassOwningModule but was never populated (only its func
+            // twin was), so `from drs import Schema` fell through to the global
+            // last-write-wins classOwningModule map. That let an unrelated
+            // `from json import loads` in the same file make `Schema` resolve to
+            // json.Schema whenever json.dr also declares a class Schema - a
+            // silent miscompile (json__Schema_new(null) + no `field` method)
+            // even though the developer imported Schema from exactly one place.
+            // Probe the mangled ctor symbol (all classes are forward-declared
+            // before any body is emitted, so this is valid here). Populated in
+            // import order, so two explicit imports of the same local name are
+            // last-write-wins - alias the second one to disambiguate.
+            std::string classMangled = Impl::mangleClass(node.module, alias.name);
+            if (impl_->module &&
+                (impl_->module->getFunction(classMangled + "_new") ||
+                 impl_->module->getFunction(classMangled + "_new_0") ||
+                 impl_->module->getFunction(classMangled + "___init__") ||
+                 impl_->module->getFunction(classMangled + "___init___0"))) {
+                impl_->importedClassAliasesByModule[impl_->currentModuleName]
+                    [localName] = node.module;
+            }
         }
         return;
     }

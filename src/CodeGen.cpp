@@ -155,12 +155,17 @@ bool CodeGen::generate(dragon::Module& entryModule,
             impl_->moduleGlobals[name->name] = gv;
             impl_->moduleGlobalKinds[name->name] = vk;
 
-            // For class-typed globals, record the class name so attribute
-            // access through the cross-module reader resolves correctly.
-            if (auto* nt = dynamic_cast<NamedTypeExpr*>(ann->annotation.get())) {
-                if (impl_->classNames.count(nt->name))
-                    impl_->varClassNames[name->name] = nt->name;
-            }
+            // For class-typed globals, record the class name (and owning
+            // module) so attribute/method access through the cross-module
+            // reader resolves correctly. resolveAnnotationClassName handles a
+            // DOTTED annotation (`db: database.Connection`) by stripping to the
+            // leaf class; a bare classNames.count(nt->name) missed it, leaving
+            // the global's className empty. A method call on such a global then
+            // fell to the "class unknown" vtable path, which guesses the callee
+            // signature from an arbitrary same-named method and produced a
+            // wrong-arity indirect call (malformed IR) - order-dependent, so it
+            // only bit some multi-module builds. Mirrors the AnnAssignStmt path.
+            impl_->bindClassVar(name->name, ann->annotation.get());
         }
     }
 

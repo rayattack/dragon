@@ -2,28 +2,93 @@
     "name": "Dragon",
     "scopeName": "source.dragon",
     "patterns": [
-        { "include": "#comments" },
-        { "include": "#strings" },
-        { "include": "#numbers" },
-        { "include": "#constants" },
-        { "include": "#storage-modifiers" },
-        { "include": "#import-statement" },
-        { "include": "#keywords" },
-        { "include": "#extern-block" },
-        { "include": "#self-constructor" },
-        { "include": "#function-definition" },
-        { "include": "#class-definition" },
-        { "include": "#decorator" },
-        { "include": "#type-annotation-arrow" },
-        { "include": "#builtin-functions" },
-        { "include": "#builtin-types" },
-        { "include": "#stdlib-types" },
-        { "include": "#exception-types" },
-        { "include": "#template-interpolation" },
-        { "include": "#self" },
-        { "include": "#function-call" },
-        { "include": "#operators" },
-        { "include": "#punctuation" }
+        {
+            "include": "#comments"
+        },
+        {
+            "include": "#strings"
+        },
+        {
+            "include": "#numbers"
+        },
+        {
+            "include": "#constants"
+        },
+        {
+            "include": "#storage-modifiers"
+        },
+        {
+            "include": "#ownership-modifiers"
+        },
+        {
+            "include": "#import-statement"
+        },
+        {
+            "include": "#template-html"
+        },
+        {
+            "include": "#template-sql"
+        },
+        {
+            "include": "#template-json"
+        },
+        {
+            "include": "#template-css"
+        },
+        {
+            "include": "#template-xml"
+        },
+        {
+            "include": "#template-typed-other"
+        },
+        {
+            "include": "#template-untyped"
+        },
+        {
+            "include": "#keywords"
+        },
+        {
+            "include": "#extern-block"
+        },
+        {
+            "include": "#self-constructor"
+        },
+        {
+            "include": "#function-definition"
+        },
+        {
+            "include": "#class-definition"
+        },
+        {
+            "include": "#decorator"
+        },
+        {
+            "include": "#type-annotation-arrow"
+        },
+        {
+            "include": "#builtin-functions"
+        },
+        {
+            "include": "#builtin-types"
+        },
+        {
+            "include": "#stdlib-types"
+        },
+        {
+            "include": "#exception-types"
+        },
+        {
+            "include": "#self"
+        },
+        {
+            "include": "#function-call"
+        },
+        {
+            "include": "#operators"
+        },
+        {
+            "include": "#punctuation"
+        }
     ],
     "repository": {
         "comments": {
@@ -44,19 +109,31 @@
                 {
                     "name": "string.quoted.triple.double.dragon",
                     "begin": "(f|b|r|rb|br)?\"\"\"",
-                    "beginCaptures": { "1": { "name": "storage.type.string.dragon" } },
+                    "beginCaptures": {
+                        "1": {
+                            "name": "storage.type.string.dragon"
+                        }
+                    },
                     "end": "\"\"\""
                 },
                 {
                     "name": "string.quoted.triple.single.dragon",
                     "begin": "(f|b|r|rb|br)?'''",
-                    "beginCaptures": { "1": { "name": "storage.type.string.dragon" } },
+                    "beginCaptures": {
+                        "1": {
+                            "name": "storage.type.string.dragon"
+                        }
+                    },
                     "end": "'''"
                 },
                 {
                     "name": "string.quoted.double.dragon",
                     "begin": "(f|b|r|rb|br)?\"",
-                    "beginCaptures": { "1": { "name": "storage.type.string.dragon" } },
+                    "beginCaptures": {
+                        "1": {
+                            "name": "storage.type.string.dragon"
+                        }
+                    },
                     "end": "\"",
                     "patterns": [
                         {
@@ -67,14 +144,22 @@
                             "name": "meta.interpolation.dragon",
                             "begin": "(?<=f\"|f\"\"\")\\{",
                             "end": "\\}",
-                            "patterns": [{ "include": "source.dragon" }]
+                            "patterns": [
+                                {
+                                    "include": "source.dragon"
+                                }
+                            ]
                         }
                     ]
                 },
                 {
                     "name": "string.quoted.single.dragon",
                     "begin": "(f|b|r|rb|br)?'",
-                    "beginCaptures": { "1": { "name": "storage.type.string.dragon" } },
+                    "beginCaptures": {
+                        "1": {
+                            "name": "storage.type.string.dragon"
+                        }
+                    },
                     "end": "'",
                     "patterns": [
                         {
@@ -113,7 +198,7 @@
             "patterns": [
                 {
                     "name": "constant.language.dragon",
-                    "match": "\\b(True|False|None|Ellipsis|NotImplemented)\\b"
+                    "match": "\\b(True|False|None|true|false|none|Ellipsis|NotImplemented)\\b"
                 }
             ]
         },
@@ -133,23 +218,41 @@
                 }
             ]
         },
+        "ownership-modifiers": {
+            "patterns": [
+                {
+                    "name": "storage.modifier.ownership.dragon",
+                    "match": "\\b(own|dub)\\b(?=\\s+[A-Za-z_])"
+                }
+            ]
+        },
         "import-statement": {
             "patterns": [
                 {
                     "comment": "from module.path import name",
                     "match": "\\b(from)\\s+([a-zA-Z_][a-zA-Z0-9_]*(?:\\.[a-zA-Z_][a-zA-Z0-9_]*)*)\\s+(import)\\b",
                     "captures": {
-                        "1": { "name": "keyword.control.import.dragon" },
-                        "2": { "name": "entity.name.import.module.dragon" },
-                        "3": { "name": "keyword.control.import.dragon" }
+                        "1": {
+                            "name": "keyword.control.import.dragon"
+                        },
+                        "2": {
+                            "name": "entity.name.import.module.dragon"
+                        },
+                        "3": {
+                            "name": "keyword.control.import.dragon"
+                        }
                     }
                 },
                 {
                     "comment": "import module.path",
                     "match": "\\b(import)\\s+([a-zA-Z_][a-zA-Z0-9_]*(?:\\.[a-zA-Z_][a-zA-Z0-9_]*)*)",
                     "captures": {
-                        "1": { "name": "keyword.control.import.dragon" },
-                        "2": { "name": "entity.name.import.module.dragon" }
+                        "1": {
+                            "name": "keyword.control.import.dragon"
+                        },
+                        "2": {
+                            "name": "entity.name.import.module.dragon"
+                        }
                     }
                 }
             ]
@@ -186,8 +289,12 @@
             "comment": "extern \"C\" declarations for C FFI",
             "begin": "\\b(extern)\\s+(\"C\")",
             "beginCaptures": {
-                "1": { "name": "storage.modifier.extern.dragon" },
-                "2": { "name": "string.quoted.double.dragon" }
+                "1": {
+                    "name": "storage.modifier.extern.dragon"
+                },
+                "2": {
+                    "name": "string.quoted.double.dragon"
+                }
             },
             "end": "(?<=\\})|(?<=;)|$",
             "patterns": [
@@ -195,48 +302,76 @@
                     "name": "keyword.control.import.dragon",
                     "match": "\\b(from)\\b"
                 },
-                { "include": "#strings" },
-                { "include": "#function-definition" },
-                { "include": "#type-annotation-arrow" },
-                { "include": "#builtin-types" },
-                { "include": "#punctuation" }
+                {
+                    "include": "#strings"
+                },
+                {
+                    "include": "#function-definition"
+                },
+                {
+                    "include": "#type-annotation-arrow"
+                },
+                {
+                    "include": "#builtin-types"
+                },
+                {
+                    "include": "#punctuation"
+                }
             ]
         },
         "self-constructor": {
             "comment": "Dragon self() constructor: self(params) { ... }",
             "match": "\\b(self)\\s*(?=\\()",
             "captures": {
-                "1": { "name": "entity.name.function.constructor.dragon" }
+                "1": {
+                    "name": "entity.name.function.constructor.dragon"
+                }
             }
         },
         "function-definition": {
             "comment": "def funcname or static def funcname",
             "match": "\\b(def)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
             "captures": {
-                "1": { "name": "keyword.other.dragon" },
-                "2": { "name": "entity.name.function.dragon" }
+                "1": {
+                    "name": "keyword.other.dragon"
+                },
+                "2": {
+                    "name": "entity.name.function.dragon"
+                }
             }
         },
         "class-definition": {
             "match": "\\b(class)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
             "captures": {
-                "1": { "name": "keyword.other.dragon" },
-                "2": { "name": "entity.name.type.class.dragon" }
+                "1": {
+                    "name": "keyword.other.dragon"
+                },
+                "2": {
+                    "name": "entity.name.type.class.dragon"
+                }
             }
         },
         "decorator": {
             "match": "^\\s*(@)([a-zA-Z_][a-zA-Z0-9_.]*)",
             "captures": {
-                "1": { "name": "punctuation.definition.decorator.dragon" },
-                "2": { "name": "entity.name.function.decorator.dragon" }
+                "1": {
+                    "name": "punctuation.definition.decorator.dragon"
+                },
+                "2": {
+                    "name": "entity.name.function.decorator.dragon"
+                }
             }
         },
         "type-annotation-arrow": {
             "comment": "Return type annotation: -> Type",
             "match": "(->)\\s*([a-zA-Z_][a-zA-Z0-9_\\[\\], ]*)",
             "captures": {
-                "1": { "name": "punctuation.separator.arrow.dragon" },
-                "2": { "name": "support.type.annotation.dragon" }
+                "1": {
+                    "name": "punctuation.separator.arrow.dragon"
+                },
+                "2": {
+                    "name": "support.type.annotation.dragon"
+                }
             }
         },
         "self": {
@@ -246,7 +381,9 @@
         "builtin-functions": {
             "match": "\\b(abs|all|any|bin|bool|callable|chr|classmethod|compile|delattr|dir|divmod|enumerate|eval|exec|filter|float|format|getattr|globals|hasattr|hash|help|hex|id|input|int|isinstance|issubclass|iter|len|list|locals|map|max|min|next|object|oct|open|ord|pow|print|property|range|repr|reversed|round|set|setattr|slice|sorted|staticmethod|str|sum|super|tuple|type|vars|zip|Lock|Thread|__import__)\\s*(?=\\()",
             "captures": {
-                "1": { "name": "support.function.builtin.dragon" }
+                "1": {
+                    "name": "support.function.builtin.dragon"
+                }
             }
         },
         "builtin-types": {
@@ -264,25 +401,788 @@
         "function-call": {
             "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)\\s*(?=\\()",
             "captures": {
-                "1": { "name": "entity.name.function.call.dragon" }
+                "1": {
+                    "name": "entity.name.function.call.dragon"
+                }
             }
         },
-        "template-interpolation": {
-            "comment": "!{expr} and !{expr | filter} inside template blocks",
-            "name": "meta.interpolation.template.dragon",
-            "begin": "!\\{",
-            "beginCaptures": { "0": { "name": "punctuation.definition.interpolation.begin.dragon" } },
-            "end": "\\}",
-            "endCaptures": { "0": { "name": "punctuation.definition.interpolation.end.dragon" } },
+        "template-html-content": {
             "patterns": [
                 {
-                    "match": "\\|\\s*([a-zA-Z_][a-zA-Z0-9_]*)",
-                    "captures": {
-                        "1": { "name": "support.function.filter.dragon" }
-                    }
+                    "include": "#template-escape"
                 },
-                { "include": "source.dragon" }
+                {
+                    "include": "#template-html-interp"
+                },
+                {
+                    "include": "#template-html-litbraces"
+                },
+                {
+                    "include": "text.html.basic"
+                }
             ]
+        },
+        "template-html-litbraces": {
+            "begin": "\\{",
+            "end": "\\}",
+            "patterns": [
+                {
+                    "include": "#template-html-content"
+                }
+            ]
+        },
+        "template-html-fragment": {
+            "name": "meta.fragment.template.dragon",
+            "begin": ":\\{",
+            "beginCaptures": {
+                "0": {
+                    "name": "punctuation.definition.fragment.begin.dragon"
+                }
+            },
+            "end": "\\}",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.definition.fragment.end.dragon"
+                }
+            },
+            "contentName": "meta.embedded.block.html",
+            "patterns": [
+                {
+                    "include": "#template-html-content"
+                }
+            ]
+        },
+        "template-html-code": {
+            "patterns": [
+                {
+                    "include": "#template-html-fragment"
+                },
+                {
+                    "include": "#template-html-codebraces"
+                },
+                {
+                    "include": "source.dragon"
+                }
+            ]
+        },
+        "template-html-codebraces": {
+            "begin": "\\{",
+            "end": "\\}",
+            "patterns": [
+                {
+                    "include": "#template-html-code"
+                }
+            ]
+        },
+        "template-html-interp": {
+            "name": "meta.interpolation.template.dragon",
+            "begin": "!\\{",
+            "beginCaptures": {
+                "0": {
+                    "name": "punctuation.definition.interpolation.begin.dragon"
+                }
+            },
+            "end": "\\}",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.definition.interpolation.end.dragon"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#template-filter"
+                },
+                {
+                    "include": "#template-html-code"
+                }
+            ]
+        },
+        "template-html": {
+            "name": "meta.template.html.dragon",
+            "begin": "\\b(template)\\s*(\\[)\\s*(HTML)\\s*(\\])\\s*(\\{)",
+            "beginCaptures": {
+                "1": {
+                    "name": "keyword.other.template.dragon"
+                },
+                "2": {
+                    "name": "punctuation.definition.template.bracket.begin.dragon"
+                },
+                "3": {
+                    "name": "support.type.template-content.dragon"
+                },
+                "4": {
+                    "name": "punctuation.definition.template.bracket.end.dragon"
+                },
+                "5": {
+                    "name": "punctuation.section.template.begin.dragon"
+                }
+            },
+            "end": "\\}",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.section.template.end.dragon"
+                }
+            },
+            "contentName": "meta.embedded.block.html",
+            "patterns": [
+                {
+                    "include": "#template-html-content"
+                }
+            ]
+        },
+        "template-sql-content": {
+            "patterns": [
+                {
+                    "include": "#template-escape"
+                },
+                {
+                    "include": "#template-sql-interp"
+                },
+                {
+                    "include": "#template-sql-litbraces"
+                },
+                {
+                    "include": "source.sql"
+                }
+            ]
+        },
+        "template-sql-litbraces": {
+            "begin": "\\{",
+            "end": "\\}",
+            "patterns": [
+                {
+                    "include": "#template-sql-content"
+                }
+            ]
+        },
+        "template-sql-fragment": {
+            "name": "meta.fragment.template.dragon",
+            "begin": ":\\{",
+            "beginCaptures": {
+                "0": {
+                    "name": "punctuation.definition.fragment.begin.dragon"
+                }
+            },
+            "end": "\\}",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.definition.fragment.end.dragon"
+                }
+            },
+            "contentName": "meta.embedded.block.sql",
+            "patterns": [
+                {
+                    "include": "#template-sql-content"
+                }
+            ]
+        },
+        "template-sql-code": {
+            "patterns": [
+                {
+                    "include": "#template-sql-fragment"
+                },
+                {
+                    "include": "#template-sql-codebraces"
+                },
+                {
+                    "include": "source.dragon"
+                }
+            ]
+        },
+        "template-sql-codebraces": {
+            "begin": "\\{",
+            "end": "\\}",
+            "patterns": [
+                {
+                    "include": "#template-sql-code"
+                }
+            ]
+        },
+        "template-sql-interp": {
+            "name": "meta.interpolation.template.dragon",
+            "begin": "!\\{",
+            "beginCaptures": {
+                "0": {
+                    "name": "punctuation.definition.interpolation.begin.dragon"
+                }
+            },
+            "end": "\\}",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.definition.interpolation.end.dragon"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#template-filter"
+                },
+                {
+                    "include": "#template-sql-code"
+                }
+            ]
+        },
+        "template-sql": {
+            "name": "meta.template.sql.dragon",
+            "begin": "\\b(template)\\s*(\\[)\\s*(SQL)\\s*(\\])\\s*(\\{)",
+            "beginCaptures": {
+                "1": {
+                    "name": "keyword.other.template.dragon"
+                },
+                "2": {
+                    "name": "punctuation.definition.template.bracket.begin.dragon"
+                },
+                "3": {
+                    "name": "support.type.template-content.dragon"
+                },
+                "4": {
+                    "name": "punctuation.definition.template.bracket.end.dragon"
+                },
+                "5": {
+                    "name": "punctuation.section.template.begin.dragon"
+                }
+            },
+            "end": "\\}",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.section.template.end.dragon"
+                }
+            },
+            "contentName": "meta.embedded.block.sql",
+            "patterns": [
+                {
+                    "include": "#template-sql-content"
+                }
+            ]
+        },
+        "template-json-content": {
+            "patterns": [
+                {
+                    "include": "#template-escape"
+                },
+                {
+                    "include": "#template-json-interp"
+                },
+                {
+                    "include": "#template-json-litbraces"
+                },
+                {
+                    "include": "source.json"
+                }
+            ]
+        },
+        "template-json-litbraces": {
+            "begin": "\\{",
+            "end": "\\}",
+            "patterns": [
+                {
+                    "include": "#template-json-content"
+                }
+            ]
+        },
+        "template-json-fragment": {
+            "name": "meta.fragment.template.dragon",
+            "begin": ":\\{",
+            "beginCaptures": {
+                "0": {
+                    "name": "punctuation.definition.fragment.begin.dragon"
+                }
+            },
+            "end": "\\}",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.definition.fragment.end.dragon"
+                }
+            },
+            "contentName": "meta.embedded.block.json",
+            "patterns": [
+                {
+                    "include": "#template-json-content"
+                }
+            ]
+        },
+        "template-json-code": {
+            "patterns": [
+                {
+                    "include": "#template-json-fragment"
+                },
+                {
+                    "include": "#template-json-codebraces"
+                },
+                {
+                    "include": "source.dragon"
+                }
+            ]
+        },
+        "template-json-codebraces": {
+            "begin": "\\{",
+            "end": "\\}",
+            "patterns": [
+                {
+                    "include": "#template-json-code"
+                }
+            ]
+        },
+        "template-json-interp": {
+            "name": "meta.interpolation.template.dragon",
+            "begin": "!\\{",
+            "beginCaptures": {
+                "0": {
+                    "name": "punctuation.definition.interpolation.begin.dragon"
+                }
+            },
+            "end": "\\}",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.definition.interpolation.end.dragon"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#template-filter"
+                },
+                {
+                    "include": "#template-json-code"
+                }
+            ]
+        },
+        "template-json": {
+            "name": "meta.template.json.dragon",
+            "begin": "\\b(template)\\s*(\\[)\\s*(JSON)\\s*(\\])\\s*(\\{)",
+            "beginCaptures": {
+                "1": {
+                    "name": "keyword.other.template.dragon"
+                },
+                "2": {
+                    "name": "punctuation.definition.template.bracket.begin.dragon"
+                },
+                "3": {
+                    "name": "support.type.template-content.dragon"
+                },
+                "4": {
+                    "name": "punctuation.definition.template.bracket.end.dragon"
+                },
+                "5": {
+                    "name": "punctuation.section.template.begin.dragon"
+                }
+            },
+            "end": "\\}",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.section.template.end.dragon"
+                }
+            },
+            "contentName": "meta.embedded.block.json",
+            "patterns": [
+                {
+                    "include": "#template-json-content"
+                }
+            ]
+        },
+        "template-css-content": {
+            "patterns": [
+                {
+                    "include": "#template-escape"
+                },
+                {
+                    "include": "#template-css-interp"
+                },
+                {
+                    "include": "#template-css-litbraces"
+                },
+                {
+                    "include": "source.css"
+                }
+            ]
+        },
+        "template-css-litbraces": {
+            "begin": "\\{",
+            "end": "\\}",
+            "patterns": [
+                {
+                    "include": "#template-css-content"
+                }
+            ]
+        },
+        "template-css-fragment": {
+            "name": "meta.fragment.template.dragon",
+            "begin": ":\\{",
+            "beginCaptures": {
+                "0": {
+                    "name": "punctuation.definition.fragment.begin.dragon"
+                }
+            },
+            "end": "\\}",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.definition.fragment.end.dragon"
+                }
+            },
+            "contentName": "meta.embedded.block.css",
+            "patterns": [
+                {
+                    "include": "#template-css-content"
+                }
+            ]
+        },
+        "template-css-code": {
+            "patterns": [
+                {
+                    "include": "#template-css-fragment"
+                },
+                {
+                    "include": "#template-css-codebraces"
+                },
+                {
+                    "include": "source.dragon"
+                }
+            ]
+        },
+        "template-css-codebraces": {
+            "begin": "\\{",
+            "end": "\\}",
+            "patterns": [
+                {
+                    "include": "#template-css-code"
+                }
+            ]
+        },
+        "template-css-interp": {
+            "name": "meta.interpolation.template.dragon",
+            "begin": "!\\{",
+            "beginCaptures": {
+                "0": {
+                    "name": "punctuation.definition.interpolation.begin.dragon"
+                }
+            },
+            "end": "\\}",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.definition.interpolation.end.dragon"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#template-filter"
+                },
+                {
+                    "include": "#template-css-code"
+                }
+            ]
+        },
+        "template-css": {
+            "name": "meta.template.css.dragon",
+            "begin": "\\b(template)\\s*(\\[)\\s*(CSS)\\s*(\\])\\s*(\\{)",
+            "beginCaptures": {
+                "1": {
+                    "name": "keyword.other.template.dragon"
+                },
+                "2": {
+                    "name": "punctuation.definition.template.bracket.begin.dragon"
+                },
+                "3": {
+                    "name": "support.type.template-content.dragon"
+                },
+                "4": {
+                    "name": "punctuation.definition.template.bracket.end.dragon"
+                },
+                "5": {
+                    "name": "punctuation.section.template.begin.dragon"
+                }
+            },
+            "end": "\\}",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.section.template.end.dragon"
+                }
+            },
+            "contentName": "meta.embedded.block.css",
+            "patterns": [
+                {
+                    "include": "#template-css-content"
+                }
+            ]
+        },
+        "template-xml-content": {
+            "patterns": [
+                {
+                    "include": "#template-escape"
+                },
+                {
+                    "include": "#template-xml-interp"
+                },
+                {
+                    "include": "#template-xml-litbraces"
+                },
+                {
+                    "include": "text.xml"
+                }
+            ]
+        },
+        "template-xml-litbraces": {
+            "begin": "\\{",
+            "end": "\\}",
+            "patterns": [
+                {
+                    "include": "#template-xml-content"
+                }
+            ]
+        },
+        "template-xml-fragment": {
+            "name": "meta.fragment.template.dragon",
+            "begin": ":\\{",
+            "beginCaptures": {
+                "0": {
+                    "name": "punctuation.definition.fragment.begin.dragon"
+                }
+            },
+            "end": "\\}",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.definition.fragment.end.dragon"
+                }
+            },
+            "contentName": "meta.embedded.block.xml",
+            "patterns": [
+                {
+                    "include": "#template-xml-content"
+                }
+            ]
+        },
+        "template-xml-code": {
+            "patterns": [
+                {
+                    "include": "#template-xml-fragment"
+                },
+                {
+                    "include": "#template-xml-codebraces"
+                },
+                {
+                    "include": "source.dragon"
+                }
+            ]
+        },
+        "template-xml-codebraces": {
+            "begin": "\\{",
+            "end": "\\}",
+            "patterns": [
+                {
+                    "include": "#template-xml-code"
+                }
+            ]
+        },
+        "template-xml-interp": {
+            "name": "meta.interpolation.template.dragon",
+            "begin": "!\\{",
+            "beginCaptures": {
+                "0": {
+                    "name": "punctuation.definition.interpolation.begin.dragon"
+                }
+            },
+            "end": "\\}",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.definition.interpolation.end.dragon"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#template-filter"
+                },
+                {
+                    "include": "#template-xml-code"
+                }
+            ]
+        },
+        "template-xml": {
+            "name": "meta.template.xml.dragon",
+            "begin": "\\b(template)\\s*(\\[)\\s*(XML)\\s*(\\])\\s*(\\{)",
+            "beginCaptures": {
+                "1": {
+                    "name": "keyword.other.template.dragon"
+                },
+                "2": {
+                    "name": "punctuation.definition.template.bracket.begin.dragon"
+                },
+                "3": {
+                    "name": "support.type.template-content.dragon"
+                },
+                "4": {
+                    "name": "punctuation.definition.template.bracket.end.dragon"
+                },
+                "5": {
+                    "name": "punctuation.section.template.begin.dragon"
+                }
+            },
+            "end": "\\}",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.section.template.end.dragon"
+                }
+            },
+            "contentName": "meta.embedded.block.xml",
+            "patterns": [
+                {
+                    "include": "#template-xml-content"
+                }
+            ]
+        },
+        "template-plain-content": {
+            "patterns": [
+                {
+                    "include": "#template-escape"
+                },
+                {
+                    "include": "#template-plain-interp"
+                },
+                {
+                    "include": "#template-plain-litbraces"
+                }
+            ]
+        },
+        "template-plain-litbraces": {
+            "begin": "\\{",
+            "end": "\\}",
+            "patterns": [
+                {
+                    "include": "#template-plain-content"
+                }
+            ]
+        },
+        "template-plain-fragment": {
+            "name": "meta.fragment.template.dragon",
+            "begin": ":\\{",
+            "beginCaptures": {
+                "0": {
+                    "name": "punctuation.definition.fragment.begin.dragon"
+                }
+            },
+            "end": "\\}",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.definition.fragment.end.dragon"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#template-plain-content"
+                }
+            ]
+        },
+        "template-plain-code": {
+            "patterns": [
+                {
+                    "include": "#template-plain-fragment"
+                },
+                {
+                    "include": "#template-plain-codebraces"
+                },
+                {
+                    "include": "source.dragon"
+                }
+            ]
+        },
+        "template-plain-codebraces": {
+            "begin": "\\{",
+            "end": "\\}",
+            "patterns": [
+                {
+                    "include": "#template-plain-code"
+                }
+            ]
+        },
+        "template-plain-interp": {
+            "name": "meta.interpolation.template.dragon",
+            "begin": "!\\{",
+            "beginCaptures": {
+                "0": {
+                    "name": "punctuation.definition.interpolation.begin.dragon"
+                }
+            },
+            "end": "\\}",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.definition.interpolation.end.dragon"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#template-filter"
+                },
+                {
+                    "include": "#template-plain-code"
+                }
+            ]
+        },
+        "template-typed-other": {
+            "name": "meta.template.other.dragon",
+            "begin": "\\b(template)\\s*(\\[)\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(\\])\\s*(\\{)",
+            "beginCaptures": {
+                "1": {
+                    "name": "keyword.other.template.dragon"
+                },
+                "2": {
+                    "name": "punctuation.definition.template.bracket.begin.dragon"
+                },
+                "3": {
+                    "name": "support.type.template-content.dragon"
+                },
+                "4": {
+                    "name": "punctuation.definition.template.bracket.end.dragon"
+                },
+                "5": {
+                    "name": "punctuation.section.template.begin.dragon"
+                }
+            },
+            "end": "\\}",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.section.template.end.dragon"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#template-plain-content"
+                }
+            ]
+        },
+        "template-untyped": {
+            "name": "meta.template.plain.dragon",
+            "begin": "\\b(template)\\s*(\\{)",
+            "beginCaptures": {
+                "1": {
+                    "name": "keyword.other.template.dragon"
+                },
+                "2": {
+                    "name": "punctuation.section.template.begin.dragon"
+                }
+            },
+            "end": "\\}",
+            "endCaptures": {
+                "0": {
+                    "name": "punctuation.section.template.end.dragon"
+                }
+            },
+            "patterns": [
+                {
+                    "include": "#template-plain-content"
+                }
+            ]
+        },
+        "template-escape": {
+            "name": "constant.character.escape.template.dragon",
+            "match": "!!\\{|!!\\}"
+        },
+        "template-filter": {
+            "comment": "!{expr | filter} - a pipe filter inside an interpolation",
+            "match": "(\\|)\\s*([a-zA-Z_][a-zA-Z0-9_]*)",
+            "captures": {
+                "1": {
+                    "name": "punctuation.separator.pipe.dragon"
+                },
+                "2": {
+                    "name": "support.function.filter.dragon"
+                }
+            }
         },
         "operators": {
             "patterns": [

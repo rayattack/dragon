@@ -971,6 +971,22 @@ void TypeChecker::visit(StringLiteral& node) {
 
 void TypeChecker::visit(TemplateExpr& node) {
     node.type = resolveTemplateContentType(node.contentType, node.location());
+    // Walk each interpolation so its expression flows AT its native type,
+    // exactly like an f-string part. Before this, template interpolations were
+    // invisible to the TypeChecker: a `!{p[0]}` tuple-subscript never got its
+    // element type, so CodeGen lowered it as a raw i64 pointer (a big decimal)
+    // instead of the value. Block interpolations (`for`/`if` + `:{}` fragments)
+    // are visited as statements so their loop variables scope at the iterable's
+    // element type; the nested `:{}` content aliases recurse back here.
+    for (auto& part : node.templateParts) {
+        if (part.kind == TemplatePart::Kind::Interpolation) {
+            if (part.expr) part.expr->accept(*this);
+        } else if (part.kind == TemplatePart::Kind::Block) {
+            for (auto& stmt : part.blockStmts) {
+                if (stmt) stmt->accept(*this);
+            }
+        }
+    }
 }
 
 void TypeChecker::visit(TemplateFileExpr& node) {

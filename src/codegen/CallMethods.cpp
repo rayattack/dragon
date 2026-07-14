@@ -2095,9 +2095,13 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             if (vmIt != impl_->varClassOwningModule.end()) {
                 owningModule = vmIt->second;
             } else if (!className.empty()) {
-                auto cmIt = impl_->classOwningModule.find(className);
-                if (cmIt != impl_->classOwningModule.end())
-                    owningModule = cmIt->second;
+                // Route through the alias-aware resolver, not the raw
+                // last-write-wins classOwningModule map: a var assigned through
+                // a path that didn't record its owning module (e.g. a function
+                // return value) must still honor `from X import Class` scoping,
+                // or method dispatch picks a same-named class from another
+                // co-compiled module.
+                owningModule = impl_->resolveClassOwningModule(className);
             }
         }
         if (!className.empty()) {
@@ -2107,6 +2111,22 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             std::string methodFuncName;
             auto* methodFunc = impl_->resolveMethodFunction(
                 owningModule, className, method, &methodFuncName);
+            // Self-correct a STALE owning module. varClassOwningModule is
+            // program-wide and never cleared, and not every binding site
+            // refreshes it (params/globals now do via bindClassVar; loop vars
+            // and some assignment fallbacks still set only varClassNames). So a
+            // stored owner can be left over from an earlier same-named binding
+            // in another function. className is always fresh, so when the stored
+            // owner fails to resolve the method, re-resolve the module from the
+            // (canonical, alias-aware) className before giving up.
+            if (!methodFunc) {
+                std::string fresh = impl_->resolveClassOwningModule(className);
+                if (fresh != owningModule) {
+                    methodFunc = impl_->resolveMethodFunction(
+                        fresh, className, method, &methodFuncName);
+                    if (methodFunc) owningModule = fresh;
+                }
+            }
             if (methodFunc) {
                 bool isStaticCall = impl_->staticMethods.count(methodFuncName) > 0;
                 std::vector<llvm::Value*> args;
@@ -2473,25 +2493,36 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             // (e.g., obj = cls(); obj.speak() where cls is a first-class class value)
             auto vk = impl_->lookupVarKind(objName->name);
             if (vk == Impl::VarKind::ClassInstance) {
-                // Find method index from any class vtable that has this method.
-                // All classes in a polymorphic hierarchy share the same index for a given method.
+                // Last-resort dispatch for a class instance whose concrete class
+                // the compiler failed to record (a className-tracking gap - real
+                // code has a known class: classes are not first-class values, and
+                // isinstance narrowing now records the narrowed class). With no
+                // class we cannot know which same-named method is the target, so
+                // we must not GUESS a signature: an arity mismatch would emit a
+                // malformed indirect call (LLVM "Incorrect number of arguments").
+                // Accept a vtable candidate ONLY when its signature matches this
+                // call's arity; otherwise fall through to the clean "cannot
+                // resolve method" diagnostic (CallExpr.cpp). All classes in a
+                // hierarchy share a method's vtable index, so an arity match is
+                // the safe common denominator.
+                const size_t wantParams = node.args.size() + 1;  // self + args
                 int methodIndex = -1;
                 llvm::FunctionType* methodFuncType = nullptr;
                 for (auto& [cls, methodMap] : impl_->classMethodVtableIndices) {
                     auto it = methodMap.find(method);
-                    if (it != methodMap.end()) {
+                    if (it == methodMap.end()) continue;
+                    // MRO walk via the shared resolver - vtable's stored
+                    // function pointer must match a real mangled symbol
+                    // for the class or one of its parents.
+                    auto cmIt = impl_->classOwningModule.find(cls);
+                    std::string clsMod = cmIt != impl_->classOwningModule.end()
+                                             ? cmIt->second
+                                             : impl_->currentModuleName;
+                    auto* func = impl_->resolveMethodFunction(clsMod, cls, method);
+                    if (func && func->getFunctionType()->getNumParams() == wantParams) {
                         methodIndex = (int)it->second;
-                        // MRO walk via the shared resolver - vtable's stored
-                        // function pointer must match a real mangled symbol
-                        // for the class or one of its parents.
-                        auto cmIt = impl_->classOwningModule.find(cls);
-                        std::string clsMod = cmIt != impl_->classOwningModule.end()
-                                                 ? cmIt->second
-                                                 : impl_->currentModuleName;
-                        auto* func = impl_->resolveMethodFunction(
-                            clsMod, cls, method);
-                        if (func) methodFuncType = func->getFunctionType();
-                        if (methodFuncType) break;
+                        methodFuncType = func->getFunctionType();
+                        break;
                     }
                 }
 
@@ -2554,14 +2585,13 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
     if (!dynamic_cast<NameExpr*>(attr.object.get())) {
         std::string className = impl_->resolveExprClassName(attr.object.get());
         if (!className.empty() && impl_->classNames.count(className)) {
-            // Owning module: best-effort from classOwningModule. Without
-            // per-expression module tracking, anonymous receivers fall back
-            // to last-write-wins; for the common case (single-defining
-            // module) this resolves to the right symbol.
-            auto cmIt = impl_->classOwningModule.find(className);
-            std::string owningModule = cmIt != impl_->classOwningModule.end()
-                                           ? cmIt->second
-                                           : impl_->currentModuleName;
+            // Owning module via the alias-aware resolver so a chained call on a
+            // temporary (`s.field(...).optional(...)`) honors `from X import
+            // Class` scoping. Without per-expression module tracking the base
+            // is the importing module's alias (or the same-module probe); it
+            // falls back to last-write-wins only when neither applies.
+            std::string owningModule =
+                impl_->resolveClassOwningModule(className);
             std::string methodFuncName;
             auto* methodFunc = impl_->resolveMethodFunction(
                 owningModule, className, method, &methodFuncName);

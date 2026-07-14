@@ -956,6 +956,22 @@ llvm::Value* CodeGen::Impl::emitTagForExprNoCG(Expr* expr) {
 llvm::Value* CodeGen::Impl::coerceArg(llvm::Value* arg, llvm::Type* paramType) {
         if (arg->getType() == paramType) return arg;
         llvm::Type* at = arg->getType();
+        // A {tag, payload} box flowing into a NATIVE param: unbox at the param's
+        // shape. Without this the box crossed as-is and the LLVM verifier
+        // rejected the call (a box where the signature wants a ptr/scalar) - the
+        // `f(doc[k] if k in doc else "")` case: a ternary over a dict[str, Any]
+        // whose arms unify to a box, passed straight into a str param. The callee
+        // BORROWS a heap param, so the payload crosses with no extra ref; an
+        // OWNED box temporary's +1 is released after the call by
+        // argTempDecrefKind (drained as a Union). Mirrors the local Phase 7a /
+        // Assign.cpp box->native-slot unbox.
+        if (at == boxType && paramType != boxType) {
+            VarKind vk = paramType == f64Type       ? VarKind::Float :
+                         paramType == i1Type        ? VarKind::Bool  :
+                         paramType->isPointerTy()   ? VarKind::Str   :
+                                                      VarKind::Int;
+            return boxPayloadAsKind(arg, vk);
+        }
         // int->float
         if (paramType == f64Type && at == i64Type)
             return builder->CreateSIToFP(arg, f64Type);

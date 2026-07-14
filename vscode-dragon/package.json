@@ -3,7 +3,7 @@
     "publisher": "tbhi",
     "displayName": "Dragon Language Support",
     "description": "Language support for Dragon (.dr)",
-    "version": "0.0.7",
+    "version": "0.0.8",
     "engines": {
         "vscode": "^1.74.0"
     },

@@ -1200,6 +1200,14 @@ void CodeGen::visit(AssignStmt& node) {
                             case Type::Kind::Set:
                             case Type::Kind::Instance:
                                 return Impl::typeKindToVarKind(node.value->type->kind());
+                            case Type::Kind::Ptr:
+                                // A raw `ptr` (fopen/malloc/extern-C result) is
+                                // unmanaged: never refcounted, never decref'd.
+                                // Without this it fell through to the Str default
+                                // below, so reassigning a ptr local (`h = fopen`)
+                                // marked it a string and scope cleanup ran
+                                // dragon_decref_str over a FILE*/raw buffer.
+                                return Impl::VarKind::Other;
                             default: break;
                         }
                     }
@@ -1530,6 +1538,17 @@ void CodeGen::visit(AssignStmt& node) {
                              Type::Kind::Int));
                 didUnboxToNative = true;
             }
+            // A BORROWED box unboxed into an owned heap-pointer slot must take
+            // its OWN reference: the container the box read from still holds the
+            // +1, so treating the slot as owned without an incref double-frees
+            // when that container is destroyed (mirror of AugAnnAssign Phase 7a -
+            // the UAF a `s = doc[k] if k in doc else ""` ternary planted, freed
+            // via the slot then re-read by dragon_dict_destroy). The syntactic
+            // isBorrowedHeapExpr(expr) is false for a ternary source, so key the
+            // incref off the box's real ownership (ownedBoxUnboxed) instead.
+            if (impl_->options.gcMode == GCMode::RC && didUnboxToNative &&
+                !ownedBoxUnboxed && allocType->isPointerTy())
+                rhsBorrowed = true;
             if (val->getType() != allocType) {
                 if (allocType == impl_->f64Type && val->getType() == impl_->i64Type)
                     val = impl_->builder->CreateSIToFP(val, impl_->f64Type);

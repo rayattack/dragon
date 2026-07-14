@@ -135,12 +135,38 @@ public:
     void accept(ASTVisitor& visitor) override;
 };
 
+/// One segment of a template body: a literal text run, a `!{expr}`
+/// interpolation, or a `!{ ...statements... }` block interpolation. Parsed
+/// once by the Parser into TemplateExpr::templateParts so Sema/TypeChecker/
+/// CodeGen all walk one shared AST instead of re-lexing the raw `body` at
+/// every stage (mirrors FStringPart). Without this the interpolations were
+/// invisible to the TypeChecker, so a `!{p[0]}` tuple-subscript never got its
+/// element type and lowered as a raw i64 pointer instead of the value.
+struct TemplatePart {
+    enum class Kind { Literal, Interpolation, Block };
+    Kind kind = Kind::Literal;
+    std::string literal;                          // Kind::Literal - raw text run (NOT escape-processed; template text is literal by design)
+    std::unique_ptr<Expr> expr;                   // Kind::Interpolation - the parsed expression
+    std::vector<std::unique_ptr<Stmt>> blockStmts;// Kind::Block - `for`/`if` block-interp statements
+    std::string filterName;                       // optional `| filter` (raw; spread->join defaulting happens in CodeGen)
+    bool isSpread = false;                         // `!{*expr}` spread sugar
+    std::string exprText;                          // raw slot text (error messages / parse-failure fallback)
+    size_t bangPos = 0;                            // byte offset of `!` in TemplateExpr::body (reactive/event-attr context in CodeGen)
+    bool parseFailed = false;                      // sub-parse produced neither expr nor statements
+};
+
 /// Template expression: template { raw text with !{expr} interpolation }
 /// Typed variant: template[HTML] { ... } - contentType = "HTML"
 class TemplateExpr : public Expr {
 public:
     std::string body;          // raw template text (between outer braces)
     std::string contentType;   // empty = untyped (str), non-empty = typed template
+
+    /// Parsed segments of `body` - populated by the Parser (and, for file
+    /// templates whose content the Parser never saw, lazily by CodeGen). One
+    /// source of truth so the TypeChecker can walk each interpolation at its
+    /// native type. Empty only for a genuinely empty template body.
+    std::vector<TemplatePart> templateParts;
 
     // D017 Phase 4.B - true when this TemplateExpr was created from a
     // `:{ ... }` content alias (Parser detected TEMPLATE_CONTENT_OPEN), not

@@ -1373,17 +1373,30 @@ struct CodeGen::Impl {
     /// iterable handling) and falls back to the resolved AST type otherwise.
     /// Returns Type::Kind::Int when no element type can be determined.
     Type::Kind getIterableElementKind(Expr* iterable) {
+        // The receiver's OWN resolved container type is authoritative when its
+        // element type is concrete. Prefer it over the varListElemKinds tracking
+        // map: that map is program-wide, keyed by BARE variable name, and never
+        // cleared between functions/modules, so a same-named list elsewhere
+        // (e.g. an `out: list[SomeClass]` param) leaves a stale entry that would
+        // otherwise mark THIS local `out: list[int]` as list[Instance] - routing
+        // its append through dragon_list_append_ptr + a generic dragon_incref on
+        // a raw i64 element (SEGV / UAF). The map is only a fallback for a list
+        // whose static element type is not yet pinned - an unannotated `out = []`
+        // whose element kind is learned from what gets appended (Unknown here).
+        if (iterable && iterable->type) {
+            if (auto* lt = dynamic_cast<ListType*>(iterable->type.get())) {
+                if (lt->elementType &&
+                    lt->elementType->kind() != Type::Kind::Unknown)
+                    return lt->elementType->kind();
+            }
+            if (auto* dt = dynamic_cast<DictType*>(iterable->type.get())) {
+                if (dt->keyType && dt->keyType->kind() != Type::Kind::Unknown)
+                    return dt->keyType->kind();
+            }
+        }
         if (auto* iterName = dynamic_cast<NameExpr*>(iterable)) {
             auto it = varListElemKinds.find(iterName->name);
             if (it != varListElemKinds.end()) return it->second;
-        }
-        if (iterable && iterable->type) {
-            if (auto* lt = dynamic_cast<ListType*>(iterable->type.get())) {
-                if (lt->elementType) return lt->elementType->kind();
-            }
-            if (auto* dt = dynamic_cast<DictType*>(iterable->type.get())) {
-                if (dt->keyType) return dt->keyType->kind();
-            }
         }
         return Type::Kind::Int;
     }
@@ -2046,6 +2059,17 @@ struct CodeGen::Impl {
         }
         if (!isHeapKind(paramKind))
             return VarKind::Other;
+        // A box arg unboxed into a native heap param (coerceArg unboxes it): an
+        // OWNED box temporary (Any-returning call / box_subscript) carries a +1
+        // the callee borrows, so release it after the call as a UNION
+        // (emitUnionDecref extracts and drops the payload by tag - the same drain
+        // the Any-param branch above uses). A BORROWED box (dict_get_box /
+        // list_box_get, or a ternary over one) belongs to its container and is
+        // never drained. Ordered before the isBorrowedHeapExpr gate, which reads
+        // false for a ternary source and would otherwise mis-drain the box by the
+        // param's kind (decref of a box struct as a bare str ptr).
+        if (rawVal && rawVal->getType() == boxType)
+            return isOwnedBoxResult(rawVal) ? VarKind::Union : VarKind::Other;
         if (isBorrowedHeapExpr(argExpr)) return VarKind::Other;
         if (paramKind == VarKind::Str && !isOwnedStrResult(rawVal))
             return VarKind::Other;
@@ -2581,6 +2605,24 @@ struct CodeGen::Impl {
             if (classNames.count(leaf)) return leaf;
         }
         return "";
+    }
+
+    // Bind a class-typed variable's class name AND owning module together from
+    // its declared type. varClassNames and varClassOwningModule are program-
+    // wide and never cleared, so recording only the name (the old param/loop
+    // behavior) let a STALE owning module from an earlier same-named binding in
+    // another function survive into this scope and misdirect method dispatch to
+    // `<staleModule>__<class>_<method>`. Always set the pair. Also handles a
+    // DOTTED annotation (`x: mod.Class`) via resolveAnnotationClassName, which
+    // a bare classNames.count() missed. No-op for non-class types, so it never
+    // writes a garbage module for `x: str` / `x: tuple[...]`.
+    void bindClassVar(const std::string& varName, TypeExpr* typeExpr) {
+        auto* named = dynamic_cast<NamedTypeExpr*>(typeExpr);
+        if (!named) return;
+        std::string cn = resolveAnnotationClassName(named->name);
+        if (cn.empty()) return;
+        varClassNames[varName] = cn;
+        varClassOwningModule[varName] = resolveClassOwningModule(cn);
     }
 
     // D044 - Type::toString-equivalent canonical name for a TypeExpr, used to
