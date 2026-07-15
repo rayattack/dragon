@@ -1,0 +1,106 @@
+# ODB M1 regression suite: the copy-on-write B+tree, its persistence across
+# reopen, the `odb check` structural pass, and the end-to-end crash-recovery
+# proof of an ordered tree. Dogfooded and run through ctest.
+
+from unittest import TestCase, main
+from odb.vfs import SimVFS
+from odb.pager import create, open_pager, Pager
+from odb.btree import BTree
+from odb.checker import check_tree, CheckResult
+from odb.codec import blank, put_u64, get_u64
+from odb.sim import run_btree_crash_trials, SimResult
+
+
+def _val(k: int) -> bytes {
+    b: list[int] = blank(8)
+    put_u64(b, 0, k * 11 + 5)
+    return bytes(b)
+}
+
+def _key(i: int) -> int {
+    return (i * 2654435761) & 0x3FFFFFFF
+}
+
+
+class BTreeBasicsTest(TestCase) {
+    def test_insert_get_missing() -> None {
+        v: SimVFS = SimVFS()
+        p: Pager = create(v, 4096)
+        t: BTree = BTree(p, 0)
+        t.insert(10, _val(10))
+        t.insert(20, _val(20))
+        t.insert(5, _val(5))
+        self.assertEqual(get_u64(t.get(10), 0), 10 * 11 + 5)
+        self.assertEqual(get_u64(t.get(5), 0), 5 * 11 + 5)
+        self.assertTrue(t.contains(20))
+        self.assertFalse(t.contains(999))
+
+        raised: bool = False
+        try {
+            t.get(999)
+        } except KeyError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+
+    def test_update_replaces_value() -> None {
+        v: SimVFS = SimVFS()
+        p: Pager = create(v, 4096)
+        t: BTree = BTree(p, 0)
+        t.insert(7, _val(7))
+        t.insert(7, _val(700))
+        self.assertEqual(get_u64(t.get(7), 0), 700 * 11 + 5)
+        self.assertEqual(t.count(), 1)
+    }
+}
+
+
+class BTreeSplitPersistTest(TestCase) {
+    # A tree large enough to split into multiple levels round-trips every key
+    # through a reopen, stays ordered, and passes odb check.
+    def test_many_keys_persist_and_check() -> None {
+        v: SimVFS = SimVFS()
+        p: Pager = create(v, 4096)
+        t: BTree = BTree(p, 0)
+        n: int = 3000
+        i: int = 0
+        while i < n {
+            k: int = _key(i)
+            t.insert(k, _val(k))
+            i = i + 1
+        }
+        p.set_catalog_root(t.root)
+        p.commit()
+
+        rp: Pager = open_pager(v)
+        chk: CheckResult = check_tree(rp, rp.catalog_root)
+        self.assertTrue(chk.ok, chk.message)
+        self.assertEqual(chk.keys, n)
+
+        rt: BTree = BTree(rp, rp.catalog_root)
+        i = 0
+        while i < n {
+            k: int = _key(i)
+            self.assertEqual(get_u64(rt.get(k), 0), k * 11 + 5)
+            i = i + 1
+        }
+    }
+}
+
+
+class BTreeCrashRecoveryTest(TestCase) {
+    # The M1 headline proof: crash an in-flight COW insert into a committed
+    # multi-level tree; the reopened tree always passes odb check and holds
+    # exactly the pre-crash key set or that set plus the one in-flight key.
+    def test_crash_during_tree_commit() -> None {
+        res: SimResult = run_btree_crash_trials(150)
+        self.assertEqual(res.trials, 150)
+        self.assertEqual(res.failures, 0)
+        self.assertTrue(res.recovered_old > 0)
+        self.assertTrue(res.recovered_new > 0)
+    }
+}
+
+
+main([BTreeBasicsTest(), BTreeSplitPersistTest(), BTreeCrashRecoveryTest()])

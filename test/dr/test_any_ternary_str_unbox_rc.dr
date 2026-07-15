@@ -1,0 +1,145 @@
+"""Reading a str out of a dict[str, Any] through a ternary must not double-free.
+
+Ordinary code, no tricks - the amebo broker's /v1 authorize handler does exactly
+this to pull request fields out of a parsed JSON body:
+
+    const doc: dict[str, Any] = loads_obj(body)
+    const action: str = doc["action"] if "action" in doc else ""
+    grant(action, ...)              # binds `action` into SQL later
+
+You did nothing wrong. The ternary's `doc["action"]` arm is a BORROWED value -
+the dict still owns it. But the compiler unboxed that borrowed box into the
+`str` slot and treated the slot as OWNED, taking no reference of its own. So at
+the function's scope exit `action` decref'd a string the dict still held, and a
+moment later destroying `doc` re-read the freed string's header:
+
+    heap-use-after-free ... READ of size 1 in dragon_str_is_heap
+      freed by: dragon_decref_str  <- the `action` slot at scope exit
+      re-read by: dragon_dict_destroy <- doc's own value decref
+
+WHEN it bit: only once the freed slab was reused (heavy heap churn, a
+long-running server) did the stale read hit reused bytes and glibc abort at a
+LATER, unrelated malloc (`malloc_consolidate(): unaligned fastbin chunk`). In
+isolation the value looked correct, so the crash seemed to come from nowhere.
+
+BEFORE the fix the identical lines below crashed under ASan / churn; AFTER, the
+slot takes its own +1 (keyed off the box's real ownership, not the syntactic
+shape of the ternary) and the value survives every read. The bool arm was never
+affected - a bool is a scalar copied out of the box, with no refcount to drop.
+"""
+
+from unittest import TestCase, main
+from json import loads_obj
+
+BODY: str = "{\"action\":\"order.placed\",\"subject_type\":\"service\",\"subject_name\":\"ful\",\"read\":true}"
+
+
+def churn() -> int {
+    # Reuse freed slabs so a dangling pointer reads reused bytes, not stale ones.
+    junk: list[str] = []
+    i: int = 0
+    while i < 300 {
+        junk.append("filler-" + str(i) + "-padding-padding")
+        i = i + 1
+    }
+    return len(junk)
+}
+
+
+def read_const(body: str) -> str {
+    # const (annotated declaration) target - AugAnnAssign Phase 7a unbox.
+    const doc: dict[str, Any] = loads_obj(body)
+    const action: str = doc["action"] if "action" in doc else ""
+    churn()
+    return action
+}
+
+
+def read_return(body: str) -> str {
+    # the ternary flows straight into a return - the value outlives `doc`.
+    const doc: dict[str, Any] = loads_obj(body)
+    return doc["subject_name"] if "subject_name" in doc else "?"
+}
+
+
+def arg_len(s: str) -> int {
+    # a borrow callee: reads its str arg after some heap churn.
+    churn()
+    return len(s)
+}
+
+
+def any_action(body: str) -> Any {
+    # returns an Any holding a str -> an OWNED box at the call site.
+    const doc: dict[str, Any] = loads_obj(body)
+    return doc["action"]
+}
+
+
+class TestAnyTernaryStrUnbox(TestCase) {
+    def test_const_target() -> None {
+        i: int = 0
+        while i < 30 {
+            self.assertEqual(read_const(BODY), "order.placed")
+            i = i + 1
+        }
+    }
+
+    def test_reassign_target() -> None {
+        # reassignment to an existing str slot - the Assign.cpp unbox path.
+        i: int = 0
+        while i < 30 {
+            const doc: dict[str, Any] = loads_obj(BODY)
+            s: str = "init"
+            s = doc["subject_type"] if "subject_type" in doc else ""
+            churn()
+            self.assertEqual(s, "service")
+            i = i + 1
+        }
+    }
+
+    def test_return_target() -> None {
+        i: int = 0
+        while i < 30 {
+            const got: str = read_return(BODY)
+            churn()
+            self.assertEqual(got, "ful")
+            i = i + 1
+        }
+    }
+
+    def test_bool_arm_still_correct() -> None {
+        # control: the sibling bool read was always fine (scalar, no refcount).
+        const doc: dict[str, Any] = loads_obj(BODY)
+        if "read" in doc {
+            const rv: bool = doc["read"]
+            self.assertEqual(rv, True)
+        }
+    }
+
+    def test_argpass_borrowed_box() -> None {
+        # the ternary / bare Any-subscript passed DIRECTLY as a str arg. Before
+        # the fix this failed the LLVM verifier (a box where the signature wants
+        # a str ptr); the arg is a BORROWED box (the dict owns the +1).
+        i: int = 0
+        while i < 30 {
+            const doc: dict[str, Any] = loads_obj(BODY)
+            self.assertEqual(arg_len(doc["action"] if "action" in doc else ""), 12)
+            self.assertEqual(arg_len(doc["subject_type"]), 7)
+            i = i + 1
+        }
+    }
+
+    def test_argpass_owned_box() -> None {
+        # an Any-returning call result passed as a str arg is an OWNED box: its
+        # +1 must be released after the call (drained as a Union), no leak.
+        i: int = 0
+        while i < 30 {
+            self.assertEqual(arg_len(any_action(BODY)), 12)
+            i = i + 1
+        }
+    }
+}
+
+
+main([TestAnyTernaryStrUnbox()])

@@ -1,0 +1,187 @@
+# ODB M4(a) regression suite: the bytes-keyed copy-on-write B+tree (odb.index)
+# built on the memcomparable encoder (odb.keyenc). Basics, split + reopen +
+# `odb check`, prefix scan (reverse-index traversal shape), and the end-to-end
+# crash-recovery proof over memcomparable keys. Dogfooded through ctest.
+
+from unittest import TestCase, main
+from odb.vfs import SimVFS
+from odb.pager import create, open_pager, Pager
+from odb.index import IndexTree
+from odb.keyenc import enc_int, enc_str, enc_composite
+from odb.checker import check_index_tree, CheckResult
+from odb.codec import blank, put_u64, get_u64
+from odb.sim import run_index_crash_trials, SimResult
+
+
+def _val(k: int) -> bytes {
+    b: list[int] = blank(8)
+    put_u64(b, 0, k * 11 + 5)
+    return bytes(b)
+}
+
+def _key(i: int) -> int {
+    return (i * 2654435761) & 0x3FFFFFFF
+}
+
+
+class IndexBasicsTest(TestCase) {
+    def test_insert_get_missing() -> None {
+        v: SimVFS = SimVFS()
+        p: Pager = create(v, 4096)
+        t: IndexTree = IndexTree(p, 0)
+        t.insert(enc_str("bob"), _val(10))
+        t.insert(enc_str("ada"), _val(20))
+        t.insert(enc_str("cy"), _val(5))
+        self.assertEqual(get_u64(t.get(enc_str("bob")), 0), 10 * 11 + 5)
+        self.assertEqual(get_u64(t.get(enc_str("ada")), 0), 20 * 11 + 5)
+        self.assertTrue(t.contains(enc_str("cy")))
+        self.assertFalse(t.contains(enc_str("nobody")))
+
+        raised: bool = False
+        try {
+            t.get(enc_str("nobody"))
+        } except KeyError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+
+    def test_update_replaces_value() -> None {
+        v: SimVFS = SimVFS()
+        p: Pager = create(v, 4096)
+        t: IndexTree = IndexTree(p, 0)
+        t.insert(enc_int(7), _val(7))
+        t.insert(enc_int(7), _val(700))
+        self.assertEqual(get_u64(t.get(enc_int(7)), 0), 700 * 11 + 5)
+        self.assertEqual(t.count(), 1)
+    }
+
+    def test_items_ascending() -> None {
+        v: SimVFS = SimVFS()
+        p: Pager = create(v, 4096)
+        t: IndexTree = IndexTree(p, 0)
+        # Insert in scrambled order; items() must come back memcmp-ascending.
+        words: list[str] = ["pear", "apple", "fig", "banana", "cherry", "date"]
+        for w in words {
+            t.insert(enc_str(w), _val(len(w)))
+        }
+        pairs: list[list[bytes]] = t.items()
+        self.assertEqual(len(pairs), 6)
+        asc: bool = True
+        i: int = 1
+        while i < len(pairs) {
+            if not (pairs[i - 1][0] < pairs[i][0]) {
+                asc = False
+            }
+            i = i + 1
+        }
+        self.assertTrue(asc)
+    }
+}
+
+
+class IndexSplitPersistTest(TestCase) {
+    # A tree large enough to split into multiple levels round-trips every key
+    # through a reopen, stays memcmp-ordered, and passes the index check.
+    def test_many_keys_persist_and_check() -> None {
+        v: SimVFS = SimVFS()
+        p: Pager = create(v, 4096)
+        t: IndexTree = IndexTree(p, 0)
+        n: int = 3000
+        i: int = 0
+        while i < n {
+            k: int = _key(i)
+            t.insert(enc_int(k), _val(k))
+            i = i + 1
+        }
+        p.set_catalog_root(t.root)
+        p.commit()
+
+        rp: Pager = open_pager(v)
+        chk: CheckResult = check_index_tree(rp, rp.catalog_root)
+        self.assertTrue(chk.ok, chk.message)
+        self.assertEqual(chk.keys, n)
+
+        rt: IndexTree = IndexTree(rp, rp.catalog_root)
+        i = 0
+        while i < n {
+            k: int = _key(i)
+            self.assertEqual(get_u64(rt.get(enc_int(k)), 0), k * 11 + 5)
+            i = i + 1
+        }
+    }
+
+    def test_delete_shrinks() -> None {
+        v: SimVFS = SimVFS()
+        p: Pager = create(v, 4096)
+        t: IndexTree = IndexTree(p, 0)
+        n: int = 400
+        i: int = 0
+        while i < n {
+            t.insert(enc_int(_key(i)), _val(i))
+            i = i + 1
+        }
+        # Delete every other key; the rest must remain findable and ordered.
+        i = 0
+        while i < n {
+            t.delete(enc_int(_key(i)))
+            i = i + 2
+        }
+        self.assertEqual(t.count(), n // 2)
+        p.set_catalog_root(t.root)
+        p.commit()
+        rp: Pager = open_pager(v)
+        chk: CheckResult = check_index_tree(rp, rp.catalog_root)
+        self.assertTrue(chk.ok, chk.message)
+        rt: IndexTree = IndexTree(rp, rp.catalog_root)
+        self.assertFalse(rt.contains(enc_int(_key(0))))
+        self.assertTrue(rt.contains(enc_int(_key(1))))
+    }
+}
+
+
+class IndexPrefixScanTest(TestCase) {
+    # The shape a reverse index uses: composite keys (target_docid, referrer)
+    # and a prefix scan that pulls every edge from one target.
+    def test_scan_prefix() -> None {
+        v: SimVFS = SimVFS()
+        p: Pager = create(v, 4096)
+        t: IndexTree = IndexTree(p, 0)
+        # target 1 has referrers {10, 11, 12}; target 2 has {20, 21}.
+        refs1: list[int] = [10, 11, 12]
+        for r in refs1 {
+            t.insert(enc_composite([enc_int(1), enc_int(r)]), bytes([]))
+        }
+        refs2: list[int] = [20, 21]
+        for r in refs2 {
+            t.insert(enc_composite([enc_int(2), enc_int(r)]), bytes([]))
+        }
+        got1: list[list[bytes]] = t.scan_prefix(enc_int(1))
+        self.assertEqual(len(got1), 3)
+        got2: list[list[bytes]] = t.scan_prefix(enc_int(2))
+        self.assertEqual(len(got2), 2)
+    }
+}
+
+
+class IndexCrashRecoveryTest(TestCase) {
+    # The M4(a) headline proof, identical in spirit to the u64 tree's: crash an
+    # in-flight COW insert into a committed multi-level bytes-keyed tree; the
+    # reopened tree always passes the index check and holds exactly the pre-crash
+    # key set or that set plus the one in-flight key.
+    def test_crash_during_index_commit() -> None {
+        res: SimResult = run_index_crash_trials(150)
+        self.assertEqual(res.trials, 150)
+        self.assertEqual(res.failures, 0)
+        self.assertTrue(res.recovered_old > 0)
+        self.assertTrue(res.recovered_new > 0)
+    }
+}
+
+
+main([
+    IndexBasicsTest(),
+    IndexSplitPersistTest(),
+    IndexPrefixScanTest(),
+    IndexCrashRecoveryTest(),
+])

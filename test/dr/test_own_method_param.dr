@@ -1,0 +1,121 @@
+"""An `own` regular method parameter that is consumed (read) but not stored.
+
+The caller MOVES its +1 in (`s.take(own v, ...)`), so the callee owns the
+value and its scope exit must release it - the caller does not drain an `own`
+argument. If the method-body prologue mis-marks an `own` heap param as merely
+borrowed (as a free function's prologue explicitly does NOT), the callee never
+frees it and every call leaks one string. Probed with and without a trailing
+`*args` so the ownership path is exercised alongside the new variadic packing.
+"""
+
+from unittest import TestCase, main
+
+
+class Sink {
+    def take(own head: str, *rest: int) -> int {
+        n: int = len(head)
+        for r in rest {
+            n = n + r
+        }
+        return n
+    }
+
+    def take_plain(own head: str) -> int {
+        return len(head)
+    }
+
+    @staticmethod
+    def take_static(own head: str) -> int {
+        return len(head)
+    }
+}
+
+
+# A constructor whose `own` param is CONSUMED (read) but not stored into a
+# field. The caller moved its +1 in, so the ctor owns it and its scope exit
+# must release it - the same leak class as a method, on the constructor path.
+class Discard {
+    seen: int = 0
+
+    def(own msg: str) {
+        self.seen = len(msg)
+    }
+}
+
+
+# The move-out guard: an `own` param a NON-constructor method moves into an own
+# field. The move nulls the slot so scope exit does not free it (that would be
+# a double-free once the field owns it); the field-overwrite next iteration
+# must drop the previous value. Fixing the consume-and-drop leak must not
+# regress this into a double-free.
+class Keeper {
+    own held: str
+
+    def(own initial: str) {
+        self.held = initial
+    }
+
+    def stash(own s: str) -> None {
+        self.held = s
+    }
+
+    def peek() -> int {
+        return len(self.held)
+    }
+}
+
+
+class OwnMethodParamTests(TestCase) {
+    def test_own_regular_before_varargs() {
+        s: Sink = Sink()
+        i: int = 0
+        while i < 3000 {
+            v: str = "head-" + str(i % 7)
+            self.assertTrue(s.take(own v, 1, 2, 3) >= 6)
+            i = i + 1
+        }
+    }
+
+    def test_own_plain_method_param() {
+        s: Sink = Sink()
+        i: int = 0
+        while i < 3000 {
+            v: str = "x-" + str(i % 7)
+            self.assertTrue(s.take_plain(own v) > 0)
+            i = i + 1
+        }
+    }
+
+    def test_own_param_moved_into_field_no_double_free() {
+        k: Keeper = Keeper("seed")
+        i: int = 0
+        while i < 3000 {
+            v: str = "kept-" + str(i % 7)
+            k.stash(own v)
+            self.assertTrue(k.peek() > 0)
+            i = i + 1
+        }
+    }
+
+    def test_own_static_method_param() {
+        i: int = 0
+        while i < 3000 {
+            v: str = "s-" + str(i % 7)
+            self.assertTrue(Sink.take_static(own v) > 0)
+            i = i + 1
+        }
+    }
+
+    def test_own_constructor_param_consumed() {
+        i: int = 0
+        while i < 3000 {
+            v: str = "c-" + str(i % 7)
+            d: Discard = Discard(own v)
+            self.assertTrue(d.seen > 0)
+            i = i + 1
+        }
+    }
+}
+
+
+main([OwnMethodParamTests()])

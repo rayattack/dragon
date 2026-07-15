@@ -1,0 +1,189 @@
+"""class instances as dict values - one tag (TAG_CLASS) across every path.
+
+Ordinary code, no tricks:
+
+    class Thing { n: int  def(n: int) { self.n = n } }
+    d: dict[str, Thing] = {}
+    d["a"] = Thing(7)
+    const t: Thing = d["a"]      # raised "TypeError: value for key 'a' is
+                                 # list, not bytes" before the fix
+
+You did nothing wrong - the store side tagged instance values TAG_LIST=5
+(the list elem_tag mapping) while annotated reads expected TAG_CLASS=7 (the
+box-domain mapping). The same split made isinstance miss on instances held in
+dict[str, Any], sent print(d) and json.dumps(d) walking the instance as a
+LIST (ASan heap-buffer-overflow), and an append-tracking heuristic clobbered
+declared list[Any] receivers into the native-pointer append (another OOB).
+All instance values now carry TAG_CLASS=7; print renders <Thing instance>;
+json.dumps raises a catchable TypeError (Python parity)
+"""
+
+from unittest import TestCase, main
+import json
+from json import Schema, ValidationResult
+
+
+class Thing {
+    n: int
+
+    def(n: int) {
+        self.n = n
+    }
+}
+
+
+class Holder {
+    things: dict[str, Thing]
+
+    def() {
+        self.things = {}
+    }
+
+    def put(name: str, t: Thing) -> None {
+        self.things[name] = t
+    }
+
+    def get_n(name: str) -> int {
+        const t: Thing = self.things[name]
+        return t.n
+    }
+}
+
+
+def make(n: int) -> Thing {
+    return Thing(n)
+}
+
+
+class TestTypedReads(TestCase) {
+    def test_subscript_store_annotated_read() -> None {
+        d: dict[str, Thing] = {}
+        d["a"] = make(7)
+        const t: Thing = d["a"]
+        self.assertEqual(t.n, 7)
+    }
+
+    def test_literal_store_annotated_read() -> None {
+        const d: dict[str, Thing] = {"a": Thing(9)}
+        const t: Thing = d["a"]
+        self.assertEqual(t.n, 9)
+    }
+
+    def test_chained_unannotated_read() -> None {
+        d: dict[str, Thing] = {}
+        d["a"] = make(5)
+        self.assertEqual(d["a"].n, 5)
+    }
+
+    def test_intkeyed_annotated_read() -> None {
+        d: dict[int, Thing] = {}
+        d[3] = make(11)
+        const t: Thing = d[3]
+        self.assertEqual(t.n, 11)
+    }
+
+    def test_class_field_dict() -> None {
+        const h: Holder = Holder()
+        h.put("a", make(13))
+        self.assertEqual(h.get_n("a"), 13)
+    }
+
+    def test_values_and_setdefault() -> None {
+        d: dict[str, Thing] = {}
+        const t0: Thing = d.setdefault("a", make(19))
+        self.assertEqual(t0.n, 19)
+        const t1: Thing = d["a"]
+        self.assertEqual(t1.n, 19)
+        const vs: list[Thing] = d.values()
+        const t2: Thing = vs[0]
+        self.assertEqual(t2.n, 19)
+    }
+}
+
+
+class TestLifetimes(TestCase) {
+    def test_overwrite_del_and_hold() -> None {
+        d: dict[str, Thing] = {}
+        d["a"] = Thing(1)
+        d["a"] = Thing(2)          # overwrite releases the old value once
+        const kept: Thing = d["a"]
+        del d["a"]                 # the held reference stays alive
+        self.assertEqual(kept.n, 2)
+    }
+
+    def test_churn_values_stay_correct() -> None {
+        total: int = 0
+        i: int = 0
+        while i < 500 {
+            d: dict[str, Thing] = {}
+            d["a"] = Thing(i)
+            d["a"] = Thing(i + 1)
+            d["b"] = Thing(i + 2)
+            del d["b"]
+            total = total + d["a"].n
+            i = i + 1
+        }
+        self.assertEqual(total, 125250)
+    }
+}
+
+
+class TestBoxDomains(TestCase) {
+    def test_anydict_isinstance_narrow() -> None {
+        d: dict[str, Any] = {}
+        d["t"] = Thing(21)
+        const v: Any = d["t"]
+        hit: bool = False
+        if isinstance(v, Thing) {
+            const t: Thing = v
+            self.assertEqual(t.n, 21)
+            hit = True
+        }
+        self.assertEqual(hit, True)
+    }
+
+    def test_listany_append_instance() -> None {
+        l: list[Any] = []
+        l.append(Thing(3))
+        const v: Any = l[0]
+        hit: bool = False
+        if isinstance(v, Thing) {
+            const t: Thing = v
+            self.assertEqual(t.n, 3)
+            hit = True
+        }
+        self.assertEqual(hit, True)
+    }
+
+    def test_dumps_of_instance_dict_raises() -> None {
+        # Python parity: not JSON serializable -> catchable TypeError,
+        # never a misread of the instance as a list/bytes.
+        d: dict[str, Thing] = {}
+        d["a"] = Thing(7)
+        caught: bool = False
+        try {
+            const out: str = json.dumps(d)
+            self.assertEqual(out, "unreachable")
+        } except {
+            caught = True
+        }
+        self.assertEqual(caught, True)
+    }
+
+    def test_dict_of_schema_instances() -> None {
+        # the original motivation: Schema instances stored in and read back
+        # from a dict at their annotated type
+        registries: dict[str, Schema] = {}
+        s: Schema = Schema("draft-07")
+        s.register("thing.made", {"type": "object", "required": ["n"], "properties": {"n": {"type": "integer", "minimum": 1}}})
+        registries["events"] = s
+        const back: Schema = registries["events"]
+        self.assertEqual(back.validate("thing.made", json.loads('{"n": 4}')).ok, True)
+        const r: ValidationResult = back.validate("thing.made", json.loads('{"n": 0}'))
+        self.assertEqual(r.ok, False)
+        self.assertEqual(r.errors[0].path, "$.n")
+    }
+}
+
+
+main([TestTypedReads(), TestLifetimes(), TestBoxDomains()])

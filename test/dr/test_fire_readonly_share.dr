@@ -1,0 +1,91 @@
+"""Door 5: a read-only value fans out across `fire` at zero copy (2026-07-14).
+
+You want the obvious worker-pool shape - fire one task per worker over the SAME
+shared data, then join them all:
+
+    shared: list[str] = build()
+    while w < N {
+        t: Task[int] = fire worker(shared)   # every worker READS `shared`
+        tasks.append(t)
+        w = w + 1
+    }
+    for t in tasks { total = total + t.join() }
+
+Before door 5 this was E10 ("'shared' deleted on iteration 1; iteration 2 would
+use a dead name"): the single-task lend could track only ONE outstanding borrow
+and killed `shared` on the back edge. But `fire` already marks every heap arg
+SHARED (atomic refcount via mark_shared_deep), so N tasks reading the same value
+concurrently cannot race on its refcount - and because `worker` provably never
+MUTATES its parameter, there is no data race on its contents either. So it is
+safe to share at zero copy, and no `dub` is needed.
+
+The invariant this locks in: a plain `fire worker(shared)` that COMPILES is proof
+the worker only reads `shared`. If it mutated, you would have had to say
+`dub shared` (a visible copy) or `own shared` (a move). `dub` stays the marker
+that a copy was needed. Memory-safety of the fan-out is proven under ASan/LSan by
+the scratch probe (12 workers x 3000 reads over 8 shared strings, clean); this
+test locks in the rendered VALUES end to end.
+"""
+
+from unittest import TestCase, main
+
+
+# Read-only over its list param: no append/insert/pop/subscript-store, so it is
+# provably safe to share. Fired concurrently over the SAME `shared` list.
+def sum_lengths(s: list[str]) -> int {
+    n: int = 0
+    i: int = 0
+    while i < len(s) {
+        n = n + len(s[i])
+        i = i + 1
+    }
+    return n
+}
+
+
+# A second read-only worker over a shared dict, to cover the dict receiver too.
+def sum_values(d: dict[str, int]) -> int {
+    total: int = 0
+    total = total + d["a"]
+    total = total + d["b"]
+    total = total + d["c"]
+    return total
+}
+
+
+class FireReadOnlyShareTests(TestCase) {
+    def test_list_fanout_joins_to_expected_total() {
+        shared: list[str] = ["item_a", "item_b", "item_c"]   # 3 x 6 = 18
+        tasks: list[Task[int]] = []
+        w: int = 0
+        while w < 8 {
+            t: Task[int] = fire sum_lengths(shared)
+            tasks.append(t)
+            w = w + 1
+        }
+        total: int = 0
+        for t in tasks {
+            total = total + t.join()
+        }
+        self.assertEqual(total, 144)   # 8 workers x 18
+    }
+
+    def test_dict_fanout_joins_to_expected_total() {
+        cfg: dict[str, int] = {a: 10, b: 20, c: 30}   # 60 per worker
+        tasks: list[Task[int]] = []
+        w: int = 0
+        while w < 5 {
+            t: Task[int] = fire sum_values(cfg)
+            tasks.append(t)
+            w = w + 1
+        }
+        total: int = 0
+        for t in tasks {
+            total = total + t.join()
+        }
+        self.assertEqual(total, 300)   # 5 workers x 60
+    }
+}
+
+
+main([FireReadOnlyShareTests()])

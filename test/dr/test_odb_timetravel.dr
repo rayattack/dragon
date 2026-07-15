@@ -1,0 +1,182 @@
+# ODB M8 regression suite: time travel (spec section 17). `source@csn(N)`
+# reads through the snapshot that commit published; `source@<date>` resolves
+# the newest commit at or before that instant. Snapshots are read-only and
+# valid exactly as far as retention reaches.
+
+from unittest import TestCase, main
+from odb import ODB, Documents, Document
+from odb.vfs import SimVFS
+from odb.pager import create, Pager
+from odb.errors import ODBError, NotFound
+
+
+def _schema() -> dict[str, Any] {
+    return { "type": "object",
+             "properties": { "id": {"type": "integer"},
+                             "name": {"type": "string"},
+                             "city": {"type": "string"} },
+             "required": ["id", "name"] }
+}
+
+def _mem() -> ODB {
+    sim: SimVFS = SimVFS()
+    p: Pager = create(sim, 4096)
+    return ODB(sim, p)
+}
+
+
+class TimeTravelTest(TestCase) {
+    # Read the past through @csn: the old value is still there.
+    def test_read_before_edit() -> None {
+        db: ODB = _mem()
+        cust: Documents = db.schema("customers", _schema())
+        r: Document = cust.save({id: 1, name: "Ada", city: "Lagos"})
+        at: int = db.pager.last_csn
+        cust.edit(r.id, {city: "Abuja"})
+
+        rows: list[Document] = db.find("customers@csn(" + str(at) + ") ? id == 1")
+        self.assertEqual(len(rows), 1)
+        c: str = rows[0]["city"]
+        self.assertEqual(c, "Lagos")
+
+        # the present is unaffected
+        now_rows: list[Document] = db.find("customers ? id == 1")
+        c2: str = now_rows[0]["city"]
+        self.assertEqual(c2, "Abuja")
+    }
+
+    # A deleted document is still visible at a snapshot before the delete.
+    def test_read_before_delete() -> None {
+        db: ODB = _mem()
+        cust: Documents = db.schema("customers", _schema())
+        r: Document = cust.save({id: 1, name: "Ada"})
+        cust.save({id: 2, name: "Zed"})
+        at: int = db.pager.last_csn
+        cust.wipe(r.id)
+
+        self.assertEqual(len(db.find("customers")), 1)
+        old: list[Document] = db.find("customers@csn(" + str(at) + ")")
+        self.assertEqual(len(old), 2)
+    }
+
+    # Filters, projection, and pipeline stages run against the snapshot.
+    def test_full_query_at_snapshot() -> None {
+        db: ODB = _mem()
+        cust: Documents = db.schema("customers", _schema())
+        i: int = 0
+        while i < 6 {
+            cust.save({id: i, name: "n" + str(i), city: "Lagos"})
+            i = i + 1
+        }
+        at: int = db.pager.last_csn
+        db.run("del customers ? id < 4")
+
+        rows: list[Document] = db.find("customers@csn(" + str(at) + ") ? city == \"Lagos\" { id } | sort -id | take 2")
+        self.assertEqual(len(rows), 2)
+        first: int = rows[0]["id"]
+        self.assertEqual(first, 5)
+    }
+
+    # A schema defined later does not exist at an older snapshot.
+    def test_schema_not_yet_defined() -> None {
+        db: ODB = _mem()
+        db.schema("customers", _schema())
+        at: int = db.pager.last_csn
+        db.schema("orders", _schema())
+
+        raised: bool = False
+        try {
+            db.find("orders@csn(" + str(at) + ")")
+        } except NotFound {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+
+    # Snapshots are read-only: an edit through one is refused.
+    def test_snapshot_is_read_only() -> None {
+        db: ODB = _mem()
+        cust: Documents = db.schema("customers", _schema())
+        r: Document = cust.save({id: 1, name: "Ada"})
+        at: int = db.pager.last_csn
+        cust.edit(r.id, {name: "Ada2"})
+
+        old: list[Document] = db.find("customers@csn(" + str(at) + ")")
+        raised: bool = False
+        try {
+            old[0].edit({name: "hacked"})
+        } except ODBError {
+            raised = True
+        }
+        self.assertTrue(raised)
+        # the live document is untouched
+        nm: str = cust.read(r.id)["name"]
+        self.assertEqual(nm, "Ada2")
+    }
+
+    # Future CSNs and pre-retention CSNs both fail loudly.
+    def test_out_of_range() -> None {
+        db: ODB = _mem()
+        cust: Documents = db.schema("customers", _schema())
+        cust.save({id: 1, name: "Ada"})
+
+        raised: bool = False
+        try {
+            db.find("customers@csn(999999)")
+        } except ODBError {
+            raised = True
+        }
+        self.assertTrue(raised)
+
+        db.retain("1 txns")
+        i: int = 0
+        while i < 5 {
+            cust.save({id: 10 + i, name: "x"})
+            i = i + 1
+        }
+        raised = False
+        try {
+            db.find("customers@csn(2)")       # trimmed away
+        } except ODBError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+
+    # Date-form travel: a date far in the past is outside retention; a date
+    # in the future resolves to the newest snapshot.
+    def test_date_form() -> None {
+        db: ODB = _mem()
+        cust: Documents = db.schema("customers", _schema())
+        cust.save({id: 1, name: "Ada"})
+
+        raised: bool = False
+        try {
+            db.find("customers@1999-01-01")
+        } except ODBError {
+            raised = True
+        }
+        self.assertTrue(raised)
+
+        rows: list[Document] = db.find("customers@2999-01-01T00:00:00Z")
+        self.assertEqual(len(rows), 1)
+    }
+
+    # Edits keep flowing after a snapshot read: the view never wedges the
+    # writer (page pinning via the retention floor, not via reader locks).
+    def test_writes_continue_after_snapshot_read() -> None {
+        db: ODB = _mem()
+        cust: Documents = db.schema("customers", _schema())
+        r: Document = cust.save({id: 1, name: "Ada"})
+        at: int = db.pager.last_csn
+        db.find("customers@csn(" + str(at) + ")")
+        cust.edit(r.id, {name: "Ada2"})
+        cust.edit(r.id, {name: "Ada3"})
+        nm: str = cust.read(r.id)["name"]
+        self.assertEqual(nm, "Ada3")
+        self.assertTrue(db.check().ok)
+    }
+}
+
+
+main([TimeTravelTest()])

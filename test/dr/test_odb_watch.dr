@@ -1,0 +1,207 @@
+# ODB M8 regression suite: watch (spec section 17). A watch is an OQL query
+# over the commit log: it streams matching post-images committed after its
+# resume token, projects like a read, and resumes exactly or fails loudly.
+
+from unittest import TestCase, main
+from odb import ODB, Documents, Document, Watch, Change
+from odb.vfs import SimVFS
+from odb.pager import create, Pager
+from odb.errors import PrepareError, ODBError
+
+
+def _schema() -> dict[str, Any] {
+    return { "type": "object",
+             "properties": { "id": {"type": "integer"},
+                             "status": {"type": "string"},
+                             "total": {"type": "integer"} },
+             "required": ["id", "status", "total"] }
+}
+
+def _mem() -> ODB {
+    sim: SimVFS = SimVFS()
+    p: Pager = create(sim, 4096)
+    return ODB(sim, p)
+}
+
+
+class WatchTest(TestCase) {
+    # A watch opened now sees only commits that happen after it.
+    def test_only_future_commits() -> None {
+        db: ODB = _mem()
+        orders: Documents = db.schema("orders", _schema())
+        orders.save({id: 1, status: "paid", total: 10})
+
+        w: Watch = db.watch("orders ? status == \"paid\"")
+        self.assertEqual(len(w.poll()), 0)         # nothing yet
+
+        orders.save({id: 2, status: "paid", total: 20})
+        hits: list[Change] = w.poll()
+        self.assertEqual(len(hits), 1)
+        t: int = hits[0].doc["total"]
+        self.assertEqual(t, 20)
+        self.assertEqual(hits[0].kind, "add")
+
+        # drained: a second poll returns nothing new
+        self.assertEqual(len(w.poll()), 0)
+    }
+
+    # The filter applies to post-images: only matching writes stream.
+    def test_filter_applies() -> None {
+        db: ODB = _mem()
+        orders: Documents = db.schema("orders", _schema())
+        w: Watch = db.watch("orders ? status == \"paid\" & total >= 15")
+
+        orders.save({id: 1, status: "paid", total: 10})     # total too low
+        orders.save({id: 2, status: "draft", total: 99})    # wrong status
+        r: Document = orders.save({id: 3, status: "paid", total: 50})
+
+        hits: list[Change] = w.poll()
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].docid, r.id)
+    }
+
+    # An edit whose post-image ENTERS the filtered set streams as a set.
+    def test_set_streams_post_image() -> None {
+        db: ODB = _mem()
+        orders: Documents = db.schema("orders", _schema())
+        r: Document = orders.save({id: 1, status: "draft", total: 10})
+
+        w: Watch = db.watch("orders ? status == \"paid\"")
+        orders.edit(r.id, {status: "paid"})
+        hits: list[Change] = w.poll()
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].kind, "set")
+        st: str = hits[0].doc["status"]
+        self.assertEqual(st, "paid")
+    }
+
+    # The projection block shapes the streamed documents.
+    def test_projection() -> None {
+        db: ODB = _mem()
+        orders: Documents = db.schema("orders", _schema())
+        w: Watch = db.watch("orders ? status == \"paid\" { id, total }")
+        orders.save({id: 7, status: "paid", total: 70})
+        hits: list[Change] = w.poll()
+        self.assertEqual(len(hits), 1)
+        d: dict[str, Any] = hits[0].doc
+        self.assertTrue("total" in d)
+        self.assertTrue("status" not in d)
+    }
+
+    # Resume: a new Watch from an old token replays exactly the missed tail.
+    def test_resume_token() -> None {
+        db: ODB = _mem()
+        orders: Documents = db.schema("orders", _schema())
+        w: Watch = db.watch("orders ? status == \"paid\"")
+        orders.save({id: 1, status: "paid", total: 10})
+        w.poll()
+        token: int = w.resume_token()
+
+        orders.save({id: 2, status: "paid", total: 20})
+        orders.save({id: 3, status: "paid", total: 30})
+
+        w2: Watch = db.watch("orders ? status == \"paid\"", token)
+        hits: list[Change] = w2.poll()
+        self.assertEqual(len(hits), 2)
+        t: int = hits[0].doc["total"]
+        self.assertEqual(t, 20)
+    }
+
+    # Deletes do not stream post-images; changes() carries them with the pk.
+    def test_delete_in_changes_not_watch() -> None {
+        db: ODB = _mem()
+        orders: Documents = db.schema("orders", _schema()).meta({primary: ["id"]})
+        r: Document = orders.save({id: 5, status: "paid", total: 10})
+
+        w: Watch = db.watch("orders ? status == \"paid\"")
+        mark: int = w.resume_token()
+        orders.wipe(r.id)
+
+        self.assertEqual(len(w.poll()), 0)
+        chs: list[Change] = db.changes(mark)
+        self.assertEqual(len(chs), 1)
+        self.assertEqual(chs[0].kind, "del")
+        pk_any: Any = chs[0].pk()
+        self.assertTrue(isinstance(pk_any, int))
+        pk: int = pk_any
+        self.assertEqual(pk, 5)
+    }
+
+    # Watch prepares like a read: bad queries are rejected before streaming.
+    def test_prepare_errors() -> None {
+        db: ODB = _mem()
+        db.schema("orders", _schema())
+
+        raised: bool = False
+        try {
+            db.watch("orders { n: count!() }")
+        } except PrepareError {
+            raised = True
+        }
+        self.assertTrue(raised)
+
+        raised = False
+        try {
+            db.watch("orders ? status == 7")
+        } except PrepareError {
+            raised = True
+        }
+        self.assertTrue(raised)
+
+        raised = False
+        try {
+            db.watch("orders@csn(3) ? status == \"paid\"")
+        } except PrepareError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+
+    # A resume token that predates the retention window fails loudly rather
+    # than silently skipping trimmed changes.
+    def test_resume_before_retention_raises() -> None {
+        db: ODB = _mem()
+        orders: Documents = db.schema("orders", _schema())
+        w: Watch = db.watch("orders ? status == \"paid\"")
+        db.retain("2 txns")
+        i: int = 0
+        while i < 6 {
+            orders.save({id: i, status: "paid", total: i})
+            i = i + 1
+        }
+        raised: bool = False
+        try {
+            w.poll()
+        } except ODBError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+
+    # Watch on a database without history is refused up front.
+    def test_watch_requires_retention() -> None {
+        db: ODB = _mem()
+        db.retain("none")
+        db.schema("orders", _schema())
+        raised: bool = False
+        try {
+            db.watch("orders ? status == \"paid\"")
+        } except ODBError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+
+    # Watch with $params binds like find.
+    def test_watch_params() -> None {
+        db: ODB = _mem()
+        orders: Documents = db.schema("orders", _schema())
+        w: Watch = db.watch("orders ? status == $s", {s: "paid"}, db.pager.last_csn)
+        orders.save({id: 1, status: "paid", total: 10})
+        orders.save({id: 2, status: "draft", total: 20})
+        self.assertEqual(len(w.poll()), 1)
+    }
+}
+
+
+main([WatchTest()])

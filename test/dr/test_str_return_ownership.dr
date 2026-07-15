@@ -1,0 +1,89 @@
+# Returning a STRING element read (`return s[i]`) hands the caller exactly
+# one reference, same as a slice. It was incref'd as if it borrowed a
+# container reference, so ordinary parser-shaped code
+#
+#   def peek() -> str {
+#       return self.src[self.pos]     # fresh 1-char string, owned
+#   }
+#   while p.peek() == "{" { ... }     # +2 out, one released: leak per call
+#
+# leaked one string per call (found by ASan in the GraphQL parser hot loop).
+# list/dict element returns DO borrow and keep their incref. Values are
+# asserted here; the leak side is guarded by the ASan/LSan CI run.
+
+from unittest import TestCase, main
+
+
+class Src {
+    s: str
+
+    def(s: str) {
+        self.s = s
+    }
+
+    def peek(i: int) -> str {
+        return self.s[i]
+    }
+}
+
+def head_of(s: str) -> str {
+    return s[0]
+}
+
+def pick(xs: list[str], i: int) -> str {
+    return xs[i]                     # a real borrow: the list keeps its ref
+}
+
+
+class StrReturnOwnershipTest(TestCase) {
+    def test_function_return_element() -> None {
+        self.assertEqual(head_of("dragon"), "d")
+    }
+
+    def test_method_return_element_in_loop() -> None {
+        src: Src = Src("abcabc")
+        hits: int = 0
+        i: int = 0
+        while i < 600 {
+            if src.peek(i % 6) == "a" {
+                hits = hits + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(hits, 200)
+    }
+
+    def test_bound_local_in_loop() -> None {
+        src: Src = Src("xyz")
+        out: list[str] = []
+        i: int = 0
+        while i < 9 {
+            c: str = src.peek(i % 3)
+            out.append(c)
+            i = i + 1
+        }
+        self.assertEqual("".join(out), "xyzxyzxyz")
+    }
+
+    # The borrowed cases keep working: list element returns stay usable after
+    # heavy churn (their incref is the documented UAF guard).
+    def test_list_element_return_still_borrows() -> None {
+        xs: list[str] = ["alpha", "beta", "gamma"]
+        got: str = pick(xs, 1)
+        self.assertEqual(got, "beta")
+        i: int = 0
+        while i < 50 {
+            self.assertEqual(len(pick(xs, i % 3)) > 0, True)
+            i = i + 1
+        }
+    }
+
+    # Slices keep their owned contract too.
+    def test_slice_return() -> None {
+        src: Src = Src("dragonfly")
+        self.assertEqual(src.s[0:6], "dragon")
+    }
+}
+
+
+main([StrReturnOwnershipTest()])

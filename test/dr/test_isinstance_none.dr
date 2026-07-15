@@ -1,0 +1,83 @@
+# isinstance(x, SomeClass) on an Optional[SomeClass] holding None must be
+# False. It was folded to compile-time True from the static class, so the
+# usual guard pattern
+#
+#   wl: Optional[WriterLock] = self._wlock
+#   if isinstance(wl, WriterLock) { wl.close() }
+#
+# passed for None and the call dereferenced a null receiver (a real SEGV).
+# The static fold now still tests the runtime pointer.
+
+from unittest import TestCase, main
+
+
+class Thing {
+    x: int
+
+    def() {
+        self.x = 41
+    }
+
+    def bump() -> int {
+        self.x = self.x + 1
+        return self.x
+    }
+}
+
+class SubThing(Thing) {}
+
+class Holder {
+    t: Optional[Thing]
+
+    def() {
+        self.t = None
+    }
+}
+
+
+class IsinstanceNoneTest(TestCase) {
+    def test_none_is_not_instance() -> None {
+        h: Holder = Holder()
+        v: Optional[Thing] = h.t
+        self.assertFalse(isinstance(v, Thing))
+    }
+
+    def test_present_is_instance() -> None {
+        h: Holder = Holder()
+        h.t = Thing()
+        v: Optional[Thing] = h.t
+        self.assertTrue(isinstance(v, Thing))
+    }
+
+    # The guard pattern must actually protect the call.
+    def test_guarded_call() -> None {
+        h: Holder = Holder()
+        total: int = 0
+        v: Optional[Thing] = h.t
+        if isinstance(v, Thing) {
+            total = total + v.bump()
+        }
+        self.assertEqual(total, 0)
+
+        h.t = Thing()
+        v2: Optional[Thing] = h.t
+        if isinstance(v2, Thing) {
+            total = total + v2.bump()
+        }
+        self.assertEqual(total, 42)
+    }
+
+    # Subclass instances still satisfy ancestor checks (and None still fails).
+    def test_subclass_chain() -> None {
+        h: Holder = Holder()
+        h.t = SubThing()
+        v: Optional[Thing] = h.t
+        self.assertTrue(isinstance(v, Thing))
+        h2: Holder = Holder()
+        v2: Optional[Thing] = h2.t
+        self.assertFalse(isinstance(v2, SubThing))
+    }
+}
+
+
+main([IsinstanceNoneTest()])

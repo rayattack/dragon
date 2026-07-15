@@ -1,0 +1,52 @@
+"""Escape safety: a `**kwargs` value or the whole pack that outlives the call.
+
+The packed `**kwargs` dict is a call-site-owned temporary the method BORROWS,
+and it is freed the instant the call returns. So a method that KEEPS a kwarg
+value (stores it in a field) or keeps the whole pack must take its own
+reference, or the stored value is a use-after-free the moment the pack is
+freed. This proves the borrow-plus-incref-on-store discipline holds with no
+`own`/`del`/`dub` annotation: the pack is a fresh temp, so there is no caller
+binding to move, and `own` on a variadic parameter is a parse error by design.
+"""
+
+from unittest import TestCase, main
+
+
+class Bag {
+    saved: str = ""
+    pack: dict[str, Any] = {}
+
+    def keep_value(key: str, **keys: Any) -> None {
+        self.saved = str(keys[key])
+    }
+
+    def keep_pack(**keys: Any) -> None {
+        self.pack = keys
+    }
+}
+
+
+class MethodKwargsEscapeTests(TestCase) {
+    def test_value_escapes_pack_lifetime() {
+        b: Bag = Bag()
+        i: int = 0
+        while i < 2000 {
+            b.keep_value("host", host="db-" + str(i % 9), port="5432")
+            self.assertTrue(len(b.saved) > 0)
+            i = i + 1
+        }
+    }
+
+    def test_pack_escapes_call() {
+        b: Bag = Bag()
+        i: int = 0
+        while i < 2000 {
+            b.keep_pack(a="x-" + str(i % 5), bb="y")
+            self.assertEqual(len(b.pack), 2)
+            i = i + 1
+        }
+    }
+}
+
+
+main([MethodKwargsEscapeTests()])

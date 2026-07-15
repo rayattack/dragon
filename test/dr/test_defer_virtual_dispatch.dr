@@ -1,0 +1,87 @@
+# A deferred method call must dispatch exactly like the direct call: through
+# the vtable when any subclass overrides the method. It was resolved
+# statically at the defer statement, so ordinary seam-shaped code
+#
+#   def stream(conn: ConnReader) -> None {
+#       defer conn.close()        # conn is a subclass at runtime
+#       ...
+#   }
+#
+# silently ran the BASE close (a no-op) and the subclass cleanup never
+# happened - no error anywhere, the resource just stayed open.
+
+from unittest import TestCase, main
+
+
+class Base {
+    hits: list[str]
+
+    def() {
+        self.hits = []
+    }
+
+    def close() -> None {
+        self.hits.append("base")
+    }
+
+    def tag() -> None {
+        self.hits.append("base-tag")
+    }
+}
+
+class Sub(Base) {
+    def close() -> None {
+        self.hits.append("sub")
+    }
+}
+
+def deferred_close(b: Base) -> None {
+    defer b.close()
+}
+
+def deferred_tag(b: Base) -> None {
+    defer b.tag()
+}
+
+def deferred_close_on_raise(b: Base) -> None {
+    defer b.close()
+    raise ValueError("boom")
+}
+
+
+class DeferVirtualDispatchTest(TestCase) {
+    def test_deferred_override_dispatches() -> None {
+        s: Sub = Sub()
+        deferred_close(s)
+        self.assertEqual(",".join(s.hits), "sub")
+    }
+
+    def test_deferred_base_receiver_stays_base() -> None {
+        b: Base = Base()
+        deferred_close(b)
+        self.assertEqual(",".join(b.hits), "base")
+    }
+
+    # A method NO subclass overrides keeps the devirtualized direct call.
+    def test_non_overridden_stays_direct() -> None {
+        s: Sub = Sub()
+        deferred_tag(s)
+        self.assertEqual(",".join(s.hits), "base-tag")
+    }
+
+    # The unwind path shares the same thunk: the override runs on raise too.
+    def test_dispatch_on_unwind() -> None {
+        s: Sub = Sub()
+        raised: bool = False
+        try {
+            deferred_close_on_raise(s)
+        } except ValueError {
+            raised = True
+        }
+        self.assertTrue(raised)
+        self.assertEqual(",".join(s.hits), "sub")
+    }
+}
+
+
+main([DeferVirtualDispatchTest()])

@@ -1,0 +1,65 @@
+# SocketHandle - the one claim on a kernel socket (docs/1604-ownership,
+# "Identity resources"). Value-assertable semantics: the adopt_raw door, the
+# live accessor, poison-idempotent close, and the FdReader that owns one.
+# The compile-time rejections (borrowing into the own field, dub of a
+# claim-holder) are exercised by the ownership checker suites.
+
+from unittest import TestCase, main
+from socket import TcpListener, TcpStream, SocketHandle
+from http.server import FdReader
+
+
+# Accept one connection, greet, wait for the client's goodbye, close.
+def _peer(l: TcpListener) -> None {
+    conn: TcpStream = l.do_accept()
+    conn.do_send("hello")
+    conn.do_recv(16)
+    conn.close()
+}
+
+
+class SocketHandleTest(TestCase) {
+    def test_adopt_and_read() -> None {
+        h: SocketHandle = SocketHandle.adopt_raw(42)
+        self.assertEqual(h.fd(), 42)
+    }
+
+    # close poisons: the fd reads -1 afterwards and a second close no-ops
+    # (fd 42 does not exist; close on it is harmlessly ignored by the OS).
+    def test_close_poisons_and_is_idempotent() -> None {
+        h: SocketHandle = SocketHandle.adopt_raw(42)
+        h.close()
+        self.assertEqual(h.fd(), -1)
+        h.close()                          # second close: no-op, no crash
+        self.assertEqual(h.fd(), -1)
+    }
+
+    # An FdReader owns its claim end to end over a real socket: reads work
+    # while live, socket_fd() reports the claim, and after close every probe
+    # reads the poisoned -1 instead of a recycled descriptor.
+    def test_fdreader_owns_the_claim() -> None {
+        lis: TcpListener = TcpListener("127.0.0.1", 54479)
+        lis.do_bind()
+        lis.do_listen(4)
+
+        t: Task[None] = fire _peer(lis)
+
+        c: TcpStream = TcpStream.open("127.0.0.1", 54479)
+        reader: FdReader = FdReader(own c)
+        self.assertTrue(reader.socket_fd() > 0)
+        got: bytes = reader.recv(16)
+        self.assertEqual(got.decode(), "hello")
+
+        reader.send("bye")
+        reader.close()
+        self.assertEqual(reader.socket_fd(), -1)   # claim is down
+        self.assertEqual(reader.send("x"), -1)     # poisoned, loud, harmless
+        reader.close()                             # idempotent through the reader
+
+        await t
+        lis.close()
+    }
+}
+
+
+main([SocketHandleTest()])

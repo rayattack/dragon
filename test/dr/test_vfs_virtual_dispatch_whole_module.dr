@@ -1,0 +1,67 @@
+"""A subclass's overridden method must still be the one that runs after an
+unrelated import pulls its whole module graph into the compile.
+
+You write ordinary, correct code:
+
+    from odb import ODB                 # you only wanted ODB
+    from odb.vfs import FileVFS
+
+    v: FileVFS = FileVFS(path)
+    print(v.size())                     # you expect FileVFS.size() - the override
+
+FileVFS(VFS) overrides size(). Called on its own, `v.size()` returns the file
+length. But `from odb import ODB` also co-compiles odb.oql, and odb.oql happens
+to declare locals named `v: Val`. Codegen tracked each variable's class and
+owning module in a program-wide table keyed by the BARE name `v` - so oql's
+`v: Val` and this `v: FileVFS` shared one entry. When the owning module went
+stale, dispatch mangled the (correct) class FileVFS under the WRONG module,
+failed to find its own size(), and walked UP to the base VFS.size() - which
+raises "size not implemented". You did nothing wrong; an unrelated import
+silently changed which size() ran.
+
+Now dispatch trusts the type the checker already proved for the receiver, not
+the bare-name table, and the method resolver tries a class's own override
+before ever walking to a parent. This asserts on VALUES: every VFS subclass's
+own size()/read_at() must run, which only holds if the override - not the
+base - was dispatched.
+"""
+
+from unittest import TestCase, main
+from odb import ODB
+from odb.vfs import FileVFS, SimVFS
+from tempfile import mktemp
+
+
+class VfsVirtualDispatchTests(TestCase) {
+    def test_filevfs_size_dispatches_to_override() {
+        # A fresh file is empty. If this reached VFS.size() (the base) it would
+        # raise "size not implemented" and never return a value.
+        v: FileVFS = FileVFS(mktemp("dr_vfs_", ".bin"))
+        self.assertEqual(v.size(), 0)
+        v.close()
+    }
+
+    def test_filevfs_write_then_size() {
+        v: FileVFS = FileVFS(mktemp("dr_vfs_", ".bin"))
+        v.write_at(0, bytes([1, 2, 3, 4]))
+        v.sync()
+        self.assertEqual(v.size(), 4)
+        got: bytes = v.read_at(0, 4)
+        self.assertEqual(len(got), 4)
+        self.assertEqual(got[0], 1)
+        self.assertEqual(got[3], 4)
+        v.close()
+    }
+
+    def test_simvfs_size_dispatches_to_override() {
+        # A second VFS subclass, so the guard is not one incidental variable
+        # name: its size()/write_at() overrides must run too.
+        s: SimVFS = SimVFS()
+        self.assertEqual(s.size(), 0)
+        s.write_at(0, bytes([9, 9]))
+        self.assertEqual(s.size(), 2)
+    }
+}
+
+
+main([VfsVirtualDispatchTests()])

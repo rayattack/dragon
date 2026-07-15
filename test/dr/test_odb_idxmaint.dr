@@ -1,0 +1,386 @@
+# ODB M4(b/c/f) regression suite: the forest catalog (per-index roots persisted
+# and reloaded), index maintenance on save/edit/wipe, unique enforcement at
+# commit with clean rollback, keyed reads via read(field=value) keyword form, primary-key immutability,
+# and a crash-recovery proof over a schema that carries a unique index and a
+# plain index.
+#
+# JSON Schema uses quoted keys (`type` is a keyword); metadata lists are built as
+# typed list[Any] locals (the blessed shape while dict-value list literals are
+# still born monomorphized).
+
+from unittest import TestCase, main
+from odb import ODB, Documents, Document, connect
+from odb.vfs import SimVFS
+from odb.pager import create, open_pager, Pager
+from odb.rng import Rng
+from odb.errors import NotFound, SchemaError, IntegrityError, PrepareError
+from tempfile import mktemp
+
+
+def _schema() -> dict[str, Any] {
+    props: dict[str, Any] = {}
+    props["id"] = {"type": "integer"}
+    props["name"] = {"type": "string"}
+    props["email"] = {"type": "string"}
+    props["city"] = {"type": "string"}
+    req: list[Any] = ["id", "name", "email", "city"]
+    s: dict[str, Any] = {}
+    s["type"] = "object"
+    s["properties"] = props
+    s["required"] = req
+    return s
+}
+
+def _meta() -> dict[str, Any] {
+    pk: list[Any] = ["id"]
+    uq: list[Any] = ["email"]
+    ix: list[Any] = ["city"]
+    m: dict[str, Any] = {}
+    m["primary"] = pk
+    m["unique"] = uq
+    m["index"] = ix
+    return m
+}
+
+def _mem() -> ODB {
+    sim: SimVFS = SimVFS()
+    p: Pager = create(sim, 4096)
+    return ODB(sim, p)
+}
+
+def _customers(db: ODB) -> Documents {
+    return db.schema("customers", _schema()).meta(_meta())
+}
+
+def _doc(idv: int, nm: str, em: str, ct: str) -> dict[str, Any] {
+    d: dict[str, Any] = {}
+    d["id"] = idv
+    d["name"] = nm
+    d["email"] = em
+    d["city"] = ct
+    return d
+}
+
+
+class UniqueTest(TestCase) {
+    def test_unique_rejects_duplicate() -> None {
+        db: ODB = _mem()
+        cust: Documents = _customers(db)
+        cust.save(_doc(1, "Ada", "ada@x.com", "Lagos"))
+        raised: bool = False
+        try {
+            cust.save(_doc(2, "Bee", "ada@x.com", "Kano"))    # duplicate email
+        } except IntegrityError {
+            raised = True
+        }
+        self.assertTrue(raised)
+        # The rejected save must have rolled back cleanly: only one document.
+        self.assertEqual(cust.count(), 1)
+    }
+
+    def test_rollback_leaves_db_writable() -> None {
+        # After a rejected write, a following valid write must still commit and
+        # nothing from the rejected write may leak into it.
+        db: ODB = _mem()
+        cust: Documents = _customers(db)
+        cust.save(_doc(1, "Ada", "ada@x.com", "Lagos"))
+        try {
+            cust.save(_doc(2, "Bee", "ada@x.com", "Kano"))
+        } except IntegrityError {
+        }
+        cust.save(_doc(3, "Cy", "cy@x.com", "Abuja"))
+        self.assertEqual(cust.count(), 2)
+        # docid 2 was never persisted; the next save should read back clean.
+        got: Document = cust.read(email="cy@x.com")
+        gnm: str = got["name"]
+        self.assertEqual(gnm, "Cy")
+    }
+}
+
+
+class KeyedReadTest(TestCase) {
+    def test_find_by_unique_and_index() -> None {
+        db: ODB = _mem()
+        cust: Documents = _customers(db)
+        cust.save(_doc(1, "Ada", "ada@x.com", "Lagos"))
+        cust.save(_doc(2, "Bee", "bee@x.com", "Lagos"))
+        cust.save(_doc(3, "Cy", "cy@x.com", "Kano"))
+
+        # unique index lookup
+        u: Document = cust.read(email="bee@x.com")
+        un: str = u["name"]
+        self.assertEqual(un, "Bee")
+
+        # non-unique index lookup returns a matching document
+        c: Document = cust.read(city="Kano")
+        cn: str = c["name"]
+        self.assertEqual(cn, "Cy")
+    }
+
+    def test_find_by_missing_raises() -> None {
+        db: ODB = _mem()
+        cust: Documents = _customers(db)
+        cust.save(_doc(1, "Ada", "ada@x.com", "Lagos"))
+        raised: bool = False
+        try {
+            cust.read(email="nobody@x.com")
+        } except NotFound {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+}
+
+
+class EditWipeIndexTest(TestCase) {
+    def test_edit_moves_index_entry() -> None {
+        db: ODB = _mem()
+        cust: Documents = _customers(db)
+        ada: Document = cust.save(_doc(1, "Ada", "ada@x.com", "Lagos"))
+        ada.edit({email: "ada2@x.com"})
+
+        # new key resolves, old key is gone
+        moved: Document = cust.read(email="ada2@x.com")
+        mn: str = moved["name"]
+        self.assertEqual(mn, "Ada")
+        raised: bool = False
+        try {
+            cust.read(email="ada@x.com")
+        } except NotFound {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+
+    def test_edit_unique_conflict_rolls_back() -> None {
+        db: ODB = _mem()
+        cust: Documents = _customers(db)
+        a: Document = cust.save(_doc(1, "Ada", "ada@x.com", "Lagos"))
+        cust.save(_doc(2, "Bee", "bee@x.com", "Kano"))
+        raised: bool = False
+        try {
+            a.edit({email: "bee@x.com"})    # collides with Bee
+        } except IntegrityError {
+            raised = True
+        }
+        self.assertTrue(raised)
+        # Ada's original email must be intact (edit rolled back).
+        still: Document = cust.read(email="ada@x.com")
+        sn: str = still["name"]
+        self.assertEqual(sn, "Ada")
+    }
+
+    def test_wipe_clears_index() -> None {
+        db: ODB = _mem()
+        cust: Documents = _customers(db)
+        ada: Document = cust.save(_doc(1, "Ada", "ada@x.com", "Lagos"))
+        ada.wipe()
+        raised: bool = False
+        try {
+            cust.read(email="ada@x.com")
+        } except NotFound {
+            raised = True
+        }
+        self.assertTrue(raised)
+        # ... and the unique slot is now free to reuse.
+        cust.save(_doc(2, "Ada2", "ada@x.com", "Kano"))
+        self.assertEqual(cust.count(), 1)
+    }
+
+    def test_pk_is_immutable() -> None {
+        db: ODB = _mem()
+        cust: Documents = _customers(db)
+        ada: Document = cust.save(_doc(1, "Ada", "ada@x.com", "Lagos"))
+        raised: bool = False
+        try {
+            ada.edit({id: 99})
+        } except PrepareError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+}
+
+
+class IndexPersistenceTest(TestCase) {
+    # The per-index roots live in the catalog entry, so a reopen must resolve
+    # keyed reads with no rebuild.
+    def test_reopen_keeps_indexes() -> None {
+        sim: SimVFS = SimVFS()
+        p: Pager = create(sim, 4096)
+        db: ODB = ODB(sim, p)
+        cust: Documents = _customers(db)
+        cust.save(_doc(1, "Ada", "ada@x.com", "Lagos"))
+        cust.save(_doc(2, "Bee", "bee@x.com", "Kano"))
+
+        p2: Pager = open_pager(sim)
+        db2: ODB = ODB(sim, p2)
+        c2: Documents = db2.schema("customers")
+        got: Document = c2.read(email="bee@x.com")
+        gn: str = got["name"]
+        self.assertEqual(gn, "Bee")
+        # a fresh unique write on the reopened db still sees the old claims
+        raised: bool = False
+        try {
+            c2.save(_doc(3, "Cy", "ada@x.com", "Abuja"))
+        } except IntegrityError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+
+    def test_backfill_on_late_meta() -> None {
+        # Attach metadata AFTER documents already exist; the index must be built
+        # over them (spec section 6 free-tier "add index").
+        db: ODB = _mem()
+        plain: Documents = db.schema("customers", _schema())
+        plain.save(_doc(1, "Ada", "ada@x.com", "Lagos"))
+        plain.save(_doc(2, "Bee", "bee@x.com", "Kano"))
+        cust: Documents = db.schema("customers").meta(_meta())
+        got: Document = cust.read(email="bee@x.com")
+        gn: str = got["name"]
+        self.assertEqual(gn, "Bee")
+    }
+}
+
+
+class IndexedCrashTest(TestCase) {
+    # Crash an in-flight indexed save mid-commit; on reopen the count is k or
+    # k+1, every committed doc resolves by its unique email, and the unique
+    # index holds no phantom claim from the interrupted write.
+    def _trial(seed: int) -> bool {
+        sim: SimVFS = SimVFS()
+        p: Pager = create(sim, 4096)
+        db: ODB = ODB(sim, p)
+        cust: Documents = _customers(db)
+
+        rng: Rng = Rng(seed)
+        k: int = rng.below(20)
+        i: int = 0
+        while i < k {
+            cust.save(_doc(i, "n" + str(i), "e" + str(i) + "@x.com", "c" + str(i % 3)))
+            i = i + 1
+        }
+
+        sim.arm(rng.below(20), Rng(seed * 7 + 1))
+        cust.save(_doc(k, "n" + str(k), "e" + str(k) + "@x.com", "c0"))
+
+        p2: Pager = open_pager(sim)
+        db2: ODB = ODB(sim, p2)
+        c2: Documents = db2.schema("customers")
+        cnt: int = c2.count()
+        if cnt != k and cnt != k + 1 {
+            return False
+        }
+        j: int = 0
+        while j < k {
+            doc: Document = c2.read(email="e" + str(j) + "@x.com")
+            nm: str = doc["name"]
+            if nm != "n" + str(j) {
+                return False
+            }
+            j = j + 1
+        }
+        return True
+    }
+
+    def test_crash_during_indexed_writes() -> None {
+        failures: int = 0
+        seed: int = 1
+        while seed <= 40 {
+            if not self._trial(seed) {
+                failures = failures + 1
+            }
+            seed = seed + 1
+        }
+        self.assertEqual(failures, 0)
+    }
+}
+
+
+class CompositePkTest(TestCase) {
+    # A composite primary key: identity and uniqueness over (id, eid) together.
+    def _cpk_schema() -> dict[str, Any] {
+        props: dict[str, Any] = {}
+        props["id"] = {"type": "integer"}
+        props["eid"] = {"type": "integer"}
+        props["name"] = {"type": "string"}
+        req: list[Any] = ["id", "eid", "name"]
+        s: dict[str, Any] = {}
+        s["type"] = "object"
+        s["properties"] = props
+        s["required"] = req
+        return s
+    }
+
+    def _cpk_meta() -> dict[str, Any] {
+        pk: list[Any] = ["id", "eid"]
+        m: dict[str, Any] = {}
+        m["primary"] = pk
+        return m
+    }
+
+    def _row(idv: int, eid: int, nm: str) -> dict[str, Any] {
+        d: dict[str, Any] = {}
+        d["id"] = idv
+        d["eid"] = eid
+        d["name"] = nm
+        return d
+    }
+
+    def test_composite_pk() -> None {
+        db: ODB = _mem()
+        t: Documents = db.schema("parts", self._cpk_schema()).meta(self._cpk_meta())
+        # Same id, different eid: distinct under a composite pk.
+        t.save(self._row(1, 1, "a"))
+        t.save(self._row(1, 2, "b"))
+        self.assertEqual(t.count(), 2)
+
+        # Exact composite duplicate is rejected.
+        dup: bool = False
+        try {
+            t.save(self._row(1, 2, "c"))
+        } except IntegrityError {
+            dup = True
+        }
+        self.assertTrue(dup)
+
+        # Composite keyword read resolves the right document.
+        got: Document = t.read(id=1, eid=2)
+        gn: str = got["name"]
+        self.assertEqual(gn, "b")
+
+        # A missing composite raises NotFound.
+        miss: bool = False
+        try {
+            t.read(id=1, eid=99)
+        } except NotFound {
+            miss = True
+        }
+        self.assertTrue(miss)
+
+        # Any pk component is immutable; a non-pk field still edits.
+        row: Document = t.read(id=1, eid=1)
+        locked: bool = False
+        try {
+            row.edit({eid: 5})
+        } except PrepareError {
+            locked = True
+        }
+        self.assertTrue(locked)
+        row.edit({name: "a2"})
+        again: Document = t.read(id=1, eid=1)
+        an: str = again["name"]
+        self.assertEqual(an, "a2")
+    }
+}
+
+
+main([
+    UniqueTest(),
+    KeyedReadTest(),
+    EditWipeIndexTest(),
+    IndexPersistenceTest(),
+    CompositePkTest(),
+    IndexedCrashTest(),
+])

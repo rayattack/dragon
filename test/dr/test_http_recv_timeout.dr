@@ -32,14 +32,14 @@ class _Probe {
 # it timed out (empty result) and how long it waited.
 def _recv_once(lis: TcpListener, probe: _Probe, timeout_ms: int) -> None {
     const conn: TcpStream = lis.do_accept()
-    const reader: FdReader = FdReader(SocketHandle.adopt_raw(conn.fd))
+    const reader: FdReader = FdReader(own conn)
     const t0: float = monotonic()
     const data: bytes = reader.recv_timeout(4096, timeout_ms)
     const t1: float = monotonic()
     probe.elapsed_ms = (t1 - t0) * 1000.0
     probe.timed_out = len(data) == 0
     probe.got = data.decode("utf-8")
-    conn.close()
+    reader.close()
 }
 
 # A handler that should never run for a stalled mid-body request (the framer
@@ -52,7 +52,7 @@ def _never(req: Request, res: Response, ctx: Context) -> None {
 # timeout, so a stalled mid-body client is dropped by serve_connection itself.
 def _serve_once(lis: TcpListener, app: Router) -> None {
     const conn: TcpStream = lis.do_accept()
-    app.serve_connection(FdReader(SocketHandle.adopt_raw(conn.fd)))
+    app.serve_connection(FdReader(own conn))
 }
 
 

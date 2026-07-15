@@ -1,0 +1,217 @@
+# ODB M3 regression suite: the ODB / Documents / Document handle API - schema
+# definition, save/read/edit/wipe, reopen persistence, validation, and a
+# database-level crash-recovery proof.
+#
+# JSON Schema definitions use quoted keys (they are JSON, and `type` is a Dragon
+# keyword). Document data uses bare-key literals (those keys are not keywords).
+
+from unittest import TestCase, main
+from odb import ODB, Documents, Document, connect
+from odb.vfs import SimVFS
+from odb.pager import create, open_pager, Pager
+from odb.rng import Rng
+from odb.errors import NotFound, SchemaError
+from tempfile import mktemp
+
+
+def _schema() -> dict[str, Any] {
+    return { "type": "object",
+             "properties": { "id": {"type": "integer"},
+                             "name": {"type": "string"},
+                             "city": {"type": "string"} },
+             "required": ["id", "name"] }
+}
+
+def _mem() -> ODB {
+    sim: SimVFS = SimVFS()
+    p: Pager = create(sim, 4096)
+    return ODB(sim, p)
+}
+
+def _customers(db: ODB) -> Documents {
+    return db.schema("customers", _schema())
+}
+
+
+class CrudTest(TestCase) {
+    def test_save_read_edit_wipe() -> None {
+        db: ODB = _mem()
+        cust: Documents = _customers(db)
+
+        ada: Document = cust.save({id: 1, name: "Ada", city: "Lagos"})
+        self.assertTrue(ada.id > 0)
+        anm: str = ada["name"]
+        self.assertEqual(anm, "Ada")
+
+        # edit the Document in place
+        ada.edit({city: "Abuja"})
+        acity: str = ada["city"]
+        self.assertEqual(acity, "Abuja")
+
+        # read by _id
+        got: Document = cust.read(ada.id)
+        gnm: str = got["name"]
+        gcity: str = got["city"]
+        self.assertEqual(gnm, "Ada")
+        self.assertEqual(gcity, "Abuja")
+
+        # wipe the Document
+        ada.wipe()
+        self.assertEqual(cust.count(), 0)
+    }
+
+    def test_read_missing_raises() -> None {
+        db: ODB = _mem()
+        cust: Documents = _customers(db)
+        raised: bool = False
+        try {
+            cust.read(999)
+        } except NotFound {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+
+    def test_meta_chains() -> None {
+        db: ODB = _mem()
+        # primary + unique must name REQUIRED fields (spec section 7); "id" and
+        # "name" are both required in _schema().
+        prim: list[Any] = ["id"]
+        uniq: list[Any] = ["name"]
+        m: dict[str, Any] = {}
+        m["primary"] = prim
+        m["unique"] = uniq
+        cust: Documents = db.schema("customers", _schema()).meta(m)
+        cust.save({id: 1, name: "Zed"})
+        self.assertEqual(cust.count(), 1)
+    }
+
+    def test_all_scan() -> None {
+        db: ODB = _mem()
+        cust: Documents = _customers(db)
+        i: int = 0
+        while i < 50 {
+            cust.save({id: i, name: "n" + str(i), city: "c"})
+            i = i + 1
+        }
+        rows: list[Document] = cust.all()
+        self.assertEqual(len(rows), 50)
+    }
+
+    def test_validation_at_save() -> None {
+        db: ODB = _mem()
+        cust: Documents = _customers(db)
+        bad: dict[str, Any] = {}
+        bad["id"] = 1
+        # missing required "name"
+        raised: bool = False
+        try {
+            cust.save(bad)
+        } except SchemaError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+}
+
+
+class PersistenceTest(TestCase) {
+    # Reopen the in-memory disk into a fresh ODB: schema, data, and the docid
+    # counter all survive, no real file involved.
+    def test_reopen_sim() -> None {
+        sim: SimVFS = SimVFS()
+        p: Pager = create(sim, 4096)
+        db: ODB = ODB(sim, p)
+        cust: Documents = _customers(db)
+        r: Document = cust.save({id: 1, name: "Zed", city: "Kano"})
+        docid: int = r.id
+        before: int = cust.count()
+
+        p2: Pager = open_pager(sim)
+        db2: ODB = ODB(sim, p2)
+        c2: Documents = db2.schema("customers")
+        self.assertEqual(c2.count(), before)
+        got: Document = c2.read(docid)
+        gnm: str = got["name"]
+        self.assertEqual(gnm, "Zed")
+        # docid counter persisted -> next save gets a larger id
+        r2: Document = c2.save({id: 2, name: "Yaa"})
+        self.assertTrue(r2.id > docid)
+    }
+
+    # A real on-disk .odb file round-trips through ODB()/close/connect().
+    def test_connect_file_roundtrip() -> None {
+        path: str = mktemp("odb_m3_", ".odb")
+        db: ODB = ODB(path)
+        cust: Documents = _customers(db)
+        r: Document = cust.save({id: 1, name: "Zed", city: "Kano"})
+        docid: int = r.id
+        db.close()
+
+        db2: ODB = connect(path)
+        c2: Documents = db2.schema("customers")
+        got: Document = c2.read(docid)
+        gnm: str = got["name"]
+        self.assertEqual(gnm, "Zed")
+        db2.close()
+    }
+}
+
+
+class DbCrashTest(TestCase) {
+    def _trial(seed: int) -> bool {
+        sim: SimVFS = SimVFS()
+        p: Pager = create(sim, 4096)
+        db: ODB = ODB(sim, p)
+        cust: Documents = _customers(db)
+
+        rng: Rng = Rng(seed)
+        k: int = rng.below(24)
+        ids: list[int] = []
+        i: int = 0
+        while i < k {
+            r: Document = cust.save({id: i, name: "n" + str(i), city: "c"})
+            ids.append(r.id)
+            i = i + 1
+        }
+
+        # In-flight save, crashing mid-commit.
+        sim.arm(rng.below(18), Rng(seed * 7 + 1))
+        cust.save({id: k, name: "n" + str(k), city: "c"})
+
+        # Reopen and verify: count is k or k+1, and every committed doc is
+        # readable with the right value (read raises on missing/corrupt).
+        p2: Pager = open_pager(sim)
+        db2: ODB = ODB(sim, p2)
+        c2: Documents = db2.schema("customers")
+        cnt: int = c2.count()
+        if cnt != k and cnt != k + 1 {
+            return False
+        }
+        j: int = 0
+        while j < k {
+            doc: Document = c2.read(ids[j])
+            nm: str = doc["name"]
+            if nm != "n" + str(j) {
+                return False
+            }
+            j = j + 1
+        }
+        return True
+    }
+
+    def test_crash_during_writes() -> None {
+        failures: int = 0
+        seed: int = 1
+        while seed <= 60 {
+            if not self._trial(seed) {
+                failures = failures + 1
+            }
+            seed = seed + 1
+        }
+        self.assertEqual(failures, 0)
+    }
+}
+
+
+main([CrudTest(), PersistenceTest(), DbCrashTest()])

@@ -1,0 +1,100 @@
+"""Whole-module `str ==` miscompile via a stale list-element class name (2026-07-14).
+
+You did nothing wrong. This tokenizer line is ordinary, correct Dragon:
+
+    if src[i] == "=" { ... }        # src: str
+
+`src[i]` mints a fresh 1-char string and `== "="` should compare its VALUE.
+It does - UNTIL another module in the same compile graph happens to declare a
+same-named parameter typed as a list of a class:
+
+    def copy_freelist(src: list[FreeEntry]) -> ...   # elsewhere
+
+Codegen tracks list-element class names in a program-wide map keyed by the bare
+parameter name (`src`), and never clears it per function. So `src -> FreeEntry`
+leaked into the tokenizer's `src: str`, and `resolveExprClassName(src[i])`
+handed back `FreeEntry`. The `==` then took the class-instance `__eq__` path -
+raw pointer identity (`icmp eq ptr`) - instead of `dragon_str_eq`. Two distinct
+heap strings never share an address, so `src[i] == "="` was ALWAYS false.
+
+WHEN it bit: only under whole-module compilation that pulled the polluting
+module in (`from odb import ODB`). The identical tokenizer compiled in isolation
+was correct - the answer depended on what ELSE was compiled. WHY it was nasty:
+no crash, no diagnostic, just a silently wrong comparison (a `>=` operator that
+never formed, then an "unexpected character '='").
+
+Fix: `resolveExprClassName`'s subscript path now consults the receiver's own
+resolved type first (D030: the static type is the truth). A concrete receiver
+that is not a `list[Instance]` - here a plain `str` - means the map entry is a
+stale same-name collision and is ignored. BEFORE: count_eq -> 0. AFTER: 3.
+"""
+
+from unittest import TestCase, main
+
+
+class FreeEntry {
+    def(page: int) {
+        self.page: int = page
+    }
+}
+
+
+# Same-named `src` param typed list[<class>]: leaves a program-wide
+# varListElemClassName["src"] = FreeEntry entry that must NOT bleed below.
+def copy_freelist(src: list[FreeEntry]) -> int {
+    return len(src)
+}
+
+
+# `src: str` here - `src[i] == "="` must value-compare, not inherit FreeEntry's
+# instance pointer-identity __eq__.
+def count_eq(src: str) -> int {
+    n: int = 0
+    i: int = 0
+    while i < len(src) {
+        if src[i] == "=" {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+
+# Two-char operator formation is the exact odb.oql tokenizer shape that broke:
+# `>=` only forms when `src[i + 1] == "="` value-compares correctly.
+def count_ge(src: str) -> int {
+    n: int = 0
+    i: int = 0
+    m: int = len(src)
+    while i < m {
+        if src[i] == ">" and i + 1 < m and src[i + 1] == "=" {
+            n = n + 1
+            i = i + 2
+            continue
+        }
+        i = i + 1
+    }
+    return n
+}
+
+
+class StrEqElemClassCollisionTests(TestCase) {
+    def test_list_class_param_does_not_poison_str_eq() {
+        # Exercise the polluter first so its element-class entry exists.
+        fl: list[FreeEntry] = [FreeEntry(1), FreeEntry(2)]
+        self.assertEqual(copy_freelist(fl), 2)
+        # "a >= b == c" holds three '=' characters.
+        self.assertEqual(count_eq("a >= b == c"), 3)
+    }
+
+    def test_two_char_operator_forms() {
+        fl: list[FreeEntry] = [FreeEntry(9)]
+        self.assertEqual(copy_freelist(fl), 1)
+        # ">=" appears twice; a lone ">" must not count.
+        self.assertEqual(count_ge("a >= b >= c > d"), 2)
+    }
+}
+
+
+main([StrEqElemClassCollisionTests()])

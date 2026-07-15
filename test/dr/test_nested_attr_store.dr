@@ -1,0 +1,115 @@
+# A store through a nested attribute path (obj.field.sub = v) must land on
+# the one shared object, exactly like the single-level store does. This was
+# silently dropped by codegen: reads and aliasing worked, the write vanished.
+#
+# You did nothing wrong if you wrote:
+#
+#   self.pager.log_tail = pgid       # ordinary, correct-looking Dragon
+#
+# Before the fix the assignment compiled, ran, and changed nothing - state
+# went stale with no error anywhere. After the fix the write lands.
+
+from unittest import TestCase, main
+
+
+class Inner {
+    a: int
+    b: int
+    tags: dict[int, bytes]
+    names: list[str]
+
+    def() {
+        self.a = 1
+        self.b = 2
+        self.tags = {}
+        self.names = ["x"]
+    }
+}
+
+class Middle {
+    inner: Inner
+
+    def(x: Inner) {
+        self.inner = x
+    }
+}
+
+class Outer {
+    mid: Middle
+
+    def(m: Middle) {
+        self.mid = m
+    }
+
+    def poke_two_level(v: int) -> None {
+        self.mid.inner.a = v
+    }
+}
+
+
+class NestedAttrStoreTest(TestCase) {
+    # obj.field.sub = literal, from outside any method.
+    def test_two_level_store_outside() -> None {
+        x: Inner = Inner()
+        m: Middle = Middle(x)
+        m.inner.a = 123
+        self.assertEqual(m.inner.a, 123)
+        self.assertEqual(x.a, 123)          # same object, not a copy
+    }
+
+    # obj.field.sub = indexed rvalue, inside a method (self.x.y = v[i]).
+    def test_two_level_store_in_method() -> None {
+        x: Inner = Inner()
+        m: Middle = Middle(x)
+        vals: list[int] = [99]
+        m.inner.b = vals[0]
+        self.assertEqual(x.b, 99)
+    }
+
+    # three levels deep, through self.
+    def test_three_level_store() -> None {
+        x: Inner = Inner()
+        o: Outer = Outer(Middle(x))
+        o.poke_two_level(55)
+        self.assertEqual(x.a, 55)
+        o.mid.inner.b = 66
+        self.assertEqual(x.b, 66)
+    }
+
+    # compound target: read-modify-write through the nested path.
+    def test_compound_assign() -> None {
+        x: Inner = Inner()
+        m: Middle = Middle(x)
+        m.inner.a = m.inner.a + 10
+        self.assertEqual(x.a, 11)
+    }
+
+    # container-field stores through the nested path: dict and list subscript
+    # targets whose base is an attribute chain.
+    def test_container_store_through_chain() -> None {
+        x: Inner = Inner()
+        m: Middle = Middle(x)
+        m.inner.tags[7] = bytes([1, 2, 3])
+        self.assertEqual(len(x.tags), 1)
+        got: bytes = x.tags[7]
+        self.assertEqual(got[2], 3)
+        m.inner.names[0] = "changed"
+        self.assertEqual(x.names[0], "changed")
+    }
+
+    # augmented assignment through the nested path.
+    def test_aug_assign() -> None {
+        x: Inner = Inner()
+        m: Middle = Middle(x)
+        m.inner.a += 5
+        self.assertEqual(x.a, 6)
+        m.inner.a -= 2
+        self.assertEqual(x.a, 4)
+        o: Outer = Outer(m)
+        o.mid.inner.b *= 10
+        self.assertEqual(x.b, 20)
+    }
+}
+
+
+main([NestedAttrStoreTest()])

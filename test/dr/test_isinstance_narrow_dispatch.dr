@@ -1,0 +1,75 @@
+"""isinstance class-arm narrowing dispatches to the narrowed class's method.
+
+You write ordinary, correct-looking Dragon:
+
+    def paint(tool: Pen | str) -> str {
+        if isinstance(tool, Pen) {
+            return tool.stroke(3)     # tool is a Pen here
+        }
+        return "str:" + tool
+    }
+
+Inside the `if isinstance(tool, Pen)` arm, `tool` is a Pen. But codegen used to
+record only the narrowed *kind* (a class instance), not the narrowed class
+*name*. So `tool.stroke(3)` fell to the "class unknown" vtable path, which
+guessed the callee by scanning every class for a method named `stroke` (in
+hash-table order) and using the first one's signature. With an unrelated
+`Brush.stroke()` of a DIFFERENT arity compiled in, it could pick the wrong
+signature and emit a malformed indirect call (LLVM "Incorrect number of
+arguments") or dispatch to the wrong class.
+
+Now the narrowed class name is recorded for the branch, so the call dispatches
+DIRECTLY to Pen.stroke - correct regardless of what other classes exist. This
+asserts on VALUES: the narrowed call returns Pen's result, not Brush's.
+"""
+
+from unittest import TestCase, main
+
+
+class Pen {
+    def stroke(width: int) -> str {
+        return "pen:" + str(width)
+    }
+}
+
+
+class Brush {
+    # Same method name, DIFFERENT arity (0 vs 1) - the arbitrary-guess trap.
+    def stroke() -> str {
+        return "brush"
+    }
+}
+
+
+def paint(tool: Pen | str) -> str {
+    if isinstance(tool, Pen) {
+        return tool.stroke(3)          # must be Pen.stroke(int), never Brush.stroke()
+    }
+    return "str:" + tool
+}
+
+
+# Reference Brush so its (conflicting) stroke is compiled in - this is what made
+# the old guess ambiguous. Also confirms Brush.stroke itself still dispatches.
+def brush_mark() -> str {
+    b: Brush = Brush()
+    return b.stroke()
+}
+
+
+class NarrowDispatchTests(TestCase) {
+    def test_narrow_class_arm_dispatches_to_narrowed_class() {
+        self.assertEqual(paint(Pen()), "pen:3")
+    }
+
+    def test_narrow_str_arm() {
+        self.assertEqual(paint("hi"), "str:hi")
+    }
+
+    def test_conflicting_same_name_method_unaffected() {
+        self.assertEqual(brush_mark(), "brush")
+    }
+}
+
+
+main([NarrowDispatchTests()])

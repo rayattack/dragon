@@ -1,0 +1,177 @@
+# ODB M5.4 regression suite: OQL nested ref joins. N:1 forward refs nest a
+# single object (via the target's unique index), 1:N reverse refs nest an array
+# (via the auto-maintained reverse index), nested filters prune the array, and
+# semijoin (+) / antijoin (-) constrain the parent row set by existence.
+
+from unittest import TestCase, main
+from odb import ODB, Documents, Document
+from odb.vfs import SimVFS
+from odb.pager import create, Pager
+from odb.errors import PrepareError
+
+
+def _customers_schema() -> dict[str, Any] {
+    props: dict[str, Any] = {}
+    props["id"] = {"type": "integer"}
+    props["name"] = {"type": "string"}
+    props["city"] = {"type": "string"}
+    req: list[Any] = ["id", "name", "city"]
+    s: dict[str, Any] = {}
+    s["type"] = "object"
+    s["properties"] = props
+    s["required"] = req
+    return s
+}
+
+def _orders_schema() -> dict[str, Any] {
+    props: dict[str, Any] = {}
+    props["id"] = {"type": "integer"}
+    props["customer_id"] = {"type": "integer"}
+    props["total"] = {"type": "integer"}
+    props["status"] = {"type": "string"}
+    req: list[Any] = ["id", "customer_id", "total", "status"]
+    s: dict[str, Any] = {}
+    s["type"] = "object"
+    s["properties"] = props
+    s["required"] = req
+    return s
+}
+
+def _orders_meta() -> dict[str, Any] {
+    pk: list[Any] = ["id"]
+    ref_spec: dict[str, Any] = {}
+    ref_spec["to"] = "customers.id"
+    ref_spec["on_delete"] = "restrict"
+    refs: dict[str, Any] = {}
+    refs["customer_id"] = ref_spec
+    m: dict[str, Any] = {}
+    m["primary"] = pk
+    m["refs"] = refs
+    return m
+}
+
+def _pk_meta() -> dict[str, Any] {
+    pk: list[Any] = ["id"]
+    m: dict[str, Any] = {}
+    m["primary"] = pk
+    return m
+}
+
+def _cust(idv: int, name: str, city: str) -> dict[str, Any] {
+    d: dict[str, Any] = {}
+    d["id"] = idv
+    d["name"] = name
+    d["city"] = city
+    return d
+}
+
+def _order(idv: int, cid: int, total: int, status: str) -> dict[str, Any] {
+    d: dict[str, Any] = {}
+    d["id"] = idv
+    d["customer_id"] = cid
+    d["total"] = total
+    d["status"] = status
+    return d
+}
+
+def _db() -> ODB {
+    sim: SimVFS = SimVFS()
+    p: Pager = create(sim, 4096)
+    db: ODB = ODB(sim, p)
+    customers: Documents = db.schema("customers", _customers_schema()).meta(_pk_meta())
+    orders: Documents = db.schema("orders", _orders_schema()).meta(_orders_meta())
+    customers.save(_cust(1, "Ada", "Lagos"))
+    customers.save(_cust(2, "Bee", "Kano"))
+    customers.save(_cust(3, "Cy", "Lagos"))          # no orders
+    orders.save(_order(10, 1, 100, "paid"))
+    orders.save(_order(11, 1, 50, "draft"))
+    orders.save(_order(12, 2, 200, "paid"))
+    return db
+}
+
+
+class ForwardRefTest(TestCase) {
+    # orders -> customer (N:1): each order nests its customer object.
+    def test_n_to_1_object_nest() -> None {
+        db: ODB = _db()
+        rows: list[Document] = db.find("orders { id, total, customer { name, city } }")
+        self.assertEqual(len(rows), 3)
+        cust0: dict[str, Any] = rows[0]["customer"]     # order 10 -> Ada
+        n0: str = cust0["name"]
+        c0: str = cust0["city"]
+        self.assertEqual(n0, "Ada")
+        self.assertEqual(c0, "Lagos")
+        cust2: dict[str, Any] = rows[2]["customer"]     # order 12 -> Bee
+        n2: str = cust2["name"]
+        self.assertEqual(n2, "Bee")
+    }
+}
+
+
+class ReverseRefTest(TestCase) {
+    # customers -> orders (1:N): each customer nests its orders array.
+    def test_1_to_n_array_nest() -> None {
+        db: ODB = _db()
+        rows: list[Document] = db.find("customers { name, orders { id, total } }")
+        self.assertEqual(len(rows), 3)
+        ada_orders: list[Any] = rows[0]["orders"]       # Ada has 2
+        bee_orders: list[Any] = rows[1]["orders"]       # Bee has 1
+        cy_orders: list[Any] = rows[2]["orders"]        # Cy has 0
+        self.assertEqual(len(ada_orders), 2)
+        self.assertEqual(len(bee_orders), 1)
+        self.assertEqual(len(cy_orders), 0)
+        first: dict[str, Any] = ada_orders[0]
+        ft: int = first["total"]
+        self.assertEqual(ft, 100)
+    }
+
+    def test_nested_filter_prunes_array() -> None {
+        db: ODB = _db()
+        rows: list[Document] = db.find("customers { name, orders ? status == \"paid\" { id } }")
+        ada_paid: list[Any] = rows[0]["orders"]         # only order 10
+        bee_paid: list[Any] = rows[1]["orders"]         # only order 12
+        self.assertEqual(len(ada_paid), 1)
+        self.assertEqual(len(bee_paid), 1)
+    }
+}
+
+
+class ExistenceJoinTest(TestCase) {
+    def test_semijoin() -> None {
+        db: ODB = _db()
+        rows: list[Document] = db.find("customers + orders { name }")
+        self.assertEqual(len(rows), 2)                  # Ada, Bee (not Cy)
+    }
+
+    def test_antijoin() -> None {
+        db: ODB = _db()
+        rows: list[Document] = db.find("customers - orders { name }")
+        self.assertEqual(len(rows), 1)                  # only Cy
+        n: str = rows[0]["name"]
+        self.assertEqual(n, "Cy")
+    }
+
+    def test_semijoin_with_condition() -> None {
+        db: ODB = _db()
+        rows: list[Document] = db.find("customers + (orders ? status == \"paid\") { name }")
+        self.assertEqual(len(rows), 2)                  # Ada (10), Bee (12)
+    }
+
+    def test_unknown_relationship_rejected() -> None {
+        db: ODB = _db()
+        raised: bool = False
+        try {
+            db.find("customers { name, widgets { id } }")
+        } except PrepareError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+}
+
+
+main([
+    ForwardRefTest(),
+    ReverseRefTest(),
+    ExistenceJoinTest(),
+])

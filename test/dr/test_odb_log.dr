@@ -1,0 +1,310 @@
+# ODB M8 regression suite: the commit log (spec section 17). Every commit
+# appends one logical entry; entries survive reopen; retention trims and the
+# trimmed pages cycle back through the free list; a crash mid-commit never
+# tears the log (the entry becomes visible exactly when the meta flips).
+
+from unittest import TestCase, main
+from odb import ODB, Documents, Document, Change
+from odb.vfs import SimVFS, sim_crash
+from odb.pager import create, open_pager, Pager, RETAIN_NONE
+from odb.rng import Rng
+from odb.errors import ODBError
+
+
+def _schema() -> dict[str, Any] {
+    return { "type": "object",
+             "properties": { "id": {"type": "integer"},
+                             "name": {"type": "string"},
+                             "notes": {"type": "string"} },
+             "required": ["id", "name"] }
+}
+
+def _mem() -> ODB {
+    sim: SimVFS = SimVFS()
+    p: Pager = create(sim, 4096)
+    return ODB(sim, p)
+}
+
+
+class LogFeedTest(TestCase) {
+    # Every write kind lands in the feed with the right kind, docid, pk, and
+    # post-image; the define op records the DDL too.
+    def test_ops_recorded() -> None {
+        db: ODB = _mem()
+        items: Documents = db.schema("items", _schema()).meta({primary: ["id"]})
+        r: Document = items.save({id: 7, name: "bolt"})
+        items.edit(r.id, {name: "nut"})
+        items.wipe(r.id)
+
+        chs: list[Change] = db.changes(0)
+        # define (schema), define (meta), add, set, del
+        self.assertEqual(len(chs), 5)
+        self.assertEqual(chs[0].kind, "define")
+        self.assertEqual(chs[1].kind, "define")
+        self.assertEqual(chs[2].kind, "add")
+        self.assertEqual(chs[3].kind, "set")
+        self.assertEqual(chs[4].kind, "del")
+
+        add: Change = chs[2]
+        self.assertEqual(add.schema, "items")
+        self.assertEqual(add.docid, r.id)
+        nm: str = add.doc["name"]
+        self.assertEqual(nm, "bolt")
+        pk_any: Any = add.pk()
+        self.assertTrue(isinstance(pk_any, int))
+
+        st: Change = chs[3]
+        nm2: str = st.doc["name"]
+        self.assertEqual(nm2, "nut")
+
+        dl: Change = chs[4]
+        self.assertEqual(dl.docid, r.id)
+        self.assertEqual(len(dl.doc), 0)
+
+        # CSNs are strictly increasing along the feed.
+        i: int = 1
+        while i < len(chs) {
+            self.assertTrue(chs[i].csn >= chs[i - 1].csn)
+            i = i + 1
+        }
+    }
+
+    # changes(since) resumes exactly after a CSN.
+    def test_since_resumes() -> None {
+        db: ODB = _mem()
+        items: Documents = db.schema("items", _schema())
+        items.save({id: 1, name: "a"})
+        mark: int = db.pager.last_csn
+        items.save({id: 2, name: "b"})
+
+        tail: list[Change] = db.changes(mark)
+        self.assertEqual(len(tail), 1)
+        self.assertEqual(tail[0].kind, "add")
+        nm: str = tail[0].doc["name"]
+        self.assertEqual(nm, "b")
+    }
+
+    # The log survives reopen: same feed from the reopened file.
+    def test_reopen_keeps_log() -> None {
+        sim: SimVFS = SimVFS()
+        p: Pager = create(sim, 4096)
+        db: ODB = ODB(sim, p)
+        items: Documents = db.schema("items", _schema())
+        items.save({id: 1, name: "a"})
+        items.save({id: 2, name: "b"})
+        n: int = len(db.changes(0))
+
+        p2: Pager = open_pager(sim)
+        db2: ODB = ODB(sim, p2)
+        chs: list[Change] = db2.changes(0)
+        self.assertEqual(len(chs), n)
+        last: Change = chs[len(chs) - 1]
+        nm: str = last.doc["name"]
+        self.assertEqual(nm, "b")
+    }
+
+    # An entry larger than one page (an atomic batch of documents) round-trips
+    # intact through the intra-entry page chain.
+    def test_multipage_entry() -> None {
+        db: ODB = _mem()
+        items: Documents = db.schema("items", _schema())
+        pieces: list[str] = []
+        i: int = 0
+        while i < 80 {
+            pieces.append("abcdefgh")
+            i = i + 1
+        }
+        note: str = "".join(pieces)    # ~640 bytes per doc, inline-friendly
+        stmts: list[str] = []
+        stmts.append("atomic {")
+        i = 0
+        while i < 10 {
+            stmts.append("add items { id: " + str(i) + ", name: \"n" + str(i) + "\", notes: \"" + note + "\" }")
+            i = i + 1
+        }
+        stmts.append("}")
+        db.run("\n".join(stmts))       # ONE txn: ~6.4 KiB entry > one 4 KiB page
+
+        chs: list[Change] = db.changes(0)
+        adds: int = 0
+        for ch in chs {
+            if ch.kind == "add" {
+                got: str = ch.doc["notes"]
+                self.assertEqual(got, note)
+                adds = adds + 1
+            }
+        }
+        self.assertEqual(adds, 10)
+        # all ten adds share one entry, so one CSN
+        self.assertEqual(chs[len(chs) - 1].csn, chs[len(chs) - 2].csn)
+    }
+}
+
+
+class RetentionTest(TestCase) {
+    # `retain <n> txns` keeps exactly the newest n entries; older ones trim.
+    def test_txn_window_trims() -> None {
+        db: ODB = _mem()
+        db.retain("3 txns")
+        items: Documents = db.schema("items", _schema())
+        i: int = 0
+        while i < 8 {
+            items.save({id: i, name: "n" + str(i)})
+            i = i + 1
+        }
+        chs: list[Change] = db.changes(0)
+        self.assertEqual(len(chs), 3)
+        # the retained tail is the newest three adds
+        nm: str = chs[2].doc["name"]
+        self.assertEqual(nm, "n7")
+    }
+
+    # The retention policy persists in the meta page across reopen.
+    def test_policy_survives_reopen() -> None {
+        sim: SimVFS = SimVFS()
+        p: Pager = create(sim, 4096)
+        db: ODB = ODB(sim, p)
+        db.retain("2 txns")
+        items: Documents = db.schema("items", _schema())
+        i: int = 0
+        while i < 5 {
+            items.save({id: i, name: "x"})
+            i = i + 1
+        }
+
+        p2: Pager = open_pager(sim)
+        db2: ODB = ODB(sim, p2)
+        self.assertEqual(len(db2.changes(0)), 2)
+        # and the reopened writer keeps trimming at 2
+        it2: Documents = db2.schema("items")
+        it2.save({id: 100, name: "y"})
+        self.assertEqual(len(db2.changes(0)), 2)
+    }
+
+    # retain none writes no history at all.
+    def test_retain_none() -> None {
+        db: ODB = _mem()
+        db.retain("none")
+        items: Documents = db.schema("items", _schema())
+        items.save({id: 1, name: "a"})
+        self.assertEqual(len(db.changes(0)), 0)
+        self.assertEqual(db.pager.log_tail, 0)
+    }
+
+    # Switching to a smaller window trims immediately.
+    def test_shrink_trims_now() -> None {
+        db: ODB = _mem()
+        items: Documents = db.schema("items", _schema())
+        i: int = 0
+        while i < 6 {
+            items.save({id: i, name: "x"})
+            i = i + 1
+        }
+        before: int = len(db.changes(0))
+        self.assertTrue(before > 4)
+        db.retain("1 txns")
+        self.assertEqual(len(db.changes(0)), 1)
+    }
+
+    # A bad retain spec is rejected loudly.
+    def test_bad_spec_raises() -> None {
+        db: ODB = _mem()
+        raised: bool = False
+        try {
+            db.retain("sometimes")
+        } except ODBError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+
+    # Trimmed log pages cycle back through the free list: heavy churn under a
+    # small window must not grow the file without bound.
+    def test_trimmed_pages_recycle() -> None {
+        sim: SimVFS = SimVFS()
+        p: Pager = create(sim, 4096)
+        db: ODB = ODB(sim, p)
+        db.retain("2 txns")
+        items: Documents = db.schema("items", _schema())
+        r: Document = items.save({id: 1, name: "seed"})
+        i: int = 0
+        while i < 40 {
+            items.edit(r.id, {name: "v" + str(i)})
+            i = i + 1
+        }
+        hw1: int = db.pager.high_water
+        i = 0
+        while i < 200 {
+            items.edit(r.id, {name: "w" + str(i)})
+            i = i + 1
+        }
+        hw2: int = db.pager.high_water
+        # 200 further edits reuse freed pages; the file grows marginally if at
+        # all once the steady state is reached.
+        self.assertTrue(hw2 - hw1 < 40)
+    }
+}
+
+
+class LogCrashTest(TestCase) {
+    # Crash at a random I/O boundary mid-commit, reopen, and require: the doc
+    # state and the log tail agree (both old or both new), and the retained
+    # chain reads back cleanly. The log must never tear.
+    def _trial(seed: int) -> bool {
+        sim: SimVFS = SimVFS()
+        p: Pager = create(sim, 4096)
+        db: ODB = ODB(sim, p)
+        items: Documents = db.schema("items", _schema())
+        rng: Rng = Rng(seed)
+        k: int = 2 + rng.below(6)
+        i: int = 0
+        while i < k {
+            items.save({id: i, name: "n" + str(i)})
+            i = i + 1
+        }
+
+        sim.arm(rng.below(20), Rng(seed * 13 + 5))
+        crashed: bool = False
+        try {
+            items.save({id: k, name: "n" + str(k)})
+        } except Exception {
+            crashed = True
+        }
+
+        v2: SimVFS = sim_crash(sim, Rng(seed * 31 + 7), True)
+        p2: Pager = open_pager(v2)
+        db2: ODB = ODB(v2, p2)
+        it2: Documents = db2.schema("items")
+        n_docs: int = it2.count()
+        if n_docs != k and n_docs != k + 1 {
+            return False
+        }
+
+        # the feed decodes cleanly and its adds equal the visible docs
+        adds: int = 0
+        for ch in db2.changes(0) {
+            if ch.kind == "add" {
+                adds = adds + 1
+            }
+        }
+        if adds != n_docs {
+            return False
+        }
+        return db2.check().ok
+    }
+
+    def test_crash_never_tears_log() -> None {
+        failures: int = 0
+        seed: int = 1
+        while seed <= 40 {
+            if not self._trial(seed) {
+                failures = failures + 1
+            }
+            seed = seed + 1
+        }
+        self.assertEqual(failures, 0)
+    }
+}
+
+
+main([LogFeedTest(), RetentionTest(), LogCrashTest()])

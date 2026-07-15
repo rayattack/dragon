@@ -1,0 +1,351 @@
+# ODB M4(d) regression suite: referential integrity. Forward checks probe the
+# target's unique index; a reverse index (target docid -> referrer docid) is
+# auto-maintained and powers on_delete restrict/cascade and (later) reverse
+# traversal. All integrity is enforced during the write and rolls back on
+# violation. Includes a self-referential cascade and a crash-recovery proof.
+
+from unittest import TestCase, main
+from odb import ODB, Documents, Document, connect
+from odb.vfs import SimVFS
+from odb.pager import create, open_pager, Pager
+from odb.rng import Rng
+from odb.errors import NotFound, IntegrityError
+
+
+def _obj2(a: str, av: Any, b: str, bv: Any) -> dict[str, Any] {
+    d: dict[str, Any] = {}
+    d[a] = av
+    d[b] = bv
+    return d
+}
+
+def _obj3(a: str, av: Any, b: str, bv: Any, c: str, cv: Any) -> dict[str, Any] {
+    d: dict[str, Any] = {}
+    d[a] = av
+    d[b] = bv
+    d[c] = cv
+    return d
+}
+
+# --- schema builders (required scalar fields only) ---
+
+def _customers_schema() -> dict[str, Any] {
+    props: dict[str, Any] = {}
+    props["id"] = {"type": "integer"}
+    props["name"] = {"type": "string"}
+    req: list[Any] = ["id", "name"]
+    s: dict[str, Any] = {}
+    s["type"] = "object"
+    s["properties"] = props
+    s["required"] = req
+    return s
+}
+
+def _orders_schema() -> dict[str, Any] {
+    props: dict[str, Any] = {}
+    props["id"] = {"type": "integer"}
+    props["customer_id"] = {"type": "integer"}
+    props["total"] = {"type": "integer"}
+    req: list[Any] = ["id", "customer_id", "total"]
+    s: dict[str, Any] = {}
+    s["type"] = "object"
+    s["properties"] = props
+    s["required"] = req
+    return s
+}
+
+def _pk_meta() -> dict[str, Any] {
+    pk: list[Any] = ["id"]
+    m: dict[str, Any] = {}
+    m["primary"] = pk
+    return m
+}
+
+# orders.meta with a ref customer_id -> customers.id (on_delete configurable)
+def _orders_meta(on_delete: str) -> dict[str, Any] {
+    pk: list[Any] = ["id"]
+    ref_spec: dict[str, Any] = {}
+    ref_spec["to"] = "customers.id"
+    ref_spec["on_delete"] = on_delete
+    refs: dict[str, Any] = {}
+    refs["customer_id"] = ref_spec
+    m: dict[str, Any] = {}
+    m["primary"] = pk
+    m["refs"] = refs
+    return m
+}
+
+def _mem() -> ODB {
+    sim: SimVFS = SimVFS()
+    p: Pager = create(sim, 4096)
+    return ODB(sim, p)
+}
+
+def _setup(db: ODB, on_delete: str) -> list[Documents] {
+    customers: Documents = db.schema("customers", _customers_schema()).meta(_pk_meta())
+    orders: Documents = db.schema("orders", _orders_schema()).meta(_orders_meta(on_delete))
+    return [customers, orders]
+}
+
+
+class ForwardCheckTest(TestCase) {
+    def test_ref_to_missing_target_rejected() -> None {
+        db: ODB = _mem()
+        cols: list[Documents] = _setup(db, "restrict")
+        orders: Documents = cols[1]
+        raised: bool = False
+        try {
+            orders.save(_obj3("id", 1, "customer_id", 999, "total", 50))
+        } except IntegrityError {
+            raised = True
+        }
+        self.assertTrue(raised)
+        self.assertEqual(orders.count(), 0)
+    }
+
+    def test_ref_to_existing_target_ok() -> None {
+        db: ODB = _mem()
+        cols: list[Documents] = _setup(db, "restrict")
+        customers: Documents = cols[0]
+        orders: Documents = cols[1]
+        customers.save(_obj2("id", 1, "name", "Ada"))
+        o: Document = orders.save(_obj3("id", 10, "customer_id", 1, "total", 50))
+        self.assertTrue(o.id > 0)
+        self.assertEqual(orders.count(), 1)
+    }
+}
+
+
+class OnDeleteRestrictTest(TestCase) {
+    def test_restrict_blocks_delete_of_referenced() -> None {
+        db: ODB = _mem()
+        cols: list[Documents] = _setup(db, "restrict")
+        customers: Documents = cols[0]
+        orders: Documents = cols[1]
+        ada: Document = customers.save(_obj2("id", 1, "name", "Ada"))
+        customers.save(_obj2("id", 2, "name", "Bee"))
+        orders.save(_obj3("id", 10, "customer_id", 1, "total", 50))
+
+        raised: bool = False
+        try {
+            ada.wipe()                       # referenced by order 10
+        } except IntegrityError {
+            raised = True
+        }
+        self.assertTrue(raised)
+        # Ada survives; order survives (whole delete rolled back).
+        self.assertEqual(customers.count(), 2)
+        self.assertEqual(orders.count(), 1)
+
+        # An unreferenced customer deletes freely.
+        bee: Document = customers.read(2)
+        bee.wipe()
+        self.assertEqual(customers.count(), 1)
+    }
+}
+
+
+class OnDeleteCascadeTest(TestCase) {
+    def test_cascade_removes_referrers() -> None {
+        db: ODB = _mem()
+        cols: list[Documents] = _setup(db, "cascade")
+        customers: Documents = cols[0]
+        orders: Documents = cols[1]
+        ada: Document = customers.save(_obj2("id", 1, "name", "Ada"))
+        customers.save(_obj2("id", 2, "name", "Bee"))
+        orders.save(_obj3("id", 10, "customer_id", 1, "total", 50))
+        orders.save(_obj3("id", 11, "customer_id", 1, "total", 70))
+        orders.save(_obj3("id", 12, "customer_id", 2, "total", 20))
+
+        ada.wipe()                           # cascades to orders 10 and 11
+        self.assertEqual(customers.count(), 1)
+        self.assertEqual(orders.count(), 1)
+        # order with user id 12 (Bee's) is untouched (read by the indexed pk)
+        survivor: Document = orders.read(id=12)
+        st: int = survivor["total"]
+        self.assertEqual(st, 20)
+    }
+}
+
+
+class EditRefTest(TestCase) {
+    def test_repoint_moves_reverse_edge() -> None {
+        db: ODB = _mem()
+        cols: list[Documents] = _setup(db, "restrict")
+        customers: Documents = cols[0]
+        orders: Documents = cols[1]
+        ada: Document = customers.save(_obj2("id", 1, "name", "Ada"))
+        bee: Document = customers.save(_obj2("id", 2, "name", "Bee"))
+        o: Document = orders.save(_obj3("id", 10, "customer_id", 1, "total", 50))
+
+        # Re-point the order from Ada to Bee.
+        o.edit({customer_id: 2})
+
+        # Ada is now unreferenced and deletable; Bee is now referenced.
+        ada.wipe()
+        self.assertEqual(customers.count(), 1)
+        raised: bool = False
+        try {
+            bee.wipe()
+        } except IntegrityError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+}
+
+
+class SelfRefCascadeTest(TestCase) {
+    # A self-referential chain: e1 is its own manager, e2 reports to e1, e3 to
+    # e2. Wiping e1 cascades the whole subtree. (A required self-ref bootstraps
+    # because the pk index entry is added before the ref is checked.)
+    def _emp_schema() -> dict[str, Any] {
+        props: dict[str, Any] = {}
+        props["id"] = {"type": "integer"}
+        props["manager_id"] = {"type": "integer"}
+        req: list[Any] = ["id", "manager_id"]
+        s: dict[str, Any] = {}
+        s["type"] = "object"
+        s["properties"] = props
+        s["required"] = req
+        return s
+    }
+
+    def _emp_meta() -> dict[str, Any] {
+        pk: list[Any] = ["id"]
+        ref_spec: dict[str, Any] = {}
+        ref_spec["to"] = "employees.id"
+        ref_spec["on_delete"] = "cascade"
+        refs: dict[str, Any] = {}
+        refs["manager_id"] = ref_spec
+        m: dict[str, Any] = {}
+        m["primary"] = pk
+        m["refs"] = refs
+        return m
+    }
+
+    def test_self_ref_cascade() -> None {
+        db: ODB = _mem()
+        emp: Documents = db.schema("employees", self._emp_schema()).meta(self._emp_meta())
+        e1: Document = emp.save(_obj2("id", 1, "manager_id", 1))    # self-managed root
+        emp.save(_obj2("id", 2, "manager_id", 1))
+        emp.save(_obj2("id", 3, "manager_id", 2))
+        self.assertEqual(emp.count(), 3)
+        e1.wipe()                             # cascades 2 -> 3
+        self.assertEqual(emp.count(), 0)
+    }
+}
+
+
+class RefReopenTest(TestCase) {
+    # Reverse-index roots persist in the catalog, so integrity is still enforced
+    # after a reopen with no rebuild.
+    def test_restrict_survives_reopen() -> None {
+        sim: SimVFS = SimVFS()
+        p: Pager = create(sim, 4096)
+        db: ODB = ODB(sim, p)
+        cols: list[Documents] = _setup(db, "restrict")
+        cols[0].save(_obj2("id", 1, "name", "Ada"))
+        cols[1].save(_obj3("id", 10, "customer_id", 1, "total", 50))
+
+        p2: Pager = open_pager(sim)
+        db2: ODB = ODB(sim, p2)
+        customers2: Documents = db2.schema("customers")
+        ada2: Document = customers2.read(1)
+        raised: bool = False
+        try {
+            ada2.wipe()
+        } except IntegrityError {
+            raised = True
+        }
+        self.assertTrue(raised)
+        # And a fresh order against a bad customer still fails after reopen.
+        orders2: Documents = db2.schema("orders")
+        bad: bool = False
+        try {
+            orders2.save(_obj3("id", 11, "customer_id", 777, "total", 5))
+        } except IntegrityError {
+            bad = True
+        }
+        self.assertTrue(bad)
+    }
+}
+
+
+class RefCrashTest(TestCase) {
+    # Crash an in-flight order insert (which touches the doc tree, the pk index,
+    # and the reverse index); on reopen every committed order still resolves and
+    # its referenced customer is intact.
+    def _trial(seed: int) -> bool {
+        sim: SimVFS = SimVFS()
+        p: Pager = create(sim, 4096)
+        db: ODB = ODB(sim, p)
+        cols: list[Documents] = _setup(db, "restrict")
+        customers: Documents = cols[0]
+        orders: Documents = cols[1]
+        customers.save(_obj2("id", 1, "name", "Ada"))
+
+        rng: Rng = Rng(seed)
+        k: int = rng.below(15)
+        i: int = 0
+        while i < k {
+            orders.save(_obj3("id", 100 + i, "customer_id", 1, "total", i))
+            i = i + 1
+        }
+
+        sim.arm(rng.below(18), Rng(seed * 13 + 3))
+        orders.save(_obj3("id", 100 + k, "customer_id", 1, "total", k))
+
+        p2: Pager = open_pager(sim)
+        db2: ODB = ODB(sim, p2)
+        o2: Documents = db2.schema("orders")
+        cnt: int = o2.count()
+        if cnt != k and cnt != k + 1 {
+            return False
+        }
+        j: int = 0
+        while j < k {
+            doc: Document = o2.read(id=100 + j)
+            tot: int = doc["total"]
+            if tot != j {
+                return False
+            }
+            j = j + 1
+        }
+        # Edge consistency: the customer is delete-blocked exactly when at least
+        # one order still references her (if the in-flight order was the only one
+        # and it was lost, cnt is 0 and the delete is allowed).
+        c2: Documents = db2.schema("customers")
+        ada: Document = c2.read(1)
+        blocked: bool = False
+        try {
+            ada.wipe()
+        } except IntegrityError {
+            blocked = True
+        }
+        return blocked == (cnt > 0)
+    }
+
+    def test_crash_during_ref_writes() -> None {
+        failures: int = 0
+        seed: int = 1
+        while seed <= 40 {
+            if not self._trial(seed) {
+                failures = failures + 1
+            }
+            seed = seed + 1
+        }
+        self.assertEqual(failures, 0)
+    }
+}
+
+
+main([
+    ForwardCheckTest(),
+    OnDeleteRestrictTest(),
+    OnDeleteCascadeTest(),
+    EditRefTest(),
+    SelfRefCascadeTest(),
+    RefReopenTest(),
+    RefCrashTest(),
+])

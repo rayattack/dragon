@@ -685,3 +685,84 @@ TEST(OwnershipCheckTest, DeferDubLeavesSourceLive) {
         "    sink(own d)\n"
         "}\n"));
 }
+
+//===----------------------------------------------------------------------===//
+// Identity resources (docs/1604 "Identity resources": the SocketHandle
+// shape). A handle class holds the one claim; an owner class takes it via an
+// own-param constructor. Each promise the book makes is a bouncer case here:
+// the borrow-forge, the stale toucher, the second claimant, and the copy all
+// get refused with a diagnostic naming the cause. The must-compile guards
+// prove the blessed spellings (fresh temporary, explicit move) stay friction-
+// free. Runtime poison semantics live in test/dr/test_socket_handle.dr.
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+// The minimal identity-resource pair, shared by the cases below.
+const char* kHandlePair =
+    "class H {\n"
+    "    _fd: int\n"
+    "    def(fd: int) { self._fd = fd }\n"
+    "    def fd() -> int { return self._fd }\n"
+    "}\n"
+    "class R {\n"
+    "    own _h: H\n"
+    "    def(own h: H) { self._h = h }\n"
+    "    def probe() -> int { return self._h.fd() }\n"
+    "}\n";
+
+std::string withPair(const std::string& body) {
+    return std::string(kHandlePair) + body;
+}
+
+} // namespace
+
+// The borrow-forge ("constructor takes ownership of its argument") and the
+// copy ("not dubable") are TYPECHECKER diagnostics, so those two bouncer
+// cases live in TypeCheckerTest.cpp (IdentityResource*). This suite owns the
+// move/claim cases below.
+
+// The stale toucher: the handle was moved into the reader; the old binding
+// is dead and every later use says so.
+TEST(OwnershipCheckTest, OwnCtorMoveThenUseErrors) {
+    std::string e = ownError(withPair(
+        "def f() -> int {\n"
+        "    h: H = H(4)\n"
+        "    r: R = R(own h)\n"
+        "    return h.fd()\n"
+        "}\n"));
+    EXPECT_NE(e.find("was moved into"), std::string::npos) << e;
+}
+
+// The second claimant: one claim cannot be moved into two owners.
+TEST(OwnershipCheckTest, OwnCtorDoubleMoveErrors) {
+    std::string e = ownError(withPair(
+        "def f() -> int {\n"
+        "    h: H = H(4)\n"
+        "    r1: R = R(own h)\n"
+        "    r2: R = R(own h)\n"
+        "    return r1.probe()\n"
+        "}\n"));
+    EXPECT_NE(e.find("already moved"), std::string::npos) << e;
+}
+
+// Guard: a FRESH temporary (the adopt_raw shape) carries its own +1 into the
+// own-param constructor with no `own` spelled at the call site.
+TEST(OwnershipCheckTest, OwnCtorFreshTemporaryAccepted) {
+    EXPECT_TRUE(ownAccepts(withPair(
+        "def f() -> int {\n"
+        "    r: R = R(H(4))\n"
+        "    return r.probe()\n"
+        "}\n")));
+}
+
+// Guard: the explicit move with no later use of the source compiles, and the
+// new owner reads through its claim.
+TEST(OwnershipCheckTest, OwnCtorMoveAccepted) {
+    EXPECT_TRUE(ownAccepts(withPair(
+        "def f() -> int {\n"
+        "    h: H = H(4)\n"
+        "    r: R = R(own h)\n"
+        "    return r.probe()\n"
+        "}\n")));
+}

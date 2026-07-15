@@ -1,0 +1,187 @@
+# test/dr/test_fire_own_fwdref.dr - regression lock for fire-own-fwdref-hang.md.
+#
+# A method that constructs an own-field class, shared into a `fire` green
+# thread that does fd I/O, must run correctly REGARDLESS of class definition
+# order. The forward-reference form (constructed class defined later in the
+# module) used to miscompile: the construction site was lowered before the
+# ctor's param-ownership descriptor was registered, so the `own` ctor param's
+# adopted +1 was drained by the caller too - a use-after-free on the owned
+# SocketHandle that surfaced as a hang (the reply went to a garbage fd).
+# Fixed by registering every ctor's param kinds/own flags in
+# forwardDeclareClasses, before any method body is lowered; a construction
+# site that still finds no descriptor is now a loud compile error.
+#
+# Three locks here:
+#   1. backward order (stream before listener) - the always-working control
+#   2. FORWARD order (listener first, stream after) - the case that hung
+#   3. an own ctor param bound by KEYWORD - the kwargs drain path skipped the
+#      paramIsOwn check and double-freed the handle in any order
+#
+# Correct port hygiene throughout (SO_REUSEADDR + checked bind) so a busy
+# port fails the assert instead of hanging (see fire-own-io-bug.md).
+
+from unittest import TestCase, main
+from socket import SocketHandle
+
+extern "C" def socket(domain: intc, type: intc, protocol: intc) -> intc
+extern "C" def bind(fd: intc, addr: ptr, addrlen: intc) -> intc
+extern "C" def listen(fd: intc, backlog: intc) -> intc
+extern "C" def setsockopt(fd: intc, level: intc, optname: intc, optval: ptr, optlen: intc) -> intc
+extern "C" def malloc(size: int) -> ptr
+extern "C" def memset(s: ptr, c: intc, n: int) -> ptr
+extern "C" def dragon_ptr_write_i32(p: ptr, offset: intc, val: intc)
+extern "C" def dragon_nb_accept(server_fd: int, addr: ptr, addrlen: ptr) -> int
+extern "C" def dragon_nb_connect(fd: int, addr: ptr, addrlen: int) -> int
+extern "C" def dragon_nb_send(fd: int, buf: str, length: int) -> int
+extern "C" def dragon_nb_recv_str(fd: int, max_len: int) -> str
+extern "C" def dragon_sockaddr_in_new(port: intc, addr: str) -> ptr
+extern "C" def dragon_sockaddr_in_size() -> intc
+extern "C" def free(p: ptr)
+
+# --- Case 1: BACKWARD order. Strm defined first; Lstn.accept() refers back. ---
+class Strm {
+    own _s: SocketHandle
+    def(own s: SocketHandle) { self._s = s }
+    def send(d: str) -> int { return dragon_nb_send(self._s.fd(), d, len(d)) }
+    def recv(n: int) -> str { return dragon_nb_recv_str(self._s.fd(), n) }
+    def close() -> None { self._s.close() }
+}
+
+class Lstn {
+    own _s: SocketHandle
+    host: str
+    port: int
+    def(host: str, port: int) {
+        const sfd: int = socket(2, 1, 0)
+        self._s = SocketHandle.adopt_raw(sfd)
+        self.host = host
+        self.port = port
+        const o: ptr = malloc(4)
+        memset(o, 0, 4)
+        dragon_ptr_write_i32(o, 0, 1)
+        setsockopt(self._s.fd(), 1, 2, o, 4)
+        free(o)
+    }
+    def do_bind() -> int {
+        const a: ptr = dragon_sockaddr_in_new(self.port, self.host)
+        const rc: int = bind(self._s.fd(), a, dragon_sockaddr_in_size())
+        free(a)
+        return rc
+    }
+    def do_listen(n: int) -> int { return listen(self._s.fd(), n) }
+    def accept() -> Strm {
+        return Strm(SocketHandle.adopt_raw(dragon_nb_accept(self._s.fd(), none, none)))
+    }
+    def close() -> None { self._s.close() }
+}
+
+def _echo(ls: Lstn) -> None {
+    conn: Strm = ls.accept()
+    conn.send("echo:" + conn.recv(1024))
+    conn.close()
+}
+
+# --- Case 2: FORWARD order. LstnF defined first; accept() forward-refs StrmF
+# (defined below it). This is the exact shape that miscompiled into a hang. ---
+class LstnF {
+    own _s: SocketHandle
+    host: str
+    port: int
+    def(host: str, port: int) {
+        const sfd: int = socket(2, 1, 0)
+        self._s = SocketHandle.adopt_raw(sfd)
+        self.host = host
+        self.port = port
+        const o: ptr = malloc(4)
+        memset(o, 0, 4)
+        dragon_ptr_write_i32(o, 0, 1)
+        setsockopt(self._s.fd(), 1, 2, o, 4)
+        free(o)
+    }
+    def do_bind() -> int {
+        const a: ptr = dragon_sockaddr_in_new(self.port, self.host)
+        const rc: int = bind(self._s.fd(), a, dragon_sockaddr_in_size())
+        free(a)
+        return rc
+    }
+    def do_listen(n: int) -> int { return listen(self._s.fd(), n) }
+    def accept() -> StrmF {
+        return StrmF(SocketHandle.adopt_raw(dragon_nb_accept(self._s.fd(), none, none)))
+    }
+    def close() -> None { self._s.close() }
+}
+
+class StrmF {
+    own _s: SocketHandle
+    def(own s: SocketHandle) { self._s = s }
+    def send(d: str) -> int { return dragon_nb_send(self._s.fd(), d, len(d)) }
+    def recv(n: int) -> str { return dragon_nb_recv_str(self._s.fd(), n) }
+    def close() -> None { self._s.close() }
+}
+
+def _echo_fwd(ls: LstnF) -> None {
+    conn: StrmF = ls.accept()
+    conn.send("echo:" + conn.recv(1024))
+    conn.close()
+}
+
+# --- Case 3: own ctor param bound by keyword. ---
+class KwHolder {
+    own _s: SocketHandle
+    def(own s: SocketHandle) { self._s = s }
+    def fd() -> int { return self._s.fd() }
+    def close() -> None { self._s.close() }
+}
+
+class FireOwnFwdRefTests(TestCase) {
+    def test_backward_ref_construction_fires_ok() {
+        ls: Lstn = Lstn("127.0.0.1", 55851)
+        brc: int = ls.do_bind()
+        self.assertEqual(brc, 0, "bind failed: port 55851 busy")
+        if brc != 0 { return }
+        ls.do_listen(8)
+        t: Task[None] = fire _echo(ls)
+
+        cfd: int = socket(2, 1, 0)
+        a: ptr = dragon_sockaddr_in_new(55851, "127.0.0.1")
+        dragon_nb_connect(cfd, a, dragon_sockaddr_in_size())
+        free(a)
+        c: Strm = Strm(SocketHandle.adopt_raw(cfd))
+        c.send("ping")
+        reply: str = c.recv(1024)
+        await t
+        c.close()
+        ls.close()
+        self.assertEqual(reply, "echo:ping")
+    }
+
+    def test_forward_ref_construction_fires_ok() {
+        ls: LstnF = LstnF("127.0.0.1", 55852)
+        brc: int = ls.do_bind()
+        self.assertEqual(brc, 0, "bind failed: port 55852 busy")
+        if brc != 0 { return }
+        ls.do_listen(8)
+        t: Task[None] = fire _echo_fwd(ls)
+
+        cfd: int = socket(2, 1, 0)
+        a: ptr = dragon_sockaddr_in_new(55852, "127.0.0.1")
+        dragon_nb_connect(cfd, a, dragon_sockaddr_in_size())
+        free(a)
+        c: StrmF = StrmF(SocketHandle.adopt_raw(cfd))
+        c.send("ping")
+        reply: str = c.recv(1024)
+        await t
+        c.close()
+        ls.close()
+        self.assertEqual(reply, "echo:ping")
+    }
+
+    def test_own_ctor_param_bound_by_keyword() {
+        sfd: int = socket(2, 1, 0)
+        h: KwHolder = KwHolder(s=SocketHandle.adopt_raw(sfd))
+        self.assertEqual(h.fd(), sfd)
+        h.close()
+    }
+}
+
+main([FireOwnFwdRefTests()])

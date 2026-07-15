@@ -1,0 +1,238 @@
+# ODB M9 regression suite: the native wire protocol (spec section 18).
+# Framing, the server command loop (driven network-free over a MemoryConn,
+# like Router.serve_connection), and a real loopback socket roundtrip with
+# the ODBClient - including the zero-re-encode R_DOCS path, the error
+# taxonomy crossing the wire, and watch resume.
+
+from unittest import TestCase, main
+from odb import ODB, Documents, Document
+from odb.vfs import SimVFS
+from odb.pager import create, Pager
+from odb.wire import MemoryConn, Frame, read_frame, frame_bytes, write_frame
+from odb.wire import Q_HELLO, R_HELLO, Q_FIND, R_ROWS, R_DOCS, Q_RUN, R_COUNT
+from odb.wire import Q_SCHEMAS, R_SCHEMAS, Q_WATCH, R_CHANGES, Q_PING, R_PONG, R_ERROR
+from odb.server import ODBServer
+from odb.client import ODBClient, WatchBatch
+from odb.errors import IntegrityError, PrepareError
+from socket import TcpListener
+from json import dumps, loads
+
+
+def _customers() -> dict[str, Any] {
+    return { "type": "object",
+             "properties": { "id": {"type": "integer"},
+                             "name": {"type": "string"},
+                             "city": {"type": "string"} },
+             "required": ["id", "name"] }
+}
+
+def _mem_db() -> ODB {
+    sim: SimVFS = SimVFS()
+    p: Pager = create(sim, 4096)
+    return ODB(sim, p)
+}
+
+def _seed(db: ODB) -> None {
+    cust: Documents = db.schema("customers", _customers()).meta({primary: ["id"], unique: ["name"]})
+    cust.save({id: 1, name: "Ada", city: "Lagos"})
+    cust.save({id: 2, name: "Zed", city: "Kano"})
+    cust.save({id: 3, name: "Ono", city: "Lagos"})
+}
+
+# Decode every reply frame the server wrote.
+def _replies(mc: MemoryConn) -> list[Frame] {
+    rd: MemoryConn = MemoryConn(mc.all_sent())
+    out: list[Frame] = []
+    going: bool = True
+    while going {
+        fr: Frame = read_frame(rd)
+        if fr.eof {
+            going = False
+        } else {
+            out.append(fr)
+        }
+    }
+    return out
+}
+
+def _json_of(fr: Frame) -> dict[str, Any] {
+    obj_any: Any = loads(fr.payload.decode())
+    obj: dict[str, Any] = obj_any
+    return obj
+}
+
+
+class FramingTest(TestCase) {
+    def test_roundtrip() -> None {
+        raw: bytes = frame_bytes(Q_FIND, "hello".encode()) + frame_bytes(Q_PING, bytes([]))
+        mc: MemoryConn = MemoryConn(raw)
+        f1: Frame = read_frame(mc)
+        self.assertEqual(f1.ftype, Q_FIND)
+        self.assertEqual(f1.payload.decode(), "hello")
+        f2: Frame = read_frame(mc)
+        self.assertEqual(f2.ftype, Q_PING)
+        self.assertEqual(len(f2.payload), 0)
+        f3: Frame = read_frame(mc)
+        self.assertTrue(f3.eof)
+    }
+}
+
+
+class ServerLoopTest(TestCase) {
+    def _drive(reqs: bytes, db: ODB) -> list[Frame] {
+        srv: ODBServer = ODBServer(db, 0)
+        mc: MemoryConn = MemoryConn(reqs)
+        srv.serve_conn(mc)
+        return _replies(mc)
+    }
+
+    def test_hello_ping_schemas() -> None {
+        db: ODB = _mem_db()
+        _seed(db)
+        reqs: bytes = frame_bytes(Q_HELLO, "{}".encode()) + frame_bytes(Q_PING, bytes([])) + frame_bytes(Q_SCHEMAS, bytes([]))
+        frames: list[Frame] = self._drive(reqs, db)
+        self.assertEqual(len(frames), 3)
+        self.assertEqual(frames[0].ftype, R_HELLO)
+        hello: dict[str, Any] = _json_of(frames[0])
+        csn_any: Any = hello["csn"]
+        self.assertTrue(isinstance(csn_any, int))
+        self.assertEqual(frames[1].ftype, R_PONG)
+        self.assertEqual(frames[2].ftype, R_SCHEMAS)
+        cat: dict[str, Any] = _json_of(frames[2])
+        arr_any: Any = cat["schemas"]
+        self.assertTrue(isinstance(arr_any, list))
+        arr: list[Any] = arr_any
+        self.assertEqual(len(arr), 1)
+    }
+
+    # A whole-document read ships as R_DOCS (raw DBON); a shaped read as rows.
+    def test_find_paths() -> None {
+        db: ODB = _mem_db()
+        _seed(db)
+        q1: dict[str, Any] = {}
+        q1["q"] = "customers ? city == \"Lagos\""
+        q2: dict[str, Any] = {}
+        q2["q"] = "customers ? city == \"Lagos\" { name }"
+        reqs: bytes = frame_bytes(Q_FIND, dumps(q1).encode()) + frame_bytes(Q_FIND, dumps(q2).encode())
+        frames: list[Frame] = self._drive(reqs, db)
+        self.assertEqual(len(frames), 2)
+        self.assertEqual(frames[0].ftype, R_DOCS)
+        self.assertEqual(frames[1].ftype, R_ROWS)
+        rows_obj: dict[str, Any] = _json_of(frames[1])
+        rows_any: Any = rows_obj["rows"]
+        rows: list[Any] = rows_any
+        self.assertEqual(len(rows), 2)
+    }
+
+    # A write runs and the count comes back; the violation comes back as its
+    # taxonomy name, and the connection stays usable.
+    def test_run_and_error() -> None {
+        db: ODB = _mem_db()
+        _seed(db)
+        w: dict[str, Any] = {}
+        w["q"] = "set customers ? id == 1 { city: \"Abuja\" }"
+        bad: dict[str, Any] = {}
+        bad["q"] = "add customers { id: 9, name: \"Ada\" }"    # duplicate unique name
+        after: dict[str, Any] = {}
+        after["q"] = "customers ? id == 1 { city }"
+        reqs: bytes = frame_bytes(Q_RUN, dumps(w).encode()) + frame_bytes(Q_RUN, dumps(bad).encode()) + frame_bytes(Q_FIND, dumps(after).encode())
+        frames: list[Frame] = self._drive(reqs, db)
+        self.assertEqual(len(frames), 3)
+        self.assertEqual(frames[0].ftype, R_COUNT)
+        cnt: dict[str, Any] = _json_of(frames[0])
+        n_any: Any = cnt["count"]
+        n: int = n_any
+        self.assertEqual(n, 1)
+        self.assertEqual(frames[1].ftype, R_ERROR)
+        err: dict[str, Any] = _json_of(frames[1])
+        kind_any: Any = err["error"]
+        kind: str = kind_any
+        self.assertEqual(kind, "IntegrityError")
+        self.assertEqual(frames[2].ftype, R_ROWS)
+    }
+
+    def test_watch_poll() -> None {
+        db: ODB = _mem_db()
+        _seed(db)
+        w: dict[str, Any] = {}
+        w["q"] = "customers ? city == \"Lagos\""
+        w["since"] = 0
+        reqs: bytes = frame_bytes(Q_WATCH, dumps(w).encode())
+        frames: list[Frame] = self._drive(reqs, db)
+        self.assertEqual(frames[0].ftype, R_CHANGES)
+        reply: dict[str, Any] = _json_of(frames[0])
+        chs_any: Any = reply["changes"]
+        chs: list[Any] = chs_any
+        self.assertEqual(len(chs), 2)              # Ada and Ono
+        r_any: Any = reply["resume"]
+        resume: int = r_any
+        self.assertEqual(resume, db.pager.last_csn)
+    }
+}
+
+
+# The full stack over a real loopback socket: fired server green thread,
+# synchronous client on the main thread.
+def _serve_shop(lis: TcpListener, conns: int) -> int {
+    db: ODB = _mem_db()
+    _seed(db)
+    srv: ODBServer = ODBServer(db, 0)
+    return srv.serve_on(lis, conns)
+}
+
+class SocketRoundtripTest(TestCase) {
+    def test_client_roundtrip() -> None {
+        lis: TcpListener = TcpListener("127.0.0.1", 54471)
+        lis.do_bind()
+        lis.do_listen(8)
+        t: Task[int] = fire _serve_shop(lis, 1)
+
+        c: ODBClient = ODBClient("127.0.0.1", 54471)
+        self.assertTrue(c.ping())
+        self.assertTrue(c.server_csn > 0)
+
+        # R_DOCS path: whole documents decoded client-side from raw DBON
+        docs: list[dict[str, Any]] = c.find("customers ? city == $city", {city: "Lagos"})
+        self.assertEqual(len(docs), 2)
+        nm_any: Any = docs[0]["name"]
+        nm: str = nm_any
+        self.assertEqual(nm, "Ada")
+        id_any: Any = docs[0]["_id"]
+        self.assertTrue(isinstance(id_any, int))
+
+        # R_ROWS path: shaped projection
+        rows: list[dict[str, Any]] = c.find("customers { name } | sort name | take 1")
+        self.assertEqual(len(rows), 1)
+
+        # writes count; errors arrive as the right exception class
+        n: int = c.run("set customers ? id == 2 { city: \"Lagos\" }")
+        self.assertEqual(n, 1)
+        raised: bool = False
+        try {
+            c.run("add customers { id: 9, name: \"Ada\" }")
+        } except IntegrityError {
+            raised = True
+        }
+        self.assertTrue(raised)
+        raised = False
+        try {
+            c.find("customers ? city == 7")
+        } except PrepareError {
+            raised = True
+        }
+        self.assertTrue(raised)
+
+        # watch across the wire: resume from 0 sees the retained feed
+        batch: WatchBatch = c.watch_poll("customers ? city == \"Lagos\"", 0)
+        self.assertEqual(len(batch.changes), 3)    # Ada, Ono, and Zed's move
+        self.assertTrue(batch.resume > 0)
+
+        c.close()
+        served: int = t.join()
+        self.assertEqual(served, 1)
+        lis.close()
+    }
+}
+
+
+main([FramingTest(), ServerLoopTest(), SocketRoundtripTest()])

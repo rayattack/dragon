@@ -1,0 +1,188 @@
+# ODB M5.3 regression suite: OQL aggregates + grouping. Whole-set aggregate
+# blocks (count! sum! avg! min! max! any! all!), `by field` grouping (one row per
+# group), count!(field) skipping absent, aggregate arithmetic, and the
+# prepare-time rules (no bare ungrouped field, no aggregate in a filter).
+
+from unittest import TestCase, main
+from odb import ODB, Documents, Document
+from odb.vfs import SimVFS
+from odb.pager import create, Pager
+from odb.errors import PrepareError
+
+
+def _schema() -> dict[str, Any] {
+    props: dict[str, Any] = {}
+    props["id"] = {"type": "integer"}
+    props["status"] = {"type": "string"}
+    props["total"] = {"type": "number"}
+    props["qty"] = {"type": "integer"}
+    props["paid"] = {"type": "boolean"}
+    props["region"] = {"type": "string"}
+    props["coupon"] = {"type": "number"}          # optional
+    req: list[Any] = ["id", "status", "total", "qty", "paid", "region"]
+    s: dict[str, Any] = {}
+    s["type"] = "object"
+    s["properties"] = props
+    s["required"] = req
+    return s
+}
+
+def _o(idv: int, status: str, total: float, qty: int, paid: bool, region: str) -> dict[str, Any] {
+    d: dict[str, Any] = {}
+    d["id"] = idv
+    d["status"] = status
+    d["total"] = total
+    d["qty"] = qty
+    d["paid"] = paid
+    d["region"] = region
+    return d
+}
+
+def _db() -> Documents {
+    sim: SimVFS = SimVFS()
+    p: Pager = create(sim, 4096)
+    db: ODB = ODB(sim, p)
+    c: Documents = db.schema("orders", _schema())
+    o1: dict[str, Any] = _o(1, "paid", 100.0, 2, True, "west")
+    o1["coupon"] = 10.0
+    c.save(o1)
+    c.save(_o(2, "paid", 50.0, 1, True, "west"))
+    c.save(_o(3, "draft", 30.0, 3, False, "east"))
+    c.save(_o(4, "paid", 20.0, 5, True, "east"))
+    c.save(_o(5, "shipped", 200.0, 1, True, "west"))
+    return c
+}
+
+
+class WholeSetAggregateTest(TestCase) {
+    def test_count_and_sum() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("orders { n: count!(), revenue: sum!(total) }")
+        self.assertEqual(len(rows), 1)
+        n: int = rows[0]["n"]
+        rev: float = rows[0]["revenue"]
+        self.assertEqual(n, 5)
+        self.assertEqual(rev, 400.0)
+    }
+
+    def test_filtered_aggregate() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("orders ? status == \"paid\" { n: count!(), rev: sum!(total) }")
+        n: int = rows[0]["n"]
+        rev: float = rows[0]["rev"]
+        self.assertEqual(n, 3)
+        self.assertEqual(rev, 170.0)
+    }
+
+    def test_count_field_skips_absent() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("orders { withcoupon: count!(coupon), allrows: count!() }")
+        wc: int = rows[0]["withcoupon"]
+        ar: int = rows[0]["allrows"]
+        self.assertEqual(wc, 1)                 # only order 1 has a coupon
+        self.assertEqual(ar, 5)
+    }
+
+    def test_min_max_numeric_and_string() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("orders { lo: min!(total), hi: max!(total), first: min!(status) }")
+        lo: float = rows[0]["lo"]
+        hi: float = rows[0]["hi"]
+        first: str = rows[0]["first"]
+        self.assertEqual(lo, 20.0)
+        self.assertEqual(hi, 200.0)
+        self.assertEqual(first, "draft")       # lexicographic min
+    }
+
+    def test_avg_and_bool_aggregates() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("orders ? status == \"paid\" { a: avg!(total) }")
+        a: float = rows[0]["a"]
+        self.assertTrue(a > 56.6 and a < 56.7)  # 170/3
+        allrows: list[Document] = c.db.find("orders { anyp: any!(paid), allp: all!(paid) }")
+        ap: bool = allrows[0]["anyp"]
+        alp: bool = allrows[0]["allp"]
+        self.assertTrue(ap)
+        self.assertFalse(alp)                   # order 3 (draft) is not paid
+    }
+}
+
+
+class GroupingTest(TestCase) {
+    def test_group_by_status() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("orders by status { status, n: count!(), rev: sum!(total) }")
+        self.assertEqual(len(rows), 3)          # paid, draft, shipped (first-seen order)
+        s0: str = rows[0]["status"]
+        n0: int = rows[0]["n"]
+        r0: float = rows[0]["rev"]
+        self.assertEqual(s0, "paid")
+        self.assertEqual(n0, 3)
+        self.assertEqual(r0, 170.0)
+        s1: str = rows[1]["status"]
+        n1: int = rows[1]["n"]
+        self.assertEqual(s1, "draft")
+        self.assertEqual(n1, 1)
+    }
+
+    def test_group_by_region() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("orders by region { region, n: count!() }")
+        self.assertEqual(len(rows), 2)
+        rg0: str = rows[0]["region"]
+        n0: int = rows[0]["n"]
+        self.assertEqual(rg0, "west")           # west first (order 1)
+        self.assertEqual(n0, 3)
+    }
+
+    def test_aggregate_arithmetic() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("orders ? status == \"paid\" by region { region, avgtot: sum!(total) / count!() }")
+        # west paid: 100 + 50 = 150 over 2 = 75.0 ; east paid: 20 over 1 = 20.0
+        self.assertEqual(len(rows), 2)
+        a0: float = rows[0]["avgtot"]
+        a1: float = rows[1]["avgtot"]
+        self.assertEqual(a0, 75.0)
+        self.assertEqual(a1, 20.0)
+    }
+}
+
+
+class GroupedPrepareErrorTest(TestCase) {
+    def _bad(c: Documents, query: str) -> bool {
+        raised: bool = False
+        try {
+            c.db.find(query)
+        } except PrepareError {
+            raised = True
+        }
+        return raised
+    }
+
+    def test_bare_ungrouped_field_rejected() -> None {
+        c: Documents = _db()
+        self.assertTrue(self._bad(c, "orders by status { status, total }"))
+    }
+
+    def test_aggregate_in_filter_rejected() -> None {
+        c: Documents = _db()
+        self.assertTrue(self._bad(c, "orders ? sum!(total) > 5 { id }"))
+    }
+
+    def test_sum_of_string_rejected() -> None {
+        c: Documents = _db()
+        self.assertTrue(self._bad(c, "orders { x: sum!(status) }"))
+    }
+
+    def test_any_on_number_rejected() -> None {
+        c: Documents = _db()
+        self.assertTrue(self._bad(c, "orders { x: any!(total) }"))
+    }
+}
+
+
+main([
+    WholeSetAggregateTest(),
+    GroupingTest(),
+    GroupedPrepareErrorTest(),
+])

@@ -1,0 +1,91 @@
+"""Typed `**kwargs` / `*args` on METHODS (compiler gap, not a rule).
+
+Typed variadics work on free functions (`def f(**kw: int)`, `def g(*xs: int)`)
+but were broken on methods: `q.read(id=1)` errored "unexpected keyword
+argument", and a positional-plus-`**keys` call emitted a null LLVM operand
+(verify fail). This is the method-side of the same surface, including the
+refcount-sensitive `**keys: Any` case where each kwarg value is a heap string:
+the packed dict is a call-site-owned temporary and must be released after the
+call, and its owned entries must survive being read back.
+"""
+
+from unittest import TestCase, main
+
+
+class Store {
+    tag: str = "s"
+
+    def read(**keys: Any) -> int {
+        return len(keys)
+    }
+
+    def query(docid: int, **keys: Any) -> int {
+        return docid * 100 + len(keys)
+    }
+
+    def collect(*xs: int) -> int {
+        s: int = 0
+        for x in xs {
+            s = s + x
+        }
+        return s
+    }
+
+    def named(**kw: int) -> int {
+        t: int = 0
+        for k in kw {
+            t = t + kw[k]
+        }
+        return t
+    }
+
+    def echo(key: str, **keys: Any) -> str {
+        v: Any = keys[key]
+        return str(v)
+    }
+}
+
+
+class MethodKwargsTests(TestCase) {
+    def test_kwargs_only() {
+        q: Store = Store()
+        self.assertEqual(q.read(id=1), 1)
+        self.assertEqual(q.read(id=1, name=2), 2)
+    }
+
+    def test_positional_plus_kwargs() {
+        q: Store = Store()
+        self.assertEqual(q.query(0), 0)
+        self.assertEqual(q.query(3, a=1, b=2), 302)
+    }
+
+    def test_varargs() {
+        q: Store = Store()
+        self.assertEqual(q.collect(1, 2, 3), 6)
+        self.assertEqual(q.collect(), 0)
+    }
+
+    def test_named_int_kwargs() {
+        q: Store = Store()
+        self.assertEqual(q.named(x=10, y=3), 13)
+    }
+
+    def test_any_heap_value_read_back() {
+        q: Store = Store()
+        self.assertEqual(q.echo("host", host="db.local", port="5432"), "db.local")
+    }
+
+    def test_heap_kwargs_no_leak() {
+        q: Store = Store()
+        i: int = 0
+        while i < 3000 {
+            borrowed: str = "host-" + str(i % 7)
+            n: int = q.read(host=borrowed, port=str(i % 5))
+            self.assertEqual(n, 2)
+            i = i + 1
+        }
+    }
+}
+
+
+main([MethodKwargsTests()])

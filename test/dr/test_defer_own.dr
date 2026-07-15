@@ -1,0 +1,182 @@
+"""defer with ownership: `defer f(own x)` moves x at the STATEMENT, the call
+runs at scope exit, and the deferred call receives the +1. `defer f(dub x)`
+copies at the statement and the source stays live.
+
+These are the adversarial RC shapes for the own-move path, written before the
+lowering per the audit rule:
+  - own move then normal exit: exactly one release (double-free probe)
+  - own move then raise: the unwind path must hand the SAME single +1 to the
+    deferred call, never zero (leak) or two (double free)
+  - dub copy independence: mutations after the defer don't reach the copy
+  - churn loops: leaks are linear, a few thousand iterations surface them
+    under the suite's ASan/LSan build
+"""
+
+from unittest import TestCase, main
+
+
+def rec(log: list[str], v: str) {
+    log.append(v)
+}
+
+
+def adopt(log: list[str], own d: list[int]) {
+    log.append("adopted" + str(len(d)))
+}
+
+
+def adopt_quiet(own d: list[int]) {
+}
+
+
+def count_into(log: list[str], vals: list[int]) {
+    log.append("saw" + str(len(vals)))
+}
+
+
+def own_move_normal_exit(log: list[str]) {
+    d: list[int] = [1, 2, 3]
+    defer adopt(log, own d)
+    rec(log, "working")
+}
+
+
+def own_move_raise(log: list[str]) {
+    d: list[int] = [1, 2, 3]
+    defer adopt(log, own d)
+    raise ValueError("mid-flight")
+}
+
+
+def dub_copy_independent(log: list[str]) {
+    d: list[int] = [1, 2]
+    defer count_into(log, dub d)
+    d.append(3)
+    d.append(4)
+    log.append("live" + str(len(d)))
+}
+
+
+def own_churn_once() {
+    d: list[int] = [1, 2, 3, 4]
+    defer adopt_quiet(own d)
+}
+
+
+def borrow_churn_once() -> int {
+    parts: list[str] = ["x", "y"]
+    defer count_len(parts)
+    parts.append("z")
+    return len(parts)
+}
+
+
+def count_len(parts: list[str]) {
+    n: int = len(parts)
+}
+
+
+def reassign_churn_once() {
+    s: str = "he" + "ap"
+    defer sink_s(s)
+    s = "re" + "bound"
+}
+
+
+def sink_s(v: str) {
+}
+
+
+def raise_churn_once() {
+    d: list[int] = [7, 8]
+    defer adopt_quiet(own d)
+    raise ValueError("churn")
+}
+
+
+class DeferOwnTests(TestCase) {
+    def test_own_move_delivers_plus_one_at_exit() {
+        log: list[str] = []
+        own_move_normal_exit(log)
+        self.assertEqual(len(log), 2)
+        self.assertEqual(log[0], "working")
+        self.assertEqual(log[1], "adopted3")
+    }
+
+    def test_own_move_delivers_plus_one_on_unwind() {
+        log: list[str] = []
+        caught: int = 0
+        try {
+            own_move_raise(log)
+        } except ValueError {
+            caught = 1
+        }
+        self.assertEqual(caught, 1)
+        self.assertEqual(len(log), 1)
+        self.assertEqual(log[0], "adopted3")
+    }
+
+    def test_dub_copies_at_statement() {
+        log: list[str] = []
+        dub_copy_independent(log)
+        self.assertEqual(len(log), 2)
+        self.assertEqual(log[0], "live4")
+        self.assertEqual(log[1], "saw2")
+    }
+
+    def test_own_churn_stays_balanced() {
+        i: int = 0
+        while i < 3000 {
+            own_churn_once()
+            i = i + 1
+        }
+        self.assertTrue(true)
+    }
+
+    def test_borrow_churn_stays_balanced() {
+        total: int = 0
+        i: int = 0
+        while i < 3000 {
+            total = total + borrow_churn_once()
+            i = i + 1
+        }
+        self.assertEqual(total, 9000)
+    }
+
+    def test_reassign_snapshot_churn_stays_balanced() {
+        i: int = 0
+        while i < 3000 {
+            reassign_churn_once()
+            i = i + 1
+        }
+        self.assertTrue(true)
+    }
+
+    def test_unwind_own_churn_stays_balanced() {
+        caught: int = 0
+        i: int = 0
+        while i < 2000 {
+            try {
+                raise_churn_once()
+            } except ValueError {
+                caught = caught + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(caught, 2000)
+    }
+
+    def test_loop_body_defer_churn() {
+        # Block scoping: the defer runs each iteration; nothing accumulates.
+        i: int = 0
+        while i < 3000 {
+            s: str = "x" + str(i)
+            defer sink_s(s)
+            i = i + 1
+        }
+        self.assertEqual(i, 3000)
+    }
+}
+
+
+main([DeferOwnTests()])

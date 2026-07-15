@@ -1,0 +1,234 @@
+# ODB M9 regression suite: the GraphQL adapter (spec section 11). A thin
+# translator: queries become OQL text (asserted verbatim), run through the
+# same prepare-time checks and executor as native reads; relation fields ride
+# the declared refs; the pk-keyed simple mutations ride the Documents API.
+
+from unittest import TestCase, main
+from odb import ODB, Documents
+from odb.vfs import SimVFS
+from odb.pager import create, Pager
+from odb.graphql import parse_graphql, field_to_oql, where_to_oql, graphql_execute, graphql_sdl
+from odb.graphql import GqlDoc, GqlField
+from json import loads
+
+
+def _customers() -> dict[str, Any] {
+    return { "type": "object",
+             "properties": { "id": {"type": "integer"},
+                             "name": {"type": "string"},
+                             "city": {"type": "string"} },
+             "required": ["id", "name"] }
+}
+
+def _orders() -> dict[str, Any] {
+    return { "type": "object",
+             "properties": { "id": {"type": "integer"},
+                             "customer_id": {"type": "integer"},
+                             "status": {"type": "string"},
+                             "total": {"type": "integer"} },
+             "required": ["id", "customer_id", "status", "total"] }
+}
+
+def _db() -> ODB {
+    sim: SimVFS = SimVFS()
+    p: Pager = create(sim, 4096)
+    db: ODB = ODB(sim, p)
+    cust: Documents = db.schema("customers", _customers()).meta({primary: ["id"]})
+    orders: Documents = db.schema("orders", _orders()).meta({
+        primary: ["id"],
+        refs: { customer_id: { to: "customers.id", on_delete: "restrict" } },
+    })
+    cust.save({id: 1, name: "Ada", city: "Lagos"})
+    cust.save({id: 2, name: "Zed", city: "Kano"})
+    orders.save({id: 10, customer_id: 1, status: "paid", total: 100})
+    orders.save({id: 11, customer_id: 1, status: "draft", total: 30})
+    orders.save({id: 12, customer_id: 2, status: "paid", total: 50})
+    return db
+}
+
+def _data(reply: str) -> dict[str, Any] {
+    obj_any: Any = loads(reply)
+    obj: dict[str, Any] = obj_any
+    d_any: Any = obj["data"]
+    d: dict[str, Any] = d_any
+    return d
+}
+
+
+class TranslationTest(TestCase) {
+    def test_where_operators() -> None {
+        w_any: Any = loads("{\"city\": {\"_eq\": \"Lagos\"}, \"id\": {\"_gte\": 2}}")
+        w: dict[str, Any] = w_any
+        oql: str = where_to_oql(w)
+        self.assertIn("city == \"Lagos\"", oql)
+        self.assertIn("id >= 2", oql)
+        self.assertIn(" & ", oql)
+    }
+
+    def test_or_not_in() -> None {
+        w_any: Any = loads("{\"_or\": [{\"city\": {\"_eq\": \"Kano\"}}, {\"id\": {\"_in\": [1, 3]}}]}")
+        w: dict[str, Any] = w_any
+        oql: str = where_to_oql(w)
+        self.assertIn("|", oql)
+        self.assertIn("id in [1, 3]", oql)
+
+        w2_any: Any = loads("{\"_not\": {\"name\": {\"_like\": \"A*\"}}}")
+        w2: dict[str, Any] = w2_any
+        self.assertIn("!(name ~ \"A*\")", where_to_oql(w2))
+    }
+
+    def test_field_to_oql() -> None {
+        doc: GqlDoc = parse_graphql("{ customers(where: {city: {_eq: \"Lagos\"}}, order_by: {id: desc}, limit: 5, offset: 2) { name city } }")
+        self.assertEqual(len(doc.fields), 1)
+        oql: str = field_to_oql(doc.fields[0])
+        self.assertEqual(oql, "customers ? city == \"Lagos\" { name, city } | sort -id | take 5 | skip 2")
+    }
+
+    def test_nested_relation() -> None {
+        doc: GqlDoc = parse_graphql("{ customers { name orders(where: {status: {_eq: \"paid\"}}) { id total } } }")
+        oql: str = field_to_oql(doc.fields[0])
+        self.assertEqual(oql, "customers { name, orders ? status == \"paid\" { id, total } }")
+    }
+
+    def test_string_escaping() -> None {
+        doc: GqlDoc = parse_graphql("{ customers(where: {name: {_eq: \"A\\\"da\"}}) { name } }")
+        oql: str = field_to_oql(doc.fields[0])
+        self.assertIn("name == \"A\\\"da\"", oql)
+    }
+}
+
+
+class ExecutionTest(TestCase) {
+    def test_filtered_query() -> None {
+        db: ODB = _db()
+        reply: str = graphql_execute(db, "{ customers(where: {city: {_eq: \"Lagos\"}}) { name } }")
+        d: dict[str, Any] = _data(reply)
+        rows_any: Any = d["customers"]
+        rows: list[Any] = rows_any
+        self.assertEqual(len(rows), 1)
+        row_any: Any = rows[0]
+        row: dict[str, Any] = row_any
+        nm_any: Any = row["name"]
+        nm: str = nm_any
+        self.assertEqual(nm, "Ada")
+    }
+
+    def test_nested_query() -> None {
+        db: ODB = _db()
+        reply: str = graphql_execute(db, "{ customers(where: {id: {_eq: 1}}) { name orders(where: {status: {_eq: \"paid\"}}) { id total } } }")
+        d: dict[str, Any] = _data(reply)
+        rows_any: Any = d["customers"]
+        rows: list[Any] = rows_any
+        row_any: Any = rows[0]
+        row: dict[str, Any] = row_any
+        ords_any: Any = row["orders"]
+        ords: list[Any] = ords_any
+        self.assertEqual(len(ords), 1)
+        o_any: Any = ords[0]
+        o: dict[str, Any] = o_any
+        t_any: Any = o["total"]
+        t: int = t_any
+        self.assertEqual(t, 100)
+    }
+
+    def test_order_limit() -> None {
+        db: ODB = _db()
+        reply: str = graphql_execute(db, "{ orders(order_by: {total: desc}, limit: 2) { id total } }")
+        d: dict[str, Any] = _data(reply)
+        rows_any: Any = d["orders"]
+        rows: list[Any] = rows_any
+        self.assertEqual(len(rows), 2)
+        first_any: Any = rows[0]
+        first: dict[str, Any] = first_any
+        t_any: Any = first["total"]
+        t: int = t_any
+        self.assertEqual(t, 100)
+    }
+
+    def test_agg_count() -> None {
+        db: ODB = _db()
+        reply: str = graphql_execute(db, "{ orders_agg(where: {status: {_eq: \"paid\"}}) { count } }")
+        d: dict[str, Any] = _data(reply)
+        agg_any: Any = d["orders_agg"]
+        agg: dict[str, Any] = agg_any
+        n_any: Any = agg["count"]
+        n: int = n_any
+        self.assertEqual(n, 2)
+    }
+
+    def test_prepare_error_reported() -> None {
+        db: ODB = _db()
+        reply: str = graphql_execute(db, "{ customers(where: {city: {_eq: 7}}) { name } }")
+        obj_any: Any = loads(reply)
+        obj: dict[str, Any] = obj_any
+        self.assertTrue("errors" in obj)
+        self.assertTrue("data" not in obj)
+    }
+}
+
+
+class MutationTest(TestCase) {
+    def test_insert_one() -> None {
+        db: ODB = _db()
+        reply: str = graphql_execute(db, "mutation { insert_customers_one(object: {id: 3, name: \"Ono\", city: \"Ife\"}) { id name } }")
+        d: dict[str, Any] = _data(reply)
+        row_any: Any = d["insert_customers_one"]
+        row: dict[str, Any] = row_any
+        nm_any: Any = row["name"]
+        nm: str = nm_any
+        self.assertEqual(nm, "Ono")
+        self.assertEqual(db.schema("customers").count(), 3)
+    }
+
+    def test_update_by_pk() -> None {
+        db: ODB = _db()
+        reply: str = graphql_execute(db, "mutation { update_customers_by_pk(id: 2, _set: {city: \"Lagos\"}) { id city } }")
+        d: dict[str, Any] = _data(reply)
+        row_any: Any = d["update_customers_by_pk"]
+        row: dict[str, Any] = row_any
+        c_any: Any = row["city"]
+        c: str = c_any
+        self.assertEqual(c, "Lagos")
+        self.assertEqual(len(db.find("customers ? city == \"Lagos\"")), 2)
+    }
+
+    def test_delete_by_pk_and_restrict() -> None {
+        db: ODB = _db()
+        # customer 1 has orders: the restrict ref surfaces as a GraphQL error
+        reply: str = graphql_execute(db, "mutation { delete_customers_by_pk(id: 1) { id } }")
+        obj_any: Any = loads(reply)
+        obj: dict[str, Any] = obj_any
+        self.assertTrue("errors" in obj)
+
+        # deleting the orders first, then the customer, succeeds
+        graphql_execute(db, "mutation { delete_orders_by_pk(id: 10) { id } }")
+        graphql_execute(db, "mutation { delete_orders_by_pk(id: 11) { id } }")
+        reply2: str = graphql_execute(db, "mutation { delete_customers_by_pk(id: 1) { id name } }")
+        d: dict[str, Any] = _data(reply2)
+        row_any: Any = d["delete_customers_by_pk"]
+        row: dict[str, Any] = row_any
+        nm_any: Any = row["name"]
+        nm: str = nm_any
+        self.assertEqual(nm, "Ada")
+        self.assertEqual(db.schema("customers").count(), 1)
+    }
+}
+
+
+class SdlTest(TestCase) {
+    # Type names mirror the schema names exactly (capitalized, underscores
+    # camel-cased) - no depluralization magic to guess wrong on real names.
+    def test_sdl_renders_types_and_relations() -> None {
+        db: ODB = _db()
+        sdl: str = graphql_sdl(db)
+        self.assertIn("type Customers {", sdl)
+        self.assertIn("type Orders {", sdl)
+        self.assertIn("id: Int!", sdl)
+        self.assertIn("city: String", sdl)
+        self.assertIn("customer: Customers", sdl)     # forward N:1
+        self.assertIn("orders: [Orders!]", sdl)       # reverse 1:N
+    }
+}
+
+
+main([TranslationTest(), ExecutionTest(), MutationTest(), SdlTest()])

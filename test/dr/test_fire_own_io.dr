@@ -1,0 +1,162 @@
+# test/dr/test_fire_own_io.dr - own field + fire share + fd-I/O reactor parking.
+#
+# Regression lock for the fire-own-io-bug.md "wall" (2026-07-15). A class
+# holding `own _s: SocketHandle`, shared read-only into a `fire` green thread
+# that parks on fd I/O (accept/recv) while the parent thread also does fd I/O,
+# was believed to deadlock the parent. Runtime debugging (strace) showed the
+# runtime was innocent: the probe ignored bind()'s EADDRINUSE (the port sat in
+# TIME_WAIT for 60s after any successful run), listen() then listened on a
+# kernel-assigned ephemeral port, the client's connect to the hardcoded port
+# was refused, and `await` parked forever on an accept no one could reach. A
+# plain (non-own) field hung identically under the same port state, so the
+# "own-specific" discriminator was an artifact of when each probe ran.
+#
+# This test keeps the exact own+fire+fd shape from the bug doc, with correct
+# port hygiene (SO_REUSEADDR + checked bind), plus the two controls from the
+# doc's matrix: a plain-field fd echo and an own-field timer-parking worker.
+
+from unittest import TestCase, main
+from socket import SocketHandle
+from time import sleep_ms
+
+extern "C" def socket(domain: intc, type: intc, protocol: intc) -> intc
+extern "C" def bind(fd: intc, addr: ptr, addrlen: intc) -> intc
+extern "C" def listen(fd: intc, backlog: intc) -> intc
+extern "C" def setsockopt(fd: intc, level: intc, optname: intc, optval: ptr, optlen: intc) -> intc
+extern "C" def malloc(size: int) -> ptr
+extern "C" def memset(s: ptr, c: intc, n: int) -> ptr
+extern "C" def dragon_ptr_write_i32(p: ptr, offset: intc, val: intc)
+extern "C" def dragon_nb_accept(server_fd: int, addr: ptr, addrlen: ptr) -> int
+extern "C" def dragon_nb_connect(fd: int, addr: ptr, addrlen: int) -> int
+extern "C" def dragon_nb_send(fd: int, buf: str, length: int) -> int
+extern "C" def dragon_nb_recv_str(fd: int, max_len: int) -> str
+extern "C" def dragon_sockaddr_in_new(port: intc, addr: str) -> ptr
+extern "C" def dragon_sockaddr_in_size() -> intc
+extern "C" def free(p: ptr)
+
+# A stream wrapper whose one claim on the kernel socket is an `own` field -
+# the exact shape the TcpStream/TcpListener duality removal migrates to.
+class OwnStream {
+    own _s: SocketHandle
+    def(own s: SocketHandle) { self._s = s }
+    def send(d: str) -> int { return dragon_nb_send(self._s.fd(), d, len(d)) }
+    def recv(n: int) -> str { return dragon_nb_recv_str(self._s.fd(), n) }
+    def close() -> None { self._s.close() }
+}
+
+class OwnListener {
+    own _s: SocketHandle
+    def(own s: SocketHandle) { self._s = s }
+    def acc() -> int { return dragon_nb_accept(self._s.fd(), none, none) }
+    def close() -> None { self._s.close() }
+}
+
+# Plain-field control: same wiring, no `own` on the listener's field.
+class PlainListener {
+    _s: SocketHandle
+    def(s: SocketHandle) { self._s = s }
+    def acc() -> int { return dragon_nb_accept(self._s.fd(), none, none) }
+    def close() -> None { self._s.close() }
+}
+
+# Timer control: an own-field holder crossing fire with sleep parking only.
+class OwnBox {
+    own _v: SocketHandle          # any heap object behind `own`; never used as an fd
+    _n: int
+    def(own v: SocketHandle, n: int) { self._v = v; self._n = n }
+    def n() -> int { return self._n }
+}
+
+# Bind a fresh listening socket on 127.0.0.1:port with SO_REUSEADDR set (a
+# prior run's server-side close parks the port in TIME_WAIT for 60s; without
+# the option, bind fails and listen() silently uses an ephemeral port).
+# Returns the listener fd, or -1 if bind failed.
+def _listen_on(port: int) -> int {
+    lfd: int = socket(2, 1, 0)
+    optval: ptr = malloc(4)
+    memset(optval, 0, 4)
+    dragon_ptr_write_i32(optval, 0, 1)
+    setsockopt(lfd, 1, 2, optval, 4)
+    free(optval)
+    a: ptr = dragon_sockaddr_in_new(port, "127.0.0.1")
+    brc: int = bind(lfd, a, dragon_sockaddr_in_size())
+    free(a)
+    if brc != 0 {
+        return -1
+    }
+    listen(lfd, 8)
+    return lfd
+}
+
+def _echo_own(ls: OwnListener) -> None {
+    cfd: int = ls.acc()
+    conn: OwnStream = OwnStream(SocketHandle.adopt_raw(cfd))
+    msg: str = conn.recv(1024)
+    conn.send("echo:" + msg)
+    conn.close()
+}
+
+def _echo_plain(ls: PlainListener) -> None {
+    cfd: int = ls.acc()
+    conn: OwnStream = OwnStream(SocketHandle.adopt_raw(cfd))
+    msg: str = conn.recv(1024)
+    conn.send("echo:" + msg)
+    conn.close()
+}
+
+def _timer_worker(b: OwnBox) -> int {
+    sleep_ms(10)
+    return b.n() * 2
+}
+
+class FireOwnIoTests(TestCase) {
+    def test_own_field_fire_fd_echo() {
+        lfd: int = _listen_on(54491)
+        self.assertNotEqual(lfd, -1, "bind failed: port 54491 busy")
+        if lfd == -1 { return }
+        ls: OwnListener = OwnListener(SocketHandle.adopt_raw(lfd))
+        t: Task[None] = fire _echo_own(ls)
+
+        cfd: int = socket(2, 1, 0)
+        a: ptr = dragon_sockaddr_in_new(54491, "127.0.0.1")
+        dragon_nb_connect(cfd, a, dragon_sockaddr_in_size())
+        free(a)
+        c: OwnStream = OwnStream(SocketHandle.adopt_raw(cfd))
+        c.send("ping")
+        reply: str = c.recv(1024)
+        await t
+        c.close()
+        ls.close()
+        self.assertEqual(reply, "echo:ping")
+    }
+
+    def test_plain_field_fire_fd_echo() {
+        lfd: int = _listen_on(54492)
+        self.assertNotEqual(lfd, -1, "bind failed: port 54492 busy")
+        if lfd == -1 { return }
+        ls: PlainListener = PlainListener(SocketHandle.adopt_raw(lfd))
+        t: Task[None] = fire _echo_plain(ls)
+
+        cfd: int = socket(2, 1, 0)
+        a: ptr = dragon_sockaddr_in_new(54492, "127.0.0.1")
+        dragon_nb_connect(cfd, a, dragon_sockaddr_in_size())
+        free(a)
+        c: OwnStream = OwnStream(SocketHandle.adopt_raw(cfd))
+        c.send("ping")
+        reply: str = c.recv(1024)
+        await t
+        c.close()
+        ls.close()
+        self.assertEqual(reply, "echo:ping")
+    }
+
+    def test_own_field_fire_timer() {
+        b: OwnBox = OwnBox(SocketHandle.adopt_raw(-1), 21)
+        t: Task[int] = fire _timer_worker(b)
+        sleep_ms(5)
+        got: int = await t
+        self.assertEqual(got, 42)
+    }
+}
+
+main([FireOwnIoTests()])

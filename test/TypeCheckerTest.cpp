@@ -2042,3 +2042,56 @@ TEST(TypeCheckerTest, DeferWellTypedCallOk) {
         "    defer sink(own e)\n"
         "}\n"));
 }
+
+//===----------------------------------------------------------------------===//
+// Identity resources (docs/1604 "Identity resources": the SocketHandle
+// shape). The typechecker owns two of the book's bouncer cases: the
+// borrow-forge into an own-param constructor and the dub of a claim holder.
+// The move/claim cases (use-after-move, double-move) live in
+// OwnershipCheckTest.cpp (OwnCtor*).
+//===----------------------------------------------------------------------===//
+
+TEST(TypeCheckerTest, IdentityResourceBorrowIntoOwnCtorRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "class H {\n"
+        "    _fd: int\n"
+        "    def(fd: int) { self._fd = fd }\n"
+        "}\n"
+        "class R {\n"
+        "    own _h: H\n"
+        "    def(own h: H) { self._h = h }\n"
+        "}\n"
+        "def f() -> None {\n"
+        "    h: H = H(4)\n"
+        "    r: R = R(h)\n"
+        "}\n"));
+}
+
+TEST(TypeCheckerTest, IdentityResourceDubRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "class H {\n"
+        "    _fd: int\n"
+        "    def(fd: int) { self._fd = fd }\n"
+        "}\n"
+        "def f() -> None {\n"
+        "    h: H = H(4)\n"
+        "    h2: H = dub h\n"
+        "}\n"));
+}
+
+TEST(TypeCheckerTest, IdentityResourceBlessedSpellingsOk) {
+    EXPECT_TRUE(checkOk(
+        "class H {\n"
+        "    _fd: int\n"
+        "    def(fd: int) { self._fd = fd }\n"
+        "}\n"
+        "class R {\n"
+        "    own _h: H\n"
+        "    def(own h: H) { self._h = h }\n"
+        "}\n"
+        "def f() -> None {\n"
+        "    fresh: R = R(H(4))\n"
+        "    h: H = H(5)\n"
+        "    moved: R = R(own h)\n"
+        "}\n"));
+}

@@ -1,0 +1,215 @@
+# ODB M5.2 regression suite: OQL expression operators. Arithmetic (+ - * / %),
+# membership `in [..]`, glob `~` / `~*`, coalesce `??`, presence `exists!` /
+# `missing!`, the scalar intrinsics (len! lower! upper! abs! floor! ceil!
+# round!), and computed projections (alias: expr). Prices/costs are chosen so
+# every margin is exact in binary f64.
+
+from unittest import TestCase, main
+from odb import ODB, Documents, Document
+from odb.vfs import SimVFS
+from odb.pager import create, Pager
+from odb.errors import PrepareError
+
+
+def _schema() -> dict[str, Any] {
+    props: dict[str, Any] = {}
+    props["id"] = {"type": "integer"}
+    props["title"] = {"type": "string"}
+    props["price"] = {"type": "number"}
+    props["cost"] = {"type": "number"}
+    props["qty"] = {"type": "integer"}
+    props["sku"] = {"type": "string"}
+    props["rebate"] = {"type": "number"}          # optional
+    req: list[Any] = ["id", "title", "price", "cost", "qty", "sku"]
+    s: dict[str, Any] = {}
+    s["type"] = "object"
+    s["properties"] = props
+    s["required"] = req
+    return s
+}
+
+def _p(idv: int, title: str, price: float, cost: float, qty: int, sku: str) -> dict[str, Any] {
+    d: dict[str, Any] = {}
+    d["id"] = idv
+    d["title"] = title
+    d["price"] = price
+    d["cost"] = cost
+    d["qty"] = qty
+    d["sku"] = sku
+    return d
+}
+
+def _db() -> Documents {
+    sim: SimVFS = SimVFS()
+    p: Pager = create(sim, 4096)
+    db: ODB = ODB(sim, p)
+    c: Documents = db.schema("products", _schema())
+    c.save(_p(1, "Widget", 10.0, 5.0, 100, "WID-1"))     # margin 0.5
+    c.save(_p(2, "Gadget", 20.0, 15.0, 5, "GAD-2"))      # margin 0.25
+    c.save(_p(3, "Gizmo", 8.0, 8.0, 0, "GIZ-3"))         # margin 0.0
+    doo: dict[str, Any] = _p(4, "Doohickey", 100.0, 25.0, 50, "DOO-4")  # margin 0.75
+    doo["rebate"] = 5.0
+    c.save(doo)
+    return c
+}
+
+
+class ComputedProjectionTest(TestCase) {
+    def test_margin_expression() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("products { title, margin: (price - cost) / price }")
+        self.assertEqual(len(rows), 4)
+        m0: float = rows[0]["margin"]
+        m1: float = rows[1]["margin"]
+        m2: float = rows[2]["margin"]
+        m3: float = rows[3]["margin"]
+        self.assertEqual(m0, 0.5)
+        self.assertEqual(m1, 0.25)
+        self.assertEqual(m2, 0.0)
+        self.assertEqual(m3, 0.75)
+    }
+
+    def test_int_arithmetic_stays_int() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("products ? id == 1 { title, twice: qty + qty }")
+        tw: int = rows[0]["twice"]
+        self.assertEqual(tw, 200)
+    }
+
+    def test_gross_float() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("products ? id == 1 { g: price * qty }")
+        g: float = rows[0]["g"]
+        self.assertEqual(g, 1000.0)
+    }
+}
+
+
+class ArithmeticFilterTest(TestCase) {
+    def test_margin_threshold() -> None {
+        c: Documents = _db()
+        # price - cost >= 5: Widget(5), Gadget(5), Doohickey(75)  (Gizmo 0 out)
+        rows: list[Document] = c.db.find("products ? price - cost >= 5 { title }")
+        self.assertEqual(len(rows), 3)
+    }
+}
+
+
+class MembershipTest(TestCase) {
+    def test_string_in_list() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("products ? sku in [\"WID-1\", \"GIZ-3\"] { title }")
+        self.assertEqual(len(rows), 2)
+    }
+
+    def test_numeric_in_list() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("products ? qty in [0, 5] { title }")
+        self.assertEqual(len(rows), 2)         # Gizmo(0), Gadget(5)
+    }
+}
+
+
+class GlobTest(TestCase) {
+    def test_glob_prefix() -> None {
+        c: Documents = _db()
+        w: list[Document] = c.db.find("products ? sku ~ \"WID*\" { title }")
+        self.assertEqual(len(w), 1)
+        g: list[Document] = c.db.find("products ? sku ~ \"G*\" { title }")
+        self.assertEqual(len(g), 2)            # GAD-2, GIZ-3
+    }
+
+    def test_glob_case_insensitive() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("products ? title ~* \"g*\" { title }")
+        self.assertEqual(len(rows), 2)         # Gadget, Gizmo
+    }
+
+    def test_glob_single_char() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("products ? sku ~ \"???-?\" { title }")
+        self.assertEqual(len(rows), 4)         # all skus are 3 letters, dash, digit
+    }
+}
+
+
+class CoalesceAndPresenceTest(TestCase) {
+    def test_coalesce_default() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("products ? (rebate ?? 0) > 0 { title }")
+        self.assertEqual(len(rows), 1)         # only Doohickey has a rebate
+        t: str = rows[0]["title"]
+        self.assertEqual(t, "Doohickey")
+    }
+
+    def test_exists_missing() -> None {
+        c: Documents = _db()
+        ex: list[Document] = c.db.find("products ? exists!(rebate) { title }")
+        self.assertEqual(len(ex), 1)
+        mi: list[Document] = c.db.find("products ? missing!(rebate) { title }")
+        self.assertEqual(len(mi), 3)
+    }
+}
+
+
+class IntrinsicTest(TestCase) {
+    def test_len_filter() -> None {
+        c: Documents = _db()
+        # len(title) > 5: Widget(6), Gadget(6), Doohickey(9); Gizmo(5) out
+        rows: list[Document] = c.db.find("products ? len!(title) > 5 { title }")
+        self.assertEqual(len(rows), 3)
+    }
+
+    def test_lower_projection() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("products ? id == 1 { low: lower!(sku) }")
+        lw: str = rows[0]["low"]
+        self.assertEqual(lw, "wid-1")
+    }
+
+    def test_abs_projection() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("products ? id == 1 { d: abs!(cost - price) }")
+        dd: float = rows[0]["d"]
+        self.assertEqual(dd, 5.0)              # |5 - 10| = 5
+    }
+}
+
+
+class PrepareErrorTest(TestCase) {
+    def _bad(c: Documents, query: str) -> bool {
+        raised: bool = False
+        try {
+            c.db.find(query)
+        } except PrepareError {
+            raised = True
+        }
+        return raised
+    }
+
+    def test_arith_on_string_rejected() -> None {
+        c: Documents = _db()
+        self.assertTrue(self._bad(c, "products { x: title + price }"))
+    }
+
+    def test_unknown_intrinsic() -> None {
+        c: Documents = _db()
+        self.assertTrue(self._bad(c, "products ? sqrt!(price) > 1 { title }"))
+    }
+
+    def test_glob_on_number_rejected() -> None {
+        c: Documents = _db()
+        self.assertTrue(self._bad(c, "products ? price ~ \"1*\" { title }"))
+    }
+}
+
+
+main([
+    ComputedProjectionTest(),
+    ArithmeticFilterTest(),
+    MembershipTest(),
+    GlobTest(),
+    CoalesceAndPresenceTest(),
+    IntrinsicTest(),
+    PrepareErrorTest(),
+])

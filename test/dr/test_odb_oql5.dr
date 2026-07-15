@@ -1,0 +1,136 @@
+# ODB M5.5 regression suite: OQL pipeline stages. Stable sort (ties by _id),
+# descending `-field`, multi-key sort, absent-values-last regardless of
+# direction, `take`/`skip` applied in pipeline order, and sorting aggregate rows.
+
+from unittest import TestCase, main
+from odb import ODB, Documents, Document
+from odb.vfs import SimVFS
+from odb.pager import create, Pager
+
+
+def _schema() -> dict[str, Any] {
+    props: dict[str, Any] = {}
+    props["id"] = {"type": "integer"}
+    props["name"] = {"type": "string"}
+    props["price"] = {"type": "integer"}
+    props["qty"] = {"type": "integer"}
+    props["tag"] = {"type": "string"}             # optional
+    req: list[Any] = ["id", "name", "price", "qty"]
+    s: dict[str, Any] = {}
+    s["type"] = "object"
+    s["properties"] = props
+    s["required"] = req
+    return s
+}
+
+def _p(idv: int, name: str, price: int, qty: int) -> dict[str, Any] {
+    d: dict[str, Any] = {}
+    d["id"] = idv
+    d["name"] = name
+    d["price"] = price
+    d["qty"] = qty
+    return d
+}
+
+def _db() -> Documents {
+    sim: SimVFS = SimVFS()
+    p: Pager = create(sim, 4096)
+    db: ODB = ODB(sim, p)
+    c: Documents = db.schema("products", _schema())
+    c.save(_p(1, "A", 30, 5))
+    c.save(_p(2, "B", 10, 2))
+    c.save(_p(3, "C", 20, 8))
+    c.save(_p(4, "D", 20, 1))                      # same price as C (id 3 < 4)
+    e: dict[str, Any] = _p(5, "E", 40, 3)
+    e["tag"] = "x"
+    c.save(e)
+    return c
+}
+
+def _names(rows: list[Document]) -> list[str] {
+    out: list[str] = []
+    for r in rows {
+        nm: str = r["name"]
+        out.append(nm)
+    }
+    return out
+}
+
+
+class SortTest(TestCase) {
+    def test_ascending_stable() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("products { name, price } | sort price")
+        # 10 B, 20 C, 20 D, 30 A, 40 E ; the 20 tie breaks by _id (C=3 < D=4)
+        self.assertEqual(_names(rows), ["B", "C", "D", "A", "E"])
+    }
+
+    def test_descending() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("products { name, price } | sort -price")
+        # 40 E, 30 A, 20 (C then D by _id), 10 B
+        self.assertEqual(_names(rows), ["E", "A", "C", "D", "B"])
+    }
+
+    def test_multi_key() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("products { name, price, qty } | sort price, -qty")
+        # price asc, then qty desc within a price group: 20 -> C(qty8) before D(qty1)
+        self.assertEqual(_names(rows), ["B", "C", "D", "A", "E"])
+    }
+
+    def test_absent_orders_last() -> None {
+        c: Documents = _db()
+        asc: list[Document] = c.db.find("products { name, tag } | sort tag")
+        # only E has a tag; present sorts before absent regardless of direction
+        an: list[str] = _names(asc)
+        self.assertEqual(an[0], "E")
+        self.assertEqual(len(asc), 5)
+        desc: list[Document] = c.db.find("products { name, tag } | sort -tag")
+        dn: list[str] = _names(desc)
+        self.assertEqual(dn[0], "E")               # absent still last under desc
+    }
+}
+
+
+class TakeSkipTest(TestCase) {
+    def test_take() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("products { name, price } | sort price | take 2")
+        self.assertEqual(_names(rows), ["B", "C"])
+    }
+
+    def test_skip() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("products { name, price } | sort price | skip 3")
+        self.assertEqual(_names(rows), ["A", "E"])
+    }
+
+    def test_pipeline_order_skip_then_take() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("products { name, price } | sort price | skip 1 | take 2")
+        # sorted B,C,D,A,E ; skip 1 -> C,D,A,E ; take 2 -> C,D
+        self.assertEqual(_names(rows), ["C", "D"])
+    }
+}
+
+
+class SortAggregateTest(TestCase) {
+    def test_sort_grouped_rows() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("products by price { price, n: count!() } | sort -n")
+        # price 20 has 2 (C,D); every other price has 1. Top row is the n=2 group.
+        self.assertEqual(len(rows), 4)
+        top_n: int = rows[0]["n"]
+        top_price: int = rows[0]["price"]
+        self.assertEqual(top_n, 2)
+        self.assertEqual(top_price, 20)
+    }
+}
+
+
+main([
+    SortTest(),
+    TakeSkipTest(),
+    SortAggregateTest(),
+])

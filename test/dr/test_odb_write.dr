@@ -1,0 +1,238 @@
+# ODB M6 regression suite: OQL writes. add (single + batch), set (deep-merge,
+# expressions over the current doc), unset (optional fields), put (full
+# replace), del, $params, and atomic { ... } blocks that commit as ONE
+# transaction (a failure rolls the whole block back).
+
+from unittest import TestCase, main
+from odb import ODB, Documents, Document
+from odb.vfs import SimVFS
+from odb.pager import create, open_pager, Pager
+from odb.errors import IntegrityError, NotFound, PrepareError
+
+
+def _schema() -> dict[str, Any] {
+    props: dict[str, Any] = {}
+    props["id"] = {"type": "integer"}
+    props["name"] = {"type": "string"}
+    props["email"] = {"type": "string"}
+    props["city"] = {"type": "string"}
+    props["visits"] = {"type": "integer"}
+    props["nickname"] = {"type": "string"}        # optional
+    req: list[Any] = ["id", "name", "email", "city", "visits"]
+    s: dict[str, Any] = {}
+    s["type"] = "object"
+    s["properties"] = props
+    s["required"] = req
+    return s
+}
+
+def _meta() -> dict[str, Any] {
+    pk: list[Any] = ["id"]
+    uq: list[Any] = ["email"]
+    ix: list[Any] = ["city"]
+    m: dict[str, Any] = {}
+    m["primary"] = pk
+    m["unique"] = uq
+    m["index"] = ix
+    return m
+}
+
+def _db() -> ODB {
+    sim: SimVFS = SimVFS()
+    p: Pager = create(sim, 4096)
+    db: ODB = ODB(sim, p)
+    db.schema("customers", _schema()).meta(_meta())
+    return db
+}
+
+def _count(db: ODB) -> int {
+    return db.schema("customers").count()
+}
+
+def _city_of(db: ODB, idv: int) -> str {
+    rows: list[Document] = db.find("customers ? id == " + str(idv) + " { city }")
+    c: str = rows[0]["city"]
+    return c
+}
+
+
+class AddTest(TestCase) {
+    def test_add_single() -> None {
+        db: ODB = _db()
+        n: int = db.run("add customers { id: 1, name: \"Ada\", email: \"ada@x.com\", city: \"Lagos\", visits: 0 }")
+        self.assertEqual(n, 1)
+        self.assertEqual(_count(db), 1)
+        self.assertEqual(_city_of(db, 1), "Lagos")
+    }
+
+    def test_add_batch() -> None {
+        db: ODB = _db()
+        n: int = db.run("add customers [{ id: 1, name: \"A\", email: \"a@x.com\", city: \"Lagos\", visits: 0 }, { id: 2, name: \"B\", email: \"b@x.com\", city: \"Kano\", visits: 0 }]")
+        self.assertEqual(n, 2)
+        self.assertEqual(_count(db), 2)
+    }
+
+    def test_add_unique_violation() -> None {
+        db: ODB = _db()
+        db.run("add customers { id: 1, name: \"A\", email: \"dup@x.com\", city: \"Lagos\", visits: 0 }")
+        raised: bool = False
+        try {
+            db.run("add customers { id: 2, name: \"B\", email: \"dup@x.com\", city: \"Kano\", visits: 0 }")
+        } except IntegrityError {
+            raised = True
+        }
+        self.assertTrue(raised)
+        self.assertEqual(_count(db), 1)         # rejected add rolled back
+    }
+}
+
+
+class SetUnsetPutDelTest(TestCase) {
+    def _seed(db: ODB) -> None {
+        db.run("add customers { id: 1, name: \"Ada\", email: \"ada@x.com\", city: \"Lagos\", visits: 5, nickname: \"Ace\" }")
+    }
+
+    def test_set_and_expression() -> None {
+        db: ODB = _db()
+        self._seed(db)
+        n: int = db.run("set customers ? id == 1 { city: \"Abuja\", visits: visits + 1 }")
+        self.assertEqual(n, 1)
+        self.assertEqual(_city_of(db, 1), "Abuja")
+        rows: list[Document] = db.find("customers ? id == 1 { visits }")
+        v: int = rows[0]["visits"]
+        self.assertEqual(v, 6)
+    }
+
+    def test_unset_optional() -> None {
+        db: ODB = _db()
+        self._seed(db)
+        rows0: list[Document] = db.find("customers ? id == 1 { nickname }")
+        nk0: str = rows0[0]["nickname"]
+        self.assertEqual(nk0, "Ace")
+        db.run("unset customers ? id == 1 { nickname }")
+        # nickname now absent -> reading it raises KeyError (omitted from output)
+        rows1: list[Document] = db.find("customers ? id == 1 { nickname }")
+        missing: bool = False
+        try {
+            x: str = rows1[0]["nickname"]
+        } except KeyError {
+            missing = True
+        }
+        self.assertTrue(missing)
+    }
+
+    def test_unset_required_rejected() -> None {
+        db: ODB = _db()
+        self._seed(db)
+        raised: bool = False
+        try {
+            db.run("unset customers ? id == 1 { city }")
+        } except PrepareError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+
+    def test_put_full_replace() -> None {
+        db: ODB = _db()
+        self._seed(db)
+        db.run("put customers ? id == 1 { id: 1, name: \"Ada2\", email: \"ada@x.com\", city: \"Kano\", visits: 0 }")
+        self.assertEqual(_city_of(db, 1), "Kano")
+        # nickname (previously set) is gone after a full replace
+        rows: list[Document] = db.find("customers ? id == 1 { nickname }")
+        missing: bool = False
+        try {
+            x: str = rows[0]["nickname"]
+        } except KeyError {
+            missing = True
+        }
+        self.assertTrue(missing)
+    }
+
+    def test_del() -> None {
+        db: ODB = _db()
+        self._seed(db)
+        db.run("add customers { id: 2, name: \"B\", email: \"b@x.com\", city: \"Kano\", visits: 0 }")
+        n: int = db.run("del customers ? city == \"Kano\"")
+        self.assertEqual(n, 1)
+        self.assertEqual(_count(db), 1)         # only Ada (Lagos) remains
+    }
+}
+
+
+class ParamsTest(TestCase) {
+    def test_params_in_set() -> None {
+        db: ODB = _db()
+        db.run("add customers { id: 1, name: \"Ada\", email: \"ada@x.com\", city: \"Lagos\", visits: 0 }")
+        params: dict[str, Any] = {}
+        params["id"] = 1
+        params["city"] = "PH"
+        n: int = db.run("set customers ? id == $id { city: $city }", params)
+        self.assertEqual(n, 1)
+        self.assertEqual(_city_of(db, 1), "PH")
+    }
+
+    def test_params_in_find() -> None {
+        db: ODB = _db()
+        db.run("add customers { id: 7, name: \"G\", email: \"g@x.com\", city: \"Jos\", visits: 0 }")
+        params: dict[str, Any] = {}
+        params["c"] = "Jos"
+        rows: list[Document] = db.find("customers ? city == $c { name }", params)
+        self.assertEqual(len(rows), 1)
+        nm: str = rows[0]["name"]
+        self.assertEqual(nm, "G")
+    }
+}
+
+
+class AtomicTest(TestCase) {
+    def test_atomic_commits_all() -> None {
+        db: ODB = _db()
+        db.run("add customers { id: 1, name: \"Ada\", email: \"ada@x.com\", city: \"Lagos\", visits: 0 }")
+        n: int = db.run("atomic { add customers { id: 2, name: \"B\", email: \"b@x.com\", city: \"Kano\", visits: 0 } set customers ? id == 1 { visits: visits + 10 } }")
+        self.assertEqual(n, 2)
+        self.assertEqual(_count(db), 2)
+        rows: list[Document] = db.find("customers ? id == 1 { visits }")
+        v: int = rows[0]["visits"]
+        self.assertEqual(v, 10)
+    }
+
+    def test_atomic_rolls_back_all() -> None {
+        db: ODB = _db()
+        db.run("add customers { id: 1, name: \"Ada\", email: \"ada@x.com\", city: \"Lagos\", visits: 0 }")
+        raised: bool = False
+        try {
+            # first add is valid, second dupes Ada's email -> the whole block aborts
+            db.run("atomic { add customers { id: 2, name: \"B\", email: \"b@x.com\", city: \"Kano\", visits: 0 } add customers { id: 3, name: \"C\", email: \"ada@x.com\", city: \"Jos\", visits: 0 } }")
+        } except IntegrityError {
+            raised = True
+        }
+        self.assertTrue(raised)
+        self.assertEqual(_count(db), 1)         # neither id 2 nor id 3 landed
+    }
+}
+
+
+class WriteReopenTest(TestCase) {
+    def test_writes_persist() -> None {
+        sim: SimVFS = SimVFS()
+        p: Pager = create(sim, 4096)
+        db: ODB = ODB(sim, p)
+        db.schema("customers", _schema()).meta(_meta())
+        db.run("add customers { id: 1, name: \"Ada\", email: \"ada@x.com\", city: \"Lagos\", visits: 0 }")
+        db.run("set customers ? id == 1 { city: \"Abuja\" }")
+
+        p2: Pager = open_pager(sim)
+        db2: ODB = ODB(sim, p2)
+        self.assertEqual(_city_of(db2, 1), "Abuja")
+    }
+}
+
+
+main([
+    AddTest(),
+    SetUnsetPutDelTest(),
+    ParamsTest(),
+    AtomicTest(),
+    WriteReopenTest(),
+])

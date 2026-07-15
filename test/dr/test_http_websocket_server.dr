@@ -71,8 +71,8 @@ def _ws_accept_serve(lis: TcpListener, app: Router, n: int, fds: list[int]) -> N
     i: int = 0
     while i < n {
         const conn: TcpStream = lis.do_accept()
-        fds.append(conn.fd)
-        const reader: ConnReader = FdReader(SocketHandle.adopt_raw(conn.fd))
+        fds.append(conn.raw_fd())
+        const reader: ConnReader = FdReader(own conn)
         app.serve_connection(reader)
         i = i + 1
     }

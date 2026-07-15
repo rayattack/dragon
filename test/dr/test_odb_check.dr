@@ -1,0 +1,154 @@
+# ODB M4(g) regression suite: `db.check()`, the one-pass whole-database verifier
+# (spec section 21). It composes the structural tree checks with index
+# completeness (one entry per document per index), unique-claim correctness, and
+# referential integrity. The counts are asserted exactly, so the pass is not
+# vacuous, and the check must stay clean across edits, wipes, and a reopen.
+
+from unittest import TestCase, main
+from odb import ODB, Documents, Document, CheckReport
+from odb.vfs import SimVFS
+from odb.pager import create, open_pager, Pager
+
+
+def _customers_schema() -> dict[str, Any] {
+    props: dict[str, Any] = {}
+    props["id"] = {"type": "integer"}
+    props["name"] = {"type": "string"}
+    props["email"] = {"type": "string"}
+    props["city"] = {"type": "string"}
+    req: list[Any] = ["id", "name", "email", "city"]
+    s: dict[str, Any] = {}
+    s["type"] = "object"
+    s["properties"] = props
+    s["required"] = req
+    return s
+}
+
+def _customers_meta() -> dict[str, Any] {
+    pk: list[Any] = ["id"]
+    uq: list[Any] = ["email"]
+    ix: list[Any] = ["city"]
+    m: dict[str, Any] = {}
+    m["primary"] = pk
+    m["unique"] = uq
+    m["index"] = ix
+    return m
+}
+
+def _orders_schema() -> dict[str, Any] {
+    props: dict[str, Any] = {}
+    props["id"] = {"type": "integer"}
+    props["customer_id"] = {"type": "integer"}
+    props["total"] = {"type": "integer"}
+    req: list[Any] = ["id", "customer_id", "total"]
+    s: dict[str, Any] = {}
+    s["type"] = "object"
+    s["properties"] = props
+    s["required"] = req
+    return s
+}
+
+def _orders_meta() -> dict[str, Any] {
+    pk: list[Any] = ["id"]
+    ref_spec: dict[str, Any] = {}
+    ref_spec["to"] = "customers.id"
+    ref_spec["on_delete"] = "restrict"
+    refs: dict[str, Any] = {}
+    refs["customer_id"] = ref_spec
+    m: dict[str, Any] = {}
+    m["primary"] = pk
+    m["refs"] = refs
+    return m
+}
+
+def _cust(idv: int, nm: str, em: str, ct: str) -> dict[str, Any] {
+    d: dict[str, Any] = {}
+    d["id"] = idv
+    d["name"] = nm
+    d["email"] = em
+    d["city"] = ct
+    return d
+}
+
+def _order(idv: int, cid: int, total: int) -> dict[str, Any] {
+    d: dict[str, Any] = {}
+    d["id"] = idv
+    d["customer_id"] = cid
+    d["total"] = total
+    return d
+}
+
+def _mem() -> ODB {
+    sim: SimVFS = SimVFS()
+    p: Pager = create(sim, 4096)
+    return ODB(sim, p)
+}
+
+def _build(db: ODB) -> list[Documents] {
+    c: Documents = db.schema("customers", _customers_schema()).meta(_customers_meta())
+    o: Documents = db.schema("orders", _orders_schema()).meta(_orders_meta())
+    c.save(_cust(1, "Ada", "ada@x.com", "Lagos"))
+    c.save(_cust(2, "Bee", "bee@x.com", "Lagos"))
+    c.save(_cust(3, "Cy", "cy@x.com", "Kano"))
+    o.save(_order(10, 1, 50))
+    o.save(_order(11, 1, 70))
+    o.save(_order(12, 2, 20))
+    o.save(_order(13, 3, 90))
+    return [c, o]
+}
+
+
+class CheckTest(TestCase) {
+    def test_clean_db_checks_with_exact_counts() -> None {
+        db: ODB = _mem()
+        _build(db)
+        rep: CheckReport = db.check()
+        self.assertTrue(rep.ok, rep.message)
+        # 3 customers + 4 orders
+        self.assertEqual(rep.docs, 7)
+        # customers: pk + u:email + i:city = 3 indexes x 3 docs = 9
+        # orders:    pk + rev:customer_id  = 2 indexes x 4 docs = 8
+        self.assertEqual(rep.index_entries, 17)
+    }
+
+    def test_check_stable_after_edit_and_wipe() -> None {
+        db: ODB = _mem()
+        cols: list[Documents] = _build(db)
+        customers: Documents = cols[0]
+        orders: Documents = cols[1]
+
+        # move a customer (updates the city index and the email unique index)
+        ada: Document = customers.read(id=1)
+        ada.edit({city: "Abuja", email: "ada@new.com"})
+
+        # wipe an order (updates the pk index and the reverse index)
+        o12: Document = orders.read(id=12)
+        o12.wipe()
+
+        rep: CheckReport = db.check()
+        self.assertTrue(rep.ok, rep.message)
+        self.assertEqual(rep.docs, 6)                 # 3 customers + 3 orders
+        # customers 3x3=9 ; orders 2x3=6
+        self.assertEqual(rep.index_entries, 15)
+    }
+
+    def test_check_survives_reopen() -> None {
+        sim: SimVFS = SimVFS()
+        p: Pager = create(sim, 4096)
+        db: ODB = ODB(sim, p)
+        _build(db)
+
+        p2: Pager = open_pager(sim)
+        db2: ODB = ODB(sim, p2)
+        # touch the schemas so their handles/meta are live, then check
+        db2.schema("customers")
+        db2.schema("orders")
+        rep: CheckReport = db2.check()
+        self.assertTrue(rep.ok, rep.message)
+        self.assertEqual(rep.docs, 7)
+        self.assertEqual(rep.index_entries, 17)
+    }
+}
+
+
+main([CheckTest()])

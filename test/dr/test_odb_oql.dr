@@ -1,0 +1,189 @@
+# ODB M5.1 regression suite: OQL reads over one source - filters (comparisons,
+# & | ! and parentheses, bare boolean fields), projection, whole-document reads,
+# two-valued logic (absent-field comparisons are false, never unknown), and
+# prepare-time type errors. Runtime-string entry db.find(text).
+
+from unittest import TestCase, main
+from odb import ODB, Documents, Document
+from odb.vfs import SimVFS
+from odb.pager import create, Pager
+from odb.errors import NotFound, PrepareError
+
+
+def _schema() -> dict[str, Any] {
+    props: dict[str, Any] = {}
+    props["id"] = {"type": "integer"}
+    props["name"] = {"type": "string"}
+    props["city"] = {"type": "string"}
+    props["age"] = {"type": "integer"}
+    props["active"] = {"type": "boolean"}
+    props["score"] = {"type": "integer"}          # optional (not required)
+    req: list[Any] = ["id", "name", "city", "age", "active"]
+    s: dict[str, Any] = {}
+    s["type"] = "object"
+    s["properties"] = props
+    s["required"] = req
+    return s
+}
+
+def _row(idv: int, nm: str, ct: str, ag: int, ac: bool) -> dict[str, Any] {
+    d: dict[str, Any] = {}
+    d["id"] = idv
+    d["name"] = nm
+    d["city"] = ct
+    d["age"] = ag
+    d["active"] = ac
+    return d
+}
+
+def _db() -> Documents {
+    sim: SimVFS = SimVFS()
+    p: Pager = create(sim, 4096)
+    db: ODB = ODB(sim, p)
+    c: Documents = db.schema("customers", _schema())
+    ada: dict[str, Any] = _row(1, "Ada", "Lagos", 30, True)
+    ada["score"] = 500
+    c.save(ada)
+    c.save(_row(2, "Bee", "Lagos", 16, False))
+    cy: dict[str, Any] = _row(3, "Cy", "Kano", 40, True)
+    cy["score"] = 50
+    c.save(cy)
+    c.save(_row(4, "Dee", "Abuja", 15, True))
+    return c
+}
+
+
+class FilterTest(TestCase) {
+    def test_eq_and_projection() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("customers ? city == \"Lagos\" { name }")
+        self.assertEqual(len(rows), 2)
+        n0: str = rows[0]["name"]
+        n1: str = rows[1]["name"]
+        self.assertEqual(n0, "Ada")
+        self.assertEqual(n1, "Bee")
+        # only the projected field (plus _id) is present
+        missing: bool = False
+        try {
+            x: str = rows[0]["city"]
+        } except KeyError {
+            missing = True
+        }
+        self.assertTrue(missing)
+    }
+
+    def test_numeric_and_bool() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("customers ? age >= 18 & active { name }")
+        self.assertEqual(len(rows), 2)         # Ada(30,t), Cy(40,t)
+        a0: str = rows[0]["name"]
+        a1: str = rows[1]["name"]
+        self.assertEqual(a0, "Ada")
+        self.assertEqual(a1, "Cy")
+    }
+
+    def test_or_not_parens() -> None {
+        c: Documents = _db()
+        # Lagos (Ada, Bee) OR (age < 18 & active) (Dee) = 3
+        rows: list[Document] = c.db.find("customers ? city == \"Lagos\" | (age < 18 & active) { name }")
+        self.assertEqual(len(rows), 3)
+    }
+
+    def test_bare_bool_and_negation() -> None {
+        c: Documents = _db()
+        act: list[Document] = c.db.find("customers ? active { name }")
+        self.assertEqual(len(act), 3)          # Ada, Cy, Dee
+        inact: list[Document] = c.db.find("customers ? !active { name }")
+        self.assertEqual(len(inact), 1)        # Bee
+        bn: str = inact[0]["name"]
+        self.assertEqual(bn, "Bee")
+    }
+
+    def test_string_ordering() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("customers ? name >= \"C\" { name }")
+        self.assertEqual(len(rows), 2)         # Cy, Dee
+    }
+}
+
+
+class TwoValuedLogicTest(TestCase) {
+    # spec section 10: a comparison touching an absent field is FALSE, and !p is
+    # pure negation, so !(score > 100) is TRUE for docs with no score.
+    def test_absent_field_is_false() -> None {
+        c: Documents = _db()
+        hi: list[Document] = c.db.find("customers ? score > 100 { name }")
+        self.assertEqual(len(hi), 1)           # only Ada (500); Bee/Dee absent -> false
+        hn: str = hi[0]["name"]
+        self.assertEqual(hn, "Ada")
+
+        not_hi: list[Document] = c.db.find("customers ? !(score > 100) { name }")
+        self.assertEqual(len(not_hi), 3)       # Bee, Cy, Dee (Cy 50; Bee/Dee absent -> !false)
+    }
+}
+
+
+class WholeDocTest(TestCase) {
+    def test_no_block_returns_full_documents() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find("customers")
+        self.assertEqual(len(rows), 4)
+        # full document: required fields all present
+        cty: str = rows[0]["city"]
+        self.assertEqual(cty, "Lagos")
+        ag: int = rows[2]["age"]
+        self.assertEqual(ag, 40)
+    }
+}
+
+
+class PrepareErrorTest(TestCase) {
+    def _expect_prepare(c: Documents, query: str) -> bool {
+        raised: bool = False
+        try {
+            c.db.find(query)
+        } except PrepareError {
+            raised = True
+        }
+        return raised
+    }
+
+    def test_unknown_field_filter() -> None {
+        c: Documents = _db()
+        self.assertTrue(self._expect_prepare(c, "customers ? bogus == 1 { name }"))
+    }
+
+    def test_type_mismatch() -> None {
+        c: Documents = _db()
+        self.assertTrue(self._expect_prepare(c, "customers ? age == \"x\" { name }"))
+    }
+
+    def test_unknown_projection_field() -> None {
+        c: Documents = _db()
+        self.assertTrue(self._expect_prepare(c, "customers { bogus }"))
+    }
+
+    def test_bare_nonbool_field_rejected() -> None {
+        c: Documents = _db()
+        self.assertTrue(self._expect_prepare(c, "customers ? age { name }"))
+    }
+
+    def test_unknown_schema() -> None {
+        c: Documents = _db()
+        raised: bool = False
+        try {
+            c.db.find("widgets ? id == 1 { id }")
+        } except NotFound {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+}
+
+
+main([
+    FilterTest(),
+    TwoValuedLogicTest(),
+    WholeDocTest(),
+    PrepareErrorTest(),
+])

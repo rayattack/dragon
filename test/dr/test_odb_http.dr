@@ -1,0 +1,298 @@
+# ODB M9 regression suite: the HTTP/JSON gateway (spec section 18). Driven
+# network-free through Router.serve_connection over canned request bytes,
+# exactly like the stdlib http keep-alive suite: the full router pipeline
+# runs, and the wire bytes written back carry the assertions.
+
+from unittest import TestCase, main
+from odb import ODB, Documents
+from odb.vfs import SimVFS
+from odb.pager import create, Pager
+from odb.gateway import gateway
+from http.server import Router, MemoryReader, ConnReader, FdReader
+from socket import TcpListener, TcpStream, SocketHandle
+from json import dumps, loads
+
+
+def _customers() -> dict[str, Any] {
+    return { "type": "object",
+             "properties": { "id": {"type": "integer"},
+                             "name": {"type": "string"},
+                             "city": {"type": "string"} },
+             "required": ["id", "name"] }
+}
+
+def _db() -> ODB {
+    sim: SimVFS = SimVFS()
+    p: Pager = create(sim, 4096)
+    db: ODB = ODB(sim, p)
+    cust: Documents = db.schema("customers", _customers()).meta({primary: ["id"], unique: ["name"]})
+    cust.save({id: 1, name: "Ada", city: "Lagos"})
+    cust.save({id: 2, name: "Zed", city: "Kano"})
+    return db
+}
+
+def _post(path: str, body: str) -> bytes {
+    head: str = "POST " + path + " HTTP/1.1\r\nHost: h\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: " + str(len(body)) + "\r\n\r\n"
+    return (head + body).encode()
+}
+
+def _get(path: str, extra: str) -> bytes {
+    return ("GET " + path + " HTTP/1.1\r\nHost: h\r\n" + extra + "Connection: close\r\n\r\n").encode()
+}
+
+# The JSON body is the last line of the HTTP response text.
+def _body_json(sent: str) -> dict[str, Any] {
+    sep: int = sent.find("\r\n\r\n")
+    body: str = sent[sep + 4:]
+    obj_any: Any = loads(body)
+    obj: dict[str, Any] = obj_any
+    return obj
+}
+
+def _drive(db: ODB, req: bytes) -> str {
+    app: Router = gateway(db)
+    mr: MemoryReader = MemoryReader([req])
+    app.serve_connection(mr)
+    return mr.sent
+}
+
+
+class QueryEndpointTest(TestCase) {
+    def test_read_rows() -> None {
+        db: ODB = _db()
+        body: dict[str, Any] = {}
+        body["q"] = "customers ? city == $c { name }"
+        params: dict[str, Any] = {}
+        params["c"] = "Lagos"
+        p_any: Any = params
+        body["params"] = p_any
+        sent: str = _drive(db, _post("/query", dumps(body)))
+        self.assertIn("200", sent[0:20])
+        reply: dict[str, Any] = _body_json(sent)
+        rows_any: Any = reply["rows"]
+        rows: list[Any] = rows_any
+        self.assertEqual(len(rows), 1)
+        row_any: Any = rows[0]
+        row: dict[str, Any] = row_any
+        nm_any: Any = row["name"]
+        nm: str = nm_any
+        self.assertEqual(nm, "Ada")
+    }
+
+    def test_write_counts() -> None {
+        db: ODB = _db()
+        body: dict[str, Any] = {}
+        body["q"] = "set customers ? id == 2 { city: \"Lagos\" }"
+        sent: str = _drive(db, _post("/query", dumps(body)))
+        reply: dict[str, Any] = _body_json(sent)
+        n_any: Any = reply["count"]
+        n: int = n_any
+        self.assertEqual(n, 1)
+        # and it actually landed
+        self.assertEqual(len(db.find("customers ? city == \"Lagos\"")), 2)
+    }
+
+    def test_prepare_error_is_400() -> None {
+        db: ODB = _db()
+        body: dict[str, Any] = {}
+        body["q"] = "customers ? city == 7"
+        sent: str = _drive(db, _post("/query", dumps(body)))
+        self.assertIn("400", sent[0:20])
+        reply: dict[str, Any] = _body_json(sent)
+        kind_any: Any = reply["error"]
+        kind: str = kind_any
+        self.assertEqual(kind, "PrepareError")
+    }
+
+    def test_integrity_error_is_409() -> None {
+        db: ODB = _db()
+        body: dict[str, Any] = {}
+        body["q"] = "add customers { id: 9, name: \"Ada\" }"
+        sent: str = _drive(db, _post("/query", dumps(body)))
+        self.assertIn("409", sent[0:20])
+    }
+}
+
+
+class SchemasEndpointTest(TestCase) {
+    def test_catalog() -> None {
+        db: ODB = _db()
+        sent: str = _drive(db, _get("/schemas", ""))
+        reply: dict[str, Any] = _body_json(sent)
+        arr_any: Any = reply["schemas"]
+        arr: list[Any] = arr_any
+        self.assertEqual(len(arr), 1)
+        rec_any: Any = arr[0]
+        rec: dict[str, Any] = rec_any
+        nm_any: Any = rec["name"]
+        nm: str = nm_any
+        self.assertEqual(nm, "customers")
+    }
+}
+
+
+class WatchEndpointTest(TestCase) {
+    # SSE: one event per matching change, id: carries the resume CSN, and the
+    # stream ends with an `event: end` carrying the token to reconnect from.
+    def test_sse_events() -> None {
+        db: ODB = _db()
+        sent: str = _drive(db, _get("/watch?q=customers&since=0", ""))
+        self.assertIn("text/event-stream", sent)
+        self.assertIn("data: ", sent)
+        self.assertIn("Ada", sent)
+        self.assertIn("Zed", sent)
+        self.assertIn("event: end", sent)
+        self.assertIn("id: " + str(db.pager.last_csn), sent)
+    }
+
+    # Last-Event-ID resumes past what was already delivered.
+    def test_last_event_id_resumes() -> None {
+        db: ODB = _db()
+        mark: int = db.pager.last_csn
+        db.schema("customers").save({id: 3, name: "Ono", city: "Ife"})
+        sent: str = _drive(db, _get("/watch?q=customers", "Last-Event-ID: " + str(mark) + "\r\n"))
+        self.assertIn("Ono", sent)
+        self.assertNotIn("Ada", sent)
+    }
+
+    # A resume point older than retention is a loud 409, never a silent gap.
+    def test_trimmed_resume_is_409() -> None {
+        db: ODB = _db()
+        db.retain("1 txns")
+        cust: Documents = db.schema("customers")
+        i: int = 0
+        while i < 4 {
+            cust.save({id: 10 + i, name: "n" + str(i), city: "x"})
+            i = i + 1
+        }
+        sent: str = _drive(db, _get("/watch?q=customers&since=1", ""))
+        self.assertIn("409", sent[0:20])
+    }
+}
+
+
+# A connection fake for LIVE streams: serves one canned request, captures
+# every send, and reports the client gone after `budget` sends - which is how
+# a live stream's infinite loop is proven to terminate on disconnect.
+class CappedConn(ConnReader) {
+    inbox: bytes
+    served: bool
+    sent: list[str]
+    budget: int
+    closed: bool
+
+    def(inbox: bytes, budget: int) {
+        self.inbox = inbox
+        self.served = False
+        self.sent = []
+        self.budget = budget
+        self.closed = False
+    }
+
+    def recv(max_len: int) -> bytes {
+        if self.served {
+            return b""
+        }
+        self.served = True
+        return self.inbox
+    }
+
+    def send(data: str) -> int {
+        if self.budget <= 0 {
+            return -1
+        }
+        self.budget = self.budget - 1
+        self.sent.append(data)
+        return len(data)
+    }
+
+    def close() -> None {
+        self.closed = True
+    }
+}
+
+
+class LiveWatchTest(TestCase) {
+    # The cede path end to end through serve_connection: headers first,
+    # then retained events pushed, heartbeats on the quiet feed, and a clean
+    # termination + close (via the callback's defer) when the client is gone.
+    def test_live_stream_pushes_and_closes() -> None {
+        db: ODB = _db()
+        app: Router = gateway(db)
+        conn: CappedConn = CappedConn(_get("/watch?q=customers&since=0&live=1", ""), 5)
+        app.serve_connection(conn)
+
+        all_sent: str = "".join(conn.sent)
+        self.assertIn("text/event-stream", conn.sent[0])
+        self.assertIn("Ada", all_sent)
+        self.assertIn("Zed", all_sent)
+        self.assertIn(": hb", all_sent)          # heartbeats flowed after the drain
+        self.assertNotIn("event: end", all_sent) # live streams do not end themselves
+        self.assertTrue(conn.closed)             # defer conn.close() ran on the way out
+    }
+
+    # Falling behind retention mid-stream ends the stream with a loud SSE
+    # error event, never a silent gap.
+    def test_live_stream_retention_overrun_is_loud() -> None {
+        db: ODB = _db()
+        db.retain("1 txns")
+        cust: Documents = db.schema("customers")
+        i: int = 0
+        while i < 4 {
+            cust.save({id: 10 + i, name: "n" + str(i), city: "x"})
+            i = i + 1
+        }
+        app: Router = gateway(db)
+        conn: CappedConn = CappedConn(_get("/watch?q=customers&since=1&live=1", ""), 8)
+        app.serve_connection(conn)
+
+        all_sent: str = "".join(conn.sent)
+        self.assertIn("event: error", all_sent)
+        self.assertIn("retention", all_sent)
+        self.assertTrue(conn.closed)
+    }
+}
+
+
+# Real-socket smoke: the live stream over an actual loopback connection. The
+# server task owns the db and serves exactly one connection; the client reads
+# the pushed events off the wire and hangs up; the heartbeat probe then fails
+# and the stream (and the fired task) terminate.
+def _serve_live(lis: TcpListener) -> int {
+    db: ODB = _db()
+    app: Router = gateway(db)
+    conn: TcpStream = lis.do_accept()
+    app.serve_connection(FdReader(own conn))
+    return 1
+}
+
+class LiveWatchSocketTest(TestCase) {
+    def test_live_stream_over_socket() -> None {
+        lis: TcpListener = TcpListener("127.0.0.1", 54473)
+        lis.do_bind()
+        lis.do_listen(4)
+        t: Task[int] = fire _serve_live(lis)
+
+        c: TcpStream = TcpStream.open("127.0.0.1", 54473)
+        c.do_send("GET /watch?q=customers&since=0&live=1 HTTP/1.1\r\nHost: h\r\n\r\n")
+        got: str = ""
+        while got.find("Ada") < 0 or got.find("Zed") < 0 {
+            chunk: str = c.do_recv(2048)
+            if len(chunk) == 0 {
+                break
+            }
+            got = got + chunk
+        }
+        c.close()                        # hang up; the server's heartbeat probe fails
+
+        self.assertIn("text/event-stream", got)
+        self.assertIn("Ada", got)
+        self.assertIn("Zed", got)
+        served: int = t.join()           # the stream terminated and the task returned
+        self.assertEqual(served, 1)
+        lis.close()
+    }
+}
+
+
+main([QueryEndpointTest(), SchemasEndpointTest(), WatchEndpointTest(), LiveWatchTest(), LiveWatchSocketTest()])

@@ -1,0 +1,216 @@
+# ODB M8 regression suite: dump / load / compact (spec section 22). dump is
+# JSONL (schemas with metadata first, then documents with their _id); load is
+# its inverse in ONE transaction with integrity checked at commit, so ref
+# cycles load in any line order; compact rebuilds the live state into a fresh
+# packed file, preserving schema ids and docids and dropping history.
+
+from unittest import TestCase, main
+from odb import ODB, Documents, Document
+from odb.vfs import SimVFS
+from odb.pager import create, open_pager, Pager
+from odb.errors import ODBError, IntegrityError
+from tempfile import mktemp
+from os import remove
+
+
+def _customers() -> dict[str, Any] {
+    return { "type": "object",
+             "properties": { "id": {"type": "integer"},
+                             "name": {"type": "string"} },
+             "required": ["id", "name"] }
+}
+
+def _orders() -> dict[str, Any] {
+    return { "type": "object",
+             "properties": { "id": {"type": "integer"},
+                             "customer_id": {"type": "integer"},
+                             "total": {"type": "integer"} },
+             "required": ["id", "customer_id", "total"] }
+}
+
+def _employees() -> dict[str, Any] {
+    return { "type": "object",
+             "properties": { "id": {"type": "integer"},
+                             "manager_id": {"type": "integer"},
+                             "name": {"type": "string"} },
+             "required": ["id", "manager_id", "name"] }
+}
+
+def _mem() -> ODB {
+    sim: SimVFS = SimVFS()
+    p: Pager = create(sim, 4096)
+    return ODB(sim, p)
+}
+
+# customers + orders with a real ref, some churn, a deleted doc.
+def _build(db: ODB) -> None {
+    cust: Documents = db.schema("customers", _customers()).meta({primary: ["id"]})
+    orders: Documents = db.schema("orders", _orders()).meta({
+        primary: ["id"],
+        refs: { customer_id: { to: "customers.id", on_delete: "restrict" } },
+    })
+    ada: Document = cust.save({id: 1, name: "Ada"})
+    cust.save({id: 2, name: "Zed"})
+    orders.save({id: 10, customer_id: 1, total: 100})
+    orders.save({id: 11, customer_id: 2, total: 50})
+    orders.save({id: 12, customer_id: 1, total: 75})
+    orders.edit(orders.read(id=10).id, {total: 110})
+}
+
+
+class DumpLoadTest(TestCase) {
+    def test_roundtrip() -> None {
+        db: ODB = _mem()
+        _build(db)
+        text: str = db.dump()
+
+        db2: ODB = _mem()
+        n: int = db2.load(text)
+        self.assertEqual(n, 5)
+
+        # documents, values, and docids all survive
+        c2: Documents = db2.schema("customers")
+        o2: Documents = db2.schema("orders")
+        self.assertEqual(c2.count(), 2)
+        self.assertEqual(o2.count(), 3)
+        ada: Document = c2.read(id=1)
+        nm: str = ada["name"]
+        self.assertEqual(nm, "Ada")
+        t: int = o2.read(id=10)["total"]
+        self.assertEqual(t, 110)
+
+        # the loaded db is fully intact: indexes, uniques, refs
+        self.assertTrue(db2.check().ok)
+
+        # metadata survived: the restrict ref still enforces
+        raised: bool = False
+        try {
+            c2.wipe(ada.id)
+        } except IntegrityError {
+            raised = True
+        }
+        self.assertTrue(raised)
+
+        # docid allocation continues past the loaded ids
+        fresh: Document = c2.save({id: 3, name: "New"})
+        self.assertTrue(fresh.id > o2.read(id=12).id)
+    }
+
+    # A reference cycle (self-referencing schema) loads regardless of order
+    # because integrity is validated at commit over the full set.
+    def test_ref_cycle_loads() -> None {
+        db: ODB = _mem()
+        emp: Documents = db.schema("employees", _employees()).meta({
+            primary: ["id"],
+            refs: { manager_id: { to: "employees.id", on_delete: "restrict" } },
+        })
+        emp.save({id: 1, manager_id: 1, name: "Root"})     # self-managing
+        text: str = db.dump()
+
+        db2: ODB = _mem()
+        self.assertEqual(db2.load(text), 1)
+        self.assertTrue(db2.check().ok)
+    }
+
+    def test_load_requires_empty() -> None {
+        db: ODB = _mem()
+        _build(db)
+        text: str = db.dump()
+        raised: bool = False
+        try {
+            db.load(text)
+        } except ODBError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+
+    # A dangling ref in the dump is rejected and the load rolls back whole.
+    def test_bad_load_rolls_back() -> None {
+        db: ODB = _mem()
+        _build(db)
+        text: str = db.dump()
+        # drop the customers docs but keep orders referencing them
+        lines: list[str] = []
+        for line in text.split("\n") {
+            if line.find("\"kind\": \"doc\"") >= 0 and line.find("\"customers\"") >= 0 {
+                continue
+            }
+            lines.append(line)
+        }
+        bad: str = "\n".join(lines)
+
+        db2: ODB = _mem()
+        raised: bool = False
+        try {
+            db2.load(bad)
+        } except IntegrityError {
+            raised = True
+        }
+        self.assertTrue(raised)
+        self.assertEqual(len(db2.changes(0)), 0)      # nothing committed
+    }
+}
+
+
+class CompactTest(TestCase) {
+    def test_compact_preserves_and_packs() -> None {
+        sim: SimVFS = SimVFS()
+        p: Pager = create(sim, 4096)
+        db: ODB = ODB(sim, p)
+        _build(db)
+        # churn to bloat the source file with history and dead pages
+        o: Documents = db.schema("orders")
+        i: int = 0
+        while i < 60 {
+            o.edit(o.read(id=11).id, {total: 50 + i})
+            i = i + 1
+        }
+
+        path: str = mktemp("odb_m8_", ".odb")
+        db.compact(path)
+
+        dst: ODB = ODB(path)
+        self.assertTrue(dst.check().ok)
+        c: Documents = dst.schema("customers")
+        od: Documents = dst.schema("orders")
+        self.assertEqual(c.count(), 2)
+        self.assertEqual(od.count(), 3)
+        t: int = od.read(id=11)["total"]
+        self.assertEqual(t, 109)
+
+        # docids preserved
+        self.assertEqual(od.read(id=10).id, o.read(id=10).id)
+
+        # history dropped: the compacted file starts a fresh, empty feed
+        self.assertEqual(len(dst.changes(0)), 0)
+
+        # packed: far fewer pages than the churned source
+        self.assertTrue(dst.pager.high_water < db.pager.high_water)
+
+        # and the copy keeps working as a writable database
+        c.save({id: 9, name: "Post"})
+        self.assertTrue(dst.check().ok)
+        dst.close()
+        remove(path)
+        remove(path + ".lock")
+    }
+
+    def test_compact_refuses_nonempty_dest() -> None {
+        db: ODB = _mem()
+        _build(db)
+        path: str = mktemp("odb_m8b_", ".odb")
+        db.compact(path)
+        raised: bool = False
+        try {
+            db.compact(path)
+        } except ODBError {
+            raised = True
+        }
+        self.assertTrue(raised)
+        remove(path)
+    }
+}
+
+
+main([DumpLoadTest(), CompactTest()])

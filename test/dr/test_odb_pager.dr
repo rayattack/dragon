@@ -1,0 +1,160 @@
+# ODB M0 regression suite: the pager, its crash-recovery guarantee, checksum
+# corruption detection, and MVCC page-reuse safety. All dogfooded in Dragon and
+# run end to end through the real compiler under ctest.
+
+from unittest import TestCase, main
+from odb.vfs import SimVFS
+from odb.pager import create, open_pager, Pager, Snapshot, PT_DATA
+from odb.codec import blank, put_u64, get_u64
+from odb.errors import CorruptionError
+from odb.sim import run_crash_trials, SimResult
+
+
+def _payload(counter: int, csn: int) -> bytes {
+    buf: list[int] = blank(64)
+    put_u64(buf, 0, counter)
+    put_u64(buf, 8, csn)
+    return bytes(buf)
+}
+
+def _commit_counter(p: Pager, counter: int) -> int {
+    newpg: int = p.alloc()
+    p.stage(newpg, PT_DATA, _payload(counter, p.last_csn + 1))
+    old: int = p.catalog_root
+    p.set_catalog_root(newpg)
+    if old != 0 {
+        p.free(old)
+    }
+    p.commit()
+    return newpg
+}
+
+
+class PagerBasicsTest(TestCase) {
+    # Create, commit a chain of COW updates, reopen, and read back the state.
+    def test_create_commit_reopen() -> None {
+        v: SimVFS = SimVFS()
+        p: Pager = create(v, 4096)
+        self.assertEqual(p.last_csn, 1)
+        self.assertEqual(p.high_water, 3)
+
+        n: int = 0
+        while n < 20 {
+            _commit_counter(p, n + 1)
+            n = n + 1
+        }
+        self.assertEqual(p.last_csn, 21)
+
+        rp: Pager = open_pager(v)
+        self.assertEqual(rp.last_csn, 21)
+        page: bytes = rp.read_page(rp.catalog_root)
+        self.assertEqual(get_u64(page, 0), 20)
+        self.assertEqual(get_u64(page, 8), 21)
+    }
+
+    # A fresh database opens with an empty catalog and the expected page count.
+    def test_empty_reopen() -> None {
+        v: SimVFS = SimVFS()
+        p: Pager = create(v, 4096)
+        rp: Pager = open_pager(v)
+        self.assertEqual(rp.last_csn, 1)
+        self.assertEqual(rp.catalog_root, 0)
+        self.assertEqual(rp.high_water, 3)
+    }
+}
+
+
+class ChecksumTest(TestCase) {
+    # A single flipped byte in a live page is caught by crc32c, never silently
+    # served as data. Corruption must be loud (spec section 13).
+    def test_corrupt_page_detected() -> None {
+        v: SimVFS = SimVFS()
+        p: Pager = create(v, 4096)
+        root: int = _commit_counter(p, 7)
+
+        # Flip one byte inside the data page and re-sync it behind the pager's
+        # back, simulating bit rot on disk.
+        off: int = root * 4096 + 3
+        v.live[off] = v.live[off] ^ 0xFF
+        v.durable = v.live[:]
+
+        rp: Pager = open_pager(v)
+        raised: bool = False
+        try {
+            rp.read_page(root)
+        } except CorruptionError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+
+    # A torn write to one meta page is survived: the other meta (the previous
+    # consistent state) is adopted on reopen.
+    def test_torn_meta_falls_back() -> None {
+        v: SimVFS = SimVFS()
+        p: Pager = create(v, 4096)
+        _commit_counter(p, 1)          # live meta is now slot 1, csn 2
+        _commit_counter(p, 2)          # live meta is now slot 2, csn 3
+
+        # Corrupt the live meta (slot 2, page 2). Reopen must fall back to the
+        # older valid meta (slot 1, csn 2) rather than fail.
+        v.live[2 * 4096 + 10] = v.live[2 * 4096 + 10] ^ 0xFF
+        v.durable = v.live[:]
+
+        rp: Pager = open_pager(v)
+        self.assertEqual(rp.last_csn, 2)
+        page: bytes = rp.read_page(rp.catalog_root)
+        self.assertEqual(get_u64(page, 0), 1)
+    }
+}
+
+
+class ReuseSafetyTest(TestCase) {
+    # A pinned read snapshot must prevent the pager from reusing a page the
+    # snapshot still needs (MVCC safety). Once released, reuse resumes.
+    def test_reader_pins_pages() -> None {
+        v: SimVFS = SimVFS()
+        p: Pager = create(v, 4096)
+        _commit_counter(p, 1)
+        root_at_snapshot: int = p.catalog_root
+
+        snap: Snapshot = p.begin_read()
+
+        # Churn several commits while the snapshot is held. The snapshot's page
+        # must not be reused out from under it.
+        n: int = 0
+        while n < 5 {
+            newpg: int = p.alloc()
+            self.assertNotEqual(newpg, root_at_snapshot)
+            p.stage(newpg, PT_DATA, _payload(100 + n, p.last_csn + 1))
+            old: int = p.catalog_root
+            p.set_catalog_root(newpg)
+            p.free(old)
+            p.commit()
+            n = n + 1
+        }
+
+        # The snapshot still reads its original value through the pinned page.
+        page: bytes = snap.page(root_at_snapshot)
+        self.assertEqual(get_u64(page, 0), 1)
+        snap.close()
+    }
+}
+
+
+class CrashRecoveryTest(TestCase) {
+    # The headline M0 proof: crash at every I/O boundary across many seeds; the
+    # database always reopens to a consistent all-or-nothing snapshot.
+    def test_crash_at_every_boundary() -> None {
+        res: SimResult = run_crash_trials(600)
+        self.assertEqual(res.trials, 600)
+        self.assertEqual(res.failures, 0)
+        # Both recovery outcomes must actually be exercised, or the harness is
+        # not testing what it claims.
+        self.assertTrue(res.recovered_old > 0)
+        self.assertTrue(res.recovered_new > 0)
+    }
+}
+
+
+main([PagerBasicsTest(), ChecksumTest(), ReuseSafetyTest(), CrashRecoveryTest()])

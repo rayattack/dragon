@@ -1,0 +1,64 @@
+"""an explicitly imported class must resolve to the module it was imported from,
+even when an unrelated import pulls in a same-named class from another module.
+
+You write correct code:
+
+    from drs import Schema      # Schema is imported from exactly ONE place
+    from json import loads      # only `loads` - you never import json's Schema
+
+    s: Schema = Schema()
+    s.field("name", "str", true)
+
+json.dr also happens to declare a `class Schema`, and because the whole program
+is compiled into one module, that class used to win a last-write-wins race in
+codegen. The result: your `Schema()` silently lowered to `json__Schema_new(null)`
+and `s.field(...)` reported "no method" - even though you imported Schema from
+drs and nothing else. You did nothing wrong; an unrelated `from json import
+loads` changed what `Schema` meant.
+
+Now a `from X import Name` pins the local name to X for class resolution too
+(importedClassAliasesByModule), so the imported name resolves to the module you
+imported it from. This asserts on VALUES: drs.Schema's fluent builder produces
+the field list it should, which only compiles/runs if `Schema` bound to drs.
+"""
+
+from unittest import TestCase, main
+from drs import Schema
+from json import loads
+
+
+def build_manifest_schema() -> Schema {
+    s: Schema = Schema()
+    s.field("name", "str", true)
+    s.field("version", "str", true)
+    s.optional("entry", "str", "main.dr")
+    return s
+}
+
+
+class ImportClassCollisionTests(TestCase) {
+    def test_schema_resolves_to_drs_not_json() {
+        # If `Schema` had mis-resolved to json.Schema this would not compile
+        # (no `field`/`optional`); reaching a value assertion proves drs won.
+        s: Schema = build_manifest_schema()
+        self.assertEqual(len(s.fields), 3)
+        self.assertFalse(s.allow_unknown)
+    }
+
+    def test_fluent_builder_and_flags() {
+        s: Schema = Schema()
+        s.field("a", "str", true).optional("b", "int", 0).allow_extra()
+        self.assertEqual(len(s.fields), 2)
+        self.assertTrue(s.allow_unknown)
+    }
+
+    def test_json_loads_still_usable() {
+        # The other import is genuinely used, so json is a real co-compiled dep
+        # (this is what triggered the collision in the first place).
+        d: dict[str, Any] = loads("{\"k\": 1}")
+        self.assertEqual(d["k"], 1)
+    }
+}
+
+
+main([ImportClassCollisionTests()])

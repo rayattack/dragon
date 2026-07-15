@@ -1,0 +1,92 @@
+"""own-transfer slice: storing an owned binding into an `own` field is an
+implicit move - no `own` keyword needed at the store.
+
+Before this landed, `self.data = d` (with `own d` param, `own data` field) was
+rejected and you had to write `self.data = own d`. The book always specified
+the plain form (1604-ownership.md: an own param d, `self._data = d` -> "d
+Moved; the field adopts the value, no copy, no incref"); the compiler now
+matches. The move consumes the name (a later use is a use-after-move error),
+and codegen adopts the +1 into the field exactly as an explicit `own` would,
+so there is no leak and no double free - the churn here is RC-checked under
+the suite's sanitizer build.
+"""
+
+from unittest import TestCase, main
+
+
+class Holder {
+    own data: dict[str, str]
+
+    def(own d: dict[str, str]) {
+        self.data = d              # implicit move - no `own` needed
+    }
+
+    def get(k: str) -> str {
+        return self.data[k]
+    }
+}
+
+
+# A self-referential type whose own-fields form a tree (excluded from cycle-GC
+# tracking): the binary-trees shape, now in plain idiomatic Dragon.
+class Node {
+    own left: Node
+    own right: Node
+
+    def(own l: Node, own r: Node) {
+        self.left = l
+        self.right = r
+    }
+}
+
+
+def make(depth: int) -> Node {
+    if depth == 0 {
+        return Node(None, None)
+    }
+    return Node(make(depth - 1), make(depth - 1))
+}
+
+
+def count(node: Node) -> int {
+    if node.left == None {
+        return 1
+    }
+    return 1 + count(node.left) + count(node.right)
+}
+
+
+class OwnTransferTests(TestCase) {
+    def test_move_param_into_own_field() -> None {
+        const h: Holder = Holder({"k": "value"})
+        self.assertEqual(h.get("k"), "value")
+    }
+
+    def test_move_fresh_local_into_own_field() -> None {
+        v: dict[str, str] = {"a": "1", "b": "2"}
+        const h: Holder = Holder(own v)
+        self.assertEqual(h.get("b"), "2")
+    }
+
+    def test_own_field_tree_builds_and_walks() -> None {
+        # depth 6 -> 2^7 - 1 = 127 nodes; the moves thread the whole tree.
+        const t: Node = make(6)
+        self.assertEqual(count(t), 127)
+    }
+
+    def test_churn_stays_balanced() -> None {
+        # Many build/drop cycles - a leak or double-free would surface under
+        # the sanitizer build (and a wrong count catches a mis-wired move).
+        total: int = 0
+        i: int = 0
+        while i < 3000 {
+            const t: Node = make(4)     # 31 nodes
+            total = total + count(t)
+            i = i + 1
+        }
+        self.assertEqual(total, 93000)
+    }
+}
+
+
+main([OwnTransferTests()])

@@ -1,0 +1,369 @@
+"""defer: scope-exit calls (the other half of the fire coin).
+
+`defer <call>` schedules a direct call to run when the current scope ends, on
+every exit path: fall-through, return, break, continue, and unwind. Arguments
+(and the method receiver) evaluate AT the defer statement into snapshot slots;
+only the call runs at scope exit. Within a scope, deferred calls run LIFO,
+before the scope's own RC cleanup, so borrowed snapshots are alive at call
+time. Block-scoped, not function-scoped: a defer in a loop body runs at the
+end of every iteration, statically lowered, no accumulation.
+
+The reassignment probe (test_snapshot_survives_reassignment) is the
+adversarial RC case: the snapshot must hold its own +1, otherwise rebinding
+the source name frees the value the defer still points at - a use-after-free
+this suite's sanitizer build would catch.
+"""
+
+from unittest import TestCase, main
+
+
+def rec(log: list[str], v: str) {
+    log.append(v)
+}
+
+
+def join_into(log: list[str], parts: list[str]) {
+    log.append("".join(parts))
+}
+
+
+def nothing() {
+}
+
+
+def fallthrough_path(log: list[str]) {
+    defer rec(log, "cleanup")
+    rec(log, "body")
+}
+
+
+def return_path(log: list[str]) -> int {
+    n: int = 1
+    defer rec(log, "cleanup")
+    return n + 41
+}
+
+
+def branch_paths(log: list[str], flag: bool) -> str {
+    defer rec(log, "cleanup")
+    if flag {
+        return "yes"
+    }
+    return "no"
+}
+
+
+def lifo_order(log: list[str]) {
+    defer rec(log, "first")
+    defer rec(log, "second")
+    defer rec(log, "third")
+    rec(log, "body")
+}
+
+
+def snapshot_int(log: list[str]) {
+    i: int = 1
+    defer rec(log, "i=" + str(i))
+    i = 9
+    rec(log, "now=" + str(i))
+}
+
+
+def snapshot_survives_reassignment(log: list[str]) {
+    s: str = "al" + "pha"
+    defer rec(log, s)
+    s = "re" + "bound"
+    rec(log, s)
+}
+
+
+def borrow_reads_latest(log: list[str]) {
+    parts: list[str] = ["a", "b"]
+    defer join_into(log, parts)
+    parts.append("c")
+}
+
+
+def block_scope(log: list[str]) {
+    if true {
+        defer rec(log, "inner")
+        rec(log, "in-block")
+    }
+    rec(log, "after-block")
+}
+
+
+def nested_scopes_return(log: list[str]) -> int {
+    defer rec(log, "outer")
+    if true {
+        defer rec(log, "inner")
+        return 5
+    }
+    return 0
+}
+
+
+def loop_iterations(log: list[str]) {
+    for i in range(3) {
+        defer rec(log, "d" + str(i))
+        rec(log, "b" + str(i))
+    }
+    rec(log, "after")
+}
+
+
+def loop_break_continue(log: list[str]) {
+    for i in range(4) {
+        defer rec(log, "d" + str(i))
+        if i == 1 {
+            continue
+        }
+        if i == 3 {
+            break
+        }
+        rec(log, "b" + str(i))
+    }
+}
+
+
+def while_loop_defer(log: list[str]) {
+    i: int = 0
+    while i < 2 {
+        defer rec(log, "w" + str(i))
+        i = i + 1
+    }
+}
+
+
+def raises_with_defer(log: list[str]) {
+    defer rec(log, "cleanup")
+    raise ValueError("boom")
+}
+
+
+def local_catch(log: list[str]) {
+    try {
+        defer rec(log, "deferred")
+        raise ValueError("x")
+    } except ValueError {
+        rec(log, "handler")
+    }
+}
+
+
+def try_finally_return(log: list[str]) -> int {
+    try {
+        defer rec(log, "deferred")
+        return 1
+    } finally {
+        rec(log, "finally")
+    }
+}
+
+
+class Counter {
+    n: int
+    def() {
+        self.n = 0
+    }
+    def bump() {
+        self.n = self.n + 1
+    }
+}
+
+
+def method_defer(c: Counter) {
+    defer c.bump()
+    c.bump()
+}
+
+
+class LogGuard {
+    log: list[str]
+    def(log: list[str]) {
+        self.log = log
+    }
+    def __enter__() -> LogGuard {
+        self.log.append("enter")
+        return self
+    }
+    def __exit__() -> int {
+        self.log.append("exit")
+        return 0
+    }
+}
+
+
+def with_body_defer(log: list[str]) {
+    with LogGuard(log) {
+        defer rec(log, "deferred")
+        rec(log, "body")
+    }
+}
+
+
+class DeferBasicTests(TestCase) {
+    def test_fallthrough_runs_defer_last() {
+        log: list[str] = []
+        fallthrough_path(log)
+        self.assertEqual(len(log), 2)
+        self.assertEqual(log[0], "body")
+        self.assertEqual(log[1], "cleanup")
+    }
+
+    def test_return_value_evaluated_before_defer() {
+        log: list[str] = []
+        self.assertEqual(return_path(log), 42)
+        self.assertEqual(len(log), 1)
+        self.assertEqual(log[0], "cleanup")
+    }
+
+    def test_every_branch_runs_defer() {
+        log: list[str] = []
+        self.assertEqual(branch_paths(log, true), "yes")
+        self.assertEqual(branch_paths(log, false), "no")
+        self.assertEqual(len(log), 2)
+        self.assertEqual(log[0], "cleanup")
+        self.assertEqual(log[1], "cleanup")
+    }
+
+    def test_lifo_order() {
+        log: list[str] = []
+        lifo_order(log)
+        self.assertEqual(len(log), 4)
+        self.assertEqual(log[0], "body")
+        self.assertEqual(log[1], "third")
+        self.assertEqual(log[2], "second")
+        self.assertEqual(log[3], "first")
+    }
+
+    def test_arguments_snapshot_at_statement() {
+        log: list[str] = []
+        snapshot_int(log)
+        self.assertEqual(len(log), 2)
+        self.assertEqual(log[0], "now=9")
+        self.assertEqual(log[1], "i=1")
+    }
+
+    def test_snapshot_survives_reassignment() {
+        log: list[str] = []
+        snapshot_survives_reassignment(log)
+        self.assertEqual(len(log), 2)
+        self.assertEqual(log[0], "rebound")
+        self.assertEqual(log[1], "alpha")
+    }
+
+    def test_borrowed_arg_reads_state_at_exit() {
+        # The documented idiom for late binding: pass the container, not the
+        # value - the deferred call READS it at exit time.
+        log: list[str] = []
+        borrow_reads_latest(log)
+        self.assertEqual(len(log), 1)
+        self.assertEqual(log[0], "abc")
+    }
+
+    def test_block_scoped_not_function_scoped() {
+        log: list[str] = []
+        block_scope(log)
+        self.assertEqual(len(log), 3)
+        self.assertEqual(log[0], "in-block")
+        self.assertEqual(log[1], "inner")
+        self.assertEqual(log[2], "after-block")
+    }
+
+    def test_return_unwinds_scopes_innermost_first() {
+        log: list[str] = []
+        self.assertEqual(nested_scopes_return(log), 5)
+        self.assertEqual(len(log), 2)
+        self.assertEqual(log[0], "inner")
+        self.assertEqual(log[1], "outer")
+    }
+
+    def test_loop_body_defer_runs_each_iteration() {
+        log: list[str] = []
+        loop_iterations(log)
+        self.assertEqual(len(log), 7)
+        self.assertEqual(log[0], "b0")
+        self.assertEqual(log[1], "d0")
+        self.assertEqual(log[2], "b1")
+        self.assertEqual(log[3], "d1")
+        self.assertEqual(log[4], "b2")
+        self.assertEqual(log[5], "d2")
+        self.assertEqual(log[6], "after")
+    }
+
+    def test_break_and_continue_run_iteration_defers() {
+        log: list[str] = []
+        loop_break_continue(log)
+        self.assertEqual(len(log), 6)
+        self.assertEqual(log[0], "b0")
+        self.assertEqual(log[1], "d0")
+        self.assertEqual(log[2], "d1")
+        self.assertEqual(log[3], "b2")
+        self.assertEqual(log[4], "d2")
+        self.assertEqual(log[5], "d3")
+    }
+
+    def test_while_body_defer() {
+        log: list[str] = []
+        while_loop_defer(log)
+        self.assertEqual(len(log), 2)
+        self.assertEqual(log[0], "w0")
+        self.assertEqual(log[1], "w1")
+    }
+
+    def test_defer_runs_during_unwind_across_frames() {
+        log: list[str] = []
+        caught: int = 0
+        try {
+            raises_with_defer(log)
+        } except ValueError {
+            caught = 1
+            rec(log, "caught")
+        }
+        self.assertEqual(caught, 1)
+        self.assertEqual(len(log), 2)
+        self.assertEqual(log[0], "cleanup")
+        self.assertEqual(log[1], "caught")
+    }
+
+    def test_defer_runs_before_local_handler() {
+        log: list[str] = []
+        local_catch(log)
+        self.assertEqual(len(log), 2)
+        self.assertEqual(log[0], "deferred")
+        self.assertEqual(log[1], "handler")
+    }
+
+    def test_defer_in_try_runs_before_finally_on_return() {
+        log: list[str] = []
+        self.assertEqual(try_finally_return(log), 1)
+        self.assertEqual(len(log), 2)
+        self.assertEqual(log[0], "deferred")
+        self.assertEqual(log[1], "finally")
+    }
+
+    def test_method_defer_receiver_snapshot() {
+        c: Counter = Counter()
+        method_defer(c)
+        self.assertEqual(c.n, 2)
+    }
+
+    def test_defer_in_with_body_runs_before_exit() {
+        log: list[str] = []
+        with_body_defer(log)
+        self.assertEqual(len(log), 4)
+        self.assertEqual(log[0], "enter")
+        self.assertEqual(log[1], "body")
+        self.assertEqual(log[2], "deferred")
+        self.assertEqual(log[3], "exit")
+    }
+
+    def test_zero_arg_defer_smoke() {
+        defer nothing()
+        self.assertTrue(true)
+    }
+}
+
+
+main([DeferBasicTests()])

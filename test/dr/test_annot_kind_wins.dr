@@ -1,0 +1,67 @@
+"""An explicit concrete annotation wins over RHS class-guessing.
+
+`const name: str = <Any>` must stay a `str` - decref'd as a string at scope
+exit - even when the RHS is an `Any`/`Union` value whose variable name has a
+stale, program-wide class association from another function. Before the fix,
+codegen's "detect a class instance from the RHS expression" fallback ran
+unconditionally: it resolved the Union-kind RHS through the flat
+`varClassNames` map, stamped the `str` target as a class instance, and emitted
+the generic `dragon_decref` (heap-object) on a string at scope exit - memory
+corruption. The bug only surfaced under whole-module compilation where the
+name collision existed, so this test recreates the collision directly.
+"""
+
+from unittest import TestCase, main
+
+
+class Box {
+    tag: int
+    def(tag: int) {
+        self.tag = tag
+    }
+}
+
+
+# A function whose local `r` IS a class instance, leaving a program-wide
+# `r -> Box` association behind for codegen.
+def uses_r_as_class() -> int {
+    const r: Box = Box(9)
+    return r.tag
+}
+
+
+# A function whose local `r` is an Any loop var, with `const name: str = r`
+# in the body - the exact shape the JSON Schema validator uses. `name` must
+# be treated as a str.
+def collect(items: list[Any]) -> str {
+    out: list[str] = []
+    for r in items {
+        const name: str = r
+        out.append(name)
+    }
+    return "|".join(out)
+}
+
+
+class AnnotKindTests(TestCase) {
+    def test_str_annotation_survives_rhs_class_bleed() -> None {
+        # Call the class-using function first so the stale association exists,
+        # then the str-binding loop must still treat `name` as a str.
+        self.assertEqual(uses_r_as_class(), 9)
+        const xs: list[Any] = ["alpha", "beta", "gamma"]
+        self.assertEqual(collect(xs), "alpha|beta|gamma")
+    }
+
+    def test_repeated_to_shake_out_uaf() -> None {
+        # Repeat so a mis-classified decref would corrupt/UAF observably.
+        i: int = 0
+        while i < 500 {
+            const xs: list[Any] = ["one", "two"]
+            self.assertEqual(collect(xs), "one|two")
+            i = i + 1
+        }
+    }
+}
+
+
+main([AnnotKindTests()])

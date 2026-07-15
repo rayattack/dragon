@@ -1,0 +1,173 @@
+# ODB M2 regression suite: the schema compiler and the DBON document codec -
+# required-field shredding, the optional tail, fixed-offset reads, and
+# validation. Dogfooded through the real compiler under ctest.
+
+from unittest import TestCase, main
+from odb.schema import compile_schema, CompiledSchema
+from odb.dbon import encode, decode, read_field, doc_schema_id
+from odb.errors import SchemaError
+
+
+def _schema() -> CompiledSchema {
+    props: dict[str, Any] = {}
+    id_s: dict[str, Any] = {}
+    id_s["type"] = "integer"
+    props["id"] = id_s
+    name_s: dict[str, Any] = {}
+    name_s["type"] = "string"
+    name_s["minLength"] = 1
+    props["name"] = name_s
+    email_s: dict[str, Any] = {}
+    email_s["type"] = "string"
+    props["email"] = email_s
+    age_s: dict[str, Any] = {}
+    age_s["type"] = "integer"
+    age_s["minimum"] = 0
+    age_s["maximum"] = 150
+    props["age"] = age_s
+    bal_s: dict[str, Any] = {}
+    bal_s["type"] = "number"
+    props["balance"] = bal_s
+    active_s: dict[str, Any] = {}
+    active_s["type"] = "boolean"
+    props["active"] = active_s
+
+    schema: dict[str, Any] = {}
+    schema["type"] = "object"
+    schema["properties"] = props
+    req: list[Any] = ["id", "name", "email"]
+    schema["required"] = req
+    return compile_schema("customers", schema, 3, 1, "{}")
+}
+
+
+class DbonRoundtripTest(TestCase) {
+    def test_all_types_roundtrip() -> None {
+        cs: CompiledSchema = _schema()
+        doc: dict[str, Any] = {}
+        doc["id"] = 42
+        doc["name"] = "Ada Lovelace"
+        doc["email"] = "ada@x.com"
+        doc["age"] = 36
+        doc["balance"] = 1234.56
+        doc["active"] = True
+
+        blob: bytes = encode(cs, doc)
+        self.assertEqual(doc_schema_id(blob), 3)
+
+        back: dict[str, Any] = decode(cs, blob)
+        rid: int = back["id"]
+        rname: str = back["name"]
+        remail: str = back["email"]
+        rage: int = back["age"]
+        rbal: float = back["balance"]
+        ractive: bool = back["active"]
+        self.assertEqual(rid, 42)
+        self.assertEqual(rname, "Ada Lovelace")
+        self.assertEqual(remail, "ada@x.com")
+        self.assertEqual(rage, 36)
+        self.assertAlmostEqual(rbal, 1234.56)
+        self.assertTrue(ractive)
+    }
+
+    def test_negative_and_zero_ints() -> None {
+        cs: CompiledSchema = _schema()
+        doc: dict[str, Any] = {}
+        doc["id"] = -9999
+        doc["name"] = "x"
+        doc["email"] = "e"
+        doc["balance"] = -0.5
+        blob: bytes = encode(cs, doc)
+        back: dict[str, Any] = decode(cs, blob)
+        rid: int = back["id"]
+        rbal: float = back["balance"]
+        self.assertEqual(rid, -9999)
+        self.assertAlmostEqual(rbal, -0.5)
+    }
+
+    def test_absent_optionals_omitted() -> None {
+        cs: CompiledSchema = _schema()
+        doc: dict[str, Any] = {}
+        doc["id"] = 7
+        doc["name"] = "Bo"
+        doc["email"] = "bo@x.com"
+        blob: bytes = encode(cs, doc)
+        back: dict[str, Any] = decode(cs, blob)
+        # only the three required fields come back
+        self.assertEqual(len(back), 3)
+        self.assertFalse("age" in back)
+    }
+}
+
+
+class DbonFixedOffsetTest(TestCase) {
+    def test_read_field_without_full_decode() -> None {
+        cs: CompiledSchema = _schema()
+        doc: dict[str, Any] = {}
+        doc["id"] = 100
+        doc["name"] = "Grace"
+        doc["email"] = "grace@x.com"
+        doc["age"] = 45
+        blob: bytes = encode(cs, doc)
+
+        fid: int = read_field(cs, blob, "id")
+        fname: str = read_field(cs, blob, "name")
+        fage: int = read_field(cs, blob, "age")
+        self.assertEqual(fid, 100)
+        self.assertEqual(fname, "Grace")
+        self.assertEqual(fage, 45)
+
+        raised: bool = False
+        try {
+            read_field(cs, blob, "balance")   # optional, absent
+        } except KeyError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+}
+
+
+class DbonValidationTest(TestCase) {
+    def _bad(cs: CompiledSchema, doc: dict[str, Any]) -> bool {
+        try {
+            encode(cs, doc)
+        } except SchemaError {
+            return True
+        }
+        return False
+    }
+
+    def test_validation_rejects() -> None {
+        cs: CompiledSchema = _schema()
+
+        missing: dict[str, Any] = {}
+        missing["id"] = 1
+        missing["name"] = "X"
+        self.assertTrue(self._bad(cs, missing))          # missing email
+
+        wrong: dict[str, Any] = {}
+        wrong["id"] = 1
+        wrong["name"] = "X"
+        wrong["email"] = "e"
+        wrong["age"] = "oops"
+        self.assertTrue(self._bad(cs, wrong))            # age wrong type
+
+        oob: dict[str, Any] = {}
+        oob["id"] = 1
+        oob["name"] = "X"
+        oob["email"] = "e"
+        oob["age"] = 999
+        self.assertTrue(self._bad(cs, oob))              # age above maximum
+
+        unknown: dict[str, Any] = {}
+        unknown["id"] = 1
+        unknown["name"] = "X"
+        unknown["email"] = "e"
+        unknown["nickname"] = "xx"
+        self.assertTrue(self._bad(cs, unknown))          # undeclared field
+    }
+}
+
+
+main([DbonRoundtripTest(), DbonFixedOffsetTest(), DbonValidationTest()])
