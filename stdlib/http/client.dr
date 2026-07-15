@@ -13,7 +13,7 @@
 # `ssl` module lands. Bodies are returned as `str` (bytes-clean for ASCII;
 # binary downloads will need a future bytes-typed read path).
 
-from socket import TcpStream
+from socket import TcpStream, SocketHandle
 from ssl import SSLContext, SSLSocket, create_default_context
 from urllib.parse import urlsplit, SplitResult
 
@@ -142,7 +142,7 @@ class HTTPConnection {
     def(host: str, port: int) {
         self.host = host
         self.port = port
-        self.stream = TcpStream(0)
+        self.stream = TcpStream(SocketHandle.adopt_raw(-1))   # born-dead placeholder until connect()
         self._connected = False
     }
 

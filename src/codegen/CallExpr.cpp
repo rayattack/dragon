@@ -441,6 +441,21 @@ void CodeGen::visit(CallExpr& node) {
 
             auto* ctorFunc = impl_->module->getFunction(ctorName);
             if (ctorFunc) {
+                // Descriptor backstop (fire-own-fwdref-hang.md): every ctor's
+                // param kinds/own flags are registered in forwardDeclareClasses
+                // before any body is lowered, so a missing entry here means
+                // this construction site is being lowered against a half-built
+                // class descriptor. Emitting anyway would route `own` args
+                // through the erased-generics drain fallback below and
+                // double-free the adopted +1. Fail the compile loudly instead.
+                if (impl_->options.gcMode == GCMode::RC && !node.args.empty() &&
+                    !impl_->funcParamKinds.count(ctorName)) {
+                    impl_->addError(
+                        "internal: cannot construct '" + name +
+                        "' here: its constructor descriptor is not finalized",
+                        node.location());
+                    return;
+                }
                 std::vector<llvm::Value*> args;
                 // Owned heap-temporary args to release after the call (the
                 // ctor borrows; `self.f = param` increfs what it retains).
@@ -532,8 +547,13 @@ void CodeGen::visit(CallExpr& node) {
                             }
                             kwVal->accept(*this);
                             llvm::Value* arg = impl_->lastValue;
-                            bool kwDrained = false;
-                            if (pkIt != impl_->funcParamKinds.end() &&
+                            // An own param ADOPTS the +1 exactly like the
+                            // positional loop above - a kwarg bound to it must
+                            // not be drained (Strm(s=SocketHandle.adopt_raw(fd))
+                            // double-freed the handle without this check).
+                            bool kwDrained = impl_->paramIsOwn(ctorName, (unsigned)idx);
+                            if (!kwDrained &&
+                                pkIt != impl_->funcParamKinds.end() &&
                                 idx < pkIt->second.size()) {
                                 Impl::VarKind dk = impl_->argTempDecrefKind(
                                     kwVal.get(), pkIt->second[idx], arg);

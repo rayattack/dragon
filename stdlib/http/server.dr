@@ -8,7 +8,7 @@
 # parse_qsl here - used by the signed-cookie session decoder below; the
 # request-side query/route parsing moved to http.message alongside Request.
 from urllib.parse import parse_qsl
-from socket import TcpStream
+from socket import TcpStream, SocketHandle
 from threading import Lock
 from ssl import SSLContext, SSLSocket, PROTOCOL_TLS_SERVER
 from time import monotonic
@@ -17,7 +17,6 @@ from time import monotonic
 # a clean producer/consumer boundary). Re-exported so existing importers and
 # W2/W3 can `from http.server import ConnReader, RequestReader, ...`.
 from http.connection import ConnReader, FdReader, TlsReader, MemoryReader
-from socket import SocketHandle
 from http.connection import RequestReader, FramedRequest
 # Request representation + routing primitives (R5). Request/Context and the
 # pure validators / route-matchers live in the sibling http.message module -
@@ -1795,7 +1794,7 @@ class Router {
         # finally guarantees the live-connection counter is decremented even if
         # serve_connection raises, so the cap can't drift up and wedge accepts.
         try {
-            const reader: ConnReader = FdReader(SocketHandle.adopt_raw(client_fd))
+            const reader: ConnReader = FdReader(TcpStream(SocketHandle.adopt_raw(client_fd)))
             self.serve_connection(reader)
         } finally {
             dragon_atomic_add(self._conn_cell, -1)
@@ -1807,7 +1806,7 @@ class Router {
     # client, unsupported cipher) closes the connection without taking down the
     # server.
     def _handle_connection_tls(client_fd: int) -> None {
-        const raw_stream: TcpStream = TcpStream(client_fd)
+        const raw_stream: TcpStream = TcpStream(SocketHandle.adopt_raw(client_fd))
         try {
             const tls: SSLSocket = self._ssl_context.wrap_socket(raw_stream, True, "")
             const reader: ConnReader = TlsReader(tls)

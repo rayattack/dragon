@@ -12,19 +12,11 @@
 # present (Content-Length or chunked), de-chunking as needed.
 
 from ssl import SSLSocket
-from socket import SocketHandle
+from socket import SocketHandle, TcpStream
 
-# Binary-safe recv: returns DragonBytes verbatim (no UTF-8 decode), so a body
-# fragmented across reads - or one carrying high bytes mid-UTF-8 - is
-# reassembled byte-for-byte. dragon_nb_recv_str silently corrupts split
-# multibyte sequences (each chunk is UTF-8-decoded independently), so the
-# connection read path buffers in `bytes`, not `str`. May short-read.
-extern "C" def dragon_nb_recv_bytes(fd: int, max_len: int) -> bytes
-# Timeout-capable recv (R1): abandons the wait after `ms` of silence and returns
-# b"" (the EOF signal), so a peer that stalls mid-read can't pin the green thread
-# (slowloris defense). `ms <= 0` behaves exactly like dragon_nb_recv_bytes.
-extern "C" def dragon_nb_recv_timeout(fd: int, max_len: int, ms: int) -> bytes
-extern "C" def dragon_nb_send(fd: int, buf: str, length: int) -> int
+# Raw socket I/O lives behind TcpStream now (recv_bytes / recv_timeout /
+# do_send are all binary-safe and scheduler-yielding); this module holds no
+# fd-level externs of its own.
 extern "C" def dragon_close_fd(fd: int)
 
 # Byte-level buffer search (returns -1 when not found; unlike bytes.index()
@@ -108,44 +100,35 @@ class ConnReader {
 # Every recv/send yields the carrier thread on EAGAIN instead of blocking, so a
 # slow client parks this vthread without stalling the scheduler.
 class FdReader(ConnReader) {
-    # The one claim on this connection's kernel socket (docs/1604-ownership,
-    # "Identity resources"). An own field: a second FdReader over the same
-    # claim is unrepresentable, and dub refuses the class outright. Construct
-    # from a fresh handle (FdReader(SocketHandle.adopt_raw(fd))) or move one
-    # in with `own`.
-    own _sock: SocketHandle
+    # CONSUMES a TcpStream and owns it for the connection's life
+    # (docs/1604-ownership, "Identity resources"). The move is spelled at
+    # construction, so a live stream closing the fd underneath the reader is
+    # unrepresentable. Every recv/send yields on EAGAIN, so a slow client
+    # parks this vthread without stalling the scheduler.
+    own _stream: TcpStream
 
-    def(own sock: SocketHandle) {
-        self._sock = sock
+    def(own stream: TcpStream) {
+        self._stream = stream
     }
 
     def recv(max_len: int) -> bytes {
-        return dragon_nb_recv_bytes(self._sock.fd(), max_len)
+        return self._stream.recv_bytes(max_len)
     }
 
-    # Real timeout-aware read on the live socket (R1). dragon_nb_recv_timeout
-    # parks the vthread on the reactor with a deadline; if the peer stays silent
-    # past timeout_ms the reactor wakes it with an empty result (b"") instead of
-    # leaving it blocked forever. timeout_ms <= 0 falls through to a plain read.
     def recv_timeout(max_len: int, timeout_ms: int) -> bytes {
-        return dragon_nb_recv_timeout(self._sock.fd(), max_len, timeout_ms)
+        return self._stream.recv_timeout(max_len, timeout_ms)
     }
 
     def send(data: str) -> int {
-        return dragon_nb_send(self._sock.fd(), data, dragon_str_byte_len_pub(data))
+        return self._stream.do_send(data)
     }
 
-    # Put the claim down. Idempotent by the handle's poison: every later
-    # recv/send sees fd -1 and fails loudly instead of touching a recycled fd.
     def close() -> None {
-        self._sock.close()
+        self._stream.close()
     }
 
-    # Expose the underlying socket fd for connection cede (W2). After a
-    # WebSocket upgrade the handler does binary frame I/O directly on this fd.
-    # Returns -1 once the claim is closed, which the upgrade path rejects.
     def socket_fd() -> int {
-        return self._sock.fd()
+        return self._stream.raw_fd()
     }
 }
 

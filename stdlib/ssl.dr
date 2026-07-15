@@ -302,7 +302,7 @@ class SSLContext {
     def wrap_socket(sock: TcpStream, server_side: bool = False,
                     server_hostname: str = "",
                     do_handshake_on_connect: bool = True) -> SSLSocket {
-        conn: ptr = dragon_tls_conn_new(self._ctx, sock.fd, server_hostname)
+        conn: ptr = dragon_tls_conn_new(self._ctx, sock.raw_fd(), server_hostname)
         if do_handshake_on_connect {
             rc: int = dragon_tls_handshake(conn)
             vr: int = dragon_tls_get_verify_result(conn)  # capture before cleanup

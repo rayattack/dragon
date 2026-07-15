@@ -30,6 +30,9 @@ extern "C" def dragon_nb_recv_str(fd: int, max_len: int) -> str
 # for binary wire protocols (Postgres/MySQL, D032). recv_bytes may short-read.
 extern "C" def dragon_nb_recv_bytes(fd: int, max_len: int) -> bytes
 extern "C" def dragon_nb_send_bytes(fd: int, data: bytes) -> int
+# Timeout-capable recv (R1): returns b"" after `ms` of silence, the same EOF
+# signal recv_bytes uses, so stalled peers can't pin a green thread.
+extern "C" def dragon_nb_recv_timeout(fd: int, max_len: int, ms: int) -> bytes
 
 # Runtime helpers for sockaddr_in construction and data transfer
 extern "C" def dragon_sockaddr_in_new(port: intc, addr: str) -> ptr
@@ -108,47 +111,99 @@ class SocketHandle {
 }
 
 #===----------------------------------------------------------------------===#
-# TcpListener - Server-side TCP socket
+# TcpStream - Bidirectional TCP connection
 #===----------------------------------------------------------------------===#
 
-class TcpListener {
-    def(host: str, port: int) {
-        # Widen the intc from socket() to int so self.fd flows to both the intc
-        # libc calls (bind/listen/close) and the int dragon_nb_* helpers.
-        const sfd: int = socket(AF_INET, SOCK_STREAM, 0)
-        self.fd = sfd
-        self.host = host
-        self.port = port
-        # Set SO_REUSEADDR
+class TcpStream {
+    # The one claim on this connection's kernel socket. Constructing a stream
+    # CONSUMES a handle (move a binding in with `own`, or pass a fresh mint);
+    # a second stream over the same claim is unrepresentable, and `dub`
+    # refuses the class. The descriptor is readable through raw_fd() - a
+    # BORROW for FFI seams, never a transfer.
+    #
+    # Defined before TcpListener (which constructs one in do_accept) purely as
+    # dependency order; definition order is not load-bearing. It briefly was:
+    # a forward reference to an own-field class's constructor miscompiled
+    # into a use-after-free hang, fixed at the root in codegen
+    # (fire-own-fwdref-hang.md, locked by test/dr/test_fire_own_fwdref.dr).
+    own _sock: SocketHandle
+
+    def(own sock: SocketHandle) {
+        self._sock = sock
+        # Disable Nagle's algorithm (TCP_NODELAY). Request/response wire protocols
+        # (MySQL/Postgres prepared statements, HTTP) send a small packet and then
+        # wait for the reply; with Nagle on, the kernel holds that small send
+        # until a prior segment is ACKed, and the peer's delayed-ACK won't arrive
+        # for ~40ms - so every round-trip stalls ~40ms. Both client (open) and
+        # accepted (do_accept) streams flow through here, so both get it.
         const optval: ptr = malloc(4)
         memset(optval, 0, 4)
         dragon_ptr_write_i32(optval, 0, 1)
-        setsockopt(self.fd, SOL_SOCKET, SO_REUSEADDR, optval, 4)
+        setsockopt(self._sock.fd(), IPPROTO_TCP, TCP_NODELAY, optval, 4)
         free(optval)
     }
 
-    def do_bind() -> int {
-        const addr: ptr = dragon_sockaddr_in_new(self.port, self.host)
+    @staticmethod
+    def open(host: str, port: int) -> TcpStream {
+        # Resolve hostnames to an IPv4 address (literal IPs pass through).
+        # The kernel mints the descriptor here; it is adopted into a claim on
+        # the spot and never exists as a free-floating number.
+        const ip: str = dragon_resolve4(host)
+        const fd: int = socket(AF_INET, SOCK_STREAM, 0)
+        const addr: ptr = dragon_sockaddr_in_new(port, ip)
         const addrlen: int = dragon_sockaddr_in_size()
-        const rc: int = bind(self.fd, addr, addrlen)
+        dragon_nb_connect(fd, addr, addrlen)
         free(addr)
-        return rc
+        return TcpStream(SocketHandle.adopt_raw(fd))
     }
 
-    def do_listen(backlog: int) -> int {
-        return listen(self.fd, backlog)
+    def do_send(data: str) -> int {
+        return dragon_nb_send(self._sock.fd(), data, len(data))
     }
 
-    def do_accept() -> TcpStream {
-        const client_fd: int = dragon_nb_accept(self.fd, none, none)
-        return TcpStream(client_fd)
+    def do_recv(size: int) -> str {
+        return dragon_nb_recv_str(self._sock.fd(), size)
     }
 
+    # Binary I/O - for protocols that aren't text. send_bytes writes all of
+    # `data` (yielding); recv_bytes reads up to `size` bytes (may short-read,
+    # so length-prefixed protocols loop it into a read-exact helper).
+    def send_bytes(data: bytes) -> int {
+        return dragon_nb_send_bytes(self._sock.fd(), data)
+    }
+
+    def recv_bytes(size: int) -> bytes {
+        return dragon_nb_recv_bytes(self._sock.fd(), size)
+    }
+
+    # Timeout-capable binary read: abandons the wait after `timeout_ms` ms of
+    # silence and returns b"" (the same EOF signal recv_bytes uses). Parks the
+    # green thread on the reactor, never the carrier. timeout_ms <= 0 reads
+    # without a deadline.
+    def recv_timeout(size: int, timeout_ms: int) -> bytes {
+        return dragon_nb_recv_timeout(self._sock.fd(), size, timeout_ms)
+    }
+
+    def do_shutdown(how: int) -> int {
+        return shutdown(self._sock.fd(), how)
+    }
+
+    # Put the claim down. Idempotent by the handle's poison: later reads and
+    # writes see fd -1 and fail loudly, never a recycled descriptor.
     def close() -> int {
-        return close(self.fd)
+        self._sock.close()
+        return 0
     }
 
-    def __enter__() -> TcpListener {
+    # The raw descriptor, BORROWED (as_raw_fd, not into_raw_fd): the stream
+    # keeps the claim, the caller gets the number for an FFI seam (the TLS
+    # engine, WebSocket frame I/O) and must not close or adopt it. Reads -1
+    # once the claim is down.
+    def raw_fd() -> int {
+        return self._sock.fd()
+    }
+
+    def __enter__() -> TcpStream {
         return self
     }
 
@@ -159,65 +214,60 @@ class TcpListener {
 }
 
 #===----------------------------------------------------------------------===#
-# TcpStream - Bidirectional TCP connection
+# TcpListener - Server-side TCP socket
 #===----------------------------------------------------------------------===#
 
-class TcpStream {
-    def(fd: int) {
-        self.fd = fd
-        # Disable Nagle's algorithm (TCP_NODELAY). Request/response wire protocols
-        # (MySQL/Postgres prepared statements, HTTP) send a small packet and then
-        # wait for the reply; with Nagle on, the kernel holds that small send
-        # until a prior segment is ACKed, and the peer's delayed-ACK won't arrive
-        # for ~40ms - so every round-trip stalls ~40ms. Both client (open) and
-        # accepted (do_accept) streams flow through here, so both get it.
+class TcpListener {
+    # The one claim on the listening socket (docs/1604-ownership, "Identity
+    # resources"). Minted here at the kernel boundary - the descriptor never
+    # travels naked.
+    own _sock: SocketHandle
+    host: str
+    port: int
+
+    def(host: str, port: int) {
+        # Widen the intc from socket() so the fd flows to both the intc libc
+        # calls (bind/listen/close) and the int dragon_nb_* helpers.
+        const sfd: int = socket(AF_INET, SOCK_STREAM, 0)
+        self._sock = SocketHandle.adopt_raw(sfd)
+        self.host = host
+        self.port = port
+        # Set SO_REUSEADDR: a prior run's server-side close parks the port in
+        # TIME_WAIT for 60s; without this, bind fails EADDRINUSE (a checked
+        # bind + this option is mandatory socket hygiene - fire-own-io-bug.md).
         const optval: ptr = malloc(4)
         memset(optval, 0, 4)
         dragon_ptr_write_i32(optval, 0, 1)
-        setsockopt(self.fd, IPPROTO_TCP, TCP_NODELAY, optval, 4)
+        setsockopt(self._sock.fd(), SOL_SOCKET, SO_REUSEADDR, optval, 4)
         free(optval)
     }
 
-    @staticmethod
-    def open(host: str, port: int) -> TcpStream {
-        # Resolve hostnames to an IPv4 address (literal IPs pass through).
-        const ip: str = dragon_resolve4(host)
-        const fd: int = socket(AF_INET, SOCK_STREAM, 0)
-        const addr: ptr = dragon_sockaddr_in_new(port, ip)
+    def do_bind() -> int {
+        const addr: ptr = dragon_sockaddr_in_new(self.port, self.host)
         const addrlen: int = dragon_sockaddr_in_size()
-        dragon_nb_connect(fd, addr, addrlen)
+        const rc: int = bind(self._sock.fd(), addr, addrlen)
         free(addr)
-        return TcpStream(fd)
+        return rc
     }
 
-    def do_send(data: str) -> int {
-        return dragon_nb_send(self.fd, data, len(data))
+    def do_listen(backlog: int) -> int {
+        return listen(self._sock.fd(), backlog)
     }
 
-    def do_recv(size: int) -> str {
-        return dragon_nb_recv_str(self.fd, size)
-    }
-
-    # Binary I/O - for protocols that aren't text. send_bytes writes all of
-    # `data` (yielding); recv_bytes reads up to `size` bytes (may short-read,
-    # so length-prefixed protocols loop it into a read-exact helper).
-    def send_bytes(data: bytes) -> int {
-        return dragon_nb_send_bytes(self.fd, data)
-    }
-
-    def recv_bytes(size: int) -> bytes {
-        return dragon_nb_recv_bytes(self.fd, size)
-    }
-
-    def do_shutdown(how: int) -> int {
-        return shutdown(self.fd, how)
+    # Accept one connection. The kernel mints a fresh descriptor for exactly
+    # this client; it is adopted into a claim on the very next line and never
+    # exists as a free-floating number outside this method.
+    def do_accept() -> TcpStream {
+        const client_fd: int = dragon_nb_accept(self._sock.fd(), none, none)
+        return TcpStream(SocketHandle.adopt_raw(client_fd))
     }
 
     def close() -> int {
-        return close(self.fd)
+        self._sock.close()
+        return 0
     }
 
-    def __enter__() -> TcpStream {
+    def __enter__() -> TcpListener {
         return self
     }
 
@@ -232,8 +282,12 @@ class TcpStream {
 #===----------------------------------------------------------------------===#
 
 class UdpSocket {
+    own _sock: SocketHandle
+    host: str
+    port: int
+
     def(host: str, port: int) {
-        self.fd = socket(AF_INET, SOCK_DGRAM, 0)
+        self._sock = SocketHandle.adopt_raw(socket(AF_INET, SOCK_DGRAM, 0))
         self.host = host
         self.port = port
     }
@@ -241,7 +295,7 @@ class UdpSocket {
     def do_bind() -> int {
         const addr: ptr = dragon_sockaddr_in_new(self.port, self.host)
         const addrlen: int = dragon_sockaddr_in_size()
-        const rc: int = bind(self.fd, addr, addrlen)
+        const rc: int = bind(self._sock.fd(), addr, addrlen)
         free(addr)
         return rc
     }
@@ -249,7 +303,7 @@ class UdpSocket {
     def sendto(data: str, host: str, port: int) -> int {
         const addr: ptr = dragon_sockaddr_in_new(port, host)
         const addrlen: int = dragon_sockaddr_in_size()
-        const rc: int = dragon_udp_sendto(self.fd, data, len(data), 0, addr, addrlen)
+        const rc: int = dragon_udp_sendto(self._sock.fd(), data, len(data), 0, addr, addrlen)
         free(addr)
         return rc
     }
@@ -257,12 +311,13 @@ class UdpSocket {
     def recvfrom(size: int) -> str {
         const buf: ptr = malloc(size + 1)
         memset(buf, 0, size + 1)
-        const result: str = dragon_recv_to_str(self.fd, buf, size, 0)
+        const result: str = dragon_recv_to_str(self._sock.fd(), buf, size, 0)
         return result
     }
 
     def close() -> int {
-        return close(self.fd)
+        self._sock.close()
+        return 0
     }
 
     def __enter__() -> UdpSocket {

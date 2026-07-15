@@ -1747,6 +1747,14 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
                     llvm::Function::Create(newFuncType, llvm::Function::InternalLinkage,
                                            newName, module.get());
                 }
+                // Zero-arg ctor: register EMPTY param metadata so the entry
+                // exists (the ctor call site treats a missing entry as a
+                // compiler invariant violation - see the descriptor backstop
+                // in CallExpr.cpp).
+                if (options.gcMode == GCMode::RC) {
+                    funcParamKinds[newName] = {};
+                    funcParamOwns[newName] = {};
+                }
             } else if (ctorCount == 1) {
                 // --- Single-constructor path ---
                 FunctionDecl* initDecl = initDecls[0];
@@ -1772,6 +1780,26 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
                     auto* newFuncType = llvm::FunctionType::get(i8PtrType, newParamTypes, false);
                     llvm::Function::Create(newFuncType, llvm::Function::InternalLinkage,
                                            newName, module.get());
+                }
+
+                // Register the ctor's param VarKinds and own flags NOW, before
+                // any method body is lowered (fire-own-fwdref-hang.md). The
+                // body pass (emitNewBody) re-derives the same data, but that
+                // runs in source order - a construction site inside an EARLIER
+                // class's method saw no entry for a forward-referenced class,
+                // paramIsOwn() answered false, and the call site drained the
+                // owned temp an `own` ctor param had adopted (use-after-free
+                // on the owned field). Methods already register here (the
+                // funcParamOwns loop below); ctors must too.
+                if (options.gcMode == GCMode::RC) {
+                    std::vector<VarKind> ck;
+                    std::vector<bool> cowns;
+                    for (size_t i = paramStart; i < initDecl->params.size(); ++i) {
+                        ck.push_back(typeExprToKind(initDecl->params[i].type.get()));
+                        cowns.push_back(initDecl->params[i].isOwn);
+                    }
+                    funcParamKinds[newName] = std::move(ck);
+                    funcParamOwns[newName] = std::move(cowns);
                 }
 
                 // Store default parameter values for _new (indexed by LLVM param position)
@@ -1831,6 +1859,20 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
                         auto* newFuncType = llvm::FunctionType::get(i8PtrType, newParamTypes, false);
                         llvm::Function::Create(newFuncType, llvm::Function::InternalLinkage,
                                                newName, module.get());
+                    }
+
+                    // Same forward registration as the single-ctor path: each
+                    // overload's param kinds/own flags must be visible before
+                    // any body is lowered (fire-own-fwdref-hang.md).
+                    if (options.gcMode == GCMode::RC) {
+                        std::vector<VarKind> ck;
+                        std::vector<bool> cowns;
+                        for (size_t i = paramStart; i < fd->params.size(); ++i) {
+                            ck.push_back(typeExprToKind(fd->params[i].type.get()));
+                            cowns.push_back(fd->params[i].isOwn);
+                        }
+                        funcParamKinds[newName] = std::move(ck);
+                        funcParamOwns[newName] = std::move(cowns);
                     }
                 }
             }
