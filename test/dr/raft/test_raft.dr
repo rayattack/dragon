@@ -1,0 +1,331 @@
+# packages/raft regression suite (ODB M11, spec section 19 v3b).
+#
+# Unit cases drive the protocol by hand through crafted messages: elections,
+# the vote restriction, log repair by truncation, stale-leader demotion, and
+# the section 5.4.2 commit rule (a prior-term entry never commits by counting;
+# it commits under a current-term entry). The chaos sweeps then run seeded
+# storms of loss, reordering, duplication, partitions, and crash-restarts,
+# checking election safety, log matching, and state-machine safety after
+# every event, and requiring full convergence on a healed network.
+
+from unittest import TestCase, main
+from raft import RaftNode, Entry, Msg, HardState, restore
+from raft import FOLLOWER, CANDIDATE, LEADER
+from raft import M_VOTE_REQ, M_VOTE_RESP, M_APP_REQ, M_APP_RESP
+from raft.rng import Rng
+from raft.sim import run_chaos, ChaosResult
+
+
+# Deliver every in-flight message FIFO until the cluster is quiet. The unit
+# tests want a perfect network; the sim owns the hostile one.
+def _pump(nodes: dict[int, RaftNode]) -> None {
+    q: list[Msg] = []
+    for nid in nodes {
+        for m in nodes[nid].take_outbox() {
+            q.append(m)
+        }
+    }
+    guard: int = 0
+    while len(q) > 0 {
+        guard = guard + 1
+        if guard > 100000 {
+            raise Exception("unit-test pump did not quiesce")
+        }
+        msg: Msg = q.pop(0)
+        nodes[msg.to].step(msg)
+        for m2 in nodes[msg.to].take_outbox() {
+            q.append(m2)
+        }
+    }
+}
+
+# Tick `nid` alone through its whole election timeout, then settle the net.
+def _force_election(nodes: dict[int, RaftNode], nid: int) -> None {
+    n: int = nodes[nid].election_timeout
+    i: int = 0
+    while i < n {
+        nodes[nid].tick()
+        i = i + 1
+    }
+    _pump(nodes)
+}
+
+# One leader heartbeat round, delivered: followers learn the commit index.
+def _heartbeat(nodes: dict[int, RaftNode], lead: int) -> None {
+    i: int = 0
+    while i < nodes[lead].heartbeat_ticks {
+        nodes[lead].tick()
+        i = i + 1
+    }
+    _pump(nodes)
+}
+
+def _cluster(n: int, seed: int) -> dict[int, RaftNode] {
+    ids: list[int] = []
+    i: int = 1
+    while i <= n {
+        ids.append(i)
+        i = i + 1
+    }
+    nodes: dict[int, RaftNode] = {}
+    for nid in ids {
+        nodes[nid] = RaftNode(nid, ids, Rng(seed * 100 + nid))
+    }
+    return nodes
+}
+
+
+class SingleNodeTest(TestCase) {
+    def test_self_election_and_commit() -> None {
+        n: RaftNode = RaftNode(1, [1], Rng(7))
+        i: int = 0
+        while i < 40 and not n.is_leader() {
+            n.tick()
+            i = i + 1
+        }
+        self.assertTrue(n.is_leader())
+        self.assertEqual(n.term, 1)
+        idx: int = n.propose("solo".encode())
+        self.assertEqual(idx, 2)                 # index 1 is the election no-op
+        self.assertEqual(n.commit_index, 2)
+        got: list[Entry] = n.take_committed()
+        self.assertEqual(len(got), 2)
+        self.assertEqual(got[0].data.decode(), "")
+        self.assertEqual(got[1].data.decode(), "solo")
+        self.assertEqual(n.applied, 2)
+    }
+
+    def test_restore_keeps_hard_state() -> None {
+        n: RaftNode = RaftNode(1, [1], Rng(7))
+        while not n.is_leader() {
+            n.tick()
+        }
+        n.propose("x".encode())
+        hs: HardState = n.hard_state()
+        r: RaftNode = restore(1, [1], Rng(9), hs)
+        self.assertEqual(r.term, n.term)
+        self.assertEqual(r.last_index(), 2)
+        self.assertEqual(r.role, FOLLOWER)       # role is volatile
+        self.assertEqual(r.commit_index, 0)      # commit is re-proven, never assumed
+    }
+}
+
+
+class ElectionTest(TestCase) {
+    def test_three_node_election() -> None {
+        nodes: dict[int, RaftNode] = _cluster(3, 1)
+        _force_election(nodes, 1)
+        self.assertTrue(nodes[1].is_leader())
+        self.assertEqual(nodes[1].term, 1)
+        self.assertEqual(nodes[2].role, FOLLOWER)
+        self.assertEqual(nodes[3].role, FOLLOWER)
+        self.assertEqual(nodes[2].leader_id, 1)
+        # The election no-op replicated everywhere; a heartbeat spreads commit.
+        _heartbeat(nodes, 1)
+        self.assertEqual(nodes[2].commit_index, 1)
+        self.assertEqual(nodes[3].commit_index, 1)
+    }
+
+    def test_vote_restriction_rejects_stale_log() -> None {
+        # Node 1 holds a committed-era entry; node 2 has an empty log. Node 2
+        # campaigns first: it must NOT win. Node 1 campaigns next: it must.
+        ids: list[int] = [1, 2]
+        n1: RaftNode = restore(1, ids, Rng(11), HardState(1, 0, [Entry(1, "a".encode())]))
+        n2: RaftNode = restore(2, ids, Rng(12), HardState(1, 0, []))
+        nodes: dict[int, RaftNode] = {}
+        nodes[1] = n1
+        nodes[2] = n2
+        _force_election(nodes, 2)
+        self.assertTrue(not n2.is_leader())
+        self.assertEqual(n1.voted_for, 0)        # the grant never happened
+        _force_election(nodes, 1)
+        self.assertTrue(n1.is_leader())
+        self.assertEqual(n2.last_index(), n1.last_index())
+    }
+
+    def test_stale_leader_steps_down() -> None {
+        nodes: dict[int, RaftNode] = _cluster(3, 3)
+        _force_election(nodes, 1)
+        self.assertTrue(nodes[1].is_leader())
+        old_term: int = nodes[1].term
+        # 2 campaigns at a higher term and wins (its log matches 1's; 3 grants).
+        _force_election(nodes, 2)
+        self.assertTrue(nodes[2].is_leader())
+        self.assertTrue(nodes[2].term > old_term)
+        self.assertEqual(nodes[1].role, FOLLOWER)
+        self.assertEqual(nodes[1].leader_id, 2)
+    }
+}
+
+
+class ReplicationTest(TestCase) {
+    def test_entries_replicate_and_commit_everywhere() -> None {
+        nodes: dict[int, RaftNode] = _cluster(3, 5)
+        _force_election(nodes, 1)
+        nodes[1].propose("a".encode())
+        _pump(nodes)
+        nodes[1].propose("b".encode())
+        _pump(nodes)
+        _heartbeat(nodes, 1)
+        for nid in nodes {
+            self.assertEqual(nodes[nid].last_index(), 3)
+            self.assertEqual(nodes[nid].commit_index, 3)
+        }
+        got: list[Entry] = nodes[3].take_committed()
+        self.assertEqual(len(got), 3)
+        self.assertEqual(got[1].data.decode(), "a")
+        self.assertEqual(got[2].data.decode(), "b")
+    }
+
+    def test_conflicting_tail_truncates_but_prefix_never() -> None {
+        # A follower carrying an uncommitted tail from a dead term must have
+        # it cut exactly at the conflict, and a consistent duplicate append
+        # must never shorten what it already holds (receiver rule 3).
+        ids: list[int] = [1, 2, 3]
+        f: RaftNode = restore(2, ids, Rng(21), HardState(2, 0, [
+            Entry(1, "a".encode()), Entry(2, "dead1".encode()), Entry(2, "dead2".encode())]))
+
+        m: Msg = Msg(M_APP_REQ, 1, 2, 3)
+        m.prev_index = 1
+        m.prev_term = 1
+        m.entries = [Entry(3, "live".encode())]
+        m.commit = 1
+        f.step(m)
+        self.assertEqual(f.last_index(), 2)
+        self.assertEqual(f.log[1].data.decode(), "live")
+        self.assertEqual(f.commit_index, 1)
+
+        dup: Msg = Msg(M_APP_REQ, 1, 2, 3)
+        dup.prev_index = 0
+        dup.prev_term = 0
+        dup.entries = [Entry(1, "a".encode())]
+        dup.commit = 1
+        f.step(dup)
+        self.assertEqual(f.last_index(), 2)      # the shorter consistent prefix cut nothing
+        self.assertEqual(f.log[1].data.decode(), "live")
+    }
+
+    def test_commit_rule_prior_term_never_counts_alone() -> None {
+        # Paper section 5.4.2. A leader at term 2 holds an uncommitted term-1
+        # entry at index 1. A quorum ack of index 1 alone must NOT commit it:
+        # only a current-term entry above it may drive the commit index.
+        ids: list[int] = [1, 2, 3]
+        lead: RaftNode = restore(1, ids, Rng(31), HardState(2, 1, [Entry(1, "old".encode())]))
+        lead.role = LEADER
+        lead.leader_id = 1
+        for nid in ids {
+            lead.next_index[nid] = 2
+            lead.match_index[nid] = 0
+        }
+        lead.match_index[1] = 1
+
+        ack1: Msg = Msg(M_APP_RESP, 2, 1, 2)
+        ack1.success = True
+        ack1.matched = 1
+        lead.step(ack1)
+        self.assertEqual(lead.commit_index, 0)   # majority on index 1, still no commit
+
+        idx: int = lead.propose("new".encode())
+        self.assertEqual(idx, 2)
+        ack2: Msg = Msg(M_APP_RESP, 2, 1, 2)
+        ack2.success = True
+        ack2.matched = 2
+        lead.step(ack2)
+        self.assertEqual(lead.commit_index, 2)   # term-2 entry commits, term-1 rides under it
+    }
+}
+
+
+class BaseCompactionTest(TestCase) {
+    def test_install_base_compacts_and_replication_continues() -> None {
+        n: RaftNode = RaftNode(1, [1], Rng(7))
+        while not n.is_leader() {
+            n.tick()
+        }
+        n.propose("a".encode())                  # index 2 (1 is the no-op)
+        n.propose("b".encode())                  # index 3
+        got: list[Entry] = n.take_committed()
+        self.assertEqual(len(got), 3)
+        n.install_base(2, n.term)
+        self.assertEqual(n.base_index, 2)
+        self.assertEqual(n.last_index(), 3)
+        idx: int = n.propose("c".encode())
+        self.assertEqual(idx, 4)
+        self.assertEqual(n.commit_index, 4)
+        got2: list[Entry] = n.take_committed()
+        self.assertEqual(len(got2), 1)
+        self.assertEqual(got2[0].data.decode(), "c")
+        # Hard state round-trips the base; commit re-proves from it.
+        r: RaftNode = restore(1, [1], Rng(9), n.hard_state())
+        self.assertEqual(r.base_index, 2)
+        self.assertEqual(r.last_index(), 4)
+        self.assertEqual(r.commit_index, 2)
+    }
+
+    def test_append_below_base_skips_applied_prefix() -> None {
+        # A stale leader resends history a compacted follower already
+        # applied: the overlap is skipped, the tail lands, nothing re-applies.
+        ids: list[int] = [1, 2, 3]
+        f: RaftNode = restore(2, ids, Rng(21), HardState(2, 0, [], 2, 1))
+        m: Msg = Msg(M_APP_REQ, 1, 2, 2)
+        m.prev_index = 0
+        m.prev_term = 0
+        m.entries = [Entry(1, "x".encode()), Entry(1, "y".encode()), Entry(2, "z".encode())]
+        m.commit = 3
+        f.step(m)
+        self.assertEqual(f.last_index(), 3)
+        self.assertEqual(f.commit_index, 3)
+        out: list[Msg] = f.take_outbox()
+        self.assertEqual(len(out), 1)
+        self.assertTrue(out[0].success)
+        self.assertEqual(out[0].matched, 3)
+        got: list[Entry] = f.take_committed()    # applied starts at the base
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0].data.decode(), "z")
+    }
+
+    def test_peer_below_base_flags_snapshot_and_recovers() -> None {
+        ids: list[int] = [1, 2]
+        lead: RaftNode = restore(1, ids, Rng(31), HardState(1, 1, [Entry(1, "c".encode())], 2, 1))
+        f: RaftNode = restore(2, ids, Rng(32), HardState(1, 0, []))
+        nodes: dict[int, RaftNode] = {}
+        nodes[1] = lead
+        nodes[2] = f
+        _force_election(nodes, 1)
+        self.assertTrue(lead.is_leader())
+        needs: list[int] = lead.take_snapshot_needed()
+        self.assertEqual(len(needs), 1)
+        self.assertEqual(needs[0], 2)
+        # The host ships its state machine through the base; consensus then
+        # repairs the rest from base+1 on the normal heartbeat cadence.
+        f.install_base(2, 1)
+        _heartbeat(nodes, 1)
+        _heartbeat(nodes, 1)
+        self.assertEqual(f.last_index(), lead.last_index())
+        self.assertEqual(f.commit_index, lead.commit_index)
+        self.assertTrue(lead.commit_index >= 4)  # history + the term-2 no-op
+    }
+}
+
+
+class ChaosTest(TestCase) {
+    def test_three_node_storms() -> None {
+        res: ChaosResult = run_chaos(60, 3, 600)
+        self.assertEqual(res.failures, 0, res.message)
+        self.assertEqual(res.trials, 60)
+        # A storm that elected nobody and committed nothing tested nothing.
+        self.assertTrue(res.elections > 0)
+        self.assertTrue(res.committed > 0)
+    }
+
+    def test_five_node_storms() -> None {
+        res: ChaosResult = run_chaos(40, 5, 800)
+        self.assertEqual(res.failures, 0, res.message)
+        self.assertEqual(res.trials, 40)
+        self.assertTrue(res.elections > 0)
+        self.assertTrue(res.committed > 0)
+    }
+}
+
+
+main([SingleNodeTest(), ElectionTest(), ReplicationTest(), BaseCompactionTest(), ChaosTest()])

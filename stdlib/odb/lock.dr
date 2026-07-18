@@ -1,0 +1,201 @@
+# odb.lock - the multi-process coordination sidecar (spec section 16).
+#
+# ODB allows readers and one writer from multiple OS processes on one machine.
+# Two mechanisms, both riding OS advisory `flock`:
+#
+#   WriterLock  - a non-blocking exclusive flock on `<name>.odb.lock`. Exactly
+#                 one process may hold it, so there is one writer at a time; a
+#                 second writer's acquire fails cleanly rather than corrupting.
+#   ReaderTable - LMDB-style slots (pid + pinned CSN) in `<name>.odb.readers`,
+#                 so the writer knows the OLDEST live reader's CSN and never
+#                 reclaims a free-list page a reader still needs. Slots whose pid
+#                 is dead are reaped (pid liveness via `kill(pid, 0)`), so a
+#                 crashed reader never wedges reclamation.
+#
+# This is the "start with lock-file polling" stage of the maturation agenda
+# (spec section 23.3); a shared-memory-mapped table is the later optimization
+
+from odb.vfs import FileVFS
+from odb.codec import blank, put_u64, get_u64
+from odb.errors import ODBError
+
+extern "C" def flock(fd: intc, op: intc) -> intc
+extern "C" def fileno(handle: ptr) -> intc
+extern "C" def getpid() -> intc
+extern "C" def kill(pid: intc, sig: intc) -> intc
+
+const LOCK_EX: int = 2
+const LOCK_NB: int = 4
+const LOCK_UN: int = 8
+
+const _RT_SLOTS: int = 64        # max concurrent registered readers
+const _RT_SLOT: int = 16         # pid u64 + csn u64
+const _RT_SIZE: int = 1024       # _RT_SLOTS * _RT_SLOT
+
+def _pid_alive(pid: int) -> bool {
+    if pid <= 0 {
+        return False
+    }
+    return int(kill(pid, 0)) == 0
+}
+
+#===----------------------------------------------------------------------===#
+# WriterLock
+#===----------------------------------------------------------------------===#
+
+class WriterLock {
+    vfs: FileVFS
+    held: bool
+
+    def(path: str) {
+        self.vfs = FileVFS(path)
+        self.held = False
+    }
+
+    # Non-blocking exclusive lock. True if acquired; False if another process
+    # already holds the writer slot.
+    def acquire() -> bool {
+        r: int = int(flock(fileno(self.vfs.handle), LOCK_EX | LOCK_NB))
+        self.held = r == 0
+        return self.held
+    }
+
+    def release() -> None {
+        if self.held {
+            flock(fileno(self.vfs.handle), LOCK_UN)
+            self.held = False
+        }
+    }
+
+    def close() -> None {
+        self.release()
+        self.vfs.close()
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# ReaderTable
+#===----------------------------------------------------------------------===#
+
+class ReaderTable {
+    vfs: FileVFS
+
+    def(path: str) {
+        self.vfs = FileVFS(path)
+        if self.vfs.size() < _RT_SIZE {
+            self.vfs.truncate(_RT_SIZE)
+        }
+    }
+
+    def _lock() -> None {
+        flock(fileno(self.vfs.handle), LOCK_EX)
+    }
+
+    def _unlock() -> None {
+        flock(fileno(self.vfs.handle), LOCK_UN)
+    }
+
+    def _read_all() -> bytes {
+        return self.vfs.read_at(0, _RT_SIZE)
+    }
+
+    def _write_slot(i: int, pid: int, csn: int) -> None {
+        buf: list[int] = blank(_RT_SLOT)
+        put_u64(buf, 0, pid)
+        put_u64(buf, 8, csn)
+        self.vfs.write_at(i * _RT_SLOT, bytes(buf))
+    }
+
+    # Clear slots whose pid is dead (must hold the lock).
+    def _reap(tbl: bytes) -> None {
+        i: int = 0
+        while i < _RT_SLOTS {
+            pid: int = get_u64(tbl, i * _RT_SLOT)
+            if pid != 0 and not _pid_alive(pid) {
+                self._write_slot(i, 0, 0)
+            }
+            i = i + 1
+        }
+    }
+
+    # Register this process as a reader pinned at `csn`. Returns the slot index,
+    # or -1 if the table is full.
+    def register(csn: int) -> int {
+        self._lock()
+        tbl: bytes = self._read_all()
+        self._reap(tbl)
+        tbl = self._read_all()
+        slot: int = -1
+        i: int = 0
+        while i < _RT_SLOTS {
+            if get_u64(tbl, i * _RT_SLOT) == 0 {
+                slot = i
+                break
+            }
+            i = i + 1
+        }
+        if slot >= 0 {
+            self._write_slot(slot, getpid(), csn)
+        }
+        self._unlock()
+        return slot
+    }
+
+    # Test-only hook: register an explicit pid (to exercise dead-reader reaping).
+    def register_pid(pid: int, csn: int) -> int {
+        self._lock()
+        tbl: bytes = self._read_all()
+        slot: int = -1
+        i: int = 0
+        while i < _RT_SLOTS {
+            if get_u64(tbl, i * _RT_SLOT) == 0 {
+                slot = i
+                break
+            }
+            i = i + 1
+        }
+        if slot >= 0 {
+            self._write_slot(slot, pid, csn)
+        }
+        self._unlock()
+        return slot
+    }
+
+    def release(slot: int) -> None {
+        if slot < 0 {
+            return
+        }
+        self._lock()
+        self._write_slot(slot, 0, 0)
+        self._unlock()
+    }
+
+    # The oldest CSN any live reader still needs, or `fallback` if there are no
+    # live readers. Reaps dead readers along the way.
+    def oldest_csn(fallback: int) -> int {
+        self._lock()
+        tbl: bytes = self._read_all()
+        self._reap(tbl)
+        tbl = self._read_all()
+        oldest: int = fallback
+        found: bool = False
+        i: int = 0
+        while i < _RT_SLOTS {
+            pid: int = get_u64(tbl, i * _RT_SLOT)
+            if pid != 0 {
+                csn: int = get_u64(tbl, i * _RT_SLOT + 8)
+                if not found or csn < oldest {
+                    oldest = csn
+                    found = True
+                }
+            }
+            i = i + 1
+        }
+        self._unlock()
+        return oldest
+    }
+
+    def close() -> None {
+        self.vfs.close()
+    }
+}

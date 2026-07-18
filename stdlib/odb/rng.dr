@@ -1,0 +1,55 @@
+# odb.rng - deterministic seeded PRNG for the simulation harness.
+#
+# ODB's crash tests are deterministic simulations (spec section 21, the
+# FoundationDB lineage): a seeded PRNG drives every fault decision so that any
+# failing seed replays the exact same run. This is xorshift32 - not for
+# security, purely for reproducible fault injection. Keeping it self-contained
+# (rather than leaning on stdlib random) guarantees a seed means one fixed
+# sequence forever, independent of stdlib changes
+
+const _MASK32: int = 0xFFFFFFFF
+
+class Rng {
+    state: int
+
+    def(seed: int) {
+        # Avoid the zero fixed point; xorshift stalls at 0.
+        s: int = seed & _MASK32
+        if s == 0 {
+            s = 0x9E3779B9
+        }
+        self.state = s
+    }
+
+    # Next 32-bit value. xorshift32 (Marsaglia); mask after every step so the
+    # register stays exactly 32 bits regardless of the signed 64-bit int width.
+    def next_u32() -> int {
+        x: int = self.state
+        x = (x ^ (x << 13)) & _MASK32
+        x = (x ^ (x >> 17)) & _MASK32
+        x = (x ^ (x << 5)) & _MASK32
+        self.state = x
+        return x
+    }
+
+    # Uniform integer in [0, n). n <= 0 returns 0.
+    def below(n: int) -> int {
+        if n <= 0 {
+            return 0
+        }
+        return self.next_u32() % n
+    }
+
+    # True with probability num/den.
+    def chance(num: int, den: int) -> bool {
+        if den <= 0 {
+            return False
+        }
+        return self.below(den) < num
+    }
+
+    # Fair coin.
+    def flip() -> bool {
+        return (self.next_u32() & 1) == 1
+    }
+}

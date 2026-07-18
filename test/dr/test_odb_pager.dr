@@ -3,11 +3,11 @@
 # run end to end through the real compiler under ctest.
 
 from unittest import TestCase, main
-from odb.vfs import SimVFS
-from odb.pager import create, open_pager, Pager, Snapshot, PT_DATA
+from odb.vfs import SimVFS, VFS
+from odb.pager import create, open_pager, Pager, Snapshot, PT_DATA, PT_FREELIST
 from odb.codec import blank, put_u64, get_u64
 from odb.errors import CorruptionError
-from odb.sim import run_crash_trials, SimResult
+from odb.sim import run_crash_trials, run_state_crash_trials, SimResult
 
 
 def _payload(counter: int, csn: int) -> bytes {
@@ -142,6 +142,113 @@ class ReuseSafetyTest(TestCase) {
 }
 
 
+# A write-only VFS that counts freelist page writes instead of storing bytes.
+# The scaling test below runs thousands of commits; holding the file image in
+# memory would dominate the run, and nothing in its loop ever reads a page back.
+class CountingVFS(VFS) {
+    length: int
+    fl_pages: int
+
+    def() {
+        self.length = 0
+        self.fl_pages = 0
+    }
+
+    def write_at(off: int, data: bytes) -> None {
+        if len(data) == 4096 {
+            if data[4088] == PT_FREELIST {
+                self.fl_pages = self.fl_pages + 1
+            }
+        }
+        end: int = off + len(data)
+        if end > self.length {
+            self.length = end
+        }
+    }
+
+    def sync() -> None {
+        pass
+    }
+
+    def truncate(n: int) -> None {
+        if n > self.length {
+            self.length = n
+        }
+    }
+
+    def size() -> int {
+        return self.length
+    }
+
+    def close() -> None {
+        pass
+    }
+}
+
+
+class FreelistScalingTest(TestCase) {
+    """The free list must never self-feed: per-commit freelist I/O tracks the
+    commit's own churn, not accumulated history. A retention window wider than
+    one freelist page's entry capacity (~255 txns at 4 KiB pages) plus steady
+    churn is exactly the regime that made a full-rewrite freelist quadratic
+    (odb-pager-scaling.md finding 1)."""
+
+    def test_freelist_io_stays_flat_under_wide_window() -> None {
+        v: CountingVFS = CountingVFS()
+        p: Pager = create(v, 4096)
+        window: int = 400
+        churn: int = 8
+        roots: list[int] = []
+        j: int = 0
+        while j < churn {
+            roots.append(0)
+            j = j + 1
+        }
+
+        early: int = 0      # freelist pages written in commits (200, 300]
+        late: int = 0       # freelist pages written in commits (700, 800]
+        mark: int = 0
+        n: int = 1
+        while n <= 800 {
+            k: int = 0
+            while k < churn {
+                pg: int = p.alloc()
+                p.stage(pg, PT_DATA, _payload(n, p.last_csn + 1))
+                if roots[k] != 0 {
+                    p.free(roots[k])
+                }
+                roots[k] = pg
+                k = k + 1
+            }
+            p.commit()
+            # Emulate the retention window's pin, as the commit log does.
+            floor: int = p.last_csn - window
+            if floor < 1 {
+                floor = 1
+            }
+            p.retain_floor = floor
+
+            if n == 200 or n == 700 {
+                mark = v.fl_pages
+            }
+            if n == 300 {
+                early = v.fl_pages - mark
+            }
+            if n == 800 {
+                late = v.fl_pages - mark
+            }
+            n = n + 1
+        }
+
+        # Flat: a late hundred commits cost about what an early hundred did.
+        self.assertTrue(late < early * 4)
+        # And proportional to churn in absolute terms: ~9 freed pages per
+        # commit fit comfortably in one freelist page per commit.
+        self.assertTrue(late <= 400)
+    }
+}
+
+
 class CrashRecoveryTest(TestCase) {
     # The headline M0 proof: crash at every I/O boundary across many seeds; the
     # database always reopens to a consistent all-or-nothing snapshot.
@@ -154,7 +261,18 @@ class CrashRecoveryTest(TestCase) {
         self.assertTrue(res.recovered_old > 0)
         self.assertTrue(res.recovered_new > 0)
     }
+
+    # Format v3: consensus-state flips (commit_state) crash-proven the same
+    # way, interleaved with data commits. The CSN never moves on a state
+    # flip, raft fields recover all-or-nothing, and the file keeps working.
+    def test_state_flip_crash_at_every_boundary() -> None {
+        res: SimResult = run_state_crash_trials(400)
+        self.assertEqual(res.trials, 400)
+        self.assertEqual(res.failures, 0, res.message)
+        self.assertTrue(res.recovered_old > 0)
+        self.assertTrue(res.recovered_new > 0)
+    }
 }
 
 
-main([PagerBasicsTest(), ChecksumTest(), ReuseSafetyTest(), CrashRecoveryTest()])
+main([PagerBasicsTest(), ChecksumTest(), ReuseSafetyTest(), FreelistScalingTest(), CrashRecoveryTest()])

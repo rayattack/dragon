@@ -1,0 +1,503 @@
+# odb.btree - the copy-on-write B+tree (spec section 14).
+#
+# A u64-keyed ordered map from key to a byte-string value, living in pager
+# pages. This is the substrate for the doc tree (docid -> DBON) and, later, the
+# index trees. Writers never touch a live page: a mutation copies each page on
+# the root-to-leaf path to a fresh page and rewrites the parent pointers up to a
+# new root (path copying). Readers pin an old root and see a perfect immutable
+# snapshot with no locks. Durability and atomicity come entirely from the pager:
+# the tree just produces a new root page id, which the caller installs as the
+# catalog root and commits.
+#
+# Pages are private to a transaction once allocated in it (pager.is_fresh), so
+# re-touching a page allocated earlier in the same txn mutates it in place
+# rather than copying again.
+#
+# Node layouts (in the page payload region [0, payload_size)):
+#
+#   Leaf (PT_LEAF):
+#     u16 count
+#     count directory entries at offset 2: (key u64, val_off u16, val_len u16)
+#     values packed downward from the end of the payload region
+#
+#   Branch (PT_BRANCH):
+#     u16 count                (number of separator keys)
+#     u64 child0 at offset 8   (subtree for keys < keys[0])
+#     count entries at offset 16: (sep_key u64, child u64)
+#       child[i] holds keys in [keys[i], keys[i+1])
+#
+# M1 stores values inline; a value larger than a quarter of the payload raises
+# (overflow page chains are a later milestone, spec section 12).
+
+from odb.pager import Pager, PT_LEAF, PT_BRANCH
+from odb.codec import blank, put_u16, put_u64, put_bytes, get_u16, get_u64, get_bytes
+from odb.errors import ODBError
+
+const _LEAF_DIR: int = 2      # leaf directory starts here
+const _LEAF_ENT: int = 12     # bytes per leaf directory entry
+const _BR_CHILD0: int = 8     # branch leftmost child offset
+const _BR_ENT_OFF: int = 16   # branch entries start here
+const _BR_ENT: int = 16       # bytes per branch entry
+
+class LeafNode {
+    keys: list[int]
+    vals: list[bytes]
+
+    def(keys: list[int], vals: list[bytes]) {
+        self.keys = keys
+        self.vals = vals
+    }
+}
+
+class BranchNode {
+    child0: int
+    keys: list[int]
+    children: list[int]
+
+    def(child0: int, keys: list[int], children: list[int]) {
+        self.child0 = child0
+        self.keys = keys
+        self.children = children
+    }
+}
+
+class BTree {
+    pager: Pager
+    root: int          # root page id; 0 = empty tree
+
+    def(pager: Pager, root: int) {
+        self.pager = pager
+        self.root = root
+    }
+
+    #--- serialization ----------------------------------------------------#
+
+    def _max_val() -> int {
+        return self.pager.payload_size() // 4
+    }
+
+    def _leaf_bytes(node: LeafNode) -> int {
+        total: int = _LEAF_DIR + len(node.keys) * _LEAF_ENT
+        i: int = 0
+        while i < len(node.vals) {
+            total = total + len(node.vals[i])
+            i = i + 1
+        }
+        return total
+    }
+
+    def _leaf_fits(node: LeafNode) -> bool {
+        return self._leaf_bytes(node) <= self.pager.payload_size()
+    }
+
+    def _branch_fits(node: BranchNode) -> bool {
+        return _BR_ENT_OFF + len(node.keys) * _BR_ENT <= self.pager.payload_size()
+    }
+
+    def _stage_leaf(pgid: int, node: LeafNode) -> None {
+        ps: int = self.pager.payload_size()
+        buf: list[int] = blank(ps)
+        n: int = len(node.keys)
+        put_u16(buf, 0, n)
+        end: int = ps
+        i: int = 0
+        while i < n {
+            v: bytes = node.vals[i]
+            vlen: int = len(v)
+            end = end - vlen
+            put_bytes(buf, end, v)
+            eoff: int = _LEAF_DIR + i * _LEAF_ENT
+            put_u64(buf, eoff, node.keys[i])
+            put_u16(buf, eoff + 8, end)
+            put_u16(buf, eoff + 10, vlen)
+            i = i + 1
+        }
+        self.pager.stage(pgid, PT_LEAF, bytes(buf))
+    }
+
+    def _stage_branch(pgid: int, node: BranchNode) -> None {
+        ps: int = self.pager.payload_size()
+        buf: list[int] = blank(ps)
+        n: int = len(node.keys)
+        put_u16(buf, 0, n)
+        put_u64(buf, _BR_CHILD0, node.child0)
+        i: int = 0
+        while i < n {
+            eoff: int = _BR_ENT_OFF + i * _BR_ENT
+            put_u64(buf, eoff, node.keys[i])
+            put_u64(buf, eoff + 8, node.children[i])
+            i = i + 1
+        }
+        self.pager.stage(pgid, PT_BRANCH, bytes(buf))
+    }
+
+    def _read_leaf(pgid: int) -> LeafNode {
+        page: bytes = self.pager.read_page(pgid)
+        n: int = get_u16(page, 0)
+        keys: list[int] = []
+        vals: list[bytes] = []
+        i: int = 0
+        while i < n {
+            eoff: int = _LEAF_DIR + i * _LEAF_ENT
+            keys.append(get_u64(page, eoff))
+            voff: int = get_u16(page, eoff + 8)
+            vlen: int = get_u16(page, eoff + 10)
+            vals.append(get_bytes(page, voff, vlen))
+            i = i + 1
+        }
+        return LeafNode(keys, vals)
+    }
+
+    def _read_branch(pgid: int) -> BranchNode {
+        page: bytes = self.pager.read_page(pgid)
+        n: int = get_u16(page, 0)
+        child0: int = get_u64(page, _BR_CHILD0)
+        keys: list[int] = []
+        children: list[int] = []
+        i: int = 0
+        while i < n {
+            eoff: int = _BR_ENT_OFF + i * _BR_ENT
+            keys.append(get_u64(page, eoff))
+            children.append(get_u64(page, eoff + 8))
+            i = i + 1
+        }
+        return BranchNode(child0, keys, children)
+    }
+
+    #--- page placement (COW vs in-place) ---------------------------------#
+
+    # Return a page id safe to write `content` into: the same id if it is private
+    # to this txn, otherwise a fresh id with the old one freed (path copying).
+    def _writable(pgid: int) -> int {
+        if pgid != 0 and self.pager.is_fresh(pgid) {
+            return pgid
+        }
+        np: int = self.pager.alloc()
+        if pgid != 0 {
+            self.pager.free(pgid)
+        }
+        return np
+    }
+
+    #--- routing / search -------------------------------------------------#
+
+    def _route(branch: BranchNode, k: int) -> int {
+        child: int = branch.child0
+        i: int = 0
+        while i < len(branch.keys) and k >= branch.keys[i] {
+            child = branch.children[i]
+            i = i + 1
+        }
+        return child
+    }
+
+    # Index of k in a sorted key list, or -1. Binary search.
+    def _find(keys: list[int], k: int) -> int {
+        lo: int = 0
+        hi: int = len(keys) - 1
+        while lo <= hi {
+            mid: int = (lo + hi) // 2
+            if keys[mid] == k {
+                return mid
+            }
+            if keys[mid] < k {
+                lo = mid + 1
+            } else {
+                hi = mid - 1
+            }
+        }
+        return -1
+    }
+
+    # First index whose key is >= k (insertion point).
+    def _lower_bound(keys: list[int], k: int) -> int {
+        lo: int = 0
+        hi: int = len(keys)
+        while lo < hi {
+            mid: int = (lo + hi) // 2
+            if keys[mid] < k {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
+        }
+        return lo
+    }
+
+    #--- public reads -----------------------------------------------------#
+
+    def contains(k: int) -> bool {
+        pid: int = self.root
+        if pid == 0 {
+            return False
+        }
+        page: bytes = self.pager.read_page(pid)
+        while self.pager.page_type(page) == PT_BRANCH {
+            br: BranchNode = self._read_branch(pid)
+            pid = self._route(br, k)
+            page = self.pager.read_page(pid)
+        }
+        leaf: LeafNode = self._read_leaf(pid)
+        return self._find(leaf.keys, k) >= 0
+    }
+
+    # Return the value for k. Raises KeyError if absent.
+    def get(k: int) -> bytes {
+        pid: int = self.root
+        if pid != 0 {
+            page: bytes = self.pager.read_page(pid)
+            while self.pager.page_type(page) == PT_BRANCH {
+                br: BranchNode = self._read_branch(pid)
+                pid = self._route(br, k)
+                page = self.pager.read_page(pid)
+            }
+            leaf: LeafNode = self._read_leaf(pid)
+            idx: int = self._find(leaf.keys, k)
+            if idx >= 0 {
+                return leaf.vals[idx]
+            }
+        }
+        raise KeyError("key " + str(k) + " not in tree")
+    }
+
+    #--- split helpers ----------------------------------------------------#
+
+    def _split_leaf(node: LeafNode) -> list[LeafNode] {
+        total: int = self._leaf_bytes(node)
+        target: int = total // 2
+        lk: list[int] = []
+        lv: list[bytes] = []
+        acc: int = _LEAF_DIR
+        i: int = 0
+        n: int = len(node.keys)
+        # Keep at least one entry on each side.
+        while i < n - 1 {
+            entry_sz: int = _LEAF_ENT + len(node.vals[i])
+            if len(lk) > 0 and acc + entry_sz > target {
+                break
+            }
+            lk.append(node.keys[i])
+            lv.append(node.vals[i])
+            acc = acc + entry_sz
+            i = i + 1
+        }
+        rk: list[int] = node.keys[i:]
+        rv: list[bytes] = node.vals[i:]
+        return [LeafNode(lk, lv), LeafNode(rk, rv)]
+    }
+
+    #--- insert -----------------------------------------------------------#
+
+    def insert(k: int, v: bytes) -> None {
+        if len(v) > self._max_val() {
+            raise ODBError("value too large for M1 inline storage (overflow pages pending)")
+        }
+
+        if self.root == 0 {
+            pid: int = self.pager.alloc()
+            self._stage_leaf(pid, LeafNode([k], [v]))
+            self.root = pid
+            return
+        }
+
+        # Descend to the target leaf, recording the branch path.
+        path: list[int] = []
+        pid2: int = self.root
+        page: bytes = self.pager.read_page(pid2)
+        while self.pager.page_type(page) == PT_BRANCH {
+            path.append(pid2)
+            br: BranchNode = self._read_branch(pid2)
+            pid2 = self._route(br, k)
+            page = self.pager.read_page(pid2)
+        }
+
+        leaf: LeafNode = self._read_leaf(pid2)
+        pos: int = self._lower_bound(leaf.keys, k)
+        if pos < len(leaf.keys) and leaf.keys[pos] == k {
+            # Replace existing value.
+            leaf.vals[pos] = v
+        } else {
+            leaf.keys.insert(pos, k)
+            leaf.vals.insert(pos, v)
+        }
+
+        if self._leaf_fits(leaf) {
+            newpid: int = self._writable(pid2)
+            self._stage_leaf(newpid, leaf)
+            self._propagate(path, pid2, newpid)
+            return
+        }
+
+        # Leaf overflow: split and push a separator into the parent.
+        halves: list[LeafNode] = self._split_leaf(leaf)
+        left: LeafNode = halves[0]
+        right: LeafNode = halves[1]
+        promo: int = right.keys[0]
+        left_pid: int = self._writable(pid2)
+        self._stage_leaf(left_pid, left)
+        right_pid: int = self.pager.alloc()
+        self._stage_leaf(right_pid, right)
+        self._insert_into_parent(path, pid2, left_pid, promo, right_pid)
+    }
+
+    # Walk up `path` replacing old_child pointers with new_child, copying each
+    # branch. Sets the (possibly new) tree root.
+    def _propagate(path: list[int], old_child: int, new_child: int) -> None {
+        i: int = len(path) - 1
+        while i >= 0 {
+            bpid: int = path[i]
+            br: BranchNode = self._read_branch(bpid)
+            self._replace_child(br, old_child, new_child)
+            nb: int = self._writable(bpid)
+            self._stage_branch(nb, br)
+            old_child = bpid
+            new_child = nb
+            i = i - 1
+        }
+        self.root = new_child
+    }
+
+    def _replace_child(br: BranchNode, old_c: int, new_c: int) -> None {
+        if br.child0 == old_c {
+            br.child0 = new_c
+            return
+        }
+        i: int = 0
+        while i < len(br.children) {
+            if br.children[i] == old_c {
+                br.children[i] = new_c
+                return
+            }
+            i = i + 1
+        }
+    }
+
+    def _insert_into_parent(path: list[int], old_child: int, left_pid: int, sep: int, right_pid: int) -> None {
+        child_old: int = old_child
+        child_left: int = left_pid
+        ins_key: int = sep
+        ins_right: int = right_pid
+
+        i: int = len(path) - 1
+        while i >= 0 {
+            bpid: int = path[i]
+            br: BranchNode = self._read_branch(bpid)
+            self._replace_child(br, child_old, child_left)
+            # Insert separator: right subtree goes at the sorted key position.
+            p: int = self._lower_bound(br.keys, ins_key)
+            br.keys.insert(p, ins_key)
+            br.children.insert(p, ins_right)
+
+            if self._branch_fits(br) {
+                nb: int = self._writable(bpid)
+                self._stage_branch(nb, br)
+                # Propagate this new page id up the remaining path.
+                self._propagate(path[0:i], bpid, nb)
+                return
+            }
+
+            # Branch overflow: split, promoting the middle key up a level.
+            mid: int = len(br.keys) // 2
+            midkey: int = br.keys[mid]
+            lb: BranchNode = BranchNode(br.child0, br.keys[0:mid], br.children[0:mid])
+            rb: BranchNode = BranchNode(br.children[mid], br.keys[mid + 1:], br.children[mid + 1:])
+            lb_pid: int = self._writable(bpid)
+            self._stage_branch(lb_pid, lb)
+            rb_pid: int = self.pager.alloc()
+            self._stage_branch(rb_pid, rb)
+
+            child_old = bpid
+            child_left = lb_pid
+            ins_key = midkey
+            ins_right = rb_pid
+            i = i - 1
+        }
+
+        # The root split: grow a new root one level up.
+        newroot: BranchNode = BranchNode(child_left, [ins_key], [ins_right])
+        nr: int = self.pager.alloc()
+        self._stage_branch(nr, newroot)
+        self.root = nr
+    }
+
+    #--- delete -----------------------------------------------------------#
+
+    # Remove a key. Returns True if it was present. M1 delete-without-merge:
+    # the entry is removed and the copy-on-write path rewritten, but under-full
+    # nodes are not merged (reclaimed by compact, a later milestone). Lookups
+    # stay correct because routing still lands each key in its own leaf.
+    def delete(k: int) -> bool {
+        if self.root == 0 {
+            return False
+        }
+        path: list[int] = []
+        pid: int = self.root
+        page: bytes = self.pager.read_page(pid)
+        while self.pager.page_type(page) == PT_BRANCH {
+            path.append(pid)
+            br: BranchNode = self._read_branch(pid)
+            pid = self._route(br, k)
+            page = self.pager.read_page(pid)
+        }
+        leaf: LeafNode = self._read_leaf(pid)
+        idx: int = self._find(leaf.keys, k)
+        if idx < 0 {
+            return False
+        }
+        leaf.keys.pop(idx)
+        leaf.vals.pop(idx)
+        newpid: int = self._writable(pid)
+        self._stage_leaf(newpid, leaf)
+        self._propagate(path, pid, newpid)
+        return True
+    }
+
+    #--- ordered scan -----------------------------------------------------#
+
+    # All (key, value) pairs in ascending key order. Used by tests and check.
+    def items() -> list[list[bytes]] {
+        out: list[list[bytes]] = []
+        if self.root != 0 {
+            self._collect(self.root, out)
+        }
+        return out
+    }
+
+    def _collect(pid: int, out: list[list[bytes]]) -> None {
+        page: bytes = self.pager.read_page(pid)
+        if self.pager.page_type(page) == PT_LEAF {
+            leaf: LeafNode = self._read_leaf(pid)
+            i: int = 0
+            while i < len(leaf.keys) {
+                pair: list[bytes] = [_key_bytes(leaf.keys[i]), leaf.vals[i]]
+                out.append(pair)
+                i = i + 1
+            }
+        } else {
+            br: BranchNode = self._read_branch(pid)
+            self._collect(br.child0, out)
+            i2: int = 0
+            while i2 < len(br.children) {
+                self._collect(br.children[i2], out)
+                i2 = i2 + 1
+            }
+        }
+    }
+
+    # Number of keys in the tree (full walk).
+    def count() -> int {
+        return len(self.items())
+    }
+}
+
+# Encode a u64 key as 8 big-endian bytes, so item pairs are uniformly byte-typed
+# and keys sort lexicographically the same as numerically.
+def _key_bytes(k: int) -> bytes {
+    out: list[int] = []
+    i: int = 7
+    while i >= 0 {
+        out.append((k >> (i * 8)) & 0xFF)
+        i = i - 1
+    }
+    return bytes(out)
+}

@@ -320,7 +320,7 @@ install(TARGETS dragon
 install(PROGRAMS ${DRAGON_EGG_OUT}
     DESTINATION ${CMAKE_INSTALL_BINDIR})
 
-install(TARGETS dragon_runtime dragon_sqlite3 dragon_llhttp
+install(TARGETS dragon_runtime dragon_sqlite3 dragon_llhttp dragon_mbedtls
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}/dragon)
 
 # pcre2-8-static is a third-party target; pull its file directly.
@@ -426,14 +426,17 @@ if(UNIX AND NOT APPLE)
     set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
     set(CPACK_DEBIAN_PACKAGE_SECTION "devel")
     set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
-    set(CPACK_DEBIAN_PACKAGE_DEPENDS "gcc | clang")
+    # gcc/clang: dragon shells out to cc for the final link. zlib1g-dev /
+    # libzstd-dev: programs using gzip/zstd/tarfile link -lz / -lzstd, which
+    # needs the dev .so symlinks, not just the runtime libs.
+    set(CPACK_DEBIAN_PACKAGE_DEPENDS "gcc | clang, zlib1g-dev, libzstd-dev")
     set(CPACK_DEBIAN_PACKAGE_RECOMMENDS "build-essential")
     set(CPACK_DEBIAN_FILE_NAME "DEB-DEFAULT")
 
     # Fedora / RHEL / openSUSE (.rpm)
     set(CPACK_RPM_PACKAGE_LICENSE "MIT")
     set(CPACK_RPM_PACKAGE_GROUP "Development/Languages")
-    set(CPACK_RPM_PACKAGE_REQUIRES "(gcc or clang)")
+    set(CPACK_RPM_PACKAGE_REQUIRES "(gcc or clang), zlib-devel, libzstd-devel")
     set(CPACK_RPM_FILE_NAME "RPM-DEFAULT")
     # The stdlib lives under /usr/share; don't let rpm claim ownership of the
     # shared system dirs it merely populates.

@@ -1,0 +1,664 @@
+# odb.sim - the deterministic crash-recovery harness (spec section 21).
+#
+# The single most important M0 property: after a crash at ANY I/O boundary, the
+# database reopens to a consistent snapshot with no recovery pass. This harness
+# proves it by brute force. For each seed it:
+#
+#   1. builds a database and applies a random number of clean commits,
+#   2. arms the SimVFS to crash at a random I/O boundary of the NEXT commit,
+#   3. attempts that commit (the crash fires somewhere inside it),
+#   4. reopens the frozen post-crash disk and checks the invariant:
+#        - the recovered CSN is exactly the previous one or the attempted one
+#          (atomicity: all-or-nothing, never a partial state),
+#        - the state read back matches whichever CSN won,
+#        - every referenced page passes its crc32c (integrity).
+#
+# The workload is a copy-on-write counter: each commit writes a fresh data page
+# holding (counter, csn) and frees the previous one. Any failing seed is
+# returned by number so it replays the exact same run
+
+from odb.vfs import SimVFS
+from odb.pager import create, open_pager, Pager, PT_DATA
+from odb.codec import blank, put_u64, get_u64
+from odb.rng import Rng
+from odb.errors import CorruptionError
+from odb.btree import BTree
+from odb.index import IndexTree
+from odb.checker import check_tree, check_index_tree, CheckResult
+from odb.keyenc import enc_int
+from odb.raftlog import RaftTail
+
+# 64-byte payload: the visible counter and the CSN it was written at.
+def _payload(counter: int, csn: int) -> bytes {
+    buf: list[int] = blank(64)
+    put_u64(buf, 0, counter)
+    put_u64(buf, 8, csn)
+    return bytes(buf)
+}
+
+# Pages the pager holds as free: unconsumed entries awaiting reuse plus the
+# pages of the persisted freelist chunks themselves. Kept in one place so the
+# crash trials' accounting checks survive freelist representation changes.
+def _freelist_page_count(p: Pager) -> int {
+    total: int = 0
+    for c in p.chunks {
+        total = total + len(c.pages) + len(c.entries)
+    }
+    # Entries already consumed off the floor chunk are live pages counted
+    # elsewhere (or freed again into a newer chunk).
+    if len(p.chunks) > 0 and p.floor_csn == p.chunks[0].csn {
+        total = total - p.floor_idx
+    }
+    return total
+}
+
+# The page-accounting partition invariant for the counter workload. At a
+# committed state every allocated page (id 3..high_water-1) must be exactly one
+# of: the catalog root, a page of a persisted freelist chunk, a freed page
+# awaiting reuse, or a page of the raft tail chain (format v3). A page in none
+# of the buckets is unreachable file bloat; a page in two of them will
+# eventually be handed out twice. Returns "" when the partition holds, else a
+# description of the first violation.
+def check_accounting(p: Pager) -> str {
+    seen: dict[int, bool] = {}
+    if p.catalog_root != 0 {
+        seen[p.catalog_root] = True
+    }
+    if p.raft_root != 0 {
+        tail: RaftTail = RaftTail(p)
+        for rpg in tail.pages() {
+            if rpg in seen {
+                return "page " + str(rpg) + " is listed twice"
+            }
+            seen[rpg] = True
+        }
+    }
+    for c in p.chunks {
+        for pg in c.pages {
+            if pg in seen {
+                return "page " + str(pg) + " is listed twice"
+            }
+            seen[pg] = True
+        }
+        start: int = 0
+        if p.floor_csn == c.csn {
+            start = p.floor_idx
+        }
+        i: int = start
+        while i < len(c.entries) {
+            e: int = c.entries[i]
+            if e in seen {
+                return "page " + str(e) + " is listed twice"
+            }
+            seen[e] = True
+            i = i + 1
+        }
+    }
+    for fpg in p.freed {
+        if fpg in seen {
+            return "page " + str(fpg) + " is listed twice"
+        }
+        seen[fpg] = True
+    }
+    pgid: int = 3
+    while pgid < p.high_water {
+        if not (pgid in seen) {
+            return "page " + str(pgid) + " is unaccounted for"
+        }
+        pgid = pgid + 1
+    }
+    if len(seen) != p.high_water - 3 {
+        return "accounting covers " + str(len(seen)) + " pages, the file has " + str(p.high_water - 3)
+    }
+    return ""
+}
+
+# One copy-on-write commit. Returns the page id it installed as the new root.
+def _do_commit(p: Pager, counter: int) -> int {
+    newpg: int = p.alloc()
+    pending_csn: int = p.last_csn + 1
+    p.stage(newpg, PT_DATA, _payload(counter, pending_csn))
+    old: int = p.catalog_root
+    p.set_catalog_root(newpg)
+    if old != 0 {
+        p.free(old)
+    }
+    p.commit()
+    return newpg
+}
+
+class SimResult {
+    trials: int
+    recovered_old: int      # crash lost the in-flight commit
+    recovered_new: int      # in-flight commit's writes durably landed
+    failures: int
+    first_bad_seed: int
+    message: str
+
+    def() {
+        self.trials = 0
+        self.recovered_old = 0
+        self.recovered_new = 0
+        self.failures = 0
+        self.first_bad_seed = 0
+        self.message = ""
+    }
+
+    def _fail(seed: int, msg: str) -> None {
+        self.failures = self.failures + 1
+        if self.first_bad_seed == 0 {
+            self.first_bad_seed = seed
+            self.message = msg
+        }
+    }
+}
+
+def run_crash_trials(n_seeds: int) -> SimResult {
+    res: SimResult = SimResult()
+    seed: int = 1
+    while seed <= n_seeds {
+        rng: Rng = Rng(seed)
+
+        v: SimVFS = SimVFS()
+        p: Pager = create(v, 4096)
+
+        # Baseline = the committed empty database.
+        old_csn: int = p.last_csn
+        old_root: int = p.catalog_root
+        old_counter: int = 0
+
+        counter: int = 0
+        k: int = rng.below(8)
+        i: int = 0
+        while i < k {
+            counter = counter + 1
+            r: int = _do_commit(p, counter)
+            old_csn = p.last_csn
+            old_root = r
+            old_counter = counter
+            i = i + 1
+        }
+
+        # Attempt one more commit, crashing at a random boundary of it.
+        budget: int = rng.below(7)
+        v.arm(budget, Rng((seed * 2654435761) & 0xFFFFFFFF))
+        counter = counter + 1
+        new_root: int = _do_commit(p, counter)
+        expect_new_csn: int = old_csn + 1
+
+        # Reopen the frozen post-crash disk into a fresh pager. A CorruptionError
+        # here would mean the recovered meta pointed at a page that never became
+        # durable - a real bug - so it counts as a failure naming the seed.
+        fail_before: int = res.failures
+        try {
+            rp: Pager = open_pager(v)
+
+            if rp.last_csn != old_csn and rp.last_csn != expect_new_csn {
+                res._fail(seed, "csn " + str(rp.last_csn) + " not in {" + str(old_csn) + "," + str(expect_new_csn) + "}")
+            } else {
+                if rp.last_csn == old_csn {
+                    # Recovered to the previous consistent state.
+                    if old_root == 0 {
+                        # empty database - nothing to read
+                        res.recovered_old = res.recovered_old + 1
+                    } else {
+                        page: bytes = rp.read_page(rp.catalog_root)
+                        c: int = get_u64(page, 0)
+                        if rp.catalog_root != old_root or c != old_counter {
+                            res._fail(seed, "old-state mismatch: root " + str(rp.catalog_root) + " counter " + str(c))
+                        } else {
+                            res.recovered_old = res.recovered_old + 1
+                        }
+                    }
+                } else {
+                    # The in-flight commit's writes reached disk: new state must
+                    # be complete and consistent.
+                    page2: bytes = rp.read_page(rp.catalog_root)
+                    c2: int = get_u64(page2, 0)
+                    pcsn: int = get_u64(page2, 8)
+                    if rp.catalog_root != new_root or c2 != counter or pcsn != expect_new_csn {
+                        res._fail(seed, "new-state mismatch: root " + str(rp.catalog_root) + " counter " + str(c2))
+                    } else {
+                        res.recovered_new = res.recovered_new + 1
+                    }
+                }
+            }
+
+            # The crash is over: disarm the disk and prove the recovered pager
+            # is a fully working database, not just a readable one. Reuse,
+            # freeing and page accounting must all hold across more commits
+            # and a clean reopen.
+            if res.failures == fail_before {
+                v.armed = False
+                v.crashed = False
+                acct: str = check_accounting(rp)
+                if acct != "" {
+                    res._fail(seed, "post-recovery accounting: " + acct)
+                }
+                j: int = 0
+                while j < 3 and res.failures == fail_before {
+                    cval: int = 1000 + j
+                    _do_commit(rp, cval)
+                    readback: bytes = rp.read_page(rp.catalog_root)
+                    if get_u64(readback, 0) != cval {
+                        res._fail(seed, "post-recovery commit read back " + str(get_u64(readback, 0)))
+                    }
+                    acct2: str = check_accounting(rp)
+                    if acct2 != "" {
+                        res._fail(seed, "post-recovery accounting after commit: " + acct2)
+                    }
+                    j = j + 1
+                }
+                if res.failures == fail_before {
+                    rp2: Pager = open_pager(v)
+                    if rp2.last_csn != rp.last_csn {
+                        res._fail(seed, "clean reopen lost csn " + str(rp.last_csn))
+                    }
+                    readback2: bytes = rp2.read_page(rp2.catalog_root)
+                    if get_u64(readback2, 0) != 1002 {
+                        res._fail(seed, "clean reopen read back " + str(get_u64(readback2, 0)))
+                    }
+                    acct3: str = check_accounting(rp2)
+                    if acct3 != "" {
+                        res._fail(seed, "accounting after clean reopen: " + acct3)
+                    }
+                }
+            }
+        } except CorruptionError {
+            res._fail(seed, "CorruptionError on reopen")
+        }
+
+        res.trials = res.trials + 1
+        seed = seed + 1
+    }
+    return res
+}
+
+
+#===----------------------------------------------------------------------===#
+# B+tree crash proof: the same all-or-nothing guarantee, end to end through a
+# real ordered tree. Each trial builds a committed tree, then crashes an
+# in-flight insert+commit and reopens; the recovered tree must pass `odb check`
+# and hold EXACTLY the pre-crash key set or that set plus the one in-flight key.
+# There are two variants: the u64-keyed doc/catalog tree and the bytes-keyed
+# index tree, so both storage substrates are crash-proven identically.
+#===----------------------------------------------------------------------===#
+
+# Distinct, scattered keys: i * odd is injective modulo 2^30 over our range, so
+# no collisions (collisions would make the count check ambiguous) while still
+# exercising routing rather than pure append.
+def _tree_key(i: int) -> int {
+    return (i * 2654435761) & 0x3FFFFFFF
+}
+
+def _tree_val(k: int) -> bytes {
+    buf: list[int] = blank(8)
+    put_u64(buf, 0, k * 11 + 5)
+    return bytes(buf)
+}
+
+def _all_present(t: BTree, keys: list[int]) -> bool {
+    for k in keys {
+        if not t.contains(k) {
+            return False
+        }
+    }
+    return True
+}
+
+def run_btree_crash_trials(n_seeds: int) -> SimResult {
+    res: SimResult = SimResult()
+    seed: int = 1
+    while seed <= n_seeds {
+        rng: Rng = Rng(seed)
+
+        v: SimVFS = SimVFS()
+        p: Pager = create(v, 4096)
+        t: BTree = BTree(p, p.catalog_root)
+
+        committed: list[int] = []
+        k_count: int = rng.below(400)
+        # Build the baseline tree in a single batched transaction (fast: fresh
+        # pages mutate in place), then commit it once.
+        i: int = 0
+        while i < k_count {
+            key: int = _tree_key(i)
+            t.insert(key, _tree_val(key))
+            committed.append(key)
+            i = i + 1
+        }
+        if k_count > 0 {
+            p.set_catalog_root(t.root)
+            p.commit()
+        }
+        old_csn: int = p.last_csn
+
+        # In-flight insert + commit into the committed tree, crashing at a
+        # random boundary. This copy-on-writes the root-to-leaf path of an
+        # existing multi-level tree, then the crash tests atomicity of the flip.
+        newk: int = _tree_key(k_count)
+        t.insert(newk, _tree_val(newk))
+        p.set_catalog_root(t.root)
+        budget: int = rng.below(24)
+        v.arm(budget, Rng((seed * 40503 + 7) & 0xFFFFFFFF))
+        p.commit()
+        expect_new_csn: int = old_csn + 1
+
+        try {
+            rp: Pager = open_pager(v)
+            chk: CheckResult = check_tree(rp, rp.catalog_root)
+            rt: BTree = BTree(rp, rp.catalog_root)
+            present: int = chk.keys
+
+            if not chk.ok {
+                res._fail(seed, "check failed: " + chk.message)
+            } else {
+                # Count accounting: tree pages + free pages must exactly fill
+                # the file (ids 0-2 are the header and the two metas).
+                accounted: int = chk.pages + _freelist_page_count(rp) + 3
+                if accounted != rp.high_water {
+                    res._fail(seed, "page accounting: " + str(accounted) + " accounted, high water " + str(rp.high_water))
+                }
+                if rp.last_csn == old_csn {
+                    if present != len(committed) or rt.contains(newk) {
+                        res._fail(seed, "old-state count " + str(present) + " want " + str(len(committed)))
+                    } else {
+                        if not _all_present(rt, committed) {
+                            res._fail(seed, "old-state missing a committed key")
+                        } else {
+                            res.recovered_old = res.recovered_old + 1
+                        }
+                    }
+                } else {
+                    if rp.last_csn == expect_new_csn {
+                        if present != len(committed) + 1 or not rt.contains(newk) {
+                            res._fail(seed, "new-state count " + str(present) + " want " + str(len(committed) + 1))
+                        } else {
+                            if not _all_present(rt, committed) {
+                                res._fail(seed, "new-state missing a committed key")
+                            } else {
+                                res.recovered_new = res.recovered_new + 1
+                            }
+                        }
+                    } else {
+                        res._fail(seed, "csn " + str(rp.last_csn) + " unexpected")
+                    }
+                }
+            }
+        } except CorruptionError {
+            res._fail(seed, "CorruptionError on reopen")
+        }
+
+        res.trials = res.trials + 1
+        seed = seed + 1
+    }
+    return res
+}
+
+
+#===----------------------------------------------------------------------===#
+# Consensus-state crash proof (format v3). commit_state() flips the meta
+# without advancing the CSN; a crash at any I/O boundary of either commit kind
+# must recover to exactly the pre- or post-state of the interrupted operation:
+# the CSN untouched by state flips, the raft fields all-or-nothing, the tail
+# chain loadable, and the page-accounting partition intact - then keep working
+# as a full database across further commits, flips, and a clean reopen.
+#===----------------------------------------------------------------------===#
+
+def _tail_payload(i: int) -> bytes {
+    buf: list[int] = blank(48)
+    put_u64(buf, 0, i * 7 + 3)
+    put_u64(buf, 40, i)
+    return bytes(buf)
+}
+
+# One raft flush: append entry `idx` at `term`, stamp term/vote, flip.
+def _do_state_flush(p: Pager, tail: RaftTail, idx: int, term: int) -> None {
+    tail.append(idx, term, _tail_payload(idx))
+    p.raft_term = term
+    p.raft_vote = (idx % 5) + 1
+    p.commit_state()
+}
+
+def run_state_crash_trials(n_seeds: int) -> SimResult {
+    res: SimResult = SimResult()
+    seed: int = 1
+    while seed <= n_seeds {
+        rng: Rng = Rng(seed)
+
+        v: SimVFS = SimVFS()
+        p: Pager = create(v, 4096)
+        tail: RaftTail = RaftTail(p)
+
+        # Baseline: an interleaving of data commits and state flips.
+        counter: int = 0
+        idx: int = 0
+        term: int = 2
+        steps: int = rng.below(6) + 1
+        i: int = 0
+        while i < steps {
+            if rng.flip() {
+                counter = counter + 1
+                _do_commit(p, counter)
+            } else {
+                idx = idx + 1
+                _do_state_flush(p, tail, idx, term)
+            }
+            i = i + 1
+        }
+
+        old_csn: int = p.last_csn
+        old_seq: int = p.meta_seq
+        old_term: int = p.raft_term
+        old_vote: int = p.raft_vote
+        old_rroot: int = p.raft_root
+        old_counter: int = counter
+        old_root: int = p.catalog_root
+
+        # Crash inside ONE more operation, of either kind.
+        budget: int = rng.below(7)
+        v.arm(budget, Rng((seed * 2246822519) & 0xFFFFFFFF))
+        crash_state: bool = rng.flip()
+        if crash_state {
+            idx = idx + 1
+            _do_state_flush(p, tail, idx, term + 1)
+        } else {
+            counter = counter + 1
+            _do_commit(p, counter)
+        }
+
+        fail_before: int = res.failures
+        try {
+            rp: Pager = open_pager(v)
+
+            if crash_state {
+                # A state flip never moves the CSN, whatever else happened.
+                if rp.last_csn != old_csn {
+                    res._fail(seed, "state flip moved csn " + str(old_csn) + " -> " + str(rp.last_csn))
+                }
+                if rp.meta_seq == old_seq {
+                    # Old state won: every raft field must be exactly the old set.
+                    if rp.raft_term != old_term or rp.raft_vote != old_vote or rp.raft_root != old_rroot {
+                        res._fail(seed, "torn state flip leaked partial raft fields")
+                    } else {
+                        res.recovered_old = res.recovered_old + 1
+                    }
+                } else {
+                    if rp.raft_term != term + 1 or rp.raft_root == old_rroot {
+                        res._fail(seed, "new-state raft fields incomplete")
+                    } else {
+                        res.recovered_new = res.recovered_new + 1
+                    }
+                }
+                if rp.catalog_root != old_root {
+                    res._fail(seed, "state flip disturbed the catalog root")
+                }
+            } else {
+                if rp.last_csn == old_csn {
+                    if rp.catalog_root != old_root {
+                        res._fail(seed, "old-state catalog root mismatch")
+                    } else {
+                        res.recovered_old = res.recovered_old + 1
+                    }
+                } else {
+                    if rp.last_csn != old_csn + 1 {
+                        res._fail(seed, "csn " + str(rp.last_csn) + " not in {" + str(old_csn) + "," + str(old_csn + 1) + "}")
+                    } else {
+                        page: bytes = rp.read_page(rp.catalog_root)
+                        if get_u64(page, 0) != counter {
+                            res._fail(seed, "new-state counter mismatch")
+                        } else {
+                            res.recovered_new = res.recovered_new + 1
+                        }
+                    }
+                }
+                # A data commit carries the raft fields through unchanged.
+                if rp.raft_term != old_term or rp.raft_root != old_rroot {
+                    res._fail(seed, "data commit disturbed raft state")
+                }
+            }
+
+            # The recovered file is a fully working database: the tail chain
+            # loads, accounting holds, both commit kinds still work, and a
+            # clean reopen agrees.
+            if res.failures == fail_before {
+                v.armed = False
+                v.crashed = False
+                rtail: RaftTail = RaftTail(rp)
+                acct: str = check_accounting(rp)
+                if acct != "" {
+                    res._fail(seed, "post-recovery accounting: " + acct)
+                } else {
+                    nidx: int = idx + 10
+                    _do_state_flush(rp, rtail, nidx, term + 2)
+                    cval: int = 500
+                    _do_commit(rp, cval)
+                    _do_commit(rp, cval + 1)
+                    acct2: str = check_accounting(rp)
+                    if acct2 != "" {
+                        res._fail(seed, "post-recovery accounting after work: " + acct2)
+                    } else {
+                        rp2: Pager = open_pager(v)
+                        if rp2.last_csn != rp.last_csn or rp2.meta_seq != rp.meta_seq {
+                            res._fail(seed, "clean reopen lost state (csn " + str(rp.last_csn) + " seq " + str(rp.meta_seq) + ")")
+                        } else {
+                            if rp2.raft_term != term + 2 {
+                                res._fail(seed, "clean reopen lost raft term")
+                            }
+                            t2: RaftTail = RaftTail(rp2)
+                            if len(t2.entries()) == 0 {
+                                res._fail(seed, "clean reopen lost the tail chain")
+                            }
+                            acct3: str = check_accounting(rp2)
+                            if acct3 != "" {
+                                res._fail(seed, "accounting after clean reopen: " + acct3)
+                            }
+                        }
+                    }
+                }
+            }
+        } except CorruptionError {
+            res._fail(seed, "CorruptionError on reopen")
+        }
+
+        res.trials = res.trials + 1
+        seed = seed + 1
+    }
+    return res
+}
+
+
+def _ix_all_present(t: IndexTree, keys: list[int]) -> bool {
+    for k in keys {
+        if not t.contains(enc_int(k)) {
+            return False
+        }
+    }
+    return True
+}
+
+# The bytes-keyed index tree, crashed the same way as the u64 tree above. Keys
+# are memcomparable-encoded scattered integers; recovery must pass the index
+# check and hold exactly the committed key set or that set plus the one in-flight
+# key.
+def run_index_crash_trials(n_seeds: int) -> SimResult {
+    res: SimResult = SimResult()
+    seed: int = 1
+    while seed <= n_seeds {
+        rng: Rng = Rng(seed)
+
+        v: SimVFS = SimVFS()
+        p: Pager = create(v, 4096)
+        t: IndexTree = IndexTree(p, p.catalog_root)
+
+        committed: list[int] = []
+        k_count: int = rng.below(400)
+        i: int = 0
+        while i < k_count {
+            kk: int = _tree_key(i)
+            t.insert(enc_int(kk), _tree_val(kk))
+            committed.append(kk)
+            i = i + 1
+        }
+        if k_count > 0 {
+            p.set_catalog_root(t.root)
+            p.commit()
+        }
+        old_csn: int = p.last_csn
+
+        newk: int = _tree_key(k_count)
+        t.insert(enc_int(newk), _tree_val(newk))
+        p.set_catalog_root(t.root)
+        budget: int = rng.below(24)
+        v.arm(budget, Rng((seed * 40503 + 7) & 0xFFFFFFFF))
+        p.commit()
+        expect_new_csn: int = old_csn + 1
+
+        try {
+            rp: Pager = open_pager(v)
+            chk: CheckResult = check_index_tree(rp, rp.catalog_root)
+            rt: IndexTree = IndexTree(rp, rp.catalog_root)
+            present: int = chk.keys
+
+            if not chk.ok {
+                res._fail(seed, "index check failed: " + chk.message)
+            } else {
+                accounted: int = chk.pages + _freelist_page_count(rp) + 3
+                if accounted != rp.high_water {
+                    res._fail(seed, "page accounting: " + str(accounted) + " accounted, high water " + str(rp.high_water))
+                }
+                if rp.last_csn == old_csn {
+                    if present != len(committed) or rt.contains(enc_int(newk)) {
+                        res._fail(seed, "old-state count " + str(present) + " want " + str(len(committed)))
+                    } else {
+                        if not _ix_all_present(rt, committed) {
+                            res._fail(seed, "old-state missing a committed key")
+                        } else {
+                            res.recovered_old = res.recovered_old + 1
+                        }
+                    }
+                } else {
+                    if rp.last_csn == expect_new_csn {
+                        if present != len(committed) + 1 or not rt.contains(enc_int(newk)) {
+                            res._fail(seed, "new-state count " + str(present) + " want " + str(len(committed) + 1))
+                        } else {
+                            if not _ix_all_present(rt, committed) {
+                                res._fail(seed, "new-state missing a committed key")
+                            } else {
+                                res.recovered_new = res.recovered_new + 1
+                            }
+                        }
+                    } else {
+                        res._fail(seed, "csn " + str(rp.last_csn) + " unexpected")
+                    }
+                }
+            }
+        } except CorruptionError {
+            res._fail(seed, "CorruptionError on reopen")
+        }
+
+        res.trials = res.trials + 1
+        seed = seed + 1
+    }
+    return res
+}

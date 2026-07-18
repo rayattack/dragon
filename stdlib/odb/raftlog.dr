@@ -1,0 +1,297 @@
+# odb.raftlog - the persisted raft tail (spec section 19 v3b).
+#
+# Raft demands that a node's log entries be durable before it acknowledges
+# them. In ODB the log below the applied index IS the database (every applied
+# entry is a committed transaction, replayable from the commit log), so only
+# the TAIL - entries above the applied index, not yet safe to apply - needs
+# its own storage. It lives in PT_RAFT pages chained backward exactly like
+# the commit log, referenced from the meta's raft_root, and flipped durable
+# by pager.commit_state() without consuming a CSN.
+#
+# The chain is append-only. A truncation (a new leader overwriting an
+# unapplied suffix) just appends the replacement entries; readers reconstruct
+# the live log as the contiguous run of indexes ending at the NEWEST chain
+# entry, which is correct because every append batch ends at the log's end.
+# Superseded duplicates and orphans stay in the chain as dead weight until
+# pruning frees them.
+#
+# Pruning rides the data commit that applies an entry: the caller sets the
+# base forward and frees every chain entry that the post-crash walk can no
+# longer reach, and the pager's next meta flip publishes the new base, the
+# freed pages, and the applied CSN in ONE atomic write. There is no crash
+# point at which a page is both unreachable and unfreed, and none at which a
+# reachable page is freed
+#
+#   raft page payload:
+#     0  prev_entry u64   first page of the previous chain entry (0 = oldest)
+#     8  next_page  u64   continuation page within THIS entry (0 = last)
+#     16 chunk_len  u32   entry bytes stored in this page
+#     20 index      u64   raft log index (repeated on every page)
+#     28 term       u64   raft term (repeated on every page)
+#     36 data
+
+from odb.pager import Pager, PT_RAFT
+from odb.codec import blank, put_u32, put_u64, put_bytes
+from odb.codec import get_u32, get_u64, get_bytes
+from odb.errors import CorruptionError
+
+const _RP_PREV: int = 0
+const _RP_NEXT: int = 8
+const _RP_LEN: int = 16
+const _RP_INDEX: int = 20
+const _RP_TERM: int = 28
+const _RP_DATA: int = 36
+
+# One live tail entry, ascending order, as handed to the consensus layer.
+class TailEntry {
+    index: int
+    term: int
+    data: bytes
+
+    def(index: int, term: int, data: bytes) {
+        self.index = index
+        self.term = term
+        self.data = data
+    }
+}
+
+# One chain entry as physically written, in write order. Dead entries
+# (superseded duplicates, truncated orphans) keep their record until pruned.
+class ChainRec {
+    index: int
+    term: int
+    pages: list[int]
+
+    def(index: int, term: int, pages: list[int]) {
+        self.index = index
+        self.term = term
+        self.pages = pages
+    }
+}
+
+class RaftTail {
+    pager: Pager
+    recs: list[ChainRec]        # write order, oldest first
+
+    def(pager: Pager) {
+        self.pager = pager
+        self.recs = []
+        self.reload()
+    }
+
+    def _capacity() -> int {
+        return self.pager.payload_size() - _RP_DATA
+    }
+
+    # Rebuild the write-order record list from the committed chain: walk
+    # backward from raft_root, stopping after the first entry at or below the
+    # base (the stop entry anchors the walk; nothing past it is reachable).
+    def reload() -> None {
+        self.recs = []
+        rev: list[ChainRec] = []
+        pg: int = self.pager.raft_root
+        while pg != 0 {
+            page: bytes = self.pager.read_page(pg)
+            if self.pager.page_type(page) != PT_RAFT {
+                raise CorruptionError("raft tail chain reached a non-raft page " + str(pg))
+            }
+            idx: int = get_u64(page, _RP_INDEX)
+            term: int = get_u64(page, _RP_TERM)
+            pages: list[int] = []
+            nxt: int = pg
+            prev: int = get_u64(page, _RP_PREV)
+            while nxt != 0 {
+                p2: bytes = self.pager.read_page(nxt)
+                if self.pager.page_type(p2) != PT_RAFT {
+                    raise CorruptionError("raft tail entry continues into a non-raft page " + str(nxt))
+                }
+                pages.append(nxt)
+                nxt = get_u64(p2, _RP_NEXT)
+            }
+            rev.append(ChainRec(idx, term, pages))
+            if idx <= self.pager.raft_base {
+                break
+            }
+            pg = prev
+        }
+        i: int = len(rev) - 1
+        while i >= 0 {
+            self.recs.append(rev[i])
+            i = i - 1
+        }
+    }
+
+    # The live tail: the contiguous run of indexes above the base that ends at
+    # the newest chain entry. Anything else in the chain is a superseded
+    # duplicate or a truncated orphan and is skipped.
+    def entries() -> list[TailEntry] {
+        out: list[TailEntry] = []
+        if len(self.recs) == 0 {
+            return out
+        }
+        expect: int = self.recs[len(self.recs) - 1].index
+        i: int = len(self.recs) - 1
+        while i >= 0 and expect > self.pager.raft_base {
+            r: ChainRec = self.recs[i]
+            if r.index == expect {
+                out.append(TailEntry(r.index, r.term, self._read_data(r)))
+                expect = expect - 1
+            }
+            i = i - 1
+        }
+        rev: list[TailEntry] = []
+        i = len(out) - 1
+        while i >= 0 {
+            rev.append(out[i])
+            i = i - 1
+        }
+        return rev
+    }
+
+    def _read_data(r: ChainRec) -> bytes {
+        chunks: list[int] = []
+        for pg in r.pages {
+            page: bytes = self.pager.read_page(pg)
+            n: int = get_u32(page, _RP_LEN)
+            chunk: bytes = get_bytes(page, _RP_DATA, n)
+            j: int = 0
+            while j < n {
+                chunks.append(chunk[j])
+                j = j + 1
+            }
+        }
+        return bytes(chunks)
+    }
+
+    # Stage one entry at the head of the chain. Durable at the next
+    # commit_state() (or data commit) flip, never before.
+    def append(index: int, term: int, data: bytes) -> None {
+        cap: int = self._capacity()
+        n: int = len(data)
+        n_pages: int = (n + cap - 1) // cap
+        if n_pages == 0 {
+            n_pages = 1
+        }
+        ids: list[int] = []
+        i: int = 0
+        while i < n_pages {
+            ids.append(self.pager.alloc_grow())
+            i = i + 1
+        }
+        p: int = 0
+        off: int = 0
+        while p < n_pages {
+            buf: list[int] = blank(_RP_DATA)
+            if p == 0 {
+                put_u64(buf, _RP_PREV, self.pager.raft_root)
+            }
+            if p + 1 < n_pages {
+                put_u64(buf, _RP_NEXT, ids[p + 1])
+            }
+            take: int = n - off
+            if take > cap {
+                take = cap
+            }
+            put_u32(buf, _RP_LEN, take)
+            put_u64(buf, _RP_INDEX, index)
+            put_u64(buf, _RP_TERM, term)
+            off = off + take
+            self.pager.stage(ids[p], PT_RAFT, bytes(buf) + get_bytes(data, off - take, take))
+            p = p + 1
+        }
+        self.pager.raft_root = ids[0]
+        self.recs.append(ChainRec(index, term, ids))
+    }
+
+    # Advance the base to `applied_index` and free every chain entry the
+    # post-crash walk can no longer reach: everything OLDER (in write order)
+    # than the newest entry at or below the new base. Runs INSIDE the data
+    # transaction that applies `applied_index` (odb.apply / fast_forward call
+    # it between begin and commit), so the frees, the base, and the applied
+    # CSN publish in one atomic meta flip: no crash point leaks a page or
+    # loses one that is still reachable.
+    #
+    # The base term comes from the chain's own record of the entry: every
+    # entry a replica applies through consensus was chained before it was
+    # acknowledged. An entry with no record (a catch-up apply, shipped as
+    # already-committed history) leaves the base where it is: a base that
+    # UNDERSTATES the applied position is safe (the node just re-receives
+    # committed entries and skips them), while a base stamped with a guessed
+    # term could misjudge a vote.
+    def prune(applied_index: int) -> None {
+        rec_term: int = -1
+        ri: int = len(self.recs) - 1
+        while ri >= 0 {
+            if self.recs[ri].index == applied_index {
+                rec_term = self.recs[ri].term
+                break
+            }
+            ri = ri - 1
+        }
+        if rec_term < 0 {
+            return
+        }
+        self.pager.raft_base = applied_index
+        self.pager.raft_base_term = rec_term
+        stop: int = -1
+        i: int = len(self.recs) - 1
+        while i >= 0 {
+            if self.recs[i].index <= applied_index {
+                stop = i
+                break
+            }
+            i = i - 1
+        }
+        if stop <= 0 {
+            return
+        }
+        j: int = 0
+        while j < stop {
+            for pg in self.recs[j].pages {
+                self.pager.free(pg)
+            }
+            j = j + 1
+        }
+        kept: list[ChainRec] = []
+        k: int = stop
+        while k < len(self.recs) {
+            kept.append(self.recs[k])
+            k = k + 1
+        }
+        self.recs = kept
+    }
+
+    # The newest chain entry's index: the log end as of the last flush (every
+    # append batch ends at the log end). The base when the chain is empty or
+    # fully pruned.
+    def last_index() -> int {
+        if len(self.recs) == 0 {
+            return self.pager.raft_base
+        }
+        return self.recs[len(self.recs) - 1].index
+    }
+
+    # Term of the live (newest-written) chain entry at `index`, or -1 if the
+    # chain does not hold that index.
+    def term_at(index: int) -> int {
+        i: int = len(self.recs) - 1
+        while i >= 0 {
+            if self.recs[i].index == index {
+                return self.recs[i].term
+            }
+            i = i - 1
+        }
+        return -1
+    }
+
+    # Every page the chain currently holds (live and dead), for accounting.
+    def pages() -> list[int] {
+        out: list[int] = []
+        for r in self.recs {
+            for pg in r.pages {
+                out.append(pg)
+            }
+        }
+        return out
+    }
+}

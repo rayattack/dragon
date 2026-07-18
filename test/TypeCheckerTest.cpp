@@ -199,6 +199,52 @@ TEST(TypeCheckerTest, IntPlusStringError) {
 }
 
 //===----------------------------------------------------------------------===//
+// Function values are not containers (the sys.argv `argv[1]` mistake).
+// Subscript, len(), and iteration over a function value previously fell
+// through to Unknown and miscompiled into garbage reads; each must be a
+// compile error that says "call it first".
+//===----------------------------------------------------------------------===//
+
+TEST(TypeCheckerTest, FunctionValueSubscriptRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "def args() -> list[str] {\n"
+        "    return [\"a\"]\n"
+        "}\n"
+        "x: str = args[1]\n"));
+}
+
+TEST(TypeCheckerTest, FunctionValueLenRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "def args() -> list[str] {\n"
+        "    return [\"a\"]\n"
+        "}\n"
+        "n: int = len(args)\n"));
+}
+
+TEST(TypeCheckerTest, FunctionValueIterationRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "def args() -> list[str] {\n"
+        "    return [\"a\"]\n"
+        "}\n"
+        "for a in args {\n"
+        "    print(a)\n"
+        "}\n"));
+}
+
+TEST(TypeCheckerTest, CalledFunctionResultStaysUsable) {
+    // The corrected forms must all stay legal.
+    EXPECT_FALSE(checkHasErrors(
+        "def args() -> list[str] {\n"
+        "    return [\"a\"]\n"
+        "}\n"
+        "x: str = args()[0]\n"
+        "n: int = len(args())\n"
+        "for a in args() {\n"
+        "    print(a)\n"
+        "}\n"));
+}
+
+//===----------------------------------------------------------------------===//
 // List variance (expected-type-directed covariance for FRESH literals only)
 //===----------------------------------------------------------------------===//
 

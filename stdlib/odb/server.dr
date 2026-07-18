@@ -1,0 +1,423 @@
+# odb.server - served mode, native protocol (spec section 18)
+#
+# A thin server owning one .odb file. Each connection runs a command loop over
+# the length-framed wire protocol (odb.wire): find / run / schemas / watch /
+# ping. Whole-document reads ship the stored DBON blobs straight from the leaf
+# pages (no re-encoding); shaped or aggregated reads ship JSON rows
+#
+# v1 serves connections sequentially: the engine has one writer, and embedded
+# served mode exists so several tools can share one file cleanly, not to serve
+# open internet traffic. Concurrent handling arrives with the lock work
+
+from odb import ODB, Document, Watch, Change
+from odb.wire import WireConn, SocketConn, Frame, read_frame, write_frame, write_json_frame
+from odb.wire import Q_HELLO, R_HELLO, Q_FIND, R_ROWS, R_DOCS, Q_RUN, R_COUNT
+from odb.wire import Q_SCHEMAS, R_SCHEMAS, Q_WATCH, R_CHANGES, Q_PING, R_PONG, R_ERROR
+from odb.wire import Q_STREAM, R_LOGENTRY, R_STREAM_END
+from odb.wire import WIRE_VERSION
+from odb.commitlog import LogEntry, encode_entry
+from odb.oql import parse, typecheck, matches, is_aggregate, has_refs, OqlQuery, bind_query
+from odb.schema import CompiledSchema
+from odb.dbon import decode
+from odb.btree import BTree
+from odb.errors import ODBError, SchemaError, PrepareError, IntegrityError, ConflictError
+from odb.errors import CorruptionError, NotFound
+from socket import TcpListener, TcpStream
+from json import dumps, loads
+
+
+def _err_json(kind: str, message: str) -> str {
+    obj: dict[str, Any] = {}
+    obj["error"] = kind
+    obj["message"] = message
+    return dumps(obj)
+}
+
+# How a server catches a read up to a client's CSN token (read-your-writes,
+# spec section 19). The base waiter cannot advance anything: a primary either
+# has the CSN already or never will by waiting. A follower server installs a
+# waiter that actively syncs from its primary (odb.repl.FollowerWaiter).
+class CsnWaiter {
+    def wait_for(csn: int, timeout_ms: int) -> bool {
+        return False
+    }
+}
+
+class ODBServer {
+    db: ODB
+    host: str
+    port: int
+    waiter: CsnWaiter
+    rw_wait_ms: int          # how long a min_csn read may hold before failing
+
+    def(db: ODB, port: int) {
+        self.db = db
+        self.host = "127.0.0.1"
+        self.port = port
+        self.waiter = CsnWaiter()
+        self.rw_wait_ms = 5000
+    }
+
+    def(db: ODB, host: str, port: int) {
+        self.db = db
+        self.host = host
+        self.port = port
+        self.waiter = CsnWaiter()
+        self.rw_wait_ms = 5000
+    }
+
+    # Serve exactly n connections from an already-bound listener. The caller
+    # binds and listens first, so a client can connect the instant this is
+    # fired on a green thread (no accept race).
+    def serve_on(lst: TcpListener, n: int) -> int {
+        i: int = 0
+        while i < n {
+            stream: TcpStream = lst.do_accept()
+            conn: SocketConn = SocketConn(stream)
+            self.serve_conn(conn)
+            conn.close()
+            i = i + 1
+        }
+        return i
+    }
+
+    # Serve exactly n connections, one at a time, then return how many were
+    # handled. serve() wraps this for the run-forever case.
+    def serve_n(n: int) -> int {
+        lst: TcpListener = TcpListener(self.host, self.port)
+        if lst.do_bind() != 0 {
+            lst.close()
+            raise ODBError("odb server: cannot bind " + self.host + ":" + str(self.port))
+        }
+        lst.do_listen(16)
+        served: int = self.serve_on(lst, n)
+        lst.close()
+        return served
+    }
+
+    def serve() -> None {
+        lst: TcpListener = TcpListener(self.host, self.port)
+        if lst.do_bind() != 0 {
+            lst.close()
+            raise ODBError("odb server: cannot bind " + self.host + ":" + str(self.port))
+        }
+        lst.do_listen(16)
+        while True {
+            stream: TcpStream = lst.do_accept()
+            conn: SocketConn = SocketConn(stream)
+            self.serve_conn(conn)
+            conn.close()
+        }
+    }
+
+    # The per-connection command loop. Public and channel-agnostic so tests
+    # drive it with a MemoryConn, exactly like Router.serve_connection.
+    def serve_conn(c: WireConn) -> None {
+        going: bool = True
+        while going {
+            fr: Frame = read_frame(c)
+            if fr.eof {
+                going = False
+            } else {
+                going = self._dispatch(c, fr)
+            }
+        }
+    }
+
+    # One request frame -> one (or one error) response frame. Returns False
+    # when the connection should end. Every engine error crosses the wire as
+    # its taxonomy name, never as a dropped connection.
+    def _dispatch(c: WireConn, fr: Frame) -> bool {
+        try {
+            if fr.ftype == Q_HELLO {
+                obj: dict[str, Any] = {}
+                obj["version"] = WIRE_VERSION
+                obj["csn"] = self.db.csn()
+                obj["uuid"] = self.db.uuid()
+                write_json_frame(c, R_HELLO, dumps(obj))
+            } else if fr.ftype == Q_PING {
+                write_frame(c, R_PONG, bytes([]))
+            } else if fr.ftype == Q_SCHEMAS {
+                write_json_frame(c, R_SCHEMAS, self._schemas_json())
+            } else if fr.ftype == Q_FIND {
+                self._find(c, fr.payload.decode())
+            } else if fr.ftype == Q_RUN {
+                self._run(c, fr.payload.decode())
+            } else if fr.ftype == Q_WATCH {
+                self._watch(c, fr.payload.decode())
+            } else if fr.ftype == Q_STREAM {
+                self._stream(c, fr.payload.decode())
+            } else {
+                write_json_frame(c, R_ERROR, _err_json("PrepareError", "unknown frame type " + str(fr.ftype)))
+            }
+        } except PrepareError as e1 {
+            write_json_frame(c, R_ERROR, _err_json("PrepareError", str(e1)))
+        } except IntegrityError as e2 {
+            write_json_frame(c, R_ERROR, _err_json("IntegrityError", str(e2)))
+        } except ConflictError as e3 {
+            write_json_frame(c, R_ERROR, _err_json("ConflictError", str(e3)))
+        } except SchemaError as e4 {
+            write_json_frame(c, R_ERROR, _err_json("SchemaError", str(e4)))
+        } except CorruptionError as e5 {
+            write_json_frame(c, R_ERROR, _err_json("CorruptionError", str(e5)))
+        } except NotFound as e6 {
+            write_json_frame(c, R_ERROR, _err_json("NotFound", str(e6)))
+        } except ODBError as e7 {
+            write_json_frame(c, R_ERROR, _err_json("ODBError", str(e7)))
+        }
+        return True
+    }
+
+    def _schemas_json() -> str {
+        out: list[Any] = []
+        for sid in self.db._sorted_sids() {
+            name: str = self.db._by_sid[sid]
+            cs: CompiledSchema = self.db._schemas[name]
+            rec: dict[str, Any] = {}
+            rec["sid"] = sid
+            rec["name"] = name
+            rec["version"] = cs.version
+            rec["schema"] = loads(cs.schema_json)
+            rec["meta"] = loads(self.db._metas[name])
+            item: Any = rec
+            out.append(item)
+        }
+        obj: dict[str, Any] = {}
+        obj["schemas"] = out
+        return dumps(obj)
+    }
+
+    def _query_of(obj: dict[str, Any]) -> OqlQuery {
+        q_any: Any = obj["q"]
+        if not isinstance(q_any, str) {
+            raise PrepareError("wire: 'q' must be OQL text")
+        }
+        qtext: str = q_any
+        q: OqlQuery = parse(qtext)
+        if "params" in obj {
+            p_any: Any = obj["params"]
+            if isinstance(p_any, dict) {
+                params: dict[str, Any] = p_any
+                bind_query(q, params)
+            }
+        }
+        return q
+    }
+
+    # Hold a read until this database has at least `csn` (a client's
+    # read-your-writes token, spec section 19). The waiter does the catching
+    # up; on a primary the token is either committed already or unknown, and
+    # waiting cannot conjure it.
+    def _hold_for(csn: int) -> None {
+        if csn <= self.db.csn() {
+            return
+        }
+        self.waiter.wait_for(csn, self.rw_wait_ms)
+        if csn > self.db.csn() {
+            raise ODBError("read-your-writes: this replica is at csn " + str(self.db.csn()) + " but the read needs csn " + str(csn))
+        }
+    }
+
+    # Whole-document reads take the zero-re-encode path: the filter is
+    # evaluated on the decoded view, but the bytes that cross the wire are the
+    # stored DBON blobs, untouched. Everything else goes as JSON rows.
+    def _find(c: WireConn, text: str) -> None {
+        req_any: Any = loads(text)
+        if not isinstance(req_any, dict) {
+            raise PrepareError("wire: request payload must be a JSON object")
+        }
+        req: dict[str, Any] = req_any
+        if "min_csn" in req {
+            mc_any: Any = req["min_csn"]
+            if isinstance(mc_any, int) {
+                self._hold_for(mc_any)
+            }
+        }
+        q: OqlQuery = self._query_of(req)
+        fast: bool = q.at_kind == 0 and q.project_all and not is_aggregate(q)
+        if fast and (has_refs(q) or q.has_by or len(q.stages) > 0) {
+            fast = False
+        }
+        if fast and q.source in self.db._schemas {
+            cs: CompiledSchema = self.db._schemas[q.source]
+            typecheck(cs, q)
+            self._send_docs(c, cs, q)
+            return
+        }
+        docs: list[Document] = self.db._find_q(q)
+        rows: list[Any] = []
+        for d in docs {
+            row: Any = d.data
+            rows.append(row)
+        }
+        obj: dict[str, Any] = {}
+        obj["rows"] = rows
+        write_json_frame(c, R_ROWS, dumps(obj))
+    }
+
+    def _send_docs(c: WireConn, cs: CompiledSchema, q: OqlQuery) -> None {
+        hits: list[bytes] = []
+        ids: list[int] = []
+        tree: BTree = self.db._tree(cs)
+        for pair in tree.items() {
+            doc: dict[str, Any] = decode(cs, pair[1])
+            if matches(cs, q, doc) {
+                hits.append(pair[1])
+                ids.append(_key_to_docid(pair[0]))
+            }
+        }
+        head: list[int] = []
+        _app_u16(head, cs.schema_id)
+        _app_u32(head, len(hits))
+        payload: bytes = bytes(head)
+        i: int = 0
+        while i < len(hits) {
+            rec: list[int] = []
+            _app_u64(rec, ids[i])
+            _app_u32(rec, len(hits[i]))
+            payload = payload + bytes(rec) + hits[i]
+            i = i + 1
+        }
+        write_frame(c, R_DOCS, payload)
+    }
+
+    def _run(c: WireConn, text: str) -> None {
+        obj_any: Any = loads(text)
+        if not isinstance(obj_any, dict) {
+            raise PrepareError("wire: request payload must be a JSON object")
+        }
+        obj: dict[str, Any] = obj_any
+        q_any: Any = obj["q"]
+        if not isinstance(q_any, str) {
+            raise PrepareError("wire: 'q' must be OQL text")
+        }
+        qtext: str = q_any
+        params: dict[str, Any] = {}
+        if "params" in obj {
+            p_any: Any = obj["params"]
+            if isinstance(p_any, dict) {
+                params = p_any
+            }
+        }
+        count: int = self.db._run(qtext, params)
+        reply: dict[str, Any] = {}
+        reply["count"] = count
+        # The commit's csn: the caller's read-your-writes token (section 19).
+        reply["csn"] = self.db.csn()
+        write_json_frame(c, R_COUNT, dumps(reply))
+    }
+
+    # One-shot watch poll: everything committed after `since` that matches,
+    # plus the resume token to poll from next. Exactly the embedded Watch
+    # semantics, so feeds resume across connections and processes.
+    def _watch(c: WireConn, text: str) -> None {
+        obj_any: Any = loads(text)
+        if not isinstance(obj_any, dict) {
+            raise PrepareError("wire: request payload must be a JSON object")
+        }
+        obj: dict[str, Any] = obj_any
+        q_any: Any = obj["q"]
+        if not isinstance(q_any, str) {
+            raise PrepareError("wire: 'q' must be OQL text")
+        }
+        qtext: str = q_any
+        since: int = self.db.pager.last_csn
+        if "since" in obj {
+            s_any: Any = obj["since"]
+            if isinstance(s_any, int) {
+                since = s_any
+            }
+        }
+        empty: dict[str, Any] = {}
+        w: Watch = self.db._watch_q(qtext, empty, since)
+        changes: list[Any] = []
+        for ch in w.poll() {
+            changes.append(change_json(ch))
+        }
+        reply: dict[str, Any] = {}
+        reply["changes"] = changes
+        reply["resume"] = w.resume_token()
+        write_json_frame(c, R_CHANGES, dumps(reply))
+    }
+
+    # Replication pull (spec section 19): every committed entry after the
+    # follower's csn, verbatim, then a stream-end frame carrying our csn so
+    # the follower can close op-less csn gaps. The uuid check refuses a
+    # follower paired to a different lineage before any history moves.
+    def _stream(c: WireConn, text: str) -> None {
+        obj_any: Any = loads(text)
+        if not isinstance(obj_any, dict) {
+            raise PrepareError("wire: request payload must be a JSON object")
+        }
+        obj: dict[str, Any] = obj_any
+        since: int = 0
+        if "since" in obj {
+            s_any: Any = obj["since"]
+            if isinstance(s_any, int) {
+                since = s_any
+            }
+        }
+        if "uuid" in obj {
+            u_any: Any = obj["uuid"]
+            if isinstance(u_any, str) {
+                fu: str = u_any
+                if fu != "" and fu != self.db.uuid() {
+                    raise ODBError("lineage mismatch: this database is " + self.db.uuid() + " but the follower expects " + fu)
+                }
+            }
+        }
+        entries: list[LogEntry] = self.db.entries_since(since)
+        for e in entries {
+            write_frame(c, R_LOGENTRY, encode_entry(e))
+        }
+        endo: dict[str, Any] = {}
+        endo["csn"] = self.db.csn()
+        write_json_frame(c, R_STREAM_END, dumps(endo))
+    }
+}
+
+# A Change as a JSON-shaped value (shared with the HTTP gateway's SSE feed).
+def change_json(ch: Change) -> Any {
+    rec: dict[str, Any] = {}
+    rec["csn"] = ch.csn
+    rec["kind"] = ch.kind
+    rec["schema"] = ch.schema
+    rec["docid"] = ch.docid
+    if ch.pk_json != "" {
+        rec["pk"] = loads(ch.pk_json)
+    }
+    rec["doc"] = ch.doc
+    out: Any = rec
+    return out
+}
+
+def _key_to_docid(kb: bytes) -> int {
+    v: int = 0
+    i: int = 0
+    while i < 8 {
+        v = (v << 8) | kb[i]
+        i = i + 1
+    }
+    return v
+}
+
+def _app_u16(out: list[int], v: int) -> None {
+    out.append(v & 0xFF)
+    out.append((v >> 8) & 0xFF)
+}
+
+def _app_u32(out: list[int], v: int) -> None {
+    i: int = 0
+    while i < 4 {
+        out.append((v >> (i * 8)) & 0xFF)
+        i = i + 1
+    }
+}
+
+def _app_u64(out: list[int], v: int) -> None {
+    i: int = 0
+    while i < 8 {
+        out.append((v >> (i * 8)) & 0xFF)
+        i = i + 1
+    }
+}

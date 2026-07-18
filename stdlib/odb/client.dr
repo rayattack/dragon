@@ -1,0 +1,413 @@
+# odb.client - the native-protocol client (spec section 18).
+#
+#   from odb.client import ODBClient
+#
+#   c: ODBClient = ODBClient("127.0.0.1", 7401)
+#   rows: list[dict[str, Any]] = c.find("customers ? city == $c", {c: "Lagos"})
+#   n: int = c.run("set customers ? id == $id { status: 'vip' }", {id: 4})
+#   batch: WatchBatch = c.watch_poll("orders ? status == 'paid'", 0)
+#
+# At connect the client pulls the compiled-schema catalog once, so R_DOCS
+# results (raw DBON blobs) decode locally with the same layouts the server
+# wrote - documents cross the wire without re-encoding in either direction
+
+from odb.wire import WireConn, SocketConn, Frame, read_frame, write_frame, write_json_frame, frame_bytes
+from odb.wire import Q_HELLO, R_HELLO, Q_FIND, R_ROWS, R_DOCS, Q_RUN, R_COUNT
+from odb.wire import Q_SCHEMAS, R_SCHEMAS, Q_WATCH, R_CHANGES, Q_PING, R_PONG, R_ERROR
+from odb.wire import Q_STREAM, R_LOGENTRY, R_STREAM_END
+from odb.commitlog import LogEntry, decode_entry
+from odb.schema import compile_schema, CompiledSchema
+from odb.dbon import decode
+from odb.codec import get_u16, get_u32, get_u64, get_bytes
+from odb.errors import ODBError, SchemaError, PrepareError, IntegrityError, ConflictError
+from odb.errors import CorruptionError, NotFound
+from socket import TcpStream
+from json import dumps, loads
+
+# One watch poll: the matching changes plus the CSN to resume from.
+class WatchBatch {
+    changes: list[dict[str, Any]]
+    resume: int
+
+    def() {
+        self.changes = []
+        self.resume = 0
+    }
+}
+
+# One replication pull: the committed entries past the requested csn, plus
+# the source's committed csn (which may sit past the last entry, because
+# op-less commits consume csns without logging).
+class LogBatch {
+    entries: list[LogEntry]
+    csn: int
+
+    def(entries: list[LogEntry], csn: int) {
+        self.entries = entries
+        self.csn = csn
+    }
+}
+
+class ODBClient {
+    conn: WireConn
+    server_csn: int
+    server_uuid: str
+    _schemas: dict[int, CompiledSchema]     # by schema id, for R_DOCS decode
+
+    def(host: str, port: int) {
+        self._boot(SocketConn(TcpStream.open(host, port)))
+    }
+
+    # Channel-injected variant (tests ride a MemoryConn or a paired stream).
+    def(conn: WireConn) {
+        self._boot(conn)
+    }
+
+    def _boot(conn: WireConn) -> None {
+        self.conn = conn
+        self.server_csn = 0
+        self.server_uuid = ""
+        self._schemas = {}
+        write_json_frame(self.conn, Q_HELLO, "{}")
+        hello: dict[str, Any] = self._expect_json(R_HELLO)
+        csn_any: Any = hello["csn"]
+        if isinstance(csn_any, int) {
+            self.server_csn = csn_any
+        }
+        if "uuid" in hello {
+            u_any: Any = hello["uuid"]
+            if isinstance(u_any, str) {
+                self.server_uuid = u_any
+            }
+        }
+        self._load_schemas()
+    }
+
+    def _load_schemas() -> None {
+        write_frame(self.conn, Q_SCHEMAS, bytes([]))
+        obj: dict[str, Any] = self._expect_json(R_SCHEMAS)
+        arr_any: Any = obj["schemas"]
+        if not isinstance(arr_any, list) {
+            raise ODBError("wire: malformed schema catalog")
+        }
+        arr: list[Any] = arr_any
+        for rec_any in arr {
+            if not isinstance(rec_any, dict) {
+                continue
+            }
+            rec: dict[str, Any] = rec_any
+            sid_any: Any = rec["sid"]
+            name_any: Any = rec["name"]
+            ver_any: Any = rec["version"]
+            def_any: Any = rec["schema"]
+            if isinstance(sid_any, int) and isinstance(name_any, str) and isinstance(def_any, dict) {
+                sid: int = sid_any
+                name: str = name_any
+                ver: int = 1
+                if isinstance(ver_any, int) {
+                    ver = ver_any
+                }
+                definition: dict[str, Any] = def_any
+                self._schemas[sid] = compile_schema(name, definition, sid, ver, dumps(definition))
+            }
+        }
+    }
+
+    #--- request/response plumbing -----------------------------------------#
+
+    # Read one response frame; surface R_ERROR as the taxonomy exception it
+    # names on the server, so client code handles errors exactly like
+    # embedded code does.
+    def _read_reply(want: int) -> Frame {
+        fr: Frame = read_frame(self.conn)
+        if fr.eof {
+            raise ODBError("wire: server closed the connection")
+        }
+        if fr.ftype == R_ERROR {
+            obj_any: Any = loads(fr.payload.decode())
+            kind: str = "ODBError"
+            message: str = "server error"
+            if isinstance(obj_any, dict) {
+                obj: dict[str, Any] = obj_any
+                k_any: Any = obj["error"]
+                m_any: Any = obj["message"]
+                if isinstance(k_any, str) {
+                    kind = k_any
+                }
+                if isinstance(m_any, str) {
+                    message = m_any
+                }
+            }
+            _raise_taxonomy(kind, message)
+        }
+        if fr.ftype != want {
+            raise ODBError("wire: expected frame " + str(want) + ", got " + str(fr.ftype))
+        }
+        return fr
+    }
+
+    def _expect_json(want: int) -> dict[str, Any] {
+        fr: Frame = self._read_reply(want)
+        obj_any: Any = loads(fr.payload.decode())
+        if not isinstance(obj_any, dict) {
+            raise ODBError("wire: malformed JSON payload")
+        }
+        obj: dict[str, Any] = obj_any
+        return obj
+    }
+
+    def _request_json(qtext: str, params: dict[str, Any]) -> str {
+        obj: dict[str, Any] = {}
+        obj["q"] = qtext
+        if len(params) > 0 {
+            p: Any = params
+            obj["params"] = p
+        }
+        return dumps(obj)
+    }
+
+    #--- the public surface -------------------------------------------------#
+
+    def ping() -> bool {
+        write_frame(self.conn, Q_PING, bytes([]))
+        self._read_reply(R_PONG)
+        return True
+    }
+
+    def find(qtext: str) -> list[dict[str, Any]] {
+        empty: dict[str, Any] = {}
+        return self._find(qtext, empty)
+    }
+
+    def find(qtext: str, params: dict[str, Any]) -> list[dict[str, Any]] {
+        return self._find(qtext, params)
+    }
+
+    # Read-your-writes read (spec section 19): `min_csn` is the token a write
+    # returned; the server holds the read until it has applied at least that
+    # csn (a follower catches up; a primary already has it).
+    def find_at_least(qtext: str, params: dict[str, Any], min_csn: int) -> list[dict[str, Any]] {
+        obj: dict[str, Any] = {}
+        obj["q"] = qtext
+        if len(params) > 0 {
+            p: Any = params
+            obj["params"] = p
+        }
+        obj["min_csn"] = min_csn
+        write_json_frame(self.conn, Q_FIND, dumps(obj))
+        return self._find_reply()
+    }
+
+    def _find(qtext: str, params: dict[str, Any]) -> list[dict[str, Any]] {
+        write_json_frame(self.conn, Q_FIND, self._request_json(qtext, params))
+        return self._find_reply()
+    }
+
+    def _find_reply() -> list[dict[str, Any]] {
+        fr: Frame = read_frame(self.conn)
+        if fr.eof {
+            raise ODBError("wire: server closed the connection")
+        }
+        if fr.ftype == R_ERROR {
+            obj_any: Any = loads(fr.payload.decode())
+            if isinstance(obj_any, dict) {
+                obj: dict[str, Any] = obj_any
+                k_any: Any = obj["error"]
+                m_any: Any = obj["message"]
+                kind: str = "ODBError"
+                message: str = ""
+                if isinstance(k_any, str) {
+                    kind = k_any
+                }
+                if isinstance(m_any, str) {
+                    message = m_any
+                }
+                _raise_taxonomy(kind, message)
+            }
+            raise ODBError("wire: malformed error frame")
+        }
+        if fr.ftype == R_DOCS {
+            return self._decode_docs(fr.payload)
+        }
+        if fr.ftype != R_ROWS {
+            raise ODBError("wire: expected rows, got frame " + str(fr.ftype))
+        }
+        obj2_any: Any = loads(fr.payload.decode())
+        out: list[dict[str, Any]] = []
+        if isinstance(obj2_any, dict) {
+            obj2: dict[str, Any] = obj2_any
+            rows_any: Any = obj2["rows"]
+            if isinstance(rows_any, list) {
+                rows: list[Any] = rows_any
+                for r_any in rows {
+                    if isinstance(r_any, dict) {
+                        r: dict[str, Any] = r_any
+                        out.append(r)
+                    }
+                }
+            }
+        }
+        return out
+    }
+
+    # R_DOCS: raw DBON blobs, decoded locally against the connect-time schema
+    # catalog. This is the read path with zero server-side re-encoding.
+    def _decode_docs(payload: bytes) -> list[dict[str, Any]] {
+        sid: int = get_u16(payload, 0)
+        count: int = get_u32(payload, 2)
+        if sid not in self._schemas {
+            raise SchemaError("wire: server sent documents of unknown schema id " + str(sid))
+        }
+        cs: CompiledSchema = self._schemas[sid]
+        out: list[dict[str, Any]] = []
+        off: int = 6
+        i: int = 0
+        while i < count {
+            docid: int = get_u64(payload, off)
+            off = off + 8
+            blen: int = get_u32(payload, off)
+            off = off + 4
+            blob: bytes = get_bytes(payload, off, blen)
+            off = off + blen
+            doc: dict[str, Any] = decode(cs, blob)
+            doc["_id"] = docid
+            out.append(doc)
+            i = i + 1
+        }
+        return out
+    }
+
+    def run(qtext: str) -> int {
+        empty: dict[str, Any] = {}
+        return self._run(qtext, empty)
+    }
+
+    def run(qtext: str, params: dict[str, Any]) -> int {
+        return self._run(qtext, params)
+    }
+
+    def _run(qtext: str, params: dict[str, Any]) -> int {
+        write_json_frame(self.conn, Q_RUN, self._request_json(qtext, params))
+        obj: dict[str, Any] = self._expect_json(R_COUNT)
+        if "csn" in obj {
+            c_any: Any = obj["csn"]
+            if isinstance(c_any, int) {
+                self.server_csn = c_any
+            }
+        }
+        n_any: Any = obj["count"]
+        if isinstance(n_any, int) {
+            n: int = n_any
+            return n
+        }
+        raise ODBError("wire: malformed count reply")
+    }
+
+    # The last csn the server reported (updated by connect and every write):
+    # the token to hand a follower read for read-your-writes.
+    def csn() -> int {
+        return self.server_csn
+    }
+
+    # Replication pull (spec section 19): every committed entry after `since`
+    # plus the source's csn. The uuid learned at connect rides along, so a
+    # source of a different lineage refuses before any history moves.
+    def pull_log(since: int) -> LogBatch {
+        obj: dict[str, Any] = {}
+        obj["since"] = since
+        obj["uuid"] = self.server_uuid
+        write_json_frame(self.conn, Q_STREAM, dumps(obj))
+        entries: list[LogEntry] = []
+        while True {
+            fr: Frame = read_frame(self.conn)
+            if fr.eof {
+                raise ODBError("wire: server closed the connection mid-stream")
+            }
+            if fr.ftype == R_LOGENTRY {
+                entries.append(decode_entry(fr.payload))
+            } else if fr.ftype == R_STREAM_END {
+                end_any: Any = loads(fr.payload.decode())
+                csn: int = 0
+                if isinstance(end_any, dict) {
+                    endo: dict[str, Any] = end_any
+                    c2_any: Any = endo["csn"]
+                    if isinstance(c2_any, int) {
+                        csn = c2_any
+                    }
+                }
+                if csn > self.server_csn {
+                    self.server_csn = csn
+                }
+                return LogBatch(entries, csn)
+            } else if fr.ftype == R_ERROR {
+                obj2_any: Any = loads(fr.payload.decode())
+                kind: str = "ODBError"
+                message: str = "server error"
+                if isinstance(obj2_any, dict) {
+                    obj2: dict[str, Any] = obj2_any
+                    k_any: Any = obj2["error"]
+                    m_any: Any = obj2["message"]
+                    if isinstance(k_any, str) {
+                        kind = k_any
+                    }
+                    if isinstance(m_any, str) {
+                        message = m_any
+                    }
+                }
+                _raise_taxonomy(kind, message)
+            } else {
+                raise ODBError("wire: unexpected frame " + str(fr.ftype) + " in a log stream")
+            }
+        }
+    }
+
+    def watch_poll(qtext: str, since: int) -> WatchBatch {
+        obj: dict[str, Any] = {}
+        obj["q"] = qtext
+        obj["since"] = since
+        write_json_frame(self.conn, Q_WATCH, dumps(obj))
+        reply: dict[str, Any] = self._expect_json(R_CHANGES)
+        out: WatchBatch = WatchBatch()
+        r_any: Any = reply["resume"]
+        if isinstance(r_any, int) {
+            out.resume = r_any
+        }
+        chs_any: Any = reply["changes"]
+        if isinstance(chs_any, list) {
+            chs: list[Any] = chs_any
+            for ch_any in chs {
+                if isinstance(ch_any, dict) {
+                    ch: dict[str, Any] = ch_any
+                    out.changes.append(ch)
+                }
+            }
+        }
+        return out
+    }
+
+    def close() -> None {
+        self.conn.close()
+    }
+}
+
+def _raise_taxonomy(kind: str, message: str) -> None {
+    if kind == "PrepareError" {
+        raise PrepareError(message)
+    }
+    if kind == "IntegrityError" {
+        raise IntegrityError(message)
+    }
+    if kind == "ConflictError" {
+        raise ConflictError(message)
+    }
+    if kind == "SchemaError" {
+        raise SchemaError(message)
+    }
+    if kind == "CorruptionError" {
+        raise CorruptionError(message)
+    }
+    if kind == "NotFound" {
+        raise NotFound(message)
+    }
+    raise ODBError(message)
+}

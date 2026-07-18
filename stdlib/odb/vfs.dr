@@ -1,0 +1,327 @@
+# odb.vfs - the I/O seam.
+#
+# Every byte ODB reads or writes goes through a VFS. Two implementations sit
+# behind one interface (spec section 21):
+#
+#   FileVFS - a real file on disk (positioned reads/writes, real fsync).
+#   SimVFS  - an in-memory disk that models durability honestly: writes are
+#             NOT durable until sync(), and a simulated crash can lose, tear,
+#             or reorder any write that had not been synced. This is what lets
+#             the crash tests inject a fault at EVERY I/O boundary and prove
+#             the pager always reopens to a consistent snapshot
+#
+# The contract, shared by both:
+#   read_at(off, n)   -> exactly n bytes from offset off (zero past EOF)
+#   write_at(off, d)  -> buffer a write; not durable until sync()
+#   sync()            -> make all prior writes durable (fsync)
+#   truncate(n)       -> set the file length to n
+#   size()            -> current length in bytes
+#   close()           -> release the underlying handle
+
+from odb.rng import Rng
+
+extern "C" def fopen(path: str, mode: str) -> ptr
+extern "C" def fclose(handle: ptr) -> intc
+extern "C" def fread(buf: ptr, size: int, count: int, handle: ptr) -> int
+extern "C" def fseek(handle: ptr, offset: int, whence: intc) -> intc
+extern "C" def ftell(handle: ptr) -> int
+extern "C" def fflush(handle: ptr) -> intc
+extern "C" def fileno(handle: ptr) -> intc
+extern "C" def fsync(fd: intc) -> intc
+extern "C" def ftruncate(fd: intc, length: int) -> intc
+extern "C" def malloc(size: int) -> ptr
+extern "C" def free(p: ptr)
+extern "C" def memset(s: ptr, c: intc, n: int) -> ptr
+extern "C" def dragon_bytes_new(data: ptr, len: int) -> bytes
+extern "C" def dragon_file_write_bytes(handle: ptr, data: bytes) -> int
+
+const _SEEK_SET: intc = 0
+const _SEEK_END: intc = 2
+
+class VfsError(Exception) {}
+
+# Abstract base. The methods exist so the pager can hold a `VFS` and dispatch
+# virtually; concrete subclasses override every one.
+class VFS {
+    def read_at(off: int, n: int) -> bytes {
+        raise VfsError("read_at not implemented")
+    }
+    def write_at(off: int, data: bytes) -> None {
+        raise VfsError("write_at not implemented")
+    }
+    def sync() -> None {
+        raise VfsError("sync not implemented")
+    }
+    def truncate(n: int) -> None {
+        raise VfsError("truncate not implemented")
+    }
+    def size() -> int {
+        raise VfsError("size not implemented")
+    }
+    def close() -> None {
+        raise VfsError("close not implemented")
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# FileVFS - a real file.
+#===----------------------------------------------------------------------===#
+
+class FileVFS(VFS) {
+    handle: ptr
+    path: str
+    closed: bool
+
+    def(path: str) {
+        self.path = path
+        self.closed = False
+        # Open read/write preserving contents; create if absent.
+        h: ptr = fopen(path, "r+b")
+        if not h {
+            h = fopen(path, "w+b")
+        }
+        if not h {
+            raise VfsError("cannot open " + path)
+        }
+        self.handle = h
+    }
+
+    def read_at(off: int, n: int) -> bytes {
+        if n <= 0 {
+            return bytes([])
+        }
+        fseek(self.handle, off, _SEEK_SET)
+        buf: ptr = malloc(n)
+        # Zero first so a short read past EOF yields deterministic zeros, never
+        # uninitialised heap bytes.
+        memset(buf, 0, n)
+        fread(buf, 1, n, self.handle)
+        out: bytes = dragon_bytes_new(buf, n)
+        free(buf)
+        return out
+    }
+
+    def write_at(off: int, data: bytes) -> None {
+        fseek(self.handle, off, _SEEK_SET)
+        dragon_file_write_bytes(self.handle, data)
+    }
+
+    def sync() -> None {
+        fflush(self.handle)
+        fsync(fileno(self.handle))
+    }
+
+    def truncate(n: int) -> None {
+        fflush(self.handle)
+        ftruncate(fileno(self.handle), n)
+    }
+
+    def size() -> int {
+        fflush(self.handle)
+        fseek(self.handle, 0, _SEEK_END)
+        return ftell(self.handle)
+    }
+
+    def close() -> None {
+        if not self.closed {
+            self.closed = True
+            fclose(self.handle)
+        }
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# SimVFS - an in-memory disk that models crash durability.
+#===----------------------------------------------------------------------===#
+
+# One buffered, not-yet-synced write. Retained so a crash can decide, per write,
+# whether it fully landed, landed torn (a prefix only), or was lost.
+class SimWrite {
+    off: int
+    data: bytes
+
+    def(off: int, data: bytes) {
+        self.off = off
+        self.data = data
+    }
+}
+
+class SimVFS(VFS) {
+    live: list[int]         # what reads see now (durable + pending applied)
+    durable: list[int]      # last synced image; a crash cannot go below this
+    pending: list[SimWrite] # writes issued since the last sync
+
+    # Crash arming: when armed, the (budget)th I/O boundary triggers a crash
+    # that faults the not-yet-synced writes and freezes the disk in place, so a
+    # subsequent open_pager sees exactly what a reopen after kill -9 would.
+    armed: bool
+    budget: int
+    crashed: bool
+    crash_rng: Rng
+
+    def() {
+        self.live = []
+        self.durable = []
+        self.pending = []
+        self.armed = False
+        self.budget = 0
+        self.crashed = False
+        self.crash_rng = Rng(1)
+    }
+
+    # Arm a crash after `budget` I/O boundaries (write_at / sync each count as
+    # one). `rng` drives the per-write lost/torn/full decisions.
+    def arm(budget: int, rng: Rng) -> None {
+        self.armed = True
+        self.budget = budget
+        self.crash_rng = rng
+        self.crashed = False
+    }
+
+    # Called at the top of every I/O boundary. Returns True if the boundary
+    # should be skipped because the disk has crashed. When the budget runs out
+    # it faults pending writes into a frozen post-crash image in place.
+    def _tick() -> bool {
+        if not self.armed {
+            return False
+        }
+        if self.crashed {
+            return True
+        }
+        if self.budget <= 0 {
+            image: list[int] = _fault_image(self.durable, self.pending, self.crash_rng, True)
+            self.durable = image[:]
+            self.live = image[:]
+            self.pending = []
+            self.crashed = True
+            return True
+        }
+        self.budget = self.budget - 1
+        return False
+    }
+
+    def _apply(buf: list[int], off: int, data: bytes) -> None {
+        need: int = off + len(data)
+        while len(buf) < need {
+            buf.append(0)
+        }
+        i: int = 0
+        while i < len(data) {
+            buf[off + i] = data[i]
+            i = i + 1
+        }
+    }
+
+    def read_at(off: int, n: int) -> bytes {
+        out: list[int] = []
+        i: int = 0
+        while i < n {
+            p: int = off + i
+            if p >= 0 and p < len(self.live) {
+                out.append(self.live[p])
+            } else {
+                out.append(0)
+            }
+            i = i + 1
+        }
+        return bytes(out)
+    }
+
+    def write_at(off: int, data: bytes) -> None {
+        if self._tick() {
+            return
+        }
+        self._apply(self.live, off, data)
+        self.pending.append(SimWrite(off, data))
+    }
+
+    def sync() -> None {
+        if self._tick() {
+            return
+        }
+        # Everything issued so far is now durable.
+        self.durable = self.live[:]
+        self.pending = []
+    }
+
+    def truncate(n: int) -> None {
+        if n < len(self.live) {
+            self.live = self.live[0:n]
+        } else {
+            while len(self.live) < n {
+                self.live.append(0)
+            }
+        }
+    }
+
+    def size() -> int {
+        return len(self.live)
+    }
+
+    def close() -> None {
+        pass
+    }
+}
+
+# The heart of the crash model. Starting from the durable snapshot, replay the
+# not-yet-synced writes, deciding per write whether it fully landed, landed torn
+# (only a prefix reached disk), or was lost - and optionally reordering them,
+# since without an fsync barrier the OS guarantees no ordering. Returns the
+# resulting on-disk byte image. The same rng seed reproduces the same crash.
+def _fault_image(durable: list[int], pending: list[SimWrite], rng: Rng, reorder: bool) -> list[int] {
+    image: list[int] = durable[:]
+
+    order: list[int] = []
+    i: int = 0
+    while i < len(pending) {
+        order.append(i)
+        i = i + 1
+    }
+    if reorder {
+        # Fisher-Yates over the pending indices.
+        j: int = len(order) - 1
+        while j > 0 {
+            k: int = rng.below(j + 1)
+            tmp: int = order[j]
+            order[j] = order[k]
+            order[k] = tmp
+            j = j - 1
+        }
+    }
+
+    for idx in order {
+        w: SimWrite = pending[idx]
+        roll: int = rng.below(4)
+        if roll == 0 {
+            # lost: never reached disk
+            continue
+        }
+        landed: int = len(w.data)
+        if roll == 1 {
+            # torn: only a prefix of the bytes reached disk
+            landed = rng.below(len(w.data) + 1)
+        }
+        # roll 2 or 3: fully landed
+        p: int = 0
+        need: int = w.off + landed
+        while len(image) < need {
+            image.append(0)
+        }
+        while p < landed {
+            image[w.off + p] = w.data[p]
+            p = p + 1
+        }
+    }
+    return image
+}
+
+# Build a fresh SimVFS positioned exactly as a reopen after `kill -9` would find
+# `vfs`: the durable snapshot plus a fault-injected subset of the pending writes.
+def sim_crash(vfs: SimVFS, rng: Rng, reorder: bool) -> SimVFS {
+    image: list[int] = _fault_image(vfs.durable, vfs.pending, rng, reorder)
+    out: SimVFS = SimVFS()
+    out.live = image[:]
+    out.durable = image[:]
+    out.pending = []
+    return out
+}

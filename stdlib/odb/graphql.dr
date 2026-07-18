@@ -1,0 +1,735 @@
+# odb.graphql - the GraphQL adapter (spec section 11).
+#
+# A thin translator, never a second engine: queries compile to OQL and run
+# through the same prepare-time checks and executor as native reads; the
+# pk-keyed simple mutations ride the Documents API. Object types come from the
+# compiled schemas; relation fields come from declared refs (forward N:1
+# nests an object, reverse 1:N nests a list) - the metadata IS the on-clause.
+#
+#   query {
+#     customers(where: {city: {_eq: "Lagos"}}, order_by: {id: desc}, limit: 5) {
+#       name
+#       orders(where: {status: {_eq: "paid"}}) { id total }
+#     }
+#     customers_agg(where: {city: {_eq: "Lagos"}}) { count }
+#   }
+#   mutation {
+#     insert_customers_one(object: {id: 7, name: "Ada"}) { id name }
+#     update_customers_by_pk(id: 7, _set: {name: "Ada L"}) { id name }
+#     delete_customers_by_pk(id: 7) { id }
+#   }
+#
+# Where operators: _eq _neq _gt _gte _lt _lte _like (glob ~) _ilike (~*) _in,
+# plus _and / _or / _not combinators. Sibling fields AND together.
+#
+# v1 gap, on purpose: full __schema introspection is not served yet; sdl()
+# renders the type system as SDL text for humans and tools that read it
+
+from odb import ODB, Documents, Document
+from odb.schema import CompiledSchema, FieldSpec, T_BOOL, T_INT, T_NUM, T_STR
+from odb.meta import CompiledMeta, RefDecl
+from odb.errors import ODBError, PrepareError, IntegrityError, NotFound, SchemaError, ConflictError
+from json import dumps, loads
+
+#===----------------------------------------------------------------------===#
+# GraphQL document parser (queries + simple mutations)
+#===----------------------------------------------------------------------===#
+
+class GqlError(ODBError) {}
+
+# One field in a selection set: name, arguments (JSON-shaped values; enums
+# arrive as plain strings), and an optional nested selection set.
+class GqlField {
+    name: str
+    args: dict[str, Any]
+    selections: list[GqlField]
+    has_selections: bool
+
+    def(name: str) {
+        self.name = name
+        self.args = {}
+        self.selections = []
+        self.has_selections = False
+    }
+}
+
+class GqlDoc {
+    op: str                       # "query" | "mutation"
+    fields: list[GqlField]
+
+    def(op: str) {
+        self.op = op
+        self.fields = []
+    }
+}
+
+class _P {
+    src: str
+    pos: int
+    n: int
+
+    def(src: str) {
+        self.src = src
+        self.pos = 0
+        self.n = len(src)
+    }
+
+    # GraphQL treats commas as insignificant, exactly like whitespace.
+    def _ws() -> None {
+        while self.pos < self.n {
+            c: str = self.src[self.pos]
+            if c == " " or c == "\t" or c == "\n" or c == "\r" or c == "," {
+                self.pos = self.pos + 1
+            } else if c == "#" {
+                while self.pos < self.n and self.src[self.pos] != "\n" {
+                    self.pos = self.pos + 1
+                }
+            } else {
+                break
+            }
+        }
+    }
+
+    def _peek() -> str {
+        self._ws()
+        if self.pos >= self.n {
+            return ""
+        }
+        return self.src[self.pos]
+    }
+
+    def _expect(c: str) -> None {
+        if self._peek() != c {
+            raise GqlError("graphql: expected '" + c + "' at offset " + str(self.pos))
+        }
+        self.pos = self.pos + 1
+    }
+
+    def _is_name_char(c: str) -> bool {
+        o: int = ord(c)
+        return (o >= ord("a") and o <= ord("z")) or (o >= ord("A") and o <= ord("Z")) or (o >= ord("0") and o <= ord("9")) or c == "_"
+    }
+
+    def _name() -> str {
+        self._ws()
+        start: int = self.pos
+        while self.pos < self.n and self._is_name_char(self.src[self.pos]) {
+            self.pos = self.pos + 1
+        }
+        if self.pos == start {
+            raise GqlError("graphql: expected a name at offset " + str(start))
+        }
+        return self.src[start:self.pos]
+    }
+
+    def parse() -> GqlDoc {
+        op: str = "query"
+        c: str = self._peek()
+        if c != "{" {
+            kw: str = self._name()
+            if kw != "query" and kw != "mutation" {
+                raise GqlError("graphql: unsupported operation '" + kw + "'")
+            }
+            op = kw
+            if self._peek() != "{" {
+                self._name()                       # optional operation name
+            }
+        }
+        doc: GqlDoc = GqlDoc(op)
+        doc.fields = self._selection_set()
+        self._ws()
+        if self.pos < self.n {
+            raise GqlError("graphql: trailing characters after document")
+        }
+        return doc
+    }
+
+    def _selection_set() -> list[GqlField] {
+        self._expect("{")
+        out: list[GqlField] = []
+        while self._peek() != "}" {
+            out.append(self._field())
+        }
+        self._expect("}")
+        if len(out) == 0 {
+            raise GqlError("graphql: empty selection set")
+        }
+        return out
+    }
+
+    def _field() -> GqlField {
+        f: GqlField = GqlField(self._name())
+        if self._peek() == "(" {
+            self._expect("(")
+            while self._peek() != ")" {
+                an: str = self._name()
+                self._expect(":")
+                f.args[an] = self._value()
+            }
+            self._expect(")")
+        }
+        if self._peek() == "{" {
+            f.selections = self._selection_set()
+            f.has_selections = True
+        }
+        return f
+    }
+
+    def _value() -> Any {
+        c: str = self._peek()
+        if c == "\"" {
+            return self._string()
+        }
+        if c == "{" {
+            self._expect("{")
+            obj: dict[str, Any] = {}
+            while self._peek() != "}" {
+                k: str = self._name()
+                self._expect(":")
+                obj[k] = self._value()
+            }
+            self._expect("}")
+            r: Any = obj
+            return r
+        }
+        if c == "[" {
+            self._expect("[")
+            arr: list[Any] = []
+            while self._peek() != "]" {
+                arr.append(self._value())
+            }
+            self._expect("]")
+            r2: Any = arr
+            return r2
+        }
+        if c == "-" or (c >= "0" and c <= "9") {
+            return self._number()
+        }
+        word: str = self._name()
+        if word == "true" {
+            rt: Any = True
+            return rt
+        }
+        if word == "false" {
+            rf: Any = False
+            return rf
+        }
+        if word == "null" {
+            raise GqlError("graphql: null literals are not supported in v1")
+        }
+        re: Any = word                             # enum value (asc / desc / ...)
+        return re
+    }
+
+    def _string() -> Any {
+        self._expect("\"")
+        buf: str = ""
+        while self.pos < self.n {
+            c: str = self.src[self.pos]
+            if c == "\\" and self.pos + 1 < self.n {
+                nx: str = self.src[self.pos + 1]
+                if nx == "\"" or nx == "\\" or nx == "/" {
+                    buf = buf + nx
+                    self.pos = self.pos + 2
+                    continue
+                }
+                if nx == "n" {
+                    buf = buf + "\n"
+                    self.pos = self.pos + 2
+                    continue
+                }
+                if nx == "t" {
+                    buf = buf + "\t"
+                    self.pos = self.pos + 2
+                    continue
+                }
+            }
+            if c == "\"" {
+                self.pos = self.pos + 1
+                r: Any = buf
+                return r
+            }
+            buf = buf + c
+            self.pos = self.pos + 1
+        }
+        raise GqlError("graphql: unterminated string")
+    }
+
+    def _number() -> Any {
+        self._ws()
+        start: int = self.pos
+        if self.pos < self.n and self.src[self.pos] == "-" {
+            self.pos = self.pos + 1
+        }
+        isflt: bool = False
+        while self.pos < self.n {
+            c: str = self.src[self.pos]
+            if c >= "0" and c <= "9" {
+                self.pos = self.pos + 1
+            } else if c == "." and not isflt {
+                isflt = True
+                self.pos = self.pos + 1
+            } else {
+                break
+            }
+        }
+        text: str = self.src[start:self.pos]
+        if isflt {
+            rf: Any = float(text)
+            return rf
+        }
+        ri: Any = int(text)
+        return ri
+    }
+}
+
+def parse_graphql(text: str) -> GqlDoc {
+    return _P(text).parse()
+}
+
+#===----------------------------------------------------------------------===#
+# where / order_by / value rendering into OQL text
+#===----------------------------------------------------------------------===#
+
+def _oql_value(v: Any) -> str {
+    if isinstance(v, bool) {
+        b: bool = v
+        if b {
+            return "true"
+        }
+        return "false"
+    }
+    if isinstance(v, int) {
+        i: int = v
+        return str(i)
+    }
+    if isinstance(v, float) {
+        f: float = v
+        return str(f)
+    }
+    if isinstance(v, str) {
+        s: str = v
+        out: str = "\""
+        k: int = 0
+        while k < len(s) {
+            c: str = s[k]
+            if c == "\"" or c == "\\" {
+                out = out + "\\"
+            }
+            out = out + c
+            k = k + 1
+        }
+        return out + "\""
+    }
+    raise GqlError("graphql: unsupported literal in where clause")
+}
+
+def _op_to_oql(field: str, op: str, v: Any) -> str {
+    if op == "_eq" {
+        return field + " == " + _oql_value(v)
+    }
+    if op == "_neq" {
+        return field + " != " + _oql_value(v)
+    }
+    if op == "_gt" {
+        return field + " > " + _oql_value(v)
+    }
+    if op == "_gte" {
+        return field + " >= " + _oql_value(v)
+    }
+    if op == "_lt" {
+        return field + " < " + _oql_value(v)
+    }
+    if op == "_lte" {
+        return field + " <= " + _oql_value(v)
+    }
+    if op == "_like" {
+        return field + " ~ " + _oql_value(v)
+    }
+    if op == "_ilike" {
+        return field + " ~* " + _oql_value(v)
+    }
+    if op == "_in" {
+        if not isinstance(v, list) {
+            raise GqlError("graphql: _in expects a list")
+        }
+        vs: list[Any] = v
+        parts: list[str] = []
+        for item in vs {
+            parts.append(_oql_value(item))
+        }
+        return field + " in [" + ", ".join(parts) + "]"
+    }
+    raise GqlError("graphql: unknown where operator '" + op + "'")
+}
+
+# {field: {_op: v}, _or: [...], _and: [...], _not: {...}} -> an OQL predicate.
+def where_to_oql(w: dict[str, Any]) -> str {
+    parts: list[str] = []
+    for key in w {
+        v: Any = w[key]
+        if key == "_or" or key == "_and" {
+            if not isinstance(v, list) {
+                raise GqlError("graphql: " + key + " expects a list")
+            }
+            branches: list[Any] = v
+            sub: list[str] = []
+            for b_any in branches {
+                if not isinstance(b_any, dict) {
+                    raise GqlError("graphql: " + key + " entries must be objects")
+                }
+                b: dict[str, Any] = b_any
+                sub.append("(" + where_to_oql(b) + ")")
+            }
+            joiner: str = " | "
+            if key == "_and" {
+                joiner = " & "
+            }
+            parts.append("(" + joiner.join(sub) + ")")
+        } else if key == "_not" {
+            if not isinstance(v, dict) {
+                raise GqlError("graphql: _not expects an object")
+            }
+            nb: dict[str, Any] = v
+            parts.append("!(" + where_to_oql(nb) + ")")
+        } else {
+            if not isinstance(v, dict) {
+                raise GqlError("graphql: field conditions must be {_op: value} objects")
+            }
+            conds: dict[str, Any] = v
+            for op in conds {
+                parts.append(_op_to_oql(key, op, conds[op]))
+            }
+        }
+    }
+    if len(parts) == 0 {
+        raise GqlError("graphql: empty where clause")
+    }
+    return " & ".join(parts)
+}
+
+def _order_to_oql(ob: Any) -> str {
+    keys: list[str] = []
+    if isinstance(ob, dict) {
+        o: dict[str, Any] = ob
+        for f in o {
+            d_any: Any = o[f]
+            if isinstance(d_any, str) {
+                d: str = d_any
+                if d == "desc" {
+                    keys.append("-" + f)
+                } else {
+                    keys.append(f)
+                }
+            }
+        }
+    } else {
+        raise GqlError("graphql: order_by expects an object")
+    }
+    if len(keys) == 0 {
+        raise GqlError("graphql: empty order_by")
+    }
+    return " | sort " + ", ".join(keys)
+}
+
+#===----------------------------------------------------------------------===#
+# Query translation and execution
+#===----------------------------------------------------------------------===#
+
+# Render one root field's selections as an OQL projection block. Nested
+# selections become nested-ref projections (declared refs drive the join).
+def _selection_block(fields: list[GqlField]) -> str {
+    parts: list[str] = []
+    for f in fields {
+        if f.has_selections {
+            item: str = f.name
+            if "where" in f.args {
+                w_any: Any = f.args["where"]
+                if not isinstance(w_any, dict) {
+                    raise GqlError("graphql: where must be an object")
+                }
+                w: dict[str, Any] = w_any
+                item = item + " ? " + where_to_oql(w)
+            }
+            item = item + " " + _selection_block(f.selections)
+            parts.append(item)
+        } else {
+            parts.append(f.name)
+        }
+    }
+    return "{ " + ", ".join(parts) + " }"
+}
+
+# One root query field -> complete OQL text.
+def field_to_oql(f: GqlField) -> str {
+    q: str = f.name
+    if "where" in f.args {
+        w_any: Any = f.args["where"]
+        if not isinstance(w_any, dict) {
+            raise GqlError("graphql: where must be an object")
+        }
+        w: dict[str, Any] = w_any
+        q = q + " ? " + where_to_oql(w)
+    }
+    if not f.has_selections {
+        raise GqlError("graphql: field '" + f.name + "' needs a selection set")
+    }
+    q = q + " " + _selection_block(f.selections)
+    if "order_by" in f.args {
+        q = q + _order_to_oql(f.args["order_by"])
+    }
+    if "limit" in f.args {
+        lim_any: Any = f.args["limit"]
+        if isinstance(lim_any, int) {
+            lim: int = lim_any
+            q = q + " | take " + str(lim)
+        }
+    }
+    if "offset" in f.args {
+        off_any: Any = f.args["offset"]
+        if isinstance(off_any, int) {
+            off: int = off_any
+            q = q + " | skip " + str(off)
+        }
+    }
+    return q
+}
+
+# <schema>_agg with a {count} selection -> whole-set aggregate OQL.
+def _agg_to_oql(f: GqlField, source: str) -> str {
+    q: str = source
+    if "where" in f.args {
+        w_any: Any = f.args["where"]
+        if isinstance(w_any, dict) {
+            w: dict[str, Any] = w_any
+            q = q + " ? " + where_to_oql(w)
+        }
+    }
+    for sel in f.selections {
+        if sel.name != "count" {
+            raise GqlError("graphql: only count is supported in _agg (v1)")
+        }
+    }
+    return q + " { count: count!() }"
+}
+
+# Project a flat result document through a selection set (mutations return
+# whichever stored fields the selection names; nested refs are query-side).
+def _project_doc(doc: dict[str, Any], fields: list[GqlField]) -> dict[str, Any] {
+    out: dict[str, Any] = {}
+    for f in fields {
+        if f.name in doc {
+            out[f.name] = doc[f.name]
+        }
+    }
+    return out
+}
+
+#===----------------------------------------------------------------------===#
+# The executor: one GraphQL document in, one JSON response text out
+#===----------------------------------------------------------------------===#
+
+def graphql_execute(db: ODB, text: str) -> str {
+    try {
+        doc: GqlDoc = parse_graphql(text)
+        data: dict[str, Any] = {}
+        if doc.op == "mutation" {
+            for f in doc.fields {
+                data[f.name] = _run_mutation(db, f)
+            }
+        } else {
+            for f2 in doc.fields {
+                data[f2.name] = _run_query(db, f2)
+            }
+        }
+        reply: dict[str, Any] = {}
+        d_any: Any = data
+        reply["data"] = d_any
+        return dumps(reply)
+    } except GqlError as g {
+        return _error_reply(str(g))
+    } except PrepareError as p {
+        return _error_reply(str(p))
+    } except IntegrityError as ie {
+        return _error_reply(str(ie))
+    } except ConflictError as ce {
+        return _error_reply(str(ce))
+    } except SchemaError as se {
+        return _error_reply(str(se))
+    } except NotFound as nf {
+        return _error_reply(str(nf))
+    } except ODBError as oe {
+        return _error_reply(str(oe))
+    }
+}
+
+def _error_reply(message: str) -> str {
+    e: dict[str, Any] = {}
+    e["message"] = message
+    errs: list[Any] = []
+    e_any: Any = e
+    errs.append(e_any)
+    reply: dict[str, Any] = {}
+    errs_any: Any = errs
+    reply["errors"] = errs_any
+    return dumps(reply)
+}
+
+def _run_query(db: ODB, f: GqlField) -> Any {
+    if len(f.name) > 4 and f.name[len(f.name) - 4:] == "_agg" {
+        source: str = f.name[0:len(f.name) - 4]
+        rows: list[Document] = db.find(_agg_to_oql(f, source))
+        obj: dict[str, Any] = {}
+        if len(rows) > 0 {
+            obj["count"] = rows[0].data["count"]
+        } else {
+            obj["count"] = 0
+        }
+        r: Any = obj
+        return r
+    }
+    docs: list[Document] = db.find(field_to_oql(f))
+    rows2: list[Any] = []
+    for d in docs {
+        row: Any = d.data
+        rows2.append(row)
+    }
+    r2: Any = rows2
+    return r2
+}
+
+def _run_mutation(db: ODB, f: GqlField) -> Any {
+    name: str = f.name
+    if len(name) > 11 and name[0:7] == "insert_" and name[len(name) - 4:] == "_one" {
+        schema: str = name[7:len(name) - 4]
+        if "object" not in f.args {
+            raise GqlError("graphql: insert_*_one needs an object argument")
+        }
+        obj_any: Any = f.args["object"]
+        if not isinstance(obj_any, dict) {
+            raise GqlError("graphql: object must be an input object")
+        }
+        obj: dict[str, Any] = obj_any
+        saved: Document = db.schema(schema).save(obj)
+        rr: Any = _project_doc(saved.data, f.selections)
+        return rr
+    }
+    if len(name) > 13 and name[0:7] == "update_" and name[len(name) - 6:] == "_by_pk" {
+        schema2: str = name[7:len(name) - 6]
+        if "_set" not in f.args {
+            raise GqlError("graphql: update_*_by_pk needs a _set argument")
+        }
+        set_any: Any = f.args["_set"]
+        if not isinstance(set_any, dict) {
+            raise GqlError("graphql: _set must be an input object")
+        }
+        patch: dict[str, Any] = set_any
+        target: Document = _by_pk(db, schema2, f.args)
+        updated: Document = db.schema(schema2).edit(target.id, patch)
+        ru: Any = _project_doc(updated.data, f.selections)
+        return ru
+    }
+    if len(name) > 13 and name[0:7] == "delete_" and name[len(name) - 6:] == "_by_pk" {
+        schema3: str = name[7:len(name) - 6]
+        gone: Document = _by_pk(db, schema3, f.args)
+        pre: dict[str, Any] = _project_doc(gone.data, f.selections)
+        db.schema(schema3).wipe(gone.id)
+        rd: Any = pre
+        return rd
+    }
+    raise GqlError("graphql: unsupported mutation '" + name + "' (v1 serves insert_*_one, update_*_by_pk, delete_*_by_pk)")
+}
+
+# Resolve the pk argument(s) of a *_by_pk mutation to the target document.
+def _by_pk(db: ODB, schema: str, args: dict[str, Any]) -> Document {
+    keys: dict[str, Any] = {}
+    for k in args {
+        if k != "_set" and k != "object" {
+            keys[k] = args[k]
+        }
+    }
+    if len(keys) == 0 {
+        raise GqlError("graphql: *_by_pk needs the primary key argument")
+    }
+    return db._read_by(db._schemas[schema], keys)
+}
+
+#===----------------------------------------------------------------------===#
+# SDL rendering (the human-readable type surface; introspection is a v1 gap)
+#===----------------------------------------------------------------------===#
+
+def _gql_type(fs: FieldSpec) -> str {
+    base: str = "String"
+    if fs.tag == T_INT {
+        base = "Int"
+    } else if fs.tag == T_NUM {
+        base = "Float"
+    } else if fs.tag == T_BOOL {
+        base = "Boolean"
+    }
+    if fs.required {
+        return base + "!"
+    }
+    return base
+}
+
+def _type_name(schema_name: str) -> str {
+    out: str = ""
+    up: bool = True
+    i: int = 0
+    while i < len(schema_name) {
+        c: str = schema_name[i]
+        if c == "_" {
+            up = True
+        } else {
+            if up {
+                out = out + c.upper()
+                up = False
+            } else {
+                out = out + c
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+# Render every schema as an SDL object type: scalar fields typed from the
+# compiled schema, one object field per forward ref (N:1), one list field per
+# reverse ref (1:N).
+def graphql_sdl(db: ODB) -> str {
+    lines: list[str] = []
+    for sid in db._sorted_sids() {
+        name: str = db._by_sid[sid]
+        cs: CompiledSchema = db._schemas[name]
+        cm: CompiledMeta = db._metac[name]
+        lines.append("type " + _type_name(name) + " {")
+        lines.append("  _id: Int!")
+        for fs in cs.required {
+            lines.append("  " + fs.name + ": " + _gql_type(fs))
+        }
+        for fs2 in cs.optional {
+            lines.append("  " + fs2.name + ": " + _gql_type(fs2))
+        }
+        for r in cm.refs {
+            rel: str = r.source_path
+            if len(rel) > 3 and rel[len(rel) - 3:] == "_id" {
+                rel = rel[0:len(rel) - 3]
+            }
+            lines.append("  " + rel + ": " + _type_name(r.target_schema))
+        }
+        # reverse edges: schemas whose refs target this one
+        for sid2 in db._sorted_sids() {
+            other: str = db._by_sid[sid2]
+            ocm: CompiledMeta = db._metac[other]
+            for r2 in ocm.refs {
+                if r2.target_schema == name {
+                    lines.append("  " + other + ": [" + _type_name(other) + "!]")
+                }
+            }
+        }
+        lines.append("}")
+        lines.append("")
+    }
+    return "\n".join(lines)
+}

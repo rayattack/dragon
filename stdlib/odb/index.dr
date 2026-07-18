@@ -1,0 +1,531 @@
+# odb.index - the bytes-keyed copy-on-write B+tree (spec sections 12, 14).
+#
+# The doc tree and catalog are keyed by a u64 docid/schema id (odb.btree), where
+# an integer compare is the fastest possible descent. Index trees are different:
+# their keys are memcomparable BYTES produced by odb.keyenc (a field value, a
+# composite, a reverse-index edge), and every comparison is a plain byte-wise
+# memcmp (Dragon's `bytes <`). This tree is that substrate. It shares the exact
+# copy-on-write / path-copying algorithm of the u64 tree - writers never touch a
+# live page, readers pin an immutable snapshot - and differs only in physical
+# layout: keys AND values are variable length, so pages are SLOTTED (a directory
+# of offsets, payloads packed from the end) rather than fixed-width.
+#
+# Page layouts (payload region [0, payload_size)):
+#
+#   Leaf (PT_IX_LEAF):
+#     u16 count
+#     count dir entries at offset 2: (key_off u16, key_len u16, val_off u16, val_len u16)
+#     key/value payloads packed downward from the end of the region
+#
+#   Branch (PT_IX_BRANCH):
+#     u16 count                     (number of separator keys)
+#     u64 child0 at offset 8        (subtree for keys < sep[0])
+#     count dir entries at offset 16: (child u64, sep_off u16, sep_len u16)
+#       child[i] holds keys in [sep[i], sep[i+1])
+#     separator payloads packed downward from the end
+#
+# A single (key, value) that cannot fit an otherwise-empty leaf raises: overflow
+# page chains for oversized entries are a later milestone (spec section 12)
+
+from odb.pager import Pager, PT_IX_LEAF, PT_IX_BRANCH
+from odb.codec import blank, put_u16, put_u64, put_bytes, get_u16, get_u64, get_bytes
+from odb.errors import ODBError
+
+const _IXL_DIR: int = 2       # leaf directory starts here
+const _IXL_ENT: int = 8       # bytes per leaf directory entry
+const _IXB_CHILD0: int = 8    # branch leftmost child offset
+const _IXB_DIR: int = 16      # branch directory starts here
+const _IXB_ENT: int = 12      # bytes per branch directory entry
+
+class IxLeaf {
+    keys: list[bytes]
+    vals: list[bytes]
+
+    def(keys: list[bytes], vals: list[bytes]) {
+        self.keys = keys
+        self.vals = vals
+    }
+}
+
+class IxBranch {
+    child0: int
+    keys: list[bytes]
+    children: list[int]
+
+    def(child0: int, keys: list[bytes], children: list[int]) {
+        self.child0 = child0
+        self.keys = keys
+        self.children = children
+    }
+}
+
+class IndexTree {
+    pager: Pager
+    root: int          # root page id; 0 = empty tree
+
+    def(pager: Pager, root: int) {
+        self.pager = pager
+        self.root = root
+    }
+
+    #--- byte-key comparison ----------------------------------------------#
+    # Dragon's `bytes <` is a memcmp with shorter-prefix-first ordering, which
+    # is exactly what odb.keyenc's encodings are designed against.
+
+    def _lt(a: bytes, b: bytes) -> bool {
+        return a < b
+    }
+
+    #--- sizing -----------------------------------------------------------#
+
+    def _leaf_bytes(node: IxLeaf) -> int {
+        total: int = _IXL_DIR + len(node.keys) * _IXL_ENT
+        i: int = 0
+        while i < len(node.keys) {
+            total = total + len(node.keys[i]) + len(node.vals[i])
+            i = i + 1
+        }
+        return total
+    }
+
+    def _leaf_fits(node: IxLeaf) -> bool {
+        return self._leaf_bytes(node) <= self.pager.payload_size()
+    }
+
+    def _branch_bytes(node: IxBranch) -> int {
+        total: int = _IXB_DIR + len(node.keys) * _IXB_ENT
+        i: int = 0
+        while i < len(node.keys) {
+            total = total + len(node.keys[i])
+            i = i + 1
+        }
+        return total
+    }
+
+    def _branch_fits(node: IxBranch) -> bool {
+        return self._branch_bytes(node) <= self.pager.payload_size()
+    }
+
+    #--- serialization ----------------------------------------------------#
+
+    def _stage_leaf(pgid: int, node: IxLeaf) -> None {
+        ps: int = self.pager.payload_size()
+        buf: list[int] = blank(ps)
+        n: int = len(node.keys)
+        put_u16(buf, 0, n)
+        end: int = ps
+        i: int = 0
+        while i < n {
+            kb: bytes = node.keys[i]
+            vb: bytes = node.vals[i]
+            kl: int = len(kb)
+            vl: int = len(vb)
+            end = end - kl
+            koff: int = end
+            put_bytes(buf, koff, kb)
+            end = end - vl
+            voff: int = end
+            put_bytes(buf, voff, vb)
+            eoff: int = _IXL_DIR + i * _IXL_ENT
+            put_u16(buf, eoff, koff)
+            put_u16(buf, eoff + 2, kl)
+            put_u16(buf, eoff + 4, voff)
+            put_u16(buf, eoff + 6, vl)
+            i = i + 1
+        }
+        self.pager.stage(pgid, PT_IX_LEAF, bytes(buf))
+    }
+
+    def _stage_branch(pgid: int, node: IxBranch) -> None {
+        ps: int = self.pager.payload_size()
+        buf: list[int] = blank(ps)
+        n: int = len(node.keys)
+        put_u16(buf, 0, n)
+        put_u64(buf, _IXB_CHILD0, node.child0)
+        end: int = ps
+        i: int = 0
+        while i < n {
+            sb: bytes = node.keys[i]
+            sl: int = len(sb)
+            end = end - sl
+            soff: int = end
+            put_bytes(buf, soff, sb)
+            eoff: int = _IXB_DIR + i * _IXB_ENT
+            put_u64(buf, eoff, node.children[i])
+            put_u16(buf, eoff + 8, soff)
+            put_u16(buf, eoff + 10, sl)
+            i = i + 1
+        }
+        self.pager.stage(pgid, PT_IX_BRANCH, bytes(buf))
+    }
+
+    def _read_leaf(pgid: int) -> IxLeaf {
+        page: bytes = self.pager.read_page(pgid)
+        n: int = get_u16(page, 0)
+        keys: list[bytes] = []
+        vals: list[bytes] = []
+        i: int = 0
+        while i < n {
+            eoff: int = _IXL_DIR + i * _IXL_ENT
+            koff: int = get_u16(page, eoff)
+            kl: int = get_u16(page, eoff + 2)
+            voff: int = get_u16(page, eoff + 4)
+            vl: int = get_u16(page, eoff + 6)
+            keys.append(get_bytes(page, koff, kl))
+            vals.append(get_bytes(page, voff, vl))
+            i = i + 1
+        }
+        return IxLeaf(keys, vals)
+    }
+
+    def _read_branch(pgid: int) -> IxBranch {
+        page: bytes = self.pager.read_page(pgid)
+        n: int = get_u16(page, 0)
+        child0: int = get_u64(page, _IXB_CHILD0)
+        keys: list[bytes] = []
+        children: list[int] = []
+        i: int = 0
+        while i < n {
+            eoff: int = _IXB_DIR + i * _IXB_ENT
+            children.append(get_u64(page, eoff))
+            soff: int = get_u16(page, eoff + 8)
+            sl: int = get_u16(page, eoff + 10)
+            keys.append(get_bytes(page, soff, sl))
+            i = i + 1
+        }
+        return IxBranch(child0, keys, children)
+    }
+
+    #--- page placement (COW vs in-place) ---------------------------------#
+
+    def _writable(pgid: int) -> int {
+        if pgid != 0 and self.pager.is_fresh(pgid) {
+            return pgid
+        }
+        np: int = self.pager.alloc()
+        if pgid != 0 {
+            self.pager.free(pgid)
+        }
+        return np
+    }
+
+    #--- routing / search -------------------------------------------------#
+
+    def _route(branch: IxBranch, k: bytes) -> int {
+        child: int = branch.child0
+        i: int = 0
+        while i < len(branch.keys) and not (k < branch.keys[i]) {
+            child = branch.children[i]
+            i = i + 1
+        }
+        return child
+    }
+
+    # Index of k in a sorted key list, or -1. Binary search over byte keys.
+    def _find(keys: list[bytes], k: bytes) -> int {
+        lo: int = 0
+        hi: int = len(keys) - 1
+        while lo <= hi {
+            mid: int = (lo + hi) // 2
+            if keys[mid] == k {
+                return mid
+            }
+            if keys[mid] < k {
+                lo = mid + 1
+            } else {
+                hi = mid - 1
+            }
+        }
+        return -1
+    }
+
+    # First index whose key is >= k (insertion point).
+    def _lower_bound(keys: list[bytes], k: bytes) -> int {
+        lo: int = 0
+        hi: int = len(keys)
+        while lo < hi {
+            mid: int = (lo + hi) // 2
+            if keys[mid] < k {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
+        }
+        return lo
+    }
+
+    #--- public reads -----------------------------------------------------#
+
+    def contains(k: bytes) -> bool {
+        pid: int = self.root
+        if pid == 0 {
+            return False
+        }
+        page: bytes = self.pager.read_page(pid)
+        while self.pager.page_type(page) == PT_IX_BRANCH {
+            br: IxBranch = self._read_branch(pid)
+            pid = self._route(br, k)
+            page = self.pager.read_page(pid)
+        }
+        leaf: IxLeaf = self._read_leaf(pid)
+        return self._find(leaf.keys, k) >= 0
+    }
+
+    # Return the value for k. Raises KeyError if absent.
+    def get(k: bytes) -> bytes {
+        pid: int = self.root
+        if pid != 0 {
+            page: bytes = self.pager.read_page(pid)
+            while self.pager.page_type(page) == PT_IX_BRANCH {
+                br: IxBranch = self._read_branch(pid)
+                pid = self._route(br, k)
+                page = self.pager.read_page(pid)
+            }
+            leaf: IxLeaf = self._read_leaf(pid)
+            idx: int = self._find(leaf.keys, k)
+            if idx >= 0 {
+                return leaf.vals[idx]
+            }
+        }
+        raise KeyError("key not in index tree")
+    }
+
+    #--- split helper -----------------------------------------------------#
+
+    def _split_leaf(node: IxLeaf) -> list[IxLeaf] {
+        total: int = self._leaf_bytes(node)
+        target: int = total // 2
+        lk: list[bytes] = []
+        lv: list[bytes] = []
+        acc: int = _IXL_DIR
+        i: int = 0
+        n: int = len(node.keys)
+        # Keep at least one entry on each side.
+        while i < n - 1 {
+            entry_sz: int = _IXL_ENT + len(node.keys[i]) + len(node.vals[i])
+            if len(lk) > 0 and acc + entry_sz > target {
+                break
+            }
+            lk.append(node.keys[i])
+            lv.append(node.vals[i])
+            acc = acc + entry_sz
+            i = i + 1
+        }
+        rk: list[bytes] = node.keys[i:]
+        rv: list[bytes] = node.vals[i:]
+        return [IxLeaf(lk, lv), IxLeaf(rk, rv)]
+    }
+
+    #--- insert -----------------------------------------------------------#
+
+    def insert(k: bytes, v: bytes) -> None {
+        # A single entry must fit an empty leaf (dir + one slot + key + value).
+        if _IXL_DIR + _IXL_ENT + len(k) + len(v) > self.pager.payload_size() {
+            raise ODBError("index entry too large for inline storage (overflow pages pending)")
+        }
+
+        if self.root == 0 {
+            pid: int = self.pager.alloc()
+            self._stage_leaf(pid, IxLeaf([k], [v]))
+            self.root = pid
+            return
+        }
+
+        path: list[int] = []
+        pid2: int = self.root
+        page: bytes = self.pager.read_page(pid2)
+        while self.pager.page_type(page) == PT_IX_BRANCH {
+            path.append(pid2)
+            br: IxBranch = self._read_branch(pid2)
+            pid2 = self._route(br, k)
+            page = self.pager.read_page(pid2)
+        }
+
+        leaf: IxLeaf = self._read_leaf(pid2)
+        pos: int = self._lower_bound(leaf.keys, k)
+        if pos < len(leaf.keys) and leaf.keys[pos] == k {
+            leaf.vals[pos] = v
+        } else {
+            leaf.keys.insert(pos, k)
+            leaf.vals.insert(pos, v)
+        }
+
+        if self._leaf_fits(leaf) {
+            newpid: int = self._writable(pid2)
+            self._stage_leaf(newpid, leaf)
+            self._propagate(path, pid2, newpid)
+            return
+        }
+
+        halves: list[IxLeaf] = self._split_leaf(leaf)
+        left: IxLeaf = halves[0]
+        right: IxLeaf = halves[1]
+        promo: bytes = right.keys[0]
+        left_pid: int = self._writable(pid2)
+        self._stage_leaf(left_pid, left)
+        right_pid: int = self.pager.alloc()
+        self._stage_leaf(right_pid, right)
+        self._insert_into_parent(path, pid2, left_pid, promo, right_pid)
+    }
+
+    def _propagate(path: list[int], old_child: int, new_child: int) -> None {
+        i: int = len(path) - 1
+        while i >= 0 {
+            bpid: int = path[i]
+            br: IxBranch = self._read_branch(bpid)
+            self._replace_child(br, old_child, new_child)
+            nb: int = self._writable(bpid)
+            self._stage_branch(nb, br)
+            old_child = bpid
+            new_child = nb
+            i = i - 1
+        }
+        self.root = new_child
+    }
+
+    def _replace_child(br: IxBranch, old_c: int, new_c: int) -> None {
+        if br.child0 == old_c {
+            br.child0 = new_c
+            return
+        }
+        i: int = 0
+        while i < len(br.children) {
+            if br.children[i] == old_c {
+                br.children[i] = new_c
+                return
+            }
+            i = i + 1
+        }
+    }
+
+    def _insert_into_parent(path: list[int], old_child: int, left_pid: int, sep: bytes, right_pid: int) -> None {
+        child_old: int = old_child
+        child_left: int = left_pid
+        ins_key: bytes = sep
+        ins_right: int = right_pid
+
+        i: int = len(path) - 1
+        while i >= 0 {
+            bpid: int = path[i]
+            br: IxBranch = self._read_branch(bpid)
+            self._replace_child(br, child_old, child_left)
+            p: int = self._lower_bound(br.keys, ins_key)
+            br.keys.insert(p, ins_key)
+            br.children.insert(p, ins_right)
+
+            if self._branch_fits(br) {
+                nb: int = self._writable(bpid)
+                self._stage_branch(nb, br)
+                self._propagate(path[0:i], bpid, nb)
+                return
+            }
+
+            mid: int = len(br.keys) // 2
+            midkey: bytes = br.keys[mid]
+            lb: IxBranch = IxBranch(br.child0, br.keys[0:mid], br.children[0:mid])
+            rb: IxBranch = IxBranch(br.children[mid], br.keys[mid + 1:], br.children[mid + 1:])
+            lb_pid: int = self._writable(bpid)
+            self._stage_branch(lb_pid, lb)
+            rb_pid: int = self.pager.alloc()
+            self._stage_branch(rb_pid, rb)
+
+            child_old = bpid
+            child_left = lb_pid
+            ins_key = midkey
+            ins_right = rb_pid
+            i = i - 1
+        }
+
+        newroot: IxBranch = IxBranch(child_left, [ins_key], [ins_right])
+        nr: int = self.pager.alloc()
+        self._stage_branch(nr, newroot)
+        self.root = nr
+    }
+
+    #--- delete -----------------------------------------------------------#
+
+    # Remove a key. Returns True if it was present. Delete-without-merge (M4):
+    # under-full nodes are not rebalanced (compaction is a later milestone);
+    # routing still lands each remaining key in its own leaf, so lookups stay
+    # correct.
+    def delete(k: bytes) -> bool {
+        if self.root == 0 {
+            return False
+        }
+        path: list[int] = []
+        pid: int = self.root
+        page: bytes = self.pager.read_page(pid)
+        while self.pager.page_type(page) == PT_IX_BRANCH {
+            path.append(pid)
+            br: IxBranch = self._read_branch(pid)
+            pid = self._route(br, k)
+            page = self.pager.read_page(pid)
+        }
+        leaf: IxLeaf = self._read_leaf(pid)
+        idx: int = self._find(leaf.keys, k)
+        if idx < 0 {
+            return False
+        }
+        leaf.keys.pop(idx)
+        leaf.vals.pop(idx)
+        newpid: int = self._writable(pid)
+        self._stage_leaf(newpid, leaf)
+        self._propagate(path, pid, newpid)
+        return True
+    }
+
+    #--- ordered scan -----------------------------------------------------#
+
+    # All (key, value) pairs in ascending key order.
+    def items() -> list[list[bytes]] {
+        out: list[list[bytes]] = []
+        if self.root != 0 {
+            self._collect(self.root, out)
+        }
+        return out
+    }
+
+    def _collect(pid: int, out: list[list[bytes]]) -> None {
+        page: bytes = self.pager.read_page(pid)
+        if self.pager.page_type(page) == PT_IX_LEAF {
+            leaf: IxLeaf = self._read_leaf(pid)
+            i: int = 0
+            while i < len(leaf.keys) {
+                pair: list[bytes] = [leaf.keys[i], leaf.vals[i]]
+                out.append(pair)
+                i = i + 1
+            }
+        } else {
+            br: IxBranch = self._read_branch(pid)
+            self._collect(br.child0, out)
+            i2: int = 0
+            while i2 < len(br.children) {
+                self._collect(br.children[i2], out)
+                i2 = i2 + 1
+            }
+        }
+    }
+
+    # (key, value) pairs whose key has `prefix` as a byte prefix, ascending.
+    # Powers reverse-index traversal (all edges from one target docid).
+    def scan_prefix(prefix: bytes) -> list[list[bytes]] {
+        out: list[list[bytes]] = []
+        for pair in self.items() {
+            if _has_prefix(pair[0], prefix) {
+                out.append(pair)
+            }
+        }
+        return out
+    }
+
+    def count() -> int {
+        return len(self.items())
+    }
+}
+
+def _has_prefix(key: bytes, prefix: bytes) -> bool {
+    if len(prefix) > len(key) {
+        return False
+    }
+    return key[0:len(prefix)] == prefix
+}

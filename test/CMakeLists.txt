@@ -135,3 +135,15 @@ add_test(NAME dr_ffi_cxx_shim
         ${CMAKE_CURRENT_SOURCE_DIR}/dr/ffi_cxx/app.dr
         --cc-source ${CMAKE_CURRENT_SOURCE_DIR}/dr/ffi_cxx/shim.cpp)
 
+# ODB M11 - the raft consensus package (packages/raft) and Raft HA over the
+# commit log (odb.ha). Registered explicitly because they need -I to resolve
+# the package, which the bare glob cannot pass.
+add_test(NAME dr_test_raft
+    COMMAND $<TARGET_FILE:dragon> run
+        ${CMAKE_CURRENT_SOURCE_DIR}/dr/raft/test_raft.dr
+        -I ${CMAKE_SOURCE_DIR}/packages)
+add_test(NAME dr_test_odb_raft
+    COMMAND $<TARGET_FILE:dragon> run
+        ${CMAKE_CURRENT_SOURCE_DIR}/dr/raft/test_odb_raft.dr
+        -I ${CMAKE_SOURCE_DIR}/packages)
+

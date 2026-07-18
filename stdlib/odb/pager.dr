@@ -1,0 +1,865 @@
+# odb.pager - the file format and the atomic commit engine (spec section 13).
+#
+# The pager owns the .odb file's low level: page 0 header, the dual meta pages
+# (the LMDB trick), per-page crc32c, the CSN-chunked free list, and the commit
+# protocol that makes every crash recover to a consistent snapshot with zero
+# recovery work.
+#
+# The free list is append-only (LMDB lineage): each commit writes ONE new
+# chunk holding exactly the pages it freed, stamped with its CSN; nothing ever
+# rewrites old chunks. Allocation consumes the oldest chunk once its CSN ages
+# past every reader and the retention floor; the consumption cursor (floor
+# csn + index) lives in the meta. Per-commit free-list I/O is therefore
+# proportional to that commit's churn, never to accumulated history - a
+# full-rewrite free list self-feeds through the retention floor and turns
+# every long write run quadratic (odb-pager-scaling.md).
+#
+#   Page 0 : header (magic, format version, page size, file uuid, created_at).
+#   Page 1 : meta A.
+#   Page 2 : meta B.
+#   Page 3+: data / freelist pages.
+#
+# Commit = write all data + freelist pages, fsync, write the OLDER meta page
+# (the one with the lower CSN) with the new CSN and roots, fsync. Recovery =
+# read both metas, verify crc, adopt the valid one with the higher CSN. A torn
+# meta fails its checksum and the other meta (the previous consistent state)
+# wins. Data is always durable before the meta that references it, so a crash
+# can never point a live meta at a half-written page.
+#
+# Every page: bytes [0, page_size-8) are payload; byte [page_size-8] is the page
+# type; [page_size-4, page_size) is a crc32c over [0, page_size-4)
+
+from odb.vfs import VFS
+from odb.checksum import crc32c_range
+from odb.codec import blank, put_u8, put_u16, put_u32, put_u64, put_bytes
+from odb.codec import get_u8, get_u16, get_u32, get_u64, get_bytes
+from odb.errors import CorruptionError, ODBError
+from secrets import token_bytes
+from time import now
+
+const DEFAULT_PAGE_SIZE: int = 4096
+# Version 2: CSN-chunked append-only free list (new PT_FREELIST page layout
+# and the free-list floor cursor in the meta).
+# Version 3 (M11, spec section 19 v3b): the meta gained a meta-write sequence
+# number and the raft consensus fields (term, vote, tail chain root, base).
+# Recovery picks the valid meta with the higher SEQUENCE, not the higher CSN,
+# so consensus state can flip the meta durably WITHOUT consuming a CSN - a
+# follower-local CSN would alias the primary's next entry, which is exactly
+# the fork the M10 write latch exists to prevent.
+const FORMAT_VERSION: int = 3
+
+const PT_HEADER: int = 1
+const PT_META: int = 2
+const PT_FREELIST: int = 3
+const PT_DATA: int = 4
+const PT_LEAF: int = 5
+const PT_BRANCH: int = 6
+const PT_IX_LEAF: int = 7        # index tree leaf (bytes keys, slotted)
+const PT_IX_BRANCH: int = 8      # index tree branch (bytes keys, slotted)
+const PT_LOG: int = 9            # commit log page (spec section 17)
+const PT_RAFT: int = 10          # raft tail chain page (spec section 19 v3b)
+
+# Retention modes (spec section 17): how long committed history stays readable.
+const RETAIN_NONE: int = 0
+const RETAIN_TXNS: int = 1
+const RETAIN_SECS: int = 2
+
+# Header field offsets (page 0).
+const H_MAGIC: int = 0            # 6 bytes: "ODB01\0"
+const H_FORMAT: int = 6           # u16
+const H_PAGE_SIZE: int = 8        # u32
+const H_UUID: int = 12            # 16 bytes
+const H_CREATED: int = 28         # u64 (unix seconds)
+
+# Meta field offsets (pages 1, 2).
+const M_CSN: int = 0             # u64 commit sequence number
+const M_CATALOG_ROOT: int = 8    # u64 catalog tree root page id (0 = none)
+const M_FREELIST_ROOT: int = 16  # u64 freelist chain head (0 = empty)
+const M_LOG_HEAD: int = 24       # u64
+const M_LOG_TAIL: int = 32       # u64
+const M_DOCID: int = 40          # u64 monotonic docid counter
+const M_PAGE_COUNT: int = 48     # u64 high-water mark (total pages)
+const M_RETAIN_MODE: int = 56    # u64 RETAIN_NONE | RETAIN_TXNS | RETAIN_SECS
+const M_RETAIN_VALUE: int = 64   # u64 count of txns / seconds (mode-dependent)
+# Free-list consumption cursor: chunks with a CSN below the floor are retired
+# (their pages recycled); within the chunk AT the floor CSN, the first `idx`
+# entries have already been reallocated.
+const M_FL_FLOOR_CSN: int = 72   # u64 CSN of the oldest live freelist chunk
+const M_FL_FLOOR_IDX: int = 80   # u64 entries consumed off that chunk
+# Meta-write sequence: bumps on EVERY meta flip (data commits and consensus
+# state flips alike). Recovery adopts the valid meta with the higher sequence.
+const M_SEQ: int = 88            # u64
+# Raft consensus hard state (spec section 19 v3b). Term and vote must be
+# durable before a vote or an append-ack leaves the process; the tail chain
+# holds log entries above the base (= applied) index, PT_RAFT pages chained
+# backward like the commit log. All five ride every meta write, so a data
+# commit that applies a raft entry publishes the consensus advance, the CSN,
+# and the pruned chain in ONE atomic flip.
+const M_RAFT_TERM: int = 96      # u64
+const M_RAFT_VOTE: int = 104     # u64 (0 = none)
+const M_RAFT_ROOT: int = 112     # u64 newest tail-chain entry page (0 = empty)
+const M_RAFT_BASE: int = 120     # u64 entries at or below this index are dead
+const M_RAFT_BASE_TERM: int = 128 # u64 term of the entry at the base index
+
+# Freelist chunk page offsets. A chunk is written once, by the commit whose
+# CSN it carries, and never modified; multi-page chunks share one CSN.
+const FL_NEXT: int = 0           # u64 next chunk page id (0 = end of chain)
+const FL_NEXT_CSN: int = 8       # u64 FL_CSN of the page FL_NEXT points to
+const FL_CSN: int = 16           # u64 the commit CSN that freed these entries
+const FL_COUNT: int = 24         # u64 entries in this page
+const FL_ENTRIES: int = 32       # u64 freed page ids
+
+# One commit's worth of freed pages: the in-memory mirror of one persisted
+# chunk. `pages` are the chunk's own page ids (recycled when the floor passes
+# it); `entries` are the page ids the commit at `csn` freed. Immutable once
+# built, so transaction snapshots share chunk objects rather than copying.
+class FreeChunk {
+    csn: int
+    pages: list[int]
+    entries: list[int]
+
+    def(csn: int, pages: list[int], entries: list[int]) {
+        self.csn = csn
+        self.pages = pages
+        self.entries = entries
+    }
+}
+
+# A pinned read snapshot: a fixed (csn, roots) view. Holding one prevents the
+# pager from reusing any page that view still needs.
+class Snapshot {
+    csn: int
+    catalog_root: int
+    docid_counter: int
+    pager: Pager
+    released: bool
+
+    def(pager: Pager, csn: int, catalog_root: int, docid_counter: int) {
+        self.pager = pager
+        self.csn = csn
+        self.catalog_root = catalog_root
+        self.docid_counter = docid_counter
+        self.released = False
+    }
+
+    def page(pgid: int) -> bytes {
+        return self.pager.read_page(pgid)
+    }
+
+    def close() -> None {
+        if not self.released {
+            self.released = True
+            self.pager._release_reader(self.csn)
+        }
+    }
+}
+
+class Pager {
+    vfs: VFS
+    page_size: int
+    uuid: bytes                     # 16 bytes from the page-0 header; with the
+                                    # CSN it identifies replica lineage (S19)
+    last_csn: int
+    current_meta_slot: int          # 1 or 2 - which meta page is live
+    catalog_root: int
+    freelist_root: int
+    log_head: int
+    log_tail: int
+    docid_counter: int
+    high_water: int                 # next fresh page id == page_count
+    chunks: list[FreeChunk]         # persisted freelist chunks, oldest first
+    floor_csn: int                  # consumption cursor: oldest live chunk CSN
+    floor_idx: int                  # entries consumed off that chunk
+    freed: list[int]                # pages freed by the current transaction
+    pending: dict[int, bytes]       # staged page writes, flushed at commit
+    txn_pages: dict[int, bool]      # pages allocated in the current txn (a set)
+    readers: list[int]              # pinned reader CSNs
+    # History retention (spec section 17). The retain floor is the oldest CSN
+    # that must stay readable for time travel / watch resume; it pins the free
+    # list exactly like a live reader. The mode/value knob persists in the meta.
+    retain_mode: int
+    retain_value: int
+    retain_floor: int
+    # Meta-write sequence and raft consensus hard state (format v3). The raft
+    # fields are written into every meta flip; commit_state() flips the meta
+    # without advancing the CSN, which is what makes consensus state durable
+    # on a follower without forking the (uuid, csn) lineage.
+    meta_seq: int
+    raft_term: int
+    raft_vote: int
+    raft_root: int
+    raft_base: int
+    raft_base_term: int
+    # Pre-txn allocation snapshot, so abort() can discard a half-built write.
+    _txn_saved: bool
+    _saved_high_water: int
+    _saved_docid: int
+    _saved_catalog_root: int
+    _saved_chunks: list[FreeChunk]
+    _saved_floor_csn: int
+    _saved_floor_idx: int
+    _saved_freed: list[int]
+    _saved_freelist_root: int
+    _saved_log_head: int
+    _saved_log_tail: int
+    _saved_retain_floor: int
+    _saved_raft_term: int
+    _saved_raft_vote: int
+    _saved_raft_root: int
+    _saved_raft_base: int
+    _saved_raft_base_term: int
+
+    def(vfs: VFS) {
+        self.vfs = vfs
+        self.page_size = DEFAULT_PAGE_SIZE
+        self.uuid = bytes([])
+        self.last_csn = 0
+        self.current_meta_slot = 1
+        self.catalog_root = 0
+        self.freelist_root = 0
+        self.log_head = 0
+        self.log_tail = 0
+        self.docid_counter = 0
+        self.high_water = 3
+        self.chunks = []
+        self.floor_csn = 0
+        self.floor_idx = 0
+        self.freed = []
+        self.pending = {}
+        self.txn_pages = {}
+        self.readers = []
+        self.retain_mode = RETAIN_TXNS
+        self.retain_value = 1024
+        self.retain_floor = 0
+        self.meta_seq = 0
+        self.raft_term = 0
+        self.raft_vote = 0
+        self.raft_root = 0
+        self.raft_base = 0
+        self.raft_base_term = 0
+        self._txn_saved = False
+        self._saved_high_water = 3
+        self._saved_docid = 0
+        self._saved_catalog_root = 0
+        self._saved_chunks = []
+        self._saved_floor_csn = 0
+        self._saved_floor_idx = 0
+        self._saved_freed = []
+        self._saved_freelist_root = 0
+        self._saved_log_head = 0
+        self._saved_log_tail = 0
+        self._saved_retain_floor = 0
+        self._saved_raft_term = 0
+        self._saved_raft_vote = 0
+        self._saved_raft_root = 0
+        self._saved_raft_base = 0
+        self._saved_raft_base_term = 0
+    }
+
+    #--- transaction boundary ---------------------------------------------#
+
+    # Snapshot the mutable allocation state so a failed write (e.g. a unique
+    # violation surfaced mid-write) can be rolled back to exactly the last
+    # committed state. Integrity is checked at commit (spec section 7), so a
+    # write buffers freely and only becomes durable if the whole thing validates.
+    def begin() -> None {
+        self._saved_high_water = self.high_water
+        self._saved_docid = self.docid_counter
+        self._saved_catalog_root = self.catalog_root
+        # Chunk objects are immutable once built, so the snapshot shares them;
+        # only the list itself and the cursor are copied.
+        self._saved_chunks = _copy_chunks(self.chunks)
+        self._saved_floor_csn = self.floor_csn
+        self._saved_floor_idx = self.floor_idx
+        self._saved_freed = _copy_ints(self.freed)
+        self._saved_freelist_root = self.freelist_root
+        self._saved_log_head = self.log_head
+        self._saved_log_tail = self.log_tail
+        self._saved_retain_floor = self.retain_floor
+        self._saved_raft_term = self.raft_term
+        self._saved_raft_vote = self.raft_vote
+        self._saved_raft_root = self.raft_root
+        self._saved_raft_base = self.raft_base
+        self._saved_raft_base_term = self.raft_base_term
+        self._txn_saved = True
+    }
+
+    # Discard everything staged since begin() and restore the pre-txn state.
+    def abort() -> None {
+        if self._txn_saved {
+            self.high_water = self._saved_high_water
+            self.docid_counter = self._saved_docid
+            self.catalog_root = self._saved_catalog_root
+            self.chunks = _copy_chunks(self._saved_chunks)
+            self.floor_csn = self._saved_floor_csn
+            self.floor_idx = self._saved_floor_idx
+            self.freed = _copy_ints(self._saved_freed)
+            self.freelist_root = self._saved_freelist_root
+            self.log_head = self._saved_log_head
+            self.log_tail = self._saved_log_tail
+            self.retain_floor = self._saved_retain_floor
+            self.raft_term = self._saved_raft_term
+            self.raft_vote = self._saved_raft_vote
+            self.raft_root = self._saved_raft_root
+            self.raft_base = self._saved_raft_base
+            self.raft_base_term = self._saved_raft_base_term
+            self._txn_saved = False
+        }
+        self.pending = {}
+        self.txn_pages = {}
+    }
+
+    #--- page-level helpers ------------------------------------------------#
+
+    def _page_off(pgid: int) -> int {
+        return pgid * self.page_size
+    }
+
+    # Freeze a payload buffer into a full page: stamp type, compute crc.
+    def _finish(buf: list[int], ptype: int) -> bytes {
+        put_u8(buf, self.page_size - 8, ptype)
+        tmp: bytes = bytes(buf)
+        c: int = crc32c_range(tmp, 0, self.page_size - 4)
+        put_u32(buf, self.page_size - 4, c)
+        return bytes(buf)
+    }
+
+    def _verify(page: bytes) -> bool {
+        if len(page) < self.page_size {
+            return False
+        }
+        c: int = crc32c_range(page, 0, self.page_size - 4)
+        return c == get_u32(page, self.page_size - 4)
+    }
+
+    # Verified read of a live page. A crc mismatch is corruption, never hidden.
+    # Staged pages (written this txn, not yet flushed) are served from memory so
+    # a transaction reads its own uncommitted writes.
+    def read_page(pgid: int) -> bytes {
+        if pgid in self.pending {
+            return self.pending[pgid]
+        }
+        page: bytes = self.vfs.read_at(self._page_off(pgid), self.page_size)
+        if not self._verify(page) {
+            raise CorruptionError("page " + str(pgid) + " failed crc32c")
+        }
+        return page
+    }
+
+    # True if this page was allocated in the current (uncommitted) txn, so it is
+    # private and can be mutated in place rather than copied.
+    def is_fresh(pgid: int) -> bool {
+        return pgid in self.txn_pages
+    }
+
+    # The type byte of a page (PT_LEAF, PT_BRANCH, ...).
+    def page_type(page: bytes) -> int {
+        return get_u8(page, self.page_size - 8)
+    }
+
+    # Bytes available for node/page content, before the type+crc trailer.
+    def payload_size() -> int {
+        return self.page_size - 8
+    }
+
+    #--- allocation --------------------------------------------------------#
+
+    # The oldest snapshot CSN any live reader still needs. With no readers, the
+    # last committed CSN: everything freed at or before it is safe to reuse.
+    # The retention floor (oldest CSN kept readable for time travel / watch
+    # resume) pins reuse exactly like a live reader; 0 means no history pinned.
+    def _oldest_needed() -> int {
+        oldest: int = self.last_csn
+        for c in self.readers {
+            if c < oldest {
+                oldest = c
+            }
+        }
+        if self.retain_floor > 0 and self.retain_floor < oldest {
+            oldest = self.retain_floor
+        }
+        return oldest
+    }
+
+    # Allocate a page id. Reuse a freed page whose freeing CSN no live reader can
+    # still see; otherwise grow the file's high-water mark.
+    def alloc() -> int {
+        pgid: int = self._take_free()
+        if pgid == 0 {
+            pgid = self.high_water
+            self.high_water = self.high_water + 1
+        }
+        self.txn_pages[pgid] = True
+        return pgid
+    }
+
+    # Consume the next reusable page off the oldest freelist chunk, or 0 if
+    # nothing has aged past every reader and the retention floor. Chunks are
+    # consumed strictly oldest-first through the (floor_csn, floor_idx) cursor;
+    # a spent chunk is retired - its own pages freed into the current commit -
+    # only once a newer chunk exists to carry the floor, so the chunk at the
+    # floor CSN is always still linked from the chain.
+    def _take_free() -> int {
+        threshold: int = self._oldest_needed()
+        while len(self.chunks) > 0 {
+            c: FreeChunk = self.chunks[0]
+            if c.csn > threshold {
+                return 0
+            }
+            if self.floor_csn != c.csn {
+                self.floor_csn = c.csn
+                self.floor_idx = 0
+            }
+            if self.floor_idx < len(c.entries) {
+                pgid: int = c.entries[self.floor_idx]
+                self.floor_idx = self.floor_idx + 1
+                return pgid
+            }
+            if len(self.chunks) == 1 {
+                return 0
+            }
+            for pg in c.pages {
+                self.freed.append(pg)
+            }
+            self.chunks.pop(0)
+            self.floor_csn = self.chunks[0].csn
+            self.floor_idx = 0
+        }
+        return 0
+    }
+
+    # Free a page as of the pending commit's CSN.
+    def free(pgid: int) -> None {
+        self.freed.append(pgid)
+    }
+
+    # Allocate a page WITHOUT consuming the free list: raft tail pages only.
+    # A commit_state() flip publishes the free-list floor cursor, but any
+    # chunk pages retired by consumption would sit in `freed` in memory with
+    # no chunk to land in until the next data commit - a crash in that window
+    # would leak them. Growing the file instead keeps every crash window
+    # leak-free; the grown pages recycle through the next data commit's chunk
+    # once the tail entry is pruned, so the growth is transient by design.
+    def alloc_grow() -> int {
+        pgid: int = self.high_water
+        self.high_water = self.high_water + 1
+        self.txn_pages[pgid] = True
+        return pgid
+    }
+
+    #--- staging + roots ---------------------------------------------------#
+
+    def stage(pgid: int, ptype: int, payload: bytes) -> None {
+        buf: list[int] = blank(self.page_size)
+        put_bytes(buf, 0, payload)
+        self.pending[pgid] = self._finish(buf, ptype)
+    }
+
+    def set_catalog_root(pgid: int) -> None {
+        self.catalog_root = pgid
+    }
+
+    def set_docid_counter(v: int) -> None {
+        self.docid_counter = v
+    }
+
+    #--- freelist persistence ---------------------------------------------#
+
+    def _fl_capacity() -> int {
+        return (self.page_size - 8 - FL_ENTRIES) // 16
+    }
+
+    # Append this commit's freed pages as ONE new chunk at the head of the
+    # chain, stamped with the committing CSN. Old chunks are never touched:
+    # the new chunk's pages link to the previous head and the meta adopts the
+    # new head, so the whole update is copy-on-write like everything else.
+    # Chunk pages REUSE eligible freed pages first (same safety proof as
+    # alloc()) and only then grow the file. Allocating a chunk page can retire
+    # a spent older chunk, which frees more pages into this very chunk, so the
+    # page count is recomputed to a fixed point before anything is filled.
+    def _serialize_freelist(csn: int) -> None {
+        if len(self.freed) == 0 {
+            return
+        }
+        cap: int = self._fl_capacity()
+        new_ids: list[int] = []
+        while (len(self.freed) + cap - 1) // cap > len(new_ids) {
+            new_ids.append(self.alloc())
+        }
+
+        prev_root: int = self.freelist_root
+        prev_csn: int = 0
+        if len(self.chunks) > 0 {
+            prev_csn = self.chunks[len(self.chunks) - 1].csn
+        }
+
+        n: int = len(self.freed)
+        n_pages: int = len(new_ids)
+        idx: int = 0
+        p: int = 0
+        while p < n_pages {
+            buf: list[int] = blank(self.page_size)
+            next_id: int = prev_root
+            next_csn: int = prev_csn
+            if p + 1 < n_pages {
+                next_id = new_ids[p + 1]
+                next_csn = csn
+            }
+            put_u64(buf, FL_NEXT, next_id)
+            put_u64(buf, FL_NEXT_CSN, next_csn)
+            put_u64(buf, FL_CSN, csn)
+            cnt: int = 0
+            off: int = FL_ENTRIES
+            while cnt < cap and idx < n {
+                put_u64(buf, off, self.freed[idx])
+                off = off + 8
+                cnt = cnt + 1
+                idx = idx + 1
+            }
+            put_u64(buf, FL_COUNT, cnt)
+            self.pending[new_ids[p]] = self._finish(buf, PT_FREELIST)
+            p = p + 1
+        }
+
+        self.chunks.append(FreeChunk(csn, new_ids, self.freed))
+        self.freed = []
+        self.freelist_root = new_ids[0]
+    }
+
+    # Walk the chain from the newest chunk, stopping before any chunk older
+    # than the floor CSN: those were retired and their pages may already hold
+    # unrelated data, so the stored FL_NEXT_CSN is what makes the stop safe
+    # without reading the retired page. Chunk CSNs strictly descend along the
+    # chain; consecutive pages sharing a CSN are one multi-page chunk.
+    def _load_freelist() -> None {
+        self.chunks = []
+        self.freed = []
+        rev: list[FreeChunk] = []                # newest first, walk order
+        pg: int = self.freelist_root
+        cur_csn: int = -1
+        while pg != 0 {
+            page: bytes = self.read_page(pg)
+            if self.page_type(page) != PT_FREELIST {
+                raise CorruptionError("freelist chain reached a non-freelist page " + str(pg))
+            }
+            ccsn: int = get_u64(page, FL_CSN)
+            if ccsn != cur_csn {
+                rev.append(FreeChunk(ccsn, [], []))
+                cur_csn = ccsn
+            }
+            c: FreeChunk = rev[len(rev) - 1]
+            c.pages.append(pg)
+            cnt: int = get_u64(page, FL_COUNT)
+            off: int = FL_ENTRIES
+            k: int = 0
+            while k < cnt {
+                c.entries.append(get_u64(page, off))
+                off = off + 8
+                k = k + 1
+            }
+            nxt: int = get_u64(page, FL_NEXT)
+            if nxt == 0 {
+                break
+            }
+            if self.floor_csn > 0 and get_u64(page, FL_NEXT_CSN) < self.floor_csn {
+                break
+            }
+            pg = nxt
+        }
+        i: int = len(rev) - 1
+        while i >= 0 {
+            self.chunks.append(rev[i])
+            i = i - 1
+        }
+        if self.floor_csn > 0 {
+            if len(self.chunks) == 0 {
+                raise CorruptionError("freelist floor csn " + str(self.floor_csn) + " but the chain is empty")
+            }
+            if self.chunks[0].csn != self.floor_csn {
+                raise CorruptionError("freelist floor csn " + str(self.floor_csn) + " does not match the oldest chunk csn " + str(self.chunks[0].csn))
+            }
+            if self.floor_idx > len(self.chunks[0].entries) {
+                raise CorruptionError("freelist floor index " + str(self.floor_idx) + " is past the oldest chunk's " + str(len(self.chunks[0].entries)) + " entries")
+            }
+        }
+    }
+
+    #--- meta --------------------------------------------------------------#
+
+    def _write_meta(slot: int, csn: int, seq: int) -> None {
+        buf: list[int] = blank(self.page_size)
+        put_u64(buf, M_CSN, csn)
+        put_u64(buf, M_CATALOG_ROOT, self.catalog_root)
+        put_u64(buf, M_FREELIST_ROOT, self.freelist_root)
+        put_u64(buf, M_LOG_HEAD, self.log_head)
+        put_u64(buf, M_LOG_TAIL, self.log_tail)
+        put_u64(buf, M_DOCID, self.docid_counter)
+        put_u64(buf, M_PAGE_COUNT, self.high_water)
+        # Stored as mode+1 so 0 stays "unset" (pre-M8 file): an explicit
+        # RETAIN_NONE (0) must never read back as "adopt the default".
+        put_u64(buf, M_RETAIN_MODE, self.retain_mode + 1)
+        put_u64(buf, M_RETAIN_VALUE, self.retain_value)
+        put_u64(buf, M_FL_FLOOR_CSN, self.floor_csn)
+        put_u64(buf, M_FL_FLOOR_IDX, self.floor_idx)
+        put_u64(buf, M_SEQ, seq)
+        put_u64(buf, M_RAFT_TERM, self.raft_term)
+        put_u64(buf, M_RAFT_VOTE, self.raft_vote)
+        put_u64(buf, M_RAFT_ROOT, self.raft_root)
+        put_u64(buf, M_RAFT_BASE, self.raft_base)
+        put_u64(buf, M_RAFT_BASE_TERM, self.raft_base_term)
+        page: bytes = self._finish(buf, PT_META)
+        self.vfs.write_at(self._page_off(slot), page)
+    }
+
+    #--- commit ------------------------------------------------------------#
+
+    # Run the full atomic-commit protocol. Returns the new CSN.
+    def commit() -> int {
+        return self.commit_at(self.last_csn + 1)
+    }
+
+    # Commit at an explicit CSN. A follower applying a primary's log entry
+    # commits at the entry's own CSN, so the (file uuid, CSN) lineage pair
+    # stays in lockstep across replicas (spec section 19). The CSN can only
+    # move forward; anything else means the histories disagree, and ODB
+    # detects that, it never merges.
+    def commit_at(csn: int) -> int {
+        if csn <= self.last_csn {
+            raise ODBError("commit_at: csn " + str(csn) + " is not ahead of the committed csn " + str(self.last_csn))
+        }
+        self._serialize_freelist(csn)
+        # Ensure the file physically spans every allocated page.
+        needed: int = self.high_water * self.page_size
+        if self.vfs.size() < needed {
+            self.vfs.truncate(needed)
+        }
+
+        # 1. write all staged data + freelist pages
+        for pgid in self.pending {
+            self.vfs.write_at(self._page_off(pgid), self.pending[pgid])
+        }
+        # 2. durability barrier: data before meta
+        self.vfs.sync()
+        # 3. write the OLDER meta (the non-live slot) with the new CSN
+        slot: int = 2
+        if self.current_meta_slot == 2 {
+            slot = 1
+        }
+        self._write_meta(slot, csn, self.meta_seq + 1)
+        # 4. durability barrier: meta
+        self.vfs.sync()
+
+        # 5. publish
+        self.current_meta_slot = slot
+        self.meta_seq = self.meta_seq + 1
+        self.last_csn = csn
+        self.pending = {}
+        self.txn_pages = {}
+        self._txn_saved = False
+        return csn
+    }
+
+    # Flip the meta WITHOUT advancing the CSN: the consensus-state commit
+    # (format v3). Persists the raft fields plus any staged PT_RAFT pages with
+    # the same all-or-nothing protocol as a data commit; recovery picks the
+    # meta by sequence, so a torn flip falls back to the previous state and a
+    # replica's history position is never disturbed. Must never run inside a
+    # data transaction: the meta is written from the live fields, and a
+    # pending begin() means those fields describe an UNCOMMITTED state.
+    def commit_state() -> None {
+        if self._txn_saved {
+            raise ODBError("commit_state: a data transaction is open; consensus state flips between transactions, never inside one")
+        }
+        needed: int = self.high_water * self.page_size
+        if self.vfs.size() < needed {
+            self.vfs.truncate(needed)
+        }
+        for pgid in self.pending {
+            self.vfs.write_at(self._page_off(pgid), self.pending[pgid])
+        }
+        self.vfs.sync()
+        slot: int = 2
+        if self.current_meta_slot == 2 {
+            slot = 1
+        }
+        self._write_meta(slot, self.last_csn, self.meta_seq + 1)
+        self.vfs.sync()
+        self.current_meta_slot = slot
+        self.meta_seq = self.meta_seq + 1
+        self.pending = {}
+        self.txn_pages = {}
+    }
+
+    # Rewrite the page-0 header with a new file uuid. Used exactly once in a
+    # file's life: a brand-new empty follower adopting its primary's identity
+    # before replaying that primary's history (spec section 19).
+    def set_uuid(u: bytes) -> None {
+        if len(u) != 16 {
+            raise ODBError("set_uuid: a file uuid is 16 bytes, got " + str(len(u)))
+        }
+        header: bytes = self.vfs.read_at(0, self.page_size)
+        buf: list[int] = []
+        i: int = 0
+        while i < self.page_size {
+            buf.append(header[i])
+            i = i + 1
+        }
+        put_bytes(buf, H_UUID, u)
+        page: bytes = self._finish(buf, PT_HEADER)
+        self.vfs.write_at(0, page)
+        self.vfs.sync()
+        self.uuid = u
+    }
+
+    #--- snapshots ---------------------------------------------------------#
+
+    def begin_read() -> Snapshot {
+        self.readers.append(self.last_csn)
+        return Snapshot(self, self.last_csn, self.catalog_root, self.docid_counter)
+    }
+
+    def _release_reader(csn: int) -> None {
+        i: int = 0
+        while i < len(self.readers) {
+            if self.readers[i] == csn {
+                self.readers.pop(i)
+                return
+            }
+            i = i + 1
+        }
+    }
+}
+
+# Shallow: chunk objects are immutable once built, so sharing them is safe.
+def _copy_chunks(src: list[FreeChunk]) -> list[FreeChunk] {
+    dst: list[FreeChunk] = []
+    for c in src {
+        dst.append(c)
+    }
+    return dst
+}
+
+def _copy_ints(src: list[int]) -> list[int] {
+    dst: list[int] = []
+    for x in src {
+        dst.append(x)
+    }
+    return dst
+}
+
+#===----------------------------------------------------------------------===#
+# create / open
+#===----------------------------------------------------------------------===#
+
+# Initialise a brand-new database in `vfs` and return an open Pager.
+def create(vfs: VFS, page_size: int) -> Pager {
+    p: Pager = Pager(vfs)
+    p.page_size = page_size
+
+    # Page 0: header.
+    u: bytes = token_bytes(16)
+    hdr: list[int] = blank(page_size)
+    put_bytes(hdr, H_MAGIC, "ODB01".encode())
+    put_u8(hdr, H_MAGIC + 5, 0)
+    put_u16(hdr, H_FORMAT, FORMAT_VERSION)
+    put_u32(hdr, H_PAGE_SIZE, page_size)
+    put_bytes(hdr, H_UUID, u)
+    put_u64(hdr, H_CREATED, now())
+    p.uuid = u
+    header_page: bytes = p._finish(hdr, PT_HEADER)
+    vfs.write_at(0, header_page)
+
+    # Pages 1 and 2: both metas at CSN 1 (the empty database); slot 2 carries
+    # the higher sequence, so recovery deterministically adopts it.
+    p.high_water = 3
+    p.last_csn = 0
+    p.current_meta_slot = 2      # so the first _write_meta targets slot 1
+    p._write_meta(1, 1, 1)
+    p.current_meta_slot = 1
+    p._write_meta(2, 1, 2)
+    p.last_csn = 1
+    p.meta_seq = 2
+    p.current_meta_slot = 2      # slot 2 was written last; next commit -> slot 1
+    vfs.sync()
+    return p
+}
+
+# Open an existing database from `vfs`: validate the header, pick the valid meta
+# with the higher CSN (torn-meta recovery), load the freelist.
+def open_pager(vfs: VFS) -> Pager {
+    p: Pager = Pager(vfs)
+
+    # Read the header with a provisional page size to learn the real one.
+    probe: bytes = vfs.read_at(0, 16)
+    magic: bytes = get_bytes(probe, H_MAGIC, 5)
+    if magic != "ODB01".encode() {
+        raise CorruptionError("bad magic: not an odb file")
+    }
+    page_size: int = get_u32(probe, H_PAGE_SIZE)
+    p.page_size = page_size
+
+    header: bytes = vfs.read_at(0, page_size)
+    if not p._verify(header) {
+        raise CorruptionError("header page failed crc32c")
+    }
+    fmt: int = get_u16(header, H_FORMAT)
+    if fmt != FORMAT_VERSION {
+        raise ODBError("unsupported odb format version " + str(fmt) + " (this build reads version " + str(FORMAT_VERSION) + "; rebuild the file via dump/load)")
+    }
+    p.uuid = get_bytes(header, H_UUID, 16)
+
+    # Read both metas; adopt the valid one with the higher meta sequence.
+    # (Not the higher CSN: a consensus-state flip advances the sequence while
+    # the CSN stands still, and it must win over the older meta it replaced.)
+    meta1: bytes = vfs.read_at(p._page_off(1), page_size)
+    meta2: bytes = vfs.read_at(p._page_off(2), page_size)
+    ok1: bool = p._verify(meta1)
+    ok2: bool = p._verify(meta2)
+    if not ok1 and not ok2 {
+        raise CorruptionError("both meta pages are invalid")
+    }
+    seq1: int = 0
+    seq2: int = 0
+    if ok1 {
+        seq1 = get_u64(meta1, M_SEQ)
+    }
+    if ok2 {
+        seq2 = get_u64(meta2, M_SEQ)
+    }
+
+    chosen: bytes = meta1
+    slot: int = 1
+    if not ok1 {
+        chosen = meta2
+        slot = 2
+    } else {
+        if ok2 and seq2 > seq1 {
+            chosen = meta2
+            slot = 2
+        }
+    }
+
+    p.current_meta_slot = slot
+    p.last_csn = get_u64(chosen, M_CSN)
+    p.catalog_root = get_u64(chosen, M_CATALOG_ROOT)
+    p.freelist_root = get_u64(chosen, M_FREELIST_ROOT)
+    p.log_head = get_u64(chosen, M_LOG_HEAD)
+    p.log_tail = get_u64(chosen, M_LOG_TAIL)
+    p.docid_counter = get_u64(chosen, M_DOCID)
+    p.high_water = get_u64(chosen, M_PAGE_COUNT)
+    stored_mode: int = get_u64(chosen, M_RETAIN_MODE)
+    if stored_mode > 0 {
+        p.retain_mode = stored_mode - 1
+        p.retain_value = get_u64(chosen, M_RETAIN_VALUE)
+    }
+    p.floor_csn = get_u64(chosen, M_FL_FLOOR_CSN)
+    p.floor_idx = get_u64(chosen, M_FL_FLOOR_IDX)
+    p.meta_seq = get_u64(chosen, M_SEQ)
+    p.raft_term = get_u64(chosen, M_RAFT_TERM)
+    p.raft_vote = get_u64(chosen, M_RAFT_VOTE)
+    p.raft_root = get_u64(chosen, M_RAFT_ROOT)
+    p.raft_base = get_u64(chosen, M_RAFT_BASE)
+    p.raft_base_term = get_u64(chosen, M_RAFT_BASE_TERM)
+    p._load_freelist()
+    return p
+}

@@ -640,6 +640,19 @@ void TypeChecker::visit(WhileStmt& node) {
 void TypeChecker::visit(ForStmt& node) {
     auto iterType = inferType(node.iterable.get());
 
+    // A function value is not iterable: `for a in argv` (sys.argv is a
+    // FUNCTION; the list is `argv()`) belongs with the subscript/len()
+    // rejections - without this it fell through to an untyped loop over
+    // garbage.
+    if (iterType && iterType->kind() == Type::Kind::Function) {
+        if (auto* fn = dynamic_cast<NameExpr*>(node.iterable.get())) {
+            error(node.location(), "cannot iterate the function '" + fn->name +
+                  "'; call it first: 'for ... in " + fn->name + "()'");
+        } else {
+            error(node.location(), "cannot iterate a function value; call it first");
+        }
+    }
+
     // Loop variable and body share the loop's block scope.
     impl_->pushScope();
     if (auto* name = dynamic_cast<NameExpr*>(node.target.get())) {

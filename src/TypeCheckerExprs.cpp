@@ -457,6 +457,28 @@ void TypeChecker::visit(CallExpr& node) {
 
     if (calleeType->kind() == Type::Kind::Function) {
         auto& ft = static_cast<FunctionType&>(*calleeType);
+        // len() of a function value: the argv[1]-class mistake one step
+        // earlier (`len(argv)` instead of `len(argv())`). The builtin's Any
+        // parameter skips the positional subtype check below, so without this
+        // it typed int and miscompiled into a garbage length. Gated on the
+        // builtin signature ([Any] -> int) so a user-defined `len` with a
+        // concrete parameter still resolves through the normal checks.
+        if (auto* lcn = dynamic_cast<NameExpr*>(node.callee.get())) {
+            if (lcn->name == "len" && node.args.size() == 1 &&
+                ft.paramTypes.size() == 1 && ft.paramTypes[0] &&
+                ft.paramTypes[0]->kind() == Type::Kind::Any &&
+                node.args[0]->type &&
+                node.args[0]->type->kind() == Type::Kind::Function) {
+                if (auto* an = dynamic_cast<NameExpr*>(node.args[0].get())) {
+                    error(node.location(), "len() of the function '" + an->name +
+                          "'; call it first: 'len(" + an->name + "())'");
+                } else {
+                    error(node.location(), "len() of a function value; call it first");
+                }
+                node.type = impl_->intType;
+                return;
+            }
+        }
         // M1/M2: validate arity + kwargs for a function (NameExpr) or method
         // (AttributeExpr) call before the type check below (which assumes exact
         // arity). On error, stop here with the declared return type.
@@ -1265,6 +1287,23 @@ void TypeChecker::visit(SubscriptExpr& node) {
             node.type = impl_->unknownType;
             return;
         }
+    }
+
+    // A function value has no elements. `argv[1]` (sys.argv is a FUNCTION;
+    // the list is `argv()[1]`) used to fall through to Unknown and compile
+    // into a garbage read out of the function value. State the fix in the
+    // error. An explicit generic instantiation (`first[int](xs)`) never gets
+    // here: visit(CallExpr) consumes its SubscriptExpr callee before the
+    // callee is visited as a value, so only real value subscripts remain.
+    if (objType && objType->kind() == Type::Kind::Function) {
+        if (auto* fname = dynamic_cast<NameExpr*>(node.object.get())) {
+            error(node.location(), "cannot subscript the function '" + fname->name +
+                  "'; call it first: '" + fname->name + "()[...]'");
+        } else {
+            error(node.location(), "cannot subscript a function value; call it first");
+        }
+        node.type = impl_->unknownType;
+        return;
     }
 
     // Check if this is a slice operation

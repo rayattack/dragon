@@ -1,0 +1,261 @@
+# odb.gateway - the HTTP/JSON gateway (spec section 18).
+#
+#   from odb.gateway import gateway
+#
+#   app: Router = gateway(db)
+#   app.listen()                       # or drive it with serve_connection
+#
+# Surfaces:
+#   POST /query    {"q": "<OQL>", "params": {...}}
+#                  reads reply {"rows": [...]}; writes reply {"count": n}
+#   GET  /schemas  {"schemas": [{sid, name, version, schema, meta}]}
+#   GET  /watch?q=<OQL>&since=<csn>   Server-Sent Events: one event per
+#                  matching post-image (id: = the CSN resume token), then the
+#                  stream ends; EventSource reconnects with Last-Event-ID and
+#                  resumes exactly. since=0 means "from the retained start".
+#   GET  /watch?q=<OQL>&live=1        the same feed, PUSHED: the handler takes
+#                  the connection over (Response.cede) and streams each
+#                  change as it commits, with ": hb" heartbeat comments so a
+#                  vanished client is detected within seconds. The stream ends
+#                  only when the client disconnects, or with an `event: error`
+#                  if the feed falls behind the retention window.
+#   POST /graphql  {"query": "..."}   (spec section 11, via odb.graphql)
+#   GET  /graphql/sdl                 the type system as SDL text
+#
+# JSON in and out is built with dumps() over real values, never concatenated
+
+from odb import ODB, Watch, Change
+from odb.server import change_json
+from odb.graphql import graphql_execute, graphql_sdl
+from odb.schema import CompiledSchema
+from odb.errors import ODBError, SchemaError, PrepareError, IntegrityError, ConflictError
+from odb.errors import CorruptionError, NotFound
+from http.server import Router, Request, Response, Context, ConnReader
+from json import dumps, loads
+
+# One change as a wire-ready SSE frame: id carries the resume CSN.
+def _sse_event(ch: Change) -> str {
+    return "id: " + str(ch.csn) + "\n" + "data: " + dumps(change_json(ch)) + "\n\n"
+}
+
+# How often the live stream wakes to poll (via recv_timeout, which yields the
+# green thread), and how many quiet wakes pass between heartbeat comments.
+# 200ms x 25 = a dead client is detected within ~5s even on a silent feed.
+const _LIVE_POLL_MS: int = 200
+const _LIVE_HB_TICKS: int = 25
+
+# The write statements OQL spells with words (spec section 9). A /query whose
+# text starts with one runs as a write and replies with the affected count.
+def _is_write(q: str) -> bool {
+    s: str = q.strip()
+    sp: int = s.find(" ")
+    head: str = s
+    if sp > 0 {
+        head = s[0:sp]
+    }
+    return head == "add" or head == "set" or head == "unset" or head == "put" or head == "del" or head == "atomic"
+}
+
+def _msg_obj(message: str) -> str {
+    obj: dict[str, Any] = {}
+    obj["message"] = message
+    return dumps(obj)
+}
+
+def _fail(res: Response, status: int, kind: str, message: str) -> None {
+    obj: dict[str, Any] = {}
+    obj["error"] = kind
+    obj["message"] = message
+    res.status = status
+    res.json(dumps(obj))
+}
+
+# Build the gateway router over one open database.
+def gateway(db: ODB) -> Router {
+    app: Router = Router(0)
+
+    def post_query(req: Request, res: Response, ctx: Context) -> None {
+        body_any: Any = loads(req.body)
+        if not isinstance(body_any, dict) {
+            _fail(res, 400, "PrepareError", "body must be a JSON object with 'q'")
+            return
+        }
+        body: dict[str, Any] = body_any
+        if "q" not in body {
+            _fail(res, 400, "PrepareError", "body must carry 'q' (OQL text)")
+            return
+        }
+        q_any: Any = body["q"]
+        if not isinstance(q_any, str) {
+            _fail(res, 400, "PrepareError", "'q' must be OQL text")
+            return
+        }
+        qtext: str = q_any
+        params: dict[str, Any] = {}
+        if "params" in body {
+            p_any: Any = body["params"]
+            if isinstance(p_any, dict) {
+                params = p_any
+            }
+        }
+        try {
+            if _is_write(qtext) {
+                count: int = db.run(qtext, params)
+                reply: dict[str, Any] = {}
+                reply["count"] = count
+                res.json(dumps(reply))
+            } else {
+                rows: list[Any] = []
+                for d in db.find(qtext, params) {
+                    row: Any = d.data
+                    rows.append(row)
+                }
+                reply2: dict[str, Any] = {}
+                reply2["rows"] = rows
+                res.json(dumps(reply2))
+            }
+        } except PrepareError as e1 {
+            _fail(res, 400, "PrepareError", str(e1))
+        } except IntegrityError as e2 {
+            _fail(res, 409, "IntegrityError", str(e2))
+        } except ConflictError as e3 {
+            _fail(res, 409, "ConflictError", str(e3))
+        } except NotFound as e4 {
+            _fail(res, 404, "NotFound", str(e4))
+        } except SchemaError as e5 {
+            _fail(res, 400, "SchemaError", str(e5))
+        } except CorruptionError as e6 {
+            _fail(res, 500, "CorruptionError", str(e6))
+        } except ODBError as e7 {
+            _fail(res, 400, "ODBError", str(e7))
+        }
+    }
+    app.POST("/query", post_query)
+
+    def get_schemas(req: Request, res: Response, ctx: Context) -> None {
+        out: list[Any] = []
+        for sid in db._sorted_sids() {
+            name: str = db._by_sid[sid]
+            cs: CompiledSchema = db._schemas[name]
+            rec: dict[str, Any] = {}
+            rec["sid"] = sid
+            rec["name"] = name
+            rec["version"] = cs.version
+            rec["schema"] = loads(cs.schema_json)
+            rec["meta"] = loads(db._metas[name])
+            item: Any = rec
+            out.append(item)
+        }
+        reply: dict[str, Any] = {}
+        reply["schemas"] = out
+        res.json(dumps(reply))
+    }
+    app.GET("/schemas", get_schemas)
+
+    # Watch as Server-Sent Events. Each event's id: is the CSN resume token;
+    # the stream carries everything retained past `since` and then ends, so an
+    # EventSource that reconnects with Last-Event-ID resumes exactly. A resume
+    # point older than retention is a loud 409, never a silent gap.
+    def get_watch(req: Request, res: Response, ctx: Context) -> None {
+        if "q" not in req.query {
+            _fail(res, 400, "PrepareError", "watch needs ?q=<OQL>")
+            return
+        }
+        qtext: str = req.query["q"]
+        since: int = db.pager.last_csn
+        if "since" in req.query {
+            since = int(req.query["since"])
+        }
+        if "last-event-id" in req.headers {
+            since = int(req.headers["last-event-id"])
+        }
+        live: bool = "live" in req.query and req.query["live"] == "1"
+        try {
+            empty: dict[str, Any] = {}
+            w: Watch = db._watch_q(qtext, empty, since)
+            res.set_header("content-type", "text/event-stream")
+            res.set_header("cache-control", "no-cache")
+
+            if live {
+                # Push mode: after the headers go out, the callback owns the
+                # connection (defer closes it on every way out) and streams
+                # each change the moment a poll sees it. recv_timeout is the
+                # pacing: it parks this connection's green thread without
+                # stalling the carrier, and SSE clients never send, so any
+                # bytes that do arrive are ignored.
+                def stream(conn: ConnReader) -> None {
+                    defer conn.close()
+                    ticks: int = 0
+                    while True {
+                        batch: list[Change] = []
+                        try {
+                            batch = w.poll()
+                        } except ODBError as we {
+                            # fell behind retention: a silent gap is a lie,
+                            # so say so on the stream and end it
+                            conn.send("event: error\ndata: " + _msg_obj(str(we)) + "\n\n")
+                            return
+                        }
+                        for ch in batch {
+                            if conn.send(_sse_event(ch)) <= 0 {
+                                return                 # client hung up
+                            }
+                        }
+                        ticks = ticks + 1
+                        if ticks >= _LIVE_HB_TICKS {
+                            if conn.send(": hb\n\n") <= 0 {
+                                return
+                            }
+                            ticks = 0
+                        }
+                        conn.recv_timeout(64, _LIVE_POLL_MS)
+                    }
+                }
+                res.cede(stream)
+                return
+            }
+
+            # Bounded mode (default): drain what is retained, end the stream;
+            # EventSource reconnects with Last-Event-ID and resumes exactly.
+            for ch in w.poll() {
+                res.chunk(_sse_event(ch))
+            }
+            res.chunk("event: end\nid: " + str(w.resume_token()) + "\ndata: {}\n\n")
+        } except PrepareError as e1 {
+            _fail(res, 400, "PrepareError", str(e1))
+        } except NotFound as e2 {
+            _fail(res, 404, "NotFound", str(e2))
+        } except ODBError as e3 {
+            _fail(res, 409, "ODBError", str(e3))
+        }
+    }
+    app.GET("/watch", get_watch)
+
+    def post_graphql(req: Request, res: Response, ctx: Context) -> None {
+        body_any: Any = loads(req.body)
+        if not isinstance(body_any, dict) {
+            _fail(res, 400, "PrepareError", "body must be a JSON object with 'query'")
+            return
+        }
+        body: dict[str, Any] = body_any
+        if "query" not in body {
+            _fail(res, 400, "PrepareError", "body must carry 'query'")
+            return
+        }
+        q_any: Any = body["query"]
+        if not isinstance(q_any, str) {
+            _fail(res, 400, "PrepareError", "'query' must be GraphQL text")
+            return
+        }
+        gql: str = q_any
+        res.json(graphql_execute(db, gql))
+    }
+    app.POST("/graphql", post_graphql)
+
+    def get_sdl(req: Request, res: Response, ctx: Context) -> None {
+        res.text(graphql_sdl(db))
+    }
+    app.GET("/graphql/sdl", get_sdl)
+
+    return app
+}

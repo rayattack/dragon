@@ -1,0 +1,231 @@
+# odb.dbon - DBON, the on-disk and on-wire document codec (spec section 12).
+#
+# A document is laid out so predicates and index maintenance on required fields
+# never parse it - they read a fixed offset. That is the speed thesis made
+# physical: required fields shred into a fixed region, optional fields live in a
+# tagged, id-sorted tail, and variable payloads (strings) sit in a var region.
+#
+#   [header 12B: schema_id u16, version u16, flags u8, _pad, total_len u32]
+#   [required region: one fixed slot per required field, in field-id order]
+#   [optional tail: count u16, then count 12B slots (field_id u16, tag u8, _pad,
+#                   payload 8B), sorted by field id -> binary-searchable]
+#   [var region: string/bytes payloads, referenced by (u32 off, u32 len)]
+#
+# Slot/payload encoding by tag: bool = 1 byte; integer = i64 two's complement;
+# number = IEEE-754 f64; string = (u32 absolute offset, u32 length) into var
+
+from odb.schema import CompiledSchema, FieldSpec, validate_doc, slot_size
+from odb.schema import T_BOOL, T_INT, T_NUM, T_STR, T_BYTES
+from odb.codec import blank, put_u8, put_u16, put_u32, put_u64, put_bytes
+from odb.codec import get_u8, get_u16, get_u32, get_u64, get_bytes
+from struct import pack_f64_le, unpack_f64_le
+
+const _HEADER: int = 12
+const _TAIL_ENT: int = 12
+
+def _int_of(v: Any) -> int {
+    const i: int = v
+    return i
+}
+
+def _float_of(v: Any) -> float {
+    if isinstance(v, int) {
+        const i: int = v
+        return float(i)
+    }
+    const f: float = v
+    return f
+}
+
+def _bool_of(v: Any) -> bool {
+    const b: bool = v
+    return b
+}
+
+def _str_of(v: Any) -> str {
+    const s: str = v
+    return s
+}
+
+def _append(dst: list[int], src: list[int]) -> None {
+    for x in src {
+        dst.append(x)
+    }
+}
+
+# Write a value into an 8-byte-max slot at `off`. Strings append their bytes to
+# `var` and store an absolute (offset, length) reference; var offsets count from
+# var_base (the start of the var region within the whole document).
+def _write_slot(buf: list[int], off: int, tag: int, v: Any, var: list[int], var_base: int) -> None {
+    if tag == T_BOOL {
+        b: int = 0
+        if _bool_of(v) {
+            b = 1
+        }
+        put_u8(buf, off, b)
+        return
+    }
+    if tag == T_INT {
+        put_u64(buf, off, _int_of(v))
+        return
+    }
+    if tag == T_NUM {
+        put_bytes(buf, off, pack_f64_le(_float_of(v)))
+        return
+    }
+    # T_STR / T_BYTES
+    sb: bytes = _str_of(v).encode()
+    start: int = var_base + len(var)
+    _append(var, _bytes_to_ints(sb))
+    put_u32(buf, off, start)
+    put_u32(buf, off + 4, len(sb))
+}
+
+def _bytes_to_ints(b: bytes) -> list[int] {
+    out: list[int] = []
+    i: int = 0
+    n: int = len(b)
+    while i < n {
+        out.append(b[i])
+        i = i + 1
+    }
+    return out
+}
+
+def _read_slot(data: bytes, off: int, tag: int) -> Any {
+    if tag == T_BOOL {
+        r: bool = get_u8(data, off) != 0
+        res: Any = r
+        return res
+    }
+    if tag == T_INT {
+        iv: int = get_u64(data, off)
+        ri: Any = iv
+        return ri
+    }
+    if tag == T_NUM {
+        fv: float = unpack_f64_le(data, off)
+        rf: Any = fv
+        return rf
+    }
+    # T_STR / T_BYTES
+    voff: int = get_u32(data, off)
+    vlen: int = get_u32(data, off + 4)
+    sv: str = get_bytes(data, voff, vlen).decode()
+    rs: Any = sv
+    return rs
+}
+
+# Sort field specs ascending by field id (small lists; insertion sort).
+def _sort_by_id(fields: list[FieldSpec]) -> None {
+    i: int = 1
+    while i < len(fields) {
+        j: int = i
+        while j > 0 and fields[j - 1].field_id > fields[j].field_id {
+            tmp: FieldSpec = fields[j - 1]
+            fields[j - 1] = fields[j]
+            fields[j] = tmp
+            j = j - 1
+        }
+        i = i + 1
+    }
+}
+
+# Encode a validated document into DBON bytes.
+def encode(schema: CompiledSchema, doc: dict[str, Any]) -> bytes {
+    validate_doc(schema, doc)
+
+    req_size: int = schema.req_region_size
+
+    present_opt: list[FieldSpec] = []
+    for f in schema.optional {
+        if f.name in doc {
+            present_opt.append(f)
+        }
+    }
+    _sort_by_id(present_opt)
+    tail_count: int = len(present_opt)
+    tail_size: int = 2 + tail_count * _TAIL_ENT
+
+    var_base: int = _HEADER + req_size + tail_size
+
+    req_buf: list[int] = blank(req_size)
+    var_buf: list[int] = []
+
+    for f in schema.required {
+        _write_slot(req_buf, f.slot_off, f.tag, doc[f.name], var_buf, var_base)
+    }
+
+    tail_buf: list[int] = blank(tail_size)
+    put_u16(tail_buf, 0, tail_count)
+    i: int = 0
+    while i < tail_count {
+        f: FieldSpec = present_opt[i]
+        eoff: int = 2 + i * _TAIL_ENT
+        put_u16(tail_buf, eoff, f.field_id)
+        put_u8(tail_buf, eoff + 2, f.tag)
+        _write_slot(tail_buf, eoff + 4, f.tag, doc[f.name], var_buf, var_base)
+        i = i + 1
+    }
+
+    total: int = var_base + len(var_buf)
+    out: list[int] = blank(_HEADER)
+    put_u16(out, 0, schema.schema_id)
+    put_u16(out, 2, schema.version)
+    put_u8(out, 4, 0)
+    put_u32(out, 8, total)
+    _append(out, req_buf)
+    _append(out, tail_buf)
+    _append(out, var_buf)
+    return bytes(out)
+}
+
+# Decode DBON bytes back into a document dict.
+def decode(schema: CompiledSchema, data: bytes) -> dict[str, Any] {
+    doc: dict[str, Any] = {}
+    for f in schema.required {
+        doc[f.name] = _read_slot(data, _HEADER + f.slot_off, f.tag)
+    }
+    tail_off: int = _HEADER + schema.req_region_size
+    count: int = get_u16(data, tail_off)
+    i: int = 0
+    while i < count {
+        eoff: int = tail_off + 2 + i * _TAIL_ENT
+        fid: int = get_u16(data, eoff)
+        tag: int = get_u8(data, eoff + 2)
+        if fid in schema.by_id {
+            f: FieldSpec = schema.by_id[fid]
+            doc[f.name] = _read_slot(data, eoff + 4, tag)
+        }
+        i = i + 1
+    }
+    return doc
+}
+
+# Read a single field without decoding the whole document. Required scalars are
+# one fixed-offset access (the speed thesis); optional fields scan the tail.
+# Raises KeyError if the field is absent from this document.
+def read_field(schema: CompiledSchema, data: bytes, name: str) -> Any {
+    f: FieldSpec = schema.field(name)
+    if f.required {
+        return _read_slot(data, _HEADER + f.slot_off, f.tag)
+    }
+    tail_off: int = _HEADER + schema.req_region_size
+    count: int = get_u16(data, tail_off)
+    i: int = 0
+    while i < count {
+        eoff: int = tail_off + 2 + i * _TAIL_ENT
+        fid: int = get_u16(data, eoff)
+        if fid == f.field_id {
+            tag: int = get_u8(data, eoff + 2)
+            return _read_slot(data, eoff + 4, tag)
+        }
+        i = i + 1
+    }
+    raise KeyError("field '" + name + "' absent from document")
+}
+
+# The schema id stamped in a document header (for dispatch without the schema).
+def doc_schema_id(data: bytes) -> int {
+    return get_u16(data, 0)
+}

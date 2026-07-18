@@ -1,0 +1,50 @@
+# redirect.dr - the port-80 companion of app.dr when the site serves TLS on 443.
+#
+# Two jobs only:
+#   1. Serve ACME HTTP-01 challenge files (Let's Encrypt issuance + renewal)
+#      from data/acme/.well-known/acme-challenge/.
+#   2. Permanently redirect every other request to the https site.
+#
+# It opens no database and reads no secrets, so it can run alongside app.dr
+# without sharing anything but the acme webroot directory.
+#
+# Run with cwd = dragonlang-org/ (same as app.dr) so data/ resolves.
+
+from http.server import Router, Request, Response, Context
+
+extern "C" def getenv(name: str) -> str
+
+def _env_int(name: str, fallback: int) -> int {
+    const v: str = getenv(name)
+    if len(v) > 0 {
+        return int(v)
+    }
+    return fallback
+}
+
+def _env_str(name: str, fallback: str) -> str {
+    const v: str = getenv(name)
+    if len(v) > 0 {
+        return v
+    }
+    return fallback
+}
+
+const PORT: int = _env_int("DRAGON_REDIRECT_PORT", 80)
+const HOST: str = _env_str("DRAGON_REDIRECT_HOST", "0.0.0.0")
+const TARGET: str = _env_str("DRAGON_REDIRECT_TARGET", "https://dragonlang.org")
+
+const app: Router = Router(PORT, HOST)
+
+# ACME first: more specific than the catch-all, must win the route match.
+app.ASSETS("data/acme/.well-known/acme-challenge", "/.well-known/acme-challenge/*")
+
+def to_https(req: Request, res: Response, ctx: Context) -> None {
+    res.redirect(f"{TARGET}{req.url}", permanent=true)
+}
+
+app.GET('/', to_https)
+app.GET('/*', to_https)
+
+print(f"Dragon redirect: http://{HOST}:{PORT}/ -> {TARGET}")
+app.listen()

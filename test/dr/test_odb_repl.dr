@@ -1,0 +1,404 @@
+# ODB M10 regression suite: replication, v3a log shipping (spec section 19).
+#
+# A follower applies the primary's committed log entries at their own CSNs, so
+# the (file uuid, csn) pair stays in lockstep and identifies lineage. Deletes,
+# cascades, and DDL all ride the same feed. Divergence and retention overruns
+# fail loudly (re-seed, never a silent skip), and read-your-writes tokens
+# resolve on a served follower through an active catch-up pull
+
+from unittest import TestCase, main
+from odb import ODB, Documents, Document, CheckReport
+from odb.vfs import SimVFS
+from odb.pager import create, open_pager, Pager
+from odb.commitlog import LogEntry
+from odb.errors import ODBError
+from odb.server import ODBServer
+from odb.client import ODBClient, LogBatch
+from odb.repl import Follower, FollowerWaiter
+from socket import TcpListener
+
+
+def _customers_schema() -> dict[str, Any] {
+    return { "type": "object",
+             "properties": { "id": {"type": "integer"},
+                             "name": {"type": "string"},
+                             "email": {"type": "string"},
+                             "city": {"type": "string"} },
+             "required": ["id", "name", "email", "city"] }
+}
+
+def _orders_schema() -> dict[str, Any] {
+    return { "type": "object",
+             "properties": { "id": {"type": "integer"},
+                             "customer_id": {"type": "integer"},
+                             "status": {"type": "string"},
+                             "total": {"type": "integer"} },
+             "required": ["id", "customer_id", "status", "total"] }
+}
+
+def _customers_meta() -> dict[str, Any] {
+    return { "primary": ["id"], "unique": ["email"], "index": ["city"] }
+}
+
+def _orders_meta() -> dict[str, Any] {
+    return { "primary": ["id"],
+             "refs": { "customer_id": { "to": "customers.id", "on_delete": "cascade" } } }
+}
+
+def _mem() -> ODB {
+    sim: SimVFS = SimVFS()
+    p: Pager = create(sim, 4096)
+    return ODB(sim, p)
+}
+
+def _seed(db: ODB) -> None {
+    customers: Documents = db.schema("customers", _customers_schema()).meta(_customers_meta())
+    orders: Documents = db.schema("orders", _orders_schema()).meta(_orders_meta())
+    customers.save({id: 1, name: "Ada", email: "ada@x.com", city: "Lagos"})
+    customers.save({id: 2, name: "Ono", email: "ono@x.com", city: "Lagos"})
+    customers.save({id: 3, name: "Zed", email: "zed@x.com", city: "Jos"})
+    orders.save({id: 100, customer_id: 1, status: "paid", total: 50})
+    orders.save({id: 101, customer_id: 1, status: "draft", total: 10})
+    orders.save({id: 102, customer_id: 2, status: "paid", total: 70})
+}
+
+# Embedded shipping loop: what Follower.sync_once does, without the wire.
+def _replicate(src: ODB, dst: ODB) -> int {
+    n: int = 0
+    for e in src.entries_since(dst.csn()) {
+        dst.apply(e)
+        n = n + 1
+    }
+    if src.csn() > dst.csn() {
+        dst.fast_forward(src.csn())
+    }
+    return n
+}
+
+# A hot backup: the committed (synced) byte image of the file, as a new disk.
+def _snapshot(src: SimVFS) -> SimVFS {
+    dst: SimVFS = SimVFS()
+    for b in src.durable {
+        dst.live.append(b)
+        dst.durable.append(b)
+    }
+    return dst
+}
+
+
+class BootstrapTest(TestCase) {
+    # A fresh empty database replays the primary's full history and lands on
+    # the identical state: same documents, same csn, clean check.
+    def test_full_history_bootstrap() -> None {
+        primary: ODB = _mem()
+        _seed(primary)
+        follower: ODB = _mem()
+
+        applied: int = _replicate(primary, follower)
+        self.assertTrue(applied > 0)
+        self.assertEqual(follower.csn(), primary.csn())
+        self.assertEqual(follower.dump(), primary.dump())
+
+        rep: CheckReport = follower.check()
+        self.assertTrue(rep.ok, rep.message)
+
+        docs: list[Document] = follower.find("customers ? city == \"Lagos\"")
+        self.assertEqual(len(docs), 2)
+    }
+
+    # Applying an entry the follower already has is an error, not a re-run.
+    def test_apply_is_forward_only() -> None {
+        primary: ODB = _mem()
+        _seed(primary)
+        follower: ODB = _mem()
+        _replicate(primary, follower)
+
+        old: list[LogEntry] = primary.entries_since(1)
+        raised: bool = False
+        try {
+            follower.apply(old[0])
+        } except ODBError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+}
+
+
+class IncrementalTest(TestCase) {
+    # Edits, deletes, and cascades committed after the bootstrap ship as ops
+    # and reproduce exactly: the cascade arrives as its own recorded deletes,
+    # never re-derived on the follower.
+    def test_incremental_sync_with_cascade() -> None {
+        primary: ODB = _mem()
+        _seed(primary)
+        follower: ODB = _mem()
+        _replicate(primary, follower)
+
+        primary.run("set customers ? id == 3 { city: \"Aba\" }")
+        primary.run("del customers ? id == 1")        # cascades orders 100, 101
+        customers: Documents = primary.schema("customers")
+        customers.save({id: 4, name: "Efe", email: "efe@x.com", city: "Aba"})
+
+        applied: int = _replicate(primary, follower)
+        self.assertTrue(applied > 0)
+        self.assertEqual(follower.dump(), primary.dump())
+        self.assertEqual(follower.csn(), primary.csn())
+
+        self.assertEqual(len(follower.find("orders")), 1)
+        self.assertEqual(len(follower.find("customers ? city == \"Aba\"")), 2)
+
+        rep: CheckReport = follower.check()
+        self.assertTrue(rep.ok, rep.message)
+    }
+
+    # A metadata change (new index) is DDL in the feed; the follower rebuilds
+    # the index over its existing documents and the exact-count check proves
+    # the backfill is complete and duplicate-free.
+    def test_meta_change_replicates() -> None {
+        primary: ODB = _mem()
+        _seed(primary)
+        follower: ODB = _mem()
+        _replicate(primary, follower)
+
+        wider: dict[str, Any] = { "primary": ["id"], "unique": ["email"],
+                                  "index": ["city", "name"] }
+        primary.schema("customers").meta(wider)
+
+        _replicate(primary, follower)
+        self.assertEqual(follower.dump(), primary.dump())
+
+        prep: CheckReport = primary.check()
+        frep: CheckReport = follower.check()
+        self.assertTrue(frep.ok, frep.message)
+        self.assertEqual(frep.index_entries, prep.index_entries)
+    }
+}
+
+
+class LineageTest(TestCase) {
+    # A follower that wrote locally has forked its history; the source
+    # refuses to serve it (and never merges).
+    def test_diverged_follower_is_refused() -> None {
+        primary: ODB = _mem()
+        _seed(primary)
+        follower: ODB = _mem()
+        _replicate(primary, follower)
+
+        fc: Documents = follower.schema("customers")
+        fc.save({id: 9, name: "Rogue", email: "rogue@x.com", city: "Uyo"})
+        self.assertTrue(follower.csn() > primary.csn())
+
+        raised: bool = False
+        try {
+            primary.entries_since(follower.csn())
+        } except ODBError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+
+    # Falling behind the retention window is a loud re-seed error.
+    def test_retention_overrun_is_loud() -> None {
+        primary: ODB = _mem()
+        _seed(primary)
+        primary.retain("2 txns")
+
+        follower: ODB = _mem()
+        raised: bool = False
+        try {
+            _replicate(primary, follower)
+        } except ODBError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+
+    # An op-less primary commit (a config change) still consumes a csn; the
+    # follower mirrors the gap so the lineage pair stays exact.
+    def test_opless_commits_fast_forward() -> None {
+        primary: ODB = _mem()
+        _seed(primary)
+        primary.retain("500 txns")                    # csn bump, no log entry
+
+        follower: ODB = _mem()
+        _replicate(primary, follower)
+        self.assertEqual(follower.csn(), primary.csn())
+
+        customers: Documents = primary.schema("customers")
+        customers.save({id: 5, name: "Ige", email: "ige@x.com", city: "Jos"})
+        _replicate(primary, follower)
+        self.assertEqual(follower.dump(), primary.dump())
+        self.assertEqual(follower.csn(), primary.csn())
+    }
+}
+
+
+class SeedAndReopenTest(TestCase) {
+    # A byte copy of the primary's committed file is a valid follower seed:
+    # same uuid, same csn, resumes incrementally without full history.
+    def test_hot_backup_seed() -> None {
+        psim: SimVFS = SimVFS()
+        primary: ODB = ODB(psim, create(psim, 4096))
+        _seed(primary)
+        fsim: SimVFS = _snapshot(psim)                # hot backup at seed csn
+        primary.retain("4 txns")                      # window too small for a
+                                                      # full replay: the copy
+                                                      # must carry the state
+        follower: ODB = ODB(fsim, open_pager(fsim))
+        self.assertEqual(follower.uuid(), primary.uuid())
+        self.assertEqual(follower.csn(), primary.csn() - 1)   # copied pre-retain
+
+        customers: Documents = primary.schema("customers")
+        customers.save({id: 6, name: "Bala", email: "bala@x.com", city: "Aba"})
+        _replicate(primary, follower)
+        self.assertEqual(follower.dump(), primary.dump())
+        self.assertEqual(follower.csn(), primary.csn())
+    }
+
+    # A follower reopened from disk keeps its csn and uuid and picks up the
+    # stream exactly where it stopped.
+    def test_follower_reopen_resumes() -> None {
+        primary: ODB = _mem()
+        _seed(primary)
+
+        fsim: SimVFS = SimVFS()
+        f1: ODB = ODB(fsim, create(fsim, 4096))
+        _replicate(primary, f1)
+        stopped_at: int = f1.csn()
+        u: str = f1.uuid()
+
+        f2: ODB = ODB(fsim, open_pager(fsim))
+        self.assertEqual(f2.csn(), stopped_at)
+        self.assertEqual(f2.uuid(), u)
+
+        primary.run("set customers ? id == 2 { city: \"Kano\" }")
+        _replicate(primary, f2)
+        self.assertEqual(f2.dump(), primary.dump())
+    }
+}
+
+
+# --- the wire path: Follower over a real loopback socket -------------------#
+
+def _serve(lis: TcpListener, db: ODB, conns: int) -> int {
+    srv: ODBServer = ODBServer(db, 0)
+    return srv.serve_on(lis, conns)
+}
+
+def _serve_with(lis: TcpListener, srv: ODBServer, conns: int) -> int {
+    return srv.serve_on(lis, conns)
+}
+
+class WireFollowerTest(TestCase) {
+    # A brand-new file adopts the primary's identity over the wire, replays
+    # history, detaches, and a later connection resumes incrementally.
+    def test_follower_over_the_wire() -> None {
+        primary: ODB = _mem()
+        _seed(primary)
+        lis: TcpListener = TcpListener("127.0.0.1", 54491)
+        lis.do_bind()
+        lis.do_listen(8)
+        t: Task[int] = fire _serve(lis, primary, 2)
+
+        fdb: ODB = _mem()
+        c1: ODBClient = ODBClient("127.0.0.1", 54491)
+        f1: Follower = Follower(fdb, c1)
+        self.assertEqual(fdb.uuid(), primary.uuid())      # adopted at pairing
+        applied: int = f1.sync_once()
+        self.assertTrue(applied > 0)
+        self.assertEqual(fdb.csn(), primary.csn())
+        self.assertEqual(fdb.dump(), primary.dump())
+
+        # While paired, a local write would consume a CSN that aliases the
+        # primary's next entry (an invisible fork), so it refuses loudly.
+        latched: bool = False
+        try {
+            fdb.run("set customers ? id == 1 { city: \"Uyo\" }")
+        } except ODBError {
+            latched = True
+        }
+        self.assertTrue(latched)
+        f1.detach()
+
+        primary.run("set customers ? id == 3 { city: \"Aba\" }")
+
+        c2: ODBClient = ODBClient("127.0.0.1", 54491)
+        f2: Follower = Follower(fdb, c2)
+        f2.sync_once()
+        self.assertEqual(fdb.dump(), primary.dump())
+        rep: CheckReport = fdb.check()
+        self.assertTrue(rep.ok, rep.message)
+        f2.detach()
+
+        # Detach = manual promotion: the file is an ordinary writable
+        # database again.
+        promoted: int = fdb.run("set customers ? id == 1 { city: \"Uyo\" }")
+        self.assertEqual(promoted, 1)
+
+        served: int = t.join()
+        self.assertEqual(served, 2)
+        lis.close()
+    }
+}
+
+class ReadYourWritesTest(TestCase) {
+    # The full section 19 loop: write to the primary, carry the commit's csn
+    # token to a served follower, and the follower holds the read while it
+    # actively catches up. A token past the primary's history fails loudly
+    # after the bounded hold.
+    def test_token_read_on_served_follower() -> None {
+        primary: ODB = _mem()
+        _seed(primary)
+        plis: TcpListener = TcpListener("127.0.0.1", 54492)
+        plis.do_bind()
+        plis.do_listen(8)
+        pt: Task[int] = fire _serve(plis, primary, 1)
+
+        fdb: ODB = _mem()
+        fc: ODBClient = ODBClient("127.0.0.1", 54492)
+        f: Follower = Follower(fdb, fc)
+        f.sync_once()
+
+        fsrv: ODBServer = ODBServer(fdb, 0)
+        fsrv.waiter = FollowerWaiter(f)
+        flis: TcpListener = TcpListener("127.0.0.1", 54493)
+        flis.do_bind()
+        flis.do_listen(8)
+        ft: Task[int] = fire _serve_with(flis, fsrv, 1)
+
+        # write on the primary; the follower has not seen it yet
+        primary.run("set customers ? id == 1 { city: \"Kano\" }")
+        token: int = primary.csn()
+        self.assertTrue(token > fdb.csn())
+
+        ec: ODBClient = ODBClient("127.0.0.1", 54493)
+        rows: list[dict[str, Any]] = ec.find_at_least("customers ? id == 1", {}, token)
+        self.assertEqual(len(rows), 1)
+        city_any: Any = rows[0]["city"]
+        city: str = city_any
+        self.assertEqual(city, "Kano")
+        self.assertTrue(fdb.csn() >= token)
+
+        # a token the primary itself does not have: bounded hold, loud error
+        fsrv.rw_wait_ms = 100
+        raised: bool = False
+        try {
+            ec.find_at_least("customers ? id == 1", {}, token + 50)
+        } except ODBError {
+            raised = True
+        }
+        self.assertTrue(raised)
+
+        ec.close()
+        ft.join()
+        f.detach()
+        pt.join()
+        plis.close()
+        flis.close()
+    }
+}
+
+
+main([BootstrapTest(), IncrementalTest(), LineageTest(), SeedAndReopenTest(),
+      WireFollowerTest(), ReadYourWritesTest()])

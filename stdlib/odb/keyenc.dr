@@ -1,0 +1,138 @@
+# odb.keyenc - order-preserving memcomparable key encoding (spec section 12).
+#
+# Index trees are keyed by BYTES, and every comparison in an index tree is a
+# plain byte-wise memcmp (Dragon's `bytes < bytes` is exactly that: lexicographic
+# with the shorter prefix ordering first). For that to give the right answer for
+# typed values, the encoding must be order-preserving: for any two values a, b of
+# the same logical type, enc(a) < enc(b) as bytes iff a < b as values.
+#
+# Every encoding starts with a one-byte TYPE MARKER, and the markers are ordered
+#   null < bool < number < (date/date-time reserved) < string < bytes
+# so a composite or heterogeneous key still totals-orders by type first. The
+# marker bytes leave a gap (0x03, 0x04) for date and date-time, which land with
+# the schema types that need them.
+#
+# Numeric encoding:
+#   - integer: two's-complement big-endian with the sign bit flipped, so the
+#     signed order maps onto unsigned lexicographic order (most-negative first).
+#   - number (f64): the IEEE-754 big-endian bytes, with all bits flipped when
+#     negative and just the sign bit set when non-negative. This orders the whole
+#     double line correctly by a raw memcmp.
+#   Integers and floats share the NUMBER marker but use different byte layouts:
+#   an index tree is single-typed (its field has one declared type), so the two
+#   never share a tree in M4. A single unified int/float/decimal numeric form
+#   (normalized sign-exponent-mantissa) lands with the decimal module and OQL
+#   cross-type comparison (spec section 4a); it is not needed until then, and its
+#   absence is a documented boundary here, not a silent coercion.
+#
+# String encoding is terminator-safe so composites concatenate unambiguously:
+# each 0x00 byte in the payload is escaped to 0x00 0xFF, and the whole value ends
+# with 0x00 0x01. A terminator (0x00 0x01) always sorts below an escaped content
+# byte (0x00 0xFF), so a prefix orders before any longer string, exactly as raw
+# byte comparison would
+
+from struct import pack_f64_be
+
+# Type markers (first byte of every encoded value). Ordering is load-bearing.
+const MARK_NULL: int = 0x00
+const MARK_BOOL: int = 0x01
+const MARK_NUM: int = 0x02
+const MARK_STR: int = 0x05
+const MARK_BYTES: int = 0x06
+
+# Encode a JSON null / absent-sentinel. Sorts before every other type.
+def enc_null() -> bytes {
+    return bytes([MARK_NULL])
+}
+
+def enc_bool(b: bool) -> bytes {
+    v: int = 0
+    if b {
+        v = 1
+    }
+    return bytes([MARK_BOOL, v])
+}
+
+# Order-preserving i64: big-endian two's complement, sign bit flipped.
+def enc_int(x: int) -> bytes {
+    out: list[int] = [MARK_NUM]
+    out.append(((x >> 56) & 0xFF) ^ 0x80)
+    i: int = 6
+    while i >= 0 {
+        out.append((x >> (i * 8)) & 0xFF)
+        i = i - 1
+    }
+    return bytes(out)
+}
+
+# Order-preserving f64: IEEE big-endian, all bits flipped if negative else sign
+# bit set. NaN/Inf are not produced by JSON numbers; they still total-order by
+# bit pattern (harmless for keys).
+def enc_float(x: float) -> bytes {
+    be: bytes = pack_f64_be(x)
+    out: list[int] = [MARK_NUM]
+    if (be[0] & 0x80) != 0 {
+        i: int = 0
+        while i < 8 {
+            out.append(be[i] ^ 0xFF)
+            i = i + 1
+        }
+    } else {
+        out.append(be[0] ^ 0x80)
+        j: int = 1
+        while j < 8 {
+            out.append(be[j])
+            j = j + 1
+        }
+    }
+    return bytes(out)
+}
+
+# Terminator-safe UTF-8: escape 0x00 -> 0x00 0xFF, terminate with 0x00 0x01.
+def enc_str(s: str) -> bytes {
+    raw: bytes = s.encode()
+    out: list[int] = [MARK_STR]
+    i: int = 0
+    n: int = len(raw)
+    while i < n {
+        c: int = raw[i]
+        out.append(c)
+        if c == 0 {
+            out.append(0xFF)
+        }
+        i = i + 1
+    }
+    out.append(0)
+    out.append(1)
+    return bytes(out)
+}
+
+# Raw bytes value (schema string+format:bytes). Same escaping as strings, its own
+# marker so bytes sort after strings.
+def enc_bytes(raw: bytes) -> bytes {
+    out: list[int] = [MARK_BYTES]
+    i: int = 0
+    n: int = len(raw)
+    while i < n {
+        c: int = raw[i]
+        out.append(c)
+        if c == 0 {
+            out.append(0xFF)
+        }
+        i = i + 1
+    }
+    out.append(0)
+    out.append(1)
+    return bytes(out)
+}
+
+# Concatenate encoded parts into one composite key. Each part is self-delimiting
+# (fixed width for null/bool/number, terminated for string/bytes), so the join is
+# unambiguous and stays memcomparable field-by-field.
+def enc_composite(parts: list[bytes]) -> bytes {
+    out: bytes = bytes([])
+    for p in parts {
+        out = out + p
+    }
+    return out
+}

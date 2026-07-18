@@ -1,0 +1,288 @@
+# odb.schema - the schema compiler (spec sections 4, 12).
+#
+# A JSON Schema (as a Dragon dict[str, Any]) compiles once into a CompiledSchema:
+#   - a symbol table interning each property name to a u16 field id,
+#   - a physical layout: required fields shredded to fixed offsets in the
+#     document's required region (the relational skeleton), optional fields
+#     living in the tagged tail,
+#   - a validator (required presence, type, numeric bounds, string length)
+#
+# Schemas compile, they are never interpreted (spec section 4). Ids are assigned
+# by sorted property name so recompiling the same schema on reopen reproduces
+# the exact layout, and stored documents decode identically.
+#
+# M2 scope: scalar types boolean / integer / number / string. date-time, date,
+# decimal, bytes format, arrays, nested objects, discriminated unions, defaults,
+# enum/pattern, and additionalProperties (extras) storage are later milestones;
+# each is rejected loudly rather than mishandled silently
+
+from odb.errors import SchemaError
+
+const T_BOOL: int = 1
+const T_INT: int = 2
+const T_NUM: int = 3
+const T_STR: int = 4
+const T_BYTES: int = 5
+
+def slot_size(tag: int) -> int {
+    if tag == T_BOOL {
+        return 1
+    }
+    return 8      # int / number inline, string / bytes as (u32 off, u32 len)
+}
+
+class FieldSpec {
+    name: str
+    field_id: int
+    tag: int
+    required: bool
+    slot_off: int       # offset within the required region (required fields)
+    has_min: bool
+    min_v: float
+    has_max: bool
+    max_v: float
+    has_minlen: bool
+    minlen: int
+    has_maxlen: bool
+    maxlen: int
+
+    def(name: str, field_id: int, tag: int, required: bool, slot_off: int) {
+        self.name = name
+        self.field_id = field_id
+        self.tag = tag
+        self.required = required
+        self.slot_off = slot_off
+        self.has_min = False
+        self.min_v = 0.0
+        self.has_max = False
+        self.max_v = 0.0
+        self.has_minlen = False
+        self.minlen = 0
+        self.has_maxlen = False
+        self.maxlen = 0
+    }
+}
+
+class CompiledSchema {
+    name: str
+    schema_id: int
+    version: int
+    required: list[FieldSpec]        # in slot order
+    optional: list[FieldSpec]        # tail fields, by field id
+    by_name: dict[str, FieldSpec]
+    by_id: dict[int, FieldSpec]
+    req_region_size: int
+    schema_json: str                 # original, for catalog persistence
+
+    def(name: str, schema_id: int, version: int) {
+        self.name = name
+        self.schema_id = schema_id
+        self.version = version
+        self.required = []
+        self.optional = []
+        self.by_name = {}
+        self.by_id = {}
+        self.req_region_size = 0
+        self.schema_json = ""
+    }
+
+    def field(fname: str) -> FieldSpec {
+        if fname in self.by_name {
+            return self.by_name[fname]
+        }
+        raise SchemaError("no such field: " + fname)
+    }
+}
+
+def _num(v: Any) -> float {
+    if isinstance(v, int) {
+        const i: int = v
+        return float(i)
+    }
+    const f: float = v
+    return f
+}
+
+def _tag_for_type(ty: str) -> int {
+    if ty == "boolean" {
+        return T_BOOL
+    }
+    if ty == "integer" {
+        return T_INT
+    }
+    if ty == "number" {
+        return T_NUM
+    }
+    if ty == "string" {
+        return T_STR
+    }
+    raise SchemaError("unsupported type '" + ty + "' (M2 supports boolean/integer/number/string)")
+}
+
+# Compile a schema dict into a CompiledSchema. `schema_json` is retained verbatim
+# so the catalog can persist and later recompile it identically.
+def compile_schema(name: str, schema: dict[str, Any], schema_id: int, version: int, schema_json: str) -> CompiledSchema {
+    cs: CompiledSchema = CompiledSchema(name, schema_id, version)
+    cs.schema_json = schema_json
+
+    if "properties" not in schema {
+        raise SchemaError("schema '" + name + "' has no properties")
+    }
+    props_any: Any = schema["properties"]
+    if not isinstance(props_any, dict) {
+        raise SchemaError("properties must be an object")
+    }
+    props: dict[str, Any] = props_any
+
+    # Required-name set.
+    req_set: dict[str, bool] = {}
+    if "required" in schema {
+        ra: Any = schema["required"]
+        if isinstance(ra, list) {
+            rl: list[Any] = ra
+            for item in rl {
+                if isinstance(item, str) {
+                    const rn: str = item
+                    req_set[rn] = True
+                }
+            }
+        }
+    }
+
+    # Deterministic id order: sorted property names.
+    names: list[str] = []
+    for k in props {
+        names.append(k)
+    }
+    names.sort()
+
+    # First pass: create every FieldSpec with an id; assign required slot offsets.
+    off: int = 0
+    fid: int = 0
+    for nm in names {
+        sub_any: Any = props[nm]
+        if not isinstance(sub_any, dict) {
+            raise SchemaError("property '" + nm + "' must be a schema object")
+        }
+        sub: dict[str, Any] = sub_any
+        if "type" not in sub {
+            raise SchemaError("property '" + nm + "' has no type")
+        }
+        ty_any: Any = sub["type"]
+        const ty: str = ty_any
+        tag: int = _tag_for_type(ty)
+        is_req: bool = nm in req_set
+
+        slot: int = -1
+        if is_req {
+            slot = off
+            off = off + slot_size(tag)
+        }
+        fs: FieldSpec = FieldSpec(nm, fid, tag, is_req, slot)
+
+        if "minimum" in sub {
+            fs.has_min = True
+            fs.min_v = _num(sub["minimum"])
+        }
+        if "maximum" in sub {
+            fs.has_max = True
+            fs.max_v = _num(sub["maximum"])
+        }
+        if "minLength" in sub {
+            const mnl: int = sub["minLength"]
+            fs.has_minlen = True
+            fs.minlen = mnl
+        }
+        if "maxLength" in sub {
+            const mxl: int = sub["maxLength"]
+            fs.has_maxlen = True
+            fs.maxlen = mxl
+        }
+
+        cs.by_name[nm] = fs
+        cs.by_id[fid] = fs
+        if is_req {
+            cs.required.append(fs)
+        } else {
+            cs.optional.append(fs)
+        }
+        fid = fid + 1
+    }
+    cs.req_region_size = off
+    return cs
+}
+
+def _value_tag(v: Any) -> int {
+    if isinstance(v, bool) {
+        return T_BOOL
+    }
+    if isinstance(v, int) {
+        return T_INT
+    }
+    if isinstance(v, float) {
+        return T_NUM
+    }
+    if isinstance(v, str) {
+        return T_STR
+    }
+    return -1
+}
+
+def _type_ok(field_tag: int, v: Any) -> bool {
+    vt: int = _value_tag(v)
+    if field_tag == T_NUM {
+        return vt == T_NUM or vt == T_INT
+    }
+    if field_tag == T_INT {
+        return vt == T_INT
+    }
+    if field_tag == T_BOOL {
+        return vt == T_BOOL
+    }
+    if field_tag == T_STR {
+        return vt == T_STR
+    }
+    return False
+}
+
+# Validate a document against a compiled schema. Raises SchemaError on the first
+# violation. `_id` is reserved (the docid) and never validated as a field.
+def validate_doc(schema: CompiledSchema, doc: dict[str, Any]) -> None {
+    for f in schema.required {
+        if f.name not in doc {
+            raise SchemaError("missing required field '" + f.name + "'")
+        }
+    }
+    for k in doc {
+        if k == "_id" {
+            continue
+        }
+        if k not in schema.by_name {
+            raise SchemaError("unknown field '" + k + "' (additionalProperties storage is a later milestone)")
+        }
+        f: FieldSpec = schema.by_name[k]
+        v: Any = doc[k]
+        if not _type_ok(f.tag, v) {
+            raise SchemaError("field '" + k + "' has the wrong type")
+        }
+        if f.tag == T_NUM or f.tag == T_INT {
+            x: float = _num(v)
+            if f.has_min and x < f.min_v {
+                raise SchemaError("field '" + k + "' below minimum")
+            }
+            if f.has_max and x > f.max_v {
+                raise SchemaError("field '" + k + "' above maximum")
+            }
+        }
+        if f.tag == T_STR {
+            const s: str = v
+            L: int = len(s)
+            if f.has_minlen and L < f.minlen {
+                raise SchemaError("field '" + k + "' shorter than minLength")
+            }
+            if f.has_maxlen and L > f.maxlen {
+                raise SchemaError("field '" + k + "' longer than maxLength")
+            }
+        }
+    }
+}

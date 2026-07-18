@@ -1,0 +1,323 @@
+# odb.meta - the metadata compiler (spec section 7).
+#
+# Metadata is the second of ODB's two user-facing concepts: per-schema
+# declarations of primary key, unique constraints, indexes, and refs. It is
+# attached with `.meta({...})` and compiles here into a CompiledMeta: a set of
+# IndexDecls, each naming an index tree in the schema's forest (spec section 13)
+# and the field path(s) whose memcomparable encoding is that tree's key.
+#
+#   { primary: ["id"], unique: ["email", ["a", "b"]], index: ["city"] }
+#
+# A string entry is a single-field index; a nested list is a composite. Every
+# field in every path must be a REQUIRED scalar field of the schema (spec section
+# 7): only the relational skeleton is indexable. A bad path is a SchemaError at
+# define time, not a silent no-op.
+#
+# M4 scope: primary (single field, list-form), unique, index over required
+# scalar fields. Composite primary keys are not supported (spec section 3);
+# express composite uniqueness in `unique`. Refs, sparse object-form entries, and
+# array/dotted paths land with their milestones (refs = M4 refs stage; arrays =
+# the schema array milestone)
+
+from odb.errors import SchemaError
+from odb.schema import CompiledSchema, FieldSpec, T_BOOL, T_INT, T_NUM, T_STR
+from odb.keyenc import enc_bool, enc_int, enc_float, enc_str, enc_composite
+
+const IK_PK: int = 0
+const IK_UNIQUE: int = 1
+const IK_INDEX: int = 2
+const IK_REVERSE: int = 3
+
+# One index tree in a schema's forest. `name` is deterministic and unique per
+# schema, so a reopen recompiles the identical set and matches persisted roots.
+class IndexDecl {
+    name: str
+    kind: int
+    fields: list[str]
+    tags: list[int]        # schema tag per field, parallel to `fields`
+    unique: bool
+    sparse: bool
+
+    def(name: str, kind: int, fields: list[str], tags: list[int], unique: bool, sparse: bool) {
+        self.name = name
+        self.kind = kind
+        self.fields = fields
+        self.tags = tags
+        self.unique = unique
+        self.sparse = sparse
+    }
+}
+
+# A declared relationship: a required scalar field in this schema whose value
+# references a uniquely-indexed field of another (or the same) schema. Each ref
+# auto-maintains a reverse index (target docid -> referrer docid), stored as an
+# IK_REVERSE tree in THIS schema's forest and named `rev_name`.
+class RefDecl {
+    source_path: str
+    source_tag: int
+    target_schema: str
+    target_field: str
+    on_delete: str               # "restrict" | "cascade"
+    rev_name: str
+
+    def(source_path: str, source_tag: int, target_schema: str, target_field: str, on_delete: str, rev_name: str) {
+        self.source_path = source_path
+        self.source_tag = source_tag
+        self.target_schema = target_schema
+        self.target_field = target_field
+        self.on_delete = on_delete
+        self.rev_name = rev_name
+    }
+}
+
+class CompiledMeta {
+    primary: list[str]           # empty => the primary key is _id (the docid)
+    indexes: list[IndexDecl]
+    refs: list[RefDecl]
+
+    def(primary: list[str]) {
+        self.primary = primary
+        self.indexes = []
+        self.refs = []
+    }
+
+    def has(n: str) -> bool {
+        for d in self.indexes {
+            if d.name == n {
+                return True
+            }
+        }
+        return False
+    }
+
+    def by_name(n: str) -> IndexDecl {
+        for d in self.indexes {
+            if d.name == n {
+                return d
+            }
+        }
+        raise SchemaError("no index named '" + n + "'")
+    }
+}
+
+def _req_field(cs: CompiledSchema, name: str) -> FieldSpec {
+    if name not in cs.by_name {
+        raise SchemaError("metadata path '" + name + "' is not a field of schema '" + cs.name + "'")
+    }
+    f: FieldSpec = cs.by_name[name]
+    if not f.required {
+        raise SchemaError("metadata path '" + name + "' must be a required field (spec section 7)")
+    }
+    return f
+}
+
+def _decl_name(prefix: str, fields: list[str]) -> str {
+    s: str = prefix
+    i: int = 0
+    while i < len(fields) {
+        if i > 0 {
+            s = s + "+"
+        }
+        s = s + fields[i]
+        i = i + 1
+    }
+    return s
+}
+
+# A validated path: parallel field names and their schema tags. A typed carrier
+# (rather than a packed list) keeps list[str] and list[int] at their own element
+# layouts - a list[Any] would box them and break element-wise typing.
+class EntryFields {
+    fields: list[str]
+    tags: list[int]
+
+    def(fields: list[str], tags: list[int]) {
+        self.fields = fields
+        self.tags = tags
+    }
+}
+
+# Turn one metadata entry (a field name, or a list of names for a composite)
+# into its field list and parallel tag list, validating each field.
+def _entry_fields(cs: CompiledSchema, entry: Any) -> EntryFields {
+    fields: list[str] = []
+    tags: list[int] = []
+    if isinstance(entry, str) {
+        const nm: str = entry
+        f: FieldSpec = _req_field(cs, nm)
+        fields.append(nm)
+        tags.append(f.tag)
+    } else {
+        if not isinstance(entry, list) {
+            raise SchemaError("metadata entry must be a field name or a list of names")
+        }
+        el: list[Any] = entry
+        for item in el {
+            if not isinstance(item, str) {
+                raise SchemaError("composite metadata entry must list field names")
+            }
+            const nm2: str = item
+            f2: FieldSpec = _req_field(cs, nm2)
+            fields.append(nm2)
+            tags.append(f2.tag)
+        }
+    }
+    return EntryFields(fields, tags)
+}
+
+def _add_entries(cs: CompiledSchema, cm: CompiledMeta, raw: Any, kind: int, unique: bool, prefix: str) -> None {
+    if not isinstance(raw, list) {
+        raise SchemaError("metadata `unique`/`index` must be a list")
+    }
+    entries: list[Any] = raw
+    for entry in entries {
+        ef: EntryFields = _entry_fields(cs, entry)
+        name: str = _decl_name(prefix, ef.fields)
+        if not cm.has(name) {
+            cm.indexes.append(IndexDecl(name, kind, ef.fields, ef.tags, unique, False))
+        }
+    }
+}
+
+def compile_meta(cs: CompiledSchema, meta: dict[str, Any]) -> CompiledMeta {
+    # The primary key is a list of required fields: one field, several (a
+    # composite key), or none (identity is the internal _id / docid). A composite
+    # pk is just a composite unique index that also names the document's domain
+    # identity.
+    primary: list[str] = []
+    if "primary" in meta {
+        pv: Any = meta["primary"]
+        if isinstance(pv, list) {
+            pl: list[Any] = pv
+            for item in pl {
+                if not isinstance(item, str) {
+                    raise SchemaError("`primary` field names must be strings")
+                }
+                const pn: str = item
+                _req_field(cs, pn)
+                primary.append(pn)
+            }
+        } else {
+            if not isinstance(pv, str) {
+                raise SchemaError("`primary` must be a field name or a list of names")
+            }
+            const pn2: str = pv
+            _req_field(cs, pn2)
+            primary.append(pn2)
+        }
+    }
+
+    cm: CompiledMeta = CompiledMeta(primary)
+    if len(primary) > 0 {
+        ptags: list[int] = []
+        for pf in primary {
+            ptags.append(cs.by_name[pf].tag)
+        }
+        cm.indexes.append(IndexDecl("pk", IK_PK, primary, ptags, True, False))
+    }
+    if "unique" in meta {
+        _add_entries(cs, cm, meta["unique"], IK_UNIQUE, True, "u:")
+    }
+    if "index" in meta {
+        _add_entries(cs, cm, meta["index"], IK_INDEX, False, "i:")
+    }
+    if "refs" in meta {
+        _add_refs(cs, cm, meta["refs"])
+    }
+    return cm
+}
+
+def _add_refs(cs: CompiledSchema, cm: CompiledMeta, raw: Any) -> None {
+    if not isinstance(raw, dict) {
+        raise SchemaError("metadata `refs` must be an object keyed by source field")
+    }
+    refs: dict[str, Any] = raw
+    for src in refs {
+        f: FieldSpec = _req_field(cs, src)
+        spec_any: Any = refs[src]
+        if not isinstance(spec_any, dict) {
+            raise SchemaError("ref '" + src + "' must be an object with `to` and optional `on_delete`")
+        }
+        spec: dict[str, Any] = spec_any
+        if "to" not in spec {
+            raise SchemaError("ref '" + src + "' needs a `to` target")
+        }
+        to_any: Any = spec["to"]
+        if not isinstance(to_any, str) {
+            raise SchemaError("ref '" + src + "' `to` must be a \"schema.field\" string")
+        }
+        const to: str = to_any
+        dot: int = to.find(".")
+        if dot <= 0 or dot >= len(to) - 1 {
+            raise SchemaError("ref '" + src + "' `to` must be \"schema.field\", got '" + to + "'")
+        }
+        tschema: str = to[0:dot]
+        tfield: str = to[dot + 1:]
+
+        od: str = "restrict"
+        if "on_delete" in spec {
+            od_any: Any = spec["on_delete"]
+            if not isinstance(od_any, str) {
+                raise SchemaError("ref '" + src + "' `on_delete` must be a string")
+            }
+            const ods: str = od_any
+            od = ods
+        }
+        if od == "set_null" {
+            raise SchemaError("ref '" + src + "' on_delete=set_null needs a nullable field (nullable types are a later milestone)")
+        }
+        if od == "detach" {
+            raise SchemaError("ref '" + src + "' on_delete=detach is array-element only (arrays are a later milestone)")
+        }
+        if od != "restrict" and od != "cascade" {
+            raise SchemaError("ref '" + src + "' has unknown on_delete '" + od + "'")
+        }
+
+        rev_name: str = "rev:" + src
+        cm.refs.append(RefDecl(src, f.tag, tschema, tfield, od, rev_name))
+        # The reverse-index tree persists like any index (its root lands in the
+        # catalog), but is keyed by (target_docid, referrer_docid), so it is
+        # maintained by the ref logic, not the field-index path.
+        cm.indexes.append(IndexDecl(rev_name, IK_REVERSE, [src], [f.tag], False, False))
+    }
+}
+
+#--- key encoding ---------------------------------------------------------#
+
+# Encode one scalar field value at its declared type into a memcomparable key
+# fragment. Integers/floats route to the numeric encoders; a number field
+# accepts an integer literal (widened to f64) so `1` validates a `number` field.
+def enc_field_value(tag: int, v: Any) -> bytes {
+    if tag == T_BOOL {
+        const b: bool = v
+        return enc_bool(b)
+    }
+    if tag == T_INT {
+        const i: int = v
+        return enc_int(i)
+    }
+    if tag == T_NUM {
+        if isinstance(v, int) {
+            const iv: int = v
+            return enc_float(float(iv))
+        }
+        const f: float = v
+        return enc_float(f)
+    }
+    if tag == T_STR {
+        const s: str = v
+        return enc_str(s)
+    }
+    raise SchemaError("field type is not indexable")
+}
+
+# The full (composite) index key for a document under one declaration.
+def enc_decl_key(decl: IndexDecl, doc: dict[str, Any]) -> bytes {
+    parts: list[bytes] = []
+    i: int = 0
+    while i < len(decl.fields) {
+        parts.append(enc_field_value(decl.tags[i], doc[decl.fields[i]]))
+        i = i + 1
+    }
+    return enc_composite(parts)
+}

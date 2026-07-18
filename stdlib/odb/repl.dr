@@ -1,0 +1,140 @@
+# odb.repl - replication, v3a: async log shipping (spec section 19).
+#
+# One primary, N followers. A follower owns a local .odb file plus an
+# ODBClient to the primary; it pulls committed log entries (Q_STREAM) and
+# applies them locally at the primary's own CSNs, so the (file uuid, csn)
+# pair stays in lockstep and identifies lineage. Reads on the follower are
+# ordinary local reads: snapshot-consistent, never blocked by shipping
+#
+# Read-your-writes: a client that wrote to the primary carries the commit's
+# CSN token; a follower read carrying `min_csn` makes the follower catch up
+# with an active pull from the primary, never a passive sleep, before it
+# answers. Wire a FollowerWaiter into an ODBServer to serve that
+#
+# Bootstrap, two ways. Byte-copy the primary's file (odb compact doubles as
+# a hot backup) and open it: same uuid, resumes from its csn. Or start with
+# a brand-new empty file: it adopts the primary's identity and replays full
+# history, which needs the primary's retention window to still hold csn 1.
+# Falling behind the window is a loud re-seed error, never a silent skip
+#
+# Promotion is manual in v3a: detach() and the file is an ordinary writable
+# database. Raft (v3b) automates failover on top of this same log
+
+from odb import ODB
+from odb.client import ODBClient, LogBatch
+from odb.server import CsnWaiter
+from odb.commitlog import LogEntry
+from odb.errors import ODBError
+from time import monotonic, sleep_ms
+
+
+class Follower {
+    db: ODB
+    client: ODBClient
+    detached: bool
+
+    def(db: ODB, client: ODBClient) {
+        self.db = db
+        self.client = client
+        self.detached = False
+        self._pair()
+    }
+
+    # Verify (or, for a pristine file, adopt) the primary's identity. A uuid
+    # mismatch on a file with history is a hard stop: applying another
+    # database's log would be a merge, and ODB never merges silently.
+    def _pair() -> None {
+        pu: str = self.client.server_uuid
+        if pu == "" {
+            raise ODBError("follower: the primary reported no uuid; it predates replication")
+        }
+        lu: str = self.db.uuid()
+        if lu != pu {
+            if self.db.pristine() {
+                self.db.adopt_uuid(pu)
+            } else {
+                raise ODBError("follower: this file (" + lu + ") does not descend from the primary (" + pu + "); seed from a copy of the primary or a fresh empty file")
+            }
+        }
+        # Latch local writes shut: a local commit would consume a CSN that
+        # aliases the primary's next entry, forking history invisibly (the
+        # lineage pair cannot see same-csn forks until v3b Raft terms).
+        self.db.set_following(True)
+    }
+
+    # Pull and apply everything the primary committed past our csn. Returns
+    # the number of entries applied. Op-less primary commits leave csn gaps;
+    # fast_forward closes them so the lineage pair stays exact.
+    def sync_once() -> int {
+        self._assert_attached()
+        batch: LogBatch = self.client.pull_log(self.db.csn())
+        n: int = 0
+        for e in batch.entries {
+            self.db.apply(e)
+            n = n + 1
+        }
+        if batch.csn > self.db.csn() {
+            self.db.fast_forward(batch.csn)
+        }
+        return n
+    }
+
+    # Catch up to at least `csn` (the read-your-writes hold). Pulls actively;
+    # the deadline only bounds a token the primary itself does not have yet.
+    def wait_for(csn: int, timeout_ms: int) -> bool {
+        self._assert_attached()
+        deadline: float = monotonic() + float(timeout_ms) / 1000.0
+        while True {
+            if self.db.csn() >= csn {
+                return True
+            }
+            self.sync_once()
+            if self.db.csn() >= csn {
+                return True
+            }
+            if monotonic() >= deadline {
+                return False
+            }
+            sleep_ms(20)
+        }
+    }
+
+    # Stop following. The local file stays exactly as last synced and is an
+    # ordinary writable database from here on: manual promotion (v3a). The
+    # first local write forks its history from the old primary's, which the
+    # divergence checks will then detect, by design.
+    def detach() -> ODB {
+        if not self.detached {
+            self.detached = True
+            self.db.set_following(False)
+            self.client.close()
+        }
+        return self.db
+    }
+
+    def close() -> None {
+        self.detach()
+        self.db.close()
+    }
+
+    def _assert_attached() -> None {
+        if self.detached {
+            raise ODBError("follower: detached; this handle no longer syncs")
+        }
+    }
+}
+
+
+# Plugs a Follower into an ODBServer, so a served follower holds a read that
+# carries a csn token until it has caught up to it (spec section 19).
+class FollowerWaiter(CsnWaiter) {
+    follower: Follower
+
+    def(follower: Follower) {
+        self.follower = follower
+    }
+
+    def wait_for(csn: int, timeout_ms: int) -> bool {
+        return self.follower.wait_for(csn, timeout_ms)
+    }
+}

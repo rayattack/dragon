@@ -1,0 +1,2154 @@
+# odb.oql - the Object Query Language: reads (spec sections 8, 10).
+#
+# OQL is parsed here into a small AST, type-checked against the compiled schemas
+# at PREPARE time (unknown schema/field, type-mismatched comparison, aggregate
+# misuse, ambiguity are errors before a document is touched), and executed by
+# odb.dr over the document trees. The blessed compile-time-checked
+# `template[OQL] { ... }` literal (spec section 20) lowers to this same runtime
+# path once the content type lands; `db.find(text)` works today.
+#
+# Covered so far (M5.1 + M5.2): one source; an optional `? filter` with
+# comparisons (== != < <= > >=), boolean `& | !` and parentheses, real
+# arithmetic (+ - * / %), membership `in [..]`, glob `~` / `~*`, coalesce `??`,
+# presence `exists!(f)` / `missing!(f)`, and the scalar intrinsics `len! lower!
+# upper! abs! round! floor! ceil!`; an optional `{ projection }` of plain fields
+# and computed fields (`margin: (price - cost) / price`); no block = the whole
+# document. Aggregates, grouping, ref joins, aliases, and pipeline stages arrive
+# in later M5 slices.
+#
+# Two-valued logic (spec section 10): a comparison touching an absent field is
+# false, never unknown; `!p` is pure boolean negation; `x ?? d` coalesces both
+# absence and (later) stored null
+
+from odb.schema import CompiledSchema, FieldSpec, T_BOOL, T_INT, T_NUM, T_STR
+from odb.errors import PrepareError
+
+#===----------------------------------------------------------------------===#
+# Tokens
+#===----------------------------------------------------------------------===#
+
+const TK_IDENT: int = 1
+const TK_STR: int = 2
+const TK_INT: int = 3
+const TK_FLOAT: int = 4
+const TK_QUESTION: int = 5
+const TK_LBRACE: int = 6
+const TK_RBRACE: int = 7
+const TK_LPAREN: int = 8
+const TK_RPAREN: int = 9
+const TK_COMMA: int = 10
+const TK_DOT: int = 11
+const TK_EQ: int = 12
+const TK_NE: int = 13
+const TK_LT: int = 14
+const TK_LE: int = 15
+const TK_GT: int = 16
+const TK_GE: int = 17
+const TK_AND: int = 18
+const TK_OR: int = 19
+const TK_NOT: int = 20
+const TK_EOF: int = 21
+const TK_PLUS: int = 22
+const TK_MINUS: int = 23
+const TK_STAR: int = 24
+const TK_SLASH: int = 25
+const TK_PERCENT: int = 26
+const TK_LBRACKET: int = 27
+const TK_RBRACKET: int = 28
+const TK_TILDE: int = 29
+const TK_TILDE_I: int = 30
+const TK_COALESCE: int = 31
+const TK_COLON: int = 32
+const TK_PARAM: int = 33         # $name (text holds the name)
+const TK_AT: int = 34            # @ before csn(N) time travel
+const TK_DATE: int = 35          # @2026-07-11[Thh:mm:ss[Z]] (text sans @)
+
+class Token {
+    kind: int
+    text: str
+    pos: int
+
+    def(kind: int, text: str, pos: int) {
+        self.kind = kind
+        self.text = text
+        self.pos = pos
+    }
+}
+
+def _is_alpha(c: str) -> bool {
+    o: int = ord(c)
+    return (o >= ord("a") and o <= ord("z")) or (o >= ord("A") and o <= ord("Z")) or c == "_"
+}
+
+def _is_digit(c: str) -> bool {
+    o: int = ord(c)
+    return o >= ord("0") and o <= ord("9")
+}
+
+def _is_space(c: str) -> bool {
+    return c == " " or c == "\t" or c == "\n" or c == "\r"
+}
+
+def tokenize(src: str) -> list[Token] {
+    toks: list[Token] = []
+    i: int = 0
+    n: int = len(src)
+    while i < n {
+        c: str = src[i]
+        if _is_space(c) {
+            i = i + 1
+            continue
+        }
+        if c == "\"" or c == "'" {
+            quote: str = c
+            start: int = i
+            i = i + 1
+            buf: str = ""
+            closed: bool = False
+            while i < n {
+                ch: str = src[i]
+                if ch == "\\" and i + 1 < n {
+                    nx: str = src[i + 1]
+                    if nx == quote or nx == "\\" {
+                        buf = buf + nx
+                        i = i + 2
+                        continue
+                    }
+                }
+                if ch == quote {
+                    closed = True
+                    i = i + 1
+                    break
+                }
+                buf = buf + ch
+                i = i + 1
+            }
+            if not closed {
+                raise PrepareError("unterminated string literal in OQL")
+            }
+            toks.append(Token(TK_STR, buf, start))
+            continue
+        }
+        if _is_digit(c) {
+            start2: int = i
+            isflt: bool = False
+            while i < n and _is_digit(src[i]) {
+                i = i + 1
+            }
+            if i < n and src[i] == "." {
+                isflt = True
+                i = i + 1
+                while i < n and _is_digit(src[i]) {
+                    i = i + 1
+                }
+            }
+            numtext: str = src[start2:i]
+            if isflt {
+                toks.append(Token(TK_FLOAT, numtext, start2))
+            } else {
+                toks.append(Token(TK_INT, numtext, start2))
+            }
+            continue
+        }
+        if _is_alpha(c) {
+            start3: int = i
+            while i < n and (_is_alpha(src[i]) or _is_digit(src[i])) {
+                i = i + 1
+            }
+            toks.append(Token(TK_IDENT, src[start3:i], start3))
+            continue
+        }
+        # @ = time travel: either `@csn(N)` (emit TK_AT, then csn lexes as an
+        # ident) or a date literal `@2026-07-11[Thh:mm:ss[Z]]` (one TK_DATE).
+        if c == "@" {
+            dstart: int = i
+            i = i + 1
+            if i < n and _is_digit(src[i]) {
+                while i < n and (_is_digit(src[i]) or src[i] == "-" or src[i] == ":" or src[i] == "T" or src[i] == "Z") {
+                    i = i + 1
+                }
+                toks.append(Token(TK_DATE, src[dstart + 1:i], dstart))
+            } else {
+                toks.append(Token(TK_AT, "@", dstart))
+            }
+            continue
+        }
+        # $name parameter
+        if c == "$" {
+            pstart: int = i
+            i = i + 1
+            while i < n and (_is_alpha(src[i]) or _is_digit(src[i])) {
+                i = i + 1
+            }
+            if i == pstart + 1 {
+                raise PrepareError("OQL: '$' must be followed by a parameter name")
+            }
+            toks.append(Token(TK_PARAM, src[pstart + 1:i], pstart))
+            continue
+        }
+        nxt: str = ""
+        if i + 1 < n {
+            nxt = src[i + 1]
+        }
+        # two-char operators
+        if c == "=" and nxt == "=" {
+            toks.append(Token(TK_EQ, "==", i))
+            i = i + 2
+            continue
+        }
+        if c == "!" and nxt == "=" {
+            toks.append(Token(TK_NE, "!=", i))
+            i = i + 2
+            continue
+        }
+        if c == "<" and nxt == "=" {
+            toks.append(Token(TK_LE, "<=", i))
+            i = i + 2
+            continue
+        }
+        if c == ">" and nxt == "=" {
+            toks.append(Token(TK_GE, ">=", i))
+            i = i + 2
+            continue
+        }
+        if c == "?" and nxt == "?" {
+            toks.append(Token(TK_COALESCE, "??", i))
+            i = i + 2
+            continue
+        }
+        if c == "~" and nxt == "*" {
+            toks.append(Token(TK_TILDE_I, "~*", i))
+            i = i + 2
+            continue
+        }
+        # single-char tokens
+        if c == "?" {
+            toks.append(Token(TK_QUESTION, c, i))
+        } else if c == "{" {
+            toks.append(Token(TK_LBRACE, c, i))
+        } else if c == "}" {
+            toks.append(Token(TK_RBRACE, c, i))
+        } else if c == "(" {
+            toks.append(Token(TK_LPAREN, c, i))
+        } else if c == ")" {
+            toks.append(Token(TK_RPAREN, c, i))
+        } else if c == "[" {
+            toks.append(Token(TK_LBRACKET, c, i))
+        } else if c == "]" {
+            toks.append(Token(TK_RBRACKET, c, i))
+        } else if c == "," {
+            toks.append(Token(TK_COMMA, c, i))
+        } else if c == "." {
+            toks.append(Token(TK_DOT, c, i))
+        } else if c == ":" {
+            toks.append(Token(TK_COLON, c, i))
+        } else if c == "<" {
+            toks.append(Token(TK_LT, c, i))
+        } else if c == ">" {
+            toks.append(Token(TK_GT, c, i))
+        } else if c == "&" {
+            toks.append(Token(TK_AND, c, i))
+        } else if c == "|" {
+            toks.append(Token(TK_OR, c, i))
+        } else if c == "!" {
+            toks.append(Token(TK_NOT, c, i))
+        } else if c == "+" {
+            toks.append(Token(TK_PLUS, c, i))
+        } else if c == "-" {
+            toks.append(Token(TK_MINUS, c, i))
+        } else if c == "*" {
+            toks.append(Token(TK_STAR, c, i))
+        } else if c == "/" {
+            toks.append(Token(TK_SLASH, c, i))
+        } else if c == "%" {
+            toks.append(Token(TK_PERCENT, c, i))
+        } else if c == "~" {
+            toks.append(Token(TK_TILDE, c, i))
+        } else {
+            raise PrepareError("unexpected character '" + c + "' in OQL")
+        }
+        i = i + 1
+    }
+    toks.append(Token(TK_EOF, "", n))
+    return toks
+}
+
+# Days between 1970-01-01 and y-m-d (proleptic Gregorian, UTC). The standard
+# civil-from-days inverse (Hinnant's algorithm), integer math only.
+def _days_from_civil(y: int, m: int, d: int) -> int {
+    yy: int = y
+    if m <= 2 {
+        yy = yy - 1
+    }
+    era: int = yy // 400
+    if yy < 0 {
+        era = (yy - 399) // 400
+    }
+    yoe: int = yy - era * 400
+    mp: int = m + 9
+    if m > 2 {
+        mp = m - 3
+    }
+    doy: int = (153 * mp + 2) // 5 + d - 1
+    doe: int = yoe * 365 + yoe // 4 - yoe // 100 + doy
+    return era * 146097 + doe - 719468
+}
+
+# `2026-07-11`, `2026-07-11T10:00:00` or `...Z` -> unix seconds (UTC).
+def date_to_unix(text: str) -> int {
+    s: str = text
+    if len(s) > 0 and s[len(s) - 1:] == "Z" {
+        s = s[0:len(s) - 1]
+    }
+    date_part: str = s
+    time_part: str = ""
+    ti: int = s.find("T")
+    if ti >= 0 {
+        date_part = s[0:ti]
+        time_part = s[ti + 1:]
+    }
+    dp: list[str] = date_part.split("-")
+    if len(dp) != 3 {
+        raise PrepareError("OQL: bad date literal '@" + text + "' (want @YYYY-MM-DD[Thh:mm:ss[Z]])")
+    }
+    y: int = int(dp[0])
+    mo: int = int(dp[1])
+    d: int = int(dp[2])
+    if mo < 1 or mo > 12 or d < 1 or d > 31 {
+        raise PrepareError("OQL: bad date literal '@" + text + "'")
+    }
+    secs: int = _days_from_civil(y, mo, d) * 86400
+    if time_part != "" {
+        tp: list[str] = time_part.split(":")
+        if len(tp) != 3 {
+            raise PrepareError("OQL: bad time in date literal '@" + text + "'")
+        }
+        h: int = int(tp[0])
+        mi: int = int(tp[1])
+        se: int = int(tp[2])
+        if h > 23 or mi > 59 or se > 60 {
+            raise PrepareError("OQL: bad time in date literal '@" + text + "'")
+        }
+        secs = secs + h * 3600 + mi * 60 + se
+    }
+    return secs
+}
+
+#===----------------------------------------------------------------------===#
+# AST (a tagged node; children carried in a list to avoid recursive optionals)
+#===----------------------------------------------------------------------===#
+
+const N_CMP: int = 1        # op holds the comparison; children [left, right]
+const N_AND: int = 2        # children [left, right]
+const N_OR: int = 3         # children [left, right]
+const N_NOT: int = 4        # children [operand]
+const N_FIELD: int = 5      # name
+const N_STR: int = 6        # sval
+const N_INT: int = 7        # ival
+const N_FLOAT: int = 8      # fval
+const N_BOOL: int = 9       # bval
+const N_ARITH: int = 10     # op in + - * / % ; children [left, right]
+const N_IN: int = 11        # children [target, item, item, ...]
+const N_GLOB: int = 12      # op "~" | "~*"; children [target, pattern]
+const N_COALESCE: int = 13  # children [primary, fallback]
+const N_INTRINSIC: int = 14 # name (len/lower/upper/abs/round/floor/ceil/exists/missing); children args
+const N_PARAM: int = 15     # name; replaced by a literal at bind time
+
+class Node {
+    kind: int
+    op: str
+    name: str
+    sval: str
+    ival: int
+    fval: float
+    bval: bool
+    children: list[Node]
+
+    def(kind: int) {
+        self.kind = kind
+        self.op = ""
+        self.name = ""
+        self.sval = ""
+        self.ival = 0
+        self.fval = 0.0
+        self.bval = False
+        self.children = []
+    }
+}
+
+def _n_field(name: str) -> Node {
+    nd: Node = Node(N_FIELD)
+    nd.name = name
+    return nd
+}
+
+def _n_true() -> Node {
+    nd: Node = Node(N_BOOL)
+    nd.bval = True
+    return nd
+}
+
+# One projected column. A plain/computed field carries `expr`. A nested-ref
+# field (`is_ref`) carries a sub-block: the relationship name (the alias), an
+# optional filter over the related schema, and the nested projection (its own
+# ProjFields, hence self-recursive like Node.children - no mutual class cycle).
+class ProjField {
+    alias: str
+    is_ref: bool
+    expr: Node
+    rel_has_filter: bool
+    rel_filter: Node
+    rel_project_all: bool
+    rel_fields: list[ProjField]
+
+    def(alias: str, expr: Node) {
+        self.alias = alias
+        self.is_ref = False
+        self.expr = expr
+        self.rel_has_filter = False
+        self.rel_filter = _n_true()
+        self.rel_project_all = True
+        self.rel_fields = []
+    }
+}
+
+# An existence constraint on the parent row set: `+ rel` (semijoin, keep parents
+# WITH a related row) or `- rel` (antijoin, keep parents with NONE), optionally
+# conditioned by a filter over the related schema.
+class ExistJoin {
+    relname: str
+    negate: bool
+    has_filter: bool
+    filter: Node
+
+    def(relname: str, negate: bool) {
+        self.relname = relname
+        self.negate = negate
+        self.has_filter = False
+        self.filter = _n_true()
+    }
+}
+
+# A pipeline sort key: a field (or `_id`) with a descending flag.
+class SortKey {
+    field: str
+    desc: bool
+
+    def(field: str, desc: bool) {
+        self.field = field
+        self.desc = desc
+    }
+}
+
+const ST_SORT: int = 1
+const ST_TAKE: int = 2
+const ST_SKIP: int = 3
+
+# A pipeline stage applied to the result rows, in order: `| sort -a, b`,
+# `| take N`, `| skip N`.
+class Stage {
+    kind: int
+    sort_keys: list[SortKey]
+    n: int
+
+    def(kind: int) {
+        self.kind = kind
+        self.sort_keys = []
+        self.n = 0
+    }
+}
+
+class OqlQuery {
+    source: str
+    joins: list[ExistJoin]
+    has_filter: bool
+    filter: Node
+    has_by: bool
+    group_exprs: list[Node]
+    project_all: bool
+    fields: list[ProjField]
+    stages: list[Stage]
+    # Time travel (spec section 17): 0 = now, 1 = at csn, 2 = at a date.
+    at_kind: int
+    at_csn: int
+    at_ts: int
+
+    def(source: str) {
+        self.source = source
+        self.joins = []
+        self.has_filter = False
+        self.filter = _n_true()
+        self.has_by = False
+        self.group_exprs = []
+        self.project_all = True
+        self.fields = []
+        self.stages = []
+        self.at_kind = 0
+        self.at_csn = 0
+        self.at_ts = 0
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# Write statements (spec section 9): add / set / unset / put / del, optionally
+# grouped in an `atomic { ... }` block that commits as one transaction.
+#===----------------------------------------------------------------------===#
+
+const W_ADD: int = 1
+const W_SET: int = 2
+const W_UNSET: int = 3
+const W_PUT: int = 4
+const W_DEL: int = 5
+
+# One `field: expr` in a write body.
+class Assign {
+    field: str
+    expr: Node
+
+    def(field: str, expr: Node) {
+        self.field = field
+        self.expr = expr
+    }
+}
+
+# A single document body `{ f: v, ... }` (an add doc, or a set/put patch).
+class WriteDoc {
+    assigns: list[Assign]
+
+    def() {
+        self.assigns = []
+    }
+}
+
+class WriteStmt {
+    kind: int
+    source: str
+    has_filter: bool
+    filter: Node
+    docs: list[WriteDoc]         # add (1 or batched); set/put (exactly one)
+    unset_fields: list[str]      # unset
+
+    def(kind: int, source: str) {
+        self.kind = kind
+        self.source = source
+        self.has_filter = False
+        self.filter = _n_true()
+        self.docs = []
+        self.unset_fields = []
+    }
+}
+
+class WriteProgram {
+    stmts: list[WriteStmt]
+
+    def() {
+        self.stmts = []
+    }
+}
+
+#===----------------------------------------------------------------------===#
+# Parser (recursive descent)
+#
+# or > and > not > relational (cmp / ~ / in) > coalesce > add > mul > primary
+#===----------------------------------------------------------------------===#
+
+class Parser {
+    toks: list[Token]
+    pos: int
+
+    def(toks: list[Token]) {
+        self.toks = toks
+        self.pos = 0
+    }
+
+    def _peek() -> Token {
+        return self.toks[self.pos]
+    }
+
+    def _at(kind: int) -> bool {
+        return self.toks[self.pos].kind == kind
+    }
+
+    def _next() -> Token {
+        t: Token = self.toks[self.pos]
+        self.pos = self.pos + 1
+        return t
+    }
+
+    def _expect(kind: int, what: str) -> Token {
+        t: Token = self._peek()
+        if t.kind != kind {
+            raise PrepareError("OQL: expected " + what)
+        }
+        return self._next()
+    }
+
+    def parse() -> OqlQuery {
+        src_tok: Token = self._expect(TK_IDENT, "a source collection name")
+        q: OqlQuery = OqlQuery(src_tok.text)
+
+        # time-travel suffix: source@csn(N) or source@2026-07-11[Thh:mm:ss[Z]]
+        if self._at(TK_AT) {
+            self._next()
+            kw: Token = self._expect(TK_IDENT, "csn(N) or a date literal after '@'")
+            if kw.text != "csn" {
+                raise PrepareError("OQL: expected csn(N) or a date literal after '@'")
+            }
+            self._expect(TK_LPAREN, "'(' after @csn")
+            nt: Token = self._expect(TK_INT, "a commit sequence number")
+            self._expect(TK_RPAREN, "')' to close @csn(N)")
+            q.at_kind = 1
+            q.at_csn = int(nt.text)
+        } else if self._at(TK_DATE) {
+            dt: Token = self._next()
+            q.at_kind = 2
+            q.at_ts = date_to_unix(dt.text)
+        }
+
+        while self._at(TK_PLUS) or self._at(TK_MINUS) {
+            neg: bool = self._at(TK_MINUS)
+            self._next()
+            q.joins.append(self._parse_exist(neg))
+        }
+
+        if self._at(TK_QUESTION) {
+            self._next()
+            q.filter = self._parse_or()
+            q.has_filter = True
+        }
+
+        if self._at(TK_IDENT) and self._peek().text == "by" {
+            self._next()
+            q.has_by = True
+            q.group_exprs = self._parse_group_exprs()
+        }
+
+        if self._at(TK_LBRACE) {
+            self._next()
+            q.project_all = False
+            q.fields = self._parse_projection()
+        }
+
+        # pipeline stages: `| sort ... | take N | skip N`
+        while self._at(TK_OR) {
+            self._next()
+            st: Token = self._expect(TK_IDENT, "a pipeline stage (sort/take/skip)")
+            if st.text == "sort" {
+                stg: Stage = Stage(ST_SORT)
+                stg.sort_keys = self._parse_sort_keys()
+                q.stages.append(stg)
+            } else if st.text == "take" {
+                stg2: Stage = Stage(ST_TAKE)
+                stg2.n = int(self._expect(TK_INT, "a count after take").text)
+                q.stages.append(stg2)
+            } else if st.text == "skip" {
+                stg3: Stage = Stage(ST_SKIP)
+                stg3.n = int(self._expect(TK_INT, "a count after skip").text)
+                q.stages.append(stg3)
+            } else {
+                raise PrepareError("OQL: unknown pipeline stage '" + st.text + "'")
+            }
+        }
+
+        if not self._at(TK_EOF) {
+            raise PrepareError("OQL: trailing tokens after query")
+        }
+        return q
+    }
+
+    def _parse_sort_keys() -> list[SortKey] {
+        out: list[SortKey] = []
+        more: bool = True
+        while more {
+            desc: bool = False
+            if self._at(TK_MINUS) {
+                self._next()
+                desc = True
+            }
+            f: Token = self._expect(TK_IDENT, "a sort field")
+            out.append(SortKey(f.text, desc))
+            if self._at(TK_COMMA) {
+                self._next()
+            } else {
+                more = False
+            }
+        }
+        return out
+    }
+
+    # `+ rel` / `- rel` / `+ (rel ? filter)` existence constraint.
+    def _parse_exist(neg: bool) -> ExistJoin {
+        if self._at(TK_LPAREN) {
+            self._next()
+            rn: Token = self._expect(TK_IDENT, "a related collection name")
+            ej: ExistJoin = ExistJoin(rn.text, neg)
+            if self._at(TK_QUESTION) {
+                self._next()
+                ej.filter = self._parse_or()
+                ej.has_filter = True
+            }
+            self._expect(TK_RPAREN, "')' to close an existence join")
+            return ej
+        }
+        rn2: Token = self._expect(TK_IDENT, "a related collection name")
+        return ExistJoin(rn2.text, neg)
+    }
+
+    # `by e1, e2, ...` - the grouping keys (M5.3: each must be a plain field).
+    def _parse_group_exprs() -> list[Node] {
+        out: list[Node] = []
+        out.append(self._parse_or())
+        while self._at(TK_COMMA) {
+            self._next()
+            out.append(self._parse_or())
+        }
+        return out
+    }
+
+    def _parse_projection() -> list[ProjField] {
+        out: list[ProjField] = []
+        while not self._at(TK_RBRACE) {
+            name_tok: Token = self._expect(TK_IDENT, "a field name in the projection")
+            if self._at(TK_COLON) {
+                self._next()
+                expr: Node = self._parse_or()
+                out.append(ProjField(name_tok.text, expr))
+            } else if self._at(TK_QUESTION) or self._at(TK_LBRACE) {
+                # nested ref: relname [? filter] [{ subprojection }]
+                pf: ProjField = ProjField(name_tok.text, _n_true())
+                pf.is_ref = True
+                if self._at(TK_QUESTION) {
+                    self._next()
+                    pf.rel_filter = self._parse_or()
+                    pf.rel_has_filter = True
+                }
+                if self._at(TK_LBRACE) {
+                    self._next()
+                    pf.rel_project_all = False
+                    pf.rel_fields = self._parse_projection()
+                }
+                out.append(pf)
+            } else {
+                out.append(ProjField(name_tok.text, _n_field(name_tok.text)))
+            }
+            if self._at(TK_COMMA) {
+                self._next()
+            } else {
+                break
+            }
+        }
+        self._expect(TK_RBRACE, "'}' to close the projection")
+        return out
+    }
+
+    def _parse_or() -> Node {
+        left: Node = self._parse_and()
+        while self._at(TK_OR) {
+            self._next()
+            right: Node = self._parse_and()
+            nd: Node = Node(N_OR)
+            nd.children = [left, right]
+            left = nd
+        }
+        return left
+    }
+
+    def _parse_and() -> Node {
+        left: Node = self._parse_not()
+        while self._at(TK_AND) {
+            self._next()
+            right: Node = self._parse_not()
+            nd: Node = Node(N_AND)
+            nd.children = [left, right]
+            left = nd
+        }
+        return left
+    }
+
+    def _parse_not() -> Node {
+        if self._at(TK_NOT) {
+            self._next()
+            operand: Node = self._parse_not()
+            nd: Node = Node(N_NOT)
+            nd.children = [operand]
+            return nd
+        }
+        return self._parse_rel()
+    }
+
+    def _parse_rel() -> Node {
+        left: Node = self._parse_coalesce()
+        k: int = self._peek().kind
+        if k == TK_EQ or k == TK_NE or k == TK_LT or k == TK_LE or k == TK_GT or k == TK_GE {
+            optok: Token = self._next()
+            right: Node = self._parse_coalesce()
+            nd: Node = Node(N_CMP)
+            nd.op = optok.text
+            nd.children = [left, right]
+            return nd
+        }
+        if k == TK_TILDE or k == TK_TILDE_I {
+            gtok: Token = self._next()
+            pat: Node = self._parse_coalesce()
+            nd2: Node = Node(N_GLOB)
+            nd2.op = gtok.text
+            nd2.children = [left, pat]
+            return nd2
+        }
+        if k == TK_IDENT and self._peek().text == "in" {
+            self._next()
+            self._expect(TK_LBRACKET, "'[' to open an `in` list")
+            nd3: Node = Node(N_IN)
+            items: list[Node] = [left]
+            while not self._at(TK_RBRACKET) {
+                items.append(self._parse_coalesce())
+                if self._at(TK_COMMA) {
+                    self._next()
+                } else {
+                    break
+                }
+            }
+            self._expect(TK_RBRACKET, "']' to close an `in` list")
+            nd3.children = items
+            return nd3
+        }
+        return left
+    }
+
+    def _parse_coalesce() -> Node {
+        left: Node = self._parse_add()
+        while self._at(TK_COALESCE) {
+            self._next()
+            right: Node = self._parse_add()
+            nd: Node = Node(N_COALESCE)
+            nd.children = [left, right]
+            left = nd
+        }
+        return left
+    }
+
+    def _parse_add() -> Node {
+        left: Node = self._parse_mul()
+        while self._at(TK_PLUS) or self._at(TK_MINUS) {
+            optok: Token = self._next()
+            right: Node = self._parse_mul()
+            nd: Node = Node(N_ARITH)
+            nd.op = optok.text
+            nd.children = [left, right]
+            left = nd
+        }
+        return left
+    }
+
+    def _parse_mul() -> Node {
+        left: Node = self._parse_primary()
+        while self._at(TK_STAR) or self._at(TK_SLASH) or self._at(TK_PERCENT) {
+            optok: Token = self._next()
+            right: Node = self._parse_primary()
+            nd: Node = Node(N_ARITH)
+            nd.op = optok.text
+            nd.children = [left, right]
+            left = nd
+        }
+        return left
+    }
+
+    def _parse_primary() -> Node {
+        t: Token = self._peek()
+        if t.kind == TK_LPAREN {
+            self._next()
+            inner: Node = self._parse_or()
+            self._expect(TK_RPAREN, "')'")
+            return inner
+        }
+        if t.kind == TK_IDENT {
+            # intrinsic call: name!(args)
+            if self.pos + 2 < len(self.toks) and self.toks[self.pos + 1].kind == TK_NOT and self.toks[self.pos + 2].kind == TK_LPAREN {
+                return self._parse_intrinsic()
+            }
+            self._next()
+            if t.text == "true" {
+                nd: Node = Node(N_BOOL)
+                nd.bval = True
+                return nd
+            }
+            if t.text == "false" {
+                nd2: Node = Node(N_BOOL)
+                nd2.bval = False
+                return nd2
+            }
+            return _n_field(t.text)
+        }
+        if t.kind == TK_PARAM {
+            self._next()
+            ndp: Node = Node(N_PARAM)
+            ndp.name = t.text
+            return ndp
+        }
+        if t.kind == TK_STR {
+            self._next()
+            nd3: Node = Node(N_STR)
+            nd3.sval = t.text
+            return nd3
+        }
+        if t.kind == TK_INT {
+            self._next()
+            nd4: Node = Node(N_INT)
+            nd4.ival = int(t.text)
+            return nd4
+        }
+        if t.kind == TK_FLOAT {
+            self._next()
+            nd5: Node = Node(N_FLOAT)
+            nd5.fval = float(t.text)
+            return nd5
+        }
+        raise PrepareError("OQL: expected a field, literal, intrinsic, or '('")
+    }
+
+    def _parse_intrinsic() -> Node {
+        name_tok: Token = self._next()          # the name
+        self._next()                            # the '!'
+        self._expect(TK_LPAREN, "'(' after an intrinsic")
+        args: list[Node] = []
+        while not self._at(TK_RPAREN) {
+            args.append(self._parse_or())
+            if self._at(TK_COMMA) {
+                self._next()
+            } else {
+                break
+            }
+        }
+        self._expect(TK_RPAREN, "')' to close an intrinsic call")
+        if not _is_known_intrinsic(name_tok.text) {
+            raise PrepareError("OQL: unknown intrinsic '" + name_tok.text + "!'")
+        }
+        nd: Node = Node(N_INTRINSIC)
+        nd.name = name_tok.text
+        nd.children = args
+        return nd
+    }
+
+    #--- write statements -------------------------------------------------#
+
+    def parse_program() -> WriteProgram {
+        prog: WriteProgram = WriteProgram()
+        if self._at(TK_IDENT) and self._peek().text == "atomic" {
+            self._next()
+            self._expect(TK_LBRACE, "'{' after atomic")
+            while not self._at(TK_RBRACE) {
+                prog.stmts.append(self._parse_stmt())
+            }
+            self._expect(TK_RBRACE, "'}' to close atomic")
+        } else {
+            prog.stmts.append(self._parse_stmt())
+        }
+        if not self._at(TK_EOF) {
+            raise PrepareError("OQL: trailing tokens after write statement")
+        }
+        return prog
+    }
+
+    def _parse_stmt() -> WriteStmt {
+        kw: Token = self._expect(TK_IDENT, "a write verb (add/set/unset/put/del)")
+        if kw.text == "add" {
+            return self._parse_add_stmt()
+        }
+        if kw.text == "set" {
+            return self._parse_setput(W_SET)
+        }
+        if kw.text == "put" {
+            return self._parse_setput(W_PUT)
+        }
+        if kw.text == "unset" {
+            return self._parse_unset()
+        }
+        if kw.text == "del" {
+            return self._parse_del()
+        }
+        raise PrepareError("OQL: unknown write verb '" + kw.text + "'")
+    }
+
+    def _parse_add_stmt() -> WriteStmt {
+        src: Token = self._expect(TK_IDENT, "a collection name after add")
+        st: WriteStmt = WriteStmt(W_ADD, src.text)
+        if self._at(TK_LBRACKET) {
+            self._next()
+            while not self._at(TK_RBRACKET) {
+                st.docs.append(self._parse_doc_body())
+                if self._at(TK_COMMA) {
+                    self._next()
+                } else {
+                    break
+                }
+            }
+            self._expect(TK_RBRACKET, "']' to close a batch add")
+        } else {
+            st.docs.append(self._parse_doc_body())
+        }
+        return st
+    }
+
+    def _parse_doc_body() -> WriteDoc {
+        self._expect(TK_LBRACE, "'{' to open a document body")
+        wd: WriteDoc = WriteDoc()
+        while not self._at(TK_RBRACE) {
+            f: Token = self._expect(TK_IDENT, "a field name")
+            self._expect(TK_COLON, "':' after a field name")
+            e: Node = self._parse_or()
+            wd.assigns.append(Assign(f.text, e))
+            if self._at(TK_COMMA) {
+                self._next()
+            } else {
+                break
+            }
+        }
+        self._expect(TK_RBRACE, "'}' to close a document body")
+        return wd
+    }
+
+    def _parse_setput(kind: int) -> WriteStmt {
+        src: Token = self._expect(TK_IDENT, "a collection name")
+        st: WriteStmt = WriteStmt(kind, src.text)
+        if self._at(TK_QUESTION) {
+            self._next()
+            st.filter = self._parse_or()
+            st.has_filter = True
+        }
+        st.docs.append(self._parse_doc_body())
+        return st
+    }
+
+    def _parse_unset() -> WriteStmt {
+        src: Token = self._expect(TK_IDENT, "a collection name")
+        st: WriteStmt = WriteStmt(W_UNSET, src.text)
+        if self._at(TK_QUESTION) {
+            self._next()
+            st.filter = self._parse_or()
+            st.has_filter = True
+        }
+        self._expect(TK_LBRACE, "'{' listing fields to unset")
+        while not self._at(TK_RBRACE) {
+            f: Token = self._expect(TK_IDENT, "a field name to unset")
+            st.unset_fields.append(f.text)
+            if self._at(TK_COMMA) {
+                self._next()
+            } else {
+                break
+            }
+        }
+        self._expect(TK_RBRACE, "'}' to close unset")
+        return st
+    }
+
+    def _parse_del() -> WriteStmt {
+        src: Token = self._expect(TK_IDENT, "a collection name after del")
+        st: WriteStmt = WriteStmt(W_DEL, src.text)
+        if self._at(TK_QUESTION) {
+            self._next()
+            st.filter = self._parse_or()
+            st.has_filter = True
+        }
+        return st
+    }
+}
+
+def parse_program(text: str) -> WriteProgram {
+    p: Parser = Parser(tokenize(text))
+    return p.parse_program()
+}
+
+#===----------------------------------------------------------------------===#
+# Parameter binding: replace `$name` leaves with literal nodes before typecheck
+# and execution, so params are injected only as values (never as syntax).
+#===----------------------------------------------------------------------===#
+
+def _set_literal(n: Node, v: Any) -> None {
+    if isinstance(v, bool) {
+        const b: bool = v
+        n.kind = N_BOOL
+        n.bval = b
+    } else if isinstance(v, int) {
+        const i: int = v
+        n.kind = N_INT
+        n.ival = i
+    } else if isinstance(v, float) {
+        const f: float = v
+        n.kind = N_FLOAT
+        n.fval = f
+    } else {
+        const s: str = v
+        n.kind = N_STR
+        n.sval = s
+    }
+}
+
+def _bind_node(n: Node, params: dict[str, Any]) -> None {
+    if n.kind == N_PARAM {
+        if n.name not in params {
+            raise PrepareError("OQL: missing parameter $" + n.name)
+        }
+        _set_literal(n, params[n.name])
+        return
+    }
+    for ch in n.children {
+        _bind_node(ch, params)
+    }
+}
+
+def _bind_fields(fields: list[ProjField], params: dict[str, Any]) -> None {
+    for pf in fields {
+        if pf.is_ref {
+            if pf.rel_has_filter {
+                _bind_node(pf.rel_filter, params)
+            }
+            _bind_fields(pf.rel_fields, params)
+        } else {
+            _bind_node(pf.expr, params)
+        }
+    }
+}
+
+def bind_query(q: OqlQuery, params: dict[str, Any]) -> None {
+    if q.has_filter {
+        _bind_node(q.filter, params)
+    }
+    for ge in q.group_exprs {
+        _bind_node(ge, params)
+    }
+    for ej in q.joins {
+        if ej.has_filter {
+            _bind_node(ej.filter, params)
+        }
+    }
+    _bind_fields(q.fields, params)
+}
+
+def bind_program(prog: WriteProgram, params: dict[str, Any]) -> None {
+    for st in prog.stmts {
+        if st.has_filter {
+            _bind_node(st.filter, params)
+        }
+        for wd in st.docs {
+            for a in wd.assigns {
+                _bind_node(a.expr, params)
+            }
+        }
+    }
+}
+
+def _is_known_intrinsic(name: str) -> bool {
+    if name == "len" or name == "lower" or name == "upper" or name == "abs" or name == "round" or name == "floor" or name == "ceil" or name == "exists" or name == "missing" {
+        return True
+    }
+    return _is_aggregate(name)
+}
+
+def _is_aggregate(name: str) -> bool {
+    return name == "count" or name == "sum" or name == "avg" or name == "min" or name == "max" or name == "any" or name == "all"
+}
+
+# Does this expression contain an aggregate call anywhere?
+def _has_aggregate(n: Node) -> bool {
+    if n.kind == N_INTRINSIC and _is_aggregate(n.name) {
+        return True
+    }
+    for ch in n.children {
+        if _has_aggregate(ch) {
+            return True
+        }
+    }
+    return False
+}
+
+# True if the query nests related collections (ref projection fields) or
+# constrains the parent by existence (`+`/`-`). odb.dr drives those, since they
+# need the catalog + reverse indexes.
+def has_refs(q: OqlQuery) -> bool {
+    if len(q.joins) > 0 {
+        return True
+    }
+    if q.project_all {
+        return False
+    }
+    for pf in q.fields {
+        if pf.is_ref {
+            return True
+        }
+    }
+    return False
+}
+
+# A query is grouped/aggregate if it has a `by` clause or any aggregate in the
+# projection (a whole-set aggregate block).
+def is_aggregate(q: OqlQuery) -> bool {
+    if q.has_by {
+        return True
+    }
+    if q.project_all {
+        return False
+    }
+    for pf in q.fields {
+        if _has_aggregate(pf.expr) {
+            return True
+        }
+    }
+    return False
+}
+
+def parse(text: str) -> OqlQuery {
+    p: Parser = Parser(tokenize(text))
+    return p.parse()
+}
+
+#===----------------------------------------------------------------------===#
+# Values (runtime evaluation results)
+#===----------------------------------------------------------------------===#
+
+const VT_ABSENT: int = 0
+const VT_INT: int = 1
+const VT_NUM: int = 2
+const VT_STR: int = 3
+const VT_BOOL: int = 4
+
+class Val {
+    tag: int
+    ival: int
+    fval: float
+    sval: str
+    bval: bool
+
+    def(tag: int) {
+        self.tag = tag
+        self.ival = 0
+        self.fval = 0.0
+        self.sval = ""
+        self.bval = False
+    }
+}
+
+def _v_absent() -> Val {
+    return Val(VT_ABSENT)
+}
+
+def _v_int(i: int) -> Val {
+    v: Val = Val(VT_INT)
+    v.ival = i
+    return v
+}
+
+def _v_num(f: float) -> Val {
+    v: Val = Val(VT_NUM)
+    v.fval = f
+    return v
+}
+
+def _v_str(s: str) -> Val {
+    v: Val = Val(VT_STR)
+    v.sval = s
+    return v
+}
+
+def _v_bool(b: bool) -> Val {
+    v: Val = Val(VT_BOOL)
+    v.bval = b
+    return v
+}
+
+def _v_is_num(v: Val) -> bool {
+    return v.tag == VT_INT or v.tag == VT_NUM
+}
+
+def _v_as_num(v: Val) -> float {
+    if v.tag == VT_INT {
+        return float(v.ival)
+    }
+    return v.fval
+}
+
+# Unbox a stored field value (Any) into a Val, keyed by its schema tag.
+def _field_val(tag: int, x: Any) -> Val {
+    if tag == T_BOOL {
+        const b: bool = x
+        return _v_bool(b)
+    }
+    if tag == T_INT {
+        const i: int = x
+        return _v_int(i)
+    }
+    if tag == T_NUM {
+        if isinstance(x, int) {
+            const iv: int = x
+            return _v_num(float(iv))
+        }
+        const f: float = x
+        return _v_num(f)
+    }
+    const s: str = x
+    return _v_str(s)
+}
+
+#===----------------------------------------------------------------------===#
+# Type checking (prepare time)
+#===----------------------------------------------------------------------===#
+
+def typecheck(cs: CompiledSchema, q: OqlQuery) -> None {
+    if q.has_filter {
+        _tc_pred(cs, q.filter)
+    }
+    if is_aggregate(q) {
+        _tc_grouped(cs, q)
+        return
+    }
+    if not q.project_all {
+        for pf in q.fields {
+            if not pf.is_ref {
+                _tc_value(cs, pf.expr)
+            }
+        }
+    }
+}
+
+# Public wrappers so odb.dr can type-check/evaluate a nested block's scalar
+# fields and filters against the related schema.
+def tc_pred(cs: CompiledSchema, n: Node) -> None {
+    _tc_pred(cs, n)
+}
+
+def tc_value(cs: CompiledSchema, n: Node) -> int {
+    return _tc_value(cs, n)
+}
+
+def pred(cs: CompiledSchema, n: Node, doc: dict[str, Any]) -> bool {
+    return _eval_pred(cs, n, doc)
+}
+
+# Does a value expression evaluate to a present (non-absent) value for `doc`?
+def eval_present(cs: CompiledSchema, n: Node, doc: dict[str, Any]) -> bool {
+    return eval_value(cs, n, doc).tag != VT_ABSENT
+}
+
+# Evaluate a value expression to its underlying Any (int/float/str/bool). Raises
+# if it is absent - callers gate with eval_present for optional writes.
+def eval_any(cs: CompiledSchema, n: Node, doc: dict[str, Any]) -> Any {
+    v: Val = eval_value(cs, n, doc)
+    if v.tag == VT_INT {
+        ri: Any = v.ival
+        return ri
+    }
+    if v.tag == VT_NUM {
+        rn: Any = v.fval
+        return rn
+    }
+    if v.tag == VT_STR {
+        rs: Any = v.sval
+        return rs
+    }
+    if v.tag == VT_BOOL {
+        rb: Any = v.bval
+        return rb
+    }
+    raise PrepareError("OQL: expression is absent where a value is required")
+}
+
+# A grouped/aggregate query: group keys must be plain required fields, the
+# projection is mandatory, and every projected field must be a group key or an
+# aggregate (a bare non-grouped field would be ambiguous - a prepare error).
+def _tc_grouped(cs: CompiledSchema, q: OqlQuery) -> None {
+    gk: dict[str, bool] = {}
+    for ge in q.group_exprs {
+        if ge.kind != N_FIELD {
+            raise PrepareError("OQL: `by` supports a plain field (M5.3)")
+        }
+        _tc_field(cs, ge.name)
+        gk[ge.name] = True
+    }
+    if q.project_all {
+        raise PrepareError("OQL: a grouped/aggregate query needs a projection block")
+    }
+    for pf in q.fields {
+        _tc_grouped_field(cs, gk, pf.expr)
+    }
+}
+
+def _tc_grouped_field(cs: CompiledSchema, gk: dict[str, bool], n: Node) -> int {
+    if n.kind == N_INTRINSIC and _is_aggregate(n.name) {
+        return _tc_agg(cs, n)
+    }
+    if n.kind == N_INT {
+        return T_INT
+    }
+    if n.kind == N_FLOAT {
+        return T_NUM
+    }
+    if n.kind == N_STR {
+        return T_STR
+    }
+    if n.kind == N_BOOL {
+        return T_BOOL
+    }
+    if n.kind == N_FIELD {
+        if n.name not in gk {
+            raise PrepareError("OQL: field '" + n.name + "' must be grouped (in `by`) or aggregated")
+        }
+        return _tc_field(cs, n.name).tag
+    }
+    if n.kind == N_ARITH {
+        lt: int = _tc_grouped_field(cs, gk, n.children[0])
+        rt: int = _tc_grouped_field(cs, gk, n.children[1])
+        if not _is_num_tag(lt) or not _is_num_tag(rt) {
+            raise PrepareError("OQL: arithmetic needs numeric operands")
+        }
+        if lt == T_NUM or rt == T_NUM or n.op == "/" {
+            return T_NUM
+        }
+        return T_INT
+    }
+    if n.kind == N_COALESCE {
+        lt2: int = _tc_grouped_field(cs, gk, n.children[0])
+        _tc_grouped_field(cs, gk, n.children[1])
+        return lt2
+    }
+    if n.kind == N_INTRINSIC {
+        # a scalar intrinsic over a group key
+        _tc_grouped_field(cs, gk, n.children[0])
+        return _tc_intrinsic(cs, n)
+    }
+    raise PrepareError("OQL: invalid grouped projection expression")
+}
+
+def _tc_agg(cs: CompiledSchema, n: Node) -> int {
+    nm: str = n.name
+    if nm == "count" {
+        if len(n.children) == 0 {
+            return T_INT
+        }
+        if len(n.children) != 1 {
+            raise PrepareError("OQL: count! takes zero or one argument")
+        }
+        _tc_value(cs, n.children[0])
+        return T_INT
+    }
+    if len(n.children) != 1 {
+        raise PrepareError("OQL: " + nm + "! takes one argument")
+    }
+    at: int = _tc_value(cs, n.children[0])
+    if nm == "sum" {
+        if not _is_num_tag(at) {
+            raise PrepareError("OQL: sum! needs a numeric field")
+        }
+        return at
+    }
+    if nm == "avg" {
+        if not _is_num_tag(at) {
+            raise PrepareError("OQL: avg! needs a numeric field")
+        }
+        return T_NUM
+    }
+    if nm == "min" or nm == "max" {
+        return at
+    }
+    # any / all
+    if at != T_BOOL {
+        raise PrepareError("OQL: " + nm + "! needs a boolean field")
+    }
+    return T_BOOL
+}
+
+# Type-check a node used in boolean (predicate) position.
+def _tc_pred(cs: CompiledSchema, n: Node) -> None {
+    if n.kind == N_AND or n.kind == N_OR {
+        _tc_pred(cs, n.children[0])
+        _tc_pred(cs, n.children[1])
+        return
+    }
+    if n.kind == N_NOT {
+        _tc_pred(cs, n.children[0])
+        return
+    }
+    if n.kind == N_BOOL {
+        return
+    }
+    if n.kind == N_FIELD {
+        fs: FieldSpec = _tc_field(cs, n.name)
+        if fs.tag != T_BOOL {
+            raise PrepareError("OQL: field '" + n.name + "' is not boolean; it needs a comparison")
+        }
+        return
+    }
+    if n.kind == N_INTRINSIC and (n.name == "exists" or n.name == "missing") {
+        _tc_value(cs, n)
+        return
+    }
+    if n.kind == N_CMP {
+        lt: int = _tc_value(cs, n.children[0])
+        rt: int = _tc_value(cs, n.children[1])
+        if not _kinds_comparable(lt, rt) {
+            raise PrepareError("OQL: type mismatch in comparison")
+        }
+        return
+    }
+    if n.kind == N_GLOB {
+        lt2: int = _tc_value(cs, n.children[0])
+        rt2: int = _tc_value(cs, n.children[1])
+        if lt2 != T_STR or rt2 != T_STR {
+            raise PrepareError("OQL: glob '~' needs string operands")
+        }
+        return
+    }
+    if n.kind == N_IN {
+        base: int = _tc_value(cs, n.children[0])
+        j: int = 1
+        while j < len(n.children) {
+            it: int = _tc_value(cs, n.children[j])
+            if not _kinds_comparable(base, it) {
+                raise PrepareError("OQL: `in` list has a mismatched element type")
+            }
+            j = j + 1
+        }
+        return
+    }
+    raise PrepareError("OQL: expression is not a valid predicate")
+}
+
+# Type-check a node used in value position; returns its result tag.
+def _tc_value(cs: CompiledSchema, n: Node) -> int {
+    if n.kind == N_INT {
+        return T_INT
+    }
+    if n.kind == N_FLOAT {
+        return T_NUM
+    }
+    if n.kind == N_STR {
+        return T_STR
+    }
+    if n.kind == N_BOOL {
+        return T_BOOL
+    }
+    if n.kind == N_FIELD {
+        return _tc_field(cs, n.name).tag
+    }
+    if n.kind == N_ARITH {
+        lt: int = _tc_value(cs, n.children[0])
+        rt: int = _tc_value(cs, n.children[1])
+        if not _is_num_tag(lt) or not _is_num_tag(rt) {
+            raise PrepareError("OQL: arithmetic needs numeric operands")
+        }
+        if lt == T_NUM or rt == T_NUM or n.op == "/" {
+            return T_NUM
+        }
+        return T_INT
+    }
+    if n.kind == N_COALESCE {
+        lt2: int = _tc_value(cs, n.children[0])
+        rt2: int = _tc_value(cs, n.children[1])
+        if not _kinds_comparable(lt2, rt2) {
+            raise PrepareError("OQL: `??` operands have different types")
+        }
+        return lt2
+    }
+    if n.kind == N_INTRINSIC {
+        return _tc_intrinsic(cs, n)
+    }
+    if n.kind == N_CMP or n.kind == N_GLOB or n.kind == N_IN or n.kind == N_AND or n.kind == N_OR or n.kind == N_NOT {
+        _tc_pred(cs, n)
+        return T_BOOL
+    }
+    raise PrepareError("OQL: invalid value expression")
+}
+
+def _tc_intrinsic(cs: CompiledSchema, n: Node) -> int {
+    nm: str = n.name
+    if _is_aggregate(nm) {
+        raise PrepareError("OQL: aggregate '" + nm + "!' is only valid in a grouped/aggregate projection")
+    }
+    if nm == "exists" or nm == "missing" {
+        if len(n.children) != 1 or n.children[0].kind != N_FIELD {
+            raise PrepareError("OQL: " + nm + "! takes one field path")
+        }
+        _tc_field(cs, n.children[0].name)
+        return T_BOOL
+    }
+    if nm == "len" {
+        if len(n.children) != 1 {
+            raise PrepareError("OQL: len! takes one argument")
+        }
+        if _tc_value(cs, n.children[0]) != T_STR {
+            raise PrepareError("OQL: len! needs a string argument")
+        }
+        return T_INT
+    }
+    if nm == "lower" or nm == "upper" {
+        if len(n.children) != 1 or _tc_value(cs, n.children[0]) != T_STR {
+            raise PrepareError("OQL: " + nm + "! needs a string argument")
+        }
+        return T_STR
+    }
+    # abs / round / floor / ceil
+    if len(n.children) != 1 or not _is_num_tag(_tc_value(cs, n.children[0])) {
+        raise PrepareError("OQL: " + nm + "! needs a numeric argument")
+    }
+    if nm == "abs" or nm == "round" or nm == "floor" or nm == "ceil" {
+        return T_NUM
+    }
+    raise PrepareError("OQL: unknown intrinsic '" + nm + "!'")
+}
+
+def _tc_field(cs: CompiledSchema, name: str) -> FieldSpec {
+    if name not in cs.by_name {
+        raise PrepareError("OQL: unknown field '" + name + "' in '" + cs.name + "'")
+    }
+    return cs.by_name[name]
+}
+
+def _is_num_tag(t: int) -> bool {
+    return t == T_INT or t == T_NUM
+}
+
+def _kinds_comparable(a: int, b: int) -> bool {
+    if _is_num_tag(a) and _is_num_tag(b) {
+        return True
+    }
+    return a == b
+}
+
+#===----------------------------------------------------------------------===#
+# Evaluation
+#===----------------------------------------------------------------------===#
+
+def eval_value(cs: CompiledSchema, n: Node, doc: dict[str, Any]) -> Val {
+    if n.kind == N_INT {
+        return _v_int(n.ival)
+    }
+    if n.kind == N_FLOAT {
+        return _v_num(n.fval)
+    }
+    if n.kind == N_STR {
+        return _v_str(n.sval)
+    }
+    if n.kind == N_BOOL {
+        return _v_bool(n.bval)
+    }
+    if n.kind == N_FIELD {
+        if n.name not in doc {
+            return _v_absent()
+        }
+        return _field_val(cs.by_name[n.name].tag, doc[n.name])
+    }
+    if n.kind == N_ARITH {
+        return _eval_arith(cs, n, doc)
+    }
+    if n.kind == N_COALESCE {
+        l: Val = eval_value(cs, n.children[0], doc)
+        if l.tag == VT_ABSENT {
+            return eval_value(cs, n.children[1], doc)
+        }
+        return l
+    }
+    if n.kind == N_INTRINSIC {
+        return _eval_intrinsic(cs, n, doc)
+    }
+    # predicate node evaluated in value position -> boolean Val
+    return _v_bool(_eval_pred(cs, n, doc))
+}
+
+def _eval_arith(cs: CompiledSchema, n: Node, doc: dict[str, Any]) -> Val {
+    l: Val = eval_value(cs, n.children[0], doc)
+    r: Val = eval_value(cs, n.children[1], doc)
+    return _arith_vals(n.op, l, r)
+}
+
+# Arithmetic on two evaluated Vals (shared by per-doc and aggregate evaluation).
+def _arith_vals(op: str, l: Val, r: Val) -> Val {
+    if l.tag == VT_ABSENT or r.tag == VT_ABSENT {
+        return _v_absent()
+    }
+    a: float = _v_as_num(l)
+    b: float = _v_as_num(r)
+    both_int: bool = l.tag == VT_INT and r.tag == VT_INT
+    if op == "+" {
+        return _num_result(a + b, both_int)
+    }
+    if op == "-" {
+        return _num_result(a - b, both_int)
+    }
+    if op == "*" {
+        return _num_result(a * b, both_int)
+    }
+    if op == "%" {
+        if b == 0.0 {
+            return _v_absent()
+        }
+        return _num_result(a - b * float(int(a / b)), both_int)
+    }
+    # division is always float (spec: exact numeric semantics)
+    if b == 0.0 {
+        return _v_absent()
+    }
+    return _v_num(a / b)
+}
+
+def _num_result(x: float, as_int: bool) -> Val {
+    if as_int {
+        return _v_int(int(x))
+    }
+    return _v_num(x)
+}
+
+def _eval_intrinsic(cs: CompiledSchema, n: Node, doc: dict[str, Any]) -> Val {
+    nm: str = n.name
+    if nm == "exists" {
+        return _v_bool(n.children[0].name in doc)
+    }
+    if nm == "missing" {
+        return _v_bool(n.children[0].name not in doc)
+    }
+    return _apply_scalar(nm, eval_value(cs, n.children[0], doc))
+}
+
+# Apply a scalar intrinsic to an evaluated argument Val.
+def _apply_scalar(nm: str, arg: Val) -> Val {
+    if arg.tag == VT_ABSENT {
+        return _v_absent()
+    }
+    if nm == "len" {
+        return _v_int(len(arg.sval))
+    }
+    if nm == "lower" {
+        return _v_str(arg.sval.lower())
+    }
+    if nm == "upper" {
+        return _v_str(arg.sval.upper())
+    }
+    x: float = _v_as_num(arg)
+    if nm == "abs" {
+        if x < 0.0 {
+            return _v_num(-x)
+        }
+        return _v_num(x)
+    }
+    if nm == "floor" {
+        fl: int = int(x)
+        if x < 0.0 and float(fl) != x {
+            fl = fl - 1
+        }
+        return _v_num(float(fl))
+    }
+    if nm == "ceil" {
+        cl: int = int(x)
+        if x > 0.0 and float(cl) != x {
+            cl = cl + 1
+        }
+        return _v_num(float(cl))
+    }
+    # round (half away from zero)
+    if x >= 0.0 {
+        return _v_num(float(int(x + 0.5)))
+    }
+    return _v_num(float(int(x - 0.5)))
+}
+
+# Evaluate a node in boolean position (two-valued logic).
+def _eval_pred(cs: CompiledSchema, n: Node, doc: dict[str, Any]) -> bool {
+    if n.kind == N_AND {
+        return _eval_pred(cs, n.children[0], doc) and _eval_pred(cs, n.children[1], doc)
+    }
+    if n.kind == N_OR {
+        return _eval_pred(cs, n.children[0], doc) or _eval_pred(cs, n.children[1], doc)
+    }
+    if n.kind == N_NOT {
+        return not _eval_pred(cs, n.children[0], doc)
+    }
+    if n.kind == N_BOOL {
+        return n.bval
+    }
+    if n.kind == N_FIELD {
+        if n.name not in doc {
+            return False
+        }
+        const b: bool = doc[n.name]
+        return b
+    }
+    if n.kind == N_INTRINSIC {
+        v: Val = _eval_intrinsic(cs, n, doc)
+        return v.tag == VT_BOOL and v.bval
+    }
+    if n.kind == N_CMP {
+        return _eval_cmp(cs, n, doc)
+    }
+    if n.kind == N_GLOB {
+        return _eval_glob(cs, n, doc)
+    }
+    if n.kind == N_IN {
+        return _eval_in(cs, n, doc)
+    }
+    return False
+}
+
+def _eval_cmp(cs: CompiledSchema, n: Node, doc: dict[str, Any]) -> bool {
+    l: Val = eval_value(cs, n.children[0], doc)
+    r: Val = eval_value(cs, n.children[1], doc)
+    if l.tag == VT_ABSENT or r.tag == VT_ABSENT {
+        return False
+    }
+    if l.tag == VT_STR and r.tag == VT_STR {
+        return _cmp_order_str(l.sval, n.op, r.sval)
+    }
+    if l.tag == VT_BOOL and r.tag == VT_BOOL {
+        if n.op == "==" {
+            return l.bval == r.bval
+        }
+        if n.op == "!=" {
+            return l.bval != r.bval
+        }
+        raise PrepareError("OQL: boolean comparison supports only == and !=")
+    }
+    return _cmp_order_num(_v_as_num(l), n.op, _v_as_num(r))
+}
+
+def _eval_glob(cs: CompiledSchema, n: Node, doc: dict[str, Any]) -> bool {
+    l: Val = eval_value(cs, n.children[0], doc)
+    r: Val = eval_value(cs, n.children[1], doc)
+    if l.tag != VT_STR or r.tag != VT_STR {
+        return False
+    }
+    ci: bool = n.op == "~*"
+    if ci {
+        return _glob_match(l.sval.lower(), r.sval.lower())
+    }
+    return _glob_match(l.sval, r.sval)
+}
+
+def _eval_in(cs: CompiledSchema, n: Node, doc: dict[str, Any]) -> bool {
+    target: Val = eval_value(cs, n.children[0], doc)
+    if target.tag == VT_ABSENT {
+        return False
+    }
+    j: int = 1
+    while j < len(n.children) {
+        item: Val = eval_value(cs, n.children[j], doc)
+        if _vals_equal(target, item) {
+            return True
+        }
+        j = j + 1
+    }
+    return False
+}
+
+def _vals_equal(a: Val, b: Val) -> bool {
+    if a.tag == VT_STR and b.tag == VT_STR {
+        return a.sval == b.sval
+    }
+    if a.tag == VT_BOOL and b.tag == VT_BOOL {
+        return a.bval == b.bval
+    }
+    if _v_is_num(a) and _v_is_num(b) {
+        return _v_as_num(a) == _v_as_num(b)
+    }
+    return False
+}
+
+def _cmp_order_num(a: float, op: str, b: float) -> bool {
+    if op == "==" {
+        return a == b
+    }
+    if op == "!=" {
+        return a != b
+    }
+    if op == "<" {
+        return a < b
+    }
+    if op == "<=" {
+        return a <= b
+    }
+    if op == ">" {
+        return a > b
+    }
+    return a >= b
+}
+
+def _cmp_order_str(a: str, op: str, b: str) -> bool {
+    if op == "==" {
+        return a == b
+    }
+    if op == "!=" {
+        return a != b
+    }
+    if op == "<" {
+        return a < b
+    }
+    if op == "<=" {
+        return a <= b
+    }
+    if op == ">" {
+        return a > b
+    }
+    return a >= b
+}
+
+# Glob: `*` matches any run (including empty), `?` matches one character.
+def _glob_match(text: str, pat: str) -> bool {
+    ti: int = 0
+    pi: int = 0
+    tn: int = len(text)
+    pn: int = len(pat)
+    star_pi: int = -1
+    star_ti: int = 0
+    while ti < tn {
+        if pi < pn and (pat[pi] == "?" or pat[pi] == text[ti]) {
+            ti = ti + 1
+            pi = pi + 1
+        } else if pi < pn and pat[pi] == "*" {
+            star_pi = pi
+            star_ti = ti
+            pi = pi + 1
+        } else if star_pi >= 0 {
+            pi = star_pi + 1
+            star_ti = star_ti + 1
+            ti = star_ti
+        } else {
+            return False
+        }
+    }
+    while pi < pn and pat[pi] == "*" {
+        pi = pi + 1
+    }
+    return pi == pn
+}
+
+#===----------------------------------------------------------------------===#
+# Execution helpers used by odb.dr
+#===----------------------------------------------------------------------===#
+
+# True if `doc` passes the query's filter (or there is none).
+def matches(cs: CompiledSchema, q: OqlQuery, doc: dict[str, Any]) -> bool {
+    if not q.has_filter {
+        return True
+    }
+    return _eval_pred(cs, q.filter, doc)
+}
+
+# Build the projected row for `doc` (without _id). Whole document if no block.
+def project(cs: CompiledSchema, q: OqlQuery, doc: dict[str, Any]) -> dict[str, Any] {
+    return project_fields(cs, q.fields, q.project_all, doc)
+}
+
+# The scalar part of a projection field list. Ref fields are skipped here (odb.dr
+# resolves them against the catalog + reverse indexes and merges them in).
+def project_fields(cs: CompiledSchema, fields: list[ProjField], project_all: bool, doc: dict[str, Any]) -> dict[str, Any] {
+    out: dict[str, Any] = {}
+    if project_all {
+        for k in doc {
+            out[k] = doc[k]
+        }
+        return out
+    }
+    for pf in fields {
+        if not pf.is_ref {
+            _store_val(out, pf.alias, eval_value(cs, pf.expr, doc))
+        }
+    }
+    return out
+}
+
+def _store_val(out: dict[str, Any], alias: str, v: Val) -> None {
+    if v.tag == VT_INT {
+        out[alias] = v.ival
+    } else if v.tag == VT_NUM {
+        out[alias] = v.fval
+    } else if v.tag == VT_STR {
+        out[alias] = v.sval
+    } else if v.tag == VT_BOOL {
+        out[alias] = v.bval
+    }
+    # VT_ABSENT: omit the field (absent optional / null-ish), spec section 5
+}
+
+#===----------------------------------------------------------------------===#
+# Grouped / aggregate execution
+#===----------------------------------------------------------------------===#
+
+# Stable bucket string for a group-key Val list.
+def _key_str(vals: list[Val]) -> str {
+    s: str = ""
+    for v in vals {
+        if v.tag == VT_ABSENT {
+            s = s + "a|"
+        } else if v.tag == VT_INT {
+            s = s + "i" + str(v.ival) + "|"
+        } else if v.tag == VT_NUM {
+            s = s + "n" + str(v.fval) + "|"
+        } else if v.tag == VT_STR {
+            s = s + "s" + v.sval + "|"
+        } else {
+            s = s + "b" + str(v.bval) + "|"
+        }
+    }
+    return s
+}
+
+class _Group {
+    rep: dict[str, Any]
+    docs: list[dict[str, Any]]
+
+    def(rep: dict[str, Any]) {
+        self.rep = rep
+        self.docs = []
+    }
+}
+
+# Run a grouped/aggregate query over the already-filtered docs; returns one
+# result row per group (or one row for a whole-set aggregate, even over zero
+# docs). Group order is first-seen.
+def aggregate(cs: CompiledSchema, q: OqlQuery, docs: list[dict[str, Any]]) -> list[dict[str, Any]] {
+    order: list[str] = []
+    groups: dict[str, _Group] = {}
+    for doc in docs {
+        kvals: list[Val] = []
+        for ge in q.group_exprs {
+            kvals.append(eval_value(cs, ge, doc))
+        }
+        ks: str = _key_str(kvals)
+        if ks not in groups {
+            groups[ks] = _Group(doc)
+            order.append(ks)
+        }
+        groups[ks].docs.append(doc)
+    }
+    if not q.has_by and len(order) == 0 {
+        empty: dict[str, Any] = {}
+        groups[""] = _Group(empty)
+        order.append("")
+    }
+    out: list[dict[str, Any]] = []
+    for ks in order {
+        g: _Group = groups[ks]
+        row: dict[str, Any] = {}
+        for pf in q.fields {
+            _store_val(row, pf.alias, eval_agg(cs, pf.expr, g.docs, g.rep))
+        }
+        out.append(row)
+    }
+    return out
+}
+
+# Evaluate a projection expression in aggregate context over a group's docs.
+def eval_agg(cs: CompiledSchema, expr: Node, docs: list[dict[str, Any]], rep: dict[str, Any]) -> Val {
+    if expr.kind == N_INTRINSIC and _is_aggregate(expr.name) {
+        return _compute_agg(cs, expr, docs)
+    }
+    if expr.kind == N_INT {
+        return _v_int(expr.ival)
+    }
+    if expr.kind == N_FLOAT {
+        return _v_num(expr.fval)
+    }
+    if expr.kind == N_STR {
+        return _v_str(expr.sval)
+    }
+    if expr.kind == N_BOOL {
+        return _v_bool(expr.bval)
+    }
+    if expr.kind == N_FIELD {
+        return eval_value(cs, expr, rep)         # a group-key field
+    }
+    if expr.kind == N_ARITH {
+        l: Val = eval_agg(cs, expr.children[0], docs, rep)
+        r: Val = eval_agg(cs, expr.children[1], docs, rep)
+        return _arith_vals(expr.op, l, r)
+    }
+    if expr.kind == N_COALESCE {
+        l2: Val = eval_agg(cs, expr.children[0], docs, rep)
+        if l2.tag == VT_ABSENT {
+            return eval_agg(cs, expr.children[1], docs, rep)
+        }
+        return l2
+    }
+    if expr.kind == N_INTRINSIC {
+        return _apply_scalar(expr.name, eval_agg(cs, expr.children[0], docs, rep))
+    }
+    return _v_absent()
+}
+
+def _compute_agg(cs: CompiledSchema, n: Node, docs: list[dict[str, Any]]) -> Val {
+    nm: str = n.name
+    if nm == "count" {
+        if len(n.children) == 0 {
+            return _v_int(len(docs))
+        }
+        cnt: int = 0
+        for d in docs {
+            if eval_value(cs, n.children[0], d).tag != VT_ABSENT {
+                cnt = cnt + 1
+            }
+        }
+        return _v_int(cnt)
+    }
+    if nm == "sum" or nm == "avg" {
+        total: float = 0.0
+        k: int = 0
+        all_int: bool = True
+        for d in docs {
+            av: Val = eval_value(cs, n.children[0], d)
+            if av.tag == VT_ABSENT {
+                continue
+            }
+            total = total + _v_as_num(av)
+            k = k + 1
+            if av.tag != VT_INT {
+                all_int = False
+            }
+        }
+        if nm == "avg" {
+            if k == 0 {
+                return _v_absent()
+            }
+            return _v_num(total / float(k))
+        }
+        if all_int {
+            return _v_int(int(total))
+        }
+        return _v_num(total)
+    }
+    if nm == "min" or nm == "max" {
+        best: Val = _v_absent()
+        for d in docs {
+            av2: Val = eval_value(cs, n.children[0], d)
+            if av2.tag == VT_ABSENT {
+                continue
+            }
+            if best.tag == VT_ABSENT {
+                best = av2
+            } else if nm == "min" and _val_lt(av2, best) {
+                best = av2
+            } else if nm == "max" and _val_lt(best, av2) {
+                best = av2
+            }
+        }
+        return best
+    }
+    # any / all over a boolean field
+    if nm == "any" {
+        for d in docs {
+            av3: Val = eval_value(cs, n.children[0], d)
+            if av3.tag == VT_BOOL and av3.bval {
+                return _v_bool(True)
+            }
+        }
+        return _v_bool(False)
+    }
+    for d in docs {
+        av4: Val = eval_value(cs, n.children[0], d)
+        if av4.tag == VT_BOOL and not av4.bval {
+            return _v_bool(False)
+        }
+    }
+    return _v_bool(True)
+}
+
+def _val_lt(a: Val, b: Val) -> bool {
+    if a.tag == VT_STR and b.tag == VT_STR {
+        return a.sval < b.sval
+    }
+    return _v_as_num(a) < _v_as_num(b)
+}

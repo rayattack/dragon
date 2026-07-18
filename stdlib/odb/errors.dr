@@ -1,0 +1,31 @@
+# odb.errors - the exception taxonomy (spec section 10).
+#
+# Each error names one honest failure class. CorruptionError in particular is
+# never swallowed: a checksum or structural mismatch always surfaces here
+
+class ODBError(Exception) {}
+
+# Schema definition / registration problems.
+class SchemaError(ODBError) {}
+
+# An OQL statement rejected before execution (type, path, ambiguity).
+class PrepareError(ODBError) {}
+
+# Unique, ref, or on_delete restrict violation, checked at commit.
+class IntegrityError(ODBError) {}
+
+# Optimistic commit collision. Retryable; db.atomic retries the closure.
+class ConflictError(ODBError) {}
+
+# Checksum or structural damage on a page. Loud by construction.
+class CorruptionError(ODBError) {}
+
+# A document or schema that was expected to exist does not.
+class NotFound(ODBError) {}
+
+# Internal control flow for the HA capture seam (spec section 19 v3b): when a
+# leader captures a write for consensus, _flush() raises this instead of
+# committing, so the statement unwinds through its normal rollback path with
+# the op list preserved. Deliberately NOT an ODBError: user code catching
+# ODBError must never swallow it.
+class CaptureSignal(Exception) {}

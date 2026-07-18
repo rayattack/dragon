@@ -1,0 +1,2670 @@
+# odb - the embedded object database (ODB). Single .odb file, ACID, crash-safe.
+#
+#   from odb import ODB, Documents, Document
+#
+#   db: ODB = ODB("shop.odb")                       # or connect("shop.odb")
+#   customers: Documents = db.schema("customers", customers_schema).meta({
+#       primary: ["id"], unique: ["email"], index: ["city"],
+#   })
+#   ada: Document = customers.save({id: 1, name: "Ada", email: "ada@x.com"})
+#   ada.edit({city: "Abuja"})
+#   ada.wipe()
+#   one: Document = customers.read(ada.id)          # by _id; raises NotFound if gone
+#   by_email: Document = customers.read(email="ada@x.com")   # by unique index
+#   rows: list[Document] = customers.all()
+#
+# A .odb file is a forest of B+trees under one catalog (spec section 13). The
+# catalog tree is keyed by schema id; each entry carries the schema's compiled
+# definition, its metadata, the root of its document tree (docid -> DBON), and
+# the root of every index tree it declares (memcomparable key -> docid). A write
+# copy-on-writes the document tree AND every affected index tree AND the catalog
+# entry, then commits them in ONE atomic pager commit, so a crash leaves the
+# whole database on the previous or the next consistent snapshot, never between.
+#
+# Integrity (uniqueness) is validated during the write and the whole thing rolls
+# back on violation (spec section 7): a rejected save never leaves staged pages
+# behind. M4 scope: primary/unique/index maintenance and keyed reads; refs and
+# OQL (db.find) arrive with the M4 refs stage and M5
+
+from odb.vfs import FileVFS, VFS
+from odb.pager import Pager, create, open_pager, RETAIN_NONE
+from odb.commitlog import CommitLog, LogEntry, LogOp, parse_retain
+from odb.commitlog import OP_ADD, OP_SET, OP_DEL, OP_PUT, OP_DEFINE
+from odb.btree import BTree
+from odb.index import IndexTree
+from odb.schema import compile_schema, CompiledSchema
+from odb.meta import compile_meta, CompiledMeta, IndexDecl, RefDecl, enc_decl_key, enc_field_value
+from odb.meta import IK_REVERSE
+from odb.dbon import encode, decode
+from odb.lock import WriterLock
+from odb.oql import parse, typecheck, matches, project, project_fields, is_aggregate, aggregate
+from odb.oql import has_refs, tc_pred, tc_value, pred, eval_present, eval_any, OqlQuery, ProjField, ExistJoin
+from odb.oql import Stage, SortKey, ST_SORT, ST_TAKE, ST_SKIP
+from odb.oql import parse_program, bind_query, bind_program, WriteProgram, WriteStmt, WriteDoc
+from odb.oql import W_ADD, W_SET, W_UNSET, W_PUT, W_DEL
+from odb.checker import check_tree, check_index_tree, CheckResult
+from odb.codec import blank, put_u16, put_u32, put_u64, put_bytes
+from odb.codec import get_u16, get_u32, get_u64, get_bytes
+from odb.errors import SchemaError, NotFound, ODBError, IntegrityError, PrepareError, CorruptionError, CaptureSignal
+from odb.raftlog import RaftTail
+from json import dumps, loads
+from time import now
+from binascii import unhexlify
+
+# Catalog entry layout (value in the catalog tree, keyed by schema id):
+#   0  doc_tree_root   u64
+#   8  schema_id       u16
+#   10 version         u16
+#   12 name_len        u16
+#   14 schema_json_len u32
+#   18 meta_json_len   u32
+#   22 index_count     u16
+#   24 name | schema_json | meta_json | index table
+#      index table: index_count * (name_len u16, name bytes, root u64)
+const _E_DOC_ROOT: int = 0
+const _E_SID: int = 8
+const _E_VER: int = 10
+const _E_NAMELEN: int = 12
+const _E_SJLEN: int = 14
+const _E_MJLEN: int = 18
+const _E_IXCOUNT: int = 22
+const _E_HEAD: int = 24
+
+
+def _ikey(sid: int, name: str) -> str {
+    return str(sid) + "/" + name
+}
+
+def _decode_key(kb: bytes) -> int {
+    v: int = 0
+    i: int = 0
+    while i < 8 {
+        v = (v << 8) | kb[i]
+        i = i + 1
+    }
+    return v
+}
+
+# 8-byte big-endian docid, used as an index-tree value and as the tiebreaker
+# suffix of a non-unique index key.
+def _docid_be(d: int) -> bytes {
+    out: list[int] = []
+    i: int = 7
+    while i >= 0 {
+        out.append((d >> (i * 8)) & 0xFF)
+        i = i - 1
+    }
+    return bytes(out)
+}
+
+def _be_to_docid(b: bytes) -> int {
+    v: int = 0
+    i: int = 0
+    while i < 8 {
+        v = (v << 8) | b[i]
+        i = i + 1
+    }
+    return v
+}
+
+def _app_u16(out: list[int], v: int) -> None {
+    out.append(v & 0xFF)
+    out.append((v >> 8) & 0xFF)
+}
+
+def _app_u64(out: list[int], v: int) -> None {
+    i: int = 0
+    while i < 8 {
+        out.append((v >> (i * 8)) & 0xFF)
+        i = i + 1
+    }
+}
+
+def _app_bytes(out: list[int], b: bytes) -> None {
+    i: int = 0
+    n: int = len(b)
+    while i < n {
+        out.append(b[i])
+        i = i + 1
+    }
+}
+
+def _copy_ii(d: dict[int, int]) -> dict[int, int] {
+    out: dict[int, int] = {}
+    for k in d {
+        out[k] = d[k]
+    }
+    return out
+}
+
+def _copy_si(d: dict[str, int]) -> dict[str, int] {
+    out: dict[str, int] = {}
+    for k in d {
+        out[k] = d[k]
+    }
+    return out
+}
+
+
+# The result of `db.check()`: the whole-database verification pass (spec 21).
+class CheckReport {
+    ok: bool
+    docs: int
+    index_entries: int
+    message: str
+
+    def() {
+        self.ok = True
+        self.docs = 0
+        self.index_entries = 0
+        self.message = ""
+    }
+
+    def _bad(msg: str) -> None {
+        self.ok = False
+        if self.message == "" {
+            self.message = msg
+        }
+    }
+}
+
+
+class ODB {
+    vfs: VFS
+    pager: Pager
+    catalog: BTree
+    _schemas: dict[str, CompiledSchema]
+    _metac: dict[str, CompiledMeta]
+    _roots: dict[int, int]              # schema_id -> doc tree root
+    _index_roots: dict[str, int]        # "sid/name" -> index tree root
+    _metas: dict[str, str]              # meta_json per schema name
+    _by_sid: dict[int, str]             # schema_id -> schema name
+    _touched: dict[int, bool]           # schema ids whose entry changed this txn
+    _next_id: int
+    _wlock: Optional[WriterLock]        # cross-process writer lock (file-backed)
+    _log: CommitLog                     # the commit log (spec section 17)
+    _log_loaded: bool                   # retained entries loaded lazily
+    _txn_ops: list[LogOp]               # ops recorded by the current txn
+    _frozen: bool                       # a time-travel view: reads only
+    _following: bool                    # paired to a primary: local writes fork
+    _raft: Optional[RaftTail]           # attached by the HA layer (S19 v3b)
+    _capture: bool                      # leader capture mode: _flush captures
+    _captured_entries: list[LogEntry]   # entries captured for consensus
+
+    # Open (or create) a database file. Acquires the cross-process writer lock
+    # on the `<path>.lock` sidecar (spec section 16): a second writer fails fast.
+    def(path: str) {
+        v: FileVFS = FileVFS(path)
+        pg: Pager = Pager(v)
+        if v.size() == 0 {
+            pg = create(v, 4096)
+        } else {
+            pg = open_pager(v)
+        }
+        self._boot_at(v, pg, pg.catalog_root, False)
+        wl: WriterLock = WriterLock(path + ".lock")
+        if not wl.acquire() {
+            wl.close()
+            raise ODBError("database '" + path + "' is locked by another writer")
+        }
+        self._wlock = wl
+    }
+
+    # Low-level: wrap an already-open vfs + pager (used by tests and reopen).
+    def(vfs: VFS, pager: Pager) {
+        self._boot_at(vfs, pager, pager.catalog_root, False)
+    }
+
+    # A read-only view of the database as of an old catalog root (time travel).
+    # Shares the pager; every write path refuses.
+    def(vfs: VFS, pager: Pager, catalog_root: int) {
+        self._boot_at(vfs, pager, catalog_root, True)
+    }
+
+    def _boot_at(vfs: VFS, pager: Pager, catalog_root: int, frozen: bool) -> None {
+        self.vfs = vfs
+        self.pager = pager
+        self.catalog = BTree(pager, catalog_root)
+        self._schemas = {}
+        self._metac = {}
+        self._roots = {}
+        self._index_roots = {}
+        self._metas = {}
+        self._by_sid = {}
+        self._touched = {}
+        self._next_id = 1
+        self._wlock = None
+        self._log = CommitLog(pager, False)
+        self._log_loaded = False
+        self._txn_ops = []
+        self._frozen = frozen
+        self._following = False
+        self._raft = None
+        self._capture = False
+        self._captured_entries = []
+        self._load_catalog()
+    }
+
+    # Attach the persisted raft tail (spec section 19 v3b). From here on,
+    # apply() and fast_forward() prune the tail inside their own commit, so
+    # the consensus base, the freed chain pages, and the applied CSN always
+    # publish in one atomic meta flip.
+    def attach_raft(tail: RaftTail) -> None {
+        self._raft = tail
+    }
+
+    # Leader capture (v3b): execute exactly like a local write, but instead
+    # of committing, _flush raises CaptureSignal so the statement rolls back,
+    # and the would-be commit is preserved here as a log entry for consensus
+    # to replicate. The entry replays through apply() - the identical path a
+    # follower uses - once a quorum holds it.
+    def capture(on: bool) -> None {
+        self._capture = on
+    }
+
+    def take_captured() -> list[LogEntry] {
+        out: list[LogEntry] = self._captured_entries
+        self._captured_entries = []
+        return out
+    }
+
+    # Load the retained commit log on first use (watch, time travel, or the
+    # first write) and pin the retention floor so page reuse never eats a
+    # snapshot the retention window still guarantees.
+    def _ensure_log() -> None {
+        if not self._log_loaded {
+            self._log.reload()
+            self._log_loaded = True
+            floor: int = self._log.oldest_csn()
+            if floor > 0 {
+                self.pager.retain_floor = floor
+            }
+        }
+    }
+
+    # While a Follower is paired to this database, local writes are refused:
+    # a local commit would consume a CSN that aliases the primary's next
+    # entry, and the aliased entry would then be silently unappliable - a
+    # fork the (uuid, csn) lineage pair cannot see. Detach to promote.
+    def set_following(on: bool) -> None {
+        self._following = on
+    }
+
+    def following() -> bool {
+        return self._following
+    }
+
+    def _assert_not_following() -> None {
+        if self._following {
+            raise ODBError("this database is following a primary; a local write would fork its history (detach the follower to promote it first)")
+        }
+    }
+
+    def _assert_writable() -> None {
+        if self._frozen {
+            raise ODBError("this handle is a read-only time-travel snapshot")
+        }
+    }
+
+    #--- catalog ----------------------------------------------------------#
+
+    def _load_catalog() -> None {
+        if self.catalog.root == 0 {
+            return
+        }
+        pairs: list[list[bytes]] = self.catalog.items()
+        maxid: int = 0
+        for pair in pairs {
+            sid: int = self._register(pair[1])
+            if sid > maxid {
+                maxid = sid
+            }
+        }
+        self._next_id = maxid + 1
+    }
+
+    def _register(val: bytes) -> int {
+        doc_root: int = get_u64(val, _E_DOC_ROOT)
+        sid: int = get_u16(val, _E_SID)
+        version: int = get_u16(val, _E_VER)
+        name_len: int = get_u16(val, _E_NAMELEN)
+        sj_len: int = get_u32(val, _E_SJLEN)
+        mj_len: int = get_u32(val, _E_MJLEN)
+        ix_count: int = get_u16(val, _E_IXCOUNT)
+
+        off: int = _E_HEAD
+        name: str = get_bytes(val, off, name_len).decode()
+        off = off + name_len
+        schema_json: str = get_bytes(val, off, sj_len).decode()
+        off = off + sj_len
+        meta_json: str = get_bytes(val, off, mj_len).decode()
+        off = off + mj_len
+
+        stored_roots: dict[str, int] = {}
+        k: int = 0
+        while k < ix_count {
+            nlen: int = get_u16(val, off)
+            off = off + 2
+            nm: str = get_bytes(val, off, nlen).decode()
+            off = off + nlen
+            rt: int = get_u64(val, off)
+            off = off + 8
+            stored_roots[nm] = rt
+            k = k + 1
+        }
+
+        sd_any: Any = loads(schema_json)
+        if not isinstance(sd_any, dict) {
+            raise SchemaError("stored schema '" + name + "' is not an object")
+        }
+        sd: dict[str, Any] = sd_any
+        cs: CompiledSchema = compile_schema(name, sd, sid, version, schema_json)
+        self._schemas[name] = cs
+        self._by_sid[sid] = name
+        self._roots[sid] = doc_root
+        self._metas[name] = meta_json
+
+        md_any: Any = loads(meta_json)
+        md: dict[str, Any] = {}
+        if isinstance(md_any, dict) {
+            md = md_any
+        }
+        cm: CompiledMeta = compile_meta(cs, md)
+        self._metac[name] = cm
+        for decl in cm.indexes {
+            r: int = 0
+            if decl.name in stored_roots {
+                r = stored_roots[decl.name]
+            }
+            self._index_roots[_ikey(sid, decl.name)] = r
+        }
+        return sid
+    }
+
+    # Serialize the current on-disk state of one schema into its catalog value.
+    def _make_entry(cs: CompiledSchema) -> bytes {
+        sid: int = cs.schema_id
+        doc_root: int = self._roots[sid]
+        meta_json: str = self._metas[cs.name]
+        cm: CompiledMeta = self._metac[cs.name]
+
+        name_b: bytes = cs.name.encode()
+        sj_b: bytes = cs.schema_json.encode()
+        mj_b: bytes = meta_json.encode()
+
+        ix: list[int] = []
+        count: int = 0
+        for decl in cm.indexes {
+            root: int = self._index_roots[_ikey(sid, decl.name)]
+            nb: bytes = decl.name.encode()
+            _app_u16(ix, len(nb))
+            _app_bytes(ix, nb)
+            _app_u64(ix, root)
+            count = count + 1
+        }
+
+        buf: list[int] = blank(_E_HEAD)
+        put_u64(buf, _E_DOC_ROOT, doc_root)
+        put_u16(buf, _E_SID, sid)
+        put_u16(buf, _E_VER, cs.version)
+        put_u16(buf, _E_NAMELEN, len(name_b))
+        put_u32(buf, _E_SJLEN, len(sj_b))
+        put_u32(buf, _E_MJLEN, len(mj_b))
+        put_u16(buf, _E_IXCOUNT, count)
+        head: bytes = bytes(buf)
+        return head + name_b + sj_b + mj_b + bytes(ix)
+    }
+
+    # Stage this schema's catalog entry into the catalog tree (no commit yet).
+    def _write_entry(cs: CompiledSchema) -> None {
+        entry: bytes = self._make_entry(cs)
+        self.catalog.insert(cs.schema_id, entry)
+        self.pager.set_catalog_root(self.catalog.root)
+    }
+
+    def _tree(cs: CompiledSchema) -> BTree {
+        return BTree(self.pager, self._roots[cs.schema_id])
+    }
+
+    def _index_tree(sid: int, decl: IndexDecl) -> IndexTree {
+        return IndexTree(self.pager, self._index_roots[_ikey(sid, decl.name)])
+    }
+
+    # Record that schema `sid`'s catalog entry changed, so _flush rewrites it.
+    def _mark(sid: int) -> None {
+        self._touched[sid] = True
+    }
+
+    # Rewrite every touched schema's catalog entry into the catalog tree,
+    # append this transaction's log entry, trim retention, and commit the
+    # whole thing (doc trees, index trees, catalog, log, meta) atomically.
+    def _flush() -> None {
+        if self._capture {
+            # Leader capture (v3b): everything this write did - validation,
+            # docid allocation, integrity - stands, but nothing commits here.
+            # The op list becomes the consensus payload and the statement
+            # unwinds through its ordinary rollback path.
+            if self.pager.retain_mode == RETAIN_NONE {
+                raise ODBError("consensus requires a retention window: ops are not recorded under retain 'none'")
+            }
+            ce: LogEntry = LogEntry(self.pager.last_csn + 1, now(), 0, self.pager.docid_counter)
+            ce.ops = self._txn_ops
+            self._captured_entries.append(ce)
+            raise CaptureSignal("write captured for consensus")
+        }
+        for sid in self._touched {
+            self._write_entry(self._schemas[self._by_sid[sid]])
+        }
+        self._touched = {}
+        ts: int = now()
+        if self.pager.retain_mode != RETAIN_NONE and len(self._txn_ops) > 0 {
+            e: LogEntry = LogEntry(self.pager.last_csn + 1, ts, self.pager.catalog_root, self.pager.docid_counter)
+            e.ops = self._txn_ops
+            self._log.append(e)
+        }
+        self._log.trim(ts)
+        self._txn_ops = []
+        self.pager.commit()
+    }
+
+    # Undo a failed transaction: restore the in-memory root maps, drop staged
+    # pages, and rebuild the retained-log view from the committed chain.
+    def _rollback(sr: dict[int, int], si: dict[str, int]) -> None {
+        self._roots = sr
+        self._index_roots = si
+        self._touched = {}
+        self._txn_ops = []
+        self.pager.abort()
+        if self._log_loaded {
+            self._log.reload()
+        }
+    }
+
+    # Record one logical op for the commit log. Skipped entirely when history
+    # is off (retain none), so bulk paths never buffer post-images for nothing.
+    def _record(kind: int, cs: CompiledSchema, docid: int, doc: dict[str, Any], image: bytes) -> None {
+        if self.pager.retain_mode == RETAIN_NONE {
+            return
+        }
+        cm: CompiledMeta = self._metac[cs.name]
+        pk_json: str = ""
+        if len(cm.primary) > 0 {
+            if cm.primary[0] in doc {
+                pk_json = dumps(doc[cm.primary[0]])
+            }
+        } else {
+            pk_json = str(docid)
+        }
+        self._txn_ops.append(LogOp(kind, cs.schema_id, docid, pk_json, image))
+    }
+
+    # Record a DDL op (schema define / metadata change) so followers and
+    # `changes()` consumers see structure changes too, not just data.
+    def _record_define(cs: CompiledSchema, meta_json: str) -> None {
+        if self.pager.retain_mode == RETAIN_NONE {
+            return
+        }
+        payload: dict[str, Any] = {}
+        payload["name"] = cs.name
+        payload["version"] = cs.version
+        payload["schema"] = loads(cs.schema_json)
+        payload["meta"] = loads(meta_json)
+        self._txn_ops.append(LogOp(OP_DEFINE, cs.schema_id, 0, "", dumps(payload).encode()))
+    }
+
+    #--- rollback snapshotting --------------------------------------------#
+
+    def _snap_ii() -> dict[int, int] {
+        return _copy_ii(self._roots)
+    }
+
+    def _snap_si() -> dict[str, int] {
+        return _copy_si(self._index_roots)
+    }
+
+    #--- index maintenance ------------------------------------------------#
+
+    def _index_add(cs: CompiledSchema, decl: IndexDecl, doc: dict[str, Any], docid: int) -> None {
+        sid: int = cs.schema_id
+        ik: str = _ikey(sid, decl.name)
+        t: IndexTree = IndexTree(self.pager, self._index_roots[ik])
+        key: bytes = enc_decl_key(decl, doc)
+        if decl.unique {
+            if t.contains(key) {
+                existing: int = _be_to_docid(t.get(key))
+                if existing != docid {
+                    raise IntegrityError("unique constraint '" + decl.name + "' on schema '" + cs.name + "' violated")
+                }
+            } else {
+                t.insert(key, _docid_be(docid))
+            }
+        } else {
+            t.insert(key + _docid_be(docid), bytes([]))
+        }
+        self._index_roots[ik] = t.root
+        self._mark(sid)
+    }
+
+    def _index_remove(cs: CompiledSchema, decl: IndexDecl, doc: dict[str, Any], docid: int) -> None {
+        sid: int = cs.schema_id
+        ik: str = _ikey(sid, decl.name)
+        t: IndexTree = IndexTree(self.pager, self._index_roots[ik])
+        key: bytes = enc_decl_key(decl, doc)
+        if decl.unique {
+            t.delete(key)
+        } else {
+            t.delete(key + _docid_be(docid))
+        }
+        self._index_roots[ik] = t.root
+        self._mark(sid)
+    }
+
+    # Field indexes only; reverse (ref) trees are keyed by docids and maintained
+    # by _refs_add / _refs_remove, so they are skipped here.
+    def _index_add_all(cs: CompiledSchema, cm: CompiledMeta, doc: dict[str, Any], docid: int) -> None {
+        for decl in cm.indexes {
+            if decl.kind != IK_REVERSE {
+                self._index_add(cs, decl, doc, docid)
+            }
+        }
+    }
+
+    def _index_remove_all(cs: CompiledSchema, cm: CompiledMeta, doc: dict[str, Any], docid: int) -> None {
+        for decl in cm.indexes {
+            if decl.kind != IK_REVERSE {
+                self._index_remove(cs, decl, doc, docid)
+            }
+        }
+    }
+
+    #--- refs: forward checks + reverse index + on_delete -----------------#
+
+    # Resolve a ref value to the target document's docid via the target's unique
+    # index. Raises IntegrityError if the target is missing (forward check).
+    def _resolve_ref(r: RefDecl, val: Any) -> int {
+        if r.target_schema not in self._schemas {
+            raise IntegrityError("ref '" + r.source_path + "' target schema '" + r.target_schema + "' is not defined")
+        }
+        tcs: CompiledSchema = self._schemas[r.target_schema]
+        tcm: CompiledMeta = self._metac[r.target_schema]
+        tdecl: IndexDecl = _unique_index_on(tcm, r.target_field, r.target_schema)
+        t: IndexTree = self._index_tree(tcs.schema_id, tdecl)
+        key: bytes = enc_field_value(r.source_tag, val)
+        if not t.contains(key) {
+            raise IntegrityError("ref '" + r.source_path + "' -> " + r.target_schema + "." + r.target_field + ": no matching target")
+        }
+        return _be_to_docid(t.get(key))
+    }
+
+    def _rev_add(sid: int, rev_name: str, target_docid: int, source_docid: int) -> None {
+        ik: str = _ikey(sid, rev_name)
+        t: IndexTree = IndexTree(self.pager, self._index_roots[ik])
+        t.insert(_docid_be(target_docid) + _docid_be(source_docid), bytes([]))
+        self._index_roots[ik] = t.root
+        self._mark(sid)
+    }
+
+    def _rev_remove(sid: int, rev_name: str, target_docid: int, source_docid: int) -> None {
+        ik: str = _ikey(sid, rev_name)
+        t: IndexTree = IndexTree(self.pager, self._index_roots[ik])
+        t.delete(_docid_be(target_docid) + _docid_be(source_docid))
+        self._index_roots[ik] = t.root
+        self._mark(sid)
+    }
+
+    def _rev_referrers(sid: int, rev_name: str, target_docid: int) -> list[int] {
+        ik: str = _ikey(sid, rev_name)
+        t: IndexTree = IndexTree(self.pager, self._index_roots[ik])
+        out: list[int] = []
+        for pair in t.scan_prefix(_docid_be(target_docid)) {
+            fk: bytes = pair[0]
+            out.append(_be_to_docid(get_bytes(fk, len(fk) - 8, 8)))
+        }
+        return out
+    }
+
+    # Forward-check every ref of a document and record its reverse edges.
+    def _refs_add(cs: CompiledSchema, cm: CompiledMeta, doc: dict[str, Any], docid: int) -> None {
+        for r in cm.refs {
+            target_docid: int = self._resolve_ref(r, doc[r.source_path])
+            self._rev_add(cs.schema_id, r.rev_name, target_docid, docid)
+        }
+    }
+
+    def _refs_remove(cs: CompiledSchema, cm: CompiledMeta, doc: dict[str, Any], docid: int) -> None {
+        for r in cm.refs {
+            target_docid: int = self._resolve_ref(r, doc[r.source_path])
+            self._rev_remove(cs.schema_id, r.rev_name, target_docid, docid)
+        }
+    }
+
+    # Enforce on_delete for every ref (in any schema) that targets this document
+    # before it is removed. restrict blocks; cascade wipes the referrers within
+    # the same transaction. `visited` breaks reference cycles.
+    def _handle_incoming_refs(target_cs: CompiledSchema, target_docid: int, visited: dict[str, bool]) -> None {
+        for sname in self._metac {
+            scm: CompiledMeta = self._metac[sname]
+            for r in scm.refs {
+                if r.target_schema == target_cs.name {
+                    scs: CompiledSchema = self._schemas[sname]
+                    referrers: list[int] = self._rev_referrers(scs.schema_id, r.rev_name, target_docid)
+                    if len(referrers) > 0 {
+                        if r.on_delete == "restrict" {
+                            raise IntegrityError("delete of " + target_cs.name + " #" + str(target_docid) + " blocked by ref '" + r.source_path + "' from '" + sname + "' (on_delete restrict)")
+                        }
+                        for rd in referrers {
+                            vkey: str = str(scs.schema_id) + ":" + str(rd)
+                            if vkey not in visited {
+                                visited[vkey] = True
+                                self._wipe_internal(scs, rd, visited)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #--- schema handles ---------------------------------------------------#
+
+    # Declare a collection and return its handle.
+    def schema(name: str, definition: dict[str, Any]) -> Documents {
+        self._assert_writable()
+        self._assert_not_following()
+        self._ensure_log()
+        if name in self._schemas {
+            raise SchemaError("schema '" + name + "' is already defined")
+        }
+        sid: int = self._next_id
+        self._next_id = sid + 1
+        sj: str = dumps(definition)
+        cs: CompiledSchema = compile_schema(name, definition, sid, 1, sj)
+
+        sr: dict[int, int] = self._snap_ii()
+        si: dict[str, int] = self._snap_si()
+        self.pager.begin()
+        try {
+            self._schemas[name] = cs
+            self._by_sid[sid] = name
+            self._roots[sid] = 0
+            self._metas[name] = "{}"
+            self._metac[name] = compile_meta(cs, {})
+            self._record_define(cs, "{}")
+            self._mark(sid)
+            self._flush()
+        } except Exception as e {
+            # A failed (or captured) define must also unwind the registries,
+            # not just the trees: a schema whose entry maps exist while its
+            # roots do not is a KeyError waiting in every later lookup.
+            del self._schemas[name]
+            del self._by_sid[sid]
+            del self._metas[name]
+            del self._metac[name]
+            self._next_id = sid
+            self._rollback(sr, si)
+            raise e
+        }
+        return Documents(self, cs)
+    }
+
+    # Fetch an already-declared collection's handle.
+    def schema(name: str) -> Documents {
+        if name not in self._schemas {
+            raise NotFound("no schema named '" + name + "'")
+        }
+        return Documents(self, self._schemas[name])
+    }
+
+    # OQL reads (spec section 8). Runtime string now; the template[OQL] literal
+    # is the blessed compile-checked form once the content type lands. Parsed and
+    # type-checked at prepare time, then executed over the document tree.
+    def find(query: str) -> list[Document] {
+        return self._find_q(parse(query))
+    }
+
+    # OQL read with `$name` parameters injected as values.
+    def find(query: str, params: dict[str, Any]) -> list[Document] {
+        q: OqlQuery = parse(query)
+        bind_query(q, params)
+        return self._find_q(q)
+    }
+
+    def _find_q(q: OqlQuery) -> list[Document] {
+        if q.at_kind != 0 {
+            return self._find_at(q)
+        }
+        if q.source not in self._schemas {
+            raise NotFound("OQL: no schema named '" + q.source + "'")
+        }
+        cs: CompiledSchema = self._schemas[q.source]
+
+        if has_refs(q) {
+            return self._pipeline(self._find_refs(cs, q), q.stages)
+        }
+
+        typecheck(cs, q)
+        tree: BTree = self._tree(cs)
+        out: list[Document] = []
+
+        if is_aggregate(q) {
+            # collect the matching documents, then group + aggregate into rows
+            hits: list[dict[str, Any]] = []
+            for pair in tree.items() {
+                doc: dict[str, Any] = decode(cs, pair[1])
+                if matches(cs, q, doc) {
+                    hits.append(doc)
+                }
+            }
+            rows: list[dict[str, Any]] = aggregate(cs, q, hits)
+            for row in rows {
+                out.append(Document(self, cs, 0, row))
+            }
+            return self._pipeline(out, q.stages)
+        }
+
+        for pair in tree.items() {
+            docid: int = _decode_key(pair[0])
+            doc2: dict[str, Any] = decode(cs, pair[1])
+            if not matches(cs, q, doc2) {
+                continue
+            }
+            data: dict[str, Any] = project(cs, q, doc2)
+            data["_id"] = docid
+            out.append(Document(self, cs, docid, data))
+        }
+        return self._pipeline(out, q.stages)
+    }
+
+    # Apply the pipeline stages (sort / take / skip) in order, mutating ONE
+    # owned working list in place - no intermediate lists, no reassignment - so
+    # the shared Document refs are never churned through list create/destroy.
+    def _pipeline(rows: list[Document], stages: list[Stage]) -> list[Document] {
+        if len(stages) == 0 {
+            return rows
+        }
+        work: list[Document] = []
+        for r in rows {
+            work.append(r)
+        }
+        for stg in stages {
+            if stg.kind == ST_SORT {
+                _sort_in_place(work, stg.sort_keys)
+            } else if stg.kind == ST_TAKE {
+                _truncate(work, stg.n)
+            } else {
+                _drop_front(work, stg.n)
+            }
+        }
+        return work
+    }
+
+    #--- OQL writes (spec section 9) --------------------------------------#
+
+    # Execute an OQL write statement (or an `atomic { ... }` block) and return
+    # the number of documents affected. The whole program commits as ONE
+    # transaction: any failure (validation, uniqueness, ref integrity) rolls the
+    # entire thing back.
+    def run(oql: str) -> int {
+        empty: dict[str, Any] = {}
+        return self._run(oql, empty)
+    }
+
+    def run(oql: str, params: dict[str, Any]) -> int {
+        return self._run(oql, params)
+    }
+
+    def _run(oql: str, params: dict[str, Any]) -> int {
+        self._assert_writable()
+        self._assert_not_following()
+        self._ensure_log()
+        prog: WriteProgram = parse_program(oql)
+        bind_program(prog, params)
+        sr: dict[int, int] = self._snap_ii()
+        si: dict[str, int] = self._snap_si()
+
+        self.pager.begin()
+        count: int = 0
+        try {
+            for st in prog.stmts {
+                count = count + self._exec_write(st)
+            }
+            self._flush()
+        } except Exception as e {
+            self._rollback(sr, si)
+            raise e
+        }
+        return count
+    }
+
+    def _exec_write(st: WriteStmt) -> int {
+        if st.source not in self._schemas {
+            raise NotFound("OQL: no schema named '" + st.source + "'")
+        }
+        cs: CompiledSchema = self._schemas[st.source]
+
+        # prepare-time checks: filter + body expressions against the schema
+        if st.has_filter {
+            tc_pred(cs, st.filter)
+        }
+        for wd in st.docs {
+            for a in wd.assigns {
+                tc_value(cs, a.expr)
+            }
+        }
+
+        if st.kind == W_ADD {
+            for wd in st.docs {
+                self._save_internal(cs, self._build_doc(cs, wd))
+            }
+            return len(st.docs)
+        }
+
+        tree: BTree = self._tree(cs)
+        ids: list[int] = []
+        for pair in tree.items() {
+            docid: int = _decode_key(pair[0])
+            doc: dict[str, Any] = decode(cs, pair[1])
+            if not st.has_filter or pred(cs, st.filter, doc) {
+                ids.append(docid)
+            }
+        }
+        for did in ids {
+            if st.kind == W_SET {
+                self._edit_internal(cs, did, self._build_patch(cs, did, st.docs[0]))
+            } else if st.kind == W_PUT {
+                self._put_internal(cs, did, self._build_doc(cs, st.docs[0]))
+            } else if st.kind == W_UNSET {
+                self._unset_internal(cs, did, st.unset_fields)
+            } else {
+                visited: dict[str, bool] = {}
+                visited[str(cs.schema_id) + ":" + str(did)] = True
+                self._wipe_internal(cs, did, visited)
+            }
+        }
+        return len(ids)
+    }
+
+    # Build a fresh document from an add body (exprs evaluate against no doc).
+    def _build_doc(cs: CompiledSchema, wd: WriteDoc) -> dict[str, Any] {
+        empty: dict[str, Any] = {}
+        doc: dict[str, Any] = {}
+        for a in wd.assigns {
+            if eval_present(cs, a.expr, empty) {
+                doc[a.field] = eval_any(cs, a.expr, empty)
+            }
+        }
+        return doc
+    }
+
+    # Build a set patch (exprs evaluate against the CURRENT document, so
+    # `total: total + 10` works).
+    def _build_patch(cs: CompiledSchema, docid: int, wd: WriteDoc) -> dict[str, Any] {
+        doc: dict[str, Any] = decode(cs, self._tree(cs).get(docid))
+        patch: dict[str, Any] = {}
+        for a in wd.assigns {
+            if eval_present(cs, a.expr, doc) {
+                patch[a.field] = eval_any(cs, a.expr, doc)
+            }
+        }
+        return patch
+    }
+
+    #--- OQL with nested refs / existence joins (M5.4) --------------------#
+
+    # A ref query nests related collections (N:1 -> object, 1:N -> array via the
+    # reverse index) and/or constrains the parent by existence (+ / -).
+    def _find_refs(cs: CompiledSchema, q: OqlQuery) -> list[Document] {
+        if q.has_filter {
+            tc_pred(cs, q.filter)
+        }
+        self._tc_joins(cs, q.joins)
+        self._tc_block(cs, q.fields, q.project_all)
+
+        out: list[Document] = []
+        tree: BTree = self._tree(cs)
+        for pair in tree.items() {
+            docid: int = _decode_key(pair[0])
+            doc: dict[str, Any] = decode(cs, pair[1])
+            if q.has_filter and not pred(cs, q.filter, doc) {
+                continue
+            }
+            if not self._joins_ok(cs, doc, docid, q.joins) {
+                continue
+            }
+            data: dict[str, Any] = self._project_block(cs, q.fields, q.project_all, doc, docid)
+            data["_id"] = docid
+            out.append(Document(self, cs, docid, data))
+        }
+        return out
+    }
+
+    def _tc_joins(cs: CompiledSchema, joins: list[ExistJoin]) -> None {
+        for ej in joins {
+            rel: _Rel = self._resolve_rel(cs, ej.relname)
+            if ej.has_filter {
+                tc_pred(rel.other_cs, ej.filter)
+            }
+        }
+    }
+
+    def _tc_block(cs: CompiledSchema, fields: list[ProjField], project_all: bool) -> None {
+        if project_all {
+            return
+        }
+        for pf in fields {
+            if pf.is_ref {
+                rel: _Rel = self._resolve_rel(cs, pf.alias)
+                if pf.rel_has_filter {
+                    tc_pred(rel.other_cs, pf.rel_filter)
+                }
+                self._tc_block(rel.other_cs, pf.rel_fields, pf.rel_project_all)
+            } else {
+                tc_value(cs, pf.expr)
+            }
+        }
+    }
+
+    def _project_block(cs: CompiledSchema, fields: list[ProjField], project_all: bool, doc: dict[str, Any], docid: int) -> dict[str, Any] {
+        out: dict[str, Any] = project_fields(cs, fields, project_all, doc)
+        if not project_all {
+            for pf in fields {
+                if pf.is_ref {
+                    out[pf.alias] = self._resolve_ref(cs, pf, doc, docid)
+                }
+            }
+        }
+        return out
+    }
+
+    # Resolve one nested-ref field: a single object (N:1) or a list (1:N).
+    def _resolve_ref(cs: CompiledSchema, pf: ProjField, doc: dict[str, Any], docid: int) -> Any {
+        rel: _Rel = self._resolve_rel(cs, pf.alias)
+        if rel.kind == 1 {
+            tcs: CompiledSchema = rel.other_cs
+            empty: dict[str, Any] = {}
+            tdocid: int = self._probe_target(cs, rel, doc)
+            if tdocid < 0 {
+                res_absent: Any = empty
+                return res_absent
+            }
+            tdoc: dict[str, Any] = decode(tcs, self._tree(tcs).get(tdocid))
+            if pf.rel_has_filter and not pred(tcs, pf.rel_filter, tdoc) {
+                res_empty: Any = empty
+                return res_empty
+            }
+            obj: dict[str, Any] = self._project_block(tcs, pf.rel_fields, pf.rel_project_all, tdoc, tdocid)
+            res_obj: Any = obj
+            return res_obj
+        }
+        scs: CompiledSchema = rel.other_cs
+        arr: list[Any] = []
+        for rdid in self._rev_referrers(scs.schema_id, rel.ref.rev_name, docid) {
+            rdoc: dict[str, Any] = decode(scs, self._tree(scs).get(rdid))
+            if pf.rel_has_filter and not pred(scs, pf.rel_filter, rdoc) {
+                continue
+            }
+            child: dict[str, Any] = self._project_block(scs, pf.rel_fields, pf.rel_project_all, rdoc, rdid)
+            citem: Any = child
+            arr.append(citem)
+        }
+        res_arr: Any = arr
+        return res_arr
+    }
+
+    # The target docid a forward ref points at, or -1 if it does not resolve.
+    def _probe_target(cs: CompiledSchema, rel: _Rel, doc: dict[str, Any]) -> int {
+        tcs: CompiledSchema = rel.other_cs
+        tcm: CompiledMeta = self._metac[tcs.name]
+        tdecl: IndexDecl = _unique_index_on(tcm, rel.ref.target_field, tcs.name)
+        t: IndexTree = self._index_tree(tcs.schema_id, tdecl)
+        key: bytes = enc_field_value(rel.ref.source_tag, doc[rel.ref.source_path])
+        if not t.contains(key) {
+            return -1
+        }
+        return _be_to_docid(t.get(key))
+    }
+
+    def _joins_ok(cs: CompiledSchema, doc: dict[str, Any], docid: int, joins: list[ExistJoin]) -> bool {
+        for ej in joins {
+            rel: _Rel = self._resolve_rel(cs, ej.relname)
+            exists: bool = self._rel_exists(cs, doc, docid, rel, ej)
+            if ej.negate {
+                if exists {
+                    return False
+                }
+            } else {
+                if not exists {
+                    return False
+                }
+            }
+        }
+        return True
+    }
+
+    def _rel_exists(cs: CompiledSchema, doc: dict[str, Any], docid: int, rel: _Rel, ej: ExistJoin) -> bool {
+        if rel.kind == 1 {
+            tdocid: int = self._probe_target(cs, rel, doc)
+            if tdocid < 0 {
+                return False
+            }
+            if not ej.has_filter {
+                return True
+            }
+            tcs: CompiledSchema = rel.other_cs
+            tdoc: dict[str, Any] = decode(tcs, self._tree(tcs).get(tdocid))
+            return pred(tcs, ej.filter, tdoc)
+        }
+        scs: CompiledSchema = rel.other_cs
+        for rdid in self._rev_referrers(scs.schema_id, rel.ref.rev_name, docid) {
+            if not ej.has_filter {
+                return True
+            }
+            rdoc: dict[str, Any] = decode(scs, self._tree(scs).get(rdid))
+            if pred(scs, ej.filter, rdoc) {
+                return True
+            }
+        }
+        return False
+    }
+
+    # Resolve a relationship name from `cs`: a forward ref (kind 1, N:1) whose
+    # source field is `relname` or `relname_id`, or a reverse ref (kind 2, 1:N)
+    # from a schema named `relname` that references `cs`.
+    def _resolve_rel(cs: CompiledSchema, relname: str) -> _Rel {
+        cm: CompiledMeta = self._metac[cs.name]
+        i: int = 0
+        while i < len(cm.refs) {
+            rr: RefDecl = cm.refs[i]
+            if rr.source_path == relname or _strip_id(rr.source_path) == relname {
+                return _Rel(1, rr, self._schemas[rr.target_schema])
+            }
+            i = i + 1
+        }
+        if relname in self._schemas {
+            scm: CompiledMeta = self._metac[relname]
+            j: int = 0
+            while j < len(scm.refs) {
+                if scm.refs[j].target_schema == cs.name {
+                    return _Rel(2, scm.refs[j], self._schemas[relname])
+                }
+                j = j + 1
+            }
+        }
+        raise PrepareError("OQL: '" + relname + "' is not a relationship of '" + cs.name + "'")
+    }
+
+    #--- time travel (spec section 17) -------------------------------------#
+
+    # Execute a `source@csn(N)` / `source@<date>` read: resolve the newest log
+    # entry at or before the target, then read through a frozen view booted
+    # from the catalog root that commit published. The retention floor
+    # guarantees every page of a retained snapshot is still intact.
+    def _find_at(q: OqlQuery) -> list[Document] {
+        self._ensure_log()
+        idx: int = -1
+        if q.at_kind == 1 {
+            if q.at_csn > self.pager.last_csn {
+                raise ODBError("time travel: csn " + str(q.at_csn) + " is in the future (last committed is " + str(self.pager.last_csn) + ")")
+            }
+            idx = self._log.at_csn(q.at_csn)
+        } else {
+            idx = self._log.at_time(q.at_ts)
+        }
+        if idx < 0 {
+            raise ODBError("time travel target is outside the retention window (see retain, spec section 17)")
+        }
+        entry: LogEntry = self._log.entry(idx)
+        view: ODB = ODB(self.vfs, self.pager, entry.catalog_root)
+        q.at_kind = 0
+        return view._find_q(q)
+    }
+
+    #--- commit log feeds: changes() and watch (spec section 17) ----------#
+
+    # The raw logical feed: every op committed after `since`, oldest first,
+    # including deletes and DDL. This is what replication (M10) ships.
+    def changes(since: int) -> list[Change] {
+        self._ensure_log()
+        out: list[Change] = []
+        for e in self._log.since(since) {
+            for op in e.ops {
+                out.append(self._change_of(e.csn, op))
+            }
+        }
+        return out
+    }
+
+    def _change_of(csn: int, op: LogOp) -> Change {
+        name: str = ""
+        if op.schema_id in self._by_sid {
+            name = self._by_sid[op.schema_id]
+        }
+        ch: Change = Change(csn, _kind_name(op.kind), name, op.docid, op.pk_json)
+        if op.kind == OP_ADD or op.kind == OP_SET or op.kind == OP_PUT {
+            if name in self._schemas {
+                d: dict[str, Any] = decode(self._schemas[name], op.image)
+                d["_id"] = op.docid
+                ch.doc = d
+            }
+        } else if op.kind == OP_DEFINE {
+            payload_any: Any = loads(op.image.decode())
+            if isinstance(payload_any, dict) {
+                payload: dict[str, Any] = payload_any
+                ch.doc = payload
+            }
+        }
+        return ch
+    }
+
+    # `watch orders ? status == "paid" { id, total }`: a resumable feed of
+    # matching post-images (spec section 17). Starts at the current CSN (only
+    # future commits) unless `since` resumes from an earlier token.
+    def watch(query: str) -> Watch {
+        empty: dict[str, Any] = {}
+        return self._watch_q(query, empty, self.pager.last_csn)
+    }
+
+    def watch(query: str, since: int) -> Watch {
+        empty: dict[str, Any] = {}
+        return self._watch_q(query, empty, since)
+    }
+
+    def watch(query: str, params: dict[str, Any], since: int) -> Watch {
+        return self._watch_q(query, params, since)
+    }
+
+    def _watch_q(query: str, params: dict[str, Any], since: int) -> Watch {
+        self._ensure_log()
+        if self.pager.retain_mode == RETAIN_NONE {
+            raise ODBError("watch requires retention (retain is 'none', spec section 17)")
+        }
+        q: OqlQuery = parse(query)
+        if len(params) > 0 {
+            bind_query(q, params)
+        }
+        if q.at_kind != 0 {
+            raise PrepareError("watch: a feed cannot time travel; resume from a CSN instead")
+        }
+        if q.source not in self._schemas {
+            raise NotFound("OQL: no schema named '" + q.source + "'")
+        }
+        cs: CompiledSchema = self._schemas[q.source]
+        if is_aggregate(q) or q.has_by {
+            raise PrepareError("watch streams documents; aggregates are not watchable")
+        }
+        if has_refs(q) {
+            raise PrepareError("watch does not support nested refs or existence joins")
+        }
+        if len(q.stages) > 0 {
+            raise PrepareError("watch does not support pipeline stages")
+        }
+        typecheck(cs, q)
+        return Watch(self, cs, q, since)
+    }
+
+    #--- retention knob (spec section 17) ----------------------------------#
+
+    # `retain = <n> txns | <duration> | none` (default 1024 txns). Trims
+    # immediately and persists in the meta page, so a reopen keeps the policy.
+    def retain(spec: str) -> None {
+        self._assert_writable()
+        self._assert_not_following()
+        self._ensure_log()
+        mv: list[int] = parse_retain(spec)
+        self.pager.begin()
+        self.pager.retain_mode = mv[0]
+        self.pager.retain_value = mv[1]
+        self._log.trim(now())
+        self.pager.commit()
+    }
+
+    #--- replication: the apply side (spec section 19) ---------------------#
+
+    # The committed commit-sequence number. Paired with uuid() it identifies
+    # replica lineage: same uuid + same csn = same history.
+    def csn() -> int {
+        return self.pager.last_csn
+    }
+
+    # The file uuid (hex), stamped at create and immutable except for a
+    # pristine file adopting a primary's identity (adopt_uuid).
+    def uuid() -> str {
+        return self.pager.uuid.hex()
+    }
+
+    # True while nothing has ever been committed: a fresh file that may still
+    # become a follower by adopting a primary's identity and replaying its
+    # history from csn 1.
+    def pristine() -> bool {
+        return self.pager.last_csn == 1 and len(self._schemas) == 0
+    }
+
+    # Take on a primary's identity (uuid hex) so a brand-new file can follow
+    # it. Only a pristine file may adopt: anything already written is a
+    # different database, and applying another history onto it would be a
+    # silent merge.
+    def adopt_uuid(uuid_hex: str) -> None {
+        self._assert_writable()
+        if not self.pristine() {
+            raise ODBError("adopt_uuid: only a pristine (never written) database can adopt an identity")
+        }
+        self.pager.set_uuid(unhexlify(uuid_hex))
+    }
+
+    # The replication feed: every committed entry after `since`, oldest first
+    # (spec section 19). Loud when it cannot be served exactly: a follower
+    # ahead of us has diverged, and a follower behind the retention window
+    # re-seeds from a fresh copy. It never silently skips history.
+    def entries_since(since: int) -> list[LogEntry] {
+        self._ensure_log()
+        if since > self.pager.last_csn {
+            raise ODBError("entries_since: csn " + str(since) + " is ahead of this database (csn " + str(self.pager.last_csn) + "); the histories have diverged")
+        }
+        if self._log.count() > 0 {
+            oldest: int = self._log.oldest_csn()
+            if since < oldest - 1 {
+                raise ODBError("history after csn " + str(since) + " is no longer retained (oldest retained entry is csn " + str(oldest) + "); re-seed the follower from a fresh copy")
+            }
+        } else if since < self.pager.last_csn {
+            if self.pager.retain_mode == RETAIN_NONE {
+                raise ODBError("this database retains no history (retain 'none'); a replication source needs a retention window")
+            }
+            raise ODBError("history after csn " + str(since) + " is no longer retained; re-seed the follower from a fresh copy")
+        }
+        return self._log.since(since)
+    }
+
+    # Apply one of a primary's committed log entries to this follower,
+    # committing at the entry's own CSN. Ops replay in exactly the order the
+    # primary executed them, so every schema and integrity check that passed
+    # there passes here; cascaded deletes were each recorded as their own op,
+    # so applying never re-runs cascade logic.
+    def apply(entry: LogEntry) -> None {
+        self._assert_writable()
+        self._ensure_log()
+        if entry.csn <= self.pager.last_csn {
+            raise ODBError("apply: entry csn " + str(entry.csn) + " is not ahead of the local csn " + str(self.pager.last_csn))
+        }
+        self.pager.begin()
+        try {
+            for op in entry.ops {
+                if op.kind == OP_DEFINE {
+                    self._apply_define(op)
+                } else if op.kind == OP_ADD {
+                    self._apply_add(op)
+                } else if op.kind == OP_SET or op.kind == OP_PUT {
+                    self._apply_replace(op)
+                } else if op.kind == OP_DEL {
+                    self._apply_del(op)
+                } else {
+                    raise CorruptionError("apply: unknown op kind " + str(op.kind))
+                }
+            }
+            if entry.docid_counter > self.pager.docid_counter {
+                self.pager.set_docid_counter(entry.docid_counter)
+            }
+            rt: Optional[RaftTail] = self._raft
+            if isinstance(rt, RaftTail) {
+                rt.prune(entry.csn - 1)
+            }
+            self._flush_at(entry)
+        } except Exception as e {
+            self._recover_committed()
+            raise e
+        }
+    }
+
+    # Advance the committed CSN with an empty commit. A primary commit that
+    # recorded no ops (a config change) still consumed a CSN; the follower
+    # mirrors the gap so the (uuid, csn) lineage pair stays exact and
+    # read-your-writes tokens resolve.
+    def fast_forward(csn: int) -> None {
+        self._assert_writable()
+        if csn <= self.pager.last_csn {
+            return
+        }
+        self._ensure_log()
+        self.pager.begin()
+        rt: Optional[RaftTail] = self._raft
+        if isinstance(rt, RaftTail) {
+            rt.prune(csn - 1)
+        }
+        self.pager.commit_at(csn)
+    }
+
+    # The _flush of an applied entry: identical commit tail, but the log
+    # keeps the primary's csn/ts/ops (with THIS file's catalog root, since
+    # page ids are per-file) and the commit lands at the entry's csn.
+    def _flush_at(src: LogEntry) -> None {
+        for sid in self._touched {
+            self._write_entry(self._schemas[self._by_sid[sid]])
+        }
+        self._touched = {}
+        if self.pager.retain_mode != RETAIN_NONE {
+            e: LogEntry = LogEntry(src.csn, src.ts, self.pager.catalog_root, src.docid_counter)
+            e.ops = src.ops
+            self._log.append(e)
+        }
+        self._log.trim(src.ts)
+        self._txn_ops = []
+        self.pager.commit_at(src.csn)
+    }
+
+    # After a failed apply, rebuild every in-memory structure from the
+    # committed on-disk state: a define op may have half-mutated the schema
+    # maps, and the catalog handle must drop any staged root.
+    def _recover_committed() -> None {
+        self.pager.abort()
+        self.catalog = BTree(self.pager, self.pager.catalog_root)
+        self._schemas = {}
+        self._metac = {}
+        self._roots = {}
+        self._index_roots = {}
+        self._metas = {}
+        self._by_sid = {}
+        self._touched = {}
+        self._next_id = 1
+        self._txn_ops = []
+        self._load_catalog()
+        if self._log_loaded {
+            self._log.reload()
+        }
+        rt: Optional[RaftTail] = self._raft
+        if isinstance(rt, RaftTail) {
+            rt.reload()
+        }
+    }
+
+    def _schema_by_sid(sid: int) -> CompiledSchema {
+        if sid not in self._by_sid {
+            raise ODBError("apply: no schema with id " + str(sid) + " here (missing define?); the histories have diverged")
+        }
+        return self._schemas[self._by_sid[sid]]
+    }
+
+    # Replay one OP_DEFINE: a schema declaration or a metadata change.
+    # Schema ids must land identically on both replicas; a mismatch means the
+    # histories diverged and is an error, never a remap.
+    def _apply_define(op: LogOp) -> None {
+        payload_any: Any = loads(op.image.decode())
+        if not isinstance(payload_any, dict) {
+            raise CorruptionError("apply: define op payload is not an object")
+        }
+        payload: dict[str, Any] = payload_any
+        name_any: Any = payload["name"]
+        if not isinstance(name_any, str) {
+            raise CorruptionError("apply: define op has no schema name")
+        }
+        name: str = name_any
+        ver: int = 1
+        ver_any: Any = payload["version"]
+        if isinstance(ver_any, int) {
+            ver = ver_any
+        }
+        def_any: Any = payload["schema"]
+        if not isinstance(def_any, dict) {
+            raise CorruptionError("apply: define op for '" + name + "' has no schema object")
+        }
+        definition: dict[str, Any] = def_any
+        m: dict[str, Any] = {}
+        m_any: Any = payload["meta"]
+        if isinstance(m_any, dict) {
+            m = m_any
+        }
+
+        sid: int = op.schema_id
+        if name in self._schemas {
+            cs: CompiledSchema = self._schemas[name]
+            if cs.schema_id != sid {
+                raise ODBError("apply: schema '" + name + "' is id " + str(cs.schema_id) + " here but " + str(sid) + " on the primary; the histories have diverged")
+            }
+            if ver != cs.version {
+                cs = compile_schema(name, definition, sid, ver, dumps(definition))
+                self._schemas[name] = cs
+            }
+            cm: CompiledMeta = compile_meta(cs, m)
+            self._metac[name] = cm
+            self._metas[name] = dumps(m)
+            for decl in cm.indexes {
+                ik: str = _ikey(sid, decl.name)
+                if ik not in self._index_roots {
+                    self._index_roots[ik] = 0
+                }
+            }
+            # Backfill exactly like _set_meta: index and ref edges for every
+            # document already present (idempotent for edges already there).
+            tree: BTree = self._tree(cs)
+            for pair in tree.items() {
+                docid: int = _decode_key(pair[0])
+                existing: dict[str, Any] = decode(cs, pair[1])
+                self._index_add_all(cs, cm, existing, docid)
+                self._refs_add(cs, cm, existing, docid)
+            }
+            self._mark(sid)
+        } else {
+            if sid != self._next_id {
+                raise ODBError("apply: primary defined '" + name + "' as schema id " + str(sid) + " but the next local id is " + str(self._next_id) + "; the histories have diverged")
+            }
+            self._next_id = sid + 1
+            cs2: CompiledSchema = compile_schema(name, definition, sid, ver, dumps(definition))
+            self._schemas[name] = cs2
+            self._by_sid[sid] = name
+            self._roots[sid] = 0
+            cm2: CompiledMeta = compile_meta(cs2, m)
+            self._metac[name] = cm2
+            self._metas[name] = dumps(m)
+            for decl in cm2.indexes {
+                self._index_roots[_ikey(sid, decl.name)] = 0
+            }
+            self._mark(sid)
+        }
+    }
+
+    # Replay an insert at the primary's docid, storing its exact DBON image.
+    def _apply_add(op: LogOp) -> None {
+        cs: CompiledSchema = self._schema_by_sid(op.schema_id)
+        cm: CompiledMeta = self._metac[cs.name]
+        doc: dict[str, Any] = decode(cs, op.image)
+        tree: BTree = self._tree(cs)
+        dup: bool = True
+        try {
+            tree.get(op.docid)
+        } except KeyError {
+            dup = False
+        }
+        if dup {
+            raise ODBError("apply: docid " + str(op.docid) + " already exists in '" + cs.name + "'; the histories have diverged")
+        }
+        self._index_add_all(cs, cm, doc, op.docid)
+        self._refs_add(cs, cm, doc, op.docid)
+        tree.insert(op.docid, op.image)
+        self._roots[cs.schema_id] = tree.root
+        self._mark(cs.schema_id)
+    }
+
+    # Replay a set/put as a whole-image replacement at the docid: the log
+    # stores post-images, so both collapse into the same operation.
+    def _apply_replace(op: LogOp) -> None {
+        cs: CompiledSchema = self._schema_by_sid(op.schema_id)
+        cm: CompiledMeta = self._metac[cs.name]
+        tree: BTree = self._tree(cs)
+        blob: bytes = bytes([])
+        try {
+            blob = tree.get(op.docid)
+        } except KeyError {
+            raise ODBError("apply: no document " + str(op.docid) + " in '" + cs.name + "' to update; the histories have diverged")
+        }
+        old: dict[str, Any] = decode(cs, blob)
+        newdoc: dict[str, Any] = decode(cs, op.image)
+        self._index_remove_all(cs, cm, old, op.docid)
+        self._refs_remove(cs, cm, old, op.docid)
+        self._index_add_all(cs, cm, newdoc, op.docid)
+        self._refs_add(cs, cm, newdoc, op.docid)
+        tree.insert(op.docid, op.image)
+        self._roots[cs.schema_id] = tree.root
+        self._mark(cs.schema_id)
+    }
+
+    # Replay a delete WITHOUT cascade logic: the primary recorded every
+    # cascaded removal as its own op, so re-running the consequences here
+    # would apply them twice.
+    def _apply_del(op: LogOp) -> None {
+        cs: CompiledSchema = self._schema_by_sid(op.schema_id)
+        cm: CompiledMeta = self._metac[cs.name]
+        tree: BTree = self._tree(cs)
+        blob: bytes = bytes([])
+        try {
+            blob = tree.get(op.docid)
+        } except KeyError {
+            raise ODBError("apply: no document " + str(op.docid) + " in '" + cs.name + "' to delete; the histories have diverged")
+        }
+        old: dict[str, Any] = decode(cs, blob)
+        self._refs_remove(cs, cm, old, op.docid)
+        self._index_remove_all(cs, cm, old, op.docid)
+        tree.delete(op.docid)
+        self._roots[cs.schema_id] = tree.root
+        self._mark(cs.schema_id)
+    }
+
+    #--- dump / load / compact (spec section 22) ---------------------------#
+
+    # JSONL export: schema records first (definition + metadata), then every
+    # document with its _id, schema-ordered. The inverse of load().
+    def dump() -> str {
+        lines: list[str] = []
+        sids: list[int] = self._sorted_sids()
+        for sid in sids {
+            name: str = self._by_sid[sid]
+            cs: CompiledSchema = self._schemas[name]
+            rec: dict[str, Any] = {}
+            rec["kind"] = "schema"
+            rec["name"] = name
+            rec["version"] = cs.version
+            rec["schema"] = loads(cs.schema_json)
+            rec["meta"] = loads(self._metas[name])
+            lines.append(dumps(rec))
+        }
+        for sid2 in sids {
+            name2: str = self._by_sid[sid2]
+            cs2: CompiledSchema = self._schemas[name2]
+            tree: BTree = self._tree(cs2)
+            for pair in tree.items() {
+                rec2: dict[str, Any] = {}
+                rec2["kind"] = "doc"
+                rec2["schema"] = name2
+                rec2["_id"] = _decode_key(pair[0])
+                rec2["doc"] = decode(cs2, pair[1])
+                lines.append(dumps(rec2))
+            }
+        }
+        lines.append("")
+        return "\n".join(lines)
+    }
+
+    # Import a dump() into this (empty) database as ONE transaction. Documents
+    # keep their _id. Ref integrity is validated once every document is in
+    # (integrity at commit, spec section 7), so reference cycles load cleanly
+    # regardless of line order. Returns the number of documents loaded.
+    def load(text: str) -> int {
+        self._assert_writable()
+        self._assert_not_following()
+        self._ensure_log()
+        if len(self._schemas) > 0 {
+            raise ODBError("load requires an empty database")
+        }
+
+        schema_recs: list[dict[str, Any]] = []
+        doc_recs: list[dict[str, Any]] = []
+        for line in text.split("\n") {
+            s: str = line.strip()
+            if s == "" {
+                continue
+            }
+            rec_any: Any = loads(s)
+            if not isinstance(rec_any, dict) {
+                raise ODBError("load: every line must be a JSON object")
+            }
+            rec: dict[str, Any] = rec_any
+            kind_any: Any = rec["kind"]
+            if not isinstance(kind_any, str) {
+                raise ODBError("load: record 'kind' must be a string")
+            }
+            kind: str = kind_any
+            if kind == "schema" {
+                schema_recs.append(rec)
+            } else if kind == "doc" {
+                doc_recs.append(rec)
+            } else {
+                raise ODBError("load: unknown record kind '" + kind + "'")
+            }
+        }
+
+        sr: dict[int, int] = self._snap_ii()
+        si: dict[str, int] = self._snap_si()
+        self.pager.begin()
+        count: int = 0
+        try {
+            for srec in schema_recs {
+                self._load_schema_rec(srec)
+            }
+            loaded_cs: list[CompiledSchema] = []
+            loaded_docs: list[dict[str, Any]] = []
+            loaded_ids: list[int] = []
+            maxid: int = self.pager.docid_counter
+            for drec in doc_recs {
+                sname_any: Any = drec["schema"]
+                if not isinstance(sname_any, str) {
+                    raise ODBError("load: doc record 'schema' must be a string")
+                }
+                sname: str = sname_any
+                if sname not in self._schemas {
+                    raise ODBError("load: doc record references undefined schema '" + sname + "'")
+                }
+                id_any: Any = drec["_id"]
+                if not isinstance(id_any, int) {
+                    raise ODBError("load: doc record '_id' must be an integer")
+                }
+                docid: int = id_any
+                if docid <= 0 {
+                    raise ODBError("load: doc _id must be positive")
+                }
+                doc_any: Any = drec["doc"]
+                if not isinstance(doc_any, dict) {
+                    raise ODBError("load: doc record 'doc' must be an object")
+                }
+                doc: dict[str, Any] = doc_any
+
+                cs: CompiledSchema = self._schemas[sname]
+                cm: CompiledMeta = self._metac[sname]
+                blob: bytes = encode(cs, doc)
+                tree: BTree = self._tree(cs)
+                dup: bool = True
+                try {
+                    tree.get(docid)
+                } except KeyError {
+                    dup = False
+                }
+                if dup {
+                    raise ODBError("load: duplicate _id " + str(docid) + " in '" + sname + "'")
+                }
+                self._index_add_all(cs, cm, doc, docid)
+                tree.insert(docid, blob)
+                self._roots[cs.schema_id] = tree.root
+                self._mark(cs.schema_id)
+                self._record(OP_ADD, cs, docid, doc, blob)
+                if docid > maxid {
+                    maxid = docid
+                }
+                loaded_cs.append(cs)
+                loaded_docs.append(doc)
+                loaded_ids.append(docid)
+                count = count + 1
+            }
+            # Commit-time integrity: with every document present, check all
+            # refs and build the reverse edges. Cycle-proof by construction.
+            i: int = 0
+            while i < count {
+                self._refs_add(loaded_cs[i], self._metac[loaded_cs[i].name], loaded_docs[i], loaded_ids[i])
+                i = i + 1
+            }
+            self.pager.set_docid_counter(maxid)
+            self._flush()
+        } except Exception as e {
+            self._schemas = {}
+            self._metac = {}
+            self._metas = {}
+            self._by_sid = {}
+            self._next_id = 1
+            self._rollback(sr, si)
+            raise e
+        }
+        return count
+    }
+
+    # Register one schema record from a dump (no commit; joins load's txn).
+    def _load_schema_rec(rec: dict[str, Any]) -> None {
+        name_any: Any = rec["name"]
+        if not isinstance(name_any, str) {
+            raise ODBError("load: schema record 'name' must be a string")
+        }
+        name: str = name_any
+        if name in self._schemas {
+            raise ODBError("load: schema '" + name + "' appears twice")
+        }
+        ver: int = 1
+        ver_any: Any = rec["version"]
+        if isinstance(ver_any, int) {
+            ver = ver_any
+        }
+        def_any: Any = rec["schema"]
+        if not isinstance(def_any, dict) {
+            raise ODBError("load: schema record 'schema' must be an object")
+        }
+        definition: dict[str, Any] = def_any
+        m: dict[str, Any] = {}
+        m_any: Any = rec["meta"]
+        if isinstance(m_any, dict) {
+            m = m_any
+        }
+
+        sid: int = self._next_id
+        self._next_id = sid + 1
+        sj: str = dumps(definition)
+        cs: CompiledSchema = compile_schema(name, definition, sid, ver, sj)
+        cm: CompiledMeta = compile_meta(cs, m)
+        self._schemas[name] = cs
+        self._by_sid[sid] = name
+        self._roots[sid] = 0
+        self._metas[name] = dumps(m)
+        self._metac[name] = cm
+        for decl in cm.indexes {
+            self._index_roots[_ikey(sid, decl.name)] = 0
+        }
+        self._record_define(cs, self._metas[name])
+        self._mark(sid)
+    }
+
+    # VACUUM-INTO-style snapshot copy (spec section 22): rebuild this database
+    # into a fresh file at `dest_path` - same schema ids, same docids, same
+    # document bytes, freshly packed trees, no history. Doubles as hot backup.
+    def compact(dest_path: str) -> None {
+        dv: FileVFS = FileVFS(dest_path)
+        if dv.size() != 0 {
+            dv.close()
+            raise ODBError("compact destination '" + dest_path + "' is not empty")
+        }
+        dp: Pager = create(dv, self.pager.page_size)
+        dp.retain_mode = self.pager.retain_mode
+        dp.retain_value = self.pager.retain_value
+        dest: ODB = ODB(dv, dp)
+        try {
+            dest._absorb(self)
+        } except Exception as e {
+            dest.close()
+            raise e
+        }
+        dest.close()
+    }
+
+    # Copy every schema and live document of `src` into this fresh empty
+    # database in one transaction. History is dropped on purpose: compaction
+    # IS the vacuum that trims the log (spec section 13).
+    def _absorb(src: ODB) -> None {
+        saved_mode: int = self.pager.retain_mode
+        self.pager.retain_mode = RETAIN_NONE       # no ops buffered for the copy
+        sids: list[int] = src._sorted_sids()
+        self.pager.begin()
+        try {
+            for sid in sids {
+                name: str = src._by_sid[sid]
+                scs: CompiledSchema = src._schemas[name]
+                def_any: Any = loads(scs.schema_json)
+                if not isinstance(def_any, dict) {
+                    raise SchemaError("compact: stored schema '" + name + "' is not an object")
+                }
+                definition: dict[str, Any] = def_any
+                cs: CompiledSchema = compile_schema(name, definition, sid, scs.version, scs.schema_json)
+                m: dict[str, Any] = {}
+                m_any: Any = loads(src._metas[name])
+                if isinstance(m_any, dict) {
+                    m = m_any
+                }
+                cm: CompiledMeta = compile_meta(cs, m)
+                self._schemas[name] = cs
+                self._by_sid[sid] = name
+                self._roots[sid] = 0
+                self._metas[name] = src._metas[name]
+                self._metac[name] = cm
+                for decl in cm.indexes {
+                    self._index_roots[_ikey(sid, decl.name)] = 0
+                }
+                self._mark(sid)
+                if sid >= self._next_id {
+                    self._next_id = sid + 1
+                }
+            }
+            for sid2 in sids {
+                name2: str = src._by_sid[sid2]
+                cs2: CompiledSchema = self._schemas[name2]
+                cm2: CompiledMeta = self._metac[name2]
+                src_tree: BTree = src._tree(src._schemas[name2])
+                t: BTree = BTree(self.pager, 0)
+                for pair in src_tree.items() {
+                    docid: int = _decode_key(pair[0])
+                    doc: dict[str, Any] = decode(cs2, pair[1])
+                    self._index_add_all(cs2, cm2, doc, docid)
+                    t.insert(docid, pair[1])
+                }
+                self._roots[sid2] = t.root
+                self._mark(sid2)
+            }
+            # Reverse-ref edges once every document is in (order-proof).
+            for sid3 in sids {
+                name3: str = src._by_sid[sid3]
+                cs3: CompiledSchema = self._schemas[name3]
+                cm3: CompiledMeta = self._metac[name3]
+                if len(cm3.refs) > 0 {
+                    t3: BTree = self._tree(cs3)
+                    for pair3 in t3.items() {
+                        self._refs_add(cs3, cm3, decode(cs3, pair3[1]), _decode_key(pair3[0]))
+                    }
+                }
+            }
+            self.pager.set_docid_counter(src.pager.docid_counter)
+            self.pager.retain_mode = saved_mode
+            self._flush()
+        } except Exception as e {
+            self.pager.retain_mode = saved_mode
+            self._schemas = {}
+            self._metac = {}
+            self._metas = {}
+            self._by_sid = {}
+            self._next_id = 1
+            sr: dict[int, int] = {}
+            si: dict[str, int] = {}
+            self._rollback(sr, si)
+            raise e
+        }
+    }
+
+    def _sorted_sids() -> list[int] {
+        out: list[int] = []
+        for sid in self._by_sid {
+            out.append(sid)
+        }
+        i: int = 1
+        while i < len(out) {
+            j: int = i
+            while j > 0 and out[j - 1] > out[j] {
+                tmp: int = out[j - 1]
+                out[j - 1] = out[j]
+                out[j] = tmp
+                j = j - 1
+            }
+            i = i + 1
+        }
+        return out
+    }
+
+    def close() -> None {
+        if self._frozen {
+            return                     # a view shares the parent's vfs/pager
+        }
+        wl: Optional[WriterLock] = self._wlock
+        if isinstance(wl, WriterLock) {
+            wl.close()
+            self._wlock = None
+        }
+        self.vfs.close()
+    }
+
+    #--- operations the handles delegate to -------------------------------#
+
+    # Attach metadata and (re)build its indexes over any existing documents.
+    def _set_meta(cs: CompiledSchema, meta: dict[str, Any]) -> None {
+        self._assert_writable()
+        self._assert_not_following()
+        self._ensure_log()
+        cm: CompiledMeta = compile_meta(cs, meta)      # validates paths; may raise
+        old_cm: CompiledMeta = self._metac[cs.name]
+        old_mj: str = self._metas[cs.name]
+        sid: int = cs.schema_id
+
+        sr: dict[int, int] = self._snap_ii()
+        si: dict[str, int] = self._snap_si()
+        self.pager.begin()
+        try {
+            self._metac[cs.name] = cm
+            self._metas[cs.name] = dumps(meta)
+            for decl in cm.indexes {
+                ik: str = _ikey(sid, decl.name)
+                if ik not in self._index_roots {
+                    self._index_roots[ik] = 0
+                }
+            }
+            # Backfill: index every document already present, and record its ref
+            # edges so integrity holds retroactively.
+            tree: BTree = self._tree(cs)
+            for pair in tree.items() {
+                docid: int = _decode_key(pair[0])
+                existing: dict[str, Any] = decode(cs, pair[1])
+                self._index_add_all(cs, cm, existing, docid)
+                self._refs_add(cs, cm, existing, docid)
+            }
+            self._record_define(cs, self._metas[cs.name])
+            self._mark(sid)
+            self._flush()
+        } except Exception as e {
+            self._metac[cs.name] = old_cm
+            self._metas[cs.name] = old_mj
+            self._rollback(sr, si)
+            raise e
+        }
+    }
+
+    def _save(cs: CompiledSchema, doc: dict[str, Any]) -> Document {
+        self._assert_writable()
+        self._assert_not_following()
+        self._ensure_log()
+        sr: dict[int, int] = self._snap_ii()
+        si: dict[str, int] = self._snap_si()
+
+        self.pager.begin()
+        docid: int = 0
+        try {
+            docid = self._save_internal(cs, doc)
+            self._flush()
+        } except Exception as e {
+            self._rollback(sr, si)
+            raise e
+        }
+
+        data: dict[str, Any] = {}
+        for k in doc {
+            data[k] = doc[k]
+        }
+        data["_id"] = docid
+        return Document(self, cs, docid, data)
+    }
+
+    # The insert mutation without begin/commit, so it can join a larger txn
+    # (atomic block, multi-statement write). Returns the new docid.
+    def _save_internal(cs: CompiledSchema, doc: dict[str, Any]) -> int {
+        cm: CompiledMeta = self._metac[cs.name]
+        sid: int = cs.schema_id
+        blob: bytes = encode(cs, doc)              # validates
+        docid: int = self.pager.docid_counter + 1
+        self.pager.set_docid_counter(docid)
+        self._index_add_all(cs, cm, doc, docid)    # unique probes may raise
+        self._refs_add(cs, cm, doc, docid)         # forward ref checks may raise
+        tree: BTree = self._tree(cs)
+        tree.insert(docid, blob)
+        self._roots[sid] = tree.root
+        self._mark(sid)
+        self._record(OP_ADD, cs, docid, doc, blob)
+        return docid
+    }
+
+    def _read(cs: CompiledSchema, docid: int) -> Document {
+        tree: BTree = self._tree(cs)
+        blob: bytes = bytes([])
+        try {
+            blob = tree.get(docid)
+        } except KeyError {
+            raise NotFound("no document " + str(docid) + " in '" + cs.name + "'")
+        }
+        data: dict[str, Any] = decode(cs, blob)
+        data["_id"] = docid
+        return Document(self, cs, docid, data)
+    }
+
+    def _edit(cs: CompiledSchema, docid: int, patch: dict[str, Any]) -> Document {
+        self._assert_writable()
+        self._assert_not_following()
+        self._ensure_log()
+        sr: dict[int, int] = self._snap_ii()
+        si: dict[str, int] = self._snap_si()
+
+        data: dict[str, Any] = {}
+        self.pager.begin()
+        try {
+            data = self._edit_internal(cs, docid, patch)
+            self._flush()
+        } except Exception as e {
+            self._rollback(sr, si)
+            raise e
+        }
+        data["_id"] = docid
+        return Document(self, cs, docid, data)
+    }
+
+    # Deep(shallow-for-M4)-merge patch, without begin/commit. Returns the merged
+    # document. `replace` = full-document replacement (OQL `put`).
+    def _edit_internal(cs: CompiledSchema, docid: int, patch: dict[str, Any]) -> dict[str, Any] {
+        cm: CompiledMeta = self._metac[cs.name]
+        sid: int = cs.schema_id
+        tree: BTree = self._tree(cs)
+        blob: bytes = bytes([])
+        try {
+            blob = tree.get(docid)
+        } except KeyError {
+            raise NotFound("no document " + str(docid) + " in '" + cs.name + "'")
+        }
+        old: dict[str, Any] = decode(cs, blob)
+
+        for pkf in cm.primary {
+            if pkf in patch {
+                pf: int = cs.by_name[pkf].tag
+                if enc_field_value(pf, patch[pkf]) != enc_field_value(pf, old[pkf]) {
+                    raise PrepareError("primary key field '" + pkf + "' is immutable (spec section 3)")
+                }
+            }
+        }
+
+        merged: dict[str, Any] = {}
+        for k in old {
+            merged[k] = old[k]
+        }
+        for k in patch {
+            if k != "_id" {
+                merged[k] = patch[k]
+            }
+        }
+
+        self._index_remove_all(cs, cm, old, docid)
+        self._refs_remove(cs, cm, old, docid)
+        newblob: bytes = encode(cs, merged)        # revalidates
+        self._index_add_all(cs, cm, merged, docid)
+        self._refs_add(cs, cm, merged, docid)
+        tree.insert(docid, newblob)
+        self._roots[sid] = tree.root
+        self._mark(sid)
+        self._record(OP_SET, cs, docid, merged, newblob)
+        return merged
+    }
+
+    # Full-document replace (OQL `put`), keeping docid; pk must be unchanged.
+    def _put_internal(cs: CompiledSchema, docid: int, newdoc: dict[str, Any]) -> None {
+        cm: CompiledMeta = self._metac[cs.name]
+        sid: int = cs.schema_id
+        tree: BTree = self._tree(cs)
+        blob: bytes = bytes([])
+        try {
+            blob = tree.get(docid)
+        } except KeyError {
+            raise NotFound("no document " + str(docid) + " in '" + cs.name + "'")
+        }
+        old: dict[str, Any] = decode(cs, blob)
+        for pkf in cm.primary {
+            if pkf in newdoc {
+                pf: int = cs.by_name[pkf].tag
+                if enc_field_value(pf, newdoc[pkf]) != enc_field_value(pf, old[pkf]) {
+                    raise PrepareError("put may not change primary key field '" + pkf + "'")
+                }
+            } else {
+                newdoc[pkf] = old[pkf]                 # preserve pk if omitted
+            }
+        }
+        self._index_remove_all(cs, cm, old, docid)
+        self._refs_remove(cs, cm, old, docid)
+        newblob: bytes = encode(cs, newdoc)            # full validation
+        self._index_add_all(cs, cm, newdoc, docid)
+        self._refs_add(cs, cm, newdoc, docid)
+        tree.insert(docid, newblob)
+        self._roots[sid] = tree.root
+        self._mark(sid)
+        self._record(OP_PUT, cs, docid, newdoc, newblob)
+    }
+
+    # Remove optional fields (OQL `unset`); unsetting a required field errors.
+    def _unset_internal(cs: CompiledSchema, docid: int, fields: list[str]) -> None {
+        cm: CompiledMeta = self._metac[cs.name]
+        sid: int = cs.schema_id
+        tree: BTree = self._tree(cs)
+        blob: bytes = bytes([])
+        try {
+            blob = tree.get(docid)
+        } except KeyError {
+            raise NotFound("no document " + str(docid) + " in '" + cs.name + "'")
+        }
+        old: dict[str, Any] = decode(cs, blob)
+        remove: dict[str, bool] = {}
+        for f in fields {
+            if f in cs.by_name and cs.by_name[f].required {
+                raise PrepareError("cannot unset required field '" + f + "'")
+            }
+            remove[f] = True
+        }
+        newdoc: dict[str, Any] = {}
+        for k in old {
+            if k not in remove {
+                newdoc[k] = old[k]
+            }
+        }
+        self._index_remove_all(cs, cm, old, docid)
+        self._refs_remove(cs, cm, old, docid)
+        newblob: bytes = encode(cs, newdoc)
+        self._index_add_all(cs, cm, newdoc, docid)
+        self._refs_add(cs, cm, newdoc, docid)
+        tree.insert(docid, newblob)
+        self._roots[sid] = tree.root
+        self._mark(sid)
+        self._record(OP_SET, cs, docid, newdoc, newblob)
+    }
+
+    def _wipe(cs: CompiledSchema, docid: int) -> bool {
+        self._assert_writable()
+        self._assert_not_following()
+        self._ensure_log()
+        sr: dict[int, int] = self._snap_ii()
+        si: dict[str, int] = self._snap_si()
+
+        self.pager.begin()
+        removed: bool = False
+        try {
+            visited: dict[str, bool] = {}
+            visited[str(cs.schema_id) + ":" + str(docid)] = True
+            removed = self._wipe_internal(cs, docid, visited)
+            if not removed {
+                self._rollback(sr, si)
+                return False
+            }
+            self._flush()
+        } except Exception as e {
+            self._rollback(sr, si)
+            raise e
+        }
+        return removed
+    }
+
+    # Remove one document and everything that must go with it: the on_delete
+    # consequences for referrers (restrict blocks, cascade removes them first),
+    # this document's own outgoing reverse edges and field indexes, then the
+    # document. No commit - the public _wipe wraps the whole graph in one
+    # transaction so a restrict deep in a cascade rolls the entire delete back.
+    def _wipe_internal(cs: CompiledSchema, docid: int, visited: dict[str, bool]) -> bool {
+        cm: CompiledMeta = self._metac[cs.name]
+        blob: bytes = bytes([])
+        found: bool = True
+        try {
+            blob = self._tree(cs).get(docid)
+        } except KeyError {
+            found = False
+        }
+        if not found {
+            return False
+        }
+        old: dict[str, Any] = decode(cs, blob)
+
+        # A cascade may delete other documents of THIS schema, advancing its doc
+        # tree root, so re-fetch the tree AFTER the cascade rather than binding
+        # it up front (a stale binding would rebuild from the pre-cascade root
+        # and resurrect the cascaded documents).
+        self._handle_incoming_refs(cs, docid, visited)
+        self._refs_remove(cs, cm, old, docid)
+        self._index_remove_all(cs, cm, old, docid)
+        tree: BTree = self._tree(cs)
+        tree.delete(docid)
+        self._roots[cs.schema_id] = tree.root
+        self._mark(cs.schema_id)
+        self._record(OP_DEL, cs, docid, old, bytes([]))
+        return True
+    }
+
+    def _all(cs: CompiledSchema) -> list[Document] {
+        tree: BTree = self._tree(cs)
+        pairs: list[list[bytes]] = tree.items()
+        out: list[Document] = []
+        for pair in pairs {
+            docid: int = _decode_key(pair[0])
+            data: dict[str, Any] = decode(cs, pair[1])
+            data["_id"] = docid
+            out.append(Document(self, cs, docid, data))
+        }
+        return out
+    }
+
+    def _count(cs: CompiledSchema) -> int {
+        return self._tree(cs).count()
+    }
+
+    # Dispatch a read: keyword fields => equality lookup by an index (single or
+    # composite); otherwise the positional docid (the internal _id).
+    def _read_dispatch(cs: CompiledSchema, docid: int, keys: dict[str, Any]) -> Document {
+        if len(keys) > 0 {
+            return self._read_by(cs, keys)
+        }
+        if docid == 0 {
+            raise PrepareError("read needs a docid or key fields")
+        }
+        return self._read(cs, docid)
+    }
+
+    # Equality lookup: the provided field(s) must exactly match some index (pk,
+    # unique, or plain), single or composite. Returns the first match or raises
+    # NotFound.
+    def _read_by(cs: CompiledSchema, keys: dict[str, Any]) -> Document {
+        cm: CompiledMeta = self._metac[cs.name]
+        decl: IndexDecl = _index_for_fields(cm, keys, cs.name)
+        sid: int = cs.schema_id
+        t: IndexTree = self._index_tree(sid, decl)
+        keybytes: bytes = enc_decl_key(decl, keys)     # keys holds exactly decl.fields
+        if decl.unique {
+            if t.contains(keybytes) {
+                return self._read(cs, _be_to_docid(t.get(keybytes)))
+            }
+            raise NotFound("no matching document in '" + cs.name + "'")
+        }
+        matches: list[list[bytes]] = t.scan_prefix(keybytes)
+        if len(matches) == 0 {
+            raise NotFound("no matching document in '" + cs.name + "'")
+        }
+        fk: bytes = matches[0][0]
+        docid: int = _be_to_docid(get_bytes(fk, len(fk) - 8, 8))
+        return self._read(cs, docid)
+    }
+
+    #--- odb check --------------------------------------------------------#
+
+    # One-pass whole-database verification (spec section 21): every tree's
+    # checksums + structure (via check_tree / check_index_tree), index
+    # completeness (each document is present in each of its indexes and each
+    # index holds exactly one entry per document), unique claims (each unique key
+    # maps to the right docid), and referential integrity (every ref resolves to
+    # an existing target). Returns a report; does not raise on a logical
+    # violation, so a damaged file can be inspected rather than crash the caller.
+    def check() -> CheckReport {
+        rep: CheckReport = CheckReport()
+        for name in self._schemas {
+            cs: CompiledSchema = self._schemas[name]
+            cm: CompiledMeta = self._metac[name]
+            sid: int = cs.schema_id
+
+            dchk: CheckResult = check_tree(self.pager, self._roots[sid])
+            if not dchk.ok {
+                rep._bad("doc tree '" + name + "': " + dchk.message)
+            }
+
+            doc_count: int = 0
+            tree: BTree = self._tree(cs)
+            for pair in tree.items() {
+                docid: int = _decode_key(pair[0])
+                doc: dict[str, Any] = decode(cs, pair[1])
+                doc_count = doc_count + 1
+
+                # every field index must contain this document's key
+                for decl in cm.indexes {
+                    if decl.kind != IK_REVERSE {
+                        it: IndexTree = self._index_tree(sid, decl)
+                        key: bytes = enc_decl_key(decl, doc)
+                        if decl.unique {
+                            if not it.contains(key) {
+                                rep._bad("index '" + decl.name + "' in '" + name + "' missing doc " + str(docid))
+                            } else {
+                                if _be_to_docid(it.get(key)) != docid {
+                                    rep._bad("unique index '" + decl.name + "' in '" + name + "' maps to the wrong docid")
+                                }
+                            }
+                        } else {
+                            if not it.contains(key + _docid_be(docid)) {
+                                rep._bad("index '" + decl.name + "' in '" + name + "' missing doc " + str(docid))
+                            }
+                        }
+                    }
+                }
+
+                # every ref must resolve to an existing target
+                for r in cm.refs {
+                    if r.target_schema not in self._schemas {
+                        rep._bad("ref '" + r.source_path + "' in '" + name + "' targets undefined schema '" + r.target_schema + "'")
+                    } else {
+                        tcs: CompiledSchema = self._schemas[r.target_schema]
+                        tcm: CompiledMeta = self._metac[r.target_schema]
+                        tdecl: IndexDecl = _unique_index_on(tcm, r.target_field, r.target_schema)
+                        tt: IndexTree = self._index_tree(tcs.schema_id, tdecl)
+                        if not tt.contains(enc_field_value(r.source_tag, doc[r.source_path])) {
+                            rep._bad("dangling ref '" + r.source_path + "' from doc " + str(docid) + " in '" + name + "'")
+                        }
+                    }
+                }
+            }
+            rep.docs = rep.docs + doc_count
+
+            # every index tree (field and reverse) is structurally sound and,
+            # since every M4 index path is required, holds exactly one entry per
+            # document (index completeness with no orphans and no phantoms).
+            for decl in cm.indexes {
+                iroot: int = self._index_roots[_ikey(sid, decl.name)]
+                ichk: CheckResult = check_index_tree(self.pager, iroot)
+                if not ichk.ok {
+                    rep._bad("index tree '" + decl.name + "' in '" + name + "': " + ichk.message)
+                }
+                it2: IndexTree = IndexTree(self.pager, iroot)
+                n: int = it2.count()
+                rep.index_entries = rep.index_entries + n
+                if n != doc_count {
+                    rep._bad("index '" + decl.name + "' in '" + name + "' has " + str(n) + " entries, expected " + str(doc_count))
+                }
+            }
+        }
+        return rep
+    }
+}
+
+
+# Find the value index (unique or plain) whose fields exactly match the provided
+# key set, single or composite. Reverse (ref) trees are keyed by docids, never by
+# a field value, so they are never a lookup target.
+def _index_for_fields(cm: CompiledMeta, keys: dict[str, Any], schema_name: str) -> IndexDecl {
+    for d in cm.indexes {
+        if d.kind != IK_REVERSE and len(d.fields) == len(keys) {
+            allmatch: bool = True
+            for f in d.fields {
+                if f not in keys {
+                    allmatch = False
+                }
+            }
+            if allmatch {
+                return d
+            }
+        }
+    }
+    raise PrepareError("no index on the given field(s) in '" + schema_name + "'")
+}
+
+# A resolved relationship: forward (N:1) or reverse (1:N), the RefDecl it rides,
+# and the other schema (target for forward, source for reverse).
+class _Rel {
+    kind: int
+    ref: RefDecl
+    other_cs: CompiledSchema
+
+    def(kind: int, ref: RefDecl, other_cs: CompiledSchema) {
+        self.kind = kind
+        self.ref = ref
+        self.other_cs = other_cs
+    }
+}
+
+# `customer_id` -> `customer` for naming a forward ref's nested object.
+def _strip_id(name: str) -> str {
+    if len(name) > 3 and name[len(name) - 3:] == "_id" {
+        return name[0:len(name) - 3]
+    }
+    return name
+}
+
+# The single-field UNIQUE index (pk or unique) on `field`, which a ref must
+# target (spec section 7). Raises SchemaError if the target field is not
+# uniquely indexed.
+def _unique_index_on(cm: CompiledMeta, field: str, schema_name: str) -> IndexDecl {
+    for d in cm.indexes {
+        if d.unique and len(d.fields) == 1 and d.fields[0] == field {
+            return d
+        }
+    }
+    raise SchemaError("ref target '" + schema_name + "." + field + "' has no unique index")
+}
+
+
+#--- pipeline helpers (sort / take / skip) --------------------------------#
+
+# take: drop everything past the first n (in place).
+def _truncate(work: list[Document], n: int) -> None {
+    k: int = n
+    if k < 0 {
+        k = 0
+    }
+    while len(work) > k {
+        work.pop(len(work) - 1)
+    }
+}
+
+# skip: drop the first n (in place).
+def _drop_front(work: list[Document], n: int) -> None {
+    i: int = 0
+    while i < n and len(work) > 0 {
+        work.pop(0)
+        i = i + 1
+    }
+}
+
+# Stable insertion sort in place by the given keys; ties break by _id ascending.
+# Absent values order after present ones regardless of direction (spec section
+# 8). O(n^2); a bottom-up merge is a perf follow-up for large result sets.
+def _sort_in_place(work: list[Document], keys: list[SortKey]) -> None {
+    i: int = 1
+    n: int = len(work)
+    while i < n {
+        j: int = i
+        while j > 0 and _cmp_docs(work[j - 1], work[j], keys) > 0 {
+            tmp: Document = work[j - 1]
+            work[j - 1] = work[j]
+            work[j] = tmp
+            j = j - 1
+        }
+        i = i + 1
+    }
+}
+
+def _cmp_docs(a: Document, b: Document, keys: list[SortKey]) -> int {
+    for k in keys {
+        c: int = _cmp_key(a, b, k)
+        if c != 0 {
+            return c
+        }
+    }
+    if a.id < b.id {
+        return -1
+    }
+    if a.id > b.id {
+        return 1
+    }
+    return 0
+}
+
+def _cmp_key(a: Document, b: Document, k: SortKey) -> int {
+    ap: bool = _row_present(a, k.field)
+    bp: bool = _row_present(b, k.field)
+    if not ap and not bp {
+        return 0
+    }
+    if not ap {
+        return 1                    # a absent -> orders after (never negated)
+    }
+    if not bp {
+        return -1
+    }
+    c: int = _cmp_present(_row_value(a, k.field), _row_value(b, k.field))
+    if k.desc {
+        return -c
+    }
+    return c
+}
+
+def _row_present(d: Document, field: str) -> bool {
+    if field == "_id" {
+        return True
+    }
+    return field in d.data
+}
+
+def _row_value(d: Document, field: str) -> Any {
+    if field == "_id" {
+        r: Any = d.id
+        return r
+    }
+    return d.data[field]
+}
+
+def _cmp_present(x: Any, y: Any) -> int {
+    if isinstance(x, bool) {
+        const bx: bool = x
+        const by: bool = y
+        if bx == by {
+            return 0
+        }
+        if not bx {
+            return -1
+        }
+        return 1
+    }
+    if isinstance(x, int) {
+        const ix: int = x
+        const iy: int = y
+        if ix < iy {
+            return -1
+        }
+        if ix > iy {
+            return 1
+        }
+        return 0
+    }
+    if isinstance(x, float) {
+        const fx: float = x
+        const fy: float = y
+        if fx < fy {
+            return -1
+        }
+        if fx > fy {
+            return 1
+        }
+        return 0
+    }
+    const sx: str = x
+    const sy: str = y
+    if sx < sy {
+        return -1
+    }
+    if sx > sy {
+        return 1
+    }
+    return 0
+}
+
+
+# A bound collection handle: every operation knows its collection.
+class Documents {
+    db: ODB
+    cs: CompiledSchema
+
+    def(db: ODB, cs: CompiledSchema) {
+        self.db = db
+        self.cs = cs
+    }
+
+    # Attach metadata (primary/unique/index/refs) and return self, so a define
+    # chains: db.schema(name, shape).meta({...}).
+    def meta(m: dict[str, Any]) -> Documents {
+        self.db._set_meta(self.cs, m)
+        return self
+    }
+
+    def save(doc: dict[str, Any]) -> Document {
+        return self.db._save(self.cs, doc)
+    }
+
+    # Read one document. Positional is the internal _id (docid); keyword fields
+    # are an equality lookup on an index - single (read(id=1)) or composite
+    # (read(id=1, eid=2)). Raises NotFound if absent.
+    def read(docid: int = 0, **keys: Any) -> Document {
+        return self.db._read_dispatch(self.cs, docid, keys)
+    }
+
+    def edit(docid: int, patch: dict[str, Any]) -> Document {
+        return self.db._edit(self.cs, docid, patch)
+    }
+
+    def wipe(docid: int) -> bool {
+        return self.db._wipe(self.cs, docid)
+    }
+
+    def all() -> list[Document] {
+        return self.db._all(self.cs)
+    }
+
+    def count() -> int {
+        return self.db._count(self.cs)
+    }
+}
+
+# A single document handle, carrying its collection and _id.
+class Document {
+    db: ODB
+    cs: CompiledSchema
+    id: int
+    data: dict[str, Any]
+
+    def(db: ODB, cs: CompiledSchema, id: int, data: dict[str, Any]) {
+        self.db = db
+        self.cs = cs
+        self.id = id
+        self.data = data
+    }
+
+    def __getitem__(k: str) -> Any {
+        return self.data[k]
+    }
+
+    # Update this document in place and persist.
+    def edit(patch: dict[str, Any]) -> Document {
+        updated: Document = self.db._edit(self.cs, self.id, patch)
+        self.data = updated.data
+        return self
+    }
+
+    # Delete this document.
+    def wipe() -> None {
+        self.db._wipe(self.cs, self.id)
+    }
+}
+
+#--- commit log feed types (spec section 17) ------------------------------#
+
+def _kind_name(kind: int) -> str {
+    if kind == OP_ADD {
+        return "add"
+    }
+    if kind == OP_SET {
+        return "set"
+    }
+    if kind == OP_PUT {
+        return "put"
+    }
+    if kind == OP_DEL {
+        return "del"
+    }
+    if kind == OP_DEFINE {
+        return "define"
+    }
+    return "unknown"
+}
+
+# One committed operation as seen by changes() / watch. `doc` is the
+# post-image (projected, for watch); empty for a delete. The pk value rides as
+# JSON text so a delete still identifies its document by domain key.
+class Change {
+    csn: int
+    kind: str            # "add" | "set" | "put" | "del" | "define"
+    schema: str
+    docid: int
+    pk_json: str
+    doc: dict[str, Any]
+
+    def(csn: int, kind: str, schema: str, docid: int, pk_json: str) {
+        self.csn = csn
+        self.kind = kind
+        self.schema = schema
+        self.docid = docid
+        self.pk_json = pk_json
+        self.doc = {}
+    }
+
+    def pk() -> Any {
+        if self.pk_json == "" {
+            raise ODBError("this change carries no primary-key value")
+        }
+        return loads(self.pk_json)
+    }
+}
+
+# A resumable OQL feed over the commit log (spec section 17). poll() returns
+# every matching post-image committed since the last poll (or the resume
+# token this Watch was opened at); resume_token() is the CSN to reopen from.
+class Watch {
+    db: ODB
+    cs: CompiledSchema
+    q: OqlQuery
+    last: int
+
+    def(db: ODB, cs: CompiledSchema, q: OqlQuery, since: int) {
+        self.db = db
+        self.cs = cs
+        self.q = q
+        self.last = since
+    }
+
+    def resume_token() -> int {
+        return self.last
+    }
+
+    def poll() -> list[Change] {
+        # Exactly-resumable or loud: if the retention window has trimmed past
+        # the resume token, changes may be gone; never silently skip them.
+        if self.db._log.count() > 0 {
+            e0: LogEntry = self.db._log.entry(0)
+            if e0.prev_page != 0 and self.last < e0.csn - 1 {
+                raise ODBError("watch resume token " + str(self.last) + " predates the retention window (oldest retained csn is " + str(e0.csn) + ")")
+            }
+        }
+        out: list[Change] = []
+        for e in self.db._log.since(self.last) {
+            for op in e.ops {
+                if op.schema_id != self.cs.schema_id {
+                    continue
+                }
+                if op.kind != OP_ADD and op.kind != OP_SET and op.kind != OP_PUT {
+                    continue
+                }
+                doc: dict[str, Any] = decode(self.cs, op.image)
+                if not matches(self.cs, self.q, doc) {
+                    continue
+                }
+                data: dict[str, Any] = project(self.cs, self.q, doc)
+                data["_id"] = op.docid
+                ch: Change = Change(e.csn, _kind_name(op.kind), self.cs.name, op.docid, op.pk_json)
+                ch.doc = data
+                out.append(ch)
+            }
+            if e.csn > self.last {
+                self.last = e.csn
+            }
+        }
+        return out
+    }
+}
+
+# Familiar factory alias: connect("shop.odb") is identical to ODB("shop.odb").
+def connect(path: str) -> ODB {
+    return ODB(path)
+}

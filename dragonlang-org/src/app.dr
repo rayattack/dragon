@@ -24,8 +24,16 @@ def _env_int(name: str, fallback: int) -> int {
     return fallback
 }
 
+def _env_str(name: str, fallback: str) -> str {
+    const v: str = getenv(name)
+    if len(v) > 0 {
+        return v
+    }
+    return fallback
+}
+
 const PORT: int = _env_int("DRAGON_SITE_PORT", 2018)
-const HOST: str = "127.0.0.1"
+const HOST: str = _env_str("DRAGON_SITE_HOST", "127.0.0.1")
 
 # Thin wrappers adapting the no-arg marketing renderers to the handler signature.
 def landing(req: Request, res: Response, ctx: Context) -> None {
@@ -85,5 +93,16 @@ app.GET('/api/log', api_log)
 app.GET('/api/search', api_search)
 app.POST('/api/yank/:name/:version', api_yank)
 
-print(f"Dragon registry: http://{HOST}:{PORT}/   (/eggs | /login | /account | /api/*)")
-app.listen()
+# TLS: set DRAGON_SITE_TLS_CERT (fullchain PEM) + DRAGON_SITE_TLS_KEY to serve
+# https directly; unset = plain http (dev default). src/redirect.dr holds port
+# 80 for ACME renewals + http->https redirects when this app is on 443.
+const TLS_CERT: str = _env_str("DRAGON_SITE_TLS_CERT", "")
+const TLS_KEY: str = _env_str("DRAGON_SITE_TLS_KEY", "")
+
+if len(TLS_CERT) > 0 {
+    print(f"Dragon registry: https://{HOST}:{PORT}/   (/eggs | /login | /account | /api/*)")
+    app.listen_tls(TLS_CERT, TLS_KEY)
+} else {
+    print(f"Dragon registry: http://{HOST}:{PORT}/   (/eggs | /login | /account | /api/*)")
+    app.listen()
+}

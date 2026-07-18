@@ -1,0 +1,60 @@
+# odb.checksum - CRC32C (Castagnoli) page integrity.
+#
+# Every ODB page carries a crc32c so corruption is loud, never swallowed
+# (spec section 13). We use Castagnoli (poly 0x1EDC6F41, reflected 0x82F63B78),
+# the same choice as modern storage engines, NOT the zlib/ethernet crc32 in
+# binascii. A checksum that lies about its polynomial is a silent lie, so this
+# is implemented honestly here rather than aliased to binascii.crc32
+
+const _POLY: int = 0x82F63B78          # reflected Castagnoli polynomial
+const _MASK: int = 0xFFFFFFFF          # 32-bit wrap mask
+
+def _build_table() -> list[int] {
+    table: list[int] = []
+    n: int = 0
+    while n < 256 {
+        crc: int = n
+        k: int = 0
+        while k < 8 {
+            if (crc & 1) != 0 {
+                crc = (crc >> 1) ^ _POLY
+            } else {
+                crc = crc >> 1
+            }
+            k = k + 1
+        }
+        table.append(crc & _MASK)
+        n = n + 1
+    }
+    return table
+}
+
+const _TABLE: list[int] = _build_table()
+
+# crc32c over `data`, optionally chaining from a previous `value` (0 to start).
+# The running register is pre/post-conditioned with the standard ones complement.
+def crc32c(data: bytes, value: int = 0) -> int {
+    crc: int = (value ^ _MASK) & _MASK
+    i: int = 0
+    n: int = len(data)
+    while i < n {
+        idx: int = (crc ^ data[i]) & 0xFF
+        crc = (_TABLE[idx] ^ (crc >> 8)) & _MASK
+        i = i + 1
+    }
+    return (crc ^ _MASK) & _MASK
+}
+
+# Chain crc32c over a sub-range [start, start+length) of `data`. Lets the pager
+# checksum a page body without slicing a fresh bytes object first.
+def crc32c_range(data: bytes, start: int, length: int, value: int = 0) -> int {
+    crc: int = (value ^ _MASK) & _MASK
+    i: int = start
+    end: int = start + length
+    while i < end {
+        idx: int = (crc ^ data[i]) & 0xFF
+        crc = (_TABLE[idx] ^ (crc >> 8)) & _MASK
+        i = i + 1
+    }
+    return (crc ^ _MASK) & _MASK
+}

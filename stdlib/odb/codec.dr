@@ -1,0 +1,77 @@
+# odb.codec - fixed-offset little-endian encode/decode.
+#
+# Pages and (later) DBON documents are built into a mutable list[int] page
+# buffer, then frozen to bytes for the VFS. Reads go straight off a bytes page
+# at fixed offsets - no parsing, the speed thesis made physical (spec 12).
+#
+# Little-endian throughout so the on-disk form matches the common CPU order
+# and index keys stay memcomparable when we get there. Ints are treated as
+# unsigned in the stored width; callers keep values within range
+
+from struct import unpack_u16_le, unpack_u32_le, unpack_u64_le, unpack_i64_le
+
+# A page-sized buffer of zero bytes, ready to be filled at offsets.
+def blank(size: int) -> list[int] {
+    buf: list[int] = []
+    i: int = 0
+    while i < size {
+        buf.append(0)
+        i = i + 1
+    }
+    return buf
+}
+
+def put_u8(buf: list[int], off: int, v: int) -> None {
+    buf[off] = v & 0xFF
+}
+
+def put_u16(buf: list[int], off: int, v: int) -> None {
+    buf[off] = v & 0xFF
+    buf[off + 1] = (v >> 8) & 0xFF
+}
+
+def put_u32(buf: list[int], off: int, v: int) -> None {
+    buf[off] = v & 0xFF
+    buf[off + 1] = (v >> 8) & 0xFF
+    buf[off + 2] = (v >> 16) & 0xFF
+    buf[off + 3] = (v >> 24) & 0xFF
+}
+
+def put_u64(buf: list[int], off: int, v: int) -> None {
+    i: int = 0
+    while i < 8 {
+        buf[off + i] = (v >> (i * 8)) & 0xFF
+        i = i + 1
+    }
+}
+
+# Copy raw bytes into the buffer at off.
+def put_bytes(buf: list[int], off: int, src: bytes) -> None {
+    i: int = 0
+    n: int = len(src)
+    while i < n {
+        buf[off + i] = src[i]
+        i = i + 1
+    }
+}
+
+def get_u8(data: bytes, off: int) -> int {
+    return data[off]
+}
+
+def get_u16(data: bytes, off: int) -> int {
+    return unpack_u16_le(data, off)
+}
+
+def get_u32(data: bytes, off: int) -> int {
+    return unpack_u32_le(data, off)
+}
+
+def get_u64(data: bytes, off: int) -> int {
+    return unpack_u64_le(data, off)
+}
+
+# Read a fixed-length raw byte field.
+def get_bytes(data: bytes, off: int, length: int) -> bytes {
+    return data[off:off + length]
+}

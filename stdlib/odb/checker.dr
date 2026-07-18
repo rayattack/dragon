@@ -1,0 +1,195 @@
+# odb.checker - `odb check`, the structural integrity pass (spec section 21).
+#
+# Walk a B+tree from its root and verify, in one pass:
+#   - every reachable page's crc32c (read_page raises CorruptionError on a bad
+#     one, so reading the whole tree checks every checksum),
+#   - keys strictly ascending within each node,
+#   - branch separator keys ascending,
+#   - key-range containment: every key in a subtree lies within the [lo, hi)
+#     bounds its parent's separators imply (catches a key filed under the wrong
+#     child, which a mere per-node sort check would miss).
+#
+# A clean check plus the crash harness is the M1 guarantee: the file on disk is
+# a well-formed tree, not just a bag of checksum-valid pages
+
+from odb.pager import Pager, PT_LEAF, PT_BRANCH, PT_IX_LEAF, PT_IX_BRANCH
+from odb.codec import get_u16, get_u64
+from odb.index import IndexTree, IxLeaf, IxBranch
+
+class CheckResult {
+    ok: bool
+    pages: int
+    keys: int
+    message: str
+
+    def() {
+        self.ok = True
+        self.pages = 0
+        self.keys = 0
+        self.message = ""
+    }
+
+    def _bad(msg: str) -> None {
+        self.ok = False
+        if self.message == "" {
+            self.message = msg
+        }
+    }
+}
+
+# Check the tree rooted at `root`. An empty tree (root 0) is trivially valid.
+def check_tree(pager: Pager, root: int) -> CheckResult {
+    res: CheckResult = CheckResult()
+    if root != 0 {
+        _walk(pager, root, 0, False, 0, False, res)
+    }
+    return res
+}
+
+# lo/hi are the inclusive-lower, exclusive-upper key bounds for this subtree;
+# has_lo/has_hi say whether each bound is active (root has neither).
+def _walk(pager: Pager, pid: int, lo: int, has_lo: bool, hi: int, has_hi: bool, res: CheckResult) -> None {
+    page: bytes = pager.read_page(pid)      # verifies crc32c
+    res.pages = res.pages + 1
+    t: int = pager.page_type(page)
+
+    if t == PT_LEAF {
+        n: int = get_u16(page, 0)
+        prev: int = 0
+        havep: bool = False
+        i: int = 0
+        while i < n {
+            k: int = get_u64(page, 2 + i * 12)
+            if has_lo and k < lo {
+                res._bad("leaf key below lower bound")
+            }
+            if has_hi and k >= hi {
+                res._bad("leaf key at/above upper bound")
+            }
+            if havep and k <= prev {
+                res._bad("leaf keys not strictly ascending")
+            }
+            prev = k
+            havep = True
+            res.keys = res.keys + 1
+            i = i + 1
+        }
+        return
+    }
+
+    if t == PT_BRANCH {
+        n: int = get_u16(page, 0)
+        child0: int = get_u64(page, 8)
+        keys: list[int] = []
+        children: list[int] = []
+        i: int = 0
+        while i < n {
+            keys.append(get_u64(page, 16 + i * 16))
+            children.append(get_u64(page, 16 + i * 16 + 8))
+            i = i + 1
+        }
+        if n == 0 {
+            res._bad("branch with no separators")
+            return
+        }
+        # separators strictly ascending
+        j: int = 1
+        while j < n {
+            if keys[j] <= keys[j - 1] {
+                res._bad("branch keys not strictly ascending")
+            }
+            j = j + 1
+        }
+        # child0 covers [lo, keys[0])
+        _walk(pager, child0, lo, has_lo, keys[0], True, res)
+        # children[i] covers [keys[i], keys[i+1]) or [keys[i], hi) for the last
+        m: int = 0
+        while m < n {
+            sub_hi: int = hi
+            sub_has_hi: bool = has_hi
+            if m + 1 < n {
+                sub_hi = keys[m + 1]
+                sub_has_hi = True
+            }
+            _walk(pager, children[m], keys[m], True, sub_hi, sub_has_hi, res)
+            m = m + 1
+        }
+        return
+    }
+
+    res._bad("unexpected page type in tree walk")
+}
+
+#===----------------------------------------------------------------------===#
+# Index trees: the same invariants over bytes keys (memcmp order + containment).
+# Parsing goes through IndexTree's own readers so there is one source of truth
+# for the slotted layout.
+#===----------------------------------------------------------------------===#
+
+def check_index_tree(pager: Pager, root: int) -> CheckResult {
+    res: CheckResult = CheckResult()
+    if root != 0 {
+        t: IndexTree = IndexTree(pager, root)
+        none: bytes = bytes([])
+        _walk_ix(t, pager, root, none, False, none, False, res)
+    }
+    return res
+}
+
+def _walk_ix(t: IndexTree, pager: Pager, pid: int, lo: bytes, has_lo: bool, hi: bytes, has_hi: bool, res: CheckResult) -> None {
+    page: bytes = pager.read_page(pid)      # verifies crc32c
+    res.pages = res.pages + 1
+    ty: int = pager.page_type(page)
+
+    if ty == PT_IX_LEAF {
+        leaf: IxLeaf = t._read_leaf(pid)
+        prev: bytes = bytes([])
+        havep: bool = False
+        for k in leaf.keys {
+            if has_lo and k < lo {
+                res._bad("index leaf key below lower bound")
+            }
+            if has_hi and not (k < hi) {
+                res._bad("index leaf key at/above upper bound")
+            }
+            if havep and not (prev < k) {
+                res._bad("index leaf keys not strictly ascending")
+            }
+            prev = k
+            havep = True
+            res.keys = res.keys + 1
+        }
+        return
+    }
+
+    if ty == PT_IX_BRANCH {
+        br: IxBranch = t._read_branch(pid)
+        n: int = len(br.keys)
+        if n == 0 {
+            res._bad("index branch with no separators")
+            return
+        }
+        j: int = 1
+        while j < n {
+            if not (br.keys[j - 1] < br.keys[j]) {
+                res._bad("index branch keys not strictly ascending")
+            }
+            j = j + 1
+        }
+        _walk_ix(t, pager, br.child0, lo, has_lo, br.keys[0], True, res)
+        m: int = 0
+        while m < n {
+            sub_hi: bytes = hi
+            sub_has_hi: bool = has_hi
+            if m + 1 < n {
+                sub_hi = br.keys[m + 1]
+                sub_has_hi = True
+            }
+            _walk_ix(t, pager, br.children[m], br.keys[m], True, sub_hi, sub_has_hi, res)
+            m = m + 1
+        }
+        return
+    }
+
+    res._bad("unexpected page type in index tree walk")
+}
