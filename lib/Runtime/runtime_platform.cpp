@@ -19,6 +19,9 @@
   #include <arpa/inet.h>
   #include <netdb.h>           // getaddrinfo for dragon_resolve4
   #include <fcntl.h>
+  #ifdef __APPLE__
+    #include <sys/random.h>    // getentropy lives here on macOS, not unistd.h
+  #endif
 #endif
 #include "llhttp.h"
 #ifndef _WIN32

@@ -45,10 +45,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-22.04,  target: linux-x86_64,  experimental: false }
-          - { os: macos-14,      target: macos-arm64,   experimental: false }
-          - { os: macos-13,      target: macos-x86_64,  experimental: false }
-          - { os: windows-2022,  target: windows-x86_64, experimental: true }
+          # macos-13/14 are retired/deprecated on GitHub; macos-15-intel is
+          # the only remaining free x64 macOS label.
+          - { os: ubuntu-22.04,     target: linux-x86_64,  experimental: false }
+          - { os: macos-15,         target: macos-arm64,   experimental: false }
+          - { os: macos-15-intel,   target: macos-x86_64,  experimental: false }
+          # Windows is parked: the runtime targets MinGW (pthreads/unistd.h,
+          # MSVC is not a target) but this job built with MSVC, so it can
+          # never link. Re-enable once the job is reworked to MSYS2/MinGW
+          # (needs an LLVM-from-source build under MinGW, cached after one run).
+          # - { os: windows-2022,   target: windows-x86_64, experimental: true }
 
     steps:
       - uses: actions/checkout@v4
