@@ -1,0 +1,484 @@
+# shell.dr - the shared view layer: app shell + floating rail, generic table
+# chrome (toolbar / list / pager / modal), spotlight, profile and settings views.
+# Pure template[HTML]; handlers pass data in. Imports only data types from core.
+from html import HTML
+from http.server import Request, Response, Context
+from core import is_fragment, AuditRow, SecretRow
+
+class Col {
+    def(key: str, label: str) {
+        self.key = key
+        self.label = label
+    }
+}
+
+
+def pill_of(status: str) -> str {
+    if status == "delivered" { return "ok" }
+    if status == "retrying" { return "warn" }
+    if status == "failed" { return "bad" }
+    return "mut"
+}
+
+
+# Pill for a delivery attempt's HTTP status: -1 never attempted, 0 the
+# connection itself failed, otherwise the code (2xx ok, 3xx neutral, 4xx warn,
+# 5xx bad).
+def code_pill(status: int) -> HTML {
+    if status < 0 {
+        return template[HTML] { <span class="pill mut">-</span> }
+    }
+    if status == 0 {
+        return template[HTML] { <span class="pill bad">no conn</span> }
+    }
+    cls: str = "bad"
+    if status < 300 {
+        cls = "ok"
+    } elif status < 400 {
+        cls = "mut"
+    } elif status < 500 {
+        cls = "warn"
+    }
+    return template[HTML] { <span class="pill !{cls}">!{f"{status}"}</span> }
+}
+
+
+def active_pill(active: bool) -> HTML {
+    if active {
+        return template[HTML] { <span class="pill ok">active</span> }
+    }
+    return template[HTML] { <span class="pill mut">inactive</span> }
+}
+
+
+def _ico(paths: HTML) -> HTML {
+    return template[HTML] {
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">!{paths}</svg>
+    }
+}
+
+
+def _search_svg() -> HTML {
+    return template[HTML] { <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg> }
+}
+
+
+def _rail_item(key: str, href: str, label: str, icon: HTML, here: str) -> HTML {
+    const cls: str = "rail-item active" if key == here else "rail-item"
+    return template[HTML] {
+      <a class="!{cls}" href="!{href}">
+        !{icon}
+        <span class="rail-tip">
+          !{label}
+        </span>
+      </a>
+    }
+}
+
+
+def render_nav_links(here: str) -> HTML {
+    const i_dash: HTML = _ico(template[HTML] { <rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/> })
+    const i_app: HTML = _ico(template[HTML] { <rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/> })
+    const i_act: HTML = _ico(template[HTML] { <path d="M13 2 3 14h9l-1 8 10-12h-9z"/> })
+    const i_evt: HTML = _ico(template[HTML] { <path d="M4 5h16M4 12h16M4 19h10"/> })
+    const i_sub: HTML = _ico(template[HTML] { <path d="M4 11a9 9 0 0 1 9 9M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1.5"/> })
+    const i_gist: HTML = _ico(template[HTML] { <path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4z"/> })
+    const i_wand: HTML = _ico(template[HTML] { <path d="M15 4V2"/><path d="M15 16v-2"/><path d="M8 9h2"/><path d="M20 9h2"/><path d="M17.8 11.8 19 13"/><path d="M15 9h.01"/><path d="M17.8 6.2 19 5"/><path d="m3 21 9-9"/><path d="M12.2 6.2 11 5"/> })
+    return template[HTML] {
+      !{_rail_item("dash", "/", "Dashboard", i_dash, here)}
+      !{_rail_item("apps", "/apps", "Applications", i_app, here)}
+      !{_rail_item("actions", "/actions", "Actions", i_act, here)}
+      !{_rail_item("events", "/events", "Events", i_evt, here)}
+      !{_rail_item("subs", "/subs", "Subscriptions", i_sub, here)}
+      !{_rail_item("gists", "/gists", "Gists", i_gist, here)}
+      !{_rail_item("wands", "/wands", "Wands", i_wand, here)}
+    }
+}
+
+
+def fragment_with_nav(content: HTML, here: str) -> HTML {
+    return template[HTML] {
+      !{content}
+      <div class="railnav" id="nav" data-dj-oob>!{render_nav_links(here)}</div>
+    }
+}
+
+
+def and_close_modal(content: HTML) -> HTML {
+    return template[HTML] {
+      !{content}
+      <div id="modal" data-dj-oob></div>
+    }
+}
+
+
+def _col_menu_item(tkey: str, c: Col) -> HTML {
+    return template[HTML] {
+      <label class="col-item"><input type="checkbox" data-colkey="!{c.key}" data-tkey="!{tkey}" checked onchange="dashCol('!{tkey}','!{c.key}',this.checked)"><span>!{c.label}</span></label>
+    }
+}
+
+
+# search (left) + filters + spacer + selection actions + Columns menu. When rows
+# are selected, `.sel-actions` un-hides in the spacer next to Columns (same row,
+# no layout shift); `data-selbar` keeps the selection JS working. `tkey` drives dashList().
+def render_toolbar(tkey: str, placeholder: str, cols: list[Col], filters: HTML, selactions: HTML) -> HTML {
+    return template[HTML] {
+      <div class="toolbar" data-toolbar="!{tkey}">
+        <div class="search-inline">!{_search_svg()}<input class="q" type="search" placeholder="!{placeholder}" oninput="dashList('!{tkey}')"></div>
+        !{filters}
+        <div class="grow"></div>
+        <div class="sel-actions" data-selbar="!{tkey}" hidden>
+          <span class="sel-n">0 selected</span>
+          !{selactions}
+          <button class="btn btn-sm btn-ghost" onclick="dashClear('!{tkey}')">Clear</button>
+        </div>
+        <div class="pos">
+          <button class="btn" onclick="dashToggleCols(this)">Columns</button>
+          <div class="pop" hidden><h4>Show columns</h4>!{ for c in cols { :{ !{_col_menu_item(tkey, c)} } }}</div>
+        </div>
+      </div>
+    }
+}
+
+
+def _thead(cols: list[Col]) -> HTML {
+    return template[HTML] {
+      <thead><tr>
+        <th class="cb-col"><input type="checkbox" class="cb-all"></th>
+        !{ for c in cols { :{ <th data-col="!{c.key}">!{c.label}</th> } }}
+      </tr></thead>
+    }
+}
+
+
+def _pgbtn(tkey: str, n: int, cur: int) -> HTML {
+    const cls: str = "active" if n == cur else ""
+    return template[HTML] { <button class="!{cls}" onclick="dashList('!{tkey}',!{f"{n}"})">!{f"{n}"}</button> }
+}
+
+
+def render_pager(tkey: str, page: int, per: int, total: int) -> HTML {
+    if total == 0 {
+        return template[HTML] {  }
+    }
+    const pages: int = (total + per - 1) // per
+    const frm: int = (page - 1) * per + 1
+    const to: int = min(total, page * per)
+    const lo: int = max(1, page - 2)
+    const hi: int = min(pages, page + 2)
+    nums: list[HTML] = []
+    if lo > 1 {
+        nums.append(_pgbtn(tkey, 1, page))
+        if lo > 2 { nums.append(template[HTML] { <span class="pg-ellipsis">...</span> }) }
+    }
+    i: int = lo
+    while i <= hi {
+        nums.append(_pgbtn(tkey, i, page))
+        i = i + 1
+    }
+    if hi < pages {
+        if hi < pages - 1 { nums.append(template[HTML] { <span class="pg-ellipsis">...</span> }) }
+        nums.append(_pgbtn(tkey, pages, page))
+    }
+    const prev_dis: str = "disabled" if page <= 1 else ""
+    const next_dis: str = "disabled" if page >= pages else ""
+    const prev_p: int = page - 1
+    const next_p: int = page + 1
+    return template[HTML] {
+      <div class="pagination">
+        <div class="pg-info">Showing <b>!{f"{frm}"}-!{f"{to}"}</b> of <b>!{f"{total}"}</b></div>
+        <div class="pg-controls">
+          <button !{prev_dis | raw} onclick="dashList('!{tkey}',!{f"{prev_p}"})">&lsaquo;</button>
+          !{ for b in nums { :{ !{b} } }}
+          <button !{next_dis | raw} onclick="dashList('!{tkey}',!{f"{next_p}"})">&rsaquo;</button>
+        </div>
+      </div>
+    }
+}
+
+
+# table-wrap(table + rows) + pagination - the swap target #list-<tkey>.
+def render_list(tkey: str, cols: list[Col], rows: HTML, empty_msg: str, page: int, per: int, total: int) -> HTML {
+    const ncol: int = len(cols) + 1
+    body: HTML = rows
+    if total == 0 {
+        body = template[HTML] { <tr><td class="empty" colspan="!{f"{ncol}"}">!{empty_msg}</td></tr> }
+    }
+    return template[HTML] {
+      <div class="table-wrap">
+        <table class="data" data-tkey="!{tkey}">
+          !{_thead(cols)}
+          <tbody>!{body}</tbody>
+        </table>
+      </div>
+      !{render_pager(tkey, page, per, total)}
+    }
+}
+
+
+# data-fill opts the section's grid into fill-available-height (dash.js sizes
+# the table-wrap to the viewport bottom); embedded lists (settings users, an
+# app's owned actions) stay natural-height by not passing through here.
+def list_page(tkey: str, title: str, sub: str, add: HTML, toolbar: HTML, list_frag: HTML) -> HTML {
+    return template[HTML] {
+      <div class="list-page" data-tkey="!{tkey}" data-fill>
+        <div class="section-head pin"><div><h2>!{title}</h2><p class="sub">!{sub}</p></div>!{add}</div>
+        !{toolbar}
+        <div id="list-!{tkey}">!{list_frag}</div>
+      </div>
+    }
+}
+
+
+def open_modal(title: str, eyebrow: str, body: HTML) -> HTML {
+    return template[HTML] {
+      <div class="scrim" onclick="document.getElementById('modal').innerHTML=''">
+        <div class="modal" onclick="event.stopPropagation()">
+          <div class="modal-head"><div><div class="eyebrow">!{eyebrow}</div><h3>!{title}</h3></div>
+            <button class="icon-btn" onclick="document.getElementById('modal').innerHTML=''">&times;</button></div>
+          !{body}
+        </div>
+      </div>
+    }
+}
+
+
+def render_shell(here: str, content: HTML) -> HTML {
+    const gear: HTML = _ico(template[HTML] { <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/> })
+    const moon: HTML = _ico(template[HTML] { <path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"/> })
+    const glass: HTML = _ico(template[HTML] { <circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/> })
+    return template[HTML] {
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>amebo</title>
+        <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+        <link rel="stylesheet" href="/static/dash.css">
+        <script>
+          (function(){ var q = new URLSearchParams(location.search).get('theme');
+            var t = q || localStorage.getItem('amebo-theme'); if (t) document.documentElement.setAttribute('data-theme', t); })();
+        </script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.32.7/ace.min.js"></script>
+      </head>
+      <body>
+        <nav class="rail">
+          <button class="rail-logo" onclick="dj.get('/dash/profile', '#modal')"><img src="/static/logo.svg" alt=""><span class="rail-tip">Profile</span></button>
+          <div class="rail-divider"></div>
+          <div class="railnav" id="nav">!{render_nav_links(here)}</div>
+          <div class="rail-divider"></div>
+          <button class="rail-item" onclick="document.getElementById('spotlight').hidden=false;document.querySelector('#spotlight input').focus()">!{glass}<span class="rail-tip">Search (Ctrl K)</span></button>
+          <button class="rail-item" onclick="dj.get('/dash/settings', '#modal')">!{gear}<span class="rail-tip">Settings</span></button>
+        </nav>
+        <button class="theme-fab" title="Toggle light / dark" onclick="var r=document.documentElement,d=r.getAttribute('data-theme')==='dark'?'light':'dark';r.setAttribute('data-theme',d);localStorage.setItem('amebo-theme',d);window.dgAceTheme&&window.dgAceTheme()">!{moon}</button>
+        <main class="stage" id="view">!{content}</main>
+        <div id="modal"></div>
+        <div id="drawer"></div>
+        <div id="spotlight" class="spotlight" hidden>
+          <div class="spot-scrim" onclick="dashCloseSpot()"></div>
+          <div class="spot-box">
+            <input class="input spot-input" type="search" placeholder="Search everything...  (Esc to close)" oninput="dj.get('/dash/search?q=' + encodeURIComponent(this.value), '#spot-results', {debounce:180})">
+            <div id="spot-results" class="spot-results"></div>
+          </div>
+        </div>
+        <script src="/static/dg.js"></script>
+        <script>
+          const dj = DragonFragments({ name: 'dj', suffix: 'dj', boost: '#view',
+            skeleton: { loading: true, colors: ['var(--dg-sk-a)', 'var(--dg-sk-b)'] } });
+          // Re-theme every live Ace editor when the light/dark toggle flips.
+          window.__ace = window.__ace || [];
+          window.dgAceTheme = function(){ var d = document.documentElement.getAttribute('data-theme') === 'dark';
+            (window.__ace || []).forEach(function(e){ try { e.setTheme(d ? 'ace/theme/one_dark' : 'ace/theme/chrome'); } catch (x) {} }); };
+          window.dashBulkOne = function(tkey, url, id){ var f = new FormData(); f.append('ids', id); dj.send(url, { method:'POST', target:'#list-'+tkey, body:f }); };
+          (function(){ var o = new URLSearchParams(location.search).get('open'); if (o) dj.get(o, '#modal'); })();
+        </script>
+        <script src="/static/dash.js"></script>
+        <script src="/static/builder.js"></script>
+        <script src="/static/echarts.min.js"></script>
+        <script src="/static/charts.js"></script>
+      </body>
+      </html>
+    }
+}
+
+
+def spot_item(label: str, kind: str, href: str) -> HTML {
+    return template[HTML] {
+      <a class="spot-item" href="!{href}" onclick="dashCloseSpot()"><span>!{label}</span><span class="s-kind">!{kind}</span></a>
+    }
+}
+
+
+def render_search(items: list[HTML], q: str) -> HTML {
+    if len(q) == 0 {
+        return template[HTML] { <div class="spot-group">Type to search across applications, actions, events, subscriptions and gists</div> }
+    }
+    if len(items) == 0 {
+        return template[HTML] { <div class="spot-group">No matches for "!{q}"</div> }
+    }
+    return template[HTML] {!{ for it in items { :{ !{it} } }}}
+}
+
+
+def render_profile(user: str, role: str, version: str, audit: list[AuditRow]) -> HTML {
+    hist: HTML = template[HTML] { <p class="hint">No admin activity recorded yet.</p> }
+    if len(audit) > 0 {
+        hist = template[HTML] {
+          <div class="table-wrap"><table class="data">
+            <thead><tr><th>when</th><th>action</th><th>detail</th></tr></thead>
+            <tbody>!{ for a in audit { :{ <tr><td class="mono dim">!{a.ts}</td><td class="fw">!{a.action}</td><td class="dim">!{a.detail}</td></tr> } }}</tbody>
+          </table></div>
+        }
+    }
+    const body: HTML = template[HTML] {
+      <div class="modal-body">
+        <div class="kv" style="margin-bottom:20px">
+          <div class="k">Signed in as</div><div class="fw">!{user}</div>
+          <div class="k">Role</div><div><span class="pill ok">!{role}</span></div>
+          <div class="k">Version</div><div class="mono">amebo !{version}</div>
+        </div>
+        <h3 style="font-size:13px;margin:0 0 10px">Recent admin activity</h3>
+        !{hist}
+      </div>
+      <div class="modal-foot">
+        <button type="button" class="btn btn-ghost" onclick="document.getElementById('modal').innerHTML=''">Close</button>
+        <button class="btn btn-danger" onclick="dj.post('/logout', null)">Log out</button>
+      </div>
+    }
+    return open_modal(user, "profile", body)
+}
+
+
+def _secret_row(s: SecretRow) -> HTML {
+    return template[HTML] {
+      <tr>
+        <td data-col="application" class="fw">!{s.application}</td>
+        <td data-col="secret"><code class="secret mono" data-real="!{s.secret}">************</code></td>
+        <td data-col="act" class="right nowrap">
+          <button class="icon-btn sm" title="Reveal / hide secret" onclick="var c=this.closest('tr').querySelector('.secret'); c.textContent = c.textContent.charAt(0)==='*' ? c.dataset.real : '************'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></button>
+          <button class="icon-btn sm" title="Rotate secret" onclick="var v=prompt('New secret for !{s.application}');if(v){var f=new FormData();f.append('application','!{s.application}');f.append('secret',v);dj.send('/dash/secret',{method:'POST',target:'#list-secrets',body:f})}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
+        </td>
+      </tr>
+    }
+}
+
+
+# App secrets has no bulk op, so it skips the checkbox column but keeps the same
+# grid styling (table.data + table-wrap) as every other table.
+def render_secrets_list(secrets: list[SecretRow]) -> HTML {
+    if len(secrets) == 0 {
+        return template[HTML] { <div class="table-wrap"><table class="data"><tbody><tr><td class="empty">No applications registered yet.</td></tr></tbody></table></div> }
+    }
+    return template[HTML] {
+      <div class="table-wrap"><table class="data" data-tkey="secrets">
+        <thead><tr><th>application</th><th>secret</th><th class="right">rotate</th></tr></thead>
+        <tbody>!{ for s in secrets { :{ !{_secret_row(s)} } }}</tbody>
+      </table></div>
+    }
+}
+
+
+def render_settings(admin_key: str, secrets: list[SecretRow], users_tab: HTML, default_retries: str) -> HTML {
+    const masked: str = (admin_key[:8] + "..." + admin_key[len(admin_key) - 4:]) if len(admin_key) > 14 else admin_key
+    const sec_body: HTML = template[HTML] { <div id="list-secrets">!{render_secrets_list(secrets)}</div> }
+    const body: HTML = template[HTML] {
+      <div class="modal-body">
+        <div class="tabs">
+          <button class="active" onclick="dgTab(this,'access')">Access</button>
+          <button onclick="dgTab(this,'users')">Users</button>
+          <button onclick="dgTab(this,'secrets')">App secrets</button>
+          <button onclick="dgTab(this,'delivery')">Delivery</button>
+          <button onclick="dgTab(this,'danger')">Danger zone</button>
+        </div>
+        <div class="tabpane active" id="tab-access">
+          <div class="field"><label>Admin API key</label>
+            <p class="hint" style="margin-top:0">Bearer token (x-amebo-admin-key) for the /v1 registration and authorization endpoints. Treat it like a password.</p>
+            <div class="codebox"><code id="adminkey" data-real="!{admin_key}">!{masked}</code>
+              <button class="btn btn-sm btn-ghost" onclick="var c=document.getElementById('adminkey'); c.textContent = c.textContent.indexOf('...')>=0 ? c.dataset.real : '!{masked}'">reveal</button>
+              <button class="btn btn-sm btn-ghost" onclick="navigator.clipboard.writeText(document.getElementById('adminkey').dataset.real)">copy</button>
+              <form action="/dash/settings/rotate-key" method="post" onsubmit="return dj.submit(this, '#modal')" style="display:inline"><button class="btn btn-sm btn-danger">rotate</button></form>
+            </div>
+          </div>
+          <div class="kv" style="margin-top:18px">
+            <div class="k">Signature</div><div>HMAC-SHA256 over the raw request body</div>
+            <div class="k">Envelope</div><div class="mono">{ action, metadata, payload }</div>
+            <div class="k">Sessions</div><div>signed cookie (HttpOnly), per-action ACLs</div>
+          </div>
+        </div>
+        <div class="tabpane" id="tab-users">
+          !{users_tab}
+        </div>
+        <div class="tabpane" id="tab-secrets">
+          <p class="hint" style="margin-top:0">Each app's secret signs its publishes and outbound webhooks. Rotate carefully.</p>
+          !{sec_body}
+        </div>
+        <div class="tabpane" id="tab-delivery">
+          <p class="hint" style="margin-top:0">Delivery policy. The default max retries applies to any new subscription that doesn't set its own.</p>
+          <form action="/dash/settings/delivery" method="post" onsubmit="return dj.submit(this, '#modal')" class="field">
+            <label>Default max retries</label>
+            <div style="display:flex;gap:8px;align-items:center;max-width:280px">
+              <input name="max_retries" type="number" min="1" value="!{default_retries}" style="width:120px">
+              <button class="btn btn-primary">Save</button>
+            </div>
+          </form>
+          <div class="kv" style="margin-top:18px">
+            <div class="k">Backoff</div><div class="mono">min(3600, 10 * 2^(attempt-1)) s</div>
+            <div class="k">Worker poll</div><div>150 ms</div>
+            <div class="k">Lease batch</div><div>64 gists</div>
+          </div>
+        </div>
+        <div class="tabpane" id="tab-danger">
+          <div class="danger-row"><div><div class="fw">Purge delivered gists</div><div class="d-txt">Remove delivery records that already succeeded.</div></div>
+            <form action="/dash/purge" method="post" onsubmit="return dj.submit(this, '#modal')"><input type="hidden" name="mode" value="delivered"><button class="btn btn-danger btn-sm">Purge delivered</button></form></div>
+          <div class="danger-row"><div><div class="fw">Reset broker data</div><div class="d-txt">Delete all events and gists. Apps/actions/subscriptions kept.</div></div>
+            <form action="/dash/purge" method="post" onsubmit="return dj.submit(this, '#modal')"><input type="hidden" name="mode" value="all"><button class="btn btn-danger btn-sm">Delete events + gists</button></form></div>
+        </div>
+      </div>
+      <div class="modal-foot"><button type="button" class="btn" onclick="document.getElementById('modal').innerHTML=''">Close</button></div>
+      <script>
+        window.dgTab = function(btn, name){ var root = btn.closest('.modal');
+          root.querySelectorAll('.tabs button').forEach(function(b){ b.classList.toggle('active', b === btn); });
+          root.querySelectorAll('.tabpane').forEach(function(p){ p.classList.toggle('active', p.id === 'tab-' + name); }); };
+      </script>
+    }
+    return open_modal("Settings", "amebo", body)
+}
+
+
+# Generic right-side detail drawer used by every resource's master-detail view.
+def open_drawer(eyebrow: str, title: str, body: HTML) -> HTML {
+    return template[HTML] {
+      <div class="drawer-scrim" onclick="document.getElementById('drawer').innerHTML=''"></div>
+      <aside class="drawer">
+        <div class="drawer-head"><div><div class="eyebrow">!{eyebrow}</div><h3>!{title}</h3></div>
+          <button class="icon-btn" onclick="document.getElementById('drawer').innerHTML=''">&times;</button></div>
+        <div class="drawer-body">!{body}</div>
+      </aside>
+    }
+}
+
+# Append an out-of-band empty #drawer so a save/delete response closes the drawer.
+def and_close_drawer(content: HTML) -> HTML {
+    return template[HTML] {
+      !{content}
+      <div id="drawer" data-dj-oob></div>
+    }
+}
+
+# A read-only key/value grid for detail drawers.
+def kv(pairs: list[tuple[str, str]]) -> HTML {
+    return template[HTML] {
+      <div class="kv kv-detail">!{ for p in pairs { :{ <div class="k">!{p[0]}</div><div class="v">!{p[1]}</div> } }}</div>
+    }
+}
+
+
+def respond_section(req: Request, res: Response, key: str, content: HTML) -> None {
+    if is_fragment(req) {
+        res.html(fragment_with_nav(content, key))
+    } else {
+        res.html(render_shell(key, content))
+    }
+}

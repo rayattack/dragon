@@ -1,0 +1,669 @@
+# raft - the Raft consensus algorithm as a pure, deterministic state machine.
+#
+# This is the standalone package objectbase.md section 19 (v3b) promises: ODB's
+# HA rides it, but nothing in here knows ODB exists. A RaftNode never touches a
+# socket, a clock, or a disk. Time is a tick() the host calls; the network is a
+# step(msg) in and a take_outbox() out; the payload is opaque bytes. That purity
+# is what makes the chaos harness (raft.sim) deterministic: a seed replays the
+# exact same election, the exact same partition, the exact same crash.
+#
+# The host contract, in full:
+#
+#   1. Call tick() at a steady cadence (the unit of all timeouts).
+#   2. Deliver every take_outbox() message to its `to` node, which step()s it.
+#   3. PERSIST HARD STATE BEFORE RELEASING MESSAGES. After any tick/step/
+#      propose, if term, voted_for, or the log changed, write hard_state()
+#      durably before the outbox messages leave the process. A vote or an
+#      append-ack that outlives a crash while the state behind it did not is
+#      how two leaders happen in one term.
+#   4. Apply take_committed() entries, in order, exactly once. Entries with
+#      empty data are leadership no-ops (see _become_leader); apply their
+#      INDEX (the slot is consumed) but no state change.
+#
+# Restart = restore(id, ids, rng, term, voted_for, log): volatile state
+# (role, timers, commit_index) rebuilds from the cluster; hard state must not.
+#
+# The algorithm is the paper (Ongaro & Ousterhout 2014, sections 5.1-5.4) with
+# the two standard production refinements: a no-op entry appended on winning an
+# election (drives the section 5.4.2 commit rule forward without waiting for
+# client traffic), and a conflict hint on failed appends so a divergent
+# follower is repaired in O(gap) round trips, not one index per trip.
+
+from raft.rng import Rng
+
+# Roles.
+const FOLLOWER: int = 0
+const CANDIDATE: int = 1
+const LEADER: int = 2
+
+# Message kinds.
+const M_VOTE_REQ: int = 1
+const M_VOTE_RESP: int = 2
+const M_APP_REQ: int = 3
+const M_APP_RESP: int = 4
+
+# Cap on entries per append message: bounds message size and keeps a repair
+# of a long gap incremental. 32 is plenty; correctness never depends on it.
+const _MAX_BATCH: int = 32
+
+# One replicated log slot. Index is positional (1-based within RaftNode.log);
+# data is opaque to consensus. Empty data = leadership no-op.
+class Entry {
+    term: int
+    data: bytes
+
+    def(term: int, data: bytes) {
+        self.term = term
+        self.data = data
+    }
+}
+
+# One protocol message. A single class with a kind tag, like odb.commitlog's
+# LogOp: fields a kind does not use stay zero. `frm` because `from` is the
+# import keyword.
+#
+#   M_VOTE_REQ:  term, frm=candidate, last_index/last_term = candidate's log
+#   M_VOTE_RESP: term, granted
+#   M_APP_REQ:   term, frm=leader, prev_index/prev_term, entries, commit
+#   M_APP_RESP:  term, success, matched (on success: highest index known
+#                replicated), hint (on failure: where the leader should back
+#                next_index off to)
+class Msg {
+    kind: int
+    frm: int
+    to: int
+    term: int
+    last_index: int
+    last_term: int
+    prev_index: int
+    prev_term: int
+    entries: list[Entry]
+    commit: int
+    granted: bool
+    success: bool
+    matched: int
+    hint: int
+
+    def(kind: int, frm: int, to: int, term: int) {
+        self.kind = kind
+        self.frm = frm
+        self.to = to
+        self.term = term
+        self.last_index = 0
+        self.last_term = 0
+        self.prev_index = 0
+        self.prev_term = 0
+        self.entries = []
+        self.commit = 0
+        self.granted = False
+        self.success = False
+        self.matched = 0
+        self.hint = 0
+    }
+}
+
+# The durable third of a node: what must survive a crash (paper figure 2,
+# "persistent state"). Everything else is safely rebuilt from the cluster.
+#
+# base_index/base_term are log compaction (paper section 7): entries at or
+# below the base have been applied by the host and discarded from the log;
+# the host's state machine IS the snapshot. `log` holds entries base+1
+# onward. A base of 0 means nothing was ever compacted.
+class HardState {
+    term: int
+    voted_for: int
+    log: list[Entry]
+    base_index: int
+    base_term: int
+
+    def(term: int, voted_for: int, log: list[Entry]) {
+        self.term = term
+        self.voted_for = voted_for
+        self.log = log
+        self.base_index = 0
+        self.base_term = 0
+    }
+
+    def(term: int, voted_for: int, log: list[Entry], base_index: int, base_term: int) {
+        self.term = term
+        self.voted_for = voted_for
+        self.log = log
+        self.base_index = base_index
+        self.base_term = base_term
+    }
+}
+
+class RaftNode {
+    id: int
+    ids: list[int]           # the full cluster, self included; fixed in v1
+    rng: Rng                 # drives election-timeout jitter only
+
+    # Hard state (persist per the host contract above).
+    term: int
+    voted_for: int           # 0 = none this term
+    log: list[Entry]         # log[k] is index base_index + k + 1
+    base_index: int          # compaction base: entries here and below applied
+    base_term: int           # term of the entry at base_index
+
+    # Volatile state.
+    role: int
+    leader_id: int           # last known leader (0 = unknown); for redirects
+    commit_index: int
+    applied: int             # high-water of take_committed()
+    votes: dict[int, bool]
+    next_index: dict[int, int]
+    match_index: dict[int, int]
+    outbox: list[Msg]
+    # Peers whose logs end below our base: consensus cannot repair them (the
+    # entries are compacted away); the HOST ships its state machine up to the
+    # base out of band, then replication resumes from base+1. The host drains
+    # this via take_snapshot_needed().
+    snapshot_needed: dict[int, bool]
+
+    # Timers, in ticks. Election timeout re-randomizes on every reset so two
+    # nodes that time out together do not collide forever (paper section 5.2).
+    heartbeat_ticks: int
+    election_base: int
+    election_elapsed: int
+    election_timeout: int
+    heartbeat_elapsed: int
+
+    def(id: int, ids: list[int], rng: Rng) {
+        self._init(id, ids, rng, 2, 10)
+    }
+
+    def(id: int, ids: list[int], rng: Rng, heartbeat_ticks: int, election_base: int) {
+        self._init(id, ids, rng, heartbeat_ticks, election_base)
+    }
+
+    def _init(id: int, ids: list[int], rng: Rng, heartbeat_ticks: int, election_base: int) {
+        self.id = id
+        self.ids = ids
+        self.rng = rng
+        self.term = 0
+        self.voted_for = 0
+        self.log = []
+        self.base_index = 0
+        self.base_term = 0
+        self.role = FOLLOWER
+        self.leader_id = 0
+        self.commit_index = 0
+        self.applied = 0
+        self.votes = {}
+        self.next_index = {}
+        self.match_index = {}
+        self.outbox = []
+        self.snapshot_needed = {}
+        self.heartbeat_ticks = heartbeat_ticks
+        self.election_base = election_base
+        self.election_elapsed = 0
+        self.election_timeout = 0
+        self.heartbeat_elapsed = 0
+        self._reset_election_timer()
+    }
+
+    #--- the host surface ---------------------------------------------------#
+
+    # One unit of logical time. Followers and candidates count toward an
+    # election; a leader counts toward its next heartbeat round.
+    def tick() -> None {
+        if self.role == LEADER {
+            self.heartbeat_elapsed = self.heartbeat_elapsed + 1
+            if self.heartbeat_elapsed >= self.heartbeat_ticks {
+                self.heartbeat_elapsed = 0
+                self._broadcast_appends()
+            }
+            return
+        }
+        self.election_elapsed = self.election_elapsed + 1
+        if self.election_elapsed >= self.election_timeout {
+            self._start_election()
+        }
+    }
+
+    # Handle one message addressed to this node.
+    def step(m: Msg) -> None {
+        # A higher term instantly demotes whatever we were (paper 5.1). The
+        # message itself is then handled at the new term below.
+        if m.term > self.term {
+            self._become_follower(m.term)
+        }
+        if m.kind == M_VOTE_REQ {
+            self._on_vote_req(m)
+        } else if m.kind == M_VOTE_RESP {
+            self._on_vote_resp(m)
+        } else if m.kind == M_APP_REQ {
+            self._on_app_req(m)
+        } else if m.kind == M_APP_RESP {
+            self._on_app_resp(m)
+        }
+    }
+
+    # Append `data` to the replicated log. Returns the index it will commit
+    # at, or 0 if this node is not the leader (the caller redirects via
+    # leader_id). The entry is durable at that index only once it shows up in
+    # take_committed().
+    def propose(data: bytes) -> int {
+        if self.role != LEADER {
+            return 0
+        }
+        self.log.append(Entry(self.term, data))
+        idx: int = self.last_index()
+        self.match_index[self.id] = idx
+        if len(self.ids) == 1 {
+            self._advance_commit()
+        } else {
+            self._broadcast_appends()
+        }
+        return idx
+    }
+
+    # Drain outgoing messages. The host owns delivery (and its failures).
+    def take_outbox() -> list[Msg] {
+        out: list[Msg] = self.outbox
+        self.outbox = []
+        return out
+    }
+
+    # Entries newly safe to apply, oldest first. The first entry returned is
+    # always index applied+1 as of the call; RaftNode.applied advances past
+    # what was handed out.
+    def take_committed() -> list[Entry] {
+        out: list[Entry] = []
+        while self.applied < self.commit_index {
+            out.append(self.log[self.applied - self.base_index])
+            self.applied = self.applied + 1
+        }
+        return out
+    }
+
+    # Peers that need the host's snapshot (state machine up to the base)
+    # before consensus can resume repairing them. Drained on read.
+    def take_snapshot_needed() -> list[int] {
+        out: list[int] = []
+        for peer in self.snapshot_needed {
+            out.append(peer)
+        }
+        self.snapshot_needed = {}
+        return out
+    }
+
+    # Compact: the host has applied (and can re-ship) everything through
+    # `index`; drop it from the log. Volatile positions never move backward.
+    def install_base(index: int, term: int) -> None {
+        if index <= self.base_index {
+            return
+        }
+        drop: int = index - self.base_index
+        if drop > len(self.log) {
+            drop = len(self.log)
+        }
+        kept: list[Entry] = []
+        k: int = drop
+        while k < len(self.log) {
+            kept.append(self.log[k])
+            k = k + 1
+        }
+        self.log = kept
+        self.base_index = index
+        self.base_term = term
+        if self.commit_index < index {
+            self.commit_index = index
+        }
+        if self.applied < index {
+            self.applied = index
+        }
+    }
+
+    # Snapshot of what the host must persist. The log list is copied so a
+    # later append never mutates a snapshot already on its way to disk.
+    def hard_state() -> HardState {
+        lg: list[Entry] = []
+        for e in self.log {
+            lg.append(e)
+        }
+        return HardState(self.term, self.voted_for, lg, self.base_index, self.base_term)
+    }
+
+    def last_index() -> int {
+        return self.base_index + len(self.log)
+    }
+
+    def last_term() -> int {
+        if len(self.log) == 0 {
+            return self.base_term
+        }
+        return self.log[len(self.log) - 1].term
+    }
+
+    # Term of the entry at `index`; callers never ask below the base.
+    def _term_at(index: int) -> int {
+        if index == self.base_index {
+            return self.base_term
+        }
+        return self.log[index - self.base_index - 1].term
+    }
+
+    def is_leader() -> bool {
+        return self.role == LEADER
+    }
+
+    #--- elections (paper 5.2) ----------------------------------------------#
+
+    def _reset_election_timer() -> None {
+        self.election_elapsed = 0
+        self.election_timeout = self.election_base + self.rng.below(self.election_base)
+    }
+
+    def _become_follower(term: int) -> None {
+        self.term = term
+        self.voted_for = 0
+        self.role = FOLLOWER
+        self.leader_id = 0
+        self.votes = {}
+        self._reset_election_timer()
+    }
+
+    def _start_election() -> None {
+        self.term = self.term + 1
+        self.role = CANDIDATE
+        self.voted_for = self.id
+        self.votes = {}
+        self.votes[self.id] = True
+        self.leader_id = 0
+        self._reset_election_timer()
+        for peer in self.ids {
+            if peer != self.id {
+                m: Msg = Msg(M_VOTE_REQ, self.id, peer, self.term)
+                m.last_index = self.last_index()
+                m.last_term = self.last_term()
+                self.outbox.append(m)
+            }
+        }
+        # A cluster of one elects itself the moment it times out.
+        self._check_election_won()
+    }
+
+    def _majority() -> int {
+        return len(self.ids) // 2 + 1
+    }
+
+    def _on_vote_req(m: Msg) -> None {
+        resp: Msg = Msg(M_VOTE_RESP, self.id, m.frm, self.term)
+        if m.term == self.term and (self.voted_for == 0 or self.voted_for == m.frm) and self._log_up_to_date(m.last_term, m.last_index) {
+            self.voted_for = m.frm
+            self._reset_election_timer()
+            resp.granted = True
+        }
+        self.outbox.append(resp)
+    }
+
+    # The election restriction (paper 5.4.1): only grant to a candidate whose
+    # log is at least as up-to-date, so a leader always holds every committed
+    # entry and never needs to fetch history from its followers.
+    def _log_up_to_date(cand_last_term: int, cand_last_index: int) -> bool {
+        my_term: int = self.last_term()
+        if cand_last_term != my_term {
+            return cand_last_term > my_term
+        }
+        return cand_last_index >= self.last_index()
+    }
+
+    def _on_vote_resp(m: Msg) -> None {
+        if self.role != CANDIDATE or m.term != self.term {
+            return
+        }
+        if m.granted {
+            self.votes[m.frm] = True
+            self._check_election_won()
+        }
+    }
+
+    def _check_election_won() -> None {
+        if self.role != CANDIDATE {
+            return
+        }
+        n: int = 0
+        for peer in self.votes {
+            if self.votes[peer] {
+                n = n + 1
+            }
+        }
+        if n >= self._majority() {
+            self._become_leader()
+        }
+    }
+
+    # Winning: reinitialize the replication trackers and append a no-op entry
+    # at the new term. The no-op is what lets entries from older terms commit
+    # (5.4.2: a leader only ever counts replicas of its OWN term toward
+    # commit; the no-op gives it a current-term entry immediately, and
+    # everything below commits with it).
+    def _become_leader() -> None {
+        self.role = LEADER
+        self.leader_id = self.id
+        self.heartbeat_elapsed = 0
+        self.next_index = {}
+        self.match_index = {}
+        for peer in self.ids {
+            self.next_index[peer] = self.last_index() + 1
+            self.match_index[peer] = 0
+        }
+        self.log.append(Entry(self.term, bytes([])))
+        self.match_index[self.id] = self.last_index()
+        if len(self.ids) == 1 {
+            self._advance_commit()
+        } else {
+            self._broadcast_appends()
+        }
+    }
+
+    #--- log replication (paper 5.3) ------------------------------------------#
+
+    def _broadcast_appends() -> None {
+        for peer in self.ids {
+            if peer != self.id {
+                self._send_append(peer)
+            }
+        }
+    }
+
+    # One append toward `peer` from its next_index. Doubles as the heartbeat:
+    # an up-to-date peer just gets an empty entries list with a fresh commit
+    # index, which is exactly what a heartbeat is. A peer positioned below
+    # our base needs the host's snapshot first: we flag it and keep serving
+    # from base+1 (the earliest slot consensus can still prove).
+    def _send_append(peer: int) -> None {
+        nxt: int = self.next_index[peer]
+        if nxt < self.base_index + 1 {
+            nxt = self.base_index + 1
+            self.snapshot_needed[peer] = True
+        }
+        m: Msg = Msg(M_APP_REQ, self.id, peer, self.term)
+        m.prev_index = nxt - 1
+        if m.prev_index > 0 {
+            m.prev_term = self._term_at(m.prev_index)
+        }
+        i: int = nxt
+        while i <= self.last_index() and len(m.entries) < _MAX_BATCH {
+            m.entries.append(self.log[i - self.base_index - 1])
+            i = i + 1
+        }
+        m.commit = self.commit_index
+        self.outbox.append(m)
+    }
+
+    def _on_app_req(m: Msg) -> None {
+        resp: Msg = Msg(M_APP_RESP, self.id, m.frm, self.term)
+        if m.term < self.term {
+            # Stale leader: refuse, and our term in the reply demotes it.
+            self.outbox.append(resp)
+            return
+        }
+        # A live leader at our term: a candidate stands down, and everyone's
+        # election timer resets.
+        self.role = FOLLOWER
+        self.leader_id = m.frm
+        self._reset_election_timer()
+
+        # Entries at or below our base are applied history here; a leader can
+        # send them when its picture of us is stale. Skip the overlap and
+        # anchor the consistency check at the base (the overlap cannot
+        # conflict: everything at or below the base is committed).
+        prev: int = m.prev_index
+        ents: list[Entry] = m.entries
+        if prev < self.base_index {
+            skip: int = self.base_index - prev
+            if skip > len(ents) {
+                skip = len(ents)
+            }
+            trimmed: list[Entry] = []
+            k: int = skip
+            while k < len(ents) {
+                trimmed.append(ents[k])
+                k = k + 1
+            }
+            ents = trimmed
+            prev = prev + skip
+        }
+
+        if prev > self.last_index() {
+            # We are missing the entry before this batch: tell the leader how
+            # far back we actually are so it jumps straight there.
+            resp.hint = self.last_index()
+            self.outbox.append(resp)
+            return
+        }
+        if prev > self.base_index and self._term_at(prev) != m.prev_term {
+            # The entry before the batch conflicts: back off past it.
+            resp.hint = prev - 1
+            self.outbox.append(resp)
+            return
+        }
+
+        # Append, truncating ONLY on a real conflict (same index, different
+        # term). A duplicate or reordered older append that is consistent with
+        # what we hold must never shorten the log (paper figure 2, receiver
+        # rule 3): newer entries behind it may already be acked.
+        idx: int = prev
+        for e in ents {
+            idx = idx + 1
+            if idx <= self.last_index() {
+                if self._term_at(idx) != e.term {
+                    while self.last_index() >= idx {
+                        self.log.pop(len(self.log) - 1)
+                    }
+                    self.log.append(e)
+                }
+            } else {
+                self.log.append(e)
+            }
+        }
+
+        # Advance commit only through what this message proved matches the
+        # leader (prev_index + the batch), never through our possibly-stale
+        # tail beyond it. Nothing below our base ever needs re-proving.
+        proven: int = m.prev_index + len(m.entries)
+        if proven < self.base_index {
+            proven = self.base_index
+        }
+        cap: int = m.commit
+        if cap > proven {
+            cap = proven
+        }
+        if cap > self.commit_index {
+            self.commit_index = cap
+        }
+
+        resp.success = True
+        resp.matched = proven
+        self.outbox.append(resp)
+    }
+
+    def _on_app_resp(m: Msg) -> None {
+        if self.role != LEADER or m.term != self.term {
+            return
+        }
+        if m.success {
+            if m.matched > self.match_index[m.frm] {
+                self.match_index[m.frm] = m.matched
+            }
+            self.next_index[m.frm] = self.match_index[m.frm] + 1
+            self._advance_commit()
+            # Keep pushing if the peer is still behind (long repair or a
+            # batch-capped burst): next round trip, not next heartbeat.
+            if self.next_index[m.frm] <= self.last_index() {
+                self._send_append(m.frm)
+            }
+            return
+        }
+        # Failed consistency check: back next_index off to the hint, floored
+        # by what we already KNOW replicated (match only ever grows, so a
+        # stale duplicate failure can never drag a repaired peer backward).
+        nxt: int = m.hint + 1
+        if nxt > self.next_index[m.frm] - 1 {
+            nxt = self.next_index[m.frm] - 1
+        }
+        if nxt < self.match_index[m.frm] + 1 {
+            nxt = self.match_index[m.frm] + 1
+        }
+        if nxt < 1 {
+            nxt = 1
+        }
+        if nxt < self.base_index + 1 {
+            # The peer needs entries we compacted away: park it at the base
+            # and flag the host to ship its state machine. Resending now
+            # would spin the identical failure until the snapshot lands; the
+            # heartbeat cadence retries (and re-flags) on its own.
+            self.next_index[m.frm] = self.base_index + 1
+            self.snapshot_needed[m.frm] = True
+            return
+        }
+        self.next_index[m.frm] = nxt
+        self._send_append(m.frm)
+    }
+
+    # Commit rule (paper 5.3 + 5.4.2): the highest index replicated on a
+    # majority whose entry is of the CURRENT term commits, and everything
+    # below it commits transitively. Prior-term entries never commit by
+    # counting; they commit under a current-term entry above them.
+    def _advance_commit() -> None {
+        n: int = self.last_index()
+        while n > self.commit_index {
+            if self._term_at(n) == self.term {
+                have: int = 0
+                for peer in self.ids {
+                    if self.match_index[peer] >= n {
+                        have = have + 1
+                    }
+                }
+                if have >= self._majority() {
+                    self.commit_index = n
+                    return
+                }
+            }
+            n = n - 1
+        }
+    }
+}
+
+# Rebuild a node from persisted hard state after a crash. Volatile state
+# starts over: it wakes a follower with a fresh randomized timeout and lets
+# the cluster (or its own election) tell it the rest. commit_index and
+# applied deliberately restart at the base: they are volatile in the paper,
+# and the first append from the live leader re-proves everything above the
+# base before anything is re-applied. (The base itself is committed by
+# definition: the host applied it.)
+def restore(id: int, ids: list[int], rng: Rng, hs: HardState) -> RaftNode {
+    n: RaftNode = RaftNode(id, ids, rng)
+    n.term = hs.term
+    n.voted_for = hs.voted_for
+    for e in hs.log {
+        n.log.append(e)
+    }
+    n.base_index = hs.base_index
+    n.base_term = hs.base_term
+    n.commit_index = hs.base_index
+    n.applied = hs.base_index
+    return n
+}

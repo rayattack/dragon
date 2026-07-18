@@ -1,0 +1,437 @@
+# core.dr - shared infrastructure for the amebo package: the DB handle + lock,
+# config constants, request/query helpers, settings, audit, schema validation
+# and event persistence. Every other module imports from here; core imports
+# nothing from the package, so there are no cycles.
+import database
+import json
+from database import SQL
+from http.server import Request
+from json import Schema, ValidationResult
+from threading import Lock
+from time import now
+from secrets import token_urlsafe
+from os.path import exists as path_exists
+from os import getenv
+
+def env_int(name: str, fallback: int) -> int {
+    const v: str = getenv(name)
+    if len(v) > 0 {
+        return int(v)
+    }
+    return fallback
+}
+
+const PORT: int = env_int("AMEBO_PORT", 8080)
+const VERSION: str = "0.1.0"
+const PER: int = 12
+
+db: database.Connection = database.open("sqlite::memory:")
+dblock: Lock = Lock()
+
+const SCHEMAS: Schema = Schema("draft-07")
+# Register the request-body schemas. Called from the entry (top-level statements
+# only execute in the entry module, not on import).
+def register_schemas() -> None {
+    SCHEMAS.register("name", {type: "string", minLength: 1})
+    SCHEMAS.register("application", {type: "object", required: ["application", "host", "port", "secret"], properties: {application: {"$ref": "name"}, host: {"$ref": "name"}, port: {type: "integer", minimum: 0}, secret: {"$ref": "name"}}})
+    SCHEMAS.register("action", {type: "object", required: ["action", "application", "schema"], properties: {action: {"$ref": "name"}, application: {"$ref": "name"}, schema: {type: "object"}}})
+    SCHEMAS.register("subscription", {type: "object", required: ["subscription", "application", "action", "handler"], properties: {subscription: {"$ref": "name"}, application: {"$ref": "name"}, action: {"$ref": "name"}, handler: {"$ref": "name"}, max_retries: {type: "integer", minimum: 1}}})
+    SCHEMAS.register("event", {type: "object", required: ["action", "deduper", "payload"], properties: {action: {"$ref": "name"}, deduper: {"$ref": "name"}, metadata: {type: "object"}, sleep_until: {type: "integer", minimum: 0}}})
+}
+
+# Where static/ resolves depends on the cwd the broker booted from.
+def static_dir() -> str {
+    if path_exists("packages/amebo/static/dg.js") {
+        return "packages/amebo/static"
+    }
+    if path_exists("static/dg.js") {
+        return "static"
+    }
+    return "packages/amebo/static"
+}
+
+const STATIC_DIR: str = static_dir()
+
+
+class AuditRow {
+    def(ts: str, action: str, detail: str) {
+        self.ts = ts
+        self.action = action
+        self.detail = detail
+    }
+}
+
+
+class SecretRow {
+    def(application: str, secret: str) {
+        self.application = application
+        self.secret = secret
+    }
+}
+
+
+# Validation errors as "path: message" strings for the 422 response body.
+def schema_errors(s: Schema, name: str, value: Any) -> list[str] {
+    const r: ValidationResult = s.validate(name, value)
+    out: list[str] = []
+    const errs: list[json.ValidationError] = r.errors
+    for e in errs {
+        out.append(f"{e.path}: {e.message}")
+    }
+    return out
+}
+
+
+# Body text -> JSON object; an empty dict when the body is not one. The empty
+# dict then fails the endpoint's schema with required-property errors, so
+# malformed bodies and wrong-shaped bodies share one 422 path.
+def parse_obj(body: str) -> dict[str, Any] {
+    try {
+        const d: dict[str, Any] = json.loads_obj(body)
+        return d
+    } except {
+        empty: dict[str, Any] = {}
+        return empty
+    }
+}
+
+
+def migrate() -> None {
+    db.raw("create table applications(application text primary key, host text, port integer, secret text, active integer default 1)")
+    db.raw("create table actions(action text primary key, application text, schema text, status text default 'active')")
+    # publisher: the principal that published (service app, admin, or a
+    # dashboard user); bytes: payload size at reception. Both feed the event
+    # provenance panel and the events list.
+    db.raw("create table events(event text primary key, action text, payload text, metadata text, deduper text unique, timestamped text, spelled integer default 0, publisher text default '', bytes integer default 0)")
+    db.raw("create table subscriptions(subscription text primary key, subscriber text, action text, handler text, max_retries integer default 3, active integer default 1)")
+    # last_status: HTTP code of the newest attempt (-1 never attempted, 0 the
+    # connection itself failed). response: that attempt's body or error text.
+    db.raw("create table gists(id integer primary key autoincrement, event text, subscription text, completed integer, retries integer, sleep_until integer default 0, timestamped text, last_status integer default -1, last_ms integer default 0, response text default '', attempted_at integer default 0, delivered_at integer default 0)")
+    # One row per webhook attempt: the delivery telemetry behind the dashboard
+    # (throughput, latency, failure rate, status mix, wire I/O) and the per-gist
+    # attempt history. ts is epoch seconds for per-minute bucketing.
+    db.raw("create table deliveries(id integer primary key autoincrement, gist integer, event text, action text, subscriber text, attempt integer, status integer, ok integer, ms integer, out_bytes integer, in_bytes integer, response text, ts integer)")
+    db.raw("create table settings(skey text primary key, svalue text)")
+    db.raw("create table audit(id integer primary key autoincrement, ts text, action text, detail text)")
+    db.raw("create table spells(spell text primary key, enabled integer default 1, action text, source text, timestamped text)")
+    db.raw("create table spell_runs(id integer primary key autoincrement, spell text, event text, status text, detail text, ts text)")
+    # Dashboard/user accounts. auth_source is 'local' (PBKDF2 in salt/phash) or
+    # 'ldap' (bind at login; salt/phash unused). superadmin bypasses every
+    # per-action ACL and owns app/user/settings management.
+    db.raw("create table users(username text primary key, salt text, phash text, auth_source text default 'local', superadmin integer default 0, created text)")
+    # Per-action access control (Nakadi model). subject_type is 'user',
+    # 'service' (an application), or '*' (any authenticated principal).
+    db.raw("create table acl(action text, subject_type text, subject_name text, can_read integer default 0, can_write integer default 0, can_admin integer default 0, primary key(action, subject_type, subject_name))")
+    # Per-action redactions: payload field paths (dot-separated) stripped from an
+    # event at RECEPTION, before it is persisted or delivered, so sensitive data
+    # never lands in the store or reaches a subscriber.
+    db.raw("create table redactions(action text, field_path text, timestamped text, primary key(action, field_path))")
+    # Indexes. Every hot query runs INSIDE dblock, so an unindexed scan is not
+    # just slow - it convoys the whole broker (API, dashboard polls, aproko,
+    # wizard) behind the lock. Measured before these existed: one events-list
+    # render at ~5k events held dblock for 22 seconds. Keep every per-row
+    # correlated subquery and daemon poll on an index.
+    db.raw("create index idx_gists_event on gists(event)")
+    db.raw("create index idx_gists_subscription on gists(subscription)")
+    db.raw("create index idx_gists_due on gists(completed, sleep_until)")
+    db.raw("create index idx_deliveries_event on deliveries(event)")
+    db.raw("create index idx_deliveries_subscriber_ts on deliveries(subscriber, ts)")
+    db.raw("create index idx_deliveries_ts on deliveries(ts)")
+    db.raw("create index idx_spellruns_event on spell_runs(event)")
+    db.raw("create index idx_spellruns_spell on spell_runs(spell)")
+    db.raw("create index idx_events_action on events(action)")
+    db.raw("create index idx_events_spelled on events(spelled, timestamped)")
+    db.raw("create index idx_events_ts on events(timestamped)")
+    db.raw("create index idx_subs_action on subscriptions(action)")
+    db.raw("create index idx_subs_subscriber on subscriptions(subscriber)")
+}
+
+
+# The dot-separated field paths redacted from an action's payloads.
+def redaction_paths(action: str) -> list[str] {
+    out: list[str] = []
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select field_path as fp from redactions where action = !{action} order by field_path })
+        for row in rs {
+            const fp: str = row["fp"]
+            out.append(fp)
+        }
+    }
+    return out
+}
+
+
+def redact_add(action: str, field_path: str) -> None {
+    const ts: str = f"{now()}"
+    with dblock {
+        const c: int = db.val[int](template[SQL] { select count(*) from redactions where action = !{action} and field_path = !{field_path} })
+        if c == 0 {
+            db.run(template[SQL] { insert into redactions(action, field_path, timestamped) values(!{action}, !{field_path}, !{ts}) })
+        }
+    }
+}
+
+
+def redact_remove(action: str, field_path: str) -> None {
+    with dblock {
+        db.run(template[SQL] { delete from redactions where action = !{action} and field_path = !{field_path} })
+    }
+}
+
+
+# Delete `parts` (a dot path split into segments) from a nested object in place.
+def _redact_walk(d: dict[str, Any], parts: list[str], i: int) -> None {
+    const key: str = parts[i]
+    if i >= len(parts) - 1 {
+        if key in d {
+            del d[key]
+        }
+        return
+    }
+    if key in d {
+        try {
+            const sub: dict[str, Any] = d[key]
+            _redact_walk(sub, parts, i + 1)
+        } except {
+        }
+    }
+}
+
+
+# Strip each redacted path from an object payload, in place. Non-object payloads
+# (arrays, scalars) have no field paths and pass through unchanged.
+def apply_redactions(payload: Any, paths: list[str]) -> Any {
+    pd: dict[str, Any] = {}
+    isobj: bool = True
+    try {
+        const d: dict[str, Any] = payload
+        pd = d
+    } except {
+        isobj = False
+    }
+    if not isobj {
+        return payload
+    }
+    for path in paths {
+        const parts: list[str] = path.split(".")
+        _redact_walk(pd, parts, 0)
+    }
+    return pd
+}
+
+
+# Seconds to wait before the next delivery attempt; `attempt` counts attempts
+# made so far (>= 1). 10s, 20s, 40s, ... capped at an hour, like the original.
+def backoff_seconds(attempt: int) -> int {
+    a: int = attempt
+    if a < 1 {
+        a = 1
+    }
+    return min(3600, 10 * (2 ** (a - 1)))
+}
+
+
+# Persist an event and fan out one gist per active subscriber, inside the DB
+# lock. Returns the fan-out count, or -1 if the deduper already exists. Shared
+# by the signed API publish (h_publish) and the trusted dashboard publish
+# (dash_publish) so both take the identical persistence path. `publisher` is
+# the resolved principal that published; payload size is recorded at reception.
+def persist_event(event_id: str, action: str, payloadtext: str, metadatatext: str, deduper: str, ts: str, wake: int, publisher: str) -> int {
+    const nbytes: int = len(payloadtext)
+    fanout: int = -1
+    with dblock {
+        const dup: int = db.val[int](template[SQL] { select count(*) from events where deduper = !{deduper} })
+        if dup == 0 {
+            db.run(template[SQL] { insert into events(event, action, payload, metadata, deduper, timestamped, publisher, bytes) values(!{event_id}, !{action}, !{payloadtext}, !{metadatatext}, !{deduper}, !{ts}, !{publisher}, !{nbytes}) })
+            db.run(template[SQL] { insert into gists(event, subscription, completed, retries, sleep_until, timestamped) select !{event_id}, subscription, 0, 0, !{wake}, !{ts} from subscriptions where action = !{action} and active <> 0 })
+            const f: int = db.val[int](template[SQL] { select count(*) from gists where event = !{event_id} })
+            fanout = f
+        }
+    }
+    return fanout
+}
+
+
+# Compact relative timestamp for tables and drawers ("42s ago", "3h ago").
+def ago(t: int) -> str {
+    if t <= 0 {
+        return "-"
+    }
+    d: int = now() - t
+    if d < 0 {
+        d = 0
+    }
+    if d < 5 {
+        return "just now"
+    }
+    if d < 60 {
+        return f"{d}s ago"
+    }
+    if d < 3600 {
+        return f"{d // 60}m ago"
+    }
+    if d < 86400 {
+        return f"{d // 3600}h ago"
+    }
+    return f"{d // 86400}d ago"
+}
+
+
+# "1.4 KB", "3.2 MB" - integer math only (tenths carried in t10).
+def human_bytes(n: int) -> str {
+    if n < 1024 {
+        return f"{n} B"
+    }
+    const units: list[str] = ["KB", "MB", "GB", "TB"]
+    t10: int = (n * 10) // 1024
+    i: int = 0
+    while t10 >= 10240 and i < 3 {
+        t10 = t10 // 1024
+        i = i + 1
+    }
+    return f"{t10 // 10}.{t10 % 10} {units[i]}"
+}
+
+
+def is_fragment(req: Request) -> bool {
+    return "x-dragon-request" in req.headers
+}
+
+
+def get_q(req: Request) -> str {
+    return req.query["q"] if "q" in req.query else ""
+}
+
+
+def get_status(req: Request) -> str {
+    return req.query["status"] if "status" in req.query else ""
+}
+
+
+def get_page(req: Request) -> int {
+    p: int = 1
+    if "page" in req.query {
+        try {
+            const v: int = int(req.query["page"])
+            p = v
+        } except {
+            p = 1
+        }
+    }
+    if p < 1 {
+        p = 1
+    }
+    return p
+}
+
+
+def like_of(q: str) -> str {
+    return "%" + q + "%"
+}
+
+
+def get_ids(req: Request) -> list[str] {
+    const f: dict[str, str] = req.form()
+    const s: str = f["ids"] if "ids" in f else ""
+    if len(s) == 0 {
+        empty: list[str] = []
+        return empty
+    }
+    return s.split(",")
+}
+
+
+def get_setting(k: str, fallback: str) -> str {
+    out: str = fallback
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select svalue as svalue from settings where skey = !{k} })
+        if len(rs) > 0 {
+            const v: str = rs[0]["svalue"]
+            out = v
+        }
+    }
+    return out
+}
+
+
+def set_setting(k: str, v: str) -> None {
+    with dblock {
+        const c: int = db.val[int](template[SQL] { select count(*) from settings where skey = !{k} })
+        if c > 0 {
+            db.run(template[SQL] { update settings set svalue = !{v} where skey = !{k} })
+        } else {
+            db.run(template[SQL] { insert into settings(skey, svalue) values(!{k}, !{v}) })
+        }
+    }
+}
+
+
+def admin_key() -> str {
+    const env: str = getenv("AMEBO_ADMIN_KEY")
+    if len(env) > 0 {
+        return env
+    }
+    const cur: str = get_setting("admin_key", "")
+    if len(cur) > 0 {
+        return cur
+    }
+    const k: str = token_urlsafe(24)
+    set_setting("admin_key", k)
+    return k
+}
+
+
+# The default max_retries applied to a new subscription that does not set its
+# own. Operator-settable from Settings -> Delivery; falls back to 3.
+def default_max_retries() -> int {
+    const v: str = get_setting("default_max_retries", "3")
+    try {
+        const n: int = int(v)
+        if n >= 1 {
+            return n
+        }
+    } except {
+    }
+    return 3
+}
+
+
+def audit_log(action: str, detail: str) -> None {
+    const ts: str = f"{now()}"
+    with dblock {
+        db.run(template[SQL] { insert into audit(ts, action, detail) values(!{ts}, !{action}, !{detail}) })
+    }
+}
+
+
+def query_audit() -> list[AuditRow] {
+    rows: list[dict[str, Any]] = []
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select ts as ts, action as action, detail as detail from audit order by id desc limit 20 })
+        rows = rs
+    }
+    out: list[AuditRow] = []
+    for row in rows {
+        const ts: str = row["ts"]
+        const ac: str = row["action"]
+        const dt: str = row["detail"]
+        out.append(AuditRow(ts, ac, dt))
+    }
+    return out
+}
+
+
+def query_secrets() -> list[SecretRow] {
+    rows: list[dict[str, Any]] = []
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select application as application, secret as secret from applications order by application limit 200 })
+        rows = rs
+    }
+    out: list[SecretRow] = []
+    for row in rows {
+        const ap: str = row["application"]
+        const se: str = row["secret"]
+        out.append(SecretRow(ap, se))
+    }
+    return out
+}

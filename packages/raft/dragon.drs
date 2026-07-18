@@ -1,0 +1,17 @@
+# raft - the Raft consensus algorithm for Dragon
+#
+# A pure, deterministic, transport-free Raft state machine plus a seeded
+# chaos simulator that proves it: elections, log replication, commit safety
+# under message loss, reordering, duplication, partitions, and crash-restart.
+# ODB's HA (v3b) is its first embedder; nothing in it knows ODB exists.
+{
+  name = 'raft'
+  version = '0.1.0'
+  description = 'The Raft consensus algorithm: a pure state machine, sim-tested.'
+  authors = ['Tersoo <ortserga@gmail.com>']
+  license = 'MIT'
+  dragon = '>=0.2.0'
+
+  eggs = {
+  }
+}

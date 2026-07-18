@@ -1,0 +1,532 @@
+# raft.sim - the deterministic chaos harness (odb.sim lineage, spec section 21).
+#
+# Raft's correctness claims are exactly the kind that pass every polite test
+# and fail in the field, so the harness is impolite by construction. For each
+# seed it runs a cluster through a random storm of events: message delivery,
+# loss, duplication, reordering (delivery order IS random), symmetric
+# partitions, node crashes (volatile state gone), and restarts from persisted
+# hard state. After every event it checks the safety properties; at the end it
+# heals the network and requires full convergence. Any failing seed replays
+# the exact same storm.
+#
+# The three safety invariants, straight from the paper (section 5.4.3):
+#
+#   Election safety: at most one leader per term, ever.
+#   Log matching: if two logs share (index, term), they are identical up
+#     through that index.
+#   State machine safety: once ANY node applies (index, entry), no node ever
+#     applies a different entry at that index. Tracked in a global map that
+#     survives crashes, because that is what "applied" means to a host.
+#
+# Persistence is modeled the way the host contract demands: a node's hard
+# state is snapshotted BEFORE its outbox messages enter the network, so a
+# crash never un-says something the cluster already heard. commit_index and
+# applied position are volatile and rebuild after restart; the applied
+# POSITION of the host state machine is persisted (in ODB it is the database
+# CSN itself), so a restart re-checks but never double-applies.
+
+from raft import RaftNode, Entry, Msg, HardState, restore
+from raft import FOLLOWER, CANDIDATE, LEADER
+from raft.rng import Rng
+
+class ChaosResult {
+    trials: int
+    failures: int
+    first_bad_seed: int
+    message: str
+    elections: int        # leadership transitions observed
+    committed: int        # distinct indexes committed across all seeds
+    crashes: int
+    partitions: int
+
+    def() {
+        self.trials = 0
+        self.failures = 0
+        self.first_bad_seed = 0
+        self.message = ""
+        self.elections = 0
+        self.committed = 0
+        self.crashes = 0
+        self.partitions = 0
+    }
+
+    def _fail(seed: int, msg: str) -> None {
+        self.failures = self.failures + 1
+        if self.first_bad_seed == 0 {
+            self.first_bad_seed = seed
+            self.message = "seed " + str(seed) + ": " + msg
+        }
+    }
+}
+
+# The committed identity of one log slot, for the state-machine safety map.
+def _entry_key(e: Entry) -> str {
+    return str(e.term) + "|" + e.data.decode()
+}
+
+# One cluster under one seed's storm. All mutable trial state lives here so
+# the event handlers stay readable.
+class _Cluster {
+    seed: int
+    rng: Rng
+    ids: list[int]
+    nodes: dict[int, RaftNode]
+    up: dict[int, bool]
+    hard: dict[int, HardState]
+    applied_pos: dict[int, int]    # host-persisted applied position per node
+    applied_log: dict[int, list[Entry]]  # the host state machine per node
+    last_role: dict[int, int]
+    inflight: list[Msg]
+    part_group: dict[int, int]
+    part_active: bool
+    leaders_by_term: dict[int, int]
+    committed_global: dict[int, str]
+    restarts: int
+    proposals: int
+    err: str
+    elections: int
+
+    def(seed: int, n_nodes: int) {
+        self.seed = seed
+        self.rng = Rng(seed)
+        self.ids = []
+        i: int = 1
+        while i <= n_nodes {
+            self.ids.append(i)
+            i = i + 1
+        }
+        self.nodes = {}
+        self.up = {}
+        self.hard = {}
+        self.applied_pos = {}
+        self.last_role = {}
+        self.applied_log = {}
+        for nid in self.ids {
+            self.nodes[nid] = RaftNode(nid, self.ids, Rng(seed * 1000 + nid))
+            self.up[nid] = True
+            self.hard[nid] = self.nodes[nid].hard_state()
+            self.applied_pos[nid] = 0
+            self.applied_log[nid] = []
+            self.last_role[nid] = FOLLOWER
+        }
+        self.inflight = []
+        self.part_group = {}
+        self.part_active = False
+        self.leaders_by_term = {}
+        self.committed_global = {}
+        self.restarts = 0
+        self.proposals = 0
+        self.err = ""
+        self.elections = 0
+    }
+
+    def _fail(msg: str) -> None {
+        if self.err == "" {
+            self.err = msg
+        }
+    }
+
+    # Persist hard state, then release messages, then account for committed
+    # entries and role changes - the host contract, in that order.
+    def pump(nid: int) -> None {
+        n: RaftNode = self.nodes[nid]
+        self.hard[nid] = n.hard_state()
+        for m in n.take_outbox() {
+            self.inflight.append(m)
+        }
+
+        base: int = n.applied
+        for e in n.take_committed() {
+            base = base + 1
+            key: str = _entry_key(e)
+            if base in self.committed_global {
+                if self.committed_global[base] != key {
+                    self._fail("state machine safety: index " + str(base) + " applied as '" + key + "' but committed as '" + self.committed_global[base] + "'")
+                }
+            } else {
+                self.committed_global[base] = key
+            }
+            if base == len(self.applied_log[nid]) + 1 {
+                self.applied_log[nid].append(e)
+            } else if base <= len(self.applied_log[nid]) {
+                if _entry_key(self.applied_log[nid][base - 1]) != key {
+                    self._fail("state machine safety: node " + str(nid) + " re-applied index " + str(base) + " differently")
+                }
+            } else {
+                self._fail("apply gap: node " + str(nid) + " applied index " + str(base) + " with only " + str(len(self.applied_log[nid])) + " entries down")
+            }
+            if base > self.applied_pos[nid] {
+                self.applied_pos[nid] = base
+            }
+        }
+
+        # Serve the host side of compaction: a peer positioned below this
+        # node's base gets the state machine shipped whole (in ODB this is
+        # the committed-history feed), then consensus resumes above it. The
+        # network still applies: a dead or partitioned peer just misses out
+        # until the leader flags it again.
+        for peer in n.take_snapshot_needed() {
+            if self.up[peer] and not self._blocked(nid, peer) {
+                snap: list[Entry] = []
+                i: int = 0
+                while i < n.base_index {
+                    snap.append(self.applied_log[nid][i])
+                    i = i + 1
+                }
+                self.applied_log[peer] = snap
+                if n.base_index > self.applied_pos[peer] {
+                    self.applied_pos[peer] = n.base_index
+                }
+                self.nodes[peer].install_base(n.base_index, n.base_term)
+                self.pump(peer)
+            }
+        }
+
+        if n.role == LEADER {
+            if n.term in self.leaders_by_term {
+                if self.leaders_by_term[n.term] != nid {
+                    self._fail("election safety: term " + str(n.term) + " has leaders " + str(self.leaders_by_term[n.term]) + " and " + str(nid))
+                }
+            } else {
+                self.leaders_by_term[n.term] = nid
+            }
+            if self.last_role[nid] != LEADER {
+                self.elections = self.elections + 1
+            }
+        }
+        self.last_role[nid] = n.role
+    }
+
+    # Random removal doubles as reordering: the network never promised order.
+    def _take_inflight() -> Msg {
+        i: int = self.rng.below(len(self.inflight))
+        m: Msg = self.inflight[i]
+        self.inflight[i] = self.inflight[len(self.inflight) - 1]
+        self.inflight.pop(len(self.inflight) - 1)
+        return m
+    }
+
+    def _blocked(a: int, b: int) -> bool {
+        if not self.part_active {
+            return False
+        }
+        return self.part_group[a] != self.part_group[b]
+    }
+
+    def deliver_one() -> None {
+        if len(self.inflight) == 0 {
+            return
+        }
+        m: Msg = self._take_inflight()
+        if not self.up[m.to] {
+            return
+        }
+        if self._blocked(m.frm, m.to) {
+            return
+        }
+        self.nodes[m.to].step(m)
+        self.pump(m.to)
+    }
+
+    def tick_one() -> None {
+        alive: list[int] = self._up_ids()
+        if len(alive) == 0 {
+            return
+        }
+        nid: int = alive[self.rng.below(len(alive))]
+        self.nodes[nid].tick()
+        self.pump(nid)
+    }
+
+    def _up_ids() -> list[int] {
+        out: list[int] = []
+        for nid in self.ids {
+            if self.up[nid] {
+                out.append(nid)
+            }
+        }
+        return out
+    }
+
+    def propose_one() -> None {
+        for nid in self._up_ids() {
+            if self.nodes[nid].is_leader() {
+                self.proposals = self.proposals + 1
+                data: bytes = ("p" + str(self.proposals)).encode()
+                self.nodes[nid].propose(data)
+                self.pump(nid)
+            }
+        }
+    }
+
+    def crash_one() -> None {
+        alive: list[int] = self._up_ids()
+        if len(alive) < 2 {
+            return
+        }
+        nid: int = alive[self.rng.below(len(alive))]
+        self.up[nid] = False
+    }
+
+    # What the host persisted: hard state COMPACTED to the applied position
+    # (in ODB the applied prefix lives in the database, not the raft tail).
+    # This is what makes the chaos storm exercise bases and snapshots at all.
+    def _persisted(nid: int) -> HardState {
+        hs: HardState = self.hard[nid]
+        ap: int = self.applied_pos[nid]
+        if ap <= hs.base_index {
+            return hs
+        }
+        kept: list[Entry] = []
+        i: int = ap - hs.base_index
+        while i < len(hs.log) {
+            kept.append(hs.log[i])
+            i = i + 1
+        }
+        return HardState(hs.term, hs.voted_for, kept, ap, self.applied_log[nid][ap - 1].term)
+    }
+
+    def _restore(nid: int) -> None {
+        self.restarts = self.restarts + 1
+        self.nodes[nid] = restore(nid, self.ids, Rng(self.seed * 7777 + nid * 131 + self.restarts), self._persisted(nid))
+        self.last_role[nid] = FOLLOWER
+        self.up[nid] = True
+        self.pump(nid)
+    }
+
+    def restart_one() -> None {
+        down: list[int] = []
+        for nid in self.ids {
+            if not self.up[nid] {
+                down.append(nid)
+            }
+        }
+        if len(down) == 0 {
+            return
+        }
+        self._restore(down[self.rng.below(len(down))])
+    }
+
+    def toggle_partition() -> None {
+        if self.part_active {
+            self.part_active = False
+            return
+        }
+        zeros: int = 0
+        for nid in self.ids {
+            g: int = self.rng.below(2)
+            self.part_group[nid] = g
+            if g == 0 {
+                zeros = zeros + 1
+            }
+        }
+        if zeros == 0 or zeros == len(self.ids) {
+            return
+        }
+        self.part_active = True
+    }
+
+    # Log matching: for every pair, over the index range both still hold
+    # uncompacted, find the highest shared (index, term); everything at and
+    # below it (down to the shared floor) must be identical. Below a node's
+    # base the state-machine safety map already guards agreement.
+    def check_log_matching() -> None {
+        a: int = 0
+        while a < len(self.ids) {
+            b: int = a + 1
+            while b < len(self.ids) {
+                na: RaftNode = self.nodes[self.ids[a]]
+                nb: RaftNode = self.nodes[self.ids[b]]
+                lo: int = na.base_index
+                if nb.base_index > lo {
+                    lo = nb.base_index
+                }
+                lo = lo + 1
+                hi: int = na.last_index()
+                if nb.last_index() < hi {
+                    hi = nb.last_index()
+                }
+                while hi >= lo and _term_of(na, hi) != _term_of(nb, hi) {
+                    hi = hi - 1
+                }
+                j: int = lo
+                while j <= hi {
+                    if _term_of(na, j) != _term_of(nb, j) or _key_of(na, j) != _key_of(nb, j) {
+                        self._fail("log matching: nodes " + str(self.ids[a]) + "/" + str(self.ids[b]) + " diverge at index " + str(j) + " below shared index " + str(hi))
+                        return
+                    }
+                    j = j + 1
+                }
+                b = b + 1
+            }
+            a = a + 1
+        }
+    }
+
+    # Commit indexes stay within [base, log end] on every node.
+    def check_bounds() -> None {
+        for nid in self.ids {
+            n: RaftNode = self.nodes[nid]
+            if n.commit_index > n.last_index() {
+                self._fail("node " + str(nid) + " commit_index " + str(n.commit_index) + " past log end " + str(n.last_index()))
+            }
+            if n.commit_index < n.base_index {
+                self._fail("node " + str(nid) + " commit_index " + str(n.commit_index) + " below its base " + str(n.base_index))
+            }
+        }
+    }
+
+    # Heal everything and require the cluster to agree completely. A cluster
+    # that cannot converge on a quiet network within the budget has a liveness
+    # bug even if no safety check ever fired.
+    def converge(budget: int) -> None {
+        self.part_active = False
+        for nid in self.ids {
+            if not self.up[nid] {
+                self._restore(nid)
+            }
+        }
+        spin: int = 0
+        while spin < budget {
+            for nid in self.ids {
+                self.nodes[nid].tick()
+                self.pump(nid)
+            }
+            # Deliver everything, but bounded: a protocol that sustains an
+            # unbounded message storm on a quiet network is itself a bug and
+            # must fail the seed, not hang the suite.
+            drained: int = 0
+            while len(self.inflight) > 0 and self.err == "" and drained < 5000 {
+                self.deliver_one()
+                drained = drained + 1
+            }
+            if drained >= 5000 {
+                self._fail("message storm: 5000 deliveries in one quiet round")
+            }
+            if self.err != "" {
+                return
+            }
+            if self._settled() {
+                self.check_log_matching()
+                self.check_bounds()
+                self._check_full_agreement()
+                return
+            }
+            spin = spin + 1
+        }
+        self._fail("no convergence within " + str(budget) + " quiet rounds")
+    }
+
+    def _settled() -> bool {
+        lead: int = 0
+        n_leaders: int = 0
+        for nid in self.ids {
+            if self.nodes[nid].is_leader() {
+                lead = nid
+                n_leaders = n_leaders + 1
+            }
+        }
+        if n_leaders != 1 {
+            return False
+        }
+        want: int = self.nodes[lead].last_index()
+        for nid in self.ids {
+            n: RaftNode = self.nodes[nid]
+            if n.last_index() != want or n.commit_index != want or n.applied != want {
+                return False
+            }
+        }
+        return True
+    }
+
+    def _check_full_agreement() -> None {
+        # Every node's full applied history must be what the cluster
+        # committed, from index 1 through its applied position.
+        for nid in self.ids {
+            idx: int = 1
+            while idx <= self.applied_pos[nid] {
+                key: str = _entry_key(self.applied_log[nid][idx - 1])
+                if idx in self.committed_global {
+                    if self.committed_global[idx] != key {
+                        self._fail("post-convergence: node " + str(nid) + " applied '" + key + "' at committed index " + str(idx))
+                        return
+                    }
+                }
+                idx = idx + 1
+            }
+        }
+    }
+}
+
+# Term and identity of the entry at `idx` on `n`, from public fields only
+# (idx must be in [base, last]).
+def _term_of(n: RaftNode, idx: int) -> int {
+    if idx == n.base_index {
+        return n.base_term
+    }
+    return n.log[idx - n.base_index - 1].term
+}
+
+def _key_of(n: RaftNode, idx: int) -> str {
+    return _entry_key(n.log[idx - n.base_index - 1])
+}
+
+# The storm. Event mix: mostly delivery and ticks (progress), a steady drip
+# of loss, duplication, crashes, restarts, and partitions (chaos). Weights
+# are fixed so seeds stay comparable across runs forever.
+def run_chaos(n_seeds: int, n_nodes: int, steps: int) -> ChaosResult {
+    res: ChaosResult = ChaosResult()
+    seed: int = 1
+    while seed <= n_seeds {
+        c: _Cluster = _Cluster(seed, n_nodes)
+        step: int = 0
+        while step < steps and c.err == "" {
+            ev: int = c.rng.below(100)
+            if ev < 40 {
+                c.deliver_one()
+            } else if ev < 47 {
+                if len(c.inflight) > 0 {
+                    c._take_inflight()
+                }
+            } else if ev < 52 {
+                if len(c.inflight) > 0 {
+                    c.inflight.append(c.inflight[c.rng.below(len(c.inflight))])
+                }
+            } else if ev < 82 {
+                c.tick_one()
+            } else if ev < 89 {
+                c.propose_one()
+            } else if ev < 93 {
+                c.crash_one()
+                res.crashes = res.crashes + 1
+            } else if ev < 97 {
+                c.restart_one()
+            } else {
+                c.toggle_partition()
+                res.partitions = res.partitions + 1
+            }
+            # The network never buffers unboundedly: oldest spill is loss,
+            # which Raft must tolerate anyway.
+            while len(c.inflight) > 2000 {
+                c.inflight[0] = c.inflight[len(c.inflight) - 1]
+                c.inflight.pop(len(c.inflight) - 1)
+            }
+            if step % 16 == 0 {
+                c.check_log_matching()
+                c.check_bounds()
+            }
+            step = step + 1
+        }
+        if c.err == "" {
+            c.converge(400)
+        }
+        if c.err != "" {
+            res._fail(seed, c.err)
+        }
+        res.elections = res.elections + c.elections
+        res.committed = res.committed + len(c.committed_global)
+        res.trials = res.trials + 1
+        seed = seed + 1
+    }
+    return res
+}

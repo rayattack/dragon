@@ -1,0 +1,224 @@
+# engine.dr - the Wands ECA engine: template interpolation, HTTP steps, spell
+# execution, and the `wizard` background daemon that runs spells over new events.
+import json
+from database import SQL
+from time import now, sleep_ms
+from http.client import HTTPConnection, HTTPResponse
+from urllib.parse import urlsplit, SplitResult
+from core import db, dblock
+
+# Stringify a boxed value the way a template expects: JSON, but a JSON string
+# has its surrounding quotes stripped (so {{event.order}} -> 42, not "42").
+def _stringify(v: Any) -> str {
+    const j: str = json.dumps(v)
+    if len(j) >= 2 and j[0] == "\"" and j[len(j) - 1] == "\"" {
+        return j[1:len(j) - 1]
+    }
+    return j
+}
+
+
+# Resolve a dotted path (event.order, info.status) against the context.
+def _lookup(ctx: dict[str, Any], path: str) -> str {
+    const parts: list[str] = path.split(".")
+    if len(parts) == 0 {
+        return ""
+    }
+    const head: str = parts[0]
+    if head not in ctx {
+        return ""
+    }
+    cur: Any = ctx[head]
+    i: int = 1
+    while i < len(parts) {
+        const d: dict[str, Any] = cur
+        const key: str = parts[i]
+        if key not in d {
+            return ""
+        }
+        cur = d[key]
+        i = i + 1
+    }
+    return _stringify(cur)
+}
+
+
+# Replace every {{ path }} in a template string.
+def _tmpl(s: str, ctx: dict[str, Any]) -> str {
+    out: list[str] = []
+    i: int = 0
+    const n: int = len(s)
+    while i < n {
+        if i + 1 < n and s[i] == "{" and s[i + 1] == "{" {
+            const close: int = s.find("}}", i + 2)
+            if close < 0 {
+                out.append(s[i:])
+                i = n
+            } else {
+                const expr: str = s[i + 2:close].strip()
+                out.append(_lookup(ctx, expr))
+                i = close + 2
+            }
+        } else {
+            out.append(s[i])
+            i = i + 1
+        }
+    }
+    return "".join(out)
+}
+
+
+# Template every string value of an object into a new dict.
+def _render_obj(obj: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any] {
+    out: dict[str, Any] = {}
+    for k in obj {
+        const raw: str = _stringify(obj[k])
+        out[k] = _tmpl(raw, ctx)
+    }
+    return out
+}
+
+
+# One HTTP round-trip. Returns (status, body); status 0 on connection failure.
+def _http(method: str, url: str, body: str) -> tuple[int, str] {
+    const parts: SplitResult = urlsplit(url)
+    host: str = parts.netloc
+    port: int = 80
+    const colon: int = parts.netloc.find(":")
+    if colon >= 0 {
+        host = parts.netloc[:colon]
+        try {
+            const pv: int = int(parts.netloc[colon + 1:])
+            port = pv
+        } except {
+            port = 80
+        }
+    }
+    pathq: str = parts.path
+    if len(pathq) == 0 {
+        pathq = "/"
+    }
+    if len(parts.query) > 0 {
+        pathq = pathq + "?" + parts.query
+    }
+    status: int = 0
+    respbody: str = ""
+    try {
+        const conn: HTTPConnection = HTTPConnection(host, port)
+        const hdrs: dict[str, str] = {"content-type": "application/json"}
+        conn.request(method, pathq, body, hdrs)
+        const resp: HTTPResponse = conn.getresponse()
+        status = resp.status
+        const rb: str = resp.read()
+        respbody = rb
+        conn.close()
+    } except {
+        status = 0
+    }
+    return (status, respbody)
+}
+
+
+# Run one spell's chain against an event. Returns (status, detail-log).
+def run_spell(spell: str, source: str, payload: Any, metadata: Any) -> tuple[str, str] {
+    logs: list[str] = []
+    status: str = "ok"
+    try {
+        const obj: dict[str, Any] = json.loads_obj(source)
+        ctx: dict[str, Any] = {}
+        ctx["event"] = payload
+        ctx["metadata"] = metadata
+        if "chain" in obj {
+            const chain: list[Any] = obj["chain"]
+            for stepAny in chain {
+                const step: dict[str, Any] = stepAny
+                if "fetch" in step {
+                    const furl: str = _tmpl(_stringify(step["fetch"]), ctx)
+                    const fr: tuple[int, str] = _http("GET", furl, "")
+                    fname: str = "result"
+                    if "as" in step {
+                        const fa: str = _stringify(step["as"])
+                        fname = fa
+                    }
+                    try {
+                        const parsed: Any = json.loads(fr[1])
+                        ctx[fname] = parsed
+                    } except {
+                        ctx[fname] = fr[1]
+                    }
+                    logs.append(f"fetch {furl} -> {fr[0]}")
+                    if fr[0] == 0 {
+                        status = "failed"
+                    }
+                } elif "post" in step {
+                    const purl: str = _tmpl(_stringify(step["post"]), ctx)
+                    pbody: dict[str, Any] = {}
+                    if "with" in step {
+                        const w: dict[str, Any] = step["with"]
+                        pbody = _render_obj(w, ctx)
+                    }
+                    const pr: tuple[int, str] = _http("POST", purl, json.dumps(pbody))
+                    logs.append(f"post {purl} -> {pr[0]}")
+                    if pr[0] < 200 or pr[0] >= 300 {
+                        status = "failed"
+                    }
+                } elif "map" in step {
+                    const m: dict[str, Any] = step["map"]
+                    mname: str = "map"
+                    if "as" in step {
+                        const ma: str = _stringify(step["as"])
+                        mname = ma
+                    }
+                    ctx[mname] = _render_obj(m, ctx)
+                    logs.append("map " + mname)
+                } elif "log" in step {
+                    logs.append(_tmpl(_stringify(step["log"]), ctx))
+                }
+            }
+        }
+    } except {
+        status = "error"
+    }
+    return (status, "; ".join(logs))
+}
+
+
+# The wizard daemon: run enabled spells over freshly-published events.
+def wizard() -> None {
+    while True {
+        rows: list[dict[str, Any]] = []
+        with dblock {
+            const rs: list[dict[str, Any]] = db.all(template[SQL] { select event as event, action as action, payload as payload, metadata as metadata from events where spelled = 0 order by timestamped asc limit 20 })
+            rows = rs
+        }
+        for row in rows {
+            const evid: str = row["event"]
+            const evaction: str = row["action"]
+            const payloadtext: str = row["payload"]
+            const metatext: str = row["metadata"]
+            matched: list[dict[str, Any]] = []
+            with dblock {
+                const ss: list[dict[str, Any]] = db.all(template[SQL] { select spell as spell, source as source from spells where enabled <> 0 and action = !{evaction} })
+                matched = ss
+            }
+            const payload: Any = json.loads(payloadtext)
+            const metadata: Any = json.loads(metatext)
+            for sp in matched {
+                const spname: str = sp["spell"]
+                const spsrc: str = sp["source"]
+                const res: tuple[str, str] = run_spell(spname, spsrc, payload, metadata)
+                const rstatus: str = res[0]
+                const rdetail: str = res[1]
+                const ts: str = f"{now()}"
+                with dblock {
+                    db.run(template[SQL] { insert into spell_runs(spell, event, status, detail, ts) values(!{spname}, !{evid}, !{rstatus}, !{rdetail}, !{ts}) })
+                }
+            }
+            with dblock {
+                db.run(template[SQL] { update events set spelled = 1 where event = !{evid} })
+            }
+        }
+        sleep_ms(200)
+    }
+}
+

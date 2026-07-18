@@ -1,0 +1,466 @@
+# resources/wands.dr - Wands (spells): row + queries + views + routes.
+from http.server import Router, Request, Response, Context
+from database import SQL
+from html import HTML
+from core import db, dblock, PER, get_q, get_status, get_page, like_of, get_ids, audit_log, parse_obj
+from shell import Col, render_toolbar, render_list, list_page, open_modal, active_pill, pill_of, and_close_modal, fragment_with_nav, respond_section, open_drawer, kv, and_close_drawer
+from authz import Principal, principal_for_api
+import json
+from resources.actions import query_action_schema
+from time import now
+
+
+# How many times a spell has executed. A spell that has run is FROZEN: its
+# definition is never editable, so run history stays an honest audit trail.
+def spell_run_count(name: str) -> int {
+    n: int = 0
+    with dblock {
+        const c: int = db.val[int](template[SQL] { select count(*) from spell_runs where spell = !{name} })
+        n = c
+    }
+    return n
+}
+
+class SpellRow {
+    def(spell: str, action: str, enabled: bool, runs: int, last: str) {
+        self.spell = spell
+        self.action = action
+        self.enabled = enabled
+        self.runs = f"{runs}"
+        self.last = last
+    }
+}
+
+
+class RunRow {
+    def(ts: str, event: str, status: str, detail: str) {
+        self.ts = ts
+        self.event = event
+        self.status = status
+        self.detail = detail
+    }
+}
+
+
+def query_spells(q: str, page: int) -> tuple[list[SpellRow], int] {
+    const pat: str = like_of(q)
+    const off: int = (page - 1) * PER
+    total: int = 0
+    rows: list[dict[str, Any]] = []
+    with dblock {
+        const t: int = db.val[int](template[SQL] { select count(*) from spells where spell like !{pat} or action like !{pat} })
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select s.spell as spell, s.action as action, s.enabled as enabled, (select count(*) from spell_runs r where r.spell = s.spell) as runs, coalesce((select status from spell_runs r where r.spell = s.spell order by r.id desc limit 1), '') as last from spells s where s.spell like !{pat} or s.action like !{pat} order by s.spell limit !{PER} offset !{off} })
+        total = t
+        rows = rs
+    }
+    out: list[SpellRow] = []
+    for row in rows {
+        const sp: str = row["spell"]
+        const ac: str = row["action"]
+        const en: int = row["enabled"]
+        const ru: int = row["runs"]
+        const la: str = row["last"]
+        out.append(SpellRow(sp, ac, en != 0, ru, la))
+    }
+    return (out, total)
+}
+
+
+def query_spell_runs(name: str) -> list[RunRow] {
+    rows: list[dict[str, Any]] = []
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select ts as ts, event as event, status as status, detail as detail from spell_runs where spell = !{name} order by id desc limit 30 })
+        rows = rs
+    }
+    out: list[RunRow] = []
+    for row in rows {
+        const ts: str = row["ts"]
+        const ev: str = row["event"]
+        const st: str = row["status"]
+        const dt: str = row["detail"]
+        out.append(RunRow(ts, ev, st, dt))
+    }
+    return out
+}
+
+
+def cols_wands() -> list[Col] {
+    return [Col("spell", "spell"), Col("when", "when (action)"), Col("status", "status"), Col("runs", "runs"), Col("last", "last run"), Col("act", "")]
+}
+
+
+def _tr_spell(s: SpellRow) -> HTML {
+    laststr: HTML = template[HTML] { <span class="dim">-</span> }
+    if len(s.last) > 0 {
+        const cls: str = pill_of(s.last)
+        laststr = template[HTML] { <span class="pill !{cls}">!{s.last}</span> }
+    }
+    return template[HTML] {
+      <tr class="rowlink" onclick="event.stopPropagation();dj.get('/dash/spell?name=!{s.spell}', '#drawer')">
+        <td class="cb-col" onclick="event.stopPropagation()"><input type="checkbox" class="cb-row" value="!{s.spell}"></td>
+        <td data-col="spell" class="fw">!{s.spell}</td>
+        <td data-col="when">!{s.action}</td>
+        <td data-col="status">!{active_pill(s.enabled)}</td>
+        <td data-col="runs">!{s.runs}</td>
+        <td data-col="last">!{laststr}</td>
+        <td data-col="act" class="right"><button class="btn btn-sm" onclick="dj.get('/dash/spell?name=!{s.spell}', '#drawer')">runs</button></td>
+      </tr>
+    }
+}
+
+
+def rows_spells(rows: list[SpellRow]) -> HTML {
+    return template[HTML] {!{ for s in rows { :{ !{_tr_spell(s)} } }}}
+}
+
+
+def list_wands(rows: list[SpellRow], page: int, per: int, total: int) -> HTML {
+    return render_list("wands", cols_wands(), rows_spells(rows), "No spells yet. Create one to react to events.", page, per, total)
+}
+
+
+def page_wands(frag: HTML) -> HTML {
+    const add: HTML = template[HTML] { <button class="btn btn-primary" onclick="dj.get('/dash/new/spell', '#modal')">+ New spell</button> }
+    const bulk: HTML = template[HTML] { <button class="btn btn-sm btn-danger" onclick="dashBulk('wands','/dash/wands/delete-many')">Delete</button> }
+    return list_page("wands", "Wands", "When an event fires, run a chain: fetch external data, map, filter, and POST over HTTP.", add, render_toolbar("wands", "Search spells...", cols_wands(), template[HTML] {  }, bulk), frag)
+}
+
+
+# Create-spell modal: name + trigger action + an Ace JSON editor for the chain.
+def render_modal_spell(actions: list[str]) -> HTML {
+    const opts: HTML = template[HTML] {!{ for a in actions { :{ <option value="!{a}">!{a}</option> } }}}
+    const body: HTML = template[HTML] {
+      <div class="spell-builder">
+      <form action="/dash/wands" method="post" onsubmit="return dashBuilderSubmit(this)">
+        <div class="modal-body">
+          <div class="field-row">
+            <div class="field"><label>Spell name<span class="req">*</span></label><input name="spell" placeholder="forward-orders" required></div>
+            <div class="field"><label>When (action)<span class="req">*</span></label><select class="b-action" name="action" required>!{opts}</select></div>
+          </div>
+          <div class="tabs b-tabs" style="margin-top:12px"><button type="button" class="active" data-bmode="visual">Visual</button><button type="button" data-bmode="yaml">YAML</button></div>
+          <div class="b-visual">
+            <label class="hint" style="display:block;margin:2px 0 4px">Chain - runs top to bottom. Type <code>&#123;&#123;</code> in any value to pick an event field or an earlier step's output.</label>
+            <div class="b-steps"></div>
+            <button type="button" class="btn btn-sm b-add">+ Add step</button>
+          </div>
+          <div class="b-yaml-pane" hidden>
+            <label class="hint" style="display:block;margin:2px 0 6px">Spellbook YAML - the <code>then:</code> chain. Switch back to Visual to sync it into the builder.</label>
+            <div class="b-yaml-ide ide" style="height:300px"></div>
+          </div>
+          <input type="hidden" name="source">
+        </div>
+        <div class="modal-foot"><button type="button" class="btn btn-ghost" onclick="document.getElementById('modal').innerHTML=''">Cancel</button><button class="btn btn-primary">Create spell</button></div>
+      </form>
+      </div>
+      <script>(function(){ var root = document.getElementById('modal').querySelector('.spell-builder'); if (window.dashBuilder) window.dashBuilder(root); })();</script>
+    }
+    return open_modal("New spell", "wands", body)
+}
+
+
+def render_spell_drawer(spell: str, action: str, source: str, enabled: bool, runs: list[RunRow]) -> HTML {
+    runs_html: HTML = template[HTML] { <p class="hint">No runs yet. Publish a matching event to trigger this spell.</p> }
+    if len(runs) > 0 {
+        runs_html = template[HTML] {
+          <table class="data" style="border:1px solid var(--border)">
+            <thead><tr><th>when</th><th>event</th><th>status</th><th>detail</th></tr></thead>
+            <tbody>!{ for r in runs { :{
+              <tr><td class="mono dim">!{r.ts}</td><td class="mono">!{r.event}</td><td><span class="pill !{pill_of(r.status)}">!{r.status}</span></td><td class="dim" style="white-space:normal">!{r.detail}</td></tr>
+            } }}</tbody>
+          </table>
+        }
+    }
+    const locked: bool = len(runs) > 0
+    const eyebrow: str = "spell (locked)" if locked else "edit spell"
+    actions_html: HTML = template[HTML] {
+      <div class="drawer-actions">
+        <button class="btn btn-primary">Save spell</button>
+        <button type="button" class="btn btn-danger" onclick="var f=new FormData();f.append('ids','!{spell}');dj.send('/dash/wands/delete-many',{method:'POST',target:'#list-wands',body:f});document.getElementById('drawer').innerHTML=''">Delete</button>
+      </div>
+    }
+    if locked {
+        actions_html = template[HTML] {
+          <div class="lock-note">This spell has run, so its definition is frozen and can no longer be edited (run history stays an honest audit trail). You can still delete it.</div>
+          <div class="drawer-actions">
+            <button type="button" class="btn btn-danger" onclick="var f=new FormData();f.append('ids','!{spell}');dj.send('/dash/wands/delete-many',{method:'POST',target:'#list-wands',body:f});document.getElementById('drawer').innerHTML=''">Delete</button>
+          </div>
+        }
+    }
+    const ro_flag: str = "true" if locked else "false"
+    const body: HTML = template[HTML] {
+      <form action="/dash/wands/update" method="post" onsubmit="this.source.value = window.yamlToChain(window.__eide.getValue()); return dj.submit(this, '#list-wands')">
+        <input type="hidden" name="spell" value="!{spell}">
+        <div class="field"><label>When (action)</label><input name="action" value="!{action}" !{"readonly" if locked else "" | raw}></div>
+        <div class="field"><label>Chain (YAML)</label><div id="spell-edit-ide" class="ide" style="height:300px">!{source}</div><input type="hidden" name="source"></div>
+        !{actions_html}
+      </form>
+      <h3 style="font-size:13px;margin:20px 0 10px">Recent runs</h3>
+      !{runs_html}
+      <script>
+        (function(){ var ed = ace.edit('spell-edit-ide'); window.__eide = ed; ed.session.setMode('ace/mode/yaml');
+          ed.setOptions({ readOnly: !{ro_flag | raw}, fontSize: 14, showPrintMargin: false, tabSize: 2, useWorker: false });
+          try { ed.setValue(window.chainToYaml(ed.getValue()), -1); } catch (e) {} ed.clearSelection();
+          (window.__ace = window.__ace || []).push(ed);
+          if (window.dgAceTheme) window.dgAceTheme(); })();
+      </script>
+    }
+    return open_drawer(eyebrow, spell, body)
+}
+
+
+def sec_wands(req: Request, res: Response, ctx: Context) -> None {
+    const page: int = get_page(req)
+    const r: tuple[list[SpellRow], int] = query_spells(get_q(req), page)
+    respond_section(req, res, "wands", page_wands(list_wands(r[0], page, PER, r[1])))
+}
+
+
+def list_wands_h(req: Request, res: Response, ctx: Context) -> None {
+    const page: int = get_page(req)
+    const r: tuple[list[SpellRow], int] = query_spells(get_q(req), page)
+    res.html(list_wands(r[0], page, PER, r[1]))
+}
+
+
+def dash_new_spell(req: Request, res: Response, ctx: Context) -> None {
+    actions: list[str] = []
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select action as action from actions order by action limit 200 })
+        for row in rs {
+            const a: str = row["action"]
+            actions.append(a)
+        }
+    }
+    res.html(render_modal_spell(actions))
+}
+
+
+# GET /dash/action-fields?name= - JSON list of an action's payload field names,
+# used by the visual builder's {{ autocomplete.
+def dash_action_fields(req: Request, res: Response, ctx: Context) -> None {
+    name: str = req.query["name"] if "name" in req.query else ""
+    const schematext: str = query_action_schema(name)
+    fields: list[str] = []
+    if len(schematext) > 0 {
+        try {
+            const obj: dict[str, Any] = json.loads_obj(schematext)
+            if "properties" in obj {
+                const props: dict[str, Any] = obj["properties"]
+                for k in props {
+                    fields.append(k)
+                }
+            }
+        } except {
+            fields = []
+        }
+    }
+    res.json(json.dumps({"fields": fields}))
+}
+
+
+def query_spell_one(name: str) -> tuple[str, str, int] {
+    action: str = ""
+    source: str = ""
+    enabled: int = 0
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select action as action, source as source, enabled as enabled from spells where spell = !{name} })
+        if len(rs) > 0 {
+            const r: dict[str, Any] = rs[0]
+            const a: str = r["action"]
+            const so: str = r["source"]
+            const e: int = r["enabled"]
+            action = a
+            source = so
+            enabled = e
+        }
+    }
+    return (action, source, enabled)
+}
+
+
+def dash_spell(req: Request, res: Response, ctx: Context) -> None {
+    name: str = ""
+    if "name" in req.query {
+        const v: str = req.query["name"]
+        name = v
+    }
+    const one: tuple[str, str, int] = query_spell_one(name)
+    res.html(render_spell_drawer(name, one[0], one[1], one[2] != 0, query_spell_runs(name)))
+}
+
+
+def dash_wands_create(req: Request, res: Response, ctx: Context) -> None {
+    const f: dict[str, str] = req.form()
+    const spell: str = f["spell"] if "spell" in f else ""
+    const action: str = f["action"] if "action" in f else ""
+    const source: str = f["source"] if "source" in f else ""
+    ok: bool = len(spell) > 0 and len(action) > 0 and len(source) > 0
+    if ok {
+        try {
+            const parsed: dict[str, Any] = json.loads_obj(source)
+            if "chain" not in parsed {
+                ok = False
+            }
+        } except {
+            ok = False
+        }
+    }
+    if ok {
+        const ts: str = f"{now()}"
+        with dblock {
+            const dup: int = db.val[int](template[SQL] { select count(*) from spells where spell = !{spell} })
+            if dup == 0 {
+                db.run(template[SQL] { insert into spells(spell, enabled, action, source, timestamped) values(!{spell}, 1, !{action}, !{source}, !{ts}) })
+            }
+        }
+        audit_log("spell", "created " + spell)
+    }
+    const r: tuple[list[SpellRow], int] = query_spells("", 1)
+    res.html(and_close_modal(list_wands(r[0], 1, PER, r[1])))
+}
+
+
+def wands_delete_many(req: Request, res: Response, ctx: Context) -> None {
+    for sp in get_ids(req) {
+        with dblock {
+            db.run(template[SQL] { delete from spell_runs where spell = !{sp} })
+            db.run(template[SQL] { delete from spells where spell = !{sp} })
+        }
+    }
+    audit_log("delete", "spells")
+    const r: tuple[list[SpellRow], int] = query_spells("", 1)
+    res.html(list_wands(r[0], 1, PER, r[1]))
+}
+
+
+def dash_wands_update(req: Request, res: Response, ctx: Context) -> None {
+    const f: dict[str, str] = req.form()
+    const spell: str = f["spell"] if "spell" in f else ""
+    const action: str = f["action"] if "action" in f else ""
+    const source: str = f["source"] if "source" in f else ""
+    ok: bool = len(spell) > 0 and len(source) > 0
+    if ok {
+        try {
+            const p: dict[str, Any] = json.loads_obj(source)
+            if "chain" not in p {
+                ok = False
+            }
+        } except {
+            ok = False
+        }
+    }
+    # A spell that has run is frozen - never editable.
+    if ok and spell_run_count(spell) == 0 {
+        with dblock {
+            db.run(template[SQL] { update spells set action = !{action}, source = !{source} where spell = !{spell} })
+        }
+        audit_log("spell", "updated " + spell)
+    }
+    const r: tuple[list[SpellRow], int] = query_spells("", 1)
+    res.html(and_close_drawer(list_wands(r[0], 1, PER, r[1])))
+}
+
+
+# --- Signed /v1 spell API (admin key) -------------------------------------
+def h_spells_list(req: Request, res: Response, ctx: Context) -> None {
+    const body: str = req.body
+    const p: Principal = principal_for_api(req, body)
+    if not p.superadmin {
+        res.status = 403
+        res.json('{"error":"managing spells requires the admin key"}')
+        return
+    }
+    rows: list[dict[str, Any]] = []
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select s.spell as spell, s.action as action, s.enabled as enabled, s.source as source, (select count(*) from spell_runs r where r.spell = s.spell) as runs from spells s order by s.spell })
+        rows = rs
+    }
+    out: list[dict[str, Any]] = []
+    for row in rows {
+        const sp: str = row["spell"]
+        const ac: str = row["action"]
+        const en: int = row["enabled"]
+        const so: str = row["source"]
+        const ru: int = row["runs"]
+        const one: dict[str, Any] = {spell: sp, action: ac, enabled: en != 0, runs: ru, locked: ru > 0, definition: json.loads(so)}
+        out.append(one)
+    }
+    res.json(json.dumps({"spells": out}))
+}
+
+
+def h_spells_create(req: Request, res: Response, ctx: Context) -> None {
+    const body: str = req.body
+    const p: Principal = principal_for_api(req, body)
+    if not p.superadmin {
+        res.status = 403
+        res.json('{"error":"managing spells requires the admin key"}')
+        return
+    }
+    const doc: dict[str, Any] = parse_obj(body)
+    const spell: str = doc["spell"] if "spell" in doc else ""
+    const action: str = doc["action"] if "action" in doc else ""
+    if len(spell) == 0 or len(action) == 0 or "chain" not in doc {
+        res.status = 422
+        res.json('{"error":"spell, action and chain are required"}')
+        return
+    }
+    const source: str = json.dumps({chain: doc["chain"]})
+    exists: int = 0
+    runs: int = 0
+    with dblock {
+        const e: int = db.val[int](template[SQL] { select count(*) from spells where spell = !{spell} })
+        const r: int = db.val[int](template[SQL] { select count(*) from spell_runs where spell = !{spell} })
+        exists = e
+        runs = r
+    }
+    if runs > 0 {
+        res.status = 403
+        res.json('{"error":"spell has run and is frozen; it can no longer be updated"}')
+        return
+    }
+    const ts: str = f"{now()}"
+    with dblock {
+        if exists > 0 {
+            db.run(template[SQL] { update spells set action = !{action}, source = !{source} where spell = !{spell} })
+        } else {
+            db.run(template[SQL] { insert into spells(spell, enabled, action, source, timestamped) values(!{spell}, 1, !{action}, !{source}, !{ts}) })
+        }
+    }
+    audit_log("spell", "api upsert " + spell)
+    res.status = 201
+    res.json(json.dumps({"spell": spell, "action": action}))
+}
+
+
+def h_spells_delete(req: Request, res: Response, ctx: Context) -> None {
+    const body: str = req.body
+    const p: Principal = principal_for_api(req, body)
+    if not p.superadmin {
+        res.status = 403
+        res.json('{"error":"managing spells requires the admin key"}')
+        return
+    }
+    const spell: str = req.params["spell"] if "spell" in req.params else ""
+    with dblock {
+        db.run(template[SQL] { delete from spell_runs where spell = !{spell} })
+        db.run(template[SQL] { delete from spells where spell = !{spell} })
+    }
+    audit_log("spell", "api deleted " + spell)
+    res.json(json.dumps({"deleted": spell}))
+}
+
+
+def mount(app: Router) -> None {
+    app.GET('/dash/action-fields', dash_action_fields)
+    app.POST('/dash/wands/update', dash_wands_update)
+    app.GET('/wands', sec_wands)
+    app.GET('/dash/wands/list', list_wands_h)
+    app.GET('/dash/new/spell', dash_new_spell)
+    app.GET('/dash/spell', dash_spell)
+    app.POST('/dash/wands', dash_wands_create)
+    app.POST('/dash/wands/delete-many', wands_delete_many)
+    app.GET('/v1/spells', h_spells_list)
+    app.POST('/v1/spells', h_spells_create)
+    app.DELETE('/v1/spells/:spell', h_spells_delete)
+}

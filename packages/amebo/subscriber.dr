@@ -1,0 +1,73 @@
+# subscriber.dr - a mock webhook subscriber for the amebo demo.
+#
+# Receives POST /hook, verifies the x-amebo-signature over the exact body bytes
+# with its own secret, and checks the body is the amebo envelope
+# {action, metadata, payload}: a 2xx means amebo signed a well-formed envelope,
+# a 401/422 means it did not. Delivery is proven server-side by amebo's
+# `delivered` counter (it only marks a gist delivered on a 2xx), so this
+# consumer stays stateless - no shared mutable state touched from the
+# worker-thread handlers.
+#
+#   build/dragon build subscriber.dr -o subscriber && ./subscriber
+
+from http.server import Router, Request, Response, Context
+from hmac import new, compare_digest
+import json
+
+extern "C" def getenv(name: str) -> str
+
+def env_int(name: str, fallback: int) -> int {
+    const v: str = getenv(name)
+    if len(v) > 0 {
+        return int(v)
+    }
+    return fallback
+}
+
+const PORT: int = env_int("SUBSCRIBER_PORT", 9000)
+const SECRET: str = "fulfillment-secret"
+
+
+def h_health(req: Request, res: Response, ctx: Context) -> None {
+    res.json('{"status":"ok"}')
+}
+
+
+def h_hook(req: Request, res: Response, ctx: Context) -> None {
+    const body: str = req.body
+    sig: str = ""
+    if "x-amebo-signature" in req.headers {
+        sig = req.headers["x-amebo-signature"]
+    }
+    const expected: bytes = new(SECRET.encode(), body.encode(), "sha256").hexdigest().encode()
+    if not compare_digest(sig.encode(), expected) {
+        res.status = 401
+        res.json('{"error":"bad signature"}')
+        return
+    }
+    # A signed body must also be the amebo envelope.
+    envelope_ok: bool = False
+    try {
+        const doc: dict[str, Any] = json.loads_obj(body)
+        if "action" in doc and "metadata" in doc and "payload" in doc {
+            envelope_ok = True
+        }
+    } except {
+        envelope_ok = False
+    }
+    if not envelope_ok {
+        res.status = 422
+        res.json('{"error":"not an amebo envelope"}')
+        return
+    }
+    res.status = 200
+    res.json('{"status":"received"}')
+}
+
+
+const app: Router = Router(PORT, "0.0.0.0")
+app.GET('/health', h_health)
+app.POST('/hook', h_hook)
+print(f"subscriber listening on http://0.0.0.0:{PORT}")
+app.listen();
+

@@ -1,0 +1,494 @@
+# api.dr - the signed broker API (/v1/*) + /health, the webhook delivery worker
+# `deliver_one`, and the `aproko` retry daemon. mount(app) registers the routes.
+from http.server import Router, Request, Response, Context
+from http.client import HTTPConnection, HTTPResponse
+from hmac import new, compare_digest
+import json
+from database import SQL
+from json import Schema
+from time import now, sleep_ms, monotonic
+from core import db, dblock, SCHEMAS, schema_errors, parse_obj, persist_event, backoff_seconds, default_max_retries, redaction_paths, apply_redactions, redact_add
+from authz import Principal, can, principal_for_api, grant, revoke
+
+# GET /health
+def h_health(req: Request, res: Response, ctx: Context) -> None {
+    res.json('{"status":"ok"}')
+}
+
+
+# GET /v1/events - broker counters: publishes, delivery outcomes, attempt totals.
+def h_stats(req: Request, res: Response, ctx: Context) -> None {
+    # Generic reads (db.val[T]) only stamp T in a `const` declaration, so read
+    # into consts inside the lock, then copy out.
+    events: int = 0
+    delivered: int = 0
+    pending: int = 0
+    failed: int = 0
+    attempts: int = 0
+    attempts_ok: int = 0
+    with dblock {
+        const e: int = db.val[int](template[SQL] { select count(*) from events })
+        const d: int = db.val[int](template[SQL] { select count(*) from gists where completed = 1 })
+        const pe: int = db.val[int](template[SQL] { select count(*) from gists g join subscriptions s on s.subscription = g.subscription where g.completed = 0 and g.retries < s.max_retries })
+        const fa: int = db.val[int](template[SQL] { select count(*) from gists g join subscriptions s on s.subscription = g.subscription where g.completed = 0 and g.retries >= s.max_retries })
+        const at: int = db.val[int](template[SQL] { select count(*) from deliveries })
+        const ao: int = db.val[int](template[SQL] { select coalesce(sum(ok), 0) from deliveries })
+        events = e
+        delivered = d
+        pending = pe
+        failed = fa
+        attempts = at
+        attempts_ok = ao
+    }
+    res.json(json.dumps({"events": events, "delivered": delivered, "pending": pending, "failed": failed, "attempts": attempts, "attempts_ok": attempts_ok}))
+}
+
+
+# POST /v1/applications - register an application (publisher and/or subscriber).
+def h_applications(req: Request, res: Response, ctx: Context) -> None {
+    const body: str = req.body
+    const p: Principal = principal_for_api(req, body)
+    if not p.superadmin {
+        res.status = 403
+        res.json('{"error":"registering an application requires the admin key (x-amebo-admin-key)"}')
+        return
+    }
+    const doc: dict[str, Any] = parse_obj(body)
+    const errs: list[str] = schema_errors(SCHEMAS, "application", doc)
+    if len(errs) > 0 {
+        res.status = 422
+        res.json(json.dumps({"error": "invalid application", "errors": errs}))
+        return
+    }
+    const application: str = doc["application"]
+    const host: str = doc["host"]
+    const port: int = doc["port"]
+    const secret: str = doc["secret"]
+
+    duplicate: bool = False
+    with dblock {
+        const dup: int = db.val[int](template[SQL] {
+            SELECT count(*) FROM applications WHERE application = !{application}
+        })
+        if dup > 0 { duplicate = True }
+        else {
+            db.run(template[SQL] {
+                insert into applications(application, host, port, secret, active)
+                values(!{application}, !{host}, !{port}, !{secret}, 1)
+            })
+        }
+    }
+    if duplicate {
+        res.status = 409
+        res.json('{"error":"application already exists"}')
+        return
+    }
+    res.status = 201
+    res.json(json.dumps({"application": application}))
+}
+
+
+# POST /v1/actions - register a named action owned by an application, with the
+# JSON Schema every future payload for that action must conform to.
+def h_actions(req: Request, res: Response, ctx: Context) -> None {
+    const body: str = req.body
+    const doc: dict[str, Any] = parse_obj(body)
+    const errs: list[str] = schema_errors(SCHEMAS, "action", doc)
+    if len(errs) > 0 {
+        res.status = 422
+        res.json(json.dumps({"error": "invalid action", "errors": errs}))
+        return
+    }
+    const action: str = doc["action"]
+    const application: str = doc["application"]
+    const schematext: str = json.dumps(doc["schema"])
+
+    # Only the owning application (signed with its secret) or an admin may
+    # register an action; the owner then becomes its implicit ACL admin.
+    const p: Principal = principal_for_api(req, body)
+    const allowed: bool = p.superadmin or (p.kind == "service" and p.name == application)
+    if not allowed {
+        res.status = 403
+        res.json('{"error":"register actions for your own application (sign with its secret) or use the admin key"}')
+        return
+    }
+
+    appknown: bool = False
+    duplicate: bool = False
+    with dblock {
+        const known: int = db.val[int](template[SQL] { select count(*) from applications where application = !{application} and active <> 0 })
+        if known > 0 {
+            appknown = True
+            const dup: int = db.val[int](template[SQL] { select count(*) from actions where action = !{action} })
+            if dup > 0 {
+                duplicate = True
+            } else {
+                db.run(template[SQL] { insert into actions(action, application, schema, status) values(!{action}, !{application}, !{schematext}, 'active') })
+            }
+        }
+    }
+    if not appknown {
+        res.status = 422
+        res.json('{"error":"unknown or inactive application"}')
+        return
+    }
+    if duplicate {
+        res.status = 409
+        res.json('{"error":"action already exists"}')
+        return
+    }
+    # Optional redactions defined at creation time: strip these payload paths at
+    # reception for every event of this action.
+    if "redactions" in doc {
+        const reds: list[Any] = doc["redactions"]
+        for r in reds {
+            const fp: str = r
+            if len(fp) > 0 {
+                redact_add(action, fp)
+            }
+        }
+    }
+    res.status = 201
+    res.json(json.dumps({"action": action}))
+}
+
+
+# POST /v1/subscriptions - subscribe an application's webhook to an action.
+def h_subscriptions(req: Request, res: Response, ctx: Context) -> None {
+    const body: str = req.body
+    const doc: dict[str, Any] = parse_obj(body)
+    const errs: list[str] = schema_errors(SCHEMAS, "subscription", doc)
+    if len(errs) > 0 {
+        res.status = 422
+        res.json(json.dumps({"error": "invalid subscription", "errors": errs}))
+        return
+    }
+    const subscription: str = doc["subscription"]
+    const application: str = doc["application"]
+    const action: str = doc["action"]
+    const handler: str = doc["handler"]
+    max_retries: int = default_max_retries()
+    if "max_retries" in doc {
+        const m: int = doc["max_retries"]
+        max_retries = m
+    }
+
+    # A service subscribes its OWN webhook (or an admin acts on its behalf).
+    const p: Principal = principal_for_api(req, body)
+    const is_self: bool = p.superadmin or (p.kind == "service" and p.name == application)
+    if not is_self {
+        res.status = 403
+        res.json('{"error":"subscribe with your application signature or the admin key"}')
+        return
+    }
+
+    appknown: bool = False
+    actionknown: bool = False
+    with dblock {
+        const ka: int = db.val[int](template[SQL] { select count(*) from applications where application = !{application} and active <> 0 })
+        if ka > 0 {
+            appknown = True
+        }
+        const kc: int = db.val[int](template[SQL] { select count(*) from actions where action = !{action} })
+        if kc > 0 {
+            actionknown = True
+        }
+    }
+    if not appknown {
+        res.status = 422
+        res.json('{"error":"unknown or inactive application"}')
+        return
+    }
+    if not actionknown {
+        res.status = 422
+        res.json('{"error":"unknown action"}')
+        return
+    }
+
+    # Subscribing consumes the action, so the subscriber needs READ on it.
+    if not can(p, action, "read") {
+        res.status = 403
+        res.json('{"error":"application is not authorized to read this action"}')
+        return
+    }
+
+    duplicate: bool = False
+    with dblock {
+        const dup: int = db.val[int](template[SQL] { select count(*) from subscriptions where subscription = !{subscription} })
+        if dup > 0 {
+            duplicate = True
+        } else {
+            db.run(template[SQL] { insert into subscriptions(subscription, subscriber, action, handler, max_retries, active) values(!{subscription}, !{application}, !{action}, !{handler}, !{max_retries}, 1) })
+        }
+    }
+    if duplicate {
+        res.status = 409
+        res.json('{"error":"subscription already exists"}')
+        return
+    }
+    res.status = 201
+    res.json(json.dumps({"subscription": subscription}))
+}
+
+
+# POST /v1/events - verify signature (action owner's secret), validate the
+# payload against the action's schema, persist, fan out one gist per subscriber.
+def h_publish(req: Request, res: Response, ctx: Context) -> None {
+    const body: str = req.body
+    const doc: dict[str, Any] = parse_obj(body)
+    const shape_errs: list[str] = schema_errors(SCHEMAS, "event", doc)
+    if len(shape_errs) > 0 {
+        res.status = 422
+        res.json(json.dumps({"error": "invalid event", "errors": shape_errs}))
+        return
+    }
+    const action: str = doc["action"]
+    const deduper: str = doc["deduper"]
+
+    owner: str = ""
+    secret: str = ""
+    schematext: str = ""
+    known: bool = False
+    with dblock {
+        const rows: list[dict[str, Any]] = db.all(template[SQL] { select a.application as owner, ap.secret as secret, a.schema as schema from actions a join applications ap on ap.application = a.application where a.action = !{action} and ap.active <> 0 })
+        if len(rows) > 0 {
+            const row: dict[str, Any] = rows[0]
+            const ow: str = row["owner"]
+            const s: str = row["secret"]
+            const sc: str = row["schema"]
+            owner = ow
+            secret = s
+            schematext = sc
+            known = True
+        }
+    }
+    if not known {
+        res.status = 422
+        res.json('{"error":"unknown or inactive action"}')
+        return
+    }
+
+    # Identify + authenticate the publisher. An explicit x-amebo-application
+    # (signed with its own secret) lets any authorized service publish; with no
+    # such header we fall back to the legacy path where the action owner signs
+    # with its own secret. Either way the resolved principal must hold WRITE.
+    p: Principal = principal_for_api(req, body)
+    if p.kind == "anon" and "x-amebo-application" not in req.headers {
+        sig: str = ""
+        if "x-amebo-signature" in req.headers {
+            sig = req.headers["x-amebo-signature"]
+        }
+        const expected: bytes = new(secret.encode(), body.encode(), "sha256").hexdigest().encode()
+        if compare_digest(sig.encode(), expected) {
+            p = Principal("service", owner, false)
+        }
+    }
+    if p.kind == "anon" {
+        res.status = 401
+        res.json('{"error":"invalid signature"}')
+        return
+    }
+    if not can(p, action, "write") {
+        res.status = 403
+        res.json('{"error":"not authorized to publish this action"}')
+        return
+    }
+
+    # The defining amebo step: the payload must conform to the action's schema,
+    # so subscribers only ever receive contractual payloads. A fresh local
+    # Schema instance per publish: handler threads never share mutable state.
+    const pschema: Schema = Schema("draft-07")
+    pschema.register(action, json.loads_obj(schematext))
+    const perrs: list[str] = schema_errors(pschema, action, doc["payload"])
+    if len(perrs) > 0 {
+        res.status = 422
+        res.json(json.dumps({"error": "payload does not conform to action schema", "errors": perrs}))
+        return
+    }
+
+    # Redact sensitive fields at RECEPTION: validate the full payload above, then
+    # strip the action's redacted paths before it is ever persisted or delivered.
+    # The sensitive data never lands in the store.
+    red_payload: Any = doc["payload"]
+    const rpaths: list[str] = redaction_paths(action)
+    if len(rpaths) > 0 {
+        const stripped: Any = apply_redactions(doc["payload"], rpaths)
+        red_payload = stripped
+    }
+    const payloadtext: str = json.dumps(red_payload)
+    metadatatext: str = "{}"
+    if "metadata" in doc {
+        const mt: str = json.dumps(doc["metadata"])
+        metadatatext = mt
+    }
+    # Optional publisher-requested delay (seconds) before the first attempt.
+    wake: int = 0
+    if "sleep_until" in doc {
+        const delay: int = doc["sleep_until"]
+        if delay > 0 {
+            wake = now() + delay
+        }
+    }
+
+    const event_id: str = "evt-" + deduper
+    const ts: str = f"{now()}"
+    const fanout: int = persist_event(event_id, action, payloadtext, metadatatext, deduper, ts, wake, p.name)
+    if fanout < 0 {
+        res.status = 409
+        res.json('{"error":"duplicate deduper"}')
+        return
+    }
+
+    res.status = 201
+    res.json(json.dumps({"event": event_id, "action": action, "fanout": fanout}))
+}
+
+
+# POST /v1/authorizations - grant/update (or revoke) an ACL subject on an
+# action. Requires ADMIN on the action (its owner, an admin subject, or the
+# admin key). Body: {action, subject_type, subject_name, read, write, admin,
+# revoke?}. subject_type is 'user', 'service', or '*' (any valid token).
+def h_authorize(req: Request, res: Response, ctx: Context) -> None {
+    const body: str = req.body
+    const doc: dict[str, Any] = parse_obj(body)
+    const action: str = doc["action"] if "action" in doc else ""
+    const stype: str = doc["subject_type"] if "subject_type" in doc else ""
+    const sname: str = doc["subject_name"] if "subject_name" in doc else ""
+    if len(action) == 0 or len(stype) == 0 or len(sname) == 0 {
+        res.status = 422
+        res.json('{"error":"action, subject_type and subject_name are required"}')
+        return
+    }
+    const p: Principal = principal_for_api(req, body)
+    if not can(p, action, "admin") {
+        res.status = 403
+        res.json('{"error":"admin on the action is required to change its authorizations"}')
+        return
+    }
+    r: bool = False
+    w: bool = False
+    a: bool = False
+    rev: bool = False
+    if "read" in doc {
+        const rv: bool = doc["read"]
+        r = rv
+    }
+    if "write" in doc {
+        const wv: bool = doc["write"]
+        w = wv
+    }
+    if "admin" in doc {
+        const av: bool = doc["admin"]
+        a = av
+    }
+    if "revoke" in doc {
+        const xv: bool = doc["revoke"]
+        rev = xv
+    }
+    if rev {
+        revoke(action, stype, sname)
+    } else {
+        grant(action, stype, sname, r, w, a)
+    }
+    res.status = 200
+    res.json(json.dumps({"action": action, "subject": stype + ":" + sname}))
+}
+
+
+# A stored response body / error text never exceeds this many characters.
+const RESPONSE_CAP: int = 2048
+
+# Deliver one gist: wrap the event in the amebo envelope, sign the envelope
+# bytes with the subscriber's secret, and POST the webhook. Network I/O happens
+# OUTSIDE the DB lock so publishes never block on delivery. Every attempt is
+# recorded: HTTP status, the subscriber's response body (or the connection
+# error), latency and wire bytes land in `deliveries` and on the gist itself.
+def deliver_one(gid: int, eventid: str, host: str, port: int, handler: str, subsecret: str, payloadtext: str, metadatatext: str, action: str, subscriber: str, retries: int) -> None {
+    const payload: Any = json.loads(payloadtext)
+    const metadata: Any = json.loads(metadatatext)
+    const envelope: dict[str, Any] = {"action": action, "metadata": metadata, "payload": payload}
+    const outbody: str = json.dumps(envelope)
+    const attempt: int = retries + 1
+    const sig: str = new(subsecret.encode(), outbody.encode(), "sha256").hexdigest()
+    status: int = 0
+    response: str = ""
+    const t0: float = monotonic()
+    try {
+        const conn: HTTPConnection = HTTPConnection(host, port)
+        const hdrs: dict[str, str] = {"content-type": "application/json", "x-amebo-signature": sig, "x-amebo-event-id": eventid, "x-amebo-delivery-attempt": f"{attempt}"}
+        conn.request("POST", handler, outbody, hdrs)
+        const resp: HTTPResponse = conn.getresponse()
+        status = resp.status
+        const rb: str = resp.read()
+        response = rb
+        conn.close()
+    } except Exception as e {
+        status = 0
+        response = f"connection failed: {e}"
+    }
+    const ms: int = int((monotonic() - t0) * 1000.0)
+    const ok: bool = status >= 200 and status < 300
+    in_bytes: int = len(response)
+    if status == 0 {
+        in_bytes = 0
+    }
+    if len(response) > RESPONSE_CAP {
+        response = response[:RESPONSE_CAP]
+    }
+    const okflag: int = 1 if ok else 0
+    const out_bytes: int = len(outbody)
+    const t: int = now()
+
+    with dblock {
+        db.run(template[SQL] { insert into deliveries(gist, event, action, subscriber, attempt, status, ok, ms, out_bytes, in_bytes, response, ts) values(!{gid}, !{eventid}, !{action}, !{subscriber}, !{attempt}, !{status}, !{okflag}, !{ms}, !{out_bytes}, !{in_bytes}, !{response}, !{t}) })
+        if ok {
+            db.run(template[SQL] { update gists set completed = 1, last_status = !{status}, last_ms = !{ms}, response = !{response}, attempted_at = !{t}, delivered_at = !{t} where id = !{gid} })
+        } else {
+            const wake: int = t + backoff_seconds(attempt)
+            db.run(template[SQL] { update gists set retries = retries + 1, sleep_until = !{wake}, last_status = !{status}, last_ms = !{ms}, response = !{response}, attempted_at = !{t} where id = !{gid} })
+        }
+    }
+}
+
+
+# The aproko daemon: poll for due gists and drain them.
+def aproko() -> None {
+    while True {
+        const t: int = now()
+        rows: list[dict[str, Any]] = []
+        with dblock {
+            # ap.active gates delivery too: deactivating an application is a
+            # kill switch - no publishes accepted AND no webhooks sent to it.
+            # Its queued gists stay pending and resume on reactivation.
+            const rs: list[dict[str, Any]] = db.all(template[SQL] { select g.id as id, g.event as eventid, g.retries as retries, ap.host as host, ap.port as port, s.handler as handler, s.subscriber as subscriber, ap.secret as secret, e.payload as payload, e.metadata as metadata, e.action as action from gists g join subscriptions s on s.subscription = g.subscription join applications ap on ap.application = s.subscriber join events e on e.event = g.event where g.completed = 0 and s.active <> 0 and ap.active <> 0 and g.retries < s.max_retries and g.sleep_until <= !{t} limit 64 })
+            rows = rs
+        }
+        for row in rows {
+            const gid: int = row["id"]
+            const eventid: str = row["eventid"]
+            const retries: int = row["retries"]
+            const host: str = row["host"]
+            const port: int = row["port"]
+            const handler: str = row["handler"]
+            const subscriber: str = row["subscriber"]
+            const subsecret: str = row["secret"]
+            const payloadtext: str = row["payload"]
+            const metadatatext: str = row["metadata"]
+            const action: str = row["action"]
+            deliver_one(gid, eventid, host, port, handler, subsecret, payloadtext, metadatatext, action, subscriber, retries)
+        }
+        sleep_ms(150)
+    }
+}
+
+
+
+def mount(app: Router) -> None {
+    app.GET('/health', h_health)
+    app.GET('/v1/events', h_stats)
+    app.POST('/v1/events', h_publish)
+    app.POST('/v1/applications', h_applications)
+    app.POST('/v1/actions', h_actions)
+    app.POST('/v1/subscriptions', h_subscriptions)
+    app.POST('/v1/authorizations', h_authorize)
+}

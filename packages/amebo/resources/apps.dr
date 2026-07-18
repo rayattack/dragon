@@ -1,0 +1,939 @@
+# resources/apps.dr - Applications: row + query + views + handlers + routes.
+# The list carries computed health, role, traffic and an activity sparkline;
+# the detail page is a per-app command center: live charts, delivery routes
+# with pause/resume, credential lifecycle, recent deliveries and audit.
+from http.server import Router, Request, Response, Context
+from database import SQL
+from html import HTML
+import json
+from time import now
+from secrets import token_urlsafe
+from core import db, dblock, PER, get_q, get_page, like_of, get_ids, audit_log, ago
+from shell import Col, render_toolbar, render_list, list_page, open_modal, active_pill, and_close_modal, fragment_with_nav, respond_section, code_pill
+from auth import session_principal
+from authz import Principal, can
+
+def _rate_text(ok: int, total: int) -> str {
+    if total == 0 {
+        return "-"
+    }
+    const r10: int = (ok * 1000) // total
+    return f"{r10 // 10}.{r10 % 10}%"
+}
+
+
+# Health is computed, never stored: consumption health for subscriber apps
+# (success rate of the last hour's webhook attempts), publish activity for
+# publisher-only apps. The pill class rides the app's status tokens.
+def health_of(active: bool, nsub: int, ev_h: int, attempts_h: int, ok_h: int) -> tuple[str, str] {
+    if not active {
+        return ("inactive", "mut")
+    }
+    if nsub > 0 {
+        if attempts_h == 0 {
+            if ev_h > 0 {
+                return ("publishing", "ok")
+            }
+            return ("idle", "mut")
+        }
+        const r10: int = (ok_h * 1000) // attempts_h
+        if r10 >= 980 {
+            return ("healthy", "ok")
+        }
+        if r10 >= 800 {
+            return ("degraded", "warn")
+        }
+        return ("failing", "bad")
+    }
+    if ev_h > 0 {
+        return ("publishing", "ok")
+    }
+    return ("idle", "mut")
+}
+
+
+def role_of(nact: int, nsub: int) -> str {
+    if nact > 0 and nsub > 0 {
+        return "pub + sub"
+    }
+    if nact > 0 {
+        return "publisher"
+    }
+    if nsub > 0 {
+        return "subscriber"
+    }
+    return "-"
+}
+
+
+# 1-hour activity sparkline (60 one-minute points) as inline SVG: polyline in
+# the de-emphasis hue, newest point dotted in the brand hue. Publishers plot
+# events published; subscriber-only apps plot webhook attempts received.
+def spark_svg(vals: list[int]) -> HTML {
+    const n: int = len(vals)
+    if n < 2 {
+        return template[HTML] { <span class="dim">-</span> }
+    }
+    mx: int = 1
+    for v in vals {
+        if v > mx {
+            mx = v
+        }
+    }
+    pts: list[str] = []
+    fx: int = 2
+    fy: int = 24
+    i: int = 0
+    while i < n {
+        const x: int = 2 + (i * 116) // (n - 1)
+        const y: int = 24 - (vals[i] * 20) // mx
+        pts.append(f"{x},{y}")
+        fx = x
+        fy = y
+        i = i + 1
+    }
+    const points: str = " ".join(pts)
+    return template[HTML] { <svg class="spark" viewBox="0 0 120 28" aria-hidden="true"><polyline points="!{points}" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="!{f"{fx}"}" cy="!{f"{fy}"}" r="2.5"/></svg> }
+}
+
+
+class AppRow {
+    def(application: str, host: str, port: int, active: bool, nact: int, nsub: int, ev_h: int, attempts_h: int, ok_h: int, last_seen: int, spark: list[int]) {
+        self.application = application
+        self.endpoint = f"{host}:{port}"
+        self.active = active
+        self.nact = nact
+        self.nsub = nsub
+        self.ev_h = ev_h
+        self.attempts_h = attempts_h
+        self.ok_h = ok_h
+        self.last_seen = last_seen
+        self.spark = spark
+        self.role = role_of(nact, nsub)
+        const h: tuple[str, str] = health_of(active, nsub, ev_h, attempts_h, ok_h)
+        self.health = h[0]
+        self.health_cls = h[1]
+    }
+}
+
+
+# Per-minute activity for one app over the last hour, zero-filled. Publishers
+# count events of their owned actions; pure subscribers count attempts to them.
+def _app_minutes(name: str, publisher: bool, start: int) -> list[int] {
+    m: dict[int, int] = {}
+    with dblock {
+        rows: list[dict[str, Any]] = []
+        if publisher {
+            const rs: list[dict[str, Any]] = db.all(template[SQL] { select (cast(e.timestamped as integer) / 60) * 60 as b, count(*) as n from events e join actions a on a.action = e.action where a.application = !{name} and cast(e.timestamped as integer) >= !{start} group by b })
+            rows = rs
+        } else {
+            const rs: list[dict[str, Any]] = db.all(template[SQL] { select (ts / 60) * 60 as b, count(*) as n from deliveries where subscriber = !{name} and ts >= !{start} group by b })
+            rows = rs
+        }
+        for row in rows {
+            const b: int = row["b"]
+            const n: int = row["n"]
+            m[b] = n
+        }
+    }
+    out: list[int] = []
+    i: int = 0
+    while i < 60 {
+        const b: int = start + i * 60
+        out.append(m[b] if b in m else 0)
+        i = i + 1
+    }
+    return out
+}
+
+
+def query_apps(q: str, page: int) -> tuple[list[AppRow], int] {
+    const pat: str = like_of(q)
+    const off: int = (page - 1) * PER
+    const t: int = now()
+    const cut: int = t - 3600
+    const start: int = ((t // 60) - 59) * 60
+    total: int = 0
+    rows: list[dict[str, Any]] = []
+    with dblock {
+        const tt: int = db.val[int](template[SQL] { select count(*) from applications where application like !{pat} or host like !{pat} })
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select ap.application as application, ap.host as host, ap.port as port, ap.active as active, (select count(*) from actions a where a.application = ap.application) as nact, (select count(*) from subscriptions s where s.subscriber = ap.application) as nsub from applications ap where ap.application like !{pat} or ap.host like !{pat} order by ap.application limit !{PER} offset !{off} })
+        total = tt
+        rows = rs
+    }
+    out: list[AppRow] = []
+    for row in rows {
+        const ap: str = row["application"]
+        const ho: str = row["host"]
+        const po: int = row["port"]
+        const ac: int = row["active"]
+        const nact: int = row["nact"]
+        const nsub: int = row["nsub"]
+        ev_h: int = 0
+        attempts_h: int = 0
+        ok_h: int = 0
+        last_pub: int = 0
+        last_del: int = 0
+        with dblock {
+            const e1: int = db.val[int](template[SQL] { select count(*) from events e join actions a on a.action = e.action where a.application = !{ap} and cast(e.timestamped as integer) >= !{cut} })
+            const d1: int = db.val[int](template[SQL] { select count(*) from deliveries where subscriber = !{ap} and ts >= !{cut} })
+            const d2: int = db.val[int](template[SQL] { select coalesce(sum(ok), 0) from deliveries where subscriber = !{ap} and ts >= !{cut} })
+            const l1: int = db.val[int](template[SQL] { select coalesce(max(cast(e.timestamped as integer)), 0) from events e join actions a on a.action = e.action where a.application = !{ap} })
+            const l2: int = db.val[int](template[SQL] { select coalesce(max(ts), 0) from deliveries where subscriber = !{ap} })
+            ev_h = e1
+            attempts_h = d1
+            ok_h = d2
+            last_pub = l1
+            last_del = l2
+        }
+        const last_seen: int = max(last_pub, last_del)
+        const spark: list[int] = _app_minutes(ap, nact > 0, start)
+        out.append(AppRow(ap, ho, po, ac != 0, nact, nsub, ev_h, attempts_h, ok_h, last_seen, spark))
+    }
+    return (out, total)
+}
+
+
+def cols_apps() -> list[Col] {
+    return [Col("application", "application"), Col("endpoint", "endpoint"), Col("role", "role"), Col("owned", "actions"), Col("subs", "subs"), Col("evh", "events / h"), Col("health", "health"), Col("activity", "activity (1h)"), Col("seen", "last seen"), Col("status", "status")]
+}
+
+
+def _tr_app(a: AppRow) -> HTML {
+    return template[HTML] {
+      <tr class="rowlink" onclick="dj.get('/apps/!{a.application}', '#view', {push:true})">
+        <td class="cb-col" onclick="event.stopPropagation()"><input type="checkbox" class="cb-row" value="!{a.application}"></td>
+        <td data-col="application" class="fw">!{a.application}</td>
+        <td data-col="endpoint" class="mono dim">!{a.endpoint}</td>
+        <td data-col="role" class="dim">!{a.role}</td>
+        <td data-col="owned">!{f"{a.nact}"}</td>
+        <td data-col="subs">!{f"{a.nsub}"}</td>
+        <td data-col="evh">!{f"{a.ev_h}"}</td>
+        <td data-col="health"><span class="pill !{a.health_cls}">!{a.health}</span></td>
+        <td data-col="activity">!{spark_svg(a.spark)}</td>
+        <td data-col="seen" class="dim">!{ago(a.last_seen)}</td>
+        <td data-col="status">!{active_pill(a.active)}</td>
+      </tr>
+    }
+}
+
+
+def rows_apps(rows: list[AppRow]) -> HTML {
+    return template[HTML] {!{ for a in rows { :{ !{_tr_app(a)} } }}}
+}
+
+
+def list_apps(rows: list[AppRow], page: int, per: int, total: int) -> HTML {
+    return render_list("apps", cols_apps(), rows_apps(rows), "No applications match.", page, per, total)
+}
+
+
+def page_apps(frag: HTML) -> HTML {
+    const add: HTML = template[HTML] { <button class="btn btn-primary" onclick="dj.get('/dash/new/app', '#modal')">+ Register</button> }
+    const bulk: HTML = template[HTML] { <button class="btn btn-sm btn-danger" onclick="dashBulk('apps','/dash/apps/delete-many')">Delete</button> }
+    return list_page("apps", "Applications", "Publishers and subscribers registered with the broker, with live health and traffic.", add, render_toolbar("apps", "Search applications...", cols_apps(), template[HTML] {  }, bulk), frag)
+}
+
+
+def sec_apps(req: Request, res: Response, ctx: Context) -> None {
+    const page: int = get_page(req)
+    const r: tuple[list[AppRow], int] = query_apps(get_q(req), page)
+    respond_section(req, res, "apps", page_apps(list_apps(r[0], page, PER, r[1])))
+}
+
+
+def list_apps_h(req: Request, res: Response, ctx: Context) -> None {
+    const page: int = get_page(req)
+    const r: tuple[list[AppRow], int] = query_apps(get_q(req), page)
+    res.html(list_apps(r[0], page, PER, r[1]))
+}
+
+
+def dash_new_app(req: Request, res: Response, ctx: Context) -> None {
+    res.html(render_modal_app())
+}
+
+
+def render_modal_app() -> HTML {
+    const body: HTML = template[HTML] {
+      <form action="/dash/apps" method="post" onsubmit="return dj.submit(this, '#list-apps')">
+        <div class="modal-body">
+          <div class="field"><label>Name<span class="req">*</span></label><input name="application" placeholder="orders" required></div>
+          <div class="field-row">
+            <div class="field"><label>Host<span class="req">*</span></label><input name="host" placeholder="127.0.0.1" required></div>
+            <div class="field"><label>Port<span class="req">*</span></label><input name="port" type="number" placeholder="9000" required></div>
+          </div>
+          <div class="field"><label>Secret<span class="req">*</span></label><input name="secret" placeholder="shared HMAC secret" required>
+            <p class="hint">Signs this app's publishes and its outbound webhook envelopes.</p></div>
+        </div>
+        <div class="modal-foot"><button type="button" class="btn btn-ghost" onclick="document.getElementById('modal').innerHTML=''">Cancel</button><button class="btn btn-primary">Register application</button></div>
+      </form>
+    }
+    return open_modal("Register application", "applications", body)
+}
+
+
+def dash_apps_create(req: Request, res: Response, ctx: Context) -> None {
+    const f: dict[str, str] = req.form()
+    const application: str = f["application"] if "application" in f else ""
+    const host: str = f["host"] if "host" in f else ""
+    const port_s: str = f["port"] if "port" in f else "0"
+    const secret: str = f["secret"] if "secret" in f else ""
+    port: int = 0
+    try {
+        const p: int = int(port_s)
+        port = p
+    } except {
+        port = 0
+    }
+    if len(application) > 0 and len(host) > 0 and len(secret) > 0 {
+        with dblock {
+            const dup: int = db.val[int](template[SQL] { select count(*) from applications where application = !{application} })
+            if dup == 0 {
+                db.run(template[SQL] { insert into applications(application, host, port, secret, active) values(!{application}, !{host}, !{port}, !{secret}, 1) })
+            }
+        }
+        audit_log("register", "application " + application)
+    }
+    const r: tuple[list[AppRow], int] = query_apps("", 1)
+    res.html(and_close_modal(list_apps(r[0], 1, PER, r[1])))
+}
+
+
+def apps_delete_many(req: Request, res: Response, ctx: Context) -> None {
+    for ap in get_ids(req) {
+        with dblock {
+            db.run(template[SQL] { delete from gists where subscription in (select subscription from subscriptions where subscriber = !{ap}) })
+            db.run(template[SQL] { delete from gists where event in (select event from events where action in (select action from actions where application = !{ap})) })
+            db.run(template[SQL] { delete from subscriptions where subscriber = !{ap} })
+            db.run(template[SQL] { delete from subscriptions where action in (select action from actions where application = !{ap}) })
+            db.run(template[SQL] { delete from events where action in (select action from actions where application = !{ap}) })
+            db.run(template[SQL] { delete from actions where application = !{ap} })
+            db.run(template[SQL] { delete from applications where application = !{ap} })
+        }
+    }
+    audit_log("delete", "applications")
+    const r: tuple[list[AppRow], int] = query_apps("", 1)
+    res.html(list_apps(r[0], 1, PER, r[1]))
+}
+
+
+#===----------------------------------------------------------------------===#
+# Application detail page
+#===----------------------------------------------------------------------===#
+
+# Everything the detail page needs in one typed bundle.
+class AppOverview {
+    def() {
+        self.found = False
+        self.name = ""
+        self.endpoint = ""
+        self.secret = ""
+        self.active = False
+        self.nact = 0
+        self.nsub = 0
+        self.nevents = 0
+        self.ev_h = 0
+        self.ndeliv = 0
+        self.attempts = 0
+        self.attempts_ok = 0
+        self.avg_ms = 0
+        self.backlog = 0
+        self.failed_g = 0
+        self.last_rotated = 0
+        self.role = ""
+        self.health = ""
+        self.health_cls = ""
+    }
+}
+
+
+def query_app_overview(name: str) -> AppOverview {
+    const o: AppOverview = AppOverview()
+    o.name = name
+    const t: int = now()
+    const cut: int = t - 3600
+    attempts_h: int = 0
+    ok_h: int = 0
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select host as host, port as port, secret as secret, active as active from applications where application = !{name} })
+        if len(rs) == 0 {
+            return o
+        }
+        o.found = True
+        const ho: str = rs[0]["host"]
+        const po: int = rs[0]["port"]
+        const se: str = rs[0]["secret"]
+        const ac: int = rs[0]["active"]
+        o.endpoint = ho + ":" + f"{po}"
+        o.secret = se
+        o.active = ac != 0
+        const a1: int = db.val[int](template[SQL] { select count(*) from actions where application = !{name} })
+        const a2: int = db.val[int](template[SQL] { select count(*) from events where action in (select action from actions where application = !{name}) })
+        const a3: int = db.val[int](template[SQL] { select count(*) from subscriptions where subscriber = !{name} })
+        const a4: int = db.val[int](template[SQL] { select count(*) from gists g join subscriptions s on s.subscription = g.subscription where s.subscriber = !{name} and g.completed = 1 })
+        const a5: int = db.val[int](template[SQL] { select count(*) from events e join actions a on a.action = e.action where a.application = !{name} and cast(e.timestamped as integer) >= !{cut} })
+        const a6: int = db.val[int](template[SQL] { select count(*) from deliveries where subscriber = !{name} })
+        const a7: int = db.val[int](template[SQL] { select coalesce(sum(ok), 0) from deliveries where subscriber = !{name} })
+        const a8: int = db.val[int](template[SQL] { select cast(coalesce(avg(ms), 0) as integer) from deliveries where subscriber = !{name} })
+        const a9: int = db.val[int](template[SQL] { select count(*) from gists g join subscriptions s on s.subscription = g.subscription where s.subscriber = !{name} and g.completed = 0 })
+        const a10: int = db.val[int](template[SQL] { select count(*) from gists g join subscriptions s on s.subscription = g.subscription where s.subscriber = !{name} and g.completed = 0 and g.retries >= s.max_retries })
+        const rk: str = "secret for " + name
+        const a11: int = db.val[int](template[SQL] { select coalesce(max(cast(ts as integer)), 0) from audit where action = 'rotate' and detail = !{rk} })
+        const h1: int = db.val[int](template[SQL] { select count(*) from deliveries where subscriber = !{name} and ts >= !{cut} })
+        const h2: int = db.val[int](template[SQL] { select coalesce(sum(ok), 0) from deliveries where subscriber = !{name} and ts >= !{cut} })
+        o.nact = a1
+        o.nevents = a2
+        o.nsub = a3
+        o.ndeliv = a4
+        o.ev_h = a5
+        o.attempts = a6
+        o.attempts_ok = a7
+        o.avg_ms = a8
+        o.backlog = a9
+        o.failed_g = a10
+        o.last_rotated = a11
+        attempts_h = h1
+        ok_h = h2
+    }
+    o.role = role_of(o.nact, o.nsub)
+    const h: tuple[str, str] = health_of(o.active, o.nsub, o.ev_h, attempts_h, ok_h)
+    o.health = h[0]
+    o.health_cls = h[1]
+    return o
+}
+
+
+# Per-app series for the detail charts, zero-filled like the dashboard's.
+def app_metrics_payload(name: str) -> dict[str, Any] {
+    const t: int = now()
+    const start: int = ((t // 60) - 59) * 60
+    pm: dict[int, int] = {}
+    dn: dict[int, int] = {}
+    dok: dict[int, int] = {}
+    dms: dict[int, int] = {}
+    dmx: dict[int, int] = {}
+    with dblock {
+        const pr: list[dict[str, Any]] = db.all(template[SQL] { select (cast(e.timestamped as integer) / 60) * 60 as b, count(*) as n from events e join actions a on a.action = e.action where a.application = !{name} and cast(e.timestamped as integer) >= !{start} group by b })
+        for row in pr {
+            const b: int = row["b"]
+            const n: int = row["n"]
+            pm[b] = n
+        }
+        const dr: list[dict[str, Any]] = db.all(template[SQL] { select (ts / 60) * 60 as b, count(*) as n, coalesce(sum(ok), 0) as okn, cast(coalesce(avg(ms), 0) as integer) as avgms, coalesce(max(ms), 0) as maxms from deliveries where subscriber = !{name} and ts >= !{start} group by b })
+        for row in dr {
+            const b: int = row["b"]
+            const n: int = row["n"]
+            const okn: int = row["okn"]
+            const avgms: int = row["avgms"]
+            const maxms: int = row["maxms"]
+            dn[b] = n
+            dok[b] = okn
+            dms[b] = avgms
+            dmx[b] = maxms
+        }
+    }
+    buckets: list[int] = []
+    published: list[int] = []
+    ok_s: list[int] = []
+    failed_s: list[int] = []
+    avg_s: list[int] = []
+    max_s: list[int] = []
+    i: int = 0
+    while i < 60 {
+        const b: int = start + i * 60
+        buckets.append(b)
+        published.append(pm[b] if b in pm else 0)
+        const at: int = dn[b] if b in dn else 0
+        const okn: int = dok[b] if b in dok else 0
+        ok_s.append(okn)
+        failed_s.append(at - okn)
+        avg_s.append(dms[b] if b in dms else 0)
+        max_s.append(dmx[b] if b in dmx else 0)
+        i = i + 1
+    }
+    series: dict[str, Any] = {}
+    series["buckets"] = buckets
+    series["published"] = published
+    series["ok"] = ok_s
+    series["failed"] = failed_s
+    series["avg_ms"] = avg_s
+    series["max_ms"] = max_s
+    const o: AppOverview = query_app_overview(name)
+    kpis: dict[str, Any] = {}
+    kpis["ev_h"] = o.ev_h
+    kpis["delivered"] = o.ndeliv
+    kpis["attempts"] = o.attempts
+    kpis["attempts_ok"] = o.attempts_ok
+    kpis["avg_ms"] = o.avg_ms
+    kpis["backlog"] = o.backlog
+    out: dict[str, Any] = {}
+    out["now"] = t
+    out["app"] = name
+    out["kpis"] = kpis
+    out["series"] = series
+    return out
+}
+
+
+def app_metrics_json(req: Request, res: Response, ctx: Context) -> None {
+    const name: str = req.query["app"] if "app" in req.query else ""
+    res.json(json.dumps(app_metrics_payload(name)))
+}
+
+
+# One delivery route (subscription) of this app, with its outcome counts.
+class RouteRow {
+    def(subscription: str, action: str, handler: str, max_retries: int, active: bool, delivered: int, failed: int, inflight: int) {
+        self.subscription = subscription
+        self.action = action
+        self.handler = handler
+        self.max_retries = max_retries
+        self.active = active
+        self.delivered = delivered
+        self.failed = failed
+        self.inflight = inflight
+    }
+}
+
+
+def query_app_routes(name: str) -> list[RouteRow] {
+    rows: list[dict[str, Any]] = []
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select s.subscription as subscription, s.action as action, s.handler as handler, s.max_retries as maxr, s.active as active, (select count(*) from gists g where g.subscription = s.subscription and g.completed = 1) as delivered, (select count(*) from gists g where g.subscription = s.subscription and g.completed = 0 and g.retries >= s.max_retries) as failed, (select count(*) from gists g where g.subscription = s.subscription and g.completed = 0 and g.retries < s.max_retries) as inflight from subscriptions s where s.subscriber = !{name} order by s.subscription })
+        rows = rs
+    }
+    out: list[RouteRow] = []
+    for row in rows {
+        const su: str = row["subscription"]
+        const ac: str = row["action"]
+        const hd: str = row["handler"]
+        const mr: int = row["maxr"]
+        const av: int = row["active"]
+        const de: int = row["delivered"]
+        const fa: int = row["failed"]
+        const inf: int = row["inflight"]
+        out.append(RouteRow(su, ac, hd, mr, av != 0, de, fa, inf))
+    }
+    return out
+}
+
+
+def render_app_routes(name: str, routes: list[RouteRow]) -> HTML {
+    if len(routes) == 0 {
+        return template[HTML] { <div class="empty">No subscriptions - this application receives no webhooks.</div> }
+    }
+    return template[HTML] {
+      <table class="data">
+        <thead><tr><th>subscription</th><th>action</th><th>handler</th><th>delivered</th><th>failed</th><th>in flight</th><th>success</th><th>status</th><th></th></tr></thead>
+        <tbody>!{ for r in routes { :{
+          <tr>
+            <td class="fw">!{r.subscription}</td>
+            <td>!{r.action}</td>
+            <td class="mono dim">!{r.handler}</td>
+            <td>!{f"{r.delivered}"}</td>
+            <td>!{f"{r.failed}"}</td>
+            <td>!{f"{r.inflight}"}</td>
+            <td>!{_rate_text(r.delivered, r.delivered + r.failed)}</td>
+            <td>!{active_pill(r.active)}</td>
+            <td class="right nowrap">
+              <button class="btn btn-sm" onclick="var f=new FormData();f.append('subscription','!{r.subscription}');f.append('application','!{name}');dj.send('/dash/apps/subs/toggle',{method:'POST',target:'#app-subs',body:f})">!{"Pause" if r.active else "Resume"}</button>
+            </td>
+          </tr>
+        } }}</tbody>
+      </table>
+    }
+}
+
+
+class DelivRow {
+    def(gist: int, action: str, status: int, ms: int, response: str, ts: int) {
+        self.gist = f"{gist}"
+        self.action = action
+        self.status = status
+        self.ms = ms
+        self.ts = ts
+        sn: str = response
+        if len(sn) > 60 {
+            sn = sn[:60] + "..."
+        }
+        self.snippet = sn
+    }
+}
+
+
+def query_app_deliveries(name: str) -> list[DelivRow] {
+    rows: list[dict[str, Any]] = []
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select gist as gist, action as action, status as status, ms as ms, response as response, ts as ts from deliveries where subscriber = !{name} order by id desc limit 8 })
+        rows = rs
+    }
+    out: list[DelivRow] = []
+    for row in rows {
+        const gi: int = row["gist"]
+        const ac: str = row["action"]
+        const st: int = row["status"]
+        const ms: int = row["ms"]
+        const re: str = row["response"]
+        const ts: int = row["ts"]
+        out.append(DelivRow(gi, ac, st, ms, re, ts))
+    }
+    return out
+}
+
+
+def render_app_deliveries(rows: list[DelivRow]) -> HTML {
+    if len(rows) == 0 {
+        return template[HTML] { <div class="empty">No webhook deliveries to this application yet.</div> }
+    }
+    return template[HTML] {
+      <table class="data">
+        <thead><tr><th>when</th><th>action</th><th>status</th><th>latency</th><th>response</th></tr></thead>
+        <tbody>!{ for d in rows { :{
+          <tr class="rowlink" onclick="dj.get('/dash/gists/detail?id=!{d.gist}', '#drawer')">
+            <td class="dim">!{ago(d.ts)}</td>
+            <td class="fw">!{d.action}</td>
+            <td>!{code_pill(d.status)}</td>
+            <td>!{f"{d.ms} ms"}</td>
+            <td class="mono dim resp-cell">!{d.snippet}</td>
+          </tr>
+        } }}</tbody>
+      </table>
+    }
+}
+
+
+# Credential lifecycle card: masked secret, copy, server-generated rotation,
+# and when it was last rotated (from the audit trail).
+def render_app_security(name: str, secret: str, last_rotated: int) -> HTML {
+    rotated: str = "never"
+    if last_rotated > 0 {
+        rotated = ago(last_rotated)
+    }
+    return template[HTML] {
+      <h3>Security &amp; credentials</h3>
+      <div class="kv">
+        <div class="k">Signing</div><div>HMAC-SHA256 over the raw body / envelope bytes</div>
+        <div class="k">Secret</div>
+        <div class="codebox" style="margin:0"><code class="secret mono" data-real="!{secret}">************</code>
+          <button class="btn btn-sm btn-ghost" onclick="var c=this.parentElement.querySelector('.secret'); c.textContent = c.textContent.charAt(0)==='*' ? c.dataset.real : '************'">reveal</button>
+          <button class="btn btn-sm btn-ghost" onclick="navigator.clipboard.writeText(this.parentElement.querySelector('.secret').dataset.real)">copy</button>
+        </div>
+        <div class="k">Last rotated</div><div>!{rotated}</div>
+      </div>
+      <div class="drawer-actions" style="margin-bottom:0">
+        <button class="btn btn-danger btn-sm" onclick="if(confirm('Rotate the secret for !{name}? The app must start signing with the new secret immediately.')){var f=new FormData();f.append('application','!{name}');dj.send('/dash/apps/rotate',{method:'POST',target:'#app-security',body:f})}">Rotate secret</button>
+      </div>
+    }
+}
+
+
+class AuditSlice {
+    def(ts: str, action: str, detail: str) {
+        self.ts = ts
+        self.action = action
+        self.detail = detail
+    }
+}
+
+
+def query_app_audit(name: str) -> list[AuditSlice] {
+    const pat: str = like_of(name)
+    rows: list[dict[str, Any]] = []
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select ts as ts, action as action, detail as detail from audit where detail like !{pat} order by id desc limit 8 })
+        rows = rs
+    }
+    out: list[AuditSlice] = []
+    for row in rows {
+        const ts: str = row["ts"]
+        const ac: str = row["action"]
+        const dt: str = row["detail"]
+        out.append(AuditSlice(ts, ac, dt))
+    }
+    return out
+}
+
+
+def render_app_audit(rows: list[AuditSlice]) -> HTML {
+    if len(rows) == 0 {
+        return template[HTML] { <p class="hint">No admin activity recorded for this application.</p> }
+    }
+    return template[HTML] {
+      <table class="data">
+        <thead><tr><th>when</th><th>action</th><th>detail</th></tr></thead>
+        <tbody>!{ for a in rows { :{
+          <tr><td class="dim">!{_audit_ago(a.ts)}</td><td class="fw">!{a.action}</td><td class="dim">!{a.detail}</td></tr>
+        } }}</tbody>
+      </table>
+    }
+}
+
+
+# audit.ts is stored as text epoch seconds; render it as relative time.
+def _audit_ago(ts: str) -> str {
+    try {
+        const t: int = int(ts)
+        return ago(t)
+    } except {
+        return ts
+    }
+}
+
+
+class ActRow {
+    def(action: str, status: str, events: int, last: int) {
+        self.action = action
+        self.status = status
+        self.events = events
+        self.last = last
+    }
+}
+
+
+def query_app_actions(app: str) -> list[ActRow] {
+    rows: list[dict[str, Any]] = []
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select a.action as action, a.status as status, (select count(*) from events e where e.action = a.action) as n, coalesce((select max(cast(e.timestamped as integer)) from events e where e.action = a.action), 0) as last from actions a where a.application = !{app} order by a.action })
+        rows = rs
+    }
+    out: list[ActRow] = []
+    for row in rows {
+        const an: str = row["action"]
+        const st: str = row["status"]
+        const n: int = row["n"]
+        const la: int = row["last"]
+        out.append(ActRow(an, st, n, la))
+    }
+    return out
+}
+
+
+def cols_appacts() -> list[Col] {
+    return [Col("action", "action"), Col("events", "events"), Col("last", "last published"), Col("status", "status")]
+}
+
+
+def _appact_row(a: ActRow) -> HTML {
+    return template[HTML] {
+      <tr class="rowlink" onclick="dj.get('/dash/action?name=!{a.action}', '#drawer')">
+        <td class="cb-col" onclick="event.stopPropagation()"><input type="checkbox" class="cb-row" value="!{a.action}"></td>
+        <td data-col="action" class="fw">!{a.action}</td>
+        <td data-col="events">!{f"{a.events}"}</td>
+        <td data-col="last" class="dim">!{ago(a.last)}</td>
+        <td data-col="status"><span class="pill ok">!{a.status}</span></td>
+      </tr>
+    }
+}
+
+
+# Actions owned by an app, as the standard full-bleed grid (tkey "appacts") so it
+# matches every other table and gets checkboxes + the selection Remove.
+def render_app_actions_list(rows: list[ActRow]) -> HTML {
+    body: HTML = template[HTML] {!{ for a in rows { :{ !{_appact_row(a)} } }}}
+    return render_list("appacts", cols_appacts(), body, "This application owns no actions.", 1, 100000, len(rows))
+}
+
+
+def _app_stat(id: str, val: str, label: str, tone: str) -> HTML {
+    return template[HTML] { <div class="card"><div class="stat-n !{tone}" id="!{id}">!{val}</div><div class="stat-l">!{label}</div></div> }
+}
+
+
+def _app_chart_panel(title: str, sub: str, cid: str) -> HTML {
+    return template[HTML] { <div class="panel"><h3>!{title} <span class="panel-sub">!{sub}</span></h3><div class="chart" id="!{cid}"></div></div> }
+}
+
+
+# The application detail PAGE (replaces the table in #view; URL /apps/:id). It is
+# isomorphic via respond_section: a direct hit / refresh renders the full shell,
+# an in-app click renders just the fragment.
+def render_app_page(o: AppOverview, routes: list[RouteRow], deliveries: list[DelivRow], audit: list[AuditSlice], actions: list[ActRow]) -> HTML {
+    requeue: HTML = template[HTML] {  }
+    if o.failed_g > 0 {
+        requeue = template[HTML] { <button class="btn" onclick="var f=new FormData();f.append('application','!{o.name}');dj.send('/dash/apps/requeue-failed',{method:'POST',target:'#view',body:f})">Requeue !{f"{o.failed_g}"} failed</button> }
+    }
+    kill_label: str = "Deactivate application"
+    kill_desc: str = "Blocks its publishes and pauses all webhook deliveries to it. Queued gists resume on reactivation."
+    if not o.active {
+        kill_label = "Reactivate application"
+        kill_desc = "Publishing resumes and queued webhook deliveries start draining again."
+    }
+    return template[HTML] {
+      <div class="section-head pin">
+        <div>
+          <div class="crumb"><a class="crumb-link" onclick="dj.get('/apps', '#view', {push:true})">Applications</a><span class="crumb-sep">/</span><span>!{o.name}</span></div>
+          <h2>!{o.name} !{active_pill(o.active)} <span class="pill !{o.health_cls}">!{o.health}</span></h2>
+          <p class="sub">!{o.endpoint} &middot; !{o.role}</p>
+        </div>
+        <div class="drawer-actions" style="margin:0">
+          !{requeue}
+          <button class="btn" onclick="dj.get('/apps', '#view', {push:true})">&larr; All applications</button>
+        </div>
+      </div>
+      <div class="cards">
+        !{_app_stat("app-kpi-actions", f"{o.nact}", "actions owned", "")}
+        !{_app_stat("app-kpi-subs", f"{o.nsub}", "subscriptions", "")}
+        !{_app_stat("app-kpi-events", f"{o.nevents}", "events published", "")}
+        !{_app_stat("app-kpi-evh", f"{o.ev_h}", "events / hour", "")}
+        !{_app_stat("app-kpi-delivered", f"{o.ndeliv}", "delivered", "ok")}
+        !{_app_stat("app-kpi-rate", _rate_text(o.attempts_ok, o.attempts), "delivery success", "")}
+        !{_app_stat("app-kpi-avg", f"{o.avg_ms} ms" if o.attempts > 0 else "-", "avg latency", "")}
+        !{_app_stat("app-kpi-backlog", f"{o.backlog}", "backlog", "bad" if o.failed_g > 0 else "")}
+      </div>
+      <div class="grid charts" data-app="!{o.name}">
+        !{_app_chart_panel("Publish activity", "events / min by this app's actions", "ch-app-pub")}
+        !{_app_chart_panel("Webhook consumption", "attempts to this app / min", "ch-app-cons")}
+        !{_app_chart_panel("Consumption latency", "attempt round-trip, ms", "ch-app-lat")}
+      </div>
+      <div class="grid two-wide" style="margin-bottom:20px">
+        <div class="panel" style="padding:0"><h3 style="padding:18px 18px 0">Delivery routes</h3><div id="app-subs" class="table-wrap" style="border:none">!{render_app_routes(o.name, routes)}</div></div>
+        <div class="panel" style="padding:0"><h3 style="padding:18px 18px 0">Recent deliveries</h3><div class="table-wrap" style="border:none">!{render_app_deliveries(deliveries)}</div></div>
+      </div>
+      <div class="grid two-wide" style="margin-bottom:20px">
+        <div class="panel"><div id="app-security">!{render_app_security(o.name, o.secret, o.last_rotated)}</div></div>
+        <div class="panel" style="padding:0"><h3 style="padding:18px 18px 0">Recent activity</h3><div class="table-wrap" style="border:none">!{render_app_audit(audit)}</div></div>
+      </div>
+      <div class="list-page" data-tkey="appacts" style="margin-bottom:20px">
+        <div class="section-head"><div><h2 style="font-size:16px">Actions owned</h2><p class="sub">Event contracts this application publishes. Select to remove (needs admin on the action).</p></div></div>
+        <div class="toolbar" data-toolbar="appacts">
+          <div class="grow"></div>
+          <div class="sel-actions" data-selbar="appacts" hidden>
+            <span class="sel-n">0 selected</span>
+            <button class="btn btn-sm btn-danger" onclick="dashBulk('appacts','/dash/apps/actions/delete?app=!{o.name}')">Remove</button>
+            <button class="btn btn-sm btn-ghost" onclick="dashClear('appacts')">Clear</button>
+          </div>
+        </div>
+        <div id="list-appacts">!{render_app_actions_list(actions)}</div>
+      </div>
+      <div class="panel">
+        <h3>Danger zone</h3>
+        <div class="danger-row" style="border-top:none;padding-top:0">
+          <div><div class="fw">!{kill_label}</div><div class="d-txt">!{kill_desc}</div></div>
+          <button class="btn btn-danger btn-sm" onclick="var f=new FormData();f.append('application','!{o.name}');dj.send('/dash/apps/toggle',{method:'POST',target:'#view',body:f})">!{kill_label}</button>
+        </div>
+      </div>
+      <script>window.AmeboCharts && window.AmeboCharts.boot()</script>
+    }
+}
+
+
+def app_page_content(name: str) -> tuple[bool, HTML] {
+    const o: AppOverview = query_app_overview(name)
+    if not o.found {
+        const nf: HTML = template[HTML] {
+          <div class="section-head"><div><div class="crumb"><a class="crumb-link" onclick="dj.get('/apps', '#view', {push:true})">Applications</a><span class="crumb-sep">/</span><span>!{name}</span></div><h2>Application not found</h2><p class="sub">No application is registered under that name.</p></div><button class="btn" onclick="dj.get('/apps', '#view', {push:true})">&larr; All applications</button></div>
+        }
+        return (False, nf)
+    }
+    return (True, render_app_page(o, query_app_routes(name), query_app_deliveries(name), query_app_audit(name), query_app_actions(name)))
+}
+
+
+def app_page_h(req: Request, res: Response, ctx: Context) -> None {
+    name: str = req.params["id"] if "id" in req.params else ""
+    const r: tuple[bool, HTML] = app_page_content(name)
+    respond_section(req, res, "apps", r[1])
+}
+
+
+# Kill switch: flip applications.active. The /v1 API blocks publishes of an
+# inactive app's actions and the aproko worker skips deliveries to it.
+def dash_apps_toggle(req: Request, res: Response, ctx: Context) -> None {
+    const f: dict[str, str] = req.form()
+    const name: str = f["application"] if "application" in f else ""
+    flipped: int = 0
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select active as active from applications where application = !{name} })
+        if len(rs) > 0 {
+            const cur: int = rs[0]["active"]
+            flipped = 0 if cur != 0 else 1
+            db.run(template[SQL] { update applications set active = !{flipped} where application = !{name} })
+        }
+    }
+    audit_log("kill-switch", ("activated " if flipped != 0 else "deactivated ") + name)
+    const r: tuple[bool, HTML] = app_page_content(name)
+    res.html(fragment_with_nav(r[1], "apps"))
+}
+
+
+# Rotate to a broker-generated secret (never typed into chat/UI, never logged).
+def dash_apps_rotate(req: Request, res: Response, ctx: Context) -> None {
+    const f: dict[str, str] = req.form()
+    const name: str = f["application"] if "application" in f else ""
+    const fresh: str = token_urlsafe(24)
+    with dblock {
+        db.run(template[SQL] { update applications set secret = !{fresh} where application = !{name} })
+    }
+    audit_log("rotate", "secret for " + name)
+    const o: AppOverview = query_app_overview(name)
+    res.html(render_app_security(name, o.secret, o.last_rotated))
+}
+
+
+# Pause / resume one delivery route (subscription) of this app.
+def dash_app_subs_toggle(req: Request, res: Response, ctx: Context) -> None {
+    const f: dict[str, str] = req.form()
+    const sub: str = f["subscription"] if "subscription" in f else ""
+    const name: str = f["application"] if "application" in f else ""
+    flipped: int = 0
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select active as active from subscriptions where subscription = !{sub} and subscriber = !{name} })
+        if len(rs) > 0 {
+            const cur: int = rs[0]["active"]
+            flipped = 0 if cur != 0 else 1
+            db.run(template[SQL] { update subscriptions set active = !{flipped} where subscription = !{sub} })
+        }
+    }
+    audit_log("route", ("resumed " if flipped != 0 else "paused ") + sub + " for " + name)
+    res.html(render_app_routes(name, query_app_routes(name)))
+}
+
+
+# Put every exhausted gist of this subscriber back in the delivery queue.
+def dash_apps_requeue_failed(req: Request, res: Response, ctx: Context) -> None {
+    const f: dict[str, str] = req.form()
+    const name: str = f["application"] if "application" in f else ""
+    with dblock {
+        db.run(template[SQL] { update gists set retries = 0, sleep_until = 0 where completed = 0 and id in (select g.id from gists g join subscriptions s on s.subscription = g.subscription where s.subscriber = !{name} and g.retries >= s.max_retries) })
+    }
+    audit_log("requeue", "failed deliveries for " + name)
+    const r: tuple[bool, HTML] = app_page_content(name)
+    res.html(fragment_with_nav(r[1], "apps"))
+}
+
+
+# Remove selected actions from an app's page. Deletes only the actions the
+# caller may ADMIN (its owner or a superadmin); others are silently skipped.
+def dash_app_actions_delete(req: Request, res: Response, ctx: Context) -> None {
+    const app: str = req.query["app"] if "app" in req.query else ""
+    const p: Principal = session_principal(req)
+    for ac in get_ids(req) {
+        if can(p, ac, "admin") {
+            with dblock {
+                db.run(template[SQL] { delete from gists where event in (select event from events where action = !{ac}) })
+                db.run(template[SQL] { delete from subscriptions where action = !{ac} })
+                db.run(template[SQL] { delete from events where action = !{ac} })
+                db.run(template[SQL] { delete from actions where action = !{ac} })
+            }
+            audit_log("delete", "action " + ac)
+        }
+    }
+    res.html(render_app_actions_list(query_app_actions(app)))
+}
+
+
+def mount(app: Router) -> None {
+    app.GET('/apps', sec_apps)
+    app.GET('/apps/:id', app_page_h)
+    app.GET('/dash/apps/list', list_apps_h)
+    app.GET('/dash/apps/metrics.json', app_metrics_json)
+    app.GET('/dash/new/app', dash_new_app)
+    app.POST('/dash/apps', dash_apps_create)
+    app.POST('/dash/apps/toggle', dash_apps_toggle)
+    app.POST('/dash/apps/rotate', dash_apps_rotate)
+    app.POST('/dash/apps/subs/toggle', dash_app_subs_toggle)
+    app.POST('/dash/apps/requeue-failed', dash_apps_requeue_failed)
+    app.POST('/dash/apps/delete-many', apps_delete_many)
+    app.POST('/dash/apps/actions/delete', dash_app_actions_delete)
+}

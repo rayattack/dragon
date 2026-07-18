@@ -1,0 +1,656 @@
+# resources/dash.dr - Dashboard + global admin (profile, settings, search).
+from http.server import Router, Request, Response, Context
+from database import SQL
+from html import HTML
+import json
+from time import now
+from secrets import token_urlsafe
+from core import db, dblock, VERSION, get_q, like_of, get_ids, admin_key, query_audit, query_secrets, get_setting, set_setting, audit_log, ago, human_bytes
+from shell import respond_section, render_profile, render_settings, render_search, spot_item, Col, render_list, render_secrets_list, code_pill
+from auth import session_principal, create_user, delete_user, set_superadmin, list_users, is_superadmin, UserRow
+from authz import Principal
+from resources.gists import GistRow, query_attention
+
+# Broker-wide counters behind the KPI row and /dash/metrics.json. def() zeroes
+# every field; query_kpis fills them from the store.
+class Kpis {
+    def() {
+        self.published = 0
+        self.delivered = 0
+        self.pending = 0
+        self.retrying = 0
+        self.failed = 0
+        self.due = 0
+        self.scheduled = 0
+        self.attempts = 0
+        self.attempts_ok = 0
+        self.avg_ms = 0
+        self.p50 = 0
+        self.p95 = 0
+        self.bytes_out = 0
+        self.bytes_in = 0
+        self.apps = 0
+        self.actions = 0
+        self.subs = 0
+        self.spells = 0
+        self.spells_on = 0
+        self.runs = 0
+        self.runs_ok = 0
+        self.runs_failed = 0
+        self.runs_error = 0
+    }
+}
+
+
+def query_kpis() -> Kpis {
+    const k: Kpis = Kpis()
+    const t: int = now()
+    with dblock {
+        const pu: int = db.val[int](template[SQL] { select count(*) from events })
+        const de: int = db.val[int](template[SQL] { select count(*) from gists where completed = 1 })
+        const fa: int = db.val[int](template[SQL] { select count(*) from gists g join subscriptions s on s.subscription = g.subscription where g.completed = 0 and g.retries >= s.max_retries })
+        # pending / retrying / failed / delivered partition the gists cleanly
+        # (same semantics as the gists list): pending = first attempt not made.
+        const pe: int = db.val[int](template[SQL] { select count(*) from gists g join subscriptions s on s.subscription = g.subscription where g.completed = 0 and g.retries = 0 })
+        const re: int = db.val[int](template[SQL] { select count(*) from gists g join subscriptions s on s.subscription = g.subscription where g.completed = 0 and g.retries > 0 and g.retries < s.max_retries })
+        const du: int = db.val[int](template[SQL] { select count(*) from gists g join subscriptions s on s.subscription = g.subscription where g.completed = 0 and g.retries < s.max_retries and g.sleep_until <= !{t} })
+        const sc: int = db.val[int](template[SQL] { select count(*) from gists g join subscriptions s on s.subscription = g.subscription where g.completed = 0 and g.retries < s.max_retries and g.sleep_until > !{t} })
+        const at: int = db.val[int](template[SQL] { select count(*) from deliveries })
+        const ao: int = db.val[int](template[SQL] { select coalesce(sum(ok), 0) from deliveries })
+        const bo: int = db.val[int](template[SQL] { select coalesce(sum(out_bytes), 0) from deliveries })
+        const bi: int = db.val[int](template[SQL] { select coalesce(sum(in_bytes), 0) from deliveries })
+        const av: int = db.val[int](template[SQL] { select cast(coalesce(avg(ms), 0) as integer) from deliveries })
+        const ap: int = db.val[int](template[SQL] { select count(*) from applications })
+        const ac: int = db.val[int](template[SQL] { select count(*) from actions })
+        const su: int = db.val[int](template[SQL] { select count(*) from subscriptions })
+        const sp: int = db.val[int](template[SQL] { select count(*) from spells })
+        const so: int = db.val[int](template[SQL] { select count(*) from spells where enabled <> 0 })
+        const ru: int = db.val[int](template[SQL] { select count(*) from spell_runs })
+        const ro: int = db.val[int](template[SQL] { select count(*) from spell_runs where status = 'ok' })
+        const rf: int = db.val[int](template[SQL] { select count(*) from spell_runs where status = 'failed' })
+        const rr: int = db.val[int](template[SQL] { select count(*) from spell_runs where status = 'error' })
+        # Latency percentiles over the most recent attempts, sorted in SQL.
+        const lat: list[dict[str, Any]] = db.all(template[SQL] { select ms as ms from (select ms from deliveries order by id desc limit 500) order by ms asc })
+        const n: int = len(lat)
+        if n > 0 {
+            const v50: int = lat[((n - 1) * 50) // 100]["ms"]
+            const v95: int = lat[((n - 1) * 95) // 100]["ms"]
+            k.p50 = v50
+            k.p95 = v95
+        }
+        k.published = pu
+        k.delivered = de
+        k.failed = fa
+        k.pending = pe
+        k.retrying = re
+        k.due = du
+        k.scheduled = sc
+        k.attempts = at
+        k.attempts_ok = ao
+        k.bytes_out = bo
+        k.bytes_in = bi
+        k.avg_ms = av
+        k.apps = ap
+        k.actions = ac
+        k.subs = su
+        k.spells = sp
+        k.spells_on = so
+        k.runs = ru
+        k.runs_ok = ro
+        k.runs_failed = rf
+        k.runs_error = rr
+    }
+    return k
+}
+
+
+# Per-minute buckets over the last hour, zero-filled so every series aligns
+# with the shared bucket axis.
+def query_series(t: int) -> dict[str, Any] {
+    const start: int = ((t // 60) - 59) * 60
+    ev: dict[int, int] = {}
+    dn: dict[int, int] = {}
+    dok: dict[int, int] = {}
+    dms: dict[int, int] = {}
+    dmx: dict[int, int] = {}
+    dbo: dict[int, int] = {}
+    dbi: dict[int, int] = {}
+    sok: dict[int, int] = {}
+    sfa: dict[int, int] = {}
+    ser: dict[int, int] = {}
+    with dblock {
+        const evr: list[dict[str, Any]] = db.all(template[SQL] { select (cast(timestamped as integer) / 60) * 60 as b, count(*) as n from events where cast(timestamped as integer) >= !{start} group by b })
+        for row in evr {
+            const b: int = row["b"]
+            const n: int = row["n"]
+            ev[b] = n
+        }
+        const der: list[dict[str, Any]] = db.all(template[SQL] { select (ts / 60) * 60 as b, count(*) as n, coalesce(sum(ok), 0) as okn, cast(coalesce(avg(ms), 0) as integer) as avgms, coalesce(max(ms), 0) as maxms, coalesce(sum(out_bytes), 0) as ob, coalesce(sum(in_bytes), 0) as ib from deliveries where ts >= !{start} group by b })
+        for row in der {
+            const b: int = row["b"]
+            const n: int = row["n"]
+            const okn: int = row["okn"]
+            const avgms: int = row["avgms"]
+            const maxms: int = row["maxms"]
+            const ob: int = row["ob"]
+            const ib: int = row["ib"]
+            dn[b] = n
+            dok[b] = okn
+            dms[b] = avgms
+            dmx[b] = maxms
+            dbo[b] = ob
+            dbi[b] = ib
+        }
+        const spr: list[dict[str, Any]] = db.all(template[SQL] { select (cast(ts as integer) / 60) * 60 as b, coalesce(sum(case when status = 'ok' then 1 else 0 end), 0) as okn, coalesce(sum(case when status = 'failed' then 1 else 0 end), 0) as fan, coalesce(sum(case when status = 'error' then 1 else 0 end), 0) as ern from spell_runs where cast(ts as integer) >= !{start} group by b })
+        for row in spr {
+            const b: int = row["b"]
+            const okn: int = row["okn"]
+            const fan: int = row["fan"]
+            const ern: int = row["ern"]
+            sok[b] = okn
+            sfa[b] = fan
+            ser[b] = ern
+        }
+    }
+    buckets: list[int] = []
+    published: list[int] = []
+    ok_s: list[int] = []
+    failed_s: list[int] = []
+    avg_s: list[int] = []
+    max_s: list[int] = []
+    bo_s: list[int] = []
+    bi_s: list[int] = []
+    spok_s: list[int] = []
+    spfa_s: list[int] = []
+    sper_s: list[int] = []
+    i: int = 0
+    while i < 60 {
+        const b: int = start + i * 60
+        buckets.append(b)
+        published.append(ev[b] if b in ev else 0)
+        const at: int = dn[b] if b in dn else 0
+        const okn: int = dok[b] if b in dok else 0
+        ok_s.append(okn)
+        failed_s.append(at - okn)
+        avg_s.append(dms[b] if b in dms else 0)
+        max_s.append(dmx[b] if b in dmx else 0)
+        bo_s.append(dbo[b] if b in dbo else 0)
+        bi_s.append(dbi[b] if b in dbi else 0)
+        spok_s.append(sok[b] if b in sok else 0)
+        spfa_s.append(sfa[b] if b in sfa else 0)
+        sper_s.append(ser[b] if b in ser else 0)
+        i = i + 1
+    }
+    out: dict[str, Any] = {}
+    out["buckets"] = buckets
+    out["published"] = published
+    out["ok"] = ok_s
+    out["failed"] = failed_s
+    out["avg_ms"] = avg_s
+    out["max_ms"] = max_s
+    out["bytes_out"] = bo_s
+    out["bytes_in"] = bi_s
+    out["spell_ok"] = spok_s
+    out["spell_failed"] = spfa_s
+    out["spell_error"] = sper_s
+    return out
+}
+
+
+# Attempt counts by response class: 2xx/3xx/4xx/5xx, plus 'net' for attempts
+# where the connection itself failed (status 0).
+def query_status_mix() -> dict[str, Any] {
+    out: dict[str, Any] = {"s2xx": 0, "s3xx": 0, "s4xx": 0, "s5xx": 0, "net": 0}
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select case when status = 0 then 'net' when status < 300 then 's2xx' when status < 400 then 's3xx' when status < 500 then 's4xx' else 's5xx' end as k, count(*) as n from deliveries group by k })
+        for row in rs {
+            const kk: str = row["k"]
+            const n: int = row["n"]
+            out[kk] = n
+        }
+    }
+    return out
+}
+
+
+def query_top_actions() -> list[dict[str, Any]] {
+    rows: list[dict[str, Any]] = []
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select e.action as action, count(distinct e.event) as events, coalesce(sum(g.completed), 0) as delivered from events e left join gists g on g.event = e.event group by e.action order by events desc limit 8 })
+        rows = rs
+    }
+    return rows
+}
+
+
+def query_subscribers() -> list[dict[str, Any]] {
+    rows: list[dict[str, Any]] = []
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select subscriber as subscriber, count(*) as attempts, coalesce(sum(ok), 0) as okn, cast(coalesce(avg(ms), 0) as integer) as avgms, (select status from deliveries d2 where d2.subscriber = d.subscriber order by d2.id desc limit 1) as last_status, coalesce(max(ts), 0) as last_ts from deliveries d group by subscriber order by attempts desc limit 12 })
+        rows = rs
+    }
+    return rows
+}
+
+
+def metrics_payload() -> dict[str, Any] {
+    const t: int = now()
+    const k: Kpis = query_kpis()
+    kd: dict[str, Any] = {}
+    kd["published"] = k.published
+    kd["delivered"] = k.delivered
+    kd["pending"] = k.pending
+    kd["retrying"] = k.retrying
+    kd["failed"] = k.failed
+    kd["due"] = k.due
+    kd["scheduled"] = k.scheduled
+    kd["attempts"] = k.attempts
+    kd["attempts_ok"] = k.attempts_ok
+    kd["avg_ms"] = k.avg_ms
+    kd["p50"] = k.p50
+    kd["p95"] = k.p95
+    kd["bytes_out"] = k.bytes_out
+    kd["bytes_in"] = k.bytes_in
+    kd["apps"] = k.apps
+    kd["actions"] = k.actions
+    kd["subs"] = k.subs
+    kd["spells"] = k.spells
+    kd["spells_on"] = k.spells_on
+    kd["runs"] = k.runs
+    kd["runs_ok"] = k.runs_ok
+    kd["runs_failed"] = k.runs_failed
+    kd["runs_error"] = k.runs_error
+    out: dict[str, Any] = {}
+    out["now"] = t
+    out["kpis"] = kd
+    out["series"] = query_series(t)
+    out["status_mix"] = query_status_mix()
+    out["top_actions"] = query_top_actions()
+    out["subscribers"] = query_subscribers()
+    return out
+}
+
+
+def dash_metrics_json(req: Request, res: Response, ctx: Context) -> None {
+    res.json(json.dumps(metrics_payload()))
+}
+
+
+def _stat(id: str, val: str, label: str, tone: str) -> HTML {
+    return template[HTML] { <div class="card"><div class="stat-n !{tone}" id="!{id}">!{val}</div><div class="stat-l">!{label}</div></div> }
+}
+
+
+def _chart_panel(title: str, sub: str, cid: str) -> HTML {
+    return template[HTML] { <div class="panel"><h3>!{title} <span class="panel-sub">!{sub}</span></h3><div class="chart" id="!{cid}"></div></div> }
+}
+
+
+def _rate_text(ok: int, total: int) -> str {
+    if total == 0 {
+        return "-"
+    }
+    const r10: int = (ok * 1000) // total
+    return f"{r10 // 10}.{r10 % 10}%"
+}
+
+
+class SubRow {
+    def(name: str, attempts: int, okn: int, avgms: int, last_status: int, last_ts: int) {
+        self.name = name
+        self.attempts = attempts
+        self.okn = okn
+        self.failedn = attempts - okn
+        self.avgms = avgms
+        self.last_status = last_status
+        self.last_ts = last_ts
+    }
+}
+
+
+def _sub_rows(rows: list[dict[str, Any]]) -> list[SubRow] {
+    out: list[SubRow] = []
+    for row in rows {
+        const name: str = row["subscriber"]
+        const attempts: int = row["attempts"]
+        const okn: int = row["okn"]
+        const avgms: int = row["avgms"]
+        const last_status: int = row["last_status"]
+        const last_ts: int = row["last_ts"]
+        out.append(SubRow(name, attempts, okn, avgms, last_status, last_ts))
+    }
+    return out
+}
+
+
+def _sub_table(subs: list[SubRow]) -> HTML {
+    if len(subs) == 0 {
+        return template[HTML] { <div class="empty">No delivery attempts yet.</div> }
+    }
+    return template[HTML] {
+      <table class="data">
+        <thead><tr><th>subscriber</th><th>attempts</th><th>delivered</th><th>failed</th><th>success</th><th>avg latency</th><th>last status</th><th>last attempt</th></tr></thead>
+        <tbody>!{ for s in subs { :{
+          <tr><td class="fw">!{s.name}</td><td>!{f"{s.attempts}"}</td><td>!{f"{s.okn}"}</td><td>!{f"{s.failedn}"}</td><td>!{_rate_text(s.okn, s.attempts)}</td><td>!{f"{s.avgms} ms"}</td><td>!{code_pill(s.last_status)}</td><td class="dim">!{ago(s.last_ts)}</td></tr>
+        } }}</tbody>
+      </table>
+    }
+}
+
+
+def render_dashboard(k: Kpis, attention: list[GistRow], subs: list[SubRow]) -> HTML {
+    attn_html: HTML = template[HTML] {
+      <div class="empty">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><path d="m9 12 2 2 4-4"/></svg>
+        <p>No failed deliveries - all healthy</p>
+      </div>
+    }
+    if len(attention) > 0 {
+        attn_html = template[HTML] {
+          <table class="data">
+            <thead><tr><th>gist</th><th>action</th><th>subscriber</th><th>last response</th><th>attempts</th><th></th></tr></thead>
+            <tbody>!{ for g in attention { :{
+              <tr><td class="mono">!{g.id}</td><td class="fw">!{g.action}</td><td>!{g.subscriber}</td><td>!{code_pill(g.code)} <span class="mono dim">!{g.snippet}</span></td><td>!{g.attempts}</td>
+                <td class="right"><button class="icon-btn sm" title="Requeue delivery" onclick="dashBulkOne('gists','/dash/gists/requeue-many','!{g.id}')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button></td></tr>
+            } }}</tbody>
+          </table>
+        }
+    }
+    const p95_text: str = f"{k.p95} ms" if k.attempts > 0 else "-"
+    return template[HTML] {
+      <div class="section-head pin">
+        <div><h2>Engine health</h2><p class="sub">Throughput, delivery outcomes, latency, wire I/O and spell activity over the last hour. Live.</p></div>
+        <button class="btn" onclick="dj.get('/', '#view')">Refresh</button>
+      </div>
+      <div class="cards">
+        !{_stat("kpi-published", f"{k.published}", "published", "")}
+        !{_stat("kpi-delivered", f"{k.delivered}", "delivered", "ok")}
+        !{_stat("kpi-pending", f"{k.pending}", "pending", "")}
+        !{_stat("kpi-retrying", f"{k.retrying}", "retrying", "")}
+        !{_stat("kpi-failed", f"{k.failed}", "failed", "bad")}
+        !{_stat("kpi-rate", _rate_text(k.attempts_ok, k.attempts), "success rate", "")}
+        !{_stat("kpi-p95", p95_text, "p95 latency", "")}
+        !{_stat("kpi-due", f"{k.due}", "due now", "")}
+      </div>
+      <div class="grid charts">
+        !{_chart_panel("Event flow", "published vs delivered / min", "ch-flow")}
+        !{_chart_panel("Delivery outcomes", "webhook attempts / min", "ch-outcomes")}
+        !{_chart_panel("Delivery latency", "attempt round-trip, ms", "ch-latency")}
+      </div>
+      <div class="grid charts">
+        !{_chart_panel("Webhook responses", "all attempts by response class", "ch-status")}
+        !{_chart_panel("Top actions", "events by action, delivered overlaid", "ch-actions")}
+        !{_chart_panel("Wire I/O", "webhook bytes out / in per min", "ch-io")}
+      </div>
+      <div class="grid two-wide">
+        !{_chart_panel("Spell runs", "wand executions / min", "ch-spells")}
+        <div class="panel" style="padding:0"><h3 style="padding:18px 18px 0">Needs attention</h3><div class="table-wrap attn" style="border:none">!{attn_html}</div></div>
+      </div>
+      <div class="panel" style="padding:0;margin-top:20px"><h3 style="padding:18px 18px 0">Subscriber health</h3><div class="table-wrap" style="border:none">!{_sub_table(subs)}</div></div>
+      <script>window.AmeboCharts && window.AmeboCharts.boot()</script>
+    }
+}
+
+
+def dash_home(req: Request, res: Response, ctx: Context) -> None {
+    const k: Kpis = query_kpis()
+    const content: HTML = render_dashboard(k, query_attention(), _sub_rows(query_subscribers()))
+    respond_section(req, res, "dash", content)
+}
+
+
+def dash_profile(req: Request, res: Response, ctx: Context) -> None {
+    const p: Principal = session_principal(req)
+    role: str = "user"
+    if p.superadmin {
+        role = "superadmin"
+    } elif p.kind == "service" {
+        role = "service account"
+    }
+    res.html(render_profile(p.name, role, VERSION, query_audit()))
+}
+
+
+def cols_users() -> list[Col] {
+    return [Col("username", "username"), Col("source", "source"), Col("role", "role"), Col("act", "")]
+}
+
+
+def _user_row(u: UserRow) -> HTML {
+    role: HTML = template[HTML] { <span class="pill mut">user</span> }
+    if u.superadmin {
+        role = template[HTML] { <span class="pill ok">superadmin</span> }
+    }
+    return template[HTML] {
+      <tr>
+        <td class="cb-col"><input type="checkbox" class="cb-row" value="!{u.username}"></td>
+        <td data-col="username" class="fw">!{u.username}</td>
+        <td data-col="source" class="dim">!{u.auth_source}</td>
+        <td data-col="role">!{role}</td>
+        <td data-col="act" class="right nowrap">
+          <button class="icon-btn sm" title="Toggle superadmin" onclick="var f=new FormData();f.append('username','!{u.username}');dj.send('/dash/users/super',{method:'POST',target:'#list-users',body:f})"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></button>
+          <button class="icon-btn sm" title="Delete user" onclick="var f=new FormData();f.append('username','!{u.username}');dj.send('/dash/users/delete',{method:'POST',target:'#list-users',body:f})"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg></button>
+        </td>
+      </tr>
+    }
+}
+
+
+def render_users_list(users: list[UserRow]) -> HTML {
+    rows: HTML = template[HTML] {!{ for u in users { :{ !{_user_row(u)} } }}}
+    return render_list("users", cols_users(), rows, "No user accounts yet.", 1, 100000, len(users))
+}
+
+
+def render_users_tab(users: list[UserRow]) -> HTML {
+    return template[HTML] {
+      <p class="hint" style="margin-top:0">Accounts that can sign in and be granted per-action access. Local users authenticate with a password here; LDAP users bind against your directory.</p>
+      <form action="/dash/users" method="post" onsubmit="dj.submit(this, '#list-users'); this.reset(); return false" autocomplete="off">
+        <div class="field-row3">
+          <div class="field"><label>Username</label><input name="username" placeholder="username / LDAP uid" autocomplete="off" required></div>
+          <div class="field"><label>Password</label><input type="password" name="password" placeholder="local users only" autocomplete="new-password"></div>
+          <div class="field"><label>Source</label><select name="source"><option value="local">Local</option><option value="ldap">LDAP</option></select></div>
+        </div>
+        <div class="form-actions">
+          <label class="acl-cb"><input type="checkbox" name="superadmin"> Superadmin</label>
+          <button class="btn btn-primary">Add user</button>
+        </div>
+      </form>
+      <div class="list-page" data-tkey="users" style="margin-top:18px">
+        <div class="toolbar" data-toolbar="users">
+          <div class="grow"></div>
+          <div class="sel-actions" data-selbar="users" hidden>
+            <span class="sel-n">0 selected</span>
+            <button class="btn btn-sm btn-danger" onclick="dashBulk('users','/dash/users/delete-many')">Remove</button>
+            <button class="btn btn-sm btn-ghost" onclick="dashClear('users')">Clear</button>
+          </div>
+        </div>
+        <div id="list-users">!{render_users_list(users)}</div>
+      </div>
+    }
+}
+
+
+# Assemble the full settings modal (used by every settings mutation so the swap
+# returns fresh state).
+def settings_view() -> HTML {
+    return render_settings(admin_key(), query_secrets(), render_users_tab(list_users()), get_setting("default_max_retries", "3"))
+}
+
+
+def dash_delivery_set(req: Request, res: Response, ctx: Context) -> None {
+    if session_principal(req).superadmin {
+        const f: dict[str, str] = req.form()
+        const v: str = f["max_retries"] if "max_retries" in f else ""
+        try {
+            const n: int = int(v)
+            if n >= 1 {
+                set_setting("default_max_retries", f"{n}")
+                audit_log("settings", "default max retries " + f"{n}")
+            }
+        } except {
+        }
+    }
+    res.html(settings_view())
+}
+
+
+def dash_settings(req: Request, res: Response, ctx: Context) -> None {
+    res.html(settings_view())
+}
+
+
+def dash_users_create(req: Request, res: Response, ctx: Context) -> None {
+    if session_principal(req).superadmin {
+        const f: dict[str, str] = req.form()
+        const username: str = f["username"] if "username" in f else ""
+        const password: str = f["password"] if "password" in f else ""
+        source: str = f["source"] if "source" in f else "local"
+        if source != "ldap" {
+            source = "local"
+        }
+        const su: bool = "superadmin" in f
+        if len(username) > 0 {
+            create_user(username, password, su, source)
+            audit_log("user", "created " + username)
+        }
+    }
+    res.html(render_users_list(list_users()))
+}
+
+
+def dash_users_delete(req: Request, res: Response, ctx: Context) -> None {
+    if session_principal(req).superadmin {
+        const f: dict[str, str] = req.form()
+        const username: str = f["username"] if "username" in f else ""
+        # Never let an admin delete their own account (self-lockout).
+        if len(username) > 0 and username != session_principal(req).name {
+            delete_user(username)
+            audit_log("user", "deleted " + username)
+        }
+    }
+    res.html(render_users_list(list_users()))
+}
+
+
+def dash_users_delete_many(req: Request, res: Response, ctx: Context) -> None {
+    if session_principal(req).superadmin {
+        const me: str = session_principal(req).name
+        for u in get_ids(req) {
+            if u != me {
+                delete_user(u)
+            }
+        }
+        audit_log("user", "bulk delete")
+    }
+    res.html(render_users_list(list_users()))
+}
+
+
+def dash_user_super(req: Request, res: Response, ctx: Context) -> None {
+    if session_principal(req).superadmin {
+        const f: dict[str, str] = req.form()
+        const username: str = f["username"] if "username" in f else ""
+        # Never let an admin demote themselves (self-lockout).
+        if len(username) > 0 and username != session_principal(req).name {
+            set_superadmin(username, not is_superadmin(username))
+            audit_log("user", "toggled superadmin for " + username)
+        }
+    }
+    res.html(render_users_list(list_users()))
+}
+
+
+def dash_search(req: Request, res: Response, ctx: Context) -> None {
+    const q: str = get_q(req)
+    apps_rows: list[dict[str, Any]] = []
+    act_rows: list[dict[str, Any]] = []
+    sub_rows: list[dict[str, Any]] = []
+    evt_rows: list[dict[str, Any]] = []
+    if len(q) > 0 {
+        const pat: str = like_of(q)
+        with dblock {
+            const a1: list[dict[str, Any]] = db.all(template[SQL] { select application as x from applications where application like !{pat} limit 6 })
+            const a2: list[dict[str, Any]] = db.all(template[SQL] { select action as x from actions where action like !{pat} or application like !{pat} limit 6 })
+            const a3: list[dict[str, Any]] = db.all(template[SQL] { select subscription as x from subscriptions where subscription like !{pat} or subscriber like !{pat} limit 6 })
+            const a4: list[dict[str, Any]] = db.all(template[SQL] { select event as x, action as a from events where action like !{pat} or deduper like !{pat} limit 6 })
+            apps_rows = a1
+            act_rows = a2
+            sub_rows = a3
+            evt_rows = a4
+        }
+    }
+    items: list[HTML] = []
+    for row in apps_rows {
+        const x: str = row["x"]
+        items.append(spot_item(x, "application", "/apps"))
+    }
+    for row in act_rows {
+        const x: str = row["x"]
+        items.append(spot_item(x, "action", "/actions"))
+    }
+    for row in sub_rows {
+        const x: str = row["x"]
+        items.append(spot_item(x, "subscription", "/subs"))
+    }
+    for row in evt_rows {
+        const x: str = row["x"]
+        const a: str = row["a"]
+        items.append(spot_item(a + " - " + x, "event", "/events"))
+    }
+    res.html(render_search(items, q))
+}
+
+
+def dash_rotate_key(req: Request, res: Response, ctx: Context) -> None {
+    set_setting("admin_key", token_urlsafe(24))
+    audit_log("rotate", "admin api key")
+    res.html(settings_view())
+}
+
+
+def dash_secret(req: Request, res: Response, ctx: Context) -> None {
+    const f: dict[str, str] = req.form()
+    const application: str = f["application"] if "application" in f else ""
+    const secret: str = f["secret"] if "secret" in f else ""
+    if len(application) > 0 and len(secret) > 0 {
+        with dblock {
+            db.run(template[SQL] { update applications set secret = !{secret} where application = !{application} })
+        }
+        audit_log("rotate", "secret for " + application)
+    }
+    res.html(render_secrets_list(query_secrets()))
+}
+
+
+def dash_purge(req: Request, res: Response, ctx: Context) -> None {
+    const f: dict[str, str] = req.form()
+    const mode: str = f["mode"] if "mode" in f else ""
+    with dblock {
+        if mode == "delivered" {
+            db.run(template[SQL] { delete from gists where completed = 1 })
+        } elif mode == "all" {
+            db.run(template[SQL] { delete from gists })
+            db.run(template[SQL] { delete from events })
+        }
+    }
+    audit_log("purge", mode)
+    res.html(settings_view())
+}
+
+
+def mount(app: Router) -> None {
+    app.GET('/', dash_home)
+    app.GET('/dash/metrics.json', dash_metrics_json)
+    app.GET('/dash/settings', dash_settings)
+    app.GET('/dash/profile', dash_profile)
+    app.GET('/dash/search', dash_search)
+    app.POST('/dash/settings/rotate-key', dash_rotate_key)
+    app.POST('/dash/settings/delivery', dash_delivery_set)
+    app.POST('/dash/secret', dash_secret)
+    app.POST('/dash/purge', dash_purge)
+    app.POST('/dash/users', dash_users_create)
+    app.POST('/dash/users/delete', dash_users_delete)
+    app.POST('/dash/users/delete-many', dash_users_delete_many)
+    app.POST('/dash/users/super', dash_user_super)
+}

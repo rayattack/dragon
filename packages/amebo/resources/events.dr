@@ -1,0 +1,633 @@
+# resources/events.dr - Events: the broker's ledger. The list carries delivery
+# progress meters, computed status, publisher, payload size, spell counts and
+# filters; each event opens a full detail PAGE (/events/:id) with a unified
+# lifecycle timeline (publish -> spell runs -> every delivery attempt), a
+# per-subscriber delivery table with requeue, the payload/metadata viewers,
+# provenance, and redelivery of everything undelivered.
+from http.server import Router, Request, Response, Context
+from database import SQL
+from html import HTML
+import json
+from time import now
+from json import Schema
+from core import db, dblock, PER, get_q, get_status, get_page, like_of, get_ids, audit_log, ago, human_bytes, persist_event, schema_errors
+from shell import Col, render_toolbar, render_list, list_page, open_modal, active_pill, pill_of, and_close_modal, fragment_with_nav, respond_section, kv, code_pill
+from auth import session_principal
+from resources.actions import query_action_schema
+
+def _qp(req: Request, k: str) -> str {
+    return req.query[k] if k in req.query else ""
+}
+
+
+# An event's delivery status is computed from its gists, never stored.
+def event_status(fanout: int, delivered: int, failed: int) -> tuple[str, str] {
+    if fanout == 0 {
+        return ("no subscribers", "mut")
+    }
+    if delivered == fanout {
+        return ("delivered", "ok")
+    }
+    if failed > 0 {
+        return ("attention", "bad")
+    }
+    return ("in flight", "warn")
+}
+
+
+# Delivery progress meter: green fill on a light track of the same hue.
+def meter(delivered: int, fanout: int) -> HTML {
+    if fanout == 0 {
+        return template[HTML] { <span class="dim">-</span> }
+    }
+    const pct: int = (delivered * 100) // fanout
+    const w: str = f"width:{pct}%"
+    return template[HTML] { <span class="meterwrap"><span class="meter"><span style="!{w}"></span></span><span class="meter-n">!{f"{delivered}"}/!{f"{fanout}"}</span></span> }
+}
+
+
+class EventRow {
+    def(event: str, action: str, publisher: str, deduper: str, tsi: int, size: int, fanout: int, delivered: int, failed: int, spells: int) {
+        self.event = event
+        self.action = action
+        self.publisher = publisher if len(publisher) > 0 else "-"
+        self.deduper = deduper
+        self.tsi = tsi
+        self.size = size
+        self.fanout = fanout
+        self.delivered = delivered
+        self.failed = failed
+        self.spells = spells
+        const st: tuple[str, str] = event_status(fanout, delivered, failed)
+        self.status = st[0]
+        self.status_cls = st[1]
+    }
+}
+
+
+def _event_from(row: dict[str, Any]) -> EventRow {
+    const ev: str = row["event"]
+    const ac: str = row["action"]
+    const pu: str = row["publisher"]
+    const dd: str = row["deduper"]
+    const tsi: int = row["tsi"]
+    const nb: int = row["nb"]
+    const fo: int = row["fanout"]
+    const dv: int = row["delivered"]
+    const fa: int = row["failed"]
+    const sp: int = row["spells"]
+    return EventRow(ev, ac, pu, dd, tsi, nb, fo, dv, fa, sp)
+}
+
+
+# Status is computed, so match q/action in SQL then filter/paginate here.
+def query_events(q: str, status: str, actionf: str, page: int) -> tuple[list[EventRow], int] {
+    const pat: str = like_of(q)
+    rows: list[dict[str, Any]] = []
+    with dblock {
+        if len(actionf) > 0 {
+            const rs: list[dict[str, Any]] = db.all(template[SQL] { select e.event as event, e.action as action, coalesce(e.publisher, '') as publisher, e.deduper as deduper, cast(e.timestamped as integer) as tsi, coalesce(e.bytes, 0) as nb, (select count(*) from gists g where g.event = e.event) as fanout, (select count(*) from gists g where g.event = e.event and g.completed = 1) as delivered, (select count(*) from gists g join subscriptions s on s.subscription = g.subscription where g.event = e.event and g.completed = 0 and g.retries >= s.max_retries) as failed, (select count(*) from spell_runs r where r.event = e.event) as spells from events e where e.action = !{actionf} and (e.event like !{pat} or e.deduper like !{pat} or e.publisher like !{pat}) order by e.timestamped desc limit 500 })
+            rows = rs
+        } else {
+            const rs: list[dict[str, Any]] = db.all(template[SQL] { select e.event as event, e.action as action, coalesce(e.publisher, '') as publisher, e.deduper as deduper, cast(e.timestamped as integer) as tsi, coalesce(e.bytes, 0) as nb, (select count(*) from gists g where g.event = e.event) as fanout, (select count(*) from gists g where g.event = e.event and g.completed = 1) as delivered, (select count(*) from gists g join subscriptions s on s.subscription = g.subscription where g.event = e.event and g.completed = 0 and g.retries >= s.max_retries) as failed, (select count(*) from spell_runs r where r.event = e.event) as spells from events e where e.action like !{pat} or e.deduper like !{pat} or e.publisher like !{pat} or e.event like !{pat} order by e.timestamped desc limit 500 })
+            rows = rs
+        }
+    }
+    filtered: list[EventRow] = []
+    for row in rows {
+        const e: EventRow = _event_from(row)
+        if len(status) == 0 or e.status == status {
+            filtered.append(e)
+        }
+    }
+    const total: int = len(filtered)
+    const off: int = (page - 1) * PER
+    out: list[EventRow] = []
+    i: int = off
+    while i < off + PER and i < total {
+        out.append(filtered[i])
+        i = i + 1
+    }
+    return (out, total)
+}
+
+
+def query_action_names() -> list[str] {
+    out: list[str] = []
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select action as action from actions order by action limit 30 })
+        for row in rs {
+            const a: str = row["action"]
+            out.append(a)
+        }
+    }
+    return out
+}
+
+
+def cols_events() -> list[Col] {
+    return [Col("event", "event"), Col("action", "action"), Col("publisher", "publisher"), Col("size", "size"), Col("delivery", "delivery"), Col("spells", "spells"), Col("status", "status"), Col("deduper", "deduper"), Col("age", "age")]
+}
+
+
+def _tr_event(e: EventRow) -> HTML {
+    return template[HTML] {
+      <tr class="rowlink" onclick="dj.get('/events/' + encodeURIComponent('!{e.event}'), '#view', {push:true})">
+        <td class="cb-col" onclick="event.stopPropagation()"><input type="checkbox" class="cb-row" value="!{e.event}"></td>
+        <td data-col="event" class="mono">!{e.event}</td>
+        <td data-col="action" class="fw">!{e.action}</td>
+        <td data-col="publisher" class="dim">!{e.publisher}</td>
+        <td data-col="size" class="dim">!{human_bytes(e.size)}</td>
+        <td data-col="delivery">!{meter(e.delivered, e.fanout)}</td>
+        <td data-col="spells">!{f"{e.spells}"}</td>
+        <td data-col="status"><span class="pill !{e.status_cls}">!{e.status}</span></td>
+        <td data-col="deduper" class="mono dim">!{e.deduper}</td>
+        <td data-col="age" class="dim">!{ago(e.tsi)}</td>
+      </tr>
+    }
+}
+
+
+def rows_events(rows: list[EventRow]) -> HTML {
+    return template[HTML] {!{ for e in rows { :{ !{_tr_event(e)} } }}}
+}
+
+
+def list_events(rows: list[EventRow], page: int, per: int, total: int) -> HTML {
+    return render_list("events", cols_events(), rows_events(rows), "No events match.", page, per, total)
+}
+
+
+def page_events(frag: HTML) -> HTML {
+    const actions: list[str] = query_action_names()
+    const filters: HTML = template[HTML] {
+      <select class="select" data-filter="status" onchange="dashList('events')" style="width:160px">
+        <option value="">All statuses</option><option value="delivered">Delivered</option>
+        <option value="in flight">In flight</option><option value="attention">Attention</option>
+        <option value="no subscribers">No subscribers</option>
+      </select>
+      <select class="select" data-filter="action" onchange="dashList('events')" style="width:180px">
+        <option value="">All actions</option>
+        !{ for a in actions { :{ <option value="!{a}">!{a}</option> } }}
+      </select>
+    }
+    const add: HTML = template[HTML] { <button class="btn btn-primary" onclick="dj.get('/dash/new/event', '#modal')">+ Publish</button> }
+    const bulk: HTML = template[HTML] { <button class="btn btn-sm btn-danger" onclick="dashBulk('events','/dash/events/delete-many')">Delete</button> }
+    return list_page("events", "Events", "The broker's ledger: every published event, its fan-out progress and spell activity.", add, render_toolbar("events", "Search events, dedupers, publishers...", cols_events(), filters, bulk), frag)
+}
+
+
+def sec_events(req: Request, res: Response, ctx: Context) -> None {
+    const page: int = get_page(req)
+    const r: tuple[list[EventRow], int] = query_events(get_q(req), get_status(req), _qp(req, "action"), page)
+    respond_section(req, res, "events", page_events(list_events(r[0], page, PER, r[1])))
+}
+
+
+def list_events_h(req: Request, res: Response, ctx: Context) -> None {
+    const page: int = get_page(req)
+    const r: tuple[list[EventRow], int] = query_events(get_q(req), get_status(req), _qp(req, "action"), page)
+    res.html(list_events(r[0], page, PER, r[1]))
+}
+
+
+def dash_new_event(req: Request, res: Response, ctx: Context) -> None {
+    res.html(render_modal_event())
+}
+
+
+def render_modal_event() -> HTML {
+    const body: HTML = template[HTML] {
+      <form action="/dash/publish" method="post" onsubmit="return dj.submit(this, '#list-events')">
+        <div class="modal-body">
+          <div class="field"><label>Action</label><input value="order.placed" disabled></div>
+          <div class="field"><label>Order number<span class="req">*</span></label><input name="order" type="number" min="1" placeholder="42" required>
+            <p class="hint">Validated against the order.placed schema, then persisted and fanned out.</p></div>
+        </div>
+        <div class="modal-foot"><button type="button" class="btn btn-ghost" onclick="document.getElementById('modal').innerHTML=''">Cancel</button><button class="btn btn-primary">Publish event</button></div>
+      </form>
+    }
+    return open_modal("Publish event", "events", body)
+}
+
+
+def dash_publish(req: Request, res: Response, ctx: Context) -> None {
+    const fields: dict[str, str] = req.form()
+    order_s: str = ""
+    if "order" in fields {
+        const v: str = fields["order"]
+        order_s = v
+    }
+    order_n: int = 0
+    try {
+        const oi: int = int(order_s)
+        order_n = oi
+    } except {
+        order_n = 0
+    }
+    const action: str = "order.placed"
+    const schematext: str = query_action_schema(action)
+    if len(schematext) > 0 and order_n >= 1 {
+        const pschema: Schema = Schema("draft-07")
+        pschema.register(action, json.loads_obj(schematext))
+        const payload: dict[str, Any] = {"order": order_n}
+        const perrs: list[str] = schema_errors(pschema, action, payload)
+        if len(perrs) == 0 {
+            const deduper: str = "ui-" + f"{now()}"
+            const event_id: str = "evt-" + deduper
+            const ts: str = f"{now()}"
+            const payloadtext: str = json.dumps(payload)
+            const who: str = session_principal(req).name
+            const ignored: int = persist_event(event_id, action, payloadtext, "{}", deduper, ts, 0, who)
+            audit_log("publish", action)
+        }
+    }
+    const r: tuple[list[EventRow], int] = query_events("", "", "", 1)
+    res.html(and_close_modal(list_events(r[0], 1, PER, r[1])))
+}
+
+
+def events_delete_many(req: Request, res: Response, ctx: Context) -> None {
+    for ev in get_ids(req) {
+        with dblock {
+            db.run(template[SQL] { delete from gists where event = !{ev} })
+            db.run(template[SQL] { delete from events where event = !{ev} })
+        }
+    }
+    audit_log("delete", "events")
+    const r: tuple[list[EventRow], int] = query_events("", "", "", 1)
+    res.html(list_events(r[0], 1, PER, r[1]))
+}
+
+
+#===----------------------------------------------------------------------===#
+# Event detail page
+#===----------------------------------------------------------------------===#
+
+class EventOverview {
+    def() {
+        self.found = False
+        self.event = ""
+        self.action = ""
+        self.deduper = ""
+        self.payload = ""
+        self.metadata = ""
+        self.tsi = 0
+        self.publisher = ""
+        self.size = 0
+        self.spelled = False
+        self.fanout = 0
+        self.delivered = 0
+        self.failed = 0
+        self.inflight = 0
+        self.attempts = 0
+        self.attempts_ok = 0
+        self.avg_ms = 0
+        self.max_ms = 0
+        self.spells = 0
+        self.e2e = -1
+        self.status = ""
+        self.status_cls = ""
+    }
+}
+
+
+def query_event_overview(id: str) -> EventOverview {
+    const o: EventOverview = EventOverview()
+    o.event = id
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select action as action, deduper as deduper, payload as payload, metadata as metadata, cast(timestamped as integer) as tsi, coalesce(publisher, '') as publisher, coalesce(bytes, 0) as nb, spelled as spelled from events where event = !{id} })
+        if len(rs) == 0 {
+            return o
+        }
+        o.found = True
+        const ac: str = rs[0]["action"]
+        const dd: str = rs[0]["deduper"]
+        const pl: str = rs[0]["payload"]
+        const md: str = rs[0]["metadata"]
+        const tsi: int = rs[0]["tsi"]
+        const pu: str = rs[0]["publisher"]
+        const nb: int = rs[0]["nb"]
+        const sp: int = rs[0]["spelled"]
+        o.action = ac
+        o.deduper = dd
+        o.payload = pl
+        o.metadata = md
+        o.tsi = tsi
+        o.publisher = pu
+        o.size = nb
+        o.spelled = sp != 0
+        const g1: int = db.val[int](template[SQL] { select count(*) from gists where event = !{id} })
+        const g2: int = db.val[int](template[SQL] { select count(*) from gists where event = !{id} and completed = 1 })
+        const g3: int = db.val[int](template[SQL] { select count(*) from gists g join subscriptions s on s.subscription = g.subscription where g.event = !{id} and g.completed = 0 and g.retries >= s.max_retries })
+        const a1: int = db.val[int](template[SQL] { select count(*) from deliveries where event = !{id} })
+        const a2: int = db.val[int](template[SQL] { select coalesce(sum(ok), 0) from deliveries where event = !{id} })
+        const a3: int = db.val[int](template[SQL] { select cast(coalesce(avg(ms), 0) as integer) from deliveries where event = !{id} })
+        const a4: int = db.val[int](template[SQL] { select coalesce(max(ms), 0) from deliveries where event = !{id} })
+        const s1: int = db.val[int](template[SQL] { select count(*) from spell_runs where event = !{id} })
+        o.fanout = g1
+        o.delivered = g2
+        o.failed = g3
+        o.inflight = g1 - g2 - g3
+        o.attempts = a1
+        o.attempts_ok = a2
+        o.avg_ms = a3
+        o.max_ms = a4
+        o.spells = s1
+        if g1 > 0 and g2 == g1 {
+            const md2: int = db.val[int](template[SQL] { select coalesce(max(delivered_at), 0) from gists where event = !{id} })
+            if md2 >= o.tsi {
+                o.e2e = md2 - o.tsi
+            }
+        }
+    }
+    const st: tuple[str, str] = event_status(o.fanout, o.delivered, o.failed)
+    o.status = st[0]
+    o.status_cls = st[1]
+    return o
+}
+
+
+# One row of the unified lifecycle timeline: reception, each spell run, and
+# every delivery attempt, merged chronologically in SQL (ord breaks ties so a
+# same-second publish sorts before its spells and deliveries).
+class TimelineRow {
+    def(ts: int, kind: str, who: str, st: str, detail: str, n: int, ms: int) {
+        self.ts = ts
+        self.kind = kind
+        self.who = who
+        self.st = st
+        self.detail = detail
+        self.n = n
+        self.ms = ms
+    }
+}
+
+
+def query_timeline(id: str) -> list[TimelineRow] {
+    rows: list[dict[str, Any]] = []
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select ts as ts, kind as kind, who as who, st as st, detail as detail, n as n, ms as ms from (select cast(timestamped as integer) as ts, 0 as ord, 'publish' as kind, coalesce(publisher, '') as who, '' as st, '' as detail, coalesce(bytes, 0) as n, 0 as ms from events where event = !{id} union all select cast(ts as integer) as ts, 1 as ord, 'spell' as kind, spell as who, status as st, detail as detail, 0 as n, 0 as ms from spell_runs where event = !{id} union all select ts as ts, 2 as ord, 'delivery' as kind, subscriber as who, cast(status as text) as st, response as detail, attempt as n, ms as ms from deliveries where event = !{id}) order by ts asc, ord asc limit 200 })
+        rows = rs
+    }
+    out: list[TimelineRow] = []
+    for row in rows {
+        const ts: int = row["ts"]
+        const kind: str = row["kind"]
+        const who: str = row["who"]
+        const st: str = row["st"]
+        const detail: str = row["detail"]
+        const n: int = row["n"]
+        const ms: int = row["ms"]
+        out.append(TimelineRow(ts, kind, who, st, detail, n, ms))
+    }
+    return out
+}
+
+
+def _clip(s: str, limit: int) -> str {
+    if len(s) > limit {
+        return s[:limit] + "..."
+    }
+    return s
+}
+
+
+def _tl_row(t: TimelineRow) -> HTML {
+    if t.kind == "publish" {
+        who: str = t.who
+        if len(who) == 0 {
+            who = "api"
+        }
+        return template[HTML] { <tr><td class="dim nowrap">!{ago(t.ts)}</td><td><span class="pill mut">published</span></td><td>by <b>!{who}</b> &middot; !{human_bytes(t.n)} payload accepted, validated and fanned out</td></tr> }
+    }
+    if t.kind == "spell" {
+        cls: str = "ok"
+        if t.st == "failed" {
+            cls = "bad"
+        } elif t.st == "error" {
+            cls = "warn"
+        }
+        return template[HTML] { <tr><td class="dim nowrap">!{ago(t.ts)}</td><td><span class="pill !{cls}">spell !{t.st}</span></td><td><b>!{t.who}</b> <span class="mono dim">!{_clip(t.detail, 90)}</span></td></tr> }
+    }
+    code: int = 0
+    try {
+        const c: int = int(t.st)
+        code = c
+    } except {
+        code = 0
+    }
+    return template[HTML] { <tr><td class="dim nowrap">!{ago(t.ts)}</td><td>!{code_pill(code)}</td><td>attempt !{f"{t.n}"} to <b>!{t.who}</b> &middot; !{f"{t.ms}"} ms &middot; <span class="mono dim">!{_clip(t.detail, 70)}</span></td></tr> }
+}
+
+
+def render_timeline(rows: list[TimelineRow]) -> HTML {
+    if len(rows) == 0 {
+        return template[HTML] { <div class="empty">No lifecycle activity recorded.</div> }
+    }
+    return template[HTML] {
+      <table class="data">
+        <thead><tr><th>when</th><th>stage</th><th>detail</th></tr></thead>
+        <tbody>!{ for t in rows { :{ !{_tl_row(t)} } }}</tbody>
+      </table>
+    }
+}
+
+
+# Per-subscriber delivery state for this event (one row per gist).
+class EvSubRow {
+    def(gist: int, subscriber: str, handler: str, completed: int, retries: int, maxr: int, code: int, ms: int, response: str) {
+        self.gist = f"{gist}"
+        self.subscriber = subscriber
+        self.handler = handler
+        status: str = "pending"
+        if completed != 0 {
+            status = "delivered"
+        } elif retries >= maxr {
+            status = "failed"
+        } elif retries > 0 {
+            status = "retrying"
+        }
+        self.status = status
+        made: int = retries
+        if completed != 0 {
+            made = retries + 1
+        }
+        self.attempts = f"{made}/{maxr}"
+        self.code = code
+        self.ms = ms
+        sn: str = response
+        if len(sn) > 46 {
+            sn = sn[:46] + "..."
+        }
+        self.snippet = sn
+        self.undelivered = completed == 0
+    }
+}
+
+
+def query_ev_subs(id: str) -> list[EvSubRow] {
+    rows: list[dict[str, Any]] = []
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select g.id as id, s.subscriber as subscriber, s.handler as handler, g.completed as completed, g.retries as retries, s.max_retries as maxr, g.last_status as last_status, g.last_ms as last_ms, g.response as response from gists g join subscriptions s on s.subscription = g.subscription where g.event = !{id} order by s.subscriber })
+        rows = rs
+    }
+    out: list[EvSubRow] = []
+    for row in rows {
+        const gid: int = row["id"]
+        const su: str = row["subscriber"]
+        const hd: str = row["handler"]
+        const co: int = row["completed"]
+        const re: int = row["retries"]
+        const mr: int = row["maxr"]
+        const cd: int = row["last_status"]
+        const ms: int = row["last_ms"]
+        const rp: str = row["response"]
+        out.append(EvSubRow(gid, su, hd, co, re, mr, cd, ms, rp))
+    }
+    return out
+}
+
+
+def render_ev_subs(id: str, subs: list[EvSubRow]) -> HTML {
+    if len(subs) == 0 {
+        return template[HTML] { <div class="empty">No subscribers were active for this action when the event was published.</div> }
+    }
+    return template[HTML] {
+      <table class="data">
+        <thead><tr><th>subscriber</th><th>handler</th><th>status</th><th>attempts</th><th>last response</th><th>latency</th><th></th></tr></thead>
+        <tbody>!{ for s in subs { :{
+          <tr class="rowlink" onclick="dj.get('/dash/gists/detail?id=!{s.gist}', '#drawer')">
+            <td class="fw">!{s.subscriber}</td>
+            <td class="mono dim">!{s.handler}</td>
+            <td><span class="pill !{pill_of(s.status)}">!{s.status}</span></td>
+            <td>!{s.attempts}</td>
+            <td>!{code_pill(s.code)} <span class="mono dim">!{s.snippet}</span></td>
+            <td>!{f"{s.ms} ms" if s.code >= 0 else "-"}</td>
+            <td class="right" onclick="event.stopPropagation()">
+              !{ if s.undelivered { :{ <button class="btn btn-sm" onclick="var f=new FormData();f.append('gist','!{s.gist}');f.append('event','!{id}');dj.send('/dash/events/requeue-gist',{method:'POST',target:'#ev-subs',body:f})">Requeue</button> } } }
+            </td>
+          </tr>
+        } }}</tbody>
+      </table>
+    }
+}
+
+
+def render_event_page(o: EventOverview, timeline: list[TimelineRow], subs: list[EvSubRow]) -> HTML {
+    const undelivered: int = o.inflight + o.failed
+    redeliver: HTML = template[HTML] {  }
+    if undelivered > 0 {
+        redeliver = template[HTML] { <button class="btn" onclick="var f=new FormData();f.append('event','!{o.event}');dj.send('/dash/events/redeliver',{method:'POST',target:'#view',body:f})">Redeliver !{f"{undelivered}"} undelivered</button> }
+    }
+    e2e_text: str = "-"
+    if o.e2e == 0 {
+        e2e_text = "under 1 s"
+    } elif o.e2e > 0 {
+        e2e_text = f"{o.e2e} s"
+    }
+    wizard_text: str = "queued"
+    if o.spelled {
+        wizard_text = f"processed ({o.spells} runs)"
+    }
+    const prov: list[tuple[str, str]] = [("Event", o.event), ("Action", o.action), ("Deduper", o.deduper), ("Publisher", o.publisher if len(o.publisher) > 0 else "api"), ("Published", ago(o.tsi)), ("Payload size", human_bytes(o.size)), ("Wizard", wizard_text)]
+    return template[HTML] {
+      <div class="section-head pin">
+        <div>
+          <div class="crumb"><a class="crumb-link" onclick="dj.get('/events', '#view', {push:true})">Events</a><span class="crumb-sep">/</span><span>!{o.event}</span></div>
+          <h2>!{o.event} <span class="pill !{o.status_cls}">!{o.status}</span></h2>
+          <p class="sub">!{o.action} &middot; published !{ago(o.tsi)} by !{o.publisher if len(o.publisher) > 0 else "api"}</p>
+        </div>
+        <div class="drawer-actions" style="margin:0">
+          !{redeliver}
+          <button class="btn" onclick="dj.get('/events/' + encodeURIComponent('!{o.event}'), '#view')">Refresh</button>
+          <button class="btn" onclick="dj.get('/events', '#view', {push:true})">&larr; All events</button>
+        </div>
+      </div>
+      <div class="cards">
+        <div class="card"><div class="stat-n">!{f"{o.fanout}"}</div><div class="stat-l">fan-out</div></div>
+        <div class="card"><div class="stat-n ok">!{f"{o.delivered}"}</div><div class="stat-l">delivered</div></div>
+        <div class="card"><div class="stat-n">!{f"{o.inflight}"}</div><div class="stat-l">in flight</div></div>
+        <div class="card"><div class="stat-n !{"bad" if o.failed > 0 else ""}">!{f"{o.failed}"}</div><div class="stat-l">failed</div></div>
+        <div class="card"><div class="stat-n">!{f"{o.attempts}"}</div><div class="stat-l">attempts</div></div>
+        <div class="card"><div class="stat-n">!{f"{o.avg_ms} ms" if o.attempts > 0 else "-"}</div><div class="stat-l">avg latency</div></div>
+        <div class="card"><div class="stat-n">!{e2e_text}</div><div class="stat-l">end to end</div></div>
+        <div class="card"><div class="stat-n">!{human_bytes(o.size)}</div><div class="stat-l">payload</div></div>
+      </div>
+      <div class="grid two-wide" style="margin-bottom:20px">
+        <div class="panel">
+          <h3>Payload <span class="panel-sub">as persisted (after redactions)</span></h3>
+          <div id="ev-ide" class="ide" style="height:260px">!{o.payload}</div>
+          <h3 style="margin-top:16px">Provenance</h3>
+          !{kv(prov)}
+        </div>
+        <div class="panel" style="padding:0"><h3 style="padding:18px 18px 0">Lifecycle timeline <span class="panel-sub">reception, spells, every delivery attempt</span></h3><div class="table-wrap attn" style="border:none">!{render_timeline(timeline)}</div></div>
+      </div>
+      <div class="panel" style="padding:0"><h3 style="padding:18px 18px 0">Deliveries by subscriber</h3><div id="ev-subs" class="table-wrap" style="border:none">!{render_ev_subs(o.event, subs)}</div></div>
+      <script>(function(){ var el=document.getElementById('ev-ide'); if(!el||!window.ace) return; var ed=ace.edit('ev-ide'); ed.session.setMode('ace/mode/json');
+        var dark=document.documentElement.getAttribute('data-theme')==='dark';
+        ed.setTheme(dark?'ace/theme/one_dark':'ace/theme/chrome');
+        ed.setOptions({readOnly:true,fontSize:13,showPrintMargin:false,wrap:true,tabSize:2,useWorker:false}); ed.clearSelection(); window.__ace.push(ed); })();</script>
+    }
+}
+
+
+def event_page_content(id: str) -> tuple[bool, HTML] {
+    const o: EventOverview = query_event_overview(id)
+    if not o.found {
+        const nf: HTML = template[HTML] {
+          <div class="section-head"><div><div class="crumb"><a class="crumb-link" onclick="dj.get('/events', '#view', {push:true})">Events</a><span class="crumb-sep">/</span><span>!{id}</span></div><h2>Event not found</h2><p class="sub">No event exists under that id (it may have been purged).</p></div><button class="btn" onclick="dj.get('/events', '#view', {push:true})">&larr; All events</button></div>
+        }
+        return (False, nf)
+    }
+    return (True, render_event_page(o, query_timeline(id), query_ev_subs(id)))
+}
+
+
+def event_page_h(req: Request, res: Response, ctx: Context) -> None {
+    const id: str = req.params["id"] if "id" in req.params else ""
+    const r: tuple[bool, HTML] = event_page_content(id)
+    respond_section(req, res, "events", r[1])
+}
+
+
+# Put every undelivered gist of this event back in the queue, fresh.
+def dash_event_redeliver(req: Request, res: Response, ctx: Context) -> None {
+    const f: dict[str, str] = req.form()
+    const id: str = f["event"] if "event" in f else ""
+    with dblock {
+        db.run(template[SQL] { update gists set retries = 0, sleep_until = 0 where event = !{id} and completed = 0 })
+    }
+    audit_log("redeliver", "undelivered gists of " + id)
+    const r: tuple[bool, HTML] = event_page_content(id)
+    res.html(fragment_with_nav(r[1], "events"))
+}
+
+
+def dash_event_requeue_gist(req: Request, res: Response, ctx: Context) -> None {
+    const f: dict[str, str] = req.form()
+    const gist_s: str = f["gist"] if "gist" in f else ""
+    const id: str = f["event"] if "event" in f else ""
+    try {
+        const gid: int = int(gist_s)
+        with dblock {
+            db.run(template[SQL] { update gists set completed = 0, retries = 0, sleep_until = 0 where id = !{gid} })
+        }
+        audit_log("requeue", "gist " + gist_s)
+    } except {
+        pass
+    }
+    res.html(render_ev_subs(id, query_ev_subs(id)))
+}
+
+
+def mount(app: Router) -> None {
+    app.GET('/events', sec_events)
+    app.GET('/events/:id', event_page_h)
+    app.GET('/dash/events/list', list_events_h)
+    app.GET('/dash/new/event', dash_new_event)
+    app.POST('/dash/publish', dash_publish)
+    app.POST('/dash/events/delete-many', events_delete_many)
+    app.POST('/dash/events/redeliver', dash_event_redeliver)
+    app.POST('/dash/events/requeue-gist', dash_event_requeue_gist)
+}

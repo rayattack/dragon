@@ -1,0 +1,55 @@
+# amebo.dr - entry point. Top-level statements only execute here (not in imported
+# modules), so setup + daemon spawning live here. Build the Router, inject it into
+# each resource module's mount() to register routes, then serve.
+from http.server import Router
+from secrets import token_bytes
+from os import getenv
+from core import PORT, STATIC_DIR, migrate, register_schemas
+from auth import mount as mount_auth, seed_admin
+from api import mount as mount_api, aproko
+from engine import wizard
+from resources.dash import mount as mount_dash
+from resources.apps import mount as mount_apps
+from resources.actions import mount as mount_actions
+from resources.events import mount as mount_events
+from resources.subs import mount as mount_subs
+from resources.gists import mount as mount_gists
+from resources.wands import mount as mount_wands
+
+register_schemas()
+migrate()
+seed_admin()
+
+const app: Router = Router(PORT, "0.0.0.0")
+
+# Signed-cookie sessions carry the sign-in state. AMEBO_SECRET keeps cookies
+# valid across restarts; without it a fresh per-boot key just means re-login.
+sess_secret: bytes = getenv("AMEBO_SECRET").encode()
+if len(sess_secret) == 0 {
+    sess_secret = token_bytes(32)
+}
+app.enable_sessions(sess_secret, "amebo_session", 0, false, "Lax")
+
+app.ASSETS(STATIC_DIR, "/static/*")
+mount_auth(app)
+mount_api(app)
+mount_dash(app)
+mount_apps(app)
+mount_actions(app)
+mount_events(app)
+mount_subs(app)
+mount_gists(app)
+mount_wands(app)
+
+# fire needs an entry-local function; these wrappers call the imported daemons.
+def _aproko() -> None {
+    aproko()
+}
+def _wizard() -> None {
+    wizard()
+}
+fire _aproko()
+fire _wizard()
+
+print(f"amebo listening on http://0.0.0.0:{PORT}")
+app.listen()

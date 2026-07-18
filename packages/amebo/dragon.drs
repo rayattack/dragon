@@ -1,0 +1,19 @@
+# amebo - HTTP event-notifications broker for Dragon
+#
+# A port of amebo (Python/heaven) to Dragon: applications register schema-backed
+# actions, publish HMAC-signed events, and subscribe to receive signed webhooks.
+# The `aproko` background worker leases pending deliveries from the DB queue and
+# POSTs each to its subscriber. `entry` makes `dragon run packages/amebo` boot
+# the broker; subscriber.dr is a mock consumer used by the tests.
+{
+  name = 'amebo'
+  version = '0.1.0'
+  description = 'HTTP event-notifications broker - signed publish + fan-out + background webhook delivery.'
+  authors = ['Tersoo <ortserga@gmail.com>']
+  license = 'MIT'
+  dragon = '>=0.2.0'
+  entry = 'amebo.dr'
+
+  eggs = {
+  }
+}

@@ -1,0 +1,202 @@
+# resources/subs.dr - Subscriptions: row + queries + views + routes.
+from http.server import Router, Request, Response, Context
+from database import SQL
+from html import HTML
+from core import db, dblock, PER, get_q, get_status, get_page, like_of, get_ids, audit_log
+from shell import Col, render_toolbar, render_list, list_page, open_modal, active_pill, pill_of, and_close_modal, fragment_with_nav, respond_section, open_drawer, kv, and_close_drawer
+
+class SubRow {
+    def(subscription: str, subscriber: str, action: str, handler: str, max_retries: int, active: bool) {
+        self.subscription = subscription
+        self.subscriber = subscriber
+        self.action = action
+        self.handler = handler
+        self.retries = f"{max_retries}"
+        self.active = active
+    }
+}
+
+
+def query_subs(q: str, page: int) -> tuple[list[SubRow], int] {
+    const pat: str = like_of(q)
+    const off: int = (page - 1) * PER
+    total: int = 0
+    rows: list[dict[str, Any]] = []
+    with dblock {
+        const t: int = db.val[int](template[SQL] { select count(*) from subscriptions where subscription like !{pat} or subscriber like !{pat} or action like !{pat} })
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select subscription as subscription, subscriber as subscriber, action as action, handler as handler, max_retries as maxr, active as active from subscriptions where subscription like !{pat} or subscriber like !{pat} or action like !{pat} order by subscription limit !{PER} offset !{off} })
+        total = t
+        rows = rs
+    }
+    out: list[SubRow] = []
+    for row in rows {
+        const su: str = row["subscription"]
+        const sb: str = row["subscriber"]
+        const ac: str = row["action"]
+        const hd: str = row["handler"]
+        const mr: int = row["maxr"]
+        const av: int = row["active"]
+        out.append(SubRow(su, sb, ac, hd, mr, av != 0))
+    }
+    return (out, total)
+}
+
+
+def cols_subs() -> list[Col] {
+    return [Col("subscription", "subscription"), Col("subscriber", "subscriber"), Col("action", "action"), Col("handler", "handler"), Col("retries", "retries"), Col("status", "status")]
+}
+
+
+def _tr_sub(s: SubRow) -> HTML {
+    return template[HTML] {
+      <tr class="rowlink" onclick="dj.get('/dash/subs/detail?id=!{s.subscription}', '#drawer')">
+        <td class="cb-col" onclick="event.stopPropagation()"><input type="checkbox" class="cb-row" value="!{s.subscription}"></td>
+        <td data-col="subscription" class="fw">!{s.subscription}</td>
+        <td data-col="subscriber" class="dim">!{s.subscriber}</td>
+        <td data-col="action">!{s.action}</td>
+        <td data-col="handler" class="mono dim">!{s.handler}</td>
+        <td data-col="retries">!{s.retries}</td>
+        <td data-col="status">!{active_pill(s.active)}</td>
+      </tr>
+    }
+}
+
+
+def rows_subs(rows: list[SubRow]) -> HTML {
+    return template[HTML] {!{ for s in rows { :{ !{_tr_sub(s)} } }}}
+}
+
+
+def list_subs(rows: list[SubRow], page: int, per: int, total: int) -> HTML {
+    return render_list("subs", cols_subs(), rows_subs(rows), "No subscriptions match.", page, per, total)
+}
+
+
+def page_subs(frag: HTML) -> HTML {
+    const add: HTML = template[HTML] { <button class="btn btn-primary" onclick="dj.get('/dash/new/sub', '#modal')">+ Subscribe</button> }
+    const bulk: HTML = template[HTML] { <button class="btn btn-sm btn-danger" onclick="dashBulk('subs','/dash/subs/delete-many')">Delete</button> }
+    return list_page("subs", "Subscriptions", "Webhook handlers subscribed to an action's fan-out.", add, render_toolbar("subs", "Search subscriptions...", cols_subs(), template[HTML] {  }, bulk), frag)
+}
+
+
+def sec_subs(req: Request, res: Response, ctx: Context) -> None {
+    const page: int = get_page(req)
+    const r: tuple[list[SubRow], int] = query_subs(get_q(req), page)
+    respond_section(req, res, "subs", page_subs(list_subs(r[0], page, PER, r[1])))
+}
+
+
+def list_subs_h(req: Request, res: Response, ctx: Context) -> None {
+    const page: int = get_page(req)
+    const r: tuple[list[SubRow], int] = query_subs(get_q(req), page)
+    res.html(list_subs(r[0], page, PER, r[1]))
+}
+
+
+def dash_new_sub(req: Request, res: Response, ctx: Context) -> None {
+    res.html(render_modal_sub())
+}
+
+
+def render_modal_sub() -> HTML {
+    const body: HTML = template[HTML] {
+      <form action="/dash/subs" method="post" onsubmit="return dj.submit(this, '#list-subs')">
+        <div class="modal-body">
+          <div class="field-row">
+            <div class="field"><label>Name<span class="req">*</span></label><input name="subscription" placeholder="sub-0" required></div>
+            <div class="field"><label>Subscriber app<span class="req">*</span></label><input name="application" placeholder="fulfillment" required></div>
+          </div>
+          <div class="field-row">
+            <div class="field"><label>Action<span class="req">*</span></label><input name="action" placeholder="order.placed" required></div>
+            <div class="field"><label>Max retries</label><input name="max_retries" type="number" min="1" value="3"></div>
+          </div>
+          <div class="field"><label>Handler path<span class="req">*</span></label><input name="handler" placeholder="/hook" required>
+            <p class="hint">Receives a signed {action, metadata, payload} envelope here.</p></div>
+        </div>
+        <div class="modal-foot"><button type="button" class="btn btn-ghost" onclick="document.getElementById('modal').innerHTML=''">Cancel</button><button class="btn btn-primary">Create subscription</button></div>
+      </form>
+    }
+    return open_modal("New subscription", "subscriptions", body)
+}
+
+
+def dash_subs_create(req: Request, res: Response, ctx: Context) -> None {
+    const f: dict[str, str] = req.form()
+    const subscription: str = f["subscription"] if "subscription" in f else ""
+    const application: str = f["application"] if "application" in f else ""
+    const action: str = f["action"] if "action" in f else ""
+    const handler: str = f["handler"] if "handler" in f else ""
+    const mr_s: str = f["max_retries"] if "max_retries" in f else "3"
+    maxr: int = 3
+    try {
+        const m: int = int(mr_s)
+        maxr = m
+    } except {
+        maxr = 3
+    }
+    if len(subscription) > 0 and len(application) > 0 and len(action) > 0 and len(handler) > 0 {
+        with dblock {
+            const ka: int = db.val[int](template[SQL] { select count(*) from applications where application = !{application} and active <> 0 })
+            const kc: int = db.val[int](template[SQL] { select count(*) from actions where action = !{action} })
+            const dup: int = db.val[int](template[SQL] { select count(*) from subscriptions where subscription = !{subscription} })
+            if ka > 0 and kc > 0 and dup == 0 {
+                db.run(template[SQL] { insert into subscriptions(subscription, subscriber, action, handler, max_retries, active) values(!{subscription}, !{application}, !{action}, !{handler}, !{maxr}, 1) })
+            }
+        }
+        audit_log("subscribe", subscription)
+    }
+    const r: tuple[list[SubRow], int] = query_subs("", 1)
+    res.html(and_close_modal(list_subs(r[0], 1, PER, r[1])))
+}
+
+
+def subs_delete_many(req: Request, res: Response, ctx: Context) -> None {
+    for su in get_ids(req) {
+        with dblock {
+            db.run(template[SQL] { delete from gists where subscription = !{su} })
+            db.run(template[SQL] { delete from subscriptions where subscription = !{su} })
+        }
+    }
+    audit_log("delete", "subscriptions")
+    const r: tuple[list[SubRow], int] = query_subs("", 1)
+    res.html(list_subs(r[0], 1, PER, r[1]))
+}
+
+
+def sub_detail(req: Request, res: Response, ctx: Context) -> None {
+    id: str = req.query["id"] if "id" in req.query else ""
+    rows: list[dict[str, Any]] = []
+    deliv: int = 0
+    pend: int = 0
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select subscriber as subscriber, action as action, handler as handler, max_retries as maxr, active as active from subscriptions where subscription = !{id} })
+        rows = rs
+        const d: int = db.val[int](template[SQL] { select count(*) from gists where subscription = !{id} and completed = 1 })
+        const p2: int = db.val[int](template[SQL] { select count(*) from gists where subscription = !{id} and completed = 0 })
+        deliv = d
+        pend = p2
+    }
+    if len(rows) == 0 {
+        res.html(open_drawer("subscription", id, template[HTML] { <p class="hint">Not found.</p> }))
+        return
+    }
+    const r: dict[str, Any] = rows[0]
+    const subscriber: str = r["subscriber"]
+    const action: str = r["action"]
+    const handler: str = r["handler"]
+    const maxr: int = r["maxr"]
+    const active: int = r["active"]
+    const st: str = "active" if active != 0 else "inactive"
+    const pairs: list[tuple[str, str]] = [("Subscription", id), ("Subscriber", subscriber), ("Action", action), ("Handler", handler), ("Max retries", f"{maxr}"), ("Status", st), ("Delivered", f"{deliv}"), ("In flight / failed", f"{pend}")]
+    res.html(open_drawer("subscription", id, kv(pairs)))
+}
+
+
+def mount(app: Router) -> None {
+    app.GET('/dash/subs/detail', sub_detail)
+    app.GET('/subs', sec_subs)
+    app.GET('/dash/subs/list', list_subs_h)
+    app.GET('/dash/new/sub', dash_new_sub)
+    app.POST('/dash/subs', dash_subs_create)
+    app.POST('/dash/subs/delete-many', subs_delete_many)
+}

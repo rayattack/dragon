@@ -1,0 +1,382 @@
+# auth.dr - authentication for the dashboard: user accounts (local PBKDF2 now,
+# LDAP bind modelled for later) and service accounts (an application + its
+# secret). Sign-in state rides the built-in signed-cookie session; a BEFORE
+# guard bounces anonymous UI requests to /login while leaving the signed /v1
+# API, static assets and /health alone. Authorization (who may do what) lives
+# in authz.dr - this module only answers "who are you".
+from http.server import Router, Request, Response, Context
+from database import SQL
+from html import HTML
+from hashlib import pbkdf2_hmac
+from hmac import compare_digest_str
+from binascii import unhexlify
+from secrets import token_bytes
+from time import now
+from os import getenv
+from core import db, dblock, is_fragment, audit_log
+from authz import Principal, anon, app_secret
+
+const _ITER: int = 120000
+
+
+class UserRow {
+    def(username: str, auth_source: str, superadmin: bool, created: str) {
+        self.username = username
+        self.auth_source = auth_source
+        self.superadmin = superadmin
+        self.created = created
+    }
+}
+
+
+def _pbkdf2_hex(password: str, salt: bytes) -> str {
+    const dk: bytes = pbkdf2_hmac("sha256", password.encode(), salt, _ITER)
+    return dk.hex()
+}
+
+
+# Create (or reset) a user. Local users store a PBKDF2 hash; LDAP users store no
+# hash (the directory verifies them at bind time).
+def create_user(username: str, password: str, superadmin: bool, source: str) -> None {
+    const salt: bytes = token_bytes(16)
+    const salt_hex: str = salt.hex()
+    phash: str = ""
+    if source == "local" {
+        phash = _pbkdf2_hex(password, salt)
+    }
+    const sup: int = 1 if superadmin else 0
+    const ts: str = f"{now()}"
+    with dblock {
+        db.run(template[SQL] { delete from users where username = !{username} })
+        db.run(template[SQL] { insert into users(username, salt, phash, auth_source, superadmin, created) values(!{username}, !{salt_hex}, !{phash}, !{source}, !{sup}, !{ts}) })
+    }
+}
+
+
+def delete_user(username: str) -> None {
+    with dblock {
+        db.run(template[SQL] { delete from users where username = !{username} })
+    }
+}
+
+
+def set_superadmin(username: str, superadmin: bool) -> None {
+    const sup: int = 1 if superadmin else 0
+    with dblock {
+        db.run(template[SQL] { update users set superadmin = !{sup} where username = !{username} })
+    }
+}
+
+
+def list_users() -> list[UserRow] {
+    rows: list[dict[str, Any]] = []
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select username as username, auth_source as src, superadmin as sup, created as created from users order by superadmin desc, username })
+        rows = rs
+    }
+    out: list[UserRow] = []
+    for row in rows {
+        const u: str = row["username"]
+        const s: str = row["src"]
+        const sup: int = row["sup"]
+        const c: str = row["created"]
+        out.append(UserRow(u, s, sup != 0, c))
+    }
+    return out
+}
+
+
+def is_superadmin(username: str) -> bool {
+    sup: int = 0
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select superadmin as s from users where username = !{username} })
+        if len(rs) > 0 {
+            const v: int = rs[0]["s"]
+            sup = v
+        }
+    }
+    return sup != 0
+}
+
+
+# LDAP simple-bind. Modelled now, wired later: with no directory configured this
+# denies. When AMEBO_LDAP_URL is set a minimal LDAPv3 bind PDU over the socket
+# goes here (follow-up). The ACL already speaks LDAP usernames, so nothing in
+# the authorization model changes when this lights up.
+def ldap_bind(username: str, password: str) -> bool {
+    const url: str = getenv("AMEBO_LDAP_URL")
+    if len(url) == 0 {
+        return false
+    }
+    return false
+}
+
+
+# Verify a user's password. Local users check the PBKDF2 hash constant-time;
+# LDAP users (and any username not found locally) defer to ldap_bind.
+def verify_user(username: str, password: str) -> bool {
+    source: str = ""
+    salt_hex: str = ""
+    phash: str = ""
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select auth_source as src, salt as salt, phash as phash from users where username = !{username} })
+        if len(rs) > 0 {
+            const s: str = rs[0]["src"]
+            const sa: str = rs[0]["salt"]
+            const ph: str = rs[0]["phash"]
+            source = s
+            salt_hex = sa
+            phash = ph
+        }
+    }
+    if len(source) == 0 or source == "ldap" {
+        return ldap_bind(username, password)
+    }
+    const salt: bytes = unhexlify(salt_hex)
+    const computed: str = _pbkdf2_hex(password, salt)
+    return compare_digest_str(computed, phash)
+}
+
+
+# Verify a service account: an application name + its secret (active apps only).
+def verify_service(application: str, secret: str) -> bool {
+    const stored: str = app_secret(application)
+    if len(stored) == 0 {
+        return false
+    }
+    return compare_digest_str(secret, stored)
+}
+
+
+# Seed / reset the bootstrap superadmin from the environment on boot. Like the
+# Python amebo, AMEBO_PASSWORD always wins (dev default admin/admin).
+def seed_admin() -> None {
+    user: str = getenv("AMEBO_USERNAME")
+    if len(user) == 0 {
+        user = "admin"
+    }
+    pwd: str = getenv("AMEBO_PASSWORD")
+    if len(pwd) == 0 {
+        pwd = "admin"
+    }
+    create_user(user, pwd, true, "local")
+}
+
+
+# The signed-in principal from the session (anon when not signed in).
+def session_principal(req: Request) -> Principal {
+    if not req.session.has("user") {
+        return anon()
+    }
+    const u: str = req.session.get("user")
+    const kind: str = req.session.get("kind")
+    const sup: bool = req.session.get("super") == "1"
+    return Principal(kind, u, sup)
+}
+
+
+#===----------------------------------------------------------------------===#
+# Login page
+#===----------------------------------------------------------------------===#
+
+def login_card(err: str, scheme: str) -> HTML {
+    err_html: HTML = template[HTML] {  }
+    if len(err) > 0 {
+        err_html = template[HTML] { <div class="login-err">!{err}</div> }
+    }
+    const user_active: str = "active" if scheme != "service" else ""
+    const svc_active: str = "active" if scheme == "service" else ""
+    const user_hidden: str = "hidden" if scheme == "service" else ""
+    const svc_hidden: str = "" if scheme == "service" else "hidden"
+    return template[HTML] {
+      <div class="login-logo"><img src="/static/logo.svg" alt="amebo"></div>
+      <h1>amebo</h1>
+      <p class="login-sub">Sign in to your event notification broker</p>
+      <div class="login-tabs">
+        <button type="button" class="!{user_active}" onclick="loginTab(this,'user')">User account</button>
+        <button type="button" class="!{svc_active}" onclick="loginTab(this,'service')">Service account</button>
+      </div>
+      !{err_html}
+      <form class="login-form" data-form="user" action="/login" method="post" onsubmit="return dj.submit(this, '#login-card')" !{user_hidden | raw}>
+        <input type="hidden" name="scheme" value="user">
+        <div class="field"><label>Username</label><input name="username" placeholder="Username (LDAP uid, e.g. amerkel)" required></div>
+        <div class="field"><label>Password</label><input type="password" name="password" placeholder="Your password" required></div>
+        <button class="btn btn-primary login-go">Sign in</button>
+      </form>
+      <form class="login-form" data-form="service" action="/login" method="post" onsubmit="return dj.submit(this, '#login-card')" !{svc_hidden | raw}>
+        <input type="hidden" name="scheme" value="service">
+        <div class="field"><label>Application</label><input name="application" placeholder="Client / application name" required></div>
+        <div class="field"><label>Secret</label><input type="password" name="secret" placeholder="Application secret" required></div>
+        <button class="btn btn-primary login-go">Sign in</button>
+      </form>
+    }
+}
+
+
+def render_login_page(err: str, scheme: str) -> HTML {
+    return template[HTML] {
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>amebo - sign in</title>
+        <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+        <link rel="stylesheet" href="/static/dash.css">
+        <script>
+          (function(){ var t = localStorage.getItem('amebo-theme'); if (t) document.documentElement.setAttribute('data-theme', t); })();
+        </script>
+        <style>
+          .login-stage{min-height:100vh;display:grid;place-items:center;background:var(--bg);padding:24px}
+          .login-card{width:100%;max-width:384px;background:var(--surface);border:1px solid var(--border);box-shadow:var(--shadow-lg);padding:34px 30px}
+          .login-logo{display:flex;justify-content:center;margin-bottom:14px}
+          .login-logo img{height:44px;width:auto}
+          .login-card h1{text-align:center;font-size:22px;margin:0 0 4px;letter-spacing:-.01em}
+          .login-sub{text-align:center;color:var(--muted);font-size:13px;margin:0 0 22px}
+          .login-tabs{display:flex;border:1px solid var(--border);margin-bottom:20px}
+          .login-tabs button{flex:1;padding:9px;background:var(--surface-2);border:none;border-right:1px solid var(--border);color:var(--muted);font-weight:650;font-size:13px;cursor:pointer}
+          .login-tabs button:last-child{border-right:none}
+          .login-tabs button.active{background:var(--surface);color:var(--text);box-shadow:inset 0 -2px 0 var(--brand)}
+          .login-form .field:last-of-type{margin-bottom:18px}
+          .login-go{width:100%;justify-content:center;margin-top:2px;padding:10px 14px}
+          .login-err{background:rgba(224,49,49,.1);border:1px solid rgba(224,49,49,.24);color:var(--bad);padding:10px 12px;font-size:12.5px;margin-bottom:16px}
+        </style>
+      </head>
+      <body>
+        <div class="login-stage">
+          <div class="login-card" id="login-card">!{login_card(err, scheme)}</div>
+        </div>
+        <button class="theme-fab" title="Toggle light / dark" onclick="var r=document.documentElement,d=r.getAttribute('data-theme')==='dark'?'light':'dark';r.setAttribute('data-theme',d);localStorage.setItem('amebo-theme',d)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8z"/></svg></button>
+        <script src="/static/dg.js"></script>
+        <script>
+          const dj = DragonFragments({ name: 'dj', suffix: 'dj' });
+          window.loginTab = function(btn, name){
+            document.querySelectorAll('.login-tabs button').forEach(function(b){ b.classList.toggle('active', b === btn); });
+            document.querySelectorAll('.login-form').forEach(function(f){ f.hidden = f.dataset.form !== name; });
+            var first = document.querySelector('.login-form[data-form="'+name+'"] input:not([type=hidden])');
+            if (first) first.focus();
+          };
+        </script>
+      </body>
+      </html>
+    }
+}
+
+
+#===----------------------------------------------------------------------===#
+# Handlers + guard
+#===----------------------------------------------------------------------===#
+
+def login_get(req: Request, res: Response, ctx: Context) -> None {
+    if req.session.has("user") {
+        res.redirect("/")
+        return
+    }
+    res.html(render_login_page("", "user"))
+}
+
+
+def login_post(req: Request, res: Response, ctx: Context) -> None {
+    const f: dict[str, str] = req.form()
+    const scheme: str = f["scheme"] if "scheme" in f else "user"
+    ok: bool = false
+    user: str = ""
+    kind: str = "user"
+    sup: bool = false
+    if scheme == "service" {
+        const application: str = f["application"] if "application" in f else ""
+        const secret: str = f["secret"] if "secret" in f else ""
+        if verify_service(application, secret) {
+            ok = true
+            user = application
+            kind = "service"
+        }
+    } else {
+        const u: str = f["username"] if "username" in f else ""
+        const p: str = f["password"] if "password" in f else ""
+        if verify_user(u, p) {
+            ok = true
+            user = u
+            kind = "user"
+            sup = is_superadmin(u)
+        }
+    }
+    if not ok {
+        audit_log("login-failed", scheme + ":" + user)
+        res.status = 401
+        res.html(login_card("Invalid credentials. Check your details and try again.", scheme))
+        return
+    }
+    const supval: str = "1" if sup else "0"
+    req.session.set("user", user)
+    req.session.set("kind", kind)
+    req.session.set("super", supval)
+    audit_log("login", user + " (" + scheme + ")")
+    # dg.js follows this to a full navigation; the Set-Cookie rides this response.
+    res.set_header("X-Dragon-Redirect", "/")
+    res.html(template[HTML] {  })
+}
+
+
+def logout_post(req: Request, res: Response, ctx: Context) -> None {
+    const who: str = req.session.get("user")
+    req.session.clear()
+    if len(who) > 0 {
+        audit_log("logout", who)
+    }
+    if is_fragment(req) {
+        res.set_header("X-Dragon-Redirect", "/login")
+        res.html(template[HTML] {  })
+    } else {
+        res.redirect("/login")
+    }
+}
+
+
+def _exempt(path: str) -> bool {
+    if path == "/login" {
+        return true
+    }
+    if path == "/logout" {
+        return true
+    }
+    if path == "/health" {
+        return true
+    }
+    if path == "/favicon.ico" {
+        return true
+    }
+    if path.startswith("/static/") {
+        return true
+    }
+    if path.startswith("/v1/") {
+        return true
+    }
+    return false
+}
+
+
+# Gate every UI route on a signed-in session. The signed /v1 API and static
+# assets are exempt (they authenticate by signature / are public).
+def require_auth(req: Request, res: Response, ctx: Context) -> None {
+    if _exempt(req.path) {
+        return
+    }
+    if req.session.has("user") {
+        return
+    }
+    if is_fragment(req) {
+        res.set_header("X-Dragon-Redirect", "/login")
+    } else {
+        res.redirect("/login")
+    }
+    res.abort()
+}
+
+
+def mount(app: Router) -> None {
+    app.GET('/login', login_get)
+    app.POST('/login', login_post)
+    app.POST('/logout', logout_post)
+    app.BEFORE('/*', require_auth)
+}

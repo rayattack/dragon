@@ -1,0 +1,615 @@
+# resources/actions.dr - Actions (+ JSON Schema): row + queries + views + routes.
+from http.server import Router, Request, Response, Context
+from database import SQL
+from html import HTML
+from core import db, dblock, PER, get_q, get_status, get_page, like_of, get_ids, audit_log, schema_errors, parse_obj, redaction_paths, redact_add, redact_remove
+from shell import Col, render_toolbar, render_list, list_page, open_modal, active_pill, pill_of, and_close_modal, fragment_with_nav, respond_section, open_drawer, kv, and_close_drawer
+from auth import session_principal
+from authz import Principal, can, acl_of, grant, revoke, action_owner, AclRow, principal_for_api
+from json import Schema
+import json
+
+class ActionRow {
+    def(action: str, application: str, status: str) {
+        self.action = action
+        self.application = application
+        self.status = status
+    }
+}
+
+
+def query_actions(q: str, page: int) -> tuple[list[ActionRow], int] {
+    const pat: str = like_of(q)
+    const off: int = (page - 1) * PER
+    total: int = 0
+    rows: list[dict[str, Any]] = []
+    with dblock {
+        const t: int = db.val[int](template[SQL] { select count(*) from actions where action like !{pat} or application like !{pat} })
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select action as action, application as application, status as status from actions where action like !{pat} or application like !{pat} order by action limit !{PER} offset !{off} })
+        total = t
+        rows = rs
+    }
+    out: list[ActionRow] = []
+    for row in rows {
+        const an: str = row["action"]
+        const ap: str = row["application"]
+        const st: str = row["status"]
+        out.append(ActionRow(an, ap, st))
+    }
+    return (out, total)
+}
+
+
+def query_action_schema(name: str) -> str {
+    schematext: str = ""
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select schema as schema from actions where action = !{name} })
+        if len(rs) > 0 {
+            const sc: str = rs[0]["schema"]
+            schematext = sc
+        }
+    }
+    return schematext
+}
+
+
+def cols_actions() -> list[Col] {
+    return [Col("action", "action"), Col("owner", "owner"), Col("status", "status"), Col("schema", "")]
+}
+
+
+def _tr_action(a: ActionRow) -> HTML {
+    return template[HTML] {
+      <tr class="rowlink" onclick="dj.get('/dash/action?name=!{a.action}', '#drawer')">
+        <td class="cb-col" onclick="event.stopPropagation()"><input type="checkbox" class="cb-row" value="!{a.action}"></td>
+        <td data-col="action" class="fw">!{a.action}</td>
+        <td data-col="owner" class="dim">!{a.application}</td>
+        <td data-col="status"><span class="pill ok">!{a.status}</span></td>
+        <td data-col="schema" class="right"><button class="btn btn-sm" onclick="event.stopPropagation();dj.get('/dash/action?name=!{a.action}', '#drawer')">view schema</button></td>
+      </tr>
+    }
+}
+
+
+def rows_actions(rows: list[ActionRow]) -> HTML {
+    return template[HTML] {!{ for a in rows { :{ !{_tr_action(a)} } }}}
+}
+
+
+def list_actions(rows: list[ActionRow], page: int, per: int, total: int) -> HTML {
+    return render_list("actions", cols_actions(), rows_actions(rows), "No actions match.", page, per, total)
+}
+
+
+def page_actions(frag: HTML) -> HTML {
+    const add: HTML = template[HTML] { <button class="btn btn-primary" onclick="dj.get('/dash/new/action', '#modal')">+ New action</button> }
+    const bulk: HTML = template[HTML] { <button class="btn btn-sm btn-danger" onclick="dashBulk('actions','/dash/actions/delete-many')">Delete</button> }
+    return list_page("actions", "Actions", "Named events, each with the JSON Schema every payload must satisfy.", add, render_toolbar("actions", "Search actions...", cols_actions(), template[HTML] {  }, bulk), frag)
+}
+
+
+# One ACL subject row: name + Read/Write/Admin checkboxes (+ optional revoke).
+# data-stype/data-sname drive the delegated change/click handlers in the drawer.
+def _acl_row(label: str, stype: str, sname: str, r: bool, w: bool, a: bool, revocable: bool) -> HTML {
+    const rc: str = "checked" if r else ""
+    const wc: str = "checked" if w else ""
+    const ac: str = "checked" if a else ""
+    xbtn: HTML = template[HTML] { <span class="acl-act"></span> }
+    if revocable {
+        xbtn = template[HTML] { <span class="acl-act"><button type="button" class="icon-btn acl-x" title="Revoke access">&times;</button></span> }
+    }
+    return template[HTML] {
+      <div class="acl-row" data-stype="!{stype}" data-sname="!{sname}">
+        <span class="acl-name">!{label}</span>
+        <label class="acl-cb"><input type="checkbox" data-perm="read" !{rc | raw}></label>
+        <label class="acl-cb"><input type="checkbox" data-perm="write" !{wc | raw}></label>
+        <label class="acl-cb"><input type="checkbox" data-perm="admin" !{ac | raw}></label>
+        !{xbtn}
+      </div>
+    }
+}
+
+
+# The owning application is an implicit, non-editable full admin.
+def _acl_owner_row(owner: str) -> HTML {
+    return template[HTML] {
+      <div class="acl-row acl-owner" data-stype="owner" data-sname="!{owner}">
+        <span class="acl-name">!{owner} <span class="acl-tag">owner</span></span>
+        <label class="acl-cb"><input type="checkbox" checked disabled></label>
+        <label class="acl-cb"><input type="checkbox" checked disabled></label>
+        <label class="acl-cb"><input type="checkbox" checked disabled></label>
+        <span class="acl-act"></span>
+      </div>
+    }
+}
+
+
+# The swappable ACCESS CONTROL body: header, the "Any valid token" wildcard,
+# the pinned owner, then grouped Users and Services. Re-rendered on every grant
+# /revoke and swapped into #acl-panel.
+def render_acl_section(action: str) -> HTML {
+    const owner: str = action_owner(action)
+    const rows: list[AclRow] = acl_of(action)
+    star_r: bool = False
+    star_w: bool = False
+    star_a: bool = False
+    users: list[HTML] = []
+    services: list[HTML] = []
+    for r in rows {
+        if r.subject_type == "*" {
+            star_r = r.can_read
+            star_w = r.can_write
+            star_a = r.can_admin
+        } elif r.subject_type == "service" {
+            services.append(_acl_row(r.subject_name, "service", r.subject_name, r.can_read, r.can_write, r.can_admin, True))
+        } else {
+            users.append(_acl_row(r.subject_name, "user", r.subject_name, r.can_read, r.can_write, r.can_admin, True))
+        }
+    }
+    owner_html: HTML = template[HTML] {  }
+    if len(owner) > 0 {
+        owner_html = _acl_owner_row(owner)
+    }
+    users_html: HTML = template[HTML] { <div class="acl-empty">No users granted.</div> }
+    if len(users) > 0 {
+        users_html = template[HTML] {!{ for u in users { :{ !{u} } }}}
+    }
+    services_html: HTML = template[HTML] { <div class="acl-empty">No services granted.</div> }
+    if len(services) > 0 {
+        services_html = template[HTML] {!{ for s in services { :{ !{s} } }}}
+    }
+    return template[HTML] {
+      <div class="acl-head"><span class="acl-col-name">NAME</span><span>READ</span><span>WRITE</span><span>ADMIN</span><span></span></div>
+      !{_acl_row("Any valid token", "*", "*", star_r, star_w, star_a, False)}
+      !{owner_html}
+      <div class="acl-group">Users</div>
+      !{users_html}
+      <div class="acl-group">Services</div>
+      !{services_html}
+    }
+}
+
+
+def render_redactions_section(action: str) -> HTML {
+    const paths: list[str] = redaction_paths(action)
+    if len(paths) == 0 {
+        return template[HTML] { <div class="acl-empty">No redactions - full payloads are stored and delivered.</div> }
+    }
+    return template[HTML] {
+      <div class="redact-list">!{ for pth in paths { :{
+        <div class="redact-row"><code class="mono">!{pth}</code><button type="button" class="icon-btn sm acl-x" title="Remove redaction" onclick="dashRedactRemove('!{pth}')">&times;</button></div>
+      } }}</div>
+    }
+}
+
+
+def render_action_drawer(action: str, schema_pretty: str) -> HTML {
+    return template[HTML] {
+      <div class="drawer-scrim" onclick="document.getElementById('drawer').innerHTML=''"></div>
+      <aside class="drawer drawer-wide">
+        <div class="drawer-head"><div><div class="eyebrow">action</div><h3>!{action}</h3></div>
+          <button class="icon-btn" onclick="document.getElementById('drawer').innerHTML=''">&times;</button></div>
+        <div class="drawer-body">
+          <div class="tabs">
+            <button class="active" onclick="dgDrawerTab(this,'schema')">Schema</button>
+            <button onclick="dgDrawerTab(this,'validate')">Validate</button>
+            <button onclick="dgDrawerTab(this,'access')">Access control</button>
+            <button onclick="dgDrawerTab(this,'redact')">Redactions</button>
+          </div>
+          <div class="tabpane active" id="dtab-schema">
+            <div class="ide-head"><span class="drawer-sec" style="margin:0">JSON Schema</span>
+              <button class="btn btn-sm btn-ghost" onclick="dgCopyAce('schema-view', this)">Copy</button></div>
+            <div id="schema-view" class="ide" style="height:calc(100vh - 210px)">!{schema_pretty}</div>
+          </div>
+          <div class="tabpane" id="dtab-validate">
+            <p class="hint" style="margin-top:0">Paste a sample payload and check it against this action's schema. <b>Nothing here is saved</b> - it is a scratch validator, not a publish.</p>
+            <div id="payload-ide" class="ide" style="height:calc(100vh - 350px)">{
+  "order": 1,
+  "amount": 9.5
+}</div>
+            <div class="drawer-actions">
+              <button class="btn btn-primary btn-sm" onclick="dgValidatePayload('!{action}')">Validate payload</button>
+              <span class="hint">not saved &mdash; validated on the fly</span>
+            </div>
+            <div id="validate-result"></div>
+          </div>
+          <div class="tabpane" id="dtab-access">
+            <p class="drawer-sec" style="margin-top:0">Access control<span class="acl-hint">who may read, write or administer this action</span></p>
+            <form class="acl-add" onsubmit="return dashAclAdd(this)">
+              <select name="subject_type" onchange="this.form.subject_name.disabled = this.value === '*'">
+                <option value="user">User</option>
+                <option value="service">Service</option>
+                <option value="*">Any valid token</option>
+              </select>
+              <input name="subject_name" placeholder="User name in LDAP, e.g. amerkel">
+              <label class="acl-cb"><input type="checkbox" name="read"> Read</label>
+              <label class="acl-cb"><input type="checkbox" name="write"> Write</label>
+              <label class="acl-cb"><input type="checkbox" name="admin"> Admin</label>
+              <button class="btn btn-sm btn-primary">Add</button>
+            </form>
+            <div id="acl-panel" data-action="!{action}">!{render_acl_section(action)}</div>
+          </div>
+          <div class="tabpane" id="dtab-redact">
+            <p class="hint" style="margin-top:0">Fields listed here are stripped from every payload <b>at reception</b> - before the event is stored or delivered - so sensitive data never lands in amebo. Use dot paths for nested fields (e.g. <code>card.cvv</code>).</p>
+            <form class="acl-add" onsubmit="return dashRedactAdd(this)">
+              <input name="field_path" placeholder="field path, e.g. card.cvv" style="flex:1;min-width:180px">
+              <button class="btn btn-sm btn-primary">Redact</button>
+            </form>
+            <div id="redact-panel" data-action="!{action}">!{render_redactions_section(action)}</div>
+          </div>
+        </div>
+        <script>
+          window.dashRedactAdd = function(form){
+            var panel = document.getElementById('redact-panel'); var fp = form.field_path.value.trim();
+            if (!fp) { form.field_path.focus(); return false; }
+            var fd = new FormData(); fd.append('action', panel.dataset.action); fd.append('field_path', fp);
+            dj.send('/dash/action/redact', { method: 'POST', target: '#redact-panel', body: fd });
+            form.reset(); return false;
+          };
+          window.dashRedactRemove = function(fp){
+            var panel = document.getElementById('redact-panel');
+            var fd = new FormData(); fd.append('action', panel.dataset.action); fd.append('field_path', fp);
+            dj.send('/dash/action/redact/remove', { method: 'POST', target: '#redact-panel', body: fd });
+          };
+        </script>
+        <script>
+          window.dgDrawerTab = function(btn, name){
+            var root = btn.closest('.drawer');
+            root.querySelectorAll('.tabs button').forEach(function(b){ b.classList.toggle('active', b === btn); });
+            root.querySelectorAll('.tabpane').forEach(function(p){ p.classList.toggle('active', p.id === 'dtab-' + name); });
+            try { if (name === 'schema') ace.edit('schema-view').resize(); if (name === 'validate') ace.edit('payload-ide').resize(); } catch (e) {}
+          };
+          window.dgCopyAce = function(id, btn){
+            navigator.clipboard.writeText(ace.edit(id).getValue());
+            var t = btn.textContent; btn.textContent = 'Copied'; setTimeout(function(){ btn.textContent = t; }, 1200);
+          };
+          window.dgValidatePayload = function(act){
+            var fd = new FormData(); fd.append('action', act); fd.append('payload', ace.edit('payload-ide').getValue());
+            dj.send('/dash/action/validate', { method: 'POST', target: '#validate-result', body: fd });
+          };
+          (function(){
+            var reg = (window.__ace = window.__ace || []);
+            var sv = ace.edit('schema-view'); sv.session.setMode('ace/mode/json');
+            sv.setOptions({ readOnly: true, fontSize: 14, showPrintMargin: false, wrap: true, tabSize: 2, useWorker: false });
+            try { sv.setValue(JSON.stringify(JSON.parse(sv.getValue()), null, 2), -1); } catch (e) {}
+            sv.clearSelection(); reg.push(sv);
+            var pv = ace.edit('payload-ide'); pv.session.setMode('ace/mode/json');
+            pv.setOptions({ fontSize: 14, showPrintMargin: false, tabSize: 2, useWorker: false });
+            pv.clearSelection(); reg.push(pv);
+            if (window.dgAceTheme) window.dgAceTheme(); else { var d = document.documentElement.getAttribute('data-theme') === 'dark'; sv.setTheme(d?'ace/theme/one_dark':'ace/theme/chrome'); pv.setTheme(d?'ace/theme/one_dark':'ace/theme/chrome'); }
+          })();
+          (function(){
+            var panel = document.getElementById('acl-panel'); if (!panel || panel.__wired) return; panel.__wired = true;
+            function send(url, fd){ fd.append('action', panel.dataset.action); dj.send(url, {method:'POST', target:'#acl-panel', body:fd}); }
+            panel.addEventListener('change', function(e){
+              var cb = e.target; if (!cb.matches || !cb.matches('input[data-perm]')) return;
+              var row = cb.closest('.acl-row'); var fd = new FormData();
+              fd.append('subject_type', row.dataset.stype); fd.append('subject_name', row.dataset.sname);
+              ['read','write','admin'].forEach(function(p){ var x = row.querySelector('input[data-perm='+p+']'); fd.append(p, (x && x.checked) ? '1' : '0'); });
+              send('/dash/action/acl', fd);
+            });
+            panel.addEventListener('click', function(e){
+              var x = e.target.closest('.acl-x'); if (!x) return;
+              var row = x.closest('.acl-row'); var fd = new FormData();
+              fd.append('subject_type', row.dataset.stype); fd.append('subject_name', row.dataset.sname);
+              send('/dash/action/acl/revoke', fd);
+            });
+          })();
+          window.dashAclAdd = function(form){
+            var panel = document.getElementById('acl-panel'); var fd = new FormData();
+            var stype = form.subject_type.value;
+            var sname = stype === '*' ? '*' : form.subject_name.value.trim();
+            if (!sname){ form.subject_name.focus(); return false; }
+            fd.append('action', panel.dataset.action); fd.append('subject_type', stype); fd.append('subject_name', sname);
+            ['read','write','admin'].forEach(function(p){ fd.append(p, form[p].checked ? '1' : '0'); });
+            dj.send('/dash/action/acl', {method:'POST', target:'#acl-panel', body:fd});
+            form.reset(); return false;
+          };
+        </script>
+      </aside>
+    }
+}
+
+
+def sec_actions(req: Request, res: Response, ctx: Context) -> None {
+    const page: int = get_page(req)
+    const r: tuple[list[ActionRow], int] = query_actions(get_q(req), page)
+    respond_section(req, res, "actions", page_actions(list_actions(r[0], page, PER, r[1])))
+}
+
+
+def list_actions_h(req: Request, res: Response, ctx: Context) -> None {
+    const page: int = get_page(req)
+    const r: tuple[list[ActionRow], int] = query_actions(get_q(req), page)
+    res.html(list_actions(r[0], page, PER, r[1]))
+}
+
+
+def dash_action(req: Request, res: Response, ctx: Context) -> None {
+    name: str = ""
+    if "name" in req.query {
+        const v: str = req.query["name"]
+        name = v
+    }
+    res.html(render_action_drawer(name, query_action_schema(name)))
+}
+
+
+def dash_new_action(req: Request, res: Response, ctx: Context) -> None {
+    res.html(render_modal_action())
+}
+
+
+def render_modal_action() -> HTML {
+    const body: HTML = template[HTML] {
+      <form action="/dash/actions" method="post" onsubmit="this.schema.value = window.__ide.getValue(); return dj.submit(this, '#list-actions')">
+        <div class="modal-body">
+          <div class="field-row">
+            <div class="field"><label>Action<span class="req">*</span></label><input name="action" placeholder="order.placed" required></div>
+            <div class="field"><label>Owner application<span class="req">*</span></label><input name="application" placeholder="orders" required></div>
+          </div>
+          <div class="field"><label>JSON Schema<span class="req">*</span></label>
+            <div id="schema-ide" class="ide">{
+  "type": "object",
+  "required": ["order"],
+  "properties": {
+    "order": { "type": "integer", "minimum": 1 }
+  }
+}</div>
+            <input type="hidden" name="schema">
+            <p class="hint">Draft-07 subset. Every payload published against this action is validated here first.</p>
+          </div>
+          <div class="field"><label>Redact fields <span class="hint" style="text-transform:none;font-weight:400">optional</span></label>
+            <input name="redactions" placeholder="comma-separated dot paths, e.g. card.cvv, card.number">
+            <p class="hint">Stripped from every payload at reception - never stored or delivered.</p>
+          </div>
+        </div>
+        <div class="modal-foot"><button type="button" class="btn btn-ghost" onclick="document.getElementById('modal').innerHTML=''">Cancel</button><button class="btn btn-primary">Create action</button></div>
+      </form>
+      <script>
+        (function(){ var ed = ace.edit('schema-ide'); window.__ide = ed; ed.session.setMode('ace/mode/json');
+          ed.setOptions({ fontSize: 14, showPrintMargin: false, tabSize: 2, useWorker: false }); ed.clearSelection();
+          (window.__ace = window.__ace || []).push(ed);
+          if (window.dgAceTheme) window.dgAceTheme(); })();
+      </script>
+    }
+    return open_modal("New action", "actions", body)
+}
+
+
+def dash_actions_create(req: Request, res: Response, ctx: Context) -> None {
+    const f: dict[str, str] = req.form()
+    const action: str = f["action"] if "action" in f else ""
+    const application: str = f["application"] if "application" in f else ""
+    const schema_s: str = f["schema"] if "schema" in f else ""
+    ok: bool = len(action) > 0 and len(application) > 0 and len(schema_s) > 0
+    schematext: str = ""
+    if ok {
+        try {
+            const parsed: dict[str, Any] = json.loads_obj(schema_s)
+            const norm: str = json.dumps(parsed)
+            schematext = norm
+        } except {
+            ok = False
+        }
+    }
+    if ok {
+        with dblock {
+            const known: int = db.val[int](template[SQL] { select count(*) from applications where application = !{application} and active <> 0 })
+            const dup: int = db.val[int](template[SQL] { select count(*) from actions where action = !{action} })
+            if known > 0 and dup == 0 {
+                db.run(template[SQL] { insert into actions(action, application, schema, status) values(!{action}, !{application}, !{schematext}, 'active') })
+            }
+        }
+        audit_log("register", "action " + action)
+        const reds_s: str = f["redactions"] if "redactions" in f else ""
+        if len(reds_s) > 0 {
+            for raw in reds_s.split(",") {
+                const fp: str = raw.strip()
+                if len(fp) > 0 {
+                    redact_add(action, fp)
+                }
+            }
+        }
+    }
+    const r: tuple[list[ActionRow], int] = query_actions("", 1)
+    res.html(and_close_modal(list_actions(r[0], 1, PER, r[1])))
+}
+
+
+def render_validate_result(ok: bool, errs: list[str], msg: str) -> HTML {
+    if ok {
+        return template[HTML] { <div class="val-ok">&check; Valid &mdash; this payload conforms to the action's schema.</div> }
+    }
+    if len(msg) > 0 {
+        return template[HTML] { <div class="val-bad">!{msg}</div> }
+    }
+    return template[HTML] {
+      <div class="val-bad">
+        <div class="val-h">!{f"{len(errs)}"} validation error(s)</div>
+        <ul class="val-list">!{ for e in errs { :{ <li>!{e}</li> } }}</ul>
+      </div>
+    }
+}
+
+
+# Scratch validation: check a pasted payload against the action's schema WITHOUT
+# persisting anything. Reuses the exact validation path h_publish uses.
+def dash_action_validate(req: Request, res: Response, ctx: Context) -> None {
+    const f: dict[str, str] = req.form()
+    const action: str = f["action"] if "action" in f else ""
+    const payload_s: str = f["payload"] if "payload" in f else ""
+    const schematext: str = query_action_schema(action)
+    if len(schematext) == 0 {
+        res.html(render_validate_result(False, [], "Unknown action."))
+        return
+    }
+    ok: bool = False
+    payload: Any = 0
+    try {
+        const p: Any = json.loads(payload_s)
+        payload = p
+        ok = True
+    } except {
+        ok = False
+    }
+    if not ok {
+        res.html(render_validate_result(False, [], "Payload is not valid JSON."))
+        return
+    }
+    const s: Schema = Schema("draft-07")
+    s.register(action, json.loads_obj(schematext))
+    const errs: list[str] = schema_errors(s, action, payload)
+    res.html(render_validate_result(len(errs) == 0, errs, ""))
+}
+
+
+# Editing an action's ACL requires ADMIN on it (its owner, an admin subject, or
+# a superadmin). The dashboard principal comes from the session.
+def _acl_allowed(req: Request, action: str) -> bool {
+    const p: Principal = session_principal(req)
+    return can(p, action, "admin")
+}
+
+
+def dash_action_acl_set(req: Request, res: Response, ctx: Context) -> None {
+    const f: dict[str, str] = req.form()
+    const action: str = f["action"] if "action" in f else ""
+    const stype: str = f["subject_type"] if "subject_type" in f else ""
+    sname: str = f["subject_name"] if "subject_name" in f else ""
+    if stype == "*" {
+        sname = "*"
+    }
+    if _acl_allowed(req, action) and len(action) > 0 and len(stype) > 0 and len(sname) > 0 {
+        const r: bool = (f["read"] if "read" in f else "0") == "1"
+        const w: bool = (f["write"] if "write" in f else "0") == "1"
+        const a: bool = (f["admin"] if "admin" in f else "0") == "1"
+        grant(action, stype, sname, r, w, a)
+        audit_log("acl", "grant " + stype + ":" + sname + " on " + action)
+    }
+    res.html(render_acl_section(action))
+}
+
+
+def dash_action_acl_revoke(req: Request, res: Response, ctx: Context) -> None {
+    const f: dict[str, str] = req.form()
+    const action: str = f["action"] if "action" in f else ""
+    const stype: str = f["subject_type"] if "subject_type" in f else ""
+    const sname: str = f["subject_name"] if "subject_name" in f else ""
+    if _acl_allowed(req, action) and len(action) > 0 {
+        revoke(action, stype, sname)
+        audit_log("acl", "revoke " + stype + ":" + sname + " on " + action)
+    }
+    res.html(render_acl_section(action))
+}
+
+
+def dash_action_redact_add(req: Request, res: Response, ctx: Context) -> None {
+    const f: dict[str, str] = req.form()
+    const action: str = f["action"] if "action" in f else ""
+    const fp: str = f["field_path"] if "field_path" in f else ""
+    if _acl_allowed(req, action) and len(action) > 0 and len(fp) > 0 {
+        redact_add(action, fp)
+        audit_log("redact", "add " + fp + " on " + action)
+    }
+    res.html(render_redactions_section(action))
+}
+
+
+def dash_action_redact_remove(req: Request, res: Response, ctx: Context) -> None {
+    const f: dict[str, str] = req.form()
+    const action: str = f["action"] if "action" in f else ""
+    const fp: str = f["field_path"] if "field_path" in f else ""
+    if _acl_allowed(req, action) and len(action) > 0 {
+        redact_remove(action, fp)
+        audit_log("redact", "remove " + fp + " on " + action)
+    }
+    res.html(render_redactions_section(action))
+}
+
+
+# --- Signed /v1 redactions API (admin key) --------------------------------
+def h_redactions_list(req: Request, res: Response, ctx: Context) -> None {
+    const body: str = req.body
+    const p: Principal = principal_for_api(req, body)
+    if not p.superadmin {
+        res.status = 403
+        res.json('{"error":"managing redactions requires the admin key"}')
+        return
+    }
+    const action: str = req.query["action"] if "action" in req.query else ""
+    res.json(json.dumps({"action": action, "redactions": redaction_paths(action)}))
+}
+
+
+def h_redactions_add(req: Request, res: Response, ctx: Context) -> None {
+    const body: str = req.body
+    const p: Principal = principal_for_api(req, body)
+    if not p.superadmin {
+        res.status = 403
+        res.json('{"error":"managing redactions requires the admin key"}')
+        return
+    }
+    const doc: dict[str, Any] = parse_obj(body)
+    const action: str = doc["action"] if "action" in doc else ""
+    const fp: str = doc["field_path"] if "field_path" in doc else ""
+    if len(action) == 0 or len(fp) == 0 {
+        res.status = 422
+        res.json('{"error":"action and field_path are required"}')
+        return
+    }
+    redact_add(action, fp)
+    audit_log("redact", "api add " + fp + " on " + action)
+    res.status = 201
+    res.json(json.dumps({"action": action, "field_path": fp}))
+}
+
+
+def h_redactions_remove(req: Request, res: Response, ctx: Context) -> None {
+    const body: str = req.body
+    const p: Principal = principal_for_api(req, body)
+    if not p.superadmin {
+        res.status = 403
+        res.json('{"error":"managing redactions requires the admin key"}')
+        return
+    }
+    const doc: dict[str, Any] = parse_obj(body)
+    const action: str = doc["action"] if "action" in doc else ""
+    const fp: str = doc["field_path"] if "field_path" in doc else ""
+    redact_remove(action, fp)
+    audit_log("redact", "api remove " + fp + " on " + action)
+    res.json(json.dumps({"removed": fp}))
+}
+
+
+def actions_delete_many(req: Request, res: Response, ctx: Context) -> None {
+    for ac in get_ids(req) {
+        with dblock {
+            db.run(template[SQL] { delete from gists where event in (select event from events where action = !{ac}) })
+            db.run(template[SQL] { delete from subscriptions where action = !{ac} })
+            db.run(template[SQL] { delete from events where action = !{ac} })
+            db.run(template[SQL] { delete from actions where action = !{ac} })
+        }
+    }
+    audit_log("delete", "actions")
+    const r: tuple[list[ActionRow], int] = query_actions("", 1)
+    res.html(list_actions(r[0], 1, PER, r[1]))
+}
+
+
+def mount(app: Router) -> None {
+    app.GET('/actions', sec_actions)
+    app.GET('/dash/actions/list', list_actions_h)
+    app.GET('/dash/action', dash_action)
+    app.GET('/dash/new/action', dash_new_action)
+    app.POST('/dash/actions', dash_actions_create)
+    app.POST('/dash/actions/delete-many', actions_delete_many)
+    app.POST('/dash/action/acl', dash_action_acl_set)
+    app.POST('/dash/action/acl/revoke', dash_action_acl_revoke)
+    app.POST('/dash/action/validate', dash_action_validate)
+    app.POST('/dash/action/redact', dash_action_redact_add)
+    app.POST('/dash/action/redact/remove', dash_action_redact_remove)
+    app.GET('/v1/redactions', h_redactions_list)
+    app.POST('/v1/redactions', h_redactions_add)
+    app.DELETE('/v1/redactions', h_redactions_remove)
+}

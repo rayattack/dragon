@@ -1,0 +1,206 @@
+# authz.dr - per-action access control (the Nakadi model). Every action carries
+# an ACL of subjects, each a (type, name) with READ / WRITE / ADMIN:
+#   READ  -> may consume: subscribe to the action and read its events/gists
+#   WRITE -> may publish events for the action
+#   ADMIN -> may edit the action (schema, status) and its ACL
+# subject_type is 'user' (a dashboard/LDAP account), 'service' (an application),
+# or '*' (any authenticated principal - Nakadi's "any valid token"). The action's
+# owning application is an implicit full-rights admin and is never stored as a row.
+from http.server import Request
+from database import SQL
+from hmac import new, compare_digest, compare_digest_str
+from core import db, dblock, admin_key
+
+# A resolved caller. kind is 'user', 'service', or 'anon'. superadmin bypasses
+# every per-action check (the bootstrap admin + any user flagged superadmin).
+class Principal {
+    def(kind: str, name: str, superadmin: bool) {
+        self.kind = kind
+        self.name = name
+        self.superadmin = superadmin
+    }
+}
+
+
+def anon() -> Principal {
+    return Principal("anon", "", false)
+}
+
+
+# One ACL entry as shown in the ACCESS CONTROL table.
+class AclRow {
+    def(subject_type: str, subject_name: str, can_read: bool, can_write: bool, can_admin: bool) {
+        self.subject_type = subject_type
+        self.subject_name = subject_name
+        self.can_read = can_read
+        self.can_write = can_write
+        self.can_admin = can_admin
+    }
+}
+
+
+# The application that owns an action is its implicit admin (creator-is-admin),
+# so legacy owner-signed publishes keep working with no explicit grant.
+def _is_owner(kind: str, name: str, action: str) -> bool {
+    if kind != "service" {
+        return false
+    }
+    owner: str = ""
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select application as application from actions where action = !{action} })
+        if len(rs) > 0 {
+            const o: str = rs[0]["application"]
+            owner = o
+        }
+    }
+    return owner == name and len(owner) > 0
+}
+
+
+# True if the (type, name) subject holds `perm` ('read'/'write'/'admin') on the
+# action. Read the flag with the typed db.val[int] (monomorphized) rather than a
+# db.all -> dict[str, Any] row: boxing the integer flag columns into Any is a
+# needless dynamic crutch (commandment #3) and corrupted the heap.
+def _acl_has(action: str, stype: str, sname: str, perm: str) -> bool {
+    n: int = 0
+    with dblock {
+        if perm == "read" {
+            const v: int = db.val[int](template[SQL] { select count(*) from acl where action = !{action} and subject_type = !{stype} and subject_name = !{sname} and can_read <> 0 })
+            n = v
+        } elif perm == "write" {
+            const v: int = db.val[int](template[SQL] { select count(*) from acl where action = !{action} and subject_type = !{stype} and subject_name = !{sname} and can_write <> 0 })
+            n = v
+        } elif perm == "admin" {
+            const v: int = db.val[int](template[SQL] { select count(*) from acl where action = !{action} and subject_type = !{stype} and subject_name = !{sname} and can_admin <> 0 })
+            n = v
+        }
+    }
+    return n > 0
+}
+
+
+# The authorization decision. Anonymous callers never pass (the '*' wildcard is
+# "any *authenticated* principal", not "everyone").
+def can(p: Principal, action: str, perm: str) -> bool {
+    if p.superadmin {
+        return true
+    }
+    if p.kind == "anon" {
+        return false
+    }
+    if _is_owner(p.kind, p.name, action) {
+        return true
+    }
+    if _acl_has(action, p.kind, p.name, perm) {
+        return true
+    }
+    if _acl_has(action, "*", "*", perm) {
+        return true
+    }
+    return false
+}
+
+
+# Upsert one ACL subject's grants. Passing all-false still writes the row (an
+# explicit "listed but no permission"); use revoke() to remove entirely.
+def grant(action: str, stype: str, sname: str, r: bool, w: bool, a: bool) -> None {
+    const ri: int = 1 if r else 0
+    const wi: int = 1 if w else 0
+    const ai: int = 1 if a else 0
+    with dblock {
+        const c: int = db.val[int](template[SQL] { select count(*) from acl where action = !{action} and subject_type = !{stype} and subject_name = !{sname} })
+        if c > 0 {
+            db.run(template[SQL] { update acl set can_read = !{ri}, can_write = !{wi}, can_admin = !{ai} where action = !{action} and subject_type = !{stype} and subject_name = !{sname} })
+        } else {
+            db.run(template[SQL] { insert into acl(action, subject_type, subject_name, can_read, can_write, can_admin) values(!{action}, !{stype}, !{sname}, !{ri}, !{wi}, !{ai}) })
+        }
+    }
+}
+
+
+def revoke(action: str, stype: str, sname: str) -> None {
+    with dblock {
+        db.run(template[SQL] { delete from acl where action = !{action} and subject_type = !{stype} and subject_name = !{sname} })
+    }
+}
+
+
+# Every explicit ACL row for an action, wildcard first, then by name.
+def acl_of(action: str) -> list[AclRow] {
+    rows: list[dict[str, Any]] = []
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select subject_type as t, subject_name as n, can_read as r, can_write as w, can_admin as a from acl where action = !{action} order by (subject_type = '*') desc, subject_type, subject_name })
+        rows = rs
+    }
+    out: list[AclRow] = []
+    for row in rows {
+        const t: str = row["t"]
+        const n: str = row["n"]
+        const r: int = row["r"]
+        const w: int = row["w"]
+        const a: int = row["a"]
+        out.append(AclRow(t, n, r != 0, w != 0, a != 0))
+    }
+    return out
+}
+
+
+# The owning application of an action ("" if none / unknown), for the pinned
+# "(owner)" row the ACL UI shows above the editable subjects.
+def action_owner(action: str) -> str {
+    owner: str = ""
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select application as application from actions where action = !{action} })
+        if len(rs) > 0 {
+            const o: str = rs[0]["application"]
+            owner = o
+        }
+    }
+    return owner
+}
+
+
+# An application's secret (active apps only); "" when unknown or inactive.
+def app_secret(application: str) -> str {
+    out: str = ""
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select secret as secret from applications where application = !{application} and active <> 0 })
+        if len(rs) > 0 {
+            const s: str = rs[0]["secret"]
+            out = s
+        }
+    }
+    return out
+}
+
+
+def _sig_ok(secret: str, body: str, sig: str) -> bool {
+    const expected: bytes = new(secret.encode(), body.encode(), "sha256").hexdigest().encode()
+    return compare_digest(sig.encode(), expected)
+}
+
+
+# Resolve the caller of a signed /v1 request:
+#   x-amebo-admin-key matching the admin key         -> superadmin
+#   x-amebo-application + valid x-amebo-signature     -> that service account
+#   otherwise                                         -> anonymous
+def principal_for_api(req: Request, body: str) -> Principal {
+    if "x-amebo-admin-key" in req.headers {
+        const k: str = req.headers["x-amebo-admin-key"]
+        if len(k) > 0 and compare_digest_str(k, admin_key()) {
+            return Principal("user", "admin", true)
+        }
+    }
+    if "x-amebo-application" in req.headers {
+        const app: str = req.headers["x-amebo-application"]
+        const secret: str = app_secret(app)
+        sig: str = ""
+        if "x-amebo-signature" in req.headers {
+            sig = req.headers["x-amebo-signature"]
+        }
+        if len(secret) > 0 and _sig_ok(secret, body, sig) {
+            return Principal("service", app, false)
+        }
+    }
+    return anon()
+}

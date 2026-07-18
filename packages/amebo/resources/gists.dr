@@ -1,0 +1,297 @@
+# resources/gists.dr - Gists (delivery records): row + queries + views + routes.
+from http.server import Router, Request, Response, Context
+from database import SQL
+from html import HTML
+from core import db, dblock, PER, get_q, get_status, get_page, like_of, get_ids, audit_log, ago
+from shell import Col, render_toolbar, render_list, list_page, open_modal, active_pill, pill_of, and_close_modal, fragment_with_nav, respond_section, open_drawer, kv, and_close_drawer, code_pill
+
+class GistRow {
+    def(id: int, action: str, subscriber: str, handler: str, status: str, attempts: str, code: int, ms: int, response: str, attempted: int) {
+        self.id = f"{id}"
+        self.action = action
+        self.subscriber = subscriber
+        self.handler = handler
+        self.status = status
+        self.attempts = attempts
+        self.code = code
+        self.ms = ms
+        self.response = response
+        self.attempted = attempted
+        sn: str = response
+        if len(sn) > 46 {
+            sn = sn[:46] + "..."
+        }
+        self.snippet = sn
+    }
+}
+
+
+# One row per webhook attempt, for the gist drawer's history table.
+class AttemptRow {
+    def(attempt: int, status: int, ms: int, out_bytes: int, in_bytes: int, response: str, ts: int) {
+        self.attempt = attempt
+        self.status = status
+        self.ms = ms
+        self.out_bytes = out_bytes
+        self.in_bytes = in_bytes
+        self.response = response
+        self.ts = ts
+    }
+}
+
+
+def _gist_from(row: dict[str, Any]) -> GistRow {
+    const gid: int = row["id"]
+    const action: str = row["action"]
+    const subscriber: str = row["subscriber"]
+    const handler: str = row["handler"]
+    const completed: int = row["completed"]
+    const retries: int = row["retries"]
+    const maxr: int = row["maxr"]
+    const code: int = row["last_status"]
+    const ms: int = row["last_ms"]
+    const response: str = row["response"]
+    const attempted: int = row["attempted_at"]
+    status: str = "pending"
+    if completed != 0 {
+        status = "delivered"
+    } elif retries >= maxr {
+        status = "failed"
+    } elif retries > 0 {
+        status = "retrying"
+    }
+    # retries counts FAILED attempts; a delivered gist also made the one that
+    # succeeded, so show the true attempt count.
+    made: int = retries
+    if completed != 0 {
+        made = retries + 1
+    }
+    return GistRow(gid, action, subscriber, handler, status, f"{made}/{maxr}", code, ms, response, attempted)
+}
+
+
+# Gists filter by computed status, so match q in SQL then filter/paginate here.
+def query_gists(q: str, status: str, page: int) -> tuple[list[GistRow], int] {
+    const pat: str = like_of(q)
+    rows: list[dict[str, Any]] = []
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select g.id as id, e.action as action, s.subscriber as subscriber, s.handler as handler, g.completed as completed, g.retries as retries, s.max_retries as maxr, g.last_status as last_status, g.last_ms as last_ms, g.response as response, g.attempted_at as attempted_at from gists g join subscriptions s on s.subscription = g.subscription join events e on e.event = g.event where e.action like !{pat} or s.subscriber like !{pat} or s.handler like !{pat} order by g.id desc limit 500 })
+        rows = rs
+    }
+    filtered: list[GistRow] = []
+    for row in rows {
+        const g: GistRow = _gist_from(row)
+        if len(status) == 0 or g.status == status {
+            filtered.append(g)
+        }
+    }
+    const total: int = len(filtered)
+    const off: int = (page - 1) * PER
+    out: list[GistRow] = []
+    i: int = off
+    while i < off + PER and i < total {
+        out.append(filtered[i])
+        i = i + 1
+    }
+    return (out, total)
+}
+
+
+def query_attention() -> list[GistRow] {
+    rows: list[dict[str, Any]] = []
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select g.id as id, e.action as action, s.subscriber as subscriber, s.handler as handler, g.completed as completed, g.retries as retries, s.max_retries as maxr, g.last_status as last_status, g.last_ms as last_ms, g.response as response, g.attempted_at as attempted_at from gists g join subscriptions s on s.subscription = g.subscription join events e on e.event = g.event where g.completed = 0 and g.retries >= s.max_retries order by g.id desc limit 50 })
+        rows = rs
+    }
+    out: list[GistRow] = []
+    for row in rows {
+        out.append(_gist_from(row))
+    }
+    return out
+}
+
+
+def cols_gists() -> list[Col] {
+    return [Col("id", "id"), Col("action", "action"), Col("subscriber", "subscriber"), Col("endpoint", "endpoint"), Col("status", "status"), Col("attempts", "attempts"), Col("resp", "last response"), Col("act", "")]
+}
+
+
+def _tr_gist(g: GistRow) -> HTML {
+    const cls: str = pill_of(g.status)
+    return template[HTML] {
+      <tr class="rowlink" onclick="dj.get('/dash/gists/detail?id=!{g.id}', '#drawer')">
+        <td class="cb-col" onclick="event.stopPropagation()"><input type="checkbox" class="cb-row" value="!{g.id}"></td>
+        <td data-col="id" class="mono">!{g.id}</td>
+        <td data-col="action" class="fw">!{g.action}</td>
+        <td data-col="subscriber">!{g.subscriber}</td>
+        <td data-col="endpoint" class="mono dim">!{g.handler}</td>
+        <td data-col="status"><span class="pill !{cls}">!{g.status}</span></td>
+        <td data-col="attempts">!{g.attempts}</td>
+        <td data-col="resp">!{code_pill(g.code)} <span class="mono dim">!{g.snippet}</span></td>
+        <td data-col="act" class="right"><button class="icon-btn sm" title="Requeue delivery" onclick="event.stopPropagation();dashBulkOne('gists','/dash/gists/requeue-many','!{g.id}')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button></td>
+      </tr>
+    }
+}
+
+
+def rows_gists(rows: list[GistRow]) -> HTML {
+    return template[HTML] {!{ for g in rows { :{ !{_tr_gist(g)} } }}}
+}
+
+
+def list_gists(rows: list[GistRow], page: int, per: int, total: int) -> HTML {
+    return render_list("gists", cols_gists(), rows_gists(rows), "No deliveries match.", page, per, total)
+}
+
+
+def page_gists(frag: HTML) -> HTML {
+    const filters: HTML = template[HTML] {
+      <select class="select" data-filter="status" onchange="dashList('gists')" style="width:150px">
+        <option value="">All statuses</option><option value="delivered">Delivered</option>
+        <option value="pending">Pending</option><option value="retrying">Retrying</option><option value="failed">Failed</option>
+      </select>
+    }
+    const bulk: HTML = template[HTML] {
+      <button class="btn btn-sm" onclick="dashBulk('gists','/dash/gists/requeue-many')">Requeue</button>
+      <button class="btn btn-sm btn-danger" onclick="dashBulk('gists','/dash/gists/delete-many')">Delete</button>
+    }
+    return list_page("gists", "Gists", "One delivery record per subscriber per event, with retry state.", template[HTML] {  }, render_toolbar("gists", "Search gists...", cols_gists(), filters, bulk), frag)
+}
+
+
+def sec_gists(req: Request, res: Response, ctx: Context) -> None {
+    const page: int = get_page(req)
+    const r: tuple[list[GistRow], int] = query_gists(get_q(req), get_status(req), page)
+    respond_section(req, res, "gists", page_gists(list_gists(r[0], page, PER, r[1])))
+}
+
+
+def list_gists_h(req: Request, res: Response, ctx: Context) -> None {
+    const page: int = get_page(req)
+    const r: tuple[list[GistRow], int] = query_gists(get_q(req), get_status(req), page)
+    res.html(list_gists(r[0], page, PER, r[1]))
+}
+
+
+def gists_requeue_many(req: Request, res: Response, ctx: Context) -> None {
+    for id in get_ids(req) {
+        try {
+            const gid: int = int(id)
+            with dblock {
+                db.run(template[SQL] { update gists set completed = 0, retries = 0, sleep_until = 0 where id = !{gid} })
+            }
+        } except {
+            pass
+        }
+    }
+    audit_log("requeue", "gists")
+    const r: tuple[list[GistRow], int] = query_gists("", "", 1)
+    res.html(list_gists(r[0], 1, PER, r[1]))
+}
+
+
+def gists_delete_many(req: Request, res: Response, ctx: Context) -> None {
+    for id in get_ids(req) {
+        try {
+            const gid: int = int(id)
+            with dblock {
+                db.run(template[SQL] { delete from gists where id = !{gid} })
+            }
+        } except {
+            pass
+        }
+    }
+    audit_log("delete", "gists")
+    const r: tuple[list[GistRow], int] = query_gists("", "", 1)
+    res.html(list_gists(r[0], 1, PER, r[1]))
+}
+
+
+def query_attempts(gid: int) -> list[AttemptRow] {
+    rows: list[dict[str, Any]] = []
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select attempt as attempt, status as status, ms as ms, out_bytes as out_bytes, in_bytes as in_bytes, response as response, ts as ts from deliveries where gist = !{gid} order by id desc limit 30 })
+        rows = rs
+    }
+    out: list[AttemptRow] = []
+    for row in rows {
+        const attempt: int = row["attempt"]
+        const status: int = row["status"]
+        const ms: int = row["ms"]
+        const ob: int = row["out_bytes"]
+        const ib: int = row["in_bytes"]
+        const response: str = row["response"]
+        const ts: int = row["ts"]
+        out.append(AttemptRow(attempt, status, ms, ob, ib, response, ts))
+    }
+    return out
+}
+
+
+# The drawer's centerpiece: what the subscriber actually answered. The full
+# body (or connection error) of the newest attempt, then one row per attempt.
+def _response_section(gr: GistRow, attempts: list[AttemptRow]) -> HTML {
+    if gr.code < 0 {
+        return template[HTML] {
+          <div class="drawer-sec">Last response</div>
+          <p class="hint">No delivery attempt yet - the gist is waiting for the aproko worker.</p>
+        }
+    }
+    hist: HTML = template[HTML] {  }
+    if len(attempts) > 0 {
+        hist = template[HTML] {
+          <div class="drawer-sec">Attempt history</div>
+          <div class="table-wrap"><table class="data">
+            <thead><tr><th>#</th><th>when</th><th>status</th><th>latency</th><th>response</th></tr></thead>
+            <tbody>!{ for a in attempts { :{
+              <tr><td class="mono">!{f"{a.attempt}"}</td><td class="dim">!{ago(a.ts)}</td><td>!{code_pill(a.status)}</td><td>!{f"{a.ms} ms"}</td><td class="mono dim resp-cell">!{a.response}</td></tr>
+            } }}</tbody>
+          </table></div>
+        }
+    }
+    return template[HTML] {
+      <div class="drawer-sec">Last response</div>
+      <div class="resp-meta">!{code_pill(gr.code)}<span class="dim">!{f"{gr.ms} ms"}</span><span class="dim">!{ago(gr.attempted)}</span></div>
+      <pre class="respbox">!{gr.response}</pre>
+      !{hist}
+    }
+}
+
+
+def gist_detail(req: Request, res: Response, ctx: Context) -> None {
+    id_s: str = req.query["id"] if "id" in req.query else ""
+    gid: int = 0
+    try {
+        const g: int = int(id_s)
+        gid = g
+    } except {
+        gid = 0
+    }
+    rows: list[dict[str, Any]] = []
+    with dblock {
+        const rs: list[dict[str, Any]] = db.all(template[SQL] { select g.event as event, g.id as id, e.action as action, s.subscriber as subscriber, s.handler as handler, g.completed as completed, g.retries as retries, s.max_retries as maxr, g.last_status as last_status, g.last_ms as last_ms, g.response as response, g.attempted_at as attempted_at from gists g join subscriptions s on s.subscription = g.subscription join events e on e.event = g.event where g.id = !{gid} })
+        rows = rs
+    }
+    if len(rows) == 0 {
+        res.html(open_drawer("delivery", id_s, template[HTML] { <p class="hint">Not found.</p> }))
+        return
+    }
+    const gr: GistRow = _gist_from(rows[0])
+    const ev: str = rows[0]["event"]
+    const pairs: list[tuple[str, str]] = [("Gist", id_s), ("Event", ev), ("Action", gr.action), ("Subscriber", gr.subscriber), ("Endpoint", gr.handler), ("Status", gr.status), ("Attempts", gr.attempts)]
+    const body: HTML = template[HTML] {
+      !{kv(pairs)}
+      !{_response_section(gr, query_attempts(gid))}
+      <div class="drawer-actions"><button class="btn btn-primary" onclick="dashBulkOne('gists','/dash/gists/requeue-many','!{id_s}');document.getElementById('drawer').innerHTML=''">Requeue delivery</button></div>
+    }
+    res.html(open_drawer("delivery", "gist " + id_s, body))
+}
+
+
+def mount(app: Router) -> None {
+    app.GET('/dash/gists/detail', gist_detail)
+    app.GET('/gists', sec_gists)
+    app.GET('/dash/gists/list', list_gists_h)
+    app.POST('/dash/gists/requeue-many', gists_requeue_many)
+    app.POST('/dash/gists/delete-many', gists_delete_many)
+}
