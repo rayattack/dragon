@@ -29,7 +29,7 @@ const DRAGON_VERSION: str = "0.0.1"      # mirrors include/dragon.h VERSION (pre
 # target's assets, then rebuild + restart the site. A platform left false
 # renders its card as "coming soon" instead of linking to a 404.
 const LINUX_LIVE: bool = true
-const MACOS_LIVE: bool = false           # flip when the mac dmg/tar.gz assets land
+const MACOS_LIVE: bool = true
 const WINDOWS_LIVE: bool = false         # parked until the MSYS2/MinGW job rework
 
 
@@ -337,7 +337,7 @@ def _dl_btn(label: str, asset: str, primary: bool, live: bool = true) -> HTML {
 }
 
 
-# A platform card. `icon` is a trusted entity (`| raw`); `buttons` and `rec` are
+# A platform card. `icon` is an /assets/ image path; `buttons` and `rec` are
 # composed HTML fragments; the rest are plain text.
 def _dl_card(os_id: str, os_name: str, icon: str, featured: bool, soon: bool, buttons: HTML, note: str) -> HTML {
     const fcls: str = "dl-card featured" if featured else "dl-card"
@@ -354,7 +354,7 @@ def _dl_card(os_id: str, os_name: str, icon: str, featured: bool, soon: bool, bu
     return template[HTML] {
       <div class="!{fcls}" data-os="!{os_id}">
         !{rec}
-        <div class="dl-os"><span class="dl-os-icon">!{icon | raw}</span><h3>!{os_name}</h3>!{soon_badge}</div>
+        <div class="dl-os"><span class="dl-os-icon"><img src="!{icon}" alt=""></span><h3>!{os_name}</h3>!{soon_badge}</div>
         <div class="dl-btns">!{buttons}</div>
         <p class="dl-note">!{note}</p>
       </div>
@@ -401,9 +401,9 @@ def render_download(ua: str, username: str) -> HTML {
           <p class="dl-ver">Current version <strong>!{DRAGON_VERSION}</strong></p>
         </section>
         <div class="dl-grid">
-          !{_dl_card("linux", "Linux", "&#128039;", os_guess == "linux", soon or not LINUX_LIVE, lin, "x86-64. Bundles the stdlib; needs a C compiler (gcc/clang) on PATH for linking.")}
-          !{_dl_card("macos", "macOS", "&#127822;", os_guess == "macos", soon or not MACOS_LIVE, mac, "Universal builds for Apple Silicon and Intel. Requires the Xcode command-line tools.")}
-          !{_dl_card("windows", "Windows", "&#128421;", os_guess == "windows", soon or not WINDOWS_LIVE, win, "x86-64 MSI. Adds dragon to PATH; needs a C compiler (MSVC or clang) for linking.")}
+          !{_dl_card("linux", "Linux", "/assets/linux.svg", os_guess == "linux", soon or not LINUX_LIVE, lin, "x86-64. Bundles the stdlib; needs a C compiler (gcc/clang) on PATH for linking.")}
+          !{_dl_card("macos", "macOS", "/assets/apple.svg", os_guess == "macos", soon or not MACOS_LIVE, mac, "Universal builds for Apple Silicon and Intel. Requires the Xcode command-line tools.")}
+          !{_dl_card("windows", "Windows", "/assets/microsoft.svg", os_guess == "windows", soon or not WINDOWS_LIVE, win, "x86-64 MSI. Adds dragon to PATH; needs a C compiler (MSVC or clang) for linking.")}
         </div>
         <section class="dl-source">
           <h2>Other ways to install</h2>

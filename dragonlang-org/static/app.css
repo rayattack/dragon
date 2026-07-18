@@ -934,7 +934,15 @@ article table code {
     white-space: nowrap;
 }
 .dl-os { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
-.dl-os-icon { font-size: 30px; line-height: 1; }
+.dl-os-icon { line-height: 1; }
+/* SVGs ship with width="800px" attributes; the CSS size wins. */
+.dl-os-icon img { width: 30px; height: 30px; display: block; }
+/* apple.svg / linux.svg are near-black monochrome and vanish on the dark
+   theme; invert just those. microsoft.svg is multicolor, leave it alone. */
+:root[data-theme="dark"] .dl-card[data-os="linux"] .dl-os-icon img,
+:root[data-theme="dark"] .dl-card[data-os="macos"] .dl-os-icon img {
+    filter: invert(1);
+}
 .dl-os h3 { margin: 0; font-size: 20px; border: 0; padding: 0; }
 /* "coming soon" status pill, pushed to the far right of the card header. */
 .dl-soon-badge {

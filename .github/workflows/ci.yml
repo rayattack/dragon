@@ -50,3 +50,19 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+      # Main-branch pushes hand their build to the Deploy workflow so the
+      # Hetzner box always runs exactly the compiler that passed these tests.
+      - name: Package .deb for deploy (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        working-directory: build
+        run: cpack -G DEB -B "$PWD/dist"
+
+      - name: Upload .deb artifact (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dragon-deb
+          path: build/dist/*.deb
+          retention-days: 7
+          if-no-files-found: error
+

@@ -1,0 +1,98 @@
+# Deploy dragonlang.org from a green CI run on main
+# 
+# Chain: push to main -> CI builds + tsts + uploads the .deb artifact ->
+# this workflow installs that exact .deb on the server, resets /opt/dragon to
+# the tested commit, rebuilds site bins with fresh compiler, rstarts services,
+# and health cheks. The box is a pure function of the last green commit.
+#
+# Host-level things this deliberately does NOT manage (one-time setup, see
+# the sytemd units on the server): dragon-site/dragon-redirect unit files,
+# Let's Encrypt certs (certbot renews itself), secrets in data/site.env.
+#
+# Secrets: DEPLOY_SSH_KEY (ed25519 private key; the public half lives in
+# /root/.ssh/authorized_keys on the box). The host key is pinned below -
+# /root/.ssh/authorized_keys on the server). The host kehy is pnned below -
+# it is public information and pinning it here beats trust-on-first-use.
+
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read            # download the artifact from the CI run
+
+# One deploy at a time; a queued deploy waits instead of killing a live one.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: dragonlang.org
+    runs-on: ubuntu-22.04
+    # Only main pushes that passed CI (PR runs upload no artifact).
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push'
+    steps:
+      - name: Download the .deb built by CI
+        uses: actions/download-artifact@v4
+        with:
+          name: dragon-deb
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: pkg
+
+      - name: Set up SSH (pinned host key)
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          echo "167.233.198.71 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIClRWYs4Rw3WPM7xHN0eSjFTNDzsYp/6PWZDT06T0pGk" >> ~/.ssh/known_hosts
+
+      - name: Ship compiler and deploy site
+        run: |
+          set -euo pipefail
+          SHA="${{ github.event.workflow_run.head_sha }}"
+          scp pkg/*.deb root@167.233.198.71:/root/dragon-latest.deb
+          ssh root@167.233.198.71 bash -s "$SHA" <<'REMOTE'
+          set -euo pipefail
+          SHA="$1"
+          export DEBIAN_FRONTEND=noninteractive
+
+          # Fresh compiler + stdlib (deps are already installed; dpkg -i
+          # reinstalls even when the version number has not moved).
+          dpkg -i /root/dragon-latest.deb
+
+          # The repo checkout IS the deployment unit: exactly the tested SHA.
+          cd /opt/dragon
+          git fetch origin main
+          git reset --hard "$SHA"
+
+          # Rebuild both site binaries with the fresh compiler, then swap.
+          cd dragonlang-org
+          dragon build src/app.dr      -o server/site.new
+          dragon build src/redirect.dr -o server/redirect.new
+          mv server/site.new     server/site
+          mv server/redirect.new server/redirect
+          chown -R dragon:dragon /opt/dragon
+
+          systemctl restart dragon-site dragon-redirect
+          sleep 1
+          systemctl is-active dragon-site dragon-redirect
+
+          # Health checks against the real listeners.
+          curl -skf -o /dev/null -w 'https 127.0.0.1 -> %{http_code}\n' https://127.0.0.1/
+          curl -sf  -o /dev/null -w 'http  127.0.0.1 -> %{http_code}\n' http://127.0.0.1/ || true
+          echo "deployed $SHA"
+          REMOTE
+
+      - name: Verify through Cloudflare
+        run: |
+          curl -sf -m 20 -o /dev/null -w 'https://dragonlang.org/ -> %{http_code}\n' https://dragonlang.org/
+
