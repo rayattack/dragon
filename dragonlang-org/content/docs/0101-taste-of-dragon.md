@@ -1,10 +1,7 @@
 # A Taste of Dragon
 
 You have the `dragon` binary on your `PATH` (if not, see
-[Installation](/docs/0003-installation)). This chapter is the thirty-thousand-foot
-tour - five small programs that show what the language actually feels like to
-write, and what you get for free that you don't get elsewhere. Every one of them
-compiles to a standalone native binary.
+[Installation](/docs/0003-installation)). This chapter is the thirty-four-thousand-foot tour - it captures five small programs that show what the language actually feels like to write, and what you get for free that you don't get elsewhere. Every one of them compiles to a standalone native binary.
 
 We move fast here and explain little; the rest of the book fills in the *why*.
 Think of this as the trailer, not the manual.
@@ -46,8 +43,7 @@ real    0m0.001s
 ```
 
 No interpreter, no VM, no JIT warm-up. A Dragon program starts in about a
-millisecond and runs at the speed of compiled C. The types you wrote (`name:
-str`, `-> str`) were checked at compile time and then *erased* - at runtime
+millisecond and runs at the speed of compiled C. The types you wrote (`name: str`, `-> str`) were checked at compile time and then *erased* - at runtime
 there is no boxing, no tag-checking, no dictionary lookup hiding behind that
 function call.
 
@@ -115,7 +111,7 @@ print(a.join() + b.join() + c.join())   # 50
 
 All three run concurrently; `join()` collects each result, already typed.
 
-The part Python can't do: **`await` works in any function.** It does not
+The part Python can't do: `**await` works in any function.** It does not
 "infect" callers, and it never changes a signature.
 
 ```dragon

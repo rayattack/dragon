@@ -96,6 +96,14 @@ cmd_start() {
         fi
         export DRAGON_LOG_SIGNING_KEY="$(cat "$LOGKEY_FILE")"
     fi
+    # Resend API key (signup confirmation email). Unlike the two generated
+    # secrets above, an API key cannot be minted locally - read it from a
+    # gitignored local file when the env is unset. Without it the app refuses
+    # to start (fail closed, deps.dr): a registry that silently strands every
+    # signup is worse than one that won't boot.
+    if [ -z "${RESEND_API_KEY:-}" ] && [ -s "$SITE/data/.resend-key" ]; then
+        export RESEND_API_KEY="$(cat "$SITE/data/.resend-key")"
+    fi
     # The server inherits cwd from this script; app.dr resolves content
     # and static paths relative to the dragonlang-org/ site root.
     nohup "$BIN" >"$LOG" 2>&1 &

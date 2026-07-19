@@ -362,6 +362,17 @@ int64_t dragon_tls_read(void* handle, void* buf, int64_t len) {
     }
 }
 
+// Binary-safe TLS send of a DragonBytes' full contents. The str-typed
+// dragon_tls_write path cannot carry arbitrary bytes: a Dragon str with any
+// non-ASCII content stores UCS-4 code points, so pushing a tarball through it
+// would write the widened buffer, not the payload. Mirrors
+// dragon_nb_send_bytes (runtime_concurrency.cpp).
+extern "C" int64_t dragon_tls_write(void* handle, const void* buf, int64_t len);
+int64_t dragon_tls_send_bytes(void* handle, DragonBytes* data) {
+    if (!data || data->len == 0) return 0;
+    return dragon_tls_write(handle, (const void*)data->data, data->len);
+}
+
 // Writes all `len` bytes. Returns bytes written, or a negative mbedTLS error.
 int64_t dragon_tls_write(void* handle, const void* buf, int64_t len) {
     DragonTlsConn* conn = (DragonTlsConn*)handle;

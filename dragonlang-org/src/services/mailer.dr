@@ -1,0 +1,82 @@
+# mailer.dr - outbound email through Resend (https://resend.com).
+#
+# One capability: send(to, subject, html) -> "" on success, else a short error
+# string (the AuthResult error convention). The base class is the seam: the
+# app wires ResendMailer (real HTTPS calls to api.resend.com), tests wire
+# CaptureMailer and assert on what would have been sent - no network, no key.
+#
+# The API key comes from the environment (deps.dr), NEVER from source: this
+# tree is public and a committed key is a leaked key
+
+from json import dumps
+from http.client import HTTPSConnection, HTTPSResponse
+from html import HTML
+
+class Mailer {
+    def() {
+    }
+
+    # Deliver one message. Returns "" on success or a short error string.
+    def send(to: str, subject: str, body: HTML) -> str {
+        return "mailer not configured"
+    }
+}
+
+# The real thing: POST https://api.resend.com/emails with a bearer key.
+# Body is a JSON document built from real values (never concatenated text).
+class ResendMailer(Mailer) {
+    api_key: str
+    from_addr: str
+
+    def(api_key: str, from_addr: str) {
+        self.api_key = api_key
+        self.from_addr = from_addr
+    }
+
+    def send(to: str, subject: str, body: HTML) -> str {
+        payload: dict[str, Any] = {}
+        payload["from"] = self.from_addr
+        to_list: list[Any] = [to]
+        payload["to"] = to_list
+        payload["subject"] = subject
+        payload["html"] = body.to_str()
+
+        headers: dict[str, str] = {}
+        headers["Authorization"] = "Bearer " + self.api_key
+        headers["Content-Type"] = "application/json"
+
+        try {
+            conn: HTTPSConnection = HTTPSConnection("api.resend.com", 443)
+            conn.request("POST", "/emails", dumps(payload), headers)
+            resp: HTTPSResponse = conn.getresponse()
+            status: int = resp.status
+            resp.close()
+            if status >= 200 and status < 300 {
+                return ""
+            }
+            return "email delivery failed (resend status " + str(status) + ")"
+        } except Exception as e {
+            return "email delivery failed: " + str(e)
+        }
+    }
+}
+
+# Test double: records every message instead of sending it.
+class CaptureMailer(Mailer) {
+    to: list[str]
+    subjects: list[str]
+    bodies: list[str]
+
+    def() {
+        self.to = []
+        self.subjects = []
+        self.bodies = []
+    }
+
+    def send(to: str, subject: str, body: HTML) -> str {
+        self.to.append(to)
+        self.subjects.append(subject)
+        self.bodies.append(body.to_str())
+        return ""
+    }
+}

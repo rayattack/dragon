@@ -29,7 +29,7 @@ from crypto import ed25519_verify, ed25519_keypair, ed25519_public_key, ed25519_
 from merkle import root as merkle_root, verify_inclusion, verify_consistency
 from json import loads
 from pathlib import Path
-from http.client import HTTPConnection, HTTPResponse
+from http.client import HTTPConnection, HTTPResponse, HTTPSConnection, HTTPSResponse, HTTPSBytesResponse
 
 
 # Whole-file write: a truncating Writer, scoped so the handle always closes.
@@ -199,10 +199,20 @@ def _sync_one(name: str, spec: dict[str, Any]) -> int {
 }
 
 # GET a registry path; returns (status, body). For the JSON CLI endpoints.
+# Speaks TLS when $DRAGON_REGISTRY is https:// (the live registry).
 def _http_get(path: str) -> tuple[int, str] {
     const target: tuple[str, int] = _registry_target()
-    const conn: HTTPConnection = HTTPConnection(target[0], target[1])
     const headers: dict[str, str] = {}
+    if _registry_tls() {
+        const sconn: HTTPSConnection = HTTPSConnection(target[0], target[1])
+        sconn.request("GET", path, "", headers)
+        const sresp: HTTPSResponse = sconn.getresponse()
+        const sbody: str = sresp.read()
+        const sstatus: int = sresp.status
+        sconn.close()
+        return (sstatus, sbody)
+    }
+    const conn: HTTPConnection = HTTPConnection(target[0], target[1])
     conn.request("GET", path, "", headers)
     const resp: HTTPResponse = conn.getresponse()
     const body: str = resp.read()
@@ -211,9 +221,61 @@ def _http_get(path: str) -> tuple[int, str] {
     return (status, body)
 }
 
-# Decode the base64 tarball carried in a /api/fetch JSON response.
+# POST a registry path; returns (status, body). TLS-aware like _http_get.
+def _http_post(path: str, body: str, headers: dict[str, str]) -> tuple[int, str] {
+    const target: tuple[str, int] = _registry_target()
+    if _registry_tls() {
+        const sconn: HTTPSConnection = HTTPSConnection(target[0], target[1])
+        sconn.request("POST", path, body, headers)
+        const sresp: HTTPSResponse = sconn.getresponse()
+        const sbody: str = sresp.read()
+        const sstatus: int = sresp.status
+        sconn.close()
+        return (sstatus, sbody)
+    }
+    const conn: HTTPConnection = HTTPConnection(target[0], target[1])
+    conn.request("POST", path, body, headers)
+    const resp: HTTPResponse = conn.getresponse()
+    const rbody: str = resp.read()
+    const rstatus: int = resp.status
+    conn.close()
+    return (rstatus, rbody)
+}
+
+# Download a presigned https URL (R2-backed registries) as raw bytes. The
+# binary-safe response path matters: a tarball must never ride through a str.
+def _download_url(url: str) -> bytes {
+    if not url.startswith("https://") {
+        raise ValueError("refusing non-https download url")
+    }
+    const rest: str = url[8:len(url)]
+    const slash: int = rest.find("/")
+    if slash < 0 {
+        raise ValueError("malformed download url")
+    }
+    const host: str = rest[0:slash]
+    const path: str = rest[slash:len(rest)]
+    const conn: HTTPSConnection = HTTPSConnection(host, 443)
+    conn.request_bytes("GET", path, b"", {})
+    const resp: HTTPSBytesResponse = conn.getresponse_bytes()
+    conn.close()
+    if resp.status != 200 {
+        raise ValueError("tarball download failed (status " + str(resp.status) + ")")
+    }
+    return resp.body
+}
+
+# The tarball for a /api/fetch JSON response: either a presigned `url` the
+# bytes are fetched from directly (R2-backed registry), or an inline base64
+# `tarball` (disk-backed registry). The caller hashes whichever bytes arrive
+# and verifies against the pinned digest, so the transport is never trusted.
 def _tarball_from_fetch(body: str) -> bytes {
     const obj: dict[str, Any] = loads(body)
+    if "url" in obj {
+        const url_any: Any = obj["url"]
+        const url: str = url_any
+        return _download_url(url)
+    }
     const tb64_any: Any = obj["tarball"]
     const tb64: str = tb64_any
     return b64decode(tb64.encode("utf-8"))
@@ -903,11 +965,13 @@ def _cmd_drop(args: list[str]) -> int {
 # --- push / find (D022 Phase 3: registry) ---------------------------------
 
 # Resolve the registry host:port from $DRAGON_REGISTRY (default local dev).
+# An https:// registry defaults to port 443 and speaks TLS (_registry_tls).
 def _registry_target() -> tuple[str, int] {
     reg: str = getenv("DRAGON_REGISTRY")
     if reg == "" {
         reg = "http://127.0.0.1:2018"
     }
+    const tls: bool = reg.startswith("https://")
     hostport: str = reg.replace("https://", "").replace("http://", "")
     const slash: int = hostport.find("/")
     if slash >= 0 {
@@ -915,12 +979,20 @@ def _registry_target() -> tuple[str, int] {
     }
     host: str = hostport
     port: int = 80
+    if tls {
+        port = 443
+    }
     const colon: int = hostport.find(":")
     if colon >= 0 {
         host = hostport[0:colon]
         port = int(hostport[colon + 1:])
     }
     return (host, port)
+}
+
+def _registry_tls() -> bool {
+    reg: str = getenv("DRAGON_REGISTRY")
+    return reg.startswith("https://")
 }
 
 # Files a published package includes - a STRICT allowlist, never the whole cwd.
@@ -985,8 +1057,6 @@ def _cmd_push(sign: bool) -> int {
     const tar_bytes: bytes = open(tarpath).bytes()
     const body: str = b64encode(tar_bytes).decode("utf-8")
 
-    const target: tuple[str, int] = _registry_target()
-    const conn: HTTPConnection = HTTPConnection(target[0], target[1])
     headers: dict[str, str] = {}
     headers["Authorization"] = "Bearer " + token
     headers["X-Egg-Description"] = description
@@ -1004,30 +1074,22 @@ def _cmd_push(sign: bool) -> int {
         headers["X-Egg-Signature"] = sig.hex()
         print("  signing as ed25519:" + pub.hex()[0:16] + "...")
     }
-    conn.request("POST", "/api/publish?name=" + name + "&version=" + version, body, headers)
-    const resp: HTTPResponse = conn.getresponse()
-    const out: str = resp.read()
-    conn.close()
+    const r: tuple[int, str] = _http_post("/api/publish?name=" + name + "&version=" + version, body, headers)
     rmtree(tmpdir)
 
-    print(out)
-    if resp.status == 201 {
+    print(r[1])
+    if r[0] == 201 {
         print("published " + name + " " + version)
         return 0
     }
-    print("publish failed (HTTP " + str(resp.status) + ")")
+    print("publish failed (HTTP " + str(r[0]) + ")")
     return 1
 }
 
 # `dragon find <query>` - search the registry.
 def _cmd_find(query: str) -> int {
-    const target: tuple[str, int] = _registry_target()
-    const conn: HTTPConnection = HTTPConnection(target[0], target[1])
-    const headers: dict[str, str] = {}
-    conn.request("GET", "/api/search?q=" + query, "", headers)
-    const resp: HTTPResponse = conn.getresponse()
-    print(resp.read())
-    conn.close()
+    const r: tuple[int, str] = _http_get("/api/search?q=" + query)
+    print(r[1])
     return 0
 }
 

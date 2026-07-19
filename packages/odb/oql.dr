@@ -3,9 +3,10 @@
 # OQL is parsed here into a small AST, type-checked against the compiled schemas
 # at PREPARE time (unknown schema/field, type-mismatched comparison, aggregate
 # misuse, ambiguity are errors before a document is touched), and executed by
-# odb.dr over the document trees. The blessed compile-time-checked
-# `template[OQL] { ... }` literal (spec section 20) lowers to this same runtime
-# path once the content type lands; `db.find(text)` works today.
+# odb.dr over the document trees. Queries arrive as runtime text
+# (`db.find(text)`, optionally with `$name` params) or as a `template[OQL]`
+# value (spec section 20): the literal folds to canonical `$$N` text with
+# extracted parameters, bound as values through this same prepare path.
 #
 # Covered so far (M5.1 + M5.2): one source; an optional `? filter` with
 # comparisons (== != < <= > >=), boolean `& | !` and parentheses, real
@@ -22,6 +23,51 @@
 
 from odb.schema import CompiledSchema, FieldSpec, T_BOOL, T_INT, T_NUM, T_STR
 from odb.errors import PrepareError
+from template import Template
+
+#===----------------------------------------------------------------------===#
+# OQL - the structured `template[OQL]` content type (Decision 032).
+#
+# Domain co-location: OQL is the object query language, so its content type
+# ships with the parser that consumes it; the package root re-exports it
+# (`from odb import OQL`).
+#
+# Like SQL (stdlib/database/base.dr), `template[OQL] { ... }` lowers to
+# parameter extraction: the literal text becomes a canonical `$$N` form and
+# every !{expr} becomes a bound parameter, never string-concatenated, so
+# injection-safety is carried by the type. The lexer below tokenizes `$$N` as
+# a positional parameter (digits-named), and `db.find(q: OQL)` binds q.params
+# through the same value-only injection path as `$name` params.
+#===----------------------------------------------------------------------===#
+
+extern "C" def dragon_str_fnv1a(s: str) -> int
+
+
+class OQL(Template) {
+    def(canonical: str, phash: int, params: list[Any]) {
+        self.canonical = canonical
+        self.hash = phash
+        self.params = params
+    }
+
+    def to_str() -> str {
+        return self.canonical
+    }
+
+    def __str__() -> str {
+        return self.canonical
+    }
+
+    # The opt-in signal that selects parameter-extraction lowering (the
+    # compiler probes the content type for a `build` method). `template[OQL]`
+    # sites are lowered directly (interned canonical + native param pack) and
+    # do NOT call this; it survives as the runtime fallback for contexts the
+    # compiler does not constant-fold.
+    @staticmethod
+    def build(canonical: str, params: list[Any]) -> OQL {
+        return OQL(canonical, dragon_str_fnv1a(canonical), params)
+    }
+}
 
 #===----------------------------------------------------------------------===#
 # Tokens
@@ -177,6 +223,21 @@ def tokenize(src: str) -> list[Token] {
         if c == "$" {
             pstart: int = i
             i = i + 1
+            # $$N positional parameter: emitted only by the template[OQL]
+            # lowering. Digits-named on purpose so it binds through the same
+            # dict path as $name (find(OQL) binds {"0": v0, "1": v1, ...}).
+            if i < n and src[i] == "$" {
+                i = i + 1
+                istart: int = i
+                while i < n and _is_digit(src[i]) {
+                    i = i + 1
+                }
+                if i == istart {
+                    raise PrepareError("OQL: '$$' must be followed by a parameter index")
+                }
+                toks.append(Token(TK_PARAM, src[istart:i], pstart))
+                continue
+            }
             while i < n and (_is_alpha(src[i]) or _is_digit(src[i])) {
                 i = i + 1
             }

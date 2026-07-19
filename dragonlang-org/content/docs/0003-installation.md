@@ -4,18 +4,17 @@ The dragon toolchain is a single binary, `dragon`, that compiles, runs,
 and type-checks `.dr` and `.py` source files. It also ships its own standard
 library - there is nothing else to install once you have the binary.
 
-
 ## Install from a package
 
 The quickest path on a desktop OS is a native installer from the 
 [downloads page](https://draganlang.org/downloads)
 
 - For **linux** - You get a `.deb` (Debian/Ubuntu) or an `.rpm` (Fedora/RHEL)
-  downloadable. Both put `dragon` and `dr` on your `PATH` and the stdlib
-  under `usr/share/dragon`.
+downloadable. Both put `dragon` and `dr` on your `PATH` and the stdlib
+under `usr/share/dragon`.
 - For **macos** - You get a `.dmg` for Applice Silicon or Intel.
 - For **Windows** - You an `.msi` installer that adds the same keywords i.e.
-  `dragon` and `dr` to your `PATH`.
+`dragon` and `dr` to your `PATH`.
 
 A portable archive is offered for every platform too (see below), for
 when you'd rather not install system-wide.
@@ -44,7 +43,7 @@ edge or to contribute - you'll need:
 - A C++17 compiler (`gcc` 11+ or `clang` 14+). TODO: Self Hosting ;-)
 - CMake 3.16 or newer.
 - LLVM 21 or newer (a released LLVM, not a trunk snapshot). Dragon's
-  codegen uses the `Triple`-based `Module` API introduced in LLVM 21.
+codegen uses the `Triple`-based `Module` API introduced in LLVM 21.
 
 On Debian/Ubuntu the development package comes straight from
 [apt.llvm.org](https://apt.llvm.org):
@@ -97,3 +96,4 @@ section in the appendix covers the common failures (missing LLVM
 libraries, stdlib not found, link errors).
 
 Now let's write something less trivial.
+

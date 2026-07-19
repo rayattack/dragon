@@ -10,10 +10,12 @@ from os import makedirs, getenv
 from os.path import exists, join
 from binascii import unhexlify
 from storage.db import Db
-from storage.blobs import BlobStore
+from storage.blobs import BlobStore, R2BlobStore
+from storage.s3 import S3Client
 from services.auth import AuthService
 from services.registry import RegistryService
 from services.translog import TranslogService
+from services.mailer import Mailer, ResendMailer
 
 const DATA_DIR: str = "data"
 
@@ -53,8 +55,62 @@ def _ensure_data() -> str {
 }
 
 # Force the data dir to exist before sqlite3_open (which won't create parents).
+# Outbound email (signup confirmation) via Resend. Fail closed like the
+# secrets above: without a key the app must not start and silently strand
+# every signup. Key from RESEND_API_KEY (dashboard: resend.com/api-keys).
+# The sending domain verified in Resend is bot.dragonlang.org (kept off the
+# bare domain so registry mail can never taint dragonlang.org's own
+# reputation); the from address must stay on it.
+def _load_mailer() -> Mailer {
+    const key: str = getenv("RESEND_API_KEY")
+    if len(key) == 0 {
+        raise ValueError("RESEND_API_KEY is unset; refusing to start with signup email disabled")
+    }
+    const from_addr: str = _env_default("RESEND_FROM", "Dragon <no-reply@bot.dragonlang.org>")
+    return ResendMailer(key, from_addr)
+}
+
+def _env_default(name: str, fallback: str) -> str {
+    const v: str = getenv(name)
+    if len(v) > 0 {
+        return v
+    }
+    return fallback
+}
+
+const MAILER: Mailer = _load_mailer()
+
+# Absolute base for links that leave the site (the confirmation email).
+const BASE_URL: str = _env_default("DRAGON_SITE_BASE_URL", "https://dragonlang.org")
+
 const _READY: str = _ensure_data()
+
+# Blob backend. R2 (S3 API, presigned downloads) when the four R2_* vars are
+# set; local disk otherwise (dev, tests). A PARTIAL R2 config is a refused
+# start, never a silent fall-through to disk.
+def _load_blobs() -> BlobStore {
+    const acc: str = getenv("R2_ACCESS_KEY_ID")
+    const sec: str = getenv("R2_SECRET_ACCESS_KEY")
+    const endpoint: str = getenv("R2_ENDPOINT")
+    const bucket: str = getenv("R2_BUCKET")
+    const nset: int = int(len(acc) > 0) + int(len(sec) > 0) + int(len(endpoint) > 0) + int(len(bucket) > 0)
+    if nset == 0 {
+        print("blobs: local disk (" + join(DATA_DIR, "blobs") + ")")
+        return BlobStore(join(DATA_DIR, "blobs"))
+    }
+    if nset < 4 {
+        raise ValueError("partial R2 config: set all of R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ENDPOINT, R2_BUCKET (or none for local disk)")
+    }
+    host: str = endpoint.replace("https://", "").replace("http://", "")
+    const slash: int = host.find("/")
+    if slash >= 0 {
+        host = host[0:slash]
+    }
+    print("blobs: R2 bucket '" + bucket + "' at " + host)
+    return R2BlobStore(S3Client(host, acc, sec, "auto"), bucket)
+}
+
 const DB: Db = Db(join(DATA_DIR, "registry.sqlite"))
 const AUTH: AuthService = AuthService(DB)
 const TLOG: TranslogService = TranslogService(DB, LOG_SIGNING_KEY)
-const REG: RegistryService = RegistryService(DB, BlobStore(join(DATA_DIR, "blobs")), TLOG)
+const REG: RegistryService = RegistryService(DB, _load_blobs(), TLOG)

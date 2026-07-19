@@ -173,6 +173,51 @@ def render_signup(csrf: str, error: str) -> HTML {
     return page_shell("Sign up - Dragon", "login", "", body)
 }
 
+# The confirmation email body. Standalone fragment (email clients ignore
+# external CSS anyway); the link is the only action.
+def confirm_email_body(username: str, link: str) -> HTML {
+    return template[HTML] {
+      <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
+        <h2>Confirm your Dragon account</h2>
+        <p>Hi !{username},</p>
+        <p>Someone (hopefully you) signed up for a Dragon package registry
+        account with this address. Click the link to create the account:</p>
+        <p><a href="!{link}">Confirm my email</a></p>
+        <p>The link works once and dies in 3 hours. If you did not sign up,
+        ignore this email - no account exists until the link is followed.</p>
+      </div>
+    }
+}
+
+def render_confirm_sent(email: str) -> HTML {
+    const body: HTML = template[HTML] {
+      <main class="www www-brand">
+        <section class="auth-card">
+          <img class="auth-logo" src="/assets/dr.png" alt="Dragon">
+          <h1>Check your email</h1>
+          <p>We sent a confirmation link to <strong>!{email}</strong>.</p>
+          <p>Your account is created when you follow it. The link works once
+          and expires in 3 hours; signing up again sends a fresh one.</p>
+        </section>
+      </main>
+    }
+    return page_shell("Check your email - Dragon", "login", "", body)
+}
+
+def render_confirm_error(msg: str) -> HTML {
+    const body: HTML = template[HTML] {
+      <main class="www www-brand">
+        <section class="auth-card">
+          <img class="auth-logo" src="/assets/dr.png" alt="Dragon">
+          <h1>Confirmation failed</h1>
+          !{_error_box(msg)}
+          <p><a href="/signup">Sign up again</a> to get a fresh link.</p>
+        </section>
+      </main>
+    }
+    return page_shell("Confirmation failed - Dragon", "login", "", body)
+}
+
 def render_account(username: str, tokens: list[Token], new_token: str, csrf: str) -> HTML {
     const body: HTML = template[HTML] {
       <main class="www www-brand">

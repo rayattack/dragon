@@ -1,0 +1,509 @@
+# odb.shell - the interactive OQL shell (spec section 22a).
+#
+#   dragon run packages/odb/shell.dr app.odb -I packages
+#
+# The shell is a SUPERSET of OQL, the way psql is a superset of SQL. A line is
+# either a shell builtin (call-shaped admin operations - never OQL grammar, so
+# the spec's "no OQL DDL" decision stays intact) or it passes through verbatim
+# to the engine: reads run db.find(), write programs run db.run(). Results
+# pretty-print as aligned rows HERE - presentation belongs to the shell, the
+# engine returns documents
+#
+# Builtins:
+#   schema("name", <json-schema>[, <meta>])  define a collection (the
+#                                            canonical JSON-Schema DDL
+#                                            artifact, fed interactively)
+#   schema("name")                           show a collection
+#   namespaces()                             list collections
+#   check()                                  verify the whole database
+#   help                                     command summary
+#   quit                                     leave
+#
+# Dispatch and formatting are pure functions (classify, builtin_name,
+# call_args, split_args, cell_text, doc_columns, format_table, format_docs),
+# and Shell.execute() maps one input line to its output lines with no I/O, so
+# the whole surface is value-testable from test/dr/test_odb_shell.dr. Only the
+# bottom-of-file entry loop touches stdin/stdout, and only when this file IS
+# the program; importing the module never starts it.
+
+from sys import argv
+from json import loads, dumps
+from odb import ODB, Documents, Document, CheckReport
+from odb.schema import CompiledSchema
+from odb.errors import ODBError, SchemaError, PrepareError, IntegrityError, ConflictError
+from odb.errors import CorruptionError, NotFound
+
+# stdio for the entry loop only. The prompt and every result line go through
+# ONE FILE* flushed per command: print() writes through a different buffered
+# stream, and mixing the two reorders output on pipes.
+extern "C" def fopen(path: str, mode: str) -> ptr
+extern "C" def fflush(handle: ptr) -> intc
+extern "C" def dragon_file_write_text(handle: ptr, s: str) -> int
+extern "C" def dragon_file_readline(handle: ptr) -> str
+
+#--- line classification ---------------------------------------------------#
+
+const L_EMPTY: int = 0     # blank line or `#` comment: nothing to run
+const L_BUILTIN: int = 1   # a shell builtin
+const L_WRITE: int = 2     # an OQL write program -> db.run()
+const L_READ: int = 3      # everything else -> db.find()
+
+def _is_ident_char(c: str) -> bool {
+    if c >= "a" and c <= "z" {
+        return True
+    }
+    if c >= "A" and c <= "Z" {
+        return True
+    }
+    if c >= "0" and c <= "9" {
+        return True
+    }
+    return c == "_"
+}
+
+# The leading identifier of a line ("add customers ..." -> "add").
+def leading_word(line: str) -> str {
+    s: str = line.strip()
+    n: int = len(s)
+    i: int = 0
+    while i < n and _is_ident_char(s[i]) {
+        i = i + 1
+    }
+    return s[0:i]
+}
+
+# The builtin a line invokes, or "" when it is not a builtin. `help` and
+# `quit` are bare words; the admin builtins are call-shaped (`check()`,
+# `namespaces()`, `schema(...)`), so a collection that happens to share a
+# builtin's name stays queryable: bare `check` is OQL, `check()` is the
+# builtin.
+def builtin_name(line: str) -> str {
+    s: str = line.strip()
+    if s == "help" or s == "quit" {
+        return s
+    }
+    w: str = leading_word(s)
+    if w != "schema" and w != "namespaces" and w != "check" {
+        return ""
+    }
+    rest: str = s[len(w):len(s)].strip()
+    if len(rest) < 2 {
+        return ""
+    }
+    if rest[0] != "(" or rest[len(rest) - 1] != ")" {
+        return ""
+    }
+    return w
+}
+
+# The argument text inside a call-shaped builtin's parentheses.
+def call_args(line: str) -> str {
+    s: str = line.strip()
+    i: int = s.find("(")
+    return s[i + 1:len(s) - 1]
+}
+
+# Split builtin argument text on top-level commas, respecting nesting
+# ({} [] ()) and double-quoted strings with backslash escapes, so a JSON
+# schema rides through as one argument no matter how many commas it holds.
+def split_args(args: str) -> list[str] {
+    out: list[str] = []
+    cur: list[str] = []
+    depth: int = 0
+    in_str: bool = False
+    esc: bool = False
+    n: int = len(args)
+    i: int = 0
+    while i < n {
+        c: str = args[i]
+        if in_str {
+            cur.append(c)
+            if esc {
+                esc = False
+            } else if c == "\\" {
+                esc = True
+            } else if c == "\"" {
+                in_str = False
+            }
+        } else if c == "\"" {
+            in_str = True
+            cur.append(c)
+        } else if c == "{" or c == "[" or c == "(" {
+            depth = depth + 1
+            cur.append(c)
+        } else if c == "}" or c == "]" or c == ")" {
+            depth = depth - 1
+            cur.append(c)
+        } else if c == "," and depth == 0 {
+            out.append("".join(cur).strip())
+            cur = []
+        } else {
+            cur.append(c)
+        }
+        i = i + 1
+    }
+    last: str = "".join(cur).strip()
+    if last != "" or len(out) > 0 {
+        out.append(last)
+    }
+    return out
+}
+
+# Classify one input line. Builtins win over OQL only in their call shape;
+# the write words route to db.run(), everything else is a read for db.find().
+def classify(line: str) -> int {
+    s: str = line.strip()
+    if s == "" or s[0] == "#" {
+        return L_EMPTY
+    }
+    if builtin_name(s) != "" {
+        return L_BUILTIN
+    }
+    w: str = leading_word(s)
+    if w == "add" or w == "set" or w == "put" or w == "del" or w == "atomic" {
+        return L_WRITE
+    }
+    return L_READ
+}
+
+#--- result formatting -----------------------------------------------------#
+
+# One cell of output: strings print bare (psql-style), everything else in its
+# JSON form (ints, floats, true/false, null, nested objects and arrays).
+def cell_text(v: Any) -> str {
+    if isinstance(v, str) {
+        s: str = v
+        return s
+    }
+    return dumps(v)
+}
+
+# Column order across a result set: first-seen field order, `_id` always
+# leading when present (it is the one engine-provided column).
+def doc_columns(rows: list[Document]) -> list[str] {
+    cols: list[str] = []
+    seen: dict[str, bool] = {}
+    for d in rows {
+        for k in d.data {
+            if k not in seen {
+                seen[k] = True
+                cols.append(k)
+            }
+        }
+    }
+    if "_id" in seen and cols[0] != "_id" {
+        front: list[str] = ["_id"]
+        for c in cols {
+            if c != "_id" {
+                front.append(c)
+            }
+        }
+        return front
+    }
+    return cols
+}
+
+def _pad(s: str, w: int) -> str {
+    parts: list[str] = [s]
+    i: int = len(s)
+    while i < w {
+        parts.append(" ")
+        i = i + 1
+    }
+    return "".join(parts)
+}
+
+def _dashes(w: int) -> str {
+    parts: list[str] = []
+    i: int = 0
+    while i < w {
+        parts.append("-")
+        i = i + 1
+    }
+    return "".join(parts)
+}
+
+# Aligned rows: header, dash rule, one line per row. Every column pads to its
+# widest cell; the last column stays unpadded and each line is right-trimmed,
+# so no line carries trailing spaces (an empty last cell would otherwise
+# leave an invisible one behind the separator).
+def format_table(cols: list[str], rows: list[list[str]]) -> list[str] {
+    out: list[str] = []
+    ncols: int = len(cols)
+    if ncols == 0 {
+        return out
+    }
+    widths: list[int] = []
+    for c in cols {
+        widths.append(len(c))
+    }
+    for r in rows {
+        for j in range(ncols) {
+            if len(r[j]) > widths[j] {
+                widths[j] = len(r[j])
+            }
+        }
+    }
+    hdr: list[str] = []
+    rule: list[str] = []
+    for j2 in range(ncols) {
+        if j2 == ncols - 1 {
+            hdr.append(cols[j2])
+        } else {
+            hdr.append(_pad(cols[j2], widths[j2]))
+        }
+        rule.append(_dashes(widths[j2]))
+    }
+    out.append(" | ".join(hdr))
+    out.append("-+-".join(rule))
+    for r2 in rows {
+        cells: list[str] = []
+        for j3 in range(ncols) {
+            if j3 == ncols - 1 {
+                cells.append(r2[j3])
+            } else {
+                cells.append(_pad(r2[j3], widths[j3]))
+            }
+        }
+        out.append(" | ".join(cells).rstrip())
+    }
+    return out
+}
+
+# A find() result as output lines: aligned rows plus the psql-style count
+# footer. An absent optional field renders as an empty cell, never a silent
+# zero.
+def format_docs(rows: list[Document]) -> list[str] {
+    if len(rows) == 0 {
+        return ["(0 rows)"]
+    }
+    cols: list[str] = doc_columns(rows)
+    cells: list[list[str]] = []
+    for d in rows {
+        r: list[str] = []
+        for c in cols {
+            if c in d.data {
+                r.append(cell_text(d.data[c]))
+            } else {
+                r.append("")
+            }
+        }
+        cells.append(r)
+    }
+    out: list[str] = format_table(cols, cells)
+    if len(rows) == 1 {
+        out.append("(1 row)")
+    } else {
+        out.append("(" + str(len(rows)) + " rows)")
+    }
+    return out
+}
+
+#--- the shell -------------------------------------------------------------#
+
+const _HELP: list[str] = [
+    "The ODB shell. Any line that is not a builtin is OQL:",
+    "  reads  (customers ? city == \"Lagos\" { name })   run db.find()",
+    "  writes (add/set/put/del, atomic { ... })         run db.run()",
+    "builtins:",
+    "  schema(\"name\", <json-schema>[, <meta>])   define a collection",
+    "  schema(\"name\")                            show schema + metadata",
+    "  namespaces()                              list collections",
+    "  check()                                   verify the database",
+    "  help                                      this text",
+    "  quit                                      leave",
+]
+
+class Shell {
+    db: ODB
+    done: bool
+
+    def(db: ODB) {
+        self.db = db
+        self.done = False
+    }
+
+    # One input line -> its output lines. Never raises: every engine error
+    # prints with its taxonomy class and the session continues.
+    def execute(line: str) -> list[str] {
+        out: list[str] = []
+        s: str = line.strip()
+        kind: int = classify(s)
+        if kind == L_EMPTY {
+            return out
+        }
+        try {
+            if kind == L_BUILTIN {
+                self._builtin(s, out)
+            } else if kind == L_WRITE {
+                n: int = self.db.run(s)
+                if n == 1 {
+                    out.append("(1 affected)")
+                } else {
+                    out.append("(" + str(n) + " affected)")
+                }
+            } else {
+                docs: list[Document] = self.db.find(s)
+                for ln in format_docs(docs) {
+                    out.append(ln)
+                }
+            }
+        } except SchemaError as e {
+            out.append("SchemaError: " + str(e))
+        } except PrepareError as e {
+            out.append("PrepareError: " + str(e))
+        } except IntegrityError as e {
+            out.append("IntegrityError: " + str(e))
+        } except ConflictError as e {
+            out.append("ConflictError: " + str(e))
+        } except CorruptionError as e {
+            out.append("CorruptionError: " + str(e))
+        } except NotFound as e {
+            out.append("NotFound: " + str(e))
+        } except ODBError as e {
+            out.append("error: " + str(e))
+        } except Exception as e {
+            out.append("error: " + str(e))
+        }
+        return out
+    }
+
+    def _builtin(s: str, out: list[str]) -> None {
+        name: str = builtin_name(s)
+        if name == "help" {
+            for h in _HELP {
+                out.append(h)
+            }
+            return
+        }
+        if name == "quit" {
+            self.done = True
+            return
+        }
+        args: list[str] = split_args(call_args(s))
+        if name == "namespaces" {
+            self._namespaces(out)
+            return
+        }
+        if name == "check" {
+            self._check(out)
+            return
+        }
+        self._schema(args, out)
+    }
+
+    def _namespaces(out: list[str]) -> None {
+        names: list[str] = []
+        for nm in self.db._schemas {
+            names.append(nm)
+        }
+        ordered: list[str] = sorted(names)
+        cells: list[list[str]] = []
+        for nm2 in ordered {
+            h: Documents = self.db.schema(nm2)
+            cells.append([nm2, str(h.cs.version), str(h.count())])
+        }
+        for ln in format_table(["name", "version", "docs"], cells) {
+            out.append(ln)
+        }
+        if len(ordered) == 1 {
+            out.append("(1 schema)")
+        } else {
+            out.append("(" + str(len(ordered)) + " schemas)")
+        }
+    }
+
+    def _check(out: list[str]) -> None {
+        rep: CheckReport = self.db.check()
+        if rep.ok {
+            out.append("ok: " + str(rep.docs) + " docs, " + str(rep.index_entries) + " index entries")
+        } else {
+            out.append("FAILED: " + rep.message)
+        }
+    }
+
+    # schema("name") shows; schema("name", <json-schema>[, <meta>]) defines.
+    # The arguments are JSON documents - the same canonical DDL artifact the
+    # catalog stores and `odb define` accepts - so a definition pastes into
+    # the shell exactly as it lives in a .schema.json file.
+    def _schema(args: list[str], out: list[str]) -> None {
+        if len(args) < 1 or len(args) > 3 {
+            out.append("usage: schema(\"name\") or schema(\"name\", <json-schema>[, <meta>])")
+            return
+        }
+        a0: Any = loads(args[0])
+        if not isinstance(a0, str) {
+            out.append("schema(): the first argument must be the collection name as a JSON string")
+            return
+        }
+        nm: str = a0
+        if len(args) == 1 {
+            h: Documents = self.db.schema(nm)
+            out.append("schema " + nm + " v" + str(h.cs.version))
+            out.append(h.cs.schema_json)
+            out.append("meta")
+            out.append(self.db._metas[nm])
+            return
+        }
+        d1: Any = loads(args[1])
+        if not isinstance(d1, dict) {
+            out.append("schema(): the definition must be a JSON object")
+            return
+        }
+        defn: dict[str, Any] = d1
+        meta: dict[str, Any] = {}
+        if len(args) == 3 {
+            d2: Any = loads(args[2])
+            if not isinstance(d2, dict) {
+                out.append("schema(): the metadata must be a JSON object")
+                return
+            }
+            meta = d2
+        }
+        h2: Documents = self.db.schema(nm, defn)
+        if len(args) == 3 {
+            h2.meta(meta)
+        }
+        out.append("defined " + nm)
+    }
+}
+
+#--- the entry loop --------------------------------------------------------#
+
+# Read lines until EOF or `quit`. dragon_file_readline keeps the trailing
+# newline on real lines and returns "" only at EOF, so an empty line at the
+# prompt and end-of-input never conflate.
+def repl_loop(db: ODB, inp: ptr, outp: ptr) -> None {
+    sh: Shell = Shell(db)
+    while not sh.done {
+        dragon_file_write_text(outp, "odb> ")
+        fflush(outp)
+        raw: str = dragon_file_readline(inp)
+        if len(raw) == 0 {
+            dragon_file_write_text(outp, "\n")
+            break
+        }
+        for ln in sh.execute(raw) {
+            dragon_file_write_text(outp, ln + "\n")
+        }
+        fflush(outp)
+    }
+}
+
+# Entry: runs only when this file is the program (imports never execute a
+# module's top level). Opening a path that does not exist yet creates the
+# database, sqlite-style.
+_args: list[str] = argv()
+if len(_args) < 2 {
+    _usage_out: ptr = fopen("/dev/stdout", "a")
+    dragon_file_write_text(_usage_out, "usage: dragon run packages/odb/shell.dr <db.odb> -I packages\n")
+    fflush(_usage_out)
+} else {
+    _db: ODB = ODB(_args[1])
+    _out: ptr = fopen("/dev/stdout", "a")
+    _in: ptr = fopen("/dev/stdin", "r")
+    dragon_file_write_text(_out, "ODB shell: " + _args[1] + " at csn " + str(_db.csn()) + ". help for commands.\n")
+    fflush(_out)
+    repl_loop(_db, _in, _out)
+    _db.close()
+}

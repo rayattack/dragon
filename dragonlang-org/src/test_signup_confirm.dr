@@ -1,0 +1,144 @@
+"""Headless behavior tests for email-confirmed signup (auth + mailer seam).
+Run:  dragon run dragonlang-org/src/test_signup_confirm.dr
+
+No account row may exist before the emailed link is followed; the link is
+one-time and expiring; the mailer is exercised through the CaptureMailer
+test double (no network, no API key)"""
+
+from unittest import TestCase, main
+from database import SQL
+from html import HTML
+from storage.db import Db
+from services.auth import AuthService, AuthResult, SignupStart
+from services.mailer import Mailer, CaptureMailer
+from views.eggs.pages import confirm_email_body
+
+
+def _svc() -> AuthService {
+    db: Db = Db(":memory:")
+    return AuthService(db)
+}
+
+
+class BeginSignupTests(TestCase) {
+    def test_begin_parks_no_account() {
+        const a: AuthService = _svc()
+        const s: SignupStart = a.begin_signup("alice", "alice@example.com", "hunter2pass")
+        self.assertTrue(s.ok)
+        self.assertTrue(len(s.token) > 20)
+        # No account yet: login must fail until the link is followed.
+        self.assertFalse(a.login("alice", "hunter2pass").ok)
+    }
+
+    def test_validation() {
+        const a: AuthService = _svc()
+        self.assertEqual(a.begin_signup("x", "x@example.com", "password1").error, "username too short")
+        self.assertEqual(a.begin_signup("carol", "carol@example.com", "short").error, "password must be at least 8 characters")
+        self.assertEqual(a.begin_signup("carol", "not-an-email", "password1").error, "enter a valid email address")
+    }
+
+    def test_taken_names_rejected_at_begin() {
+        const a: AuthService = _svc()
+        self.assertTrue(a.register("bob", "bob@example.com", "password1").ok)
+        self.assertEqual(a.begin_signup("bob", "new@example.com", "password1").error, "username already taken")
+        self.assertEqual(a.begin_signup("newbob", "bob@example.com", "password1").error, "email already registered")
+    }
+}
+
+
+class ConfirmSignupTests(TestCase) {
+    def test_confirm_creates_account_and_logs_in() {
+        const a: AuthService = _svc()
+        const s: SignupStart = a.begin_signup("alice", "alice@example.com", "hunter2pass")
+        const r: AuthResult = a.confirm_signup(s.token)
+        self.assertTrue(r.ok)
+        self.assertTrue(r.user_id > 0)
+        const login: AuthResult = a.login("alice", "hunter2pass")
+        self.assertTrue(login.ok)
+        self.assertEqual(login.user_id, r.user_id)
+    }
+
+    def test_link_is_one_time() {
+        const a: AuthService = _svc()
+        const s: SignupStart = a.begin_signup("alice", "alice@example.com", "hunter2pass")
+        self.assertTrue(a.confirm_signup(s.token).ok)
+        const again: AuthResult = a.confirm_signup(s.token)
+        self.assertFalse(again.ok)
+        self.assertEqual(again.error, "invalid or expired confirmation link")
+    }
+
+    def test_garbage_token_fails() {
+        const a: AuthService = _svc()
+        const r: AuthResult = a.confirm_signup("not-a-real-token")
+        self.assertFalse(r.ok)
+        self.assertEqual(r.error, "invalid or expired confirmation link")
+    }
+
+    def test_expired_link_fails() {
+        const a: AuthService = _svc()
+        const s: SignupStart = a.begin_signup("alice", "alice@example.com", "hunter2pass")
+        a.db.conn.run(template[SQL] { update pending_signups set expires_at = 1 })
+        const r: AuthResult = a.confirm_signup(s.token)
+        self.assertFalse(r.ok)
+        self.assertEqual(r.error, "invalid or expired confirmation link")
+        # And the dead row is gone: nothing to confirm later either.
+        self.assertFalse(a.confirm_signup(s.token).ok)
+    }
+
+    def test_username_claimed_after_email_sent() {
+        const a: AuthService = _svc()
+        const s: SignupStart = a.begin_signup("alice", "alice@example.com", "hunter2pass")
+        self.assertTrue(a.register("alice", "other@example.com", "password1").ok)
+        const r: AuthResult = a.confirm_signup(s.token)
+        self.assertFalse(r.ok)
+        self.assertEqual(r.error, "username already taken")
+    }
+
+    def test_resignup_replaces_pending() {
+        const a: AuthService = _svc()
+        const first: SignupStart = a.begin_signup("alice", "alice@example.com", "hunter2pass")
+        const second: SignupStart = a.begin_signup("alice", "alice@example.com", "betterpass9")
+        self.assertTrue(second.ok)
+        # Only the newest emailed link works.
+        self.assertFalse(a.confirm_signup(first.token).ok)
+        self.assertTrue(a.confirm_signup(second.token).ok)
+        self.assertTrue(a.login("alice", "betterpass9").ok)
+    }
+}
+
+
+class MailerSeamTests(TestCase) {
+    def test_capture_mailer_records_message() {
+        cap: CaptureMailer = CaptureMailer()
+        const body: HTML = confirm_email_body("alice", "https://dragonlang.org/confirm?token=tok123")
+        const err: str = cap.send("alice@example.com", "Confirm your Dragon account", body)
+        self.assertEqual(err, "")
+        self.assertEqual(len(cap.to), 1)
+        self.assertEqual(cap.to[0], "alice@example.com")
+        self.assertEqual(cap.subjects[0], "Confirm your Dragon account")
+        self.assertTrue("https://dragonlang.org/confirm?token=tok123" in cap.bodies[0])
+    }
+
+    def test_email_body_carries_link_and_name() {
+        const body: HTML = confirm_email_body("alice", "https://dragonlang.org/confirm?token=abc")
+        const text: str = body.to_str()
+        self.assertTrue("href=\"https://dragonlang.org/confirm?token=abc\"" in text)
+        self.assertTrue("alice" in text)
+        self.assertTrue("3 hours" in text)
+    }
+
+    def test_base_mailer_dispatches_to_override() {
+        # The deps seam holds a Mailer-typed reference; delivery must reach
+        # the subclass through virtual dispatch.
+        m: Mailer = CaptureMailer()
+        const body: HTML = confirm_email_body("bob", "https://example.com/x")
+        self.assertEqual(m.send("bob@example.com", "s", body), "")
+    }
+}
+
+
+main([
+    BeginSignupTests(),
+    ConfirmSignupTests(),
+    MailerSeamTests(),
+])

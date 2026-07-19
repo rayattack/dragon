@@ -22,6 +22,19 @@ class AuthResult {
     }
 }
 
+# Outcome of starting a signup. `token` is the ONE-TIME plaintext confirmation
+# token for the email link; only its SHA-256 is stored.
+class SignupStart {
+    def(ok: bool, token: str, error: str) {
+        self.ok: bool = ok
+        self.token: str = token
+        self.error: str = error
+    }
+}
+
+# Confirmation links die after this long (seconds).
+const CONFIRM_TTL: int = 10800
+
 def _token_hash(plaintext: str) -> str {
     return hexdigest("sha256", plaintext.encode("utf-8"))
 }
@@ -54,6 +67,89 @@ class AuthService {
             insert into users (username, email, password_hash, created_at)
             values (!{username}, !{email}, !{ph}, !{ts})
         })
+        return AuthResult(true, res.xid, "")
+    }
+
+    #--- email-confirmed signup ------------------------------------------#
+
+    # Step 1: validate, park the signup in pending_signups, and hand back the
+    # plaintext confirmation token for the email link. No account exists yet.
+    # Re-running for the same username or email replaces the earlier pending
+    # row, so only the newest emailed link works.
+    def begin_signup(username: str, email: str, password: str) -> SignupStart {
+        if len(username) < 2 {
+            return SignupStart(false, "", "username too short")
+        }
+        if len(password) < 8 {
+            return SignupStart(false, "", "password must be at least 8 characters")
+        }
+        if "@" not in email or len(email) < 3 {
+            return SignupStart(false, "", "enter a valid email address")
+        }
+        if self._username_taken(username) {
+            return SignupStart(false, "", "username already taken")
+        }
+        if self._email_taken(email) {
+            return SignupStart(false, "", "email already registered")
+        }
+
+        const ts: int = now()
+        # Opportunistic sweep: expired invitations never accumulate.
+        self.db.conn.run(template[SQL] {
+            delete from pending_signups where expires_at < !{ts}
+        })
+        self.db.conn.run(template[SQL] {
+            delete from pending_signups where username = !{username} or email = !{email}
+        })
+
+        const salt: bytes = token_bytes(16)
+        const ph: str = argon_hash(password.encode("utf-8"), salt)
+        const token: str = token_urlsafe(24)
+        const ch: str = _token_hash(token)
+        const exp: int = ts + CONFIRM_TTL
+        self.db.conn.run(template[SQL] {
+            insert into pending_signups (username, email, password_hash, confirm_hash, created_at, expires_at)
+            values (!{username}, !{email}, !{ph}, !{ch}, !{ts}, !{exp})
+        })
+        return SignupStart(true, token, "")
+    }
+
+    # Step 2: the emailed link. Creates the account iff the token matches a
+    # live pending signup AND the username/email are still free (someone may
+    # have claimed them since the email went out - re-check, never trust the
+    # step-1 snapshot).
+    def confirm_signup(token: str) -> AuthResult {
+        const ch: str = _token_hash(token)
+        const ts: int = now()
+        const rows: list[dict[str, Any]] = self.db.conn.all[dict[str, Any]](template[SQL] {
+            select id, username, email, password_hash, expires_at
+            from pending_signups where confirm_hash = !{ch}
+        })
+        if len(rows) == 0 {
+            return AuthResult(false, 0, "invalid or expired confirmation link")
+        }
+        const pid: int = rows[0]["id"]
+        const expires_at: int = rows[0]["expires_at"]
+        if expires_at < ts {
+            self.db.conn.run(template[SQL] { delete from pending_signups where id = !{pid} })
+            return AuthResult(false, 0, "invalid or expired confirmation link")
+        }
+        const username: str = rows[0]["username"]
+        const email: str = rows[0]["email"]
+        const ph: str = rows[0]["password_hash"]
+        if self._username_taken(username) {
+            self.db.conn.run(template[SQL] { delete from pending_signups where id = !{pid} })
+            return AuthResult(false, 0, "username already taken")
+        }
+        if self._email_taken(email) {
+            self.db.conn.run(template[SQL] { delete from pending_signups where id = !{pid} })
+            return AuthResult(false, 0, "email already registered")
+        }
+        const res: Results = self.db.conn.run(template[SQL] {
+            insert into users (username, email, password_hash, created_at)
+            values (!{username}, !{email}, !{ph}, !{ts})
+        })
+        self.db.conn.run(template[SQL] { delete from pending_signups where id = !{pid} })
         return AuthResult(true, res.xid, "")
     }
 

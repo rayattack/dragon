@@ -698,6 +698,26 @@ void CodeGen::visit(ClassDecl& node) {
                         fld.type = declType;
                     }
                 }
+            } else if (declKind != Impl::VarKind::Other) {
+                // Scalar annotations fix the TYPE too: `price: float` seeded
+                // by `self.price = d["price"]` (RHS type unknown to
+                // extractFields) stayed i64, so the f64 store wrote raw
+                // payload bits and reads returned the float's bit pattern as
+                // an integer. Upgrade fld.type only; the KIND deliberately
+                // stays Other for now. Upgrading it to Int/Float/Bool makes
+                // the class eligible for the acyclic skip-tracking
+                // optimization, and untracked instances surface the known
+                // call-arg-temp RC leak (an instance-returning call used
+                // directly as an argument orphans its +1) that the cycle
+                // collector currently rescues tracked classes from. The C3
+                // plan sequences that leak fix BEFORE widening acyclic
+                // skip-tracking; when it lands, this branch should assign
+                // fld.kind = declKind as well.
+                for (auto& fld : fields) {
+                    if (fld.name == tgt->name && fld.kind == Impl::VarKind::Other) {
+                        fld.type = declType;
+                    }
+                }
             }
             continue;
         }

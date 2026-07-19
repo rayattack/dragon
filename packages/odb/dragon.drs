@@ -1,0 +1,18 @@
+# odb - the embedded object database (spec: objectbase.md).
+#
+# One .odb file, JSON documents, JSON Schema as table definitions, real
+# referential integrity, MVCC snapshots, OQL. SQLite's deployment story with
+# a document data model. Pure package: install it if you need it
+
+{
+  name = 'odb'
+  version = '0.1.0'
+  description = 'Embedded object database - one file, JSON documents, typed OQL, MVCC, refs with integrity.'
+  authors = ['Tersoo <ortserga@gmail.com>']
+  license = 'MIT'
+  dragon = '>=0.2.0'
+
+  eggs = {
+    raft = { path = '../raft' }
+  }
+}

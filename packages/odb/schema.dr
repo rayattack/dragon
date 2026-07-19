@@ -9,7 +9,7 @@
 #
 # Schemas compile, they are never interpreted (spec section 4). Ids are assigned
 # by sorted property name so recompiling the same schema on reopen reproduces
-# the exact layout, and stored documents decode identically.
+# the exact layout, and stored documents decode identically
 #
 # M2 scope: scalar types boolean / integer / number / string. date-time, date,
 # decimal, bytes format, arrays, nested objects, discriminated unions, defaults,

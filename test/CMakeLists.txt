@@ -117,7 +117,10 @@ add_test(NAME CodeGenTests COMMAND dragon_codegen_tests)
 file(GLOB DR_TEST_FILES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/dr/test_*.dr)
 foreach(_dr ${DR_TEST_FILES})
     get_filename_component(_name ${_dr} NAME_WE)
-    add_test(NAME dr_${_name} COMMAND $<TARGET_FILE:dragon> run ${_dr})
+    # -I packages resolves first-party package imports (odb, raft, frames);
+    # stdlib imports still resolve via the baked-in DRAGON_STDLIB_DIR.
+    add_test(NAME dr_${_name} COMMAND $<TARGET_FILE:dragon> run ${_dr}
+        -I ${CMAKE_SOURCE_DIR}/packages)
 endforeach()
 
 # D044 - generics `.py`-mode parity. Registered explicitly because the test_*.dr

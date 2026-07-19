@@ -16,6 +16,12 @@ class Db {
 
     def init_schema() {
         self.conn.raw("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, created_at INTEGER NOT NULL)")
+        # Signups awaiting email confirmation. The account row is created ONLY
+        # when the emailed link is followed (services/auth.dr confirm_signup).
+        # confirm_hash is the SHA-256 of the emailed token - same discipline as
+        # publish tokens, so a DB leak reveals no usable confirmation link. The
+        # password is argon2id-hashed BEFORE it ever reaches this table.
+        self.conn.raw("CREATE TABLE IF NOT EXISTS pending_signups (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL, email TEXT NOT NULL, password_hash TEXT NOT NULL, confirm_hash TEXT UNIQUE NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL)")
         self.conn.raw("CREATE TABLE IF NOT EXISTS tokens (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, label TEXT NOT NULL, token_hash TEXT UNIQUE NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL DEFAULT 0, revoked INTEGER NOT NULL DEFAULT 0)")
         self.conn.raw("CREATE TABLE IF NOT EXISTS packages (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL, owner_id INTEGER NOT NULL, description TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL)")
         # yanked: 0 = live, 1 = soft-yank (deprecated; dropped from "latest" and

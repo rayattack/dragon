@@ -368,10 +368,125 @@ class HTTPSConnection {
         return HTTPSResponse(self.stream, status, reason, headers, body)
     }
 
+    # Binary-safe request: the head travels as ASCII text, the payload goes
+    # through SSLSocket.send_bytes - never through a str, whose non-ASCII
+    # widening would corrupt raw bytes (tarballs, images).
+    def request_bytes(method: str, url: str, body: bytes, headers: dict[str, str]) -> None {
+        self.connect()
+        host_hdr: str = self.host
+        if self.port != 80 and self.port != 443 {
+            host_hdr = self.host + ":" + dragon_int_to_str(self.port)
+        }
+        req: str = method + " " + url + " HTTP/1.1\r\n"
+        req = req + "Host: " + host_hdr + "\r\n"
+        req = req + "Connection: close\r\n"
+        req = req + "Content-Length: " + dragon_int_to_str(len(body)) + "\r\n"
+        for k in headers {
+            req = req + k + ": " + headers[k] + "\r\n"
+        }
+        req = req + "\r\n"
+        self.stream.do_send(req)
+        if len(body) > 0 {
+            self.stream.send_bytes(body)
+        }
+    }
+
+    # Read a whole response with a BYTES body (binary-safe download). Reads to
+    # EOF (every request here sends Connection: close), splits head/body at
+    # the first CRLFCRLF, and decodes only the ASCII head.
+    def getresponse_bytes() -> HTTPSBytesResponse {
+        chunks: list[bytes] = []
+        while True {
+            c: bytes = self.stream.recv(65536)
+            if len(c) == 0 {
+                break
+            }
+            chunks.append(c)
+        }
+        raw: bytes = b"".join(chunks)
+        n: int = len(raw)
+        # Locate \r\n\r\n without lifting the payload into a str.
+        sep: int = -1
+        i: int = 0
+        while i + 3 < n {
+            if raw[i] == 13 and raw[i + 1] == 10 and raw[i + 2] == 13 and raw[i + 3] == 10 {
+                sep = i
+                break
+            }
+            i = i + 1
+        }
+        if sep < 0 {
+            raise ValueError("malformed HTTP response: no header terminator")
+        }
+        head: str = raw[0:sep].decode("utf-8")
+        body: bytes = raw[sep + 4:n]
+
+        lines: list[str] = head.split("\r\n")
+        if len(lines) == 0 {
+            raise ValueError("malformed HTTP response: empty head")
+        }
+        status_pair: tuple[int, str] = _parse_status_line(lines[0])
+        headers: dict[str, str] = {}
+        j: int = 1
+        while j < len(lines) {
+            line: str = lines[j]
+            if len(line) > 0 {
+                kv: tuple[str, str] = _parse_header_line(line)
+                if len(kv[0]) > 0 {
+                    headers[kv[0]] = kv[1]
+                }
+            }
+            j = j + 1
+        }
+        # Chunked bodies are refused loudly rather than mis-assembled; every
+        # server this client targets responds with Content-Length (and the
+        # Connection: close EOF bounds the read regardless).
+        te: str = ""
+        for hk in headers {
+            if hk.lower() == "transfer-encoding" {
+                te = headers[hk]
+            }
+        }
+        if "chunked" in te.lower() {
+            raise ValueError("chunked response bodies are not supported by getresponse_bytes")
+        }
+        return HTTPSBytesResponse(status_pair[0], status_pair[1], headers, body)
+    }
+
     def close() -> None {
         if self._connected {
             self.stream.close()
             self._connected = False
         }
+    }
+}
+
+# A fully-read HTTPS response whose body is raw bytes. No stream handle: the
+# connection is already drained and closed by the time one exists.
+class HTTPSBytesResponse {
+    status: int
+    reason: str
+    headers: dict[str, str]
+    body: bytes
+
+    def(status: int, reason: str, headers: dict[str, str], body: bytes) {
+        self.status = status
+        self.reason = reason
+        self.headers = headers
+        self.body = body
+    }
+
+    def read() -> bytes {
+        return self.body
+    }
+
+    def getheader(name: str, default: str = "") -> str {
+        target: str = name.lower()
+        for k in self.headers {
+            if k.lower() == target {
+                return self.headers[k]
+            }
+        }
+        return default
     }
 }

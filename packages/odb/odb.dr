@@ -19,7 +19,7 @@
 # the root of every index tree it declares (memcomparable key -> docid). A write
 # copy-on-writes the document tree AND every affected index tree AND the catalog
 # entry, then commits them in ONE atomic pager commit, so a crash leaves the
-# whole database on the previous or the next consistent snapshot, never between.
+# whole database on the previous or the next consistent snapshot, never between
 #
 # Integrity (uniqueness) is validated during the write and the whole thing rolls
 # back on violation (spec section 7): a rejected save never leaves staged pages
@@ -41,6 +41,7 @@ from odb.oql import parse, typecheck, matches, project, project_fields, is_aggre
 from odb.oql import has_refs, tc_pred, tc_value, pred, eval_present, eval_any, OqlQuery, ProjField, ExistJoin
 from odb.oql import Stage, SortKey, ST_SORT, ST_TAKE, ST_SKIP
 from odb.oql import parse_program, bind_query, bind_program, WriteProgram, WriteStmt, WriteDoc
+from odb.oql import OQL
 from odb.oql import W_ADD, W_SET, W_UNSET, W_PUT, W_DEL
 from odb.checker import check_tree, check_index_tree, CheckResult
 from odb.codec import blank, put_u16, put_u32, put_u64, put_bytes
@@ -715,9 +716,10 @@ class ODB {
         return Documents(self, self._schemas[name])
     }
 
-    # OQL reads (spec section 8). Runtime string now; the template[OQL] literal
-    # is the blessed compile-checked form once the content type lands. Parsed and
-    # type-checked at prepare time, then executed over the document tree.
+    # OQL reads (spec section 8). Three overloads: runtime text, text with
+    # $name params, and the template[OQL] value (the blessed injection-safe
+    # form). Parsed and type-checked at prepare time, then executed over the
+    # document tree.
     def find(query: str) -> list[Document] {
         return self._find_q(parse(query))
     }
@@ -726,6 +728,23 @@ class ODB {
     def find(query: str, params: dict[str, Any]) -> list[Document] {
         q: OqlQuery = parse(query)
         bind_query(q, params)
+        return self._find_q(q)
+    }
+
+    # OQL read from a `template[OQL]` value: the canonical `$$N` text plus its
+    # extracted parameters, bound positionally through the same value-only
+    # injection path as `$name`. Parameters are never spliced into the text.
+    def find(query: OQL) -> list[Document] {
+        q: OqlQuery = parse(query.canonical)
+        binds: dict[str, Any] = {}
+        i: int = 0
+        for v in query.params {
+            binds[str(i)] = v
+            i = i + 1
+        }
+        if i > 0 {
+            bind_query(q, binds)
+        }
         return self._find_q(q)
     }
 

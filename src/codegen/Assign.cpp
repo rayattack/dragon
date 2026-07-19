@@ -743,6 +743,46 @@ void CodeGen::visit(AssignStmt& node) {
                                 else if (fieldKind != Impl::VarKind::Other)
                                     newKind = fieldKind;
                                 bool rhsBorrowed = Impl::isBorrowedHeapExpr(node.value.get());
+                                // D039 box -> native unbox for a TYPED field, the
+                                // mirror of the local-slot path above. Without it
+                                // `self.name = d["name"]` (d: dict[str, Any])
+                                // stored the 16-byte {tag, payload} box over the
+                                // 8-byte field slot: the write spilled into the
+                                // NEXT field, an int field read back tag bits, and
+                                // a str field held a non-pointer the shared-mark
+                                // walk / dealloc then dereferenced (SEGV,
+                                // test_any_field_store.dr). Extract the payload at
+                                // the field's natural type; ownership follows the
+                                // local-slot protocol exactly.
+                                bool ownedBoxUnboxed = false;
+                                llvm::Value* ownedBoxPayload = nullptr;
+                                llvm::Value* ownedBoxTag = nullptr;
+                                if (fieldKind != Impl::VarKind::Union &&
+                                    storeVal->getType() == impl_->boxType &&
+                                    fieldType != impl_->boxType) {
+                                    if (impl_->options.gcMode == GCMode::RC &&
+                                        impl_->isOwnedBoxResult(storeVal)) {
+                                        ownedBoxUnboxed = true;
+                                        ownedBoxPayload =
+                                            impl_->boxPayloadI64(storeVal, "ownbox.pay");
+                                        ownedBoxTag =
+                                            impl_->boxTag(storeVal, "ownbox.tag");
+                                    }
+                                    storeVal = impl_->boxPayloadAsKind(
+                                        storeVal, Impl::typeKindToVarKind(
+                                            fieldType == impl_->f64Type ? Type::Kind::Float :
+                                            fieldType == impl_->i1Type ? Type::Kind::Bool :
+                                            fieldType->isPointerTy() ? Type::Kind::Str :
+                                            Type::Kind::Int));
+                                    // A BORROWED box's payload is still owned by
+                                    // its container, so the field must take its
+                                    // own reference; an OWNED box's +1 transfers
+                                    // to the field (surplus released below when
+                                    // the store increfs independently).
+                                    if (impl_->options.gcMode == GCMode::RC &&
+                                        !ownedBoxUnboxed && fieldType->isPointerTy())
+                                        rhsBorrowed = true;
+                                }
                                 // An Any/Union field slot is a {tag, payload} box
                                 // VALUE. A NATIVE RHS (`k.v = "d" + s`, `k.v = 5`)
                                 // must be boxed here: the raw store wrote the
@@ -774,6 +814,14 @@ void CodeGen::visit(AssignStmt& node) {
                                 // move exception); null the source so scope
                                 // exit sees nothing (docs/002 2.4 row 3).
                                 impl_->emitMoveOutIfMarked(node.value.get());
+                                // Release the OWNED box temporary's +1 when the
+                                // store took its own independent ref (same rule
+                                // as the local-slot path: adopt when
+                                // rhsBorrowed=false, release the surplus when
+                                // the store increfed). Tag-gated: no-op for a
+                                // non-heap payload.
+                                if (ownedBoxUnboxed && rhsBorrowed)
+                                    impl_->emitUnionDecref(ownedBoxPayload, ownedBoxTag);
                             }
                             continue;
                         }

@@ -485,6 +485,123 @@ void TypeChecker::visit(CallExpr& node) {
         return err;
     };
 
+    // Conservative positional argument type check + fresh-literal blessing,
+    // shared by plain function/method calls AND single-ctor class calls (the
+    // caller gates on no kwargs + exact arity). Any/Unknown on either side is
+    // skipped (can't prove a violation). This catches the silent miscompile
+    // `def sq(n: int)...; sq("x")` and the template[SQL] mismatch (M3), and
+    // blesses container literals against the param's representation. Ctor
+    // calls previously skipped this entirely (2026-07-18 gap): an inline
+    // `[11, 22]` passed to a `list[Any]` ctor param compiled monomorphized
+    // and the callee walked the wrong stride (`xs[0]` read a box that was
+    // never there).
+    auto checkPositionalArgs = [&](FunctionType& ft) {
+        auto isContainer = [](Type::Kind k) {
+            return k == Type::Kind::List || k == Type::Kind::Dict ||
+                   k == Type::Kind::Tuple || k == Type::Kind::Task;
+        };
+        for (size_t i = 0; i < node.args.size(); ++i) {
+            const auto& at = node.args[i]->type;
+            const auto& pt = ft.paramTypes[i];
+            if (!at || !pt) continue;
+            auto ak = at->kind(), pk = pt->kind();
+            if (ak == Type::Kind::Unknown || ak == Type::Kind::Any ||
+                pk == Type::Kind::Unknown)
+                continue;
+            if (pk == Type::Kind::Any) {
+                // A container literal ENTERING A BOXED-ELEMENT CONTAINER
+                // (append/remove on a list[Any] receiver - the Any param is
+                // the receiver's element type) is born in the box
+                // representation: it will only ever be read back through
+                // Any. A literal passed to a PLAIN Any param keeps its
+                // concrete monomorphized type (commandment #3) - the box
+                // boundary carries native lists safely (dynamic ops
+                // header-dispatch; builtins like bytes() read natively;
+                // unboxing to list[Any] raises a teaching TypeError).
+                if (auto* att = dynamic_cast<AttributeExpr*>(node.callee.get())) {
+                    bool recvIsBoxList = false;
+                    if (att->object && att->object->type) {
+                        if (auto* rlt = dynamic_cast<ListType*>(
+                                att->object->type.get()))
+                            recvIsBoxList = rlt->elementType &&
+                                rlt->elementType->kind() == Type::Kind::Any;
+                    }
+                    if (recvIsBoxList &&
+                        (att->attribute == "append" ||
+                         att->attribute == "insert" ||
+                         att->attribute == "remove"))
+                        boxNestedContainerLiteralForAny(node.args[i].get());
+                }
+                continue;
+            }
+            // None is the null pointer - admissible for any ptr-shaped
+            // param (nullable pattern); a Union arg may still need
+            // narrowing the checker can't see. Both are skipped.
+            if (ak == Type::Kind::None_ || ak == Type::Kind::Union ||
+                pk == Type::Kind::Union)
+                continue;
+            // Dragon containers are INVARIANT, but a fresh literal arg of a
+            // covariant element type (`main([SubTest()])` -> list[TestCase])
+            // is sound and idiomatic: bless it via tryExpectedTypeLiteral,
+            // which also forces the box representation for an Any element
+            // type. For NON-literal same-kind container args, defer as
+            // before - EXCEPT when the element layouts differ (list[T] vs
+            // list[Any]/list[union]): passing a monomorphized list as a
+            // box-element list walks the wrong stride inside the callee,
+            // so that specific aliasing is rejected here.
+            if (isContainer(ak) && ak == pk) {
+                // An EMPTY container literal adopts the param type - the
+                // same contextual typing `x: list[T] = []` gets - so
+                // `f([])` builds the param's representation.
+                if (auto* le = dynamic_cast<ListExpr*>(node.args[i].get())) {
+                    if (le->elements.empty()) {
+                        propagateAnnotationToEmptyLiteral(
+                            node.args[i].get(), pt);
+                        continue;
+                    }
+                } else if (auto* de =
+                               dynamic_cast<DictExpr*>(node.args[i].get())) {
+                    if (de->entries.empty()) {
+                        propagateAnnotationToEmptyLiteral(
+                            node.args[i].get(), pt);
+                        continue;
+                    }
+                }
+                if (tryExpectedTypeLiteral(node.args[i].get(), pt)) continue;
+                if (ak == Type::Kind::List) {
+                    const auto& ae =
+                        static_cast<const ListType&>(*at).elementType;
+                    const auto& pe =
+                        static_cast<const ListType&>(*pt).elementType;
+                    // Only judge when both element types are known - an
+                    // Unknown element carries no representation claim.
+                    if (ae && pe && ae->kind() != Type::Kind::Unknown &&
+                        pe->kind() != Type::Kind::Unknown) {
+                        auto boxElem = [](const Type::Kind k) {
+                            return k == Type::Kind::Any ||
+                                   k == Type::Kind::Union;
+                        };
+                        if (boxElem(ae->kind()) != boxElem(pe->kind())) {
+                            error(node.args[i]->location(),
+                                  "argument " + std::to_string(i + 1) +
+                                  " of type '" + at->toString() +
+                                  "' is not assignable to parameter type '" +
+                                  pt->toString() + "'" +
+                                  TypeChecker::listReprMismatchHint(*at, *pt));
+                        }
+                    }
+                }
+                continue;
+            }
+            if (!at->isSubtypeOf(*pt)) {
+                error(node.args[i]->location(),
+                      "argument " + std::to_string(i + 1) + " of type '" +
+                      at->toString() + "' is not assignable to parameter "
+                      "type '" + pt->toString() + "'");
+            }
+        }
+    };
+
     if (calleeType->kind() == Type::Kind::Function) {
         auto& ft = static_cast<FunctionType&>(*calleeType);
         // len() of a function value: the argv[1]-class mistake one step
@@ -546,110 +663,7 @@ void TypeChecker::visit(CallExpr& node) {
         if ((dynamic_cast<NameExpr*>(node.callee.get()) ||
              dynamic_cast<AttributeExpr*>(node.callee.get())) &&
             node.kwArgs.empty() && node.args.size() == ft.paramTypes.size()) {
-            auto isContainer = [](Type::Kind k) {
-                return k == Type::Kind::List || k == Type::Kind::Dict ||
-                       k == Type::Kind::Tuple || k == Type::Kind::Task;
-            };
-            for (size_t i = 0; i < node.args.size(); ++i) {
-                const auto& at = node.args[i]->type;
-                const auto& pt = ft.paramTypes[i];
-                if (!at || !pt) continue;
-                auto ak = at->kind(), pk = pt->kind();
-                if (ak == Type::Kind::Unknown || ak == Type::Kind::Any ||
-                    pk == Type::Kind::Unknown)
-                    continue;
-                if (pk == Type::Kind::Any) {
-                    // A container literal ENTERING A BOXED-ELEMENT CONTAINER
-                    // (append/remove on a list[Any] receiver - the Any param is
-                    // the receiver's element type) is born in the box
-                    // representation: it will only ever be read back through
-                    // Any. A literal passed to a PLAIN Any param keeps its
-                    // concrete monomorphized type (commandment #3) - the box
-                    // boundary carries native lists safely (dynamic ops
-                    // header-dispatch; builtins like bytes() read natively;
-                    // unboxing to list[Any] raises a teaching TypeError).
-                    if (auto* att = dynamic_cast<AttributeExpr*>(node.callee.get())) {
-                        bool recvIsBoxList = false;
-                        if (att->object && att->object->type) {
-                            if (auto* rlt = dynamic_cast<ListType*>(
-                                    att->object->type.get()))
-                                recvIsBoxList = rlt->elementType &&
-                                    rlt->elementType->kind() == Type::Kind::Any;
-                        }
-                        if (recvIsBoxList &&
-                            (att->attribute == "append" ||
-                             att->attribute == "insert" ||
-                             att->attribute == "remove"))
-                            boxNestedContainerLiteralForAny(node.args[i].get());
-                    }
-                    continue;
-                }
-                // None is the null pointer - admissible for any ptr-shaped
-                // param (nullable pattern); a Union arg may still need
-                // narrowing the checker can't see. Both are skipped.
-                if (ak == Type::Kind::None_ || ak == Type::Kind::Union ||
-                    pk == Type::Kind::Union)
-                    continue;
-                // Dragon containers are INVARIANT, but a fresh literal arg of a
-                // covariant element type (`main([SubTest()])` -> list[TestCase])
-                // is sound and idiomatic: bless it via tryExpectedTypeLiteral,
-                // which also forces the box representation for an Any element
-                // type. For NON-literal same-kind container args, defer as
-                // before - EXCEPT when the element layouts differ (list[T] vs
-                // list[Any]/list[union]): passing a monomorphized list as a
-                // box-element list walks the wrong stride inside the callee,
-                // so that specific aliasing is rejected here.
-                if (isContainer(ak) && ak == pk) {
-                    // An EMPTY container literal adopts the param type - the
-                    // same contextual typing `x: list[T] = []` gets - so
-                    // `f([])` builds the param's representation.
-                    if (auto* le = dynamic_cast<ListExpr*>(node.args[i].get())) {
-                        if (le->elements.empty()) {
-                            propagateAnnotationToEmptyLiteral(
-                                node.args[i].get(), pt);
-                            continue;
-                        }
-                    } else if (auto* de =
-                                   dynamic_cast<DictExpr*>(node.args[i].get())) {
-                        if (de->entries.empty()) {
-                            propagateAnnotationToEmptyLiteral(
-                                node.args[i].get(), pt);
-                            continue;
-                        }
-                    }
-                    if (tryExpectedTypeLiteral(node.args[i].get(), pt)) continue;
-                    if (ak == Type::Kind::List) {
-                        const auto& ae =
-                            static_cast<const ListType&>(*at).elementType;
-                        const auto& pe =
-                            static_cast<const ListType&>(*pt).elementType;
-                        // Only judge when both element types are known - an
-                        // Unknown element carries no representation claim.
-                        if (ae && pe && ae->kind() != Type::Kind::Unknown &&
-                            pe->kind() != Type::Kind::Unknown) {
-                            auto boxElem = [](const Type::Kind k) {
-                                return k == Type::Kind::Any ||
-                                       k == Type::Kind::Union;
-                            };
-                            if (boxElem(ae->kind()) != boxElem(pe->kind())) {
-                                error(node.args[i]->location(),
-                                      "argument " + std::to_string(i + 1) +
-                                      " of type '" + at->toString() +
-                                      "' is not assignable to parameter type '" +
-                                      pt->toString() + "'" +
-                                      TypeChecker::listReprMismatchHint(*at, *pt));
-                            }
-                        }
-                    }
-                    continue;
-                }
-                if (!at->isSubtypeOf(*pt)) {
-                    error(node.args[i]->location(),
-                          "argument " + std::to_string(i + 1) + " of type '" +
-                          at->toString() + "' is not assignable to parameter "
-                          "type '" + pt->toString() + "'");
-                }
-            }
+            checkPositionalArgs(ft);
         }
         // sorted()/reversed() are declared returning `any`, but they preserve
         // the iterable's element type. Propagate it here (this block runs
@@ -703,8 +717,17 @@ void TypeChecker::visit(CallExpr& node) {
             auto initIt = ct.methods.find("__init__");
             if (initIt != ct.methods.end() && initIt->second &&
                 initIt->second->kind() == Type::Kind::Function) {
-                validateCall(static_cast<FunctionType&>(*initIt->second),
-                             "class '" + ct.name + "' constructor");
+                auto& ift = static_cast<FunctionType&>(*initIt->second);
+                validateCall(ift, "class '" + ct.name + "' constructor");
+                // Positional type check + literal blessing for ctor args,
+                // same gates as the function/method path: no kwargs, exact
+                // arity. Without this a ctor call skipped both entirely
+                // (2026-07-18 gap) - `Cls([11, 22])` against `xs: list[Any]`
+                // compiled the literal monomorphized and every element read
+                // in the ctor walked the wrong stride.
+                if (node.kwArgs.empty() &&
+                    node.args.size() == ift.paramTypes.size())
+                    checkPositionalArgs(ift);
             }
         }
         node.type = std::make_shared<InstanceType>(

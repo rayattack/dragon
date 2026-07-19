@@ -1,0 +1,122 @@
+"""Storing an Any expression directly into a typed field must unbox.
+
+Regression test for the self-field sibling of the fixed module-global bug:
+`self.id = d['id']` with d: dict[str, Any] stored the box (or nothing)
+instead of the unboxed value. int fields silently read 0, str fields held a
+garbage pointer that crashed later. The via-a-typed-local path always worked;
+these tests pin the direct path to the same answers
+"""
+
+from unittest import TestCase, main
+
+
+class IntField {
+    id: int
+
+    def(d: dict[str, Any]) {
+        self.id = d['id']
+    }
+}
+
+
+class StrField {
+    name: str
+
+    def(d: dict[str, Any]) {
+        self.name = d['name']
+    }
+}
+
+
+class MixedFields {
+    id: int
+    name: str
+
+    def(d: dict[str, Any]) {
+        self.id = d['id']
+        self.name = d['name']
+    }
+}
+
+
+class MethodStore {
+    id: int
+    name: str
+
+    def() {
+        self.id = 0
+        self.name = ""
+    }
+
+    def load(d: dict[str, Any]) -> None {
+        self.id = d['id']
+        self.name = d['name']
+    }
+}
+
+
+class FloatField {
+    price: float
+
+    def(d: dict[str, Any]) {
+        self.price = d['price']
+    }
+}
+
+
+class ListAnySource {
+    first: int
+
+    def(xs: list[Any]) {
+        self.first = xs[0]
+    }
+}
+
+
+class TestAnyFieldStore(TestCase) {
+    def test_int_field_direct_store() -> None {
+        a: IntField = IntField({'id': 42})
+        self.assertEqual(a.id, 42)
+    }
+
+    def test_str_field_direct_store() -> None {
+        b: StrField = StrField({name: 'Ada'})
+        self.assertEqual(b.name, "Ada")
+    }
+
+    def test_mixed_fields_ctor() -> None {
+        # The two-field case crashed outright (str field held a bogus
+        # pointer); assert both fields land correctly.
+        c: MixedFields = MixedFields({'id': 7, name: 'Peter'})
+        self.assertEqual(c.id, 7)
+        self.assertEqual(c.name, "Peter")
+    }
+
+    def test_method_store() -> None {
+        m: MethodStore = MethodStore()
+        m.load({'id': 9, name: 'Grace'})
+        self.assertEqual(m.id, 9)
+        self.assertEqual(m.name, "Grace")
+    }
+
+    def test_float_field_direct_store() -> None {
+        f: FloatField = FloatField({'price': 2.5})
+        self.assertEqual(f.price, 2.5)
+    }
+
+    def test_list_any_element_store() -> None {
+        l: ListAnySource = ListAnySource([11, 22])
+        self.assertEqual(l.first, 11)
+    }
+
+    def test_direct_matches_via_local() -> None {
+        d: dict[str, Any] = {'id': 42}
+        direct: IntField = IntField(d)
+        tmp: int = d['id']
+        self.assertEqual(direct.id, tmp)
+    }
+}
+
+
+main([TestAnyFieldStore()])
+

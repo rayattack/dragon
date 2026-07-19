@@ -30,6 +30,7 @@ extern "C" def dragon_tls_conn_free(conn: ptr)
 extern "C" def dragon_tls_handshake(conn: ptr) -> int
 extern "C" def dragon_tls_get_verify_result(conn: ptr) -> int
 extern "C" def dragon_tls_write(conn: ptr, buf: str, length: int) -> int
+extern "C" def dragon_tls_send_bytes(conn: ptr, data: bytes) -> int
 extern "C" def dragon_tls_read(conn: ptr, buf: ptr, length: int) -> int
 extern "C" def dragon_tls_recv_str(conn: ptr, maxlen: int) -> str
 # R1: bounded read - abandons after `ms` of silence, returning "" (EOF contract).
@@ -137,6 +138,17 @@ class SSLSocket {
 
     def sendall(data: str) -> None {
         self.send(data)
+    }
+
+    # Binary-safe send. A str carries code points (non-ASCII widens to UCS-4),
+    # so raw payloads - tarballs, images, encrypted blobs - must travel as
+    # bytes end to end. Mirrors TcpStream.send_bytes.
+    def send_bytes(data: bytes) -> int {
+        rc: int = dragon_tls_send_bytes(self._conn, data)
+        if rc < 0 {
+            raise SSLError(f"TLS write failed: {_err_msg(rc)}")
+        }
+        return rc
     }
 
     # CPython SSLSocket aliases.

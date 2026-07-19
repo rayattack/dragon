@@ -1,0 +1,141 @@
+"""Iterating a container reached through a NESTED attribute chain.
+
+You did nothing wrong: ordinary code like
+
+    class Db { schemas: dict[str, int] }
+    class Shell {
+        db: Db
+        def names() -> None {
+            for k in self.db.schemas { ... }
+        }
+    }
+
+crashed, while the same loop over a local copy (`d: dict[str, int] =
+self.db.schemas` then `for k in d`) worked. The for-loop codegen resolved the
+owning class only for single-level `self.field` / `obj.field` iterables; a
+nested base (`self.db.schemas`) resolved to no class, fell through to the
+LIST default, and the loop read the dict's heap pages as list slots: a
+heap-buffer-overflow that ASan flags immediately and that segfaults in a
+plain build the moment the fake slot is dereferenced. It bites whenever a
+class holds another class that holds a dict - a wrapper over a database, a
+config inside an app object - and the wrapper iterates it directly.
+
+The fix resolves the owner class of a nested base with the same resolution
+the dict key-kind lookup already used (resolveExprClassName), and when the
+field kind still is not tracked, falls back to the iterable's stamped static
+type instead of assuming list. Before: `for k in self.db.schemas` crashed.
+After: the identical line iterates the dict's keys, str- and int-keyed alike
+"""
+
+from unittest import TestCase, main
+
+
+class Inner {
+    ds: dict[str, int]
+    di: dict[int, str]
+    title: str
+    xs: list[int]
+
+    def() {
+        self.ds = {}
+        self.ds["x"] = 1
+        self.ds["y"] = 2
+        self.di = {}
+        self.di[10] = "a"
+        self.di[20] = "b"
+        self.title = "abc"
+        self.xs = [7, 8, 9]
+    }
+}
+
+class Outer {
+    inner: Inner
+
+    def(inner: Inner) {
+        self.inner = inner
+    }
+
+    def str_keys() -> str {
+        parts: list[str] = []
+        for k in self.inner.ds {
+            parts.append(k)
+        }
+        return ",".join(parts)
+    }
+
+    def int_keys() -> int {
+        total: int = 0
+        for k in self.inner.di {
+            total = total + k
+        }
+        return total
+    }
+
+    def items_sum() -> int {
+        total: int = 0
+        for k, v in self.inner.ds.items() {
+            total = total + v
+        }
+        return total
+    }
+
+    def keys_join() -> str {
+        parts: list[str] = []
+        for k in self.inner.ds.keys() {
+            parts.append(k)
+        }
+        return ",".join(parts)
+    }
+
+    def chars() -> int {
+        n: int = 0
+        for c in self.inner.title {
+            n = n + 1
+        }
+        return n
+    }
+
+    def list_sum() -> int {
+        total: int = 0
+        for x in self.inner.xs {
+            total = total + x
+        }
+        return total
+    }
+}
+
+
+class NestedAttrIterationTests(TestCase) {
+    def test_str_keyed_dict_keys() {
+        o: Outer = Outer(Inner())
+        self.assertEqual(o.str_keys(), "x,y")
+    }
+
+    def test_int_keyed_dict_keys() {
+        o: Outer = Outer(Inner())
+        self.assertEqual(o.int_keys(), 30)
+    }
+
+    def test_items_unpack_on_nested_chain() {
+        o: Outer = Outer(Inner())
+        self.assertEqual(o.items_sum(), 3)
+    }
+
+    def test_keys_call_on_nested_chain() {
+        o: Outer = Outer(Inner())
+        self.assertEqual(o.keys_join(), "x,y")
+    }
+
+    def test_str_field_iterates_chars() {
+        o: Outer = Outer(Inner())
+        self.assertEqual(o.chars(), 3)
+    }
+
+    def test_list_field_still_list() {
+        o: Outer = Outer(Inner())
+        self.assertEqual(o.list_sum(), 24)
+    }
+}
+
+
+main([NestedAttrIterationTests()])

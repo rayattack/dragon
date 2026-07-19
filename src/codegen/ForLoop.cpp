@@ -581,6 +581,57 @@ void CodeGen::visit(ForStmt& node) {
             // is NOT, even though its static type may still read Any.
             iterMayBeBox = impl_->lookupVarKind(nm->name) == Impl::VarKind::Union;
         }
+        // A list[Any] iterable stores 16-byte boxes (DragonListBox). The
+        // native-list loop walks elements at the 8-byte stride, which reads
+        // interleaved tag/payload words - the exact failure this box path
+        // exists to prevent for Any-typed iterables - so route every
+        // Any-element list here as well. The coercion below wraps the raw
+        // list pointer as a list-tagged box and dragon_box_subscript
+        // dispatches either list representation. Element-kind sources, in
+        // order: the checker's static type, a local's tracked elem kind, a
+        // field's registered elem kind.
+        bool anyElemList = false;
+        if (node.iterable->type) {
+            if (auto* lt = dynamic_cast<ListType*>(node.iterable->type.get())) {
+                if (lt->elementType &&
+                    lt->elementType->kind() == Type::Kind::Any)
+                    anyElemList = true;
+            }
+        }
+        if (auto* nm = dynamic_cast<NameExpr*>(node.iterable.get())) {
+            auto it = impl_->varListElemKinds.find(nm->name);
+            if (it != impl_->varListElemKinds.end() &&
+                it->second == Type::Kind::Any)
+                anyElemList = true;
+            // D025: a list[type] element is a class descriptor, not a value.
+            // Its elem-kind entry reads Any (no Type::Kind counterpart), but
+            // it must stay on the native path so constructing through the
+            // loop var still dies with the "classes are not values" error.
+            if (impl_->varListElemIsType.count(nm->name))
+                anyElemList = false;
+        } else if (auto* iterAttr =
+                       dynamic_cast<AttributeExpr*>(node.iterable.get())) {
+            std::string ownerClass;
+            if (auto* objName = dynamic_cast<NameExpr*>(iterAttr->object.get())) {
+                if (objName->name == "self" && !impl_->currentClassName.empty())
+                    ownerClass = impl_->currentClassName;
+                else {
+                    auto vit = impl_->varClassNames.find(objName->name);
+                    if (vit != impl_->varClassNames.end())
+                        ownerClass = vit->second;
+                }
+            }
+            if (!ownerClass.empty()) {
+                auto cit = impl_->classFieldListElemKinds.find(ownerClass);
+                if (cit != impl_->classFieldListElemKinds.end()) {
+                    auto fit = cit->second.find(iterAttr->attribute);
+                    if (fit != cit->second.end() &&
+                        fit->second == Type::Kind::Any)
+                        anyElemList = true;
+                }
+            }
+        }
+        if (anyElemList) iterMayBeBox = true;
         auto* boxTarget = dynamic_cast<NameExpr*>(node.target.get());
         if (iterMayBeBox && boxTarget) {
             node.iterable->accept(*this);
@@ -704,16 +755,21 @@ void CodeGen::visit(ForStmt& node) {
     bool isDictKeysIterable = false;   // for k in d.keys() OR for k in d
 
     // Helper: resolve owner class name for an AttributeExpr's object.
-    // Handles `self.<field>` (uses currentClassName) and `obj.<field>`
-    // (looks up varClassNames). Returns empty string if unresolved.
+    // Handles `self.<field>` (uses currentClassName), `obj.<field>`
+    // (looks up varClassNames), and nested bases (`self.inner.<field>`,
+    // `a.b.<field>`) via resolveExprClassName - the same resolution
+    // resolveDictKeyKind uses, so the iteration shape and the key kind
+    // are always read off the same owning class. Returns empty string if
+    // unresolved.
     auto resolveOwnerClass = [&](AttributeExpr* attr) -> std::string {
         if (auto* objName = dynamic_cast<NameExpr*>(attr->object.get())) {
             if (objName->name == "self" && !impl_->currentClassName.empty())
                 return impl_->currentClassName;
             auto vit = impl_->varClassNames.find(objName->name);
             if (vit != impl_->varClassNames.end()) return vit->second;
+            return {};
         }
-        return {};
+        return impl_->resolveExprClassName(attr->object.get());
     };
 
     // Helper: look up the VarKind of a class field. Returns Other if unknown.
@@ -768,7 +824,20 @@ void CodeGen::visit(ForStmt& node) {
                 : fieldVarKind(owner, iterAttr->attribute);
             if (kind == Impl::VarKind::Str || kind == Impl::VarKind::StrLiteral) isStrIterable = true;
             else if (kind == Impl::VarKind::Dict) isDictKeysIterable = true;
-            else isListIterable = true; // List or unknown - list is a safe default
+            else if (kind == Impl::VarKind::List) isListIterable = true;
+            else if (node.iterable->type) {
+                // Field kind untracked (e.g. the owner class was declared in
+                // another module): the stamped static type still knows the
+                // container shape. Without this fallback a dict field reached
+                // through an unresolved owner iterated as a LIST and the loop
+                // read the dict's pages as list slots (heap overflow).
+                switch (node.iterable->type->kind()) {
+                    case Type::Kind::Dict: isDictKeysIterable = true; break;
+                    case Type::Kind::Str:  isStrIterable = true; break;
+                    default:               isListIterable = true; break;
+                }
+            }
+            else isListIterable = true; // unknown - list is the legacy default
         } else if (dynamic_cast<StringLiteral*>(node.iterable.get())) {
             isStrIterable = true;
         } else if (node.iterable->type) {

@@ -114,7 +114,7 @@ Iterating a dict yields its **keys**, in insertion order. `.items()` yields
 key/value pairs you can unpack; `.keys()` and `.values()` return lists:
 
 ```dragon
-const scores: dict[str, int] = {"a": 1, "b": 2, "c": 3}
+const scores: dict[str, int] = {a: 1, b: 2, c: 3}
 for k in scores {
     print(k, scores[k])
 }
@@ -134,8 +134,7 @@ its key type: a `dict[str, V]` holds string keys, a `dict[int, V]` holds integer
 keys, and you cannot mix the two - there is no dict that holds both `1` and
 `"1"`. The payoff is that the compiler emits a key-type-specialized hash and
 probe (integer keys hash and compare as native `i64`, never boxed), so lookups
-are as fast as the data allows. A `dict[int, V]` works exactly like the `dict[str,
-V]` shown here - same methods, same iteration - just with integer keys.
+are as fast as the data allows. A `dict[int, V]` works exactly like the `dict[str, V]` shown here - same methods, same iteration - just with integer keys.
 
 ## Objects as values
 
@@ -183,17 +182,20 @@ The full comprehension story - list, dict, and set - is in
 
 ## At a glance
 
-| You want to... | Write |
-|----------------|-------|
-| A dict | `d: dict[str, int] = {"a": 1}` |
-| Read a value | `d["a"]`, `d.a`, `d.get("a", 0)` |
-| Add / update | `d["b"] = 2` |
-| Get or insert a default | `d.setdefault("a", 0)` |
-| Membership / size | `"a" in d`, `len(d)` |
-| Remove | `del d["a"]`, `d.pop("a")`, `d.popitem()` |
-| Merge | `d.update(other)` |
-| Iterate keys | `for k in d { ... }` |
-| Iterate pairs | `for k, v in d.items() { ... }` |
-| Keys / values | `d.keys()`, `d.values()` |
+
+| You want to...          | Write                                     |
+| ----------------------- | ----------------------------------------- |
+| A dict                  | `d: dict[str, int] = {"a": 1}`            |
+| Read a value            | `d["a"]`, `d.a`, `d.get("a", 0)`          |
+| Add / update            | `d["b"] = 2`                              |
+| Get or insert a default | `d.setdefault("a", 0)`                    |
+| Membership / size       | `"a" in d`, `len(d)`                      |
+| Remove                  | `del d["a"]`, `d.pop("a")`, `d.popitem()` |
+| Merge                   | `d.update(other)`                         |
+| Iterate keys            | `for k in d { ... }`                      |
+| Iterate pairs           | `for k, v in d.items() { ... }`           |
+| Keys / values           | `d.keys()`, `d.values()`                  |
+
 
 Next, the two remaining built-in containers - [Sets and Tuples](/docs/0503-sets-and-tuples).
+

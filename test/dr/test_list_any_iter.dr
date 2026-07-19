@@ -1,0 +1,105 @@
+"""for-loops over list[Any] must read 16-byte box slots, never 8-byte strides.
+
+Regression test: iterating a list[Any] held in a CLASS FIELD (`for v in
+h.params`) walked the DragonListBox at the native stride and yielded
+interleaved tag/payload words (shifted values, garbage first element), while
+the identical loop over a local alias was correct. All list[Any] sources now
+route through the box-dispatch loop
+"""
+
+from unittest import TestCase, main
+
+
+class Holder {
+    params: list[Any]
+
+    def(p: list[Any]) {
+        self.params = p
+    }
+
+    def collect() -> list[str] {
+        out: list[str] = []
+        for v in self.params {
+            out.append(str(v))
+        }
+        return out
+    }
+}
+
+
+def _mixed() -> list[Any] {
+    xs: list[Any] = [42, "Ada", 2.5, True]
+    return xs
+}
+
+
+class ListAnyIterTest(TestCase) {
+    def test_field_iteration_direct() -> None {
+        h: Holder = Holder(_mixed())
+        got: list[str] = []
+        for v in h.params {
+            got.append(str(v))
+        }
+        self.assertEqual(len(got), 4)
+        self.assertEqual(got[0], "42")
+        self.assertEqual(got[1], "Ada")
+        self.assertEqual(got[2], "2.5")
+        self.assertEqual(got[3], "True")
+    }
+
+    def test_self_field_iteration_in_method() -> None {
+        h: Holder = Holder(_mixed())
+        got: list[str] = h.collect()
+        self.assertEqual(len(got), 4)
+        self.assertEqual(got[0], "42")
+        self.assertEqual(got[1], "Ada")
+    }
+
+    def test_local_alias_matches_field() -> None {
+        h: Holder = Holder(_mixed())
+        via_field: list[str] = []
+        for v in h.params {
+            via_field.append(str(v))
+        }
+        ps: list[Any] = h.params
+        via_alias: list[str] = []
+        for v in ps {
+            via_alias.append(str(v))
+        }
+        self.assertEqual(len(via_field), len(via_alias))
+        i: int = 0
+        for s in via_field {
+            self.assertEqual(s, via_alias[i])
+            i = i + 1
+        }
+    }
+
+    def test_call_result_iteration() -> None {
+        got: list[str] = []
+        for v in _mixed() {
+            got.append(str(v))
+        }
+        self.assertEqual(len(got), 4)
+        self.assertEqual(got[1], "Ada")
+    }
+
+    def test_dict_transfer_loop() -> None {
+        # The shape that exposed the bug: keying a dict off a counter while
+        # iterating a field-held list[Any].
+        h: Holder = Holder(_mixed())
+        binds: dict[str, Any] = {}
+        i: int = 0
+        for v in h.params {
+            binds[str(i)] = v
+            i = i + 1
+        }
+        self.assertEqual(len(binds), 4)
+        a: int = binds["0"]
+        self.assertEqual(a, 42)
+        b: str = binds["1"]
+        self.assertEqual(b, "Ada")
+    }
+}
+
+
+main([ListAnyIterTest()])

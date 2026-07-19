@@ -1,0 +1,190 @@
+"""
+S3 compatible client (cloudflare's version) wigh SIgV4 signing
+
+Implements exactly what the reigstry blob store needs: PutObject, GetObject,
+HeadObjeact, DeleteObject over the S3 REAST API, plus presigned GET URLs so
+downloads go straight to R2 instead of through the app. AWS Signature
+Version 4 is implemented from the spec and KAT-verified against the two
+official worked examples in the AWS documetnation (test_sigv4.dr): the
+header-auth GET and the 86400 second presigned GET
+
+R2 Specifics: path style URLs on the account endpoint, region "auto".
+Payloads travel as bytes end to end (request_bytes / getresponse_bytes)
+a tarbull must/should never ride through a str
+"""
+
+
+from hashlib import hexdigest
+from hmac import digest as hmac_digest
+from http.client import HTTPSConnection, HTTPSBytesResponse
+from datetime import datetime, datetime_fromtimestamp
+from time import now
+
+const UNSIGNED_PAYLOAD: str = "UNSIGNED-PAYLOAD"
+
+def _sha256_hex(data: bytes) -> str {
+    return hexdigest("sha256", data)
+}
+
+def _pad2(n: int) -> str {
+    if n < 10 {
+        return "0" + str(n)
+    }
+    return str(n)
+}
+
+# (amz_date "YYYYMMDDTHHMMSSZ", datestamp "YYYYMMDD") for an epoch second, UTC.
+def amz_timestamp(epoch: int) -> tuple[str, str] {
+    const dt: datetime = datetime_fromtimestamp(float(epoch))
+    const ds: str = str(dt.year) + _pad2(dt.month) + _pad2(dt.day)
+    const ts: str = ds + "T" + _pad2(dt.hour) + _pad2(dt.minute) + _pad2(dt.second) + "Z"
+    return (ts, ds)
+}
+
+# AWS URI-encoding over the UTF-8 bytes: unreserved [A-Za-z0-9-._~] verbatim,
+# every other byte %XX uppercase. "/" survives only in paths (keep_slash).
+def uri_encode(s: str, keep_slash: bool) -> str {
+    const bs: bytes = s.encode("utf-8")
+    const hexd: str = "0123456789ABCDEF"
+    out: list[str] = []
+    i: int = 0
+    while i < len(bs) {
+        const b: int = bs[i]
+        if (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or (b >= 48 and b <= 57) or b == 45 or b == 46 or b == 95 or b == 126 {
+            out.append(chr(b))
+        } else if b == 47 and keep_slash {
+            out.append("/")
+        } else {
+            out.append("%")
+            out.append(hexd[b // 16])
+            out.append(hexd[b % 16])
+        }
+        i = i + 1
+    }
+    return "".join(out)
+}
+
+# The SigV4 signing key: HMAC chain over date/region/service/aws4_request.
+def signing_key(secret: str, datestamp: str, region: str, service: str) -> bytes {
+    k: bytes = hmac_digest(("AWS4" + secret).encode("utf-8"), datestamp.encode("utf-8"), "sha256")
+    k = hmac_digest(k, region.encode("utf-8"), "sha256")
+    k = hmac_digest(k, service.encode("utf-8"), "sha256")
+    return hmac_digest(k, "aws4_request".encode("utf-8"), "sha256")
+}
+
+def string_to_sign(amz_date: str, scope: str, canonical: str) -> str {
+    return "AWS4-HMAC-SHA256\n" + amz_date + "\n" + scope + "\n" + hexdigest("sha256", canonical.encode("utf-8"))
+}
+
+def sig_hex(secret: str, datestamp: str, region: str, service: str, sts: str) -> str {
+    const k: bytes = signing_key(secret, datestamp, region, service)
+    return hmac_digest(k, sts.encode("utf-8"), "sha256").hex()
+}
+
+class S3Client {
+    host: str
+    access_key: str
+    secret_key: str
+    region: str
+
+    def(host: str, access_key: str, secret_key: str, region: str) {
+        self.host = host
+        self.access_key = access_key
+        self.secret_key = secret_key
+        self.region = region
+    }
+
+    # One signed request with a bytes payload (header-auth SigV4). `path` is
+    # the raw object path ("/bucket/key"); the canonical query is empty for
+    # every operation this client performs.
+    def _request(method: str, path: str, payload: bytes) -> HTTPSBytesResponse {
+        const t: tuple[str, str] = amz_timestamp(now())
+        const amz_date: str = t[0]
+        const ds: str = t[1]
+        const payload_hash: str = _sha256_hex(payload)
+        const cpath: str = uri_encode(path, True)
+        const parts: list[str] = [
+            method,
+            cpath,
+            "",
+            "host:" + self.host,
+            "x-amz-content-sha256:" + payload_hash,
+            "x-amz-date:" + amz_date,
+            "",
+            "host;x-amz-content-sha256;x-amz-date",
+            payload_hash,
+        ]
+        const canonical: str = "\n".join(parts)
+        const scope: str = ds + "/" + self.region + "/s3/aws4_request"
+        const sts: str = string_to_sign(amz_date, scope, canonical)
+        const sig: str = sig_hex(self.secret_key, ds, self.region, "s3", sts)
+        headers: dict[str, str] = {}
+        headers["x-amz-date"] = amz_date
+        headers["x-amz-content-sha256"] = payload_hash
+        headers["Authorization"] = "AWS4-HMAC-SHA256 Credential=" + self.access_key + "/" + scope + ", SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=" + sig
+        conn: HTTPSConnection = HTTPSConnection(self.host, 443)
+        conn.request_bytes(method, cpath, payload, headers)
+        const resp: HTTPSBytesResponse = conn.getresponse_bytes()
+        conn.close()
+        return resp
+    }
+
+    # "" on success, else a short error string (status + body head).
+    def put_object(bucket: str, key: str, data: bytes) -> str {
+        const r: HTTPSBytesResponse = self._request("PUT", "/" + bucket + "/" + key, data)
+        if r.status >= 200 and r.status < 300 {
+            return ""
+        }
+        return "s3 put failed (status " + str(r.status) + ")"
+    }
+
+    def head_object(bucket: str, key: str) -> bool {
+        const r: HTTPSBytesResponse = self._request("HEAD", "/" + bucket + "/" + key, b"")
+        return r.status >= 200 and r.status < 300
+    }
+
+    # Raises on any non-2xx: a published blob that cannot be read back is an
+    # operational failure, never an empty result.
+    def get_object(bucket: str, key: str) -> bytes {
+        const r: HTTPSBytesResponse = self._request("GET", "/" + bucket + "/" + key, b"")
+        if r.status < 200 or r.status >= 300 {
+            raise ValueError("s3 get failed (status " + str(r.status) + ")")
+        }
+        return r.body
+    }
+
+    def delete_object(bucket: str, key: str) -> bool {
+        const r: HTTPSBytesResponse = self._request("DELETE", "/" + bucket + "/" + key, b"")
+        return r.status >= 200 and r.status < 300
+    }
+
+    # Presigned GET at the current clock.
+    def presign_get(bucket: str, key: str, expires: int) -> str {
+        return self.presign_path_at("/" + bucket + "/" + key, expires, now())
+    }
+
+    # Presigned GET for an explicit path and epoch (pure - KAT-testable).
+    # Query parameters are already in lexicographic order.
+    def presign_path_at(path: str, expires: int, epoch: int) -> str {
+        const t: tuple[str, str] = amz_timestamp(epoch)
+        const amz_date: str = t[0]
+        const ds: str = t[1]
+        const scope: str = ds + "/" + self.region + "/s3/aws4_request"
+        const cred: str = self.access_key + "/" + scope
+        const query: str = "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=" + uri_encode(cred, False) + "&X-Amz-Date=" + amz_date + "&X-Amz-Expires=" + str(expires) + "&X-Amz-SignedHeaders=host"
+        const cpath: str = uri_encode(path, True)
+        const parts: list[str] = [
+            "GET",
+            cpath,
+            query,
+            "host:" + self.host,
+            "",
+            "host",
+            UNSIGNED_PAYLOAD,
+        ]
+        const canonical: str = "\n".join(parts)
+        const sts: str = string_to_sign(amz_date, scope, canonical)
+        const sig: str = sig_hex(self.secret_key, ds, self.region, "s3", sts)
+        return "https://" + self.host + cpath + "?" + query + "&X-Amz-Signature=" + sig
+    }
+}

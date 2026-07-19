@@ -77,6 +77,19 @@ def api_download(req: Request, res: Response, ctx: Context) -> None {
             return
         }
     }
+    # R2 backend: hand the client a short-lived presigned URL so the bytes
+    # never transit the app. The hash header still rides on the redirect; the
+    # client verifies the digest of whatever it downloads, so the storage
+    # never has to be trusted.
+    const url: str = REG.blobs.presign_get(v.hash, 300)
+    if len(url) > 0 {
+        res.set_header("x-content-hash", v.hash)
+        if v.yanked != 0 {
+            res.set_header("x-yanked", str(v.yanked))
+        }
+        res.redirect(url)
+        return
+    }
     if not REG.blobs.has(v.hash) {
         _fail(res, 404, "no such package version")
         return
@@ -164,10 +177,13 @@ def api_eggs(req: Request, res: Response, ctx: Context) -> None {
     res.json(dumps(out))
 }
 
-# GET /api/fetch/:name/:version  -> JSON { hash, tarball(base64) } for the CLI.
-# Binary travels base64-encoded (the string HTTP client cannot carry raw bytes),
-# symmetric with publish. The client recomputes sha256 and verifies it against
-# the hash pinned in dragon.drs - the registry is never trusted for integrity.
+# GET /api/fetch/:name/:version  -> JSON metadata + receipt for the CLI.
+# With the R2 backend the envelope carries `url` - a short-lived presigned
+# GET the client downloads from directly, so tarball bytes never transit the
+# app. A disk backend inlines `tarball` (base64) instead. Either way the
+# client recomputes sha256 of the bytes it received and verifies it against
+# the hash pinned in dragon.drs plus the transparency receipt - neither the
+# registry nor the storage is ever trusted for integrity.
 def api_fetch(req: Request, res: Response, ctx: Context) -> None {
     const name: str = req.params.get("name", "")
     const version: str = req.params.get("version", "")
@@ -183,18 +199,23 @@ def api_fetch(req: Request, res: Response, ctx: Context) -> None {
             return
         }
     }
-    if not REG.blobs.has(v.hash) {
-        _fail(res, 404, "no such package version")
-        return
-    }
-    const tarball: bytes = REG.blobs.get(v.hash)
     out: dict[str, Any] = {}
     out["ok"] = true
     out["name"] = name
     out["version"] = version
     out["hash"] = v.hash
     out["yanked"] = v.yanked
-    out["tarball"] = b64encode(tarball).decode("utf-8")
+    const url: str = REG.blobs.presign_get(v.hash, 300)
+    if len(url) > 0 {
+        out["url"] = url
+    } else {
+        if not REG.blobs.has(v.hash) {
+            _fail(res, 404, "no such package version")
+            return
+        }
+        const tarball: bytes = REG.blobs.get(v.hash)
+        out["tarball"] = b64encode(tarball).decode("utf-8")
+    }
     # Transparency receipt: the append-only log's leaf for this (name, version).
     # The client recomputes leaf_hash from (name, version, hash, ts, published_by)
     # and confirms the log commits to the exact bytes it is installing.

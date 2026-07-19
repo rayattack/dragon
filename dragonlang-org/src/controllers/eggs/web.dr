@@ -6,10 +6,11 @@
 
 from http.server import Router, Request, Response, Context
 from secrets import token_urlsafe, compare_digest
-from deps import AUTH, REG
-from services.auth import AuthResult
+from deps import AUTH, REG, MAILER, BASE_URL
+from services.auth import AuthResult, SignupStart
 from models.records import Token
 from views.eggs.pages import render_login, render_signup, render_account, render_index, render_search, render_detail, render_not_found
+from views.eggs.pages import render_confirm_sent, render_confirm_error, confirm_email_body
 
 #--- session helpers ------------------------------------------------------#
 
@@ -84,6 +85,10 @@ def signup_page(req: Request, res: Response, ctx: Context) -> None {
     res.html(render_signup(_csrf(req), ""))
 }
 
+# Signup is two-step: park the request (no account row yet), email a one-time
+# confirmation link, and only /confirm creates the account. The mail failure
+# path is LOUD - a signup whose email never left would otherwise strand the
+# user with no account and no explanation.
 def signup_submit(req: Request, res: Response, ctx: Context) -> None {
     if not _check_csrf(req) {
         res.status = 400
@@ -94,14 +99,39 @@ def signup_submit(req: Request, res: Response, ctx: Context) -> None {
     const username: str = f.get("username", "")
     const email: str = f.get("email", "")
     const password: str = f.get("password", "")
-    const r: AuthResult = AUTH.register(username, email, password)
-    if not r.ok {
+    const s: SignupStart = AUTH.begin_signup(username, email, password)
+    if not s.ok {
         res.status = 400
-        res.html(render_signup(_csrf(req), r.error))
+        res.html(render_signup(_csrf(req), s.error))
         return
     }
+    const link: str = BASE_URL + "/confirm?token=" + s.token
+    const mail_err: str = MAILER.send(email, "Confirm your Dragon account", confirm_email_body(username, link))
+    if len(mail_err) > 0 {
+        res.status = 502
+        res.html(render_signup(_csrf(req), "Could not send the confirmation email - please try again in a minute."))
+        return
+    }
+    res.html(render_confirm_sent(email))
+}
+
+# The emailed link. On success the fresh account is logged straight in.
+def confirm_email(req: Request, res: Response, ctx: Context) -> None {
+    const token: str = req.query_str("token", "")
+    if len(token) == 0 {
+        res.status = 400
+        res.html(render_confirm_error("The confirmation link is incomplete."))
+        return
+    }
+    const r: AuthResult = AUTH.confirm_signup(token)
+    if not r.ok {
+        res.status = 400
+        res.html(render_confirm_error(r.error))
+        return
+    }
+    const u: str = AUTH.get_user(r.user_id).username
     req.session.set("uid", str(r.user_id))
-    req.session.set("uname", username)
+    req.session.set("uname", u)
     _see_other(res, "/account")
 }
 

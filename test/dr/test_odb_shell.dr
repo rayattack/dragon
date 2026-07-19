@@ -1,0 +1,313 @@
+"""The ODB interactive shell (odb.shell, spec section 22a).
+
+The shell is a superset of OQL: builtins are call-shaped admin operations,
+every other line passes through verbatim to the engine (reads to db.find(),
+write programs to db.run()), and results format as aligned rows. Dispatch and
+formatting are pure functions and Shell.execute() maps one input line to its
+output lines with no I/O, so everything here asserts on values
+"""
+
+from unittest import TestCase, main
+from json import dumps
+from odb import ODB, Documents, Document
+from odb.vfs import SimVFS
+from odb.pager import create, Pager
+from odb.shell import Shell, classify, builtin_name, call_args, split_args
+from odb.shell import cell_text, doc_columns, format_table, format_docs
+from odb.shell import L_EMPTY, L_BUILTIN, L_WRITE, L_READ
+
+
+def _schema() -> dict[str, Any] {
+    props: dict[str, Any] = {}
+    props["id"] = {"type": "integer"}
+    props["name"] = {"type": "string"}
+    props["city"] = {"type": "string"}
+    props["nickname"] = {"type": "string"}        # optional
+    s: dict[str, Any] = {}
+    s["type"] = "object"
+    s["properties"] = props
+    s["required"] = ["id", "name", "city"]
+    return s
+}
+
+def _meta() -> dict[str, Any] {
+    m: dict[str, Any] = {}
+    m["primary"] = ["id"]
+    m["index"] = ["city"]
+    return m
+}
+
+def _db() -> ODB {
+    sim: SimVFS = SimVFS()
+    p: Pager = create(sim, 4096)
+    return ODB(sim, p)
+}
+
+# A shell whose database already holds the customers schema plus two
+# documents saved through the API (the define rides the schema() builtin, so
+# the round trip crosses both surfaces).
+def _shell() -> Shell {
+    sh: Shell = Shell(_db())
+    line: str = "schema(\"customers\", " + dumps(_schema()) + ", " + dumps(_meta()) + ")"
+    sh.execute(line)
+    h: Documents = sh.db.schema("customers")
+    h.save({"id": 1, "name": "Ada", "city": "Lagos"})
+    h.save({"id": 2, "name": "Grace", "city": "Kano"})
+    return sh
+}
+
+
+class ClassifyTests(TestCase) {
+    def test_blank_and_comment_lines_run_nothing() {
+        self.assertEqual(classify(""), L_EMPTY)
+        self.assertEqual(classify("   "), L_EMPTY)
+        self.assertEqual(classify("# a comment"), L_EMPTY)
+    }
+
+    def test_builtins_are_call_shaped_or_bare_words() {
+        self.assertEqual(classify("help"), L_BUILTIN)
+        self.assertEqual(classify("quit"), L_BUILTIN)
+        self.assertEqual(classify("check()"), L_BUILTIN)
+        self.assertEqual(classify("namespaces()"), L_BUILTIN)
+        self.assertEqual(classify("schema(\"customers\")"), L_BUILTIN)
+        self.assertEqual(classify("  check()  "), L_BUILTIN)
+    }
+
+    def test_builtin_names_without_call_shape_stay_oql() {
+        # A collection may share a builtin's name: bare `check` is a query.
+        self.assertEqual(classify("check"), L_READ)
+        self.assertEqual(classify("schema"), L_READ)
+        self.assertEqual(classify("namespaces ? x == 1"), L_READ)
+    }
+
+    def test_write_words_route_to_run() {
+        self.assertEqual(classify("add customers { id: 1 }"), L_WRITE)
+        self.assertEqual(classify("set customers ? id == 1 { city: \"Jos\" }"), L_WRITE)
+        self.assertEqual(classify("put customers ? id == 1 { id: 1 }"), L_WRITE)
+        self.assertEqual(classify("del customers ? id == 1"), L_WRITE)
+        self.assertEqual(classify("atomic { add customers { id: 9 } }"), L_WRITE)
+    }
+
+    def test_reads_are_the_default() {
+        self.assertEqual(classify("customers ? id == 1"), L_READ)
+        self.assertEqual(classify("customers { name }"), L_READ)
+        self.assertEqual(classify("customers"), L_READ)
+        self.assertEqual(classify("addresses"), L_READ)   # `add` prefix, not the word
+    }
+
+    def test_builtin_name_extraction() {
+        self.assertEqual(builtin_name("schema(\"x\")"), "schema")
+        self.assertEqual(builtin_name("schema (\"x\")"), "schema")
+        self.assertEqual(builtin_name("schemata(\"x\")"), "")
+        self.assertEqual(builtin_name("check()"), "check")
+        self.assertEqual(builtin_name("check"), "")
+        self.assertEqual(builtin_name("customers ? id == 1"), "")
+    }
+}
+
+
+class SplitArgsTests(TestCase) {
+    def test_empty_args() {
+        self.assertEqual(len(split_args("")), 0)
+        self.assertEqual(len(split_args("   ")), 0)
+    }
+
+    def test_single_string_arg() {
+        args: list[str] = split_args("\"customers\"")
+        self.assertEqual(len(args), 1)
+        self.assertEqual(args[0], "\"customers\"")
+    }
+
+    def test_nested_json_rides_as_one_arg() {
+        text: str = "\"c\", {\"a\": [1, 2], \"b\": {\"x\": 3}}, {\"primary\": [\"id\"]}"
+        args: list[str] = split_args(text)
+        self.assertEqual(len(args), 3)
+        self.assertEqual(args[0], "\"c\"")
+        self.assertEqual(args[1], "{\"a\": [1, 2], \"b\": {\"x\": 3}}")
+        self.assertEqual(args[2], "{\"primary\": [\"id\"]}")
+    }
+
+    def test_commas_and_parens_inside_strings_do_not_split() {
+        text: str = "\"a,b(c)\", {\"note\": \"he said \\\"hi, there\\\"\"}"
+        args: list[str] = split_args(text)
+        self.assertEqual(len(args), 2)
+        self.assertEqual(args[0], "\"a,b(c)\"")
+        self.assertEqual(args[1], "{\"note\": \"he said \\\"hi, there\\\"\"}")
+    }
+
+    def test_call_args_extraction() {
+        self.assertEqual(call_args("check()"), "")
+        self.assertEqual(call_args("schema(\"x\", {})"), "\"x\", {}")
+    }
+}
+
+
+class FormatTests(TestCase) {
+    def test_cell_text_strings_bare_rest_json() {
+        self.assertEqual(cell_text("Ada"), "Ada")
+        self.assertEqual(cell_text(5), "5")
+        self.assertEqual(cell_text(True), "true")
+    }
+
+    def test_format_table_aligns_and_rules() {
+        lines: list[str] = format_table(["name", "docs"], [["customers", "2"], ["orders", "10"]])
+        self.assertEqual(len(lines), 4)
+        self.assertEqual(lines[0], "name      | docs")
+        self.assertEqual(lines[1], "----------+-----")
+        self.assertEqual(lines[2], "customers | 2")
+        self.assertEqual(lines[3], "orders    | 10")
+    }
+
+    def test_format_docs_empty_result() {
+        rows: list[Document] = []
+        lines: list[str] = format_docs(rows)
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0], "(0 rows)")
+    }
+
+    def test_format_docs_projection_order_and_footer() {
+        # `_id` is always readable on every document (spec section 3), so the
+        # engine returns it with every projection and it leads the columns.
+        sh: Shell = _shell()
+        docs: list[Document] = sh.db.find("customers { name, city } | sort name")
+        lines: list[str] = format_docs(docs)
+        self.assertEqual(len(lines), 5)
+        self.assertEqual(lines[0], "_id | name  | city")
+        self.assertEqual(lines[1], "----+-------+------")
+        self.assertEqual(lines[2], "1   | Ada   | Lagos")
+        self.assertEqual(lines[3], "2   | Grace | Kano")
+        self.assertEqual(lines[4], "(2 rows)")
+    }
+
+    def test_doc_columns_puts_id_first() {
+        sh: Shell = _shell()
+        docs: list[Document] = sh.db.find("customers ? id == 1")
+        cols: list[str] = doc_columns(docs)
+        self.assertEqual(cols[0], "_id")
+    }
+
+    def test_absent_optional_renders_empty_cell() {
+        sh: Shell = _shell()
+        h: Documents = sh.db.schema("customers")
+        h.save({"id": 3, "name": "Tunde", "city": "Jos", "nickname": "T"})
+        lines: list[str] = sh.execute("customers { name, nickname } | sort name")
+        self.assertEqual(lines[0], "_id | name  | nickname")
+        self.assertEqual(lines[2], "1   | Ada   |")
+        self.assertEqual(lines[4], "3   | Tunde | T")
+    }
+}
+
+
+class ShellRoundTripTests(TestCase) {
+    def test_define_save_find_round() {
+        sh: Shell = _shell()
+        lines: list[str] = sh.execute("customers ? id == 1 { name }")
+        self.assertEqual(len(lines), 4)
+        self.assertEqual(lines[0], "_id | name")
+        self.assertEqual(lines[1], "----+-----")
+        self.assertEqual(lines[2], "1   | Ada")
+        self.assertEqual(lines[3], "(1 row)")
+    }
+
+    def test_schema_builtin_defines() {
+        sh: Shell = Shell(_db())
+        line: str = "schema(\"customers\", " + dumps(_schema()) + ", " + dumps(_meta()) + ")"
+        lines: list[str] = sh.execute(line)
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0], "defined customers")
+        self.assertEqual(sh.db.schema("customers").count(), 0)
+    }
+
+    def test_schema_builtin_shows() {
+        sh: Shell = _shell()
+        lines: list[str] = sh.execute("schema(\"customers\")")
+        self.assertEqual(len(lines), 4)
+        self.assertEqual(lines[0], "schema customers v1")
+        self.assertEqual(lines[2], "meta")
+    }
+
+    def test_schema_builtin_usage_errors() {
+        sh: Shell = _shell()
+        lines: list[str] = sh.execute("schema()")
+        self.assertEqual(lines[0], "usage: schema(\"name\") or schema(\"name\", <json-schema>[, <meta>])")
+        lines2: list[str] = sh.execute("schema(42)")
+        self.assertEqual(lines2[0], "schema(): the first argument must be the collection name as a JSON string")
+    }
+
+    def test_namespaces_builtin() {
+        sh: Shell = _shell()
+        lines: list[str] = sh.execute("namespaces()")
+        self.assertEqual(len(lines), 4)
+        self.assertEqual(lines[0], "name      | version | docs")
+        self.assertEqual(lines[2], "customers | 1       | 2")
+        self.assertEqual(lines[3], "(1 schema)")
+    }
+
+    def test_check_builtin() {
+        sh: Shell = _shell()
+        lines: list[str] = sh.execute("check()")
+        self.assertEqual(len(lines), 1)
+        # two indexes (primary id + city) over two docs = 4 entries
+        self.assertEqual(lines[0], "ok: 2 docs, 4 index entries")
+    }
+
+    def test_write_passthrough_runs() {
+        sh: Shell = _shell()
+        lines: list[str] = sh.execute("add customers { id: 3, name: \"Bola\", city: \"Jos\" }")
+        self.assertEqual(lines[0], "(1 affected)")
+        self.assertEqual(sh.db.schema("customers").count(), 3)
+        lines2: list[str] = sh.execute("set customers ? id == 3 { city: \"Abuja\" }")
+        self.assertEqual(lines2[0], "(1 affected)")
+        moved: list[Document] = sh.db.find("customers ? id == 3 { city }")
+        c: str = moved[0]["city"]
+        self.assertEqual(c, "Abuja")
+        lines3: list[str] = sh.execute("del customers ? id == 3")
+        self.assertEqual(lines3[0], "(1 affected)")
+        self.assertEqual(sh.db.schema("customers").count(), 2)
+    }
+
+    def test_atomic_passthrough_counts_all() {
+        sh: Shell = _shell()
+        lines: list[str] = sh.execute("atomic { add customers { id: 8, name: \"A8\", city: \"Osun\" } add customers { id: 9, name: \"A9\", city: \"Osun\" } }")
+        self.assertEqual(lines[0], "(2 affected)")
+        self.assertEqual(sh.db.schema("customers").count(), 4)
+    }
+
+    def test_errors_print_and_session_continues() {
+        sh: Shell = _shell()
+        lines: list[str] = sh.execute("bogus ? id == 1")
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0].startswith("NotFound:"), True)
+        lines2: list[str] = sh.execute("customers ? id ==")
+        self.assertEqual(lines2[0].startswith("PrepareError:"), True)
+        lines3: list[str] = sh.execute("add customers { id: 1, name: \"Dup\", city: \"X\" }")
+        self.assertEqual(lines3[0].startswith("IntegrityError:"), True)
+        after: list[str] = sh.execute("customers ? id == 2 { name }")
+        self.assertEqual(after[2], "2   | Grace")
+    }
+
+    def test_empty_line_and_quit() {
+        sh: Shell = _shell()
+        self.assertEqual(len(sh.execute("")), 0)
+        self.assertEqual(len(sh.execute("# note")), 0)
+        self.assertEqual(sh.done, False)
+        out: list[str] = sh.execute("quit")
+        self.assertEqual(len(out), 0)
+        self.assertEqual(sh.done, True)
+    }
+
+    def test_help_lists_builtins() {
+        sh: Shell = _shell()
+        lines: list[str] = sh.execute("help")
+        self.assertEqual(len(lines) > 5, True)
+        self.assertEqual(lines[0].startswith("The ODB shell"), True)
+    }
+}
+
+
+main([
+    ClassifyTests(),
+    SplitArgsTests(),
+    FormatTests(),
+    ShellRoundTripTests(),
+])

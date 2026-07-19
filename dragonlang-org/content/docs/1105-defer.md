@@ -30,8 +30,7 @@ wanting it.
 
 ## Block-scoped, not function-scoped
 
-A defer lives and dies with the BLOCK that declared it, like every other
-binding. The Zen line is literal here: a scope that ends frees what it held.
+A defer lives and dies within and with the BLOCK that declared it, like every other binding. The Zen line is literal here: a scope that ends frees what it held.
 
 ```dragon
 def process(items: list[str]) {
@@ -159,47 +158,48 @@ tool, not a process-shutdown hook.
 ## What defer is NOT
 
 - **Not `with`.** Paired enter/exit protocols keep `with`. `defer` covers
-  the exits that have no enter, or an ownership-transferring fate. A defer
-  registered inside a `with` body belongs to the body's scope and runs
-  before `__exit__`.
+the exits that have no enter, or an ownership-transferring fate. A defer
+registered inside a `with` body belongs to the body's scope and runs
+before `__exit__`.
 - **Not `try`/`except`.** Rollback-only-on-failure is conditional on the
-  exception and stays `except`. `defer` is for actions unconditional on HOW
-  the scope ends.
+exception and stays `except`. `defer` is for actions unconditional on HOW
+the scope ends.
 - **Not a conditional registration trick.** The Go idiom
-  `if cond { defer unlock() }` registering for FUNCTION exit is
-  inexpressible on purpose; under block scoping that defer fires at the
-  `if`'s closing brace. Register at the scope you mean and decide in the
-  callee: `defer maybe_unlock(locked)`.
+`if cond { defer unlock() }` registering for FUNCTION exit is
+inexpressible on purpose; under block scoping that defer fires at the
+`if`'s closing brace. Register at the scope you mean and decide in the
+callee: `defer maybe_unlock(locked)`.
 - **Not free at the last line.** A defer whose scope ends one statement
-  later is a direct call in a costume; write the direct call. `defer` earns
-  its keep when there is distance between registration and the exits:
-  multiple paths, raises, or real code after it.
+later is a direct call in a costume; write the direct call. `defer` earns
+its keep when there is distance between registration and the exits:
+multiple paths, raises, or real code after it.
 
 ## v1 limits (all loud compile errors, never silent)
 
 - No `defer` at module top level (no scope ends before process exit).
 - The callee must resolve to a direct function or method; computed and
-  closure callees are not supported yet.
+closure callees are not supported yet.
 - No keyword arguments in the deferred call yet; pass positionally.
 - Arguments whose static type is `Any` or a union are not supported yet;
-  annotate the concrete type.
+annotate the concrete type.
 - No `defer fire f(x)` fusion; spawning at scope exit composes manually with
-  a wrapper that fires inside.
+a wrapper that fires inside.
 
 ## At a glance
 
-| You want to... | Write |
-|----------------|-------|
-| Run cleanup on every exit path | `defer f.close()` |
-| Hand a resource to its scope-exit owner | `defer archive(own log)` |
-| Snapshot a value, keep mutating the source | `defer send(dub items)` |
-| See the latest state at exit | defer a call that reads a borrow: `defer report(stats)` |
-| Cleanup per loop iteration | put the `defer` in the loop body |
-| Paired enter/exit protocol | not defer - use [`with`](/docs/0903-context-managers) |
+
+| You want to...                             | Write                                                   |
+| ------------------------------------------ | ------------------------------------------------------- |
+| Run cleanup on every exit path             | `defer f.close()`                                       |
+| Hand a resource to its scope-exit owner    | `defer archive(own log)`                                |
+| Snapshot a value, keep mutating the source | `defer send(dub items)`                                 |
+| See the latest state at exit               | defer a call that reads a borrow: `defer report(stats)` |
+| Cleanup per loop iteration                 | put the `defer` in the loop body                        |
+| Paired enter/exit protocol                 | not defer - use `[with](/docs/0903-context-managers)`   |
+
 
 That completes the concurrency model - three colorless tiers, the primitives
 to coordinate them, and the scope-exit calls that clean up after all of it.
 Next, a different kind of building block: [Templates](/docs/1201-templates),
 Dragon's typed, auto-escaping approach to generating HTML, SQL, and other
 structured text.
-

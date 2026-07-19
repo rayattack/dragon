@@ -1,0 +1,76 @@
+"""KATs for the SigV4 core (storage/s3.dr) against the two official worked
+examples in the AWS documentation ("Authenticating Requests: AWS Signature
+Version 4"), independently reproduced with a reference implementation before
+being pinned here.
+Run:  dragon run dragonlang-org/src/test_sigv4.dr"""
+
+from unittest import TestCase, main
+from storage.s3 import S3Client, signing_key, string_to_sign, sig_hex, uri_encode, amz_timestamp
+
+const AK: str = "AKIAIOSFODNN7EXAMPLE"
+const SK: str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+
+
+class SigV4KATs(TestCase) {
+    def test_presigned_get_official_example() {
+        # GET test.txt from examplebucket, 2013-05-24, us-east-1, 86400s.
+        # 20130524T000000Z = epoch 1369353600.
+        c: S3Client = S3Client("examplebucket.s3.amazonaws.com", AK, SK, "us-east-1")
+        const url: str = c.presign_path_at("/test.txt", 86400, 1369353600)
+        const expected: str = "https://examplebucket.s3.amazonaws.com/test.txt?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20130524T000000Z&X-Amz-Expires=86400&X-Amz-SignedHeaders=host&X-Amz-Signature=aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404"
+        self.assertEqual(url, expected)
+    }
+
+    def test_header_auth_official_example() {
+        # GET /test.txt with Range, empty payload, 2013-05-24. The canonical
+        # request is assembled per the documented example; the signature must
+        # match the documented value exactly.
+        const empty_sha: str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        const parts: list[str] = [
+            "GET",
+            "/test.txt",
+            "",
+            "host:examplebucket.s3.amazonaws.com",
+            "range:bytes=0-9",
+            "x-amz-content-sha256:" + empty_sha,
+            "x-amz-date:20130524T000000Z",
+            "",
+            "host;range;x-amz-content-sha256;x-amz-date",
+            empty_sha,
+        ]
+        const canonical: str = "\n".join(parts)
+        const sts: str = string_to_sign("20130524T000000Z", "20130524/us-east-1/s3/aws4_request", canonical)
+        const sig: str = sig_hex(SK, "20130524", "us-east-1", "s3", sts)
+        self.assertEqual(sig, "f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41")
+    }
+
+    def test_amz_timestamp() {
+        const t: tuple[str, str] = amz_timestamp(1369353600)
+        self.assertEqual(t[0], "20130524T000000Z")
+        self.assertEqual(t[1], "20130524")
+        const t2: tuple[str, str] = amz_timestamp(1369353600 + 3661)
+        self.assertEqual(t2[0], "20130524T010101Z")
+    }
+
+    def test_uri_encode() {
+        self.assertEqual(uri_encode("abc-._~XYZ019", False), "abc-._~XYZ019")
+        self.assertEqual(uri_encode("a/b/c", True), "a/b/c")
+        self.assertEqual(uri_encode("a/b", False), "a%2Fb")
+        self.assertEqual(uri_encode("AK/20130524/us-east-1/s3/aws4_request", False), "AK%2F20130524%2Fus-east-1%2Fs3%2Faws4_request")
+        self.assertEqual(uri_encode("sp ace+plus", False), "sp%20ace%2Bplus")
+    }
+
+    def test_signing_key_is_chained_hmac() {
+        # Sanity: distinct dates/regions give distinct keys (chain actually runs).
+        const k1: bytes = signing_key(SK, "20130524", "us-east-1", "s3")
+        const k2: bytes = signing_key(SK, "20130525", "us-east-1", "s3")
+        const k3: bytes = signing_key(SK, "20130524", "auto", "s3")
+        self.assertEqual(len(k1), 32)
+        self.assertTrue(k1.hex() != k2.hex())
+        self.assertTrue(k1.hex() != k3.hex())
+    }
+}
+
+
+main([SigV4KATs()])
+

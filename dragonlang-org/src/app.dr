@@ -9,7 +9,7 @@
 
 from http.server import Router, Request, Response, Context
 from deps import SECRET
-from controllers.eggs.web import login_page, login_submit, signup_page, signup_submit, logout, account_page, token_create, token_revoke, index_page, search_page, detail_page
+from controllers.eggs.web import login_page, login_submit, signup_page, signup_submit, confirm_email, logout, account_page, token_create, token_revoke, index_page, search_page, detail_page
 from controllers.eggs.api import api_publish, api_download, api_search, api_yank, api_eggs, api_fetch, api_log_checkpoint, api_log, api_log_pubkey, api_log_inclusion, api_log_consistency
 from views.www import render_landing, render_download, render_benchmarks
 from controllers.docs.docs import docs_redirect, docs_page, docs_search_index
@@ -75,6 +75,7 @@ app.GET('/login', login_page)
 app.POST('/login', login_submit)
 app.GET('/signup', signup_page)
 app.POST('/signup', signup_submit)
+app.GET('/confirm', confirm_email)
 app.GET('/logout', logout)
 app.GET('/account', account_page)
 app.POST('/account/tokens/create', token_create)

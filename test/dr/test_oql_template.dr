@@ -1,0 +1,128 @@
+"""template[OQL]: parameterized queries as typed values (spec section 20).
+
+The literal text folds to a canonical form with $$N slots; every !{expr}
+becomes a bound parameter injected as a VALUE at prepare time, never spliced
+into query syntax. The injection tests feed OQL metacharacters through a
+parameter and assert they arrive as data (zero matches), not as query text
+(extra matches or a parse error)
+"""
+
+from unittest import TestCase, main
+from odb import ODB, Documents, Document, OQL
+from odb.vfs import SimVFS
+from odb.pager import create, Pager
+from odb.errors import PrepareError
+
+
+def _schema() -> dict[str, Any] {
+    props: dict[str, Any] = {}
+    props["id"] = {"type": "integer"}
+    props["name"] = {"type": "string"}
+    props["age"] = {"type": "integer"}
+    req: list[Any] = ["id", "name", "age"]
+    s: dict[str, Any] = {}
+    s["type"] = "object"
+    s["properties"] = props
+    s["required"] = req
+    return s
+}
+
+
+def _row(idv: int, nm: str, ag: int) -> dict[str, Any] {
+    d: dict[str, Any] = {}
+    d["id"] = idv
+    d["name"] = nm
+    d["age"] = ag
+    return d
+}
+
+
+def _db() -> Documents {
+    sim: SimVFS = SimVFS()
+    p: Pager = create(sim, 4096)
+    db: ODB = ODB(sim, p)
+    c: Documents = db.schema("customers", _schema())
+    c.save(_row(1, "Ada", 30))
+    c.save(_row(2, "Bee", 16))
+    c.save(_row(3, "Cy", 40))
+    return c
+}
+
+
+class OqlTemplateTest(TestCase) {
+    def test_int_param() -> None {
+        c: Documents = _db()
+        uid: int = 1
+        rows: list[Document] = c.db.find(template[OQL] { customers ? id == !{uid} })
+        self.assertEqual(len(rows), 1)
+        nm: str = rows[0]["name"]
+        self.assertEqual(nm, "Ada")
+    }
+
+    def test_str_param() -> None {
+        c: Documents = _db()
+        who: str = "Bee"
+        rows: list[Document] = c.db.find(template[OQL] { customers ? name == !{who} })
+        self.assertEqual(len(rows), 1)
+        got: int = rows[0]["id"]
+        self.assertEqual(got, 2)
+    }
+
+    def test_injection_is_data_not_syntax() -> None {
+        # If this string were spliced into the query text it would widen the
+        # filter to every row (or fail to parse). Parameterized, it is just a
+        # name nobody has: zero rows, no error.
+        c: Documents = _db()
+        evil: str = "Ada\" | id > 0"
+        rows: list[Document] = c.db.find(template[OQL] { customers ? name == !{evil} })
+        self.assertEqual(len(rows), 0)
+    }
+
+    def test_injection_comment_forms() -> None {
+        c: Documents = _db()
+        evil: str = "\" | 1 == 1"
+        rows: list[Document] = c.db.find(template[OQL] { customers ? name == !{evil} })
+        self.assertEqual(len(rows), 0)
+    }
+
+    def test_two_params_bind_in_order() -> None {
+        c: Documents = _db()
+        lo: int = 20
+        hi: int = 35
+        rows: list[Document] = c.db.find(template[OQL] { customers ? age >= !{lo} & age <= !{hi} })
+        self.assertEqual(len(rows), 1)
+        nm: str = rows[0]["name"]
+        self.assertEqual(nm, "Ada")
+    }
+
+    def test_no_param_template() -> None {
+        c: Documents = _db()
+        rows: list[Document] = c.db.find(template[OQL] { customers ? age > 18 })
+        self.assertEqual(len(rows), 2)
+    }
+
+    def test_query_is_a_value() -> None {
+        # The whole point of the content type: a query travels as a typed
+        # value, parameters already bound to it.
+        c: Documents = _db()
+        target: int = 3
+        q: OQL = template[OQL] { customers ? id == !{target} }
+        self.assertTrue("$$0" in q.canonical)
+        rows: list[Document] = c.db.find(q)
+        self.assertEqual(len(rows), 1)
+        nm: str = rows[0]["name"]
+        self.assertEqual(nm, "Cy")
+    }
+
+    def test_projection_through_template() -> None {
+        c: Documents = _db()
+        min_age: int = 18
+        rows: list[Document] = c.db.find(template[OQL] { customers ? age > !{min_age} { name } })
+        self.assertEqual(len(rows), 2)
+        nm: str = rows[0]["name"]
+        self.assertEqual(nm, "Ada")
+    }
+}
+
+
+main([OqlTemplateTest()])
