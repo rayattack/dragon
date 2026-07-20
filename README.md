@@ -12,20 +12,20 @@ It looks enough like Python that you can read it without a decoder ring. CPython
 
 ## 30 seconds to a native binary
 
-```bash
-# Linux x86-64 (.deb; .rpm and a portable .tar.gz are on the releases page)
-curl -LO https://github.com/rayattack/dragon/releases/download/v0.0.1/dragon-0.0.1-linux-x86_64.deb
-sudo apt install ./dragon-0.0.1-linux-x86_64.deb
-
+```py
 # hello.dr
-cat > hello.dr <<'EOF'
 def fib(n: int) -> int {
     if n < 2 { return n }
     return fib(n - 1) + fib(n - 2)
 }
-
 print(f"fib(32) = {fib(32)}")
-EOF
+```
+
+```sh
+# Linux x86-64 (.deb; .rpm and a portable .tar.gz are on the releases page)
+curl -LO https://github.com/rayattack/dragon/releases/download/v0.0.1/dragon-0.0.1-linux-x86_64.deb
+sudo apt install ./dragon-0.0.1-linux-x86_64.deb
+
 
 dragon run hello.dr          # compile and run:  fib(32) = 2178309
 dragon build hello.dr -o fib # or keep the binary
