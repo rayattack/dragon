@@ -38,7 +38,7 @@ Mac OS and Microsoft Windows are WIP. See [dragonlang.org/download](https://drag
 
 The standard library is written in Dragon itself, including the HTTP server, TLS, templating, and database drivers. This is a complete web server; it compiles to a 1.8 MB executable:
 
-```dr
+```py
 from html import HTML
 from http.server import Router, Request, Response, Context
 
