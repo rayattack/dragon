@@ -111,7 +111,7 @@ void CodeGen::Impl::emitIncrefByKind(llvm::Value* val, VarKind kind) {
         if (kind == VarKind::Str) {
             builder->CreateCall(runtimeFuncs["dragon_incref_str"], {ptr});
         } else if (kind == VarKind::Closure) {
-            // T39: a Callable slot may hold a DragonClosure OR a bare fn ptr (no
+            // a Callable slot may hold a DragonClosure OR a bare fn ptr (no
             // header). dragon_incref_callable is TAG-GATED - it increfs only a
             // real TAG_CLOSURE object and no-ops on a bare fn ptr / null, so the
             // generic dragon_incref (which would treat a code pointer's bytes as
@@ -163,7 +163,7 @@ void CodeGen::Impl::emitUnionDecref(llvm::Value* val, llvm::Value* tag) {
         builder->CreateBr(endBB);
 
         builder->SetInsertPoint(notStrBB);
-        // T39: tag == 10 (TAG_CLOSURE) -> tag-gated dragon_decref_callable. Must
+        // tag == 10 (TAG_CLOSURE) -> tag-gated dragon_decref_callable. Must
         // precede the generic `>= 5` heap branch (10 >= 5): a boxed closure may
         // be a real DragonClosure OR a bare fn ptr (no header), and the tag-gated
         // drop frees the former (+ its env) while no-oping on the latter.
@@ -207,7 +207,7 @@ void CodeGen::Impl::emitUnionIncref(llvm::Value* val, llvm::Value* tag) {
         builder->CreateBr(endBB);
 
         builder->SetInsertPoint(notStrBB);
-        // T39: tag == 10 (TAG_CLOSURE) -> tag-gated dragon_incref_callable (must
+        // tag == 10 (TAG_CLOSURE) -> tag-gated dragon_incref_callable (must
         // precede the generic `>= 5` branch). Mirrors emitUnionDecref.
         auto* isClosure = builder->CreateICmpEQ(tag, llvm::ConstantInt::get(i64Type, 10), "is.clos");
         auto* closBB = llvm::BasicBlock::Create(*context, "union.incref.clos", func);
@@ -417,10 +417,10 @@ bool CodeGen::Impl::exprIsBytes(Expr* expr) {
                     if (vit != varClassNames.end()) className = vit->second;
                 }
             }
-            // D030 §5: bytes-vs-list disambiguation now flows through the
+            // D030 §5: bytes-vs-list disambiguation flows through the
             // static type at the top of this function (expr->type->kind()
             // == Bytes). classFieldKinds tags bytes fields as VarKind::List
-            // (generic-heap), so a kind-equal-Bytes check no longer applies.
+            // (generic-heap), so a kind-equal-Bytes check can never match here.
             (void)className;
             return false;
         }
@@ -553,7 +553,7 @@ Type::Kind CodeGen::Impl::typeExprToTypeKind(TypeExpr* typeExpr) {
             return Type::Kind::Int;
         }
         if (dynamic_cast<TupleTypeExpr*>(typeExpr)) return Type::Kind::Tuple;
-        // T39: Callable[...] is a refcounted DragonClosure ptr element. Without
+        // Callable[...] is a refcounted DragonClosure ptr element. Without
         // this, list[Callable] tracked its element kind as Int, so the
         // overwrite/store paths (varListElemKinds-driven) used the non-RC i64
         // store and leaked the overwritten closure.
@@ -619,7 +619,7 @@ CodeGen::Impl::VarKind CodeGen::Impl::typeExprToKind(TypeExpr* typeExpr) {
         if (auto* tupleType = dynamic_cast<TupleTypeExpr*>(typeExpr)) {
             return VarKind::Tuple;
         }
-        // T39: a `: Callable[...]` slot (local / param / field) holds a
+        // a `: Callable[...]` slot (local / param / field) holds a
         // refcounted DragonClosure (or a bare fn ptr), so it is a heap kind that
         // must be scope-cleaned and overwrite-decref'd. This is safe only because
         // closure RC goes through the TAG-GATED dragon_incref_callable /

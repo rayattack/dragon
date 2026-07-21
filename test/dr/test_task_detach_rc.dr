@@ -1,4 +1,4 @@
-"""Task scope-exit lifetime - leaks.md #2 (bound-Task tail + conditional-await).
+"""Task scope-exit lifetime - bound-Task tail + conditional-await.
 
 Source of truth: a bound `Task[T]` is owned by its SCOPE. `await t` / `t.join()`
 CONSUME it (the runtime frees the vthread) and codegen then blanks t's slot to

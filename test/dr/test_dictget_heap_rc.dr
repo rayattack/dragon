@@ -1,5 +1,5 @@
 # test/dr/test_dictget_heap_rc.dr - dict.get on a HEAP-valued dict: reference
-# counting (leaks.md #19).
+# counting.
 #
 # `dict.get(k)` / `.get(k, default)` on a dict whose VALUES are heap objects
 # (list/dict/set/tuple/bytes/instance) used to return a BORROW: the stored value

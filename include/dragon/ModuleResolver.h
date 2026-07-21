@@ -46,7 +46,6 @@ struct ModuleResolverOptions {
 
 /// Resolves module imports by finding files, lexing, and parsing them.
 ///
-/// Replaces the ad-hoc import resolution previously inline in Driver::buildFile().
 /// Builds a full import graph with cycle detection and topological ordering.
 class ModuleResolver {
 public:

@@ -1,4 +1,4 @@
-"""deque finished wiring (bugs.md #10, smells.md deque item).
+"""deque full wiring.
 
 Was half-wired: print(deque) read the DragonDeque header as a list (garbage
 pointers), maxlen was accepted but ignored, and `in` on a deque[str] routed to

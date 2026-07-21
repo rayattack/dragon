@@ -1,4 +1,4 @@
-"""deque refcount / teardown - leaks.md #9 (+ #17 deque source-list).
+"""deque refcount / teardown.
 
 Before the fix:
   - dragon_dealloc had NO DRAGON_TAG_DEQUE case, so EVERY deque local (even a

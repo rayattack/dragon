@@ -64,9 +64,9 @@ class SqliteConnection(Connection) {
         if rc != SQLITE_OK {
             # SQLite's contract: a FAILED open still returns an allocated handle
             # that must be passed to sqlite3_close. Skipping it (and the 8-byte
-            # out-param) leaked the error handle on every failed open - a bad
-            # path, permissions error, or retry against a locked volume
-            # (AUDIT-2026-07-09 Tier 3). Close and free before raising.
+            # out-param) leaks the error handle on every failed open - a bad
+            # path, permissions error, or retry against a locked volume.
+            # Close and free before raising.
             const ignored: int = sqlite3_close(self.db)
             free(self.dbpp)
             raise ConnectionError("cannot open database: " + path)

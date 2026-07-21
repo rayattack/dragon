@@ -231,7 +231,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                     // `t.join()` CONSUMES t (same as `await t`): the runtime freed
                     // the vthread, so blank a LOCAL binding's slot (free(p);p=NULL)
                     // so the scope-exit detach won't double-free and a later
-                    // is_alive()/join reads NULL, not freed memory. leaks.md #2.
+                    // is_alive()/join reads NULL, not freed memory.
                     if (localSlot && impl_->options.gcMode == GCMode::RC)
                         impl_->builder->CreateStore(
                             llvm::ConstantPointerNull::get(
@@ -985,9 +985,9 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         }
 
         // encode(encoding="utf-8", errors="strict") - returns bytes.
-        // The encoding/errors args were previously evaluated and silently
-        // discarded; they are now honored by dragon_str_encode_ex (UTF-8/ASCII
-        // only, strict/replace). obj is captured above, so accepting the arg
+        // The encoding/errors args are honored by dragon_str_encode_ex
+        // (UTF-8/ASCII only, strict/replace), never silently discarded.
+        // obj is captured above, so accepting the arg
         // exprs after it is safe.
         if (method == "encode") {
             llvm::Value* enc = impl_->builder->CreateGlobalString("utf-8");
@@ -1045,9 +1045,9 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         }
 
         // decode(encoding="utf-8", errors="strict") - returns str (i8*).
-        // The encoding/errors args were previously discarded; dragon_bytes_
-        // decode_ex now honors them. Default errors="strict" matches Python:
-        // invalid input raises UnicodeDecodeError instead of the old silent
+        // The encoding/errors args are honored by dragon_bytes_decode_ex,
+        // never silently discarded. Default errors="strict" matches Python:
+        // invalid input raises UnicodeDecodeError, not a silent
         // Latin-1 reinterpretation. obj is captured above.
         if (method == "decode") {
             llvm::Value* enc = impl_->builder->CreateGlobalString("utf-8");
@@ -1213,8 +1213,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         attr.object->accept(*this);
         llvm::Value* obj = impl_->lastValue;
         // An owned list RECEIVER temp (make().count(1), slice-then-method) is
-        // consumed by the call and leaked once per evaluation without a drain
-        // (AUDIT-2026-07-09 1.8) - the str path has always done this (see
+        // consumed by the call and leaks once per evaluation without a drain -
+        // the str path does the same (see
         // ownedStrRecv above). Drained at the tail, gated on an allow-list of
         // methods that cannot hand out a borrow into the receiver
         // (void / scalar / transfer / fresh results only).
@@ -1426,7 +1426,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             // append's adopt), so an owned temp arg (`xs.insert(0, "a" + s)`)
             // keeps its construction +1 forever without the same drain its
             // sibling handlers (remove/extend/index/count) route through.
-            // AUDIT-2026-07-09 1.4; leak-freedom pinned under the ASan build.
+            // Leak-freedom is pinned under the ASan build.
             val = impl_->trackBorrowTemp(node.args[1].get(), val, argTemps);
             if (val->getType() == impl_->f64Type) val = impl_->builder->CreateBitCast(val, impl_->i64Type);
             else if (val->getType() == impl_->i1Type) val = impl_->builder->CreateZExt(val, impl_->i64Type);
@@ -1820,7 +1820,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             node.args[1]->accept(*this);
             llvm::Value* defVal = impl_->lastValue;
             // Heap-VALUED dict: own the result via the incref-on-return setdefault
-            // (leaks.md #20, the setdefault sibling of the #19 get fix). The
+            // (the setdefault sibling of the owned-get fix). The
             // key-absent branch ALSO stores the default, tagged correctly, so the
             // runtime increfs twice (dict's retained copy + binding) - matched by
             // the SAME owned-temp drain the get-default path uses. A bare borrow
@@ -2464,8 +2464,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 // Fill missing args with default values. Route the sink so a
                 // synthesized heap default (`= [10, 20]`) is drained after the
                 // call like every other owned arg temp - the free-function path
-                // (CallExpr) has always passed it; methods leaked one default
-                // per omitting call (AUDIT-2026-07-09 1.9).
+                // (CallExpr) passes it too; without the sink, methods leak one
+                // default per omitting call.
                 impl_->fillDefaultArgs(methodFuncName, methodFunc, args, *this,
                                        &argTemps);
 
@@ -2922,7 +2922,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 // omitting do_handshake_on_connect=True) passed too few args and
                 // LLVM rejected the call.
                 // Sink wired for the same reason as the NameExpr-receiver path
-                // above: method heap defaults must drain (AUDIT-2026-07-09 1.9).
+                // above: method heap defaults must drain.
                 impl_->fillDefaultArgs(methodFuncName, methodFunc, args, *this,
                                        &argTemps);
 

@@ -1,5 +1,5 @@
 """A default parameter BEFORE `*args`, plus keyword binding to a variadic
-callee's regular params (bugs.md #3).
+callee's regular params.
 
 `def f(a: int, b: int = 10, *xs: int)` called as `f(1)` produced an LLVM
 "Operand is null" verify crash: the call-site marshaller pushed the *args list

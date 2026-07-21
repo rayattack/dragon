@@ -792,19 +792,18 @@ TEST(CodeGenE2E, VarArgsUnionElem) {
 }
 
 //===----------------------------------------------------------------------===//
-// Tier 2 Fix 2.5: Generator reraise scope cleanup (T19)
+// Regression: generator reraise scope cleanup
 //
-// Pre-fix: the for-in loop over a generator only cleaned up `__iter` and
+// The for-in loop over a generator cleans up `__iter` and
 // the loop variable on the StopIteration exit path. When the generator
-// raised a non-StopIteration exception, the codegen built a "reraise"
-// block that called `dragon_raise_exc` directly, bypassing scope cleanup.
-// Heap-typed locals allocated *before* the for-loop leaked.
-//
-// The fix calls `emitAllScopeCleanup()` in the reraise BB before the
+// raises a non-StopIteration exception, codegen builds a "reraise"
+// block that calls `dragon_raise_exc` directly, bypassing scope cleanup -
+// heap-typed locals allocated *before* the for-loop would leak. The
+// reraise BB therefore calls `emitAllScopeCleanup()` before the
 // raise, so all live heap variables are decref'd on the abnormal exit.
 //===----------------------------------------------------------------------===//
 
-TEST(CodeGenIR, GeneratorReraiseEmitsScopeCleanup_Tier25) {
+TEST(CodeGenIR, GeneratorReraiseEmitsScopeCleanup) {
     // The reraise path must emit dragon_decref / dragon_decref_str for the
     // outer-scope heap-typed locals. We look for cleanup calls in/near the
     // gen.reraise basic block.
@@ -826,14 +825,14 @@ TEST(CodeGenIR, GeneratorReraiseEmitsScopeCleanup_Tier25) {
     // The reraise BB must exist
     EXPECT_NE(ir.find("gen.reraise"), std::string::npos)
         << "Expected gen.reraise basic block\nIR:\n" << ir;
-    // After the fix, scope cleanup is emitted before dragon_raise_exc.
+    // Scope cleanup is emitted before dragon_raise_exc.
     // We expect dragon_decref_str to appear somewhere in the function so
     // the outer-scope `buf` is freed on the reraise path.
     EXPECT_NE(ir.find("dragon_decref_str"), std::string::npos)
         << "Expected scope cleanup (decref_str) in caller\nIR:\n" << ir;
 }
 
-TEST(CodeGenE2E, GeneratorReraiseDoesntLeakOuterLocals_Tier25) {
+TEST(CodeGenE2E, GeneratorReraiseDoesntLeakOuterLocals) {
     // Generator that raises mid-iteration. The for-loop catches it in the
     // outer try/except. Pre-fix, `buf` would leak per iteration.
     //
@@ -861,8 +860,8 @@ TEST(CodeGenE2E, GeneratorReraiseDoesntLeakOuterLocals_Tier25) {
     EXPECT_EQ(out, "2000\n");
 }
 
-TEST(CodeGenE2E, GeneratorReraiseExceptionPropagates_Tier25) {
-    // Sanity: non-StopIteration exceptions still propagate after the fix
+TEST(CodeGenE2E, GeneratorReraiseExceptionPropagates) {
+    // Sanity: non-StopIteration exceptions still propagate
     // (the cleanup emit must NOT swallow the exception).
     auto out = compileAndRun(
         "def explode() {\n"
@@ -883,16 +882,16 @@ TEST(CodeGenE2E, GeneratorReraiseExceptionPropagates_Tier25) {
 }
 
 //===----------------------------------------------------------------------===//
-// Tier 2 Fix 2.6: Abandoned generator arg leak (T20)
+// Regression: abandoned generator arg leak
 //
-// Pre-fix: when a generator function was called, the generator wrapper
-// packed args into an i64 array but did NOT incref heap-typed args, and
-// dragon_generator_destroy did NOT decref them. If the caller's scope
-// dropped a heap reference (e.g. a string) before the generator ran,
-// the generator held a dangling pointer; if the generator was abandoned
-// mid-iteration, the captured heap-typed args leaked.
+// The generator wrapper packs args into an i64 array. If it does NOT
+// incref heap-typed args, and
+// dragon_generator_destroy does NOT decref them, then a caller's scope
+// dropping a heap reference (e.g. a string) before the generator runs
+// leaves the generator holding a dangling pointer, and a generator
+// abandoned mid-iteration leaks the captured heap-typed args.
 //
-// The fix:
+// The contract:
 //  - Codegen emits `dragon_generator_create_tagged(body, args, tags, n)`
 //  instead of `_create`. The tags array carries the per-arg
 //  DragonValueTag so the runtime knows which slots are heap-typed.
@@ -901,7 +900,7 @@ TEST(CodeGenE2E, GeneratorReraiseExceptionPropagates_Tier25) {
 //  - Runtime decrefs heap-typed args in dragon_generator_destroy.
 //===----------------------------------------------------------------------===//
 
-TEST(CodeGenIR, GeneratorWrapperUsesTypedCreate_Tier26) {
+TEST(CodeGenIR, GeneratorWrapperUsesTypedCreate) {
     // D030: generator wrapper calls dragon_generator_create_typed (per-callsite
     // trampoline + decref fn pattern). The decref fn handles heap args at
     // destroy - replaces the prior tags-array approach.
@@ -924,7 +923,7 @@ TEST(CodeGenIR, GeneratorWrapperUsesTypedCreate_Tier26) {
         << "Expected per-callsite generator decref fn\nIR:\n" << ir;
 }
 
-TEST(CodeGenIR, GeneratorTypedCreateDeclaration_Tier26) {
+TEST(CodeGenIR, GeneratorTypedCreateDeclaration) {
     // D030 runtime entry point: declare ptr @dragon_generator_create_typed(
     //  ptr trampoline, ptr args, i64 args_size, ptr decref_fn).
     auto ir = generateIR(
@@ -939,7 +938,7 @@ TEST(CodeGenIR, GeneratorTypedCreateDeclaration_Tier26) {
         << "IR:\n" << ir;
 }
 
-TEST(CodeGenE2E, GeneratorWithStringArgRunsCorrectly_Tier26) {
+TEST(CodeGenE2E, GeneratorWithStringArgRunsCorrectly) {
     // Sanity: generator with str arg consumes the captured value correctly,
     // and yielded str values round-trip through for-in (yield kind tracking
     // wires this up - see generatorYieldKinds in CodeGen).
@@ -972,14 +971,14 @@ TEST(CodeGenE2E, GeneratorYieldsStringRoundTrips) {
     EXPECT_EQ(out, "first\nsecond\nthird\n");
 }
 
-TEST(CodeGenE2E, GeneratorAbandonedNoLeak_Tier26) {
+TEST(CodeGenE2E, GeneratorAbandonedNoLeak) {
     // Create a generator with heap-typed args, take ONE next, then
     // abandon (let it go out of scope). The destroy path must decref
     // the captured str so it doesn't leak per iteration.
     //
     // To run under valgrind:
     //  valgrind --leak-check=full ./dragon_codegen_tests \
-    //  --gtest_filter='*GeneratorAbandonedNoLeak_Tier26*'
+    //  --gtest_filter='*GeneratorAbandonedNoLeak*'
     auto out = compileAndRun(
         "def chunks(s: str) {\n"
         "  yield s\n"
@@ -1000,7 +999,7 @@ TEST(CodeGenE2E, GeneratorAbandonedNoLeak_Tier26) {
     EXPECT_EQ(out, "ok\n");
 }
 
-TEST(CodeGenE2E, GeneratorMultipleHeapArgsBalance_Tier26) {
+TEST(CodeGenE2E, GeneratorMultipleHeapArgsBalance) {
     // Multiple heap-typed args. Each must be incref'd at pack time and
     // decref'd at destroy time exactly once.
     auto out = compileAndRun(
@@ -1020,7 +1019,7 @@ TEST(CodeGenE2E, GeneratorMultipleHeapArgsBalance_Tier26) {
     EXPECT_EQ(out, "ok\n");
 }
 
-TEST(CodeGenE2E, GeneratorIntArgStillWorks_Tier26) {
+TEST(CodeGenE2E, GeneratorIntArgStillWorks) {
     // Regression: int args (TAG_INT=0) must NOT trigger spurious
     // incref/decref. The tag array holds 0 -> runtime is a no-op.
     auto out = compileAndRun(
@@ -1041,18 +1040,18 @@ TEST(CodeGenE2E, GeneratorIntArgStillWorks_Tier26) {
 }
 
 //===----------------------------------------------------------------------===//
-// Tier 2 Fix 2.10: file_read on non-seekable streams (T24)
+// Regression: file_read on non-seekable streams
 //
-// Pre-fix: dragon_file_read used ftell/fseek to size the buffer in one
-// shot. On pipes/FIFOs/stdin, ftell returns -1 and fseek fails, so
-// `remaining = size - pos` came out 0 and the function silently returned
-// an empty string - even though there was readable content.
+// Sizing the buffer with ftell/fseek alone breaks
+// on pipes/FIFOs/stdin: ftell returns -1 and fseek fails, so
+// `remaining = size - pos` comes out 0 and the function silently returns
+// an empty string - even though there is readable content.
 //
-// The fix tries the seek-based fast path, but on failure falls through to
-// an incremental fread loop with a doubling buffer (4KB -> 8KB -> ...).
+// dragon_file_read tries the seek-based fast path, and on failure falls
+// through to an incremental fread loop with a doubling buffer (4KB -> 8KB -> ...).
 //===----------------------------------------------------------------------===//
 
-TEST(CodeGenE2E, FileReadFromPipe_Tier210) {
+TEST(CodeGenE2E, FileReadFromPipe) {
     // popen produces a non-seekable FILE*. Pre-fix, `f.read()` on a popen'd
     // handle returned an empty string. Post-fix, it drains the pipe via
     // incremental fread.
@@ -1084,7 +1083,7 @@ TEST(CodeGenE2E, FileReadFromPipe_Tier210) {
     EXPECT_EQ(out, "abc\ndef\nghi\n\n");
 }
 
-TEST(CodeGenE2E, FileReadShellPipe_Tier210) {
+TEST(CodeGenE2E, FileReadShellPipe) {
     // Use Dragon's FFI to popen() a shell command. popen returns a
     // non-seekable FILE*. Pre-fix dragon_file_read would return empty.
     // Post-fix it drains the pipe and we get the full output.
@@ -1100,7 +1099,7 @@ TEST(CodeGenE2E, FileReadShellPipe_Tier210) {
     EXPECT_EQ(out, "line1\nline2\nline3\n\n");
 }
 
-TEST(CodeGenE2E, FileReadShellPipeLargeOutput_Tier210) {
+TEST(CodeGenE2E, FileReadShellPipeLargeOutput) {
     // Pipe output larger than the initial 4KB buffer - exercises the
     // realloc/double-and-grow path in the non-seekable fallback.
     auto out = compileAndRun(
@@ -1119,7 +1118,7 @@ TEST(CodeGenE2E, FileReadShellPipeLargeOutput_Tier210) {
     EXPECT_EQ(out, "20000\n");
 }
 
-TEST(CodeGenE2E, FileReadShellPipeEmpty_Tier210) {
+TEST(CodeGenE2E, FileReadShellPipeEmpty) {
     // Empty pipe (command produces no output). Must still return an empty
     // string cleanly, no crash, no garbage.
     auto out = compileAndRun(

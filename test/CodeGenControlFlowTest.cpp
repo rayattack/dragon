@@ -49,7 +49,7 @@ TEST(CodeGenTest, ElifFloatConditionCoercion) {
 }
 
 TEST(CodeGenE2E, ElseIfChainSameAsElif) {
-    // 6.B.1: `else if` is accepted as an alias for `elif`. Mixing the two
+    // `else if` is accepted as an alias for `elif`. Mixing the two
     // in one chain works too.
     auto out = compileAndRun(
         "def cls(x: int) -> str {\n"

@@ -84,8 +84,8 @@ def _open(dsn: str) -> Connection {
 #===----------------------------------------------------------------------===#
 
 class Pool {
-    # Sole owner of the pool mutex: destroyed when the pool dies
-    # (docs/001-memory.md; was AUDIT 2.3's leaked pthread mutex)
+    # Sole owner of the pool mutex: destroyed when the pool dies (a bare
+    # Lock() has no owner of last resort, so its pthread mutex would leak)
     own lock: Lock
 
     def(dsn: str, max_idle: int = 8) {

@@ -239,9 +239,9 @@ TEST(CodeGenE2E, FStringMultiInterpolation) {
 }
 
 //===----------------------------------------------------------------------===//
-// Format-spec validator tests (Tier 1 1.3 / 1.4 - security)
+// Format-spec validator tests (security)
 //===----------------------------------------------------------------------===//
-// User-controlled format specs used to be injected directly into snprintf,
+// Unvalidated, user-controlled format specs flow directly into snprintf,
 // allowing %n stack writes and %s stack reads, plus a strncpy overflow on
 // the 32-byte prefix buffer. The validator rejects any non-grammar input
 // with ValueError; long specs are bounds-clamped as defense-in-depth.
@@ -700,7 +700,7 @@ TEST(CodeGenE2E, BytesIsDigit) {
 }
 
 //===----------------------------------------------------------------------===//
-// Tier 1 Fix 1.5: String Concat Intermediate Leaks
+// Regression: string concat intermediate leaks
 //
 // Verifies that intermediate strings from runtime calls (str.upper(),
 // str.lower(), str.replace(), str() coercion, slice) are decref'd when
@@ -784,7 +784,7 @@ TEST(CodeGenE2E, ConcatIntermediateLiteralPlusStrPlusLiteral) {
 
 //===----------------------------------------------------------------------===//
 // IR-level checks: confirm decref_str is emitted for intermediates that
-// previously leaked.
+// would otherwise leak.
 //===----------------------------------------------------------------------===//
 
 TEST(CodeGenIR, ConcatBroadDecrefUpperLower) {
@@ -831,7 +831,7 @@ TEST(CodeGenIR, ConcatBroadDecrefIntToStr) {
 }
 
 //===----------------------------------------------------------------------===//
-// Tier 2 Fix 2.1: str.join NULL element guard (T15)
+// Regression: str.join NULL element guard
 //
 // Pre-fix: dragon_str_join called strlen() on each element with no NULL guard,
 // crashing if any list slot was NULL. The fix skips NULL elements and only
@@ -904,7 +904,7 @@ TEST(CodeGenE2E, StrJoinLoopBounded) {
 }
 
 //===----------------------------------------------------------------------===//
-// Tier 2 Fix 2.8: str.replace signed arithmetic (T22)
+// Regression: str.replace signed arithmetic
 //
 // Pre-fix: `slen + count * (nlen - olen)` used unsigned size_t arithmetic.
 // When replacement is shorter than the search string, `nlen - olen` wraps

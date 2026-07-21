@@ -18,7 +18,7 @@
 #      paramIsOwn check and double-freed the handle in any order
 #
 # Correct port hygiene throughout (SO_REUSEADDR + checked bind) so a busy
-# port fails the assert instead of hanging (see fire-own-io-bug.md).
+# port fails the assert instead of hanging.
 
 from unittest import TestCase, main
 from socket import SocketHandle

@@ -126,7 +126,7 @@ DragonThread* dragon_thread_fire(void* fn, int64_t* args, int64_t nargs) {
     // long-running-process failure mode) the entry never runs, so t->done is
     // never set and t->tid is garbage. The scoped-fire join would then
     // pthread_join a garbage tid (undefined behavior) and block forever on
-    // done, and fa / fa->args / t all leak (AUDIT-2026-07-09 2.6). On failure,
+    // done, and fa / fa->args / t all leak. On failure,
     // mark the handle done with an error result and free the args so the join
     // returns immediately instead of hanging on UB.
     int rc = pthread_create(&t->tid, NULL, dragon_thread_entry, fa);
@@ -158,7 +158,7 @@ int64_t dragon_thread_join(DragonThread* t) {
         return __atomic_load_n(&t->result, __ATOMIC_ACQUIRE);
     }
     // Only join a thread that actually started: on a pthread_create failure
-    // t->tid is garbage, and pthread_join on it is undefined (AUDIT 2.6). The
+    // t->tid is garbage, and pthread_join on it is undefined. The
     // failed handle already has done=1 and result=0.
     if (t->started)
         pthread_join(t->tid, NULL);
@@ -168,7 +168,7 @@ int64_t dragon_thread_join(DragonThread* t) {
 }
 
 //===----------------------------------------------------------------------===//
-// OS Thread API (manual Thread class - Tier 3)
+// OS Thread API (manual Thread class)
 //===----------------------------------------------------------------------===//
 
 typedef struct {
@@ -530,7 +530,7 @@ static void scheduler_init() {
 ///               (field 0 reserved for the DragonVThread*, patched here)
 ///   args_size:  byte size of the struct for malloc + memcpy (0 if no args)
 /// The trampoline owns the heap copy and is responsible for free()ing it
-/// before returning. dragon_vthread_join no longer touches args.
+/// before returning; dragon_vthread_join never touches args.
 DragonVThread* dragon_vthread_spawn_typed(
     void (*trampoline)(mco_coro*), void* args, int64_t args_size) {
     pthread_once(&__scheduler_once, scheduler_init);
@@ -579,7 +579,7 @@ void dragon_vthread_set_result(DragonVThread* vt, int64_t res) {
 
 /// Join a green thread: block until done, return result, free resources.
 /// D030: args buffer is owned by the per-callsite trampoline (free'd before
-/// the coroutine returns) - join no longer frees args.
+/// the coroutine returns) - join must never free args.
 int64_t dragon_vthread_join(DragonVThread* vt) {
     if (!vt) return 0;
 

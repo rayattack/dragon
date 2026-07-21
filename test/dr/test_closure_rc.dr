@@ -1,4 +1,4 @@
-# test/dr/test_closure_rc.dr - closure / Callable reference-counting (T39).
+# test/dr/test_closure_rc.dr - closure / Callable reference-counting.
 #
 # Regression guard for making VarKind::Closure a fully refcounted kind: a
 # `: Callable` local / param / field / list element / dict value is a heap

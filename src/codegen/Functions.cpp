@@ -3,7 +3,7 @@
 
 namespace dragon {
 
-// leaks.md #11: the per-closure-site env GC hook. One emitter, two call sites
+// the per-closure-site env GC hook. One emitter, two call sites
 // (LambdaExpr + nested def), so the DEALLOC/TRAVERSE/CLEAR logic can't drift.
 // Signature matches DragonEnv.gc_fn: void(env: ptr, op: i32, visit: ptr, arg: ptr).
 //  op 0 DEALLOC - decref each heap capture (the former dealloc_fn behavior).
@@ -398,7 +398,7 @@ void CodeGen::visit(LambdaExpr& node) {
 
     // 10. Result
     if (hasCaptures) {
-        // leaks.md #11: emit the multi-op env GC hook (DEALLOC/TRAVERSE/CLEAR)
+        // emit the multi-op env GC hook (DEALLOC/TRAVERSE/CLEAR)
         // via the shared emitter, and gc-track the env iff it captures a
         // cycle-capable object (so instance/list -> closure -> env cycles are
         // collectable; scalar/str-only envs stay untracked - #1).
@@ -473,7 +473,7 @@ void CodeGen::visit(LambdaExpr& node) {
                         impl_->builder->CreateCall(
                             impl_->runtimeFuncs["dragon_incref_str"], {storeVal});
                     } else if (cap.kind == Impl::VarKind::Closure) {
-                        // T39: a captured Callable may hold a BARE fn pointer
+                        // a captured Callable may hold a BARE fn pointer
                         // (a decorator's `fn` param wrapping a plain def).
                         // The generic incref would WRITE a refcount into the
                         // function's code bytes (SIGSEGV - the chained-
@@ -931,7 +931,7 @@ void CodeGen::visit(FunctionDecl& node) {
     // Mirror forwardDeclareFunctions: extern decls keep the bare C symbol
     // name, Dragon defs go through per-module mangling so cross-module
     // collisions on names like `open` / `compress` resolve to distinct
-    // LLVM symbols. Gap #12: an aliased extern stores its C symbol in
+    // LLVM symbols. An aliased extern stores its C symbol in
     // `externSymbol`; the LLVM lookup must match what forwardDeclare used.
     const std::string externLinkName =
         node.externSymbol.empty() ? node.name : node.externSymbol;
@@ -1678,7 +1678,7 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
         boundValue = impl_->builder->CreateBitCast(nestedFunc, impl_->i8PtrType);
         boundKind = Impl::VarKind::Other;  // bare fn pointer - not a heap object
     } else {
-        // leaks.md #11: multi-op env GC hook + gc-track gate (see LambdaExpr).
+        // multi-op env GC hook + gc-track gate (see LambdaExpr).
         // Shared emitter so the nested-def and lambda sites never drift.
         std::vector<Impl::EnvCaptureDesc> capDescs;
         capDescs.reserve(captures.size());
@@ -1735,7 +1735,7 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
                         impl_->builder->CreateCall(
                             impl_->runtimeFuncs["dragon_incref_str"], {storeVal});
                     } else if (cap.kind == Impl::VarKind::Closure) {
-                        // T39: tag-gated - a captured Callable may hold a
+                        // tag-gated - a captured Callable may hold a
                         // BARE fn ptr; the generic incref would write a
                         // refcount into code bytes (SIGSEGV).
                         impl_->builder->CreateCall(

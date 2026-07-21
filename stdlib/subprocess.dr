@@ -220,10 +220,10 @@ class Popen {
     }
 
     # Close any still-open captured pipe end (idempotent; -1 means already
-    # closed or never captured). Without this, `Popen(args); p.wait()` leaked
-    # the 2-3 parent-held read/write ends per spawn, and a chatty child could
-    # deadlock on a full pipe nobody was draining (AUDIT-2026-07-09 2.5). Only
-    # communicate() closed fds before; wait()/poll()/close() now do too.
+    # closed or never captured). Without this, `Popen(args); p.wait()` leaks
+    # the 2-3 parent-held read/write ends per spawn, and a chatty child can
+    # deadlock on a full pipe nobody is draining. Called from communicate(),
+    # wait(), poll(), and close().
     def _close_fds() -> None {
         if self._stdin_fd >= 0 {
             dragon_subprocess_close(self._stdin_fd)

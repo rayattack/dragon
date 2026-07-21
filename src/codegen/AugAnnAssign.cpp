@@ -158,7 +158,7 @@ void CodeGen::visit(AugAssignStmt& node) {
         // SAME object and rebinds nothing, so we call dragon_list_extend on the
         // loaded pointer and do NOT store back. Without this a list slot fell
         // through to the numeric switch below and emitted `add ptr` (invalid
-        // IR - the LLVM verifier crash in bugs.md #6). Like bytes, the
+        // IR - an LLVM verifier crash). Like bytes, the
         // TypeChecker-propagated target type disambiguates list from bytes.
         bool targetIsList = node.target && node.target->type &&
                             node.target->type->kind() == Type::Kind::List;
@@ -783,7 +783,7 @@ void CodeGen::visit(AnnAssignStmt& node) {
         }
     }
     // D025: track dict[K, type] so subscript value is a class descriptor
-    // 6.B.4: track dict[K, V] value Type::Kind for items() unpack.
+    // Track dict[K, V] value Type::Kind for items() unpack.
     // D030 Phase 3.G: track dict[K, V] key Type::Kind so subscript / `in` /
     // print dispatch route int-keyed dicts to the dragon_dict_int_* family.
     if (varKind == Impl::VarKind::Dict) {
@@ -915,7 +915,7 @@ void CodeGen::visit(AnnAssignStmt& node) {
             }
             if (isTaskAnnot) {
                 impl_->varClassNames[name->name] = "__Thread";
-                // leaks.md #2 tail: a bound fire-and-forget Task that provably
+                // Task-detach tail: a bound fire-and-forget Task that provably
                 // never escapes or joins leaks its handle ref. The escape pre-pass
                 // (computeStackAllocSites) recorded such decls; arm a scope-exit
                 // dragon_vthread_detach for this one. setVar below puts the alloca
@@ -1478,12 +1478,12 @@ void CodeGen::visit(AnnAssignStmt& node) {
                         val = impl_->builder->CreateZExt(val, impl_->i64Type);
                     else if (allocType == impl_->i64Type && val->getType() == impl_->f64Type)
                         val = impl_->builder->CreateFPToSI(val, impl_->i64Type);
-                    // 6.B.6 root cause: storing an i64-returning expression
+                    // Storing an i64-returning expression
                     // (e.g. `name.startswith("-")` returns i64) into a `bool`
                     // alloca needs explicit i1 coercion. Without this, the store
                     // is type-mismatched and LLVM either errors or - worse -
-                    // silently produces wrong output, which is what was breaking
-                    // bool fields in argparse's parse_args.
+                    // silently produces wrong output (bool fields in argparse's
+                    // parse_args break exactly this way).
                     else if (allocType == impl_->i1Type && val->getType() == impl_->i64Type)
                         val = impl_->builder->CreateICmpNE(
                             val, llvm::ConstantInt::get(impl_->i64Type, 0), "tobool");

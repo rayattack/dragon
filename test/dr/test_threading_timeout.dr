@@ -1,7 +1,7 @@
 # test/dr/test_threading_timeout.dr - acquire(timeout=) parity across primitives.
 #
-# RWLock and Semaphore gained the same acquire(blocking=True, timeout=T) shape as
-# Lock (2026-06-07). This pins the contract: when the lock cannot be taken,
+# RWLock and Semaphore share the same acquire(blocking=True, timeout=T) shape as
+# Lock. This pins the contract: when the lock cannot be taken,
 # acquire() returns False AND actually waits ~T seconds - a timed wait must never
 # return early, because the deadline is absolute (now + T). When the lock can be
 # taken, it returns True promptly. Lower-bound timing checks only: a timed wait

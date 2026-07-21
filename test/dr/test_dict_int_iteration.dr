@@ -1,4 +1,4 @@
-"""Iteration and lookup over int-keyed dicts (bugs.md #1 and #2).
+"""Iteration and lookup over int-keyed dicts.
 
 Before the fix, every int-keyed `dict[int, V]` iteration treated the i64 key as
 a string pointer: `for k in d` / `d.items()` IntToPtr'd the key (1 → address

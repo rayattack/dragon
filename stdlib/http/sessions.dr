@@ -278,8 +278,8 @@ class MemoryStore(SessionStore) {
     # without per-key versioning (a DB/Redis store has the same race absent a
     # transaction) and is the expected session semantics.
     _sessions: dict[str, Session]
-    # Sole owner of the store's mutex: destroyed when the store dies
-    # (docs/001-memory.md; was AUDIT 2.3's leaked pthread mutex).
+    # Sole owner of the store's mutex: destroyed when the store dies (a bare
+    # Lock() has no owner of last resort, so its pthread mutex would leak).
     own lock: Lock
 
     def() {

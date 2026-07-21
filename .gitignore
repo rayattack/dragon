@@ -9,8 +9,6 @@ cmake-build-*/
 *.notes.cpp
 *.notes.dr
 
-decisions/
-
 # --- CMake / CTest generated files ---
 Testing/
 CMakeCache.txt
@@ -54,6 +52,9 @@ CPackSourceConfig.cmake
 /examples/pypy
 /examples/server
 /test/dr/test_template_borrowed_field_rc
+
+# --- Tiza (local only) ---
+.tiza/
 
 # --- Editor / OS / tooling ---
 .ignore/

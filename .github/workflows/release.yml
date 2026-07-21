@@ -115,6 +115,25 @@ jobs:
         shell: bash
         run: cmake --build build --config Release -j
 
+      # ---- Verify the binaries are self-contained on (macOS) --------------------
+      # in v0.0.1 we shipped dyld-broken: the bins tried to load Homebrew's libz3 and
+      # libzstd by absolute /opt/homebrew paths that only exist on the build
+      # machine, so `dragon --version` aborted on any Mac without those brew
+      # packages.
+      - name: Verify self-contained binaries (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for bin in build/dragon build/dragon-egg; do
+            otool -L "$bin"
+            if otool -L "$bin" | grep -E '/opt/homebrew|/usr/local/(opt|Cellar|lib)'; then
+              echo "$bin links non-system libraries by absolute path" >&2
+              exit 1
+            fi
+          done
+          ./build/dragon --version
+
       # ---- Package -----------------------------------------------------------
       - name: Package (Linux)
         if: runner.os == 'Linux'

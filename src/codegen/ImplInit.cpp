@@ -427,7 +427,7 @@ void CodeGen::Impl::declareRuntimeFunctions() {
     // of an Any-typed value. Returns an owned refcounted heap DragonString.
     getOrDeclareRuntime("dragon_box_to_str",
         llvm::FunctionType::get(i8PtrType, {boxType}, false));
-    // T38: box dragon_box_subscript(box container, box index) - `anyVal[i]`.
+    // dragon_box_subscript(box container, box index) - `anyVal[i]`.
     // Tag-dispatched element read for an Any-boxed list/dict/str/bytes; returns
     // an OWNED box (borrowed container elements are incref'd, mirroring the
     // owned-str convention so transient results can be released).
@@ -1043,7 +1043,7 @@ void CodeGen::Impl::declareRuntimeFunctions() {
     getOrDeclareRuntime("dragon_generator_abandon",
         llvm::FunctionType::get(voidType, {i8PtrType}, false));
 
-    // --- OS thread functions (Thread class -- Tier 3) ---
+    // --- OS thread functions (Thread class) ---
     // ptr dragon_osthread_new(ptr fn, ptr args, i64 nargs)
     getOrDeclareRuntime("dragon_osthread_new",
         llvm::FunctionType::get(i8PtrType, {i8PtrType, i8PtrType, i64Type}, false));
@@ -1325,7 +1325,7 @@ void CodeGen::Impl::declareRuntimeFunctions() {
     // --- D027/D030: Closure and environment functions ---
     // ptr dragon_env_alloc(i64 total_size, ptr gc_fn, i32 trackable)
     //  Allocates header + body. Body layout owned by codegen (per-lambda struct).
-    //  gc_fn is the multi-op env GC hook (leaks.md #11); trackable=1 gc-tracks
+    //  gc_fn is the multi-op env GC hook; trackable=1 gc-tracks
     //  the env so a closure-capture cycle through it is collectable.
     getOrDeclareRuntime("dragon_env_alloc",
         llvm::FunctionType::get(i8PtrType,
@@ -1369,10 +1369,10 @@ void CodeGen::Impl::forwardDeclareFunctions(dragon::Module& mod) {
             if (!func->typeParams.empty()) continue;
             // Per-module mangling. Extern-C declarations keep the bare name
             // since they reference C-ABI symbols (`malloc`, `dragon_str_*`,
-            // etc.) that must NOT be mangled - the linker would no longer
+            // etc.) that must NOT be mangled - the linker would not
             // find them. Same-module Dragon defs get mangled so two stdlib
             // modules with `def open` produce distinct LLVM symbols.
-            // Gap #12: `extern "C" def CSYM(...) as DRAGON_NAME` stores the
+            // `extern "C" def CSYM(...) as DRAGON_NAME` stores the
             // C symbol in `externSymbol` and the Dragon-visible alias in
             // `name`. The LLVM symbol must use the C name so the linker
             // resolves it; the Dragon name flows through the alias map
@@ -1387,13 +1387,14 @@ void CodeGen::Impl::forwardDeclareFunctions(dragon::Module& mod) {
                 // extern with the same C symbol - e.g. glob.dr/path.dr both
                 // declare `getcwd` - or declareRuntimeFunctions pre-declared a
                 // dragon_* symbol). The dedup must NOT skip this module's
-                // Dragon-side alias registration (Gap #12): without it, a call
+                // Dragon-side alias registration: without it, a call
                 // to the alias (e.g. os's `_libc_getcwd`) resolves to nothing.
                 // It must not skip the RC side maps either: every `dragon_*`
-                // extern collides with the runtime pre-declarations, so its
-                // param kinds and FFI drain eligibility were never registered
-                // and owned arg temps at those call sites never drained
-                // (stdlib http's nested dragon_str_concat, AUDIT 1.2).
+                // extern collides with the runtime pre-declarations, so
+                // without this its param kinds and FFI drain eligibility are
+                // never registered and owned arg temps at those call sites
+                // never drain (stdlib http's nested dragon_str_concat hits
+                // exactly this).
                 if (func->isExtern && !func->externSymbol.empty())
                     importedFuncAliasesByModule[currentModuleName][func->name] = llvmName;
                 if (options.gcMode == GCMode::RC && func->isExtern) {
@@ -1559,7 +1560,7 @@ void CodeGen::Impl::forwardDeclareFunctions(dragon::Module& mod) {
             if (func->isExtern && !func->externLib.empty()) {
                 externLibs.insert(func->externLib);
             }
-            // Gap #12: library-detection heuristics inspect the C symbol, not
+            // Library-detection heuristics inspect the C symbol, not
             // the (possibly aliased) Dragon-visible name. For a plain extern
             // these are the same string; for an aliased extern they diverge.
             // Auto-detect sqlite3 usage for bundled lib linking
@@ -1597,7 +1598,7 @@ void CodeGen::Impl::forwardDeclareFunctions(dragon::Module& mod) {
             if (func->isExtern && externLinkName.substr(0, 11) == "dragon_zstd") {
                 needsZstd = true;
             }
-            // Gap #12: when the extern has an alias, register `name -> llvmName`
+            // When the extern has an alias, register `name -> llvmName`
             // in the current module's alias scope so a Dragon call to the
             // alias resolves to the C symbol. resolveCalleeSymbol probes this
             // map first.

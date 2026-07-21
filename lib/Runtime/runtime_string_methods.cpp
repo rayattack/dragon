@@ -419,9 +419,9 @@ static constexpr int64_t DRAGON_STR_MAX_WIDTH = 1LL << 28;
 // Padding helpers below take width in CODE POINTS and an ASCII `fill` byte.
 // The width comparison must use the code-point count (ds->len), not strlen -
 // strlen on a UCS-4 string is the byte length up to the first embedded NUL, so
-// "café".center(8) saw length 1 and, worse, memcpy'd the raw UCS-4 storage
+// "café".center(8) would see length 1 and, worse, memcpy the raw UCS-4 storage
 // into a kind=1 byte result, emitting "c" surrounded by fill. For a kind=4
-// source we now build a UCS-4 result and write the fill as a code point.
+// source, build a UCS-4 result and write the fill as a code point.
 
 const char* dragon_str_center(const char* s, int64_t w, char fill) {
     if (!s) return dragon_string_alloc("", 0);

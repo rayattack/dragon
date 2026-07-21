@@ -1,4 +1,4 @@
-"""Door 5: a read-only value fans out across `fire` at zero copy (2026-07-14).
+"""A read-only value fans out across `fire` at zero copy.
 
 You want the obvious worker-pool shape - fire one task per worker over the SAME
 shared data, then join them all:

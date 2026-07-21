@@ -597,7 +597,7 @@ void CodeGen::visit(ReturnStmt& node) {
             // self.f` / `return d[k]` - scope cleanup or the container owns
             // the +1). An OWNED temp (str() / concat / slice / literal /
             // call result) already carries the +1 the caller's box takes;
-            // increffing it too leaked one object per call (bugs.md #20:
+            // increffing it too leaks one object per call (
             // `def f() -> Any { return str(42) }`). IR-level predicates, not
             // AST: a ternary of locals merges in a PHI, which the predicates
             // conservatively treat as a borrow - incref'd, never dangling.
@@ -1289,7 +1289,7 @@ void CodeGen::visit(RaiseStmt& node) {
                 // The instance is BORROWED from the local's slot; the raise
                 // transfers a +1 into the owning exc_obj slot, so retain
                 // first. The local's own ref is then correctly freed by the
-                // unwind / scope cleanup (AUDIT-2026-07-09 1.5).
+                // unwind / scope cleanup.
                 inst = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_exc_retain_obj"], {inst},
                     "raise.obj.retained");

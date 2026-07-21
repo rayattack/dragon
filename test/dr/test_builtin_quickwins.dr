@@ -1,6 +1,6 @@
-"""Regression tests for the builtin/codegen quick-wins pass (2026-05-27).
+"""Regression tests for the builtin/codegen quick-wins pass.
 
-Each block guards a gap from missing.md that was root-caused and fixed:
+Each block guards a root-caused-and-fixed language gap:
   1. pow / round / divmod were rejected by Sema ("undefined name") even though
      CodeGen handlers existed; divmod additionally printed garbage because it
      was typed list[any] instead of tuple[int,int].

@@ -1,5 +1,5 @@
 """List concatenation, augmented concatenation, reverse-aware sorting, and
-extend() across element types (bugs.md #4, #5, #6).
+extend() across element types.
 
 #4 `sorted(xs, reverse=True)` / `xs.sort(reverse=True)` silently ignored the
    flag and returned ascending order. Now a reverse-aware runtime sort

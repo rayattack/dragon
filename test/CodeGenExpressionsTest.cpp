@@ -379,7 +379,7 @@ TEST(CodeGenE2E, ChainedCompShortCircuitsMiddleNotReevaluated) {
 }
 
 TEST(CodeGenE2E, AndOrShortCircuitSkipsUnsafeRhs) {
-    // 6.B.2 regression: `and` / `or` MUST short-circuit, otherwise empty-list
+    // Regression: `and` / `or` MUST short-circuit, otherwise empty-list
     // index access or div-by-zero in the RHS would crash.
     auto out = compileAndRun(
         "def access_first(xs: list[int]) -> bool {\n"
@@ -402,9 +402,9 @@ TEST(CodeGenE2E, AndOrShortCircuitSkipsUnsafeRhs) {
 }
 
 TEST(CodeGenE2E, BoolAssignFromI64ReturningExpr) {
-    // 6.B.6 root cause: `const flag: bool = <i64-returning expr>` MUST
-    // truncate the i64 to i1. Without this, the bool field stored 0
-    // regardless of input, which corrupted argparse flag handling.
+    // `const flag: bool = <i64-returning expr>` MUST
+    // truncate the i64 to i1. Without this, the bool field stores 0
+    // regardless of input (argparse flag handling corrupts exactly this way).
     // Methods like str.startswith return i64 (1/0); they need to coerce
     // when stored into a bool slot.
     auto out = compileAndRun(
@@ -551,11 +551,11 @@ TEST(CodeGenE2E, OverflowCaughtByArithmeticErrorParent) {
 // Regression: ternary with class-field dict subscript
 //===----------------------------------------------------------------------===//
 //
-// Before the fix, `obj.field["k"] if cond else lit` triggered a PHI type
-// mismatch: the class-field dict subscript fell through to dragon_dict_get
-// (returning i64) while the literal branch produced ptr/double, so the merge
-// PHI got operands of different LLVM types and the compiler asserted.
-// classFieldDictValueKinds now feeds checkTag for the AttributeExpr case so
+// Without kind tracking, `obj.field["k"] if cond else lit` triggers a PHI type
+// mismatch: the class-field dict subscript falls through to dragon_dict_get
+// (returning i64) while the literal branch produces ptr/double, so the merge
+// PHI gets operands of different LLVM types and the compiler asserts.
+// classFieldDictValueKinds feeds checkTag for the AttributeExpr case so
 // both branches cross the runtime boundary at the dict's native value type.
 
 TEST(CodeGenE2E, TernaryClassFieldDictSubscriptStrThenBranch) {

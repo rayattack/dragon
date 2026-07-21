@@ -1,4 +1,4 @@
-"""Regression test for the borrowed-slot reassignment over-decref (2026-06-19).
+"""Regression test for the borrowed-slot reassignment over-decref.
 
 Reassigning a heap-refcounted PARAMETER (or any borrowed slot - loop variable,
 capture, self) used to decref the slot's incoming value on the first write. The

@@ -489,12 +489,11 @@ void TypeChecker::visit(CallExpr& node) {
     // shared by plain function/method calls AND single-ctor class calls (the
     // caller gates on no kwargs + exact arity). Any/Unknown on either side is
     // skipped (can't prove a violation). This catches the silent miscompile
-    // `def sq(n: int)...; sq("x")` and the template[SQL] mismatch (M3), and
+    // `def sq(n: int)...; sq("x")` and the str-vs-template[SQL] mismatch, and
     // blesses container literals against the param's representation. Ctor
-    // calls previously skipped this entirely (2026-07-18 gap): an inline
-    // `[11, 22]` passed to a `list[Any]` ctor param compiled monomorphized
-    // and the callee walked the wrong stride (`xs[0]` read a box that was
-    // never there).
+    // calls must run it too: an inline `[11, 22]` passed to a `list[Any]`
+    // ctor param otherwise compiles monomorphized and the callee walks the
+    // wrong stride (`xs[0]` reads a box that was never there).
     auto checkPositionalArgs = [&](FunctionType& ft) {
         auto isContainer = [](Type::Kind k) {
             return k == Type::Kind::List || k == Type::Kind::Dict ||
@@ -651,13 +650,13 @@ void TypeChecker::visit(CallExpr& node) {
         }
         // Conservative positional argument type check. FunctionType carries no
         // default/vararg metadata, so we only check a plain function reference
-        // (NameExpr callee) or a method call (AttributeExpr callee - M3) invoked
+        // (NameExpr callee) or a method call (AttributeExpr callee) invoked
         // with no kwargs and EXACT arity; a defaulted or variadic call has a
         // mismatched count and is skipped. Any/Unknown on either side is also
         // skipped (can't prove a violation). This catches the silent miscompile
         // `def sq(n: int)...; sq("x")` AND `db.query(some_str)` where query wants
-        // a template[SQL] (M3 - previously the str->SQL mismatch reached codegen
-        // and segfaulted) without misfiring on valid subtype passes
+        // a template[SQL] (unchecked, the str->SQL mismatch reaches codegen
+        // and segfaults) without misfiring on valid subtype passes
         // (InstanceType::isSubtypeOf walks the class hierarchy; int<:float etc.).
         // Method FunctionTypes exclude `self`, so paramTypes.size() == arg count.
         if ((dynamic_cast<NameExpr*>(node.callee.get()) ||
@@ -721,10 +720,10 @@ void TypeChecker::visit(CallExpr& node) {
                 validateCall(ift, "class '" + ct.name + "' constructor");
                 // Positional type check + literal blessing for ctor args,
                 // same gates as the function/method path: no kwargs, exact
-                // arity. Without this a ctor call skipped both entirely
-                // (2026-07-18 gap) - `Cls([11, 22])` against `xs: list[Any]`
-                // compiled the literal monomorphized and every element read
-                // in the ctor walked the wrong stride.
+                // arity. Without this a ctor call skips both entirely -
+                // `Cls([11, 22])` against `xs: list[Any]` compiles the
+                // literal monomorphized and every element read in the ctor
+                // walks the wrong stride.
                 if (node.kwArgs.empty() &&
                     node.args.size() == ift.paramTypes.size())
                     checkPositionalArgs(ift);
@@ -1217,8 +1216,8 @@ void TypeChecker::visit(AttributeExpr& node) {
             return;
         }
         // `pop`/`popleft` (deque is modeled as ListType) return the ELEMENT type,
-        // not Any. popleft was previously unhandled -> fell through to Any, which
-        // forced boxing and broke generic callers' type inference (cmd #3: an op
+        // not Any. An unhandled popleft falls through to Any, which forces
+        // boxing and breaks generic callers' type inference (cmd #3: an op
         // that knows its element type must never report Any).
         if (node.attribute == "pop" || node.attribute == "popleft") {
             node.type = std::make_shared<FunctionType>(
@@ -1343,9 +1342,10 @@ void TypeChecker::visit(SubscriptExpr& node) {
     }
 
     // A function value has no elements. `argv[1]` (sys.argv is a FUNCTION;
-    // the list is `argv()[1]`) used to fall through to Unknown and compile
-    // into a garbage read out of the function value. State the fix in the
-    // error. An explicit generic instantiation (`first[int](xs)`) never gets
+    // the list is `argv()[1]`) must be rejected here - falling through to
+    // Unknown compiles into a garbage read out of the function value. The
+    // error message states the remedy.
+    // An explicit generic instantiation (`first[int](xs)`) never gets
     // here: visit(CallExpr) consumes its SubscriptExpr callee before the
     // callee is visited as a value, so only real value subscripts remain.
     if (objType && objType->kind() == Type::Kind::Function) {
@@ -1445,7 +1445,7 @@ void TypeChecker::visit(SubscriptExpr& node) {
         return;
     }
     if (objType->kind() == Type::Kind::Any) {
-        // T38: subscripting an Any value. The element type is statically
+        // Subscripting an Any value. The element type is statically
         // unknown, so the result is itself Any (a box); codegen lowers this to
         // dragon_box_subscript, which dispatches on the runtime tag. Mirrors
         // Python's `Any[...] -> Any`.

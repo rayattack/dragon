@@ -571,12 +571,12 @@ TEST(CodeGenE2E, TupleUnpackAssignment) {
 }
 
 //===----------------------------------------------------------------------===//
-// 6.B.4 - for k, v in dict.items() tracks value VarKind for str/bool/etc.
+// for k, v in dict.items() tracks value VarKind for str/bool/etc.
 //===----------------------------------------------------------------------===//
 
 TEST(CodeGenE2E, DictItemsValueVarKindStr) {
-    // 6.B.4: value gets the dict's declared V type so `print(v)` dispatches
-    // as str - was printing raw pointer as int.
+    // The value gets the dict's declared V type so `print(v)` dispatches
+    // as str, not as a raw pointer printed as int.
     auto out = compileAndRun(
         "d: dict[str, str] = {\"a\": \"alpha\", \"b\": \"beta\"}\n"
         "for k, v in d.items() {\n"
@@ -1115,7 +1115,7 @@ TEST(CodeGenE2E, ListRepeatBool) {
         "print(x[0])\n"
         "print(x[4])\n"
     );
-    // 6.B.5: list[bool] subscript dispatches as bool now (was printing 1/0).
+    // list[bool] subscript dispatches as bool (a raw-int dispatch prints 1/0).
     EXPECT_EQ(out, "5\nTrue\nTrue\n");
 }
 
@@ -1160,7 +1160,7 @@ TEST(CodeGenE2E, ListRepeatSingleInt) {
 }
 
 //===----------------------------------------------------------------------===//
-// Tier 1 - 1.6: Discarded pop() leak fixes
+// Regression: discarded pop() must not leak
 //===----------------------------------------------------------------------===//
 
 // list[str].pop() discarded - popped strings must be decref'd.
@@ -1176,8 +1176,8 @@ TEST(CodeGenIR, DiscardedListStrPopEmitsDecref) {
 }
 
 // E2E: many list[str].pop() iterations, the loop body discards the
-// returned string. Without the fix this leaks every pop. With the fix
-// memory stays bounded - completion within the test timeout suffices.
+// returned string. Without the discard decref this leaks every pop; with
+// it memory stays bounded - completion within the test timeout suffices.
 TEST(CodeGenE2E, DiscardedListStrPopLoopBounded) {
     auto out = compileAndRun(
         "x: list[str] = [\"a\", \"b\", \"c\", \"d\"]\n"
@@ -1197,8 +1197,8 @@ TEST(CodeGenIR, DiscardedListListIntPopEmitsDecref) {
         "x.pop()\n"
     );
     EXPECT_NE(ir.find("dragon_list_pop"), std::string::npos);
-    // The fix emits an inttoptr followed by dragon_decref for non-string
-    // heap elements (list/dict/bytes).
+    // Non-string heap elements (list/dict/bytes) get an inttoptr followed
+    // by dragon_decref.
     EXPECT_NE(ir.find("pop.discard.ptr"), std::string::npos)
         << "Expected IntToPtr conversion of popped i64 value";
     EXPECT_NE(ir.find("dragon_decref"), std::string::npos);
@@ -1303,27 +1303,27 @@ TEST(CodeGenE2E, AnnAssignConsumesPopNoDoubleFree) {
     EXPECT_EQ(out, "world\n");
 }
 
-// Tier 1 - 1.13 dict.values() mixed-type, 1.14 list.extend tag adoption.
-// (Dragon source can't easily build a mixed-tag dict, so 1.13's regression
-//  test exercises the uniform path; the mixed-fix is by inspection.)
-TEST(CodeGenE2E, DictValuesUniformLoopBounded_Tier113) {
+// Regression: dict.values() mixed-type, and list.extend tag adoption.
+// (Dragon source can't easily build a mixed-tag dict, so the values()
+//  regression exercises the uniform path; the mixed case is by inspection.)
+TEST(CodeGenE2E, DictValuesUniformLoopBounded) {
     auto out = compileAndRun(
         "d: dict[str, str] = {}\nd[\"a\"] = \"x\"\nd[\"b\"] = \"y\"\n"
         "for _ in range(10000) { _v: list[str] = d.values() }\nprint(\"ok\")\n"
     );
     EXPECT_EQ(out, "ok\n");
 }
-TEST(CodeGenE2E, ListExtendAdoptsTag_Tier114) {
+TEST(CodeGenE2E, ListExtendAdoptsTag) {
     auto out = compileAndRun(
         "src: list[str] = [\"a\", \"b\", \"c\"]\n"
         "dest: list[str] = []\ndest.extend(src)\nprint(dest[2])\n"
     );
     EXPECT_EQ(out, "c\n");
 }
-// Tier 1 - 1.7: enumerate/zip incref+tag elements so tuple owners survive
-// source destruction. Loop regression - bug was UAF only on read; fix also
-// ensures refcounts balance (no leak per iteration).
-TEST(CodeGenE2E, EnumerateZipBalancedRefcount_Tier17) {
+// Regression: enumerate/zip incref+tag elements so tuple owners survive
+// source destruction (a read after source destruction is otherwise a UAF),
+// and refcounts must balance (no leak per iteration).
+TEST(CodeGenE2E, EnumerateZipBalancedRefcount) {
     auto out = compileAndRun(
         "for i in range(1000) {\n"
         "  src: list[str] = [\"a\", \"b\", \"c\"]\n"
@@ -1335,19 +1335,19 @@ TEST(CodeGenE2E, EnumerateZipBalancedRefcount_Tier17) {
 }
 
 //===----------------------------------------------------------------------===//
-// Tier 2 Fix 2.7: dict_get_checked strdup leak (T21)
+// Regression: dict_get_checked TypeError message must not leak
 //
-// Pre-fix: when a typed dict access hit a tag mismatch, the runtime called
-// `strdup(buf)` to allocate the TypeError message and passed it to
-// dragon_raise_exc. The exception machinery stored the pointer by reference
-// (no ownership transfer), so the strdup'd memory was never freed and leaked
-// once per raised TypeError. Repeated TypeErrors -> unbounded growth.
+// A `strdup(buf)` for the TypeError message passed to dragon_raise_exc
+// leaks: the exception machinery stores the pointer by reference (no
+// ownership transfer), so the strdup'd memory is never freed - once per
+// raised TypeError, and repeated TypeErrors mean unbounded growth.
 //
-// The fix uses a per-thread `static __thread char tls_msg[256]` buffer:
+// dict_get_checked instead formats into a per-thread
+// `static __thread char tls_msg[256]` buffer:
 // each call overwrites the previous message, no malloc/free traffic.
 //===----------------------------------------------------------------------===//
 
-TEST(CodeGenE2E, DictGetCheckedTypeErrorMessage_Tier27) {
+TEST(CodeGenE2E, DictGetCheckedTypeErrorMessage) {
     // Sanity: TypeError is still raised on tag mismatch, and the message
     // reports the offending key + actual/expected types.
     auto out = compileAndRun(
@@ -1362,14 +1362,14 @@ TEST(CodeGenE2E, DictGetCheckedTypeErrorMessage_Tier27) {
     EXPECT_EQ(out, "caught\n");
 }
 
-TEST(CodeGenE2E, DictGetCheckedTypeErrorLoopBounded_Tier27) {
+TEST(CodeGenE2E, DictGetCheckedTypeErrorLoopBounded) {
     // Trigger the same TypeError 100k times. Pre-fix: each strdup leaked
     // ~80 bytes -> ~8MB of growth. Post-fix: bounded (the TLS buffer is
     // reused).
     //
     // To run under valgrind:
     //  valgrind --leak-check=full ./dragon_codegen_tests \
-    //  --gtest_filter='*DictGetCheckedTypeErrorLoopBounded_Tier27*'
+    //  --gtest_filter='*DictGetCheckedTypeErrorLoopBounded*'
     auto out = compileAndRun(
         "d: dict = {age: \"ten\"}\n"
         "errors: int = 0\n"
@@ -1385,7 +1385,7 @@ TEST(CodeGenE2E, DictGetCheckedTypeErrorLoopBounded_Tier27) {
     EXPECT_EQ(out, "100000\n");
 }
 
-TEST(CodeGenE2E, DictGetCheckedAlternatingErrors_Tier27) {
+TEST(CodeGenE2E, DictGetCheckedAlternatingErrors) {
     // Two different TypeErrors alternating - confirms the TLS buffer is
     // overwritten cleanly each time without cross-thread bleed (single
     // thread here, but exercises the overwrite path).
@@ -1818,9 +1818,9 @@ TEST(CodeGenE2E, ListAnyIteration) {
 
 // C5 (Any-box container repr): a list/dict reached through an Any box carries
 // its element kind in the pointed-to object's elem_tag, so print() must render
-// it tag-aware. The direct dragon_print_*_raw family previously printed a
+// it tag-aware. A tag-blind dragon_print_*_raw call prints a
 // nested list[str]/list[float] payload (and a dict[str,Any] container value) as
-// a raw pointer integer; only the int-element case rendered correctly by luck.
+// a raw pointer integer; only the int-element case renders correctly by luck.
 // str()/f-strings always used the tag-aware repr path; these guard print().
 TEST(CodeGenE2E, ListAnyHoldingStrListPrintsTagAware) {
     auto out = compileAndRun(

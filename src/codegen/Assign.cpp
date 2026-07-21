@@ -276,7 +276,7 @@ void CodeGen::visit(AssignStmt& node) {
                             impl_->builder->CreateCall(
                                 impl_->runtimeFuncs["dragon_incref_str"], {pval});
                         else if (tag == 10)
-                            // T39: borrowed Callable dict value - tag-gated incref
+                            // borrowed Callable dict value - tag-gated incref
                             // (bare fn ptr safe). dict destroy decrefs via tag 10.
                             impl_->builder->CreateCall(
                                 impl_->runtimeFuncs["dragon_incref_callable"], {pval});
@@ -367,7 +367,7 @@ void CodeGen::visit(AssignStmt& node) {
                                   setElemKind == Type::Kind::Tuple    ||
                                   setElemKind == Type::Kind::Set      ||
                                   setElemKind == Type::Kind::Instance ||
-                                  setElemKind == Type::Kind::Function);  // T39:
+                                  setElemKind == Type::Kind::Function);  //
                                   // list[Callable] element is a refcounted closure
                                   // ptr - route the overwrite through set_ptr so the
                                   // old closure is decref'd and the new one's
@@ -389,7 +389,7 @@ void CodeGen::visit(AssignStmt& node) {
                             impl_->builder->CreateCall(
                                 impl_->runtimeFuncs["dragon_incref_str"], {pval});
                         else if (setElemKind == Type::Kind::Function)
-                            // T39: tag-gated - element may be a bare fn ptr.
+                            // tag-gated - element may be a bare fn ptr.
                             impl_->builder->CreateCall(
                                 impl_->runtimeFuncs["dragon_incref_callable"], {pval});
                         else
@@ -696,7 +696,7 @@ void CodeGen::visit(AssignStmt& node) {
                                              newPtr->getType()->isPointerTy())
                                         newPtr = impl_->builder->CreateBitCast(
                                             newPtr, impl_->i8PtrType);
-                                    // T39: incref the NEW closure only when it is a
+                                    // incref the NEW closure only when it is a
                                     // BORROW (a param/field/subscript read the field
                                     // must outlive). An OWNED temporary (a closure
                                     // literal or a closure-returning call) already
@@ -1125,7 +1125,7 @@ void CodeGen::visit(AssignStmt& node) {
                 // redundant. If the RHS is an OWNED temp (a call result -
                 // divmod(...), s.partition(...) - or a tuple/list literal),
                 // nobody else frees it: the struct + buffer + its element refs
-                // leak (leaks.md #17a, `q, r = divmod(...)`). Drop it here.
+                // leak (`q, r = divmod(...)`). Drop it here.
                 // A BORROWED source (Name / attribute / element read) is left to
                 // its owner. dragon_decref dispatches on the header, freeing both
                 // DragonTuple and DragonList shapes and decref'ing each element
@@ -1203,7 +1203,7 @@ void CodeGen::visit(AssignStmt& node) {
                             return Impl::VarKind::Type;
                     }
                 }
-                // T39: a Callable-typed RHS (a closure-returning call, a popped
+                // a Callable-typed RHS (a closure-returning call, a popped
                 // list[Callable] element, a Callable field/param read) is a
                 // refcounted closure. Resolve to Closure from the static type
                 // BEFORE the llvm-type checks so it isn't misread as Int (pop

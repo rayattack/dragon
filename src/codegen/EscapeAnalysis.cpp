@@ -37,7 +37,7 @@ public:
     }
 };
 
-/// Task-detach escape walk (leaks.md #2 tail). A Task local `target` must NOT be
+/// Task-detach escape walk (Task-detach tail). A Task local `target` must NOT be
 /// detached at scope exit only if it TRANSFERS out: returned, stored, passed as
 /// an argument, captured by a closure/fire/thread/nested-def, or rebound. It is
 /// NOT a transfer to CONSUME it in-scope - `await t` / `t.join()` - or READ it -
@@ -354,7 +354,7 @@ void CodeGen::Impl::analyzeBlockForStackAlloc(
         auto* targetName = dynamic_cast<NameExpr*>(an->target.get());
         if (!targetName) continue;
 
-        // 2b. `t: Task[...] = fire ...` bound fire-and-forget (leaks.md #2 tail).
+        // 2b. `t: Task[...] = fire ...` bound fire-and-forget (Task-detach tail).
         // A bound Task that is never joined/awaited and never escapes leaks its
         // handle ref - mark it for scope-exit dragon_vthread_detach. The SAME
         // conservative escape check flags any later use (join/await/is_alive are

@@ -210,7 +210,7 @@ class HAReplica {
     #--- catch-up (the snapshot feed) ---------------------------------------#
 
     # Leader side: committed history a lagging peer needs, straight off the
-    # commit log. Raises (loudly, per M10) when retention no longer covers
+    # commit log. Raises (loudly) when retention no longer covers
     # the peer: it must re-seed from a file copy.
     def snapshot_for(follower_csn: int) -> SnapshotBatch {
         return SnapshotBatch(self.db.entries_since(follower_csn),

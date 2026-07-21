@@ -1,4 +1,4 @@
-"""str element-read ownership - the str-index-arg leak (2026-07-05).
+"""str element-read ownership - the str-index-arg leak.
 
 `s[i]` calls dragon_str_index, which mallocs a FRESH owned 1-char string
 (strings are immutable, so indexing must materialize a new one). Codegen

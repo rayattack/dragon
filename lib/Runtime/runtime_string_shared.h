@@ -12,14 +12,14 @@
 /// Allocate an ASCII/Latin-1 (kind=1) DragonString of `cp_count` bytes.
 /// Caller fills `data`.
 static inline DragonString* dragon_string_alloc_ascii(int64_t cp_count) {
-    // Guard negative / overflowing lengths (leaks.md #6: _ascii lacked the guard
+    // Guard negative / overflowing lengths (_ascii lacked the guard
     // _ucs4 has). A negative cp_count wraps sizeof+cp_count to a huge size_t and
     // the data[cp_count] write would be out of bounds.
     if (cp_count < 0 || cp_count > INT64_MAX - (int64_t)sizeof(DragonString) - 1) {
         dragon_raise_exc_cstr(43, "MemoryError: string too large");
     }
     // dragon_xmalloc raises MemoryError on NULL instead of letting the deref
-    // below SIGSEGV on OOM (leaks.md #6).
+    // below SIGSEGV on OOM.
     DragonString* s = (DragonString*)dragon_xmalloc(sizeof(DragonString) + (size_t)cp_count + 1);
     dragon_obj_init(&s->header, DRAGON_TAG_STR);
     s->len = cp_count;
@@ -41,7 +41,7 @@ static inline DragonString* dragon_string_alloc_ucs4(int64_t cp_count) {
     int64_t bytes = cp_count * 4;
     // +1 byte tail to allow consistent NUL probing; not a valid C string.
     // dragon_xmalloc raises MemoryError on NULL (was an unchecked deref -> SEGV
-    // on OOM, leaks.md #6).
+    // on OOM).
     DragonString* s = (DragonString*)dragon_xmalloc(sizeof(DragonString) + bytes + 1);
     dragon_obj_init(&s->header, DRAGON_TAG_STR);
     s->len = cp_count;

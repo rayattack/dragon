@@ -1,5 +1,5 @@
 # test/dr/test_dictsetdefault_heap_rc.dr - dict.setdefault on a HEAP-valued dict:
-# reference counting (leaks.md #20).
+# reference counting.
 #
 # `setdefault` carried the same borrow-return UAF as `.get` (#19): the key-present
 # branch returned the stored value with NO incref, so a binding

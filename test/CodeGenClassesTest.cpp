@@ -972,8 +972,8 @@ TEST(CodeGenE2E, FirstClassClassUnannotatedParamErrors) {
 //===----------------------------------------------------------------------===//
 
 TEST(CodeGenE2E, ClassDecoratorIdentity) {
-    // ADR 025 removal: class decorators (`@dec class C`) are dropped - they
-    // would require runtime descriptor construction, which no longer exists.
+    // Class decorators (`@dec class C`) are dropped - they
+    // would require runtime descriptor construction, which ADR 025 removed.
     // Constructing a decorated class is a compile error.
     auto out = compileAndRun(
         "def identity(cls: type) -> type {\n"

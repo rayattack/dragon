@@ -1,4 +1,4 @@
-"""`**dict` spread into variadic callees (bugs.md #7, the D047 deferral).
+"""`**dict` spread into variadic callees (the D047 deferral).
 
 `f(**d)` into a callee declaring `**kwargs` used to error "call-site spread
 into this callable is not supported" (only fixed-arity targets accepted a

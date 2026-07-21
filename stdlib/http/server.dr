@@ -497,7 +497,7 @@ class Response {
         return self
     }
 
-    # --- Connection cede seam (W2 hook; named takeover before 2026-07-15) ---
+    # --- Connection cede seam ---
     #
     # A handler that needs the raw connection beyond HTTP framing (WebSocket
     # 101 upgrade, live SSE streams) CEDES it: after the status line and
@@ -889,8 +889,8 @@ class Router {
     # TLS context, assigned only by listen_tls() (declared here so the field
     # exists even before TLS is enabled - guarded by _tls_enabled below).
     _ssl_context: SSLContext
-    # Sole owner of the app-storage mutex: destroyed when the Router dies
-    # (docs/001-memory.md; was AUDIT 2.3's leaked pthread mutex).
+    # Sole owner of the app-storage mutex: destroyed when the Router dies (a
+    # bare Lock() has no owner of last resort, so its pthread mutex would leak).
     own _storage_lock: Lock
     # Sole owner of the live-connection counter (an 8-byte atomic cell the
     # accept loop and connection vthreads share): freed when the Router dies.

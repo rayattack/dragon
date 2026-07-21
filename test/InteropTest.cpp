@@ -306,13 +306,13 @@ TEST(InteropTest, DragonImportsDragon) {
 }
 
 //===----------------------------------------------------------------------===//
-// Cross-module @property (2026-06-01 fixes):
-//  N4 -- bare-attribute getter/setter on an IMPORTED class must mangle the
+// Cross-module @property regressions:
+//  - bare-attribute getter/setter on an IMPORTED class must mangle the
 //  symbol with the class's owning module (`<mod>__<Class>_<attr>`), not
-//  the bare `<Class>_<attr>`. A class-returning property + str() used to
-//  abort LLVM verification with `self` = i64 0 (Attributes.cpp/Assign.cpp).
-//  N5 -- a property accessed on an EXPRESSION result (chained `b.twin.val`)
-//  must invoke the getter too; it used to fall through to a `0` fallback.
+//  the bare `<Class>_<attr>`. A class-returning property + str() otherwise
+//  aborts LLVM verification with `self` = i64 0 (Attributes.cpp/Assign.cpp).
+//  - a property accessed on an EXPRESSION result (chained `b.twin.val`)
+//  must invoke the getter too, not fall through to a `0` fallback.
 //===----------------------------------------------------------------------===//
 
 TEST(InteropTest, CrossModulePropertyGetterSetter) {

@@ -603,7 +603,7 @@ TEST(CodeGenE2E, TypedTemplateSameTypeNoDoubleEscape) {
 }
 
 //===----------------------------------------------------------------------===//
-// Tier 2 Fix 2.2: Template pipe filter pre-filter leak (T16)
+// Regression: template pipe filter pre-filter leak
 //
 // Pre-fix: when an interpolated expression produced an owned (freshly
 // allocated) string and was followed by a pipe filter, the pre-filter string

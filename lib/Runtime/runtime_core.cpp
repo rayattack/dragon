@@ -58,7 +58,6 @@ int __next_class_id = 1;  // 0 = unregistered
 // gc_lock protects all access to gc_tracked / gc_tracked_size / gc_tracked_cap
 // AND the file-static `gc_in_progress` flag.
 // gc_alloc_counter, gc_threshold, gc_collecting are accessed atomically.
-// See Tier 1.2 (thread-safety) and Tier 1.1 (re-entrancy guard) in status.md.
 pthread_mutex_t gc_lock = PTHREAD_MUTEX_INITIALIZER;
 void** gc_tracked = nullptr;
 int32_t gc_tracked_size = 0;
@@ -114,7 +113,7 @@ void dragon_fatal_concurrent_mutation(const char* kind) {
 static inline void gc_tracked_append(DragonObjectHeader* h, void* obj);
 static inline void gc_tracked_remove(DragonObjectHeader* h);
 
-// Tier 1.1 + 1.2: one collection at a time across all threads. Set under
+// Re-entrancy + thread-safety guard: one collection at a time across all threads. Set under
 // gc_lock at the start of dragon_gc_collect, cleared under gc_lock at the end.
 static int gc_in_progress = 0;
 
@@ -143,7 +142,7 @@ __thread int32_t            __dragon_cleanup_saved[DRAGON_EXC_STACK_SIZE] = {0};
 // hot path pays only a predicted-untaken branch, no runtime call).
 __thread int __dragon_active_frames = 0;
 
-// Tier 1.9: TLS atomic-context flag. See runtime_internal.h for semantics.
+// TLS atomic-context flag. See runtime_internal.h for semantics.
 __thread int __dragon_atomic_context = 0;
 
 //===----------------------------------------------------------------------===//
@@ -215,8 +214,8 @@ static void dragon_dealloc(void* obj) {
             // No free(obj): class descriptors are ALWAYS immortal - the single
             // creation site (dragon_class_descriptor_create) calls
             // dragon_make_immortal before returning, so decref no-ops on them
-            // and this case is unreachable today. Verified AUDIT-2026-07-09
-            // Tier 4; if a mortal TAG_TYPE object is ever introduced, this
+            // and this case is unreachable today. If a mortal TAG_TYPE
+            // object is ever introduced, this
             // must learn to free the shell (name/doc are .rodata borrows, but
             // ancestor_ids is malloc'd).
             break;
@@ -280,7 +279,7 @@ void dragon_decref(void* obj) {
             h->refcount--;
             return;
         }
-        // Tier 1.2: decref-to-zero of a tracked object races with GC - GC
+        // Decref-to-zero of a tracked object races with GC - GC
         // may capture refcount==0 and schedule dealloc concurrently, leading
         // to double-free. Serialize through gc_lock: either we decrement
         // AND dealloc under the lock (GC hasn't started), OR the lock blocks
@@ -292,7 +291,7 @@ void dragon_decref(void* obj) {
             if (--h->refcount == 0) dragon_dealloc(obj);
             return;
         }
-        // Tier 1.10: cycle-collector ownership guard. The collector marks every
+        // Cycle-collector ownership guard: the collector marks every
         // unreachable object IN_TO_FREE before running clear_refs + the dealloc
         // loop; only those objects are owned by the collector. Decrefs reaching
         // 0 here (from clear_refs's recursive decref of cyclic children, OR an
@@ -368,7 +367,7 @@ void dragon_decref_atomic(void* obj) {
         if (!(dragon_gc_flags_load(h) & GC_FLAG_SHARED))
             __atomic_fetch_or(&h->gc_flags, GC_FLAG_SHARED, __ATOMIC_RELAXED);
         if (__atomic_sub_fetch(&h->refcount, 1, __ATOMIC_ACQ_REL) == 0) {
-            // Tier 1.10: cycle-collector ownership guard. If the collector has
+            // Cycle-collector ownership guard: if the collector has
             // queued this object into to_free (IN_TO_FREE bit set in pass 1 of
             // dragon_gc_collect, ACQUIRE-loaded here), it owns the dealloc.
             // A recursive decref from clear_refs that drove refcount to 0, OR
@@ -382,7 +381,7 @@ void dragon_decref_atomic(void* obj) {
             if (__atomic_load_n(&h->gc_flags, __ATOMIC_ACQUIRE) & GC_FLAG_IN_TO_FREE) {
                 return;
             }
-            // Tier 1.2: race with GC. Take gc_lock to serialize our dealloc
+            // Race with GC: take gc_lock to serialize our dealloc
             // decision with any concurrent GC collection. If GC already
             // untracked + claimed this object, skip.
             if (h->gc_flags & GC_FLAG_TRACKED) {
@@ -406,7 +405,7 @@ void dragon_decref_atomic(void* obj) {
                 h->gc_track_idx = -1;
                 pthread_mutex_unlock(&gc_lock);
             }
-            // Tier 1.9: enter atomic-context for the duration of the dealloc.
+            // Enter atomic-context for the duration of the dealloc.
             // Per-type destroy functions consult __dragon_atomic_context and
             // route child decrefs through atomic variants - necessary because
             // children may be shared with other threads. Save-and-restore so
@@ -557,7 +556,7 @@ static void dragon_list_traverse(void* obj, dragon_gc_visit_fn visit, void* arg)
     // an attacker-supplied integer that numerically aliases a tracked object's
     // address subtract a ref from that real object during trial-deletion -
     // premature free / UAF. Single source of truth: value_tag_is_traceable.
-    // leaks.md #11: a list[Callable] (elem_tag == DRAGON_TAG_CLOSURE == 10) can
+    // a list[Callable] (elem_tag == DRAGON_TAG_CLOSURE == 10) can
     // hold a closure that captures the list back (xs.append(lambda{...xs...})),
     // a real cycle. Closure elements are covered by the shared predicate (see
     // its comment in runtime_internal.h): the visit fns (subtract/reachable)
@@ -642,9 +641,9 @@ static void dragon_list_box_traverse(void* obj, dragon_gc_visit_fn visit, void* 
 }
 
 // Deque elements live in the circular window [head, head+size); elem_tag
-// drives the dispatch exactly like the list traverse (AUDIT-2026-07-09 Tier 4:
-// deques were invisible to the cycle collector - never tracked, no traverse,
-// no clear_refs - so a deque in a cycle leaked unconditionally).
+// drives the dispatch exactly like the list traverse. Without a traverse a
+// deque is invisible to the cycle collector (no tracking, no clear_refs),
+// and a deque in a cycle leaks unconditionally.
 static void dragon_deque_traverse(void* obj, dragon_gc_visit_fn visit, void* arg) {
     auto* d = (DragonDeque*)obj;
     if (!d || !d->data || d->size == 0) return;
@@ -682,7 +681,7 @@ static void dragon_traverse(void* obj, dragon_gc_visit_fn visit, void* arg) {
             break;
         }
         case DRAGON_TAG_CLOSURE: {
-            // leaks.md #11: a closure owns exactly one ref on its env - visit it
+            // a closure owns exactly one ref on its env - visit it
             // so the collector subtracts that internal edge. (Only header-bearing
             // closures whose env is trackable are ever in gc_tracked, so reaching
             // this case means cls->env is a real DragonEnv or NULL.)
@@ -691,7 +690,7 @@ static void dragon_traverse(void* obj, dragon_gc_visit_fn visit, void* arg) {
             break;
         }
         case DRAGON_TAG_ENV: {
-            // leaks.md #11: the env's captures live INLINE in a per-site layout
+            // the env's captures live INLINE in a per-site layout
             // only the codegen-emitted gc_fn understands - delegate the walk to
             // it (TRAVERSE op visits each cycle-capable capture exactly once).
             DragonEnv* env = (DragonEnv*)obj;
@@ -709,7 +708,7 @@ static void dragon_list_clear_refs(void* obj) {
     if (!l || !l->data) return;
     uint8_t tag = l->elem_tag;
     if (tag == TAG_STR) {
-        // Tier 1.8: bypass `dragon_decref_str`'s gc_collecting guard so that
+        // Force-free bypass: skip `dragon_decref_str`'s gc_collecting guard so that
         // strings dropped to refcount==0 are actually freed. Phase 6's
         // dragon_list_destroy iterates a zero `size`, so it would leak them.
         for (int64_t i = 0; i < l->size; i++) {
@@ -724,7 +723,7 @@ static void dragon_list_clear_refs(void* obj) {
             dragon_list_store(l, i, 0);
         }
     } else if (tag == DRAGON_TAG_CLOSURE) {
-        // leaks.md #11: break a list -> closure -> env -> list cycle. The
+        // break a list -> closure -> env -> list cycle. The
         // element may be a real DragonClosure (tracked; the IN_TO_FREE guard
         // turns this decref into a plain decrement, the dealloc loop frees it)
         // or a bare fn ptr (no header) - dragon_decref_callable is tag-gated and
@@ -745,7 +744,7 @@ static void dragon_dict_clear_refs(void* obj) {
         int8_t tag = d->entries[i].tag;
         int64_t val = d->entries[i].value;
         if (val && tag == TAG_STR) {
-            // Tier 1.8: bypass gc_collecting guard - see list_clear_refs.
+            // Bypass gc_collecting guard - see list_clear_refs.
             dragon_str_force_free_if_zero((const char*)(uintptr_t)val);
         } else if (val && (tag == TAG_LIST || tag == TAG_DICT || tag == TAG_BYTES)) {
             dragon_decref((void*)(uintptr_t)val);
@@ -774,7 +773,7 @@ static void dragon_tuple_clear_refs(void* obj) {
             uint8_t tag = t->elem_tags[i];
             int64_t val = t->data[i];
             if (val && tag == TAG_STR) {
-                // Tier 1.8: bypass gc_collecting guard - see list_clear_refs.
+                // Bypass gc_collecting guard - see list_clear_refs.
                 dragon_str_force_free_if_zero((const char*)(uintptr_t)val);
             } else if (val && (tag == TAG_LIST || tag == TAG_DICT || tag == TAG_BYTES)) {
                 dragon_decref((void*)(uintptr_t)val);
@@ -792,7 +791,7 @@ static void dragon_set_clear_refs(void* obj) {
     uint8_t tag = s->elem_tag;
     if (tag == TAG_STR) {
         for (int64_t i = 0; i < s->capacity; i++) {
-            // Tier 1.8: bypass gc_collecting guard - see list_clear_refs.
+            // Bypass gc_collecting guard - see list_clear_refs.
             if (s->states[i] == 1 && s->buckets[i])
                 dragon_str_force_free_if_zero((const char*)(uintptr_t)s->buckets[i]);
             s->buckets[i] = 0;
@@ -817,7 +816,7 @@ static void dragon_set_clear_refs(void* obj) {
 }
 
 // list[Any] cycle-break: drop refcounted child references in place.
-// Per-entry tag dispatches: strings use force_free (Tier 1.8 bypass), other
+// Per-entry tag dispatches: strings use force_free (gc_collecting-guard bypass), other
 // heap tags decref through the standard path. Plain values (int/float/bool/
 // none) just zero out - no refcount to drop.
 static void dragon_list_box_clear_refs(void* obj) {
@@ -851,7 +850,7 @@ static void dragon_deque_clear_refs(void* obj) {
         int64_t v = d->data[idx];
         if (v) {
             if (tag == TAG_STR) {
-                // Tier 1.8: bypass gc_collecting guard - see list_clear_refs.
+                // Bypass gc_collecting guard - see list_clear_refs.
                 dragon_str_force_free_if_zero((const char*)(uintptr_t)v);
             } else if (tag == TAG_LIST || tag == TAG_DICT || tag == TAG_BYTES) {
                 dragon_decref((void*)(uintptr_t)v);
@@ -895,7 +894,7 @@ static void dragon_clear_refs(void* obj) {
             break;
         }
         case DRAGON_TAG_CLOSURE: {
-            // leaks.md #11: drop the closure's ref on its env and NULL the slot
+            // drop the closure's ref on its env and NULL the slot
             // so the later dragon_closure_dealloc (in the collector's dealloc
             // loop) sees env==NULL and doesn't double-decref. dragon_decref sees
             // the env's IN_TO_FREE bit and only decrements - the loop frees it.
@@ -904,7 +903,7 @@ static void dragon_clear_refs(void* obj) {
             break;
         }
         case DRAGON_TAG_ENV: {
-            // leaks.md #11: the gc_fn CLEAR op decrefs + NULLs each heap capture
+            // the gc_fn CLEAR op decrefs + NULLs each heap capture
             // slot, so the subsequent env dealloc sees emptied slots (exactly
             // once, like the per-class clear that zeros fields before dealloc).
             DragonEnv* env = (DragonEnv*)obj;
@@ -965,7 +964,7 @@ static void gc_visit_reachable(void* child, void* arg) {
 
 int64_t dragon_gc_collect() {
     pthread_mutex_lock(&gc_lock);
-    // Tier 1.1 + 1.2: only one collection at a time, across all threads.
+    // Only one collection at a time, across all threads.
     // If another thread is collecting, or we re-entered (via __dealloc__ that
     // crossed gc_threshold while the lock was dropped for user dealloc code),
     // bail out immediately.
@@ -1060,7 +1059,7 @@ int64_t dragon_gc_collect() {
     __gc_refs = nullptr;
     __gc_ht = nullptr;
 
-    // Tier 1.2: drop gc_lock around dealloc invocations. User __dealloc__
+    // Drop gc_lock around dealloc invocations: user __dealloc__
     // (Python __del__) may run arbitrary Dragon code that allocates - those
     // allocations call dragon_gc_track which needs gc_lock. The gc_in_progress
     // flag (still set) prevents any thread (including ourselves) from
@@ -1152,7 +1151,7 @@ static void shared_worklist_push_internal(DragonSharedWorklist* w, void* obj) {
         w->cap = w->cap ? w->cap * 2 : 32;
         // Abort (not raise) on OOM: this runs inside mark-shared / GC, where a
         // raise would re-enter at an arbitrary point. xrealloc_or_abort also
-        // fixes the self-assign NULL-write (leaks.md #7).
+        // fixes the self-assign NULL-write.
         w->entries = (void**)dragon_xrealloc_or_abort(w->entries, w->cap * sizeof(void*));
     }
     w->entries[w->size++] = obj;
@@ -1316,10 +1315,10 @@ static void shared_walk_set(DragonSet* s, DragonSharedWorklist* w) {
             if (s->states[i] == 1 && s->buckets[i])
                 dragon_mark_shared_worklist_push(w, (void*)(uintptr_t)s->buckets[i]);
     } else if (tag == DRAGON_TAG_CLOSURE) {
-        // set[Callable]: tag-gated (element may be a bare fn pointer). This arm
-        // was missing while every sibling walker had it (AUDIT-2026-07-09 Tier
-        // 4): an un-marked-SHARED closure in a set crossing threads did
-        // non-atomic refcounting - a torn-refcount / UAF-by-race class bug.
+        // set[Callable]: tag-gated (element may be a bare fn pointer). Every
+        // sibling walker has this arm; without it an un-marked-SHARED closure
+        // in a set crossing threads does non-atomic refcounting - a
+        // torn-refcount / UAF-by-race class bug.
         for (int64_t i = 0; i < s->capacity; i++)
             if (s->states[i] == 1 && s->buckets[i])
                 dragon_mark_shared_callable(w, (void*)(uintptr_t)s->buckets[i]);

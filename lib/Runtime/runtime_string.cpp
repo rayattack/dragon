@@ -276,7 +276,7 @@ DragonString* dragon_string_alloc_raw(int64_t byte_len) {
     if (byte_len < 0) byte_len = 0;
     // dragon_xmalloc raises MemoryError on OOM. (Previously raised OverflowError,
     // conflating a genuine out-of-memory with an overflowing size; the negative/
-    // overflow case is the clamp above, OOM is a MemoryError - leaks.md #6.)
+    // overflow case is the clamp above, OOM is a MemoryError.)
     DragonString* s = (DragonString*)dragon_xmalloc(sizeof(DragonString) + (size_t)byte_len + 1);
     dragon_obj_init(&s->header, DRAGON_TAG_STR);
     s->len = byte_len;   // for kind=1 ASCII, cp_count == byte count
@@ -538,7 +538,7 @@ void dragon_decref_str_atomic(const char* s) {
         free(ds);
 }
 
-/// Tier 1.8: cycle-collector helper. Decrement a string's refcount and free
+/// Cycle-collector helper. Decrement a string's refcount and free
 /// it directly if it hits zero, bypassing `dragon_decref_str`'s
 /// `gc_collecting` guard. Used by `dragon_*_clear_refs` while we're tearing
 /// down an unreachable cycle: the string is owned exclusively by the

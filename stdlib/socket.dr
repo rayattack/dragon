@@ -234,7 +234,7 @@ class TcpListener {
         self.port = port
         # Set SO_REUSEADDR: a prior run's server-side close parks the port in
         # TIME_WAIT for 60s; without this, bind fails EADDRINUSE (a checked
-        # bind + this option is mandatory socket hygiene - fire-own-io-bug.md).
+        # bind + this option is mandatory socket hygiene - see test_fire_own_io.dr).
         const optval: ptr = malloc(4)
         memset(optval, 0, 4)
         dragon_ptr_write_i32(optval, 0, 1)

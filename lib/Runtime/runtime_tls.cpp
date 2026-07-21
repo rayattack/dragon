@@ -265,7 +265,7 @@ int64_t dragon_tls_ctx_load_cert_chain(void* handle, const char* certfile,
     // mbedtls_x509_crt_parse_file APPENDS to the existing chain. load_cert_chain
     // is a REPLACE (CPython semantics), and a caller that retries after a
     // key-parse failure would otherwise append the certs again every attempt,
-    // growing the chain on a long-lived context (AUDIT-2026-07-09 Tier 3).
+    // growing the chain on a long-lived context.
     // Reset owncert to an empty chain first so each call starts clean; a
     // failure part-way leaves an empty chain, not a half-built one
     mbedtls_x509_crt_free(&c->owncert);

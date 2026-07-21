@@ -152,8 +152,8 @@ enum DragonValueTag : int8_t {
 // A container element's value-tag is "traceable" iff it points at a heap object
 // the cycle collector must follow to find cycles: list, dict, bytes, or a
 // Callable slot (DRAGON_TAG_CLOSURE = 10). A Callable element may be a real
-// DragonClosure whose env can point back at the container (a genuine cycle,
-// leaks.md #11) or a bare fn pointer with no header; including tag 10 here is
+// DragonClosure whose env can point back at the container (a genuine cycle)
+// or a bare fn pointer with no header; including tag 10 here is
 // safe because the traverse visit fns only dereference children found in the
 // tracked set, so a bare fn ptr is a hash-miss no-op. Class instances / sets /
 // tuples stored as elements are stamped TAG_LIST=5 by codegen; str=1 and the
@@ -161,10 +161,10 @@ enum DragonValueTag : int8_t {
 // SINGLE SOURCE OF TRUTH shared by the container traverse functions AND the
 // acyclic-skip allocation/insert gates, so the two cannot diverge - a gate that
 // skipped tracking something the traverse follows would leak a live cycle.
-// (That divergence was real: AUDIT-2026-07-09 Tier 4 - the traverse fns grew
-// explicit closure arms while the dict/tuple insert gates kept using this
-// predicate without tag 10, so a dict/tuple whose only heap values were
-// closures was never enrolled and closure cycles through them never collected.)
+// (The divergence is not hypothetical: if the traverse fns have explicit
+// closure arms while the dict/tuple insert gates use this predicate without
+// tag 10, a dict/tuple whose only heap values are closures is never enrolled
+// and closure cycles through them are never collected.)
 static inline bool dragon_value_tag_is_traceable(int8_t tag) {
     return tag == TAG_LIST || tag == TAG_DICT || tag == TAG_BYTES ||
            tag == (int8_t)DRAGON_TAG_CLOSURE;
@@ -494,7 +494,7 @@ typedef struct DragonVThread {
     // re-enqueued-after-finish vthread can't double-drop) and one for the Task
     // handle (dropped by the join winner, or by dragon_vthread_detach for a
     // discarded fire-and-forget). The last release frees the struct + coroutine
-    // stack - so a fire-and-forget vthread no longer leaks.
+    // stack - so a fire-and-forget vthread cannot leak.
     volatile int8_t refs;
     pthread_mutex_t join_lock;
     pthread_cond_t  join_cond;
@@ -566,7 +566,7 @@ struct DragonClassDescriptor {
 //   sizeof(DragonEnv) = 24 bytes (16 header + 8 fn ptr) - codegen relies on
 //   this offset to GEP into the body. Do not insert fields here.
 //
-// leaks.md #11: `gc_fn` is a MULTI-OP hook (one codegen-emitted fn per closure
+// `gc_fn` is a MULTI-OP hook (one codegen-emitted fn per closure
 // site) so the cycle collector can see through an env to the heap objects it
 // captured. It replaces the old single-purpose `dealloc_fn` WITHOUT growing the
 // struct (still one fn ptr; sizeof stays 24). The op selects the behavior:
@@ -658,7 +658,7 @@ int64_t dragon_class_register_mark_shared(int64_t class_id, void* fn);
 void dragon_mark_shared_worklist_push(void* worklist, void* obj);
 
 // GC tracking state
-// Thread-safety (Tier 1.2):
+// Thread-safety:
 //   - `gc_tracked`, `gc_tracked_size`, `gc_tracked_cap`: protected by `gc_lock`
 //     (see runtime_core.cpp). All track/untrack/collect access takes the lock.
 //   - `gc_alloc_counter`: accessed via `__atomic_*` (RELAXED). It's a soft trigger.
@@ -795,7 +795,7 @@ DragonBytes* dragon_nb_recv_bytes(int64_t fd, int64_t max_len);
 int64_t      dragon_nb_send_bytes(int64_t fd, DragonBytes* data);
 }
 
-// Tier 1.9: TLS atomic-context flag.
+// TLS atomic-context flag.
 // Set non-zero by `dragon_decref_atomic` (and the atomic string variant) for
 // the duration of a recursive dealloc - when we are tearing down a heap object
 // whose final reference was dropped by an atomic decref, child decrefs must
@@ -846,9 +846,9 @@ extern char _end[];
 /// The image range check MUST come before the header probe. A literal lives
 /// in the binary's rodata, and probing the bytes BEFORE it is unsound: an
 /// unlucky neighboring symbol can fake a valid header purely by layout
-/// coincidence (A/B-proven 2026-07-11: an unrelated runtime edit shifted
-/// rodata so one ssl.dr literal's neighbor matched tag+flags, and the next
-/// exception-slot decref WROTE a refcount into the read-only page - SEGV in
+/// coincidence (not theoretical: a rodata layout shift once made an ssl.dr
+/// literal's neighbor match tag+flags, and the next exception-slot decref
+/// WROTE a refcount into the read-only page - SEGV in
 /// test_ssl_roundtrip). Heap allocations can never live inside the image, so
 /// the two compares are both sufficient and cheaper than the header loads
 /// they replace on the literal path
@@ -965,7 +965,7 @@ void dragon_incref(void* obj);
 void dragon_decref(void* obj);
 void dragon_incref_atomic(void* obj);
 void dragon_decref_atomic(void* obj);
-// T39: TAG-GATED closure RC (defined in runtime_builtins.cpp). Safe on a bare
+// TAG-GATED closure RC (defined in runtime_builtins.cpp). Safe on a bare
 // fn ptr (no header) and null - used by dragon_{in,de}cref_tagged for
 // TAG_CLOSURE elements so Callable containers RC closures without touching a
 // headerless code pointer.
@@ -1010,7 +1010,7 @@ const char* dragon_string_dup_cstr(const char* s);
 // return it unchanged - no dup, no leak). See definition in runtime_string.cpp.
 const char* dragon_exc_msg_preserve(const char* s);
 
-// Tier 1.8: Force-free a heap string when its refcount has hit 0 inside the
+// Force-free a heap string when its refcount has hit 0 inside the
 // cycle collector's clear_refs phase. Bypasses `dragon_decref_str`'s
 // `gc_collecting` guard, which would otherwise leave the string allocated
 // because Phase 4 zeros the container's size and Phase 6's destroy iterates
@@ -1194,7 +1194,7 @@ void dragon_raise_exc_obj_consume(int64_t type, void* obj, const char* msg);
 const char* dragon_exc_bind_msg(void);
 int64_t dragon_exc_matches(int64_t raised, int64_t caught);
 
-// Checked allocation (leaks.md #6/#7). Callers were dereferencing a NULL malloc
+// Checked allocation. Callers were dereferencing a NULL malloc
 // result on OOM -> SIGSEGV (e.g. chr() via dragon_string_alloc_ucs4), or
 // overwriting the only pointer before checking realloc (-> NULL-write/leak).
 // These centralize the contract:
@@ -1312,7 +1312,7 @@ static inline void dragon_incref_tagged(int64_t val, uint8_t tag) {
         dragon_incref_str((const char*)(uintptr_t)val);
     else if (tag == TAG_LIST || tag == TAG_DICT || tag == TAG_BYTES)
         dragon_incref((void*)(uintptr_t)val);
-    else if (tag == DRAGON_TAG_CLOSURE)  // T39: Callable element (closure / bare fn)
+    else if (tag == DRAGON_TAG_CLOSURE)  // Callable element (closure / bare fn)
         dragon_incref_callable((void*)(uintptr_t)val);
 }
 
@@ -1322,11 +1322,11 @@ static inline void dragon_decref_tagged(int64_t val, uint8_t tag) {
         dragon_decref_str((const char*)(uintptr_t)val);
     else if (tag == TAG_LIST || tag == TAG_DICT || tag == TAG_BYTES)
         dragon_decref((void*)(uintptr_t)val);
-    else if (tag == DRAGON_TAG_CLOSURE)  // T39: tag-gated (bare fn safe)
+    else if (tag == DRAGON_TAG_CLOSURE)  // tag-gated (bare fn safe)
         dragon_decref_callable((void*)(uintptr_t)val);
 }
 
-// Tier 1.9: route a child decref through the atomic variant if we're inside
+// Route a child decref through the atomic variant if we're inside
 // an atomic-context dealloc, otherwise use the normal variant. Per-type
 // destroy functions invoked from `dragon_dealloc` MUST go through these.
 static inline void dragon_decref_dispatch(void* obj) {

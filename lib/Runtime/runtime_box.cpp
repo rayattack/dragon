@@ -619,7 +619,7 @@ int64_t dragon_box_cmp(DragonBox a, DragonBox b, int64_t op) {
 }
 
 //===----------------------------------------------------------------------===//
-// T38: subscripting an Any-boxed value - `anyVal[index]`.
+// Subscripting an Any-boxed value - `anyVal[index]`.
 //
 // When the static type is `Any`, codegen can't pick a typed subscript path, so
 // it boxes the receiver and the index and hands both to this dispatcher. We

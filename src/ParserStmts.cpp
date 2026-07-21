@@ -860,7 +860,7 @@ std::unique_ptr<Stmt> Parser::parseExternFuncSig(const std::string& libHint) {
     if (match(TokenType::ARROW)) {
         decl->returnType = parseType();
     }
-    // Gap #12 - `extern "C" def CSYM(...) [-> ret] as DRAGON_NAME` lets a C
+    // `extern "C" def CSYM(...) [-> ret] as DRAGON_NAME` lets a C
     // symbol whose spelling collides with a Dragon keyword (`raise`, `for`,
     // `pass`, ...) be bound under a Dragon-side alias. The alias is the
     // Dragon-visible identifier; `decl->externSymbol` keeps the C symbol so

@@ -902,9 +902,9 @@ void CodeGen::visit(ForStmt& node) {
         node.iterable->accept(*this);
         iterableVal = impl_->lastValue;
     }
-    // Unique scope name per loop: two container-iterating for-loops in one
-    // scope previously both registered the name "__iter", so the second's
-    // setVar clobbered the first in the scope map and cleanup leaked all but
+    // Unique scope name per loop: if two container-iterating for-loops in one
+    // scope both register the name "__iter", the second's
+    // setVar clobbers the first in the scope map and cleanup leaks all but
     // the last iterable temp (a keys()/items()/comprehension list each).
     std::string iterName = "__iter." + std::to_string(impl_->forIterCounter++);
     auto* iterAlloca = impl_->createEntryAlloca(func, iterName, impl_->i8PtrType);
@@ -978,7 +978,7 @@ void CodeGen::visit(ForStmt& node) {
     if (tupleTarget && isDictItemsIterable) {
         // Dict items unpacking: for k, v in d.items()
         // Each list element is a DragonTuple* (stored as i64) with (key, value).
-        // 6.B.4: track the dict's value kind so v gets the right VarKind for
+        // Track the dict's value kind so v gets the right VarKind for
         // print / dispatch / comparison.
         Impl::VarKind valVarKind = Impl::VarKind::Int;
         if (auto* methCall = dynamic_cast<CallExpr*>(node.iterable.get())) {

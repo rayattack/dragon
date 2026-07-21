@@ -171,12 +171,20 @@ target_link_libraries(dragon_runtime PRIVATE dragon_mbedtls)
 # a follow-up (see the design spec).
 target_compile_definitions(dragon_runtime PRIVATE
     DRAGON_CA_BUNDLE="${CMAKE_SOURCE_DIR}/share/dragon/certs/cacert.pem")
-# Compression: link the system zlib + zstd. We use the headers system-wide
-# (zlib.h, zstd.h) and depend on shared libs at runtime. Both are present on
-# every supported distro (and brew on macOS). User binaries pick them up via
-# the -lz -lzstd flags in CodeGen::linkExecutable.
+# Compression: link zlib + zstd. zlib is a system lib everywhere (macOS ships
+# /usr/lib/libz.1.dylib; distros ship zlib1g). zstd is NOT part of macOS: only
+# Homebrew provides it, so on Apple we must link the static archive - a .dylib
+# dependency would bake the build machine's /opt/homebrew path into the shipped
+# binary and dyld aborts on any Mac without brew zstd (v0.0.1 shipped like
+# that). Naming libzstd.a exactly forces the static pick even though the same
+# Homebrew dir also holds libzstd.dylib. Linux keeps the shared lib: the
+# .deb/.rpm declare the libzstd dependency and apt/dnf resolve it.
 find_package(ZLIB REQUIRED)
-find_library(ZSTD_LIBRARY NAMES zstd libzstd REQUIRED)
+if(APPLE)
+    find_library(ZSTD_LIBRARY NAMES libzstd.a REQUIRED)
+else()
+    find_library(ZSTD_LIBRARY NAMES zstd libzstd REQUIRED)
+endif()
 # zstd has no imported target carrying its include dir (unlike ZLIB::ZLIB).
 # On arm64 macOS Homebrew lives at /opt/homebrew, which is NOT on the default
 # header search path, so resolve zstd.h explicitly.
@@ -260,12 +268,18 @@ set(DRAGON_EGG_SRC_FILE ${CMAKE_SOURCE_DIR}/tools/egg/egg.dr)
 # linked into COMPILED PROGRAMS is the instrumented twin under DRAGON_ASAN;
 # DRAGON_ASAN_BUILD then tells CodeGen::linkExecutable to add the sanitizer
 # link flags. Both are no-ops when DRAGON_ASAN is OFF.
+if(APPLE)
+    set(DRAGON_ZSTD_DEF DRAGON_ZSTD_LIB="${ZSTD_LIBRARY}")
+else()
+    set(DRAGON_ZSTD_DEF "")
+endif()
 target_compile_definitions(dragon_lib PRIVATE
     DRAGON_RUNTIME_LIB="$<TARGET_FILE:${DRAGON_RUNTIME_FOR_PROGRAMS}>"
     DRAGON_SQLITE3_LIB="$<TARGET_FILE:dragon_sqlite3>"
     DRAGON_PCRE2_LIB="$<TARGET_FILE:pcre2-8-static>"
     DRAGON_LLHTTP_LIB="$<TARGET_FILE:dragon_llhttp>"
     DRAGON_MBEDTLS_LIB="$<TARGET_FILE:dragon_mbedtls>"
+    ${DRAGON_ZSTD_DEF}
     DRAGON_STDLIB_DIR="${CMAKE_SOURCE_DIR}/stdlib"
     DRAGON_EGG_BIN="${DRAGON_EGG_OUT}"
     DRAGON_EGG_SRC="${DRAGON_EGG_SRC_FILE}"
@@ -274,6 +288,14 @@ target_compile_definitions(dragon_lib PRIVATE
 # dragon CLI tool
 add_executable(dragon tools/dragon/main.cpp)
 target_link_libraries(dragon PRIVATE dragon_lib dragon_runtime)
+# Drop load commands for dylibs no symbol is used from. Homebrew's LLVM is
+# built against libz3 (its solver support), which lands on our link line via
+# LLVMConfig even though Dragon uses zero z3 symbols; without this flag I believe
+# ld64 records the absolute /opt/homebrew path and the shipped binary will abort on
+# Macs without brew. 
+if(APPLE)
+    target_link_options(dragon PRIVATE LINKER:-dead_strip_dylibs)
+endif()
 
 target_compile_definitions(dragon PRIVATE
     DRAGON_RUNTIME_LIB="$<TARGET_FILE:${DRAGON_RUNTIME_FOR_PROGRAMS}>"
@@ -281,6 +303,7 @@ target_compile_definitions(dragon PRIVATE
     DRAGON_PCRE2_LIB="$<TARGET_FILE:pcre2-8-static>"
     DRAGON_LLHTTP_LIB="$<TARGET_FILE:dragon_llhttp>"
     DRAGON_MBEDTLS_LIB="$<TARGET_FILE:dragon_mbedtls>"
+    ${DRAGON_ZSTD_DEF}
     DRAGON_STDLIB_DIR="${CMAKE_SOURCE_DIR}/stdlib"
     DRAGON_EGG_BIN="${DRAGON_EGG_OUT}"
     DRAGON_EGG_SRC="${DRAGON_EGG_SRC_FILE}"
@@ -331,6 +354,15 @@ install(TARGETS dragon_runtime dragon_sqlite3 dragon_llhttp dragon_mbedtls
 # pcre2-8-static is a third-party target; pull its file directly.
 install(FILES $<TARGET_FILE:pcre2-8-static>
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/dragon)
+
+# macOS only: ship the zstd static archive so user programs that use
+# gzip/zstd/tarfile link without Homebrew on the target machine (the Driver
+# resolves it via findBundledLib, same as sqlite3/pcre2). zstd is BSD-licensed.
+# Linux relies on the distro libzstd declared as a package dependency.
+if(APPLE)
+    install(FILES ${ZSTD_LIBRARY}
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/dragon)
+endif()
 
 # dragon_lib is the compiler frontend - only needed if someone embeds it.
 # Not shipped in the default package; uncomment if you want to expose the

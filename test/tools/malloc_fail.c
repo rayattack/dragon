@@ -1,5 +1,5 @@
 // test/tools/malloc_fail.c - OOM fault-injection shim for verifying the
-// allocation-hardening of leaks.md #6/#7 (dragon_xmalloc / dragon_xrealloc).
+// allocation-hardening of dragon_xmalloc / dragon_xrealloc.
 //
 // OOM is not reachable from a normal .dr test, so allocation hardening is
 // verified by interposing libc malloc/realloc and failing a chosen call. The
@@ -13,7 +13,7 @@
 //  DRAGON_FAIL_REPORT=1 LD_PRELOAD=/tmp/malloc_fail.so ./prog # count allocs
 //  DRAGON_FAIL_ALLOC_AT=<N> LD_PRELOAD=/tmp/malloc_fail.so ./prog # fail the Nth
 //
-// Expected (the #6/#7 A/B): before the fix, failing an allocation that a caller
+// Expected: before the fix, failing an allocation that a caller
 // dereferences (e.g. chr() -> dragon_string_alloc_ucs4) SIGSEGVs (exit 139);
 // after the fix it raises a catchable MemoryError. A `try/except MemoryError`
 // around the operation should catch it and exit cleanly.

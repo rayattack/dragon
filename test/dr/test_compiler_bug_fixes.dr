@@ -1,4 +1,4 @@
-"""Regression tests for the 2026-05-30 compiler-bugs.md fix campaign.
+"""Regression tests from a compiler bug-fix campaign.
 
 Covers the runtime-behavior fixes (the check-time-only diagnostics - L4, M1,
 M2, M3, C9 - are compile errors, not runtime behavior, so they're verified by

@@ -1,6 +1,6 @@
 # test/dr/test_fire_own_io.dr - own field + fire share + fd-I/O reactor parking.
 #
-# Regression lock for the fire-own-io-bug.md "wall" (2026-07-15). A class
+# Regression lock (a documented wall). A class
 # holding `own _s: SocketHandle`, shared read-only into a `fire` green thread
 # that parks on fd I/O (accept/recv) while the parent thread also does fd I/O,
 # was believed to deadlock the parent. Runtime debugging (strace) showed the

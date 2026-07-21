@@ -1975,7 +1975,7 @@ TEST(TypeCheckerTest, MixedListAgainstIntAnnotationRejected) {
 }
 
 //===----------------------------------------------------------------------===//
-// Lambda bodies are type-checked (2026-07-11). visit(LambdaExpr) used to build
+// Lambda bodies are type-checked. visit(LambdaExpr) used to build
 // the FunctionType from the annotations and skip the body entirely, so
 // `bad: int = "boy"` inside a lambda compiled clean and generic method calls
 // in handlers were never stamped (silent empty results at runtime). The

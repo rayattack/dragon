@@ -693,29 +693,28 @@ TEST(CodeGenTest, SyncListThreadedE2E) {
 }
 
 //===----------------------------------------------------------------------===//
-// Tier 1.2 - GC thread-safety stress test
+// GC thread-safety stress test
 //===----------------------------------------------------------------------===//
 
 // Spawns 10 fire workers (each green thread distributed across N scheduler
 // OS threads) and has each one perform 100k heap allocations. Every
 // allocation calls dragon_gc_track AND bumps gc_alloc_counter; crossing
 // gc_threshold triggers dragon_gc_collect from whichever worker thread
-// crossed it. This exercises every Tier 1.2 race simultaneously:
+// crossed it. This exercises every GC thread-safety race simultaneously:
 //
 //  - parallel dragon_gc_track vs. dragon_gc_track: concurrent realloc of
-//  gc_tracked array (the exact "double-free of stale pointer" race
-//  called out in status.md)
+//  gc_tracked array (the exact "double-free of stale pointer" race)
 //  - two concurrent dragon_gc_collect calls: would double-free without
-//  the gc_in_progress coordination (Tier 1.1+1.2)
+//  the gc_in_progress coordination
 //  - dragon_decref racing with GC's capture of refcount: mutator
 //  `--refcount == 0` on a tracked obj concurrent with GC's snapshot
 //  would produce double-free without serialization through gc_lock
 //
-// Success criterion from status.md: no crashes, no leaks, no UAF.
+// Success criterion: no crashes, no leaks, no UAF.
 // NOTE: we use flat list[int] allocations only because list-literal codegen
 // currently does not incref heap-typed elements - nesting would hit that
-// pre-existing refcount accounting bug (orthogonal to Tier 1.2). The flat
-// allocations still hit every race path above.
+// pre-existing refcount accounting bug (orthogonal to the races above). The
+// flat allocations still hit every race path above.
 TEST(CodeGenTest, GCThreadSafetyStressE2E) {
     auto out = compileAndRun(
         "def worker(seed: int) -> int {\n"
@@ -745,15 +744,16 @@ TEST(CodeGenTest, GCThreadSafetyStressE2E) {
 }
 
 //===----------------------------------------------------------------------===//
-// Tier 1 - 1.11 + 1.12: thread sync flags + double-start race
+// Regression: thread sync flags + double-start race
 //===----------------------------------------------------------------------===//
-// 1.11: vthread/OSThread done & started flags use __atomic builtins (was volatile).
-// 1.12: dragon_osthread_start uses CAS so concurrent .start() runs pthread_create
+// - vthread/OSThread done & started flags use __atomic builtins (volatile
+//   is not enough).
+// - dragon_osthread_start uses CAS so concurrent .start() runs pthread_create
 //  at most once. Single-threaded test is enough to verify the CAS rejects the
 //  second call; concurrent start of OS threads from Dragon source is awkward
 //  to express, so we exercise the Thread API directly.
 
-TEST(CodeGenE2E, VThreadDoneFlagSynchronizes_Tier111) {
+TEST(CodeGenE2E, VThreadDoneFlagSynchronizes) {
     // After join() returns, is_alive() must observe done=1. With volatile this
     // could fail on weakly-ordered hardware; with atomic-load ACQUIRE it can't.
     auto out = compileAndRun(
@@ -765,12 +765,12 @@ TEST(CodeGenE2E, VThreadDoneFlagSynchronizes_Tier111) {
     EXPECT_EQ(out, "42\n");
 }
 
-// Tier 1 - 1.8: cycle collector string leak. The clear_refs phase used to
-// call dragon_decref_str, whose gc_collecting guard refused to free strings
-// reaching refcount 0 mid-collection; Phase 6's destroy then iterated zero
-// elements (size already cleared) and the strings leaked. Now clear_refs
-// uses dragon_str_force_free_if_zero which bypasses the guard.
-TEST(CodeGenE2E, CycleCollectorWithStringFields_Tier18) {
+// Regression: cycle collector string leak. If the clear_refs phase calls
+// dragon_decref_str, its gc_collecting guard refuses to free strings
+// reaching refcount 0 mid-collection; Phase 6's destroy then iterates zero
+// elements (size already cleared) and the strings leak. clear_refs
+// uses dragon_str_force_free_if_zero, which bypasses the guard.
+TEST(CodeGenE2E, CycleCollectorWithStringFields) {
     auto out = compileAndRun(
         "class Node {\n"
         "  def(name: str) {\n"
@@ -790,7 +790,7 @@ TEST(CodeGenE2E, CycleCollectorWithStringFields_Tier18) {
     EXPECT_EQ(out, "ok\n");
 }
 
-TEST(CodeGenE2E, ThreadDoubleStartRejected_Tier112) {
+TEST(CodeGenE2E, ThreadDoubleStartRejected) {
     // Calling start() twice on the same OS thread handle must return -1 the
     // second time. The CAS in dragon_osthread_start makes this race-safe.
     // We call the C runtime directly to avoid the stdlib threading import
@@ -812,12 +812,12 @@ TEST(CodeGenE2E, ThreadDoubleStartRejected_Tier112) {
 }
 
 //===----------------------------------------------------------------------===//
-// Tier 2 Fix 2.3: vthread_sleep ms truncation (T17)
+// Regression: vthread_sleep ms truncation
 //
-// Pre-fix: dragon_vthread_sleep encoded `ms` into IoRequest.fd via
-// `(int)(intptr_t)ms`, silently truncating values >2^31 ms (~24.8 days)
-// and producing wrong durations. The fix added a separate int64_t timer_ms
-// field on IoRequest so the full int64 ms value is preserved.
+// Encoding `ms` into IoRequest.fd via
+// `(int)(intptr_t)ms` silently truncates values >2^31 ms (~24.8 days)
+// and produces wrong durations. IoRequest carries a separate int64_t
+// timer_ms field so the full int64 ms value is preserved.
 //
 // We can't actually sleep for >2^31 ms in CI, but we can verify:
 //  1. Short sleeps (< INT_MAX) still work correctly (regression).
@@ -841,7 +841,7 @@ TEST(CodeGenIR, VthreadSleepInt64Param) {
         << "Expected i64 ms parameter on dragon_vthread_sleep\nIR:\n" << ir;
 }
 
-TEST(CodeGenE2E, VthreadSleepShortStillWorks_Tier23) {
+TEST(CodeGenE2E, VthreadSleepShortStillWorks) {
     // Regression: short sleep still completes correctly.
     auto out = compileAndRun(
         "extern \"C\" def dragon_vthread_sleep(ms: int)\n"
@@ -856,7 +856,7 @@ TEST(CodeGenE2E, VthreadSleepShortStillWorks_Tier23) {
     EXPECT_EQ(out, "99\n");
 }
 
-TEST(CodeGenE2E, VthreadSleepLargeValueDoesntTruncate_Tier23) {
+TEST(CodeGenE2E, VthreadSleepLargeValueDoesntTruncate) {
     // Pass a value > INT_MAX. Pre-fix this would cast to int and become a
     // negative or wrapped duration -> timerfd would either fire instantly
     // or fail. Post-fix the int64 value is preserved.
@@ -889,24 +889,25 @@ TEST(CodeGenE2E, VthreadSleepLargeValueDoesntTruncate_Tier23) {
     );
     // If truncation collapsed long_sleeper's duration, the program could
     // hang on the long_sleeper joining or exit with weird behavior. With
-    // the fix, long_sleeper just stays parked and the short worker returns.
+    // the full int64 preserved, long_sleeper just stays parked and the
+    // short worker returns.
     EXPECT_EQ(out, "42\n");
 }
 
 //===----------------------------------------------------------------------===//
-// Tier 2 Fix 2.9: nb_ I/O poll() instead of busy wait (T23)
+// Regression: nb_ I/O must poll(), not busy-wait
 //
-// Pre-fix: dragon_nb_accept/_recv/_send entered an infinite usleep(1000)
-// loop when EAGAIN was hit outside a green-thread context. An invalid /
-// closed fd -> 100% CPU spin forever. The fix replaces the spin with
-// poll() and bails to -1 on POLLERR/POLLHUP/POLLNVAL.
+// A usleep(1000) retry loop on EAGAIN outside a green-thread context
+// spins at 100% CPU forever on an invalid /
+// closed fd. dragon_nb_accept/_recv/_send instead use
+// poll() and bail to -1 on POLLERR/POLLHUP/POLLNVAL.
 //
 // Test: call nb_recv on a socket fd that never becomes readable (a
-// half-closed pipe) from the main thread. Pre-fix this would hang the
-// test process; post-fix it returns -1 promptly.
+// half-closed pipe) from the main thread. A spin would hang the
+// test process; poll returns -1 promptly.
 //===----------------------------------------------------------------------===//
 
-TEST(CodeGenE2E, NbRecvBadFdReturnsMinusOne_Tier29) {
+TEST(CodeGenE2E, NbRecvBadFdReturnsMinusOne) {
     // -1 is never a valid fd. nb_recv should return -1 (not hang).
     // We allocate a small buffer via Dragon's bytes type so we have a ptr
     // to hand the runtime - it must not actually try to fill it.
@@ -923,7 +924,7 @@ TEST(CodeGenE2E, NbRecvBadFdReturnsMinusOne_Tier29) {
     EXPECT_EQ(out, "-1\n");
 }
 
-TEST(CodeGenE2E, NbSendBadFdReturnsMinusOne_Tier29) {
+TEST(CodeGenE2E, NbSendBadFdReturnsMinusOne) {
     auto out = compileAndRun(
         "extern \"C\" def dragon_nb_send(fd: int, buf: str, len: int) -> int\n"
         "msg: str = \"hello\"\n"
@@ -933,7 +934,7 @@ TEST(CodeGenE2E, NbSendBadFdReturnsMinusOne_Tier29) {
     EXPECT_EQ(out, "-1\n");
 }
 
-TEST(CodeGenE2E, NbAcceptBadFdReturnsMinusOne_Tier29) {
+TEST(CodeGenE2E, NbAcceptBadFdReturnsMinusOne) {
     // nb_accept on a bogus fd: must return -1, not hang.
     auto out = compileAndRun(
         "extern \"C\" def dragon_nb_accept(fd: int, addr: ptr, addrlen: ptr) -> int\n"
@@ -1077,9 +1078,9 @@ TEST(CodeGenE2E, SharedRefcountAtomicDispatch_FireMultiWorker) {
 }
 
 // Regression: an uncaught exception inside a fired vthread must NOT kill the
-// parent. Before the fix, dragon_raise_exc fell through to exit(1) when the
-// fire-trampoline had no exception handler, taking down the parent thread
-// (and any sibling vthreads / accept loop with it). The fire trampoline now
+// parent. If the fire-trampoline has no exception handler, dragon_raise_exc
+// falls through to exit(1), taking down the parent thread
+// (and any sibling vthreads / accept loop with it). The fire trampoline
 // pushes a top-level setjmp frame so a stray longjmp lands in the trampoline,
 // is logged, and the worker re-enters the scheduler cleanly.
 //

@@ -1,4 +1,4 @@
-"""tuple-unpack source-temp release - leaks.md #17a.
+"""tuple-unpack source-temp release.
 
 Before the fix, simple tuple unpacking (`a, b = <rhs>`) extracted each element
 (borrowed from dragon_tuple_get / dragon_list_get, then increfed into its slot)

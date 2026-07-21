@@ -383,7 +383,7 @@ std::string CodeGen::Impl::resolveExprClassName(Expr* expr) {
                 }
             }
         }
-        // 6.B.6 root cause fix: subscript on a list[ClassName] / dict[K, ClassName]
+        // Subscript on a list[ClassName] / dict[K, ClassName]
         // produces a class instance - resolve the element class.
         if (auto* sub = dynamic_cast<SubscriptExpr*>(expr)) {
             // Plain local list[ClassName].
@@ -893,7 +893,7 @@ int64_t CodeGen::Impl::typeKindToTag(Type::Kind k) {
                                                   // refcount-managed heap objects)
             case Type::Kind::Tuple:    return 5; // TAG_LIST (tuples reuse list dispatch)
             case Type::Kind::Set:      return 5; // TAG_LIST (sets reuse list dispatch)
-            case Type::Kind::Function: return 10; // TAG_CLOSURE - T39: a closure
+            case Type::Kind::Function: return 10; // TAG_CLOSURE - a closure
                                                   // boxed into Any/Union carries
                                                   // this tag; emitUnion{In,De}cref
                                                   // route it through the tag-gated
@@ -997,7 +997,7 @@ int64_t CodeGen::Impl::typeKindToElemTag(dragon::Type::Kind k) {
             case Type::Kind::Tuple:    return 5; // TAG_LIST (uses dragon_decref)
             case Type::Kind::Set:      return 5; // TAG_LIST (uses dragon_decref)
             case Type::Kind::Instance: return 5; // TAG_LIST (uses dragon_decref)
-            case Type::Kind::Function: return 10; // TAG_CLOSURE - T39: a list[Callable]
+            case Type::Kind::Function: return 10; // TAG_CLOSURE - a list[Callable]
                                                  // element is a refcounted closure OR a
                                                  // bare fn ptr (no header). Tag 10 picks
                                                  // the ptr-list variant AND routes the
@@ -1057,7 +1057,7 @@ CodeGen::Impl::VarKind CodeGen::Impl::typeKindToVarKind(Type::Kind k) {
             case Type::Kind::Tuple:    return VarKind::Tuple;
             case Type::Kind::Set:      return VarKind::Set;
             case Type::Kind::Instance: return VarKind::ClassInstance;
-            case Type::Kind::Function: return VarKind::Closure;  // T39: a Callable
+            case Type::Kind::Function: return VarKind::Closure;  // a Callable
                                        // element / pop-result / return value is a
                                        // refcounted closure (or bare fn ptr).
             // D039 Phase 9: list[Any] / dict[str, Any] iteration loop vars
@@ -1102,7 +1102,7 @@ bool CodeGen::Impl::isHeapTypeKind(Type::Kind k) {
             case Type::Kind::Tuple:
             case Type::Kind::Set:
             case Type::Kind::Instance:
-            case Type::Kind::Function:  // T39: a Callable element is a refcounted
+            case Type::Kind::Function:  // a Callable element is a refcounted
                                         // closure - a `for f in list[Callable]`
                                         // loop var must be marked BORROWED (the
                                         // list owns the element) so per-iteration
@@ -1410,7 +1410,7 @@ void CodeGen::Impl::emitScopeCleanupFor(Scope& scope) {
             if (kind == VarKind::Str) {
                 builder->CreateCall(runtimeFuncs["dragon_decref_str"], {val});
             } else if (kind == VarKind::Closure) {
-                // T39: tag-gated - a `: Callable` local may hold a bare fn ptr
+                // tag-gated - a `: Callable` local may hold a bare fn ptr
                 // (no header); dragon_decref_callable no-ops on it and frees a
                 // real closure + its env.
                 builder->CreateCall(runtimeFuncs["dragon_decref_callable"], {val});
@@ -1418,7 +1418,7 @@ void CodeGen::Impl::emitScopeCleanupFor(Scope& scope) {
                 builder->CreateCall(runtimeFuncs["dragon_decref"], {val});
             }
         }
-        // leaks.md #2 tail: detach bound fire-and-forget Task locals (handle ref
+        // Task-detach tail: detach bound fire-and-forget Task locals (handle ref
         // never joined/escaped). Separate from the decref loop above - a Task is a
         // bare DragonVThread* (no DragonObjectHeader), released via the vthread
         // refcount, NOT dragon_decref. dragon_vthread_detach is idempotent with

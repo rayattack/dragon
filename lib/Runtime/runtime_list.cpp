@@ -9,7 +9,7 @@ extern "C" {
 // trip.
 int64_t dragon_str_cmp(const char* a, const char* b);
 
-// Defined in runtime_builtins.cpp - TAG-GATED closure decref (T39). A
+// Defined in runtime_builtins.cpp - TAG-GATED closure decref. A
 // list[Callable] element (elem_tag == DRAGON_TAG_CLOSURE) may be a real
 // DragonClosure OR a bare fn ptr (no header); this frees the former (+ env)
 // and no-ops on the latter, so the element decref never touches a headerless
@@ -265,7 +265,7 @@ void dragon_list_remove(DragonList* list, int64_t value) {
                          list->elem_tag == TAG_BYTES)
                     dragon_decref_dispatch((void*)(uintptr_t)elem);
                 else if (list->elem_tag == DRAGON_TAG_CLOSURE)
-                    // T39: list[Callable] element. dragon_list_delitem already
+                    // list[Callable] element. dragon_list_delitem already
                     // releases closures on removal; remove() missed this arm,
                     // leaking one closure + env per cbs.remove(f).
                     dragon_decref_callable((void*)(uintptr_t)elem);
@@ -361,7 +361,7 @@ void dragon_list_delitem(DragonList* list, int64_t index) {
                  list->elem_tag == TAG_BYTES)
             dragon_decref_dispatch((void*)(uintptr_t)elem);
         else if (list->elem_tag == DRAGON_TAG_CLOSURE)
-            dragon_decref_callable((void*)(uintptr_t)elem);  // T39
+            dragon_decref_callable((void*)(uintptr_t)elem);  // tag-gated (bare fn safe)
     }
 }
 
@@ -372,7 +372,7 @@ void dragon_list_clear(DragonList* list) {
     bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     if (list->elem_tag == TAG_STR || list->elem_tag == TAG_LIST ||
         list->elem_tag == TAG_DICT || list->elem_tag == TAG_BYTES ||
-        list->elem_tag == DRAGON_TAG_CLOSURE) {  // T39: dragon_decref_tagged handles closures
+        list->elem_tag == DRAGON_TAG_CLOSURE) {  // dragon_decref_tagged handles closures
         // Reentrancy hardening: null each slot before dropping its ref and
         // snapshot the count up front, so a finalizer that re-reads the list
         // during a drop sees an emptied slot (never a freed pointer) and a
@@ -629,7 +629,7 @@ DragonList* dragon_list_from_range(int64_t start, int64_t stop, int64_t step) {
 }
 
 /// Destroy a list and free its memory (GC support).
-/// Tier 1.9: child decrefs go through `dragon_decref_*_dispatch`, which
+/// Child decrefs go through `dragon_decref_*_dispatch`, which
 /// route to atomic variants when called inside an atomic-context dealloc.
 void dragon_list_destroy(DragonList* l) {
     if (!l) return;
@@ -647,7 +647,7 @@ void dragon_list_destroy(DragonList* l) {
                 if (v) dragon_decref_dispatch((void*)(uintptr_t)v);
             }
         } else if (l->elem_tag == DRAGON_TAG_CLOSURE) {
-            // T39: list[Callable] - tag-gated drop (closure + env, or no-op on
+            // list[Callable] - tag-gated drop (closure + env, or no-op on
             // a bare fn ptr).
             for (int64_t i = 0; i < l->size; i++) {
                 int64_t v = dragon_list_load(l, i);
@@ -713,7 +713,7 @@ DragonList* dragon_list_repeat(DragonList* src, int64_t count) {
             dragon_list_store(result, c * src->size + i, val);
             // dragon_incref_tagged, not a bare dragon_incref. A list[Callable]
             // element may be a bare function pointer with no object header
-            // (T39); the generic dragon_incref read/wrote refcount bytes inside
+            //; the generic dragon_incref read/wrote refcount bytes inside
             // the function's .text (read-only) -> SIGSEGV on `[f] * 3`. The
             // tagged path routes closures through the tag-gated
             // dragon_incref_callable, which is safe on a headerless fn ptr.
@@ -848,7 +848,7 @@ void dragon_list_set_ptr(DragonListPtr* list, int64_t index, void* value) {
         if (list->elem_tag == TAG_STR)
             dragon_decref_str_dispatch((const char*)old);
         else if (list->elem_tag == DRAGON_TAG_CLOSURE)
-            dragon_decref_callable(old);  // T39: tag-gated (bare fn safe)
+            dragon_decref_callable(old);  // tag-gated (bare fn safe)
         else
             dragon_decref_dispatch(old);
     }
@@ -898,10 +898,10 @@ static inline void dragon_listbox_decref_elem(DragonListBoxElem* e) {
     // TAG_INT / TAG_FLOAT / TAG_BOOL / TAG_NONE: no refcount to drop.
     //
     // TAG_CLOSURE (10) deliberately has NO decref arm yet - a WALL, not an
-    // oversight (AUDIT-2026-07-09 Tier 4). Codegen's boxArgTagPayload increfs
+    // oversight. Codegen's boxArgTagPayload increfs
     // BORROWED sources for tags 1/5/6/7 only, so `anyList.append(f)` with a
     // borrowed Callable local stores a tag-10 payload at +0. Adding
-    // dragon_decref_callable here was ASan-PROVEN (2026-07-09) to double-free
+    // dragon_decref_callable here is ASan-PROVEN to double-free
     // that shape: box destroy released a ref the box never took, then the
     // local's scope-cleanup decref hit freed memory (heap-use-after-free in
     // dragon_decref_callable). The known cost of the skip: box repeat/extend/
@@ -1282,7 +1282,7 @@ int64_t dragon_list_eq(void* a, void* b) {
 /// four list variants (the elem-as-box reader normalizes them) and recurses
 /// through dragon_box_cmp for nested lists. Raises TypeError on an incomparable
 /// element pair (e.g. `[1] < ["a"]`). Backs the native `list < list` codegen
-/// path (which previously fell through to a pointer-address compare).
+/// path.
 int64_t dragon_list_cmp(void* a, void* b) {
     if (a == b) return 0;
     if (!a || !b) return (!a && !b) ? 0 : (!a ? -1 : 1);

@@ -269,7 +269,7 @@ void CodeGen::visit(AwaitExpr& node) {
     // (2) a later `t.is_alive()` / `await t` reads NULL (-> false / 0) instead of
     // the freed struct - closing the latent use-after-await UAF. Only a bound
     // NameExpr has a slot; `await fire f()` / `await get()` are owned temps the
-    // join already reclaimed, with no slot to blank. leaks.md #2 tail.
+    // join already reclaimed, with no slot to blank. Task-detach tail.
     if (impl_->options.gcMode == GCMode::RC) {
         if (auto* nm = dynamic_cast<NameExpr*>(node.operand.get())) {
             if (auto* slot = impl_->lookupVar(nm->name)) {

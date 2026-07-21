@@ -1,4 +1,4 @@
-"""Generic-method call as a bare reassignment RHS (2026-07-06).
+"""Generic-method call as a bare reassignment RHS.
 
 Given the code:
 

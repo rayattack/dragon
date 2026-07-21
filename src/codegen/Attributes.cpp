@@ -617,12 +617,12 @@ void CodeGen::visit(AttributeExpr& node) {
         }
     }
 
-    // 6.B.6 root-cause fix: when the object is not a bare NameExpr (e.g.
+    // When the object is not a bare NameExpr (e.g.
     // `pos_specs[j].name` - a SubscriptExpr followed by attribute access),
     // resolve the class via resolveExprClassName and emit a real field GEP.
     // Without this, attribute access on any chained expression silently
-    // returned i64 0, which then poisoned downstream uses (e.g. dict keys
-    // built from `obj_list[i].name` produced bad LLVM IR).
+    // returns i64 0, which then poisons downstream uses (e.g. dict keys
+    // built from `obj_list[i].name` produce bad LLVM IR).
     {
         std::string className = impl_->resolveExprClassName(node.object.get());
         if (!className.empty()) {
@@ -1064,7 +1064,7 @@ void CodeGen::visit(SubscriptExpr& node) {
                 impl_->pendingDictCheckTag = -1;
                 recvReleaseTag = 2;
             } else if (checkTag == 1 || checkTag == 5 || checkTag == 6 || checkTag == 7 ||
-                       checkTag == 10) {  // T39: TAG_CLOSURE - return the closure as a ptr
+                       checkTag == 10) {  // TAG_CLOSURE - return the closure as a ptr
                 auto* tagVal = llvm::ConstantInt::get(impl_->i64Type, checkTag);
                 impl_->lastValue = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_dict_int_get_ptr"], {dict, key, tagVal}, "dictget.ip");
@@ -1102,7 +1102,7 @@ void CodeGen::visit(SubscriptExpr& node) {
             impl_->pendingDictCheckTag = -1;
             recvReleaseTag = 2;
         } else if (checkTag == 1 || checkTag == 5 || checkTag == 6 || checkTag == 7 ||
-                   checkTag == 10) {  // T39: TAG_CLOSURE - return the closure as a ptr so
+                   checkTag == 10) {  // TAG_CLOSURE - return the closure as a ptr so
                                       // the borrow-store increfs it (incref_callable)
             auto* tagVal = llvm::ConstantInt::get(impl_->i64Type, checkTag);
             impl_->lastValue = impl_->builder->CreateCall(
@@ -1194,7 +1194,7 @@ void CodeGen::visit(SubscriptExpr& node) {
     node.index->accept(*this);
     llvm::Value* idx = impl_->lastValue;
 
-    // T38: subscripting an Any-boxed value (`anyVal[i]`). The static type is
+    // Subscripting an Any-boxed value (`anyVal[i]`). The static type is
     // Any, so none of the typed branches above fired and `obj` is a 16-byte
     // box, not a pointer. Box the index too and let the runtime dispatch on
     // the receiver's tag (list/dict/str/bytes). Result is a box, preserving
@@ -1368,7 +1368,7 @@ void CodeGen::visit(SubscriptExpr& node) {
                 if (it != impl_->varListElemKinds.end())
                     elemKind = it->second;
             } else if (auto* attrExpr = dynamic_cast<AttributeExpr*>(node.object.get())) {
-                // 6.B.5: <class-instance>.<field>[i] - read the field's
+                // <class-instance>.<field>[i] - read the field's
                 // element kind from classFieldListElemKinds. This is the
                 // mirror of the for-loop logic in ForLoop.cpp.
                 std::string className;
@@ -1404,7 +1404,7 @@ void CodeGen::visit(SubscriptExpr& node) {
                             elemKind == Type::Kind::Tuple    ||
                             elemKind == Type::Kind::Set      ||
                             elemKind == Type::Kind::Instance ||
-                            elemKind == Type::Kind::Function);  // T39: list[Callable]
+                            elemKind == Type::Kind::Function);  // list[Callable]
                             // stores closure ptrs in the DragonListPtr variant.
         auto* i8Ty = llvm::Type::getInt8Ty(*impl_->context);
         llvm::Type* strideTy;

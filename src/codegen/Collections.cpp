@@ -14,7 +14,7 @@ namespace dragon {
 llvm::Value* CodeGen::Impl::emitNewTypedList(int64_t elemTag, bool isAny,
                                              llvm::Value* capVal) {
     bool isF64 = (elemTag == 2);
-    // elemTag 10 = TAG_CLOSURE (T39: list[Callable]) - a ptr-storage variant.
+    // elemTag 10 = TAG_CLOSURE (list[Callable]) - a ptr-storage variant.
     bool isPtr = (elemTag == 1 || elemTag == 5 || elemTag == 6 || elemTag == 7 ||
                   elemTag == 10);
     if (isAny)
@@ -68,7 +68,7 @@ void CodeGen::Impl::emitTypedListAppend(llvm::Value* list, llvm::Value* val,
             if (elemTag == 1)
                 builder->CreateCall(runtimeFuncs["dragon_incref_str"], {val});
             else if (elemTag == 10)
-                // T39: tag-gated incref - borrowed Callable element may be a bare
+                // tag-gated incref - borrowed Callable element may be a bare
                 // fn ptr (no header); _callable no-ops on it, increfs a real closure.
                 builder->CreateCall(runtimeFuncs["dragon_incref_callable"], {val});
             else

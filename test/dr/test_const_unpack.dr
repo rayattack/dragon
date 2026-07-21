@@ -1,4 +1,4 @@
-"""const multi-target tuple unpack (bugs.md #14, smells.md const-unpack item).
+"""const multi-target tuple unpack.
 
 `const q: int, r: int = divmod(7, 2)` used to fail to parse ("const
 declaration must have an initializer" on the comma) while the plain

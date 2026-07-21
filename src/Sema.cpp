@@ -1103,11 +1103,9 @@ void Sema::visit(Module& node) {
             // forward reference to a const defined later in the file resolves,
             // matching codegen's order-independent global resolution and
             // Python module semantics. Without this, `if n > _MAX` used above
-            // its `const _MAX: int = ...` definition was flagged undefined -
-            // an error that was silently swallowed for dependency modules
-            // until Tier 5.1 made dependency Sema errors surface, at which
-            // point the false positive broke the stdlib build
-            // (AUDIT-2026-07-09 Tier 5 forward-reference note). Marked so the
+            // its `const _MAX: int = ...` definition is flagged undefined -
+            // a false positive that breaks the stdlib build now that
+            // dependency Sema errors surface. Marked so the
             // second-pass visit recognizes its own hoist and does not report a
             // redeclaration.
             if (auto* name = dynamic_cast<NameExpr*>(ann->target.get())) {

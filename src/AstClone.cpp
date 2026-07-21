@@ -16,9 +16,9 @@ namespace {
 // A missing clone case is an internal compiler error, not a silent drop: the
 // monomorphizer consumes a null clone with `if (!cloned) continue;`, so a new
 // AST node added without an AstClone case would silently omit a stamped
-// statement / null a sub-expression and miscompile the generic instantiation
-// (AUDIT-2026-07-09 Tier 5.4). Fire loudly on every build (stderr) and abort
-// under assertions so tests catch it, instead of the old quiet nullptr.
+// statement / null a sub-expression and miscompile the generic instantiation.
+// Fire loudly on every build (stderr) and abort under assertions so tests
+// catch it.
 [[maybe_unused]] std::nullptr_t cloneMissingCase(const char* kind,
                                                  const ASTNode& node) {
     std::fprintf(stderr,

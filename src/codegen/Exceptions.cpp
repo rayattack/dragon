@@ -272,7 +272,7 @@ void CodeGen::visit(TryStmt& node) {
                     // overwrite releases it). The binding's scope cleanup
                     // drops this +1 on the normal path; the unwind cleanup
                     // entry drops it when a nested raise longjmps past the
-                    // handler (AUDIT-2026-07-09 1.5).
+                    // handler.
                     auto* obj = impl_->builder->CreateCall(
                         impl_->runtimeFuncs["dragon_exc_bind_obj"], {}, "exc.obj");
                     auto* alloca = impl_->createEntryAlloca(
@@ -393,7 +393,7 @@ void CodeGen::visit(WithStmt& node) {
     // `with` owns - one ref). `enterResult` is what __enter__ returned and bound
     // to the `as` var; for the common `return self` it is the SAME object with a
     // SECOND ref (the return convention increfs). Both refs are released at
-    // with-exit (leaks.md #8) - releasing only `val` left the as-binding ref.
+    // with-exit - releasing only `val` left the as-binding ref.
     struct CtxInfo {
         llvm::Value* val;
         bool isClassCtx;
@@ -433,7 +433,7 @@ void CodeGen::visit(WithStmt& node) {
         bool isLockTemp = false;  // `with Lock()` mints an anonymous lock the
                                   // with OWNS - it must be DESTROYED (not just
                                   // released) on exit or every use leaks the
-                                  // pthread_mutex (leaks.md bare-Lock item). A
+                                  // pthread_mutex. A
                                   // named `with g:` lock is owned by its scope -
                                   // release only, never destroy here.
         if (impl_->isLockExpr(item.contextExpr.get())) {
@@ -533,7 +533,7 @@ void CodeGen::visit(WithStmt& node) {
         impl_->builder->SetInsertPoint(bodyBB);
         impl_->tryFrameFuncs.push_back(func);
         // Register this with's __exit__/lock-release set so an early
-        // return/break/continue inside the body replays it (leaks.md #5).
+        // return/break/continue inside the body replays it.
         {
             Impl::ExitCleanup ec;
             ec.isWith = true;
@@ -612,7 +612,7 @@ void CodeGen::visit(WithStmt& node) {
         impl_->builder->CreateUnreachable();
 
         // Normal cleanup: call __exit__ / release locks / close files, then
-        // release the context-manager OBJECT itself (leaks.md #8). The CM is a
+        // release the context-manager OBJECT itself. The CM is a
         // ctor temp the `with` owns; __exit__ runs first (it may still use the
         // object), then we drop the ctor's +1. Decref AFTER __exit__.
         impl_->builder->SetInsertPoint(cleanupBB);

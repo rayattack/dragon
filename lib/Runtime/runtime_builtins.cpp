@@ -520,12 +520,11 @@ int64_t dragon_argv_count(void) {
 }
 
 // Returns the i-th argv element as a fresh owned DragonString (+1). Returns
-// "" for out-of-range. This used to dragon_str_intern each result, minting an
-// IMMORTAL string per call with no dedup table: reading sys.argv in a loop
-// grew RSS without bound and the codegen's owned-str drain (argv_at is not a
-// borrowed-returner) was a no-op on it (AUDIT-2026-07-09 2.1). A normal
-// mortal +1 is reclaimed by that existing drain; equality/hashing compare by
-// content, so nothing relied on the interned identity.
+// "" for out-of-range. Must stay a normal mortal +1, never dragon_str_intern:
+// argv_at is not a borrowed-returner, so codegen's owned-str drain reclaims
+// the +1, while an interned result is IMMORTAL with no dedup table (reading
+// sys.argv in a loop grows RSS without bound and the drain is a no-op on it).
+// Equality/hashing compare by content, so nothing relies on interned identity.
 const char* dragon_argv_at(int64_t i) {
     if (i < 0 || i >= (int64_t)g_dragon_argc || !g_dragon_argv) {
         return dragon_string_alloc("", 0);
@@ -587,11 +586,10 @@ const char* dragon_file_read(void* handle) {
 /// helper) reports the same value - so HTTP `Content-Length` and
 /// `nb_send` ship the file verbatim with no re-encoding.
 ///
-/// `dragon_file_read` going through `dragon_string_alloc` was
-/// surfaced as a bug serving a 309 KB PNG: any non-ASCII byte (PNG
-/// header has 0x89) tripped the UTF-8 path, expanded the body to 442
-/// KB of 4-byte code points, and the wire content was no longer the
-/// PNG.
+/// Must NOT route through `dragon_string_alloc`: any non-ASCII byte
+/// (a PNG header has 0x89) trips its UTF-8 path and expands the body
+/// to 4-byte code points (a 309 KB PNG becomes 442 KB), so the bytes
+/// on the wire stop being the file.
 const char* dragon_file_read_bytes(void* handle) {
     if (!handle) return dragon_string_alloc("", 0);
     FILE* f = (FILE*)handle;
@@ -1168,14 +1166,14 @@ DragonListPtr* dragon_dir(int64_t instance_or_desc, int64_t is_descriptor) {
 /// D033 Phase 3: forward declarations for closure construction. These live
 /// further down in this TU and the existing field path doesn't reach them;
 /// adding the proto here keeps the getattr extension self-contained.
-/// leaks.md #11: env_alloc gained the multi-op gc_fn + a `trackable` gate.
+/// env_alloc gained the multi-op gc_fn + a `trackable` gate.
 void* dragon_env_alloc(int64_t total_size,
                        void (*gc_fn)(void*, int32_t, dragon_gc_visit_fn, void*),
                        int32_t trackable);
 void* dragon_closure_create(void* fn_ptr, void* env);
 
 /// Per-class shared GC hook for bound-method envs. The env body is exactly
-/// `{ void* self }`, captured with a +1. leaks.md #11: this is now MULTI-OP so
+/// `{ void* self }`, captured with a +1. this is now MULTI-OP so
 /// a bound method stored in a field of `self` (instance -> closure -> env ->
 /// self, a real cycle) is collectable. One copy serves every class because the
 /// body layout is uniform.
@@ -1297,7 +1295,7 @@ int64_t dragon_getattr_default(int64_t instance, const char* attr_name, int64_t 
 ///   gc_fn:      codegen-generated multi-op hook (DEALLOC/TRAVERSE/CLEAR over
 ///               the heap captures). NULL for a scalar-only env (no cleanup).
 ///   trackable:  1 iff the env captures a cycle-capable heap object (instance,
-///               container, closure, cell, ...). leaks.md #11: only trackable
+///               container, closure, cell, ...). only trackable
 ///               envs join gc_tracked so the cycle collector can reclaim an
 ///               instance/list -> closure -> env -> back-edge cycle. A str-only
 ///               or scalar-only env can never close a cycle, so it stays
@@ -1317,7 +1315,7 @@ void* dragon_env_alloc(int64_t total_size,
 /// pointer (no i64 round-trip). Takes ownership of the env's existing
 /// reference (env_alloc starts at refcount 1 - no additional incref needed).
 /// Codegen accesses the closure's fn_ptr / env fields via inline GEPs.
-/// leaks.md #11: a closure whose env is tracked is itself tracked, so the
+/// a closure whose env is tracked is itself tracked, so the
 /// `instance/list -> closure -> env` chain is fully visible to the collector.
 /// A non-capturing or scalar-only-env closure stays untracked (#1).
 void* dragon_closure_create(void* fn_ptr, void* env) {
@@ -1332,9 +1330,9 @@ void* dragon_closure_create(void* fn_ptr, void* env) {
 
 /// Dealloc a closure: decref the env, then free self.
 /// Called by dragon_decref when refcount hits 0 for TAG_CLOSURE objects.
-/// Tier 1.9: child decref dispatches atomic when invoked from atomic context.
-/// (cls->env may have been NULLed by the cycle collector's clear_refs - the
-/// guard handles that exactly-once.)
+/// The env decref goes through dragon_decref_dispatch so it takes the atomic
+/// variant inside atomic context. (cls->env may have been NULLed by the cycle
+/// collector's clear_refs - the guard handles that exactly-once.)
 void dragon_closure_dealloc(DragonClosure* cls) {
     if (!cls) return;
     if (cls->env) {

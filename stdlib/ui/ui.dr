@@ -74,11 +74,9 @@ def _ui_dispatch(msg: str) -> None {
 # effect; writing it re-runs every subscribed effect. No virtual DOM, no diff -
 # the effect that re-runs is exactly the one that touches the changed node.
 #
-# Effects are no-arg closures kept in a module-global registry, referenced by an
-# integer id, and invoked BY INDEX (`_effects[eid]()`). The for-loop form
-# (`for f in _effects { f() }`) once miscompiled but is now fixed (bugs.md #17,
-# 2026-06-08); index dispatch is kept here only because subscribers are tracked as
-# ids, not as the closures themselves.
+# Effects are no-arg closures kept in a module-global registry, referenced by
+# an integer id, and invoked BY INDEX (`_effects[eid]()`) because subscribers
+# are tracked as ids, not as the closures themselves.
 #===----------------------------------------------------------------------===#
 
 _effects: list[Callable[[], None]] = []

@@ -1,4 +1,4 @@
-# test/dr/test_closure_cycle_rc.dr - leaks.md #11: the cycle collector can now
+# test/dr/test_closure_cycle_rc.dr - the cycle collector can now
 # see through closures + their captured environments.
 #
 # A closure stored in a field/container that captures the holder back is a real

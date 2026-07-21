@@ -1076,10 +1076,11 @@ bool CodeGen::linkExecutable(const std::string& outputFile,
     // mirrors the sqlite3 / pcre2 gating pattern.
 #ifdef __APPLE__
     // Apple clang does not search Homebrew's lib dir on arm64 (/opt/homebrew);
-    // Intel brew's /usr/local/lib it does. libzstd is brew-only on macOS (libz
-    // ships with the OS), so add both prefixes: ld silently ignores absent
-    // dirs, and system paths still win for libs present in both
-    if (impl_->needsZ || impl_->needsZstd) {
+    // Intel brew's /usr/local/lib it does. Only reached when no bundled zstd
+    // archive resolved (dev trees without an installed prefix): ld silently
+    // ignores absent dirs, and system paths still win for libs in both.
+    // libz needs nothing extra (it ships with the OS).
+    if (impl_->needsZstd && impl_->options.zstdLibPath.empty()) {
         args.push_back("-L/opt/homebrew/lib");
         args.push_back("-L/usr/local/lib");
     }
@@ -1087,8 +1088,15 @@ bool CodeGen::linkExecutable(const std::string& outputFile,
     if (impl_->needsZ) {
         args.push_back("-lz");
     }
+    // tested on demzs system - prefer bundled static archive (zstd) - shpped on
+    // macOS, where no system libzstd exists and a hombrew .dylib path would break
+    // the binary on other machines. 
     if (impl_->needsZstd) {
-        args.push_back("-lzstd");
+        if (!impl_->options.zstdLibPath.empty()) {
+            args.push_back(impl_->options.zstdLibPath);
+        } else {
+            args.push_back("-lzstd");
+        }
     }
     for (const auto& lib : impl_->options.linkedLibraries) {
         args.push_back("-l" + lib);

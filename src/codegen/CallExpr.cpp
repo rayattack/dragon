@@ -328,9 +328,9 @@ void CodeGen::visit(CallExpr& node) {
         const std::string ctorClassName =
             impl_->classNames.count(name) ? name : std::string();
         if (impl_->classNames.count(ctorClassName)) {
-            // Class decorators (`@dec class C`) are dropped (ADR 025 removal):
+            // Class decorators (`@dec class C`) are dropped:
             // a decorated class would require runtime descriptor construction,
-            // which no longer exists. Function decorators, @dataclass,
+            // which ADR 025 removed. Function decorators, @dataclass,
             // @staticmethod, @classmethod, @property and NamedTuple are
             // unaffected (compile-time synthesis, handled elsewhere).
             if (impl_->decoratedClasses.count(ctorClassName)) {
@@ -629,7 +629,7 @@ void CodeGen::visit(CallExpr& node) {
                 // A wrapping decorator (`return lambda ...` capturing the
                 // original fn) stores a DragonClosure*, not a bare code
                 // pointer - calling it directly jumps into the closure
-                // struct's bytes (SIGSEGV, missing.md T14's @-form). Route
+                // struct's bytes (SIGSEGV on the @-form). Route
                 // through the shared closure-vs-bare runtime discrimination,
                 // exactly like any other Callable value call. An identity
                 // decorator (`return fn`) stores a bare fn ptr and takes the
@@ -726,8 +726,8 @@ void CodeGen::visit(CallExpr& node) {
             // borrows; it increfs whatever it retains). Extern "C" callees are
             // drainable under the FFI v0 contract unless they return `ptr`
             // (see externDrainableFuncs) - nested owned temps like
-            // dragon_str_concat("a", dragon_str_concat(...)) leaked the inner
-            // string per call without this (AUDIT-2026-07-09 1.2).
+            // dragon_str_concat("a", dragon_str_concat(...)) leak the inner
+            // string per call without this.
             std::vector<std::pair<llvm::Value*, Impl::VarKind>> argTemps;
             const std::string calleeSym = func->getName().str();
             const bool externNoDrain = impl_->externFuncNames.count(calleeSym) &&
@@ -768,8 +768,8 @@ void CodeGen::visit(CallExpr& node) {
                     // with disagreeing Dragon arg types across modules (e.g.
                     // dragon_tls_write's buf is `str` in ssl.dr but `ptr` in
                     // postgres.dr, and funcParamKinds keeps only the first);
-                    // trusting `str` there decref'd dragon_bytes_data's INTERIOR
-                    // pointer as a string (AUDIT-2026-07-09 postgres UAF).
+                    // trusting `str` there decrefs dragon_bytes_data's INTERIOR
+                    // pointer as a string - a use-after-free.
                     // ownedTempDrainKind gates on the arg expr's static type, so
                     // an interior-ptr result (type ptr, not a heap kind) is never
                     // drained while a genuine owned str/bytes temp still is.
@@ -1066,7 +1066,7 @@ void CodeGen::visit(CallExpr& node) {
                         args.push_back(arg);
                     }
 
-                    // T39: a VarKind::Closure value is NOT necessarily a real
+                    // a VarKind::Closure value is NOT necessarily a real
                     // DragonClosure - with `: Callable` slots uniformly Closure, a
                     // bare top-level function passed to a Callable param/field/
                     // element lands here too (e.g. timeit(_bump), `[inc, mk(1)]`).
@@ -1366,9 +1366,9 @@ void CodeGen::visit(CallExpr& node) {
                     // path does. For an extern callee, gate on the ARG's own
                     // static type (ownedTempDrainKind), never the declared param
                     // kind - the same C symbol can carry disagreeing arg types
-                    // across modules (AUDIT-2026-07-09 postgres UAF, see the
-                    // same-module path). Dragon callees keep the param-kind
-                    // classifier.
+                    // across modules (see the same-module path for the
+                    // interior-pointer hazard). Dragon callees keep the
+                    // param-kind classifier.
                     if (impl_->externDrainableFuncs.count(calleeSym2)) {
                         Impl::VarKind dk = impl_->ownedTempDrainKind(node.args[i].get(), arg);
                         if (dk != Impl::VarKind::Other)
@@ -1721,8 +1721,8 @@ void CodeGen::emitVarArgCall(llvm::Function* func, CallExpr& node) {
     }
     // The *args pack is a call-site-owned temp alive across the binding guards
     // below (which can raise via longjmp), so register it on the unwind stack
-    // too - a stray-key raise into an args-only callee leaked it otherwise
-    // (AUDIT-2026-07-09 1.3). Pushed AFTER argsList exists, popped before its
+    // too - a stray-key raise into an args-only callee leaks it otherwise.
+    // Pushed AFTER argsList exists, popped before its
     // tail drain, in reverse order relative to the spread-dict entry.
     llvm::Value* packedArgsCleanupBase = nullptr;
     if (packedArgsList)
@@ -1799,9 +1799,9 @@ void CodeGen::emitVarArgCall(llvm::Function* func, CallExpr& node) {
     // Register an inline `**{literal}` spread source on the unwind cleanup
     // stack for the whole bind+call: the duplicate/missing/stray-key guards
     // below raise via longjmp, skipping the normal-path drain at the tail, so
-    // the synthesized dict leaked on every raising call (AUDIT-2026-07-09 1.3,
-    // test_kwargs_spread *_raises). Freed by exactly one path: the unwind on
-    // raise, or the pop+decref at the tail.
+    // without this the synthesized dict leaks on every raising call (pinned
+    // by test_kwargs_spread *_raises). Freed by exactly one path: the unwind
+    // on raise, or the pop+decref at the tail.
     llvm::Value* spreadCleanupBase = nullptr;
     if (spreadSrc && spreadSrcExpr &&
         impl_->ownedTempDrainKind(spreadSrcExpr, spreadSrc) != Impl::VarKind::Other)
@@ -1982,8 +1982,8 @@ void CodeGen::emitVarArgCall(llvm::Function* func, CallExpr& node) {
     // An INLINE `**{literal}` spread source into a variadic callee is an owned
     // temp only read from during binding - drain it here (a named `**opts`
     // source classifies borrowed and stays its owner's). This mirrors the
-    // non-variadic emitSpreadCall drain; without it f(**{...}) leaked the whole
-    // synthesized dict per call (AUDIT-2026-07-09 1.3, test_kwargs_spread).
+    // non-variadic emitSpreadCall drain; without it f(**{...}) leaks the whole
+    // synthesized dict per call (pinned by test_kwargs_spread).
     if (spreadSrc && spreadSrcExpr) {
         Impl::VarKind dk = impl_->ownedTempDrainKind(spreadSrcExpr, spreadSrc);
         if (dk != Impl::VarKind::Other)
@@ -2383,8 +2383,8 @@ bool CodeGen::Impl::expandSpreadCallArgs(
                 d = builder->CreateIntToPtr(d, i8PtrType);
             // An INLINE literal spread source (`f(**{"name": v})`) is an owned
             // temp the binding only reads from: without a post-call drain the
-            // whole synthesized dict (struct + buckets + keys + values) leaked
-            // once per call (AUDIT-2026-07-09 1.3). The bound args are borrows
+            // whole synthesized dict (struct + buckets + keys + values) leaks
+            // once per call. The bound args are borrows
             // into the dict, so it is released AFTER the call via argTemps,
             // never before. A named spread source (`f(**opts)`) classifies
             // borrowed and stays its owner's.

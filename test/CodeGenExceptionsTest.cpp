@@ -819,15 +819,15 @@ TEST(CodeGenE2E, PyMatchCaseE2E) {
 }
 
 //===----------------------------------------------------------------------===//
-// Tier 2 Fix 2.12: Match arm scope cleanup (H6)
+// Regression: match arm scope cleanup
 //
-// Pre-fix: when a match arm fell through to `match.end`, its arm scope
-// was popped without first calling `emitScopeCleanup()`. Capture-bound
+// When a match arm falls through to `match.end`, its arm scope must run
+// `emitScopeCleanup()` before it is popped. Capture-bound
 // match patterns (e.g. `case y { ... }`) introduce new variables into
-// the arm scope; if those captures were ever heap-typed they'd leak.
+// the arm scope; heap-typed captures leak without the cleanup.
 //
-// The fix emits `emitScopeCleanup()` before the unconditional branch to
-// the match-end block in MatchStmt.
+// MatchStmt emits `emitScopeCleanup()` before the unconditional branch to
+// the match-end block.
 //
 // Today's matches mostly bind ints (which need no decref), so the
 // inserted cleanup is a no-op there. The IR test below pins down the
@@ -835,7 +835,7 @@ TEST(CodeGenE2E, PyMatchCaseE2E) {
 // and the loop test confirms heap-typed bindings don't leak per arm.
 //===----------------------------------------------------------------------===//
 
-TEST(CodeGenE2E, MatchArmCaptureBoundedLoop_Tier212) {
+TEST(CodeGenE2E, MatchArmCaptureBoundedLoop) {
     // Capture binding inside the match arm. Each iteration binds y to the
     // subject value and falls through. Pre-fix: scope popped without
     // cleanup. Post-fix: cleanup is a no-op for int captures, but the path
@@ -854,7 +854,7 @@ TEST(CodeGenE2E, MatchArmCaptureBoundedLoop_Tier212) {
     EXPECT_EQ(output, "49995001\n");
 }
 
-TEST(CodeGenE2E, MatchStringSubjectLoopBounded_Tier212) {
+TEST(CodeGenE2E, MatchStringSubjectLoopBounded) {
     // Match a string subject - exercises the string-comparison path through
     // the cleanup-then-fallthrough.
     auto output = compileAndRun(
@@ -912,8 +912,8 @@ TEST(CodeGenE2E, ExceptionRaiseAndCatch_AllBuiltins) {
     EXPECT_EQ(out, "ve\nte\nle\nie\nae\noe\nfe\npe\nioe\nme\nne\nre\nue\naa\nnme\nse\nasx\nbe\n");
 }
 
-TEST(CodeGenIR, MatchArmEmitsCleanupBeforeEndBranch_Tier212) {
-    // After the fix, MatchStmt visit emits emitScopeCleanup() before the
+TEST(CodeGenIR, MatchArmEmitsCleanupBeforeEndBranch) {
+    // MatchStmt visit emits emitScopeCleanup() before the
     // br to match.end. With Int captures the cleanup is a no-op, so the
     // crispest IR signal is that the structure still terminates correctly:
     // every arm body has a terminator (br to match.end) and match.end

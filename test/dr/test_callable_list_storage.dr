@@ -1,6 +1,6 @@
 # test/dr/test_callable_list_storage.dr - regression for the ADR 046 fix.
 #
-# Bug (fixed 2026-06-07): a Callable stored in a list[Callable] used the
+# Bug: a Callable stored in a list[Callable] used the
 # non-refcounting i64 append - Type::Kind::Function fell through to the int path
 # in list.append codegen (src/codegen/CallMethods.cpp). A bare fn passed through
 # a Callable param and then appended (the effect-registry pattern) was stored

@@ -128,9 +128,9 @@ class WithEarlyExitTests(TestCase) {
     def test_lock_released_on_early_return() {
         # If the lock were not released on the early return, acquiring it again
         # on this thread would deadlock; reaching the assertion proves release.
-        # The bound `g: Lock` used to leak its mutex (a bare Lock() had no
-        # owner of last resort - AUDIT 2.3); `del g` is the docs/001-memory.md
-        # answer: a compiler-PROVEN sole-owner release, so this test is now
+        # Without `del g` the bound `g: Lock` leaks its mutex (a bare Lock()
+        # has no owner of last resort); `del g` is
+        # a compiler-PROVEN sole-owner release, so this test is
         # LSan-clean end to end. The plain-arg pass above stays a borrow and
         # does not block the proof.
         g: Lock = Lock()

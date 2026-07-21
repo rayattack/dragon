@@ -1,4 +1,4 @@
-"""Whole-module `str ==` miscompile via a stale list-element class name (2026-07-14).
+"""Whole-module `str ==` miscompile via a stale list-element class name.
 
 You did nothing wrong. This tokenizer line is ordinary, correct Dragon:
 

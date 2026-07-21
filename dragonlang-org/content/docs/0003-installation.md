@@ -4,10 +4,14 @@ The dragon toolchain is a single binary, `dragon`, that compiles, runs,
 and type-checks `.dr` and `.py` source files. It also ships its own standard
 library - there is nothing else to install once you have the binary.
 
+**Mac and Linux**: `curl -fsSL https://dragonlang.org/install.sh | sh`
+
+**Windows**: `coming soon`
+
 ## Install from a package
 
 The quickest path on a desktop OS is a native installer from the 
-[downloads page](https://draganlang.org/downloads)
+[downloads page](https://dragonlang.org/download)
 
 - For **linux** - You get a `.deb` (Debian/Ubuntu) or an `.rpm` (Fedora/RHEL)
 downloadable. Both put `dragon` and `dr` on your `PATH` and the stdlib

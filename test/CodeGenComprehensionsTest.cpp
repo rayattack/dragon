@@ -121,23 +121,21 @@ TEST(CodeGenE2E, NestedListCompRange) {
 }
 
 //===----------------------------------------------------------------------===//
-// Tier 2 Fix 2.11: Comprehension scope cleanup (H5)
+// Regression: comprehension scope cleanup
 //
-// Pre-fix: list/dict/set/generator comprehensions called `popScope()`
-// without first calling `emitScopeCleanup()`. With Int loop vars this is
+// list/dict/set/generator comprehensions must call `emitScopeCleanup()`
+// before every `popScope()`. With Int loop vars skipping it is
 // harmless (no decrefs needed), but heap-typed loop vars (str/list/dict/
-// instance) would have skipped cleanup leak through every iteration.
-// The fix adds emitScopeCleanup before every popScope in the comprehension
-// paths.
+// instance) leak through every iteration without the cleanup.
 //
-// Companion fix to the codegen scope cleanup: the type checker now binds
+// Companion to the codegen scope cleanup: the type checker binds
 // the loop variable's type from the iterable's element type, and codegen
 // uses the matching VarKind (heap-aware) for the loop var so the body
 // can call methods on it. The loop var is marked borrowed so per-iter
 // cleanup doesn't free strings still owned by the source list.
 //===----------------------------------------------------------------------===//
 
-TEST(CodeGenE2E, ListCompRangeStillWorks_Tier211) {
+TEST(CodeGenE2E, ListCompRangeStillWorks) {
     auto output = compileAndRun(
         "xs: list[int] = [i * 2 for i in range(5)]\n"
         "print(len(xs))\n"
@@ -146,7 +144,7 @@ TEST(CodeGenE2E, ListCompRangeStillWorks_Tier211) {
     EXPECT_EQ(output, "5\n8\n");
 }
 
-TEST(CodeGenE2E, ListCompCollectionStillWorks_Tier211) {
+TEST(CodeGenE2E, ListCompCollectionStillWorks) {
     auto output = compileAndRun(
         "src: list[int] = [1, 2, 3, 4, 5]\n"
         "doubled: list[int] = [x * 2 for x in src]\n"
@@ -155,7 +153,7 @@ TEST(CodeGenE2E, ListCompCollectionStillWorks_Tier211) {
     EXPECT_EQ(output, "10\n");
 }
 
-TEST(CodeGenE2E, NestedListCompStillWorks_Tier211) {
+TEST(CodeGenE2E, NestedListCompStillWorks) {
     // Nested comprehension exercises the extra-clause path's cleanup.
     auto output = compileAndRun(
         "pairs: list[int] = [x + y for x in range(3) for y in range(3) if x != y]\n"
@@ -164,7 +162,7 @@ TEST(CodeGenE2E, NestedListCompStillWorks_Tier211) {
     EXPECT_EQ(output, "6\n");
 }
 
-TEST(CodeGenE2E, ListCompLoopBounded_Tier211) {
+TEST(CodeGenE2E, ListCompLoopBounded) {
     // Build the comprehension 10k times. Pre-fix, if a future heap-typed
     // loop var ever landed without cleanup, this pattern would surface
     // the leak. Today it's a regression check on the int path.
@@ -179,7 +177,7 @@ TEST(CodeGenE2E, ListCompLoopBounded_Tier211) {
     EXPECT_EQ(output, "50\n");
 }
 
-TEST(CodeGenE2E, SetCompStillWorks_Tier211) {
+TEST(CodeGenE2E, SetCompStillWorks) {
     auto output = compileAndRun(
         "nums: list[int] = [1, 2, 2, 3, 3, 3]\n"
         "unique: set[int] = {x for x in nums}\n"
@@ -188,7 +186,7 @@ TEST(CodeGenE2E, SetCompStillWorks_Tier211) {
     EXPECT_EQ(output, "3\n");
 }
 
-TEST(CodeGenE2E, DictCompStillWorks_Tier211) {
+TEST(CodeGenE2E, DictCompStillWorks) {
     auto output = compileAndRun(
         "d: dict[str, int] = {\"k\" + str(i): i for i in range(3)}\n"
         "print(len(d))\n"
@@ -196,7 +194,7 @@ TEST(CodeGenE2E, DictCompStillWorks_Tier211) {
     EXPECT_EQ(output, "3\n");
 }
 
-TEST(CodeGenE2E, GeneratorExprStillWorks_Tier211) {
+TEST(CodeGenE2E, GeneratorExprStillWorks) {
     // Generator expressions need an explicit list[int] annotation today
     // for the type checker to accept indexed access on the result.
     auto output = compileAndRun(

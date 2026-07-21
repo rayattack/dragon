@@ -1,8 +1,8 @@
-"""Regression tests for the language gaps fixed from missing.md (2026-05-29).
+"""Regression tests for a language-gap fix campaign.
 
 Each TestCase pins a bug that was reproduced against the docs dogfood and then
 root-caused. Behaviour is asserted directly (not via skipped/xfail) so a
-regression re-breaks the build. Grouped by the missing.md section.
+regression re-breaks the build. Grouped by area.
 """
 
 from typing import Union, Optional
@@ -17,12 +17,12 @@ class Dog(Animal) {
     def() {}
 }
 
-# T31: module-global union (declared at module top level).
+# Module-global union (declared at module top level).
 g: int | str = 5
 
 
 class FloatRepr(TestCase) {
-    """T30/T28: scalar/str/f-string floats keep `.0`, round-trip precision."""
+    """scalar/str/f-string floats keep `.0`, round-trip precision."""
     def test_whole_number_keeps_dot_zero() {
         self.assertEqual(str(1.0), "1.0")
         self.assertEqual(str(4.0), "4.0")
@@ -44,7 +44,7 @@ class FloatRepr(TestCase) {
 
 
 class FormatSpecs(TestCase) {
-    """T27/T28: the Python format mini-language."""
+    """the Python format mini-language."""
     def test_alignment() {
         self.assertEqual(f"[{42:<6}]", "[42    ]")
         self.assertEqual(f"[{42:>6}]", "[    42]")
@@ -74,7 +74,7 @@ class FormatSpecs(TestCase) {
 
 
 class FStringEscapes(TestCase) {
-    """T29: backslash escapes are processed inside f-strings."""
+    """backslash escapes are processed inside f-strings."""
     def test_newline_and_tab() {
         const name: str = "world"
         self.assertEqual(f"a\n{name}", "a\nworld")
@@ -84,7 +84,7 @@ class FStringEscapes(TestCase) {
 
 
 class StringMethods(TestCase) {
-    """T24/T25/T26: strip(chars), split(maxsplit), rsplit."""
+    """strip(chars), split(maxsplit), rsplit."""
     def test_strip_charset() {
         self.assertEqual("xxhixx".strip("x"), "hi")
         self.assertEqual("xxhixx".lstrip("x"), "hixx")
@@ -102,7 +102,7 @@ class StringMethods(TestCase) {
 
 
 class Builtins(TestCase) {
-    """T19/T18/T23: min/max varargs, tuple(list), truthiness."""
+    """min/max varargs, tuple(list), truthiness."""
     def test_min_max_varargs() {
         self.assertEqual(min(5, 2, 8, 1, 9), 1)
         self.assertEqual(max(1, 2, 3), 3)
@@ -125,7 +125,7 @@ class Builtins(TestCase) {
 
 
 class Isinstance(TestCase) {
-    """T22/T32: inheritance walk + else-branch / is-None narrowing."""
+    """inheritance walk + else-branch / is-None narrowing."""
     def test_inheritance_chain() {
         const d: Dog = Dog()
         self.assertTrue(isinstance(d, Animal))
@@ -153,7 +153,7 @@ class Isinstance(TestCase) {
 
 
 class ListConversions(TestCase) {
-    """T21: list()/sorted()/reversed() preserve element type."""
+    """list()/sorted()/reversed() preserve element type."""
     def test_list_range() {
         const a: list[int] = list(range(3))
         self.assertEqual(a, [0, 1, 2])
@@ -171,7 +171,7 @@ class ListConversions(TestCase) {
 
 
 class DictAndEnumerate(TestCase) {
-    """T4/T6: dict.get value typing + enumerate/zip element typing."""
+    """dict.get value typing + enumerate/zip element typing."""
     def test_dict_get_str_value() {
         const cfg: dict[str, str] = {"host": "localhost"}
         self.assertEqual(f"{cfg.get('host', '?')}", "localhost")
@@ -200,7 +200,7 @@ class DictAndEnumerate(TestCase) {
 
 
 class Exceptions(TestCase) {
-    """T8/T9: try/finally re-raises; except tuple matches any."""
+    """try/finally re-raises; except tuple matches any."""
     def test_finally_reraises() {
         const ran: list[str] = []
         try {
@@ -226,7 +226,7 @@ class Exceptions(TestCase) {
 
 
 class UnionAlias(TestCase) {
-    """T3/T31: Union[]/Optional[] alias + module-global union reassign."""
+    """Union[]/Optional[] alias + module-global union reassign."""
     def test_union_optional() {
         const u: Union[int, str] = 42
         self.assertEqual(str(u), "42")
@@ -237,7 +237,7 @@ class UnionAlias(TestCase) {
 
 
 class CatchableBuiltinErrors(TestCase) {
-    """T7: builtin runtime errors are catchable (route through setjmp, not exit)."""
+    """builtin runtime errors are catchable (route through setjmp, not exit)."""
     def test_zero_division() {
         const ran: list[str] = []
         try { const x: int = 10 // 0 } except ZeroDivisionError { ran.append("div") }

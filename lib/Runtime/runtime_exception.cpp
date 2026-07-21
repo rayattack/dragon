@@ -163,12 +163,12 @@ const char* dragon_exc_bind_msg(void) {
 // handler's scope / unwind cleanup), and the slot's ref is released by the
 // NEXT raise's overwrite (or by dragon_vthread_log_uncaught). At most one
 // caught instance is retained per exception context between raises - a
-// bounded root, not growth. Before this, the slot was a bare pointer store
-// with an implicit "the handler will take it" contract that only the bound
-// user-class handler shape fulfilled: `except AppError { }` (no `as`) and
-// builtin-typed handlers leaked the instance and its fields on every raise,
-// and a second raise overwrote the slot without releasing the first
-// (AUDIT-2026-07-09 1.5, test_rc_exc_instance.dr)
+// bounded root, not growth. A bare pointer store with an implicit "the
+// handler will take it" contract is not enough: only the bound user-class
+// handler shape fulfills it, while `except AppError { }` (no `as`) and
+// builtin-typed handlers leak the instance and its fields on every raise,
+// and a second raise overwrites the slot without releasing the first
+// (pinned by test_rc_exc_instance.dr).
 //===----------------------------------------------------------------------===//
 
 static void dragon_exc_obj_set(void* obj, int consume) {
@@ -296,7 +296,7 @@ static void dragon_cleanup_grow(DragonCleanupStack* cs) {
     // Abort (not raise) on OOM: this IS the exception machinery, so raising
     // would re-enter the unwind mid-failure. xrealloc_or_abort also fixes the
     // self-assign - on failure it aborts before NULL can land in the field, so
-    // the old buffers stay valid (leaks.md #7).
+    // the old buffers stay valid.
     cs->vals  = (int64_t*) dragon_xrealloc_or_abort(cs->vals,  (size_t)newcap * sizeof(int64_t));
     cs->kinds = (int32_t*) dragon_xrealloc_or_abort(cs->kinds, (size_t)newcap * sizeof(int32_t));
     cs->tags  = (int32_t*) dragon_xrealloc_or_abort(cs->tags,  (size_t)newcap * sizeof(int32_t));
@@ -504,9 +504,9 @@ void dragon_vthread_log_uncaught() {
     // unwind cleanup deliberately SKIPS (keep_obj) because a matching
     // `except ... as e` handler is expected to take it. When the raise is
     // uncaught in a fired vthread there is no handler, so that +1 lands here -
-    // and was previously never released, leaking the instance (and its typed
-    // fields) on every uncaught vthread exception: unbounded RSS on a server
-    // whose handler green-threads can throw. exc_obj is a class instance, freed
+    // without this release the instance (and its typed fields) leaks on every
+    // uncaught vthread exception: unbounded RSS on a server whose handler
+    // green-threads can throw. exc_obj is a class instance, freed
     // with the generic object decref (same as the DCLEAN_OBJ unwind case).
     if (obj) dragon_decref_dispatch(obj);
 }

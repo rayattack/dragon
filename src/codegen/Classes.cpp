@@ -120,11 +120,11 @@ void CodeGen::visit(ClassDecl& node) {
         }
     }
 
-    // 6.18: @dataclass / NamedTuple synthesis already ran during
+    // @dataclass / NamedTuple synthesis already ran during
     // forwardDeclareClasses. The synthesized __init__ is now a regular member
     // of node.body and will be processed by the rest of this visitor.
 
-    // 6.B.5: class-body field declarations like `names: list[str]` (PEP 526
+    // Class-body field declarations like `names: list[str]` (PEP 526
     // style) populate classFieldListElemKinds so subscript on the field
     // (`obj.names[0]`) carries the right VarKind. Without this, the subscript
     // path defaults to int and downstream method dispatch / print fails.
@@ -246,7 +246,7 @@ void CodeGen::visit(ClassDecl& node) {
                     }
                 }
             }
-            // T39: a Callable-typed RHS - e.g. `self.f = mk(10)` (a closure-
+            // a Callable-typed RHS - e.g. `self.f = mk(10)` (a closure-
             // returning call) or any closure-valued expression - seeds the field
             // as a refcounted Closure. Without this the field-extract pass left a
             // closure field as VarKind::Other, so the synthesized destructor never
@@ -687,7 +687,7 @@ void CodeGen::visit(ClassDecl& node) {
         // inferred from the assignment RHS - e.g. `self.f = mk()` infers
         // VarKind::Other), the CLASS-BODY annotation is authoritative: upgrade a
         // stale Other to the annotated heap kind so the field is laid out and
-        // refcounted correctly (T39: a `f: Callable` field seeded as Other from a
+        // refcounted correctly (a `f: Callable` field seeded as Other from a
         // closure-returning-call ctor init was left out of the destructor ->
         // every instance leaked its closure).
         if (seenFields.count(tgt->name)) {
@@ -820,12 +820,12 @@ void CodeGen::visit(ClassDecl& node) {
     // field only from how the constructor *initializes* it, and only the
     // direct-ctor (`self.a = A(..)`) and class-typed-param forms recorded the
     // field's class. A factory call (`self.a = make_a(..)`), a typed local
-    // (`self.a = tmp`), or a cross-module return left the field as kind=Other
-    // (no refcount management) and, cross-module, type=i64 (the fallback
-    // default) - and crucially classFieldClassName unset, so method dispatch
-    // on `self.a.method()` resolved to ConstantInt 0. Re-derive declared
-    // class fields straight from their annotation here so the initialization
-    // form no longer matters.
+    // (`self.a = tmp`), or a cross-module return would leave the field as
+    // kind=Other (no refcount management) and, cross-module, type=i64 (the
+    // fallback default) - and crucially classFieldClassName unset, so method
+    // dispatch on `self.a.method()` resolves to ConstantInt 0. Re-derive
+    // declared class fields straight from their annotation here so the
+    // initialization form does not matter.
     for (auto& bs : node.body) {
         auto* ann = dynamic_cast<AnnAssignStmt*>(bs.get());
         if (!ann || ann->isStatic || !ann->annotation) continue;
@@ -1510,12 +1510,12 @@ void CodeGen::visit(ClassDecl& node) {
             }
             // This class's own defaults last (derived overrides base).
             for (auto& entry : perInstanceDefaults) orderedDefaults.push_back(entry);
-            // Dedupe by field name keeping the LAST (most-derived) entry. The
-            // old last-write-wins stores were not RC-correct: evaluating a
-            // shadowed base default (`items: list = []`) minted a fresh +1
+            // Dedupe by field name keeping the LAST (most-derived) entry.
+            // Plain last-write-wins stores are not RC-correct: evaluating a
+            // shadowed base default (`items: list = []`) mints a fresh +1
             // heap value the derived default's plain CreateStore then
-            // overwrote with no release - one leaked base default per
-            // construction (AUDIT-2026-07-09 1.6, test_rc_ctor_defaults.dr).
+            // overwrites with no release - one leaked base default per
+            // construction (pinned by test_rc_ctor_defaults.dr).
             // Skipping the shadowed initializer entirely also means only the
             // winning default's side effects run, matching override semantics.
             {
@@ -1819,7 +1819,7 @@ void CodeGen::visit(ClassDecl& node) {
 
             // For each heap-typed field, GEP and decref. Track which field
             // names we drop here so the Callable-specific pass below does NOT
-            // decref them a second time (T39: a Callable field is now
+            // decref them a second time (a Callable field is
             // VarKind::Closure - a heap kind - so it is handled in THIS loop via
             // dragon_decref_callable; without de-duping, the legacy callable pass
             // would double-decref it and free the closure early -> UAF).
@@ -1833,7 +1833,7 @@ void CodeGen::visit(ClassDecl& node) {
                 if (f.kind == Impl::VarKind::Str) {
                     impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref_str"], {val});
                 } else if (f.kind == Impl::VarKind::Closure) {
-                    // T39: tag-gated drop - frees a real closure (+ its env) and
+                    // tag-gated drop - frees a real closure (+ its env) and
                     // no-ops on a bare fn ptr (no header).
                     llvm::Value* p = val;
                     if (!p->getType()->isPointerTy())
@@ -1914,7 +1914,7 @@ void CodeGen::visit(ClassDecl& node) {
             if (f.kind == Impl::VarKind::List || f.kind == Impl::VarKind::Dict ||
                 f.kind == Impl::VarKind::Tuple || f.kind == Impl::VarKind::Set ||
                 f.kind == Impl::VarKind::ClassInstance ||
-                // leaks.md #11: a Closure field can capture `self` back
+                // a Closure field can capture `self` back
                 // (self.cb = lambda { ...self... }) - instance -> closure ->
                 // env -> self, a real cycle the collector must be able to see.
                 f.kind == Impl::VarKind::Closure) {
@@ -1941,13 +1941,12 @@ void CodeGen::visit(ClassDecl& node) {
             // intermediate allocation in __init__ crosses gc_threshold). At
             // that moment the field is still memset-zeroed (NULL). The
             // visitor (gc_visit_reachable) dereferences `(DragonObjectHeader*)
-            // child` at offset 9 and segfaults on NULL. (This is the actual
-            // root cause of the hello_server "request 87" crash.)
+            // child` at offset 9 and segfaults on NULL.
             for (auto& f : fields) {
                 if (f.kind != Impl::VarKind::List && f.kind != Impl::VarKind::Dict &&
                     f.kind != Impl::VarKind::Tuple && f.kind != Impl::VarKind::Set &&
                     f.kind != Impl::VarKind::ClassInstance &&
-                    // leaks.md #11: visit Closure fields so the cycle collector
+                    // visit Closure fields so the cycle collector
                     // subtracts the instance -> closure internal ref. The visit
                     // fns only deref a TRACKED child, so a bare-fn-ptr Callable
                     // field (no header, never tracked) is a safe hash-miss.
@@ -2011,7 +2010,7 @@ void CodeGen::visit(ClassDecl& node) {
                 if (f.kind == Impl::VarKind::Str) {
                     impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref_str"], {val});
                 } else if (f.kind == Impl::VarKind::Closure) {
-                    // T39: tag-gated drop, safe on a bare fn ptr (see dealloc).
+                    // tag-gated drop, safe on a bare fn ptr (see dealloc).
                     llvm::Value* p = val;
                     if (!p->getType()->isPointerTy())
                         p = impl_->builder->CreateIntToPtr(p, impl_->i8PtrType);

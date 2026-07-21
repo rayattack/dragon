@@ -2,7 +2,7 @@
 #include "runtime_internal.h"
 
 extern "C" {
-// T39: tag-gated closure decref (runtime_builtins.cpp) - a dict[*, Callable]
+// tag-gated closure decref (runtime_builtins.cpp) - a dict[*, Callable]
 // value (entry tag == DRAGON_TAG_CLOSURE) may be a real DragonClosure or a bare
 // fn ptr; this frees the former (+ env) and no-ops on the latter.
 void dragon_decref_callable(void* p);
@@ -265,7 +265,7 @@ void dragon_dict_set_tagged(DragonDict* d, const char* key, int64_t value, int64
         // value's ref. Reentrancy hardening: the slot must hold the new value
         // before the decref, so if a finalizer ever runs during the drop and
         // re-reads d[key] it observes `value`, never the freed `old_val`.
-        // Tier 1.9: dispatch covers atomic-context.
+        // The decref goes through dispatch, which covers atomic-context.
         int8_t old_tag = d->entries[idx].tag;
         int64_t old_val = d->entries[idx].value;
         d->entries[idx].value = value;
@@ -524,7 +524,7 @@ int64_t dragon_dict_get_default(DragonDict* d, const char* key, int64_t def) {
 // Owned-returning getters for HEAP-valued dicts (list/dict/set/tuple/bytes/
 // instance). The generic i64 getters above return a BORROW of the stored value;
 // a binding (`g: list[int] = d.get(k)`) then decrefs it at scope exit and frees
-// the dict's value while the dict still holds it -> UAF (leaks.md #19). These
+// the dict's value while the dict still holds it -> UAF. These
 // incref what they return, so the caller owns its OWN reference and the dict
 // keeps its own - the exact contract dragon_dict_get_str_default uses for str.
 // dragon_incref is generic (works for any heap object with the RC header);
@@ -663,8 +663,8 @@ void dragon_print_tagged(int64_t value, int64_t tag) {
 }
 
 /// Destroy a dict and free its memory (GC support).
-/// Tier 1.9: child decrefs go through dispatch helpers (atomic variants
-/// when invoked from an atomic-context dealloc).
+/// Child decrefs go through dispatch helpers (atomic variants when
+/// invoked from an atomic-context dealloc).
 void dragon_dict_destroy(DragonDict* d) {
     if (!d) return;
     // Phase 5: decref heap-typed values before freeing. Dead slots already had
@@ -752,11 +752,10 @@ DragonListBox* dragon_dict_values_box(DragonDict* d) {
         // STR/LIST/DICT/BYTES only. Deliberately NOT dragon_incref_tagged,
         // which would also incref a TAG_CLOSURE payload that box destroy does
         // not decref - that asymmetry would leak a closure-valued entry. If
-        // the box destroy ever learns TAG_CLOSURE, mirror it here too. (The
-        // decref arm was attempted 2026-07-09 and walled by an ASan-proven
-        // double-free: see the WALL note in dragon_listbox_decref_elem,
-        // runtime_list.cpp - the codegen borrowed-append incref for tag 10
-        // must land first.)
+        // the box destroy ever learns TAG_CLOSURE, mirror it here too. (A
+        // decref arm there is walled by an ASan-proven double-free: see the
+        // WALL note in dragon_listbox_decref_elem, runtime_list.cpp - the
+        // codegen borrowed-append incref for tag 10 must land first.)
         if (payload) {
             if (tag == TAG_STR)
                 dragon_incref_str((const char*)(uintptr_t)payload);
@@ -813,13 +812,13 @@ DragonDict* dragon_dict_fromkeys(DragonList* keys, int64_t value, int64_t tag) {
         if (!keyData) continue;
         // The new-key store ADOPTS the key pointer (dragon_dict_set_tagged sets
         // entries[ei].key = key with no dup), so the dict needs one owned ref.
-        // This used to dragon_str_intern the key: that allocated an IMMORTAL
-        // string with no dedup table, so every fromkeys call leaked one
-        // unfreeable string per key forever - unbounded RSS for a server
-        // calling fromkeys per request (AUDIT-2026-07-09 2.1). dragon_string_dup
-        // gives a normal mortal +1 the dict's key release path reclaims, and it
-        // already handles the ASCII / UCS-4 kinds, so the manual UTF-8 round
-        // trip is gone too.
+        // That ref must be a normal mortal +1 (dragon_string_dup), never
+        // dragon_str_intern: an interned key is IMMORTAL with no dedup table,
+        // so every fromkeys call would leak one unfreeable string per key
+        // forever - unbounded RSS for a server calling fromkeys per request.
+        // dragon_string_dup gives a +1 the dict's key release path reclaims,
+        // and it already handles the ASCII / UCS-4 kinds, so no manual UTF-8
+        // round trip is needed.
         const char* ownedKey = dragon_string_dup(keyData);
         // Each entry takes its own reference to the value.
         dragon_incref_tagged(value, tag);
@@ -983,8 +982,7 @@ void dragon_dict_clear(DragonDict* d) {
         // insert appends past it (and is dropped by the size=0 below) rather
         // than corrupting this teardown loop. Nulling the key also stops the
         // reused entries storage from re-releasing a stale key on a later
-        // destroy. Tier 1.9: dispatch routes to atomic decref under
-        // atomic-context.
+        // destroy. Dispatch routes to atomic decref under atomic-context.
         int64_t n = d->size;
         for (int64_t i = 0; i < n; i++) {
             if (d->entries[i].dead) continue;  // already released at delete time
@@ -1057,7 +1055,7 @@ int64_t dragon_dict_setdefault(DragonDict* d, const char* key, int64_t def) {
 }
 
 // Owned-returning setdefault for HEAP-OBJECT-valued dicts (list/dict/set/tuple/
-// bytes/instance) - the str-keyed half of leaks.md #20 (the get half is #19).
+// bytes/instance) - the str-keyed setdefault sibling of the owned-returning get.
 // The generic dragon_dict_setdefault above returns the stored value as a BORROW
 // and, on insert, stores the default with TAG_INT (so dealloc/cycle-GC never
 // see it as heap -> leak + blind collector). This variant fixes both. Contract
@@ -1442,7 +1440,7 @@ int64_t dragon_dict_int_get_default(DragonDict* d, int64_t key, int64_t def) {
 // Same incref-on-return contract as the str-keyed dragon_dict_get_ptr; named
 // _owned to avoid the existing dragon_dict_int_get_ptr, which is a tag-checked
 // BORROW. Without these, a binding `g: list[int] = d.get(1)` frees the dict's
-// stored value -> UAF (leaks.md #19). dragon_incref is generic over heap kinds.
+// stored value -> UAF. dragon_incref is generic over heap kinds.
 void* dragon_dict_int_get_owned(DragonDict* d, int64_t key) {
     uint64_t h = dict_hash_i64(key);
     int64_t slot = dict_probe_i64(d, key, h);
@@ -1556,8 +1554,8 @@ int64_t dragon_dict_int_setdefault(DragonDict* d, int64_t key, int64_t def) {
     return def;
 }
 
-// Int-keyed owned-returning setdefault for HEAP-OBJECT-valued dicts (leaks.md
-// #20). Same contract as the str-keyed dragon_dict_setdefault_ptr: present ->
+// Int-keyed owned-returning setdefault for HEAP-OBJECT-valued dicts.
+// Same contract as the str-keyed dragon_dict_setdefault_ptr: present ->
 // incref + return the stored value; absent -> store the default with its heap
 // `tag` then incref twice (dict's retained copy + the binding), balanced against
 // the call site's single owned-temp drain.

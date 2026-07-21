@@ -1,6 +1,6 @@
 # test/dr/test_box_subscript.dr - subscripting an Any/Union (box) value.
 #
-# Regression guard for T38: `anyVal[index]` returned 0. The static type is
+# Regression guard: `anyVal[index]` returned 0. The static type is
 # `Any`, so codegen couldn't pick a typed subscript path; the receiver was a
 # 16-byte box (not a pointer), so the SubscriptExpr fast path hit a
 # `return constant 0` fallback. The fix boxes the index and routes through the

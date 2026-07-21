@@ -1,4 +1,4 @@
-"""json.dumps of a list[Any] - the box-layout misread (2026-07-06).
+"""json.dumps of a list[Any] - the box-layout misread.
 
 Given the code below:
 

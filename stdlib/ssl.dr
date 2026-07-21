@@ -240,9 +240,9 @@ class SSLContext {
     }
 
     # Release the engine context (mbedTLS ctx + parsed CA / cert chains, ~54KB+
-    # per context). The context had no release path at all: dragon_tls_ctx_free
-    # was declared and never called from Dragon, so every SSLContext leaked its
-    # engine state (AUDIT-2026-07-09 2.2). Idempotent so `with` + a manual
+    # per context). This is the ONLY release path: without it
+    # dragon_tls_ctx_free is never called from Dragon and every SSLContext
+    # leaks its engine state. Idempotent so `with` + a manual
     # close() (or a double close) frees exactly once. A context is reusable
     # across many connections, so this is caller-driven (like SSLSocket.close),
     # not tied to any one wrap_socket.

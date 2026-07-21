@@ -1,4 +1,4 @@
-"""Unified `except X as e` binding semantics (smells.md except-as fork).
+"""Unified `except X as e` binding semantics.
 
 Previously `e` was a plain message STRING for a builtin exception but a typed
 INSTANCE for a user exception - one syntax, two semantics. Pythonic code that

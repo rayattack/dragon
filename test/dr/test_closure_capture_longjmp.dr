@@ -1,6 +1,6 @@
 # test/dr/test_closure_capture_longjmp.dr - regression for a fixed SIGSEGV.
 #
-# Bug (fixed 2026-05-31): a capturing-lambda literal sets the one-shot
+# Bug: a capturing-lambda literal sets the one-shot
 # `lastClosureCallableType` codegen flag (consumed to mark an assigned var
 # VarKind::Closure). When the lambda was consumed as a CALL ARGUMENT instead of
 # a direct assignment RHS - e.g. `assertRaises(ValueError, lambda () { ... })` -

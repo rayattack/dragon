@@ -477,7 +477,7 @@ void CodeGen::visit(TemplateExpr& node) {
                 // frees nothing) and `joined` is a fresh +1. The buffer owns one
                 // ref per appended fragment (dragon_list_append_ptr transfers),
                 // so it must be released here or the list + buffer + every
-                // rendered fragment leaks per render (leaks.md #10). list_destroy
+                // rendered fragment leaks per render. list_destroy
                 // decrefs each element, leaving `joined` independent.
                 impl_->emitDecrefByKind(buf, Impl::VarKind::List);
                 parts.push_back(joined);
@@ -656,7 +656,7 @@ void CodeGen::visit(TemplateExpr& node) {
                     // -> isOwnedStrResult false) or an OWNED temp (str(n), a + b,
                     // f() -> a fresh +1). The pre-fix code hardcoded `false`, so a
                     // typed template's auto-escape (applyFilter) skipped decref'ing
-                    // the owned temp -> one leaked str per render (leaks.md #10,
+                    // the owned temp -> one leaked str per render (
                     // e.g. `!{str(n)}`). Classify honestly so applyFilter releases
                     // an owned source and leaves a borrowed one alone.
                     strValOwned = impl_->isOwnedStrResult(exprVal);
@@ -859,7 +859,7 @@ void CodeGen::visit(TemplateExpr& node) {
                 // The content-type ctor RETAINS (increfs) the inner string into
                 // its field (the borrowed-param store convention), so the owned
                 // concat temp we built above is still the caller's +1. Drop it or
-                // a typed template leaks one string per render (leaks.md #10).
+                // a typed template leaks one string per render.
                 // A literal-only template's `result` is a GlobalString (not an
                 // owned CallInst) - isOwnedStrResult screens it out.
                 if (impl_->options.gcMode == GCMode::RC &&

@@ -425,7 +425,7 @@ TEST(DriverLLVM, ArithmeticAndFunction) {
 }
 
 //===----------------------------------------------------------------------===//
-// Tier 2 Fix 2.4: HTTP response buffer undercount (T18)
+// Regression: HTTP response buffer undercount
 //
 // Pre-fix: dragon_http_build_response computed `total` from a hand-rolled
 // formula (`32 + strlen(reason) + headers_len + 4 + body_len`) and allocated
@@ -438,7 +438,7 @@ TEST(DriverLLVM, ArithmeticAndFunction) {
 // the result length is exactly correct (no truncation, no over-write).
 //===----------------------------------------------------------------------===//
 
-TEST(CodeGenE2E, HttpBuildResponseLongHeaders_Tier24) {
+TEST(CodeGenE2E, HttpBuildResponseLongHeaders) {
     // 100 copies of "x-custom: value\r\n" = 1700-char headers section.
     // Pre-fix the 32-char fudge factor was enough for typical headers but
     // we still want to confirm the fix handles arbitrary sizes correctly.
@@ -456,7 +456,7 @@ TEST(CodeGenE2E, HttpBuildResponseLongHeaders_Tier24) {
     EXPECT_EQ(out, "1724\n");
 }
 
-TEST(CodeGenE2E, HttpBuildResponseEmptyBody_Tier24) {
+TEST(CodeGenE2E, HttpBuildResponseEmptyBody) {
     // Body is empty string - body_len=0, but the prefix must be sized correctly.
     auto out = compileAndRun(
         "extern \"C\" def dragon_http_build_response(status: int, headers: str, body: str) -> str\n"
@@ -469,7 +469,7 @@ TEST(CodeGenE2E, HttpBuildResponseEmptyBody_Tier24) {
     EXPECT_EQ(out, "46\n");
 }
 
-TEST(CodeGenE2E, HttpBuildResponseLargeBody_Tier24) {
+TEST(CodeGenE2E, HttpBuildResponseLargeBody) {
     // 10KB body + small headers - exercises memcpy(buf + off, body, body_len)
     // path. With the fix, off equals exactly prefix_len, so the body always
     // lands at a safe offset.
@@ -488,7 +488,7 @@ TEST(CodeGenE2E, HttpBuildResponseLargeBody_Tier24) {
     EXPECT_EQ(out, "10282\n");
 }
 
-TEST(CodeGenE2E, HttpBuildResponseLoopBounded_Tier24) {
+TEST(CodeGenE2E, HttpBuildResponseLoopBounded) {
     // Stress: build many responses in a tight loop. Pre-fix overruns would
     // corrupt the heap and likely crash; post-fix this is bounded.
     auto out = compileAndRun(
@@ -506,7 +506,7 @@ TEST(CodeGenE2E, HttpBuildResponseLoopBounded_Tier24) {
     EXPECT_EQ(out, "69\n");
 }
 
-TEST(CodeGenE2E, HttpBuildResponseUnknownStatus_Tier24) {
+TEST(CodeGenE2E, HttpBuildResponseUnknownStatus) {
     // Status code with no entry in the reason switch - falls through to "Unknown".
     auto out = compileAndRun(
         "extern \"C\" def dragon_http_build_response(status: int, headers: str, body: str) -> str\n"

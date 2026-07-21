@@ -310,10 +310,9 @@ int typeCheckModuleGraph(Module& entryModule,
         // Sema + TypeCheck each dependency module
         // Surface Sema errors in dependency modules just like the entry module
         // (below) and like the dependency TypeChecker (further down). Dropping
-        // the return meant a name-resolution error in an imported module was
-        // swallowed - it vanished or resurfaced later as an opaque type error,
-        // violating the "a silent fallback is a silent lie" rule
-        // (AUDIT-2026-07-09 Tier 5.1).
+        // the return swallows a name-resolution error in an imported module -
+        // it vanishes or resurfaces later as an opaque type error, violating
+        // the "a silent fallback is a silent lie" rule.
         Sema modSema;
         if (!modSema.analyze(*mod.ast)) {
             for (const auto& diag : modSema.diagnostics()) {
@@ -738,8 +737,8 @@ int Driver::runFile(const std::string& filename) {
     waitpid(pid, &status, 0);
     cleanup();
     // Translate the wait status: normal exit -> exit code; signal death (segv,
-    // abort, ...) -> 128+signum (shell convention). Returning a bare 1 here
-    // previously masked program crashes as an ordinary failure.
+    // abort, ...) -> 128+signum (shell convention). A bare 1 here would mask
+    // program crashes as an ordinary failure.
     return platform::getExitCode(status);
 #endif
 }
@@ -830,7 +829,7 @@ int Driver::buildFile(const std::string& filename) {
     // Any on the second pass - silently miscompiling `cell()[k]` / `cell().x`
     // into a str-index / 0. Checking exactly once keeps monomorphization a
     // single, consistent pass (and halves type-check work for import-free
-    // programs). See bugs.md "generic chained access".
+    // programs).
 
     // --- Resolve Imports ---
     // sourceDir = the directory of the entry file. For an absolute or
@@ -922,6 +921,12 @@ int Driver::buildFile(const std::string& filename) {
 #ifdef DRAGON_MBEDTLS_LIB
         codegenOpts.mbedtlsLibPath = findBundledLib(
             prefix, "libdragon_mbedtls.a", DRAGON_MBEDTLS_LIB);
+#endif
+#ifdef DRAGON_ZSTD_LIB
+        // Mac only (see CMakeLIsts): macOS has no system libzstd - so user
+        // programs link the bundled static archive instead of -lzstd.
+        codegenOpts.zstdLibPath = findBundledLib(
+            prefix, "libzstd.a", DRAGON_ZSTD_LIB);
 #endif
     }
     codegenOpts.linkedLibraries = impl_->options.linkedLibraries;

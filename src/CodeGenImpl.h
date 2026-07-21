@@ -91,7 +91,7 @@ struct CodeGen::Impl {
         // stack frame unwinds). Only non-escaping locals of scalar-only classes
         // land here, so there are no heap children to tear down.
         std::unordered_set<std::string> stackAllocated;
-        // leaks.md #2 (bound-Task tail): Task locals bound to a `fire ...` that
+        // Bound-Task tail: Task locals bound to a `fire ...` that
         // PROVABLY never escape and are never joined/awaited (a bound
         // fire-and-forget) - dragon_vthread_detach them at scope exit so the
         // handle ref isn't leaked. Populated only at the binding site for decls
@@ -172,7 +172,7 @@ struct CodeGen::Impl {
     bool nodeMentionsName(Expr* e, const std::string& name);
     bool nodeMentionsName(Stmt* s, const std::string& name);
 
-    // leaks.md #2 tail (refined): does Task local `name` TRANSFER out of its
+    // Task-detach tail (refined): does Task local `name` TRANSFER out of its
     // scope - returned, stored, passed as an argument, captured by a
     // lambda/fire/thread/nested def, or rebound - as OPPOSED to merely being
     // CONSUMED (`await t` / `t.join()`) or READ (`t.is_alive()`)? A consume/read
@@ -255,7 +255,7 @@ struct CodeGen::Impl {
     // last). return/break/continue replay the escaped frames innermost-first
     // BEFORE jumping, so finally bodies AND `with` __exit__/lock-release run on
     // every exit edge - not just the normal fall-through and the longjmp path
-    // (leaks.md #5: an early `return` skipped __exit__/release; break/continue
+    // (an early `return` skipped __exit__/release; break/continue
     // additionally produced invalid IR). One stack rather than two so a `with`
     // nested in a try-finally (and vice-versa) interleave in the correct order.
     struct ExitCleanup {
@@ -333,9 +333,9 @@ struct CodeGen::Impl {
     // unannotated parameters that may carry class descriptors.
     std::unordered_set<std::string> varIsPtrCallable;
 
-    // D024 Phase 2 (6.11), post ADR-025 removal: Classes with user-defined
-    // (runtime) decorators. Class decorators are now DROPPED - a decorated class
-    // would require runtime descriptor construction, which no longer exists.
+    // D024, post ADR-025: classes with user-defined (runtime) decorators.
+    // Class decorators are DROPPED - a decorated class would require runtime
+    // descriptor construction, which ADR-025 removed.
     // Constructing a class in this set is a compile error (CallExpr.cpp).
     // @dataclass / @staticmethod / @classmethod / @property / NamedTuple are
     // compile-time synthesis and are NOT tracked here.
@@ -564,7 +564,7 @@ struct CodeGen::Impl {
     // Iterating yields VarKind::Type so callsites dispatch through descriptor.
     std::unordered_set<std::string> varListElemIsType;
     std::unordered_set<std::string> varDictValueIsType;
-    // 6.B.4: dict[K, V] value Type::Kind tracking. Used by `for k, v in d.items()`
+    // dict[K, V] value Type::Kind tracking. Used by `for k, v in d.items()`
     // to set v's VarKind so subsequent uses (print, comparisons, etc.) dispatch
     // correctly. Mirrors varListElemKinds for lists.
     std::unordered_map<std::string, Type::Kind> varDictValueKinds;
@@ -846,10 +846,10 @@ struct CodeGen::Impl {
     // Each parent's owning module is looked up in classOwningModule and
     // falls back to the caller-supplied owningModule if not recorded.
     //
-    // This consolidates the five copies of the same lookup that previously
-    // lived in CallMethods, Classes, and Concurrency codegen. Drift between
-    // copies (Concurrency.cpp using bare classNames pre-mangling) was the
-    // root cause of the http-package `fire self._method()` regression.
+    // This is the SINGLE lookup point: CallMethods, Classes, and Concurrency
+    // codegen all resolve through it. Per-caller copies drift (e.g. bare
+    // classNames pre-mangling) and a drifted copy miscompiles cross-module
+    // dispatch like `fire self._method()`.
     llvm::Function* resolveMethodFunction(
         const std::string& owningModule,
         const std::string& className,
@@ -1024,7 +1024,7 @@ struct CodeGen::Impl {
     // buffer ptr) - so the call site must never release owned-temp arguments
     // passed to them.
     std::unordered_set<std::string> externFuncNames;
-    // FFI v0 ownership contract (AUDIT-2026-07-09 1.2): extern "C" args are
+    // FFI v0 ownership contract: extern "C" args are
     // BORROWED for the duration of the call (an extern must not retain a
     // Dragon reference past return - an adopting extern would already corrupt
     // named-local args, which are never increfed for externs), and a managed
@@ -1244,7 +1244,7 @@ struct CodeGen::Impl {
                k == VarKind::Union;  // conservative: union may hold heap types
     }
 
-    // leaks.md #11: a closure env capture that can be a NODE in a reference
+    // a closure env capture that can be a NODE in a reference
     // cycle - a heap object the env holds a +1 to AND that can transitively
     // point back at the env (instance/list -> closure -> env -> ...). Strings
     // are heap LEAVES (no children, never gc_tracked) and unions are boxed (not
@@ -1266,7 +1266,7 @@ struct CodeGen::Impl {
     // closure-site CaptureInfo.
     struct EnvCaptureDesc { VarKind kind; bool isCellRelay; };
 
-    // leaks.md #11: emit the per-closure-site MULTI-OP env GC hook (DEALLOC /
+    // emit the per-closure-site MULTI-OP env GC hook (DEALLOC /
     // TRAVERSE / CLEAR over the env's heap captures). Replaces the old
     // single-purpose dealloc fn; both closure sites (LambdaExpr + nested def)
     // route through this one emitter so they cannot drift. Returns the fn;
@@ -1277,7 +1277,7 @@ struct CodeGen::Impl {
 
     /// True if `v` is an owned (+1 refcount, heap) intermediate string that a
     /// consuming op (concat, repeat, ...) must decref or it leaks. By the
-    /// ownership convention (audited 2026-04-24) ALL dragon_* i8*-returning
+    /// ownership convention, ALL dragon_* i8*-returning
     /// functions return owned heap strings EXCEPT the borrowed-returners
     /// listed here, so this uses a blocklist. Non-CallInst values (GlobalString
     /// literals, alloca loads of named vars) are not owned intermediates.
@@ -1574,8 +1574,8 @@ struct CodeGen::Impl {
     /// Register owned arg temps on the runtime cleanup stack for the duration
     /// of a call, so a raise that longjmps out of the callee frees them (the
     /// post-call decref only runs on normal return; without this an owned temp
-    /// like the bytes literal in `assertRaises(..., lambda: f(b"x"))` leaked
-    /// whenever the callee raised - AUDIT-2026-07-09 1.9). Returns the per-temp
+    /// like the bytes literal in `assertRaises(..., lambda: f(b"x"))` leaks
+    /// whenever the callee raises). Returns the per-temp
     /// rewind bases for popArgTempCleanups on the normal-return path. Only
     /// tag-independent kinds (Str/Callable/Obj) are registered - a Union temp
     /// needs a box value-tag the temp-cleanup path doesn't carry, so it stays
@@ -2088,7 +2088,7 @@ struct CodeGen::Impl {
         if (kind == VarKind::Str) {
             builder->CreateCall(runtimeFuncs["dragon_decref_str"], {ptr});
         } else if (kind == VarKind::Closure) {
-            // T39: tag-gated drop - frees a real closure (cascading to its env)
+            // tag-gated drop - frees a real closure (cascading to its env)
             // and no-ops on a bare fn ptr / null. See emitIncrefByKind.
             builder->CreateCall(runtimeFuncs["dragon_decref_callable"], {ptr});
         } else {
@@ -2112,17 +2112,15 @@ struct CodeGen::Impl {
     VarKind argTempDecrefKind(Expr* argExpr, VarKind paramKind, llvm::Value* rawVal) {
         if (options.gcMode != GCMode::RC) return VarKind::Other;
         if (paramKind == VarKind::Union) {
-            // Union/Any params now take the SAME callee-borrows contract as
+            // Union/Any params take the SAME callee-borrows contract as
             // every typed param: the callee retains by increfing (the Union
             // arm of emitIncrefByKind fires on field stores / return aliases
             // via storeWithRCOverwrite), so the caller's owned temp is always
-            // the caller's to drain. History: this used to return Other ON
-            // PURPOSE because an Any FIELD store adopted the temp's +1
-            // without incref - ownership was genuinely ambiguous at the call
-            // site and draining double-freed the retain case (A/B-proven
-            // heap-use-after-free in __dragon_dealloc_<Class>). That adopt
-            // asymmetry is fixed at the root, the old failure is pinned by
-            // test_rc_any_field.dr, and the ambiguity is gone. Monomorphizing
+            // the caller's to drain. That incref-on-retain is the load-bearing
+            // half of the contract: if an Any FIELD store ever adopts the
+            // temp's +1 without increfing again, this drain double-frees the
+            // retain case (heap-use-after-free in __dragon_dealloc_<Class>,
+            // pinned by test_rc_any_field.dr). Monomorphizing
             // spurious-Any params into generics [T] remains the better fix
             // where the concrete type is knowable (zen: types are honest);
             // this drain covers the genuinely dynamic remainder.
@@ -2181,8 +2179,9 @@ struct CodeGen::Impl {
             // A ptr-returning extern is not drainable (interior-pointer hazard).
             // A drainable extern is classified by the ARG's own static type,
             // never the declared param kind (the same C symbol can carry
-            // disagreeing arg types across modules - AUDIT-2026-07-09 postgres
-            // UAF), so route through ownedTempDrainKind.
+            // disagreeing arg types across modules; classifying by param kind
+            // drains a borrowed pointer - a use-after-free), so route
+            // through ownedTempDrainKind.
             if (!externDrainableFuncs.count(funcName)) return;
             VarKind dk = ownedTempDrainKind(srcExpr, rawArg);
             if (dk != VarKind::Other) out.emplace_back(rawArg, dk);
@@ -2616,7 +2615,7 @@ struct CodeGen::Impl {
     // emitted). Keyed by AST node identity.
     std::unordered_set<const CallExpr*> stackAllocSites;
 
-    // leaks.md #2 (bound-Task tail): `t: Task[...] = fire ...` declarations whose
+    // Bound-Task tail: `t: Task[...] = fire ...` declarations whose
     // bound local PROVABLY does not escape the rest of its block (reusing the
     // same conservative escape walk as stackAllocSites - any use, INCLUDING a
     // join/await/is_alive method call, counts as escape). So this captures ONLY
@@ -2990,7 +2989,7 @@ struct CodeGen::Impl {
             // source here, then have the callee free a non-escaping Any param at
             // scope exit) is deferred - it additionally needs an ownership-FLOW
             // analysis for the free-point that the stack-allocation escape pass
-            // can't provide. See leaks.md #3 (class B). Flipping this to true is
+            // can't provide. Flipping this to true is
             // the caller half of that future work.
             auto tp = boxArgTagPayload(expr, arg, /*takesOwnership=*/false);
             return makeBox(tp.first, tp.second);

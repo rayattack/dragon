@@ -37,8 +37,8 @@
 // workers + reactor), so a CONCURRENT dragon_subprocess_spawn on another carrier
 // thread can fork between our pipe() and exec and inherit our pipe ends into an
 // unrelated child - that child then holds our stdout write end open, so our
-// drain never sees EOF and communicate() hangs past the intended child's death
-// (AUDIT-2026-07-09 2.5). O_CLOEXEC closes that race: the child of THIS spawn
+// drain never sees EOF and communicate() hangs past the intended child's
+// death. O_CLOEXEC closes that race: the child of THIS spawn
 // re-establishes the ends it needs via dup2 (which clears CLOEXEC on the copy),
 // so the existing child-side wiring is unaffected. pipe2 in one syscall where
 // available; fcntl fallback otherwise

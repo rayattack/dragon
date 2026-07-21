@@ -387,14 +387,12 @@ void TypeChecker::visit(AugAssignStmt& node) {
     auto valueType = inferType(node.value.get());
     // `x += y` desugars to `x = x <op> y`, so it must obey the SAME operand
     // rules as the binary operator - and then the result must be assignable
-    // back to the target. Previously this did nothing ("for now, just visit
-    // both sides"), so `x: int` followed by `x += "s"` compiled while the
-    // equivalent `x = x + "s"` was correctly rejected - a hole in commandment 3
-    // (types must be honest) that a grep for TODO would not even find
-    // (AUDIT-2026-07-09 Tier 5.3). This mirrors the accept/reject decisions in
-    // visit(BinaryExpr) for the compound operators; the two encode the same
-    // operator table and should be unified when that table is centralized
-    // (Tier 6 duplication note).
+    // back to the target. If this checks nothing, `x: int` followed by
+    // `x += "s"` compiles while the equivalent `x = x + "s"` is correctly
+    // rejected - a hole in commandment 3 (types must be honest). This mirrors
+    // the accept/reject decisions in visit(BinaryExpr) for the compound
+    // operators; the two encode the same operator table and should be
+    // unified when that table is centralized.
     if (!targetType || !valueType) return;
     auto tk = targetType->kind();
     auto vk = valueType->kind();

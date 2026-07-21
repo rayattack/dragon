@@ -1,5 +1,5 @@
 # test/dr/test_with_object_rc.dr - the `with` context-manager OBJECT is released
-# at with-exit (leaks.md #8).
+# at with-exit.
 #
 # Each `with CM()` used to leak the manager instance: the constructor temp the
 # `with` owns AND the second ref `__enter__` returns (the `as` binding, which the

@@ -99,7 +99,9 @@ fi
 # Copy bin/lib/share/include as siblings under the prefix. -R preserves the
 # `dr` symlink; the toolchain finds its stdlib relative to the binary, so all
 # four directories must stay together.
-$sudo cp -R "$root/." "$PREFIX/"
+copy="cp -R"
+[ "$plat" = "macos" ] && copy="cp -RX"
+$sudo $copy "$root/." "$PREFIX/"
 
 # macOS: we need to clear any quarantine flag so the (ad-hoc signed) binary runs silently.
 if [ "$plat" = "macos" ] && have xattr; then

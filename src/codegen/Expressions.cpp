@@ -545,7 +545,7 @@ void CodeGen::visit(BinaryExpr& node) {
                     impl_->runtimeFuncs["dragon_bytes_concat"], {lhs, rhs}, "bytescat");
                 // Decref owned intermediate bytes operands from chained
                 // expressions ((a + b) + c) - the str/list paths already do this;
-                // bytes did not, leaking the inner temp per op (leaks.md #10).
+                // bytes did not, leaking the inner temp per op.
                 // isOwnedPtrResult screens out borrowed Names/fields. bytes carry
                 // a DragonObjectHeader, so dragon_decref dispatches to bytes free.
                 if (impl_->options.gcMode == GCMode::RC) {
@@ -571,7 +571,7 @@ void CodeGen::visit(BinaryExpr& node) {
             // (`h == "ONYX1".encode()`, `(a + b) != c`). The runtime eq/cmp
             // helpers only READ their operands, so a fresh +1 on either side
             // leaks once per evaluation - the exact mirror of the str-compare
-            // path below, which bytes previously lacked. isBorrowedHeapExpr
+            // path below. isBorrowedHeapExpr
             // screens out borrowed Names/fields/element reads; isOwnedPtrResult
             // confirms a genuinely-owned pointer result; bytes carry a
             // DragonObjectHeader so dragon_decref dispatches to bytes free.

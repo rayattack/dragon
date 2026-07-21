@@ -1,4 +1,4 @@
-"""template render temp leaks - leaks.md #10.
+"""template render temp leaks.
 
 Three per-render leaks in the typed-template (`template[X] { ... }`) lowering,
 all now closed (verified leak-free under LSan with high-iteration probes; this

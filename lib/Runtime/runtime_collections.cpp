@@ -540,7 +540,7 @@ void dragon_print_tuple(DragonTuple* t) {
 }
 
 /// Destroy a tuple and free its memory (GC support).
-/// Tier 1.9: child decrefs go through dispatch helpers.
+/// Child decrefs go through the dispatch helpers (atomic-safe in atomic context).
 void dragon_tuple_destroy(DragonTuple* t) {
     if (!t) return;
     // Phase 5: decref heap-typed elements
@@ -553,10 +553,10 @@ void dragon_tuple_destroy(DragonTuple* t) {
             } else if (val && (tag == TAG_LIST || tag == TAG_DICT || tag == TAG_BYTES)) {
                 dragon_decref_dispatch((void*)(uintptr_t)val);
             } else if (val && tag == DRAGON_TAG_CLOSURE) {
-                // AUDIT-2026-07-09 Tier 4: fill paths (tuple literals with
-                // Callable elements, dragon_tuple_from_list, dict items()/
-                // popitem()) all take a ref on tag-10 elements; without this
-                // arm every such tuple leaked the closure + its env. Tag-gated
+                // Every fill path (tuple literals with Callable elements,
+                // dragon_tuple_from_list, dict items()/popitem()) takes a
+                // ref on tag-10 elements; without this arm every such tuple
+                // leaks the closure + its env. Tag-gated
                 // dragon_decref_callable no-ops on a bare fn ptr element
                 // (mirrors dragon_deque_destroy / dragon_dict_destroy).
                 dragon_decref_callable((void*)(uintptr_t)val);
@@ -583,7 +583,7 @@ static DragonSet* dragon_set_alloc(int64_t cap, uint8_t elem_tag = 0) {
     s->states = (uint8_t*)calloc(cap, sizeof(uint8_t));
     // Phase 5b: track for cycle collection
     dragon_gc_track(s);
-    // Tier 1.2: atomic counter - many threads may allocate concurrently.
+    // Atomic counter: many threads may allocate concurrently.
     if (__atomic_add_fetch(&gc_alloc_counter, 1, __ATOMIC_RELAXED)
         >= __atomic_load_n(&gc_threshold, __ATOMIC_RELAXED)) {
         dragon_gc_collect();
@@ -766,9 +766,9 @@ void dragon_set_remove(DragonSet* s, int64_t val) {
             else if (stored && (s->elem_tag == TAG_LIST || s->elem_tag == TAG_DICT || s->elem_tag == TAG_BYTES))
                 dragon_decref_dispatch((void*)(uintptr_t)stored);
             else if (stored && s->elem_tag == DRAGON_TAG_CLOSURE)
-                // AUDIT-2026-07-09 Tier 4: dragon_set_add increfs tag-10
-                // elements via dragon_incref_tagged; the release paths must
-                // mirror it. Tag-gated (bare fn ptr safe).
+                // dragon_set_add increfs tag-10 elements via
+                // dragon_incref_tagged; the release paths must mirror it.
+                // Tag-gated (bare fn ptr safe).
                 dragon_decref_callable((void*)(uintptr_t)stored);
             return;
         }
@@ -795,7 +795,7 @@ void dragon_set_discard(DragonSet* s, int64_t val) {
             else if (stored && (s->elem_tag == TAG_LIST || s->elem_tag == TAG_DICT || s->elem_tag == TAG_BYTES))
                 dragon_decref_dispatch((void*)(uintptr_t)stored);
             else if (stored && s->elem_tag == DRAGON_TAG_CLOSURE)
-                // AUDIT-2026-07-09 Tier 4 - mirrors dragon_set_remove.
+                // Mirrors dragon_set_remove: release the ref dragon_set_add took.
                 dragon_decref_callable((void*)(uintptr_t)stored);
             return;
         }
@@ -819,8 +819,8 @@ void dragon_set_clear(DragonSet* s) {
         // from an atomic-context dealloc chain (__dragon_atomic_context is set
         // exclusively around dragon_dealloc inside dragon_decref_atomic, and no
         // destroy/clear_refs path calls dragon_set_clear), and dragon_decref
-        // itself already routes SHARED objects to the atomic path. Verified
-        // AUDIT-2026-07-09 Tier 4; revisit if user finalizers (__del__) land.
+        // itself already routes SHARED objects to the atomic path. Revisit
+        // if user finalizers (__del__) land.
         uint8_t tag = s->elem_tag;
         if (tag == TAG_STR) {
             for (int64_t i = 0; i < s->capacity; i++) {
@@ -833,7 +833,7 @@ void dragon_set_clear(DragonSet* s) {
                     dragon_decref((void*)(uintptr_t)s->buckets[i]);
             }
         } else if (tag == DRAGON_TAG_CLOSURE) {
-            // AUDIT-2026-07-09 Tier 4 - mirrors dragon_set_remove/destroy.
+            // Mirrors dragon_set_remove/destroy: release the refs dragon_set_add took.
             for (int64_t i = 0; i < s->capacity; i++) {
                 if (s->states[i] == 1 && s->buckets[i])
                     dragon_decref_callable((void*)(uintptr_t)s->buckets[i]);
@@ -864,9 +864,9 @@ DragonSet* dragon_set_copy(DragonSet* s) {
                 dragon_incref((void*)(uintptr_t)n->buckets[i]);
         }
     } else if (tag == DRAGON_TAG_CLOSURE) {
-        // Required inverse of the tag-10 arm in dragon_set_destroy (AUDIT
-        // 2026-07-09 Tier 4): a memcpy'd copy of a set[Callable] must co-own
-        // its closures or the two destroys would double-free them. Tag-gated.
+        // Required inverse of the tag-10 arm in dragon_set_destroy: a
+        // memcpy'd copy of a set[Callable] must co-own its closures or the
+        // two destroys would double-free them. Tag-gated.
         for (int64_t i = 0; i < n->capacity; i++) {
             if (n->states[i] == 1 && n->buckets[i])
                 dragon_incref_callable((void*)(uintptr_t)n->buckets[i]);
@@ -990,7 +990,7 @@ void dragon_print_set(DragonSet* s) {
 }
 
 /// Destroy a set and free its memory (GC support).
-/// Tier 1.9: child decrefs go through dispatch helpers.
+/// Child decrefs go through the dispatch helpers (atomic-safe in atomic context).
 void dragon_set_destroy(DragonSet* s) {
     if (!s) return;
     // Decref elements based on elem_tag
@@ -1006,10 +1006,9 @@ void dragon_set_destroy(DragonSet* s) {
                 dragon_decref_dispatch((void*)(uintptr_t)s->buckets[i]);
         }
     } else if (tag == DRAGON_TAG_CLOSURE) {
-        // AUDIT-2026-07-09 Tier 4: dragon_set_add / dragon_set_copy take a
-        // ref on tag-10 elements; without this arm every set[Callable] leaked
-        // its closures + envs on destroy. Tag-gated (bare fn ptr safe),
-        // mirrors dragon_deque_destroy.
+        // dragon_set_add / dragon_set_copy take a ref on tag-10 elements;
+        // without this arm every set[Callable] leaks its closures + envs on
+        // destroy. Tag-gated (bare fn ptr safe), mirrors dragon_deque_destroy.
         for (int64_t i = 0; i < s->capacity; i++) {
             if (s->states[i] == 1 && s->buckets[i])
                 dragon_decref_callable((void*)(uintptr_t)s->buckets[i]);
@@ -1610,8 +1609,8 @@ DragonDeque* dragon_deque_new(int64_t maxlen, int64_t elem_tag) {
 void dragon_deque_append(DragonDeque* d, int64_t value, int64_t tag) {
     if (tag) d->elem_tag = (uint8_t)tag;
     if (d->maxlen == 0) return;  // Python: maxlen-0 deque silently discards
-    // Acyclic-skip enrollment (AUDIT-2026-07-09 Tier 4: deques were NEVER
-    // gc-tracked, so a deque in a reference cycle leaked unconditionally).
+    // Acyclic-skip enrollment: an untracked deque in a reference cycle
+    // leaks unconditionally, so deques must gc-enroll like the other containers.
     // Mirrors the dict/tuple insert gates: enroll on the first traceable
     // (list/dict/bytes/instance/closure) element, BEFORE the store, so a
     // concurrent collector can never see the edge without the deque already
@@ -1694,7 +1693,7 @@ int64_t dragon_deque_pop(DragonDeque* d) {
 /// deque's +1 moves to the caller, no decref), but return the value as a ptr so
 /// codegen sees an OWNED ptr result - drained when the result is discarded or
 /// passed to a borrow callee, adopted when bound. Scalar-element deques keep the
-/// i64 variants. Mirrors dragon_dict_get_ptr (leaks.md #19).
+/// i64 variants. Mirrors dragon_dict_get_ptr.
 void* dragon_deque_popleft_ptr(DragonDeque* d) {
     return (void*)(uintptr_t)dragon_deque_popleft(d);
 }

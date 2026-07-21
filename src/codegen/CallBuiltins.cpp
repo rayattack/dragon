@@ -1706,7 +1706,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
             // dragon_deque_from_list COPIES + increfs each element, so the
             // source list is BORROWED: an owned list-literal temp
             // (`deque([1,2,3])`) must be drained here or it leaks one list +
-            // buffer per call (leaks.md #17, deque source-list). A borrowed
+            // buffer per call (deque source-list). A borrowed
             // list var (`deque(xs)`) is a Name and is left untouched.
             node.args[0]->accept(*this);
             llvm::Value* listArg = impl_->lastValue;
