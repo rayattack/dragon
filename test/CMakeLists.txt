@@ -38,6 +38,11 @@ add_executable(dragon_definite_assignment_tests DefiniteAssignmentTest.cpp)
 target_link_libraries(dragon_definite_assignment_tests PRIVATE dragon_lib gtest_main)
 add_test(NAME DefiniteAssignmentTests COMMAND dragon_definite_assignment_tests)
 
+# --- Module Initialization-Order (definite-init) Tests ---
+add_executable(dragon_module_init_order_tests ModuleInitOrderTest.cpp)
+target_link_libraries(dragon_module_init_order_tests PRIVATE dragon_lib gtest_main)
+add_test(NAME ModuleInitOrderTests COMMAND dragon_module_init_order_tests)
+
 # --- Ownership (del/own/dub) Tests ---
 add_executable(dragon_ownership_tests OwnershipCheckTest.cpp)
 target_link_libraries(dragon_ownership_tests PRIVATE dragon_lib gtest_main)

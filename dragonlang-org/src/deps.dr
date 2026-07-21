@@ -17,18 +17,7 @@ from services.registry import RegistryService
 from services.translog import TranslogService
 from services.mailer import Mailer, ResendMailer
 
-
-const AUTH: AuthService = AuthService(DB)
-# Absolute base for links that leave the site (the confirmation email).
-const BASE_URL: str = _env_default("DRAGON_SITE_BASE_URL", "https://dragonlang.org")
 const DATA_DIR: str = "data"
-const DB: Db = Db(join(DATA_DIR, "registry.sqlite"))
-const LOG_SIGNING_KEY: bytes = _load_signing_key()
-const MAILER: Mailer = _load_mailer()
-const _READY: str = _ensure_data()
-const REG: RegistryService = RegistryService(DB, _load_blobs(), TLOG)
-const SECRET: bytes = _load_secret()
-const TLOG: TranslogService = TranslogService(DB, LOG_SIGNING_KEY)
 
 
 def _load_secret() -> bytes {
@@ -46,6 +35,9 @@ def _load_secret() -> bytes {
 }
 
 
+const SECRET: bytes = _load_secret()
+
+
 def _load_signing_key() -> bytes {
     """
     Ed25519 seed (32 bytes, hex-encoded) that signs the transparency-log
@@ -59,6 +51,9 @@ def _load_signing_key() -> bytes {
     }
     return unhexlify(raw[0:64].encode("utf-8"))
 }
+
+
+const LOG_SIGNING_KEY: bytes = _load_signing_key()
 
 
 def _ensure_data() -> str {
@@ -97,11 +92,19 @@ def _env_default(name: str, fallback: str) -> str {
 }
 
 
+const MAILER: Mailer = _load_mailer()
+
+# Absolute base for links that leave the site (the confirmation email).
+const BASE_URL: str = _env_default("DRAGON_SITE_BASE_URL", "https://dragonlang.org")
+
+const _READY: str = _ensure_data()
+
+
 def _load_blobs() -> BlobStore {
     """
     Blob backend. R2 (S3 API, presigned downloads) when the four R2_* vars are
     set; local disk otherwise (dev, tests). A PARTIAL R2 config is a refused
-    start, never a silent fall-through to disk.
+    start, never a silent fall-through to disk
     """
     const acc: str = getenv("R2_ACCESS_KEY_ID")
     const sec: str = getenv("R2_SECRET_ACCESS_KEY")
@@ -123,3 +126,9 @@ def _load_blobs() -> BlobStore {
     print("blobs: R2 bucket '" + bucket + "' at " + host)
     return R2BlobStore(S3Client(host, acc, sec, "auto"), bucket)
 }
+
+
+const DB: Db = Db(join(DATA_DIR, "registry.sqlite"))
+const AUTH: AuthService = AuthService(DB)
+const TLOG: TranslogService = TranslogService(DB, LOG_SIGNING_KEY)
+const REG: RegistryService = RegistryService(DB, _load_blobs(), TLOG)
