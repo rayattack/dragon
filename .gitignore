@@ -45,6 +45,10 @@ CPackSourceConfig.cmake
 .log-signing-key
 *signing-key
 *.private
+.resend-key
+*.resend-key
+.env
+*.env
 
 # --- Compiled binaries with no extension (rebuildable from .dr source) ---
 /examples/pypy
