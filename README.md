@@ -75,7 +75,7 @@ The compiler needs a C compiler (gcc or clang) on PATH for the final link; the .
 
 ## Build from source
 
-Requirements: a C++17 compiler, CMake 3.16+, and LLVM 21+ with dev headers.
+Requirements: a C++17 compiler, CMake 3.16+, and LLVM 21+ with dev headers, libzstd.
 
 ```bash
 git clone https://github.com/rayattack/dragon.git
