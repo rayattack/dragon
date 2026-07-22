@@ -16,8 +16,9 @@
 
 namespace dragon {
 
-/// Library version
-constexpr const char* VERSION = "0.0.1";
+/// Library version. Single source of truth: CMake parses this line for the
+/// project version (cpack artifact names) and Driver::printVersion prints it.
+constexpr const char* VERSION = "0.0.2";
 
 /// Initialize the Dragon compiler (call once at startup)
 void initialize();

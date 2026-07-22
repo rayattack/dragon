@@ -16,7 +16,7 @@ from highlight import highlight
 from assets import CSS_V, JS_V
 
 const GITHUB_REPO: str = "rayattack/dragon" 
-const DRAGON_VERSION: str = "0.0.1"      # mirrors include/dragon.h VERSION (pre-release)
+const DRAGON_VERSION: str = "0.0.2"      # mirrors include/dragon.h VERSION (pre-release)
 
 # Per-platform switches: flip to true as the release pipeline publishes each
 # target's assets, then rebuild + restart the site. A platform left false

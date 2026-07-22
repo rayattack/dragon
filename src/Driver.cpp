@@ -1,3 +1,4 @@
+#include "dragon.h"
 #include "dragon/Driver.h"
 #include "dragon/Lexer.h"
 #include "dragon/Parser.h"
@@ -679,7 +680,7 @@ Examples:
 }
 
 void Driver::printVersion() {
-    std::cout << "Dragon Compiler version 0.0.1\n";
+    std::cout << "Dragon Compiler version " << VERSION << "\n";
     std::cout << "Built on LLVM\n";
 }
 

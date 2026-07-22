@@ -1,0 +1,22 @@
+# Keep GitHub Actions current even when pinned to a commit SHA.
+#
+# Actions should be pinned to a full commit SHA (not a moving tag like @v4) so a
+# retagged or compromised third-party action cannot silently run in CI. The cost
+# of SHA pinning is going stale on security fixes; Dependabot removes that cost:
+# it opens a PR that bumps the SHA (and the `# vX.Y` comment beside it) whenever
+# a pinned action publishes a new release
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    # "/" covers .github/workflows/*.yml and the composite action under
+    # .github/actions/setup-llvm.
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    groups:
+      # One grouped PR per week instead of one per action.
+      actions:
+        patterns:
+          - "*"

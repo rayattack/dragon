@@ -57,14 +57,15 @@ jobs:
           # - { os: windows-2022,   target: windows-x86_64, experimental: true }
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # ---- Resolve the version from the tag (strip the leading 'v') ----------
       - name: Resolve version
         id: ver
         shell: bash
+        env:
+          REF: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          REF="${{ github.event.inputs.tag || github.ref_name }}"
           VER="${REF#v}"
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "tag=v$VER"   >> "$GITHUB_OUTPUT"
@@ -95,7 +96,7 @@ jobs:
       # Put MSVC on PATH so the bash-driven LLVM/Dragon Ninja builds find a compiler.
       - name: Set up MSVC (Windows)
         if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
 
       # ---- LLVM (pinned trunk snapshot, built once + cached) -----------------
       - name: Setup LLVM
@@ -163,10 +164,11 @@ jobs:
       - name: Rename artifacts
         id: rename
         shell: bash
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+          T: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          VER="${{ steps.ver.outputs.version }}"
-          T="${{ matrix.target }}"
           mkdir -p out
           shopt -s nullglob
           pick() {  # pick <glob> <dest-extension>
@@ -191,7 +193,7 @@ jobs:
           ls -la out
 
       - name: Upload to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
           name: Dragon ${{ steps.ver.outputs.version }}
