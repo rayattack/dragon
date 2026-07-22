@@ -35,13 +35,17 @@ jobs:
   deploy:
     name: dragonlang.org
     runs-on: ubuntu-22.04
+    # Protected environment: the deploy pauses for a required reviewer, so a push
+    # to main cannot reach the production box unattended. Store DEPLOY_SSH_KEY on
+    # THIS environment (not the repo), so only this gated job can ever read it.
+    environment: production
     # Only main pushes that passed CI (PR runs upload no artifact).
     if: >
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push'
     steps:
       - name: Download the .deb built by CI
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: dragon-deb
           run-id: ${{ github.event.workflow_run.id }}
@@ -49,16 +53,19 @@ jobs:
           path: pkg
 
       - name: Set up SSH (pinned host key)
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
         run: |
           mkdir -p ~/.ssh
-          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           echo "167.233.198.71 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIClRWYs4Rw3WPM7xHN0eSjFTNDzsYp/6PWZDT06T0pGk" >> ~/.ssh/known_hosts
 
       - name: Ship compiler and deploy site
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
-          SHA="${{ github.event.workflow_run.head_sha }}"
           scp pkg/*.deb root@167.233.198.71:/root/dragon-latest.deb
           ssh root@167.233.198.71 bash -s "$SHA" <<'REMOTE'
           set -euo pipefail

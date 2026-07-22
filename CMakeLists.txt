@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.16)
 # Copyright (c) 2018 Tersoo Ortserga <ortserga@gmail.com>
-project(Dragon VERSION 0.0.1 LANGUAGES C CXX)
+# The version is parsed from dragon::VERSION in include/dragon.h so the cpack
+# artifact names, `dragon --version`, and the public constant cannot disagree.
+file(STRINGS include/dragon.h DRAGON_VERSION_LINE REGEX "constexpr const char\\* VERSION")
+string(REGEX MATCH "[0-9]+\\.[0-9]+\\.[0-9]+" DRAGON_VERSION "${DRAGON_VERSION_LINE}")
+if(NOT DRAGON_VERSION)
+    message(FATAL_ERROR "could not parse dragon::VERSION from include/dragon.h")
+endif()
+project(Dragon VERSION ${DRAGON_VERSION} LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
