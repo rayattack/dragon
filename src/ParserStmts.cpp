@@ -413,6 +413,9 @@ std::unique_ptr<Stmt> Parser::deleteStatement() {
     auto stmt = std::make_unique<DeleteStmt>();
     stmt->setLocation(previous().location());  // the 'del' keyword
     do {
+        // Trailing comma at end of the target list, e.g. del a, b,.
+        if (check(TokenType::NEWLINE) || check(TokenType::RIGHT_BRACE) ||
+            check(TokenType::DEDENT) || isAtEnd()) break;
         stmt->targets.push_back(expression());
     } while (match(TokenType::COMMA));
     return stmt;
@@ -1253,7 +1256,11 @@ std::unique_ptr<Stmt> Parser::classDeclaration() {
     decl->typeParams = parseTypeParams();
     if (match(TokenType::LEFT_PAREN)) {
         if (!check(TokenType::RIGHT_PAREN)) {
-            do { decl->bases.push_back(expression()); } while (match(TokenType::COMMA));
+            do {
+                // Trailing comma before ')', e.g. class C(A, B,).
+                if (check(TokenType::RIGHT_PAREN)) break;
+                decl->bases.push_back(expression());
+            } while (match(TokenType::COMMA));
         }
         consume(TokenType::RIGHT_PAREN, "Expect ')'");
     }
@@ -1441,7 +1448,11 @@ std::unique_ptr<TypeExpr> Parser::parseGenericType(std::unique_ptr<TypeExpr> bas
         auto callable = std::make_unique<CallableTypeExpr>();
         callable->setLocation(startLoc);
         if (!check(TokenType::RIGHT_BRACKET)) {
-            do { callable->paramTypes.push_back(parseType()); } while (match(TokenType::COMMA));
+            do {
+                // Trailing comma before ']', e.g. Callable[[int, str,], R].
+                if (check(TokenType::RIGHT_BRACKET)) break;
+                callable->paramTypes.push_back(parseType());
+            } while (match(TokenType::COMMA));
         }
         consume(TokenType::RIGHT_BRACKET, "Expect ']'");
         consume(TokenType::COMMA, "Expect ','");
@@ -1454,6 +1465,8 @@ std::unique_ptr<TypeExpr> Parser::parseGenericType(std::unique_ptr<TypeExpr> bas
     generic->base = std::move(base);
     if (!check(TokenType::RIGHT_BRACKET)) {
         do {
+            // Trailing comma before ']', e.g. dict[str, int,].
+            if (check(TokenType::RIGHT_BRACKET)) break;
             auto arg = parseType();
             if (arg) generic->typeArgs.push_back(std::move(arg));
         } while (match(TokenType::COMMA));
@@ -1496,6 +1509,8 @@ std::vector<TypeParam> Parser::parseTypeParams() {
         return params;
     }
     do {
+        // Trailing comma before ']', e.g. class Foo[T, U,].
+        if (check(TokenType::RIGHT_BRACKET)) break;
         TypeParam tp;
         tp.name = std::string(consume(TokenType::IDENTIFIER,
                                       "Expect type-parameter name").lexeme());
@@ -1560,6 +1575,8 @@ std::vector<Parameter> Parser::parseParameters() {
     std::vector<Parameter> params;
     if (check(TokenType::RIGHT_PAREN)) return params;
     do {
+        // Allow a trailing comma before the closing paren, e.g. def f(a, b,).
+        if (check(TokenType::RIGHT_PAREN)) break;
         // Positional-only separator: /
         if (match(TokenType::SLASH)) {
             Parameter sep;

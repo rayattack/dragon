@@ -568,6 +568,35 @@ TEST(ParserTest, CallWithMixedArgs) {
     EXPECT_EQ(call->kwArgs.size(), 1u);
 }
 
+TEST(ParserTest, CallWithTrailingComma) {
+    auto module = parse("f(1, 2, 3,)");
+    ASSERT_NE(module, nullptr);
+    auto* exprStmt = dynamic_cast<ExprStmt*>(module->body[0].get());
+    auto* call = dynamic_cast<CallExpr*>(exprStmt->expr.get());
+    ASSERT_NE(call, nullptr);
+    // The trailing comma is a separator, not an argument: still 3 args.
+    EXPECT_EQ(call->args.size(), 3u);
+    EXPECT_TRUE(call->kwArgs.empty());
+}
+
+TEST(ParserTest, CallWithSingleArgTrailingComma) {
+    auto module = parse("f(1,)");
+    ASSERT_NE(module, nullptr);
+    auto* exprStmt = dynamic_cast<ExprStmt*>(module->body[0].get());
+    auto* call = dynamic_cast<CallExpr*>(exprStmt->expr.get());
+    ASSERT_NE(call, nullptr);
+    EXPECT_EQ(call->args.size(), 1u);
+}
+
+TEST(ParserTest, CallWithKeywordArgTrailingComma) {
+    auto module = parse("f(a=1, b=2,)");
+    ASSERT_NE(module, nullptr);
+    auto* exprStmt = dynamic_cast<ExprStmt*>(module->body[0].get());
+    auto* call = dynamic_cast<CallExpr*>(exprStmt->expr.get());
+    ASSERT_NE(call, nullptr);
+    EXPECT_EQ(call->kwArgs.size(), 2u);
+}
+
 TEST(ParserTest, NestedCalls) {
     auto module = parse("f(g(x))");
     ASSERT_NE(module, nullptr);
@@ -1164,6 +1193,33 @@ TEST(ParserTest, ClassWithBase) {
     EXPECT_EQ(base->name, "Animal");
 }
 
+TEST(ParserTest, FunctionWithParamsTrailingComma) {
+    auto module = parse("def add(x: int, y: int,) -> int {\n  return x + y\n}");
+    ASSERT_NE(module, nullptr);
+    auto* func = dynamic_cast<FunctionDecl*>(module->body[0].get());
+    ASSERT_NE(func, nullptr);
+    // Trailing comma is a separator, not a parameter: still 2 params.
+    ASSERT_EQ(func->params.size(), 2u);
+    EXPECT_EQ(func->params[0].name, "x");
+    EXPECT_EQ(func->params[1].name, "y");
+}
+
+TEST(ParserTest, FunctionWithSingleParamTrailingComma) {
+    auto module = parse("def f(x: int,) {\n  pass\n}");
+    ASSERT_NE(module, nullptr);
+    auto* func = dynamic_cast<FunctionDecl*>(module->body[0].get());
+    ASSERT_NE(func, nullptr);
+    ASSERT_EQ(func->params.size(), 1u);
+}
+
+TEST(ParserTest, ClassWithBasesTrailingComma) {
+    auto module = parse("class C(A, B,) {\n  pass\n}");
+    ASSERT_NE(module, nullptr);
+    auto* cls = dynamic_cast<ClassDecl*>(module->body[0].get());
+    ASSERT_NE(cls, nullptr);
+    EXPECT_EQ(cls->bases.size(), 2u);
+}
+
 TEST(ParserTest, ClassWithMultipleBases) {
     auto module = parse("class C(A, B) {\n  pass\n}");
     ASSERT_NE(module, nullptr);
@@ -1222,6 +1278,25 @@ TEST(ParserTest, DictTypeAnnotation) {
     ASSERT_NE(base, nullptr);
     EXPECT_EQ(base->name, "dict");
     EXPECT_EQ(genType->typeArgs.size(), 2u);
+}
+
+TEST(ParserTest, GenericTypeArgsTrailingComma) {
+    auto module = parse("x: dict[str, int,]");
+    ASSERT_NE(module, nullptr);
+    auto* ann = dynamic_cast<AnnAssignStmt*>(module->body[0].get());
+    ASSERT_NE(ann, nullptr);
+    auto* genType = dynamic_cast<GenericTypeExpr*>(ann->annotation.get());
+    ASSERT_NE(genType, nullptr);
+    // Trailing comma is a separator, not a type arg: still 2.
+    EXPECT_EQ(genType->typeArgs.size(), 2u);
+}
+
+TEST(ParserTest, TypeParamsTrailingComma) {
+    auto module = parse("class Box[T, U,] {\n  pass\n}");
+    ASSERT_NE(module, nullptr);
+    auto* cls = dynamic_cast<ClassDecl*>(module->body[0].get());
+    ASSERT_NE(cls, nullptr);
+    EXPECT_EQ(cls->typeParams.size(), 2u);
 }
 
 TEST(ParserTest, UnionTypeAnnotation) {
