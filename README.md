@@ -60,7 +60,7 @@ Proof it holds up: [dragonlang.org](https://dragonlang.org) (site, docs, and pac
 - **Types are honest.** Every value whose concrete type is knowable flows at that type. Generics monomorphize at compile time; nothing is boxed behind your back. `assertEqual(1, "x")` fails to compile, exactly like `name: int = "boy"`.
 - **One binary out.** `dragon build` produces a self-contained executable. Copy it to a server and run it.
 - **Batteries in the stdlib, written in Dragon.** HTTP client and server (embedded mbedTLS), SQLite/PostgreSQL/MySQL, JSON, crypto (KAT-verified), green threads over epoll/kqueue, subprocess, zip/tar/zstd.
-- **Speed with receipts.** We beat Rust on compute-bound microbenchmarks (fib, mandelbrot) and trail C by about 12% on fib. We also publish the number we are not proud of yet: binary-trees runs 2.7x slower than Rust because it stresses the refcount runtime, and it is the current optimization target. Full table: [dragonlang.org/benchmarks](https://dragonlang.org/benchmarks).
+- **Speed with receipts.** On compute-bound microbenchmarks (fib, mandelbrot) Dragon runs at parity with Rust, and trails C by about 12% on fib. We also publish the number we are not proud of yet: binary-trees runs 2.7x slower than Rust because it stresses the refcount runtime, and it is an optimization target. Rust is a yardstick, not the goal. Full table: [dragonlang.org/benchmarks](https://dragonlang.org/benchmarks).
 - **Coming from Python?** A typed `.py` file compiles directly: `dragon build script.py`. Annotations are mandatory and the dynamic parts of Python do not carry over. It is an on-ramp, not a compatibility promise.
 
 ## Platform status

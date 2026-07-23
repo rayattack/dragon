@@ -69,8 +69,7 @@ struct CodeGenOptions {
     /// Path to bundled mbedTLS static library for linking (TLS engine)
     std::string mbedtlsLibPath;
 
-    /// Path to a bundled zstd static archive (macOS, where no system libzstd)
-    /// exists). EMpty on linux: the shared system lib is linked via -lzstd.
+    /// Bundled zstd static archive (macOS only; empty on Linux, which uses -lzstd)
     std::string zstdLibPath;
 
     /// Extra libraries to link (e.g. "m", "pthread", "curl")
