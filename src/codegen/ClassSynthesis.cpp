@@ -5,9 +5,7 @@
 
 namespace dragon {
 
-//===----------------------------------------------------------------------===//
 // 6.18 - @dataclass / NamedTuple compile-time synthesis
-//===----------------------------------------------------------------------===//
 
 // Helper: build a binary-op expression a <op> b (string concat / and-chain
 // for synthesized __eq__ and __repr__).
@@ -129,7 +127,7 @@ void CodeGen::Impl::synthesizeDataclassMethods(ClassDecl& node) {
 
     SourceLocation loc = node.location();
 
-    // ─── Synthesize __init__ ────────────────────────────────────────────
+    // Synthesize __init__ from the fields.
     if (!hasInit && !fields.empty()) {
         auto init = std::make_unique<FunctionDecl>();
         init->name = "__init__";
@@ -150,10 +148,7 @@ void CodeGen::Impl::synthesizeDataclassMethods(ClassDecl& node) {
         node.body.insert(node.body.begin(), std::move(init));
     }
 
-    // ─── Synthesize __eq__ ──────────────────────────────────────────────
-    // def __eq__(other: ClassName) -> bool {
-    //  return self.f1 == other.f1 and self.f2 == other.f2
-    // }
+    // Synthesize __eq__: field-by-field equality against another instance.
     if (!hasEq) {
         auto eq = std::make_unique<FunctionDecl>();
         eq->name = "__eq__";
@@ -198,10 +193,7 @@ void CodeGen::Impl::synthesizeDataclassMethods(ClassDecl& node) {
         node.body.push_back(std::move(eq));
     }
 
-    // ─── Synthesize __repr__ ────────────────────────────────────────────
-    // def __repr__() -> str {
-    //  return "ClassName(f1=" + str(self.f1) + ", f2=" + str(self.f2) + ")"
-    // }
+    // Synthesize __repr__: "ClassName(f1=..., f2=...)".
     if (!hasRepr) {
         auto repr = std::make_unique<FunctionDecl>();
         repr->name = "__repr__";
@@ -263,12 +255,8 @@ static std::unique_ptr<TypeExpr> makeListType(const std::string& elemName,
     return g;
 }
 
-// AST-level synthesis for class-based enums: `class C(Enum) { RED: int = 1 }`.
-// Rewrites the class so each member is a singleton instance carrying .name and
-// .value, with __init__/__str__/__repr__ and a __members__ list. Value-lookup
-// (`C(v)`), iteration (`for x in C`), and IntEnum/StrEnum value-comparison are
-// wired in CallExpr/ForLoop/Expressions keyed on enumKind/enumMemberNames.
-// Mirrors the proven synthesizeDataclassMethods pathway. See stdlib/enum.dr.
+// Synthesize class-based enums (class C(Enum) { RED: int = 1 }): each member a
+// singleton with .name/.value; lookup/iteration wired in CallExpr/ForLoop.
 void CodeGen::Impl::synthesizeEnumMethods(ClassDecl& node) {
     EnumKind kind = EnumKind::Plain;
     bool isEnum = false;
@@ -452,10 +440,8 @@ void CodeGen::Impl::synthesizeEnumMethods(ClassDecl& node) {
         node.body.push_back(std::move(sf));
     }
 
-    // Static value-lookup helper: `static _lookup(value) -> ClassName` scans the
-    // members and returns the matching singleton, or raises ValueError. CallExpr
-    // redirects `ClassName(v)` here. Written in Dragon AST (reuses normal codegen
-    // + the `for m in ClassName` rewrite) - no hand-rolled field-offset loop.
+    // Static _lookup(value): scan members for the matching singleton or raise.
+    // CallExpr redirects ClassName(v) here.
     {
         auto fn = std::make_unique<FunctionDecl>();
         fn->name = "_lookup";

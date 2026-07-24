@@ -7,9 +7,7 @@ void CodeGen::visit(StarredExpr&) {
     impl_->lastValue = llvm::ConstantInt::get(impl_->i64Type, 0);
 }
 
-//===----------------------------------------------------------------------===//
 // Visitor: Statements
-//===----------------------------------------------------------------------===//
 
 void CodeGen::visit(ExprStmt& node) {
     node.expr->accept(*this);
@@ -1674,8 +1672,6 @@ void CodeGen::visit(FromImportStmt& node) {
     }
 }
 
-//===----------------------------------------------------------------------===//
 // Visitor: Declarations
-//===----------------------------------------------------------------------===//
 
 } // namespace dragon

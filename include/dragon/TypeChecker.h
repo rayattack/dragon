@@ -338,6 +338,14 @@ public:
     /// module already checked them). Call before check() on the importer.
     void registerExternalGenerics(Module& mod);
 
+    /// D048: build the box-free `json.decode[T]` body from T's constructor
+    /// params (one Cursor read per field, skip_value for the rest). Returns the
+    /// stamped FunctionDecl, or nullptr after reporting a clean error (unknown T,
+    /// non-scalar field, optional field). Called by the monomorphizer in place of
+    /// cloneStmt for schemaDecodeFns.
+    std::unique_ptr<Stmt> synthesizeSchemaDecoder(
+        const std::shared_ptr<Type>& targetType, SourceLocation loc);
+
     /// Get all module-level exports (functions, classes, variables) after check().
     /// Returns a map of symbol name -> type.
     std::unordered_map<std::string, std::shared_ptr<Type>> getExports() const;

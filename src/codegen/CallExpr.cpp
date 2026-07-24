@@ -1991,9 +1991,7 @@ void CodeGen::emitVarArgCall(llvm::Function* func, CallExpr& node) {
     }
 }
 
-//===----------------------------------------------------------------------===//
 // C9-B - general call-site spread (`*tuple` / `*list` / `**dict`)
-//===----------------------------------------------------------------------===//
 
 bool CodeGen::callHasStarArg(CallExpr& node) {
     for (auto& a : node.args)

@@ -150,6 +150,10 @@ struct TypeChecker::Impl {
     std::unordered_map<std::string, ClassDecl*> genericClasses;
     std::unordered_map<std::string, FunctionDecl*> genericFunctions;
 
+    // D048 schema decoders: the stdlib `json.decode[T]` generic. The monomorphizer
+    // synthesizes each stamp's body from T's fields instead of cloning a template.
+    std::unordered_set<const FunctionDecl*> schemaDecodeFns;
+
     // D044+ generic METHODS - a method that declares its OWN type parameter
     // (`def m[T](...)` on a class, generic or not; the db.all[T] / D049 shape).
     // `genericMethods` is keyed "Class.method" so two classes' same-named generic

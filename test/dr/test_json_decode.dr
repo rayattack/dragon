@@ -1,0 +1,92 @@
+# const u: User = User(**json.loads_obj(body))  # before
+# const u: User = decode[User](body)  # after
+# no more building dict[str, Any] first e.g. moving from map[string]interface{} to serde style
+
+from unittest import TestCase, main
+from json import decode
+
+
+class User {
+    def(id: int, tag: str, active: bool) {
+        self.id = id
+        self.tag = tag
+        self.active = active
+    }
+}
+
+
+class DecodeBasicTests(TestCase) {
+    def test_scalars() {
+        const u: User = decode[User]('{"id": 7, "tag": "ok", "active": true}'.encode("utf-8"))
+        self.assertEqual(u.id, 7)
+        self.assertEqual(u.tag, "ok")
+        self.assertTrue(u.active)
+    }
+
+    # Document order need not match declaration order.
+    def test_out_of_order() {
+        const u: User = decode[User]('{"tag": "x", "active": false, "id": 3}'.encode("utf-8"))
+        self.assertEqual(u.id, 3)
+        self.assertEqual(u.tag, "x")
+        self.assertFalse(u.active)
+    }
+
+    # Unrequested keys (scalar, nested object, array) are skipped, not materialized.
+    def test_skips_unrequested_keys() {
+        const body: bytes = '{"id": 1, "extra": {"a": [1,2,3], "b": "zzz"}, "tag": "t", "junk": 999, "active": true}'.encode("utf-8")
+        const u: User = decode[User](body)
+        self.assertEqual(u.id, 1)
+        self.assertEqual(u.tag, "t")
+        self.assertTrue(u.active)
+    }
+}
+
+
+class DecodeAdversarialTests(TestCase) {
+    # Leak probe: skip_value() over many unrequested keys must not allocate, so
+    # RSS stays flat across the loop (LSan under build-asan; ulimit -v otherwise).
+    def test_skip_key_no_leak() {
+        const body: bytes = '{"id": 42, "k0": "aaaaaaaa", "k1": [1,2,3,4,5], "k2": {"n": {"d": "deep"}}, "tag": "hot", "k3": 3.14159, "active": true, "k4": null}'.encode("utf-8")
+        i: int = 0
+        while i < 5000 {
+            const u: User = decode[User](body)
+            self.assertEqual(u.id, 42)
+            i = i + 1
+        }
+    }
+
+    def test_type_mismatch_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const u: User = decode[User]('{"id": "not-an-int", "tag": "t", "active": true}'.encode("utf-8"))
+        })
+    }
+
+    def test_missing_required_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const u: User = decode[User]('{"tag": "t", "active": true}'.encode("utf-8"))
+        })
+    }
+
+    # Malformed mid-decode raises and frees the partial instance (checked under build-asan).
+    def test_malformed_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const u: User = decode[User]('{"id": 1, "tag": "t", "active": tru'.encode("utf-8"))
+        })
+    }
+}
+
+
+class DecodeOwnershipTests(TestCase) {
+    # str fields arrive owned; decode/drop loop must not leak or double-free.
+    def test_str_field_ownership() {
+        i: int = 0
+        while i < 5000 {
+            const u: User = decode[User]('{"id": 0, "tag": "some-owned-string-value", "active": false}'.encode("utf-8"))
+            self.assertEqual(u.tag, "some-owned-string-value")
+            i = i + 1
+        }
+    }
+}
+
+
+main([DecodeBasicTests(), DecodeAdversarialTests(), DecodeOwnershipTests()])
