@@ -1,0 +1,110 @@
+"""ffi.runs[T] (D052). Hermetic: coreutils play the foreign program, so no
+Python/Go toolchain is needed."""
+
+from unittest import TestCase, main
+from ffi import runs, SpawnError, ForeignError, SchemaError
+
+
+class User {
+    def(id: int, tag: str, active: bool) {
+        self.id = id
+        self.tag = tag
+        self.active = active
+    }
+}
+
+
+class RunsRoundTripTests(TestCase) {
+    def test_cat_roundtrip() {
+        const body: bytes = '{"id": 7, "tag": "ok", "active": true}'.encode("utf-8")
+        const u: User = runs[User](["cat"], body)
+        self.assertEqual(u.id, 7)
+        self.assertEqual(u.tag, "ok")
+        self.assertTrue(u.active)
+    }
+
+    # Unrequested keys are skipped by decode[T], same as in-process decode.
+    def test_extra_keys_skipped() {
+        const body: bytes = '{"id": 1, "junk": {"a":[1,2]}, "tag": "t", "active": false}'.encode("utf-8")
+        const u: User = runs[User](["cat"], body)
+        self.assertEqual(u.id, 1)
+        self.assertFalse(u.active)
+    }
+}
+
+
+class RunsErrorTaxonomyTests(TestCase) {
+    def test_spawn_error() {
+        raised: bool = false
+        try {
+            const u: User = runs[User](["/nonexistent/dragon-ffi-xyz"], b"{}")
+        } except SpawnError as e {
+            raised = true
+            self.assertTrue(len(e.hint) > 0)
+        }
+        self.assertTrue(raised)
+    }
+
+    # No decode is attempted on a crashed child, even when stdin was valid JSON.
+    def test_foreign_error_on_nonzero_exit() {
+        raised: bool = false
+        try {
+            const u: User = runs[User](["false"], '{"id":1,"tag":"t","active":true}'.encode("utf-8"))
+        } except ForeignError as e {
+            raised = true
+            self.assertTrue(e.returncode != 0)
+        }
+        self.assertTrue(raised)
+    }
+
+    def test_foreign_error_carries_stderr() {
+        raised: bool = false
+        try {
+            const u: User = runs[User](["sh", "-c", "echo boom 1>&2; exit 2"], b"{}")
+        } except ForeignError as e {
+            raised = true
+            self.assertEqual(e.returncode, 2)
+            self.assertTrue("boom" in e.traceback.decode("utf-8"))
+        }
+        self.assertTrue(raised)
+    }
+
+    def test_schema_error_on_garbage() {
+        raised: bool = false
+        try {
+            const u: User = runs[User](["cat"], b"this is not json at all")
+        } except SchemaError as e {
+            raised = true
+            self.assertTrue(len(e.raw) > 0)
+        }
+        self.assertTrue(raised)
+    }
+
+    # Valid JSON with a wrong field type is a SchemaError too, not just garbage input.
+    def test_schema_error_on_type_mismatch() {
+        raised: bool = false
+        try {
+            const u: User = runs[User](["cat"], '{"id":"nope","tag":"t","active":true}'.encode("utf-8"))
+        } except SchemaError as e {
+            raised = true
+        }
+        self.assertTrue(raised)
+    }
+}
+
+
+class RunsOwnershipTests(TestCase) {
+    # A leaked pipe fd blows the open-files ulimit well before 1500 iterations.
+    def test_no_leak() {
+        const body: bytes = '{"id": 0, "tag": "some-owned-string", "active": false}'.encode("utf-8")
+        i: int = 0
+        while i < 1500 {
+            const u: User = runs[User](["cat"], body)
+            self.assertEqual(u.tag, "some-owned-string")
+            i = i + 1
+        }
+    }
+}
+
+
+main([RunsRoundTripTests(), RunsErrorTaxonomyTests(), RunsOwnershipTests()])

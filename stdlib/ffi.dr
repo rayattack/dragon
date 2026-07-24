@@ -1,0 +1,83 @@
+"""ffi - the process lane (D052): run foreign code across a process boundary,
+typed on both ends. Child contract: read stdin, write stdout, exit non-zero on failure."""
+
+from subprocess import Popen, CompletedProcess
+from json import decode
+
+
+class FFIError(Exception) {
+    """Base for every process-lane failure: `except FFIError` catches all three."""
+}
+
+
+class SpawnError(FFIError) {
+    """The foreign binary could not be started (missing, not executable)."""
+    argv: list[str]
+    hint: str
+
+    def(argv: list[str], hint: str) {
+        self.argv = argv
+        self.hint = hint
+    }
+}
+
+
+class ForeignError(FFIError) {
+    """The child ran but exited non-zero; `traceback` is its stderr verbatim."""
+    argv: list[str]
+    returncode: int
+    traceback: bytes
+
+    def(argv: list[str], returncode: int, traceback: bytes) {
+        self.argv = argv
+        self.returncode = returncode
+        self.traceback = traceback
+    }
+}
+
+
+class SchemaError(FFIError) {
+    """The child exited clean but its stdout did not match T."""
+    argv: list[str]
+    raw: bytes
+    stderr: bytes
+    detail: str
+
+    def(argv: list[str], raw: bytes, stderr: bytes, detail: str) {
+        self.argv = argv
+        self.raw = raw
+        self.stderr = stderr
+        self.detail = detail
+    }
+}
+
+
+# Capture stdin so the child gets EOF, not the parent's stdin (else it hangs).
+# OSError here is execvp failure in the spawned child - the SpawnError signal.
+def _capture(argv: list[str], input: bytes) -> CompletedProcess {
+    try {
+        const proc: Popen = Popen(argv, "", true, true, true)
+        const both: tuple[bytes, bytes] = proc.communicate(input)
+        return CompletedProcess(argv, proc.returncode, both[0], both[1])
+    } except OSError as e {
+        raise SpawnError(argv, str(e))
+    }
+}
+
+
+def runs[T](argv: list[str], input: bytes) -> T {
+    """Spawn `argv` one-shot, feed `input` on stdin, decode stdout into T.
+    A non-zero exit is never decoded: crash output must not become a 'valid' result."""
+    if len(argv) == 0 {
+        raise SpawnError(argv, "ffi.runs: argv must be a non-empty list[str]")
+    }
+    const cp: CompletedProcess = _capture(argv, input)
+    if cp.returncode != 0 {
+        raise ForeignError(argv, cp.returncode, cp.stderr)
+    }
+    try {
+        return decode[T](cp.stdout)
+    } except ValueError as e {
+        raise SchemaError(argv, cp.stdout, cp.stderr, str(e))
+    }
+}
