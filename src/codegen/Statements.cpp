@@ -12,12 +12,8 @@ void CodeGen::visit(StarredExpr&) {
 void CodeGen::visit(ExprStmt& node) {
     node.expr->accept(*this);
 
-    // A discarded `fire fn()` / `fire { ... }` (fire-and-forget): its Task handle
-    // is dropped right here, so detach the vthread - it then frees itself on
-    // completion instead of leaking the struct + its ~2MB coroutine stack (#2).
-    // `t: Task[T] = fire ...` (binding) and `await fire ...` are NOT
-    // ExprStmt(FireExpr), so they keep the handle for join. Not RC-gated: the
-    // vthread refcount is independent of the object GC mode.
+    // Discarded `fire fn()` drops its Task handle: detach the vthread so it frees
+    // itself (no struct + ~2MB stack leak). Binding / `await fire` keep it. Not RC-gated.
     if (impl_->lastValue && dynamic_cast<FireExpr*>(node.expr.get())) {
         llvm::Value* vt = impl_->lastValue;
         if (!vt->getType()->isPointerTy())
@@ -27,14 +23,8 @@ void CodeGen::visit(ExprStmt& node) {
         return;
     }
 
-    // D017 Phase 4.B - freestanding TemplateExpr / TemplateFileExpr at
-    // statement position inside a `!{ ... }` block-interp appends its
-    // rendered string to the active block buffer instead of being treated
-    // as a discarded value. Both `:{ ... }` aliases and explicit
-    // `template { ... }` fragments work this way (spec §"Using `template {}`
-    // instead (identical behavior)"). The buffer takes ownership of one
-    // reference via dragon_list_append_ptr, so we skip the discarded-value
-    // decref path below.
+    // D017 Phase 4.B: a freestanding template inside a `!{...}` block appends to the
+    // active buffer (which takes the +1 via dragon_list_append_ptr); skip decref below.
     if (!impl_->templateBlockBufferStack.empty() && impl_->lastValue) {
         if (dynamic_cast<TemplateExpr*>(node.expr.get()) ||
             dynamic_cast<TemplateFileExpr*>(node.expr.get())) {
@@ -50,15 +40,8 @@ void CodeGen::visit(ExprStmt& node) {
         return;
     }
 
-    // A discarded value-callee (closure) result is a PHI of owned calls - see
-    // emitCallableValueCall, which merges the closure/bare/env call results -
-    // not a CallInst, so the CallInst-keyed paths below would miss it and leak
-    // it every call (e.g. a bare `render()` statement where `render` is a
-    // `Callable[[], str]`). Release it here, gated on isOwnedStrResult (which
-    // sees through the value-callee PHI) so a PHI from a borrowed source - a
-    // conditional `a if c else b` over locals, say - is left untouched. The
-    // element variant (str vs list/dict/instance) comes from the expr's
-    // resolved type via inferPtrValueTag, exactly like the CallInst ptr path.
+    // A discarded value-callee (closure) result is a PHI, not a CallInst, so the paths
+    // below miss it and leak; release here gated on isOwnedStrResult (borrowed PHIs skip).
     if (llvm::isa<llvm::PHINode>(impl_->lastValue)) {
         auto* ty = impl_->lastValue->getType();
         if (ty == impl_->boxType) {
@@ -85,18 +68,13 @@ void CodeGen::visit(ExprStmt& node) {
         return;
     }
 
-    // Decref discarded heap-typed results to prevent leaks (D020 Phase 4a).
-    // Path A: pointer-typed return - decref by inferred tag.
-    // Path B (Tier1 1.6): i64-typed return from pop-family runtime funcs -
-    // these return a tagged value (heap pointer encoded as i64) that the
-    // caller now owns. When the result is discarded, leak unless we
-    // IntToPtr and decref by the container's element tag.
+    // Decref discarded heap results to prevent leaks (D020 Phase 4a). Path A: ptr return
+    // decref by tag. Path B (Tier1 1.6): i64 pop-family return (heap ptr as i64) - IntToPtr + decref by elem tag.
     auto* callInst = llvm::cast<llvm::CallInst>(impl_->lastValue);
     auto* retTy = callInst->getType();
 
-    // Path C: discarded OWNED box result (`anyA + anyB` / `anyVal[i]` as a bare
-    // statement). The box owns +1 on a refcounted payload; release it by tag.
-    // Borrowed box reads are not owned (isOwnedBoxResult rejects them).
+    // Path C: discarded OWNED box result (`anyA + anyB` as a bare statement) owns +1
+    // on its payload - release by tag. Borrowed box reads aren't owned (rejected).
     if (retTy == impl_->boxType) {
         if (impl_->isOwnedBoxResult(impl_->lastValue)) {
             impl_->builder->CreateCall(
@@ -171,19 +149,15 @@ void CodeGen::visit(ExprStmt& node) {
 }
 
 void CodeGen::visit(IfStmt& node) {
-    // Detect isinstance() narrowing for union-typed variables.
-    // Returns (varName, narrowedKind) if condition is isinstance(x, T) where x is Union.
-    // Also handles `x != none` for `T | None` unions: narrows x to the non-None
-    // member inside the then-branch.
+    // Detect isinstance() narrowing for union vars; returns (varName, narrowedKind).
+    // Also handles `x != none` (T | None): narrows to the non-None member in the then-branch.
     auto detectNarrowing = [this](Expr* cond) -> std::pair<std::string, Impl::VarKind> {
         // Pattern: `union_var != none` (or symmetric) -> narrow to the
         // single non-None member of a 2-member union.
         if (auto* bin = dynamic_cast<BinaryExpr*>(cond)) {
             auto op = bin->op.type();
-            // `x != None` / `x is not None` -> THEN sees the non-None member.
-            // `x == None` / `x is None` -> ELSE sees it; THEN is None, so we
-            //  return the Other sentinel which skips THEN narrowing while
-            //  computeElseKind() still narrows the ELSE branch.
+            // `x != None` -> THEN sees the non-None member. `x == None` -> ELSE sees
+            // it; THEN returns the Other sentinel (skips THEN; computeElseKind does ELSE).
             bool isNe = (op == TokenType::NOT_EQUAL || op == TokenType::IS_NOT);
             bool isEq = (op == TokenType::EQUAL_EQUAL || op == TokenType::IS);
             if (isNe || isEq) {
@@ -227,14 +201,8 @@ void CodeGen::visit(IfStmt& node) {
         else if (typeName->name == "str")   nk = Impl::VarKind::Str;
         else if (typeName->name == "bytes") nk = Impl::VarKind::List;  // D030 §5: bytes/list share generic-heap dispatch
         else if (typeName->name == "list") {
-            // Narrowing a DECLARED union to its concrete list member keeps
-            // the native-list rebind - the member type fixes the layout. A
-            // bare Any gives no layout guarantee (a tag-5 payload may be a
-            // monomorphized DragonList or a DragonListBox), so KEEP THE BOX
-            // binding: len / subscript / iteration on it runtime-dispatch on
-            // the payload header instead of walking the wrong stride. An Any
-            // param also registers a unionMemberKinds entry, so the gate is
-            // "the declared members INCLUDE a list", not mere presence.
+            // Narrowing a DECLARED list member keeps the native rebind (member type fixes
+            // layout); bare Any keeps the box binding (no layout guarantee). Gate: members INCLUDE a list.
             auto membIt = impl_->unionMemberKinds.find(argName->name);
             bool declaredListMember =
                 membIt != impl_->unionMemberKinds.end() &&
@@ -264,12 +232,8 @@ void CodeGen::visit(IfStmt& node) {
         return Impl::VarKind::Union;  // 3+ members: stay union in else
     };
 
-    // The class an `isinstance(x, SomeClass)` condition narrows to, or "" if the
-    // condition is not a class-arm isinstance. detectNarrowing returns only the
-    // VarKind (ClassInstance) - the NAME is needed so the narrowed `x.method()`
-    // dispatches directly to `SomeClass`'s method instead of falling to the
-    // "class unknown" vtable path, which guesses the callee from an arbitrary
-    // same-named method (wrong dispatch / wrong-arity IR when classes collide).
+    // The class `isinstance(x, SomeClass)` narrows to, or "" otherwise. The NAME (not
+    // just VarKind) makes narrowed `x.method()` dispatch directly, not via the wrong-guess vtable path.
     auto narrowClassName = [this](Expr* cond) -> std::string {
         auto* call = dynamic_cast<CallExpr*>(cond);
         if (!call) return "";
@@ -281,11 +245,8 @@ void CodeGen::visit(IfStmt& node) {
         return impl_->classNames.count(typeName->name) ? typeName->name : "";
     };
 
-    // Record a narrowed class name (+owning module) for the branch body and
-    // return a restorer. varClassNames/varClassOwningModule are program-wide
-    // and NOT scope-managed (unlike the VarKind set via setVar), so the entry
-    // must be restored when the narrowed branch ends or it would leak onto the
-    // union var after the block.
+    // Record a narrowed class name (+owning module) and return a restorer. These maps
+    // are program-wide, NOT scope-managed, so must be restored or narrowing leaks past the block.
     auto applyClassNarrow = [this](const std::string& var,
                                    const std::string& cls) -> std::function<void()> {
         if (var.empty() || cls.empty()) return []{};
@@ -328,18 +289,15 @@ void CodeGen::visit(IfStmt& node) {
         ? (elseBB ? elseBB : mergeBB) : elifBlocks[0];
     impl_->builder->CreateCondBr(cond, thenBB, nextBB);
 
-    // Then body - with narrowing if isinstance detected.
-    // D030 Phase 4: extract the box's payload at the narrowed native type
-    // and shadow the union local with a typed alloca for the narrowed scope.
-    // Inside `if isinstance(x, int):`, x reads as native i64 (not a box).
+    // Then body: D030 Phase 4 extracts the box payload at the narrowed native type and
+    // shadows the union local with a typed alloca (inside `isinstance(x, int)`, x is native i64).
     impl_->builder->SetInsertPoint(thenBB);
     impl_->pushScope();  // each branch is its own block scope
     // narrowKind == Other is the "no THEN narrowing" sentinel (e.g. `x is None`,
     // where only the ELSE branch narrows). Skip extraction in that case.
     if (!narrowVar.empty() && narrowKind != Impl::VarKind::Other) {
-        // Resolve the storage: local alloca first, then module global. Without
-        // the global fallback, narrowing for module-level union vars (the common
-        // case for `const r: T | None = ...`) silently fails.
+        // Resolve storage: local alloca first, then module global. Without the global
+        // fallback, narrowing module-level union vars (`const r: T | None = ...`) silently fails.
         auto* localAlloca = impl_->lookupVar(narrowVar);
         llvm::Value* slotPtr = localAlloca;
         bool slotIsBox = (localAlloca && localAlloca->getAllocatedType() == impl_->boxType);
@@ -373,9 +331,8 @@ void CodeGen::visit(IfStmt& node) {
     impl_->emitScopeCleanup();
     impl_->popScope();
     restoreThenNarrow();
-    // Did the then-branch unconditionally terminate (return/raise/...)? If so it
-    // does NOT fall through to the merge, which enables fall-through narrowing
-    // below (the Python early-return idiom).
+    // Did the then-branch unconditionally terminate? If so it doesn't fall through to
+    // merge, enabling the fall-through narrowing below (Python early-return idiom).
     bool thenTerminated = impl_->builder->GetInsertBlock()->getTerminator() != nullptr;
     if (!thenTerminated)
         impl_->builder->CreateBr(mergeBB);
@@ -429,11 +386,8 @@ void CodeGen::visit(IfStmt& node) {
         if (!narrowVar.empty()) {
             auto elseKind = computeElseKind(narrowVar, narrowKind);
             if (elseKind != Impl::VarKind::Union) {
-                // Resolve storage: local alloca first, then module global -
-                // mirroring the then-branch. Without the global fallback,
-                // else-narrowing for module-level union vars silently failed
-                // and `v` stayed a box (e.g. v.upper() called on the box ->
-                // LLVM verify error).
+                // Resolve storage: local alloca first, then module global (mirrors the
+                // then-branch). Without the global fallback, `v` stays a box -> LLVM verify error.
                 auto* localAlloca = impl_->lookupVar(narrowVar);
                 llvm::Value* slotPtr = localAlloca;
                 bool slotIsBox = (localAlloca && localAlloca->getAllocatedType() == impl_->boxType);
@@ -466,14 +420,8 @@ void CodeGen::visit(IfStmt& node) {
 
     impl_->builder->SetInsertPoint(mergeBB);
 
-    // Fall-through narrowing: when the then-branch unconditionally terminates and
-    // there is no elif/else, the merge is reached ONLY via the condition being
-    // false - so `x` is narrowed to the else-type for the rest of THIS (enclosing)
-    // scope. This is the Python early-return idiom:
-    //  if isinstance(x, int) { return ... } # x is str from here on
-    //  return f"{x.upper()}"
-    // Mirrors the else-branch payload extraction, but binds into the enclosing
-    // scope (the then/else scopes were already popped).
+    // Fall-through narrowing: a terminating then-branch with no elif/else means merge is
+    // reached only when cond is false, so `x` narrows to the else-type in the enclosing scope.
     if (!narrowVar.empty() && stmtsAlwaysTerminate(node.thenBody) &&
         node.elifClauses.empty() && node.elseBody.empty()) {
         auto elseKind = computeElseKind(narrowVar, narrowKind);
@@ -508,12 +456,8 @@ void CodeGen::visit(WhileStmt& node) {
     auto* condBB = llvm::BasicBlock::Create(*impl_->context, "whilecond", func);
     auto* bodyBB = llvm::BasicBlock::Create(*impl_->context, "whilebody", func);
     auto* endBB = llvm::BasicBlock::Create(*impl_->context, "whileend", func);
-    // `while ... else` (Python): the else block runs IFF the loop completed
-    // normally (condition became false) and was NOT exited via `break`. The
-    // natural-completion edge from the condition targets elseBB; `break`
-    // keeps targeting endBB (breakBlock below stays endBB) so it bypasses
-    // else. With no else clause behavior is unchanged - completion goes
-    // straight to endBB.
+    // `while ... else` (Python): else runs IFF the loop completed normally (not via
+    // `break`). Completion targets elseBB; `break` targets endBB, bypassing else.
     llvm::BasicBlock* elseBB = node.elseBody.empty()
         ? endBB
         : llvm::BasicBlock::Create(*impl_->context, "whileelse", func);
@@ -537,9 +481,8 @@ void CodeGen::visit(WhileStmt& node) {
     if (!impl_->builder->GetInsertBlock()->getTerminator())
         impl_->builder->CreateBr(condBB);
 
-    // Pop the loop context BEFORE emitting the else body - a `break` inside
-    // the else would belong to an enclosing loop, not this one, matching
-    // Python scoping (the else is outside the loop proper).
+    // Pop the loop context BEFORE the else body - a `break` there belongs to an
+    // enclosing loop, matching Python scoping (else is outside the loop proper).
     impl_->loopStack.pop();
 
     // Else body - reached only on natural completion. Own block scope, then
@@ -575,30 +518,13 @@ void CodeGen::visit(ReturnStmt& node) {
         node.value->accept(*this);
         llvm::Value* retVal = impl_->lastValue;
         llvm::Type* retType = impl_->currentFunction->getReturnType();
-        // `-> T | None` (Union / Any) lowers to a `{i64, i64}` box. When the
-        // return expression is one of the union members (or `none`), widen by
-        // tagging and packing into a box so the LLVM-level types line up.
-        //
-        // D039 Phase 8 fix: when the wrapped payload is a heap pointer
-        // (string, list, dict, class, bytes), it's about to be scope-cleanup-
-        // decref'd. Incref the NATIVE pointer here, before wrapping, so the
-        // caller's box owns its own +1 ref. The downstream "return path
-        // incref" only sees the box (struct value) and can't reach the
-        // payload - so the incref must happen at the wrap site.
+        // `-> T | None` (Union/Any) lowers to a `{i64,i64}` box: tag + pack a union member.
+        // D039 Phase 8: incref the heap payload BEFORE wrapping so the caller's box owns +1.
         bool retBoxWrapped = false;
         if (retType == impl_->boxType && retVal->getType() != impl_->boxType) {
             auto* tag = impl_->emitTagForExpr(node.value.get(), *this);
-            // Incref the heap payload (if any) BEFORE wrapping, while it's
-            // still in its native ptr form. The wrap discards type info that
-            // the incref dispatch needs.
-            // Gated on BORROWED payloads only (`return name` / `return
-            // self.f` / `return d[k]` - scope cleanup or the container owns
-            // the +1). An OWNED temp (str() / concat / slice / literal /
-            // call result) already carries the +1 the caller's box takes;
-            // increffing it too leaks one object per call (
-            // `def f() -> Any { return str(42) }`). IR-level predicates, not
-            // AST: a ternary of locals merges in a PHI, which the predicates
-            // conservatively treat as a borrow - incref'd, never dangling.
+            // Incref a BORROWED heap payload before wrapping (`return name/self.f/d[k]`);
+            // an OWNED temp already carries the +1, so increffing it leaks one object/call.
             if (impl_->options.gcMode == GCMode::RC &&
                 retVal->getType()->isPointerTy()) {
                 if (auto* tagConst = llvm::dyn_cast<llvm::ConstantInt>(tag)) {
@@ -618,14 +544,8 @@ void CodeGen::visit(ReturnStmt& node) {
             retVal = impl_->makeBox(tag, retVal);
             retBoxWrapped = true;
         } else if (retVal->getType() == impl_->boxType && retType != impl_->boxType) {
-            // D039: returning an Any (box) from a function with a CONCRETE
-            // return type (e.g. `return d[k]` on a dict[str, Any] from a
-            // `-> str`). coerceArg can't unbox a {tag, payload} box, so do it
-            // here, mirroring the unbox-on-assign path (Assign.cpp). A BORROW
-            // box payload (dragon_dict_get_box contract) is incref'd by runtime
-            // tag so the caller receives an owning ref; an OWNED box temporary
-            // (box_binop / box_subscript) already carries that +1, so taking its
-            // payload as the return value must NOT incref again (else it leaks).
+            // D039: unbox an Any (box) returned from a CONCRETE-return function (coerceArg
+            // can't). Incref a BORROW payload by tag; an OWNED box temp already has +1 (don't re-incref).
             if (impl_->options.gcMode == GCMode::RC &&
                 !impl_->isOwnedBoxResult(retVal)) {
                 auto* tag = impl_->boxTag(retVal, "ret.tag");
@@ -642,14 +562,8 @@ void CodeGen::visit(ReturnStmt& node) {
                 retVal = impl_->coerceArg(retVal, retType);
             retBoxWrapped = true;  // RC handled here - skip the generic incref below
         } else if (retType == impl_->boxType && retVal->getType() == impl_->boxType) {
-            // Returning an already-boxed value from an Any/Union function. Make
-            // the returned box OWNED so callers can take ownership uniformly
-            // (isOwnedBoxResult treats any box-returning call as owned). An owned
-            // producer (box_binop / box_subscript / another owned call) already
-            // carries the +1; a BORROW - a box local about to be scope-cleanup-
-            // decref'd, or a dict/list element (dragon_dict_get_box) - must be
-            // incref'd here, else the payload is freed out from under the caller
-            // (use-after-free) or the caller's take-ownership double-frees it.
+            // Returning an already-boxed value from an Any/Union function: make it OWNED
+            // so callers take ownership uniformly. Incref a BORROW here, else use-after-free / double-free.
             if (impl_->options.gcMode == GCMode::RC &&
                 !impl_->isOwnedBoxResult(retVal)) {
                 auto* tag = impl_->boxTag(retVal, "ret.tag");
@@ -659,19 +573,11 @@ void CodeGen::visit(ReturnStmt& node) {
             retBoxWrapped = true;  // RC handled here - skip the generic incref below
         } else if (retVal->getType() != retType)
             retVal = impl_->coerceArg(retVal, retType);
-        // GC: if returning a local heap-kinded variable, incref it first so
-        // scope cleanup doesn't free it. Only incref when we KNOW the value
-        // has a DragonObjectHeader (isHeapKind). StrLiteral and other
-        // ptr-typed values without headers must NOT be incref'd.
-        // Phase 2: Str uses dragon_incref_str (data ptr -> header).
-        // Phase 3: ClassInstance uses dragon_incref (pointer IS the header).
-        // D039 Phase 8: skip when we already incref'd at the box-wrap site -
-        // retVal there is the {tag, payload} struct, not a heap pointer, and
-        // the incref already protected the payload's lifetime.
+        // GC: incref a returned local heap var first so scope cleanup doesn't free it,
+        // only when isHeapKind (headerless ptrs must NOT be). Skip if already incref'd at the box-wrap site.
         if (impl_->options.gcMode == GCMode::RC && !retBoxWrapped) {
-            // Incref borrowed heap values before scope cleanup.
-            // NameExpr: local variable about to be decref'd by scope cleanup.
-            // AttributeExpr: field borrowed from an object.
+            // Incref borrowed heap values before scope cleanup. NameExpr: local about to
+            // be decref'd; AttributeExpr: field borrowed from an object.
             auto increfIfHeap = [&](Impl::VarKind kind) {
                 if (Impl::isHeapKind(kind)) {
                     impl_->emitIncrefByKind(retVal, kind);
@@ -716,33 +622,10 @@ void CodeGen::visit(ReturnStmt& node) {
                     }
                 }
             } else if (auto* subExpr = dynamic_cast<SubscriptExpr*>(node.value.get())) {
-                // Returning a subscript value (`return d[k]`, `return lst[i]`,
-                // `return _MIME_TYPES[ext]`) yields a *borrowed* reference into
-                // the container. The caller is expected to receive an owning
-                // ref (calling-convention contract), so we must incref before
-                // returning. Without this, the caller can store the value into
-                // another container that "steals" the +1 - when the caller's
-                // container is freed it decrefs the value, drops the source
-                // container's reference too, and the source ends up holding a
-                // dangling pointer (use-after-free on the next read).
-                //
-                // EXCEPT a SLICE (`return s[a:b]`, `return xs[a:b]`): that lowers
-                // to dragon_{str,list,bytes}_slice, which returns a FRESH +1
-                // object the caller already owns. Increffing it makes +2 and
-                // leaks one object per call (e.g. os.path.basename's
-                // `return path[idx+1:]` leaked its result every call). Mirror
-                // isBorrowedHeapExpr's slice carve-out: only an element read
-                // borrows; a slice is owned.
-                //
-                // AND EXCEPT a STRING element read (`return s[i]`): strings are
-                // immutable, so dragon_str_index mallocs a fresh 1-char string -
-                // owned exactly like a slice, with no container holding a
-                // reference. isBorrowedHeapExpr has carried this carve-out for
-                // a while; this return path predated it, so every
-                // `def peek() -> str { return self.src[i] }` came back +2 and
-                // leaked one string per call (the GraphQL parser hot loop found
-                // it). list/dict element returns keep the incref: those really
-                // do borrow the container's reference.
+                // A subscript return (`return d[k]`, `lst[i]`) borrows into the container;
+                // incref before returning or the caller's take-ownership causes a use-after-free.
+                // EXCEPT a SLICE (`s[a:b]`) and a STRING element read (`s[i]`): both return a
+                // FRESH +1 the caller already owns, so increffing leaks one object per call.
                 bool ownedStrElem = subExpr->object && subExpr->object->type &&
                     subExpr->object->type->kind() == Type::Kind::Str;
                 if (dynamic_cast<SliceExpr*>(subExpr->index.get()) == nullptr &&
@@ -774,9 +657,8 @@ void CodeGen::visit(ReturnStmt& node) {
 
 void CodeGen::visit(BreakStmt&) {
     if (!impl_->loopStack.empty()) {
-        // Pop only the try/with frames opened inside the loop body (those above
-        // the count recorded at loop entry) - the jump lands at breakBlock,
-        // still inside any try enclosing the loop.
+        // Pop only the try/with frames opened inside the loop body (above the loop-entry
+        // count) - the jump to breakBlock is still inside any try enclosing the loop.
         impl_->emitExcFramePops(impl_->tryFrameFuncs.size() - impl_->loopStack.top().tryFrameDepth);
         impl_->emitEarlyExitCleanups(*this, impl_->loopStack.top().scopeDepth,
                                      impl_->loopStack.top().exitCleanupDepth);
@@ -797,13 +679,8 @@ void CodeGen::visit(PassStmt&) {
     // No-op
 }
 
-// defer <call> (defer.md): arguments and the method receiver evaluate HERE
-// into an i64 snapshot array; only the call runs at scope exit. The entry
-// appended to the current Scope is emitted by emitScopeCleanupFor on every
-// normal exit edge (LIFO, before the RC decref pass), and the runtime
-// cleanup-stack entries registered below make the same thunk run during a
-// longjmp unwind. Zero heap either way: the snapshot array is an entry
-// alloca and the unwind entries live on the preallocated cleanup stack.
+// defer <call> (defer.md): args + receiver evaluate HERE into an i64 snapshot array; only
+// the call runs at scope exit (normal exit via emitScopeCleanupFor, unwind via the cleanup stack). Zero heap.
 void CodeGen::visit(DeferStmt& node) {
     auto* call = dynamic_cast<CallExpr*>(node.call.get());
     if (!call) {
@@ -875,12 +752,8 @@ void CodeGen::visit(DeferStmt& node) {
                 attrExpr->object->accept(*this);
                 selfVal = impl_->lastValue;
                 selfExpr = attrExpr->object.get();
-                // D026 parity: a deferred method must dispatch exactly like
-                // the direct call would. The receiver's STATIC class resolved
-                // the symbol, but the runtime value may be a subclass; when
-                // any subclass overrides this method, the thunk goes through
-                // the receiver's vtable, or `defer conn.close()` on a
-                // ConnReader would silently run the base no-op.
+                // D026 parity: a deferred method must dispatch like the direct call. The
+                // runtime value may be a subclass, so when overridden the thunk uses the vtable.
                 if (impl_->methodIsOverridden(className, attrExpr->attribute)) {
                     auto idxIt =
                         impl_->classMethodVtableIndices.find(className);
@@ -901,10 +774,8 @@ void CodeGen::visit(DeferStmt& node) {
         return;
     }
 
-    // Evaluate every argument NOW (snapshot rule) and classify what the
-    // snapshot slot owns. drainKind != Other means the slot holds a +1
-    // released after the deferred call; own-moved values ride into the
-    // callee and drain nothing.
+    // Evaluate every argument NOW (snapshot rule) and classify slot ownership: drainKind
+    // != Other means the slot holds a +1 released after the call; own-moved values drain nothing.
     std::vector<llvm::Value*> vals;
     std::vector<Expr*> exprs;
     if (isMethodCall) {
@@ -946,9 +817,8 @@ void CodeGen::visit(DeferStmt& node) {
             continue;
         }
         if (Impl::isHeapKind(tk)) {
-            // Borrowed heap value. A rodata literal has no header to count -
-            // dup it to a refcounted copy; anything else takes a +1 so a
-            // rebind of the source name cannot strand the snapshot.
+            // Borrowed heap value: a rodata literal (no header) is dup'd to a refcounted
+            // copy; anything else takes a +1 so rebinding the source can't strand the snapshot.
             llvm::Value* heapified = impl_->ensureHeapString(vals[i], e);
             if (heapified != vals[i]) {
                 vals[i] = heapified;
@@ -960,9 +830,8 @@ void CodeGen::visit(DeferStmt& node) {
         }
     }
 
-    // Fill omitted trailing args from the callee's defaults, evaluated here
-    // (snapshot semantics hold for defaults too). Fresh heap defaults are
-    // owned temps the matching slot adopts.
+    // Fill omitted trailing args from the callee's defaults, evaluated here (snapshot
+    // holds for defaults too). Fresh heap defaults are owned temps the matching slot adopts.
     auto* targetTy = targetFn->getFunctionType();
     if (vals.size() < targetTy->getNumParams()) {
         std::vector<std::pair<llvm::Value*, Impl::VarKind>> defaultTemps;
@@ -1007,16 +876,12 @@ void CodeGen::visit(DeferStmt& node) {
 
     auto* thunk = impl_->buildDeferThunk(targetFn, siteName, deferVtIdx);
 
-    // `defer f(own x)`: the snapshot now carries the moved +1 - null the
-    // binding's slot and its unwind-stack entry so neither path frees what
-    // the deferred callee will adopt.
+    // `defer f(own x)`: the snapshot carries the moved +1 - null the binding's slot and
+    // its unwind-stack entry so neither path frees what the deferred callee will adopt.
     impl_->emitMoveOutSlots(*call);
 
-    // Register the unwind entries, gated on a live exception frame exactly
-    // like every other cleanup push (no frame live here means no handler
-    // exists that an unwind crossing this scope could reach). One entry per
-    // snapshot value with its drain kind, then the thunk entry on top; the
-    // scope's normal-exit rewind pops them unexecuted.
+    // Register unwind entries, gated on a live exception frame (no frame = no reachable
+    // handler): one per snapshot value + drain kind, thunk on top; normal exit pops them unexecuted.
     {
         auto* i32Ty = llvm::Type::getInt32Ty(*impl_->context);
         auto& scope = impl_->scopes.back();
@@ -1071,18 +936,13 @@ void CodeGen::visit(DeferStmt& node) {
 void CodeGen::visit(RaiseStmt& node) {
     auto* func = impl_->currentFunction;
 
-    // An owned +1 message temp (concat / str() / f-string) transfers its
-    // reference into the exc slot via the consume variant - the raise
-    // longjmps, so the caller can never release it. Borrowed reads and
-    // literals go through the plain raise (the slot dups mortal heap msgs).
+    // An owned +1 message temp (concat / str() / f-string) transfers its ref into the exc
+    // slot via the consume variant (the raise longjmps). Borrowed reads / literals use plain raise.
     auto emitRaise = [&](llvm::Value* typeVal, llvm::Value* msgVal) {
         bool owned = impl_->options.gcMode == GCMode::RC &&
                      impl_->isOwnedStrResult(msgVal);
-        // A constant ptr message is a rodata C literal (CreateGlobalString);
-        // heap DragonStrings always arrive via loads/calls. Literals go
-        // through the cstr raise so the runtime wraps them in a heap
-        // DragonString - the exc_msg slot must never hold a raw literal
-        // (its header probe would read 24 bytes before the rodata).
+        // A constant ptr message is a rodata C literal - route it through the cstr raise
+        // so the runtime wraps it in a heap DragonString (exc_msg must never hold a raw literal).
         bool literal = !owned && llvm::isa<llvm::Constant>(msgVal);
         auto* raiseFn = impl_->runtimeFuncs[owned   ? "dragon_raise_exc_consume"
                                             : literal ? "dragon_raise_exc_cstr"
@@ -1094,14 +954,8 @@ void CodeGen::visit(RaiseStmt& node) {
         impl_->builder->SetInsertPoint(deadBB);
     };
 
-    // Re-raise the in-flight exception preserving its ORIGINAL type + message
-    // + instance. The runtime keeps all three in TLS (or the vthread struct),
-    // still valid while a handler body runs. Used for bare `raise` and
-    // `raise <handler-var>` - the handler variable only carries one of msg/
-    // instance, so the full state must come from the runtime slots, not from
-    // the variable. Always route through dragon_raise_exc_obj so a typed-
-    // field exception keeps its instance through nested handlers (obj=NULL
-    // for built-in raises makes this equivalent to dragon_raise_exc).
+    // Re-raise the in-flight exception preserving its ORIGINAL type + message + instance
+    // from the runtime slots (via dragon_raise_exc_obj; obj=NULL for built-ins). For bare `raise` and `raise <handler-var>`.
     auto emitReraiseCurrent = [&]() {
         auto* t = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_exc_get_type"], {}, "reraise.type");
@@ -1129,37 +983,19 @@ void CodeGen::visit(RaiseStmt& node) {
                 int64_t typeCode = impl_->excTypeCode(name->name);
                 auto* typeVal = llvm::ConstantInt::get(impl_->i64Type, typeCode);
 
-                // User-defined exception class with typed-field ctor: construct
-                // the instance via its __init__ and route through the obj-aware
-                // raise. Without this, `raise HTTPError(404, "url")` would
-                // lower the int 404 straight into `dragon_raise_exc(i64, ptr
-                // msg)` - type mismatch, LLVM verifier failure - and the user
-                // ctor would never run, so e.code / e.url / e.reason would
-                // not survive unwinding. Built-in exceptions (ValueError,
-                // OSError, ...) keep the message-only path: they have no user-
-                // typed ctor and their first arg is, by convention, the msg.
+                // A user exception with a typed-field ctor is constructed via __init__ and routed
+                // through the obj-aware raise (else typed fields don't survive unwinding). Built-ins keep the message-only path.
                 bool isUserExc = impl_->userExcCodes.count(name->name) > 0;
                 auto* initFn = isUserExc
                     ? impl_->module->getFunction(
                           impl_->classSymPrefix(name->name) + "___init__")
                     : nullptr;
-                // Arity mismatch (e.g. `raise EmptyError()` against a ctor
-                // declared `def(msg: str)`) falls through to the message-only
-                // path: invoking the ctor with the wrong arity produces an
-                // LLVM verifier failure. Historical behavior silently treated
-                // such raises as built-in-style (type + message-or-classname);
-                // preserve that. The user-class type code still routes to a
-                // matching `except UserClass as e` handler - `e` just binds
-                // to the message string rather than an instance.
+                // An arity mismatch falls through to the message-only path (a wrong-arity ctor
+                // call would fail the verifier); the type code still routes to `except UserClass as e` (e binds the message).
                 bool arityMatches = false;
                 if (isUserExc && initFn) {
-                    // initFn signature: (self, args...). User args = numParams - 1.
-                    // Exact match always works; a short call works when every
-                    // missing user arg has a default. Defaults for the ctor are
-                    // stored on the matching `<clsSym>_new` symbol (ImplInit.cpp
-                    // line 1451), NOT on the `___init__` symbol, and the vector
-                    // is keyed by user-arg position (no self slot). visit(CallExpr)
-                    // calls fillDefaultArgs for the ctor before invoking it.
+                    // initFn is (self, args...); user args = numParams - 1. A short call works
+                    // when missing args have defaults (stored on `<clsSym>_new`, keyed by user-arg position).
                     unsigned expected = initFn->getFunctionType()->getNumParams();
                     if (expected >= 1 && call->args.size() == expected - 1) {
                         arityMatches = true;
@@ -1182,20 +1018,8 @@ void CodeGen::visit(RaiseStmt& node) {
                     }
                 }
                 if (isUserExc && initFn && arityMatches) {
-                    // Derive a runtime `msg` for the obj-raise. Two reasons
-                    // we don't just punt to the class name:
-                    //  1. `print(e)` for an exception instance routes through
-                    //  the runtime msg slot (see emitPrintArg) so single-
-                    //  string-arg ctors stay Python-shaped (`AppError("x")`
-                    //  -> str(e) = "x").
-                    //  2. Uncaught raises still print a useful message at the
-                    //  process-exit fallback in dragon_raise_exc_obj.
-                    // We snapshot the first arg ONLY when it's a pure-eval
-                    // expression (StringLiteral or NameExpr), so that visiting
-                    // the CallExpr below re-evaluates it without observable
-                    // side effects. Anything else (CallExpr arg, f-string,
-                    // arithmetic) falls back to the class name to keep raise
-                    // sites side-effect-faithful.
+                    // Derive a runtime `msg` for the obj-raise (so `print(e)` stays Python-shaped, uncaught
+                    // raises print usefully). Only snapshot a pure-eval first arg (StringLiteral/NameExpr); else use the class name.
                     llvm::Value* msgVal = nullptr;
                     if (!call->args.empty()) {
                         Expr* a0 = call->args[0].get();
@@ -1204,24 +1028,20 @@ void CodeGen::visit(RaiseStmt& node) {
                             pure = !sl->isBytes && !sl->isFString;
                         else if (dynamic_cast<NameExpr*>(a0))
                             pure = true;
-                        if (pure) {
+                        // Adopt a0 as msg only when it is actually a `str`; a ptr-shaped
+                        // non-string first arg (list/dict/bytes) raised as a string UAFs.
+                        const bool isStr = a0->type && a0->type->kind() == Type::Kind::Str;
+                        if (pure && isStr) {
                             a0->accept(*this);
                             llvm::Value* v = impl_->lastValue;
-                            // A NameExpr can resolve to non-string scalars
-                            // (HTTPError(code, url) - first arg is int);
-                            // only adopt as msg when the resulting value is a
-                            // ptr-shaped string.
                             if (v && v->getType()->isPointerTy())
                                 msgVal = v;
                         }
                     }
                     if (!msgVal)
                         msgVal = impl_->builder->CreateGlobalString(name->name);
-                    // Evaluate the call expression as a normal constructor:
-                    // visit(CallExpr) handles malloc + gc_track + __init__ call
-                    // for any user class. The result is the instance pointer
-                    // with refcount=1, which the obj-aware raise treats as an
-                    // owned ref handed off to the matched handler's binding.
+                    // Evaluate the call as a normal constructor (malloc + gc_track + __init__);
+                    // the rc=1 instance is an owned ref the obj-aware raise hands to the handler's binding.
                     node.exception->accept(*this);
                     llvm::Value* inst = impl_->lastValue;
                     if (!inst->getType()->isPointerTy())
@@ -1251,10 +1071,8 @@ void CodeGen::visit(RaiseStmt& node) {
             }
         }
 
-        // `raise e` where `e` is an enclosing handler's bound exception variable:
-        // re-raise the in-flight exception with its ORIGINAL type. Without this
-        // the type would be lost (the var holds only the message), so an
-        // enclosing `except <OriginalType>` could not match it.
+        // `raise e` where `e` is a handler's bound exception var: re-raise the in-flight
+        // exception with its ORIGINAL type (the var holds only the message, so `except <Type>` could not match otherwise).
         if (auto* nameRef = dynamic_cast<NameExpr*>(node.exception.get())) {
             for (auto& v : impl_->handlerExcVars) {
                 if (v == nameRef->name) {
@@ -1262,16 +1080,8 @@ void CodeGen::visit(RaiseStmt& node) {
                     return;
                 }
             }
-            // `raise <var>` where var holds a user-exception instance built
-            // earlier (`saved: HTTPError = HTTPError(...); raise saved`).
-            // Route through the obj-aware raise so the handler's `except
-            // <UserClass> as e` binding gets the real instance (typed-field
-            // access works) AND the correct type code routes through the
-            // parent-class catch-range (so `except URLError` matches an
-            // HTTPError instance). The static class is the source of truth
-            // for the type code; if the instance is polymorphic (e.g. a
-            // subclass stored under a parent annotation), the parent code's
-            // [lo,hi] range still covers the runtime subclass.
+            // `raise <var>` holding a user-exception instance: route through the obj-aware
+            // raise so the handler binds the real instance (typed fields) and the static type code's [lo,hi] range matches subclasses.
             auto cnIt = impl_->varClassNames.find(nameRef->name);
             if (cnIt != impl_->varClassNames.end() &&
                 impl_->userExcCodes.count(cnIt->second) > 0) {
@@ -1284,10 +1094,8 @@ void CodeGen::visit(RaiseStmt& node) {
                 else if (inst->getType() != impl_->i8PtrType)
                     inst = impl_->builder->CreateBitCast(inst, impl_->i8PtrType);
                 auto* msgVal = impl_->builder->CreateGlobalString(cnIt->second);
-                // The instance is BORROWED from the local's slot; the raise
-                // transfers a +1 into the owning exc_obj slot, so retain
-                // first. The local's own ref is then correctly freed by the
-                // unwind / scope cleanup.
+                // The instance is BORROWED from the local's slot; the raise transfers a +1
+                // into the owning exc_obj slot, so retain first (the local's ref is freed by unwind / cleanup).
                 inst = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_exc_retain_obj"], {inst},
                     "raise.obj.retained");
@@ -1342,13 +1150,8 @@ void CodeGen::visit(DeleteStmt& node) {
                 if (Impl::isHeapKind(kind)) {
                     auto* val = impl_->builder->CreateLoad(
                         alloca->getAllocatedType(), alloca, nameExpr->name + ".del");
-                    // docs/002 ADR: OwnershipCheck PROVED this binding is the
-                    // value's sole owner, so debug builds (-O0) assert
-                    // rc == 1 right here - the executable form of the proof.
-                    // A disagreement (codegen refcount bug, or a callee that
-                    // retained a borrow) aborts naming this exact line.
-                    // Release builds: the plain decref below, identical to
-                    // scope exit, just earlier.
+                    // docs/002 ADR: OwnershipCheck PROVED sole ownership, so -O0 asserts rc==1
+                    // here (executable proof; a disagreement aborts). Release builds: the plain decref below.
                     bool proven = ti < node.provenUnique.size() &&
                                   node.provenUnique[ti];
                     if (proven && impl_->options.optimizationLevel == 0) {
@@ -1384,11 +1187,8 @@ void CodeGen::visit(DeleteStmt& node) {
                     }
                     impl_->emitDecrefByKind(val, kind);
                 }
-                // docs/002: del of a PROVEN Lock local destroys the OS
-                // primitive through the same releaser the own-field dealloc
-                // uses. A Lock is a raw pthread mutex (no refcount header),
-                // so the rc==1 assert does not apply; compilation implies
-                // the ownership proof (an escaped/borrowed Lock refuses).
+                // docs/002: del of a PROVEN Lock local destroys the OS primitive (raw pthread
+                // mutex, no refcount header, so no rc==1 assert; compilation implies the ownership proof).
                 else if (nameExpr->type &&
                          nameExpr->type->kind() == Type::Kind::Lock) {
                     auto* val = impl_->builder->CreateLoad(
@@ -1404,9 +1204,8 @@ void CodeGen::visit(DeleteStmt& node) {
             }
             // Store null/zero to the slot to prevent double-free on scope cleanup
             if (alloca->getAllocatedType() == impl_->boxType) {
-                // Union slot: the decref above drained the payload by tag;
-                // zero the whole {tag, payload} box so scope cleanup's own
-                // Union drain sees tag 0 and no-ops instead of double-freeing.
+                // Union slot: zero the whole {tag, payload} box so scope cleanup's Union
+                // drain sees tag 0 and no-ops instead of double-freeing the already-drained payload.
                 impl_->builder->CreateStore(
                     llvm::Constant::getNullValue(impl_->boxType), alloca);
             } else if (alloca->getAllocatedType()->isPointerTy()) {
@@ -1420,10 +1219,8 @@ void CodeGen::visit(DeleteStmt& node) {
                     alloca);
             }
         }
-        // del d[key] for dicts. Dispatches str- vs int-keyed exactly like the
-        // subscript-store path in Assign.cpp. del lst[i] is routed to
-        // dragon_list_delitem below; del x.attr remains unsupported (hard
-        // error - never a silent no-op).
+        // del d[key]: str- vs int-keyed like the subscript-store in Assign.cpp. del lst[i]
+        // routes to dragon_list_delitem below; del x.attr is a hard error, never a silent no-op.
         else if (auto* sub = dynamic_cast<SubscriptExpr*>(target.get())) {
             bool isDict = false;
             if (auto* objName = dynamic_cast<NameExpr*>(sub->object.get())) {
@@ -1434,12 +1231,8 @@ void CodeGen::visit(DeleteStmt& node) {
                 isDict = true;
             }
             if (!isDict) {
-                // del lst[i] - list element deletion. The three monomorphized
-                // list variants (I64/F64/Ptr) share layout, so a single
-                // decref-aware runtime entry covers them. A non-list, non-dict
-                // subscript (e.g. del x.attr) is a hard error, NOT a no-op:
-                // silently dropping it once turned scheduler.run() into an
-                // unbounded loop that exhausted RAM.
+                // del lst[i]: the three list variants (I64/F64/Ptr) share layout, so one
+                // decref-aware entry covers them. A non-list/non-dict subscript is a hard error (a silent no-op once OOM'd sched.run()).
                 bool isList = false;
                 if (auto* objName = dynamic_cast<NameExpr*>(sub->object.get())) {
                     isList = impl_->lookupVarKind(objName->name) ==
@@ -1497,12 +1290,8 @@ void CodeGen::visit(DeleteStmt& node) {
             } else {
                 impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_dict_del"], {dict, key});
-                // Release an owned str key TEMP used only to address the entry
-                // (`del d[str(i)]`, `del d[a + b]`). The dict drops its OWN key
-                // ref internally; this temp is a separate +1 the caller still
-                // owns. Borrowed keys (a bare name/literal) are not owned, so
-                // isOwnedStrResult leaves them alone. Pre-existing leak, surfaced
-                // by the dict-delete ASan probe.
+                // Release an owned str key TEMP used only to address the entry (`del d[str(i)]`):
+                // the dict drops its own ref, this +1 is separate. Borrowed keys are skipped. (leak found by ASan)
                 if (impl_->options.gcMode == GCMode::RC &&
                     impl_->isOwnedStrResult(key)) {
                     impl_->builder->CreateCall(
@@ -1510,13 +1299,8 @@ void CodeGen::visit(DeleteStmt& node) {
                 }
             }
         }
-        // del adict.key - dict dot-access delete (.dr str-keyed dicts), the
-        // delete mirror of `adict.key` reads. Equivalent to del adict["key"].
-        // Resolves the same dict receivers as the read path in Attributes.cpp:
-        // a Dict-kind NameExpr, a class field of Dict kind (self._d.k), or a
-        // statically Dict-typed receiver. A genuine class instance has fixed
-        // layout, so deleting one of its attributes is meaningless -> hard
-        // error (never a silent no-op - that's what OOM'd sched.run()).
+        // del adict.key: dict dot-access delete (str-keyed), equivalent to del adict["key"],
+        // resolving the same receivers as the Attributes.cpp read path. A class instance attr is a hard error (silent no-op once OOM'd sched.run()).
         else if (auto* attr = dynamic_cast<AttributeExpr*>(target.get())) {
             bool isDictObj = false;
             if (impl_->isDragonFile) {
@@ -1561,9 +1345,8 @@ void CodeGen::visit(DeleteStmt& node) {
             if (isDictObj) {
                 attr->object->accept(*this);
                 llvm::Value* dict = impl_->lastValue;
-                // dict dot-access is str-keyed by definition; the attribute
-                // name is the key. dragon_dict_del raises KeyError on miss,
-                // exactly like del adict["key"].
+                // dict dot-access is str-keyed; the attribute name is the key. dragon_dict_del
+                // raises KeyError on miss, exactly like del adict["key"].
                 auto* keyStr =
                     impl_->builder->CreateGlobalString(attr->attribute);
                 impl_->builder->CreateCall(
@@ -1603,50 +1386,26 @@ void CodeGen::visit(ImportStmt& node) {
 }
 
 void CodeGen::visit(FromImportStmt& node) {
-    // For file-resolved modules (`from os import listdir` etc.), the
-    // imported names enter the importing module's scope under their bare
-    // form, but the LLVM symbol they resolve to is per-module-mangled
-    // (`os__listdir`). Record the alias so CallExpr's same-module lookup
-    // can find the right symbol - without this the call falls through to
-    // the bare name, which doesn't exist in mangled stdlib modules and
-    // produces "Unknown function" diagnostics.
+    // For file-resolved modules the imported name enters scope bare, but its LLVM symbol is
+    // per-module-mangled (`os__listdir`). Record the alias so CallExpr's lookup finds it (else "Unknown function").
     if (impl_->fileResolvedModules.count(node.module)) {
-        // Scoped to the IMPORTING module (currentModuleName) so a `from os
-        // import listdir` in stdlib/tarfile.dr stays inside tarfile and
-        // two modules importing the same bare name from different sources
-        // don't clobber.
+        // Scoped to the IMPORTING module (currentModuleName) so two modules importing the
+        // same bare name from different sources don't clobber each other.
         auto& bucket = impl_->importedFuncAliasesByModule[impl_->currentModuleName];
         for (auto& alias : node.names) {
             const std::string& localName =
                 alias.asName.empty() ? alias.name : alias.asName;
             std::string mangled = Impl::mangleFunc(node.module, alias.name);
-            // `extern "C"` functions (e.g. `math.sqrt`) keep their bare C
-            // symbol name rather than the per-module mangle. The non-aliased
-            // import only resolved by coincidence (entry-module mangle of a
-            // bare name == the bare name); an `as` rename broke that, so map
-            // the alias to whichever symbol actually exists. All modules are
-            // forward-declared before any body is emitted, so this probe is
-            // valid here.
+            // `extern "C"` functions (`math.sqrt`) keep their bare C symbol, not the mangle;
+            // an `as` rename broke the coincidental match, so map the alias to whichever symbol exists.
             if (impl_->module && !impl_->module->getFunction(mangled)) {
                 std::string bare = Impl::userFuncName(alias.name);
                 if (impl_->module->getFunction(bare)) mangled = bare;
             }
             bucket[localName] = mangled;
 
-            // If the imported name is a CLASS defined by node.module, pin the
-            // local name to that module for class resolution too. The
-            // importedClassAliasesByModule map is consulted first by
-            // resolveClassOwningModule but was never populated (only its func
-            // twin was), so `from drs import Schema` fell through to the global
-            // last-write-wins classOwningModule map. That let an unrelated
-            // `from json import loads` in the same file make `Schema` resolve to
-            // json.Schema whenever json.dr also declares a class Schema - a
-            // silent miscompile (json__Schema_new(null) + no `field` method)
-            // even though the developer imported Schema from exactly one place.
-            // Probe the mangled ctor symbol (all classes are forward-declared
-            // before any body is emitted, so this is valid here). Populated in
-            // import order, so two explicit imports of the same local name are
-            // last-write-wins - alias the second one to disambiguate.
+            // If the imported name is a CLASS, pin the local name to node.module (via the mangled
+            // ctor probe), else it falls through to the last-write-wins classOwningModule map - a silent miscompile.
             std::string classMangled = Impl::mangleClass(node.module, alias.name);
             if (impl_->module &&
                 (impl_->module->getFunction(classMangled + "_new") ||
