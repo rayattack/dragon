@@ -1092,6 +1092,96 @@ class Cursor {
         return false                        # unreachable (_fail raised)
     }
 
+    # Consume '[' or raise.
+    def _array_begin() -> None {
+        self.p._skip_ws()
+        if self.p._peek() != _B_LBRACKET {
+            self.p._fail("expected array")
+        }
+        self.p.pos = self.p.pos + 1
+    }
+
+    # True if another element follows; false consumes the closing ']'.
+    def _array_more(first: bool) -> bool {
+        self.p._skip_ws()
+        const c: int = self.p._peek()
+        if c == _B_RBRACKET {
+            self.p.pos = self.p.pos + 1
+            return false
+        }
+        if first {
+            return true
+        }
+        if c == _B_COMMA {
+            self.p.pos = self.p.pos + 1
+            return true
+        }
+        self.p._fail("expected ',' or ']' in array")
+        return false
+    }
+
+    def parse_int_list() -> list[int] {
+        const out: list[int] = []
+        self._array_begin()
+        first: bool = true
+        while self._array_more(first) {
+            first = false
+            out.append(self.parse_int())
+        }
+        return out
+    }
+
+    def parse_float_list() -> list[float] {
+        const out: list[float] = []
+        self._array_begin()
+        first: bool = true
+        while self._array_more(first) {
+            first = false
+            out.append(self.parse_float())
+        }
+        return out
+    }
+
+    def parse_bool_list() -> list[bool] {
+        const out: list[bool] = []
+        self._array_begin()
+        first: bool = true
+        while self._array_more(first) {
+            first = false
+            out.append(self.parse_bool())
+        }
+        return out
+    }
+
+    def parse_str_list() -> list[str] {
+        const out: list[str] = []
+        self._array_begin()
+        first: bool = true
+        while self._array_more(first) {
+            first = false
+            out.append(self.parse_str())
+        }
+        return out
+    }
+
+    # If the next value is null, consume it and return true.
+    def try_null() -> bool {
+        self.p._skip_ws()
+        if self.p._peek() == 110 {          # n
+            self._expect_lit("null")
+            return true
+        }
+        return false
+    }
+
+    # Skip the next value and return its raw bytes (for a nested decode[T]).
+    def capture_value() -> bytes {
+        self.p._skip_ws()
+        const start: int = self.p.pos
+        self.skip_value()
+        return self.p.buf[start:self.p.pos]
+    }
+
     # Advance past any value; allocates nothing.
     def skip_value() -> None {
         self.p._skip_ws()

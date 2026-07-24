@@ -1,7 +1,5 @@
-/// Dragon CodeGen - CodeGen::Impl out-of-line method definitions (part 2:
-/// RC stores, union box RC, var binding, type-expr mapping, fire/vthread
-/// trampolines). Moved from CodeGenImpl.h (file-size policy) - pure code
-/// motion, no logic changes.
+/// CodeGen::Impl out-of-line methods (part 2): RC stores, union box RC, var
+/// binding, type-expr mapping, fire/vthread trampolines.
 #include "../CodeGenImpl.h"
 
 namespace dragon {
@@ -38,18 +36,11 @@ void CodeGen::Impl::fillDefaultArgs(const std::string& funcName, llvm::Function*
         auto& defaults = it->second;
         auto funcType = func->getFunctionType();
         unsigned numParams = funcType->getNumParams();
-        // Ensure args is sized to numParams with nullptr placeholders for any
-        // tail slots not yet filled. This is the no-op resize for the common
-        // case where args.size() == numParams.
+        // Size args to numParams with nullptr placeholders (no-op when equal).
         if (args.size() < numParams)
             args.resize(numParams, nullptr);
-        // Cross-module defaults: a default expression like `_helper` refers to
-        // a symbol in the function's DEFINING module. The call site may live in
-        // a different module whose name-resolution scope can't see that
-        // symbol. Swap currentModuleName for the duration of the eval so all
-        // codegen visitors (NameExpr / CallExpr / etc.) consult the defining
-        // module's mangling + alias scope. Restored even on early return /
-        // throw via RAII.
+        // Cross-module defaults: a default expr resolves in the function's DEFINING
+        // module, so swap currentModuleName for the eval (RAII-restored).
         struct ModuleScope {
             std::string& slot;
             std::string saved;
@@ -70,13 +61,8 @@ void CodeGen::Impl::fillDefaultArgs(const std::string& funcName, llvm::Function*
                 defaults[i]->accept(cg);
             }
             llvm::Value* val = lastValue;
-            // A default that synthesized an owned heap temp (list/dict/set/...,
-            // e.g. `= [10, 20, 30]`) leaks once per omitting call unless released
-            // after the call. Classify the PRE-coerce value by the PARAM kind
-            // (the stored default expr has no propagated ->type at the call site,
-            // so the expr-type classifier would miss it); argTempDecrefKind also
-            // gates Str on isOwnedStrResult so a list default never takes the
-            // dragon_decref_str path. Literals/scalars carry no droppable +1.
+            // A default that made an owned heap temp (= [10,20,30]) leaks unless
+            // released; classify by the param kind (the default expr has no ->type here).
             if (defaultTemps) {
                 auto pkIt = funcParamKinds.find(funcName);
                 if (pkIt != funcParamKinds.end() && i < pkIt->second.size()) {
@@ -93,14 +79,8 @@ void CodeGen::Impl::emitIncrefByKind(llvm::Value* val, VarKind kind) {
         if (options.gcMode != GCMode::RC) return;
         if (!isHeapKind(kind)) return;
         if (kind == VarKind::Union) {
-            // A Union value is a {tag, payload} box VALUE: incref the payload
-            // by runtime tag (no-op for scalar tags). This is the retain half
-            // of the callee-borrows contract for Any: a field store / return
-            // alias of a borrowed box takes its OWN ref here, so the caller's
-            // post-call drain of an owned temp can never free a retained
-            // payload (A/B-proven use-after-free in __dragon_dealloc_<Class>,
-            // test_rc_any_field.dr). Silently no-oping instead left one ref
-            // with two owners.
+            // Incref a Union box's payload by runtime tag (retain half of the Any
+            // borrow contract); without it a retained box is freed twice (UAF, A/B-proven).
             if (val && val->getType() == boxType)
                 emitUnionIncref(boxPayloadI64(val, "u.inc.p"),
                                 boxTag(val, "u.inc.t"));
@@ -111,11 +91,8 @@ void CodeGen::Impl::emitIncrefByKind(llvm::Value* val, VarKind kind) {
         if (kind == VarKind::Str) {
             builder->CreateCall(runtimeFuncs["dragon_incref_str"], {ptr});
         } else if (kind == VarKind::Closure) {
-            // a Callable slot may hold a DragonClosure OR a bare fn ptr (no
-            // header). dragon_incref_callable is TAG-GATED - it increfs only a
-            // real TAG_CLOSURE object and no-ops on a bare fn ptr / null, so the
-            // generic dragon_incref (which would treat a code pointer's bytes as
-            // a refcount header) is never let near a headerless callable.
+            // A Callable slot may hold a DragonClosure or a bare fn ptr; the
+            // tag-gated dragon_incref_callable no-ops on the headerless bare fn.
             builder->CreateCall(runtimeFuncs["dragon_incref_callable"], {ptr});
         } else {
             builder->CreateCall(runtimeFuncs["dragon_incref"], {ptr});
@@ -163,10 +140,8 @@ void CodeGen::Impl::emitUnionDecref(llvm::Value* val, llvm::Value* tag) {
         builder->CreateBr(endBB);
 
         builder->SetInsertPoint(notStrBB);
-        // tag == 10 (TAG_CLOSURE) -> tag-gated dragon_decref_callable. Must
-        // precede the generic `>= 5` heap branch (10 >= 5): a boxed closure may
-        // be a real DragonClosure OR a bare fn ptr (no header), and the tag-gated
-        // drop frees the former (+ its env) while no-oping on the latter.
+        // tag==10 (TAG_CLOSURE) -> tag-gated decref_callable, before the >=5 heap
+        // branch: it frees a real closure (+env) and no-ops a bare fn ptr.
         auto* isClosure = builder->CreateICmpEQ(tag, llvm::ConstantInt::get(i64Type, 10), "is.clos");
         auto* closBB = llvm::BasicBlock::Create(*context, "union.decref.clos", func);
         auto* notClosBB = llvm::BasicBlock::Create(*context, "union.decref.notclos", func);
@@ -261,19 +236,8 @@ void CodeGen::Impl::storeWithRCOverwrite(llvm::Value* slotPtr, llvm::Type* slotV
             emitIncrefByKind(newVal, newKind);
         }
 
-        // A borrowed slot (parameter, loop variable, capture, self) holds a
-        // reference the callee does not own - its current value belongs to the
-        // caller. The first reassignment must NOT decref that value: doing so
-        // steals a reference from a caller-owned object. The classic break is
-        // `s = s.replace(...)` inside HTML.escape: `replace` always returns a
-        // fresh string, so the old-value decref dropped a refcount on whatever
-        // borrowed string was passed in - benign for an owned temporary (freed
-        // anyway), but it corrupts a long-lived `!{obj.field}` interpolated into
-        // a template[HTML]. After the store the slot owns the new value, so we
-        // clear the borrowed mark and fall through to the cleanup registration
-        // below (which now pushes a fresh unwind entry rather than refreshing a
-        // non-existent one). Gated to real local slots (AllocaInst); field /
-        // element stores carry their own borrowed handling via newIsBorrowed.
+        // A borrowed slot (param/loop-var/capture/self) holds a caller-owned value:
+        // the first reassignment must NOT decref it (would steal a caller's ref).
         bool slotWasBorrowed =
             (options.gcMode == GCMode::RC && llvm::isa<llvm::AllocaInst>(slotPtr) &&
              consumeBorrowedSlot(name));
@@ -287,10 +251,8 @@ void CodeGen::Impl::storeWithRCOverwrite(llvm::Value* slotPtr, llvm::Type* slotV
             auto* newPtr = toI8Ptr(newVal);
             if (oldPtr && newPtr) {
                 auto* same = builder->CreateICmpEQ(oldPtr, newPtr, "rc.same");
-                // If new was incref'd (borrowed RHS), same-pointer overwrite must
-                // still decref once to keep refcounts balanced (x = x case).
-                // If new was not incref'd, skip decref on same-pointer overwrite
-                // to avoid dropping the only live reference.
+                // Same-pointer overwrite (x = x): decref once if new was incref'd,
+                // else skip to avoid dropping the only live reference.
                 if (!didIncrefNew) {
                     auto* nullPtr = llvm::ConstantPointerNull::get(
                         llvm::cast<llvm::PointerType>(i8PtrType));
@@ -303,22 +265,13 @@ void CodeGen::Impl::storeWithRCOverwrite(llvm::Value* slotPtr, llvm::Type* slotV
 
         builder->CreateStore(newVal, slotPtr);
 
-        // Register / refresh the unwind cleanup snapshot for owned heap LOCALS
-        // (AllocaInst slots only - module globals live forever and are never
-        // scope-cleaned). A heap oldKind means this is a reassignment of an
-        // already-registered local (refresh); a non-heap oldKind is a fresh
-        // declaration (push). Union LOCALS are handled at their own store site;
-        // Union FIELD stores route through here (box-typed slot, non-alloca)
-        // and get their tag-dispatched incref/decref from the by-kind helpers
-        // above, but are excluded from local cleanup registration below.
-        // See DragonCleanupStack.
+        // Register/refresh the unwind snapshot for owned heap locals (alloca only):
+        // heap oldKind = reassignment (refresh), else fresh declaration (push).
         if (options.gcMode == GCMode::RC && !name.empty() &&
             isHeapKind(newKind) && newKind != VarKind::Union &&
             llvm::isa<llvm::AllocaInst>(slotPtr)) {
             int ck = cleanupKindFor(newKind);
-            // A previously-borrowed slot has no prior unwind entry (borrowed
-            // values are never registered), so PUSH a fresh one rather than
-            // refreshing a snapshot that does not exist.
+            // A previously-borrowed slot has no prior unwind entry, so push a fresh one.
             if (isHeapKind(oldKind) && !slotWasBorrowed)
                 emitCleanupUpdate(name, newVal);
             else
@@ -328,9 +281,8 @@ void CodeGen::Impl::storeWithRCOverwrite(llvm::Value* slotPtr, llvm::Type* slotV
 
 void CodeGen::Impl::emitStrAppendInplace(llvm::Value* slotPtr, llvm::Value* cur,
                           llvm::Value* rhs, const std::string& name) {
-        // A str operand can flow as i64 (e.g. a string field loaded as int);
-        // coerce to ptr exactly as the dragon_str_concat path does
-        // (Expressions.cpp) before the call.
+        // A str operand can flow as i64 (a field loaded as int); coerce to ptr
+        // before the call, like dragon_str_concat.
         if (cur->getType() == i64Type) cur = builder->CreateIntToPtr(cur, i8PtrType);
         if (rhs->getType() == i64Type) rhs = builder->CreateIntToPtr(rhs, i8PtrType);
         llvm::Value* result = builder->CreateCall(
@@ -341,9 +293,8 @@ void CodeGen::Impl::emitStrAppendInplace(llvm::Value* slotPtr, llvm::Value* cur,
         }
         if (auto* ai = llvm::dyn_cast<llvm::AllocaInst>(slotPtr)) {
             setVar(name, ai, VarKind::Str);
-            // The old snapshot was just consumed by dragon_str_append_inplace;
-            // refresh the unwind cleanup entry to the new value (else a later
-            // raise would double-free the stale/realloc'd pointer).
+            // append_inplace consumed the old value; refresh the unwind entry, else
+            // a later raise double-frees the realloc'd pointer.
             emitCleanupUpdate(name, result);
         } else {
             moduleGlobalKinds[name] = VarKind::Str;
@@ -353,14 +304,8 @@ void CodeGen::Impl::emitStrAppendInplace(llvm::Value* slotPtr, llvm::Value* cur,
 void CodeGen::Impl::setVar(const std::string& name, llvm::AllocaInst* alloca,
              VarKind kind) {
         if (scopes.empty()) return;
-        // If this exact slot already lives in an enclosing scope, this is a
-        // reassignment / in-place kind update - refresh it where it lives
-        // rather than shadowing it into the current (inner) block scope.
-        // Otherwise block-exit cleanup would decref a heap value owned by an
-        // outer scope (e.g. an accumulator reassigned inside a loop body).
-        // A *fresh* alloca for the same name (a declaration or isinstance
-        // narrowing) has a different slot, so it correctly falls through to a
-        // new inner binding (genuine shadow).
+        // If this exact slot already lives in an outer scope, refresh it there (a
+        // reassignment), not shadow it; a fresh alloca for the name is a real shadow.
         for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
             auto found = it->vars.find(name);
             if (found != it->vars.end()) {
@@ -382,18 +327,13 @@ bool CodeGen::Impl::exprIsBytes(Expr* expr) {
             return lit->isBytes;
         }
         if (dynamic_cast<NameExpr*>(expr)) {
-            // D030 §5: bytes-typed slots collapse into VarKind::List at the
-            // VarKind layer. The static-type check at the top of this
-            // function (expr->type->kind() == Bytes) already handles
-            // typechecker-resolved NameExprs; nothing more to do here.
+            // bytes-typed slots collapse to VarKind::List; the static-type check
+            // above already handles resolved NameExprs.
             return false;
         }
         if (auto* sub = dynamic_cast<SubscriptExpr*>(expr)) {
-            // Subscripting bytes with a single int returns an int (the byte
-            // value); subscripting with a slice returns bytes. The naive
-            // "result-is-bytes-because-base-is-bytes" rule was sending
-            // single-byte reads through dragon_bytes_eq / _concat with i64
-            // operands, which is a type mismatch in the LLVM verifier.
+            // bytes[int] -> int (byte value), bytes[slice] -> bytes; treating a
+            // single-byte read as bytes fails the verifier.
             if (dynamic_cast<SliceExpr*>(sub->index.get())) {
                 return exprIsBytes(sub->object.get());
             }
@@ -402,11 +342,8 @@ bool CodeGen::Impl::exprIsBytes(Expr* expr) {
         if (auto* bin = dynamic_cast<BinaryExpr*>(expr)) {
             return exprIsBytes(bin->left.get()) || exprIsBytes(bin->right.get());
         }
-        // Class field access: self.x or instance.x - consult classFieldKinds.
-        // D030 §5: the AttributeExpr's static type (when populated by
-        // TypeChecker) is the primary answer. The classFieldKinds table is
-        // a fallback for the same-class-body path where TypeChecker hasn't
-        // re-resolved attribute types yet.
+        // Class field access (self.x): the AttributeExpr's static type is primary;
+        // classFieldKinds is the same-class-body fallback.
         if (auto* attr = dynamic_cast<AttributeExpr*>(expr)) {
             std::string className;
             if (auto* objName = dynamic_cast<NameExpr*>(attr->object.get())) {
@@ -417,10 +354,8 @@ bool CodeGen::Impl::exprIsBytes(Expr* expr) {
                     if (vit != varClassNames.end()) className = vit->second;
                 }
             }
-            // D030 §5: bytes-vs-list disambiguation flows through the
-            // static type at the top of this function (expr->type->kind()
-            // == Bytes). classFieldKinds tags bytes fields as VarKind::List
-            // (generic-heap), so a kind-equal-Bytes check can never match here.
+            // bytes-vs-list disambiguation flows through the static type above;
+            // classFieldKinds tags bytes fields as List, so it can't match here.
             (void)className;
             return false;
         }
@@ -456,27 +391,15 @@ llvm::AllocaInst* CodeGen::Impl::createEntryAlloca(llvm::Function* func,
         llvm::IRBuilder<> tmpBuilder(&func->getEntryBlock(),
                                      func->getEntryBlock().begin());
         auto* alloca = tmpBuilder.CreateAlloca(type, nullptr, name);
-        // Zero-init pointer-typed allocas so scope-exit decref/incref on a
-        // control-flow path that never wrote to the slot sees a clean NULL
-        // (all dragon_*_decref / _incref runtime entry points short-circuit
-        // on NULL). Without this, an early return out of a nested-scope
-        // const decl reads garbage stack memory and crashes - see
-        // _match_route's ifend15 cleanup of unwritten %ps / %rs / %rest_parts.
-        // Stored after the alloca so that any subsequent param-store / first
-        // assignment from the user program overwrites the NULL cleanly.
+        // Zero-init pointer allocas so scope-exit cleanup of a slot never written
+        // (an early return) sees NULL (decref/incref no-op) instead of garbage.
         if (type->isPointerTy()) {
             auto* nullPtr = llvm::ConstantPointerNull::get(
                 llvm::cast<llvm::PointerType>(type));
             tmpBuilder.CreateStore(nullPtr, alloca);
         } else if (type == boxType) {
-            // Same rationale as the pointer-typed path: scope-exit cleanup
-            // walks every alloca and dispatches by the box's tag. An
-            // unwritten box slot (control-flow path that never assigned to
-            // this Union/Any local) holds garbage - a non-zero tag plus
-            // garbage payload - and decref dispatches on the garbage tag
-            // would deref the garbage payload. A {tag=0, payload=0} box is
-            // safe: TAG_INT short-circuits cleanup, and any later write
-            // overwrites the zero cleanly.
+            // Same for a box slot: zero-init to {tag=0, payload=0} so cleanup of an
+            // unwritten Union/Any local sees TAG_INT (no-op), not garbage.
             tmpBuilder.CreateStore(
                 llvm::ConstantAggregateZero::get(boxType), alloca);
         }
@@ -532,9 +455,7 @@ Type::Kind CodeGen::Impl::typeExprToTypeKind(TypeExpr* typeExpr) {
             if (named->name == "dict" || named->name == "Dict") return Type::Kind::Dict;
             if (named->name == "tuple" || named->name == "Tuple") return Type::Kind::Tuple;
             if (named->name == "set" || named->name == "Set") return Type::Kind::Set;
-            // D039 Phase 1: Any maps to Type::Kind::Any (was falling through to
-            // Int, which made `pendingDictCheckTag` dispatch to TAG_INT-checked
-            // reads - wrong for heterogeneous dict[str, Any]).
+            // Any maps to Kind::Any (was falling to Int, breaking dict[str, Any] reads).
             if (named->name == "Any" || named->name == "object") return Type::Kind::Any;
             if (typedDictClasses.count(named->name)) return Type::Kind::Dict;
             if (!resolveAnnotationClassName(named->name).empty())
@@ -553,10 +474,8 @@ Type::Kind CodeGen::Impl::typeExprToTypeKind(TypeExpr* typeExpr) {
             return Type::Kind::Int;
         }
         if (dynamic_cast<TupleTypeExpr*>(typeExpr)) return Type::Kind::Tuple;
-        // Callable[...] is a refcounted DragonClosure ptr element. Without
-        // this, list[Callable] tracked its element kind as Int, so the
-        // overwrite/store paths (varListElemKinds-driven) used the non-RC i64
-        // store and leaked the overwritten closure.
+        // Callable[...] is a refcounted DragonClosure ptr; without this list[Callable]
+        // tracked it as Int and leaked overwritten closures.
         if (dynamic_cast<CallableTypeExpr*>(typeExpr)) return Type::Kind::Function;
         if (auto* unionType = dynamic_cast<UnionTypeExpr*>(typeExpr)) {
             if (TypeExpr* niche = unionNicheMember(typeExpr))
@@ -579,16 +498,11 @@ CodeGen::Impl::VarKind CodeGen::Impl::typeExprToKind(TypeExpr* typeExpr) {
             if (named->name == "dict" || named->name == "Dict") return VarKind::Dict;
             if (named->name == "tuple" || named->name == "Tuple") return VarKind::Tuple;
             if (named->name == "set" || named->name == "Set") return VarKind::Set;
-            // D039 Phase 1: `Any` reuses the existing Union infrastructure -
-            // box alloca, tag/payload, incref/decref on overwrite, isinstance
-            // narrowing. unionMemberKinds for an Any-typed var is left empty
-            // (signal: any tag is valid at runtime). The non-niche Union path
-            // already covers everything Any needs except the empty-members
-            // narrowing fallback, which is already handled at the read sites.
+            // Any reuses the Union box infrastructure; its unionMemberKinds is left
+            // empty (any tag valid at runtime).
             if (named->name == "Any" || named->name == "object") return VarKind::Union;
-            // `Lock` is an intrinsic ptr handle, not a class instance - keep it
-            // VarKind::Other (bare ptr) so method calls dispatch via the __Lock
-            // fast path, never class-instance dispatch (which segfaults on it).
+            // Lock is an intrinsic ptr handle (VarKind::Other), so calls dispatch via
+            // the __Lock fast path, not class-instance dispatch.
             if (named->name == "Lock") return VarKind::Other;
             // TypedDict classes are dicts at runtime
             if (typedDictClasses.count(named->name))
@@ -619,22 +533,14 @@ CodeGen::Impl::VarKind CodeGen::Impl::typeExprToKind(TypeExpr* typeExpr) {
         if (auto* tupleType = dynamic_cast<TupleTypeExpr*>(typeExpr)) {
             return VarKind::Tuple;
         }
-        // a `: Callable[...]` slot (local / param / field) holds a
-        // refcounted DragonClosure (or a bare fn ptr), so it is a heap kind that
-        // must be scope-cleaned and overwrite-decref'd. This is safe only because
-        // closure RC goes through the TAG-GATED dragon_incref_callable /
-        // dragon_decref_callable everywhere (emitIncrefByKind / emitDecrefByKind /
-        // emitScopeCleanupFor), which no-op on a bare fn ptr (no header) and on a
-        // null, and because params of a heap kind are marked borrowed (the caller
-        // owns them - so a `self.fn = param` field store increfs the borrow rather
-        // than the param cleanup freeing a closure the field still references).
+        // A `: Callable[...]` slot holds a refcounted DragonClosure (or bare fn ptr):
+        // a scope-cleaned heap kind, safe because closure RC is tag-gated everywhere.
         if (dynamic_cast<CallableTypeExpr*>(typeExpr)) {
             return VarKind::Closure;
         }
         if (auto* unionType = dynamic_cast<UnionTypeExpr*>(typeExpr)) {
-            // Niche-pointer optimization: `Ptr | None` reads at the pointer
-            // type's VarKind (e.g. ClassInstance for `Foo | None`). The runtime
-            // null encodes None; no boxing needed.
+            // Niche-pointer: `Ptr | None` reads at the pointer's VarKind; a null
+            // ptr encodes None, no boxing.
             if (TypeExpr* niche = unionNicheMember(typeExpr))
                 return typeExprToKind(niche);
             return VarKind::Union;
@@ -729,9 +635,8 @@ llvm::Value* CodeGen::Impl::unboxBoxResultChecked(llvm::Value* box, llvm::Type* 
         builder->CreateUnreachable();
         builder->SetInsertPoint(okBB);
         llvm::Value* out = boxPayloadAsKind(box, vk);
-        // The list box tag (5) cannot distinguish a monomorphized DragonList
-        // from a DragonListBox; verify the payload's HEADER matches the
-        // target's element representation before it is used at that stride.
+        // The list tag (5) can't tell a monomorphized DragonList from a DragonListBox;
+        // verify the payload header matches the target's element rep first.
         if (expectedTag == 5 && wantListElemTag != kNoListElemCheck)
             builder->CreateCall(runtimeFuncs["dragon_list_view_check"],
                 {out, llvm::ConstantInt::get(i64Type, wantListElemTag)});
@@ -788,15 +693,8 @@ std::pair<llvm::Value*, llvm::Value*> CodeGen::Impl::boxArgTagPayload(
                 int64_t litTag = -1;
                 if (auto* cT = llvm::dyn_cast<llvm::ConstantInt>(tagV))
                     litTag = cT->getSExtValue();
-                // Promote a str literal to a heap dup ONLY when the consumer
-                // adopts it (takesOwnership: the dup's +1 transfers to the
-                // container, Model B). A borrow-only box (an Any param via
-                // coerceArgFromExpr, remove's equality search) keeps the
-                // rodata literal pointer as payload: every runtime TAG_STR
-                // path validates heap-ness first (dragon_incref_str /
-                // decref_str no-op, dragon_str_eq / string_len fall back to
-                // strlen), and a dup here has no owner to free it - it leaked
-                // one string per assertEqual(x, "lit") call.
+                // Heap-dup a str literal only when the consumer adopts it; a
+                // borrow-only box keeps the rodata pointer (a dup would leak).
                 if (litTag == 1 && takesOwnership)
                     val = ensureHeapString(val, argExpr);
                 if (takesOwnership && options.gcMode == GCMode::RC &&
@@ -810,14 +708,37 @@ std::pair<llvm::Value*, llvm::Value*> CodeGen::Impl::boxArgTagPayload(
                 }
             }
             payloadV = nativeToPayloadI64(val);
+            // Niche Optional (X | None): pick the tag at runtime - TAG_NONE when the
+            // ptr is null, else X's tag (the static derivation can't see null-ness).
+            if (argExpr && argExpr->type &&
+                argExpr->type->kind() == Type::Kind::Union &&
+                val->getType()->isPointerTy()) {
+                auto& u = static_cast<UnionType&>(*argExpr->type);
+                if (u.types.size() == 2) {
+                    Type* inner = nullptr;
+                    bool hasNone = false;
+                    for (auto& t : u.types) {
+                        if (t->kind() == Type::Kind::None_) hasNone = true;
+                        else inner = t.get();
+                    }
+                    int64_t innerTag = inner ? typeKindToTag(inner->kind()) : -1;
+                    if (hasNone && innerTag >= 0) {
+                        auto* nullp = llvm::ConstantPointerNull::get(
+                            llvm::cast<llvm::PointerType>(val->getType()));
+                        auto* isNull = builder->CreateICmpEQ(val, nullp, "opt.isnull");
+                        tagV = builder->CreateSelect(isNull,
+                            llvm::ConstantInt::get(i64Type, 4),   // TAG_NONE
+                            llvm::ConstantInt::get(i64Type, innerTag), "opt.tag");
+                    }
+                }
+            }
         }
         return {tagV, payloadV};
     }
 
 llvm::Value* CodeGen::Impl::emitTagForExpr(Expr* expr, CodeGen& cg) {
-        // D030 §5: typechecker static type is the source-of-truth for tag
-        // derivation. Catches every case below (literals, calls, named
-        // vars, attribute reads) when TypeChecker has propagated the type.
+        // The static type is the source of truth for tag derivation when the
+        // TypeChecker propagated it; the literal/name fallbacks below cover the rest.
         if (expr && expr->type) {
             int64_t tag = typeKindToTag(expr->type->kind());
             if (tag >= 0)
@@ -883,9 +804,8 @@ llvm::Type* CodeGen::Impl::typeExprToLLVM(TypeExpr* typeExpr) {
             if (named->name == "Lock") return i8PtrType;  // pthread_mutex_t* handle
             // TypedDict classes are dicts (pointers) at runtime
             if (typedDictClasses.count(named->name)) return i8PtrType;
-            // Class types are represented as pointers to their struct
-            // (also resolves dotted `mod.Foo` annotations to the bare struct
-            // type, matching resolveAnnotationClassName's lookup rule).
+            // Class types are struct pointers (also resolves dotted mod.Foo to the
+            // bare struct type).
             if (classStructTypes.count(named->name) || classNames.count(named->name)) return i8PtrType;
             if (!resolveAnnotationClassName(named->name).empty()) return i8PtrType;
             return i64Type; // fallback
@@ -895,9 +815,8 @@ llvm::Type* CodeGen::Impl::typeExprToLLVM(TypeExpr* typeExpr) {
             return i8PtrType;
         }
         if (dynamic_cast<UnionTypeExpr*>(typeExpr)) {
-            // Niche-pointer optimization: `Ptr | None` is a single nullable
-            // pointer (8B, 1 register) - null encodes None. Same source-level
-            // semantics, half the register pressure and no tag branch.
+            // Niche-pointer: `Ptr | None` is a single nullable pointer (null = None),
+            // no box.
             if (TypeExpr* niche = unionNicheMember(typeExpr))
                 return typeExprToLLVM(niche);
             // D030 Phase 4: non-niche unions (e.g. `int | str`) still use the
@@ -956,15 +875,8 @@ llvm::Value* CodeGen::Impl::emitTagForExprNoCG(Expr* expr) {
 llvm::Value* CodeGen::Impl::coerceArg(llvm::Value* arg, llvm::Type* paramType) {
         if (arg->getType() == paramType) return arg;
         llvm::Type* at = arg->getType();
-        // A {tag, payload} box flowing into a NATIVE param: unbox at the param's
-        // shape. Without this the box crossed as-is and the LLVM verifier
-        // rejected the call (a box where the signature wants a ptr/scalar) - the
-        // `f(doc[k] if k in doc else "")` case: a ternary over a dict[str, Any]
-        // whose arms unify to a box, passed straight into a str param. The callee
-        // BORROWS a heap param, so the payload crosses with no extra ref; an
-        // OWNED box temporary's +1 is released after the call by
-        // argTempDecrefKind (drained as a Union). Mirrors the local Phase 7a /
-        // Assign.cpp box->native-slot unbox.
+        // A box flowing into a native param: unbox at the param's shape (else the
+        // verifier rejects a box where a ptr/scalar is wanted). Payload crosses borrowed.
         if (at == boxType && paramType != boxType) {
             VarKind vk = paramType == f64Type       ? VarKind::Float :
                          paramType == i1Type        ? VarKind::Bool  :
@@ -1074,13 +986,8 @@ llvm::Function* CodeGen::Impl::buildFireTrampoline(
             callArgs.push_back(v);
         }
 
-        // Top-level setjmp barrier so an uncaught raise inside the body
-        // longjmps here instead of falling through dragon_raise_exc's exit(1)
-        // - the latter would kill the parent thread (and a server's accept
-        // loop with it). On the longjmp path we log and clear the exception
-        // and proceed to the standard cleanup so the vthread terminates
-        // cleanly and the worker re-enters the scheduler. setRes(0) gives
-        // any waiting joiner a defined sentinel.
+        // setjmp barrier: an uncaught raise longjmps here instead of exit(1)
+        // (which would kill the worker); log, clear, set result 0, and clean up.
         auto* setRes = runtimeFuncs["dragon_vthread_set_result"];
         auto* jmpbufPtr = builder->CreateCall(
             runtimeFuncs["dragon_exc_push_frame"], {}, "tramp.jmpbuf");
@@ -1105,10 +1012,8 @@ llvm::Function* CodeGen::Impl::buildFireTrampoline(
         builder->CreateCall(runtimeFuncs["dragon_exc_pop_frame"], {});
         builder->CreateBr(cleanupBB);
 
-        // Uncaught: longjmp arrived. Free the vthread body's owned heap locals
-        // the longjmp skipped (operates on this vthread's cleanup context), pop
-        // the frame ourselves (raise doesn't), log + clear the in-flight
-        // exception, and write a 0 result so joiners observe a defined value.
+        // Uncaught longjmp: free the heap locals it skipped, pop the frame, log +
+        // clear the exception, write result 0 for joiners.
         builder->SetInsertPoint(caughtBB);
         builder->CreateCall(runtimeFuncs["dragon_exc_cleanup_unwind"], {});
         builder->CreateCall(runtimeFuncs["dragon_exc_pop_frame"], {});
@@ -1148,16 +1053,8 @@ llvm::Function* CodeGen::Impl::buildFireTrampoline(
 llvm::Function* CodeGen::Impl::buildDeferThunk(llvm::Function* targetFn,
                                                const std::string& siteName,
                                                int vtableIndex) {
-        // void __dragon_defer_<site>(i64* args): load each param from the
-        // snapshot array at its native type, call, discard the result. The
-        // same thunk runs on the inline normal-exit path and (via the
-        // DCLEAN_DEFER_CALL entry) on the longjmp unwind path, so the two
-        // paths cannot drift.
-        //
-        // vtableIndex >= 0: the deferred callee is a method some subclass
-        // overrides (D026), so the snapshot's `self` (slot 0) may be a
-        // subclass at runtime - dispatch through its vtable exactly like the
-        // direct-call path, or the override is silently skipped.
+        // Defer thunk: load each param from the snapshot at native type, call,
+        // discard. vtableIndex >= 0 dispatches self through its vtable (D026 override).
         auto* i64PtrTy = llvm::PointerType::getUnqual(*context);
         auto* thunkType = llvm::FunctionType::get(voidType, {i64PtrTy}, false);
         auto* thunk = llvm::Function::Create(
@@ -1240,26 +1137,15 @@ llvm::Function* CodeGen::Impl::buildGeneratorTrampoline(
         auto* ud = builder->CreateBitCast(
             udRaw, llvm::PointerType::getUnqual(*context), "args.typed");
 
-        // Load generator pointer (field 0). Stash it in an alloca so it stays
-        // valid after a longjmp back into the setjmp barrier below (SSA values
-        // computed before setjmp may be clobbered by the longjmp; allocas are
-        // stable - see the LLVM setjmp gotcha).
+        // Load the generator ptr (field 0) into an alloca so it survives a longjmp
+        // back into the barrier (pre-setjmp SSA values may be clobbered).
         auto* genAddr = builder->CreateStructGEP(argsStructType, ud, 0, "gen.addr");
         auto* gen = builder->CreateLoad(i8PtrType, genAddr, "gen");
         auto* genSlot = builder->CreateAlloca(i8PtrType, nullptr, "gen.slot");
         builder->CreateStore(gen, genSlot);
 
-        // Setjmp BARRIER around the body. The generator runs with its own
-        // isolated exc context (dragon_generator_next installs it); this barrier
-        // is the bottom frame of that context. An exception raised in the body
-        // and not caught by a try/except INSIDE the generator unwinds here
-        // (rather than longjmp-ing across the coroutine boundary into the
-        // caller, which would skip generator_next's context restore). The caught
-        // path flags the generator; dragon_generator_next re-raises in the
-        // caller's restored context. The body returning normally just marks the
-        // generator exhausted, as before. This also lets the coroutine return
-        // cleanly (MCO_DEAD) instead of being abandoned MCO_RUNNING, so its
-        // stack is reclaimable.
+        // setjmp barrier at the bottom of the generator's exc context: an uncaught
+        // body exception unwinds here to re-raise in the caller, not across the coroutine.
         auto* jmpbufPtr = builder->CreateCall(
             runtimeFuncs["dragon_exc_push_frame"], {}, "gen.barrier.jmpbuf");
         auto* setjmpResult = builder->CreateCall(
@@ -1290,9 +1176,8 @@ llvm::Function* CodeGen::Impl::buildGeneratorTrampoline(
             runtimeFuncs["dragon_generator_set_exhausted"], {gen});
         builder->CreateRetVoid();
 
-        // Caught path: an uncaught body exception unwound to the barrier. Pop
-        // the barrier frame, flag the pending exception (type/msg/obj live in
-        // the generator's exc context), mark exhausted, and return normally.
+        // Caught path: an uncaught body exception unwound here. Pop the frame,
+        // flag the pending exception, mark exhausted, return.
         builder->SetInsertPoint(caughtBB);
         auto* genReload = builder->CreateLoad(i8PtrType, genSlot, "gen.reload");
         builder->CreateCall(runtimeFuncs["dragon_exc_pop_frame"], {});
@@ -1425,9 +1310,8 @@ llvm::AllocaInst* CodeGen::Impl::bindListElemByTypeKind(
         llvm::Value* val;
         llvm::Type* allocaType = typeKindToLLVM(elemKind);
         if (elemKind == Type::Kind::Any) {
-            // D039 Phase 9: list[Any] iteration - load each element as the
-            // full {tag, payload} box so isinstance / print / unbox-on-assign
-            // inside the loop body see the right runtime type.
+            // list[Any] iteration: load each element as the full {tag,payload} box so
+            // the loop body sees the right runtime type.
             val = builder->CreateCall(
                 runtimeFuncs["dragon_list_box_get"],
                 {listVal, idx}, varName + ".box");
@@ -1460,17 +1344,8 @@ llvm::Value* CodeGen::Impl::emitStringLiteralBytes(const std::string& bytes,
             if (c >= 0x80) { hasNonAscii = true; break; }
         }
         if (!hasNonAscii) {
-            // Emit the literal as an IMMORTAL DragonString constant so it carries
-            // a real DragonObjectHeader (refcount=IMMORTAL, type_tag=STR,
-            // gc_flags=HEAP_OBJ) plus len/kind/cap, and return a pointer to its
-            // `data` field. A bare C global has no header, so dragon_is_heap_string
-            // read 32 bytes BEFORE it (OOB) and could layout-dependently
-            // misclassify the literal as a heap string, corrupting eq/concat/
-            // decref. The immortal refcount makes incref/decref no-ops. The
-            // global is writable .data (not .rodata) to match interned non-ASCII
-            // immortals: the immortal guards in append_inplace / mark_shared
-            // keep it logically unmutated, but staying writable tolerates any
-            // immortal-flag write without faulting.
+            // Emit the literal as an IMMORTAL DragonString constant (real header) so
+            // is_heap_string can't OOB-misread the 32 bytes before a bare C global.
             auto& ctx = builder->getContext();
             auto* i8Ty  = llvm::Type::getInt8Ty(ctx);
             auto* i16Ty = llvm::Type::getInt16Ty(ctx);
@@ -1592,12 +1467,8 @@ llvm::Function* CodeGen::Impl::getOrDeclareRuntime(const std::string& name,
                                      llvm::FunctionType* funcType) {
         auto it = runtimeFuncs.find(name);
         if (it != runtimeFuncs.end()) return it->second;
-        // User-side `extern "C" def` declarations register the symbol via
-        // `Function::Create` directly (forwardDeclareFunctions) - they don't
-        // populate `runtimeFuncs`. Without this lookup, a runtime helper that
-        // also wants the same symbol would call `Function::Create` a second
-        // time and LLVM would uniquify it as `name.1`, leaving an unresolved
-        // reference at link time. Adopt the existing function instead.
+        // A user `extern "C" def` registers the symbol directly (not in runtimeFuncs);
+        // adopt the existing function so we don't create a `name.1` uniquified dup.
         if (auto* existing = module->getFunction(name)) {
             runtimeFuncs[name] = existing;
             return existing;
@@ -1635,21 +1506,8 @@ void CodeGen::Impl::runOptimizationPasses() {
             PB.buildPerModuleDefaultPipeline(optLevel);
         MPM.run(*module, MAM);
 
-        // Hot-loop alignment. The X86 backend aligns loop headers to only 16
-        // bytes (TargetLowering::getPrefLoopAlignment), so a small loop body
-        // (<=32B) can straddle a 64-byte L1i cache line depending on where its
-        // enclosing function happens to land in .text - costing a per-iteration
-        // fetch penalty (measured ~12% on a tight recursive fib once the
-        // optimizer lowers it to a loop, purely from layout luck). LLVM lets a
-        // loop request a stronger alignment via "llvm.loop.align" metadata,
-        // which MachineBlockPlacement maxes against the subtarget default. We
-        // tag every loop *after* the optimization pipeline, so this also covers
-        // loops the optimizer synthesizes (e.g. de-recursed tail loops) that no
-        // source annotation could reach. A <=32B loop then never splits a cache
-        // line; 32B also matches Intel's uop-cache (DSB) window. The padding
-        // NOPs sit before the loop entry (never executed per iteration), so the
-        // only cost is a small code-size increase - hence gated to >=O2.
-        // DRAGON_LOOP_ALIGN overrides the byte count (1 disables) for tuning.
+        // Hot-loop alignment: tag every loop llvm.loop.align=32 after the pipeline so
+        // a small body never straddles a 64B L1i line (~12% on fib). DRAGON_LOOP_ALIGN overrides.
         unsigned loopAlign = 32;
         if (const char* e = std::getenv("DRAGON_LOOP_ALIGN"))
             loopAlign = static_cast<unsigned>(std::strtoul(e, nullptr, 10));

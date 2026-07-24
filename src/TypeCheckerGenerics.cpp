@@ -523,7 +523,22 @@ bool TypeChecker::tryInstantiateGenericCall(
 
     if (auto* nm = dynamic_cast<NameExpr*>(node.callee.get())) {
         auto it = impl_->genericFunctions.find(nm->name);
-        if (it != impl_->genericFunctions.end()) { decl = it->second; fnName = nm->name; }
+        if (it != impl_->genericFunctions.end()) {
+            // genericFunctions is name-keyed and program-global, so a stdlib
+            // generic (e.g. json.decode[T]) must not hijack a same-named function
+            // a package actually imported. If the name is bound in THIS scope to a
+            // concrete (non-generic) function, that binding wins - defer to normal
+            // dispatch. Only take the global generic when the in-scope binding is
+            // itself generic, or the name isn't otherwise bound here.
+            bool concreteInScope = false;
+            if (auto inScope = impl_->lookup(nm->name))
+                if (auto ft = std::dynamic_pointer_cast<FunctionType>(inScope)) {
+                    concreteInScope = typeIsConcrete(ft->returnType.get());
+                    for (auto& pt : ft->paramTypes)
+                        if (!typeIsConcrete(pt.get())) concreteInScope = false;
+                }
+            if (!concreteInScope) { decl = it->second; fnName = nm->name; }
+        }
     } else if (auto* sub = dynamic_cast<SubscriptExpr*>(node.callee.get())) {
         if (auto* nm = dynamic_cast<NameExpr*>(sub->object.get())) {
             auto it = impl_->genericFunctions.find(nm->name);
@@ -1140,6 +1155,80 @@ std::unique_ptr<Expr> sdZero(const std::string& kind, SourceLocation loc) {
     if (kind == "bool") return sdBool(false, loc);
     return sdStr("", loc);
 }
+// "list:<elem>" -> list[<elem>] type expr; a scalar kind -> its NamedTypeExpr.
+// Base type for a field kind (no opt wrapper): scalar, list[<elem>], or a class.
+std::unique_ptr<TypeExpr> sdInnerType(const std::string& kind, SourceLocation loc) {
+    if (kind.rfind("list:", 0) == 0) {
+        auto g = std::make_unique<GenericTypeExpr>();
+        g->base = sdType("list", loc);
+        g->typeArgs.push_back(sdType(kind.substr(5), loc));
+        g->setLocation(loc);
+        return g;
+    }
+    if (kind.rfind("class:", 0) == 0) return sdType(kind.substr(6), loc);
+    return sdType(kind, loc);
+}
+// Field type: "opt:<ik>" -> <ik> | None; otherwise the inner type.
+std::unique_ptr<TypeExpr> sdFieldType(const std::string& kind, SourceLocation loc) {
+    if (kind.rfind("opt:", 0) == 0) {
+        auto u = std::make_unique<UnionTypeExpr>();
+        u->types.push_back(sdInnerType(kind.substr(4), loc));
+        u->types.push_back(sdType("None", loc));
+        u->setLocation(loc);
+        return u;
+    }
+    return sdInnerType(kind, loc);
+}
+std::unique_ptr<Expr> sdFieldZero(const std::string& kind, SourceLocation loc) {
+    if (kind.rfind("list:", 0) == 0) {
+        auto l = std::make_unique<ListExpr>();
+        l->setLocation(loc);
+        return l;
+    }
+    return sdZero(kind, loc);
+}
+std::unique_ptr<Expr> sdBytesEmpty(SourceLocation loc) {
+    auto e = std::make_unique<StringLiteral>();
+    e->value = ""; e->isBytes = true; e->setLocation(loc);
+    return e;
+}
+std::unique_ptr<Expr> sdNone(SourceLocation loc) {
+    auto e = std::make_unique<NoneLiteral>(); e->setLocation(loc); return e;
+}
+// decode[<cls>](<arg>) - feed a bytes expression back through decode.
+std::unique_ptr<Expr> sdDecodeExpr(const std::string& cls, std::unique_ptr<Expr> arg,
+                                   SourceLocation loc) {
+    auto sub = std::make_unique<SubscriptExpr>();
+    sub->object = sdName("decode", loc);
+    sub->index = sdName(cls, loc);
+    sub->setLocation(loc);
+    auto call = std::make_unique<CallExpr>();
+    call->callee = std::move(sub);
+    call->args.push_back(std::move(arg));
+    call->setLocation(loc);
+    return call;
+}
+// Rebuild a LITERAL default so an optional field can initialize to it; nullptr
+// for anything non-literal.
+std::unique_ptr<Expr> sdRebuildLiteral(const Expr* d, SourceLocation loc) {
+    if (auto* i = dynamic_cast<const IntegerLiteral*>(d)) {
+        auto e = std::make_unique<IntegerLiteral>(); e->value = i->value; e->setLocation(loc); return e;
+    }
+    if (auto* f = dynamic_cast<const FloatLiteral*>(d)) {
+        auto e = std::make_unique<FloatLiteral>(); e->value = f->value; e->setLocation(loc); return e;
+    }
+    if (auto* b = dynamic_cast<const BooleanLiteral*>(d)) return sdBool(b->value, loc);
+    if (auto* s = dynamic_cast<const StringLiteral*>(d)) {
+        if (s->isFString || s->isBytes) return nullptr;
+        auto e = std::make_unique<StringLiteral>(); e->value = s->value; e->setLocation(loc); return e;
+    }
+    if (dynamic_cast<const NoneLiteral*>(d)) {
+        auto e = std::make_unique<NoneLiteral>(); e->setLocation(loc); return e;
+    }
+    if (auto* l = dynamic_cast<const ListExpr*>(d))
+        if (l->elements.empty()) { auto e = std::make_unique<ListExpr>(); e->setLocation(loc); return e; }
+    return nullptr;
+}
 // c.method() with no args
 std::unique_ptr<Expr> sdCall0(const std::string& recv, const std::string& method, SourceLocation loc) {
     auto attr = std::make_unique<AttributeExpr>();
@@ -1198,7 +1287,27 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
         return nullptr;
     }
 
-    struct Field { std::string name, kind; };
+    // kind: scalar ("int"/"str"/"bool"/"float"), "list:<elem>", "class:<Name>",
+    // or "opt:<ik>" for Optional[<ik>]. `optional` means "no seen-check" (absent
+    // is allowed) - true for opt-null fields and for literal-default fields.
+    struct Field { std::string name; std::string kind; bool optional; std::unique_ptr<Expr> dflt; };
+    auto detectKind = [&](const TypeExpr* t) -> std::string {
+        if (auto* nt = dynamic_cast<const NamedTypeExpr*>(t)) {
+            const std::string& n = nt->name;
+            if (n == "int" || n == "str" || n == "bool" || n == "float") return n;
+            if (impl_->classDeclByName.count(n)) return "class:" + n;
+            return "";
+        }
+        if (auto* gt = dynamic_cast<const GenericTypeExpr*>(t))
+            if (auto* b = dynamic_cast<const NamedTypeExpr*>(gt->base.get()))
+                if (b->name == "list" && gt->typeArgs.size() == 1)
+                    if (auto* el = dynamic_cast<const NamedTypeExpr*>(gt->typeArgs[0].get())) {
+                        const std::string& e = el->name;
+                        if (e == "int" || e == "str" || e == "bool" || e == "float")
+                            return "list:" + e;
+                    }
+        return "";
+    };
     std::vector<Field> fields;
     for (auto& p : ctor->params) {
         if (p.name == "self") continue;
@@ -1206,20 +1315,49 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
             error(loc, "json.decode[" + className + "]: variadic constructors are not decodable");
             return nullptr;
         }
-        if (p.defaultValue) {
+        std::string kind = detectKind(p.type.get());
+        bool isOptNull = false;
+        if (kind.empty()) {
+            // Optional[X] is parsed as `X | None`.
+            if (auto* u = dynamic_cast<UnionTypeExpr*>(p.type.get()))
+                if (u->types.size() == 2) {
+                    const TypeExpr* inner = nullptr;
+                    bool hasNone = false;
+                    for (auto& tt : u->types) {
+                        auto* nt = dynamic_cast<const NamedTypeExpr*>(tt.get());
+                        if (nt && nt->name == "None") hasNone = true;
+                        else inner = tt.get();
+                    }
+                    if (hasNone && inner) {
+                        std::string ik = detectKind(inner);
+                        if (!ik.empty()) { kind = "opt:" + ik; isOptNull = true; }
+                    }
+                }
+        }
+        if (kind.empty()) {
             error(loc, "json.decode[" + className + "]: field '" + p.name +
-                       "' has a default (optional fields are not yet supported)");
+                       "' is not yet decodable (int/str/bool/float, list of those, "
+                       "a class, or Optional of those)");
             return nullptr;
         }
-        std::string tn;
-        if (auto* nt = dynamic_cast<NamedTypeExpr*>(p.type.get())) tn = nt->name;
-        if (tn != "int" && tn != "str" && tn != "bool" && tn != "float") {
-            error(loc, "json.decode[" + className + "]: field '" + p.name + "' of type '" +
-                       (tn.empty() ? "<complex>" : tn) +
-                       "' is not yet decodable (int/str/bool/float only)");
-            return nullptr;
+        bool optional = isOptNull;
+        std::unique_ptr<Expr> dflt;
+        if (p.defaultValue) {
+            if (kind.rfind("class:", 0) == 0) {
+                error(loc, "json.decode[" + className + "]: nested field '" + p.name +
+                           "' cannot have a default (required only)");
+                return nullptr;
+            }
+            dflt = sdRebuildLiteral(p.defaultValue.get(), loc);
+            if (!dflt) {
+                error(loc, "json.decode[" + className + "]: field '" + p.name +
+                           "' has a non-literal default (only literal defaults are supported)");
+                return nullptr;
+            }
+            optional = true;
         }
-        fields.push_back({p.name, tn});
+        if (isOptNull && !dflt) dflt = sdNone(loc);   // absent Optional -> None
+        fields.push_back({p.name, kind, optional, std::move(dflt)});
     }
     if (fields.empty()) {
         error(loc, "json.decode[" + className + "]: class has no decodable fields");
@@ -1230,7 +1368,11 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
         if (k == "int") return "parse_int";
         if (k == "float") return "parse_float";
         if (k == "bool") return "parse_bool";
-        return "parse_str";
+        if (k == "str") return "parse_str";
+        if (k == "list:int") return "parse_int_list";
+        if (k == "list:float") return "parse_float_list";
+        if (k == "list:bool") return "parse_bool_list";
+        return "parse_str_list";  // list:str
     };
 
     auto fn = std::make_unique<FunctionDecl>();
@@ -1248,10 +1390,20 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
     ctorCall->setLocation(loc);
     fn->body.push_back(sdDecl("c", sdType("Cursor", loc), std::move(ctorCall), loc));
 
-    // per-field native local + presence flag
+    // per-field local + presence flag. A nested class captures raw bytes (b"" has
+    // a zero; a class-typed local does not); an optional field inits to its default.
     for (auto& f : fields) {
-        fn->body.push_back(sdDecl("_" + f.name, sdType(f.kind, loc), sdZero(f.kind, loc), loc));
-        fn->body.push_back(sdDecl("_" + f.name + "_seen", sdType("bool", loc), sdBool(false, loc), loc));
+        if (f.kind.rfind("class:", 0) == 0) {
+            fn->body.push_back(sdDecl("_" + f.name + "_bytes", sdType("bytes", loc), sdBytesEmpty(loc), loc));
+            fn->body.push_back(sdDecl("_" + f.name + "_seen", sdType("bool", loc), sdBool(false, loc), loc));
+        } else {
+            std::unique_ptr<Expr> init;
+            if (f.optional) init = std::move(f.dflt);
+            else init = sdFieldZero(f.kind, loc);
+            fn->body.push_back(sdDecl("_" + f.name, sdFieldType(f.kind, loc), std::move(init), loc));
+            if (!f.optional)
+                fn->body.push_back(sdDecl("_" + f.name + "_seen", sdType("bool", loc), sdBool(false, loc), loc));
+        }
     }
 
     fn->body.push_back(sdExprStmt(sdCall0("c", "begin_object", loc), loc));
@@ -1270,10 +1422,30 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
         bin->setLocation(loc);
         return bin;
     };
+    // Read a value of inner-kind `ik` from cursor c into local `L`.
+    auto readInto = [&](const std::string& ik, const std::string& L) -> std::unique_ptr<Stmt> {
+        if (ik.rfind("class:", 0) == 0)
+            return sdAssign(L, sdDecodeExpr(ik.substr(6), sdCall0("c", "capture_value", loc), loc), loc);
+        return sdAssign(L, sdCall0("c", methodFor(ik), loc), loc);
+    };
     auto assignBody = [&](const Field& f) {
         std::vector<std::unique_ptr<Stmt>> b;
-        b.push_back(sdAssign("_" + f.name, sdCall0("c", methodFor(f.kind), loc), loc));
-        b.push_back(sdAssign("_" + f.name + "_seen", sdBool(true, loc), loc));
+        if (f.kind.rfind("opt:", 0) == 0) {
+            // if c.try_null() { _f = None } else { _f = <read inner> }
+            auto ifn = std::make_unique<IfStmt>();
+            ifn->setLocation(loc);
+            ifn->condition = sdCall0("c", "try_null", loc);
+            ifn->thenBody.push_back(sdAssign("_" + f.name, sdNone(loc), loc));
+            ifn->elseBody.push_back(readInto(f.kind.substr(4), "_" + f.name));
+            b.push_back(std::move(ifn));
+        } else if (f.kind.rfind("class:", 0) == 0) {
+            b.push_back(sdAssign("_" + f.name + "_bytes", sdCall0("c", "capture_value", loc), loc));
+            b.push_back(sdAssign("_" + f.name + "_seen", sdBool(true, loc), loc));
+        } else {
+            b.push_back(sdAssign("_" + f.name, sdCall0("c", methodFor(f.kind), loc), loc));
+            if (!f.optional)
+                b.push_back(sdAssign("_" + f.name + "_seen", sdBool(true, loc), loc));
+        }
         return b;
     };
 
@@ -1287,8 +1459,9 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
     wh->body.push_back(std::move(iff));
     fn->body.push_back(std::move(wh));
 
-    // required-field checks: if not _<f>_seen { raise ValueError(...) }
+    // required-field checks (optional fields keep their default): if not _seen, raise
     for (auto& f : fields) {
+        if (f.optional) continue;
         auto notseen = std::make_unique<UnaryExpr>();
         notseen->op = Token(TokenType::NOT, "not", loc);
         notseen->operand = sdName("_" + f.name + "_seen", loc);
@@ -1310,8 +1483,12 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
     // return ClassName(f0=_f0, f1=_f1, ...)
     auto build = std::make_unique<CallExpr>();
     build->callee = sdName(className, loc);
-    for (auto& f : fields)
-        build->kwArgs.emplace_back(f.name, sdName("_" + f.name, loc));
+    for (auto& f : fields) {
+        if (f.kind.rfind("class:", 0) == 0)
+            build->kwArgs.emplace_back(f.name, sdDecodeExpr(f.kind.substr(6), sdName("_" + f.name + "_bytes", loc), loc));
+        else
+            build->kwArgs.emplace_back(f.name, sdName("_" + f.name, loc));
+    }
     build->setLocation(loc);
     auto ret = std::make_unique<ReturnStmt>();
     ret->value = std::move(build);
