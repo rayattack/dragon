@@ -793,6 +793,7 @@ std::unique_ptr<Stmt> Parser::externDeclaration() {
             return nullptr;
         }
         std::string libName = stripQuotes(std::string(advance().lexeme()));
+        skipNewlines();
         consume(TokenType::LEFT_BRACE, "Expect '{' after library name");
         // Parse multiple extern function signatures inside the block
         std::vector<std::unique_ptr<Stmt>> decls;
@@ -895,6 +896,7 @@ std::unique_ptr<Stmt> Parser::matchStatement() {
     // In .dr mode: match subject { case ... { } case ... { } }
     // In .py mode: match subject:\n case ...:
     if (impl_->options.isDragonFile) {
+        skipNewlines();
         consume(TokenType::LEFT_BRACE, "Expect '{' after match subject");
         // Forward-progress invariant: every iteration must advance the cursor.
         // consume() records an error WITHOUT advancing on a missing brace, and
@@ -923,6 +925,7 @@ std::unique_ptr<Stmt> Parser::matchStatement() {
             // Case body must be brace-delimited (`case p { ... }`). The colon
             // form is unsupported: report it, synchronize past the bad token so
             // the loop makes progress, and stop parsing further cases.
+            skipNewlines(); // allow brace on next line
             if (!check(TokenType::LEFT_BRACE)) {
                 error("Expect '{' after case pattern");
                 synchronize();
@@ -1293,6 +1296,7 @@ std::unique_ptr<Stmt> Parser::enumDeclaration() {
     decl->setLocation(enumTok.location());
     decl->name = std::string(consume(TokenType::IDENTIFIER, "Expect enum name").lexeme());
 
+    skipNewlines();
     consume(TokenType::LEFT_BRACE, "Expect '{' after enum name");
     while (match(TokenType::NEWLINE)) {}
 
@@ -1526,6 +1530,7 @@ std::vector<std::unique_ptr<Stmt>> Parser::parseBlock() {
     // until the process OOMs. parseModule applies the same guard at top
     // level; parseBlock missed it.
     if (impl_->options.isDragonFile) {
+        skipNewlines();
         consume(TokenType::LEFT_BRACE, "Expect '{' before block");
         while (!check(TokenType::RIGHT_BRACE) && !isAtEnd()) {
             while (match(TokenType::NEWLINE) || match(TokenType::SEMICOLON)) {}

@@ -2817,3 +2817,112 @@ TEST(ParserTest, DeferRemainsUsableAsIdentifier) {
         "}\n");
     ASSERT_NE(module, nullptr);
 }
+
+//===----------------------------------------------------------------------===//
+// Next-line brace placement (Issue #14)
+// Opening curly braces can appear on the line after a declaration, not just
+// on the same line.
+//===----------------------------------------------------------------------===//
+
+TEST(ParserTest, FunctionDefNextLineBrace) {
+    auto module = parse("def foo() -> int\n{\n    return 0\n}", true);
+    ASSERT_NE(module, nullptr);
+    EXPECT_EQ(module->body.size(), 1u);
+    auto* fn = dynamic_cast<FunctionDecl*>(module->body[0].get());
+    ASSERT_NE(fn, nullptr);
+    EXPECT_EQ(fn->name, "foo");
+    EXPECT_EQ(fn->body.size(), 1u);
+}
+
+TEST(ParserTest, FunctionDefSameLineBraceStillWorks) {
+    auto module = parse("def foo() -> int { return 0 }", true);
+    ASSERT_NE(module, nullptr);
+    EXPECT_EQ(module->body.size(), 1u);
+    auto* fn = dynamic_cast<FunctionDecl*>(module->body[0].get());
+    ASSERT_NE(fn, nullptr);
+    EXPECT_EQ(fn->name, "foo");
+}
+
+TEST(ParserTest, ClassDefNextLineBrace) {
+    auto module = parse("class Foo\n{\n    pass\n}", true);
+    ASSERT_NE(module, nullptr);
+    EXPECT_EQ(module->body.size(), 1u);
+    auto* cls = dynamic_cast<ClassDecl*>(module->body[0].get());
+    ASSERT_NE(cls, nullptr);
+    EXPECT_EQ(cls->name, "Foo");
+}
+
+TEST(ParserTest, IfStatementNextLineBrace) {
+    auto module = parse("if true\n{\n    pass\n}", true);
+    ASSERT_NE(module, nullptr);
+    EXPECT_EQ(module->body.size(), 1u);
+    auto* ifStmt = dynamic_cast<IfStmt*>(module->body[0].get());
+    ASSERT_NE(ifStmt, nullptr);
+}
+
+TEST(ParserTest, WhileLoopNextLineBrace) {
+    auto module = parse("while true\n{\n    pass\n}", true);
+    ASSERT_NE(module, nullptr);
+    EXPECT_EQ(module->body.size(), 1u);
+    auto* whileStmt = dynamic_cast<WhileStmt*>(module->body[0].get());
+    ASSERT_NE(whileStmt, nullptr);
+}
+
+TEST(ParserTest, ForLoopNextLineBrace) {
+    auto module = parse("for i in range(3)\n{\n    pass\n}", true);
+    ASSERT_NE(module, nullptr);
+    EXPECT_EQ(module->body.size(), 1u);
+    auto* forStmt = dynamic_cast<ForStmt*>(module->body[0].get());
+    ASSERT_NE(forStmt, nullptr);
+}
+
+TEST(ParserTest, TryExceptNextLineBrace) {
+    auto module = parse("try\n{\n    pass\n} except ValueError\n{\n    pass\n}", true);
+    ASSERT_NE(module, nullptr);
+    EXPECT_EQ(module->body.size(), 1u);
+    auto* tryStmt = dynamic_cast<TryStmt*>(module->body[0].get());
+    ASSERT_NE(tryStmt, nullptr);
+}
+
+TEST(ParserTest, EnumNextLineBrace) {
+    auto module = parse("enum Color\n{\n    RED\n}", true);
+    ASSERT_NE(module, nullptr);
+    EXPECT_EQ(module->body.size(), 1u);
+    auto* cls = dynamic_cast<ClassDecl*>(module->body[0].get());
+    ASSERT_NE(cls, nullptr);
+    EXPECT_EQ(cls->name, "Color");
+}
+
+TEST(ParserTest, MatchStatementNextLineBrace) {
+    auto module = parse("match 1\n{\n    case 1\n    {\n        pass\n    }\n}", true);
+    ASSERT_NE(module, nullptr);
+    EXPECT_EQ(module->body.size(), 1u);
+    auto* matchStmt = dynamic_cast<MatchStmt*>(module->body[0].get());
+    ASSERT_NE(matchStmt, nullptr);
+}
+
+TEST(ParserTest, MultipleBlankLinesBeforeBrace) {
+    auto module = parse("def foo()\n\n\n{\n    pass\n}", true);
+    ASSERT_NE(module, nullptr);
+    EXPECT_EQ(module->body.size(), 1u);
+    auto* fn = dynamic_cast<FunctionDecl*>(module->body[0].get());
+    ASSERT_NE(fn, nullptr);
+}
+
+TEST(ParserTest, NestedNextLineBraces) {
+    auto module = parse(
+        "if true\n"
+        "{\n"
+        "    for i in range(3)\n"
+        "    {\n"
+        "        pass\n"
+        "    }\n"
+        "}", true);
+    ASSERT_NE(module, nullptr);
+    EXPECT_EQ(module->body.size(), 1u);
+    auto* ifStmt = dynamic_cast<IfStmt*>(module->body[0].get());
+    ASSERT_NE(ifStmt, nullptr);
+    EXPECT_EQ(ifStmt->thenBody.size(), 1u);
+    auto* forStmt = dynamic_cast<ForStmt*>(ifStmt->thenBody[0].get());
+    ASSERT_NE(forStmt, nullptr);
+}

@@ -543,6 +543,7 @@ std::unique_ptr<Expr> Parser::fireExpr() {
     if (match(TokenType::FIRE)) {
         auto fe = std::make_unique<FireExpr>();
         fe->setLocation(previous().location());
+        skipNewlines();
         if (check(TokenType::LEFT_BRACE)) {
             // fire { block } form - inline block as green thread
             fe->bodyStmts = parseBlock();
@@ -1089,6 +1090,7 @@ std::unique_ptr<Expr> Parser::parseLambda() {
         }
         consume(TokenType::RIGHT_PAREN, "Expect ')'");
         if (match(TokenType::ARROW)) lam->returnType = parseType();
+        skipNewlines();
         if (check(TokenType::LEFT_BRACE)) {
             lam->bodyStmts = parseBlock();
         } else {

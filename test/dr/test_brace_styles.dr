@@ -1,0 +1,324 @@
+"""Comprehensive tests for all brace placement styles (Issue #14).
+
+Tests 4 brace styles across all language constructs:
+  Shape 1: Single-line       if (cond) { code }
+  Shape 2: Opening same-line if (cond) { code }
+                              }
+  Shape 3: Closing inline    if (cond) { code }
+  Shape 4: Opening next-line if (cond)
+                              {
+                                  code
+                              }
+"""
+
+from unittest import TestCase, main
+
+
+#=============================================================================
+# Shape 1: Single-line braces
+#=============================================================================
+
+def shape1_if() -> bool { if true { return true } return false }
+
+def shape1_while() -> int { i: int = 0 while i < 3 { i = i + 1 } return i }
+
+def shape1_for() -> int { total: int = 0 for i in range(3) { total = total + i } return total }
+
+def shape1_try() -> str { try { raise ValueError("x") } catch ValueError { return "caught" } return "fail" }
+
+class Shape1Class {
+    x: int
+    def() { self.x = 10 }
+    def get() -> int { return self.x }
+}
+
+#=============================================================================
+# Shape 2: Opening brace same-line, closing on own line
+#=============================================================================
+
+def shape2_if() -> bool {
+    if true {
+        return true
+    }
+    return false
+}
+
+def shape2_while() -> int {
+    i: int = 0
+    while i < 3 {
+        i = i + 1
+    }
+    return i
+}
+
+def shape2_for() -> int {
+    total: int = 0
+    for i in range(3) {
+        total = total + i
+    }
+    return total
+}
+
+def shape2_try() -> str {
+    try {
+        raise ValueError("x")
+    } catch ValueError {
+        return "caught"
+    }
+    return "fail"
+}
+
+def shape2_try_finally() -> int {
+    x: int = 0
+    try {
+        x = 1
+    } finally {
+        x = 2
+    }
+    return x
+}
+
+def shape2_with() -> int {
+    x: int = 0
+    return x
+}
+
+class Shape2Class {
+    x: int
+
+    def() {
+        self.x = 10
+    }
+
+    def get() -> int {
+        return self.x
+    }
+
+    def set(v: int) {
+        self.x = v
+    }
+}
+
+#=============================================================================
+# Shape 3: Closing brace on same line as last statement
+#=============================================================================
+
+def shape3_if() -> bool { if true {
+    return true } return false }
+
+def shape3_while() -> int { i: int = 0 while i < 3 {
+    i = i + 1 } return i }
+
+def shape3_for() -> int { total: int = 0 for i in range(3) {
+    total = total + i } return total }
+
+def shape3_try() -> str { try {
+    raise ValueError("x") } catch ValueError {
+    return "caught" } return "fail" }
+
+class Shape3Class {
+    x: int
+    def() {
+        self.x = 10 }
+    def get() -> int {
+        return self.x }
+}
+
+#=============================================================================
+# Shape 4: Opening brace on next line (Issue #14 feature)
+#=============================================================================
+
+def shape4_if() -> bool
+{
+    if true
+    {
+        return true
+    }
+    return false
+}
+
+def shape4_while() -> int
+{
+    i: int = 0
+    while i < 3
+    {
+        i = i + 1
+    }
+    return i
+}
+
+def shape4_for() -> int
+{
+    total: int = 0
+    for i in range(3)
+    {
+        total = total + i
+    }
+    return total
+}
+
+def shape4_try() -> str
+{
+    try
+    {
+        raise ValueError("x")
+    } catch ValueError
+    {
+        return "caught"
+    }
+    return "fail"
+}
+
+def shape4_try_finally() -> int
+{
+    x: int = 0
+    try
+    {
+        x = 1
+    } finally
+    {
+        x = 2
+    }
+    return x
+}
+
+class Shape4Class
+{
+    x: int
+
+    def()
+    {
+        self.x = 10
+    }
+
+    def get() -> int
+    {
+        return self.x
+    }
+
+    def set(v: int)
+    {
+        self.x = v
+    }
+}
+
+#=============================================================================
+# Mixed styles in same construct
+#=============================================================================
+
+def mixed_styles() -> int {
+    result: int = 0
+
+    if true
+    {
+        result = result + 1
+    }
+
+    i: int = 0
+    while i < 2 {
+        result = result + 1
+        i = i + 1
+    }
+
+    for j in range(2) {
+        result = result + 1
+    }
+
+    return result
+}
+
+#=============================================================================
+# Test Cases
+#=============================================================================
+
+class BraceStyleTests(TestCase) {
+    #--- Shape 1 ---#
+    def test_shape1_if() {
+        self.assertTrue(shape1_if())
+    }
+    def test_shape1_while() {
+        self.assertEqual(shape1_while(), 3)
+    }
+    def test_shape1_for() {
+        self.assertEqual(shape1_for(), 3)
+    }
+    def test_shape1_try() {
+        self.assertEqual(shape1_try(), "caught")
+    }
+    def test_shape1_class() {
+        c: Shape1Class = Shape1Class()
+        self.assertEqual(c.get(), 10)
+    }
+
+    #--- Shape 2 ---#
+    def test_shape2_if() {
+        self.assertTrue(shape2_if())
+    }
+    def test_shape2_while() {
+        self.assertEqual(shape2_while(), 3)
+    }
+    def test_shape2_for() {
+        self.assertEqual(shape2_for(), 3)
+    }
+    def test_shape2_try() {
+        self.assertEqual(shape2_try(), "caught")
+    }
+    def test_shape2_try_finally() {
+        self.assertEqual(shape2_try_finally(), 2)
+    }
+    def test_shape2_class() {
+        c: Shape2Class = Shape2Class()
+        self.assertEqual(c.get(), 10)
+        c.set(42)
+        self.assertEqual(c.get(), 42)
+    }
+
+    #--- Shape 3 ---#
+    def test_shape3_if() {
+        self.assertTrue(shape3_if())
+    }
+    def test_shape3_while() {
+        self.assertEqual(shape3_while(), 3)
+    }
+    def test_shape3_for() {
+        self.assertEqual(shape3_for(), 3)
+    }
+    def test_shape3_try() {
+        self.assertEqual(shape3_try(), "caught")
+    }
+    def test_shape3_class() {
+        c: Shape3Class = Shape3Class()
+        self.assertEqual(c.get(), 10)
+    }
+
+    #--- Shape 4 ---#
+    def test_shape4_if() {
+        self.assertTrue(shape4_if())
+    }
+    def test_shape4_while() {
+        self.assertEqual(shape4_while(), 3)
+    }
+    def test_shape4_for() {
+        self.assertEqual(shape4_for(), 3)
+    }
+    def test_shape4_try() {
+        self.assertEqual(shape4_try(), "caught")
+    }
+    def test_shape4_try_finally() {
+        self.assertEqual(shape4_try_finally(), 2)
+    }
+    def test_shape4_class() {
+        c: Shape4Class = Shape4Class()
+        self.assertEqual(c.get(), 10)
+        c.set(42)
+        self.assertEqual(c.get(), 42)
+    }
+
+    #--- Mixed ---#
+    def test_mixed_styles() {
+        self.assertEqual(mixed_styles(), 5)
+    }
+}
+
+
+main([BraceStyleTests()])

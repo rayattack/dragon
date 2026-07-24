@@ -303,6 +303,19 @@ target_link_libraries(dragon PRIVATE dragon_lib dragon_runtime)
 # line and Dragon uses no z3 symbols.
 if(APPLE)
     target_link_options(dragon PRIVATE LINKER:-dead_strip_dylibs)
+    # Remove transitive Homebrew dylib references (z3, zstd, etc.) that
+    # -dead_strip_dylibs doesn't catch.  Without this the shipped binary
+    # still carries an /opt/homebrew/... load command and dyld aborts on
+    # any Mac without those brew packages.  See issue #9.
+    add_custom_command(TARGET dragon POST_BUILD
+        COMMAND /bin/bash -c "
+            set -euo pipefail; \
+            for lib in $(otool -L '$<TARGET_FILE:dragon>' | grep '/opt/homebrew\|/usr/local' | awk '{print \$1}'); do \
+                echo 'removing stale load: '$lib; \
+                install_name_tool -delete \"$lib\" '$<TARGET_FILE:dragon>'; \
+            done"
+        COMMENT "Stripping Homebrew load commands from dragon binary"
+        VERBATIM)
 endif()
 
 target_compile_definitions(dragon PRIVATE
@@ -325,6 +338,20 @@ add_custom_command(
     DEPENDS dragon ${DRAGON_EGG_SRC_FILE} ${CMAKE_SOURCE_DIR}/stdlib/drs.dr
     COMMENT "Building dragon-egg sidecar (spec-22 package CLI)"
     VERBATIM)
+# Strip Homebrew load commands from dragon-egg the same way we do for dragon
+# (see the POST_BUILD above).  The sidecar is produced by running `dragon build`
+# so it inherits the same link flags and picks up the same transitive dylibs.
+if(APPLE)
+    add_custom_command(TARGET dragon_egg POST_BUILD
+        COMMAND /bin/bash -c "
+            set -euo pipefail; \
+            for lib in $(otool -L '${DRAGON_EGG_OUT}' | grep '/opt/homebrew\|/usr/local' | awk '{print \$1}'); do \
+                echo 'removing stale load: '$lib; \
+                install_name_tool -delete \"$lib\" '${DRAGON_EGG_OUT}'; \
+            done"
+        COMMENT "Stripping Homebrew load commands from dragon-egg binary"
+        VERBATIM)
+endif()
 add_custom_target(dragon_egg ALL DEPENDS ${DRAGON_EGG_OUT})
 
 # Force the instrumented runtime twin to build under DRAGON_ASAN. It's referenced
