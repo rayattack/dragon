@@ -924,8 +924,7 @@ int Driver::buildFile(const std::string& filename) {
             prefix, "libdragon_mbedtls.a", DRAGON_MBEDTLS_LIB);
 #endif
 #ifdef DRAGON_ZSTD_LIB
-        // Mac only (see CMakeLIsts): macOS has no system libzstd - so user
-        // programs link the bundled static archive instead of -lzstd.
+        // Apple only: user programs link the bundled static zstd, not -lzstd.
         codegenOpts.zstdLibPath = findBundledLib(
             prefix, "libzstd.a", DRAGON_ZSTD_LIB);
 #endif
@@ -1176,3 +1175,4 @@ bool Driver::isPythonFile(const std::string& filename) {
 }
 
 } // namespace dragon
+

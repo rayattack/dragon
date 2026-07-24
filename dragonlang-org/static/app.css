@@ -819,8 +819,16 @@ article table code {
     line-height: 1.1;
 }
 .lp-tagline {
-    margin: 0 0 28px 0;
+    margin: 0 0 10px 0;
     font-size: 21px;
+    color: var(--fg-muted);
+}
+/* Audience line under the tagline: says who Dragon is for, in one sentence. */
+.lp-lede {
+    margin: 0 auto 28px auto;
+    max-width: 560px;
+    font-size: 16px;
+    line-height: 1.55;
     color: var(--fg-muted);
 }
 .lp-cta {
@@ -1112,6 +1120,15 @@ article table code {
     font-size: 15px;
 }
 .lp-bench-link { margin-top: 18px; font-weight: 600; }
+
+/* Framing paragraph under the /benchmarks heading: what Rust is doing here. */
+.bench-lede {
+    color: var(--fg-muted);
+    max-width: 680px;
+    margin: 14px auto 0 auto;
+    font-size: 15px;
+    line-height: 1.6;
+}
 
 /* inline code chips reused in bench/download subtitles */
 .lp-bench-sub code, .dl-ver code, .bench-notes code {

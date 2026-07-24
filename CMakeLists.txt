@@ -1,7 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 # Copyright (c) 2018 Tersoo Ortserga <ortserga@gmail.com>
-# The version is parsed from dragon::VERSION in include/dragon.h so the cpack
-# artifact names, `dragon --version`, and the public constant cannot disagree.
+# Version is single-sourced from dragon::VERSION in include/dragon.h.
 file(STRINGS include/dragon.h DRAGON_VERSION_LINE REGEX "constexpr const char\\* VERSION")
 string(REGEX MATCH "[0-9]+\\.[0-9]+\\.[0-9]+" DRAGON_VERSION "${DRAGON_VERSION_LINE}")
 if(NOT DRAGON_VERSION)
@@ -26,6 +25,19 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # createTargetMachine(const Triple&, ...)) that landed in LLVM 21. Anything
 # older needs the string-based overloads instead. This accepts 21, 22, and
 # trunk; CI and releases build against the latest packaged release (22).
+# macOS: claim LLVM's zstd imported targets with the static archive before
+# find_package(LLVM), else the link pulls Homebrew's dylib and the shipped
+# binary dies on Macs without brew.
+if(APPLE)
+    find_library(ZSTD_LIBRARY NAMES libzstd.a REQUIRED)
+    add_library(zstd::libzstd_shared STATIC IMPORTED)
+    set_target_properties(zstd::libzstd_shared PROPERTIES
+        IMPORTED_LOCATION "${ZSTD_LIBRARY}")
+    add_library(zstd::libzstd_static STATIC IMPORTED)
+    set_target_properties(zstd::libzstd_static PROPERTIES
+        IMPORTED_LOCATION "${ZSTD_LIBRARY}")
+endif()
+
 find_package(LLVM REQUIRED CONFIG)
 if(LLVM_PACKAGE_VERSION VERSION_LESS 21.0)
     message(FATAL_ERROR
@@ -178,18 +190,10 @@ target_link_libraries(dragon_runtime PRIVATE dragon_mbedtls)
 # a follow-up (see the design spec).
 target_compile_definitions(dragon_runtime PRIVATE
     DRAGON_CA_BUNDLE="${CMAKE_SOURCE_DIR}/share/dragon/certs/cacert.pem")
-# Compression: link zlib + zstd. zlib is a system lib everywhere (macOS ships
-# /usr/lib/libz.1.dylib; distros ship zlib1g). zstd is NOT part of macOS: only
-# Homebrew provides it, so on Apple we must link the static archive - a .dylib
-# dependency would bake the build machine's /opt/homebrew path into the shipped
-# binary and dyld aborts on any Mac without brew zstd (v0.0.1 shipped like
-# that). Naming libzstd.a exactly forces the static pick even though the same
-# Homebrew dir also holds libzstd.dylib. Linux keeps the shared lib: the
-# .deb/.rpm declare the libzstd dependency and apt/dnf resolve it.
+# zlib ships with every OS. zstd: Apple uses the static archive resolved above
+# find_package(LLVM); Linux links the shared lib the .deb/.rpm declare.
 find_package(ZLIB REQUIRED)
-if(APPLE)
-    find_library(ZSTD_LIBRARY NAMES libzstd.a REQUIRED)
-else()
+if(NOT APPLE)
     find_library(ZSTD_LIBRARY NAMES zstd libzstd REQUIRED)
 endif()
 # zstd has no imported target carrying its include dir (unlike ZLIB::ZLIB).
@@ -295,11 +299,8 @@ target_compile_definitions(dragon_lib PRIVATE
 # dragon CLI tool
 add_executable(dragon tools/dragon/main.cpp)
 target_link_libraries(dragon PRIVATE dragon_lib dragon_runtime)
-# Drop load commands for dylibs no symbol is used from. Homebrew's LLVM is
-# built against libz3 (its solver support), which lands on our link line via
-# LLVMConfig even though Dragon uses zero z3 symbols; without this flag I believe
-# ld64 records the absolute /opt/homebrew path and the shipped binary will abort on
-# Macs without brew. 
+# Drop dylibs no symbol is used from: Homebrew LLVM puts libz3 on the link
+# line and Dragon uses no z3 symbols.
 if(APPLE)
     target_link_options(dragon PRIVATE LINKER:-dead_strip_dylibs)
 endif()
@@ -362,10 +363,7 @@ install(TARGETS dragon_runtime dragon_sqlite3 dragon_llhttp dragon_mbedtls
 install(FILES $<TARGET_FILE:pcre2-8-static>
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/dragon)
 
-# macOS only: ship the zstd static archive so user programs that use
-# gzip/zstd/tarfile link without Homebrew on the target machine (the Driver
-# resolves it via findBundledLib, same as sqlite3/pcre2). zstd is BSD-licensed.
-# Linux relies on the distro libzstd declared as a package dependency.
+# macOS: ship libzstd.a so user programs link zstd without Homebrew.
 if(APPLE)
     install(FILES ${ZSTD_LIBRARY}
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/dragon)
