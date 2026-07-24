@@ -692,8 +692,12 @@ int Driver::runFile(const std::string& filename) {
     // in the window before execvp (TOCTOU local privesc).
     std::string tmpDir = platform::makeSecureTempDir("dragon_run_");
     if (tmpDir.empty()) {
-        std::cerr << "error: could not create a secure temporary directory\n";
-        return 1;
+        // Fallback to ~/.dragon/<prefix><unique> if secure temp dir creation fails
+        tmpDir = platform::makeFallbackTempDir("dragon_run_");
+        if (tmpDir.empty()) {
+            std::cerr << "error: could not create a temporary directory\n";
+            return 1;
+        }
     }
     std::string tmpExe = tmpDir
         + std::string(1, platform::pathSeparator())
@@ -970,8 +974,12 @@ int Driver::buildFile(const std::string& filename) {
     // object write and the `cc` link both follow symlinks).
     std::string objDir = platform::makeSecureTempDir("dragon_llvm_");
     if (objDir.empty()) {
-        std::cerr << "error: could not create a secure temporary directory\n";
-        return 1;
+        // Fallback to ~/.dragon/<prefix><unique> if secure temp dir creation fails
+        objDir = platform::makeFallbackTempDir("dragon_llvm_");
+        if (objDir.empty()) {
+            std::cerr << "error: could not create a temporary directory\n";
+            return 1;
+        }
     }
     std::string objFile = objDir
         + std::string(1, platform::pathSeparator())
