@@ -951,6 +951,21 @@ void TypeChecker::registerExternalGenerics(Module& mod) {
             }
         }
     }
+    // D052 - record imported class bindings so a stamped generic body can name an
+    // imported type; source exports are already registered, so resolve against them.
+    for (auto& stmt : mod.body) {
+        auto* fi = dynamic_cast<FromImportStmt*>(stmt.get());
+        if (!fi) continue;
+        auto srcIt = impl_->moduleTypes.find(fi->module);
+        if (srcIt == impl_->moduleTypes.end()) continue;
+        for (auto& alias : fi->names) {
+            auto exIt = srcIt->second->exports.find(alias.name);
+            if (exIt == srcIt->second->exports.end() || !exIt->second) continue;
+            if (exIt->second->kind() != Type::Kind::Class) continue;
+            const std::string bound = alias.asName.empty() ? alias.name : alias.asName;
+            impl_->moduleImportedTypes[mod.moduleName][bound] = exIt->second;
+        }
+    }
 }
 
 // Worklist: stamp the transitive closure of instantiations to a fixpoint.
@@ -1079,18 +1094,25 @@ void TypeChecker::runMonomorphization() {
         std::vector<std::string> addedTypeNames;
         if (auto modIt = impl_->genericTemplateModule.find(template_);
             modIt != impl_->genericTemplateModule.end()) {
+            auto injectClass = [&](const std::string& ename,
+                                   const std::shared_ptr<Type>& etype) {
+                if (!etype || etype->kind() != Type::Kind::Class) return;
+                if (auto ex = impl_->typeNames.find(ename); ex != impl_->typeNames.end())
+                    savedTypeNames.push_back({ename, ex->second});
+                else
+                    addedTypeNames.push_back(ename);
+                impl_->typeNames[ename] = std::make_shared<InstanceType>(
+                    std::static_pointer_cast<ClassType>(etype));
+            };
             if (auto mtIt = impl_->moduleTypes.find(modIt->second);
-                mtIt != impl_->moduleTypes.end()) {
-                for (auto& [ename, etype] : mtIt->second->exports) {
-                    if (!etype || etype->kind() != Type::Kind::Class) continue;
-                    if (auto ex = impl_->typeNames.find(ename); ex != impl_->typeNames.end())
-                        savedTypeNames.push_back({ename, ex->second});
-                    else
-                        addedTypeNames.push_back(ename);
-                    impl_->typeNames[ename] = std::make_shared<InstanceType>(
-                        std::static_pointer_cast<ClassType>(etype));
-                }
-            }
+                mtIt != impl_->moduleTypes.end())
+                for (auto& [ename, etype] : mtIt->second->exports)
+                    injectClass(ename, etype);
+            // D052 - also the home module's IMPORTED classes (not in its exports).
+            if (auto imIt = impl_->moduleImportedTypes.find(modIt->second);
+                imIt != impl_->moduleImportedTypes.end())
+                for (auto& [ename, etype] : imIt->second)
+                    injectClass(ename, etype);
         }
 
         if (isMethodReq) {
