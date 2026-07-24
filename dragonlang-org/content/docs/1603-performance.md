@@ -5,9 +5,9 @@ They are not marketing - they are the tie-breakers the language uses
 whenever two designs compete, and they explain every trade-off in the
 book.
 
-1. **Speed is king.** Dragon aims to run at C-class speed and to beat Rust
-   on compute. When two approaches both work, the one that emits faster
-   code wins - no exceptions.
+1. **Speed is king.** Dragon aims to run at C-class speed. When two
+   approaches both work, the one that emits faster code wins - no
+   exceptions.
 2. **Efficiency trumps quick wins.** Never take the easy road when a
    better one exists. No workarounds, no convenience shims that leak
    performance. When something is slow at the root, the root gets fixed.
@@ -25,9 +25,11 @@ results - measured, and honest about where Dragon still loses.
 ## The numbers
 
 These are from the project's `versus/` suite: Dragon against Rust, both
-at `-O2`, best-of-three on the same machine. The live, continuously
-re-run table is at [the benchmarks page](/benchmarks); the snapshot below
-is current as of this writing.
+at `-O2`, best-of-three on the same machine. Rust is the yardstick rather
+than the target - it is the fastest language with a comparable safety
+story, so it is the honest thing to measure a young runtime against. The
+live, continuously re-run table is at [the benchmarks page](/benchmarks);
+the snapshot below is current as of this writing.
 
 | Benchmark | Dragon | Rust | Verdict |
 |---|---|---|---|

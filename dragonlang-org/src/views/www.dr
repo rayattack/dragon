@@ -216,7 +216,7 @@ def page_shell(title: str, active: str, username: str, body: HTML) -> HTML {
 # A short, representative Dragon program for the hero code sample. It is text
 # fed to the syntax highlighter - never compiled - so it can show off flavour
 # (mandatory types, Python-like syntax, colorless green threads) freely.
-const _SAMPLE: str = """# Typed like Rust, reads like Python, runs on green threads.
+const _SAMPLE: str = """# Reads like Python, checked at compile time, runs on green threads.
 class Greeter {
     def(name: str) {
         self.name = name
@@ -282,8 +282,8 @@ def _bench_table() -> HTML {
       <table class="bench-table">
         <thead><tr><th>Benchmark</th><th>Dragon</th><th>Rust</th><th>Verdict</th></tr></thead>
         <tbody>
-          !{_bench_row("Fibonacci (recursive, n=42)", "0.848s", "0.986s", "win", "Dragon 1.16&#215; faster")}
-          !{_bench_row("Mandelbrot (float, 1600&#178;, 100 iter)", "0.421s", "0.452s", "win", "Dragon 1.07&#215; faster")}
+          !{_bench_row("Fibonacci (recursive, n=42)", "0.848s", "0.986s", "tie", "parity (1.16&#215;, within noise)")}
+          !{_bench_row("Mandelbrot (float, 1600&#178;, 100 iter)", "0.421s", "0.452s", "tie", "parity (1.07&#215;, within noise)")}
           !{_bench_row("Sieve of Eratosthenes (1M)", "0.007s", "0.006s", "tie", "tie (noise)")}
           !{_bench_row("String concat (10k)", "0.003s", "0.003s", "tie", "tie (noise)")}
           !{_bench_row("Object creation (1M)", "0.002s", "0.003s", "tie", "tie (noise)")}
@@ -305,7 +305,8 @@ def render_landing(username: str) -> HTML {
         <section class="lp-hero">
           <img class="lp-logo" src="/assets/dr.png" alt="Dragon logo">
           <h1 class="lp-title">The Dragon Programming Language</h1>
-          <p class="lp-tagline">Reads like Python. Faster than Rust.</p>
+          <p class="lp-tagline">Reads like Python. Runs like C.</p>
+          <p class="lp-lede">A statically typed, compiled language for people who write Python and need native speed.</p>
           <div class="lp-cta">
             <a class="btn btn-primary" href="/download">Download</a>
             <a class="btn btn-secondary" href="/docs/0001-foreword">Get Started</a>
@@ -318,17 +319,21 @@ def render_landing(username: str) -> HTML {
           <div class="lp-features">
             !{_feature("&#9889;", "Fast", "Compiles to native code through LLVM. Dragon targets C-class performance with no interpreter and no GC pauses on the hot path.")}
             !{_feature("&#128274;", "Typed", "Type annotations are mandatory and checked ahead of time. Mistakes become compile errors, not 2 a.m. pages.")}
-            !{_feature("&#128013;", "Familiar", "Syntax and standard-library APIs mirror Python 3, so the language reads like code you already know.")}
+            !{_feature("&#128013;", "Familiar", "Syntax and standard-library APIs mirror Python 3. Dragon is its own language, not a Python runtime, but you will read it on day one.")}
             !{_feature("&#129525;", "Concurrent", "Colorless green threads: fire a task, await it anywhere. One way to write code, scheduled M:N for free.")}
           </div>
         </section>
         <section class="lp-sample">
-          <h2>Looks like Python. Runs like C.</h2>
+          <h2>Familiar surface, static underneath</h2>
           <pre class="lp-code"><code>!{sample_html | raw}</code></pre>
         </section>
         <section class="lp-bench">
-          <h2>Faster than Rust on compute</h2>
-          <p class="lp-bench-sub">Best-of-3, all <code>-O2</code>. We lead on compute-bound work and stay honest about the allocation and hashmap gaps we're still closing.</p>
+          <h2>Compiled speed, measured</h2>
+          <p class="lp-bench-sub">
+            Best-of-3, all <code>-O2</code>, with Rust as the yardstick: it's the language with a comparable safety story, so
+            it shows where our runtime still costs us. Dragon runs at parity on compute-bound work and behind on allocation-heavy
+            work, where reference counting costs what a borrow checker does not. Both stay on the page.
+          </p>
           <div class="bench-wrap">!{_bench_table()}</div>
           <p class="lp-bench-link"><a href="/benchmarks">Full results &amp; methodology &rarr;</a></p>
         </section>
@@ -397,10 +402,7 @@ def render_download(ua: str, username: str) -> HTML {
       !{_dl_btn(".rpm (Fedora / RHEL)", "dragon-" + DRAGON_VERSION + "-linux-x86_64.rpm", false, LINUX_LIVE)}
       !{_dl_btn(".tar.gz (portable)", "dragon-" + DRAGON_VERSION + "-linux-x86_64.tar.gz", false, LINUX_LIVE)}
     }
-    # macOS: the primary action is "Install via curl", which points at (and
-    # spotlights) the command box above - no .dmg, so no Gatekeeper quarantine.
-    # The portable tarballs stay as the manual alternative for Apple Silicon and
-    # Intel. The curl trigger is macOS-only by living in this card's buttons.
+    # macOS: the primary action is "Install via curl"
     const mac: HTML = template[HTML] {
       <a class="dl-btn dl-btn-primary dl-curl-trigger" href="#dl-quick">Install via curl</a>
       !{_dl_btn(".tar.gz (Apple Silicon)", "dragon-" + DRAGON_VERSION + "-macos-arm64.tar.gz", false, MACOS_LIVE)}
@@ -452,7 +454,7 @@ def render_download(ua: str, username: str) -> HTML {
         <section class="dl-source">
           <h2>Other ways to install</h2>
           <ul>
-            <li><strong>Build from source.</strong> Clone the repository and build with CMake and LLVM 17 - see the <a href="/docs/0003-installation">installation guide</a>.</li>
+            <li><strong>Build from source.</strong> Clone the repository and build with CMake and LLVM 21+ - see the <a href="/docs/0003-installation">installation guide</a>.</li>
             !{src_extra}
           </ul>
         </section>
@@ -470,11 +472,12 @@ def render_benchmarks(username: str) -> HTML {
         <section class="dl-head">
           <h1>Benchmarks</h1>
           <p class="dl-ver">Dragon vs Rust &middot; best-of-3 &middot; all <code>-O2</code> &middot; same machine</p>
+          <p class="bench-lede">Rust is the yardstick, not the target. It is the fastest language with a comparable safety story, which makes it the honest place to measure our runtime against. Dragon's goal is C-class speed with a surface a Python developer can read; these numbers say how close we are and where we are not.</p>
         </section>
         <div class="bench-wrap">!{_bench_table()}</div>
         <section class="bench-notes">
           <h2>Where we stand</h2>
-          <p>We beat Rust on <strong>compute-bound</strong> work. Recursive integer math (fib) and tight float loops (mandelbrot) are where the LLVM backend is already at or ahead of <code>rustc</code>. On fib we also beat Go and Java, and trail C/C++ by only ~12%.</p>
+          <p>On <strong>compute-bound</strong> work Dragon runs at parity with <code>rustc</code>. Recursive integer math (fib) and tight float loops (mandelbrot) both land within run-to-run variance, in both directions: we have measured fib anywhere from 1.02&#215; to 1.16&#215; across snapshots, so the nominal lead is not a lead. Parity with a mature systems compiler is the real result. On fib we also beat Go and Java, and trail C/C++ by only ~12%, which is the number we actually care about.</p>
           <p>The three sub-10&nbsp;ms rows &mdash; sieve, string concat, object creation &mdash; are <strong>noise, not signal</strong>. They finish in 2&ndash;7&nbsp;ms, dominated by process startup rather than the workload. Worth noting: object creation at 2&nbsp;ms means the old GC-tracking overhead no longer shows up at this scale.</p>
           <h2>Three gaps we're closing</h2>
           <ol>
@@ -483,7 +486,7 @@ def render_benchmarks(username: str) -> HTML {
             <li><strong>Parallel sum (1.17&#215; slower)</strong> &mdash; the closest gap. Green-thread fork-join carries a little more overhead than Rust's threads; we still beat Java and sit near Go.</li>
           </ol>
           <h2>Bottom line</h2>
-          <p>Faster than Rust on raw compute, even on the micro-benchmarks &mdash; and we lose on allocation-heavy (binary-trees) and hashmap (dicts) workloads. Per our first commandment (<em>speed is king</em>), the refcount/alloc path is the highest-leverage target, and it's what we're working on next. These numbers are re-run and updated as the runtime improves.</p>
+          <p>Dragon is at parity with Rust on compute and behind it on allocation-heavy and hashmap work. That gap is the price of reference counting rather than a borrow checker: you get native speed without lifetimes, and you pay for it where allocation churn dominates. It is a deliberate trade, not one we are content with. Per our first commandment (<em>speed is king</em>), the refcount/alloc path is the highest-leverage target, and it's what we're working on next. These numbers are re-run and updated as the runtime improves.</p>
         </section>
       </main>
     }
