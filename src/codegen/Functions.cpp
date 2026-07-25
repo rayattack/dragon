@@ -142,6 +142,8 @@ llvm::Function* CodeGen::Impl::emitEnvGcFn(
 void CodeGen::visit(LambdaExpr& node) {
     // Lambda expression: generate a new internal function and return its pointer.
     // D027: If capturedVars is non-empty, create a closure (env + wrapper).
+    // Per-variable metadata dies with the lambda body (stale-type family).
+    Impl::VarMetaScope _varMeta(*impl_);
 
     bool hasCaptures = !node.capturedVars.empty();
 
@@ -874,6 +876,8 @@ void CodeGen::visit(FunctionDecl& node) {
     // D044 - a generic template (`def f[T](...)`) is never lowered; only its
     // stamped monomorphic instantiations (empty typeParams) are emitted.
     if (!node.typeParams.empty()) return;
+    // Per-variable metadata dies with this body (stale-type family).
+    Impl::VarMetaScope _varMeta(*impl_);
     // Mirror forwardDeclareFunctions: externs keep the bare C symbol, Dragon
     // defs get per-module mangling; aliased externs use `externSymbol`.
     const std::string externLinkName =
@@ -916,7 +920,7 @@ void CodeGen::visit(FunctionDecl& node) {
     // Top-level keyed by mangled name (cross-module distinct); methods by (class, method).
     if (node.docstring) {
         if (node.isMethod && !impl_->currentClassName.empty())
-            impl_->methodDocstrings[impl_->currentClassName][node.name] = *node.docstring;
+            impl_->methodDocstringsBySym[impl_->classSym(impl_->currentClassName)][node.name] = *node.docstring;
         else if (!node.isMethod)
             impl_->functionDocstrings[llvmName] = *node.docstring;
     }
@@ -925,15 +929,15 @@ void CodeGen::visit(FunctionDecl& node) {
     // (-> ptr); callers set the receiving var's VarKind/varIsPtrCallable.
     if (auto* retNamed = dynamic_cast<NamedTypeExpr*>(node.returnType.get())) {
         if (retNamed->name == "type")
-            impl_->funcReturnsType.insert(node.name);
+            impl_->funcReturnsType.insert(llvmName);
         else if (retNamed->name == "ptr")
-            impl_->funcReturnsPtr.insert(node.name);
+            impl_->funcReturnsPtr.insert(llvmName);
     }
 
     // D027: track fns returning a CLOSURE so `g = make_closure()` marks g Closure
     // (call site unpacks fn+env, avoiding SIGSEGV). Idempotent backstop; see ImplInit.
     if (impl_->functionReturnsClosure(node))
-        impl_->funcReturnsClosure.insert(node.name);
+        impl_->funcReturnsClosure.insert(llvmName);
 
     // async def: inner body fn + wrapper that spawns vthread
     if (node.isAsync) {
@@ -1139,7 +1143,7 @@ void CodeGen::visit(FunctionDecl& node) {
                     impl_->varListElemIsType.insert(paramName);
                 if (auto* nt = dynamic_cast<NamedTypeExpr*>(elemTy)) {
                     if (impl_->classNames.count(nt->name) ||
-                        impl_->classFieldKinds.count(nt->name))
+                        impl_->classFieldKindsBySym.count(impl_->classSym(nt->name)))
                         impl_->varListElemClassName[paramName] = nt->name;
                 }
             }

@@ -1208,6 +1208,7 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
     // this class's package; survives the export boundary on the shared_ptr.
     classType->definingModule = impl_->currentModuleName;
     classType->definingFile = impl_->currentFile;
+    classType->decl = &node;
 
     // D045 - reject a reserved-shape (`__x__`) member name that isn't a known special
     // method; validate explicit method and annotated-field declarations.
@@ -1525,6 +1526,7 @@ void TypeChecker::visit(Module& node) {
                 classType->definingModule = impl_->currentModuleName;
                 classType->definingFile = impl_->currentFile;
             }
+            if (classType && !classType->decl) classType->decl = cd;
         }
     }
 

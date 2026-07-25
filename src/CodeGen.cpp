@@ -121,13 +121,16 @@ bool CodeGen::generate(dragon::Module& entryModule,
     // `i64`, which then mismatched the `dragon_dict_get_str_*` ABI at the
     // load site once the cross-module reader emitted the typed call).
     for (auto* dep : depModules) {
+        // Module context: a dep's global is keyed and class-resolved in the dep.
+        impl_->currentModuleName = dep->moduleName;
         for (auto& stmt : dep->body) {
             auto* ann = dynamic_cast<AnnAssignStmt*>(stmt.get());
             if (!ann || !ann->target) continue;
             auto* name = dynamic_cast<NameExpr*>(ann->target.get());
             if (!name) continue;
 
-            std::string gvName = "global." + name->name;
+            std::string gKey = Impl::mangleGlobal(dep->moduleName, name->name);
+            std::string gvName = "global." + gKey;
             if (impl_->module->getGlobalVariable(gvName)) continue;
 
             llvm::Type* gvType = ann->annotation
@@ -145,6 +148,7 @@ bool CodeGen::generate(dragon::Module& entryModule,
             if (impl_->annAssignIsDeque(ann)) {
                 vk = Impl::VarKind::Deque;
                 impl_->varClassNames[name->name] = "__Deque";
+                impl_->moduleGlobalClassNames[gKey] = {"__Deque", ""};
             }
 
             auto* gv = new llvm::GlobalVariable(
@@ -152,8 +156,8 @@ bool CodeGen::generate(dragon::Module& entryModule,
                 llvm::GlobalValue::InternalLinkage,
                 llvm::Constant::getNullValue(gvType),
                 gvName);
-            impl_->moduleGlobals[name->name] = gv;
-            impl_->moduleGlobalKinds[name->name] = vk;
+            impl_->moduleGlobals[gKey] = gv;
+            impl_->moduleGlobalKinds[gKey] = vk;
 
             // For class-typed globals, record the class name (and owning
             // module) so attribute/method access through the cross-module
@@ -165,9 +169,10 @@ bool CodeGen::generate(dragon::Module& entryModule,
             // signature from an arbitrary same-named method and produced a
             // wrong-arity indirect call (malformed IR) - order-dependent, so it
             // only bit some multi-module builds. Mirrors the AnnAssignStmt path.
-            impl_->bindClassVar(name->name, ann->annotation.get());
+            impl_->bindGlobalClassVar(gKey, name->name, ann->annotation.get());
         }
     }
+    impl_->currentModuleName = "";
 
     // Forward-declare the ENTRY module's top-level globals too, BEFORE the
     // entry-module class bodies are emitted below (line ~140). A class method
@@ -200,7 +205,9 @@ bool CodeGen::generate(dragon::Module& entryModule,
                     for (size_t i = 0; i < tup->elements.size(); ++i) {
                         auto* nm = dynamic_cast<NameExpr*>(tup->elements[i].get());
                         if (!nm) continue;
-                        std::string ugvName = "global." + nm->name;
+                        // Entry-module key: mangleGlobal("", name) == bare name.
+                        std::string ugKey = Impl::mangleGlobal("", nm->name);
+                        std::string ugvName = "global." + ugKey;
                         if (impl_->module->getGlobalVariable(ugvName)) continue;
                         llvm::Type* ugvType = impl_->i64Type;
                         Impl::VarKind uvk = Impl::VarKind::Int;
@@ -233,9 +240,9 @@ bool CodeGen::generate(dragon::Module& entryModule,
                             *impl_->module, ugvType, /*isConstant=*/false,
                             llvm::GlobalValue::InternalLinkage,
                             llvm::Constant::getNullValue(ugvType), ugvName);
-                        impl_->moduleGlobals[nm->name] = ugv;
-                        impl_->moduleGlobalKinds[nm->name] = uvk;
-                        impl_->entryGlobalsAwaitingInit.insert(nm->name);
+                        impl_->moduleGlobals[ugKey] = ugv;
+                        impl_->moduleGlobalKinds[ugKey] = uvk;
+                        impl_->entryGlobalsAwaitingInit.insert(ugKey);
                     }
                 }
             }
@@ -246,7 +253,9 @@ bool CodeGen::generate(dragon::Module& entryModule,
         auto* name = dynamic_cast<NameExpr*>(ann->target.get());
         if (!name) continue;
 
-        std::string gvName = "global." + name->name;
+        // Entry-module key: mangleGlobal("", name) == bare name.
+        std::string gKey = Impl::mangleGlobal("", name->name);
+        std::string gvName = "global." + gKey;
         if (impl_->module->getGlobalVariable(gvName)) continue;
 
         llvm::Type* gvType = ann->annotation
@@ -259,6 +268,7 @@ bool CodeGen::generate(dragon::Module& entryModule,
         if (impl_->annAssignIsDeque(ann)) {
             vk = Impl::VarKind::Deque;
             impl_->varClassNames[name->name] = "__Deque";
+            impl_->moduleGlobalClassNames[gKey] = {"__Deque", ""};
         }
         // Callable-typed global: register its signature now, for same ordering reason
         // as deque correction - a class method calling `TAGGER(x)` compiles before module
@@ -274,14 +284,11 @@ bool CodeGen::generate(dragon::Module& entryModule,
             llvm::GlobalValue::InternalLinkage,
             llvm::Constant::getNullValue(gvType),
             gvName);
-        impl_->moduleGlobals[name->name] = gv;
-        impl_->moduleGlobalKinds[name->name] = vk;
-        impl_->entryGlobalsAwaitingInit.insert(name->name);
+        impl_->moduleGlobals[gKey] = gv;
+        impl_->moduleGlobalKinds[gKey] = vk;
+        impl_->entryGlobalsAwaitingInit.insert(gKey);
 
-        if (auto* nt = dynamic_cast<NamedTypeExpr*>(ann->annotation.get())) {
-            if (impl_->classNames.count(nt->name))
-                impl_->varClassNames[name->name] = nt->name;
-        }
+        impl_->bindGlobalClassVar(gKey, name->name, ann->annotation.get());
     }
 
     // Generate dependency module code (functions and classes only, no top-level exprs).
@@ -393,8 +400,8 @@ bool CodeGen::generate(dragon::Module& entryModule,
 
             // Find the constructor function pointer
             llvm::Value* ctorPtr = nullptr;
-            auto ctorCountIt = impl_->classCtorCount.find(className);
-            bool isMultiCtor = (ctorCountIt != impl_->classCtorCount.end() && ctorCountIt->second > 1);
+            auto ctorCountIt = impl_->classCtorCountBySym.find(clsSym);
+            bool isMultiCtor = (ctorCountIt != impl_->classCtorCountBySym.end() && ctorCountIt->second > 1);
 
             if (isMultiCtor) {
                 // Multi-constructor: generate a dispatch wrapper that switches on nargs
@@ -420,7 +427,7 @@ bool CodeGen::generate(dragon::Module& entryModule,
                     llvm::Value* argsArray = &*argIt++;
                     llvm::Value* nargs = &*argIt;
 
-                    auto& arityVec = impl_->classCtorArities[className];
+                    auto& arityVec = impl_->classCtorAritiesBySym[clsSym];
                     auto* defaultBlock = llvm::BasicBlock::Create(*impl_->context, "default", dispatchFn);
                     auto* sw = impl_->builder->CreateSwitch(nargs, defaultBlock, arityVec.size());
 
@@ -484,19 +491,14 @@ bool CodeGen::generate(dragon::Module& entryModule,
             // parent's owning module so two same-named parents from different
             // modules don't last-write-wins through the bare-keyed map.
             llvm::Value* parentDesc = llvm::ConstantInt::get(impl_->i64Type, 0);
-            auto parentIt = impl_->classParentNames.find(className);
-            if (parentIt != impl_->classParentNames.end()) {
-                auto pmIt = impl_->classOwningModule.find(parentIt->second);
-                std::string parentMod = pmIt != impl_->classOwningModule.end()
-                                            ? pmIt->second
-                                            : dci.owningModule;
-                std::string parentSym = Impl::mangleClass(parentMod, parentIt->second);
+            auto parentIt = impl_->classParentNamesBySym.find(clsSym);
+            if (parentIt != impl_->classParentNamesBySym.end()) {
+                // Parent entry IS its sym; the descriptor symbol is direct.
+                const std::string& parentSym = parentIt->second;
                 auto* parentDescGlobal = impl_->module->getNamedGlobal(parentSym + "__descriptor");
                 if (!parentDescGlobal) {
-                    // Fall back to bare-keyed map (e.g. parent is a builtin
-                    // exception class with bare descriptor name).
-                    auto descIt = impl_->classDescriptorGlobals.find(parentIt->second);
-                    if (descIt != impl_->classDescriptorGlobals.end())
+                    auto descIt = impl_->classDescriptorGlobalsBySym.find(parentSym);
+                    if (descIt != impl_->classDescriptorGlobalsBySym.end())
                         parentDescGlobal = descIt->second;
                 }
                 if (parentDescGlobal) {
@@ -531,8 +533,8 @@ bool CodeGen::generate(dragon::Module& entryModule,
             // through the niche-ptr Optional[str] ABI as `None`.
             llvm::Value* docPtr = llvm::ConstantPointerNull::get(
                 llvm::cast<llvm::PointerType>(impl_->i8PtrType));
-            auto docIt = impl_->classDocstrings.find(className);
-            if (docIt != impl_->classDocstrings.end()) {
+            auto docIt = impl_->classDocstringsBySym.find(clsSym);
+            if (docIt != impl_->classDocstringsBySym.end()) {
                 auto* docStr = impl_->builder->CreateGlobalString(
                     docIt->second, clsSym + "__doc");
                 docPtr = impl_->builder->CreateBitCast(docStr, impl_->i8PtrType);
@@ -545,8 +547,8 @@ bool CodeGen::generate(dragon::Module& entryModule,
             impl_->builder->CreateStore(descVal, descGlobal);
 
             // Emit field metadata for hasattr()/getattr() reflection
-            auto fieldIt = impl_->classFieldIndices.find(className);
-            if (fieldIt != impl_->classFieldIndices.end() && !fieldIt->second.empty()) {
+            auto fieldIt = impl_->classFieldIndicesBySym.find(clsSym);
+            if (fieldIt != impl_->classFieldIndicesBySym.end() && !fieldIt->second.empty()) {
                 size_t nfields = fieldIt->second.size();
                 // Build sorted field list (deterministic order)
                 std::vector<std::pair<std::string, unsigned>> fieldList(
@@ -562,8 +564,8 @@ bool CodeGen::generate(dragon::Module& entryModule,
                 // narrow field misaligns or over-reads the allocation.
                 const llvm::DataLayout& dl = impl_->module->getDataLayout();
                 llvm::StructType* clsStruct = nullptr;
-                auto cstIt = impl_->classStructTypes.find(className);
-                if (cstIt != impl_->classStructTypes.end()) clsStruct = cstIt->second;
+                auto cstIt = impl_->classStructTypesBySym.find(clsSym);
+                if (cstIt != impl_->classStructTypesBySym.end()) clsStruct = cstIt->second;
                 const llvm::StructLayout* sl =
                     clsStruct ? dl.getStructLayout(clsStruct) : nullptr;
 
@@ -618,14 +620,14 @@ bool CodeGen::generate(dragon::Module& entryModule,
             // parent chain at lookup time, mirroring how _find_field_offset
             // does it for fields. Skipped when the class has no own
             // non-__init__ methods (e.g. data-only classes).
-            auto ownMethodsIt = impl_->classOwnMethods.find(className);
-            if (ownMethodsIt != impl_->classOwnMethods.end() &&
+            auto ownMethodsIt = impl_->classOwnMethodsBySym.find(clsSym);
+            if (ownMethodsIt != impl_->classOwnMethodsBySym.end() &&
                 !ownMethodsIt->second.empty()) {
                 const auto& ownMethods = ownMethodsIt->second;
                 std::vector<llvm::Constant*> mNameConsts;
                 std::vector<llvm::Constant*> mFnConsts;
                 std::vector<llvm::Constant*> mKindConsts;
-                auto& kindsForClass = impl_->classMethodKinds[className];
+                auto& kindsForClass = impl_->classMethodKindsBySym[clsSym];
                 for (auto& methodName : ownMethods) {
                     mNameConsts.push_back(impl_->builder->CreateGlobalString(
                         methodName, clsSym + "_mn_" + methodName));
@@ -676,9 +678,9 @@ bool CodeGen::generate(dragon::Module& entryModule,
                 // dragon_getattr only consults this array for instance/class
                 // methods (kind 0 / 2). Emitted only when at least one thunk
                 // exists, to skip the work for purely-static classes.
-                auto thunkMapIt = impl_->classMethodBoundThunks.find(className);
+                auto thunkMapIt = impl_->classMethodBoundThunksBySym.find(clsSym);
                 bool anyThunk = false;
-                if (thunkMapIt != impl_->classMethodBoundThunks.end()) {
+                if (thunkMapIt != impl_->classMethodBoundThunksBySym.end()) {
                     for (auto& kv : thunkMapIt->second) {
                         if (kv.second) { anyThunk = true; break; }
                     }
@@ -770,13 +772,13 @@ bool CodeGen::generate(dragon::Module& entryModule,
     // any module-level state the decorator depends on is already initialized.
     for (auto& stmt : entryModule.body) {
         if (auto* cd = dynamic_cast<ClassDecl*>(stmt.get())) {
-            if (impl_->decoratedClasses.count(cd->name)) {
-                auto dgIt = impl_->classDescriptorGlobals.find(cd->name);
-                if (dgIt != impl_->classDescriptorGlobals.end()) {
+            if (impl_->decoratedClassesBySym.count(impl_->classSym(cd->name))) {
+                auto dgIt = impl_->classDescriptorGlobalsBySym.find(impl_->classSym(cd->name));
+                if (dgIt != impl_->classDescriptorGlobalsBySym.end()) {
                     auto* descGlobal = dgIt->second;
                     llvm::Value* current = impl_->builder->CreateLoad(
                         impl_->i64Type, descGlobal, cd->name + "_desc_pre");
-                    auto& decs = impl_->classDecoratorExprs[cd->name];
+                    auto& decs = impl_->classDecoratorExprsBySym[impl_->classSym(cd->name)];
                     for (int i = (int)decs.size() - 1; i >= 0; i--) {
                         Expr* decExpr = decs[i];
                         llvm::Function* decFn = nullptr;

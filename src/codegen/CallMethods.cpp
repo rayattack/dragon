@@ -608,8 +608,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 }
             }
             if (!className.empty()) {
-                auto fkIt = impl_->classFieldKinds.find(className);
-                if (fkIt != impl_->classFieldKinds.end()) {
+                auto fkIt = impl_->classFieldKindsBySym.find(impl_->classSym(className));
+                if (fkIt != impl_->classFieldKindsBySym.end()) {
                     auto fkIt2 = fkIt->second.find(innerAttr->attribute);
                     if (fkIt2 != fkIt->second.end()) {
                         if (fkIt2->second == Impl::VarKind::List) isList = true;
@@ -1278,16 +1278,16 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                             if (vit != impl_->varClassNames.end()) ownerClass = vit->second;
                         }
                         if (!ownerClass.empty()) {
-                            auto ckIt = impl_->classFieldListElemKinds.find(ownerClass);
+                            auto ckIt = impl_->classFieldListElemKindsBySym.find(impl_->classSym(ownerClass));
                             bool fieldIsAny = false;
-                            if (ckIt != impl_->classFieldListElemKinds.end()) {
+                            if (ckIt != impl_->classFieldListElemKindsBySym.end()) {
                                 auto fIt = ckIt->second.find(listAttr->attribute);
                                 fieldIsAny = fIt != ckIt->second.end() &&
                                              fIt->second == Type::Kind::Any;
                             }
                             if (!fieldIsAny) {
-                                impl_->classFieldListElemKinds[ownerClass][listAttr->attribute] = Type::Kind::Instance;
-                                impl_->classFieldListElemClassName[ownerClass][listAttr->attribute] = appendedClassName;
+                                impl_->classFieldListElemKindsBySym[impl_->classSym(ownerClass)][listAttr->attribute] = Type::Kind::Instance;
+                                impl_->classFieldListElemClassNameBySym[impl_->classSym(ownerClass)][listAttr->attribute] = appendedClassName;
                             }
                         }
                     }
@@ -2110,16 +2110,11 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 return fail("in .py mode, call a parent method as `super()." + method +
                     "(...)` - bare `super." + method + "` is .dr-mode syntax");
 
-            // Resolve the parent's owning module so a cross-module parent's method
-            // picks the right `<ParentMod>__Parent_<method>` symbol.
-            auto parentIt = impl_->classParentNames.find(impl_->currentClassName);
-            if (parentIt != impl_->classParentNames.end()) {
-                auto pmIt = impl_->classOwningModule.find(parentIt->second);
-                std::string parentMod = pmIt != impl_->classOwningModule.end()
-                                            ? pmIt->second
-                                            : impl_->currentModuleName;
-                std::string parentMethodName =
-                    Impl::mangleClass(parentMod, parentIt->second) + "_" + method;
+            // Parent entry IS its sym, so the method symbol is direct.
+            auto parentIt = impl_->classParentNamesBySym.find(
+                impl_->classSym(impl_->currentClassName));
+            if (parentIt != impl_->classParentNamesBySym.end()) {
+                std::string parentMethodName = parentIt->second + "_" + method;
                 auto* parentMethod = impl_->module->getFunction(parentMethodName);
                 if (parentMethod) {
                     auto* selfAlloca = impl_->lookupVar("self");
@@ -2247,6 +2242,10 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         if (objName->name == "self" && !impl_->currentClassName.empty()) {
             className = impl_->currentClassName;
             owningModule = impl_->currentModuleName;
+        } else if (const auto* gb = impl_->globalClassBindingFor(objName->name)) {
+            // Unshadowed module global: the scoped binding is authoritative.
+            className = gb->className;
+            owningModule = gb->owningModule;
         } else {
             auto vit = impl_->varClassNames.find(objName->name);
             if (vit != impl_->varClassNames.end()) className = vit->second;
@@ -2478,8 +2477,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 // leaf / non-overridden site.
                 llvm::Value* callee = methodFunc;
                 if (!isStaticCall && impl_->methodIsOverridden(className, method)) {
-                    auto idxIt = impl_->classMethodVtableIndices.find(className);
-                    if (idxIt != impl_->classMethodVtableIndices.end()) {
+                    auto idxIt = impl_->classMethodVtableIndicesBySym.find(impl_->classSym(className));
+                    if (idxIt != impl_->classMethodVtableIndicesBySym.end()) {
                         auto mIt = idxIt->second.find(method);
                         if (mIt != idxIt->second.end()) {
                             // self is args[0]; load vtable (struct offset 2),
@@ -2531,10 +2530,10 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             // struct and call with env appended; otherwise call the value
             // as a bare function pointer.
             {
-                auto fieldIt = impl_->classFieldIndices.find(className);
-                auto fieldTypeIt = impl_->classFieldTypes.find(className);
-                if (fieldIt != impl_->classFieldIndices.end() &&
-                    fieldTypeIt != impl_->classFieldTypes.end()) {
+                auto fieldIt = impl_->classFieldIndicesBySym.find(impl_->classSym(className));
+                auto fieldTypeIt = impl_->classFieldTypesBySym.find(impl_->classSym(className));
+                if (fieldIt != impl_->classFieldIndicesBySym.end() &&
+                    fieldTypeIt != impl_->classFieldTypesBySym.end()) {
                     auto idxIt = fieldIt->second.find(method);
                     if (idxIt != fieldIt->second.end()) {
                         // Load the object pointer
@@ -2543,7 +2542,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                         if (!objPtr->getType()->isPointerTy())
                             objPtr = impl_->builder->CreateIntToPtr(objPtr, impl_->i8PtrType);
                         // GEP to the field
-                        auto structIt = impl_->classStructTypes.find(className);
+                        auto structIt = impl_->classStructTypesBySym.find(impl_->classSym(className));
                         auto* gep = impl_->builder->CreateStructGEP(
                             structIt->second, objPtr, idxIt->second, method + "_ptr");
                         auto* fieldType = fieldTypeIt->second[method];
@@ -2557,9 +2556,9 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                         // it we fall back to a synthetic all-i64 signature
                         // (legacy path - works on x86-64 only because GP
                         // regs alias ptr/i64 args).
-                        auto cfIt = impl_->classFieldCallableType.find(className);
+                        auto cfIt = impl_->classFieldCallableTypeBySym.find(impl_->classSym(className));
                         llvm::FunctionType* userFnType = nullptr;
-                        if (cfIt != impl_->classFieldCallableType.end()) {
+                        if (cfIt != impl_->classFieldCallableTypeBySym.end()) {
                             auto fIt = cfIt->second.find(method);
                             if (fIt != cfIt->second.end()) userFnType = fIt->second;
                         }
@@ -2708,17 +2707,12 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 const size_t wantParams = node.args.size() + 1;  // self + args
                 int methodIndex = -1;
                 llvm::FunctionType* methodFuncType = nullptr;
-                for (auto& [cls, methodMap] : impl_->classMethodVtableIndices) {
+                for (auto& [cls, methodMap] : impl_->classMethodVtableIndicesBySym) {
                     auto it = methodMap.find(method);
                     if (it == methodMap.end()) continue;
-                    // MRO walk via the shared resolver - vtable's stored
-                    // function pointer must match a real mangled symbol
-                    // for the class or one of its parents.
-                    auto cmIt = impl_->classOwningModule.find(cls);
-                    std::string clsMod = cmIt != impl_->classOwningModule.end()
-                                             ? cmIt->second
-                                             : impl_->currentModuleName;
-                    auto* func = impl_->resolveMethodFunction(clsMod, cls, method);
+                    // `cls` is a sym; mangleClass("", sym) inside the resolver
+                    // is the identity, so the direct + chain lookups are exact.
+                    auto* func = impl_->resolveMethodFunction("", cls, method);
                     if (func && func->getFunctionType()->getNumParams() == wantParams) {
                         methodIndex = (int)it->second;
                         methodFuncType = func->getFunctionType();
@@ -2931,8 +2925,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 // unless-overridden rule as the NameExpr path above.
                 llvm::Value* callee = methodFunc;
                 if (!isStaticCall && impl_->methodIsOverridden(className, method)) {
-                    auto idxIt = impl_->classMethodVtableIndices.find(className);
-                    if (idxIt != impl_->classMethodVtableIndices.end()) {
+                    auto idxIt = impl_->classMethodVtableIndicesBySym.find(impl_->classSym(className));
+                    if (idxIt != impl_->classMethodVtableIndicesBySym.end()) {
                         auto mIt = idxIt->second.find(method);
                         if (mIt != idxIt->second.end()) {
                             auto* headerTy = llvm::StructType::get(*impl_->context,

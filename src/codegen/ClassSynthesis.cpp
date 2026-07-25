@@ -233,8 +233,12 @@ void CodeGen::Impl::synthesizeDataclassMethods(ClassDecl& node) {
     // Track for later passes (TypeChecker registration, etc.)
     std::vector<std::string> fieldNames;
     for (auto& f : fields) fieldNames.push_back(f.name);
-    dataclassFieldNames[node.name] = std::move(fieldNames);
-    dataclassClassNames.insert(node.name);
+    // Synthesis runs before classNames registration, so mangle directly.
+    const std::string dcSym = mangleClass(
+        node.genericHomeModule.empty() ? currentModuleName : node.genericHomeModule,
+        node.name);
+    dataclassFieldNamesBySym[dcSym] = std::move(fieldNames);
+    dataclassClassNamesBySym.insert(dcSym);
 }
 
 // Helper: is this expression a call to the enum `auto()` sentinel?
@@ -489,11 +493,15 @@ void CodeGen::Impl::synthesizeEnumMethods(ClassDecl& node) {
         node.body.push_back(std::move(fn));
     }
 
-    // Record for CallExpr/ForLoop/Expressions wiring.
-    enumKind[node.name] = kind;
+    // Record for CallExpr/ForLoop/Expressions wiring. Synthesis runs before
+    // classNames registration, so mangle directly.
+    const std::string enSym = mangleClass(
+        node.genericHomeModule.empty() ? currentModuleName : node.genericHomeModule,
+        node.name);
+    enumKindBySym[enSym] = kind;
     std::vector<std::string> names;
     for (auto& m : members) names.push_back(m.name);
-    enumMemberNames[node.name] = std::move(names);
+    enumMemberNamesBySym[enSym] = std::move(names);
 }
 
 } // namespace dragon

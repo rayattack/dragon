@@ -443,6 +443,7 @@ std::shared_ptr<Type> TypeChecker::instantiateGenericClass(
 
     auto ph = std::make_shared<ClassType>(key);
     ph->genericOrigin = decl->name;
+    ph->originDecl = decl;
     ph->genericArgs = args;
     if (genericCT) {
         ph->definingModule = genericCT->definingModule;
@@ -486,37 +487,48 @@ bool TypeChecker::tryInstantiateGenericCall(
     std::vector<std::unique_ptr<TypeExpr>> explicitArgs;
     // Method-call state (empty owningClass => generic FREE function).
     std::string owningClass;           // the class that DECLARES the generic method
+    std::shared_ptr<ClassType> owningCT;  // its true identity (threads into the InstReq)
     AttributeExpr* methodAttr = nullptr;  // the `recv.method` node, for retargeting
     const ClassType* probeCls = nullptr;  // receiver class of a method-shaped call
     std::string probeMethod;              // its method name (for a clean deferral)
 
     // Resolve a receiver expression to the ClassType it is an instance of.
-    auto receiverClass = [&](Expr* recv) -> const ClassType* {
+    auto receiverClass = [&](Expr* recv) -> std::shared_ptr<ClassType> {
         auto t = inferType(recv);
         if (auto inst = std::dynamic_pointer_cast<InstanceType>(t))
-            return inst->classType.get();
+            return inst->classType;
         return nullptr;
     };
     // Find generic method `m` on `cls`, walking the MRO so an inherited one resolves
-    // to its declaring class (whose body the stamp is appended to).
-    auto findGenericMethod = [&](const ClassType* cls, const std::string& m,
-                                 std::string& declClass) -> FunctionDecl* {
-        const ClassType* c = cls;
+    // to its declaring class (whose body the stamp is appended to). Identity-first:
+    // the decl-keyed registry never collides across same-named classes.
+    auto findGenericMethod = [&](std::shared_ptr<ClassType> cls, const std::string& m,
+                                 std::string& declClass,
+                                 std::shared_ptr<ClassType>& declCT) -> FunctionDecl* {
+        std::shared_ptr<ClassType> c = cls;
         for (int guard = 0; c && guard < 256; ++guard) {
+            for (const ClassDecl* key : {static_cast<const ClassDecl*>(c->decl),
+                                         static_cast<const ClassDecl*>(c->originDecl)}) {
+                if (!key) continue;
+                auto dit = impl_->genericMethodsByDecl.find(key);
+                if (dit != impl_->genericMethodsByDecl.end()) {
+                    auto mit = dit->second.find(m);
+                    if (mit != dit->second.end()) {
+                        declClass = c->name; declCT = c; return mit->second;
+                    }
+                }
+            }
+            // Name fallback for classes with no decl backpointer (builtins).
             auto it = impl_->genericMethods.find(c->name + "." + m);
-            if (it != impl_->genericMethods.end()) { declClass = c->name; return it->second; }
-            // A stamped generic class (Container[int]) keeps its method template under
-            // the origin name; resolve there but key declClass to the stamped name.
+            if (it != impl_->genericMethods.end()) { declClass = c->name; declCT = c; return it->second; }
             if (!c->genericOrigin.empty()) {
                 auto oit = impl_->genericMethods.find(c->genericOrigin + "." + m);
                 if (oit != impl_->genericMethods.end()) {
-                    declClass = c->name;
+                    declClass = c->name; declCT = c;
                     return oit->second;
                 }
             }
-            c = c->parentClass && c->parentClass->kind() == Type::Kind::Class
-                    ? static_cast<const ClassType*>(c->parentClass.get())
-                    : nullptr;
+            c = std::dynamic_pointer_cast<ClassType>(c->parentClass);
         }
         return nullptr;
     };
@@ -554,9 +566,9 @@ bool TypeChecker::tryInstantiateGenericCall(
         } else if (auto* at = dynamic_cast<AttributeExpr*>(sub->object.get())) {
             // Generic method with explicit args: recv.method[T](args). Resolve the
             // receiver's class and look the method up by class+name.
-            if (const ClassType* cls = receiverClass(at->object.get())) {
-                probeCls = cls; probeMethod = at->attribute;
-                if (FunctionDecl* m = findGenericMethod(cls, at->attribute, owningClass)) {
+            if (auto cls = receiverClass(at->object.get())) {
+                probeCls = cls.get(); probeMethod = at->attribute;
+                if (FunctionDecl* m = findGenericMethod(cls, at->attribute, owningClass, owningCT)) {
                     decl = m; fnName = at->attribute; methodAttr = at;
                     if (auto* tup = dynamic_cast<TupleExpr*>(sub->index.get())) {
                         for (auto& el : tup->elements) explicitArgs.push_back(exprToTypeExpr(el.get()));
@@ -569,9 +581,9 @@ bool TypeChecker::tryInstantiateGenericCall(
     } else if (auto* at = dynamic_cast<AttributeExpr*>(node.callee.get())) {
         // Generic method, args inferred: recv.method(args). Non-generic methods
         // leave decl null and fall through to normal dispatch.
-        if (const ClassType* cls = receiverClass(at->object.get())) {
-            probeCls = cls; probeMethod = at->attribute;
-            if (FunctionDecl* m = findGenericMethod(cls, at->attribute, owningClass)) {
+        if (auto cls = receiverClass(at->object.get())) {
+            probeCls = cls.get(); probeMethod = at->attribute;
+            if (FunctionDecl* m = findGenericMethod(cls, at->attribute, owningClass, owningCT)) {
                 decl = m; fnName = at->attribute; methodAttr = at;
             }
         }
@@ -590,8 +602,8 @@ bool TypeChecker::tryInstantiateGenericCall(
         // restore the recorded return type, keying on the declaring class then bare name.
         if (auto* at2 = dynamic_cast<AttributeExpr*>(node.callee.get())) {
             if (at2->attribute.find('[') != std::string::npos) {
-                if (const ClassType* cls = receiverClass(at2->object.get())) {
-                    const ClassType* c = cls;
+                if (auto cls = receiverClass(at2->object.get())) {
+                    const ClassType* c = cls.get();
                     for (int guard = 0; c && guard < 256; ++guard) {
                         auto it = impl_->stampedCallReturnType.find(
                             c->name + "." + at2->attribute);
@@ -765,7 +777,8 @@ bool TypeChecker::tryInstantiateGenericCall(
         bool pending = false;
         for (auto& r : impl_->pendingInsts) if (r.key == key) { pending = true; break; }
         if (!pending)
-            impl_->pendingInsts.push_back({key, fnName, /*isClass=*/false, args, owningClass});
+            impl_->pendingInsts.push_back(
+                {key, fnName, /*isClass=*/false, args, owningClass, owningCT});
     }
 
     // Retarget the callee to the stamped specialization, only when concrete (a
@@ -901,6 +914,7 @@ void TypeChecker::collectGenericTemplates(Module& module) {
                                       "' shadows the class's type parameter '" +
                                       ctp.name + "'; rename the method's parameter");
                 impl_->genericMethods[cd->name + "." + fd->name] = fd;
+                impl_->genericMethodsByDecl[cd][fd->name] = fd;
             }
             if (!cd->typeParams.empty())
                 impl_->genericClasses[cd->name] = cd;
@@ -938,6 +952,7 @@ void TypeChecker::registerExternalGenerics(Module& mod) {
                 if (auto* fd = dynamic_cast<FunctionDecl*>(m.get()))
                     if (!fd->typeParams.empty()) {
                         impl_->genericMethods.emplace(cd->name + "." + fd->name, fd);
+                        impl_->genericMethodsByDecl[cd][fd->name] = fd;
                         impl_->genericTemplateModule.emplace(fd, mod.moduleName);
                     }
             if (!cd->typeParams.empty()) {
@@ -999,18 +1014,36 @@ void TypeChecker::runMonomorphization() {
         } else if (isMethodReq) {
             // On a stamped owning class (Container[int]) the method template lives under
             // the origin name; seed the subst with the class frame (T->arg) so cloning does both.
-            std::shared_ptr<ClassType> ownerCT;
-            if (auto tnIt = impl_->typeNames.find(req.owningClass);
-                tnIt != impl_->typeNames.end())
-                if (auto inst = std::dynamic_pointer_cast<InstanceType>(tnIt->second))
-                    ownerCT = inst->classType;
-            auto it = impl_->genericMethods.find(req.owningClass + "." + req.genericName);
-            if (it == impl_->genericMethods.end() && ownerCT &&
-                !ownerCT->genericOrigin.empty())
-                it = impl_->genericMethods.find(
-                    ownerCT->genericOrigin + "." + req.genericName);
-            if (it == impl_->genericMethods.end()) continue;
-            template_ = it->second; tps = &it->second->typeParams;
+            std::shared_ptr<ClassType> ownerCT = req.ownerCT;
+            if (!ownerCT)
+                if (auto tnIt = impl_->typeNames.find(req.owningClass);
+                    tnIt != impl_->typeNames.end())
+                    if (auto inst = std::dynamic_pointer_cast<InstanceType>(tnIt->second))
+                        ownerCT = inst->classType;
+            // Identity-first template lookup; by-name maps only as fallback.
+            FunctionDecl* tmplFn = nullptr;
+            if (ownerCT) {
+                for (const ClassDecl* dkey :
+                     {static_cast<const ClassDecl*>(ownerCT->decl),
+                      static_cast<const ClassDecl*>(ownerCT->originDecl)}) {
+                    if (!dkey) continue;
+                    auto dit = impl_->genericMethodsByDecl.find(dkey);
+                    if (dit != impl_->genericMethodsByDecl.end()) {
+                        auto mit = dit->second.find(req.genericName);
+                        if (mit != dit->second.end()) { tmplFn = mit->second; break; }
+                    }
+                }
+            }
+            if (!tmplFn) {
+                auto it = impl_->genericMethods.find(req.owningClass + "." + req.genericName);
+                if (it == impl_->genericMethods.end() && ownerCT &&
+                    !ownerCT->genericOrigin.empty())
+                    it = impl_->genericMethods.find(
+                        ownerCT->genericOrigin + "." + req.genericName);
+                if (it == impl_->genericMethods.end()) continue;
+                tmplFn = it->second;
+            }
+            template_ = tmplFn; tps = &tmplFn->typeParams;
             if (ownerCT && !ownerCT->genericOrigin.empty()) {
                 if (auto gcIt = impl_->genericClasses.find(ownerCT->genericOrigin);
                     gcIt != impl_->genericClasses.end()) {
@@ -1127,16 +1160,25 @@ void TypeChecker::runMonomorphization() {
         if (isMethodReq) {
             // Append the stamp into its owning class body and re-type-check it with
             // self/currentClass bound (else self.X and implicit self would be untyped).
-            auto cdIt = impl_->classDeclByName.find(req.owningClass);
-            if (cdIt == impl_->classDeclByName.end()) continue;
+            // Identity-first: req.ownerCT->decl IS the owning class; the by-name
+            // registry (first-wins across deps) is only the legacy fallback.
+            ClassDecl* ownerDecl =
+                req.ownerCT ? req.ownerCT->decl : nullptr;
+            if (!ownerDecl) {
+                auto cdIt = impl_->classDeclByName.find(req.owningClass);
+                if (cdIt == impl_->classDeclByName.end()) continue;
+                ownerDecl = cdIt->second;
+            }
             auto* stampedFn = static_cast<FunctionDecl*>(cloned.get());
-            cdIt->second->body.push_back(std::move(cloned));
+            ownerDecl->body.push_back(std::move(cloned));
 
-            std::shared_ptr<ClassType> ownerCT;
-            auto tnIt = impl_->typeNames.find(req.owningClass);
-            if (tnIt != impl_->typeNames.end())
-                if (auto inst = std::dynamic_pointer_cast<InstanceType>(tnIt->second))
-                    ownerCT = inst->classType;
+            std::shared_ptr<ClassType> ownerCT = req.ownerCT;
+            if (!ownerCT) {
+                auto tnIt = impl_->typeNames.find(req.owningClass);
+                if (tnIt != impl_->typeNames.end())
+                    if (auto inst = std::dynamic_pointer_cast<InstanceType>(tnIt->second))
+                        ownerCT = inst->classType;
+            }
             impl_->pushScope();
             const ClassType* prevClass = impl_->currentClass;
             if (ownerCT) {
@@ -1554,19 +1596,28 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
     }
 
     std::string className;
+    ClassDecl* classDecl = nullptr;
     if (auto inst = std::dynamic_pointer_cast<InstanceType>(targetType))
-        if (inst->classType) className = inst->classType->name;
+        if (inst->classType) {
+            className = inst->classType->name;
+            classDecl = inst->classType->decl;
+        }
     if (className.empty()) {
         error(loc, "json.decode[T]: T must be a class type (or list of a class)");
         return nullptr;
     }
-    auto cdIt = impl_->classDeclByName.find(className);
-    if (cdIt == impl_->classDeclByName.end() || !cdIt->second) {
+    // True identity first; the by-name registry folds every dep's classes
+    // first-wins, so a same-named class elsewhere must never supply the fields.
+    if (!classDecl) {
+        auto cdIt = impl_->classDeclByName.find(className);
+        if (cdIt != impl_->classDeclByName.end()) classDecl = cdIt->second;
+    }
+    if (!classDecl) {
         error(loc, "json.decode[" + className + "]: class definition not found");
         return nullptr;
     }
     FunctionDecl* ctor = nullptr;
-    for (auto& m : cdIt->second->body)
+    for (auto& m : classDecl->body)
         if (auto* fd = dynamic_cast<FunctionDecl*>(m.get()))
             if (fd->isConstructor || fd->name == "__init__") { ctor = fd; break; }
     if (!ctor) {
@@ -1862,19 +1913,27 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaEncoder(
     }
 
     std::string className;
+    ClassDecl* classDecl = nullptr;
     if (auto inst = std::dynamic_pointer_cast<InstanceType>(targetType))
-        if (inst->classType) className = inst->classType->name;
+        if (inst->classType) {
+            className = inst->classType->name;
+            classDecl = inst->classType->decl;
+        }
     if (className.empty()) {
         error(loc, "json.encode[T]: T must be a class type (or list of a class)");
         return nullptr;
     }
-    auto cdIt = impl_->classDeclByName.find(className);
-    if (cdIt == impl_->classDeclByName.end() || !cdIt->second) {
+    // True identity first, mirroring the decode side.
+    if (!classDecl) {
+        auto cdIt = impl_->classDeclByName.find(className);
+        if (cdIt != impl_->classDeclByName.end()) classDecl = cdIt->second;
+    }
+    if (!classDecl) {
         error(loc, "json.encode[" + className + "]: class definition not found");
         return nullptr;
     }
     FunctionDecl* ctor = nullptr;
-    for (auto& m : cdIt->second->body)
+    for (auto& m : classDecl->body)
         if (auto* fd = dynamic_cast<FunctionDecl*>(m.get()))
             if (fd->isConstructor || fd->name == "__init__") { ctor = fd; break; }
     if (!ctor) {

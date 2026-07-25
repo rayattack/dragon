@@ -310,7 +310,7 @@ void CodeGen::emitPrintArgRaw(Expr* argExpr) {
             auto* reprResult = impl_->callDunder(printClassName, "__repr__", arg);
             impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_print_str_raw"], {reprResult});
-        } else if (impl_->userExcCodes.count(printClassName) > 0) {
+        } else if (impl_->userExcCodesBySym.count(impl_->classSym(printClassName)) > 0) {
             // Exception with no __str__/__repr__: `str(e)` is args[0], which
             // the raise snapshots into the runtime msg slot a handler reads.
             auto* msg = impl_->builder->CreateCall(
@@ -403,8 +403,8 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
         } else if (!base.empty()) {
             std::string cur = sub;
             for (int guard = 0; !cur.empty() && guard < 1000; ++guard) {
-                auto pit = impl_->classParentNames.find(cur);
-                if (pit == impl_->classParentNames.end()) break;
+                auto pit = impl_->classParentNamesBySym.find(impl_->classSym(cur));
+                if (pit == impl_->classParentNamesBySym.end()) break;
                 cur = pit->second;
                 if (cur == base) { result = true; break; }
             }
@@ -512,8 +512,8 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
                     }
                 }
                 if (!className.empty()) {
-                    auto fkIt = impl_->classFieldKinds.find(className);
-                    if (fkIt != impl_->classFieldKinds.end()) {
+                    auto fkIt = impl_->classFieldKindsBySym.find(impl_->classSym(className));
+                    if (fkIt != impl_->classFieldKindsBySym.end()) {
                         auto fkIt2 = fkIt->second.find(argAttr->attribute);
                         if (fkIt2 != fkIt->second.end()) {
                             if (fkIt2->second == Impl::VarKind::List) isList = true;
@@ -690,7 +690,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
             impl_->lastValue = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_box_to_str"], {arg}, "btos.any");
         } else if (!strClassName.empty() &&
-                   impl_->userExcCodes.count(strClassName) > 0) {
+                   impl_->userExcCodesBySym.count(impl_->classSym(strClassName)) > 0) {
             // Exception with no __str__/__repr__: `str(e)` is the raise-time
             // msg slot, duped because str() results are owned by convention.
             auto* slotMsg = impl_->builder->CreateCall(
@@ -1120,8 +1120,8 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
                             std::string c = inst.classType ? inst.classType->name : "";
                             while (!c.empty()) {
                                 if (c == typeName) { matches = true; break; }
-                                auto pit = impl_->classParentNames.find(c);
-                                c = (pit != impl_->classParentNames.end()) ? pit->second
+                                auto pit = impl_->classParentNamesBySym.find(impl_->classSym(c));
+                                c = (pit != impl_->classParentNamesBySym.end()) ? pit->second
                                                                            : std::string();
                             }
                             break;
@@ -1214,8 +1214,8 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
                 std::string c = argClassName;
                 while (!c.empty()) {
                     if (c == typeName) { result = true; break; }
-                    auto pit = impl_->classParentNames.find(c);
-                    c = (pit != impl_->classParentNames.end()) ? pit->second : std::string();
+                    auto pit = impl_->classParentNamesBySym.find(impl_->classSym(c));
+                    c = (pit != impl_->classParentNamesBySym.end()) ? pit->second : std::string();
                 }
             }
             // Evaluate args for side effects
@@ -1653,8 +1653,8 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
         // dir(ClassName) folds to a load of the class descriptor global.
         if (auto* argName = dynamic_cast<NameExpr*>(node.args[0].get())) {
             if (impl_->classNames.count(argName->name)) {
-                auto descIt = impl_->classDescriptorGlobals.find(argName->name);
-                if (descIt != impl_->classDescriptorGlobals.end()) {
+                auto descIt = impl_->classDescriptorGlobalsBySym.find(impl_->classSym(argName->name));
+                if (descIt != impl_->classDescriptorGlobalsBySym.end()) {
                     auto* descI64 = impl_->builder->CreateLoad(
                         impl_->i64Type, descIt->second, argName->name + "_desc");
                     impl_->lastValue = impl_->builder->CreateCall(

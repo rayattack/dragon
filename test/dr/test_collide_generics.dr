@@ -1,0 +1,27 @@
+"""Same-named generic templates in different modules must stamp their own.
+Pre-fix: the template registries folded across modules, first dep wins."""
+
+from unittest import TestCase, main
+from collide_generics_one import one_box_int, one_box_str
+from collide_generics_two import two_box_int
+from collide_generics_importer import importer_box_int
+
+
+class CollideGenericsTests(TestCase) {
+    def test_one_stamps_its_own_template() {
+        self.assertEqual(one_box_int(), 7)
+        self.assertEqual(one_box_str(), "alpha")
+    }
+
+    def test_two_stamps_its_own_template() {
+        # Pre-fix: two's Box[int] stamped one's template (no stamp field).
+        self.assertEqual(two_box_int(), 104)
+    }
+
+    def test_import_pins_template_across_registration_order() {
+        self.assertEqual(importer_box_int(), 102)
+    }
+}
+
+
+main([CollideGenericsTests()])

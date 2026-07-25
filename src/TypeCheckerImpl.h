@@ -133,6 +133,10 @@ struct TypeChecker::Impl {
     // Generic METHODS (`def m[T]` on any class; db.all[T] / D049). genericMethods is
     // keyed "Class.method"; classDeclByName lets stamps append into the owning class.
     std::unordered_map<std::string, FunctionDecl*> genericMethods;
+    // Identity twin of genericMethods: owning ClassDecl -> method -> template.
+    // Never collides across same-named classes; lookups prefer this.
+    std::unordered_map<const ClassDecl*,
+        std::unordered_map<std::string, FunctionDecl*>> genericMethodsByDecl;
     std::unordered_map<std::string, ClassDecl*> classDeclByName;
 
     // Defining module of each imported generic template (registerExternalGenerics);
@@ -155,6 +159,9 @@ struct TypeChecker::Impl {
         bool isClass;
         std::vector<std::shared_ptr<Type>> args;    // resolved concrete type args
         std::string owningClass;                    // non-empty => generic METHOD on this class
+        // True identity of the owning class (methods): preferred over the
+        // by-name maps, which fold every dep first-wins.
+        std::shared_ptr<ClassType> ownerCT;
     };
     std::vector<InstReq> pendingInsts;       // worklist
     std::set<std::string> instDone;          // cache keys already stamped (dedup)

@@ -1,0 +1,23 @@
+"""The other Box[T]: extra field and method under the same template name."""
+
+
+class Box[T] {
+    def(v: T) {
+        self.v = v
+        self.stamp: int = 99
+    }
+
+    def get() -> T {
+        return self.v
+    }
+
+    def stamped() -> int {
+        return self.stamp
+    }
+}
+
+
+def two_box_int() -> int {
+    b: Box[int] = Box[int](5)
+    return b.get() + b.stamped()
+}

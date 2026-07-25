@@ -128,7 +128,8 @@ void CodeGen::visit(AugAssignStmt& node) {
                 if (auto* ai = llvm::dyn_cast<llvm::AllocaInst>(storeTarget)) {
                     impl_->setVar(name->name, ai, Impl::VarKind::Str);
                 } else {
-                    impl_->moduleGlobalKinds[name->name] = Impl::VarKind::Str;
+                    impl_->moduleGlobalKinds[impl_->globalKeyOrOwn(name->name)] =
+                        Impl::VarKind::Str;
                 }
             }
             return;
@@ -512,9 +513,9 @@ void CodeGen::visit(AugAssignStmt& node) {
             // Static class field: `ClassName.field OP= value`. Stored as a module
             // global in staticFieldGlobals (keyed by class name). Numeric only here;
             // heap static fields are rare and fall through (todo).
-            auto sfIt = objName ? impl_->staticFieldGlobals.find(objName->name)
-                                : impl_->staticFieldGlobals.end();
-            if (sfIt != impl_->staticFieldGlobals.end()) {
+            auto sfIt = objName ? impl_->staticFieldGlobalsBySym.find(impl_->classSym(objName->name))
+                                : impl_->staticFieldGlobalsBySym.end();
+            if (sfIt != impl_->staticFieldGlobalsBySym.end()) {
                 auto gvIt = sfIt->second.find(attr->attribute);
                 if (gvIt != sfIt->second.end()) {
                     llvm::GlobalVariable* gv = gvIt->second;
@@ -553,14 +554,14 @@ void CodeGen::visit(AugAssignStmt& node) {
                 className = impl_->resolveExprClassName(attr->object.get());
             }
             if (!className.empty()) {
-                auto structIt = impl_->classStructTypes.find(className);
-                auto fieldIt = impl_->classFieldIndices.find(className);
-                if (structIt != impl_->classStructTypes.end() &&
-                    fieldIt != impl_->classFieldIndices.end()) {
+                auto structIt = impl_->classStructTypesBySym.find(impl_->classSym(className));
+                auto fieldIt = impl_->classFieldIndicesBySym.find(impl_->classSym(className));
+                if (structIt != impl_->classStructTypesBySym.end() &&
+                    fieldIt != impl_->classFieldIndicesBySym.end()) {
                     auto idxIt = fieldIt->second.find(attr->attribute);
                     if (idxIt != fieldIt->second.end()) {
                         llvm::Type* fieldType =
-                            impl_->classFieldTypes[className][attr->attribute];
+                            impl_->classFieldTypesBySym[impl_->classSym(className)][attr->attribute];
                         // Numeric fields: load + op + plain store. Heap str/bytes
                         // fields: concat + RC-overwrite store (below).
                         if (fieldType == impl_->i64Type || fieldType == impl_->f64Type) {
@@ -609,8 +610,8 @@ void CodeGen::visit(AugAssignStmt& node) {
                             // simple concat-assign here and falls through (no-op).
                             bool isBytesField = impl_->exprIsBytes(node.target.get());
                             Impl::VarKind fkind = Impl::VarKind::Other;
-                            auto fkIt = impl_->classFieldKinds.find(className);
-                            if (fkIt != impl_->classFieldKinds.end()) {
+                            auto fkIt = impl_->classFieldKindsBySym.find(impl_->classSym(className));
+                            if (fkIt != impl_->classFieldKindsBySym.end()) {
                                 auto f2 = fkIt->second.find(attr->attribute);
                                 if (f2 != fkIt->second.end()) fkind = f2->second;
                             }
@@ -806,7 +807,7 @@ void CodeGen::visit(AnnAssignStmt& node) {
     // Check if annotation is a TypedDict - treat as Dict at runtime
     std::string typedDictClassName;
     if (auto* namedType = dynamic_cast<NamedTypeExpr*>(node.annotation.get())) {
-        if (impl_->typedDictClasses.count(namedType->name)) {
+        if (impl_->typedDictClassesBySym.count(impl_->classSym(namedType->name))) {
             typedDictClassName = namedType->name;
             varKind = Impl::VarKind::Dict;  // TypedDict is a dict at runtime
             varType = impl_->i8PtrType;     // ptr (DragonDict*)
@@ -848,10 +849,10 @@ void CodeGen::visit(AnnAssignStmt& node) {
                 if (vit != impl_->varClassNames.end()) className = vit->second;
             }
             if (!className.empty()) {
-                auto structIt = impl_->classStructTypes.find(className);
-                auto fieldIt = impl_->classFieldIndices.find(className);
-                if (structIt != impl_->classStructTypes.end() &&
-                    fieldIt != impl_->classFieldIndices.end()) {
+                auto structIt = impl_->classStructTypesBySym.find(impl_->classSym(className));
+                auto fieldIt = impl_->classFieldIndicesBySym.find(impl_->classSym(className));
+                if (structIt != impl_->classStructTypesBySym.end() &&
+                    fieldIt != impl_->classFieldIndicesBySym.end()) {
                     auto idxIt = fieldIt->second.find(attrTarget->attribute);
                     if (idxIt != fieldIt->second.end()) {
                         if (!node.value) return;  // declaration only; nothing to store
@@ -863,7 +864,7 @@ void CodeGen::visit(AnnAssignStmt& node) {
                             structIt->second, objPtr, idxIt->second,
                             attrTarget->attribute + "_ptr");
                         auto* fieldType =
-                            impl_->classFieldTypes[className][attrTarget->attribute];
+                            impl_->classFieldTypesBySym[impl_->classSym(className)][attrTarget->attribute];
                         if (val->getType() != fieldType) {
                             if (fieldType == impl_->f64Type && val->getType() == impl_->i64Type)
                                 val = impl_->builder->CreateSIToFP(val, impl_->f64Type);
@@ -873,8 +874,8 @@ void CodeGen::visit(AnnAssignStmt& node) {
                                 val = impl_->builder->CreateFPToSI(val, impl_->i64Type);
                         }
                         Impl::VarKind fieldKind = Impl::VarKind::Other;
-                        auto fkIt = impl_->classFieldKinds.find(className);
-                        if (fkIt != impl_->classFieldKinds.end()) {
+                        auto fkIt = impl_->classFieldKindsBySym.find(impl_->classSym(className));
+                        if (fkIt != impl_->classFieldKindsBySym.end()) {
                             auto fkIt2 = fkIt->second.find(attrTarget->attribute);
                             if (fkIt2 != fkIt->second.end()) fieldKind = fkIt2->second;
                         }
@@ -952,6 +953,7 @@ void CodeGen::visit(AnnAssignStmt& node) {
         if (isModuleLevel) {
             // Reuse existing forward-declared global (from dependency modules)
             // or create a new GlobalVariable for module-level var
+            std::string gKey = impl_->globalKeyOrOwn(name->name);
             auto* gv = impl_->lookupModuleGlobal(name->name);
             // A global we forward-declared for entry-module method resolution
             // but never initialized is, semantically, a fresh definition here -
@@ -959,7 +961,7 @@ void CodeGen::visit(AnnAssignStmt& node) {
             // treated as an RC overwrite (no decref of old). Erase on first init
             // so later reassignments take the normal overwrite path.
             bool firstInitOfForwardGlobal =
-                impl_->entryGlobalsAwaitingInit.erase(name->name) > 0;
+                impl_->entryGlobalsAwaitingInit.erase(gKey) > 0;
             bool hadExistingGlobal = (gv != nullptr) && !firstInitOfForwardGlobal;
             Impl::VarKind oldKind = hadExistingGlobal
                 ? impl_->lookupVarKind(name->name)
@@ -969,8 +971,8 @@ void CodeGen::visit(AnnAssignStmt& node) {
                     *impl_->module, varType, /*isConstant=*/false,
                     llvm::GlobalValue::InternalLinkage,
                     llvm::Constant::getNullValue(varType),
-                    "global." + name->name);
-                impl_->moduleGlobals[name->name] = gv;
+                    "global." + gKey);
+                impl_->moduleGlobals[gKey] = gv;
             }
             // D033 Phase 3: Callable[...] = getattr(obj, name) at module
             // scope. Mirror the local-scope path: register the callable type
@@ -980,7 +982,7 @@ void CodeGen::visit(AnnAssignStmt& node) {
                 if (auto* rhsCall = dynamic_cast<CallExpr*>(node.value.get())) {
                     if (auto* rhsCallee = dynamic_cast<NameExpr*>(rhsCall->callee.get())) {
                         if (rhsCallee->name == "getattr" ||
-                            impl_->funcReturnsClosure.count(rhsCallee->name)) {
+                            impl_->funcReturnsClosure.count(impl_->resolveCalleeSymbol(rhsCallee->name))) {
                             // getattr(obj, m) returns a bound DragonClosure; a
                             // call to a closure-returning function (D027) returns
                             // a capturing closure. Either way, mark the var
@@ -993,7 +995,7 @@ void CodeGen::visit(AnnAssignStmt& node) {
                     }
                 }
             }
-            impl_->moduleGlobalKinds[name->name] = varKind;
+            impl_->moduleGlobalKinds[gKey] = varKind;
 
             // Union module global: track member kinds + class member so
             // isinstance narrowing - including the else-branch complement
@@ -1111,22 +1113,25 @@ void CodeGen::visit(AnnAssignStmt& node) {
             // LOCALS at scope exit.
             bool globalIsBoxSlot = (gv->getValueType() == impl_->boxType);
             if (!annotClassName.empty()) {
+                std::string ownMod = impl_->resolveClassOwningModule(annotClassName);
                 impl_->varClassNames[name->name] = annotClassName;
-                impl_->varClassOwningModule[name->name] =
-                    impl_->resolveClassOwningModule(annotClassName);
+                impl_->varClassOwningModule[name->name] = ownMod;
+                impl_->moduleGlobalClassNames[gKey] = {annotClassName, ownMod};
                 // GC Phase 3: mark module global as ClassInstance
                 if (impl_->options.gcMode == GCMode::RC && !globalIsBoxSlot)
-                    impl_->moduleGlobalKinds[name->name] = Impl::VarKind::ClassInstance;
+                    impl_->moduleGlobalKinds[gKey] = Impl::VarKind::ClassInstance;
             } else if (node.value) {
                 if (auto* callVal = dynamic_cast<CallExpr*>(node.value.get())) {
                     if (auto* calleeName = dynamic_cast<NameExpr*>(callVal->callee.get())) {
                         if (impl_->classNames.count(calleeName->name)) {
-                            impl_->varClassNames[name->name] = calleeName->name;
-                            impl_->varClassOwningModule[name->name] =
+                            std::string ownMod =
                                 impl_->resolveClassOwningModule(calleeName->name);
+                            impl_->varClassNames[name->name] = calleeName->name;
+                            impl_->varClassOwningModule[name->name] = ownMod;
+                            impl_->moduleGlobalClassNames[gKey] = {calleeName->name, ownMod};
                             // GC Phase 3: mark module global as ClassInstance
                             if (impl_->options.gcMode == GCMode::RC && !globalIsBoxSlot)
-                                impl_->moduleGlobalKinds[name->name] = Impl::VarKind::ClassInstance;
+                                impl_->moduleGlobalKinds[gKey] = Impl::VarKind::ClassInstance;
                         }
                     }
                 }
@@ -1150,10 +1155,11 @@ void CodeGen::visit(AnnAssignStmt& node) {
                         if (owningMod.empty())
                             owningMod = impl_->resolveClassOwningModule(cls);
                         impl_->varClassOwningModule[name->name] = owningMod;
+                        impl_->moduleGlobalClassNames[gKey] = {cls, owningMod};
                         // Same box-slot guard as above.
                         if (impl_->options.gcMode == GCMode::RC &&
                             impl_->classNames.count(cls) && !globalIsBoxSlot)
-                            impl_->moduleGlobalKinds[name->name] = Impl::VarKind::ClassInstance;
+                            impl_->moduleGlobalKinds[gKey] = Impl::VarKind::ClassInstance;
                     }
                 }
             }
@@ -1181,7 +1187,7 @@ void CodeGen::visit(AnnAssignStmt& node) {
             //   - Union box slot: tag-dispatched mark of the payload.
             if (impl_->options.gcMode == GCMode::RC && node.value) {
                 Impl::VarKind storedKind = varKind;
-                auto mgkIt = impl_->moduleGlobalKinds.find(name->name);
+                auto mgkIt = impl_->moduleGlobalKinds.find(gKey);
                 if (mgkIt != impl_->moduleGlobalKinds.end())
                     storedKind = mgkIt->second;
                 if (storedKind == Impl::VarKind::Str &&
@@ -1300,7 +1306,7 @@ void CodeGen::visit(AnnAssignStmt& node) {
                 if (auto* rhsCall = dynamic_cast<CallExpr*>(node.value.get())) {
                     if (auto* rhsCallee = dynamic_cast<NameExpr*>(rhsCall->callee.get())) {
                         if (rhsCallee->name == "getattr" ||
-                            impl_->funcReturnsClosure.count(rhsCallee->name)) {
+                            impl_->funcReturnsClosure.count(impl_->resolveCalleeSymbol(rhsCallee->name))) {
                             // getattr(obj, m) returns a bound DragonClosure; a
                             // call to a closure-returning function (D027) returns
                             // a capturing closure. Mark the var Closure so the

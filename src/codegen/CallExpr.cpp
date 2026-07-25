@@ -10,7 +10,7 @@ void CodeGen::visit(CallExpr& node) {
     if (callHasSpread(node)) {
         bool isTypedDict = false;
         if (auto* c = dynamic_cast<NameExpr*>(node.callee.get()))
-            isTypedDict = impl_->typedDictClasses.count(c->name) > 0;
+            isTypedDict = impl_->typedDictClassesBySym.count(impl_->classSym(c->name)) > 0;
         bool isMethodCall = false;
         if (auto* attr = dynamic_cast<AttributeExpr*>(node.callee.get()))
             isMethodCall = !(attr->object && attr->object->type &&
@@ -72,8 +72,9 @@ void CodeGen::visit(CallExpr& node) {
                     llvm::PointerType::getUnqual(*impl_->context));
                 return;
             }
-            auto parentIt = impl_->classParentNames.find(impl_->currentClassName);
-            if (parentIt == impl_->classParentNames.end()) {
+            auto parentIt = impl_->classParentNamesBySym.find(
+                impl_->classSym(impl_->currentClassName));
+            if (parentIt == impl_->classParentNamesBySym.end()) {
                 impl_->addError("super(...): class '" + impl_->currentClassName +
                     "' has no parent class to delegate to", node.location());
                 impl_->lastValue = llvm::ConstantPointerNull::get(
@@ -146,8 +147,9 @@ void CodeGen::visit(CallExpr& node) {
         // Constructor delegation: ParentClass(args...) inside a child class method
         // calls ParentClass___init__(self, args...) instead of allocating a new instance.
         if (impl_->classNames.count(name) && !impl_->currentClassName.empty()) {
-            auto parentIt = impl_->classParentNames.find(impl_->currentClassName);
-            if (parentIt != impl_->classParentNames.end() && parentIt->second == name) {
+            auto parentIt = impl_->classParentNamesBySym.find(
+                impl_->classSym(impl_->currentClassName));
+            if (parentIt != impl_->classParentNamesBySym.end() && parentIt->second == name) {
                 // Delegate to the parent's __init__ with the current self.
                 std::string initName = impl_->classSymPrefix(name) + "___init__";
                 auto* initFunc = impl_->module->getFunction(initName);
@@ -172,7 +174,7 @@ void CodeGen::visit(CallExpr& node) {
         }
 
         // TypedDict constructor: ClassName({...}) -> create dict with tagged values
-        if (impl_->typedDictClasses.count(name)) {
+        if (impl_->typedDictClassesBySym.count(impl_->classSym(name))) {
             // TypedDict(dict_literal): evaluate the DictExpr (already tagged).
             if (node.args.size() == 1) {
                 node.args[0]->accept(*this);
@@ -212,8 +214,8 @@ void CodeGen::visit(CallExpr& node) {
                     }
                     // Determine tag from the TypedDict schema
                     int64_t tag = 0; // TAG_INT default
-                    auto schemaIt = impl_->typedDictFieldKinds.find(name);
-                    if (schemaIt != impl_->typedDictFieldKinds.end()) {
+                    auto schemaIt = impl_->typedDictFieldKindsBySym.find(impl_->classSym(name));
+                    if (schemaIt != impl_->typedDictFieldKindsBySym.end()) {
                         auto fIt = schemaIt->second.find(kwName);
                         if (fIt != schemaIt->second.end())
                             tag = Impl::typeKindToTag(fIt->second);
@@ -244,7 +246,7 @@ void CodeGen::visit(CallExpr& node) {
 
         // Enum value lookup Color(v) -> Color._lookup(v) (not construction). The
         // internal 2-arg singleton ctor has arity 2, so it isn't intercepted.
-        if (impl_->enumKind.count(name) && node.args.size() == 1) {
+        if (impl_->enumKindBySym.count(impl_->classSym(name)) && node.args.size() == 1) {
             auto call = std::make_unique<CallExpr>();
             auto attr = std::make_unique<AttributeExpr>();
             auto obj = std::make_unique<NameExpr>(); obj->name = name; obj->setLocation(node.location());
@@ -265,7 +267,7 @@ void CodeGen::visit(CallExpr& node) {
         if (impl_->classNames.count(ctorClassName)) {
             // Class decorators are unsupported (would need runtime descriptor
             // construction, removed by D025). @dataclass etc. are compile-time.
-            if (impl_->decoratedClasses.count(ctorClassName)) {
+            if (impl_->decoratedClassesBySym.count(impl_->classSym(ctorClassName))) {
                 impl_->addError(
                     "class decorators are not supported: classes are "
                     "compile-time entities and cannot be wrapped at runtime "
@@ -284,11 +286,11 @@ void CodeGen::visit(CallExpr& node) {
             // Stack-construct a proven-non-escaping scalar-only instance: entry
             // alloca + memset + immortal rc + direct __init__, no malloc/gc/decref.
             if (impl_->stackAllocSites.count(&node) &&
-                impl_->stackEligibleClasses.count(name)) {
-                auto stIt = impl_->classStructTypes.find(name);
+                impl_->stackEligibleClassesBySym.count(impl_->classSym(name))) {
+                auto stIt = impl_->classStructTypesBySym.find(impl_->classSym(name));
                 auto* initFn = impl_->module->getFunction(
                     impl_->classSymPrefix(name) + "___init__");
-                if (stIt != impl_->classStructTypes.end() && initFn) {
+                if (stIt != impl_->classStructTypesBySym.end() && initFn) {
                     llvm::StructType* structType = stIt->second;
                     auto* self = impl_->createEntryAlloca(
                         impl_->currentFunction, name + ".stack", structType);
@@ -336,11 +338,11 @@ void CodeGen::visit(CallExpr& node) {
             // multi-ctor classes, else ClassName_new. Mangled per owning module.
             const std::string ctorPrefix = impl_->classSymPrefix(name);
             std::string ctorName;
-            auto ctorCountIt = impl_->classCtorCount.find(name);
-            if (ctorCountIt != impl_->classCtorCount.end() && ctorCountIt->second > 1) {
+            auto ctorCountIt = impl_->classCtorCountBySym.find(impl_->classSym(name));
+            if (ctorCountIt != impl_->classCtorCountBySym.end() && ctorCountIt->second > 1) {
                 // Multi-constructor: match call arity against classCtorArities
                 size_t callArity = node.args.size();
-                auto& arityVec = impl_->classCtorArities[name];
+                auto& arityVec = impl_->classCtorAritiesBySym[impl_->classSym(name)];
                 int matchedIdx = -1;
                 for (auto& [arity, idx] : arityVec) {
                     if (arity == callArity) { matchedIdx = idx; break; }
@@ -1077,10 +1079,10 @@ void CodeGen::visit(CallExpr& node) {
                 const std::string ctorPrefix =
                     Impl::mangleClass(srcModuleName, attr->attribute);
                 std::string ctorName;
-                auto ctorCountIt = impl_->classCtorCount.find(attr->attribute);
-                if (ctorCountIt != impl_->classCtorCount.end() && ctorCountIt->second > 1) {
+                auto ctorCountIt = impl_->classCtorCountBySym.find(ctorPrefix);
+                if (ctorCountIt != impl_->classCtorCountBySym.end() && ctorCountIt->second > 1) {
                     size_t callArity = node.args.size();
-                    auto& arityVec = impl_->classCtorArities[attr->attribute];
+                    auto& arityVec = impl_->classCtorAritiesBySym[ctorPrefix];
                     int matchedIdx = -1;
                     for (auto& [arity, idx] : arityVec) {
                         if (arity == callArity) { matchedIdx = idx; break; }
@@ -1720,17 +1722,17 @@ bool CodeGen::emitSpreadDispatch(CallExpr& node) {
         // Class ctor spread: an overloaded ctor resolves only when the positional
         // arity is statically known (codegen must pick a _new_N body up front).
         if (impl_->classNames.count(name) &&
-            !impl_->typedDictClasses.count(name) &&
-            !impl_->decoratedClasses.count(name)) {
+            !impl_->typedDictClassesBySym.count(impl_->classSym(name)) &&
+            !impl_->decoratedClassesBySym.count(impl_->classSym(name))) {
             const std::string ctorPrefix = impl_->classSymPrefix(name);
             std::string ctorName;
-            auto ctorCountIt = impl_->classCtorCount.find(name);
-            if (ctorCountIt != impl_->classCtorCount.end() &&
+            auto ctorCountIt = impl_->classCtorCountBySym.find(impl_->classSym(name));
+            if (ctorCountIt != impl_->classCtorCountBySym.end() &&
                 ctorCountIt->second > 1) {
                 // Need a statically-known positional arity to pick the overload.
                 int64_t arity = -1;
                 if (spreadStaticArity(node, arity)) {
-                    auto& arityVec = impl_->classCtorArities[name];
+                    auto& arityVec = impl_->classCtorAritiesBySym[impl_->classSym(name)];
                     int matchedIdx = -1;
                     for (auto& [a, idx] : arityVec)
                         if ((int64_t)a == arity) { matchedIdx = idx; break; }
@@ -1788,16 +1790,17 @@ bool CodeGen::emitSpreadDispatch(CallExpr& node) {
                 static_cast<ModuleType&>(*attr->object->type).name;
             // Cross-module class ctor.
             if (impl_->classNames.count(attr->attribute) &&
-                !impl_->typedDictClasses.count(attr->attribute)) {
+                !impl_->typedDictClassesBySym.count(
+                    Impl::mangleClass(srcModuleName, attr->attribute))) {
                 const std::string ctorPrefix =
                     Impl::mangleClass(srcModuleName, attr->attribute);
                 std::string ctorName;
-                auto ctorCountIt = impl_->classCtorCount.find(attr->attribute);
-                if (ctorCountIt != impl_->classCtorCount.end() &&
+                auto ctorCountIt = impl_->classCtorCountBySym.find(ctorPrefix);
+                if (ctorCountIt != impl_->classCtorCountBySym.end() &&
                     ctorCountIt->second > 1) {
                     int64_t arity = -1;
                     if (spreadStaticArity(node, arity)) {
-                        auto& arityVec = impl_->classCtorArities[attr->attribute];
+                        auto& arityVec = impl_->classCtorAritiesBySym[ctorPrefix];
                         int matchedIdx = -1;
                         for (auto& [a, idx] : arityVec)
                             if ((int64_t)a == arity) { matchedIdx = idx; break; }

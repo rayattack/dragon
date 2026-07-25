@@ -1,0 +1,18 @@
+"""The other Holder: different field, same generic method name."""
+
+
+class Holder {
+    def(count: int) {
+        self.count = count
+    }
+
+    def wrap[T](v: T) -> str {
+        return str(self.count) + "#" + str(v)
+    }
+}
+
+
+def two_wrap() -> str {
+    h: Holder = Holder(9)
+    return h.wrap[str]("x")
+}

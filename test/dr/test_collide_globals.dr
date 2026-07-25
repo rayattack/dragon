@@ -1,0 +1,36 @@
+"""Same top-level names in two modules must stay per-module bindings.
+Pre-fix: one flat `global.<name>` cell per name, shared by every module."""
+
+from unittest import TestCase, main
+from collide_globals_one import one_shared, one_rate, one_counter
+from collide_globals_two import two_shared, two_rate, two_counter, SHARED
+
+counter: int = 42
+
+
+class CollideGlobalsTests(TestCase) {
+    def test_class_typed_consts_stay_per_module() {
+        # Pre-fix: one_shared() ran Handle.ping over a Thing ("handle:decoy").
+        self.assertEqual(one_shared(), "handle:real")
+        self.assertEqual(two_shared(), "thing:decoy")
+    }
+
+    def test_same_type_consts_stay_per_module() {
+        # Pre-fix: both read 999 (last write won the shared cell).
+        self.assertEqual(one_rate(), 111)
+        self.assertEqual(two_rate(), 999)
+    }
+
+    def test_entry_var_does_not_shadow_dep_vars() {
+        self.assertEqual(one_counter(), 5)
+        self.assertEqual(two_counter(), 800)
+        self.assertEqual(counter, 42)
+    }
+
+    def test_imported_const_binds_to_its_module() {
+        self.assertEqual(SHARED.describe(), "thing:decoy")
+    }
+}
+
+
+main([CollideGlobalsTests()])

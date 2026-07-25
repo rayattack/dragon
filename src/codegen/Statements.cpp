@@ -602,16 +602,16 @@ void CodeGen::visit(ReturnStmt& node) {
                         // Look up the specific field's VarKind (walk inheritance chain)
                         Impl::VarKind fieldKind = Impl::VarKind::Other;
                         for (std::string cls = className; !cls.empty(); ) {
-                            auto fkIt = impl_->classFieldKinds.find(cls);
-                            if (fkIt != impl_->classFieldKinds.end()) {
+                            auto fkIt = impl_->classFieldKindsBySym.find(impl_->classSym(cls));
+                            if (fkIt != impl_->classFieldKindsBySym.end()) {
                                 auto fieldIt = fkIt->second.find(attrExpr->attribute);
                                 if (fieldIt != fkIt->second.end()) {
                                     fieldKind = fieldIt->second;
                                     break;
                                 }
                             }
-                            auto parentIt = impl_->classParentNames.find(cls);
-                            if (parentIt != impl_->classParentNames.end())
+                            auto parentIt = impl_->classParentNamesBySym.find(impl_->classSym(cls));
+                            if (parentIt != impl_->classParentNamesBySym.end())
                                 cls = parentIt->second;
                             else
                                 break;
@@ -756,8 +756,8 @@ void CodeGen::visit(DeferStmt& node) {
                 // runtime value may be a subclass, so when overridden the thunk uses the vtable.
                 if (impl_->methodIsOverridden(className, attrExpr->attribute)) {
                     auto idxIt =
-                        impl_->classMethodVtableIndices.find(className);
-                    if (idxIt != impl_->classMethodVtableIndices.end()) {
+                        impl_->classMethodVtableIndicesBySym.find(impl_->classSym(className));
+                    if (idxIt != impl_->classMethodVtableIndicesBySym.end()) {
                         auto mIt = idxIt->second.find(attrExpr->attribute);
                         if (mIt != idxIt->second.end())
                             deferVtIdx = (int)mIt->second;
@@ -985,7 +985,7 @@ void CodeGen::visit(RaiseStmt& node) {
 
                 // A user exception with a typed-field ctor is constructed via __init__ and routed
                 // through the obj-aware raise (else typed fields don't survive unwinding). Built-ins keep the message-only path.
-                bool isUserExc = impl_->userExcCodes.count(name->name) > 0;
+                bool isUserExc = impl_->userExcCodesBySym.count(impl_->classSym(name->name)) > 0;
                 auto* initFn = isUserExc
                     ? impl_->module->getFunction(
                           impl_->classSymPrefix(name->name) + "___init__")
@@ -1084,7 +1084,7 @@ void CodeGen::visit(RaiseStmt& node) {
             // raise so the handler binds the real instance (typed fields) and the static type code's [lo,hi] range matches subclasses.
             auto cnIt = impl_->varClassNames.find(nameRef->name);
             if (cnIt != impl_->varClassNames.end() &&
-                impl_->userExcCodes.count(cnIt->second) > 0) {
+                impl_->userExcCodesBySym.count(impl_->classSym(cnIt->second)) > 0) {
                 int64_t typeCode = impl_->excTypeCode(cnIt->second);
                 auto* typeVal = llvm::ConstantInt::get(impl_->i64Type, typeCode);
                 node.exception->accept(*this);
@@ -1327,8 +1327,8 @@ void CodeGen::visit(DeleteStmt& node) {
                             cls = impl_->resolveExprClassName(
                                 objAttr->object.get());
                         if (!cls.empty()) {
-                            auto fkIt = impl_->classFieldKinds.find(cls);
-                            if (fkIt != impl_->classFieldKinds.end()) {
+                            auto fkIt = impl_->classFieldKindsBySym.find(impl_->classSym(cls));
+                            if (fkIt != impl_->classFieldKindsBySym.end()) {
                                 auto f2 = fkIt->second.find(objAttr->attribute);
                                 if (f2 != fkIt->second.end() &&
                                     f2->second == Impl::VarKind::Dict)
@@ -1414,6 +1414,14 @@ void CodeGen::visit(FromImportStmt& node) {
                  impl_->module->getFunction(classMangled + "___init___0"))) {
                 impl_->importedClassAliasesByModule[impl_->currentModuleName]
                     [localName] = node.module;
+            }
+
+            // Imported module GLOBAL: pin the local name to the source module's
+            // mangled global (stubs exist for all deps before any body lowers).
+            std::string globalKey = Impl::mangleGlobal(node.module, alias.name);
+            if (impl_->moduleGlobals.count(globalKey)) {
+                impl_->importedGlobalAliasesByModule[impl_->currentModuleName]
+                    [localName] = globalKey;
             }
         }
         return;

@@ -340,26 +340,26 @@ struct CodeGen::Impl {
     // Constructing a class in this set is a compile error (CallExpr.cpp).
     // @dataclass / @staticmethod / @classmethod / @property / NamedTuple are
     // compile-time synthesis and are NOT tracked here.
-    std::unordered_set<std::string> decoratedClasses;
+    std::unordered_set<std::string> decoratedClassesBySym;
     // Per-class decorator AST expressions (raw pointers; AST owns them).
-    std::unordered_map<std::string, std::vector<Expr*>> classDecoratorExprs;
+    std::unordered_map<std::string, std::vector<Expr*>> classDecoratorExprsBySym;
 
     // 6.18: @dataclass / NamedTuple synthesis tracking. classNames in this set
     // had __init__ / __eq__ / __repr__ auto-generated from field declarations.
-    // dataclassFieldNames holds the ordered field names per class for use by
+    // dataclassFieldNamesBySym holds the ordered field names per class for use by
     // synthesized __eq__ and __repr__.
-    std::unordered_set<std::string> dataclassClassNames;
-    std::unordered_map<std::string, std::vector<std::string>> dataclassFieldNames;
+    std::unordered_set<std::string> dataclassClassNamesBySym;
+    std::unordered_map<std::string, std::vector<std::string>> dataclassFieldNamesBySym;
 
     // Enum synthesis tracking (class-based `from enum import Enum`). A class
     // deriving Enum/IntEnum/StrEnum is rewritten by synthesizeEnumMethods into
-    // a class of singleton member instances. enumKind selects equality
+    // a class of singleton member instances. enumKindBySym selects equality
     // semantics: Plain -> pointer identity (default); Int/Str -> value-compare
-    // emitted in Expressions.cpp. enumMemberNames holds member order (used by
+    // emitted in Expressions.cpp. enumMemberNamesBySym holds member order (used by
     // value-lookup and iteration over the class object).
     enum class EnumKind { Plain, Int, Str };
-    std::unordered_map<std::string, EnumKind> enumKind;          // className -> kind
-    std::unordered_map<std::string, std::vector<std::string>> enumMemberNames;
+    std::unordered_map<std::string, EnumKind> enumKindBySym;          // className -> kind
+    std::unordered_map<std::string, std::vector<std::string>> enumMemberNamesBySym;
 
     // Map a VarKind for a list/dict element annotation to the Type::Kind used
     // by varListElemKinds / varDictValueKinds. Mirrors the per-VarKind switch
@@ -456,12 +456,13 @@ struct CodeGen::Impl {
 
     // Check if a name is any exception type (built-in or user-defined)
     bool isExcType(const std::string& name) {
-        return isBuiltinExcName(name) || userExcCodes.count(name) > 0;
+        return isBuiltinExcName(name) ||
+               userExcCodesBySym.count(classSymPrefix(name)) > 0;
     }
 
     // User-defined exception tracking
     int64_t userExcNextCode = 1000;
-    std::unordered_map<std::string, int64_t> userExcCodes;        // className -> code
+    std::unordered_map<std::string, int64_t> userExcCodesBySym;        // className -> code
     std::unordered_map<int64_t, int64_t> userExcParentCodes;      // childCode -> parentCode
 
     // Return the inclusive range [lo, hi] of type codes caught by a given
@@ -497,30 +498,30 @@ struct CodeGen::Impl {
     // Methods: ClassName_methodName(ptr self, params...) -> retType
     std::set<std::string> classNames;         // Known class names for constructor dispatch
     std::string currentClassName;              // Set when emitting class methods
-    std::unordered_map<std::string, llvm::StructType*> classStructTypes;
+    std::unordered_map<std::string, llvm::StructType*> classStructTypesBySym;
     // TypedDict: class name -> {field name -> Type::Kind}. Variables of TypedDict
     // type are VarKind::Dict at runtime but access uses checked get with known
     // tags derived via typeKindToTag - the source-of-truth tag derivation.
     // Stored as Type::Kind (not VarKind) so per-field bytes-ness survives the
     // VarKind::Bytes deletion (D030 §5).
-    std::set<std::string> typedDictClasses;
-    std::unordered_map<std::string, std::unordered_map<std::string, Type::Kind>> typedDictFieldKinds;
+    std::set<std::string> typedDictClassesBySym;
+    std::unordered_map<std::string, std::unordered_map<std::string, Type::Kind>> typedDictFieldKindsBySym;
     // Variable name -> TypedDict class name (so we know which schema to use)
     std::unordered_map<std::string, std::string> varTypedDictClass;
-    std::unordered_map<std::string, std::unordered_map<std::string, unsigned>> classFieldIndices;
-    std::unordered_map<std::string, std::unordered_map<std::string, llvm::Type*>> classFieldTypes;
-    std::unordered_map<std::string, std::unordered_map<std::string, VarKind>> classFieldKinds; // Phase 5: per-field VarKind for dealloc
+    std::unordered_map<std::string, std::unordered_map<std::string, unsigned>> classFieldIndicesBySym;
+    std::unordered_map<std::string, std::unordered_map<std::string, llvm::Type*>> classFieldTypesBySym;
+    std::unordered_map<std::string, std::unordered_map<std::string, VarKind>> classFieldKindsBySym; // Phase 5: per-field VarKind for dealloc
     // Own (non-inherited) instance-field order per class, from the AST
     // `instanceFieldOrder` helper - the SAME source the TypeChecker fills
     // ClassType::fieldOrder from. Drives positional `match` class-pattern
     // destructuring (`case Point(x, y)`); ancestors are prepended via
-    // classParentNames at the match site.
-    std::unordered_map<std::string, std::vector<std::string>> classFieldOrder;
-    std::unordered_map<std::string, llvm::GlobalVariable*> classIdGlobals; // Phase 5: class_id globals
+    // classParentNamesBySym at the match site.
+    std::unordered_map<std::string, std::vector<std::string>> classFieldOrderBySym;
+    std::unordered_map<std::string, llvm::GlobalVariable*> classIdGlobalsBySym; // Phase 5: class_id globals
     // Class docstrings: populated by visit(ClassDecl) when ClassDecl.docstring is
     // present. Looked up at dragon_class_descriptor_create call time so the
     // descriptor's `doc` field carries the class docstring (powers `Cls.__doc__`).
-    std::unordered_map<std::string, std::string> classDocstrings;
+    std::unordered_map<std::string, std::string> classDocstringsBySym;
     // Function docstrings: keyed by mangleFunc(modName, funcName). Populated by
     // visit(FunctionDecl) when ClassDecl.docstring is present. Powers `f.__doc__`.
     std::unordered_map<std::string, std::string> functionDocstrings;
@@ -534,10 +535,10 @@ struct CodeGen::Impl {
     // chain - methods aren't first-class values in Dragon, so this is the
     // only access shape we support.
     std::unordered_map<std::string,
-        std::unordered_map<std::string, std::string>> methodDocstrings;
+        std::unordered_map<std::string, std::string>> methodDocstringsBySym;
     // Cached `.rodata` constants for method docstrings: className -> methodName.
     std::unordered_map<std::string,
-        std::unordered_map<std::string, llvm::Constant*>> methodDocConstants;
+        std::unordered_map<std::string, llvm::Constant*>> methodDocConstantsBySym;
     // Module docstrings: keyed by module name (entry module key is empty
     // string, matching `currentModuleName = ""`). Populated upfront in
     // generate() from each Module.docstring.
@@ -551,7 +552,7 @@ struct CodeGen::Impl {
         std::string classSymPrefix;  // <mod>__<className> (for LLVM symbols)
         std::string owningModule;    // module that defined this class
         llvm::GlobalVariable* descriptorGlobal; // per-instance descriptor (bypass
-                                                // last-wins on classDescriptorGlobals)
+                                                // last-wins on classDescriptorGlobalsBySym)
         llvm::Function* deallocFn;
         llvm::GlobalVariable* classIdGlobal;
         llvm::Function* traverseFn;  // Phase 5e: per-class traverse function
@@ -575,23 +576,23 @@ struct CodeGen::Impl {
     // (absent entry) means str-keyed, preserving the existing behaviour.
     std::unordered_map<std::string, Type::Kind> varDictKeyKinds;
     // className -> fieldName -> list element Type::Kind (for self.field list iterations)
-    std::unordered_map<std::string, std::unordered_map<std::string, Type::Kind>> classFieldListElemKinds;
+    std::unordered_map<std::string, std::unordered_map<std::string, Type::Kind>> classFieldListElemKindsBySym;
     // className -> fieldName -> dict value Type::Kind (for self.field dict subscript)
     // Mirrors varDictValueKinds for class-field dicts so `obj.field["k"]` routes
     // to the typed runtime op (dragon_dict_get_str_ptr / _str_f64) at the dict's
     // native value type instead of the polymorphic i64-returning op.
-    std::unordered_map<std::string, std::unordered_map<std::string, Type::Kind>> classFieldDictValueKinds;
+    std::unordered_map<std::string, std::unordered_map<std::string, Type::Kind>> classFieldDictValueKindsBySym;
     // D030 Phase 3.G: class-field dict key Type::Kind. Mirrors varDictKeyKinds
     // for self.<field> dicts.
-    std::unordered_map<std::string, std::unordered_map<std::string, Type::Kind>> classFieldDictKeyKinds;
+    std::unordered_map<std::string, std::unordered_map<std::string, Type::Kind>> classFieldDictKeyKindsBySym;
     // className -> fieldName -> element class name (for list[ClassName] field iterations)
-    std::unordered_map<std::string, std::unordered_map<std::string, std::string>> classFieldListElemClassName;
+    std::unordered_map<std::string, std::unordered_map<std::string, std::string>> classFieldListElemClassNameBySym;
 
     // Class name of a class-instance field. Populated when extractFields sees
     // `self.x = Foo(...)` or `self.x = param: Foo`. Read by
     // resolveExprClassName(AttributeExpr) so chained `obj.x.field` resolves
     // to Foo's struct layout instead of returning ConstantInt 0.
-    std::unordered_map<std::string, std::unordered_map<std::string, std::string>> classFieldClassName;
+    std::unordered_map<std::string, std::unordered_map<std::string, std::string>> classFieldClassNameBySym;
     // varName -> element class name (for local list[ClassName] iterations)
     std::unordered_map<std::string, std::string> varListElemClassName;
     // Callable[[...], R] element typing for list iterations:
@@ -602,7 +603,7 @@ struct CodeGen::Impl {
     std::unordered_map<std::string, llvm::FunctionType*> varListElemCallableType;
     std::unordered_map<std::string,
         std::unordered_map<std::string, llvm::FunctionType*>>
-            classFieldListElemCallableType;
+            classFieldListElemCallableTypeBySym;
     // Direct Callable[[A,B,...], R] field types - `class C { handler:
     // Callable[[Req,Res,Ctx], None] }`. Recorded so the call site
     // `obj.handler(args)` can build the real FunctionType (param types
@@ -611,14 +612,14 @@ struct CodeGen::Impl {
     // a DragonClosure rather than a bare fn pointer.
     std::unordered_map<std::string,
         std::unordered_map<std::string, llvm::FunctionType*>>
-            classFieldCallableType;
-    std::unordered_map<std::string, std::string> classParentNames; // className -> parentClassName
+            classFieldCallableTypeBySym;
+    std::unordered_map<std::string, std::string> classParentNamesBySym; // className -> parentClassName
     // className -> (field, per-instance default-expr). Persisted from the layout
     // pre-pass (which visits every class in source order, before any _new body is
     // emitted) so emitNewBody can walk the parent chain and apply inherited
     // defaults regardless of source order. Expr* is borrowed from the ClassDecl
     // body (owned by the AST) and stays valid for the CodeGen instance's lifetime.
-    std::unordered_map<std::string, std::vector<std::pair<std::string, Expr*>>> classPerInstanceDefaults;
+    std::unordered_map<std::string, std::vector<std::pair<std::string, Expr*>>> classPerInstanceDefaultsBySym;
     std::unordered_map<std::string, std::string> methodReturnClassNames; // "Class_method" -> returnClassName
     std::unordered_map<std::string, std::string> funcReturnClassNames;   // top-level funcName -> returnClassName
     // "Class_method" -> declared return Type::Kind. Needed alongside the LLVM
@@ -631,14 +632,14 @@ struct CodeGen::Impl {
     std::unordered_map<std::string, Type::Kind> methodReturnKinds;       // "Class_method" -> Type::Kind
 
     // Decision 025: First-class class descriptors
-    std::unordered_map<std::string, llvm::GlobalVariable*> classDescriptorGlobals; // className -> @ClassName__descriptor
+    std::unordered_map<std::string, llvm::GlobalVariable*> classDescriptorGlobalsBySym; // className -> @ClassName__descriptor
     bool resolvingCallTarget = false; // true when visiting callee of a CallExpr (suppresses descriptor load)
 
     // Decision 026: Vtable support
     // className -> methodName -> vtable index (0-based)
-    std::unordered_map<std::string, std::unordered_map<std::string, unsigned>> classMethodVtableIndices;
+    std::unordered_map<std::string, std::unordered_map<std::string, unsigned>> classMethodVtableIndicesBySym;
     // className -> ordered list of method names in vtable order
-    std::unordered_map<std::string, std::vector<std::string>> classVtableMethodOrder;
+    std::unordered_map<std::string, std::vector<std::string>> classVtableMethodOrderBySym;
     // className -> llvm::GlobalVariable* for @ClassName__vtable
     std::unordered_map<std::string, llvm::GlobalVariable*> classVtables;
 
@@ -648,20 +649,20 @@ struct CodeGen::Impl {
     // vtable order in ImplInit's class-body scan; consumed by CodeGen
     // main-init to emit @ClassName__method_names / __method_fn_ptrs /
     // __method_kinds globals and wire them via dragon_class_descriptor_set_methods.
-    std::unordered_map<std::string, std::vector<std::string>> classOwnMethods;
-    std::unordered_map<std::string, std::unordered_map<std::string, uint8_t>> classMethodKinds;
+    std::unordered_map<std::string, std::vector<std::string>> classOwnMethodsBySym;
+    std::unordered_map<std::string, std::unordered_map<std::string, uint8_t>> classMethodKindsBySym;
     // D033 Phase 3: per-(class, method) bound-thunk function. Codegen emits
     // one alongside the method body (signature = user args minus self + env).
     // Indexed by className -> methodName -> thunk fn. NULL entries are valid
     // for static methods (which skip the bind path in dragon_getattr).
     std::unordered_map<std::string,
-                       std::unordered_map<std::string, llvm::Function*>> classMethodBoundThunks;
+                       std::unordered_map<std::string, llvm::Function*>> classMethodBoundThunksBySym;
 
     // 4.1 @property: per-class set of property names whose getter is the same name.
     // Populated in ImplInit when scanning class bodies for FunctionDecl with isProperty=true.
-    std::unordered_map<std::string, std::unordered_set<std::string>> classProperties;
+    std::unordered_map<std::string, std::unordered_set<std::string>> classPropertiesBySym;
     // className -> propertyName -> mangled setter func name ("<propName>__setter")
-    std::unordered_map<std::string, std::unordered_map<std::string, std::string>> classPropertySetters;
+    std::unordered_map<std::string, std::unordered_map<std::string, std::string>> classPropertySettersBySym;
 
     /// Mangle user function names that collide with codegen-reserved symbols.
     /// "main" collides with the C entry point that codegen owns; user
@@ -769,6 +770,13 @@ struct CodeGen::Impl {
         return out;
     }
 
+    // Same `mod__name` scheme as classes/functions (entry stays bare); a
+    // distinct entry point so global-keying sites grep cleanly.
+    static std::string mangleGlobal(const std::string& modName,
+                                     const std::string& varName) {
+        return mangleClass(modName, varName);
+    }
+
     // Bare class name -> owning module. Populated in forwardDeclareClasses for
     // every dependency module and the entry. With duplicate class names this
     // is last-write-wins; resolveClassOwningModule below prefers the
@@ -823,6 +831,14 @@ struct CodeGen::Impl {
         return mangleClass(resolveClassOwningModule(bareName), bareName);
     }
 
+    // Idempotent sym: a bare known class (incl. TypedDicts, which live in
+    // classOwningModule but not classNames) resolves via classSymPrefix;
+    // anything else (already a sym, pseudo-class, unknown) passes through.
+    std::string classSym(const std::string& name) const {
+        return (classNames.count(name) || classOwningModule.count(name))
+                   ? classSymPrefix(name) : name;
+    }
+
     // TRUE-identity method resolution: walk the ClassType parent chain, each level
     // mangled with ITS definingModule - immune to same-named classes elsewhere.
     llvm::Function* methodFromClassType(const ClassType* ct,
@@ -856,7 +872,7 @@ struct CodeGen::Impl {
     // `mangleClass(mod, cls) + "_" + methodName`. Returns the first
     // matching llvm::Function, or nullptr if no level defines the method.
     // On match, *resolvedSymbol (if non-null) is set to the mangled symbol
-    // so callers can probe parallel maps (staticMethods, classCtorArities,
+    // so callers can probe parallel maps (staticMethods, classCtorAritiesBySym,
     // etc.) without re-mangling.
     //
     // Each parent's owning module is looked up in classOwningModule and
@@ -881,7 +897,7 @@ struct CodeGen::Impl {
 
 
     // Owning module per class field whose declared type is another class
-    // (see classFieldClassName). Same purpose as varClassOwningModule but
+    // (see classFieldClassNameBySym). Same purpose as varClassOwningModule but
     // for `self.x: Foo` / `self.x = Foo(...)` reads.
     std::unordered_map<std::string,
         std::unordered_map<std::string, std::string>> classFieldOwningModule;
@@ -961,20 +977,33 @@ struct CodeGen::Impl {
     std::vector<llvm::Value*> templateBlockBufferStack;
 
     // Static member support
-    // staticFieldGlobals[className][fieldName] -> LLVM GlobalVariable for that static field
-    std::unordered_map<std::string, std::unordered_map<std::string, llvm::GlobalVariable*>> staticFieldGlobals;
+    // staticFieldGlobalsBySym[className][fieldName] -> LLVM GlobalVariable for that static field
+    std::unordered_map<std::string, std::unordered_map<std::string, llvm::GlobalVariable*>> staticFieldGlobalsBySym;
     // staticMethods tracks "ClassName_methodName" entries that are static (no self param)
     std::unordered_set<std::string> staticMethods;
 
     // Multi-constructor support: className -> number of __init__ overloads
-    std::unordered_map<std::string, size_t> classCtorCount;
+    std::unordered_map<std::string, size_t> classCtorCountBySym;
     // className -> vector of (arity, constructorIndex) pairs for dispatch
-    std::unordered_map<std::string, std::vector<std::pair<size_t, int>>> classCtorArities;
+    std::unordered_map<std::string, std::vector<std::pair<size_t, int>>> classCtorAritiesBySym;
 
-    // Module-level globals: variables declared at top level become LLVM GlobalVariables
-    // so functions can access them without needing Python-style `global` declarations (.dr mode)
+    // Module-level globals, keyed by mangleGlobal (symbol "global." + key); a flat
+    // bare-name key silently aliased same-named globals across modules. Resolve via resolveGlobalKey.
     std::unordered_map<std::string, llvm::GlobalVariable*> moduleGlobals;
     std::unordered_map<std::string, VarKind> moduleGlobalKinds;
+
+    // importingMod -> (bareName -> mangled global key), the global twin of
+    // importedFuncAliasesByModule: `from beta import SHARED` pins beta's global.
+    std::unordered_map<std::string,
+        std::unordered_map<std::string, std::string>> importedGlobalAliasesByModule;
+
+    // Class binding of class-typed globals keyed by mangled global key; readers
+    // consult this before the flat varClassNames so foreign same-named globals can't misdirect dispatch.
+    struct GlobalClassBinding {
+        std::string className;
+        std::string owningModule;
+    };
+    std::unordered_map<std::string, GlobalClassBinding> moduleGlobalClassNames;
     // Entry-module globals that were forward-declared (so entry-module method
     // bodies can resolve them) but not yet initialized. Their first
     // module-level assignment is a definition, not an overwrite, so it must
@@ -1166,7 +1195,7 @@ struct CodeGen::Impl {
     bool needsZstd = false;
 
     // Dunder method tracking: className -> set of dunder names (e.g. "__str__", "__eq__")
-    std::unordered_map<std::string, std::set<std::string>> classDunderMethods;
+    std::unordered_map<std::string, std::set<std::string>> classDunderMethodsBySym;
 
     // Resolve the class name of an expression (for dunder dispatch and field
     // access). Returns "" if the expression is not a known class instance.
@@ -1192,7 +1221,7 @@ struct CodeGen::Impl {
     /// Is `e` a receiver expression denoting the intrinsic Lock? Covers a
     /// tagged local/global (`lock.acquire()`, `with glock`) via varClassNames,
     /// AND a Lock-typed instance field (`self._lock.acquire()`,
-    /// `with app._storage_lock`) via classFieldClassName - the NameExpr-only
+    /// `with app._storage_lock`) via classFieldClassNameBySym - the NameExpr-only
     /// check silently missed fields: the acquire/release/with lowering fell
     /// through to generic paths that DROPPED the calls, so the "lock" never
     /// locked (found by the concurrent-mutation detector on
@@ -1206,28 +1235,29 @@ struct CodeGen::Impl {
     // Returns VarKind::Other if unknown.
     VarKind resolveExprVarKind(Expr* expr);
 
-    // Check if a class has a specific dunder method (walks inheritance chain)
+    // Check if a class has a specific dunder method (walks inheritance chain).
+    // Accepts a bare name or a sym; the chain itself is sym -> parent sym.
     bool hasDunder(const std::string& className, const std::string& dunder) {
-        std::string cls = className;
+        std::string cls = classSym(className);
         while (!cls.empty()) {
-            auto it = classDunderMethods.find(cls);
-            if (it != classDunderMethods.end() && it->second.count(dunder))
+            auto it = classDunderMethodsBySym.find(cls);
+            if (it != classDunderMethodsBySym.end() && it->second.count(dunder))
                 return true;
-            auto pit = classParentNames.find(cls);
-            cls = (pit != classParentNames.end()) ? pit->second : "";
+            auto pit = classParentNamesBySym.find(cls);
+            cls = (pit != classParentNamesBySym.end()) ? pit->second : "";
         }
         return false;
     }
 
-    // Find the class that actually defines the dunder (for MRO)
+    // Find the class that defines the dunder (for MRO). Returns its SYM.
     std::string findDunderClass(const std::string& className, const std::string& dunder) {
-        std::string cls = className;
+        std::string cls = classSym(className);
         while (!cls.empty()) {
-            auto it = classDunderMethods.find(cls);
-            if (it != classDunderMethods.end() && it->second.count(dunder))
+            auto it = classDunderMethodsBySym.find(cls);
+            if (it != classDunderMethodsBySym.end() && it->second.count(dunder))
                 return cls;
-            auto pit = classParentNames.find(cls);
-            cls = (pit != classParentNames.end()) ? pit->second : "";
+            auto pit = classParentNamesBySym.find(cls);
+            cls = (pit != classParentNamesBySym.end()) ? pit->second : "";
         }
         return "";
     }
@@ -2653,16 +2683,55 @@ struct CodeGen::Impl {
     // memset + __init__ exactly reproduces _new's field initialization).
     // Computed during class codegen; consulted at the CallExpr fork together
     // with stackAllocSites. Keyed by source class name.
-    std::unordered_set<std::string> stackEligibleClasses;
+    std::unordered_set<std::string> stackEligibleClassesBySym;
+
+    // RAII scope for the per-variable metadata maps: snapshot at function
+    // entry, restore at exit, so a body's entries die with it and a
+    // same-named local elsewhere can never inherit stale types (the
+    // documented cross-function SEGV/UAF family). Module-level entries made
+    // before body lowering survive inside the snapshot baseline.
+    struct VarMetaScope {
+        Impl& I;
+        decltype(varClassNames) a;  decltype(varClassOwningModule) b;
+        decltype(varListElemKinds) c;  decltype(varListElemIsType) d;
+        decltype(varDictValueIsType) e;  decltype(varDictValueKinds) f;
+        decltype(varDictKeyKinds) g;  decltype(varListElemClassName) h;
+        decltype(varListElemCallableType) i;  decltype(varTypedDictClass) j;
+        decltype(varIsPtrCallable) k;  decltype(knownNonNeg) l;
+        decltype(callableTypes) m;  decltype(varGenYieldKinds) n;
+        decltype(unionMemberKinds) o;
+        explicit VarMetaScope(Impl& impl) : I(impl),
+            a(impl.varClassNames), b(impl.varClassOwningModule),
+            c(impl.varListElemKinds), d(impl.varListElemIsType),
+            e(impl.varDictValueIsType), f(impl.varDictValueKinds),
+            g(impl.varDictKeyKinds), h(impl.varListElemClassName),
+            i(impl.varListElemCallableType), j(impl.varTypedDictClass),
+            k(impl.varIsPtrCallable), l(impl.knownNonNeg),
+            m(impl.callableTypes), n(impl.varGenYieldKinds),
+            o(impl.unionMemberKinds) {}
+        ~VarMetaScope() {
+            I.varClassNames = std::move(a); I.varClassOwningModule = std::move(b);
+            I.varListElemKinds = std::move(c); I.varListElemIsType = std::move(d);
+            I.varDictValueIsType = std::move(e); I.varDictValueKinds = std::move(f);
+            I.varDictKeyKinds = std::move(g); I.varListElemClassName = std::move(h);
+            I.varListElemCallableType = std::move(i); I.varTypedDictClass = std::move(j);
+            I.varIsPtrCallable = std::move(k); I.knownNonNeg = std::move(l);
+            I.callableTypes = std::move(m); I.varGenYieldKinds = std::move(n);
+            I.unionMemberKinds = std::move(o);
+        }
+    };
 
     VarKind lookupVarKind(const std::string& name) {
         for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
             auto found = it->varKinds.find(name);
             if (found != it->varKinds.end()) return found->second;
         }
-        // Check module globals
-        auto mgIt = moduleGlobalKinds.find(name);
-        if (mgIt != moduleGlobalKinds.end()) return mgIt->second;
+        // Per-module resolution: a foreign same-named global must not retype this read.
+        std::string key = resolveGlobalKey(name);
+        if (!key.empty()) {
+            auto mgIt = moduleGlobalKinds.find(key);
+            if (mgIt != moduleGlobalKinds.end()) return mgIt->second;
+        }
         return VarKind::Other;
     }
 
@@ -2673,11 +2742,55 @@ struct CodeGen::Impl {
     // VarKind::Bytes-tagged slots that haven't been migrated).
     bool exprIsBytes(Expr* expr);
 
-    // Look up a module-level global variable. Returns nullptr if not found.
+    // Bare name -> moduleGlobals key from the current module's view: alias, then
+    // own binding, else "". No cross-module fallthrough (that WAS the aliasing bug).
+    std::string resolveGlobalKey(const std::string& name) const {
+        auto modIt = importedGlobalAliasesByModule.find(currentModuleName);
+        if (modIt != importedGlobalAliasesByModule.end()) {
+            auto aIt = modIt->second.find(name);
+            if (aIt != modIt->second.end() && moduleGlobals.count(aIt->second))
+                return aIt->second;
+        }
+        std::string own = mangleGlobal(currentModuleName, name);
+        if (moduleGlobals.count(own)) return own;
+        return "";
+    }
+
+    // Write key for a global: the resolved key when visible, else the current
+    // module's own key (new declaration).
+    std::string globalKeyOrOwn(const std::string& name) const {
+        std::string k = resolveGlobalKey(name);
+        return k.empty() ? mangleGlobal(currentModuleName, name) : k;
+    }
+
+    // Look up a module global by bare name from the current module's view.
     llvm::GlobalVariable* lookupModuleGlobal(const std::string& name) {
-        auto it = moduleGlobals.find(name);
-        if (it != moduleGlobals.end()) return it->second;
+        std::string key = resolveGlobalKey(name);
+        if (key.empty()) return nullptr;
+        return moduleGlobals.find(key)->second;
+    }
+
+    // Scoped class binding for an unshadowed class-typed global, else null.
+    const GlobalClassBinding* globalClassBindingFor(const std::string& name) {
+        if (lookupVar(name)) return nullptr;
+        std::string key = resolveGlobalKey(name);
+        if (key.empty()) return nullptr;
+        auto it = moduleGlobalClassNames.find(key);
+        if (it != moduleGlobalClassNames.end()) return &it->second;
         return nullptr;
+    }
+
+    // Bind a class-typed global under its mangled key; dual-writes the legacy
+    // flat maps until every reader resolves through the scoped one.
+    void bindGlobalClassVar(const std::string& globalKey,
+                            const std::string& bareVarName, TypeExpr* typeExpr) {
+        auto* named = dynamic_cast<NamedTypeExpr*>(typeExpr);
+        if (!named) return;
+        std::string cn = resolveAnnotationClassName(named->name);
+        if (cn.empty()) return;
+        moduleGlobalClassNames[globalKey] = {cn, resolveClassOwningModule(cn)};
+        varClassNames[bareVarName] = cn;
+        varClassOwningModule[bareVarName] = resolveClassOwningModule(cn);
     }
 
     // Check if we should use a module global for this variable name.
@@ -2754,7 +2867,7 @@ struct CodeGen::Impl {
 
     /// D030 §5: source-of-truth Type::Kind from a TypeExpr annotation.
     /// Used wherever the static type needs to survive past the VarKind layer
-    /// (e.g. typedDictFieldKinds, where bytes-vs-list disambiguation matters
+    /// (e.g. typedDictFieldKindsBySym, where bytes-vs-list disambiguation matters
     /// for runtime tag dispatch). Mirrors typeExprToKind but returns the
     /// type-system Type::Kind directly.
     Type::Kind typeExprToTypeKind(TypeExpr* typeExpr);

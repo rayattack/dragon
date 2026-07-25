@@ -265,7 +265,7 @@ void CodeGen::visit(TryStmt& node) {
                 // user-defined exception class. Built-in handler types
                 // (Exception, ValueError, ...) keep the message-string
                 // binding - they have no struct shape for `e.x` access.
-                if (impl_->userExcCodes.count(named->name) > 0 &&
+                if (impl_->userExcCodesBySym.count(impl_->classSym(named->name)) > 0 &&
                     impl_->classNames.count(named->name)) {
                     // dragon_exc_bind_obj returns the in-flight instance with
                     // its OWN +1 (the slot keeps its ref; the next raise's
@@ -1045,8 +1045,8 @@ void CodeGen::visit(MatchStmt& node) {
                     bool inChain = false;
                     while (!cur.empty()) {
                         if (cur == pat.name) { inChain = true; break; }
-                        auto pit = impl_->classParentNames.find(cur);
-                        if (pit == impl_->classParentNames.end()) break;
+                        auto pit = impl_->classParentNamesBySym.find(impl_->classSym(cur));
+                        if (pit == impl_->classParentNamesBySym.end()) break;
                         cur = pit->second;
                     }
                     if (!inChain) {
@@ -1085,13 +1085,13 @@ void CodeGen::visit(MatchStmt& node) {
                 std::string cur = pat.name;
                 while (!cur.empty()) {
                     chain.push_back(cur);
-                    auto pit = impl_->classParentNames.find(cur);
-                    cur = (pit != impl_->classParentNames.end()) ? pit->second : "";
+                    auto pit = impl_->classParentNamesBySym.find(impl_->classSym(cur));
+                    cur = (pit != impl_->classParentNamesBySym.end()) ? pit->second : "";
                 }
                 std::set<std::string> seen;
                 for (auto rit = chain.rbegin(); rit != chain.rend(); ++rit) {
-                    auto fo = impl_->classFieldOrder.find(*rit);
-                    if (fo == impl_->classFieldOrder.end()) continue;
+                    auto fo = impl_->classFieldOrderBySym.find(impl_->classSym(*rit));
+                    if (fo == impl_->classFieldOrderBySym.end()) continue;
                     for (auto& f : fo->second)
                         if (seen.insert(f).second) order.push_back(f);
                 }
@@ -1103,13 +1103,13 @@ void CodeGen::visit(MatchStmt& node) {
             impl_->builder->CreateCondBr(classTest, clsFieldsBB, clsFailBB);
 
             impl_->builder->SetInsertPoint(clsFieldsBB);
-            auto* structTy = impl_->classStructTypes.count(pat.name)
-                ? impl_->classStructTypes[pat.name] : nullptr;
+            auto* structTy = impl_->classStructTypesBySym.count(impl_->classSym(pat.name))
+                ? impl_->classStructTypesBySym[impl_->classSym(pat.name)] : nullptr;
             llvm::Value* allMatch = llvm::ConstantInt::get(impl_->i1Type, 1);
             for (size_t si = 0; si < pat.subPatterns.size() && si < order.size(); ++si) {
-                auto idxIt = impl_->classFieldIndices[pat.name].find(order[si]);
-                if (!structTy || idxIt == impl_->classFieldIndices[pat.name].end()) continue;
-                auto* fTy = impl_->classFieldTypes[pat.name][order[si]];
+                auto idxIt = impl_->classFieldIndicesBySym[impl_->classSym(pat.name)].find(order[si]);
+                if (!structTy || idxIt == impl_->classFieldIndicesBySym[impl_->classSym(pat.name)].end()) continue;
+                auto* fTy = impl_->classFieldTypesBySym[impl_->classSym(pat.name)][order[si]];
                 auto* gep = impl_->builder->CreateStructGEP(
                     structTy, instPtr, idxIt->second, "match.fld." + order[si]);
                 auto* fVal = impl_->builder->CreateLoad(fTy, gep, order[si]);

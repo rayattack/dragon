@@ -182,6 +182,9 @@ public:
     // always-populated key for package/same-file comparisons.
     std::string definingModule;
     std::string definingFile;
+    // True-identity backpointer to the declaring ClassDecl (owned by the module
+    // AST, which outlives checking). Prefer this over any by-name registry.
+    ClassDecl* decl = nullptr;
     // Number of constructors (`def()` / `__init__`) the class declares. Dragon
     // supports arity-overloaded ctors (codegen classCtorArities), but `methods`
     // stores only one __init__ FunctionType - so a call-site ctor arity check
@@ -191,6 +194,9 @@ public:
     bool isEnum = false;       // class-based enum (Enum/IntEnum/StrEnum): members are
                                // singleton instances of this class (see synthesizeEnumMethods)
     // D044 - when this ClassType is a monomorphic instantiation of a generic
+    // True-identity backpointer to the TEMPLATE ClassDecl a stamped class came
+    // from (null for ordinary classes). Set where genericOrigin is set.
+    ClassDecl* originDecl = nullptr;
     // (e.g. `Box[int]`), `genericOrigin` is the generic's name ("Box") and
     // `genericArgs` are the type arguments (possibly TypeVar-containing while a
     // generic body is checked, e.g. `Inner[T]` inside `Outer[T]`). Lets

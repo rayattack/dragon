@@ -1,0 +1,18 @@
+"""Holder with a tag field and a generic wrap[T]; two reuses both names."""
+
+
+class Holder {
+    def(tag: str) {
+        self.tag = tag
+    }
+
+    def wrap[T](v: T) -> str {
+        return self.tag + ":" + str(v)
+    }
+}
+
+
+def one_wrap() -> str {
+    h: Holder = Holder("one")
+    return h.wrap[int](5)
+}

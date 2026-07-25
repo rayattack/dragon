@@ -297,7 +297,7 @@ void CodeGen::Impl::emitStrAppendInplace(llvm::Value* slotPtr, llvm::Value* cur,
             // a later raise double-frees the realloc'd pointer.
             emitCleanupUpdate(name, result);
         } else {
-            moduleGlobalKinds[name] = VarKind::Str;
+            moduleGlobalKinds[globalKeyOrOwn(name)] = VarKind::Str;
         }
     }
 
@@ -457,7 +457,7 @@ Type::Kind CodeGen::Impl::typeExprToTypeKind(TypeExpr* typeExpr) {
             if (named->name == "set" || named->name == "Set") return Type::Kind::Set;
             // Any maps to Kind::Any (was falling to Int, breaking dict[str, Any] reads).
             if (named->name == "Any" || named->name == "object") return Type::Kind::Any;
-            if (typedDictClasses.count(named->name)) return Type::Kind::Dict;
+            if (typedDictClassesBySym.count(classSym(named->name))) return Type::Kind::Dict;
             if (!resolveAnnotationClassName(named->name).empty())
                 return Type::Kind::Instance;
             return Type::Kind::Int;
@@ -505,7 +505,7 @@ CodeGen::Impl::VarKind CodeGen::Impl::typeExprToKind(TypeExpr* typeExpr) {
             // the __Lock fast path, not class-instance dispatch.
             if (named->name == "Lock") return VarKind::Other;
             // TypedDict classes are dicts at runtime
-            if (typedDictClasses.count(named->name))
+            if (typedDictClassesBySym.count(classSym(named->name)))
                 return VarKind::Dict;
             // GC Phase 3: user-defined class types get ClassInstance kind
             if (!resolveAnnotationClassName(named->name).empty())
@@ -803,10 +803,10 @@ llvm::Type* CodeGen::Impl::typeExprToLLVM(TypeExpr* typeExpr) {
             if (named->name == "Task") return i8PtrType;  // vthread handle (D016)
             if (named->name == "Lock") return i8PtrType;  // pthread_mutex_t* handle
             // TypedDict classes are dicts (pointers) at runtime
-            if (typedDictClasses.count(named->name)) return i8PtrType;
+            if (typedDictClassesBySym.count(classSym(named->name))) return i8PtrType;
             // Class types are struct pointers (also resolves dotted mod.Foo to the
             // bare struct type).
-            if (classStructTypes.count(named->name) || classNames.count(named->name)) return i8PtrType;
+            if (classStructTypesBySym.count(classSym(named->name)) || classNames.count(named->name)) return i8PtrType;
             if (!resolveAnnotationClassName(named->name).empty()) return i8PtrType;
             return i64Type; // fallback
         }

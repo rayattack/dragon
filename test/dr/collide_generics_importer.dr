@@ -1,0 +1,9 @@
+"""Imports two's Box while one's same-named template registered first."""
+
+from collide_generics_two import Box
+
+
+def importer_box_int() -> int {
+    b: Box[int] = Box[int](3)
+    return b.get() + b.stamped()
+}
