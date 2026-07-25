@@ -237,10 +237,15 @@ than raising. The classifiers (`isnan`, etc.) return an `intc` (`0`/`1`), not a
 cryptographically secure - reach for `secrets` when you need unpredictable
 values.
 
+The generator **seeds itself on first use** from the OS CSPRNG, so a program
+that never calls `seed()` produces different values on every run. Call
+`seed(n)` when you want a run to be reproducible; it takes precedence and
+nothing re-seeds behind you afterwards.
+
 | Function | Returns | Meaning |
 | --- | --- | --- |
 | `seed(s: int)` | - | seed the generator deterministically |
-| `seed_time()` | - | seed from the current time |
+| `seed_time()` | - | seed from the current time (rarely needed - see below) |
 | `random()` | `float` | a value in `[0.0, 1.0)` |
 | `randint(a, b)` | `int` | `N` with `a <= N <= b` (inclusive) |
 | `randrange(start, stop)` | `int` | `N` with `start <= N < stop` |
@@ -253,7 +258,9 @@ values.
 ```dragon
 import random
 
-random.seed(42)                       # reproducible runs
+const varies: float = random.random()  # auto-seeded: differs every run
+
+random.seed(42)                       # opt in to a reproducible stream
 
 const r: float = random.random()
 print(r >= 0.0 and r < 1.0)           # True
@@ -269,15 +276,36 @@ print(len(order))                     # 5
 ```
 
 The exact draws above are not shown because they depend on the seed and the
-platform's `rand()`. Call `random.seed(n)` first if you need a run to be
-reproducible.
+platform's `rand()`.
+
+### When to call which seeder
+
+Most code should call **nothing** - the automatic seed is what you want. Reach
+for a seeder only when you have a specific reason:
+
+- `seed(n)` - reproducible runs: tests, benchmarks, anything you need to replay.
+- `seed_time()` - you specifically want a *time-derived*, and therefore
+  guessable, seed. This exists for compatibility and for the rare case where a
+  reader wants to reconstruct the stream from a timestamp. It is strictly worse
+  than the automatic seed for every other purpose, and it is never the fix for
+  "my program keeps printing the same number" - that no longer happens.
+
+Both seeders diffuse the seed before returning, so nearby seeds - `seed(1)` and
+`seed(2)`, or `seed(i)` around a loop - yield unrelated streams rather than
+first draws a few microsteps apart. `seed_time()` additionally mixes in a
+per-call counter: the platform clock tick is coarser than its nanosecond field
+suggests (microseconds on macOS), so two calls in quick succession would
+otherwise read the same instant and silently repeat the previous stream.
 
 **Differs from Python.** `choice` is monomorphic per element type:
 `choice(list[str])` and `choice_int(list[int])` are separate functions because
 Dragon does not have a runtime-polymorphic sequence type. `shuffle` returns a
 new list rather than shuffling in place (and is `int`-only), and `sample` is
-`int`-only. The generator is libc's, so the stream for a given seed will not
-match CPython's Mersenne Twister.
+`int`-only. Automatic seeding matches Python, but the *generator* does not: the
+stream for a given seed is libc's and will not match CPython's Mersenne
+Twister, and `random()` carries the resolution of libc `rand()` rather than
+Python's full 53-bit double. Python's `seed(None)` spelling is not accepted -
+the no-argument behaviour is simply the default.
 
 ---
 
