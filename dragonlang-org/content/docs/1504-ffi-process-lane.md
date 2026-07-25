@@ -43,14 +43,19 @@ hint, Dragon spells it `"golang"`.)
 The compiler lowers the declaration to an ordinary Dragon function that:
 
 1. encodes the arguments as one JSON object keyed by parameter name, through
-   the box-free `json` machinery (`{"batch": [...]}`); every field is written
+   the box-free `json.encode[T]` (`{"batch": [...]}`); every field is written
    at its static type, nothing is boxed. A `bytes` parameter rides after the
    body as a raw blob - no base64, ever,
 2. spawns the child ONCE from an argv list (never a shell) and keeps it warm:
    the process, its imports, and its state survive across calls,
 3. sends one length-prefixed frame per call on stdin, reads one reply frame,
-4. decodes the reply body into the declared return type, box-free (a `bytes`
-   return arrives as a raw blob).
+4. decodes the reply body into the declared return type with `json.decode[T]`,
+   box-free (a `bytes` return arrives as a raw blob).
+
+The serializer here is not FFI-private plumbing: `encode[T]` / `decode[T]`
+are the same public schema-directed pair you can call yourself on any class
+- see [Data Formats](/docs/1404-stdlib-data). Your `User` crosses the
+boundary at exactly the cost of encoding a `User`, nothing hidden on top.
 
 A child that answers a call with an error keeps serving (you get a
 `ForeignError` with its traceback; the process lives). A child that dies is
