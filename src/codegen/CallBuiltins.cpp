@@ -1227,6 +1227,74 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
             if (argClassName.empty())
                 argClassName = impl_->resolveExprClassName(node.args[0].get());
 
+            // Niche-pointer Optional (`T | None`, ptr-shaped T): no box, no tag, null
+            // IS None - isinstance must test the pointer, never the static kind.
+            if (const Type* argT = node.args[0]->type.get()) {
+                const Type* nicheT = nullptr;
+                if (argT->kind() == Type::Kind::Union) {
+                    auto& ut = static_cast<const UnionType&>(*argT);
+                    const Type* other = nullptr;
+                    bool hasNone = false;
+                    if (ut.types.size() == 2) {
+                        for (auto& m : ut.types) {
+                            if (!m) continue;
+                            if (m->kind() == Type::Kind::None_) hasNone = true;
+                            else other = m.get();
+                        }
+                    }
+                    if (hasNone && other) {
+                        switch (other->kind()) {
+                            case Type::Kind::Str: case Type::Kind::Bytes:
+                            case Type::Kind::List: case Type::Kind::Dict:
+                            case Type::Kind::Tuple: case Type::Kind::Set:
+                            case Type::Kind::Instance:
+                                nicheT = other; break;
+                            default: break;
+                        }
+                    }
+                }
+                if (nicheT) {
+                    bool matches = false;
+                    switch (nicheT->kind()) {
+                        case Type::Kind::Str:   matches = (typeName == "str"); break;
+                        case Type::Kind::Bytes: matches = (typeName == "bytes"); break;
+                        case Type::Kind::List:  matches = (typeName == "list"); break;
+                        case Type::Kind::Dict:  matches = (typeName == "dict"); break;
+                        case Type::Kind::Tuple: matches = (typeName == "tuple"); break;
+                        case Type::Kind::Set:   matches = (typeName == "set"); break;
+                        case Type::Kind::Instance: {
+                            // Ancestor walk, as the static class path below does.
+                            auto& inst = static_cast<const InstanceType&>(*nicheT);
+                            std::string c = inst.classType ? inst.classType->name : "";
+                            while (!c.empty()) {
+                                if (c == typeName) { matches = true; break; }
+                                auto pit = impl_->classParentNames.find(c);
+                                c = (pit != impl_->classParentNames.end()) ? pit->second
+                                                                           : std::string();
+                            }
+                            break;
+                        }
+                        default: break;
+                    }
+                    node.args[0]->accept(*this);
+                    llvm::Value* recv = impl_->lastValue;
+                    if (!matches) {
+                        impl_->lastValue = llvm::ConstantInt::get(impl_->i1Type, 0);
+                        return true;
+                    }
+                    if (recv && recv->getType()->isPointerTy())
+                        impl_->lastValue =
+                            impl_->builder->CreateIsNotNull(recv, "isinstance.nn");
+                    else if (recv && recv->getType() == impl_->i64Type)
+                        impl_->lastValue = impl_->builder->CreateICmpNE(
+                            recv, llvm::ConstantInt::get(impl_->i64Type, 0),
+                            "isinstance.nn");
+                    else
+                        impl_->lastValue = llvm::ConstantInt::get(impl_->i1Type, 1);
+                    return true;
+                }
+            }
+
             // D030 Phase 4: Union-typed variable - runtime tag comparison
             // against the box's tag field.
             if (argKind == Impl::VarKind::Union) {
