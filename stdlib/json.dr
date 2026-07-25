@@ -1093,7 +1093,7 @@ class Cursor {
     }
 
     # Consume '[' or raise.
-    def _array_begin() -> None {
+    def array_begin() -> None {
         self.p._skip_ws()
         if self.p._peek() != _B_LBRACKET {
             self.p._fail("expected array")
@@ -1102,7 +1102,7 @@ class Cursor {
     }
 
     # True if another element follows; false consumes the closing ']'.
-    def _array_more(first: bool) -> bool {
+    def array_more(first: bool) -> bool {
         self.p._skip_ws()
         const c: int = self.p._peek()
         if c == _B_RBRACKET {
@@ -1122,9 +1122,9 @@ class Cursor {
 
     def parse_int_list() -> list[int] {
         const out: list[int] = []
-        self._array_begin()
+        self.array_begin()
         first: bool = true
-        while self._array_more(first) {
+        while self.array_more(first) {
             first = false
             out.append(self.parse_int())
         }
@@ -1133,9 +1133,9 @@ class Cursor {
 
     def parse_float_list() -> list[float] {
         const out: list[float] = []
-        self._array_begin()
+        self.array_begin()
         first: bool = true
-        while self._array_more(first) {
+        while self.array_more(first) {
             first = false
             out.append(self.parse_float())
         }
@@ -1144,9 +1144,9 @@ class Cursor {
 
     def parse_bool_list() -> list[bool] {
         const out: list[bool] = []
-        self._array_begin()
+        self.array_begin()
         first: bool = true
-        while self._array_more(first) {
+        while self.array_more(first) {
             first = false
             out.append(self.parse_bool())
         }
@@ -1155,12 +1155,58 @@ class Cursor {
 
     def parse_str_list() -> list[str] {
         const out: list[str] = []
-        self._array_begin()
+        self.array_begin()
         first: bool = true
-        while self._array_more(first) {
+        while self.array_more(first) {
             first = false
             out.append(self.parse_str())
         }
+        return out
+    }
+
+    # dict[str, scalar] parsers. begin_object/next_field reset _need_comma, so a
+    # completed nested dict must leave it true for the ENCLOSING field loop.
+    def parse_int_dict() -> dict[str, int] {
+        const out: dict[str, int] = {}
+        self.begin_object()
+        while self.next_field() {
+            const k: str = self.field_key()
+            out[k] = self.parse_int()
+        }
+        self._need_comma = true
+        return out
+    }
+
+    def parse_float_dict() -> dict[str, float] {
+        const out: dict[str, float] = {}
+        self.begin_object()
+        while self.next_field() {
+            const k: str = self.field_key()
+            out[k] = self.parse_float()
+        }
+        self._need_comma = true
+        return out
+    }
+
+    def parse_bool_dict() -> dict[str, bool] {
+        const out: dict[str, bool] = {}
+        self.begin_object()
+        while self.next_field() {
+            const k: str = self.field_key()
+            out[k] = self.parse_bool()
+        }
+        self._need_comma = true
+        return out
+    }
+
+    def parse_str_dict() -> dict[str, str] {
+        const out: dict[str, str] = {}
+        self.begin_object()
+        while self.next_field() {
+            const k: str = self.field_key()
+            out[k] = self.parse_str()
+        }
+        self._need_comma = true
         return out
     }
 
@@ -1353,10 +1399,186 @@ class Cursor {
 }
 
 
+# Box-free streaming writer, the write-side mirror of Cursor: values written AT
+# their type into one str buffer, joined once. (Not "Writer": io.Writer exists.)
+class JsonWriter {
+    _parts: list[str]
+    _need_comma: bool
+
+    def() {
+        self._parts = []
+        self._need_comma = false
+    }
+
+    # Emit the separating ',' when a sibling precedes; value writes leave the
+    # flag set, key()/begin_*() clear it for what follows them.
+    def _pre_value() -> None {
+        if self._need_comma {
+            self._parts.append(",")
+        }
+        self._need_comma = true
+    }
+
+    def begin_object() -> None {
+        self._pre_value()
+        self._parts.append("{")
+        self._need_comma = false
+    }
+
+    def end_object() -> None {
+        self._parts.append("}")
+        self._need_comma = true
+    }
+
+    def begin_array() -> None {
+        self._pre_value()
+        self._parts.append("[")
+        self._need_comma = false
+    }
+
+    def end_array() -> None {
+        self._parts.append("]")
+        self._need_comma = true
+    }
+
+    def key(name: str) -> None {
+        self._pre_value()
+        self._parts.append("\"")
+        self._parts.append(escape(name))
+        self._parts.append("\":")
+        self._need_comma = false
+    }
+
+    def write_int(v: int) -> None {
+        self._pre_value()
+        self._parts.append(dragon_int_to_str(v))
+    }
+
+    def write_float(v: float) -> None {
+        self._pre_value()
+        self._parts.append(dragon_float_to_str(v))
+    }
+
+    def write_bool(v: bool) -> None {
+        self._pre_value()
+        if v {
+            self._parts.append("true")
+        } else {
+            self._parts.append("false")
+        }
+    }
+
+    def write_str(v: str) -> None {
+        self._pre_value()
+        self._parts.append("\"")
+        self._parts.append(escape(v))
+        self._parts.append("\"")
+    }
+
+    def write_null() -> None {
+        self._pre_value()
+        self._parts.append("null")
+    }
+
+    # Splice a pre-encoded JSON fragment verbatim (a nested encode[T] result).
+    def write_raw(fragment: bytes) -> None {
+        self._pre_value()
+        self._parts.append(fragment.decode("utf-8"))
+    }
+
+    def write_int_list(items: list[int]) -> None {
+        self.begin_array()
+        i: int = 0
+        while i < len(items) {
+            self.write_int(items[i])
+            i = i + 1
+        }
+        self.end_array()
+    }
+
+    def write_float_list(items: list[float]) -> None {
+        self.begin_array()
+        i: int = 0
+        while i < len(items) {
+            self.write_float(items[i])
+            i = i + 1
+        }
+        self.end_array()
+    }
+
+    def write_bool_list(items: list[bool]) -> None {
+        self.begin_array()
+        i: int = 0
+        while i < len(items) {
+            self.write_bool(items[i])
+            i = i + 1
+        }
+        self.end_array()
+    }
+
+    def write_str_list(items: list[str]) -> None {
+        self.begin_array()
+        i: int = 0
+        while i < len(items) {
+            self.write_str(items[i])
+            i = i + 1
+        }
+        self.end_array()
+    }
+
+    def write_int_dict(items: dict[str, int]) -> None {
+        self.begin_object()
+        for k in items {
+            self.key(k)
+            self.write_int(items[k])
+        }
+        self.end_object()
+    }
+
+    def write_float_dict(items: dict[str, float]) -> None {
+        self.begin_object()
+        for k in items {
+            self.key(k)
+            self.write_float(items[k])
+        }
+        self.end_object()
+    }
+
+    def write_bool_dict(items: dict[str, bool]) -> None {
+        self.begin_object()
+        for k in items {
+            self.key(k)
+            self.write_bool(items[k])
+        }
+        self.end_object()
+    }
+
+    def write_str_dict(items: dict[str, str]) -> None {
+        self.begin_object()
+        for k in items {
+            self.key(k)
+            self.write_str(items[k])
+        }
+        self.end_object()
+    }
+
+    def finish() -> bytes {
+        return "".join(self._parts).encode("utf-8")
+    }
+}
+
+
 # D048 schema-directed decode into T. The compiler synthesizes each stamp's body
 # from T's fields (one Cursor read per field); this template is never lowered.
 def decode[T](body: bytes) -> T {
     raise ValueError("json.decode requires a concrete type: decode[T](body)")
+}
+
+
+# D052 mirror of decode: the compiler synthesizes each stamp from T's fields,
+# one typed Writer call per field; this template is never lowered.
+def encode[T](value: T) -> bytes {
+    raise ValueError("json.encode requires a concrete type: encode[T](value)")
 }
 
 
