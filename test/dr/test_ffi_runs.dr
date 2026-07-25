@@ -41,6 +41,7 @@ class RunsErrorTaxonomyTests(TestCase) {
         } except SpawnError as e {
             raised = true
             self.assertTrue(len(e.hint) > 0)
+            self.assertEqual(str(e), e.hint)
         }
         self.assertTrue(raised)
     }
@@ -64,6 +65,7 @@ class RunsErrorTaxonomyTests(TestCase) {
         } except ForeignError as e {
             raised = true
             self.assertEqual(e.returncode, 2)
+            self.assertEqual(str(e), "foreign child exited 2")
             self.assertTrue("boom" in e.traceback.decode("utf-8"))
         }
         self.assertTrue(raised)
@@ -76,6 +78,7 @@ class RunsErrorTaxonomyTests(TestCase) {
         } except SchemaError as e {
             raised = true
             self.assertTrue(len(e.raw) > 0)
+            self.assertEqual(str(e), e.detail)
         }
         self.assertTrue(raised)
     }

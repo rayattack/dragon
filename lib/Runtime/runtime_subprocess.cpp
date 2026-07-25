@@ -529,4 +529,77 @@ DragonList* dragon_subprocess_pump(int in_fd, DragonBytes* stdin_data,
 #endif
 }
 
+
+/// @brief read exactly n bytes - a short results means writer died mid-frame; callers treat len < n as fatal
+/// @param fd 
+/// @param n 
+/// @return 
+DragonBytes* dragon_subprocess_read_n(int fd, int64_t n) {
+#ifdef _WIN32
+    (void)fd; (void)n;
+    return dragon_bytes_new((const uint8_t*)"", 0);
+#else
+    if (fd < 0 || n <= 0) return dragon_bytes_new((const uint8_t*)"", 0);
+    uint8_t* buf = (uint8_t*)malloc((size_t)n);
+    if (!buf) return dragon_bytes_new((const uint8_t*)"", 0);
+    size_t got = 0;
+    struct pollfd pf;
+    pf.fd = fd;
+    pf.events = POLLIN;
+    while (got < (size_t)n) {
+        pf.revents = 0;
+        int pr = poll(&pf, 1, 25);
+        if (pr < 0) {
+            if (errno == EINTR) { dragon_vthread_yield(); continue; }
+            break;
+        }
+        if (pr == 0) { dragon_vthread_yield(); continue; }
+        ssize_t r = read(fd, buf + got, (size_t)n - got);
+        if (r > 0) { got += (size_t)r; continue; }
+        if (r < 0 && errno == EINTR) continue;
+        break;  // EOF or real error: return the short read
+    }
+    DragonBytes* out = dragon_bytes_new(buf, (int64_t)got);
+    free(buf);
+    return out;
+#endif
+}
+
+/// D052 frames: write ALL bytes (poll-sliced + vthread-yield, SIGPIPE-masked
+/// across each burst). Returns 0 on success, -1 when the reader died / error.
+int64_t dragon_subprocess_write_all(int fd, DragonBytes* data) {
+#ifdef _WIN32
+    (void)fd; (void)data;
+    return -1;
+#else
+    if (fd < 0 || !data) return -1;
+    const uint8_t* p = data->data;
+    size_t left = (size_t)data->len;
+    struct pollfd pf;
+    pf.fd = fd;
+    pf.events = POLLOUT;
+    while (left > 0) {
+        pf.revents = 0;
+        int pr = poll(&pf, 1, 25);
+        if (pr < 0) {
+            if (errno == EINTR) { dragon_vthread_yield(); continue; }
+            return -1;
+        }
+        if (pr == 0) { dragon_vthread_yield(); continue; }
+        if (pf.revents & (POLLERR | POLLHUP)) return -1;
+        // Mask SIGPIPE only across the non-yielding write burst (the pump's rule:
+        // the pthread-local mask must never be held across a yield).
+        SigpipeGuard sg = pump_block_sigpipe();
+        ssize_t w = write(fd, p, left);
+        if (w < 0 && errno == EPIPE) pump_drain_sigpipe();
+        pump_restore_sigpipe(sg);
+        if (w > 0) { p += (size_t)w; left -= (size_t)w; continue; }
+        if (w < 0 && errno == EINTR) continue;
+        if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+        return -1;
+    }
+    return 0;
+#endif
+}
+
 }  // extern "C"

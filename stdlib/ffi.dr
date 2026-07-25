@@ -2,7 +2,16 @@
 typed on both ends. Child contract: read stdin, write stdout, exit non-zero on failure."""
 
 from subprocess import Popen, CompletedProcess
-from json import decode
+from json import decode, Cursor, JsonWriter
+from os import getenv
+from os.path import exists
+
+extern "C" def dragon_subprocess_spawn(argv: list[str], cap_in: intc, cap_out: intc, cap_err: intc, cwd: str) -> list[int]
+extern "C" def dragon_subprocess_read_n(fd: intc, n: int) -> bytes
+extern "C" def dragon_subprocess_write_all(fd: intc, data: bytes) -> int
+extern "C" def dragon_subprocess_close(fd: intc)
+extern "C" def dragon_waitpid(pid: intc, options: intc) -> list[int]
+extern "C" def dragon_bytes_get(b: bytes, idx: int) -> int
 
 
 class FFIError(Exception) {
@@ -12,23 +21,25 @@ class FFIError(Exception) {
 
 class SpawnError(FFIError) {
     """The foreign binary could not be started (missing, not executable)."""
-    argv: list[str]
     hint: str
+    argv: list[str]
 
-    def(argv: list[str], hint: str) {
-        self.argv = argv
+    def(hint: str, argv: list[str]) {
         self.hint = hint
+        self.argv = argv
     }
 }
 
 
 class ForeignError(FFIError) {
     """The child ran but exited non-zero; `traceback` is its stderr verbatim."""
+    msg: str
     argv: list[str]
     returncode: int
     traceback: bytes
 
-    def(argv: list[str], returncode: int, traceback: bytes) {
+    def(msg: str, argv: list[str], returncode: int, traceback: bytes) {
+        self.msg = msg
         self.argv = argv
         self.returncode = returncode
         self.traceback = traceback
@@ -38,17 +49,40 @@ class ForeignError(FFIError) {
 
 class SchemaError(FFIError) {
     """The child exited clean but its stdout did not match T."""
+    detail: str
     argv: list[str]
     raw: bytes
     stderr: bytes
-    detail: str
 
-    def(argv: list[str], raw: bytes, stderr: bytes, detail: str) {
+    def(detail: str, argv: list[str], raw: bytes, stderr: bytes) {
+        self.detail = detail
         self.argv = argv
         self.raw = raw
         self.stderr = stderr
-        self.detail = detail
     }
+}
+
+
+# Trusted interpreter resolution (mirrors the compiler's): DRAGON_PYTHON wins,
+# else absolute candidates; never a bare name searched on $PATH (hijack surface).
+def python3() -> str {
+    const override: str = getenv("DRAGON_PYTHON")
+    if len(override) > 0 {
+        if exists(override) {
+            return override
+        }
+        const hint: str = "DRAGON_PYTHON points at '" + override + "' but nothing exists there"
+        const noargv: list[str] = []
+        raise SpawnError(hint, noargv)
+    }
+    const candidates: list[str] = ["/usr/bin/python3", "/usr/local/bin/python3", "/bin/python3"]
+    for c in candidates {
+        if exists(c) {
+            return c
+        }
+    }
+    const noargv: list[str] = []
+    raise SpawnError("python3 not found (tried /usr/bin, /usr/local/bin, /bin); set DRAGON_PYTHON", noargv)
 }
 
 
@@ -60,24 +94,256 @@ def _capture(argv: list[str], input: bytes) -> CompletedProcess {
         const both: tuple[bytes, bytes] = proc.communicate(input)
         return CompletedProcess(argv, proc.returncode, both[0], both[1])
     } except OSError as e {
-        raise SpawnError(argv, str(e))
+        # Bind to a name first: the raise site adopts a pure str NAME as str(e).
+        const hint: str = str(e)
+        raise SpawnError(hint, argv)
     }
+}
+
+
+# --- D052 v2: the baton frame protocol + warm sidecars ---
+
+def _u32le(n: int) -> bytes {
+    return bytes([n % 256, (n // 256) % 256, (n // 65536) % 256, (n // 16777216) % 256])
+}
+
+def _u32le_read(b: bytes) -> int {
+    return dragon_bytes_get(b, 0) + dragon_bytes_get(b, 1) * 256 + dragon_bytes_get(b, 2) * 65536 + dragon_bytes_get(b, 3) * 16777216
+}
+
+
+class FrameReply {
+    """One framed result; ok=false carries the child's call-level error text."""
+    ok: bool
+    body: bytes
+    blobs: list[bytes]
+    error: bytes
+
+    def(ok: bool, body: bytes, blobs: list[bytes], error: bytes) {
+        self.ok = ok
+        self.body = body
+        self.blobs = blobs
+        self.error = error
+    }
+}
+
+
+class Sidecar {
+    """A warm framed child: spawned on first call, kept alive across calls.
+    stderr is inherited, never captured (a chatty child must not deadlock)."""
+    argv: list[str]
+    pid: int
+    alive: bool
+    _in_fd: int
+    _out_fd: int
+
+    def(argv: list[str]) {
+        self.argv = argv
+        self.pid = -1
+        self.alive = false
+        self._in_fd = -1
+        self._out_fd = -1
+    }
+
+    def _spawn() -> None {
+        const r: list[int] = dragon_subprocess_spawn(self.argv, 1, 1, 0, "")
+        if r[0] < 0 {
+            const hint: str = "cannot start '" + self.argv[0] + "'"
+            raise SpawnError(hint, self.argv)
+        }
+        self.pid = r[0]
+        self._in_fd = r[1]
+        self._out_fd = r[2]
+        self.alive = true
+    }
+
+    def _teardown() -> None {
+        if self._in_fd >= 0 { dragon_subprocess_close(self._in_fd) }
+        if self._out_fd >= 0 { dragon_subprocess_close(self._out_fd) }
+        self._in_fd = -1
+        self._out_fd = -1
+        if self.pid > 0 {
+            const st: list[int] = dragon_waitpid(self.pid, 0)
+        }
+        self.pid = -1
+        self.alive = false
+    }
+
+    def close() -> None {
+        """Deterministic shutdown: stdin EOF ends the child's serve loop, then reap."""
+        self._teardown()
+    }
+
+    # Transport death: tear down and surface as ForeignError (no decode, ever).
+    def _dead(where: str) -> None {
+        self._teardown()
+        const msg: str = "foreign sidecar died (" + where + ")"
+        const nothing: bytes = b""
+        raise ForeignError(msg, self.argv, -1, nothing)
+    }
+
+    # Write one call frame; false = the child was already gone (restart candidate).
+    def _send(body: bytes, blobs: list[bytes]) -> bool {
+        w: JsonWriter = JsonWriter()
+        w.begin_object()
+        w.key("body_len"); w.write_int(len(body))
+        w.key("blobs")
+        w.begin_array()
+        for b in blobs { w.write_int(len(b)) }
+        w.end_array()
+        w.end_object()
+        const header: bytes = w.finish()
+        if dragon_subprocess_write_all(self._in_fd, _u32le(len(header))) != 0 { return false }
+        if dragon_subprocess_write_all(self._in_fd, header) != 0 { return false }
+        if len(body) > 0 {
+            if dragon_subprocess_write_all(self._in_fd, body) != 0 { return false }
+        }
+        for b in blobs {
+            if len(b) > 0 {
+                if dragon_subprocess_write_all(self._in_fd, b) != 0 { return false }
+            }
+        }
+        return true
+    }
+
+    def _recv() -> FrameReply {
+        const pre: bytes = dragon_subprocess_read_n(self._out_fd, 4)
+        if len(pre) < 4 { self._dead("no reply") }
+        const hlen: int = _u32le_read(pre)
+        if hlen <= 0 or hlen > 1048576 { self._dead("garbage header length") }
+        const hb: bytes = dragon_subprocess_read_n(self._out_fd, hlen)
+        if len(hb) < hlen { self._dead("truncated header") }
+
+        const c: Cursor = Cursor(hb)
+        ok: bool = false
+        body_len: int = 0
+        error_len: int = 0
+        blob_lens: list[int] = []
+        c.begin_object()
+        while c.next_field() {
+            const k: str = c.field_key()
+            if k == "ok" { ok = c.parse_bool() }
+            elif k == "body_len" { body_len = c.parse_int() }
+            elif k == "error_len" { error_len = c.parse_int() }
+            elif k == "blobs" { blob_lens = c.parse_int_list() }
+            else { c.skip_value() }
+        }
+        if not ok {
+            err: bytes = b""
+            if error_len > 0 {
+                err = dragon_subprocess_read_n(self._out_fd, error_len)
+            }
+            const noblobs: list[bytes] = []
+            const nobody: bytes = b""
+            return FrameReply(false, nobody, noblobs, err)
+        }
+        body: bytes = b""
+        if body_len > 0 {
+            body = dragon_subprocess_read_n(self._out_fd, body_len)
+            if len(body) < body_len { self._dead("truncated body") }
+        }
+        blobs: list[bytes] = []
+        for bl in blob_lens {
+            chunk: bytes = b""
+            if bl > 0 {
+                chunk = dragon_subprocess_read_n(self._out_fd, bl)
+                if len(chunk) < bl { self._dead("truncated blob") }
+            }
+            blobs.append(chunk)
+        }
+        const noerr: bytes = b""
+        return FrameReply(true, body, blobs, noerr)
+    }
+
+    def call(body: bytes, blobs: list[bytes]) -> FrameReply {
+        """One framed round trip. A child that died since the LAST call restarts
+        once; a death after this call's frame was sent never retries (side effects)"""
+        if not self.alive { self._spawn() }
+        if not self._send(body, blobs) {
+            self._teardown()
+            self._spawn()
+            if not self._send(body, blobs) { self._dead("write") }
+        }
+        return self._recv()
+    }
+}
+
+
+# One warm sidecar per distinct argv, module-owned (tiny linear registry: a
+# program declares a handful of endpoints, not thousands).
+_sc_keys: list[str] = []
+_sc_procs: list[Sidecar] = []
+
+def _sidecar_for(argv: list[str]) -> Sidecar {
+    const key: str = "\n".join(argv)
+    i: int = 0
+    while i < len(_sc_keys) {
+        if _sc_keys[i] == key { return _sc_procs[i] }
+        i = i + 1
+    }
+    const sc: Sidecar = Sidecar(argv)
+    _sc_keys.append(key)
+    _sc_procs.append(sc)
+    return sc
+}
+
+
+def sidecar_call[T](argv: list[str], input: bytes, blobs: list[bytes]) -> T {
+    """Framed call on the warm sidecar for argv; decodes the reply body into T."""
+    if len(argv) == 0 {
+        raise SpawnError("ffi.sidecar_call: argv must be a non-empty list[str]", argv)
+    }
+    const sc: Sidecar = _sidecar_for(argv)
+    const rep: FrameReply = sc.call(input, blobs)
+    if not rep.ok {
+        const msg: str = "foreign call failed"
+        raise ForeignError(msg, argv, 0, rep.error)
+    }
+    try {
+        return decode[T](rep.body)
+    } except ValueError as e {
+        const detail: str = str(e)
+        const noerr: bytes = b""
+        raise SchemaError(detail, argv, rep.body, noerr)
+    }
+}
+
+
+def sidecar_call_bytes(argv: list[str], input: bytes, blobs: list[bytes]) -> bytes {
+    """Framed call whose return type is bytes: the reply's first blob, raw."""
+    if len(argv) == 0 {
+        raise SpawnError("ffi.sidecar_call_bytes: argv must be a non-empty list[str]", argv)
+    }
+    const sc: Sidecar = _sidecar_for(argv)
+    const rep: FrameReply = sc.call(input, blobs)
+    if not rep.ok {
+        const msg: str = "foreign call failed"
+        raise ForeignError(msg, argv, 0, rep.error)
+    }
+    if len(rep.blobs) == 0 {
+        const detail: str = "child returned no blob for a bytes return"
+        const noerr: bytes = b""
+        raise SchemaError(detail, argv, rep.body, noerr)
+    }
+    return rep.blobs[0]
 }
 
 
 def runs[T](argv: list[str], input: bytes) -> T {
     """Spawn `argv` one-shot, feed `input` on stdin, decode stdout into T.
-    A non-zero exit is never decoded: crash output must not become a 'valid' result."""
+    A non-zero exit is never decoded: crash output must not become a 'valid' result"""
     if len(argv) == 0 {
-        raise SpawnError(argv, "ffi.runs: argv must be a non-empty list[str]")
+        raise SpawnError("ffi.runs: argv must be a non-empty list[str]", argv)
     }
     const cp: CompletedProcess = _capture(argv, input)
     if cp.returncode != 0 {
-        raise ForeignError(argv, cp.returncode, cp.stderr)
+        const msg: str = f"foreign child exited {cp.returncode}"
+        raise ForeignError(msg, argv, cp.returncode, cp.stderr)
     }
     try {
         return decode[T](cp.stdout)
     } except ValueError as e {
-        raise SchemaError(argv, cp.stdout, cp.stderr, str(e))
+        const detail: str = str(e)
+        raise SchemaError(detail, argv, cp.stdout, cp.stderr)
     }
 }
