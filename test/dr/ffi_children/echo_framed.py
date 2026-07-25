@@ -1,5 +1,5 @@
 # Hand-written framed child (no stub): echoes the args object back with a call
-# counter. n=13 answers ok:false; n=99 dies mid-serve. Pins the wire contract
+# counter. n=13 answers ok:false; n=99 dies mid-serve. Pins the wire contract.
 import json
 import struct
 import sys

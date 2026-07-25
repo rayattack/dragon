@@ -13,7 +13,8 @@ struct DriverOptions {
         Run,      // Compile and execute
         Build,    // Compile to executable
         Check,    // Type check only
-        Emit      // Emit IR/ASM
+        Emit,     // Emit IR/ASM
+        FfiSync   // D052: regenerate process-extern stubs
     };
 
     Action action = Action::Build;
@@ -35,6 +36,7 @@ struct DriverOptions {
     std::vector<std::string> ccSources;          // --cc-source: C/C++ shims to compile+link (ADR 041)
     std::string gcMode = "rc";  // --gc=rc (default) or --gc=none
     bool checkOverflow = false; // --check-overflow: raise OverflowError on int overflow
+    bool ffiCheck = false;      // ffi sync --check: verify stubs, write nothing
 };
 
 /// Main compiler driver

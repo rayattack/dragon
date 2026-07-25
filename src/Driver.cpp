@@ -1,5 +1,6 @@
 #include "dragon.h"
 #include "dragon/Driver.h"
+#include "FfiSync.h"
 #include "dragon/Lexer.h"
 #include "dragon/Parser.h"
 #include "dragon/Sema.h"
@@ -474,6 +475,25 @@ bool Driver::parseArgs(int argc, char* argv[]) {
         std::exit(execEggPassthrough(sub));
     }
 
+    // D052: `dragon ffi sync <file.dr> [--check]` - two-word subcommand.
+    if (command == "ffi") {
+        if (argc < 3 || std::string(argv[2]) != "sync") {
+            std::cerr << "usage: dragon ffi sync <file.dr> [--check]\n";
+            return false;
+        }
+        impl_->options.action = DriverOptions::Action::FfiSync;
+        for (int i = 3; i < argc; i++) {
+            std::string arg = argv[i];
+            if (arg == "--check") impl_->options.ffiCheck = true;
+            else if (!arg.empty() && arg[0] != '-') impl_->options.inputFiles.push_back(arg);
+        }
+        if (impl_->options.inputFiles.empty()) {
+            std::cerr << "dragon ffi sync: name the .dr file holding the extern declarations\n";
+            return false;
+        }
+        return true;
+    }
+
     if (command == "run") {
         impl_->options.action = DriverOptions::Action::Run;
     } else if (command == "build") {
@@ -624,6 +644,9 @@ int Driver::run(const DriverOptions& options) {
             case DriverOptions::Action::Check:
                 result = checkFile(filename);
                 break;
+            case DriverOptions::Action::FfiSync:
+                result = runFfiSync(filename, options.ffiCheck);
+                break;
             default:
                 break;
         }
@@ -644,6 +667,7 @@ Commands:
   run <file|dir>    Compile and run Dragon/Python file (a dir resolves dragon.drs `entry`)
   build <file|dir>  Compile to executable
   check <file>      Type check without compiling
+  ffi sync <file>   Regenerate foreign stubs for process externs (--check: verify only)
 
 Package (eggs, D022):
   init              Scaffold a dragon.drs manifest in the current directory
@@ -887,6 +911,14 @@ int Driver::buildFile(const std::string& filename) {
     if (int rc = typeCheckModuleGraph(*module, filename, graph,
                                       impl_->formatter, depModules)) {
         return rc;
+    }
+
+    // D052: an edited process-extern signature with a stale stub is a compile
+    // error, not a runtime zero-fill.
+    {
+        int staleStubs = verifyFfiStubSignatures(*module);
+        for (auto* dep : depModules) staleStubs += verifyFfiStubSignatures(*dep);
+        if (staleStubs) return 1;
     }
 
     // Determine output filename
@@ -1142,6 +1174,13 @@ int Driver::checkFile(const std::string& filename) {
     if (int rc = typeCheckModuleGraph(*module, filename, graph,
                                       impl_->formatter, depModules)) {
         return rc;
+    }
+
+    // D052: stale process-extern stubs fail `check` too (see buildFile).
+    {
+        int staleStubs = verifyFfiStubSignatures(*module);
+        for (auto* dep : depModules) staleStubs += verifyFfiStubSignatures(*dep);
+        if (staleStubs) return 1;
     }
 
     if (impl_->options.verbose) {

@@ -7,11 +7,9 @@
 
 namespace dragon {
 
-// Emit code to print ONE argument with NO trailing newline, using the `_raw`
-// runtime printers. This is the per-argument type dispatch shared by single-
-// and multi-arg print(); the caller (emitBuiltinCall's print branch) inserts
-// spaces between args and one trailing newline. Faithful to the prior
-// single-arg dispatch - only the terminal printers became their `_raw` form.
+
+//Emit code to print 1 argument. Per-argument type dispatch. Caller inserts spaces
+//between args and stays faithful to prior single-arg dispatch. Only terminal printers beacme `_raw` form
 void CodeGen::emitPrintArgRaw(Expr* argExpr) {
     argExpr->accept(*this);
     llvm::Value* arg = impl_->lastValue;
