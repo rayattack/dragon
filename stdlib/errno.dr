@@ -209,6 +209,7 @@ def errorcode(code: int) -> str {
     # Symbolic name for an errno code, or empty string when unknown.
     # Python exposes `errno.errorcode` as a dict; use this function plus the
     # exposed `errorcode_dict()` helper for parity.
+    global _errorcode_cache
     if len(_errorcode_cache) == 0 {
         _errorcode_cache = _build_errorcode()
     }
@@ -220,6 +221,7 @@ def errorcode(code: int) -> str {
 
 def errorcode_dict() -> dict[int, str] {
     # Full code-to-name map (matches Python's errno.errorcode dict).
+    global _errorcode_cache
     if len(_errorcode_cache) == 0 {
         _errorcode_cache = _build_errorcode()
     }
