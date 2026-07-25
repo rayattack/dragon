@@ -738,6 +738,10 @@ public:
     /// Empty for the plain `extern "C" def fn(...)` shape, where `name` is
     /// both the C symbol and the Dragon-visible identifier.
     std::string externSymbol;
+    /// D052 process-extern metadata for `dragon ffi sync`: lang tag (python/golang/
+    /// rust; empty = C lane) + the `from` path. Body is parser-synthesized, isExtern stays false.
+    std::string externLang;
+    std::string externPath;
     bool isProperty = false;       // true if @property - accessed without parens; in vtable
     std::string propertySetterFor; // non-empty if @<name>.setter - name of the property it sets
     int constructorIndex = -1;     // overload index (0, 1, 2, ...) for __init__ methods

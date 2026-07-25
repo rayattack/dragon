@@ -174,6 +174,9 @@ private:
     std::unique_ptr<Expr> maybeMoveRhs();
     std::unique_ptr<Stmt> externDeclaration();
     std::unique_ptr<Stmt> parseExternFuncSig(const std::string& libHint);
+    // D052 process-lane extern: parse the signature + `from "path"` and
+    // synthesize the runs[T] wrapper body in place.
+    std::unique_ptr<Stmt> parseProcessExternDef(const std::string& lang);
 
     // Helper for decorated definitions
     std::vector<std::unique_ptr<Expr>> parseDecorators();

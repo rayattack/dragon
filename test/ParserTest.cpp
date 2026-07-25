@@ -2510,6 +2510,86 @@ TEST(ParserTest, ExternCNotInPyMode) {
     EXPECT_GE(module->body.size(), 1u);
 }
 
+// D052 process-lane extern: extern "python"/"golang"/"rust" ... from "path"
+
+TEST(ParserTest, ProcessExternSynthesizesWrapper) {
+    auto module = parse(
+        "extern \"golang\" def resize(w: int, h: int) -> Img from \"./imgtool\"\n");
+    ASSERT_NE(module, nullptr);
+    // Injected ffi/json imports must precede the wrapper def in the body.
+    ASSERT_EQ(module->body.size(), 3u);
+    auto* ffiImport = dynamic_cast<FromImportStmt*>(module->body[0].get());
+    ASSERT_NE(ffiImport, nullptr);
+    EXPECT_EQ(ffiImport->module, "ffi");
+    auto* jsonImport = dynamic_cast<FromImportStmt*>(module->body[1].get());
+    ASSERT_NE(jsonImport, nullptr);
+    EXPECT_EQ(jsonImport->module, "json");
+    auto* fn = dynamic_cast<FunctionDecl*>(module->body[2].get());
+    ASSERT_NE(fn, nullptr);
+    EXPECT_EQ(fn->name, "resize");
+    EXPECT_FALSE(fn->isExtern);              // a real def with a synthesized body
+    EXPECT_EQ(fn->externLang, "golang");     // metadata for `dragon ffi sync`
+    EXPECT_EQ(fn->externPath, "./imgtool");
+    EXPECT_FALSE(fn->body.empty());
+    // Body ends in `return sidecar_call[Img](...)` (the warm framed transport).
+    auto* ret = dynamic_cast<ReturnStmt*>(fn->body.back().get());
+    ASSERT_NE(ret, nullptr);
+    auto* call = dynamic_cast<CallExpr*>(ret->value.get());
+    ASSERT_NE(call, nullptr);
+    ASSERT_EQ(call->args.size(), 3u);  // argv, body, blobs
+    auto* sub = dynamic_cast<SubscriptExpr*>(call->callee.get());
+    ASSERT_NE(sub, nullptr);
+    auto* scName = dynamic_cast<NameExpr*>(sub->object.get());
+    ASSERT_NE(scName, nullptr);
+    EXPECT_EQ(scName->name, "sidecar_call");
+}
+
+TEST(ParserTest, ProcessExternGoSpellingRejected) {
+    auto errs = parseErrors(
+        "extern \"go\" def f(n: int) -> int from \"./tool\"\n");
+    ASSERT_FALSE(errs.empty());
+    EXPECT_NE(errs[0].message.find("golang"), std::string::npos);
+}
+
+TEST(ParserTest, ProcessExternUnknownLangRejected) {
+    auto errs = parseErrors(
+        "extern \"cobol\" def f(n: int) -> int from \"./tool\"\n");
+    ASSERT_FALSE(errs.empty());
+    EXPECT_NE(errs[0].message.find("unknown extern language"), std::string::npos);
+}
+
+TEST(ParserTest, ProcessExternBytesCrossAsBlobs) {
+    // bytes params compile (they ride as raw blobs); a bytes RETURN routes
+    // through sidecar_call_bytes instead of the generic decode path.
+    auto module = parse(
+        "extern \"python\" def double(img: bytes, tag: str) -> bytes from \"x.py\"\n");
+    ASSERT_NE(module, nullptr);
+    ASSERT_EQ(module->body.size(), 3u);
+    auto* fn = dynamic_cast<FunctionDecl*>(module->body[2].get());
+    ASSERT_NE(fn, nullptr);
+    auto* ret = dynamic_cast<ReturnStmt*>(fn->body.back().get());
+    ASSERT_NE(ret, nullptr);
+    auto* call = dynamic_cast<CallExpr*>(ret->value.get());
+    ASSERT_NE(call, nullptr);
+    auto* callee = dynamic_cast<NameExpr*>(call->callee.get());
+    ASSERT_NE(callee, nullptr);
+    EXPECT_EQ(callee->name, "sidecar_call_bytes");
+}
+
+TEST(ParserTest, ProcessExternRequiresFromPath) {
+    auto errs = parseErrors(
+        "extern \"python\" def f(n: int) -> int\n");
+    ASSERT_FALSE(errs.empty());
+    EXPECT_NE(errs[0].message.find("from"), std::string::npos);
+}
+
+TEST(ParserTest, ProcessExternRequiresReturnType) {
+    auto errs = parseErrors(
+        "extern \"rust\" def f(n: int) from \"./tool\"\n");
+    ASSERT_FALSE(errs.empty());
+    EXPECT_NE(errs[0].message.find("return type"), std::string::npos);
+}
+
 //===----------------------------------------------------------------------===//
 // @staticmethod / @classmethod decorator wiring tests
 //===----------------------------------------------------------------------===//
