@@ -56,8 +56,15 @@ public:
     /// re-lexing the raw body at each stage. `isDragonFile` selects the sub-
     /// parser surface for the interpolation bodies. Static because it builds
     /// its own sub-lexers/sub-parsers and needs no outer parser state.
+    ///
+    /// Only `!!{` and `!!}` are escapes; a bare `!!` with nothing to escape
+    /// (the JS `!!x` idiom) is literal text. Scan defects that would silently
+    /// corrupt the rendered output - an unterminated `!{`, an interpolation
+    /// body that is not valid Dragon - are appended to `errorsOut` when
+    /// provided; every caller surfaces them as compile errors.
     static std::vector<TemplatePart> parseTemplateBody(
-        const std::string& body, const SourceLocation& loc, bool isDragonFile);
+        const std::string& body, const SourceLocation& loc, bool isDragonFile,
+        std::vector<std::string>* errorsOut = nullptr);
 
     /// Parse a single statement
     std::unique_ptr<Stmt> parseStatement();
@@ -174,6 +181,9 @@ private:
     std::unique_ptr<Expr> maybeMoveRhs();
     std::unique_ptr<Stmt> externDeclaration();
     std::unique_ptr<Stmt> parseExternFuncSig(const std::string& libHint);
+    // D052 process-lane extern: parse the signature + `from "path"` and
+    // synthesize the runs[T] wrapper body in place.
+    std::unique_ptr<Stmt> parseProcessExternDef(const std::string& lang);
 
     // Helper for decorated definitions
     std::vector<std::unique_ptr<Expr>> parseDecorators();

@@ -5,6 +5,7 @@
 #include "ParserImpl.h"
 #include <cctype>
 #include <charconv>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 
@@ -773,17 +774,29 @@ std::unique_ptr<Stmt> Parser::externDeclaration() {
     consume(TokenType::EXTERN, "Expect 'extern'");
     auto loc = previous().location();
 
-    // Expect "C" string literal (lexeme includes quotes: "C")
+    // Language tag string (lexeme includes quotes): "C" is the in-process lane,
+    // "python"/"golang"/"rust" the D052 process lane.
     auto stripQuotes = [](const std::string& s) -> std::string {
         if (s.size() >= 2 && (s.front() == '"' || s.front() == '\''))
             return s.substr(1, s.size() - 2);
         return s;
     };
-    if (!check(TokenType::STRING) || stripQuotes(peek().lexeme()) != "C") {
-        error("Expect '\"C\"' after 'extern'");
+    if (!check(TokenType::STRING)) {
+        error("Expect a language string after 'extern' (\"C\", \"python\", \"golang\", \"rust\")");
         return nullptr;
     }
-    advance(); // consume "C"
+    const std::string lang = stripQuotes(std::string(peek().lexeme()));
+    if (lang == "go") {
+        error("unknown extern language \"go\" - Dragon spells it \"golang\"");
+        return nullptr;
+    }
+    if (lang != "C" && lang != "python" && lang != "golang" && lang != "rust") {
+        error("unknown extern language \"" + lang +
+              "\" (supported: \"C\", \"python\", \"golang\", \"rust\")");
+        return nullptr;
+    }
+    advance(); // consume the language tag
+    if (lang != "C") return parseProcessExternDef(lang);
 
     // Form 1: extern "C" from "lib" { def ...; def ...; }
     if (check(TokenType::FROM)) {
@@ -880,6 +893,287 @@ std::unique_ptr<Stmt> Parser::parseExternFuncSig(const std::string& libHint) {
         decl->name = cSymbol;
     }
     // No body for extern declarations
+    return decl;
+}
+
+// D052 process-lane extern AST builders (file-local).
+namespace {
+
+std::unique_ptr<NameExpr> ffiName(const std::string& n, SourceLocation loc) {
+    auto e = std::make_unique<NameExpr>(); e->name = n; e->setLocation(loc); return e;
+}
+std::unique_ptr<Expr> ffiStr(const std::string& s, SourceLocation loc) {
+    auto e = std::make_unique<StringLiteral>(); e->value = s; e->setLocation(loc); return e;
+}
+// recv.method(args...) as a statement.
+std::unique_ptr<Stmt> ffiCallStmt(const std::string& recv, const std::string& method,
+                                  std::vector<std::unique_ptr<Expr>> args, SourceLocation loc) {
+    auto attr = std::make_unique<AttributeExpr>();
+    attr->object = ffiName(recv, loc);
+    attr->attribute = method;
+    attr->setLocation(loc);
+    auto call = std::make_unique<CallExpr>();
+    call->callee = std::move(attr);
+    for (auto& a : args) call->args.push_back(std::move(a));
+    call->setLocation(loc);
+    auto s = std::make_unique<ExprStmt>();
+    s->expr = std::move(call);
+    s->setLocation(loc);
+    return s;
+}
+// A TypeExpr as a value expression (`list[User]` -> subscript) for explicit
+// generic args; null for shapes the process lane does not carry (unions, callables).
+std::unique_ptr<Expr> ffiTypeExprToExpr(const TypeExpr* t) {
+    if (auto* nt = dynamic_cast<const NamedTypeExpr*>(t)) return ffiName(nt->name, t->location());
+    if (auto* gt = dynamic_cast<const GenericTypeExpr*>(t)) {
+        auto base = ffiTypeExprToExpr(gt->base.get());
+        if (!base || gt->typeArgs.empty()) return nullptr;
+        auto sub = std::make_unique<SubscriptExpr>();
+        sub->object = std::move(base);
+        if (gt->typeArgs.size() == 1) {
+            sub->index = ffiTypeExprToExpr(gt->typeArgs[0].get());
+            if (!sub->index) return nullptr;
+        } else {
+            auto tup = std::make_unique<TupleExpr>();
+            for (auto& a : gt->typeArgs) {
+                auto ae = ffiTypeExprToExpr(a.get());
+                if (!ae) return nullptr;
+                tup->elements.push_back(std::move(ae));
+            }
+            tup->setLocation(t->location());
+            sub->index = std::move(tup);
+        }
+        sub->setLocation(t->location());
+        return sub;
+    }
+    return nullptr;
+}
+
+}  // namespace
+
+// extern "python"|"golang"|"rust" def NAME(params) -> RET from "path": body
+// synthesized here so the module carries its ffi/json imports before the resolver runs.
+std::unique_ptr<Stmt> Parser::parseProcessExternDef(const std::string& lang) {
+    consume(TokenType::DEF, "Expect 'def' in extern declaration");
+    auto loc = previous().location();
+
+    auto decl = std::make_unique<FunctionDecl>();
+    decl->setLocation(loc);
+    decl->externLang = lang;
+    if (!check(TokenType::IDENTIFIER)) {
+        error("Expect function name");
+        return decl;
+    }
+    decl->name = std::string(advance().lexeme());
+    consume(TokenType::LEFT_PAREN, "Expect '(' after function name");
+    decl->params = parseParameters();
+    consume(TokenType::RIGHT_PAREN, "Expect ')' after parameters");
+    if (!match(TokenType::ARROW)) {
+        error("a process extern needs a return type - the child's output decodes into it");
+        return decl;
+    }
+    decl->returnType = parseType();
+    if (!match(TokenType::FROM)) {
+        error(std::string("Expect `from \"<path>\"` naming the foreign ") +
+              (lang == "python" ? "script" : "binary"));
+        return decl;
+    }
+    if (!check(TokenType::STRING)) {
+        error("Expect a path string after 'from'");
+        return decl;
+    }
+    {
+        std::string raw = std::string(advance().lexeme());
+        if (raw.size() >= 2 && (raw.front() == '"' || raw.front() == '\''))
+            raw = raw.substr(1, raw.size() - 2);
+        decl->externPath = raw;
+    }
+
+    for (auto& p : decl->params) {
+        if (p.isVarArg || p.isKwArg) {
+            error("process externs take a fixed parameter list");
+            return decl;
+        }
+    }
+    auto isBytesType = [](const TypeExpr* t) -> bool {
+        auto* nt = dynamic_cast<const NamedTypeExpr*>(t);
+        return nt && nt->name == "bytes";
+    };
+
+    // Resolve the path relative to the declaring file at compile time.
+    std::string resolvedPath = decl->externPath;
+    {
+        std::filesystem::path p(decl->externPath);
+        if (p.is_relative())
+            p = std::filesystem::path(impl_->options.filename).parent_path() / p;
+        std::error_code ec;
+        auto abs = std::filesystem::absolute(p, ec);
+        if (!ec) resolvedPath = abs.lexically_normal().string();
+    }
+
+    // Body: <w> = JsonWriter(); the args object keyed by param name; a framed
+    // sidecar_call[RET]. Fresh-name locals so user params can never collide.
+    auto freshName = [&](std::string seed) -> std::string {
+        for (bool clash = true; clash;) {
+            clash = false;
+            for (auto& p : decl->params)
+                if (p.name == seed) { seed += "_"; clash = true; break; }
+        }
+        return seed;
+    };
+    std::string wn = freshName("_w");
+    std::string bn = freshName("_blobs");
+    if (bn == wn) bn += "b";
+    {
+        auto ctorCall = std::make_unique<CallExpr>();
+        ctorCall->callee = ffiName("JsonWriter", loc);
+        ctorCall->setLocation(loc);
+        auto annot = std::make_unique<NamedTypeExpr>();
+        annot->name = "JsonWriter";
+        annot->setLocation(loc);
+        auto d = std::make_unique<AnnAssignStmt>();
+        d->target = ffiName(wn, loc);
+        d->annotation = std::move(annot);
+        d->value = std::move(ctorCall);
+        d->setLocation(loc);
+        decl->body.push_back(std::move(d));
+    }
+    {
+        std::vector<std::unique_ptr<Expr>> none;
+        decl->body.push_back(ffiCallStmt(wn, "begin_object", std::move(none), loc));
+    }
+    std::vector<std::string> blobParams;  // bytes params, in declaration order
+    for (auto& p : decl->params) {
+        {
+            std::vector<std::unique_ptr<Expr>> kargs;
+            kargs.push_back(ffiStr(p.name, loc));
+            decl->body.push_back(ffiCallStmt(wn, "key", std::move(kargs), loc));
+        }
+        if (isBytesType(p.type.get())) {
+            // bytes ride raw as blob i; the body carries {"$blob": i} in its place.
+            std::vector<std::unique_ptr<Expr>> none0;
+            decl->body.push_back(ffiCallStmt(wn, "begin_object", std::move(none0), loc));
+            std::vector<std::unique_ptr<Expr>> bkey;
+            bkey.push_back(ffiStr("$blob", loc));
+            decl->body.push_back(ffiCallStmt(wn, "key", std::move(bkey), loc));
+            auto idx = std::make_unique<IntegerLiteral>();
+            idx->value = (int64_t)blobParams.size();
+            idx->setLocation(loc);
+            std::vector<std::unique_ptr<Expr>> ival;
+            ival.push_back(std::move(idx));
+            decl->body.push_back(ffiCallStmt(wn, "write_int", std::move(ival), loc));
+            std::vector<std::unique_ptr<Expr>> none1;
+            decl->body.push_back(ffiCallStmt(wn, "end_object", std::move(none1), loc));
+            blobParams.push_back(p.name);
+            continue;
+        }
+        auto typeArgE = ffiTypeExprToExpr(p.type.get());
+        if (!typeArgE) {
+            error("process extern param '" + p.name + "' has a type the process "
+                  "lane cannot carry (scalars, lists, classes, bytes)");
+            return decl;
+        }
+        auto encSub = std::make_unique<SubscriptExpr>();
+        encSub->object = ffiName("encode", loc);
+        encSub->index = std::move(typeArgE);
+        encSub->setLocation(loc);
+        auto encCall = std::make_unique<CallExpr>();
+        encCall->callee = std::move(encSub);
+        encCall->args.push_back(ffiName(p.name, loc));
+        encCall->setLocation(loc);
+        std::vector<std::unique_ptr<Expr>> wargs;
+        wargs.push_back(std::move(encCall));
+        decl->body.push_back(ffiCallStmt(wn, "write_raw", std::move(wargs), loc));
+    }
+    {
+        std::vector<std::unique_ptr<Expr>> none;
+        decl->body.push_back(ffiCallStmt(wn, "end_object", std::move(none), loc));
+    }
+    {
+        // <bn>: list[bytes] = [<bytes params in order>]
+        auto lb = std::make_unique<ListExpr>();
+        for (auto& n : blobParams) lb->elements.push_back(ffiName(n, loc));
+        lb->setLocation(loc);
+        auto lt = std::make_unique<GenericTypeExpr>();
+        auto base = std::make_unique<NamedTypeExpr>();
+        base->name = "list";
+        base->setLocation(loc);
+        auto elem = std::make_unique<NamedTypeExpr>();
+        elem->name = "bytes";
+        elem->setLocation(loc);
+        lt->base = std::move(base);
+        lt->typeArgs.push_back(std::move(elem));
+        lt->setLocation(loc);
+        auto d = std::make_unique<AnnAssignStmt>();
+        d->target = ffiName(bn, loc);
+        d->annotation = std::move(lt);
+        d->value = std::move(lb);
+        d->setLocation(loc);
+        decl->body.push_back(std::move(d));
+    }
+
+    auto argvList = std::make_unique<ListExpr>();
+    if (lang == "python") {
+        auto py = std::make_unique<CallExpr>();
+        py->callee = ffiName("python3", loc);
+        py->setLocation(loc);
+        argvList->elements.push_back(std::move(py));
+    }
+    argvList->elements.push_back(ffiStr(resolvedPath, loc));
+    argvList->setLocation(loc);
+
+    auto mkFinish = [&]() -> std::unique_ptr<Expr> {
+        auto attr = std::make_unique<AttributeExpr>();
+        attr->object = ffiName(wn, loc);
+        attr->attribute = "finish";
+        attr->setLocation(loc);
+        auto fin = std::make_unique<CallExpr>();
+        fin->callee = std::move(attr);
+        fin->setLocation(loc);
+        return fin;
+    };
+    auto scCall = std::make_unique<CallExpr>();
+    if (isBytesType(decl->returnType.get())) {
+        // bytes return: the reply's first blob, raw - no decode[T] involved.
+        scCall->callee = ffiName("sidecar_call_bytes", loc);
+    } else {
+        auto retTypeE = ffiTypeExprToExpr(decl->returnType.get());
+        if (!retTypeE) {
+            error("process extern return type is not carryable (a class, list, scalar, or bytes)");
+            return decl;
+        }
+        auto scSub = std::make_unique<SubscriptExpr>();
+        scSub->object = ffiName("sidecar_call", loc);
+        scSub->index = std::move(retTypeE);
+        scSub->setLocation(loc);
+        scCall->callee = std::move(scSub);
+    }
+    scCall->args.push_back(std::move(argvList));
+    scCall->args.push_back(mkFinish());
+    scCall->args.push_back(ffiName(bn, loc));
+    scCall->setLocation(loc);
+    auto ret = std::make_unique<ReturnStmt>();
+    ret->value = std::move(scCall);
+    ret->setLocation(loc);
+    decl->body.push_back(std::move(ret));
+
+    // Inject the ffi/json imports once per module, BEFORE the wrapper in body
+    // order (codegen registers aliases at visit time): return one, pend the rest.
+    if (!impl_->ffiProcessImportsInjected) {
+        impl_->ffiProcessImportsInjected = true;
+        auto mkFrom = [&](const std::string& mod,
+                          std::vector<std::string> names) -> std::unique_ptr<Stmt> {
+            auto fi = std::make_unique<FromImportStmt>();
+            fi->module = mod;
+            for (auto& n : names) fi->names.push_back({n, ""});
+            fi->setLocation(loc);
+            return fi;
+        };
+        auto first = mkFrom("ffi", {"sidecar_call", "sidecar_call_bytes", "python3"});
+        impl_->pendingStmts.push_back(mkFrom("json", {"encode", "JsonWriter"}));
+        impl_->pendingStmts.push_back(std::move(decl));
+        return first;
+    }
     return decl;
 }
 

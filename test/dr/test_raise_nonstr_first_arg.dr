@@ -1,0 +1,48 @@
+"""Only a str first ctor arg becomes the exception message (else str(e) is the class
+name): a list/dict/bytes pointer read as a DragonString is a use-after-free."""
+
+from unittest import TestCase, main
+
+
+class ListErr(Exception) {
+    items: list[str]
+    code: int
+    def(items: list[str], code: int) {
+        self.items = items
+        self.code = code
+    }
+}
+
+
+class RaiseNonStrTests(TestCase) {
+    def test_list_first_arg_fields_intact() {
+        raised: bool = false
+        try {
+            raise ListErr(["a", "b", "c"], 7)
+        } except ListErr as e {
+            raised = true
+            self.assertEqual(len(e.items), 3)
+            self.assertEqual(e.items[0], "a")
+            self.assertEqual(e.code, 7)
+        }
+        self.assertTrue(raised)
+    }
+
+    # Each pass allocates and frees a heap string, so a stale message pointer
+    # lands on freed memory.
+    def test_repeated_raise_no_uaf() {
+        i: int = 0
+        while i < 2000 {
+            const junk: str = "prefix-" + str(i)
+            try {
+                raise ListErr([junk], i)
+            } except ListErr as e {
+                self.assertEqual(e.code, i)
+            }
+            i = i + 1
+        }
+    }
+}
+
+
+main([RaiseNonStrTests()])

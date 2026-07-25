@@ -17,7 +17,7 @@
 namespace dragon {
 
 /// Library version. Single source of truth: CMake parses this line.
-constexpr const char* VERSION = "0.0.2";
+constexpr const char* VERSION = "0.0.3";
 
 /// Initialize the Dragon compiler (call once at startup)
 void initialize();

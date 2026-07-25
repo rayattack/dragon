@@ -1,0 +1,204 @@
+"""json.encode[T] (D052) - box-free schema-directed encode, the mirror of
+decode[T]. Also covers top-level list[T] in both directions"""
+
+from unittest import TestCase, main
+from json import encode, decode
+
+
+class User {
+    def(id: int, tag: str, active: bool) {
+        self.id = id
+        self.tag = tag
+        self.active = active
+    }
+}
+
+
+class Team {
+    def(name: str, scores: list[int]) {
+        self.name = name
+        self.scores = scores
+    }
+}
+
+
+class Address {
+    def(street: str, zip: str) {
+        self.street = street
+        self.zip = zip
+    }
+}
+
+
+class Person {
+    def(name: str, home: Address) {
+        self.name = name
+        self.home = home
+    }
+}
+
+
+class Widget {
+    def(id: int, label: str | None) {
+        self.id = id
+        self.label = label
+    }
+}
+
+
+class EncodeBasicTests(TestCase) {
+    def test_flat_object_exact() {
+        const u: User = User(7, "hi", true)
+        self.assertEqual(encode[User](u).decode("utf-8"),
+                         "{\"id\":7,\"tag\":\"hi\",\"active\":true}")
+    }
+
+    def test_escaping_roundtrip() {
+        const u: User = User(42, "wa\"ha\\x", false)
+        const back: User = decode[User](encode[User](u))
+        self.assertEqual(back.id, 42)
+        self.assertEqual(back.tag, "wa\"ha\\x")
+        self.assertFalse(back.active)
+    }
+
+    def test_list_field() {
+        const t: Team = Team("reds", [3, 1, 4])
+        self.assertEqual(encode[Team](t).decode("utf-8"),
+                         "{\"name\":\"reds\",\"scores\":[3,1,4]}")
+        const back: Team = decode[Team](encode[Team](t))
+        self.assertEqual(back.scores[2], 4)
+    }
+}
+
+
+class EncodeNestedTests(TestCase) {
+    def test_nested_object_exact() {
+        const p: Person = Person("ada", Address("mill lane", "0001"))
+        self.assertEqual(encode[Person](p).decode("utf-8"),
+                         "{\"name\":\"ada\",\"home\":{\"street\":\"mill lane\",\"zip\":\"0001\"}}")
+    }
+
+    def test_nested_roundtrip() {
+        const p: Person = Person("ada", Address("mill lane", "0001"))
+        const back: Person = decode[Person](encode[Person](p))
+        self.assertEqual(back.home.zip, "0001")
+    }
+}
+
+
+class EncodeOptionalTests(TestCase) {
+    def test_optional_present() {
+        const wgt: Widget = Widget(1, "on")
+        self.assertEqual(encode[Widget](wgt).decode("utf-8"), "{\"id\":1,\"label\":\"on\"}")
+    }
+
+    def test_optional_null() {
+        const wgt: Widget = Widget(2, None)
+        self.assertEqual(encode[Widget](wgt).decode("utf-8"), "{\"id\":2,\"label\":null}")
+        const back: Widget = decode[Widget](encode[Widget](wgt))
+        self.assertEqual(back.id, 2)
+    }
+}
+
+
+class Ratings {
+    def(name: str, scores: dict[str, int], tail: int) {
+        self.name = name
+        self.scores = scores
+        self.tail = tail
+    }
+}
+
+
+class DictTests(TestCase) {
+    def test_dict_field_exact_and_roundtrip() {
+        const one: dict[str, int] = {"k": 7}
+        self.assertEqual(encode[Ratings](Ratings("n", one, 5)).decode("utf-8"),
+                         "{\"name\":\"n\",\"scores\":{\"k\":7},\"tail\":5}")
+        const back: Ratings = decode[Ratings](encode[Ratings](Ratings("n", one, 5)))
+        self.assertEqual(back.scores["k"], 7)
+        self.assertEqual(back.tail, 5)
+    }
+
+    # An EMPTY dict mid-object: the field after it must still parse (the nested
+    # object resets the cursor's comma flag; the restore is what this pins).
+    def test_empty_dict_field_with_trailing_field() {
+        const nothing: dict[str, int] = {}
+        const back: Ratings = decode[Ratings](encode[Ratings](Ratings("e", nothing, 9)))
+        self.assertEqual(len(back.scores), 0)
+        self.assertEqual(back.tail, 9)
+    }
+
+    def test_top_level_dict() {
+        const d: dict[str, str] = {"x": "one", "y": "two"}
+        const back: dict[str, str] = decode[dict[str, str]](encode[dict[str, str]](d))
+        self.assertEqual(back["y"], "two")
+        self.assertEqual(len(back), 2)
+    }
+}
+
+
+class TopLevelListTests(TestCase) {
+    def test_encode_list_exact() {
+        const users: list[User] = [User(1, "a", true), User(2, "b", false)]
+        self.assertEqual(encode[list[User]](users).decode("utf-8"),
+                         "[{\"id\":1,\"tag\":\"a\",\"active\":true},{\"id\":2,\"tag\":\"b\",\"active\":false}]")
+    }
+
+    def test_list_roundtrip() {
+        const users: list[User] = [User(1, "a", true), User(2, "b", false), User(3, "c", true)]
+        const back: list[User] = decode[list[User]](encode[list[User]](users))
+        self.assertEqual(len(back), 3)
+        self.assertEqual(back[0].id, 1)
+        self.assertEqual(back[1].tag, "b")
+        self.assertTrue(back[2].active)
+    }
+
+    def test_decode_empty_list() {
+        const empty: list[User] = decode[list[User]](b"[]")
+        self.assertEqual(len(empty), 0)
+    }
+
+    def test_decode_list_whitespace() {
+        const back: list[User] = decode[list[User]](b" [ {\"id\": 9, \"tag\": \"z\", \"active\": false} ] ")
+        self.assertEqual(len(back), 1)
+        self.assertEqual(back[0].id, 9)
+    }
+}
+
+
+class TopLevelScalarTests(TestCase) {
+    # The uniform extern wrapper leans on these: encode[int]("n" arg) etc.
+    def test_scalar_roundtrip() {
+        self.assertEqual(encode[int](42).decode("utf-8"), "42")
+        self.assertEqual(decode[int](b"42"), 42)
+        self.assertEqual(encode[str]("hi\n").decode("utf-8"), "\"hi\\n\"")
+        self.assertEqual(decode[str](b"\"hi\\n\""), "hi\n")
+        self.assertEqual(encode[bool](true).decode("utf-8"), "true")
+        self.assertTrue(decode[bool](b"true"))
+    }
+
+    def test_scalar_list_roundtrip() {
+        self.assertEqual(encode[list[int]]([1, 2, 3]).decode("utf-8"), "[1,2,3]")
+        const xs: list[int] = decode[list[int]](b"[1, 2, 3]")
+        self.assertEqual(len(xs), 3)
+        self.assertEqual(xs[2], 3)
+        self.assertEqual(encode[list[str]](["a", "b"]).decode("utf-8"), "[\"a\",\"b\"]")
+    }
+}
+
+
+class EncodeOwnershipTests(TestCase) {
+    def test_roundtrip_no_leak() {
+        i: int = 0
+        while i < 2000 {
+            const u: User = User(i, "owned-tag-" + str(i), true)
+            const back: User = decode[User](encode[User](u))
+            self.assertEqual(back.id, i)
+            i = i + 1
+        }
+    }
+}
+
+
+main([EncodeBasicTests(), EncodeNestedTests(), EncodeOptionalTests(), DictTests(), TopLevelListTests(), TopLevelScalarTests(), EncodeOwnershipTests()])

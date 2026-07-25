@@ -182,6 +182,9 @@ public:
     // always-populated key for package/same-file comparisons.
     std::string definingModule;
     std::string definingFile;
+    // True-identity backpointer to the declaring ClassDecl (owned by the module
+    // AST, which outlives checking). Prefer this over any by-name registry.
+    ClassDecl* decl = nullptr;
     // Number of constructors (`def()` / `__init__`) the class declares. Dragon
     // supports arity-overloaded ctors (codegen classCtorArities), but `methods`
     // stores only one __init__ FunctionType - so a call-site ctor arity check
@@ -191,6 +194,9 @@ public:
     bool isEnum = false;       // class-based enum (Enum/IntEnum/StrEnum): members are
                                // singleton instances of this class (see synthesizeEnumMethods)
     // D044 - when this ClassType is a monomorphic instantiation of a generic
+    // True-identity backpointer to the TEMPLATE ClassDecl a stamped class came
+    // from (null for ordinary classes). Set where genericOrigin is set.
+    ClassDecl* originDecl = nullptr;
     // (e.g. `Box[int]`), `genericOrigin` is the generic's name ("Box") and
     // `genericArgs` are the type arguments (possibly TypeVar-containing while a
     // generic body is checked, e.g. `Inner[T]` inside `Outer[T]`). Lets
@@ -337,6 +343,19 @@ public:
     /// pointer-wiring; templates are registered, never re-visited (their home
     /// module already checked them). Call before check() on the importer.
     void registerExternalGenerics(Module& mod);
+
+    /// D048: build the box-free `json.decode[T]` body from T's constructor
+    /// params (one Cursor read per field, skip_value for the rest). Returns the
+    /// stamped FunctionDecl, or nullptr after reporting a clean error (unknown T,
+    /// non-scalar field, optional field). Called by the monomorphizer in place of
+    /// cloneStmt for schemaDecodeFns.
+    std::unique_ptr<Stmt> synthesizeSchemaDecoder(
+        const std::shared_ptr<Type>& targetType, SourceLocation loc);
+
+    /// D052: the write-side mirror - build the box-free `json.encode[T]` body
+    /// (Writer-driven) from T's ctor params. Same contract as the decoder.
+    std::unique_ptr<Stmt> synthesizeSchemaEncoder(
+        const std::shared_ptr<Type>& targetType, SourceLocation loc);
 
     /// Get all module-level exports (functions, classes, variables) after check().
     /// Returns a map of symbol name -> type.

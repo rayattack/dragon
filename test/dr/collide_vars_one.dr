@@ -1,0 +1,14 @@
+"""A local `items: list[Widget]`, lowered before the entry's `items: list[str]`."""
+
+
+class Widget {
+    def(name: str) {
+        self.name: str = name
+    }
+}
+
+
+def one_scan() -> int {
+    items: list[Widget] = [Widget("a"), Widget("b")]
+    return len(items)
+}

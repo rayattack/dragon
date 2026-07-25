@@ -15,7 +15,6 @@
 
 extern "C" def rand() -> intc
 extern "C" def srand(seed: intc)
-extern "C" def time(tloc: ptr) -> int
 extern "C" def clock_gettime(clockid: intc, tp: ptr) -> intc
 extern "C" def malloc(size: int) -> ptr
 extern "C" def free(p: ptr)

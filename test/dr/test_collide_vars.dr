@@ -1,0 +1,42 @@
+"""A same-named local in another module must not poison this one's types.
+Pre-fix: per-variable metadata was program-wide and never cleared (segfault)."""
+
+from unittest import TestCase, main
+from collide_vars_one import one_scan
+
+
+def entry_scan() -> str {
+    items: list[str] = ["a", "b"]
+    if "b" in items {
+        return "found"
+    }
+    return "missing"
+}
+
+
+def entry_count() -> int {
+    items: list[int] = [10, 20, 30]
+    total: int = 0
+    for n in items {
+        total = total + n
+    }
+    return total
+}
+
+
+class CollideVarsTests(TestCase) {
+    def test_dep_scan_works() {
+        self.assertEqual(one_scan(), 2)
+    }
+
+    def test_entry_str_list_keeps_str_semantics() {
+        self.assertEqual(entry_scan(), "found")
+    }
+
+    def test_entry_int_list_keeps_int_semantics() {
+        self.assertEqual(entry_count(), 60)
+    }
+}
+
+
+main([CollideVarsTests()])

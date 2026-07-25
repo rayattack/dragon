@@ -1,0 +1,277 @@
+# const u: User = User(**json.loads_obj(body))  # before
+# const u: User = decode[User](body)  # after
+# no more building dict[str, Any] first e.g. moving from map[string]interface{} to serde style
+
+from unittest import TestCase, main
+from json import decode
+
+
+class User {
+    def(id: int, tag: str, active: bool) {
+        self.id = id
+        self.tag = tag
+        self.active = active
+    }
+}
+
+
+class DecodeBasicTests(TestCase) {
+    def test_scalars() {
+        const u: User = decode[User]('{"id": 7, "tag": "ok", "active": true}'.encode("utf-8"))
+        self.assertEqual(u.id, 7)
+        self.assertEqual(u.tag, "ok")
+        self.assertTrue(u.active)
+    }
+
+    # Document order need not match declaration order.
+    def test_out_of_order() {
+        const u: User = decode[User]('{"tag": "x", "active": false, "id": 3}'.encode("utf-8"))
+        self.assertEqual(u.id, 3)
+        self.assertEqual(u.tag, "x")
+        self.assertFalse(u.active)
+    }
+
+    # Unrequested keys (scalar, nested object, array) are skipped, not materialized.
+    def test_skips_unrequested_keys() {
+        const body: bytes = '{"id": 1, "extra": {"a": [1,2,3], "b": "zzz"}, "tag": "t", "junk": 999, "active": true}'.encode("utf-8")
+        const u: User = decode[User](body)
+        self.assertEqual(u.id, 1)
+        self.assertEqual(u.tag, "t")
+        self.assertTrue(u.active)
+    }
+}
+
+
+class DecodeAdversarialTests(TestCase) {
+    # Leak probe: skip_value() over many unrequested keys must not allocate, so
+    # RSS stays flat across the loop (LSan under build-asan; ulimit -v otherwise).
+    def test_skip_key_no_leak() {
+        const body: bytes = '{"id": 42, "k0": "aaaaaaaa", "k1": [1,2,3,4,5], "k2": {"n": {"d": "deep"}}, "tag": "hot", "k3": 3.14159, "active": true, "k4": null}'.encode("utf-8")
+        i: int = 0
+        while i < 5000 {
+            const u: User = decode[User](body)
+            self.assertEqual(u.id, 42)
+            i = i + 1
+        }
+    }
+
+    def test_type_mismatch_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const u: User = decode[User]('{"id": "not-an-int", "tag": "t", "active": true}'.encode("utf-8"))
+        })
+    }
+
+    def test_missing_required_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const u: User = decode[User]('{"tag": "t", "active": true}'.encode("utf-8"))
+        })
+    }
+
+    # Malformed mid-decode raises and frees the partial instance (checked under build-asan).
+    def test_malformed_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const u: User = decode[User]('{"id": 1, "tag": "t", "active": tru'.encode("utf-8"))
+        })
+    }
+}
+
+
+class DecodeOwnershipTests(TestCase) {
+    # str fields arrive owned; decode/drop loop must not leak or double-free.
+    def test_str_field_ownership() {
+        i: int = 0
+        while i < 5000 {
+            const u: User = decode[User]('{"id": 0, "tag": "some-owned-string-value", "active": false}'.encode("utf-8"))
+            self.assertEqual(u.tag, "some-owned-string-value")
+            i = i + 1
+        }
+    }
+}
+
+
+class Team {
+    def(name: str, ids: list[int], flags: list[bool]) {
+        self.name = name
+        self.ids = ids
+        self.flags = flags
+    }
+}
+
+
+class DecodeListTests(TestCase) {
+    def test_scalar_lists() {
+        const t: Team = decode[Team]('{"name":"x","ids":[1,2,3],"flags":[true,false,true]}'.encode("utf-8"))
+        self.assertEqual(t.name, "x")
+        self.assertEqual(len(t.ids), 3)
+        self.assertEqual(t.ids[0], 1)
+        self.assertEqual(t.ids[2], 3)
+        self.assertFalse(t.flags[1])
+    }
+
+    def test_empty_list() {
+        const t: Team = decode[Team]('{"name":"y","ids":[],"flags":[]}'.encode("utf-8"))
+        self.assertEqual(len(t.ids), 0)
+    }
+
+    # Leak probe: list-field decode/drop loop must stay flat under build-asan.
+    def test_list_no_leak() {
+        i: int = 0
+        while i < 3000 {
+            const t: Team = decode[Team]('{"name":"z","ids":[1,2,3,4,5],"flags":[true]}'.encode("utf-8"))
+            self.assertEqual(len(t.ids), 5)
+            i = i + 1
+        }
+    }
+}
+
+
+class Address {
+    def(city: str, zip: int) {
+        self.city = city
+        self.zip = zip
+    }
+}
+
+
+class Person {
+    def(name: str, home: Address) {
+        self.name = name
+        self.home = home
+    }
+}
+
+
+class DecodeNestedTests(TestCase) {
+    def test_nested_object() {
+        const p: Person = decode[Person]('{"name":"ada","home":{"city":"lon","zip":90}}'.encode("utf-8"))
+        self.assertEqual(p.name, "ada")
+        self.assertEqual(p.home.city, "lon")
+        self.assertEqual(p.home.zip, 90)
+    }
+
+    def test_nested_out_of_order() {
+        const p: Person = decode[Person]('{"home":{"zip":7,"city":"x"},"name":"bo"}'.encode("utf-8"))
+        self.assertEqual(p.home.zip, 7)
+        self.assertEqual(p.home.city, "x")
+    }
+
+    def test_nested_missing_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const p: Person = decode[Person]('{"name":"x"}'.encode("utf-8"))
+        })
+    }
+
+    # Leak probe: nested capture + recursive decode drop loop, under build-asan.
+    def test_nested_no_leak() {
+        i: int = 0
+        while i < 3000 {
+            const p: Person = decode[Person]('{"name":"n","home":{"city":"cccc","zip":1}}'.encode("utf-8"))
+            self.assertEqual(p.home.zip, 1)
+            i = i + 1
+        }
+    }
+}
+
+
+class Config {
+    def(host: str, port: int = 8080, debug: bool = false, tags: list[str] = []) {
+        self.host = host
+        self.port = port
+        self.debug = debug
+        self.tags = tags
+    }
+}
+
+
+class DecodeOptionalTests(TestCase) {
+    def test_defaults_apply() {
+        const c: Config = decode[Config]('{"host":"h"}'.encode("utf-8"))
+        self.assertEqual(c.host, "h")
+        self.assertEqual(c.port, 8080)
+        self.assertFalse(c.debug)
+        self.assertEqual(len(c.tags), 0)
+    }
+
+    def test_overrides() {
+        const c: Config = decode[Config]('{"host":"h","port":9090,"debug":true,"tags":["a","b"]}'.encode("utf-8"))
+        self.assertEqual(c.port, 9090)
+        self.assertTrue(c.debug)
+        self.assertEqual(len(c.tags), 2)
+    }
+
+    def test_required_still_enforced() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const c: Config = decode[Config]('{"port":1}'.encode("utf-8"))
+        })
+    }
+}
+
+
+class Widget {
+    def(name: str, count: Optional[int], note: Optional[str]) {
+        self.name = name
+        self.count = count
+        self.note = note
+    }
+}
+
+
+class Node {
+    def(val: int, next: Optional[Node]) {
+        self.val = val
+        self.next = next
+    }
+}
+
+
+class DecodeOptionalTypeTests(TestCase) {
+    def test_optional_present() {
+        const w: Widget = decode[Widget]('{"name":"x","count":5,"note":"hi"}'.encode("utf-8"))
+        const c: Optional[int] = w.count
+        self.assertIsNotNone(c)
+        if c is not None {
+            const ci: int = c
+            self.assertEqual(ci, 5)
+        }
+    }
+
+    def test_optional_null() {
+        const w: Widget = decode[Widget]('{"name":"x","count":null,"note":null}'.encode("utf-8"))
+        self.assertIsNone(w.count)
+        self.assertIsNone(w.note)
+    }
+
+    def test_optional_absent() {
+        const w: Widget = decode[Widget]('{"name":"x"}'.encode("utf-8"))
+        self.assertIsNone(w.count)
+        self.assertIsNone(w.note)
+    }
+
+    def test_recursive_optional() {
+        const n: Node = decode[Node]('{"val":1,"next":{"val":2,"next":null}}'.encode("utf-8"))
+        self.assertEqual(n.val, 1)
+        const nx: Optional[Node] = n.next
+        self.assertIsNotNone(nx)
+        if nx is not None {
+            const inner: Node = nx
+            self.assertEqual(inner.val, 2)
+            self.assertIsNone(inner.next)
+        }
+    }
+
+    # Leak probe: optional decode/drop loop, under build-asan.
+    def test_optional_no_leak() {
+        i: int = 0
+        while i < 3000 {
+            const w: Widget = decode[Widget]('{"name":"n","count":7,"note":"q"}'.encode("utf-8"))
+            self.assertIsNotNone(w.count)
+            i = i + 1
+        }
+    }
+}
+
+
+main([DecodeBasicTests(), DecodeAdversarialTests(), DecodeOwnershipTests(),
+      DecodeListTests(), DecodeNestedTests(), DecodeOptionalTests(),
+      DecodeOptionalTypeTests()])
+

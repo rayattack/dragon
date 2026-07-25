@@ -1,0 +1,24 @@
+"""Minimal Box[T]; collide_generics_two.dr declares a richer one under the same name."""
+
+
+class Box[T] {
+    def(v: T) {
+        self.v = v
+    }
+
+    def get() -> T {
+        return self.v
+    }
+}
+
+
+def one_box_int() -> int {
+    b: Box[int] = Box[int](7)
+    return b.get()
+}
+
+
+def one_box_str() -> str {
+    b: Box[str] = Box[str]("alpha")
+    return b.get()
+}

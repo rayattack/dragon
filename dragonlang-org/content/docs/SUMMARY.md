@@ -114,11 +114,12 @@
 - [Networking](1408-stdlib-networking.md)
 - [Processes and the OS](1409-stdlib-processes.md)
 
-# Interfacing with C
+# Interfacing with Other Languages
 
 - [Calling C and C++](1501-ffi.md)
 - [Marshalling and intc](1502-ffi-marshalling.md)
 - [Linking Native Libraries](1503-ffi-linking.md)
+- [Calling Python, Go, and Rust](1504-ffi-process-lane.md)
 
 # Under the Hood
 

@@ -57,9 +57,26 @@ std::unique_ptr<Stmt> Parser::parseStatement() {
 }
 
 std::vector<TemplatePart> Parser::parseTemplateBody(
-        const std::string& body, const SourceLocation& loc, bool isDragonFile) {
+        const std::string& body, const SourceLocation& loc, bool isDragonFile,
+        std::vector<std::string>* errorsOut) {
     std::vector<TemplatePart> out;
     const std::string& val = body;
+
+    // 1-based line of `pos` within the body. Templates regularly embed whole
+    // files, so errors must say "line 412", not a byte offset.
+    auto lineOf = [&](size_t pos) {
+        size_t line = 1;
+        for (size_t k = 0; k < pos && k < val.size(); k++)
+            if (val[k] == '\n') line++;
+        return line;
+    };
+    auto snippetOf = [&](const std::string& s) {
+        return s.size() > 40 ? s.substr(0, 40) + "..." : s;
+    };
+    auto reportError = [&](std::string msg) {
+        if (errorsOut) errorsOut->push_back(std::move(msg));
+    };
+
     size_t i = 0;
     while (i < val.size()) {
         if (val[i] == '!' && i + 1 < val.size() && val[i+1] == '!' &&
@@ -88,6 +105,22 @@ std::vector<TemplatePart> Parser::parseTemplateBody(
                 if (val[j] == '{') depth++;
                 else if (val[j] == '}') depth--;
                 if (depth > 0) j++;
+            }
+            if (depth > 0) {
+                // Ran off the end of the body: the tail would otherwise be
+                // sub-parsed as if it were a complete interpolation and any
+                // failure silently dropped from the rendered output.
+                reportError("unterminated '!{' interpolation starting at line " +
+                            std::to_string(lineOf(bangPos)) +
+                            " of the template body: no matching '}' before the "
+                            "end of the content. Write '!!{' for a literal '!{'.");
+                TemplatePart p;
+                p.kind = TemplatePart::Kind::Interpolation;
+                p.bangPos = bangPos;
+                p.exprText = val.substr(start);
+                p.parseFailed = true;
+                out.push_back(std::move(p));
+                break;
             }
             std::string exprText = val.substr(start, j - start);
             i = j + 1;
@@ -172,19 +205,44 @@ std::vector<TemplatePart> Parser::parseTemplateBody(
                     p.blockStmts = std::move(fModule->body);
                 } else {
                     p.parseFailed = true;
+                    reportError("empty '!{}' interpolation at line " +
+                                std::to_string(lineOf(bangPos)) +
+                                " of the template body. Write '!!{' for a "
+                                "literal '!{'.");
                 }
             } else {
                 p.parseFailed = true;
+                std::string why;
+                for (const auto& d : fParser.diagnostics()) {
+                    if (d.level == ParserDiagnostic::Level::Error) {
+                        why = d.message;
+                        break;
+                    }
+                }
+                reportError("template interpolation '!{" + snippetOf(p.exprText) +
+                            "}' at line " + std::to_string(lineOf(bangPos)) +
+                            " of the template body does not parse as a Dragon "
+                            "expression or block" +
+                            (why.empty() ? "" : " (" + why + ")") +
+                            ". Write '!!{' for a literal '!{'.");
             }
             if (p.expr) p.expr->setLocation(loc);
             out.push_back(std::move(p));
         } else {
             // Literal text run - stored raw (template text is literal by design;
             // escapes are NOT processed, matching the original CodeGen scan).
+            // The break condition must mirror the dispatcher above exactly:
+            // stop only at `!{`, `!!{`, or `!!}` starts. A bare `!!` (the JS
+            // boolean-coercion idiom) is literal text; breaking on it left `i`
+            // unadvanced against a dispatcher that consumed nothing - an
+            // infinite loop.
             size_t start = i;
             while (i < val.size()) {
-                if (val[i] == '!' && i + 1 < val.size() &&
-                    (val[i+1] == '{' || val[i+1] == '!')) break;
+                if (val[i] == '!' && i + 1 < val.size()) {
+                    if (val[i+1] == '{') break;
+                    if (val[i+1] == '!' && i + 2 < val.size() &&
+                        (val[i+2] == '{' || val[i+2] == '}')) break;
+                }
                 i++;
             }
             std::string text = val.substr(start, i - start);
@@ -799,8 +857,10 @@ std::unique_ptr<Expr> Parser::primary() {
         expr->setLocation(loc);
         expr->body = std::move(body);
         expr->contentType = std::move(contentType);
+        std::vector<std::string> bodyErrors;
         expr->templateParts = parseTemplateBody(
-            expr->body, loc, /*isDragonFile=*/true);
+            expr->body, loc, /*isDragonFile=*/true, &bodyErrors);
+        for (const auto& e : bodyErrors) error(e);
         return expr;
     }
 
@@ -819,8 +879,10 @@ std::unique_ptr<Expr> Parser::primary() {
         expr->setLocation(loc);
         expr->body = previous().lexeme();
         expr->isContentAlias = true;
+        std::vector<std::string> bodyErrors;
         expr->templateParts = parseTemplateBody(
-            expr->body, loc, /*isDragonFile=*/true);
+            expr->body, loc, /*isDragonFile=*/true, &bodyErrors);
+        for (const auto& e : bodyErrors) error(e);
         return expr;
     }
 

@@ -692,6 +692,8 @@ std::unique_ptr<Stmt> cloneStmt(const Stmt* s, const TypeSubst& subst) {
         r->isExtern = n->isExtern;
         r->externLib = n->externLib;
         r->externSymbol = n->externSymbol;
+        r->externLang = n->externLang;
+        r->externPath = n->externPath;
         r->isProperty = n->isProperty;
         r->propertySetterFor = n->propertySetterFor;
         r->constructorIndex = n->constructorIndex;

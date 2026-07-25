@@ -33,6 +33,11 @@ add_executable(dragon_sema_tests SemaTest.cpp)
 target_link_libraries(dragon_sema_tests PRIVATE dragon_lib gtest_main)
 add_test(NAME SemaTests COMMAND dragon_sema_tests)
 
+# --- ffi sync tool tests (D052 stub generation + provenance guard) ---
+add_executable(dragon_ffisync_tests FfiSyncTest.cpp)
+target_link_libraries(dragon_ffisync_tests PRIVATE dragon_lib gtest_main)
+add_test(NAME FfiSyncTests COMMAND dragon_ffisync_tests)
+
 # --- Definite-Assignment Tests ---
 add_executable(dragon_definite_assignment_tests DefiniteAssignmentTest.cpp)
 target_link_libraries(dragon_definite_assignment_tests PRIVATE dragon_lib gtest_main)
@@ -157,6 +162,11 @@ set(DRAGON_STDLIB_IMPORTS_DR ${CMAKE_CURRENT_BINARY_DIR}/stdlib_imports.dr)
 file(GENERATE OUTPUT ${DRAGON_STDLIB_IMPORTS_DR} CONTENT "${_stdlib_imports}")
 add_test(NAME dr_stdlib_imports
     COMMAND $<TARGET_FILE:dragon> check ${DRAGON_STDLIB_IMPORTS_DR})
+
+# D052 - the flagship's generated stub must stay in sync with its declaration.
+add_test(NAME dr_ffi_sync_check
+    COMMAND $<TARGET_FILE:dragon> ffi sync
+        ${CMAKE_CURRENT_SOURCE_DIR}/dr/test_ffi_python.dr --check)
 
 # D044 - generics `.py`-mode parity. Registered explicitly because the test_*.dr
 # glob above is .dr-only; this file must keep its .py extension to parse in

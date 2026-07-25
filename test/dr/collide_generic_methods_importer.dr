@@ -1,0 +1,9 @@
+"""Imports two's Holder while one's same-named template registered first."""
+
+from collide_generic_methods_two import Holder
+
+
+def importer_wrap() -> str {
+    h: Holder = Holder(4)
+    return h.wrap[int](6)
+}

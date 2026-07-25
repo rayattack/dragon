@@ -1,0 +1,20 @@
+"""Fixture for the two-same-named-classes defect: this Writer is NOT io.Writer
+and has no __enter__/__exit__; it must never hijack io.Writer's identity."""
+
+
+class Writer {
+    tag: str
+
+    def(tag: str) {
+        self.tag = tag
+    }
+
+    def describe() -> str {
+        return "collision-writer:" + self.tag
+    }
+}
+
+
+def make_w(tag: str) -> Writer {
+    return Writer(tag)
+}
