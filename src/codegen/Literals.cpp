@@ -914,6 +914,13 @@ void CodeGen::emitSqlTemplate(TemplateExpr& node, const std::string& contentType
                 else if (val[j] == '}') depth--;
                 if (depth > 0) j++;
             }
+            if (depth > 0) {
+                impl_->addError("template[" + contentType + "]: unterminated "
+                                "'!{' parameter slot: no matching '}' before "
+                                "the end of the template. Write '!!{' for a "
+                                "literal '!{'.", node.location());
+                break;
+            }
             std::string exprText = val.substr(start, j - start);
             i = j + 1;
 
@@ -971,10 +978,16 @@ void CodeGen::emitSqlTemplate(TemplateExpr& node, const std::string& contentType
             canonical += "$$" + std::to_string(paramIndex++);
         } else {
             // Literal run - copied verbatim into the canonical query text.
+            // Mirror the dispatcher exactly (stop only at `!{`, `!!{`, `!!}`):
+            // a bare `!!` (e.g. Postgres prefix `!!`) is literal query text,
+            // and breaking on it without consuming spins forever.
             size_t lstart = i;
             while (i < val.size()) {
-                if (val[i] == '!' && i + 1 < val.size() &&
-                    (val[i+1] == '{' || val[i+1] == '!')) break;
+                if (val[i] == '!' && i + 1 < val.size()) {
+                    if (val[i+1] == '{') break;
+                    if (val[i+1] == '!' && i + 2 < val.size() &&
+                        (val[i+2] == '{' || val[i+2] == '}')) break;
+                }
                 i++;
             }
             canonical += val.substr(lstart, i - lstart);
@@ -1044,8 +1057,12 @@ void CodeGen::visit(TemplateFileExpr& node) {
     tmp.setLocation(node.location());
     tmp.body = std::move(content);
     tmp.contentType = node.contentType;
+    std::vector<std::string> bodyErrors;
     tmp.templateParts = Parser::parseTemplateBody(
-        tmp.body, tmp.location(), /*isDragonFile=*/true);
+        tmp.body, tmp.location(), /*isDragonFile=*/true, &bodyErrors);
+    for (const auto& e : bodyErrors)
+        impl_->addError("template file '" + node.filePath + "': " + e,
+                        node.location());
     visit(tmp);
 }
 

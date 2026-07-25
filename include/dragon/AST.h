@@ -152,7 +152,7 @@ struct TemplatePart {
     bool isSpread = false;                         // `!{*expr}` spread sugar
     std::string exprText;                          // raw slot text (error messages / parse-failure fallback)
     size_t bangPos = 0;                            // byte offset of `!` in TemplateExpr::body (reactive/event-attr context in CodeGen)
-    bool parseFailed = false;                      // sub-parse produced neither expr nor statements
+    bool parseFailed = false;                      // sub-parse produced neither expr nor statements (parseTemplateBody reported it via errorsOut; consumers skip the part)
 };
 
 /// Template expression: template { raw text with !{expr} interpolation }

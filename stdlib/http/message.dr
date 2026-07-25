@@ -414,7 +414,7 @@ class Request {
         # body bytes (not the lenient-decoded `body` str), so a body with high
         # bytes round-trips byte-exact. Raises ValueError (with the byte offset)
         # on malformed JSON. The raw body is still available as `req.body`; for a
-        # known shape, prefer `T(**json.loads_obj(req.body))`.
+        # known shape, prefer the box-free `decode[T](req.body_bytes)`.
         return loads_bytes(self.body_bytes)
     }
 

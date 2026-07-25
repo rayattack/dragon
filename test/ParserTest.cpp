@@ -2897,3 +2897,98 @@ TEST(ParserTest, DeferRemainsUsableAsIdentifier) {
         "}\n");
     ASSERT_NE(module, nullptr);
 }
+
+//===----------------------------------------------------------------------===//
+// Template body scanning (parseTemplateBody)
+//===----------------------------------------------------------------------===//
+
+// A bare `!!` with no `{`/`}` after it is literal text (the JS boolean-
+// coercion idiom `!!x`), not an escape prefix. The literal-run scanner used
+// to break at any `!!` while the dispatcher consumed nothing, so this input
+// spun forever. Terminating at all IS the regression assertion.
+TEST(ParserTest, TemplateBodyDoubleBangIsLiteral) {
+    SourceLocation loc;
+    auto parts = Parser::parseTemplateBody("var a = !!b;", loc, true);
+    ASSERT_EQ(parts.size(), 1u);
+    EXPECT_EQ(parts[0].kind, TemplatePart::Kind::Literal);
+    EXPECT_EQ(parts[0].literal, "var a = !!b;");
+}
+
+TEST(ParserTest, TemplateBodyDoubleBangAtEndOfBody) {
+    SourceLocation loc;
+    auto parts = Parser::parseTemplateBody("a !!", loc, true);
+    ASSERT_EQ(parts.size(), 1u);
+    EXPECT_EQ(parts[0].kind, TemplatePart::Kind::Literal);
+    EXPECT_EQ(parts[0].literal, "a !!");
+}
+
+// Runs of 3+ bangs: away from a brace they are pure literal text; abutting
+// a `{` or `}` the LAST two bangs form the escape and the rest stay literal
+// (`!!!{` -> `!!{`, `!!!!{` -> `!!!{`). Pins the greedy-leftmost scan.
+TEST(ParserTest, TemplateBodyBangRuns) {
+    SourceLocation loc;
+    auto render = [&](const std::string& body) {
+        std::string out;
+        for (const auto& p : Parser::parseTemplateBody(body, loc, true))
+            out += p.literal;
+        return out;
+    };
+    EXPECT_EQ(render("a !!! b"), "a !!! b");
+    EXPECT_EQ(render("a !!!! b"), "a !!!! b");
+    EXPECT_EQ(render("a !!!!!"), "a !!!!!");
+    EXPECT_EQ(render("g !!!{x} h"), "g !!{x} h");
+    EXPECT_EQ(render("i !!!!{x} j"), "i !!!{x} j");
+    EXPECT_EQ(render("k !!!} m"), "k !} m");
+}
+
+// The documented escapes are exactly `!!{` -> `!{` and `!!}` -> `}`; they
+// must keep working with the tightened literal-run break condition.
+TEST(ParserTest, TemplateBodyEscapesUnchanged) {
+    SourceLocation loc;
+    auto parts = Parser::parseTemplateBody("x !!{y!!} z", loc, true);
+    std::string joined;
+    for (const auto& p : parts) {
+        ASSERT_EQ(p.kind, TemplatePart::Kind::Literal);
+        joined += p.literal;
+    }
+    EXPECT_EQ(joined, "x !{y} z");
+}
+
+// An unterminated `!{` used to sub-parse the ragged tail and silently drop
+// it from the rendered output on failure. It is a reported error now.
+TEST(ParserTest, TemplateBodyUnterminatedInterpolationIsError) {
+    SourceLocation loc;
+    std::vector<std::string> errs;
+    auto parts = Parser::parseTemplateBody("a !{x", loc, true, &errs);
+    ASSERT_EQ(errs.size(), 1u);
+    EXPECT_NE(errs[0].find("unterminated '!{'"), std::string::npos);
+    ASSERT_FALSE(parts.empty());
+    EXPECT_TRUE(parts.back().parseFailed);
+}
+
+// An interpolation body that is not valid Dragon was silently dropped too.
+TEST(ParserTest, TemplateBodyUnparsableInterpolationIsError) {
+    SourceLocation loc;
+    std::vector<std::string> errs;
+    Parser::parseTemplateBody("a !{1 +} b", loc, true, &errs);
+    ASSERT_EQ(errs.size(), 1u);
+    EXPECT_NE(errs[0].find("does not parse"), std::string::npos);
+}
+
+TEST(ParserTest, TemplateBodyEmptyInterpolationIsError) {
+    SourceLocation loc;
+    std::vector<std::string> errs;
+    Parser::parseTemplateBody("a !{} b", loc, true, &errs);
+    ASSERT_EQ(errs.size(), 1u);
+    EXPECT_NE(errs[0].find("empty '!{}'"), std::string::npos);
+}
+
+// End-to-end through the real parser: a bad interpolation inside an inline
+// `template { ... }` must surface as a parser diagnostic, not vanish.
+TEST(ParserTest, InlineTemplateBadInterpolationSurfacesError) {
+    auto diags = parseErrors("x: str = template {a !{1 +} b}");
+    bool hasError = false;
+    for (const auto& d : diags)
+        if (d.level == ParserDiagnostic::Level::Error) hasError = true;
+    EXPECT_TRUE(hasError);
+}

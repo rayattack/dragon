@@ -530,10 +530,8 @@ DragonList* dragon_subprocess_pump(int in_fd, DragonBytes* stdin_data,
 }
 
 
-/// @brief read exactly n bytes - a short results means writer died mid-frame; callers treat len < n as fatal
-/// @param fd 
-/// @param n 
-/// @return 
+/// Read exactly n bytes (poll-sliced + vthread-yield). A short read means the
+/// writer died mid-frame; callers treat len < n as fatal.
 DragonBytes* dragon_subprocess_read_n(int fd, int64_t n) {
 #ifdef _WIN32
     (void)fd; (void)n;

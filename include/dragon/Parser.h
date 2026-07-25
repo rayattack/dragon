@@ -56,8 +56,15 @@ public:
     /// re-lexing the raw body at each stage. `isDragonFile` selects the sub-
     /// parser surface for the interpolation bodies. Static because it builds
     /// its own sub-lexers/sub-parsers and needs no outer parser state.
+    ///
+    /// Only `!!{` and `!!}` are escapes; a bare `!!` with nothing to escape
+    /// (the JS `!!x` idiom) is literal text. Scan defects that would silently
+    /// corrupt the rendered output - an unterminated `!{`, an interpolation
+    /// body that is not valid Dragon - are appended to `errorsOut` when
+    /// provided; every caller surfaces them as compile errors.
     static std::vector<TemplatePart> parseTemplateBody(
-        const std::string& body, const SourceLocation& loc, bool isDragonFile);
+        const std::string& body, const SourceLocation& loc, bool isDragonFile,
+        std::vector<std::string>* errorsOut = nullptr);
 
     /// Parse a single statement
     std::unique_ptr<Stmt> parseStatement();
