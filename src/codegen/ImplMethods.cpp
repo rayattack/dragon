@@ -690,6 +690,11 @@ llvm::Value* CodeGen::Impl::callDunder(const std::string& className, const std::
         std::string funcName = mangleClass(defMod, defClass) + "_" + dunder;
         auto* func = module->getFunction(funcName);
         if (!func) return nullptr;
+        return emitDunderCall(func, dunder, self, extraArgs);
+    }
+
+llvm::Value* CodeGen::Impl::emitDunderCall(llvm::Function* func, const std::string& dunder,
+                        llvm::Value* self, const std::vector<llvm::Value*>& extraArgs) {
         std::vector<llvm::Value*> args = {self};
         args.insert(args.end(), extraArgs.begin(), extraArgs.end());
         // Fill any still-undeclared parameters (past self + provided extras) with

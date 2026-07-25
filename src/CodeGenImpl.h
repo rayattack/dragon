@@ -240,6 +240,7 @@ struct CodeGen::Impl {
         std::string className;
         llvm::Value* val;
         llvm::Value* enterResult = nullptr;  // __enter__ result (class CMs); may == val
+        llvm::Function* exitFn = nullptr;    // true-identity __exit__; null = name-resolved
         bool isLockTemp = false;  // `with Lock()` - an anonymous lock the `with`
                                   // OWNS: destroy (not just release) it on exit.
         bool subjectOwned = true;  // false when the subject expression is a
@@ -822,6 +823,21 @@ struct CodeGen::Impl {
         return mangleClass(resolveClassOwningModule(bareName), bareName);
     }
 
+    // TRUE-identity method resolution: walk the ClassType parent chain, each level
+    // mangled with ITS definingModule - immune to same-named classes elsewhere.
+    llvm::Function* methodFromClassType(const ClassType* ct,
+                                        const std::string& method) const {
+        for (int guard = 0; ct && module && guard < 256; ++guard) {
+            auto* f = module->getFunction(
+                mangleClass(ct->definingModule, ct->name) + "_" + method);
+            if (f) return f;
+            ct = (ct->parentClass && ct->parentClass->kind() == Type::Kind::Class)
+                     ? static_cast<const ClassType*>(ct->parentClass.get())
+                     : nullptr;
+        }
+        return nullptr;
+    }
+
     // D026 devirtualization gate: does any STRICT subclass of `baseClass`
     // directly define (override) `method`? If not, a call on a `baseClass`-
     // typed receiver can be devirtualized to a direct call (C-speed) - the
@@ -1219,6 +1235,11 @@ struct CodeGen::Impl {
     // Call a dunder method on a class instance. Returns the result or nullptr if not found.
     llvm::Value* callDunder(const std::string& className, const std::string& dunder,
                             llvm::Value* self, const std::vector<llvm::Value*>& extraArgs = {});
+
+    // Emit the call to an ALREADY-resolved dunder (None-fills missing params).
+    llvm::Value* emitDunderCall(llvm::Function* func, const std::string& dunder,
+                                llvm::Value* self,
+                                const std::vector<llvm::Value*>& extraArgs = {});
 
     // Convert a value to i1 (boolean) for use in conditions.
     // For class instances, calls __bool__ if available (defaults to true).
@@ -1644,7 +1665,8 @@ struct CodeGen::Impl {
             // Forward order, matching the with-statement's normal cleanup path.
             for (auto& it : e.withItems) {
                 if (it.isClassCtx) {
-                    callDunder(it.className, "__exit__", it.val);
+                    if (it.exitFn) emitDunderCall(it.exitFn, "__exit__", it.val);
+                    else callDunder(it.className, "__exit__", it.val);
                     if (options.gcMode == GCMode::RC) {   // release the CM object (#8)
                         if (it.subjectOwned)
                             builder->CreateCall(runtimeFuncs["dragon_decref"], {it.val});

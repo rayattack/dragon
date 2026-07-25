@@ -1,0 +1,49 @@
+"""Two dep modules each declare `class Writer` (io's has __enter__; the fixture's
+does not). Each value must resolve against ITS OWN class, in both import orders"""
+
+from unittest import TestCase, main
+from io import make, open
+from writer_collision_mod import make_w, Writer
+from tempfile import mkdtemp
+from os.path import join
+
+
+class WriterCollisionTests(TestCase) {
+    # The crash shape: with-statement through io.make's RETURN type while the
+    # fixture's same-named Writer sits later in the dep graph.
+    def test_with_uses_ios_writer() {
+        const dir: str = mkdtemp("drtest-", "-wc")
+        const path: str = join(dir, "out.txt")
+        with make(path) as w {
+            w.write("hello from io")
+        }
+        body: str = ""
+        with open(path) as f {
+            body = f.text()
+        }
+        self.assertEqual(body, "hello from io")
+    }
+
+    def test_fixture_writer_dispatches_to_its_own_class() {
+        const cw: Writer = make_w("mine")
+        self.assertEqual(cw.describe(), "collision-writer:mine")
+        self.assertEqual(cw.tag, "mine")
+    }
+
+    def test_both_alive_in_one_scope() {
+        const dir: str = mkdtemp("drtest-", "-wc")
+        const path: str = join(dir, "both.txt")
+        const cw: Writer = make_w("x")
+        with make(path) as w {
+            w.write(cw.describe())
+        }
+        body: str = ""
+        with open(path) as f {
+            body = f.text()
+        }
+        self.assertEqual(body, "collision-writer:x")
+    }
+}
+
+
+main([WriterCollisionTests()])
