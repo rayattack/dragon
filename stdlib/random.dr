@@ -16,6 +16,12 @@
 extern "C" def rand() -> intc
 extern "C" def srand(seed: intc)
 extern "C" def time(tloc: ptr) -> int
+extern "C" def clock_gettime(clockid: intc, tp: ptr) -> intc
+extern "C" def malloc(size: int) -> ptr
+extern "C" def free(p: ptr)
+extern "C" def memset(s: ptr, c: intc, n: int) -> ptr
+extern "C" def dragon_timespec_sec(ts: ptr) -> int
+extern "C" def dragon_timespec_nsec(ts: ptr) -> int
 
 # OS CSPRNG (getrandom/getentropy), exposed by the Dragon runtime. Declared
 # directly instead of importing `secrets` so that a program which rolls a die
@@ -34,11 +40,16 @@ const _SEED_MASK: int = 2147483647
 # seeding so the first value a caller sees does not leak the seed's magnitude.
 const _WARMUP: int = 16
 
+# Knuth's multiplicative constant. Mixed in per seed_time() call so that two
+# calls landing in the same clock tick still get well-separated seeds.
+const _CALL_STRIDE: int = 2654435761
+
 #===----------------------------------------------------------------------===#
 # Seeding
 #===----------------------------------------------------------------------===#
 
 _seeded: bool = false
+_seed_time_calls: int = 0
 
 def _srand_warm(s: int) {
     # Single seeding path: mask, seed, diffuse, and mark as seeded so the
@@ -78,10 +89,25 @@ def seed(s: int) {
 }
 
 def seed_time() {
-    # Seed from the current time. Routed through _srand_warm so it also marks
-    # the generator as seeded; time() only resolves to the second, so callers
-    # that need distinct streams should prefer the automatic entropy seed.
-    _srand_warm(time(none))
+    # Seed from the wall clock, plus a per-call stride.
+    #
+    # CLOCK_REALTIME reports nanoseconds but the underlying tick is coarser
+    # (microseconds on macOS), so two calls in quick succession can read the
+    # same instant. The call counter guarantees each call still gets a distinct,
+    # well-separated seed rather than silently repeating the previous stream.
+    #
+    # Prefer leaving the generator alone (it self-seeds from the OS CSPRNG) or
+    # calling seed(n) for reproducibility. This is kept for callers that want a
+    # time-derived - and therefore guessable - seed on purpose.
+    global _seed_time_calls
+    const ts: ptr = malloc(16)
+    memset(ts, 0, 16)
+    clock_gettime(0, ts)
+    const sec: int = dragon_timespec_sec(ts)
+    const nsec: int = dragon_timespec_nsec(ts)
+    free(ts)
+    _seed_time_calls = _seed_time_calls + 1
+    _srand_warm(sec * 1000000000 + nsec + _seed_time_calls * _CALL_STRIDE)
 }
 
 #===----------------------------------------------------------------------===#
