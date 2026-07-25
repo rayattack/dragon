@@ -909,6 +909,8 @@ void TypeChecker::collectGenericTemplates(Module& module) {
             impl_->genericFunctions[fd->name] = fd;
             if (fd->name == "decode" && module.moduleName == "json")
                 impl_->schemaDecodeFns.insert(fd);
+            if (fd->name == "encode" && module.moduleName == "json")
+                impl_->schemaEncodeFns.insert(fd);
         }
     }
     // Visit each template once (type params bound to TypeVar) to populate its type
@@ -948,6 +950,8 @@ void TypeChecker::registerExternalGenerics(Module& mod) {
                 impl_->genericTemplateModule.emplace(fd, mod.moduleName);
                 if (fd->name == "decode" && mod.moduleName == "json")
                     impl_->schemaDecodeFns.insert(fd);
+                if (fd->name == "encode" && mod.moduleName == "json")
+                    impl_->schemaEncodeFns.insert(fd);
             }
         }
     }
@@ -1069,6 +1073,11 @@ void TypeChecker::runMonomorphization() {
             // than cloning the (never-lowered) template body.
             cloned = synthesizeSchemaDecoder(
                 req.args.empty() ? nullptr : req.args[0], template_->location());
+        } else if (!req.isClass && !isMethodReq &&
+                   impl_->schemaEncodeFns.count(dynamic_cast<const FunctionDecl*>(template_))) {
+            // D052: the write-side mirror - generate the box-free encoder body.
+            cloned = synthesizeSchemaEncoder(
+                req.args.empty() ? nullptr : req.args[0], template_->location());
         } else {
             cloned = cloneStmt(template_, subst);
         }
@@ -1187,6 +1196,14 @@ std::unique_ptr<TypeExpr> sdInnerType(const std::string& kind, SourceLocation lo
         g->setLocation(loc);
         return g;
     }
+    if (kind.rfind("dict:", 0) == 0) {
+        auto g = std::make_unique<GenericTypeExpr>();
+        g->base = sdType("dict", loc);
+        g->typeArgs.push_back(sdType("str", loc));
+        g->typeArgs.push_back(sdType(kind.substr(5), loc));
+        g->setLocation(loc);
+        return g;
+    }
     if (kind.rfind("class:", 0) == 0) return sdType(kind.substr(6), loc);
     return sdType(kind, loc);
 }
@@ -1206,6 +1223,11 @@ std::unique_ptr<Expr> sdFieldZero(const std::string& kind, SourceLocation loc) {
         auto l = std::make_unique<ListExpr>();
         l->setLocation(loc);
         return l;
+    }
+    if (kind.rfind("dict:", 0) == 0) {
+        auto d = std::make_unique<DictExpr>();
+        d->setLocation(loc);
+        return d;
     }
     return sdZero(kind, loc);
 }
@@ -1284,15 +1306,258 @@ std::unique_ptr<Stmt> sdAssign(const std::string& name, std::unique_ptr<Expr> va
     return s;
 }
 
+// Field kind shared by encode/decode synthesis: scalar name, "list:<scalar>",
+// "class:<Name>", or "" for an unsupported shape
+std::string sdDetectKind(const std::unordered_map<std::string, ClassDecl*>& classes,
+                         const TypeExpr* t) {
+    if (auto* nt = dynamic_cast<const NamedTypeExpr*>(t)) {
+        const std::string& n = nt->name;
+        if (n == "int" || n == "str" || n == "bool" || n == "float") return n;
+        if (classes.count(n)) return "class:" + n;
+        return "";
+    }
+    if (auto* gt = dynamic_cast<const GenericTypeExpr*>(t))
+        if (auto* b = dynamic_cast<const NamedTypeExpr*>(gt->base.get())) {
+            if (b->name == "list" && gt->typeArgs.size() == 1)
+                if (auto* el = dynamic_cast<const NamedTypeExpr*>(gt->typeArgs[0].get())) {
+                    const std::string& e = el->name;
+                    if (e == "int" || e == "str" || e == "bool" || e == "float")
+                        return "list:" + e;
+                }
+            // dict[str, scalar] - str keys only (JSON object keys ARE strings).
+            if (b->name == "dict" && gt->typeArgs.size() == 2) {
+                auto* kt = dynamic_cast<const NamedTypeExpr*>(gt->typeArgs[0].get());
+                auto* vt = dynamic_cast<const NamedTypeExpr*>(gt->typeArgs[1].get());
+                if (kt && vt && kt->name == "str") {
+                    const std::string& e = vt->name;
+                    if (e == "int" || e == "str" || e == "bool" || e == "float")
+                        return "dict:" + e;
+                }
+            }
+        }
+    return "";
+}
+// Optional[X] (parsed as `X | None`) -> "opt:<ik>"; "" if not that shape.
+std::string sdOptKind(const std::unordered_map<std::string, ClassDecl*>& classes,
+                      const TypeExpr* t) {
+    auto* u = dynamic_cast<const UnionTypeExpr*>(t);
+    if (!u || u->types.size() != 2) return "";
+    const TypeExpr* inner = nullptr;
+    bool hasNone = false;
+    for (auto& tt : u->types) {
+        auto* nt = dynamic_cast<const NamedTypeExpr*>(tt.get());
+        if (nt && nt->name == "None") hasNone = true;
+        else inner = tt.get();
+    }
+    if (!hasNone || !inner) return "";
+    std::string ik = sdDetectKind(classes, inner);
+    return ik.empty() ? "" : "opt:" + ik;
+}
+// obj.field
+std::unique_ptr<Expr> sdAttr(const std::string& obj, const std::string& field,
+                             SourceLocation loc) {
+    auto attr = std::make_unique<AttributeExpr>();
+    attr->object = sdName(obj, loc);
+    attr->attribute = field;
+    attr->setLocation(loc);
+    return attr;
+}
+// recv.method(arg)
+std::unique_ptr<Expr> sdCall1(const std::string& recv, const std::string& method,
+                              std::unique_ptr<Expr> arg, SourceLocation loc) {
+    auto attr = std::make_unique<AttributeExpr>();
+    attr->object = sdName(recv, loc);
+    attr->attribute = method;
+    attr->setLocation(loc);
+    auto call = std::make_unique<CallExpr>();
+    call->callee = std::move(attr);
+    call->args.push_back(std::move(arg));
+    call->setLocation(loc);
+    return call;
+}
+// encode[<cls>](<arg>) - the write-side mirror of sdDecodeExpr.
+std::unique_ptr<Expr> sdEncodeExpr(const std::string& cls, std::unique_ptr<Expr> arg,
+                                   SourceLocation loc) {
+    auto sub = std::make_unique<SubscriptExpr>();
+    sub->object = sdName("encode", loc);
+    sub->index = sdName(cls, loc);
+    sub->setLocation(loc);
+    auto call = std::make_unique<CallExpr>();
+    call->callee = std::move(sub);
+    call->args.push_back(std::move(arg));
+    call->setLocation(loc);
+    return call;
+}
+std::string sdWriteMethodFor(const std::string& k) {
+    if (k == "int") return "write_int";
+    if (k == "float") return "write_float";
+    if (k == "bool") return "write_bool";
+    if (k == "str") return "write_str";
+    if (k == "list:int") return "write_int_list";
+    if (k == "list:float") return "write_float_list";
+    if (k == "list:bool") return "write_bool_list";
+    if (k == "list:str") return "write_str_list";
+    if (k == "dict:int") return "write_int_dict";
+    if (k == "dict:float") return "write_float_dict";
+    if (k == "dict:bool") return "write_bool_dict";
+    return "write_str_dict";  // dict:str
+}
+// w: JsonWriter = JsonWriter()
+std::unique_ptr<Stmt> sdWriterDecl(SourceLocation loc) {
+    auto ctorCall = std::make_unique<CallExpr>();
+    ctorCall->callee = sdName("JsonWriter", loc);
+    ctorCall->setLocation(loc);
+    return sdDecl("w", sdType("JsonWriter", loc), std::move(ctorCall), loc);
+}
+// return w.finish()
+std::unique_ptr<Stmt> sdReturnFinish(SourceLocation loc) {
+    auto ret = std::make_unique<ReturnStmt>();
+    ret->value = sdCall0("w", "finish", loc);
+    ret->setLocation(loc);
+    return ret;
+}
+// One statement writing a value expr of kind k through w (recursive encode for classes).
+std::unique_ptr<Stmt> sdWriteValueStmt(const std::string& k, std::unique_ptr<Expr> val,
+                                       SourceLocation loc) {
+    if (k.rfind("class:", 0) == 0)
+        return sdExprStmt(sdCall1("w", "write_raw",
+                                  sdEncodeExpr(k.substr(6), std::move(val), loc), loc), loc);
+    return sdExprStmt(sdCall1("w", sdWriteMethodFor(k), std::move(val), loc), loc);
+}
+// Scalar kind name for a top-level type; "" when not a JSON scalar.
+std::string sdScalarKindName(Type::Kind k) {
+    switch (k) {
+        case Type::Kind::Int: return "int";
+        case Type::Kind::Float: return "float";
+        case Type::Kind::Bool: return "bool";
+        case Type::Kind::Str: return "str";
+        default: return "";
+    }
+}
+// Shared decoder prologue: fn(body: bytes) with `c: Cursor = Cursor(body)`.
+std::unique_ptr<FunctionDecl> sdCursorFn(SourceLocation loc) {
+    auto fn = std::make_unique<FunctionDecl>();
+    fn->setLocation(loc);
+    Parameter bodyParam;
+    bodyParam.name = "body";
+    bodyParam.type = sdType("bytes", loc);
+    fn->params.push_back(std::move(bodyParam));
+    auto ctorCall = std::make_unique<CallExpr>();
+    ctorCall->callee = sdName("Cursor", loc);
+    ctorCall->args.push_back(sdName("body", loc));
+    ctorCall->setLocation(loc);
+    fn->body.push_back(sdDecl("c", sdType("Cursor", loc), std::move(ctorCall), loc));
+    return fn;
+}
+
 }  // namespace
 
 std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
     const std::shared_ptr<Type>& targetType, SourceLocation loc) {
+    // D052 - top-level scalar: one Cursor read is the whole document
+    if (targetType) {
+        const std::string sk = sdScalarKindName(targetType->kind());
+        if (!sk.empty()) {
+            auto fn = sdCursorFn(loc);
+            fn->returnType = sdType(sk, loc);
+            auto ret = std::make_unique<ReturnStmt>();
+            ret->value = sdCall0("c", "parse_" + sk, loc);
+            ret->setLocation(loc);
+            fn->body.push_back(std::move(ret));
+            return fn;
+        }
+    }
+    // D052 - top-level dict[str, scalar]: one Cursor call reads the whole object.
+    if (targetType && targetType->kind() == Type::Kind::Dict) {
+        auto& dt = static_cast<DictType&>(*targetType);
+        const std::string vk = dt.valueType ? sdScalarKindName(dt.valueType->kind()) : "";
+        if (!dt.keyType || dt.keyType->kind() != Type::Kind::Str || vk.empty()) {
+            error(loc, "json.decode[dict[K, V]]: only dict[str, <scalar>] decodes");
+            return nullptr;
+        }
+        auto fn = sdCursorFn(loc);
+        fn->returnType = sdInnerType("dict:" + vk, loc);
+        auto ret = std::make_unique<ReturnStmt>();
+        ret->value = sdCall0("c", "parse_" + vk + "_dict", loc);
+        ret->setLocation(loc);
+        fn->body.push_back(std::move(ret));
+        return fn;
+    }
+    // D052 - top-level list[Class] / list[scalar]: decode a JSON array
+    if (targetType && targetType->kind() == Type::Kind::List) {
+        auto& lt = static_cast<ListType&>(*targetType);
+        const std::string elemScalar =
+            lt.elementType ? sdScalarKindName(lt.elementType->kind()) : "";
+        if (!elemScalar.empty()) {
+            auto fn = sdCursorFn(loc);
+            auto g = std::make_unique<GenericTypeExpr>();
+            g->base = sdType("list", loc);
+            g->typeArgs.push_back(sdType(elemScalar, loc));
+            g->setLocation(loc);
+            fn->returnType = std::move(g);
+            auto ret = std::make_unique<ReturnStmt>();
+            ret->value = sdCall0("c", "parse_" + elemScalar + "_list", loc);
+            ret->setLocation(loc);
+            fn->body.push_back(std::move(ret));
+            return fn;
+        }
+        std::string elemClass;
+        if (auto inst = std::dynamic_pointer_cast<InstanceType>(lt.elementType))
+            if (inst->classType) elemClass = inst->classType->name;
+        if (elemClass.empty() || !impl_->classDeclByName.count(elemClass)) {
+            error(loc, "json.decode[list[T]]: the element type must be a class or scalar");
+            return nullptr;
+        }
+        auto fn = std::make_unique<FunctionDecl>();
+        fn->setLocation(loc);
+        auto mkListTy = [&]() -> std::unique_ptr<TypeExpr> {
+            auto g = std::make_unique<GenericTypeExpr>();
+            g->base = sdType("list", loc);
+            g->typeArgs.push_back(sdType(elemClass, loc));
+            g->setLocation(loc);
+            return g;
+        };
+        fn->returnType = mkListTy();
+        Parameter bodyParam;
+        bodyParam.name = "body";
+        bodyParam.type = sdType("bytes", loc);
+        fn->params.push_back(std::move(bodyParam));
+
+        auto ctorCall = std::make_unique<CallExpr>();
+        ctorCall->callee = sdName("Cursor", loc);
+        ctorCall->args.push_back(sdName("body", loc));
+        ctorCall->setLocation(loc);
+        fn->body.push_back(sdDecl("c", sdType("Cursor", loc), std::move(ctorCall), loc));
+
+        auto emptyList = std::make_unique<ListExpr>();
+        emptyList->setLocation(loc);
+        fn->body.push_back(sdDecl("out", mkListTy(), std::move(emptyList), loc));
+
+        fn->body.push_back(sdExprStmt(sdCall0("c", "array_begin", loc), loc));
+        fn->body.push_back(sdDecl("_first", sdType("bool", loc), sdBool(true, loc), loc));
+
+        auto wh = std::make_unique<WhileStmt>();
+        wh->condition = sdCall1("c", "array_more", sdName("_first", loc), loc);
+        wh->setLocation(loc);
+        wh->body.push_back(sdAssign("_first", sdBool(false, loc), loc));
+        wh->body.push_back(sdExprStmt(
+            sdCall1("out", "append",
+                    sdDecodeExpr(elemClass, sdCall0("c", "capture_value", loc), loc), loc),
+            loc));
+        fn->body.push_back(std::move(wh));
+
+        auto ret = std::make_unique<ReturnStmt>();
+        ret->value = sdName("out", loc);
+        ret->setLocation(loc);
+        fn->body.push_back(std::move(ret));
+        return fn;
+    }
+
     std::string className;
     if (auto inst = std::dynamic_pointer_cast<InstanceType>(targetType))
         if (inst->classType) className = inst->classType->name;
     if (className.empty()) {
-        error(loc, "json.decode[T]: T must be a class type");
+        error(loc, "json.decode[T]: T must be a class type (or list of a class)");
         return nullptr;
     }
     auto cdIt = impl_->classDeclByName.find(className);
@@ -1313,23 +1578,6 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
     // or "opt:<ik>" for Optional[<ik>]. `optional` means "no seen-check" (absent
     // is allowed) - true for opt-null fields and for literal-default fields.
     struct Field { std::string name; std::string kind; bool optional; std::unique_ptr<Expr> dflt; };
-    auto detectKind = [&](const TypeExpr* t) -> std::string {
-        if (auto* nt = dynamic_cast<const NamedTypeExpr*>(t)) {
-            const std::string& n = nt->name;
-            if (n == "int" || n == "str" || n == "bool" || n == "float") return n;
-            if (impl_->classDeclByName.count(n)) return "class:" + n;
-            return "";
-        }
-        if (auto* gt = dynamic_cast<const GenericTypeExpr*>(t))
-            if (auto* b = dynamic_cast<const NamedTypeExpr*>(gt->base.get()))
-                if (b->name == "list" && gt->typeArgs.size() == 1)
-                    if (auto* el = dynamic_cast<const NamedTypeExpr*>(gt->typeArgs[0].get())) {
-                        const std::string& e = el->name;
-                        if (e == "int" || e == "str" || e == "bool" || e == "float")
-                            return "list:" + e;
-                    }
-        return "";
-    };
     std::vector<Field> fields;
     for (auto& p : ctor->params) {
         if (p.name == "self") continue;
@@ -1337,28 +1585,15 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
             error(loc, "json.decode[" + className + "]: variadic constructors are not decodable");
             return nullptr;
         }
-        std::string kind = detectKind(p.type.get());
+        std::string kind = sdDetectKind(impl_->classDeclByName, p.type.get());
         bool isOptNull = false;
         if (kind.empty()) {
-            // Optional[X] is parsed as `X | None`.
-            if (auto* u = dynamic_cast<UnionTypeExpr*>(p.type.get()))
-                if (u->types.size() == 2) {
-                    const TypeExpr* inner = nullptr;
-                    bool hasNone = false;
-                    for (auto& tt : u->types) {
-                        auto* nt = dynamic_cast<const NamedTypeExpr*>(tt.get());
-                        if (nt && nt->name == "None") hasNone = true;
-                        else inner = tt.get();
-                    }
-                    if (hasNone && inner) {
-                        std::string ik = detectKind(inner);
-                        if (!ik.empty()) { kind = "opt:" + ik; isOptNull = true; }
-                    }
-                }
+            std::string ok = sdOptKind(impl_->classDeclByName, p.type.get());
+            if (!ok.empty()) { kind = ok; isOptNull = true; }
         }
         if (kind.empty()) {
             error(loc, "json.decode[" + className + "]: field '" + p.name +
-                       "' is not yet decodable (int/str/bool/float, list of those, "
+                       "' is not yet decodable (int/str/bool/float, list of those, dict[str, scalar], "
                        "a class, or Optional of those)");
             return nullptr;
         }
@@ -1394,7 +1629,11 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
         if (k == "list:int") return "parse_int_list";
         if (k == "list:float") return "parse_float_list";
         if (k == "list:bool") return "parse_bool_list";
-        return "parse_str_list";  // list:str
+        if (k == "list:str") return "parse_str_list";
+        if (k == "dict:int") return "parse_int_dict";
+        if (k == "dict:float") return "parse_float_dict";
+        if (k == "dict:bool") return "parse_bool_dict";
+        return "parse_str_dict";  // dict:str
     };
 
     auto fn = std::make_unique<FunctionDecl>();
@@ -1517,6 +1756,193 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
     ret->setLocation(loc);
     fn->body.push_back(std::move(ret));
 
+    return fn;
+}
+
+// D052 schema-encode synthesis: build encode[T]'s box-free Writer-driven body
+// from T's ctor fields - the write-side mirror of synthesizeSchemaDecoder.
+
+std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaEncoder(
+    const std::shared_ptr<Type>& targetType, SourceLocation loc) {
+    // Top-level scalar: one typed Writer call is the whole document.
+    if (targetType) {
+        const std::string sk = sdScalarKindName(targetType->kind());
+        if (!sk.empty()) {
+            auto fn = std::make_unique<FunctionDecl>();
+            fn->setLocation(loc);
+            fn->returnType = sdType("bytes", loc);
+            Parameter valueParam;
+            valueParam.name = "value";
+            valueParam.type = sdType(sk, loc);
+            fn->params.push_back(std::move(valueParam));
+            fn->body.push_back(sdWriterDecl(loc));
+            fn->body.push_back(sdWriteValueStmt(sk, sdName("value", loc), loc));
+            fn->body.push_back(sdReturnFinish(loc));
+            return fn;
+        }
+    }
+    // Top-level dict[str, scalar]: one typed Writer call is the whole object.
+    if (targetType && targetType->kind() == Type::Kind::Dict) {
+        auto& dt = static_cast<DictType&>(*targetType);
+        const std::string vk = dt.valueType ? sdScalarKindName(dt.valueType->kind()) : "";
+        if (!dt.keyType || dt.keyType->kind() != Type::Kind::Str || vk.empty()) {
+            error(loc, "json.encode[dict[K, V]]: only dict[str, <scalar>] encodes");
+            return nullptr;
+        }
+        auto fn = std::make_unique<FunctionDecl>();
+        fn->setLocation(loc);
+        fn->returnType = sdType("bytes", loc);
+        Parameter valueParam;
+        valueParam.name = "value";
+        valueParam.type = sdInnerType("dict:" + vk, loc);
+        fn->params.push_back(std::move(valueParam));
+        fn->body.push_back(sdWriterDecl(loc));
+        fn->body.push_back(sdWriteValueStmt("dict:" + vk, sdName("value", loc), loc));
+        fn->body.push_back(sdReturnFinish(loc));
+        return fn;
+    }
+    // Top-level list[Class] / list[scalar]: encode a JSON array.
+    if (targetType && targetType->kind() == Type::Kind::List) {
+        auto& lt = static_cast<ListType&>(*targetType);
+        const std::string elemScalar =
+            lt.elementType ? sdScalarKindName(lt.elementType->kind()) : "";
+        if (!elemScalar.empty()) {
+            auto fn = std::make_unique<FunctionDecl>();
+            fn->setLocation(loc);
+            fn->returnType = sdType("bytes", loc);
+            Parameter valueParam;
+            valueParam.name = "value";
+            {
+                auto g = std::make_unique<GenericTypeExpr>();
+                g->base = sdType("list", loc);
+                g->typeArgs.push_back(sdType(elemScalar, loc));
+                g->setLocation(loc);
+                valueParam.type = std::move(g);
+            }
+            fn->params.push_back(std::move(valueParam));
+            fn->body.push_back(sdWriterDecl(loc));
+            fn->body.push_back(sdWriteValueStmt("list:" + elemScalar, sdName("value", loc), loc));
+            fn->body.push_back(sdReturnFinish(loc));
+            return fn;
+        }
+        std::string elemClass;
+        if (auto inst = std::dynamic_pointer_cast<InstanceType>(lt.elementType))
+            if (inst->classType) elemClass = inst->classType->name;
+        if (elemClass.empty() || !impl_->classDeclByName.count(elemClass)) {
+            error(loc, "json.encode[list[T]]: the element type must be a class or scalar");
+            return nullptr;
+        }
+        auto fn = std::make_unique<FunctionDecl>();
+        fn->setLocation(loc);
+        fn->returnType = sdType("bytes", loc);
+        Parameter valueParam;
+        valueParam.name = "value";
+        {
+            auto g = std::make_unique<GenericTypeExpr>();
+            g->base = sdType("list", loc);
+            g->typeArgs.push_back(sdType(elemClass, loc));
+            g->setLocation(loc);
+            valueParam.type = std::move(g);
+        }
+        fn->params.push_back(std::move(valueParam));
+
+        fn->body.push_back(sdWriterDecl(loc));
+        fn->body.push_back(sdExprStmt(sdCall0("w", "begin_array", loc), loc));
+        auto forS = std::make_unique<ForStmt>();
+        forS->setLocation(loc);
+        forS->target = sdName("_item", loc);
+        forS->iterable = sdName("value", loc);
+        forS->body.push_back(sdExprStmt(
+            sdCall1("w", "write_raw",
+                    sdEncodeExpr(elemClass, sdName("_item", loc), loc), loc), loc));
+        fn->body.push_back(std::move(forS));
+        fn->body.push_back(sdExprStmt(sdCall0("w", "end_array", loc), loc));
+        fn->body.push_back(sdReturnFinish(loc));
+        return fn;
+    }
+
+    std::string className;
+    if (auto inst = std::dynamic_pointer_cast<InstanceType>(targetType))
+        if (inst->classType) className = inst->classType->name;
+    if (className.empty()) {
+        error(loc, "json.encode[T]: T must be a class type (or list of a class)");
+        return nullptr;
+    }
+    auto cdIt = impl_->classDeclByName.find(className);
+    if (cdIt == impl_->classDeclByName.end() || !cdIt->second) {
+        error(loc, "json.encode[" + className + "]: class definition not found");
+        return nullptr;
+    }
+    FunctionDecl* ctor = nullptr;
+    for (auto& m : cdIt->second->body)
+        if (auto* fd = dynamic_cast<FunctionDecl*>(m.get()))
+            if (fd->isConstructor || fd->name == "__init__") { ctor = fd; break; }
+    if (!ctor) {
+        error(loc, "json.encode[" + className + "]: class has no constructor to encode from");
+        return nullptr;
+    }
+
+    struct EField { std::string name; std::string kind; };
+    std::vector<EField> fields;
+    for (auto& p : ctor->params) {
+        if (p.name == "self") continue;
+        if (p.isVarArg || p.isKwArg) {
+            error(loc, "json.encode[" + className + "]: variadic constructors are not encodable");
+            return nullptr;
+        }
+        std::string kind = sdDetectKind(impl_->classDeclByName, p.type.get());
+        if (kind.empty()) kind = sdOptKind(impl_->classDeclByName, p.type.get());
+        if (kind.empty()) {
+            error(loc, "json.encode[" + className + "]: field '" + p.name +
+                       "' is not yet encodable (int/str/bool/float, list of those, dict[str, scalar], "
+                       "a class, or Optional of those)");
+            return nullptr;
+        }
+        fields.push_back({p.name, kind});
+    }
+    if (fields.empty()) {
+        error(loc, "json.encode[" + className + "]: class has no encodable fields");
+        return nullptr;
+    }
+
+    auto fn = std::make_unique<FunctionDecl>();
+    fn->setLocation(loc);
+    fn->returnType = sdType("bytes", loc);
+    Parameter valueParam;
+    valueParam.name = "value";
+    valueParam.type = sdType(className, loc);
+    fn->params.push_back(std::move(valueParam));
+
+    fn->body.push_back(sdWriterDecl(loc));
+    fn->body.push_back(sdExprStmt(sdCall0("w", "begin_object", loc), loc));
+
+    for (auto& f : fields) {
+        if (f.kind.rfind("opt:", 0) == 0) {
+            const std::string ik = f.kind.substr(4);
+            // _f: <ik> | None = value.f; `== None` keys on the runtime state and the
+            // else-branch narrows _f to the native member (isinstance would answer statically).
+            fn->body.push_back(sdDecl("_" + f.name, sdFieldType(f.kind, loc),
+                                      sdAttr("value", f.name, loc), loc));
+            fn->body.push_back(sdExprStmt(sdCall1("w", "key", sdStr(f.name, loc), loc), loc));
+            auto ifs = std::make_unique<IfStmt>();
+            ifs->setLocation(loc);
+            auto isNone = std::make_unique<BinaryExpr>();
+            isNone->left = sdName("_" + f.name, loc);
+            isNone->op = Token(TokenType::EQUAL_EQUAL, "==", loc);
+            isNone->right = sdNone(loc);
+            isNone->setLocation(loc);
+            ifs->condition = std::move(isNone);
+            ifs->thenBody.push_back(sdExprStmt(sdCall0("w", "write_null", loc), loc));
+            ifs->elseBody.push_back(sdWriteValueStmt(ik, sdName("_" + f.name, loc), loc));
+            fn->body.push_back(std::move(ifs));
+        } else {
+            fn->body.push_back(sdExprStmt(sdCall1("w", "key", sdStr(f.name, loc), loc), loc));
+            fn->body.push_back(sdWriteValueStmt(f.kind, sdAttr("value", f.name, loc), loc));
+        }
+    }
+
+    fn->body.push_back(sdExprStmt(sdCall0("w", "end_object", loc), loc));
+    fn->body.push_back(sdReturnFinish(loc));
     return fn;
 }
 

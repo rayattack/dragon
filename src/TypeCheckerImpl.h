@@ -127,6 +127,9 @@ struct TypeChecker::Impl {
     // synthesizes each stamp's body from T's fields instead of cloning a template.
     std::unordered_set<const FunctionDecl*> schemaDecodeFns;
 
+    // D052 - `json.encode[T]`, the write-side mirror (Writer-driven, box-free).
+    std::unordered_set<const FunctionDecl*> schemaEncodeFns;
+
     // Generic METHODS (`def m[T]` on any class; db.all[T] / D049). genericMethods is
     // keyed "Class.method"; classDeclByName lets stamps append into the owning class.
     std::unordered_map<std::string, FunctionDecl*> genericMethods;

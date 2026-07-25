@@ -346,6 +346,11 @@ public:
     std::unique_ptr<Stmt> synthesizeSchemaDecoder(
         const std::shared_ptr<Type>& targetType, SourceLocation loc);
 
+    /// D052: the write-side mirror - build the box-free `json.encode[T]` body
+    /// (Writer-driven) from T's ctor params. Same contract as the decoder.
+    std::unique_ptr<Stmt> synthesizeSchemaEncoder(
+        const std::shared_ptr<Type>& targetType, SourceLocation loc);
+
     /// Get all module-level exports (functions, classes, variables) after check().
     /// Returns a map of symbol name -> type.
     std::unordered_map<std::string, std::shared_ptr<Type>> getExports() const;
