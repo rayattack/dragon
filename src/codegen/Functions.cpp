@@ -1,6 +1,8 @@
 /// Dragon CodeGen - Lambda, Function Declaration, TypeAlias
 #include "../CodeGenImpl.h"
 
+#include <optional>
+
 namespace dragon {
 
 // Shared per-closure-site env GC hook (LambdaExpr + nested def) so
@@ -876,8 +878,6 @@ void CodeGen::visit(FunctionDecl& node) {
     // D044 - a generic template (`def f[T](...)`) is never lowered; only its
     // stamped monomorphic instantiations (empty typeParams) are emitted.
     if (!node.typeParams.empty()) return;
-    // Per-variable metadata dies with this body (stale-type family).
-    Impl::VarMetaScope _varMeta(*impl_);
     // Mirror forwardDeclareFunctions: externs keep the bare C symbol, Dragon
     // defs get per-module mangling; aliased externs use `externSymbol`.
     const std::string externLinkName =
@@ -898,6 +898,9 @@ void CodeGen::visit(FunctionDecl& node) {
         return;
     }
     if (!func) return;
+    // Per-variable metadata dies with this body (stale-type family). The nested
+    // path scopes its own guard so the parent-scope binding it installs survives.
+    Impl::VarMetaScope _varMeta(*impl_);
 
     // Extern "C" functions are declarations only - no body to emit
     if (node.isExtern) return;
@@ -1401,7 +1404,9 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
         }
     }
 
-    // 5. Save enclosing context.
+    // 5. Save enclosing context. Body metadata dies with the body (stale-type
+    // family); released before step 14 so the parent-scope binding survives.
+    std::optional<Impl::VarMetaScope> bodyMeta(*impl_);
     auto* prevFunc = impl_->currentFunction;
     auto* prevBlock = impl_->builder->GetInsertBlock();
     auto savedScopes = std::move(impl_->scopes);
@@ -1563,6 +1568,7 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
     impl_->cellPromotedLocals = std::move(savedCellPromoted);
     impl_->currentFunction = prevFunc;
     if (prevBlock) impl_->builder->SetInsertPoint(prevBlock);
+    bodyMeta.reset();
 
     // 14. Bind the name in the enclosing scope: bare fn pointer for non-capturing
     // defs, a freshly allocated closure object for capturing ones.
