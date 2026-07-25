@@ -58,7 +58,7 @@ statically linked the same way. Either way, nothing is fetched at build time.
 | `math` | Mathematical functions over `float` wrapping libm, with module-level constants (`pi`, …). |
 | `statistics` | Common statistics over lists of floats/ints - a subset of Python's `statistics`. Pure Dragon (only libm `sqrt`). |
 | `fractions` | Exact rational arithmetic via a `Fraction` class, always stored reduced with sign on the numerator. Pure Dragon. |
-| `random` | Pseudo-random floats, ints, and sequence ops over libc `rand`/`srand`. **Not** cryptographically secure. |
+| `random` | Pseudo-random floats, ints, and sequence ops over libc `rand`/`srand`. Auto-seeds from the OS CSPRNG on first use; `seed(n)` for reproducible runs. **Not** cryptographically secure. |
 | `bisect` | Binary search for maintaining sorted `list[int]` sequences. Pure Dragon. |
 | `heapq` | Min-heap (priority queue) operations on `list[int]`. Pure Dragon. |
 | `graphlib` | Topological sort via Kahn's algorithm (`TopologicalSorter`). Pure Dragon. |
@@ -137,7 +137,7 @@ statically linked the same way. Either way, nothing is fetched at build time.
 | `argon2id` | Argon2id password hashing (RFC 9106) over the memory-hard runtime core - `hash`/`verify`, raw and encoded forms. **Beyond Python:** not in CPython's stdlib (Python needs `argon2-cffi`). |
 | `totp` | RFC 6238 TOTP and RFC 4226 HOTP one-time passwords, pure Dragon (zero FFI). **Beyond Python:** not in CPython's stdlib. |
 | `ssl` | TLS/SSL with a CPython-parity surface (`SSLContext`, `wrap_socket`, `create_default_context`, `CERT_*`/`PROTOCOL_*`) over statically-linked mbedTLS; modern-only policy, not user-weakenable. |
-| `uuid` | UUID v4 (random) generation and string utilities over libc `rand` - **not** cryptographically secure. |
+| `uuid` | UUID v4 (random) generation and string utilities, drawing from the OS CSPRNG. |
 | `merkle` | RFC 6962 (Certificate Transparency) Merkle tree with `0x00`/`0x01` domain separation - `O(log n)` inclusion and consistency proofs. Pure Dragon. The transparency-log primitive behind the egg registry. |
 
 ## Concurrency
