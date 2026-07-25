@@ -3,6 +3,11 @@
 # Wraps C stdlib rand()/srand() via extern "C". Provides random floats,
 # integers, and sequence operations.
 # Uses libc PRNG - not cryptographically secure.
+#
+# Seeding matches Python: the generator seeds itself from the OS CSPRNG on
+# first use, so an unseeded program produces different values on every run.
+# Call seed(n) for a reproducible stream. The *stream quality* is still libc's
+# LCG, not Python's Mersenne Twister - see the module notes in the docs.
 
 #===----------------------------------------------------------------------===#
 # C extern declarations
@@ -11,21 +16,98 @@
 extern "C" def rand() -> intc
 extern "C" def srand(seed: intc)
 extern "C" def time(tloc: ptr) -> int
+extern "C" def clock_gettime(clockid: intc, tp: ptr) -> intc
+extern "C" def malloc(size: int) -> ptr
+extern "C" def free(p: ptr)
+extern "C" def memset(s: ptr, c: intc, n: int) -> ptr
+extern "C" def dragon_timespec_sec(ts: ptr) -> int
+extern "C" def dragon_timespec_nsec(ts: ptr) -> int
+
+# OS CSPRNG (getrandom/getentropy), exposed by the Dragon runtime. Declared
+# directly instead of importing `secrets` so that a program which rolls a die
+# does not drag base64/binascii/hmac into the binary.
+extern "C" def dragon_urandom(n: int) -> bytes
 
 # RAND_MAX is 2147483647 on most systems
 const RAND_MAX: int = 2147483647
+
+# srand() takes a C `unsigned int`. Mask every seed into signed 32-bit range so
+# the value we pass is the value libc actually sees.
+const _SEED_MASK: int = 2147483647
+
+# libc rand() is an LCG whose first output is close to linear in the seed:
+# seeds one apart yield first draws ~7.8e-06 apart. Burn a few draws after
+# seeding so the first value a caller sees does not leak the seed's magnitude.
+const _WARMUP: int = 16
+
+# Knuth's multiplicative constant. Mixed in per seed_time() call so that two
+# calls landing in the same clock tick still get well-separated seeds.
+const _CALL_STRIDE: int = 2654435761
 
 #===----------------------------------------------------------------------===#
 # Seeding
 #===----------------------------------------------------------------------===#
 
+_seeded: bool = false
+_seed_time_calls: int = 0
+
+def _srand_warm(s: int) {
+    # Single seeding path: mask, seed, diffuse, and mark as seeded so the
+    # automatic entropy seed never runs afterwards.
+    global _seeded
+    srand(s & _SEED_MASK)
+    i: int = 0
+    while i < _WARMUP {
+        rand()
+        i = i + 1
+    }
+    _seeded = true
+}
+
+def _entropy_seed() -> int {
+    # 32 bits straight from the OS CSPRNG.
+    const b: bytes = dragon_urandom(4)
+    s: int = 0
+    i: int = 0
+    while i < 4 {
+        s = (s << 8) | b[i]
+        i = i + 1
+    }
+    return s
+}
+
+def _ensure_seeded() {
+    if _seeded == false {
+        _srand_warm(_entropy_seed())
+    }
+}
+
 def seed(s: int) {
-    srand(s)
+    # Deterministic seeding for reproducible runs. Takes precedence over the
+    # automatic entropy seed - once called, nothing re-seeds behind you.
+    _srand_warm(s)
 }
 
 def seed_time() {
-    # Seed with current time (auto-seed)
-    srand(time(none))
+    # Seed from the wall clock, plus a per-call stride.
+    #
+    # CLOCK_REALTIME reports nanoseconds but the underlying tick is coarser
+    # (microseconds on macOS), so two calls in quick succession can read the
+    # same instant. The call counter guarantees each call still gets a distinct,
+    # well-separated seed rather than silently repeating the previous stream.
+    #
+    # Prefer leaving the generator alone (it self-seeds from the OS CSPRNG) or
+    # calling seed(n) for reproducibility. This is kept for callers that want a
+    # time-derived - and therefore guessable - seed on purpose.
+    global _seed_time_calls
+    const ts: ptr = malloc(16)
+    memset(ts, 0, 16)
+    clock_gettime(0, ts)
+    const sec: int = dragon_timespec_sec(ts)
+    const nsec: int = dragon_timespec_nsec(ts)
+    free(ts)
+    _seed_time_calls = _seed_time_calls + 1
+    _srand_warm(sec * 1000000000 + nsec + _seed_time_calls * _CALL_STRIDE)
 }
 
 #===----------------------------------------------------------------------===#
@@ -34,17 +116,20 @@ def seed_time() {
 
 def random() -> float {
     # Returns a random float in [0.0, 1.0)
+    _ensure_seeded()
     return float(rand()) / (float(RAND_MAX) + 1.0)
 }
 
 def randint(a: int, b: int) -> int {
     # Returns a random integer N such that a <= N <= b
+    _ensure_seeded()
     const range: int = b - a + 1
     return a + rand() % range
 }
 
 def randrange(start: int, stop: int) -> int {
     # Returns a random integer N such that start <= N < stop
+    _ensure_seeded()
     const range: int = stop - start
     if range <= 0 { return start }
     return start + rand() % range
@@ -60,6 +145,7 @@ def uniform(a: float, b: float) -> float {
 #===----------------------------------------------------------------------===#
 
 def choice(items: list[str]) -> str {
+    _ensure_seeded()
     const n: int = len(items)
     if n == 0 { return "" }
     const idx: int = rand() % n
@@ -67,6 +153,7 @@ def choice(items: list[str]) -> str {
 }
 
 def choice_int(items: list[int]) -> int {
+    _ensure_seeded()
     const n: int = len(items)
     if n == 0 { return 0 }
     const idx: int = rand() % n
@@ -75,6 +162,7 @@ def choice_int(items: list[int]) -> int {
 
 def shuffle(items: list[int]) -> list[int] {
     # Fisher-Yates shuffle (returns new shuffled list)
+    _ensure_seeded()
     result: list[int] = []
     i: int = 0
     while i < len(items) {
@@ -95,6 +183,7 @@ def shuffle(items: list[int]) -> list[int] {
 def sample(items: list[int], k: int) -> list[int] {
     # Return k unique random elements (selection without replacement)
     # Uses reservoir sampling for simplicity
+    _ensure_seeded()
     result: list[int] = []
     i: int = 0
     while i < k {
