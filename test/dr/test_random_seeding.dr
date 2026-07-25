@@ -17,15 +17,16 @@ from unittest import TestCase, main
 import random
 import uuid
 
-# The first value an unseeded libc LCG yields: 16807 / 2147483648.
-const UNSEEDED_FIRST_DRAW: float = 7.826369255781174e-06
+# First unseeded draw of libc rand(), per libc: minstd (macOS/BSD) and glibc.
+const UNSEEDED_MINSTD: float = 7.826369255781174e-06
+const UNSEEDED_GLIBC: float = 0.8401877167634666
 
 class RandomSeedingTests(TestCase) {
     def test_auto_seeds_from_entropy() {
         # No seed() call: the module must have seeded itself, so we must not be
         # replaying the srand(1) stream.
         const first: float = random.random()
-        self.assertTrue(first != UNSEEDED_FIRST_DRAW)
+        self.assertTrue(first != UNSEEDED_MINSTD and first != UNSEEDED_GLIBC)
         self.assertTrue(first >= 0.0 and first < 1.0)
     }
 
