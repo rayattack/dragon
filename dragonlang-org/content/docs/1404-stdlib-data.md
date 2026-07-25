@@ -559,12 +559,17 @@ The helpers are `uuid_hex` (strip dashes to 32 hex chars), `uuid_version`
 (the version digit, 1-5, or -1), `uuid_is_valid` (full 8-4-4-4-12 format
 check), and `uuid_compare(a, b) -> int` for canonical lexicographic ordering.
 
+`uuid4()` draws its 122 random bits from the OS CSPRNG (the same source as
+`secrets`), not from the `random` module - so seeding `random` has no effect on
+the UUIDs you get, and two processes started in the same instant produce
+different values.
+
 > **Differs from Python.** `uuid4()` returns a plain `str`, not a `UUID`
 > object - there are no `.hex` / `.int` / `.version` attributes; the
-> `uuid_hex` / `uuid_version` module functions take a string instead. The
-> randomness comes from libc `rand()`, so it is **not** cryptographically
-> secure; for tokens, reach for the crypto modules. Only `uuid4` is
-> implemented (no `uuid1`/`uuid3`/`uuid5`).
+> `uuid_hex` / `uuid_version` module functions take a string instead. Only
+> `uuid4` is implemented (no `uuid1`/`uuid3`/`uuid5`). As in Python, a v4 UUID
+> is a fine unique identifier but is not a substitute for a purpose-built
+> token - use `secrets.token_urlsafe` for anything bearer-like.
 
 ## At a glance
 
