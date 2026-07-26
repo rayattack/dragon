@@ -40,6 +40,45 @@ class BytesAllocBounds(TestCase) {
         self.assertEqual(c.hex(), "61626364")
         self.assertEqual(len(b"" + b""), 0)
     }
+    def test_replace_alloc_failure_raises() {
+        # 2^20 matches, each grown by ~128MB: newLen = 2^47, unmappable.
+        # Pre-fix this was a NULL memcpy, and count * delta could also wrap
+        # negative into a 1-byte buffer with a full-length write loop.
+        a: bytes = b"a" * 1048576
+        big: bytes = b"x" * 134217728
+        caught: bool = False
+        try {
+            r: bytes = a.replace(b"a", big)
+            print(len(r))
+        } except MemoryError {
+            caught = True
+        }
+        self.assertTrue(caught)
+    }
+    def test_join_alloc_failure_raises() {
+        # 1M list references to ONE 128MB buffer: totalLen = 2^47 backed by
+        # 8MB of pointers. Pre-fix the unchecked malloc made this a NULL
+        # memcpy; the per-add overflow check now raises instead.
+        big: bytes = b"x" * 134217728
+        parts: list[bytes] = [big] * 1048576
+        caught: bool = False
+        try {
+            r: bytes = b"".join(parts)
+            print(len(r))
+        } except MemoryError {
+            caught = True
+        }
+        self.assertTrue(caught)
+    }
+    def test_replace_join_unchanged() {
+        r: bytes = b"abcabc".replace(b"b", b"xx")
+        self.assertEqual(r.hex(), "6178786361787863")
+        s: bytes = b"abc".replace(b"b", b"")
+        self.assertEqual(s.hex(), "6163")
+        j: bytes = b"-".join([b"ab", b"cd"])
+        self.assertEqual(j.hex(), "61622d6364")
+    }
 }
 
 main([BytesAllocBounds()])
+

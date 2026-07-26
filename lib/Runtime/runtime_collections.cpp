@@ -1345,11 +1345,20 @@ DragonBytes* dragon_bytes_replace(DragonBytes* b, DragonBytes* old_b, DragonByte
         if (memcmp(b->data + i, old_b->data, old_b->len) == 0) { count++; i += old_b->len - 1; }
     }
     if (count == 0) return dragon_bytes_new(b->data, b->len);
-    int64_t newLen = b->len + count * (new_b ? new_b->len - old_b->len : -old_b->len);
-    auto* result = (DragonBytes*)malloc(sizeof(DragonBytes));
+    int64_t delta = new_b ? new_b->len - old_b->len : -old_b->len;
+    // Only growth can overflow: a shrink removes at most b->len bytes. An
+    // unchecked count * delta wraps negative and the size ternary below then
+    // picks 1 byte for a write loop that still runs to full length.
+    if (delta > 0 && count > (INT64_MAX - b->len) / delta)
+        dragon_raise_exc_cstr(43, "MemoryError: allocation size overflow");
+    int64_t newLen = b->len + count * delta;
+    // Data before header: an OOM longjmp out of dragon_xmalloc must not
+    // strand a bare header allocation (same ordering as dragon_list_new_tagged).
+    auto* data = (uint8_t*)dragon_xmalloc(newLen > 0 ? (size_t)newLen : 1);
+    auto* result = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
     dragon_obj_init(&result->header, DRAGON_TAG_BYTES);
     result->len = newLen;
-    result->data = (uint8_t*)malloc(newLen > 0 ? newLen : 1);
+    result->data = data;
     int64_t w = 0;
     for (int64_t i = 0; i < b->len; ) {
         if (i <= b->len - old_b->len && memcmp(b->data + i, old_b->data, old_b->len) == 0) {
@@ -1440,17 +1449,27 @@ DragonList* dragon_bytes_split(DragonBytes* b, DragonBytes* sep) {
 
 DragonBytes* dragon_bytes_join(DragonBytes* sep, DragonList* list) {
     if (!list || list->size == 0) return dragon_bytes_new(nullptr, 0);
-    // Calculate total length
+    // Calculate total length. The list can reference the same bytes object
+    // many times, so the sum is amplified far past any real buffer - it can
+    // exceed memory (allocation failure below) or wrap int64, so every add
+    // is checked.
     int64_t totalLen = 0;
     for (int64_t i = 0; i < list->size; i++) {
         auto* part = (DragonBytes*)(intptr_t)dragon_list_load(list, i);
+        if (part && part->len > INT64_MAX - totalLen)
+            dragon_raise_exc_cstr(43, "MemoryError: allocation size overflow");
         if (part) totalLen += part->len;
+        if (i > 0 && sep && sep->len > INT64_MAX - totalLen)
+            dragon_raise_exc_cstr(43, "MemoryError: allocation size overflow");
         if (i > 0 && sep) totalLen += sep->len;
     }
-    auto* result = (DragonBytes*)malloc(sizeof(DragonBytes));
+    // Data before header: an OOM longjmp out of dragon_xmalloc must not
+    // strand a bare header allocation (same ordering as dragon_list_new_tagged).
+    auto* data = (uint8_t*)dragon_xmalloc(totalLen > 0 ? (size_t)totalLen : 1);
+    auto* result = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
     dragon_obj_init(&result->header, DRAGON_TAG_BYTES);
     result->len = totalLen;
-    result->data = (uint8_t*)malloc(totalLen > 0 ? totalLen : 1);
+    result->data = data;
     int64_t w = 0;
     for (int64_t i = 0; i < list->size; i++) {
         if (i > 0 && sep && sep->len > 0) { memcpy(result->data + w, sep->data, sep->len); w += sep->len; }
