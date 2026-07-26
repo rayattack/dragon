@@ -1,0 +1,79 @@
+# test/dr/test_raw_strings.dr - Rust-style raw string literals (issue #22).
+#
+# `r#"..."#` (and `r##"..."##`, ...) take their content verbatim: no escape
+# processing at all, and the literal ends only at `"` followed by the same
+# number of `#`. That buys two things Python-style `r"..."` cannot express:
+#
+#   - an unescaped `"` inside the string
+#   - a trailing backslash - `r"C:\"` is a syntax error in Python
+#
+# Pick more `#` than the content contains and any content becomes writable.
+
+from unittest import TestCase, main
+
+class RustRawStringTests(TestCase) {
+    def test_embedded_double_quotes() {
+        const s: str = r#"he said "hi""#
+        self.assertEqual(s, "he said \"hi\"")
+        self.assertEqual(len(s), 12)
+    }
+
+    def test_trailing_backslash() {
+        # The case Python raw strings cannot express at all.
+        const s: str = r#"C:\"#
+        self.assertEqual(len(s), 3)
+        self.assertEqual(s, "C:\\")
+    }
+
+    def test_no_escape_processing() {
+        # \n stays two characters, exactly as with r"..."
+        const s: str = r#"\n\t"#
+        self.assertEqual(len(s), 4)
+        self.assertEqual(s, "\\n\\t")
+    }
+
+    def test_multiple_hashes_allow_hash_quote_inside() {
+        # A single-# literal could not hold `"#`; a double-# one can.
+        const s: str = r##"contains "# here"##
+        self.assertEqual(len(s), 16)
+    }
+
+    def test_lone_hash_inside_single_hash_literal() {
+        # `#` alone does not end the literal - only `"` followed by `#` does.
+        const s: str = r#"a # b"#
+        self.assertEqual(s, "a # b")
+    }
+
+    def test_empty() {
+        const s: str = r#""#
+        self.assertEqual(len(s), 0)
+    }
+
+    def test_quote_run_inside() {
+        # A run of quotes is fine as long as it is not followed by `#`.
+        const s: str = r#"tri""" quote"#
+        self.assertEqual(len(s), 12)
+        self.assertEqual(s, "tri\"\"\" quote")
+    }
+
+    def test_python_style_raw_still_works() {
+        # Regression: the existing r"..." form is untouched.
+        const s: str = r"back\nslash"
+        self.assertEqual(len(s), 11)
+    }
+
+    def test_plain_string_still_escapes() {
+        # Regression: non-raw strings still process escapes.
+        const s: str = "a\nb"
+        self.assertEqual(len(s), 3)
+    }
+
+    def test_hash_after_identifier_is_a_comment() {
+        # `r` is a legal identifier, and `#` still opens a comment. If the lexer
+        # committed to a raw string on seeing `r#` this would not compile.
+        r: int = 5   # a comment mentioning r#"..."# should be ignored
+        self.assertEqual(r, 5)
+    }
+}
+
+main([RustRawStringTests()])

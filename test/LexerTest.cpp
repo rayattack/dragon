@@ -187,6 +187,70 @@ TEST(LexerTest, RawString) {
     EXPECT_EQ(tokens[0].type(), TokenType::STRING);
 }
 
+//===----------------------------------------------------------------------===//
+// Rust-style raw strings (issue #22): r#"..."#
+//===----------------------------------------------------------------------===//
+
+TEST(LexerTest, RustRawStringEmbeddedQuotes) {
+    auto tokens = lex("r#\"he said \"hi\"\"#");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type(), TokenType::STRING);
+    EXPECT_EQ(tokens[0].lexeme(), "r#\"he said \"hi\"\"#");
+}
+
+TEST(LexerTest, RustRawStringMultipleHashes) {
+    // A single-# literal cannot hold `"#`; a double-# one can.
+    auto tokens = lex("r##\"holds \"# inside\"##");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type(), TokenType::STRING);
+    EXPECT_EQ(tokens[0].lexeme(), "r##\"holds \"# inside\"##");
+}
+
+TEST(LexerTest, RustRawStringTrailingBackslash) {
+    // The literal Python-style raw strings cannot express.
+    auto tokens = lex("r#\"C:\\\"#");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type(), TokenType::STRING);
+    EXPECT_EQ(tokens[0].lexeme(), "r#\"C:\\\"#");
+}
+
+TEST(LexerTest, RustRawStringEmpty) {
+    auto tokens = lex("r#\"\"#");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type(), TokenType::STRING);
+}
+
+TEST(LexerTest, RustRawStringSpansNewlines) {
+    auto tokens = lex("r#\"line one\nline two\"#");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type(), TokenType::STRING);
+}
+
+TEST(LexerTest, IdentifierRThenCommentIsNotARawString) {
+    // `#` still opens a comment. Committing to a raw string on seeing `r#`
+    // would break this - the disambiguation is a lookahead for the quote.
+    auto tokens = lex("r # a comment with r#\" in it");
+    ASSERT_GE(tokens.size(), 2u);
+    EXPECT_EQ(tokens[0].type(), TokenType::IDENTIFIER);
+    EXPECT_EQ(tokens[0].lexeme(), "r");
+    EXPECT_EQ(tokens[1].type(), TokenType::END_OF_FILE);
+}
+
+TEST(LexerTest, RustRawStringIsDragonOnly) {
+    // Not valid Python, so .py mode must leave `r` as an identifier and treat
+    // the rest as a comment - keeping typed .py files CPython-compatible.
+    auto tokens = lex("r#\"x\"#", /*isDragon=*/false);
+    ASSERT_GE(tokens.size(), 1u);
+    EXPECT_EQ(tokens[0].type(), TokenType::IDENTIFIER);
+    EXPECT_EQ(tokens[0].lexeme(), "r");
+}
+
+TEST(LexerTest, UnterminatedRustRawString) {
+    // Closing quote present but not followed by the matching '#' run.
+    auto diags = lexErrors("r##\"never closed\"#");
+    EXPECT_FALSE(diags.empty());
+}
+
 TEST(LexerTest, ByteString) {
     auto tokens = lex("b\"bytes\"");
     ASSERT_GE(tokens.size(), 2u);
