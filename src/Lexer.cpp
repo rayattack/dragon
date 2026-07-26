@@ -220,6 +220,32 @@ Token Lexer::scanToken() {
         if ((c == 'f' || c == 'r' || c == 'b' || c == 'F' || c == 'R' || c == 'B') &&
             !isAtEnd()) {
             char next = peekChar();
+            // Rust-style raw string: r#"..."#, r##"..."##, ...
+            //
+            // `#` also opens a comment, so `r` followed by `#` is ambiguous:
+            // `r#"x"#` is a string, but `r  #note` is the identifier `r` and a
+            // comment. Probe the run of `#` without consuming anything and only
+            // commit when a quote follows it; otherwise fall through to
+            // scanIdentifier() and let the comment scanner have the `#`.
+            //
+            // .dr only: `r#"..."#` is not valid Python, and a typed .py file is
+            // meant to stay compilable by CPython too (see decisions/009 for the
+            // .dr-only precedent). Drop the useBraceBlocks test to allow both.
+            if ((c == 'r' || c == 'R') && next == '#' &&
+                impl_->options.useBraceBlocks) {
+                size_t probe = impl_->current;
+                while (probe < impl_->source.length() &&
+                       impl_->source[probe] == '#') {
+                    probe++;
+                }
+                if (probe < impl_->source.length() &&
+                    impl_->source[probe] == '"') {
+                    size_t hashes = probe - impl_->current;
+                    for (size_t i = 0; i < hashes; i++) advance();  // the '#' run
+                    advance();                                      // opening quote
+                    return scanRawString(hashes);
+                }
+            }
             // Single prefix + quote
             if (next == '"' || next == '\'') {
                 advance(); // consume the quote
@@ -462,6 +488,35 @@ Token Lexer::scanString(char quote) {
     }
 
     return errorToken("Unterminated string literal");
+}
+
+Token Lexer::scanRawString(size_t hashes) {
+    // Deliberately does NOT reuse scanString's backslash handling. In here a
+    // backslash is just a byte, which is the whole point: `r#"C:\"#` is a valid
+    // literal, whereas Python-style `r"C:\"` cannot be written at all. Quotes
+    // need no escaping either - only `"` + `hashes` worth of `#` ends it - so
+    // choosing more `#` than the content contains always works.
+    //
+    // Newlines are allowed; advance() keeps line/column tracking correct.
+    while (!isAtEnd()) {
+        if (peekChar() == '"') {
+            size_t probe = impl_->current + 1;
+            size_t seen = 0;
+            while (seen < hashes && probe < impl_->source.length() &&
+                   impl_->source[probe] == '#') {
+                probe++;
+                seen++;
+            }
+            if (seen == hashes) {
+                advance();                                      // closing quote
+                for (size_t i = 0; i < hashes; i++) advance();  // the '#' run
+                return makeToken(TokenType::STRING);
+            }
+        }
+        advance();
+    }
+
+    return errorToken("Unterminated raw string literal");
 }
 
 //===----------------------------------------------------------------------===//

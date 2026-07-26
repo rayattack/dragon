@@ -923,7 +923,21 @@ std::unique_ptr<Expr> Parser::primary() {
             if (lexeme[start] == 'b' || lexeme[start] == 'B') lit->isBytes = true;
             start++;
         }
-        if (start + 5 < lexeme.size() &&
+        // Rust-style raw string: r#"..."#. The lexer only produces this shape
+        // when a run of `#` was followed by a quote, so a `#` here means the
+        // delimiters are `#`*n + quote on each side.
+        size_t hashes = 0;
+        while (start + hashes < lexeme.size() && lexeme[start + hashes] == '#') {
+            hashes++;
+        }
+        if (hashes > 0) {
+            lit->isRaw = true;  // already set by the `r` above; explicit for clarity
+            size_t open = start + hashes + 1;  // past the '#' run and the quote
+            size_t trailer = 1 + hashes;       // closing quote plus the '#' run
+            lit->value = open + trailer <= lexeme.size()
+                ? std::string(lexeme.substr(open, lexeme.size() - open - trailer))
+                : std::string();
+        } else if (start + 5 < lexeme.size() &&
             ((lexeme.substr(start, 3) == "\"\"\"") || (lexeme.substr(start, 3) == "'''"))) {
             lit->value = std::string(lexeme.substr(start + 3, lexeme.size() - start - 6));
         } else if (start < lexeme.size()) {

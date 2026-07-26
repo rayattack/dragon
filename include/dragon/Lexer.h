@@ -89,6 +89,11 @@ private:
     // Scanning methods
     Token scanToken();
     Token scanString(char quote);
+    // Rust-style raw string body: `r#"..."#`, `r##"..."##`, ... The caller has
+    // consumed `r`, the run of `#`, and the opening quote; `hashes` is the
+    // length of that run. Content is fully literal - no escape processing at
+    // all - and the literal ends at `"` followed by the same number of `#`.
+    Token scanRawString(size_t hashes);
     Token scanNumber();
     Token scanIdentifier();
     Token scanTemplateBody(const std::string& contentType = "");
