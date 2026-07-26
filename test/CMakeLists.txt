@@ -133,6 +133,16 @@ foreach(_dr ${DR_TEST_FILES})
         -I ${CMAKE_SOURCE_DIR}/packages)
 endforeach()
 
+# Sustained-OOM recoverability. Outside the test_*.dr glob on purpose: it is
+# only meaningful under a tight RLIMIT_AS (uncapped it never OOMs and its
+# assertion fails). Compile uncapped, run capped. Linux-only: macOS accepts
+# but does not enforce RLIMIT_AS.
+if(NOT APPLE)
+    add_test(NAME dr_oom_sustained
+        COMMAND bash -c "$<TARGET_FILE:dragon> build ${CMAKE_CURRENT_SOURCE_DIR}/dr/oom_sustained.dr -o ${CMAKE_CURRENT_BINARY_DIR}/oom_sustained && ulimit -v 262144 && exec ${CMAKE_CURRENT_BINARY_DIR}/oom_sustained")
+    set_tests_properties(dr_oom_sustained PROPERTIES TIMEOUT 90)
+endif()
+
 # --- Stdlib import gate ---
 # Every stdlib module must at least parse, name-resolve, and type-check. Both
 # `uuid` and `errno` once shipped assigning a module global without `global`,

@@ -1185,6 +1185,10 @@ void dragon_raise_exc(int64_t type, const char* msg);
 // unwound. Every runtime-internal raise site MUST use this; the plain
 // dragon_raise_exc above is for codegen str-typed messages only.
 void dragon_raise_exc_cstr(int64_t type, const char* msg);
+// Allocation-free MemoryError raise for the OOM branches below. _cstr dups
+// its message THROUGH dragon_xmalloc, so raising OOM there recurses to
+// stack death. Every other runtime-internal raise still MUST use _cstr.
+void dragon_raise_oom(void);
 // Consume variants: take an owned +1 message (freshly dup'd / allocated)
 // into the slot instead of dup'ing a borrow. See dragon_exc_msg_set.
 void dragon_raise_exc_consume(int64_t type, const char* msg);
@@ -1202,6 +1206,8 @@ int64_t dragon_exc_matches(int64_t raised, int64_t caught);
 //   *_x*   raise MemoryError (longjmp) - for user-reachable allocations. The
 //          raise never returns, so a failed dragon_xrealloc leaves the caller's
 //          OLD pointer intact (the realloc-into-temp pattern, built in).
+//          OOM branches raise via dragon_raise_oom, never _cstr: the _cstr
+//          message dup allocates, which recursed to stack death under OOM.
 //   *_or_abort  abort with a diagnostic - for the GC / exception machinery,
 //          where raising would re-enter the very subsystem mid-failure.
 // One branch, hinted unlikely, so the hot (success) path costs nothing - the
@@ -1209,13 +1215,13 @@ int64_t dragon_exc_matches(int64_t raised, int64_t caught);
 static inline void* dragon_xmalloc(size_t n) {
     void* p = malloc(n);
     if (__builtin_expect(p == nullptr, 0))
-        dragon_raise_exc_cstr(43, "MemoryError: out of memory");
+        dragon_raise_oom();
     return p;
 }
 static inline void* dragon_xrealloc(void* old, size_t n) {
     void* p = realloc(old, n);
     if (__builtin_expect(p == nullptr, 0))
-        dragon_raise_exc_cstr(43, "MemoryError: out of memory");
+        dragon_raise_oom();
     return p;
 }
 static inline void* dragon_xmalloc_or_abort(size_t n) {
@@ -1247,27 +1253,107 @@ static inline void* dragon_xrealloc_or_abort(void* old, size_t n) {
 // Guarding one caller only re-opens the hole at the next caller that sizes a
 // buffer, so the trap lives where the byte count is formed. Nothing below may
 // hand-compute a data-buffer size.
-static inline size_t dragon_alloc_bytes(int64_t count, size_t elem_size) {
-    if (__builtin_expect(count < 0 || (uint64_t)count > SIZE_MAX / elem_size, 0))
+//
+// `extra` covers the trailing-byte shapes so they never get hand-added either:
+// a NUL terminator (`malloc(n + 1)`), or an inline header
+// (`sizeof(DragonString) + bytes + 1`). `n + 1` is its own overflow at
+// n == INT64_MAX, so the add is checked too, not just the multiply.
+//
+// __builtin_mul_overflow rather than a divide-guard: it is exact, it cannot be
+// written wrong, and it collapses the six different hand-rolled spellings that
+// were scattered across this runtime into one. The repo's only prior checked
+// builtin is the older suffixed form at runtime_builtins.cpp:136.
+static inline bool dragon_alloc_bytes_try(int64_t count, size_t elem_size,
+                                          size_t extra, size_t* out) {
+    // elem_size == 0 would make any count "fit" and yield a 0-byte buffer that
+    // callers then index. No current caller passes it; trap rather than trust.
+    if (__builtin_expect(count < 0 || elem_size == 0, 0)) return false;
+    size_t bytes;
+    if (__builtin_expect(__builtin_mul_overflow((size_t)count, elem_size, &bytes), 0))
+        return false;
+    if (__builtin_expect(__builtin_add_overflow(bytes, extra, &bytes), 0))
+        return false;
+    *out = bytes;
+    return true;
+}
+
+static inline size_t dragon_alloc_bytes_ex(int64_t count, size_t elem_size,
+                                           size_t extra) {
+    size_t bytes;
+    if (__builtin_expect(!dragon_alloc_bytes_try(count, elem_size, extra, &bytes), 0))
         dragon_raise_exc_cstr(43, "MemoryError: allocation size overflow");
-    return (size_t)count * elem_size;
+    return bytes;
+}
+static inline size_t dragon_alloc_bytes(int64_t count, size_t elem_size) {
+    return dragon_alloc_bytes_ex(count, elem_size, 0);
 }
 static inline void* dragon_xmalloc_n(int64_t count, size_t elem_size) {
-    return dragon_xmalloc(dragon_alloc_bytes(count, elem_size));
+    return dragon_xmalloc(dragon_alloc_bytes_ex(count, elem_size, 0));
 }
-// Non-raising sibling, for the container GROW paths. Those run between
+static inline void* dragon_xmalloc_ex(int64_t count, size_t elem_size, size_t extra) {
+    return dragon_xmalloc(dragon_alloc_bytes_ex(count, elem_size, extra));
+}
+static inline void* dragon_xrealloc_n(void* old, int64_t count, size_t elem_size) {
+    return dragon_xrealloc(old, dragon_alloc_bytes_ex(count, elem_size, 0));
+}
+// calloc had NO helper at all, while 24 sites call it directly. Its own
+// product check returns NULL rather than truncating, but every one of those
+// sites then wrote through the NULL - so the wrap was safe and the result was
+// not. Route the count through the same trap so the two failures report
+// differently (size overflow vs out of memory) instead of both as a SIGSEGV.
+static inline void* dragon_xcalloc_n(int64_t count, size_t elem_size) {
+    size_t bytes;
+    if (__builtin_expect(!dragon_alloc_bytes_try(count, elem_size, 0, &bytes), 0))
+        dragon_raise_exc_cstr(43, "MemoryError: allocation size overflow");
+    void* p = calloc((size_t)count, elem_size);
+    if (__builtin_expect(p == nullptr && bytes != 0, 0))
+        dragon_raise_oom();
+    return p;
+}
+static inline void* dragon_xcalloc(size_t n) { return dragon_xcalloc_n((int64_t)n, 1); }
+
+// Non-raising siblings, for the container GROW paths. Those run between
 // dragon_shared_mut_begin and dragon_shared_mut_end, so a longjmp out of them
 // would escape with GC_FLAG_MUTATING still set on the object - and the next
 // legitimate mutation of that same container would then trip
 // dragon_fatal_concurrent_mutation. A caught MemoryError must not arm a
 // spurious fatal later, so the grow paths keep their abort-on-failure
 // contract and only gain the overflow trap.
-static inline size_t dragon_alloc_bytes_or_abort(int64_t count, size_t elem_size) {
-    if (__builtin_expect(count < 0 || (uint64_t)count > SIZE_MAX / elem_size, 0)) {
+//
+// Use the _or_abort form when ANY of these hold, else use the raising form:
+//   1. the site sits inside an armed dragon_shared_mut_begin window
+//   2. the site is inside the GC collector or the exception machinery
+//      (raising re-enters the very subsystem that is mid-failure)
+//   3. the site has already freed or half-swapped a buffer a live object still
+//      points at, so an unwind would expose a dangling pointer
+static inline size_t dragon_alloc_bytes_ex_or_abort(int64_t count, size_t elem_size,
+                                                    size_t extra) {
+    size_t bytes;
+    if (__builtin_expect(!dragon_alloc_bytes_try(count, elem_size, extra, &bytes), 0)) {
         fprintf(stderr, "dragon: allocation size overflow\n");
         abort();
     }
-    return (size_t)count * elem_size;
+    return bytes;
+}
+static inline size_t dragon_alloc_bytes_or_abort(int64_t count, size_t elem_size) {
+    return dragon_alloc_bytes_ex_or_abort(count, elem_size, 0);
+}
+static inline void* dragon_xmalloc_n_or_abort(int64_t count, size_t elem_size) {
+    return dragon_xmalloc_or_abort(dragon_alloc_bytes_ex_or_abort(count, elem_size, 0));
+}
+static inline void* dragon_xrealloc_n_or_abort(void* old, int64_t count,
+                                               size_t elem_size) {
+    return dragon_xrealloc_or_abort(old,
+        dragon_alloc_bytes_ex_or_abort(count, elem_size, 0));
+}
+static inline void* dragon_xcalloc_n_or_abort(int64_t count, size_t elem_size) {
+    size_t bytes = dragon_alloc_bytes_ex_or_abort(count, elem_size, 0);
+    void* p = calloc((size_t)count, elem_size);
+    if (__builtin_expect(p == nullptr && bytes != 0, 0)) {
+        fprintf(stderr, "dragon: out of memory\n");
+        abort();
+    }
+    return p;
 }
 
 // Unwind cleanup stack (see DragonCleanupStack). Codegen emits push at each

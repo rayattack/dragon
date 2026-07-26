@@ -253,6 +253,16 @@ void dragon_raise_exc_cstr(int64_t type, const char* msg) {
     dragon_raise_exc_impl(type, NULL, msg ? dragon_string_dup_cstr(msg) : NULL, 1);
 }
 
+/// Raise MemoryError WITHOUT allocating - the only raise entry that may
+/// claim that. _cstr dups its message through dragon_xmalloc, so an OOM
+/// raise routed there re-enters the failing allocator and recurses to stack
+/// death (A/B-proven 3700-frame SIGSEGV; pinned by oom_sustained.dr). The
+/// rodata literal is classified by the image range gate: stored borrowed,
+/// never dup'd, skipped by refcount ops.
+void dragon_raise_oom(void) {
+    dragon_raise_exc_impl(43, NULL, "MemoryError: out of memory", 0);
+}
+
 /// Raise a typed-field exception with an attached user-class instance.
 /// `obj` TRANSFERS a +1 into the owning exc_obj slot (a fresh construction's
 /// ref, or an explicit dragon_exc_retain_obj hold for borrowed-instance and
