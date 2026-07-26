@@ -267,6 +267,103 @@ int64_t dragon_osthread_is_alive(void* handle) {
 }
 
 //===----------------------------------------------------------------------===//
+// Sync primitive sizes - ask the platform, do not guess
+//===----------------------------------------------------------------------===//
+// stdlib/threading.dr used to malloc hardcoded x86_64-Linux struct sizes and
+// call them "padded for other platforms' layouts". They are not: Darwin's
+// pthread_rwlock_t is 200 bytes against the 64 assumed, so pthread_rwlock_init
+// wrote 136 bytes past the end of the block and RWLock segfaulted on macOS.
+//
+// Only the runtime is compiled against the target's own pthread.h, so only the
+// runtime can answer this. Callers allocate sizeof(), never a literal.
+
+int64_t dragon_sizeof_mutex(void)  { return (int64_t)sizeof(pthread_mutex_t); }
+int64_t dragon_sizeof_rwlock(void) { return (int64_t)sizeof(pthread_rwlock_t); }
+int64_t dragon_sizeof_cond(void)   { return (int64_t)sizeof(pthread_cond_t); }
+int64_t dragon_sizeof_sem(void)    { return (int64_t)sizeof(sem_t); }
+
+//===----------------------------------------------------------------------===//
+// Barrier - portable rendezvous for threading.Barrier
+//===----------------------------------------------------------------------===//
+// pthread_barrier_* is an *optional* part of POSIX (the _POSIX_BARRIERS option)
+// and Apple has never shipped it. stdlib/threading.dr called it directly, which
+// left three undefined symbols in every macOS link that pulled in `threading` -
+// and that is every program importing the module, because the class's methods
+// are emitted whether or not the program ever constructs a Barrier.
+//
+// Implemented here as a mutex + condition variable with a generation counter,
+// the textbook construction. Deliberately pure C: on Linux/macOS this archive
+// is linked into user programs with `cc` and no libstdc++, so std::mutex and
+// std::condition_variable are off-limits (see the header comment at the top of
+// this file). pthread mutexes and condvars are mandatory POSIX, unlike barriers.
+
+typedef struct DragonBarrier {
+    pthread_mutex_t mutex;
+    pthread_cond_t  cond;
+    uint64_t        generation;  // bumped each time the barrier trips
+    unsigned        threshold;   // arrivals needed to trip it
+    unsigned        waiting;     // arrivals so far in this generation
+} DragonBarrier;
+
+/// Create a barrier that trips once `count` threads have called wait().
+/// Returns NULL for a non-positive count.
+void* dragon_barrier_new(int64_t count) {
+    if (count <= 0) return nullptr;
+    DragonBarrier* b = (DragonBarrier*)dragon_xmalloc(sizeof(DragonBarrier));
+    if (pthread_mutex_init(&b->mutex, nullptr) != 0) {
+        free(b);
+        return nullptr;
+    }
+    if (pthread_cond_init(&b->cond, nullptr) != 0) {
+        pthread_mutex_destroy(&b->mutex);
+        free(b);
+        return nullptr;
+    }
+    b->generation = 0;
+    b->threshold = (unsigned)count;
+    b->waiting = 0;
+    return b;
+}
+
+/// Block until `count` threads have arrived. Returns 1 to exactly one waiter
+/// per trip - mirroring PTHREAD_BARRIER_SERIAL_THREAD, so callers can elect a
+/// single thread to do post-rendezvous work - and 0 to the others. -1 on a
+/// NULL handle.
+int64_t dragon_barrier_wait(void* handle) {
+    DragonBarrier* b = (DragonBarrier*)handle;
+    if (!b) return -1;
+    pthread_mutex_lock(&b->mutex);
+    const uint64_t gen = b->generation;
+    if (++b->waiting >= b->threshold) {
+        // Last to arrive: open the gate for this generation, then reset so the
+        // barrier is immediately reusable.
+        b->generation++;
+        b->waiting = 0;
+        pthread_cond_broadcast(&b->cond);
+        pthread_mutex_unlock(&b->mutex);
+        return 1;
+    }
+    // Wait on the generation rather than a flag: a thread that re-enters a
+    // reused barrier must not be released by the previous trip's broadcast,
+    // and the loop absorbs spurious wakeups.
+    while (gen == b->generation) {
+        pthread_cond_wait(&b->cond, &b->mutex);
+    }
+    pthread_mutex_unlock(&b->mutex);
+    return 0;
+}
+
+/// Destroy a barrier and release it. Returns 0, or -1 on a NULL handle.
+int64_t dragon_barrier_destroy(void* handle) {
+    DragonBarrier* b = (DragonBarrier*)handle;
+    if (!b) return -1;
+    pthread_cond_destroy(&b->cond);
+    pthread_mutex_destroy(&b->mutex);
+    free(b);
+    return 0;
+}
+
+//===----------------------------------------------------------------------===//
 // Green Thread Runtime (M:N scheduling via minicoro)
 //===----------------------------------------------------------------------===//
 
@@ -1374,14 +1471,15 @@ static void dragon__abs_deadline(double seconds, struct timespec* d) {
     if (d->tv_nsec >= 1000000000L) { d->tv_sec += 1; d->tv_nsec -= 1000000000L; }
 }
 
-#if defined(__APPLE__)
+// Used by the macOS poll-until-deadline fallbacks below and, on every platform,
+// by dragon_sem_timedacquire_sec to bound a condvar wait against spurious
+// wakeups. Not __APPLE__-only for that reason.
 static int dragon__deadline_passed(const struct timespec* d) {
     struct timespec now;
     clock_gettime(CLOCK_REALTIME, &now);
     return now.tv_sec > d->tv_sec ||
            (now.tv_sec == d->tv_sec && now.tv_nsec >= d->tv_nsec);
 }
-#endif
 
 int dragon_rwlock_timedrdlock_sec(void* rw, double seconds) {
     pthread_rwlock_t* l = (pthread_rwlock_t*)rw;
@@ -1433,6 +1531,114 @@ int dragon_sem_timedwait_sec(void* sem, double seconds) {
     }
     return 1;
 #endif
+}
+
+//===----------------------------------------------------------------------===//
+// Semaphore - counting semaphore that also works on Darwin
+//===----------------------------------------------------------------------===//
+// sem_init() is deprecated on macOS and returns -1 with ENOSYS: Darwin ships
+// only *named* semaphores (sem_open). stdlib/threading.dr called sem_init and
+// ignored the result, so every Semaphore on macOS was a zeroed sem_t that had
+// never been initialised - acquire/release then behaved arbitrarily instead of
+// failing loudly, which is the worst of both worlds.
+//
+// Built from a mutex + condvar, which POSIX does mandate everywhere. Same
+// reasoning as the Barrier above, and pure C for the same link-with-cc reason.
+
+typedef struct DragonSem {
+    pthread_mutex_t mutex;
+    pthread_cond_t  cond;
+    int64_t         permits;
+} DragonSem;
+
+/// Create a semaphore with `value` permits. NULL for a negative value.
+void* dragon_sem_new(int64_t value) {
+    if (value < 0) return nullptr;
+    DragonSem* s = (DragonSem*)dragon_xmalloc(sizeof(DragonSem));
+    if (pthread_mutex_init(&s->mutex, nullptr) != 0) {
+        free(s);
+        return nullptr;
+    }
+    if (pthread_cond_init(&s->cond, nullptr) != 0) {
+        pthread_mutex_destroy(&s->mutex);
+        free(s);
+        return nullptr;
+    }
+    s->permits = value;
+    return s;
+}
+
+/// Take a permit, blocking until one is free. 0 on success, -1 on NULL.
+int64_t dragon_sem_acquire(void* handle) {
+    DragonSem* s = (DragonSem*)handle;
+    if (!s) return -1;
+    pthread_mutex_lock(&s->mutex);
+    while (s->permits == 0) {
+        pthread_cond_wait(&s->cond, &s->mutex);
+    }
+    s->permits--;
+    pthread_mutex_unlock(&s->mutex);
+    return 0;
+}
+
+/// Take a permit only if one is free right now. 1 if taken, 0 otherwise.
+int64_t dragon_sem_tryacquire(void* handle) {
+    DragonSem* s = (DragonSem*)handle;
+    if (!s) return 0;
+    pthread_mutex_lock(&s->mutex);
+    int64_t taken = 0;
+    if (s->permits > 0) {
+        s->permits--;
+        taken = 1;
+    }
+    pthread_mutex_unlock(&s->mutex);
+    return taken;
+}
+
+/// Take a permit, waiting at most `seconds`. 1 if taken, 0 on timeout.
+int64_t dragon_sem_timedacquire_sec(void* handle, double seconds) {
+    DragonSem* s = (DragonSem*)handle;
+    if (!s) return 0;
+    struct timespec deadline;
+    dragon__abs_deadline(seconds, &deadline);
+    pthread_mutex_lock(&s->mutex);
+    while (s->permits == 0) {
+        const int rc = pthread_cond_timedwait(&s->cond, &s->mutex, &deadline);
+        if (rc == ETIMEDOUT) {
+            pthread_mutex_unlock(&s->mutex);
+            return 0;
+        }
+        // Spurious wakeup or EINTR: re-check the deadline ourselves so a signal
+        // storm cannot stretch the wait past what the caller asked for.
+        if (rc != 0 && dragon__deadline_passed(&deadline)) {
+            pthread_mutex_unlock(&s->mutex);
+            return 0;
+        }
+    }
+    s->permits--;
+    pthread_mutex_unlock(&s->mutex);
+    return 1;
+}
+
+/// Return a permit and wake one waiter. 0 on success, -1 on NULL.
+int64_t dragon_sem_release(void* handle) {
+    DragonSem* s = (DragonSem*)handle;
+    if (!s) return -1;
+    pthread_mutex_lock(&s->mutex);
+    s->permits++;
+    pthread_cond_signal(&s->cond);
+    pthread_mutex_unlock(&s->mutex);
+    return 0;
+}
+
+/// Destroy and release. 0 on success, -1 on NULL.
+int64_t dragon_sem_free(void* handle) {
+    DragonSem* s = (DragonSem*)handle;
+    if (!s) return -1;
+    pthread_cond_destroy(&s->cond);
+    pthread_mutex_destroy(&s->mutex);
+    free(s);
+    return 0;
 }
 
 void dragon_lock_release(void* lock) {
