@@ -141,6 +141,9 @@ if(NOT APPLE)
     add_test(NAME dr_oom_sustained
         COMMAND bash -c "$<TARGET_FILE:dragon> build ${CMAKE_CURRENT_SOURCE_DIR}/dr/oom_sustained.dr -o ${CMAKE_CURRENT_BINARY_DIR}/oom_sustained && ulimit -v 262144 && exec ${CMAKE_CURRENT_BINARY_DIR}/oom_sustained")
     set_tests_properties(dr_oom_sustained PROPERTIES TIMEOUT 90)
+    add_test(NAME dr_oom_bytes
+        COMMAND bash -c "$<TARGET_FILE:dragon> build ${CMAKE_CURRENT_SOURCE_DIR}/dr/oom_bytes.dr -o ${CMAKE_CURRENT_BINARY_DIR}/oom_bytes && ulimit -v 262144 && exec ${CMAKE_CURRENT_BINARY_DIR}/oom_bytes")
+    set_tests_properties(dr_oom_bytes PROPERTIES TIMEOUT 90)
 endif()
 
 # --- Stdlib import gate ---

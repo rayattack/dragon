@@ -1,0 +1,45 @@
+# Pre-fix: dragon_bytes_repeat and dragon_bytes_concat wrote through an
+# unchecked malloc, so an allocation failure was a NULL-write SIGSEGV, and
+# their overflow guards fprintf'd + exit(1) - the one failure that WAS
+# detected still killed the process. Both now raise catchable MemoryError,
+# matching the list path. The 2^62-byte request is deterministic uncapped:
+# no 64-bit VA space can map it, so malloc fails without committing memory.
+
+from unittest import TestCase, main
+
+
+class BytesAllocBounds(TestCase) {
+    def test_repeat_alloc_failure_raises() {
+        caught: bool = False
+        try {
+            big: bytes = b"a" * 4611686018427387904
+            print(len(big))
+        } except MemoryError {
+            caught = True
+        }
+        self.assertTrue(caught)
+    }
+    def test_repeat_size_overflow_raises() {
+        # len 2: 2^62 exceeds INT64_MAX / 2 by exactly 1, tripping the guard
+        # before any allocation is attempted.
+        caught: bool = False
+        try {
+            big: bytes = b"ab" * 4611686018427387904
+            print(len(big))
+        } except MemoryError {
+            caught = True
+        }
+        self.assertTrue(caught)
+    }
+    def test_repeat_concat_unchanged() {
+        r: bytes = b"ab" * 3
+        self.assertEqual(r.hex(), "616261626162")
+        self.assertEqual(len(b"" * 5), 0)
+        self.assertEqual(len(b"ab" * 0), 0)
+        c: bytes = b"ab" + b"cd"
+        self.assertEqual(c.hex(), "61626364")
+        self.assertEqual(len(b"" + b""), 0)
+    }
+}
+
+main([BytesAllocBounds()])

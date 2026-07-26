@@ -1113,31 +1113,37 @@ DragonBytes* dragon_bytes_concat(DragonBytes* a, DragonBytes* b) {
     // Overflow guard: mirror dragon_bytes_repeat's INT64_MAX-relative check.
     // Without it, na+nb wraps negative and the malloc below truncates to a
     // tiny buffer that the memcpys then overrun.
-    if (na > INT64_MAX - nb) {
-        fprintf(stderr, "MemoryError: bytes concat too large\n"); exit(1);
-    }
+    if (na > INT64_MAX - nb)
+        dragon_raise_exc_cstr(43, "MemoryError: allocation size overflow");
     int64_t newLen = na + nb;
-    auto* result = (DragonBytes*)malloc(sizeof(DragonBytes));
+    // Data before header: an OOM longjmp out of dragon_xmalloc must not
+    // strand a bare header allocation (same ordering as dragon_list_new_tagged).
+    auto* data = (uint8_t*)dragon_xmalloc(newLen > 0 ? (size_t)newLen : 1);
+    auto* result = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
     dragon_obj_init(&result->header, DRAGON_TAG_BYTES);
     result->len = newLen;
-    result->data = (uint8_t*)malloc(newLen > 0 ? newLen : 1);
-    if (a && a->len > 0) memcpy(result->data, a->data, a->len);
-    if (b && b->len > 0) memcpy(result->data + (a ? a->len : 0), b->data, b->len);
+    result->data = data;
+    if (na > 0) memcpy(data, a->data, na);
+    if (nb > 0) memcpy(data + na, b->data, nb);
     return result;
 }
 
 DragonBytes* dragon_bytes_repeat(DragonBytes* b, int64_t n) {
-    if (!b || n <= 0) return dragon_bytes_new(nullptr, 0);
-    if (b->len > 0 && n > INT64_MAX / b->len) {
-        fprintf(stderr, "MemoryError: bytes repeat too large\n"); exit(1);
-    }
+    if (!b || n <= 0 || b->len == 0) return dragon_bytes_new(nullptr, 0);
+    // Keeps the int64 product below well-defined; the byte-count wrap is
+    // trapped again inside dragon_xmalloc_n where the size_t multiply lives.
+    if (n > INT64_MAX / b->len)
+        dragon_raise_exc_cstr(43, "MemoryError: allocation size overflow");
     int64_t newLen = b->len * n;
-    auto* result = (DragonBytes*)malloc(sizeof(DragonBytes));
+    // Data before header: an OOM longjmp out of dragon_xmalloc_n must not
+    // strand a bare header allocation (same ordering as dragon_list_new_tagged).
+    auto* data = (uint8_t*)dragon_xmalloc_n(n, (size_t)b->len);
+    auto* result = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
     dragon_obj_init(&result->header, DRAGON_TAG_BYTES);
     result->len = newLen;
-    result->data = (uint8_t*)malloc(newLen);
+    result->data = data;
     for (int64_t i = 0; i < n; i++) {
-        memcpy(result->data + i * b->len, b->data, b->len);
+        memcpy(data + i * b->len, b->data, b->len);
     }
     return result;
 }
