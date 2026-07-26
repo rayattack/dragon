@@ -1067,18 +1067,38 @@ static const char* dragon_join_utf8(const char* sep, const char** items, int64_t
 
     // Encode each element to UTF-8 once (NULL = kind=1, use the raw pointer);
     // remember the owned transcode (to free) and the byte length, and sum.
-    char** owned = (char**)malloc(sizeof(char*) * (size_t)n);
-    int64_t* blens = (int64_t*)malloc(sizeof(int64_t) * (size_t)n);
-    size_t total = 0;
+    // owned is calloc'd so the failure paths below can free the whole array
+    // blind: unfilled slots are NULL and free(NULL) is a no-op.
+    char** owned = (char**)calloc((size_t)n, sizeof(char*));
+    int64_t* blens = owned ? (int64_t*)calloc((size_t)n, sizeof(int64_t)) : NULL;
+    if (!owned || !blens) {
+        free(owned);
+        if (sep_enc) free(sep_enc);
+        dragon_raise_oom();
+    }
+    int64_t total = 0;
+    bool overflow = false;
     for (int64_t i = 0; i < n; ++i) {
         const char* elem = items[i];
         int64_t bl = 0;
         owned[i] = elem ? dragon_str_to_utf8_alloc(elem, &bl) : NULL;
         blens[i] = elem ? bl : 0;
-        total += (size_t)blens[i];
-        if (i > 0) total += (size_t)sep_blen;
+        // The list can reference the same string many times, so the sum is
+        // amplified far past any real buffer; check every add.
+        int64_t add = blens[i] + (i > 0 ? sep_blen : 0);
+        if (add > INT64_MAX - total) { overflow = true; break; }
+        total += add;
     }
-    char* buf = (char*)malloc(total > 0 ? total : 1);
+    char* buf = overflow ? NULL : (char*)malloc(total > 0 ? (size_t)total : 1);
+    if (!buf) {
+        for (int64_t i = 0; i < n; ++i) free(owned[i]);
+        free(owned);
+        free(blens);
+        if (sep_enc) free(sep_enc);
+        if (overflow)
+            dragon_raise_exc_cstr(43, "MemoryError: allocation size overflow");
+        dragon_raise_oom();
+    }
     char* w = buf;
     for (int64_t i = 0; i < n; ++i) {
         if (i > 0 && sep_blen > 0) { memcpy(w, sep_bytes, (size_t)sep_blen); w += sep_blen; }
@@ -1089,7 +1109,7 @@ static const char* dragon_join_utf8(const char* sep, const char** items, int64_t
         }
         if (owned[i]) free(owned[i]);
     }
-    const char* result = dragon_string_alloc(buf, (int64_t)total);
+    const char* result = dragon_string_alloc(buf, total);
     free(buf);
     free(owned);
     free(blens);
@@ -1100,7 +1120,7 @@ static const char* dragon_join_utf8(const char* sep, const char** items, int64_t
 const char* dragon_str_join_ptr(const char* sep, DragonListPtr* l) {
     if (!l || l->size == 0) return dragon_string_alloc("", 0);
     int64_t n = l->size;
-    const char** items = (const char**)malloc(sizeof(char*) * (size_t)n);
+    const char** items = (const char**)dragon_xmalloc_n(n, sizeof(char*));
     for (int64_t i = 0; i < n; ++i) items[i] = (const char*)l->data[i];
     const char* r = dragon_join_utf8(sep, items, n);
     free((void*)items);
@@ -1110,7 +1130,7 @@ const char* dragon_str_join_ptr(const char* sep, DragonListPtr* l) {
 const char* dragon_str_join(const char* sep, DragonList* l) {
     if (!l || l->size == 0) return dragon_string_alloc("", 0);
     int64_t n = l->size;
-    const char** items = (const char**)malloc(sizeof(char*) * (size_t)n);
+    const char** items = (const char**)dragon_xmalloc_n(n, sizeof(char*));
     for (int64_t i = 0; i < n; ++i) items[i] = (const char*)(uintptr_t)dragon_list_load(l, i);
     const char* r = dragon_join_utf8(sep, items, n);
     free((void*)items);

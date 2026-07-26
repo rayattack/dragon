@@ -1027,10 +1027,13 @@ void dragon_set_destroy(DragonSet* s) {
 // functions can access the real layout.
 
 DragonBytes* dragon_bytes_new(const uint8_t* data, int64_t len) {
-    auto* b = (DragonBytes*)malloc(sizeof(DragonBytes));
+    // Data before header: an OOM longjmp out of dragon_xmalloc must not
+    // strand a bare header allocation (same ordering as dragon_list_new_tagged).
+    auto* buf = (uint8_t*)dragon_xmalloc(len > 0 ? (size_t)len : 1);
+    auto* b = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
     dragon_obj_init(&b->header, DRAGON_TAG_BYTES);
     b->len = len;
-    b->data = (uint8_t*)malloc(len > 0 ? len : 1);
+    b->data = buf;
     if (data && len > 0) memcpy(b->data, data, len);
     return b;
 }
@@ -1045,10 +1048,11 @@ DragonBytes* dragon_bytes_from_literal(const char* data, int64_t len) {
 DragonBytes* dragon_bytes_from_list(DragonList* list) {
     if (!list) return dragon_bytes_new(nullptr, 0);
     int64_t n = list->size;
-    auto* b = (DragonBytes*)malloc(sizeof(DragonBytes));
+    auto* buf = (uint8_t*)dragon_xmalloc(n > 0 ? (size_t)n : 1);
+    auto* b = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
     dragon_obj_init(&b->header, DRAGON_TAG_BYTES);
     b->len = n;
-    b->data = (uint8_t*)malloc(n > 0 ? n : 1);
+    b->data = buf;
     for (int64_t i = 0; i < n; ++i) {
         b->data[i] = (uint8_t)(dragon_list_load(list, i) & 0xFF);
     }
@@ -1187,10 +1191,11 @@ DragonBytes* dragon_bytes_slice(DragonBytes* b, int64_t start, int64_t stop, int
     int64_t count = 0;
     if (step > 0) { for (int64_t i = start; i < stop; i += step) count++; }
     else { for (int64_t i = start; i > stop; i += step) count++; }
-    auto* result = (DragonBytes*)malloc(sizeof(DragonBytes));
+    auto* data = (uint8_t*)dragon_xmalloc(count > 0 ? (size_t)count : 1);
+    auto* result = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
     dragon_obj_init(&result->header, DRAGON_TAG_BYTES);
     result->len = count;
-    result->data = (uint8_t*)malloc(count > 0 ? count : 1);
+    result->data = data;
     int64_t w = 0;
     if (step > 0) { for (int64_t i = start; i < stop; i += step) result->data[w++] = b->data[i]; }
     else { for (int64_t i = start; i > stop; i += step) result->data[w++] = b->data[i]; }
@@ -1264,10 +1269,15 @@ DragonBytes* dragon_str_to_utf8_bytes(const char* s) {
     int64_t blen = 0;
     char* enc = s ? dragon_str_to_utf8_alloc(s, &blen) : nullptr;
     const uint8_t* src = (const uint8_t*)(enc ? enc : (s ? s : ""));
+    // enc is a live owned transcode: free it before raising, since the
+    // longjmp skips this frame's cleanup.
+    auto* data = (uint8_t*)malloc((size_t)(blen > 0 ? blen : 0) + 1);
+    if (!data) { if (enc) free(enc); dragon_raise_oom(); }
     auto* b = (DragonBytes*)malloc(sizeof(DragonBytes));
+    if (!b) { free(data); if (enc) free(enc); dragon_raise_oom(); }
     dragon_obj_init(&b->header, DRAGON_TAG_BYTES);
     b->len = blen;
-    b->data = (uint8_t*)malloc((size_t)(blen > 0 ? blen : 0) + 1);
+    b->data = data;
     if (blen > 0) memcpy(b->data, src, (size_t)blen);
     b->data[blen] = '\0';
     if (enc) free(enc);
@@ -1538,10 +1548,11 @@ DragonBytes* dragon_bytes_fromhex(const char* hex_str) {
         exit(1);
     }
     int64_t byteLen = nibbles / 2;
-    auto* result = (DragonBytes*)malloc(sizeof(DragonBytes));
+    auto* data = (uint8_t*)dragon_xmalloc(byteLen > 0 ? (size_t)byteLen : 1);
+    auto* result = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
     dragon_obj_init(&result->header, DRAGON_TAG_BYTES);
     result->len = byteLen;
-    result->data = (uint8_t*)malloc(byteLen > 0 ? byteLen : 1);
+    result->data = data;
     int64_t w = 0;
     for (int64_t i = 0; i < slen; ) {
         while (i < slen && hex_str[i] == ' ') i++;

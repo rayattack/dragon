@@ -250,6 +250,7 @@ DragonBytes* dragon_str_encode_ex(const char* s, const char* encoding,
         outn++; i += adv;
     }
     uint8_t* buf = (uint8_t*)malloc(outn > 0 ? (size_t)outn : 1);
+    if (!buf) { if (enc) free(enc); dragon_raise_oom(); }
     int64_t w = 0;
     for (int64_t i = 0; i < blen; ) {
         uint32_t cp;
@@ -877,7 +878,9 @@ static const char* dragon_fmt_pad(const DragonFmtSpec* o, const char* prefix, co
     size_t total = plen + blen;
     long width = o->width;
     size_t pad = (long)total >= width ? 0 : (size_t)(width - (long)total);
-    char* buf = (char*)malloc(total + pad + 1);
+    // width is user-supplied via the format spec, so this is an honest
+    // arbitrarily-large request; it must raise, not NULL-write.
+    char* buf = (char*)dragon_xmalloc(total + pad + 1);
     char align = o->align ? o->align : '>';   // numbers default to right-align
     char fill = o->fill;
     size_t pos = 0;
@@ -944,7 +947,7 @@ const char* dragon_float_format(double value, const char* spec) {
     } else {
         long bufprec = (prec < 0 ? 17 : prec);
         size_t magcap = 360 + (size_t)bufprec + 8;
-        heapmag = (char*)malloc(magcap);
+        heapmag = (char*)dragon_xmalloc(magcap);
         if (type == 'f' || type == 'F') {
             snprintf(heapmag, magcap, "%.*f", (int)(prec < 0 ? 6 : prec), av);
         } else if (type == 'e' || type == 'E') {
@@ -976,6 +979,7 @@ const char* dragon_float_format(double value, const char* spec) {
             dragon_fmt_group(intpart, o.grouping, 3, grouped);
             size_t cap2 = strlen(grouped) + strlen(mag + ilen) + 2;
             grpbuf = (char*)malloc(cap2);
+            if (!grpbuf) { free(heapmag); dragon_raise_oom(); }
             snprintf(grpbuf, cap2, "%s%s", grouped, mag + ilen);
             finalmag = grpbuf;
         }
@@ -985,6 +989,7 @@ const char* dragon_float_format(double value, const char* spec) {
     if (percent) {
         size_t cap3 = strlen(finalmag) + 2;
         withpct = (char*)malloc(cap3);
+        if (!withpct) { free(grpbuf); free(heapmag); dragon_raise_oom(); }
         snprintf(withpct, cap3, "%s%%", finalmag);
         finalmag = withpct;
     }
