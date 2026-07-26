@@ -15,7 +15,7 @@ void CodeGen::visit(ForStmt& node) {
     // loop variable as a Color instance (sets varClassNames). __members__ was
     // created by synthesizeEnumMethods.
     if (auto* enumName = dynamic_cast<NameExpr*>(node.iterable.get())) {
-        if (impl_->enumKind.count(enumName->name)) {
+        if (impl_->enumKindBySym.count(impl_->classSym(enumName->name))) {
             auto attr = std::make_unique<AttributeExpr>();
             auto obj = std::make_unique<NameExpr>();
             obj->name = enumName->name;
@@ -393,19 +393,9 @@ void CodeGen::visit(ForStmt& node) {
             {
                 std::string nextClass = impl_->findDunderClass(iterClassName, "__next__");
                 if (!nextClass.empty()) {
-                    // Cross-module classes are forward-declared with per-module
-                    // mangling (`<mod>__<cls>_<method>`), and methodReturnKinds /
+                    // nextClass IS the defining class's sym; methodReturnKinds /
                     // methodReturnClassNames are keyed by that mangled symbol.
-                    // Using the bare class name as the key only matched when
-                    // the iterator class lived in the entry module - for an
-                    // imported `for line in it` the lookups all missed and
-                    // loopVarKind stayed `Other`, which dropped `line.strip()`
-                    // into the default i8* method-dispatch path and miscompiled.
-                    auto cmIt = impl_->classOwningModule.find(nextClass);
-                    std::string defMod = cmIt != impl_->classOwningModule.end()
-                                             ? cmIt->second
-                                             : impl_->currentModuleName;
-                    std::string methKey = Impl::mangleClass(defMod, nextClass) + "___next__";
+                    std::string methKey = nextClass + "___next__";
                     auto* nextFn = impl_->module->getFunction(methKey);
                     if (nextFn) loopVarType = nextFn->getReturnType();
                     auto rkIt = impl_->methodReturnKinds.find(methKey);
@@ -622,8 +612,8 @@ void CodeGen::visit(ForStmt& node) {
                 }
             }
             if (!ownerClass.empty()) {
-                auto cit = impl_->classFieldListElemKinds.find(ownerClass);
-                if (cit != impl_->classFieldListElemKinds.end()) {
+                auto cit = impl_->classFieldListElemKindsBySym.find(impl_->classSym(ownerClass));
+                if (cit != impl_->classFieldListElemKindsBySym.end()) {
                     auto fit = cit->second.find(iterAttr->attribute);
                     if (fit != cit->second.end() &&
                         fit->second == Type::Kind::Any)
@@ -774,8 +764,8 @@ void CodeGen::visit(ForStmt& node) {
 
     // Helper: look up the VarKind of a class field. Returns Other if unknown.
     auto fieldVarKind = [&](const std::string& cls, const std::string& field) -> Impl::VarKind {
-        auto cit = impl_->classFieldKinds.find(cls);
-        if (cit == impl_->classFieldKinds.end()) return Impl::VarKind::Other;
+        auto cit = impl_->classFieldKindsBySym.find(impl_->classSym(cls));
+        if (cit == impl_->classFieldKindsBySym.end()) return Impl::VarKind::Other;
         auto fit = cit->second.find(field);
         if (fit == cit->second.end()) return Impl::VarKind::Other;
         return fit->second;
@@ -1227,8 +1217,8 @@ void CodeGen::visit(ForStmt& node) {
                 }
             }
             if (!className.empty()) {
-                auto cit = impl_->classFieldListElemKinds.find(className);
-                if (cit != impl_->classFieldListElemKinds.end()) {
+                auto cit = impl_->classFieldListElemKindsBySym.find(impl_->classSym(className));
+                if (cit != impl_->classFieldListElemKindsBySym.end()) {
                     auto fit = cit->second.find(iterAttr->attribute);
                     if (fit != cit->second.end()) elemTypeKind = fit->second;
                 }
@@ -1264,8 +1254,8 @@ void CodeGen::visit(ForStmt& node) {
                     }
                 }
                 if (!ownerClass.empty()) {
-                    auto cit = impl_->classFieldListElemClassName.find(ownerClass);
-                    if (cit != impl_->classFieldListElemClassName.end()) {
+                    auto cit = impl_->classFieldListElemClassNameBySym.find(impl_->classSym(ownerClass));
+                    if (cit != impl_->classFieldListElemClassNameBySym.end()) {
                         auto fit = cit->second.find(iterAttr->attribute);
                         if (fit != cit->second.end())
                             elemTypeKind = Type::Kind::Instance;
@@ -1335,8 +1325,8 @@ void CodeGen::visit(ForStmt& node) {
                     }
                 }
                 if (!ownerClass.empty()) {
-                    auto cit = impl_->classFieldListElemClassName.find(ownerClass);
-                    if (cit != impl_->classFieldListElemClassName.end()) {
+                    auto cit = impl_->classFieldListElemClassNameBySym.find(impl_->classSym(ownerClass));
+                    if (cit != impl_->classFieldListElemClassNameBySym.end()) {
                         auto fit = cit->second.find(iterAttr->attribute);
                         if (fit != cit->second.end()) elemClassName = fit->second;
                     }
@@ -1392,7 +1382,7 @@ void CodeGen::visit(ForStmt& node) {
                         if (inst->classType && inst->classType->isTypedDict)
                             tdCls = inst->classType->name;
             }
-            if (!tdCls.empty() && impl_->typedDictClasses.count(tdCls))
+            if (!tdCls.empty() && impl_->typedDictClassesBySym.count(impl_->classSym(tdCls)))
                 impl_->varTypedDictClass[targetName->name] = tdCls;
         }
         // Loop variable is a borrowed reference from the typed get (no
@@ -1419,8 +1409,8 @@ void CodeGen::visit(ForStmt& node) {
                 }
             }
             if (!ownerClass.empty()) {
-                auto cit = impl_->classFieldListElemCallableType.find(ownerClass);
-                if (cit != impl_->classFieldListElemCallableType.end()) {
+                auto cit = impl_->classFieldListElemCallableTypeBySym.find(impl_->classSym(ownerClass));
+                if (cit != impl_->classFieldListElemCallableTypeBySym.end()) {
                     auto fit = cit->second.find(iterAttr->attribute);
                     if (fit != cit->second.end()) elemCallable = fit->second;
                 }

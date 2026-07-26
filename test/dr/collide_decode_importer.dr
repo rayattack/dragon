@@ -1,0 +1,13 @@
+"""Imports two's Cfg while one's same-named Cfg registered first."""
+
+from json import decode
+from collide_decode_two import Cfg
+
+
+def importer_decode() -> str {
+    const c: Cfg = decode[Cfg]('{"x": "im", "y": 4, "z": true}'.encode("utf-8"))
+    if c.z {
+        return c.x + ":" + str(c.y)
+    }
+    return "z-lost"
+}

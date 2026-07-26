@@ -1,0 +1,26 @@
+"""decode[T] must synthesize against T's own class, not a same-named one.
+Pre-fix: the synthesizer read fields from a first-wins by-name registry."""
+
+from unittest import TestCase, main
+from collide_decode_one import one_roundtrip
+from collide_decode_two import two_roundtrip
+from collide_decode_importer import importer_decode
+
+
+class CollideDecodeTests(TestCase) {
+    def test_one_decodes_its_own_shape() {
+        self.assertEqual(one_roundtrip(), "seven:7")
+    }
+
+    def test_two_decodes_its_own_shape() {
+        self.assertEqual(two_roundtrip(), "ex:9")
+    }
+
+    def test_imported_class_pins_decoder_across_fold_order() {
+        # Pre-fix: the decoder was stamped as Cfg(a=, b=) against this Cfg.
+        self.assertEqual(importer_decode(), "im:4")
+    }
+}
+
+
+main([CollideDecodeTests()])

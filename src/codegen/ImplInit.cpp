@@ -1486,7 +1486,7 @@ void CodeGen::Impl::forwardDeclareFunctions(dragon::Module& mod) {
             // visit(FunctionDecl) site alone is too late for method bodies).
             // Keyed by the bare Dragon name to match the call-site lookup.
             if (functionReturnsClosure(*func))
-                funcReturnsClosure.insert(func->name);
+                funcReturnsClosure.insert(llvmName);
             // D027: record which params are Callable[...] so the direct-call arg
             // path wraps a bare fn passed there into DragonClosure(fn, null),
             // keeping every Callable value a real DragonClosure (reliable
@@ -1640,12 +1640,19 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
                     if (bn->name == "TypedDict") isTD = true;
             }
             if (isTD) {
-                typedDictClasses.insert(classDecl->name);
+                std::string tdSym = mangleClass(
+                    classDecl->genericHomeModule.empty() ? currentModuleName
+                                                         : classDecl->genericHomeModule,
+                    classDecl->name);
+                typedDictClassesBySym.insert(tdSym);
+                classOwningModule[classDecl->name] =
+                    classDecl->genericHomeModule.empty()
+                        ? currentModuleName : classDecl->genericHomeModule;
                 // Collect field schemas
                 for (auto& bs : classDecl->body) {
                     if (auto* ann = dynamic_cast<AnnAssignStmt*>(bs.get())) {
                         if (auto* fn = dynamic_cast<NameExpr*>(ann->target.get())) {
-                            typedDictFieldKinds[classDecl->name][fn->name] =
+                            typedDictFieldKindsBySym[tdSym][fn->name] =
                                 typeExprToTypeKind(ann->annotation.get());
                         }
                     }
@@ -1672,7 +1679,12 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
     for (auto& stmt : mod.body) {
         if (auto* classDecl = dynamic_cast<ClassDecl*>(stmt.get())) {
             if (!classDecl->typeParams.empty()) continue;  // D044 - template, not lowered
-            if (typedDictClasses.count(classDecl->name)) continue;
+            // Metadata key: home-module-aware, identical to the visit(ClassDecl) key.
+            const std::string csym = mangleClass(
+                classDecl->genericHomeModule.empty() ? currentModuleName
+                                                     : classDecl->genericHomeModule,
+                classDecl->name);
+            if (typedDictClassesBySym.count(csym)) continue;
 
             // D044 cross-module generics: forward-declare a stamped instantiation's
             // struct/ctor/method symbols under the template's DEFINING module so
@@ -1686,12 +1698,8 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
             if (!classDecl->genericHomeModule.empty())
                 currentModuleName = classDecl->genericHomeModule;
 
-            // Track parent class for MRO. Accept both bare names
-            // (`class Foo(Base)`) and dotted module references
-            // (`class Foo(unittest.TestCase)`) - the latter is how
-            // cross-module inheritance lands in the AST. We store the
-            // bare parent name; classOwningModule resolves which module
-            // it came from when the descriptor is emitted.
+            // Track parent for MRO: bare or dotted base, stored as the parent's
+            // SYM (resolved alias-aware in this module's context).
             if (!classDecl->bases.empty()) {
                 std::string baseBareName;
                 if (auto* baseName = dynamic_cast<NameExpr*>(classDecl->bases[0].get())) {
@@ -1701,12 +1709,12 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
                     baseBareName = baseAttr->attribute;
                 }
                 if (!baseBareName.empty()) {
-                    classParentNames[classDecl->name] = baseBareName;
+                    classParentNamesBySym[csym] = classSymPrefix(baseBareName);
 
                     // Detect user-defined exception classes
                     if (isExcType(baseBareName)) {
                         int64_t code = userExcNextCode++;
-                        userExcCodes[classDecl->name] = code;
+                        userExcCodesBySym[csym] = code;
                         userExcParentCodes[code] = excTypeCode(baseBareName);
                     }
                 }
@@ -1824,8 +1832,8 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
                 }
             } else {
                 // --- Multi-constructor path ---
-                classCtorCount[classDecl->name] = ctorCount;
-                auto& arityVec = classCtorArities[classDecl->name];
+                classCtorCountBySym[csym] = ctorCount;
+                auto& arityVec = classCtorAritiesBySym[csym];
                 arityVec.clear();
 
                 for (size_t ci = 0; ci < ctorCount; ++ci) {
@@ -1893,7 +1901,7 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
                 // already a type-check error, so this never silently drops a
                 // method a valid program relies on).
                 if (isReservedDunder(methodDecl->name)) {
-                    classDunderMethods[classDecl->name].insert(methodDecl->name);
+                    classDunderMethodsBySym[csym].insert(methodDecl->name);
                 }
 
                 std::string methodName = clsSym + "_" + methodDecl->name;
@@ -2080,10 +2088,10 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
                 // Setters are mangled by the parser to "<propName>__setter" so they
                 // live in their own vtable slot.
                 if (methodDecl->isProperty) {
-                    classProperties[classDecl->name].insert(methodDecl->name);
+                    classPropertiesBySym[csym].insert(methodDecl->name);
                 }
                 if (!methodDecl->propertySetterFor.empty()) {
-                    classPropertySetters[classDecl->name][methodDecl->propertySetterFor] =
+                    classPropertySettersBySym[csym][methodDecl->propertySetterFor] =
                         methodDecl->name; // already mangled "<prop>__setter"
                 }
             }
@@ -2098,10 +2106,10 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
             {
                 std::vector<std::string> vtableOrder;
                 std::vector<std::string> ownMethods;
-                auto parentIt = classParentNames.find(classDecl->name);
-                if (parentIt != classParentNames.end()) {
-                    auto poIt = classVtableMethodOrder.find(parentIt->second);
-                    if (poIt != classVtableMethodOrder.end())
+                auto parentIt = classParentNamesBySym.find(csym);
+                if (parentIt != classParentNamesBySym.end()) {
+                    auto poIt = classVtableMethodOrderBySym.find(parentIt->second);
+                    if (poIt != classVtableMethodOrderBySym.end())
                         vtableOrder = poIt->second; // inherit parent order
                 }
                 for (auto& classStmt : classDecl->body) {
@@ -2112,7 +2120,7 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
                     uint8_t kind = 0;
                     if (md->isClassMethod) kind = 2;
                     else if (md->isStatic) kind = 1;
-                    classMethodKinds[classDecl->name][md->name] = kind;
+                    classMethodKindsBySym[csym][md->name] = kind;
                     if (md->name == "__init__") continue;
                     ownMethods.push_back(md->name);
                     // Check if already inherited (override -- keep same index)
@@ -2122,10 +2130,10 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
                     }
                     if (!found) vtableOrder.push_back(md->name);
                 }
-                classVtableMethodOrder[classDecl->name] = vtableOrder;
-                classOwnMethods[classDecl->name] = ownMethods;
+                classVtableMethodOrderBySym[csym] = vtableOrder;
+                classOwnMethodsBySym[csym] = ownMethods;
                 for (size_t i = 0; i < vtableOrder.size(); ++i) {
-                    classMethodVtableIndices[classDecl->name][vtableOrder[i]] = (unsigned)i;
+                    classMethodVtableIndicesBySym[csym][vtableOrder[i]] = (unsigned)i;
                 }
             }
         }

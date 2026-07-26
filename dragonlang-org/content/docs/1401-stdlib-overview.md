@@ -47,12 +47,16 @@ generic function in Python sometimes appear as a small family of
 typed functions in Dragon. You'll meet these as you go - the most
 prominent are:
 
-- **`json`**'s generic `loads` returns `Any` (a boxed value you narrow
-  with `isinstance`), not a `dict`/`list`; the typed decoders and
-  encoders are monomorphized (`loads_int`, `dumps_list_str`, …) for the
-  hot path. It also ships a JSON Schema validator (the `Schema` class:
-  register named schemas, validate by name, compose with `$ref`) with no
-  CPython-stdlib counterpart.
+- **`json`** turns the static-typing constraint into its best feature:
+  `decode[User](body)` / `encode[User](u)` treat your class as the
+  schema and move JSON straight into and out of native fields, box-free,
+  with a decoder synthesized per type at compile time - the serde /
+  pydantic idiom with no library and no reflection. The generic `loads`
+  returns `Any` (a boxed value you narrow with `isinstance`), not a
+  `dict`/`list`, and the scalar decoders and encoders are monomorphized
+  (`loads_int`, `dumps_list_str`, …). It also ships a JSON Schema
+  validator (the `Schema` class: register named schemas, validate by
+  name, compose with `$ref`) with no CPython-stdlib counterpart.
 - **`re.match`/`re.search`** return an `int` index (or `-1`), not a
   `Match` object; captures come from a `Pattern` API.
 - **`csv`** exposes `parse_row`/`format_row` with an explicit delimiter,
@@ -142,7 +146,7 @@ Reading and writing structured data: JSON, CSV, INI, TOML, and binary.
 
 | Module | Purpose | Chapter |
 |--------|---------|---------|
-| `json` | JSON encode/decode/validate (`loads` → `Any`; typed `dumps_*`; the `Schema` registry) | [Data Formats](/docs/1404-stdlib-data) |
+| `json` | JSON encode/decode/validate (schema-directed `decode[T]`/`encode[T]`; `loads` → `Any`; typed `dumps_*`; the `Schema` registry) | [Data Formats](/docs/1404-stdlib-data) |
 | `csv` | CSV `parse_row`/`format_row` with explicit delimiter | [Data Formats](/docs/1404-stdlib-data) |
 | `configparser` | INI files - sections, key-values, comments | [Data Formats](/docs/1404-stdlib-data) |
 | `tomllib` | Read-only TOML, returning a typed `TomlDoc` | [Data Formats](/docs/1404-stdlib-data) |

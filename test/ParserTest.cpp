@@ -2510,6 +2510,86 @@ TEST(ParserTest, ExternCNotInPyMode) {
     EXPECT_GE(module->body.size(), 1u);
 }
 
+// D052 process-lane extern: extern "python"/"golang"/"rust" ... from "path"
+
+TEST(ParserTest, ProcessExternSynthesizesWrapper) {
+    auto module = parse(
+        "extern \"golang\" def resize(w: int, h: int) -> Img from \"./imgtool\"\n");
+    ASSERT_NE(module, nullptr);
+    // Injected ffi/json imports must precede the wrapper def in the body.
+    ASSERT_EQ(module->body.size(), 3u);
+    auto* ffiImport = dynamic_cast<FromImportStmt*>(module->body[0].get());
+    ASSERT_NE(ffiImport, nullptr);
+    EXPECT_EQ(ffiImport->module, "ffi");
+    auto* jsonImport = dynamic_cast<FromImportStmt*>(module->body[1].get());
+    ASSERT_NE(jsonImport, nullptr);
+    EXPECT_EQ(jsonImport->module, "json");
+    auto* fn = dynamic_cast<FunctionDecl*>(module->body[2].get());
+    ASSERT_NE(fn, nullptr);
+    EXPECT_EQ(fn->name, "resize");
+    EXPECT_FALSE(fn->isExtern);              // a real def with a synthesized body
+    EXPECT_EQ(fn->externLang, "golang");     // metadata for `dragon ffi sync`
+    EXPECT_EQ(fn->externPath, "./imgtool");
+    EXPECT_FALSE(fn->body.empty());
+    // Body ends in `return sidecar_call[Img](...)` (the warm framed transport).
+    auto* ret = dynamic_cast<ReturnStmt*>(fn->body.back().get());
+    ASSERT_NE(ret, nullptr);
+    auto* call = dynamic_cast<CallExpr*>(ret->value.get());
+    ASSERT_NE(call, nullptr);
+    ASSERT_EQ(call->args.size(), 3u);  // argv, body, blobs
+    auto* sub = dynamic_cast<SubscriptExpr*>(call->callee.get());
+    ASSERT_NE(sub, nullptr);
+    auto* scName = dynamic_cast<NameExpr*>(sub->object.get());
+    ASSERT_NE(scName, nullptr);
+    EXPECT_EQ(scName->name, "sidecar_call");
+}
+
+TEST(ParserTest, ProcessExternGoSpellingRejected) {
+    auto errs = parseErrors(
+        "extern \"go\" def f(n: int) -> int from \"./tool\"\n");
+    ASSERT_FALSE(errs.empty());
+    EXPECT_NE(errs[0].message.find("golang"), std::string::npos);
+}
+
+TEST(ParserTest, ProcessExternUnknownLangRejected) {
+    auto errs = parseErrors(
+        "extern \"cobol\" def f(n: int) -> int from \"./tool\"\n");
+    ASSERT_FALSE(errs.empty());
+    EXPECT_NE(errs[0].message.find("unknown extern language"), std::string::npos);
+}
+
+TEST(ParserTest, ProcessExternBytesCrossAsBlobs) {
+    // bytes params compile (they ride as raw blobs); a bytes RETURN routes
+    // through sidecar_call_bytes instead of the generic decode path.
+    auto module = parse(
+        "extern \"python\" def double(img: bytes, tag: str) -> bytes from \"x.py\"\n");
+    ASSERT_NE(module, nullptr);
+    ASSERT_EQ(module->body.size(), 3u);
+    auto* fn = dynamic_cast<FunctionDecl*>(module->body[2].get());
+    ASSERT_NE(fn, nullptr);
+    auto* ret = dynamic_cast<ReturnStmt*>(fn->body.back().get());
+    ASSERT_NE(ret, nullptr);
+    auto* call = dynamic_cast<CallExpr*>(ret->value.get());
+    ASSERT_NE(call, nullptr);
+    auto* callee = dynamic_cast<NameExpr*>(call->callee.get());
+    ASSERT_NE(callee, nullptr);
+    EXPECT_EQ(callee->name, "sidecar_call_bytes");
+}
+
+TEST(ParserTest, ProcessExternRequiresFromPath) {
+    auto errs = parseErrors(
+        "extern \"python\" def f(n: int) -> int\n");
+    ASSERT_FALSE(errs.empty());
+    EXPECT_NE(errs[0].message.find("from"), std::string::npos);
+}
+
+TEST(ParserTest, ProcessExternRequiresReturnType) {
+    auto errs = parseErrors(
+        "extern \"rust\" def f(n: int) from \"./tool\"\n");
+    ASSERT_FALSE(errs.empty());
+    EXPECT_NE(errs[0].message.find("return type"), std::string::npos);
+}
+
 //===----------------------------------------------------------------------===//
 // @staticmethod / @classmethod decorator wiring tests
 //===----------------------------------------------------------------------===//
@@ -2816,4 +2896,99 @@ TEST(ParserTest, DeferRemainsUsableAsIdentifier) {
         "    return defer_task(defer)\n"
         "}\n");
     ASSERT_NE(module, nullptr);
+}
+
+//===----------------------------------------------------------------------===//
+// Template body scanning (parseTemplateBody)
+//===----------------------------------------------------------------------===//
+
+// A bare `!!` with no `{`/`}` after it is literal text (the JS boolean-
+// coercion idiom `!!x`), not an escape prefix. The literal-run scanner used
+// to break at any `!!` while the dispatcher consumed nothing, so this input
+// spun forever. Terminating at all IS the regression assertion.
+TEST(ParserTest, TemplateBodyDoubleBangIsLiteral) {
+    SourceLocation loc;
+    auto parts = Parser::parseTemplateBody("var a = !!b;", loc, true);
+    ASSERT_EQ(parts.size(), 1u);
+    EXPECT_EQ(parts[0].kind, TemplatePart::Kind::Literal);
+    EXPECT_EQ(parts[0].literal, "var a = !!b;");
+}
+
+TEST(ParserTest, TemplateBodyDoubleBangAtEndOfBody) {
+    SourceLocation loc;
+    auto parts = Parser::parseTemplateBody("a !!", loc, true);
+    ASSERT_EQ(parts.size(), 1u);
+    EXPECT_EQ(parts[0].kind, TemplatePart::Kind::Literal);
+    EXPECT_EQ(parts[0].literal, "a !!");
+}
+
+// Runs of 3+ bangs: away from a brace they are pure literal text; abutting
+// a `{` or `}` the LAST two bangs form the escape and the rest stay literal
+// (`!!!{` -> `!!{`, `!!!!{` -> `!!!{`). Pins the greedy-leftmost scan.
+TEST(ParserTest, TemplateBodyBangRuns) {
+    SourceLocation loc;
+    auto render = [&](const std::string& body) {
+        std::string out;
+        for (const auto& p : Parser::parseTemplateBody(body, loc, true))
+            out += p.literal;
+        return out;
+    };
+    EXPECT_EQ(render("a !!! b"), "a !!! b");
+    EXPECT_EQ(render("a !!!! b"), "a !!!! b");
+    EXPECT_EQ(render("a !!!!!"), "a !!!!!");
+    EXPECT_EQ(render("g !!!{x} h"), "g !!{x} h");
+    EXPECT_EQ(render("i !!!!{x} j"), "i !!!{x} j");
+    EXPECT_EQ(render("k !!!} m"), "k !} m");
+}
+
+// The documented escapes are exactly `!!{` -> `!{` and `!!}` -> `}`; they
+// must keep working with the tightened literal-run break condition.
+TEST(ParserTest, TemplateBodyEscapesUnchanged) {
+    SourceLocation loc;
+    auto parts = Parser::parseTemplateBody("x !!{y!!} z", loc, true);
+    std::string joined;
+    for (const auto& p : parts) {
+        ASSERT_EQ(p.kind, TemplatePart::Kind::Literal);
+        joined += p.literal;
+    }
+    EXPECT_EQ(joined, "x !{y} z");
+}
+
+// An unterminated `!{` used to sub-parse the ragged tail and silently drop
+// it from the rendered output on failure. It is a reported error now.
+TEST(ParserTest, TemplateBodyUnterminatedInterpolationIsError) {
+    SourceLocation loc;
+    std::vector<std::string> errs;
+    auto parts = Parser::parseTemplateBody("a !{x", loc, true, &errs);
+    ASSERT_EQ(errs.size(), 1u);
+    EXPECT_NE(errs[0].find("unterminated '!{'"), std::string::npos);
+    ASSERT_FALSE(parts.empty());
+    EXPECT_TRUE(parts.back().parseFailed);
+}
+
+// An interpolation body that is not valid Dragon was silently dropped too.
+TEST(ParserTest, TemplateBodyUnparsableInterpolationIsError) {
+    SourceLocation loc;
+    std::vector<std::string> errs;
+    Parser::parseTemplateBody("a !{1 +} b", loc, true, &errs);
+    ASSERT_EQ(errs.size(), 1u);
+    EXPECT_NE(errs[0].find("does not parse"), std::string::npos);
+}
+
+TEST(ParserTest, TemplateBodyEmptyInterpolationIsError) {
+    SourceLocation loc;
+    std::vector<std::string> errs;
+    Parser::parseTemplateBody("a !{} b", loc, true, &errs);
+    ASSERT_EQ(errs.size(), 1u);
+    EXPECT_NE(errs[0].find("empty '!{}'"), std::string::npos);
+}
+
+// End-to-end through the real parser: a bad interpolation inside an inline
+// `template { ... }` must surface as a parser diagnostic, not vanish.
+TEST(ParserTest, InlineTemplateBadInterpolationSurfacesError) {
+    auto diags = parseErrors("x: str = template {a !{1 +} b}");
+    bool hasError = false;
+    for (const auto& d : diags)
+        if (d.level == ParserDiagnostic::Level::Error) hasError = true;
+    EXPECT_TRUE(hasError);
 }

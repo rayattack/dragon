@@ -97,6 +97,7 @@ set(DRAGON_SOURCES
     src/TypeHintEnforcer.cpp
     src/ModuleResolver.cpp
     src/Driver.cpp
+    src/FfiSync.cpp
     src/Platform.cpp
     src/dragon.cpp
 )

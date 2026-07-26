@@ -13,27 +13,16 @@ void CodeGen::visit(FloatLiteral& node) {
 
 void CodeGen::visit(StringLiteral& node) {
     if (node.isFString) {
-        // F-string segments are pre-parsed by the Parser into node.fstringParts so
-        // Sema/TypeChecker have already walked the interpolations (closure capture
-        // analysis, type inference). Here we just lower each segment.
+        // Segments arrive in node.fstringParts pre-parsed and type-checked; lower each.
         std::vector<llvm::Value*> parts;
-        // True when the (only) part was lowered as a bare borrowed str value
-        // (identity, no conversion call). A multi-part f-string concats - the
-        // result is a fresh owned string either way - but a SINGLE borrowed
-        // part would flow out as the f-string's result, and consumers treat
-        // f-string results as owned (isBorrowedHeapExpr): they'd release a
-        // reference we never took. See the retain at the bottom.
+        // True when the (only) part is a bare borrowed str: consumers own f-string
+        // results, so a lone borrowed part needs the retain at the bottom.
         bool lastPartBorrowedStr = false;
         for (auto& part : node.fstringParts) {
             lastPartBorrowedStr = false;
             if (part.kind == FStringPart::Kind::Literal) {
-                // Process backslash escapes (\n, \t, \\, ...) exactly as a
-                // normal string literal does - the Parser stores f-string
-                // literal segments raw. Honour the r-prefix (rf"...") via
-                // node.isRaw. Then route through emitStringLiteralBytes so a
-                // segment containing non-ASCII (e.g. f"x - {y}") becomes a
-                // kind=1/4 heap DragonString rather than a raw C-string that
-                // dragon_str_concat would mis-decode as Latin-1.
+                // The Parser stores segments raw: process escapes (honours rf"..."),
+                // then emitStringLiteralBytes so non-ASCII becomes a heap DragonString, not Latin-1.
                 std::string processed = impl_->processEscapes(part.literal, node.isRaw);
                 parts.push_back(impl_->emitStringLiteralBytes(processed));
                 continue;
@@ -49,12 +38,8 @@ void CodeGen::visit(StringLiteral& node) {
             part.expr->accept(*this);
             llvm::Value* exprVal = impl_->lastValue;
 
-            // A str part emitted as-is (no conversion call) is only BORROWED
-            // when its expr/value actually borrow. An owned call result
-            // (`f"{cfg.get('host', '?')}"` - the getter increfs per #19)
-            // already carries the +1 the f-string result hands out; marking
-            // it borrowed made the single-part retain below double-count it,
-            // leaking the dict's stored value once per evaluation.
+            // An as-is str part is BORROWED only when its expr/value actually borrow:
+            // an owned call result carries the +1 already; the retain would double-count it.
             auto partBorrows = [&](llvm::Value* v) {
                 return Impl::isBorrowedHeapExpr(part.expr.get()) ||
                        !impl_->isOwnedStrResult(v);
@@ -79,13 +64,8 @@ void CodeGen::visit(StringLiteral& node) {
                        (impl_->resolveExprVarKind(part.expr.get()) == Impl::VarKind::Str ||
                         (part.expr->type &&
                          part.expr->type->kind() == Type::Kind::Str))) {
-                // A str value with a format spec - Python's mini-language for
-                // strings is `[[fill]align][width][type]`, where the only valid
-                // type char is `s`. Honour column padding (<, >, ^, = + width)
-                // by routing through the exported ljust/rjust/center helpers;
-                // a numeric-only spec (e.g. `.2f`, `d`) on a str is an error,
-                // not a silent no-op. Parse here so we can reuse the str-pad
-                // runtime without a new dragon_str_format symbol.
+                // Str format spec `[[fill]align][width][s]`: pad via the ljust/rjust/center
+                // helpers; a numeric spec (e.g. `.2f`) on a str is an error, not a no-op.
                 const std::string& s = formatSpec;
                 size_t p = 0;
                 char fill = ' ';
@@ -109,8 +89,7 @@ void CodeGen::visit(StringLiteral& node) {
                     p++; typeOk = true;  // explicit `s` type is valid for str
                 }
                 if (!typeOk || align == '=') {
-                    // `=` alignment is numeric-only; any leftover (e.g. `.2f`)
-                    // is a non-string conversion applied to a str.
+                    // `=` alignment is numeric-only; any leftover spec is a non-str conversion.
                     impl_->addError("invalid format spec '" + s +
                                     "' for str value", node.location());
                     strVal = exprVal;
@@ -145,11 +124,8 @@ void CodeGen::visit(StringLiteral& node) {
                 strVal = impl_->callDunder(fClassName, "__repr__", exprVal);
             } else if (exprVal->getType() == impl_->i8PtrType ||
                        exprVal->getType()->isPointerTy()) {
-                // A container (list/dict/set/tuple) is a pointer but not a
-                // string - render it via its repr instead of feeding the
-                // container header to dragon_str_concat (which produced empty
-                // output). The result is an owned heap string, decref'd by the
-                // concat-intermediate rule below.
+                // A container pointer is not a string: render via its repr (owned
+                // result, balanced by the concat-intermediate decref below).
                 std::string creprFn = impl_->containerReprFn(part.expr.get());
                 if (!creprFn.empty()) {
                     strVal = impl_->builder->CreateCall(
@@ -166,11 +142,8 @@ void CodeGen::visit(StringLiteral& node) {
                 strVal = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_float_to_str"], {exprVal}, "ftos");
             } else if (exprVal->getType() == impl_->boxType) {
-                // D039: Any / Union interpolation - dispatch on tag at runtime.
-                // Without this the box was being shoved through dragon_int_to_str
-                // (signature mismatch / LLVM verify failure). dragon_box_to_str
-                // returns an owned heap DragonString that the existing concat
-                // chain's decref-on-CallInst rule will balance.
+                // D039: Any/Union interpolation dispatches on tag; dragon_box_to_str
+                // returns an owned string balanced by the concat decref rule below.
                 strVal = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_box_to_str"], {exprVal}, "btos.any");
             } else {
@@ -185,11 +158,8 @@ void CodeGen::visit(StringLiteral& node) {
             impl_->lastValue = impl_->builder->CreateGlobalString("");
         } else if (parts.size() == 1 && lastPartBorrowedStr &&
                    impl_->options.gcMode == GCMode::RC) {
-            // Single borrowed str part (f"{e}"): the part IS the f-string's
-            // result, but consumers own f-string results by convention - hand
-            // them their own +1 (identity, no copy). Without this, storing
-            // f"{e}" stole the source's reference and scope cleanup
-            // over-released it (UAF on the exception slot after `out = f"{e}"`).
+            // Single borrowed part: consumers own f-string results, so hand out our
+            // own +1 - else `out = f"{e}"` steals the source's ref (UAF on over-release).
             impl_->lastValue = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_str_retain"], {parts[0]}, "fstr.retain");
         } else {
@@ -198,32 +168,21 @@ void CodeGen::visit(StringLiteral& node) {
                 llvm::Value* prev = result;
                 result = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_str_concat"], {prev, parts[k]}, "fstr");
-                // (note: parts[k] may be a `load` of the utf8 literal global, which
-                // is `isa<CallInst>` false - so the existing decref-of-CallInst
-                // heuristic below will correctly leave the immortal interned
-                // string alone.)
-                // Decref the previous concat intermediate (k>1 means prev is a concat
-                // result, not parts[0] which could be a GlobalString literal)
+                // Decref the previous concat intermediate (k>1: prev is a concat
+                // result, not parts[0], which may be a GlobalString literal).
                 if (k > 1 && impl_->options.gcMode == GCMode::RC) {
                     impl_->builder->CreateCall(
                         impl_->runtimeFuncs["dragon_decref_str"], {prev});
                 }
-                // Decref only OWNED converstion results consumed by this concat
-                // (dragon_int_to_str etc.). The old `isa<CallInst>` heuristic was
-                // wrong: a borrowed interpolation like {d['k']} lowers to
-                // dragon_dict_get_str_ptr - ALSO a CallInst, but the dict keeps
-                // that +1 - so decref'ing it here freed the dict's stored value
-                // (f"x {d['k']} y" -> UAF, then d['k'] reads freed memory).
-                // isOwnedStrResult knows the borrowed str returners and excludes
-                // them.
+                // Decref only OWNED conversion results: a borrowed part like {d['k']}
+                // is also a CallInst but the dict keeps that +1 - decref'ing it here is a UAF.
                 if (impl_->options.gcMode == GCMode::RC &&
                     impl_->isOwnedStrResult(parts[k])) {
                     impl_->builder->CreateCall(
                         impl_->runtimeFuncs["dragon_decref_str"], {parts[k]});
                 }
             }
-            // Also decref parts[0] if it was an OWNED conversion result (not a
-            // literal and not a borrowed dict/field/foreign string).
+            // Also decref parts[0] when it was an OWNED conversion result.
             if (parts.size() > 1 && impl_->options.gcMode == GCMode::RC &&
                 impl_->isOwnedStrResult(parts[0])) {
                 impl_->builder->CreateCall(
@@ -244,17 +203,12 @@ void CodeGen::visit(StringLiteral& node) {
     }
     std::string processed = impl_->processEscapes(node.value, node.isRaw);
     // ASCII: raw C-string global. Non-ASCII: lazily-interned heap DragonString,
-    // shared via emitStringLiteralBytes so template / f-string segments don't
-    // double-encode the same byte sequence. See helper docs for details.
+    // shared via emitStringLiteralBytes so segments don't double-encode.
     impl_->lastValue = impl_->emitStringLiteralBytes(processed);
 }
 
-// Decision 031: if the `!{...}` at `val[bangPos]` sits in the value of an HTML
-// attribute - `onclick="!{...}"`, `value=!{...}` - return that attribute's name
-// (else ""). Scans the literal text backward over an optional opening quote, the
-// `=`, and the attribute name. Used both to detect event handlers (#3) and to
-// suppress reactive text-binding inside attribute values (#4 - a `<span>` wrap
-// is invalid there).
+// D031: returns the attribute name when the `!{...}` at val[bangPos] sits in an
+// HTML attribute value (else ""); gates event handlers and in-attribute binding suppression.
 static std::string precedingAttrName(const std::string& val, size_t bangPos) {
     auto isNameChar = [](char c) {
         return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
@@ -272,7 +226,7 @@ static std::string precedingAttrName(const std::string& val, size_t bangPos) {
     return val.substr(k, nameEnd - k);
 }
 
-// #3: the interpolation sits in an event-attribute value (`onclick=`, `oninput=`...).
+// True when the interpolation sits in an event-attribute value (`onclick=`, `oninput=`...).
 static bool isEventAttrContext(const std::string& val, size_t bangPos) {
     std::string attr = precedingAttrName(val, bangPos);
     return attr.size() > 2 && (attr[0] == 'o' || attr[0] == 'O') &&
@@ -280,24 +234,8 @@ static bool isEventAttrContext(const std::string& val, size_t bangPos) {
 }
 
 void CodeGen::visit(TemplateExpr& node) {
-    // Parse template body for !{expr} segments and lower to dragon_str_concat chains.
-    // Mirrors the f-string implementation but scans for !{ instead of {.
-    //
-    // D017 Phase 4.B effective-content-type rule:
-    //  - explicit `template[X] { ... }` -> effContent = "X"
-    //  - `:{ ... }` content alias inside a !{} block -> inherit from
-    //  templateContextStack top (the enclosing template[X])
-    //  - explicit `template { ... }` (untyped) or top-level :{} with no
-    //  enclosing context -> effContent = "" (untyped str)
-    //
-    // We push the effective content type on the context stack so that
-    // ANY template visited recursively (via !{} block-mode parseBlock that
-    // visits a `:{...}` ExprStmt) sees the inherited type at its top.
-    // D032: content types that declare `build` (SQL) use parameter-extraction
-    // lowering - the literal text becomes a canonical $$N string and each
-    // !{expr} becomes a native-typed bound parameter, never escape-and-concat.
-    // Only the explicit `template[X] { ... }` site routes here; `:{}` content
-    // aliases keep the string path below.
+    // D032: a content type declaring `build` (SQL) lowers via parameter
+    // extraction, never escape-and-concat; `:{}` content aliases keep the string path.
     if (!node.contentType.empty() && !node.isContentAlias) {
         std::string ownMod = impl_->resolveClassOwningModule(node.contentType);
         if (impl_->resolveMethodFunction(ownMod, node.contentType, "build")) {
@@ -306,6 +244,8 @@ void CodeGen::visit(TemplateExpr& node) {
         }
     }
 
+    // D017: a `:{}` content alias inherits the enclosing template[X]'s type; the
+    // push makes recursively visited templates see it at the stack top.
     std::string effContent = node.contentType;
     if (effContent.empty() && node.isContentAlias &&
         !impl_->templateContextStack.empty()) {
@@ -313,17 +253,11 @@ void CodeGen::visit(TemplateExpr& node) {
     }
     impl_->templateContextStack.push_back(effContent);
 
-    // #4 (Decision 031) reactive text-binding helpers. A text-content
-    // interpolation that reads a module-global `ui.Signal` - `<h1>!{count()}</h1>`
-    // - is lowered to a `<span data-dr="N">` wrapping the value, plus a
-    // synthesized `() -> str` render closure registered via `ui.bind_text` so the
-    // node auto-patches on every `Signal.set()`. The lambdas below are used by the
-    // reactive branch inside the scan loop.
+    // D031 reactive text-binding helpers: a text interpolation reading a module-global
+    // `ui.Signal` lowers to a `<span data-dr="N">` wrap plus a `ui.bind_text` render closure.
 
-    // Stringify a visited value to a Dragon `str`, mirroring the non-reactive
-    // path (dunder __str__/__repr__, then native int/float/bool/str). When
-    // `wantOwned`, a borrowed str (a Signal's own `_value`) is increfed so the
-    // result is safe to return out of the render function.
+    // Stringify a visited value to str, mirroring the non-reactive path. When
+    // `wantOwned`, a borrowed str is increfed so the render fn may return it.
     auto emitStringify = [&](llvm::Value* v, const std::string& cls,
                              bool wantOwned) -> llvm::Value* {
         llvm::Value* s;
@@ -366,13 +300,8 @@ void CodeGen::visit(TemplateExpr& node) {
         return impl_->hasDunder(cls, "__call__") || impl_->hasDunder(cls, "get");
     };
 
-    // Walk an interpolation expression, recording whether it reads a Signal
-    // (`s()` / `s.get()`) and whether it references any *local* name. Phase 0
-    // supports reactive interpolations over module-global Signals only: the
-    // synthesized render function reads globals by name (no capture), but a
-    // local would need codegen-synthesized capture analysis (the unimplemented
-    // `fire{}`/`thread{}` capture path) - so a local reference is a clean error,
-    // never a silent miscompile.
+    // Records whether the expression reads a Signal and whether it touches a local:
+    // the capture-free render fn reads globals only, so a local is a clean error, not a miscompile.
     std::function<void(Expr*, bool&, bool&)> analyzeReactive =
         [&](Expr* e, bool& signalRead, bool& localRef) {
         if (!e) return;
@@ -418,24 +347,20 @@ void CodeGen::visit(TemplateExpr& node) {
 
     const std::string& val = node.body;  // kept for event-attr / reactive context scans
     std::vector<llvm::Value*> parts;
-    // Lower each pre-parsed segment. The Parser split node.body into
-    // templateParts once and the TypeChecker walked every interpolation, so
-    // each `!{expr}` now flows AT its native type - a `!{p[0]}` tuple-subscript
-    // materializes the value, not the raw i64 pointer it used to print.
+    // Segments arrive pre-parsed in templateParts and type-checked, so each
+    // `!{expr}` flows at its native type.
     for (auto& tp : node.templateParts) {
         if (tp.kind == TemplatePart::Kind::Literal) {
-            // Literal text must go through emitStringLiteralBytes because
-            // template bodies often carry UTF-8 (accents, box-drawing) a raw
-            // C-string would misdecode once a kind=4 operand joins the chain.
+            // emitStringLiteralBytes: template UTF-8 in a raw C-string would
+            // misdecode once a kind=4 operand joins the concat chain.
             if (!tp.literal.empty())
                 parts.push_back(impl_->emitStringLiteralBytes(tp.literal));
         } else {
-            const size_t bangPos = tp.bangPos;  // #3: event-attr (onclick=!{h}) detection
+            const size_t bangPos = tp.bangPos;  // event-attr (onclick=!{h}) detection
             const std::string& exprText = tp.exprText;
 
-            // D017 Phase 4.B `!{*expr}` spread sugar desugars to `| join`
-            // (empty sep). The Parser recorded the raw filter + spread flag;
-            // apply the join defaulting and the combined-filter rejection here.
+            // D017: `!{*expr}` spread desugars to `| join` (empty sep); any
+            // explicit filter other than `raw` is rejected below.
             std::string filterName = tp.filterName;
             if (tp.isSpread) {
                 if (filterName.empty()) {
@@ -453,12 +378,8 @@ void CodeGen::visit(TemplateExpr& node) {
             Expr* fExpr = tp.expr.get();
 
             if (blockMode) {
-                // Block-interp lowering: allocate a runtime list[str] buffer,
-                // push it on the buffer stack, visit each statement (which
-                // emits its IR; any `:{ ... }` ExprStmt inside appends its
-                // rendered string to the top buffer - see visit(ExprStmt)),
-                // pop the buffer, and emit dragon_str_join_ptr to flatten.
-                // The joined string is this `!{...}`'s value.
+                // Block interpolation renders into a pushed list[str] buffer (a
+                // `:{...}` ExprStmt appends to the top buffer, see visit(ExprStmt)), then joins it.
                 llvm::Value* buf = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_list_new_ptr"],
                     {llvm::ConstantInt::get(impl_->i64Type, 0),
@@ -473,31 +394,21 @@ void CodeGen::visit(TemplateExpr& node) {
                 llvm::Value* joined = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_str_join_ptr"],
                     {emptySep, buf}, "tpl_blk_joined");
-                // dragon_str_join_ptr BORROWS the buffer (reads + copies bytes,
-                // frees nothing) and `joined` is a fresh +1. The buffer owns one
-                // ref per appended fragment (dragon_list_append_ptr transfers),
-                // so it must be released here or the list + buffer + every
-                // rendered fragment leaks per render. list_destroy
-                // decrefs each element, leaving `joined` independent.
+                // dragon_str_join_ptr BORROWS the buffer and `joined` is a fresh +1:
+                // release the buffer (decrefs every fragment) or each render leaks it all.
                 impl_->emitDecrefByKind(buf, Impl::VarKind::List);
                 parts.push_back(joined);
                 continue;
             }
 
             if (fExpr) {
-                // Check for class instance __str__ before visiting
                 std::string fClassName = impl_->resolveExprClassName(fExpr);
 
-                // Visit the expression to generate LLVM IR
                 fExpr->accept(*this);
                 llvm::Value* exprVal = impl_->lastValue;
 
-                // #3 (Decision 031): an interpolated event handler -
-                // `onclick="!{lambda...}"` or `onclick="!{some_fn}"`. Register the
-                // callable (returns an int id) and emit `window.dr.invoke(<id>)`
-                // into the markup instead of stringifying it. Gated on an
-                // unambiguous callable (a lambda literal or a bare function value),
-                // so `onclick="!{a_js_string}"` still interpolates normally.
+                // D031 event handler: register the callable, emit `window.dr.invoke(<id>)`.
+                // Gated on an unambiguous callable so `onclick="!{a_js_string}"` still interpolates.
                 if (isEventAttrContext(val, bangPos) &&
                     (dynamic_cast<LambdaExpr*>(fExpr) ||
                      llvm::isa<llvm::Function>(exprVal))) {
@@ -509,8 +420,8 @@ void CodeGen::visit(TemplateExpr& node) {
                         parts.push_back(impl_->emitStringLiteralBytes(""));
                         continue;
                     }
-                    // Wrap a bare fn into a DragonClosure(fn, null) so the registry
-                    // always holds a uniform refcounted callable (ADR 046).
+                    // D046: wrap a bare fn as DragonClosure(fn, null) so the registry
+                    // holds a uniform refcounted callable.
                     llvm::Value* cb = exprVal;
                     if (llvm::isa<llvm::Function>(cb)) {
                         auto* fnI8 = impl_->builder->CreateBitCast(cb, impl_->i8PtrType);
@@ -535,12 +446,8 @@ void CodeGen::visit(TemplateExpr& node) {
                     continue;
                 }
 
-                // #4 (Decision 031): a reactive text-content interpolation -
-                // `<h1>!{count()}</h1>` reading a module-global Signal. Wrap the
-                // value in `<span data-dr="N">` and register a synthesized render
-                // closure via `ui.bind_text` so the node auto-patches on every
-                // `Signal.set()`. Suppressed inside attribute values (a span wrap
-                // is invalid there - handled by the normal stringify below).
+                // D031 reactive text binding: `<span data-dr="N">` wrap plus a
+                // `ui.bind_text` render closure; suppressed inside attribute values (span is invalid there).
                 {
                     bool inAttr = !precedingAttrName(val, bangPos).empty();
                     bool signalRead = false, localRef = false;
@@ -565,19 +472,13 @@ void CodeGen::visit(TemplateExpr& node) {
                             continue;
                         }
 
-                        // (1) Static initial value baked into the span. The DOM is
-                        //  not loaded when the binding first runs, so its first
-                        //  patch is a no-op - this baked value is what shows
-                        //  until the first Signal.set().
+                        // Static value baked into the span: the binding's first patch
+                        // predates DOM load, so this shows until the first Signal.set().
                         llvm::Value* staticStr =
                             emitStringify(exprVal, fClassName, /*wantOwned=*/false);
 
-                        // (2) Synthesize a capture-free `() -> str` render fn that
-                        //  re-evaluates the interpolation. The Signal is a module
-                        //  global (read by name in any function), so no closure
-                        //  capture is needed - sidestepping synthesized-capture
-                        //  analysis, which doesn't exist (the local-ref guard
-                        //  above enforces this Phase-0 boundary).
+                        // Synthesize a capture-free `() -> str` render fn: the Signal
+                        // is a module global read by name (the local-ref guard above enforces this).
                         std::string fnName =
                             "__dragon_reactive_" + std::to_string(impl_->lambdaCounter++);
                         auto* fnTy = llvm::FunctionType::get(impl_->i8PtrType, {}, false);
@@ -612,9 +513,8 @@ void CodeGen::visit(TemplateExpr& node) {
                             if (prevBlock) impl_->builder->SetInsertPoint(prevBlock);
                         }
 
-                        // (3) Wrap the bare render fn as a uniform refcounted
-                        //  closure (ADR 046) and register it; bind_text returns
-                        //  the fresh node id.
+                        // D046: wrap the render fn as a refcounted closure and
+                        // register it; bind_text returns the fresh node id.
                         auto* fnI8 = impl_->builder->CreateBitCast(renderFn, impl_->i8PtrType);
                         auto* nullEnv = llvm::ConstantPointerNull::get(
                             llvm::cast<llvm::PointerType>(impl_->i8PtrType));
@@ -627,7 +527,7 @@ void CodeGen::visit(TemplateExpr& node) {
                         llvm::Value* nid =
                             impl_->builder->CreateCall(bindFn, {closure}, "rx.nid");
 
-                        // (4) Emit `<span data-dr="<nid>"><static-value></span>`.
+                        // Emit `<span data-dr="<nid>"><static-value></span>`.
                         parts.push_back(impl_->emitStringLiteralBytes("<span data-dr=\""));
                         parts.push_back(impl_->builder->CreateCall(
                             impl_->runtimeFuncs["dragon_int_to_str"], {nid}, "rx.nid.str"));
@@ -638,10 +538,8 @@ void CodeGen::visit(TemplateExpr& node) {
                     }
                 }
 
-                // Convert to string based on type.
-                // Track whether strVal is freshly allocated ("owned" - caller decrefs)
-                // or borrowed (already-tracked pointer). Filters return a fresh string,
-                // so the pre-filter owned strVal must be decref'd before being replaced.
+                // strValOwned: fresh ("owned") vs borrowed. Filters return a fresh
+                // string, so an owned pre-filter strVal is decref'd when replaced.
                 llvm::Value* strVal;
                 bool strValOwned = true;
                 if (!fClassName.empty() && impl_->hasDunder(fClassName, "__str__") &&
@@ -652,13 +550,8 @@ void CodeGen::visit(TemplateExpr& node) {
                     strVal = impl_->callDunder(fClassName, "__repr__", exprVal);
                 } else if (exprVal->getType() == impl_->i8PtrType || exprVal->getType()->isPointerTy()) {
                     strVal = exprVal;
-                    // An interpolated str can be a BORROWED value (a Name / field
-                    // -> isOwnedStrResult false) or an OWNED temp (str(n), a + b,
-                    // f() -> a fresh +1). The pre-fix code hardcoded `false`, so a
-                    // typed template's auto-escape (applyFilter) skipped decref'ing
-                    // the owned temp -> one leaked str per render (
-                    // e.g. `!{str(n)}`). Classify honestly so applyFilter releases
-                    // an owned source and leaves a borrowed one alone.
+                    // Classify borrowed (Name/field) vs owned temp (str(n), a + b) honestly.
+                    // Pre-fix: hardcoded false made auto-escape skip the decref, one leaked str per render.
                     strValOwned = impl_->isOwnedStrResult(exprVal);
                 } else if (exprVal->getType() == impl_->i1Type) {
                     llvm::Value* ext = impl_->builder->CreateZExt(exprVal, impl_->i64Type);
@@ -696,14 +589,8 @@ void CodeGen::visit(TemplateExpr& node) {
                         applyFilter("dragon_template_escape_url", "esc_url");
                     } else if (filterName == "join" ||
                                filterName.rfind("join(", 0) == 0) {
-                        // D017 Phase 4.C - list[str] join. The expression's
-                        // value (strVal) is the list pointer itself; we do
-                        // NOT stringify it. dragon_str_join_ptr walks the
-                        // typed DragonListPtr without per-element decode.
-                        //
-                        // `join` (no arg) -> empty separator
-                        // `join(sep_expr)` -> sep_expr is any Dragon expression
-                        // evaluating to a str, lexed and visited inline.
+                        // D017 list[str] join: strVal is the list pointer, never
+                        // stringified. `join` -> empty sep; `join(sep)` lexes/visits sep as a Dragon expr.
                         std::string sepText;
                         if (filterName.size() > 5 && filterName[4] == '(') {
                             auto closeParen = filterName.rfind(')');
@@ -757,20 +644,8 @@ void CodeGen::visit(TemplateExpr& node) {
                         }
                     }
                 } else if (!effContent.empty()) {
-                    // Typed template auto-escape: apply X.escape() where X is
-                    // the EFFECTIVE content type - either the explicit
-                    // template[X] type or the type inherited by a `:{}`
-                    // content fragment from its enclosing template[X].
-                    // - Symbol is mangled via the content type's owning module
-                    //  so stdlib imports like `from template import HTML`
-                    //  resolve to `template__HTML_escape`, not `HTML_escape`.
-                    // - Parent walk: a subclass that doesn't override escape
-                    //  inherits its ancestor's via resolveMethodFunction.
-                    //  Required by D017 Phase 4 §"Compiler Resolution" so a
-                    //  user `class MyHTML(HTML)` automatically gets HTML's
-                    //  escape applied.
-                    // - Same-type skip avoids double-escape on `X` interpolated
-                    //  inside `template[X]`.
+                    // Auto-escape via the effective content type's escape(), owning-module
+                    // mangled and parent-walked (D017); the same-type skip avoids double-escape.
                     bool sameType = (!fClassName.empty() &&
                                      fClassName == effContent);
                     if (!sameType) {
@@ -822,46 +697,28 @@ void CodeGen::visit(TemplateExpr& node) {
             impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_decref_str"], {parts[0]});
         }
-        // Typed template: validate and wrap result in content type instance.
-        // Both symbol prefixes are resolved via the content type's owning
-        // module so stdlib-imported types (mangled `template__HTML_*`) and
-        // entry-module types (bare `Foo_*`) work uniformly.
-        //
-        // Critically, we only wrap on EXPLICIT `template[X] { ... }` - a
-        // `:{ ... }` content fragment returns the raw str so its caller (an
-        // outer block buffer) can keep accumulating string parts. Inheriting
-        // the escape function is correct; inheriting the instance wrap is
-        // not (it would mismatch the buffer's element type).
+        // Only an EXPLICIT `template[X]` wraps in its content-type instance; a
+        // `:{}` fragment stays a raw str so the outer block buffer keeps its element type.
         if (!node.contentType.empty() && !node.isContentAlias) {
             std::string symPrefix = impl_->classSymPrefix(node.contentType);
 
-            // Call ContentType.validate(result) if the leaf class defines
-            // its own validate. We deliberately don't parent-walk here:
-            // Template's default validate is a no-op, so emitting a call to
-            // it on every typed template would be wasted instructions. Users
-            // who want validation override it on their content type.
+            // Deliberately no parent walk for validate: Template's default is a
+            // no-op, so only a leaf-defined override earns the call.
             std::string validateFn = symPrefix + "_validate";
             auto* valFunc = impl_->module->getFunction(validateFn);
             if (valFunc) {
                 impl_->builder->CreateCall(valFunc, {result});
             }
 
-            // Wrap string in content type instance via ContentType_new(result).
-            // Dragon doesn't auto-inherit constructors, so direct lookup is
-            // the right semantics - every Template subclass redeclares its
-            // `def(inner: str)`. If the constructor is missing, leave the
-            // result as a raw str (TypeChecker would have flagged it).
+            // Direct ctor lookup: Dragon doesn't auto-inherit constructors. A
+            // missing ctor leaves the raw str (the TypeChecker already flagged it).
             std::string newFn = symPrefix + "_new";
             auto* ctorFunc = impl_->module->getFunction(newFn);
             if (ctorFunc) {
                 llvm::Value* innerStr = result;
                 result = impl_->builder->CreateCall(ctorFunc, {innerStr}, "tpl_inst");
-                // The content-type ctor RETAINS (increfs) the inner string into
-                // its field (the borrowed-param store convention), so the owned
-                // concat temp we built above is still the caller's +1. Drop it or
-                // a typed template leaks one string per render.
-                // A literal-only template's `result` is a GlobalString (not an
-                // owned CallInst) - isOwnedStrResult screens it out.
+                // The ctor RETAINS the inner string into its field, so drop our owned
+                // concat temp or each render leaks one str; isOwnedStrResult screens out literals.
                 if (impl_->options.gcMode == GCMode::RC &&
                     impl_->isOwnedStrResult(innerStr)) {
                     impl_->builder->CreateCall(
@@ -872,19 +729,14 @@ void CodeGen::visit(TemplateExpr& node) {
         impl_->lastValue = result;
     }
 
-    // D017 Phase 4.B - pop the effective content type we pushed at function
-    // entry. Pairs with the push at the top of this visit.
+    // Pop the effective content type pushed at the top of this visit.
     if (!impl_->templateContextStack.empty()) {
         impl_->templateContextStack.pop_back();
     }
 }
 
-// D032 - parameter-extraction lowering for content types declaring `build`.
-// The literal text is constant-folded into an interned canonical `$$N` string
-// (+ a compile-time FNV-1a hash constant); each !{expr} becomes a native-typed
-// bound parameter appended to a list[Any] (DragonListBox, 16B/elem inline, no
-// stringify). The value is `<contentType>_new(canonical, hash, params)`. This
-// is the SQL fast path; nested-SQL composition is a follow-up (errors for now).
+// D032 parameter extraction: literal text constant-folds to an interned canonical
+// `$$N` string + FNV-1a hash; each !{expr} becomes a native-typed bound parameter, never stringified.
 void CodeGen::emitSqlTemplate(TemplateExpr& node, const std::string& contentType) {
     const std::string& val = node.body;
 
@@ -914,6 +766,13 @@ void CodeGen::emitSqlTemplate(TemplateExpr& node, const std::string& contentType
                 else if (val[j] == '}') depth--;
                 if (depth > 0) j++;
             }
+            if (depth > 0) {
+                impl_->addError("template[" + contentType + "]: unterminated "
+                                "'!{' parameter slot: no matching '}' before "
+                                "the end of the template. Write '!!{' for a "
+                                "literal '!{'.", node.location());
+                break;
+            }
             std::string exprText = val.substr(start, j - start);
             i = j + 1;
 
@@ -932,8 +791,7 @@ void CodeGen::emitSqlTemplate(TemplateExpr& node, const std::string& contentType
                 continue;
             }
 
-            // Composition: a nested content-type value (SQL inside SQL) is the
-            // runtime-splice path - not yet implemented.
+            // Nested content-type composition (SQL inside SQL) is not implemented yet.
             if (impl_->resolveExprClassName(fExpr.get()) == contentType) {
                 impl_->addError("template[" + contentType + "]: composing a nested "
                                 + contentType + " value (!{sql_expr}) is not "
@@ -970,11 +828,15 @@ void CodeGen::emitSqlTemplate(TemplateExpr& node, const std::string& contentType
 
             canonical += "$$" + std::to_string(paramIndex++);
         } else {
-            // Literal run - copied verbatim into the canonical query text.
+            // Literal run: stop only at `!{`, `!!{`, `!!}` - a bare `!!` (Postgres)
+            // is literal text, and breaking on it without consuming spins forever.
             size_t lstart = i;
             while (i < val.size()) {
-                if (val[i] == '!' && i + 1 < val.size() &&
-                    (val[i+1] == '{' || val[i+1] == '!')) break;
+                if (val[i] == '!' && i + 1 < val.size()) {
+                    if (val[i+1] == '{') break;
+                    if (val[i+1] == '!' && i + 2 < val.size() &&
+                        (val[i+2] == '{' || val[i+2] == '}')) break;
+                }
                 i++;
             }
             canonical += val.substr(lstart, i - lstart);
@@ -998,9 +860,8 @@ void CodeGen::emitSqlTemplate(TemplateExpr& node, const std::string& contentType
     llvm::Value* sqlVal = impl_->builder->CreateCall(
         ctorFunc, {canonVal, hashVal, params}, "sql.value");
 
-    // Release our owned temp ref on `params`: the constructor's `self.params =
-    // params` store increfs it into the field (params is a borrowed NameExpr
-    // there), so the listbox is left with exactly the field's reference.
+    // The ctor's `self.params = params` store increfs into the field, so drop
+    // our owned temp ref, leaving exactly the field's reference.
     if (impl_->options.gcMode == GCMode::RC)
         impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {params});
 
@@ -1008,11 +869,9 @@ void CodeGen::emitSqlTemplate(TemplateExpr& node, const std::string& contentType
 }
 
 void CodeGen::visit(TemplateFileExpr& node) {
-    // Compile-time file template: read the file, then process as inline template.
-    // Path is resolved relative to the source file being compiled.
+    // Compile-time file template; the path resolves relative to the compiling source file.
     std::string resolvedPath = node.filePath;
 
-    // If relative, resolve against source file directory
     if (!resolvedPath.empty() && resolvedPath[0] != '/') {
         std::string sourceFile = node.location().filename;
         if (!sourceFile.empty()) {
@@ -1023,7 +882,6 @@ void CodeGen::visit(TemplateFileExpr& node) {
         }
     }
 
-    // Read the file at compile time
     std::ifstream file(resolvedPath);
     if (!file.is_open()) {
         impl_->addError("Cannot open template file: " + resolvedPath, node.location());
@@ -1034,18 +892,18 @@ void CodeGen::visit(TemplateFileExpr& node) {
                          std::istreambuf_iterator<char>());
     file.close();
 
-    // Delegate to TemplateExpr logic by creating a temporary node. The Parser
-    // never saw this file's contents, so parse the body into parts here. These
-    // parts are NOT type-checked (the file is read at codegen time, after the
-    // TypeChecker has run), so a file-template interpolation whose lowering
-    // needs a static type stays untyped - the same pre-existing limitation as
-    // before; inline `template[X] { ... }` interpolations are fully typed.
+    // Delegate via a temporary TemplateExpr, parsing the body here. The parts are
+    // NOT type-checked (the file is read after the TypeChecker runs), so they lower untyped.
     TemplateExpr tmp;
     tmp.setLocation(node.location());
     tmp.body = std::move(content);
     tmp.contentType = node.contentType;
+    std::vector<std::string> bodyErrors;
     tmp.templateParts = Parser::parseTemplateBody(
-        tmp.body, tmp.location(), /*isDragonFile=*/true);
+        tmp.body, tmp.location(), /*isDragonFile=*/true, &bodyErrors);
+    for (const auto& e : bodyErrors)
+        impl_->addError("template file '" + node.filePath + "': " + e,
+                        node.location());
     visit(tmp);
 }
 
@@ -1057,9 +915,5 @@ void CodeGen::visit(NoneLiteral&) {
     impl_->lastValue = llvm::ConstantPointerNull::get(
         llvm::PointerType::getUnqual(*impl_->context));
 }
-
-//===----------------------------------------------------------------------===//
-// Visitor: Expressions
-//===----------------------------------------------------------------------===//
 
 } // namespace dragon

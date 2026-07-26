@@ -26,6 +26,8 @@ struct Parser::Impl {
     std::vector<ParserDiagnostic> diagnostics;
     // Extra stmts from multi-decl constructs (extern "C" from "lib" { })
     std::vector<std::unique_ptr<Stmt>> pendingStmts;
+    // D052 - the ffi/json imports a process extern needs, injected once per module.
+    bool ffiProcessImportsInjected = false;
     // Recursion depth cap - prevents stack overflow on `(((...)))`-style
     // attacks. Compiler is exposed to user input via dragonlang.org.
     int recursionDepth = 0;

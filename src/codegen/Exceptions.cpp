@@ -265,7 +265,7 @@ void CodeGen::visit(TryStmt& node) {
                 // user-defined exception class. Built-in handler types
                 // (Exception, ValueError, ...) keep the message-string
                 // binding - they have no struct shape for `e.x` access.
-                if (impl_->userExcCodes.count(named->name) > 0 &&
+                if (impl_->userExcCodesBySym.count(impl_->classSym(named->name)) > 0 &&
                     impl_->classNames.count(named->name)) {
                     // dragon_exc_bind_obj returns the in-flight instance with
                     // its OWN +1 (the slot keeps its ref; the next raise's
@@ -407,6 +407,7 @@ void CodeGen::visit(WithStmt& node) {
                                    // over-released and the slot's scope-exit
                                    // decref read freed memory (A/B-proven UAF,
                                    // test_d045_privacy / test_rc_with_subject.dr).
+        llvm::Function* exitFn = nullptr;  // true-identity __exit__; null = name path
     };
     std::vector<CtxInfo> contextHandles;
 
@@ -425,6 +426,17 @@ void CodeGen::visit(WithStmt& node) {
                 if (inst->classType && impl_->classNames.count(inst->classType->name))
                     ctxClassName = inst->classType->name;
         }
+        // TRUE class identity from the expr's type: with two same-named classes in
+        // the build, the name-keyed maps guess (last-write-wins) and can segfault.
+        const ClassType* ctxCT = nullptr;
+        if (item.contextExpr->type)
+            if (auto inst = std::dynamic_pointer_cast<InstanceType>(item.contextExpr->type))
+                if (inst->classType && inst->classType->name == ctxClassName)
+                    ctxCT = inst->classType.get();
+        llvm::Function* enterFn =
+            ctxCT ? impl_->methodFromClassType(ctxCT, "__enter__") : nullptr;
+        llvm::Function* exitFn =
+            ctxCT ? impl_->methodFromClassType(ctxCT, "__exit__") : nullptr;
 
         // Intrinsic `Lock` context: `with lock { }` or `with Lock() { }`.
         // Lock has no class/dunders - it lowers to acquire on entry and
@@ -457,9 +469,12 @@ void CodeGen::visit(WithStmt& node) {
         // `with g` / `with self.guard` borrow the slot's reference.
         bool subjectOwned = !Impl::isBorrowedHeapExpr(item.contextExpr.get());
 
+        // Identity-resolved fns decide when the type is known; the name-keyed
+        // hasDunder pair remains the fallback for untyped context exprs.
         bool isClassCtx = !isLockCtx && !ctxClassName.empty() &&
-            impl_->hasDunder(ctxClassName, "__enter__") &&
-            impl_->hasDunder(ctxClassName, "__exit__") &&
+            (ctxCT ? (enterFn != nullptr && exitFn != nullptr)
+                   : (impl_->hasDunder(ctxClassName, "__enter__") &&
+                      impl_->hasDunder(ctxClassName, "__exit__"))) &&
             (ctxVal->getType() == impl_->i8PtrType || ctxVal->getType()->isPointerTy());
 
         if (isLockCtx) {
@@ -477,7 +492,16 @@ void CodeGen::visit(WithStmt& node) {
             }
         } else if (isClassCtx) {
             // Call __enter__() - result is bound to `as` variable
-            enterResultV = impl_->callDunder(ctxClassName, "__enter__", ctxVal);
+            enterResultV = enterFn
+                ? impl_->emitDunderCall(enterFn, "__enter__", ctxVal)
+                : impl_->callDunder(ctxClassName, "__enter__", ctxVal);
+            if (!enterResultV) {
+                // Never a crash: report and bind the manager itself.
+                impl_->addError("internal error: cannot resolve __enter__ on class '" +
+                                ctxClassName + "' (two classes may share the name)",
+                                node.location());
+                enterResultV = ctxVal;
+            }
 
             if (item.optionalVars) {
                 if (auto* nameExpr = dynamic_cast<NameExpr*>(item.optionalVars.get())) {
@@ -486,6 +510,10 @@ void CodeGen::visit(WithStmt& node) {
                     impl_->builder->CreateStore(enterResultV, alloca);
                     impl_->setVar(nameExpr->name, alloca);
                     impl_->varClassNames[nameExpr->name] = ctxClassName;
+                    // Pin the binding to the value's OWN module so method dispatch
+                    // on it never falls to the last-write-wins global map
+                    if (ctxCT)
+                        impl_->varClassOwningModule[nameExpr->name] = ctxCT->definingModule;
                 }
             }
         } else {
@@ -499,7 +527,7 @@ void CodeGen::visit(WithStmt& node) {
                 }
             }
         }
-        contextHandles.push_back({ctxVal, isClassCtx, isLockCtx, ctxClassName, enterResultV, isLockTemp, subjectOwned});
+        contextHandles.push_back({ctxVal, isClassCtx, isLockCtx, ctxClassName, enterResultV, isLockTemp, subjectOwned, exitFn});
     }
 
     // Class context managers (__exit__) and locks (release) both need an
@@ -540,7 +568,7 @@ void CodeGen::visit(WithStmt& node) {
             ec.func = func;
             ec.scopeDepth = impl_->scopes.size();
             for (auto& ci : contextHandles)
-                ec.withItems.push_back({ci.isClassCtx, ci.isLock, ci.className, ci.val, ci.enterResult, ci.isLockTemp, ci.subjectOwned});
+                ec.withItems.push_back({ci.isClassCtx, ci.isLock, ci.className, ci.val, ci.enterResult, ci.exitFn, ci.isLockTemp, ci.subjectOwned});
             impl_->exitCleanupStack.push_back(std::move(ec));
         }
         // The with body is its own lexical scope, so a defer registered in it
@@ -572,7 +600,8 @@ void CodeGen::visit(WithStmt& node) {
         impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_exc_pop_frame"], {});
         for (auto& ci : contextHandles) {
             if (ci.isClassCtx) {
-                impl_->callDunder(ci.className, "__exit__", ci.val);
+                if (ci.exitFn) impl_->emitDunderCall(ci.exitFn, "__exit__", ci.val);
+                else impl_->callDunder(ci.className, "__exit__", ci.val);
                 if (impl_->options.gcMode == GCMode::RC) {   // release the CM object (#8)
                     if (ci.subjectOwned)  // borrowed subject: the slot owns it
                         impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {ci.val});
@@ -618,7 +647,8 @@ void CodeGen::visit(WithStmt& node) {
         impl_->builder->SetInsertPoint(cleanupBB);
         for (auto& ci : contextHandles) {
             if (ci.isClassCtx) {
-                impl_->callDunder(ci.className, "__exit__", ci.val);
+                if (ci.exitFn) impl_->emitDunderCall(ci.exitFn, "__exit__", ci.val);
+                else impl_->callDunder(ci.className, "__exit__", ci.val);
                 if (impl_->options.gcMode == GCMode::RC) {
                     if (ci.subjectOwned)  // borrowed subject: the slot owns it
                         impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {ci.val});
@@ -1015,8 +1045,8 @@ void CodeGen::visit(MatchStmt& node) {
                     bool inChain = false;
                     while (!cur.empty()) {
                         if (cur == pat.name) { inChain = true; break; }
-                        auto pit = impl_->classParentNames.find(cur);
-                        if (pit == impl_->classParentNames.end()) break;
+                        auto pit = impl_->classParentNamesBySym.find(impl_->classSym(cur));
+                        if (pit == impl_->classParentNamesBySym.end()) break;
                         cur = pit->second;
                     }
                     if (!inChain) {
@@ -1055,13 +1085,13 @@ void CodeGen::visit(MatchStmt& node) {
                 std::string cur = pat.name;
                 while (!cur.empty()) {
                     chain.push_back(cur);
-                    auto pit = impl_->classParentNames.find(cur);
-                    cur = (pit != impl_->classParentNames.end()) ? pit->second : "";
+                    auto pit = impl_->classParentNamesBySym.find(impl_->classSym(cur));
+                    cur = (pit != impl_->classParentNamesBySym.end()) ? pit->second : "";
                 }
                 std::set<std::string> seen;
                 for (auto rit = chain.rbegin(); rit != chain.rend(); ++rit) {
-                    auto fo = impl_->classFieldOrder.find(*rit);
-                    if (fo == impl_->classFieldOrder.end()) continue;
+                    auto fo = impl_->classFieldOrderBySym.find(impl_->classSym(*rit));
+                    if (fo == impl_->classFieldOrderBySym.end()) continue;
                     for (auto& f : fo->second)
                         if (seen.insert(f).second) order.push_back(f);
                 }
@@ -1073,13 +1103,13 @@ void CodeGen::visit(MatchStmt& node) {
             impl_->builder->CreateCondBr(classTest, clsFieldsBB, clsFailBB);
 
             impl_->builder->SetInsertPoint(clsFieldsBB);
-            auto* structTy = impl_->classStructTypes.count(pat.name)
-                ? impl_->classStructTypes[pat.name] : nullptr;
+            auto* structTy = impl_->classStructTypesBySym.count(impl_->classSym(pat.name))
+                ? impl_->classStructTypesBySym[impl_->classSym(pat.name)] : nullptr;
             llvm::Value* allMatch = llvm::ConstantInt::get(impl_->i1Type, 1);
             for (size_t si = 0; si < pat.subPatterns.size() && si < order.size(); ++si) {
-                auto idxIt = impl_->classFieldIndices[pat.name].find(order[si]);
-                if (!structTy || idxIt == impl_->classFieldIndices[pat.name].end()) continue;
-                auto* fTy = impl_->classFieldTypes[pat.name][order[si]];
+                auto idxIt = impl_->classFieldIndicesBySym[impl_->classSym(pat.name)].find(order[si]);
+                if (!structTy || idxIt == impl_->classFieldIndicesBySym[impl_->classSym(pat.name)].end()) continue;
+                auto* fTy = impl_->classFieldTypesBySym[impl_->classSym(pat.name)][order[si]];
                 auto* gep = impl_->builder->CreateStructGEP(
                     structTy, instPtr, idxIt->second, "match.fld." + order[si]);
                 auto* fVal = impl_->builder->CreateLoad(fTy, gep, order[si]);

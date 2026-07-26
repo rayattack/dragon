@@ -1,0 +1,26 @@
+"""Generic method stamps must land in their own class across modules.
+Pre-fix: the stamp request carried only a bare owning-class name."""
+
+from unittest import TestCase, main
+from collide_generic_methods_one import one_wrap
+from collide_generic_methods_two import two_wrap
+from collide_generic_methods_importer import importer_wrap
+
+
+class CollideGenericMethodsTests(TestCase) {
+    def test_one_stamps_into_its_own_holder() {
+        self.assertEqual(one_wrap(), "one:5")
+    }
+
+    def test_two_stamps_into_its_own_holder() {
+        self.assertEqual(two_wrap(), "9#x")
+    }
+
+    def test_imported_holder_uses_its_own_template() {
+        # Pre-fix: the stamp landed in one's Holder, so this call had no target.
+        self.assertEqual(importer_wrap(), "4#6")
+    }
+}
+
+
+main([CollideGenericMethodsTests()])

@@ -1,0 +1,130 @@
+# test/dr/test_random_seeding.dr - Seeding behaviour for `random` and `uuid`.
+#
+# Regression cover for three defects that shipped together:
+#
+#  1. `random` never seeded itself, so libc rand() ran from its implicit
+#     srand(1) and every process produced an identical stream. The first draw
+#     was always 16807 / 2^31 == 7.826369255781174e-06.
+#  2. `seed_time()` seeded from time() at one-second resolution, and because the
+#     LCG's first output is near-linear in the seed, runs within the same second
+#     produced first draws ~7.8e-06 apart - effectively constant.
+#  3. `uuid.dr` assigned a module global without `global`, so it did not
+#     compile; `import uuid` was a hard error. Merely importing it here guards
+#     that. uuid4() also drew from the same time-seeded LCG, which would have
+#     made same-second processes emit identical UUIDs.
+
+from unittest import TestCase, main
+import random
+import uuid
+
+# First unseeded draw of libc rand(), per libc: minstd (macOS/BSD) and glibc.
+const UNSEEDED_MINSTD: float = 7.826369255781174e-06
+const UNSEEDED_GLIBC: float = 0.8401877167634666
+
+class RandomSeedingTests(TestCase) {
+    def test_auto_seeds_from_entropy() {
+        # No seed() call: the module must have seeded itself, so we must not be
+        # replaying the srand(1) stream.
+        const first: float = random.random()
+        self.assertTrue(first != UNSEEDED_MINSTD and first != UNSEEDED_GLIBC)
+        self.assertTrue(first >= 0.0 and first < 1.0)
+    }
+
+    def test_explicit_seed_is_reproducible() {
+        random.seed(42)
+        const a: float = random.random()
+        const b: int = random.randint(1, 6)
+        random.seed(42)
+        self.assertEqual(a, random.random())
+        self.assertEqual(b, random.randint(1, 6))
+    }
+
+    def test_explicit_seed_beats_auto_seed() {
+        # seed() must mark the generator as seeded so the lazy entropy seed
+        # never fires afterwards and clobbers a reproducible run.
+        random.seed(7)
+        const a: float = random.random()
+        random.seed(7)
+        self.assertEqual(a, random.random())
+    }
+
+    def test_small_seeds_are_not_correlated() {
+        # Post-seed warmup must diffuse the seed: without it, seeds 1 and 2 give
+        # first draws 7.8e-06 apart.
+        random.seed(1)
+        const a: float = random.random()
+        random.seed(2)
+        const b: float = random.random()
+        const gap: float = a - b if a > b else b - a
+        self.assertTrue(gap > 0.001)
+    }
+
+    def test_seed_time_has_subsecond_resolution() {
+        # Two seed_time() calls in the same second must not produce the same
+        # stream. This is the assertion that fails against time()-resolution
+        # seeding.
+        random.seed_time()
+        const a: float = random.random()
+        random.seed_time()
+        const b: float = random.random()
+        self.assertTrue(a != b)
+    }
+
+    def test_range_helpers_stay_in_bounds() {
+        i: int = 0
+        while i < 200 {
+            const r: int = random.randint(1, 6)
+            self.assertTrue(r >= 1 and r <= 6)
+            const q: int = random.randrange(0, 10)
+            self.assertTrue(q >= 0 and q < 10)
+            const u: float = random.uniform(2.0, 3.0)
+            self.assertTrue(u >= 2.0 and u <= 3.0)
+            i = i + 1
+        }
+    }
+}
+
+class Uuid4Tests(TestCase) {
+    def test_uuid4_is_wellformed() {
+        const u: str = uuid.uuid4()
+        self.assertEqual(len(u), 36)
+        self.assertTrue(uuid.uuid_is_valid(u))
+        self.assertEqual(uuid.uuid_version(u), 4)
+    }
+
+    def test_uuid4_does_not_repeat() {
+        # 256 draws inside one process, all distinct. Under the old
+        # time-seeded LCG the whole process shared one weak seed.
+        seen: dict[str, bool] = {}
+        i: int = 0
+        while i < 256 {
+            const u: str = uuid.uuid4()
+            self.assertTrue(u not in seen)
+            seen[u] = true
+            i = i + 1
+        }
+        self.assertEqual(len(seen), 256)
+    }
+
+    def test_uuid4_variant_bits() {
+        # RFC 4122 variant nibble must be one of 8, 9, a, b.
+        i: int = 0
+        while i < 64 {
+            const u: str = uuid.uuid4()
+            const variant: str = u[19:20]
+            self.assertTrue(variant == "8" or variant == "9" or variant == "a" or variant == "b")
+            i = i + 1
+        }
+    }
+
+    def test_uuid4_is_independent_of_random_seed() {
+        # uuid4() must draw from the OS CSPRNG, not the `random` LCG: seeding
+        # `random` must not make UUIDs reproducible.
+        random.seed(42)
+        const a: str = uuid.uuid4()
+        random.seed(42)
+        self.assertTrue(a != uuid.uuid4())
+    }
+}
+
+main([RandomSeedingTests(), Uuid4Tests()])

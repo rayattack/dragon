@@ -280,9 +280,21 @@ run it through the stdlib JSON Schema validator (`json.Schema` - register
 named schemas at startup, validate each body by name; see
 [Data Formats](/docs/1404-stdlib-data)) and reply `422` with the error
 paths on a miss. When you want the undecoded body
-to validate or parse yourself, read `req.body`, the raw request body as a
-`str`. For a known shape, `T(**json.loads_obj(req.body))` decodes
-straight into your type. `req.query_str(name, default)` and its typed
+to validate or parse yourself, read `req.body` (the request body as a
+`str`) or `req.body_bytes` (the verbatim bytes). And when you already
+know the shape, skip the `Any` tree entirely: `decode[T](req.body_bytes)`
+reads the body straight into your own class, box-free, with missing or
+mismatched fields raising `ValueError` - see the schema-directed decoders
+in [Data Formats](/docs/1404-stdlib-data):
+
+```dragon
+from json import decode
+
+api.POST("/users", lambda (req: Request, res: Response, ctx: Context) -> None {
+    const u: User = decode[User](req.body_bytes)
+    res.json(json.dumps({"ok": true, "id": u.id}))
+})
+``` `req.query_str(name, default)` and its typed
 siblings, covered above, read the query string. Between these you can
 read any request a browser or API client will send.
 
@@ -587,7 +599,8 @@ documentation you are reading was delivered by the stack it describes.
 | Type-check a path param | `"/players/:id:int"` then `req.param_int("id")` |
 | Read a query param | `req.query_str("q", "default")` (typed: `query_int`, ...) |
 | Read a form body | `form: dict[str, str] = req.form()` |
-| Read a JSON body | `body: str = req.json()` (parse with the `json` module) |
+| Read a JSON body (known shape) | `u: User = decode[User](req.body_bytes)` - box-free |
+| Read a JSON body (unknown shape) | `tree: Any = req.json()` (boxed `Any` tree) |
 | Send HTML / text / JSON | `res.html(s)` / `res.text(s)` / `res.json(s)` |
 | Set status + body | `res.out(404, "Not Found")` |
 | Redirect | `res.redirect("/")` (307) / `res.redirect("/", true)` (308) |

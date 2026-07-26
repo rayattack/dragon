@@ -1,0 +1,21 @@
+"""The other Cfg: fields (x, y, z), its own decoder."""
+
+from json import decode
+
+
+class Cfg {
+    def(x: str, y: int, z: bool) {
+        self.x = x
+        self.y = y
+        self.z = z
+    }
+}
+
+
+def two_roundtrip() -> str {
+    const c: Cfg = decode[Cfg]('{"x": "ex", "y": 9, "z": true}'.encode("utf-8"))
+    if c.z {
+        return c.x + ":" + str(c.y)
+    }
+    return "z-lost"
+}

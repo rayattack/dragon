@@ -1,0 +1,140 @@
+"""json.JsonWriter - box-free streaming writer, the write-side mirror of Cursor"""
+
+from unittest import TestCase, main
+from json import JsonWriter
+
+
+class WriterShapeTests(TestCase) {
+    def test_flat_object() {
+        const w: JsonWriter = JsonWriter()
+        w.begin_object()
+        w.key("id"); w.write_int(7)
+        w.key("tag"); w.write_str("hi")
+        w.key("ok"); w.write_bool(true)
+        w.end_object()
+        self.assertEqual(w.finish().decode("utf-8"), "{\"id\":7,\"tag\":\"hi\",\"ok\":true}")
+    }
+
+    def test_empty_object_and_array() {
+        const w: JsonWriter = JsonWriter()
+        w.begin_object()
+        w.end_object()
+        self.assertEqual(w.finish().decode("utf-8"), "{}")
+        const a: JsonWriter = JsonWriter()
+        a.begin_array()
+        a.end_array()
+        self.assertEqual(a.finish().decode("utf-8"), "[]")
+    }
+
+    def test_nested_object_in_object() {
+        const w: JsonWriter = JsonWriter()
+        w.begin_object()
+        w.key("outer"); w.write_int(1)
+        w.key("inner")
+        w.begin_object()
+        w.key("a"); w.write_int(2)
+        w.key("b"); w.write_int(3)
+        w.end_object()
+        w.key("after"); w.write_int(4)
+        w.end_object()
+        self.assertEqual(w.finish().decode("utf-8"),
+                         "{\"outer\":1,\"inner\":{\"a\":2,\"b\":3},\"after\":4}")
+    }
+
+    def test_array_of_objects() {
+        const w: JsonWriter = JsonWriter()
+        w.begin_array()
+        w.begin_object()
+        w.key("n"); w.write_int(1)
+        w.end_object()
+        w.begin_object()
+        w.key("n"); w.write_int(2)
+        w.end_object()
+        w.end_array()
+        self.assertEqual(w.finish().decode("utf-8"), "[{\"n\":1},{\"n\":2}]")
+    }
+
+    def test_scalar_array_commas() {
+        const w: JsonWriter = JsonWriter()
+        w.begin_array()
+        w.write_int(1)
+        w.write_int(2)
+        w.write_int(3)
+        w.end_array()
+        self.assertEqual(w.finish().decode("utf-8"), "[1,2,3]")
+    }
+
+    def test_null_and_float_and_negative() {
+        const w: JsonWriter = JsonWriter()
+        w.begin_object()
+        w.key("f"); w.write_float(1.5)
+        w.key("none"); w.write_null()
+        w.key("neg"); w.write_int(-42)
+        w.end_object()
+        self.assertEqual(w.finish().decode("utf-8"), "{\"f\":1.5,\"none\":null,\"neg\":-42}")
+    }
+}
+
+
+class WriterEscapeTests(TestCase) {
+    def test_str_value_escaped() {
+        const w: JsonWriter = JsonWriter()
+        w.begin_object()
+        w.key("s"); w.write_str("a\"b\\c\nd")
+        w.end_object()
+        self.assertEqual(w.finish().decode("utf-8"), "{\"s\":\"a\\\"b\\\\c\\nd\"}")
+    }
+
+    def test_key_escaped() {
+        const w: JsonWriter = JsonWriter()
+        w.begin_object()
+        w.key("we\"ird"); w.write_int(1)
+        w.end_object()
+        self.assertEqual(w.finish().decode("utf-8"), "{\"we\\\"ird\":1}")
+    }
+}
+
+
+class WriterListHelperTests(TestCase) {
+    def test_typed_list_helpers() {
+        const w: JsonWriter = JsonWriter()
+        w.begin_object()
+        w.key("ints"); w.write_int_list([1, 2])
+        w.key("strs"); w.write_str_list(["a", "b"])
+        w.key("bools"); w.write_bool_list([true, false])
+        w.end_object()
+        self.assertEqual(w.finish().decode("utf-8"),
+                         "{\"ints\":[1,2],\"strs\":[\"a\",\"b\"],\"bools\":[true,false]}")
+    }
+
+    def test_raw_fragment_splice() {
+        const w: JsonWriter = JsonWriter()
+        w.begin_object()
+        w.key("pre"); w.write_int(1)
+        w.key("obj"); w.write_raw("{\"x\":9}".encode("utf-8"))
+        w.key("post"); w.write_int(2)
+        w.end_object()
+        self.assertEqual(w.finish().decode("utf-8"), "{\"pre\":1,\"obj\":{\"x\":9},\"post\":2}")
+    }
+}
+
+
+class WriterOwnershipTests(TestCase) {
+    # Build+finish+drop in a loop: the parts buffer, join, and bytes must all free.
+    def test_no_leak() {
+        i: int = 0
+        while i < 2000 {
+            const w: JsonWriter = JsonWriter()
+            w.begin_object()
+            w.key("tag"); w.write_str("some-owned-string-" + "x")
+            w.key("n"); w.write_int(i)
+            w.end_object()
+            const out: bytes = w.finish()
+            self.assertTrue(len(out) > 0)
+            i = i + 1
+        }
+    }
+}
+
+
+main([WriterShapeTests(), WriterEscapeTests(), WriterListHelperTests(), WriterOwnershipTests()])

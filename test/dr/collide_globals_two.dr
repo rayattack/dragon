@@ -1,0 +1,32 @@
+"""Same top-level names as collide_globals_one.dr, different types and values."""
+
+
+class Thing {
+    def(label: str) {
+        self.label: str = label
+    }
+
+    def describe() -> str {
+        return "thing:" + self.label
+    }
+}
+
+
+const SHARED: Thing = Thing("decoy")
+const RATE: int = 999
+counter: int = 800
+
+
+def two_shared() -> str {
+    return SHARED.describe()
+}
+
+
+def two_rate() -> int {
+    return RATE
+}
+
+
+def two_counter() -> int {
+    return counter
+}

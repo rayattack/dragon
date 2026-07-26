@@ -100,8 +100,8 @@ void CodeGen::visit(NameExpr& node) {
     // which __exc_matches can never range-match against an exception code.
     if (!impl_->resolvingCallTarget && impl_->classNames.count(node.name) &&
         !impl_->isExcType(node.name)) {
-        auto descIt = impl_->classDescriptorGlobals.find(node.name);
-        if (descIt != impl_->classDescriptorGlobals.end()) {
+        auto descIt = impl_->classDescriptorGlobalsBySym.find(impl_->classSym(node.name));
+        if (descIt != impl_->classDescriptorGlobalsBySym.end()) {
             impl_->lastValue = impl_->builder->CreateLoad(
                 impl_->i64Type, descIt->second, node.name + "_desc");
             return;
@@ -255,8 +255,12 @@ void CodeGen::visit(BinaryExpr& node) {
                 if (!e || !e->type) return false;
                 auto* inst = dynamic_cast<InstanceType*>(e->type.get());
                 if (!inst || !inst->classType) return false;
-                auto it = impl_->enumKind.find(inst->classType->name);
-                return it != impl_->enumKind.end() && it->second != Impl::EnumKind::Plain;
+                auto it = impl_->enumKindBySym.find(
+                    inst->classType->definingModule.empty()
+                        ? impl_->classSym(inst->classType->name)
+                        : Impl::mangleClass(inst->classType->definingModule,
+                                            inst->classType->name));
+                return it != impl_->enumKindBySym.end() && it->second != Impl::EnumKind::Plain;
             };
             auto wrapValue = [&](std::unique_ptr<Expr>& operand) {
                 if (!isValueEnum(operand.get())) return;

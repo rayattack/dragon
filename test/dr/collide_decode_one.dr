@@ -1,0 +1,17 @@
+"""Cfg with fields (a, b); collide_decode_two.dr declares another Cfg."""
+
+from json import decode
+
+
+class Cfg {
+    def(a: int, b: str) {
+        self.a = a
+        self.b = b
+    }
+}
+
+
+def one_roundtrip() -> str {
+    const c: Cfg = decode[Cfg]('{"a": 7, "b": "seven"}'.encode("utf-8"))
+    return c.b + ":" + str(c.a)
+}

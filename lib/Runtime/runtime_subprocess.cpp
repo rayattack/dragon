@@ -1,21 +1,5 @@
-/// Dragon Runtime - subprocess spawn with pipe capture (POSIX).
-///
-/// Its OWN translation unit, mirroring runtime_ed25519.cpp / runtime_crypto.cpp:
-/// the spawn+pipe+dup2+exec dance is the one part of subprocess that CANNOT be
-/// written in Dragon. Between fork() and execvp() a child may run only
-/// async-signal-safe code - no Dragon allocator, no green-thread scheduler - so
-/// the wiring of stdin/stdout/stderr pipes (pipe + dup2 + close-on-exec) and the
-/// post-fork chdir must happen here in plain C. Everything user-visible
-/// (CompletedProcess, Popen, run/check_output/call, CalledProcessError, status
-/// decode) lives in stdlib/subprocess.dr.
-///
-/// argv is marshalled from a Dragon `list[str]` exactly like dragon_execvp in
-/// runtime_platform.cpp: each element is a `const char*` into a heap
-/// DragonString, NULL-terminated into a `char**` vector.
-///
-/// Pipe fds are ordinary file descriptors (NOT sockets), so the os/socket
-/// nb_recv helpers (which call recv(2)) do not apply - Tier-0 drains them with
-/// plain blocking read(2)/write(2)/close(2) defined here.
+/// Dragon subprocess spawn with pipe capture (POSIX), own TU: spawn+pipe+dup2+exec can't be
+/// Dragon (only async-signal-safe code runs between fork and exec). User-visible API lives in stdlib/subprocess.dr.
 
 #include "runtime_internal.h"   // DragonList, DragonBytes, dragon_list_* , dragon_bytes_new
 #include <cstring>
@@ -30,18 +14,12 @@
   #include <time.h>
   #include <signal.h>
   #include <pthread.h>
+  #include <sys/wait.h>
 #endif
 
 #ifndef _WIN32
-// Create a pipe with both ends CLOEXEC. The runtime is multithreaded (scheduler
-// workers + reactor), so a CONCURRENT dragon_subprocess_spawn on another carrier
-// thread can fork between our pipe() and exec and inherit our pipe ends into an
-// unrelated child - that child then holds our stdout write end open, so our
-// drain never sees EOF and communicate() hangs past the intended child's
-// death. O_CLOEXEC closes that race: the child of THIS spawn
-// re-establishes the ends it needs via dup2 (which clears CLOEXEC on the copy),
-// so the existing child-side wiring is unaffected. pipe2 in one syscall where
-// available; fcntl fallback otherwise
+// Create a pipe with both ends CLOEXEC: a concurrent spawn's fork could otherwise inherit our ends,
+// hold the write end open, and hang the drain (never sees EOF). dup2 clears CLOEXEC on the child's copies; pipe2 where available, else fcntl.
 static int make_pipe_cloexec(int fds[2]) {
 #if defined(__linux__) || defined(__FreeBSD__)
     return pipe2(fds, O_CLOEXEC);
@@ -60,22 +38,12 @@ static int make_pipe_cloexec(int fds[2]) {
 
 extern "C" {
 
-// Forward decls for the green-thread cooperation seam (runtime_concurrency.cpp).
-// dragon_vthread_yield() is a no-op off a green thread; on one it cooperatively
-// reschedules so a poll-driven pump does not monopolize the carrier OS thread.
+// Forward decl for the green-thread cooperation seam (runtime_concurrency.cpp): dragon_vthread_yield()
+// is a no-op off a green thread; on one it reschedules so a poll-driven pump doesn't hog the carrier OS thread.
 void dragon_vthread_yield(void);
 
-//===-------------------------------------------------------------------===//
-// dragon_subprocess_spawn - fork + pipe + dup2 + (chdir) + execvp.
-//
-// Returns a list[int] of length 4: [pid, stdin_w_fd, stdout_r_fd, stderr_r_fd].
-//   * stdin_w_fd  is the PARENT's write end of the child's stdin  (-1 if not captured)
-//   * stdout_r_fd is the PARENT's read  end of the child's stdout (-1 if not captured)
-//   * stderr_r_fd is the PARENT's read  end of the child's stderr (-1 if not captured)
-// On failure to fork the list is [-1, errno, -1, -1] and stdlib raises OSError.
-//
-// cwd: chdir to this directory in the child before exec, unless it is empty.
-//===-------------------------------------------------------------------===//
+// dragon_subprocess_spawn: fork + pipe + dup2 + (chdir cwd unless empty) + execvp. Returns list[int]
+// [pid, stdin_w, stdout_r, stderr_r] (parent's ends, -1 if uncaptured); on fork failure [-1, errno, -1, -1] and stdlib raises OSError.
 DragonList* dragon_subprocess_spawn(DragonList* argv, int cap_in, int cap_out,
                                     int cap_err, const char* cwd) {
     DragonList* result = dragon_list_new_tagged(4, TAG_INT);
@@ -89,8 +57,7 @@ DragonList* dragon_subprocess_spawn(DragonList* argv, int cap_in, int cap_out,
     dragon_list_append(result, -1);
     return result;
 #else
-    // --- create the requested pipes in the PARENT first ---------------------
-    // pipe[0] = read end, pipe[1] = write end.
+    // Create the requested pipes in the PARENT first. pipe[0] = read end, pipe[1] = write end.
     int in_pipe[2]  = {-1, -1};
     int out_pipe[2] = {-1, -1};
     int err_pipe[2] = {-1, -1};
@@ -116,22 +83,11 @@ DragonList* dragon_subprocess_spawn(DragonList* argv, int cap_in, int cap_out,
         return result;
     }
 
-    // --- marshal argv (same pattern as dragon_execvp) -----------------------
-    // Done in the PARENT: the DragonString element pointers are valid here, and
-    // execvp copies the strings, so the child only reads from `args`. We must
-    // NOT call malloc between fork and exec (not async-signal-safe), so this
-    // vector is built before forking and survives into the child's address
-    // space via copy-on-write.
-    int n = (int)dragon_list_len(argv);
-    char** args = (char**)malloc((size_t)(n + 1) * sizeof(char*));
-    // Parallel array of UTF-8 temporaries we own and must free. owned[i] is
-    // non-NULL only when arg i needed encoding (a wide/UCS-4 string); a raw
-    // (already-UTF-8) arg leaves owned[i] == NULL and args[i] borrows the
-    // DragonString bytes directly. calloc'd so an early-exit free is safe.
-    char** owned = (char**)calloc((size_t)(n > 0 ? n : 1), sizeof(char*));
-    if (!args || !owned) {
-        int e = ENOMEM;
-        free(args); free(owned);
+    // Exec-status pipe (CLOEXEC): a successful exec closes it (parent reads EOF);
+    // a failed chdir/execvp writes errno, so the parent reports spawn failure.
+    int exec_pipe[2] = {-1, -1};
+    if (make_pipe_cloexec(exec_pipe) != 0) {
+        int e = errno;
         if (cap_in)  { close(in_pipe[0]);  close(in_pipe[1]); }
         if (cap_out) { close(out_pipe[0]); close(out_pipe[1]); }
         if (cap_err) { close(err_pipe[0]); close(err_pipe[1]); }
@@ -139,13 +95,27 @@ DragonList* dragon_subprocess_spawn(DragonList* argv, int cap_in, int cap_out,
         dragon_list_append(result, -1); dragon_list_append(result, -1);
         return result;
     }
-    // Encode each arg to UTF-8 in the PARENT (malloc is safe here; the child
-    // reads the finished vector via copy-on-write). A DragonString element may
-    // be UCS-4 storage - handing that raw pointer to execvp feeds the child
-    // wide chars, so a non-ASCII arg like "café" arrives truncated at the
-    // first embedded NUL. dragon_str_to_utf8_alloc returns NULL for a string
-    // that is already UTF-8 bytes ("use the raw pointer") and a fresh buffer
-    // otherwise.
+
+    // Marshal argv (same pattern as dragon_execvp), in the PARENT: malloc isn't async-signal-safe
+    // between fork and exec, so the vector is built before forking and reaches the child via copy-on-write.
+    int n = (int)dragon_list_len(argv);
+    char** args = (char**)malloc((size_t)(n + 1) * sizeof(char*));
+    // Parallel array of UTF-8 temporaries we own and must free: owned[i] is non-NULL only when arg i needed
+    // encoding, else NULL and args[i] borrows the DragonString bytes. calloc'd so an early-exit free is safe.
+    char** owned = (char**)calloc((size_t)(n > 0 ? n : 1), sizeof(char*));
+    if (!args || !owned) {
+        int e = ENOMEM;
+        free(args); free(owned);
+        if (cap_in)  { close(in_pipe[0]);  close(in_pipe[1]); }
+        if (cap_out) { close(out_pipe[0]); close(out_pipe[1]); }
+        if (cap_err) { close(err_pipe[0]); close(err_pipe[1]); }
+        close(exec_pipe[0]); close(exec_pipe[1]);
+        dragon_list_append(result, -1); dragon_list_append(result, e);
+        dragon_list_append(result, -1); dragon_list_append(result, -1);
+        return result;
+    }
+    // Encode each arg to UTF-8 in the PARENT: a UCS-4 DragonString handed raw to execvp feeds the child
+    // wide chars, truncating at the first embedded NUL. dragon_str_to_utf8_alloc returns NULL if already UTF-8 (use raw ptr), else a fresh buffer.
     for (int i = 0; i < n; i++) {
         const char* raw = (const char*)(uintptr_t)dragon_list_load(argv, i);
         int64_t blen = 0;
@@ -164,15 +134,15 @@ DragonList* dragon_subprocess_spawn(DragonList* argv, int cap_in, int cap_out,
         if (cap_in)  { close(in_pipe[0]);  close(in_pipe[1]); }
         if (cap_out) { close(out_pipe[0]); close(out_pipe[1]); }
         if (cap_err) { close(err_pipe[0]); close(err_pipe[1]); }
+        close(exec_pipe[0]); close(exec_pipe[1]);
         dragon_list_append(result, -1); dragon_list_append(result, e);
         dragon_list_append(result, -1); dragon_list_append(result, -1);
         return result;
     }
 
     if (pid == 0) {
-        // ---- CHILD: async-signal-safe only past this point ----------------
-        // Wire the child's std fds to the pipe ends, then exec. dup2 the
-        // child-side ends onto 0/1/2 and close every pipe fd we still hold.
+        // CHILD: async-signal-safe only past this point. dup2 the child-side ends
+        // onto 0/1/2, then close every pipe fd we still hold before exec.
         if (cap_in) {
             dup2(in_pipe[0], 0);
             close(in_pipe[0]);
@@ -190,18 +160,21 @@ DragonList* dragon_subprocess_spawn(DragonList* argv, int cap_in, int cap_out,
         }
         if (cwd && cwd[0] != '\0') {
             if (chdir(cwd) != 0) {
+                int ce = errno;
+                ssize_t w = write(exec_pipe[1], &ce, sizeof(ce)); (void)w;
                 _exit(127);
             }
         }
         execvp(args[0], args);
-        // exec only returns on failure; 127 mirrors the shell "command not
-        // found" convention CPython's subprocess also surfaces.
+        // exec only returns on failure: hand the errno to the parent over the
+        // status pipe, then _exit(127) (the shell "command not found" code).
+        int ee = errno;
+        ssize_t w = write(exec_pipe[1], &ee, sizeof(ee)); (void)w;
         _exit(127);
     }
 
-    // ---- PARENT: close the child-side ends, keep our own ends --------------
-    // Free the UTF-8 temporaries. Safe post-fork: the child has its own COW
-    // copy, so releasing the parent's does not disturb the exec'd argv.
+    // PARENT: close the child-side ends, keep our own. Free the UTF-8 temporaries -
+    // safe post-fork since the child has its own COW copy of the exec'd argv.
     for (int i = 0; i < n; i++) free(owned[i]);
     free(owned);
     free(args);
@@ -212,6 +185,24 @@ DragonList* dragon_subprocess_spawn(DragonList* argv, int cap_in, int cap_out,
     if (cap_out) { close(out_pipe[1]); stdout_r = out_pipe[0]; }
     if (cap_err) { close(err_pipe[1]); stderr_r = err_pipe[0]; }
 
+    // Close our write end so the child holds the only one, then read: bytes =>
+    // child failed to start (errno delivered); EOF => exec succeeded (CLOEXEC).
+    close(exec_pipe[1]);
+    int child_err = 0;
+    ssize_t got = read(exec_pipe[0], &child_err, sizeof(child_err));
+    close(exec_pipe[0]);
+    if (got > 0) {
+        // Binary could not start: reap the child, drop the kept pipe ends, and
+        // report spawn failure so stdlib Popen raises OSError.
+        int status; waitpid(pid, &status, 0);
+        if (stdin_w  >= 0) close((int)stdin_w);
+        if (stdout_r >= 0) close((int)stdout_r);
+        if (stderr_r >= 0) close((int)stderr_r);
+        dragon_list_append(result, -1); dragon_list_append(result, child_err);
+        dragon_list_append(result, -1); dragon_list_append(result, -1);
+        return result;
+    }
+
     dragon_list_append(result, (int64_t)pid);
     dragon_list_append(result, stdin_w);
     dragon_list_append(result, stdout_r);
@@ -220,17 +211,11 @@ DragonList* dragon_subprocess_spawn(DragonList* argv, int cap_in, int cap_out,
 #endif
 }
 
-//===-------------------------------------------------------------------===//
-// Blocking pipe I/O for the Tier-0 drain. Pipes are plain fds, not sockets, so
-// these use read(2)/write(2)/close(2) directly. Distinct names from the
-// socket-oriented dragon_nb_* helpers and from dragon_close_fd so there is no
-// symbol collision.
-//===-------------------------------------------------------------------===//
+// Blocking pipe I/O for the Tier-0 drain. Pipes are plain fds, not sockets, so these use
+// read(2)/write(2)/close(2) directly; distinct names from dragon_nb_*/dragon_close_fd to avoid symbol collision.
 
-/// Blocking read of the WHOLE pipe until EOF (the child closed its write end).
-/// Returns the accumulated bytes; empty bytes on error or immediate EOF. This
-/// is the Tier-0 drain: it blocks the carrier thread (see knownRisks - the
-/// green-thread non-blocking integration is a follow-up).
+/// Blocking read of the WHOLE pipe until EOF (child closed its write end); returns accumulated
+/// bytes, empty on error/immediate EOF. Tier-0 drain: blocks the carrier thread (green-thread non-blocking is a follow-up).
 DragonBytes* dragon_subprocess_drain(int fd) {
 #ifdef _WIN32
     (void)fd;
@@ -295,43 +280,8 @@ void dragon_subprocess_close(int fd) {
 #endif
 }
 
-//===-------------------------------------------------------------------===//
-// dragon_subprocess_pump - the Tier-1 concurrent drain.
-//
-// Replaces communicate()'s serial "write-all-stdin -> drain-stdout-fully ->
-// drain-stderr-fully" loop, which DEADLOCKS the moment the child fills a pipe
-// the parent is not currently servicing (e.g. the child blocks writing stderr
-// while we block reading stdout, or needs more stdin than one pipe buffer
-// holds). This pump multiplexes all three captured fds with poll(2): it feeds
-// stdin while simultaneously draining stdout AND stderr, so no party can wedge
-// on a full/empty pipe. It does NOT waitpid - once both read ends hit EOF the
-// child has finished writing and the .dr side's existing wait() reaps it.
-//
-//   in_fd       parent's write end of child stdin  (-1 if not captured)
-//   stdin_data  bytes to feed to stdin             (may be empty/NULL)
-//   out_fd      parent's read end of child stdout  (-1 if not captured)
-//   err_fd      parent's read end of child stderr  (-1 if not captured)
-//   timeout_ms  wall-clock budget; < 0 means no timeout
-//
-// Returns a list[bytes] of length 3: [stdout, stderr, flag]. `flag` is a
-// single byte: 0x00 = the child closed both pipes within the budget, 0x01 =
-// the budget elapsed first (the .dr side then kills + reaps and raises
-// TimeoutExpired carrying the partial stdout/stderr captured so far).
-//
-// All captured fds are CLOSED here on the way out (success or timeout); the
-// .dr side clears its fd fields so its destructor/close path is a no-op. The
-// one exception is stdin: it is closed as soon as it is fully written so the
-// child sees EOF and can exit.
-//
-// Scheduler cooperation: a single blocking poll() with the full timeout would
-// stall every other green thread sharing this carrier OS thread. Instead the
-// poll() timeout is clamped to a short slice (SLICE_MS) and we
-// dragon_vthread_yield() after each slice; on a green thread that lets
-// co-scheduled vthreads make progress, and off one (no vthread) the yield is a
-// no-op so the slice loop is just a bounded wait. This is NOT a true reactor
-// park (the pump is not suspended on the epoll/kqueue fd set while idle) - see
-// the .dr knownRisks note on the dedicated multi-fd+timeout reactor seam.
-//===-------------------------------------------------------------------===//
+// dragon_subprocess_pump: Tier-1 concurrent drain. Serial communicate() DEADLOCKS when the child fills a pipe the parent
+// isn't servicing, so this poll(2)-multiplexes all three fds and never waitpids (.dr wait() reaps at EOF). Returns [stdout, stderr, flag]: 0x00 = done in budget, 0x01 = timeout.
 #ifndef _WIN32
 static void pump_set_nonblock(int fd) {
     if (fd < 0) return;
@@ -346,14 +296,8 @@ static int64_t pump_now_ms(void) {
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-// Block SIGPIPE on THIS thread for the lifetime of the pump. Writing to a pipe
-// whose read end the child has closed (e.g. `head` exiting early) raises
-// SIGPIPE, whose default disposition kills the whole process. The runtime
-// deliberately does NOT set a process-wide SIG_IGN (it would be inherited
-// across fork/exec and break child pipelines that rely on SIGPIPE), so we mask
-// it thread-locally instead: after a write returns EPIPE we drain the pending
-// signal so it cannot fire when the mask is later lifted. `had_blocked` records
-// whether SIGPIPE was already masked so we restore the exact prior state.
+// Block SIGPIPE on THIS thread for the pump's lifetime: writing to a pipe whose read end the child closed
+// (e.g. `head` exiting early) would otherwise kill the process. Thread-local, not process-wide SIG_IGN (which fork/exec inherits and breaks child pipelines); had_blocked restores the prior mask state.
 typedef struct { bool had_blocked; } SigpipeGuard;
 
 static SigpipeGuard pump_block_sigpipe(void) {
@@ -380,9 +324,8 @@ static void pump_drain_sigpipe(void) {
         sigemptyset(&only);
         sigaddset(&only, SIGPIPE);
 #ifdef __APPLE__
-        // macOS has no sigtimedwait. sigwait would block on an empty pending
-        // set, but the sigpending check above guarantees SIGPIPE is pending,
-        // so this consumes it and returns immediately
+        // macOS has no sigtimedwait; sigwait would block on an empty pending set, but the
+        // sigpending check above guarantees SIGPIPE is pending, so this consumes it and returns immediately.
         int consumed = 0;
         sigwait(&only, &consumed);
 #else
@@ -504,17 +447,15 @@ DragonList* dragon_subprocess_pump(int in_fd, DragonBytes* stdin_data,
             continue;
         }
 
-        // --- stdin: write whatever the pipe will accept right now ----------
+        // stdin: write whatever the pipe will accept right now.
         if (idx_in >= 0 && (pfds[idx_in].revents & (POLLOUT | POLLERR | POLLHUP))) {
             if (pfds[idx_in].revents & (POLLERR | POLLHUP)) {
                 // Child closed/aborted its stdin read end (e.g. `head`): stop
                 // feeding and close our end so we don't take SIGPIPE later.
                 close(in_fd); in_fd = -1; stdin_open = false;
             } else {
-                // SIGPIPE is masked ONLY across this non-yielding write burst:
-                // the M:N scheduler may migrate this vthread to another carrier
-                // OS thread at a yield, so the pthread-local mask must never be
-                // held across dragon_vthread_yield().
+                // SIGPIPE is masked ONLY across this non-yielding write burst: the M:N scheduler may migrate
+                // this vthread to another carrier OS thread at a yield, so the pthread-local mask must never be held across a yield.
                 SigpipeGuard sg = pump_block_sigpipe();
                 for (;;) {
                     size_t want = in_total - in_done;
@@ -537,7 +478,7 @@ DragonList* dragon_subprocess_pump(int in_fd, DragonBytes* stdin_data,
             }
         }
 
-        // --- stdout: drain until EAGAIN or EOF -----------------------------
+        // stdout: drain until EAGAIN or EOF.
         if (idx_out >= 0 && (pfds[idx_out].revents & (POLLIN | POLLERR | POLLHUP))) {
             for (;;) {
                 ssize_t r = read(out_fd, rbuf, sizeof(rbuf));
@@ -549,7 +490,7 @@ DragonList* dragon_subprocess_pump(int in_fd, DragonBytes* stdin_data,
             }
         }
 
-        // --- stderr: drain until EAGAIN or EOF -----------------------------
+        // stderr: drain until EAGAIN or EOF.
         if (idx_err >= 0 && (pfds[idx_err].revents & (POLLIN | POLLERR | POLLHUP))) {
             for (;;) {
                 ssize_t r = read(err_fd, rbuf, sizeof(rbuf));
@@ -585,6 +526,77 @@ DragonList* dragon_subprocess_pump(int in_fd, DragonBytes* stdin_data,
     dragon_list_append_ptr(result, (void*)err_bytes);
     dragon_list_append_ptr(result, (void*)flag_bytes);
     return (DragonList*)result;
+#endif
+}
+
+
+/// Read exactly n bytes (poll-sliced + vthread-yield). A short read means the
+/// writer died mid-frame; callers treat len < n as fatal.
+DragonBytes* dragon_subprocess_read_n(int fd, int64_t n) {
+#ifdef _WIN32
+    (void)fd; (void)n;
+    return dragon_bytes_new((const uint8_t*)"", 0);
+#else
+    if (fd < 0 || n <= 0) return dragon_bytes_new((const uint8_t*)"", 0);
+    uint8_t* buf = (uint8_t*)malloc((size_t)n);
+    if (!buf) return dragon_bytes_new((const uint8_t*)"", 0);
+    size_t got = 0;
+    struct pollfd pf;
+    pf.fd = fd;
+    pf.events = POLLIN;
+    while (got < (size_t)n) {
+        pf.revents = 0;
+        int pr = poll(&pf, 1, 25);
+        if (pr < 0) {
+            if (errno == EINTR) { dragon_vthread_yield(); continue; }
+            break;
+        }
+        if (pr == 0) { dragon_vthread_yield(); continue; }
+        ssize_t r = read(fd, buf + got, (size_t)n - got);
+        if (r > 0) { got += (size_t)r; continue; }
+        if (r < 0 && errno == EINTR) continue;
+        break;  // EOF or real error: return the short read
+    }
+    DragonBytes* out = dragon_bytes_new(buf, (int64_t)got);
+    free(buf);
+    return out;
+#endif
+}
+
+/// D052 frames: write ALL bytes (poll-sliced + vthread-yield, SIGPIPE-masked
+/// across each burst). Returns 0 on success, -1 when the reader died / error.
+int64_t dragon_subprocess_write_all(int fd, DragonBytes* data) {
+#ifdef _WIN32
+    (void)fd; (void)data;
+    return -1;
+#else
+    if (fd < 0 || !data) return -1;
+    const uint8_t* p = data->data;
+    size_t left = (size_t)data->len;
+    struct pollfd pf;
+    pf.fd = fd;
+    pf.events = POLLOUT;
+    while (left > 0) {
+        pf.revents = 0;
+        int pr = poll(&pf, 1, 25);
+        if (pr < 0) {
+            if (errno == EINTR) { dragon_vthread_yield(); continue; }
+            return -1;
+        }
+        if (pr == 0) { dragon_vthread_yield(); continue; }
+        if (pf.revents & (POLLERR | POLLHUP)) return -1;
+        // Mask SIGPIPE only across the non-yielding write burst (the pump's rule:
+        // the pthread-local mask must never be held across a yield).
+        SigpipeGuard sg = pump_block_sigpipe();
+        ssize_t w = write(fd, p, left);
+        if (w < 0 && errno == EPIPE) pump_drain_sigpipe();
+        pump_restore_sigpipe(sg);
+        if (w > 0) { p += (size_t)w; left -= (size_t)w; continue; }
+        if (w < 0 && errno == EINTR) continue;
+        if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+        return -1;
+    }
+    return 0;
 #endif
 }
 
