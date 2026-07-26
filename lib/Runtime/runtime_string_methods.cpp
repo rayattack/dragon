@@ -1223,7 +1223,11 @@ DragonTuple* dragon_str_rpartition(const char* s, const char* sep) {
 DragonList* dragon_str_rsplit(const char* s, const char* sep, int64_t maxsplit) {
     if (maxsplit < 0) return dragon_str_split(s, sep);
     DragonList* all = dragon_str_split(s, sep);
-    if (all->size <= maxsplit + 1) return all;
+    // Phrased so maxsplit + 1 is never computed: at maxsplit == INT64_MAX it
+    // signed-overflows to INT64_MIN, skipping this return and sending the copy
+    // loops below off from a negative index. Here maxsplit >= 0, so past this
+    // point maxsplit + 1 <= all->size is overflow-free.
+    if (maxsplit >= all->size - 1) return all;
     DragonList* result = dragon_list_new_tagged(maxsplit + 1, TAG_STR);
     DragonList* head = dragon_list_new_tagged(all->size - maxsplit, TAG_STR);
     for (int64_t i = 0; i < all->size - maxsplit; i++) {
