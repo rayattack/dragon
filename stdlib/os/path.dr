@@ -112,6 +112,32 @@ def normpath(path: str) -> str {
     return result
 }
 
+# Join `name` onto `root` and return the result only if it stays inside
+# `root`. Raises ValueError otherwise.
+#
+# Use this wherever `name` came from outside the program: an archive member,
+# an upload's declared filename, a URL path segment. Plain `join` will happily
+# build "root/../../etc/passwd", and the caller usually cannot tell by looking
+# at the result that it left the directory they asked for.
+#
+# Containment is decided on the *normalized* path, so an interior ".." that
+# stays inside ("sub/../ok.txt") is allowed while one that climbs out is not.
+# Absolute names are rejected outright rather than silently reinterpreted.
+def safe_join(root: str, name: str) -> str {
+    if isabs(name) {
+        raise ValueError(f"unsafe path '{name}': absolute names are not allowed here")
+    }
+    const base: str = normpath(root)
+    const target: str = normpath(join(base, name))
+    if target == base {
+        return target
+    }
+    if not target.startswith(base + "/") {
+        raise ValueError(f"unsafe path '{name}': escapes '{root}'")
+    }
+    return target
+}
+
 # Split a path into its non-empty "/"-separated segments.
 def _segments(p: str) -> list[str] {
     parts: list[str] = []

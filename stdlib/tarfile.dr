@@ -20,7 +20,7 @@
 
 
 from os import listdir, makedirs, isfile, isdir, islink, readlink
-from os.path import join, basename, dirname
+from os.path import join, basename, dirname, safe_join
 import gzip
 import zstandard
 
@@ -351,8 +351,13 @@ class TarFile {
     # Write a single member's bytes to disk under `path` (treated as the
     # root for relative archive names). Creates parent dirs as needed,
     # mirroring CPython's TarFile.extract behaviour.
+    #
+    # `member.name` is attacker-controlled: it is whatever the archive says.
+    # safe_join refuses any name that resolves outside `path`, so a member
+    # called "../../.ssh/authorized_keys" raises instead of landing there.
+    # it turns out that CPython shipped this unguarded for 15 years (CVE-2007-4559). ;-)
     def extract(member: TarInfo, path: str) -> None {
-        target: str = join(path, member.name)
+        target: str = safe_join(path, member.name)
         if member.isdir() {
             makedirs(target)
             return
