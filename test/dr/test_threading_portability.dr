@@ -1,0 +1,147 @@
+# test/dr/test_threading_portability.dr - the sync primitives actually work.
+#
+# Three primitives were broken on macOS and nothing caught it, because nothing
+# exercised them:
+#
+#   Barrier    called pthread_barrier_*, which is an optional part of POSIX that
+#              Apple does not ship. It left undefined symbols in every link that
+#              imported `threading` - so the whole module was unusable, not just
+#              Barrier, since the class's methods are emitted regardless.
+#
+#   RWLock     malloc'd a hardcoded 64 bytes for a pthread_rwlock_t. Darwin's is
+#              200, so pthread_rwlock_init wrote 136 bytes past the block and the
+#              process segfaulted.
+#
+#   Semaphore  called sem_init, which on macOS is deprecated and returns -1 with
+#              ENOSYS (Darwin implements only named semaphores). The result was
+#              ignored, so every Semaphore operated on an uninitialised sem_t.
+#
+# The size and clock constants are now read from the runtime, which is the only
+# component compiled against the target's own headers.
+
+from unittest import TestCase, main
+from threading import Barrier, Semaphore, RWLock, Thread
+import time
+
+const N: int = 4
+
+barrier: Barrier = Barrier(N)
+serial_count: int = 0
+arrivals: int = 0
+
+def barrier_worker() -> None {
+    global serial_count
+    global arrivals
+    const rc: int = barrier.wait()
+    # Exactly one thread per trip is elected, mirroring
+    # PTHREAD_BARRIER_SERIAL_THREAD, so this counts to 1 and not N.
+    if rc == 1 {
+        serial_count = serial_count + 1
+    }
+    arrivals = arrivals + 1
+}
+
+class BarrierTests(TestCase) {
+    def test_rendezvous_elects_one_serial_thread() {
+        t1: Thread = Thread(target=barrier_worker)
+        t2: Thread = Thread(target=barrier_worker)
+        t3: Thread = Thread(target=barrier_worker)
+        t1.start()
+        t2.start()
+        t3.start()
+        # The main thread is the Nth arrival, so the barrier trips here.
+        barrier.wait()
+        t1.join()
+        t2.join()
+        t3.join()
+        self.assertEqual(arrivals, N - 1)
+        self.assertEqual(serial_count, 1)
+    }
+
+    def test_construct_and_destroy() {
+        b: Barrier = Barrier(1)
+        # Threshold of 1 trips immediately, and the sole arrival is the serial one.
+        self.assertEqual(b.wait(), 1)
+        # Reusable: the generation advanced, so a second trip works too.
+        self.assertEqual(b.wait(), 1)
+        self.assertEqual(b.destroy(), 0)
+    }
+}
+
+class SemaphoreTests(TestCase) {
+    def test_permits_are_counted() {
+        s: Semaphore = Semaphore(2)
+        self.assertTrue(s.acquire(blocking=False))
+        self.assertTrue(s.acquire(blocking=False))
+        # Both permits taken - a third try must fail rather than block.
+        self.assertFalse(s.acquire(blocking=False))
+        s.release()
+        self.assertTrue(s.acquire(blocking=False))
+        s.release()
+        s.release()
+        self.assertEqual(s.destroy(), 0)
+    }
+
+    def test_available_permit_is_taken_immediately() {
+        s: Semaphore = Semaphore(1)
+        self.assertTrue(s.acquire(blocking=True, timeout=1.0))
+        s.release()
+        s.destroy()
+    }
+
+    def test_timeout_waits_then_fails() {
+        s: Semaphore = Semaphore(1)
+        s.acquire()
+        const t0: float = time.monotonic()
+        const got: bool = s.acquire(blocking=True, timeout=0.1)
+        const dt: float = time.monotonic() - t0
+        s.release()
+        s.destroy()
+        self.assertFalse(got)
+        # Must actually have waited. This is the assertion that caught
+        # time.monotonic() returning a constant 0.0 on macOS.
+        self.assertGreaterEqual(dt, 0.05)
+    }
+}
+
+class RWLockTests(TestCase) {
+    def test_construct_read_release_destroy() {
+        # Undersized allocation used to corrupt the heap here and segfault.
+        rw: RWLock = RWLock()
+        self.assertTrue(rw.acquire())
+        self.assertEqual(rw.release(), 0)
+        self.assertTrue(rw.acquire(write=True))
+        self.assertEqual(rw.release(), 0)
+        self.assertEqual(rw.destroy(), 0)
+    }
+}
+
+class ClockTests(TestCase) {
+    def test_monotonic_is_not_stuck_at_zero() {
+        # clock_gettime(1, ...) is CLOCK_MONOTONIC on Linux but an invalid
+        # clockid on Darwin (6), where it failed with EINVAL and left the
+        # timespec zeroed - so this returned exactly 0.0 on every call.
+        const a: float = time.monotonic()
+        self.assertTrue(a > 0.0)
+    }
+
+    def test_monotonic_advances() {
+        const a: float = time.monotonic()
+        time.sleep_ms(20)
+        const b: float = time.monotonic()
+        self.assertTrue(b > a)
+    }
+
+    def test_perf_counter_is_live() {
+        const a: float = time.perf_counter()
+        self.assertTrue(a > 0.0)
+    }
+
+    def test_realtime_still_works() {
+        # REALTIME is 0 on both platforms, so this never broke - pin it so a
+        # future clock-id change cannot silently regress it.
+        self.assertTrue(time.now_float() > 1000000000.0)
+    }
+}
+
+main([BarrierTests(), SemaphoreTests(), RWLockTests(), ClockTests()])
