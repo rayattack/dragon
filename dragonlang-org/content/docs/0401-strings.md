@@ -27,6 +27,42 @@ string"""
 const tabbed: str = "col1\tcol2"
 ```
 
+### Raw strings
+
+Prefix with `r` to take the content verbatim - no escape processing:
+
+```dragon
+const path: str = r"C:\Users\new"     # backslashes stay literal; \n is not a newline
+const pattern: str = r"\d+\.\d+"      # regex, no double-backslashing
+```
+
+`r"..."` inherits two limits from Python: it cannot contain an unescaped `"`,
+and it cannot **end** with a backslash (`r"C:\"` does not parse - the backslash
+still shields the closing quote). For those cases use the `r#"..."#` form, where
+the delimiter is a quote plus a run of `#`:
+
+```dragon
+const quoted: str = r#"he said "hi""#      # unescaped double quotes
+const windows: str = r#"C:\"#              # trailing backslash is fine
+const json: str = r#"{"key": "value"}"#    # no escaping at all
+```
+
+Nothing inside is special - not backslashes, not quotes. The literal ends only
+at a `"` followed by the same number of `#` you opened with, so if the content
+itself contains `"#`, open with more:
+
+```dragon
+const tricky: str = r##"this holds a "# sequence"##
+```
+
+Raw strings of either form may span lines. `r#"..."#` is a `.dr`-only spelling:
+it is not valid Python, and a typed `.py` file is meant to stay compilable by
+CPython as well.
+
+> **Differs from Python.** The `r#"..."#` form is a Dragon superset borrowed
+> from Rust; CPython has no equivalent. Plain `r"..."` behaves as it does in
+> Python.
+
 ## Length, indexing, and slicing
 
 Index from the front with `0`-based positions, from the back with negatives, and
