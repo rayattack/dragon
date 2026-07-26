@@ -1338,6 +1338,18 @@ const char* dragon_getlogin() {
 // Time Helpers - struct timespec access
 //===----------------------------------------------------------------------===//
 
+/// Clock IDs, from the target's own <time.h>.
+///
+/// stdlib/time.dr hardcoded the Linux numbering (REALTIME=0, MONOTONIC=1,
+/// PROCESS_CPUTIME=2). Darwin agrees only on REALTIME: there MONOTONIC is 6 and
+/// PROCESS_CPUTIME_ID is 12, so clock_gettime(1, ...) was an invalid clockid
+/// that failed with EINVAL and left the timespec untouched. time.monotonic()
+/// and time.perf_counter() therefore returned 0.0 on every macOS call - silently,
+/// so elapsed-time measurements came out as exactly zero.
+int64_t dragon_clock_realtime_id(void)  { return (int64_t)CLOCK_REALTIME; }
+int64_t dragon_clock_monotonic_id(void) { return (int64_t)CLOCK_MONOTONIC; }
+int64_t dragon_clock_process_id(void)   { return (int64_t)CLOCK_PROCESS_CPUTIME_ID; }
+
 /// Create a timespec struct (16 bytes: tv_sec + tv_nsec)
 void* dragon_timespec_new(int64_t sec, int64_t nsec) {
     struct timespec* ts = (struct timespec*)malloc(sizeof(struct timespec));

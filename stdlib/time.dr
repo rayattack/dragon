@@ -24,10 +24,19 @@ extern "C" def dragon_timespec_new(sec: int, nsec: int) -> ptr
 extern "C" def dragon_timespec_sec(ts: ptr) -> int
 extern "C" def dragon_timespec_nsec(ts: ptr) -> int
 
-# Clock IDs: CLOCK_REALTIME=0, CLOCK_MONOTONIC=1, CLOCK_PROCESS_CPUTIME_ID=2
-const CLOCK_REALTIME: int = 0
-const CLOCK_MONOTONIC: int = 1
-const CLOCK_PROCESS: int = 2
+# Clock IDs come from the runtime, which is compiled against the target's own
+# <time.h>. They used to be hardcoded to the Linux numbering (0/1/2); Darwin
+# agrees only on REALTIME - there MONOTONIC is 6 and PROCESS_CPUTIME_ID is 12 -
+# so clock_gettime(1, ...) was an invalid clockid on macOS. It failed with
+# EINVAL and left the timespec zeroed, which made monotonic() and
+# perf_counter() return 0.0 on every call instead of raising.
+extern "C" def dragon_clock_realtime_id() -> int
+extern "C" def dragon_clock_monotonic_id() -> int
+extern "C" def dragon_clock_process_id() -> int
+
+CLOCK_REALTIME: int = dragon_clock_realtime_id()
+CLOCK_MONOTONIC: int = dragon_clock_monotonic_id()
+CLOCK_PROCESS: int = dragon_clock_process_id()
 
 # CLOCKS_PER_SEC is 1000000 on POSIX
 const CLOCKS_PER_SEC: int = 1000000
@@ -45,7 +54,7 @@ def now_float() -> float {
     # Current time as float (seconds + nanoseconds)
     const ts: ptr = malloc(16)
     memset(ts, 0, 16)
-    clock_gettime(0, ts)
+    clock_gettime(CLOCK_REALTIME, ts)
     const sec: int = dragon_timespec_sec(ts)
     const nsec: int = dragon_timespec_nsec(ts)
     free(ts)
@@ -56,7 +65,7 @@ def monotonic() -> float {
     # Monotonic clock (not affected by system clock changes)
     const ts: ptr = malloc(16)
     memset(ts, 0, 16)
-    clock_gettime(1, ts)
+    clock_gettime(CLOCK_MONOTONIC, ts)
     const sec: int = dragon_timespec_sec(ts)
     const nsec: int = dragon_timespec_nsec(ts)
     free(ts)
