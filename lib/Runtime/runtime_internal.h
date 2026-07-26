@@ -977,6 +977,7 @@ void dragon_gc_track(void* obj);
 void dragon_gc_untrack(void* obj);
 void dragon_gc_set_threshold(int64_t n);
 int64_t dragon_gc_collect();
+int64_t dragon_gc_tracked_count();
 
 // Mark an object SHARED (atomic OR into gc_flags). Idempotent; safe under
 // concurrent callers. Does NOT recurse into children. Used at the leaf of
@@ -1232,6 +1233,41 @@ static inline void* dragon_xrealloc_or_abort(void* old, size_t n) {
         abort();
     }
     return p;
+}
+
+// Count-based variants. The multiply that turns an ELEMENT COUNT into a BYTE
+// COUNT belongs here, not at the call site. `capacity * elem_size` is an i64
+// multiply and it wraps: `[1] * n` with n = 2^61+2 clears dragon_list_repeat's
+// `count > INT64_MAX / size` guard (that guard only proves the element count
+// is sane, and says nothing about the byte count), then 2^61+2 * 8 wraps to a
+// 16-byte request. A-B proven under gdb: malloc served 16 bytes, returned a
+// valid heap pointer, and the repeat memcpy then marched 2.3 quintillion
+// elements through the heap. That is a controlled heap overflow, not an
+// allocation failure.
+// Guarding one caller only re-opens the hole at the next caller that sizes a
+// buffer, so the trap lives where the byte count is formed. Nothing below may
+// hand-compute a data-buffer size.
+static inline size_t dragon_alloc_bytes(int64_t count, size_t elem_size) {
+    if (__builtin_expect(count < 0 || (uint64_t)count > SIZE_MAX / elem_size, 0))
+        dragon_raise_exc_cstr(43, "MemoryError: allocation size overflow");
+    return (size_t)count * elem_size;
+}
+static inline void* dragon_xmalloc_n(int64_t count, size_t elem_size) {
+    return dragon_xmalloc(dragon_alloc_bytes(count, elem_size));
+}
+// Non-raising sibling, for the container GROW paths. Those run between
+// dragon_shared_mut_begin and dragon_shared_mut_end, so a longjmp out of them
+// would escape with GC_FLAG_MUTATING still set on the object - and the next
+// legitimate mutation of that same container would then trip
+// dragon_fatal_concurrent_mutation. A caught MemoryError must not arm a
+// spurious fatal later, so the grow paths keep their abort-on-failure
+// contract and only gain the overflow trap.
+static inline size_t dragon_alloc_bytes_or_abort(int64_t count, size_t elem_size) {
+    if (__builtin_expect(count < 0 || (uint64_t)count > SIZE_MAX / elem_size, 0)) {
+        fprintf(stderr, "dragon: allocation size overflow\n");
+        abort();
+    }
+    return (size_t)count * elem_size;
 }
 
 // Unwind cleanup stack (see DragonCleanupStack). Codegen emits push at each
