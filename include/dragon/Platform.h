@@ -13,6 +13,13 @@ std::string getTempDir();
 // artifact path and redirect or hijack the link step (TOCTOU privesc).
 std::string makeSecureTempDir(const std::string& prefix);
 
+// Get the dragon home directory (~/.dragon). Returns "" on failure.
+std::string getDragonHomeDir();
+
+// Create a fallback temporary directory under ~/.dragon/<prefix><unique>.
+// Returns "" on failure. This is used when makeSecureTempDir fails.
+std::string makeFallbackTempDir(const std::string& prefix);
+
 int getProcessId();
 std::string getExecutablePath();
 int getExitCode(int systemResult);
