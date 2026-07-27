@@ -1,18 +1,13 @@
 /// Dragon CodeGen - Lambda, Function Declaration, TypeAlias
 #include "../CodeGenImpl.h"
 
+#include <optional>
+
 namespace dragon {
 
-// the per-closure-site env GC hook. One emitter, two call sites
-// (LambdaExpr + nested def), so the DEALLOC/TRAVERSE/CLEAR logic can't drift.
-// Signature matches DragonEnv.gc_fn: void(env: ptr, op: i32, visit: ptr, arg: ptr).
-//  op 0 DEALLOC - decref each heap capture (the former dealloc_fn behavior).
-//  op 1 TRAVERSE - visit each cycle-capable capture so the cycle collector
-//  subtracts the env's internal ref to it. The visit fns
-//  (subtract/reachable) only dereference a TRACKED child, so a
-//  bare-fn-ptr Closure capture is a safe hash-miss - no gate.
-//  op 2 CLEAR - decref + NULL each heap capture slot (break the cycle; the
-//  later env dealloc then sees emptied slots, double-frees 0).
+// Shared per-closure-site env GC hook (LambdaExpr + nested def) so
+// DEALLOC/TRAVERSE/CLEAR can't drift. op 1 TRAVERSE's bare-fn-ptr Closure capture
+// is a safe hash-miss (no gate); op 2 CLEAR NULLs slots so later dealloc frees 0.
 llvm::Function* CodeGen::Impl::emitEnvGcFn(
         const std::string& baseName, llvm::StructType* envStructType,
         const std::vector<EnvCaptureDesc>& caps) {
@@ -60,9 +55,8 @@ llvm::Function* CodeGen::Impl::emitEnvGcFn(
         auto* ptr = builder->CreateLoad(i8PtrType, fieldPtr);
         return std::make_pair(fieldPtr, ptr);
     };
-    // The exact per-kind decref the old dealloc_fn used (cell/str/closure/
-    // generic) - preserved so DEALLOC behavior is byte-identical, and reused by
-    // CLEAR. Closure goes through the tag-gated _callable (bare-fn-ptr safe).
+    // Per-kind decref (cell/str/closure/generic), reused by DEALLOC and CLEAR.
+    // Closure goes through tag-gated _callable (bare-fn-ptr safe).
     auto emitCapDecref = [&](const EnvCaptureDesc& c, llvm::Value* ptr) {
         if (c.isCellRelay)
             builder->CreateCall(runtimeFuncs["dragon_decref"], {ptr});
@@ -116,9 +110,8 @@ llvm::Function* CodeGen::Impl::emitEnvGcFn(
     }
     builder->CreateRetVoid();
 
-    // Propagate the SHARED flag into every heap capture - str included
-    // (TRAVERSE skips them: they cannot close a cycle, but a capture read out
-    // of shared closure increfs, so it must be marked or refcount tears cross-thread)
+    // Propagate SHARED into every heap capture, str included: a capture read
+    // out of a shared closure increfs, so unmarked refcounts tear cross-thread.
     builder->SetInsertPoint(markBB);
     for (size_t i = 0; i < caps.size(); i++) {
         if (!(caps[i].isCellRelay || isHeapKind(caps[i].kind))) continue;
@@ -151,15 +144,16 @@ llvm::Function* CodeGen::Impl::emitEnvGcFn(
 void CodeGen::visit(LambdaExpr& node) {
     // Lambda expression: generate a new internal function and return its pointer.
     // D027: If capturedVars is non-empty, create a closure (env + wrapper).
+    // Per-variable metadata dies with the lambda body (stale-type family).
+    Impl::VarMetaScope _varMeta(*impl_);
 
     bool hasCaptures = !node.capturedVars.empty();
 
     // 1. Generate unique function name
     std::string lambdaName = "__dragon_lambda_" + std::to_string(impl_->lambdaCounter++);
 
-    // 2. Determine return type. An expression-body lambda always returns a
-    // value (int default); a block lambda is a procedure only when it has no
-    // value-returning return (then void, so a bare `return` lowers cleanly).
+    // 2. Determine return type. Expression-body lambda always returns a value
+    // (int default); a block lambda with no value-return is void.
     llvm::Type* retType = impl_->typeExprToLLVM(node.returnType.get());
     if (!node.returnType) {
         retType = (node.body || impl_->bodyReturnsValue(node.bodyStmts))
@@ -182,10 +176,8 @@ void CodeGen::visit(LambdaExpr& node) {
     auto* lambdaFunc = llvm::Function::Create(
         funcType, llvm::Function::InternalLinkage, lambdaName, impl_->module.get());
 
-    // D027: Gather capture info BEFORE switching to lambda function context.
-    // We need to load values from the current scope while we're still in the caller.
-    // D027.1: a capture flagged `nonlocal` by the lambda body is relayed as
-    // a cell pointer; reads/writes route through dragon_cell_get/set.
+    // D027: Gather capture info BEFORE switching context (load values from the
+    // caller scope). D027.1: `nonlocal` captures relay as cell ptrs (cell_get/set).
     std::unordered_set<std::string> innerCellRelayed(
         node.mutatedCapturedVars.begin(), node.mutatedCapturedVars.end());
     struct CaptureInfo {
@@ -272,12 +264,8 @@ void CodeGen::visit(LambdaExpr& node) {
         idx++;
     }
 
-    // D030: Build per-lambda env struct type with native field types.
-    //  { [24 x i8]; <native capture types...> }
-    //  Field 0 mirrors sizeof(DragonEnv) = 16 (header) + 8 (dealloc_fn) = 24 bytes.
-    //  Subsequent fields are the captures themselves, in order, at native LLVM types.
-    // Computed once and used at: (a) lambda body unpack, (b) capture site populate,
-    // (c) dealloc fn for heap-typed captures.
+    // D030: Per-lambda env struct { [24 x i8] header+dealloc_fn; native capture
+    // fields... }. Used at body unpack, capture populate, and dealloc fn.
     auto kindToCaptureLLVM = [&](Impl::VarKind k) -> llvm::Type* {
         switch (k) {
             case Impl::VarKind::Float: return impl_->f64Type;
@@ -360,9 +348,8 @@ void CodeGen::visit(LambdaExpr& node) {
         if (impl_->options.gcMode == GCMode::RC) {
             if (auto* nameExpr = dynamic_cast<NameExpr*>(node.body.get())) {
                 auto kind = impl_->lookupVarKind(nameExpr->name);
-                // emitIncrefByKind dispatches Str/Closure/generic - the
-                // Closure case is tag-gated (a returned bare-fn Callable
-                // must not have a refcount written into its code bytes).
+                // emitIncrefByKind dispatches Str/Closure/generic; Closure is
+                // tag-gated (a returned bare-fn Callable has no refcount slot).
                 impl_->emitIncrefByKind(bodyVal, kind);
             }
         }
@@ -398,10 +385,8 @@ void CodeGen::visit(LambdaExpr& node) {
 
     // 10. Result
     if (hasCaptures) {
-        // emit the multi-op env GC hook (DEALLOC/TRAVERSE/CLEAR)
-        // via the shared emitter, and gc-track the env iff it captures a
-        // cycle-capable object (so instance/list -> closure -> env cycles are
-        // collectable; scalar/str-only envs stay untracked - #1).
+        // Emit the shared multi-op env GC hook, gc-track the env iff it captures
+        // a cycle-capable object (scalar/str-only envs stay untracked - #1).
         std::vector<Impl::EnvCaptureDesc> capDescs;
         capDescs.reserve(captures.size());
         bool envTrackable = false;
@@ -428,20 +413,15 @@ void CodeGen::visit(LambdaExpr& node) {
         llvm::Value* envTyped = impl_->builder->CreateBitCast(
             envVal, llvm::PointerType::getUnqual(*impl_->context), "closure.env.typed");
 
-        // Populate captures with native-typed stores. Coerce only when
-        // the loaded value's type doesn't match the field type - those are
-        // legitimate widening (e.g. if the source was an alloca of a
-        // different type than the capture field).
+        // Populate captures with native-typed stores; coerce only when the
+        // loaded value's type doesn't match the field type (legitimate widening).
         for (size_t i = 0; i < captures.size(); i++) {
             auto& cap = captures[i];
             llvm::Type* fieldType = envStructType->getElementType((unsigned)(i + 1));
             llvm::Value* storeVal = cap.value;
 
-            // Reconcile loaded value type with field type. The capture's
-            // .value was loaded from the enclosing alloca at its native
-            // type, which usually matches kindToCaptureLLVM. The cases that
-            // need adjustment are int->float captures (rare) or capturing
-            // a literal whose type is narrower.
+            // Reconcile loaded value type with field type; adjustment is needed
+            // only for int->float captures or a narrower literal.
             if (storeVal->getType() != fieldType) {
                 if (fieldType == impl_->f64Type && storeVal->getType() == impl_->i64Type)
                     storeVal = impl_->builder->CreateSIToFP(storeVal, fieldType);
@@ -460,10 +440,8 @@ void CodeGen::visit(LambdaExpr& node) {
                 envStructType, envTyped, (unsigned)(i + 1), cap.name + ".env.slot");
             impl_->builder->CreateStore(storeVal, fieldPtr);
 
-            // Incref heap captures - env now holds a reference. Cell-relayed
-            // captures travel as TAG_CELL pointers, so the env's incref hits
-            // the cell itself (plain dragon_incref); _str would mis-navigate
-            // through the cell's bytes treating them as a string payload.
+            // Incref heap captures - env now holds a ref. Cell-relayed travel as
+            // TAG_CELL, so plain dragon_incref (not _str, which misreads the cell).
             if (impl_->options.gcMode == GCMode::RC) {
                 if (cap.isCellRelay) {
                     impl_->builder->CreateCall(
@@ -473,12 +451,8 @@ void CodeGen::visit(LambdaExpr& node) {
                         impl_->builder->CreateCall(
                             impl_->runtimeFuncs["dragon_incref_str"], {storeVal});
                     } else if (cap.kind == Impl::VarKind::Closure) {
-                        // a captured Callable may hold a BARE fn pointer
-                        // (a decorator's `fn` param wrapping a plain def).
-                        // The generic incref would WRITE a refcount into the
-                        // function's code bytes (SIGSEGV - the chained-
-                        // decorator crash). The tag-gated variant increfs a
-                        // real DragonClosure and no-ops on a bare fn ptr.
+                        // A captured Callable may hold a BARE fn ptr; generic incref
+                        // would write into code bytes (SIGSEGV). Tag-gated variant is safe.
                         impl_->builder->CreateCall(
                             impl_->runtimeFuncs["dragon_incref_callable"], {storeVal});
                     } else {
@@ -505,15 +479,8 @@ void CodeGen::visit(LambdaExpr& node) {
     }
 }
 
-//===---------------------------------------------------------------------===//
-// D027.1: Recursive collection of nested-function `mutatedCapturedVars`.
-//
-// For a given function body, we want to know which names get nonlocal-mutated
-// somewhere inside its nested defs/lambdas (potentially many levels deep).
-// The intersection with the function's own locals tells us which locals to
-// cell-promote at this function's level. Names not bound here will be
-// resolved by an even-further-out function that owns them.
-//===---------------------------------------------------------------------===//
+// D027.1: Recursively collect nested-fn `mutatedCapturedVars`. Names nonlocal-
+// mutated in nested defs/lambdas, intersected with own locals, get cell-promoted.
 
 void CodeGen::Impl::collectNestedMutatedCaptures(
     const std::vector<std::unique_ptr<Stmt>>& body,
@@ -527,11 +494,8 @@ void CodeGen::Impl::collectNestedMutatedCaptures(Stmt* s,
 {
     if (!s) return;
     if (auto* fd = dynamic_cast<FunctionDecl*>(s)) {
-        // The nested fn's own mutatedCapturedVars (its `nonlocal` decls)
-        // surface as required cell-backings at this scanner's level. We
-        // also recurse into its body to pick up grandchildren whose
-        // nonlocal targets bind even further out - those names appear
-        // here too because the intermediate nested fn relays them.
+        // The nested fn's own `nonlocal` decls surface as cell-backings here;
+        // recurse to pick up grandchildren whose targets bind further out.
         for (const auto& n : fd->mutatedCapturedVars) out.insert(n);
         collectNestedMutatedCaptures(fd->body, out);
         return;
@@ -595,9 +559,8 @@ void CodeGen::Impl::collectNestedMutatedCaptures(Stmt* s,
         return;
     }
     if (auto* th = dynamic_cast<ThreadStmt*>(s)) {
-        // ThreadStmt blocks are themselves capture sites - its own
-        // mutatedCapturedVars bubble up here so the owning function
-        // cell-promotes the appropriate locals.
+        // ThreadStmt blocks are capture sites: their mutatedCapturedVars bubble
+        // up so the owning function cell-promotes the right locals.
         for (const auto& n : th->mutatedCapturedVars) out.insert(n);
         collectNestedMutatedCaptures(th->body, out);
         return;
@@ -616,9 +579,8 @@ void CodeGen::Impl::collectNestedMutatedCaptures(Expr* e,
     }
     if (auto* fe = dynamic_cast<FireExpr*>(e)) {
         for (const auto& n : fe->mutatedCapturedVars) out.insert(n);
-        // FireExpr can wrap either a CallExpr (fire foo()) via `operand`,
-        // or a body block (`fire { ... }`) via `bodyStmts`. Recurse into
-        // both so anything deeper still surfaces.
+        // FireExpr wraps either a CallExpr (via `operand`) or a body block
+        // (via `bodyStmts`); recurse into both.
         if (fe->operand) collectNestedMutatedCaptures(fe->operand.get(), out);
         for (auto& s : fe->bodyStmts) collectNestedMutatedCaptures(s.get(), out);
         return;
@@ -658,14 +620,8 @@ void CodeGen::Impl::collectNestedMutatedCaptures(Expr* e,
 }
 
 namespace {
-// --- D027 closure-return analysis (escaping-closure dispatch fix) ----------
-// A `-> Callable[...]` function may return either a closure (a capturing nested
-// def / capturing lambda: a heap DragonClosure with an env) or a bare function
-// pointer. The call-site dispatch differs, so the receiving var must be marked
-// VarKind::Closure iff the function returns a closure. Detected SOUNDLY at decl
-// time: only when EVERY value-return is provably a closure. Anything we can't
-// prove stays bare-fn - so a bare-fn-returning function is never mis-marked
-// (which would crash the closure dispatch by reading an env off a code ptr).
+// D027 closure-return analysis: mark the receiving var VarKind::Closure only
+// when EVERY value-return is provably a closure (mis-marking crashes dispatch).
 
 void collectCapturingDefs(const std::vector<std::unique_ptr<Stmt>>& body,
                           std::unordered_set<std::string>& out);
@@ -762,18 +718,14 @@ bool CodeGen::Impl::functionReturnsClosure(FunctionDecl& node) {
     return everyReturnClosure(node.body, capDefs, sawReturn) && sawReturn;
 }
 
-// Emit a generator function (shared by free functions and methods). Builds the
-// inner body fn `<site>__gen_body(ptr gen, [ptr self,] params...) -> void`, then
-// fills `wrapper` to build the typed args struct + per-callsite trampoline +
-// decref fn, create the generator object, and return it. For a method,
-// `hasSelf` threads `self` (typed by `selfClass`) as the first captured arg -
-// modelled as the leading heap (ClassInstance) arg, so the wrapper increfs it
-// and the destroy decref fn drops it (the generator owns a reference to self
-// while alive). `userParamStart` skips an explicit self/cls in node.params.
+// Emit a generator function (free fns and methods): builds the inner body fn,
+// then fills `wrapper` to build args struct + trampoline + decref fn and return
+// the gen object. `hasSelf` threads self as a leading heap arg the gen owns
+// (wrapper increfs, destroy decref drops); `userParamStart` skips self/cls.
 void CodeGen::emitGeneratorFn(FunctionDecl& node, llvm::Function* wrapper,
                               const std::string& siteName, bool hasSelf,
                               const std::string& selfClass, size_t userParamStart) {
-    // --- 1. Inner body function ---
+    // 1. Inner body function
     std::vector<llvm::Type*> bodyParamTypes;
     bodyParamTypes.push_back(impl_->i8PtrType);                 // gen
     if (hasSelf) bodyParamTypes.push_back(impl_->i8PtrType);    // self
@@ -841,8 +793,8 @@ void CodeGen::emitGeneratorFn(FunctionDecl& node, llvm::Function* wrapper,
     impl_->globalDeclaredVars = savedGlobalDecls;
     impl_->nonlocalDeclaredVars = savedNonlocalDecls;
 
-    // --- 2. Wrapper body: create + return the generator object ---
-    // The wrapper's LLVM args ARE the captured args, in order: [self?, params...].
+    // 2. Wrapper body: create + return the generator object. The wrapper's LLVM
+    // args ARE the captured args, in order: [self?, params...].
     impl_->builder->SetInsertPoint(
         llvm::BasicBlock::Create(*impl_->context, "entry", wrapper));
     unsigned nwrap = (unsigned)wrapper->arg_size();
@@ -893,9 +845,8 @@ void CodeGen::emitGeneratorFn(FunctionDecl& node, llvm::Function* wrapper,
 void CodeGen::Impl::preregisterDecoratedFunction(FunctionDecl& node) {
     if (node.isExtern || node.isMethod || !node.typeParams.empty()) return;
     if (node.decorators.empty()) return;
-    // Same user-decorator filter as the application block in visit(FunctionDecl):
-    // built-in flags (staticmethod/classmethod/property, @x.setter) are not
-    // runtime wrappers and don't produce an indirect-dispatch global.
+    // Same user-decorator filter as visit(FunctionDecl): built-in flags
+    // (staticmethod/classmethod/property, @x.setter) produce no dispatch global.
     bool hasUser = false;
     for (auto& dec : node.decorators) {
         if (auto* n = dynamic_cast<NameExpr*>(dec.get())) {
@@ -924,15 +875,11 @@ void CodeGen::Impl::preregisterDecoratedFunction(FunctionDecl& node) {
 }
 
 void CodeGen::visit(FunctionDecl& node) {
-    // D044 - a generic template (`def f[T](...)`) has free type vars and is
-    // never lowered; only its stamped monomorphic instantiations are emitted
-    // (they carry empty typeParams). Skip the template.
+    // D044 - a generic template (`def f[T](...)`) is never lowered; only its
+    // stamped monomorphic instantiations (empty typeParams) are emitted.
     if (!node.typeParams.empty()) return;
-    // Mirror forwardDeclareFunctions: extern decls keep the bare C symbol
-    // name, Dragon defs go through per-module mangling so cross-module
-    // collisions on names like `open` / `compress` resolve to distinct
-    // LLVM symbols. An aliased extern stores its C symbol in
-    // `externSymbol`; the LLVM lookup must match what forwardDeclare used.
+    // Mirror forwardDeclareFunctions: externs keep the bare C symbol, Dragon
+    // defs get per-module mangling; aliased externs use `externSymbol`.
     const std::string externLinkName =
         node.externSymbol.empty() ? node.name : node.externSymbol;
     const std::string llvmName = node.isExtern
@@ -940,14 +887,8 @@ void CodeGen::visit(FunctionDecl& node) {
         : Impl::mangleFunc(impl_->currentModuleName, node.name);
     auto* func = impl_->module->getFunction(llvmName);
 
-    // Nested `def` detection. forwardDeclareFunctions only registers
-    // top-level functions, so a nested def has no LLVM symbol (`func ==
-    // nullptr`). It can also share a user name with a module-level def
-    // (Python lets you shadow with a nested def - the local binding wins);
-    // in that case `func` IS non-null, but we're emitting from inside
-    // another user function's body (currentFunction != mainFunction). Both
-    // paths funnel into the closure-style emit below. Methods are skipped
-    // - they're handled by class codegen separately.
+    // Nested `def` detection: no LLVM symbol (func == nullptr), or shadows a
+    // module-level def while emitting inside another fn body. Methods handled separately.
     bool nested = !node.isMethod &&
                   (!func ||
                    (impl_->currentFunction != nullptr &&
@@ -957,6 +898,9 @@ void CodeGen::visit(FunctionDecl& node) {
         return;
     }
     if (!func) return;
+    // Per-variable metadata dies with this body (stale-type family). The nested
+    // path scopes its own guard so the parent-scope binding it installs survives.
+    Impl::VarMetaScope _varMeta(*impl_);
 
     // Extern "C" functions are declarations only - no body to emit
     if (node.isExtern) return;
@@ -964,40 +908,41 @@ void CodeGen::visit(FunctionDecl& node) {
     // Skip if already has a body (was already generated)
     if (!func->empty()) return;
 
-    // Stash the function/method docstring so `.__doc__` lookups (lowered in
-    // Attributes.cpp) can lazily emit the `.rodata` constant for it.
-    //  - Top-level fns: keyed by LLVM mangled name so cross-module
-    //  same-name fns (`os.open`, `gzip.open`) get distinct entries.
-    //  - Methods: keyed by (className, methodName) since methods aren't
-    //  first-class values - they're only reachable via the
-    //  `MyClass.method.__doc__` / `inst.method.__doc__` AttrExpr chain.
+    // D052 - stamped cross-module generic: symbol resolved above under the instantiation
+    // module; swap to genericHomeModule for the body so bare calls/globals resolve there.
+    const std::string _savedModForGeneric = impl_->currentModuleName;
+    struct RestoreModuleName {
+        std::string* slot; std::string saved; bool active;
+        ~RestoreModuleName() { if (active) *slot = saved; }
+    } _restoreModuleName{&impl_->currentModuleName, _savedModForGeneric,
+                         !node.genericHomeModule.empty()};
+    if (!node.genericHomeModule.empty())
+        impl_->currentModuleName = node.genericHomeModule;
+
+    // Stash the docstring so `.__doc__` (Attributes.cpp) can lazily emit .rodata.
+    // Top-level keyed by mangled name (cross-module distinct); methods by (class, method).
     if (node.docstring) {
         if (node.isMethod && !impl_->currentClassName.empty())
-            impl_->methodDocstrings[impl_->currentClassName][node.name] = *node.docstring;
+            impl_->methodDocstringsBySym[impl_->classSym(impl_->currentClassName)][node.name] = *node.docstring;
         else if (!node.isMethod)
             impl_->functionDocstrings[llvmName] = *node.docstring;
     }
 
-    // D025: track functions returning class descriptors (-> type) or function
-    // pointers (-> ptr). Callers use these sets to set the receiving var's
-    // VarKind / varIsPtrCallable so subsequent calls dispatch correctly.
+    // D025: track functions returning class descriptors (-> type) or fn ptrs
+    // (-> ptr); callers set the receiving var's VarKind/varIsPtrCallable.
     if (auto* retNamed = dynamic_cast<NamedTypeExpr*>(node.returnType.get())) {
         if (retNamed->name == "type")
-            impl_->funcReturnsType.insert(node.name);
+            impl_->funcReturnsType.insert(llvmName);
         else if (retNamed->name == "ptr")
-            impl_->funcReturnsPtr.insert(node.name);
+            impl_->funcReturnsPtr.insert(llvmName);
     }
 
-    // D027: track functions returning a CLOSURE value so a call result like
-    // `g = make_closure()` marks g VarKind::Closure (call site unpacks fn+env
-    // instead of executing the env object as code - the escaping-closure
-    // SIGSEGV). The authoritative population is the forward-declaration pre-pass
-    // (ImplInit.cpp) so it precedes method-body emission; this is a harmless
-    // idempotent backstop for any function not covered there.
+    // D027: track fns returning a CLOSURE so `g = make_closure()` marks g Closure
+    // (call site unpacks fn+env, avoiding SIGSEGV). Idempotent backstop; see ImplInit.
     if (impl_->functionReturnsClosure(node))
-        impl_->funcReturnsClosure.insert(node.name);
+        impl_->funcReturnsClosure.insert(llvmName);
 
-    //=== async def: create inner body function + wrapper that spawns vthread ===
+    // async def: inner body fn + wrapper that spawns vthread
     if (node.isAsync) {
         impl_->needsPthread = true;
 
@@ -1040,13 +985,8 @@ void CodeGen::visit(FunctionDecl& node) {
             auto paramKind = impl_->typeExprToKind(node.params[idx].type.get());
             impl_->setVar(paramName, alloca, paramKind);
             impl_->trackPtrParam(paramName, node.params[idx].type.get());
-            // GC: async/fire body params are BORROWED, exactly like a normal
-            // function's params (see the sync path below). The reference the
-            // body relies on is the spawn-site atomic-incref, which the fire
-            // trampoline atomic-decrefs post-call. If the body ALSO decref'd its
-            // params (which it did while they were left un-borrowed), that extra
-            // decref plus the trampoline's dropped the caller's object to rc 0 -
-            // a UAF of `xs` after `await` for `fire worker(xs)`.
+            // GC: async/fire body params are BORROWED like normal params (ref from
+            // spawn-site atomic-incref); a body decref too would UAF `xs` after await.
             if (Impl::isHeapKind(paramKind))
                 impl_->scopes.back().borrowed.insert(paramName);
             idx++;
@@ -1069,8 +1009,7 @@ void CodeGen::visit(FunctionDecl& node) {
         impl_->nonlocalDeclaredVars = savedNonlocalDecls;
 
         // 2. Generate wrapper: foo(params) -> ptr (spawns vthread via D030 typed
-        //  spawn API, returns handle). Wrapper is a small native-typed
-        //  forwarder; the per-callsite trampoline does the real unpack+call.
+        // spawn API). Wrapper forwards; the per-callsite trampoline unpacks+calls.
         auto* wrapEntry = llvm::BasicBlock::Create(*impl_->context, "entry", func);
         impl_->builder->SetInsertPoint(wrapEntry);
 
@@ -1126,12 +1065,11 @@ void CodeGen::visit(FunctionDecl& node) {
         return;
     }
 
-    //=== Generator function: create body function + wrapper that returns generator ===
+    // Generator function: body fn + wrapper that returns generator
     if (Impl::containsYield(node.body)) {
         impl_->generatorFunctions.insert(node.name);
-        // Record the yielded value's VarKind so for-in consumers can type
-        // their loop variable correctly (heap yields round-trip as ptr,
-        // not raw i64).
+        // Record the yielded value's VarKind so for-in consumers type their loop
+        // var correctly (heap yields round-trip as ptr, not raw i64).
         impl_->generatorYieldKinds[node.name] = impl_->inferYieldKind(node.body);
         // Free-function generator: no self, all params are user params.
         emitGeneratorFn(node, func, node.name,
@@ -1139,7 +1077,7 @@ void CodeGen::visit(FunctionDecl& node) {
         return;
     }
 
-    //=== Normal (non-async, non-generator) function codegen ===
+    // Normal (non-async, non-generator) function codegen
     auto* prevFunc = impl_->currentFunction;
     auto* prevBlock = impl_->builder->GetInsertBlock();
 
@@ -1149,9 +1087,8 @@ void CodeGen::visit(FunctionDecl& node) {
     impl_->globalDeclaredVars.clear();
     impl_->nonlocalDeclaredVars.clear();
 
-    // Save and replace scope stack - functions get a clean scope so they
-    // don't accidentally reference allocas from the enclosing function.
-    // Module globals are accessed via GlobalVariable, not via the scope chain.
+    // Save and replace scope stack - functions get a clean scope, not the
+    // enclosing allocas. Module globals go through GlobalVariable.
     auto savedScopes = std::move(impl_->scopes);
     impl_->scopes.clear();
     auto savedUnionMembers = std::move(impl_->unionMemberKinds);
@@ -1161,10 +1098,8 @@ void CodeGen::visit(FunctionDecl& node) {
     auto savedNonNeg = std::move(impl_->knownNonNeg);
     impl_->knownNonNeg.clear();
 
-    // D027.1: each function recomputes which of its OWN locals must be
-    // cell-promoted. We collect every name marked `nonlocal` somewhere
-    // inside our nested defs/lambdas and subtract our own mutated-captures
-    // (which are relayed through us, owned by an even-further-out function).
+    // D027.1: recompute which OWN locals to cell-promote: names marked `nonlocal`
+    // in nested defs/lambdas, minus our own mutated-captures (relayed, not owned).
     auto savedCellPromoted = std::move(impl_->cellPromotedLocals);
     impl_->cellPromotedLocals.clear();
     {
@@ -1183,9 +1118,8 @@ void CodeGen::visit(FunctionDecl& node) {
     impl_->currentFunction = func;
     impl_->pushScope();
 
-    // Create allocas for parameters.
-    // D030 Phase 4: union params are a single {i64, i64} box arg - no
-    // hidden trailing tag, no funcUnionTagMask consultation.
+    // Create allocas for parameters. D030 Phase 4: union params are a single
+    // {i64, i64} box arg - no hidden trailing tag, no funcUnionTagMask.
     auto funcType = func->getFunctionType();
     size_t astIdx = 0;
     size_t llvmIdx = 0;
@@ -1203,11 +1137,8 @@ void CodeGen::visit(FunctionDecl& node) {
             impl_->builder->CreateStore(&arg, alloca);
             impl_->setVar(paramName, alloca, Impl::VarKind::List);
             impl_->scopes.back().borrowed.insert(paramName);
-            // The `*args: T` annotation is the per-element type, so register the
-            // list element kind exactly like a `list[T]` param. This is what
-            // makes `for a in args` and `args[i]` read native T, matching the
-            // monomorphized list the call site packed (visit(CallExpr)). Without
-            // it the loop var would default to int and print raw addresses.
+            // `*args: T` is the per-element type: register the list elem kind like
+            // a `list[T]` param so `for a in args`/`args[i]` read native T, not int.
             if (TypeExpr* elemTy = node.params[astIdx].type.get()) {
                 Impl::VarKind ek = impl_->typeExprToKind(elemTy);
                 impl_->varListElemKinds[paramName] = Impl::elemVarKindToTypeKind(ek);
@@ -1215,7 +1146,7 @@ void CodeGen::visit(FunctionDecl& node) {
                     impl_->varListElemIsType.insert(paramName);
                 if (auto* nt = dynamic_cast<NamedTypeExpr*>(elemTy)) {
                     if (impl_->classNames.count(nt->name) ||
-                        impl_->classFieldKinds.count(nt->name))
+                        impl_->classFieldKindsBySym.count(impl_->classSym(nt->name)))
                         impl_->varListElemClassName[paramName] = nt->name;
                 }
             }
@@ -1230,12 +1161,8 @@ void CodeGen::visit(FunctionDecl& node) {
             impl_->builder->CreateStore(&arg, alloca);
             impl_->setVar(paramName, alloca, Impl::VarKind::Dict);
             impl_->scopes.back().borrowed.insert(paramName);
-            // Register the dict key/value kinds like a `dict[K,V]` param
-            // (trackPtrParam). **kwargs keys are always str; the `**kwargs: T`
-            // annotation's `type` is the per-VALUE type. Without this the
-            // subscript dispatch keeps checkTag = -1 and falls to the untyped
-            // dragon_dict_get (i64), misrouting e.g. an inlined `options[key]`
-            // through dragon_int_to_str -> raw pointer.
+            // Register dict key/value kinds like `dict[K,V]`: **kwargs keys are str,
+            // `**kwargs: T` is the value type. Else subscript falls to untyped dict_get.
             impl_->varDictKeyKinds[paramName] = Type::Kind::Str;
             impl_->varDictValueKinds[paramName] = Impl::elemVarKindToTypeKind(
                 impl_->typeExprToKind(node.params[astIdx].type.get()));
@@ -1261,10 +1188,8 @@ void CodeGen::visit(FunctionDecl& node) {
         if (paramKind == Impl::VarKind::ClassInstance) {
             impl_->bindClassVar(paramName, node.params[astIdx].type.get());
         }
-        // GC: mark params as borrowed - caller owns the reference. An `own`
-        // param is the exception (docs/002 2.8): the caller MOVED its +1 in,
-        // so this callee owns it and scope exit releases it (unless the body
-        // consumed it onward, which nulls the slot).
+        // GC: params are borrowed - caller owns the ref. An `own` param (docs/002
+        // 2.8) moved its +1 in, so the callee owns it and scope exit releases it.
         if (Impl::isHeapKind(paramKind) && !node.params[astIdx].isOwn)
             impl_->scopes.back().borrowed.insert(paramName);
         // An own Lock param: the callee owns the mutex - arm the null-gated
@@ -1358,16 +1283,8 @@ void CodeGen::visit(FunctionDecl& node) {
                     }
                     current = result;
                 } else {
-                    // Decorator is not a bare NameExpr - evaluate the expression.
-                    // The result may be a DragonClosure* rather than a bare code
-                    // pointer: a decorator FACTORY (`@register("x")`) whose inner
-                    // decorator captures the factory argument returns a capturing
-                    // closure, and calling that directly as a function pointer
-                    // jumps into the closure struct's bytes (SIGSEGV). Route
-                    // through the shared closure-vs-bare runtime discrimination -
-                    // the same path a normal Callable-value call uses. A
-                    // non-capturing decorator (bare fn ptr / null-env closure)
-                    // takes the bare branch at the cost of one tag-byte check.
+                    // Decorator not a bare NameExpr - evaluate it. A factory closure
+                    // SIGSEGVs if called as a bare fn ptr; route via closure-vs-bare.
                     decExpr->accept(*this);
                     llvm::Value* decVal = impl_->lastValue;
                     if (!decVal->getType()->isPointerTy())
@@ -1392,10 +1309,8 @@ void CodeGen::visit(FunctionDecl& node) {
                 }
             }
 
-            // Store decorated result in a module global. Reuse the global the
-            // decorator pre-pass already created (so a method body emitted
-            // earlier loads the SAME symbol this stores into); create it here
-            // only when this function wasn't pre-registered.
+            // Store decorated result in a module global. Reuse the pre-pass global
+            // (same symbol a method body loads); create here only if not pre-registered.
             llvm::GlobalVariable* gv = nullptr;
             auto preIt = impl_->decoratedFunctions.find(node.name);
             if (preIt != impl_->decoratedFunctions.end()) {
@@ -1420,16 +1335,9 @@ void CodeGen::visit(TypeAliasStmt& node) {
     // Type aliases are compile-time only - no code generation needed
 }
 
-/// Emit a nested `def` (one defined inside another function's body).
-/// Lowers to the same shape as a capturing lambda: a top-level mangled
-/// LLVM function that takes user params + an optional trailing i8* env,
-/// plus a heap-allocated env populated from the enclosing scope. The
-/// user-visible name is bound to either the bare fn-pointer (no captures)
-/// or the closure object as a local in the enclosing scope, so calls in
-/// that scope dispatch through the first-class-function path. While the
-/// inner body is being emitted - with the enclosing scope chain saved
-/// off - calls to the function's own name resolve through
-/// nestedFunctionAliases to a direct LLVM call.
+/// Emit a nested `def` (inside another fn's body). Lowers like a capturing lambda:
+/// mangled top-level fn (user params + optional trailing i8* env) + heap env; name
+/// binds to a bare fn ptr or closure; own name resolves via nestedFunctionAliases.
 void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
     bool hasCaptures = !node.capturedVars.empty();
 
@@ -1456,15 +1364,8 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
     auto* nestedFunc = llvm::Function::Create(
         funcType, llvm::Function::InternalLinkage, mangledName, impl_->module.get());
 
-    // 4. Gather capture info from the enclosing scope BEFORE switching contexts.
-    // D027.1: a capture flagged `nonlocal` by the inner fn (`mutatedCapturedVars`)
-    // must travel as a cell pointer - otherwise mutations inside the inner
-    // wouldn't propagate back. The outer is required to have the name
-    // cell-backed already (either it owns the cell-promoted local, or it
-    // received the cell ptr from a further-out fn). At env-load time the
-    // alloca's allocated type is i8* (cell ptr); we store that pointer
-    // verbatim into the env, which is what dragon_cell_get/set on the inner
-    // side will dereference.
+    // 4. Gather capture info from enclosing scope BEFORE switching. D027.1:
+    // `nonlocal` captures travel as a cell ptr so mutations propagate (via cell_get/set).
     std::unordered_set<std::string> innerCellRelayed(
         node.mutatedCapturedVars.begin(), node.mutatedCapturedVars.end());
     struct CaptureInfo {
@@ -1503,7 +1404,9 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
         }
     }
 
-    // 5. Save enclosing context.
+    // 5. Save enclosing context. Body metadata dies with the body (stale-type
+    // family); released before step 14 so the parent-scope binding survives.
+    std::optional<Impl::VarMetaScope> bodyMeta(*impl_);
     auto* prevFunc = impl_->currentFunction;
     auto* prevBlock = impl_->builder->GetInsertBlock();
     auto savedScopes = std::move(impl_->scopes);
@@ -1611,9 +1514,8 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
                 impl_->varClassNames[cap.name] = cap.className;
             // Captures are borrowed from the env - don't decref at scope exit.
             impl_->scopes.back().borrowed.insert(cap.name);
-            // D027.1: cell-relayed captures - the alloca holds the cell ptr;
-            // route reads/writes through dragon_cell_get/set so mutations
-            // propagate back to the same backing slot the owner mutates.
+            // D027.1: cell-relayed captures - alloca holds the cell ptr; route
+            // reads/writes via dragon_cell_get/set so mutations reach the owner's slot.
             if (cap.isCellRelay) {
                 impl_->markCellBacked(cap.name);
             }
@@ -1666,10 +1568,10 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
     impl_->cellPromotedLocals = std::move(savedCellPromoted);
     impl_->currentFunction = prevFunc;
     if (prevBlock) impl_->builder->SetInsertPoint(prevBlock);
+    bodyMeta.reset();
 
-    // 14. Bind the name in the enclosing scope. For non-capturing nested
-    //  defs the binding is the bare fn pointer; for capturing variants
-    //  it's a freshly allocated closure object.
+    // 14. Bind the name in the enclosing scope: bare fn pointer for non-capturing
+    // defs, a freshly allocated closure object for capturing ones.
     llvm::Value* boundValue = nullptr;
     Impl::VarKind boundKind = Impl::VarKind::Other;
     bool isClosure = false;
@@ -1725,9 +1627,8 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
             impl_->builder->CreateStore(storeVal, fieldPtr);
             if (impl_->options.gcMode == GCMode::RC) {
                 if (cap.isCellRelay) {
-                    // The env owns a refcount on the cell itself (TAG_CELL).
-                    // Plain dragon_incref - `_str` would mis-navigate through
-                    // the cell's bytes treating them as a string payload.
+                    // The env owns a refcount on the cell itself (TAG_CELL): plain
+                    // dragon_incref, not `_str` (which would misread the cell's bytes).
                     impl_->builder->CreateCall(
                         impl_->runtimeFuncs["dragon_incref"], {storeVal});
                 } else if (Impl::isHeapKind(cap.kind)) {
@@ -1735,9 +1636,8 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
                         impl_->builder->CreateCall(
                             impl_->runtimeFuncs["dragon_incref_str"], {storeVal});
                     } else if (cap.kind == Impl::VarKind::Closure) {
-                        // tag-gated - a captured Callable may hold a
-                        // BARE fn ptr; the generic incref would write a
-                        // refcount into code bytes (SIGSEGV).
+                        // tag-gated - a captured Callable may hold a BARE fn ptr;
+                        // generic incref would write a refcount into code bytes (SIGSEGV).
                         impl_->builder->CreateCall(
                             impl_->runtimeFuncs["dragon_incref_callable"], {storeVal});
                     } else {
@@ -1756,9 +1656,8 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
         isClosure = true;
     }
 
-    // 15. Allocate a local in the enclosing scope and store the bound value.
-    //  callableTypes[name] gives the user-visible signature so calls
-    //  through the local var dispatch with the right ABI.
+    // 15. Allocate a local in the enclosing scope, store the bound value.
+    // callableTypes[name] gives the user-visible signature for right-ABI dispatch.
     auto* localAlloca = impl_->createEntryAlloca(
         prevFunc, node.name, impl_->i8PtrType);
     impl_->builder->CreateStore(boundValue, localAlloca);

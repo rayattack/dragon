@@ -29,6 +29,11 @@ void CodeGen::visit(ClassDecl& node) {
                      !node.genericHomeModule.empty()};
     if (!node.genericHomeModule.empty())
         impl_->currentModuleName = node.genericHomeModule;
+
+    // Per-module class symbol: the key for EVERY metadata map below and the
+    // prefix for every class-owned LLVM symbol.
+    const std::string clsSym = Impl::mangleClass(impl_->currentModuleName, node.name);
+
     //--- TypedDict: backed by DragonDict at runtime, not a struct ---
     // Must check BEFORE classNames.insert to avoid treating TypedDict as a struct class.
     {
@@ -38,14 +43,15 @@ void CodeGen::visit(ClassDecl& node) {
                 if (bn->name == "TypedDict") isTypedDict = true;
         }
         if (isTypedDict) {
-            impl_->typedDictClasses.insert(node.name);
+            impl_->typedDictClassesBySym.insert(clsSym);
+            impl_->classOwningModule[node.name] = impl_->currentModuleName;
 
             // Collect field name -> VarKind from annotated fields in class body
             for (auto& stmt : node.body) {
                 if (auto* ann = dynamic_cast<AnnAssignStmt*>(stmt.get())) {
                     if (auto* fieldName = dynamic_cast<NameExpr*>(ann->target.get())) {
                         auto fk = impl_->typeExprToTypeKind(ann->annotation.get());
-                        impl_->typedDictFieldKinds[node.name][fieldName->name] = fk;
+                        impl_->typedDictFieldKindsBySym[clsSym][fieldName->name] = fk;
                     }
                 }
             }
@@ -62,17 +68,10 @@ void CodeGen::visit(ClassDecl& node) {
     impl_->classNames.insert(node.name);
     impl_->classOwningModule[node.name] = impl_->currentModuleName;
 
-    // Per-module class symbol prefix used everywhere we reach a class-owned
-    // LLVM symbol below: struct type, vtable global, classId global,
-    // descriptor global, dealloc/traverse/clear/markShared helpers, init/new
-    // and method bodies. Two modules with same-named classes get distinct
-    // mangled symbols so neither body is silently dropped at link time.
-    const std::string clsSym = Impl::mangleClass(impl_->currentModuleName, node.name);
-
     // Stash the class docstring so the descriptor_create call site can pass it
     // through to the runtime - powers `Cls.__doc__` / `instance.__doc__`.
     if (node.docstring)
-        impl_->classDocstrings[node.name] = *node.docstring;
+        impl_->classDocstringsBySym[clsSym] = *node.docstring;
 
     // Methods are emitted inline inside this function (not via the top-level
     // visit(FunctionDecl) path), so their docstrings need to be stashed here.
@@ -81,7 +80,7 @@ void CodeGen::visit(ClassDecl& node) {
     for (auto& bodyStmt : node.body) {
         if (auto* fd = dynamic_cast<FunctionDecl*>(bodyStmt.get())) {
             if (fd->docstring)
-                impl_->methodDocstrings[node.name][fd->name] = *fd->docstring;
+                impl_->methodDocstringsBySym[clsSym][fd->name] = *fd->docstring;
         }
     }
 
@@ -98,7 +97,9 @@ void CodeGen::visit(ClassDecl& node) {
             baseBareName = baseAttr->attribute;
         }
         if (!baseBareName.empty()) {
-            impl_->classParentNames[node.name] = baseBareName;
+            // Parent chain is sym -> sym: resolve the base in the defining
+            // module's context (alias-aware) at registration time.
+            impl_->classParentNamesBySym[clsSym] = impl_->classSymPrefix(baseBareName);
         }
     }
 
@@ -115,8 +116,8 @@ void CodeGen::visit(ClassDecl& node) {
             userDecs.push_back(dec.get());
         }
         if (!userDecs.empty()) {
-            impl_->decoratedClasses.insert(node.name);
-            impl_->classDecoratorExprs[node.name] = std::move(userDecs);
+            impl_->decoratedClassesBySym.insert(clsSym);
+            impl_->classDecoratorExprsBySym[clsSym] = std::move(userDecs);
         }
     }
 
@@ -141,12 +142,12 @@ void CodeGen::visit(ClassDecl& node) {
         // D030 §5: derive Type::Kind directly from the annotation - no VarKind hop.
         Type::Kind ek = impl_->typeExprToTypeKind(generic->typeArgs[0].get());
         if (baseName == "list" || baseName == "List") {
-            impl_->classFieldListElemKinds[node.name][tgt->name] = ek;
+            impl_->classFieldListElemKindsBySym[clsSym][tgt->name] = ek;
             // For list[ClassName] also track the class name so iteration /
             // subscript can resolve attribute access on the elements.
             if (auto* elemNamed = dynamic_cast<NamedTypeExpr*>(generic->typeArgs[0].get())) {
                 if (impl_->classNames.count(elemNamed->name))
-                    impl_->classFieldListElemClassName[node.name][tgt->name] = elemNamed->name;
+                    impl_->classFieldListElemClassNameBySym[clsSym][tgt->name] = elemNamed->name;
             }
         } else if ((baseName == "dict" || baseName == "Dict") && generic->typeArgs.size() >= 2) {
             // Class-body `data: dict[K, V]` - record the value Type::Kind so
@@ -160,8 +161,8 @@ void CodeGen::visit(ClassDecl& node) {
             // class-field dicts dispatch to dragon_dict_int_* at the call site.
             Type::Kind kk = impl_->typeExprToTypeKind(generic->typeArgs[0].get());
             Type::Kind vk = impl_->typeExprToTypeKind(generic->typeArgs[1].get());
-            impl_->classFieldDictKeyKinds[node.name][tgt->name] = kk;
-            impl_->classFieldDictValueKinds[node.name][tgt->name] = vk;
+            impl_->classFieldDictKeyKindsBySym[clsSym][tgt->name] = kk;
+            impl_->classFieldDictValueKindsBySym[clsSym][tgt->name] = vk;
         }
     }
 
@@ -337,7 +338,7 @@ void CodeGen::visit(ClassDecl& node) {
                                                     if (auto* nt = dynamic_cast<NamedTypeExpr*>(param.type.get())) {
                                                         std::string cn = impl_->resolveAnnotationClassName(nt->name);
                                                         if (!cn.empty()) {
-                                                            impl_->classFieldClassName[node.name][attrExpr->attribute] = cn;
+                                                            impl_->classFieldClassNameBySym[clsSym][attrExpr->attribute] = cn;
                                                         }
                                                     }
                                                 }
@@ -346,8 +347,8 @@ void CodeGen::visit(ClassDecl& node) {
                                                 // FunctionType + branch on the closure tag
                                                 // (capturing closure vs bare fn pointer).
                                                 if (auto* cte = dynamic_cast<CallableTypeExpr*>(param.type.get())) {
-                                                    impl_->classFieldCallableType
-                                                        [node.name][attrExpr->attribute] =
+                                                    impl_->classFieldCallableTypeBySym
+                                                        [clsSym][attrExpr->attribute] =
                                                         impl_->callableTypeExprToFnType(cte);
                                                 }
                                             }
@@ -432,7 +433,7 @@ void CodeGen::visit(ClassDecl& node) {
                                                 // dispatch reaches dragon_lock_acquire/release.
                                                 fieldType = impl_->i8PtrType;
                                                 fieldKind = Impl::VarKind::Other;
-                                                impl_->classFieldClassName[node.name][attrExpr->attribute] = "__Lock";
+                                                impl_->classFieldClassNameBySym[clsSym][attrExpr->attribute] = "__Lock";
                                             } else if (impl_->classNames.count(cn)) {
                                                 // User class constructor: `self.x = Foo(args)`.
                                                 // Track both kind and concrete class name so a
@@ -441,7 +442,7 @@ void CodeGen::visit(ClassDecl& node) {
                                                 // to ConstantInt 0.
                                                 fieldType = impl_->i8PtrType;
                                                 fieldKind = Impl::VarKind::ClassInstance;
-                                                impl_->classFieldClassName[node.name][attrExpr->attribute] = cn;
+                                                impl_->classFieldClassNameBySym[clsSym][attrExpr->attribute] = cn;
                                             } else if (auto* userFn = impl_->module->getFunction(cn)) {
                                                 // User-defined function: trust its declared return type.
                                                 fieldType = userFn->getReturnType();
@@ -535,12 +536,12 @@ void CodeGen::visit(ClassDecl& node) {
                                 // concrete class from the RHS InstanceType here.
                                 if (assign->value && assign->value->type &&
                                     assign->value->type->kind() == Type::Kind::Instance &&
-                                    !impl_->classFieldClassName[node.name].count(attrExpr->attribute)) {
+                                    !impl_->classFieldClassNameBySym[clsSym].count(attrExpr->attribute)) {
                                     if (auto* inst = dynamic_cast<InstanceType*>(assign->value->type.get())) {
                                         if (inst->classType && impl_->classNames.count(inst->classType->name)) {
                                             fieldType = impl_->i8PtrType;
                                             fieldKind = Impl::VarKind::ClassInstance;
-                                            impl_->classFieldClassName[node.name][attrExpr->attribute] = inst->classType->name;
+                                            impl_->classFieldClassNameBySym[clsSym][attrExpr->attribute] = inst->classType->name;
                                         }
                                     }
                                 }
@@ -576,14 +577,14 @@ void CodeGen::visit(ClassDecl& node) {
                                         impl_->typeExprUnionClassName(annAssign->annotation.get());
                                     if (!ucn.empty()) {
                                         fieldKind = Impl::VarKind::ClassInstance;
-                                        impl_->classFieldClassName[node.name][attrExpr->attribute] = ucn;
+                                        impl_->classFieldClassNameBySym[clsSym][attrExpr->attribute] = ucn;
                                     }
                                 }
                                 // Bug A: same Callable-field tracking for the
                                 // explicit `self.handler: Callable[...]` form.
                                 if (auto* cte = dynamic_cast<CallableTypeExpr*>(annAssign->annotation.get())) {
-                                    impl_->classFieldCallableType
-                                        [node.name][attrExpr->attribute] =
+                                    impl_->classFieldCallableTypeBySym
+                                        [clsSym][attrExpr->attribute] =
                                         impl_->callableTypeExprToFnType(cte);
                                 }
                                 // Intrinsic Lock field, annotated form:
@@ -598,8 +599,8 @@ void CodeGen::visit(ClassDecl& node) {
                                         !impl_->classNames.count("Lock")) {
                                         fieldType = impl_->i8PtrType;
                                         fieldKind = Impl::VarKind::Other;
-                                        impl_->classFieldClassName
-                                            [node.name][attrExpr->attribute] = "__Lock";
+                                        impl_->classFieldClassNameBySym
+                                            [clsSym][attrExpr->attribute] = "__Lock";
                                     }
                                 }
                                 // `self.x: list[T] = ...` - record the element
@@ -616,11 +617,11 @@ void CodeGen::visit(ClassDecl& node) {
                                             !generic->typeArgs.empty()) {
                                             // D030 §5: direct Type::Kind from the annotation.
                                             Type::Kind ek = impl_->typeExprToTypeKind(generic->typeArgs[0].get());
-                                            impl_->classFieldListElemKinds[node.name][attrExpr->attribute] = ek;
+                                            impl_->classFieldListElemKindsBySym[clsSym][attrExpr->attribute] = ek;
                                             if (auto* elemNamed = dynamic_cast<NamedTypeExpr*>(generic->typeArgs[0].get())) {
                                                 std::string cn = impl_->resolveAnnotationClassName(elemNamed->name);
                                                 if (!cn.empty()) {
-                                                    impl_->classFieldListElemClassName[node.name][attrExpr->attribute] = cn;
+                                                    impl_->classFieldListElemClassNameBySym[clsSym][attrExpr->attribute] = cn;
                                                 }
                                             }
                                         }
@@ -732,7 +733,7 @@ void CodeGen::visit(ClassDecl& node) {
     // here - not from emitNewBody - is what makes the parent-chain lookup
     // order-independent (a base declared after its subclass would otherwise be
     // absent when the subclass's _new is emitted).
-    impl_->classPerInstanceDefaults[node.name] = perInstanceDefaults;
+    impl_->classPerInstanceDefaultsBySym[clsSym] = perInstanceDefaults;
 
     // Inherit the parent's fields so the subclass struct is a prefix-
     // compatible extension of the parent (standard single-inheritance
@@ -748,14 +749,14 @@ void CodeGen::visit(ClassDecl& node) {
     // extractFields already captured it, so we dedupe by name and keep the
     // parent's slot position (don't shift the inherited field to the tail).
     {
-        auto parentIt = impl_->classParentNames.find(node.name);
-        if (parentIt != impl_->classParentNames.end()) {
+        auto parentIt = impl_->classParentNamesBySym.find(clsSym);
+        if (parentIt != impl_->classParentNamesBySym.end()) {
             const std::string& parentName = parentIt->second;
-            auto pIdxIt = impl_->classFieldIndices.find(parentName);
-            auto pTyIt  = impl_->classFieldTypes.find(parentName);
-            auto pKindIt = impl_->classFieldKinds.find(parentName);
-            if (pIdxIt != impl_->classFieldIndices.end() &&
-                pTyIt  != impl_->classFieldTypes.end()) {
+            auto pIdxIt = impl_->classFieldIndicesBySym.find(parentName);
+            auto pTyIt  = impl_->classFieldTypesBySym.find(parentName);
+            auto pKindIt = impl_->classFieldKindsBySym.find(parentName);
+            if (pIdxIt != impl_->classFieldIndicesBySym.end() &&
+                pTyIt  != impl_->classFieldTypesBySym.end()) {
                 // Recover the parent's field order from its name->index map.
                 std::vector<std::pair<unsigned, std::string>> parentOrdered;
                 for (auto& [fname, fidx] : pIdxIt->second)
@@ -780,7 +781,7 @@ void CodeGen::visit(ClassDecl& node) {
                     }
                     llvm::Type* ft = tIt->second;
                     Impl::VarKind fk = Impl::VarKind::Other;
-                    if (pKindIt != impl_->classFieldKinds.end()) {
+                    if (pKindIt != impl_->classFieldKindsBySym.end()) {
                         auto kIt = pKindIt->second.find(fname);
                         if (kIt != pKindIt->second.end()) fk = kIt->second;
                     }
@@ -802,15 +803,15 @@ void CodeGen::visit(ClassDecl& node) {
                     auto sit = srcMap.find(parentName);
                     if (sit == srcMap.end()) return;
                     // snapshot parent's inner map: when dst == srcMap (called
-                    // below with the same map for both args), dst[node.name]
+                    // below with the same map for both args), dst[clsSym]
                     // may rehash and invalidate sit before we iterate.
                     auto parentEntry = sit->second;
-                    auto& dstEntry = dst[node.name];
+                    auto& dstEntry = dst[clsSym];
                     for (auto& kv : parentEntry)
                         if (!dstEntry.count(kv.first)) dstEntry[kv.first] = kv.second;
                 };
-                copyMap(impl_->classFieldListElemKinds, impl_->classFieldListElemKinds);
-                copyMap(impl_->classFieldClassName, impl_->classFieldClassName);
+                copyMap(impl_->classFieldListElemKindsBySym, impl_->classFieldListElemKindsBySym);
+                copyMap(impl_->classFieldClassNameBySym, impl_->classFieldClassNameBySym);
             }
         }
     }
@@ -835,7 +836,7 @@ void CodeGen::visit(ClassDecl& node) {
         if (!named) continue;  // generics handled by the scan above
         std::string cn = impl_->resolveAnnotationClassName(named->name);
         if (cn.empty()) continue;
-        impl_->classFieldClassName[node.name][tgt->name] = cn;
+        impl_->classFieldClassNameBySym[clsSym][tgt->name] = cn;
         for (auto& f : fields) {
             if (f.name == tgt->name) {
                 f.type = impl_->i8PtrType;
@@ -872,24 +873,24 @@ void CodeGen::visit(ClassDecl& node) {
     // struct (`%Class.0`). The body-emission pass re-runs this function and must
     // reuse the layout pass's type.
     llvm::StructType* structType = nullptr;
-    if (auto it = impl_->classStructTypes.find(node.name);
-        it != impl_->classStructTypes.end()) {
+    if (auto it = impl_->classStructTypesBySym.find(clsSym);
+        it != impl_->classStructTypesBySym.end()) {
         structType = it->second;
     } else {
         structType = llvm::StructType::create(*impl_->context, fieldTypes, clsSym);
-        impl_->classStructTypes[node.name] = structType;
+        impl_->classStructTypesBySym[clsSym] = structType;
     }
 
     // Store field->index, field->type, and field->VarKind mappings (shifted by headerOffset for GC header)
     for (unsigned i = 0; i < fields.size(); ++i) {
-        impl_->classFieldIndices[node.name][fields[i].name] = i + headerOffset;
-        impl_->classFieldTypes[node.name][fields[i].name] = fields[i].type;
-        impl_->classFieldKinds[node.name][fields[i].name] = fields[i].kind;
+        impl_->classFieldIndicesBySym[clsSym][fields[i].name] = i + headerOffset;
+        impl_->classFieldTypesBySym[clsSym][fields[i].name] = fields[i].type;
+        impl_->classFieldKindsBySym[clsSym][fields[i].name] = fields[i].kind;
     }
     // Own (non-inherited) positional field order for match destructuring - the
     // same AST helper the TypeChecker fills ClassType::fieldOrder from, so the
     // position->field-name mapping is identical across stages.
-    impl_->classFieldOrder[node.name] = instanceFieldOrder(node);
+    impl_->classFieldOrderBySym[clsSym] = instanceFieldOrder(node);
 
     // Track list element types for class fields (from constructor param type annotations)
     // This enables correct for-in iteration over self.field where field is list[str] etc.
@@ -921,12 +922,12 @@ void CodeGen::visit(ClassDecl& node) {
                 else if (elemVK == Impl::VarKind::Float) ek = Type::Kind::Float;
                 else if (elemVK == Impl::VarKind::Bool) ek = Type::Kind::Bool;
                 else if (elemVK == Impl::VarKind::ClassInstance) ek = Type::Kind::Instance;
-                impl_->classFieldListElemKinds[node.name][attrExpr->attribute] = ek;
+                impl_->classFieldListElemKindsBySym[clsSym][attrExpr->attribute] = ek;
                 // Callable element: stash FunctionType for ForLoop to register
                 // callableTypes for the loop variable.
                 if (auto* cte = dynamic_cast<CallableTypeExpr*>(generic->typeArgs[0].get())) {
-                    impl_->classFieldListElemCallableType
-                        [node.name][attrExpr->attribute] =
+                    impl_->classFieldListElemCallableTypeBySym
+                        [clsSym][attrExpr->attribute] =
                         impl_->callableTypeExprToFnType(cte);
                 }
             } else if (base->name == "dict" && generic->typeArgs.size() >= 2) {
@@ -937,7 +938,7 @@ void CodeGen::visit(ClassDecl& node) {
                 // appears in a ternary alongside a str/float/list value.
                 // D030 §5: direct Type::Kind from the annotation.
                 Type::Kind vk = impl_->typeExprToTypeKind(generic->typeArgs[1].get());
-                impl_->classFieldDictValueKinds[node.name][attrExpr->attribute] = vk;
+                impl_->classFieldDictValueKindsBySym[clsSym][attrExpr->attribute] = vk;
             }
         }
         for (auto& bodyStmt : initDecl->body) {
@@ -948,8 +949,8 @@ void CodeGen::visit(ClassDecl& node) {
                 if (!attrExpr) continue;
                 auto* selfName = dynamic_cast<NameExpr*>(attrExpr->object.get());
                 if (!selfName || selfName->name != "self") continue;
-                auto fkIt = impl_->classFieldKinds[node.name].find(attrExpr->attribute);
-                bool fieldIsList = (fkIt != impl_->classFieldKinds[node.name].end() && fkIt->second == Impl::VarKind::List);
+                auto fkIt = impl_->classFieldKindsBySym[clsSym].find(attrExpr->attribute);
+                bool fieldIsList = (fkIt != impl_->classFieldKindsBySym[clsSym].end() && fkIt->second == Impl::VarKind::List);
                 // Also check if the field is assigned from a function returning list[T]
                 if (!fieldIsList && assign->value) {
                     if (auto* rhsCall = dynamic_cast<CallExpr*>(assign->value.get())) {
@@ -989,7 +990,7 @@ void CodeGen::visit(ClassDecl& node) {
                                     Type::Kind ek = Type::Kind::Int;
                                     if (elemVK == Impl::VarKind::Str) ek = Type::Kind::Str;
                                     else if (elemVK == Impl::VarKind::Float) ek = Type::Kind::Float;
-                                    impl_->classFieldListElemKinds[node.name][attrExpr->attribute] = ek;
+                                    impl_->classFieldListElemKindsBySym[clsSym][attrExpr->attribute] = ek;
                                 }
                             }
                         }
@@ -1014,7 +1015,7 @@ void CodeGen::visit(ClassDecl& node) {
                                                 Type::Kind ek = Type::Kind::Int;
                                                 if (elemVK == Impl::VarKind::Str) ek = Type::Kind::Str;
                                                 else if (elemVK == Impl::VarKind::Float) ek = Type::Kind::Float;
-                                                impl_->classFieldListElemKinds[node.name][attrExpr->attribute] = ek;
+                                                impl_->classFieldListElemKindsBySym[clsSym][attrExpr->attribute] = ek;
                                             }
                                         }
                                     }
@@ -1031,13 +1032,13 @@ void CodeGen::visit(ClassDecl& node) {
                             Type::Kind ek = Type::Kind::Int;
                             if (elemVK == Impl::VarKind::Str) ek = Type::Kind::Str;
                             else if (elemVK == Impl::VarKind::Float) ek = Type::Kind::Float;
-                            impl_->classFieldListElemKinds[node.name][attrExpr->attribute] = ek;
+                            impl_->classFieldListElemKindsBySym[clsSym][attrExpr->attribute] = ek;
                             // list[Callable[[...], R]] field - record the
                             // element FunctionType for for-loop call dispatch.
                             if (auto* cte = dynamic_cast<CallableTypeExpr*>(
                                     generic->typeArgs[0].get())) {
-                                impl_->classFieldListElemCallableType
-                                    [node.name][attrExpr->attribute] =
+                                impl_->classFieldListElemCallableTypeBySym
+                                    [clsSym][attrExpr->attribute] =
                                     impl_->callableTypeExprToFnType(cte);
                             }
                         }
@@ -1058,10 +1059,10 @@ void CodeGen::visit(ClassDecl& node) {
                 if (!attrExpr) continue;
                 auto* selfName = dynamic_cast<NameExpr*>(attrExpr->object.get());
                 if (!selfName || selfName->name != "self") continue;
-                if (impl_->classFieldDictValueKinds[node.name].count(attrExpr->attribute))
+                if (impl_->classFieldDictValueKindsBySym[clsSym].count(attrExpr->attribute))
                     continue;
-                auto fkIt = impl_->classFieldKinds[node.name].find(attrExpr->attribute);
-                if (fkIt == impl_->classFieldKinds[node.name].end() ||
+                auto fkIt = impl_->classFieldKindsBySym[clsSym].find(attrExpr->attribute);
+                if (fkIt == impl_->classFieldKindsBySym[clsSym].end() ||
                     fkIt->second != Impl::VarKind::Dict)
                     continue;
                 GenericTypeExpr* dictType = nullptr;
@@ -1099,7 +1100,7 @@ void CodeGen::visit(ClassDecl& node) {
                                     consistent = false;
                             }
                             if (consistent) {
-                                impl_->classFieldDictValueKinds[node.name][attrExpr->attribute] = firstVK;
+                                impl_->classFieldDictValueKindsBySym[clsSym][attrExpr->attribute] = firstVK;
                                 continue;
                             }
                         }
@@ -1110,7 +1111,7 @@ void CodeGen::visit(ClassDecl& node) {
                 if (!base || base->name != "dict") continue;
                 // D030 §5: direct Type::Kind from the annotation.
                 Type::Kind vk = impl_->typeExprToTypeKind(dictType->typeArgs[1].get());
-                impl_->classFieldDictValueKinds[node.name][attrExpr->attribute] = vk;
+                impl_->classFieldDictValueKindsBySym[clsSym][attrExpr->attribute] = vk;
             }
         }
     }
@@ -1169,7 +1170,7 @@ void CodeGen::visit(ClassDecl& node) {
         auto* gv = new llvm::GlobalVariable(
             *impl_->module, fieldType, /*isConstant=*/false,
             llvm::GlobalValue::InternalLinkage, initVal, globalName);
-        impl_->staticFieldGlobals[node.name][target->name] = gv;
+        impl_->staticFieldGlobalsBySym[clsSym][target->name] = gv;
 
         // If the initializer is a non-trivial expression, mark for runtime init.
         // We will emit the initialization code later in the main function preamble,
@@ -1257,14 +1258,14 @@ void CodeGen::visit(ClassDecl& node) {
             llvm::GlobalValue::InternalLinkage,
             llvm::ConstantInt::get(impl_->i64Type, 0),
             "__class_id_" + clsSym);
-        impl_->classIdGlobals[node.name] = classIdGlobal;
+        impl_->classIdGlobalsBySym[clsSym] = classIdGlobal;
     }
 
     // Decision 026: Forward-declare vtable global (initializer set after method emission).
     llvm::GlobalVariable* vtableGlobal = nullptr;
     if (impl_->options.gcMode == GCMode::RC) {
-        auto vtOrdIt = impl_->classVtableMethodOrder.find(node.name);
-        if (vtOrdIt != impl_->classVtableMethodOrder.end() && !vtOrdIt->second.empty()) {
+        auto vtOrdIt = impl_->classVtableMethodOrderBySym.find(clsSym);
+        if (vtOrdIt != impl_->classVtableMethodOrderBySym.end() && !vtOrdIt->second.empty()) {
             auto* vtableArrayType = llvm::ArrayType::get(impl_->i8PtrType, vtOrdIt->second.size());
             vtableGlobal = new llvm::GlobalVariable(
                 *impl_->module, vtableArrayType, /*isConstant=*/true,
@@ -1338,16 +1339,16 @@ void CodeGen::visit(ClassDecl& node) {
     // same analysis as the use-site check.
     bool anyInheritedDefaults = false;
     {
-        auto pit = impl_->classParentNames.find(node.name);
-        std::string cur = (pit != impl_->classParentNames.end()) ? pit->second : "";
+        auto pit = impl_->classParentNamesBySym.find(clsSym);
+        std::string cur = (pit != impl_->classParentNamesBySym.end()) ? pit->second : "";
         while (!cur.empty()) {
-            auto dit = impl_->classPerInstanceDefaults.find(cur);
-            if (dit != impl_->classPerInstanceDefaults.end() && !dit->second.empty()) {
+            auto dit = impl_->classPerInstanceDefaultsBySym.find(cur);
+            if (dit != impl_->classPerInstanceDefaultsBySym.end() && !dit->second.empty()) {
                 anyInheritedDefaults = true;
                 break;
             }
-            auto nit = impl_->classParentNames.find(cur);
-            cur = (nit != impl_->classParentNames.end()) ? nit->second : "";
+            auto nit = impl_->classParentNamesBySym.find(cur);
+            cur = (nit != impl_->classParentNamesBySym.end()) ? nit->second : "";
         }
     }
     {
@@ -1365,7 +1366,7 @@ void CodeGen::visit(ClassDecl& node) {
                 if (impl_->stmtEscapes(st.get(), "self")) { scalarOnly = false; break; }
         }
         if (scalarOnly)
-            impl_->stackEligibleClasses.insert(node.name);
+            impl_->stackEligibleClassesBySym.insert(clsSym);
     }
 
     // Helper lambda: emit a _new function that mallocs the struct and calls the
@@ -1496,16 +1497,16 @@ void CodeGen::visit(ClassDecl& node) {
         {
             // Collect ancestors innermost->outermost, then reverse to base-first.
             std::vector<std::string> chain;
-            auto pit = impl_->classParentNames.find(node.name);
-            std::string cur = (pit != impl_->classParentNames.end()) ? pit->second : "";
+            auto pit = impl_->classParentNamesBySym.find(clsSym);
+            std::string cur = (pit != impl_->classParentNamesBySym.end()) ? pit->second : "";
             while (!cur.empty()) {
                 chain.push_back(cur);
-                auto nit = impl_->classParentNames.find(cur);
-                cur = (nit != impl_->classParentNames.end()) ? nit->second : "";
+                auto nit = impl_->classParentNamesBySym.find(cur);
+                cur = (nit != impl_->classParentNamesBySym.end()) ? nit->second : "";
             }
             for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
-                auto dit = impl_->classPerInstanceDefaults.find(*it);
-                if (dit != impl_->classPerInstanceDefaults.end())
+                auto dit = impl_->classPerInstanceDefaultsBySym.find(*it);
+                if (dit != impl_->classPerInstanceDefaultsBySym.end())
                     for (auto& entry : dit->second) orderedDefaults.push_back(entry);
             }
             // This class's own defaults last (derived overrides base).
@@ -1536,10 +1537,10 @@ void CodeGen::visit(ClassDecl& node) {
                 // Resolve the slot via the SUBCLASS's merged layout - it already
                 // contains inherited slots at the parent's indices, so an
                 // inherited default lands in the correct offset of this instance.
-                auto idxIt = impl_->classFieldIndices[node.name].find(fname);
-                if (idxIt == impl_->classFieldIndices[node.name].end()) continue;
-                auto tyIt = impl_->classFieldTypes[node.name].find(fname);
-                if (tyIt == impl_->classFieldTypes[node.name].end()) continue;
+                auto idxIt = impl_->classFieldIndicesBySym[clsSym].find(fname);
+                if (idxIt == impl_->classFieldIndicesBySym[clsSym].end()) continue;
+                auto tyIt = impl_->classFieldTypesBySym[clsSym].find(fname);
+                if (tyIt == impl_->classFieldTypesBySym[clsSym].end()) continue;
                 auto* fieldPtr = impl_->builder->CreateStructGEP(
                     structType, self, idxIt->second, fname + "_def");
                 valExpr->accept(*this);
@@ -1584,24 +1585,12 @@ void CodeGen::visit(ClassDecl& node) {
                 impl_->currentFunction = synthInit;
                 auto* entry = llvm::BasicBlock::Create(*impl_->context, "entry", synthInit);
                 impl_->builder->SetInsertPoint(entry);
-                // Delegate to the parent's zero-arg __init__ if present. Resolve
-                // it under the PARENT's owning module, not the current one - an
-                // imported parent (e.g. a subclass of a stdlib class) lives in a
-                // different module, so mangling its __init__ with currentModule
-                // misses and the parent ctor silently never runs, leaving every
-                // inherited field zero-initialized. classOwningModule records the
-                // parent's real module; fall back to current only if unknown.
-                auto parentIt = impl_->classParentNames.find(node.name);
-                if (parentIt != impl_->classParentNames.end()) {
-                    const std::string& parentName = parentIt->second;
-                    auto pmIt = impl_->classOwningModule.find(parentName);
-                    const std::string& parentMod =
-                        pmIt != impl_->classOwningModule.end() ? pmIt->second
-                                                               : impl_->currentModuleName;
-                    llvm::Function* parentInit = impl_->resolveMethodFunction(
-                        parentMod, parentName, "__init__");
-                    // Only delegate when the parent ctor is zero-user-arg
-                    // (just self) - otherwise we'd have no values to pass.
+                // Delegate to the parent's zero-arg __init__ if present. The
+                // parent entry IS its sym, so the symbol lookup is direct.
+                auto parentIt = impl_->classParentNamesBySym.find(clsSym);
+                if (parentIt != impl_->classParentNamesBySym.end()) {
+                    llvm::Function* parentInit = impl_->module->getFunction(
+                        parentIt->second + "___init__");
                     if (parentInit && parentInit->arg_size() == 1) {
                         impl_->builder->CreateCall(parentInit, {synthInit->getArg(0)});
                     }
@@ -1644,8 +1633,8 @@ void CodeGen::visit(ClassDecl& node) {
         // isn't leaked when the last instance dies.
         bool hasCallableFields = false;
         {
-            auto cfIt = impl_->classFieldCallableType.find(node.name);
-            if (cfIt != impl_->classFieldCallableType.end() && !cfIt->second.empty()) {
+            auto cfIt = impl_->classFieldCallableTypeBySym.find(clsSym);
+            if (cfIt != impl_->classFieldCallableTypeBySym.end() && !cfIt->second.empty()) {
                 hasCallableFields = true;
                 hasHeapFields = true; // ensures the dealloc body is emitted below
             }
@@ -1785,10 +1774,10 @@ void CodeGen::visit(ClassDecl& node) {
             // Null-gated: an owner whose close() already freed and nulled
             // the handle releases exactly once.
             for (auto& [fname, releaser] : ownRawReleasers) {
-                auto idxIt = impl_->classFieldIndices[node.name].find(fname);
-                auto tyIt = impl_->classFieldTypes[node.name].find(fname);
-                if (idxIt == impl_->classFieldIndices[node.name].end() ||
-                    tyIt == impl_->classFieldTypes[node.name].end())
+                auto idxIt = impl_->classFieldIndicesBySym[clsSym].find(fname);
+                auto tyIt = impl_->classFieldTypesBySym[clsSym].find(fname);
+                if (idxIt == impl_->classFieldIndicesBySym[clsSym].end() ||
+                    tyIt == impl_->classFieldTypesBySym[clsSym].end())
                     continue;
                 auto* gep = impl_->builder->CreateStructGEP(
                     structType, self, idxIt->second, fname + "_own_ptr");
@@ -1826,7 +1815,7 @@ void CodeGen::visit(ClassDecl& node) {
             std::set<std::string> deallocHandled;
             for (auto& f : fields) {
                 if (!Impl::isHeapKind(f.kind)) continue;
-                unsigned idx = impl_->classFieldIndices[node.name][f.name];
+                unsigned idx = impl_->classFieldIndicesBySym[clsSym][f.name];
                 auto* gep = impl_->builder->CreateStructGEP(structType, self, idx, f.name + "_ptr");
                 auto* val = impl_->builder->CreateLoad(f.type, gep, f.name + "_val");
                 deallocHandled.insert(f.name);
@@ -1861,18 +1850,18 @@ void CodeGen::visit(ClassDecl& node) {
             // above (a field whose kind wasn't resolved to Closure - e.g. an
             // inference miss - still needs its single tag-gated decref here).
             if (hasCallableFields) {
-                auto cfIt = impl_->classFieldCallableType.find(node.name);
-                if (cfIt != impl_->classFieldCallableType.end()) {
+                auto cfIt = impl_->classFieldCallableTypeBySym.find(clsSym);
+                if (cfIt != impl_->classFieldCallableTypeBySym.end()) {
                     for (auto& [fname, _ftype] : cfIt->second) {
                         if (deallocHandled.count(fname)) continue;
-                        auto fIdxIt = impl_->classFieldIndices[node.name].find(fname);
-                        if (fIdxIt == impl_->classFieldIndices[node.name].end())
+                        auto fIdxIt = impl_->classFieldIndicesBySym[clsSym].find(fname);
+                        if (fIdxIt == impl_->classFieldIndicesBySym[clsSym].end())
                             continue;
                         unsigned idx = fIdxIt->second;
                         auto* gep2 = impl_->builder->CreateStructGEP(
                             structType, self, idx, fname + "_ptr");
                         auto* fldType =
-                            impl_->classFieldTypes[node.name][fname];
+                            impl_->classFieldTypesBySym[clsSym][fname];
                         auto* val2 = impl_->builder->CreateLoad(
                             fldType, gep2, fname + "_val");
                         llvm::Value* p = val2;
@@ -1951,7 +1940,7 @@ void CodeGen::visit(ClassDecl& node) {
                     // fns only deref a TRACKED child, so a bare-fn-ptr Callable
                     // field (no header, never tracked) is a safe hash-miss.
                     f.kind != Impl::VarKind::Closure) continue;
-                unsigned idx = impl_->classFieldIndices[node.name][f.name];
+                unsigned idx = impl_->classFieldIndicesBySym[clsSym][f.name];
                 auto* gep = impl_->builder->CreateStructGEP(structType, selfArg, idx, f.name + "_ptr");
                 auto* val = impl_->builder->CreateLoad(f.type, gep, f.name + "_val");
                 llvm::Value* ptrVal = val;
@@ -2003,7 +1992,7 @@ void CodeGen::visit(ClassDecl& node) {
 
             for (auto& f : fields) {
                 if (!Impl::isHeapKind(f.kind)) continue;
-                unsigned idx = impl_->classFieldIndices[node.name][f.name];
+                unsigned idx = impl_->classFieldIndicesBySym[clsSym][f.name];
                 auto* gep = impl_->builder->CreateStructGEP(structType, selfArg3, idx, f.name + "_ptr");
                 auto* val = impl_->builder->CreateLoad(f.type, gep, f.name + "_val");
                 // Decref the field value
@@ -2065,7 +2054,7 @@ void CodeGen::visit(ClassDecl& node) {
 
             for (auto& f : fields) {
                 if (!Impl::isHeapKind(f.kind)) continue;
-                unsigned idx = impl_->classFieldIndices[node.name][f.name];
+                unsigned idx = impl_->classFieldIndicesBySym[clsSym][f.name];
                 auto* gep = impl_->builder->CreateStructGEP(structType, selfArg4, idx, f.name + "_ptr");
                 auto* val = impl_->builder->CreateLoad(f.type, gep, f.name + "_val");
                 if (f.kind == Impl::VarKind::Str) {
@@ -2162,7 +2151,7 @@ void CodeGen::visit(ClassDecl& node) {
             // CallExpr decorator path): last-wins is acceptable because the
             // decorator dispatcher is per-class-name and same-named decorated
             // classes would already need an alias to disambiguate.
-            impl_->classDescriptorGlobals[node.name] = descGlobalForDci;
+            impl_->classDescriptorGlobalsBySym[clsSym] = descGlobalForDci;
         }
 
         // Register in main() preamble: store dragon_class_register_dealloc(fn) -> classIdGlobal.
@@ -2185,13 +2174,13 @@ void CodeGen::visit(ClassDecl& node) {
         // descriptor accesses (e.g. `Cls.__name__` via descriptor_get_name)
         // resolve. No dci push because the main preamble's deferred init
         // loop is GC-only.
-        if (!impl_->classDescriptorGlobals.count(node.name)) {
+        if (!impl_->classDescriptorGlobalsBySym.count(clsSym)) {
             auto* descGlobal = new llvm::GlobalVariable(
                 *impl_->module, impl_->i64Type, /*isConstant=*/false,
                 llvm::GlobalValue::InternalLinkage,
                 llvm::ConstantInt::get(impl_->i64Type, 0),
                 clsSym + "__descriptor");
-            impl_->classDescriptorGlobals[node.name] = descGlobal;
+            impl_->classDescriptorGlobalsBySym[clsSym] = descGlobal;
         }
     }
 
@@ -2274,7 +2263,7 @@ void CodeGen::visit(ClassDecl& node) {
                             impl_->varListElemIsType.insert(pname);
                         if (auto* nt = dynamic_cast<NamedTypeExpr*>(elemTy)) {
                             if (impl_->classNames.count(nt->name) ||
-                                impl_->classFieldKinds.count(nt->name))
+                                impl_->classFieldKindsBySym.count(impl_->classSymPrefix(nt->name)))
                                 impl_->varListElemClassName[pname] = nt->name;
                         }
                     }
@@ -2354,7 +2343,7 @@ void CodeGen::visit(ClassDecl& node) {
                             impl_->varListElemIsType.insert(pname);
                         if (auto* nt = dynamic_cast<NamedTypeExpr*>(elemTy)) {
                             if (impl_->classNames.count(nt->name) ||
-                                impl_->classFieldKinds.count(nt->name))
+                                impl_->classFieldKindsBySym.count(impl_->classSymPrefix(nt->name)))
                                 impl_->varListElemClassName[pname] = nt->name;
                         }
                     }
@@ -2433,19 +2422,19 @@ void CodeGen::visit(ClassDecl& node) {
     // (env captures the descriptor instead of self at the runtime layer).
     {
         std::string thunkClsSym = Impl::mangleClass(impl_->currentModuleName, node.name);
-        auto ownIt = impl_->classOwnMethods.find(node.name);
-        if (ownIt != impl_->classOwnMethods.end()) {
+        auto ownIt = impl_->classOwnMethodsBySym.find(clsSym);
+        if (ownIt != impl_->classOwnMethodsBySym.end()) {
             for (auto& methodName : ownIt->second) {
                 uint8_t kind = 0;
-                auto kIt = impl_->classMethodKinds[node.name].find(methodName);
-                if (kIt != impl_->classMethodKinds[node.name].end()) kind = kIt->second;
+                auto kIt = impl_->classMethodKindsBySym[clsSym].find(methodName);
+                if (kIt != impl_->classMethodKindsBySym[clsSym].end()) kind = kIt->second;
                 if (kind == 1 || kind == 2) {
                     // Static (1) or @classmethod (2): the LLVM-emitted method
                     // signature has no leading self/cls param (Classes.cpp
                     // collapses both to "static-style" emission). No bind
                     // needed - getattr returns the raw fn ptr. Slot stays
                     // NULL for alignment with method_fn_ptrs indices.
-                    impl_->classMethodBoundThunks[node.name][methodName] = nullptr;
+                    impl_->classMethodBoundThunksBySym[clsSym][methodName] = nullptr;
                     continue;
                 }
                 std::string methodSym = thunkClsSym + "_" + methodName;
@@ -2509,7 +2498,7 @@ void CodeGen::visit(ClassDecl& node) {
                         methodFn, callArgs, "bound.call");
                     impl_->builder->CreateRet(result);
                 }
-                impl_->classMethodBoundThunks[node.name][methodName] = thunkFn;
+                impl_->classMethodBoundThunksBySym[clsSym][methodName] = thunkFn;
                 impl_->currentFunction = prevFunc;
                 if (prevBlock) impl_->builder->SetInsertPoint(prevBlock);
             }
@@ -2518,7 +2507,7 @@ void CodeGen::visit(ClassDecl& node) {
 
     // Decision 026: Set real vtable initializer now that all method bodies exist.
     if (vtableGlobal) {
-        auto& vtableOrder = impl_->classVtableMethodOrder[node.name];
+        auto& vtableOrder = impl_->classVtableMethodOrderBySym[clsSym];
         std::vector<llvm::Constant*> vtableEntries;
         for (auto& methodName : vtableOrder) {
             // MRO lookup: check this class, then walk parent chain. Method
@@ -2556,8 +2545,8 @@ void CodeGen::visit(ClassDecl& node) {
         if (isLiteral) continue;
 
         // Emit runtime initialization: evaluate the expression and store to the global
-        auto sfIt = impl_->staticFieldGlobals.find(node.name);
-        if (sfIt == impl_->staticFieldGlobals.end()) continue;
+        auto sfIt = impl_->staticFieldGlobalsBySym.find(clsSym);
+        if (sfIt == impl_->staticFieldGlobalsBySym.end()) continue;
         auto gvIt = sfIt->second.find(target->name);
         if (gvIt == sfIt->second.end()) continue;
 

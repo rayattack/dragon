@@ -1,7 +1,5 @@
-/// Dragon CodeGen - Method Call Dispatch
-/// Handles: obj.method(args) for Thread, Lock, SyncList, SyncDict,
-///  string/bytes/list/dict/file methods, super().method(),
-///  static methods, instance methods, vtable dispatch, stdlib modules.
+/// Method-call dispatch: obj.method(args) for builtin receivers (str/bytes/
+/// list/dict/set, Thread/Lock/Sync*), super, static/instance/vtable, modules.
 #include "../CodeGenImpl.h"
 
 namespace dragon {
@@ -21,11 +19,8 @@ bool CodeGen::Impl::packVarArgMethodArgs(
             llvm::PointerType::getUnqual(*context));
     };
 
-    // Spread INTO a variadic method (`recv.m(*xs)` / `recv.m(**d)`) is a
-    // separate capability - free functions have it via emitVarArgCall's spread
-    // arm, but packing it here would need the exception-safe pack-cleanup dance
-    // before its dup-key guards raise. Until that lands, diagnose rather than
-    // miscompile, so no leak or bad IR escapes.
+    // Spread into a variadic method is not wired yet: diagnose rather than
+    // miscompile (packing here would leak or emit bad IR on the dup-key raise).
     if (callHasSpread(node)) {
         addError("call-site spread (`*`/`**`) into a variadic method is not yet "
                  "supported", node.location());
@@ -33,14 +28,12 @@ bool CodeGen::Impl::packVarArgMethodArgs(
         return false;
     }
 
-    // self (if any) already occupies args[0..selfOffset). For a static variadic
-    // method selfOffset is 0 and this reduces to the free-function shape.
+    // self (if any) already occupies args[0..selfOffset); 0 for a static method.
     const size_t selfOffset = args.size();
     const size_t numParams = methodFuncType->getNumParams();
 
-    // 1. Regular positional args (those before `*args`). Drain owned heap temps
-    // via the shared classifier so a `def m(a: str, *xs)` regular arg can't leak
-    // (the callee borrows; the packed list/dict below drain through argTemps).
+    // 1. Regular positionals (before `*args`): the callee borrows, so owned
+    // heap temps must drain via the shared classifier or a regular arg leaks.
     size_t llvmIdx = selfOffset;
     for (size_t i = 0; i < vaInfo.numRegularParams && i < node.args.size(); ++i) {
         node.args[i]->accept(cg);
@@ -53,19 +46,15 @@ bool CodeGen::Impl::packVarArgMethodArgs(
         args.push_back(arg);
         llvmIdx++;
     }
-    // 1b. Pad regular slots the caller omitted (a default param BEFORE `*args`)
-    // with null placeholders; fillDefaultArgs fills them at the tail. Without
-    // this the `*args` list would land in the first omitted slot and its own
-    // slot would be null - an LLVM "Operand is null" verify crash.
+    // 1b. Pad omitted regular slots (defaults before `*args`) with nulls for
+    // fillDefaultArgs, else the `*args` list lands in the wrong slot (bad IR).
     while (args.size() < selfOffset + vaInfo.numRegularParams) {
         args.push_back(nullptr);
         llvmIdx++;
     }
 
-    // 2. Pack surplus positionals into the `*args` list, monomorphized by the
-    // declared element tag (native ints/floats/ptrs; boxed only for Any).
-    // emitTypedListAppend owns each element's borrow/incref discipline, so the
-    // list decref at the tail releases the element refs - no per-element drain.
+    // 2. Pack surplus positionals into the `*args` list, monomorphized by
+    // element tag; emitTypedListAppend owns each element's refs (tail decref).
     if (vaInfo.hasVarArg) {
         size_t extra = (node.args.size() > vaInfo.numRegularParams)
             ? node.args.size() - vaInfo.numRegularParams : 0;
@@ -82,10 +71,8 @@ bool CodeGen::Impl::packVarArgMethodArgs(
         llvmIdx++;
     }
 
-    // 2b. Bind keyword args that NAME a regular param into that positional slot
-    // (so `def m(x: int, **kw)` accepts `m(x=5, y=6)`). funcParamNames includes
-    // "self" at index 0 for an instance method, hence the selfOffset shift when
-    // deciding whether the matched name is a regular param.
+    // 2b. Bind keywords naming a regular param into that slot; funcParamNames
+    // includes "self" at index 0, hence the selfOffset shift.
     std::vector<bool> kwConsumed(node.kwArgs.size(), false);
     if (!node.kwArgs.empty()) {
         auto pnIt = funcParamNames.find(methodFuncName);
@@ -119,10 +106,8 @@ bool CodeGen::Impl::packVarArgMethodArgs(
         }
     }
 
-    // 3. Pack the remaining keyword args into the `**kwargs` dict, tagging each
-    // value by its LLVM type and increfing a BORROWED heap string the dict-set
-    // adopts (mirrors emitVarArgCall step 3 / the dict-literal value path). The
-    // dict is a call-site-owned temp released via argTemps at the tail.
+    // 3. Pack remaining keywords into the `**kwargs` dict: tag by LLVM type,
+    // incref a borrowed heap value the dict-set adopts; dict drains via argTemps.
     if (vaInfo.hasKwArg) {
         auto* cap = llvm::ConstantInt::get(i64Type, (int64_t)node.kwArgs.size());
         llvm::Value* kwargsDict =
@@ -156,8 +141,7 @@ bool CodeGen::Impl::packVarArgMethodArgs(
         argTemps.emplace_back(kwargsDict, VarKind::Dict);
         llvmIdx++;
     } else {
-        // `*args`-only method: a keyword that bound to no regular param is
-        // unexpected. Guard so codegen never silently drops it.
+        // `*args`-only method: an unbound keyword is an error, never dropped.
         for (size_t ki = 0; ki < node.kwArgs.size(); ++ki) {
             if (!kwConsumed[ki] && !node.kwArgs[ki].first.empty()) {
                 addError(dispName + " got an unexpected keyword argument '" +
@@ -171,26 +155,14 @@ bool CodeGen::Impl::packVarArgMethodArgs(
 }
 
 bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
-    // ADR 010: when the TypeChecker resolved this call to a specific method
-    // overload, dispatch to that overload's per-index symbol (`name__ovN`).
-    // resolvedMethodOverload is -1 for every non-overloaded call, so the bare
-    // name (and all existing behavior) is unchanged on the common path; the
-    // resolution itself was compile-time, so this only redirects a direct call.
+    // D010: a TypeChecker-resolved overload dispatches to its per-index symbol
+    // (`name__ovN`); resolvedMethodOverload is -1 for non-overloaded calls.
     std::string method = attr.attribute;
     if (node.resolvedMethodOverload >= 0)
         method += "__ov" + std::to_string(node.resolvedMethodOverload);
 
-    // C9-B: method-call spread (`obj.m(*xs)`) is wired ONLY at the class-
-    // instance dispatch below (the path that builds args via
-    // expandSpreadCallArgs). Any other method kind (builtins on str/list/dict,
-    // module functions, Thread/Task handles) does not support it. The early
-    // builtin/module paths are type-gated on a str/list/dict/... receiver, so a
-    // user-class-instance receiver never reaches them - but to be certain a
-    // spread call can't be silently grabbed (and mishandled) by one of them,
-    // bail up-front unless the receiver is a NameExpr-bound user-class instance
-    // (or `self`). That leaves the instance dispatch as the sole consumer of a
-    // method spread; everything else returns false so visit(CallExpr) emits the
-    // "spread not supported" diagnostic. Non-spread calls are unaffected.
+    // Spread (`obj.m(*xs)`) is wired only at class-instance dispatch: bail
+    // unless the receiver is a user-class instance, so no earlier path grabs it.
     if (callHasSpread(node)) {
         auto* objName = dynamic_cast<NameExpr*>(attr.object.get());
         bool instanceRecv = false;
@@ -203,17 +175,15 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                                impl_->classNames.count(it->second) > 0;
             }
         } else {
-            // Non-Name receiver (`self.field.m(*xs)`, `make().m(*xs)`,
-            // `arr[0].m(*xs)`) - handled by the second instance-dispatch block
-            // when its class resolves statically.
+            // Non-Name receiver (`self.field.m(*xs)`, `make().m(*xs)`): handled
+            // by the non-Name instance-dispatch block if its class is static.
             std::string cn = impl_->resolveExprClassName(attr.object.get());
             instanceRecv = !cn.empty() && impl_->classNames.count(cn) > 0;
         }
         if (!instanceRecv) return false;
     }
 
-    // Thread handle .join() method - joins vthread and returns result
-    // Thread handle .is_alive() method - returns 1 if running, 0 if done
+    // Thread handle dispatch: join() / is_alive()
     if (auto* objName = dynamic_cast<NameExpr*>(attr.object.get())) {
         auto tIt = impl_->varClassNames.find(objName->name);
         if (tIt != impl_->varClassNames.end() && tIt->second == "__Thread") {
@@ -225,13 +195,10 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                     auto* handle = impl_->builder->CreateLoad(impl_->i8PtrType, handlePtr, "vthread.handle");
                     auto* raw = impl_->builder->CreateCall(
                         impl_->runtimeFuncs["dragon_vthread_join"], {handle}, "vthread.join");
-                    // Reinterpret the i64 result slot at the task's native T
-                    // (D030): join() on Task[T] has CallExpr type T.
+                    // D030: reinterpret the i64 result slot at the task's native T.
                     impl_->lastValue = impl_->taskResultFromI64(raw, node.type.get());
-                    // `t.join()` CONSUMES t (same as `await t`): the runtime freed
-                    // the vthread, so blank a LOCAL binding's slot (free(p);p=NULL)
-                    // so the scope-exit detach won't double-free and a later
-                    // is_alive()/join reads NULL, not freed memory.
+                    // join() CONSUMES t (the runtime freed the vthread): null a
+                    // LOCAL slot so detach / later calls never touch freed memory.
                     if (localSlot && impl_->options.gcMode == GCMode::RC)
                         impl_->builder->CreateStore(
                             llvm::ConstantPointerNull::get(
@@ -256,12 +223,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         }
     }
 
-    // Lock method dispatch (Python threading.Lock shape): acquire(blocking=...),
-    // release(), destroy(). isLockExpr covers a tagged local/global receiver
-    // AND a Lock-typed instance field (`self._lock.acquire()`) - the old
-    // NameExpr-only check let field receivers fall through to the generic
-    // instance path, which silently DROPPED the calls (the "lock" never
-    // locked; found by the concurrent-mutation detector).
+    // Lock dispatch (threading.Lock shape). isLockExpr must cover Lock-typed
+    // instance fields too, else `self._lock.acquire()` is silently dropped.
     if (impl_->isLockExpr(attr.object.get())) {
         llvm::Value* handle = nullptr;
         if (auto* objName = dynamic_cast<NameExpr*>(attr.object.get())) {
@@ -270,8 +233,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             if (handlePtr)
                 handle = impl_->builder->CreateLoad(impl_->i8PtrType, handlePtr, "lock.handle");
         } else {
-            // Field receiver: evaluate the attribute expression - the field
-            // slot holds the dragon_lock_new() pointer.
+            // Field receiver: the field slot holds the dragon_lock_new() pointer.
             attr.object->accept(*this);
             handle = impl_->lastValue;
             if (handle && !handle->getType()->isPointerTy())
@@ -280,10 +242,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         {
             if (handle) {
                 if (method == "acquire") {
-                    // Python shape: acquire(blocking=True, timeout=-1) -> bool.
-                    // `blocking`/`timeout` come from positional args[0]/[1] or
-                    // kwargs. acquire() returns True once held; with
-                    // blocking=False or a timeout it returns whether it got it.
+                    // acquire(blocking=True, timeout=-1) -> bool: True once
+                    // held; with blocking=False/timeout, whether it got it.
                     Expr* blockingExpr = nullptr;
                     Expr* timeoutExpr = nullptr;
                     if (node.args.size() >= 1) blockingExpr = node.args[0].get();
@@ -551,9 +511,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 }
                 if (method == "setdefault" && node.args.size() == 2) {
                     node.args[0]->accept(*this); auto key = impl_->lastValue;
-                    // Own the borrowed key (#20a): dragon_syncdict_setdefault
-                    // delegates to dragon_dict_setdefault, which adopts on insert
-                    // and releases on present (under the syncdict wrlock).
+                    // Own the borrowed key: the runtime adopts it on insert and
+                    // releases it on present (under the syncdict wrlock).
                     impl_->increfBorrowedSetdefaultKey(node.args[0].get(), key);
                     node.args[1]->accept(*this);
                     impl_->lastValue = impl_->builder->CreateCall(
@@ -574,19 +533,16 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         }
     }
 
-    // Check if the object is a list variable
     bool isList = false;
     if (auto* objName = dynamic_cast<NameExpr*>(attr.object.get())) {
         isList = impl_->lookupVarKind(objName->name) == Impl::VarKind::List;
     }
 
-    // Check if the object is a dict variable
     bool isDict = false;
     if (auto* objName = dynamic_cast<NameExpr*>(attr.object.get())) {
         isDict = impl_->lookupVarKind(objName->name) == Impl::VarKind::Dict;
     }
 
-    // Check if the object is a set variable
     bool isSet = false;
     if (auto* objName = dynamic_cast<NameExpr*>(attr.object.get())) {
         isSet = impl_->lookupVarKind(objName->name) == Impl::VarKind::Set;
@@ -595,7 +551,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         if (dynamic_cast<SetExpr*>(attr.object.get())) isSet = true;
     }
 
-    // Check if the object is a class field (self.field or instance.field)
+    // Class-field receiver (self.field / instance.field): use its recorded kind.
     if (!isList && !isDict && !isSet) {
         if (auto* innerAttr = dynamic_cast<AttributeExpr*>(attr.object.get())) {
             std::string className;
@@ -608,8 +564,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 }
             }
             if (!className.empty()) {
-                auto fkIt = impl_->classFieldKinds.find(className);
-                if (fkIt != impl_->classFieldKinds.end()) {
+                auto fkIt = impl_->classFieldKindsBySym.find(impl_->classSym(className));
+                if (fkIt != impl_->classFieldKindsBySym.end()) {
                     auto fkIt2 = fkIt->second.find(innerAttr->attribute);
                     if (fkIt2 != fkIt->second.end()) {
                         if (fkIt2->second == Impl::VarKind::List) isList = true;
@@ -621,7 +577,6 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         }
     }
 
-    // Check if the object is a string variable or literal
     bool isStr = false;
     if (auto* objName = dynamic_cast<NameExpr*>(attr.object.get())) {
         auto sk = impl_->lookupVarKind(objName->name);
@@ -632,10 +587,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             isStr = !sl->isBytes;
     }
 
-    // Check if the object is a bytes variable or literal. D030 §5:
-    // bytes-ness is identified solely by the static type / AST shape.
-    // VarKind::Bytes was deleted; bytes-typed slots carry VarKind::List
-    // (generic-heap) at the VarKind layer.
+    // D030 §5: bytes-ness comes solely from the static type / AST shape; there
+    // is no VarKind::Bytes (bytes slots carry the generic-heap VarKind::List).
     bool isBytes = attr.object && attr.object->type &&
                    attr.object->type->kind() == Type::Kind::Bytes;
     if (!isBytes) {
@@ -643,10 +596,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             isBytes = sl->isBytes;
     }
 
-    // Final fallback: typechecker-propagated type. Handles chained subscripts
-    // (paths[0].startswith(...), all_parts[i].append(...)), dict values as
-    // receivers, and any other expression whose VarKind heuristic misses but
-    // whose static type is unambiguous.
+    // Final fallback: the typechecker-propagated static type, for receivers the
+    // VarKind heuristics miss (chained subscripts, dict values, ...).
     if (!isList && !isDict && !isSet && !isStr && !isBytes && attr.object->type) {
         switch (attr.object->type->kind()) {
             case Type::Kind::List:  isList  = true; break;
@@ -658,7 +609,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         }
     }
 
-    // --- Deque method dispatch ---
+    // Deque method dispatch
     if (auto* objName = dynamic_cast<NameExpr*>(attr.object.get())) {
         auto dqIt = impl_->varClassNames.find(objName->name);
         if (dqIt != impl_->varClassNames.end() && dqIt->second == "__Deque") {
@@ -671,9 +622,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                     node.args[0]->accept(*this);
                     llvm::Value* rawVal = impl_->lastValue;
                     llvm::Value* val = rawVal;
-                    // Element tag: prefer the receiver's static deque[T]
-                    // element type; fall back to the value's LLVM type. The
-                    // runtime stores it (drives RC, `in` equality, repr).
+                    // Element tag: prefer the static deque[T] element type, else
+                    // the value's LLVM type; the runtime stores it (RC, `in`, repr).
                     int64_t elemTag = 0;
                     if (auto* lt = dynamic_cast<ListType*>(attr.object->type.get())) {
                         if (lt->elementType) {
@@ -697,9 +647,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                                                 : "dragon_deque_appendleft"],
                         {handle, val,
                          llvm::ConstantInt::get(impl_->i64Type, elemTag)});
-                    // The deque took its own ref; release an OWNED heap arg
-                    // temp (f-string, concat, method result) or it leaks one
-                    // ref per append. Borrowed args (named vars) untouched.
+                    // The deque took its own ref: release an OWNED heap arg temp
+                    // or it leaks one ref per append; borrowed args untouched.
                     if (rawVal->getType()->isPointerTy()) {
                         Impl::VarKind pk = elemTag == 1 ? Impl::VarKind::Str
                                                         : Impl::VarKind::List;
@@ -714,11 +663,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 }
                 if ((method == "popleft" || method == "pop") &&
                     node.args.empty()) {
-                    // A heap-ptr element type (str / list / dict / set / tuple /
-                    // bytes / instance) pops via the _ptr variant so the OWNED
-                    // transfer is a recognized ptr result - drained when passed
-                    // to a borrow callee, adopted when bound. Scalars (int /
-                    // float / bool) and Callable elements keep the i64 form.
+                    // Heap-ptr element types pop via the _ptr variant so the OWNED
+                    // transfer is a recognized ptr result; scalars/Callable stay i64.
                     bool heapElem = false;
                     if (auto* lt = dynamic_cast<ListType*>(attr.object->type.get())) {
                         if (lt->elementType) {
@@ -751,28 +697,21 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         }
     }
 
-    // --- String method dispatch ---
+    // String method dispatch
     if (isStr) {
         attr.object->accept(*this);
         llvm::Value* obj = impl_->lastValue;
-        // An owned heap-str receiver - a slice (s[a:b]), concat, str(), or
-        // call result - is consumed by the method and must be released, or it
-        // leaks once per call (e.g. the JSON decoder's `buf[a:b].decode()`).
-        // Every str method below returns a FRESH, non-aliasing result, so
-        // dropping the receiver after the call is always balanced. Borrowed
-        // receivers (named locals, fields) are skipped by isOwnedStrResult.
+        // An owned heap-str receiver (slice/concat/call result) must be released
+        // or it leaks per call; every str method returns a fresh result, so ok.
         bool ownedStrRecv =
             impl_->options.gcMode == GCMode::RC && impl_->isOwnedStrResult(obj);
-        // Owned heap temporaries materialized for a borrow-arg slot (s.replace(a+b, c),
-        // s.split(x+y), s.join(make_list()), ...). Every str method borrows its args
-        // and returns a FRESH result, so these are released at the common tail below -
-        // one decref per owned temp, never for a borrowed Name/field. (#3 class A.)
+        // Owned heap temps for borrow-arg slots: every str method borrows its
+        // args, so these drain at the common tail, never for a borrowed Name/field.
         std::vector<std::pair<llvm::Value*, Impl::VarKind>> argTemps;
         bool strHandled = [&]() -> bool {
 
-        // strip/lstrip/rstrip(chars) - Python char-set trim (NOT prefix/suffix).
-        // Must precede the no-arg block below, which would otherwise swallow
-        // these and silently drop the argument.
+        // strip/lstrip/rstrip(chars): char-set trim (NOT prefix/suffix). Must
+        // precede the no-arg block, else it swallows these and drops the arg.
         if ((method == "strip" || method == "lstrip" || method == "rstrip") &&
             node.args.size() >= 1) {
             node.args[0]->accept(*this);
@@ -793,9 +732,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // No-arg boolean predicates. Runtime returns int64_t (0/1); D030
-        // says values flow at native types, so we convert to i1 here so that
-        // downstream consumers (print, if, &&) see a real bool, not an int.
+        // No-arg bool predicates: runtime returns i64 0/1, converted to i1 so
+        // consumers see a native bool (D030).
         if (method == "isdigit" || method == "isalpha" || method == "isalnum" ||
             method == "isspace" || method == "isupper" || method == "islower" ||
             method == "istitle" || method == "isascii" || method == "isdecimal" ||
@@ -831,10 +769,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // Python-parity str.find / rfind / count with optional start[, end].
-        //  find(sub) -> dragon_str_<m>(s, sub)
-        //  find(sub, start) -> dragon_str_<m>_se(s, sub, start, -1)
-        //  find(sub, start, end) -> dragon_str_<m>_se(s, sub, start, end)
+        // find/rfind/count with optional start[, end]; the _se variant takes both.
         if ((method == "find" || method == "rfind" || method == "count") &&
             node.args.size() >= 1 && node.args.size() <= 3) {
             node.args[0]->accept(*this);
@@ -863,7 +798,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // .index() and .rindex() - map to dragon_str_index_of / dragon_str_rindex
+        // index/rindex
         if ((method == "index" || method == "rindex") && node.args.size() >= 1) {
             node.args[0]->accept(*this);
             llvm::Value* arg = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
@@ -874,7 +809,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // replace(old, new[, count]) - 2 string args + optional int count, returning string
+        // replace(old, new[, count])
         if (method == "replace" && node.args.size() >= 2) {
             node.args[0]->accept(*this);
             llvm::Value* old_s = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
@@ -896,7 +831,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // zfill(width) - int arg returning string
+        // zfill(width)
         if (method == "zfill" && node.args.size() >= 1) {
             node.args[0]->accept(*this);
             llvm::Value* width = impl_->lastValue;
@@ -906,7 +841,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // expandtabs(tabsize) - int arg returning string
+        // expandtabs(tabsize=8)
         if (method == "expandtabs") {
             llvm::Value* tabsize = llvm::ConstantInt::get(impl_->i64Type, 8);
             if (node.args.size() >= 1) { node.args[0]->accept(*this); tabsize = impl_->lastValue; }
@@ -916,7 +851,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // center/ljust/rjust(width[, fillchar]) - int + optional char arg
+        // center/ljust/rjust(width[, fillchar])
         if (method == "center" || method == "ljust" || method == "rjust") {
             if (node.args.size() >= 1) {
                 node.args[0]->accept(*this);
@@ -938,9 +873,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             }
         }
 
-        // split(sep[, maxsplit]) / rsplit(sep[, maxsplit]) - return list (ptr).
-        // maxsplit defaults to -1 (unlimited); rsplit splits from the right.
-        // Previously split dropped maxsplit and rsplit had no dispatch at all.
+        // split/rsplit(sep[, maxsplit]) return a list; maxsplit -1 = unlimited,
+        // rsplit splits from the right.
         if (method == "split" || method == "rsplit") {
             llvm::Value* sep = llvm::ConstantPointerNull::get(
                 llvm::PointerType::getUnqual(*impl_->context));
@@ -955,7 +889,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // join(list) - returns string
+        // join(list)
         if (method == "join" && node.args.size() >= 1) {
             node.args[0]->accept(*this);
             llvm::Value* list = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
@@ -965,7 +899,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // splitlines() - returns list
+        // splitlines()
         if (method == "splitlines") {
             auto* fn = impl_->getOrDeclareRuntime("dragon_str_splitlines",
                 llvm::FunctionType::get(impl_->i8PtrType, {impl_->i8PtrType}, false));
@@ -984,11 +918,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // encode(encoding="utf-8", errors="strict") - returns bytes.
-        // The encoding/errors args are honored by dragon_str_encode_ex
-        // (UTF-8/ASCII only, strict/replace), never silently discarded.
-        // obj is captured above, so accepting the arg
-        // exprs after it is safe.
+        // encode(encoding="utf-8", errors="strict") -> bytes; args honored by
+        // dragon_str_encode_ex (UTF-8/ASCII, strict/replace), never discarded.
         if (method == "encode") {
             llvm::Value* enc = impl_->builder->CreateGlobalString("utf-8");
             llvm::Value* err = impl_->builder->CreateGlobalString("strict");
@@ -1012,17 +943,16 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         }
     }
 
-    // --- Bytes method dispatch ---
+    // Bytes method dispatch
     if (isBytes) {
         attr.object->accept(*this);
         llvm::Value* obj = impl_->lastValue;
-        // Owned heap-bytes receiver (slice b[a:b], etc.) - same consume-and-
-        // release contract as the str block above. All bytes methods return
-        // fresh non-aliasing results. dragon_decref drops the DragonBytes.
+        // Owned heap-bytes receiver: same consume-and-release contract as the
+        // str block; all bytes methods return fresh non-aliasing results.
         bool ownedBytesRecv =
             impl_->options.gcMode == GCMode::RC && impl_->isOwnedPtrResult(obj);
-        // Owned heap temporaries for borrow-arg slots (b.replace(x+y, z), ...);
-        // every bytes method borrows its args - released at the common tail. (#3.)
+        // Owned heap temps for borrow-arg slots: every bytes method borrows its
+        // args; released at the common tail.
         std::vector<std::pair<llvm::Value*, Impl::VarKind>> argTemps;
         bool bytesHandled = [&]() -> bool {
 
@@ -1044,11 +974,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // decode(encoding="utf-8", errors="strict") - returns str (i8*).
-        // The encoding/errors args are honored by dragon_bytes_decode_ex,
-        // never silently discarded. Default errors="strict" matches Python:
-        // invalid input raises UnicodeDecodeError, not a silent
-        // Latin-1 reinterpretation. obj is captured above.
+        // decode(encoding="utf-8", errors="strict") -> str; strict matches Python
+        // (invalid input raises UnicodeDecodeError, no silent Latin-1 fallback).
         if (method == "decode") {
             llvm::Value* enc = impl_->builder->CreateGlobalString("utf-8");
             llvm::Value* err = impl_->builder->CreateGlobalString("strict");
@@ -1061,7 +988,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // hex() - returns str
+        // hex()
         if (method == "hex") {
             impl_->lastValue = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_bytes_hex"], {obj}, "hex");
@@ -1080,7 +1007,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // 1-arg(bytes) methods returning int64 (find/rfind/count return positions)
+        // find/rfind/count return positions (i64)
         if ((method == "find" || method == "rfind" || method == "count") &&
             node.args.size() >= 1) {
             node.args[0]->accept(*this);
@@ -1146,16 +1073,15 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         if (objName->name == "bytes" && method == "fromhex" && node.args.size() >= 1) {
             node.args[0]->accept(*this);
             llvm::Value* hexStr = impl_->lastValue;
-            // fromhex borrows the hex string and returns fresh bytes; release an
-            // owned-temp arg (bytes.fromhex(a + b)) after the call. (#3 class A.)
+            // fromhex borrows the hex string and returns fresh bytes; release
+            // an owned-temp arg after the call.
             Impl::VarKind dk = impl_->ownedTempDrainKind(node.args[0].get(), hexStr);
             impl_->lastValue = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_bytes_fromhex"], {hexStr}, "fromhex");
             impl_->emitDecrefByKind(hexStr, dk);
             return true;
         }
-        // 6.17: dict.fromkeys(iterable[, value]) - classmethod-style.
-        // Default value is None (i64=0, tag=TAG_NONE=4).
+        // dict.fromkeys(iterable[, value]); default value None (TAG_NONE).
         if (objName->name == "dict" && method == "fromkeys" &&
             (node.args.size() == 1 || node.args.size() == 2)) {
             node.args[0]->accept(*this);
@@ -1165,10 +1091,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             if (node.args.size() == 2) {
                 node.args[1]->accept(*this);
                 llvm::Value* raw = impl_->lastValue;
-                // D030 §5: prefer the typechecker's static type for tag
-                // derivation - bytes-typed values must round-trip with
-                // TAG_BYTES even when their slot's VarKind has collapsed
-                // into the generic-heap cohort.
+                // D030 §5: prefer the static type for the tag - bytes values
+                // must round-trip TAG_BYTES even when their VarKind is generic-heap.
                 int64_t tagVal = -1;
                 if (node.args[1] && node.args[1]->type)
                     tagVal = Impl::typeKindToTag(node.args[1]->type->kind());
@@ -1208,33 +1132,26 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         }
     }
 
-    // --- List method dispatch ---
+    // List method dispatch
     if (isList) {
         attr.object->accept(*this);
         llvm::Value* obj = impl_->lastValue;
-        // An owned list RECEIVER temp (make().count(1), slice-then-method) is
-        // consumed by the call and leaks once per evaluation without a drain -
-        // the str path does the same (see
-        // ownedStrRecv above). Drained at the tail, gated on an allow-list of
-        // methods that cannot hand out a borrow into the receiver
-        // (void / scalar / transfer / fresh results only).
+        // An owned list RECEIVER temp leaks once per call without a drain; done
+        // at the tail, allow-listed to methods that cannot borrow the receiver.
         bool ownedListRecv = impl_->options.gcMode == GCMode::RC &&
                              !Impl::isBorrowedHeapExpr(attr.object.get()) &&
                              impl_->isOwnedPtrResult(obj);
         static const std::set<std::string> kListRecvDrainOk = {
             "append", "insert", "extend", "remove", "clear", "sort",
             "reverse", "count", "index", "pop", "copy"};
-        // Owned heap temporaries materialized for a BORROW-method arg slot
-        // (xs.remove(a+b), xs.index(x+y), xs.extend(make())). The transfer
-        // methods append/insert deliberately do NOT track - they adopt the +1
-        // (Model B). Tracked temps are released once at the common tail. (#3.)
+        // Owned heap temps for borrow-method arg slots, released at the tail;
+        // append/insert do NOT track - they adopt the +1 (Model B).
         std::vector<std::pair<llvm::Value*, Impl::VarKind>> argTemps;
         bool listHandled = [&]() -> bool {
 
         if (method == "append" && node.args.size() == 1) {
-            // Track element class name when appending a class instance.
-            // Detect both constructor calls: list.append(Route(...))
-            // and variables with known class type: list.append(item)
+            // Track the element class when appending a class instance
+            // (ctor call or class-typed variable).
             std::string appendedClassName;
             if (auto* argCall = dynamic_cast<CallExpr*>(node.args[0].get())) {
                 if (auto* argFn = dynamic_cast<NameExpr*>(argCall->callee.get())) {
@@ -1242,18 +1159,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                         appendedClassName = argFn->name;
                 }
             } else if (auto* argName = dynamic_cast<NameExpr*>(node.args[0].get())) {
-                // varClassNames is keyed by bare name and is NOT cleared between
-                // functions, so a name used as a class instance in one function
-                // (e.g. an `entry` in a stdlib module) leaves a stale entry. If a
-                // later function appends a STRING of the same name, that stale
-                // entry would mark `out` as list[Instance] and emit a generic
-                // dragon_incref on a string pointer - whose refcount header lives
-                // at a different offset than dragon_decref_str uses - so the incref
-                // misses, the iterable temp's destroy frees the string, and the
-                // list is left holding a dangling pointer (use-after-free). A
-                // string is never a class instance, so skipping the lookup for a
-                // str-bound arg is always correct and leaves genuine instance/Task
-                // element tracking untouched.
+                // varClassNames is bare-name-keyed and never cleared: a str-bound
+                // arg must skip it, else a stale Instance entry mis-increfs (UAF).
                 Impl::VarKind ak = impl_->lookupVarKind(argName->name);
                 if (ak != Impl::VarKind::Str && ak != Impl::VarKind::StrLiteral) {
                     auto vit = impl_->varClassNames.find(argName->name);
@@ -1262,12 +1169,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 }
             }
             if (!appendedClassName.empty()) {
-                // Track the element class for later attribute access - but
-                // NEVER clobber a declared list[Any] receiver: overwriting its
-                // elem kind with Instance re-routed this append (and every
-                // later element op) from the box-list runtime to
-                // dragon_list_append_ptr on a DragonListBox - an ASan
-                // heap-buffer-overflow (`l: list[Any] = []; l.append(Thing())`).
+                // NEVER clobber a declared list[Any] receiver's elem kind with
+                // Instance: that re-routes box-list ops to append_ptr (overflow).
                 if (auto* listAttr = dynamic_cast<AttributeExpr*>(attr.object.get())) {
                     if (auto* listObj = dynamic_cast<NameExpr*>(listAttr->object.get())) {
                         std::string ownerClass;
@@ -1278,16 +1181,16 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                             if (vit != impl_->varClassNames.end()) ownerClass = vit->second;
                         }
                         if (!ownerClass.empty()) {
-                            auto ckIt = impl_->classFieldListElemKinds.find(ownerClass);
+                            auto ckIt = impl_->classFieldListElemKindsBySym.find(impl_->classSym(ownerClass));
                             bool fieldIsAny = false;
-                            if (ckIt != impl_->classFieldListElemKinds.end()) {
+                            if (ckIt != impl_->classFieldListElemKindsBySym.end()) {
                                 auto fIt = ckIt->second.find(listAttr->attribute);
                                 fieldIsAny = fIt != ckIt->second.end() &&
                                              fIt->second == Type::Kind::Any;
                             }
                             if (!fieldIsAny) {
-                                impl_->classFieldListElemKinds[ownerClass][listAttr->attribute] = Type::Kind::Instance;
-                                impl_->classFieldListElemClassName[ownerClass][listAttr->attribute] = appendedClassName;
+                                impl_->classFieldListElemKindsBySym[impl_->classSym(ownerClass)][listAttr->attribute] = Type::Kind::Instance;
+                                impl_->classFieldListElemClassNameBySym[impl_->classSym(ownerClass)][listAttr->attribute] = appendedClassName;
                             }
                         }
                     }
@@ -1303,14 +1206,12 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             }
             node.args[0]->accept(*this);
             llvm::Value* val = impl_->lastValue;
-            // D030 Phase 3.C: dispatch append by element kind to the matching
-            // typed runtime op so the value never funnels through i64.
-            // D039 Phase 4: list[Any] uses dragon_list_box_append.
+            // D030: dispatch append by element kind so the value never funnels
+            // through i64; D039: list[Any] uses dragon_list_box_append.
             Type::Kind appendElemKind = impl_->getIterableElementKind(attr.object.get());
             if (appendElemKind == Type::Kind::Any) {
-                // dragon_list_box_append takes ownership of one reference on a
-                // refcounted payload (Model B) - boxArgTagPayload increfs a
-                // borrowed source so the list's reference outlives it.
+                // dragon_list_box_append adopts one reference (Model B);
+                // boxArgTagPayload increfs a borrowed source.
                 auto tp = impl_->boxArgTagPayload(node.args[0].get(),
                                                   val, /*takesOwnership=*/true);
                 impl_->builder->CreateCall(
@@ -1337,12 +1238,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                        appendElemKind == Type::Kind::Instance) {
                 if (appendElemKind == Type::Kind::Str && val->getType()->isPointerTy())
                     val = impl_->ensureHeapString(val, node.args[0].get());
-                // ADR 046: a bare fn used as a value (`llvm::Function`) stored into
-                // a list[Callable] must be wrapped into a DragonClosure(fn, null)
-                // so every element is a uniform refcounted closure - the dispatch
-                // unwraps env==null -> bare call, and the list owns one reference.
-                // The fresh wrapper carries refcount 1, so it skips the
-                // borrowed-incref below (append_ptr takes that reference).
+                // D046: wrap a bare fn value in DragonClosure(fn, null) so every
+                // element is refcounted; the fresh +1 skips the incref below.
                 bool freshWrappedClosure = false;
                 if (appendElemKind == Type::Kind::Function &&
                     llvm::isa<llvm::Function>(val)) {
@@ -1356,21 +1253,16 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 }
                 if (!val->getType()->isPointerTy())
                     val = impl_->builder->CreateIntToPtr(val, impl_->i8PtrType);
-                // Model B (CPython convention, documented at runtime_list.cpp:455):
-                // dragon_list_append_ptr takes ownership of one reference.
-                // Borrowed sources (a heap-typed local, class field, or
-                // container subscript) need an incref before crossing in -
-                // otherwise scope cleanup at the source's owning scope would
-                // decref the value back to 0 while the list still holds it.
+                // Model B: append_ptr adopts one reference, so borrowed sources
+                // need an incref, else scope cleanup frees the value in the list.
                 if (impl_->options.gcMode == GCMode::RC && !freshWrappedClosure &&
                     Impl::isBorrowedHeapExpr(node.args[0].get())) {
                     if (appendElemKind == Type::Kind::Str)
                         impl_->builder->CreateCall(
                             impl_->runtimeFuncs["dragon_incref_str"], {val});
                     else if (appendElemKind == Type::Kind::Function)
-                        // Tag-gated: a Callable slot may hold a real DragonClosure
-                        // or a bare fn ptr - incref only the former (no-op on a
-                        // headerless code pointer), never dragon_incref on .text.
+                        // A Callable slot may hold a DragonClosure or a bare fn
+                        // ptr; the tag-gated incref no-ops on the latter (.text).
                         impl_->builder->CreateCall(
                             impl_->runtimeFuncs["dragon_incref_callable"], {val});
                     else
@@ -1419,14 +1311,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                     llvm::PointerType::getUnqual(*impl_->context));
                 return true;
             }
-            // D030 Phase 3.C note: dragon_list_insert is still polymorphic
-            // (i64-funneled) - typed insert ops can be added in a follow-up if
-            // insert becomes a hot path. For now we coerce to i64 as before.
             // dragon_list_insert BORROWS its value (increfs internally, unlike
-            // append's adopt), so an owned temp arg (`xs.insert(0, "a" + s)`)
-            // keeps its construction +1 forever without the same drain its
-            // sibling handlers (remove/extend/index/count) route through.
-            // Leak-freedom is pinned under the ASan build.
+            // append's adopt), so an owned temp arg must drain or its +1 leaks.
             val = impl_->trackBorrowTemp(node.args[1].get(), val, argTemps);
             if (val->getType() == impl_->f64Type) val = impl_->builder->CreateBitCast(val, impl_->i64Type);
             else if (val->getType() == impl_->i1Type) val = impl_->builder->CreateZExt(val, impl_->i64Type);
@@ -1475,11 +1361,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 idx = impl_->builder->CreatePtrToInt(idx, impl_->i64Type);
             else if (idx->getType() != impl_->i64Type)
                 idx = impl_->builder->CreateZExtOrTrunc(idx, impl_->i64Type);
-            // list[float] -> DragonListF64: pop must return native f64. The
-            // generic i64 pop returns the raw 8 bytes, and the caller's
-            // numeric coercion would SIToFP them - converting the f64 BIT
-            // PATTERN as an integer (garbage). The typed pop returns double so
-            // the value stays unboxed end-to-end (commandment #1).
+            // list[float]: pop must return native f64 - the generic i64 pop's
+            // raw bytes would be SIToFP'd (garbage from the f64 bit pattern).
             if (popElemKind == Type::Kind::Float) {
                 impl_->lastValue = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_list_pop_f64"], {obj, idx},
@@ -1527,8 +1410,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
         if (method == "sort" && node.args.empty()) {
-            // list.sort() / list.sort(reverse=...). reverse= selects descending;
-            // without it the cheaper in-place ascending sort.
+            // sort(reverse=...) selects descending; without it the cheaper
+            // in-place ascending sort.
             Expr* reverseArg = nullptr;
             for (auto& kw : node.kwArgs)
                 if (kw.first == "reverse") reverseArg = kw.second.get();
@@ -1569,23 +1452,17 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         }
     }
 
-    // --- Dict method dispatch ---
+    // Dict method dispatch
     if (isDict) {
         attr.object->accept(*this);
         llvm::Value* obj = impl_->lastValue;
 
-        // Int-keyed dicts store keys as native i64 in the pointer slot. The
-        // generic dragon_dict_get/_has_key/_get_default take `const char*` keys
-        // (str-keyed dicts); calling them with an i64 key is an LLVM signature
-        // mismatch. Route to the dragon_dict_int_* family, which takes i64 keys.
+        // Int-keyed dicts store native i64 keys: route to the dragon_dict_int_*
+        // family, else the char*-keyed generics are a signature mismatch.
         bool intKeyed = impl_->dictKeyIsInt(attr.object.get());
 
-        // dragon_dict_get* return the value as a raw i64. Re-cast it to the
-        // dict's native value type (D030) so consumers that key off the LLVM
-        // type - f-strings, print - treat a str value as a string, not a
-        // pointer-as-int. (A typed binding already coerces via its target; a
-        // bare interpolation has no target, which is why f"{d.get(k)}" printed
-        // a raw pointer int.)
+        // dragon_dict_get* return raw i64: re-cast to the dict's native value
+        // type (D030), else a target-less f"{d.get(k)}" prints a pointer int.
         auto coerceDictValue = [&](llvm::Value* raw) -> llvm::Value* {
             Type::Kind vk = Type::Kind::Unknown;
             if (attr.object->type && attr.object->type->kind() == Type::Kind::Dict)
@@ -1601,9 +1478,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                     return raw;  // int/bool/any flow as i64
             }
         };
-        // A heap-OBJECT value type (list/dict/set/tuple/bytes/instance) - reads
-        // must own the result (incref) or the binding frees the dict's value
-        // (#19). str has its own *_str getters; int/float/bool/Any are not here.
+        // Heap-object value types: reads must own the result (incref) or the
+        // binding's scope decref frees the dict's stored value.
         auto isHeapValueKind = [](Type::Kind k) {
             return k == Type::Kind::List || k == Type::Kind::Dict ||
                    k == Type::Kind::Set  || k == Type::Kind::Tuple ||
@@ -1615,33 +1491,24 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return Type::Kind::Unknown;
         };
 
-        // Owned dict RECEIVER temp drain (mirror of ownedListRecv above).
-        // Conservative allow-list: get/setdefault/keys/values/items are
-        // excluded until their result-ownership contracts are pinned (a
-        // borrowed str value or a mixed-tag values() borrow-list must not
-        // outlive a drained receiver).
+        // Owned dict RECEIVER temp drain. Conservative allow-list: get/
+        // setdefault/keys/values/items excluded - results may borrow the receiver.
         bool ownedDictRecv = impl_->options.gcMode == GCMode::RC &&
                              !Impl::isBorrowedHeapExpr(attr.object.get()) &&
                              impl_->isOwnedPtrResult(obj);
         static const std::set<std::string> kDictRecvDrainOk = {
             "pop", "popitem", "clear", "update"};
-        // Owned heap temporaries for a borrow-method KEY / other-dict arg
-        // (d.get(a+b), d.pop(x+y), d.update(make())). Lookups borrow the key, so
-        // an owned temp is released at the tail below. setdefault and the
-        // default-VALUE args are intentionally NOT tracked here - their key is
-        // transfer-adopted and the default is return-aliased; both are handled
-        // via the runtime ownership contract, not a caller drain. (#3 class A.)
+        // Owned heap temps for borrowed KEY / other-dict args, released at the
+        // tail; setdefault keys and default-VALUE args are NOT tracked (adopted).
         std::vector<std::pair<llvm::Value*, Impl::VarKind>> argTemps;
         bool dictHandled = [&]() -> bool {
 
-        // .get(key) -> dragon_dict_get(dict, key)
+        // .get(key)
         if (method == "get" && node.args.size() == 1) {
             node.args[0]->accept(*this);
             llvm::Value* key = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
-            // Heap-VALUED dict: own the returned value (the getter increfs it) so
-            // the binding's scope-decref balances - a bare borrow would free the
-            // dict's stored value -> UAF (#19). str-keyed key is a ptr, int-keyed
-            // an i64; the matching getter's signature takes each.
+            // Heap-valued dict: own the returned value (the getter increfs) so
+            // the binding's scope-decref balances - a bare borrow would UAF.
             if (isHeapValueKind(dictValueKind())) {
                 impl_->lastValue = impl_->builder->CreateCall(
                     impl_->runtimeFuncs[intKeyed ? "dragon_dict_int_get_owned"
@@ -1656,16 +1523,14 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // .get(key, default) -> dragon_dict_get_default(dict, key, default)
+        // .get(key, default)
         if (method == "get" && node.args.size() == 2) {
             node.args[0]->accept(*this);
             llvm::Value* key = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
             node.args[1]->accept(*this);
             llvm::Value* defVal = impl_->lastValue;
-            // Str-keyed, str-VALUED dict: route to the owned-str getter so a str
-            // local bound to the result is refcount-balanced. The generic getter
-            // returns a BORROWED value which, decref'd at scope exit, double-frees
-            // the dict's stored string. defVal is already an i8* here.
+            // Str-keyed str-valued dict: route to the owned-str getter; the
+            // generic getter's borrowed result would double-free at scope exit.
             Type::Kind getVk = Type::Kind::Unknown;
             if (attr.object->type && attr.object->type->kind() == Type::Kind::Dict)
                 getVk = static_cast<DictType&>(*attr.object->type).valueType->kind();
@@ -1675,11 +1540,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                     {obj, key, defVal}, "dictgetstrdef");
                 return true;
             }
-            // Heap-VALUED (list/dict/set/tuple/bytes/instance): own the result via
-            // the incref-on-return getter so the binding's decref balances (#19).
-            // The default temp is released right after - balanced whether the key
-            // was present (default unused) or absent (default returned: the
-            // getter's incref + this drain net to the binding's single +1).
+            // Heap-valued: own the result via the incref-on-return getter; the
+            // default temp drains right after, balanced present or absent.
             if (isHeapValueKind(getVk)) {
                 Impl::VarKind ddk = impl_->ownedTempDrainKind(node.args[1].get(), defVal);
                 llvm::Value* defPtr = defVal;
@@ -1708,14 +1570,14 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // .keys() -> dragon_dict_keys(dict)
+        // .keys()
         if (method == "keys" && node.args.empty()) {
             impl_->lastValue = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_dict_keys"], {obj}, "dictkeys");
             return true;
         }
 
-        // .has_key(key) -> dragon_dict_has_key(dict, key)
+        // .has_key(key)
         if (method == "has_key" && node.args.size() == 1) {
             node.args[0]->accept(*this);
             llvm::Value* key = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
@@ -1726,10 +1588,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // .values() -> dragon_dict_values(dict)
-        // D039 Phase 9: when the dict's value type is Any, route to
-        // dragon_dict_values_box so the resulting list iterates with box
-        // semantics (preserves per-entry tags for isinstance / print / etc.).
+        // .values(); D039: an Any value type routes to dragon_dict_values_box
+        // so the result list keeps per-entry tags (isinstance / print).
         if (method == "values" && node.args.empty()) {
             bool valueIsAny = false;
             if (auto* objName = dynamic_cast<NameExpr*>(attr.object.get())) {
@@ -1756,15 +1616,14 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // .items() -> dragon_dict_items(dict)
+        // .items()
         if (method == "items" && node.args.empty()) {
             impl_->lastValue = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_dict_items"], {obj}, "dictitems");
             return true;
         }
 
-        // 6.17: .popitem() -> dragon_dict_popitem(dict) - returns DragonTuple*
-        // (LIFO order; raises KeyError on empty dict).
+        // .popitem() returns DragonTuple* (LIFO; raises KeyError on empty dict).
         if (method == "popitem" && node.args.empty()) {
             llvm::Value* tupleI64 = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_dict_popitem"], {obj}, "dictpopitem");
@@ -1773,7 +1632,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // .pop(key) -> dragon_dict_pop(dict, key)
+        // .pop(key)
         if (method == "pop" && node.args.size() == 1) {
             node.args[0]->accept(*this);
             llvm::Value* key = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
@@ -1782,7 +1641,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // .pop(key, default) -> dragon_dict_pop_default(dict, key, default)
+        // .pop(key, default)
         if (method == "pop" && node.args.size() == 2) {
             node.args[0]->accept(*this);
             llvm::Value* key = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
@@ -1797,14 +1656,14 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // .clear() -> dragon_dict_clear(dict)
+        // .clear()
         if (method == "clear" && node.args.empty()) {
             impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_dict_clear"], {obj});
             impl_->lastValue = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*impl_->context));
             return true;
         }
 
-        // .update(other_dict) -> dragon_dict_update(dict, other_dict)
+        // .update(other_dict)
         if (method == "update" && node.args.size() == 1) {
             node.args[0]->accept(*this);
             llvm::Value* other = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
@@ -1813,21 +1672,17 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // .setdefault(key, default) -> dragon_dict_setdefault(dict, key, default)
+        // .setdefault(key, default)
         if (method == "setdefault" && node.args.size() == 2) {
             node.args[0]->accept(*this);
             llvm::Value* key = impl_->lastValue;
             node.args[1]->accept(*this);
             llvm::Value* defVal = impl_->lastValue;
-            // Heap-VALUED dict: own the result via the incref-on-return setdefault
-            // (the setdefault sibling of the owned-get fix). The
-            // key-absent branch ALSO stores the default, tagged correctly, so the
-            // runtime increfs twice (dict's retained copy + binding) - matched by
-            // the SAME owned-temp drain the get-default path uses. A bare borrow
-            // would free the dict's stored value -> UAF.
+            // Heap-valued setdefault: own the result via the incref-on-return
+            // variant (absent branch increfs dict copy + binding); borrow = UAF.
             if (isHeapValueKind(dictValueKind())) {
-                // Own the borrowed heap key so the dict's stored key can't dangle
-                // (the runtime releases it on the present branch). See #20a.
+                // Own the borrowed heap key so the dict's stored key can't
+                // dangle (the runtime releases it on the present branch).
                 impl_->increfBorrowedSetdefaultKey(node.args[0].get(), key);
                 Impl::VarKind ddk = impl_->ownedTempDrainKind(node.args[1].get(), defVal);
                 llvm::Value* defPtr = defVal;
@@ -1842,9 +1697,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 if (ddk != Impl::VarKind::Other) impl_->emitDecrefByKind(defVal, ddk);
                 return true;
             }
-            // Scalar-valued str-keyed dict: no value UAF (scalars aren't heap),
-            // but the KEY still dangles on insert - own the borrowed key (#20a).
-            // The shared dragon_dict_setdefault releases it on its present branch.
+            // Scalar-valued dict: no value UAF, but the KEY still dangles on
+            // insert - own the borrowed key; released on the present branch.
             impl_->increfBorrowedSetdefaultKey(node.args[0].get(), key);
             if (defVal->getType() == impl_->i1Type) defVal = impl_->builder->CreateZExt(defVal, impl_->i64Type);
             else if (defVal->getType() == impl_->f64Type) defVal = impl_->builder->CreateBitCast(defVal, impl_->i64Type);
@@ -1855,7 +1709,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // .copy() -> dragon_dict_copy(dict)
+        // .copy()
         if (method == "copy" && node.args.empty()) {
             impl_->lastValue = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_dict_copy"], {obj}, "dictcopy");
@@ -1873,13 +1727,12 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         }
     }
 
-    // --- Set method dispatch (4.4: real hash-table-backed set) ---
+    // Set method dispatch (hash-table-backed)
     if (isSet) {
         attr.object->accept(*this);
         llvm::Value* obj = impl_->lastValue;
-        // Owned set RECEIVER temp drain (mirror of ownedListRecv above). Set
-        // binary ops return fresh sets whose elements are increfed on add, so
-        // none can borrow from the receiver.
+        // Owned set RECEIVER temp drain: set binary ops return fresh sets with
+        // increfed elements, so none can borrow from the receiver.
         bool ownedSetRecv = impl_->options.gcMode == GCMode::RC &&
                             !Impl::isBorrowedHeapExpr(attr.object.get()) &&
                             impl_->isOwnedPtrResult(obj);
@@ -1887,19 +1740,12 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             "add", "remove", "discard", "clear", "union", "intersection",
             "difference", "symmetric_difference", "issubset", "issuperset",
             "isdisjoint"};
-        // Owned heap temporaries for borrow-method args - the lookup value of
-        // remove/discard (via argToI64) and the other-set arg of the binary ops
-        // (via setArg). set.add is excluded: it runs its own owned-str decref
-        // (the set increfs to own its element). Released at the common tail. (#3.)
+        // Owned heap temps for borrow-method args, released at the tail;
+        // set.add is excluded (it runs its own owned-str decref).
         std::vector<std::pair<llvm::Value*, Impl::VarKind>> argTemps;
         bool setHandled = [&]() -> bool {
 
-        // Helper: encode an arg expr into i64 for set storage / lookup.
-        // Promotes string-literal args to heap strings so RC ownership is
-        // correct (the set incref's whatever it stores). For lookups
-        // (contains / discard / remove), content hashing makes the heap-vs-
-        // literal distinction irrelevant - but we go through the same path
-        // for code simplicity.
+        // Encode an arg expr into i64 for set storage / lookup.
         auto argToI64 = [&](size_t i) -> llvm::Value* {
             node.args[i]->accept(*this);
             llvm::Value* v = impl_->lastValue;
@@ -1921,13 +1767,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             v = impl_->lastValue;
             if (v->getType()->isPointerTy()) {
                 v = impl_->ensureHeapString(v, node.args[0].get());
-                // dragon_set_add INCREFS to take its own reference, so an
-                // owned +1 temp (concat / str() / the dup ensureHeapString
-                // just made) must be released after the call or every add
-                // leaks one string. Borrowed reads (s.add(name)) have no +1
-                // to drop and are skipped by isOwnedStrResult. Gated on the
-                // arg's static str type: a non-str owned pointer would need
-                // dragon_decref, not the string-header walk.
+                // dragon_set_add INCREFS, so an owned +1 str temp must drain or
+                // every add leaks; str-gated (non-str would need dragon_decref).
                 bool argIsStr =
                     (node.args[0]->type &&
                      node.args[0]->type->kind() == Type::Kind::Str) ||
@@ -1941,11 +1782,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             } else if (v->getType() == impl_->f64Type) {
                 v = impl_->builder->CreateBitCast(v, impl_->i64Type);
             }
-            // An empty set() is allocated untagged (TAG_INT -> raw i64 hashing),
-            // which mis-hashes and never decrefs string elements. Teach the set
-            // its element type from the first added value's static type; the
-            // runtime adopts it only while the set is still empty (free, no
-            // rehash). Set literals are already tagged, so this is a no-op there.
+            // An empty set() is untagged (raw i64 hashing, no str decref): adopt
+            // the element tag from the first add; runtime accepts it only while empty.
             {
                 int64_t addTag = 0;
                 if (node.args[0]->type)
@@ -2067,14 +1905,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         }
     }
 
-    // --- super parent-method dispatch ---
-    // Two mode-exclusive spellings dispatch a call to the parent class's method:
-    //  .dr keyword form: `super.method(args)` (attr.object is NameExpr "super")
-    //  .py Python form: `super().method(args)` (attr.object is a CallExpr of "super")
-    // The `super` surface tracks the file mode, like braces-vs-indent: .dr rejects
-    // the Python spelling and .py rejects the keyword spelling, so neither leaks
-    // into the other. `super().__init__(...)` / `super(args)` (ctor delegation) are
-    // handled in CallExpr.cpp; here we only see parent *method* calls.
+    // super parent-method dispatch: .dr spells it `super.m(...)`, .py
+    // `super().m(...)`, mode-exclusive; ctor delegation lives in CallExpr.cpp.
     {
         bool bareSuper = false;    // super.method(...)
         bool calledSuper = false;  // super().method(...)
@@ -2110,16 +1942,11 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 return fail("in .py mode, call a parent method as `super()." + method +
                     "(...)` - bare `super." + method + "` is .dr-mode syntax");
 
-            // Resolve the parent's owning module so a cross-module parent's method
-            // picks the right `<ParentMod>__Parent_<method>` symbol.
-            auto parentIt = impl_->classParentNames.find(impl_->currentClassName);
-            if (parentIt != impl_->classParentNames.end()) {
-                auto pmIt = impl_->classOwningModule.find(parentIt->second);
-                std::string parentMod = pmIt != impl_->classOwningModule.end()
-                                            ? pmIt->second
-                                            : impl_->currentModuleName;
-                std::string parentMethodName =
-                    Impl::mangleClass(parentMod, parentIt->second) + "_" + method;
+            // Parent entry IS its sym, so the method symbol is direct.
+            auto parentIt = impl_->classParentNamesBySym.find(
+                impl_->classSym(impl_->currentClassName));
+            if (parentIt != impl_->classParentNamesBySym.end()) {
+                std::string parentMethodName = parentIt->second + "_" + method;
                 auto* parentMethod = impl_->module->getFunction(parentMethodName);
                 if (parentMethod) {
                     auto* selfAlloca = impl_->lookupVar("self");
@@ -2154,8 +1981,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         }
     }
 
-    // --- Static method dispatch: ClassName.method(args) ---
-    // Check if the object is a class name directly (not an instance variable)
+    // Static method dispatch: ClassName.method(args)
     if (auto* objName = dynamic_cast<NameExpr*>(attr.object.get())) {
         if (impl_->classNames.count(objName->name)) {
             std::string methodFuncName =
@@ -2165,7 +1991,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 if (methodFunc) {
                     // Static method: do NOT pass self
                     std::vector<llvm::Value*> args;
-                    // Owned heap-temp args to release after the call (#3 class A).
+                    // Owned heap-temp args to release after the call.
                     std::vector<std::pair<llvm::Value*, Impl::VarKind>> argTemps;
                     auto methodFuncType = methodFunc->getFunctionType();
                     for (size_t i = 0; i < node.args.size(); ++i) {
@@ -2194,10 +2020,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         }
     }
 
-    // --- Static method via a module-qualified class: mod.Class.method(args) ---
-    // The receiver `mod.Class` is an AttributeExpr whose object (`mod`) is a
-    // Module. The same-NameExpr block above only catches a bare `Class.method`;
-    // without this, `mod.Class.staticmethod()` silently compiled to nothing.
+    // Static method via a module-qualified class: mod.Class.method(args).
+    // Without this path, `mod.Class.staticmethod()` silently compiles to nothing.
     if (auto* objAttr = dynamic_cast<AttributeExpr*>(attr.object.get())) {
         if (objAttr->object && objAttr->object->type &&
             objAttr->object->type->kind() == Type::Kind::Module &&
@@ -2209,7 +2033,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             if (impl_->staticMethods.count(methodFuncName)) {
                 if (auto* methodFunc = impl_->module->getFunction(methodFuncName)) {
                     std::vector<llvm::Value*> args;
-                    // Owned heap-temp args to release after the call (#3 class A).
+                    // Owned heap-temp args to release after the call.
                     std::vector<std::pair<llvm::Value*, Impl::VarKind>> argTemps;
                     auto methodFuncType = methodFunc->getFunctionType();
                     for (size_t i = 0; i < node.args.size(); ++i) {
@@ -2240,45 +2064,32 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         }
     }
 
-    // --- Class instance method dispatch ---
+    // Class instance method dispatch
     if (auto* objName = dynamic_cast<NameExpr*>(attr.object.get())) {
         std::string className;
         std::string owningModule;
         if (objName->name == "self" && !impl_->currentClassName.empty()) {
             className = impl_->currentClassName;
             owningModule = impl_->currentModuleName;
+        } else if (const auto* gb = impl_->globalClassBindingFor(objName->name)) {
+            // Unshadowed module global: the scoped binding is authoritative.
+            className = gb->className;
+            owningModule = gb->owningModule;
         } else {
             auto vit = impl_->varClassNames.find(objName->name);
             if (vit != impl_->varClassNames.end()) className = vit->second;
-            // Per-instance owning module - populated in Assign.cpp when the
-            // RHS is a class instantiation. Falls back to the class's
-            // forwardDeclareClasses-recorded owner if the var was assigned
-            // through a path that didn't carry module info (e.g. function
-            // return value).
+            // Per-instance owning module (recorded at instantiation in Assign.cpp);
+            // falls back to the class's recorded owner when the var carried none.
             auto vmIt = impl_->varClassOwningModule.find(objName->name);
             if (vmIt != impl_->varClassOwningModule.end()) {
                 owningModule = vmIt->second;
             } else if (!className.empty()) {
-                // Route through the alias-aware resolver, not the raw
-                // last-write-wins classOwningModule map: a var assigned through
-                // a path that didn't record its owning module (e.g. a function
-                // return value) must still honor `from X import Class` scoping,
-                // or method dispatch picks a same-named class from another
-                // co-compiled module.
+                // Alias-aware resolver, not the last-write-wins map, else dispatch
+                // picks a same-named class from another co-compiled module.
                 owningModule = impl_->resolveClassOwningModule(className);
             }
-            // AUTHORITATIVE OVERRIDE. varClassNames/varClassOwningModule are
-            // program-wide, keyed by bare variable name only, and never cleared:
-            // a `v: Val` local in one module and a `v: FileVFS` local in another
-            // co-compiled module share the one `v` entry, so a stale (class,
-            // module) pair leaks across functions. When it is the MODULE that
-            // goes stale, resolveMethodFunction mangles the (correct) class under
-            // the wrong module, fails to find its own method, and walks UP to the
-            // parent - silently dispatching FileVFS.size() to the base VFS.size().
-            // The type checker already proved this receiver's exact type, so trust
-            // it: pin (class, module) from the resolved InstanceType, but only when
-            // that pin actually resolves the method, so this can only correct a
-            // misdispatch, never introduce one.
+            // AUTHORITATIVE OVERRIDE: the bare-name maps can hold a stale (class,
+            // module); pin both from the InstanceType when that pin resolves the method.
             if (attr.object->type &&
                 attr.object->type->kind() == Type::Kind::Instance) {
                 auto* inst = static_cast<InstanceType*>(attr.object->type.get());
@@ -2297,20 +2108,13 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             }
         }
         if (!className.empty()) {
-            // MRO lookup via the shared resolver - walks the inheritance
-            // chain and mangles each level's symbol per its owning module
-            // so two same-named classes from different modules don't collide.
+            // MRO lookup: walk the chain, mangling each level per its owning
+            // module so same-named classes from different modules don't collide.
             std::string methodFuncName;
             auto* methodFunc = impl_->resolveMethodFunction(
                 owningModule, className, method, &methodFuncName);
-            // Self-correct a STALE owning module. varClassOwningModule is
-            // program-wide and never cleared, and not every binding site
-            // refreshes it (params/globals now do via bindClassVar; loop vars
-            // and some assignment fallbacks still set only varClassNames). So a
-            // stored owner can be left over from an earlier same-named binding
-            // in another function. className is always fresh, so when the stored
-            // owner fails to resolve the method, re-resolve the module from the
-            // (canonical, alias-aware) className before giving up.
+            // Self-correct a stale owning module: when the stored owner fails to
+            // resolve the method, re-resolve it from the (alias-aware) className.
             if (!methodFunc) {
                 std::string fresh = impl_->resolveClassOwningModule(className);
                 if (fresh != owningModule) {
@@ -2338,13 +2142,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 std::vector<std::pair<llvm::Value*, Impl::VarKind>> argTemps;
                 auto mpkIt = impl_->funcParamKinds.find(methodFuncName);
                 unsigned paramOffset = isStaticCall ? 0 : 1;
-                // A variadic method (`*args`/`**kwargs`) packs surplus
-                // positionals into a list and surplus keywords into a dict
-                // (self already at args[0]), exactly like a variadic free
-                // function; the packs drain through argTemps at the tail. This
-                // takes precedence over the fixed-arity spread path. Non-variadic
-                // spread calls expand through the shared routine; plain calls
-                // keep the original positional + kwarg loops verbatim.
+                // A variadic method packs surplus positionals/keywords (self at
+                // args[0]); precedes the fixed-arity spread path; drains via argTemps.
                 if (impl_->funcVarArgInfo.count(methodFuncName)) {
                     if (!impl_->packVarArgMethodArgs(
                             *this, node, methodFuncName, methodFuncType, args,
@@ -2360,9 +2159,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                     node.args[i]->accept(*this);
                     llvm::Value* arg = impl_->lastValue;
                     unsigned paramIdx = (unsigned)(i + paramOffset);
-                    // An own param ADOPTS the arg's +1 (moved binding or
-                    // fresh temp): the callee releases it; a caller drain
-                    // here would double-free (A/B-proven fresh-temp probe).
+                    // An own param ADOPTS the arg's +1: the callee releases it; a
+                    // caller drain would double-free (A/B-proven fresh-temp probe).
                     bool argDrained = impl_->paramIsOwn(methodFuncName, paramIdx);
                     if (!argDrained &&
                         mpkIt != impl_->funcParamKinds.end() &&
@@ -2375,30 +2173,14 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                         }
                     }
                     if (!argDrained) {
-                        // A MONOMORPHIZED GENERIC method (e.g. assertEqual[T])
-                        // records its T param as a non-heap kind (T is erased ->
-                        // Other), so argTempDecrefKind bails at !isHeapKind and an
-                        // OWNED box result passed to it leaked one object per call
-                        // (`self.assertEqual(m[k], v)`). Drain ONLY a provably-
-                        // OWNED BOX: isOwnedBoxResult has an explicit borrowed-
-                        // returner denylist (dict_get_box / dict_int_get_box /
-                        // list_box_get => false), so a borrowed dict[str,Any]/
-                        // list[Any] element is never double-freed.
+                        // Monomorphized generic (T erased -> non-heap kind): drain ONLY
+                        // a provably-owned box (isOwnedBoxResult denylists borrows).
                         if (arg->getType() == impl_->boxType) {
                             if (impl_->isOwnedBoxResult(arg))
                                 argTemps.emplace_back(arg, Impl::VarKind::Union);
                         } else {
-                            // NATIVE owned temps (`assertEqual(a + b + [5], ...)`,
-                            // `assertEqual(mklist(), ...)`) leaked one object per
-                            // call through the same erased-T gap. ownedTempDrainKind
-                            // gates on the EXPRESSION first (borrowed Name/Attribute/
-                            // element reads return Other), then the static type,
-                            // then value provenance - so the borrowed int-keyed
-                            // dict[int,str] `d[k]` getter that double-freed a bare
-                            // isOwnedStrResult cut (A/B-proven UAF in
-                            // test_augassign_targets + test_builtin_quickwins) is
-                            // rejected at the expression gate before isOwnedStrResult
-                            // is ever consulted.
+                            // ownedTempDrainKind gates on the expression first, so a borrowed
+                            // read never double-frees (A/B-proven UAF, test_augassign_targets).
                             Impl::VarKind dk = impl_->ownedTempDrainKind(
                                 node.args[i].get(), arg);
                             if (dk != Impl::VarKind::Other)
@@ -2409,14 +2191,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                         arg = impl_->coerceArgFromExpr(node.args[i].get(), arg, methodFuncType->getParamType(paramIdx));
                     args.push_back(arg);
                 }
-                // D040: bind call-site keyword arguments past `self` to their
-                // named parameter slots. Without this, kwargs to instance
-                // methods were silently dropped and fillDefaultArgs filled the
-                // slots with defaults - a silent miscompile (self.greet("Ada",
-                // greeting="Hello") used the default greeting). funcParamNames
-                // for a method INCLUDES "self" at index 0 (ImplInit.cpp), so a
-                // std::find over it yields the correct LLVM param index
-                // directly - do NOT add paramOffset.
+                // D040: bind keyword args to named param slots (else silently
+                // dropped); funcParamNames includes "self" at 0, no paramOffset.
                 if (!node.kwArgs.empty()) {
                     auto pnIt = impl_->funcParamNames.find(methodFuncName);
                     if (pnIt != impl_->funcParamNames.end()) {
@@ -2461,25 +2237,17 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                     }
                 }
                 }  // end non-spread arg build (else branch of callHasSpread)
-                // Fill missing args with default values. Route the sink so a
-                // synthesized heap default (`= [10, 20]`) is drained after the
-                // call like every other owned arg temp - the free-function path
-                // (CallExpr) passes it too; without the sink, methods leak one
-                // default per omitting call.
+                // Fill missing args with defaults; the argTemps sink drains a
+                // synthesized heap default, else one leaks per omitting call.
                 impl_->fillDefaultArgs(methodFuncName, methodFunc, args, *this,
                                        &argTemps);
 
-                // D026 virtual dispatch. Devirtualize to a direct call (C-speed)
-                // unless a subclass overrides this method - then the receiver,
-                // though statically typed as `className`, may be a subclass at
-                // runtime, so dispatch through its vtable (one indirect load +
-                // call, the same path the D025 dynamic case uses). The
-                // whole-program override check keeps the direct call for every
-                // leaf / non-overridden site.
+                // D026 virtual dispatch: devirtualize to a direct call unless a
+                // subclass overrides - then the receiver may be one, use its vtable.
                 llvm::Value* callee = methodFunc;
                 if (!isStaticCall && impl_->methodIsOverridden(className, method)) {
-                    auto idxIt = impl_->classMethodVtableIndices.find(className);
-                    if (idxIt != impl_->classMethodVtableIndices.end()) {
+                    auto idxIt = impl_->classMethodVtableIndicesBySym.find(impl_->classSym(className));
+                    if (idxIt != impl_->classMethodVtableIndicesBySym.end()) {
                         auto mIt = idxIt->second.find(method);
                         if (mIt != idxIt->second.end()) {
                             // self is args[0]; load vtable (struct offset 2),
@@ -2501,8 +2269,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                     }
                 }
 
-                // Exception-safe temps: unwind frees on raise, pop+decref on
-                // normal return (mirrors the free-function call path).
+                // Exception-safe temps: unwind frees on raise, pop+decref on return.
                 auto argTempBases = impl_->pushArgTempCleanups(argTemps);
                 if (methodFuncType->getReturnType()->isVoidTy()) {
                     impl_->builder->CreateCall(methodFuncType, callee, args);
@@ -2518,32 +2285,20 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 return true;
             }
 
-            // No method found - check if it's a callable field (ptr type)
-            // e.g., route.handler(req, res, ctx) where handler is a ptr field.
-            //
-            // Bug A: the field can hold either a bare LLVM function pointer
-            // (assigned a non-capturing lambda or top-level def) or a
-            // DragonClosure* (assigned a capturing lambda). The two shapes
-            // need different ABI: the closure's fn_ptr expects a trailing
-            // i8* env, the bare pointer doesn't. Discriminate at runtime by
-            // reading the DragonObjectHeader.type_tag (offset 8) - if it's
-            // DRAGON_TAG_CLOSURE (10), unwrap fn_ptr+env from the closure
-            // struct and call with env appended; otherwise call the value
-            // as a bare function pointer.
+            // No method found: try a callable field (route.handler(...)). It may hold
+            // a bare fn ptr or a DragonClosure* (trailing i8* env ABI) - tag-checked.
             {
-                auto fieldIt = impl_->classFieldIndices.find(className);
-                auto fieldTypeIt = impl_->classFieldTypes.find(className);
-                if (fieldIt != impl_->classFieldIndices.end() &&
-                    fieldTypeIt != impl_->classFieldTypes.end()) {
+                auto fieldIt = impl_->classFieldIndicesBySym.find(impl_->classSym(className));
+                auto fieldTypeIt = impl_->classFieldTypesBySym.find(impl_->classSym(className));
+                if (fieldIt != impl_->classFieldIndicesBySym.end() &&
+                    fieldTypeIt != impl_->classFieldTypesBySym.end()) {
                     auto idxIt = fieldIt->second.find(method);
                     if (idxIt != fieldIt->second.end()) {
-                        // Load the object pointer
                         attr.object->accept(*this);
                         llvm::Value* objPtr = impl_->lastValue;
                         if (!objPtr->getType()->isPointerTy())
                             objPtr = impl_->builder->CreateIntToPtr(objPtr, impl_->i8PtrType);
-                        // GEP to the field
-                        auto structIt = impl_->classStructTypes.find(className);
+                        auto structIt = impl_->classStructTypesBySym.find(impl_->classSym(className));
                         auto* gep = impl_->builder->CreateStructGEP(
                             structIt->second, objPtr, idxIt->second, method + "_ptr");
                         auto* fieldType = fieldTypeIt->second[method];
@@ -2552,20 +2307,16 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                         if (!fnPtr->getType()->isPointerTy())
                             fnPtr = impl_->builder->CreateIntToPtr(fnPtr, impl_->i8PtrType);
 
-                        // Recover the user-facing FunctionType when the field
-                        // was declared as `Callable[[A,B,...], R]`. Without
-                        // it we fall back to a synthetic all-i64 signature
-                        // (legacy path - works on x86-64 only because GP
-                        // regs alias ptr/i64 args).
-                        auto cfIt = impl_->classFieldCallableType.find(className);
+                        // Recover the declared Callable[[A,...], R] FunctionType;
+                        // else the synthetic all-i64 fallback (x86-64 GP aliasing).
+                        auto cfIt = impl_->classFieldCallableTypeBySym.find(impl_->classSym(className));
                         llvm::FunctionType* userFnType = nullptr;
-                        if (cfIt != impl_->classFieldCallableType.end()) {
+                        if (cfIt != impl_->classFieldCallableTypeBySym.end()) {
                             auto fIt = cfIt->second.find(method);
                             if (fIt != cfIt->second.end()) userFnType = fIt->second;
                         }
 
-                        // Evaluate user args once, and coerce to the recovered
-                        // signature when known; else keep the legacy i64 path.
+                        // Evaluate args once; coerce to the recovered signature when known.
                         std::vector<llvm::Value*> userArgs;
                         std::vector<llvm::Type*> bareArgTypes;
                         for (size_t i = 0; i < node.args.size(); ++i) {
@@ -2599,12 +2350,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                         auto* closureFnType = llvm::FunctionType::get(
                             retTy, closureArgTypes, false);
 
-                        // Runtime tag check: load DragonObjectHeader.type_tag
-                        // (the byte at offset 8 of every heap-allocated GC
-                        // header). For a bare LLVM fn pointer this reads a
-                        // byte from the function's prologue in .text - safe
-                        // (r-x mapping) and statistically ~never equal to
-                        // DRAGON_TAG_CLOSURE (10), so the bare path stays.
+                        // Tag check: read type_tag (offset 8). For a bare fn ptr this
+                        // reads .text - safe (r-x) and ~never DRAGON_TAG_CLOSURE.
                         auto* i8Ty = llvm::Type::getInt8Ty(*impl_->context);
                         auto* tagAddr = impl_->builder->CreateGEP(
                             i8Ty, fnPtr,
@@ -2626,7 +2373,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                             *impl_->context, method + ".cont", fn);
                         impl_->builder->CreateCondBr(isClosure, closureBB, bareBB);
 
-                        // -- Closure path: unwrap DragonClosure { hdr, fn_ptr, env } --
+                        // Closure path: unwrap DragonClosure { hdr, fn_ptr, env }
                         impl_->builder->SetInsertPoint(closureBB);
                         auto* closureStructType = llvm::StructType::getTypeByName(
                             *impl_->context, "DragonClosure");
@@ -2659,7 +2406,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                         impl_->builder->CreateBr(mergeBB);
                         auto* closureEndBB = impl_->builder->GetInsertBlock();
 
-                        // -- Bare path: legacy fn pointer call --
+                        // Bare path: legacy fn pointer call
                         impl_->builder->SetInsertPoint(bareBB);
                         llvm::Value* bareRet = nullptr;
                         if (bareFnType->getReturnType()->isVoidTy()) {
@@ -2672,7 +2419,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                         impl_->builder->CreateBr(mergeBB);
                         auto* bareEndBB = impl_->builder->GetInsertBlock();
 
-                        // -- Merge --
+                        // Merge
                         impl_->builder->SetInsertPoint(mergeBB);
                         if (retTy->isVoidTy()) {
                             impl_->lastValue = llvm::ConstantPointerNull::get(
@@ -2689,36 +2436,20 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 }
             }
         } else {
-            // Decision 026: Vtable dynamic dispatch - className unknown
-            // (e.g., obj = cls(); obj.speak() where cls is a first-class class value)
+            // D026 vtable dynamic dispatch: className unknown (obj = cls(); obj.speak()).
             auto vk = impl_->lookupVarKind(objName->name);
             if (vk == Impl::VarKind::ClassInstance) {
-                // Last-resort dispatch for a class instance whose concrete class
-                // the compiler failed to record (a className-tracking gap - real
-                // code has a known class: classes are not first-class values, and
-                // isinstance narrowing now records the narrowed class). With no
-                // class we cannot know which same-named method is the target, so
-                // we must not GUESS a signature: an arity mismatch would emit a
-                // malformed indirect call (LLVM "Incorrect number of arguments").
-                // Accept a vtable candidate ONLY when its signature matches this
-                // call's arity; otherwise fall through to the clean "cannot
-                // resolve method" diagnostic (CallExpr.cpp). All classes in a
-                // hierarchy share a method's vtable index, so an arity match is
-                // the safe common denominator.
+                // No concrete class recorded: accept a vtable candidate ONLY on arity
+                // match, else a wrong-arity indirect call would be malformed IR.
                 const size_t wantParams = node.args.size() + 1;  // self + args
                 int methodIndex = -1;
                 llvm::FunctionType* methodFuncType = nullptr;
-                for (auto& [cls, methodMap] : impl_->classMethodVtableIndices) {
+                for (auto& [cls, methodMap] : impl_->classMethodVtableIndicesBySym) {
                     auto it = methodMap.find(method);
                     if (it == methodMap.end()) continue;
-                    // MRO walk via the shared resolver - vtable's stored
-                    // function pointer must match a real mangled symbol
-                    // for the class or one of its parents.
-                    auto cmIt = impl_->classOwningModule.find(cls);
-                    std::string clsMod = cmIt != impl_->classOwningModule.end()
-                                             ? cmIt->second
-                                             : impl_->currentModuleName;
-                    auto* func = impl_->resolveMethodFunction(clsMod, cls, method);
+                    // `cls` is a sym; mangleClass("", sym) inside the resolver
+                    // is the identity, so the direct + chain lookups are exact.
+                    auto* func = impl_->resolveMethodFunction("", cls, method);
                     if (func && func->getFunctionType()->getNumParams() == wantParams) {
                         methodIndex = (int)it->second;
                         methodFuncType = func->getFunctionType();
@@ -2727,13 +2458,12 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 }
 
                 if (methodIndex >= 0 && methodFuncType) {
-                    // Load object pointer
                     attr.object->accept(*this);
                     llvm::Value* objPtr = impl_->lastValue;
                     if (!objPtr->getType()->isPointerTy())
                         objPtr = impl_->builder->CreateIntToPtr(objPtr, impl_->i8PtrType);
 
-                    // Load vtable pointer from struct offset 2 using a minimal header struct type
+                    // Load vtable from header struct offset 2.
                     auto* headerStructType = llvm::StructType::get(*impl_->context,
                         {impl_->i64Type, impl_->i64Type, impl_->i8PtrType});
                     auto* vtableSlot = impl_->builder->CreateStructGEP(
@@ -2741,7 +2471,6 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                     auto* vtablePtr = impl_->builder->CreateLoad(
                         impl_->i8PtrType, vtableSlot, "vtable");
 
-                    // GEP into vtable array to get method function pointer
                     auto* vtableArrayType = llvm::ArrayType::get(impl_->i8PtrType, 0);
                     auto* methodSlot = impl_->builder->CreateGEP(
                         vtableArrayType, vtablePtr,
@@ -2750,7 +2479,6 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                     auto* methodPtr = impl_->builder->CreateLoad(
                         impl_->i8PtrType, methodSlot, "method_ptr");
 
-                    // Build argument list: self + user args
                     std::vector<llvm::Value*> args;
                     args.push_back(objPtr); // self
                     for (size_t i = 0; i < node.args.size(); ++i) {
@@ -2762,7 +2490,6 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                         args.push_back(arg);
                     }
 
-                    // Indirect call through vtable
                     if (methodFuncType->getReturnType()->isVoidTy()) {
                         impl_->builder->CreateCall(methodFuncType, methodPtr, args);
                         impl_->lastValue = llvm::ConstantPointerNull::get(
@@ -2777,19 +2504,13 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         }
     }
 
-    // --- Class instance method dispatch on a non-Name receiver ---
-    // Handles `make_box(42).show()`, `(a + b).render()`, `arr[0].id()` - anything
-    // whose class identity can be resolved statically via `resolveExprClassName`.
-    // Without this, chained method calls on temporaries silently fall through
-    // and produce `i64 0`, masking the real call entirely.
+    // Class instance dispatch on a non-Name receiver (make_box(42).show(),
+    // arr[0].id()); without it, chained calls silently produce i64 0.
     if (!dynamic_cast<NameExpr*>(attr.object.get())) {
         std::string className = impl_->resolveExprClassName(attr.object.get());
         if (!className.empty() && impl_->classNames.count(className)) {
-            // Owning module via the alias-aware resolver so a chained call on a
-            // temporary (`s.field(...).optional(...)`) honors `from X import
-            // Class` scoping. Without per-expression module tracking the base
-            // is the importing module's alias (or the same-module probe); it
-            // falls back to last-write-wins only when neither applies.
+            // Alias-aware owning-module resolution so a chained call on a temporary
+            // honors `from X import Class` scoping; last-write-wins only as fallback.
             std::string owningModule =
                 impl_->resolveClassOwningModule(className);
             std::string methodFuncName;
@@ -2814,9 +2535,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 }
                 auto mpkIt = impl_->funcParamKinds.find(methodFuncName);
                 unsigned paramOffset = isStaticCall ? 0 : 1;
-                // Variadic method on a non-Name receiver - pack `*args`/`**kwargs`
-                // (self already pushed), same as the NameExpr-receiver block
-                // above. Precedes the fixed-arity spread path.
+                // Variadic method: pack `*args`/`**kwargs` (self already pushed);
+                // precedes the fixed-arity spread path.
                 if (impl_->funcVarArgInfo.count(methodFuncName)) {
                     if (!impl_->packVarArgMethodArgs(
                             *this, node, methodFuncName, methodFuncType, args,
@@ -2832,9 +2552,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                     node.args[i]->accept(*this);
                     llvm::Value* arg = impl_->lastValue;
                     unsigned paramIdx = (unsigned)(i + paramOffset);
-                    // An own param ADOPTS the arg's +1 (moved binding or
-                    // fresh temp): the callee releases it; a caller drain
-                    // here would double-free (A/B-proven fresh-temp probe).
+                    // An own param ADOPTS the arg's +1: the callee releases it; a
+                    // caller drain would double-free (A/B-proven fresh-temp probe).
                     bool argDrained = impl_->paramIsOwn(methodFuncName, paramIdx);
                     if (!argDrained &&
                         mpkIt != impl_->funcParamKinds.end() &&
@@ -2847,12 +2566,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                         }
                     }
                     if (!argDrained) {
-                        // Monomorphized generic method (T erased -> non-heap kind):
-                        // drain a provably-owned BOX (isOwnedBoxResult has a
-                        // borrowed-returner denylist), or a NATIVE owned temp via
-                        // ownedTempDrainKind (expression-gated first, so borrowed
-                        // getters never reach the isOwnedStrResult false-positive -
-                        // see the NameExpr-receiver path above).
+                        // Monomorphized generic (T erased): drain a provably-owned box
+                        // or a native owned temp; both classifiers reject borrows first.
                         if (arg->getType() == impl_->boxType) {
                             if (impl_->isOwnedBoxResult(arg))
                                 argTemps.emplace_back(arg, Impl::VarKind::Union);
@@ -2867,11 +2582,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                         arg = impl_->coerceArgFromExpr(node.args[i].get(), arg, methodFuncType->getParamType(paramIdx));
                     args.push_back(arg);
                 }
-                // D040: bind call-site keyword arguments past `self` to their
-                // named parameter slots (same as the NameExpr-receiver path
-                // above). funcParamNames INCLUDES "self" at index 0, so the
-                // std::find index is already the LLVM param position - no
-                // paramOffset added.
+                // D040: bind keyword args to named param slots; funcParamNames
+                // includes "self" at 0, no paramOffset.
                 if (!node.kwArgs.empty()) {
                     auto pnIt = impl_->funcParamNames.find(methodFuncName);
                     if (pnIt != impl_->funcParamNames.end()) {
@@ -2916,23 +2628,16 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                     }
                 }
                 }  // end non-spread arg build (else branch of callHasSpread)
-                // Fill omitted trailing parameters with their defaults - same as
-                // the NameExpr-receiver path above. Without this, a call on a
-                // field/temporary receiver (`self.ctx.wrap_socket(s, False, h)`
-                // omitting do_handshake_on_connect=True) passed too few args and
-                // LLVM rejected the call.
-                // Sink wired for the same reason as the NameExpr-receiver path
-                // above: method heap defaults must drain.
+                // Fill omitted params with defaults (too few args is malformed IR);
+                // the argTemps sink drains synthesized heap defaults.
                 impl_->fillDefaultArgs(methodFuncName, methodFunc, args, *this,
                                        &argTemps);
 
-                // D026 virtual dispatch on a non-Name receiver (temporaries,
-                // `make(...).speak()`, `arr[0].speak()`): same devirtualize-
-                // unless-overridden rule as the NameExpr path above.
+                // D026: same devirtualize-unless-overridden rule as the NameExpr path.
                 llvm::Value* callee = methodFunc;
                 if (!isStaticCall && impl_->methodIsOverridden(className, method)) {
-                    auto idxIt = impl_->classMethodVtableIndices.find(className);
-                    if (idxIt != impl_->classMethodVtableIndices.end()) {
+                    auto idxIt = impl_->classMethodVtableIndicesBySym.find(impl_->classSym(className));
+                    if (idxIt != impl_->classMethodVtableIndicesBySym.end()) {
                         auto mIt = idxIt->second.find(method);
                         if (mIt != idxIt->second.end()) {
                             auto* headerTy = llvm::StructType::get(*impl_->context,
@@ -2970,7 +2675,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         }
     }
 
-    // --- Stdlib module method dispatch (e.g., math.sqrt) ---
+    // Stdlib module method dispatch (e.g. math.sqrt)
     if (auto* objName = dynamic_cast<NameExpr*>(attr.object.get())) {
         std::string qualName = objName->name + "." + method;
         auto aliasIt = impl_->symbolAliases.find(qualName);

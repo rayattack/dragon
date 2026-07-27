@@ -1,30 +1,17 @@
 # uuid.dr - Dragon standard library: UUID generation
 #
 # Provides UUID v4 (random) generation and UUID string utilities.
-# Uses libc rand()/srand() for randomness - not cryptographically secure.
+#
+# Randomness comes from the OS CSPRNG (getrandom/getentropy) via
+# `dragon_urandom`, not libc rand(). A time-seeded LCG made two processes that
+# started in the same second emit identical UUIDs, which breaks the one
+# property a UUID is supposed to have.
 
 #===----------------------------------------------------------------------===#
 # C extern declarations
 #===----------------------------------------------------------------------===#
 
-extern "C" def rand() -> intc
-extern "C" def srand(seed: intc)
-extern "C" def time(tloc: ptr) -> int
-
-const RAND_MAX: int = 2147483647
-
-#===----------------------------------------------------------------------===#
-# Internal state
-#===----------------------------------------------------------------------===#
-
-_seeded: bool = false
-
-def _ensure_seeded() {
-    if _seeded == false {
-        srand(time(none))
-        _seeded = true
-    }
-}
+extern "C" def dragon_urandom(n: int) -> bytes
 
 #===----------------------------------------------------------------------===#
 # Hex helpers
@@ -35,17 +22,17 @@ def _hex_char(v: int) -> str {
     return f"{v:x}"
 }
 
-def _rand_hex_char() -> str {
-    # Return one random hex character.
-    return _hex_char(rand() % 16)
+def _hex_byte(v: int) -> str {
+    # Map 0-255 to two hex characters, high nibble first.
+    return _hex_char((v >> 4) & 15) + _hex_char(v & 15)
 }
 
-def _rand_hex(n: int) -> str {
-    # Return a string of n random hex characters.
+def _hex_range(b: bytes, start: int, end: int) -> str {
+    # Hex-encode b[start:end].
     result: str = ""
-    i: int = 0
-    while i < n {
-        result = result + _rand_hex_char()
+    i: int = start
+    while i < end {
+        result = result + _hex_byte(b[i])
         i = i + 1
     }
     return result
@@ -58,21 +45,20 @@ def _rand_hex(n: int) -> str {
 def uuid4() -> str {
     # Generate a random UUID v4 string.
     # Format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
-    # Version nibble (position 13) is always '4'.
-    # Variant nibble (position 19) is one of '8','9','a','b'.
-    _ensure_seeded()
+    #
+    # RFC 4122 s4.4: take 16 random bytes, then overwrite the version nibble
+    # (high nibble of byte 6) with 4 and the variant bits (top two bits of
+    # byte 8) with 10. The other 122 bits stay random.
+    const b: bytes = dragon_urandom(16)
 
-    # 8 hex chars
-    const p1: str = _rand_hex(8)
-    # 4 hex chars
-    const p2: str = _rand_hex(4)
-    # 4xxx: version nibble is '4', then 3 random hex
-    const p3: str = "4" + _rand_hex(3)
-    # yxxx: variant nibble is 8/9/a/b, then 3 random hex
-    const variant: int = 8 + rand() % 4
-    const p4: str = _hex_char(variant) + _rand_hex(3)
-    # 12 hex chars
-    const p5: str = _rand_hex(12)
+    const b6: int = (b[6] & 15) | 64      # 0x4_ : version 4
+    const b8: int = (b[8] & 63) | 128     # 10xx xxxx : RFC 4122 variant
+
+    const p1: str = _hex_range(b, 0, 4)
+    const p2: str = _hex_range(b, 4, 6)
+    const p3: str = _hex_byte(b6) + _hex_byte(b[7])
+    const p4: str = _hex_byte(b8) + _hex_byte(b[9])
+    const p5: str = _hex_range(b, 10, 16)
 
     return f"{p1}-{p2}-{p3}-{p4}-{p5}"
 }

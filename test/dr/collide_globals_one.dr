@@ -1,0 +1,32 @@
+"""Declares SHARED / RATE / counter; collide_globals_two.dr reuses the names."""
+
+
+class Handle {
+    def(tag: str) {
+        self.tag: str = tag
+    }
+
+    def ping() -> str {
+        return "handle:" + self.tag
+    }
+}
+
+
+const SHARED: Handle = Handle("real")
+const RATE: int = 111
+counter: int = 5
+
+
+def one_shared() -> str {
+    return SHARED.ping()
+}
+
+
+def one_rate() -> int {
+    return RATE
+}
+
+
+def one_counter() -> int {
+    return counter
+}

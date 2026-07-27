@@ -75,6 +75,16 @@ TEST(CodeGenE2E, TemplateEscapedBang) {
     EXPECT_EQ(output, "Use !{expr} for interpolation\n");
 }
 
+TEST(CodeGenE2E, TemplateDoubleBangLiteral) {
+    // `!!` with no brace after it is plain template text (the JS `!!x`
+    // boolean-coercion idiom), not an escape prefix. Scanning it used to
+    // spin codegen forever.
+    auto output = compileAndRun(
+        "print(template {var a = !!b; t = !! q})"
+    );
+    EXPECT_EQ(output, "var a = !!b; t = !! q\n");
+}
+
 TEST(CodeGenE2E, TemplateBalancedBraces) {
     auto output = compileAndRun(
         "name: str = \"test\"\n"

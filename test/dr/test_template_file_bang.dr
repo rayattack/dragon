@@ -1,0 +1,44 @@
+"""A file template containing `!!` must embed, not hang the compiler.
+
+You write ordinary, correct-looking Dragon:
+
+    const X: str = template("f.js")
+
+and f.js is ordinary JavaScript using the standard boolean-coercion idiom:
+
+    var a = !!b;
+
+You did nothing wrong: only `!!{` and `!!}` are template escapes, so a bare
+`!!` is plain literal text. But the template body scanner broke its literal
+run at ANY `!!` while the escape dispatcher consumed nothing, so `dragon
+build` spun forever on a byte position that never advanced. `dragon check`
+passed (file templates are read at codegen), which made it look like a
+backend hang, not a source issue. Any minified JS triggered it (htmx has 2
+occurrences of `!!`, Alpine 7).
+
+Now the literal-run break mirrors the dispatcher exactly: it stops only at
+`!{`, `!!{`, or `!!}`. The same program compiles and the file embeds
+byte-for-byte, escapes still applied. The data file also ends in `!!` at EOF
+with no trailing newline - the other former hang - and carries one
+`!!{ok!!}` escape to pin that file templates keep processing escapes.
+"""
+
+from unittest import TestCase, main
+
+const JS: str = template("tmpl_bang_data.js")
+
+
+class TemplateFileBangTests(TestCase) {
+    def test_file_embeds_byte_for_byte_with_escapes_applied() {
+        expected: str = "var a = !!b;\nvar re = !!t ? \"gim\" : \"im\";\nvar c = ! !d;\nesc !{ok}\n!!"
+        self.assertEqual(JS, expected)
+    }
+
+    def test_double_bang_survives_verbatim() {
+        self.assertTrue("var a = !!b;" in JS)
+        self.assertTrue("!!t" in JS)
+    }
+}
+
+
+main([TemplateFileBangTests()])

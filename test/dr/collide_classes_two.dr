@@ -1,0 +1,74 @@
+"""Same class names as collide_classes_one.dr: other layouts, other method order."""
+
+from collide_classes_one import throw_one
+
+
+class Point {
+    def(name: str, scale: float, z: int) {
+        self.name: str = name
+        self.scale: float = scale
+        self.z: int = z
+    }
+
+    def describe() -> str {
+        return self.name + ":" + str(self.z)
+    }
+}
+
+
+class Boom(Exception) {
+    def(msg: str) {
+        self.msg: str = msg
+    }
+}
+
+
+class Base {
+    def() {
+        self.kind: str = "base2"
+    }
+
+    def greet() -> str {
+        return "base2"
+    }
+}
+
+
+class Kid(Base) {
+    def() {
+        self.kind: str = "kid2"
+    }
+
+    def zeroth() -> str {
+        return "two-zeroth"
+    }
+
+    def greet() -> str {
+        return "two-kid"
+    }
+}
+
+
+def two_point() -> str {
+    p: Point = Point("axis", 2.5, 9)
+    return p.describe()
+}
+
+
+def probe_two() -> str {
+    # one's Boom must pass through this module's `except Boom`.
+    try {
+        throw_one()
+    } except Boom as e {
+        return "caught-wrong-boom"
+    } except Exception as e {
+        return "passed-through"
+    }
+    return "unreachable"
+}
+
+
+def two_greet_via_base() -> str {
+    b: Base = Kid()
+    return b.greet()
+}

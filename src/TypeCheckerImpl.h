@@ -1,9 +1,8 @@
 #ifndef DRAGON_TYPE_CHECKER_IMPL_H
 #define DRAGON_TYPE_CHECKER_IMPL_H
 
-// Internal definition of TypeChecker::Impl, shared between TypeChecker.cpp (the
-// core checker + visitors) and TypeCheckerGenerics.cpp (the Decision 044
-// monomorphization engine). Not a public header - lives under src/.
+// TypeChecker::Impl, shared by TypeChecker.cpp (core checker + visitors) and
+// TypeCheckerGenerics.cpp (D044 monomorphization). Internal, not a public header.
 
 #include "dragon/AST.h"
 #include "dragon/TypeChecker.h"
@@ -17,9 +16,8 @@
 
 namespace dragon {
 
-// M1/M2 call-validation metadata filler (defined in TypeCheckerStmts.cpp).
-// Shared with the function-signature pre-pass in TypeChecker.cpp so
-// forward-referenced module functions carry full arg metadata too.
+// M1/M2 call-validation metadata filler (defined in TypeCheckerStmts.cpp); shared
+// with the function-signature pre-pass so forward-referenced fns carry arg metadata.
 void fillFuncMeta(FunctionType& ft, const std::vector<Parameter>& params,
                   bool isMethod, bool hasImplicitSelf,
                   bool isClassMethod = false);
@@ -50,25 +48,16 @@ struct TypeChecker::Impl {
     // Function return type stack (for checking return statements)
     std::vector<std::shared_ptr<Type>> returnTypeStack;
 
-    // Lambda bodies already walked by THIS checker instance. inferType()
-    // re-visits expression nodes freely (no memoization), so a lambda passed
-    // as an argument can be visited several times in one pass; the body walk
-    // in visit(LambdaExpr) is guarded to run once - the same once-per-walk
-    // cadence a def body gets - so diagnostics aren't duplicated and generic
-    // stamping isn't re-entered.
+    // Lambda bodies already walked: inferType re-visits exprs freely, so guard the
+    // body walk to run once (else duplicate diagnostics and re-entered stamping).
     std::unordered_set<const LambdaExpr*> checkedLambdaBodies;
 
-    // Module types keyed by canonical dotted path. Holds both registered
-    // dependency modules and intermediate package nodes. `import x.y`
-    // populates both "x" (with submodule "y") and "x.y" (with the actual
-    // exports). Single source of truth for cross-module name resolution.
+    // Module types by canonical dotted path (dep modules + package nodes):
+    // `import x.y` populates "x" and "x.y". Single source for cross-module resolution.
     std::unordered_map<std::string, std::shared_ptr<ModuleType>> moduleTypes;
 
-    // Get-or-create a ModuleType for `canonicalName`, building the package
-    // chain so `import x.y.z` registers "x", "x.y", and "x.y.z" with
-    // submodule links wired (x.submodules["y"]->x.y, x.y.submodules["z"]->x.y.z).
-    // Idempotent - returning the same ModuleType instance for the same name
-    // across calls keeps the type-system identity stable.
+    // Get-or-create a ModuleType, building the package chain (`import x.y.z` wires
+    // x->x.y->x.y.z). Idempotent: same name returns the same instance (stable identity).
     std::shared_ptr<ModuleType> getOrCreateModuleType(const std::string& canonicalName) {
         auto it = moduleTypes.find(canonicalName);
         if (it != moduleTypes.end()) return it->second;
@@ -86,14 +75,8 @@ struct TypeChecker::Impl {
     // Cached module-level exports (captured before scope is popped)
     std::unordered_map<std::string, std::shared_ptr<Type>> cachedExports;
 
-    // D045 - access-site context for member/import privacy. Set per-module in
-    // check() (each module gets a fresh TypeChecker). `currentFile` is the
-    // always-populated package/same-file key; `currentModuleName` is the
-    // canonical dotted name (empty for the entry module - do NOT derive package
-    // from it). `currentPackage` = packageKeyOf(currentFile). `currentClass` is
-    // the lexically-enclosing class (push/pop around visit(ClassDecl) body), or
-    // null in a free function / module top level. `packageKeyCache` memoizes
-    // the filesystem probe in packageKeyOf so repeated checks are cheap.
+    // D045 privacy context, set per-module in check(). currentModuleName is empty
+    // for the entry module - use currentFile (the package/same-file key), not it.
     std::string currentFile;
     std::string currentModuleName;
     std::string currentPackage;
@@ -103,12 +86,8 @@ struct TypeChecker::Impl {
     // Defined out-of-line in TypeChecker.cpp (calls the TU-local packageKeyOf).
     const std::string& packageKey(const std::string& file);
 
-    // Snapshot of (builtin name -> shared_ptr identity) taken right after
-    // builtins are defined into scope[0] of `check()`. getExports() uses
-    // this to filter out the BUILTIN entries while keeping user defs that
-    // happen to shadow a builtin name (e.g. `def open(...)` in stdlib/gzip.dr
-    // - we want `gzip.open` to be exported, but the unshadowed `print` in
-    // a different module should not be re-exported as that module's symbol).
+    // Builtin name -> identity snapshot (post-builtin-setup). getExports() filters
+    // builtins by identity, so a user `def open` shadowing one still exports.
     std::unordered_map<std::string, Type*> builtinIdentity;
 
     void pushScope() { scopes.push_back({}); }
@@ -129,49 +108,48 @@ struct TypeChecker::Impl {
         return nullptr;
     }
 
-    //===-----------------------------------------------------------------===//
-    // D044 - generics / monomorphization state. See TypeCheckerGenerics.cpp.
-    //===-----------------------------------------------------------------===//
+    // D044 generics / monomorphization state. See TypeCheckerGenerics.cpp.
 
-    // Stack of type-parameter binding scopes. While checking a generic template
-    // (class/function with non-empty typeParams), the active frame maps each
-    // type-param name (e.g. "T") to its TypeVarType so resolveType returns the
-    // type variable instead of erroring "unknown type". Nested generics (a
-    // generic method of a generic class) stack additional frames.
+    // Type-param binding scopes: while checking a template, the active frame maps
+    // each param (T -> TypeVarType) so resolveType returns it, not "unknown type".
     std::vector<std::unordered_map<std::string, std::shared_ptr<Type>>> typeParamScopes;
 
     // Depth counter: >0 while checking inside a generic template body. Gates the
     // unbounded-`T` restriction (no method/operator calls on a `T`-typed value).
     int genericTemplateDepth = 0;
 
-    // Registries of this module's generic templates, keyed by name. Populated by
-    // the generic pre-pass so resolveType / visit(CallExpr) can find the decl to
-    // stamp at a use site.
+    // This module's generic templates by name (populated by the generic pre-pass)
+    // so resolveType / visit(CallExpr) can find the decl to stamp at a use site.
     std::unordered_map<std::string, ClassDecl*> genericClasses;
     std::unordered_map<std::string, FunctionDecl*> genericFunctions;
 
-    // D044+ generic METHODS - a method that declares its OWN type parameter
-    // (`def m[T](...)` on a class, generic or not; the db.all[T] / D049 shape).
-    // `genericMethods` is keyed "Class.method" so two classes' same-named generic
-    // methods never collide. `classDeclByName` (every class, generic or not) lets
-    // the monomorphizer append a stamped method into its owning class body, so
-    // CodeGen emits it through the existing per-class method loops.
+    // D048 schema decoders: the stdlib `json.decode[T]` generic. The monomorphizer
+    // synthesizes each stamp's body from T's fields instead of cloning a template.
+    std::unordered_set<const FunctionDecl*> schemaDecodeFns;
+
+    // D052 - `json.encode[T]`, the write-side mirror (Writer-driven, box-free).
+    std::unordered_set<const FunctionDecl*> schemaEncodeFns;
+
+    // Generic METHODS (`def m[T]` on any class; db.all[T] / D049). genericMethods is
+    // keyed "Class.method"; classDeclByName lets stamps append into the owning class.
     std::unordered_map<std::string, FunctionDecl*> genericMethods;
+    // Identity twin of genericMethods: owning ClassDecl -> method -> template.
+    // Never collides across same-named classes; lookups prefer this.
+    std::unordered_map<const ClassDecl*,
+        std::unordered_map<std::string, FunctionDecl*>> genericMethodsByDecl;
     std::unordered_map<std::string, ClassDecl*> classDeclByName;
 
-    // Defining module (canonical dotted name) of each generic template, recorded
-    // when an IMPORTED module's templates are registered (registerExternalGenerics).
-    // Absent => defined in the module currently being checked. The monomorphizer
-    // uses it to re-check a stamped CROSS-MODULE body with the defining module's
-    // exported types injected into `typeNames`, so the body's bare references to
-    // sibling types (e.g. a return-type class the generic method delegates to)
-    // resolve in the instantiating module - fixing cross-module generic methods
-    // whose bodies touch other module-level entities.
+    // Defining module of each imported generic template (registerExternalGenerics);
+    // the monomorphizer re-checks a stamped cross-module body with its types injected.
     std::unordered_map<const void*, std::string> genericTemplateModule;
 
-    // Generic templates already fully checked by the generic pre-pass - the main
-    // module walk skips re-visiting them (they have free type vars and must not
-    // be lowered; only their stamped instantiations are checked + emitted).
+    // D052 - per-module imported class bindings; the monomorphizer injects these
+    // so a stamped cross-module body can name an imported type, not just siblings.
+    std::unordered_map<std::string,
+        std::unordered_map<std::string, std::shared_ptr<Type>>> moduleImportedTypes;
+
+    // Templates already checked by the generic pre-pass; the main walk skips them
+    // (free type vars, never lowered - only their stamped instantiations are).
     std::set<const Stmt*> genericChecked;
 
     // A pending monomorphization request: stamp `decl` at `args`.
@@ -181,46 +159,36 @@ struct TypeChecker::Impl {
         bool isClass;
         std::vector<std::shared_ptr<Type>> args;    // resolved concrete type args
         std::string owningClass;                    // non-empty => generic METHOD on this class
+        // True identity of the owning class (methods): preferred over the
+        // by-name maps, which fold every dep first-wins.
+        std::shared_ptr<ClassType> ownerCT;
     };
     std::vector<InstReq> pendingInsts;       // worklist
     std::set<std::string> instDone;          // cache keys already stamped (dedup)
-    // Stamped-call result types, keyed by the retargeted callee name (e.g.
-    // `take[int]`). A generic call is retargeted to its stamped name on first
-    // type-check; a later RE-VISIT of the same expr sees `take[int]` - no longer
-    // a registered generic - and would fall through to the normal-call path,
-    // clobbering the resolved return type to <unknown>. Restoring from here keeps
-    // the call's type correct when there is no binding annotation to supply it
-    // (e.g. `print(take([..], 2))`).
+    // Stamped-call result types by retargeted callee (`take[int]`): a re-visit sees
+    // the stamped name (no longer a generic) and would clobber the return to unknown.
     std::unordered_map<std::string, std::shared_ptr<Type>> stampedCallReturnType;
 
     // The module currently being checked - the monomorphizer appends stamped
     // instantiations to its body so they flow through CodeGen unchanged.
     Module* currentModule = nullptr;
 
-    // Expected-type hint for the immediately-following value expression, set by
-    // visit(AnnAssignStmt)/visit(AssignStmt) and consumed (cleared) at the top of
-    // visit(CallExpr). Lets `b: Box[int] = Box(5)` infer the construction's type
-    // arguments from the binding annotation. Single-slot + consume-on-read so it
-    // never leaks into a nested call's arguments.
+    // Expected-type hint for the next value expr (set by Ann/AssignStmt, consumed in
+    // visit(CallExpr)): `b: Box[int] = Box(5)` infers args. Single-slot, consume-on-read.
     std::shared_ptr<Type> currentExpectedType;
 
-    // Recursion guard for polymorphic recursion (`Foo[T]` -> `Foo[list[T]]` ...):
-    // total distinct instantiations stamped this module. Hitting the cap is a
-    // compile error, not a silent truncation.
+    // Polymorphic-recursion guard (`Foo[T]` -> `Foo[list[T]]` ...): distinct stamps
+    // this module. Hitting the cap is a compile error, not a silent truncation.
     int instantiationCount = 0;    // total distinct instantiations stamped
     int instDepth = 0;             // current instantiateGenericClass recursion depth
     bool instCapReported = false;  // error emitted once when a cap is hit
     bool genericsAborted = false;  // a cap tripped - stop all further instantiation
-    // Location of the nearest enclosing generic-class instantiation with a real
-    // use-site position. A transitive re-instantiation (substituteType stamping
-    // an `Inner[T]` field of `Outer[int]`) has no location of its own, so its
-    // diagnostics inherit this instead of reporting at 0:0.
+    // Nearest enclosing instantiation's use-site location; a transitive re-instantiation
+    // (an `Inner[T]` field of `Outer[int]`) inherits it instead of reporting at 0:0.
     SourceLocation lastInstLoc;
     static constexpr int kMaxInstantiations = 4096;  // breadth budget
-    // Recursion-DEPTH cap. The substituteType->instantiateGenericClass chain
-    // (`Foo[T]` -> `Foo[list[T]]` -> ...) recurses in C++; this bounds the native
-    // stack AND catches unbounded polymorphic recursion fast. Far above any
-    // legitimate nesting depth (`Box[Box[Box[int]]]` is ~3).
+    // Recursion-DEPTH cap: substituteType->instantiateGenericClass recurses in C++;
+    // bounds the native stack and catches unbounded recursion. Far above real nesting.
     static constexpr int kMaxInstDepth = 200;
 };
 

@@ -1,0 +1,28 @@
+"""Same-named classes in different modules must not share compiler metadata.
+Pre-fix: bare-name layout/vtable/exception maps, last write wins."""
+
+from unittest import TestCase, main
+from collide_classes_one import one_point, one_greet_via_base, throw_one
+from collide_classes_two import two_point, two_greet_via_base, probe_two
+
+
+class CollideClassesTests(TestCase) {
+    def test_field_layouts_stay_per_module() {
+        # Pre-fix: one Point's GEP used the other's field index (invalid IR).
+        self.assertEqual(one_point(), 7)
+        self.assertEqual(two_point(), "axis:9")
+    }
+
+    def test_exception_identity_stays_per_module() {
+        self.assertEqual(probe_two(), "passed-through")
+    }
+
+    def test_virtual_dispatch_stays_per_module() {
+        # two's Kid has an extra method BEFORE greet, so its vtable ordinals differ.
+        self.assertEqual(one_greet_via_base(), "one-kid")
+        self.assertEqual(two_greet_via_base(), "two-kid")
+    }
+}
+
+
+main([CollideClassesTests()])

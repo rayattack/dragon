@@ -1,0 +1,85 @@
+"""Process-extern sugar over the warm framed sidecar: a hand-written python
+child (no stub) pins the wire contract; a missing binary stays SpawnError"""
+
+from unittest import TestCase, main
+from ffi import SpawnError, ForeignError
+
+extern "python" def echo(user: User, n: int) -> EchoBack from "ffi_children/echo_framed.py"
+extern "rust" def ghost(n: int) -> EchoBack from "ffi_children/no-such-binary"
+
+
+class User {
+    def(id: int, tag: str) {
+        self.id = id
+        self.tag = tag
+    }
+}
+
+
+class EchoBack {
+    def(user: User, n: int, seen: int) {
+        self.user = user
+        self.n = n
+        self.seen = seen
+    }
+}
+
+
+class ProcessExternTests(TestCase) {
+    def test_call_error_keeps_child_alive() {
+        raised: bool = false
+        try {
+            const x: EchoBack = echo(User(1, "boom"), 13)
+        } except ForeignError as e {
+            raised = true
+            self.assertTrue("refused" in e.traceback.decode("utf-8"))
+        }
+        self.assertTrue(raised)
+        const c: EchoBack = echo(User(2, "ok"), 3)
+        self.assertTrue(c.seen >= 2)
+    }
+
+    def test_child_death_then_fresh_child() {
+        died: bool = false
+        try {
+            const x: EchoBack = echo(User(1, "die"), 99)
+        } except ForeignError as e {
+            died = true
+        }
+        self.assertTrue(died)
+        const c: EchoBack = echo(User(3, "back"), 4)
+        self.assertEqual(c.seen, 1)
+    }
+
+    def test_missing_binary_is_spawn_error() {
+        raised: bool = false
+        try {
+            const x: EchoBack = ghost(1)
+        } except SpawnError as e {
+            raised = true
+            self.assertEqual(str(e), e.hint)
+        }
+        self.assertTrue(raised)
+    }
+
+    def test_no_leak() {
+        # n starts at 1000: the child's 13/99 magic values must not fire here.
+        i: int = 0
+        while i < 300 {
+            const back: EchoBack = echo(User(i, "t"), i + 1000)
+            self.assertEqual(back.n, i + 1000)
+            i = i + 1
+        }
+    }
+
+    def test_roundtrip_and_warm() {
+        const a: EchoBack = echo(User(7, "hi"), 1)
+        self.assertEqual(a.user.id, 7)
+        self.assertEqual(a.user.tag, "hi")
+        const b: EchoBack = echo(User(8, "yo"), 2)
+        self.assertTrue(b.seen > a.seen)
+    }
+}
+
+
+main([ProcessExternTests()])

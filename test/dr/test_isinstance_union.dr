@@ -1,0 +1,112 @@
+"""isinstance on a union value must answer from the RUNTIME state, never the
+static type (caught folding statically during the D052 audit)"""
+
+from unittest import TestCase, main
+
+
+class W {
+    def(id: int, label: str | None) {
+        self.id = id
+        self.label = label
+    }
+}
+
+
+class Pod {
+    def(n: int) {
+        self.n = n
+    }
+}
+
+
+class H {
+    def(inner: Pod | None) {
+        self.inner = inner
+    }
+}
+
+
+def pick(flag: bool) -> str | None {
+    if flag {
+        return "yes"
+    }
+    return None
+}
+
+
+def check_param(v: str | None) -> bool {
+    return isinstance(v, str)
+}
+
+
+# int is not ptr-shaped, so int | None stays a tagged box (no niche).
+def check_box_param(v: int | None) -> bool {
+    return isinstance(v, int)
+}
+
+
+class IsinstanceUnionTests(TestCase) {
+    def test_local_from_field_none() {
+        const w: W = W(1, None)
+        _l: str | None = w.label
+        self.assertFalse(isinstance(_l, str))
+    }
+
+    def test_local_from_field_present() {
+        const w: W = W(2, "hi")
+        _l: str | None = w.label
+        self.assertTrue(isinstance(_l, str))
+    }
+
+    def test_field_direct() {
+        const w: W = W(3, None)
+        self.assertFalse(isinstance(w.label, str))
+        const p: W = W(4, "yo")
+        self.assertTrue(isinstance(p.label, str))
+    }
+
+    def test_param_expression_position() {
+        self.assertFalse(check_param(None))
+        self.assertTrue(check_param("s"))
+    }
+
+    def test_local_from_call() {
+        _a: str | None = pick(false)
+        self.assertFalse(isinstance(_a, str))
+        _b: str | None = pick(true)
+        self.assertTrue(isinstance(_b, str))
+    }
+
+    def test_class_member_union() {
+        const h: H = H(None)
+        _i: Pod | None = h.inner
+        self.assertFalse(isinstance(_i, Pod))
+        const h2: H = H(Pod(9))
+        _j: Pod | None = h2.inner
+        self.assertTrue(isinstance(_j, Pod))
+    }
+
+    def test_box_union_param_expression() {
+        self.assertFalse(check_box_param(None))
+        self.assertTrue(check_box_param(7))
+    }
+
+    def test_box_union_local() {
+        v: int | str = "s"
+        self.assertTrue(isinstance(v, str))
+        self.assertFalse(isinstance(v, int))
+    }
+
+    def test_if_condition_narrowing_still_works() {
+        const w: W = W(5, "abc")
+        _l: str | None = w.label
+        n: int = 0
+        if isinstance(_l, str) {
+            n = len(_l)
+        }
+        self.assertEqual(n, 3)
+    }
+}
+
+
+main([IsinstanceUnionTests()])

@@ -101,6 +101,15 @@ class OqlTemplateTest(TestCase) {
         self.assertEqual(len(rows), 2)
     }
 
+    def test_double_bang_is_literal_query_text() -> None {
+        # `!!` with no brace after it is literal query text (Postgres has a
+        # prefix `!!` operator), not an escape. The SQL parameter-extraction
+        # scanner used to spin forever on it, exactly like the str template
+        # scanner. No db needed: the canonical text is built at compile time.
+        q: OQL = template[OQL] { customers ? flag == !!x }
+        self.assertTrue("!!x" in q.canonical)
+    }
+
     def test_query_is_a_value() -> None {
         # The whole point of the content type: a query travels as a typed
         # value, parameters already bound to it.

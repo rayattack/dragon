@@ -1,0 +1,67 @@
+"""Flagship D052 e2e: extern "python" def score(batch: list[User]) -> list[Scored].
+Needs python3 (absolute-path candidates or DRAGON_PYTHON; never bare $PATH)"""
+
+from unittest import TestCase, main
+
+extern "python" def score(batch: list[User]) -> list[Scored] from "ffi_children/score.py"
+extern "python" def double(data: bytes, tag: str) -> bytes from "ffi_children/double.py"
+
+
+class User {
+    def(id: int, tag: str) {
+        self.id = id
+        self.tag = tag
+    }
+}
+
+
+class Scored {
+    def(id: int, score: int) {
+        self.id = id
+        self.score = score
+    }
+}
+
+
+class PythonExternTests(TestCase) {
+    def test_flagship_batch() {
+        const users: list[User] = [User(1, "ab"), User(2, "xyz")]
+        const scored: list[Scored] = score(users)
+        self.assertEqual(len(scored), 2)
+        self.assertEqual(scored[0].id, 1)
+        self.assertEqual(scored[0].score, 4)
+        self.assertEqual(scored[1].score, 7)
+    }
+
+    def test_empty_batch() {
+        const nobody: list[User] = []
+        const scored: list[Scored] = score(nobody)
+        self.assertEqual(len(scored), 0)
+    }
+
+    def test_warm_across_calls() {
+        # Two more calls on the same declaration ride ONE child process.
+        const again: list[Scored] = score([User(9, "warm")])
+        self.assertEqual(again[0].score, 22)
+        const more: list[Scored] = score([User(10, "warm")])
+        self.assertEqual(more[0].score, 24)
+    }
+}
+
+
+class BytesExternTests(TestCase) {
+    # bytes cross as raw blobs both directions - no base64, exact lengths.
+    def test_bytes_roundtrip() {
+        const out: bytes = double("hello".encode("utf-8"), "t")
+        self.assertEqual(out.decode("utf-8"), "hellohello")
+    }
+
+    def test_empty_and_large_blob() {
+        self.assertEqual(len(double(b"", "empty")), 0)
+        const big: bytes = ("x" * 10000).encode("utf-8")
+        self.assertEqual(len(double(big, "big")), 20000)
+    }
+}
+
+
+main([PythonExternTests(), BytesExternTests()])

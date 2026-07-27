@@ -30,8 +30,11 @@ A module is used by importing it and qualifying the call (`import json` then
 ## json
 
 JSON is the module with the widest surface, because Dragon's type system
-gives it two distinct decoding strategies and you should pick deliberately
-between them.
+gives it something CPython cannot: **your classes are schemas**. That yields
+two tiers, and you should pick deliberately between them. When the shape is
+known, the schema-directed pair `decode[T]` / `encode[T]` moves data between
+JSON bytes and your own types with no boxing at all. When the shape is
+genuinely unknown, the boxed `Any` tree is the honest escape hatch.
 
 **Decoding a whole document.** `loads(s: str) -> Any` parses a JSON string
 into a boxed `Any` tree: objects become `dict[str, Any]`, arrays become
@@ -88,6 +91,64 @@ The full set is `loads_str`, `loads_int`, `loads_float`, `loads_bool`,
 `loads_is_null`, and the homogeneous-array forms `loads_list_str`,
 `loads_list_int`, `loads_list_float`, `loads_list_bool`.
 
+**Decoding into your own types: `decode[T]`.** When the shape you expect is
+a class, the class itself is the schema. `decode[T](body: bytes) -> T` reads
+the raw UTF-8 bytes straight into a `T`, field by field - no `Any` tree, no
+intermediate dict, nothing boxed on the way through:
+
+```dragon
+from json import decode
+
+class User {
+    def(id: int, tag: str, active: bool) {
+        self.id = id
+        self.tag = tag
+        self.active = active
+    }
+}
+
+const u: User = decode[User]('{"id": 7, "tag": "ok", "active": true}'.encode("utf-8"))
+print(u.id)      # 7
+print(u.tag)     # ok
+```
+
+The compiler synthesizes a decoder for each concrete `T` at compile time, so
+every field lands in its native slot: an `int` field is parsed directly into
+an i64, a `str` field into one owned heap string. This is the shape Rust
+reaches with a serde derive macro and Go reaches with reflection, except
+here it is stamped from the type you already wrote - no annotation, no
+registration, no runtime dispatch. The contract:
+
+- **Keys may arrive in any order**, and keys the class does not declare are
+  skipped without being materialized - a wide payload with three fields you
+  care about costs three fields.
+- **Constructor defaults apply.** A field with a default (`port: int =
+  8080`) is optional in the document; a field without one is required, and
+  its absence raises `ValueError`.
+- **`Optional[T]` fields accept `null`.**
+- **Nested classes recurse** (a `home: Address` field decodes the nested
+  object into an `Address`), and `list[...]` fields decode each element at
+  the element type.
+- **Failure is loud and total.** A type mismatch, a missing required field,
+  or malformed JSON raises `ValueError` with the byte offset - never a
+  partially-filled object, so a bad body cannot impersonate a valid one.
+
+The target does not have to be a class. Any concrete type works at the top
+level, which keeps wire payloads uniform end to end:
+
+```dragon
+from json import decode
+
+const n: int = decode[int](b"42")
+const xs: list[int] = decode[list[int]](b"[1, 2, 3]")
+const users: list[User] = decode[list[User]](body)    # array of objects
+const d: dict[str, str] = decode[dict[str, str]](b'{"x": "one"}')
+```
+
+`decode[T]` takes `bytes`, not `str`, because the payloads it exists for -
+request bodies, process-lane frames, files - already are bytes; for a
+string literal, `.encode("utf-8")` at the callsite is the whole ceremony.
+
 **Encoding.** `dumps(obj: Any) -> str` serializes any scalar or
 arbitrarily-nested homogeneous list/dict by dispatching on the value's
 runtime tag:
@@ -105,9 +166,40 @@ There are also typed encoders - `dumps_str`, `dumps_int`, `dumps_float`,
 `dumps_bool`, and the `dumps_list_*` family - for when you want to avoid the
 tag dispatch on a hot path.
 
-Values with no JSON form - `bytes` and class instances - raise a catchable
-`TypeError` (`Object of type Thing is not JSON serializable`), exactly as
-CPython's `json.dumps` does.
+Values `dumps` has no JSON form for - `bytes` and class instances - raise a
+catchable `TypeError` (`Object of type Thing is not JSON serializable`),
+exactly as CPython's `json.dumps` does. A class instance is not a dead end,
+though; it is the whole point of the next call.
+
+**Encoding from your own types: `encode[T]`.** The write-side mirror of
+`decode[T]`. `encode[T](value: T) -> bytes` serializes a class instance (or
+any concrete top-level type) by emitting one typed write per field - no
+boxing, no runtime tag dispatch, compact output:
+
+```dragon
+from json import encode, decode
+
+const u: User = User(7, "hi", true)
+print(encode[User](u).decode("utf-8"))    # {"id":7,"tag":"hi","active":true}
+
+const back: User = decode[User](encode[User](u))   # lossless round-trip
+```
+
+An `Optional` field holding `None` emits `null`; nested classes nest;
+`list[T]` and `dict[str, ...]` work as fields and at the top level, in both
+directions (`encode[list[User]](users)` emits the array of objects). This
+pair is exactly what the process-lane FFI uses to move your arguments and
+returns across the boundary - see
+[Calling Python, Go, and Rust](/docs/1504-ffi-process-lane); the FFI has no
+private serializer, just these two public calls.
+
+Beneath both sit two public classes for the rare document you must handle
+piecewise without a type: `json.Cursor`, a pull reader over bytes, and
+`json.JsonWriter`, a push writer (`begin_object()` / `key(k)` /
+`write_int(n)` / ... / `finish() -> bytes`). They are the pieces the
+compiler stamps `decode[T]` / `encode[T]` from. Reach for them when the
+shape is genuinely irregular but the hot path still cannot afford an `Any`
+tree; reach for `decode[T]` / `encode[T]` everywhere else.
 
 For building JSON *text* with interpolated values, the module also hosts the
 `JSON` content type: `template[JSON] { {"name": "!{name}"} }` escapes each
@@ -215,10 +307,13 @@ from server worker threads; validation is read-only and safe to share.
 > **Differs from Python.** `json.loads` returns an `Any` tree, not a
 > `dict`/`list`, and a boxed `Any` does not unbox under a direct subscript -
 > reach for `loads_obj` (typed `dict[str, Any]`) or the `loads_*` scalar
-> decoders, which is where the typed, zero-box path lives. There is no
-> `object_hook`, `indent=`, or `sort_keys=` keyword; `dumps` emits compact
-> output. Schema validation has no CPython stdlib counterpart at all - it
-> replaces the third-party `jsonschema`/`fastjsonschema` dependency.
+> decoders, which is where the typed, zero-box path lives. `decode[T]` /
+> `encode[T]` have no CPython stdlib counterpart at all: they replace the
+> pydantic / dataclass-loader / `json.loads`-then-construct idiom with a
+> decoder synthesized at compile time from your class, reflection-free.
+> There is no `object_hook`, `indent=`, or `sort_keys=` keyword; `dumps` and
+> `encode[T]` emit compact output. Schema validation likewise replaces the
+> third-party `jsonschema`/`fastjsonschema` dependency.
 
 ## csv
 
@@ -464,20 +559,28 @@ The helpers are `uuid_hex` (strip dashes to 32 hex chars), `uuid_version`
 (the version digit, 1-5, or -1), `uuid_is_valid` (full 8-4-4-4-12 format
 check), and `uuid_compare(a, b) -> int` for canonical lexicographic ordering.
 
+`uuid4()` draws its 122 random bits from the OS CSPRNG (the same source as
+`secrets`), not from the `random` module - so seeding `random` has no effect on
+the UUIDs you get, and two processes started in the same instant produce
+different values.
+
 > **Differs from Python.** `uuid4()` returns a plain `str`, not a `UUID`
 > object - there are no `.hex` / `.int` / `.version` attributes; the
-> `uuid_hex` / `uuid_version` module functions take a string instead. The
-> randomness comes from libc `rand()`, so it is **not** cryptographically
-> secure; for tokens, reach for the crypto modules. Only `uuid4` is
-> implemented (no `uuid1`/`uuid3`/`uuid5`).
+> `uuid_hex` / `uuid_version` module functions take a string instead. Only
+> `uuid4` is implemented (no `uuid1`/`uuid3`/`uuid5`). As in Python, a v4 UUID
+> is a fine unique identifier but is not a substitute for a purpose-built
+> token - use `secrets.token_urlsafe` for anything bearer-like.
 
 ## At a glance
 
 | Task | Call |
 |---|---|
-| Decode a JSON object | `obj: dict[str, Any] = json.loads_obj(s)` |
+| Decode JSON into your class | `u: User = decode[User](body)` - box-free; defaults, `Optional`, nesting |
+| Encode your class to JSON | `encode[User](u) -> bytes` - compact; round-trips with `decode[T]` |
+| Decode a JSON object (unknown shape) | `obj: dict[str, Any] = json.loads_obj(s)` |
 | Decode a typed JSON scalar/array | `json.loads_int(s)`, `loads_str`, `loads_list_int`, … |
 | Encode any value to JSON | `json.dumps(value) -> str` |
+| Stream irregular JSON without a type | `json.Cursor` (read) / `json.JsonWriter` (write) |
 | Validate against JSON Schemas | `s: Schema = Schema("draft-07")`; `s.register(name, schema)`; `s.validate(name, v)` |
 | Split a CSV line | `csv.parse_row(line, ",") -> list[str]` |
 | Join CSV fields | `csv.format_row(fields, ",") -> str` |

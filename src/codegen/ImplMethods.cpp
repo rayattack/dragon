@@ -54,7 +54,7 @@ void CodeGen::Impl::trackPtrParam(const std::string& paramName, TypeExpr* typeEx
                 if (ek == VarKind::Type)
                     varListElemIsType.insert(paramName);
                 if (auto* nt = dynamic_cast<NamedTypeExpr*>(elemTy)) {
-                    if (classFieldKinds.count(nt->name) ||
+                    if (classFieldKindsBySym.count(classSym(nt->name)) ||
                         classNames.count(nt->name))
                         varListElemClassName[paramName] = nt->name;
                 }
@@ -153,8 +153,8 @@ int64_t CodeGen::Impl::excTypeCode(const std::string& name) {
         if (name == "RuntimeWarning")         return 104;
         if (name == "UserWarning")            return 105;
         // Check user-defined exception codes
-        auto uit = userExcCodes.find(name);
-        if (uit != userExcCodes.end()) return uit->second;
+        auto uit = userExcCodesBySym.find(classSym(name));
+        if (uit != userExcCodesBySym.end()) return uit->second;
         return 10; // Default to Exception
     }
 
@@ -183,22 +183,20 @@ bool CodeGen::Impl::isBuiltinExcName(const std::string& name) {
 
 bool CodeGen::Impl::methodIsOverridden(const std::string& baseClass,
                         const std::string& method) const {
-        for (const auto& [cls, parent] : classParentNames) {
-            // Is `cls` a strict descendant of baseClass?
+        const std::string baseSym = classSym(baseClass);
+        for (const auto& [cls, parent] : classParentNamesBySym) {
+            // Is `cls` (a sym) a strict descendant of baseClass?
             std::string c = cls;
             bool descendant = false;
             int guard = 0;
             while (guard++ < 256) {
-                auto pit = classParentNames.find(c);
-                if (pit == classParentNames.end()) break;
+                auto pit = classParentNamesBySym.find(c);
+                if (pit == classParentNamesBySym.end()) break;
                 c = pit->second;
-                if (c == baseClass) { descendant = true; break; }
+                if (c == baseSym) { descendant = true; break; }
             }
             if (!descendant) continue;
-            auto cmIt = classOwningModule.find(cls);
-            const std::string& mod =
-                cmIt != classOwningModule.end() ? cmIt->second : currentModuleName;
-            if (module->getFunction(mangleClass(mod, cls) + "_" + method))
+            if (module->getFunction(cls + "_" + method))
                 return true;
         }
         return false;
@@ -209,39 +207,33 @@ llvm::Function* CodeGen::Impl::resolveMethodFunction(
     const std::string& className,
     const std::string& methodName,
     std::string* resolvedSymbol) const {
-        std::string sym = mangleClass(owningModule, className) + "_" + methodName;
+        // Leaf first: the explicit (module, class), then the resolver's own
+        // view (corrects a stale caller-supplied module before any parent
+        // walk could mask an override with the base implementation).
+        std::string leafSym = mangleClass(owningModule, className);
+        std::string sym = leafSym + "_" + methodName;
         auto* fn = module->getFunction(sym);
-        if (!fn) {
-            // The caller-supplied owningModule can be stale: the per-variable
-            // owner maps are keyed by bare name and a same-named variable of a
-            // different class in another co-compiled module can leave a wrong
-            // module behind. Before walking UP to a parent's method - which
-            // would silently MASK this class's own override with the base
-            // implementation - re-resolve THIS leaf class's own owning module
-            // and try its own method there first. Strictly additive: a leaf's
-            // own method always wins over an inherited one, so this only ever
-            // corrects a stale-module miss, never changes a hit.
-            std::string ownMod = resolveClassOwningModule(className);
-            if (ownMod != owningModule) {
-                std::string ownSym =
-                    mangleClass(ownMod, className) + "_" + methodName;
-                if (auto* ownFn = module->getFunction(ownSym)) {
-                    fn = ownFn;
-                    sym = ownSym;
-                }
+        std::string resolvedLeaf = classSym(className);
+        if (!fn && resolvedLeaf != leafSym) {
+            std::string s2 = resolvedLeaf + "_" + methodName;
+            if (auto* f2 = module->getFunction(s2)) {
+                fn = f2;
+                sym = s2;
             }
         }
+        // Parent chain is sym -> sym; try the explicit leaf's chain, then the
+        // resolver-view leaf's.
         if (!fn) {
-            std::string cur = className;
-            while (!fn) {
-                auto pit = classParentNames.find(cur);
-                if (pit == classParentNames.end()) break;
-                cur = pit->second;
-                auto pmIt = classOwningModule.find(cur);
-                const std::string& parentMod =
-                    pmIt != classOwningModule.end() ? pmIt->second : owningModule;
-                sym = mangleClass(parentMod, cur) + "_" + methodName;
-                fn = module->getFunction(sym);
+            for (const std::string& start : {leafSym, resolvedLeaf}) {
+                std::string cur = start;
+                while (!fn) {
+                    auto pit = classParentNamesBySym.find(cur);
+                    if (pit == classParentNamesBySym.end()) break;
+                    cur = pit->second;
+                    sym = cur + "_" + methodName;
+                    fn = module->getFunction(sym);
+                }
+                if (fn) break;
             }
         }
         if (fn && resolvedSymbol) *resolvedSymbol = sym;
@@ -287,8 +279,8 @@ bool CodeGen::Impl::isLockExpr(Expr* e) {
         }
         if (owner.empty()) owner = resolveExprClassName(at->object.get());
         if (owner.empty()) return false;
-        auto cit = classFieldClassName.find(owner);
-        if (cit == classFieldClassName.end()) return false;
+        auto cit = classFieldClassNameBySym.find(classSym(owner));
+        if (cit == classFieldClassNameBySym.end()) return false;
         auto fit = cit->second.find(at->attribute);
         return fit != cit->second.end() && fit->second == "__Lock";
     }
@@ -297,6 +289,10 @@ bool CodeGen::Impl::isLockExpr(Expr* e) {
 
 std::string CodeGen::Impl::resolveExprClassName(Expr* expr) {
         if (auto* nameExpr = dynamic_cast<NameExpr*>(expr)) {
+            // Unshadowed module global: the scoped binding wins over the flat map.
+            if (const auto* gb = globalClassBindingFor(nameExpr->name)) {
+                if (classNames.count(gb->className)) return gb->className;
+            }
             auto it = varClassNames.find(nameExpr->name);
             if (it != varClassNames.end() && classNames.count(it->second)) {
                 // varClassNames is keyed by bare variable name (program-wide),
@@ -364,8 +360,12 @@ std::string CodeGen::Impl::resolveExprClassName(Expr* expr) {
                 if (!objClass.empty()) {
                     std::string objMod;
                     if (auto* on = dynamic_cast<NameExpr*>(attrCallee->object.get())) {
-                        auto rmIt = varClassOwningModule.find(on->name);
-                        if (rmIt != varClassOwningModule.end()) objMod = rmIt->second;
+                        if (const auto* gb = globalClassBindingFor(on->name)) {
+                            objMod = gb->owningModule;
+                        } else {
+                            auto rmIt = varClassOwningModule.find(on->name);
+                            if (rmIt != varClassOwningModule.end()) objMod = rmIt->second;
+                        }
                     }
                     if (objMod.empty()) {
                         auto cmIt = classOwningModule.find(objClass);
@@ -446,8 +446,8 @@ std::string CodeGen::Impl::resolveExprClassName(Expr* expr) {
                     }
                 }
                 if (!ownerCls.empty()) {
-                    auto cit = classFieldListElemClassName.find(ownerCls);
-                    if (cit != classFieldListElemClassName.end()) {
+                    auto cit = classFieldListElemClassNameBySym.find(classSym(ownerCls));
+                    if (cit != classFieldListElemClassNameBySym.end()) {
                         auto fit = cit->second.find(attr->attribute);
                         if (fit != cit->second.end()) return fit->second;
                     }
@@ -498,8 +498,8 @@ std::string CodeGen::Impl::resolveExprClassName(Expr* expr) {
                 ownerCls = resolveExprClassName(attr->object.get());
             }
             if (!ownerCls.empty()) {
-                auto cit = classFieldClassName.find(ownerCls);
-                if (cit != classFieldClassName.end()) {
+                auto cit = classFieldClassNameBySym.find(classSym(ownerCls));
+                if (cit != classFieldClassNameBySym.end()) {
                     auto fit = cit->second.find(attr->attribute);
                     if (fit != cit->second.end()) return fit->second;
                 }
@@ -562,8 +562,8 @@ CodeGen::Impl::VarKind CodeGen::Impl::resolveExprVarKind(Expr* expr) {
                     }
                 }
                 if (!cls.empty()) {
-                    auto cit = classFieldListElemKinds.find(cls);
-                    if (cit != classFieldListElemKinds.end()) {
+                    auto cit = classFieldListElemKindsBySym.find(classSym(cls));
+                    if (cit != classFieldListElemKindsBySym.end()) {
                         auto fit = cit->second.find(attr->attribute);
                         if (fit != cit->second.end())
                             return kindFromTypeKind(fit->second);
@@ -595,8 +595,8 @@ CodeGen::Impl::VarKind CodeGen::Impl::resolveExprVarKind(Expr* expr) {
                     }
                 }
                 if (!cls.empty()) {
-                    auto cit = classFieldDictValueKinds.find(cls);
-                    if (cit != classFieldDictValueKinds.end()) {
+                    auto cit = classFieldDictValueKindsBySym.find(classSym(cls));
+                    if (cit != classFieldDictValueKindsBySym.end()) {
                         auto fit = cit->second.find(attr->attribute);
                         if (fit != cit->second.end())
                             return kindFromTypeKind(fit->second);
@@ -632,8 +632,8 @@ CodeGen::Impl::VarKind CodeGen::Impl::resolveExprVarKind(Expr* expr) {
                 }
             }
             if (!cls.empty()) {
-                auto cit = classFieldKinds.find(cls);
-                if (cit != classFieldKinds.end()) {
+                auto cit = classFieldKindsBySym.find(classSym(cls));
+                if (cit != classFieldKindsBySym.end()) {
                     auto fit = cit->second.find(attr->attribute);
                     if (fit != cit->second.end()) return fit->second;
                 }
@@ -677,19 +677,17 @@ CodeGen::Impl::VarKind CodeGen::Impl::resolveExprVarKind(Expr* expr) {
 
 llvm::Value* CodeGen::Impl::callDunder(const std::string& className, const std::string& dunder,
                         llvm::Value* self, const std::vector<llvm::Value*>& extraArgs) {
+        // findDunderClass returns the defining class's SYM; direct symbol.
         std::string defClass = findDunderClass(className, dunder);
         if (defClass.empty()) return nullptr;
-        // Resolve the dunder-defining class's owning module so the method
-        // symbol resolves through per-class mangling. Falls back to the
-        // current module so entry-defined classes (with empty owner) keep
-        // bare names.
-        auto cmIt = classOwningModule.find(defClass);
-        std::string defMod = cmIt != classOwningModule.end()
-                                 ? cmIt->second
-                                 : currentModuleName;
-        std::string funcName = mangleClass(defMod, defClass) + "_" + dunder;
+        std::string funcName = defClass + "_" + dunder;
         auto* func = module->getFunction(funcName);
         if (!func) return nullptr;
+        return emitDunderCall(func, dunder, self, extraArgs);
+    }
+
+llvm::Value* CodeGen::Impl::emitDunderCall(llvm::Function* func, const std::string& dunder,
+                        llvm::Value* self, const std::vector<llvm::Value*>& extraArgs) {
         std::vector<llvm::Value*> args = {self};
         args.insert(args.end(), extraArgs.begin(), extraArgs.end());
         // Fill any still-undeclared parameters (past self + provided extras) with
@@ -944,8 +942,8 @@ Type::Kind CodeGen::Impl::resolveDictKeyKind(Expr* expr) {
                 cls = resolveExprClassName(attr->object.get());
             }
             if (!cls.empty()) {
-                auto cit = classFieldDictKeyKinds.find(cls);
-                if (cit != classFieldDictKeyKinds.end()) {
+                auto cit = classFieldDictKeyKindsBySym.find(classSym(cls));
+                if (cit != classFieldDictKeyKindsBySym.end()) {
                     auto fit = cit->second.find(attr->attribute);
                     if (fit != cit->second.end()) return fit->second;
                 }
@@ -976,8 +974,8 @@ Type::Kind CodeGen::Impl::resolveDictValueKind(Expr* expr) {
                 cls = resolveExprClassName(attr->object.get());
             }
             if (!cls.empty()) {
-                auto cit = classFieldDictValueKinds.find(cls);
-                if (cit != classFieldDictValueKinds.end()) {
+                auto cit = classFieldDictValueKindsBySym.find(classSym(cls));
+                if (cit != classFieldDictValueKindsBySym.end()) {
                     auto fit = cit->second.find(attr->attribute);
                     if (fit != cit->second.end()) return fit->second;
                 }
@@ -1137,8 +1135,8 @@ bool CodeGen::Impl::isBareDictIterable(Expr* expr) {
                 }
             }
             if (!cls.empty()) {
-                auto cit = classFieldDictKeyKinds.find(cls);
-                if (cit != classFieldDictKeyKinds.end() &&
+                auto cit = classFieldDictKeyKindsBySym.find(classSym(cls));
+                if (cit != classFieldDictKeyKindsBySym.end() &&
                     cit->second.count(attr->attribute))
                     return true;
             }

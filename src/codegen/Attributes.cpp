@@ -80,8 +80,8 @@ void CodeGen::visit(AttributeExpr& node) {
             // 3. Class object: `Cls.__doc__` - load descriptor, call
             //  runtime accessor (returns const char* / null).
             if (impl_->classNames.count(objName->name)) {
-                auto descIt = impl_->classDescriptorGlobals.find(objName->name);
-                if (descIt != impl_->classDescriptorGlobals.end()) {
+                auto descIt = impl_->classDescriptorGlobalsBySym.find(impl_->classSym(objName->name));
+                if (descIt != impl_->classDescriptorGlobalsBySym.end()) {
                     auto* descVal = impl_->builder->CreateLoad(
                         impl_->i64Type, descIt->second, objName->name + "_desc");
                     impl_->lastValue = impl_->builder->CreateCall(
@@ -128,23 +128,23 @@ void CodeGen::visit(AttributeExpr& node) {
                 ownerCls = impl_->resolveExprClassName(innerAttr->object.get());
             }
             if (!ownerCls.empty()) {
-                auto cIt = impl_->methodDocConstants.find(ownerCls);
-                if (cIt != impl_->methodDocConstants.end()) {
+                auto cIt = impl_->methodDocConstantsBySym.find(impl_->classSym(ownerCls));
+                if (cIt != impl_->methodDocConstantsBySym.end()) {
                     auto mIt = cIt->second.find(innerAttr->attribute);
                     if (mIt != cIt->second.end()) {
                         impl_->lastValue = mIt->second;
                         return;
                     }
                 }
-                auto dIt = impl_->methodDocstrings.find(ownerCls);
-                if (dIt != impl_->methodDocstrings.end()) {
+                auto dIt = impl_->methodDocstringsBySym.find(impl_->classSym(ownerCls));
+                if (dIt != impl_->methodDocstringsBySym.end()) {
                     auto mIt = dIt->second.find(innerAttr->attribute);
                     if (mIt != dIt->second.end()) {
                         auto* docStr = impl_->builder->CreateGlobalString(
                             mIt->second, ownerCls + "_" + innerAttr->attribute + "__doc");
                         auto* casted = llvm::ConstantExpr::getBitCast(
                             llvm::cast<llvm::Constant>(docStr), impl_->i8PtrType);
-                        impl_->methodDocConstants[ownerCls][innerAttr->attribute] = casted;
+                        impl_->methodDocConstantsBySym[impl_->classSym(ownerCls)][innerAttr->attribute] = casted;
                         impl_->lastValue = casted;
                         return;
                     }
@@ -226,8 +226,9 @@ void CodeGen::visit(AttributeExpr& node) {
             return;
         }
         if (node.type && node.type->kind() == Type::Kind::Class) {
-            auto descIt = impl_->classDescriptorGlobals.find(node.attribute);
-            if (descIt != impl_->classDescriptorGlobals.end()) {
+            auto descIt = impl_->classDescriptorGlobalsBySym.find(
+                impl_->classSym(node.attribute));
+            if (descIt != impl_->classDescriptorGlobalsBySym.end()) {
                 impl_->lastValue = impl_->builder->CreateLoad(
                     impl_->i64Type, descIt->second, node.attribute + "_desc");
                 return;
@@ -248,23 +249,18 @@ void CodeGen::visit(AttributeExpr& node) {
             impl_->lastValue = llvm::ConstantInt::get(impl_->i64Type, 0);
             return;
         }
-        // Module-level const / global variable export (`mod.SIGINT`,
-        // `os.X_OK`, etc.). The `from mod import X; X` path works because
-        // FromImportStmt routes the bare name through the same module-global
-        // load (NameExpr -> lookupModuleGlobal); the qualified form must
-        // mirror that load instead of falling through to the static-field /
-        // dict / class-field branches below, which silently return i64 0.
-        //
-        // All linked modules share one flat global namespace (forward-
-        // declared in CodeGen.cpp:104 with `"global." + bareName`), so the
-        // attribute name alone - keyed in `moduleGlobals` - is the right
-        // lookup. The store side (Assign.cpp module-level path) emits to the
-        // same GV under the dep module's `currentModuleName`, so the load
-        // here sees the initialized value at runtime.
-        if (auto* gv = impl_->lookupModuleGlobal(node.attribute)) {
-            impl_->lastValue = impl_->builder->CreateLoad(
-                gv->getValueType(), gv, node.attribute);
-            return;
+        // Qualified module-global load (`mod.SIGINT`): resolve in the TARGET
+        // module's namespace via the ModuleType, mirroring the from-import path
+        {
+            const std::string& srcMod =
+                static_cast<ModuleType&>(*node.object->type).name;
+            auto gvIt = impl_->moduleGlobals.find(
+                Impl::mangleGlobal(srcMod, node.attribute));
+            if (gvIt != impl_->moduleGlobals.end()) {
+                impl_->lastValue = impl_->builder->CreateLoad(
+                    gvIt->second->getValueType(), gvIt->second, node.attribute);
+                return;
+            }
         }
         // Const or other export kind - fall through to existing logic for
         // now. Will need expansion as more module export kinds gain values.
@@ -288,8 +284,8 @@ void CodeGen::visit(AttributeExpr& node) {
 
     // Static field access: ClassName.field (where ClassName is a known class, not an instance)
     if (auto* objName = dynamic_cast<NameExpr*>(node.object.get())) {
-        auto sfIt = impl_->staticFieldGlobals.find(objName->name);
-        if (sfIt != impl_->staticFieldGlobals.end()) {
+        auto sfIt = impl_->staticFieldGlobalsBySym.find(impl_->classSym(objName->name));
+        if (sfIt != impl_->staticFieldGlobalsBySym.end()) {
             auto gvIt = sfIt->second.find(node.attribute);
             if (gvIt != sfIt->second.end()) {
                 llvm::GlobalVariable* gv = gvIt->second;
@@ -399,8 +395,8 @@ void CodeGen::visit(AttributeExpr& node) {
             if (cls.empty())
                 cls = impl_->resolveExprClassName(objAttr->object.get());
             if (!cls.empty()) {
-                auto fkIt = impl_->classFieldKinds.find(cls);
-                if (fkIt != impl_->classFieldKinds.end()) {
+                auto fkIt = impl_->classFieldKindsBySym.find(impl_->classSym(cls));
+                if (fkIt != impl_->classFieldKindsBySym.end()) {
                     auto fkIt2 = fkIt->second.find(objAttr->attribute);
                     if (fkIt2 != fkIt->second.end() &&
                         fkIt2->second == Impl::VarKind::Dict) {
@@ -455,8 +451,8 @@ void CodeGen::visit(AttributeExpr& node) {
                     valueIsAny = true;
             }
             if (!valueIsAny && !dictFieldClass.empty()) {
-                auto cit = impl_->classFieldDictValueKinds.find(dictFieldClass);
-                if (cit != impl_->classFieldDictValueKinds.end()) {
+                auto cit = impl_->classFieldDictValueKindsBySym.find(impl_->classSym(dictFieldClass));
+                if (cit != impl_->classFieldDictValueKindsBySym.end()) {
                     auto fit = cit->second.find(dictFieldName);
                     if (fit != cit->second.end() &&
                         fit->second == Type::Kind::Any)
@@ -483,8 +479,8 @@ void CodeGen::visit(AttributeExpr& node) {
             if (checkTag < 0 && !dictObjName.empty()) {
                 auto tdIt = impl_->varTypedDictClass.find(dictObjName);
                 if (tdIt != impl_->varTypedDictClass.end()) {
-                    auto schemaIt = impl_->typedDictFieldKinds.find(tdIt->second);
-                    if (schemaIt != impl_->typedDictFieldKinds.end()) {
+                    auto schemaIt = impl_->typedDictFieldKindsBySym.find(impl_->classSym(tdIt->second));
+                    if (schemaIt != impl_->typedDictFieldKindsBySym.end()) {
                         auto fIt = schemaIt->second.find(node.attribute);
                         if (fIt != schemaIt->second.end())
                             checkTag = Impl::typeKindToTag(fIt->second);
@@ -502,8 +498,8 @@ void CodeGen::visit(AttributeExpr& node) {
             }
             // Class-field dict: classFieldDictValueKinds tracks the V type.
             if (checkTag < 0 && !dictFieldClass.empty()) {
-                auto cit = impl_->classFieldDictValueKinds.find(dictFieldClass);
-                if (cit != impl_->classFieldDictValueKinds.end()) {
+                auto cit = impl_->classFieldDictValueKindsBySym.find(impl_->classSym(dictFieldClass));
+                if (cit != impl_->classFieldDictValueKindsBySym.end()) {
                     auto fit = cit->second.find(dictFieldName);
                     if (fit != cit->second.end()) {
                         int64_t t = Impl::typeKindToTag(fit->second);
@@ -513,8 +509,8 @@ void CodeGen::visit(AttributeExpr& node) {
             }
             // Static TypedDict receiver (e.g. lst[0].field): field kind -> tag.
             if (checkTag < 0 && !staticTypedDictClass.empty()) {
-                auto schemaIt = impl_->typedDictFieldKinds.find(staticTypedDictClass);
-                if (schemaIt != impl_->typedDictFieldKinds.end()) {
+                auto schemaIt = impl_->typedDictFieldKindsBySym.find(impl_->classSym(staticTypedDictClass));
+                if (schemaIt != impl_->typedDictFieldKindsBySym.end()) {
                     auto fIt = schemaIt->second.find(node.attribute);
                     if (fIt != schemaIt->second.end())
                         checkTag = Impl::typeKindToTag(fIt->second);
@@ -569,13 +565,13 @@ void CodeGen::visit(AttributeExpr& node) {
         if (!className.empty()) {
             std::string getterClass;
             for (std::string cur = className; !cur.empty(); ) {
-                auto pit = impl_->classProperties.find(cur);
-                if (pit != impl_->classProperties.end() && pit->second.count(node.attribute)) {
+                auto pit = impl_->classPropertiesBySym.find(impl_->classSym(cur));
+                if (pit != impl_->classPropertiesBySym.end() && pit->second.count(node.attribute)) {
                     getterClass = cur;
                     break;
                 }
-                auto pp = impl_->classParentNames.find(cur);
-                if (pp == impl_->classParentNames.end()) break;
+                auto pp = impl_->classParentNamesBySym.find(impl_->classSym(cur));
+                if (pp == impl_->classParentNamesBySym.end()) break;
                 cur = pp->second;
             }
             if (!getterClass.empty()) {
@@ -598,9 +594,9 @@ void CodeGen::visit(AttributeExpr& node) {
         }
 
         if (!className.empty()) {
-            auto structIt = impl_->classStructTypes.find(className);
-            auto fieldIt = impl_->classFieldIndices.find(className);
-            if (structIt != impl_->classStructTypes.end() && fieldIt != impl_->classFieldIndices.end()) {
+            auto structIt = impl_->classStructTypesBySym.find(impl_->classSym(className));
+            auto fieldIt = impl_->classFieldIndicesBySym.find(impl_->classSym(className));
+            if (structIt != impl_->classStructTypesBySym.end() && fieldIt != impl_->classFieldIndicesBySym.end()) {
                 auto idxIt = fieldIt->second.find(node.attribute);
                 if (idxIt != fieldIt->second.end()) {
                     // Load object pointer
@@ -609,7 +605,7 @@ void CodeGen::visit(AttributeExpr& node) {
                     // GEP to field + load
                     auto* gep = impl_->builder->CreateStructGEP(
                         structIt->second, objPtr, idxIt->second, node.attribute + "_ptr");
-                    auto* fieldType = impl_->classFieldTypes[className][node.attribute];
+                    auto* fieldType = impl_->classFieldTypesBySym[impl_->classSym(className)][node.attribute];
                     impl_->lastValue = impl_->builder->CreateLoad(fieldType, gep, node.attribute);
                     return;
                 }
@@ -632,13 +628,13 @@ void CodeGen::visit(AttributeExpr& node) {
             // property on a chained object falls through to the `0` fallback.
             std::string getterClass;
             for (std::string cur = className; !cur.empty(); ) {
-                auto pit = impl_->classProperties.find(cur);
-                if (pit != impl_->classProperties.end() && pit->second.count(node.attribute)) {
+                auto pit = impl_->classPropertiesBySym.find(impl_->classSym(cur));
+                if (pit != impl_->classPropertiesBySym.end() && pit->second.count(node.attribute)) {
                     getterClass = cur;
                     break;
                 }
-                auto pp = impl_->classParentNames.find(cur);
-                if (pp == impl_->classParentNames.end()) break;
+                auto pp = impl_->classParentNamesBySym.find(impl_->classSym(cur));
+                if (pp == impl_->classParentNamesBySym.end()) break;
                 cur = pp->second;
             }
             if (!getterClass.empty()) {
@@ -660,9 +656,9 @@ void CodeGen::visit(AttributeExpr& node) {
                     return;
                 }
             }
-            auto structIt = impl_->classStructTypes.find(className);
-            auto fieldIt = impl_->classFieldIndices.find(className);
-            if (structIt != impl_->classStructTypes.end() && fieldIt != impl_->classFieldIndices.end()) {
+            auto structIt = impl_->classStructTypesBySym.find(impl_->classSym(className));
+            auto fieldIt = impl_->classFieldIndicesBySym.find(impl_->classSym(className));
+            if (structIt != impl_->classStructTypesBySym.end() && fieldIt != impl_->classFieldIndicesBySym.end()) {
                 auto idxIt = fieldIt->second.find(node.attribute);
                 if (idxIt != fieldIt->second.end()) {
                     node.object->accept(*this);
@@ -671,7 +667,7 @@ void CodeGen::visit(AttributeExpr& node) {
                         objPtr = impl_->builder->CreateIntToPtr(objPtr, impl_->i8PtrType);
                     auto* gep = impl_->builder->CreateStructGEP(
                         structIt->second, objPtr, idxIt->second, node.attribute + "_ptr");
-                    auto* fieldType = impl_->classFieldTypes[className][node.attribute];
+                    auto* fieldType = impl_->classFieldTypesBySym[impl_->classSym(className)][node.attribute];
                     impl_->lastValue = impl_->builder->CreateLoad(fieldType, gep, node.attribute);
                     // `f().attr` (audit 1.7 "receivers"): the receiver temp is
                     // consumed by this read. isBorrowedHeapExpr classifies an
@@ -686,8 +682,8 @@ void CodeGen::visit(AttributeExpr& node) {
                         impl_->ownedTempDrainKind(node.object.get(), objPtr);
                     if (rd != Impl::VarKind::Other) {
                         Impl::VarKind fk = Impl::VarKind::Other;
-                        auto cfk = impl_->classFieldKinds.find(className);
-                        if (cfk != impl_->classFieldKinds.end()) {
+                        auto cfk = impl_->classFieldKindsBySym.find(impl_->classSym(className));
+                        if (cfk != impl_->classFieldKindsBySym.end()) {
                             auto ff = cfk->second.find(node.attribute);
                             if (ff != cfk->second.end()) fk = ff->second;
                         }
@@ -814,8 +810,8 @@ void CodeGen::visit(SubscriptExpr& node) {
                 }
             }
             if (!className.empty()) {
-                auto fkIt = impl_->classFieldKinds.find(className);
-                if (fkIt != impl_->classFieldKinds.end()) {
+                auto fkIt = impl_->classFieldKindsBySym.find(impl_->classSym(className));
+                if (fkIt != impl_->classFieldKindsBySym.end()) {
                     auto fkIt2 = fkIt->second.find(attrExpr->attribute);
                     if (fkIt2 != fkIt->second.end() && fkIt2->second == Impl::VarKind::Dict)
                         isDict = true;
@@ -920,8 +916,8 @@ void CodeGen::visit(SubscriptExpr& node) {
                         std::string fieldName = strKey->value;
                         if (fieldName.size() >= 2 && (fieldName.front() == '"' || fieldName.front() == '\''))
                             fieldName = fieldName.substr(1, fieldName.size() - 2);
-                        auto schemaIt = impl_->typedDictFieldKinds.find(tdIt->second);
-                        if (schemaIt != impl_->typedDictFieldKinds.end()) {
+                        auto schemaIt = impl_->typedDictFieldKindsBySym.find(impl_->classSym(tdIt->second));
+                        if (schemaIt != impl_->typedDictFieldKindsBySym.end()) {
                             auto fIt = schemaIt->second.find(fieldName);
                             if (fIt != schemaIt->second.end())
                                 checkTag = Impl::typeKindToTag(fIt->second);
@@ -975,8 +971,8 @@ void CodeGen::visit(SubscriptExpr& node) {
                 if (className.empty())
                     className = impl_->resolveExprClassName(attrExpr->object.get());
                 if (!className.empty()) {
-                    auto cit = impl_->classFieldDictValueKinds.find(className);
-                    if (cit != impl_->classFieldDictValueKinds.end()) {
+                    auto cit = impl_->classFieldDictValueKindsBySym.find(impl_->classSym(className));
+                    if (cit != impl_->classFieldDictValueKindsBySym.end()) {
                         auto fit = cit->second.find(attrExpr->attribute);
                         if (fit != cit->second.end()) {
                             int64_t t = Impl::typeKindToTag(fit->second);
@@ -1019,8 +1015,8 @@ void CodeGen::visit(SubscriptExpr& node) {
                 if (className.empty())
                     className = impl_->resolveExprClassName(attrExpr->object.get());
                 if (!className.empty()) {
-                    auto cit = impl_->classFieldDictValueKinds.find(className);
-                    if (cit != impl_->classFieldDictValueKinds.end()) {
+                    auto cit = impl_->classFieldDictValueKindsBySym.find(impl_->classSym(className));
+                    if (cit != impl_->classFieldDictValueKindsBySym.end()) {
                         auto fit = cit->second.find(attrExpr->attribute);
                         if (fit != cit->second.end() &&
                             fit->second == Type::Kind::Any)
@@ -1258,8 +1254,8 @@ void CodeGen::visit(SubscriptExpr& node) {
                 }
             }
             if (!className.empty()) {
-                auto fkIt = impl_->classFieldKinds.find(className);
-                if (fkIt != impl_->classFieldKinds.end()) {
+                auto fkIt = impl_->classFieldKindsBySym.find(impl_->classSym(className));
+                if (fkIt != impl_->classFieldKindsBySym.end()) {
                     auto fkIt2 = fkIt->second.find(attrExpr->attribute);
                     if (fkIt2 != fkIt->second.end()) {
                         if (fkIt2->second == Impl::VarKind::List) isList = true;
@@ -1381,8 +1377,8 @@ void CodeGen::visit(SubscriptExpr& node) {
                     }
                 }
                 if (!className.empty()) {
-                    auto cit = impl_->classFieldListElemKinds.find(className);
-                    if (cit != impl_->classFieldListElemKinds.end()) {
+                    auto cit = impl_->classFieldListElemKindsBySym.find(impl_->classSym(className));
+                    if (cit != impl_->classFieldListElemKindsBySym.end()) {
                         auto fit = cit->second.find(attrExpr->attribute);
                         if (fit != cit->second.end()) elemKind = fit->second;
                     }

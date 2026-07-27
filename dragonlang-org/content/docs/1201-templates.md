@@ -48,7 +48,11 @@ config: str = template {
 
 The lexer tracks brace depth to find the template's end; balanced content (HTML,
 JSON, CSS, SQL) just works. For a stray brace in prose, escape it: `!!}` is a
-literal `}`, `!!{` a literal `!{`.
+literal `}`, `!!{` a literal `!{`. Those two trigrams are the only escapes: a
+bare `!!` with no brace after it (the JavaScript `!!x` coercion idiom, the
+Postgres `!!` operator) is plain literal text and needs no escaping. An
+unterminated `!{` (or an interpolation body that is not valid Dragon) is a
+compile error, never a silent drop from the output.
 
 ## Typed templates: `template[HTML]`
 

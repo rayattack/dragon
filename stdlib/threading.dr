@@ -38,19 +38,25 @@ extern "C" def pthread_cond_signal(cond: ptr) -> intc
 extern "C" def pthread_cond_broadcast(cond: ptr) -> intc
 extern "C" def pthread_cond_destroy(cond: ptr) -> intc
 
-# pthread barrier - 32 bytes on x86_64 Linux
-extern "C" def pthread_barrier_init(barrier: ptr, attr: ptr, count: intc) -> intc
-extern "C" def pthread_barrier_wait(barrier: ptr) -> intc
-extern "C" def pthread_barrier_destroy(barrier: ptr) -> intc
+# Barrier via the Dragon runtime, not pthread_barrier_*: barriers are an
+# optional part of POSIX and macOS does not ship them, so calling them directly
+# broke the link for every program that imported this module. The runtime
+# builds one from a mutex + condvar, which POSIX does mandate.
+# The handle is opaque - the runtime owns the allocation.
+extern "C" def dragon_barrier_new(count: int) -> ptr
+extern "C" def dragon_barrier_wait(barrier: ptr) -> int
+extern "C" def dragon_barrier_destroy(barrier: ptr) -> int
 
-# Semaphore via sem_t - 32 bytes on x86_64 Linux
-extern "C" def sem_init(sem: ptr, pshared: intc, value: intc) -> intc
-extern "C" def sem_wait(sem: ptr) -> intc
-extern "C" def sem_trywait(sem: ptr) -> intc
-extern "C" def sem_post(sem: ptr) -> intc
-extern "C" def sem_destroy(sem: ptr) -> intc
-# Timed wait (deadline math + macOS fallback live in the C runtime) - return 1 if a permit was taken, 0 on timeout.
-extern "C" def dragon_sem_timedwait_sec(sem: ptr, seconds: float) -> intc
+# Semaphore via the Dragon runtime, not sem_init/sem_wait: macOS deprecated
+# unnamed POSIX semaphores and sem_init() there returns -1/ENOSYS, so the old
+# code silently operated on an uninitialised sem_t. The runtime builds a
+# counting semaphore from a mutex + condvar. Handle is opaque.
+extern "C" def dragon_sem_new(value: int) -> ptr
+extern "C" def dragon_sem_acquire(sem: ptr) -> int
+extern "C" def dragon_sem_tryacquire(sem: ptr) -> int
+extern "C" def dragon_sem_timedacquire_sec(sem: ptr, seconds: float) -> int
+extern "C" def dragon_sem_release(sem: ptr) -> int
+extern "C" def dragon_sem_free(sem: ptr) -> int
 
 # pthread thread - 8 bytes (pthread_t is unsigned long on x86_64 Linux)
 extern "C" def pthread_create(thread: ptr, attr: ptr, start_routine: ptr, arg: ptr) -> intc
@@ -64,18 +70,21 @@ extern "C" def dragon_atomic_store(p: ptr, val: int)
 extern "C" def dragon_atomic_add(p: ptr, val: int) -> int
 
 #===----------------------------------------------------------------------===#
-# Struct allocation sizes. The extern comments above give the true x86_64-Linux
-# pthread struct sizes; we malloc these (>= true size, padded for margin and
-# other platforms' layouts) and zero them before init. Change only if a target
-# ABI needs more room.
+# Struct allocation sizes.
+#
+# These come from the runtime, which is the only part of the toolchain compiled
+# against the target's own pthread.h. They used to be hardcoded x86_64-Linux
+# literals described as "padded for other platforms' layouts" - which was wrong:
+# Darwin's pthread_rwlock_t is 200 bytes against the 64 assumed, so
+# pthread_rwlock_init overran the block and RWLock segfaulted on macOS.
 #===----------------------------------------------------------------------===#
 
-const _MUTEX_SIZE: int = 64       # pthread_mutex_t (true 40, padded)
-const _RWLOCK_SIZE: int = 64      # pthread_rwlock_t (true 56, padded)
-const _COND_SIZE: int = 48        # pthread_cond_t
-const _BARRIER_SIZE: int = 32     # pthread_barrier_t
-const _SEM_SIZE: int = 32         # sem_t
-const _EVENT_FLAG_SIZE: int = 8   # one i64 atomic flag
+extern "C" def dragon_sizeof_mutex() -> int
+extern "C" def dragon_sizeof_rwlock() -> int
+extern "C" def dragon_sizeof_cond() -> int
+
+const _EVENT_FLAG_SIZE: int = 8   # one i64 atomic flag - a plain i64, not a
+                                  # pthread struct, so its size is ours to fix
 
 #===----------------------------------------------------------------------===#
 # Lock - Basic mutex (most common synchronization primitive)
@@ -97,8 +106,8 @@ const _EVENT_FLAG_SIZE: int = 8   # one i64 atomic flag
 
 class RWLock {
     def() {
-        self.rw = malloc(_RWLOCK_SIZE)
-        memset(self.rw, 0, _RWLOCK_SIZE)
+        self.rw = malloc(dragon_sizeof_rwlock())
+        memset(self.rw, 0, dragon_sizeof_rwlock())
         pthread_rwlock_init(self.rw, none)
     }
 
@@ -153,9 +162,8 @@ class RWLock {
 
 class Semaphore {
     def(value: int) {
-        self.sem = malloc(_SEM_SIZE)
-        memset(self.sem, 0, _SEM_SIZE)
-        sem_init(self.sem, 0, value)
+        # The runtime owns the allocation; destroy() releases it.
+        self.sem = dragon_sem_new(value)
     }
 
     # Take one permit. blocking=False tries once and returns whether a permit
@@ -164,22 +172,20 @@ class Semaphore {
     # Same shape as Lock.acquire / RWLock.acquire.
     def acquire(blocking: bool = True, timeout: float = -1.0) -> bool {
         if not blocking {
-            return sem_trywait(self.sem) == 0
+            return dragon_sem_tryacquire(self.sem) == 1
         }
         if timeout < 0.0 {
-            return sem_wait(self.sem) == 0
+            return dragon_sem_acquire(self.sem) == 0
         }
-        return dragon_sem_timedwait_sec(self.sem, timeout) == 1
+        return dragon_sem_timedacquire_sec(self.sem, timeout) == 1
     }
 
     def release() -> int {
-        return sem_post(self.sem)
+        return dragon_sem_release(self.sem)
     }
 
     def destroy() -> int {
-        const result: int = sem_destroy(self.sem)
-        free(self.sem)
-        return result
+        return dragon_sem_free(self.sem)
     }
 
     def __enter__() -> Semaphore {
@@ -199,20 +205,19 @@ class Semaphore {
 
 class Barrier {
     def(count: int) {
-        self.bar = malloc(_BARRIER_SIZE)
-        memset(self.bar, 0, _BARRIER_SIZE)
-        pthread_barrier_init(self.bar, none, count)
+        # The runtime allocates and owns the barrier; destroy() releases it.
+        self.bar = dragon_barrier_new(count)
         self.count = count
     }
 
     def wait() -> int {
-        return pthread_barrier_wait(self.bar)
+        # Returns 1 to exactly one thread per trip (so you can elect one to do
+        # the post-rendezvous work) and 0 to the rest. Reusable across trips.
+        return dragon_barrier_wait(self.bar)
     }
 
     def destroy() -> int {
-        const result: int = pthread_barrier_destroy(self.bar)
-        free(self.bar)
-        return result
+        return dragon_barrier_destroy(self.bar)
     }
 }
 
@@ -222,11 +227,11 @@ class Barrier {
 
 class Condition {
     def() {
-        self.cond = malloc(_COND_SIZE)
-        memset(self.cond, 0, _COND_SIZE)
+        self.cond = malloc(dragon_sizeof_cond())
+        memset(self.cond, 0, dragon_sizeof_cond())
         pthread_cond_init(self.cond, none)
-        self.mtx = malloc(_MUTEX_SIZE)
-        memset(self.mtx, 0, _MUTEX_SIZE)
+        self.mtx = malloc(dragon_sizeof_mutex())
+        memset(self.mtx, 0, dragon_sizeof_mutex())
         pthread_mutex_init(self.mtx, none)
     }
 
@@ -277,11 +282,11 @@ class Event {
     def() {
         self.flag = malloc(_EVENT_FLAG_SIZE)
         memset(self.flag, 0, _EVENT_FLAG_SIZE)
-        self.cond = malloc(_COND_SIZE)
-        memset(self.cond, 0, _COND_SIZE)
+        self.cond = malloc(dragon_sizeof_cond())
+        memset(self.cond, 0, dragon_sizeof_cond())
         pthread_cond_init(self.cond, none)
-        self.mtx = malloc(_MUTEX_SIZE)
-        memset(self.mtx, 0, _MUTEX_SIZE)
+        self.mtx = malloc(dragon_sizeof_mutex())
+        memset(self.mtx, 0, dragon_sizeof_mutex())
         pthread_mutex_init(self.mtx, none)
     }
 
