@@ -290,9 +290,25 @@ void TypeChecker::visit(AssignStmt& node) {
                     impl_->define(name->name, valueType);
                 }
             } else if (auto* attr = dynamic_cast<AttributeExpr*>(target.get())) {
+                auto objType = inferType(attr->object.get());
+                // `obj.method = v` / `Class.method = v` must not compile: a
+                // method is not an assignable slot. It previously compiled
+                // silently and did nothing (the method was untouched), hiding
+                // real bugs like `res.html = ...` for `res.html(...)`.
+                const ClassType* recvCls = nullptr;
+                if (objType && objType->kind() == Type::Kind::Instance)
+                    recvCls = static_cast<const InstanceType&>(*objType).classType.get();
+                else if (objType && objType->kind() == Type::Kind::Class)
+                    recvCls = static_cast<const ClassType*>(objType.get());
+                if (const ClassType* owner = findMethodOwner(recvCls, attr->attribute)) {
+                    error(node.location(), "cannot assign to method '" +
+                          attr->attribute + "' of class '" + owner->name +
+                          "'; methods are not assignable - did you mean to "
+                          "call it: `." + attr->attribute + "(...)`?");
+                    continue;
+                }
                 // `obj.attr = []` bare reassign of a class field: push the field's
                 // declared type into the empty literal (else it falls back to TAG_INT).
-                auto objType = inferType(attr->object.get());
                 if (objType && objType->kind() == Type::Kind::Instance) {
                     const auto& inst = static_cast<const InstanceType&>(*objType);
                     std::shared_ptr<Type> fieldType;
@@ -382,6 +398,25 @@ void TypeChecker::visit(AugAssignStmt& node) {
 
 void TypeChecker::visit(AnnAssignStmt& node) {
     auto annotType = resolveType(node.annotation.get());
+
+    // `obj.method: T = v` is as invalid as the bare form (see AssignStmt): a
+    // method is not an assignable slot, annotated or not. The ctor's field
+    // declarations (`self.x: str = v`) resolve in `fields` and pass through.
+    if (auto* attr = dynamic_cast<AttributeExpr*>(node.target.get())) {
+        auto objType = inferType(attr->object.get());
+        const ClassType* recvCls = nullptr;
+        if (objType && objType->kind() == Type::Kind::Instance)
+            recvCls = static_cast<const InstanceType&>(*objType).classType.get();
+        else if (objType && objType->kind() == Type::Kind::Class)
+            recvCls = static_cast<const ClassType*>(objType.get());
+        if (const ClassType* owner = findMethodOwner(recvCls, attr->attribute)) {
+            error(node.location(), "cannot assign to method '" +
+                  attr->attribute + "' of class '" + owner->name +
+                  "'; methods are not assignable - did you mean to call it: `." +
+                  attr->attribute + "(...)`?");
+            return;
+        }
+    }
 
     if (node.value) {
         // Propagate annotation type into empty container literals
@@ -1449,6 +1484,12 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
                             auto* obj = dynamic_cast<NameExpr*>(attr->object.get());
                             if (!obj || obj->name != "self") continue;
                             if (classType->fields.count(attr->attribute)) continue;
+                            // `self.m = v` where m is a METHOD is a compile
+                            // error (AssignStmt visitor); never register it as
+                            // a field here - that would shadow the method.
+                            if (classType->methods.count(attr->attribute) ||
+                                classType->methodOverloads.count(attr->attribute))
+                                continue;
                             auto rhsType = rhsLiteralType(as->value.get());
                             if (rhsType) {
                                 classType->fields[attr->attribute] = rhsType;
@@ -1459,7 +1500,9 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
                         if (attr) {
                             auto* obj = dynamic_cast<NameExpr*>(attr->object.get());
                             if (obj && obj->name == "self" &&
-                                !classType->fields.count(attr->attribute)) {
+                                !classType->fields.count(attr->attribute) &&
+                                !classType->methods.count(attr->attribute) &&
+                                !classType->methodOverloads.count(attr->attribute)) {
                                 classType->fields[attr->attribute] =
                                     resolveType(ann->annotation.get());
                             }

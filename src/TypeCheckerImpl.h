@@ -177,6 +177,15 @@ struct TypeChecker::Impl {
     // visit(CallExpr)): `b: Box[int] = Box(5)` infers args. Single-slot, consume-on-read.
     std::shared_ptr<Type> currentExpectedType;
 
+    // The one expression currently ALLOWED to resolve to a bare class method:
+    // the callee of the CallExpr being inferred (`obj.m(...)`), or the object
+    // of a `.__doc__` access (`obj.m.__doc__`, lowered to a .rodata constant).
+    // Set/restored around the respective inferType calls. Anywhere else a
+    // METHOD is not a value (there is no bound-method object; codegen has no
+    // lowering, so it miscompiled to 0 / a SEGV) - visit(AttributeExpr)
+    // rejects it at compile time.
+    const Expr* methodRefOkExpr = nullptr;
+
     // Polymorphic-recursion guard (`Foo[T]` -> `Foo[list[T]]` ...): distinct stamps
     // this module. Hitting the cap is a compile error, not a silent truncation.
     int instantiationCount = 0;    // total distinct instantiations stamped

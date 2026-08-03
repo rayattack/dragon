@@ -2141,3 +2141,75 @@ TEST(TypeCheckerTest, IdentityResourceBlessedSpellingsOk) {
         "    moved: R = R(own h)\n"
         "}\n"));
 }
+
+//===----------------------------------------------------------------------===//
+// Issue #25 - methods are not values: reassigning a method must not compile
+// (it previously compiled silently and did nothing), and a bare method
+// reference outside call position must not compile (it previously
+// miscompiled to 0, or a SEGV when bound to a Callable and invoked).
+//===----------------------------------------------------------------------===//
+
+static const char* kIss25Class =
+    "class Test {\n"
+    "    def(name: str) { self.name: str = name }\n"
+    "    def print_junk() { print(\"junk\") }\n"
+    "    def double(n: int) -> int { return n * 2 }\n"
+    "}\n"
+    "test: Test = Test('t')\n";
+
+TEST(TypeCheckerTest, MethodReassignRejected) {
+    EXPECT_TRUE(checkHasErrors(std::string(kIss25Class) +
+        "test.print_junk = \"nope\"\n"));
+}
+
+TEST(TypeCheckerTest, MethodAnnotatedReassignRejected) {
+    EXPECT_TRUE(checkHasErrors(std::string(kIss25Class) +
+        "test.print_junk: str = \"nope\"\n"));
+}
+
+TEST(TypeCheckerTest, MethodReassignOnClassRejected) {
+    EXPECT_TRUE(checkHasErrors(std::string(kIss25Class) +
+        "Test.print_junk = \"nope\"\n"));
+}
+
+TEST(TypeCheckerTest, MethodSelfReassignInCtorRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "class T2 {\n"
+        "    def(x: int) {\n"
+        "        self.x: int = x\n"
+        "        self.m = \"shadow\"\n"
+        "    }\n"
+        "    def m() { print(\"m\") }\n"
+        "}\n"));
+}
+
+TEST(TypeCheckerTest, BareMethodReadRejected) {
+    EXPECT_TRUE(checkHasErrors(std::string(kIss25Class) +
+        "print(test.print_junk)\n"));
+}
+
+TEST(TypeCheckerTest, BareMethodReadOnClassRejected) {
+    EXPECT_TRUE(checkHasErrors(std::string(kIss25Class) +
+        "print(Test.print_junk)\n"));
+}
+
+TEST(TypeCheckerTest, MethodBoundToCallableRejected) {
+    EXPECT_TRUE(checkHasErrors(std::string(kIss25Class) +
+        "cb: Callable[[int], int] = test.double\n"));
+}
+
+TEST(TypeCheckerTest, MethodCallsStillOk) {
+    EXPECT_TRUE(checkOk(std::string(kIss25Class) +
+        "test.print_junk()\n"
+        "d: int = test.double(5)\n"
+        "test.name = \"renamed\"\n"));
+}
+
+TEST(TypeCheckerTest, InheritedMethodReassignRejected) {
+    EXPECT_TRUE(checkHasErrors(std::string(kIss25Class) +
+        "class Sub(Test) {\n"
+        "    def(name: str) { self.name: str = name }\n"
+        "}\n"
+        "s: Sub = Sub('s')\n"
+        "s.print_junk = \"nope\"\n"));
+}

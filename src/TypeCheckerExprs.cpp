@@ -63,7 +63,14 @@ void TypeChecker::visit(CallExpr& node) {
         }
     }
 
+    // Mark the callee window so visit(AttributeExpr) can tell a genuine call
+    // `obj.method(...)` from a bare `obj.method` read (which must be rejected:
+    // a method is not a value). Save/restore, so a CallExpr nested inside an
+    // ARGUMENT of this call doesn't leak its own window outward.
+    const Expr* savedMethodOk = impl_->methodRefOkExpr;
+    impl_->methodRefOkExpr = node.callee.get();
     auto calleeType = inferType(node.callee.get());
+    impl_->methodRefOkExpr = savedMethodOk;
 
     // ADR 010 method-overload resolution. When the callee is `obj.method` (or
     // `Class.method`) and the receiver's class declares >1 method with that name,
@@ -865,7 +872,14 @@ void TypeChecker::visit(CallExpr& node) {
 }
 
 void TypeChecker::visit(AttributeExpr& node) {
+    // `obj.m.__doc__` is a SUPPORTED method chain (no method value at runtime:
+    // codegen pattern-matches the chain and emits the cached .rodata constant),
+    // so the object of a `.__doc__` access may resolve to a bare method.
+    const Expr* savedMethodOk = impl_->methodRefOkExpr;
+    if (node.attribute == "__doc__")
+        impl_->methodRefOkExpr = node.object.get();
     auto objType = inferType(node.object.get());
+    impl_->methodRefOkExpr = savedMethodOk;
 
     // D044 - unbounded-`T` restriction: a value of type parameter `T` may be
     // stored, passed, returned, and compared, but its members/methods cannot be
@@ -973,6 +987,20 @@ void TypeChecker::visit(AttributeExpr& node) {
             auto mit = cls->methods.find(node.attribute);
             if (mit != cls->methods.end()) {
                 checkMemberPrivacy(cls, node.attribute, node.location());  // D045
+                // A method resolves ONLY in callee position (`obj.m(...)`). A
+                // bare `obj.m` has no runtime value - there is no bound-method
+                // object (D033's getattr is the reflection surface) - and
+                // codegen miscompiled it to 0 (printed) or a null Callable
+                // (SEGV when invoked). Reject it here instead.
+                if (impl_->methodRefOkExpr != &node) {
+                    error(node.location(), "method '" + node.attribute +
+                          "' of class '" + cls->name +
+                          "' is not a value; call it (`." + node.attribute +
+                          "(...)`), or wrap it in a lambda to pass it as a "
+                          "Callable");
+                    node.type = impl_->unknownType;
+                    return;
+                }
                 node.type = mit->second;
                 return;
             }
@@ -1024,6 +1052,17 @@ void TypeChecker::visit(AttributeExpr& node) {
         auto mit = ct.methods.find(node.attribute);
         if (mit != ct.methods.end()) {
             checkMemberPrivacy(&ct, node.attribute, node.location());  // D045
+            // Same rule as the Instance branch: `Class.m` only in callee
+            // position; a bare read miscompiled to 0 before this check.
+            if (impl_->methodRefOkExpr != &node) {
+                error(node.location(), "method '" + node.attribute +
+                      "' of class '" + ct.name +
+                      "' is not a value; call it (`" + ct.name + "." +
+                      node.attribute + "(...)`), or wrap it in a lambda to "
+                      "pass it as a Callable");
+                node.type = impl_->unknownType;
+                return;
+            }
             node.type = mit->second;
             return;
         }

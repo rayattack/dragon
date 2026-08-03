@@ -47,6 +47,7 @@ CPackSourceConfig.cmake
 *.resend-key
 .env
 *.env
+.env.*
 
 # --- Compiled binaries with no extension (rebuildable from .dr source) ---
 /examples/pypy
