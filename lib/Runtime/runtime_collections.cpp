@@ -443,10 +443,17 @@ void dragon_print_dict_int_nested_raw(DragonDict* d) {
 extern "C" {
 
 DragonTuple* dragon_tuple_new(int64_t count) {
+    // Data before header: the OOM raise is a longjmp that skips the rest of
+    // this frame, so a header allocated first would be stranded with nothing
+    // left to free it. The count * elem_size multiply lives inside the trap,
+    // never at the call site (runtime_internal.h).
+    int64_t* data = count > 0
+        ? (int64_t*)dragon_xmalloc_n(count, sizeof(int64_t)) : nullptr;
     auto* t = (DragonTuple*)malloc(sizeof(DragonTuple));
+    if (!t) { free(data); dragon_raise_oom(); }
     dragon_obj_init(&t->header, DRAGON_TAG_TUPLE);
     t->length = count;
-    t->data = count > 0 ? (int64_t*)malloc(count * sizeof(int64_t)) : nullptr;
+    t->data = data;
     t->elem_tags = nullptr;  // NULL = all ints (no heap elements)
     // Acyclic-skip: created UNTRACKED. dragon_tuple_set_tagged enrolls the tuple
     // in cycle tracking on its first traceable (heap-pointer) element; an all-leaf
@@ -479,13 +486,15 @@ void dragon_tuple_set_tagged(DragonTuple* t, int64_t index, int64_t val, int64_t
         else if (tag == TAG_LIST || tag == TAG_DICT || tag == TAG_BYTES)
             dragon_mark_shared_deep((void*)(uintptr_t)val);
     }
+    // Tag array BEFORE the value store, deliberately. This allocation can
+    // raise, and the raise longjmps out; if the store came first the tuple
+    // would be left live holding a heap pointer with elem_tags still NULL,
+    // which reads as "all ints" and leaks that element at destroy time.
+    // Allocating first means a failure leaves the tuple exactly as it was.
+    if (tag != TAG_INT && !t->elem_tags)
+        t->elem_tags = (uint8_t*)dragon_xcalloc_n(t->length, sizeof(uint8_t));
     t->data[index] = val;
-    if (tag != TAG_INT) {
-        if (!t->elem_tags) {
-            t->elem_tags = (uint8_t*)calloc(t->length, sizeof(uint8_t));
-        }
-        t->elem_tags[index] = (uint8_t)tag;
-    }
+    if (tag != TAG_INT) t->elem_tags[index] = (uint8_t)tag;
 }
 
 int64_t dragon_tuple_get(DragonTuple* t, int64_t index) {
@@ -574,13 +583,22 @@ void dragon_tuple_destroy(DragonTuple* t) {
 
 
 static DragonSet* dragon_set_alloc(int64_t cap, uint8_t elem_tag = 0) {
+    // Tables before header, and each raise frees what this frame already owns:
+    // the OOM longjmp skips the rest of the frame, so anything allocated here
+    // and not yet reachable from a live object would be stranded. Note the
+    // gc_track below runs AFTER all three, so a raise can never hand the
+    // collector a half-built set - that ordering is load-bearing.
+    auto* buckets = (int64_t*)dragon_xcalloc_n(cap, sizeof(int64_t));
+    auto* states = (uint8_t*)calloc((size_t)cap, sizeof(uint8_t));
+    if (!states) { free(buckets); dragon_raise_oom(); }
     auto* s = (DragonSet*)malloc(sizeof(DragonSet));
+    if (!s) { free(states); free(buckets); dragon_raise_oom(); }
     dragon_obj_init(&s->header, DRAGON_TAG_SET);
     s->capacity = cap;
     s->count = 0;
     s->elem_tag = elem_tag;
-    s->buckets = (int64_t*)calloc(cap, sizeof(int64_t));
-    s->states = (uint8_t*)calloc(cap, sizeof(uint8_t));
+    s->buckets = buckets;
+    s->states = states;
     // Phase 5b: track for cycle collection
     dragon_gc_track(s);
     // Atomic counter: many threads may allocate concurrently.
@@ -617,8 +635,14 @@ static void dragon_set_grow(DragonSet* s) {
     int64_t* oldBuckets = s->buckets;
     uint8_t* oldStates = s->states;
     s->capacity = oldCap * 2;
-    s->buckets = (int64_t*)calloc(s->capacity, sizeof(int64_t));
-    s->states = (uint8_t*)calloc(s->capacity, sizeof(uint8_t));
+    // ABORT, never raise. Two independent reasons (runtime_internal.h): this
+    // runs inside the armed dragon_shared_mut_begin window of dragon_set_add,
+    // so a longjmp would escape with GC_FLAG_MUTATING set and arm a spurious
+    // concurrent-mutation fatal on the next mutation of this set; and by the
+    // second calloc the set is already half-swapped (capacity doubled, buckets
+    // replaced), so an unwind would expose a corrupt set to a live caller.
+    s->buckets = (int64_t*)dragon_xcalloc_n_or_abort(s->capacity, sizeof(int64_t));
+    s->states = (uint8_t*)dragon_xcalloc_n_or_abort(s->capacity, sizeof(uint8_t));
     s->count = 0;
     for (int64_t i = 0; i < oldCap; i++) {
         if (oldStates[i] == 1) {
@@ -1587,7 +1611,11 @@ void dragon_bytes_destroy(DragonBytes* b) {
 static void _deque_grow(DragonDeque* d) {
     int64_t newCap = d->capacity * 2;
     if (newCap < 8) newCap = 8;
-    int64_t* newData = (int64_t*)malloc(newCap * sizeof(int64_t));
+    // ABORT, never raise: called from dragon_deque_append and
+    // dragon_deque_appendleft inside their armed dragon_shared_mut_begin
+    // window, so a longjmp would leave GC_FLAG_MUTATING set and arm a
+    // spurious fatal on the next mutation (runtime_internal.h).
+    int64_t* newData = (int64_t*)dragon_xmalloc_n_or_abort(newCap, sizeof(int64_t));
     // Linearize: copy from head to end, then wrap to beginning
     for (int64_t i = 0; i < d->size; i++) {
         newData[i] = d->data[(d->head + i) % d->capacity];
@@ -1627,11 +1655,14 @@ static bool _deque_elem_eq(uint8_t tag, int64_t a, int64_t b) {
 /// `deque(maxlen=N)` parity); elem_tag is the DragonValueTag of the elements
 /// (seeded from the static type, refreshed on every append).
 DragonDeque* dragon_deque_new(int64_t maxlen, int64_t elem_tag) {
-    DragonDeque* d = (DragonDeque*)calloc(1, sizeof(DragonDeque));
-    dragon_obj_init(&d->header, DRAGON_TAG_DEQUE);
     int64_t capacity = 8;
     if (maxlen >= 0 && maxlen < capacity) capacity = maxlen > 0 ? maxlen : 1;
-    d->data = (int64_t*)malloc(capacity * sizeof(int64_t));
+    // Data before header, so an OOM raise cannot strand the header.
+    auto* data = (int64_t*)dragon_xmalloc_n(capacity, sizeof(int64_t));
+    DragonDeque* d = (DragonDeque*)calloc(1, sizeof(DragonDeque));
+    if (!d) { free(data); dragon_raise_oom(); }
+    dragon_obj_init(&d->header, DRAGON_TAG_DEQUE);
+    d->data = data;
     d->capacity = capacity;
     d->head = 0;
     d->size = 0;

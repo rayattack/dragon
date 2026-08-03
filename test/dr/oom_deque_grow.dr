@@ -1,0 +1,20 @@
+# This program is EXPECTED TO DIE. Its ctest entry asserts exit 134 (SIGABRT)
+# and the "out of memory" diagnostic on stderr. it oft died with 139
+# (SIGSEGV) and printed nothing.
+
+from collections import deque
+from collections import deque
+
+
+def main() {
+    q: deque = deque()
+    i: int = 0
+    while i < 5000000 {
+        q.append(i)
+        i = i + 1
+    }
+    print("FAIL: never reached the allocation failure - the cap is too loose")
+}
+
+main()
+
