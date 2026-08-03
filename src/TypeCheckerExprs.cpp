@@ -872,6 +872,36 @@ void TypeChecker::visit(CallExpr& node) {
 }
 
 void TypeChecker::visit(AttributeExpr& node) {
+    resolveAttributeExpr(node);
+    // Builtin receivers (str, bytes, int, float, bool, list, dict, set,
+    // tuple, Task, Lock) expose ONLY methods, never fields, so a Function-
+    // typed result outside the callee/__doc__ window is a bare method read:
+    // `s.upper` / `t.join` without parens. Same rule as the user-class
+    // branches (which check at their resolution sites, since a user FIELD may
+    // legitimately hold a Callable value): a method is not a value - codegen
+    // printed 0 for one, and a Callable binding broke LLVM verification.
+    // Module receivers stay exempt: `mod.fn` is a real function-pointer value.
+    if (!node.type || node.type->kind() != Type::Kind::Function) return;
+    if (impl_->methodRefOkExpr == &node) return;
+    auto objT = node.object ? node.object->type : nullptr;
+    if (!objT) return;
+    switch (objT->kind()) {
+        case Type::Kind::Int:   case Type::Kind::Float: case Type::Kind::Bool:
+        case Type::Kind::Str:   case Type::Kind::Bytes:
+        case Type::Kind::List:  case Type::Kind::Dict:  case Type::Kind::Set:
+        case Type::Kind::Tuple: case Type::Kind::Task:  case Type::Kind::Lock:
+            error(node.location(), "method '" + node.attribute + "' of '" +
+                  objT->toString() + "' is not a value; call it (`." +
+                  node.attribute + "(...)`), or wrap it in a lambda to pass "
+                  "it as a Callable");
+            node.type = impl_->unknownType;
+            break;
+        default:
+            break;
+    }
+}
+
+void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
     // `obj.m.__doc__` is a SUPPORTED method chain (no method value at runtime:
     // codegen pattern-matches the chain and emits the cached .rodata constant),
     // so the object of a `.__doc__` access may resolve to a bare method.

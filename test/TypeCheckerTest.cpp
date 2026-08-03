@@ -2213,3 +2213,39 @@ TEST(TypeCheckerTest, InheritedMethodReassignRejected) {
         "s: Sub = Sub('s')\n"
         "s.print_junk = \"nope\"\n"));
 }
+
+// Builtin receivers: their members are only ever methods, so a bare read is
+// the same defect on a different resolution branch (`print(s.upper)` printed
+// 0; a signature-matching Callable binding broke LLVM verification).
+TEST(TypeCheckerTest, BareBuiltinMethodReadRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "s: str = \"abc\"\n"
+        "print(s.upper)\n"));
+}
+
+TEST(TypeCheckerTest, BareTaskJoinReadRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "def work() -> int { return 7 }\n"
+        "t: Task[int] = fire work()\n"
+        "print(t.join)\n"));
+}
+
+TEST(TypeCheckerTest, BuiltinMethodBoundToCallableRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "s: str = \"abc\"\n"
+        "up: Callable[[Any], str] = s.upper\n"));
+}
+
+TEST(TypeCheckerTest, BuiltinMethodCallsStillOk) {
+    EXPECT_TRUE(checkOk(
+        "def work() -> int { return 7 }\n"
+        "s: str = \"abc\"\n"
+        "u: str = s.upper()\n"
+        "parts: list[str] = [\"a\", \"b\"]\n"
+        "j: str = \",\".join(parts)\n"
+        "parts.append(\"c\")\n"
+        "d: dict[str, int] = {\"k\": 1}\n"
+        "v: int = d.get(\"k\", 0)\n"
+        "t: Task[int] = fire work()\n"
+        "r: int = t.join()\n"));
+}

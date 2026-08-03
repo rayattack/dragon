@@ -482,6 +482,11 @@ private:
     // reads (a method is not a runtime value; codegen has no lowering for it).
     const ClassType* findMethodOwner(const ClassType* cls,
                                      const std::string& member) const;
+    // The body of visit(AttributeExpr): resolves the member and sets
+    // node.type. visit(AttributeExpr) wraps it with the bare-method-read
+    // check for BUILTIN receivers (str/list/Task/...), whose members are
+    // only ever methods - one check instead of one per builtin branch.
+    void resolveAttributeExpr(AttributeExpr& node);
     void checkModuleNamePrivacy(const ModuleType& srcModule, const std::string& name,
                                 const SourceLocation& loc);
     void checkDunderDeclaration(const std::string& name, bool moduleLevel,
