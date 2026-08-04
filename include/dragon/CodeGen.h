@@ -92,6 +92,13 @@ struct CodeGenOptions {
     /// then fails with a clear error instead of undefined references).
     std::string webviewShimPath;
 
+    /// D031 - the program's assets/ directory (next to the entry file),
+    /// resolved by the Driver. When the program imports ui, linkExecutable
+    /// embeds every file in it into the binary (a generated TU exporting
+    /// dragon_ui_assets[]) for the in-process app:// scheme handler. Empty =
+    /// no assets directory; an empty table is emitted so the shell links.
+    std::string assetsDir;
+
     /// Include directories (-I) forwarded to the shim compiler for --cc-source.
     std::vector<std::string> includePaths;
 };

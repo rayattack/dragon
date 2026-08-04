@@ -31,6 +31,45 @@
 // Dragon `def msg: str` parameter, which lowers to `void(const char*)`.
 extern "C" const char* dragon_string_dup(const char* s);
 
+// D031 app:// assets: the compiler emits one generated TU per ui build holding
+// every file of the program's assets/ directory (empty table when there is
+// none); the scheme handler below resolves app://<path> against it. No socket,
+// no port, no HTTP round-trip.
+extern "C" {
+typedef struct DragonUiAsset {
+    const char* path;              // relative to assets/, e.g. "app.css"
+    const unsigned char* data;
+    unsigned long len;
+} DragonUiAsset;
+extern const DragonUiAsset dragon_ui_assets[];
+extern const unsigned long dragon_ui_asset_count;
+}
+
+// Content-Type by extension - the handler serves from memory, so this is the
+// only place a type can come from.
+static const char* dragon__asset_mime(const char* path) {
+    const char* dot = strrchr(path, '.');
+    if (!dot) return "application/octet-stream";
+    ++dot;
+    if (!strcmp(dot, "html") || !strcmp(dot, "htm")) return "text/html";
+    if (!strcmp(dot, "css"))   return "text/css";
+    if (!strcmp(dot, "js"))    return "text/javascript";
+    if (!strcmp(dot, "mjs"))   return "text/javascript";
+    if (!strcmp(dot, "json"))  return "application/json";
+    if (!strcmp(dot, "svg"))   return "image/svg+xml";
+    if (!strcmp(dot, "png"))   return "image/png";
+    if (!strcmp(dot, "jpg") || !strcmp(dot, "jpeg")) return "image/jpeg";
+    if (!strcmp(dot, "gif"))   return "image/gif";
+    if (!strcmp(dot, "webp"))  return "image/webp";
+    if (!strcmp(dot, "ico"))   return "image/x-icon";
+    if (!strcmp(dot, "woff2")) return "font/woff2";
+    if (!strcmp(dot, "woff"))  return "font/woff";
+    if (!strcmp(dot, "ttf"))   return "font/ttf";
+    if (!strcmp(dot, "txt"))   return "text/plain";
+    if (!strcmp(dot, "wasm"))  return "application/wasm";
+    return "application/octet-stream";
+}
+
 extern "C" {
 
 // Inbound message callback: a top-level Dragon `def on_message(msg: str)` passed
@@ -48,14 +87,31 @@ typedef struct DragonWebView {
 // The locked window.dr shim, injected at document-start so it exists before any
 // page script runs. invoke() posts a message to native; _patch() applies a single
 // targeted node op (text/attr/html) - the v1 re-render mechanism (no innerHTML
-// replace). Hardening (Object.freeze / defineProperty) lands with the security
-// pass; this is the functional core.
+// replace). call() is the JSON bridge (Decision 031 Phase 0): a named Dragon
+// handler invoked by promise, settled from native via _settle(). Hardening
+// (Object.freeze / defineProperty) lands with the security pass; this is the
+// functional core.
 static const char* DRAGON_SHIM_JS =
     "(function(){"
     "  if (window.__drInit) return; window.__drInit = true;"
     "  function post(s){ try{ window.webkit.messageHandlers.dragon.postMessage(String(s)); }catch(e){} }"
     "  window.dr = {"
     "    invoke: function(name){ post(name); },"
+    "    _seq: 0,"
+    "    _pending: {},"
+    "    call: function(name, payload){"
+    "      var id = ++window.dr._seq;"
+    "      return new Promise(function(resolve, reject){"
+    "        window.dr._pending[id] = { ok: resolve, err: reject };"
+    "        post('rpc:' + id + ':' + name + ':' + (payload == null ? '' : String(payload)));"
+    "      });"
+    "    },"
+    "    _settle: function(id, ok, data){"
+    "      var p = window.dr._pending[id];"
+    "      if (!p) return;"
+    "      delete window.dr._pending[id];"
+    "      if (ok) p.ok(data); else p.err(new Error(data));"
+    "    },"
     "    _patch: function(op){"
     "      var el = document.querySelector('[data-dr=\"'+op.id+'\"]');"
     "      if(!el) return;"
@@ -65,6 +121,36 @@ static const char* DRAGON_SHIM_JS =
     "    }"
     "  };"
     "})();";
+
+// app:// scheme handler: serve straight from the embedded asset table. The
+// URI's authority and path are both part of the lookup key ("app://a/b.css"
+// resolves the asset "a/b.css"), query/fragment are ignored.
+static void dragon__on_app_request(WebKitURISchemeRequest* request, gpointer) {
+    const char* uri = webkit_uri_scheme_request_get_uri(request);
+    const char* p = uri ? strstr(uri, "://") : NULL;
+    p = p ? p + 3 : "";
+    while (*p == '/') ++p;
+    char key[1024];
+    size_t n = 0;
+    for (; p[n] && p[n] != '?' && p[n] != '#' && n < sizeof(key) - 1; ++n)
+        key[n] = p[n];
+    key[n] = 0;
+    DRAGON_DBG("app:// request: '%s' -> key '%s'\n", uri ? uri : "(null)", key);
+    for (unsigned long i = 0; i < dragon_ui_asset_count; ++i) {
+        if (strcmp(dragon_ui_assets[i].path, key) != 0) continue;
+        GInputStream* stream = g_memory_input_stream_new_from_data(
+            dragon_ui_assets[i].data, (gssize) dragon_ui_assets[i].len, NULL);
+        webkit_uri_scheme_request_finish(request, stream,
+                                         (gint64) dragon_ui_assets[i].len,
+                                         dragon__asset_mime(key));
+        g_object_unref(stream);
+        return;
+    }
+    GError* err = g_error_new(G_FILE_ERROR, G_FILE_ERROR_NOENT,
+                              "app://%s: no such embedded asset", key);
+    webkit_uri_scheme_request_finish_error(request, err);
+    g_error_free(err);
+}
 
 // Single-window Phase 0: the most-recently-created window is "current", so the
 // bridge entry points (set_handler / eval_js) need no handle. Multi-window adds
@@ -124,6 +210,20 @@ static void dragon__on_window_destroy(GtkWidget* widget, gpointer user_data) {
 
 void dragon_webview_init(void) {
     gtk_init(NULL, NULL);
+    // Register app:// once on the default context (every webview shares it).
+    // Secure + CORS-enabled so documents can reference embedded assets the
+    // way they would any https origin.
+    static gboolean scheme_registered = FALSE;
+    if (!scheme_registered) {
+        scheme_registered = TRUE;
+        WebKitWebContext* ctx = webkit_web_context_get_default();
+        webkit_web_context_register_uri_scheme(ctx, "app",
+                                               dragon__on_app_request,
+                                               NULL, NULL);
+        WebKitSecurityManager* sm = webkit_web_context_get_security_manager(ctx);
+        webkit_security_manager_register_uri_scheme_as_secure(sm, "app");
+        webkit_security_manager_register_uri_scheme_as_cors_enabled(sm, "app");
+    }
 }
 
 void* dragon_webview_window_new(const char* title, int width, int height) {
@@ -161,6 +261,19 @@ void dragon_webview_set_handler(void* fn) {
     if (g_current_wv) g_current_wv->handler = (DragonMsgHandler) fn;
 }
 
+// Hand a no-arg Dragon function to the GTK main loop from ANY thread.
+// g_idle_add is thread-safe; the function runs on the UI thread, where
+// webkit calls (eval_js and friends) are legal. This is the worker-to-UI
+// completion edge of the JSON bridge (Decision 031's run_on_ui, minimal form).
+static gboolean dragon__post_trampoline(gpointer data) {
+    ((void (*)(void)) data)();
+    return G_SOURCE_REMOVE;
+}
+void dragon_webview_post(void* fn) {
+    if (!fn) return;
+    g_idle_add(dragon__post_trampoline, fn);
+}
+
 // Dragon -> JS: run a script in the current window (used to push targeted patch ops).
 void dragon_webview_eval_js(const char* js) {
     if (!g_current_wv || !g_current_wv->webview) return;
@@ -178,7 +291,9 @@ void dragon_webview_load_html(void* handle, const char* html) {
     DragonWebView* wv = (DragonWebView*) handle;
     if (!wv || !wv->webview) return;  // closed window: no-op
     DRAGON_DBG("load_html: %zu bytes\n", html ? strlen(html) : 0);
-    webkit_web_view_load_html(wv->webview, html ? html : "", NULL);
+    // Base the document on app:/// so relative asset URLs ("/app.css",
+    // "app.css") resolve through the embedded-asset scheme handler.
+    webkit_web_view_load_html(wv->webview, html ? html : "", "app:///");
 }
 
 void dragon_webview_show(void* handle) {

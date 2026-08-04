@@ -490,6 +490,28 @@ bool TypeChecker::check(Module& module) {
         }
     }
 
+    // Import-binding pre-pass: bind `import x` / `from x import y` names BEFORE
+    // the class and function-signature pre-passes below, so a signature or field
+    // annotation referencing an IMPORTED type resolves during pre-registration.
+    // Without this, a module function whose parameter is an imported class was
+    // skipped by the signature pre-pass (its annotation resolved Unknown), so a
+    // FORWARD call to it silently typed Any: the call result boxed into a
+    // dict[str, Any] literal carried TAG_INT and read back as a TypeError, and
+    // `const q: int = that_call()` type-checked. The visitors are pure,
+    // idempotent bindings; the main walk re-runs them in statement order (which
+    // still owns shadowing) and owns the diagnostics - any emitted here are
+    // rolled back so privacy/unknown-name errors are not duplicated.
+    for (auto& stmt : module.body) {
+        size_t diagBefore = impl_->diagnostics.size();
+        if (auto* imp = dynamic_cast<ImportStmt*>(stmt.get())) {
+            visit(*imp);
+        } else if (auto* fimp = dynamic_cast<FromImportStmt*>(stmt.get())) {
+            visit(*fimp);
+        }
+        if (impl_->diagnostics.size() > diagBefore)
+            impl_->diagnostics.resize(diagBefore);
+    }
+
     // Class-layout pre-pass (mirrors CodeGen's): register every class's type
     // name and ANNOTATED field types before checking any method body. Without
     // this, a method in class A referencing a class B defined later resolved

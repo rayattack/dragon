@@ -15,7 +15,10 @@ extern "C" def dragon_webview_run()
 extern "C" def dragon_webview_run_timeout(ms: intc)
 extern "C" def dragon_webview_set_handler(fn: ptr)
 extern "C" def dragon_webview_eval_js(js: str)
+extern "C" def dragon_webview_post(fn: ptr)
 extern "C" def dragon_json_escape_str(s: str) -> str
+
+from threading import Lock
 
 
 class App {
@@ -59,11 +62,102 @@ def register_callback(fn: Callable[[], None]) -> int {
 }
 
 def _ui_dispatch(msg: str) -> None {
-    """Webview JS->Dragon message handler: `msg` is a callback id; invoke it."""
+    """Webview JS->Dragon message handler: an `rpc:` message routes to the
+    JSON bridge; anything else is a callback id from `window.dr.invoke()`."""
+    if msg.startswith("rpc:") {
+        _rpc_dispatch(msg)
+        return
+    }
     cid: int = int(msg)
     if cid >= 0 and cid < len(_ui_callbacks) {
         _ui_callbacks[cid]()
     }
+}
+
+
+#===----------------------------------------------------------------------===#
+# JSON bridge (Decision 031 Phase 0): named handlers callable from page JS.
+#
+# JS calls `window.dr.call(name, payload)` and gets a Promise; the shim posts
+# `rpc:<id>:<name>:<payload>` to native. The handler runs on a green thread so
+# the UI thread never blocks; its return value (conventionally JSON text)
+# resolves the promise, a raised exception rejects it. Completion crosses back
+# to the UI thread through dragon_webview_post (g_idle_add), because webkit
+# calls are only legal there.
+#===----------------------------------------------------------------------===#
+
+_rpc_handlers: dict[str, Callable[[str], str]] = {}
+_rpc_done: list[tuple[int, bool, str]] = []
+_rpc_lock: Lock = Lock()
+
+def rpc(name: str, fn: Callable[[str], str]) -> None {
+    """Register `fn` as the handler behind `window.dr.call(name, payload)`.
+    Register everything before `App.run()`."""
+    _rpc_handlers[name] = fn
+}
+
+def _settle_js(rid: int, ok: bool, data: str) -> str {
+    # JSON-escape the data so an arbitrary string can never break out of the
+    # literal or inject script (same rule as __patch_text_js).
+    const okjs: str = "true" if ok else "false"
+    return "window.dr._settle(" + str(rid) + "," + okjs + "," +
+           dragon_json_escape_str(data) + ")"
+}
+
+def _rpc_drain() -> None {
+    """Runs on the UI thread (via dragon_webview_post): settle every finished
+    rpc. Drain under the lock, eval outside it."""
+    batch: list[tuple[int, bool, str]] = []
+    with _rpc_lock {
+        while len(_rpc_done) > 0 {
+            batch.append(_rpc_done.pop())
+        }
+    }
+    for item in batch {
+        js: str = _settle_js(item[0], item[1], item[2])
+        dragon_webview_eval_js(js)
+    }
+}
+
+def _rpc_exec(rid: int, name: str, payload: str) -> None {
+    handler: Callable[[str], str] = _rpc_handlers[name]
+    ok: bool = true
+    result: str = ""
+    try {
+        result = handler(payload)
+    } except Exception as e {
+        ok = false
+        result = str(e)
+    }
+    with _rpc_lock {
+        _rpc_done.append((rid, ok, result))
+    }
+    dragon_webview_post(_rpc_drain)
+}
+
+def _rpc_dispatch(msg: str) -> None {
+    # msg = "rpc:<id>:<name>:<payload>"; the payload may itself contain ':'.
+    # _rpc_exec is defined ABOVE because `fire` cannot resolve a forward
+    # reference yet (compiler gap, same family as the signature pre-pass).
+    const rest: str = msg[4:]
+    const p1: int = rest.find(":")
+    if p1 < 0 {
+        return
+    }
+    const rest2: str = rest[p1 + 1:]
+    const p2: int = rest2.find(":")
+    if p2 < 0 {
+        return
+    }
+    const rid: int = int(rest[:p1])
+    const name: str = rest2[:p2]
+    const payload: str = rest2[p2 + 1:]
+    if name not in _rpc_handlers {
+        # Settled directly: we are already on the UI thread.
+        dragon_webview_eval_js(_settle_js(rid, false, f"no rpc handler named '{name}'"))
+        return
+    }
+    fire _rpc_exec(rid, name, payload)
 }
 
 

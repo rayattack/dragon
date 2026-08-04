@@ -1,0 +1,19 @@
+# Helper module for test_fwd_import_sig.dr: the class lives HERE so that
+# fwdsig_mod.dr's function signatures reference an IMPORTED class.
+
+
+class FwdStore {
+    n: int
+
+    def(n: int) {
+        self.n = n
+    }
+
+    def close() -> None {
+    }
+}
+
+def fwd_connect(path: str) -> FwdStore {
+    return FwdStore(9)
+}
+

@@ -974,6 +974,17 @@ int Driver::buildFile(const std::string& filename) {
                     codegenOpts.webviewShimPath = shim.string();
             }
         }
+        // D031: the program's assets/ directory (next to the entry file) is
+        // embedded into the binary and served in-process by the app:// scheme
+        // handler - no localhost server, no open port.
+        {
+            namespace fs = std::filesystem;
+            std::error_code aec;
+            fs::path assets =
+                fs::absolute(fs::path(filename), aec).parent_path() / "assets";
+            if (fs::is_directory(assets, aec))
+                codegenOpts.assetsDir = assets.string();
+        }
     }
     codegenOpts.linkedLibraries = impl_->options.linkedLibraries;
     codegenOpts.librarySearchPaths = impl_->options.librarySearchPaths;

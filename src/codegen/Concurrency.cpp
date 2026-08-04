@@ -125,8 +125,24 @@ void CodeGen::visit(FireExpr& node) {
         llvm::Value* selfVal = nullptr;
         std::string calleeName;
         if (auto* nameExpr = dynamic_cast<NameExpr*>(callExpr->callee.get())) {
-            targetFn = impl_->module->getFunction(nameExpr->name);
-            calleeName = nameExpr->name;
+            // Resolve exactly like a normal call (CallExpr.cpp): import alias,
+            // then the same-module mangled name, then the plain user symbol,
+            // then the bare name. The bare name only exists for entry-module
+            // functions, so `fire` inside an IMPORTED module (e.g. the stdlib
+            // ui rpc bridge) failed to resolve with a bare lookup alone.
+            const std::string aliasSym = impl_->lookupImportedAlias(nameExpr->name);
+            if (!aliasSym.empty())
+                targetFn = impl_->module->getFunction(aliasSym);
+            if (!targetFn)
+                targetFn = impl_->module->getFunction(
+                    Impl::mangleFunc(impl_->currentModuleName, nameExpr->name));
+            if (!targetFn)
+                targetFn = impl_->module->getFunction(
+                    Impl::userFuncName(nameExpr->name));
+            if (!targetFn)
+                targetFn = impl_->module->getFunction(nameExpr->name);
+            // funcParamKinds/paramIsOwn are keyed by the RESOLVED symbol.
+            calleeName = targetFn ? targetFn->getName().str() : nameExpr->name;
         } else if (auto* attrExpr =
                    dynamic_cast<AttributeExpr*>(callExpr->callee.get())) {
             // Resolve (owningModule, className) the same way CallMethods.cpp
