@@ -1194,6 +1194,12 @@ struct CodeGen::Impl {
     bool needsZ = false;
     bool needsZstd = false;
 
+    // Webview shell (D031 `import ui`): set when dragon_webview_* extern
+    // declarations show up. linkExecutable then compiles the platform shell
+    // (options.webviewShimPath) into the program and links webkit2gtk
+    // resolved via pkg-config. Non-UI programs never carry GTK/webkit.
+    bool needsWebview = false;
+
     // Dunder method tracking: className -> set of dunder names (e.g. "__str__", "__eq__")
     std::unordered_map<std::string, std::set<std::string>> classDunderMethodsBySym;
 

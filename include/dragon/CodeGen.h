@@ -84,6 +84,14 @@ struct CodeGenOptions {
     /// when any C++ shim is present.
     std::vector<std::string> ccSources;
 
+    /// D031 - path to the platform webview shell source (stdlib/ui/desktop/
+    /// webview_linux.cpp), resolved by the Driver next to the stdlib. When the
+    /// program references dragon_webview_* externs (`import ui`),
+    /// linkExecutable compiles it in like a --cc-source shim and links
+    /// webkit2gtk via pkg-config. Empty = not resolved (linking a UI program
+    /// then fails with a clear error instead of undefined references).
+    std::string webviewShimPath;
+
     /// Include directories (-I) forwarded to the shim compiler for --cc-source.
     std::vector<std::string> includePaths;
 };

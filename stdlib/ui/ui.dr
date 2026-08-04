@@ -29,7 +29,7 @@ class App {
     }
 
     @staticmethod
-    def run_timeout(ms: int) -> None {
+    def timeout(ms: int) -> None {
         """Run the loop, then auto-quit after `ms` (smoke tests / timed demos)."""
         dragon_webview_set_handler(_ui_dispatch)
         dragon_webview_run_timeout(ms)

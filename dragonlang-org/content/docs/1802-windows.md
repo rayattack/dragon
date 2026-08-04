@@ -22,22 +22,25 @@ which hands control to the platform event loop and returns only when the
 last window closes. `run()` is the last line for the same reason
 `app.listen()` is in a server - it *is* the program's body.
 
-On Linux (GTK3 + webkit2gtk-4.1), build it by compiling the webview shell
-in and pointing the link at webkit:
+On Linux (GTK3 + webkit2gtk), build and run it like any Dragon program:
 
 ```bash
-INCS=( $(pkg-config --cflags-only-I webkit2gtk-4.1 | sed 's/-I/-I /g') )
-LIBS=( $(pkg-config --libs-only-l webkit2gtk-4.1) )
-dragon build hello.dr --cc-source stdlib/ui/desktop/webview_linux.cpp \
-    "${INCS[@]}" "${LIBS[@]}" -lpthread -o hello
+dragon build hello.dr -o hello
 ./hello
 ```
 
-The `ui.desktop` shell is a small C++ file (`webview_linux.cpp`) that wraps
-the system webview; `--cc-source` compiles it in, and the `pkg-config` flags
-point the link at GTK3 and webkit2gtk-4.1, which must be installed on both the
-build and target machines. (`ui.App.run_timeout(ms)` is the same loop with an
-automatic quit after `ms` milliseconds - handy for smoke tests and screenshots.)
+`import ui` is all the build needs to see. The `ui.desktop` shell is a small
+C++ file (`webview_linux.cpp`) wrapping the system webview; the compiler
+compiles it in automatically and resolves the GTK/webkit include and link
+flags through `pkg-config` (webkit2gtk-4.1, or 4.0 on older distros). The
+build machine needs the development package (Debian/Ubuntu
+`libwebkit2gtk-4.1-dev`, Fedora `webkit2gtk4.1-devel`); the target machine
+only needs the ordinary runtime libraries, which ship with most Linux
+desktops. To build a patched or custom shell instead, pass it explicitly
+with `--cc-source` plus your own `-I`/`-l` flags - an explicit webview shim
+always wins over the automatic one. (`ui.App.timeout(ms)` is the same
+loop with an automatic quit after `ms` milliseconds - handy for smoke tests
+and screenshots.)
 
 ## The window is its `body`
 
@@ -72,8 +75,34 @@ screen follow your data as it changes, you reach for the next two pieces -
 | Call | What it does |
 |---|---|
 | `ui.App.run()` | Enter the platform run loop; returns when the last window closes. |
-| `ui.App.run_timeout(ms)` | Same loop, but auto-quit after `ms` milliseconds. |
+| `ui.App.timeout(ms)` | Same loop, but auto-quit after `ms` milliseconds. |
 
-`run_timeout` exists for tests and screenshots - a windowed app otherwise
+`timeout` exists for tests and screenshots - a windowed app otherwise
 blocks until a human closes it, which a CI run cannot do. In a shipped app
 you call `run()` as the final top-level statement.
+
+## Many windows, one loop
+
+Windows are independent: construct several, show several - one `run()`
+serves them all, and it returns only when the *last* open window closes.
+Closing one of three keeps the other two alive.
+
+```dragon
+main_win: Window = Window("Post Office", 800, 600)
+inspector: Window = Window("Inspector", 400, 600)
+main_win.show()
+inspector.show()
+ui.App.run()   # returns when BOTH windows have been closed
+```
+
+`close()` closes a window from code - the same path as the user clicking
+its close button:
+
+```dragon
+def dismiss_inspector() -> None {
+    inspector.close()
+}
+```
+
+A closed window stays closed: calling `show()`, `close()`, or assigning
+`body` on it is a no-op. To bring one back, construct a new `Window`.
