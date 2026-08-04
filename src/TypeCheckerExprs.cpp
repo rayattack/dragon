@@ -1079,27 +1079,59 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
     // layout. The static type IS the truth (D030).
     if (objType->kind() == Type::Kind::Class) {
         auto& ct = static_cast<ClassType&>(*objType);
-        auto mit = ct.methods.find(node.attribute);
-        if (mit != ct.methods.end()) {
-            checkMemberPrivacy(&ct, node.attribute, node.location());  // D045
-            // Same rule as the Instance branch: `Class.m` only in callee
-            // position; a bare read miscompiled to 0 before this check.
-            if (impl_->methodRefOkExpr != &node) {
-                error(node.location(), "method '" + node.attribute +
-                      "' of class '" + ct.name +
-                      "' is not a value; call it (`" + ct.name + "." +
-                      node.attribute + "(...)`), or wrap it in a lambda to "
-                      "pass it as a Callable");
-                node.type = impl_->unknownType;
+        // Walk the class AND its ancestors, mirroring the Instance branch: an
+        // inherited staticmethod / class-level field is reachable through the
+        // subclass name (`Sub.make(...)`), so the receiver's own maps are not
+        // the whole story.
+        bool declared = false;
+        const ClassType* declaringViaName = nullptr;  // D045 (see Instance branch)
+        for (const ClassType* cls = &ct; cls; ) {
+            auto mit = cls->methods.find(node.attribute);
+            if (mit != cls->methods.end()) {
+                checkMemberPrivacy(cls, node.attribute, node.location());  // D045
+                // Same rule as the Instance branch: `Class.m` only in callee
+                // position; a bare read miscompiled to 0 before this check.
+                if (impl_->methodRefOkExpr != &node) {
+                    error(node.location(), "method '" + node.attribute +
+                          "' of class '" + cls->name +
+                          "' is not a value; call it (`" + ct.name + "." +
+                          node.attribute + "(...)`), or wrap it in a lambda to "
+                          "pass it as a Callable");
+                    node.type = impl_->unknownType;
+                    return;
+                }
+                node.type = mit->second;
                 return;
             }
-            node.type = mit->second;
-            return;
+            auto fit = cls->fields.find(node.attribute);
+            if (fit != cls->fields.end()) {
+                checkMemberPrivacy(cls, node.attribute, node.location());  // D045
+                node.type = fit->second;
+                return;
+            }
+            if (cls->declaredFieldNames.count(node.attribute)) {
+                declared = true;
+                if (!declaringViaName) declaringViaName = cls;  // most-derived declarer
+            }
+            cls = (cls->parentClass && cls->parentClass->kind() == Type::Kind::Class)
+                      ? static_cast<const ClassType*>(cls->parentClass.get())
+                      : nullptr;
         }
-        auto fit = ct.fields.find(node.attribute);
-        if (fit != ct.fields.end()) {
-            checkMemberPrivacy(&ct, node.attribute, node.location());  // D045
-            node.type = fit->second;
+        if (declared && declaringViaName)
+            checkMemberPrivacy(declaringViaName, node.attribute, node.location());
+        // Neither a method, a typed class-level field, nor a DECLARED field
+        // name anywhere in the chain: the member does not exist. Hard error
+        // for BOTH reads and calls, exactly like the Instance branch - the
+        // module pre-pass collects every member name syntactically before any
+        // body is checked, so a miss here is real regardless of declaration
+        // order. Without this, a call to a removed/renamed static method
+        // (`App.run_timeout(100)`) passed `dragon check` and surfaced only as
+        // a late codegen scale error. A declared-by-name-only member (type
+        // not inferred yet) falls through to the default, as on instances.
+        if (!declared) {
+            error(node.location(), "class '" + ct.name +
+                  "' has no attribute '" + node.attribute + "'");
+            node.type = impl_->unknownType;
             return;
         }
     }

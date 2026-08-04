@@ -2249,3 +2249,71 @@ TEST(TypeCheckerTest, BuiltinMethodCallsStillOk) {
         "t: Task[int] = fire work()\n"
         "r: int = t.join()\n"));
 }
+
+// Unknown members on a CLASS receiver: the static/classmethod surface must
+// reject a nonexistent member at check time, exactly like the instance
+// branch. Before this, `App.run_timeout(100)` against a renamed API passed
+// `dragon check` and only failed as a late codegen scale error.
+TEST(TypeCheckerTest, UnknownStaticMethodCallOnClassRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "class Box {\n"
+        "    @staticmethod\n"
+        "    def real() -> None {\n"
+        "        pass\n"
+        "    }\n"
+        "}\n"
+        "Box.nope()\n"));
+}
+
+TEST(TypeCheckerTest, UnknownClassAttributeReadRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "class Box {\n"
+        "    limit: int = 3\n"
+        "}\n"
+        "x: int = Box.missing\n"));
+}
+
+TEST(TypeCheckerTest, StaticMethodCallOnClassOk) {
+    EXPECT_TRUE(checkOk(
+        "class Box {\n"
+        "    limit: int = 3\n"
+        "    @staticmethod\n"
+        "    def real() -> int {\n"
+        "        return 7\n"
+        "    }\n"
+        "}\n"
+        "x: int = Box.real()\n"
+        "lim: int = Box.limit\n"));
+}
+
+// The parent-chain walk: an inherited staticmethod is reachable through the
+// subclass name (it silently typed Unknown before, hiding the member from
+// downstream inference), while a genuinely-unknown member on the same chain
+// is a hard error.
+TEST(TypeCheckerTest, InheritedStaticMethodThroughSubclassOk) {
+    EXPECT_TRUE(checkOk(
+        "class Base {\n"
+        "    @staticmethod\n"
+        "    def make() -> int {\n"
+        "        return 1\n"
+        "    }\n"
+        "}\n"
+        "class Sub(Base) {\n"
+        "    pass\n"
+        "}\n"
+        "x: int = Sub.make()\n"));
+}
+
+TEST(TypeCheckerTest, UnknownMemberOnSubclassChainRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "class Base {\n"
+        "    @staticmethod\n"
+        "    def make() -> int {\n"
+        "        return 1\n"
+        "    }\n"
+        "}\n"
+        "class Sub(Base) {\n"
+        "    pass\n"
+        "}\n"
+        "Sub.fabricate()\n"));
+}
