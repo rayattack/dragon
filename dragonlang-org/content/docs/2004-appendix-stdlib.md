@@ -186,7 +186,7 @@ See [Desktop Applications](/docs/1801-desktop-overview) for the full guide.
 
 | Module | Purpose |
 |--------|---------|
-| `ui` | Dragon's desktop UI toolkit (the design spec) - the `App` lifecycle/main loop and reactive `Signal` primitives. Views are `template[HTML]`; the renderer is the OS webview. |
+| `ui` | Dragon's desktop UI toolkit (the design spec) - the `App` lifecycle/main loop, reactive `Signal` primitives, and the `rpc` bridge page script calls by name. Views are `template[HTML]`; the renderer is the OS webview, assets embed behind `app://`. |
 | `ui.desktop` | The platform `Window` and native shell bindings beneath `ui` (webview host). |
 
 ## A note on coverage

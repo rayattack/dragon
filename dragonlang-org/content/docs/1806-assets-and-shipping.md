@@ -33,10 +33,57 @@ ui.App.run()
 
 Because the stylesheet lives in the typed `HTML` view, you can factor it into a
 function that returns `HTML` and reuse it across windows - the same composition
-that works for any other markup. If you keep a larger stylesheet in a file, read
-it at startup with [the io module](/docs/1402-stdlib-io) and insert it into the
-`<style>` block with the `raw` filter (`!{css | raw}`) - it is trusted content you
-authored, so opting out of escaping is correct there.
+that works for any other markup. When the stylesheet outgrows an inline block,
+move it to a file in the `assets/` directory and link it - that is the next
+section.
+
+## Real assets: the `assets/` directory and `app://`
+
+Put an `assets/` directory next to your entry file and `dragon build` embeds
+every file in it into the binary. At runtime an in-process `app://` handler
+serves them straight from that embedded blob - no localhost server, no open
+port, no files to install next to the executable:
+
+```text
+weather/
+├── main.dr
+└── assets/
+    ├── app.css
+    ├── logo.svg
+    └── charts.min.js
+```
+
+```dragon
+view: HTML = template[HTML] {
+  <head>
+    <link rel="stylesheet" href="app:///app.css">
+    <script src="app:///charts.min.js"></script>
+  </head>
+  <body>
+    <img src="app:///logo.svg" alt="logo">
+    ...
+  </body>
+}
+```
+
+The URL path is the file's path relative to `assets/`, so subdirectories keep
+their shape (`assets/img/icon.png` is `app:///img/icon.png`). Content types
+come from the extension - CSS, JS, images, fonts, JSON, wasm all serve
+correctly, and page script can `fetch('app:///data.json')` like any other URL.
+
+This is how third-party frontend libraries arrive, too. The webview is a real
+browser, so anything that runs on a web page runs here: download a library
+once, drop the built file into `assets/`, link it with `<script
+src="app:///...">`. No CDN at runtime, no bundler, no `npm` tree - and the
+finished app still works on a machine with no network.
+
+Two things to keep in mind:
+
+- Assets are read **at build time**. `dragon run` recompiles on every run so
+  edits just show up; with a prebuilt binary, rebuild to pick up changed
+  assets.
+- Every byte in `assets/` lands in the binary. A few hundred kilobytes of CSS
+  and JS is nothing; think twice before dropping a video in.
 
 ## A complete app
 
@@ -114,9 +161,11 @@ shell in, and resolves the GTK/webkit flags through `pkg-config`. The build
 machine needs the webkit2gtk development package
 (Debian/Ubuntu `libwebkit2gtk-4.1-dev`, Fedora `webkit2gtk4.1-devel`).
 
-That produces a single native executable. The renderer itself is the OS's
-webview - so the binary is a few megabytes, not the hundred-plus a bundled
-browser engine would add. It is not fully self-contained, though: it
+That produces a single native executable, with everything in `assets/`
+embedded inside it - copy one file to another machine and the app carries its
+stylesheets, images, and vendored libraries with it. The renderer itself is
+the OS's webview - so the binary is a few megabytes, not the hundred-plus a
+bundled browser engine would add. It is not fully self-contained, though: it
 dynamically links GTK3 and webkit2gtk-4.1, so the target machine needs those
 libraries installed (they ship with most Linux desktops).
 
@@ -125,3 +174,8 @@ platform shell - the only non-Dragon code in the stack - is selected at build
 time: WebKitGTK on Linux, WKWebView on macOS, WebView2 on Windows. Your signals,
 views, and handlers are identical across all three. For installers (`.deb`,
 `.dmg`, `.msi`), see [Packaging](/docs/1003-packaging-eggs).
+
+One more piece completes the desktop story: when the page runs its own
+JavaScript - a library you dropped into `assets/`, or plain script you wrote -
+it calls back into Dragon by name over the bridge. That is
+[Page Script and the Bridge](/docs/1807-the-bridge).

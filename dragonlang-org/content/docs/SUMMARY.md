@@ -143,6 +143,7 @@
 - [Signals and Reactivity](1804-reactivity.md)
 - [Event Handlers](1805-event-handlers.md)
 - [Styling, Assets, and Shipping](1806-assets-and-shipping.md)
+- [Page Script and the Bridge](1807-the-bridge.md)
 
 # Testing
 

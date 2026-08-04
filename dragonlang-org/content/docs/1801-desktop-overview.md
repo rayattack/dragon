@@ -31,7 +31,10 @@ This topic builds a real reactive app end to end, one concept per page:
 - **[Event Handlers](/docs/1805-event-handlers)** - point an HTML event at
   a Dragon function; build the full interactive counter.
 - **[Styling, Assets, and Shipping](/docs/1806-assets-and-shipping)** - a
-  complete app, a stylesheet, and one command to a native binary.
+  complete app, a stylesheet, embedded `app://` assets, and one command to
+  a native binary.
+- **[Page Script and the Bridge](/docs/1807-the-bridge)** - the page runs
+  its own JavaScript and calls Dragon handlers by name.
 
 Everything above the thin platform shell is `.dr` you can read in
 `stdlib/ui/`.
