@@ -169,15 +169,20 @@ static inline void dict_maybe_compact(DragonDict* d) {
 static void dict_grow(DragonDict* d) {
     // Double entries capacity - realloc into a temp first so a NULL return
     // doesn't leak the live buffer or NULL-deref on the next access.
+    // Keeps its abort contract (armed dragon_shared_mut_begin window in
+    // dragon_dict_set_tagged, and half-swapped by the second realloc), but the
+    // byte counts move inside the trap: `new_cap * sizeof(DictEntry)` was a
+    // raw i64 multiply at the call site, which is the exact shape 7c888e3
+    // removed everywhere else.
     int64_t new_cap = d->capacity * 2;
-    DictEntry* etmp = (DictEntry*)realloc(d->entries, new_cap * sizeof(DictEntry));
-    if (!etmp) { fprintf(stderr, "dragon: out of memory\n"); abort(); }
+    DictEntry* etmp = (DictEntry*)dragon_xrealloc_n_or_abort(
+        d->entries, new_cap, sizeof(DictEntry));
     d->entries = etmp;
     d->capacity = new_cap;
     // Double index size and rebuild
     int64_t new_isz = d->index_size * 2;
-    int64_t* itmp = (int64_t*)realloc(d->indices, new_isz * sizeof(int64_t));
-    if (!itmp) { fprintf(stderr, "dragon: out of memory\n"); abort(); }
+    int64_t* itmp = (int64_t*)dragon_xrealloc_n_or_abort(
+        d->indices, new_isz, sizeof(int64_t));
     d->indices = itmp;
     d->index_size = new_isz;
     dict_rebuild_index(d);
@@ -185,16 +190,36 @@ static void dict_grow(DragonDict* d) {
 
 DragonDict* dragon_dict_new(int64_t cap) {
     if (cap < 4) cap = 4;
+    // Buffers before header, each raise freeing what this frame already owns:
+    // the OOM longjmp skips the rest of the frame, so a header allocated first
+    // would be stranded, and the second buffer failing must not leak the first.
+    // Both byte counts are formed inside the trap, never hand-computed here.
+    //
+    // The entries allocation deliberately comes BEFORE next_power_of_2. That
+    // helper doubles a signed int64 with no bound, so a capacity large enough
+    // to overflow `cap * 2` sends it into a non-terminating loop (it shifts
+    // into the sign bit, then to zero, and `0 < n` stays true). Trapping the
+    // capacity here means such a cap raises MemoryError instead of hanging.
+    auto* entries = (DictEntry*)dragon_xmalloc_n(cap, sizeof(DictEntry));
+    // Index table is 2x entries capacity (load factor ~0.5 for good probe performance)
+    int64_t index_size = next_power_of_2(cap * 2);
+    size_t ibytes;
+    if (!dragon_alloc_bytes_try(index_size, sizeof(int64_t), 0, &ibytes)) {
+        free(entries);
+        dragon_raise_exc_cstr(43, "MemoryError: allocation size overflow");
+    }
+    auto* indices = (int64_t*)malloc(ibytes);
+    if (!indices) { free(entries); dragon_raise_oom(); }
     auto* d = (DragonDict*)malloc(sizeof(DragonDict));
+    if (!d) { free(indices); free(entries); dragon_raise_oom(); }
     dragon_obj_init(&d->header, DRAGON_TAG_DICT);
     d->size = 0;
     d->used = 0;
     d->keys_are_ptr = 0;     // flipped to 1 by the str setter; int-keyed dicts stay 0
     d->capacity = cap;
-    // Index table is 2x entries capacity (load factor ~0.5 for good probe performance)
-    d->index_size = next_power_of_2(cap * 2);
-    d->entries = (DictEntry*)malloc(d->capacity * sizeof(DictEntry));
-    d->indices = (int64_t*)malloc(d->index_size * sizeof(int64_t));
+    d->index_size = index_size;
+    d->entries = entries;
+    d->indices = indices;
     for (int64_t i = 0; i < d->index_size; i++) d->indices[i] = DICT_EMPTY;
     // Acyclic-skip: created UNTRACKED. The set-tagged paths enroll the dict in
     // cycle tracking on the first traceable value; a leaf-only dict (int/float/

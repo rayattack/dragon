@@ -550,7 +550,18 @@ bool TypeChecker::check(Module& module) {
                 if (auto* tgt = dynamic_cast<NameExpr*>(ann->target.get()))
                     tryRegister(tgt->name, ann->annotation.get());
         }
-        // (b) constructor `self.x: T = ...`
+        // (b) constructor `self.x: T = ...`. Method names are excluded: a
+        // `self.m: T = v` where m is a method is a compile error (AnnAssign
+        // visitor), and registering it as a field here would shadow the
+        // method and suppress that error. ClassType::methods isn't populated
+        // yet in this pre-pass, so collect the names syntactically.
+        std::unordered_set<std::string> methodNames;
+        for (auto& s : cd->body) {
+            auto* fd = dynamic_cast<FunctionDecl*>(s.get());
+            if (fd && fd->name != "__init__" && !fd->isConstructor &&
+                !fd->isProperty)
+                methodNames.insert(fd->name);
+        }
         for (auto& s : cd->body) {
             auto* fd = dynamic_cast<FunctionDecl*>(s.get());
             if (!fd || !(fd->name == "__init__" || fd->isConstructor)) continue;
@@ -560,7 +571,8 @@ bool TypeChecker::check(Module& module) {
                 auto* attr = dynamic_cast<AttributeExpr*>(ann->target.get());
                 if (!attr) continue;
                 auto* selfN = dynamic_cast<NameExpr*>(attr->object.get());
-                if (selfN && selfN->name == "self")
+                if (selfN && selfN->name == "self" &&
+                    !methodNames.count(attr->attribute))
                     tryRegister(attr->attribute, ann->annotation.get());
             }
         }
@@ -649,6 +661,24 @@ void TypeChecker::error(const SourceLocation& loc, const std::string& message) {
 
 void TypeChecker::warning(const SourceLocation& loc, const std::string& message) {
     impl_->diagnostics.push_back({TypeDiagnostic::Level::Warning, loc, message});
+}
+
+// Walks the ancestor chain looking for `member`. A class whose `fields` holds
+// the name resolves it as a field (assignable, readable as a value), so the
+// walk answers nullptr; a hit in `methods`/`methodOverloads` answers the
+// declaring class. Mirrors the fields-then-methods order of the Instance
+// branch in visit(AttributeExpr).
+const ClassType* TypeChecker::findMethodOwner(const ClassType* cls,
+                                              const std::string& member) const {
+    for (const ClassType* c = cls; c; ) {
+        if (c->fields.count(member)) return nullptr;
+        if (c->methods.count(member) || c->methodOverloads.count(member))
+            return c;
+        c = (c->parentClass && c->parentClass->kind() == Type::Kind::Class)
+                ? static_cast<const ClassType*>(c->parentClass.get())
+                : nullptr;
+    }
+    return nullptr;
 }
 
 // D045 - member-access privacy. `declaring` is the class that DECLARES

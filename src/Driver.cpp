@@ -960,6 +960,20 @@ int Driver::buildFile(const std::string& filename) {
         codegenOpts.zstdLibPath = findBundledLib(
             prefix, "libzstd.a", DRAGON_ZSTD_LIB);
 #endif
+        // D031: the ui module's webview shell ships as SOURCE next to the
+        // stdlib (not in the runtime archive); when a program imports ui,
+        // linkExecutable compiles it in and links webkit2gtk via pkg-config.
+        {
+            auto stdlibDir = resolveStdlibDir();
+            if (!stdlibDir.empty()) {
+                namespace fs = std::filesystem;
+                fs::path shim = fs::path(stdlibDir) / "ui" / "desktop" /
+                                "webview_linux.cpp";
+                std::error_code shimEc;
+                if (fs::is_regular_file(shim, shimEc))
+                    codegenOpts.webviewShimPath = shim.string();
+            }
+        }
     }
     codegenOpts.linkedLibraries = impl_->options.linkedLibraries;
     codegenOpts.librarySearchPaths = impl_->options.librarySearchPaths;

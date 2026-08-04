@@ -336,9 +336,13 @@ class Response {
     # `res.headers = "name", "value"` - Python parses the RHS as a tuple, so
     # the setter gets a `tuple[str, str]`. One tuple-arg keeps the call site
     # short and reads naturally; multi-key updates loop with this same form.
+    #
+    # Delegates to set_header rather than writing _headers directly: this is
+    # the same write, so it must carry the same CR/LF rejection. Writing the
+    # dict here bypassed that and let a tainted value split the response.
     @headers.setter
     def headers(kv: tuple[str, str]) -> None {
-        self._headers[kv[0]] = kv[1]
+        self.set_header(kv[0], kv[1])
     }
 
     def json(data: str) -> Response {

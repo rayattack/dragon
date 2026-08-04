@@ -133,6 +133,39 @@ foreach(_dr ${DR_TEST_FILES})
         -I ${CMAKE_SOURCE_DIR}/packages)
 endforeach()
 
+# Sustained-OOM recoverability. Outside the test_*.dr glob on purpose: it is
+# only meaningful under a tight RLIMIT_AS (uncapped it never OOMs and its
+# assertion fails). Compile uncapped, run capped. Linux-only: macOS accepts
+# but does not enforce RLIMIT_AS.
+if(NOT APPLE)
+    add_test(NAME dr_oom_sustained
+        COMMAND bash -c "$<TARGET_FILE:dragon> build ${CMAKE_CURRENT_SOURCE_DIR}/dr/oom_sustained.dr -o ${CMAKE_CURRENT_BINARY_DIR}/oom_sustained && ulimit -v 262144 && exec ${CMAKE_CURRENT_BINARY_DIR}/oom_sustained")
+    set_tests_properties(dr_oom_sustained PROPERTIES TIMEOUT 90)
+    add_test(NAME dr_oom_bytes
+        COMMAND bash -c "$<TARGET_FILE:dragon> build ${CMAKE_CURRENT_SOURCE_DIR}/dr/oom_bytes.dr -o ${CMAKE_CURRENT_BINARY_DIR}/oom_bytes && ulimit -v 262144 && exec ${CMAKE_CURRENT_BINARY_DIR}/oom_bytes")
+    set_tests_properties(dr_oom_bytes PROPERTIES TIMEOUT 90)
+    # Container constructors: count-sized data buffers must raise a catchable
+    # MemoryError. Same 256MB cap as the bytes sibling, and the cap is load
+    # bearing in the other direction too: the 160MB operand has to fit while
+    # its copy does not.
+    add_test(NAME dr_oom_containers
+        COMMAND bash -c "$<TARGET_FILE:dragon> build ${CMAKE_CURRENT_SOURCE_DIR}/dr/oom_containers.dr -o ${CMAKE_CURRENT_BINARY_DIR}/oom_containers && ulimit -v 262144 && exec ${CMAKE_CURRENT_BINARY_DIR}/oom_containers")
+    set_tests_properties(dr_oom_containers PROPERTIES TIMEOUT 90)
+
+    # Container GROW paths abort by design rather than raising (a longjmp out
+    # of the armed dragon_shared_mut_begin window would arm a spurious
+    # concurrent-mutation fatal later), so these two programs are expected to
+    # die and the assertion is on HOW. 134 is SIGABRT with a diagnostic; the
+    # regression being pinned is 139, the silent SIGSEGV they used to give.
+    # 32768 rather than 262144 on purpose: at 256MB the set finishes growing
+    # and never reaches the allocation failure at all.
+    foreach(_grow set deque)
+        add_test(NAME dr_oom_${_grow}_grow
+            COMMAND bash -c "$<TARGET_FILE:dragon> build ${CMAKE_CURRENT_SOURCE_DIR}/dr/oom_${_grow}_grow.dr -o ${CMAKE_CURRENT_BINARY_DIR}/oom_${_grow}_grow && ( ulimit -v 32768 && ${CMAKE_CURRENT_BINARY_DIR}/oom_${_grow}_grow 2>&1 ; echo \"rc=$?\" ) | grep -q 'rc=134'")
+        set_tests_properties(dr_oom_${_grow}_grow PROPERTIES TIMEOUT 90)
+    endforeach()
+endif()
+
 # --- Stdlib import gate ---
 # Every stdlib module must at least parse, name-resolve, and type-check. Both
 # `uuid` and `errno` once shipped assigning a module global without `global`,

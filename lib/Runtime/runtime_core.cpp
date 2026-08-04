@@ -12,6 +12,7 @@
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
 #include <string.h>
+
 const char* __dragon_image_lo = (const char*)0;
 const char* __dragon_image_hi = (const char*)UINTPTR_MAX;
 __attribute__((constructor))
@@ -45,10 +46,8 @@ static void dragon_image_bounds_init(void) {
 
 extern "C" {
 
-//===----------------------------------------------------------------------===//
-// Shared state definitions (declared extern in runtime_internal.h)
-//===----------------------------------------------------------------------===//
 
+// -------------------------- Shared state definitions (declared extern in runtime_internal.h) -------------------------- //
 dragon_class_dealloc_fn __class_dealloc_table[DRAGON_MAX_CLASS_IDS];
 dragon_class_clear_fn __class_clear_table[DRAGON_MAX_CLASS_IDS];
 dragon_class_traverse_fn __class_traverse_table[DRAGON_MAX_CLASS_IDS];
@@ -1113,6 +1112,17 @@ int64_t dragon_gc_collect() {
     gc_in_progress = 0;
     pthread_mutex_unlock(&gc_lock);
     return collected;
+}
+
+// Live tracked-container count, for leak probes: tracked objects are pinned
+// by gc_tracked and thus invisible to LSan, so steady-state churn asserts
+// count-before == count-after (post-collect) instead. Locked read: a torn
+// size during a concurrent collect would fake a leak or hide one.
+int64_t dragon_gc_tracked_count() {
+    pthread_mutex_lock(&gc_lock);
+    int64_t n = gc_tracked_size;
+    pthread_mutex_unlock(&gc_lock);
+    return n;
 }
 
 //===----------------------------------------------------------------------===//

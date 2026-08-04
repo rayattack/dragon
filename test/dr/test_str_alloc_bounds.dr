@@ -1,0 +1,33 @@
+# Pre-fix: dragon_join_utf8 summed element byte lengths unchecked and wrote
+# the joined result through an unchecked malloc. A list holding many
+# references to ONE string amplifies the sum far past any real buffer, so
+# ordinary code could request terabytes and take a NULL-memcpy SIGSEGV.
+# The 2^47 request is deterministic uncapped: no 64-bit VA space can map it
+
+from unittest import TestCase, main
+
+
+class StrAllocBounds(TestCase) {
+    def test_join_alloc_failure_raises() {
+        big: str = "x" * 134217728            # 128MB ASCII, one buffer
+        parts: list[str] = [big] * 1048576    # 1M refs, total = 2^47
+        caught: bool = False
+        try {
+            j: str = "".join(parts)
+            print(len(j))
+        } except MemoryError {
+            caught = True
+        }
+        self.assertTrue(caught)
+    }
+    def test_join_unchanged() {
+        self.assertEqual("-".join(["a", "b", "c"]), "a-b-c")
+        self.assertEqual("".join(["ab", "cd"]), "abcd")
+        e: list[str] = []
+        self.assertEqual("".join(e), "")
+        self.assertEqual(",".join(["café", "naïve"]), "café,naïve")
+    }
+}
+
+main([StrAllocBounds()])
+

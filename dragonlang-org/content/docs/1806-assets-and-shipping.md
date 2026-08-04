@@ -103,15 +103,16 @@ framework, no IPC, and no virtual DOM.
 
 ## Distributing the app
 
-On Linux, build the finished app the same way as any `ui` program -
-compile the webview shell in and link webkit:
+On Linux, build the finished app the same way as any Dragon program:
 
 ```bash
-INCS=( $(pkg-config --cflags-only-I webkit2gtk-4.1 | sed 's/-I/-I /g') )
-LIBS=( $(pkg-config --libs-only-l webkit2gtk-4.1) )
-dragon build tip.dr --cc-source stdlib/ui/desktop/webview_linux.cpp \
-    "${INCS[@]}" "${LIBS[@]}" -lpthread -o tip
+dragon build tip.dr -o tip
 ```
+
+`import ui` is the whole story: the compiler sees it, compiles the webview
+shell in, and resolves the GTK/webkit flags through `pkg-config`. The build
+machine needs the webkit2gtk development package
+(Debian/Ubuntu `libwebkit2gtk-4.1-dev`, Fedora `webkit2gtk4.1-devel`).
 
 That produces a single native executable. The renderer itself is the OS's
 webview - so the binary is a few megabytes, not the hundred-plus a bundled

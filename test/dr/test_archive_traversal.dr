@@ -1,0 +1,156 @@
+# test/dr/test_archive_traversal.dr - Extraction containment for tar and zip.
+#
+# An archive member name is attacker-controlled data. A name like
+# "../../evil" must never place bytes outside the directory the caller asked
+# to extract into. CPython carried this defect for 15 years (CVE-2007-4559)
+# because extract() joined the member name onto the destination and trusted
+# the result.
+#
+# These tests pin the contract from the caller's side: after attempting to
+# extract a hostile archive, the escape target does not exist, and the
+# attempt was refused loudly rather than skipped quietly.
+
+from unittest import TestCase, main
+from tarfile import open as tar_open, TarFile, TarInfo
+from zipfile import open as zip_open, ZipFile
+from tempfile import mkdtemp
+from os.path import exists, join
+from os import makedirs
+
+
+# Build a one-member archive whose name walks out of the extraction root.
+def _write_hostile_tar(path: str, member_name: str) {
+    const t: TarFile = tar_open(path, "w")
+    info: TarInfo = TarInfo(member_name)
+    info.data = b"escaped\n"
+    info.size = len(info.data)
+    t.addfile(info)
+    t.close()
+}
+
+
+class TarTraversalTests(TestCase) {
+    def test_dotdot_member_is_refused() {
+        # The caller asks for extraction under <tmp>/root/deep/deeper.
+        # The member name reaches two levels above that.
+        const tmp: str = mkdtemp("dragon-slip-", "")
+        const deep: str = join(join(tmp, "root"), join("deep", "deeper"))
+        makedirs(deep)
+        const arc: str = join(tmp, "hostile.tar")
+        _write_hostile_tar(arc, "../../ESCAPED.txt")
+
+        const t: TarFile = tar_open(arc, "r")
+        def run() {
+            t.extractall(deep)
+        }
+        self.assertRaises(ValueError, run)
+        t.close()
+
+        # The decisive assertion: nothing landed outside the requested root.
+        self.assertFalse(exists(join(join(tmp, "root"), "ESCAPED.txt")),
+                         "member escaped the extraction directory")
+    }
+
+    def test_absolute_member_is_refused() {
+        # An absolute member name must not be honoured either. Today it is
+        # contained only because Dragon's os.path.join concatenates instead
+        # of resetting on an absolute right-hand side - an accident that a
+        # future parity fix to join() would silently undo.
+        const tmp: str = mkdtemp("dragon-slip-abs-", "")
+        const dest: str = join(tmp, "dest")
+        makedirs(dest)
+        const arc: str = join(tmp, "hostile-abs.tar")
+        _write_hostile_tar(arc, "/tmp/DRAGON_ABS_ESCAPE.txt")
+
+        const t: TarFile = tar_open(arc, "r")
+        def run() {
+            t.extractall(dest)
+        }
+        self.assertRaises(ValueError, run)
+        t.close()
+
+        self.assertFalse(exists("/tmp/DRAGON_ABS_ESCAPE.txt"),
+                         "absolute member name escaped to an absolute path")
+    }
+
+    def test_ordinary_member_still_extracts() {
+        # The guard must not break the normal case. A plain relative name,
+        # including one with a subdirectory, still lands where asked.
+        const tmp: str = mkdtemp("dragon-ok-", "")
+        const dest: str = join(tmp, "dest")
+        makedirs(dest)
+        const arc: str = join(tmp, "fine.tar")
+        _write_hostile_tar(arc, "sub/ok.txt")
+
+        const t: TarFile = tar_open(arc, "r")
+        t.extractall(dest)
+        t.close()
+
+        self.assertTrue(exists(join(dest, join("sub", "ok.txt"))),
+                        "a legitimate member failed to extract")
+    }
+
+    def test_interior_dotdot_that_stays_inside_is_allowed() {
+        # "sub/../ok.txt" normalises to "ok.txt", which is inside the root.
+        # Containment is decided on the resolved path, not on the presence
+        # of the characters "..", so this must still extract.
+        const tmp: str = mkdtemp("dragon-interior-", "")
+        const dest: str = join(tmp, "dest")
+        makedirs(dest)
+        const arc: str = join(tmp, "interior.tar")
+        _write_hostile_tar(arc, "sub/../ok.txt")
+
+        const t: TarFile = tar_open(arc, "r")
+        t.extractall(dest)
+        t.close()
+
+        self.assertTrue(exists(join(dest, "ok.txt")),
+                        "an interior '..' that stays inside was wrongly refused")
+    }
+}
+
+
+class ZipTraversalTests(TestCase) {
+    def test_dotdot_entry_is_refused() {
+        const tmp: str = mkdtemp("dragon-zipslip-", "")
+        const deep: str = join(join(tmp, "root"), join("deep", "deeper"))
+        makedirs(deep)
+        const arc: str = join(tmp, "hostile.zip")
+
+        const w: ZipFile = zip_open(arc, "w")
+        w.writestr("../../ZIP_ESCAPED.txt", b"escaped\n")
+        w.close()
+
+        const z: ZipFile = zip_open(arc, "r")
+        def run() {
+            z.extractall(deep)
+        }
+        self.assertRaises(ValueError, run)
+        z.close()
+
+        self.assertFalse(exists(join(join(tmp, "root"), "ZIP_ESCAPED.txt")),
+                         "zip entry escaped the extraction directory")
+    }
+
+    def test_ordinary_entry_still_extracts() {
+        const tmp: str = mkdtemp("dragon-zipok-", "")
+        const dest: str = join(tmp, "dest")
+        makedirs(dest)
+        const arc: str = join(tmp, "fine.zip")
+
+        const w: ZipFile = zip_open(arc, "w")
+        w.writestr("sub/ok.txt", b"fine\n")
+        w.close()
+
+        const z: ZipFile = zip_open(arc, "r")
+        z.extractall(dest)
+        z.close()
+
+        self.assertTrue(exists(join(dest, join("sub", "ok.txt"))),
+                        "a legitimate zip entry failed to extract")
+    }
+}
+
+
+main([TarTraversalTests(), ZipTraversalTests()])
+

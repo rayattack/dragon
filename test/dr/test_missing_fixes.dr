@@ -98,6 +98,16 @@ class StringMethods(TestCase) {
         self.assertEqual("a,b,c".rsplit(","), ["a", "b", "c"])
         self.assertEqual("a,b,c,d".rsplit(",", 1), ["a,b,c", "d"])
     }
+    def test_rsplit_maxsplit_bounds() {
+        # Pre-fix: maxsplit == INT64_MAX overflowed maxsplit + 1 to INT64_MIN
+        # and the tail-copy loop read from index -2^63 (wild read, SEGV).
+        self.assertEqual("a,b,c,d".rsplit(",", 9223372036854775807), ["a", "b", "c", "d"])
+        self.assertEqual("a,b,c,d".rsplit(",", 9223372036854775806), ["a", "b", "c", "d"])
+        self.assertEqual("a,b,c,d".rsplit(",", 4), ["a", "b", "c", "d"])
+        self.assertEqual("a,b,c,d".rsplit(",", 3), ["a", "b", "c", "d"])
+        self.assertEqual("a,b,c,d".rsplit(",", 2), ["a,b", "c", "d"])
+        self.assertEqual("a,b,c,d".rsplit(",", 0), ["a,b,c,d"])
+    }
 }
 
 

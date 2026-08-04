@@ -83,18 +83,21 @@ DragonBytes* dragon_ed25519_sign(DragonBytes* seed, DragonBytes* msg) {
         dragon_raise_exc_cstr(90, "ed25519: private key (seed) must be 32 bytes");
         return nullptr;
     }
-    unsigned char pk[32];
-    unsigned char sk[64];
-    crypto_sign_ed25519_seed_keypair(pk, sk, (const unsigned char*)seed->data);
-
     size_t mlen = msg ? (size_t)msg->len : 0;
     const unsigned char* mp = (msg && msg->data) ? (const unsigned char*)msg->data
                                                  : dragon_ed_empty;
+    // Every allocation happens BEFORE the expanded private key is derived:
+    // an OOM raise here unwinds with no secret material on the stack to wipe.
     size_t sm_capacity = mlen + 64;
-    unsigned char* sm = (unsigned char*)malloc(sm_capacity);  // ref10 writes sig||msg
+    unsigned char* sm = (unsigned char*)dragon_xmalloc(sm_capacity);  // ref10 writes sig||msg
+    DragonBytes* sig = dragon_bytes_new(nullptr, 64);       // detached = R(32)||S(32)
+
+    unsigned char pk[32];
+    unsigned char sk[64];
+    crypto_sign_ed25519_seed_keypair(pk, sk, (const unsigned char*)seed->data);
     unsigned long long smlen = 0;
     crypto_sign_ed25519(sm, &smlen, mp, (unsigned long long)mlen, sk);
-    DragonBytes* sig = dragon_bytes_new(sm, 64);            // detached = R(32)||S(32)
+    memcpy(sig->data, sm, 64);
     // wipe expanded private-key material; sm is signature||msg (both public),
     // wiped defensively since ref10's scratch may overlap secret-derived state.
     mbedtls_platform_zeroize(sk, sizeof(sk));
@@ -112,10 +115,11 @@ int dragon_ed25519_verify(DragonBytes* pk, DragonBytes* msg, DragonBytes* sig) {
                                                  : dragon_ed_empty;
     // ref10's _open consumes the combined sig||msg and recovers the message.
     unsigned long long smlen = (unsigned long long)mlen + 64;
-    unsigned char* sm = (unsigned char*)malloc((size_t)smlen);
+    unsigned char* sm = (unsigned char*)dragon_xmalloc((size_t)smlen);
+    unsigned char* mout = (unsigned char*)malloc((size_t)smlen);
+    if (!mout) { free(sm); dragon_raise_oom(); }
     memcpy(sm, sig->data, 64);
     if (mlen) memcpy(sm + 64, mp, mlen);
-    unsigned char* mout = (unsigned char*)malloc((size_t)smlen);
     unsigned long long moutlen = 0;
     int ret = crypto_sign_ed25519_open(mout, &moutlen, sm, smlen,
                                        (const unsigned char*)pk->data);

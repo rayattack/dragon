@@ -443,10 +443,17 @@ void dragon_print_dict_int_nested_raw(DragonDict* d) {
 extern "C" {
 
 DragonTuple* dragon_tuple_new(int64_t count) {
+    // Data before header: the OOM raise is a longjmp that skips the rest of
+    // this frame, so a header allocated first would be stranded with nothing
+    // left to free it. The count * elem_size multiply lives inside the trap,
+    // never at the call site (runtime_internal.h).
+    int64_t* data = count > 0
+        ? (int64_t*)dragon_xmalloc_n(count, sizeof(int64_t)) : nullptr;
     auto* t = (DragonTuple*)malloc(sizeof(DragonTuple));
+    if (!t) { free(data); dragon_raise_oom(); }
     dragon_obj_init(&t->header, DRAGON_TAG_TUPLE);
     t->length = count;
-    t->data = count > 0 ? (int64_t*)malloc(count * sizeof(int64_t)) : nullptr;
+    t->data = data;
     t->elem_tags = nullptr;  // NULL = all ints (no heap elements)
     // Acyclic-skip: created UNTRACKED. dragon_tuple_set_tagged enrolls the tuple
     // in cycle tracking on its first traceable (heap-pointer) element; an all-leaf
@@ -479,13 +486,15 @@ void dragon_tuple_set_tagged(DragonTuple* t, int64_t index, int64_t val, int64_t
         else if (tag == TAG_LIST || tag == TAG_DICT || tag == TAG_BYTES)
             dragon_mark_shared_deep((void*)(uintptr_t)val);
     }
+    // Tag array BEFORE the value store, deliberately. This allocation can
+    // raise, and the raise longjmps out; if the store came first the tuple
+    // would be left live holding a heap pointer with elem_tags still NULL,
+    // which reads as "all ints" and leaks that element at destroy time.
+    // Allocating first means a failure leaves the tuple exactly as it was.
+    if (tag != TAG_INT && !t->elem_tags)
+        t->elem_tags = (uint8_t*)dragon_xcalloc_n(t->length, sizeof(uint8_t));
     t->data[index] = val;
-    if (tag != TAG_INT) {
-        if (!t->elem_tags) {
-            t->elem_tags = (uint8_t*)calloc(t->length, sizeof(uint8_t));
-        }
-        t->elem_tags[index] = (uint8_t)tag;
-    }
+    if (tag != TAG_INT) t->elem_tags[index] = (uint8_t)tag;
 }
 
 int64_t dragon_tuple_get(DragonTuple* t, int64_t index) {
@@ -574,13 +583,22 @@ void dragon_tuple_destroy(DragonTuple* t) {
 
 
 static DragonSet* dragon_set_alloc(int64_t cap, uint8_t elem_tag = 0) {
+    // Tables before header, and each raise frees what this frame already owns:
+    // the OOM longjmp skips the rest of the frame, so anything allocated here
+    // and not yet reachable from a live object would be stranded. Note the
+    // gc_track below runs AFTER all three, so a raise can never hand the
+    // collector a half-built set - that ordering is load-bearing.
+    auto* buckets = (int64_t*)dragon_xcalloc_n(cap, sizeof(int64_t));
+    auto* states = (uint8_t*)calloc((size_t)cap, sizeof(uint8_t));
+    if (!states) { free(buckets); dragon_raise_oom(); }
     auto* s = (DragonSet*)malloc(sizeof(DragonSet));
+    if (!s) { free(states); free(buckets); dragon_raise_oom(); }
     dragon_obj_init(&s->header, DRAGON_TAG_SET);
     s->capacity = cap;
     s->count = 0;
     s->elem_tag = elem_tag;
-    s->buckets = (int64_t*)calloc(cap, sizeof(int64_t));
-    s->states = (uint8_t*)calloc(cap, sizeof(uint8_t));
+    s->buckets = buckets;
+    s->states = states;
     // Phase 5b: track for cycle collection
     dragon_gc_track(s);
     // Atomic counter: many threads may allocate concurrently.
@@ -617,8 +635,14 @@ static void dragon_set_grow(DragonSet* s) {
     int64_t* oldBuckets = s->buckets;
     uint8_t* oldStates = s->states;
     s->capacity = oldCap * 2;
-    s->buckets = (int64_t*)calloc(s->capacity, sizeof(int64_t));
-    s->states = (uint8_t*)calloc(s->capacity, sizeof(uint8_t));
+    // ABORT, never raise. Two independent reasons (runtime_internal.h): this
+    // runs inside the armed dragon_shared_mut_begin window of dragon_set_add,
+    // so a longjmp would escape with GC_FLAG_MUTATING set and arm a spurious
+    // concurrent-mutation fatal on the next mutation of this set; and by the
+    // second calloc the set is already half-swapped (capacity doubled, buckets
+    // replaced), so an unwind would expose a corrupt set to a live caller.
+    s->buckets = (int64_t*)dragon_xcalloc_n_or_abort(s->capacity, sizeof(int64_t));
+    s->states = (uint8_t*)dragon_xcalloc_n_or_abort(s->capacity, sizeof(uint8_t));
     s->count = 0;
     for (int64_t i = 0; i < oldCap; i++) {
         if (oldStates[i] == 1) {
@@ -1027,10 +1051,13 @@ void dragon_set_destroy(DragonSet* s) {
 // functions can access the real layout.
 
 DragonBytes* dragon_bytes_new(const uint8_t* data, int64_t len) {
-    auto* b = (DragonBytes*)malloc(sizeof(DragonBytes));
+    // Data before header: an OOM longjmp out of dragon_xmalloc must not
+    // strand a bare header allocation (same ordering as dragon_list_new_tagged).
+    auto* buf = (uint8_t*)dragon_xmalloc(len > 0 ? (size_t)len : 1);
+    auto* b = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
     dragon_obj_init(&b->header, DRAGON_TAG_BYTES);
     b->len = len;
-    b->data = (uint8_t*)malloc(len > 0 ? len : 1);
+    b->data = buf;
     if (data && len > 0) memcpy(b->data, data, len);
     return b;
 }
@@ -1045,10 +1072,11 @@ DragonBytes* dragon_bytes_from_literal(const char* data, int64_t len) {
 DragonBytes* dragon_bytes_from_list(DragonList* list) {
     if (!list) return dragon_bytes_new(nullptr, 0);
     int64_t n = list->size;
-    auto* b = (DragonBytes*)malloc(sizeof(DragonBytes));
+    auto* buf = (uint8_t*)dragon_xmalloc(n > 0 ? (size_t)n : 1);
+    auto* b = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
     dragon_obj_init(&b->header, DRAGON_TAG_BYTES);
     b->len = n;
-    b->data = (uint8_t*)malloc(n > 0 ? n : 1);
+    b->data = buf;
     for (int64_t i = 0; i < n; ++i) {
         b->data[i] = (uint8_t)(dragon_list_load(list, i) & 0xFF);
     }
@@ -1113,31 +1141,37 @@ DragonBytes* dragon_bytes_concat(DragonBytes* a, DragonBytes* b) {
     // Overflow guard: mirror dragon_bytes_repeat's INT64_MAX-relative check.
     // Without it, na+nb wraps negative and the malloc below truncates to a
     // tiny buffer that the memcpys then overrun.
-    if (na > INT64_MAX - nb) {
-        fprintf(stderr, "MemoryError: bytes concat too large\n"); exit(1);
-    }
+    if (na > INT64_MAX - nb)
+        dragon_raise_exc_cstr(43, "MemoryError: allocation size overflow");
     int64_t newLen = na + nb;
-    auto* result = (DragonBytes*)malloc(sizeof(DragonBytes));
+    // Data before header: an OOM longjmp out of dragon_xmalloc must not
+    // strand a bare header allocation (same ordering as dragon_list_new_tagged).
+    auto* data = (uint8_t*)dragon_xmalloc(newLen > 0 ? (size_t)newLen : 1);
+    auto* result = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
     dragon_obj_init(&result->header, DRAGON_TAG_BYTES);
     result->len = newLen;
-    result->data = (uint8_t*)malloc(newLen > 0 ? newLen : 1);
-    if (a && a->len > 0) memcpy(result->data, a->data, a->len);
-    if (b && b->len > 0) memcpy(result->data + (a ? a->len : 0), b->data, b->len);
+    result->data = data;
+    if (na > 0) memcpy(data, a->data, na);
+    if (nb > 0) memcpy(data + na, b->data, nb);
     return result;
 }
 
 DragonBytes* dragon_bytes_repeat(DragonBytes* b, int64_t n) {
-    if (!b || n <= 0) return dragon_bytes_new(nullptr, 0);
-    if (b->len > 0 && n > INT64_MAX / b->len) {
-        fprintf(stderr, "MemoryError: bytes repeat too large\n"); exit(1);
-    }
+    if (!b || n <= 0 || b->len == 0) return dragon_bytes_new(nullptr, 0);
+    // Keeps the int64 product below well-defined; the byte-count wrap is
+    // trapped again inside dragon_xmalloc_n where the size_t multiply lives.
+    if (n > INT64_MAX / b->len)
+        dragon_raise_exc_cstr(43, "MemoryError: allocation size overflow");
     int64_t newLen = b->len * n;
-    auto* result = (DragonBytes*)malloc(sizeof(DragonBytes));
+    // Data before header: an OOM longjmp out of dragon_xmalloc_n must not
+    // strand a bare header allocation (same ordering as dragon_list_new_tagged).
+    auto* data = (uint8_t*)dragon_xmalloc_n(n, (size_t)b->len);
+    auto* result = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
     dragon_obj_init(&result->header, DRAGON_TAG_BYTES);
     result->len = newLen;
-    result->data = (uint8_t*)malloc(newLen);
+    result->data = data;
     for (int64_t i = 0; i < n; i++) {
-        memcpy(result->data + i * b->len, b->data, b->len);
+        memcpy(data + i * b->len, b->data, b->len);
     }
     return result;
 }
@@ -1181,10 +1215,11 @@ DragonBytes* dragon_bytes_slice(DragonBytes* b, int64_t start, int64_t stop, int
     int64_t count = 0;
     if (step > 0) { for (int64_t i = start; i < stop; i += step) count++; }
     else { for (int64_t i = start; i > stop; i += step) count++; }
-    auto* result = (DragonBytes*)malloc(sizeof(DragonBytes));
+    auto* data = (uint8_t*)dragon_xmalloc(count > 0 ? (size_t)count : 1);
+    auto* result = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
     dragon_obj_init(&result->header, DRAGON_TAG_BYTES);
     result->len = count;
-    result->data = (uint8_t*)malloc(count > 0 ? count : 1);
+    result->data = data;
     int64_t w = 0;
     if (step > 0) { for (int64_t i = start; i < stop; i += step) result->data[w++] = b->data[i]; }
     else { for (int64_t i = start; i > stop; i += step) result->data[w++] = b->data[i]; }
@@ -1258,10 +1293,15 @@ DragonBytes* dragon_str_to_utf8_bytes(const char* s) {
     int64_t blen = 0;
     char* enc = s ? dragon_str_to_utf8_alloc(s, &blen) : nullptr;
     const uint8_t* src = (const uint8_t*)(enc ? enc : (s ? s : ""));
+    // enc is a live owned transcode: free it before raising, since the
+    // longjmp skips this frame's cleanup.
+    auto* data = (uint8_t*)malloc((size_t)(blen > 0 ? blen : 0) + 1);
+    if (!data) { if (enc) free(enc); dragon_raise_oom(); }
     auto* b = (DragonBytes*)malloc(sizeof(DragonBytes));
+    if (!b) { free(data); if (enc) free(enc); dragon_raise_oom(); }
     dragon_obj_init(&b->header, DRAGON_TAG_BYTES);
     b->len = blen;
-    b->data = (uint8_t*)malloc((size_t)(blen > 0 ? blen : 0) + 1);
+    b->data = data;
     if (blen > 0) memcpy(b->data, src, (size_t)blen);
     b->data[blen] = '\0';
     if (enc) free(enc);
@@ -1339,11 +1379,20 @@ DragonBytes* dragon_bytes_replace(DragonBytes* b, DragonBytes* old_b, DragonByte
         if (memcmp(b->data + i, old_b->data, old_b->len) == 0) { count++; i += old_b->len - 1; }
     }
     if (count == 0) return dragon_bytes_new(b->data, b->len);
-    int64_t newLen = b->len + count * (new_b ? new_b->len - old_b->len : -old_b->len);
-    auto* result = (DragonBytes*)malloc(sizeof(DragonBytes));
+    int64_t delta = new_b ? new_b->len - old_b->len : -old_b->len;
+    // Only growth can overflow: a shrink removes at most b->len bytes. An
+    // unchecked count * delta wraps negative and the size ternary below then
+    // picks 1 byte for a write loop that still runs to full length.
+    if (delta > 0 && count > (INT64_MAX - b->len) / delta)
+        dragon_raise_exc_cstr(43, "MemoryError: allocation size overflow");
+    int64_t newLen = b->len + count * delta;
+    // Data before header: an OOM longjmp out of dragon_xmalloc must not
+    // strand a bare header allocation (same ordering as dragon_list_new_tagged).
+    auto* data = (uint8_t*)dragon_xmalloc(newLen > 0 ? (size_t)newLen : 1);
+    auto* result = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
     dragon_obj_init(&result->header, DRAGON_TAG_BYTES);
     result->len = newLen;
-    result->data = (uint8_t*)malloc(newLen > 0 ? newLen : 1);
+    result->data = data;
     int64_t w = 0;
     for (int64_t i = 0; i < b->len; ) {
         if (i <= b->len - old_b->len && memcmp(b->data + i, old_b->data, old_b->len) == 0) {
@@ -1434,17 +1483,27 @@ DragonList* dragon_bytes_split(DragonBytes* b, DragonBytes* sep) {
 
 DragonBytes* dragon_bytes_join(DragonBytes* sep, DragonList* list) {
     if (!list || list->size == 0) return dragon_bytes_new(nullptr, 0);
-    // Calculate total length
+    // Calculate total length. The list can reference the same bytes object
+    // many times, so the sum is amplified far past any real buffer - it can
+    // exceed memory (allocation failure below) or wrap int64, so every add
+    // is checked.
     int64_t totalLen = 0;
     for (int64_t i = 0; i < list->size; i++) {
         auto* part = (DragonBytes*)(intptr_t)dragon_list_load(list, i);
+        if (part && part->len > INT64_MAX - totalLen)
+            dragon_raise_exc_cstr(43, "MemoryError: allocation size overflow");
         if (part) totalLen += part->len;
+        if (i > 0 && sep && sep->len > INT64_MAX - totalLen)
+            dragon_raise_exc_cstr(43, "MemoryError: allocation size overflow");
         if (i > 0 && sep) totalLen += sep->len;
     }
-    auto* result = (DragonBytes*)malloc(sizeof(DragonBytes));
+    // Data before header: an OOM longjmp out of dragon_xmalloc must not
+    // strand a bare header allocation (same ordering as dragon_list_new_tagged).
+    auto* data = (uint8_t*)dragon_xmalloc(totalLen > 0 ? (size_t)totalLen : 1);
+    auto* result = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
     dragon_obj_init(&result->header, DRAGON_TAG_BYTES);
     result->len = totalLen;
-    result->data = (uint8_t*)malloc(totalLen > 0 ? totalLen : 1);
+    result->data = data;
     int64_t w = 0;
     for (int64_t i = 0; i < list->size; i++) {
         if (i > 0 && sep && sep->len > 0) { memcpy(result->data + w, sep->data, sep->len); w += sep->len; }
@@ -1513,10 +1572,11 @@ DragonBytes* dragon_bytes_fromhex(const char* hex_str) {
         exit(1);
     }
     int64_t byteLen = nibbles / 2;
-    auto* result = (DragonBytes*)malloc(sizeof(DragonBytes));
+    auto* data = (uint8_t*)dragon_xmalloc(byteLen > 0 ? (size_t)byteLen : 1);
+    auto* result = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
     dragon_obj_init(&result->header, DRAGON_TAG_BYTES);
     result->len = byteLen;
-    result->data = (uint8_t*)malloc(byteLen > 0 ? byteLen : 1);
+    result->data = data;
     int64_t w = 0;
     for (int64_t i = 0; i < slen; ) {
         while (i < slen && hex_str[i] == ' ') i++;
@@ -1551,7 +1611,11 @@ void dragon_bytes_destroy(DragonBytes* b) {
 static void _deque_grow(DragonDeque* d) {
     int64_t newCap = d->capacity * 2;
     if (newCap < 8) newCap = 8;
-    int64_t* newData = (int64_t*)malloc(newCap * sizeof(int64_t));
+    // ABORT, never raise: called from dragon_deque_append and
+    // dragon_deque_appendleft inside their armed dragon_shared_mut_begin
+    // window, so a longjmp would leave GC_FLAG_MUTATING set and arm a
+    // spurious fatal on the next mutation (runtime_internal.h).
+    int64_t* newData = (int64_t*)dragon_xmalloc_n_or_abort(newCap, sizeof(int64_t));
     // Linearize: copy from head to end, then wrap to beginning
     for (int64_t i = 0; i < d->size; i++) {
         newData[i] = d->data[(d->head + i) % d->capacity];
@@ -1591,11 +1655,14 @@ static bool _deque_elem_eq(uint8_t tag, int64_t a, int64_t b) {
 /// `deque(maxlen=N)` parity); elem_tag is the DragonValueTag of the elements
 /// (seeded from the static type, refreshed on every append).
 DragonDeque* dragon_deque_new(int64_t maxlen, int64_t elem_tag) {
-    DragonDeque* d = (DragonDeque*)calloc(1, sizeof(DragonDeque));
-    dragon_obj_init(&d->header, DRAGON_TAG_DEQUE);
     int64_t capacity = 8;
     if (maxlen >= 0 && maxlen < capacity) capacity = maxlen > 0 ? maxlen : 1;
-    d->data = (int64_t*)malloc(capacity * sizeof(int64_t));
+    // Data before header, so an OOM raise cannot strand the header.
+    auto* data = (int64_t*)dragon_xmalloc_n(capacity, sizeof(int64_t));
+    DragonDeque* d = (DragonDeque*)calloc(1, sizeof(DragonDeque));
+    if (!d) { free(data); dragon_raise_oom(); }
+    dragon_obj_init(&d->header, DRAGON_TAG_DEQUE);
+    d->data = data;
     d->capacity = capacity;
     d->head = 0;
     d->size = 0;

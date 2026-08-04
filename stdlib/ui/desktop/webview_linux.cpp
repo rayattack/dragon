@@ -5,12 +5,17 @@
 // and the window.dr shim injection. Everything above this - Signal/effect, the
 // binding-table patch protocol, Window/App API objects - is .dr.
 //
-// Built as an ADR-041 `--cc-source` shim and linked into the program; gtk/webkit
-// come in via `-l` link flags. Nothing here is pulled into a Dragon binary that
-// does not import `ui`, so non-UI programs keep their tiny footprint.
+// Compiled into the program AUTOMATICALLY by the compiler: when a program
+// references dragon_webview_* externs (`import ui`), linkExecutable builds this
+// file like an ADR-041 `--cc-source` shim, with GTK/webkit include and link
+// flags resolved via pkg-config (webkit2gtk-4.1 preferred, 4.0 accepted - the
+// eval_js version guard covers pre-2.40 webkit). Passing your own webview
+// `--cc-source` overrides the auto path. Nothing here is pulled into a Dragon
+// binary that does not import `ui`, so non-UI programs keep their tiny
+// footprint.
 //
-// Exposes a flat extern "C" API consumed by stdlib/ui/desktop/desktop.dr +
-// stdlib/ui/bridge/bridge.dr.
+// Exposes a flat extern "C" API consumed by stdlib/ui/desktop/desktop.dr and
+// stdlib/ui/ui.dr.
 
 #include <gtk/gtk.h>
 #include <webkit2/webkit2.h>
@@ -37,6 +42,7 @@ typedef struct DragonWebView {
     GtkWidget*      window;
     WebKitWebView*  webview;
     DragonMsgHandler handler;   // JS -> Dragon dispatch (set by dragon_webview_set_handler)
+    gboolean        shown;      // counted in g_open_windows once shown
 } DragonWebView;
 
 // The locked window.dr shim, injected at document-start so it exists before any
@@ -93,6 +99,29 @@ static void dragon__on_web_process_terminated(WebKitWebView* view, guint reason,
     DRAGON_DBG("WEB PROCESS TERMINATED, reason=%u\n", reason);
 }
 
+// Open (= shown and not yet destroyed) window count. `App.run()` returns when
+// the LAST open window closes, not when the first one does; each window's
+// destroy signal lands here instead of straight in gtk_main_quit.
+static int g_open_windows = 0;
+
+static void dragon__on_window_destroy(GtkWidget* widget, gpointer user_data) {
+    (void) widget;
+    DragonWebView* wv = (DragonWebView*) user_data;
+    DRAGON_DBG("window destroy: %p (open=%d)\n", (void*) wv, g_open_windows);
+    // The GTK widgets are being torn down; null the struct so any late Dragon
+    // call on this window (a still-held `Window.handle`) is a safe no-op, never
+    // a use-after-free. The struct itself stays allocated because Dragon still
+    // points at it; it is reclaimed at process exit.
+    wv->window = NULL;
+    wv->webview = NULL;
+    wv->handler = NULL;
+    if (g_current_wv == wv) g_current_wv = NULL;
+    if (wv->shown) {
+        wv->shown = FALSE;
+        if (--g_open_windows <= 0 && gtk_main_level() > 0) gtk_main_quit();
+    }
+}
+
 void dragon_webview_init(void) {
     gtk_init(NULL, NULL);
 }
@@ -118,7 +147,7 @@ void* dragon_webview_window_new(const char* title, int width, int height) {
 
     wv->webview = WEBKIT_WEB_VIEW(webkit_web_view_new_with_user_content_manager(ucm));
     gtk_container_add(GTK_CONTAINER(wv->window), GTK_WIDGET(wv->webview));
-    g_signal_connect(wv->window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
+    g_signal_connect(wv->window, "destroy", G_CALLBACK(dragon__on_window_destroy), wv);
     g_signal_connect(wv->webview, "load-changed", G_CALLBACK(dragon__on_load_changed), NULL);
     g_signal_connect(wv->webview, "web-process-terminated",
                      G_CALLBACK(dragon__on_web_process_terminated), NULL);
@@ -134,20 +163,40 @@ void dragon_webview_set_handler(void* fn) {
 
 // Dragon -> JS: run a script in the current window (used to push targeted patch ops).
 void dragon_webview_eval_js(const char* js) {
-    if (g_current_wv)
-        webkit_web_view_evaluate_javascript(g_current_wv->webview, js, -1,
-                                            NULL, NULL, NULL, NULL, NULL);
+    if (!g_current_wv || !g_current_wv->webview) return;
+#if WEBKIT_CHECK_VERSION(2, 40, 0)
+    webkit_web_view_evaluate_javascript(g_current_wv->webview, js, -1,
+                                        NULL, NULL, NULL, NULL, NULL);
+#else
+    // webkit < 2.40 (the webkit2gtk-4.0 era): evaluate_javascript does not
+    // exist yet; run_javascript is the same fire-and-forget call here.
+    webkit_web_view_run_javascript(g_current_wv->webview, js, NULL, NULL, NULL);
+#endif
 }
 
 void dragon_webview_load_html(void* handle, const char* html) {
     DragonWebView* wv = (DragonWebView*) handle;
+    if (!wv || !wv->webview) return;  // closed window: no-op
     DRAGON_DBG("load_html: %zu bytes\n", html ? strlen(html) : 0);
     webkit_web_view_load_html(wv->webview, html ? html : "", NULL);
 }
 
 void dragon_webview_show(void* handle) {
     DragonWebView* wv = (DragonWebView*) handle;
+    if (!wv || !wv->window) return;   // closed window: no-op
+    if (!wv->shown) {
+        wv->shown = TRUE;
+        g_open_windows++;
+    }
     gtk_widget_show_all(wv->window);
+}
+
+// Close a window programmatically: destroy the GTK toplevel, which fires the
+// same "destroy" signal as the user clicking the window's close button, so
+// programmatic and user closes share one code path.
+void dragon_webview_close(void* handle) {
+    DragonWebView* wv = (DragonWebView*) handle;
+    if (wv && wv->window) gtk_widget_destroy(wv->window);
 }
 
 void dragon_webview_run(void) {

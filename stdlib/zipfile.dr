@@ -19,7 +19,7 @@ Binary layout (all multi-byte fields little-endian):
 """
 
 
-from os.path import join, dirname
+from os.path import join, dirname, safe_join
 
 import struct
 import binascii
@@ -32,9 +32,7 @@ extern "C" def dragon_write_file_bytes(path: str, data: bytes) -> int
 extern "C" def dragon_makedirs(path: str, mode: intc) -> intc
 
 
-#===----------------------------------------------------------------------===#
-# Constants
-#===----------------------------------------------------------------------===#
+# ---------------------------------------------- Constants ------------------------------------------------- #
 
 # Compression methods (PKWARE APPNOTE §4.4.5). Only these two are supported.
 const ZIP_STORED: int = 0
@@ -57,9 +55,7 @@ const _VERSION_MADE_BY: int = 0x001E
 const _DOS_EPOCH_DATE_TIME: tuple[int, int, int, int, int, int] = (1980, 1, 1, 0, 0, 0)
 
 
-#===----------------------------------------------------------------------===#
-# DOS date/time packing (APPNOTE §4.4.6) - MS-DOS 16-bit date + 16-bit time.
-#===----------------------------------------------------------------------===#
+# ------------------- DOS date/time packing (APPNOTE §4.4.6) - MS-DOS 16-bit date + 16-bit time. -------------------- #
 
 # Pack a 6-tuple (year, month, day, hour, minute, second) into the DOS
 # (mdate, mtime) pair. Seconds have 2-second resolution (the low bit is the
@@ -87,9 +83,7 @@ def _dos_unpack(dosdate: int, dostime: int) -> tuple[int, int, int, int, int, in
 }
 
 
-#===----------------------------------------------------------------------===#
-# ZipInfo - one archive member's metadata (CPython zipfile.ZipInfo parity).
-#===----------------------------------------------------------------------===#
+# ----------------- ZipInfo - one archive member's metadata (CPython zipfile.ZipInfo parity). ----------------- #
 
 class ZipInfo {
     filename: str
@@ -119,9 +113,7 @@ class ZipInfo {
 }
 
 
-#===----------------------------------------------------------------------===#
-# ZipFile
-#===----------------------------------------------------------------------===#
+# ---------------------------------------------- ZipFile ------------------------------------------------- #
 
 class ZipFile {
     filename: str
@@ -211,7 +203,10 @@ class ZipFile {
     }
 
     def extract(name: str, path: str = ".") -> str {
-        target: str = join(path, name)
+        # `name` is whatever the archive's central directory says it is.
+        # safe_join refuses any name resolving outside `path`, so an entry
+        # called "../../evil" raises instead of being written there.
+        target: str = safe_join(path, name)
         # ZIP names use '/' as the separator; a directory entry ends in '/'
         # and carries no payload - create the dir and stop (no read()).
         if len(name) > 0 and name[len(name) - 1:len(name)] == "/" {
@@ -487,9 +482,7 @@ class ZipFile {
 }
 
 
-#===----------------------------------------------------------------------===#
-# Factory
-#===----------------------------------------------------------------------===#
+# -------------------------------------------- Factory ------------------------------------------------ #
 
 # Open a ZIP archive. mode 'r' reads + parses the central directory eagerly;
 # mode 'w' creates a fresh archive that flushes on close().
@@ -505,3 +498,4 @@ def open(filename: str, mode: str = "r") -> ZipFile {
     }
     return zf
 }
+

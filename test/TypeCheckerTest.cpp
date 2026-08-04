@@ -2141,3 +2141,179 @@ TEST(TypeCheckerTest, IdentityResourceBlessedSpellingsOk) {
         "    moved: R = R(own h)\n"
         "}\n"));
 }
+
+//===----------------------------------------------------------------------===//
+// Issue #25 - methods are not values: reassigning a method must not compile
+// (it previously compiled silently and did nothing), and a bare method
+// reference outside call position must not compile (it previously
+// miscompiled to 0, or a SEGV when bound to a Callable and invoked).
+//===----------------------------------------------------------------------===//
+
+static const char* kIss25Class =
+    "class Test {\n"
+    "    def(name: str) { self.name: str = name }\n"
+    "    def print_junk() { print(\"junk\") }\n"
+    "    def double(n: int) -> int { return n * 2 }\n"
+    "}\n"
+    "test: Test = Test('t')\n";
+
+TEST(TypeCheckerTest, MethodReassignRejected) {
+    EXPECT_TRUE(checkHasErrors(std::string(kIss25Class) +
+        "test.print_junk = \"nope\"\n"));
+}
+
+TEST(TypeCheckerTest, MethodAnnotatedReassignRejected) {
+    EXPECT_TRUE(checkHasErrors(std::string(kIss25Class) +
+        "test.print_junk: str = \"nope\"\n"));
+}
+
+TEST(TypeCheckerTest, MethodReassignOnClassRejected) {
+    EXPECT_TRUE(checkHasErrors(std::string(kIss25Class) +
+        "Test.print_junk = \"nope\"\n"));
+}
+
+TEST(TypeCheckerTest, MethodSelfReassignInCtorRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "class T2 {\n"
+        "    def(x: int) {\n"
+        "        self.x: int = x\n"
+        "        self.m = \"shadow\"\n"
+        "    }\n"
+        "    def m() { print(\"m\") }\n"
+        "}\n"));
+}
+
+TEST(TypeCheckerTest, BareMethodReadRejected) {
+    EXPECT_TRUE(checkHasErrors(std::string(kIss25Class) +
+        "print(test.print_junk)\n"));
+}
+
+TEST(TypeCheckerTest, BareMethodReadOnClassRejected) {
+    EXPECT_TRUE(checkHasErrors(std::string(kIss25Class) +
+        "print(Test.print_junk)\n"));
+}
+
+TEST(TypeCheckerTest, MethodBoundToCallableRejected) {
+    EXPECT_TRUE(checkHasErrors(std::string(kIss25Class) +
+        "cb: Callable[[int], int] = test.double\n"));
+}
+
+TEST(TypeCheckerTest, MethodCallsStillOk) {
+    EXPECT_TRUE(checkOk(std::string(kIss25Class) +
+        "test.print_junk()\n"
+        "d: int = test.double(5)\n"
+        "test.name = \"renamed\"\n"));
+}
+
+TEST(TypeCheckerTest, InheritedMethodReassignRejected) {
+    EXPECT_TRUE(checkHasErrors(std::string(kIss25Class) +
+        "class Sub(Test) {\n"
+        "    def(name: str) { self.name: str = name }\n"
+        "}\n"
+        "s: Sub = Sub('s')\n"
+        "s.print_junk = \"nope\"\n"));
+}
+
+// Builtin receivers: their members are only ever methods, so a bare read is
+// the same defect on a different resolution branch (`print(s.upper)` printed
+// 0; a signature-matching Callable binding broke LLVM verification).
+TEST(TypeCheckerTest, BareBuiltinMethodReadRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "s: str = \"abc\"\n"
+        "print(s.upper)\n"));
+}
+
+TEST(TypeCheckerTest, BareTaskJoinReadRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "def work() -> int { return 7 }\n"
+        "t: Task[int] = fire work()\n"
+        "print(t.join)\n"));
+}
+
+TEST(TypeCheckerTest, BuiltinMethodBoundToCallableRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "s: str = \"abc\"\n"
+        "up: Callable[[Any], str] = s.upper\n"));
+}
+
+TEST(TypeCheckerTest, BuiltinMethodCallsStillOk) {
+    EXPECT_TRUE(checkOk(
+        "def work() -> int { return 7 }\n"
+        "s: str = \"abc\"\n"
+        "u: str = s.upper()\n"
+        "parts: list[str] = [\"a\", \"b\"]\n"
+        "j: str = \",\".join(parts)\n"
+        "parts.append(\"c\")\n"
+        "d: dict[str, int] = {\"k\": 1}\n"
+        "v: int = d.get(\"k\", 0)\n"
+        "t: Task[int] = fire work()\n"
+        "r: int = t.join()\n"));
+}
+
+// Unknown members on a CLASS receiver: the static/classmethod surface must
+// reject a nonexistent member at check time, exactly like the instance
+// branch. Before this, `App.run_timeout(100)` against a renamed API passed
+// `dragon check` and only failed as a late codegen scale error.
+TEST(TypeCheckerTest, UnknownStaticMethodCallOnClassRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "class Box {\n"
+        "    @staticmethod\n"
+        "    def real() -> None {\n"
+        "        pass\n"
+        "    }\n"
+        "}\n"
+        "Box.nope()\n"));
+}
+
+TEST(TypeCheckerTest, UnknownClassAttributeReadRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "class Box {\n"
+        "    limit: int = 3\n"
+        "}\n"
+        "x: int = Box.missing\n"));
+}
+
+TEST(TypeCheckerTest, StaticMethodCallOnClassOk) {
+    EXPECT_TRUE(checkOk(
+        "class Box {\n"
+        "    limit: int = 3\n"
+        "    @staticmethod\n"
+        "    def real() -> int {\n"
+        "        return 7\n"
+        "    }\n"
+        "}\n"
+        "x: int = Box.real()\n"
+        "lim: int = Box.limit\n"));
+}
+
+// The parent-chain walk: an inherited staticmethod is reachable through the
+// subclass name (it silently typed Unknown before, hiding the member from
+// downstream inference), while a genuinely-unknown member on the same chain
+// is a hard error.
+TEST(TypeCheckerTest, InheritedStaticMethodThroughSubclassOk) {
+    EXPECT_TRUE(checkOk(
+        "class Base {\n"
+        "    @staticmethod\n"
+        "    def make() -> int {\n"
+        "        return 1\n"
+        "    }\n"
+        "}\n"
+        "class Sub(Base) {\n"
+        "    pass\n"
+        "}\n"
+        "x: int = Sub.make()\n"));
+}
+
+TEST(TypeCheckerTest, UnknownMemberOnSubclassChainRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "class Base {\n"
+        "    @staticmethod\n"
+        "    def make() -> int {\n"
+        "        return 1\n"
+        "    }\n"
+        "}\n"
+        "class Sub(Base) {\n"
+        "    pass\n"
+        "}\n"
+        "Sub.fabricate()\n"));
+}

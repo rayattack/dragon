@@ -25,13 +25,22 @@ void dragon_print_box_raw(DragonBox box);
 /// `elem_size` is derived from the tag (1B for bool, 8B otherwise) so the
 /// data buffer is sized correctly for the packed-storage fast path.
 DragonList* dragon_list_new_tagged(int64_t capacity, int64_t elem_tag) {
-    auto* list = (DragonList*)malloc(sizeof(DragonList));
+    // Size and allocate the DATA buffer first. dragon_alloc_bytes traps the
+    // capacity*elem_size wrap and dragon_xmalloc traps a NULL return, both by
+    // longjmp - so neither may run while a bare header malloc is in flight, or
+    // the unwind leaks it. The header is a fixed ~40B and is the allocation
+    // that cannot realistically fail.
+    int64_t cap = capacity > 0 ? capacity : 8;
+    uint8_t esize = dragon_list_size_for_tag((uint8_t)elem_tag);
+    void* data = dragon_xmalloc_n(cap, esize);
+
+    auto* list = (DragonList*)dragon_xmalloc(sizeof(DragonList));
     dragon_obj_init(&list->header, DRAGON_TAG_LIST);
-    list->capacity = capacity > 0 ? capacity : 8;
+    list->capacity = cap;
     list->size = 0;
     list->elem_tag = (uint8_t)elem_tag;
-    list->elem_size = dragon_list_size_for_tag(list->elem_tag);
-    list->data = malloc((size_t)(list->capacity * list->elem_size));
+    list->elem_size = esize;
+    list->data = data;
     // Acyclic-skip cycle tracking (mirrors codegen's classIsAcyclic): an
     // int/bool list holds only inline scalars - no heap pointers - so it can
     // never be part of a reference cycle. The cycle collector therefore never
@@ -67,7 +76,8 @@ void dragon_list_append(DragonList* list, int64_t value) {
         int64_t new_cap = list->capacity * 2;
         // Realloc into a temp: on NULL the original buffer is still valid;
         // self-assigning the result would leak the live buffer + NULL-deref.
-        void* tmp = realloc(list->data, (size_t)(new_cap * list->elem_size));
+        void* tmp = realloc(list->data,
+                            dragon_alloc_bytes_or_abort(new_cap, list->elem_size));
         if (!tmp) { fprintf(stderr, "dragon: out of memory\n"); abort(); }
         list->data = tmp;
         list->capacity = new_cap;
@@ -206,7 +216,8 @@ void dragon_list_insert(DragonList* list, int64_t index, int64_t value) {
     // Ensure capacity
     if (list->size >= list->capacity) {
         int64_t new_cap = list->capacity * 2;
-        void* tmp = realloc(list->data, (size_t)(new_cap * list->elem_size));
+        void* tmp = realloc(list->data,
+                            dragon_alloc_bytes_or_abort(new_cap, list->elem_size));
         if (!tmp) { fprintf(stderr, "dragon: out of memory\n"); abort(); }
         list->data = tmp;
         list->capacity = new_cap;
@@ -415,9 +426,16 @@ void dragon_list_extend(DragonList* list, DragonList* other) {
         // Promote storage width if needed (TAG_INT==8B, switch to other tag's width).
         uint8_t new_size = dragon_list_size_for_tag(list->elem_tag);
         if (new_size != list->elem_size) {
+            // Allocate BEFORE the free. `list` is live and reachable here, so
+            // any failure between the free and the malloc (a wrap trap, an OOM)
+            // would leave list->data dangling on an object the GC still walks.
+            // Abort rather than raise for the same reason: an unwind must not
+            // observe the half-swapped buffer.
+            void* fresh = dragon_xmalloc_or_abort(
+                dragon_alloc_bytes_or_abort(list->capacity, new_size));
             free(list->data);
             list->elem_size = new_size;
-            list->data = malloc((size_t)(list->capacity * list->elem_size));
+            list->data = fresh;
         }
     }
     bool tags_match = (list->elem_tag == other->elem_tag);
@@ -680,11 +698,16 @@ DragonList* dragon_list_repeat(DragonList* src, int64_t count) {
     if (count <= 0 || src->size == 0) {
         return dragon_list_new_tagged(0, src->elem_tag);
     }
-    // Overflow guard: mirror dragon_bytes_repeat / dragon_str_repeat. Without
-    // this, a crafted size*count wrap silently undersizes the result buffer
-    // and the per-block memcpy below writes past the allocation.
+    // Element-count guard. NOTE this proves only that size*count fits an i64 -
+    // it says NOTHING about the BYTE count, so it does not on its own stop the
+    // undersized allocation (n = 2^61+2 clears it, then capacity*8 wrapped to a
+    // 16-byte malloc: A-B proven heap overflow). The byte-size trap lives in
+    // dragon_list_new_tagged via dragon_alloc_bytes; this stays because it
+    // fails earlier with a more specific message. Raise, don't exit(1): the
+    // sibling dragon_list_box_repeat already raises, and `[x] * n` on a bad n
+    // must be catchable the same way on both layouts.
     if (count > INT64_MAX / src->size) {
-        fprintf(stderr, "MemoryError: list repeat too large\n"); exit(1);
+        dragon_raise_exc_cstr(43, "MemoryError: list repeat too large");
     }
     int64_t total = src->size * count;
     DragonList* result = dragon_list_new_tagged(total, src->elem_tag);
@@ -735,13 +758,17 @@ DragonList* dragon_list_repeat(DragonList* src, int64_t count) {
 
 /// list[float] - allocate with native f64 storage.
 DragonListF64* dragon_list_new_f64(int64_t capacity) {
-    auto* list = (DragonListF64*)malloc(sizeof(DragonListF64));
+    // Data buffer first - see dragon_list_new_tagged for the ordering rule.
+    int64_t cap = capacity > 0 ? capacity : 8;
+    auto* data = (double*)dragon_xmalloc_n(cap, sizeof(double));
+
+    auto* list = (DragonListF64*)dragon_xmalloc(sizeof(DragonListF64));
     dragon_obj_init(&list->header, DRAGON_TAG_LIST);
-    list->capacity = capacity > 0 ? capacity : 8;
+    list->capacity = cap;
     list->size = 0;
     list->elem_tag = TAG_FLOAT;
     list->elem_size = 8;
-    list->data = (double*)malloc((size_t)list->capacity * sizeof(double));
+    list->data = data;
     // Acyclic-skip: a float list is native double[] storage - no heap pointers,
     // never cyclic - so it is never tracked (see dragon_list_new_tagged). The
     // counter bump stays unconditional to keep collection cadence unchanged.
@@ -780,7 +807,8 @@ void dragon_list_append_f64(DragonListF64* list, double value) {
     bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     if (list->size >= list->capacity) {
         int64_t new_cap = list->capacity * 2;
-        double* tmp = (double*)realloc(list->data, (size_t)new_cap * sizeof(double));
+        double* tmp = (double*)realloc(
+            list->data, dragon_alloc_bytes_or_abort(new_cap, sizeof(double)));
         if (!tmp) { fprintf(stderr, "dragon: out of memory\n"); abort(); }
         list->data = tmp;
         list->capacity = new_cap;
@@ -793,13 +821,17 @@ void dragon_list_append_f64(DragonListF64* list, double value) {
 /// per-element refcount semantics (TAG_STR uses dragon_incref_str family;
 /// other heap tags use the generic dragon_incref family).
 DragonListPtr* dragon_list_new_ptr(int64_t capacity, int64_t elem_tag) {
-    auto* list = (DragonListPtr*)malloc(sizeof(DragonListPtr));
+    // Data buffer first - see dragon_list_new_tagged for the ordering rule.
+    int64_t cap = capacity > 0 ? capacity : 8;
+    auto* data = (void**)dragon_xmalloc_n(cap, sizeof(void*));
+
+    auto* list = (DragonListPtr*)dragon_xmalloc(sizeof(DragonListPtr));
     dragon_obj_init(&list->header, DRAGON_TAG_LIST);
-    list->capacity = capacity > 0 ? capacity : 8;
+    list->capacity = cap;
     list->size = 0;
     list->elem_tag = (uint8_t)elem_tag;
     list->elem_size = 8;
-    list->data = (void**)malloc((size_t)list->capacity * sizeof(void*));
+    list->data = data;
     dragon_gc_track(list);
     if (__atomic_add_fetch(&gc_alloc_counter, 1, __ATOMIC_RELAXED)
         >= __atomic_load_n(&gc_threshold, __ATOMIC_RELAXED)) {
@@ -862,7 +894,8 @@ void dragon_list_append_ptr(DragonListPtr* list, void* value) {
     bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     if (list->size >= list->capacity) {
         int64_t new_cap = list->capacity * 2;
-        void** tmp = (void**)realloc(list->data, (size_t)new_cap * sizeof(void*));
+        void** tmp = (void**)realloc(
+            list->data, dragon_alloc_bytes_or_abort(new_cap, sizeof(void*)));
         if (!tmp) { fprintf(stderr, "dragon: out of memory\n"); abort(); }
         list->data = tmp;
         list->capacity = new_cap;
@@ -916,14 +949,19 @@ static inline void dragon_listbox_decref_elem(DragonListBoxElem* e) {
 
 /// list[Any] allocation. capacity rounds up to at least 8 to match other variants.
 DragonListBox* dragon_list_box_new(int64_t capacity) {
-    auto* list = (DragonListBox*)malloc(sizeof(DragonListBox));
+    // Data buffer first - see dragon_list_new_tagged for the ordering rule.
+    // 16B stride, so this layout wraps a capacity at 2^60, not 2^61.
+    int64_t cap = capacity > 0 ? capacity : 8;
+    auto* data = (DragonListBoxElem*)dragon_xmalloc_n(cap, sizeof(DragonListBoxElem));
+
+    auto* list = (DragonListBox*)dragon_xmalloc(sizeof(DragonListBox));
     // Distinct type tag so the GC dispatches destroy/traverse/clear to
     // dragon_list_box_* helpers - the layout differs from DragonList
     // (16B/elem stride, per-element tag) so we can't share dragon_list_destroy.
     dragon_obj_init(&list->header, DRAGON_TAG_LIST_BOX);
-    list->capacity = capacity > 0 ? capacity : 8;
+    list->capacity = cap;
     list->size = 0;
-    list->data = (DragonListBoxElem*)malloc((size_t)list->capacity * sizeof(DragonListBoxElem));
+    list->data = data;
     dragon_gc_track(list);
     if (__atomic_add_fetch(&gc_alloc_counter, 1, __ATOMIC_RELAXED)
         >= __atomic_load_n(&gc_threshold, __ATOMIC_RELAXED)) {
@@ -1069,7 +1107,7 @@ void dragon_list_box_append(DragonListBox* list, int64_t tag, int64_t payload) {
     if (list->size >= list->capacity) {
         int64_t new_cap = list->capacity * 2;
         DragonListBoxElem* tmp = (DragonListBoxElem*)realloc(list->data,
-            (size_t)new_cap * sizeof(DragonListBoxElem));
+            dragon_alloc_bytes_or_abort(new_cap, sizeof(DragonListBoxElem)));
         if (!tmp) { fprintf(stderr, "dragon: out of memory\n"); abort(); }
         list->data = tmp;
         list->capacity = new_cap;
@@ -1206,7 +1244,7 @@ void dragon_list_box_insert(DragonListBox* list, int64_t index, int64_t tag, int
     if (list->size >= list->capacity) {
         int64_t new_cap = list->capacity * 2;
         DragonListBoxElem* tmp = (DragonListBoxElem*)realloc(list->data,
-            (size_t)new_cap * sizeof(DragonListBoxElem));
+            dragon_alloc_bytes_or_abort(new_cap, sizeof(DragonListBoxElem)));
         if (!tmp) { fprintf(stderr, "dragon: out of memory\n"); abort(); }
         list->data = tmp;
         list->capacity = new_cap;

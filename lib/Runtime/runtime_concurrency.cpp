@@ -2080,7 +2080,11 @@ int64_t dragon_nb_send(int64_t fd, const char* buf, int64_t len) {
 
 /// Non-blocking recv that returns a Dragon string. Reads up to max_len bytes.
 const char* dragon_nb_recv_str(int64_t fd, int64_t max_len) {
-    char* buf = (char*)malloc(max_len + 1);
+    // max_len is caller-supplied (socket.dr recv size). Clamp non-positive
+    // like recv_bytes; the checked helper traps the +1 wrap at INT64_MAX and
+    // raises MemoryError instead of handing recv a NULL buffer.
+    int64_t cap = max_len > 0 ? max_len : 1;
+    char* buf = (char*)dragon_xmalloc_ex(cap, 1, 1);
     int64_t n = dragon_nb_recv(fd, buf, max_len);
     if (n < 0) n = 0;
     buf[n] = '\0';
@@ -2095,7 +2099,7 @@ const char* dragon_nb_recv_str(int64_t fd, int64_t max_len) {
 /// protocols a caller loops this into a read-exact helper (recv may short-read).
 DragonBytes* dragon_nb_recv_bytes(int64_t fd, int64_t max_len) {
     int64_t cap = max_len > 0 ? max_len : 1;
-    uint8_t* buf = (uint8_t*)malloc((size_t)cap);
+    uint8_t* buf = (uint8_t*)dragon_xmalloc_n(cap, 1);
     int64_t n = dragon_nb_recv(fd, buf, max_len);
     if (n < 0) n = 0;
     DragonBytes* result = dragon_bytes_new(buf, n);
@@ -2117,7 +2121,7 @@ DragonBytes* dragon_nb_recv_timeout(int64_t fd, int64_t max_len, int64_t timeout
     if (timeout_ms <= 0) return dragon_nb_recv_bytes(fd, max_len);
     make_nonblocking((int)fd);
     int64_t cap = max_len > 0 ? max_len : 1;
-    uint8_t* buf = (uint8_t*)malloc((size_t)cap);
+    uint8_t* buf = (uint8_t*)dragon_xmalloc_n(cap, 1);
     int64_t n = 0;
     while (1) {
 #ifdef _WIN32

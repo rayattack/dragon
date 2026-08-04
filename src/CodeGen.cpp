@@ -966,6 +966,60 @@ static bool runTool(const std::vector<std::string>& args) {
 #endif
 }
 
+#if !defined(_WIN32)
+// D031 - run a subprocess and capture its stdout (pkg-config queries for the
+// webview shell). Returns true on a clean exit(0) with `out` holding the raw
+// stdout text. Same no-shell fork/execvp discipline as runTool.
+static bool runToolCapture(const std::vector<std::string>& args,
+                           std::string& out) {
+    std::vector<const char*> argv;
+    for (const auto& a : args) argv.push_back(a.c_str());
+    argv.push_back(nullptr);
+    int fds[2];
+    if (pipe(fds) != 0) return false;
+    pid_t pid = fork();
+    if (pid == -1) {
+        close(fds[0]);
+        close(fds[1]);
+        return false;
+    }
+    if (pid == 0) {
+        close(fds[0]);
+        dup2(fds[1], STDOUT_FILENO);
+        close(fds[1]);
+        execvp(argv[0], const_cast<char* const*>(argv.data()));
+        _exit(127);  // execvp failed (tool not found on PATH)
+    }
+    close(fds[1]);
+    out.clear();
+    char buf[4096];
+    ssize_t n;
+    while ((n = read(fds[0], buf, sizeof buf)) > 0) out.append(buf, (size_t) n);
+    close(fds[0]);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+// Split pkg-config output into whitespace-separated flag tokens.
+static std::vector<std::string> splitFlagTokens(const std::string& s) {
+    std::vector<std::string> toks;
+    size_t i = 0;
+    while (i < s.size()) {
+        while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' ||
+                                s[i] == '\r'))
+            i++;
+        size_t j = i;
+        while (j < s.size() && s[j] != ' ' && s[j] != '\t' && s[j] != '\n' &&
+               s[j] != '\r')
+            j++;
+        if (j > i) toks.push_back(s.substr(i, j - i));
+        i = j;
+    }
+    return toks;
+}
+#endif
+
 // ADR 041 - does this --cc-source path name a C++ translation unit? Selects the
 // per-file compiler (c++ vs cc) and, transitively, the final link driver.
 static bool isCxxSource(const std::string& path) {
@@ -1010,6 +1064,88 @@ bool CodeGen::linkExecutable(const std::string& outputFile,
         }
         shimObjects.push_back(shimObj);
     }
+
+    // D031 `import ui` - auto-compile and link the platform webview shell.
+    // The shell (stdlib/ui/desktop/webview_linux.cpp) is deliberately NOT in
+    // the runtime archive, so non-UI binaries never carry GTK/webkit. When the
+    // program references dragon_webview_* externs, compile the shell in like a
+    // --cc-source shim, with GTK/webkit include and link flags resolved via
+    // pkg-config. A user-supplied webview --cc-source (a custom or patched
+    // shell, the pre-auto-link recipe from docs 1802) takes precedence: any
+    // shim whose basename mentions "webview" skips the auto path entirely.
+    std::vector<std::string> webviewLinkTokens;
+#if !defined(_WIN32) && !defined(__APPLE__)
+    if (impl_->needsWebview) {
+        bool userShell = false;
+        for (const auto& src : impl_->options.ccSources) {
+            auto slash = src.find_last_of("/\\");
+            std::string base =
+                slash == std::string::npos ? src : src.substr(slash + 1);
+            if (base.find("webview") != std::string::npos) {
+                userShell = true;
+                break;
+            }
+        }
+        if (!userShell) {
+            if (impl_->options.webviewShimPath.empty()) {
+                impl_->addError(
+                    "import ui: cannot locate the webview shell source "
+                    "(stdlib/ui/desktop/webview_linux.cpp) next to the "
+                    "stdlib");
+                for (const auto& o : shimObjects) std::remove(o.c_str());
+                return false;
+            }
+            // webkit2gtk-4.1 (libsoup3) is the primary target; 4.0 is
+            // API-compatible for everything the shell uses and covers older
+            // distros that never shipped 4.1.
+            std::string pkg;
+            for (const char* cand : {"webkit2gtk-4.1", "webkit2gtk-4.0"}) {
+                if (runTool({"pkg-config", "--exists", cand})) {
+                    pkg = cand;
+                    break;
+                }
+            }
+            std::string cflags, libs;
+            if (pkg.empty() ||
+                !runToolCapture({"pkg-config", "--cflags", pkg}, cflags) ||
+                !runToolCapture({"pkg-config", "--libs", pkg}, libs)) {
+                impl_->addError(
+                    "import ui: the desktop webview shell needs webkit2gtk "
+                    "(pkg-config found neither webkit2gtk-4.1 nor "
+                    "webkit2gtk-4.0). Install the development package "
+                    "(Debian/Ubuntu: libwebkit2gtk-4.1-dev, Fedora: "
+                    "webkit2gtk4.1-devel), or compile the shell yourself "
+                    "with --cc-source stdlib/ui/desktop/webview_linux.cpp "
+                    "plus matching -I/-l flags (docs: 1802-windows)");
+                for (const auto& o : shimObjects) std::remove(o.c_str());
+                return false;
+            }
+            std::string shimObj = objectFile + ".webview.o";
+            std::vector<std::string> cc;
+            cc.push_back("c++");
+            cc.push_back("-c");
+            cc.push_back(impl_->options.webviewShimPath);
+            cc.push_back("-o");
+            cc.push_back(shimObj);
+            cc.push_back("-fPIC");
+            if (impl_->options.optimizationLevel > 0)
+                cc.push_back("-O" +
+                             std::to_string(impl_->options.optimizationLevel));
+            for (const auto& tok : splitFlagTokens(cflags)) cc.push_back(tok);
+            if (!runTool(cc)) {
+                impl_->addError(
+                    "import ui: failed to compile the webview shell: " +
+                    impl_->options.webviewShimPath);
+                for (const auto& o : shimObjects) std::remove(o.c_str());
+                return false;
+            }
+            shimObjects.push_back(shimObj);
+            anyCxxShim = true;
+            webviewLinkTokens = splitFlagTokens(libs);
+            impl_->needsPthread = true;  // the shell's loop serves fire/timers
+        }
+    }
+#endif
 
     // Build argv for the compiler driver. A C++ shim forces the C++ driver so
     // libstdc++, static initializers, and exception/RTTI tables link correctly
@@ -1101,6 +1237,10 @@ bool CodeGen::linkExecutable(const std::string& outputFile,
     // Auto-link libraries from extern "C" from "lib" { } hints
     for (const auto& lib : impl_->externLibs) {
         args.push_back("-l" + lib);
+    }
+    // D031: webkit2gtk link flags (pkg-config --libs) for `import ui`.
+    for (const auto& tok : webviewLinkTokens) {
+        args.push_back(tok);
     }
 
 #if defined(_WIN32)

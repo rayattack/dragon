@@ -12,6 +12,7 @@ extern "C" def dragon_webview_init()
 extern "C" def dragon_webview_window_new(title: str, width: intc, height: intc) -> ptr
 extern "C" def dragon_webview_load_html(handle: ptr, html: str)
 extern "C" def dragon_webview_show(handle: ptr)
+extern "C" def dragon_webview_close(handle: ptr)
 
 
 class Window {
@@ -56,5 +57,12 @@ class Window {
     def show() -> None {
         """Realize and display the window."""
         dragon_webview_show(self.handle)
+    }
+
+    def close() -> None {
+        """Close the window - the same path as the user clicking its close
+        button. When the last open window closes, `ui.App.run()` returns.
+        Calling any method on a closed window is a no-op."""
+        dragon_webview_close(self.handle)
     }
 }

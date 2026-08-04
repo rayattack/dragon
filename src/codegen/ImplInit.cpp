@@ -1598,6 +1598,14 @@ void CodeGen::Impl::forwardDeclareFunctions(dragon::Module& mod) {
             if (func->isExtern && externLinkName.substr(0, 11) == "dragon_zstd") {
                 needsZstd = true;
             }
+            // Auto-detect the ui module's webview shell (D031). The shell is
+            // not part of the runtime archive (non-UI binaries keep their
+            // tiny footprint), so linkExecutable compiles it in per-app and
+            // links webkit2gtk via pkg-config.
+            if (func->isExtern &&
+                externLinkName.substr(0, 14) == "dragon_webview") {
+                needsWebview = true;
+            }
             // When the extern has an alias, register `name -> llvmName`
             // in the current module's alias scope so a Dragon call to the
             // alias resolves to the C symbol. resolveCalleeSymbol probes this
