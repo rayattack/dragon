@@ -15,7 +15,7 @@ Build (Linux - GTK3 + webkit2gtk-4.1):
     INCS=( $(pkg-config --cflags-only-I webkit2gtk-4.1 | sed 's/-I/-I /g') )
     LIBS=( $(pkg-config --libs-only-l webkit2gtk-4.1) )
     dragon build examples/ui-counter.dr \\
-        --cc-source stdlib/ui/desktop/webview_linux.cpp \\
+        --cc-source platform/webview_linux.cpp \\
         "${INCS[@]}" "${LIBS[@]}" -lpthread -o ui-counter
 """
 

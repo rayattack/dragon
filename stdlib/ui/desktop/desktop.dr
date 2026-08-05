@@ -1,9 +1,10 @@
 """ui.desktop - desktop windows over the system webview (Decision 031).
 
 `Window` wraps the platform webview shell (an opaque `ptr` handle) behind a typed
-Dragon API. The shell is selected at link time; on Linux it is webview_linux.cpp
-(GTK3 + webkit2gtk-4.1). The per-platform `extern "C"` surface is intentionally
-flat and stable so the `.dr` layer never changes when a new platform is added.
+Dragon API. The shell is selected at link time from the toolchain's platform/
+tree; on Linux it is platform/webview_linux.cpp (GTK3 + webkit2gtk-4.1). The
+per-platform `extern "C"` surface is intentionally flat and stable so the `.dr`
+layer never changes when a new platform is added.
 """
 
 from html import HTML

@@ -1068,8 +1068,8 @@ bool CodeGen::linkExecutable(const std::string& outputFile,
     }
 
     // D031 `import ui` - auto-compile and link the platform webview shell.
-    // The shell (stdlib/ui/desktop/webview_linux.cpp) is deliberately NOT in
-    // the runtime archive, so non-UI binaries never carry GTK/webkit. When the
+    // The shell (platform/webview_linux.cpp) is deliberately NOT in the
+    // runtime archive, so non-UI binaries never carry GTK/webkit. When the
     // program references dragon_webview_* externs, compile the shell in like a
     // --cc-source shim, with GTK/webkit include and link flags resolved via
     // pkg-config. A user-supplied webview --cc-source (a custom or patched
@@ -1175,8 +1175,8 @@ bool CodeGen::linkExecutable(const std::string& outputFile,
             if (impl_->options.webviewShimPath.empty()) {
                 impl_->addError(
                     "import ui: cannot locate the webview shell source "
-                    "(stdlib/ui/desktop/webview_linux.cpp) next to the "
-                    "stdlib");
+                    "(platform/webview_linux.cpp) in the platform/ tree "
+                    "installed beside the stdlib");
                 for (const auto& o : shimObjects) std::remove(o.c_str());
                 return false;
             }
@@ -1200,7 +1200,7 @@ bool CodeGen::linkExecutable(const std::string& outputFile,
                     "webkit2gtk-4.0). Install the development package "
                     "(Debian/Ubuntu: libwebkit2gtk-4.1-dev, Fedora: "
                     "webkit2gtk4.1-devel), or compile the shell yourself "
-                    "with --cc-source stdlib/ui/desktop/webview_linux.cpp "
+                    "with --cc-source platform/webview_linux.cpp "
                     "plus matching -I/-l flags (docs: 1802-windows)");
                 for (const auto& o : shimObjects) std::remove(o.c_str());
                 return false;

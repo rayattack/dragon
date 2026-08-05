@@ -30,7 +30,8 @@ dragon build hello.dr -o hello
 ```
 
 `import ui` is all the build needs to see. The `ui.desktop` shell is a small
-C++ file (`webview_linux.cpp`) wrapping the system webview; the compiler
+C++ file (`platform/webview_linux.cpp`, from the native-shim tree shipped
+beside the stdlib) wrapping the system webview; the compiler
 compiles it in automatically and resolves the GTK/webkit include and link
 flags through `pkg-config` (webkit2gtk-4.1, or 4.0 on older distros). The
 build machine needs the development package (Debian/Ubuntu

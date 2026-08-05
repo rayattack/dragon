@@ -293,6 +293,7 @@ target_compile_definitions(dragon_lib PRIVATE
     DRAGON_MBEDTLS_LIB="$<TARGET_FILE:dragon_mbedtls>"
     ${DRAGON_ZSTD_DEF}
     DRAGON_STDLIB_DIR="${CMAKE_SOURCE_DIR}/stdlib"
+    DRAGON_PLATFORM_DIR="${CMAKE_SOURCE_DIR}/platform"
     DRAGON_EGG_BIN="${DRAGON_EGG_OUT}"
     DRAGON_EGG_SRC="${DRAGON_EGG_SRC_FILE}"
     $<$<BOOL:${DRAGON_ASAN}>:DRAGON_ASAN_BUILD=1>)
@@ -314,6 +315,7 @@ target_compile_definitions(dragon PRIVATE
     DRAGON_MBEDTLS_LIB="$<TARGET_FILE:dragon_mbedtls>"
     ${DRAGON_ZSTD_DEF}
     DRAGON_STDLIB_DIR="${CMAKE_SOURCE_DIR}/stdlib"
+    DRAGON_PLATFORM_DIR="${CMAKE_SOURCE_DIR}/platform"
     DRAGON_EGG_BIN="${DRAGON_EGG_OUT}"
     DRAGON_EGG_SRC="${DRAGON_EGG_SRC_FILE}"
     $<$<BOOL:${DRAGON_ASAN}>:DRAGON_ASAN_BUILD=1>)
@@ -379,6 +381,13 @@ endif()
 install(DIRECTORY stdlib/
     DESTINATION ${CMAKE_INSTALL_DATADIR}/dragon/stdlib
     FILES_MATCHING PATTERN "*.dr" PATTERN "*.py")
+
+# platform/ - native shim sources compiled into user programs on demand (the
+# webview shell today; future per-OS shells slot in beside it). Shipped as
+# SOURCE so each machine compiles against its own GTK/webkit via pkg-config.
+install(DIRECTORY platform/
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/dragon/platform
+    FILES_MATCHING PATTERN "*.cpp" PATTERN "*.mm" PATTERN "*.h")
 
 # Bundled Mozilla CA trust store (ssl.load_default_certs fallback).
 install(DIRECTORY share/dragon/certs/

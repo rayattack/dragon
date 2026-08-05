@@ -44,6 +44,19 @@ std::string findStdlibUnderPrefix(const std::string& prefix) {
     return {};
 }
 
+/// Locate the platform/ tree (native shim sources compiled per program, e.g.
+/// the webview shell) under an install prefix.
+std::string findPlatformUnderPrefix(const std::string& prefix) {
+    if (prefix.empty()) return {};
+    namespace fs = std::filesystem;
+    for (const char* sub : {"share/dragon/platform", "lib/dragon/platform"}) {
+        fs::path candidate = fs::path(prefix) / sub;
+        std::error_code ec;
+        if (fs::is_directory(candidate, ec)) return candidate.string();
+    }
+    return {};
+}
+
 /// Resolve the runtime libdragon_runtime.a alongside the install prefix.
 std::string findRuntimeUnderPrefix(const std::string& prefix) {
     if (prefix.empty()) return {};
@@ -87,6 +100,25 @@ std::string resolveStdlibDir() {
     if (!installed.empty()) return installed;
 #ifdef DRAGON_STDLIB_DIR
     return std::string(DRAGON_STDLIB_DIR);
+#else
+    return {};
+#endif
+}
+
+/// Resolve the platform/ tree (native per-program shim sources, the Odin
+/// vendor-style sibling of stdlib/) using the same fallback chain:
+///  1. $DRAGON_PLATFORM_PATH env var
+///  2. <install-prefix>/share/dragon/platform (relocatable install)
+///  3. Compile-time DRAGON_PLATFORM_DIR (development tree)
+std::string resolvePlatformDir() {
+    if (const char* env = std::getenv("DRAGON_PLATFORM_PATH")) {
+        if (env[0] != '\0') return std::string(env);
+    }
+    auto prefix = platform::getInstallPrefix();
+    auto installed = findPlatformUnderPrefix(prefix);
+    if (!installed.empty()) return installed;
+#ifdef DRAGON_PLATFORM_DIR
+    return std::string(DRAGON_PLATFORM_DIR);
 #else
     return {};
 #endif
@@ -960,15 +992,15 @@ int Driver::buildFile(const std::string& filename) {
         codegenOpts.zstdLibPath = findBundledLib(
             prefix, "libzstd.a", DRAGON_ZSTD_LIB);
 #endif
-        // D031: the ui module's webview shell ships as SOURCE next to the
-        // stdlib (not in the runtime archive); when a program imports ui,
-        // linkExecutable compiles it in and links webkit2gtk via pkg-config.
+        // D031: the ui module's webview shell ships as SOURCE in platform/
+        // (the native-shim tree installed beside stdlib/, never in the runtime
+        // archive); when a program imports ui, linkExecutable compiles it in
+        // and links webkit2gtk via pkg-config.
         {
-            auto stdlibDir = resolveStdlibDir();
-            if (!stdlibDir.empty()) {
+            auto platformDir = resolvePlatformDir();
+            if (!platformDir.empty()) {
                 namespace fs = std::filesystem;
-                fs::path shim = fs::path(stdlibDir) / "ui" / "desktop" /
-                                "webview_linux.cpp";
+                fs::path shim = fs::path(platformDir) / "webview_linux.cpp";
                 std::error_code shimEc;
                 if (fs::is_regular_file(shim, shimEc))
                     codegenOpts.webviewShimPath = shim.string();
