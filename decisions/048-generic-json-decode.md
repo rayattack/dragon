@@ -125,3 +125,39 @@ bad body can't be mistaken for a valid-but-empty one (same contract as `verify_s
 5. `test/dr/` coverage: round-trip `dumps`→`loads`, schema-directed decode of nested objects, skip of
  unrequested keys, malformed-body errors with offsets, and a decode benchmark vs. the boxed path to
  keep the no-per-char-alloc invariant honest.
+
+## Addendum (2026-08-04): the generic door; loads_obj and the typed loaders retire
+
+A spelled-out `Any` in `decode[T]` now stamps a boxed decoder: `decode[Any]`
+(any document), `decode[dict[str, Any]]` (top-level object), and
+`decode[list[Any]]` (top-level array). Generic code (`ffi.sidecar_call[T]`,
+`ffi.runs[T]`, any user `route[T]` forwarding to `decode[T]`) holds only a `T`
+and cannot route to `loads` itself, so the boxed tier gets a generic entrance.
+
+With `decode[T]` covering objects, arrays, and scalars at both tiers, the
+pre-generics surface retired: `loads_obj` and the monomorphic typed loaders
+(`loads_str`, `loads_int`, `loads_float`, `loads_bool`, `loads_is_null`, the
+`loads_list_*` family, `detect_type` + the `JSON_*` constants) are deleted,
+along with the legacy per-char string parser that backed them. `loads(s: str)`
+stays as the Python-parity boxed door, and `loads_bytes` was renamed `loadb`.
+
+The typed encoders (`dumps_str/int/float/bool/none`, `dumps_list_*`) retired
+with them: zero in-tree consumers, and the generic `dumps` walker is equal on
+scalars (one branch) and faster on lists (native-element reads into one
+buffer vs a per-element allocate-and-join loop). `dumps(obj: Any)` and
+`encode[T]` are the whole encode surface.
+
+Guardrails on the stamps:
+
+1. **Delegate, don't duplicate.** `decode[Any]`'s synthesized body is one call
+   to `loadb`; the dict/list stamps go through `_decode_obj_any` /
+   `_decode_list_any`, thin shape checks over the same parser. One boxed-tree
+   parser exists.
+2. **`Any` is spelled, never reached.** The synthesis gates are literal `Any`
+   types. A concrete non-scalar `V` in `decode[dict[str, V]]` and a non-str
+   key stay compile errors (`dr_decode_dict_class_guard` /
+   `dr_decode_dict_intkey_guard` pin this); nothing ever falls back to a
+   boxed stamp.
+3. **The price is in the type.** Every concrete `T` keeps its box-free stamp;
+   a spelled `Any` buys one box per value, exactly the `loads` cost. Docs
+   (`1404-stdlib-data.md`) state this next to `decode[T]`.

@@ -13,6 +13,7 @@
 from http.server import Router, Request, Response, Context
 from hmac import new, compare_digest
 import json
+from json import decode
 
 extern "C" def getenv(name: str) -> str
 
@@ -48,7 +49,7 @@ def h_hook(req: Request, res: Response, ctx: Context) -> None {
     # A signed body must also be the amebo envelope.
     envelope_ok: bool = False
     try {
-        const doc: dict[str, Any] = json.loads_obj(body)
+        const doc: dict[str, Any] = decode[dict[str, Any]](body.encode("utf-8"))
         if "action" in doc and "metadata" in doc and "payload" in doc {
             envelope_ok = True
         }

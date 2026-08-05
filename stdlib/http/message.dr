@@ -24,7 +24,7 @@
 from urllib.parse import unquote_plus, parse_qsl
 from http.multipart import parse_multipart, boundary_from_content_type, Part
 from http.sessions import Session
-from json import loads_bytes
+from json import loadb
 
 extern "C" def dragon_str_contains(a: str, b: str) -> int
 extern "C" def dragon_str_find(haystack: str, needle: str) -> int
@@ -415,7 +415,7 @@ class Request {
         # bytes round-trips byte-exact. Raises ValueError (with the byte offset)
         # on malformed JSON. The raw body is still available as `req.body`; for a
         # known shape, prefer the box-free `decode[T](req.body_bytes)`.
-        return loads_bytes(self.body_bytes)
+        return loadb(self.body_bytes)
     }
 
     def form() -> dict[str, str] {

@@ -9,7 +9,7 @@ from database import SQL
 from html import HTML
 import json
 from time import now
-from json import Schema
+from json import Schema, decode
 from core import db, dblock, PER, get_q, get_status, get_page, like_of, get_ids, audit_log, ago, human_bytes, persist_event, schema_errors
 from shell import Col, render_toolbar, render_list, list_page, open_modal, active_pill, pill_of, and_close_modal, fragment_with_nav, respond_section, kv, code_pill
 from auth import session_principal
@@ -229,7 +229,7 @@ def dash_publish(req: Request, res: Response, ctx: Context) -> None {
     const schematext: str = query_action_schema(action)
     if len(schematext) > 0 and order_n >= 1 {
         const pschema: Schema = Schema("draft-07")
-        pschema.register(action, json.loads_obj(schematext))
+        pschema.register(action, decode[dict[str, Any]](schematext.encode("utf-8")))
         const payload: dict[str, Any] = {"order": order_n}
         const perrs: list[str] = schema_errors(pschema, action, payload)
         if len(perrs) == 0 {

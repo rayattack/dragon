@@ -38,34 +38,35 @@ genuinely unknown, the boxed `Any` tree is the honest escape hatch.
 
 **Decoding a whole document.** `loads(s: str) -> Any` parses a JSON string
 into a boxed `Any` tree: objects become `dict[str, Any]`, arrays become
-`list[Any]`, and scalars become tagged `Any` values. This is the
-Python-parity convenience tier - every node is one box, so it is fine off
-hot paths.
+`list[Any]`, and scalars become tagged `Any` values. Its bytes sibling is
+`loadb(data: bytes) -> Any` (what `Request.json()` uses on the verbatim
+body). This is the Python-parity convenience tier - every node is one box,
+so it is fine off hot paths.
 
 The catch is that you cannot index *straight* into the boxed `Any` and read
 a value out of it; the box does not auto-unbox under a subscript. The
-working pattern is to decode the top-level object with `loads_obj`, which is
-typed as `dict[str, Any]`, and let each value unbox as you assign it to a
-typed local:
+working pattern for a document you know is an object is to decode it AT
+`dict[str, Any]` with `decode[dict[str, Any]]`, and let each value unbox as
+you assign it to a typed local:
 
 ```dragon
-import json
+from json import decode
 
-const obj: dict[str, Any] = json.loads_obj('{"name": "ada", "age": 36}')
+const obj: dict[str, Any] = decode[dict[str, Any]]('{"name": "ada", "age": 36}'.encode("utf-8"))
 const name: str = obj["name"]    # the Any value unboxes into a str here
 const age: int = obj["age"]      # ...and into an int here
 print(name)                      # ada
 print(age)                       # 36
 ```
 
-`loads_obj(s: str) -> dict[str, Any]` raises `ValueError` if the top-level
-value is not an object. When a value's type is not known statically, narrow
-it with `isinstance` before binding:
+`decode[dict[str, Any]]` raises `ValueError` if the top-level value is not
+an object (`decode[list[Any]]` is the array twin). When a value's type is
+not known statically, narrow it with `isinstance` before binding:
 
 ```dragon
-import json
+from json import decode
 
-const obj: dict[str, Any] = json.loads_obj('{"port": 8080}')
+const obj: dict[str, Any] = decode[dict[str, Any]]('{"port": 8080}'.encode("utf-8"))
 const v: Any = obj["port"]
 if isinstance(v, int) {
     const n: int = v
@@ -74,22 +75,11 @@ if isinstance(v, int) {
 print("port" in obj)       # True
 ```
 
-**Decoding a value of known type.** When you already know the shape, the
-typed decoders skip the boxing entirely and hand you a native value. They
-each parse a single JSON value of the stated type:
-
-```dragon
-import json
-
-print(json.loads_int("42"))             # 42
-print(json.loads_float("3.14"))         # 3.14
-print(json.loads_str('"hello"'))   # hello
-print(json.loads_list_int("[1, 2, 3]")) # [1, 2, 3]
-```
-
-The full set is `loads_str`, `loads_int`, `loads_float`, `loads_bool`,
-`loads_is_null`, and the homogeneous-array forms `loads_list_str`,
-`loads_list_int`, `loads_list_float`, `loads_list_bool`.
+**Decoding a value of known type.** When you already know the shape, spell
+it: `decode[int](b"42")`, `decode[list[int]](b"[1, 2, 3]")`,
+`decode[dict[str, str]](...)` all skip the boxing entirely and hand you the
+native value - the same `decode[T]` the next section introduces, at scalar
+and container targets.
 
 **Decoding into your own types: `decode[T]`.** When the shape you expect is
 a class, the class itself is the schema. `decode[T](body: bytes) -> T` reads
@@ -149,6 +139,33 @@ const d: dict[str, str] = decode[dict[str, str]](b'{"x": "one"}')
 request bodies, process-lane frames, files - already are bytes; for a
 string literal, `.encode("utf-8")` at the callsite is the whole ceremony.
 
+**The boxed stamps: a spelled-out `Any`.** Generic code holds only a `T` -
+it cannot decide at its call site to use `loads` instead. So the convenience
+tier has a generic door: an `Any` you spell in the type argument stamps a
+boxed decoder. `decode[Any]` accepts any document (it delegates to `loadb`);
+`decode[dict[str, Any]]` requires a top-level object; `decode[list[Any]]`
+requires an array.
+
+```dragon
+from json import decode
+
+# The reply's shape is genuinely unknown at compile time.
+const d: dict[str, Any] = decode[dict[str, Any]](body)
+const v: Any = d["status"]
+if isinstance(v, str) {
+    const status: str = v
+    print(status)
+}
+```
+
+Read the price off the type: every concrete `T` decodes box-free; an `Any`
+you spell buys one box per value, exactly what `loads` costs. It is an
+opt-in, never a fallback - `decode[dict[str, User]]` and `decode[dict[int,
+Any]]` stay compile errors rather than silently taking the boxed path. This
+is what makes an FFI call with a loosely-shaped reply possible:
+`ffi.sidecar_call[dict[str, Any]](argv, input, blobs)` routes its reply
+through this stamp.
+
 **Encoding.** `dumps(obj: Any) -> str` serializes any scalar or
 arbitrarily-nested homogeneous list/dict by dispatching on the value's
 runtime tag:
@@ -162,9 +179,10 @@ print(json.dumps([1, 2, 3])) # [1, 2, 3]
 print(json.dumps(true))      # true
 ```
 
-There are also typed encoders - `dumps_str`, `dumps_int`, `dumps_float`,
-`dumps_bool`, and the `dumps_list_*` family - for when you want to avoid the
-tag dispatch on a hot path.
+The tag dispatch is one branch per value, and a monomorphized `list[int]` /
+`dict[str, int]` passes straight through - the runtime walker reads native
+elements into a single output buffer. For a known shape where the consumer
+wants bytes, `encode[T]` below is the box-free pair.
 
 Values `dumps` has no JSON form for - `bytes` and class instances - raise a
 catchable `TypeError` (`Object of type Thing is not JSON serializable`),
@@ -245,8 +263,8 @@ Schemas are ordinary Dragon dicts, so the keys are bare identifiers - no
 quoting - and the payload can be anything: a value straight from
 `json.loads`, a dict literal like the `{order: 7}` above, or a native Dragon
 list. `register(name, schema)` also takes a parsed document
-(`s.register("evt", json.loads_obj(text))` for schema text arriving from a
-request body or a database column). `validate(name, payload)` never raises
+(`s.register("evt", decode[dict[str, Any]](text.encode("utf-8")))` for
+schema text arriving from a request body or a database column). `validate(name, payload)` never raises
 on invalid *data* - it returns `ok` plus a list of `ValidationError` values,
 each carrying the JSON `path` of the offending value and a human-readable
 `message`, so one call reports *every* violation instead of stopping at the
@@ -306,8 +324,8 @@ from server worker threads; validation is read-only and safe to share.
 
 > **Differs from Python.** `json.loads` returns an `Any` tree, not a
 > `dict`/`list`, and a boxed `Any` does not unbox under a direct subscript -
-> reach for `loads_obj` (typed `dict[str, Any]`) or the `loads_*` scalar
-> decoders, which is where the typed, zero-box path lives. `decode[T]` /
+> reach for `decode[dict[str, Any]]` (a typed dict) or a concrete
+> `decode[T]`, which is where the typed, zero-box path lives. `decode[T]` /
 > `encode[T]` have no CPython stdlib counterpart at all: they replace the
 > pydantic / dataclass-loader / `json.loads`-then-construct idiom with a
 > decoder synthesized at compile time from your class, reflection-free.
@@ -577,8 +595,8 @@ different values.
 |---|---|
 | Decode JSON into your class | `u: User = decode[User](body)` - box-free; defaults, `Optional`, nesting |
 | Encode your class to JSON | `encode[User](u) -> bytes` - compact; round-trips with `decode[T]` |
-| Decode a JSON object (unknown shape) | `obj: dict[str, Any] = json.loads_obj(s)` |
-| Decode a typed JSON scalar/array | `json.loads_int(s)`, `loads_str`, `loads_list_int`, … |
+| Decode a JSON object (unknown values) | `obj: dict[str, Any] = decode[dict[str, Any]](body)` |
+| Decode a typed JSON scalar/array | `decode[int](body)`, `decode[str](body)`, `decode[list[int]](body)`, … |
 | Encode any value to JSON | `json.dumps(value) -> str` |
 | Stream irregular JSON without a type | `json.Cursor` (read) / `json.JsonWriter` (write) |
 | Validate against JSON Schemas | `s: Schema = Schema("draft-07")`; `s.register(name, schema)`; `s.validate(name, v)` |

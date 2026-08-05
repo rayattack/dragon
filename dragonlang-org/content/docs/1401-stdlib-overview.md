@@ -53,8 +53,9 @@ prominent are:
   with a decoder synthesized per type at compile time - the serde /
   pydantic idiom with no library and no reflection. The generic `loads`
   returns `Any` (a boxed value you narrow with `isinstance`), not a
-  `dict`/`list`, and the scalar decoders and encoders are monomorphized
-  (`loads_int`, `dumps_list_str`, …). It also ships a JSON Schema
+  `dict`/`list`; typed scalar decodes are `decode[int]` / `decode[list[str]]`
+  and `dumps(obj)` is the one encoder for dynamic values (`encode[T]` for
+  known shapes at bytes). It also ships a JSON Schema
   validator (the `Schema` class: register named schemas, validate by
   name, compose with `$ref`) with no CPython-stdlib counterpart.
 - **`re.match`/`re.search`** return an `int` index (or `-1`), not a

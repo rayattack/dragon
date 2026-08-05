@@ -1,0 +1,167 @@
+# test/dr/test_decode_any.dr - the boxed tier through the generic door 
+
+
+from unittest import TestCase, main
+from json import decode
+
+
+# The ffi.call[T] shape: a generic that holds only a T and forwards it.
+def route[T](body: bytes) -> T {
+    return decode[T](body)
+}
+
+
+class DecodeAnyTests(TestCase) {
+    def test_scalar_document() {
+        const v: Any = decode[Any]("42".encode("utf-8"))
+        self.assertTrue(isinstance(v, int))
+        const n: int = v
+        self.assertEqual(n, 42)
+    }
+
+    def test_object_document() {
+        const v: Any = decode[Any]('{"k": "v"}'.encode("utf-8"))
+        self.assertTrue(isinstance(v, dict))
+        const d: dict[str, Any] = v
+        const s: str = d["k"]
+        self.assertEqual(s, "v")
+    }
+
+    def test_array_document() {
+        const v: Any = decode[Any]("[1, 2]".encode("utf-8"))
+        self.assertTrue(isinstance(v, list))
+    }
+
+    def test_trailing_garbage_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const v: Any = decode[Any]("42 99".encode("utf-8"))
+        })
+    }
+}
+
+
+class DecodeListAnyTests(TestCase) {
+    def test_heterogeneous_array() {
+        const xs: list[Any] = decode[list[Any]]('[1, "two", true]'.encode("utf-8"))
+        self.assertEqual(len(xs), 3)
+        const s: str = xs[1]
+        self.assertEqual(s, "two")
+        const b: bool = xs[2]
+        self.assertTrue(b)
+    }
+
+    def test_empty_array() {
+        const xs: list[Any] = decode[list[Any]]("[]".encode("utf-8"))
+        self.assertEqual(len(xs), 0)
+    }
+
+    def test_nested_objects_in_array() {
+        const xs: list[Any] = decode[list[Any]]('[{"n": 1}, {"n": 2}]'.encode("utf-8"))
+        const second: dict[str, Any] = xs[1]
+        const n: int = second["n"]
+        self.assertEqual(n, 2)
+    }
+
+    def test_top_level_object_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const xs: list[Any] = decode[list[Any]]('{"a": 1}'.encode("utf-8"))
+        })
+    }
+}
+
+
+class DecodeDictAnyTests(TestCase) {
+    def test_mixed_scalars() {
+        const body: bytes = '{"name": "ada", "n": 3, "pi": 2.5, "ok": true}'.encode("utf-8")
+        const d: dict[str, Any] = decode[dict[str, Any]](body)
+        self.assertEqual(len(d), 4)
+        const name: str = d["name"]
+        self.assertEqual(name, "ada")
+        const n: int = d["n"]
+        self.assertEqual(n, 3)
+        const pi: float = d["pi"]
+        self.assertEqual(pi, 2.5)
+        const ok: bool = d["ok"]
+        self.assertTrue(ok)
+    }
+
+    def test_isinstance_narrowing() {
+        const body: bytes = '{"v": 7}'.encode("utf-8")
+        const d: dict[str, Any] = decode[dict[str, Any]](body)
+        const v: Any = d["v"]
+        self.assertTrue(isinstance(v, int))
+        self.assertFalse(isinstance(v, str))
+    }
+
+    def test_nested_list_value() {
+        const body: bytes = '{"xs": [10, 20, 30]}'.encode("utf-8")
+        const d: dict[str, Any] = decode[dict[str, Any]](body)
+        const v: Any = d["xs"]
+        self.assertTrue(isinstance(v, list))
+        const xs: list[Any] = v
+        self.assertEqual(len(xs), 3)
+        const second: int = xs[1]
+        self.assertEqual(second, 20)
+    }
+
+    def test_nested_object_value() {
+        const body: bytes = '{"inner": {"k": "deep"}}'.encode("utf-8")
+        const d: dict[str, Any] = decode[dict[str, Any]](body)
+        const v: Any = d["inner"]
+        self.assertTrue(isinstance(v, dict))
+        const inner: dict[str, Any] = v
+        const k: str = inner["k"]
+        self.assertEqual(k, "deep")
+    }
+
+    def test_empty_object() {
+        const d: dict[str, Any] = decode[dict[str, Any]]("{}".encode("utf-8"))
+        self.assertEqual(len(d), 0)
+    }
+
+    def test_top_level_array_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const d: dict[str, Any] = decode[dict[str, Any]]("[1, 2]".encode("utf-8"))
+        })
+    }
+
+    def test_trailing_garbage_raises() {
+        self.assertRaises(ValueError, lambda () -> None {
+            const d: dict[str, Any] = decode[dict[str, Any]]('{"a": 1} x'.encode("utf-8"))
+        })
+    }
+}
+
+
+class DecodeAnyGenericDoorTests(TestCase) {
+    # The whole point of the stamps: generic code that holds only a T.
+    def test_transitive_dict_composition() {
+        const d: dict[str, Any] = route[dict[str, Any]]('{"ok": true, "n": 5}'.encode("utf-8"))
+        self.assertEqual(len(d), 2)
+        const n: int = d["n"]
+        self.assertEqual(n, 5)
+    }
+
+    def test_transitive_any_composition() {
+        const v: Any = route[Any]('"plain"'.encode("utf-8"))
+        const s: str = v
+        self.assertEqual(s, "plain")
+    }
+
+    # The box-free stamps and the boxed Any stamps coexist in one program;
+    # the concrete stamps must keep decoding natively next to the Any ones.
+    def test_box_free_stamps_coexist() {
+        const d: dict[str, int] = decode[dict[str, int]]('{"a": 1, "b": 2}'.encode("utf-8"))
+        self.assertEqual(d["a"], 1)
+        self.assertEqual(d["b"], 2)
+        const ns: list[int] = decode[list[int]]("[7, 8]".encode("utf-8"))
+        self.assertEqual(ns[1], 8)
+        const any_d: dict[str, Any] = decode[dict[str, Any]]('{"a": 1}'.encode("utf-8"))
+        const a: int = any_d["a"]
+        self.assertEqual(a, 1)
+    }
+}
+
+
+main([DecodeAnyTests(), DecodeListAnyTests(), DecodeDictAnyTests(),
+      DecodeAnyGenericDoorTests()])

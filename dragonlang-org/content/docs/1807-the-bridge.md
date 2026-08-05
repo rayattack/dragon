@@ -28,7 +28,7 @@ window.dr.call('weather.lookup', JSON.stringify({ city: 'Lagos' }))
 
 A handler takes one `str` and returns one `str`. The bridge does not
 impose a format, but JSON is the convention on both sides:
-[`json.loads_obj`](/docs/1404-stdlib-data) / `json.dumps` in Dragon,
+[`decode[dict[str, Any]]`](/docs/1404-stdlib-data) / `json.dumps` in Dragon,
 `JSON.parse` / `JSON.stringify` in the page. Names are plain strings; the
 dots are just a naming convention. Register everything before
 `App.run()` - registration is setup, the run loop is the program's body.
@@ -42,12 +42,13 @@ it reaches Dragon through the bridge:
 ```dragon
 import ui
 import json
+from json import decode
 from html import HTML
 from ui import rpc
 from ui.desktop import Window
 
 def lookup(payload: str) -> str {
-    const d: dict[str, Any] = json.loads_obj(payload)
+    const d: dict[str, Any] = decode[dict[str, Any]](payload.encode("utf-8"))
     const city: str = d["city"]
     temps: dict[str, int] = {Lagos: 31, Abuja: 28, Jos: 22}
     if city not in temps {

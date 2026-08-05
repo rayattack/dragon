@@ -1,0 +1,18 @@
+# MUST NOT COMPILE (registered in test/CMakeLists.txt with a pass-regex on the
+# error). D048 guardrail: Any is spelled, never reached - a concrete class V in
+# decode[dict[str, V]] must stay a compile error, not fall back to the boxed
+# dict[str, Any] stamp.
+
+from json import decode
+
+class Point {
+    def(x: int, y: int) {
+        self.x = x
+        self.y = y
+    }
+}
+
+const body: bytes = '{"p": {"x": 1, "y": 2}}'.encode("utf-8")
+const d: dict[str, Point] = decode[dict[str, Point]](body)
+print(len(d))
+

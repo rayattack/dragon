@@ -18,26 +18,6 @@ extern "C" def dragon_bytes_get(b: bytes, idx: int) -> int
 extern "C" def dragon_chr(code: int) -> str
 extern "C" def dragon_ord(s: str) -> int
 
-# Internal helpers
-
-def _skip_ws(s: str, pos: int) -> int {
-    # Advance pos past any whitespace characters.
-    i: int = pos
-    while i < len(s) {
-        const ch: str = s[i:i + 1]
-        if ch in " \t\n\r" {
-            i = i + 1
-        } else {
-            return i
-        }
-    }
-    return i
-}
-
-def _is_digit(ch: str) -> bool {
-    return ch.isdigit()
-}
-
 # String escaping
 
 def escape(s: str) -> str {
@@ -152,609 +132,22 @@ def unescape(s: str) -> str {
     return "".join(parts)
 }
 
-# Encoding functions (Dragon values -> JSON strings)
-
-def dumps_str(value: str) -> str {
-    # Encode a string as a JSON string with quotes and escaping
-    return "\"" + escape(value) + "\""
-}
-
-def dumps_int(value: int) -> str {
-    # Encode an integer as a JSON number
-    return dragon_int_to_str(value)
-}
-
-def dumps_float(value: float) -> str {
-    # Encode a float as a JSON number
-    return dragon_float_to_str(value)
-}
-
-def dumps_bool(value: bool) -> str {
-    # Encode a boolean as a JSON literal
-    if value {
-        return "true"
-    }
-    return "false"
-}
-
-def dumps_none() -> str {
-    # Encode None/null as a JSON literal
-    return "null"
-}
+# Encoding (Dragon values -> JSON strings)
 
 # Generic dumps: serialize any value (scalar or nested list/dict) to JSON,
-# dispatching on the runtime tag - Python parity for json.dumps(obj).
+# dispatching on the runtime tag - Python parity for json.dumps(obj). A
+# monomorphized list/dict passes straight through: the runtime walker reads
+# native elements into one output buffer (header-tag dispatch), so there is
+# no typed dumps_* family - for a known shape at bytes, encode[T] is the
+# box-free pair.
 def dumps(obj: Any) -> str {
     return dragon_json_dumps(obj)
 }
 
-def dumps_list_str(items: list[str]) -> str {
-    parts: list[str] = []
-    i: int = 0
-    while i < len(items) {
-        parts.append(dumps_str(items[i]))
-        i = i + 1
-    }
-    return "[" + ", ".join(parts) + "]"
-}
 
-def dumps_list_int(items: list[int]) -> str {
-    parts: list[str] = []
-    i: int = 0
-    while i < len(items) {
-        parts.append(dumps_int(items[i]))
-        i = i + 1
-    }
-    return "[" + ", ".join(parts) + "]"
-}
-
-def dumps_list_float(items: list[float]) -> str {
-    parts: list[str] = []
-    i: int = 0
-    while i < len(items) {
-        parts.append(dumps_float(items[i]))
-        i = i + 1
-    }
-    return "[" + ", ".join(parts) + "]"
-}
-
-def dumps_list_bool(items: list[bool]) -> str {
-    parts: list[str] = []
-    i: int = 0
-    while i < len(items) {
-        parts.append(dumps_bool(items[i]))
-        i = i + 1
-    }
-    return "[" + ", ".join(parts) + "]"
-}
-
-# Internal parsing helpers
-
-def _parse_string_value(s: str, pos: int) -> str {
-    # Parse a JSON string at pos (the opening quote); returns unescaped content.
-    # Caller advances past the closing quote.
-    if pos >= len(s) {
-        raise ValueError("unexpected end of JSON input")
-    }
-    if s[pos:pos + 1] != "\"" {
-        raise ValueError("expected '\"' at start of JSON string")
-    }
-    i: int = pos + 1
-    result: str = ""
-    while i < len(s) {
-        const ch: str = s[i:i + 1]
-        if ch == "\"" {
-            return result
-        }
-        if ch == "\\" {
-            if i + 1 >= len(s) {
-                raise ValueError("unexpected end of escape sequence")
-            }
-            const next: str = s[i + 1:i + 2]
-            if next == "n" {
-                result = result + "\n"
-                i = i + 2
-            } else {
-                if next == "t" {
-                    result = result + "\t"
-                    i = i + 2
-                } else {
-                    if next == "r" {
-                        result = result + "\r"
-                        i = i + 2
-                    } else {
-                        if next == "\\" {
-                            result = result + "\\"
-                            i = i + 2
-                        } else {
-                            if next == "\"" {
-                                result = result + "\""
-                                i = i + 2
-                            } else {
-                                if next == "/" {
-                                    result = result + "/"
-                                    i = i + 2
-                                } else {
-                                    result = result + next
-                                    i = i + 2
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            result = result + ch
-            i = i + 1
-        }
-    }
-    raise ValueError("unterminated JSON string")
-}
-
-def _find_string_end(s: str, pos: int) -> int {
-    # Find the position of the closing quote for a JSON string starting at pos.
-    # pos should point to the opening quote. Returns position AFTER closing quote.
-    if pos >= len(s) {
-        return pos
-    }
-    i: int = pos + 1
-    while i < len(s) {
-        const ch: str = s[i:i + 1]
-        if ch == "\"" {
-            return i + 1
-        }
-        if ch == "\\" {
-            # Skip escaped character
-            i = i + 2
-        } else {
-            i = i + 1
-        }
-    }
-    return i
-}
-
-def _parse_number_str(s: str, pos: int) -> str {
-    # Extract the raw number substring starting at pos.
-    # Handles negative sign, digits, and decimal point.
-    i: int = pos
-    if i < len(s) {
-        if s[i:i + 1] == "-" {
-            i = i + 1
-        }
-    }
-    while i < len(s) {
-        const ch: str = s[i:i + 1]
-        if _is_digit(ch) {
-            i = i + 1
-        } else {
-            if ch == "." {
-                i = i + 1
-            } else {
-                if ch == "e" {
-                    i = i + 1
-                    # Handle optional sign after exponent
-                    if i < len(s) {
-                        const ech: str = s[i:i + 1]
-                        if ech == "+" {
-                            i = i + 1
-                        } else {
-                            if ech == "-" {
-                                i = i + 1
-                            }
-                        }
-                    }
-                } else {
-                    if ch == "E" {
-                        i = i + 1
-                        if i < len(s) {
-                            const ech: str = s[i:i + 1]
-                            if ech == "+" {
-                                i = i + 1
-                            } else {
-                                if ech == "-" {
-                                    i = i + 1
-                                }
-                            }
-                        }
-                    } else {
-                        return s[pos:i]
-                    }
-                }
-            }
-        }
-    }
-    return s[pos:i]
-}
-
-def _find_number_end(s: str, pos: int) -> int {
-    # Find the end position of a number starting at pos.
-    i: int = pos
-    if i < len(s) {
-        if s[i:i + 1] == "-" {
-            i = i + 1
-        }
-    }
-    while i < len(s) {
-        const ch: str = s[i:i + 1]
-        if _is_digit(ch) {
-            i = i + 1
-        } else {
-            if ch == "." {
-                i = i + 1
-            } else {
-                if ch == "e" {
-                    i = i + 1
-                    if i < len(s) {
-                        const ech: str = s[i:i + 1]
-                        if ech == "+" {
-                            i = i + 1
-                        } else {
-                            if ech == "-" {
-                                i = i + 1
-                            }
-                        }
-                    }
-                } else {
-                    if ch == "E" {
-                        i = i + 1
-                        if i < len(s) {
-                            const ech: str = s[i:i + 1]
-                            if ech == "+" {
-                                i = i + 1
-                            } else {
-                                if ech == "-" {
-                                    i = i + 1
-                                }
-                            }
-                        }
-                    } else {
-                        return i
-                    }
-                }
-            }
-        }
-    }
-    return i
-}
-
-# Decoding functions (JSON strings -> Dragon values)
-
-def loads_str(json: str) -> str {
-    # Parse a JSON string value. Input should be a JSON string like: "hello"
-    pos: int = _skip_ws(json, 0)
-    if pos >= len(json) {
-        raise ValueError("empty JSON input")
-    }
-    return _parse_string_value(json, pos)
-}
-
-def loads_int(json: str) -> int {
-    # Parse a JSON integer value. Input should be like: 42 or -7
-    pos: int = _skip_ws(json, 0)
-    if pos >= len(json) {
-        raise ValueError("empty JSON input")
-    }
-    const num_str: str = _parse_number_str(json, pos)
-    return dragon_str_to_int(num_str)
-}
-
-def loads_float(json: str) -> float {
-    # Parse a JSON float value. Input should be like: 3.14 or -2.5e10
-    pos: int = _skip_ws(json, 0)
-    if pos >= len(json) {
-        raise ValueError("empty JSON input")
-    }
-    const num_str: str = _parse_number_str(json, pos)
-    return dragon_str_to_float(num_str)
-}
-
-def loads_bool(json: str) -> bool {
-    # Parse a JSON boolean. Input should be: true or false
-    pos: int = _skip_ws(json, 0)
-    if pos >= len(json) {
-        raise ValueError("empty JSON input")
-    }
-    const remaining: int = len(json) - pos
-    if remaining >= 4 {
-        if json[pos:pos + 4] == "true" {
-            return true
-        }
-    }
-    if remaining >= 5 {
-        if json[pos:pos + 5] == "false" {
-            return false
-        }
-    }
-    raise ValueError("expected 'true' or 'false'")
-}
-
-def loads_is_null(json: str) -> bool {
-    # Check if the JSON value is null. Returns true if input is: null
-    pos: int = _skip_ws(json, 0)
-    const remaining: int = len(json) - pos
-    if remaining >= 4 {
-        if json[pos:pos + 4] == "null" {
-            return true
-        }
-    }
-    return false
-}
-
-def loads_list_str(json: str) -> list[str] {
-    # Parse a JSON array of strings. Input should be like: ["a", "b", "c"]
-    result: list[str] = []
-    pos: int = _skip_ws(json, 0)
-    if pos >= len(json) {
-        raise ValueError("empty JSON input")
-    }
-    if json[pos:pos + 1] != "[" {
-        raise ValueError("expected '[' at start of JSON array")
-    }
-    pos = pos + 1
-    pos = _skip_ws(json, pos)
-
-    # Handle empty array
-    if pos < len(json) {
-        if json[pos:pos + 1] == "]" {
-            return result
-        }
-    }
-
-    # Parse elements
-    while pos < len(json) {
-        pos = _skip_ws(json, pos)
-        if pos >= len(json) {
-            raise ValueError("unexpected end of JSON array")
-        }
-
-        # Parse string element
-        const val: str = _parse_string_value(json, pos)
-        result.append(val)
-        pos = _find_string_end(json, pos)
-
-        # Skip whitespace, then comma or closing bracket
-        pos = _skip_ws(json, pos)
-        if pos >= len(json) {
-            raise ValueError("unexpected end of JSON array")
-        }
-        const ch: str = json[pos:pos + 1]
-        if ch == "]" {
-            return result
-        }
-        if ch == "," {
-            pos = pos + 1
-        } else {
-            raise ValueError("expected ',' or ']' in JSON array")
-        }
-    }
-    raise ValueError("unterminated JSON array")
-}
-
-def loads_list_int(json: str) -> list[int] {
-    # Parse a JSON array of integers. Input should be like: [1, 2, 3]
-    result: list[int] = []
-    pos: int = _skip_ws(json, 0)
-    if pos >= len(json) {
-        raise ValueError("empty JSON input")
-    }
-    if json[pos:pos + 1] != "[" {
-        raise ValueError("expected '[' at start of JSON array")
-    }
-    pos = pos + 1
-    pos = _skip_ws(json, pos)
-
-    # Handle empty array
-    if pos < len(json) {
-        if json[pos:pos + 1] == "]" {
-            return result
-        }
-    }
-
-    # Parse elements
-    while pos < len(json) {
-        pos = _skip_ws(json, pos)
-        if pos >= len(json) {
-            raise ValueError("unexpected end of JSON array")
-        }
-
-        # Parse integer element
-        const num_str: str = _parse_number_str(json, pos)
-        result.append(dragon_str_to_int(num_str))
-        pos = _find_number_end(json, pos)
-
-        # Skip whitespace, then comma or closing bracket
-        pos = _skip_ws(json, pos)
-        if pos >= len(json) {
-            raise ValueError("unexpected end of JSON array")
-        }
-        const ch: str = json[pos:pos + 1]
-        if ch == "]" {
-            return result
-        }
-        if ch == "," {
-            pos = pos + 1
-        } else {
-            raise ValueError("expected ',' or ']' in JSON array")
-        }
-    }
-    raise ValueError("unterminated JSON array")
-}
-
-def loads_list_float(json: str) -> list[float] {
-    # Parse a JSON array of floats. Input should be like: [1.5, 2.7, 3.14]
-    result: list[float] = []
-    pos: int = _skip_ws(json, 0)
-    if pos >= len(json) {
-        raise ValueError("empty JSON input")
-    }
-    if json[pos:pos + 1] != "[" {
-        raise ValueError("expected '[' at start of JSON array")
-    }
-    pos = pos + 1
-    pos = _skip_ws(json, pos)
-
-    # Handle empty array
-    if pos < len(json) {
-        if json[pos:pos + 1] == "]" {
-            return result
-        }
-    }
-
-    # Parse elements
-    while pos < len(json) {
-        pos = _skip_ws(json, pos)
-        if pos >= len(json) {
-            raise ValueError("unexpected end of JSON array")
-        }
-
-        # Parse float element
-        const num_str: str = _parse_number_str(json, pos)
-        result.append(dragon_str_to_float(num_str))
-        pos = _find_number_end(json, pos)
-
-        # Skip whitespace, then comma or closing bracket
-        pos = _skip_ws(json, pos)
-        if pos >= len(json) {
-            raise ValueError("unexpected end of JSON array")
-        }
-        const ch: str = json[pos:pos + 1]
-        if ch == "]" {
-            return result
-        }
-        if ch == "," {
-            pos = pos + 1
-        } else {
-            raise ValueError("expected ',' or ']' in JSON array")
-        }
-    }
-    raise ValueError("unterminated JSON array")
-}
-
-def loads_list_bool(json: str) -> list[bool] {
-    # Parse a JSON array of booleans. Input should be like: [true, false, true]
-    result: list[bool] = []
-    pos: int = _skip_ws(json, 0)
-    if pos >= len(json) {
-        raise ValueError("empty JSON input")
-    }
-    if json[pos:pos + 1] != "[" {
-        raise ValueError("expected '[' at start of JSON array")
-    }
-    pos = pos + 1
-    pos = _skip_ws(json, pos)
-
-    # Handle empty array
-    if pos < len(json) {
-        if json[pos:pos + 1] == "]" {
-            return result
-        }
-    }
-
-    # Parse elements
-    while pos < len(json) {
-        pos = _skip_ws(json, pos)
-        if pos >= len(json) {
-            raise ValueError("unexpected end of JSON array")
-        }
-
-        # Parse boolean element
-        const remaining: int = len(json) - pos
-        if remaining >= 4 {
-            if json[pos:pos + 4] == "true" {
-                result.append(true)
-                pos = pos + 4
-            } else {
-                if remaining >= 5 {
-                    if json[pos:pos + 5] == "false" {
-                        result.append(false)
-                        pos = pos + 5
-                    } else {
-                        raise ValueError("expected 'true' or 'false' in JSON array")
-                    }
-                } else {
-                    raise ValueError("expected 'true' or 'false' in JSON array")
-                }
-            }
-        } else {
-            raise ValueError("expected 'true' or 'false' in JSON array")
-        }
-
-        # Skip whitespace, then comma or closing bracket
-        pos = _skip_ws(json, pos)
-        if pos >= len(json) {
-            raise ValueError("unexpected end of JSON array")
-        }
-        const ch: str = json[pos:pos + 1]
-        if ch == "]" {
-            return result
-        }
-        if ch == "," {
-            pos = pos + 1
-        } else {
-            raise ValueError("expected ',' or ']' in JSON array")
-        }
-    }
-    raise ValueError("unterminated JSON array")
-}
-
-# Value type detection
-
-# JSON type constants
-const JSON_NULL: int = 0
-const JSON_BOOL: int = 1
-const JSON_INT: int = 2
-const JSON_FLOAT: int = 3
-const JSON_STRING: int = 4
-const JSON_ARRAY: int = 5
-const JSON_OBJECT: int = 6
-
-def detect_type(json: str) -> int {
-    # Detect the JSON value type at the string start (returns a JSON_* constant).
-    pos: int = _skip_ws(json, 0)
-    if pos >= len(json) {
-        return JSON_NULL
-    }
-    const ch: str = json[pos:pos + 1]
-    if ch == "\"" {
-        return JSON_STRING
-    }
-    if ch == "[" {
-        return JSON_ARRAY
-    }
-    if ch == "{" {
-        return JSON_OBJECT
-    }
-    if ch == "t" {
-        return JSON_BOOL
-    }
-    if ch == "f" {
-        return JSON_BOOL
-    }
-    if ch == "n" {
-        return JSON_NULL
-    }
-    # Must be a number - check if it contains a decimal point or exponent
-    const num_str: str = _parse_number_str(json, pos)
-    i: int = 0
-    while i < len(num_str) {
-        const nc: str = num_str[i:i + 1]
-        if nc == "." {
-            return JSON_FLOAT
-        }
-        if nc == "e" {
-            return JSON_FLOAT
-        }
-        if nc == "E" {
-            return JSON_FLOAT
-        }
-        i = i + 1
-    }
-    return JSON_INT
-}
-
-
-# Generic decode loads -> Any (D048): byte-scanning recursive descent, zero
-# per-char allocation. Materializes a boxed tree (the convenience tier; decode[T] is box-free).
+# The boxed-tree decoder (D048): byte-scanning recursive descent, zero
+# per-char allocation. Backs the decode[Any]-family stamps (the convenience
+# tier; every concrete decode[T] is box-free and never comes through here).
 
 # ASCII byte constants for the structural tokens.
 const _B_LBRACE: int = 123       # {
@@ -1570,6 +963,10 @@ class JsonWriter {
 
 # D048 schema-directed decode into T. The compiler synthesizes each stamp's body
 # from T's fields (one Cursor read per field); this template is never lowered.
+# Box-free for every concrete T. A spelled-out Any (decode[Any],
+# decode[dict[str, Any]], decode[list[Any]]) opts into the boxed tree
+# (loadb / the _decode_*_any privates below); a concrete T never falls
+# back to a boxed stamp - unsupported shapes stay compile errors.
 def decode[T](body: bytes) -> T {
     raise ValueError("json.decode requires a concrete type: decode[T](body)")
 }
@@ -1583,8 +980,8 @@ def encode[T](value: T) -> bytes {
 
 
 # Decode JSON bytes into a boxed Any tree (D048); raises ValueError with the byte
-# offset on malformed input. Used by Request.json().
-def loads_bytes(data: bytes) -> Any {
+# offset on malformed input. Used by Request.json() and the decode[Any] stamp.
+def loadb(data: bytes) -> Any {
     const p: _JsonParser = _JsonParser(data)
     const v: Any = p.parse_value()
     p._skip_ws()
@@ -1596,18 +993,29 @@ def loads_bytes(data: bytes) -> Any {
 
 # Decode a JSON document (str) into a boxed Any tree. Python-parity name/shape.
 def loads(s: str) -> Any {
-    return loads_bytes(s.encode("utf-8"))
+    return loadb(s.encode("utf-8"))
 }
 
-# Decode a JSON object into dict[str, Any] for the T(**loads_obj(s)) path (D047).
-# Raises if the top-level value is not an object.
-def loads_obj(s: str) -> dict[str, Any] {
-    const v: Any = loads(s)
+# Shaped entries to the boxed tree, private on purpose: their public spelling
+# is decode[dict[str, Any]] / decode[list[Any]] (the compiler's stamps
+# delegate here; decode[Any] delegates to loadb directly).
+
+def _decode_obj_any(data: bytes) -> dict[str, Any] {
+    const v: Any = loadb(data)
     if isinstance(v, dict) {
         const m: dict[str, Any] = v
         return m
     }
     raise ValueError("JSON top-level value is not an object")
+}
+
+def _decode_list_any(data: bytes) -> list[Any] {
+    const v: Any = loadb(data)
+    if isinstance(v, list) {
+        const xs: list[Any] = v
+        return xs
+    }
+    raise ValueError("JSON top-level value is not an array")
 }
 
 # template[JSON] content type (D032 domain co-location). Auto-escapes each

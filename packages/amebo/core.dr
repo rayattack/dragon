@@ -6,7 +6,7 @@ import database
 import json
 from database import SQL
 from http.server import Request
-from json import Schema, ValidationResult
+from json import Schema, ValidationResult, decode
 from threading import Lock
 from time import now
 from secrets import token_urlsafe
@@ -87,7 +87,7 @@ def schema_errors(s: Schema, name: str, value: Any) -> list[str] {
 # malformed bodies and wrong-shaped bodies share one 422 path.
 def parse_obj(body: str) -> dict[str, Any] {
     try {
-        const d: dict[str, Any] = json.loads_obj(body)
+        const d: dict[str, Any] = decode[dict[str, Any]](body.encode("utf-8"))
         return d
     } except {
         empty: dict[str, Any] = {}

@@ -12,7 +12,7 @@ runs by name. Registered schemas reference each other with
 
 from unittest import TestCase, main
 import json
-from json import Schema, ValidationResult, ValidationError
+from json import Schema, ValidationResult, ValidationError, decode
 
 
 class TestEntryPoint(TestCase) {
@@ -30,7 +30,7 @@ class TestEntryPoint(TestCase) {
     def test_register_parsed_text() -> None {
         # schemas arriving as text (an HTTP body, a DB column) parse then register
         s: Schema = Schema("draft-07")
-        s.register("evt", json.loads_obj('{"type": "object", "required": ["id"]}'))
+        s.register("evt", decode[dict[str, Any]]('{"type": "object", "required": ["id"]}'.encode("utf-8")))
         self.assertEqual(s.validate("evt", json.loads('{"id": 1}')).ok, True)
         const r: ValidationResult = s.validate("evt", json.loads('{}'))
         self.assertEqual(r.errors[0].path, "$.id")

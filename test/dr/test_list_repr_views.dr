@@ -20,6 +20,7 @@ You did nothing wrong - the fix makes the compiler do two things:
 
 from unittest import TestCase, main
 import json
+from json import decode
 
 
 def anylist_returner() -> list[Any] {
@@ -100,7 +101,7 @@ class TestMatchingViews(TestCase) {
     }
 
     def test_loads_built_as_anylist() -> None {
-        const schema: dict[str, Any] = json.loads_obj('{"k": ["a", "b"]}')
+        const schema: dict[str, Any] = decode[dict[str, Any]]('{"k": ["a", "b"]}'.encode("utf-8"))
         const xs: list[Any] = schema["k"]
         out: str = ""
         for r in xs {
@@ -126,7 +127,7 @@ class TestCrossViewsRaise(TestCase) {
     def test_boxlist_as_concrete_raises() -> None {
         # json.loads builds boxed-element lists; a monomorphized view over one
         # must raise, never misread
-        const schema: dict[str, Any] = json.loads_obj('{"k": ["a", "b"]}')
+        const schema: dict[str, Any] = decode[dict[str, Any]]('{"k": ["a", "b"]}'.encode("utf-8"))
         caught: bool = False
         try {
             const names: list[str] = schema["k"]

@@ -1,6 +1,7 @@
 # engine.dr - the Wands ECA engine: template interpolation, HTTP steps, spell
 # execution, and the `wizard` background daemon that runs spells over new events.
 import json
+from json import decode
 from database import SQL
 from time import now, sleep_ms
 from http.client import HTTPConnection, HTTPResponse
@@ -124,7 +125,7 @@ def run_spell(spell: str, source: str, payload: Any, metadata: Any) -> tuple[str
     logs: list[str] = []
     status: str = "ok"
     try {
-        const obj: dict[str, Any] = json.loads_obj(source)
+        const obj: dict[str, Any] = decode[dict[str, Any]](source.encode("utf-8"))
         ctx: dict[str, Any] = {}
         ctx["event"] = payload
         ctx["metadata"] = metadata

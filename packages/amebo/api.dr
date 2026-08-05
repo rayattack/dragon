@@ -5,7 +5,7 @@ from http.client import HTTPConnection, HTTPResponse
 from hmac import new, compare_digest
 import json
 from database import SQL
-from json import Schema
+from json import Schema, decode
 from time import now, sleep_ms, monotonic
 from core import db, dblock, SCHEMAS, schema_errors, parse_obj, persist_event, backoff_seconds, default_max_retries, redaction_paths, apply_redactions, redact_add
 from authz import Principal, can, principal_for_api, grant, revoke
@@ -298,7 +298,7 @@ def h_publish(req: Request, res: Response, ctx: Context) -> None {
     # so subscribers only ever receive contractual payloads. A fresh local
     # Schema instance per publish: handler threads never share mutable state.
     const pschema: Schema = Schema("draft-07")
-    pschema.register(action, json.loads_obj(schematext))
+    pschema.register(action, decode[dict[str, Any]](schematext.encode("utf-8")))
     const perrs: list[str] = schema_errors(pschema, action, doc["payload"])
     if len(perrs) > 0 {
         res.status = 422

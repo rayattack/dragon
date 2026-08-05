@@ -6,7 +6,7 @@ from core import db, dblock, PER, get_q, get_status, get_page, like_of, get_ids,
 from shell import Col, render_toolbar, render_list, list_page, open_modal, active_pill, pill_of, and_close_modal, fragment_with_nav, respond_section, open_drawer, kv, and_close_drawer
 from auth import session_principal
 from authz import Principal, can, acl_of, grant, revoke, action_owner, AclRow, principal_for_api
-from json import Schema
+from json import Schema, decode
 import json
 
 class ActionRow {
@@ -386,7 +386,7 @@ def dash_actions_create(req: Request, res: Response, ctx: Context) -> None {
     schematext: str = ""
     if ok {
         try {
-            const parsed: dict[str, Any] = json.loads_obj(schema_s)
+            const parsed: dict[str, Any] = decode[dict[str, Any]](schema_s.encode("utf-8"))
             const norm: str = json.dumps(parsed)
             schematext = norm
         } except {
@@ -458,7 +458,7 @@ def dash_action_validate(req: Request, res: Response, ctx: Context) -> None {
         return
     }
     const s: Schema = Schema("draft-07")
-    s.register(action, json.loads_obj(schematext))
+    s.register(action, decode[dict[str, Any]](schematext.encode("utf-8")))
     const errs: list[str] = schema_errors(s, action, payload)
     res.html(render_validate_result(len(errs) == 0, errs, ""))
 }

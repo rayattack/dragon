@@ -1,5 +1,5 @@
-# const u: User = User(**json.loads_obj(body))  # before
-# const u: User = decode[User](body)  # after
+# const u: User = User(**decode[dict[str, Any]](body))  # boxed detour
+# const u: User = decode[User](body)                     # the real thing
 # no more building dict[str, Any] first e.g. moving from map[string]interface{} to serde style
 
 from unittest import TestCase, main

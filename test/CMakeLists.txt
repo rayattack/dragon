@@ -201,6 +201,18 @@ add_test(NAME dr_ffi_sync_check
     COMMAND $<TARGET_FILE:dragon> ffi sync
         ${CMAKE_CURRENT_SOURCE_DIR}/dr/test_ffi_python.dr --check)
 
+# D048 guardrail - Any is spelled, never reached. decode[dict[str, Any]] is the
+# boxed convenience tier by explicit opt-in; a concrete class V or a non-str
+# key must STAY a compile error and never fall back to the Any stamp. These
+# files must not compile, so they live outside the test_*.dr glob and the test
+# passes on the error text itself (PASS_REGULAR_EXPRESSION ignores exit code).
+foreach(_guard decode_dict_class_guard decode_dict_intkey_guard)
+    add_test(NAME dr_${_guard}
+        COMMAND $<TARGET_FILE:dragon> check ${CMAKE_CURRENT_SOURCE_DIR}/dr/${_guard}.dr)
+    set_tests_properties(dr_${_guard} PROPERTIES
+        PASS_REGULAR_EXPRESSION "never falls back to Any")
+endforeach()
+
 # D044 - generics `.py`-mode parity. Registered explicitly because the test_*.dr
 # glob above is .dr-only; this file must keep its .py extension to parse in
 # indentation mode (the whole point of the surface-parity check).

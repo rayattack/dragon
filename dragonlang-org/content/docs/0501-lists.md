@@ -76,9 +76,9 @@ than misreading. Parsed JSON arrays are box lists, so reading them as
 `list[Any]` and narrowing per element is the natural path:
 
 ```dragon
-import json
+from json import decode
 
-const doc: dict[str, Any] = json.loads_obj('{"tags": ["a", "b"]}')
+const doc: dict[str, Any] = decode[dict[str, Any]]('{"tags": ["a", "b"]}'.encode("utf-8"))
 const tags: list[Any] = doc["tags"]    # parsed arrays are box lists - ok
 for t in tags {
     const s: str = t                   # narrow each element

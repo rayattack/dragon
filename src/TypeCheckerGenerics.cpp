@@ -1476,6 +1476,30 @@ std::string sdScalarKindName(Type::Kind k) {
         default: return "";
     }
 }
+// One-call delegation body for the boxed tier: fn(body: bytes) -> retTy
+// { return <target>(body) }. The target is a private json.dr function; the
+// stamp's genericHomeModule (json) resolves the bare name at lowering.
+std::unique_ptr<FunctionDecl> sdBoxedDelegateFn(const std::string& target,
+                                                std::unique_ptr<TypeExpr> retTy,
+                                                SourceLocation loc) {
+    auto fn = std::make_unique<FunctionDecl>();
+    fn->setLocation(loc);
+    Parameter bodyParam;
+    bodyParam.name = "body";
+    bodyParam.type = sdType("bytes", loc);
+    fn->params.push_back(std::move(bodyParam));
+    fn->returnType = std::move(retTy);
+    auto call = std::make_unique<CallExpr>();
+    call->callee = sdName(target, loc);
+    call->args.push_back(sdName("body", loc));
+    call->setLocation(loc);
+    auto ret = std::make_unique<ReturnStmt>();
+    ret->value = std::move(call);
+    ret->setLocation(loc);
+    fn->body.push_back(std::move(ret));
+    return fn;
+}
+
 // Shared decoder prologue: fn(body: bytes) with `c: Cursor = Cursor(body)`.
 std::unique_ptr<FunctionDecl> sdCursorFn(SourceLocation loc) {
     auto fn = std::make_unique<FunctionDecl>();
@@ -1496,6 +1520,13 @@ std::unique_ptr<FunctionDecl> sdCursorFn(SourceLocation loc) {
 
 std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
     const std::shared_ptr<Type>& targetType, SourceLocation loc) {
+    // D048 - the boxed tier's generic door. A spelled-out Any (bare, list
+    // element, or dict[str, _] value) opts into the boxed tree; the stamps
+    // delegate to the ONE _JsonParser entry in json.dr. The gates are literal
+    // Any types only: a concrete T either synthesizes box-free below or
+    // errors - it never falls back to a boxed stamp.
+    if (targetType && targetType->kind() == Type::Kind::Any)
+        return sdBoxedDelegateFn("loadb", sdType("Any", loc), loc);
     // D052 - top-level scalar: one Cursor read is the whole document
     if (targetType) {
         const std::string sk = sdScalarKindName(targetType->kind());
@@ -1512,9 +1543,14 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
     // D052 - top-level dict[str, scalar]: one Cursor call reads the whole object.
     if (targetType && targetType->kind() == Type::Kind::Dict) {
         auto& dt = static_cast<DictType&>(*targetType);
+        const bool strKey = dt.keyType && dt.keyType->kind() == Type::Kind::Str;
+        if (strKey && dt.valueType && dt.valueType->kind() == Type::Kind::Any)
+            return sdBoxedDelegateFn("_decode_obj_any", sdInnerType("dict:Any", loc), loc);
         const std::string vk = dt.valueType ? sdScalarKindName(dt.valueType->kind()) : "";
-        if (!dt.keyType || dt.keyType->kind() != Type::Kind::Str || vk.empty()) {
-            error(loc, "json.decode[dict[K, V]]: only dict[str, <scalar>] decodes");
+        if (!strKey || vk.empty()) {
+            error(loc, "json.decode[dict[K, V]]: only dict[str, <scalar>] decodes "
+                       "box-free; spell dict[str, Any] to opt into the boxed tree "
+                       "(a class or container V never falls back to Any)");
             return nullptr;
         }
         auto fn = sdCursorFn(loc);
@@ -1528,6 +1564,8 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
     // D052 - top-level list[Class] / list[scalar]: decode a JSON array
     if (targetType && targetType->kind() == Type::Kind::List) {
         auto& lt = static_cast<ListType&>(*targetType);
+        if (lt.elementType && lt.elementType->kind() == Type::Kind::Any)
+            return sdBoxedDelegateFn("_decode_list_any", sdInnerType("list:Any", loc), loc);
         const std::string elemScalar =
             lt.elementType ? sdScalarKindName(lt.elementType->kind()) : "";
         if (!elemScalar.empty()) {
@@ -1547,7 +1585,8 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
         if (auto inst = std::dynamic_pointer_cast<InstanceType>(lt.elementType))
             if (inst->classType) elemClass = inst->classType->name;
         if (elemClass.empty() || !impl_->classDeclByName.count(elemClass)) {
-            error(loc, "json.decode[list[T]]: the element type must be a class or scalar");
+            error(loc, "json.decode[list[T]]: the element type must be a class or "
+                       "scalar (box-free), or a spelled Any for the boxed tree");
             return nullptr;
         }
         auto fn = std::make_unique<FunctionDecl>();
@@ -1603,7 +1642,8 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
             classDecl = inst->classType->decl;
         }
     if (className.empty()) {
-        error(loc, "json.decode[T]: T must be a class type (or list of a class)");
+        error(loc, "json.decode[T]: T must be a class, a scalar, a list/dict of "
+                   "those, or a spelled Any (boxed tree)");
         return nullptr;
     }
     // True identity first; the by-name registry folds every dep's classes

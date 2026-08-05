@@ -6,6 +6,7 @@ from core import db, dblock, PER, get_q, get_status, get_page, like_of, get_ids,
 from shell import Col, render_toolbar, render_list, list_page, open_modal, active_pill, pill_of, and_close_modal, fragment_with_nav, respond_section, open_drawer, kv, and_close_drawer
 from authz import Principal, principal_for_api
 import json
+from json import decode
 from resources.actions import query_action_schema
 from time import now
 
@@ -243,7 +244,7 @@ def dash_action_fields(req: Request, res: Response, ctx: Context) -> None {
     fields: list[str] = []
     if len(schematext) > 0 {
         try {
-            const obj: dict[str, Any] = json.loads_obj(schematext)
+            const obj: dict[str, Any] = decode[dict[str, Any]](schematext.encode("utf-8"))
             if "properties" in obj {
                 const props: dict[str, Any] = obj["properties"]
                 for k in props {
@@ -297,7 +298,7 @@ def dash_wands_create(req: Request, res: Response, ctx: Context) -> None {
     ok: bool = len(spell) > 0 and len(action) > 0 and len(source) > 0
     if ok {
         try {
-            const parsed: dict[str, Any] = json.loads_obj(source)
+            const parsed: dict[str, Any] = decode[dict[str, Any]](source.encode("utf-8"))
             if "chain" not in parsed {
                 ok = False
             }
@@ -341,7 +342,7 @@ def dash_wands_update(req: Request, res: Response, ctx: Context) -> None {
     ok: bool = len(spell) > 0 and len(source) > 0
     if ok {
         try {
-            const p: dict[str, Any] = json.loads_obj(source)
+            const p: dict[str, Any] = decode[dict[str, Any]](source.encode("utf-8"))
             if "chain" not in p {
                 ok = False
             }

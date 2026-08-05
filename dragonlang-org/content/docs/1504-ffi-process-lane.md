@@ -57,6 +57,13 @@ are the same public schema-directed pair you can call yourself on any class
 - see [Data Formats](/docs/1404-stdlib-data). Your `User` crosses the
 boundary at exactly the cost of encoding a `User`, nothing hidden on top.
 
+A reply whose shape you do not control still has a typed spelling: declare
+the return as `dict[str, Any]` and the reply decodes through the boxed
+convenience tier (`sidecar_call[dict[str, Any]]` / `runs[dict[str, Any]]`).
+The `Any` in the signature is the price tag - each value arrives boxed, so
+narrow with `isinstance` as usual; every concrete return type keeps the
+box-free path.
+
 A child that answers a call with an error keeps serving (you get a
 `ForeignError` with its traceback; the process lives). A child that dies is
 restarted once for the NEXT call - never mid-call, so a crash can't silently
