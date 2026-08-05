@@ -5,6 +5,17 @@ across HTTPConnection/HTTPSConnection/the bytes path, and getresponse()
 re-copied the whole buffer per received chunk. This exercises the shared
 helpers end to end through the public API: the served request bytes pin the
 request shape, and a multi-send response body pins the chunk-joining read.
+
+Also pins Transfer-Encoding: chunked decoding (ChunkedResponseTests). Before
+the fix, getresponse() split on the first CRLFCRLF and returned everything
+after it as the literal body, so the wire framing leaked into read():
+
+    resp.read()   # '15\r\n{"mfa_required":true}\r\n0\r\n\r\n'  before
+    resp.read()   # '{"mfa_required":true}'                     after
+
+The chunked server here splits a chunk across sends (reassembly), uses a
+chunk extension and a trailer field (both must be tolerated), and a second
+malformed server pins the loud ValueError on garbage framing.
 """
 
 from unittest import TestCase, main
@@ -60,5 +71,89 @@ class ClientRoundTripTests(TestCase) {
 }
 
 
-main([ClientRoundTripTests()])
+# Accept one connection, reply with a chunked-encoded body split across sends
+# so the client reassembles frames that straddle recv boundaries. The first
+# chunk-size line carries an extension; the last-chunk carries a trailer.
+def _serve_chunked(lis: TcpListener) -> str {
+    conn: TcpStream = lis.do_accept()
+    got: str = ""
+    while got.find("\r\n\r\n") < 0 {
+        const chunk: str = conn.do_recv(2048)
+        if len(chunk) == 0 { break }
+        got = got + chunk
+    }
+    conn.do_send("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n")
+    conn.do_send("15;chunk-ext=1\r\n{\"mfa_required\":true}\r\n")
+    conn.do_send("b\r\nhello ")
+    conn.do_send("world\r\n")
+    conn.do_send("0\r\nX-Trailer: yes\r\n\r\n")
+    conn.close()
+    return got
+}
+
+
+# Reply with framing whose chunk-size line is not hex: the client must raise,
+# never hand the garbage to the caller as a body.
+def _serve_bad_chunked(lis: TcpListener) -> str {
+    conn: TcpStream = lis.do_accept()
+    got: str = ""
+    while got.find("\r\n\r\n") < 0 {
+        const chunk: str = conn.do_recv(2048)
+        if len(chunk) == 0 { break }
+        got = got + chunk
+    }
+    conn.do_send("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+    conn.do_send("zz\r\nnot a chunk\r\n0\r\n\r\n")
+    conn.close()
+    return got
+}
+
+
+class ChunkedResponseTests(TestCase) {
+    def test_chunked_body_decoded() {
+        lis: TcpListener = TcpListener("127.0.0.1", 54482)
+        lis.do_bind()
+        lis.do_listen(2)
+        t: Task[str] = fire _serve_chunked(lis)
+
+        conn: HTTPConnection = HTTPConnection("127.0.0.1", 54482)
+        headers: dict[str, str] = {}
+        conn.request("GET", "/login", "", headers)
+        const resp: HTTPResponse = conn.getresponse()
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(resp.getheader("transfer-encoding"), "chunked")
+        self.assertEqual(resp.read(), "{\"mfa_required\":true}hello world")
+        conn.close()
+
+        const req: str = t.join()
+        self.assertIn("GET /login HTTP/1.1\r\n", req)
+        lis.close()
+    }
+
+    def test_malformed_chunk_size_raises() {
+        lis: TcpListener = TcpListener("127.0.0.1", 54483)
+        lis.do_bind()
+        lis.do_listen(2)
+        t: Task[str] = fire _serve_bad_chunked(lis)
+
+        conn: HTTPConnection = HTTPConnection("127.0.0.1", 54483)
+        headers: dict[str, str] = {}
+        conn.request("GET", "/", "", headers)
+        raised: bool = False
+        try {
+            const resp: HTTPResponse = conn.getresponse()
+            print(resp.status)
+        } except ValueError {
+            raised = True
+        }
+        self.assertTrue(raised)
+        conn.close()
+        const req: str = t.join()
+        self.assertIn("GET / HTTP/1.1\r\n", req)
+        lis.close()
+    }
+}
+
+
+main([ClientRoundTripTests(), ChunkedResponseTests()])
 

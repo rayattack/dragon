@@ -129,6 +129,84 @@ def _parse_head(head: str) -> _ResponseHead {
 }
 
 
+# Case-insensitive header lookup on a parsed head, for use before a response
+# object (which exposes getheader()) exists.
+def _header_value(headers: dict[str, str], name: str) -> str {
+    const target: str = name.lower()
+    for k in headers {
+        if k.lower() == target {
+            return headers[k]
+        }
+    }
+    return ""
+}
+
+
+# Parse a chunk-size line: hex digits optionally followed by ";extensions".
+# A non-hex digit is a protocol error and raises - silently reading it as 0
+# would truncate the body at the first malformed chunk.
+def _chunk_size(line: str) -> int {
+    s: str = line
+    const semi: int = s.find(";")
+    if semi >= 0 {
+        s = s[0:semi]
+    }
+    s = s.strip()
+    if len(s) == 0 {
+        raise ValueError("malformed chunked body: empty chunk-size line")
+    }
+    size: int = 0
+    i: int = 0
+    while i < len(s) {
+        const c: int = ord(s[i])
+        d: int = -1
+        if c >= 48 and c <= 57 { d = c - 48 }     # 0-9
+        if c >= 97 and c <= 102 { d = c - 87 }    # a-f
+        if c >= 65 and c <= 70 { d = c - 55 }     # A-F
+        if d < 0 {
+            raise ValueError("malformed chunked body: invalid chunk size '" + line + "'")
+        }
+        size = size * 16 + d
+        i = i + 1
+    }
+    return size
+}
+
+
+# Decode a Transfer-Encoding: chunked payload: each chunk is a hex size line,
+# CRLF, `size` bytes of data, CRLF; a zero-size chunk terminates the body and
+# any trailer fields after it are dropped. Truncated or misframed input
+# raises - the connection already read to EOF, so there is no more data
+# coming and a partial body must never be returned as if complete.
+def _dechunk(body: str) -> str {
+    parts: list[str] = []
+    pos: int = 0
+    const n: int = len(body)
+    done: bool = False
+    while not done {
+        const eol: int = body.find("\r\n", pos)
+        if eol < 0 {
+            raise ValueError("malformed chunked body: missing chunk-size terminator")
+        }
+        const size: int = _chunk_size(body[pos:eol])
+        pos = eol + 2
+        if size == 0 {
+            done = True
+        } else {
+            if pos + size + 2 > n {
+                raise ValueError("malformed chunked body: chunk data truncated")
+            }
+            parts.append(body[pos:pos + size])
+            if body[pos + size:pos + size + 2] != "\r\n" {
+                raise ValueError("malformed chunked body: missing chunk-data terminator")
+            }
+            pos = pos + size + 2
+        }
+    }
+    return "".join(parts)
+}
+
+
 # Assemble a request head (request line through the blank line). Shared by
 # the HTTP and HTTPS request paths. content_len >= 0 emits a Content-Length
 # header; pass -1 to omit it for bodyless requests. The body (str or bytes)
@@ -218,9 +296,8 @@ class HTTPConnection {
 
     # Send `method url HTTP/1.1` plus host/connection headers, optional body.
     # `headers` overrides defaults; the only headers we always set are Host
-    # (from self.host:port) and Connection: close (so getresponse() can read
-    # until EOF without parsing Content-Length / chunked yet - that's a
-    # follow-up).
+    # (from self.host:port) and Connection: close (so getresponse() reads
+    # until EOF; a Content-Length early-exit is a possible future speedup).
     def request(method: str, url: str, body: str, headers: dict[str, str]) -> None {
         self.connect()
         content_len: int = -1
@@ -235,8 +312,8 @@ class HTTPConnection {
     }
 
     # Read the full response off the socket and parse it. Connection: close
-    # means we read until EOF (zero-byte recv). When Content-Length / chunked
-    # parsing lands, this can early-exit instead.
+    # means we read until EOF (zero-byte recv), so the payload is complete;
+    # a chunked transfer-encoding is then decoded off the buffered payload.
     def getresponse() -> HTTPResponse {
         chunks: list[str] = []
         while True {
@@ -253,7 +330,11 @@ class HTTPConnection {
             raise ValueError("malformed HTTP response: no header terminator")
         }
         const h: _ResponseHead = _parse_head(raw[0:sep])
-        return HTTPResponse(self.stream, h.status, h.reason, h.headers, raw[sep + 4:len(raw)])
+        body: str = raw[sep + 4:len(raw)]
+        if "chunked" in _header_value(h.headers, "Transfer-Encoding").lower() {
+            body = _dechunk(body)
+        }
+        return HTTPResponse(self.stream, h.status, h.reason, h.headers, body)
     }
 
     def close() -> None {
@@ -365,7 +446,11 @@ class HTTPSConnection {
             raise ValueError("malformed HTTP response: no header terminator")
         }
         const h: _ResponseHead = _parse_head(raw[0:sep])
-        return HTTPSResponse(self.stream, h.status, h.reason, h.headers, raw[sep + 4:len(raw)])
+        body: str = raw[sep + 4:len(raw)]
+        if "chunked" in _header_value(h.headers, "Transfer-Encoding").lower() {
+            body = _dechunk(body)
+        }
+        return HTTPSResponse(self.stream, h.status, h.reason, h.headers, body)
     }
 
     # Binary-safe request: the head travels as ASCII text, the payload goes
