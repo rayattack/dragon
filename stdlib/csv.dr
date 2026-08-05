@@ -4,77 +4,70 @@
 # data. Supports quoted fields, escaped quotes, and configurable delimiters.
 # Pure Dragon - no C dependencies.
 
-#===----------------------------------------------------------------------===#
 # Constants
-#===----------------------------------------------------------------------===#
 
 const COMMA: str = ","
 const TAB: str = "\t"
 const QUOTE: str = "\""
 const NEWLINE: str = "\n"
 
-#===----------------------------------------------------------------------===#
+
 # Parsing
-#===----------------------------------------------------------------------===#
 
 def parse_row(line: str, delimiter: str) -> list[str] {
     # Split a single CSV line into fields, handling quoted fields.
     # Quoted fields may contain delimiters and escaped quotes ("").
     # Example: "hello","wor,ld" -> ["hello", "wor,ld"]
+    # Field text is collected as spans between structural characters and
+    # joined once per field - no per-character string building.
     fields: list[str] = []
-    current: str = ""
+    parts: list[str] = []
     in_quotes: bool = false
     i: int = 0
+    run: int = 0                # start of the current verbatim span
     const n: int = len(line)
 
     while i < n {
         const ch: str = line[i]
 
         if in_quotes {
-            # Inside a quoted field
             if ch == "\"" {
-                # Check for escaped quote ""
-                if i + 1 < n {
-                    const next: str = line[i + 1]
-                    if next == "\"" {
-                        # Escaped quote - emit single quote
-                        current = current + "\""
-                        i = i + 2
-                    } else {
-                        # Closing quote
-                        in_quotes = false
-                        i = i + 1
-                    }
+                if i > run { parts.append(line[run:i]) }
+                if i + 1 < n and line[i + 1] == "\"" {
+                    # Escaped quote "" - emit a single quote
+                    parts.append("\"")
+                    i = i + 2
                 } else {
-                    # Quote at end of line - closing quote
+                    # Closing quote (also when the quote ends the line)
                     in_quotes = false
                     i = i + 1
                 }
+                run = i
             } else {
-                current = current + ch
                 i = i + 1
             }
         } else {
-            # Outside a quoted field
             if ch == "\"" {
                 # Opening quote - only valid at start of field
+                if i > run { parts.append(line[run:i]) }
                 in_quotes = true
                 i = i + 1
+                run = i
+            } elif ch == delimiter {
+                if i > run { parts.append(line[run:i]) }
+                fields.append("".join(parts))
+                parts = []
+                i = i + 1
+                run = i
             } else {
-                if ch == delimiter {
-                    fields.append(current)
-                    current = ""
-                    i = i + 1
-                } else {
-                    current = current + ch
-                    i = i + 1
-                }
+                i = i + 1
             }
         }
     }
 
     # Append the last field
-    fields.append(current)
+    if n > run { parts.append(line[run:n]) }
+    fields.append("".join(parts))
     return fields
 }
 
@@ -114,9 +107,8 @@ def parse_row_simple(line: str, delimiter: str) -> list[str] {
     return line.split(delimiter)
 }
 
-#===----------------------------------------------------------------------===#
+
 # Writing
-#===----------------------------------------------------------------------===#
 
 def quote_field(field: str, delimiter: str) -> str {
     # Quote a field if it contains the delimiter, a double quote, or a newline.
@@ -137,42 +129,35 @@ def quote_field(field: str, delimiter: str) -> str {
 def format_row(fields: list[str], delimiter: str) -> str {
     # Format a list of fields into a single CSV line.
     # Fields are quoted only when necessary.
-    result: str = ""
+    parts: list[str] = []
     i: int = 0
     const n: int = len(fields)
 
     while i < n {
-        if i > 0 {
-            result = result + delimiter
-        }
-        result = result + quote_field(fields[i], delimiter)
+        parts.append(quote_field(fields[i], delimiter))
         i = i + 1
     }
 
-    return result
+    return delimiter.join(parts)
 }
 
 def format_rows(rows: list[list[str]], delimiter: str) -> str {
     # Format multiple rows into a complete CSV text string.
     # Rows are separated by newlines.
-    result: str = ""
+    parts: list[str] = []
     i: int = 0
     const n: int = len(rows)
 
     while i < n {
-        if i > 0 {
-            result = result + "\n"
-        }
-        result = result + format_row(rows[i], delimiter)
+        parts.append(format_row(rows[i], delimiter))
         i = i + 1
     }
 
-    return result
+    return "\n".join(parts)
 }
 
-#===----------------------------------------------------------------------===#
+
 # Convenience helpers
-#===----------------------------------------------------------------------===#
 
 def field_count(line: str, delimiter: str) -> int {
     # Return the number of fields in a CSV line.
@@ -199,3 +184,4 @@ def has_header(text: str, delimiter: str) -> bool {
     }
     return true
 }
+

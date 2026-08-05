@@ -1,0 +1,99 @@
+"""html unescape/strip_tags, configparser to_string, reprlib output shapes.
+
+These functions used to build their output one character (or one row) per
+concat; they now copy verbatim spans and join once. The assertions pin the
+exact output so the span rewrites cannot drift.
+"""
+
+from unittest import TestCase, main
+from html import escape, unescape, strip_tags
+from configparser import ConfigParser
+from reprlib import Repr, repr_str, repr_list_int, repr_list_str, repr_dict_str_int
+
+
+class HtmlTests(TestCase) {
+    def test_escape_unescape_roundtrip() {
+        const raw: str = "<a href=\"x\">Tom & 'Jerry'</a>"
+        const esc: str = escape(raw)
+        self.assertEqual(esc, "&lt;a href=&quot;x&quot;&gt;Tom &amp; &#x27;Jerry&#x27;&lt;/a&gt;")
+        self.assertEqual(unescape(esc), raw)
+    }
+
+    def test_unescape_no_entities_unchanged() {
+        self.assertEqual(unescape("plain text"), "plain text")
+        self.assertEqual(unescape(""), "")
+    }
+
+    def test_unescape_lone_ampersand() {
+        self.assertEqual(unescape("a & b"), "a & b")
+        self.assertEqual(unescape("a &amp b; c"), "a &amp b; c")
+        self.assertEqual(unescape("&lt;end"), "<end")
+        self.assertEqual(unescape("end&gt;"), "end>")
+    }
+
+    def test_unescape_numeric_entities() {
+        self.assertEqual(unescape("&#65;&#x42;"), "AB")
+    }
+
+    def test_strip_tags() {
+        self.assertEqual(strip_tags("<p>hi <b>there</b></p>"), "hi there")
+        self.assertEqual(strip_tags("no tags"), "no tags")
+        self.assertEqual(strip_tags("<br>"), "")
+        self.assertEqual(strip_tags("a<unclosed"), "a")
+    }
+}
+
+
+class ConfigParserTests(TestCase) {
+    def test_to_string_roundtrip() {
+        cp: ConfigParser = ConfigParser()
+        cp.add_section("server")
+        cp.set("server", "host", "localhost")
+        cp.set("server", "port", "8080")
+        cp.add_section("auth")
+        cp.set("auth", "user", "ada")
+        const text: str = cp.to_string()
+        self.assertEqual(text, "[server]\nhost = localhost\nport = 8080\n\n[auth]\nuser = ada\n")
+
+        back: ConfigParser = ConfigParser()
+        back.read_string(text)
+        self.assertEqual(back.get("server", "host"), "localhost")
+        self.assertEqual(back.get_int("server", "port"), 8080)
+        self.assertEqual(back.get("auth", "user"), "ada")
+    }
+}
+
+
+class ReprlibTests(TestCase) {
+    def test_repr_str_escapes() {
+        self.assertEqual(repr_str("a'b\nc"), "'a\\'b\\nc'")
+        self.assertEqual(repr_str("plain"), "'plain'")
+    }
+
+    def test_repr_str_truncates() {
+        const long: str = "abcdefghijklmnopqrstuvwxyz0123456789"
+        const r: Repr = Repr()
+        const out: str = r.repr_str(long)
+        self.assertTrue(len(out) <= r.maxstring + 2)
+        self.assertIn("...", out)
+    }
+
+    def test_repr_list_truncation() {
+        self.assertEqual(repr_list_int([1, 2, 3]), "[1, 2, 3]")
+        self.assertEqual(repr_list_int([1, 2, 3, 4, 5, 6, 7, 8]), "[1, 2, 3, 4, 5, 6, ...]")
+        self.assertEqual(repr_list_str(["a", "b"]), "['a', 'b']")
+    }
+
+    def test_repr_dict() {
+        d: dict[str, int] = {}
+        d["a"] = 1
+        d["b"] = 2
+        self.assertEqual(repr_dict_str_int(d), "{'a': 1, 'b': 2}")
+        e: dict[str, int] = {}
+        self.assertEqual(repr_dict_str_int(e), "{}")
+    }
+}
+
+
+main([HtmlTests(), ConfigParserTests(), ReprlibTests()])
+

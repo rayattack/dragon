@@ -11,11 +11,9 @@
 #
 # Pure Dragon - no C dependencies.
 
-#===----------------------------------------------------------------------===#
-# Repr - holds the size caps applied during truncation
-#===----------------------------------------------------------------------===#
 
 class Repr {
+    """Repr - holds the size caps applied during truncation"""
     def(maxlevel: int = 6,
         maxtuple: int = 6,
         maxlist: int = 6,
@@ -104,20 +102,19 @@ class Repr {
         if total == 0 {
             return "{}"
         }
-        out: str = "{"
+        parts: list[str] = []
         const cap: int = self.maxdict
-        i: int = 0
         const stop: int = min(cap, total)
+        i: int = 0
         while i < stop {
-            if i > 0 { out = out + ", " }
             const k: str = keys[i]
-            out = out + self.repr_str(k) + ": " + self.repr_int(value[k])
+            parts.append(self.repr_str(k) + ": " + self.repr_int(value[k]))
             i = i + 1
         }
         if total > cap {
-            out = out + ", " + self.fillvalue
+            parts.append(self.fillvalue)
         }
-        return out + "}"
+        return "{" + ", ".join(parts) + "}"
     }
 
     def repr_dict_str_str(value: dict[str, str]) -> str {
@@ -129,30 +126,27 @@ class Repr {
         if total == 0 {
             return "{}"
         }
-        out: str = "{"
+        parts: list[str] = []
         const cap: int = self.maxdict
-        i: int = 0
         const stop: int = min(cap, total)
+        i: int = 0
         while i < stop {
-            if i > 0 { out = out + ", " }
             const k: str = keys[i]
-            out = out + self.repr_str(k) + ": " + self.repr_str(value[k])
+            parts.append(self.repr_str(k) + ": " + self.repr_str(value[k]))
             i = i + 1
         }
         if total > cap {
-            out = out + ", " + self.fillvalue
+            parts.append(self.fillvalue)
         }
-        return out + "}"
+        return "{" + ", ".join(parts) + "}"
     }
 }
 
 
-#===----------------------------------------------------------------------===#
 # Module-level singleton + convenience proxies (match Python's `aRepr`)
-#===----------------------------------------------------------------------===#
+# ---------------------------------------
 
 aRepr: Repr = Repr()
-
 
 def repr_int(value: int) -> str { return aRepr.repr_int(value) }
 def repr_float(value: float) -> str { return aRepr.repr_float(value) }
@@ -164,31 +158,34 @@ def repr_dict_str_int(value: dict[str, int]) -> str { return aRepr.repr_dict_str
 def repr_dict_str_str(value: dict[str, str]) -> str { return aRepr.repr_dict_str_str(value) }
 
 
-#===----------------------------------------------------------------------===#
 # Internal helpers
-#===----------------------------------------------------------------------===#
+# ----------------------------------------
 
 def _escape_str(s: str) -> str {
-    out: str = ""
+    # Verbatim spans between escape-needing characters are copied whole; a
+    # string that needs no escaping is returned unchanged.
+    parts: list[str] = []
     i: int = 0
-    while i < len(s) {
+    run: int = 0
+    const n: int = len(s)
+    while i < n {
         const c: str = s[i]
-        if c == "'" {
-            out = out + "\\'"
-        } else if c == "\\" {
-            out = out + "\\\\"
-        } else if c == "\n" {
-            out = out + "\\n"
-        } else if c == "\r" {
-            out = out + "\\r"
-        } else if c == "\t" {
-            out = out + "\\t"
-        } else {
-            out = out + c
+        esc: str = ""
+        if c == "'" { esc = "\\'" }
+        elif c == "\\" { esc = "\\\\" }
+        elif c == "\n" { esc = "\\n" }
+        elif c == "\r" { esc = "\\r" }
+        elif c == "\t" { esc = "\\t" }
+        if len(esc) > 0 {
+            if i > run { parts.append(s[run:i]) }
+            parts.append(esc)
+            run = i + 1
         }
         i = i + 1
     }
-    return out
+    if run == 0 { return s }
+    if n > run { parts.append(s[run:n]) }
+    return "".join(parts)
 }
 
 
@@ -198,18 +195,17 @@ def _join_truncated_int(value: list[int], cap: int, fillvalue: str,
     if total == 0 {
         return open_s + close_s
     }
-    out: str = open_s
+    parts: list[str] = []
     const stop: int = min(cap, total)
     i: int = 0
     while i < stop {
-        if i > 0 { out = out + ", " }
-        out = out + str(value[i])
+        parts.append(str(value[i]))
         i = i + 1
     }
     if total > cap {
-        out = out + ", " + fillvalue
+        parts.append(fillvalue)
     }
-    return out + close_s
+    return open_s + ", ".join(parts) + close_s
 }
 
 
@@ -219,16 +215,16 @@ def _join_truncated_str(value: list[str], cap: int, fillvalue: str,
     if total == 0 {
         return open_s + close_s
     }
-    out: str = open_s
+    parts: list[str] = []
     const stop: int = min(cap, total)
     i: int = 0
     while i < stop {
-        if i > 0 { out = out + ", " }
-        out = out + repr_str(value[i])
+        parts.append(repr_str(value[i]))
         i = i + 1
     }
     if total > cap {
-        out = out + ", " + fillvalue
+        parts.append(fillvalue)
     }
-    return out + close_s
+    return open_s + ", ".join(parts) + close_s
 }
+

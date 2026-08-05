@@ -20,36 +20,63 @@ extern "C" def dragon_ord(s: str) -> int
 
 # String escaping
 
-def escape(s: str) -> str {
-    # Escape special characters for JSON string encoding
-    parts: list[str] = []
+const _HEX_DIGITS: str = "0123456789abcdef"
+
+# The escape implementation. Module-level `escape` and the JSON template's
+# static `escape` both delegate here so the two surfaces cannot drift.
+def _escape_body(s: str) -> str {
+    # RFC 8259 §7: `"`, `\`, and every control character U+0000-U+001F must be
+    # escaped. Byte-level scan; escape-needing bytes are all ASCII, so span
+    # boundaries always land on UTF-8 sequence starts.
+    const b: bytes = s.encode("utf-8")
+    const n: int = len(b)
+    dirty: int = -1
     i: int = 0
-    while i < len(s) {
-        const ch: str = s[i:i + 1]
-        if ch == "\\" {
-            parts.append("\\\\")
-        } else {
-            if ch == "\"" {
-                parts.append("\\\"")
-            } else {
-                if ch == "\n" {
-                    parts.append("\\n")
-                } else {
-                    if ch == "\t" {
-                        parts.append("\\t")
-                    } else {
-                        if ch == "\r" {
-                            parts.append("\\r")
-                        } else {
-                            parts.append(ch)
-                        }
-                    }
-                }
-            }
+    while i < n {
+        const c: int = dragon_bytes_get(b, i)
+        if c < 32 or c == _B_QUOTE or c == _B_BACKSLASH {
+            dirty = i
+            break
         }
         i = i + 1
     }
+    if dirty < 0 {
+        return s        # nothing to escape - the common case allocates nothing
+    }
+    parts: list[str] = []
+    run: int = 0        # start of the current clean span
+    i = dirty
+    while i < n {
+        const c: int = dragon_bytes_get(b, i)
+        if c < 32 or c == _B_QUOTE or c == _B_BACKSLASH {
+            if i > run {
+                parts.append(b[run:i].decode("utf-8"))
+            }
+            if c == _B_QUOTE { parts.append("\\\"") }
+            elif c == _B_BACKSLASH { parts.append("\\\\") }
+            elif c == 10 { parts.append("\\n") }
+            elif c == 9 { parts.append("\\t") }
+            elif c == 13 { parts.append("\\r") }
+            elif c == 8 { parts.append("\\b") }
+            elif c == 12 { parts.append("\\f") }
+            else {
+                parts.append("\\u00" + _HEX_DIGITS[c // 16] + _HEX_DIGITS[c % 16])
+            }
+            i = i + 1
+            run = i
+        } else {
+            i = i + 1
+        }
+    }
+    if n > run {
+        parts.append(b[run:n].decode("utf-8"))
+    }
     return "".join(parts)
+}
+
+def escape(s: str) -> str {
+    # Escape a string for use as a JSON string body (no surrounding quotes).
+    return _escape_body(s)
 }
 
 # Hex digit value, or -1 if not a hex digit.
@@ -210,47 +237,45 @@ class _JsonParser {
         if c == _B_LBRACE { return self._parse_object() }
         if c == _B_LBRACKET { return self._parse_array() }
         if c == _B_QUOTE { return self._parse_string() }
-        if c == 116 { return self._parse_keyword("true", 1) }     # t
-        if c == 102 { return self._parse_keyword("false", 0) }    # f
-        if c == 110 { return self._parse_keyword("null", -1) }    # n
+        if c == 116 { self._expect_kw(114, 117, 101, -1); return true }      # true
+        if c == 102 { self._expect_kw(97, 108, 115, 101); return false }     # false
+        if c == 110 { self._expect_kw(117, 108, 108, -1); return none }      # null
         if c == _B_MINUS or _is_digit_byte(c) { return self._parse_number() }
         self._fail("unexpected character")
         return none     # unreachable (_fail raised); satisfies all-paths-return
     }
 
-    # kind: 1 -> bool true, 0 -> bool false, -1 -> null.
-    def _parse_keyword(word: str, kind: int) -> Any {
-        const wlen: int = len(word)
+    # Verify and consume a true/false/null keyword without allocating. The
+    # caller already matched byte 0 via peek; b1..b3 are the rest, b4 is the
+    # 5th byte ("false") or -1 for the 4-byte keywords.
+    def _expect_kw(b1: int, b2: int, b3: int, b4: int) -> None {
+        wlen: int = 4
+        if b4 >= 0 { wlen = 5 }
         if self.pos + wlen > self.n {
             self._fail("truncated literal")
         }
-        const wb: bytes = word.encode("utf-8")
-        i: int = 0
-        while i < wlen {
-            if dragon_bytes_get(self.buf, self.pos + i) != dragon_bytes_get(wb, i) {
-                self._fail("invalid literal")
-            }
-            i = i + 1
+        if dragon_bytes_get(self.buf, self.pos + 1) != b1 or
+           dragon_bytes_get(self.buf, self.pos + 2) != b2 or
+           dragon_bytes_get(self.buf, self.pos + 3) != b3 {
+            self._fail("invalid literal")
+        }
+        if b4 >= 0 and dragon_bytes_get(self.buf, self.pos + 4) != b4 {
+            self._fail("invalid literal")
         }
         self.pos = self.pos + wlen
-        if kind == 1 {
-            return true
-        }
-        if kind == 0 {
-            return false
-        }
-        return none
     }
 
     def _parse_string() -> str {
         # self.pos is at the opening quote.
         self.pos = self.pos + 1
         const start: int = self.pos
+        saw_escape: bool = false
         while self.pos < self.n {
             const c: int = dragon_bytes_get(self.buf, self.pos)
             if c == _B_BACKSLASH {
                 # Skip the backslash + its escaped byte; \uXXXX hex digits stay in
                 # the span and unescape() decodes them.
+                saw_escape = true
                 self.pos = self.pos + 2
                 continue
             }
@@ -264,7 +289,11 @@ class _JsonParser {
         }
         const span: bytes = self.buf[start:self.pos]
         self.pos = self.pos + 1             # consume closing quote
-        return unescape(span.decode("utf-8"))
+        const text: str = span.decode("utf-8")
+        if saw_escape {
+            return unescape(text)
+        }
+        return text                         # clean string - skip the unescape walk
     }
 
     def _parse_number() -> Any {
@@ -473,12 +502,12 @@ class Cursor {
     def parse_bool() -> bool {
         self.p._skip_ws()
         const c: int = self.p._peek()
-        if c == 116 {                       # t
-            self._expect_lit("true")
+        if c == 116 {                                       # t
+            self.p._expect_kw(114, 117, 101, -1)            # true
             return true
         }
-        if c == 102 {                       # f
-            self._expect_lit("false")
+        if c == 102 {                                       # f
+            self.p._expect_kw(97, 108, 115, 101)            # false
             return false
         }
         self.p._fail("expected boolean")
@@ -606,8 +635,8 @@ class Cursor {
     # If the next value is null, consume it and return true.
     def try_null() -> bool {
         self.p._skip_ws()
-        if self.p._peek() == 110 {          # n
-            self._expect_lit("null")
+        if self.p._peek() == 110 {                          # n
+            self.p._expect_kw(117, 108, 108, -1)            # null
             return true
         }
         return false
@@ -631,9 +660,9 @@ class Cursor {
         if c == _B_QUOTE { self._skip_string_span(); return }
         if c == _B_LBRACE { self._skip_object(); return }
         if c == _B_LBRACKET { self._skip_array(); return }
-        if c == 116 { self._expect_lit("true"); return }        # t
-        if c == 102 { self._expect_lit("false"); return }       # f
-        if c == 110 { self._expect_lit("null"); return }        # n
+        if c == 116 { self.p._expect_kw(114, 117, 101, -1); return }     # true
+        if c == 102 { self.p._expect_kw(97, 108, 115, 101); return }     # false
+        if c == 110 { self.p._expect_kw(117, 108, 108, -1); return }     # null
         if c == _B_MINUS or _is_digit_byte(c) {
             self._scan_number()
             return
@@ -713,23 +742,6 @@ class Cursor {
             self.p._fail("unterminated string")
         }
         self.p.pos = self.p.pos + 1                 # closing quote
-    }
-
-    # Verify and consume a bare literal (true/false/null).
-    def _expect_lit(word: str) -> None {
-        const wlen: int = len(word)
-        if self.p.pos + wlen > self.p.n {
-            self.p._fail("truncated literal")
-        }
-        const wb: bytes = word.encode("utf-8")
-        i: int = 0
-        while i < wlen {
-            if dragon_bytes_get(self.p.buf, self.p.pos + i) != dragon_bytes_get(wb, i) {
-                self.p._fail("invalid literal")
-            }
-            i = i + 1
-        }
-        self.p.pos = self.p.pos + wlen
     }
 
     # Skip an object (pos at '{'); keys skipped as spans so quoted braces don't miscount.
@@ -1028,12 +1040,8 @@ class JSON(Template) {
 
     @staticmethod
     def escape(s: str) -> str {
-        s = s.replace("\\", "\\\\")
-        s = s.replace('"', '\\"')
-        s = s.replace("\n", "\\n")
-        s = s.replace("\r", "\\r")
-        s = s.replace("\t", "\\t")
-        return s
+        # Same escaping as module-level json.escape (one implementation).
+        return _escape_body(s)
     }
 }
 

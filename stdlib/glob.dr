@@ -62,20 +62,7 @@ def _path_join(a: str, b: str) -> str {
 
 def _split_path(pattern: str) -> list[str] {
     # Split pattern on "/" into components
-    parts: list[str] = []
-    current: str = ""
-    i: int = 0
-    while i < len(pattern) {
-        if pattern[i] == "/" {
-            parts.append(current)
-            current = ""
-        } else {
-            current = current + pattern[i]
-        }
-        i = i + 1
-    }
-    parts.append(current)
-    return parts
+    return pattern.split("/")
 }
 
 def _glob_in_dir(dirname: str, pattern: str) -> list[str] {

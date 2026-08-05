@@ -1,0 +1,51 @@
+"""string module utilities: padding, repetition, capwords.
+
+The padding helpers used to build fill one character per concat (quadratic on
+pad width); they now use built-in string repetition. These assertions pin the
+exact output shapes so the rewrite cannot drift.
+"""
+
+from unittest import TestCase, main
+from string import capwords, center, ljust, rjust, zfill, repeat
+
+
+class PaddingTests(TestCase) {
+    def test_center() {
+        self.assertEqual(center("ab", 6, "-"), "--ab--")
+        self.assertEqual(center("ab", 5, "-"), "-ab--")
+        self.assertEqual(center("abc", 3, "-"), "abc")
+        self.assertEqual(center("abc", 2, "-"), "abc")
+        self.assertEqual(center("", 3, "*"), "***")
+    }
+
+    def test_ljust_rjust() {
+        self.assertEqual(ljust("ab", 5, "."), "ab...")
+        self.assertEqual(rjust("ab", 5, "."), "...ab")
+        self.assertEqual(ljust("abcdef", 3, "."), "abcdef")
+        self.assertEqual(rjust("abcdef", 3, "."), "abcdef")
+    }
+
+    def test_zfill() {
+        self.assertEqual(zfill("42", 5), "00042")
+        self.assertEqual(zfill("42", 2), "42")
+        self.assertEqual(zfill("", 3), "000")
+    }
+
+    def test_repeat() {
+        self.assertEqual(repeat("ab", 3), "ababab")
+        self.assertEqual(repeat("x", 0), "")
+        self.assertEqual(repeat("x", -2), "")
+        self.assertEqual(repeat("", 5), "")
+    }
+
+    def test_capwords() {
+        self.assertEqual(capwords("hello world"), "Hello World")
+        self.assertEqual(capwords("one"), "One")
+        self.assertEqual(capwords(""), "")
+        self.assertEqual(capwords("a  b"), "A B")
+    }
+}
+
+
+main([PaddingTests()])
+

@@ -5,9 +5,8 @@
 # = or : delimiters, comments (# and ;), and whitespace stripping.
 # Data is stored as parallel lists for section names, keys, and values.
 
-#===----------------------------------------------------------------------===#
+
 # Internal helpers
-#===----------------------------------------------------------------------===#
 
 def _strip(s: str) -> str {
     # Strip leading and trailing spaces, tabs, and carriage returns.
@@ -56,9 +55,8 @@ def _extract_section_name(line: str) -> str {
     return _strip(line[1:len(line) - 1])
 }
 
-#===----------------------------------------------------------------------===#
+
 # ConfigParser class
-#===----------------------------------------------------------------------===#
 
 class ConfigParser {
     def() {
@@ -266,22 +264,23 @@ class ConfigParser {
 
     def to_string() -> str {
         # Serialize the entire configuration back to INI format.
-        result: str = ""
+        parts: list[str] = []
         i: int = 0
         while i < len(self.section_names) {
             if i > 0 {
-                result = result + "\n"
+                parts.append("\n")
             }
-            result = result + "[" + self.section_names[i] + "]\n"
+            parts.append("[" + self.section_names[i] + "]\n")
             const keys: list[str] = self.section_keys[i]
             const vals: list[str] = self.section_values[i]
             j: int = 0
             while j < len(keys) {
-                result = result + keys[j] + " = " + vals[j] + "\n"
+                parts.append(keys[j] + " = " + vals[j] + "\n")
                 j = j + 1
             }
             i = i + 1
         }
-        return result
+        return "".join(parts)
     }
 }
+

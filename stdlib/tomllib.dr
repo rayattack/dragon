@@ -9,9 +9,8 @@
 extern "C" def dragon_str_to_int(s: str) -> int
 extern "C" def dragon_str_to_float(s: str) -> float
 
-#===----------------------------------------------------------------------===#
+
 # Internal helpers
-#===----------------------------------------------------------------------===#
 
 def _strip(s: str) -> str {
     # Strip leading and trailing spaces, tabs, and carriage returns.
@@ -46,46 +45,31 @@ def _unquote(s: str) -> str {
     if s[0:1] == "\"" {
         if s[len(s) - 1:len(s)] == "\"" {
             const inner: str = s[1:len(s) - 1]
-            # Process escape sequences
-            result: str = ""
+            # Process escape sequences: verbatim spans between backslashes are
+            # copied whole; an unknown escape keeps its backslash.
+            parts: list[str] = []
             i: int = 0
-            while i < len(inner) {
-                const ch: str = inner[i:i + 1]
-                if ch == "\\" {
-                    if i + 1 < len(inner) {
-                        const next: str = inner[i + 1:i + 2]
-                        if next == "n" {
-                            result = result + "\n"
-                            i = i + 2
-                        } else {
-                            if next == "t" {
-                                result = result + "\t"
-                                i = i + 2
-                            } else {
-                                if next == "\\" {
-                                    result = result + "\\"
-                                    i = i + 2
-                                } else {
-                                    if next == "\"" {
-                                        result = result + "\""
-                                        i = i + 2
-                                    } else {
-                                        result = result + ch
-                                        i = i + 1
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        result = result + ch
-                        i = i + 1
-                    }
-                } else {
-                    result = result + ch
+            run: int = 0
+            const n: int = len(inner)
+            while i < n {
+                if inner[i:i + 1] != "\\" or i + 1 >= n {
+                    i = i + 1
+                    continue
+                }
+                if i > run { parts.append(inner[run:i]) }
+                const next: str = inner[i + 1:i + 2]
+                if next == "n" { parts.append("\n"); i = i + 2 }
+                elif next == "t" { parts.append("\t"); i = i + 2 }
+                elif next == "\\" { parts.append("\\"); i = i + 2 }
+                elif next == "\"" { parts.append("\""); i = i + 2 }
+                else {
+                    parts.append("\\")      # unknown escape - keep verbatim
                     i = i + 1
                 }
+                run = i
             }
-            return result
+            if n > run { parts.append(inner[run:n]) }
+            return "".join(parts)
         }
     }
     # Also handle single-quoted (literal) strings
@@ -116,9 +100,8 @@ def _parse_value(raw: str) -> str {
     return val
 }
 
-#===----------------------------------------------------------------------===#
+
 # TomlDoc class - holds parsed TOML data as flat dotted key-value pairs
-#===----------------------------------------------------------------------===#
 
 class TomlDoc {
     def() {
@@ -161,34 +144,14 @@ class TomlDoc {
 
     def get_int(key: str) -> int {
         # Return the integer value for the given key.
-        const val: str = self.get(key)
-        # TOML allows underscores in integers (e.g. 1_000) - strip them
-        cleaned: str = ""
-        i: int = 0
-        while i < len(val) {
-            const ch: str = val[i:i + 1]
-            if ch != "_" {
-                cleaned = cleaned + ch
-            }
-            i = i + 1
-        }
-        return dragon_str_to_int(cleaned)
+        # TOML allows underscores in integers (e.g. 1_000) - strip them.
+        return dragon_str_to_int(self.get(key).replace("_", ""))
     }
 
     def get_float(key: str) -> float {
         # Return the float value for the given key.
-        const val: str = self.get(key)
-        # TOML allows underscores in floats - strip them
-        cleaned: str = ""
-        i: int = 0
-        while i < len(val) {
-            const ch: str = val[i:i + 1]
-            if ch != "_" {
-                cleaned = cleaned + ch
-            }
-            i = i + 1
-        }
-        return dragon_str_to_float(cleaned)
+        # TOML allows underscores in floats - strip them.
+        return dragon_str_to_float(self.get(key).replace("_", ""))
     }
 
     def get_bool(key: str) -> bool {
@@ -215,9 +178,8 @@ class TomlDoc {
     }
 }
 
-#===----------------------------------------------------------------------===#
+
 # Parser
-#===----------------------------------------------------------------------===#
 
 def loads(text: str) -> TomlDoc {
     # Parse a TOML string and return a TomlDoc.
@@ -281,3 +243,4 @@ def loads(text: str) -> TomlDoc {
 
     return doc
 }
+

@@ -3,9 +3,7 @@
 # Provides standard string constants matching Python's string module.
 # Pure Dragon - no C dependencies.
 
-#===----------------------------------------------------------------------===#
 # String constants
-#===----------------------------------------------------------------------===#
 
 const ascii_lowercase: str = "abcdefghijklmnopqrstuvwxyz"
 const ascii_uppercase: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -17,24 +15,23 @@ const punctuation: str = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
 const whitespace: str = " \t\n\r"
 const printable: str = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~ \t\n\r"
 
-#===----------------------------------------------------------------------===#
+
 # String utility functions
-#===----------------------------------------------------------------------===#
 
 def capwords(s: str) -> str {
     # Capitalize each word in the string (split on spaces)
     const words: list[str] = s.split(" ")
-    result: str = ""
+    parts: list[str] = []
     i: int = 0
     while i < len(words) {
         const w: str = words[i]
         if len(w) > 0 {
-            if i > 0 { result = result + " " }
-            result = result + w.capitalize()
+            if i > 0 { parts.append(" ") }
+            parts.append(w.capitalize())
         }
         i = i + 1
     }
-    return result
+    return "".join(parts)
 }
 
 def center(s: str, width: int, fillchar: str) -> str {
@@ -42,44 +39,19 @@ def center(s: str, width: int, fillchar: str) -> str {
     if slen >= width { return s }
     const total_pad: int = width - slen
     const left_pad: int = total_pad // 2
-    const right_pad: int = total_pad - left_pad
-    result: str = ""
-    i: int = 0
-    while i < left_pad {
-        result = result + fillchar
-        i = i + 1
-    }
-    result = result + s
-    i = 0
-    while i < right_pad {
-        result = result + fillchar
-        i = i + 1
-    }
-    return result
+    return fillchar * left_pad + s + fillchar * (total_pad - left_pad)
 }
 
 def ljust(s: str, width: int, fillchar: str) -> str {
     const slen: int = len(s)
     if slen >= width { return s }
-    result: str = s
-    i: int = slen
-    while i < width {
-        result = result + fillchar
-        i = i + 1
-    }
-    return result
+    return s + fillchar * (width - slen)
 }
 
 def rjust(s: str, width: int, fillchar: str) -> str {
     const slen: int = len(s)
     if slen >= width { return s }
-    result: str = ""
-    i: int = slen
-    while i < width {
-        result = result + fillchar
-        i = i + 1
-    }
-    return result + s
+    return fillchar * (width - slen) + s
 }
 
 def zfill(s: str, width: int) -> str {
@@ -87,13 +59,8 @@ def zfill(s: str, width: int) -> str {
 }
 
 def repeat(s: str, n: int) -> str {
-    result: str = ""
-    i: int = 0
-    while i < n {
-        result = result + s
-        i = i + 1
-    }
-    return result
+    if n <= 0 { return "" }
+    return s * n
 }
 
 def is_numeric(s: str) -> bool {
@@ -111,3 +78,4 @@ def is_alnum(s: str) -> bool {
 def is_space(s: str) -> bool {
     return s.isspace()
 }
+

@@ -34,34 +34,33 @@ def escape(s: str) -> str {
 #===----------------------------------------------------------------------===#
 
 def unescape(s: str) -> str {
-    # Replace HTML entities with their character equivalents.
-    result: str = ""
+    # Replace HTML entities with their character equivalents. Text between
+    # entities is copied as whole spans; a string with no entities is
+    # returned unchanged.
+    parts: list[str] = []
     i: int = 0
+    run: int = 0
     const n: int = len(s)
 
     while i < n {
-        const ch: str = s[i]
-
-        if ch == "&" {
-            const rest: str = s[i:]
-            const semi_pos: int = rest.find(";")
-
-            if semi_pos > 0 {
-                const entity: str = rest[:semi_pos + 1]
-                const decoded: str = decode_entity(entity)
-                result = result + decoded
-                i = i + semi_pos + 1
-            } else {
-                result = result + ch
-                i = i + 1
-            }
-        } else {
-            result = result + ch
+        if s[i] != "&" {
             i = i + 1
+            continue
         }
+        const semi_pos: int = s.find(";", i)
+        if semi_pos < 0 {
+            i = i + 1
+            continue
+        }
+        if i > run { parts.append(s[run:i]) }
+        parts.append(decode_entity(s[i:semi_pos + 1]))
+        i = semi_pos + 1
+        run = i
     }
 
-    return result
+    if run == 0 { return s }        # no entity decoded
+    if n > run { parts.append(s[run:n]) }
+    return "".join(parts)
 }
 
 #===----------------------------------------------------------------------===#
@@ -69,9 +68,12 @@ def unescape(s: str) -> str {
 #===----------------------------------------------------------------------===#
 
 def strip_tags(s: str) -> str {
-    result: str = ""
+    # Text outside tags is copied as whole spans between the angle brackets;
+    # an unterminated trailing tag is dropped (as before).
+    parts: list[str] = []
     in_tag: bool = false
     i: int = 0
+    run: int = 0
     const n: int = len(s)
 
     while i < n {
@@ -79,18 +81,17 @@ def strip_tags(s: str) -> str {
         if in_tag {
             if ch == ">" {
                 in_tag = false
+                run = i + 1
             }
-        } else {
-            if ch == "<" {
-                in_tag = true
-            } else {
-                result = result + ch
-            }
+        } elif ch == "<" {
+            if i > run { parts.append(s[run:i]) }
+            in_tag = true
         }
         i = i + 1
     }
 
-    return result
+    if not in_tag and n > run { parts.append(s[run:n]) }
+    return "".join(parts)
 }
 
 #===----------------------------------------------------------------------===#

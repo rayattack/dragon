@@ -36,15 +36,7 @@ def _rjust(s: str, width: int) -> str {
     # Right-justify s in a field of given width, padding with spaces.
     const slen: int = len(s)
     if slen >= width { return s }
-    result: str = ""
-    i: int = 0
-    const pad: int = width - slen
-    while i < pad {
-        result = result + " "
-        i = i + 1
-    }
-    result = result + s
-    return result
+    return " " * (width - slen) + s
 }
 
 def _center(s: str, width: int) -> str {
@@ -53,20 +45,7 @@ def _center(s: str, width: int) -> str {
     if slen >= width { return s }
     const total_pad: int = width - slen
     const left_pad: int = total_pad // 2
-    const right_pad: int = total_pad - left_pad
-    result: str = ""
-    i: int = 0
-    while i < left_pad {
-        result = result + " "
-        i = i + 1
-    }
-    result = result + s
-    i = 0
-    while i < right_pad {
-        result = result + " "
-        i = i + 1
-    }
-    return result
+    return " " * left_pad + s + " " * (total_pad - left_pad)
 }
 
 #===----------------------------------------------------------------------===#
@@ -131,9 +110,9 @@ def month_abbr(m: int) -> str {
     return ""
 }
 
-#===----------------------------------------------------------------------===#
+
 # Core calendar functions
-#===----------------------------------------------------------------------===#
+
 
 def isleap(year: int) -> bool {
     # Return True if year is a leap year.
@@ -218,9 +197,8 @@ def monthcalendar(year: int, month: int) -> list[list[int]] {
     return weeks
 }
 
-#===----------------------------------------------------------------------===#
+
 # Formatting
-#===----------------------------------------------------------------------===#
 
 def formatmonth(year: int, month: int) -> str {
     # Return a multi-line string with a formatted month calendar.
@@ -262,3 +240,4 @@ def formatyear(year: int) -> str {
     }
     return result
 }
+

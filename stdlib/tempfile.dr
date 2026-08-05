@@ -3,9 +3,7 @@
 # Provides functions for creating temporary files and directories.
 # Wraps POSIX/libc via extern "C".
 
-#===----------------------------------------------------------------------===#
 # POSIX / libc extern declarations
-#===----------------------------------------------------------------------===#
 
 extern "C" def getenv(name: str) -> str
 extern "C" def access(path: str, mode: intc) -> intc
@@ -23,32 +21,30 @@ extern "C" def dragon_urandom(n: int) -> bytes
 # racy _exists()-then-fopen("w") pattern (TOCTOU + symlink-follow + 0644).
 extern "C" def dragon_create_excl(path: str) -> intc
 
-#===----------------------------------------------------------------------===#
+
 # Internal helpers
-#===----------------------------------------------------------------------===#
 
 def _random_name(length: int) -> str {
     # Generate a random alphanumeric string from the OS CSPRNG.
     const chars: str = "abcdefghijklmnopqrstuvwxyz0123456789"
     const nchars: int = 36
     const raw: bytes = dragon_urandom(length)
-    result: str = ""
+    parts: list[str] = []
     i: int = 0
     while i < length {
         const idx: int = raw[i] % nchars
-        result = result + chars[idx]
+        parts.append(chars[idx])
         i = i + 1
     }
-    return result
+    return "".join(parts)
 }
 
 def _exists(path: str) -> bool {
     return access(path, 0) == 0
 }
 
-#===----------------------------------------------------------------------===#
+
 # Public API
-#===----------------------------------------------------------------------===#
 
 def gettempdir() -> str {
     # Return the default temporary directory.
@@ -120,3 +116,4 @@ def mkdtemp(prefix: str, suffix: str) -> str {
     mkdir(fallback, 0o700)
     return fallback
 }
+
