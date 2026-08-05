@@ -25,6 +25,10 @@
 // DEBUG (temporary): set DRAGON_UI_DEBUG=1 to trace load + bridge events to stderr.
 #define DRAGON_DBG(...) do { if (getenv("DRAGON_UI_DEBUG")) { fprintf(stderr, "[shell] " __VA_ARGS__); fflush(stderr); } } while (0)
 
+// DRAGON_UI_INSPECT=1 enables the Web Inspector on every window of any Dragon
+// app without recompiling (right-click -> Inspect Element). Per-window opt-in
+// from code goes through dragon_webview_enable_inspector / open_inspector.
+
 // Dragon runtime: wrap a plain C string into a refcounted Dragon string. A Dragon
 // `str` is a `const char*` pointing at the managed string's data (the refcount
 // header sits behind it), so the value returned here can be handed straight to a
@@ -226,6 +230,25 @@ void dragon_webview_init(void) {
     }
 }
 
+// Enable the Web Inspector (WebKit "developer extras") for one window: the
+// context menu gains "Inspect Element". Safe to call repeatedly.
+void dragon_webview_enable_inspector(void* handle) {
+    DragonWebView* wv = (DragonWebView*) handle;
+    if (!wv || !wv->webview) return;
+    WebKitSettings* st = webkit_web_view_get_settings(wv->webview);
+    webkit_settings_set_enable_developer_extras(st, TRUE);
+}
+
+// Open the inspector pane programmatically (enables it first - WebKit ignores
+// the show without developer extras).
+void dragon_webview_open_inspector(void* handle) {
+    DragonWebView* wv = (DragonWebView*) handle;
+    if (!wv || !wv->webview) return;
+    dragon_webview_enable_inspector(handle);
+    WebKitWebInspector* insp = webkit_web_view_get_inspector(wv->webview);
+    if (insp) webkit_web_inspector_show(insp);
+}
+
 void* dragon_webview_window_new(const char* title, int width, int height) {
     DragonWebView* wv = g_new0(DragonWebView, 1);
     wv->window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
@@ -246,6 +269,9 @@ void* dragon_webview_window_new(const char* title, int width, int height) {
     webkit_user_content_manager_add_script(ucm, shim);
 
     wv->webview = WEBKIT_WEB_VIEW(webkit_web_view_new_with_user_content_manager(ucm));
+    // DRAGON_UI_INSPECT in the environment turns the inspector on for every
+    // window - ad-hoc debugging of any app, no recompile.
+    if (getenv("DRAGON_UI_INSPECT")) dragon_webview_enable_inspector(wv);
     gtk_container_add(GTK_CONTAINER(wv->window), GTK_WIDGET(wv->webview));
     g_signal_connect(wv->window, "destroy", G_CALLBACK(dragon__on_window_destroy), wv);
     g_signal_connect(wv->webview, "load-changed", G_CALLBACK(dragon__on_load_changed), NULL);
@@ -331,3 +357,4 @@ void dragon_webview_run_timeout(int ms) {
 }
 
 }  // extern "C"
+

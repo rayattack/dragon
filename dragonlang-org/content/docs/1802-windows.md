@@ -106,3 +106,30 @@ def dismiss_inspector() -> None {
 
 A closed window stays closed: calling `show()`, `close()`, or assigning
 `body` on it is a no-op. To bring one back, construct a new `Window`.
+
+## Debugging with the Web Inspector
+
+Every window can host WebKit's Web Inspector - the same DOM, console, and
+network panel a browser's devtools give you, pointed at your window's
+document. It is off by default. From code, opt a window in at construction
+or later:
+
+```dragon
+win: Window = Window("Hello", 360, 200, inspect = true)   # on from birth
+
+win.enable_inspector()   # right-click in the window gains "Inspect Element"
+win.open_inspector()     # open the inspector pane now (enables it first)
+```
+
+For a build you cannot or do not want to touch, set `DRAGON_UI_INSPECT=1`
+in the environment - every window of the app comes up inspectable, no
+recompile:
+
+```bash
+DRAGON_UI_INSPECT=1 ./hello
+```
+
+The console tab shows anything your view scripts log, plus errors from the
+`window.dr` bridge shim, which makes it the quickest way to see why a
+binding or an [`rpc` call](/docs/1807-the-bridge) is not doing what you
+expect.

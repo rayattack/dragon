@@ -13,6 +13,8 @@ extern "C" def dragon_webview_window_new(title: str, width: intc, height: intc) 
 extern "C" def dragon_webview_load_html(handle: ptr, html: str)
 extern "C" def dragon_webview_show(handle: ptr)
 extern "C" def dragon_webview_close(handle: ptr)
+extern "C" def dragon_webview_enable_inspector(handle: ptr)
+extern "C" def dragon_webview_open_inspector(handle: ptr)
 
 
 class Window {
@@ -33,12 +35,15 @@ class Window {
     handle: ptr
     _body: HTML
 
-    def(title: str, width: int, height: int) {
+    def(title: str, width: int, height: int, inspect: bool = false) {
         # gtk_init is idempotent; calling it per-window is safe and keeps the
         # Window self-contained until a dedicated App.init() phase exists.
         dragon_webview_init()
         self.handle = dragon_webview_window_new(title, width, height)
         self._body = HTML("")
+        if inspect {
+            dragon_webview_enable_inspector(self.handle)
+        }
     }
 
     @property
@@ -59,6 +64,20 @@ class Window {
         dragon_webview_show(self.handle)
     }
 
+    def enable_inspector() -> None {
+        """Enable the Web Inspector for this window: the right-click menu gains
+        "Inspect Element". Same switch as constructing with `inspect=true`.
+        Setting `DRAGON_UI_INSPECT=1` in the environment enables it for every
+        window of any app without touching code."""
+        dragon_webview_enable_inspector(self.handle)
+    }
+
+    def open_inspector() -> None {
+        """Open the Web Inspector pane for this window programmatically
+        (enables the inspector first if it is not already on)."""
+        dragon_webview_open_inspector(self.handle)
+    }
+
     def close() -> None {
         """Close the window - the same path as the user clicking its close
         button. When the last open window closes, `ui.App.run()` returns.
@@ -66,3 +85,4 @@ class Window {
         dragon_webview_close(self.handle)
     }
 }
+
