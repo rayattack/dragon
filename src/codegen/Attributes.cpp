@@ -1146,6 +1146,18 @@ void CodeGen::visit(SubscriptExpr& node) {
         if (tupleIdx->getType() == impl_->i1Type) {
             tupleIdx = impl_->builder->CreateZExt(tupleIdx, impl_->i64Type);
         }
+        // tuple[Any, ...] element read: the stored value is {tag, payload}
+        // (dragon_tuple_set_tagged), so return the box (BORROW - the tuple
+        // keeps the +1) and downstream isinstance / print / unbox-on-assign
+        // see the runtime tag. The raw i64 path below would rebox the payload
+        // as TAG_INT, so a heap payload read back as a wrong-tagged box.
+        if (node.type && (node.type->kind() == Type::Kind::Any ||
+                          node.type->kind() == Type::Kind::Union)) {
+            impl_->lastValue = impl_->builder->CreateCall(
+                impl_->runtimeFuncs["dragon_tuple_box_get"],
+                {tuplePtr, tupleIdx}, "tupleget.box");
+            return;
+        }
         llvm::Value* raw = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_tuple_get"], {tuplePtr, tupleIdx}, "tupleget");
         // D030: convert the i64 storage value back to its native LLVM type so

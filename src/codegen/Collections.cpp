@@ -141,12 +141,47 @@ void CodeGen::visit(TupleExpr& node) {
     for (int64_t i = 0; i < count; i++) {
         node.elements[i]->accept(*this);
         llvm::Value* val = impl_->lastValue;
+        // Any / Union element: it is a {tag, payload} box. dragon_tuple_set
+        // wants an i64 slot, so we extract payload + runtime tag from the box
+        // and route through the tagged setter - passing the whole %dragon.box
+        // where an i64 is expected is an LLVM verification failure (e.g.
+        // `t: tuple[Any, int] = (anyVal, 5)`). Mirrors the DictExpr box branch
+        // above. RC: a heap payload boxed from a BORROWED source needs the
+        // tuple to own its own ref (tag-dispatched union incref, a no-op on
+        // int/float/bool); an owned box temp already carries the +1 the tuple
+        // adopts.
+        if (val->getType() == impl_->boxType) {
+            llvm::Value* btag = impl_->boxTag(val, "tv.tag");
+            llvm::Value* bpayload = impl_->boxPayloadI64(val, "tv.payload");
+            if (impl_->options.gcMode == GCMode::RC &&
+                Impl::isBorrowedHeapExpr(node.elements[i].get())) {
+                impl_->emitUnionIncref(bpayload, btag);
+            }
+            llvm::Value* bidx = llvm::ConstantInt::get(impl_->i64Type, i);
+            impl_->builder->CreateCall(
+                impl_->runtimeFuncs["dragon_tuple_set_tagged"],
+                {tuple, bidx, bpayload, btag});
+            continue;
+        }
         bool wasPtr = val->getType()->isPointerTy();
         // Phase 5: determine per-element tag early so we can promote string literals
         int64_t elemTag = 0;
         if (tupleType && i < (int64_t)tupleType->elementTypes.size() &&
             tupleType->elementTypes[i]) {
-            elemTag = Impl::typeKindToElemTag(tupleType->elementTypes[i]->kind());
+            Type::Kind slotKind = tupleType->elementTypes[i]->kind();
+            if (slotKind == Type::Kind::Any || slotKind == Type::Kind::Union) {
+                // Any/Union slot holding a CONCRETE value (an element that is
+                // itself a box took the branch above): elements are stored
+                // per-slot tagged, so the tag comes from the element's own
+                // static type. typeKindToElemTag(Any) is TAG_INT, which would
+                // store a heap pointer untagged - a leak at destroy and a
+                // wrong-tagged box on read-back.
+                if (node.elements[i]->type)
+                    elemTag =
+                        Impl::typeKindToElemTag(node.elements[i]->type->kind());
+            } else {
+                elemTag = Impl::typeKindToElemTag(slotKind);
+            }
         }
         // Promote string literals to heap DragonStrings when stored with TAG_STR
         if (elemTag == 1 && wasPtr) { // TAG_STR

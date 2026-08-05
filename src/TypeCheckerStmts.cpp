@@ -143,6 +143,37 @@ bool TypeChecker::tryExpectedTypeLiteral(Expr* value, const std::shared_ptr<Type
         lit->type = expected;
         return true;
     }
+    // tuple literal -> tuple[T1, ..., Tn]: arity must match, each element <: Ti.
+    // Sound for the same reason as the list/dict cases: a fresh literal has no
+    // aliases, and tuple elements are stored per-slot tagged (elem_tags), so an
+    // Any slot adopts the element's runtime tag - there is no whole-container
+    // representation split to guard.
+    if (expected->kind() == Type::Kind::Tuple) {
+        auto* lit = dynamic_cast<TupleExpr*>(value);
+        if (!lit) return false;
+        const auto& tt = static_cast<const TupleType&>(*expected);
+        if (lit->elements.size() != tt.elementTypes.size()) return false;
+        for (size_t i = 0; i < lit->elements.size(); ++i) {
+            const auto& want = tt.elementTypes[i];
+            const auto& el = lit->elements[i];
+            if (!want || !el || !el->type) return false;
+            if (!el->type->isSubtypeOf(*want)) return false;
+        }
+        // Any propagation per SLOT: a nested container literal in an Any slot
+        // is born boxed; a concrete-container slot recurses at its exact type.
+        for (size_t i = 0; i < lit->elements.size(); ++i) {
+            const auto& want = tt.elementTypes[i];
+            if (want->kind() == Type::Kind::Any) {
+                boxNestedContainerLiteralForAny(lit->elements[i].get());
+            } else if (want->kind() == Type::Kind::List ||
+                       want->kind() == Type::Kind::Dict ||
+                       want->kind() == Type::Kind::Tuple) {
+                tryExpectedTypeLiteral(lit->elements[i].get(), want);
+            }
+        }
+        lit->type = expected;
+        return true;
+    }
     return false;
 }
 

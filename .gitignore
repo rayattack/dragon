@@ -58,6 +58,7 @@ CPackSourceConfig.cmake
 .tiza/
 
 # --- Editor / OS / tooling ---
+.playwright-mcp/
 .ignore/
 .vscode/
 .idea/
@@ -65,3 +66,5 @@ CPackSourceConfig.cmake
 *~
 .DS_Store
 Thumbs.db
+issues/
+

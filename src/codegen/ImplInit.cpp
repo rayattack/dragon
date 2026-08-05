@@ -617,6 +617,10 @@ void CodeGen::Impl::declareRuntimeFunctions() {
     // i64 dragon_tuple_get(ptr tuple, i64 index)
     getOrDeclareRuntime("dragon_tuple_get",
         llvm::FunctionType::get(i64Type, {i8PtrType, i64Type}, false));
+    // %dragon.box dragon_tuple_box_get(ptr tuple, i64 index) - Any/Union
+    // element read; BORROW contract like dragon_list_box_get.
+    getOrDeclareRuntime("dragon_tuple_box_get",
+        llvm::FunctionType::get(boxType, {i8PtrType, i64Type}, false));
     // void dragon_tuple_set(ptr tuple, i64 index, i64 value)
     getOrDeclareRuntime("dragon_tuple_set",
         llvm::FunctionType::get(voidType, {i8PtrType, i64Type, i64Type}, false));

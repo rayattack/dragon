@@ -512,6 +512,22 @@ void dragon_tuple_set(DragonTuple* t, int64_t index, int64_t val) {
     }
 }
 
+/// Read element `index` as a 16-byte {tag, payload} box (a tuple[Any, ...]
+/// element read). BORROW contract - the payload pointer is non-owning; codegen
+/// increfs at the store-into-longer-lived-slot site, matching
+/// dragon_list_box_get / dragon_dict_get_box.
+DragonBox dragon_tuple_box_get(DragonTuple* t, int64_t index) {
+    if (index < 0) index += t->length;
+    if (index < 0 || index >= t->length) {
+        fprintf(stderr, "IndexError: tuple index out of range\n");
+        exit(1);
+    }
+    DragonBox v;
+    v.tag = t->elem_tags ? (int64_t)t->elem_tags[index] : (int64_t)TAG_INT;
+    v.payload = t->data[index];
+    return v;
+}
+
 int64_t dragon_tuple_len(DragonTuple* t) {
     return t ? t->length : 0;
 }

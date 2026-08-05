@@ -874,6 +874,7 @@ bool CodeGen::Impl::isOwnedBoxResult(llvm::Value* v) {
             "dragon_dict_get_box",
             "dragon_dict_int_get_box",
             "dragon_list_box_get",
+            "dragon_tuple_box_get",
         };
         return kBorrowedBoxReturners.count(fn->getName().str()) == 0;
     }
