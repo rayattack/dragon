@@ -71,7 +71,6 @@ def _dos_pack(dt: tuple[int, int, int, int, int, int]) -> tuple[int, int] {
 }
 
 
-# Unpack the DOS (dosdate, dostime) fields back into a 6-tuple.
 def _dos_unpack(dosdate: int, dostime: int) -> tuple[int, int, int, int, int, int] {
     year: int = ((dosdate >> 9) & 0x7F) + 1980
     month: int = (dosdate >> 5) & 0x0F
@@ -345,7 +344,6 @@ class ZipFile {
             if len(comp) < file_size {
                 stored = comp
             } else {
-                # Compression didn't help - store verbatim (CPython parity).
                 method = ZIP_STORED
                 stored = data
             }
@@ -361,7 +359,6 @@ class ZipFile {
         info.CRC = crc
         info.header_offset = self._offset
 
-        # Emit the local file header followed by the stored payload.
         header: bytes = self._build_local_header(info, name)
         self._local += header
         self._local += stored

@@ -28,7 +28,6 @@ def _hex_byte(v: int) -> str {
 }
 
 def _hex_range(b: bytes, start: int, end: int) -> str {
-    # Hex-encode b[start:end].
     result: str = ""
     i: int = start
     while i < end {
@@ -43,7 +42,6 @@ def _hex_range(b: bytes, start: int, end: int) -> str {
 #===----------------------------------------------------------------------===#
 
 def uuid4() -> str {
-    # Generate a random UUID v4 string.
     # Format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
     #
     # RFC 4122 s4.4: take 16 random bytes, then overwrite the version nibble
@@ -68,7 +66,6 @@ def uuid4() -> str {
 #===----------------------------------------------------------------------===#
 
 def uuid_hex(uuid: str) -> str {
-    # Strip dashes from a UUID string, returning 32 hex characters.
     result: str = ""
     i: int = 0
     while i < len(uuid) {
@@ -82,7 +79,6 @@ def uuid_hex(uuid: str) -> str {
 }
 
 def uuid_version(uuid: str) -> int {
-    # Extract the version digit from a UUID string.
     # The version char is at position 14 (the char after the second dash).
     const ch: str = uuid[14:15]
     if ch == "0" { return 0 }
@@ -95,7 +91,6 @@ def uuid_version(uuid: str) -> int {
 }
 
 def _is_hex_char(ch: str) -> bool {
-    # Return true if ch is a valid hex digit.
     if ch == "0" { return true }
     if ch == "1" { return true }
     if ch == "2" { return true }
@@ -125,7 +120,6 @@ def uuid_is_valid(uuid: str) -> bool {
     # Validate UUID format: 8-4-4-4-12, all hex digits, version 1-5.
     if len(uuid) != 36 { return false }
 
-    # Check dash positions: 8, 13, 18, 23
     if uuid[8:9] != "-" { return false }
     if uuid[13:14] != "-" { return false }
     if uuid[18:19] != "-" { return false }
@@ -148,7 +142,6 @@ def uuid_is_valid(uuid: str) -> bool {
         i = i + 1
     }
 
-    # Check version nibble (position 14) is 1-5
     const ver: int = uuid_version(uuid)
     if ver < 1 { return false }
     if ver > 5 { return false }

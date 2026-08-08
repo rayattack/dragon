@@ -18,7 +18,6 @@ from template import Template
 #===----------------------------------------------------------------------===#
 
 def escape(s: str) -> str {
-    # Replace special HTML characters with their entity equivalents.
     # & must be replaced first to avoid double-escaping.
     result: str = s
     result = result.replace("&", "&amp;")
@@ -69,7 +68,7 @@ def unescape(s: str) -> str {
 
 def strip_tags(s: str) -> str {
     # Text outside tags is copied as whole spans between the angle brackets;
-    # an unterminated trailing tag is dropped (as before).
+    # an unterminated trailing tag is dropped.
     parts: list[str] = []
     in_tag: bool = false
     i: int = 0
@@ -167,7 +166,7 @@ def _hex_to_int(s: str) -> int {
 }
 
 def _hex_digit_value(ch: str) -> int {
-    # Hex digit -> 0..15 (0 for a non-hex char, matching the prior behaviour).
+    # Hex digit -> 0..15 (0 for a non-hex char).
     const c: int = ord(ch)
     if c >= 48 and c <= 57 { return c - 48 }      # 0-9
     if c >= 97 and c <= 102 { return c - 87 }     # a-f

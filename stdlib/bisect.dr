@@ -56,7 +56,6 @@ def insort_left(a: list[int], x: int) {
     # Insert x into sorted list a, maintaining sort order.
     # If x is already in a, insert to the left of existing entries.
     const idx: int = bisect_left(a, x)
-    # Append a placeholder to grow the list by one, then shift elements right.
     a.append(x)
     j: int = len(a) - 1
     while j > idx {
@@ -70,7 +69,6 @@ def insort_right(a: list[int], x: int) {
     # Insert x into sorted list a, maintaining sort order.
     # If x is already in a, insert to the right of existing entries.
     const idx: int = bisect_right(a, x)
-    # Append a placeholder to grow the list by one, then shift elements right.
     a.append(x)
     j: int = len(a) - 1
     while j > idx {

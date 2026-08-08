@@ -76,22 +76,18 @@ class Hash {
     }
 
     def digest() -> bytes {
-        # Raw digest (bytes) of all data fed so far - Python parity.
         return _raw_digest(self.algorithm, self.data)
     }
 
     def hexdigest() -> str {
-        # Hex-encoded digest of all data fed so far.
         return self.digest().hex()
     }
 
     def digest_size() -> int {
-        # Return the size of the hash output in bytes.
         return _digest_size(self.algorithm)
     }
 
     def name() -> str {
-        # Return the canonical name of the hash algorithm.
         return self.algorithm
     }
 
@@ -108,7 +104,6 @@ class Hash {
     }
 
     def block_size() -> int {
-        # Return the internal block size of the hash algorithm in bytes.
         return _block_size(self.algorithm)
     }
 }
@@ -118,32 +113,26 @@ class Hash {
 #===----------------------------------------------------------------------===#
 
 def sha256(data: bytes = b"") -> Hash {
-    # Create a SHA-256 hash object, optionally initialized with data.
     return Hash("sha256", data)
 }
 
 def sha224(data: bytes = b"") -> Hash {
-    # Create a SHA-224 hash object, optionally initialized with data.
     return Hash("sha224", data)
 }
 
 def sha512(data: bytes = b"") -> Hash {
-    # Create a SHA-512 hash object, optionally initialized with data.
     return Hash("sha512", data)
 }
 
 def sha384(data: bytes = b"") -> Hash {
-    # Create a SHA-384 hash object, optionally initialized with data.
     return Hash("sha384", data)
 }
 
 def sha1(data: bytes = b"") -> Hash {
-    # Create a SHA-1 hash object, optionally initialized with data.
     return Hash("sha1", data)
 }
 
 def md5(data: bytes = b"") -> Hash {
-    # Create an MD5 hash object, optionally initialized with data.
     return Hash("md5", data)
 }
 
@@ -166,7 +155,6 @@ def hexdigest(algorithm: str, data: bytes = b"") -> str {
 }
 
 def algorithms_available() -> list[str] {
-    # Return the list of supported hash algorithm names.
     result: list[str] = []
     for a in _ALGORITHMS {
         result.append(a)

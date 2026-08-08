@@ -56,7 +56,6 @@ class TopologicalSorter {
             i = i + 1
         }
 
-        # Count incoming edges for each node.
         e: int = 0
         while e < num_edges {
             const to_node: int = self.edge_to[e]
@@ -67,7 +66,6 @@ class TopologicalSorter {
             e = e + 1
         }
 
-        # Initialize queue with all zero in-degree nodes.
         queue: list[int] = []
         i = 0
         while i < num_nodes {
@@ -79,12 +77,10 @@ class TopologicalSorter {
 
         result: list[int] = []
         while len(queue) > 0 {
-            # Dequeue from front (shift operation).
             const node: int = queue[0]
             _remove_front(queue)
             result.append(node)
 
-            # For each edge from this node, decrement in-degree of target.
             e = 0
             while e < num_edges {
                 if self.edge_from[e] == node {
@@ -114,7 +110,6 @@ class TopologicalSorter {
 #===----------------------------------------------------------------------===#
 
 def _list_contains(items: list[int], value: int) -> bool {
-    # Check if value exists in items.
     i: int = 0
     while i < len(items) {
         if items[i] == value {
@@ -153,7 +148,6 @@ def _remove_front(items: list[int]) {
 #===----------------------------------------------------------------------===#
 
 def topological_sort(nodes: list[int], edge_from: list[int], edge_to: list[int]) -> list[int] {
-    # Convenience function for one-shot topological sort.
     # edge_from[i] must come before edge_to[i].
     const sorter: TopologicalSorter = TopologicalSorter()
     i: int = 0

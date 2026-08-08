@@ -117,9 +117,9 @@ def verify(encoded: str, password: bytes, secret: bytes = b"",
     if len(cost_fields) != 3 {
         return false
     }
-    memory_cost: int = int(cost_fields[0][2:])    # strip "m="
-    time_cost: int = int(cost_fields[1][2:])      # strip "t="
-    parallelism: int = int(cost_fields[2][2:])    # strip "p="
+    memory_cost: int = int(cost_fields[0][2:])
+    time_cost: int = int(cost_fields[1][2:])
+    parallelism: int = int(cost_fields[2][2:])
 
     salt: bytes = _b64_decode_nopad(parts[4])
     expected: bytes = _b64_decode_nopad(parts[5])

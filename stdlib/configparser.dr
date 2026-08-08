@@ -9,7 +9,6 @@
 # Internal helpers
 
 def _strip(s: str) -> str {
-    # Strip leading and trailing spaces, tabs, and carriage returns.
     return s.strip(" \t\r")
 }
 
@@ -51,7 +50,6 @@ def _is_section_header(line: str) -> bool {
 }
 
 def _extract_section_name(line: str) -> str {
-    # Extract the section name from a header line like [section].
     return _strip(line[1:len(line) - 1])
 }
 
@@ -109,7 +107,6 @@ class ConfigParser {
         while i < len(lines) {
             const raw_line: str = _strip(lines[i])
 
-            # Skip empty lines and comments
             if len(raw_line) == 0 {
                 i = i + 1
             } else {
@@ -117,7 +114,6 @@ class ConfigParser {
                     i = i + 1
                 } else {
                     if _is_section_header(raw_line) {
-                        # New section
                         current_section = _extract_section_name(raw_line)
                         has_section = true
                         const idx: int = self._find_section(current_section)
@@ -130,7 +126,6 @@ class ConfigParser {
                         }
                         i = i + 1
                     } else {
-                        # Key-value pair
                         if has_section {
                             const sep: int = _find_separator(raw_line)
                             if sep > 0 {
@@ -149,7 +144,6 @@ class ConfigParser {
     #--- Query methods ---#
 
     def sections() -> list[str] {
-        # Return a list of all section names.
         result: list[str] = []
         i: int = 0
         while i < len(self.section_names) {
@@ -160,19 +154,16 @@ class ConfigParser {
     }
 
     def has_section(name: str) -> bool {
-        # Check whether the named section exists.
         return self._find_section(name) >= 0
     }
 
     def has_option(section: str, key: str) -> bool {
-        # Check whether the given key exists in the named section.
         const idx: int = self._find_section(section)
         if idx < 0 { return false }
         return self._find_key(idx, key) >= 0
     }
 
     def get(section: str, key: str) -> str {
-        # Return the string value of a key in a section.
         # Raises ValueError if the section or key is not found.
         const idx: int = self._find_section(section)
         if idx < 0 {
@@ -186,19 +177,16 @@ class ConfigParser {
     }
 
     def get_int(section: str, key: str) -> int {
-        # Return the integer value of a key.
         const val: str = self.get(section, key)
         return int(val)
     }
 
     def get_float(section: str, key: str) -> float {
-        # Return the float value of a key.
         const val: str = self.get(section, key)
         return float(val)
     }
 
     def get_bool(section: str, key: str) -> bool {
-        # Return the boolean value of a key.
         # Recognizes: true, yes, on, 1 (case-sensitive) as true.
         # Everything else is false.
         const val: str = self.get(section, key)
@@ -221,10 +209,8 @@ class ConfigParser {
         }
         const kidx: int = self._find_key(idx, key)
         if kidx >= 0 {
-            # Overwrite existing value
             self.section_values[idx][kidx] = value
         } else {
-            # Append new key-value pair
             self.section_keys[idx].append(key)
             self.section_values[idx].append(value)
         }

@@ -332,7 +332,6 @@ class TarFile {
             info: TarInfo = _parse_header(raw, off)
             off = off + 512
             if info.isfile() and info.size > 0 {
-                # Slurp the payload.
                 payload: list[int] = []
                 i: int = 0
                 while i < info.size {
@@ -362,7 +361,6 @@ class TarFile {
             makedirs(target)
             return
         }
-        # Files: ensure parent exists, write payload bytes.
         parent: str = dirname(target)
         if len(parent) > 0 {
             makedirs(parent)
@@ -499,7 +497,6 @@ def open(filename: str, mode: str = "r") -> TarFile {
     if direction != "r" and direction != "w" {
         raise ValueError(f"tarfile: mode must start with 'r' or 'w', got '{mode}'")
     }
-    # Pull out compression suffix after the colon (if any).
     compress: str = ""
     colon: int = mode.find(":")
     if colon >= 0 {

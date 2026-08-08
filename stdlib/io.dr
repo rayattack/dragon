@@ -58,7 +58,6 @@ extern "C" def dragon_file_write_text(handle: ptr, s: str) -> int
 extern "C" def dragon_file_write_bytes(handle: ptr, data: bytes) -> int
 extern "C" def dragon_file_readline(handle: ptr) -> str
 
-# Seek constants: SEEK_SET=0, SEEK_CUR=1, SEEK_END=2
 const SEEK_SET: int = 0
 const SEEK_CUR: int = 1
 const SEEK_END: int = 2

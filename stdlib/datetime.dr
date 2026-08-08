@@ -312,7 +312,6 @@ class datetime {
     }
 
     def __add__(td: timedelta) -> datetime {
-        # datetime + timedelta -> datetime
         const total_us: int = self.microsecond + td.microseconds
         const us_carry: int = total_us // MICROS_PER_SECOND
         const new_us: int = total_us - us_carry * MICROS_PER_SECOND
@@ -332,7 +331,6 @@ class datetime {
     }
 
     def __sub__(other: datetime) -> timedelta {
-        # datetime - datetime -> timedelta
         const my_days: int = _days_from_civil(self.year, self.month, self.day)
         const ot_days: int = _days_from_civil(other.year, other.month, other.day)
         const my_wall: int = self.hour * SECONDS_PER_HOUR + self.minute * SECONDS_PER_MINUTE + self.second

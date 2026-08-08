@@ -115,7 +115,6 @@ def month_abbr(m: int) -> str {
 
 
 def isleap(year: int) -> bool {
-    # Return True if year is a leap year.
     if year % 4 != 0 { return false }
     if year % 100 != 0 { return true }
     if year % 400 != 0 { return false }
@@ -134,7 +133,6 @@ def leapdays(y1: int, y2: int) -> int {
 }
 
 def _days_in_month(year: int, month: int) -> int {
-    # Return number of days in the given month/year.
     if month == 2 {
         if isleap(year) { return 29 }
         return 28
@@ -179,7 +177,6 @@ def monthcalendar(year: int, month: int) -> list[list[int]] {
     day: int = 1
     pos: int = first_weekday
 
-    # Fill the first partial week
     while day <= ndays {
         week[pos] = day
         day = day + 1
@@ -190,7 +187,6 @@ def monthcalendar(year: int, month: int) -> list[list[int]] {
             pos = 0
         }
     }
-    # Append final partial week if it has any days
     if pos > 0 {
         weeks.append(week)
     }

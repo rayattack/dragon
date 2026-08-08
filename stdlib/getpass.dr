@@ -64,7 +64,6 @@ def getpass(prompt: str = "Password: ") -> str {
     available, else to stderr, so it stays visible even with stdout redirected.
     """
     if isatty(_STDIN_FD) != 0 {
-        # Terminal available: the native shim hides input and restores state.
         return dragon_getpass_read(prompt)
     }
 
@@ -93,6 +92,5 @@ def getuser() -> str {
     const username: str = getenv("USERNAME")
     if len(username) > 0 { return username }
 
-    # Last resort: getpwuid(getuid())->pw_name.
     return dragon_getpass_pwname()
 }

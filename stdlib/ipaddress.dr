@@ -225,7 +225,6 @@ def _parse_ipv6_group(s: str) -> int {
 
 
 def _parse_ipv6(s: str) -> list[int] {
-    # Locate the "::" zero-run if present.
     dd: int = s.find("::")
     parts_left: list[str] = []
     parts_right: list[str] = []
@@ -273,7 +272,6 @@ class IPv4Network {
         if prefixlen < 0 or prefixlen > 32 {
             raise ValueError(f"invalid IPv4 prefix length: {prefixlen}")
         }
-        # Build the netmask.
         m: int = 0
         if prefixlen == 0 {
             m = 0
@@ -317,7 +315,6 @@ def IPv4Network_from_str(s: str) -> IPv4Network {
     if slash >= 0 {
         addr_str = s[0:slash]
         prefix_str: str = s[slash + 1:len(s)]
-        # Parse prefix length as int
         prefixlen = 0
         i: int = 0
         while i < len(prefix_str) {

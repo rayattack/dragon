@@ -51,7 +51,6 @@ def now() -> int {
 }
 
 def now_float() -> float {
-    # Current time as float (seconds + nanoseconds)
     const ts: ptr = malloc(16)
     memset(ts, 0, 16)
     clock_gettime(CLOCK_REALTIME, ts)
@@ -73,7 +72,6 @@ def monotonic() -> float {
 }
 
 def process_time() -> float {
-    # CPU time used by current process
     return float(clock()) / float(CLOCKS_PER_SEC)
 }
 
@@ -82,13 +80,11 @@ def sleep_secs(seconds: int) -> int {
 }
 
 def sleep_ms(milliseconds: int) -> int {
-    # Sleep for given milliseconds
     const us: int = milliseconds * 1000
     return usleep(us)
 }
 
 def sleep_float(seconds: float) -> int {
-    # Sleep with sub-second precision via nanosleep
     const sec: int = int(seconds)
     const nsec: int = int((seconds - float(sec)) * 1000000000.0)
     const ts: ptr = dragon_timespec_new(sec, nsec)

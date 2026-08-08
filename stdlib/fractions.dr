@@ -24,7 +24,6 @@ class Fraction {
         if den == 0 {
             raise ValueError("Fraction denominator cannot be zero")
         }
-        # Assign fields first (unconditional), then normalize
         self.num = num
         self.den = den
         # Normalize sign: negative sign always on numerator
@@ -32,7 +31,6 @@ class Fraction {
             self.num = 0 - self.num
             self.den = 0 - self.den
         }
-        # Reduce by GCD
         const g: int = gcd(_abs_int(self.num), self.den)
         if g > 1 {
             self.num = self.num // g
@@ -131,7 +129,6 @@ class Fraction {
             return Fraction(self.num, self.den)
         }
 
-        # Work with the absolute value of num
         sign: int = 1
         n: int = self.num
         if n < 0 {
@@ -148,17 +145,14 @@ class Fraction {
         q1: int = 0
 
         while true {
-            # a = floor(n / d)
             const a: int = n // d
             const r: int = n - a * d
 
-            # next convergent: p2/q2 = a * p1 + p0, a * q1 + q0
             const p2: int = a * p1 + p0
             const q2: int = a * q1 + q0
 
             if q2 > max_den {
                 # Binary search for the best semi-convergent
-                # k = floor((max_den - q0) / q1)
                 const k: int = (max_den - q0) // q1
                 if k < 1 {
                     # p0/q0 is the best we have
@@ -167,7 +161,6 @@ class Fraction {
                     }
                     return Fraction(sign * p0, q0)
                 }
-                # Semi-convergent: (k * p1 + p0) / (k * q1 + q0)
                 const sp: int = k * p1 + p0
                 const sq: int = k * q1 + q0
                 # Compare semi-convergent with previous convergent p1/q1
@@ -176,7 +169,6 @@ class Fraction {
                 # sp*d - n*sq vs n*q1 - p1*d (both sides multiplied by sq*d and q1*d)
                 const diff_semi: int = _abs_int(sp * d - n * sq)
                 const diff_prev: int = _abs_int(p1 * d - n * q1)
-                # Compare: diff_semi * q1 vs diff_prev * sq
                 if diff_semi * q1 <= diff_prev * sq {
                     return Fraction(sign * sp, sq)
                 } else {
@@ -218,7 +210,6 @@ def from_float(f: float) -> Fraction {
         val = 0.0 - val
     }
 
-    # Integer part
     whole: int = int(val)
     frac: float = val - float(whole)
 
@@ -243,7 +234,6 @@ def from_float(f: float) -> Fraction {
         const a: int = int(x)
         x = x - float(a)
 
-        # Next convergent
         const p2: int = a * p0 + p1
         const q2: int = a * q0 + q1
 

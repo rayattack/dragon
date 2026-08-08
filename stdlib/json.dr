@@ -399,7 +399,7 @@ class _JsonParser {
             if self._peek() != _B_COLON {
                 self._fail("expected ':' after object key")
             }
-            self.pos = self.pos + 1         # consume :
+            self.pos = self.pos + 1
             const v: Any = self.parse_value()
             obj[key] = v
             self._skip_ws()
@@ -726,7 +726,7 @@ class Cursor {
     def _skip_string_span() -> None {
         const b: bytes = self.p.buf
         const n: int = self.p.n
-        self.p.pos = self.p.pos + 1                 # opening quote
+        self.p.pos = self.p.pos + 1
         while self.p.pos < n {
             const c: int = dragon_bytes_get(b, self.p.pos)
             if c == _B_BACKSLASH {
@@ -746,7 +746,7 @@ class Cursor {
 
     # Skip an object (pos at '{'); keys skipped as spans so quoted braces don't miscount.
     def _skip_object() -> None {
-        self.p.pos = self.p.pos + 1                 # consume {
+        self.p.pos = self.p.pos + 1
         self.p._skip_ws()
         if self.p._peek() == _B_RBRACE {
             self.p.pos = self.p.pos + 1
@@ -780,7 +780,7 @@ class Cursor {
 
     # Skip an array (pos at '[').
     def _skip_array() -> None {
-        self.p.pos = self.p.pos + 1                 # consume [
+        self.p.pos = self.p.pos + 1
         self.p._skip_ws()
         if self.p._peek() == _B_RBRACKET {
             self.p.pos = self.p.pos + 1

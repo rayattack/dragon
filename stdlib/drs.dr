@@ -911,7 +911,6 @@ def _eval_cmp(src: str, tokens: list[int], pos: list[int], bindings: dict[str, A
     return left
 }
 
-# Logical not
 def _eval_not(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any]) -> Any {
     if _tk(tokens, pos) == TK_NOT {
         _adv(pos)
@@ -962,7 +961,6 @@ def _eval_ternary(src: str, tokens: list[int], pos: list[int], bindings: dict[st
     return cond
 }
 
-# Convenience: tokenize an expression substring and evaluate.
 def _eval_expr_text(expr_src: str, bindings: dict[str, Any]) -> Any {
     toks: list[int] = _tokenize(expr_src)
     p: list[int] = [0]
@@ -1128,7 +1126,6 @@ def _parse_for_expr(src: str, tokens: list[int], pos: list[int], bindings: dict[
     }
     _adv(pos)
     _skip_nl(tokens, pos)
-    # Iterable: `range(N)` or an expression yielding a list.
     iter_list: list[Any] = []
     if _tk(tokens, pos) == TK_RANGE {
         _adv(pos)
@@ -1151,7 +1148,6 @@ def _parse_for_expr(src: str, tokens: list[int], pos: list[int], bindings: dict[
             ri = ri + 1
         }
     } else {
-        # Any expression - must evaluate to a list.
         iter_box: Any = _eval_ternary(src, tokens, pos, bindings)
         if isinstance(iter_box, list) {
             iter_list = iter_box
@@ -1211,7 +1207,6 @@ def _parse_for_expr(src: str, tokens: list[int], pos: list[int], bindings: dict[
     while i_iter < len(iter_list) {
         elem: Any = iter_list[i_iter]
         local_bindings[loop_name] = elem
-        # Filter check
         if has_filter {
             fp: list[int] = [filter_start]
             fv: Any = _eval_ternary(src, tokens, fp, local_bindings)

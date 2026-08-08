@@ -39,14 +39,12 @@ def _siftup(heap: list[int], pos: int) {
     childpos: int = 2 * pos + 1
     curpos: int = pos
     while childpos < endpos {
-        # Pick the smaller child.
         const rightpos: int = childpos + 1
         if rightpos < endpos {
             if heap[rightpos] < heap[childpos] {
                 childpos = rightpos
             }
         }
-        # Move the smaller child up.
         heap[curpos] = heap[childpos]
         curpos = childpos
         childpos = 2 * curpos + 1
@@ -62,27 +60,23 @@ def _siftup(heap: list[int], pos: int) {
 #===----------------------------------------------------------------------===#
 
 def heappush(heap: list[int], item: int) {
-    # Push item onto heap, maintaining the heap invariant.
     heap.append(item)
     _siftdown(heap, 0, len(heap) - 1)
 }
 
 def heappop(heap: list[int]) -> int {
-    # Pop the smallest item off the heap, maintaining the heap invariant.
     const n: int = len(heap)
     if n == 0 {
         raise ValueError("heap is empty")
     }
     const lastelt: int = heap[n - 1]
     if n > 1 {
-        # Move the last element to the root, shrink, then sift it down.
         const returnitem: int = heap[0]
         heap[0] = lastelt
         heap.pop()
         _siftup(heap, 0)
         return returnitem
     }
-    # Only one element - remove and return it.
     heap.pop()
     return lastelt
 }
@@ -99,12 +93,10 @@ def heapify(items: list[int]) {
 }
 
 def heappushpop(heap: list[int], item: int) -> int {
-    # Push item on the heap, then pop and return the smallest item.
     # More efficient than heappush followed by heappop.
     const n: int = len(heap)
     if n > 0 {
         if item > heap[0] {
-            # item is larger than current min, so we swap them.
             const returnitem: int = heap[0]
             heap[0] = item
             _siftup(heap, 0)
@@ -130,14 +122,12 @@ def heapreplace(heap: list[int], item: int) -> int {
 
 def nsmallest(n: int, items: list[int]) -> list[int] {
     # Return the n smallest elements from items, in ascending order.
-    # Uses a heap-based approach.
     const size: int = len(items)
     if n <= 0 {
         result: list[int] = []
         return result
     }
     if n >= size {
-        # Return all items sorted.
         return _sorted_copy(items)
     }
     # Build a max-heap of size n, then scan the rest.
@@ -162,7 +152,6 @@ def nlargest(n: int, items: list[int]) -> list[int] {
         return result
     }
     if n >= size {
-        # Return all items sorted descending.
         const sorted_asc: list[int] = _sorted_copy(items)
         return _reverse_list(sorted_asc)
     }

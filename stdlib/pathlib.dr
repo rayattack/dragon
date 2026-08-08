@@ -104,7 +104,6 @@ class Path {
     }
 
     def __truediv__(other: str) -> Path {
-        # Path("foo") / "bar" -> Path("foo/bar")
         return Path(join(self.raw, other))
     }
 
@@ -144,6 +143,5 @@ class Path {
 #===----------------------------------------------------------------------===#
 
 def cwd() -> Path {
-    # Current working directory as a Path. Wraps os.path.abspath(".").
     return Path(abspath("."))
 }

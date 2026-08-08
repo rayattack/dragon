@@ -22,7 +22,6 @@ def _sorted_float(data: list[float]) -> list[float] {
         result.append(data[i])
         i = i + 1
     }
-    # In-place insertion sort on the copy
     i = 1
     while i < len(result) {
         const key: float = result[i]
@@ -64,14 +63,12 @@ def geometric_mean(data: list[float]) -> float {
     if len(data) == 0 {
         raise ValueError("geometric_mean requires at least one data point")
     }
-    # Use log/exp approach: compute sum of logs, then exp(sum/n)
     log_sum: float = 0.0
     i: int = 0
     while i < len(data) {
         if data[i] <= 0.0 {
             raise ValueError("geometric_mean requires all positive values")
         }
-        # Compute natural log via series approximation
         log_sum = log_sum + _ln(data[i])
         i = i + 1
     }
@@ -150,14 +147,12 @@ def mode_float(data: list[float]) -> float {
     if len(data) == 0 {
         raise ValueError("mode_float requires at least one data point")
     }
-    # Track unique values and their counts with parallel lists
     values: list[float] = []
     counts: list[int] = []
 
     i: int = 0
     while i < len(data) {
         const val: float = data[i]
-        # Search for val in values list
         found: bool = false
         j: int = 0
         while j < len(values) {
@@ -175,7 +170,6 @@ def mode_float(data: list[float]) -> float {
         i = i + 1
     }
 
-    # Find the value with the highest count
     best_idx: int = 0
     best_count: int = counts[0]
     k: int = 1
@@ -296,7 +290,6 @@ def quantiles(data: list[float], n: int) -> list[float] {
     i: int = 1
     while i < n {
         # Index into the sorted array (1-based fractional position)
-        # idx = i * m / n (as float)
         const idx: float = float(i) * float(m) / float(n)
         const lo: int = int(idx) - 1
         const frac: float = idx - float(int(idx))

@@ -13,7 +13,6 @@ extern "C" def dragon_str_to_float(s: str) -> float
 # Internal helpers
 
 def _strip(s: str) -> str {
-    # Strip leading and trailing spaces, tabs, and carriage returns.
     return s.strip(" \t\r")
 }
 
@@ -63,7 +62,7 @@ def _unquote(s: str) -> str {
                 elif next == "\\" { parts.append("\\"); i = i + 2 }
                 elif next == "\"" { parts.append("\""); i = i + 2 }
                 else {
-                    parts.append("\\")      # unknown escape - keep verbatim
+                    parts.append("\\")
                     i = i + 1
                 }
                 run = i
@@ -143,26 +142,22 @@ class TomlDoc {
     }
 
     def get_int(key: str) -> int {
-        # Return the integer value for the given key.
         # TOML allows underscores in integers (e.g. 1_000) - strip them.
         return dragon_str_to_int(self.get(key).replace("_", ""))
     }
 
     def get_float(key: str) -> float {
-        # Return the float value for the given key.
         # TOML allows underscores in floats - strip them.
         return dragon_str_to_float(self.get(key).replace("_", ""))
     }
 
     def get_bool(key: str) -> bool {
-        # Return the boolean value for the given key.
         const val: str = self.get(key)
         if val == "true" { return true }
         return false
     }
 
     def has(key: str) -> bool {
-        # Check whether the given dotted key exists.
         return self._find(key) >= 0
     }
 
@@ -220,7 +215,6 @@ def loads(text: str) -> TomlDoc {
                     }
                 } else {
                     # Key-value pair
-                    # Strip trailing comment
                     const cleaned: str = _strip_comment(raw)
                     const eq_pos: int = cleaned.find("=")
                     if eq_pos > 0 {
@@ -228,7 +222,6 @@ def loads(text: str) -> TomlDoc {
                         const raw_val: str = _strip(cleaned[eq_pos + 1:])
                         const value: str = _parse_value(raw_val)
 
-                        # Build the full dotted key
                         full_key: str = raw_key
                         if len(current_prefix) > 0 {
                             full_key = current_prefix + "." + raw_key

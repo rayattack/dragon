@@ -47,7 +47,6 @@ def _exists(path: str) -> bool {
 # Public API
 
 def gettempdir() -> str {
-    # Return the default temporary directory.
     # Checks TMPDIR, TEMP, TMP environment variables, falls back to /tmp.
     const tmpdir: str = getenv("TMPDIR")
     if len(tmpdir) > 0 { return tmpdir }
@@ -98,7 +97,6 @@ def mkstemp(prefix: str, suffix: str) -> str {
 }
 
 def mkdtemp(prefix: str, suffix: str) -> str {
-    # Create a temporary directory and return its path.
     # Uses mode 0o700 (448 decimal) for owner-only access.
     const tmpdir: str = gettempdir()
     attempts: int = 0

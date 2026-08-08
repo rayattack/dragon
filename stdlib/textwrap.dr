@@ -95,7 +95,6 @@ class TextWrapper {
             # splits it; otherwise emit it as-is on its own line.
             if w_len > self.width - len(cur_indent) {
                 if self.break_long_words {
-                    # Fill the current line, then keep slicing.
                     remaining: str = w
                     while len(remaining) > 0 {
                         const free: int = self.width - len(cur)
@@ -121,7 +120,6 @@ class TextWrapper {
                 }
             }
 
-            # Does the next word fit?
             const sep: str = _word_sep(cur, cur_indent)
             const projected: int = len(cur) + len(sep) + w_len
             if projected <= self.width {
@@ -130,7 +128,6 @@ class TextWrapper {
                 continue
             }
 
-            # Doesn't fit: flush and start a fresh line.
             if len(cur) > 0 and cur != cur_indent {
                 lines.append(cur)
             }
@@ -261,7 +258,6 @@ def indent(text: str, prefix: str) -> str {
 
 
 def shorten(text: str, width: int, placeholder: str = " [...]") -> str {
-    # Collapse all whitespace into single spaces, then truncate.
     const collapsed: str = _replace_whitespace(text)
     const trimmed: str = _strip_ws(collapsed)
     if len(trimmed) <= width {

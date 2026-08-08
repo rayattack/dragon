@@ -94,7 +94,6 @@ class Pattern {
             const ovector: ptr = pcre2_get_ovector_pointer_8(md)
             const matched: str = dragon_re_get_match(subject, ovector, 0)
             results.append(matched)
-            # Advance past the match
             const match_end: int = dragon_re_ovector_get(ovector, 1)
             if match_end <= offset {
                 offset = offset + 1
@@ -122,7 +121,6 @@ class Pattern {
             const ovector: ptr = pcre2_get_ovector_pointer_8(md)
             const match_start: int = dragon_re_ovector_get(ovector, 0)
             const match_end: int = dragon_re_ovector_get(ovector, 1)
-            # Add text before the match
             parts.append(subject[offset:match_start])
             if match_end <= offset {
                 offset = offset + 1
@@ -221,9 +219,7 @@ class Pattern {
             const ovector: ptr = pcre2_get_ovector_pointer_8(md)
             const match_start: int = dragon_re_ovector_get(ovector, 0)
             const match_end: int = dragon_re_ovector_get(ovector, 1)
-            # Add text before the match
             result = result + subject[offset:match_start]
-            # Add replacement with backreferences expanded against this match
             result = result + self._expand(replacement, subject, ovector, rc)
             if match_end <= offset {
                 offset = offset + 1

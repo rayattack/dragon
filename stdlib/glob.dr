@@ -61,15 +61,12 @@ def _path_join(a: str, b: str) -> str {
 #===----------------------------------------------------------------------===#
 
 def _split_path(pattern: str) -> list[str] {
-    # Split pattern on "/" into components
     return pattern.split("/")
 }
 
 def _glob_in_dir(dirname: str, pattern: str) -> list[str] {
-    # Match files in a single directory against a filename pattern
     result: list[str] = []
     if not has_magic(pattern) {
-        # No wildcards - just check if the path exists
         const full: str = _path_join(dirname, pattern)
         if _exists(full) { result.append(full) }
         return result
@@ -143,11 +140,9 @@ def has_magic(pattern: str) -> bool {
 }
 
 def glob(pattern: str) -> list[str] {
-    # Return list of paths matching a glob pattern
     # Supports: *.txt, dir/*.py, /path/to/*.c, dir/**/file.txt
 
     if not has_magic(pattern) {
-        # No wildcards - return the path if it exists
         result: list[str] = []
         if _exists(pattern) { result.append(pattern) }
         return result
@@ -165,7 +160,6 @@ def glob(pattern: str) -> list[str] {
     dirname: str = ""
     start: int = 0
 
-    # Handle absolute paths
     if len(pattern) > 0 {
         if pattern[0] == "/" {
             dirname = "/"
@@ -174,7 +168,6 @@ def glob(pattern: str) -> list[str] {
         }
     }
 
-    # Collect non-magic prefix as directory
     while start < nparts - 1 {
         const part: str = parts[start]
         if has_magic(part) { break }
@@ -187,7 +180,6 @@ def glob(pattern: str) -> list[str] {
     # Check for ** (recursive globbing)
     if start < nparts {
         if parts[start] == "**" {
-            # Recursive: walk all dirs, then match remaining pattern
             const dirs: list[str] = _walk_dirs(dirname)
             result: list[str] = []
             # The file pattern is the last component
