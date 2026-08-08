@@ -713,6 +713,9 @@ std::unique_ptr<Expr> Parser::finishCall(std::unique_ptr<Expr> callee) {
 
     if (!check(TokenType::RIGHT_PAREN)) {
         do {
+            // Allow a trailing comma before the closing paren, e.g. f(a, b,).
+            // The comma that got us here was the last token in the list.
+            if (check(TokenType::RIGHT_PAREN)) break;
             // **expr - dict/kwargs spread (e.g. Customer(**row)). Represented as
             // a kwArg with an empty name (the spread sentinel), mirroring the
             // null-key DictExpr convention for `{**other}`.
@@ -1142,6 +1145,8 @@ std::unique_ptr<Expr> Parser::parseLambda() {
     if (match(TokenType::LEFT_PAREN)) {
         if (!check(TokenType::RIGHT_PAREN)) {
             do {
+                // Trailing comma before ')', e.g. lambda(x, y,) { ... }.
+                if (check(TokenType::RIGHT_PAREN)) break;
                 LambdaExpr::Parameter param;
                 param.name = std::string(consume(TokenType::IDENTIFIER, "Expect parameter name").lexeme());
                 if (match(TokenType::COLON)) param.type = parseType();
@@ -1159,6 +1164,8 @@ std::unique_ptr<Expr> Parser::parseLambda() {
     } else {
         if (!check(TokenType::COLON)) {
             do {
+                // Trailing comma before ':', e.g. lambda x, y,: x + y.
+                if (check(TokenType::COLON)) break;
                 LambdaExpr::Parameter param;
                 param.name = std::string(consume(TokenType::IDENTIFIER, "Expect parameter name").lexeme());
                 if (match(TokenType::EQUAL)) param.defaultValue = expression();
