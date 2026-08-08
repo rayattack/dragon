@@ -124,8 +124,6 @@ std::unique_ptr<Stmt> Parser::statement() {
         return staticDeclaration();
     }
 
-    // Note: self() constructor syntax removed - use def() instead (parsed in functionDeclaration)
-
     // Soft keyword: match at statement position
     if (check(TokenType::IDENTIFIER) && peek().lexeme() == "match") {
         return matchStatement();

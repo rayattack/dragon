@@ -484,7 +484,6 @@ void CodeGen::visit(CallExpr& node) {
                         }
                     }
                 }
-                // Fill missing args with default values
                 impl_->fillDefaultArgs(ctorName, ctorFunc, args, *this, &argTemps);
                 // Exception-safe temps: unwind frees on raise (a ctor body can
                 // raise), pop+decref on normal return.

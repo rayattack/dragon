@@ -4,7 +4,6 @@ namespace dragon {
 
 StdlibRegistry::StdlibRegistry() {
     // Standard library mapping: (module, symbol) -> (c_include, c_name)
-    // Extracted from CEmitter.cpp getStdlibRegistry()
     registry_ = {
         {"math", {
             {"sqrt",  {"math.h", "sqrt"}},

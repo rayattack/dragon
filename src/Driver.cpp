@@ -424,7 +424,7 @@ int typeCheckModuleGraph(Module& entryModule,
     }
 
     // Register all dependency exports with the entry module's type checker, then
-    // check the entry module. This is the step the old `check` path skipped.
+    // check the entry module.
     TypeChecker entryTc;
     for (auto& [modName, exports] : allExports) {
         entryTc.registerExternalModule(modName, exports, moduleFilepaths[modName]);

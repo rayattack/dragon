@@ -173,7 +173,6 @@ void CodeGen::visit(ClassDecl& node) {
     std::vector<FieldInfo> fields;
     std::set<std::string> seenFields; // avoid duplicates
 
-    // Collect all __init__ FunctionDecls
     std::vector<FunctionDecl*> allInitDecls;
     for (auto& stmt : node.body) {
         if (auto* fd = dynamic_cast<FunctionDecl*>(stmt.get())) {
@@ -1199,7 +1198,6 @@ void CodeGen::visit(ClassDecl& node) {
         auto initFuncType = initFunc->getFunctionType();
         auto argIt = initFunc->arg_begin();
 
-        // Alloca for self
         argIt->setName("self");
         auto* selfAlloca = impl_->createEntryAlloca(initFunc, "self", impl_->i8PtrType);
         impl_->builder->CreateStore(&*argIt, selfAlloca);
@@ -1233,7 +1231,6 @@ void CodeGen::visit(ClassDecl& node) {
             ++argIt;
         }
 
-        // Generate init body
         for (auto& bodyStmt : decl->body) {
             bodyStmt->accept(*this);
         }
@@ -1402,7 +1399,6 @@ void CodeGen::visit(ClassDecl& node) {
         auto* entry = llvm::BasicBlock::Create(*impl_->context, "entry", newFunc);
         impl_->builder->SetInsertPoint(entry);
 
-        // Declare malloc if not already declared
         auto* mallocFunc = impl_->module->getFunction("malloc");
         if (!mallocFunc) {
             auto* mallocType = llvm::FunctionType::get(impl_->i8PtrType, {impl_->i64Type}, false);
@@ -1560,7 +1556,6 @@ void CodeGen::visit(ClassDecl& node) {
             impl_->builder->CreateCall(initFunc, initArgs);
         }
 
-        // Return self
         impl_->builder->CreateRet(self);
 
         impl_->currentFunction = prevFunc;
@@ -1622,7 +1617,6 @@ void CodeGen::visit(ClassDecl& node) {
 
     //--- 2d2: Phase 5 - Generate per-class __dealloc__ and register class_id ---
     if (impl_->options.gcMode == GCMode::RC) {
-        // Check if this class has any heap-typed fields
         bool hasHeapFields = false;
         for (auto& f : fields) {
             if (Impl::isHeapKind(f.kind)) { hasHeapFields = true; break; }
@@ -2389,7 +2383,6 @@ void CodeGen::visit(ClassDecl& node) {
             }
         }
 
-        // Generate method body
         for (auto& bodyStmt : methodDecl->body) {
             bodyStmt->accept(*this);
         }

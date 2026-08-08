@@ -841,7 +841,6 @@ void ASTPrinter::visit(LambdaExpr& node) {
             indent_ = 0;
             p.type->accept(*this);
             std::string typeStr = output_;
-            // Remove any trailing whitespace/newline
             while (!typeStr.empty() && (typeStr.back() == '\n' || typeStr.back() == ' '))
                 typeStr.pop_back();
             output_ = savedOutput;

@@ -976,7 +976,6 @@ void CodeGen::visit(BinaryExpr& node) {
         // (returning 0 for any dict pointer), silently breaking membership.
         Impl::VarKind rhsKind = impl_->resolveExprVarKind(node.right.get());
 
-        // Check if RHS is a set
         bool isSet = dynamic_cast<SetExpr*>(node.right.get()) != nullptr ||
                      rhsKind == Impl::VarKind::Set;
         if (isSet) {
@@ -990,7 +989,6 @@ void CodeGen::visit(BinaryExpr& node) {
                 val = impl_->builder->CreatePtrToInt(val, impl_->i64Type);
             impl_->lastValue = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_set_contains"], {rhs, val}, "setcontains");
-            // Convert i64 result to i1 for boolean context
             impl_->lastValue = impl_->builder->CreateICmpNE(
                 impl_->lastValue, llvm::ConstantInt::get(impl_->i64Type, 0), "inbool");
             releaseOwnedInOperands();
@@ -1533,7 +1531,6 @@ void CodeGen::visit(ChainedCompExpr& node) {
 
         // Handle 'in' operator: membership test on set or string containment
         if (opType == TokenType::IN) {
-            // Check if RHS is a set
             bool isSet = dynamic_cast<SetExpr*>(node.operands[i + 1].get()) != nullptr;
             if (!isSet) {
                 if (auto* rhsName = dynamic_cast<NameExpr*>(node.operands[i + 1].get())) {
@@ -1883,7 +1880,6 @@ void CodeGen::visit(WalrusExpr& node) {
     node.value->accept(*this);
     llvm::Value* val = impl_->lastValue;
 
-    // Determine the LLVM type for the variable
     llvm::Type* valType = val->getType();
 
     // Infer VarKind from the LLVM type and the RHS expression

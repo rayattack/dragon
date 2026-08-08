@@ -128,7 +128,6 @@ struct Sema::Impl {
 };
 
 Sema::Sema() : impl_(std::make_unique<Impl>()) {
-    // Create module scope and define builtins
     pushScope(Scope::Kind::Module);
     defineBuiltins();
 }
@@ -249,7 +248,6 @@ void Sema::visit(ChainedCompExpr& node) {
 
 void Sema::visit(WalrusExpr& node) {
     node.value->accept(*this);
-    // Define the variable in current scope
     Symbol sym;
     sym.name = node.name;
     sym.kind = Symbol::Kind::Variable;
@@ -961,7 +959,6 @@ void Sema::visit(FromImportStmt& node) {
 //===----------------------------------------------------------------------===//
 
 void Sema::visit(FunctionDecl& node) {
-    // Define function in current scope
     Symbol funcSym;
     funcSym.name = node.name;
     funcSym.kind = Symbol::Kind::Function;
@@ -972,7 +969,6 @@ void Sema::visit(FunctionDecl& node) {
     // Visit decorators in outer scope
     for (auto& dec : node.decorators) dec->accept(*this);
 
-    // Enter function scope
     pushScope(Scope::Kind::Function);
 
     // D044 - bind type parameters (`def f[T]()`) as type symbols so the body
@@ -1001,7 +997,6 @@ void Sema::visit(FunctionDecl& node) {
 
     impl_->isInFunction = true;
 
-    // For implicit-self methods, define 'self' in scope
     if (node.isMethod && node.hasImplicitSelf) {
         Symbol selfSym;
         selfSym.name = "self";
@@ -1011,7 +1006,6 @@ void Sema::visit(FunctionDecl& node) {
         currentScope()->define(selfSym);
     }
 
-    // Define parameters
     for (auto& p : node.params) {
         Symbol paramSym;
         paramSym.name = p.name;
@@ -1024,7 +1018,6 @@ void Sema::visit(FunctionDecl& node) {
     }
     if (node.returnType) node.returnType->accept(*this);
 
-    // Visit body
     for (auto& s : node.body) s->accept(*this);
 
     if (isNested) {
@@ -1040,7 +1033,6 @@ void Sema::visit(FunctionDecl& node) {
 }
 
 void Sema::visit(ClassDecl& node) {
-    // Define class in current scope
     Symbol classSym;
     classSym.name = node.name;
     classSym.kind = Symbol::Kind::Class;
@@ -1053,7 +1045,6 @@ void Sema::visit(ClassDecl& node) {
     for (auto& base : node.bases) base->accept(*this);
     for (auto& [name, val] : node.keywords) val->accept(*this);
 
-    // Enter class scope
     pushScope(Scope::Kind::Class);
     // D044 - bind type parameters (`class Foo[T]`) as type symbols, visible to
     // every method body (e.g. an in-body construction `Inner[T](...)`).
@@ -1088,7 +1079,6 @@ void Sema::visit(ContractDecl& node) {
 }
 
 void Sema::visit(TypeAliasStmt& node) {
-    // Define type alias name in current scope
     Symbol sym;
     sym.name = node.name;
     sym.kind = Symbol::Kind::Variable;
