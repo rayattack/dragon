@@ -430,7 +430,26 @@ std::shared_ptr<Type> TypeChecker::instantiateGenericClass(
         auto& tp = decl->typeParams[i];
         if (tp.bound && args[i] && args[i]->kind() != Type::Kind::TypeVar) {
             auto boundType = resolveType(tp.bound.get());
-            if (boundType && boundType->kind() != Type::Kind::Unknown &&
+            // ADR 054 - a CONTRACT bound checks structurally at stamp time:
+            // no cast and no promise needed, because no contract-typed value
+            // ever exists inside the monomorphized body (every call is a
+            // direct call on the concrete T).
+            if (boundType && boundType->kind() == Type::Kind::Contract &&
+                args[i]->kind() == Type::Kind::Instance) {
+                auto& ct = static_cast<ContractType&>(*boundType);
+                auto& inst = static_cast<InstanceType&>(*args[i]);
+                auto problems =
+                    contractConformanceProblems(*inst.classType, ct);
+                if (!problems.empty()) {
+                    std::string msg = "type argument '" +
+                        args[i]->toString() + "' does not satisfy contract "
+                        "bound '" + ct.display + "' of type parameter '" +
+                        tp.name + "' in generic '" + decl->name + "'";
+                    for (auto& pr : problems) msg += "; " + pr;
+                    error(effLoc, msg);
+                    boundViolated = true;
+                }
+            } else if (boundType && boundType->kind() != Type::Kind::Unknown &&
                 !args[i]->isSubtypeOf(*boundType)) {
                 error(effLoc, "type argument '" + args[i]->toString() +
                       "' does not satisfy bound '" + boundType->toString() +
@@ -699,7 +718,25 @@ bool TypeChecker::tryInstantiateGenericCall(
         auto arg = bit->second;
         if (arg->kind() == Type::Kind::TypeVar) continue;  // still abstract
         auto boundType = resolveType(tp.bound.get());
-        if (boundType && boundType->kind() != Type::Kind::Unknown &&
+        // ADR 054 - a CONTRACT bound checks structurally at stamp time: no
+        // cast and no promise needed, because no contract-typed value ever
+        // exists inside the monomorphized body (every call is direct on the
+        // concrete T).
+        if (boundType && boundType->kind() == Type::Kind::Contract &&
+            arg->kind() == Type::Kind::Instance) {
+            auto& ct = static_cast<ContractType&>(*boundType);
+            auto& inst = static_cast<InstanceType&>(*arg);
+            auto problems = contractConformanceProblems(*inst.classType, ct);
+            if (!problems.empty()) {
+                std::string msg = "type argument '" + arg->toString() +
+                    "' does not satisfy contract bound '" + ct.display +
+                    "' of type parameter '" + tp.name + "' in generic " +
+                    kindWord + " '" + fnName + "'";
+                for (auto& pr : problems) msg += "; " + pr;
+                error(node.location(), msg);
+                boundViolated = true;
+            }
+        } else if (boundType && boundType->kind() != Type::Kind::Unknown &&
             !arg->isSubtypeOf(*boundType)) {
             error(node.location(), "type argument '" + arg->toString() +
                   "' does not satisfy bound '" + boundType->toString() +

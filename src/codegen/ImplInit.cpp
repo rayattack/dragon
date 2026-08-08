@@ -2152,4 +2152,88 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
     }
 }
 
+//===----------------------------------------------------------------------===//
+// ADR 054 - type contracts: registry + vtable slot coloring
+//===----------------------------------------------------------------------===//
+
+void CodeGen::Impl::collectContracts(dragon::Module& mod) {
+    for (auto& stmt : mod.body) {
+        auto* cd = dynamic_cast<ContractDecl*>(stmt.get());
+        if (!cd) continue;
+        if (!contractDeclSeen.insert(cd).second) continue;
+        contractDeclsInOrder.push_back(cd);
+        contractTypeNames.insert(cd->name);
+    }
+}
+
+void CodeGen::Impl::assignContractSlots() {
+    if (contractSlotsAssigned) return;
+    contractSlotsAssigned = true;
+    if (contractDeclsInOrder.empty()) return;
+
+    // 1. Conformance sets from the TypeChecker's stamps (promises + proven
+    // casts), keyed by class sym. Then close over inheritance: a subclass
+    // IS-A conforming ancestor, so it must fill the same colored slots -
+    // resolveMethodFunction's MRO walk makes an override win through the
+    // very same index.
+    std::unordered_map<std::string, std::set<const ContractDecl*>> ownAtoms;
+    auto gather = [&](dragon::Module* m) {
+        if (!m) return;
+        for (auto& stmt : m->body) {
+            auto* cd = dynamic_cast<ClassDecl*>(stmt.get());
+            if (!cd || cd->conformedContracts.empty()) continue;
+            const std::string csym = mangleClass(m->moduleName, cd->name);
+            ownAtoms[csym].insert(cd->conformedContracts.begin(),
+                                  cd->conformedContracts.end());
+        }
+    };
+    for (auto* dep : depModulePtrs) gather(dep);
+    gather(entryModulePtr);
+
+    std::unordered_map<std::string, std::set<const ContractDecl*>> effAtoms;
+    for (auto& [csym, order] : classVtableMethodOrderBySym) {
+        std::set<const ContractDecl*> atoms;
+        std::string cur = csym;
+        std::set<std::string> guard;
+        while (!cur.empty() && guard.insert(cur).second) {
+            auto oIt = ownAtoms.find(cur);
+            if (oIt != ownAtoms.end())
+                atoms.insert(oIt->second.begin(), oIt->second.end());
+            auto pIt = classParentNamesBySym.find(cur);
+            cur = (pIt != classParentNamesBySym.end()) ? pIt->second : "";
+        }
+        if (!atoms.empty()) effAtoms[csym] = std::move(atoms);
+    }
+    if (effAtoms.empty()) return;
+
+    // 2. Color: sequential global indices starting past the largest natural
+    // vtable, so a colored slot can never collide with any class's own
+    // method ordinals. Order is deterministic (module order, then decl
+    // order, then signature order).
+    unsigned base = 0;
+    for (auto& [csym, order] : classVtableMethodOrderBySym)
+        base = std::max(base, (unsigned)order.size());
+    unsigned next = base;
+    for (auto* cd : contractDeclsInOrder)
+        for (auto& m : cd->methods)
+            contractMethodSlots[{cd, m->name}] = next++;
+
+    // 3. Extend every conforming class's vtable order. Unused indices pad
+    // with "" (the initializer emits a null pointer there); each used index
+    // gets the METHOD NAME - the existing MRO initializer fill resolves it
+    // to this class's own override or the inherited implementation.
+    for (auto& [csym, atoms] : effAtoms) {
+        auto voIt = classVtableMethodOrderBySym.find(csym);
+        if (voIt == classVtableMethodOrderBySym.end()) continue;
+        auto& order = voIt->second;
+        for (auto* atom : atoms) {
+            for (auto& m : atom->methods) {
+                unsigned slot = contractMethodSlots[{atom, m->name}];
+                if (order.size() <= slot) order.resize(slot + 1, "");
+                order[slot] = m->name;
+            }
+        }
+    }
+}
+
 } // namespace dragon

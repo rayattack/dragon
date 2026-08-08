@@ -1134,6 +1134,11 @@ struct OwnershipCheck::Impl {
             checkExpr(aw->operand.get(), flow);
             return;
         }
+        if (auto* ac = dynamic_cast<AsCastExpr*>(e)) {
+            // ADR 054 - a conformance cast reads its operand, nothing more.
+            checkExpr(ac->operand.get(), flow);
+            return;
+        }
         if (auto* y = dynamic_cast<YieldExpr*>(e)) {
             checkExpr(y->value.get(), flow);
             return;

@@ -643,6 +643,20 @@ struct CodeGen::Impl {
     // className -> llvm::GlobalVariable* for @ClassName__vtable
     std::unordered_map<std::string, llvm::GlobalVariable*> classVtables;
 
+    // ADR 054 - type contracts. Coloring assigns every contract method a
+    // globally unique vtable slot (base = the largest natural vtable), so a
+    // contract-typed call is load-vtable + call-slot on a plain instance
+    // pointer - no fat pointers, no new value representation. Keys are the
+    // ATOM ContractDecl* (true identity, D053), never bare names.
+    std::vector<const ContractDecl*> contractDeclsInOrder;
+    std::set<const ContractDecl*> contractDeclSeen;
+    std::unordered_set<std::string> contractTypeNames;  // annotation mapping only
+    std::map<std::pair<const ContractDecl*, std::string>, unsigned> contractMethodSlots;
+    bool contractSlotsAssigned = false;
+    void collectContracts(dragon::Module& mod);
+    void assignContractSlots();
+    bool emitContractMethodCall(CodeGen& cg, CallExpr& node, AttributeExpr& attr);
+
     // D033: Method-name reflection. Each class's OWN (non-inherited) method
     // names, in declaration order, and parallel kind bytes
     // (0 = instance, 1 = static, 2 = classmethod). Populated alongside the
@@ -1969,6 +1983,10 @@ struct CodeGen::Impl {
     // (literals, calls, container constructors) already own a +1 and are NOT
     // borrowed.
     static bool isBorrowedHeapExpr(Expr* expr) {
+        // ADR 054 - a conformance cast compiles to nothing: ownership-wise it
+        // IS its operand (same pointer), so classification must see through.
+        if (auto* cast = dynamic_cast<AsCastExpr*>(expr))
+            return isBorrowedHeapExpr(cast->operand.get());
         if (auto* sub = dynamic_cast<SubscriptExpr*>(expr)) {
             // A SLICE (s[1:4], xs[a:b]) calls dragon_str_slice /
             // dragon_list_slice / dragon_bytes_slice, all of which return a
@@ -2281,6 +2299,7 @@ struct CodeGen::Impl {
             case Type::Kind::Set:
             case Type::Kind::Tuple:
             case Type::Kind::Instance:
+            case Type::Kind::Contract:  // ADR 054 - an instance behind a contract
                 // All release via dragon_decref (VarKind::List is a representative
                 // non-Str / non-Closure heap kind in emitDecrefByKind).
                 return (v->getType()->isPointerTy() && isOwnedPtrResult(v))

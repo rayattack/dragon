@@ -175,6 +175,8 @@ void Sema::visit(TupleTypeExpr& node) {
     for (auto& e : node.elementTypes) e->accept(*this);
 }
 
+void Sema::visit(ContractSetTypeExpr&) {}
+
 //===----------------------------------------------------------------------===//
 // Expression Visitors
 //===----------------------------------------------------------------------===//
@@ -439,6 +441,12 @@ void Sema::visit(IfExpr& node) {
 }
 
 void Sema::visit(AwaitExpr& node) {
+    node.operand->accept(*this);
+}
+
+void Sema::visit(AsCastExpr& node) {
+    // Contract names are TYPE names resolved by the TypeChecker; only the
+    // operand is a value expression.
     node.operand->accept(*this);
 }
 
@@ -1061,6 +1069,24 @@ void Sema::visit(ClassDecl& node) {
     popScope();
 }
 
+void Sema::visit(ContractDecl& node) {
+    // A contract is a TYPE name, never a value: define it Class-kind so
+    // annotations resolve, and walk the signatures so their annotations get
+    // the same treatment as any other type expression. Contract methods have
+    // no bodies, so there is nothing else to resolve.
+    Symbol sym;
+    sym.name = node.name;
+    sym.kind = Symbol::Kind::Class;
+    sym.declaration = node.location();
+    sym.isInitialized = true;
+    currentScope()->define(sym);
+    for (auto& m : node.methods) {
+        for (auto& param : m->params)
+            if (param.type) param.type->accept(*this);
+        if (m->returnType) m->returnType->accept(*this);
+    }
+}
+
 void Sema::visit(TypeAliasStmt& node) {
     // Define type alias name in current scope
     Symbol sym;
@@ -1098,6 +1124,15 @@ void Sema::visit(Module& node) {
             clsSym.declaration = cls->location();
             clsSym.isInitialized = true;
             currentScope()->define(clsSym);
+        } else if (auto* con = dynamic_cast<ContractDecl*>(s.get())) {
+            // ADR 054 - contracts resolve forward like classes: a class
+            // earlier in the file may promise a contract declared later.
+            Symbol conSym;
+            conSym.name = con->name;
+            conSym.kind = Symbol::Kind::Class;
+            conSym.declaration = con->location();
+            conSym.isInitialized = true;
+            currentScope()->define(conSym);
         } else if (auto* ann = dynamic_cast<AnnAssignStmt*>(s.get())) {
             // Hoist module-level typed globals (const / static / plain) so a
             // forward reference to a const defined later in the file resolves,

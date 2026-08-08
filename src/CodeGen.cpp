@@ -56,21 +56,17 @@ bool CodeGen::generate(dragon::Module& entryModule,
             impl_->moduleDocstrings[dep->moduleName] = *dep->docstring;
     }
 
-    // Forward-declare classes first (so function signatures can reference class types),
-    // then functions from all modules (deps first). Each pass sets
-    // currentModuleName so per-module symbol mangling (mangleFunc) emits
-    // distinct symbols for same-named functions across modules - without
-    // this, stdlib modules that share Python-conventional names like
-    // `open` / `compress` / `decompress` would collapse onto one symbol
-    // and the second emit would silently overwrite (or be dropped by) the
-    // first. Restored to "" before entry-module emit so user code keeps
-    // bare names.
+    for (auto* dep : depModules) impl_->collectContracts(*dep);
+    impl_->collectContracts(entryModule);
+
     for (auto* dep : depModules) {
         impl_->currentModuleName = dep->moduleName;
         impl_->forwardDeclareClasses(*dep);
     }
     impl_->currentModuleName = "";
     impl_->forwardDeclareClasses(entryModule);
+
+    impl_->assignContractSlots();
     for (auto* dep : depModules) {
         impl_->currentModuleName = dep->moduleName;
         impl_->forwardDeclareFunctions(*dep);
@@ -78,13 +74,6 @@ bool CodeGen::generate(dragon::Module& entryModule,
     impl_->currentModuleName = "";
     impl_->forwardDeclareFunctions(entryModule);
 
-    // Decorator pre-pass: register each decorated top-level function's
-    // indirect-dispatch global + type BEFORE class bodies are emitted below. A
-    // class method that calls a decorated free function is lowered in the
-    // class-body pass (next), before that function's visit(FunctionDecl) runs
-    // its decorator block - without this, the call site misses the
-    // decoratedFunctions entry and binds the UNdecorated original (a wrapping
-    // decorator's effect silently vanishes when invoked from a method).
     for (auto* dep : depModules) {
         impl_->currentModuleName = dep->moduleName;
         for (auto& stmt : dep->body)
@@ -96,12 +85,6 @@ bool CodeGen::generate(dragon::Module& entryModule,
         if (auto* fd = dynamic_cast<FunctionDecl*>(stmt.get()))
             impl_->preregisterDecoratedFunction(*fd);
 
-    // Class-layout pre-pass: register EVERY class's field layout (struct type,
-    // field indices/types/kinds, list-elem/dict-value kinds) before any method
-    // body is emitted. Without this, a method in class A that references a class
-    // B defined later in the file saw empty layout metadata for B and miscompiled
-    // every B field access to offset 0 (silent wrong answer). visit(ClassDecl)
-    // returns right after layout registration while classLayoutPass is set.
     impl_->classLayoutPass = true;
     for (auto* dep : depModules) {
         impl_->currentModuleName = dep->moduleName;
@@ -113,15 +96,6 @@ bool CodeGen::generate(dragon::Module& entryModule,
         if (dynamic_cast<ClassDecl*>(stmt.get())) stmt->accept(*this);
     impl_->classLayoutPass = false;
 
-    // Forward-declare module-level globals from dependency modules.
-    // This creates GlobalVariable stubs so dependency functions can reference
-    // them. Actual initialization happens in main() (see below). The LLVM
-    // type and VarKind are derived from the full annotation via the same
-    // helpers the AnnAssignStmt path uses, so generic types like
-    // `dict[str, str]` and `list[T]` get a `ptr` global instead of `i64`
-    // (the previous `NamedTypeExpr`-only inspection silently fell through to
-    // `i64`, which then mismatched the `dragon_dict_get_str_*` ABI at the
-    // load site once the cross-module reader emitted the typed call).
     for (auto* dep : depModules) {
         // Module context: a dep's global is keyed and class-resolved in the dep.
         impl_->currentModuleName = dep->moduleName;
@@ -141,12 +115,7 @@ bool CodeGen::generate(dragon::Module& entryModule,
             Impl::VarKind vk = ann->annotation
                 ? impl_->typeExprToKind(ann->annotation.get())
                 : Impl::VarKind::Int;
-            // Given the code -> `X: deque[T] = deque(...)`: the annotation lowers
-            // list-like, but the val is a real DragonDeque. Correct the kidn + "__Deque"
-            // tag here - method bodies compile before the module-body stmnt runs its own
-            // correction (AugAnnAssign), and a method reading the global would misroute
-            // len/pop through list path (reads the deque header as a list - wrong values,
-            // runaway allocation on append)
+
             if (impl_->annAssignIsDeque(ann)) {
                 vk = Impl::VarKind::Deque;
                 impl_->varClassNames[name->name] = "__Deque";
@@ -161,36 +130,12 @@ bool CodeGen::generate(dragon::Module& entryModule,
             impl_->moduleGlobals[gKey] = gv;
             impl_->moduleGlobalKinds[gKey] = vk;
 
-            // For class-typed globals, record the class name (and owning
-            // module) so attribute/method access through the cross-module
-            // reader resolves correctly. resolveAnnotationClassName handles a
-            // DOTTED annotation (`db: database.Connection`) by stripping to the
-            // leaf class; a bare classNames.count(nt->name) missed it, leaving
-            // the global's className empty. A method call on such a global then
-            // fell to the "class unknown" vtable path, which guesses the callee
-            // signature from an arbitrary same-named method and produced a
-            // wrong-arity indirect call (malformed IR) - order-dependent, so it
-            // only bit some multi-module builds. Mirrors the AnnAssignStmt path.
             impl_->bindGlobalClassVar(gKey, name->name, ann->annotation.get());
         }
     }
     impl_->currentModuleName = "";
 
-    // Forward-declare the ENTRY module's top-level globals too, BEFORE the
-    // entry-module class bodies are emitted below (line ~140). A class method
-    // that reads a module-level global/const is codegen'd before main() lazily
-    // creates that global, so without this stub the read resolves to a spurious
-    // "Undefined variable". (Entry-module free functions escape this: their
-    // bodies are emitted during the main-body iteration, after the top-level
-    // decl has already registered the global.) The module-level AnnAssign /
-    // Assign paths both reuse an existing moduleGlobals entry, so main() still
-    // creates the global exactly once and initializes it in place.
     for (auto& stmt : entryModule.body) {
-        // Module-level UNPACK targets (`const a: T, b: U = f()`, an AssignStmt
-        // with a TupleExpr target) are module globals too - forward declare
-        // them from the checker-resolved element types so class methods can
-        // reference them (methods compile before the module body initializes
-        // the slots, the unpack lowering in Assign.cpp reuses these gvs).
         if (auto* as = dynamic_cast<AssignStmt*>(stmt.get())) {
             if (as->targets.size() == 1) {
                 if (auto* tup = dynamic_cast<TupleExpr*>(as->targets[0].get())) {
@@ -272,10 +217,6 @@ bool CodeGen::generate(dragon::Module& entryModule,
             impl_->varClassNames[name->name] = "__Deque";
             impl_->moduleGlobalClassNames[gKey] = {"__Deque", ""};
         }
-        // Callable-typed global: register its signature now, for same ordering reason
-        // as deque correction - a class method calling `TAGGER(x)` compiles before module
-        // body registers the type, and untyped indirect call fallback it would take will
-        // not drain owned result temp (one leaked str per call site under LSan).
         if (auto* cte = dynamic_cast<CallableTypeExpr*>(ann->annotation.get())) {
             impl_->callableTypes[name->name] = impl_->callableTypeExprToFnType(cte);
             vk = Impl::VarKind::Closure;
@@ -293,10 +234,6 @@ bool CodeGen::generate(dragon::Module& entryModule,
         impl_->bindGlobalClassVar(gKey, name->name, ann->annotation.get());
     }
 
-    // Generate dependency module code (functions and classes only, no top-level exprs).
-    // currentModuleName is restored per dep so visit(FunctionDecl) and
-    // CallExpr's same-module call path resolve to the dep's mangled symbol
-    // namespace, not the entry's.
     for (auto* dep : depModules) {
         impl_->currentModuleName = dep->moduleName;
         for (auto& stmt : dep->body) {
@@ -310,16 +247,6 @@ bool CodeGen::generate(dragon::Module& entryModule,
     }
     impl_->currentModuleName = "";
 
-    // Process the entry module's own import statements BEFORE its class bodies
-    // are emitted below. The import visitors only populate alias maps
-    // (importedFuncAliasesByModule / symbolAliases) - no code emission, fully
-    // idempotent - so re-processing them during the main-body iteration is
-    // harmless. Without this, an entry-module method body is codegen'd with an
-    // empty alias table, and a `from mod import fn` call inside the method
-    // falls through to a 0 / "Unknown function" instead of the mangled symbol.
-    // (Dependency modules already get this via the loop above; entry-module
-    // free functions escape because their bodies emit during the main-body
-    // iteration, after the imports have been processed.)
     for (auto& stmt : entryModule.body) {
         if (dynamic_cast<ImportStmt*>(stmt.get()) ||
             dynamic_cast<FromImportStmt*>(stmt.get())) {
@@ -327,8 +254,6 @@ bool CodeGen::generate(dragon::Module& entryModule,
         }
     }
 
-    // Generate entry module class bodies BEFORE main,
-    // so their deferredClassInits are processed in the main preamble.
     for (auto& stmt : entryModule.body) {
         if (dynamic_cast<ClassDecl*>(stmt.get())) {
             stmt->accept(*this);
@@ -558,12 +483,6 @@ bool CodeGen::generate(dragon::Module& entryModule,
                 std::sort(fieldList.begin(), fieldList.end(),
                     [](auto& a, auto& b) { return a.second < b.second; });
 
-                // Emit global constant arrays: field names (i8*[]), BYTE offsets
-                // (i64[]) and field byte widths (i64[]). getattr reads exactly
-                // `width` bytes at `offset`; fields are native-typed (bool=i1,
-                // float=f64), so the runtime must know the real byte offset and
-                // width rather than assume an 8-byte GEP slot - otherwise a
-                // narrow field misaligns or over-reads the allocation.
                 const llvm::DataLayout& dl = impl_->module->getDataLayout();
                 llvm::StructType* clsStruct = nullptr;
                 auto cstIt = impl_->classStructTypesBySym.find(clsSym);
@@ -617,11 +536,6 @@ bool CodeGen::generate(dragon::Module& entryModule,
                      llvm::ConstantInt::get(impl_->i64Type, (int64_t)nfields)});
             }
 
-            // D033: Emit method-name reflection metadata. Each class
-            // advertises its OWN methods; dragon_class_find_method walks the
-            // parent chain at lookup time, mirroring how _find_field_offset
-            // does it for fields. Skipped when the class has no own
-            // non-__init__ methods (e.g. data-only classes).
             auto ownMethodsIt = impl_->classOwnMethodsBySym.find(clsSym);
             if (ownMethodsIt != impl_->classOwnMethodsBySym.end() &&
                 !ownMethodsIt->second.empty()) {
@@ -675,11 +589,6 @@ bool CodeGen::generate(dragon::Module& entryModule,
                     {descVal, mNamePtr, mFnPtr, mKindPtr,
                      llvm::ConstantInt::get(impl_->i64Type, (int64_t)nmethods)});
 
-                // D033 Phase 3: parallel bound-thunks array. Same length as
-                // method_names; NULL slots for static methods are fine because
-                // dragon_getattr only consults this array for instance/class
-                // methods (kind 0 / 2). Emitted only when at least one thunk
-                // exists, to skip the work for purely-static classes.
                 auto thunkMapIt = impl_->classMethodBoundThunksBySym.find(clsSym);
                 bool anyThunk = false;
                 if (thunkMapIt != impl_->classMethodBoundThunksBySym.end()) {
@@ -713,11 +622,6 @@ bool CodeGen::generate(dragon::Module& entryModule,
                         {descVal, mThunkPtr});
                 }
             }
-
-            // Class decorators (6.11) are NOT applied here - they run at the
-            // class's source position during entry-module-body processing so
-            // module-level globals referenced by the decorator are already
-            // initialized.
         }
     }
 

@@ -154,6 +154,101 @@ bool CodeGen::Impl::packVarArgMethodArgs(
     return true;
 }
 
+bool CodeGen::Impl::emitContractMethodCall(CodeGen& cg, CallExpr& node,
+                                           AttributeExpr& attr) {
+    auto ct = std::static_pointer_cast<ContractType>(attr.object->type);
+    const std::string& method = attr.attribute;
+
+    auto poison = [&]() {
+        lastValue = llvm::ConstantPointerNull::get(
+            llvm::PointerType::getUnqual(*context));
+    };
+
+    auto ownerIt = ct->methodOwner.find(method);
+    if (ownerIt == ct->methodOwner.end()) {
+        addError("contract '" + ct->display + "' declares no method '" +
+                 method + "'", node.location());
+        poison();
+        return true;
+    }
+    const ContractDecl* owner = ownerIt->second;
+    auto slotIt = contractMethodSlots.find({owner, method});
+    if (slotIt == contractMethodSlots.end()) {
+        addError("internal: no colored slot for contract method '" +
+                 owner->name + "." + method + "'", node.location());
+        poison();
+        return true;
+    }
+    const FunctionDecl* sig = nullptr;
+    for (auto& m : owner->methods)
+        if (m->name == method) { sig = m.get(); break; }
+    if (!sig) {
+        addError("internal: contract '" + owner->name + "' lost signature '" +
+                 method + "'", node.location());
+        poison();
+        return true;
+    }
+    if (!node.kwArgs.empty() || callHasSpread(node)) {
+        addError("keyword and spread arguments are not yet supported on a "
+                 "contract-typed call; pass positionally", node.location());
+        poison();
+        return true;
+    }
+
+    // The contract signature IS the ABI: self ptr + declared params.
+    std::vector<llvm::Type*> paramTys;
+    paramTys.push_back(i8PtrType);
+    for (auto& p : sig->params) paramTys.push_back(typeExprToLLVM(p.type.get()));
+    llvm::Type* retTy = sig->returnType ? typeExprToLLVM(sig->returnType.get())
+                                        : voidType;
+    auto* fnType = llvm::FunctionType::get(retTy, paramTys, false);
+
+    // Receiver: an ordinary instance pointer (the cast added nothing). An
+    // OWNED receiver temp (`pick().amazing_method()`) must drain after the
+    // call - a bare local stays borrowed and is skipped by the classifier.
+    attr.object->accept(cg);
+    llvm::Value* self = lastValue;
+    if (!self->getType()->isPointerTy())
+        self = builder->CreateIntToPtr(self, i8PtrType);
+
+    std::vector<llvm::Value*> args;
+    args.push_back(self);
+    std::vector<std::pair<llvm::Value*, VarKind>> argTemps;
+    auto recvDk = ownedTempDrainKind(attr.object.get(), self);
+    if (recvDk != VarKind::Other) argTemps.emplace_back(self, recvDk);
+    for (size_t i = 0; i < node.args.size() && i + 1 < paramTys.size(); ++i) {
+        node.args[i]->accept(cg);
+        llvm::Value* arg = lastValue;
+        auto dk = ownedTempDrainKind(node.args[i].get(), arg);
+        if (dk != VarKind::Other) argTemps.emplace_back(arg, dk);
+        args.push_back(coerceArgFromExpr(node.args[i].get(), arg, paramTys[i + 1]));
+    }
+
+    // Load the vtable from the instance header (rc, tag, vtable) and call
+    // through the colored slot - the same shape as D026 virtual dispatch.
+    auto* headerTy = llvm::StructType::get(*context,
+        {i64Type, i64Type, i8PtrType});
+    auto* vtSlot = builder->CreateStructGEP(headerTy, self, 2, "vt_slot");
+    auto* vtPtr = builder->CreateLoad(i8PtrType, vtSlot, "vtable");
+    auto* vtArrTy = llvm::ArrayType::get(i8PtrType, 0);
+    auto* mSlot = builder->CreateGEP(vtArrTy, vtPtr,
+        {builder->getInt64(0), builder->getInt64((int64_t)slotIt->second)},
+        "contract_slot");
+    llvm::Value* callee = builder->CreateLoad(i8PtrType, mSlot, "contract_fn");
+
+    auto argTempBases = pushArgTempCleanups(argTemps);
+    if (fnType->getReturnType()->isVoidTy()) {
+        builder->CreateCall(fnType, callee, args);
+        poison();
+    } else {
+        lastValue = normalizeIntC(
+            builder->CreateCall(fnType, callee, args, "ccall"));
+    }
+    popArgTempCleanups(argTempBases);
+    for (auto& [v, k] : argTemps) emitDecrefByKind(v, k);
+    return true;
+}
+
 bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
     // D010: a TypeChecker-resolved overload dispatches to its per-index symbol
     // (`name__ovN`); resolvedMethodOverload is -1 for non-overloaded calls.
@@ -181,6 +276,15 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             instanceRecv = !cn.empty() && impl_->classNames.count(cn) > 0;
         }
         if (!instanceRecv) return false;
+    }
+
+    // ADR 054 - contract-typed receiver: the concrete class is unknown by
+    // design, so dispatch through the globally colored vtable slot. The
+    // contract's own signature is the ABI (conformance enforced exact match
+    // against every conforming class, so all implementations agree).
+    if (attr.object && attr.object->type &&
+        attr.object->type->kind() == Type::Kind::Contract) {
+        return impl_->emitContractMethodCall(*this, node, attr);
     }
 
     // Thread handle dispatch: join() / is_alive()

@@ -146,6 +146,7 @@ public:
     void visit(UnionTypeExpr& node) override;
     void visit(CallableTypeExpr& node) override;
     void visit(TupleTypeExpr& node) override;
+    void visit(ContractSetTypeExpr& node) override;
     void visit(IntegerLiteral& node) override;
     void visit(FloatLiteral& node) override;
     void visit(StringLiteral& node) override;
@@ -171,6 +172,7 @@ public:
     void visit(LambdaExpr& node) override;
     void visit(IfExpr& node) override;
     void visit(AwaitExpr& node) override;
+    void visit(AsCastExpr& node) override;
     void visit(FireExpr& node) override;
     void visit(YieldExpr& node) override;
     void visit(StarredExpr& node) override;
@@ -205,6 +207,7 @@ public:
     void visit(FromImportStmt& node) override;
     void visit(FunctionDecl& node) override;
     void visit(ClassDecl& node) override;
+    void visit(ContractDecl& node) override;
     void visit(TypeAliasStmt& node) override;
     void visit(dragon::Module& node) override;
 

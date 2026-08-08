@@ -18,6 +18,7 @@ public:
         Int, Float, Bool, Str, Bytes, None_,
         List, Dict, Set, Tuple, Function, Task, Lock,
         Class, Instance, Any, Never, Union, Optional, TypeVar, Unknown,
+        Contract,  // ADR 054 - a contract (or plural contract set) value type
         Ptr,  // Raw C pointer (void* / i8*), used in extern "C" FFI
         Module  // Imported module - base of x.y.z attribute chains, never a runtime value
     };
@@ -185,6 +186,13 @@ public:
     // True-identity backpointer to the declaring ClassDecl (owned by the module
     // AST, which outlives checking). Prefer this over any by-name registry.
     ClassDecl* decl = nullptr;
+    /// ADR 054 - contract atoms this class promises in its header (`-> A, B`),
+    /// stamped by visit(ClassDecl) after the structural check passes. Casts do
+    /// NOT land here (they stamp the AST for codegen only): a promise is the
+    /// class author's declaration and is what InstanceType::isSubtypeOf
+    /// consults for value-position assignability. Parent promises count via
+    /// the parent-chain walk at the check site.
+    std::set<const ContractDecl*> promisedContracts;
     // Number of constructors (`def()` / `__init__`) the class declares. Dragon
     // supports arity-overloaded ctors (codegen classCtorArities), but `methods`
     // stores only one __init__ FunctionType - so a call-site ctor arity check
@@ -221,6 +229,32 @@ public:
     // Nominal subtyping: an instance of a subclass is a subtype of an
     // instance of any ancestor (walks ClassType::parentClass). Without this
     // override `Dog <: Animal` was false even for a single value.
+    bool isSubtypeOf(const Type& other) const override;
+};
+
+/// ADR 054 - a contract, or a plural contract set, in type position. The
+/// unit of identity is the ATOM: a ContractDecl that declares at least one
+/// method of its own (a pure composition `type C(A, B) {}` expands to its
+/// bases' atoms and contributes none itself). `atoms` is sorted by pointer
+/// and deduped, so equals/subset checks are order-independent. A
+/// contract-typed value is an ordinary instance pointer at runtime; only
+/// dispatch differs (vtable colored slots), so RC treats it as an instance.
+class ContractType : public Type {
+public:
+    /// Source-level spelling for diagnostics ("Amazing" / "{Amazing, Speaker}").
+    std::string display;
+    /// Atom decls, sorted by pointer, deduped (true identity per D053).
+    std::vector<const ContractDecl*> atoms;
+    /// Union of every atom's method signatures: name -> FunctionType.
+    std::unordered_map<std::string, std::shared_ptr<Type>> methods;
+    /// Method name -> the atom that DECLARES it. CodeGen's slot coloring is
+    /// keyed by (owner decl, method name), so composed and direct views of
+    /// the same contract dispatch through the same slot.
+    std::unordered_map<std::string, const ContractDecl*> methodOwner;
+    Kind kind() const override { return Kind::Contract; }
+    std::string toString() const override { return display; }
+    bool equals(const Type& other) const override;
+    /// Subset rule: `{A, B}` satisfies an `A` position.
     bool isSubtypeOf(const Type& other) const override;
 };
 
@@ -368,6 +402,7 @@ public:
     void visit(UnionTypeExpr& node) override;
     void visit(CallableTypeExpr& node) override;
     void visit(TupleTypeExpr& node) override;
+    void visit(ContractSetTypeExpr& node) override;
     void visit(IntegerLiteral& node) override;
     void visit(FloatLiteral& node) override;
     void visit(StringLiteral& node) override;
@@ -396,6 +431,7 @@ public:
     void visit(LambdaExpr& node) override;
     void visit(IfExpr& node) override;
     void visit(AwaitExpr& node) override;
+    void visit(AsCastExpr& node) override;
     void visit(FireExpr& node) override;
     void visit(YieldExpr& node) override;
     void visit(StarredExpr& node) override;
@@ -426,11 +462,39 @@ public:
     void visit(FromImportStmt& node) override;
     void visit(FunctionDecl& node) override;
     void visit(ClassDecl& node) override;
+    void visit(ContractDecl& node) override;
     void visit(TypeAliasStmt& node) override;
     void visit(Module& node) override;
 
 private:
     std::shared_ptr<Type> resolveType(TypeExpr* typeExpr);
+
+    //===------------------------------------------------------------------===//
+    // ADR 054 - type contracts
+    //===------------------------------------------------------------------===//
+
+    /// Pre-pass: register every ContractDecl in the module (shell first so
+    /// order and composition don't matter, then signatures, then merges).
+    /// All contract-declaration diagnostics are reported here; the main-walk
+    /// visit(ContractDecl) is a no-op.
+    void registerContracts(Module& module);
+    /// Resolve one contract name (typeNames, then scope - covers imports).
+    /// Returns nullptr (and optionally reports) when the name is unknown or
+    /// names a non-contract type.
+    std::shared_ptr<ContractType> resolveContractRef(const std::string& name,
+                                                     const SourceLocation& loc,
+                                                     bool reportErrors);
+    /// Resolve a cast/annotation contract list into one merged ContractType
+    /// (atoms unioned; conflicting duplicate signatures are an error).
+    std::shared_ptr<ContractType> resolveContractSet(
+        const std::vector<std::string>& names, const SourceLocation& loc,
+        bool reportErrors);
+    /// Structural conformance: every contract method must exist on the
+    /// flattened class (inherited methods count) with an EXACTLY matching
+    /// signature (ADR 010: any one overload may match). Returns human-readable
+    /// problems; empty means the class satisfies the contract.
+    std::vector<std::string> contractConformanceProblems(
+        const ClassType& cls, const ContractType& ct);
     std::shared_ptr<Type> inferType(Expr* expr);
     void propagateAnnotationToEmptyLiteral(Expr* value, const std::shared_ptr<Type>& annotType);
     // Expected-type-directed typing for a FRESH container literal. When the

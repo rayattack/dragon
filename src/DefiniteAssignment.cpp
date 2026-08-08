@@ -533,6 +533,10 @@ void DefiniteAssignment::Impl::checkExpr(Expr* e, Flow& flow) {
         checkExpr(aw->operand.get(), flow);
         return;
     }
+    if (auto* cast = dynamic_cast<AsCastExpr*>(e)) {  // ADR 054 - transparent
+        checkExpr(cast->operand.get(), flow);
+        return;
+    }
     if (auto* y = dynamic_cast<YieldExpr*>(e)) {
         checkExpr(y->value.get(), flow);
         return;
@@ -1145,6 +1149,7 @@ void DefiniteAssignment::Impl::scanReadsExpr(
         return;
     }
     if (auto* aw = dynamic_cast<AwaitExpr*>(e)) { R(aw->operand.get()); return; }
+    if (auto* ac = dynamic_cast<AsCastExpr*>(e)) { R(ac->operand.get()); return; }  // ADR 054
     if (auto* y = dynamic_cast<YieldExpr*>(e)) { R(y->value.get()); return; }
     if (auto* star = dynamic_cast<StarredExpr*>(e)) { R(star->value.get()); return; }
     if (auto* wl = dynamic_cast<WalrusExpr*>(e)) { R(wl->value.get()); return; }

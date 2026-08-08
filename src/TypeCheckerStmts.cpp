@@ -1568,9 +1568,40 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
         }
     }
 
+    // ADR 054 producer promises: `class Dog(Animal) -> Amazing, Speaker`.
+    // Checked HERE, at the class site, after the method-signature pre-pass
+    // filled classType->methods - so breaking a contract errors once, on the
+    // class, listing exactly what is missing. Atoms land in
+    // promisedContracts (value-position assignability) and on the ClassDecl
+    // (CodeGen's coloring pre-pass).
+    for (auto& pname : node.promises) {
+        auto ct = resolveContractRef(pname, node.location(), true);
+        if (!ct) continue;
+        auto problems = contractConformanceProblems(*classType, *ct);
+        if (!problems.empty()) {
+            std::string msg = "class '" + node.name + "' promises contract '" +
+                              pname + "' but does not satisfy it";
+            for (auto& p : problems) msg += "; " + p;
+            error(node.location(), msg);
+            continue;
+        }
+        for (auto* a : ct->atoms) {
+            classType->promisedContracts.insert(a);
+            if (std::find(node.conformedContracts.begin(),
+                          node.conformedContracts.end(),
+                          a) == node.conformedContracts.end())
+                node.conformedContracts.push_back(a);
+        }
+    }
+
     impl_->currentClass = prevClass;  // D045 - restore enclosing-class context
     impl_->popScope();
 }
+
+// ADR 054 - all contract-declaration work (registration, signatures,
+// composition, diagnostics) happens in the registerContracts pre-pass so
+// declaration order never matters; the main walk has nothing left to do.
+void TypeChecker::visit(ContractDecl&) {}
 
 void TypeChecker::visit(TypeAliasStmt& node) {
     // PEP 695 `type X = <expr>`: resolve the aliased type and register X in typeNames
@@ -1581,6 +1612,9 @@ void TypeChecker::visit(TypeAliasStmt& node) {
 }
 
 void TypeChecker::visit(Module& node) {
+    // ADR 054 - contracts register before anything resolves annotations
+    // against them (idempotent; check() also runs it for the entry module).
+    registerContracts(node);
     // Pre-pass: register all top-level class names so annotations referencing a class
     // defined later in the module resolve (else mutual refs fail "unknown type").
     for (auto& stmt : node.body) {

@@ -320,7 +320,8 @@ bool CodeGen::Impl::stmtEscapes(Stmt* s, const std::string& name) {
     // is treated as an escape (sound over-approximation).
     if (dynamic_cast<BreakStmt*>(s) || dynamic_cast<ContinueStmt*>(s) ||
         dynamic_cast<PassStmt*>(s) || dynamic_cast<ImportStmt*>(s) ||
-        dynamic_cast<FromImportStmt*>(s) || dynamic_cast<TypeAliasStmt*>(s))
+        dynamic_cast<FromImportStmt*>(s) || dynamic_cast<TypeAliasStmt*>(s) ||
+        dynamic_cast<ContractDecl*>(s))
         return false;
 
     return nodeMentionsName(s, name);

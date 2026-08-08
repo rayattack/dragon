@@ -583,9 +583,12 @@ void CodeGen::visit(ReturnStmt& node) {
                     impl_->emitIncrefByKind(retVal, kind);
                 }
             };
-            if (auto* nameExpr = dynamic_cast<NameExpr*>(node.value.get())) {
+            Expr* retSrc = node.value.get();
+            while (auto* castExpr = dynamic_cast<AsCastExpr*>(retSrc))
+                retSrc = castExpr->operand.get();
+            if (auto* nameExpr = dynamic_cast<NameExpr*>(retSrc)) {
                 increfIfHeap(impl_->lookupVarKind(nameExpr->name));
-            } else if (auto* attrExpr = dynamic_cast<AttributeExpr*>(node.value.get())) {
+            } else if (auto* attrExpr = dynamic_cast<AttributeExpr*>(retSrc)) {
                 // Field access returns a borrowed reference - incref to keep alive.
                 // Look up the field's VarKind from classFieldKinds for precise dispatch.
                 if (auto* objName = dynamic_cast<NameExpr*>(attrExpr->object.get())) {
@@ -621,11 +624,7 @@ void CodeGen::visit(ReturnStmt& node) {
                         }
                     }
                 }
-            } else if (auto* subExpr = dynamic_cast<SubscriptExpr*>(node.value.get())) {
-                // A subscript return (`return d[k]`, `lst[i]`) borrows into the container;
-                // incref before returning or the caller's take-ownership causes a use-after-free.
-                // EXCEPT a SLICE (`s[a:b]`) and a STRING element read (`s[i]`): both return a
-                // FRESH +1 the caller already owns, so increffing leaks one object per call.
+            } else if (auto* subExpr = dynamic_cast<SubscriptExpr*>(retSrc)) {
                 bool ownedStrElem = subExpr->object && subExpr->object->type &&
                     subExpr->object->type->kind() == Type::Kind::Str;
                 if (dynamic_cast<SliceExpr*>(subExpr->index.get()) == nullptr &&

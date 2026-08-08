@@ -282,6 +282,25 @@ bool InstanceType::equals(const Type& other) const {
 bool InstanceType::isSubtypeOf(const Type& other) const {
     // equals / Any / Union handled by the base.
     if (Type::isSubtypeOf(other)) return true;
+    // ADR 054 - value-position conformance is DECLARED, never inferred: an
+    // instance satisfies a contract position iff its class (or an ancestor)
+    // promised every atom in its header. A structurally-matching class that
+    // never promised does not pass here - the call-site check turns that
+    // into the teaching error naming both remedies (cast or promise).
+    if (other.kind() == Kind::Contract) {
+        const auto& ct = static_cast<const ContractType&>(other);
+        std::set<const ContractDecl*> promised;
+        for (const ClassType* cur = classType.get(); cur; ) {
+            promised.insert(cur->promisedContracts.begin(),
+                            cur->promisedContracts.end());
+            cur = (cur->parentClass && cur->parentClass->kind() == Kind::Class)
+                      ? static_cast<const ClassType*>(cur->parentClass.get())
+                      : nullptr;
+        }
+        for (auto* need : ct.atoms)
+            if (!promised.count(need)) return false;
+        return true;
+    }
     if (other.kind() != Kind::Instance) return false;
     const auto& o = static_cast<const InstanceType&>(other);
     if (!o.classType) return false;
@@ -296,6 +315,23 @@ bool InstanceType::isSubtypeOf(const Type& other) const {
             break;
     }
     return false;
+}
+
+// ContractType (ADR 054)
+bool ContractType::equals(const Type& other) const {
+    if (other.kind() != Kind::Contract) return false;
+    return atoms == static_cast<const ContractType&>(other).atoms;  // sorted+deduped
+}
+
+bool ContractType::isSubtypeOf(const Type& other) const {
+    if (Type::isSubtypeOf(other)) return true;
+    if (other.kind() != Kind::Contract) return false;
+    // Subset rule: a `{A, B}` value satisfies an `A` position.
+    const auto& o = static_cast<const ContractType&>(other);
+    for (auto* need : o.atoms)
+        if (std::find(atoms.begin(), atoms.end(), need) == atoms.end())
+            return false;
+    return true;
 }
 
 // UnionType
@@ -535,6 +571,12 @@ bool TypeChecker::check(Module& module) {
         impl_->typeNames[cd->name] = std::make_shared<InstanceType>(classType);
         impl_->define(cd->name, classType);
     }
+    // ADR 054 contract pre-pass: register every contract before field types
+    // resolve (a field or parameter may be contract-typed) and before any
+    // promise is checked. Class name shells from sub-pass 1 are already in
+    // typeNames, so signature annotations referencing classes resolve here.
+    registerContracts(module);
+
     // Sub-pass 2: register annotated field types onto each ClassType.
     for (auto& stmt : module.body) {
         auto* cd = dynamic_cast<ClassDecl*>(stmt.get());
@@ -834,6 +876,235 @@ void TypeChecker::initBuiltinTypes() {
 // Type Resolution
 //===----------------------------------------------------------------------===//
 
+//===----------------------------------------------------------------------===//
+// ADR 054 - type contracts
+//===----------------------------------------------------------------------===//
+
+// Renders "name(int, str) -> bool" for conformance diagnostics.
+static std::string contractSigToString(const std::string& name,
+                                       const FunctionType& ft) {
+    std::string s = name + "(";
+    for (size_t i = 0; i < ft.paramTypes.size(); ++i) {
+        if (i > 0) s += ", ";
+        s += ft.paramTypes[i] ? ft.paramTypes[i]->toString() : "?";
+    }
+    s += ")";
+    if (ft.returnType && ft.returnType->kind() != Type::Kind::None_ &&
+        ft.returnType->kind() != Type::Kind::Unknown)
+        s += " -> " + ft.returnType->toString();
+    return s;
+}
+
+void TypeChecker::registerContracts(Module& module) {
+    // Pass A - shells: register every contract NAME so composition and
+    // signatures resolve independent of declaration order.
+    std::vector<ContractDecl*> decls;
+    for (auto& stmt : module.body) {
+        auto* cd = dynamic_cast<ContractDecl*>(stmt.get());
+        if (!cd) continue;
+        if (impl_->contractByDecl.count(cd)) { decls.push_back(cd); continue; }
+        if (impl_->typeNames.count(cd->name)) {
+            error(cd->location(), "cannot declare contract '" + cd->name +
+                  "': the name already refers to another type");
+            continue;
+        }
+        auto ct = std::make_shared<ContractType>();
+        ct->display = cd->name;
+        if (!cd->methods.empty()) ct->atoms.push_back(cd);
+        impl_->contractByDecl[cd] = ct;
+        impl_->typeNames[cd->name] = ct;
+        // Also bind in module scope so the contract EXPORTS like a class and
+        // `from mod import Amazing` works. Contracts are not values - calling
+        // one is rejected at the call site.
+        impl_->define(cd->name, ct);
+        decls.push_back(cd);
+    }
+    // Pass B - own method signatures.
+    for (auto* cd : decls) {
+        auto ct = impl_->contractByDecl[cd];
+        if (!ct || !ct->methods.empty()) continue;
+        for (auto& m : cd->methods) {
+            std::vector<std::shared_ptr<Type>> paramTypes;
+            for (auto& p : m->params)
+                paramTypes.push_back(resolveType(p.type.get()));
+            auto ret = m->returnType ? resolveType(m->returnType.get())
+                                     : impl_->noneType;
+            auto ft = std::make_shared<FunctionType>(paramTypes, ret);
+            fillFuncMeta(*ft, m->params, /*isMethod=*/true,
+                         /*hasImplicitSelf=*/true, /*isClassMethod=*/false);
+            if (ct->methods.count(m->name)) {
+                error(m->location(), "contract '" + cd->name +
+                      "' declares method '" + m->name + "' more than once");
+                continue;
+            }
+            ct->methods[m->name] = ft;
+            ct->methodOwner[m->name] = cd;
+        }
+    }
+    // Pass C - composition merge (`type C(A, B) {}` unions the sets).
+    // Recursive with a cycle guard; bases may live in this module or be
+    // imported (resolveContractRef covers both).
+    std::set<const ContractDecl*> merging;
+    std::function<void(ContractDecl*)> mergeBases = [&](ContractDecl* cd) {
+        auto ct = impl_->contractByDecl[cd];
+        if (!ct) return;
+        if (merging.count(cd)) {
+            error(cd->location(), "contract composition cycle through '" +
+                  cd->name + "'");
+            return;
+        }
+        merging.insert(cd);
+        for (auto& baseName : cd->bases) {
+            // Merge a sibling declared later first, so its own merge ran.
+            for (auto* other : decls)
+                if (other->name == baseName) { mergeBases(other); break; }
+            auto base = resolveContractRef(baseName, cd->location(), true);
+            if (!base) continue;
+            for (auto* a : base->atoms)
+                if (std::find(ct->atoms.begin(), ct->atoms.end(), a) ==
+                    ct->atoms.end())
+                    ct->atoms.push_back(a);
+            for (auto& [mname, mtype] : base->methods) {
+                auto exist = ct->methods.find(mname);
+                if (exist == ct->methods.end()) {
+                    ct->methods[mname] = mtype;
+                    ct->methodOwner[mname] = base->methodOwner.at(mname);
+                } else if (!exist->second->equals(*mtype)) {
+                    error(cd->location(), "contract '" + cd->name +
+                          "' composes conflicting signatures for method '" +
+                          mname + "' - duplicate names must agree exactly");
+                }
+            }
+        }
+        std::sort(ct->atoms.begin(), ct->atoms.end());
+        merging.erase(cd);
+    };
+    for (auto* cd : decls) mergeBases(cd);
+    for (auto* cd : decls) {
+        auto ct = impl_->contractByDecl[cd];
+        if (ct && ct->methods.empty())
+            error(cd->location(), "contract '" + cd->name +
+                  "' declares no methods (an empty contract constrains "
+                  "nothing)");
+    }
+}
+
+std::shared_ptr<ContractType> TypeChecker::resolveContractRef(
+    const std::string& name, const SourceLocation& loc, bool reportErrors) {
+    std::shared_ptr<Type> found;
+    auto it = impl_->typeNames.find(name);
+    if (it != impl_->typeNames.end()) found = it->second;
+    if (!found) found = impl_->lookup(name);
+    if (!found) {
+        if (reportErrors)
+            error(loc, "unknown contract '" + name + "'");
+        return nullptr;
+    }
+    if (found->kind() != Type::Kind::Contract) {
+        if (reportErrors)
+            error(loc, "'" + name + "' is not a contract (declare one with "
+                  "`type " + name + " { def ... }`)");
+        return nullptr;
+    }
+    return std::static_pointer_cast<ContractType>(found);
+}
+
+std::shared_ptr<ContractType> TypeChecker::resolveContractSet(
+    const std::vector<std::string>& names, const SourceLocation& loc,
+    bool reportErrors) {
+    if (names.empty()) return nullptr;
+    if (names.size() == 1) return resolveContractRef(names[0], loc, reportErrors);
+    auto merged = std::make_shared<ContractType>();
+    std::string display = "{";
+    bool ok = true;
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (i > 0) display += ", ";
+        display += names[i];
+        auto ct = resolveContractRef(names[i], loc, reportErrors);
+        if (!ct) { ok = false; continue; }
+        for (auto* a : ct->atoms)
+            if (std::find(merged->atoms.begin(), merged->atoms.end(), a) ==
+                merged->atoms.end())
+                merged->atoms.push_back(a);
+        for (auto& [mname, mtype] : ct->methods) {
+            auto exist = merged->methods.find(mname);
+            if (exist == merged->methods.end()) {
+                merged->methods[mname] = mtype;
+                merged->methodOwner[mname] = ct->methodOwner.at(mname);
+            } else if (!exist->second->equals(*mtype)) {
+                if (reportErrors)
+                    error(loc, "contract set combines conflicting signatures "
+                          "for method '" + mname + "'");
+                ok = false;
+            }
+        }
+    }
+    if (!ok) return nullptr;
+    display += "}";
+    merged->display = display;
+    std::sort(merged->atoms.begin(), merged->atoms.end());
+    return merged;
+}
+
+std::vector<std::string> TypeChecker::contractConformanceProblems(
+    const ClassType& cls, const ContractType& ct) {
+    std::vector<std::string> problems;
+    // Missing/mismatched returns compare as None so `def m()` (no annotation)
+    // on either side means "returns None".
+    auto norm = [&](const std::shared_ptr<Type>& t) -> std::shared_ptr<Type> {
+        return (!t || t->kind() == Type::Kind::Unknown)
+                   ? std::static_pointer_cast<Type>(impl_->noneType) : t;
+    };
+    auto sigMatches = [&](const Type& have, const FunctionType& want) {
+        if (have.kind() != Type::Kind::Function) return false;
+        auto& hf = static_cast<const FunctionType&>(have);
+        if (hf.paramTypes.size() != want.paramTypes.size()) return false;
+        for (size_t i = 0; i < hf.paramTypes.size(); ++i) {
+            auto a = norm(hf.paramTypes[i]);
+            auto b = norm(want.paramTypes[i]);
+            if (!a->equals(*b)) return false;
+        }
+        return norm(hf.returnType)->equals(*norm(want.returnType));
+    };
+    for (auto& [mname, mtype] : ct.methods) {
+        auto& want = static_cast<FunctionType&>(*mtype);
+        // Flattened lookup: this class, then the parent chain.
+        std::shared_ptr<Type> found;
+        const std::vector<std::shared_ptr<Type>>* overloads = nullptr;
+        for (const ClassType* cur = &cls; cur; ) {
+            auto mIt = cur->methods.find(mname);
+            if (mIt != cur->methods.end()) {
+                found = mIt->second;
+                auto oIt = cur->methodOverloads.find(mname);
+                if (oIt != cur->methodOverloads.end()) overloads = &oIt->second;
+                break;
+            }
+            cur = (cur->parentClass &&
+                   cur->parentClass->kind() == Type::Kind::Class)
+                      ? static_cast<const ClassType*>(cur->parentClass.get())
+                      : nullptr;
+        }
+        if (!found) {
+            problems.push_back("missing method '" +
+                               contractSigToString(mname, want) + "'");
+            continue;
+        }
+        bool ok = false;
+        if (overloads) {
+            for (auto& o : *overloads)
+                if (o && sigMatches(*o, want)) { ok = true; break; }
+        } else {
+            ok = sigMatches(*found, want);
+        }
+        if (!ok)
+            problems.push_back("method '" + mname +
+                               "' does not match the contract signature '" +
+                               contractSigToString(mname, want) + "'");
+    }
+    std::sort(problems.begin(), problems.end());
+    return problems;
+}
+
 std::shared_ptr<Type> TypeChecker::resolveType(TypeExpr* typeExpr) {
     if (!typeExpr) return impl_->unknownType;
 
@@ -888,8 +1159,19 @@ std::shared_ptr<Type> TypeChecker::resolveType(TypeExpr* typeExpr) {
             auto cls = std::static_pointer_cast<ClassType>(looked);
             return std::make_shared<InstanceType>(cls);
         }
+        // ADR 054 - an imported contract (`from shapes import Amazing`) binds
+        // in scope, not typeNames; a bare contract name in type position is
+        // the contract itself.
+        if (looked && looked->kind() == Type::Kind::Contract) return looked;
         error(named->location(), "unknown type '" + named->name + "'");
         return impl_->unknownType;
+    }
+
+    // ADR 054 - braced contract set `{Amazing, Speaker}` in annotation or
+    // bound position: one merged intersection type.
+    if (auto* cs = dynamic_cast<ContractSetTypeExpr*>(typeExpr)) {
+        auto ct = resolveContractSet(cs->names, cs->location(), true);
+        return ct ? std::static_pointer_cast<Type>(ct) : impl_->unknownType;
     }
 
     if (auto* generic = dynamic_cast<GenericTypeExpr*>(typeExpr)) {

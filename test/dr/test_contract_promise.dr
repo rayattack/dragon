@@ -1,0 +1,100 @@
+"""ADR 054 producer promises: `class Dog(Animal) -> Amazing { }`.
+
+The header promise is the class author's declaration of conformance, checked
+at the class site against the FLATTENED method set - an inherited method
+satisfies a promised contract, and a promised class flows into contract-typed
+positions with no cast anywhere. Composition (`type C(A, B) {}`) unions the
+signature sets, so promising the composition proves every member atom.
+"""
+
+from unittest import TestCase, main
+
+type Amazing {
+    def amazing_method() -> str
+}
+
+type Speaker {
+    def speak() -> str
+}
+
+type Performer(Amazing, Speaker) {}
+
+class Base {
+    def amazing_method() -> str { return "base-amaze" }
+}
+
+class Star(Base) -> Performer {
+    def speak() -> str { return "la la" }
+}
+
+class Hermit -> Amazing {
+    def amazing_method() -> str { return "quietly amazing" }
+}
+
+class Loud(Star) {
+    def amazing_method() -> str { return "LOUD-AMAZE" }
+}
+
+def solo(x: Amazing) -> str {
+    return x.amazing_method()
+}
+
+def stage(x: Performer) -> str {
+    return x.amazing_method() + "+" + x.speak()
+}
+
+def wants_both(x: {Amazing, Speaker}) -> str {
+    return x.speak()
+}
+
+
+class TestContractPromise(TestCase) {
+    def test_promise_only_class_no_base() -> None {
+        h: Hermit = Hermit()
+        self.assertEqual(solo(h), "quietly amazing")
+    }
+
+    def test_inherited_method_satisfies_promise() -> None {
+        """Star never defines amazing_method; Base's implementation satisfies
+        the Amazing half of the promised Performer composition."""
+        s: Star = Star()
+        self.assertEqual(stage(s), "base-amaze+la la")
+    }
+
+    def test_composed_promise_covers_member_atoms() -> None {
+        """Promising Performer(Amazing, Speaker) proves BOTH atoms, so a Star
+        flows into an Amazing position and a {Amazing, Speaker} position
+        with no cast."""
+        s: Star = Star()
+        self.assertEqual(solo(s), "base-amaze")
+        self.assertEqual(wants_both(s), "la la")
+    }
+
+    def test_promised_values_in_container() -> None {
+        s: Star = Star()
+        h: Hermit = Hermit()
+        acts: list[Amazing] = [s, h]
+        joined: list[str] = []
+        for a in acts {
+            joined.append(a.amazing_method())
+        }
+        self.assertEqual(joined, ["base-amaze", "quietly amazing"])
+    }
+
+    def test_override_wins_through_colored_slot() -> None {
+        """A subclass of a promised class dispatches its own override through
+        the same colored slot (conformance closes over inheritance)."""
+        s: Star = Star()
+        l: Loud = Loud()
+        acts: list[Amazing] = [s, l]
+        joined: list[str] = []
+        for a in acts {
+            joined.append(a.amazing_method())
+        }
+        self.assertEqual(joined, ["base-amaze", "LOUD-AMAZE"])
+    }
+}
+
+
+main([TestContractPromise()])
+

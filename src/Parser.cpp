@@ -407,7 +407,7 @@ std::unique_ptr<Expr> Parser::notExpr() {
 }
 
 std::unique_ptr<Expr> Parser::comparison() {
-    auto expr = bitwiseOr();
+    auto expr = asCast();
 
     // Recognize a comparison operator at the current cursor, including the
     // two-word forms `not in` and `is not`. On a match the cursor is advanced
@@ -463,13 +463,13 @@ std::unique_ptr<Expr> Parser::comparison() {
     operands.push_back(std::move(expr));
     operators.push_back(firstOp);
     skipNewlines();
-    operands.push_back(bitwiseOr());
+    operands.push_back(asCast());
 
     Token nextOp;
     while (tryConsumeCompOp(nextOp)) {
         operators.push_back(nextOp);
         skipNewlines();
-        operands.push_back(bitwiseOr());
+        operands.push_back(asCast());
     }
 
     if (operators.size() == 1) {
@@ -484,6 +484,37 @@ std::unique_ptr<Expr> Parser::comparison() {
     chain->operands = std::move(operands);
     chain->operators = std::move(operators);
     return chain;
+}
+
+// ADR 054 - conformance cast: `dog as Amazing` / `dog as {Amazing, Speaker}`.
+// Binds tighter than comparisons (`d as A == e` compares the cast result) and
+// looser than arithmetic; .dr mode only (`as` in .py stays statement syntax).
+// A with-item's trailing `as name` binder also lands here first -
+// withStatement() unwraps that shape back into the binder (see AsCastExpr).
+std::unique_ptr<Expr> Parser::asCast() {
+    auto expr = bitwiseOr();
+    if (!impl_->options.isDragonFile) return expr;
+    while (check(TokenType::AS)) {
+        advance();
+        auto cast = std::make_unique<AsCastExpr>();
+        cast->setLocation(previous().location());
+        cast->operand = std::move(expr);
+        if (match(TokenType::LEFT_BRACE)) {
+            cast->fromBracedSet = true;
+            do {
+                cast->contracts.push_back(std::string(consume(
+                    TokenType::IDENTIFIER,
+                    "Expect contract name in 'as' set").lexeme()));
+            } while (match(TokenType::COMMA));
+            consume(TokenType::RIGHT_BRACE, "Expect '}' after contract set");
+        } else {
+            cast->contracts.push_back(std::string(consume(
+                TokenType::IDENTIFIER,
+                "Expect contract name after 'as'").lexeme()));
+        }
+        expr = std::move(cast);
+    }
+    return expr;
 }
 
 std::unique_ptr<Expr> Parser::bitwiseOr() {

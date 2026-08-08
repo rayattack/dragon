@@ -1,0 +1,159 @@
+"""ADR 054 type contracts: consumer casts, contract-typed flow, coloring.
+
+Ordinary code - two unrelated classes share a shape, and a function wants to
+accept both:
+
+    type Amazing { def amazing_method() -> str }
+    def show(x: Amazing) -> str { return x.amazing_method() }
+    show(dog)               # promised in the class header
+    show(robot as Amazing)  # asserted at the call site
+
+You did nothing wrong if you forget the assertion - the compile error names
+both remedies. At runtime a contract-typed value is an ordinary instance
+pointer; dispatch goes through globally colored vtable slots, so every value
+below must come back exactly as written, through params, locals, containers,
+fields, returns, and monomorphized bounds.
+"""
+
+from unittest import TestCase, main
+
+type Amazing {
+    def amazing_method() -> str
+    def rating() -> int
+}
+
+type Speaker {
+    def speak() -> str
+}
+
+class Dog -> Amazing, Speaker {
+    def amazing_method() -> str { return "woof" }
+    def rating() -> int { return 10 }
+    def speak() -> str { return "bark" }
+}
+
+class Robot {
+    def amazing_method() -> str { return "beep" }
+    def rating() -> int { return 7 }
+    def speak() -> str { return "whirr" }
+}
+
+def show(x: Amazing) -> str {
+    return x.amazing_method()
+}
+
+def duo(x: {Amazing, Speaker}) -> str {
+    return x.amazing_method() + "+" + x.speak()
+}
+
+def show_mono[T: Amazing](x: T) -> str {
+    return x.amazing_method()
+}
+
+def both_mono[T: {Amazing, Speaker}](x: T) -> str {
+    return x.speak() + "/" + x.amazing_method()
+}
+
+def pick(flag: bool) -> Amazing {
+    d: Dog = Dog()
+    r: Robot = Robot()
+    if flag {
+        return d
+    }
+    return r as Amazing
+}
+
+class Kennel {
+    def(resident: Amazing) {
+        self.resident: Amazing = resident
+    }
+    def talk() -> str {
+        return self.resident.amazing_method()
+    }
+}
+
+
+class TestContractDispatch(TestCase) {
+    def test_promised_flows_without_cast() -> None {
+        d: Dog = Dog()
+        self.assertEqual(show(d), "woof")
+    }
+
+    def test_cast_then_call_through_param() -> None {
+        r: Robot = Robot()
+        self.assertEqual(show(r as Amazing), "beep")
+    }
+
+    def test_cast_into_local_then_call() -> None {
+        r: Robot = Robot()
+        a: Amazing = r as Amazing
+        self.assertEqual(a.amazing_method(), "beep")
+        self.assertEqual(a.rating(), 7)
+    }
+
+    def test_plural_set_annotation_and_cast() -> None {
+        d: Dog = Dog()
+        r: Robot = Robot()
+        self.assertEqual(duo(d), "woof+bark")
+        self.assertEqual(duo(r as {Amazing, Speaker}), "beep+whirr")
+    }
+
+    def test_heterogeneous_list_iteration() -> None {
+        d: Dog = Dog()
+        r: Robot = Robot()
+        pack: list[Amazing] = [d, r as Amazing]
+        total: int = 0
+        names: list[str] = []
+        for p in pack {
+            total = total + p.rating()
+            names.append(p.amazing_method())
+        }
+        self.assertEqual(total, 17)
+        self.assertEqual(names, ["woof", "beep"])
+    }
+
+    def test_bound_monomorphizes_both_classes() -> None {
+        d: Dog = Dog()
+        r: Robot = Robot()
+        self.assertEqual(show_mono(d), "woof")
+        self.assertEqual(show_mono(r), "beep")
+        self.assertEqual(both_mono(d), "bark/woof")
+        self.assertEqual(both_mono(r), "whirr/beep")
+    }
+
+    def test_contract_return_position() -> None {
+        self.assertEqual(pick(true).amazing_method(), "woof")
+        self.assertEqual(pick(false).amazing_method(), "beep")
+    }
+
+    def test_contract_typed_field() -> None {
+        r: Robot = Robot()
+        k: Kennel = Kennel(r as Amazing)
+        self.assertEqual(k.talk(), "beep")
+    }
+
+    def test_subset_review_of_plural_value() -> None {
+        d: Dog = Dog()
+        pair: {Amazing, Speaker} = d
+        a: Amazing = pair as Amazing
+        self.assertEqual(a.rating(), 10)
+    }
+
+    def test_repeated_dispatch_stays_stable() -> None {
+        """A few thousand colored-slot calls: any refcount imbalance on the
+        receiver or the returned strings shows up under the ASan job."""
+        r: Robot = Robot()
+        a: Amazing = r as Amazing
+        i: int = 0
+        acc: int = 0
+        while i < 3000 {
+            acc = acc + a.rating() + len(a.amazing_method())
+            i = i + 1
+        }
+        self.assertEqual(acc, 33000)
+    }
+}
+
+
+main([TestContractDispatch()])
+

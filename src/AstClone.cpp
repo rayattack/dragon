@@ -212,6 +212,12 @@ std::unique_ptr<TypeExpr> cloneTypeExpr(const TypeExpr* t, const TypeSubst& subs
         setLoc(r, *t);
         return r;
     }
+    if (auto* cs = dynamic_cast<const ContractSetTypeExpr*>(t)) {
+        auto r = std::make_unique<ContractSetTypeExpr>();
+        r->names = cs->names;
+        setLoc(r, *t);
+        return r;
+    }
     return nullptr;
 }
 
@@ -421,6 +427,14 @@ std::unique_ptr<Expr> cloneExpr(const Expr* e, const TypeSubst& subst) {
     if (auto* n = dynamic_cast<const AwaitExpr*>(e)) {
         auto r = std::make_unique<AwaitExpr>();
         r->operand = cloneExpr(n->operand.get(), subst);
+        setLoc(r, *e);
+        return r;
+    }
+    if (auto* n = dynamic_cast<const AsCastExpr*>(e)) {
+        auto r = std::make_unique<AsCastExpr>();
+        r->operand = cloneExpr(n->operand.get(), subst);
+        r->contracts = n->contracts;
+        r->fromBracedSet = n->fromBracedSet;
         setLoc(r, *e);
         return r;
     }
@@ -722,6 +736,21 @@ std::unique_ptr<Stmt> cloneStmt(const Stmt* s, const TypeSubst& subst) {
         r->body = cloneBody(n->body, subst);
         r->decorators = cloneExprVec(n->decorators, subst);
         r->docstring = n->docstring;
+        r->promises = n->promises;
+        setLoc(r, *s);
+        return r;
+    }
+    if (auto* n = dynamic_cast<const ContractDecl*>(s)) {
+        auto r = std::make_unique<ContractDecl>();
+        r->name = n->name;
+        r->bases = n->bases;
+        for (auto& m : n->methods) {
+            auto cloned = cloneStmt(m.get(), subst);
+            if (auto* fd = dynamic_cast<FunctionDecl*>(cloned.get())) {
+                cloned.release();
+                r->methods.emplace_back(fd);
+            }
+        }
         setLoc(r, *s);
         return r;
     }

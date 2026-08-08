@@ -131,12 +131,22 @@ std::unique_ptr<Stmt> Parser::statement() {
         return matchStatement();
     }
 
-    // Soft keyword: type alias at statement position (PEP 695)
+    // Soft keyword: `type` at statement position. `=` after the name is a
+    // PEP 695 alias; `{` or `(` opens an ADR 054 contract declaration.
     if (check(TokenType::IDENTIFIER) && peek().lexeme() == "type") {
         advance(); // skip 'type'
+        auto typeLoc = previous().location();
+        std::string typeName = std::string(
+            consume(TokenType::IDENTIFIER, "Expect type name").lexeme());
+        if (impl_->options.isDragonFile &&
+            (check(TokenType::LEFT_BRACE) || check(TokenType::LEFT_PAREN))) {
+            auto contract = contractDeclaration(std::move(typeName));
+            contract->setLocation(typeLoc);
+            return contract;
+        }
         auto stmt = std::make_unique<TypeAliasStmt>();
-        stmt->setLocation(previous().location());
-        stmt->name = std::string(consume(TokenType::IDENTIFIER, "Expect type alias name").lexeme());
+        stmt->setLocation(typeLoc);
+        stmt->name = std::move(typeName);
         consume(TokenType::EQUAL, "Expect '=' after type alias name");
         stmt->value = parseType();
         return stmt;
@@ -629,6 +639,22 @@ std::unique_ptr<Stmt> Parser::withStatement() {
         WithStmt::WithItem item;
         item.contextExpr = expression();
         if (match(TokenType::AS)) item.optionalVars = expression();
+        // ADR 054 gave expression-position `as` to conformance casts, so a
+        // .dr with-item's trailing binder arrives as a cast: `open() as f`
+        // parses to AsCastExpr(open(), {f}). In with-item position a trailing
+        // BARE single name after `as` is the binder, never a cast (the braced
+        // form `as {A}` stays a cast); unwrap it back into binder shape.
+        if (!item.optionalVars) {
+            if (auto* cast = dynamic_cast<AsCastExpr*>(item.contextExpr.get())) {
+                if (cast->contracts.size() == 1 && !cast->fromBracedSet) {
+                    auto bind = std::make_unique<NameExpr>();
+                    bind->name = cast->contracts[0];
+                    bind->setLocation(cast->location());
+                    item.optionalVars = std::move(bind);
+                    item.contextExpr = std::move(cast->operand);
+                }
+            }
+        }
         stmt->items.push_back(std::move(item));
     } while (match(TokenType::COMMA));
     stmt->body = parseBlock();
@@ -1551,6 +1577,16 @@ std::unique_ptr<Stmt> Parser::classDeclaration() {
         }
         consume(TokenType::RIGHT_PAREN, "Expect ')'");
     }
+    // ADR 054 producer promise: `class Dog(Animal) -> Amazing, Speaker { }`.
+    // The comma list is delimited by `->` and the body `{`, so it needs no
+    // braces; each name must resolve to a contract (TypeChecker enforces).
+    if (impl_->options.isDragonFile && match(TokenType::ARROW)) {
+        do {
+            decl->promises.push_back(std::string(consume(
+                TokenType::IDENTIFIER,
+                "Expect contract name after '->'").lexeme()));
+        } while (match(TokenType::COMMA));
+    }
     bool savedInClass = impl_->inClassBody;
     impl_->inClassBody = true;
     decl->body = parseBlock();
@@ -1567,6 +1603,66 @@ std::unique_ptr<Stmt> Parser::classDeclaration() {
         }
     }
 
+    return decl;
+}
+
+/// ADR 054 - parse a contract declaration body. `type` and the name are
+/// already consumed by statement(); cursor sits on `(` (composition) or `{`.
+/// The body is .pyi-shaped: only bodiless `def name(params) -> ret`
+/// signatures - fields, statements, method bodies, and parameter defaults
+/// are compile errors here, so a contract can never smuggle state or code.
+std::unique_ptr<Stmt> Parser::contractDeclaration(std::string name) {
+    auto decl = std::make_unique<ContractDecl>();
+    decl->name = std::move(name);
+    if (match(TokenType::LEFT_PAREN)) {
+        if (!check(TokenType::RIGHT_PAREN)) {
+            do {
+                decl->bases.push_back(std::string(consume(
+                    TokenType::IDENTIFIER,
+                    "Expect contract name in composition list").lexeme()));
+            } while (match(TokenType::COMMA));
+        }
+        consume(TokenType::RIGHT_PAREN, "Expect ')' after composition list");
+    }
+    consume(TokenType::LEFT_BRACE, "Expect '{' to open the contract body");
+    while (!check(TokenType::RIGHT_BRACE) && !isAtEnd()) {
+        while (match(TokenType::NEWLINE) || match(TokenType::SEMICOLON)) {}
+        if (check(TokenType::RIGHT_BRACE)) break;
+        if (!check(TokenType::DEF)) {
+            error(peek(), "a contract body contains only 'def' method "
+                  "signatures - no fields, statements, or values");
+            synchronize();
+            continue;
+        }
+        advance();  // consume 'def'
+        auto method = std::make_unique<FunctionDecl>();
+        method->setLocation(previous().location());
+        method->name = std::string(consume(
+            TokenType::IDENTIFIER, "Expect method name after 'def'").lexeme());
+        consume(TokenType::LEFT_PAREN, "Expect '(' after method name");
+        method->params = parseParameters();
+        consume(TokenType::RIGHT_PAREN, "Expect ')' after parameters");
+        if (match(TokenType::ARROW)) method->returnType = parseType();
+        method->isMethod = true;
+        method->hasImplicitSelf = true;
+        if (check(TokenType::LEFT_BRACE)) {
+            error(peek(), "contract methods declare signatures only - the "
+                  "implementation lives in the conforming class");
+            synchronize();
+        }
+        for (auto& p : method->params) {
+            if (p.defaultValue) {
+                error("contract method parameters take no default values");
+                p.defaultValue = nullptr;
+            }
+        }
+        decl->methods.push_back(std::move(method));
+    }
+    consume(TokenType::RIGHT_BRACE, "Expect '}' to close the contract body");
+    if (decl->methods.empty() && decl->bases.empty()) {
+        error(previous(), "a contract must declare at least one method "
+              "signature (an empty contract constrains nothing)");
+    }
     return decl;
 }
 
@@ -1696,6 +1792,22 @@ std::unique_ptr<TypeExpr> Parser::parseUnionType() {
 }
 
 std::unique_ptr<TypeExpr> Parser::parsePrimaryType() {
+    // ADR 054 - a braced contract set `{Amazing, Speaker}` in type position
+    // (annotations and generic bounds). Braces exist to group a PLURAL set
+    // where a bare comma would be ambiguous; a singleton set parses and means
+    // the same as the bare name.
+    if (impl_->options.isDragonFile && check(TokenType::LEFT_BRACE)) {
+        advance();
+        auto cs = std::make_unique<ContractSetTypeExpr>();
+        cs->setLocation(previous().location());
+        do {
+            cs->names.push_back(std::string(consume(
+                TokenType::IDENTIFIER,
+                "Expect contract name in contract set").lexeme()));
+        } while (match(TokenType::COMMA));
+        consume(TokenType::RIGHT_BRACE, "Expect '}' after contract set");
+        return cs;
+    }
     if (match(TokenType::NONE)) {
         auto t = std::make_unique<NamedTypeExpr>();
         t->name = "None";

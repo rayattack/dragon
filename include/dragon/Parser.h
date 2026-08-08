@@ -111,6 +111,7 @@ private:
     std::unique_ptr<Expr> andExpr();
     std::unique_ptr<Expr> notExpr();
     std::unique_ptr<Expr> comparison();
+    std::unique_ptr<Expr> asCast();       // ADR 054 - `x as Amazing` / `x as {A, B}`
     std::unique_ptr<Expr> bitwiseOr();
     std::unique_ptr<Expr> bitwiseXor();
     std::unique_ptr<Expr> bitwiseAnd();
@@ -173,6 +174,10 @@ private:
     std::unique_ptr<Stmt> functionDeclaration();
     std::unique_ptr<Stmt> classDeclaration();
     std::unique_ptr<Stmt> enumDeclaration();
+    /// ADR 054 - `type Name { def sig... }` / `type Name(A, B) { ... }`.
+    /// Called from statement() with the contextual `type` and the contract
+    /// name already consumed (the alias form `type X = T` stays there).
+    std::unique_ptr<Stmt> contractDeclaration(std::string name);
 
     // Dragon-specific (.dr mode)
     std::unique_ptr<Stmt> constDeclaration();

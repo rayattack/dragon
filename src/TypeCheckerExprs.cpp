@@ -600,6 +600,43 @@ void TypeChecker::visit(CallExpr& node) {
                 continue;
             }
             if (!at->isSubtypeOf(*pt)) {
+                // ADR 054 teaching error: a structurally-matching class that
+                // never DECLARED conformance is rejected with both remedies
+                // spelled out (consumer cast, producer promise).
+                if (pt->kind() == Type::Kind::Contract &&
+                    at->kind() == Type::Kind::Instance) {
+                    auto& ct = static_cast<ContractType&>(*pt);
+                    auto& inst = static_cast<InstanceType&>(*at);
+                    auto problems =
+                        contractConformanceProblems(*inst.classType, ct);
+                    std::string head =
+                        "argument " + std::to_string(i + 1) + " of type '" +
+                        at->toString() + "' is not assignable to parameter "
+                        "type '" + pt->toString() + "'";
+                    if (problems.empty()) {
+                        std::string argName = "value";
+                        if (auto* nm =
+                                dynamic_cast<NameExpr*>(node.args[i].get()))
+                            argName = nm->name;
+                        // Promise spelling is the bare comma list (strip the
+                        // set braces when the target is plural).
+                        std::string promise = ct.display;
+                        if (!promise.empty() && promise.front() == '{')
+                            promise = promise.substr(1, promise.size() - 2);
+                        error(node.args[i]->location(), head + ". " +
+                              inst.classType->name + " has a matching method "
+                              "set but no declared conformance - cast at the "
+                              "call site ('" + argName + " as " + ct.display +
+                              "') or promise it on the class ('class " +
+                              inst.classType->name + " -> " + promise + "')");
+                    } else {
+                        std::string msg = head + ":";
+                        for (auto& pr : problems) msg += " " + pr + ";";
+                        msg.pop_back();
+                        error(node.args[i]->location(), msg);
+                    }
+                    continue;
+                }
                 error(node.args[i]->location(),
                       "argument " + std::to_string(i + 1) + " of type '" +
                       at->toString() + "' is not assignable to parameter "
@@ -607,6 +644,15 @@ void TypeChecker::visit(CallExpr& node) {
             }
         }
     };
+
+    // ADR 054 - a contract is a shape, not a class: it has no constructor.
+    if (calleeType->kind() == Type::Kind::Contract) {
+        error(node.location(), "cannot construct a contract ('" +
+              calleeType->toString() + "'); instantiate a conforming class "
+              "instead");
+        node.type = impl_->unknownType;
+        return;
+    }
 
     if (calleeType->kind() == Type::Kind::Function) {
         auto& ft = static_cast<FunctionType&>(*calleeType);
@@ -901,6 +947,65 @@ void TypeChecker::visit(AttributeExpr& node) {
     }
 }
 
+// ADR 054 - consumer conformance assertion. Upward only, compile-time only:
+// the operand's STATIC class must satisfy every named contract structurally,
+// and on success the cast costs nothing at runtime (same pointer). The proof
+// is stamped onto the class's ClassDecl so CodeGen's coloring pre-pass knows
+// whose vtables carry the contract slots.
+void TypeChecker::visit(AsCastExpr& node) {
+    auto opType = inferType(node.operand.get());
+    auto ct = resolveContractSet(node.contracts, node.location(), true);
+    if (!ct) { node.type = impl_->unknownType; return; }
+
+    if (opType && opType->kind() == Type::Kind::Contract) {
+        // Re-view of an already contract-typed value: legal when the target
+        // is a subset of what the value already carries ({A, B} -> A).
+        auto& src = static_cast<ContractType&>(*opType);
+        for (auto* need : ct->atoms) {
+            if (std::find(src.atoms.begin(), src.atoms.end(), need) ==
+                src.atoms.end()) {
+                error(node.location(), "'as' goes upward only: '" +
+                      src.display + "' does not include contract '" +
+                      need->name + "' - narrow with isinstance instead");
+                node.type = impl_->unknownType;
+                return;
+            }
+        }
+        node.resolvedDecls = ct->atoms;
+        node.type = ct;
+        return;
+    }
+
+    if (!opType || opType->kind() != Type::Kind::Instance) {
+        error(node.location(), "'as' asserts contract conformance on a class "
+              "instance; the operand is '" +
+              (opType ? opType->toString() : std::string("<unknown>")) + "'");
+        node.type = impl_->unknownType;
+        return;
+    }
+
+    auto& inst = static_cast<InstanceType&>(*opType);
+    auto problems = contractConformanceProblems(*inst.classType, *ct);
+    if (!problems.empty()) {
+        std::string msg = "'" + inst.classType->name +
+                          "' does not satisfy contract '" + ct->display + "'";
+        for (auto& p : problems) msg += "; " + p;
+        error(node.location(), msg);
+        node.type = impl_->unknownType;
+        return;
+    }
+    node.resolvedDecls = ct->atoms;
+    if (inst.classType->decl) {
+        auto& cc = inst.classType->decl->conformedContracts;
+        for (auto* a : ct->atoms)
+            if (std::find(cc.begin(), cc.end(), a) == cc.end())
+                cc.push_back(a);
+    }
+    node.type = ct;
+}
+
+void TypeChecker::visit(ContractSetTypeExpr&) {}
+
 void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
     // `obj.m.__doc__` is a SUPPORTED method chain (no method value at runtime:
     // codegen pattern-matches the chain and emits the cached .rodata constant),
@@ -934,6 +1039,23 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
             node.type = impl_->unknownType;
             return;
         }
+    }
+
+    // ADR 054 - member access on a contract-typed receiver resolves against
+    // the contract's signature set. Contracts declare methods only, so any
+    // other name is a clean error naming the contract. A bounded `T:
+    // {Amazing}` lands here too via the bound rewrite above.
+    if (objType && objType->kind() == Type::Kind::Contract) {
+        auto& ct = static_cast<ContractType&>(*objType);
+        auto mIt = ct.methods.find(node.attribute);
+        if (mIt != ct.methods.end()) {
+            node.type = mIt->second;
+            return;
+        }
+        error(node.location(), "contract '" + ct.display +
+              "' declares no method '" + node.attribute + "'");
+        node.type = impl_->unknownType;
+        return;
     }
 
     // Commandment #3: a member access on a statically-`Any` receiver cannot be

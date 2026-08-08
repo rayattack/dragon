@@ -523,6 +523,9 @@ std::string CodeGen::Impl::resolveExprClassName(Expr* expr) {
 
 CodeGen::Impl::VarKind CodeGen::Impl::resolveExprVarKind(Expr* expr) {
         if (!expr) return VarKind::Other;
+        // ADR 054 - a conformance cast is its operand at runtime.
+        if (auto* cast = dynamic_cast<AsCastExpr*>(expr))
+            return resolveExprVarKind(cast->operand.get());
         if (auto* nameExpr = dynamic_cast<NameExpr*>(expr))
             return lookupVarKind(nameExpr->name);
         if (auto* sub = dynamic_cast<SubscriptExpr*>(expr)) {
@@ -538,6 +541,9 @@ CodeGen::Impl::VarKind CodeGen::Impl::resolveExprVarKind(Expr* expr) {
                     case Type::Kind::Tuple:    return VarKind::Tuple;
                     case Type::Kind::Set:      return VarKind::Set;
                     case Type::Kind::Instance: return VarKind::ClassInstance;
+            // ADR 054 - a contract-typed value IS an instance pointer at
+            // runtime; RC treats it identically (the whole zero-cost claim).
+            case Type::Kind::Contract: return VarKind::ClassInstance;
                     case Type::Kind::Int:      return VarKind::Int;
                     default:                   return VarKind::Other;
                 }
@@ -890,6 +896,8 @@ int64_t CodeGen::Impl::typeKindToTag(Type::Kind k) {
             case Type::Kind::Bytes:    return 7; // TAG_BYTES
             case Type::Kind::Instance: return 7; // TAG_CLASS (shares slot - both are
                                                   // refcount-managed heap objects)
+            case Type::Kind::Contract: return 7; // TAG_CLASS - ADR 054, an
+                                                  // instance viewed through a contract
             case Type::Kind::Tuple:    return 5; // TAG_LIST (tuples reuse list dispatch)
             case Type::Kind::Set:      return 5; // TAG_LIST (sets reuse list dispatch)
             case Type::Kind::Function: return 10; // TAG_CLOSURE - a closure
@@ -1056,6 +1064,9 @@ CodeGen::Impl::VarKind CodeGen::Impl::typeKindToVarKind(Type::Kind k) {
             case Type::Kind::Tuple:    return VarKind::Tuple;
             case Type::Kind::Set:      return VarKind::Set;
             case Type::Kind::Instance: return VarKind::ClassInstance;
+            // ADR 054 - a contract-typed value IS an instance pointer at
+            // runtime; RC treats it identically (the whole zero-cost claim).
+            case Type::Kind::Contract: return VarKind::ClassInstance;
             case Type::Kind::Function: return VarKind::Closure;  // a Callable
                                        // element / pop-result / return value is a
                                        // refcounted closure (or bare fn ptr).
@@ -1080,6 +1091,7 @@ llvm::Type* CodeGen::Impl::typeKindToLLVM(Type::Kind k) const {
             case Type::Kind::Tuple:
             case Type::Kind::Set:
             case Type::Kind::Instance:
+            case Type::Kind::Contract:  // ADR 054 - plain instance pointer
             case Type::Kind::Module:
             case Type::Kind::Class:    return i8PtrType;
             // D039 Phase 9: Any (and Union via the same channel) lower to

@@ -13,6 +13,7 @@ namespace dragon {
 // Forward declarations
 class ASTVisitor;
 class Type;
+class ContractDecl;
 
 //===----------------------------------------------------------------------===//
 // Base Node Classes
@@ -89,6 +90,17 @@ public:
 class TupleTypeExpr : public TypeExpr {
 public:
     std::vector<std::unique_ptr<TypeExpr>> elementTypes;
+    void accept(ASTVisitor& visitor) override;
+};
+
+/// ADR 054 - a contract set in type position: `{Amazing, Speaker}`. Two or
+/// more contract names group as a braced set (intersection: the value must
+/// satisfy every member) where a bare comma would be ambiguous (annotations,
+/// bounds, as-casts). A single contract is normally written bare and parses
+/// as NamedTypeExpr; the braced singleton is legal and means the same.
+class ContractSetTypeExpr : public TypeExpr {
+public:
+    std::vector<std::string> names;
     void accept(ASTVisitor& visitor) override;
 };
 
@@ -408,6 +420,28 @@ public:
 class AwaitExpr : public Expr {
 public:
     std::unique_ptr<Expr> operand;
+    void accept(ASTVisitor& visitor) override;
+};
+
+/// ADR 054 - consumer conformance assertion: `dog as Amazing` or
+/// `dog as {Amazing, Speaker}`. Compile-time checked and upward only; the
+/// operand's class must satisfy every named contract. Codegen emits nothing
+/// (same pointer in and out), so ownership classification must treat this
+/// node as transparent - the cast is exactly its operand at runtime.
+class AsCastExpr : public Expr {
+public:
+    std::unique_ptr<Expr> operand;
+    std::vector<std::string> contracts;
+    /// Resolved contract ATOMS (a composed contract expands to the decls that
+    /// declare its methods), stamped by the TypeChecker on a successful check.
+    /// True-identity backpointers (D053): CodeGen keys its vtable coloring off
+    /// these, never off bare names.
+    std::vector<const ContractDecl*> resolvedDecls;
+    /// True when the target was the braced form (`as {A}` / `as {A, B}`).
+    /// A with-item's TRAILING bare single name (`with open() as f`) is
+    /// Python's binder, never a cast - withStatement() unwraps that shape,
+    /// and this flag lets `as {A}` opt out of the unwrap.
+    bool fromBracedSet = false;
     void accept(ASTVisitor& visitor) override;
 };
 
@@ -766,12 +800,35 @@ public:
     void accept(ASTVisitor& visitor) override;
 };
 
+/// ADR 054 - `type Name { def sig... }`: a named contract, a block of
+/// bodiless method signatures in the spirit of a .pyi stub. `bases` composes
+/// other contracts (`type C(A, B) {}` unions the signature sets). Methods
+/// reuse FunctionDecl with an always-empty body; the parser rejects bodies,
+/// fields, and defaults inside a contract.
+class ContractDecl : public Stmt {
+public:
+    std::string name;
+    std::vector<std::string> bases;
+    std::vector<std::unique_ptr<FunctionDecl>> methods;
+    void accept(ASTVisitor& visitor) override;
+};
+
 /// Class definition
 class ClassDecl : public Stmt {
 public:
     std::string name;
     std::vector<TypeParam> typeParams;  // D044 - PEP 695 `class Foo[T]`; empty = non-generic
     std::vector<std::unique_ptr<Expr>> bases;
+    /// ADR 054 - producer promise: the comma list after `->` in the header
+    /// (`class Dog(Animal) -> Amazing, Speaker { ... }`). Each name must be a
+    /// contract; conformance is checked at the class site and the class then
+    /// flows into contract-typed positions with no cast.
+    std::vector<std::string> promises;
+    /// ADR 054 - every contract atom this class PROVENLY conforms to, stamped
+    /// by the TypeChecker from header promises and successful `as` casts
+    /// (deduped). CodeGen's coloring pre-pass reads this - plus each class's
+    /// ancestors' entries - to decide whose vtables carry colored slots.
+    std::vector<const ContractDecl*> conformedContracts;
     std::vector<std::pair<std::string, std::unique_ptr<Expr>>> keywords;  // metaclass etc.
     std::vector<std::unique_ptr<Stmt>> body;
     std::vector<std::unique_ptr<Expr>> decorators;
@@ -844,6 +901,7 @@ public:
     virtual void visit(UnionTypeExpr& node) = 0;
     virtual void visit(CallableTypeExpr& node) = 0;
     virtual void visit(TupleTypeExpr& node) = 0;
+    virtual void visit(ContractSetTypeExpr& node) = 0;
 
     // Expressions
     virtual void visit(IntegerLiteral& node) = 0;
@@ -871,6 +929,7 @@ public:
     virtual void visit(LambdaExpr& node) = 0;
     virtual void visit(IfExpr& node) = 0;
     virtual void visit(AwaitExpr& node) = 0;
+    virtual void visit(AsCastExpr& node) = 0;
     virtual void visit(FireExpr& node) = 0;
     virtual void visit(YieldExpr& node) = 0;
     virtual void visit(StarredExpr& node) = 0;
@@ -905,6 +964,7 @@ public:
     // Declarations
     virtual void visit(FunctionDecl& node) = 0;
     virtual void visit(ClassDecl& node) = 0;
+    virtual void visit(ContractDecl& node) = 0;
     virtual void visit(TypeAliasStmt& node) = 0;
 
     // Module
@@ -921,6 +981,7 @@ public:
     void visit(UnionTypeExpr& node) override;
     void visit(CallableTypeExpr& node) override;
     void visit(TupleTypeExpr& node) override;
+    void visit(ContractSetTypeExpr& node) override;
 
     // Expressions
     void visit(IntegerLiteral& node) override;
@@ -948,6 +1009,7 @@ public:
     void visit(LambdaExpr& node) override;
     void visit(IfExpr& node) override;
     void visit(AwaitExpr& node) override;
+    void visit(AsCastExpr& node) override;
     void visit(FireExpr& node) override;
     void visit(YieldExpr& node) override;
     void visit(StarredExpr& node) override;
@@ -982,6 +1044,7 @@ public:
     // Declarations
     void visit(FunctionDecl& node) override;
     void visit(ClassDecl& node) override;
+    void visit(ContractDecl& node) override;
     void visit(TypeAliasStmt& node) override;
 
     // Module
@@ -1000,6 +1063,7 @@ public:
     void visit(UnionTypeExpr& node) override;
     void visit(CallableTypeExpr& node) override;
     void visit(TupleTypeExpr& node) override;
+    void visit(ContractSetTypeExpr& node) override;
 
     // Expressions
     void visit(IntegerLiteral& node) override;
@@ -1027,6 +1091,7 @@ public:
     void visit(LambdaExpr& node) override;
     void visit(IfExpr& node) override;
     void visit(AwaitExpr& node) override;
+    void visit(AsCastExpr& node) override;
     void visit(FireExpr& node) override;
     void visit(YieldExpr& node) override;
     void visit(StarredExpr& node) override;
@@ -1061,6 +1126,7 @@ public:
     // Declarations
     void visit(FunctionDecl& node) override;
     void visit(ClassDecl& node) override;
+    void visit(ContractDecl& node) override;
     void visit(TypeAliasStmt& node) override;
 
     // Module

@@ -1331,6 +1331,12 @@ void CodeGen::visit(FunctionDecl& node) {
     }
 }
 
+// ADR 054 - contracts are compile-time shapes: no code, no symbols. The
+// registry work happened in collectContracts/assignContractSlots.
+void CodeGen::visit(ContractDecl&) {}
+
+void CodeGen::visit(ContractSetTypeExpr&) {}
+
 void CodeGen::visit(TypeAliasStmt& node) {
     // Type aliases are compile-time only - no code generation needed
 }

@@ -261,6 +261,14 @@ void CodeGen::visit(FireExpr& node) {
         impl_->emitMoveOutSlots(*movedCall);
 }
 
+// ADR 054 - a conformance cast is proof, not conversion: the operand's
+// pointer flows through unchanged (coloring already gave every conforming
+// class's vtable the contract slots). Ownership classification sees through
+// the node (isBorrowedHeapExpr / resolveExprVarKind delegate to the operand).
+void CodeGen::visit(AsCastExpr& node) {
+    node.operand->accept(*this);
+}
+
 void CodeGen::visit(AwaitExpr& node) {
     // await expr -> evaluate expr (Task handle), join vthread, return result
     impl_->needsPthread = true;

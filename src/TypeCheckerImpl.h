@@ -38,6 +38,10 @@ struct TypeChecker::Impl {
 
     // Type name -> type mapping for resolution
     std::unordered_map<std::string, std::shared_ptr<Type>> typeNames;
+    // ADR 054 - one shared ContractType per ContractDecl (true identity,
+    // D053): every annotation/cast/bound view of a contract aliases the same
+    // object, so signatures filled by the pre-pass are visible everywhere.
+    std::unordered_map<const ContractDecl*, std::shared_ptr<ContractType>> contractByDecl;
 
     // Type environment (variable name -> type) with scope stack
     struct Scope {

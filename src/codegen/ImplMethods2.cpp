@@ -460,6 +460,8 @@ Type::Kind CodeGen::Impl::typeExprToTypeKind(TypeExpr* typeExpr) {
             if (typedDictClassesBySym.count(classSym(named->name))) return Type::Kind::Dict;
             if (!resolveAnnotationClassName(named->name).empty())
                 return Type::Kind::Instance;
+            // ADR 054 - a contract-typed slot holds an instance pointer.
+            if (contractTypeNames.count(named->name)) return Type::Kind::Instance;
             return Type::Kind::Int;
         }
         if (auto* generic = dynamic_cast<GenericTypeExpr*>(typeExpr)) {
@@ -474,8 +476,7 @@ Type::Kind CodeGen::Impl::typeExprToTypeKind(TypeExpr* typeExpr) {
             return Type::Kind::Int;
         }
         if (dynamic_cast<TupleTypeExpr*>(typeExpr)) return Type::Kind::Tuple;
-        // Callable[...] is a refcounted DragonClosure ptr; without this list[Callable]
-        // tracked it as Int and leaked overwritten closures.
+        if (dynamic_cast<ContractSetTypeExpr*>(typeExpr)) return Type::Kind::Instance;
         if (dynamic_cast<CallableTypeExpr*>(typeExpr)) return Type::Kind::Function;
         if (auto* unionType = dynamic_cast<UnionTypeExpr*>(typeExpr)) {
             if (TypeExpr* niche = unionNicheMember(typeExpr))
@@ -498,22 +499,17 @@ CodeGen::Impl::VarKind CodeGen::Impl::typeExprToKind(TypeExpr* typeExpr) {
             if (named->name == "dict" || named->name == "Dict") return VarKind::Dict;
             if (named->name == "tuple" || named->name == "Tuple") return VarKind::Tuple;
             if (named->name == "set" || named->name == "Set") return VarKind::Set;
-            // Any reuses the Union box infrastructure; its unionMemberKinds is left
-            // empty (any tag valid at runtime).
             if (named->name == "Any" || named->name == "object") return VarKind::Union;
-            // Lock is an intrinsic ptr handle (VarKind::Other), so calls dispatch via
-            // the __Lock fast path, not class-instance dispatch.
             if (named->name == "Lock") return VarKind::Other;
-            // TypedDict classes are dicts at runtime
             if (typedDictClassesBySym.count(classSym(named->name)))
                 return VarKind::Dict;
-            // GC Phase 3: user-defined class types get ClassInstance kind
             if (!resolveAnnotationClassName(named->name).empty())
+                return VarKind::ClassInstance;
+            if (contractTypeNames.count(named->name))
                 return VarKind::ClassInstance;
             return VarKind::Other;
         }
         if (auto* generic = dynamic_cast<GenericTypeExpr*>(typeExpr)) {
-            // list[int], dict[str, int], etc. - check base type name
             if (auto* base = dynamic_cast<NamedTypeExpr*>(generic->base.get())) {
                 if (base->name == "list" || base->name == "List")
                     return VarKind::List;
@@ -524,14 +520,16 @@ CodeGen::Impl::VarKind CodeGen::Impl::typeExprToKind(TypeExpr* typeExpr) {
                 if (base->name == "set" || base->name == "Set")
                     return VarKind::Set;
             }
-            // D044 - a user generic-class instantiation (`Box[int]`) is a class
-            // instance (a heap ptr to the stamped struct), not an opaque ptr.
             if (!genericInstanceClassName(typeExpr).empty())
                 return VarKind::ClassInstance;
             return VarKind::Other;
         }
         if (auto* tupleType = dynamic_cast<TupleTypeExpr*>(typeExpr)) {
             return VarKind::Tuple;
+        }
+        // ADR 054 - a braced contract set is an instance RC-wise.
+        if (dynamic_cast<ContractSetTypeExpr*>(typeExpr)) {
+            return VarKind::ClassInstance;
         }
         // A `: Callable[...]` slot holds a refcounted DragonClosure (or bare fn ptr):
         // a scope-cleaned heap kind, safe because closure RC is tag-gated everywhere.
@@ -808,23 +806,21 @@ llvm::Type* CodeGen::Impl::typeExprToLLVM(TypeExpr* typeExpr) {
             // bare struct type).
             if (classStructTypesBySym.count(classSym(named->name)) || classNames.count(named->name)) return i8PtrType;
             if (!resolveAnnotationClassName(named->name).empty()) return i8PtrType;
+            if (contractTypeNames.count(named->name)) return i8PtrType;
             return i64Type; // fallback
         }
         if (dynamic_cast<GenericTypeExpr*>(typeExpr)) {
-            // list[int], dict[str,int], etc. are all pointer types
+            return i8PtrType;
+        }
+        if (dynamic_cast<ContractSetTypeExpr*>(typeExpr)) {
             return i8PtrType;
         }
         if (dynamic_cast<UnionTypeExpr*>(typeExpr)) {
-            // Niche-pointer: `Ptr | None` is a single nullable pointer (null = None),
-            // no box.
             if (TypeExpr* niche = unionNicheMember(typeExpr))
                 return typeExprToLLVM(niche);
-            // D030 Phase 4: non-niche unions (e.g. `int | str`) still use the
-            // {i64 tag, i64 payload} box.
             return boxType;
         }
         if (dynamic_cast<CallableTypeExpr*>(typeExpr)) {
-            // Callable[[A, B], R] is a bare function pointer at runtime.
             return i8PtrType;
         }
         return i64Type; // fallback

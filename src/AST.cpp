@@ -90,6 +90,7 @@ void OptionalTypeExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void UnionTypeExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void CallableTypeExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void TupleTypeExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
+void ContractSetTypeExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 
 //===----------------------------------------------------------------------===//
 // Expression Visitors
@@ -122,6 +123,7 @@ void GeneratorExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void LambdaExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void IfExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void AwaitExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
+void AsCastExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void FireExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void YieldExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void StarredExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
@@ -161,6 +163,7 @@ void FromImportStmt::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void FunctionDecl::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void ClassDecl::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void TypeAliasStmt::accept(ASTVisitor& visitor) { visitor.visit(*this); }
+void ContractDecl::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void Module::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 
 //===----------------------------------------------------------------------===//
@@ -186,6 +189,7 @@ void DefaultASTVisitor::visit(CallableTypeExpr& node) {
 void DefaultASTVisitor::visit(TupleTypeExpr& node) {
     for (auto& e : node.elementTypes) e->accept(*this);
 }
+void DefaultASTVisitor::visit(ContractSetTypeExpr&) {}
 
 // Literals (no children)
 void DefaultASTVisitor::visit(IntegerLiteral&) {}
@@ -295,6 +299,9 @@ void DefaultASTVisitor::visit(IfExpr& node) {
     node.elseExpr->accept(*this);
 }
 void DefaultASTVisitor::visit(AwaitExpr& node) {
+    node.operand->accept(*this);
+}
+void DefaultASTVisitor::visit(AsCastExpr& node) {
     node.operand->accept(*this);
 }
 void DefaultASTVisitor::visit(FireExpr& node) {
@@ -423,6 +430,9 @@ void DefaultASTVisitor::visit(ClassDecl& node) {
 void DefaultASTVisitor::visit(TypeAliasStmt& node) {
     if (node.value) node.value->accept(*this);
 }
+void DefaultASTVisitor::visit(ContractDecl& node) {
+    for (auto& m : node.methods) m->accept(*this);
+}
 void DefaultASTVisitor::visit(Module& node) {
     for (auto& s : node.body) s->accept(*this);
 }
@@ -542,6 +552,15 @@ void ASTPrinter::visit(TupleTypeExpr& node) {
         node.elementTypes[i]->accept(*this);
     }
     write("]");
+}
+
+void ASTPrinter::visit(ContractSetTypeExpr& node) {
+    write("{");
+    for (size_t i = 0; i < node.names.size(); i++) {
+        if (i > 0) write(", ");
+        write(node.names[i]);
+    }
+    write("}");
 }
 
 // --- Expressions ---
@@ -867,6 +886,19 @@ void ASTPrinter::visit(IfExpr& node) {
 
 void ASTPrinter::visit(AwaitExpr& node) {
     writeLine("(await");
+    increaseIndent();
+    node.operand->accept(*this);
+    decreaseIndent();
+    writeLine(")");
+}
+
+void ASTPrinter::visit(AsCastExpr& node) {
+    std::string names;
+    for (size_t i = 0; i < node.contracts.size(); i++) {
+        if (i > 0) names += ", ";
+        names += node.contracts[i];
+    }
+    writeLine("(as {" + names + "}");
     increaseIndent();
     node.operand->accept(*this);
     decreaseIndent();
@@ -1355,6 +1387,16 @@ void ASTPrinter::visit(TypeAliasStmt& node) {
     writeLine("(type_alias " + node.name);
     increaseIndent();
     if (node.value) node.value->accept(*this);
+    decreaseIndent();
+    writeLine(")");
+}
+
+void ASTPrinter::visit(ContractDecl& node) {
+    std::string header = "(contract " + node.name;
+    for (auto& b : node.bases) header += " " + b;
+    writeLine(header);
+    increaseIndent();
+    for (auto& m : node.methods) m->accept(*this);
     decreaseIndent();
     writeLine(")");
 }

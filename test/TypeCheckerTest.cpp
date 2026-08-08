@@ -2317,3 +2317,184 @@ TEST(TypeCheckerTest, UnknownMemberOnSubclassChainRejected) {
         "}\n"
         "Sub.fabricate()\n"));
 }
+
+//===----------------------------------------------------------------------===//
+// ADR 054 - type contracts
+//===----------------------------------------------------------------------===//
+
+// Shared fixture source: one contract, one conforming-but-undeclared class.
+static const char* kAmazing =
+    "type Amazing {\n"
+    "    def amazing_method() -> str\n"
+    "}\n";
+
+// Checker diagnostics joined, for asserting the teaching-error text.
+static std::string checkErrorText(const std::string& source) {
+    auto module = parse(source);
+    if (!module) return "<parse failed>";
+    Sema sema;
+    sema.analyze(*module);
+    TypeChecker tc;
+    tc.check(*module);
+    std::string all;
+    for (auto& d : tc.diagnostics()) all += d.message + "\n";
+    return all;
+}
+
+TEST(TypeCheckerTest, ContractValuePositionNeedsDeclaredConformance) {
+    // Structurally perfect method set, but nobody wrote the conformance
+    // down: rejected with BOTH remedies spelled out (ADR 054's flagship
+    // teaching error).
+    std::string src = std::string(kAmazing) +
+        "class Duck {\n"
+        "    def amazing_method() -> str {\n"
+        "        return \"quack\"\n"
+        "    }\n"
+        "}\n"
+        "def show(x: Amazing) -> str {\n"
+        "    return x.amazing_method()\n"
+        "}\n"
+        "d: Duck = Duck()\n"
+        "show(d)\n";
+    EXPECT_TRUE(checkHasErrors(src));
+    std::string text = checkErrorText(src);
+    EXPECT_NE(text.find("matching method set but no declared conformance"),
+              std::string::npos);
+    EXPECT_NE(text.find("d as Amazing"), std::string::npos);
+    EXPECT_NE(text.find("class Duck -> Amazing"), std::string::npos);
+}
+
+TEST(TypeCheckerTest, ContractCastMissingMethodRejected) {
+    EXPECT_TRUE(checkHasErrors(std::string(kAmazing) +
+        "class Rock {\n"
+        "    def weight() -> int {\n"
+        "        return 3\n"
+        "    }\n"
+        "}\n"
+        "r: Rock = Rock()\n"
+        "a: Amazing = r as Amazing\n"));
+}
+
+TEST(TypeCheckerTest, ContractPromiseMissingMethodRejectedAtClass) {
+    EXPECT_TRUE(checkHasErrors(std::string(kAmazing) +
+        "class Cat -> Amazing {\n"
+        "    def other() -> str {\n"
+        "        return \"meow\"\n"
+        "    }\n"
+        "}\n"));
+}
+
+TEST(TypeCheckerTest, ContractSignatureMismatchRejected) {
+    // Name matches, arity does not: not conformance.
+    EXPECT_TRUE(checkHasErrors(std::string(kAmazing) +
+        "class Off {\n"
+        "    def amazing_method(n: int) -> str {\n"
+        "        return \"x\"\n"
+        "    }\n"
+        "}\n"
+        "o: Off = Off()\n"
+        "a: Amazing = o as Amazing\n"));
+}
+
+TEST(TypeCheckerTest, ContractReturnTypeMismatchRejected) {
+    EXPECT_TRUE(checkHasErrors(std::string(kAmazing) +
+        "class Wrong {\n"
+        "    def amazing_method() -> int {\n"
+        "        return 3\n"
+        "    }\n"
+        "}\n"
+        "w: Wrong = Wrong()\n"
+        "a: Amazing = w as Amazing\n"));
+}
+
+TEST(TypeCheckerTest, AsTargetMustBeAContract) {
+    // `as` asserts contract conformance; a CLASS on the right is rejected
+    // (downward/sideways movement is isinstance narrowing, not `as`).
+    EXPECT_TRUE(checkHasErrors(std::string(kAmazing) +
+        "class Dog -> Amazing {\n"
+        "    def amazing_method() -> str {\n"
+        "        return \"woof\"\n"
+        "    }\n"
+        "}\n"
+        "class Other {\n"
+        "    def hi() -> int {\n"
+        "        return 1\n"
+        "    }\n"
+        "}\n"
+        "d: Dog = Dog()\n"
+        "x: Amazing = d as Other\n"));
+}
+
+TEST(TypeCheckerTest, ContractDownwardReviewRejected) {
+    // A plural value re-views UPWARD only: casting to a contract outside the
+    // carried set is rejected.
+    EXPECT_TRUE(checkHasErrors(std::string(kAmazing) +
+        "type Speaker {\n"
+        "    def speak() -> str\n"
+        "}\n"
+        "class Dog -> Amazing {\n"
+        "    def amazing_method() -> str {\n"
+        "        return \"woof\"\n"
+        "    }\n"
+        "}\n"
+        "d: Dog = Dog()\n"
+        "a: Amazing = d as Amazing\n"
+        "s: Speaker = a as Speaker\n"));
+}
+
+TEST(TypeCheckerTest, ContractCompositionConflictRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "type A {\n"
+        "    def m() -> str\n"
+        "}\n"
+        "type B {\n"
+        "    def m() -> int\n"
+        "}\n"
+        "type C(A, B) {}\n"));
+}
+
+TEST(TypeCheckerTest, ContractCannotBeConstructed) {
+    EXPECT_TRUE(checkHasErrors(std::string(kAmazing) +
+        "a: Amazing = Amazing()\n"));
+}
+
+TEST(TypeCheckerTest, ContractBoundViolationListsMissingMethod) {
+    EXPECT_TRUE(checkHasErrors(std::string(kAmazing) +
+        "class Rock {\n"
+        "    def weight() -> int {\n"
+        "        return 3\n"
+        "    }\n"
+        "}\n"
+        "def go[T: Amazing](x: T) -> str {\n"
+        "    return x.amazing_method()\n"
+        "}\n"
+        "r: Rock = Rock()\n"
+        "go(r)\n"));
+}
+
+TEST(TypeCheckerTest, ContractDeclaresNoSuchMethodRejected) {
+    EXPECT_TRUE(checkHasErrors(std::string(kAmazing) +
+        "class Dog -> Amazing {\n"
+        "    def amazing_method() -> str {\n"
+        "        return \"woof\"\n"
+        "    }\n"
+        "    def bark() -> str {\n"
+        "        return \"!\"\n"
+        "    }\n"
+        "}\n"
+        "d: Dog = Dog()\n"
+        "a: Amazing = d\n"
+        "a.bark()\n"));
+}
+
+TEST(ParserTest, ContractBodyRejectsFieldsBodiesDefaultsAndEmpty) {
+    // Parser-level rejections: pyi-shaped signatures only.
+    EXPECT_FALSE(parseErrors("type T {\n    def m() -> str\n}\n").empty()
+                 ? false : true);  // control: a valid contract parses clean
+    EXPECT_TRUE(parseErrors("type Empty { }\n").size() > 0);
+    EXPECT_TRUE(parseErrors("type Bad {\n    name: str\n}\n").size() > 0);
+    EXPECT_TRUE(parseErrors(
+        "type Bad {\n    def m() -> str { return \"x\" }\n}\n").size() > 0);
+    EXPECT_TRUE(parseErrors(
+        "type Bad {\n    def m(n: int = 3) -> str\n}\n").size() > 0);
+}
