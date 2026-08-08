@@ -6,29 +6,51 @@
 extern "C" def malloc(size: int) -> ptr
 extern "C" def free(p: ptr)
 
-# SQLite3 C API (linked from bundled amalgamation)
-extern "C" def sqlite3_open(filename: str, ppDb: ptr) -> intc
+# SQLite3 C API (linked from bundled amalgamation).
+#
+# Every inbound text parameter is declared `ptr`, never `str`: sqlite reads
+# text as NUL-terminated (or length-counted) UTF-8 BYTES, while a Dragon str
+# holding any code point >= 0x80 is UCS-4 in memory (4-byte slots, zero bytes
+# mid-buffer). Handing such a str across truncated at the first slot - a
+# bound "arrow → here" was stored as "a", and SQL containing a non-ASCII
+# literal executed cut short. The wrappers below encode to utf-8 bytes and
+# pass dragon_bytes_data (str.encode's buffer carries an uncounted trailing
+# NUL, so it satisfies both length-counted and NUL-terminated consumers).
+extern "C" def sqlite3_open(filename: ptr, ppDb: ptr) -> intc
 extern "C" def sqlite3_close(db: ptr) -> intc
-extern "C" def sqlite3_exec(db: ptr, sql: str, callback: ptr, arg: ptr, errmsg: ptr) -> intc
-extern "C" def sqlite3_prepare_v2(db: ptr, sql: str, nByte: intc, ppStmt: ptr, pzTail: ptr) -> intc
+extern "C" def sqlite3_exec(db: ptr, sql: ptr, callback: ptr, arg: ptr, errmsg: ptr) -> intc
+extern "C" def sqlite3_prepare_v2(db: ptr, sql: ptr, nByte: intc, ppStmt: ptr, pzTail: ptr) -> intc
 extern "C" def sqlite3_step(stmt: ptr) -> intc
 extern "C" def sqlite3_finalize(stmt: ptr) -> intc
 extern "C" def sqlite3_reset(stmt: ptr) -> intc
 extern "C" def sqlite3_column_count(stmt: ptr) -> intc
 extern "C" def sqlite3_column_int(stmt: ptr, iCol: intc) -> intc
 extern "C" def sqlite3_column_double(stmt: ptr, iCol: intc) -> float
-extern "C" def sqlite3_column_text(stmt: ptr, iCol: intc) -> str
+extern "C" def sqlite3_column_text(stmt: ptr, iCol: intc) -> ptr
 extern "C" def sqlite3_column_type(stmt: ptr, iCol: intc) -> intc
 extern "C" def sqlite3_bind_int(stmt: ptr, index: intc, value: intc) -> intc
 extern "C" def sqlite3_bind_double(stmt: ptr, index: intc, value: float) -> intc
-extern "C" def sqlite3_bind_text(stmt: ptr, index: intc, value: str, n: intc, destructor: ptr) -> intc
+extern "C" def sqlite3_bind_text(stmt: ptr, index: intc, value: ptr, n: intc, destructor: ptr) -> intc
 extern "C" def sqlite3_bind_null(stmt: ptr, index: intc) -> intc
-extern "C" def sqlite3_errmsg(db: ptr) -> str
+extern "C" def sqlite3_errmsg(db: ptr) -> ptr
 extern "C" def sqlite3_changes(db: ptr) -> intc
 extern "C" def sqlite3_last_insert_rowid(db: ptr) -> int
 
 # Runtime helper to dereference a pointer-to-pointer
 extern "C" def dragon_ptr_deref(pp: ptr) -> ptr
+
+# ADR 041 blessed accessors. dragon_str_to_utf8_bytes converts a str to
+# UTF-8 bytes whose buffer carries an UNCOUNTED trailing NUL - the correct
+# handoff for C consumers that strlen (str.encode() buffers are exact-length,
+# no terminator). dragon_bytes_data is that buffer, valid for the lifetime
+# of the bytes object.
+extern "C" def dragon_str_to_utf8_bytes(s: str) -> bytes
+extern "C" def dragon_bytes_data(b: bytes) -> ptr
+
+# Inbound: copy a sqlite-owned C string into a fresh Dragon string RIGHT NOW
+# (sqlite invalidates it on the next API call) and UTF-8-decode it, so a
+# stored "→" reads back as one character, not three mojibake bytes.
+extern "C" def dragon_string_dup_cstr(s: ptr) -> str
 
 # SQLite constants
 # SQLITE_OK = 0, SQLITE_ROW = 100, SQLITE_DONE = 101
@@ -42,22 +64,22 @@ extern "C" def dragon_ptr_deref(pp: ptr) -> ptr
 class Database {
     def(path: str) {
         self.dbpp = malloc(8)
-        const rc: int = sqlite3_open(path, self.dbpp)
+        const pathb: bytes = dragon_str_to_utf8_bytes(path)
+        const rc: int = sqlite3_open(dragon_bytes_data(pathb), self.dbpp)
         self.db = dragon_ptr_deref(self.dbpp)
         self.path = path
         self.ok = rc == 0
     }
 
     def execute(sql: str) -> int {
-        return sqlite3_exec(self.db, sql, none, none, none)
+        const sqlb: bytes = dragon_str_to_utf8_bytes(sql)
+        return sqlite3_exec(self.db, dragon_bytes_data(sqlb), none, none, none)
     }
 
     def errmsg() -> str {
         # sqlite3_errmsg returns a pointer into SQLite-owned memory that is
-        # invalidated by the next API call. `+ ""` forces a Dragon-owned copy
-        # (a non-heap source operand always takes dragon_str_concat's fresh-
-        # alloc path), so the returned string outlives the next sqlite3 call.
-        return sqlite3_errmsg(self.db) + ""
+        # invalidated by the next API call; dup_cstr snapshots and decodes it.
+        return dragon_string_dup_cstr(sqlite3_errmsg(self.db))
     }
 
     def changes() -> int {
@@ -93,11 +115,18 @@ class Database {
 #===----------------------------------------------------------------------===#
 
 class Cursor {
+    # Encoded buffers behind sqlite3_bind_text live here: the binding is
+    # SQLITE_STATIC (no copy), so sqlite reads the buffer at step() time and
+    # the bytes must stay alive until finalize().
+    pins: list[bytes]
+
     def(db: ptr, sql: str) {
         self.stmtpp = malloc(8)
-        self.rc = sqlite3_prepare_v2(db, sql, -1, self.stmtpp, none)
+        const sqlb: bytes = dragon_str_to_utf8_bytes(sql)
+        self.rc = sqlite3_prepare_v2(db, dragon_bytes_data(sqlb), len(sqlb), self.stmtpp, none)
         self.stmt = dragon_ptr_deref(self.stmtpp)
         self.db = db
+        self.pins = []
     }
 
     def bind_int(index: int, value: int) -> int {
@@ -109,7 +138,9 @@ class Cursor {
     }
 
     def bind_text(index: int, value: str) -> int {
-        return sqlite3_bind_text(self.stmt, index, value, -1, none)
+        const vb: bytes = dragon_str_to_utf8_bytes(value)
+        self.pins.append(vb)
+        return sqlite3_bind_text(self.stmt, index, dragon_bytes_data(vb), len(vb), none)
     }
 
     def bind_null(index: int) -> int {
@@ -139,9 +170,9 @@ class Cursor {
     def column_text(index: int) -> str {
         # The pointer returned by sqlite3_column_text is owned by SQLite and is
         # invalidated by the next step()/reset()/finalize() (or another column
-        # access). `+ ""` copies the bytes into a Dragon-owned string now, so the
-        # value survives the rest of the cursor's lifetime.
-        return sqlite3_column_text(self.stmt, index) + ""
+        # access); dup_cstr snapshots and UTF-8-decodes it now. NULL (a NULL
+        # column) comes back as "".
+        return dragon_string_dup_cstr(sqlite3_column_text(self.stmt, index))
     }
 
     def column_type(index: int) -> int {

@@ -1,25 +1,31 @@
 # Decision 005: Dragon REPL
 
-Proposed. Command: `dragon repl`.
+Proposed (revised). Command: `dragon repl`.
 
 Every serious language needs a REPL and Dragon doesn't have one yet, which feels wrong. Python's interactive interpreter is half how people learn the language - try an expression, see the result, iterate. I want that for Dragon: explore without files, debug a function in isolation, sketch logic before committing, all the usual reasons. A language without a REPL feels incomplete no matter how fast `dragon build` is.
 
 ```
 $ dragon repl
-Dragon 0.3.0 - The Snake That Became a Dragon
-Type :help for commands, :quit to exit.
+Dragon <version> - The Snake That Became a Dragon
+Enter adds a line. Alt+Enter (or Esc, Enter) runs the cell. :help for commands.
 
->>> x: int = 42
->>> x * 2 + 1
-85
+>>> x: int = 10
+... print(x)
+...
+... x = x * 5
+... x                      # Alt+Enter
+10
+50
 >>> def greet(name: str) -> str {
-... return "Hello, " + name + "!"
+...     return "Hello, " + name + "!"
 ... }
->>> greet("Dragon")
+... greet("Dragon")        # Alt+Enter
 'Hello, Dragon!'
 ```
 
-Commandment #1 applies: prompt-to-output has to feel instant. Spawning `cc` every line (~150ms) is a non-starter when we already link orcjit - that's the whole point of this doc.
+One deliberate departure from Python's REPL: the unit of input is a **cell**, not a line. Enter never executes anything; it inserts a newline. Execution is an explicit keystroke. The rationale and the terminal mechanics are in the design section.
+
+Commandment #1 applies: prompt-to-output has to feel instant. Spawning the system linker on every run (100-300ms) is a non-starter when the whole frontend runs in single-digit milliseconds.
 
 ## Current Architecture
 
@@ -29,384 +35,144 @@ Dragon's `dragon run file.dr` flow today:
 source → Lex → Parse → [TypeHintEnforcer (.py)] → Sema → TypeChecker → CodeGen (LLVM IR) → object → cc link → execute
 ```
 
-Teh full frontend (Lex → Parse → Sema → TypeChecker) runs in <5ms. CodeGen lowers to LLVM IR in single-digit ms. The bottleneck is the **object emit + `cc` link** tail - 100-300ms per invocation, dominated by linker setup.
+The full frontend (Lex → Parse → Sema → TypeChecker) runs in under 5ms. CodeGen lowers to LLVM IR in single-digit milliseconds. The bottleneck is the object emit plus system-linker tail: 100-300ms per invocation, dominated by linker setup.
 
-### Existing Infrastructure We Can Reuse
+Everything upstream of the linker is reusable verbatim for a REPL:
 
-| Component | Status | Notes |
-|-----------|--------|-------|
-| Lexer (`src/Lexer.cpp`) | done Reusable | `LexerOptions.useBraceBlocks` already toggles .dr/.py |
-| Parser (`src/Parser.cpp`) | done Reusable | `ParserOptions.requireTypes = false` already exists for relaxed parsing |
-| Sema (`src/Sema.cpp`) | done Reusable | Name resolution + scope analysis |
-| TypeChecker (`src/TypeChecker.cpp`) | done Reusable | `registerExternalModule` supports cross-module symbols |
-| CodeGen (`src/CodeGen.cpp` + `src/codegen/*.cpp`) | done Reusable | Produces in-memory `llvm::Module` |
-| Runtime (`lib/Runtime/runtime_*.cpp`, ~9k LOC, single `dragon_runtime` archive) | done Reusable | All `extern "C" dragon_*` symbols |
-| DiagnosticFormatter | done Reusable | Error display |
-| LLVM `orcjit` component | done **Already linked** (`CMakeLists.txt:71`) | LLJIT/OrcJIT available with zero new dependencies |
+- The lexer and parser already carry the mode switches a REPL needs (brace vs indent input, relaxed type requirements).
+- Sema and the TypeChecker already support registering symbols from other compilation units, which is exactly the shape of "names defined in earlier turns".
+- CodeGen produces an in-memory LLVM module; nothing about it assumes the module is headed for an object file.
+- The runtime is a single static archive of C-ABI entry points, the same archive every compiled program links.
 
-**Update since first draft:** the backend is LLVM IR, not a C-text emitter, and `orcjit` is already in the link line. The "Phase 3 (LLVM JIT) blocked on CodeGen feature parity" framing in the original draft no longer applies - CodeGen *is* the backend.
+One correction from the first draft of this document: the build deliberately links only the AOT slice of LLVM, and the JIT (ORC) components are **not** currently in the component list. Adding them is a one-line build change, but it is a real addition, not a freebie: it grows the compiler binary and its link time. That cost is accepted and priced in below; it buys a REPL with zero new runtime semantics.
 
 ---
 
 ## Decision
 
-**Implement the REPL as a thin shell over LLVM OrcJIT (LLJIT), reusing CodeGen verbatim.** Each input becomes a new `llvm::Module` added to a persistent LLJIT instance; cross-input state (variables, functions, classes) persists as JIT-resident globals and symbols.
+**Implement the REPL as a thin shell over LLVM's ORC JIT (LLJIT), reusing CodeGen verbatim.** Input follows a cell model: Enter edits, an explicit keystroke executes. Each executed cell becomes a new LLVM module added to a persistent JIT instance; cross-turn state (variables, functions, classes) persists as JIT-resident globals and symbols.
 
-No tree-walking interpreter. No "accumulating C buffer". No `cc` in the loop.
+Four structural commitments come with this, each covered in the design:
+
+1. **Every turn is transactional.** Each turn's module is registered under its own removable resource tracker, so a turn that fails at any stage (parse, type check, JIT, or a runtime exception mid-execution) is rolled back completely and leaves the session exactly as it was.
+2. **Names are versioned, not overwritten.** Rebinding a name (including at a different type) mints a new versioned symbol; the persistent type environment always points at the live version. Redefinition never collides with a dead symbol.
+3. **The shell owns a catch-all exception frame.** An uncaught Dragon exception unwinds to the shell, prints, and returns to the prompt. It never exits the process.
+4. **REPL globals are module globals.** Top-level variables get the same ownership and sharing semantics as module globals in a compiled program: released on reassignment, never at entry-function exit, and stored through the same write barrier that makes globals safe to share with fired vthreads.
+
+No tree-walking interpreter. No accumulating source buffer. No system linker in the loop.
 
 ---
 
 ## Options Considered
 
-### Option A: OrcJIT over existing CodeGen (chosen)
+### Option A: ORC JIT over existing CodeGen (chosen)
 
-Persist an `llvm::orc::LLJIT`. Per input: parse → typecheck → codegen into a fresh `llvm::Module` → `jit->addIRModule(...)` → `jit->lookup("__repl_entry_N")` → call. Variables become JIT globals; functions/classes become JIT-resident symbols.
+Persist a JIT instance for the session. Per input: parse → typecheck → codegen into a fresh module → add to the JIT → look up that turn's entry function → call it. Variables become JIT globals; functions and classes become JIT-resident symbols.
 
 **Good:**
-- Native machine-code speed at the prompt (<5ms per input including codegen).
-- 100% feature parity with `dragon run` - every language feature works because it's the same CodeGen.
-- Reuses the entire runtime as-is (link `dragon_runtime` into the JIT's symbol table once).
-- No second runtime semantics to maintain → no drift between REPL and compiled behavior.
-- No `cc` dependency, no `/tmp` files, no process fork.
+- Native machine-code speed at the prompt (target under 10ms per input including codegen).
+- 100% feature parity with `dragon run`, because it is the same CodeGen. No second implementation of any language feature.
+- Links the same runtime archive compiled programs link, so REPL behavior and compiled behavior cannot drift at the runtime level either.
+- No linker dependency at the prompt, no temp files, no process fork.
 
 **Bad:**
-- Variable persistence requires emitting variables as `llvm::GlobalVariable` rather than allocas in the entry function (an emit-mode toggle).
-- Per-input module management (~100 modules over a long session). LLVM handles this fine, but the symbol table grows.
-- LLVM link-time surface added to the `dragon` binary - but `orcjit` is already linked.
+- The JIT components must be added to the LLVM link (binary size and link time; a one-line change, but not free).
+- Variable persistence requires an emit-mode toggle in CodeGen (top-level vars as globals rather than stack slots), and that toggle carries real ownership semantics, detailed below.
+- Per-turn module management: a long session accumulates modules and versioned symbols. ORC handles thousands of modules; the design keeps the growth inert (dead versions hold no live references).
 
 ### Option B: Tree-walking AST interpreter
 
-Build a parallel `DragonValue` runtime + `Interpreter : ASTVisitor` that evaluates the AST directly.
+Build a parallel boxed-value runtime plus an interpreter that evaluates the AST directly.
 
-**Good:**
-- No LLVM at the prompt; instant evaluation.
-- Easier to introspect (every value is a C++ object).
+**Bad, and rejected:**
+- **Duplicates the runtime.** Every container, string method, exception path, and concurrency primitive would need a second implementation against interpreter values. The runtime is ~9k LOC; the interpreter would shadow most of it.
+- **Drift risk.** Compiled semantics and REPL semantics will diverge - exactly the bug pattern the "no workarounds" rule exists to prevent.
+- Violates dogfooding: a parallel interpreter is a workaround for not linking a JIT that LLVM already ships.
+- Misses commandment #1: users will feel the gap the moment they paste a real loop.
 
-**Bad:**
-- **Duplicates the runtime.** Every container, every string method, every exception code, every concurrency primitive must be reimplemented in C++ against `DragonValue`. The current runtime is ~9k LOC; the AST interpreter would shadow most of it.
-- **Drift risk.** Compiled semantics and REPL semantics will diverge - exactly the bug pattern Dragon's "no workarounds" rule exists to prevent.
-- Violates dogfooding: a parallel interpreter is a workaround for not having a JIT, when we already link a JIT.
-- Misses commandment #1: a tree-walker is not C-speed; users will feel the gap the moment they paste a real loop.
+### Option C: Accumulating C-text + recompile per turn
 
-### Option C: Accumulating C-text + recompile via `cc`
+**Rejected:** predicated on a C-text emitter that no longer exists. CodeGen emits LLVM IR; reviving a C backend just for the REPL forks the entire codegen path, and still pays ~150ms per input.
 
-Maintain a growing C source buffer, re-link via `cc` each turn.
+### Option D: Object file per input + dynamic loader
 
-**Bad:**
-- Predicated on a C-text emitter that no longer exists. CodeGen emits LLVM IR; reviving a C backend just for the REPL is a fork of the entire codegen path.
-- ~150ms per input even with `tcc` fallbacks. Slower than native JIT for no architectural benefit.
-- Doesn't reuse the actual compilation pipeline - so REPL output and `dragon run` output can drift.
-
-### Option D: Object-file-per-input + dynamic loader
-
-Emit a `.so` per input and `dlopen` it.
-
-**Bad:**
-- Object emission alone is 50-100ms; `dlopen` adds more. No faster than the current `cc` path.
-- Relies on PIC, dynamic linker quirks, symbol versioning. OrcJIT does all of this in-process for free.
+**Rejected:** object emission alone is 50-100ms and dynamic loading adds more, so it is no faster than the current linker path, while taking on position-independent-code and symbol-versioning quirks the in-process JIT handles for free.
 
 ---
 
 ## Design
 
-### ReplSession
+### Session shape
 
-Single long-lived object owning the JIT and the accumulated language state.
+One long-lived session object owns:
 
-```cpp
-// include/dragon/Repl.h
-class ReplSession {
-public:
- ReplSession;
- ~ReplSession;
+- the JIT instance and a per-turn list of resource trackers (for rollback);
+- the persistent frontend state: a symbol table, a type environment, and the AST nodes of previously defined functions and classes, so each turn's type check sees everything earlier turns defined;
+- the name-version map: for every user-visible name, which versioned JIT symbol is live;
+- the cell buffer currently being edited.
 
- // Top-level entry: feed one logical input (possibly multi-line),
- // returns whether the session should continue.
- bool feed(const std::string& input);
+### Per-turn module layout
 
-private:
- // --- JIT ---
- std::unique_ptr<llvm::orc::LLJIT> jit_;
- llvm::orc::ThreadSafeContext tsCtx_;
- int moduleCounter_ = 0;
+Each executed cell compiles into a fresh module named `repl.N` containing:
 
- // --- Frontend continuity ---
- // Symbol table carried across inputs so each fresh parse sees prior
- // variables/functions/classes. TypeChecker reads from this.
- std::shared_ptr<SymbolTable> persistentSymbols_;
+1. External declarations for every prior global, function, and class the new input references (the same forward-declare-then-resolve pattern multi-file compilation already uses).
+2. Definitions for any new (or rebound) variables, functions, and classes introduced this turn.
+3. An entry function for the turn, wrapping the cell's top-level statements. Bare expressions get echo handling (below).
 
- // Persistent type environment - names → Type for declared globals.
- std::unordered_map<std::string, std::shared_ptr<Type>> persistentTypes_;
+After the module is added, the shell looks up the turn's entry function and calls it through the catch frame.
 
- // Declared functions/classes from prior inputs, kept as AST nodes
- // so TypeChecker can re-validate references in new inputs.
- std::vector<std::unique_ptr<FunctionDecl>> persistentFunctions_;
- std::vector<std::unique_ptr<ClassDecl>> persistentClasses_;
+### Names: rebinding and versioning
 
- // --- Input handling ---
- std::string pendingBuffer_; // accumulating multi-line input
- int braceDepth_ = 0;
- int parenDepth_ = 0;
- int bracketDepth_ = 0;
-
- // --- Pipeline steps ---
- InputKind classify(const std::string& input);
- std::unique_ptr<Module> parseInput(const std::string& src);
- bool typeCheck(Module& m);
- llvm::Error jitModule(std::unique_ptr<llvm::Module> llvmMod);
- void executeEntry(const std::string& entrySymbol);
-};
-```
-
-### Per-Input Module Layout
-
-For each input we synthesize a fresh `llvm::Module` named `repl.N` containing:
-
-1. **External declarations** for every prior global, function, and class symbol the new input references (CodeGen already emits these for cross-module compilation - same code path).
-2. **New globals** for any variable being introduced this turn (`@x = global i64 0`).
-3. **New function/class definitions** for any `def` / `class` declarations.
-4. **`__repl_entry_N` function** containing the actual statement(s) / expression evaluation for this turn. Auto-print logic wraps bare expressions in a type-appropriate `dragon_print_*` call from the runtime.
+Rebinding is an everyday REPL action and must work, including at a different type:
 
 ```
-declare @prev_function(...) ; from earlier turn
-@x = external global i64 ; from earlier turn
-@y = global i64 0 ; new this turn
-
-define void @__repl_entry_7 {
- %1 = call i64 @prev_function
- store i64 %1, ptr @y
- call void @dragon_print_i64(i64 %1)
- ret void
-}
+>>> x: int = 1
+>>> x = "hello"
 ```
 
-After `addIRModule`, `jit_->lookup("__repl_entry_7")` returns a function pointer we call directly.
+A JIT dylib will not accept two definitions of the same symbol, and the second `x` may not even have the same layout as the first. So user names never map 1:1 onto JIT symbols. Each binding of `x` mints a fresh versioned symbol (conceptually `x@1`, `x@2`, ...), and the persistent type environment records which version is live along with its type. Later turns that mention `x` compile against the live version.
 
-### Variable Persistence
+Rebinding releases the old version's value (the ownership rules below), after which the old global is dead metadata: it holds no live reference and costs a few bytes of JIT memory. Nothing scans it, nothing frees it, nothing collides with it.
 
-Variables in REPL mode are emitted as `llvm::GlobalVariable` (internal linkage) in the module that introduces them. Subsequent modules see them as `external` and OrcJIT resolves them across modules automatically (this is exactly how multi-file Dragon compilation already works in CodeGen - see how cross-module globals are forward-declared).
+Whether `x = "hello"` after `x: int = 1` is *allowed* is a language-surface question, not a JIT question: the prompt follows the same typing rules as a file, where a name's type is fixed by its first binding. Re-annotating (`x: str = "hello"`) reads as a deliberate new binding and is accepted; a bare re-assignment at a mismatched type is the same type error a file would produce. The versioning machinery exists so that the *accepted* cases never fight the symbol table.
 
-CodeGen needs **one** new emit-mode flag (e.g., `CodeGenOptions::topLevelVarsAsGlobals = true`) so that a `let`/`x: T = ...` at the top level of the REPL input becomes a `GlobalVariable` rather than an alloca. The same flag tells CodeGen to declare references to prior globals as `external`.
+### Failed turns: rollback
 
-### Function and Class Persistence
-
-Functions and classes already emit as module-level symbols. The REPL just needs to remember their AST nodes (`persistentFunctions_`, `persistentClasses_`) so the **type checker** for subsequent turns sees them in scope - the LLVM symbol side is handled by OrcJIT's symbol table.
-
- vtables: each class emits its `@ClassName__vtable` global into the module that defines it. References from later turns become `external` constants. Standard cross-module pattern; nothing REPL-specific.
-
-### Runtime Linkage
-
-`dragon_runtime`'s `extern "C"` symbols (all ~9k LOC of `runtime_*.cpp`) are made discoverable to the JIT exactly once at startup:
-
-```cpp
-jit_->getMainJITDylib.addGenerator(
- llvm::cantFail(llvm::orc::DynamicLibrarySearchGenerator::GetForCurrentProcess(
- jit_->getDataLayout.getGlobalPrefix)));
-```
-
-This exposes every `dragon_*` symbol statically linked into the `dragon` binary. No per-input registration needed.
-
-### Input Classification
-
-```cpp
-enum class InputKind {
- Expression, // "2 + 2" → wrap in print, emit into entry
- Statement, // "x = 42" → emit into entry; if introducing a new name, emit as global
- FunctionDecl, // "def foo {...}" → module-level function
- ClassDecl, // "class Bar {...}" → module-level class + vtable
- Import, // "import math" → resolve via ModuleResolver, JIT all dependency IR
- ReplCommand, // ":quit", ":help" → handle in shell, never reach CodeGen
- Incomplete, // unclosed brace/paren/bracket → request continuation
- Empty, // blank line → noop
-};
-```
-
-Classification uses a cheap lex-only pre-pass to count `{}`, ``, `[]` depth and detect leading keywords. The actual parse runs only when `Incomplete` is ruled out.
-
-### Multiline Input
-
-Tracking brace/paren/bracket depth across lines:
+"Errors never corrupt the session" has to hold at every stage, including after code has started running:
 
 ```
->>> def fibonacci(n: int) -> int {
-... if n <= 1 {
-... return n
-... }
-... return fibonacci(n - 1) + fibonacci(n - 2)
-... }
->>> fibonacci(10)
-55
+>>> y: str = load_config()     # raises IOError halfway through
+>>> y                          # must be an undefined-variable error, not a null deref
 ```
 
-Rules:
-- Unbalanced `{`, `(`, or `[` → continuation prompt `...`
-- Empty line after `...` → submit accumulated input
-- Ctrl+C during multiline → discard buffer, return to `>>>`
-- `.py` mode (if `dragon repl --py`): use indent tracking instead of braces
+By the time the exception fires, the turn's module is already in the JIT and `y`'s global already exists, zero-initialized. If the session forgot the turn but kept the symbol, the next `y: str = ...` would collide with the dead definition; if it kept the binding, `y` would be a null string. Both are wrong.
 
-### REPL Commands
+The fix is transactional: every turn's module is registered under its own removable resource tracker. On failure at any stage - parse, type check, JIT materialization, or a runtime exception during execution - the tracker is removed, which unloads the turn's code and symbols wholesale, and the persistent frontend state is left untouched (it is only committed after the entry function returns cleanly). The session after a failed turn is bit-identical to the session before it.
 
-| Command | Action |
-|---------|--------|
-| `:quit` / `:q` | Exit |
-| `:reset` | Tear down JIT + symbol tables, start fresh |
-| `:type <expr>` | Type-check expr and print inferred type, no execution |
-| `:ast <expr>` | Dump AST |
-| `:ir` | Dump accumulated LLVM IR (concat of all modules) |
-| `:ir <N>` | Dump IR of the Nth turn only |
-| `:save <file.dr>` | Export session source as a Dragon file |
-| `:load <file.dr>` | Read + execute a file in this session |
-| `:vars` | List bound names with types |
-| `:fns` | List defined functions |
-| `:time <expr>` | Time the expression's execution (uses runtime's monotonic clock) |
-| `:help` | List commands |
+One subtlety: a turn that partially executed may have already mutated *pre-existing* state (`xs.append(1)` before raising). That is not rolled back, matching Python and every other REPL: executed effects are effects. Rollback guarantees are about the turn's *definitions*, not about undoing its side effects.
 
-### Auto-Print Rules
+### Variable persistence and ownership
 
-Bare expressions auto-print, matching Python's REPL:
+Top-level variables in REPL mode are emitted as module-scope globals rather than stack slots in the entry function, behind a single emit-mode flag. Subsequent modules see them as external and the JIT resolves them across modules, the same way multi-file compilation already resolves cross-module globals.
 
-| Input | Behavior |
-|-------|----------|
-| `2 + 2` | Print `4` |
-| `"hello".upper` | Print `'HELLO'` |
-| `x = 42` | Silent (assignment) |
-| `print("hi")` | Print `hi` (explicit print) |
-| `[1, 2, 3]` | Print `[1, 2, 3]` |
-| `None` literal | Silent (Python parity) |
-| `def foo {...}` | Silent (declaration) |
+The flag is small; the ownership semantics it drags in are not, and this is where the REPL touches the codebase's most audited territory. Stated explicitly, a REPL global must behave exactly like a module global in a compiled program:
 
-Implementation: if the top-level node in the entry is an `ExprStmt` whose expression has a non-`None`, non-`void` type, codegen wraps it in `dragon_print_repr_<tag>` (a thin runtime entrypoint that dispatches on the static type for repr-style formatting - strings in quotes, lists with brackets, etc.).
+- **Released on reassignment, never at scope exit.** A local's owned value is released when the entry function ends; a global's value must survive the turn and be released only when a later turn rebinds the name (or on `:reset`). The emit mode changes where the release happens, and getting that wrong is a leak or a use-after-free per assignment.
+- **Stored through the shared-global write barrier.** A compiled program marks values stored into module globals as shared, so vthreads spawned with `fire` can read them without racing the refcount. A REPL global assigned in turn 1 and read by a vthread fired in turn 4 is exactly that scenario, so REPL globals take the same barrier, not a private variant.
+- **Per-name codegen metadata is re-seeded, never accumulated.** CodeGen keeps name-keyed metadata (element kinds, class bindings) that in a single compilation is written once. A REPL compiles many small programs that reuse names. Each turn's CodeGen starts from metadata seeded off the persistent type environment - the one source of truth - rather than inheriting a previous turn's map. Stale name-keyed metadata has caused real miscompiles in this codebase before; the REPL must be structurally unable to reproduce that pattern.
 
-### Type Annotations in REPL Mode
+Per this repo's memory-safety policy, the adversarial tests for this emit mode (assign-and-rebind churn, globals captured by fired vthreads, exception mid-assignment) are written and run under ASan **before** the emit mode is adopted, not after. They are the first artifact of that step, not the last.
 
-REPL mode uses `ParserOptions{ isDragonFile=true, requireTypes=false }` (the option already exists in `include/dragon/Parser.h:26`).
+### Functions, classes, vtables
 
-```
->>> x = 42 # inferred as int
->>> name = "Dragon" # inferred as str
->>> values = [1, 2, 3] # inferred as list[int]
->>> def add(a: int, b: int) -> int { return a + b }
-```
+Functions and classes already emit as module-level symbols; the REPL keeps their AST nodes so later turns type-check against them, and the JIT's symbol table handles linkage. Each class's vtable emits into the module that defines it and later turns reference it externally - the standard cross-module pattern, nothing REPL-specific. Redefining a function or class is the same versioning story as variables: new version becomes live, old one goes inert.
 
-Full annotations still work for users who want them. Untyped function parameters without enough inference signal raise the same diagnostic as `dragon check` would - we do not silently fall back to `Any` (that would violate commandment #2).
+### Exceptions: the shell catch frame
 
----
+The runtime's unwinding machinery is in-process and per-thread, so exceptions inside JIT'd code propagate exactly as in a compiled program. What a compiled program does with an *uncaught* exception, though, is print and exit - correct for `dragon run`, fatal for a REPL.
 
-## Implementation Plan
+So the shell pushes its own catch-all exception frame around every entry-function call, using the same frame push/pop machinery `try` compiles to. An uncaught raise unwinds to the shell's frame (running the same unwind cleanup any handler gets, so owned temporaries on the skipped frames are released, not leaked), the shell prints the error, pops the frame, rolls back the turn's definitions, and prompts again:
 
-### Step 1: Driver wiring
-
-```
-Files: include/dragon/Driver.h, src/Driver.cpp, src/dragon.cpp
-```
-
-- Add `Repl` to `Action` enum (`include/dragon/Driver.h:12-15`)
-- Parse `dragon repl` in `parseArgs`
-- Add `runRepl` method on `Driver` that constructs and runs a `ReplSession`
-- `printUsage` updates
-
-### Step 2: ReplSession skeleton + LLJIT bring-up
-
-```
-Files: include/dragon/Repl.h, src/Repl.cpp
-```
-
-- Construct `LLJIT` via `LLJITBuilder`
-- Install `DynamicLibrarySearchGenerator::GetForCurrentProcess` for runtime symbol resolution
-- Empty `feed` returning true; verify shell can be entered and exited
-
-### Step 3: Input loop + classifier
-
-```
-Files: src/Repl.cpp
-```
-
-- `std::getline` reader (readline integration deferred to Step 7)
-- Prompt rendering (`>>>` / `...`)
-- Cheap lex-based classifier (brace/paren/bracket depth, leading-keyword detection)
-- REPL command dispatch table
-- Ctrl+C → clear pending buffer; Ctrl+D → exit
-
-### Step 4: CodeGen REPL emit mode
-
-```
-Files: include/dragon/CodeGen.h, src/CodeGen.cpp, src/CodeGenImpl.h, src/codegen/Assign.cpp
-```
-
-- Add `CodeGenOptions::replMode` (or `topLevelVarsAsGlobals`)
-- In assignment lowering at module scope: emit `GlobalVariable` instead of alloca when flag is on
-- Use `external` linkage for references to globals not defined in the current module
-- Synthesize `__repl_entry_<N>` wrapper function around the input's top-level statements
-
-### Step 5: Pipeline per turn
-
-```
-Files: src/Repl.cpp
-```
-
-- Parse with `ParserOptions{ requireTypes=false }`
-- Merge `persistentSymbols_` / `persistentTypes_` into TypeChecker context
-- CodeGen with `replMode=true`, emit into a fresh `ThreadSafeModule`
-- `jit_->addIRModule(std::move(tsm))`
-- `jit_->lookup("__repl_entry_N")`, cast, call
-- On success: commit any new symbols to `persistentSymbols_` / `persistentTypes_` and append new function/class decls to `persistentFunctions_` / `persistentClasses_`
-- On failure (parse / typecheck / JIT): print diagnostic via `DiagnosticFormatter`, leave session state unchanged
-
-### Step 6: Auto-print + repr
-
-```
-Files: src/codegen/Expressions.cpp, lib/Runtime/runtime_builtins.cpp
-```
-
-- New runtime helpers `dragon_print_repr_int`, `_float`, `_str`, `_bool`, `_list`, `_dict` (most already exist as `dragon_repr_*`; just wire the print wrappers if missing)
-- CodeGen REPL mode: if entry consists of a single `ExprStmt` with non-`None` type, wrap in the appropriate repr-printer
-
-### Step 7: Polish
-
-```
-Files: src/Repl.cpp
-```
-
-- Linenoise or readline integration (history, up/down arrows, basic editing)
-- History persisted to `~/.dragon_history`
-- `:help`, `:vars`, `:fns`, `:type`, `:ir` implementations
-- Multi-line continuation prompt cleanup
-
-### Step 8: Tests
-
-```
-Files: test/ReplTest.cpp
-```
-
-| Test | Validates |
-|------|-----------|
-| Expression auto-print (int, str, float, bool, list, dict) | Bare `2 + 2` prints `4` |
-| Variable persistence | `x = 1` then `x + 1` → `2` |
-| Function definition + call across turns | `def f(x: int) {...}` then `f(3)` works |
-| Class definition + instantiation + method call | `class Foo {...}` then `Foo.bar` works |
-| Vtable dispatch in REPL | `c = cls; c.method` where `cls` is bound dynamically |
-| Multiline detection | Unclosed `{` triggers continuation |
-| REPL commands | `:quit`, `:reset`, `:type`, `:vars`, `:ir` |
-| Error recovery | Syntax error / type error / runtime exception doesn't corrupt session |
-| Import in REPL | `import math` then `math.sqrt(4.0)` |
-| Type inference | `x = 42` infers `int`, used correctly in subsequent expressions |
-| Concurrency in REPL | `fire f` spawns vthread; result observable next turn |
-
-Test harness reuses `compileAndRun`-style helpers, except it drives `ReplSession::feed` directly and captures stdout per turn.
-
----
-
-## UX Design
-
-### Startup Banner
-```
-Dragon 0.3.0 - The Snake That Became a Dragon
-Interactive REPL | Type :help for commands
-
->>>
-```
-
-### Error Recovery
 ```
 >>> 1 / 0
 DRAGON SCALE ERROR: ZeroDivisionError: integer division by zero
@@ -417,26 +183,162 @@ DRAGON SCALE ERROR: undefined variable 'x'
 42
 ```
 
-Errors never crash the session. Failed inputs are not committed to the persistent symbol table; only successful turns mutate session state.
+### Runtime linkage
 
-### Repr vs Print
+The first draft proposed resolving runtime symbols by searching the compiler's own process image. That does not survive contact with how the binary is built: a normal executable does not export its statically linked symbols for runtime lookup, and the linker only keeps the archive members the compiler itself uses. Making it work would mean exporting and whole-archive-linking the entire runtime into the compiler binary - bloat in service of the wrong mechanism.
 
-| Value | `print(x)` output | Bare `x` (auto-print, repr-style) |
-|-------|-------------------|-----------------------------------|
-| `42` | `42` | `42` |
-| `3.14` | `3.14` | `3.14` |
-| `"hello"` | `hello` | `'hello'` |
-| `True` | `True` | `True` |
-| `None` | `None` | (silent) |
-| `[1, 2]` | `[1, 2]` | `[1, 2]` |
-| `{"a": 1}` | `{a: 1}` | `{'a': 1}` |
+The right mechanism is sitting in plain sight: the compiler already knows the path to the runtime archive, because it passes that archive to the system linker for every `dragon build`. ORC can load static archives directly into the JIT's symbol table. So the REPL loads **the same runtime archive compiled programs link**, plus the same bundled dependency archives under the same "only if the program needs them" gating the AOT link uses. Process-level lookup remains only as a fallback for libc/libm, which are genuinely in-process.
 
-### Tab Completion (future)
+This is strictly better than the original plan: no build-flag changes, no binary bloat, and the REPL's runtime is byte-for-byte the archive a compiled program gets, which upgrades "no drift" from a goal to a property of the link.
 
-Out of scope for v0.3.0. When added, completion sources are:
-- bound names from `persistentSymbols_`
-- method names from known type (look up in TypeChecker's method tables)
-- module attributes after `import math; math.<TAB>`
+### Imports
+
+`import math` in a REPL turn resolves through the same compile-time module resolver as a file build, compiles the module's IR into the JIT, and runs its module-level initialization. Two REPL-specific rules:
+
+- **Idempotence.** The session tracks which modules are already resident; a second `import math` (or an import reached transitively twice) neither re-JITs nor re-runs initialization.
+- **Initialization is a turn effect.** Module init runs inside the importing turn's catch frame, so a module whose init raises rolls back like any other failed turn.
+
+### Input model: cells, not lines
+
+A deliberate departure from Python's REPL: the unit of input is a **cell**, a small multi-line buffer, and execution is an explicit keystroke. Enter always inserts a newline; nothing runs until the user says run.
+
+```
+>>> def fibonacci(n: int) -> int {
+...     if n <= 1 {
+...         return n
+...     }
+...     return fibonacci(n - 1) + fibonacci(n - 2)
+... }
+... fibonacci(10)          # Alt+Enter
+55
+```
+
+The `>>>` / `...` prefixes are display decoration on the cell's lines, not modes; the whole buffer is one editable unit.
+
+This kills the worst part of line-based REPLs at the root. A line REPL has to guess whether input is complete after every Enter, which is what continuation prompts, depth-tracking classifiers, and blank-line-submits rules exist to approximate - and the guess is wrong exactly where those REPLs hurt most, editing multi-line definitions. With an explicit run keystroke there is nothing to guess: comments, blank lines, and half-written braces are just text until the user runs the cell. The lex-only classifier from the first draft is deleted outright, and `--py` mode needs no special submission rules either, since indentation is just text too.
+
+**The run keystroke: Alt+Enter, one binding everywhere.** The obvious first instinct is Ctrl+Enter, and it has a terminal problem: in a plain terminal, Ctrl+Enter and Enter arrive as the same byte, so most terminals cannot even report the difference without an enhanced keyboard protocol, which would mean protocol detection and a banner that names a different chord per terminal. Alt+Enter has none of that: every terminal and multiplexer delivers it as an escape-prefixed Enter. So Alt+Enter is the one documented run key, implemented as that two-byte sequence - which makes **Esc followed by Enter** the exact same input for free. That equivalence is not a footnote; it is the escape hatch for the two real-world snags: macOS terminals where Option is not configured as Meta (Alt+Enter never reaches the program), and desktops or terminals that grab Alt+Enter for fullscreen before the shell sees it. Esc, Enter cannot be intercepted by anything. One key, one parser, no detection code. If enhanced-keyboard Ctrl+Enter is ever wanted as a courtesy alias, it can be added later without changing anything documented.
+
+**Editing.** The reader is a small multi-line buffer editor: arrows move within the cell, Ctrl+C discards the cell, Ctrl+D on an empty cell exits. Enter auto-indents: the new line copies the previous line's leading whitespace, plus one indent unit when that line opened more `{`/`(`/`[` than it closed, and typing `}` as the first character of a line dedents that line as it is typed. Auto-indent is a hint, never authority: braces carry the structure and indentation stays cosmetic exactly as in a file, so a wrong guess costs one keystroke to fix and can never change meaning. (This is the depth tracker the first draft used for submission guessing, relocated to the one place where guessing wrong is harmless.) History stores whole cells, so recalling a function definition brings back the entire definition, ready to edit and re-run - the single biggest quality-of-life win over line-based REPLs.
+
+**Commands.** A cell whose first non-blank character is `:` is a shell command, not a program. Commands are one-liners and run on plain Enter; they never reach the compiler.
+
+**Statement separators.** None needed. Statements end at newlines, exactly as in a file; since Enter no longer means execute, there is no reason for trailing semicolons.
+
+### REPL commands
+
+| Command | Action |
+|---------|--------|
+| `:quit` / `:q` | Exit |
+| `:reset` | Tear down the JIT and all session state, start fresh |
+| `:type <expr>` | Type-check expr and print its inferred type, no execution |
+| `:ast <expr>` | Dump AST |
+| `:ir` / `:ir <N>` | Dump accumulated LLVM IR / the Nth turn's IR |
+| `:save <file.dr>` | Export the session as a valid Dragon source file |
+| `:load <file.dr>` | Read and execute a file in this session |
+| `:vars` | List bound names with types |
+| `:fns` | List defined functions |
+| `:time <expr>` | Time the expression's execution |
+| `:help` | List commands |
+
+`:reset` has one guard: it must not tear down the JIT while fired vthreads are still running, because destroying the JIT unmaps machine code a live thread may be executing. `:reset` waits for (or refuses under) live vthreads and says so.
+
+### Echo
+
+Top-level bare expressions echo their value, repr-style. A cell can hold several statements, so this needs a rule, and the rule is: **every** top-level expression statement of non-`None`, non-`void` type echoes, in source order. (Jupyter's echo-only-the-last rule was considered and rejected: an expression that silently vanishes mid-cell is a surprise, and echoing in order means a one-expression cell behaves exactly like Python's prompt.)
+
+| Input | Behavior |
+|-------|----------|
+| `2 + 2` | Print `4` |
+| `"hello".upper()` | Print `'HELLO'` |
+| `x = 42` | Silent (assignment) |
+| `print("hi")` | Print `hi` (explicit print) |
+| `[1, 2, 3]` | Print `[1, 2, 3]` |
+| `None` literal | Silent (Python parity) |
+| `def foo() {...}` | Silent (declaration) |
+| class instance | Repr-style, same formatting the runtime already produces for nested values |
+
+Implementation: the entry synthesizer wraps each qualifying top-level expression statement in a repr-printing call dispatched on the static type. The runtime already formats every value repr-style for nested container printing; echo reuses that formatting at the top level rather than inventing a second one.
+
+### Types at the prompt
+
+The prompt follows the file rules: first binding annotated, exactly as the compiler enforces everywhere else.
+
+The first draft proposed relaxing annotations at the prompt and leaning on inference (`x = 42` infers `int`). Rejected on reflection: the same draft's risk table promised "errors identical to `dragon check`", and a mode where a file-mode error is a REPL success is drift by definition, in the one place (the interactive teaching surface) where users form their model of the language. It would also make `:save` emit files that don't compile, or force `:save` to rewrite the user's own input. A REPL that quietly waives the language's rules teaches a different language.
+
+```
+>>> x = 42
+DRAGON SCALE ERROR: first binding of 'x' needs a type: x: int = 42
+>>> x: int = 42
+>>> x
+42
+```
+
+The annotation cost at the prompt is one token, the error is instructive rather than obstructive, and `:save` output compiles by construction. If real-world use shows the annotation requirement genuinely hurts at the prompt, relaxing it is a one-flag experiment *on top of* a working REPL, decided then with usage evidence rather than now with none.
+
+---
+
+## Implementation Plan
+
+### Step 1: Build + driver wiring
+
+- Add the ORC JIT components to the LLVM link.
+- Add a `repl` action to the driver and argument parsing; usage text.
+
+### Step 2: JIT bring-up + runtime linkage
+
+- Construct the session's JIT instance.
+- Load the runtime archive (and gated dependency archives) into the JIT's symbol table; process-lookup fallback for libc/libm.
+- Smoke test: JIT a hand-built module that calls into the runtime.
+
+### Step 3: Cell editor
+
+- Multi-line buffer editor: Enter inserts a line, arrows move within the cell, `>>>` / `...` render as line decoration.
+- Auto-indent on Enter (copy leading whitespace, one extra unit after a net-opening line; a leading `}` dedents live); a hint only, never structure.
+- Run keystroke: the escape-prefixed-Enter sequence, so Alt+Enter and Esc, Enter are one code path; no protocol detection.
+- Command cells (leading `:`) dispatch on plain Enter; Ctrl+C discards the cell, Ctrl+D on an empty cell exits.
+
+### Step 4: CodeGen REPL emit mode (tests first)
+
+- **First artifact: the adversarial ASan test suite** for the ownership semantics - assign/rebind churn across turns, globals captured by fired vthreads, exception mid-assignment, container globals mutated across turns. Written and running (red) before the emit mode lands.
+- Emit-mode flag: top-level vars as globals; external references for names from prior turns; versioned symbol naming.
+- Globals released on reassignment, never at entry-function exit; stores go through the shared-global write barrier.
+- Per-turn entry-function synthesis.
+- Per-name codegen metadata seeded from the persistent type environment each turn.
+
+### Step 5: Per-turn pipeline, rollback, catch frame
+
+- Parse → typecheck against persistent state → codegen → add module under a fresh resource tracker → call entry through the shell's catch frame.
+- Commit persistent state only on clean return; remove the tracker on any failure.
+- Uncaught-exception path: print, pop frame, roll back, re-prompt.
+- Import residency tracking.
+
+### Step 6: Echo
+
+- Per-expression echo in the entry synthesizer (every qualifying top-level expression, in order); repr-print dispatch on static type, reusing the runtime's existing repr formatting.
+
+### Step 7: Polish
+
+- Cell history: whole cells as history entries, persisted to `~/.dragon_history`; up-arrow at the top of a cell recalls the previous one.
+- `:vars`, `:fns`, `:type`, `:ir`, `:save`, `:load`, `:time` implementations.
+
+### Step 8: Tests (beyond Step 4's suite)
+
+| Test | Validates |
+|------|-----------|
+| Expression echo per type | Bare `2 + 2` prints `4`; strings quote; `None` silent |
+| Echo order | A cell with several bare expressions echoes each, in source order |
+| Variable persistence | `x: int = 1` then `x + 1` → `2` |
+| Rebinding | Re-annotated rebind works; mismatched bare re-assignment errors; no symbol collision either way |
+| Failed-turn rollback | A turn that raises mid-execution leaves no binding, no symbol, no leak; the name is reusable |
+| Uncaught exception | Raise at the prompt prints and returns to a working prompt |
+| Function/class definition + use across turns | Including vtable dispatch through a dynamically bound class |
+| Cell editing | Enter never executes; the run keystroke does; Esc, Enter equals Alt+Enter; Ctrl+C discards; command cells run on Enter |
+| REPL commands | `:quit`, `:reset`, `:type`, `:vars`, `:ir`, `:save` round-trip (saved file compiles) |
+| Import | `import math` then use; repeated import is a no-op; failing module init rolls back |
+| Concurrency | `fire f(x)` where `x` is a REPL global; `:reset` under a live vthread is guarded |
+
+The harness drives the session object directly and captures stdout per turn. The whole suite also runs under ASan/LSan in CI, since half of what the REPL exercises is ownership across turn boundaries.
 
 ---
 
@@ -444,26 +346,23 @@ Out of scope for v0.3.0. When added, completion sources are:
 
 | Risk | Mitigation |
 |------|------------|
-| Per-input module accumulation slows JIT lookups over long sessions | OrcJIT scales to thousands of modules in practice; if it becomes a problem, coalesce decl-only modules on `:reset` or after N turns |
-| GlobalVariable emission for top-level vars diverges from local-var codegen | Single emit-mode flag; tested by running the same `.dr` source as a file (allocas) and as a REPL session (globals) and comparing observable behavior |
-| vtables don't survive cross-module JIT linking | They already do for `dragon run` multi-file builds; same forward-declare-then-resolve pattern applies. Covered by the vtable dispatch REPL test |
-| Runtime symbol resolution misses a `dragon_*` function | `DynamicLibrarySearchGenerator` exposes all statically-linked symbols; if a symbol is missing the JIT reports it cleanly with the symbol name - diagnose at first occurrence, no fallback |
-| `requireTypes=false` causes drift between REPL and file mode | Same Parser/Sema/TypeChecker - relaxed mode is parse-time only; type *inference* (not erasure) fills in the rest. If inference can't conclude, the error is identical to `dragon check` |
-| Exception propagation across JIT boundary | Dragon exceptions use setjmp/longjmp with per-thread TLS (see zen.md); the JIT'd code sits inside the same process and the same TLS, so this just works. Test explicitly with `raise` in REPL |
-| LLVM crash inside `addIRModule` corrupts shell | Wrap in `llvm::Expected` / `cantFail` paths with diagnostic catching; on hard JIT error, offer `:reset` |
+| Per-turn module and dead-version accumulation over long sessions | Dead versions hold no live references (rebind releases the value) and cost bytes; ORC scales to thousands of modules. If lookup cost ever shows up, coalesce or prune on `:reset` |
+| Emit-mode globals diverge from compiled-program global semantics | One emit path, exercised by running identical source as a file and as a session and comparing observable behavior; the Step 4 ASan suite is written before the emit mode lands |
+| Rollback misses a stage (state committed before execution finishes) | Single commit point after clean entry return; everything before it lives under the turn's resource tracker; the failed-turn tests assert bit-identical session state |
+| Shared-global barrier missed for REPL globals → vthread refcount race | REPL globals compile through the same store path as module globals, not a REPL-specific one; the fired-vthread test runs under ASan |
+| A runtime symbol the JIT can't resolve | The archive loaded is the same one the AOT link uses, so any gap is a pre-existing AOT gap; the JIT reports the missing symbol by name at first use, no fallback |
+| Uncaught exception leaks the skipped frames' temporaries | The shell's catch frame runs the same unwind cleanup as any handler; covered under LSan |
+| `:reset` while fired vthreads still run JIT'd code | Guarded: join or refuse with a message, never unmap live code |
+| Alt+Enter grabbed by the desktop or terminal (fullscreen bindings) before the shell sees it | Esc, Enter is the same byte sequence and cannot be intercepted; the banner names both |
+| LLVM error during module add corrupts the shell | Errors surface as diagnostics; the turn rolls back; on a hard JIT error, offer `:reset` |
 
 ---
 
 ## Why One Phase
 
-The original draft of this ADR proposed three phases (accumulating C → tree-walking interpreter → LLVM JIT) because at the time of drafting CodeGen targeted C source text via a hypothetical CEmitter and JIT was blocked on CodeGen feature parity.
+The original draft proposed three phases (accumulating C-text → tree-walking interpreter → LLVM JIT) because at the time CodeGen targeted C source text and a JIT looked blocked on feature parity. Both premises are obsolete: CodeGen targets LLVM IR directly, and the runtime ABI the JIT would consume is the stable, shipping ABI every compiled program already uses. The only remaining gap is linking LLVM's JIT components, which is a build-list change, not a phase.
 
-Both premises are now obsolete:
-- **CodeGen targets LLVM IR directly** (`src/CodeGen.cpp` + `src/codegen/*.cpp`).
-- **`orcjit` is already linked** (`CMakeLists.txt:71`) - zero new dependencies.
-- **,, ** have all landed, so the runtime ABI the JIT consumes is stable and matches what `dragon run` produces.
-
-No reason anymore for a transitional Phase 1 or a parallel Phase 2 interpreter. The "Phase 3" approach is the only one that satisfies commandment #1 (native speed), commandment #2 (no parallel runtime to drift against compiled output), and the dogfooding policy (reuse, don't reimplement). Occassionally people ask for the C-text REPL anyway - still no.
+So: no transitional phase 1, no parallel phase 2 interpreter. The JIT approach is the only one that satisfies commandment #1 (native speed), commandment #2 (no parallel runtime to drift against compiled output), and the dogfooding policy (reuse, don't reimplement). People occasionally ask for the C-text REPL anyway - still no.
 
 ---
 
@@ -471,20 +370,20 @@ No reason anymore for a transitional Phase 1 or a parallel Phase 2 interpreter. 
 
 | Step | Effort | Notes |
 |------|--------|-------|
-| 1: Driver wiring | 0.5 day | Mechanical |
-| 2: LLJIT bring-up + runtime symbol generator | 1 day | Standard OrcJIT pattern |
-| 3: Input loop + classifier + multiline | 2 days | Lex-only depth tracker |
-| 4: CodeGen REPL emit mode | 3 days | The substantive piece - top-level vars as globals, entry-fn synthesis |
-| 5: Per-turn pipeline + state persistence | 2 days | Glue across existing components |
-| 6: Auto-print + repr wiring | 1 day | Most repr fns already exist in runtime |
-| 7: Readline + history + meta commands | 2 days | Polish, deferrable |
-| 8: Tests | 2 days | New `dragon_repl_tests` GoogleTest suite |
-| **Total** | **~2 weeks** | One engineer, no blocking dependencies |
+| 1: Build + driver wiring | 0.5 day | Mechanical |
+| 2: JIT bring-up + archive linkage | 1.5 days | Standard ORC patterns |
+| 3: Cell editor + run keystroke | 2.5 days | Multi-line buffer editing; no classifier to build |
+| 4: Emit mode + ownership (tests first) | 4-5 days | The substantive piece; the ASan suite is written before the emit mode |
+| 5: Per-turn pipeline, rollback, catch frame | 3 days | Resource trackers, versioning, commit point, exception path |
+| 6: Echo | 1 day | Reuses existing repr formatting |
+| 7: Cell history + commands | 2 days | Polish, deferrable |
+| 8: Remaining tests | 1.5 days | On top of Step 4's suite |
+| **Total** | **~3 weeks** | One engineer, no blocking dependencies |
 
-Latency budget: parse + typecheck (~3ms) + codegen (~2ms) + JIT compile of single module (~1-3ms) + execute = **<10ms typical**, well under the 50ms perceptual threshold and dramatically below Python's REPL.
+Latency budget: parse + typecheck (~3ms) + codegen (~2ms) + JIT compile of one small module (~1-3ms) + execute = **under 10ms typical**, well below the 50ms perceptual threshold and dramatically below Python's REPL.
 
 ---
 
 ## Recommendation
 
-Ship in v0.3.0. Most of the pipeline exists already - this is mostly driver glue plus one codegen flag.
+Ship it. The pipeline reuse is real - this is driver glue, one carefully audited emit mode, and a transactional turn loop around components that already exist. The two places that deserve the most care are exactly the two this revision redesigned: the ownership semantics of cross-turn globals (Step 4, tests first) and turn rollback (Step 5). Everything else is mechanical.

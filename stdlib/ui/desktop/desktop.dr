@@ -16,6 +16,16 @@ extern "C" def dragon_webview_show(handle: ptr)
 extern "C" def dragon_webview_close(handle: ptr)
 extern "C" def dragon_webview_enable_inspector(handle: ptr)
 extern "C" def dragon_webview_open_inspector(handle: ptr)
+extern "C" def dragon_webview_pick_folder(title: str, start_dir: str) -> str
+
+
+def pick_folder(title: str = "Open Folder", start_dir: str = "") -> str {
+    """Open the OS-native folder chooser (the XDG portal dialog where one is
+    running) and return the chosen absolute path, or "" if the user cancels.
+    Blocks its caller until the dialog settles; call it from an rpc handler -
+    those run on green threads, so the window itself stays live."""
+    return dragon_webview_pick_folder(title, start_dir)
+}
 
 
 class Window {

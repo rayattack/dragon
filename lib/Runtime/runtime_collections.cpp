@@ -45,6 +45,24 @@ static void sb_puts(DragonStrBuf* b, const char* s) {
     b->buf[b->len] = '\0';
 }
 
+// Append a Dragon string PAYLOAD's true UTF-8 bytes. A kind=4 (UCS-4)
+// DragonString stores one code point per 4-byte slot, so any strlen-family
+// walk stops inside the first slot ("arrow → here" appended as "a").
+// dragon_str_to_utf8_alloc returns NULL for kind=1 / literals - the data
+// pointer already IS UTF-8; use it with the reported byte length. Same
+// boundary rule as dragon_http_build_response.
+static void sb_put_dstr(DragonStrBuf* b, const char* s) {
+    if (!s) return;
+    int64_t blen = 0;
+    char* enc = dragon_str_to_utf8_alloc(s, &blen);
+    const char* bytes = enc ? enc : s;
+    sb_ensure(b, (size_t)blen);
+    memcpy(b->buf + b->len, bytes, (size_t)blen);
+    b->len += (size_t)blen;
+    b->buf[b->len] = '\0';
+    if (enc) free(enc);
+}
+
 static void dragon_repr_list(DragonStrBuf* out, DragonList* l);
 static void dragon_repr_list_box(DragonStrBuf* out, DragonListBox* l);
 static void dragon_repr_dict(DragonStrBuf* out, DragonDict* d);
@@ -60,7 +78,7 @@ static void dragon_repr_value(DragonStrBuf* out, int64_t val, uint8_t tag) {
         case TAG_STR: {
             const char* s = (const char*)(uintptr_t)val;
             sb_putc(out, '\'');
-            sb_puts(out, s);
+            sb_put_dstr(out, s);
             sb_putc(out, '\'');
             break;
         }
@@ -192,7 +210,7 @@ static void dragon_repr_dict(DragonStrBuf* out, DragonDict* d) {
             first = false;
             DictEntry& e = d->entries[i];
             sb_putc(out, '\'');
-            sb_puts(out, e.key);
+            sb_put_dstr(out, e.key);
             sb_puts(out, "': ");
             dragon_repr_value(out, e.value, (uint8_t)e.tag);
         }
@@ -231,11 +249,17 @@ static void dragon_repr_dict_int(DragonStrBuf* out, DragonDict* d) {
 // generic `json.dumps(obj: Any) -> str`.
 //===----------------------------------------------------------------------===//
 
+// String bodies arrive as Dragon payloads: encode kind=4 (UCS-4) buffers to
+// real UTF-8 first and walk by byte length, never NUL-termination (a UCS-4
+// slot's top three zero bytes ended the old walk after one character).
 static void dragon_json_escape(DragonStrBuf* out, const char* s) {
     sb_putc(out, '"');
     if (s) {
-        for (const unsigned char* p = (const unsigned char*)s; *p; ++p) {
-            unsigned char c = *p;
+        int64_t blen = 0;
+        char* enc = dragon_str_to_utf8_alloc(s, &blen);
+        const unsigned char* p = (const unsigned char*)(enc ? enc : s);
+        for (int64_t i = 0; i < blen; ++i) {
+            unsigned char c = p[i];
             switch (c) {
                 case '"':  sb_puts(out, "\\\""); break;
                 case '\\': sb_puts(out, "\\\\"); break;
@@ -254,6 +278,7 @@ static void dragon_json_escape(DragonStrBuf* out, const char* s) {
                     }
             }
         }
+        if (enc) free(enc);
     }
     sb_putc(out, '"');
 }

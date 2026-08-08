@@ -1,0 +1,70 @@
+# json.dumps and container repr of non-ASCII (kind=4 / UCS-4) strings.
+#
+# A str holding any code point >= 0x80 stores one code point per 4-byte slot
+# (kind=4). The runtime's json/repr buffer builders appended those payloads
+# with strlen-family walks, which stop at the first zero byte of the first
+# slot: json.dumps({c: "arrow → here"}) returned {"c": "a"}, a leading
+# non-ASCII char produced garbage ("→..." became "!"), and str(["a→b"])
+# returned ['a']. The builders now encode payloads via dragon_str_to_utf8_alloc
+# (same boundary rule as dragon_http_build_response).
+
+from unittest import TestCase, main
+import json
+from json import decode
+
+
+def _roundtrip(s: str) -> str {
+    const out: str = json.dumps({c: s})
+    const d: dict[str, Any] = decode[dict[str, Any]](out.encode("utf-8"))
+    const back: str = d["c"]
+    return back
+}
+
+
+class TestUcs4DumpsRepr(TestCase) {
+    def test_dumps_value_roundtrip() {
+        const s: str = "arrow → here, § then … and ô"
+        self.assertEqual(_roundtrip(s), s)
+    }
+
+    def test_dumps_leading_multibyte() {
+        self.assertEqual(_roundtrip("→lead"), "→lead")
+    }
+
+    def test_dumps_mixed_escapes_and_unicode() {
+        const s: str = "line1\n→ \"quoted\" \\ tail\t§"
+        self.assertEqual(_roundtrip(s), s)
+    }
+
+    def test_dumps_bare_string_and_list() {
+        self.assertEqual(json.dumps("a→b"), "\"a→b\"")
+        self.assertEqual(json.dumps(["x", "y → z"]), "[\"x\", \"y → z\"]")
+    }
+
+    def test_dumps_nonascii_key() {
+        const out: str = json.dumps({"k→ey": "v"})
+        const d: dict[str, Any] = decode[dict[str, Any]](out.encode("utf-8"))
+        const v: str = d["k→ey"]
+        self.assertEqual(v, "v")
+    }
+
+    def test_repr_list_str() {
+        xs: list[str] = ["a→b", "plain"]
+        self.assertEqual(str(xs), "['a→b', 'plain']")
+    }
+
+    def test_repr_dict_key_and_value() {
+        d: dict[str, str] = {"k→": "v→w"}
+        self.assertEqual(str(d), "{'k→': 'v→w'}")
+    }
+
+    def test_repr_ascii_unchanged() {
+        ys: list[str] = ["plain", "text"]
+        self.assertEqual(str(ys), "['plain', 'text']")
+        self.assertEqual(json.dumps({a: "b"}), "{\"a\": \"b\"}")
+    }
+}
+
+
+main([TestUcs4DumpsRepr()])
+
