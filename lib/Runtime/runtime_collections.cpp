@@ -1237,11 +1237,10 @@ int64_t dragon_bytes_cmp(DragonBytes* a, DragonBytes* b) {
 }
 
 int64_t dragon_bytes_get(DragonBytes* b, int64_t index) {
-    if (!b) { fprintf(stderr, "IndexError: bytes index out of range\n"); exit(1); }
+    if (!b) { dragon_raise_exc_cstr(41, "IndexError: bytes index out of range"); }
     if (index < 0) index += b->len;
     if (index < 0 || index >= b->len) {
-        fprintf(stderr, "IndexError: bytes index out of range\n");
-        exit(1);
+        dragon_raise_exc_cstr(41, "IndexError: bytes index out of range");
     }
     return (int64_t)b->data[index];
 }
