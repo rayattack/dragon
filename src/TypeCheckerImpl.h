@@ -184,6 +184,10 @@ struct TypeChecker::Impl {
     // (a call's callee, or `.__doc__`'s object); visit(AttributeExpr) rejects it elsewhere.
     const Expr* methodRefOkExpr = nullptr;
 
+    std::unordered_set<const Expr*> rangeValueOkExprs;
+
+    std::unordered_map<const Expr*, long long> constIntFolds;
+
     // Polymorphic-recursion guard (`Foo[T]` -> `Foo[list[T]]` ...): distinct stamps
     // this module. Hitting the cap is a compile error, not a silent truncation.
     int instantiationCount = 0;    // total distinct instantiations stamped

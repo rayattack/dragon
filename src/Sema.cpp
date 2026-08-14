@@ -1,4 +1,3 @@
-// TODO: except-as targets probably need their own scope depth
 #include "dragon/Sema.h"
 #include <functional>
 #include <set>

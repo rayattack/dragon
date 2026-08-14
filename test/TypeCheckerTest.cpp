@@ -2549,3 +2549,114 @@ TEST(TypeCheckerTest, DictFloatKeyRejected) {
     EXPECT_TRUE(checkHasErrors(
         "d: dict[float, int] = {}\n"));
 }
+
+TEST(TypeCheckerTest, InOnScalarRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "x: int = 5\n"
+        "b: bool = x in 3\n"));
+    EXPECT_TRUE(checkHasErrors(
+        "b: bool = \"b\" in 5.5\n"));
+    EXPECT_FALSE(checkHasErrors(
+        "xs: list[int] = [1, 2]\n"
+        "b: bool = 1 in xs\n"));
+    EXPECT_FALSE(checkHasErrors(
+        "d: dict[str, int] = {\"a\": 1}\n"
+        "b: bool = \"a\" in d\n"));
+    EXPECT_FALSE(checkHasErrors(
+        "b: bool = 1 in {1, 2}\n"));
+    EXPECT_FALSE(checkHasErrors(
+        "b: bool = b\"a\" in b\"abc\"\n"));
+}
+
+TEST(TypeCheckerTest, InOnTupleRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "t: tuple[int, int, int] = (1, 2, 3)\n"
+        "b: bool = 2 in t\n"));
+}
+
+TEST(TypeCheckerTest, StrInRequiresStrLeft) {
+    EXPECT_TRUE(checkHasErrors(
+        "b: bool = 5 in \"abc\"\n"));
+    EXPECT_FALSE(checkHasErrors(
+        "b: bool = \"a\" in \"abc\"\n"));
+}
+
+TEST(TypeCheckerTest, InOnInstanceNeedsContains) {
+    EXPECT_TRUE(checkHasErrors(
+        "class Box {\n"
+        "    v: int\n"
+        "    def(v: int) { self.v = v }\n"
+        "}\n"
+        "b: Box = Box(5)\n"
+        "ok: bool = 1 in b\n"));
+    EXPECT_FALSE(checkHasErrors(
+        "class Bag {\n"
+        "    xs: list[int]\n"
+        "    def(xs: list[int]) { self.xs = xs }\n"
+        "    def __contains__(v: int) -> bool { return v in self.xs }\n"
+        "}\n"
+        "b: Bag = Bag([1])\n"
+        "ok: bool = 1 in b\n"));
+}
+
+TEST(TypeCheckerTest, BareRangeValueRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "print(range(5))\n"));
+    EXPECT_TRUE(checkHasErrors(
+        "xs: list[int] = sorted(range(5))\n"));
+    EXPECT_FALSE(checkHasErrors(
+        "for i in range(3) { print(i) }\n"));
+    EXPECT_FALSE(checkHasErrors(
+        "xs: list[int] = list(range(3))\n"));
+    EXPECT_FALSE(checkHasErrors(
+        "xs: list[int] = [i * 2 for i in range(3)]\n"));
+}
+
+TEST(TypeCheckerTest, IsinstanceSecondArgMustBeType) {
+    EXPECT_TRUE(checkHasErrors(
+        "x: int = 5\n"
+        "n: int = 3\n"
+        "b: bool = isinstance(x, n)\n"));
+    EXPECT_FALSE(checkHasErrors(
+        "x: int = 5\n"
+        "b: bool = isinstance(x, int)\n"));
+    EXPECT_FALSE(checkHasErrors(
+        "class Cow {\n"
+        "    v: int\n"
+        "    def(v: int) { self.v = v }\n"
+        "}\n"
+        "c: Cow = Cow(1)\n"
+        "b: bool = isinstance(c, Cow)\n"));
+}
+
+TEST(TypeCheckerTest, NonCallableCalleeRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "xs: list[int] = [10, 20]\n"
+        "print(xs[0](3))\n"));
+}
+
+TEST(TypeCheckerTest, ConstantIntOverflowRejected) {
+    EXPECT_TRUE(checkHasErrors("x: int = 2 ** 100\n"));
+    EXPECT_TRUE(checkHasErrors("x: int = 2 ** 63\n"));
+    EXPECT_TRUE(checkHasErrors("x: int = 9223372036854775807 + 1\n"));
+    EXPECT_TRUE(checkHasErrors("x: int = -9223372036854775807 - 2\n"));
+    EXPECT_TRUE(checkHasErrors("x: int = 4611686018427387904 * 2\n"));
+    EXPECT_TRUE(checkHasErrors("x: int = (2 ** 50) * (2 ** 50)\n"));
+    EXPECT_FALSE(checkHasErrors("x: int = 2 ** 62\n"));
+    EXPECT_FALSE(checkHasErrors("x: int = 9223372036854775806 + 1\n"));
+    EXPECT_FALSE(checkHasErrors("x: int = -9223372036854775807 - 1\n"));
+}
+
+TEST(TypeCheckerTest, ConstantDivModByZeroStaysRuntimeError) {
+    EXPECT_FALSE(checkHasErrors("x: int = 1 // 0\n"));
+    EXPECT_FALSE(checkHasErrors("x: int = 1 % 0\n"));
+    EXPECT_FALSE(checkHasErrors("x: int = 7 // 2\n"));
+    EXPECT_FALSE(checkHasErrors("x: int = -7 // 2\n"));
+    EXPECT_FALSE(checkHasErrors("x: int = 7 % -2\n"));
+}
+
+TEST(TypeCheckerTest, ConstantShiftCountRejected) {
+    EXPECT_TRUE(checkHasErrors("x: int = 1 << 64\n"));
+    EXPECT_TRUE(checkHasErrors("x: int = 1 << -1\n"));
+    EXPECT_FALSE(checkHasErrors("x: int = 1 << 62\n"));
+}

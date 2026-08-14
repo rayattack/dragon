@@ -1287,6 +1287,16 @@ static int64_t bytes_find_impl(DragonBytes* haystack, DragonBytes* needle, bool 
 int64_t dragon_bytes_find(DragonBytes* h, DragonBytes* n) { return bytes_find_impl(h, n, false); }
 int64_t dragon_bytes_rfind(DragonBytes* h, DragonBytes* n) { return bytes_find_impl(h, n, true); }
 
+int64_t dragon_bytes_find_from(DragonBytes* h, DragonBytes* n, int64_t start) {
+    if (!h || !n) return -1;
+    if (start < 0) start = 0;
+    if (n->len == 0) return start <= h->len ? start : -1;
+    for (int64_t i = start; i <= h->len - n->len; i++) {
+        if (memcmp(h->data + i, n->data, n->len) == 0) return i;
+    }
+    return -1;
+}
+
 int64_t dragon_bytes_index_of(DragonBytes* h, DragonBytes* n) {
     int64_t r = bytes_find_impl(h, n, false);
     if (r < 0) dragon_raise_exc_cstr(90, "ValueError: subsequence not found");

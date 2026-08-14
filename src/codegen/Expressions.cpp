@@ -1055,6 +1055,11 @@ void CodeGen::visit(BinaryExpr& node) {
             releaseOwnedInOperands();
             return;
         }
+        impl_->addError(
+            "internal error: 'in' lowered with no container dispatch path; "
+            "the front end should have rejected the operand types",
+            node.location());
+        releaseOwnedInOperands();
         impl_->lastValue = llvm::ConstantInt::get(impl_->i1Type, 0);
         return;
     }

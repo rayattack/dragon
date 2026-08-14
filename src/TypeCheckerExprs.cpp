@@ -1,6 +1,5 @@
 /// Dragon TypeChecker - expression visitors (calls, attributes, subscripts, literals-composite, comprehensions, lambdas).
 /// Split from TypeChecker.cpp (file-size policy): same class, same behavior, pure code motion.
-// FIXME: isinstance() on generic type params still wrong for nested unions
 #include "dragon/TypeChecker.h"
 #include "dragon/Privacy.h"
 #include "TypeCheckerImpl.h"
@@ -26,6 +25,34 @@ void TypeChecker::visit(CallExpr& node) {
     // immediately, so it applies to this call's generic inference and never leaks into a nested call's arguments.
     auto expectedType = impl_->currentExpectedType;
     impl_->currentExpectedType = nullptr;
+
+    if (auto* calleeName = dynamic_cast<NameExpr*>(node.callee.get())) {
+        if (calleeName->name == "list" && node.args.size() == 1)
+            impl_->rangeValueOkExprs.insert(node.args[0].get());
+        if (calleeName->name == "range" &&
+            !impl_->rangeValueOkExprs.count(&node)) {
+            error(node.location(),
+                  "range() has no runtime value here: use it as a loop "
+                  "iterable or materialize it with list(range(...))");
+        }
+        if (calleeName->name == "isinstance" && node.args.size() == 2) {
+            bool typeArgOk = false;
+            if (auto* tn = dynamic_cast<NameExpr*>(node.args[1].get())) {
+                typeArgOk = tn->name == "int" || tn->name == "float" ||
+                            tn->name == "bool" || tn->name == "str" ||
+                            tn->name == "bytes" || tn->name == "list" ||
+                            tn->name == "dict" || tn->name == "tuple" ||
+                            tn->name == "set" ||
+                            impl_->typeNames.count(tn->name) != 0 ||
+                            lookupTypeParam(tn->name) != nullptr;
+            }
+            if (!typeArgOk) {
+                error(node.location(),
+                      "isinstance's second argument must be a type or class "
+                      "name known at compile time");
+            }
+        }
+    }
 
     // Visit arguments first: generic-function inference needs their types, and it
     // must run before the callee resolves (an explicit `first[int]` callee is a SubscriptExpr, not a real value subscript).
@@ -713,6 +740,29 @@ void TypeChecker::visit(CallExpr& node) {
             cls = (cls->parentClass && cls->parentClass->kind() == Type::Kind::Class)
                       ? static_cast<const ClassType*>(cls->parentClass.get())
                       : nullptr;
+        }
+    }
+
+    if (calleeType && !dynamic_cast<NameExpr*>(node.callee.get()) &&
+        !dynamic_cast<AttributeExpr*>(node.callee.get())) {
+        switch (calleeType->kind()) {
+        case Type::Kind::Int:
+        case Type::Kind::Float:
+        case Type::Kind::Bool:
+        case Type::Kind::Str:
+        case Type::Kind::Bytes:
+        case Type::Kind::None_:
+        case Type::Kind::List:
+        case Type::Kind::Dict:
+        case Type::Kind::Set:
+        case Type::Kind::Tuple:
+        case Type::Kind::Instance:
+            error(node.location(), "cannot call a value of type '" +
+                                       calleeType->toString() + "'");
+            node.type = impl_->unknownType;
+            return;
+        default:
+            break;
         }
     }
 
@@ -1620,6 +1670,7 @@ void TypeChecker::bindCompLoopVars(
 // in the same lexical scope as the outer comprehension so loop vars stay visible.
 void TypeChecker::checkCompExtraClauses(std::vector<CompClause>& clauses) {
     for (auto& c : clauses) {
+        if (c.iterable) impl_->rangeValueOkExprs.insert(c.iterable.get());
         auto cIter = c.iterable ? inferType(c.iterable.get()) : impl_->unknownType;
         bindCompLoopVars(c.varNames, cIter);
         if (c.condition) inferType(c.condition.get());
@@ -1628,6 +1679,7 @@ void TypeChecker::checkCompExtraClauses(std::vector<CompClause>& clauses) {
 
 void TypeChecker::visit(ListCompExpr& node) {
     impl_->pushScope();
+    if (node.iterable) impl_->rangeValueOkExprs.insert(node.iterable.get());
     auto iterType = node.iterable ? inferType(node.iterable.get()) : impl_->unknownType;
     bindCompLoopVars({node.varName}, iterType);
     if (node.condition) inferType(node.condition.get());
@@ -1643,6 +1695,7 @@ void TypeChecker::visit(ListCompExpr& node) {
 
 void TypeChecker::visit(DictCompExpr& node) {
     impl_->pushScope();
+    if (node.iterable) impl_->rangeValueOkExprs.insert(node.iterable.get());
     auto iterType = node.iterable ? inferType(node.iterable.get()) : impl_->unknownType;
     bindCompLoopVars(node.varNames, iterType);
     if (node.condition) inferType(node.condition.get());
@@ -1655,6 +1708,7 @@ void TypeChecker::visit(DictCompExpr& node) {
 
 void TypeChecker::visit(SetCompExpr& node) {
     impl_->pushScope();
+    if (node.iterable) impl_->rangeValueOkExprs.insert(node.iterable.get());
     auto iterType = node.iterable ? inferType(node.iterable.get()) : impl_->unknownType;
     bindCompLoopVars({node.varName}, iterType);
     if (node.condition) inferType(node.condition.get());
@@ -1670,6 +1724,7 @@ void TypeChecker::visit(SetCompExpr& node) {
 
 void TypeChecker::visit(GeneratorExpr& node) {
     impl_->pushScope();
+    if (node.iterable) impl_->rangeValueOkExprs.insert(node.iterable.get());
     auto iterType = node.iterable ? inferType(node.iterable.get()) : impl_->unknownType;
     bindCompLoopVars({node.varName}, iterType);
     if (node.condition) inferType(node.condition.get());

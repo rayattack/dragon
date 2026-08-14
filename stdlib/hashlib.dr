@@ -6,6 +6,9 @@ digest() (str->hex helpers live in crypto.dr); also provides pbkdf2_hmac (RFC 80
 import hmac
 
 # Raw-digest primitives (mbedTLS-backed): bytes in, bytes out.
+extern "C" def dragon_hash_ctx_new(algorithm: str) -> bytes
+extern "C" def dragon_hash_ctx_updated(state: bytes, data: bytes) -> bytes
+extern "C" def dragon_hash_ctx_digest(state: bytes) -> bytes
 extern "C" def dragon_sha256_bytes(data: bytes) -> bytes
 extern "C" def dragon_sha224_bytes(data: bytes) -> bytes
 extern "C" def dragon_sha512_bytes(data: bytes) -> bytes
@@ -57,11 +60,15 @@ def _block_size(algorithm: str) -> int {
 class Hash {
     def(algorithm: str, data: bytes) {
         self.algorithm = algorithm
-        self.data = data
+        state: bytes = dragon_hash_ctx_new(algorithm)
+        if len(data) > 0 {
+            state = dragon_hash_ctx_updated(state, data)
+        }
+        self.state = state
     }
 
     def digest() -> bytes {
-        return _raw_digest(self.algorithm, self.data)
+        return dragon_hash_ctx_digest(self.state)
     }
 
     def hexdigest() -> str {
@@ -77,12 +84,13 @@ class Hash {
     }
 
     def update(more: bytes) {
-        # Digest is computed lazily over all accumulated data on digest()/hexdigest().
-        self.data += more
+        self.state = dragon_hash_ctx_updated(self.state, more)
     }
 
     def copy() -> Hash {
-        return Hash(self.algorithm, self.data)
+        const twin: Hash = Hash(self.algorithm, b"")
+        twin.state = self.state
+        return twin
     }
 
     def block_size() -> int {

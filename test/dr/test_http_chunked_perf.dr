@@ -1,0 +1,66 @@
+from unittest import TestCase, main
+from http.server import MemoryReader, RequestReader, FramedRequest
+from time import monotonic
+
+const TINY_CHUNK_COUNT: int = 20000
+const DECHUNK_BUDGET_SECS: float = 2.0
+
+def _chunked_wire_of_tiny_chunks(n: int) -> bytes {
+    parts: list[bytes] = [b"POST /x HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n"]
+    i: int = 0
+    while i < n {
+        parts.append(b"1\r\na\r\n")
+        i = i + 1
+    }
+    parts.append(b"0\r\n\r\n")
+    return b"".join(parts)
+}
+
+class ChunkedDechunkPerfTests(TestCase) {
+    def test_many_tiny_chunks_decode_within_time_budget() {
+        const wire: bytes = _chunked_wire_of_tiny_chunks(TINY_CHUNK_COUNT)
+        const rr: RequestReader = RequestReader(MemoryReader([wire]))
+        const t0: float = monotonic()
+        const fr: FramedRequest = rr.read_request()
+        const elapsed: float = monotonic() - t0
+        self.assertTrue(fr.ok)
+        self.assertEqual(len(fr.body), TINY_CHUNK_COUNT)
+        self.assertEqual(fr.body, b"a" * TINY_CHUNK_COUNT)
+        self.assertTrue(elapsed < DECHUNK_BUDGET_SECS)
+    }
+}
+
+class ChunkedCorrectnessGuardTests(TestCase) {
+    def test_hex_size_with_chunk_extension() {
+        const wire: bytes = b"POST /x HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n1a;name=val\r\nabcdefghijklmnopqrstuvwxyz\r\n0\r\n\r\n"
+        const rr: RequestReader = RequestReader(MemoryReader([wire]))
+        const fr: FramedRequest = rr.read_request()
+        self.assertTrue(fr.ok)
+        self.assertEqual(fr.body.decode("utf-8"), "abcdefghijklmnopqrstuvwxyz")
+        self.assertIn("content-length: 26", fr.raw.decode("utf-8"))
+    }
+
+    def test_pipelined_request_after_chunked_survives() {
+        const wire: bytes = b"POST /x HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\nGET /next HTTP/1.1\r\nHost: h\r\n\r\n"
+        const rr: RequestReader = RequestReader(MemoryReader([wire]))
+        const fr1: FramedRequest = rr.read_request()
+        self.assertTrue(fr1.ok)
+        self.assertEqual(fr1.body.decode("utf-8"), "abc")
+        const fr2: FramedRequest = rr.read_request()
+        self.assertTrue(fr2.ok)
+        self.assertIn("GET /next", fr2.raw.decode("utf-8"))
+    }
+
+    def test_chunk_data_split_across_reads_after_rewrite() {
+        const rr: RequestReader = RequestReader(MemoryReader([
+            b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhe",
+            b"llo\r\n1",
+            b"4\r\nabcdefghij",
+            b"0123456789\r\n0\r\n\r\n"]))
+        const fr: FramedRequest = rr.read_request()
+        self.assertTrue(fr.ok)
+        self.assertEqual(fr.body.decode("utf-8"), "helloabcdefghij0123456789")
+    }
+}
+
+main([ChunkedDechunkPerfTests(), ChunkedCorrectnessGuardTests()])

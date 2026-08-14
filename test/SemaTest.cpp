@@ -408,3 +408,21 @@ TEST(SemaTest, DeferInsideFunctionAccepted) {
         "    defer f()\n"
         "}\n"));
 }
+
+TEST(SemaTest, ExceptAsTargetIsHandlerLocal) {
+    EXPECT_TRUE(analyzeHasErrors(
+        "try {\n"
+        "    raise ValueError(\"x\")\n"
+        "} except ValueError as ex {\n"
+        "    print(ex)\n"
+        "}\n"
+        "print(ex)\n"));
+    EXPECT_TRUE(analyzeOk(
+        "e: str = \"outer\"\n"
+        "try {\n"
+        "    raise ValueError(\"x\")\n"
+        "} except ValueError as e {\n"
+        "    print(e)\n"
+        "}\n"
+        "print(e)\n"));
+}

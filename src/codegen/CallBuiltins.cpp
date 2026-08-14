@@ -775,8 +775,13 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
         return true;
     }
 
-    // range() is fused into for-loop codegen; a bare range expr is just 0.
+    // range() is fused into for-loop/comprehension codegen and materialized
+    // by list(range(...)); the checker rejects it in any other position.
     if (name == "range") {
+        impl_->addError(
+            "internal error: bare range() reached codegen; the front end "
+            "should have rejected it",
+            node.location());
         impl_->lastValue = llvm::ConstantInt::get(impl_->i64Type, 0);
         return true;
     }
@@ -1265,9 +1270,10 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
             impl_->lastValue = llvm::ConstantInt::get(impl_->i1Type, result ? 1 : 0);
             return true;
         }
-        // Fallback: evaluate both args, return false
-        node.args[0]->accept(*this);
-        node.args[1]->accept(*this);
+        impl_->addError(
+            "internal error: isinstance type argument did not resolve at "
+            "codegen; the front end should have rejected it",
+            node.location());
         impl_->lastValue = llvm::ConstantInt::get(impl_->i1Type, 0);
         return true;
     }

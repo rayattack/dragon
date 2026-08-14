@@ -23,6 +23,7 @@ extern "C" def dragon_close_fd(fd: int)
 # which raises). Locates the \r\n\r\n header terminator and chunk-size CRLFs in
 # the raw byte buffer without decoding it.
 extern "C" def dragon_bytes_find(h: bytes, n: bytes) -> int
+extern "C" def dragon_bytes_find_from(h: bytes, n: bytes, start: int) -> int
 
 # String ops used by the (ASCII-only) header-framing path.
 extern "C" def dragon_str_concat(a: str, b: str) -> str
@@ -282,26 +283,41 @@ class RequestReader {
     # serve_connection so a stalled peer's read is bounded.
     idle_timeout_ms: int
 
+    consumed: int
+
     def(reader: ConnReader) {
         self.reader = reader
         self.buf = b""
         self.idle_timeout_ms = 0
+        self.consumed = 0
+    }
+
+    def take_unconsumed() -> bytes {
+        const rest: bytes = self.buf[self.consumed:]
+        self.buf = b""
+        self.consumed = 0
+        return rest
     }
 
     # Fill `self.buf` until it contains `needle`, or EOF. Returns the index of
     # `needle` in buf, or -1 on EOF-before-found / -2 on oversize.
     def _read_until(needle: bytes, cap: int) -> int {
-        pos: int = dragon_bytes_find(self.buf, needle)
+        scan: int = self.consumed
+        pos: int = dragon_bytes_find_from(self.buf, needle, scan)
         while pos < 0 {
-            if len(self.buf) > cap {
+            if len(self.buf) - self.consumed > cap {
                 return -2                      # oversize sentinel
+            }
+            scan = len(self.buf) - len(needle) + 1
+            if scan < self.consumed {
+                scan = self.consumed
             }
             const chunk: bytes = self.reader.recv_timeout(_RECV_CHUNK, self.idle_timeout_ms)
             if len(chunk) == 0 {
                 return -1                      # EOF / idle timeout before terminator
             }
             self.buf = self.buf + chunk
-            pos = dragon_bytes_find(self.buf, needle)
+            pos = dragon_bytes_find_from(self.buf, needle, scan)
         }
         return pos
     }
@@ -325,6 +341,11 @@ class RequestReader {
     def read_request() -> FramedRequest {
         const empty: bytes = b""
         const crlf2: bytes = b"\r\n\r\n"
+
+        if self.consumed > 0 {
+            self.buf = self.buf[self.consumed:]
+            self.consumed = 0
+        }
 
         # 1. Header terminator.
         const hpos: int = self._read_until(crlf2, _MAX_HEADER_BYTES)
@@ -381,7 +402,7 @@ class RequestReader {
         const raw: bytes = self.buf[0:need]
         const body: bytes = self.buf[head_end:need]
         # Retain anything beyond this request for the next read (pipelining).
-        self.buf = self.buf[need:]
+        self.consumed = need
         return FramedRequest(true, false, false, raw, body)
     }
 
@@ -392,41 +413,46 @@ class RequestReader {
     def _read_chunked(head_end: int, head_bytes: bytes) -> FramedRequest {
         const empty: bytes = b""
         const crlf: bytes = b"\r\n"
-        body: bytes = b""
-        # _read_until / _fill_to operate on absolute self.buf offsets, so we
-        # consume from the front as we go to keep offsets simple.
-        self.buf = self.buf[head_end:]
+        parts: list[bytes] = []
+        body_len: int = 0
+        self.consumed = head_end
 
         while true {
+            if self.consumed > len(self.buf) - self.consumed {
+                self.buf = self.buf[self.consumed:]
+                self.consumed = 0
+            }
             # chunk-size line up to CRLF.
             const szpos: int = self._read_until(crlf, _MAX_HEADER_BYTES)
             if szpos < 0 {
                 return FramedRequest(false, false, true, empty, empty)
             }
-            const szline: str = self.buf[0:szpos].decode("utf-8")
+            const szline: str = self.buf[self.consumed:szpos].decode("utf-8")
             const size: int = _parse_chunk_size(dragon_str_strip(szline))
             # Drop the size line + CRLF.
-            self.buf = self.buf[szpos + 2:]
+            self.consumed = szpos + 2
             if size == 0 {
                 # Last chunk. Consume the trailing CRLF (and any trailers up to
                 # the final blank line) then stop.
                 const endpos: int = self._read_until(crlf, _MAX_HEADER_BYTES)
                 if endpos >= 0 {
-                    self.buf = self.buf[endpos + 2:]
+                    self.consumed = endpos + 2
                 }
                 break
             }
-            if len(body) + size > _MAX_BODY_BYTES {
+            if body_len + size > _MAX_BODY_BYTES {
                 return FramedRequest(false, false, true, empty, empty)
             }
             # Ensure the chunk data + its trailing CRLF are buffered.
-            if not self._fill_to(size + 2) {
+            if not self._fill_to(self.consumed + size + 2) {
                 return FramedRequest(false, false, true, empty, empty)
             }
-            body = body + self.buf[0:size]
-            self.buf = self.buf[size + 2:]      # drop data + trailing CRLF
+            parts.append(self.buf[self.consumed:self.consumed + size])
+            body_len = body_len + size
+            self.consumed = self.consumed + size + 2
         }
 
+        const body: bytes = b"".join(parts)
         # Rebuild a Content-Length head from the original head, stripping the
         # Transfer-Encoding line so the parser frames the synthesized body.
         const head: str = head_bytes.decode("utf-8")

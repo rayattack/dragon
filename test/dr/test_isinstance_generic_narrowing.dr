@@ -1,0 +1,69 @@
+from unittest import TestCase, main
+
+def is_t_scalar[T](x: T) -> bool {
+    return isinstance(x, T)
+}
+
+def which_of_union[T](x: T) -> str {
+    if isinstance(x, str) {
+        return "str"
+    }
+    return "not-str"
+}
+
+def which_nested[T](x: T | None) -> str {
+    if x is None {
+        return "none"
+    }
+    if isinstance(x, str) {
+        return "str"
+    }
+    return "other"
+}
+
+def matches_param[T](a: T, b: int | str) -> bool {
+    return isinstance(b, T)
+}
+
+class GenericIsinstanceTests(TestCase) {
+    def test_scalar_type_param() {
+        self.assertTrue(is_t_scalar(5))
+        self.assertTrue(is_t_scalar("a"))
+    }
+
+    def test_union_bound_type_param_narrows() {
+        u: int | str = "hey"
+        self.assertEqual(which_of_union(u), "str")
+        v: int | str = 5
+        self.assertEqual(which_of_union(v), "not-str")
+    }
+
+    def test_nested_union_explicit_instantiation() {
+        u: int | str = 5
+        self.assertEqual(which_nested[int | str](u), "other")
+        w: int | str = "hi"
+        self.assertEqual(which_nested[int | str](w), "str")
+    }
+
+    def test_isinstance_against_type_param_on_union_value() {
+        self.assertFalse(matches_param("x", 5))
+        self.assertTrue(matches_param("x", "y"))
+        self.assertTrue(matches_param(3, 7))
+    }
+}
+
+class ExceptAsScopeTests(TestCase) {
+    def test_handler_shadow_preserves_outer() {
+        e: str = "outer"
+        caught: bool = false
+        try {
+            raise ValueError("boom")
+        } except ValueError as e {
+            caught = true
+        }
+        self.assertTrue(caught)
+        self.assertEqual(e, "outer")
+    }
+}
+
+main([GenericIsinstanceTests(), ExceptAsScopeTests()])

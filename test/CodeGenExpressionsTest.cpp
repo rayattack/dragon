@@ -493,8 +493,10 @@ TEST(CodeGenE2E, OverflowMulCaught) {
 TEST(CodeGenE2E, OverflowPowCaught) {
     CodeGenOptions opts; opts.checkOverflow = true;
     auto output = compileAndRun(
+        "b: int = 2\n"
+        "e: int = 100\n"
         "try {\n"
-        "    c: int = 2 ** 100\n"
+        "    c: int = b ** e\n"
         "    print(c)\n"
         "} except OverflowError {\n"
         "    print(\"caught\")\n"

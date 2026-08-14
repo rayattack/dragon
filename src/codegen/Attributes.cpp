@@ -1386,7 +1386,11 @@ void CodeGen::visit(SubscriptExpr& node) {
             impl_->emitDecrefByKind(obj, subRecvDrain);
     }
 }
-void CodeGen::visit(SliceExpr&) {
+void CodeGen::visit(SliceExpr& node) {
+    impl_->addError(
+        "internal error: slice expression reached codegen outside a "
+        "subscript",
+        node.location());
     impl_->lastValue = llvm::ConstantInt::get(impl_->i64Type, 0);
 }
 } // namespace dragon

@@ -626,6 +626,7 @@ void TypeChecker::visit(WhileStmt& node) {
 }
 
 void TypeChecker::visit(ForStmt& node) {
+    impl_->rangeValueOkExprs.insert(node.iterable.get());
     auto iterType = inferType(node.iterable.get());
 
     // A function value is not iterable (`for a in argv` where argv is a function, not

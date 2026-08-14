@@ -87,6 +87,129 @@ DragonBytes* dragon_md5_bytes(DragonBytes* data) {
     return dragon_bytes_new(hash, 16);
 }
 
+typedef struct {
+    int64_t kind;
+    union {
+        mbedtls_md5_context md5;
+        mbedtls_sha1_context sha1;
+        mbedtls_sha256_context sha256;
+        mbedtls_sha512_context sha512;
+    } u;
+} DragonHashCtx;
+
+enum {
+    DRAGON_HASH_MD5 = 1,
+    DRAGON_HASH_SHA1 = 2,
+    DRAGON_HASH_SHA224 = 3,
+    DRAGON_HASH_SHA256 = 4,
+    DRAGON_HASH_SHA384 = 5,
+    DRAGON_HASH_SHA512 = 6,
+};
+
+static DragonHashCtx* dragon_hash_ctx_check(DragonBytes* state) {
+    if (!state || state->len != (int64_t)sizeof(DragonHashCtx) || !state->data) {
+        dragon_raise_exc_cstr(90, "ValueError: corrupt hash state");
+    }
+    DragonHashCtx* c = (DragonHashCtx*)state->data;
+    if (c->kind < DRAGON_HASH_MD5 || c->kind > DRAGON_HASH_SHA512) {
+        dragon_raise_exc_cstr(90, "ValueError: corrupt hash state");
+    }
+    return c;
+}
+
+DragonBytes* dragon_hash_ctx_new(const char* algorithm) {
+    DragonHashCtx c;
+    memset(&c, 0, sizeof(c));
+    if (strcmp(algorithm, "md5") == 0) {
+        c.kind = DRAGON_HASH_MD5;
+        mbedtls_md5_init(&c.u.md5);
+        mbedtls_md5_starts(&c.u.md5);
+    } else if (strcmp(algorithm, "sha1") == 0) {
+        c.kind = DRAGON_HASH_SHA1;
+        mbedtls_sha1_init(&c.u.sha1);
+        mbedtls_sha1_starts(&c.u.sha1);
+    } else if (strcmp(algorithm, "sha224") == 0) {
+        c.kind = DRAGON_HASH_SHA224;
+        mbedtls_sha256_init(&c.u.sha256);
+        mbedtls_sha256_starts(&c.u.sha256, 1);
+    } else if (strcmp(algorithm, "sha256") == 0) {
+        c.kind = DRAGON_HASH_SHA256;
+        mbedtls_sha256_init(&c.u.sha256);
+        mbedtls_sha256_starts(&c.u.sha256, 0);
+    } else if (strcmp(algorithm, "sha384") == 0) {
+        c.kind = DRAGON_HASH_SHA384;
+        mbedtls_sha512_init(&c.u.sha512);
+        mbedtls_sha512_starts(&c.u.sha512, 1);
+    } else if (strcmp(algorithm, "sha512") == 0) {
+        c.kind = DRAGON_HASH_SHA512;
+        mbedtls_sha512_init(&c.u.sha512);
+        mbedtls_sha512_starts(&c.u.sha512, 0);
+    } else {
+        dragon_raise_exc_cstr(90, "ValueError: unsupported hash algorithm");
+    }
+    return dragon_bytes_new((const uint8_t*)&c, (int64_t)sizeof(c));
+}
+
+DragonBytes* dragon_hash_ctx_updated(DragonBytes* state, DragonBytes* data) {
+    dragon_hash_ctx_check(state);
+    DragonBytes* out = dragon_bytes_new((const uint8_t*)state->data, state->len);
+    DragonHashCtx* c = (DragonHashCtx*)out->data;
+    size_t n = data ? (size_t)data->len : 0;
+    const unsigned char* p = (data && data->data)
+                                 ? (const unsigned char*)data->data
+                                 : dragon_empty_input;
+    switch (c->kind) {
+    case DRAGON_HASH_MD5:
+        mbedtls_md5_update(&c->u.md5, p, n);
+        break;
+    case DRAGON_HASH_SHA1:
+        mbedtls_sha1_update(&c->u.sha1, p, n);
+        break;
+    case DRAGON_HASH_SHA224:
+    case DRAGON_HASH_SHA256:
+        mbedtls_sha256_update(&c->u.sha256, p, n);
+        break;
+    default:
+        mbedtls_sha512_update(&c->u.sha512, p, n);
+        break;
+    }
+    return out;
+}
+
+DragonBytes* dragon_hash_ctx_digest(DragonBytes* state) {
+    DragonHashCtx c;
+    memcpy(&c, dragon_hash_ctx_check(state), sizeof(c));
+    uint8_t out[64];
+    int64_t dlen = 0;
+    switch (c.kind) {
+    case DRAGON_HASH_MD5:
+        mbedtls_md5_finish(&c.u.md5, out);
+        dlen = 16;
+        break;
+    case DRAGON_HASH_SHA1:
+        mbedtls_sha1_finish(&c.u.sha1, out);
+        dlen = 20;
+        break;
+    case DRAGON_HASH_SHA224:
+        mbedtls_sha256_finish(&c.u.sha256, out);
+        dlen = 28;
+        break;
+    case DRAGON_HASH_SHA256:
+        mbedtls_sha256_finish(&c.u.sha256, out);
+        dlen = 32;
+        break;
+    case DRAGON_HASH_SHA384:
+        mbedtls_sha512_finish(&c.u.sha512, out);
+        dlen = 48;
+        break;
+    default:
+        mbedtls_sha512_finish(&c.u.sha512, out);
+        dlen = 64;
+        break;
+    }
+    return dragon_bytes_new(out, dlen);
+}
+
 // SHA-224 is SHA-256 truncated to 28 bytes (`is224=1`); SHA-384 is SHA-512
 // truncated to 48 bytes (`is384=1`). mbedTLS fills the full-width buffer either way.
 

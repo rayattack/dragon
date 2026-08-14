@@ -1920,8 +1920,7 @@ class Router {
                     # Seed the inbound buffer with any bytes the framer already
                     # over-read past the request head (a pipelined first frame),
                     # so no client data is lost across the HTTP->WS boundary.
-                    ws._inbuf = rr.buf
-                    rr.buf = b""
+                    ws._inbuf = rr.take_unconsumed()
                     const handler: Callable[[WebSocket], None] | None = res._ws_handler
                     if handler != none {
                         try {

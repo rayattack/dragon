@@ -1332,6 +1332,34 @@ bool TypeChecker::typeIsDubable(const Type* t, std::string& why) {
     }
 }
 
+static bool foldedConstInt(
+    const std::unordered_map<const Expr*, long long>& folds, Expr* e,
+    long long& out) {
+    if (auto* il = dynamic_cast<IntegerLiteral*>(e)) {
+        out = il->value;
+        return true;
+    }
+    auto it = folds.find(e);
+    if (it == folds.end()) return false;
+    out = it->second;
+    return true;
+}
+
+static bool constPowOverflows(long long base, long long exp, long long& out) {
+    long long r = 1;
+    while (exp > 0) {
+        if (exp & 1) {
+            if (__builtin_smulll_overflow(r, base, &r)) return true;
+        }
+        exp >>= 1;
+        if (exp) {
+            if (__builtin_smulll_overflow(base, base, &base)) return true;
+        }
+    }
+    out = r;
+    return false;
+}
+
 void TypeChecker::visit(BinaryExpr& node) {
     auto leftType = inferType(node.left.get());
     auto rightType = inferType(node.right.get());
@@ -1350,6 +1378,59 @@ void TypeChecker::visit(BinaryExpr& node) {
         op == TokenType::STAR || op == TokenType::SLASH ||
         op == TokenType::PERCENT || op == TokenType::POWER ||
         op == TokenType::DOUBLE_SLASH) {
+
+        long long lcv = 0;
+        long long rcv = 0;
+        if (op != TokenType::SLASH &&
+            foldedConstInt(impl_->constIntFolds, node.left.get(), lcv) &&
+            foldedConstInt(impl_->constIntFolds, node.right.get(), rcv)) {
+            long long r = 0;
+            bool overflowed = false;
+            bool folded = true;
+            switch (op) {
+            case TokenType::PLUS:
+                overflowed = __builtin_saddll_overflow(lcv, rcv, &r);
+                break;
+            case TokenType::MINUS:
+                overflowed = __builtin_ssubll_overflow(lcv, rcv, &r);
+                break;
+            case TokenType::STAR:
+                overflowed = __builtin_smulll_overflow(lcv, rcv, &r);
+                break;
+            case TokenType::POWER:
+                if (rcv < 0) folded = false;
+                else overflowed = constPowOverflows(lcv, rcv, r);
+                break;
+            case TokenType::DOUBLE_SLASH:
+                if (rcv == 0) {
+                    folded = false;
+                } else if (lcv == INT64_MIN && rcv == -1) {
+                    overflowed = true;
+                } else {
+                    r = lcv / rcv;
+                    if ((lcv % rcv != 0) && ((lcv < 0) != (rcv < 0))) r -= 1;
+                }
+                break;
+            case TokenType::PERCENT:
+                if (rcv == 0) {
+                    folded = false;
+                } else if (rcv == -1) {
+                    r = 0;
+                } else {
+                    r = lcv % rcv;
+                    if (r != 0 && ((r < 0) != (rcv < 0))) r += rcv;
+                }
+                break;
+            default:
+                folded = false;
+                break;
+            }
+            if (overflowed) {
+                error(node.location(), "integer constant expression out of range");
+            } else if (folded) {
+                impl_->constIntFolds[&node] = r;
+            }
+        }
 
         if (op == TokenType::PLUS &&
             leftType->kind() == Type::Kind::Str && rightType->kind() == Type::Kind::Str) {
@@ -1492,6 +1573,28 @@ void TypeChecker::visit(BinaryExpr& node) {
     if (op == TokenType::AMPERSAND || op == TokenType::PIPE ||
         op == TokenType::CARET || op == TokenType::LEFT_SHIFT ||
         op == TokenType::RIGHT_SHIFT) {
+        long long lcv = 0;
+        long long rcv = 0;
+        if (foldedConstInt(impl_->constIntFolds, node.left.get(), lcv) &&
+            foldedConstInt(impl_->constIntFolds, node.right.get(), rcv)) {
+            if (op == TokenType::LEFT_SHIFT || op == TokenType::RIGHT_SHIFT) {
+                if (rcv < 0 || rcv > 63) {
+                    error(node.location(),
+                          "constant shift count out of range (0..63)");
+                } else if (op == TokenType::LEFT_SHIFT) {
+                    impl_->constIntFolds[&node] =
+                        (long long)((unsigned long long)lcv << rcv);
+                } else {
+                    impl_->constIntFolds[&node] = lcv >> rcv;
+                }
+            } else if (op == TokenType::AMPERSAND) {
+                impl_->constIntFolds[&node] = lcv & rcv;
+            } else if (op == TokenType::PIPE) {
+                impl_->constIntFolds[&node] = lcv | rcv;
+            } else {
+                impl_->constIntFolds[&node] = lcv ^ rcv;
+            }
+        }
         if (leftType->isSubtypeOf(*impl_->intType) && rightType->isSubtypeOf(*impl_->intType)) {
             node.type = impl_->intType;
             return;
@@ -1504,6 +1607,62 @@ void TypeChecker::visit(BinaryExpr& node) {
         error(node.location(), "unsupported operand types for " + node.op.lexeme() +
               ": '" + leftType->toString() + "' and '" + rightType->toString() + "'");
         node.type = impl_->unknownType;
+        return;
+    }
+
+    if ((op == TokenType::IN || op == TokenType::NOT_IN) && rightType) {
+        switch (rightType->kind()) {
+        case Type::Kind::List:
+        case Type::Kind::Dict:
+        case Type::Kind::Set:
+        case Type::Kind::Bytes:
+            break;
+        case Type::Kind::Str:
+            if (leftType && leftType->kind() != Type::Kind::Str &&
+                leftType->kind() != Type::Kind::Any &&
+                leftType->kind() != Type::Kind::Unknown &&
+                leftType->kind() != Type::Kind::TypeVar) {
+                error(node.location(),
+                      "'" + node.op.lexeme() + "' on a str requires a str on "
+                      "the left, got '" + leftType->toString() + "'");
+            }
+            break;
+        case Type::Kind::Instance: {
+            bool hasContains = false;
+            auto& inst = static_cast<InstanceType&>(*rightType);
+            for (const ClassType* cls = inst.classType.get(); cls;) {
+                if (cls->methods.count("__contains__")) {
+                    hasContains = true;
+                    break;
+                }
+                cls = (cls->parentClass &&
+                       cls->parentClass->kind() == Type::Kind::Class)
+                          ? static_cast<const ClassType*>(cls->parentClass.get())
+                          : nullptr;
+            }
+            if (!hasContains) {
+                error(node.location(),
+                      "'" + node.op.lexeme() + "' needs '" +
+                      rightType->toString() + "' to define __contains__");
+            }
+            break;
+        }
+        case Type::Kind::Tuple:
+            error(node.location(), "'" + node.op.lexeme() +
+                  "' on a tuple is not supported; use a list");
+            break;
+        case Type::Kind::Any:
+        case Type::Kind::Unknown:
+        case Type::Kind::Union:
+        case Type::Kind::Optional:
+        case Type::Kind::TypeVar:
+            break;
+        default:
+            error(node.location(),
+                  "right operand of '" + node.op.lexeme() + "' must be a "
+                  "container, got '" + rightType->toString() + "'");
+        }
+        node.type = impl_->boolType;
         return;
     }
 
@@ -1560,6 +1719,17 @@ void TypeChecker::visit(UnaryExpr& node) {
     auto op = node.op.type();
 
     if (op == TokenType::MINUS || op == TokenType::PLUS) {
+        long long cv = 0;
+        if (foldedConstInt(impl_->constIntFolds, node.operand.get(), cv)) {
+            if (op == TokenType::PLUS) {
+                impl_->constIntFolds[&node] = cv;
+            } else if (cv == INT64_MIN) {
+                error(node.location(),
+                      "integer constant expression out of range");
+            } else {
+                impl_->constIntFolds[&node] = -cv;
+            }
+        }
         if (operandType->isSubtypeOf(*impl_->intType)) {
             node.type = impl_->intType;
         } else if (operandType->kind() == Type::Kind::Float) {

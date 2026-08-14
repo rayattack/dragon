@@ -3,7 +3,11 @@
 
 namespace dragon {
 
-void CodeGen::visit(StarredExpr&) {
+void CodeGen::visit(StarredExpr& node) {
+    impl_->addError(
+        "internal error: starred expression reached codegen outside a call "
+        "or unpacking context",
+        node.location());
     impl_->lastValue = llvm::ConstantInt::get(impl_->i64Type, 0);
 }
 

@@ -1244,6 +1244,10 @@ void CodeGen::visit(CallExpr& node) {
         return;
     }
 
+    impl_->addError(
+        "internal error: no call dispatch path matched this callee; the "
+        "front end should have rejected it",
+        node.location());
     impl_->lastValue = llvm::ConstantInt::get(impl_->i64Type, 0);
 }
 
