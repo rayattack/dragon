@@ -283,6 +283,21 @@ static int x509_check_wildcard(const char *cn, const mbedtls_x509_buf *name)
         return -1;
     }
 
+    /* DRAGON PATCH (see lib/mbedtls/VENDORING.md): the wildcard entry must
+     * contain at least two dots, so "*.com" cannot match every second-level
+     * name. Mirrors OpenSSL's valid_star() minimum-label rule. */
+    {
+        size_t dots = 0;
+        for (i = 0; i < name->len; ++i) {
+            if (name->p[i] == '.') {
+                ++dots;
+            }
+        }
+        if (dots < 2) {
+            return -1;
+        }
+    }
+
     for (i = 0; i < cn_len; ++i) {
         if (cn[i] == '.') {
             cn_idx = i;
