@@ -1,0 +1,32 @@
+# Pre-fix: os.getcwd() returned glibc's malloc'd buffer as a DragonString
+# (the A/B-proven realpath corruption shape); every call leaked under LSan.
+
+from unittest import TestCase, main
+from os import getcwd
+from os.path import relpath
+
+
+class GetcwdTests(TestCase) {
+    def test_shape() {
+        const cwd: str = getcwd()
+        self.assertTrue(len(cwd) > 0)
+        self.assertTrue(cwd.startswith("/"))
+        self.assertEqual(getcwd(), cwd)
+    }
+
+    def test_repeated_calls_stable() {
+        const first: str = getcwd()
+        i: int = 0
+        while i < 2000 {
+            self.assertEqual(getcwd(), first)
+            i = i + 1
+        }
+    }
+
+    def test_relpath_uses_cwd() {
+        self.assertEqual(relpath(getcwd() + "/x", "."), "x")
+    }
+}
+
+
+main([GetcwdTests()])

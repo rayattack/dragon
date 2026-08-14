@@ -1,5 +1,6 @@
-# frames demo: read a CSV, group + aggregate, sort, and pretty-print.
-# Run:  dragon run packages/frames/example.dr
+"""frames demo: read a CSV, group + aggregate, sort, and pretty-print.
+Run: dragon run packages/frames/example.dr
+"""
 
 from frames import read_csv, DataFrame
 

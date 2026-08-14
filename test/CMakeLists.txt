@@ -78,6 +78,15 @@ add_executable(dragon_diagnostic_tests DiagnosticTest.cpp)
 target_link_libraries(dragon_diagnostic_tests PRIVATE dragon_lib gtest_main)
 add_test(NAME DiagnosticTests COMMAND dragon_diagnostic_tests)
 
+# --- Python->Dragon Migrator Tests ---
+# The migrator TUs are not part of dragon_lib (no CLI path links them yet),
+# so this suite compiles them directly.
+add_executable(dragon_migrator_tests MigratorTest.cpp
+    ${CMAKE_SOURCE_DIR}/src/PythonMigrator.cpp
+    ${CMAKE_SOURCE_DIR}/src/TypeInference.cpp)
+target_link_libraries(dragon_migrator_tests PRIVATE dragon_lib gtest_main)
+add_test(NAME MigratorTests COMMAND dragon_migrator_tests)
+
 # --- Interop (End-to-End) Tests ---
 add_executable(dragon_interop_tests InteropTest.cpp)
 target_compile_definitions(dragon_interop_tests PRIVATE
@@ -239,4 +248,61 @@ add_test(NAME dr_test_odb_raft
     COMMAND $<TARGET_FILE:dragon> run
         ${CMAKE_CURRENT_SOURCE_DIR}/dr/raft/test_odb_raft.dr
         -I ${CMAKE_SOURCE_DIR}/packages)
+
+# The flagship dataframe package's own suite (packages/frames), wired like the
+# raft tests above: explicit registration with -I to resolve the package.
+add_test(NAME dr_test_frames
+    COMMAND $<TARGET_FILE:dragon> run
+        ${CMAKE_SOURCE_DIR}/packages/frames/test_frames.dr
+        -I ${CMAKE_SOURCE_DIR}/packages)
+
+# --- Examples compile gate ---
+# Every shipped example must keep type-checking. Skipped: pre-1.0 syntax
+# sketches (asyncs, syntax, server) that never targeted the current language.
+file(GLOB DRAGON_EXAMPLE_FILES CONFIGURE_DEPENDS
+    ${CMAKE_SOURCE_DIR}/examples/*.dr
+    ${CMAKE_SOURCE_DIR}/examples/docs_site/*.dr)
+set(DRAGON_EXAMPLE_SKIP asyncs.dr syntax.dr server.dr)
+foreach(_ex ${DRAGON_EXAMPLE_FILES})
+    get_filename_component(_ex_file ${_ex} NAME)
+    if(_ex_file IN_LIST DRAGON_EXAMPLE_SKIP)
+        continue()
+    endif()
+    get_filename_component(_ex_name ${_ex} NAME_WE)
+    add_test(NAME example_check_${_ex_name}
+        COMMAND $<TARGET_FILE:dragon> check ${_ex})
+    set_tests_properties(example_check_${_ex_name} PROPERTIES TIMEOUT 90)
+endforeach()
+
+# --- Docs sample compile gate ---
+# Extracts every ```dragon block from the docs and runs `dragon check` on it;
+# the skip heuristics live in the script's docstring.
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME docs_samples_check
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_doc_samples.py
+        $<TARGET_FILE:dragon>
+        ${CMAKE_SOURCE_DIR}/dragonlang-org/content/docs)
+# ~600 blocks, one `dragon check` each; generous ceiling for slow runners.
+set_tests_properties(docs_samples_check PROPERTIES TIMEOUT 900)
+
+# Default 90s ctest timeout for every dr_* test that did not set its own.
+get_property(_dr_all_tests DIRECTORY PROPERTY TESTS)
+foreach(_t ${_dr_all_tests})
+    if(_t MATCHES "^dr_")
+        get_test_property(${_t} TIMEOUT _dr_timeout)
+        if(NOT _dr_timeout)
+            set_tests_properties(${_t} PROPERTIES TIMEOUT 90)
+        endif()
+    endif()
+endforeach()
+
+# First-party warning set on every gtest binary (mirrors the root targets).
+foreach(_t
+    dragon_lexer_tests dragon_parser_tests dragon_sema_tests dragon_ffisync_tests
+    dragon_definite_assignment_tests dragon_module_init_order_tests
+    dragon_ownership_tests dragon_typechecker_tests dragon_ast_tests
+    dragon_enforcer_tests dragon_resolver_tests dragon_diagnostic_tests
+    dragon_migrator_tests dragon_interop_tests dragon_codegen_tests)
+    target_compile_options(${_t} PRIVATE ${DRAGON_WARNINGS})
+endforeach()
 

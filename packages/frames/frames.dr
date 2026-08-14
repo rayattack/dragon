@@ -1,18 +1,18 @@
 """
-# frames.dr - typed dataframes for Dragon
-#
-# Design (the "pandas without the cruft" core):
-#   * A column is a `Series`: one homogeneous dtype, stored in a native Dragon
-#     list (`list[int]` -> DragonListI64, `list[float]` -> DragonListF64,
-#     `list[str]` -> DragonListPtr). No per-element boxing.
-#   * A `DataFrame` is just a list of Series. Heterogeneity lives *across*
-#     columns, never inside one - so the only tag is `Series.dtype`, one per
-#     column, exactly the tagged-value pattern json.dr uses.
-#   * Deliberately omitted (the cruft): object dtype, dynamic column injection,
-#     implicit index alignment, inplace mutation, MultiIndex.
-#
-# Pure Dragon. Reductions (`sum`/`mean`/`min`/`max`/`std`) return float for a
-# uniform typed API regardless of int vs float column.
+frames.dr - typed dataframes for Dragon
+
+Design (the "pandas without the cruft" core):
+  * A column is a `Series`: one homogeneous dtype, stored in a native Dragon
+    list (`list[int]` -> DragonListI64, `list[float]` -> DragonListF64,
+    `list[str]` -> DragonListPtr). No per-element boxing.
+  * A `DataFrame` is just a list of Series. Heterogeneity lives *across*
+    columns, never inside one - so the only tag is `Series.dtype`, one per
+    column, exactly the tagged-value pattern json.dr uses.
+  * Deliberately omitted (the cruft): object dtype, dynamic column injection,
+    implicit index alignment, inplace mutation, MultiIndex.
+
+Pure Dragon. Reductions (`sum`/`mean`/`min`/`max`/`std`) return float for a
+uniform typed API regardless of int vs float column.
 """
 
 from csv import parse_rows, format_row

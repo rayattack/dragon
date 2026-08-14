@@ -1,0 +1,83 @@
+# Pre-fix: translate() returned the pattern unchanged, and _match backtracked
+# exponentially on multi-star patterns.
+
+from unittest import TestCase, main
+from fnmatch import fnmatch, fnmatchcase, filter_names, translate
+
+
+class TranslateTests(TestCase) {
+    def test_star_and_escape() {
+        self.assertEqual(translate("*.py"), "(?s:.*\\.py)\\Z")
+    }
+
+    def test_question_mark() {
+        self.assertEqual(translate("a?c"), "(?s:a.c)\\Z")
+    }
+
+    def test_char_class() {
+        self.assertEqual(translate("[abc]"), "(?s:[abc])\\Z")
+        self.assertEqual(translate("[!x]"), "(?s:[^x])\\Z")
+        self.assertEqual(translate("[a-z]"), "(?s:[a-z])\\Z")
+    }
+
+    def test_unterminated_bracket_escaped() {
+        self.assertEqual(translate("a["), "(?s:a\\[)\\Z")
+    }
+
+    def test_consecutive_stars_collapse() {
+        self.assertEqual(translate("a**b"), "(?s:a.*b)\\Z")
+    }
+
+    def test_metachars_escaped() {
+        self.assertEqual(translate("a+b"), "(?s:a\\+b)\\Z")
+        self.assertEqual(translate("a-b"), "(?s:a\\-b)\\Z")
+        self.assertEqual(translate("a b"), "(?s:a\\ b)\\Z")
+        self.assertEqual(translate("(x)"), "(?s:\\(x\\))\\Z")
+    }
+}
+
+
+class MatchTests(TestCase) {
+    def test_basic() {
+        self.assertTrue(fnmatch("foo.py", "*.py"))
+        self.assertFalse(fnmatch("foo.pyc", "*.py"))
+        self.assertTrue(fnmatch("abc", "a?c"))
+        self.assertTrue(fnmatch("abc", "*"))
+        self.assertTrue(fnmatch("", "*"))
+        self.assertTrue(fnmatch("", ""))
+        self.assertFalse(fnmatch("a", ""))
+    }
+
+    def test_char_classes() {
+        self.assertTrue(fnmatch("abc", "[ab]bc"))
+        self.assertTrue(fnmatch("dbc", "[!ab]bc"))
+        self.assertFalse(fnmatch("abc", "[!ab]bc"))
+        self.assertTrue(fnmatch("m.txt", "[a-z].txt"))
+        self.assertFalse(fnmatch("M.txt", "[a-z].txt"))
+    }
+
+    def test_multi_star_backtracking() {
+        self.assertTrue(fnmatch("axbyc", "a*b*c"))
+        self.assertTrue(fnmatch("aXXbYYcZZc", "a*b*c"))
+        self.assertFalse(fnmatch("axbyd", "a*b*c"))
+    }
+
+    def test_unterminated_bracket_is_literal() {
+        self.assertTrue(fnmatch("ab[", "ab["))
+        self.assertFalse(fnmatch("abx", "ab["))
+    }
+
+    def test_pathological_pattern_fast() {
+        const name: str = "a" * 60
+        self.assertFalse(fnmatch(name, "a*a*a*a*a*a*a*a*a*a*b"))
+        self.assertTrue(fnmatch(name, "a*a*a*a*a*a*a*a*a*a*"))
+    }
+
+    def test_filter_names() {
+        self.assertEqual(filter_names(["a.py", "b.txt", "c.py"], "*.py"), ["a.py", "c.py"])
+        self.assertTrue(fnmatchcase("foo.PY", "*.PY"))
+    }
+}
+
+
+main([TranslateTests(), MatchTests()])

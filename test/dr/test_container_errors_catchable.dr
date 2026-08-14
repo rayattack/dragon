@@ -1,0 +1,114 @@
+# Pre-fix: these paths called exit(1), killing the process instead of raising.
+
+from unittest import TestCase, main
+
+
+def _remove_missing() {
+    xs: list[int] = [1, 2]
+    xs.remove(9)
+}
+
+
+def _index_missing() {
+    xs: list[str] = ["a"]
+    xs.index("z")
+}
+
+
+def _tuple_oob() {
+    t: tuple[int, int] = (1, 2)
+    t[5]
+}
+
+
+def _set_remove_missing() {
+    s: set[int] = {1}
+    s.remove(9)
+}
+
+
+def _set_pop_empty() {
+    s: set[int] = set()
+    s.pop()
+}
+
+
+def _bytes_index_missing() {
+    hay: bytes = b"abc"
+    needle: bytes = b"zz"
+    hay.index(needle)
+}
+
+
+def _fromhex_junk() {
+    bytes.fromhex("zz")
+}
+
+
+def _fromhex_odd() {
+    bytes.fromhex("abc")
+}
+
+
+class CatchableContainerErrors(TestCase) {
+    def test_list_remove_raises() {
+        self.assertRaises(ValueError, _remove_missing)
+    }
+
+    def test_list_index_raises() {
+        self.assertRaises(ValueError, _index_missing)
+    }
+
+    def test_tuple_oob_raises() {
+        self.assertRaises(IndexError, _tuple_oob)
+    }
+
+    def test_set_remove_raises() {
+        self.assertRaises(KeyError, _set_remove_missing)
+    }
+
+    def test_set_pop_empty_raises() {
+        self.assertRaises(KeyError, _set_pop_empty)
+    }
+
+    def test_bytes_index_raises() {
+        self.assertRaises(ValueError, _bytes_index_missing)
+    }
+
+    def test_fromhex_raises() {
+        self.assertRaises(ValueError, _fromhex_junk)
+        self.assertRaises(ValueError, _fromhex_odd)
+    }
+
+    def test_survives_and_continues() {
+        hits: int = 0
+        i: int = 0
+        while i < 3 {
+            try {
+                xs: list[int] = []
+                xs.remove(1)
+            } except ValueError {
+                hits = hits + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(hits, 3)
+    }
+
+    def test_happy_paths_unchanged() {
+        xs: list[int] = [5, 6, 7]
+        xs.remove(6)
+        self.assertEqual(len(xs), 2)
+        self.assertEqual(xs[0], 5)
+        self.assertEqual(xs[1], 7)
+        self.assertEqual(xs.index(7), 1)
+        s: set[int] = {1}
+        s.remove(1)
+        self.assertEqual(len(s), 0)
+        self.assertTrue(bytes.fromhex("ff00") == b"\xff\x00")
+        self.assertEqual(b"abc".index(b"bc"), 1)
+    }
+}
+
+
+main([CatchableContainerErrors()])

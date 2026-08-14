@@ -1,0 +1,34 @@
+# Pre-fix: pins TomlDoc key order, overwrite, and miss behavior before the
+# parallel-list _find storage became dict-backed.
+
+from unittest import TestCase, main
+import tomllib
+
+
+def _get_missing() {
+    tomllib.loads("a = 1").get("missing")
+}
+
+
+class TomlDocStorageTests(TestCase) {
+    def test_all_keys_insertion_order() {
+        const doc: tomllib.TomlDoc = tomllib.loads("z = 1\na = 2\n[sec]\nm = 3\n")
+        self.assertEqual(doc.all_keys(), ["z", "a", "sec.m"])
+    }
+
+    def test_duplicate_key_overwrites_in_place() {
+        const doc: tomllib.TomlDoc = tomllib.loads("k = \"old\"\nj = 2\nk = \"new\"\n")
+        self.assertEqual(doc.get("k"), "new")
+        self.assertEqual(doc.all_keys(), ["k", "j"])
+    }
+
+    def test_has_and_missing_raise() {
+        const doc: tomllib.TomlDoc = tomllib.loads("a = 1")
+        self.assertTrue(doc.has("a"))
+        self.assertFalse(doc.has("b"))
+        self.assertRaises(ValueError, _get_missing)
+    }
+}
+
+
+main([TomlDocStorageTests()])

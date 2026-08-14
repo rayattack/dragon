@@ -1,0 +1,77 @@
+# Pre-fix: unescape decoded only &#32..&#126 so "&#233;" came back unchanged,
+# and "&#xZZ;" decoded as "&#0;" because junk hex digits mapped to 0.
+
+from unittest import TestCase, main
+from html import escape, unescape
+
+
+class UnescapeRangeTests(TestCase) {
+    def test_decimal_beyond_ascii() {
+        self.assertEqual(unescape("&#233;"), chr(233))
+        self.assertEqual(unescape("caf&#233;"), "caf" + chr(233))
+        self.assertEqual(unescape("&#0000065;"), "A")
+    }
+
+    def test_hex_beyond_ascii() {
+        self.assertEqual(unescape("&#xE9;"), chr(233))
+        self.assertEqual(unescape("&#xe9;"), chr(233))
+    }
+
+    def test_astral_code_points() {
+        self.assertEqual(unescape("&#128512;"), chr(128512))
+        self.assertEqual(unescape("&#x1F600;"), chr(128512))
+    }
+
+    def test_low_controls_decode() {
+        self.assertEqual(unescape("&#10;"), "\n")
+        self.assertEqual(unescape("&#9;"), "\t")
+    }
+
+    def test_invalid_hex_left_verbatim() {
+        self.assertEqual(unescape("&#xZZ;"), "&#xZZ;")
+        self.assertEqual(unescape("&#x;"), "&#x;")
+        self.assertEqual(unescape("&#x1G;"), "&#x1G;")
+    }
+
+    def test_out_of_range_left_verbatim() {
+        self.assertEqual(unescape("&#1114112;"), "&#1114112;")
+        self.assertEqual(unescape("&#x110000;"), "&#x110000;")
+        self.assertEqual(unescape("&#99999999999999999999;"), "&#99999999999999999999;")
+        self.assertEqual(unescape("&#xFFFFFFFFFFFFFFFFFF;"), "&#xFFFFFFFFFFFFFFFFFF;")
+    }
+
+    def test_max_code_point() {
+        self.assertEqual(unescape("&#1114111;"), chr(1114111))
+        self.assertEqual(unescape("&#x10FFFF;"), chr(1114111))
+    }
+
+    def test_named_still_work() {
+        self.assertEqual(unescape("&amp;&lt;&gt;"), "&<>")
+    }
+}
+
+
+class EscapeSpanTests(TestCase) {
+    def test_all_specials() {
+        self.assertEqual(escape("<a href=\"x\">&'</a>"),
+                         "&lt;a href=&quot;x&quot;&gt;&amp;&#x27;&lt;/a&gt;")
+    }
+
+    def test_no_specials_identity() {
+        self.assertEqual(escape("plain text 123"), "plain text 123")
+        self.assertEqual(escape(""), "")
+    }
+
+    def test_no_double_escape_ordering() {
+        self.assertEqual(escape("&amp;"), "&amp;amp;")
+        self.assertEqual(escape("a&b<c"), "a&amp;b&lt;c")
+    }
+
+    def test_roundtrip() {
+        const raw: str = "Tom & 'Jerry' <b>\"hi\"</b>"
+        self.assertEqual(unescape(escape(raw)), raw)
+    }
+}
+
+
+main([UnescapeRangeTests(), EscapeSpanTests()])

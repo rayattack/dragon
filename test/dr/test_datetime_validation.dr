@@ -1,0 +1,115 @@
+# Pre-fix: date(2024, 13, 45) was accepted silently, and
+# datetime_fromtimestamp(-0.5) produced microsecond = -500000.
+
+from unittest import TestCase, main
+from datetime import date, datetime, datetime_fromtimestamp, date_fromtimestamp
+
+
+def _bad_month() {
+    const d: date = date(2024, 13, 1)
+}
+
+def _bad_day() {
+    const d: date = date(2024, 1, 32)
+}
+
+def _feb29_non_leap() {
+    const d: date = date(2023, 2, 29)
+}
+
+def _bad_year() {
+    const d: date = date(0, 1, 1)
+}
+
+def _bad_hour() {
+    const d: datetime = datetime(2024, 1, 1, 24, 0, 0, 0)
+}
+
+def _bad_minute() {
+    const d: datetime = datetime(2024, 1, 1, 0, 60, 0, 0)
+}
+
+def _bad_second() {
+    const d: datetime = datetime(2024, 1, 1, 0, 0, 60, 0)
+}
+
+def _bad_micro() {
+    const d: datetime = datetime(2024, 1, 1, 0, 0, 0, 1000000)
+}
+
+def _bad_dt_month() {
+    const d: datetime = datetime(2024, 0, 1, 0, 0, 0, 0)
+}
+
+
+class DateValidationTests(TestCase) {
+    def test_bad_month_raises() {
+        self.assertRaises(ValueError, _bad_month)
+    }
+
+    def test_bad_day_raises() {
+        self.assertRaises(ValueError, _bad_day)
+    }
+
+    def test_feb29_non_leap_raises() {
+        self.assertRaises(ValueError, _feb29_non_leap)
+    }
+
+    def test_feb29_leap_ok() {
+        const d: date = date(2024, 2, 29)
+        self.assertEqual(d.isoformat(), "2024-02-29")
+    }
+
+    def test_bad_year_raises() {
+        self.assertRaises(ValueError, _bad_year)
+    }
+}
+
+
+class DatetimeValidationTests(TestCase) {
+    def test_bad_time_fields_raise() {
+        self.assertRaises(ValueError, _bad_hour)
+        self.assertRaises(ValueError, _bad_minute)
+        self.assertRaises(ValueError, _bad_second)
+        self.assertRaises(ValueError, _bad_micro)
+        self.assertRaises(ValueError, _bad_dt_month)
+    }
+
+    def test_valid_bounds_ok() {
+        const d: datetime = datetime(9999, 12, 31, 23, 59, 59, 999999)
+        self.assertEqual(d.isoformat(), "9999-12-31T23:59:59.999999")
+        const z: datetime = datetime(1, 1, 1, 0, 0, 0, 0)
+        self.assertEqual(z.isoformat(), "0001-01-01T00:00:00")
+    }
+}
+
+
+class FromTimestampTests(TestCase) {
+    def test_negative_fraction_floors() {
+        const d: datetime = datetime_fromtimestamp(-0.5)
+        self.assertEqual(d.isoformat(), "1969-12-31T23:59:59.500000")
+    }
+
+    def test_negative_whole() {
+        const d: datetime = datetime_fromtimestamp(-1.0)
+        self.assertEqual(d.isoformat(), "1969-12-31T23:59:59")
+    }
+
+    def test_positive_fraction_unchanged() {
+        const d: datetime = datetime_fromtimestamp(1.25)
+        self.assertEqual(d.isoformat(), "1970-01-01T00:00:01.250000")
+    }
+
+    def test_epoch() {
+        const d: datetime = datetime_fromtimestamp(0.0)
+        self.assertEqual(d.isoformat(), "1970-01-01T00:00:00")
+    }
+
+    def test_date_fromtimestamp_negative_floors() {
+        const d: date = date_fromtimestamp(-0.5)
+        self.assertEqual(d.isoformat(), "1969-12-31")
+    }
+}
+
+
+main([DateValidationTests(), DatetimeValidationTests(), FromTimestampTests()])

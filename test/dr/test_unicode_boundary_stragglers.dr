@@ -1,0 +1,155 @@
+# Pre-fix: ord/is*/repr/hash walked kind=4 storage as a C string
+# (ord("€")==172, "éabc".isalpha()==False, repr truncated, hash collided).
+
+from unittest import TestCase, main
+
+
+def _ord_two_chars() {
+    ord("ab")
+}
+
+
+def _ord_empty() {
+    ord("")
+}
+
+
+class OrdTests(TestCase) {
+    def test_ascii() {
+        self.assertEqual(ord("A"), 65)
+        self.assertEqual(ord("\x7F"), 127)
+    }
+
+    def test_latin1() {
+        self.assertEqual(ord("é"), 233)
+        self.assertEqual(ord("ÿ"), 255)
+    }
+
+    def test_bmp() {
+        self.assertEqual(ord("Ā"), 256)
+        self.assertEqual(ord("€"), 8364)
+        self.assertEqual(ord("中"), 20013)
+    }
+
+    def test_astral() {
+        self.assertEqual(ord("😀"), 128512)
+    }
+
+    def test_chr_ord_roundtrip() {
+        codes: list[int] = [0, 65, 127, 128, 233, 256, 8364, 20013, 65535, 65536, 128512, 1114111]
+        for c in codes {
+            self.assertEqual(ord(chr(c)), c)
+        }
+    }
+
+    def test_wrong_length_raises() {
+        self.assertRaises(TypeError, _ord_two_chars)
+        self.assertRaises(TypeError, _ord_empty)
+    }
+}
+
+
+class PredicateTests(TestCase) {
+    def test_isalpha_nonascii() {
+        self.assertTrue("éabc".isalpha())
+        self.assertTrue("Ā".isalpha())
+        self.assertTrue("αβγ".isalpha())
+        self.assertTrue("привет".isalpha())
+        self.assertFalse("€".isalpha())
+        self.assertFalse("éa1".isalpha())
+        self.assertFalse("".isalpha())
+    }
+
+    def test_isalnum_nonascii() {
+        self.assertTrue("é1".isalnum())
+        self.assertFalse("é ".isalnum())
+    }
+
+    def test_isdigit_nonascii() {
+        # Non-digit code points must be classified, not garbage-scanned.
+        self.assertFalse("€2".isdigit())
+        self.assertFalse("Ā".isdigit())
+        self.assertTrue("123".isdigit())
+    }
+
+    def test_isspace_nonascii() {
+        # U+00A0 no-break space and U+2028 line separator are whitespace.
+        self.assertTrue(chr(160).isspace())
+        self.assertTrue(chr(8232).isspace())
+        self.assertTrue((" " + chr(160)).isspace())
+        self.assertFalse(("x" + chr(160)).isspace())
+        self.assertFalse("€".isspace())
+    }
+
+    def test_isupper_islower_nonascii() {
+        self.assertTrue("ÉÀ".isupper())
+        self.assertFalse("Éà".isupper())
+        self.assertTrue("éà".islower())
+        self.assertFalse("éÀ".islower())
+        self.assertTrue("ΣΔ".isupper())
+        self.assertTrue("σδ".islower())
+        self.assertTrue("ЖУК".isupper())
+        self.assertTrue("жук".islower())
+        # Uncased code points do not flip the verdict.
+        self.assertTrue("É€".isupper())
+        self.assertTrue("é€".islower())
+        self.assertFalse("€".isupper())
+        self.assertFalse("€".islower())
+    }
+
+    def test_istitle_nonascii() {
+        self.assertTrue("Über".istitle())
+        self.assertTrue("Éa Ба".istitle())
+        self.assertFalse("ÜBer".istitle())
+        self.assertFalse("über".istitle())
+    }
+
+    def test_isidentifier_nonascii() {
+        # Dragon identifiers are ASCII; a non-ASCII cp is classified, not
+        # byte-scanned into a false positive.
+        self.assertFalse("€x".isidentifier())
+        self.assertFalse("aé".isidentifier())
+        self.assertTrue("a_1".isidentifier())
+        self.assertFalse("1a".isidentifier())
+    }
+}
+
+
+class ReprTests(TestCase) {
+    def test_repr_ascii() {
+        self.assertEqual(repr("hello"), "'hello'")
+    }
+
+    def test_repr_nonascii_roundtrips() {
+        self.assertEqual(repr("héllo"), "'héllo'")
+        self.assertEqual(repr("€uro"), "'€uro'")
+        self.assertEqual(repr("中文"), "'中文'")
+        self.assertEqual(repr("😀"), "'😀'")
+        self.assertEqual(len(repr("Āb")), 4)
+    }
+}
+
+
+class HashTests(TestCase) {
+    def test_equal_content_equal_hash() {
+        # Same content built two different ways must hash the same.
+        self.assertEqual(hash("é€"), hash("é" + "€"))
+        self.assertEqual(hash("Āabc"), hash("Ā" + "abc"))
+    }
+
+    def test_distinct_nonascii_strings_differ() {
+        # Pre-fix, djb2 stopped at the first 0x00 storage byte, so all of these
+        # collided with each other (and with the empty string's hash).
+        self.assertNotEqual(hash("Ā"), hash("Ă"))
+        self.assertNotEqual(hash("Āx"), hash("Āy"))
+        self.assertNotEqual(hash("Ā"), hash(""))
+        self.assertNotEqual(hash("€1"), hash("€2"))
+    }
+
+    def test_prefix_differs() {
+        self.assertNotEqual(hash("é"), hash("éé"))
+    }
+}
+
+
+main([OrdTests(), PredicateTests(), ReprTests(), HashTests()])

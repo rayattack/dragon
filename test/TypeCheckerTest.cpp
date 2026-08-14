@@ -2472,6 +2472,24 @@ TEST(TypeCheckerTest, ContractBoundViolationListsMissingMethod) {
         "go(r)\n"));
 }
 
+TEST(TypeCheckerTest, SumRejectsNonNumericElements) {
+    EXPECT_TRUE(checkHasErrors(
+        "xs: list[str] = [\"a\", \"b\"]\n"
+        "s: str = sum(xs)\n"));
+    EXPECT_FALSE(checkHasErrors(
+        "xs: list[float] = [1.5, 2.5]\n"
+        "t: float = sum(xs)\n"));
+}
+
+TEST(TypeCheckerTest, MinMaxRejectContainerElements) {
+    EXPECT_TRUE(checkHasErrors(
+        "xs: list[list[int]] = [[1], [2]]\n"
+        "m: list[int] = min(xs)\n"));
+    EXPECT_FALSE(checkHasErrors(
+        "xs: list[str] = [\"a\", \"b\"]\n"
+        "m: str = min(xs)\n"));
+}
+
 TEST(TypeCheckerTest, ContractDeclaresNoSuchMethodRejected) {
     EXPECT_TRUE(checkHasErrors(std::string(kAmazing) +
         "class Dog -> Amazing {\n"

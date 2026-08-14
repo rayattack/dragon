@@ -1,0 +1,72 @@
+# Pre-fix: parse_rows split on "\n" before quote handling, so a quoted field
+# containing a newline was corrupted into separate rows.
+
+from unittest import TestCase, main
+from csv import parse_rows, format_rows
+
+
+class MultilineFieldTests(TestCase) {
+    def test_quoted_newline_is_one_field() {
+        const text: str = "a,\"x\ny\"\nb,c"
+        const rows: list[list[str]] = parse_rows(text, ",")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0][0], "a")
+        self.assertEqual(rows[0][1], "x\ny")
+        self.assertEqual(rows[1][0], "b")
+        self.assertEqual(rows[1][1], "c")
+    }
+
+    def test_roundtrip_with_newline_field() {
+        rows: list[list[str]] = []
+        rows.append(["name", "note"])
+        rows.append(["ada", "line1\nline2"])
+        const text: str = format_rows(rows, ",")
+        const back: list[list[str]] = parse_rows(text, ",")
+        self.assertEqual(len(back), 2)
+        self.assertEqual(back[1][0], "ada")
+        self.assertEqual(back[1][1], "line1\nline2")
+    }
+
+    def test_escaped_quotes_across_newline() {
+        const rows: list[list[str]] = parse_rows("\"he said \"\"hi\"\"\nbye\",x", ",")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], "he said \"hi\"\nbye")
+        self.assertEqual(rows[0][1], "x")
+    }
+}
+
+
+class PlainRowsTests(TestCase) {
+    def test_plain_rows_unchanged() {
+        const rows: list[list[str]] = parse_rows("a,b\nc,d\n", ",")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0][0], "a")
+        self.assertEqual(rows[1][1], "d")
+    }
+
+    def test_no_trailing_newline() {
+        const rows: list[list[str]] = parse_rows("a,b\nc,d", ",")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[1][1], "d")
+    }
+
+    def test_empty_line_mid_text() {
+        const rows: list[list[str]] = parse_rows("a\n\nb", ",")
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[1][0], "")
+    }
+
+    def test_empty_text() {
+        const rows: list[list[str]] = parse_rows("", ",")
+        self.assertEqual(len(rows), 0)
+    }
+
+    def test_quoted_delimiter_still_works() {
+        const rows: list[list[str]] = parse_rows("a,\"b,c\"\nd,e", ",")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0][1], "b,c")
+    }
+}
+
+
+main([MultilineFieldTests(), PlainRowsTests()])

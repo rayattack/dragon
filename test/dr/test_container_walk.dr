@@ -1,0 +1,100 @@
+# Pre-fix: self-referential containers crashed print/str/json.dumps with
+# unbounded recursion, and getattr on a missing attribute returned 0.
+
+from unittest import TestCase, main
+from json import dumps
+
+
+class Point {
+    x: int
+
+    def __init__(x: int) {
+        self.x = x
+    }
+}
+
+
+def _dumps_cyclic_dict() {
+    d: dict[str, Any] = {}
+    d["self"] = d
+    dumps(d)
+}
+
+
+def _dumps_cyclic_list() {
+    l: list[Any] = []
+    l.append(l)
+    dumps(l)
+}
+
+
+def _getattr_missing() {
+    p: Point = Point(1)
+    getattr(p, "nope")
+}
+
+
+class CycleTests(TestCase) {
+    def test_str_cyclic_list() {
+        l: list[Any] = []
+        l.append(l)
+        self.assertEqual(str(l), "[[...]]")
+    }
+
+    def test_str_cyclic_dict() {
+        d: dict[str, Any] = {}
+        d["self"] = d
+        self.assertEqual(str(d), "{'self': {...}}")
+    }
+
+    def test_print_cyclic_no_crash() {
+        l: list[Any] = []
+        l.append(l)
+        print(l)
+        self.assertTrue(true)
+    }
+
+    def test_dumps_cyclic_raises() {
+        self.assertRaises(ValueError, _dumps_cyclic_dict)
+        self.assertRaises(ValueError, _dumps_cyclic_list)
+    }
+
+    def test_acyclic_shared_subtree_still_renders() {
+        inner: list[int] = [1, 2]
+        outer: list[Any] = []
+        outer.append(inner)
+        outer.append(inner)
+        self.assertEqual(str(outer), "[[1, 2], [1, 2]]")
+    }
+}
+
+
+class NonAsciiContainerTests(TestCase) {
+    def test_dict_str_nonascii() {
+        d: dict[str, str] = {"é": "ü€"}
+        self.assertEqual(str(d), "{'é': 'ü€'}")
+    }
+
+    def test_nested_list_nonascii() {
+        xs: list[str] = ["Āb", "€"]
+        self.assertEqual(str(xs), "['Āb', '€']")
+    }
+}
+
+
+class GetattrTests(TestCase) {
+    def test_missing_raises() {
+        self.assertRaises(AttributeError, _getattr_missing)
+    }
+
+    def test_default_still_works() {
+        p: Point = Point(7)
+        missing: int = getattr(p, "nope", 42)
+        present: int = getattr(p, "x", 0)
+        self.assertEqual(missing, 42)
+        self.assertEqual(present, 7)
+    }
+}
+
+
+main([CycleTests(), NonAsciiContainerTests(), GetattrTests()])

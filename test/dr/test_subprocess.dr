@@ -161,9 +161,10 @@ class SubprocessTests(TestCase) {
         }
         self.assertTrue(raised)
         self.assertEqual(captured_timeout, 200)
-        # The child was reaped inside communicate(): poll() returns the already
-        # known returncode (negative == killed by signal), never -1 "running".
-        self.assertTrue(proc.poll() != -1)
+        # The child was reaped inside communicate(): running() is false and the
+        # returncode is the SIGKILL death (-9), not the -1 "running" sentinel.
+        self.assertFalse(proc.running())
+        self.assertEqual(proc.returncode, -9)
     }
 
     def test_run_timeout_raises() {

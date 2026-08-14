@@ -1,0 +1,154 @@
+# Pre-fix: vendored mbedTLS x509_check_wildcard had no minimum-label rule, so a
+# leaf with SAN "*.com" verified against any second-level host (e.g. evil.com).
+
+from unittest import TestCase, main
+from socket import TcpListener, TcpStream
+from ssl import SSLContext, SSLSocket, SSLCertVerificationError
+from ssl import PROTOCOL_TLS_CLIENT, PROTOCOL_TLS_SERVER
+from threading import Thread
+from io import make
+from tempfile import mktemp
+
+
+def _materialize(pem: str, suffix: str) -> str {
+    const path: str = mktemp("dragon_wild_", suffix)
+    with make(path) as w {
+        w.write(pem)
+    }
+    return path
+}
+
+
+const CA_PEM: str = """-----BEGIN CERTIFICATE-----
+MIIBmjCCAUGgAwIBAgIUUrsPR8iBCgB0e97gpFZ/zpLWmTAwCgYIKoZIzj0EAwIw
+IjEgMB4GA1UEAwwXRHJhZ29uIFdpbGRjYXJkIFRlc3QgQ0EwIBcNMjYwODE0MDMw
+MjA3WhgPMjEyNjA3MjEwMzAyMDdaMCIxIDAeBgNVBAMMF0RyYWdvbiBXaWxkY2Fy
+ZCBUZXN0IENBMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEpatBDuCt/Du5GCU4
+rkjbG9DD/GAG1/m0zOBrF+5G/ObxFjVaE1WePz0BXOTnEvhBYdq8YyYQvzKj1Ot5
+O0gVKKNTMFEwHQYDVR0OBBYEFM7WKv9jRkzK2EVri+TDap6F28f8MB8GA1UdIwQY
+MBaAFM7WKv9jRkzK2EVri+TDap6F28f8MA8GA1UdEwEB/wQFMAMBAf8wCgYIKoZI
+zj0EAwIDRwAwRAIgTH13hkttjQkdv4T8wP9hrlbYcFoez+qfJajNwHXor0QCIA89
+0iyuHVc9hM3yZDGOK/hBpDx9yd1T2tYEybSCOzB6
+-----END CERTIFICATE-----
+"""
+
+const STAR_COM_CERT: str = """-----BEGIN CERTIFICATE-----
+MIIBiTCCATCgAwIBAgIUZ7kZQLQhwPL7F0xUmIp8w5SJHfIwCgYIKoZIzj0EAwIw
+IjEgMB4GA1UEAwwXRHJhZ29uIFdpbGRjYXJkIFRlc3QgQ0EwIBcNMjYwODE0MDMw
+MjA3WhgPMjEyNjA3MjEwMzAyMDdaMBAxDjAMBgNVBAMMBSouY29tMFkwEwYHKoZI
+zj0CAQYIKoZIzj0DAQcDQgAEU3PL78qa1kP5DSLPXxv69a3TSk7zMHWNxAVLboPB
+z0Mv9IdGloMd6wClAcz56wMMcnbqjYjoliDDuwadchTsRaNUMFIwEAYDVR0RBAkw
+B4IFKi5jb20wHQYDVR0OBBYEFDN8/xRHhpOkkH6TFeEUq9+1D6LjMB8GA1UdIwQY
+MBaAFM7WKv9jRkzK2EVri+TDap6F28f8MAoGCCqGSM49BAMCA0cAMEQCIFY35ZHA
+Aryza4ihyIezMu0yOpSwUgVO9US24b7CngJ1AiAR4HMa58MGjedGM5pF3AVbNb8P
+imanE+qI+a1dBdJgUA==
+-----END CERTIFICATE-----
+"""
+
+const STAR_COM_KEY: str = """-----BEGIN EC PRIVATE KEY-----
+MHcCAQEEIJV6bBGrG5GckpwOWafOI+p0p4172S9kl72zoa5SGbgDoAoGCCqGSM49
+AwEHoUQDQgAEU3PL78qa1kP5DSLPXxv69a3TSk7zMHWNxAVLboPBz0Mv9IdGloMd
+6wClAcz56wMMcnbqjYjoliDDuwadchTsRQ==
+-----END EC PRIVATE KEY-----
+"""
+
+const STAR_EXAMPLE_CERT: str = """-----BEGIN CERTIFICATE-----
+MIIBmjCCAUCgAwIBAgIUZ7kZQLQhwPL7F0xUmIp8w5SJHfMwCgYIKoZIzj0EAwIw
+IjEgMB4GA1UEAwwXRHJhZ29uIFdpbGRjYXJkIFRlc3QgQ0EwIBcNMjYwODE0MDMw
+MjA3WhgPMjEyNjA3MjEwMzAyMDdaMBgxFjAUBgNVBAMMDSouZXhhbXBsZS5jb20w
+WTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAAQQwPWxEC+FbjRSs08AQKMesIVCoe4f
++pjsCkO6GTu2BQl94ZNHeS87l+5vvZ+SrSHaDvOUuh090mwYpZYm37hWo1wwWjAY
+BgNVHREEETAPgg0qLmV4YW1wbGUuY29tMB0GA1UdDgQWBBRwlydKEm5Rp8G2k7uT
+p/IsZdQ7wzAfBgNVHSMEGDAWgBTO1ir/Y0ZMythFa4vkw2qehdvH/DAKBggqhkjO
+PQQDAgNIADBFAiBtOIrGZ5rYk3m0ikxchIqhamNWAsNMqI7MfxOmS3trQgIhALtZ
+5wpd9UvybFlPb7j2b8R7ePn7eR8XRJ0ClK9DuWYs
+-----END CERTIFICATE-----
+"""
+
+const STAR_EXAMPLE_KEY: str = """-----BEGIN EC PRIVATE KEY-----
+MHcCAQEEIDxdsoZAf8E3YMfrgiVo1TxwTHhoOFy9W4r5NLmDBxzHoAoGCCqGSM49
+AwEHoUQDQgAEEMD1sRAvhW40UrNPAECjHrCFQqHuH/qY7ApDuhk7tgUJfeGTR3kv
+O5fub72fkq0h2g7zlLodPdJsGKWWJt+4Vg==
+-----END EC PRIVATE KEY-----
+"""
+
+
+const ca_file: str = _materialize(CA_PEM, ".crt")
+const star_com_cert: str = _materialize(STAR_COM_CERT, ".crt")
+const star_com_key: str = _materialize(STAR_COM_KEY, ".key")
+const star_ex_cert: str = _materialize(STAR_EXAMPLE_CERT, ".crt")
+const star_ex_key: str = _materialize(STAR_EXAMPLE_KEY, ".key")
+
+const PORT: int = 19643
+const g_listener: TcpListener = TcpListener("127.0.0.1", PORT)
+
+
+def _serve_once(certfile: str, keyfile: str) -> None {
+    try {
+        const conn: TcpStream = g_listener.do_accept()
+        const sctx: SSLContext = SSLContext(PROTOCOL_TLS_SERVER)
+        sctx.load_cert_chain(certfile, keyfile)
+        const tls: SSLSocket = sctx.wrap_socket(conn, True, "")
+        tls.send("ok")
+        tls.close()
+    } except Exception {
+    }
+}
+
+
+def server_star_com() -> int {
+    _serve_once(star_com_cert, star_com_key)
+    return 0
+}
+
+
+def server_star_example() -> int {
+    _serve_once(star_ex_cert, star_ex_key)
+    return 0
+}
+
+
+g_listener.do_bind()
+g_listener.do_listen(16)
+
+
+class WildcardTests(TestCase) {
+    def test_star_com_rejected_for_second_level_host() {
+        const th: Thread = Thread(server_star_com)
+        th.start()
+        self.assertRaises(SSLCertVerificationError, lambda () -> None {
+            const ctx: SSLContext = SSLContext(PROTOCOL_TLS_CLIENT)
+            ctx.load_verify_locations(ca_file, "")
+            const raw: TcpStream = TcpStream.open("127.0.0.1", PORT)
+            ctx.wrap_socket(raw, False, "evil.com")
+        })
+        th.join()
+    }
+
+    def test_legitimate_wildcard_still_verifies() {
+        const th: Thread = Thread(server_star_example)
+        th.start()
+        const ctx: SSLContext = SSLContext(PROTOCOL_TLS_CLIENT)
+        ctx.load_verify_locations(ca_file, "")
+        const raw: TcpStream = TcpStream.open("127.0.0.1", PORT)
+        const s: SSLSocket = ctx.wrap_socket(raw, False, "host.example.com")
+        self.assertTrue(s.getpeer_verified())
+        s.close()
+        th.join()
+    }
+
+    def test_wildcard_does_not_span_multiple_labels() {
+        const th: Thread = Thread(server_star_example)
+        th.start()
+        self.assertRaises(SSLCertVerificationError, lambda () -> None {
+            const ctx: SSLContext = SSLContext(PROTOCOL_TLS_CLIENT)
+            ctx.load_verify_locations(ca_file, "")
+            const raw: TcpStream = TcpStream.open("127.0.0.1", PORT)
+            ctx.wrap_socket(raw, False, "a.b.example.com")
+        })
+        th.join()
+    }
+}
+
+
+main([WildcardTests()])

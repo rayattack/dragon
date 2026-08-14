@@ -1,0 +1,86 @@
+# Pre-fix: re.compile("(") stored pcre2's NULL result without checking, so the
+# error was silent and a later match() passed NULL into pcre2 and crashed.
+
+from unittest import TestCase, main
+from re import compile, sub, findall, split, error, Pattern
+
+
+class ReCompileErrorTests(TestCase) {
+    def test_unbalanced_paren_raises() {
+        def bad() {
+            const p: Pattern = compile("(")
+        }
+        self.assertRaises(error, bad)
+    }
+
+    def test_bad_quantifier_raises() {
+        def bad() {
+            const p: Pattern = compile("*a")
+        }
+        self.assertRaises(error, bad)
+    }
+
+    def test_error_message_has_position() {
+        msg: str = ""
+        try {
+            const p: Pattern = compile("(")
+        } except error as e {
+            msg = str(e)
+        }
+        self.assertIn("position", msg)
+    }
+
+    def test_valid_pattern_still_compiles() {
+        const p: Pattern = compile("[a-z]+")
+        self.assertEqual(p.find("123abc456"), "abc")
+        p.destroy()
+    }
+}
+
+
+class ReSubTests(TestCase) {
+    def test_sub_multiple_matches() {
+        self.assertEqual(sub("[0-9]+", "N", "a1b22c333"), "aNbNcN")
+    }
+
+    def test_sub_no_match_returns_subject() {
+        self.assertEqual(sub("z+", "N", "abc"), "abc")
+    }
+
+    def test_sub_backreference() {
+        self.assertEqual(sub("([a-z])([0-9])", "\\2\\1", "a1 b2"), "1a 2b")
+    }
+
+    def test_sub_many_matches() {
+        parts: list[str] = []
+        i: int = 0
+        while i < 2000 {
+            parts.append("a1")
+            i = i + 1
+        }
+        const subject: str = "".join(parts)
+        const result: str = sub("[0-9]", "N", subject)
+        self.assertEqual(len(result), 4000)
+        self.assertTrue(result.startswith("aNaN"))
+        self.assertTrue(result.endswith("aNaN"))
+    }
+}
+
+
+class ReScanTests(TestCase) {
+    def test_findall() {
+        const xs: list[str] = findall("[0-9]+", "a1b22c333")
+        self.assertEqual(len(xs), 3)
+        self.assertEqual(xs[0], "1")
+        self.assertEqual(xs[2], "333")
+    }
+
+    def test_split() {
+        const ps: list[str] = split(",", "a,b,c")
+        self.assertEqual(len(ps), 3)
+        self.assertEqual(ps[1], "b")
+    }
+}
+
+
+main([ReCompileErrorTests(), ReSubTests(), ReScanTests()])

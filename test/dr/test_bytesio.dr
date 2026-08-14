@@ -1,0 +1,101 @@
+# Pre-fix: BytesIO stored a boxed per-byte list[int] and looped byte-by-byte,
+# and seek() accepted negative offsets that later made write() index negatively.
+
+from unittest import TestCase, main
+from io import BytesIO, Reader, open, make
+
+
+def _neg_seek_set() {
+    const bio: BytesIO = BytesIO(b"abc")
+    bio.seek(-1)
+}
+
+
+class BytesIOSeekTests(TestCase) {
+    def test_negative_seek_set_raises() {
+        self.assertRaises(ValueError, _neg_seek_set)
+    }
+
+    def test_relative_seek_clamps_at_zero() {
+        const bio: BytesIO = BytesIO(b"abc")
+        self.assertEqual(bio.seek(-10, 1), 0)
+        self.assertEqual(bio.seek(-10, 2), 0)
+    }
+
+    def test_seek_end_then_read() {
+        const bio: BytesIO = BytesIO(b"abcde")
+        self.assertEqual(bio.seek(-2, 2), 3)
+        self.assertEqual(bio.read().decode(), "de")
+    }
+}
+
+
+class BytesIOStreamTests(TestCase) {
+    def test_append_many_chunks() {
+        const bio: BytesIO = BytesIO()
+        i: int = 0
+        while i < 1000 {
+            bio.write(b"ab")
+            i = i + 1
+        }
+        self.assertEqual(len(bio.getvalue()), 2000)
+        self.assertEqual(bio.tell(), 2000)
+    }
+
+    def test_initial_overwrite_and_read() {
+        const bio: BytesIO = BytesIO(b"ABC")
+        bio.seek(1)
+        bio.write(b"Z")
+        self.assertEqual(bio.getvalue().decode(), "AZC")
+        bio.seek(0)
+        self.assertEqual(bio.read(2).decode(), "AZ")
+        self.assertEqual(bio.read().decode(), "C")
+        self.assertEqual(len(bio.read()), 0)
+    }
+
+    def test_overwrite_then_append() {
+        const bio: BytesIO = BytesIO(b"hello")
+        bio.seek(0)
+        bio.write(b"J")
+        bio.seek(0, 2)
+        bio.write(b"!")
+        self.assertEqual(bio.getvalue().decode(), "Jello!")
+    }
+
+    def test_truncate_keeps_prefix() {
+        const bio: BytesIO = BytesIO(b"12345")
+        self.assertEqual(bio.truncate(2), 2)
+        self.assertEqual(bio.getvalue().decode(), "12")
+    }
+
+    def test_read_size_beyond_end() {
+        const bio: BytesIO = BytesIO(b"xyz")
+        self.assertEqual(bio.read(100).decode(), "xyz")
+    }
+
+    def test_binary_bytes_preserved() {
+        const bio: BytesIO = BytesIO()
+        bio.write(bytes([0, 255, 128]))
+        const out: bytes = bio.getvalue()
+        self.assertEqual(out[0], 0)
+        self.assertEqual(out[1], 255)
+        self.assertEqual(out[2], 128)
+    }
+}
+
+
+class ReaderClosedBytesTests(TestCase) {
+    def test_closed_reader_yields_empty_bytes() {
+        const p: str = "/tmp/dragon_test_bytesio_r.bin"
+        with make(p) as w {
+            w.write(b"abc")
+        }
+        const r: Reader = open(p)
+        self.assertEqual(len(r.bytes()), 3)
+        self.assertTrue(r.closed)
+        self.assertEqual(len(r.bytes()), 0)
+    }
+}
+
+
+main([BytesIOSeekTests(), BytesIOStreamTests(), ReaderClosedBytesTests()])

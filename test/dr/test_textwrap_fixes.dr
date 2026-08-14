@@ -1,0 +1,95 @@
+# Pre-fix: wrap() with width <= 0 (or width <= len(subsequent_indent)) looped
+# forever appending lines, and shorten() silently truncated an oversized placeholder.
+
+from unittest import TestCase, main
+from textwrap import TextWrapper, wrap, fill, shorten, dedent, indent
+
+
+def _wrap_width_zero() -> None {
+    wrap("hello world", 0)
+}
+
+def _wrap_width_negative() -> None {
+    wrap("hello world", -3)
+}
+
+def _shorten_placeholder_too_wide() -> None {
+    shorten("hello world", 4)
+}
+
+def _shorten_fits_but_placeholder_too_wide() -> None {
+    shorten("hi", 3)
+}
+
+
+class WrapWidthTests(TestCase) {
+    def test_zero_width_raises() {
+        self.assertRaises(ValueError, _wrap_width_zero)
+    }
+
+    def test_negative_width_raises() {
+        self.assertRaises(ValueError, _wrap_width_negative)
+    }
+
+    def test_narrow_width_with_wider_indent_terminates() {
+        const tw: TextWrapper = TextWrapper(2, "", "  ")
+        self.assertEqual(tw.wrap("abcdef"), ["ab", "  c", "  d", "  e", "  f"])
+    }
+
+    def test_long_word_breaks() {
+        self.assertEqual(wrap("abcdefghij", 3), ["abc", "def", "ghi", "j"])
+    }
+
+    def test_basic_wrap() {
+        self.assertEqual(wrap("the quick brown fox jumps", 10),
+                         ["the quick", "brown fox", "jumps"])
+    }
+
+    def test_fill() {
+        self.assertEqual(fill("a b c", 3), "a b\nc")
+    }
+}
+
+
+class ShortenTests(TestCase) {
+    def test_placeholder_too_wide_raises() {
+        self.assertRaises(ValueError, _shorten_placeholder_too_wide)
+    }
+
+    def test_placeholder_check_precedes_fit() {
+        self.assertRaises(ValueError, _shorten_fits_but_placeholder_too_wide)
+    }
+
+    def test_shorten_fits() {
+        self.assertEqual(shorten("hello world", 15), "hello world")
+    }
+
+    def test_shorten_truncates_at_word_boundary() {
+        self.assertEqual(shorten("The quick brown fox", 10), "The [...]")
+    }
+
+    def test_shorten_nothing_fits() {
+        self.assertEqual(shorten("hello world", 5), "[...]")
+    }
+}
+
+
+class SpanRewriteTests(TestCase) {
+    def test_dedent() {
+        self.assertEqual(dedent("    a\n    b\n"), "a\nb\n")
+        self.assertEqual(dedent("  a\n    b"), "a\n  b")
+        self.assertEqual(dedent("a\n  b"), "a\n  b")
+    }
+
+    def test_dedent_blank_lines_kept() {
+        self.assertEqual(dedent("  a\n\n  b"), "a\n\nb")
+    }
+
+    def test_indent() {
+        self.assertEqual(indent("a\nb\n", "  "), "  a\n  b\n")
+        self.assertEqual(indent("a\n\nb", "> "), "> a\n\n> b")
+    }
+}
+
+
+main([WrapWidthTests(), ShortenTests(), SpanRewriteTests()])
