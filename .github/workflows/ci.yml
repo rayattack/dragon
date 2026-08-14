@@ -24,6 +24,7 @@ jobs:
   build-test:
     name: Linux build + test
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -65,4 +66,138 @@ jobs:
           path: build/dist/*.deb
           retention-days: 7
           if-no-files-found: error
+
+  build-test-macos:
+    name: macOS build + test
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install build deps
+        run: brew install cmake ninja zstd
+
+      - name: Setup LLVM
+        id: llvm
+        uses: ./.github/actions/setup-llvm
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DDRAGON_BUILD_TESTS=ON \
+            -DLLVM_DIR="${{ steps.llvm.outputs.llvm-dir }}"
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  asan:
+    name: ASan dr tests
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build zlib1g-dev libzstd-dev
+
+      - name: Setup LLVM
+        id: llvm
+        uses: ./.github/actions/setup-llvm
+
+      - name: Configure (instrumented runtime)
+        run: |
+          cmake -S . -B build-asan -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DDRAGON_BUILD_TESTS=ON \
+            -DDRAGON_ASAN=ON \
+            -DLLVM_DIR="${{ steps.llvm.outputs.llvm-dir }}"
+
+      - name: Build
+        run: cmake --build build-asan -j
+
+      # RSS cap instead of ulimit -v: ASan reserves ~20TB of virtual address
+      # space and aborts at startup under an address-space limit.
+      # dr_oom_* excluded: they run compiled programs under ulimit -v by design,
+      # which an ASan-instrumented binary cannot survive.
+      # detect_leaks=0 for now: the temp-operand-leak-on-raise (issues/issue-3)
+      # is a known, tracked codegen defect that leaks small temps on every
+      # exception path, so full-suite leak detection is deferred until it lands.
+      # UAF, heap/stack-buffer-overflow, and use-after-scope stay ON across the
+      # whole suite - the severe classes this mid-audit repo hunts.
+      - name: Run dr tests under ASan
+        env:
+          ASAN_OPTIONS: detect_leaks=0:hard_rss_limit_mb=2048
+        run: ctest --test-dir build-asan -R '^dr_' -E '^dr_oom_' --output-on-failure
+
+      # Leak detection on a curated subset proven clean under LSan today, so a
+      # NEW leak in this surface fails CI while issue-3 stays tracked separately.
+      - name: Leak-check clean subset
+        env:
+          ASAN_OPTIONS: detect_leaks=1:hard_rss_limit_mb=2048
+        run: ctest --test-dir build-asan -R 'unicode_boundary|container_walk|container_errors|minmax_sum|getcwd_owner' --output-on-failure
+
+  llvm-floor:
+    name: LLVM 21 floor build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build zlib1g-dev libzstd-dev
+
+      # Everything else builds against the default major (22); this job pins
+      # the documented floor so a 21-only API break cannot land unnoticed.
+      - name: Setup LLVM
+        id: llvm
+        uses: ./.github/actions/setup-llvm
+        with:
+          llvm-major: '21'
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DDRAGON_BUILD_TESTS=OFF \
+            -DLLVM_DIR="${{ steps.llvm.outputs.llvm-dir }}"
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Smoke check
+        run: ./build/dragon check examples/hello.dr
+
+  freebsd:
+    name: FreeBSD build + test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # New platform: report status without blocking merges yet.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Build + test in FreeBSD VM
+        uses: vmactions/freebsd-vm@83b151f58c6047089f4c80eb5ba2039d158ce093 # v1.5.3
+        with:
+          usesh: true
+          copyback: false
+          prepare: |
+            pkg install -y cmake ninja git python3 llvm21 zstd
+          run: |
+            # `set -e` is needed for failures to register. https://github.com/vmactions/freebsd-vm/issues/72
+            set -e -x
+            cmake -S . -B build -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DDRAGON_BUILD_TESTS=ON \
+              -DLLVM_DIR="$(llvm-config21 --cmakedir)"
+            cmake --build build -j
+            ctest --test-dir build --output-on-failure
 

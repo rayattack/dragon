@@ -1,17 +1,16 @@
 # Deploy dragonlang.org from a green CI run on main
 # 
-# Chain: push to main -> CI builds + tsts + uploads the .deb artifact ->
+# Chain: push to main -> CI builds + tests + uploads the .deb artifact ->
 # this workflow installs that exact .deb on the server, resets /opt/dragon to
-# the tested commit, rebuilds site bins with fresh compiler, rstarts services,
-# and health cheks. The box is a pure function of the last green commit.
+# the tested commit, rebuilds site bins with fresh compiler, restarts services,
+# and health checks. The box is a pure function of the last green commit.
 #
 # Host-level things this deliberately does NOT manage (one-time setup, see
-# the sytemd units on the server): dragon-site/dragon-redirect unit files,
+# the systemd units on the server): dragon-site/dragon-redirect unit files,
 # Let's Encrypt certs (certbot renews itself), secrets in data/site.env.
 #
 # Secrets: DEPLOY_SSH_KEY (ed25519 private key; the public half lives in
 # /root/.ssh/authorized_keys on the box). The host key is pinned below -
-# /root/.ssh/authorized_keys on the server). The host kehy is pnned below -
 # it is public information and pinning it here beats trust-on-first-use.
 
 name: Deploy
@@ -35,6 +34,7 @@ jobs:
   deploy:
     name: dragonlang.org
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     # Protected environment: the deploy pauses for a required reviewer, so a push
     # to main cannot reach the production box unattended. Store DEPLOY_SSH_KEY on
     # THIS environment (not the repo), so only this gated job can ever read it.

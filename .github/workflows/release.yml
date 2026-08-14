@@ -1,6 +1,7 @@
 # Dragon release pipeline.
 #
-# This is required to build the compiler on Linux, macOS (Apple Silicon + Intel) and Windows,
+# Builds the compiler on Linux and macOS (Apple Silicon + Intel). Windows is
+# parked until the MSYS2/MinGW rework (see the matrix note below).
 #
 # Triggers:
 #   * If you push a tag like `v0.0.1`            -> publishes a release for that tag
@@ -8,15 +9,13 @@
 #
 # Asset naming (consumed verbatim by www.dr):
 #   dragon-<ver>-linux-x86_64.{deb,rpm,tar.gz}
-#   dragon-<ver>-macos-arm64.{dmg,tar.gz}
-#   dragon-<ver>-macos-x86_64.{dmg,tar.gz}
-#   dragon-<ver>-windows-x86_64.{msi,zip}
+#   dragon-<ver>-macos-arm64.tar.gz
+#   dragon-<ver>-macos-x86_64.tar.gz
 #
 # LLVM: the codebase builds against a released LLVM (>= 21). The reusable
 # .github/actions/setup-llvm installs it from apt.llvm.org (Linux) or Homebrew
-# (macOS); LLVM is statically linked, so the produced .deb/.rpm/.dmg do not
-# depend on a system libLLVM. Windows still builds LLVM (the release branch)
-# from source and caches it, and stays experimental.
+# (macOS); LLVM is statically linked, so the produced .deb/.rpm/.tar.gz do not
+# depend on a system libLLVM.
 #
 
 name: Release
@@ -39,6 +38,7 @@ jobs:
   build:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     # One bad platform shouldn't sink the others; partial releases are fine.
     continue-on-error: ${{ matrix.experimental == true }}
     strategy:
@@ -70,6 +70,20 @@ jobs:
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "tag=v$VER"   >> "$GITHUB_OUTPUT"
           echo "Building Dragon $VER"
+
+      # Refuse to build a release whose tag disagrees with dragon::VERSION.
+      - name: Version guard (tag vs include/dragon.h)
+        shell: bash
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          SRC="$(grep 'constexpr const char\* VERSION' include/dragon.h | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
+          if [ "$SRC" != "$VER" ]; then
+            echo "tag says $VER but include/dragon.h says $SRC" >&2
+            exit 1
+          fi
+          echo "version check passed: $VER"
 
       # ---- Toolchain ---------------------------------------------------------
       - name: Install build + packaging tools (Linux)
@@ -104,17 +118,24 @@ jobs:
         uses: ./.github/actions/setup-llvm
 
       # ---- Configure + build -------------------------------------------------
+      # macOS legs build with tests ON and run the suite before packaging;
+      # the Linux leg is already gated by the everyday CI workflow.
       - name: Configure
         shell: bash
         run: |
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DDRAGON_BUILD_TESTS=OFF \
+            -DDRAGON_BUILD_TESTS=${{ runner.os == 'macOS' && 'ON' || 'OFF' }} \
             -DLLVM_DIR="${{ steps.llvm.outputs.llvm-dir }}"
 
       - name: Build
         shell: bash
         run: cmake --build build --config Release -j
+
+      - name: Test (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: ctest --test-dir build --output-on-failure
 
       # ---- Verify the binaries are self-contained (macOS) --------------------
       # Fail the release if a binary links any non-system library by absolute
@@ -189,6 +210,31 @@ jobs:
               else shasum -a 256 "$f" > "$f.sha256"; fi
             done )
           ls -la out
+
+      # Every tarball must work cold: unpack somewhere neutral, then compile
+      # and run a hello world with the unpacked binary.
+      - name: Smoke test tarball
+        shell: bash
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+          T: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          tb="out/dragon-${VER}-${T}.tar.gz"
+          if [ ! -f "$tb" ]; then
+            echo "no tarball for $T, nothing to smoke test"
+            exit 0
+          fi
+          dir="$(mktemp -d)"
+          tar -xzf "$tb" -C "$dir"
+          bin="$(find "$dir" -type f -path '*/bin/dragon' | head -1)"
+          if [ -z "$bin" ]; then
+            echo "no bin/dragon inside $tb" >&2
+            exit 1
+          fi
+          echo 'print("hello, world")' > "$dir/hello.dr"
+          "$bin" run "$dir/hello.dr" | grep -q "hello, world"
+          echo "smoke test passed for $tb"
 
       - name: Upload to release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2

@@ -1,0 +1,27 @@
+# Normalize line endings in the repo; checkouts stay native unless forced below.
+* text=auto
+
+# Shell scripts run on POSIX hosts and inside CI VMs; CRLF breaks them.
+*.sh text eol=lf
+
+# Dragon reads like Python; map .dr/.drs for GitHub highlighting and stats.
+*.dr linguist-language=Python
+*.drs linguist-language=Python
+
+# Byte-exact test inputs: the UTF-8 em-dash test data and the dr regression
+# corpus must never be EOL-normalized on checkout.
+test/CodeGenExpressionsTest.cpp text eol=lf
+test/InteropTest.cpp text eol=lf
+test/dr/*.dr text eol=lf
+
+# Binary assets: never diff or normalize.
+*.png -text
+*.jpg -text
+*.jpeg -text
+*.gif -text
+*.ico -text
+*.woff -text
+*.woff2 -text
+*.ttf -text
+*.zip -text
+*.gz -text

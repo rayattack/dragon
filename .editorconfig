@@ -1,0 +1,22 @@
+# Repo-wide editor defaults. Spaces only, LF everywhere.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+indent_style = space
+trim_trailing_whitespace = true
+
+[*.{c,cc,cpp,h,hpp,mm}]
+indent_size = 4
+
+[*.{dr,drs,py}]
+indent_size = 4
+
+[*.{yml,yaml}]
+indent_size = 2
+
+# Trailing double-space is a hard line break in markdown.
+[*.md]
+trim_trailing_whitespace = false
