@@ -486,8 +486,16 @@ void CodeGen::visit(BinaryExpr& node) {
 
         if (lhsIsBytes || rhsIsBytes) {
             if (op == TokenType::PLUS) {
+                std::vector<llvm::Value*> opBases;
+                if (impl_->options.gcMode == GCMode::RC) {
+                    if (impl_->isOwnedPtrResult(lhs))
+                        impl_->pushTempCleanupByKind(lhs, Impl::VarKind::List, opBases);
+                    if (impl_->isOwnedPtrResult(rhs))
+                        impl_->pushTempCleanupByKind(rhs, Impl::VarKind::List, opBases);
+                }
                 impl_->lastValue = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_bytes_concat"], {lhs, rhs}, "bytescat");
+                impl_->popArgTempCleanups(opBases);
                 // Decrefs owned intermediate bytes operands from chained exprs
                 // ((a+b)+c); the str/list paths already did this, bytes didn't (leaked).
                 if (impl_->options.gcMode == GCMode::RC) {
@@ -501,8 +509,12 @@ void CodeGen::visit(BinaryExpr& node) {
             if (op == TokenType::STAR) {
                 llvm::Value* bv = lhsIsBytes ? lhs : rhs;
                 llvm::Value* iv = lhsIsBytes ? rhs : lhs;
+                std::vector<llvm::Value*> opBases;
+                if (impl_->options.gcMode == GCMode::RC && impl_->isOwnedPtrResult(bv))
+                    impl_->pushTempCleanupByKind(bv, Impl::VarKind::List, opBases);
                 impl_->lastValue = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_bytes_repeat"], {bv, iv}, "bytesrep");
+                impl_->popArgTempCleanups(opBases);
                 // Drop an owned bytes operand temp ((a + b) * 3); the count is a
                 // scalar, no decref. Mirrors the str-repeat path.
                 if (impl_->options.gcMode == GCMode::RC && impl_->isOwnedPtrResult(bv))
@@ -576,22 +588,29 @@ void CodeGen::visit(BinaryExpr& node) {
                 lhs = impl_->builder->CreateIntToPtr(lhs, impl_->i8PtrType);
             if (rhs->getType() == impl_->i64Type)
                 rhs = impl_->builder->CreateIntToPtr(rhs, impl_->i8PtrType);
+            bool lhsOwned = false, rhsOwned = false;
+            if (impl_->options.gcMode == GCMode::RC) {
+                lhsOwned = dynamic_cast<ListExpr*>(node.left.get()) ||
+                           dynamic_cast<ListCompExpr*>(node.left.get()) ||
+                           impl_->ownedTempDrainKind(node.left.get(), lhs) !=
+                               Impl::VarKind::Other;
+                rhsOwned = dynamic_cast<ListExpr*>(node.right.get()) ||
+                           dynamic_cast<ListCompExpr*>(node.right.get()) ||
+                           impl_->ownedTempDrainKind(node.right.get(), rhs) !=
+                               Impl::VarKind::Other;
+            }
+            std::vector<llvm::Value*> opBases;
+            if (lhsOwned) impl_->pushTempCleanupByKind(lhs, Impl::VarKind::List, opBases);
+            if (rhsOwned) impl_->pushTempCleanupByKind(rhs, Impl::VarKind::List, opBases);
             auto* result = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_list_concat"], {lhs, rhs}, "listcat");
+            impl_->popArgTempCleanups(opBases);
             // Decrefs owned temp operands: literals/comprehensions plus nested-
             // concat results via ownedTempDrainKind (`a+b+[5]` leaked the inner concat's +1).
-            if (impl_->options.gcMode == GCMode::RC) {
-                bool lhsLit = dynamic_cast<ListExpr*>(node.left.get()) ||
-                              dynamic_cast<ListCompExpr*>(node.left.get());
-                if (lhsLit || impl_->ownedTempDrainKind(node.left.get(), lhs) !=
-                                  Impl::VarKind::Other)
-                    impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {lhs});
-                bool rhsLit = dynamic_cast<ListExpr*>(node.right.get()) ||
-                              dynamic_cast<ListCompExpr*>(node.right.get());
-                if (rhsLit || impl_->ownedTempDrainKind(node.right.get(), rhs) !=
-                                  Impl::VarKind::Other)
-                    impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {rhs});
-            }
+            if (lhsOwned)
+                impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {lhs});
+            if (rhsOwned)
+                impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {rhs});
             impl_->lastValue = result;
             return;
         }
@@ -623,7 +642,11 @@ void CodeGen::visit(BinaryExpr& node) {
             if (countVal->getType() == impl_->i1Type)
                 countVal = impl_->builder->CreateZExt(countVal, impl_->i64Type);
             auto* repeatFn = impl_->runtimeFuncs["dragon_list_repeat"];
+            std::vector<llvm::Value*> opBases;
+            if (sourceIsTemp && impl_->options.gcMode == GCMode::RC)
+                impl_->pushTempCleanupByKind(listVal, Impl::VarKind::List, opBases);
             auto* result = impl_->builder->CreateCall(repeatFn, {listVal, countVal}, "listrepeat");
+            impl_->popArgTempCleanups(opBases);
             if (sourceIsTemp && impl_->options.gcMode == GCMode::RC) {
                 impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_decref"], {listVal});
@@ -682,8 +705,12 @@ void CodeGen::visit(BinaryExpr& node) {
 
             if (strVal->getType() != impl_->i8PtrType)
                 strVal = impl_->builder->CreateIntToPtr(strVal, impl_->i8PtrType);
+            std::vector<llvm::Value*> opBases;
+            if (strIsTemp && impl_->options.gcMode == GCMode::RC)
+                impl_->pushTempCleanupByKind(strVal, Impl::VarKind::Str, opBases);
             auto* result = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_str_repeat"], {strVal, countVal}, "strrep");
+            impl_->popArgTempCleanups(opBases);
             // Decref an owned intermediate operand (e.g. ("a"+"b") * 3) so the
             // consumed temporary isn't leaked, mirroring str concat.
             if (strIsTemp && impl_->options.gcMode == GCMode::RC) {
@@ -772,8 +799,16 @@ void CodeGen::visit(BinaryExpr& node) {
     // String concatenation
     if (lhs->getType() == impl_->i8PtrType && rhs->getType() == impl_->i8PtrType) {
         if (op == TokenType::PLUS) {
+            std::vector<llvm::Value*> opBases;
+            if (impl_->options.gcMode == GCMode::RC) {
+                if (impl_->isOwnedStrResult(lhs))
+                    impl_->pushTempCleanupByKind(lhs, Impl::VarKind::Str, opBases);
+                if (impl_->isOwnedStrResult(rhs))
+                    impl_->pushTempCleanupByKind(rhs, Impl::VarKind::Str, opBases);
+            }
             impl_->lastValue = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_str_concat"], {lhs, rhs}, "strcat");
+            impl_->popArgTempCleanups(opBases);
             // Decrefs owned intermediate string operands from chained concats
             // ((a+b)+c); see isOwnedStrResult for ownership convention and borrowed-returner blocklist.
             if (impl_->options.gcMode == GCMode::RC) {

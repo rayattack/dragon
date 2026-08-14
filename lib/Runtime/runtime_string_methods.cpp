@@ -1095,7 +1095,15 @@ static const char* dragon_join_utf8(const char* sep, const char** items, int64_t
         }
         if (owned[i]) free(owned[i]);
     }
+    // string_alloc raises on OOM; the DCLEAN_FREE entries free the scratches
+    // during unwind (per-element transcodes were already freed in the loop).
+    int32_t clbase = dragon_cleanup_depth();
+    dragon_cleanup_push((int64_t)(uintptr_t)buf, DCLEAN_FREE, 0);
+    dragon_cleanup_push((int64_t)(uintptr_t)owned, DCLEAN_FREE, 0);
+    dragon_cleanup_push((int64_t)(uintptr_t)blens, DCLEAN_FREE, 0);
+    if (sep_enc) dragon_cleanup_push((int64_t)(uintptr_t)sep_enc, DCLEAN_FREE, 0);
     const char* result = dragon_string_alloc(buf, total);
+    dragon_cleanup_reset(clbase);
     free(buf);
     free(owned);
     free(blens);
@@ -1108,7 +1116,10 @@ const char* dragon_str_join_ptr(const char* sep, DragonListPtr* l) {
     int64_t n = l->size;
     const char** items = (const char**)dragon_xmalloc_n(n, sizeof(char*));
     for (int64_t i = 0; i < n; ++i) items[i] = (const char*)l->data[i];
+    int32_t clbase = dragon_cleanup_depth();
+    dragon_cleanup_push((int64_t)(uintptr_t)items, DCLEAN_FREE, 0);
     const char* r = dragon_join_utf8(sep, items, n);
+    dragon_cleanup_reset(clbase);
     free((void*)items);
     return r;
 }
@@ -1118,7 +1129,10 @@ const char* dragon_str_join(const char* sep, DragonList* l) {
     int64_t n = l->size;
     const char** items = (const char**)dragon_xmalloc_n(n, sizeof(char*));
     for (int64_t i = 0; i < n; ++i) items[i] = (const char*)(uintptr_t)dragon_list_load(l, i);
+    int32_t clbase = dragon_cleanup_depth();
+    dragon_cleanup_push((int64_t)(uintptr_t)items, DCLEAN_FREE, 0);
     const char* r = dragon_join_utf8(sep, items, n);
+    dragon_cleanup_reset(clbase);
     free((void*)items);
     return r;
 }

@@ -722,7 +722,7 @@ def path_dirname(path: str) -> str {
     return _dirname(path)
 }
 
-def path_split(path: str) -> list[str] {
+def path_split(path: str) -> tuple[str, str] {
     return _split(path)
 }
 
@@ -730,7 +730,7 @@ def path_ext(path: str) -> str {
     return _ext(path)
 }
 
-def path_splitext(path: str) -> list[str] {
+def path_splitext(path: str) -> tuple[str, str] {
     return _splitext(path)
 }
 
@@ -758,7 +758,7 @@ def path_expandvars(path: str) -> str {
     return _expandvars(path)
 }
 
-def path_splitdrive(path: str) -> list[str] {
+def path_splitdrive(path: str) -> tuple[str, str] {
     return _splitdrive(path)
 }
 

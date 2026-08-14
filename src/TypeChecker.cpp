@@ -1069,9 +1069,15 @@ std::shared_ptr<Type> TypeChecker::resolveType(TypeExpr* typeExpr) {
             return std::make_shared<ListType>(resolveType(generic->typeArgs[0].get()));
         }
         if (baseName->name == "dict" && generic->typeArgs.size() == 2) {
+            auto keyT = resolveType(generic->typeArgs[0].get());
+            // No float key path exists in the runtime/codegen yet (tracked as
+            // J1); reject here rather than fail LLVM verification downstream.
+            if (keyT && keyT->kind() == Type::Kind::Float)
+                error(typeExpr->location(), "dict[float, V] keys are not "
+                      "supported yet; use int or str keys (float-keyed dicts "
+                      "are tracked as a planned feature)");
             return std::make_shared<DictType>(
-                resolveType(generic->typeArgs[0].get()),
-                resolveType(generic->typeArgs[1].get()));
+                keyT, resolveType(generic->typeArgs[1].get()));
         }
         if (baseName->name == "tuple") {
             std::vector<std::shared_ptr<Type>> elems;

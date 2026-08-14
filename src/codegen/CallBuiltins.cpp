@@ -362,6 +362,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
     // Owned temps in a borrow-builtin arg slot (`len(a+b)`, `sorted(make())`),
     // drained at the common tail. print and list()/set() manage their own args.
     std::vector<std::pair<llvm::Value*, Impl::VarKind>> argTemps;
+    std::vector<llvm::Value*> argTempBases;
     bool builtinHandled = [&]() -> bool {
     // print(*args): one space between args, one trailing newline. Per-arg type
     // dispatch lives in emitPrintArgRaw.
@@ -543,7 +544,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
         bool isBytes = impl_->exprIsBytes(node.args[0].get());
         std::string lenClassName = impl_->resolveExprClassName(node.args[0].get());
         node.args[0]->accept(*this);
-        llvm::Value* arg = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
         if (!lenClassName.empty() && impl_->hasDunder(lenClassName, "__len__") &&
             (arg->getType() == impl_->i8PtrType || arg->getType()->isPointerTy())) {
             impl_->lastValue = impl_->callDunder(lenClassName, "__len__", arg);
@@ -588,7 +589,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
     if (name == "abs" && node.args.size() == 1) {
         std::string absClassName = impl_->resolveExprClassName(node.args[0].get());
         node.args[0]->accept(*this);
-        llvm::Value* arg = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
         if (!absClassName.empty() && impl_->hasDunder(absClassName, "__abs__") &&
             (arg->getType() == impl_->i8PtrType || arg->getType()->isPointerTy())) {
             impl_->lastValue = impl_->callDunder(absClassName, "__abs__", arg);
@@ -613,7 +614,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
         // its receiver.
         std::string intClassName = impl_->resolveExprClassName(node.args[0].get());
         node.args[0]->accept(*this);
-        llvm::Value* arg = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
         if (!intClassName.empty() && impl_->hasDunder(intClassName, "__int__")) {
             llvm::Value* r = impl_->callDunder(intClassName, "__int__", arg);
             // __int__ returns int; normalize a bool/intc result to i64.
@@ -645,7 +646,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
     if (name == "float" && node.args.size() == 1) {
         std::string floatClassName = impl_->resolveExprClassName(node.args[0].get());
         node.args[0]->accept(*this);
-        llvm::Value* arg = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
         if (!floatClassName.empty() && impl_->hasDunder(floatClassName, "__float__")) {
             llvm::Value* r = impl_->callDunder(floatClassName, "__float__", arg);
             // __float__ returns float; widen an int/bool/intc result to f64.
@@ -674,7 +675,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
     if (name == "str" && node.args.size() == 1) {
         std::string strClassName = impl_->resolveExprClassName(node.args[0].get());
         node.args[0]->accept(*this);
-        llvm::Value* arg = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
         if (!strClassName.empty() && impl_->hasDunder(strClassName, "__str__")) {
             impl_->lastValue = impl_->callDunder(strClassName, "__str__", arg);
         } else if (!strClassName.empty() && impl_->hasDunder(strClassName, "__repr__")) {
@@ -726,8 +727,8 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
     if (name == "bool" && node.args.size() == 1) {
         node.args[0]->accept(*this);
         // bool() only reads its arg; an owned temp drains at the argTemps tail.
-        llvm::Value* arg = impl_->trackBorrowTemp(node.args[0].get(),
-                                                  impl_->lastValue, argTemps);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(
+            node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
         // Same truthiness as an if/while condition: numeric != 0, len != 0,
         // __bool__/__len__, else non-null.
         impl_->lastValue = impl_->toBool(arg, node.args[0].get());
@@ -746,7 +747,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
         }
         if (node.args.size() == 1) {
             node.args[0]->accept(*this);
-            llvm::Value* arg = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
+            llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
             if (arg->getType() == impl_->i64Type) {
                 llvm::Value* nullData = llvm::ConstantPointerNull::get(
                 llvm::PointerType::getUnqual(*impl_->context));
@@ -786,7 +787,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
         bool isMin = (name == "min");
         if (node.args.size() == 1) {
             node.args[0]->accept(*this);
-            llvm::Value* mmArg = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
+            llvm::Value* mmArg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
             Type::Kind elemKind = Type::Kind::Unknown;
             if (node.args[0]->type) {
                 if (auto* lt = dynamic_cast<ListType*>(node.args[0]->type.get())) {
@@ -811,7 +812,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
         bool anyFloat = false;
         for (auto& arg : node.args) {
             arg->accept(*this);
-            llvm::Value* v = impl_->trackBorrowTemp(arg.get(), impl_->lastValue, argTemps);
+            llvm::Value* v = impl_->trackBorrowTempGuarded(arg.get(), impl_->lastValue, argTemps, argTempBases);
             if (v->getType() == impl_->i1Type) v = impl_->builder->CreateZExt(v, impl_->i64Type);
             if (v->getType() == impl_->f64Type) anyFloat = true;
             vals.push_back(v);
@@ -831,7 +832,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
 
     if (name == "sum" && node.args.size() == 1) {
         node.args[0]->accept(*this);
-        llvm::Value* sumArg = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
+        llvm::Value* sumArg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
         Type::Kind elemKind = Type::Kind::Unknown;
         if (node.args[0]->type) {
             if (auto* lt = dynamic_cast<ListType*>(node.args[0]->type.get())) {
@@ -847,7 +848,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
 
     if (name == "any" && node.args.size() == 1) {
         node.args[0]->accept(*this);
-        llvm::Value* anyArg = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
+        llvm::Value* anyArg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
         llvm::Value* result = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_any_list"], {anyArg}, "any");
         impl_->lastValue = impl_->builder->CreateICmpNE(
@@ -857,7 +858,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
 
     if (name == "all" && node.args.size() == 1) {
         node.args[0]->accept(*this);
-        llvm::Value* allArg = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
+        llvm::Value* allArg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
         llvm::Value* result = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_all_list"], {allArg}, "all");
         impl_->lastValue = impl_->builder->CreateICmpNE(
@@ -868,7 +869,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
     if (name == "enumerate") {
         if (node.args.size() >= 1) {
             node.args[0]->accept(*this);
-            llvm::Value* list = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
+            llvm::Value* list = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
             llvm::Value* start = llvm::ConstantInt::get(impl_->i64Type, 0);
             if (node.args.size() >= 2) {
                 node.args[1]->accept(*this);
@@ -882,9 +883,9 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
 
     if (name == "zip" && node.args.size() == 2) {
         node.args[0]->accept(*this);
-        llvm::Value* a = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
+        llvm::Value* a = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
         node.args[1]->accept(*this);
-        llvm::Value* b = impl_->trackBorrowTemp(node.args[1].get(), impl_->lastValue, argTemps);
+        llvm::Value* b = impl_->trackBorrowTempGuarded(node.args[1].get(), impl_->lastValue, argTemps, argTempBases);
         impl_->lastValue = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_zip"], {a, b}, "zip");
         return true;
@@ -897,7 +898,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
         for (auto& kw : node.kwArgs)
             if (kw.first == "reverse") reverseArg = kw.second.get();
         node.args[0]->accept(*this);  // evaluate the list first (Python order)
-        llvm::Value* listv = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
+        llvm::Value* listv = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
         if (listv->getType() == impl_->i64Type)
             listv = impl_->builder->CreateIntToPtr(listv, impl_->i8PtrType);
         if (reverseArg) {
@@ -918,7 +919,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
 
     if (name == "reversed" && node.args.size() == 1) {
         node.args[0]->accept(*this);
-        llvm::Value* revArg = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
+        llvm::Value* revArg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
         impl_->lastValue = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_reversed"], {revArg}, "reversed");
         return true;
@@ -927,7 +928,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
     if (name == "hash" && node.args.size() == 1) {
         std::string hashClassName = impl_->resolveExprClassName(node.args[0].get());
         node.args[0]->accept(*this);
-        llvm::Value* arg = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
         if (!hashClassName.empty() && impl_->hasDunder(hashClassName, "__hash__") &&
             (arg->getType() == impl_->i8PtrType || arg->getType()->isPointerTy())) {
             impl_->lastValue = impl_->callDunder(hashClassName, "__hash__", arg);
@@ -952,7 +953,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
 
     if (name == "id" && node.args.size() == 1) {
         node.args[0]->accept(*this);
-        llvm::Value* arg = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
         if (arg->getType()->isPointerTy()) {
             arg = impl_->builder->CreatePtrToInt(arg, impl_->i64Type);
         } else if (arg->getType() == impl_->i1Type) {
@@ -966,7 +967,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
     if (name == "repr" && node.args.size() == 1) {
         std::string reprClassName = impl_->resolveExprClassName(node.args[0].get());
         node.args[0]->accept(*this);
-        llvm::Value* arg = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
         if (!reprClassName.empty() && impl_->hasDunder(reprClassName, "__repr__") &&
             (arg->getType() == impl_->i8PtrType || arg->getType()->isPointerTy())) {
             impl_->lastValue = impl_->callDunder(reprClassName, "__repr__", arg);
@@ -993,7 +994,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
         node.args[0]->accept(*this);
         // ord borrows: `ord(s[i])` mallocs a fresh 1-char string that leaks
         // once per call without the argTemps drain.
-        llvm::Value* arg = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
         impl_->lastValue = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_ord"], {arg}, "ord");
         return true;
@@ -1001,7 +1002,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
 
     if (name == "chr" && node.args.size() == 1) {
         node.args[0]->accept(*this);
-        llvm::Value* arg = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
         if (arg->getType() == impl_->i1Type)
             arg = impl_->builder->CreateZExt(arg, impl_->i64Type);
         impl_->lastValue = impl_->builder->CreateCall(
@@ -1368,14 +1369,14 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
         // Evaluate arg for side effects; an owned temp (`type(Dog("rex"))`
         // builds an instance nobody keeps) is drained by the argTemps tail.
         node.args[0]->accept(*this);
-        impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
+        impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
         impl_->lastValue = impl_->builder->CreateGlobalString(typeName);
         return true;
     }
 
     if (name == "round" && node.args.size() == 1) {
         node.args[0]->accept(*this);
-        llvm::Value* arg = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
         if (arg->getType() == impl_->i64Type) {
             impl_->lastValue = arg; // round of int is itself
         } else {
@@ -1422,7 +1423,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
 
     if (name == "hex" && node.args.size() == 1) {
         node.args[0]->accept(*this);
-        llvm::Value* arg = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
         if (arg->getType() == impl_->i1Type) arg = impl_->builder->CreateZExt(arg, impl_->i64Type);
         impl_->lastValue = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_hex"], {arg}, "hex");
@@ -1430,7 +1431,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
     }
     if (name == "oct" && node.args.size() == 1) {
         node.args[0]->accept(*this);
-        llvm::Value* arg = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
         if (arg->getType() == impl_->i1Type) arg = impl_->builder->CreateZExt(arg, impl_->i64Type);
         impl_->lastValue = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_oct"], {arg}, "oct");
@@ -1438,7 +1439,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
     }
     if (name == "bin" && node.args.size() == 1) {
         node.args[0]->accept(*this);
-        llvm::Value* arg = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
         if (arg->getType() == impl_->i1Type) arg = impl_->builder->CreateZExt(arg, impl_->i64Type);
         impl_->lastValue = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_bin"], {arg}, "bin");
@@ -1550,8 +1551,8 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
         node.args[0]->accept(*this);
         // The converter copies the elements, so an owned list temp
         // (`tuple([1, 2, 3])`) drains at the argTemps tail.
-        llvm::Value* arg = impl_->trackBorrowTemp(node.args[0].get(),
-                                                  impl_->lastValue, argTemps);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(
+            node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
         auto* fn = impl_->getOrDeclareRuntime("dragon_tuple_from_list",
             llvm::FunctionType::get(impl_->i8PtrType, {impl_->i8PtrType}, false));
         impl_->lastValue = impl_->builder->CreateCall(fn, {arg}, "tuplefromlist");
@@ -1733,6 +1734,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
 
     return false;
     }();
+    impl_->popArgTempCleanups(argTempBases);
     if (builtinHandled) {
         impl_->drainBorrowTemps(argTemps);
         return true;

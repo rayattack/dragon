@@ -1667,6 +1667,15 @@ struct CodeGen::Impl {
                 // non-Str / non-Closure heap kind in emitDecrefByKind).
                 return (v->getType()->isPointerTy() && isOwnedPtrResult(v))
                            ? VarKind::List : VarKind::Other;
+            case Type::Kind::Unknown:
+                // An untyped owned call result would skip its release silently;
+                // never legitimate once the signature pre-passes have run.
+                if (v->getType()->isPointerTy() && dynamic_cast<CallExpr*>(e) &&
+                    isOwnedPtrResult(v))
+                    addError("internal error: owned call result has no static "
+                             "type; its release would be silently skipped "
+                             "(typechecker signature gap)", e->location());
+                return VarKind::Other;
             default:
                 return VarKind::Other;  // int/float/bool/Any/Function: no owned heap +1
         }
@@ -1685,6 +1694,29 @@ struct CodeGen::Impl {
     // definition so no call path can hand-roll (and forget) the drain.
     void drainBorrowTemps(const std::vector<std::pair<llvm::Value*, VarKind>>& temps) {
         for (auto& [v, k] : temps) emitDecrefByKind(v, k);
+    }
+
+    // Cleanup-stack registration for one owned temp so a raising callee frees
+    // it during longjmp; pop `bases` after the call (popArgTempCleanups). Same
+    // kind filter as pushArgTempCleanups: Union stays on the normal-path drain.
+    void pushTempCleanupByKind(llvm::Value* v, VarKind k,
+                               std::vector<llvm::Value*>& bases) {
+        int ck = cleanupKindFor(k);
+        if (ck == DCLEAN_STR || ck == DCLEAN_CALLABLE || ck == DCLEAN_OBJ)
+            bases.push_back(emitCleanupPushTemp(v, ck));
+    }
+
+    // trackBorrowTemp plus the cleanup-stack registration above; pop `bases`
+    // after the call, then drainBorrowTemps.
+    llvm::Value* trackBorrowTempGuarded(Expr* e, llvm::Value* v,
+                                 std::vector<std::pair<llvm::Value*, VarKind>>& sink,
+                                 std::vector<llvm::Value*>& bases) {
+        VarKind k = ownedTempDrainKind(e, v);
+        if (k != VarKind::Other) {
+            sink.emplace_back(v, k);
+            pushTempCleanupByKind(v, k, bases);
+        }
+        return v;
     }
 
     // D027.1 heap-boxed cell read/write helpers. Cells store values as i64; native types
@@ -2291,9 +2323,12 @@ struct CodeGen::Impl {
 
     // Unboxes a dragon_box_binop result into `targetType`, emitting a runtime tag-check
     // that raises TypeError (80) on mismatch (mirrors AnnAssign's D039 Phase-7a inline unbox); targetType == box type returns unchanged (Any slot). `wantListElemTag` additionally emits dragon_list_view_check, since the box tag alone can't distinguish DragonList from DragonListBox (silent corruption otherwise): -1 for list[Any]/union, >=0 for concrete list[T].
+    // `staticKind` disambiguates targets whose VarKind collapses onto a generic heap
+    // kind (bytes -> VarKind::List per D030 §5), else the tag check misreports them.
     llvm::Value* unboxBoxResultChecked(llvm::Value* box, llvm::Type* targetType,
                                        VarKind vk,
-                                       int64_t wantListElemTag = kNoListElemCheck);
+                                       int64_t wantListElemTag = kNoListElemCheck,
+                                       Type::Kind staticKind = Type::Kind::Unknown);
 
     /// The dragon_list_view_check argument for a list-typed slot, from its annotation: -1
     /// for list[Any]/union (box representation), a concrete tag for monomorphized elements, kNoListElemCheck for a non-checkable shape (bare `list`, `list[type]`, type variables).

@@ -122,25 +122,20 @@ jobs:
         run: cmake --build build-asan -j
 
       # RSS cap instead of ulimit -v: ASan reserves ~20TB of virtual address
-      # space and aborts at startup under an address-space limit.
+      # space and aborts at startup under an address-space limit. 4000MB: the
+      # alloc-bounds/oom-probe tests peak near 3.5GB under ASan overhead and
+      # spuriously rss-abort at 2048.
       # dr_oom_* excluded: they run compiled programs under ulimit -v by design,
       # which an ASan-instrumented binary cannot survive.
-      # detect_leaks=0 for now: the temp-operand-leak-on-raise (issues/issue-3)
-      # is a known, tracked codegen defect that leaks small temps on every
-      # exception path, so full-suite leak detection is deferred until it lands.
-      # UAF, heap/stack-buffer-overflow, and use-after-scope stay ON across the
-      # whole suite - the severe classes this mid-audit repo hunts.
-      - name: Run dr tests under ASan
+      # detect_leaks=1 across the whole suite: the raise-path temp-leak family
+      # (issue-3) is fixed, so any leak here is a regression.
+      # allocator_may_return_null=1: the alloc-bounds tests probe huge requests
+      # that must return NULL so the runtime raises MemoryError; without it
+      # ASan hard-aborts on allocation-size-too-big.
+      - name: Run dr tests under ASan with leak detection
         env:
-          ASAN_OPTIONS: detect_leaks=0:hard_rss_limit_mb=2048
+          ASAN_OPTIONS: detect_leaks=1:allocator_may_return_null=1:hard_rss_limit_mb=4000
         run: ctest --test-dir build-asan -R '^dr_' -E '^dr_oom_' --output-on-failure
-
-      # Leak detection on a curated subset proven clean under LSan today, so a
-      # NEW leak in this surface fails CI while issue-3 stays tracked separately.
-      - name: Leak-check clean subset
-        env:
-          ASAN_OPTIONS: detect_leaks=1:hard_rss_limit_mb=2048
-        run: ctest --test-dir build-asan -R 'unicode_boundary|container_walk|container_errors|minmax_sum|getcwd_owner' --output-on-failure
 
   llvm-floor:
     name: LLVM 21 floor build

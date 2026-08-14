@@ -21,13 +21,13 @@ class Path {
 
     @property
     def stem() -> str {
-        const parts: list[str] = splitext(basename(self.raw))
+        const parts: tuple[str, str] = splitext(basename(self.raw))
         return parts[0]
     }
 
     @property
     def suffix() -> str {
-        const parts: list[str] = splitext(basename(self.raw))
+        const parts: tuple[str, str] = splitext(basename(self.raw))
         return parts[1]
     }
 
@@ -92,7 +92,7 @@ class Path {
 
     def with_suffix(new_suffix: str) -> Path {
         # Replace the extension. Empty new_suffix removes it.
-        const parts: list[str] = splitext(self.raw)
+        const parts: tuple[str, str] = splitext(self.raw)
         return Path(parts[0] + new_suffix)
     }
 

@@ -419,7 +419,7 @@ std::string PythonMigrator::emitStmt(Stmt* stmt, int level) {
             if (p.defaultValue) out += " = " + emitExpr(p.defaultValue.get());
         }
         out += ")";
-        if (func->returnType) out += " : " + emitType(func->returnType.get());
+        if (func->returnType) out += " -> " + emitType(func->returnType.get());
         out += emitBlockHelper(this, func->body, level, useBraces);
         out += "\n";
         return out;

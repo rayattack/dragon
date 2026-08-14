@@ -1,0 +1,36 @@
+"""Any -> bytes checked unbox must accept a bytes payload (J2).
+
+Regression: bytes-typed slots collapse onto the generic heap VarKind, so the
+checked unbox expected a list tag and raised a spurious
+"TypeError: expected list" for a perfectly ordinary `b: bytes = anyval`.
+The mismatch case must still raise: an Any holding a str into a bytes slot
+is a genuine type error.
+"""
+
+from unittest import TestCase, main
+from anybox_src import give_bytes, give_str
+
+data: bytes = give_bytes()
+
+def _bind_wrong() {
+    wrong: bytes = give_str()
+}
+
+class AnyBytesUnbox(TestCase) {
+    def test_module_global_bytes_from_any() {
+        self.assertEqual(len(data), 3)
+        self.assertEqual(data[0], 97)
+    }
+
+    def test_local_bytes_from_any() {
+        b: bytes = give_bytes()
+        self.assertEqual(len(b), 3)
+        self.assertEqual(b, b"abc")
+    }
+
+    def test_mismatch_still_raises() {
+        self.assertRaises(TypeError, _bind_wrong)
+    }
+}
+
+main([AnyBytesUnbox()])

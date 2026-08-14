@@ -9,6 +9,7 @@
 #include "dragon/TypeChecker.h"
 #include "dragon/CodeGen.h"
 #include "dragon/TypeHintEnforcer.h"
+#include "dragon/PythonMigrator.h"
 #include "dragon/ModuleResolver.h"
 #include "dragon/DiagnosticFormatter.h"
 #include "dragon/Platform.h"
@@ -490,6 +491,8 @@ bool Driver::parseArgs(int argc, char* argv[]) {
         impl_->options.action = DriverOptions::Action::Build;
     } else if (command == "check") {
         impl_->options.action = DriverOptions::Action::Check;
+    } else if (command == "migrate") {
+        impl_->options.action = DriverOptions::Action::Migrate;
     } else if (command == "--version" || command == "-v") {
         // Terminal success op: exit(0) directly, since parseArgs returning false
         // makes main() return 1, which would fail CI's `dragon --version` probes.
@@ -625,6 +628,9 @@ int Driver::run(const DriverOptions& options) {
             case DriverOptions::Action::FfiSync:
                 result = runFfiSync(filename, options.ffiCheck);
                 break;
+            case DriverOptions::Action::Migrate:
+                result = migrateFile(filename);
+                break;
             default:
                 break;
         }
@@ -644,6 +650,7 @@ Commands:
   run <file|dir>    Compile and run Dragon/Python file (a dir resolves dragon.drs `entry`)
   build <file|dir>  Compile to executable
   check <file>      Type check without compiling
+  migrate <file.py> Emit a typed .dr draft next to the input
   ffi sync <file>   Regenerate foreign stubs for process externs (--check: verify only)
 
 Package (eggs, D022):
@@ -1013,6 +1020,31 @@ int Driver::buildFile(const std::string& filename) {
     if (impl_->options.verbose) {
         std::cout << "Built: " << outputFile << "\n";
     }
+    return 0;
+}
+
+int Driver::migrateFile(const std::string& filename) {
+    if (isDragonFile(filename)) {
+        std::cerr << "dragon migrate: '" << filename
+                  << "' is already a Dragon file; name a .py input\n";
+        return 1;
+    }
+    std::string outPath = filename;
+    auto dot = outPath.find_last_of('.');
+    if (dot != std::string::npos) outPath.resize(dot);
+    outPath += ".dr";
+    PythonMigrator migrator;
+    bool ok = migrator.migrate(filename, outPath);
+    for (const auto& d : migrator.diagnostics()) {
+        const char* level =
+            d.level == MigrationDiagnostic::Level::Error   ? "error"
+          : d.level == MigrationDiagnostic::Level::Warning ? "warning"
+                                                           : "note";
+        std::cerr << impl_->formatter.format(filename, d.location.line,
+                                             d.location.column, level, d.message);
+    }
+    if (!ok || migrator.hasErrors()) return 1;
+    std::cout << "Migrated: " << filename << " -> " << outPath << "\n";
     return 0;
 }
 

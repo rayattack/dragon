@@ -98,4 +98,29 @@ class ReaderClosedBytesTests(TestCase) {
 }
 
 
-main([BytesIOSeekTests(), BytesIOStreamTests(), ReaderClosedBytesTests()])
+class BytesIOGapWriteTests(TestCase) {
+    def test_write_past_eof_zero_fills() {
+        b: BytesIO = BytesIO(b"ab")
+        b.seek(5)
+        b.write(b"XY")
+        v: bytes = b.getvalue()
+        self.assertEqual(len(v), 7)
+        self.assertEqual(v, b"ab\x00\x00\x00XY")
+    }
+
+    def test_write_into_empty_at_offset() {
+        b: BytesIO = BytesIO()
+        b.seek(3)
+        b.write(b"Z")
+        self.assertEqual(b.getvalue(), b"\x00\x00\x00Z")
+        self.assertEqual(b.tell(), 4)
+    }
+
+    def test_bytes_int_ctor_is_zeroed() {
+        z: bytes = bytes(4)
+        self.assertEqual(z, b"\x00\x00\x00\x00")
+    }
+}
+
+
+main([BytesIOSeekTests(), BytesIOStreamTests(), ReaderClosedBytesTests(), BytesIOGapWriteTests()])

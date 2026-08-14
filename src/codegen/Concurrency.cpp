@@ -288,11 +288,31 @@ void CodeGen::visit(YieldExpr& node) {
 
     // Evaluate the yielded value (default to 0/None if no value)
     llvm::Value* yieldVal;
+    int64_t yieldTag = 0;
     if (node.value) {
         node.value->accept(*this);
         yieldVal = impl_->lastValue;
         // Coerce to i64 if needed
         if (yieldVal->getType()->isPointerTy()) {
+            // Heap yield: the slot owns a +1 (released on the next yield / at
+            // destroy), so a borrowed source increfs; an owned temp transfers.
+            if (node.value->type) {
+                int64_t t = Impl::typeKindToTag(node.value->type->kind());
+                if (t >= TAG_LIST || t == TAG_STR || t == TAG_CALLABLE)
+                    yieldTag = t;
+            }
+            if (yieldTag != 0 && impl_->options.gcMode == GCMode::RC &&
+                Impl::isBorrowedHeapExpr(node.value.get())) {
+                if (yieldTag == TAG_STR)
+                    impl_->builder->CreateCall(
+                        impl_->runtimeFuncs["dragon_incref_str"], {yieldVal});
+                else if (yieldTag == TAG_CALLABLE)
+                    impl_->builder->CreateCall(
+                        impl_->runtimeFuncs["dragon_incref_callable"], {yieldVal});
+                else
+                    impl_->builder->CreateCall(
+                        impl_->runtimeFuncs["dragon_incref"], {yieldVal});
+            }
             yieldVal = impl_->builder->CreatePtrToInt(yieldVal, impl_->i64Type);
         } else if (yieldVal->getType()->isDoubleTy()) {
             yieldVal = impl_->builder->CreateBitCast(yieldVal, impl_->i64Type);
@@ -306,7 +326,8 @@ void CodeGen::visit(YieldExpr& node) {
     // Load the generator pointer and call dragon_generator_yield
     auto* genPtr = impl_->builder->CreateLoad(impl_->i8PtrType, impl_->generatorPtr, "__gen.ptr");
     impl_->builder->CreateCall(
-        impl_->runtimeFuncs["dragon_generator_yield"], {genPtr, yieldVal});
+        impl_->runtimeFuncs["dragon_generator_yield"],
+        {genPtr, yieldVal, llvm::ConstantInt::get(impl_->i64Type, yieldTag)});
 
     // The yield expression itself evaluates to 0 (sent value not yet supported)
     impl_->lastValue = llvm::ConstantInt::get(impl_->i64Type, 0);

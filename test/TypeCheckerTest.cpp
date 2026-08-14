@@ -2516,3 +2516,36 @@ TEST(ParserTest, ContractBodyRejectsFieldsBodiesDefaultsAndEmpty) {
     EXPECT_TRUE(parseErrors(
         "type Bad {\n    def m(n: int = 3) -> str\n}\n").size() > 0);
 }
+
+TEST(TypeCheckerTest, GenericAndMonomorphicSameNameRejected) {
+    // One name, two callables: the bracket-less call site infers T, so a rival
+    // definition is ambiguous and one of the two silently never runs (J9).
+    EXPECT_TRUE(checkHasErrors(
+        "def f(x: int) -> int {\n"
+        "    return x + 1\n"
+        "}\n"
+        "def f[T](x: T) -> T {\n"
+        "    return x\n"
+        "}\n"));
+    EXPECT_TRUE(checkHasErrors(
+        "def f[T](x: T) -> T {\n"
+        "    return x\n"
+        "}\n"
+        "def f(x: int) -> int {\n"
+        "    return x + 1\n"
+        "}\n"));
+    EXPECT_TRUE(checkHasErrors(
+        "def f[T](x: T) -> T {\n"
+        "    return x\n"
+        "}\n"
+        "def f[T](x: T, y: T) -> T {\n"
+        "    return x\n"
+        "}\n"));
+}
+
+TEST(TypeCheckerTest, DictFloatKeyRejected) {
+    // No float key path exists in the runtime/codegen (J1); without this
+    // rejection the program died on LLVM verification instead of a diagnostic.
+    EXPECT_TRUE(checkHasErrors(
+        "d: dict[float, int] = {}\n"));
+}

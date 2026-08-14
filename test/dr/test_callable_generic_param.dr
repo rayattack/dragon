@@ -1,0 +1,50 @@
+"""Generic type params in Callable positions must substitute (J8).
+
+Regression: `def f[T](fn: Callable[[T, T], T], ...)` failed to bind T at every
+call site, even explicit `f[int](...)`, because neither unification nor the
+concreteness check descended into function types. This blocked any generic
+reduce/fold written in Dragon itself.
+"""
+
+from unittest import TestCase, main
+
+def apply2[T](fn: Callable[[T, T], T], a: T, b: T) -> T {
+    return fn(a, b)
+}
+
+def fold[T](fn: Callable[[T, T], T], xs: list[T], init: T) -> T {
+    acc: T = init
+    for x in xs {
+        acc = fn(acc, x)
+    }
+    return acc
+}
+
+def add_i(a: int, b: int) -> int {
+    return a + b
+}
+
+def cat_s(a: str, b: str) -> str {
+    return a + b
+}
+
+class CallableGenericParam(TestCase) {
+    def test_inferred_int() {
+        self.assertEqual(apply2(add_i, 3, 4), 7)
+    }
+
+    def test_explicit_int() {
+        self.assertEqual(apply2[int](add_i, 5, 6), 11)
+    }
+
+    def test_inferred_str() {
+        self.assertEqual(apply2(cat_s, "ab", "cd"), "abcd")
+    }
+
+    def test_generic_fold() {
+        self.assertEqual(fold(add_i, [1, 2, 3, 4], 0), 10)
+        self.assertEqual(fold(cat_s, ["x", "y", "z"], ""), "xyz")
+    }
+}
+
+main([CallableGenericParam()])

@@ -49,8 +49,8 @@ def dirname(path: str) -> str {
     return path[:idx]
 }
 
-def split(path: str) -> list[str] {
-    return [dirname(path), basename(path)]
+def split(path: str) -> tuple[str, str] {
+    return (dirname(path), basename(path))
 }
 
 def ext(path: str) -> str {
@@ -60,13 +60,13 @@ def ext(path: str) -> str {
     return base[idx:]
 }
 
-def splitext(path: str) -> list[str] {
+def splitext(path: str) -> tuple[str, str] {
     const e: str = ext(path)
     if len(e) == 0 {
-        return [path, ""]
+        return (path, "")
     }
     const stem: str = path[:len(path) - len(e)]
-    return [stem, e]
+    return (stem, e)
 }
 
 def abspath(path: str) -> str {
@@ -272,8 +272,8 @@ def expandvars(path: str) -> str {
 }
 
 # Split path into (drive, tail). POSIX always returns ["", path].
-def splitdrive(path: str) -> list[str] {
-    return ["", path]
+def splitdrive(path: str) -> tuple[str, str] {
+    return ("", path)
 }
 
 # Longest character-level common prefix of paths. Note: character-level,

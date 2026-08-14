@@ -79,11 +79,7 @@ target_link_libraries(dragon_diagnostic_tests PRIVATE dragon_lib gtest_main)
 add_test(NAME DiagnosticTests COMMAND dragon_diagnostic_tests)
 
 # --- Python->Dragon Migrator Tests ---
-# The migrator TUs are not part of dragon_lib (no CLI path links them yet),
-# so this suite compiles them directly.
-add_executable(dragon_migrator_tests MigratorTest.cpp
-    ${CMAKE_SOURCE_DIR}/src/PythonMigrator.cpp
-    ${CMAKE_SOURCE_DIR}/src/TypeInference.cpp)
+add_executable(dragon_migrator_tests MigratorTest.cpp)
 target_link_libraries(dragon_migrator_tests PRIVATE dragon_lib gtest_main)
 add_test(NAME MigratorTests COMMAND dragon_migrator_tests)
 

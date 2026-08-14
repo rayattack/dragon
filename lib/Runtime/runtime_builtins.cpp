@@ -736,10 +736,26 @@ void dragon_generator_set_raised(void* gen_ptr) {
     if (gen) gen->pending_exc = 1;
 }
 
-/// Yield a value from inside the generator body. Called by compiled yield expressions.
-void dragon_generator_yield(void* gen_ptr, int64_t value) {
+/// Release the +1 the yielded-value slot owns for heap tags (mirrors the
+/// DCLEAN_UNION unwind arm; TAG_CLOSURE checked before the generic heap range).
+static void dragon_generator_release_yielded(DragonGenerator* gen) {
+    int64_t tag = gen->yielded_tag;
+    void* p = (void*)(uintptr_t)gen->yielded_value;
+    if (!p) { gen->yielded_tag = 0; return; }
+    if (tag == TAG_STR) dragon_decref_str((const char*)p);
+    else if (tag == DRAGON_TAG_CLOSURE) dragon_decref_callable(p);
+    else if (tag >= TAG_LIST) dragon_decref(p);
+    gen->yielded_tag = 0;
+}
+
+/// Yield a value from inside the generator body. Called by compiled yield
+/// expressions. A heap `value` transfers a +1 into the slot (codegen increfs
+/// borrowed sources first); the previous slot value's +1 is released here.
+void dragon_generator_yield(void* gen_ptr, int64_t value, int64_t tag) {
     DragonGenerator* gen = (DragonGenerator*)gen_ptr;
+    dragon_generator_release_yielded(gen);
     gen->yielded_value = value;
+    gen->yielded_tag = tag;
     gen->state = GEN_STATE_SUSPENDED;
     mco_yield(gen->coro);
 }
@@ -791,6 +807,7 @@ int64_t dragon_generator_next(void* gen_ptr) {
 void dragon_generator_destroy(void* gen_ptr) {
     DragonGenerator* gen = (DragonGenerator*)gen_ptr;
     if (!gen) return;
+    dragon_generator_release_yielded(gen);
     if (gen->coro) {
         // mco_destroy needs MCO_DEAD/MCO_SUSPENDED; a generator abandoned mid-
         // resume (exception propagated out) is left MCO_RUNNING - skip destroy (its stack leaks, a known minicoro limitation) and still free args below.
@@ -801,12 +818,17 @@ void dragon_generator_destroy(void* gen_ptr) {
         if (gen->args_decref_fn) gen->args_decref_fn(gen->args);
         free(gen->args);
     }
-    // Free the isolated exception context (cleanup stack may have grown heap
-    // buffers); only present if the generator was resumed at least once.
+    // Free the isolated exception context; only present if the generator was
+    // resumed at least once. A generator abandoned mid-iteration still holds
+    // its registered locals on the cleanup stack and may hold the last raise's
+    // message/instance - drain and release before freeing the arrays.
     if (gen->exc_vt) {
+        dragon_cleanup_stack_drain(&gen->exc_vt->cleanup, 0);
         free(gen->exc_vt->cleanup.vals);
         free(gen->exc_vt->cleanup.kinds);
         free(gen->exc_vt->cleanup.tags);
+        dragon_decref_str_dispatch(gen->exc_vt->exc_msg);
+        if (gen->exc_vt->exc_obj) dragon_decref_dispatch(gen->exc_vt->exc_obj);
         free(gen->exc_vt);
     }
     free(gen);

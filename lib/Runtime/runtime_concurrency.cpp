@@ -89,6 +89,7 @@ static void* dragon_thread_entry(void* raw) {
     __atomic_store_n(&fa->thread->done, (int8_t)1, __ATOMIC_RELEASE);
     free(fa->args);
     free(fa);
+    dragon_exc_thread_state_release();
     return NULL;
 }
 
@@ -178,6 +179,7 @@ static void* dragon_osthread_entry(void* raw) {
     }
     t->result = res;
     __atomic_store_n(&t->done, (int8_t)1, __ATOMIC_RELEASE);
+    dragon_exc_thread_state_release();
     return NULL;
 }
 
@@ -418,12 +420,14 @@ static void vthread_release(DragonVThread* vt) {
     mco_destroy(vt->coro);
     pthread_mutex_destroy(&vt->join_lock);
     pthread_cond_destroy(&vt->join_cond);
+    dragon_cleanup_stack_drain(&vt->cleanup, 0);
     free(vt->cleanup.vals);
     free(vt->cleanup.kinds);
     free(vt->cleanup.tags);
     // The exc_msg slot owns its message (dragon_exc_msg_set); a vthread that
     // caught-and-finished still holds its last message - release it.
     dragon_decref_str_dispatch(vt->exc_msg);
+    if (vt->exc_obj) dragon_decref_dispatch(vt->exc_obj);
     free(vt);
 }
 
@@ -1885,7 +1889,12 @@ const char* dragon_nb_recv_str(int64_t fd, int64_t max_len) {
     int64_t n = dragon_nb_recv(fd, buf, max_len);
     if (n < 0) n = 0;
     buf[n] = '\0';
+    // string_alloc raises MemoryError on OOM; the DCLEAN_FREE entry frees the
+    // scratch during unwind instead of leaking it per caught raise.
+    int32_t clbase = dragon_cleanup_depth();
+    dragon_cleanup_push((int64_t)(uintptr_t)buf, DCLEAN_FREE, 0);
     const char* result = dragon_string_alloc(buf, n);
+    dragon_cleanup_reset(clbase);
     free(buf);
     return result;
 }

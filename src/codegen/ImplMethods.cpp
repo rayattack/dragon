@@ -809,6 +809,12 @@ int64_t CodeGen::Impl::varKindToTag(VarKind vk) {
 
 Type::Kind CodeGen::Impl::resolveDictKeyKind(Expr* expr) {
         if (!expr) return Type::Kind::Unknown;
+        if (expr->type) {
+            if (auto* dt = dynamic_cast<DictType*>(expr->type.get())) {
+                if (dt->keyType && dt->keyType->kind() != Type::Kind::Unknown)
+                    return dt->keyType->kind();
+            }
+        }
         if (auto* name = dynamic_cast<NameExpr*>(expr)) {
             auto it = varDictKeyKinds.find(name->name);
             if (it != varDictKeyKinds.end()) return it->second;
@@ -841,6 +847,12 @@ Type::Kind CodeGen::Impl::resolveDictKeyKind(Expr* expr) {
 
 Type::Kind CodeGen::Impl::resolveDictValueKind(Expr* expr) {
         if (!expr) return Type::Kind::Unknown;
+        if (expr->type) {
+            if (auto* dt = dynamic_cast<DictType*>(expr->type.get())) {
+                if (dt->valueType && dt->valueType->kind() != Type::Kind::Unknown)
+                    return dt->valueType->kind();
+            }
+        }
         if (auto* name = dynamic_cast<NameExpr*>(expr)) {
             auto it = varDictValueKinds.find(name->name);
             if (it != varDictValueKinds.end()) return it->second;

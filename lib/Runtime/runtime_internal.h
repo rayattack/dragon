@@ -141,6 +141,9 @@ enum DragonCleanupKind {
     // Pending `defer` call (defer.md): val is a codegen thunk `void(*)(int64_t*)`, tag is its
     // snapshot-arg count; those entries carry the snapshot values and drain per-kind so defers run before the borrowed values release.
     DCLEAN_DEFER_CALL = 5,
+    // Raw malloc'd scratch inside a runtime function whose callee can raise: free(val) on
+    // unwind. Runtime-internal only; codegen never emits it.
+    DCLEAN_FREE = 6,
 };
 
 enum VThreadYieldReason {
@@ -337,6 +340,9 @@ struct DragonGenerator {
     DragonObjectHeader header;
     mco_coro*   coro;
     int64_t     yielded_value;
+    // DragonValueTag of yielded_value; heap tags mean the slot OWNS a +1,
+    // released on the next yield / at destroy (0 for non-heap yields).
+    int64_t     yielded_tag;
     int8_t      state;
     // D030: codegen-allocated typed args struct + per-callsite decref fn. Buffer holds
     // (Generator*, user args...) and outlives the body; destroy calls the decref fn then frees args.
@@ -710,6 +716,16 @@ static inline void dragon_hex_encode(char* dst, const unsigned char* src, int64_
 // Snapshot a message for re-raising only if it is a mortal heap string (else
 // return it unchanged - no dup, no leak). See definition in runtime_string.cpp.
 const char* dragon_exc_msg_preserve(const char* s);
+
+// Free this OS thread's TLS exception state (cleanup-stack arrays, owned exc
+// message and instance). Call as a thread entry returns; the vthread twin is
+// vthread_release.
+void dragon_exc_thread_state_release(void);
+
+// Free every owned entry above `target` on `cs` and rewind to it. Teardown of an
+// abandoned context (generator / vthread) must drain before freeing the arrays,
+// else the registered locals leak.
+void dragon_cleanup_stack_drain(DragonCleanupStack* cs, int32_t target);
 
 // Force-free a heap string at refcount 0 inside the cycle collector's clear_refs phase,
 // bypassing dragon_decref_str's gc_collecting guard (else Phase 4/6 would leave it allocated). Safe since the string is owned exclusively by the unreachable container being torn down; still honors the immortal sentinel.

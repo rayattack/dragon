@@ -919,7 +919,7 @@ TEST(InteropTest, StdlibOsPathSplitdrive) {
 
     std::string source =
         "from os.path import splitdrive\n"
-        "const r: list[str] = splitdrive(\"/usr/lib\")\n"
+        "const r: tuple[str, str] = splitdrive(\"/usr/lib\")\n"
         "print(\"d=\" + r[0])\n"
         "print(\"p=\" + r[1])\n";
 

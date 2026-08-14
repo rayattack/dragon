@@ -243,7 +243,12 @@ class BytesIO {
     def write(data: bytes) -> int {
         const n: int = len(data)
         if self._pos >= self._len {
-            # Append at end - fast path, defer the join.
+            # Append at end - fast path, defer the join. A cursor seeked past
+            # EOF zero-fills the gap first (Python parity).
+            if self._pos > self._len {
+                self._chunks.append(bytes(self._pos - self._len))
+                self._len = self._pos
+            }
             self._chunks.append(data)
             self._len = self._len + n
             self._pos = self._len

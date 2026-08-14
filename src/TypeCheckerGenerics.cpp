@@ -30,6 +30,12 @@ bool typeIsConcrete(const Type* t) {
         }
         case Type::Kind::Task:
             return typeIsConcrete(static_cast<const TaskType&>(*t).resultType.get());
+        case Type::Kind::Function: {
+            auto& f = static_cast<const FunctionType&>(*t);
+            for (auto& p : f.paramTypes)
+                if (!typeIsConcrete(p.get())) return false;
+            return typeIsConcrete(f.returnType.get());
+        }
         case Type::Kind::Union: {
             for (auto& e : static_cast<const UnionType&>(*t).types)
                 if (!typeIsConcrete(e.get())) return false;
@@ -361,6 +367,15 @@ bool TypeChecker::unifyTypeParam(
     if (declared->kind() == Type::Kind::Task && actual->kind() == Type::Kind::Task)
         return unifyTypeParam(static_cast<const TaskType&>(*declared).resultType,
                               static_cast<const TaskType&>(*actual).resultType, out);
+    if (declared->kind() == Type::Kind::Function &&
+        actual->kind() == Type::Kind::Function) {
+        auto& d = static_cast<const FunctionType&>(*declared);
+        auto& a = static_cast<const FunctionType&>(*actual);
+        if (d.paramTypes.size() != a.paramTypes.size()) return false;
+        for (size_t i = 0; i < d.paramTypes.size(); ++i)
+            if (!unifyTypeParam(d.paramTypes[i], a.paramTypes[i], out)) return false;
+        return unifyTypeParam(d.returnType, a.returnType, out);
+    }
     // No type variable to refine here - not a hard failure; the concrete check
     // happens when the stamped body is type-checked.
     return true;
@@ -948,6 +963,20 @@ void TypeChecker::collectGenericTemplates(Module& module) {
                 impl_->genericClasses[cd->name] = cd;
         } else if (auto* fd = dynamic_cast<FunctionDecl*>(stmt.get())) {
             if (fd->typeParams.empty()) continue;
+            // D049 module-level twin: a bracket-less f(...) call infers T, so a
+            // rival same-name definition is ambiguous and one of the two would
+            // silently never be callable.
+            for (auto& other : module.body) {
+                if (other.get() == stmt.get()) continue;
+                auto* od = dynamic_cast<FunctionDecl*>(other.get());
+                if (od && od->name == fd->name) {
+                    error(fd->location(), "function '" + fd->name +
+                          "' is declared more than once; a generic 'def " +
+                          fd->name + "[T](...)' cannot coexist with another '" +
+                          fd->name + "' definition in the same module");
+                    break;
+                }
+            }
             impl_->genericFunctions[fd->name] = fd;
             if (fd->name == "decode" && module.moduleName == "json")
                 impl_->schemaDecodeFns.insert(fd);

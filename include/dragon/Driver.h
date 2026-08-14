@@ -14,7 +14,8 @@ struct DriverOptions {
         Build,    // compile to executable
         Check,    // type check only
         Emit,     // emit IR/ASM
-        FfiSync   // D052: regenerate process-extern stubs
+        FfiSync,  // D052: regenerate process-extern stubs
+        Migrate   // emit a typed .dr draft from a .py file
     };
 
     Action action = Action::Build;
@@ -56,6 +57,7 @@ private:
     int runFile(const std::string& filename);
     int buildFile(const std::string& filename);
     int checkFile(const std::string& filename);
+    int migrateFile(const std::string& filename);
 
     std::string readFile(const std::string& filename);
     bool isDragonFile(const std::string& filename);

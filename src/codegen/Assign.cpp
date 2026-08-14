@@ -50,6 +50,11 @@ void CodeGen::visit(AssignStmt& node) {
         }
     }
 
+    // One-shot RHS signals: only THIS assignment's value expression may set
+    // them; a stale flag from an earlier statement stamps the wrong VarKind
+    // (Type/Closure) and scope cleanup then skips the decref.
+    impl_->lastValueIsType = false;
+    impl_->lastClosureCallableType = nullptr;
     node.value->accept(*this);
     llvm::Value* val = impl_->lastValue;
 
@@ -129,6 +134,11 @@ void CodeGen::visit(AssignStmt& node) {
                 if (!cls.empty() && isDictFieldOf(cls, objAttr->attribute))
                     isDict = true;
             }
+            // Chained stores (`m[0]["k"] = v`): the receiver is no bare name or
+            // field, so only the typechecker's type identifies it.
+            if (!isDict && sub->object->type &&
+                sub->object->type->kind() == Type::Kind::Dict)
+                isDict = true;
             if (isDict) {
                 // D030: int-keyed dicts route through dragon_dict_int_*; resolve
                 // the key kind before evaluating so the whole write path branches once.
@@ -272,6 +282,9 @@ void CodeGen::visit(AssignStmt& node) {
                 if (!cls.empty() && isListFieldOf(cls, objAttr->attribute))
                     isList = true;
             }
+            if (!isList && sub->object->type &&
+                sub->object->type->kind() == Type::Kind::List)
+                isList = true;
             if (isList) {
                 sub->object->accept(*this);
                 llvm::Value* list = impl_->lastValue;
@@ -556,11 +569,31 @@ void CodeGen::visit(AssignStmt& node) {
                             llvm::Value* obj = impl_->lastValue;
                             if (!obj->getType()->isPointerTy())
                                 obj = impl_->builder->CreateIntToPtr(obj, impl_->i8PtrType);
+                            // The setter borrows its param and the receiver, so
+                            // owned temps drain here; unwind-guarded for a
+                            // raising setter body. Sole-target only: a shared
+                            // multi-target RHS is still live for later targets.
+                            std::vector<std::pair<llvm::Value*, Impl::VarKind>>
+                                setterTemps;
+                            Impl::VarKind rdk = impl_->ownedTempDrainKind(
+                                attrTarget->object.get(), obj);
+                            if (rdk != Impl::VarKind::Other)
+                                setterTemps.emplace_back(obj, rdk);
+                            if (node.targets.size() == 1) {
+                                Impl::VarKind vdk = impl_->ownedTempDrainKind(
+                                    node.value.get(), val);
+                                if (vdk != Impl::VarKind::Other)
+                                    setterTemps.emplace_back(val, vdk);
+                            }
+                            auto setterBases =
+                                impl_->pushArgTempCleanups(setterTemps);
                             auto* fty = setterFn->getFunctionType();
                             llvm::Value* coerced = val;
                             if (fty->getNumParams() >= 2)
                                 coerced = impl_->coerceArg(coerced, fty->getParamType(1));
                             impl_->builder->CreateCall(setterFn, {obj, coerced});
+                            impl_->popArgTempCleanups(setterBases);
+                            impl_->drainBorrowTemps(setterTemps);
                             continue;
                         }
                     }

@@ -98,6 +98,8 @@ set(DRAGON_SOURCES
     src/DiagnosticFormatter.cpp
     src/TypeHintEnforcer.cpp
     src/ModuleResolver.cpp
+    src/PythonMigrator.cpp
+    src/TypeInference.cpp
     src/Driver.cpp
     src/FfiSync.cpp
     src/Platform.cpp

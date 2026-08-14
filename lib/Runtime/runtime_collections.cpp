@@ -1054,7 +1054,10 @@ DragonBytes* dragon_bytes_new(const uint8_t* data, int64_t len) {
     dragon_obj_init(&b->header, DRAGON_TAG_BYTES);
     b->len = len;
     b->data = buf;
+    // NULL data = zero-filled constructor (`bytes(n)`); leaving the buffer
+    // uninitialized would hand the program stale heap contents.
     if (data && len > 0) memcpy(b->data, data, len);
+    else if (len > 0) memset(b->data, 0, (size_t)len);
     return b;
 }
 

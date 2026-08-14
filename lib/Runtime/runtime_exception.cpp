@@ -263,6 +263,21 @@ int32_t dragon_cleanup_depth(void) {
     return dragon_cleanup_active_stack()->sp;
 }
 
+void dragon_exc_thread_state_release(void) {
+    free(__dragon_cleanup.vals);
+    free(__dragon_cleanup.kinds);
+    free(__dragon_cleanup.tags);
+    __dragon_cleanup.vals = NULL;
+    __dragon_cleanup.kinds = NULL;
+    __dragon_cleanup.tags = NULL;
+    __dragon_cleanup.cap = 0;
+    __dragon_cleanup.sp = 0;
+    dragon_decref_str_dispatch(__dragon_exc_msg);
+    __dragon_exc_msg = NULL;
+    if (__dragon_exc_obj) dragon_decref_dispatch(__dragon_exc_obj);
+    __dragon_exc_obj = NULL;
+}
+
 /// Rewind to `depth` WITHOUT freeing (emitScopeCleanupFor already decref'd these on the normal-exit
 /// path); pops the snapshots so a later sibling exception can't re-free them.
 void dragon_cleanup_reset(int32_t depth) {
@@ -270,19 +285,11 @@ void dragon_cleanup_reset(int32_t depth) {
     if (depth >= 0 && depth <= cs->sp) cs->sp = depth;
 }
 
-/// Free every owned heap local registered since the top exc frame was pushed (what a longjmp into
-/// it skipped). Mirrors emitScopeCleanupFor; called at longjmp arrival BEFORE dragon_exc_pop_frame.
-void dragon_exc_cleanup_unwind(void) {
-    int sp_exc = dragon_cleanup_active_exc_sp();
-    if (sp_exc < 0) return;  // malformed arrival - free nothing rather than guess
-    DragonCleanupStack* cs = dragon_cleanup_active_stack();
-    int32_t* saved = dragon_cleanup_active_saved();
-    int32_t target = saved[sp_exc];
+/// Free every owned entry above `target` on `cs` and rewind to it. Shared by longjmp
+/// arrival and by teardown of an abandoned context (generator / vthread), whose
+/// registered locals were never scope-drained.
+void dragon_cleanup_stack_drain(DragonCleanupStack* cs, int32_t target) {
     if (target < 0) target = 0;
-
-    // exc_obj now OWNS its +1, so an aliasing local is freed here safely. The old `keep_obj`
-    // skip (built for the prior borrowed-slot contract) would leak one ref per raise in a retry loop.
-
     while (cs->sp > target) {
         int32_t i = --cs->sp;
         void* p = (void*)(uintptr_t)cs->vals[i];
@@ -310,10 +317,22 @@ void dragon_exc_cleanup_unwind(void) {
                 // else int/float/bool/none - non-heap, nothing to free
                 break;
             }
+            case DCLEAN_FREE:     free(p); break;
             default: break;
         }
     }
     cs->sp = target;
+}
+
+/// Free every owned heap local registered since the top exc frame was pushed (what a longjmp into
+/// it skipped). Mirrors emitScopeCleanupFor; called at longjmp arrival BEFORE dragon_exc_pop_frame.
+void dragon_exc_cleanup_unwind(void) {
+    int sp_exc = dragon_cleanup_active_exc_sp();
+    if (sp_exc < 0) return;  // malformed arrival - free nothing rather than guess
+    // exc_obj now OWNS its +1, so an aliasing local is freed here safely. The old `keep_obj`
+    // skip (built for the prior borrowed-slot contract) would leak one ref per raise in a retry loop.
+    dragon_cleanup_stack_drain(dragon_cleanup_active_stack(),
+                               dragon_cleanup_active_saved()[sp_exc]);
 }
 
 // Each fire trampoline pushes a setjmp frame; an uncaught raise inside longjmps here, which logs

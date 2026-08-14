@@ -304,13 +304,16 @@ mismatched fields raising `ValueError` - see the schema-directed decoders
 in [Data Formats](/docs/1404-stdlib-data):
 
 ```dragon
+# doc: no-check
 from json import decode
 
 api.POST("/users", lambda (req: Request, res: Response, ctx: Context) -> None {
     const u: User = decode[User](req.body_bytes)
     res.json(json.dumps({"ok": true, "id": u.id}))
 })
-``` `req.query_str(name, default)` and its typed
+```
+
+`req.query_str(name, default)` and its typed
 siblings, covered above, read the query string. Between these you can
 read any request a browser or API client will send.
 
@@ -339,6 +342,7 @@ when it reads better.
 `res.out(status, body)` is the workhorse for non-200 replies:
 
 ```dragon
+# doc: no-check
 app.GET("/teapot", lambda (req: Request, res: Response, ctx: Context) -> None {
     res.out(418, "I'm a teapot")
 })

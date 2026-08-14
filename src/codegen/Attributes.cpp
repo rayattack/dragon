@@ -682,9 +682,13 @@ void CodeGen::visit(SubscriptExpr& node) {
     if (!subClassName.empty() && impl_->hasDunder(subClassName, "__getitem__")) {
         node.object->accept(*this);
         llvm::Value* obj = impl_->lastValue;
+        std::vector<llvm::Value*> dunderBases;
+        impl_->pushTempCleanupByKind(
+            obj, impl_->ownedTempDrainKind(node.object.get(), obj), dunderBases);
         node.index->accept(*this);
         llvm::Value* idx = impl_->lastValue;
         impl_->lastValue = impl_->callDunder(subClassName, "__getitem__", obj, {idx});
+        impl_->popArgTempCleanups(dunderBases);
         return;
     }
 
@@ -692,6 +696,10 @@ void CodeGen::visit(SubscriptExpr& node) {
     if (auto* slice = dynamic_cast<SliceExpr*>(node.index.get())) {
         node.object->accept(*this);
         llvm::Value* obj = impl_->lastValue;
+        Impl::VarKind sliceRecvDrain =
+            impl_->ownedTempDrainKind(node.object.get(), obj);
+        std::vector<llvm::Value*> sliceBases;
+        impl_->pushTempCleanupByKind(obj, sliceRecvDrain, sliceBases);
 
         // INT64_MIN sentinel for omitted bounds
         llvm::Value* sentinel = llvm::ConstantInt::get(impl_->i64Type, INT64_MIN);
@@ -732,10 +740,9 @@ void CodeGen::visit(SubscriptExpr& node) {
         }
         // A slice COPIES (fresh +1, independent of the receiver): an OWNED receiver
         // temp (`("Z"+p)[1:3]`) is fully consumed here and must be released or it leaks once per evaluation (audit 1.7).
-        {
-            Impl::VarKind rd = impl_->ownedTempDrainKind(node.object.get(), obj);
-            if (rd != Impl::VarKind::Other) impl_->emitDecrefByKind(obj, rd);
-        }
+        impl_->popArgTempCleanups(sliceBases);
+        if (sliceRecvDrain != Impl::VarKind::Other)
+            impl_->emitDecrefByKind(obj, sliceRecvDrain);
         return;
     }
 
@@ -788,6 +795,10 @@ void CodeGen::visit(SubscriptExpr& node) {
 
         node.object->accept(*this);
         llvm::Value* dict = impl_->lastValue;
+        Impl::VarKind recvDrain =
+            impl_->ownedTempDrainKind(node.object.get(), dict);
+        std::vector<llvm::Value*> subBases;
+        impl_->pushTempCleanupByKind(dict, recvDrain, subBases);
         node.index->accept(*this);
         llvm::Value* key = impl_->lastValue;
 
@@ -796,14 +807,13 @@ void CodeGen::visit(SubscriptExpr& node) {
         llvm::Value* keyOrig = key;
         Impl::VarKind keyDrain =
             impl_->ownedTempDrainKind(node.index.get(), key);
+        impl_->pushTempCleanupByKind(keyOrig, keyDrain, subBases);
         auto releaseOwnedKeyTemp = [&]() {
             if (keyDrain != Impl::VarKind::Other)
                 impl_->emitDecrefByKind(keyOrig, keyDrain);
         };
         // An OWNED dict RECEIVER temp (`loads_ints()["k"]`) is fully consumed by a
         // PROVABLY-SCALAR value read, so release the whole temp dict or it leaks once per call (audit 1.7).
-        Impl::VarKind recvDrain =
-            impl_->ownedTempDrainKind(node.object.get(), dict);
         auto releaseOwnedRecvTempScalar = [&](int64_t tag) {
             // tag 0/2/3 = int/float/bool: value copied, receiver done.
             if ((tag == 0 || tag == 2 || tag == 3) &&
@@ -956,6 +966,7 @@ void CodeGen::visit(SubscriptExpr& node) {
                 impl_->runtimeFuncs["dragon_dict_get_box"], {dict, key},
                 "dictget.box");
             impl_->pendingDictCheckTag = -1;
+            impl_->popArgTempCleanups(subBases);
             releaseOwnedKeyTemp();
             return;
         }
@@ -998,6 +1009,7 @@ void CodeGen::visit(SubscriptExpr& node) {
                 impl_->lastValue = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_dict_int_get"], {dict, key}, "dictget.i");
             }
+            impl_->popArgTempCleanups(subBases);
             releaseOwnedKeyTemp();
             releaseOwnedRecvTempScalar(recvReleaseTag);
             return;
@@ -1034,6 +1046,7 @@ void CodeGen::visit(SubscriptExpr& node) {
             impl_->lastValue = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_dict_get"], {dict, key}, "dictget");
         }
+        impl_->popArgTempCleanups(subBases);
         releaseOwnedKeyTemp();
         releaseOwnedRecvTempScalar(recvReleaseTag);
         return;
@@ -1055,6 +1068,10 @@ void CodeGen::visit(SubscriptExpr& node) {
     if (isTuple) {
         node.object->accept(*this);
         llvm::Value* tuplePtr = impl_->lastValue;
+        std::vector<llvm::Value*> tupBases;
+        impl_->pushTempCleanupByKind(
+            tuplePtr, impl_->ownedTempDrainKind(node.object.get(), tuplePtr),
+            tupBases);
         node.index->accept(*this);
         llvm::Value* tupleIdx = impl_->lastValue;
         if (tupleIdx->getType() == impl_->i1Type) {
@@ -1067,10 +1084,12 @@ void CodeGen::visit(SubscriptExpr& node) {
             impl_->lastValue = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_tuple_box_get"],
                 {tuplePtr, tupleIdx}, "tupleget.box");
+            impl_->popArgTempCleanups(tupBases);
             return;
         }
         llvm::Value* raw = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_tuple_get"], {tuplePtr, tupleIdx}, "tupleget");
+        impl_->popArgTempCleanups(tupBases);
         // D030: convert i64 storage back to its native LLVM type, else `const matched:
         // dict = result[1]` stores i64 into a ptr alloca and storeWithRCOverwrite's incref silently no-ops -> shared ref with the tuple, double-free on cleanup.
         if (node.type) {
@@ -1105,6 +1124,11 @@ void CodeGen::visit(SubscriptExpr& node) {
 
     node.object->accept(*this);
     llvm::Value* obj = impl_->lastValue;
+    Impl::VarKind subRecvDrain = Impl::VarKind::Other;
+    if (obj->getType() != impl_->boxType)
+        subRecvDrain = impl_->ownedTempDrainKind(node.object.get(), obj);
+    std::vector<llvm::Value*> subBases;
+    impl_->pushTempCleanupByKind(obj, subRecvDrain, subBases);
     node.index->accept(*this);
     llvm::Value* idx = impl_->lastValue;
 
@@ -1201,6 +1225,7 @@ void CodeGen::visit(SubscriptExpr& node) {
             impl_->lastValue = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_list_box_get"], {obj, idx},
                 "listget.box");
+            impl_->popArgTempCleanups(subBases);
             return;
         }
 
@@ -1243,7 +1268,7 @@ void CodeGen::visit(SubscriptExpr& node) {
         auto* oobBB = llvm::BasicBlock::Create(*impl_->context, "list.oob", func);
         impl_->builder->CreateCondBr(inBounds, okBB, oobBB);
 
-        // OOB: dragon_list_get prints error and exits (never returns)
+        // OOB: dragon_list_get raises IndexError (longjmp, never returns here)
         impl_->builder->SetInsertPoint(oobBB);
         impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_list_get"], {obj, idx});
         impl_->builder->CreateUnreachable();
@@ -1251,6 +1276,7 @@ void CodeGen::visit(SubscriptExpr& node) {
         // In-bounds: direct element load with TBAA. Stride matches the runtime's
         // elem_size - i8 for list[bool] (1MB not 8MB), i64 for everything else.
         impl_->builder->SetInsertPoint(okBB);
+        impl_->popArgTempCleanups(subBases);
         // Resolve element kind (used for stride + unbox).
         Type::Kind elemKind = Type::Kind::Int;
         if (node.object->type) {
@@ -1340,23 +1366,24 @@ void CodeGen::visit(SubscriptExpr& node) {
                 }
             }
         }
-        if (!isPtrElem && elemProvablyScalar) {
-            Impl::VarKind rd = impl_->ownedTempDrainKind(node.object.get(), obj);
-            if (rd != Impl::VarKind::Other) impl_->emitDecrefByKind(obj, rd);
-        }
+        if (!isPtrElem && elemProvablyScalar &&
+            subRecvDrain != Impl::VarKind::Other)
+            impl_->emitDecrefByKind(obj, subRecvDrain);
     } else if (isBytes) {
         impl_->lastValue = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_bytes_get"], {obj, idx}, "bytesget");
+        impl_->popArgTempCleanups(subBases);
         // bytes[i] copies out an int - an owned bytes receiver temp is done.
-        Impl::VarKind rd = impl_->ownedTempDrainKind(node.object.get(), obj);
-        if (rd != Impl::VarKind::Other) impl_->emitDecrefByKind(obj, rd);
+        if (subRecvDrain != Impl::VarKind::Other)
+            impl_->emitDecrefByKind(obj, subRecvDrain);
     } else {
         impl_->lastValue = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_str_index"], {obj, idx}, "strget");
+        impl_->popArgTempCleanups(subBases);
         // s[i] mallocs a FRESH 1-char string (see isBorrowedHeapExpr) - the
         // owned str receiver temp (`("Z" + p)[0]`) is fully consumed here.
-        Impl::VarKind rd = impl_->ownedTempDrainKind(node.object.get(), obj);
-        if (rd != Impl::VarKind::Other) impl_->emitDecrefByKind(obj, rd);
+        if (subRecvDrain != Impl::VarKind::Other)
+            impl_->emitDecrefByKind(obj, subRecvDrain);
     }
 }
 void CodeGen::visit(SliceExpr&) {

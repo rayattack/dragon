@@ -4,6 +4,8 @@
 namespace dragon {
 
 void CodeGen::visit(AugAssignStmt& node) {
+    impl_->lastClosureCallableType = nullptr;
+    impl_->lastValueIsType = false;
     if (auto* name = dynamic_cast<NameExpr*>(node.target.get())) {
         // x OP= rhs stays non-neg only if x was non-neg, the op preserves
         // non-negativity, and the rhs is non-neg.
@@ -161,7 +163,9 @@ void CodeGen::visit(AugAssignStmt& node) {
                     *this, node.target.get(), current, node.value.get(), rhs,
                     opcode);
                 llvm::Value* stored = impl_->unboxBoxResultChecked(
-                    resultBox, loadType, varKind);
+                    resultBox, loadType, varKind, Impl::kNoListElemCheck,
+                    node.target->type ? node.target->type->kind()
+                                      : Type::Kind::Unknown);
                 storeBack(stored, varKind, /*newIsBorrowed=*/false);
                 return;
             }
@@ -391,6 +395,11 @@ void CodeGen::visit(AugAssignStmt& node) {
                 if (it != impl_->varListElemKinds.end()) elemKind = it->second;
             }
         }
+        if (!isList && sub->object->type &&
+            sub->object->type->kind() == Type::Kind::List) {
+            isList = true;
+            elemKind = impl_->getIterableElementKind(sub->object.get());
+        }
         if (isList && (elemKind == Type::Kind::Int || elemKind == Type::Kind::Bool)) {
             sub->object->accept(*this);
             llvm::Value* list = impl_->lastValue;
@@ -602,9 +611,10 @@ void CodeGen::visit(AugAssignStmt& node) {
 }
 
 void CodeGen::visit(AnnAssignStmt& node) {
-    // Reset the one-shot closure-type flag: a lambda consumed earlier as a
-    // call arg must not leak its closure type into this assignment.
+    // Reset the one-shot RHS signals: a lambda or bare exception name consumed
+    // earlier as a call arg must not leak its kind into this assignment.
     impl_->lastClosureCallableType = nullptr;
+    impl_->lastValueIsType = false;
 
     llvm::Type* varType = impl_->typeExprToLLVM(node.annotation.get());
     auto varKind = impl_->typeExprToKind(node.annotation.get());
@@ -904,7 +914,10 @@ void CodeGen::visit(AnnAssignStmt& node) {
                     if (val->getType() == impl_->boxType && gv->getValueType() != impl_->boxType) {
                         if (impl_->options.gcMode == GCMode::RC && !impl_->isOwnedBoxResult(val) && gv->getValueType()->isPointerTy())
                             rhsBorrowed = true;
-                        llvm::Value* unboxed = impl_->unboxBoxResultChecked(val, gv->getValueType(), varKind, impl_->listViewWantElemTag(node.annotation.get()));
+                        llvm::Value* unboxed = impl_->unboxBoxResultChecked(
+                            val, gv->getValueType(), varKind,
+                            impl_->listViewWantElemTag(node.annotation.get()),
+                            impl_->typeExprToTypeKind(node.annotation.get()));
                         if (unboxed->getType() == impl_->boxType)
                             unboxed = impl_->boxPayloadAsKind(
                                 val, Impl::typeKindToVarKind(
@@ -1084,6 +1097,12 @@ void CodeGen::visit(AnnAssignStmt& node) {
                         expectedTag = 2; tagName = "float";
                     } else if (allocType == impl_->i1Type) {
                         expectedTag = 3; tagName = "bool";
+                    } else if (allocType == impl_->i8PtrType &&
+                               impl_->typeExprToTypeKind(node.annotation.get())
+                                   == Type::Kind::Bytes) {
+                        // Bytes collapses onto VarKind::List (D030 §5); only the
+                        // annotation identifies it, else the check misreports.
+                        expectedTag = TAG_BYTES; tagName = "bytes";
                     } else if (allocType == impl_->i8PtrType) {
                         // Pointer LHS: expected tag from the slot's VarKind.
                         if (varKind == Impl::VarKind::Str ||

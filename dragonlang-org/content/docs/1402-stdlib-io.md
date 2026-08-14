@@ -343,7 +343,7 @@ print(basename("/usr/local/bin/dragon")) # dragon
 print(dirname("/usr/local/bin/dragon"))  # /usr/local/bin
 print(normpath("/a/b/../c/./d"))          # /a/c/d
 
-parts: list[str] = splitext("report.txt")
+parts: tuple[str, str] = splitext("report.txt")
 print(f"stem={parts[0]} ext={parts[1]}")  # stem=report ext=.txt
 ```
 
@@ -352,7 +352,7 @@ print(f"stem={parts[0]} ext={parts[1]}")  # stem=report ext=.txt
 ```dragon
 from os.path import splitext
 
-parts: list[str] = splitext("archive.tar.gz")
+parts: tuple[str, str] = splitext("archive.tar.gz")
 print(f"{parts[0]} | {parts[1]}")   # archive.tar | .gz
 ```
 
@@ -388,7 +388,7 @@ print(isdir("/etc/hosts"))    # False
 ```dragon
 from os.path import split, relpath, commonpath
 
-sp: list[str] = split("/usr/local/bin/dragon")
+sp: tuple[str, str] = split("/usr/local/bin/dragon")
 print(f"{sp[0]} | {sp[1]}")             # /usr/local/bin | dragon
 print(relpath("/a/b/c", "/a/b"))        # c
 print(commonpath(["/usr/lib", "/usr/local"]))  # /usr

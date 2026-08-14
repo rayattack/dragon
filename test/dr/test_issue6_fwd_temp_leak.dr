@@ -1,0 +1,48 @@
+"""Forward call with an imported-type signature must release its result temp.
+
+Regression for issue-6: `probe` forward-calls `make_box` (defined BELOW it)
+whose parameter type is imported from another module. The signature pre-pass
+once silently skipped import-typed signatures, the forward call typed Unknown,
+and the drain gate skipped the release - one leaked LeakBox per call, forever.
+Both conditions (callee below caller, imported param type) are load-bearing;
+removing either used to hide the leak. Must stay clean under
+ASAN_OPTIONS=detect_leaks=1.
+"""
+
+from unittest import TestCase, main
+from fwdsig_store import FwdStore
+
+class LeakBox {
+    tag: int
+    label: str
+
+    def(t: int) {
+        self.tag = t
+        self.label = "b"
+    }
+}
+
+def probe(s: FwdStore) -> bool {
+    return make_box(s).tag != 0
+}
+
+def make_box(s: FwdStore) -> LeakBox {
+    return LeakBox(s.n)
+}
+
+class FwdImportTempLeak(TestCase) {
+    def test_fwd_call_result_temp_released() {
+        s: FwdStore = FwdStore(7)
+        i: int = 0
+        hits: int = 0
+        while i < 1000 {
+            if probe(s) {
+                hits = hits + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(hits, 1000)
+    }
+}
+
+main([FwdImportTempLeak()])

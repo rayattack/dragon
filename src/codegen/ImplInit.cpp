@@ -1015,9 +1015,9 @@ void CodeGen::Impl::declareRuntimeFunctions() {
     // void dragon_generator_set_raised(ptr gen) - trampoline barrier flag
     getOrDeclareRuntime("dragon_generator_set_raised",
         llvm::FunctionType::get(voidType, {i8PtrType}, false));
-    // void dragon_generator_yield(ptr gen, i64 value)
+    // void dragon_generator_yield(ptr gen, i64 value, i64 tag)
     getOrDeclareRuntime("dragon_generator_yield",
-        llvm::FunctionType::get(voidType, {i8PtrType, i64Type}, false));
+        llvm::FunctionType::get(voidType, {i8PtrType, i64Type, i64Type}, false));
     // i64 dragon_generator_next(ptr gen)
     getOrDeclareRuntime("dragon_generator_next",
         llvm::FunctionType::get(i64Type, {i8PtrType}, false));

@@ -599,13 +599,17 @@ llvm::Value* CodeGen::Impl::boxPayloadAsKind(llvm::Value* box, VarKind k) {
     }
 
 llvm::Value* CodeGen::Impl::unboxBoxResultChecked(llvm::Value* box, llvm::Type* targetType,
-                                   VarKind vk, int64_t wantListElemTag) {
+                                   VarKind vk, int64_t wantListElemTag,
+                                   Type::Kind staticKind) {
         if (targetType == boxType) return box;
         int64_t expectedTag = -1;
         const char* tagName = "value";
         if (targetType == i64Type)        { expectedTag = 0; tagName = "int"; }
         else if (targetType == f64Type)   { expectedTag = 2; tagName = "float"; }
         else if (targetType == i1Type)    { expectedTag = 3; tagName = "bool"; }
+        else if (targetType == i8PtrType && staticKind == Type::Kind::Bytes) {
+            expectedTag = TAG_BYTES; tagName = "bytes";
+        }
         else if (targetType == i8PtrType) {
             switch (vk) {
                 case VarKind::Str: case VarKind::StrLiteral:
@@ -683,7 +687,10 @@ std::pair<llvm::Value*, llvm::Value*> CodeGen::Impl::boxArgTagPayload(
         if (val->getType() == boxType) {
             tagV = boxTag(val, "tag");
             payloadV = boxPayloadI64(val, "payload");
-            if (takesOwnership && options.gcMode == GCMode::RC)
+            // An owned box temporary already carries the +1 the adopting
+            // consumer takes; increfing it again strands one ref per call.
+            if (takesOwnership && options.gcMode == GCMode::RC &&
+                !isOwnedBoxResult(val))
                 emitUnionIncref(payloadV, tagV);
         } else {
             tagV = emitTagForExprNoCG(argExpr);

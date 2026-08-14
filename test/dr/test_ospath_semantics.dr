@@ -23,18 +23,18 @@ class JoinTests(TestCase) {
 
 class SplitPairTests(TestCase) {
     def test_split_pair() {
-        const parts: list[str] = split("/a/b/c.txt")
+        const parts: tuple[str, str] = split("/a/b/c.txt")
         self.assertEqual(len(parts), 2)
         self.assertEqual(parts[0], "/a/b")
         self.assertEqual(parts[1], "c.txt")
     }
 
     def test_splitext_pair() {
-        const parts: list[str] = splitext("/a/b.tar.gz")
+        const parts: tuple[str, str] = splitext("/a/b.tar.gz")
         self.assertEqual(len(parts), 2)
         self.assertEqual(parts[0], "/a/b.tar")
         self.assertEqual(parts[1], ".gz")
-        const bare: list[str] = splitext("noext")
+        const bare: tuple[str, str] = splitext("noext")
         self.assertEqual(bare[0], "noext")
         self.assertEqual(bare[1], "")
     }
