@@ -9,11 +9,8 @@ void CodeGen::visit(ForStmt& node) {
     auto* tupleTarget = dynamic_cast<TupleExpr*>(node.target.get());
     if (!targetName && !tupleTarget) return;
 
-    // Class-based enum: `for c in Color` iterates the synthesized `__members__`
-    // singleton list. Rewrite the iterable to `Color.__members__` and stamp it
-    // with type list[Instance(Color)] so the list-iteration path below binds the
-    // loop variable as a Color instance (sets varClassNames). __members__ was
-    // created by synthesizeEnumMethods.
+    // `for c in Color` (class-based enum): rewrite the iterable to
+    // `Color.__members__` (synthesizeEnumMethods), typed list[Instance(Color)].
     if (auto* enumName = dynamic_cast<NameExpr*>(node.iterable.get())) {
         if (impl_->enumKindBySym.count(impl_->classSym(enumName->name))) {
             auto attr = std::make_unique<AttributeExpr>();
@@ -56,7 +53,6 @@ void CodeGen::visit(ForStmt& node) {
             endVal = llvm::ConstantInt::get(impl_->i64Type, 0);
         }
 
-        // Create loop variable
         auto* loopVar = impl_->createEntryAlloca(func, targetName->name, impl_->i64Type);
         impl_->setVar(targetName->name, loopVar);
         impl_->builder->CreateStore(startVal, loopVar);
@@ -65,10 +61,8 @@ void CodeGen::visit(ForStmt& node) {
         auto* bodyBB = llvm::BasicBlock::Create(*impl_->context, "forbody", func);
         auto* incBB = llvm::BasicBlock::Create(*impl_->context, "forinc", func);
         auto* endBB = llvm::BasicBlock::Create(*impl_->context, "forend", func);
-        // `for ... else`: else runs on natural exhaustion (range condition
-        // false), skipped on `break`. The exhausted edge targets elseBB;
-        // `break` keeps targeting endBB so it bypasses else. Absent else ->
-        // elseBB == endBB (unchanged flow).
+        // `for ... else`: else runs on natural exhaustion, skipped by `break`
+        // (which targets endBB directly). No else -> elseBB == endBB.
         llvm::BasicBlock* elseBB = node.elseBody.empty()
             ? endBB
             : llvm::BasicBlock::Create(*impl_->context, "forelse", func);
@@ -119,10 +113,8 @@ void CodeGen::visit(ForStmt& node) {
         // Yielded value's VarKind - defaults to Int (matches the original
         // behavior and works for the common "yield i" case).
         Impl::VarKind yieldKind = Impl::VarKind::Int;
-        // Check if iterable is a call to a known generator function.
-        // Use resolveCalleeSymbol so the same-module / aliased / mangled
-        // chain finds the correct key - generatorFunctions is keyed by the
-        // LLVM symbol (post-mangling) since per-module mangling landed.
+        // Detect a call to a known generator function via resolveCalleeSymbol
+        // (generatorFunctions is keyed by the post-mangling LLVM symbol).
         if (auto* callExpr = dynamic_cast<CallExpr*>(node.iterable.get())) {
             if (auto* callee = dynamic_cast<NameExpr*>(callExpr->callee.get())) {
                 std::string sym = impl_->resolveCalleeSymbol(callee->name);
@@ -132,10 +124,8 @@ void CodeGen::visit(ForStmt& node) {
                     if (it != impl_->generatorYieldKinds.end()) yieldKind = it->second;
                 }
             } else if (auto* attr = dynamic_cast<AttributeExpr*>(callExpr->callee.get())) {
-                // Method-generator call: `obj.gen_method(...)` / `self.gen_method(...)`.
-                // Resolve the receiver's class + the method's mangled symbol and
-                // check the generator registry (the method wrapper returns the
-                // generator object, so the body iterates it like any generator).
+                // Method-generator call (`obj.gen_method()`): resolve the receiver's
+                // class + mangled symbol and check the generator registry.
                 std::string cn = impl_->resolveExprClassName(attr->object.get());
                 // Static call form `ClassName.gen_method(...)`: the receiver is a
                 // class name, not an instance, so resolve the class directly.
@@ -177,26 +167,20 @@ void CodeGen::visit(ForStmt& node) {
             if (!genObj->getType()->isPointerTy())
                 genObj = impl_->builder->CreateIntToPtr(genObj, impl_->i8PtrType);
 
-            // Create loop variable. dragon_generator_next returns i64; for
-            // heap-typed yields we IntToPtr-cast on each read so the loop
-            // body sees the correct ptr type.
+            // dragon_generator_next returns i64; heap-typed yields are
+            // IntToPtr-cast on each read so the loop body sees a ptr.
             bool yieldIsHeap = Impl::isHeapKind(yieldKind);
             auto* loopVar = impl_->createEntryAlloca(func, targetName->name,
                 yieldIsHeap ? impl_->i8PtrType : impl_->i64Type);
             impl_->setVar(targetName->name, loopVar, yieldKind);
-            // The yielded heap value is borrowed from the generator's
-            // perspective today (no incref on yield, no decref on next).
-            // Mark the loop var as borrowed so per-iter cleanup doesn't
-            // free it.
+            // The yielded heap value is borrowed (no incref on yield, no
+            // decref on next); mark it so per-iter cleanup doesn't free it.
             if (yieldIsHeap) impl_->scopes.back().borrowed.insert(targetName->name);
 
             auto* genAlloca = impl_->createEntryAlloca(func, "__gen_iter", impl_->i8PtrType);
             impl_->builder->CreateStore(genObj, genAlloca);
-            // Register the generator temp for unwind cleanup: it is owned by the
-            // for-loop (decref'd at endBB), but a raise that unwinds past this
-            // frame (e.g. from the loop body) skips endBB and would leak the
-            // generator + its coroutine stack. The cleanup stack frees it on that
-            // path; emitCleanupPopTemp rewinds past it on the normal-exit decref.
+            // Register the generator temp for unwind cleanup: normally decref'd
+            // at endBB, but a raise that skips endBB would leak it otherwise.
             llvm::Value* genCleanupBase =
                 impl_->emitCleanupPushTemp(genObj, Impl::DCLEAN_OBJ);
 
@@ -204,8 +188,7 @@ void CodeGen::visit(ForStmt& node) {
             auto* bodyBB = llvm::BasicBlock::Create(*impl_->context, "gen.body", func);
             auto* endBB = llvm::BasicBlock::Create(*impl_->context, "gen.end", func);
             // `for ... else`: else runs on natural exhaustion (StopIteration),
-            // skipped on `break` (which targets endBB). Absent else ->
-            // elseBB == endBB (unchanged flow).
+            // skipped by `break`. No else -> elseBB == endBB.
             llvm::BasicBlock* elseBB = node.elseBody.empty()
                 ? endBB
                 : llvm::BasicBlock::Create(*impl_->context, "gen.else", func);
@@ -236,9 +219,8 @@ void CodeGen::visit(ForStmt& node) {
             auto* nextVal = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_generator_next"], {genPtr}, "gen.val");
             impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_exc_pop_frame"], {});
-            // For heap-typed yields, dragon_generator_next returns the value as
-            // i64 (the runtime API is type-erased); cast back to ptr so the
-            // loop variable's allocated type matches.
+            // dragon_generator_next is type-erased (returns i64); cast heap-typed
+            // yields back to ptr to match the loop variable's allocated type.
             if (yieldIsHeap) {
                 llvm::Value* asPtr = impl_->builder->CreateIntToPtr(
                     nextVal, impl_->i8PtrType, "gen.val.ptr");
@@ -250,9 +232,8 @@ void CodeGen::visit(ForStmt& node) {
 
             // Exception path: check if StopIteration (code 11)
             impl_->builder->SetInsertPoint(excBB);
-            // Free consumer-side owned heap locals the longjmp skipped (no-op on
-            // the StopIteration exhaustion path - each iteration already reset the
-            // cleanup stack). Before pop_frame so it reads this frame's depth.
+            // Free owned heap locals the longjmp skipped (no-op on the
+            // StopIteration path); runs before pop_frame to read this frame's depth.
             impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_exc_cleanup_unwind"], {});
             impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_exc_pop_frame"], {});
             auto* excType = impl_->builder->CreateCall(
@@ -265,57 +246,34 @@ void CodeGen::visit(ForStmt& node) {
             // StopIteration = natural exhaustion -> run the else (or endBB).
             impl_->builder->CreateCondBr(isStopIter, elseBB, reraiseBB);
 
-            // Re-raise non-StopIteration exceptions. Do NOT explicitly decref
-            // outer-scope locals here: re-raising longjmps to the nearest
-            // handler, and the cleanup-stack unwind frees exactly the locals
-            // registered between the raise point and that handler - whether it
-            // is in THIS function (a `try` around the for-loop) or an outer one.
-            // An explicit emitAllScopeCleanup() here wrongly assumed the
-            // exception always leaves the function; when it is caught locally,
-            // it decref'd a still-live local (e.g. the generator's receiver
-            // `self`, also held by the coroutine), which scope-exit then
-            // decref'd again - a use-after-free. This mirrors the plain
-            // RaiseStmt path, which likewise relies on the cleanup stack.
+            // Re-raise: no emitAllScopeCleanup() here - it double-decref'd a still-live
+            // local (e.g. generator's `self`, held by the coroutine) -> use-after-free.
             impl_->builder->SetInsertPoint(reraiseBB);
             {
                 auto* reType = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_exc_get_type"], {}, "reraise.type");
-                // The exc slot OWNS its message (dragon_exc_msg_set) - it is
-                // never an alias of a scope local, so re-raising with msg ==
-                // slot hits the self-store no-op, keeping the slot's ownership
-                // intact. (The old dragon_exc_msg_preserve snapshot here would
-                // now leak: the plain raise dups it AGAIN into the slot.)
+                // The exc slot owns its message; re-raising with msg==slot hits a
+                // self-store no-op. (dragon_exc_msg_preserve here would dup it again and leak.)
                 auto* reMsg = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_exc_get_msg"], {}, "reraise.msg");
-                // Preserve the in-flight instance pointer too - see the matching
-                // RaiseStmt reraise path. obj=NULL when only a message was raised.
-                // Retained: the obj-raise consumes a +1; the same-pointer fold
-                // in dragon_exc_obj_set nets it out.
+                // Preserve the in-flight instance too (obj=NULL if only a message was
+                // raised); retained since the obj-raise consumes a +1, netted by the same-pointer fold.
                 auto* reObj = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_exc_retain_obj"],
                     {impl_->builder->CreateCall(
                         impl_->runtimeFuncs["dragon_exc_get_obj"], {},
                         "reraise.obj.raw")},
                     "reraise.obj");
-                // The generator body raised and longjmp'd out of mco_resume,
-                // abandoning the coroutine mid-run (MCO_RUNNING) with minicoro's
-                // running-coroutine pointer left dangling at it. Restore that
-                // bookkeeping and mark the coroutine dead so it can be reclaimed
-                // - must run here at the longjmp arrival, before any further
-                // resume. (The body's heap locals were already freed by the
-                // cleanup-stack unwind at excBB above.)
+                // The raise longjmp'd out of mco_resume mid-run, leaving minicoro's
+                // running-coroutine pointer dangling; abandon it here so it can be reclaimed.
                 {
                     auto* gAb = impl_->builder->CreateLoad(
                         impl_->i8PtrType, genAlloca, "gen.abandon");
                     impl_->builder->CreateCall(
                         impl_->runtimeFuncs["dragon_generator_abandon"], {gAb});
                 }
-                // The generator object is normally decref'd at endBB, but this
-                // re-raise bypasses endBB (it longjmps out), so decref it here -
-                // otherwise the generator + its coroutine stack leak. Mirror
-                // endBB EXACTLY: decref then pop its cleanup-stack entry, so the
-                // outer handler's unwind does not also free the (now stale)
-                // snapshot (double-free).
+                // This re-raise bypasses endBB's decref, so decref the generator here
+                // (else it leaks); mirror endBB exactly (decref then pop cleanup-stack) to avoid a double-free.
                 if (impl_->options.gcMode == GCMode::RC) {
                     auto* g = impl_->builder->CreateLoad(
                         impl_->i8PtrType, genAlloca, "gen.reraise.cleanup");
@@ -338,9 +296,8 @@ void CodeGen::visit(ForStmt& node) {
 
             impl_->loopStack.pop();
 
-            // Else body - only on natural exhaustion (StopIteration edge).
-            // Falls through to endBB, where the generator object is decref'd
-            // on every exit path (break and natural alike).
+            // Else body - only on natural exhaustion; falls through to endBB,
+            // where the generator is decref'd on every exit path.
             if (elseBB != endBB) {
                 impl_->builder->SetInsertPoint(elseBB);
                 impl_->pushScope();
@@ -374,19 +331,12 @@ void CodeGen::visit(ForStmt& node) {
             impl_->hasDunder(iterClassName, "__iter__")) {
             auto* func = impl_->currentFunction;
 
-            // Call __iter__() to get iterator
             node.iterable->accept(*this);
             llvm::Value* iterable = impl_->lastValue;
             auto* iterator = impl_->callDunder(iterClassName, "__iter__", iterable);
 
-            // Determine loop variable type AND kind from __next__'s declared
-            // return type. The LLVM type alone is ambiguous for `ptr` (str /
-            // list / dict / bytes / instance all lower to ptr), so we also
-            // consult methodReturnKinds - populated from the AST returnType
-            // at class declaration time - to pick the right VarKind for the
-            // bound value. Without the VarKind, method dispatch on `x` falls
-            // through default int handling, so e.g. x.strip() on a str-typed
-            // __next__ result returns 0 rather than the trimmed string.
+            // LLVM `ptr` is ambiguous (str/list/dict/bytes/instance all lower to it);
+            // consult methodReturnKinds for the real VarKind, else `x.strip()` on a str-typed __next__ falls to int handling and returns 0.
             llvm::Type* loopVarType = impl_->i8PtrType; // default
             Impl::VarKind loopVarKind = Impl::VarKind::Other;
             std::string loopVarClassName;
@@ -401,9 +351,8 @@ void CodeGen::visit(ForStmt& node) {
                     auto rkIt = impl_->methodReturnKinds.find(methKey);
                     if (rkIt != impl_->methodReturnKinds.end())
                         loopVarKind = Impl::typeKindToVarKind(rkIt->second);
-                    // __next__ returning a class instance: also record the
-                    // concrete class so attribute access on `x` resolves via
-                    // the right struct (mirrors the field-from-method path).
+                    // __next__ returning a class instance: record the concrete class
+                    // too, so attribute access on `x` resolves via the right struct.
                     auto rcIt = impl_->methodReturnClassNames.find(methKey);
                     if (rcIt != impl_->methodReturnClassNames.end())
                         loopVarClassName = rcIt->second;
@@ -416,19 +365,11 @@ void CodeGen::visit(ForStmt& node) {
             impl_->setVar(targetName->name, loopVar, loopVarKind);
             if (!loopVarClassName.empty())
                 impl_->varClassNames[targetName->name] = loopVarClassName;
-            // The __next__ result is a real method CALL, and Dragon method
-            // returns are OWNED (+1): ReturnStmt increfs a borrowed return
-            // (a shared-field `return self.items[i]` included), so the loop
-            // variable owns each element and the per-iteration scope cleanup
-            // is exactly the right release. The previous borrowed-marking
-            // (copied from the GENERATOR yield convention, which is a
-            // different machinery) leaked one element per iteration - every
-            // line of `for line in open(p)` (A/B-proven, both shapes:
-            // fresh-returning and shared-field-returning __next__).
+            // __next__ returns OWNED (+1); a prior borrowed-mark on the loop var (copied
+            // from the generator-yield convention) leaked one element per iter of `for line in open(p)` (A/B-proven).
 
-            // Store iterator and register for GC cleanup on all exit paths.
-            // Unique scope name per loop so a sibling for-loop's setVar can't
-            // clobber this binding and leak its iterator temp (see forIterCounter).
+            // Store the iterator and register it for GC cleanup on all exit paths.
+            // Unique per-loop name so a sibling for-loop's setVar can't clobber it.
             std::string iterObjName = "__iter_obj." + std::to_string(impl_->forIterCounter++);
             auto* iterAlloca = impl_->createEntryAlloca(func, iterObjName, impl_->i8PtrType);
             impl_->builder->CreateStore(iterator, iterAlloca);
@@ -438,8 +379,7 @@ void CodeGen::visit(ForStmt& node) {
             auto* bodyBB = llvm::BasicBlock::Create(*impl_->context, "iter.body", func);
             auto* endBB = llvm::BasicBlock::Create(*impl_->context, "iter.end", func);
             // `for ... else`: else runs on natural exhaustion (StopIteration),
-            // skipped on `break` (which targets endBB). Absent else ->
-            // elseBB == endBB (unchanged flow).
+            // skipped by `break`. No else -> elseBB == endBB.
             llvm::BasicBlock* elseBB = node.elseBody.empty()
                 ? endBB
                 : llvm::BasicBlock::Create(*impl_->context, "iter.else", func);
@@ -469,10 +409,8 @@ void CodeGen::visit(ForStmt& node) {
             impl_->builder->SetInsertPoint(nextBB);
             auto* nextVal = impl_->callDunder(iterClassName, "__next__", iterObj);
             impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_exc_pop_frame"], {});
-            // RC overwrite: the loop var OWNS each element (a method return
-            // is +1), so release the previous iteration's element before
-            // storing the next - a plain store orphaned every element but
-            // the last (A/B-proven; the slot starts null, decref no-ops).
+            // RC overwrite: the loop var owns each element (+1 method return); release
+            // the previous one before storing next, else all but the last leaked (A/B-proven).
             if (impl_->options.gcMode == GCMode::RC &&
                 Impl::isHeapKind(loopVarKind)) {
                 auto* prevVal = impl_->builder->CreateLoad(
@@ -549,16 +487,8 @@ void CodeGen::visit(ForStmt& node) {
     }
 
     // --- For-in on collection (list, string, or dict) ---
-    // D039: `for x in <Any>` - a box-typed iterable. The payload may hold
-    // EITHER list representation (the monomorphized DragonList family or a
-    // DragonListBox), so the loop must not assume a layout: dragon_box_len
-    // sizes it (raising the Python-shaped TypeError for non-sized values) and
-    // dragon_box_subscript header-dispatches every element read, returning an
-    // OWNED box. The loop var is itself an Any box - narrow it in the body
-    // with isinstance. Previously an Any iterable fell into the native-list
-    // default and walked the payload at the 8-byte stride: a list[str]
-    // yielded raw pointers tagged int, a list[Any] yielded interleaved
-    // tag/payload words.
+    // D039: an Any iterable's box may hold either list repr; dragon_box_len sizes
+    // it and dragon_box_subscript dispatches each read (owned box) - the old native-list default read raw bytes at a fixed stride and mishandled list[str]/list[Any].
     {
         bool iterMayBeBox = false;
         if (node.iterable->type &&
@@ -566,20 +496,12 @@ void CodeGen::visit(ForStmt& node) {
              node.iterable->type->kind() == Type::Kind::Union))
             iterMayBeBox = true;
         if (auto* nm = dynamic_cast<NameExpr*>(node.iterable.get())) {
-            // A name's VarKind is the codegen truth: a Union-kind slot IS a
-            // box; a name rebound by isinstance narrowing to a concrete kind
-            // is NOT, even though its static type may still read Any.
+            // A name's VarKind is the codegen truth: a Union-kind slot IS a box, but
+            // one narrowed by isinstance to a concrete kind is NOT (even if its static type still reads Any).
             iterMayBeBox = impl_->lookupVarKind(nm->name) == Impl::VarKind::Union;
         }
-        // A list[Any] iterable stores 16-byte boxes (DragonListBox). The
-        // native-list loop walks elements at the 8-byte stride, which reads
-        // interleaved tag/payload words - the exact failure this box path
-        // exists to prevent for Any-typed iterables - so route every
-        // Any-element list here as well. The coercion below wraps the raw
-        // list pointer as a list-tagged box and dragon_box_subscript
-        // dispatches either list representation. Element-kind sources, in
-        // order: the checker's static type, a local's tracked elem kind, a
-        // field's registered elem kind.
+        // list[Any] stores 16-byte boxes (DragonListBox); the native-list loop's
+        // 8-byte stride would read interleaved tag/payload words, so route it here too (coerced to a list-tagged box; dragon_box_subscript dispatches either repr).
         bool anyElemList = false;
         if (node.iterable->type) {
             if (auto* lt = dynamic_cast<ListType*>(node.iterable->type.get())) {
@@ -593,10 +515,8 @@ void CodeGen::visit(ForStmt& node) {
             if (it != impl_->varListElemKinds.end() &&
                 it->second == Type::Kind::Any)
                 anyElemList = true;
-            // D025: a list[type] element is a class descriptor, not a value.
-            // Its elem-kind entry reads Any (no Type::Kind counterpart), but
-            // it must stay on the native path so constructing through the
-            // loop var still dies with the "classes are not values" error.
+            // D025: list[type] elements are class descriptors (elem-kind reads Any,
+            // no Type::Kind counterpart) but must stay native, else the "classes are not values" error is lost.
             if (impl_->varListElemIsType.count(nm->name))
                 anyElemList = false;
         } else if (auto* iterAttr =
@@ -626,10 +546,8 @@ void CodeGen::visit(ForStmt& node) {
         if (iterMayBeBox && boxTarget) {
             node.iterable->accept(*this);
             llvm::Value* iterBox = impl_->lastValue;
-            // Non-box lowerings of an Any-typed expression are not expected
-            // (the type says box); coerce defensively rather than re-evaluate
-            // the iterable through a different path. A scalar coerces to an
-            // int box, and dragon_box_len then raises the honest TypeError.
+            // A non-box lowering of an Any-typed expr isn't expected; coerce
+            // defensively (scalar -> int box) so dragon_box_len raises the honest TypeError.
             if (iterBox->getType() != impl_->boxType) {
                 if (iterBox->getType()->isPointerTy())
                     iterBox = impl_->makeBox(
@@ -679,9 +597,8 @@ void CodeGen::visit(ForStmt& node) {
             auto* elemBox = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_box_subscript"],
                 {iterBox, idxBox}, "boxiter.elem");
-            // The element box is OWNED (+1 on heap payloads): release the
-            // previous iteration's element before overwriting (the slot
-            // starts zeroed, so the first decref no-ops).
+            // The element box is OWNED (+1 on heap payloads): release the previous
+            // iteration's element before overwriting (slot starts zeroed, first decref no-ops).
             if (impl_->options.gcMode == GCMode::RC) {
                 auto* prev = impl_->builder->CreateLoad(
                     impl_->boxType, loopVar, "boxiter.prev");
@@ -717,10 +634,8 @@ void CodeGen::visit(ForStmt& node) {
             }
 
             impl_->builder->SetInsertPoint(endBB);
-            // Release the LAST element (break and natural exhaustion both
-            // land here), neutralize the slot so any later cleanup can't
-            // double-free, and drop the iterable's own +1 if its expression
-            // produced an owned box temporary.
+            // Release the LAST element (both break and natural exhaustion land here),
+            // null the slot to prevent a double-free, and drop the iterable's own +1 if owned.
             if (impl_->options.gcMode == GCMode::RC) {
                 auto* last = impl_->builder->CreateLoad(
                     impl_->boxType, loopVar, "boxiter.last");
@@ -744,13 +659,8 @@ void CodeGen::visit(ForStmt& node) {
     bool isDictItemsIterable = false;  // for k, v in d.items()
     bool isDictKeysIterable = false;   // for k in d.keys() OR for k in d
 
-    // Helper: resolve owner class name for an AttributeExpr's object.
-    // Handles `self.<field>` (uses currentClassName), `obj.<field>`
-    // (looks up varClassNames), and nested bases (`self.inner.<field>`,
-    // `a.b.<field>`) via resolveExprClassName - the same resolution
-    // resolveDictKeyKind uses, so the iteration shape and the key kind
-    // are always read off the same owning class. Returns empty string if
-    // unresolved.
+    // Resolve an AttributeExpr's owner class: `self.<field>`, `obj.<field>`, or a
+    // nested base, via the same resolution resolveDictKeyKind uses (empty if unresolved).
     auto resolveOwnerClass = [&](AttributeExpr* attr) -> std::string {
         if (auto* objName = dynamic_cast<NameExpr*>(attr->object.get())) {
             if (objName->name == "self" && !impl_->currentClassName.empty())
@@ -771,11 +681,8 @@ void CodeGen::visit(ForStmt& node) {
         return fit->second;
     };
 
-    // Check for dict method calls: d.items(), d.keys(), d.values()
-    // Recognises both `localDict.method()` and `self.field.method()` /
-    // `obj.field.method()` so class-field dicts route to the typed runtime ops
-    // (D030 alignment - the dispatch must consult the tracked field type
-    // instead of falling through to the legacy list default).
+    // Dict method calls (d.items()/.keys()/.values()), incl. `self.field.method()`,
+    // route class-field dicts to typed runtime ops instead of the legacy list default.
     if (auto* iterCall = dynamic_cast<CallExpr*>(node.iterable.get())) {
         if (auto* attr = dynamic_cast<AttributeExpr*>(iterCall->callee.get())) {
             bool objIsDict = false;
@@ -803,11 +710,8 @@ void CodeGen::visit(ForStmt& node) {
             else if (kind == Impl::VarKind::List) isListIterable = true;
             else isListIterable = true; // default to list for unknown
         } else if (auto* iterAttr = dynamic_cast<AttributeExpr*>(node.iterable.get())) {
-            // `for x in self.<field>` / `for x in obj.<field>` - consult the
-            // tracked class-field VarKind so dict-typed and str-typed fields
-            // route to the correct runtime path. Without this, dict fields
-            // fall through to the list default and the loop variable gets
-            // mis-allocated as i64, crashing dragon_dict_get(ptr, ptr).
+            // `for x in self.<field>` needs the tracked class-field VarKind so dict/str
+            // fields route correctly, else a dict field defaults to list and crashes dragon_dict_get(ptr, ptr).
             std::string owner = resolveOwnerClass(iterAttr);
             Impl::VarKind kind = owner.empty()
                 ? Impl::VarKind::Other
@@ -816,11 +720,8 @@ void CodeGen::visit(ForStmt& node) {
             else if (kind == Impl::VarKind::Dict) isDictKeysIterable = true;
             else if (kind == Impl::VarKind::List) isListIterable = true;
             else if (node.iterable->type) {
-                // Field kind untracked (e.g. the owner class was declared in
-                // another module): the stamped static type still knows the
-                // container shape. Without this fallback a dict field reached
-                // through an unresolved owner iterated as a LIST and the loop
-                // read the dict's pages as list slots (heap overflow).
+                // Field kind untracked (owner class in another module): fall back to
+                // the stamped static type, else a dict field iterated as a LIST, reading its pages as list slots (heap overflow).
                 switch (node.iterable->type->kind()) {
                     case Type::Kind::Dict: isDictKeysIterable = true; break;
                     case Type::Kind::Str:  isStrIterable = true; break;
@@ -831,12 +732,8 @@ void CodeGen::visit(ForStmt& node) {
         } else if (dynamic_cast<StringLiteral*>(node.iterable.get())) {
             isStrIterable = true;
         } else if (node.iterable->type) {
-            // General-expression iterable (e.g. `for k in rows[0]`, a subscript,
-            // or any call/index whose result is a container). VarKind tracking
-            // only covers simple names and class fields, so fall back to the
-            // expression's inferred static type to choose the iteration shape.
-            // Without this a dict-valued expression defaulted to list iteration
-            // and the loop walked the dict's bytes as i64 keys.
+            // General-expression iterable (e.g. `rows[0]`): VarKind tracking only covers
+            // names/fields, so fall back to the static type, else a dict-valued expr iterated as a list and read raw bytes as i64 keys.
             switch (node.iterable->type->kind()) {
                 case Type::Kind::Dict: isDictKeysIterable = true; break;
                 case Type::Kind::Str:  isStrIterable = true; break;
@@ -847,12 +744,8 @@ void CodeGen::visit(ForStmt& node) {
         }
     }
 
-    // Str-keyed dicts OWN their keys (heap DragonStrings), so a key loop var
-    // must be a heap kind (for escape-incref) but borrowed (no per-iter decref).
-    // Int-keyed dicts have i64 keys that must NEVER be treated as strings - keep
-    // them on the legacy StrLiteral binding (no escape-incref). Resolve the dict
-    // expr behind `for k in d` (the iterable itself) or `for k in d.keys()` /
-    // `d.items()` (the method receiver).
+    // Str-keyed dict keys are heap DragonStrings (heap kind, borrowed - no per-iter
+    // decref); int-keyed dict keys stay i64/StrLiteral and must never be treated as strings.
     bool dictKeysAreInt = false;
     if (isDictKeysIterable || isDictItemsIterable) {
         Expr* dictExpr = node.iterable.get();
@@ -876,9 +769,8 @@ void CodeGen::visit(ForStmt& node) {
             llvm::Value* dictVal = impl_->lastValue;
             iterableVal = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_dict_keys"], {dictVal}, "dictkeys");
-            // An OWNED dict temp (a `dub d` snapshot, a call result): the
-            // keys list is independent (fresh list, retained keys), so the
-            // temp is fully consumed here - release it or it leaks per loop.
+            // An OWNED dict temp (`dub d` snapshot / call result) is fully consumed by
+            // dragon_dict_keys (a fresh list); release it here or it leaks per loop.
             Impl::VarKind rd =
                 impl_->ownedTempDrainKind(node.iterable.get(), dictVal);
             if (rd != Impl::VarKind::Other)
@@ -892,27 +784,13 @@ void CodeGen::visit(ForStmt& node) {
         node.iterable->accept(*this);
         iterableVal = impl_->lastValue;
     }
-    // Unique scope name per loop: if two container-iterating for-loops in one
-    // scope both register the name "__iter", the second's
-    // setVar clobbers the first in the scope map and cleanup leaks all but
-    // the last iterable temp (a keys()/items()/comprehension list each).
+    // Unique scope name per loop: two "__iter" registrations in one scope would
+    // have the second setVar clobber the first, leaking all but the last iterable temp.
     std::string iterName = "__iter." + std::to_string(impl_->forIterCounter++);
     auto* iterAlloca = impl_->createEntryAlloca(func, iterName, impl_->i8PtrType);
     impl_->builder->CreateStore(iterableVal, iterAlloca);
-    // GC: register __iter so scope cleanup handles it on all exit paths
-    // (normal exit, break, return). Dict/items paths create a new DragonList*
-    // that must be decref'd. Regular list paths are borrowed (marked below).
-    //
-    // An OWNED iterable temp - a comprehension, map()/filter() (which desugar
-    // to comprehensions), list()/sorted() results, a function returning a
-    // fresh container, or an inline literal - is a +1 nobody else holds, so
-    // iterating it without registering cleanup leaks the whole container each
-    // pass (`for x in [c for c in xs]` / `for x in filter(f, xs)`). A borrowed
-    // iterable (a NameExpr/AttributeExpr/element read) keeps its owner's
-    // reference and must NOT be decref'd here. Gate on heap-container static
-    // type so VarKind::List cleanup's dragon_decref is the right drop (str /
-    // bytes use a different decref and stay borrowed - their temps are a
-    // separate, smaller concern).
+    // GC: register __iter for scope cleanup on all exit paths. Dict/items create a
+    // new DragonList* (decref'd); an OWNED iterable temp (comprehension/map/filter/literal) otherwise leaks the whole container each pass.
     bool ownedContainerIter =
         !isDictKeysIterable && !isDictItemsIterable &&
         node.iterable && !Impl::isBorrowedHeapExpr(node.iterable.get()) &&
@@ -924,7 +802,6 @@ void CodeGen::visit(ForStmt& node) {
         impl_->setVar(iterName, iterAlloca, Impl::VarKind::List);
     }
 
-    // Create index variable __i
     auto* idxVar = impl_->createEntryAlloca(func, "__i", impl_->i64Type);
     impl_->builder->CreateStore(llvm::ConstantInt::get(impl_->i64Type, 0), idxVar);
 
@@ -933,8 +810,7 @@ void CodeGen::visit(ForStmt& node) {
     auto* incBB = llvm::BasicBlock::Create(*impl_->context, "forinc", func);
     auto* endBB = llvm::BasicBlock::Create(*impl_->context, "forend", func);
     // `for ... else`: else runs on natural exhaustion (index reaches len),
-    // skipped on `break` (which targets endBB). Absent else -> elseBB == endBB
-    // (unchanged flow).
+    // skipped by `break`. No else -> elseBB == endBB.
     llvm::BasicBlock* elseBB = node.elseBody.empty()
         ? endBB
         : llvm::BasicBlock::Create(*impl_->context, "forelse", func);
@@ -966,10 +842,8 @@ void CodeGen::visit(ForStmt& node) {
     iterLoaded = impl_->builder->CreateLoad(impl_->i8PtrType, iterAlloca, "__iter");
 
     if (tupleTarget && isDictItemsIterable) {
-        // Dict items unpacking: for k, v in d.items()
-        // Each list element is a DragonTuple* (stored as i64) with (key, value).
-        // Track the dict's value kind so v gets the right VarKind for
-        // print / dispatch / comparison.
+        // Dict items unpacking (`for k, v in d.items()`): each element is a
+        // DragonTuple* (as i64); track the dict's value kind so v gets the right VarKind.
         Impl::VarKind valVarKind = Impl::VarKind::Int;
         if (auto* methCall = dynamic_cast<CallExpr*>(node.iterable.get())) {
             if (auto* methAttr = dynamic_cast<AttributeExpr*>(methCall->callee.get())) {
@@ -1000,20 +874,14 @@ void CodeGen::visit(ForStmt& node) {
                     impl_->runtimeFuncs["dragon_tuple_get"], {tuplePtr, idx}, "unpack");
                 if (i == 0) {
                     if (dictKeysAreInt) {
-                        // int-keyed dict: the items() tuple stores the key as a
-                        // native i64 (untagged). Bind as VarKind::Int in an i64
-                        // slot - IntToPtr'ing it into a ptr slot made `print(k)`
-                        // deref the key value as a string pointer (-> SIGSEGV).
+                        // int-keyed dict: items() stores the key as a native untagged i64.
+                        // Bind VarKind::Int in an i64 slot - IntToPtr'ing it into ptr made `print(k)` SIGSEGV.
                         auto* alloca = impl_->createEntryAlloca(func, name->name, impl_->i64Type);
                         impl_->builder->CreateStore(val, alloca);
                         impl_->setVar(name->name, alloca, Impl::VarKind::Int);
                     } else {
-                        // Key is an owned heap DragonString (the items() tuple
-                        // holds a ref to it). Bind as VarKind::Str + BORROWED: no
-                        // per-iteration decref of a key the tuple/dict still owns,
-                        // but the heap kind lets escape paths (return/store the
-                        // key) incref it. dragon_incref_str is a no-op for any
-                        // bare-C-string key.
+                        // Key is an owned heap DragonString (tuple holds a ref). Bind
+                        // VarKind::Str + BORROWED: no per-iter decref, but escape paths can still incref it.
                         llvm::Value* strPtr = impl_->builder->CreateIntToPtr(val, impl_->i8PtrType, "keystr");
                         auto* alloca = impl_->createEntryAlloca(func, name->name, impl_->i8PtrType);
                         impl_->builder->CreateStore(strPtr, alloca);
@@ -1021,9 +889,8 @@ void CodeGen::visit(ForStmt& node) {
                         impl_->scopes.back().borrowed.insert(name->name);
                     }
                 } else {
-                    // D030 Phase 3.F: bind value slot at its native type so
-                    // f64 / ptr values don't funnel through i64 in the body.
-                    // Tuple slot returns i64; convert once to the native type.
+                    // D030 Phase 3.F: bind the value slot at its native type (not i64),
+                    // converting the tuple's i64 return once so f64/ptr values don't funnel through i64.
                     llvm::Type* slotTy;
                     llvm::Value* slotVal;
                     if (valVarKind == Impl::VarKind::Float) {
@@ -1049,11 +916,8 @@ void CodeGen::visit(ForStmt& node) {
                     if (!alloca || alloca->getAllocatedType() != slotTy)
                         alloca = impl_->createEntryAlloca(func, name->name, slotTy);
                     impl_->setVar(name->name, alloca, valVarKind);
-                    // The items() tuple co-owns the value (dragon_dict_items
-                    // increfs it) - the binding is a BORROW, exactly like the
-                    // key above. Without this mark, per-iteration cleanup
-                    // decref'd a heap value the tuple still holds, and the
-                    // tuple destroy + dict destroy double-freed it.
+                    // items() co-owns the value (dragon_dict_items increfs it); mark it
+                    // BORROWED, else per-iter cleanup decref'd it and tuple+dict destroy double-freed it.
                     if (Impl::isHeapKind(valVarKind))
                         impl_->scopes.back().borrowed.insert(name->name);
                     impl_->builder->CreateStore(slotVal, alloca);
@@ -1061,19 +925,11 @@ void CodeGen::visit(ForStmt& node) {
             }
         }
     } else if (tupleTarget) {
-        // Generic tuple unpacking: for a, b in [(1,2), (3,4)] - plus the
-        // element-typed forms enumerate(X) / zip(A,B). The tuple co-owns each
-        // element by tag at runtime, but the unpack vars need the right static
-        // VarKind + native slot type, else a str/float element funnels through
-        // i64 (which made `for i, v in enumerate(list[str])` print pointers).
+        // Generic tuple unpacking (`for a, b in ...`, incl. enumerate/zip): the
+        // unpack vars need the right static VarKind/slot, else str/float funnels through i64 (enumerate(list[str]) printed pointers).
         std::vector<Type::Kind> posKinds(tupleTarget->elements.size(), Type::Kind::Int);
-        // Plain `for a, b, ... in <list[tuple[T1,T2,...]]>`: pull each tuple
-        // component's checked static type so the unpack vars get their real
-        // native slot (str/ptr/float/...), instead of defaulting to i64 - which
-        // made a str/ptr element funnel through i64 and print as a raw pointer
-        // (and mis-type a dict key built from it). Best-effort: falls through to
-        // the Int default + enumerate/zip handling below when the type is
-        // unavailable. Placed first so the enumerate/zip block keeps precedence.
+        // `for a, b in <list[tuple[...]]>`: pull each component's static type for the
+        // real native slot, else str/ptr funneled through i64 (raw-pointer prints, bad dict keys). Falls back to Int + enumerate/zip below.
         if (node.iterable->type && node.iterable->type->kind() == Type::Kind::List) {
             auto& lt = static_cast<ListType&>(*node.iterable->type);
             if (lt.elementType && lt.elementType->kind() == Type::Kind::Tuple) {
@@ -1147,40 +1003,27 @@ void CodeGen::visit(ForStmt& node) {
                 if (!alloca || alloca->getAllocatedType() != slotTy)
                     alloca = impl_->createEntryAlloca(func, name->name, slotTy);
                 impl_->setVar(name->name, alloca, vk);
-                // dragon_tuple_get returns a BORROW - the tuple co-owns the
-                // element (e.g. d.items() tuples incref'd their key/value).
-                // Without the borrowed mark, per-iteration scope cleanup
-                // decref'd a heap element the tuple still holds, so the later
-                // tuple destroy double-freed it (`for k, v in d.items()` UAF).
+                // dragon_tuple_get returns a BORROW (the tuple co-owns the element);
+                // without this mark, scope cleanup decref'd it and tuple destroy double-freed it (`for k, v in d.items()` UAF).
                 if (Impl::isHeapKind(vk))
                     impl_->scopes.back().borrowed.insert(name->name);
                 impl_->builder->CreateStore(slotVal, alloca);
             }
         }
     } else if (isDictKeysIterable) {
-        // Iterating over dict keys. dragon_dict_keys returns the keys list as
-        // i64 elements: str-keyed -> DragonString pointer-as-i64; int-keyed ->
-        // the raw i64 key. The two need different loop-var bindings.
+        // dragon_dict_keys returns i64 elements: str-keyed -> DragonString ptr-as-i64,
+        // int-keyed -> the raw i64 key. The two need different loop-var bindings.
         llvm::Value* elem = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_list_get"], {iterLoaded, currentIdx}, "elem");
         if (dictKeysAreInt) {
-            // int-keyed dict: the key is a native i64 - bind it as VarKind::Int
-            // in an i64 slot. The old path IntToPtr'd it into a ptr slot and
-            // bound StrLiteral, so `print(k)` dereferenced the key value as a
-            // string pointer (key 1 -> address 0x1 -> SIGSEGV).
+            // int-keyed dict: bind VarKind::Int in an i64 slot. The old path
+            // IntToPtr'd it into a ptr slot, so `print(k)` on key 1 deref'd address 0x1 -> SIGSEGV.
             auto* targetAlloca = impl_->createEntryAlloca(func, targetName->name, impl_->i64Type);
             impl_->builder->CreateStore(elem, targetAlloca);
             impl_->setVar(targetName->name, targetAlloca, Impl::VarKind::Int);
         } else {
-            // str-keyed dict: keys are owned heap DragonStrings (the dict holds
-            // one ref per key). Bind the loop var as VarKind::Str (heap) but mark
-            // it BORROWED so per-iteration scope cleanup does NOT decref a key the
-            // dict still owns - while the heap kind still lets the
-            // return/append/assign paths incref it when it ESCAPES the loop (e.g.
-            // `for k in d: return k`). Without that escape-incref the returned key
-            // would dangle once the dict frees its keys on destroy.
-            // dragon_incref_str is a no-op for any non-heap literal key, so this
-            // is safe even if a key is a bare C string.
+            // str-keyed dict: keys are owned heap DragonStrings. Bind VarKind::Str +
+            // BORROWED (no per-iter decref); heap-kind still lets `return k` incref it, else the key dangles after dict destroy.
             llvm::Value* strPtr = impl_->builder->CreateIntToPtr(elem, impl_->i8PtrType, "keystr");
             auto* targetAlloca = impl_->createEntryAlloca(func, targetName->name, impl_->i8PtrType);
             impl_->builder->CreateStore(strPtr, targetAlloca);
@@ -1195,12 +1038,8 @@ void CodeGen::visit(ForStmt& node) {
         impl_->builder->CreateStore(elem, targetAlloca);
         impl_->setVar(targetName->name, targetAlloca, Impl::VarKind::Str);
     } else {
-        // D030 §5: The loop-var alloca shape and the typed runtime-op
-        // selection both come directly from the iterable's element
-        // `Type::Kind`. The legacy `Type::Kind` -> `VarKind` fan-out switch
-        // is collapsed to one boundary call (`typeKindToVarKind`) used
-        // only where setVar / refcount tracking still consume VarKind -
-        // they're the bookkeeping shapes that LLVM doesn't represent.
+        // D030 §5: loop-var alloca shape and typed runtime-op both come from the
+        // element's Type::Kind directly; typeKindToVarKind is the one boundary call left for setVar/refcount bookkeeping.
         Type::Kind elemTypeKind = Type::Kind::Int;
         if (auto* iterName = dynamic_cast<NameExpr*>(node.iterable.get())) {
             auto it = impl_->varListElemKinds.find(iterName->name);
@@ -1224,9 +1063,8 @@ void CodeGen::visit(ForStmt& node) {
                 }
             }
         } else if (auto* iterCall = dynamic_cast<CallExpr*>(node.iterable.get())) {
-            // D030 Phase 3.F: `for v in d.values()` - element kind is the
-            // dict's tracked V kind. Without this the loop var defaults to
-            // Int and f64 / ptr values get bashed through i64.
+            // `for v in d.values()`: element kind is the dict's tracked V kind,
+            // else the loop var defaults to Int and f64/ptr values get bashed through i64.
             if (auto* methAttr = dynamic_cast<AttributeExpr*>(iterCall->callee.get())) {
                 if (methAttr->attribute == "values") {
                     if (auto* dn = dynamic_cast<NameExpr*>(methAttr->object.get())) {
@@ -1238,10 +1076,8 @@ void CodeGen::visit(ForStmt& node) {
             }
         }
 
-        // Class-instance heuristics - `list[Foo]` whose element kind tables
-        // weren't populated with `Type::Kind::Instance` (entries created
-        // before TypeChecker propagation). Fall back to the parallel
-        // class-name maps so the alloca still gets sized as `ptr`.
+        // Class-instance heuristics: a `list[Foo]` whose elem-kind table predates
+        // TypeChecker propagation falls back to the parallel class-name maps to size the alloca as `ptr`.
         if (elemTypeKind == Type::Kind::Int) {
             if (auto* iterAttr = dynamic_cast<AttributeExpr*>(node.iterable.get())) {
                 std::string ownerClass;
@@ -1269,13 +1105,8 @@ void CodeGen::visit(ForStmt& node) {
             }
         }
 
-        // Typechecker-propagated iterable type fallback - catches a list[T]
-        // produced directly by an expression with no var/field entry, e.g.
-        // `for part in s.split(";")` (method call -> list[str]) or a function
-        // returning list[Foo]. Generalised from Instance-only to every concrete
-        // element kind: without it the element defaulted to Int and a str/float/
-        // ptr element was bashed through i64 (a `.strip()` on it then passed an
-        // i64 where a ptr was required - LLVM verify failure).
+        // Fallback for a list[T] with no var/field entry (e.g. `s.split(";")` ->
+        // list[str]): without it the element defaulted to Int and str/float/ptr bashed through i64 (LLVM verify failure on `.strip()`).
         if (elemTypeKind == Type::Kind::Int && node.iterable->type) {
             if (auto* lt = dynamic_cast<ListType*>(node.iterable->type.get())) {
                 if (lt->elementType) {
@@ -1298,10 +1129,8 @@ void CodeGen::visit(ForStmt& node) {
             }
         }
 
-        // Boundary mapping - setVar / refcount tracking still consume
-        // VarKind. D025: `list[type]` iteration yields a class descriptor,
-        // which is the one VarKind without a Type::Kind counterpart, so
-        // it's an explicit one-line override after the boundary translation.
+        // Boundary mapping to VarKind (setVar/refcount tracking still need it). D025:
+        // `list[type]` yields a class descriptor, the one VarKind with no Type::Kind counterpart, so it's an explicit override.
         Impl::VarKind elemVarKind = Impl::typeKindToVarKind(elemTypeKind);
         if (auto* iterName = dynamic_cast<NameExpr*>(node.iterable.get())) {
             if (impl_->varListElemIsType.count(iterName->name))
@@ -1343,14 +1172,8 @@ void CodeGen::visit(ForStmt& node) {
             }
         }
 
-        // D030 §5: bind via the Type::Kind-driven helper which picks the
-        // typed runtime get and sizes the alloca from the static element
-        // type itself. The list was allocated by visit(ListExpr) using the
-        // matching variant (DragonListF64 / DragonListPtr / DragonList)
-        // so the typed get returns the native LLVM type.
-        // D025 escape: list[type] still yields a descriptor i64 - the one
-        // shape that doesn't fall out of Type::Kind directly, so reuse the
-        // VarKind binder for that single case.
+        // D030 §5: bind via the Type::Kind-driven helper, matching the ListExpr
+        // allocation variant. D025 escape: list[type] still needs the VarKind binder (descriptor i64).
         llvm::AllocaInst* targetAlloca;
         if (elemVarKind == Impl::VarKind::Type) {
             targetAlloca = impl_->bindListElemTyped(
@@ -1362,14 +1185,8 @@ void CodeGen::visit(ForStmt& node) {
         impl_->setVar(targetName->name, targetAlloca, elemVarKind);
         if (elemTypeKind == Type::Kind::Instance && !elemClassName.empty())
             impl_->varClassNames[targetName->name] = elemClassName;
-        // C7: a `list[TypedDict]` loop variable binds as VarKind::Dict (a
-        // TypedDict is dict-backed), but the field-tag dispatch in
-        // visit(AttributeExpr) needs the TypedDict *schema* to emit a typed
-        // dragon_dict_get_* (so `pl.name` yields a real str ptr, not a generic
-        // i64). The Instance branch above records varClassNames for instances;
-        // do the analogous wiring for the dict-backed TypedDict case so
-        // str()/f-string of a field works (not just print, which masks it via
-        // a runtime tag dispatch).
+        // C7: list[TypedDict] binds as VarKind::Dict, but AttributeExpr's field-tag
+        // dispatch needs the schema too (else `pl.name` yields i64, not a str ptr) - wire varTypedDictClass like the Instance case above.
         if (elemTypeKind == Type::Kind::Dict) {
             std::string tdCls;
             if (auto* iterName = dynamic_cast<NameExpr*>(node.iterable.get())) {
@@ -1385,9 +1202,8 @@ void CodeGen::visit(ForStmt& node) {
             if (!tdCls.empty() && impl_->typedDictClassesBySym.count(impl_->classSym(tdCls)))
                 impl_->varTypedDictClass[targetName->name] = tdCls;
         }
-        // Loop variable is a borrowed reference from the typed get (no
-        // incref on extraction). Heap classification flows from the static
-        // type - D030 §5: "the LLVM type IS the truth."
+        // Loop var is a borrowed reference from the typed get (no incref on
+        // extraction); heap classification flows from the static type (D030 §5).
         if (Impl::isHeapTypeKind(elemTypeKind))
             impl_->scopes.back().borrowed.insert(targetName->name);
 

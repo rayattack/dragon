@@ -17,57 +17,37 @@ struct MigrationDiagnostic {
     std::string message;
 };
 
-/// Options for Python to Dragon migration
+/// Options for Python to Dragon migration.
 struct MigrationOptions {
-    /// Add curly braces (true) or keep indentation (false)
-    bool useBraces = true;
-    
-    /// Add type annotations from inference
-    bool addTypes = true;
-    
-    /// Output file (empty = stdout)
-    std::string outputFile;
-    
-    /// Preserve comments
+    bool useBraces = true;   // braces vs kept indentation
+    bool addTypes = true;    // annotate from inference
+    std::string outputFile;  // "" = stdout
     bool preserveComments = true;
 };
 
-/// Converts Python code to Dragon
-/// 
-/// Performs:
-/// - Type inference and annotation insertion
-/// - Optional conversion from indentation to braces
-/// - Validation of Python compatibility
+/// Converts Python to Dragon: type inference/annotation, indentation-to-braces,
+/// and Dragon-compatibility validation.
 class PythonMigrator {
 public:
     explicit PythonMigrator(MigrationOptions options = {});
     ~PythonMigrator();
 
-    /// Migrate a Python file to Dragon
     bool migrate(const std::string& inputFile, const std::string& outputFile);
-
-    /// Migrate Python source string to Dragon
     std::string migrateSource(const std::string& source);
-
-    /// Migrate an already-parsed module
     bool migrateModule(Module& module);
 
-    /// Get migration diagnostics
     const std::vector<MigrationDiagnostic>& diagnostics() const;
-
-    /// Check if migration succeeded
     bool hasErrors() const;
 
-    /// Get list of things that couldn't be migrated
+    /// Things that couldn't be migrated.
     std::vector<std::string> incompatibilities() const;
 
-    // Code emission (public for helper access)
+    // Public for helper access.
     std::string emitExpr(Expr* expr);
     std::string emitStmt(Stmt* stmt, int indent);
     std::string emitType(TypeExpr* type);
 
 private:
-    // Transformation passes
     void addTypeAnnotations(Module& module);
     void convertBlocksToBraces(Module& module);
     void validateDragonCompatibility(Module& module);

@@ -15,8 +15,7 @@ void CodeGen::visit(StringLiteral& node) {
     if (node.isFString) {
         // Segments arrive in node.fstringParts pre-parsed and type-checked; lower each.
         std::vector<llvm::Value*> parts;
-        // True when the (only) part is a bare borrowed str: consumers own f-string
-        // results, so a lone borrowed part needs the retain at the bottom.
+        // True when the sole part is a bare borrowed str: f-string results are owned, so it needs a retain at the bottom.
         bool lastPartBorrowedStr = false;
         for (auto& part : node.fstringParts) {
             lastPartBorrowedStr = false;
@@ -38,8 +37,7 @@ void CodeGen::visit(StringLiteral& node) {
             part.expr->accept(*this);
             llvm::Value* exprVal = impl_->lastValue;
 
-            // An as-is str part is BORROWED only when its expr/value actually borrow:
-            // an owned call result carries the +1 already; the retain would double-count it.
+            // An as-is str part borrows only when its expr/value actually borrows; an owned call result already carries the +1.
             auto partBorrows = [&](llvm::Value* v) {
                 return Impl::isBorrowedHeapExpr(part.expr.get()) ||
                        !impl_->isOwnedStrResult(v);
@@ -383,7 +381,7 @@ void CodeGen::visit(TemplateExpr& node) {
                 llvm::Value* buf = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_list_new_ptr"],
                     {llvm::ConstantInt::get(impl_->i64Type, 0),
-                     llvm::ConstantInt::get(impl_->i64Type, 1)},  // TAG_STR
+                     llvm::ConstantInt::get(impl_->i64Type, TAG_STR)},  // TAG_STR
                     "tpl_blk_buf");
                 impl_->templateBlockBufferStack.push_back(buf);
                 for (auto& stmt : blockStmts) {
@@ -805,11 +803,11 @@ void CodeGen::emitSqlTemplate(TemplateExpr& node, const std::string& contentType
             // Native value -> {tag, payload-i64}, mirroring list[Any] append.
             llvm::Type* t = exprVal->getType();
             int64_t tag;
-            if (dynamic_cast<NoneLiteral*>(fExpr.get())) tag = 4;   // TAG_NONE
-            else if (t == impl_->f64Type) tag = 2;                 // TAG_FLOAT
-            else if (t == impl_->i1Type) tag = 3;                  // TAG_BOOL
-            else if (t->isPointerTy()) tag = 1;                    // TAG_STR (default ptr)
-            else tag = 0;                                          // TAG_INT
+            if (dynamic_cast<NoneLiteral*>(fExpr.get())) tag = TAG_NONE;   // TAG_NONE
+            else if (t == impl_->f64Type) tag = TAG_FLOAT;                 // TAG_FLOAT
+            else if (t == impl_->i1Type) tag = TAG_BOOL;                  // TAG_BOOL
+            else if (t->isPointerTy()) tag = TAG_STR;                    // TAG_STR (default ptr)
+            else tag = TAG_INT;                                          // TAG_INT
 
             // Strings need a heap DragonString so the list-owned ref lands
             // somewhere; borrowed heap sources get an incref (Model-B append).

@@ -576,6 +576,10 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
             impl_->lastValue = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_str_len"], {arg}, "len");
         } else {
+            impl_->addError(
+                "len() operand lowered to a non-container scalar; the call "
+                "would have silently produced 0",
+                node.location());
             impl_->lastValue = llvm::ConstantInt::get(impl_->i64Type, 0);
         }
         return true;
@@ -783,9 +787,24 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
         if (node.args.size() == 1) {
             node.args[0]->accept(*this);
             llvm::Value* mmArg = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
+            Type::Kind elemKind = Type::Kind::Unknown;
+            if (node.args[0]->type) {
+                if (auto* lt = dynamic_cast<ListType*>(node.args[0]->type.get())) {
+                    if (lt->elementType) elemKind = lt->elementType->kind();
+                }
+            }
+            const char* fn;
+            if (elemKind == Type::Kind::Float) {
+                fn = isMin ? "dragon_min_list_f64" : "dragon_max_list_f64";
+            } else if (elemKind == Type::Kind::Str) {
+                fn = isMin ? "dragon_min_list_str" : "dragon_max_list_str";
+            } else {
+                fn = isMin ? "dragon_min_list" : "dragon_max_list";
+            }
             impl_->lastValue = impl_->builder->CreateCall(
-                impl_->runtimeFuncs[isMin ? "dragon_min_list" : "dragon_max_list"],
-                {mmArg}, name);
+                impl_->runtimeFuncs[fn], {mmArg}, name);
+            if (elemKind == Type::Kind::Bool)
+                impl_->lastValue = impl_->builder->CreateTrunc(impl_->lastValue, impl_->i1Type);
             return true;
         }
         std::vector<llvm::Value*> vals;
@@ -813,8 +832,16 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
     if (name == "sum" && node.args.size() == 1) {
         node.args[0]->accept(*this);
         llvm::Value* sumArg = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
+        Type::Kind elemKind = Type::Kind::Unknown;
+        if (node.args[0]->type) {
+            if (auto* lt = dynamic_cast<ListType*>(node.args[0]->type.get())) {
+                if (lt->elementType) elemKind = lt->elementType->kind();
+            }
+        }
         impl_->lastValue = impl_->builder->CreateCall(
-            impl_->runtimeFuncs["dragon_sum_list"], {sumArg}, "sum");
+            impl_->runtimeFuncs[elemKind == Type::Kind::Float ? "dragon_sum_list_f64"
+                                                              : "dragon_sum_list"],
+            {sumArg}, "sum");
         return true;
     }
 
@@ -1707,7 +1734,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
     return false;
     }();
     if (builtinHandled) {
-        for (auto& [v, k] : argTemps) impl_->emitDecrefByKind(v, k);
+        impl_->drainBorrowTemps(argTemps);
         return true;
     }
     return false;

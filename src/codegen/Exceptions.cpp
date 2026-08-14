@@ -17,11 +17,8 @@ void CodeGen::visit(AssertStmt& node) {
         llvm::Value* msgVal = impl_->lastValue;
         impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_assert"], {cond, msgVal});
-        // Passing-assert path: an owned +1 message temp (concat / f-string)
-        // must be released here or every passing assert leaks it. On the
-        // failing path the raise longjmps past this decref and the slot's
-        // protective dup keeps the message alive; the temp itself leaks
-        // once per CAUGHT failing assert - rare and bounded.
+        // Passing path: an owned message temp (concat/f-string) is released here or every passing assert leaks it.
+        // Failing path: raise longjmps past this decref; the slot's dup keeps it alive but leaks once per CAUGHT assert (rare, bounded).
         if (impl_->options.gcMode == GCMode::RC &&
             impl_->isOwnedStrResult(msgVal))
             impl_->builder->CreateCall(
@@ -32,17 +29,14 @@ void CodeGen::visit(AssertStmt& node) {
     }
 }
 
-// Control flow / misc stubs
 void CodeGen::visit(TryStmt& node) {
     auto* func = impl_->currentFunction;
     int excId = impl_->excCounter++;
     std::string prefix = "try" + std::to_string(excId);
 
-    // Create basic blocks
     auto* tryBodyBB  = llvm::BasicBlock::Create(*impl_->context, prefix + ".body", func);
     auto* dispatchBB = llvm::BasicBlock::Create(*impl_->context, prefix + ".dispatch", func);
 
-    // Analyze handlers
     struct HandlerInfo {
         llvm::BasicBlock* checkBB = nullptr;
         llvm::BasicBlock* bodyBB  = nullptr;
@@ -81,7 +75,6 @@ void CodeGen::visit(TryStmt& node) {
             prefix + ".unmatched", func);
     }
 
-    // Else and finally blocks
     llvm::BasicBlock* elseBB = nullptr;
     if (!node.elseBody.empty()) {
         elseBB = llvm::BasicBlock::Create(*impl_->context, prefix + ".else", func);
@@ -94,11 +87,8 @@ void CodeGen::visit(TryStmt& node) {
 
     auto* endBB = llvm::BasicBlock::Create(*impl_->context, prefix + ".end", func);
 
-    // A try whose exception goes unhandled (no handler at all, or no handler
-    // matched) must still run `finally` and THEN re-raise - never silently
-    // swallow it. The unhandled paths record the in-flight exception into these
-    // slots, route through `finally`, and re-raise at reraiseCheckBB if the
-    // flag is set. (setjmp-safe: these are memory allocas, not registers.)
+    // An unhandled exception must still run `finally` and THEN re-raise, never swallow it: these slots record
+    // the in-flight exception and re-raise at reraiseCheckBB after finally runs (allocas, not registers - setjmp-safe).
     auto* reraiseFlag = impl_->createEntryAlloca(func, prefix + ".rr.flag", impl_->i1Type);
     auto* savedType = impl_->createEntryAlloca(func, prefix + ".rr.type", impl_->i64Type);
     auto* savedObj  = impl_->createEntryAlloca(func, prefix + ".rr.obj", impl_->i8PtrType);
@@ -113,7 +103,6 @@ void CodeGen::visit(TryStmt& node) {
     llvm::BasicBlock* afterHandlerBB = finallyBB ? finallyBB : reraiseCheckBB;
     llvm::BasicBlock* afterTryBodyBB = elseBB ? elseBB : afterHandlerBB;
 
-    // === Push frame + setjmp + branch ===
     auto* jmpbufPtr = impl_->builder->CreateCall(
         impl_->runtimeFuncs["dragon_exc_push_frame"], {}, "jmpbuf");
     auto* setjmpResult = impl_->builder->CreateCall(
@@ -124,7 +113,7 @@ void CodeGen::visit(TryStmt& node) {
         "is.normal");
     impl_->builder->CreateCondBr(isNormal, tryBodyBB, dispatchBB);
 
-    // === Push exit-cleanup stack so return/break/continue can inline finally ===
+    // Push the exit-cleanup stack entry so return/break/continue can inline finally.
     if (!node.finallyBody.empty()) {
         Impl::ExitCleanup ec;
         ec.isWith = false;
@@ -134,18 +123,12 @@ void CodeGen::visit(TryStmt& node) {
         impl_->exitCleanupStack.push_back(std::move(ec));
     }
 
-    // === Try body ===
     impl_->builder->SetInsertPoint(tryBodyBB);
-    // Frame is live for the duration of the body so a return/break/continue
-    // inside it pops it (the normal-exit pop below is bypassed once they set a
-    // terminator). Keyed by function for free nested-function isolation.
+    // Frame is live for the body's duration so a return/break/continue inside it pops it (the normal-exit pop
+    // below is bypassed once they set a terminator); keyed by function for free nested-function isolation.
     impl_->tryFrameFuncs.push_back(func);
-    // The try body is its own lexical scope (block-scoping). This is load-bearing
-    // for the unwind cleanup: its owned heap locals are freed EITHER by codegen
-    // (normal completion, below) OR by dragon_exc_cleanup_unwind (longjmp arrival
-    // at dispatch) - never both. If they lived in the enclosing function scope
-    // instead, the function-return cleanup would re-decref what the unwind already
-    // freed on the caught path (double-free).
+    // The try body is its own lexical scope: its owned heap locals are freed EITHER by codegen (normal completion)
+    // OR by dragon_exc_cleanup_unwind (longjmp), never both - in the enclosing scope they'd double-free on the caught path.
     impl_->pushScope();
     for (auto& stmt : node.tryBody) stmt->accept(*this);
     bool tryTerminated = impl_->builder->GetInsertBlock()->getTerminator() != nullptr;
@@ -161,11 +144,9 @@ void CodeGen::visit(TryStmt& node) {
         impl_->builder->CreateBr(afterTryBodyBB);
     }
 
-    // === Dispatch block ===
     impl_->builder->SetInsertPoint(dispatchBB);
-    // Free the owned heap locals the longjmp skipped over (the try body's locals
-    // declared after this frame's setjmp). Runs BEFORE pop_frame so it reads this
-    // frame's saved cleanup depth. See DragonCleanupStack.
+    // Frees the owned heap locals the longjmp skipped over (declared after this frame's setjmp); runs BEFORE
+    // pop_frame so it reads this frame's saved cleanup depth (see DragonCleanupStack).
     impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_exc_cleanup_unwind"], {});
     impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_exc_pop_frame"], {});
     auto* excType = impl_->builder->CreateCall(
@@ -179,12 +160,8 @@ void CodeGen::visit(TryStmt& node) {
             impl_->builder->CreateBr(handlerInfos[0].bodyBB);
         }
     } else {
-        // No handlers (try with only finally): record the in-flight exception,
-        // run finally, then re-raise - do NOT swallow it.
-        // Retain BOTH the saved instance and message (+1 each): if the finally
-        // body raises and catches internally, the slot overwrite releases the
-        // old values - without these holds the deferred re-raise would use
-        // freed pointers. The consume re-raise transfers both holds back.
+        // No handlers (try with only finally): record the exception, run finally, then re-raise (never swallow it).
+        // Retain BOTH instance and message (+1 each) - an internal finally raise/catch would otherwise free them first.
         auto* curObj = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_exc_retain_obj"],
             {impl_->builder->CreateCall(
@@ -199,7 +176,6 @@ void CodeGen::visit(TryStmt& node) {
         impl_->builder->CreateBr(afterHandlerBB);
     }
 
-    // === Handler check + body blocks ===
     for (size_t i = 0; i < handlerInfos.size(); ++i) {
         auto& hi = handlerInfos[i];
         auto& handler = node.handlers[i];
@@ -207,9 +183,8 @@ void CodeGen::visit(TryStmt& node) {
         // Emit check block (typed handlers only)
         if (hi.checkBB) {
             impl_->builder->SetInsertPoint(hi.checkBB);
-            // Use runtime dragon_exc_matches for both built-in and user-defined.
-            // For `except (A, B, ...)` the handler matches if ANY listed type
-            // matches, so OR the per-type results together.
+            // dragon_exc_matches handles both built-in and user-defined types; for `except (A, B, ...)` the handler
+            // matches if ANY listed type matches, so OR the per-type results together.
             auto matchCode = [&](int64_t code, const std::string& tag) -> llvm::Value* {
                 auto* r = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_exc_matches"],
@@ -247,41 +222,24 @@ void CodeGen::visit(TryStmt& node) {
         impl_->builder->SetInsertPoint(hi.bodyBB);
         impl_->pushScope();
 
-        // If handler has a name, bind exception to it. Two shapes:
-        //  1. Typed-field path - `raise UserExc(args)` constructed an
-        //  instance and routed through dragon_raise_exc_obj. The handler
-        //  type is the same user class (or an ancestor); bind `e` to
-        //  that instance so `e.code` / `e.reason` / `e.url` work.
-        //  2. Message-only path - built-in raise: bind `e` to the message
-        //  string (historical behavior, used by 100% of stdlib `except
-        //  OSError as e: print(e)` sites).
-        // The instance pointer dominates the message: if a handler types
-        // its binding to a user class, we want the typed instance even if
-        // the runtime's msg slot was set as a fallback.
+        // Named handler binds two ways: a typed-field raise (`raise UserExc(args)`) binds `e` to the instance so
+        // `e.code` etc. work; a built-in raise binds `e` to the message string. The instance wins when both are possible.
         if (!handler.name.empty()) {
             bool boundInstance = false;
             if (auto* named = dynamic_cast<NamedTypeExpr*>(handler.type.get())) {
-                // Bind as instance when the handler types its binding to a
-                // user-defined exception class. Built-in handler types
-                // (Exception, ValueError, ...) keep the message-string
-                // binding - they have no struct shape for `e.x` access.
+                // Bind as instance only when the handler types its binding to a user-defined exception class; built-in
+                // handler types (Exception, ValueError, ...) keep the message-string binding since they have no struct shape.
                 if (impl_->userExcCodesBySym.count(impl_->classSym(named->name)) > 0 &&
                     impl_->classNames.count(named->name)) {
-                    // dragon_exc_bind_obj returns the in-flight instance with
-                    // its OWN +1 (the slot keeps its ref; the next raise's
-                    // overwrite releases it). The binding's scope cleanup
-                    // drops this +1 on the normal path; the unwind cleanup
-                    // entry drops it when a nested raise longjmps past the
-                    // handler.
+                    // dragon_exc_bind_obj returns the in-flight instance with its OWN +1 (the slot keeps its own ref); the
+                    // binding's scope cleanup drops this +1 normally, the unwind cleanup entry drops it if a nested raise longjmps past.
                     auto* obj = impl_->builder->CreateCall(
                         impl_->runtimeFuncs["dragon_exc_bind_obj"], {}, "exc.obj");
                     auto* alloca = impl_->createEntryAlloca(
                         func, handler.name, impl_->i8PtrType);
                     impl_->builder->CreateStore(obj, alloca);
-                    // ClassInstance binding routes attribute / method access
-                    // to the class struct + emitted methods. varClassNames
-                    // pins the concrete class for resolveExprClassName so
-                    // `e.code` etc. lower via the right struct GEP.
+                    // ClassInstance binding routes attribute/method access to the class struct + emitted methods; varClassNames
+                    // pins the concrete class for resolveExprClassName so `e.code` etc. lower via the right struct GEP.
                     impl_->setVar(handler.name, alloca, Impl::VarKind::ClassInstance);
                     impl_->varClassNames[handler.name] = named->name;
                     impl_->emitCleanupPush(handler.name, obj, Impl::DCLEAN_OBJ);
@@ -289,12 +247,8 @@ void CodeGen::visit(TryStmt& node) {
                 }
             }
             if (!boundInstance) {
-                // dragon_exc_bind_msg returns the in-flight message with its
-                // OWN +1 (mortal heap only; literals/immortals no-op), so a
-                // nested raise inside this handler - which overwrites and
-                // releases the slot - cannot leave `e` dangling. Bind as Str:
-                // the handler's scope cleanup (and the unwind cleanup entry)
-                // drop the +1; dragon_decref_str is literal-safe.
+                // dragon_exc_bind_msg returns the message with its OWN +1 (mortal heap only, no-op for literals), so a
+                // nested raise overwriting the slot can't leave `e` dangling; scope/unwind cleanup drop that +1 (dragon_decref_str is literal-safe).
                 auto* msg = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_exc_bind_msg"], {}, "exc.msg");
                 auto* alloca = impl_->createEntryAlloca(
@@ -319,7 +273,6 @@ void CodeGen::visit(TryStmt& node) {
             impl_->builder->CreateBr(afterHandlerBB);
     }
 
-    // === Unmatched block (re-raise) ===
     // Preserve the original instance pointer too so a typed-field exception
     // raised inside this try block keeps its instance for an outer handler.
     if (unmatchedBB) {
@@ -343,7 +296,6 @@ void CodeGen::visit(TryStmt& node) {
         impl_->builder->CreateBr(afterHandlerBB);
     }
 
-    // === Else block ===
     if (elseBB) {
         impl_->builder->SetInsertPoint(elseBB);
         for (auto& stmt : node.elseBody) stmt->accept(*this);
@@ -351,7 +303,6 @@ void CodeGen::visit(TryStmt& node) {
             impl_->builder->CreateBr(afterHandlerBB);
     }
 
-    // === Finally block ===
     if (finallyBB) {
         impl_->builder->SetInsertPoint(finallyBB);
         for (auto& stmt : node.finallyBody) stmt->accept(*this);
@@ -359,12 +310,10 @@ void CodeGen::visit(TryStmt& node) {
             impl_->builder->CreateBr(reraiseCheckBB);
     }
 
-    // === Pop exit-cleanup stack ===
     if (!node.finallyBody.empty()) {
         impl_->exitCleanupStack.pop_back();
     }
 
-    // === Re-raise check ===
     // Reached after `finally` (or directly, when there is none). If the
     // exception went unhandled, re-raise it now that finally has run.
     impl_->builder->SetInsertPoint(reraiseCheckBB);
@@ -384,16 +333,12 @@ void CodeGen::visit(TryStmt& node) {
         impl_->builder->CreateUnreachable();
     }
 
-    // === Continue at end ===
     impl_->builder->SetInsertPoint(endBB);
 }
 
 void CodeGen::visit(WithStmt& node) {
-    // Context handle tracking. `val` is the manager object (the ctor temp the
-    // `with` owns - one ref). `enterResult` is what __enter__ returned and bound
-    // to the `as` var; for the common `return self` it is the SAME object with a
-    // SECOND ref (the return convention increfs). Both refs are released at
-    // with-exit - releasing only `val` left the as-binding ref.
+    // `val` is the ctor temp the with owns (one ref); `enterResult` is __enter__'s return bound to `as` -
+    // for `return self` it's the same object with a second ref. Both refs release at exit; releasing only `val` leaks the other.
     struct CtxInfo {
         llvm::Value* val;
         bool isClassCtx;
@@ -401,26 +346,16 @@ void CodeGen::visit(WithStmt& node) {
         std::string className;
         llvm::Value* enterResult = nullptr;  // class CMs only; may == val
         bool isLockTemp = false;  // anonymous `with Lock()` - the with owns + frees it
-        bool subjectOwned = true;  // false for a borrowed subject (bound local /
-                                   // attribute): its slot owns the manager, so
-                                   // with-exit must not decref `val` - doing so
-                                   // over-released and the slot's scope-exit
-                                   // decref read freed memory (A/B-proven UAF,
-                                   // test_d045_privacy / test_rc_with_subject.dr).
+        bool subjectOwned = true;  // false = borrowed subject (bound local/attr): with-exit must not
+                                   // decref `val` - doing so was an A/B-proven UAF (test_d045_privacy / test_rc_with_subject.dr).
         llvm::Function* exitFn = nullptr;  // true-identity __exit__; null = name path
     };
     std::vector<CtxInfo> contextHandles;
 
     for (auto& item : node.items) {
-        // Check for class-based context manager (__enter__/__exit__)
         std::string ctxClassName = impl_->resolveExprClassName(item.contextExpr.get());
-        // Fallback: a module-function call like `database.open(...)` returns a
-        // class instance, but resolveExprClassName can't name it (it handles
-        // `mod.Class(...)` and `func(...)`, not `mod.func(...)`). Use the expr's
-        // inferred InstanceType so the `as` variable is class-tracked - without
-        // it the with-bound var has no class, and generic method calls on it
-        // (e.g. `db.all[T](...)`) can't resolve their receiver's class (the
-        // non-generic methods happen to work, so the bug is silent).
+        // Fallback: resolveExprClassName can't name a `mod.func(...)` result (only `mod.Class(...)`/`func(...)`), so use
+        // the expr's InstanceType to class-track the `as` var - without it, generic method calls on it silently fail to resolve.
         if (ctxClassName.empty() && item.contextExpr->type) {
             if (auto inst = std::dynamic_pointer_cast<InstanceType>(item.contextExpr->type))
                 if (inst->classType && impl_->classNames.count(inst->classType->name))
@@ -438,23 +373,14 @@ void CodeGen::visit(WithStmt& node) {
         llvm::Function* exitFn =
             ctxCT ? impl_->methodFromClassType(ctxCT, "__exit__") : nullptr;
 
-        // Intrinsic `Lock` context: `with lock { }` or `with Lock() { }`.
-        // Lock has no class/dunders - it lowers to acquire on entry and
-        // release on every exit (normal + exception), directly.
+        // Intrinsic `Lock` context (`with lock {}` / `with Lock() {}`): no class/dunders, lowers directly to
+        // acquire on entry and release on every exit (normal + exception).
         bool isLockCtx = false;
-        bool isLockTemp = false;  // `with Lock()` mints an anonymous lock the
-                                  // with OWNS - it must be DESTROYED (not just
-                                  // released) on exit or every use leaks the
-                                  // pthread_mutex. A
-                                  // named `with g:` lock is owned by its scope -
-                                  // release only, never destroy here.
+        bool isLockTemp = false;  // `with Lock()` mints an anonymous lock the with OWNS: must be DESTROYED
+                                  // (not released only) on exit or it leaks the mutex; a named `with g:` lock is release-only.
         if (impl_->isLockExpr(item.contextExpr.get())) {
-            // Covers a tagged local/global (`with glock`) AND a Lock-typed
-            // instance field (`with self._storage_lock`) - the NameExpr-only
-            // check let field locks fall to the generic non-class context
-            // path, which binds the value and SILENTLY SKIPS acquire/release
-            // (the "critical section" ran unlocked; found by the concurrent-
-            // mutation detector on Router._storage_lock).
+            // Covers a tagged local/global AND a Lock-typed instance field (`with self._storage_lock`): a NameExpr-only
+            // check let field locks silently skip acquire/release (found by the concurrent-mutation detector).
             isLockCtx = true;
         } else if (auto* ce = dynamic_cast<CallExpr*>(item.contextExpr.get())) {
             if (auto* cn = dynamic_cast<NameExpr*>(ce->callee.get()))
@@ -464,9 +390,8 @@ void CodeGen::visit(WithStmt& node) {
         item.contextExpr->accept(*this);
         llvm::Value* ctxVal = impl_->lastValue;
         llvm::Value* enterResultV = nullptr;  // __enter__ result (class CMs)
-        // Ownership of the manager object follows the subject EXPRESSION:
-        // `with Guard()` mints a ctor temp the with owns (+1 to drop at exit);
-        // `with g` / `with self.guard` borrow the slot's reference.
+        // Ownership follows the subject EXPRESSION: `with Guard()` mints a ctor temp the with owns (+1 dropped
+        // at exit); `with g` / `with self.guard` borrow the slot's reference.
         bool subjectOwned = !Impl::isBorrowedHeapExpr(item.contextExpr.get());
 
         // Identity-resolved fns decide when the type is known; the name-keyed
@@ -545,7 +470,6 @@ void CodeGen::visit(WithStmt& node) {
         auto* cleanupBB = llvm::BasicBlock::Create(*impl_->context, "with.cleanup", func);
         auto* endBB = llvm::BasicBlock::Create(*impl_->context, "with.end", func);
 
-        // Push exception frame
         auto* jmpbufPtr = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_exc_push_frame"], {}, "jmpbuf");
         auto* setjmpResult = impl_->builder->CreateCall(
@@ -580,21 +504,15 @@ void CodeGen::visit(WithStmt& node) {
         impl_->popScope();
         impl_->exitCleanupStack.pop_back();
         impl_->tryFrameFuncs.pop_back();
-        // Only pop the frame + fall through to cleanup if the body did not
-        // already terminate. A `return` leaves a (no-terminator) dead block, so
-        // this still runs harmlessly into it; a `break`/`continue` leaves the
-        // body block terminated by its branch, so we must NOT append here (that
-        // produced "terminator in the middle of a block" invalid IR) - the
-        // early exit already replayed __exit__/release at the jump site.
+        // Pop frame + fall to cleanup only if the body didn't terminate: a `break`/`continue` already terminated the
+        // block via its own branch, and appending here produced invalid IR ("terminator in the middle of a block").
         if (!impl_->builder->GetInsertBlock()->getTerminator()) {
             impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_exc_pop_frame"], {});
             impl_->builder->CreateBr(cleanupBB);
         }
 
-        // Exception path: free unwound body locals, pop frame, call __exit__ /
-        // release locks, re-raise. The unwind (before pop_frame) rewinds the
-        // cleanup stack to this frame's saved depth, so the chained re-raise's
-        // outer unwind won't re-process the with-body's already-freed locals.
+        // Exception path: free unwound body locals, pop frame, call __exit__/release locks, re-raise. The unwind
+        // rewinds the cleanup stack to this frame's depth so a chained outer unwind won't re-free the same locals.
         impl_->builder->SetInsertPoint(excBB);
         impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_exc_cleanup_unwind"], {});
         impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_exc_pop_frame"], {});
@@ -619,12 +537,8 @@ void CodeGen::visit(WithStmt& node) {
         {
             auto* reType = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_exc_get_type"], {}, "reraise.type");
-            // Preserve the typed-field instance too: re-raising through the
-            // msg-only entry point would NULL exc_obj and a downstream
-            // `except UserExc as e` handler would lose its instance binding.
-            // The obj-raise consumes a +1, and this re-raise borrows the
-            // slot's own pointer - retain first; the same-pointer fold in
-            // dragon_exc_obj_set folds it straight back (net no-op).
+            // Preserve the typed-field instance: the msg-only raise entry would NULL exc_obj and drop a downstream
+            // handler's instance binding. This re-raise borrows the slot's pointer, so retain first (net no-op via same-pointer fold).
             auto* reObj = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_exc_retain_obj"],
                 {impl_->builder->CreateCall(
@@ -640,10 +554,8 @@ void CodeGen::visit(WithStmt& node) {
         }
         impl_->builder->CreateUnreachable();
 
-        // Normal cleanup: call __exit__ / release locks / close files, then
-        // release the context-manager OBJECT itself. The CM is a
-        // ctor temp the `with` owns; __exit__ runs first (it may still use the
-        // object), then we drop the ctor's +1. Decref AFTER __exit__.
+        // Normal cleanup: __exit__ runs first (may still use the object), then release the ctor's +1 on the CM
+        // object itself - decref AFTER __exit__, never before.
         impl_->builder->SetInsertPoint(cleanupBB);
         for (auto& ci : contextHandles) {
             if (ci.isClassCtx) {
@@ -680,23 +592,19 @@ void CodeGen::visit(WithStmt& node) {
 void CodeGen::visit(MatchStmt& node) {
     auto* func = impl_->currentFunction;
 
-    // Evaluate the subject expression once and store it.
     node.subject->accept(*this);
     llvm::Value* subjectVal = impl_->lastValue;
     llvm::Type* subjectTy = subjectVal->getType();
 
-    // Store subject in an alloca so we can reload it in each arm.
     auto* subjectAlloca = impl_->createEntryAlloca(func, "match.subject", subjectTy);
     impl_->builder->CreateStore(subjectVal, subjectAlloca);
 
-    // For class/type-test patterns (`case TypeName()`): the subject's static
-    // type drives ptr-shaped discrimination (str vs list vs class) and the
-    // class-chain walk; a Union/Any subject uses the runtime box tag instead.
+    // Class/type-test patterns (`case TypeName()`): the subject's static type drives ptr-shaped discrimination
+    // (str vs list vs class) and the class-chain walk; a Union/Any subject uses the runtime box tag instead.
     std::shared_ptr<Type> subjectStaticType =
         node.subject ? node.subject->type : nullptr;
-    // Resolve a class name from a (possibly union/Optional) static type - class
-    // instance ptrs carry no runtime type tag, so `case ClassName()` leans on
-    // the static type, including the non-None member of a `Class | None`.
+    // Resolve a class name from a (possibly union/Optional) static type: class instance ptrs carry no runtime
+    // type tag, so `case ClassName()` leans on the static type, including the non-None member of `Class | None`.
     auto classNameOfType = [](Type* t) -> std::string {
         if (!t) return "";
         if (auto* inst = dynamic_cast<InstanceType*>(t))
@@ -714,13 +622,8 @@ void CodeGen::visit(MatchStmt& node) {
     if (subjectClassName.empty() && subjectStaticType)
         subjectClassName = classNameOfType(subjectStaticType.get());
 
-    // #1 in-arm narrowing: when the subject is a bare name `v` and an arm is a
-    // single scalar type-test `case T()`, shadow `v` with the unboxed native
-    // payload inside that arm so the body uses it at its matched type (e.g.
-    // `case int() { print(v + 1) }`) with one payload-extract of cost. Kept in
-    // sync with the TypeChecker's narrowing predicate (scalars only here; class
-    // narrowing rides with field destructuring). Speed: the arm body then emits
-    // native i64/f64 ops instead of boxed ones - narrowing makes it faster.
+    // #1 narrowing: a bare-name subject `v` in a scalar type-test arm (`case int() {...}`) is shadowed with the
+    // unboxed native payload so the body emits native i64/f64 ops instead of boxed ones (kept in sync with the TypeChecker).
     auto* subjectNameExpr = dynamic_cast<NameExpr*>(node.subject.get());
     std::string subjectName = subjectNameExpr ? subjectNameExpr->name : "";
     auto scalarNarrowKind = [&](const std::string& tn) -> Impl::VarKind {
@@ -731,28 +634,21 @@ void CodeGen::visit(MatchStmt& node) {
         return Impl::VarKind::Other;
     };
 
-    // Create merge block.
     auto* endBB = llvm::BasicBlock::Create(*impl_->context, "match.end", func);
 
-    // ---------------------------------------------------------------
-    // Helper: recursively emit pattern-match test on |val| of type
-    // |valTy|. Returns an i1 (true = match).
-    // ---------------------------------------------------------------
+    // Recursively tests `val` (of type `valTy`) against a pattern; returns i1 (true = match).
     std::function<llvm::Value*(llvm::Value*, llvm::Type*, const MatchPattern&)>
     emitPatternMatch = [&](llvm::Value* val, llvm::Type* valTy,
                            const MatchPattern& pat) -> llvm::Value* {
         using Kind = MatchPattern::Kind;
 
         switch (pat.kind) {
-        // -- Wildcard: always matches ------------------------------------
         case Kind::Wildcard:
             return llvm::ConstantInt::get(impl_->i1Type, 1);
 
-        // -- Capture: always matches, bind variable ----------------------
         case Kind::Capture: {
-            // Determine VarKind from the LLVM type of the captured value.
-            // For match capture, use StrLiteral (safe - no decref) since the
-            // captured string's provenance is unknown at this point.
+            // VarKind comes from the captured value's LLVM type; strings bind as StrLiteral (no decref) since the
+            // captured string's provenance is unknown here.
             Impl::VarKind kind = Impl::VarKind::Other;
             if (valTy == impl_->i64Type)     kind = Impl::VarKind::Int;
             else if (valTy == impl_->f64Type) kind = Impl::VarKind::Float;
@@ -765,36 +661,28 @@ void CodeGen::visit(MatchStmt& node) {
             return llvm::ConstantInt::get(impl_->i1Type, 1);
         }
 
-        // -- Literal: compare subject with a constant --------------------
         case Kind::Literal: {
             if (!pat.literal) return llvm::ConstantInt::get(impl_->i1Type, 0);
 
-            // Evaluate the literal expression.
             pat.literal->accept(*this);
             llvm::Value* litVal = impl_->lastValue;
 
-            // Boxed subject (Union / Any): the literal matches iff the box tag
-            // is the literal's type AND the unboxed payload equals it. Without
-            // this the comparison runs against the {tag,payload} struct and
-            // silently never matches (so `match v: int|str { case 0 {...} }`
-            // would skip the `0` arm). int/float/bool payload compares are
-            // arithmetic (safe even when the tag differs, since the result is
-            // AND-ed with the tag check); the string compare derefs, so it is
-            // guarded behind the tag check.
+            // Boxed subject: must check tag AND payload, else the compare runs against the raw {tag,payload} struct and
+            // silently never matches; the string compare derefs so it's guarded behind the tag check (int/float/bool aren't).
             if (valTy == impl_->boxType) {
                 auto* boxTagV = impl_->boxTag(val, "lit.tag");
                 if (dynamic_cast<NoneLiteral*>(pat.literal.get()))
                     return impl_->builder->CreateICmpEQ(
                         boxTagV, llvm::ConstantInt::get(impl_->i64Type, 4),
                         "lit.none");  // TAG_NONE
-                int64_t litTag = 0;            // TAG_INT
+                int64_t litTag = TAG_INT;            // TAG_INT
                 Impl::VarKind payKind = Impl::VarKind::Int;
                 if (litVal->getType() == impl_->i8PtrType) {
-                    litTag = 1; payKind = Impl::VarKind::Str;       // TAG_STR
+                    litTag = TAG_STR; payKind = Impl::VarKind::Str;       // TAG_STR
                 } else if (litVal->getType() == impl_->f64Type) {
-                    litTag = 2; payKind = Impl::VarKind::Float;     // TAG_FLOAT
+                    litTag = TAG_FLOAT; payKind = Impl::VarKind::Float;     // TAG_FLOAT
                 } else if (litVal->getType() == impl_->i1Type) {
-                    litTag = 3; payKind = Impl::VarKind::Bool;      // TAG_BOOL
+                    litTag = TAG_BOOL; payKind = Impl::VarKind::Bool;      // TAG_BOOL
                 }
                 auto* tagEq = impl_->builder->CreateICmpEQ(
                     boxTagV, llvm::ConstantInt::get(impl_->i64Type, litTag),
@@ -871,7 +759,6 @@ void CodeGen::visit(MatchStmt& node) {
             return llvm::ConstantInt::get(impl_->i1Type, 0);
         }
 
-        // -- Value: evaluate dotted-name expr, compare with subject ------
         case Kind::Value: {
             if (!pat.literal) return llvm::ConstantInt::get(impl_->i1Type, 0);
 
@@ -899,7 +786,6 @@ void CodeGen::visit(MatchStmt& node) {
             return llvm::ConstantInt::get(impl_->i1Type, 0);
         }
 
-        // -- Sequence: structural match against tuple elements -----------
         case Kind::Sequence: {
             // val must be a ptr (tuple). Check length first.
             auto* tupleLen = impl_->builder->CreateCall(
@@ -919,16 +805,14 @@ void CodeGen::visit(MatchStmt& node) {
 
             impl_->builder->CreateCondBr(lenOk, elemCheckBB, seqFailBB);
 
-            // Element matching block.
             impl_->builder->SetInsertPoint(elemCheckBB);
             llvm::Value* allMatch = llvm::ConstantInt::get(impl_->i1Type, 1);
             for (size_t i = 0; i < pat.subPatterns.size(); ++i) {
                 auto* idx = llvm::ConstantInt::get(impl_->i64Type, static_cast<int64_t>(i));
                 auto* elem = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_tuple_get"], {val, idx}, "match.elem");
-                // dragon_tuple_get returns i64. For sub-pattern matching we
-                // treat captured values as i64 (ints stored directly, ptrs via
-                // inttoptr when needed later by user code).
+                // dragon_tuple_get returns i64; sub-pattern matching treats captured values as i64 (ints stored directly,
+                // ptrs via inttoptr later when user code needs them).
                 llvm::Value* elemMatch = emitPatternMatch(
                     elem, impl_->i64Type, pat.subPatterns[i]);
                 allMatch = impl_->builder->CreateAnd(allMatch, elemMatch, "match.seq.and");
@@ -938,11 +822,9 @@ void CodeGen::visit(MatchStmt& node) {
             // may have created new blocks).
             auto* elemEndBB = impl_->builder->GetInsertBlock();
 
-            // Fail block: length mismatch.
             impl_->builder->SetInsertPoint(seqFailBB);
             impl_->builder->CreateBr(seqDoneBB);
 
-            // Merge with PHI.
             impl_->builder->SetInsertPoint(seqDoneBB);
             auto* phi = impl_->builder->CreatePHI(impl_->i1Type, 2, "match.seq.phi");
             phi->addIncoming(allMatch, elemEndBB);
@@ -950,7 +832,6 @@ void CodeGen::visit(MatchStmt& node) {
             return phi;
         }
 
-        // -- Or: succeed if any alternative matches ----------------------
         case Kind::Or: {
             if (pat.subPatterns.empty())
                 return llvm::ConstantInt::get(impl_->i1Type, 0);
@@ -959,7 +840,6 @@ void CodeGen::visit(MatchStmt& node) {
             auto* orDoneBB = llvm::BasicBlock::Create(
                 *impl_->context, "match.or.done", func);
 
-            // We'll collect incoming edges for the final PHI.
             std::vector<std::pair<llvm::Value*, llvm::BasicBlock*>> incoming;
 
             for (size_t i = 0; i < pat.subPatterns.size(); ++i) {
@@ -991,17 +871,17 @@ void CodeGen::visit(MatchStmt& node) {
             return phi;
         }
 
-        // -- Class pattern: type test `case TypeName()`, plus positional field
-        //  destructuring `case TypeName(p0, p1, ...)` (handled at the end).
+        // Class pattern: type test `case TypeName()`, plus positional field destructuring
+        // `case TypeName(p0, p1, ...)` (handled below).
         case Kind::Class: {
             auto tagFor = [&](const std::string& tn) -> int64_t {
-                if (tn == "int")   return 0;   // TAG_INT
-                if (tn == "str")   return 1;   // TAG_STR
-                if (tn == "float") return 2;   // TAG_FLOAT
-                if (tn == "bool")  return 3;   // TAG_BOOL
-                if (tn == "list")  return 5;   // TAG_LIST
-                if (tn == "dict")  return 6;   // TAG_DICT
-                if (tn == "bytes") return 7;   // TAG_BYTES
+                if (tn == "int")   return TAG_INT;   // TAG_INT
+                if (tn == "str")   return TAG_STR;   // TAG_STR
+                if (tn == "float") return TAG_FLOAT;   // TAG_FLOAT
+                if (tn == "bool")  return TAG_BOOL;   // TAG_BOOL
+                if (tn == "list")  return TAG_LIST;   // TAG_LIST
+                if (tn == "dict")  return TAG_DICT;   // TAG_DICT
+                if (tn == "bytes") return TAG_BYTES;   // TAG_BYTES
                 if (impl_->classNames.count(tn)) return 7;  // TAG_CLASS
                 return -1;
             };
@@ -1014,9 +894,8 @@ void CodeGen::visit(MatchStmt& node) {
             llvm::Value* instPtr = nullptr;
 
             if (valTy == impl_->boxType) {
-                // Union/Any subject (16-byte box): runtime tag check - mirrors
-                // isinstance's box-tag path. The payload of a TAG_CLASS box is
-                // the instance pointer (used for destructuring).
+                // Union/Any subject (16-byte box): runtime tag check mirrors isinstance's box-tag path; a TAG_CLASS
+                // box's payload is the instance pointer (used for destructuring).
                 int64_t tag = tagFor(pat.name);
                 if (tag < 0) {
                     classTest = llvm::ConstantInt::get(impl_->i1Type, 0);
@@ -1035,11 +914,8 @@ void CodeGen::visit(MatchStmt& node) {
             } else if (valTy == impl_->i1Type) {
                 classTest = llvm::ConstantInt::get(impl_->i1Type, pat.name == "bool" ? 1 : 0);
             } else if (valTy->isPointerTy()) {
-                // A class test on a ptr subject: the dynamic class is recovered
-                // from the static type (no runtime tag on a class ptr). If
-                // pat.name is in the subject's class chain, the match is a
-                // runtime non-null check (a null - None in a `Class | None`
-                // Optional - is not an instance). The ptr itself is the instance.
+                // Ptr subject: the dynamic class is recovered from the static type (no runtime tag on a class ptr).
+                // If pat.name is in the subject's class chain, the match is a non-null check (null = None, not an instance).
                 if (impl_->classNames.count(pat.name)) {
                     std::string cur = subjectClassName;
                     bool inChain = false;
@@ -1074,11 +950,8 @@ void CodeGen::visit(MatchStmt& node) {
             if (!wantDestructure || !instPtr)
                 return classTest;
 
-            // -- Positional field destructuring `case T(p0, p1, ...)` --------
-            // Build the full field order (ancestors first, then own), the same
-            // list the TypeChecker used to type the captures. Then guard the
-            // field loads behind classTest (short-circuit: never read fields of
-            // a non-matching object) and AND each sub-pattern's match.
+            // Field order is ancestors-first then own (matches the TypeChecker's list); field loads are guarded
+            // behind classTest (never read a non-matching object's fields) and ANDed with each sub-pattern's match.
             std::vector<std::string> order;
             {
                 std::vector<std::string> chain;
@@ -1134,9 +1007,7 @@ void CodeGen::visit(MatchStmt& node) {
         return llvm::ConstantInt::get(impl_->i1Type, 0);
     };
 
-    // ---------------------------------------------------------------
-    // Emit case arms as a chain of test-and-branch blocks.
-    // ---------------------------------------------------------------
+    // Emits case arms as a chain of test-and-branch blocks.
     size_t numCases = node.cases.size();
     for (size_t i = 0; i < numCases; ++i) {
         auto& arm = node.cases[i];
@@ -1158,20 +1029,13 @@ void CodeGen::visit(MatchStmt& node) {
         // its own load).
         llvm::Value* subject = impl_->builder->CreateLoad(subjectTy, subjectAlloca, "match.subj");
 
-        // Emit the pattern match condition.
         llvm::Value* matched = emitPatternMatch(subject, subjectTy, arm.pattern);
 
-        // Evaluate optional guard: case pattern if guard_expr.
-        // The guard is only evaluated when the pattern matches.
-        //
-        // We track a "fallthroughBB": the block where control resumes
-        // when this arm does NOT match. After emitting the body we
-        // restore the insert point to fallthroughBB so the next
-        // iteration's CreateBr(testBB) chains correctly.
+        // Guard (if present) is evaluated only when the pattern matches. `fallthroughBB` is where control resumes
+        // on no-match; restoring the insert point there lets the next iteration's branch chain correctly.
         llvm::BasicBlock* fallthroughBB = nullptr;
 
         if (arm.guard) {
-            // Create a block for guard evaluation and one for "guard failed".
             auto* guardBB = llvm::BasicBlock::Create(
                 *impl_->context, "match.case" + std::to_string(i) + ".guard", func);
             auto* guardFailBB = llvm::BasicBlock::Create(
@@ -1179,7 +1043,6 @@ void CodeGen::visit(MatchStmt& node) {
 
             impl_->builder->CreateCondBr(matched, guardBB, guardFailBB);
 
-            // Guard evaluation block.
             impl_->builder->SetInsertPoint(guardBB);
             arm.guard->accept(*this);
             llvm::Value* guardVal = impl_->lastValue;
@@ -1192,7 +1055,6 @@ void CodeGen::visit(MatchStmt& node) {
             }
             impl_->builder->CreateCondBr(guardVal, bodyBB, guardFailBB);
 
-            // guardFailBB is the fallthrough for the next case.
             fallthroughBB = guardFailBB;
         } else {
             // No guard: branch directly on pattern match.
@@ -1202,12 +1064,9 @@ void CodeGen::visit(MatchStmt& node) {
             fallthroughBB = fallBB;
         }
 
-        // Emit the case body.
         impl_->builder->SetInsertPoint(bodyBB);
-        // #1 narrowing: extract the box payload at the matched native type and
-        // shadow the bare-name subject for this arm's scope (mirrors the
-        // isinstance narrowing in visit(IfStmt)). Borrowed - the payload lives
-        // in the box, so scope cleanup must not decref it.
+        // #1 narrowing: extracts the box payload at the matched native type and shadows the bare-name subject
+        // for this arm (mirrors IfStmt's isinstance narrowing); borrowed, so scope cleanup must not decref it.
         if (!subjectName.empty() && subjectTy == impl_->boxType &&
             arm.pattern.kind == MatchPattern::Kind::Class &&
             arm.pattern.subPatterns.empty()) {
@@ -1233,10 +1092,8 @@ void CodeGen::visit(MatchStmt& node) {
             impl_->builder->CreateBr(endBB);
         }
 
-        // Restore insert point to the fallthrough block. If this is
-        // the last case, terminate it with a branch to match.end.
-        // Otherwise, leave it unterminated so the next iteration can
-        // chain it to the next case's test block.
+        // Restore the insert point to the fallthrough block: terminate with a branch to match.end if this is the
+        // last case, else leave it unterminated so the next iteration's testBB branch chains onto it.
         impl_->builder->SetInsertPoint(fallthroughBB);
         if (i + 1 >= numCases) {
             impl_->builder->CreateBr(endBB);

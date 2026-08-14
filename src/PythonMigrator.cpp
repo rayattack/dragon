@@ -121,10 +121,6 @@ void PythonMigrator::validateDragonCompatibility(Module& module) {
     }
 }
 
-//===----------------------------------------------------------------------===//
-// Dragon Code Emission
-//===----------------------------------------------------------------------===//
-
 static std::string ind(int level) {
     return std::string(level * 4, ' ');
 }
@@ -293,7 +289,6 @@ std::string PythonMigrator::emitType(TypeExpr* type) {
     return "Any";
 }
 
-// Helper to emit a block of statements (with braces or indent)
 static std::string emitBlockHelper(PythonMigrator* self, const std::vector<std::unique_ptr<Stmt>>& stmts,
                                    int level, bool useBraces) {
     std::string out;

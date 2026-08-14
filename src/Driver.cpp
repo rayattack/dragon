@@ -30,9 +30,8 @@ namespace dragon {
 
 namespace {
 
-/// Search the install prefix for the Dragon stdlib directory.
-/// Tries <prefix>/share/dragon/stdlib then <prefix>/lib/dragon/stdlib.
-/// Returns empty string if not found.
+/// Search the install prefix for the Dragon stdlib dir (share/dragon/stdlib
+/// or lib/dragon/stdlib); empty string if not found.
 std::string findStdlibUnderPrefix(const std::string& prefix) {
     if (prefix.empty()) return {};
     namespace fs = std::filesystem;
@@ -44,8 +43,8 @@ std::string findStdlibUnderPrefix(const std::string& prefix) {
     return {};
 }
 
-/// Locate the platform/ tree (native shim sources compiled per program, e.g.
-/// the webview shell) under an install prefix.
+/// Locate the platform/ tree (native per-program shim sources, e.g. the
+/// webview shell) under an install prefix.
 std::string findPlatformUnderPrefix(const std::string& prefix) {
     if (prefix.empty()) return {};
     namespace fs = std::filesystem;
@@ -72,7 +71,7 @@ std::string findRuntimeUnderPrefix(const std::string& prefix) {
 }
 
 /// Resolve a bundled library (e.g. sqlite3, pcre2-8, llhttp) under the install
-/// prefix, falling back to the compile-time path baked at configure time.
+/// prefix, falling back to the compile-time path.
 std::string findBundledLib(const std::string& prefix,
                             const std::string& filename,
                             const std::string& compileTimePath) {
@@ -87,10 +86,8 @@ std::string findBundledLib(const std::string& prefix,
     return compileTimePath;
 }
 
-/// Resolve the stdlib directory using a fallback chain:
-///  1. $DRAGON_STDLIB_PATH env var
-///  2. <install-prefix>/share/dragon/stdlib (relocatable install)
-///  3. Compile-time DRAGON_STDLIB_DIR (development tree)
+/// Resolve the stdlib dir: $DRAGON_STDLIB_PATH env var, then
+/// <prefix>/share/dragon/stdlib, then compile-time DRAGON_STDLIB_DIR.
 std::string resolveStdlibDir() {
     if (const char* env = std::getenv("DRAGON_STDLIB_PATH")) {
         if (env[0] != '\0') return std::string(env);
@@ -105,11 +102,8 @@ std::string resolveStdlibDir() {
 #endif
 }
 
-/// Resolve the platform/ tree (native per-program shim sources, the Odin
-/// vendor-style sibling of stdlib/) using the same fallback chain:
-///  1. $DRAGON_PLATFORM_PATH env var
-///  2. <install-prefix>/share/dragon/platform (relocatable install)
-///  3. Compile-time DRAGON_PLATFORM_DIR (development tree)
+/// Resolve the platform/ tree (native per-program shim sources) via the same
+/// fallback chain: $DRAGON_PLATFORM_PATH env var, install prefix, then DRAGON_PLATFORM_DIR.
 std::string resolvePlatformDir() {
     if (const char* env = std::getenv("DRAGON_PLATFORM_PATH")) {
         if (env[0] != '\0') return std::string(env);
@@ -139,15 +133,8 @@ std::string resolveRuntimeLib() {
 #endif
 }
 
-//===--------------------------------------------------------------------===//
-// dragon-egg sidecar (D022 package manager).
-//
-// The C++ Driver can't call the pure-Dragon .drs parser directly, so the egg
-// CLI lives in tools/egg/egg.dr, compiled to a `dragon-egg` binary. The Driver
-// exec's it for manifest reading + the package verbs. Same fallback chain as
-// resolveStdlibDir: env -> install prefix -> compile-time path; with a dev-tree
-// fallback that compiles-and-runs the egg.dr source via this `dragon`.
-//===--------------------------------------------------------------------===//
+// dragon-egg sidecar (D022): the Driver can't call the pure-Dragon .drs parser
+// directly, so it execs the compiled dragon-egg binary (or runs egg.dr via this `dragon` in a dev tree).
 
 /// Resolve the dragon-egg sidecar binary, or "" if not found.
 std::string resolveEggBin() {
@@ -172,9 +159,8 @@ std::string resolveEggBin() {
     return {};
 }
 
-/// argv for invoking the sidecar with `subArgs` (egg verb + its args). Prefers
-/// the compiled binary; falls back to `dragon run <egg.dr> -- <subArgs>` in a
-/// dev tree. Empty result = sidecar unavailable.
+/// argv for invoking the sidecar with subArgs; prefers the compiled binary,
+/// falls back to `dragon run <egg.dr> -- <subArgs>` in a dev tree. Empty = unavailable.
 std::vector<std::string> buildEggArgv(const std::vector<std::string>& subArgs) {
     std::vector<std::string> argv;
     std::string bin = resolveEggBin();
@@ -284,22 +270,8 @@ bool isEggVerb(const std::string& cmd) {
     return false;
 }
 
-/// Type-check the entry module together with its resolved dependency modules.
-///
-/// This is the SINGLE registration path shared by `build`/`run` and `check`,
-/// so the three commands resolve imports and register cross-module types
-/// identically. It mirrors what the full compile pipeline needs: every
-/// dependency module (already topologically ordered in `graph`) is run through
-/// Sema + TypeChecker, its exports are collected, and downstream modules - and
-/// finally the entry module - get those exports registered via
-/// `registerExternalModule`. Without this, `check` saw an unregistered module
-/// for `from http.server import Router` / `import math`, so imported classes
-/// (and their parent chains) and stdlib functions resolved to "unknown type" /
-/// "module has no attribute" even though `build` of the same file succeeds.
-///
-/// On success returns 0 and fills `depModules` with the dependency ASTs (kept
-/// alive by `graph`, which the caller owns) for codegen. On error, prints the
-/// diagnostics via `formatter` and returns 1.
+/// Type-checks the entry module plus its dependency graph; the single registration path
+/// shared by build/run/check. Fills depModules with the dependency ASTs; returns 0 or 1.
 int typeCheckModuleGraph(Module& entryModule,
                          const std::string& entryFile,
                          ImportGraph& graph,
@@ -309,17 +281,14 @@ int typeCheckModuleGraph(Module& entryModule,
     std::unordered_map<std::string,
         std::unordered_map<std::string, std::shared_ptr<Type>>> allExports;
 
-    // D045 - name -> source-file path, so registerExternalModule can carry each
-    // module's filepath into the importer's type system (member/import privacy
-    // needs the declaring module's package + same-file key).
+    // D045: name -> source-file path, carried into the importer's type system
+    // (member/import privacy needs the declaring module's package + same-file key).
     std::unordered_map<std::string, std::string> moduleFilepaths;
     for (auto& mod : graph.modules) moduleFilepaths[mod.name] = mod.filepath;
 
     for (auto& mod : graph.modules) {
-        // Stamp the canonical module name onto the AST so codegen can produce
-        // per-module-mangled symbols (e.g. `tarfile__open` instead of bare
-        // `@open`, which collides across stdlib modules sharing Python-
-        // conventional names like `open` / `compress` / `decompress`).
+        // Stamp the canonical module name onto the AST so codegen mangles symbols per
+        // module (e.g. `tarfile__open`, avoiding collisions on names like `open`/`compress`).
         mod.ast->moduleName = mod.name;
 
         // Run PEP-484 enforcement on imported .py files
@@ -341,12 +310,8 @@ int typeCheckModuleGraph(Module& entryModule,
             }
         }
 
-        // Sema + TypeCheck each dependency module
-        // Surface Sema errors in dependency modules just like the entry module
-        // (below) and like the dependency TypeChecker (further down). Dropping
-        // the return swallows a name-resolution error in an imported module -
-        // it vanishes or resurfaces later as an opaque type error, violating
-        // the "a silent fallback is a silent lie" rule.
+        // Surface Sema errors in dependency modules (like the entry module below);
+        // dropping this return would swallow a name-resolution error until it resurfaces as an opaque type error.
         Sema modSema;
         if (!modSema.analyze(*mod.ast)) {
             for (const auto& diag : modSema.diagnostics()) {
@@ -359,8 +324,8 @@ int typeCheckModuleGraph(Module& entryModule,
             return 1;
         }
 
-        // Definite-assignment: reject reads of a no-initializer local before it
-        // is assigned on every path (runs after name resolution, type-agnostic).
+        // Definite-assignment: rejects reads of a no-initializer local before
+        // it is assigned on every path (runs after name resolution).
         {
             DefiniteAssignment modDa;
             if (!modDa.analyze(*mod.ast)) {
@@ -379,19 +344,16 @@ int typeCheckModuleGraph(Module& entryModule,
         for (auto& [modName, exports] : allExports) {
             modTypeChecker.registerExternalModule(modName, exports, moduleFilepaths[modName]);
         }
-        // D044 cross-module generics: surface earlier deps' generic templates so
-        // this module can instantiate them (e.g. a stdlib module using another's
-        // generic). depModules holds the already-processed dependency ASTs.
+        // D044: surface earlier deps' generic templates so this module can instantiate
+        // them (e.g. a stdlib module using another's generic); depModules holds prior ASTs.
         for (auto* prior : depModules) {
             modTypeChecker.registerExternalGenerics(*prior);
         }
 
         modTypeChecker.check(*mod.ast);
 
-        // Surface type errors in dependency modules. Without this, a broken
-        // import fails silently: we'd collect incomplete exports and march on,
-        // and the entry would later die with an opaque "unknown type" (or no
-        // error at all).
+        // Surface type errors in dependency modules; without this a broken import
+        // fails silently and the entry later dies with an opaque "unknown type" (or no error at all).
         if (modTypeChecker.hasErrors()) {
             for (const auto& diag : modTypeChecker.diagnostics()) {
                 if (diag.level == TypeDiagnostic::Level::Error) {
@@ -403,8 +365,8 @@ int typeCheckModuleGraph(Module& entryModule,
             return 1;
         }
 
-        // Ownership analysis (del/own/dub, docs/002 ADR): needs the
-        // TypeChecker's expression types, so it runs after check().
+        // Ownership analysis (del/own/dub, docs/002 ADR) needs the TypeChecker's
+        // expression types, so it runs after check().
         {
             OwnershipCheck modOwn;
             if (!modOwn.analyze(*mod.ast)) {
@@ -429,15 +391,14 @@ int typeCheckModuleGraph(Module& entryModule,
     for (auto& [modName, exports] : allExports) {
         entryTc.registerExternalModule(modName, exports, moduleFilepaths[modName]);
     }
-    // D044 cross-module generics: surface every dependency's generic templates so
-    // the entry module can instantiate them (the db.all[T] / db.one[T] shape -
-    // a stdlib generic method stamped against an entry-module row type).
+    // D044: surface every dependency's generic templates so the entry module can
+    // instantiate them (e.g. db.all[T], a stdlib generic stamped against an entry-module row type).
     for (auto* dep : depModules) {
         entryTc.registerExternalGenerics(*dep);
     }
 
-    // Definite-assignment on the entry module - runs before the type check (a
-    // basic, type-agnostic property, mirroring the per-dependency ordering).
+    // Definite-assignment on the entry module runs before the type check,
+    // mirroring the per-dependency ordering.
     {
         DefiniteAssignment entryDa;
         if (!entryDa.analyze(entryModule)) {
@@ -462,7 +423,7 @@ int typeCheckModuleGraph(Module& entryModule,
         return 1;
     }
 
-    // Ownership analysis on the entry module (del/own/dub, docs/002 ADR):
+    // Ownership analysis on the entry module (del/own/dub, docs/002 ADR)
     // needs the TypeChecker's expression types, so it runs after check().
     {
         OwnershipCheck entryOwn;
@@ -489,7 +450,6 @@ Driver::Driver() : impl_(std::make_unique<Impl>()) {}
 Driver::~Driver() = default;
 
 bool Driver::parseArgs(int argc, char* argv[]) {
-    // TODO: Implement argument parsing
     if (argc < 2) {
         printUsage();
         return false;
@@ -497,10 +457,8 @@ bool Driver::parseArgs(int argc, char* argv[]) {
     
     std::string command = argv[1];
 
-    // Package-manager verbs (D022) are dispatched to the dragon-egg sidecar
-    // (pure-Dragon CLI in tools/egg/egg.dr). They never reach the compile
-    // pipeline - exec the sidecar with the verb + remaining args, then exit
-    // with its status (like --version, a terminal operation).
+    // D022 package-manager verbs dispatch to the dragon-egg sidecar (tools/egg/egg.dr);
+    // they never reach the compile pipeline, exec'd then exit with its status (like --version).
     if (isEggVerb(command)) {
         std::vector<std::string> sub;
         for (int i = 1; i < argc; ++i) sub.push_back(argv[i]);
@@ -533,10 +491,8 @@ bool Driver::parseArgs(int argc, char* argv[]) {
     } else if (command == "check") {
         impl_->options.action = DriverOptions::Action::Check;
     } else if (command == "--version" || command == "-v") {
-        // `--version` / `--help` are terminal success operations, not errors.
-        // main() returns 1 whenever parseArgs returns false (used for "no input
-        // / bad command"), so exit(0) directly here - otherwise CI install
-        // probes that run `dragon --version` see a nonzero status and fail.
+        // Terminal success op: exit(0) directly, since parseArgs returning false
+        // makes main() return 1, which would fail CI's `dragon --version` probes.
         printVersion();
         std::exit(0);
     } else if (command == "--help" || command == "-h") {
@@ -550,11 +506,8 @@ bool Driver::parseArgs(int argc, char* argv[]) {
     bool afterSeparator = false;  // `--` forces all following args to the program
     for (int i = 2; i < argc; i++) {
         std::string arg = argv[i];
-        // `run` mode argv forwarding. Compiler flags are still parsed wherever
-        // they appear (so `run app.dr --cc-source x.cpp` keeps working); a
-        // NON-flag arg after the program file is forwarded to the program
-        // (`run file.dr a b` -> argv a, b). Use `--` to forward flag-shaped
-        // program args explicitly (`run file.dr -- --verbose`).
+        // `run` mode argv forwarding: compiler flags still parse wherever they appear;
+        // a non-flag arg after the program file forwards to it (use `--` for flag-shaped args).
         if (impl_->options.action == DriverOptions::Action::Run) {
             if (afterSeparator) { impl_->options.programArgs.push_back(arg); continue; }
             if (arg == "--") { afterSeparator = true; continue; }
@@ -574,12 +527,8 @@ bool Driver::parseArgs(int argc, char* argv[]) {
         } else if (arg == "-O3") {
             impl_->options.optimizationLevel = 3;
         } else if (arg == "--release") {
-            // Aggressive optimization for shipping binaries. Previously this
-            // flag was documented (CLI chapter) and used by build scripts but
-            // never parsed here, so `dragon build --release` silently fell
-            // through to the default optimizationLevel = 0 and shipped
-            // *unoptimized* code (~70% slower on compute-bound programs). Map
-            // it to -O3 so "release" actually means release.
+            // Previously documented but never parsed here, so `--release` silently
+            // shipped unoptimized code (~70% slower); map it to -O3 so it means release.
             impl_->options.optimizationLevel = 3;
         } else if (arg == "-g") {
             impl_->options.debugInfo = true;
@@ -605,11 +554,10 @@ bool Driver::parseArgs(int argc, char* argv[]) {
         } else if (arg.size() > 2 && arg.substr(0, 2) == "-L") {
             impl_->options.librarySearchPaths.push_back(arg.substr(2));
         } else if (arg == "--cc-source" && i + 1 < argc) {
-            // ADR 041 - compile a C/C++ FFI shim and link it into the program.
+            // ADR 041: compile a C/C++ FFI shim and link it into the program.
             impl_->options.ccSources.push_back(argv[++i]);
         } else if (arg == "--backend" && i + 1 < argc) {
-            // --backend is accepted for backward compatibility but ignored
-            // (LLVM is the only backend)
+            // Accepted for backward compatibility but ignored (LLVM is the only backend).
             ++i;
         } else if (arg.substr(0, 5) == "--gc=") {
             impl_->options.gcMode = arg.substr(5);
@@ -620,10 +568,8 @@ bool Driver::parseArgs(int argc, char* argv[]) {
         }
     }
 
-    // Manifest-driven entry resolution (D022): `dragon run`/`build` aimed at a
-    // directory - or with no file when a dragon.drs sits in the cwd - resolves
-    // the entry file via the sidecar reading the manifest's `entry` field. A
-    // plain `dragon build file.dr` skips this entirely (no sidecar call).
+    // D022: `run`/`build` aimed at a directory (or cwd with a dragon.drs) resolves
+    // the entry file via the sidecar's manifest `entry` field; a plain `dragon build file.dr` skips this.
     if (impl_->options.action == DriverOptions::Action::Run ||
         impl_->options.action == DriverOptions::Action::Build) {
         namespace fs = std::filesystem;
@@ -690,9 +636,8 @@ int Driver::run(const DriverOptions& options) {
 }
 
 void Driver::printUsage() {
-    std::cout << R"(
-Dragon Compiler v0.0.1 - Bilingual Python/Dragon Compiler
-
+    std::cout << "\nDragon Compiler v" << VERSION
+              << " - Bilingual Python/Dragon Compiler\n" << R"(
 Usage: dragon <command> [options] <files>
 
 Commands:
@@ -741,11 +686,8 @@ void Driver::printVersion() {
 }
 
 int Driver::runFile(const std::string& filename) {
-    // Build to a temp executable inside a fresh owner-only (0700) temp dir, then
-    // execute. Using a randomized mkdtemp directory (not a predictable
-    // /tmp/dragon_run_<pid>) prevents a local attacker from pre-planting a
-    // symlink at the path and redirecting the link step or swapping the binary
-    // in the window before execvp (TOCTOU local privesc).
+    // Build into a fresh owner-only (0700) randomized temp dir, then execute; a
+    // predictable path would let a local attacker pre-plant a symlink and hijack the link/exec step (TOCTOU).
     std::string tmpDir = platform::makeSecureTempDir("dragon_run_");
     if (tmpDir.empty()) {
         std::cerr << "error: could not create a secure temporary directory\n";
@@ -780,9 +722,8 @@ int Driver::runFile(const std::string& filename) {
         return 1;
     }
     if (pid == 0) {
-        // argv[0] = the script path (Python parity for sys.argv[0]); the
-        // remaining slots forward the program's arguments. The executed image
-        // is still tmpExe.
+        // argv[0] = the script path (Python parity for sys.argv[0]); remaining
+        // slots forward the program's args. The executed image is still tmpExe.
         std::vector<const char*> ev;
         ev.push_back(filename.c_str());
         for (const auto& a : impl_->options.programArgs) ev.push_back(a.c_str());
@@ -793,9 +734,8 @@ int Driver::runFile(const std::string& filename) {
     int status = 0;
     waitpid(pid, &status, 0);
     cleanup();
-    // Translate the wait status: normal exit -> exit code; signal death (segv,
-    // abort, ...) -> 128+signum (shell convention). A bare 1 here would mask
-    // program crashes as an ordinary failure.
+    // Translate wait status: normal exit -> exit code, signal death -> 128+signum
+    // (shell convention); a bare 1 here would mask program crashes as ordinary failure.
     return platform::getExitCode(status);
 #endif
 }
@@ -876,26 +816,12 @@ int Driver::buildFile(const std::string& filename) {
     }
 
     // --- Type Checking ---
-    // The entry module is type-checked by `typeCheckModuleGraph` below (after
-    // dependency modules are processed and their exports registered). We do NOT
-    // type-check early here: a redundant pre-check mutates the AST as a side
-    // effect (generic monomorphization appends stamped class decls to the
-    // module body), and the subsequent graph check then re-resolves that
-    // already-stamped AST. For an entry-file generic class, the stamped class
-    // is non-generic, so its method's `-> T` return annotation re-resolves to
-    // Any on the second pass - silently miscompiling `cell()[k]` / `cell().x`
-    // into a str-index / 0. Checking exactly once keeps monomorphization a
-    // single, consistent pass (and halves type-check work for import-free
-    // programs).
+    // Entry module type-checks once, inside typeCheckModuleGraph below: a redundant
+    // early pre-check re-stamps monomorphized generics, silently miscompiling `-> T` returns to Any.
 
     // --- Resolve Imports ---
-    // sourceDir = the directory of the entry file. For an absolute or
-    // dotted-relative path it's the substring up to the last '/'. For a
-    // bare filename (no slash) we default to "./" so co-located modules
-    // are resolvable - otherwise `dragon run foo.dr` from the directory
-    // containing both foo.dr and its dependency bar.dr would silently
-    // fail to find bar.dr because the resolver had no source dir to
-    // search.
+    // sourceDir = entry file's directory (substring to last '/'), defaulting to
+    // "./" for a bare filename, or co-located deps like bar.dr would silently fail to resolve.
     std::string sourceDir;
     auto lastSlash = filename.rfind('/');
     if (lastSlash != std::string::npos) {
@@ -934,26 +860,21 @@ int Driver::buildFile(const std::string& filename) {
         return 1;
     }
 
-    // Process imported modules + entry module through the SHARED type-check
-    // path (also used by `check`): enforce types, run Sema + TypeChecker on
-    // each dependency, register their exports for downstream modules, then
-    // register all exports with the entry module and check it. depModules is
-    // filled with the dependency ASTs (kept alive by `graph`) for codegen.
+    // Process modules through the SHARED type-check path (also used by `check`):
+    // Sema + TypeChecker per dependency, then the entry module; depModules holds the ASTs for codegen.
     std::vector<Module*> depModules;
     if (int rc = typeCheckModuleGraph(*module, filename, graph,
                                       impl_->formatter, depModules)) {
         return rc;
     }
 
-    // D052: an edited process-extern signature with a stale stub is a compile
-    // error, not a runtime zero-fill.
+    // D052: an edited process-extern signature with a stale stub is a compile error.
     {
         int staleStubs = verifyFfiStubSignatures(*module);
         for (auto* dep : depModules) staleStubs += verifyFfiStubSignatures(*dep);
         if (staleStubs) return 1;
     }
 
-    // Determine output filename
     std::string outputFile = impl_->options.outputFile;
     if (outputFile.empty()) {
         outputFile = filename;
@@ -992,23 +913,25 @@ int Driver::buildFile(const std::string& filename) {
         codegenOpts.zstdLibPath = findBundledLib(
             prefix, "libzstd.a", DRAGON_ZSTD_LIB);
 #endif
-        // D031: the ui module's webview shell ships as SOURCE in platform/
-        // (the native-shim tree installed beside stdlib/, never in the runtime
-        // archive); when a program imports ui, linkExecutable compiles it in
-        // and links webkit2gtk via pkg-config.
+        // D031: the ui module's webview shell ships as source in platform/ (never in
+        // the runtime archive); importing ui makes linkExecutable compile it in and link the system webview.
         {
             auto platformDir = resolvePlatformDir();
             if (!platformDir.empty()) {
                 namespace fs = std::filesystem;
-                fs::path shim = fs::path(platformDir) / "webview_linux.cpp";
+#ifdef __APPLE__
+                const char* shimName = "webview_macos.mm";
+#else
+                const char* shimName = "webview_linux.cpp";
+#endif
+                fs::path shim = fs::path(platformDir) / shimName;
                 std::error_code shimEc;
                 if (fs::is_regular_file(shim, shimEc))
                     codegenOpts.webviewShimPath = shim.string();
             }
         }
-        // D031: the program's assets/ directory (next to the entry file) is
-        // embedded into the binary and served in-process by the app:// scheme
-        // handler - no localhost server, no open port.
+        // D031: the program's assets/ dir (next to the entry file) is embedded into
+        // the binary and served in-process by the app:// scheme handler; no localhost server, no open port.
         {
             namespace fs = std::filesystem;
             std::error_code aec;
@@ -1026,17 +949,15 @@ int Driver::buildFile(const std::string& filename) {
     codegenOpts.checkOverflow = impl_->options.checkOverflow;
 
     CodeGen codegen(codegenOpts);
-    // Debug: dump LLVM IR. DRAGON_DUMP_IR=1 dumps pre-optimization IR here;
-    // DRAGON_DUMP_IR=opt dumps post-optimization IR inside compileToObject
-    // (after runOptimizationPasses). Path optional via DRAGON_IR_FILE.
+    // DRAGON_DUMP_IR=1 dumps pre-opt IR here; DRAGON_DUMP_IR=opt dumps post-opt IR
+    // inside compileToObject. Path optional via DRAGON_IR_FILE.
     const char* dumpMode = std::getenv("DRAGON_DUMP_IR");
     bool dumpPreOpt = dumpMode != nullptr && std::string(dumpMode) != "opt";
     if (!codegen.generate(*module, depModules)) {
         for (const auto& diag : codegen.diagnostics()) {
             if (diag.level == CodeGenDiagnostic::Level::Error) {
-                // Use the diagnostic's own location (line/column/file) - every
-                // other stage does. Hardcoding 0,0 here made EVERY codegen
-                // error report at [file:0:0], hiding where the problem is.
+                // Use the diagnostic's own location; hardcoding 0,0 here made every
+                // codegen error report at [file:0:0], hiding where the problem is.
                 std::cerr << impl_->formatter.format(
                     diag.location.filename.empty() ? filename
                                                    : diag.location.filename,
@@ -1053,10 +974,8 @@ int Driver::buildFile(const std::string& filename) {
         codegen.writeIR(irPath);
         std::cerr << "[DRAGON_DUMP_IR] wrote pre-optimization IR to " << irPath << "\n";
     }
-    // Emit the intermediate object into a fresh owner-only (0700) temp dir with
-    // a randomized name, not a predictable /tmp/dragon_llvm_<pid>.o that a local
-    // attacker could pre-create as a symlink to clobber a victim file (the
-    // object write and the `cc` link both follow symlinks).
+    // Emit the object into a fresh owner-only (0700) randomized temp dir; a predictable
+    // path would let a local attacker pre-plant a symlink to clobber a victim file on write/link.
     std::string objDir = platform::makeSecureTempDir("dragon_llvm_");
     if (objDir.empty()) {
         std::cerr << "error: could not create a secure temporary directory\n";
@@ -1181,13 +1100,8 @@ int Driver::checkFile(const std::string& filename) {
     }
 
     // --- Resolve Imports ---
-    // `check` MUST resolve imports and register cross-module types exactly the
-    // way `build`/`run` do (same ModuleResolver, same stdlib search paths, same
-    // registerExternalModule registration). Otherwise `from http.server import
-    // Router` or `import math` would type-check against an unregistered module
-    // and report spurious "unknown type Router" / "module math has no attribute
-    // sqrt" on programs that `build` accepts. sourceDir mirrors buildFile: a
-    // bare filename (no slash) defaults to "./" so co-located deps resolve.
+    // `check` must resolve imports and register cross-module types exactly like
+    // build/run, or imports type-check against an unregistered module (spurious "unknown type" errors).
     std::string sourceDir;
     auto lastSlash = filename.rfind('/');
     if (lastSlash != std::string::npos) {

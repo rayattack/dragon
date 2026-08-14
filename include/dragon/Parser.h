@@ -17,69 +17,36 @@ struct ParserDiagnostic {
     std::string message;
 };
 
-/// Configuration options for the parser
+/// Configuration options for the parser.
 struct ParserOptions {
-    /// If true, parsing .dr file (curly braces); if false, .py file (indentation)
-    bool isDragonFile = true;
-    
-    /// If true, type annotations are required (Dragon mode)
-    bool requireTypes = true;
-    
-    /// Filename for error reporting
+    bool isDragonFile = true;   // .dr (braces) vs .py (indentation)
+    bool requireTypes = true;   // require type annotations (Dragon mode)
     std::string filename = "<stdin>";
 };
 
-/// Recursive descent parser for Dragon/Python
-/// 
-/// Produces an AST from a token stream. Handles both brace-delimited
-/// and indentation-based syntax depending on configuration.
+/// Recursive descent parser: token stream to AST, brace- or indentation-based.
 class Parser {
 public:
     Parser(std::vector<Token> tokens, ParserOptions options = {});
     ~Parser();
 
-    // Disable copy
     Parser(const Parser&) = delete;
     Parser& operator=(const Parser&) = delete;
 
-    /// Parse a complete module
     std::unique_ptr<Module> parseModule();
+    std::unique_ptr<Expr> parseExpression();  // for REPL
 
-    /// Parse a single expression (for REPL)
-    std::unique_ptr<Expr> parseExpression();
-
-    /// Parse a template body (the text between the outer braces of a
-    /// `template[X] { ... }` or `:{ ... }` content alias) into structured
-    /// TemplateParts: literal text runs, `!{expr}` interpolations, and
-    /// `!{ ...statements... }` block interpolations. Runs once so the
-    /// TypeChecker and CodeGen walk one shared, typed AST instead of
-    /// re-lexing the raw body at each stage. `isDragonFile` selects the sub-
-    /// parser surface for the interpolation bodies. Static because it builds
-    /// its own sub-lexers/sub-parsers and needs no outer parser state.
-    ///
-    /// Only `!!{` and `!!}` are escapes; a bare `!!` with nothing to escape
-    /// (the JS `!!x` idiom) is literal text. Scan defects that would silently
-    /// corrupt the rendered output - an unterminated `!{`, an interpolation
-    /// body that is not valid Dragon - are appended to `errorsOut` when
-    /// provided; every caller surfaces them as compile errors.
+    /// Parses a `template[X] { ... }` / `:{ ... }` body into TemplateParts once
+    /// (only `!!{`/`!!}` are escapes); scan defects append to `errorsOut` if given.
     static std::vector<TemplatePart> parseTemplateBody(
         const std::string& body, const SourceLocation& loc, bool isDragonFile,
         std::vector<std::string>* errorsOut = nullptr);
 
-    /// Parse a single statement
     std::unique_ptr<Stmt> parseStatement();
-
-    /// Get all diagnostics generated during parsing
     const std::vector<ParserDiagnostic>& diagnostics() const;
-
-    /// Check if any errors occurred
     bool hasErrors() const;
 
 private:
-    //===------------------------------------------------------------------===//
-    // Token Management
-    //===------------------------------------------------------------------===//
-    
     Token advance();
     Token current() const;
     Token previous() const;
@@ -92,17 +59,9 @@ private:
     Token consume(TokenType type, const std::string& message);
     bool isAtEnd() const;
 
-    /// Consume any sequence of NEWLINE tokens. Used to allow line breaks
-    /// after a binary operator or `=` where the parser is committed to
-    /// reading the next operand and a NEWLINE between them is purely
-    /// cosmetic continuation (the Python/JS "trailing operator" rule).
-    /// Do NOT call before *checking* an operator - that would silently
-    /// merge two independent statements together.
+    /// Consumes NEWLINE tokens after a binary op/`=` (trailing-operator
+    /// continuation). Do not call before checking an operator, or it merges statements.
     void skipNewlines();
-
-    //===------------------------------------------------------------------===//
-    // Expression Parsing
-    //===------------------------------------------------------------------===//
 
     std::unique_ptr<Expr> expression();
     std::unique_ptr<Expr> assignment();
@@ -138,10 +97,6 @@ private:
     std::unique_ptr<Expr> parseDictComp();
     std::unique_ptr<Expr> parseYield();
 
-    //===------------------------------------------------------------------===//
-    // Statement Parsing
-    //===------------------------------------------------------------------===//
-
     std::unique_ptr<Stmt> statement();
     std::unique_ptr<Stmt> simpleStatement();
     std::unique_ptr<Stmt> compoundStatement();
@@ -174,9 +129,8 @@ private:
     std::unique_ptr<Stmt> functionDeclaration();
     std::unique_ptr<Stmt> classDeclaration();
     std::unique_ptr<Stmt> enumDeclaration();
-    /// ADR 054 - `type Name { def sig... }` / `type Name(A, B) { ... }`.
-    /// Called from statement() with the contextual `type` and the contract
-    /// name already consumed (the alias form `type X = T` stays there).
+    /// ADR 054: `type Name { def sig... }` / `type Name(A, B) { ... }`, called
+    /// with `type` and the name already consumed (`type X = T` stays in statement()).
     std::unique_ptr<Stmt> contractDeclaration(std::string name);
 
     // Dragon-specific (.dr mode)
@@ -190,49 +144,28 @@ private:
     // synthesize the runs[T] wrapper body in place.
     std::unique_ptr<Stmt> parseProcessExternDef(const std::string& lang);
 
-    // Helper for decorated definitions
     std::vector<std::unique_ptr<Expr>> parseDecorators();
-
-    //===------------------------------------------------------------------===//
-    // Type Annotation Parsing
-    //===------------------------------------------------------------------===//
 
     std::unique_ptr<TypeExpr> parseType();
     std::unique_ptr<TypeExpr> parseUnionType();
     std::unique_ptr<TypeExpr> parsePrimaryType();
     std::unique_ptr<TypeExpr> parseGenericType(std::unique_ptr<TypeExpr> base);
 
-    /// D044 - parse an optional PEP 695 type-parameter list `[T, U, ...]`
-    /// immediately after a class/function name. Returns empty when no `[` is
-    /// present. In declaration position a `[` is unambiguously a type-param
-    /// list (subscript only follows a value expression), so no lookahead trick
-    /// is needed. v1 accepts bare identifiers only; a `T: Bound` form is
-    /// reserved for D046 and rejected here for now.
+    /// D044: optional PEP 695 `[T, U, ...]` after a class/function name; empty
+    /// if no `[`. Bare identifiers only for now; `T: Bound` is reserved for D046.
     std::vector<TypeParam> parseTypeParams();
 
-    //===------------------------------------------------------------------===//
-    // Block Parsing
-    //===------------------------------------------------------------------===//
-
-    /// Parse a block of statements (handles both {} and indentation)
     std::vector<std::unique_ptr<Stmt>> parseBlock();
-    
-    /// Parse function parameters: (x: int, y: str = "default")
-    std::vector<Parameter> parseParameters();
-
-    //===------------------------------------------------------------------===//
-    // Error Handling
-    //===------------------------------------------------------------------===//
+    std::vector<Parameter> parseParameters();  // (x: int, y: str = "default")
 
     void error(const std::string& message);
     void error(const Token& token, const std::string& message);
     void synchronize();
-    
-    // Panic mode recovery points
+
+    // Panic mode recovery points.
     bool isAtStatementBoundary() const;
     bool isAtBlockEnd() const;
 
-    // State
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

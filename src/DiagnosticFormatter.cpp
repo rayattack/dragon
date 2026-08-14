@@ -3,12 +3,10 @@
 
 namespace dragon {
 
-// ---------------------------------------------------------------------------
-// ANSI escape helpers (only emitted when colorOutput is true)
-// ---------------------------------------------------------------------------
 namespace {
 
 const char* kRed     = "\033[1;31m";
+const char* kYellow  = "\033[1;33m";
 const char* kCyan    = "\033[36m";
 const char* kReset   = "\033[0m";
 
@@ -20,26 +18,11 @@ std::string colorize(const std::string& text, const char* color, bool useColor) 
 
 } // anonymous namespace
 
-// ---------------------------------------------------------------------------
-// Construction
-// ---------------------------------------------------------------------------
-
 DiagnosticFormatter::DiagnosticFormatter(DiagnosticStyle style)
     : style_(style) {}
 
-// ---------------------------------------------------------------------------
-// format() -- generic diagnostic
-// ---------------------------------------------------------------------------
-
-/// Produce a formatted diagnostic for any compiler stage.
-///
-/// Dragon theme:
-///  DRAGON SCALE ERROR: <message> at [<filename>:<line>:<column>]
-///  Suggestion: <suggestion>
-///
-/// Plain mode:
-///  <filename>:<line>:<column>: <level>: <message>
-///  Suggestion: <suggestion>
+/// Dragon theme: "DRAGON SCALE ERROR: <message> at [<file>:<line>:<col>]".
+/// Plain mode: "<file>:<line>:<col>: <level>: <message>". Both take a Suggestion line.
 std::string DiagnosticFormatter::format(const std::string& filename,
                                         int line, int column,
                                         const std::string& level,
@@ -56,18 +39,17 @@ std::string DiagnosticFormatter::format(const std::string& filename,
         } else if (level == "warning") {
             label = "DRAGON SCALE WARNING";
         } else {
-            // Fallback: uppercase the level
             label = "DRAGON SCALE " + level;
         }
 
-        out << colorize(label, kRed, color)
+        out << colorize(label, level == "warning" ? kYellow : kRed, color)
             << ": " << message
             << " at [" << filename << ":" << line << ":" << column << "]"
             << "\n";
     } else {
         // Classic plain format: file:line:col: level: message
         out << filename << ":" << line << ":" << column << ": "
-            << colorize(level, kRed, color) << ": "
+            << colorize(level, level == "warning" ? kYellow : kRed, color) << ": "
             << message << "\n";
     }
 
@@ -80,19 +62,8 @@ std::string DiagnosticFormatter::format(const std::string& filename,
     return out.str();
 }
 
-// ---------------------------------------------------------------------------
-// formatMissingType() -- missing type annotation
-// ---------------------------------------------------------------------------
-
-/// Produce a formatted diagnostic for a missing type hint.
-///
-/// Dragon theme:
-///  DRAGON SCALE ERROR: Missing type hint at [<filename>:<line>:<column>]
-///  <context> '<symbolName>' requires a type annotation
-///  Suggestion: "To breathe fire, the Dragon needs to know this type. ..."
-///
-/// Plain mode:
-///  <filename>:<line>:<column>: error: missing type annotation for <context> '<symbolName>'
+/// Dragon theme: "DRAGON SCALE ERROR: Missing type hint ..." plus a Suggestion
+/// line. Plain mode: "<file>:<line>:<col>: error: missing type annotation for <context> '<name>'".
 std::string DiagnosticFormatter::formatMissingType(const std::string& filename,
                                                    int line, int column,
                                                    const std::string& symbolName,
@@ -121,14 +92,8 @@ std::string DiagnosticFormatter::formatMissingType(const std::string& filename,
     return out.str();
 }
 
-// ---------------------------------------------------------------------------
-// formatUntypedImport() -- untyped .py import
-// ---------------------------------------------------------------------------
-
-/// Produce the "borders must be secured" error for untyped Python imports.
-/// This diagnostic is always Dragon-themed regardless of the style flag,
-/// because it represents a core Dragon philosophy about type safety at
-/// module boundaries.
+/// "Borders must be secured" error for untyped Python imports; always
+/// Dragon-themed regardless of the style flag.
 std::string DiagnosticFormatter::formatUntypedImport(const std::string& importedFile) const {
     std::ostringstream out;
 

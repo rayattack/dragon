@@ -6,14 +6,8 @@ namespace dragon {
 
 namespace {
 
-/// Collect every name bound by an assignment *target* that, per the Dragon
-/// declare-vs-reassign rule (`:` declares, `=` reassigns - Sema.cpp visit
-/// AssignStmt / AnnAssignStmt), introduces a binding for the name. A bare
-/// single `NameExpr` target only declares when the statement carries an
-/// annotation (the vestigial AssignStmt::typeAnnotation form); without one it
-/// is a reassignment and is handled by the caller. Tuple-unpack targets have
-/// no annotation slot and implicitly declare each name. Subscript/attribute
-/// targets are mutations and never declare.
+/// Every name a target introduces under Dragon's declare-vs-reassign rule
+/// (`:` declares, `=` reassigns): a bare NameExpr only if annotated; tuple/list unpacking always declares.
 void collectImplicitlyDeclaredNames(Expr* target, std::set<std::string>& out) {
     if (auto* name = dynamic_cast<NameExpr*>(target)) {
         out.insert(name->name);
@@ -35,12 +29,8 @@ TypeHintEnforcer::TypeHintEnforcer(EnforcerOptions options)
 bool TypeHintEnforcer::enforce(Module& module) {
     diagnostics_.clear();
 
-    // The enforcer runs before name resolution, so it cannot ask Sema whether a
-    // bare `name = ...` reassigns an existing binding or introduces a new one.
-    // We track module-level declared names ourselves, mirroring the Sema rule
-    // (`:` declares, `=` reassigns): an annotation introduces a binding, a bare
-    // `=` only reassigns. Only a *first* bare-NameExpr declaration must carry an
-    // annotation; reassignments and subscript/attribute/tuple mutations do not.
+    // Runs before name resolution, so it tracks declared names itself
+    // (Sema's `:` declares / `=` reassigns) to spot first-declaration vs reassignment.
     std::set<std::string> declaredModuleNames;
 
     for (auto& stmt : module.body) {
@@ -63,15 +53,12 @@ bool TypeHintEnforcer::enforce(Module& module) {
                 declaredModuleNames.count(
                     static_cast<NameExpr*>(assign->targets[0].get())->name) != 0;
 
-            // A subscript/attribute target (`cache["k"] = v`, `obj.f = v`) and a
-            // bare reassignment (`counter = counter + 1`) are mutations - never
-            // require an annotation. Only a genuine first declaration is checked.
+            // Mutations (subscript/attribute targets, bare reassignment) never
+            // require an annotation; only a genuine first declaration is checked.
             if (!isReassign) checkModuleLevelAssign(*assign);
 
-            // Record any names this statement binds for later reassignments:
-            // the vestigial annotated form, and annotation-less tuple/list
-            // unpacking. A bare single `=` introduces no new binding here -
-            // it either errored above (undeclared) or was already declared.
+            // Record names bound for later reassignments; a bare single `=`
+            // introduces no new binding (already declared or errored above).
             if (assign->typeAnnotation || !isBareSingleName) {
                 for (auto& target : assign->targets) {
                     collectImplicitlyDeclaredNames(target.get(), declaredModuleNames);
@@ -140,16 +127,8 @@ void TypeHintEnforcer::checkModuleLevelAssign(AssignStmt& assign) {
     // A statement that already carries an annotation is a complete declaration.
     if (assign.typeAnnotation) return;
 
-    // `enforce()` only routes genuine first declarations here (it filters out
-    // bare reassignments of already-declared names). The remaining cases that
-    // must still NOT require an annotation are the implicit-binding forms that
-    // have no annotation slot, mirroring Sema's AssignStmt rule:
-    //  - subscript/attribute targets (`cache["k"] = v`, `obj.f = v`) mutate an
-    //  existing object - they declare nothing.
-    //  - tuple/list unpacking and chained `a = b = c` implicitly declare with
-    //  an inferred type.
-    // Only a bare single `NameExpr` target is a declaration that demands an
-    // explicit annotation.
+    // `enforce()` already filters reassignments; subscript/attribute targets
+    // and tuple/list unpacking have no annotation slot, so only a bare NameExpr counts.
     if (assign.targets.size() != 1) return;
     auto* name = dynamic_cast<NameExpr*>(assign.targets[0].get());
     if (!name) return;

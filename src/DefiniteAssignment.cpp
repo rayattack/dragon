@@ -6,16 +6,8 @@
 
 namespace dragon {
 
-//===----------------------------------------------------------------------===//
-// Implementation
-//
-// A structured forward "must" dataflow. Each tracked no-initializer local gets
-// a unique integer id; a `Flow` carries the set of ids that are *definitely
-// assigned* at a program point plus whether control has already left the path
-// (return/raise/break/continue). Joins intersect the assigned sets of the
-// surviving (non-terminated) predecessors, so a variable is only "assigned"
-// when assigned on every path.
-//===----------------------------------------------------------------------===//
+// A structured forward "must" dataflow: each tracked no-initializer local gets an
+// id; a Flow tracks which ids are definitely assigned (joins intersect surviving, non-terminated predecessors).
 
 namespace {
 
@@ -51,26 +43,15 @@ struct DefiniteAssignment::Impl {
     // duplicate errors for the same variable.
     std::unordered_set<int> reported;
 
-    // --- constructor field-init context -----------------------------------
-    // Active only while analyzing a constructor body. Each own-declared field
-    // with no class-body default gets a slot id; `self.field = ...` marks it
-    // assigned, and the constructor must leave every slot assigned on all exits.
+    // Active only while analyzing a constructor body. Each own-declared field with
+    // no class-body default gets a slot id; the constructor must leave every slot assigned on all exits.
     bool inConstructor = false;
     std::unordered_map<std::string, int> ctorFieldSlot;  // field name -> slot id
     std::unordered_set<int> ctorAllFieldIds;             // every field slot id
     std::vector<Flow>* returnCollector = nullptr;        // flow at each `return`
 
-    // --- module-initialization order context -------------------------------
-    // Module level consts/globals init eagerly, in source order. A binding
-    // whose initaializer reads another module binding's value before that binding
-    // is initialized cpatures a still zeroed slot: a null deref (heap type) or a slient
-    // 0 (scalar). Let's model the module top-level as a definite init flow - every
-    // module binding is a tracked slot, assigned when its initializer runs; a read of
-    // a still-unassgned one directly or through a function/ctor called during ini
-    // is a ompile time error. Function/method bodies analyze with a cleared scope
-    // stack (analyzeCallable), so ordinary forward FUNCTION stay legal: a callee
-    // reads a constant only when actually CALLED, and for init time-time calls we
-    // should expect consultation of module-const read-set (below).
+    // Module consts/globals init eagerly in source order; a binding whose initializer reads
+    // another before it runs would capture a zeroed slot. The module top level is modeled as its own definite-init flow: a read of a not-yet-initialized binding (even through a called function/ctor) is a compile error.
     bool inModuleInit = false;               // true only while walking the module top level
     std::string currentInitConst;            // binding whose initializer is running (diagnostics)
     std::unordered_map<std::string, SourceLocation> moduleConsts;  // name -> decl loc
@@ -78,7 +59,6 @@ struct DefiniteAssignment::Impl {
     std::unordered_map<std::string, ClassDecl*> moduleClasses;     // class name -> decl (for ctor)
     std::unordered_map<const FunctionDecl*, std::unordered_set<std::string>> readSetMemo;
 
-    // --- scope helpers -----------------------------------------------------
     void pushFrame() { scopes.emplace_back(); }
     void popFrame() { scopes.pop_back(); }
 
@@ -105,9 +85,8 @@ struct DefiniteAssignment::Impl {
         flow.assigned.insert(id);
     }
 
-    // Mark an existing name assigned (a plain `x = ...`). If the name isn't a
-    // local of this callable it's a global/outer binding - record it as an
-    // assigned untracked local so later reads in this callable don't warn.
+    // Mark an existing name assigned (`x = ...`); if it's not a local of this callable
+    // it's a global/outer binding, recorded as an assigned untracked local so later reads don't warn.
     void markAssigned(const std::string& name, SourceLocation loc, Flow& flow) {
         if (VarSlot* s = resolve(name)) {
             flow.assigned.insert(s->id);
@@ -120,7 +99,6 @@ struct DefiniteAssignment::Impl {
         diags.push_back(DADiagnostic{loc, msg});
     }
 
-    // --- merge -------------------------------------------------------------
     // Join several branch outcomes: a variable is assigned afterwards only if
     // assigned on every surviving branch. Terminated branches don't constrain.
     Flow merge(const std::vector<Flow>& branches) {
@@ -142,8 +120,6 @@ struct DefiniteAssignment::Impl {
         }
         return out;
     }
-
-    // --- traversal ---------------------------------------------------------
 
     // Analyze a function/method/module/lambda body in isolation: a fresh scope
     // stack and loop context, with parameters pre-declared as assigned.
@@ -196,7 +172,7 @@ struct DefiniteAssignment::Impl {
         ctorFieldSlot.clear();
         ctorAllFieldIds.clear();
         inConstructor = true;
-        inModuleInit = false;        // cos ctor body runs at call time, not module load
+        inModuleInit = false;        // since ctor body runs at call time, not module load
         currentInitConst.clear();
         std::vector<Flow> returnStates;
         returnCollector = &returnStates;
@@ -252,11 +228,8 @@ struct DefiniteAssignment::Impl {
     Flow analyzeStmt(Stmt* s, Flow flow);
     void checkExpr(Expr* e, Flow& flow);
 
-    // --- module-init order analysis ---------------------------------------
-    // Resolve a call's callee to a THIS-MOD function or constructor, or null
-    // for imported/method/indirect callees (which cannot read this module's priate consts).
-    // computeReadSet returns the set of module consts a
-    // callable's body reads, unioned transitively over init-time calls; memoized.
+    // Resolve a call's callee to a this-module function/constructor, or null for
+    // imported/method/indirect callees; computeReadSet unions the module consts a callable's body reads transitively, memoized.
     static FunctionDecl* classCtor(ClassDecl* cd);
     FunctionDecl* resolveModuleCallable(Expr* callee);
     const std::unordered_set<std::string>& computeReadSet(
@@ -275,9 +248,8 @@ struct DefiniteAssignment::Impl {
                        std::unordered_set<std::string>& constReads,
                        std::vector<FunctionDecl*>& callees);
 
-    // Mark the variables written by an assignment target (handles plain names,
-    // tuple/list unpacking, and starred targets; container/attribute targets
-    // only read their object).
+    // Mark the variables written by an assignment target (names, tuple/list unpacking,
+    // starred targets); container/attribute targets only read their object.
     void assignTarget(Expr* target, Flow& flow) {
         if (auto* n = dynamic_cast<NameExpr*>(target)) {
             markAssigned(n->name, n->location(), flow);
@@ -321,10 +293,8 @@ struct DefiniteAssignment::Impl {
         }
     }
 
-    // Collect field names assigned via `self.<field> = ...` anywhere in a body
-    // (descending into nested blocks). Used to detect the deferred-init pattern:
-    // a field a non-constructor method assigns is intentionally initialized
-    // later, so the constructor isn't required to assign it.
+    // Collect field names assigned via `self.<field> = ...` anywhere in a body (nested
+    // blocks included); detects the deferred-init pattern so the constructor isn't required to assign them.
     void collectAssignedSelfFields(const std::vector<std::unique_ptr<Stmt>>& body,
                                    std::unordered_set<std::string>& out) {
         for (auto& s : body) collectStmtSelfFields(s.get(), out);
@@ -376,10 +346,6 @@ struct DefiniteAssignment::Impl {
     }
 };
 
-//===----------------------------------------------------------------------===//
-// Expression reads
-//===----------------------------------------------------------------------===//
-
 void DefiniteAssignment::Impl::checkExpr(Expr* e, Flow& flow) {
     if (!e) return;
 
@@ -430,11 +396,8 @@ void DefiniteAssignment::Impl::checkExpr(Expr* e, Flow& flow) {
         checkExpr(call->callee.get(), flow);
         for (auto& a : call->args) checkExpr(a.get(), flow);
         for (auto& kw : call->kwArgs) checkExpr(kw.second.get(), flow);
-        // Module-init order: a call evaluated during eager module initialization
-        // runs the callee's body NOW. If that body reads a module const not yet
-        // initialized (directly or transitively through further init-time calls),
-        // that is a forward read - reject it. Only calls to this-module callables
-        // are inspected; imported/method/indirect callees cannot reach our consts.
+        // Module-init order: a call during eager init runs the callee's body NOW; a
+        // forward read of a not-yet-initialized const (even transitively) is rejected. Only this-module callees are inspected.
         if (inModuleInit) {
             if (FunctionDecl* target = resolveModuleCallable(call->callee.get())) {
                 std::unordered_set<const FunctionDecl*> visiting;
@@ -457,9 +420,8 @@ void DefiniteAssignment::Impl::checkExpr(Expr* e, Flow& flow) {
                 }
             }
         }
-        // Constructor leniency: once `self` escapes to a helper - `self.setup()`
-        // or `register(self)` - that callee may assign any field, so we can no
-        // longer prove a field is unassigned. Treat all field slots as assigned.
+        // Constructor leniency: once `self` escapes to a helper (self.setup(),
+        // register(self)), that callee may assign any field, so treat all field slots as assigned.
         if (inConstructor && !ctorAllFieldIds.empty()) {
             bool selfEscapes = false;
             if (auto* ce = dynamic_cast<AttributeExpr*>(call->callee.get()))
@@ -627,15 +589,10 @@ void DefiniteAssignment::Impl::checkExpr(Expr* e, Flow& flow) {
     // Literals / templates / type-less leaves: nothing to read.
 }
 
-//===----------------------------------------------------------------------===//
-// Statements
-//===----------------------------------------------------------------------===//
-
 Flow DefiniteAssignment::Impl::analyzeStmt(Stmt* s, Flow flow) {
     if (!s || flow.terminated) {
-        // Still descend into declarations even on a dead path so nested
-        // callables get analyzed; but for straight statements there's nothing
-        // observable once terminated.
+        // Still descend into declarations even on a dead path so nested callables get
+        // analyzed; straight statements have nothing observable once terminated.
         if (!s) return flow;
     }
 
@@ -653,10 +610,8 @@ Flow DefiniteAssignment::Impl::analyzeStmt(Stmt* s, Flow flow) {
         // `self.x: T = v` / `obj.x: T` - attribute target, not a local.
         if (auto* nm = dynamic_cast<NameExpr*>(an->target.get())) {
             if (an->value) {
-                // A module-level binding was pre-declared as a tracked slot; set
-                // the diagnostic context, check its initializer (forward reads of
-                // not-yet-initialized consts fire here), then mark the existing
-                // slot assigned instead of shadowing it with a fresh one.
+                // A module-level binding was pre-declared as a tracked slot; set the
+                // diagnostic context, check its initializer (forward reads fire here), then mark it assigned instead of shadowing it.
                 VarSlot* modSlot =
                     inModuleInit ? resolve(nm->name) : nullptr;
                 if (modSlot && !modSlot->isModuleConst) modSlot = nullptr;
@@ -742,9 +697,8 @@ Flow DefiniteAssignment::Impl::analyzeStmt(Stmt* s, Flow flow) {
         std::vector<Flow> breaks = std::move(loopBreaks.back());
         loopBreaks.pop_back();
 
-        // A for-loop always has a zero-iteration path, so body assignments never
-        // survive; the post-state is the incoming flow (or else clause) joined
-        // with any break edges.
+        // A for-loop always has a zero-iteration path, so body assignments never survive;
+        // the post-state is the incoming flow (or else clause) joined with any break edges.
         std::vector<Flow> outs = std::move(breaks);
         if (!fo->elseBody.empty())
             outs.push_back(analyzeBlock(fo->elseBody, flow));
@@ -888,17 +842,12 @@ Flow DefiniteAssignment::Impl::analyzeStmt(Stmt* s, Flow flow) {
     if (auto* cd = dynamic_cast<ClassDecl*>(s)) {
         if (!cd->name.empty()) declareAssigned(cd->name, cd->location(), flow);
 
-        // A decorator may rewrite the class (e.g. @dataclass synthesizes field
-        // assignment), so don't enforce constructor field-init on decorated
-        // classes. Generic class templates are stamped per-instantiation and
-        // re-analyzed there, so skip the abstract template too.
+        // A decorator may rewrite the class (e.g. @dataclass synthesizes field assignment),
+        // so skip constructor field-init enforcement on decorated classes and on abstract generic templates.
         bool enforceFields = cd->decorators.empty() && cd->typeParams.empty();
 
-        // Deferred-init detection: a field assigned by a NON-constructor method
-        // is intentionally initialized later (the `listen_tls()` / `connect()`
-        // pattern - Swift would model it as an Optional). Such fields are exempt
-        // from the constructor requirement; fields the constructor alone owns
-        // still get full per-path checking.
+        // Deferred-init detection: a field a non-constructor method assigns (the
+        // listen_tls()/connect() pattern) is exempt from the constructor requirement; ctor-only fields still get full checking.
         std::unordered_set<std::string> deferredFields;
         if (enforceFields) {
             for (auto& member : cd->body) {
@@ -909,9 +858,8 @@ Flow DefiniteAssignment::Impl::analyzeStmt(Stmt* s, Flow flow) {
             }
         }
 
-        // Own-declared fields with no class-body default and not deferred: these
-        // are exactly the slots a constructor must fill (the parent ctor handles
-        // inherited ones).
+        // Own-declared fields with no class-body default and not deferred are exactly
+        // the slots a constructor must fill (the parent ctor handles inherited ones).
         std::vector<std::pair<std::string, SourceLocation>> requiredFields;
         if (enforceFields) {
             for (auto& member : cd->body) {
@@ -944,24 +892,10 @@ Flow DefiniteAssignment::Impl::analyzeStmt(Stmt* s, Flow flow) {
     return flow;
 }
 
-//===----------------------------------------------------------------------===//
-// Module-initialization order: interprocedural read-set
-//
-// A module const's initializer may reach another const not only in its own RHS
-// but THROUGH a function/ctor it calls during init (deps.dr's
-// `const _READY = _ensure_data()`, where `_ensure_data` reads `DATA_DIR`). These
-// helpers compute, for a this-module callable i.e. the set of module consts its body
-// reads - unioned transitively over further this-module calls, memoized. The
-// module-init walk consults that set at each init-time call site and errors on a
-// read of a not-yet-initialized const.
-//
-// Conservative by construction: unresolved callees (imported, method, or called
-// through a value) and reads inside nested lambdas/comprehensions contribute
-// nothing TODO: - a false negative never a false positive that
-// would reject correct code. Mutual recursion among init-time callees is
-// under-approximated for the same reason. Local/param names that shadow a const
-// are excluded so a parameter named like a const is never mistaken for it.
-//===----------------------------------------------------------------------===//
+// These helpers compute, memoized, the module consts a this-module callable's body
+// reads transitively through further calls (deps.dr's `const _READY = _ensure_data()`); the module-init walk errors on a read of a not-yet-initialized one.
+// Conservative by construction: unresolved callees and nested lambdas/comprehensions
+// contribute nothing - a false negative, never a false positive that rejects correct code.
 
 FunctionDecl* DefiniteAssignment::Impl::classCtor(ClassDecl* cd) {
     if (!cd) return nullptr;
@@ -1181,10 +1115,6 @@ const std::unordered_set<std::string>& DefiniteAssignment::Impl::computeReadSet(
     return ins.first->second;
 }
 
-//===----------------------------------------------------------------------===//
-// Public API
-//===----------------------------------------------------------------------===//
-
 DefiniteAssignment::DefiniteAssignment() : impl_(std::make_unique<Impl>()) {}
 DefiniteAssignment::~DefiniteAssignment() = default;
 
@@ -1197,9 +1127,8 @@ bool DefiniteAssignment::analyze(Module& module) {
     impl_->readSetMemo.clear();
     impl_->currentInitConst.clear();
 
-    // COllect the inputs to the module-init order check - every module-lelevel
-    // value binding (eagaer, source-ordered init), plus top-level function and
-    // classes (call targets whose bodies may read a const during init).
+    // Collect inputs to the module-init order check: every module-level value binding
+    // (eager, source-ordered init), plus top-level functions/classes whose bodies may read a const during init.
     for (auto& s : module.body) {
         Stmt* st = s.get();
         if (auto* an = dynamic_cast<AnnAssignStmt*>(st)) {
@@ -1221,9 +1150,8 @@ bool DefiniteAssignment::analyze(Module& module) {
     impl_->scopes.clear();
     impl_->loopBreaks.clear();
     impl_->pushFrame();
-    // Pre-declare every module binding as a tracked slot - a read before its
-    // initializer runs is then caught by the same use-before-assignment guard
-    // that protects no-initializer locals.
+    // Pre-declare every module binding as a tracked slot, so a read before its
+    // initializer runs is caught by the same use-before-assignment guard that protects no-initializer locals.
     for (auto& kv : impl_->moduleConsts) {
         impl_->declare(kv.first, /*tracked=*/true, kv.second);
         impl_->scopes.back()[kv.first].isModuleConst = true;

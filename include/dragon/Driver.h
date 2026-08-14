@@ -10,17 +10,17 @@ namespace dragon {
 /// Compiler driver options
 struct DriverOptions {
     enum class Action {
-        Run,      // Compile and execute
-        Build,    // Compile to executable
-        Check,    // Type check only
-        Emit,     // Emit IR/ASM
+        Run,      // compile and execute
+        Build,    // compile to executable
+        Check,    // type check only
+        Emit,     // emit IR/ASM
         FfiSync   // D052: regenerate process-extern stubs
     };
 
     Action action = Action::Build;
     std::vector<std::string> inputFiles;
-    // `dragon run file.dr a b c` - args after the program file are forwarded to
-    // the program's argv (Python parity), not treated as more source files.
+    // Args after the program file in `dragon run file.dr a b c` forward to
+    // argv (Python parity), not treated as source files.
     std::vector<std::string> programArgs;
     std::string outputFile;
     int optimizationLevel = 0;
@@ -39,37 +39,24 @@ struct DriverOptions {
     bool ffiCheck = false;      // ffi sync --check: verify stubs, write nothing
 };
 
-/// Main compiler driver
-/// 
-/// Orchestrates the compilation pipeline:
-/// Lexer -> Parser -> Sema -> TypeChecker -> CodeGen
+/// Orchestrates the compile pipeline: Lexer -> Parser -> Sema -> TypeChecker -> CodeGen.
 class Driver {
 public:
     Driver();
     ~Driver();
 
-    /// Parse command line arguments
     bool parseArgs(int argc, char* argv[]);
-
-    /// Run the compiler with parsed options
     int run();
-
-    /// Run with explicit options
     int run(const DriverOptions& options);
 
-    /// Print usage information
     static void printUsage();
-
-    /// Print version
     static void printVersion();
 
 private:
-    // Pipeline stages
     int runFile(const std::string& filename);
     int buildFile(const std::string& filename);
     int checkFile(const std::string& filename);
 
-    // File handling
     std::string readFile(const std::string& filename);
     bool isDragonFile(const std::string& filename);
     bool isPythonFile(const std::string& filename);

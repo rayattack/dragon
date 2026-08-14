@@ -1,9 +1,10 @@
 #ifndef DRAGON_CODEGEN_IMPL_H
 #define DRAGON_CODEGEN_IMPL_H
 
-/// Dragon CodeGen - Private Implementation Header
-/// Contains CodeGen::Impl struct definition shared across all codegen TUs.
+/// Dragon CodeGen Private Implementation Header: the CodeGen::Impl struct shared across
+/// all codegen TUs.
 
+#include "dragon/ValueTags.h"
 #include <execinfo.h>
 #include <limits>
 #include "dragon/CodeGen.h"
@@ -49,10 +50,6 @@
 
 namespace dragon {
 
-//===----------------------------------------------------------------------===//
-// Impl
-//===----------------------------------------------------------------------===//
-
 struct CodeGen::Impl {
     CodeGenOptions options;
     std::vector<CodeGenDiagnostic> diagnostics;
@@ -65,66 +62,32 @@ struct CodeGen::Impl {
     // Value stack: visitor methods push results here
     llvm::Value* lastValue = nullptr;
 
-    // Variable storage: name -> alloca
-    // Variable type tags for distinguishing ptr-typed variables (list vs str)
-    // VarKind::Str = dynamic string from runtime (has DragonObjectHeader, decref with dragon_decref_str)
-    // VarKind::StrLiteral = compile-time string literal (no header, never decref)
-    // VarKind::ClassInstance = user-defined class instance (has GC header prepended to struct, decref with dragon_decref)
-    // D030 §5: VarKind::Bytes deleted - bytes-typed slots use VarKind::List
-    // (generic-heap dispatch); the bytes-vs-list distinction now flows
-    // through Type::Kind / typeKindToTag at every consumer.
+    // Variable storage: name -> alloca, tagged by VarKind (Str = heap DragonObjectHeader,
+    // decref'd via dragon_decref_str; StrLiteral = no header, never decref'd; ClassInstance = GC header, decref via dragon_decref). D030 §5: VarKind::Bytes deleted, bytes now use List (dispatch via Type::Kind/typeKindToTag).
     enum class VarKind { Int, Float, Bool, Str, StrLiteral, List, Dict, Tuple, Set, File, ClassInstance, Generator, Type, Closure, Union, Deque, Other };
 
     struct Scope {
         std::unordered_map<std::string, llvm::AllocaInst*> vars;
         std::unordered_map<std::string, VarKind> varKinds;
         std::unordered_set<std::string> borrowed;  // params - don't decref at scope exit
-        // D027.1: heap-boxed via DragonCell. The alloca holds the cell ptr;
-        // reads route through dragon_cell_get, writes through dragon_cell_set.
-        // Set both at the cell-promoted definition site (the owning function)
-        // and at the env-load site in any nested fn that captured the cell.
+        // D027.1: heap-boxed via DragonCell; the alloca holds the cell ptr, reads route
+        // through dragon_cell_get, writes through dragon_cell_set. Set at both the cell-promoted definition site and any nested fn's env-load site.
         std::unordered_set<std::string> cellBacked;
-        // B Phase 1 (escape analysis): class instances allocated in an entry
-        // alloca rather than the heap. The var is an ordinary ClassInstance for
-        // field access / method dispatch, but it is never malloc'd / gc_tracked,
-        // so scope cleanup must NOT decref it (the storage is reclaimed when the
-        // stack frame unwinds). Only non-escaping locals of scalar-only classes
-        // land here, so there are no heap children to tear down.
+        // B Phase 1 (escape analysis): class instances entry-alloca'd instead of heap.
+        // Ordinary ClassInstance for field/method access, but never malloc'd/gc_tracked, so scope cleanup must not decref it; only non-escaping scalar-only-class locals land here.
         std::unordered_set<std::string> stackAllocated;
-        // Bound-Task tail: Task locals bound to a `fire ...` that
-        // PROVABLY never escape and are never joined/awaited (a bound
-        // fire-and-forget) - dragon_vthread_detach them at scope exit so the
-        // handle ref isn't leaked. Populated only at the binding site for decls
-        // in `detachableTaskDecls`; detach is idempotent with join (the `joined`
-        // CAS), so it is safe even if a later edit adds a join.
+        // Task-detach tail: Task locals bound to `fire ...` that provably never escape or
+        // get joined/awaited get dragon_vthread_detach'd at scope exit. Detach is idempotent with join (`joined` CAS), safe even if a later edit adds a join.
         std::unordered_set<std::string> detachOnExit;
-        // docs/002 ADR 2.10: bare Lock LOCALS are owned by their scope and
-        // destroyed at scope exit (null-gated: a `del` nulls the slot, so a
-        // deleted lock is skipped). Statically sound because OwnershipCheck
-        // forbids every second-owner path for a raw resource: E8 refuses
-        // borrow stores into own fields, E15 makes resource fields own-only,
-        // E16 bans container elements, and plain call args only borrow.
-        // Module-level Locks are NOT armed (2.10: globals live for the
-        // process).
+        // docs/002 ADR 2.10: bare Lock locals are owned by their scope, destroyed at exit
+        // (null-gated: `del` skips a deleted lock). Sound because OwnershipCheck bars every second-owner path (E8/E15/E16). Module-level Locks are not armed (globals live for the process).
         std::unordered_set<std::string> lockDestroyOnExit;
-        // Exception-unwind cleanup (see DragonCleanupStack). cleanupSlots maps an
-        // owned heap local's name -> the i32 alloca holding its runtime cleanup
-        // slot index, so a reassignment can refresh the snapshot. cleanupBaseAlloca
-        // holds the cleanup depth captured at this scope's FIRST push; normal scope
-        // exit rewinds the cleanup stack to it (so a later sibling exception cannot
-        // re-free locals already decref'd here).
+        // Exception-unwind cleanup (DragonCleanupStack): cleanupSlots maps an owned heap
+        // local to the i32 alloca holding its cleanup slot index, so reassignment can refresh it. cleanupBaseAlloca holds the depth at this scope's first push; normal exit rewinds to it so a sibling exception can't re-free already-decref'd locals.
         std::unordered_map<std::string, llvm::AllocaInst*> cleanupSlots;
         llvm::AllocaInst* cleanupBaseAlloca = nullptr;
-        // defer f(x) snapshots (defer.md): appended by visit(DeferStmt) in
-        // source order; emitScopeCleanupFor calls them in REVERSE (LIFO)
-        // ahead of the RC decref pass on every exit edge, so borrowed
-        // snapshots are alive at call time. argSlots is an [argc x i64]
-        // entry alloca holding the snapshot values (written at the defer
-        // statement). drainKinds[i] != VarKind::Other means slot i owns a +1
-        // released after the deferred call runs; a value an own param adopts
-        // carries VarKind::Other (the callee consumed it). The straight-line
-        // append order also gives exit edges emitted mid-scope exactly the
-        // defers whose statements precede them - registration is lexical.
+        // defer f(x) snapshots (defer.md): appended in source order, run in reverse (LIFO)
+        // ahead of the RC decref pass on every exit edge so borrowed snapshots stay alive. argSlots holds the snapshot values; drainKinds[i] != Other means slot i owns a +1 released after the call (Other = an own param already consumed it).
         struct DeferEntry {
             llvm::Function* thunk = nullptr;      // void(i64*) per-site
             llvm::AllocaInst* argSlots = nullptr; // [max(argc,1) x i64]
@@ -135,11 +98,8 @@ struct CodeGen::Impl {
     };
     std::vector<Scope> scopes;
 
-    // D027.1: walk a function body collecting `mutatedCapturedVars` from
-    // every nested FunctionDecl and LambdaExpr. Used to compute which of
-    // the OUTER function's locals must be cell-promoted (their addresses
-    // are taken by inner mutations). Recurses through statement bodies
-    // so a `nonlocal` declared two levels deep still surfaces here.
+    // D027.1: walks a function body collecting `mutatedCapturedVars` from every nested
+    // FunctionDecl/LambdaExpr, to find which outer locals need cell-promotion. Recurses through statement bodies so a `nonlocal` two levels deep still surfaces.
     void collectNestedMutatedCaptures(const std::vector<std::unique_ptr<Stmt>>& body,
                                       std::unordered_set<std::string>& out);
     void collectNestedMutatedCaptures(Stmt* s,
@@ -147,46 +107,27 @@ struct CodeGen::Impl {
     void collectNestedMutatedCaptures(Expr* e,
                                       std::unordered_set<std::string>& out);
 
-    // B Phase 1 escape analysis (src/codegen/EscapeAnalysis.cpp). Walks the
-    // entry module's top-level statements + function bodies; for each
-    // `v: T = T(args)` declaration of a class instance whose binding `v`
-    // provably does not escape its declaring block, records the ctor CallExpr*
-    // in `stackAllocSites`. Conservative: any use of `v` other than a plain
-    // `v.field` read disqualifies (default-escapes). The CallExpr fork applies
-    // the remaining gates (scalar-only class, single trivial non-self-escaping
-    // ctor) using authoritative class metadata.
+    // B Phase 1 escape analysis (EscapeAnalysis.cpp): walks the entry module's top-level
+    // statements + function bodies, recording each non-escaping `v: T = T(args)` ctor CallExpr* in `stackAllocSites` (conservative: any use beyond a plain `v.field` read disqualifies). The CallExpr fork applies the remaining gates (scalar-only class, single non-self-escaping ctor).
     void computeStackAllocSites(Module& entryModule);
-    // isModuleTopLevel: direct children of the module body are module globals
-    // (whole-program visibility - an earlier-defined function may reference
-    // them), so they are NEVER stack-allocated; only their nested blocks are
-    // analyzed. Function bodies and nested blocks get full candidate detection.
+    // isModuleTopLevel: direct children of the module body are module globals (whole-program
+    // visibility), so they're never stack-allocated; only their nested blocks are analyzed. Function bodies and nested blocks get full candidate detection.
     void analyzeBlockForStackAlloc(const std::vector<std::unique_ptr<Stmt>>& stmts,
                                    bool isModuleTopLevel = false);
     // True if `name` is used in a way that lets the instance escape its
-    // declaring block (or is rebound). Default-escapes for unhandled nodes.
+    // declaring block (or is rebound); default-escapes for unhandled nodes. A nested
+    // def/lambda/fire/thread body referencing `name` is a capture => escape, and ctor
+    // self-escape (target="self") is covered too.
     bool exprEscapes(Expr* e, const std::string& name);
     bool stmtEscapes(Stmt* s, const std::string& name);
-    // Exhaustive (DefaultASTVisitor-based) "does `name` appear anywhere in this
-    // subtree" - the sound fallback for nodes exprEscapes/stmtEscapes don't
-    // special-case, and for capture sites (lambda/fire/thread/nested def).
+    // Exhaustive "does `name` appear anywhere in this subtree" probe: the sound fallback
+    // for nodes exprEscapes/stmtEscapes don't special-case, and for capture sites (lambda/fire/thread/nested def).
     bool nodeMentionsName(Expr* e, const std::string& name);
     bool nodeMentionsName(Stmt* s, const std::string& name);
 
-    // Task-detach tail (refined): does Task local `name` TRANSFER out of its
-    // scope - returned, stored, passed as an argument, captured by a
-    // lambda/fire/thread/nested def, or rebound - as OPPOSED to merely being
-    // CONSUMED (`await t` / `t.join()`) or READ (`t.is_alive()`)? A consume/read
-    // is safe to ALSO detach at scope exit (idempotent with join via the runtime
-    // `joined` CAS); a transfer must NOT be detached (the new owner still needs
-    // the handle -> detaching early = UAF). DISTINCT from exprEscapes/stmtEscapes
-    // (deliberately NOT shared with stack-alloc, so it can never weaken that
-    // analysis): the carve-out for await/join/is_alive applies ONLY at the
-    // current scope's top level - inside a capture body ANY mention is a transfer
-    // (the closure took the variable). Conservative: any unrecognized mention is
-    // a transfer (leak > UAF).
+    // Task-detach tail: does Task local `name` transfer out (return/store/pass/capture/
+    // rebind) vs merely consumed (await/join, safe to also detach) or read (is_alive)? Distinct from exprEscapes/stmtEscapes so it never weakens stack-alloc; unrecognized mentions count as transfers.
     bool taskLocalTransferEscapes(Stmt* s, const std::string& name);
-    // A nested def / lambda / fire / thread body referencing `name` is a
-    // capture ⇒ escape. Also covers ctor self-escape via target="self".
     std::unordered_set<std::string> cellPromotedLocals;
 
     // Current function being generated
@@ -197,20 +138,16 @@ struct CodeGen::Impl {
         llvm::BasicBlock* breakBlock;
         llvm::BasicBlock* continueBlock;
         size_t scopeDepth;  // scopes.size() when loop was entered (before body push)
-        size_t tryFrameDepth = 0;  // tryFrameFuncs.size() at loop entry - break/
-                                   // continue pop the try/with frames opened
-                                   // inside the loop body (those above this).
-        size_t exitCleanupDepth = 0;  // exitCleanupStack.size() at loop entry -
-                                      // break/continue replay only the finally /
-                                      // with __exit__ cleanups opened inside the
-                                      // loop body, not ones enclosing the loop.
+        size_t tryFrameDepth = 0;  // tryFrameFuncs.size() at loop entry; break/continue
+                                   // pop only try/with frames opened inside the loop body.
+        size_t exitCleanupDepth = 0;  // exitCleanupStack.size() at loop entry; break/continue
+                                      // replay only finally/with __exit__ cleanups opened inside the loop, not enclosing ones.
     };
     std::stack<LoopInfo> loopStack;
     std::vector<llvm::Function*> tryFrameFuncs;
 
-    // Count of the current function's live try/with exception frames (the
-    // trailing run of tryFrameFuncs equal to currentFunction). A `return`
-    // escapes all of them.
+    // Count of the current function's live try/with exception frames (the trailing run of
+    // tryFrameFuncs equal to currentFunction). A `return` escapes all of them.
     size_t currentFnTryFrames() {
         size_t n = 0;
         for (auto it = tryFrameFuncs.rbegin(); it != tryFrameFuncs.rend(); ++it) {
@@ -220,9 +157,8 @@ struct CodeGen::Impl {
         return n;
     }
 
-    // Emit `n` dragon_exc_pop_frame calls at the current insertion point (no-op
-    // if it is already terminated). Used by return/break/continue to unwind the
-    // exception frames their jump bypasses.
+    // Emits `n` dragon_exc_pop_frame calls at the current insertion point (no-op if
+    // already terminated); used by return/break/continue to unwind the exception frames their jump bypasses.
     void emitExcFramePops(size_t n) {
         if (n == 0) return;
         auto* bb = builder->GetInsertBlock();
@@ -231,9 +167,8 @@ struct CodeGen::Impl {
             builder->CreateCall(runtimeFuncs["dragon_exc_pop_frame"], {});
     }
 
-    // One escaped-scope cleanup action attached to a `with` context manager:
-    // call __exit__ (class CM) or release a lock. Carries the SSA context handle
-    // (defined at with-entry, which dominates every early-exit point in the body).
+    // One escaped-scope cleanup action for a `with` context manager: call __exit__ (class
+    // CM) or release a lock. Carries the SSA context handle defined at with-entry, which dominates every early-exit point.
     struct WithCleanupItem {
         bool isClassCtx;
         bool isLock;
@@ -241,52 +176,34 @@ struct CodeGen::Impl {
         llvm::Value* val;
         llvm::Value* enterResult = nullptr;  // __enter__ result (class CMs); may == val
         llvm::Function* exitFn = nullptr;    // true-identity __exit__; null = name-resolved
-        bool isLockTemp = false;  // `with Lock()` - an anonymous lock the `with`
-                                  // OWNS: destroy (not just release) it on exit.
-        bool subjectOwned = true;  // false when the subject expression is a
-                                   // BORROW (bound local / attribute / walrus):
-                                   // its slot owns the manager, so with-exit
-                                   // must NOT decref `val` (A/B-proven UAF,
-                                   // test_rc_with_subject.dr). The __enter__
-                                   // result's +1 is always the with's to drop.
+        bool isLockTemp = false;  // `with Lock()`: an anonymous lock the `with` owns and destroys (not just releases) on exit.
+        bool subjectOwned = true;  // false when the subject is a BORROW (local/attribute/
+                                   // walrus): with-exit must not decref `val` (A/B-proven UAF, test_rc_with_subject.dr); the __enter__ result's +1 is always dropped.
     };
 
-    // Unified exit-cleanup stack: a try/finally body OR a with-statement's
-    // __exit__/lock-release set, pushed in lexical nesting order (innermost
-    // last). return/break/continue replay the escaped frames innermost-first
-    // BEFORE jumping, so finally bodies AND `with` __exit__/lock-release run on
-    // every exit edge - not just the normal fall-through and the longjmp path
-    // (an early `return` skipped __exit__/release; break/continue
-    // additionally produced invalid IR). One stack rather than two so a `with`
-    // nested in a try-finally (and vice-versa) interleave in the correct order.
+    // Unified exit-cleanup stack: a try/finally body or a with's __exit__/lock-release
+    // set, pushed innermost-last; return/break/continue replay innermost-first before jumping so cleanups run on every exit edge. One stack (not two) so nested try/with interleave correctly.
     struct ExitCleanup {
         bool isWith = false;
         std::vector<Stmt*> finallyBody;          // isWith == false (owned by TryStmt)
         std::vector<WithCleanupItem> withItems;  // isWith == true
         llvm::Function* func = nullptr;          // owning function (depth isolation)
-        // scopes.size() when this entry was pushed. Early exits interleave
-        // exit-cleanup replays with per-scope cleanup by nesting depth
-        // (emitEarlyExitCleanups), so a defer registered INSIDE a try body
-        // runs before that try's finally, matching the normal-exit order.
+        // scopes.size() when this entry was pushed; early exits interleave exit-cleanup
+        // replays with per-scope cleanup by nesting depth (emitEarlyExitCleanups), so a defer inside a try body runs before that try's finally.
         size_t scopeDepth = 0;
     };
     std::vector<ExitCleanup> exitCleanupStack;
 
-    // Index below which exitCleanupStack entries belong to ENCLOSING functions
-    // (a nested fn/lambda/comprehension emitted inline keeps its parent's frames
-    // on the stack); a `return` replays only the trailing run owned by
-    // currentFunction. Mirrors currentFnTryFrames.
+    // Index below which exitCleanupStack entries belong to enclosing functions (an inline
+    // nested fn/lambda/comprehension keeps its parent's frames); `return` replays only currentFunction's trailing run. Mirrors currentFnTryFrames.
     size_t currentFnExitCleanupBase() {
         size_t i = exitCleanupStack.size();
         while (i > 0 && exitCleanupStack[i - 1].func == currentFunction) --i;
         return i;
     }
 
-    // Names of the exception variables bound by the except handler bodies
-    // currently being emitted (lexically enclosing, innermost last). Lets
-    // RaiseStmt recognize `raise e` as a re-raise of the in-flight exception
-    // (the bound var only holds the message string, so the type must come from
-    // dragon_exc_get_type, not from `e`).
+    // Names of the exception vars bound by the except handlers currently being emitted
+    // (innermost last); lets `raise e` recognize a re-raise, since the bound var only holds the message and the type must come from dragon_exc_get_type.
     std::vector<std::string> handlerExcVars;
 
     // Generator state: when compiling a generator body, this holds the gen pointer alloca
@@ -294,107 +211,64 @@ struct CodeGen::Impl {
     // Set of function names that are generators (contain yield)
     std::unordered_set<std::string> generatorFunctions;
 
-    // D025 (post ADR-025 removal): Set of function names whose declared return
-    // type is `type` (they return a class value). Callers set VarKind::Type on
-    // the receiving variable. Because classes are now compile-time entities,
-    // such a value's class is not known statically, so constructing through it
-    // (or isinstance against it) is a compile error - there is no runtime
-    // class-descriptor dispatch. Populated at FunctionDecl emission.
+    // D025: function names whose declared return type is `type` (a class value); callers
+    // set VarKind::Type on the receiver. Classes are compile-time entities now, so constructing through or isinstance-ing such a value is a compile error (no runtime class-descriptor dispatch).
     std::unordered_set<std::string> funcReturnsType;
 
-    // D025: Functions whose declared return type is `ptr` - callers can call
-    // the returned value as a function pointer (the historical higher-order
-    // pattern: `dbl = get_doubler(); dbl(x)`). Tracked so the indirect-call
-    // fallback can fire safely without conflating with class-descriptor vars.
+    // D025: functions declared to return `ptr` let callers call the result as a function
+    // pointer (`dbl = get_doubler(); dbl(x)`). Tracked so the indirect-call fallback doesn't conflate with class-descriptor vars.
     std::unordered_set<std::string> funcReturnsPtr;
 
-    // D027: Functions that return a CLOSURE value (a capturing nested def or
-    // capturing lambda - a heap DragonClosure carrying an env), as opposed to a
-    // bare function pointer. Both are typed `-> Callable[...]`, so the type
-    // alone can't distinguish them, but the call-site dispatch differs (a
-    // closure must be unpacked into fn+env). Populated at FunctionDecl emission
-    // ONLY when every value-return is provably a closure, so a bare-fn-returning
-    // function is never mis-marked (which would crash the closure dispatch).
-    // Lets `g = make_closure(); g()` mark g VarKind::Closure (escaping-closure
-    // fix). Consumed in the AnnAssign Callable paths in Assign.cpp.
+    // D027: functions returning a CLOSURE (capturing nested def/lambda, a heap DragonClosure
+    // with an env) vs a bare fn pointer; both type as `Callable[...]` but dispatch differs (a closure unpacks into fn+env). Populated only when every return is provably a closure.
     std::unordered_set<std::string> funcReturnsClosure;
 
-    // Predicate backing funcReturnsClosure: true iff `node` is typed
-    // `-> Callable[...]` and EVERY value-return is provably a closure (capturing
-    // nested def / capturing lambda). Defined in Functions.cpp (uses file-local
-    // AST walkers). Must be run from the forward-declaration pre-pass so it
-    // precedes all body emission - class method bodies are emitted before a free
-    // function's visit(FunctionDecl) runs, so populating it there alone is too
-    // late for a method that calls a closure factory.
+    // Predicate backing funcReturnsClosure: true iff `node` is `-> Callable[...]` and every
+    // return is provably a closure. Must run from the forward-declaration pre-pass, since class method bodies emit before a free function's visit(FunctionDecl).
     bool functionReturnsClosure(FunctionDecl& node);
 
-    // D025: Variable / parameter names whose declared type is `ptr`. The
-    // bare-fn-pointer indirect-call fallback in CallExpr.cpp needs this
-    // signal to safely emit an indirect call without conflating with
-    // unannotated parameters that may carry class descriptors.
+    // D025: variable/parameter names declared `ptr`. The bare-fn-pointer indirect-call
+    // fallback in CallExpr.cpp needs this to avoid conflating with unannotated params that may carry class descriptors.
     std::unordered_set<std::string> varIsPtrCallable;
 
-    // D024, post ADR-025: classes with user-defined (runtime) decorators.
-    // Class decorators are DROPPED - a decorated class would require runtime
-    // descriptor construction, which ADR-025 removed.
-    // Constructing a class in this set is a compile error (CallExpr.cpp).
+    // D024, post ADR-025: classes with user-defined decorators. Decorators are dropped
+    // (would need runtime descriptor construction, which ADR-025 removed); constructing such a class is a compile error (CallExpr.cpp).
     // @dataclass / @staticmethod / @classmethod / @property / NamedTuple are
     // compile-time synthesis and are NOT tracked here.
     std::unordered_set<std::string> decoratedClassesBySym;
     // Per-class decorator AST expressions (raw pointers; AST owns them).
     std::unordered_map<std::string, std::vector<Expr*>> classDecoratorExprsBySym;
 
-    // 6.18: @dataclass / NamedTuple synthesis tracking. classNames in this set
-    // had __init__ / __eq__ / __repr__ auto-generated from field declarations.
-    // dataclassFieldNamesBySym holds the ordered field names per class for use by
-    // synthesized __eq__ and __repr__.
+    // 6.18: @dataclass/NamedTuple synthesis: classNames here had __init__/__eq__/__repr__
+    // auto-generated from field declarations; dataclassFieldNamesBySym holds the ordered field names those synthesized methods use.
     std::unordered_set<std::string> dataclassClassNamesBySym;
     std::unordered_map<std::string, std::vector<std::string>> dataclassFieldNamesBySym;
 
-    // Enum synthesis tracking (class-based `from enum import Enum`). A class
-    // deriving Enum/IntEnum/StrEnum is rewritten by synthesizeEnumMethods into
-    // a class of singleton member instances. enumKindBySym selects equality
-    // semantics: Plain -> pointer identity (default); Int/Str -> value-compare
-    // emitted in Expressions.cpp. enumMemberNamesBySym holds member order (used by
-    // value-lookup and iteration over the class object).
+    // Enum synthesis (`from enum import Enum`): a class deriving Enum/IntEnum/StrEnum is
+    // rewritten by synthesizeEnumMethods into singleton member instances. enumKindBySym picks equality semantics (Plain: pointer identity; Int/Str: value-compare); enumMemberNamesBySym holds member order.
     enum class EnumKind { Plain, Int, Str };
     std::unordered_map<std::string, EnumKind> enumKindBySym;          // className -> kind
     std::unordered_map<std::string, std::vector<std::string>> enumMemberNamesBySym;
 
-    // Map a VarKind for a list/dict element annotation to the Type::Kind used
-    // by varListElemKinds / varDictValueKinds. Mirrors the per-VarKind switch
-    // in Assign.cpp for local list[T]/dict[K,V] annotations.
+    // Maps a VarKind for a list/dict element annotation to the Type::Kind used by
+    // varListElemKinds/varDictValueKinds, mirroring Assign.cpp's per-VarKind switch.
     static Type::Kind elemVarKindToTypeKind(VarKind ek);
 
-    // D025: Mark `paramName` as ptr-typed if its annotation is `ptr`. Param
-    // setup sites call this after typeExprToKind so the bare-fn-pointer
-    // indirect-call fallback can safely fire only for ptr-annotated names.
-    //
-    // Also handles `Callable[[A, B], R]`: derives the LLVM FunctionType from
-    // the type expression and registers it so calls go through with the
-    // proper signature (no i64-default fallback).
-    //
-    // Also populates the list[T]/dict[K,V] element-kind tables so for-in,
-    // subscript, and iteration over a parameter name dispatch at the right
-    // native type - without this, `for part in parts` on a `list[str]` param
-    // treats the loop var as int and prints raw addresses.
+    // D025: marks `paramName` ptr-typed if annotated `ptr` (gates the bare-fn-pointer
+    // indirect-call fallback); derives Callable[[A,B],R]'s LLVM FunctionType; and populates list[T]/dict[K,V] element-kind tables so for-in/subscript dispatch at the right native type.
     void trackPtrParam(const std::string& paramName, TypeExpr* typeExpr);
 
-    /// Allocate a monomorphized list matching `elemTag` (and `isAny` for the
-    /// box list). Mirrors the variant selection in visit(ListExpr) so list
-    /// literals and *args packing share one source of truth. Defined in
-    /// Collections.cpp. (elemTag 0 + !isAny = legacy i64 DragonList.)
+    /// Allocates a monomorphized list matching `elemTag` (and `isAny` for the box list),
+    /// mirroring visit(ListExpr)'s variant selection. Defined in Collections.cpp; elemTag 0 + !isAny = legacy i64 DragonList.
     llvm::Value* emitNewTypedList(int64_t elemTag, bool isAny, llvm::Value* capVal);
 
-    /// Append one already-evaluated `val` to a list built by emitNewTypedList.
-    /// `elemExpr` drives tag inference (box list) and the borrow/incref +
-    /// ensureHeapString discipline. Defined in Collections.cpp.
+    /// Appends an already-evaluated `val` to a list built by emitNewTypedList; `elemExpr`
+    /// drives tag inference and the borrow/incref + ensureHeapString discipline. Defined in Collections.cpp.
     void emitTypedListAppend(llvm::Value* list, llvm::Value* val, Expr* elemExpr,
                              int64_t elemTag, bool isAny, CodeGen& cg);
 
-    /// Build an llvm::FunctionType from a Callable[[A, B], R] AST node.
-    /// Used by trackPtrParam (for params/locals) and by the for-loop site
-    /// (for list[Callable[...]] element propagation).
+    /// Builds an llvm::FunctionType from a Callable[[A, B], R] AST node. Used by
+    /// trackPtrParam (params/locals) and the for-loop site (list[Callable[...]] element propagation).
     llvm::FunctionType* callableTypeExprToFnType(CallableTypeExpr* callable) {
         std::vector<llvm::Type*> pts;
         pts.reserve(callable->paramTypes.size());
@@ -417,16 +291,8 @@ struct CodeGen::Impl {
     llvm::MDNode* tbaaListHeader = nullptr;  // list struct fields (data ptr, size)
     llvm::MDNode* tbaaListData = nullptr;    // list element array
 
-    // D030 Phase 4: %dragon.box = type { i64 tag, i64 payload }.
-    //  tag: DragonValueTag (TAG_INT=0, TAG_STR=1, TAG_FLOAT=2, ...).
-    //  payload: i64-shaped storage; codegen extracts at the narrowed
-    //  native type at consumption sites (no value flows as raw
-    //  i64 through user code - the i64 here is purely 8-byte
-    //  opaque storage backing for any 8-byte value).
-    // {i64,i64} (not the doc's original {i8,i64}) is the locked-in shape:
-    // sysv ABI passes it cleanly in two registers, every field is on a
-    // natural-alignment boundary, and the tag word can later carry richer
-    // metadata (class id, narrowing hints) without touching the layout.
+    // D030 Phase 4: %dragon.box = { i64 tag (DragonValueTag), i64 payload (opaque 8-byte
+    // storage, narrowed to its native type at consumption sites)}. {i64,i64} (not the doc's original {i8,i64}) is locked in: sysv ABI passes it in two registers, natural alignment, room for richer tag metadata later.
     llvm::StructType* boxType = nullptr;
 
     // Runtime function cache
@@ -438,17 +304,12 @@ struct CodeGen::Impl {
     // Exception handling counter for unique block naming
     int excCounter = 0;
 
-    // Per-for-loop counter so each loop's owned iterable temp gets a UNIQUE
-    // scope-cleanup name. Two container-iterating for-loops in one scope both
-    // used the name "__iter"; the second setVar clobbered the first in the
-    // scope map, so scope cleanup only decref'd the last and leaked the rest
-    // (one keys()/items()/comprehension temp per extra loop).
+    // Per-for-loop counter so each loop's owned iterable temp gets a unique scope-cleanup
+    // name. Two loops sharing the name "__iter" let the second setVar clobber the first, leaking one keys()/items()/comprehension temp per extra loop.
     int forIterCounter = 0;
 
-    // Map exception class name to hierarchical type code.
-    // Codes are assigned so that all children of a parent are contiguous,
-    // enabling range-based subtype matching (e.g., except ArithmeticError
-    // catches ZeroDivisionError, OverflowError, FloatingPointError).
+    // Maps an exception class name to a hierarchical type code; codes are assigned so a
+    // parent's children are contiguous, enabling range-based subtype matching (e.g. ArithmeticError catches ZeroDivisionError/OverflowError/FloatingPointError).
     int64_t excTypeCode(const std::string& name);
 
     // Check if a name is a built-in exception type
@@ -490,20 +351,13 @@ struct CodeGen::Impl {
     std::set<std::string> importedModules;
     std::set<std::string> fileResolvedModules;
 
-    // Class support
-    // Dragon class layout: each class creates an LLVM StructType with fields
-    // extracted from __init__ body (self.x = ... assignments).
-    // Constructor: ClassName_new(params...) -> ptr (malloc + __init__)
-    // Init: ClassName___init__(ptr self, params...) -> void
-    // Methods: ClassName_methodName(ptr self, params...) -> retType
+    // Class support: each class becomes an LLVM StructType with fields extracted from
+    // __init__ (self.x = ...). Symbols: ClassName_new (malloc+init), ClassName___init__, ClassName_methodName.
     std::set<std::string> classNames;         // Known class names for constructor dispatch
     std::string currentClassName;              // Set when emitting class methods
     std::unordered_map<std::string, llvm::StructType*> classStructTypesBySym;
-    // TypedDict: class name -> {field name -> Type::Kind}. Variables of TypedDict
-    // type are VarKind::Dict at runtime but access uses checked get with known
-    // tags derived via typeKindToTag - the source-of-truth tag derivation.
-    // Stored as Type::Kind (not VarKind) so per-field bytes-ness survives the
-    // VarKind::Bytes deletion (D030 §5).
+    // TypedDict: className -> {field -> Type::Kind}. Variables are VarKind::Dict at
+    // runtime but access uses checked get with tags from typeKindToTag; stored as Type::Kind (not VarKind) so per-field bytes-ness survives the VarKind::Bytes deletion (D030 §5).
     std::set<std::string> typedDictClassesBySym;
     std::unordered_map<std::string, std::unordered_map<std::string, Type::Kind>> typedDictFieldKindsBySym;
     // Variable name -> TypedDict class name (so we know which schema to use)
@@ -511,37 +365,28 @@ struct CodeGen::Impl {
     std::unordered_map<std::string, std::unordered_map<std::string, unsigned>> classFieldIndicesBySym;
     std::unordered_map<std::string, std::unordered_map<std::string, llvm::Type*>> classFieldTypesBySym;
     std::unordered_map<std::string, std::unordered_map<std::string, VarKind>> classFieldKindsBySym; // Phase 5: per-field VarKind for dealloc
-    // Own (non-inherited) instance-field order per class, from the AST
-    // `instanceFieldOrder` helper - the SAME source the TypeChecker fills
-    // ClassType::fieldOrder from. Drives positional `match` class-pattern
-    // destructuring (`case Point(x, y)`); ancestors are prepended via
-    // classParentNamesBySym at the match site.
+    // Own (non-inherited) instance-field order per class, from the AST `instanceFieldOrder`
+    // helper (same source TypeChecker fills ClassType::fieldOrder from). Drives positional `match` destructuring (`case Point(x, y)`); ancestors prepend via classParentNamesBySym.
     std::unordered_map<std::string, std::vector<std::string>> classFieldOrderBySym;
     std::unordered_map<std::string, llvm::GlobalVariable*> classIdGlobalsBySym; // Phase 5: class_id globals
-    // Class docstrings: populated by visit(ClassDecl) when ClassDecl.docstring is
-    // present. Looked up at dragon_class_descriptor_create call time so the
-    // descriptor's `doc` field carries the class docstring (powers `Cls.__doc__`).
+    // Class docstrings, populated by visit(ClassDecl) when present; looked up at
+    // dragon_class_descriptor_create time so the descriptor's `doc` field powers `Cls.__doc__`.
     std::unordered_map<std::string, std::string> classDocstringsBySym;
     // Function docstrings: keyed by mangleFunc(modName, funcName). Populated by
     // visit(FunctionDecl) when ClassDecl.docstring is present. Powers `f.__doc__`.
     std::unordered_map<std::string, std::string> functionDocstrings;
-    // Cached `.rodata` i8* constants for function docstring bytes. Lazy: built
-    // on first attribute-access. Unused docstrings cost zero (the constant is
-    // never emitted; the entry stays in `functionDocstrings` only).
+    // Cached `.rodata` i8* constants for function docstring bytes, built lazily on first
+    // attribute-access; unused docstrings cost zero (never emitted).
     std::unordered_map<std::string, llvm::Constant*> functionDocConstants;
-    // Method docstrings: className -> methodName -> docstring. Powers
-    // `MyClass.method.__doc__` and `instance.method.__doc__`. Pattern-match
-    // happens in Attributes.cpp on the AttrExpr(AttrExpr(...), "__doc__")
-    // chain - methods aren't first-class values in Dragon, so this is the
-    // only access shape we support.
+    // Method docstrings: className -> methodName -> docstring, powering `Cls.method.__doc__`
+    // and `instance.method.__doc__`. Matched in Attributes.cpp on the AttrExpr(AttrExpr(...), "__doc__") chain, the only shape supported since methods aren't first-class values.
     std::unordered_map<std::string,
         std::unordered_map<std::string, std::string>> methodDocstringsBySym;
     // Cached `.rodata` constants for method docstrings: className -> methodName.
     std::unordered_map<std::string,
         std::unordered_map<std::string, llvm::Constant*>> methodDocConstantsBySym;
-    // Module docstrings: keyed by module name (entry module key is empty
-    // string, matching `currentModuleName = ""`). Populated upfront in
-    // generate() from each Module.docstring.
+    // Module docstrings keyed by module name (entry module = "", matching
+    // currentModuleName = ""); populated upfront in generate() from each Module.docstring.
     std::unordered_map<std::string, std::string> moduleDocstrings;
     // Cached `.rodata` i8* constants for module docstring bytes. Same lazy
     // shape as functionDocConstants.
@@ -566,69 +411,47 @@ struct CodeGen::Impl {
     // Iterating yields VarKind::Type so callsites dispatch through descriptor.
     std::unordered_set<std::string> varListElemIsType;
     std::unordered_set<std::string> varDictValueIsType;
-    // dict[K, V] value Type::Kind tracking. Used by `for k, v in d.items()`
-    // to set v's VarKind so subsequent uses (print, comparisons, etc.) dispatch
-    // correctly. Mirrors varListElemKinds for lists.
+    // dict[K, V] value Type::Kind tracking, used by `for k, v in d.items()` to set v's
+    // VarKind so later uses dispatch correctly. Mirrors varListElemKinds for lists.
     std::unordered_map<std::string, Type::Kind> varDictValueKinds;
-    // D030 Phase 3.G: dict[K, V] key Type::Kind tracking. Codegen branches on
-    // this to route subscript/`in`/print/iteration at int-keyed dicts to the
-    // dragon_dict_int_* family instead of the str-keyed defaults. Default
-    // (absent entry) means str-keyed, preserving the existing behaviour.
+    // D030 Phase 3.G: dict[K, V] key Type::Kind tracking; codegen routes subscript/`in`/
+    // print/iteration on int-keyed dicts to dragon_dict_int_* instead of the str-keyed default (absent entry = str-keyed).
     std::unordered_map<std::string, Type::Kind> varDictKeyKinds;
     // className -> fieldName -> list element Type::Kind (for self.field list iterations)
     std::unordered_map<std::string, std::unordered_map<std::string, Type::Kind>> classFieldListElemKindsBySym;
-    // className -> fieldName -> dict value Type::Kind (for self.field dict subscript)
-    // Mirrors varDictValueKinds for class-field dicts so `obj.field["k"]` routes
-    // to the typed runtime op (dragon_dict_get_str_ptr / _str_f64) at the dict's
-    // native value type instead of the polymorphic i64-returning op.
+    // className -> fieldName -> dict value Type::Kind, mirroring varDictValueKinds so
+    // `obj.field["k"]` routes to the typed runtime op (dragon_dict_get_str_ptr/_str_f64) instead of the polymorphic i64-returning one.
     std::unordered_map<std::string, std::unordered_map<std::string, Type::Kind>> classFieldDictValueKindsBySym;
-    // D030 Phase 3.G: class-field dict key Type::Kind. Mirrors varDictKeyKinds
-    // for self.<field> dicts.
+    // D030 Phase 3.G: class-field dict key Type::Kind, mirroring varDictKeyKinds for
+    // self.<field> dicts.
     std::unordered_map<std::string, std::unordered_map<std::string, Type::Kind>> classFieldDictKeyKindsBySym;
     // className -> fieldName -> element class name (for list[ClassName] field iterations)
     std::unordered_map<std::string, std::unordered_map<std::string, std::string>> classFieldListElemClassNameBySym;
 
-    // Class name of a class-instance field. Populated when extractFields sees
-    // `self.x = Foo(...)` or `self.x = param: Foo`. Read by
-    // resolveExprClassName(AttributeExpr) so chained `obj.x.field` resolves
-    // to Foo's struct layout instead of returning ConstantInt 0.
+    // Class name of a class-instance field, populated when extractFields sees `self.x =
+    // Foo(...)` or `self.x = param: Foo`. Read by resolveExprClassName(AttributeExpr) so `obj.x.field` resolves to Foo's struct layout.
     std::unordered_map<std::string, std::unordered_map<std::string, std::string>> classFieldClassNameBySym;
     // varName -> element class name (for local list[ClassName] iterations)
     std::unordered_map<std::string, std::string> varListElemClassName;
-    // Callable[[...], R] element typing for list iterations:
-    //  varName -> element FunctionType (local list[Callable[...]])
-    //  className.F -> element FunctionType (self.field: list[Callable[...]])
-    // Loop var of `for f in xs` picks up callableTypes[f] from these maps so the
-    // callsite has a known signature without falling back to i64-default.
+    // Callable[[...], R] element typing for list iterations (varName or className.F ->
+    // element FunctionType); `for f in xs` picks up callableTypes[f] from these maps so the callsite has a known signature, not the i64-default fallback.
     std::unordered_map<std::string, llvm::FunctionType*> varListElemCallableType;
     std::unordered_map<std::string,
         std::unordered_map<std::string, llvm::FunctionType*>>
             classFieldListElemCallableTypeBySym;
-    // Direct Callable[[A,B,...], R] field types - `class C { handler:
-    // Callable[[Req,Res,Ctx], None] }`. Recorded so the call site
-    // `obj.handler(args)` can build the real FunctionType (param types
-    // and return type) instead of a synthetic all-i64 signature, and so
-    // it can append the trailing env arg when the field at runtime holds
-    // a DragonClosure rather than a bare fn pointer.
+    // Direct Callable[[A,B,...], R] field types (`handler: Callable[[Req,Res,Ctx], None]`),
+    // recorded so `obj.handler(args)` builds the real FunctionType instead of an all-i64 signature, and appends the trailing env arg when the field holds a DragonClosure.
     std::unordered_map<std::string,
         std::unordered_map<std::string, llvm::FunctionType*>>
             classFieldCallableTypeBySym;
     std::unordered_map<std::string, std::string> classParentNamesBySym; // className -> parentClassName
-    // className -> (field, per-instance default-expr). Persisted from the layout
-    // pre-pass (which visits every class in source order, before any _new body is
-    // emitted) so emitNewBody can walk the parent chain and apply inherited
-    // defaults regardless of source order. Expr* is borrowed from the ClassDecl
-    // body (owned by the AST) and stays valid for the CodeGen instance's lifetime.
+    // className -> (field, per-instance default-expr), persisted from the layout pre-pass
+    // (visits every class in source order before any _new body) so emitNewBody applies inherited defaults regardless of source order. Expr* is AST-owned, valid for CodeGen's lifetime.
     std::unordered_map<std::string, std::vector<std::pair<std::string, Expr*>>> classPerInstanceDefaultsBySym;
     std::unordered_map<std::string, std::string> methodReturnClassNames; // "Class_method" -> returnClassName
     std::unordered_map<std::string, std::string> funcReturnClassNames;   // top-level funcName -> returnClassName
-    // "Class_method" -> declared return Type::Kind. Needed alongside the LLVM
-    // function's return type because `ptr` is overloaded (str / list / dict /
-    // bytes / instance all lower to ptr) - the AST kind disambiguates so
-    // downstream call sites can pick the right VarKind for the bound value.
-    // Drives `for x in iter` binding `x` with the correct VarKind so method
-    // dispatch on `x` (e.g. x.strip() when __next__() -> str) reaches the
-    // right runtime path.
+    // "Class_method" -> declared return Type::Kind, needed because `ptr` is overloaded
+    // (str/list/dict/bytes/instance all lower to ptr); the AST kind disambiguates so callers pick the right VarKind, e.g. `for x in iter` binding x correctly when __next__() -> str.
     std::unordered_map<std::string, Type::Kind> methodReturnKinds;       // "Class_method" -> Type::Kind
 
     // Decision 025: First-class class descriptors
@@ -643,11 +466,8 @@ struct CodeGen::Impl {
     // className -> llvm::GlobalVariable* for @ClassName__vtable
     std::unordered_map<std::string, llvm::GlobalVariable*> classVtables;
 
-    // ADR 054 - type contracts. Coloring assigns every contract method a
-    // globally unique vtable slot (base = the largest natural vtable), so a
-    // contract-typed call is load-vtable + call-slot on a plain instance
-    // pointer - no fat pointers, no new value representation. Keys are the
-    // ATOM ContractDecl* (true identity, D053), never bare names.
+    // ADR 054 type contracts: coloring assigns every contract method a globally unique
+    // vtable slot (base = the largest natural vtable), so a contract call is load-vtable + call-slot on a plain instance pointer. Keys are the ContractDecl* identity (D053), never bare names.
     std::vector<const ContractDecl*> contractDeclsInOrder;
     std::set<const ContractDecl*> contractDeclSeen;
     std::unordered_set<std::string> contractTypeNames;  // annotation mapping only
@@ -657,18 +477,12 @@ struct CodeGen::Impl {
     void assignContractSlots();
     bool emitContractMethodCall(CodeGen& cg, CallExpr& node, AttributeExpr& attr);
 
-    // D033: Method-name reflection. Each class's OWN (non-inherited) method
-    // names, in declaration order, and parallel kind bytes
-    // (0 = instance, 1 = static, 2 = classmethod). Populated alongside the
-    // vtable order in ImplInit's class-body scan; consumed by CodeGen
-    // main-init to emit @ClassName__method_names / __method_fn_ptrs /
-    // __method_kinds globals and wire them via dragon_class_descriptor_set_methods.
+    // D033: method-name reflection. Each class's own (non-inherited) method names in
+    // declaration order plus parallel kind bytes (0=instance,1=static,2=classmethod), populated in ImplInit's class-body scan and consumed at main-init to emit the __method_* globals.
     std::unordered_map<std::string, std::vector<std::string>> classOwnMethodsBySym;
     std::unordered_map<std::string, std::unordered_map<std::string, uint8_t>> classMethodKindsBySym;
-    // D033 Phase 3: per-(class, method) bound-thunk function. Codegen emits
-    // one alongside the method body (signature = user args minus self + env).
-    // Indexed by className -> methodName -> thunk fn. NULL entries are valid
-    // for static methods (which skip the bind path in dragon_getattr).
+    // D033 Phase 3: per-(class, method) bound-thunk fn, emitted alongside the method body
+    // (signature = user args minus self + env). NULL entries are valid for static methods (which skip the bind path in dragon_getattr).
     std::unordered_map<std::string,
                        std::unordered_map<std::string, llvm::Function*>> classMethodBoundThunksBySym;
 
@@ -678,28 +492,15 @@ struct CodeGen::Impl {
     // className -> propertyName -> mangled setter func name ("<propName>__setter")
     std::unordered_map<std::string, std::unordered_map<std::string, std::string>> classPropertySettersBySym;
 
-    /// Mangle user function names that collide with codegen-reserved symbols.
-    /// "main" collides with the C entry point that codegen owns; user
-    /// `def main()` becomes the LLVM symbol `_dragon_user_main`. All call
-    /// sites that resolve a user function by name route through this helper
-    /// so the rename is invisible at the Dragon source level.
+    /// Mangles user function names that collide with codegen-reserved symbols: "main"
+    /// collides with the C entry point, so `def main()` becomes `_dragon_user_main`. All by-name resolution routes through here so the rename stays invisible at the source level.
     static std::string userFuncName(const std::string& name) {
         if (name == "main") return "_dragon_user_main";
         return name;
     }
 
-    // Per-module symbol mangling for top-level function names. Dragon
-    // links all imports into a single LLVM module, which
-    // means every module's `def open` would land on the same `@open`
-    // symbol - `gzip.open`, `zstandard.open`, and `tarfile.open` together
-    // would collapse onto one body. Mangling by module path gives each
-    // module its own namespace at the LLVM symbol level while keeping the
-    // user-visible name unchanged at the Dragon source level.
-    //
-    // `_dragon_user_main` stays unique across the program (only the entry
-    // module is allowed to define `main`). Modules with no name (the entry
-    // file's body before imports are resolved) keep the bare name so the
-    // entry program's `def helper(...)` call remains `@helper`.
+    // Per-module symbol mangling for top-level function names: Dragon links every import
+    // into one LLVM module, so `gzip.open`/`zstandard.open`/`tarfile.open` would collide on one `@open` without a module-path prefix. `_dragon_user_main` stays program-unique; unnamed (entry) modules keep the bare name.
     static std::string mangleFunc(const std::string& modName,
                                    const std::string& funcName) {
         if (funcName == "main") return "_dragon_user_main";
@@ -712,29 +513,17 @@ struct CodeGen::Impl {
         return out;
     }
 
-    // The module currently being lowered. Set/restored in CodeGen::generate
-    // for each dependency before forwardDeclare / visit fires, then again
-    // for the entry module. Read by mangleFunc call sites that need to
-    // refer to a same-module symbol (where there's no AttributeExpr base
-    // pointing at the owning module).
+    // The module currently being lowered; set/restored in CodeGen::generate around each
+    // dependency and the entry module. Read by mangleFunc sites needing a same-module symbol with no AttributeExpr base to name the owning module.
     std::string currentModuleName;
 
-    // Per-importing-module alias scope: importingModule -> (bareName -> mangled).
-    // `from os import listdir` in module A binds A's `listdir` to
-    // `os__listdir`; module B doing `from socket import listdir as ld`
-    // never sees A's binding. The keys are the IMPORTING module names so
-    // same-module reads consult the alias under currentModuleName; the
-    // entry program (currentModuleName == "") gets its own bucket.
-    //
-    // Without this scoping, a single global map silently clobbered when
-    // two modules imported the same bare name from different sources.
+    // Per-importing-module alias scope: importingModule -> (bareName -> mangled). `from os
+    // import listdir` in module A binds only A's `listdir`; keyed by importing module so a single global map can't clobber same-named aliases from different modules.
     std::unordered_map<std::string,
         std::unordered_map<std::string, std::string>> importedFuncAliasesByModule;
 
-    // Resolve an alias under the current module's scope. Returns the
-    // mangled symbol name, or empty string when no alias is in effect.
-    // Readers (CallExpr / Expressions / Assign function-as-value) all
-    // funnel through this so the lookup stays consistent.
+    // Resolves an alias under the current module's scope; empty string when none is in
+    // effect. All readers (CallExpr/Expressions/Assign function-as-value) funnel through here for consistency.
     std::string lookupImportedAlias(const std::string& bareName) const {
         auto modIt = importedFuncAliasesByModule.find(currentModuleName);
         if (modIt == importedFuncAliasesByModule.end()) return "";
@@ -743,15 +532,8 @@ struct CodeGen::Impl {
         return nameIt->second;
     }
 
-    // Resolve a bare callee name to the LLVM symbol it should look up:
-    // alias -> mangleFunc(currentModule, name) -> userFuncName(name). Used
-    // both for `module->getFunction(...)` lookups AND for indexing the
-    // side-channel maps (funcVarArgInfo, funcParamKinds, funcParamDefaults,
-    // funcReturnClassNames, generatorFunctions) which are now keyed by
-    // the mangled symbol so two stdlib modules with same-named functions
-    // (gzip.open vs tarfile.open) don't clobber each other's signatures
-    // and defaults. Picks the FIRST candidate that exists in the module
-    // so extern-C and entry-module bare names still resolve.
+    // Resolves a bare callee name to its LLVM symbol: alias -> mangleFunc(module, name) ->
+    // userFuncName(name), picking the first candidate that exists. Used for lookups and for indexing side-channel maps (funcParamKinds etc.) keyed by mangled symbol so same-named stdlib functions don't clobber each other.
     std::string resolveCalleeSymbol(const std::string& name) const {
         std::string aliasSym = lookupImportedAlias(name);
         if (!aliasSym.empty()) {
@@ -762,17 +544,8 @@ struct CodeGen::Impl {
         return userFuncName(name);
     }
 
-    // Per-module mangling for class symbols. Same shape as mangleFunc - joins
-    // module path and class name with `__`, replacing dots in the module path
-    // with underscores. Used as the prefix for ALL class-related LLVM
-    // symbols: `%<className>` struct type, `<cls>_new` / `<cls>___init__` /
-    // `<cls>_<method>` functions, `<cls>__vtable` / `<cls>__descriptor` /
-    // `__class_id_<cls>` globals, and the `__dragon_dealloc_<cls>` /
-    // `_traverse_` / `_clear_` / `_mark_shared_` per-class helpers.
-    //
-    // Modules with no name (the entry file) leave the bare name unchanged so
-    // entry-program classes keep their `%Foo` etc. symbols and same-named
-    // dep classes get a module-prefixed namespace at the LLVM symbol level.
+    // Per-module mangling for class symbols, same shape as mangleFunc: prefix for every
+    // class-related LLVM symbol (struct type, _new/___init__/_<method>, __vtable/__descriptor, dealloc/traverse/clear/mark_shared helpers). Entry-module (unnamed) classes keep the bare name.
     static std::string mangleClass(const std::string& modName,
                                     const std::string& className) {
         if (modName.empty()) return className;
@@ -791,17 +564,12 @@ struct CodeGen::Impl {
         return mangleClass(modName, varName);
     }
 
-    // Bare class name -> owning module. Populated in forwardDeclareClasses for
-    // every dependency module and the entry. With duplicate class names this
-    // is last-write-wins; resolveClassOwningModule below prefers the
-    // current-module probe over this map so same-module callers always win
-    // before falling through to the global owner.
+    // Bare class name -> owning module, populated in forwardDeclareClasses. Last-write-wins
+    // on duplicate names; resolveClassOwningModule prefers a same-module probe over this map so same-module callers always win first.
     std::unordered_map<std::string, std::string> classOwningModule;
 
-    // Per-importing-module class alias scope: importingMod -> (bareName ->
-    // owningMod). `from b import Conflict` in module A pins A's `Conflict`
-    // to module b regardless of any same-named class elsewhere. Mirrors
-    // importedFuncAliasesByModule in shape.
+    // Per-importing-module class alias scope: importingMod -> (bareName -> owningMod).
+    // `from b import Conflict` pins A's `Conflict` to module b regardless of same-named classes elsewhere. Mirrors importedFuncAliasesByModule.
     std::unordered_map<std::string,
         std::unordered_map<std::string, std::string>> importedClassAliasesByModule;
 
@@ -813,13 +581,8 @@ struct CodeGen::Impl {
         return nameIt->second;
     }
 
-    // Resolve which module a bare class name belongs to from the current
-    // module's perspective. Order:
-    //  1. Imported alias (`from b import Conflict` in current module).
-    //  2. Same-module probe: if `<currentModule>__<className>_new` exists
-    //  in the LLVM module, the current module defines the class.
-    //  3. Global owning-module map (last-wins fallback for duplicate names).
-    //  4. Current module name (for entry-module direct definitions).
+    // Resolves which module owns a bare class name: imported alias, then a same-module
+    // `<mod>__<className>_new` probe, then the global owning-module map (last-wins fallback), then currentModuleName.
     std::string resolveClassOwningModule(const std::string& bareName) const {
         std::string aliasMod = lookupImportedClassAlias(bareName);
         if (!aliasMod.empty()) return aliasMod;
@@ -838,16 +601,14 @@ struct CodeGen::Impl {
         return currentModuleName;
     }
 
-    // Return the LLVM symbol prefix for a bare class name, resolved from
-    // the current module's perspective. Use this for every emitter that
-    // needs to reach a class-owned LLVM function or global.
+    // Returns the LLVM symbol prefix for a bare class name, resolved from the current
+    // module's perspective. Use this for every emitter reaching a class-owned LLVM function or global.
     std::string classSymPrefix(const std::string& bareName) const {
         return mangleClass(resolveClassOwningModule(bareName), bareName);
     }
 
-    // Idempotent sym: a bare known class (incl. TypedDicts, which live in
-    // classOwningModule but not classNames) resolves via classSymPrefix;
-    // anything else (already a sym, pseudo-class, unknown) passes through.
+    // Idempotent sym: a bare known class (incl. TypedDicts, in classOwningModule but not
+    // classNames) resolves via classSymPrefix; anything else passes through unchanged.
     std::string classSym(const std::string& name) const {
         return (classNames.count(name) || classOwningModule.count(name))
                    ? classSymPrefix(name) : name;
@@ -868,97 +629,52 @@ struct CodeGen::Impl {
         return nullptr;
     }
 
-    // D026 devirtualization gate: does any STRICT subclass of `baseClass`
-    // directly define (override) `method`? If not, a call on a `baseClass`-
-    // typed receiver can be devirtualized to a direct call (C-speed) - the
-    // runtime object's method is provably the statically-resolved one. If so,
-    // the receiver may be a subclass and the call must dispatch through the
-    // object's vtable. Dragon compiles whole-program (all modules in one LLVM
-    // module), so this analysis is exact: a subclass only has a
-    // `mangleClass(mod, sub) + "_" + method` symbol when it overrides - inherited
-    // methods are never re-emitted under the subclass name (resolveMethodFunction
-    // walks the MRO precisely because of that).
+    // D026 devirtualization gate: if no strict subclass of `baseClass` overrides `method`,
+    // a call on a baseClass-typed receiver devirtualizes to a direct call; otherwise it must dispatch through the vtable. Exact because Dragon compiles whole-program: an override always gets its own `mangleClass(mod,sub)+"_"+method` symbol.
     bool methodIsOverridden(const std::string& baseClass,
                             const std::string& method) const;
 
-    // Walk the inheritance chain starting at (owningModule, className),
-    // trying each level for a method symbol of the form
-    // `mangleClass(mod, cls) + "_" + methodName`. Returns the first
-    // matching llvm::Function, or nullptr if no level defines the method.
-    // On match, *resolvedSymbol (if non-null) is set to the mangled symbol
-    // so callers can probe parallel maps (staticMethods, classCtorAritiesBySym,
-    // etc.) without re-mangling.
-    //
-    // Each parent's owning module is looked up in classOwningModule and
-    // falls back to the caller-supplied owningModule if not recorded.
-    //
-    // This is the SINGLE lookup point: CallMethods, Classes, and Concurrency
-    // codegen all resolve through it. Per-caller copies drift (e.g. bare
-    // classNames pre-mangling) and a drifted copy miscompiles cross-module
-    // dispatch like `fire self._method()`.
+    // Walks the inheritance chain from (owningModule, className), trying each level's
+    // `mangleClass(mod,cls)+"_"+methodName` symbol; sets *resolvedSymbol on match. The single lookup point (CallMethods/Classes/Concurrency all use it) since a drifted per-caller copy miscompiles cross-module dispatch like `fire self._method()`.
     llvm::Function* resolveMethodFunction(
         const std::string& owningModule,
         const std::string& className,
         const std::string& methodName,
         std::string* resolvedSymbol = nullptr) const;
 
-    // Per-instance owning module: var -> owning module of the class instance
-    // stored in that var. Mirrors varClassNames so method dispatch (and
-    // anything else that needs to reach `<owner>__<className>_<method>`)
-    // can pick the right LLVM symbol when two modules define same-named
-    // classes. Populated alongside varClassNames at every assignment site.
+    // Per-instance owning module: var -> owning module of the class instance it holds.
+    // Mirrors varClassNames so method dispatch picks the right `<owner>__<className>_<method>` symbol when two modules define same-named classes.
     std::unordered_map<std::string, std::string> varClassOwningModule;
 
 
-    // Owning module per class field whose declared type is another class
-    // (see classFieldClassNameBySym). Same purpose as varClassOwningModule but
-    // for `self.x: Foo` / `self.x = Foo(...)` reads.
+    // Owning module per class-typed field (see classFieldClassNameBySym); same purpose as
+    // varClassOwningModule but for `self.x: Foo` / `self.x = Foo(...)` reads.
     std::unordered_map<std::string,
         std::unordered_map<std::string, std::string>> classFieldOwningModule;
 
-    /// 6.12(B) Non-negative variable tracking. A variable name is in this
-    /// set when its current value is provably ≥ 0 - assigned from an int
-    /// literal ≥ 0, a `len()` / `abs()` call, or a `+`/`*`/`**` of two
-    /// non-negative operands. Used by the inline list-subscript paths in
-    /// Attributes.cpp / Assign.cpp to skip the `idx + (idx<0 ? size : 0)`
-    /// correction (3 instructions per access). Conservatively cleared on any
-    /// assignment whose RHS is not provably non-negative.
+    /// 6.12(B): a variable is in this set when its value is provably >= 0 (int literal,
+    /// len()/abs(), or +/*/** of non-negative operands). Lets Attributes.cpp/Assign.cpp skip the `idx + (idx<0 ? size : 0)` correction; cleared on any not-provably-non-negative assignment.
     std::unordered_set<std::string> knownNonNeg;
 
-    /// Returns true when `e` is provably ≥ 0 from its AST shape. Recursive,
-    /// purely structural - no flow-sensitive reasoning beyond the tracked
-    /// `knownNonNeg` set.
+    /// True when `e` is provably >= 0 from its AST shape. Recursive and purely structural,
+    /// no flow-sensitive reasoning beyond the tracked `knownNonNeg` set.
     bool isExprDefinitelyNonNeg(Expr* e) const;
 
-    // 4.7 PEP 393-lite: non-ASCII string literals.
-    // Each unique UTF-8 byte sequence gets a module-level i8* global, lazily
-    // initialized at the top of main() via dragon_str_intern (one-shot
-    // alloc + immortal). Use sites just emit a load - zero per-access cost.
+    // 4.7 PEP 393-lite: non-ASCII string literals. Each unique UTF-8 byte sequence gets
+    // a module-level i8* global, lazily interned at the top of main() (one-shot, immortal); use sites just load it, zero per-access cost.
     std::unordered_map<std::string, llvm::GlobalVariable*> utf8LiteralGlobals;
     std::vector<std::string> utf8LiteralOrder;
 
-    // ASCII string literals: emitted as IMMORTAL DragonString CONSTANTS (real
-    // DragonObjectHeader + len/kind/cap + NUL-terminated bytes) in the binary,
-    // deduped by byte sequence. A pointer to the `data` field is returned, so
-    // dragon_is_heap_string / _len / _eq / decref read an in-bounds header
-    // (no OOB read off a bare C global), and the immortal refcount makes
-    // incref/decref no-ops. Zero per-access and zero startup cost (writable
-    // .data, like interned non-ASCII immortals, so immortal-flag writes never fault).
+    // ASCII string literals emit as immortal DragonString constants (real header +
+    // len/kind/cap + NUL-terminated bytes), deduped by byte sequence; a pointer to `data` keeps dragon_is_heap_string/_len/_eq/decref reading an in-bounds header and makes incref/decref no-ops, at zero per-access/startup cost.
     std::unordered_map<std::string, llvm::GlobalVariable*> asciiLiteralGlobals;
 
-    // D017 Phase 4.B - template content-type context stack. Pushed on
-    // entry to `visit(TemplateExpr)` / `visit(TemplateFileExpr)`, popped on
-    // exit. Used so `:{ ... }` content fragments inside a `!{}` block
-    // inherit their parent template's content type for auto-escape and
-    // instance wrapping. Empty stack = no enclosing template (top-level
-    // `template { ... }` stays untyped str).
+    // D017 Phase 4.B: template content-type context stack, pushed/popped around
+    // visit(TemplateExpr/TemplateFileExpr) so `:{ ... }` fragments inherit the parent's content type for auto-escape/wrapping. Empty stack means no enclosing template (top-level stays untyped str).
     std::vector<std::string> templateContextStack;
 
-    // D032 - interned canonical `$$N` query texts for `template[SQL]` sites.
-    // One ASCII global per unique canonical, so structurally identical sites
-    // share a pointer and a driver's prepared-statement cache can hit by
-    // pointer-compare. Non-ASCII canonicals (rare) fall back to the UTF-8 path
-    // and aren't interned (content+hash keying still works).
+    // D032: interned canonical `$$N` query texts for `template[SQL]` sites, one ASCII
+    // global per unique canonical so structurally identical sites share a pointer for prepared-statement cache pointer-compare. Rare non-ASCII canonicals fall back uninterned.
     std::unordered_map<std::string, llvm::Value*> sqlCanonicalGlobals;
 
     llvm::Value* internSqlCanonical(const std::string& canon) {
@@ -972,22 +688,16 @@ struct CodeGen::Impl {
         return g;
     }
 
-    // 64-bit FNV-1a over `s`'s bytes. MUST match dragon_str_fnv1a in
-    // runtime_sqltemplate.cpp so the compiler's folded constant and any
-    // runtime-built canonical with the same text share a cache bucket.
+    // 64-bit FNV-1a over `s`'s bytes; must match dragon_str_fnv1a in runtime_sqltemplate.cpp
+    // so a compile-time folded constant and a runtime-built canonical with the same text share a cache bucket.
     uint64_t sqlCanonicalHash(const std::string& s) const {
         uint64_t h = 0xcbf29ce484222325ULL;
         for (unsigned char c : s) { h ^= (uint64_t)c; h *= 0x100000001b3ULL; }
         return h;
     }
 
-    // D017 Phase 4.B - template block-interp buffer stack. Each `!{...}`
-    // that falls into block mode (parseExpression failed -> parseBlock)
-    // allocates a runtime DragonListPtr* (list[str]) and pushes the alloca
-    // here. `:{}` ExprStmts inside the block append their rendered string
-    // to the top buffer via dragon_list_append_ptr. After the block runs,
-    // CodeGen pops the buffer and calls dragon_str_join_ptr to flatten -
-    // that joined string is the !{}'s value.
+    // D017 Phase 4.B: template block-interp buffer stack. Each `!{...}` falling into block
+    // mode allocates a list[str] and pushes its alloca here; `:{}` ExprStmts append to the top buffer, then CodeGen pops it and dragon_str_join_ptr flattens it into the !{}'s value.
     std::vector<llvm::Value*> templateBlockBufferStack;
 
     // Static member support
@@ -1018,16 +728,12 @@ struct CodeGen::Impl {
         std::string owningModule;
     };
     std::unordered_map<std::string, GlobalClassBinding> moduleGlobalClassNames;
-    // Entry-module globals that were forward-declared (so entry-module method
-    // bodies can resolve them) but not yet initialized. Their first
-    // module-level assignment is a definition, not an overwrite, so it must
-    // not decref the null initializer. Erased on first init; genuine
-    // reassignments thereafter take the normal RC-overwrite path.
+    // Entry-module globals forward-declared (so method bodies can resolve them) but not
+    // yet initialized; their first assignment is a definition, not an overwrite, so it must not decref the null initializer. Erased on first init.
     std::unordered_set<std::string> entryGlobalsAwaitingInit;
     llvm::Function* mainFunction = nullptr;  // pointer to main() for detecting module level
-    // Scope-stack depth at which the entry module's top-level body executes.
-    // A declaration in main() is only a module global when at this depth; any
-    // deeper means it sits inside a block scope and must be a block-local.
+    // Scope-stack depth at which the entry module's top-level body executes; a
+    // declaration in main() is a module global only at this depth, deeper means block-local.
     size_t moduleBodyScopeDepth = 0;
     bool isDragonFile = false;               // .dr vs .py mode
     std::vector<dragon::Module*> depModulePtrs; // stored dep modules for cross-module type lookups
@@ -1057,87 +763,49 @@ struct CodeGen::Impl {
 
     // GC Phase 4: per-function parameter VarKinds (for atomic incref at fire/async spawn)
     std::unordered_map<std::string, std::vector<VarKind>> funcParamKinds;
-    // docs/002 2.8: aligned with funcParamKinds (methods include self at 0) -
-    // true for `own p: T` params. The CALLER must not drain an owned temp
-    // bound to an own param: ownership TRANSFERRED, the callee's scope exit
-    // releases it (caller-drain + callee-release double-freed, A/B-proven by
-    // the fresh-temp-exemption probe).
+    // docs/002 2.8: aligned with funcParamKinds (methods include self at 0), true for
+    // `own p: T` params. The caller must not drain an owned temp bound to one: ownership transfers, and caller-drain + callee-release double-freed it (A/B-proven, fresh-temp-exemption probe).
     std::unordered_map<std::string, std::vector<bool>> funcParamOwns;
     bool paramIsOwn(const std::string& funcName, unsigned idx) {
         auto it = funcParamOwns.find(funcName);
         return it != funcParamOwns.end() && idx < it->second.size() &&
                it->second[idx];
     }
-    // D027: per-function flags - param i is a `Callable[...]`. When a BARE
-    // function is passed to such a param, the call site wraps it as
-    // DragonClosure(fn, null) so the param always holds a real DragonClosure
-    // (reliable closure dispatch - no .text tag guess, no crash). Keyed by the
-    // LLVM symbol, like funcParamKinds; the wrapped closure is freed after the
-    // call via argTemps (VarKind::Closure decref). Indexed by AST param position
-    // (== arg index for the free-function direct-call path that consumes it).
+    // D027: per-function flags marking param i as `Callable[...]`. A bare fn passed there
+    // gets wrapped as DragonClosure(fn, null) so the param always holds a real closure (no tag-guess, no crash); freed post-call via argTemps.
     std::unordered_map<std::string, std::vector<bool>> funcCallableParam;
 
-    // `extern "C"` function names (keyed like funcParamKinds). Extern callees do
-    // NOT follow Dragon's borrow-and-incref RC convention - their args may be
-    // borrowed interior/non-owned pointers (e.g. dragon_bytes_data -> a raw
-    // buffer ptr) - so the call site must never release owned-temp arguments
-    // passed to them.
+    // `extern "C"` function names (keyed like funcParamKinds). Extern callees don't follow
+    // Dragon's borrow-and-incref RC convention (args may be borrowed interior pointers like dragon_bytes_data), so the call site must never release owned-temp args passed to them.
     std::unordered_set<std::string> externFuncNames;
-    // FFI v0 ownership contract: extern "C" args are
-    // BORROWED for the duration of the call (an extern must not retain a
-    // Dragon reference past return - an adopting extern would already corrupt
-    // named-local args, which are never increfed for externs), and a managed
-    // return (str/bytes/list/dict/set) is a FRESH +1 allocation, never an
-    // alias of an argument. Under that contract an owned heap temp passed to
-    // a managed-typed extern param drains after the call exactly like any
-    // borrow callee (stdlib http's nested dragon_str_concat calls leaked one
-    // string per header per response without this). A declared `ptr` RETURN
-    // opts the whole call out: the result may point INTO an argument
-    // (dragon_bytes_data), so its arg temps must outlive the call site
-    // (leak-over-UAF at the FFI edge). Members: externs whose declared return
-    // is not `ptr` - the ones whose owned arg temps are safe to drain.
+    // FFI v0: extern "C" args are borrowed for the call, and a managed return is a fresh
+    // +1, never aliasing an arg; owned temps passed to a managed-typed param drain like any borrow callee (stdlib http leaked one string per header without this). Declared `ptr` return opts out (may alias an arg: leak-over-UAF). Members: externs whose return isn't `ptr`.
     std::unordered_set<std::string> externDrainableFuncs;
 
     // Default parameter values: funcName -> vector of Expr* (one per LLVM param,
     // nullptr for params without defaults). Used at call sites to fill missing args.
     std::unordered_map<std::string, std::vector<Expr*>> funcParamDefaults;
 
-    // Defining module name per LLVM function symbol. Recorded alongside
-    // funcParamDefaults at registration time. fillDefaultArgs swaps
-    // `currentModuleName` to this value while evaluating each default's AST
-    // so NameExpr / CallExpr lookups against module-private symbols
-    // (functions, classes, aliases) resolve in the defining module's scope
-    // instead of the call site's. Without it, a default like
-    // `Cls.method = _helper` in module M is unreachable from a call site in
-    // module N (M is private; N has no alias for _helper).
+    // Defining module per LLVM function symbol, recorded alongside funcParamDefaults.
+    // fillDefaultArgs swaps currentModuleName to this while evaluating a default's AST so module-private lookups resolve in the defining module, not the call site's (else a default referencing a private helper is unreachable cross-module).
     std::unordered_map<std::string, std::string> funcDefiningModule;
 
-    // D040: Declared parameter names (one per LLVM param), populated alongside
-    // funcParamDefaults at every emission site. The non-vararg call path in
-    // CallExpr.cpp uses this to bind call-site keyword arguments to their
-    // matching parameter positions before fillDefaultArgs fills the remainder.
+    // D040: declared parameter names (one per LLVM param), populated alongside
+    // funcParamDefaults. CallExpr.cpp's non-vararg path binds keyword args to matching positions before fillDefaultArgs fills the rest.
     std::unordered_map<std::string, std::vector<std::string>> funcParamNames;
 
-    // Union type support: member VarKinds per union-typed variable.
-    // Used by isinstance narrowing to compute the "else" type for 2-member
-    // unions and to validate `isinstance(x, T)` against declared members.
+    // Union type support: member VarKinds per union-typed variable, used by isinstance
+    // narrowing (computes the "else" type for 2-member unions and validates against declared members).
     std::unordered_map<std::string, std::vector<VarKind>> unionMemberKinds;
-    // (D030 Phase 4: unionTagAllocas and funcUnionTagMask deleted -
-    //  tag is now structural in the {i64, i64} box value.)
+    // D030 Phase 4: unionTagAllocas/funcUnionTagMask deleted; tag is now structural in
+    // the {i64, i64} box value.
 
-    // First-class function support: track the LLVM FunctionType of callable variables.
-    // Populated when a lambda is assigned to a variable, or when a named function
-    // reference is assigned (e.g., fn = double). Used in visit(CallExpr) to emit
-    // indirect calls when module->getFunction(name) fails.
+    // First-class function support: LLVM FunctionType of callable variables, populated
+    // when a lambda or named function reference is assigned (`fn = double`). visit(CallExpr) uses it for indirect calls when module->getFunction(name) fails.
     std::unordered_map<std::string, llvm::FunctionType*> callableTypes;
 
-    // Nested `def` aliases: the LLVM function of a nested def is mangled
-    // (e.g. `__dragon_nested_3__inner`) so it can't collide across siblings,
-    // but the user source refers to it by the bare user name. While emitting
-    // the nested def's own body - where the enclosing scope has been replaced
-    // and its locals are no longer visible - direct calls to `inner(...)`
-    // resolve through this map so self-recursion compiles to a direct LLVM
-    // call (with the env arg auto-appended for capturing variants).
+    // Nested `def` aliases: a nested def's LLVM function is mangled (`__dragon_nested_3__inner`)
+    // to avoid sibling collisions, but source calls it by the bare name. While emitting the nested def's own body, this map resolves `inner(...)` to a direct LLVM call (env auto-appended for capturing variants) for self-recursion.
     struct NestedAliasInfo {
         llvm::Function* fn;            // mangled LLVM function (params + optional trailing env)
         llvm::FunctionType* userFnType;// user-visible signature (no trailing env)
@@ -1145,27 +813,20 @@ struct CodeGen::Impl {
     };
     std::unordered_map<std::string, NestedAliasInfo> nestedFunctionAliases;
 
-    // D027: After LambdaExpr codegen, if non-null, the last value was a closure.
-    // Holds the user-facing function type (without trailing env param).
-    // Assignment path checks this to set VarKind::Closure and callableTypes.
+    // D027: non-null after LambdaExpr codegen means the last value was a closure; holds
+    // the user-facing function type (no trailing env). Assignment path checks it to set VarKind::Closure and callableTypes.
     llvm::FunctionType* lastClosureCallableType = nullptr;
 
     // D025 Phase 4: set to true when type() returns a class descriptor (i64).
     // Assignment path checks this to set VarKind::Type.
     bool lastValueIsType = false;
 
-    // D024: Functions that have been wrapped by user-defined decorators.
-    // Maps original function name -> module global holding the decorated callable.
-    // Call dispatch checks this before direct function calls.
+    // D024: functions wrapped by user-defined decorators, mapping the original name to a
+    // module global holding the decorated callable. Call dispatch checks this before direct calls.
     std::unordered_map<std::string, llvm::GlobalVariable*> decoratedFunctions;
 
-    // Pre-register a decorated top-level function's indirect-dispatch global and
-    // callable type BEFORE class method bodies are emitted. Class bodies lower
-    // in an early pass (CodeGen.cpp), before visit(FunctionDecl) runs the
-    // decorator-application block - so a method that calls a decorated free
-    // function would otherwise miss the decoratedFunctions entry and bind the
-    // UNdecorated original. Mirrors the class-layout / module-global pre-passes.
-    // Idempotent; visit(FunctionDecl) reuses the global this creates.
+    // Pre-registers a decorated top-level function's indirect-dispatch global before class
+    // method bodies emit (which happens before visit(FunctionDecl) applies decorators), so a method calling it doesn't bind the undecorated original. Idempotent; visit(FunctionDecl) reuses the global.
     void preregisterDecoratedFunction(FunctionDecl& node);
 
     // *args/**kwargs tracking: function name -> vararg info
@@ -1175,13 +836,8 @@ struct CodeGen::Impl {
         bool hasKwArg = false;
         std::string varArgName;      // name of *args param
         std::string kwArgName;       // name of **kwargs param
-        // Element representation for *args, derived from the declared element
-        // annotation (`*args: T` -> T). Lets the call site pack into the
-        // monomorphized list variant instead of the type-erasing i64 path.
-        //  tag 0 + !isAny -> legacy DragonList (int/bool/bare *args, unchanged)
-        //  tag 2 -> DragonListF64 (*args: float)
-        //  tag 1/5/6/7 -> DragonListPtr (*args: str/list/dict/bytes/...)
-        //  isAny -> DragonListBox (*args: Any or a union element)
+        // Element representation for *args, from the declared `*args: T` annotation, so the
+        // call site packs into the monomorphized list variant: tag2->ListF64, tag1/5/6/7->ListPtr, isAny->ListBox, else legacy DragonList.
         int64_t varArgElemTag = 0;
         bool    varArgElemIsAny = false;
     };
@@ -1197,21 +853,17 @@ struct CodeGen::Impl {
     // PCRE2: set to true when pcre2_* functions are encountered
     bool needsPcre2 = false;
 
-    // mbedTLS: set to true when the dragon_tls_* TLS shim OR the mbedTLS-backed
-    // crypto digests/HMAC (dragon_sha*/dragon_md5*/dragon_hmac, ADR 038 Phase 7)
-    // are referenced - both pull mbedtls_* symbols from libdragon_mbedtls.a.
+    // mbedTLS: set when the dragon_tls_* shim or mbedTLS-backed crypto digests/HMAC
+    // (dragon_sha*/dragon_md5*/dragon_hmac, ADR 038 Phase 7) are referenced; both pull mbedtls_* symbols from libdragon_mbedtls.a.
     bool needsMbedtls = false;
 
-    // System libz / libzstd: set when dragon_zlib_* / dragon_zstd_* extern
-    // declarations show up. Used by linkExecutable to decide whether to
-    // pass -lz / -lzstd. Programs that never touch compression don't pay.
+    // System libz/libzstd: set when dragon_zlib_*/dragon_zstd_* externs show up, so
+    // linkExecutable knows whether to pass -lz/-lzstd. Programs that skip compression don't pay.
     bool needsZ = false;
     bool needsZstd = false;
 
-    // Webview shell (D031 `import ui`): set when dragon_webview_* extern
-    // declarations show up. linkExecutable then compiles the platform shell
-    // (options.webviewShimPath) into the program and links webkit2gtk
-    // resolved via pkg-config. Non-UI programs never carry GTK/webkit.
+    // Webview shell (D031 `import ui`): set when dragon_webview_* externs show up, so
+    // linkExecutable compiles the platform shell and links webkit2gtk via pkg-config. Non-UI programs never carry GTK/webkit.
     bool needsWebview = false;
 
     // Dunder method tracking: className -> set of dunder names (e.g. "__str__", "__eq__")
@@ -1221,9 +873,8 @@ struct CodeGen::Impl {
     // access). Returns "" if the expression is not a known class instance.
     std::string resolveExprClassName(Expr* expr);
 
-    /// Does this module level annotated declaration bind a DEQUE? True when
-    /// the annotation names deque (`X: deque[T]`) or the RHS is a deque(...)
-    /// ctor call.
+    /// True when a module-level annotated declaration binds a deque: the annotation names
+    /// deque (`X: deque[T]`) or the RHS is a deque(...) ctor call.
     static bool annAssignIsDeque(AnnAssignStmt* ann) {
         if (!ann) return false;
         if (auto* gt = dynamic_cast<GenericTypeExpr*>(ann->annotation.get())) {
@@ -1238,21 +889,12 @@ struct CodeGen::Impl {
         return false;
     }
 
-    /// Is `e` a receiver expression denoting the intrinsic Lock? Covers a
-    /// tagged local/global (`lock.acquire()`, `with glock`) via varClassNames,
-    /// AND a Lock-typed instance field (`self._lock.acquire()`,
-    /// `with app._storage_lock`) via classFieldClassNameBySym - the NameExpr-only
-    /// check silently missed fields: the acquire/release/with lowering fell
-    /// through to generic paths that DROPPED the calls, so the "lock" never
-    /// locked (found by the concurrent-mutation detector on
-    /// Router._storage_lock). Defined in codegen/ImplMethods.cpp.
+    /// True for a receiver denoting the intrinsic Lock: a tagged local/global
+    /// (`lock.acquire()`) via varClassNames, or a Lock-typed field (`self._lock.acquire()`) via classFieldClassNameBySym. The old NameExpr-only check silently dropped field locks (found via concurrent-mutation detector on Router._storage_lock). Defined in ImplMethods.cpp.
     bool isLockExpr(Expr* e);
 
-    // Resolve the VarKind of an arbitrary expression. Used by print() and
-    // other dispatch sites that need to know if a non-NameExpr argument is
-    // a string / bool / float / etc. - without this, a subscript like
-    // `obj.names[0]` would fall through to default-int print.
-    // Returns VarKind::Other if unknown.
+    // Resolves the VarKind of an arbitrary expression, used by print() and other dispatch
+    // sites needing a non-NameExpr argument's kind (e.g. `obj.names[0]` would otherwise fall through to default-int print). Returns VarKind::Other if unknown.
     VarKind resolveExprVarKind(Expr* expr);
 
     // Check if a class has a specific dunder method (walks inheritance chain).
@@ -1291,9 +933,8 @@ struct CodeGen::Impl {
                                 llvm::Value* self,
                                 const std::vector<llvm::Value*>& extraArgs = {});
 
-    // Convert a value to i1 (boolean) for use in conditions.
-    // For class instances, calls __bool__ if available (defaults to true).
-    // exprNode is optional - used to resolve class name for dunder dispatch.
+    // Converts a value to i1 for use in conditions; for class instances calls __bool__ if
+    // available (defaults to true). exprNode is optional, used to resolve the class name for dunder dispatch.
     llvm::Value* toBool(llvm::Value* val, Expr* exprNode = nullptr);
 
     void init(); // defined in codegen/ImplInit.cpp
@@ -1301,11 +942,8 @@ struct CodeGen::Impl {
     void pushScope() { scopes.push_back({}); }
     void popScope() { if (!scopes.empty()) scopes.pop_back(); }
 
-    /// Return true if a VarKind represents a heap-allocated type
-    /// that has a DragonObjectHeader and can be safely decref'd.
-    /// Phase 2: Str (dynamic) is included. Uses dragon_decref_str which
-    /// navigates from the data pointer back to the DragonString header.
-    /// StrLiteral is NOT included - literals have no header.
+    /// True if a VarKind is heap-allocated with a DragonObjectHeader, safely decref'able.
+    /// Str (dynamic) is included (dragon_decref_str navigates from data ptr to header); StrLiteral is not (no header).
     static bool isHeapKind(VarKind k) {
         return k == VarKind::Str || k == VarKind::List || k == VarKind::Dict ||
                k == VarKind::Tuple || k == VarKind::Set ||
@@ -1315,15 +953,8 @@ struct CodeGen::Impl {
                k == VarKind::Union;  // conservative: union may hold heap types
     }
 
-    // a closure env capture that can be a NODE in a reference
-    // cycle - a heap object the env holds a +1 to AND that can transitively
-    // point back at the env (instance/list -> closure -> env -> ...). Strings
-    // are heap LEAVES (no children, never gc_tracked) and unions are boxed (not
-    // a single tracked ptr), so neither makes the env cyclic; cells + the
-    // pointer-shaped heap kinds do. Drives BOTH the env's gc-track gate (only a
-    // cyclic env joins gc_tracked - #1: scalar/str-only envs pay no GC cost) AND
-    // which captures the env gc_fn's TRAVERSE op visits (must match exactly, so
-    // trial-deletion subtracts each internal ref once and no more).
+    // True when a closure env capture can be a cycle node: a heap object the env holds
+    // a +1 to that can transitively point back (instance/list -> closure -> env -> ...). Strings are leaves and unions are boxed, so neither counts. Drives both the env's gc-track gate and which captures gc_fn's TRAVERSE visits.
     static bool envCaptureIsCyclic(VarKind kind, bool isCellRelay) {
         if (isCellRelay) return true;
         return kind == VarKind::List || kind == VarKind::Dict ||
@@ -1332,62 +963,34 @@ struct CodeGen::Impl {
                kind == VarKind::Deque || kind == VarKind::Closure;
     }
 
-    // Per-capture descriptor for the shared env-GC-hook emitter. One per env
-    // field (field i+1 of the env struct); `kind`/`isCellRelay` mirror the
-    // closure-site CaptureInfo.
+    // Per-capture descriptor for the shared env-GC-hook emitter, one per env field (field
+    // i+1 of the env struct); `kind`/`isCellRelay` mirror the closure-site CaptureInfo.
     struct EnvCaptureDesc { VarKind kind; bool isCellRelay; };
 
-    // emit the per-closure-site MULTI-OP env GC hook (DEALLOC /
-    // TRAVERSE / CLEAR over the env's heap captures). Replaces the old
-    // single-purpose dealloc fn; both closure sites (LambdaExpr + nested def)
-    // route through this one emitter so they cannot drift. Returns the fn;
-    // the caller bitcasts it into dragon_env_alloc's gc_fn slot.
+    // Emits the per-closure-site multi-op env GC hook (DEALLOC/TRAVERSE/CLEAR over the
+    // env's heap captures), replacing the old single-purpose dealloc fn. Both closure sites (LambdaExpr + nested def) route through this one emitter so they can't drift.
     llvm::Function* emitEnvGcFn(const std::string& baseName,
                                 llvm::StructType* envStructType,
                                 const std::vector<EnvCaptureDesc>& caps);
 
-    /// True if `v` is an owned (+1 refcount, heap) intermediate string that a
-    /// consuming op (concat, repeat, ...) must decref or it leaks. By the
-    /// ownership convention, ALL dragon_* i8*-returning
-    /// functions return owned heap strings EXCEPT the borrowed-returners
-    /// listed here, so this uses a blocklist. Non-CallInst values (GlobalString
-    /// literals, alloca loads of named vars) are not owned intermediates.
+    /// True if `v` is an owned (+1, heap) intermediate string a consuming op must decref
+    /// or it leaks. All dragon_* i8*-returning fns return owned strings except the borrowed-returner blocklist here; non-CallInst values (literals, var loads) are never owned.
     bool isOwnedStrResult(llvm::Value* v);
 
-    /// True when a NAMED callee returns a BORROWED string (TLS slots,
-    /// container element reads, foreign C pointers) that must never be
-    /// decref'd by the consumer. Shared by isOwnedStrResult and the
-    /// mixed-shape comparison drain in Expressions.cpp.
+    /// True when a named callee returns a borrowed string (TLS slots, container element
+    /// reads, foreign C pointers) that must never be decref'd. Shared by isOwnedStrResult and the mixed-shape comparison drain in Expressions.cpp.
     bool isBorrowedStrReturnerName(const std::string& name);
 
-    /// Generic-pointer analog of isOwnedStrResult: true if `v` is an owned
-    /// (+1, fresh) heap object pointer - list/dict/set/tuple/instance/bytes -
-    /// that a consumer must release or take ownership of. Same blocklist
-    /// shape: every ptr-returning call yields an owned result EXCEPT the
-    /// container element reads below, which return a BORROW (the container
-    /// keeps the +1). Non-CallInst values (alloca loads of locals, IntToPtr
-    /// of i64 payloads, GEP field loads) are conservatively borrows.
+    /// Generic-pointer analog of isOwnedStrResult: true if `v` is an owned (+1, fresh)
+    /// heap pointer (list/dict/set/tuple/instance/bytes) a consumer must release. Same blocklist shape; container element reads are borrows, and non-CallInst values are conservatively borrows.
     bool isOwnedPtrResult(llvm::Value* v);
 
-    /// True if `v` is an OWNED box temporary (a `{tag,payload}` value whose
-    /// refcounted payload carries a +1 the consumer must release / take). The
-    /// box equivalent of isOwnedStrResult, and a BLOCKLIST for the same reason:
-    /// every box-returning call yields an owned result EXCEPT the container
-    /// element-read helpers below, which return a BORROW (the container keeps
-    /// the +1). User functions returning Any are owned too - the ReturnStmt path
-    /// increfs a borrowed box payload before returning, so a box flowing out of
-    /// a call always owns its payload. A non-CallInst (a box loaded from a slot)
-    /// or an indirect call (no known callee) is conservatively a borrow.
-    /// Used to free box temporaries after a transient use (print / discarded
-    /// statement) and to take ownership on store instead of double-counting.
+    /// True if `v` is an owned box temporary (`{tag,payload}`, refcounted payload
+    /// carrying a +1). Box equivalent of isOwnedStrResult, same blocklist shape (container element-reads are borrows); ReturnStmt increfs a borrowed payload before returning, so a call's box result always owns it. Non-CallInst/indirect-call values are conservatively borrows.
     bool isOwnedBoxResult(llvm::Value* v);
 
-    /// D030 §5: Type::Kind -> DragonValueTag - the source-of-truth tag
-    /// derivation. Replaces varKindToTag at every site that has access to
-    /// the source expression's static type. Critical for Bytes-typed
-    /// values stored in box/union/typedDict slots: the runtime tag must
-    /// reflect the actual element type even when the slot's VarKind has
-    /// been collapsed into a generic-heap kind.
+    /// D030 §5: Type::Kind -> DragonValueTag, the source-of-truth tag derivation,
+    /// replacing varKindToTag wherever the source expression's static type is known. Critical for Bytes-typed values in box/union/typedDict slots, whose VarKind collapses to a generic heap kind.
     static int64_t typeKindToTag(Type::Kind k);
 
     /// Map VarKind to DragonValueTag. Returns -1 if no specific tag (e.g. Other/Any).
@@ -1397,20 +1000,12 @@ struct CodeGen::Impl {
     /// with this tag, then resets to -1. Set by AnnAssignStmt when RHS is dict access.
     int64_t pendingDictCheckTag = -1;
 
-    /// Companion to pendingDictCheckTag for LIST-annotated LHS: the
-    /// dragon_list_view_check argument (see listViewWantElemTag). The dict
-    /// checked-get verifies the stored TAG is "list" (5) but cannot tell a
-    /// monomorphized DragonList from a DragonListBox - the consuming get site
-    /// emits the view check on the returned pointer so `xs: list[int] =
-    /// anyDict["k"]` raises TypeError instead of misreading a list[str]'s
-    /// pointers as ints. Captured and cleared together with
-    /// pendingDictCheckTag at the get sites.
+    /// Companion to pendingDictCheckTag for list-annotated LHS: the dict checked-get
+    /// verifies the stored tag is "list" but can't distinguish a monomorphized DragonList from a DragonListBox, so the get site view-checks the returned pointer (`xs: list[int] = anyDict["k"]` raises TypeError instead of misreading a list[str]'s pointers as ints).
     int64_t pendingListViewElemTag = kNoListElemCheck;
 
-    /// D030 Phase 3.G: resolve the static key Type::Kind of a dict that
-    /// `expr` evaluates to. Used by subscript/`in`/print sites to branch
-    /// between str-keyed (default) and int-keyed dispatch. Returns
-    /// Type::Kind::Unknown when no annotation reached this site.
+    /// D030 Phase 3.G: resolves the static key Type::Kind of a dict `expr` evaluates to,
+    /// used by subscript/`in`/print to branch str-keyed vs int-keyed. Returns Unknown when no annotation reached this site.
     Type::Kind resolveDictKeyKind(Expr* expr);
 
     /// True iff `expr` denotes a dict[int, V].
@@ -1418,24 +1013,24 @@ struct CodeGen::Impl {
         return resolveDictKeyKind(expr) == Type::Kind::Int;
     }
 
-    /// Resolve the VALUE kind of a dict expression (the V in dict[K, V]).
-    /// Mirrors resolveDictKeyKind but reads the value-kind maps. Used to pick
-    /// the typed augmented-assignment path for `d[k] OP= v`.
+    /// Resolves the VALUE kind of a dict expression (the V in dict[K, V]), mirroring
+    /// resolveDictKeyKind but reading the value-kind maps. Used to pick the typed path for `d[k] OP= v`.
     Type::Kind resolveDictValueKind(Expr* expr);
 
-    /// Phase 5: Map a Type::Kind to a DragonValueTag integer for container elem_tag.
-    /// Returns 0 (TAG_INT) for non-heap types we don't pack specially.
-    /// 6.12: TAG_BOOL = 3 unlocks 1-byte packed storage in the runtime -
-    /// `list[bool]` of 1M elements drops from 8MB to 1MB and fits in L2.
+    /// Phase 5: maps a Type::Kind to a DragonValueTag for container elem_tag (0/TAG_INT
+    /// for non-heap types). 6.12: TAG_BOOL=3 unlocks 1-byte packed storage, so list[bool] of 1M elements drops from 8MB to 1MB and fits in L2.
     static int64_t typeKindToElemTag(dragon::Type::Kind k);
 
-    /// If `e` is a container expression (list/dict/set/tuple), return the
-    /// runtime function that renders it to a DragonString; otherwise "".
-    /// Used by str() and f-string interpolation so a container is rendered as
-    /// its repr (e.g. "[1, 2, 3]") instead of being misread as a string
-    /// pointer (which produced empty output). Sets are typed as ListType, so we
-    /// disambiguate list vs set via VarKind / AST node before the type kind.
+    /// If `e` is a container (list/dict/set/tuple), returns the runtime function that
+    /// renders it to a DragonString, else "". Used by str()/f-strings so a container renders as its repr instead of an empty misread string pointer. Sets type as ListType, so VarKind/AST disambiguates list vs set first.
     std::string containerReprFn(Expr* e);
+
+    /// Records the class (and owning module) constructed by an assignment's
+    /// value expression for `varName`; returns the class name or "" if the
+    /// value is not a class instance or the var is already classified. The
+    /// single definition replaces four drifting copies (one of which skipped
+    /// varClassOwningModule, breeding cross-module collisions).
+    std::string recordVarClassFromValue(const std::string& varName, Expr* value);
 
     /// Phase 5: Get elem_tag for a list expression from its resolved type.
     int64_t getListElemTag(Expr* listExpr) {
@@ -1444,44 +1039,26 @@ struct CodeGen::Impl {
                 if (lt->elementType) return typeKindToElemTag(lt->elementType->kind());
             }
         }
-        return 0; // TAG_INT (unknown)
+        return TAG_INT; // TAG_INT (unknown)
     }
 
-    /// Map a Type::Kind to the matching VarKind. Used when binding a
-    /// comprehension/for-loop variable to the element type derived from the
-    /// iterable. Returns Int for primitives we don't track as heap kinds.
+    /// Maps a Type::Kind to the matching VarKind, used when binding a comprehension/for-loop
+    /// variable to the iterable's element type. Returns Int for primitives not tracked as heap kinds.
     static VarKind typeKindToVarKind(Type::Kind k);
 
-    /// D030 §5: native-LLVM-type derivation from Type::Kind. The single
-    /// source of truth for "what shape does a value of this type have at
-    /// the LLVM ABI level". Replaces ad-hoc Type::Kind -> VarKind translation
-    /// switches scattered across codegen call sites - drives loop-var
-    /// allocas, list-get return shapes, dict-value bindings, and any other
-    /// place that needs to size a slot from the static type.
+    /// D030 §5: single source of truth for native-LLVM-type derivation from Type::Kind
+    /// (what shape a value has at the ABI level). Replaces ad-hoc translation switches; drives loop-var allocas, list-get return shapes, dict-value bindings, etc.
     llvm::Type* typeKindToLLVM(Type::Kind k) const;
 
-    /// Type::Kind-based heap classification. Replaces `isHeapKind(VarKind)`
-    /// at refcount-on-iteration sites so the heap test is driven from the
-    /// static type, not the source-level VarKind hop. Mirrors `isHeapKind`
-    /// minus the Other/Union/File branches that VarKind tracked for
-    /// non-Type-shaped slots.
+    /// Type::Kind-based heap classification, replacing `isHeapKind(VarKind)` at
+    /// refcount-on-iteration sites so the test is driven from the static type. Mirrors isHeapKind minus the Other/Union/File branches VarKind tracked for non-Type-shaped slots.
     static bool isHeapTypeKind(Type::Kind k);
 
-    /// Determine the element Type::Kind of an iterable expression. Looks at
-    /// `varListElemKinds` for plain NameExpr iterables (matches ForLoop.cpp's
-    /// iterable handling) and falls back to the resolved AST type otherwise.
-    /// Returns Type::Kind::Int when no element type can be determined.
+    /// Determines the element Type::Kind of an iterable expression: checks `varListElemKinds`
+    /// for plain NameExpr iterables (matches ForLoop.cpp), falls back to the resolved AST type, else Int.
     Type::Kind getIterableElementKind(Expr* iterable) {
-        // The receiver's OWN resolved container type is authoritative when its
-        // element type is concrete. Prefer it over the varListElemKinds tracking
-        // map: that map is program-wide, keyed by BARE variable name, and never
-        // cleared between functions/modules, so a same-named list elsewhere
-        // (e.g. an `out: list[SomeClass]` param) leaves a stale entry that would
-        // otherwise mark THIS local `out: list[int]` as list[Instance] - routing
-        // its append through dragon_list_append_ptr + a generic dragon_incref on
-        // a raw i64 element (SEGV / UAF). The map is only a fallback for a list
-        // whose static element type is not yet pinned - an unannotated `out = []`
-        // whose element kind is learned from what gets appended (Unknown here).
+        // The receiver's own resolved type is authoritative when concrete: preferred over
+        // varListElemKinds, a program-wide bare-name-keyed map never cleared between functions, so a same-named `list[SomeClass]` elsewhere left a stale entry causing this `out: list[int]` to route through dragon_list_append_ptr + incref on a raw i64 (SEGV/UAF). The map is only a fallback for unpinned element types (unannotated `out = []`).
         if (iterable && iterable->type) {
             if (auto* lt = dynamic_cast<ListType*>(iterable->type.get())) {
                 if (lt->elementType &&
@@ -1500,29 +1077,16 @@ struct CodeGen::Impl {
         return Type::Kind::Int;
     }
 
-    /// True when iterating `expr` directly means iterating a dict's KEYS - i.e.
-    /// `expr` is a bare dict (variable, class field, or dict-typed expression),
-    /// NOT a `.keys()`/`.items()`/`.values()` call (those already yield a list).
-    /// Comprehensions and the for-loop must convert the evaluated DragonDict*
-    /// to its keys list via dragon_dict_keys before indexing it as a list;
-    /// indexing the dict pointer directly walks its raw bytes (-> SIGSEGV).
+    /// True when iterating `expr` directly means iterating a dict's keys, i.e. `expr` is
+    /// a bare dict (not a `.keys()`/`.items()`/`.values()` call). For-loops/comprehensions must convert via dragon_dict_keys first; indexing the dict pointer directly walks raw bytes (SIGSEGV).
     bool isBareDictIterable(Expr* expr);
 
     /// Determine the correct DragonValueTag for a pointer-typed expression.
     /// Used by DictExpr to tag values properly (not blindly TAG_STR for all pointers).
     int64_t inferPtrValueTag(Expr* expr);
 
-    /// Promote a string literal to a heap-allocated DragonString via dragon_string_dup.
-    /// If the expression is a TRUE compile-time StringLiteral (headerless rodata
-    /// pointer) or a NameExpr with VarKind::StrLiteral, calls dragon_string_dup to
-    /// create a refcounted copy. Otherwise returns val as-is.
-    ///
-    /// An f-string parses as a StringLiteral node too (isFString=true), but its
-    /// VALUE is already an owned +1 heap string built at runtime by the concat
-    /// chain. It must NOT be dup'd here: the container setter then adopts the
-    /// dup while the original +1 is orphaned - one leaked string per
-    /// list-literal element, list.append, dict-literal value, d[k]=v (key and
-    /// value), and xs[i]=v, every time the stored value is an f-string.
+    /// Promotes a string literal to a heap DragonString via dragon_string_dup: true for a
+    /// compile-time StringLiteral or StrLiteral-kind NameExpr, else returns val as-is. An f-string is also a StringLiteral node but its value is already an owned +1; dup'ing it here orphaned the original +1, leaking one string per list/dict store or subscript-assign of an f-string.
     llvm::Value* ensureHeapString(llvm::Value* val, Expr* expr) {
         if (options.gcMode != GCMode::RC) return val;
         bool isLiteral = false;
@@ -1545,15 +1109,12 @@ struct CodeGen::Impl {
     static constexpr int DCLEAN_CALLABLE = 2;
     static constexpr int DCLEAN_OBJ      = 3;
     static constexpr int DCLEAN_UNION    = 4;
-    // A pending defer's call entry: val is the void(i64*) thunk, tag is the
-    // arg count. The unwinder invokes the thunk over the `tag` entries pushed
-    // directly below it (each carrying its own DCLEAN kind for the post-call
-    // release), then keeps popping so those entries drain normally.
+    // A pending defer's call entry: val is the void(i64*) thunk, tag is the arg count. The
+    // unwinder invokes it over the `tag` entries pushed directly below (each with its own DCLEAN kind for post-call release), then keeps popping so they drain normally.
     static constexpr int DCLEAN_DEFER_CALL = 5;
 
-    /// Map an owned-heap VarKind to its DragonCleanupKind, mirroring
-    /// emitScopeCleanupFor's per-kind decref dispatch. Returns 0 for non-heap
-    /// (caller must not push). Union is handled separately (carries a box tag).
+    /// Maps an owned-heap VarKind to its DragonCleanupKind, mirroring emitScopeCleanupFor's
+    /// per-kind decref dispatch. Returns 0 for non-heap (caller must not push); Union is handled separately (carries a box tag).
     int cleanupKindFor(VarKind k) {
         switch (k) {
             case VarKind::Str:     return DCLEAN_STR;
@@ -1572,10 +1133,8 @@ struct CodeGen::Impl {
         return builder->CreateZExtOrBitCast(v, i64Type);
     }
 
-    /// The thread-local frame-count global (`__dragon_active_frames`), declared
-    /// lazily. Initial-exec TLS model: call-free access (a GOT-relative TLS
-    /// offset), valid because the runtime is statically linked into the
-    /// executable. This is the ONLY inline TLS read codegen emits.
+    /// The thread-local frame-count global (`__dragon_active_frames`), declared lazily
+    /// with initial-exec TLS (call-free GOT-relative access, valid since the runtime is statically linked). The only inline TLS read codegen emits.
     llvm::GlobalVariable* activeFramesGlobal = nullptr;
     llvm::GlobalVariable* getActiveFramesGlobal() {
         if (!activeFramesGlobal) {
@@ -1588,10 +1147,8 @@ struct CodeGen::Impl {
         return activeFramesGlobal;
     }
 
-    /// Emit the inline cleanup gate: `__dragon_active_frames != 0`. A heap local
-    /// declared with NO exception frame live can never be longjmp-unwound (any
-    /// raise is uncaught -> exit), so its cleanup registration is skipped - the
-    /// hot path pays only this predicted-untaken branch, no runtime call.
+    /// Emits the inline cleanup gate `__dragon_active_frames != 0`: a heap local declared
+    /// with no live exception frame can never be longjmp-unwound (uncaught raise exits), so registration is skipped; the hot path pays only a predicted-untaken branch.
     llvm::Value* emitActiveFramesNonZero() {
         auto* i32Ty = llvm::Type::getInt32Ty(*context);
         auto* af = builder->CreateLoad(i32Ty, getActiveFramesGlobal(), "active.frames");
@@ -1609,9 +1166,8 @@ struct CodeGen::Impl {
         return a;
     }
 
-    /// Find the i32 alloca holding a cleanup-registered local's runtime slot
-    /// index, searching the scope chain (mirrors setVar's owning-scope
-    /// resolution). Null if the name was never registered.
+    /// Finds the i32 alloca holding a cleanup-registered local's runtime slot index,
+    /// searching the scope chain (mirrors setVar's owning-scope resolution). Null if never registered.
     llvm::AllocaInst* findCleanupSlot(const std::string& name) {
         for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
             auto found = it->cleanupSlots.find(name);
@@ -1621,36 +1177,22 @@ struct CodeGen::Impl {
         return nullptr;
     }
 
-    /// Register a freshly-declared owned heap local on the unwind cleanup stack
-    /// and remember its slot (so a later reassignment can refresh the snapshot).
-    /// `tagVal` is the box value-tag for Union locals (DCLEAN_UNION), else null.
-    /// No-op outside RC mode or when the block already has a terminator.
+    /// Registers a freshly-declared owned heap local on the unwind cleanup stack and
+    /// remembers its slot for reassignment refresh. `tagVal` is the box value-tag for Union locals; no-op outside RC mode or a terminated block.
     void emitCleanupPush(const std::string& name, llvm::Value* value,
                          int cleanupKind, llvm::Value* tagVal = nullptr);
 
-    /// Refresh a registered local's cleanup snapshot after reassignment (its old
-    /// value was already decref'd by storeWithRCOverwrite / the union path). No-op
-    /// if the name was never registered.
+    /// Refreshes a registered local's cleanup snapshot after reassignment (old value
+    /// already decref'd by storeWithRCOverwrite/the union path). No-op if never registered.
     void emitCleanupUpdate(const std::string& name, llvm::Value* value,
                            llvm::Value* tagVal = nullptr);
 
-    /// Push an anonymous for-loop temp (generator/iterator object) onto the
-    /// unwind cleanup stack so a raise that unwinds the loop's frame frees it.
-    /// These are NOT named scope locals, so emitScopeCleanupFor never sees them
-    /// and they'd leak when an exception skips the loop's normal-exit decref.
-    /// Returns an i32 alloca holding the depth to rewind to at that decref (or
-    /// null in non-RC / terminated block). Pair with emitCleanupPopTemp.
+    /// Pushes an anonymous for-loop temp (generator/iterator) onto the unwind cleanup
+    /// stack so a raise unwinding the loop's frame frees it (these aren't named scope locals, so emitScopeCleanupFor never sees them and they'd leak). Pair with emitCleanupPopTemp.
     llvm::Value* emitCleanupPushTemp(llvm::Value* ptr, int cleanupKind);
 
-    /// Register owned arg temps on the runtime cleanup stack for the duration
-    /// of a call, so a raise that longjmps out of the callee frees them (the
-    /// post-call decref only runs on normal return; without this an owned temp
-    /// like the bytes literal in `assertRaises(..., lambda: f(b"x"))` leaks
-    /// whenever the callee raises). Returns the per-temp
-    /// rewind bases for popArgTempCleanups on the normal-return path. Only
-    /// tag-independent kinds (Str/Callable/Obj) are registered - a Union temp
-    /// needs a box value-tag the temp-cleanup path doesn't carry, so it stays
-    /// with the existing normal-path decref.
+    /// Registers owned arg temps on the runtime cleanup stack for the call's duration, so
+    /// a longjmp out of the callee frees them (else e.g. the bytes literal in `assertRaises(..., lambda: f(b"x"))` leaks when the callee raises). Only tag-independent kinds (Str/Callable/Obj); Union needs a box tag this path doesn't carry.
     std::vector<llvm::Value*> pushArgTempCleanups(
         const std::vector<std::pair<llvm::Value*, VarKind>>& argTemps);
 
@@ -1658,17 +1200,12 @@ struct CodeGen::Impl {
     /// in reverse push order, on the normal-return path before the decref.
     void popArgTempCleanups(const std::vector<llvm::Value*>& bases);
 
-    /// Rewind the cleanup stack past a temp pushed by emitCleanupPushTemp - call
-    /// at the loop's normal-exit decref site, where codegen already freed the
-    /// temp, so a later unwind doesn't double-free the now-stale snapshot.
+    /// Rewinds the cleanup stack past a temp pushed by emitCleanupPushTemp; call at the
+    /// loop's normal-exit decref site so a later unwind doesn't double-free the stale snapshot.
     void emitCleanupPopTemp(llvm::Value* baseAlloca);
 
-    /// Emit dragon_decref calls for all heap-typed, non-borrowed locals in
-    /// the current (innermost) scope. Must be called BEFORE the scope's
-    /// terminator is emitted and BEFORE popScope().
-    /// Phase 2: Str uses dragon_decref_str (navigates from data ptr to header).
-    /// Phase 3: ClassInstance uses dragon_decref (pointer IS the header, like containers).
-    /// Emit decrefs for all heap-typed, non-borrowed locals in a single scope.
+    /// Emits dragon_decref calls for all heap-typed, non-borrowed locals in the current
+    /// scope, before the terminator and before popScope(). Str uses dragon_decref_str; ClassInstance uses dragon_decref (pointer is the header, like containers).
     void emitScopeCleanupFor(Scope& scope);
 
     /// Clean up the innermost scope only (used at normal scope exit points
@@ -1681,8 +1218,8 @@ struct CodeGen::Impl {
         emitScopeCleanupFor(scopes.back());
     }
 
-    /// Clean up ALL scopes from innermost to outermost.
-    /// Used by return statements which exit the entire function.
+    /// Cleans up all scopes innermost to outermost; used by return statements exiting the
+    /// whole function.
     void emitAllScopeCleanup() {
         if (scopes.empty()) return;
         if (options.gcMode != GCMode::RC) return;
@@ -1693,9 +1230,8 @@ struct CodeGen::Impl {
         }
     }
 
-    /// Clean up scopes from innermost down to (and including) targetDepth.
-    /// Used by break/continue to clean loop-interior scopes without
-    /// touching the enclosing function scope.
+    /// Cleans up scopes from innermost down to (and including) targetDepth; used by
+    /// break/continue to clean loop-interior scopes without touching the enclosing function scope.
     void emitScopeCleanupToDepth(size_t targetDepth) {
         if (scopes.empty()) return;
         if (options.gcMode != GCMode::RC) return;
@@ -1732,13 +1268,8 @@ struct CodeGen::Impl {
         }
     }
 
-    /// Early-exit (return/break/continue) cleanup: walk scopes innermost to
-    /// `targetScopeDepth` and exit-cleanup entries down to `ecDownTo`,
-    /// INTERLEAVED by nesting depth - each scope's defers + decrefs run
-    /// before the finally/__exit__ that encloses that scope, exactly as they
-    /// would on the normal fall-through path. Replaces the old two-flat-pass
-    /// order (all finallys, then all scopes), which ran an enclosing finally
-    /// before an inner scope's deferred calls.
+    /// Early-exit (return/break/continue) cleanup: walks scopes and exit-cleanup entries
+    /// down to targetScopeDepth/ecDownTo, interleaved by nesting depth so each scope's defers+decrefs run before the finally/__exit__ enclosing it, matching normal fall-through. Replaces an old two-flat-pass order that ran an enclosing finally before an inner scope's defers.
     void emitEarlyExitCleanups(CodeGen& cg, size_t targetScopeDepth,
                                size_t ecDownTo) {
         size_t ecIdx = exitCleanupStack.size();
@@ -1781,12 +1312,8 @@ struct CodeGen::Impl {
         return finder.found;
     }
 
-    /// True if the body contains a value-returning `return <expr>` (not a bare
-    /// `return`). An unannotated function with NO value-returning return is a
-    /// procedure and must get a `void` LLVM return type: a bare `return` lowers
-    /// to `ret void`, which would mismatch the historical i64 no-annotation
-    /// default and fail LLVM verification. Stops at nested function/class
-    /// bodies - their returns belong to them, not the enclosing function.
+    /// True if the body has a value-returning `return <expr>` (not bare). An unannotated
+    /// function with none is a procedure needing `void` return (a bare `return` lowers to `ret void`, mismatching the i64 default and failing LLVM verification). Stops at nested function/class bodies.
     static bool bodyReturnsValue(const std::vector<std::unique_ptr<Stmt>>& body) {
         struct RetFinder : public DefaultASTVisitor {
             bool found = false;
@@ -1803,57 +1330,34 @@ struct CodeGen::Impl {
         return finder.found;
     }
 
-    /// LLVM return type for an unannotated function/method: a procedure (no
-    /// value-returning return) is `void`; everything else keeps the historical
-    /// `int` default. Centralizes the rule so forward-declaration and body
-    /// emission agree (a divergence would fail LLVM verification).
+    /// LLVM return type for an unannotated function/method: void for a procedure, else the
+    /// historical int default. Centralizes the rule so forward-declaration and body emission agree (a divergence fails LLVM verification).
     llvm::Type* unannotatedReturnType(const std::vector<std::unique_ptr<Stmt>>& body) {
         return bodyReturnsValue(body) ? i64Type : voidType;
     }
 
-    /// Infer the yielded value's VarKind from the first YieldExpr in a
-    /// generator body. Used to bind `for x in gen()` loop var with the
-    /// correct kind so heap-typed yields (str/list/dict/instance) round-trip
-    /// through the consumer instead of being printed as raw i64. Returns Int
-    /// if no yields are found or the value's type is unresolved.
+    /// Infers the yielded value's VarKind from a generator body's first YieldExpr, used
+    /// to bind `for x in gen()` with the right kind so heap-typed yields round-trip instead of printing as raw i64. Returns Int if none found or unresolved.
     VarKind inferYieldKind(const std::vector<std::unique_ptr<Stmt>>& body);
 
-    /// Map: generator function name -> VarKind of values it yields.
-    /// Populated when a generator function is compiled; consulted by the
-    /// for-in-over-generator path to type the loop variable.
+    /// generator function name -> VarKind of values it yields; populated when compiled,
+    /// consulted by the for-in-over-generator path to type the loop variable.
     std::unordered_map<std::string, VarKind> generatorYieldKinds;
 
-    /// Map: variable name (storing a Generator) -> VarKind of yielded values.
-    /// Populated when `g = some_gen_fn(...)` is assigned, so subsequent
-    /// `for x in g { ... }` loops know how to type x.
+    /// variable (storing a Generator) -> VarKind of yielded values, populated on
+    /// `g = some_gen_fn(...)` so later `for x in g { ... }` loops know how to type x.
     std::unordered_map<std::string, VarKind> varGenYieldKinds;
 
-    /// Fill missing arguments with default values at a call site.
-    // C9-B shared spread expansion. Expand `node`'s positional args (with
-    // `*tuple`/`*list` spread) and kwargs (with `**dict` spread) into the
-    // fully-coerced `args` vector against `func`'s signature, registering owned
-    // heap temporaries in `argTemps` (spread elements are BORROWED - never
-    // listed). `args` may already hold prefix values (e.g. `self`); expansion
-    // continues from args.size(). Does NOT fill defaults or emit the call - the
-    // caller owns dispatch (so a method call routes through its vtable). Returns
-    // false on a diagnosed error (lastValue poisoned). Defined in CallExpr.cpp.
+    // C9-B shared spread expansion: expands `node`'s positional (`*tuple`/`*list`) and
+    // kwargs (`**dict`) spreads into the fully-coerced `args` vector against `func`'s signature, registering owned temps in `argTemps` (spread elements are borrowed, never listed). Doesn't fill defaults or emit the call. Defined in CallExpr.cpp.
     bool expandSpreadCallArgs(
         CodeGen& cg, llvm::Function* func, CallExpr& node,
         std::vector<llvm::Value*>& args,
         std::vector<std::pair<llvm::Value*, VarKind>>& argTemps,
         const std::string& dispName);
 
-    // Pack a variadic method call's surplus positionals into a `*args` list and
-    // surplus keywords into a `**kwargs` dict, given `self` already pushed as
-    // args[0] (empty for a static variadic method). The method-path twin of the
-    // free-function emitVarArgCall, differing only by the leading-self offset:
-    // funcParamNames includes "self" at index 0 for an instance method, while
-    // VarArgInfo.numRegularParams counts only the user params before `*args`.
-    // The packed list/dict are call-site-owned temporaries registered in
-    // `argTemps` so the shared call tail drains them (the callee borrows).
-    // Returns true when `args` is fully built (caller emits the call), false
-    // after emitting a diagnostic (caller returns, lastValue poisoned). Defined
-    // in CallMethods.cpp.
+    // Packs a variadic method call's surplus positionals into `*args` and surplus keywords
+    // into `**kwargs`, given `self` already at args[0]. Method-path twin of emitVarArgCall (differs only by the leading-self offset). Packed list/dict are owned temps registered in `argTemps` for the shared call tail to drain. Defined in CallMethods.cpp.
     bool packVarArgMethodArgs(
         CodeGen& cg, CallExpr& node, const std::string& methodFuncName,
         llvm::FunctionType* methodFuncType,
@@ -1861,44 +1365,21 @@ struct CodeGen::Impl {
         std::vector<std::pair<llvm::Value*, VarKind>>& argTemps,
         const std::string& dispName);
 
-    // Bind the regular-param slots listed in `bindIdx` by NAME from a `**dict`
-    // spread source `d`: a required param (no default) raises TypeError when
-    // its key is absent, an optional param PHIs between the dict value and its
-    // default expr. Bound heap values are BORROWED from the dict. Shared by
-    // the fixed-arity spread path (expandSpreadCallArgs) and the variadic one
-    // (emitVarArgCall). Defined in CallExpr.cpp.
+    // Binds the regular-param slots in `bindIdx` by name from a `**dict` spread source:
+    // a required param raises TypeError if absent, an optional PHIs between the dict value and its default. Bound heap values are borrowed. Shared by expandSpreadCallArgs and emitVarArgCall.
     void bindParamSlotsFromDict(
         CodeGen& cg, llvm::Function* func, llvm::Value* d,
         std::vector<llvm::Value*>& args, const std::vector<size_t>& bindIdx,
         const std::vector<std::string>& paramNames, const std::string& dispName);
 
-    /// Evaluates default Expr* AST nodes for params not already supplied.
-    ///
-    /// D040: scans the full [0, numParams) range and fills any slot that is
-    /// either past args.size() OR currently nullptr (the latter happens when
-    /// kwargs binding leaves a hole between positional and keyword-filled
-    /// positions - see CallExpr.cpp non-vararg path).
-    // `defaultTemps` (optional): owned heap temporaries synthesized for omitted
-    // args (Dragon evaluates a default per-call, so `def f(x: list = [])` mints a
-    // fresh +1 each time the arg is omitted). The callee borrows it like any arg,
-    // so the call site must release it after the call - pass the same argTemps
-    // vector the regular args drain through. Skipped (nullptr) by callers that
-    // don't drain. (#3 class A, default-value temps.)
+    /// Evaluates default Expr* nodes for params not already supplied. D040: scans [0,
+    /// numParams) and fills any slot past args.size() or nullptr (a kwargs-binding hole). `defaultTemps` (optional) collects owned heap temps for omitted-arg defaults (each call mints a fresh +1) so the caller can release them after the call; skip (nullptr) if not draining.
     void fillDefaultArgs(const std::string& funcName, llvm::Function* func,
                          std::vector<llvm::Value*>& args, CodeGen& cg,
                          std::vector<std::pair<llvm::Value*, VarKind>>* defaultTemps = nullptr);
 
-    /// Emit an atomic incref for a pointer value being passed across a thread
-    /// boundary (fire fn(args), async def wrapper). Dispatches to the correct
-    /// atomic incref variant based on VarKind.
-    ///
-    /// Also emits `dragon_mark_shared_deep` (or `_str`) on the value first -
-    /// see d018-shared-refcount.md. This propagates SHARED to every reachable
-    /// child so plain dragon_incref/decref calls inside the vthread body
-    /// route to the atomic path. Without this, two vthread bodies on
-    /// different OS threads tear the refcount on shared Router state and
-    /// the cycle collector then walks freed memory (the original
-    /// hello_server crash at request ~87).
+    /// Emits an atomic incref for a pointer crossing a thread boundary (fire fn(args),
+    /// async def wrapper), dispatched by VarKind. Also emits dragon_mark_shared_deep/_str first (d018-shared-refcount.md) to propagate SHARED to every reachable child; without it, two vthread bodies tore the refcount on shared Router state and the cycle collector walked freed memory (the original hello_server crash at request ~87).
     void emitAtomicIncref(llvm::Value* val, VarKind kind) {
         if (options.gcMode != GCMode::RC) return;
         if (!isHeapKind(kind)) return;
@@ -1913,13 +1394,8 @@ struct CodeGen::Impl {
         }
     }
 
-    /// Storing a heap value into a shared isntance field makes it globally reachable
-    /// through that instance so itm must be shared-marked like the list/sdict store
-    /// barriers already do for elements. Previously a gap masked only by fire path
-    /// re-marking `self` per connection.
-    /// UNSHARED instance pays one byte load + predicted-untaken branch (the
-    /// SHARED bit lives at header offset 9); only genuinely shared instances
-    /// reach the runtime call
+    /// Storing a heap value into a shared instance field makes it globally reachable, so it
+    /// must be shared-marked like list/dict store barriers already do for elements (previously masked only by the fire path re-marking `self` per connection). An unshared instance pays one byte load + a predicted-untaken branch (SHARED bit at header offset 9).
     void emitFieldSharedBarrier(llvm::Value* objPtr, llvm::Value* val, VarKind kind) {
         if (options.gcMode != GCMode::RC) return;
         if (!isHeapKind(kind)) return;
@@ -1952,15 +1428,8 @@ struct CodeGen::Impl {
         builder->SetInsertPoint(contBB);
     }
 
-    /// A value stored into a MODULE GLOBAL is reachable from
-    /// every vthread BY NAME - it never crosses a `fire` boundary, so the
-    /// fire-site mark (emitAtomicIncref above) never sees it. Two handler
-    /// vthreads on different OS workers then run plain non-atomic
-    /// incref/decref on the same object: torn refcount, premature free, heap
-    /// use-after-free (the /copy-a-global-to-a-local server crash). Mark the
-    /// stored graph SHARED at the global-store site instead; the SHARED store
-    /// barriers in list/dict keep the invariant for values inserted later.
-    /// Cold path: module globals are stored once at init / rarely reassigned.
+    /// A value stored into a module global is reachable from every vthread by name,
+    /// never crossing a `fire` boundary, so emitAtomicIncref's fire-site mark misses it; two vthreads then tore the refcount on the same object (the copy-a-global-to-a-local server crash). Mark the stored graph SHARED here instead. Cold path: globals store rarely.
     void emitMarkSharedGlobal(llvm::Value* val, VarKind kind) {
         if (options.gcMode != GCMode::RC) return;
         if (!isHeapKind(kind)) return;
@@ -1976,45 +1445,25 @@ struct CodeGen::Impl {
         }
     }
 
-    // Conservative borrowed-reference detector for assignment / consume-site
-    // RHS expressions. Name, attribute, and subscript reads are existing
-    // references owned by their enclosing slot/container; storing them into
-    // another owning slot requires an incref. Fresh-ref expressions
-    // (literals, calls, container constructors) already own a +1 and are NOT
-    // borrowed.
+    // Conservative borrowed-reference detector for assignment/consume-site RHS: name,
+    // attribute, and subscript reads are existing references owned by their enclosing slot/container (need an incref on store); fresh-ref expressions (literals, calls, constructors) already own a +1 and aren't borrowed.
     static bool isBorrowedHeapExpr(Expr* expr) {
         // ADR 054 - a conformance cast compiles to nothing: ownership-wise it
         // IS its operand (same pointer), so classification must see through.
         if (auto* cast = dynamic_cast<AsCastExpr*>(expr))
             return isBorrowedHeapExpr(cast->operand.get());
         if (auto* sub = dynamic_cast<SubscriptExpr*>(expr)) {
-            // A SLICE (s[1:4], xs[a:b]) calls dragon_str_slice /
-            // dragon_list_slice / dragon_bytes_slice, all of which return a
-            // FRESH +1 object the consumer owns - never a borrow. Treating it as
-            // a borrow adds an extra incref on store (and skips the arg-temp
-            // decref), leaking one object per evaluation.
+            // A slice (s[1:4]) calls dragon_str_slice/_list_slice/_bytes_slice, all
+            // returning a fresh +1 the consumer owns, never a borrow; misclassifying it added an extra incref and skipped the arg-temp decref, leaking one object per evaluation.
             if (dynamic_cast<SliceExpr*>(sub->index.get()) != nullptr)
                 return false;
-            // A STRING element read (s[i]) is likewise OWNED, not borrowed:
-            // strings are immutable, so dragon_str_index mallocs a fresh 1-char
-            // string - there is no interior reference to hand back. Same fresh
-            // +1 as a slice, so the same rule applies; misclassifying it as a
-            // borrow leaked one 1-char string per evaluation (ord(s[i]),
-            // c = s[i], len(s[i]), and binascii.hexlify's ord(HEX[n]) hot loop).
-            // list / dict / set element reads (xs[i], d[k]) DO borrow the
-            // container's stored reference, so they stay borrowed.
+            // A string element read (s[i]) is owned too: strings are immutable, so
+            // dragon_str_index mallocs a fresh 1-char string with no interior ref to hand back; misclassifying it leaked one string per evaluation (ord(s[i]), len(s[i]), binascii.hexlify's hot loop). list/dict/set element reads (xs[i], d[k]) do borrow and stay borrowed.
             if (sub->object && sub->object->type &&
                 sub->object->type->kind() == Type::Kind::Str)
                 return false;
-            // A DICT element read whose receiver is itself a CALL
-            // (`r.info()["k"]`, `cfg.get("db")["host"]`): the receiver is an
-            // owned temp the read consumes, and the lowering
-            // (retainElemThenReleaseRecv in Attributes.cpp) retains the
-            // element by kind before releasing it - handing the consumer an
-            // owned +1, the mirror of the f().attr rule below. Only the
-            // concrete-heap element branches retain (Any/Union box reads and
-            // closure elements keep today's borrow story), so the owned
-            // classification is gated the same way.
+            // A dict element read off a call receiver (`r.info()["k"]`): the receiver is
+            // an owned temp the read consumes, and retainElemThenReleaseRecv (Attributes.cpp) retains the element before releasing it, handing an owned +1 (mirrors the f().attr rule below). Only concrete-heap element branches retain; Any/Union/closure elements keep the borrow story.
             if (sub->object && dynamic_cast<CallExpr*>(sub->object.get()) &&
                 sub->object->type &&
                 sub->object->type->kind() == Type::Kind::Dict && expr->type) {
@@ -2032,38 +1481,24 @@ struct CodeGen::Impl {
             }
             return true;
         }
-        // A walrus target slot ADOPTS its value's +1 (the store site passes
-        // rhsBorrowed=false and skips the incref), so the expression hands its
-        // consumer a BORROW of the slot's value - exactly like reading the
-        // name. Classifying it owned made a call site drain `takes(x := ...)`
-        // while x still held the same pointer (A/B-proven use-after-free,
-        // test_rc_walrus.dr).
+        // A walrus target adopts its value's +1 (store skips the incref), so it hands the
+        // consumer a borrow, like reading the name. Classifying it owned let a call site drain `takes(x := ...)` while x still held the pointer (A/B-proven UAF, test_rc_walrus.dr).
         if (dynamic_cast<WalrusExpr*>(expr) != nullptr) return true;
         if (auto* nm = dynamic_cast<NameExpr*>(expr)) {
-            // `own x` at a consuming position (docs/002 2.8): the binding's
-            // +1 TRANSFERS - an owned value by definition, never a borrow.
-            // The consumer adopts (no incref) and the move-out nulls the
-            // source slot, so the single reference stays single.
-            // `dub x` (2.7) likewise hands its consumer a fresh owned +1
-            // (deep copy / identity retain) - never a borrow.
+            // `own x` (docs/002 2.8) transfers the binding's +1, so it's owned, never a
+            // borrow (consumer adopts, move-out nulls the source slot). `dub x` (2.7) likewise hands a fresh owned +1 (deep copy/identity retain), never a borrow.
             return !nm->isMoveMarked && !nm->isDubMarked;
         }
         if (auto* at = dynamic_cast<AttributeExpr*>(expr)) {
-            // `f().attr`: the receiver is an owned temp the read consumes;
-            // the lowering (Attributes.cpp) RETAINS the field by kind and
-            // releases the receiver, handing the consumer an owned +1 - so
-            // an attr-on-a-CALL is NOT a borrow. A field read off a named
-            // object stays borrowed as ever.
+            // `f().attr`: the receiver is an owned temp the read consumes; Attributes.cpp
+            // retains the field by kind and releases the receiver, handing an owned +1, so attr-on-a-call is not a borrow. A field read off a named object stays borrowed.
             return !dynamic_cast<CallExpr*>(at->object.get());
         }
         return false;
     }
 
-    /// docs/002 moves: after a call consumed `f(own x)` arguments, null each
-    /// moved-out binding's slot. The callee adopted the caller's +1, so the
-    /// caller's scope-exit release must see nothing (decref of null no-ops;
-    /// the Lock scope-destroy is null-gated). E9-at-join guarantees every
-    /// path agrees, so this is bookkeeping, not a runtime drop flag.
+    /// docs/002 moves: after a call consumes `f(own x)` args, nulls each moved-out slot
+    /// so the caller's scope-exit release sees nothing (decref of null no-ops; Lock destroy is null-gated). E9-at-join guarantees every path agrees; pure bookkeeping.
     void emitNullSlot(llvm::AllocaInst* alloca) {
         if (alloca->getAllocatedType() == boxType)
             builder->CreateStore(llvm::Constant::getNullValue(boxType), alloca);
@@ -2102,9 +1537,8 @@ struct CodeGen::Impl {
             if (!nm || !nm->isMoveMarked) continue;
             if (auto* alloca = lookupVar(nm->name)) {
                 emitNullSlot(alloca);
-                // The unwind cleanup stack snapshots the value at declaration;
-                // the callee adopted that +1, so a later longjmp unwind must
-                // see null here, not re-free what the callee now owns.
+                // The unwind cleanup stack snapshots the value at declaration; the callee
+                // adopted that +1, so a later longjmp unwind must see null, not re-free what the callee now owns.
                 emitCleanupUpdate(
                     nm->name,
                     llvm::ConstantPointerNull::get(
@@ -2114,15 +1548,8 @@ struct CodeGen::Impl {
         }
     }
 
-    // setdefault key ownership (#20a): a NEW str-keyed insert stores the key by
-    // POINTER (adopt), so the dict must own a real ref. Incref a BORROWED heap
-    // str key here; literals need nothing (dragon_dict_release_key no-ops on
-    // them - no promotion/alloc, faster than the d[k]=v store path) and owned
-    // temps already carry +1. No-op for int keys (i64, not a pointer) and non-RC.
-    // The runtime setdefault releases this key on its present branch, so a
-    // borrowed key that turns out to already exist never leaks. Shared by the
-    // heap-valued, scalar, and syncdict setdefault call sites (one definition so
-    // the three can't drift).
+    // setdefault key ownership (#20a): a new str-keyed insert adopts the key pointer,
+    // so incref a borrowed heap str key here (literals/owned temps need nothing); no-op for int keys/non-RC. The runtime releases the key on its present branch, so an already-existing key never leaks. Shared by heap-valued/scalar/syncdict setdefault sites.
     void increfBorrowedSetdefaultKey(Expr* keyExpr, llvm::Value* key) {
         if (options.gcMode != GCMode::RC || !key || !key->getType()->isPointerTy())
             return;
@@ -2141,19 +1568,16 @@ struct CodeGen::Impl {
         return builder->CreateBitCast(val, i8PtrType);
     }
 
-    // Emit non-atomic incref/decref for a value based on VarKind.
-    // Str uses string-specific RC entrypoints; all other heap kinds use
-    // generic object RC entrypoints.
+    // Emits non-atomic incref/decref for a value based on VarKind: Str uses string-specific
+    // RC entrypoints, all other heap kinds use generic object RC entrypoints.
     void emitIncrefByKind(llvm::Value* val, VarKind kind);
 
     void emitDecrefByKind(llvm::Value* val, VarKind kind) {
         if (options.gcMode != GCMode::RC) return;
         if (!isHeapKind(kind)) return;
         if (kind == VarKind::Union) {
-            // A Union value is a {tag, payload} box VALUE, not a pointer:
-            // extract and release by runtime tag (no-op for scalar tags and
-            // the zero-initialized {0, 0} box). Mirrors emitIncrefByKind so
-            // the two by-kind entry points share one ownership story.
+            // A Union is a {tag, payload} box value, not a pointer: extract and release by
+            // runtime tag (no-op for scalar tags and the zero {0,0} box). Mirrors emitIncrefByKind.
             if (val && val->getType() == boxType)
                 emitUnionDecref(boxPayloadI64(val, "u.dec.p"),
                                 boxTag(val, "u.dec.t"));
@@ -2172,66 +1596,26 @@ struct CodeGen::Impl {
         }
     }
 
-    /// Owned heap-temporary call arguments carry a +1 the callee borrows but
-    /// never consumes (a callee increfs when it retains - e.g. a ctor's
-    /// `self.f = param` - so the caller's reference always returns to the
-    /// caller). After the call the caller must release it or it leaks
-    /// (the binary-trees / object-tree leak). Given an argument expression and
-    /// the callee's formal param kind, return the kind to decref the raw arg
-    /// value with after the call, or VarKind::Other to skip.
-    ///  - Borrowed exprs (Name/Attribute/Subscript) keep their owner's
-    ///  reference - never decref them here.
-    ///  - Str args are only released when they are owned heap-string *results*
-    ///  (concat / f-string / str() / call); literals and borrows have no
-    ///  +1 to drop and (for literals) no header to navigate.
-    ///  - Union/box params manage RC by tag; left to the box machinery.
+    /// Owned heap-temp call args carry a +1 the callee borrows but never consumes (increfs
+    /// on retain), so the caller must release it after the call or leak (binary-trees/object-tree leak). Returns the decref kind, or Other to skip: borrowed exprs never decref; Str only when an owned result; Union/box managed by tag.
     VarKind argTempDecrefKind(Expr* argExpr, VarKind paramKind, llvm::Value* rawVal) {
         if (options.gcMode != GCMode::RC) return VarKind::Other;
         if (paramKind == VarKind::Union) {
-            // Union/Any params take the SAME callee-borrows contract as
-            // every typed param: the callee retains by increfing (the Union
-            // arm of emitIncrefByKind fires on field stores / return aliases
-            // via storeWithRCOverwrite), so the caller's owned temp is always
-            // the caller's to drain. That incref-on-retain is the load-bearing
-            // half of the contract: if an Any FIELD store ever adopts the
-            // temp's +1 without increfing again, this drain double-frees the
-            // retain case (heap-use-after-free in __dragon_dealloc_<Class>,
-            // pinned by test_rc_any_field.dr). Monomorphizing
-            // spurious-Any params into generics [T] remains the better fix
-            // where the concrete type is knowable (zen: types are honest);
-            // this drain covers the genuinely dynamic remainder.
-            // A PROVABLY-OWNED box result (dragon_box_subscript / dragon_box_binop
-            // / an Any-returning call) carries a +1 the callee borrows, so it must
-            // be drained even when the SOURCE EXPRESSION reads as borrowed: a
-            // subscript on an Any value lowers to dragon_box_subscript (OWNED +1),
-            // but isBorrowedHeapExpr classifies every list/dict subscript borrowed
-            // for the typed-container element-read case. isOwnedBoxResult is
-            // value-based and precise - the borrowed-box returners (dict_get_box /
-            // dict_int_get_box / list_box_get) are isOwnedBoxResult=false, so a
-            // BORROWED element read (dict[str,Any] / list[Any], the hot path in a
-            // parsed-JSON server) is still NOT drained (the container keeps the +1;
-            // draining it would double-free). Ordered BEFORE the isBorrowedHeapExpr
-            // gate so the owned-subscript +1 is not lost to the borrowed-subscript
-            // classification (was: leaked one payload per `f(anyVal[k])`).
+            // Union/Any params share the callee-borrows contract: the callee increfs on
+            // retain (via storeWithRCOverwrite), so the caller's owned temp is always the caller's to drain. If an Any field store ever adopted the temp's +1 without increfing, this drain would double-free it (pinned by test_rc_any_field.dr). Monomorphizing spurious-Any into generics [T] is the better fix where the type is knowable; this covers the dynamic remainder.
+            // A provably-owned box result (dragon_box_subscript/box_binop/Any-returning call)
+            // must drain even when the source reads as borrowed (isBorrowedHeapExpr classifies every subscript borrowed), since isOwnedBoxResult is value-based and precise; borrowed-box returners (dict_get_box etc.) stay undrained. Checked before isBorrowedHeapExpr or leaked one payload per `f(anyVal[k])`.
             if (rawVal && rawVal->getType() == boxType)
                 return isOwnedBoxResult(rawVal) ? VarKind::Union : VarKind::Other;
             if (isBorrowedHeapExpr(argExpr)) return VarKind::Other;
-            // Owned NATIVE heap temp boxed at the boundary (concat, ctor,
-            // slice, ... into `x: Any`): the box borrows the payload, so the
-            // native +1 is drained by the temp's own static type.
+            // Owned native heap temp boxed at the boundary (concat/ctor/slice into `x: Any`):
+            // the box borrows the payload, so the native +1 drains by the temp's own static type.
             return ownedTempDrainKind(argExpr, rawVal);
         }
         if (!isHeapKind(paramKind))
             return VarKind::Other;
-        // A box arg unboxed into a native heap param (coerceArg unboxes it): an
-        // OWNED box temporary (Any-returning call / box_subscript) carries a +1
-        // the callee borrows, so release it after the call as a UNION
-        // (emitUnionDecref extracts and drops the payload by tag - the same drain
-        // the Any-param branch above uses). A BORROWED box (dict_get_box /
-        // list_box_get, or a ternary over one) belongs to its container and is
-        // never drained. Ordered before the isBorrowedHeapExpr gate, which reads
-        // false for a ternary source and would otherwise mis-drain the box by the
-        // param's kind (decref of a box struct as a bare str ptr).
+        // A box arg unboxed into a native heap param (coerceArg unboxes it): an owned box
+        // temp releases after the call as a Union (same drain as the Any-param branch); a borrowed box (dict_get_box etc.) belongs to its container, never drained. Checked before isBorrowedHeapExpr, which reads false for a ternary source and would otherwise mis-drain the box as the param's kind.
         if (rawVal && rawVal->getType() == boxType)
             return isOwnedBoxResult(rawVal) ? VarKind::Union : VarKind::Other;
         if (isBorrowedHeapExpr(argExpr)) return VarKind::Other;
@@ -2240,24 +1624,15 @@ struct CodeGen::Impl {
         return paramKind;
     }
 
-    // Classify one PRE-coerce call argument and, if it is an owned heap temporary
-    // the callee borrows, record it in `out` for release after the call. Skips
-    // ptr-returning extern-C callees (interior-pointer hazard at the FFI edge;
-    // see externDrainableFuncs) and anything argTempDecrefKind rejects
-    // (borrowed expr / str literal / scalar).
-    // The single place direct-call sites (cross-module fn, module-attr ctor,
-    // static methods, ...) route owned-temp tracking through (#3, class A).
+    // Classifies one pre-coerce call argument and, if an owned heap temp the callee borrows,
+    // records it in `out` for post-call release. Skips ptr-returning extern-C callees (FFI interior-pointer hazard) and anything argTempDecrefKind rejects. The single place direct-call sites route owned-temp tracking through (#3, class A).
     void collectArgTemp(const std::string& funcName, Expr* srcExpr,
                         llvm::Value* rawArg, unsigned paramIdx,
                         std::vector<std::pair<llvm::Value*, VarKind>>& out) {
         if (options.gcMode != GCMode::RC) return;
         if (externFuncNames.count(funcName)) {
-            // A ptr-returning extern is not drainable (interior-pointer hazard).
-            // A drainable extern is classified by the ARG's own static type,
-            // never the declared param kind (the same C symbol can carry
-            // disagreeing arg types across modules; classifying by param kind
-            // drains a borrowed pointer - a use-after-free), so route
-            // through ownedTempDrainKind.
+            // A ptr-returning extern is not drainable (interior-pointer hazard). A drainable
+            // extern is classified by the arg's own static type, not the declared param kind (the same C symbol can carry disagreeing arg types across modules, so classifying by param kind would drain a borrowed pointer -> UAF).
             if (!externDrainableFuncs.count(funcName)) return;
             VarKind dk = ownedTempDrainKind(srcExpr, rawArg);
             if (dk != VarKind::Other) out.emplace_back(rawArg, dk);
@@ -2271,25 +1646,13 @@ struct CodeGen::Impl {
         if (dk != VarKind::Other) out.emplace_back(rawArg, dk);
     }
 
-    // Classify an owned heap temporary passed to a BORROW callee (a builtin
-    // method / function that reads its argument transiently and produces a
-    // fresh result without storing or returning the argument - str.split,
-    // dict.get(key), int(s), len(x), ...). Unlike collectArgTemp this needs no
-    // callee param-kind table: a borrow callee never consumes the +1, so any
-    // owned heap temp the caller materialized for the arg must be released after
-    // the call or it leaks once per call. Returns VarKind::Other (skip) for
-    // borrowed exprs (Name/Attribute/element-read keep their owner's ref), str
-    // literals, and scalars - none carry a droppable +1. NOT for transfer
-    // callees (list.append, dict set: they adopt the +1) - those must skip this.
+    // Classifies an owned heap temp passed to a borrow callee (str.split, dict.get, int(s),
+    // len(x): reads transiently, produces a fresh result). Needs no param-kind table since a borrow callee never consumes the +1; returns Other for borrowed exprs/literals/scalars. Not for transfer callees (list.append, dict set adopt the +1) - those skip this.
     VarKind ownedTempDrainKind(Expr* e, llvm::Value* v) {
         if (options.gcMode != GCMode::RC) return VarKind::Other;
         if (!v || !e || !e->type || isBorrowedHeapExpr(e)) return VarKind::Other;
-        // Gate on the argument's STATIC type, not just the LLVM value: at LLVM
-        // level str / list / dict / set / bytes are all i8*, and isOwnedStrResult
-        // treats any non-blocklisted i8*-returning call as an owned STRING - so a
-        // set/list temp would be misclassified Str and freed with dragon_decref_str
-        // (a string-header walk past the container struct - heap overflow). The
-        // type kind picks the correct release entry point.
+        // Gate on the argument's static type, not just the LLVM value: at LLVM level
+        // str/list/dict/set/bytes are all i8*, so isOwnedStrResult would misclassify a set/list temp as Str and free it via dragon_decref_str (a header walk past the container struct: heap overflow).
         switch (e->type->kind()) {
             case Type::Kind::Str:
                 return isOwnedStrResult(v) ? VarKind::Str : VarKind::Other;
@@ -2309,12 +1672,8 @@ struct CodeGen::Impl {
         }
     }
 
-    // Wrap an already-evaluated borrow-callee argument: if it is an owned heap
-    // temporary, record it in `sink` for release after the call, and return the
-    // value unchanged so call sites read `trackBorrowTemp(expr, lastValue, sink)`
-    // in place of a bare `lastValue`. The drain happens once per dispatch block
-    // (str/bytes common tail; per-handler for list/dict/set), so `sink` is a
-    // block-local vector - nesting-safe (a nested builtin call has its own).
+    // Wraps an already-evaluated borrow-callee argument: if an owned heap temp, records it
+    // in `sink` for post-call release and returns the value unchanged (`trackBorrowTemp(expr, lastValue, sink)` replacing a bare `lastValue`). `sink` is block-local, nesting-safe.
     llvm::Value* trackBorrowTemp(Expr* e, llvm::Value* v,
                                  std::vector<std::pair<llvm::Value*, VarKind>>& sink) {
         VarKind k = ownedTempDrainKind(e, v);
@@ -2322,13 +1681,14 @@ struct CodeGen::Impl {
         return v;
     }
 
-    //===-- D027.1: Heap-boxed cell read / write helpers ------------------===//
-    //
-    // The cell stores values as i64; native types (float/bool/ptr) round-trip
-    // through bitcast / zext / ptrtoint at the boundary so the cell layout
-    // stays uniform. Heap kinds also obey the "incref new before set, decref
-    // returned-old after" discipline so RC remains balanced across the
-    // overwrite even if old==new.
+    // Post-call release of every owned temp recorded by trackBorrowTemp. One
+    // definition so no call path can hand-roll (and forget) the drain.
+    void drainBorrowTemps(const std::vector<std::pair<llvm::Value*, VarKind>>& temps) {
+        for (auto& [v, k] : temps) emitDecrefByKind(v, k);
+    }
+
+    // D027.1 heap-boxed cell read/write helpers. Cells store values as i64; native types
+    // round-trip through bitcast/zext/ptrtoint. Heap kinds obey "incref new before set, decref old after" so RC stays balanced across overwrite even when old==new.
 
     /// Cast a native LLVM value at `kind`'s natural type to i64 for cell storage.
     llvm::Value* nativeToCellI64(llvm::Value* val, VarKind kind) {
@@ -2350,12 +1710,8 @@ struct CodeGen::Impl {
     /// Cast a cell-stored i64 back to the native LLVM type for `kind`.
     llvm::Value* cellI64ToNative(llvm::Value* i64Val, VarKind kind);
 
-    /// Allocate a fresh cell for a `nonlocal`-promoted local. The caller is
-    /// responsible for the +1 refcount of any heap value placed in `valueI64`
-    /// - the cell does not auto-incref. Returns the cell pointer (i8*).
-    /// D030 §5: when the source-level Type::Kind is available, prefer it for
-    /// tag derivation so bytes-typed cells round-trip with TAG_BYTES even
-    /// after VarKind::Bytes is collapsed into the generic-heap cohort.
+    /// Allocates a fresh cell for a `nonlocal`-promoted local; the caller owns the +1 of
+    /// any heap value in `valueI64` (no auto-incref). D030 §5: prefers the source Type::Kind for tag derivation when available, so bytes-typed cells keep TAG_BYTES after VarKind::Bytes collapses into the generic-heap cohort.
     llvm::Value* emitCellAlloc(llvm::Value* valueI64, VarKind kind,
                                 Type::Kind typeKind = Type::Kind::Unknown) {
         int64_t tag = typeKindToTag(typeKind);
@@ -2378,17 +1734,8 @@ struct CodeGen::Impl {
         return cellI64ToNative(raw, kind);
     }
 
-    /// Write to a cell-backed local. `newVal` is at native type. When the
-    /// value is BORROWED (a name/field/element read - some other slot owns
-    /// it), the cell increfs to take its own reference; an OWNED fresh value
-    /// (a concat / call result) already carries the +1 the cell adopts.
-    /// Incref'ing an owned value too left every intermediate at refcount 2:
-    /// a `nonlocal` str accumulator (`acc = acc + s`) leaked one string PER
-    /// MUTATION (534KB per 1000 loop iterations under LSan). Decrefs the
-    /// prior cell contents returned by dragon_cell_set under the same kind,
-    /// so the cell holds a balanced +1 ref to the latest value at all times.
-    /// `newIsBorrowed` defaults to true (the incref side) - the safe side for
-    /// self-aliasing writes (`s = s`) and in-place aug-assign results.
+    /// Writes to a cell-backed local. Borrowed values (name/field/element read) get an
+    /// incref; owned fresh values (concat/call result) already carry the +1. Increfing an owned value too leaked one string per mutation (534KB/1000 iterations under LSan, a `nonlocal` accumulator). Decrefs the prior contents so the cell stays balanced; `newIsBorrowed` defaults true (safe for self-aliasing `s = s`).
     void emitCellWrite(llvm::AllocaInst* alloca, VarKind kind,
                        llvm::Value* newVal, const std::string& name,
                        bool newIsBorrowed = true) {
@@ -2400,9 +1747,8 @@ struct CodeGen::Impl {
         auto* oldI64 = builder->CreateCall(
             runtimeFuncs["dragon_cell_set"], {cellPtr, newI64}, name + ".old");
         if (isHeapKind(kind) && kind != VarKind::Union) {
-            // Decref via the kind's native pointer type - same dispatch as
-            // emitDecrefByKind, just reconstructed from i64. The first write
-            // sees old == 0 (fresh cell), and decref(NULL) is a no-op.
+            // Decref via the kind's native pointer type, same dispatch as emitDecrefByKind
+            // reconstructed from i64. The first write sees old == 0 (fresh cell); decref(NULL) is a no-op.
             auto* oldPtr = builder->CreateIntToPtr(oldI64, i8PtrType, name + ".old.p");
             emitDecrefByKind(oldPtr, kind);
         }
@@ -2415,31 +1761,20 @@ struct CodeGen::Impl {
     // Emit conditional incref for a union-typed variable based on its runtime tag.
     void emitUnionIncref(llvm::Value* val, llvm::Value* tag);
 
-    // RC-aware store with overwrite cleanup.
-    // For heap-typed slots this performs:
-    //  1) (optional) incref new when RHS is borrowed from an existing owner
-    //  2) decref old occupant (guarded against self-assignment)
-    //  3) store new value
+    // RC-aware store with overwrite cleanup for heap-typed slots: (1) incref new if the
+    // RHS is borrowed, (2) decref old occupant (guarded against self-assignment), (3) store new value.
     void storeWithRCOverwrite(llvm::Value* slotPtr, llvm::Type* slotValueType,
                               llvm::Value* newVal,
                               VarKind oldKind, VarKind newKind,
                               bool newIsBorrowed,
                               const std::string& name = "");
 
-    // If `name` currently denotes a BORROWED slot (a parameter, loop variable,
-    // capture, or `self` - one the callee does not own), clear the borrowed mark
-    // in its owning scope and return true. Used by storeWithRCOverwrite: the
-    // first reassignment of a borrowed slot must NOT decref its old value (that
-    // reference belongs to the caller), and after the store the slot owns its
-    // new value, so it must be cleaned up at scope exit like any owned local.
-    // Walks scopes outward and consults the same owning-scope rule as setVar.
+    // If `name` denotes a borrowed slot (param, loop var, capture, self), clears the
+    // borrowed mark and returns true, so storeWithRCOverwrite's first reassignment skips the old-value decref (caller owns that ref) but the slot cleans up at scope exit thereafter. Walks scopes like setVar.
     bool consumeBorrowedSlot(const std::string& name);
 
-    // Non-mutating peek of the same borrowed mark consumeBorrowedSlot clears:
-    // is `name`'s innermmost binding currently a borrowed slot? Used to gate the
-    // owned-str -> StrLiteral downgrade guard (a literal sotre must keepn an
-    // owned slot's cleanup kind Str, but must NOT promote a BORROWED slot -
-    // decref'ing the caller's value on a not-taken branch would be a UAF).
+    // Non-mutating peek of the mark consumeBorrowedSlot clears: is `name`'s innermost
+    // binding currently borrowed? Gates the owned-str->StrLiteral downgrade guard: a literal store must keep an owned slot's cleanup kind Str, but never promote a borrowed slot (decref on a not-taken branch would UAF).
     bool isBorrowedSlot(const std::string& name) {
         if (name.empty()) return false;
         for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
@@ -2451,34 +1786,13 @@ struct CodeGen::Impl {
         return false;
     }
 
-    // Emit an amortized in-place string append for `slot = slot + rhs` and
-    // `slot += rhs`. The runtime entry point CONSUMES the slot's old
-    // reference (in-place realloc reuse, or fallback concat + decref) and
-    // returns the new value - so we MUST plain-store it, NOT route through
-    // storeWithRCOverwrite, whose old-value decref would double-consume `cur`.
-    // `rhs` is only borrowed by the entry point; decref it here iff it is an
-    // owned intermediate, exactly as the dragon_str_concat path does
-    // (isOwnedStrResult / Expressions.cpp). The slot then holds a dynamic heap
-    // Str, so its VarKind is updated for block-exit cleanup.
+    // Emits an amortized in-place string append for `slot = slot + rhs` / `slot += rhs`.
+    // The runtime entry point consumes the slot's old ref and returns the new value, so it must be plain-stored, not routed through storeWithRCOverwrite (which would double-consume `cur`). `rhs` is only borrowed; decref it here iff an owned intermediate (mirrors dragon_str_concat/Expressions.cpp).
     void emitStrAppendInplace(llvm::Value* slotPtr, llvm::Value* cur,
                               llvm::Value* rhs, const std::string& name);
 
-    // Lower Python integer modulo `a % b` and floor-division `a // b`. Both use
-    // FLOOR semantics - the result tracks the sign of the *divisor*, unlike C's
-    // truncated `srem`/`sdiv`. We emit them INLINE rather than as a per-use call
-    // to dragon_mod_int / dragon_floordiv_int, whose call overhead dominated tight
-    // loops (`x % 256`, `i % k`, `n // 2`, ...): a function call vs a few inline
-    // instructions. This shared scaffold picks the strategy by divisor shape:
-    //
-    //  - Nonzero CONSTANT divisor: no guard needed (it can't be zero) - emit the
-    //  inline op + branchless floor-correction `select` directly.
-    //  - VARIABLE divisor: branch on `b == 0`. The (predictable, normally
-    //  never-taken) zero path calls the runtime fallback, which prints the
-    //  ZeroDivisionError message and exit(1)s - preserving existing behavior;
-    //  the nonzero path is fully inline. A phi merges the two results.
-    //  - Literal `0` divisor: keep the call (compile-time div-by-zero, rare).
-    //
-    // `a`/`b` are already i64 at every call site (the integer-arithmetic path).
+    // Lowers Python `%`/`//` (floor semantics, tracking the divisor's sign, unlike C's
+    // truncated srem/sdiv) inline instead of per-use runtime calls, whose overhead dominated tight loops. Strategy by divisor shape: nonzero constant -> inline + branchless floor-select; variable -> branch on b==0 (fallback path prints ZeroDivisionError+exit(1), nonzero path inline, phi merge); literal 0 -> keep the call.
     template <typename EmitInline>
     llvm::Value* emitGuardedIntDivOp(llvm::Value* a, llvm::Value* b,
                                      const char* fallback, const char* label,
@@ -2495,9 +1809,8 @@ struct CodeGen::Impl {
         auto* contBB = llvm::BasicBlock::Create(*context, std::string(label) + ".cont", func);
         builder->CreateCondBr(isZero, zeroBB, okBB);
 
-        // Zero path: the runtime fallback prints ZeroDivisionError + exit(1). It
-        // never returns, but it isn't marked noreturn, so we feed its (dead)
-        // result into the phi rather than emit a noreturn-lying `unreachable`.
+        // Zero path: the runtime fallback prints ZeroDivisionError + exit(1) and never
+        // returns, but isn't marked noreturn, so feed its dead result into the phi instead of a noreturn-lying `unreachable`.
         builder->SetInsertPoint(zeroBB);
         llvm::Value* zres = builder->CreateCall(runtimeFuncs[fallback], {a, b}, label);
         builder->CreateBr(contBB);
@@ -2531,13 +1844,8 @@ struct CodeGen::Impl {
             });
     }
 
-    // Floor division: q = a / b, then correct toward -inf when the operands have
-    // opposite signs and the division was inexact:
-    //  if ((a ^ b) < 0 && a % b != 0) q -= 1.
-    // The `srem` reuses the divide hardware result - LLVM fuses an adjacent
-    // sdiv+srem of the same operands into a single idiv - so detecting the
-    // remainder is near-free (and matches dragon_floordiv_int's `d*b != a` test:
-    // `a % b == 0` exactly when `b` divides `a`).
+    // Floor division: q=a/b, corrected toward -inf when operands' signs differ and the
+    // division was inexact (if (a^b)<0 && a%b!=0, q-=1). LLVM fuses an adjacent sdiv+srem into one idiv, so the srem check is near-free.
     llvm::Value* emitIntFloorDiv(llvm::Value* a, llvm::Value* b) {
         return emitGuardedIntDivOp(a, b, "dragon_floordiv_int", "fdiv",
             [&](llvm::Value* n, llvm::Value* d) -> llvm::Value* {
@@ -2554,11 +1862,8 @@ struct CodeGen::Impl {
             });
     }
 
-    // Compute `cur OP rhs` for an integer augmented-assignment op token (i64
-    // operands). Mirrors the int arithmetic in the NameExpr aug-assign path and
-    // reuses emitIntMod for `%=`. Returns nullptr for ops that don't yield an
-    // int result (e.g. `/=` true division) so the caller can skip. Used by the
-    // list/dict element aug-assign lowering.
+    // Computes `cur OP rhs` for an integer augmented-assignment token (i64 operands),
+    // mirroring NameExpr's aug-assign path (reuses emitIntMod for `%=`). Returns nullptr for non-int ops (e.g. `/=`) so the caller skips. Used by list/dict element aug-assign.
     llvm::Value* emitIntAugOp(llvm::Value* cur, llvm::Value* rhs, TokenType op) {
         switch (op) {
             case TokenType::PLUS_EQUAL:         return builder->CreateAdd(cur, rhs, "aug.add");
@@ -2586,11 +1891,8 @@ struct CodeGen::Impl {
         return nullptr;
     }
 
-    // Compute `cur OP rhs` for a float augmented-assignment op token (f64
-    // operands). Mirrors emitIntAugOp for the float path; shared by every
-    // float aug-assign target (NameExpr already inlines, but dict/list/field
-    // element targets route here). `//=` and `%=` use Python float floor/mod
-    // semantics. Returns nullptr for ops with no float meaning (bitwise/shift).
+    // Computes `cur OP rhs` for a float augmented-assignment token (f64 operands), mirroring
+    // emitIntAugOp; shared by dict/list/field aug-assign targets (NameExpr inlines directly). `//=`/`%=` use Python float floor/mod semantics; returns nullptr for bitwise/shift ops.
     llvm::Value* emitFloatAugOp(llvm::Value* cur, llvm::Value* rhs, TokenType op) {
         switch (op) {
             case TokenType::PLUS_EQUAL:         return builder->CreateFAdd(cur, rhs, "augf.add");
@@ -2612,10 +1914,8 @@ struct CodeGen::Impl {
         return builder->CreateCall(floorFn, {q}, "ffdiv");
     }
 
-    // Python float modulo `a % b`: the result takes the sign of the DIVISOR
-    // (unlike C `fmod`/LLVM `frem`, which take the sign of the dividend). Start
-    // from frem (= fmod) then add b when the remainder is nonzero and its sign
-    // disagrees with b - matching CPython's float_mod.
+    // Python float modulo: result takes the divisor's sign (unlike C fmod/LLVM frem, which
+    // take the dividend's). Starts from frem, then adds b when the remainder is nonzero and disagrees in sign, matching CPython's float_mod.
     llvm::Value* emitFloatMod(llvm::Value* a, llvm::Value* b) {
         llvm::Value* zero = llvm::ConstantFP::get(f64Type, 0.0);
         llvm::Value* r = builder->CreateFRem(a, b, "fmod.r");
@@ -2637,11 +1937,8 @@ struct CodeGen::Impl {
         return nullptr;
     }
 
-    // Like lookupVar but restricted to the innermost (current) scope. A
-    // `:`-declaration uses this to decide reuse-vs-shadow: a name that
-    // resolves only in an ENCLOSING scope must be shadowed with a fresh slot,
-    // not aliased onto the outer binding (which would overwrite it and, on a
-    // type change, reinterpret its slot at the wrong LLVM type).
+    // Like lookupVar but restricted to the innermost scope. A `:`-declaration uses this
+    // to decide reuse-vs-shadow: a name resolving only in an enclosing scope must be shadowed with a fresh slot, not aliased onto the outer binding (risking a wrong-LLVM-type reinterpretation on a type change).
     llvm::AllocaInst* lookupVarInCurrentScope(const std::string& name) {
         if (scopes.empty()) return nullptr;
         auto found = scopes.back().vars.find(name);
@@ -2651,30 +1948,26 @@ struct CodeGen::Impl {
     void setVar(const std::string& name, llvm::AllocaInst* alloca,
                  VarKind kind = VarKind::Other);
 
-    // D027.1: walk scope chain to find whether this name's alloca holds a
-    // DragonCell pointer (rather than the value directly). Reads/writes
-    // route through dragon_cell_get/set when this returns true.
+    // D027.1: walks the scope chain to check whether this name's alloca holds a DragonCell
+    // pointer (not the value directly); reads/writes route through dragon_cell_get/set when true.
     bool isCellBacked(const std::string& name) {
         for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
             if (it->cellBacked.count(name)) return true;
-            // Stop at the scope that actually defines the name - a same-name
-            // shadow in a deeper scope must not be confused with an outer
-            // cell-backed binding.
+            // Stop at the scope that actually defines the name, so a same-name shadow in a
+            // deeper scope isn't confused with an outer cell-backed binding.
             if (it->vars.count(name)) return false;
         }
         return false;
     }
 
-    // D027.1: mark a name in the innermost scope as cell-backed. Used both
-    // at the cell-promoted definition site (outer fn) and at the env-load
-    // site (inner fn whose env carries a cell pointer for this capture).
+    // D027.1: marks a name in the innermost scope as cell-backed. Used at the cell-promoted
+    // definition site (outer fn) and at the env-load site (inner fn holding a cell pointer for this capture).
     void markCellBacked(const std::string& name) {
         if (!scopes.empty()) scopes.back().cellBacked.insert(name);
     }
 
-    // B Phase 1: mark a freshly-bound local as a stack-allocated instance in
-    // its owning scope, so block-exit cleanup skips the decref. Mirrors the
-    // owning-scope search in setVar (a fresh declaration lands in scopes.back).
+    // B Phase 1: marks a freshly-bound local as stack-allocated in its owning scope, so
+    // block-exit cleanup skips the decref. Mirrors setVar's owning-scope search.
     void markStackAllocated(const std::string& name) {
         for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
             if (it->vars.count(name)) { it->stackAllocated.insert(name); return; }
@@ -2682,39 +1975,24 @@ struct CodeGen::Impl {
         if (!scopes.empty()) scopes.back().stackAllocated.insert(name);
     }
 
-    // Set by the CallExpr constructor fork when it lowers a class construction
-    // to a stack alloca (a NoEscape site of a scalar-only class). The binding
-    // site reads + clears it to mark the bound local stack-allocated.
+    // Set by the CallExpr constructor fork when it lowers a class construction to a
+    // stack alloca (a no-escape site of a scalar-only class); the binding site reads+clears it to mark the local stack-allocated.
     bool lastWasStackInstance = false;
 
-    // B Phase 1: ctor CallExpr* sites whose result is bound to a non-escaping
-    // local (populated by computeStackAllocSites before the entry body is
-    // emitted). Keyed by AST node identity.
+    // B Phase 1: ctor CallExpr* sites bound to a non-escaping local, populated by
+    // computeStackAllocSites before the entry body emits. Keyed by AST node identity.
     std::unordered_set<const CallExpr*> stackAllocSites;
 
-    // Bound-Task tail: `t: Task[...] = fire ...` declarations whose
-    // bound local PROVABLY does not escape the rest of its block (reusing the
-    // same conservative escape walk as stackAllocSites - any use, INCLUDING a
-    // join/await/is_alive method call, counts as escape). So this captures ONLY
-    // the genuinely-unused bound-fire-and-forget case that leaks the handle ref;
-    // a joined/awaited task already drops it, an escaped one keeps it for its new
-    // owner. Populated by computeStackAllocSites; consulted at the binding site
-    // to arm scope.detachOnExit. Keyed by AST node identity.
+    // Task-detach tail: `t: Task[...] = fire ...` declarations whose local provably never
+    // escapes the block (any use, including join/await/is_alive, counts as escape), capturing only the genuinely-unused fire-and-forget case that leaks the handle. Consulted at the binding site to arm scope.detachOnExit.
     std::unordered_set<const AnnAssignStmt*> detachableTaskDecls;
 
-    // B Phase 1: classes eligible for stack construction - scalar-only fields
-    // (no heap children to tear down), exactly one constructor that does not
-    // let `self` escape, and no class-body per-instance field defaults (so a
-    // memset + __init__ exactly reproduces _new's field initialization).
-    // Computed during class codegen; consulted at the CallExpr fork together
-    // with stackAllocSites. Keyed by source class name.
+    // B Phase 1: classes eligible for stack construction (scalar-only fields, exactly one
+    // non-self-escaping constructor, no per-instance field defaults, so memset+__init__ reproduces _new). Computed during class codegen, consulted at the CallExpr fork with stackAllocSites.
     std::unordered_set<std::string> stackEligibleClassesBySym;
 
-    // RAII scope for the per-variable metadata maps: snapshot at function
-    // entry, restore at exit, so a body's entries die with it and a
-    // same-named local elsewhere can never inherit stale types (the
-    // documented cross-function SEGV/UAF family). Module-level entries made
-    // before body lowering survive inside the snapshot baseline.
+    // RAII scope for per-variable metadata maps: snapshots at function entry, restores at
+    // exit, so a body's entries die with it and a same-named local elsewhere can't inherit stale types (the documented cross-function SEGV/UAF family). Module-level entries made before lowering survive in the baseline.
     struct VarMetaScope {
         Impl& I;
         decltype(varClassNames) a;  decltype(varClassOwningModule) b;
@@ -2760,11 +2038,8 @@ struct CodeGen::Impl {
         return VarKind::Other;
     }
 
-    // Determine if an expression produces a bytes value.
-    // D030 §5: prefer the typechecker's static type as the source of truth.
-    // Falls back to AST node shape and the source-level VarKind for paths
-    // where the typechecker hasn't propagated a Type yet (and for legacy
-    // VarKind::Bytes-tagged slots that haven't been migrated).
+    // Determines if an expression produces a bytes value. D030 §5: prefers the typechecker's
+    // static type, falling back to AST node shape and source-level VarKind where a Type hasn't propagated yet (or for legacy VarKind::Bytes-tagged slots).
     bool exprIsBytes(Expr* expr);
 
     // Bare name -> moduleGlobals key from the current module's view: alias, then
@@ -2818,18 +2093,11 @@ struct CodeGen::Impl {
         varClassOwningModule[bareVarName] = resolveClassOwningModule(cn);
     }
 
-    // Check if we should use a module global for this variable name.
-    // In .dr mode: always (scope chain resolution).
-    // In .py mode: module-level code always accesses globals; inside functions
-    // only if `global x` was declared.
+    // Whether to use a module global for this name: always in .dr mode (scope chain
+    // resolution); in .py mode, always at module level, or inside a function only if `global x` was declared.
     bool shouldUseModuleGlobal(const std::string& name) {
-        // Mode-independent (D: .dr/.py parity). A function may READ a module
-        // global with no keyword in both modes; this is only consulted after
-        // lookupVar found no shadowing local, so using the global is always the
-        // correct read. WRITES to a module global from a function require
-        // `global` - but that is enforced uniformly in Sema, so by the time we
-        // get here any reachable write already carries the declaration. Hence
-        // no `.py`-vs-`.dr` gate and no `globalDeclaredVars` check.
+        // Mode-independent (.dr/.py parity): a function may read a module global with no
+        // keyword in either mode, and this only runs after lookupVar found no shadowing local. Writes require `global`, enforced uniformly in Sema, so no mode gate or globalDeclaredVars check is needed here.
         (void)name;
         return true;
     }
@@ -2839,13 +2107,8 @@ struct CodeGen::Impl {
                                          const std::string& name,
                                          llvm::Type* type);
 
-    // Determine VarKind from a type annotation
-    // Resolve a (possibly dotted) NamedTypeExpr name to a class name in the
-    // flat classNames table. Same-module names match directly. Cross-module
-    // names like `mod.Foo` (legal after Parser supports dotted type
-    // annotations) match the trailing segment, since all linked modules
-    // share one LLVM symbol space - the class struct is registered under
-    // the bare class name regardless of which module defined it.
+    // Resolves a (possibly dotted) NamedTypeExpr name to a class name in the flat classNames
+    // table. Same-module names match directly; cross-module `mod.Foo` matches the trailing segment, since all linked modules share one LLVM symbol space.
     std::string resolveAnnotationClassName(const std::string& name) const {
         if (classNames.count(name)) return name;
         auto dot = name.rfind('.');
@@ -2856,15 +2119,8 @@ struct CodeGen::Impl {
         return "";
     }
 
-    // Bind a class-typed variable's class name AND owning module together from
-    // its declared type. varClassNames and varClassOwningModule are program-
-    // wide and never cleared, so recording only the name (the old param/loop
-    // behavior) let a STALE owning module from an earlier same-named binding in
-    // another function survive into this scope and misdirect method dispatch to
-    // `<staleModule>__<class>_<method>`. Always set the pair. Also handles a
-    // DOTTED annotation (`x: mod.Class`) via resolveAnnotationClassName, which
-    // a bare classNames.count() missed. No-op for non-class types, so it never
-    // writes a garbage module for `x: str` / `x: tuple[...]`.
+    // Binds a class-typed variable's class name AND owning module together (both maps are
+    // program-wide, never cleared, so setting only the name let a stale owning module from another function survive and misdirect dispatch). Handles dotted `x: mod.Class` via resolveAnnotationClassName; no-op for non-class types.
     void bindClassVar(const std::string& varName, TypeExpr* typeExpr) {
         auto* named = dynamic_cast<NamedTypeExpr*>(typeExpr);
         if (!named) return;
@@ -2874,12 +2130,8 @@ struct CodeGen::Impl {
         varClassOwningModule[varName] = resolveClassOwningModule(cn);
     }
 
-    // D044 - Type::toString-equivalent canonical name for a TypeExpr, used to
-    // recover the stamped class name of a generic-instantiation annotation
-    // (`Box[int]`). Must match TypeChecker::mangleInstantiation (a user-generic
-    // class's top-level args are joined by ',') AND Type::toString (the built-in
-    // dict/tuple containers use ', '). Builtin container args nested inside a
-    // user-generic therefore keep ', '; the user-generic level uses ','.
+    // D044: Type::toString-equivalent canonical name for a TypeExpr, recovering the stamped
+    // class name of a generic instantiation (`Box[int]`). Must match TypeChecker::mangleInstantiation (top-level args joined by ',') and Type::toString (builtin containers use ', ').
     std::string typeExprCanonicalName(TypeExpr* t) const;
 
     // If `t` is a generic-class instantiation annotation whose class was stamped
@@ -2890,11 +2142,8 @@ struct CodeGen::Impl {
         return classNames.count(c) ? c : "";
     }
 
-    /// D030 §5: source-of-truth Type::Kind from a TypeExpr annotation.
-    /// Used wherever the static type needs to survive past the VarKind layer
-    /// (e.g. typedDictFieldKindsBySym, where bytes-vs-list disambiguation matters
-    /// for runtime tag dispatch). Mirrors typeExprToKind but returns the
-    /// type-system Type::Kind directly.
+    /// D030 §5: source-of-truth Type::Kind from a TypeExpr annotation, used wherever the
+    /// static type must survive past the VarKind layer (e.g. typedDictFieldKindsBySym's bytes-vs-list tag dispatch). Mirrors typeExprToKind but returns Type::Kind directly.
     Type::Kind typeExprToTypeKind(TypeExpr* typeExpr);
 
     VarKind typeExprToKind(TypeExpr* typeExpr);
@@ -2910,9 +2159,8 @@ struct CodeGen::Impl {
         return members;
     }
 
-    // Extract the class-name member of a union type, if any. Used to recover
-    // the concrete class name for narrowing `Foo | None` -> Foo so attribute
-    // access (`x.field`) finds the right struct layout.
+    // Extracts the class-name member of a union type, if any, to recover the concrete
+    // class for narrowing `Foo | None` -> Foo so `x.field` finds the right struct layout.
     std::string typeExprUnionClassName(TypeExpr* typeExpr) {
         if (auto* ut = dynamic_cast<UnionTypeExpr*>(typeExpr)) {
             for (auto& t : ut->types) {
@@ -2924,23 +2172,14 @@ struct CodeGen::Impl {
         return "";
     }
 
-    // Niche-pointer optimization: when a Union is exactly `T | None` and T's
-    // LLVM representation is a pointer (class instance, list, dict, str, bytes,
-    // tuple, set, ptr), lower the union as a bare nullable pointer instead of a
-    // {i64,i64} box. `null` represents None. `r != none` becomes a 1-cycle null
-    // compare; `r.field` is a normal field load - no boxing/unboxing/tag check.
-    // Boxed Union machinery stays for non-niche unions like `int | str`.
-    //
-    // Returns the non-None member's TypeExpr* on success, or nullptr otherwise.
+    // Niche-pointer optimization: when a Union is exactly `T | None` and T is pointer-shaped,
+    // lower as a bare nullable pointer instead of a {i64,i64} box (null = None, `r != none` is a 1-cycle compare, `r.field` a plain load). Boxed Union stays for non-niche unions like `int | str`. Returns the non-None member's TypeExpr*, or nullptr.
     TypeExpr* unionNicheMember(TypeExpr* typeExpr);
 
-    //===------------------------------------------------------------------===//
-    // D030 Phase 4 - Box helpers ({i64 tag, i64 payload})
-    //===------------------------------------------------------------------===//
+    // D030 Phase 4: box helpers ({i64 tag, i64 payload}).
 
-    /// Coerce a native-typed value to the box's i64 payload slot.
-    /// Floats bitcast (preserve bit pattern). Pointers PtrToInt. Bools ZExt.
-    /// i64 / int identity. Caller decides the tag separately.
+    /// Coerces a native-typed value to the box's i64 payload slot: floats bitcast, pointers
+    /// PtrToInt, bools ZExt, i64/int pass through. Caller decides the tag separately.
     llvm::Value* nativeToPayloadI64(llvm::Value* val) {
         auto* ty = val->getType();
         if (ty == i64Type) return val;
@@ -2976,14 +2215,12 @@ struct CodeGen::Impl {
         return builder->CreateExtractValue(box, 1, name);
     }
 
-    /// Extract the payload as a native LLVM type matching `kind`. Used by
-    /// isinstance narrowing: once `box.tag == tag(T)` is verified, this gives
-    /// the value at T's native LLVM type with no further conversion needed.
+    /// Extracts the payload as a native LLVM type matching `kind`. Used by isinstance
+    /// narrowing: once `box.tag == tag(T)` is verified, gives the value at T's native type.
     llvm::Value* boxPayloadAsKind(llvm::Value* box, VarKind k);
 
-    // D039 Phase 11: arithmetic op token -> dragon_box_binop opcode. Handles both
-    // the BinaryExpr form (PLUS) and the AugAssign form (PLUS_EQUAL). Returns -1
-    // when the token is not a box-arithmetic operator.
+    // D039 Phase 11: arithmetic op token -> dragon_box_binop opcode, handling both the
+    // BinaryExpr (PLUS) and AugAssign (PLUS_EQUAL) forms. Returns -1 for a non-box-arithmetic token.
     int64_t binopOpcodeForToken(TokenType t) {
         switch (t) {
             case TokenType::PLUS: case TokenType::PLUS_EQUAL: return 0;
@@ -2997,19 +2234,17 @@ struct CodeGen::Impl {
         }
     }
 
-    // Box a native arithmetic operand for dragon_box_binop. A numeric LLVM type
-    // maps directly to its value-tag; a pointer operand's tag comes from the
-    // expr's static type (str/list/bytes/...). A value already of box type is
-    // returned unchanged. Borrow semantics - the helpers read, never own.
+    // Boxes a native arithmetic operand for dragon_box_binop: a numeric LLVM type maps
+    // directly to its value-tag, a pointer's tag comes from the expr's static type. Already-boxed values pass through unchanged. Borrow semantics: reads, never owns.
     llvm::Value* boxNativeOperand(CodeGen& cg, Expr* e, llvm::Value* v) {
         if (v->getType() == boxType) return v;
         llvm::Value* tag;
         if (v->getType() == i64Type)
-            tag = llvm::ConstantInt::get(i64Type, 0);   // TAG_INT
+            tag = llvm::ConstantInt::get(i64Type, TAG_INT);   // TAG_INT
         else if (v->getType() == f64Type)
-            tag = llvm::ConstantInt::get(i64Type, 2);   // TAG_FLOAT
+            tag = llvm::ConstantInt::get(i64Type, TAG_FLOAT);   // TAG_FLOAT
         else if (v->getType() == i1Type)
-            tag = llvm::ConstantInt::get(i64Type, 3);   // TAG_BOOL
+            tag = llvm::ConstantInt::get(i64Type, TAG_BOOL);   // TAG_BOOL
         else
             tag = emitTagForExpr(e, cg);                // ptr: str/list/bytes/...
         return makeBox(tag, v);
@@ -3027,10 +2262,8 @@ struct CodeGen::Impl {
         return res;
     }
 
-    // boxNativeOperand borrows - the box only reads the payload. A native ptr
-    // operand that is itself an owned temp (fresh call result / bytes literal)
-    // is orphaned once the runtime call returns, so drain it here. Names and
-    // field reads are loads, not calls - isOwnedPtrResult screens them out.
+    // boxNativeOperand borrows (the box only reads the payload), so a native ptr operand
+    // that's itself an owned temp is orphaned once the call returns; drain it here (names/field reads are loads, screened out by isOwnedPtrResult).
     void drainOwnedNativeBoxOperands(llvm::Value* lhs, llvm::Value* rhs) {
         if (options.gcMode != GCMode::RC) return;
         for (llvm::Value* v : {lhs, rhs}) {
@@ -3040,10 +2273,8 @@ struct CodeGen::Impl {
         }
     }
 
-    // Emit dragon_box_cmp(boxA, boxB, cmpOp) for an ordering operator where at
-    // least one operand is a box. Returns the three-way i64 result (<0/0/>0);
-    // the caller compares it to 0. cmpOp (0=< 1=<= 2=> 3=>=) is only used for
-    // the TypeError message on incomparable operands.
+    // Emits dragon_box_cmp for an ordering operator where at least one operand is a box,
+    // returning a three-way i64 (<0/0/>0) the caller compares to 0. cmpOp (0=</1=<=/2=>/3=>=) is used only for the TypeError message on incomparable operands.
     llvm::Value* emitBoxCmp(CodeGen& cg, Expr* lExpr, llvm::Value* lhs,
                             Expr* rExpr, llvm::Value* rhs, int64_t cmpOp) {
         llvm::Value* boxA = boxNativeOperand(cg, lExpr, lhs);
@@ -3058,33 +2289,18 @@ struct CodeGen::Impl {
     static constexpr int64_t kNoListElemCheck =
         std::numeric_limits<int64_t>::min();
 
-    // Unbox a dragon_box_binop result into `targetType` (a native slot type),
-    // emitting a runtime tag-check that raises TypeError (code 80) on mismatch.
-    // Mirrors the D039 Phase-7a inline unbox in AnnAssign. If targetType IS the
-    // box type, returns the box unchanged (Any slot). Leaves the builder at the
-    // ok-path continuation block.
-    // `wantListElemTag` (when not kNoListElemCheck) additionally emits
-    // dragon_list_view_check on a list-tagged payload: the box tag alone says
-    // "some list" but cannot distinguish a monomorphized DragonList from a
-    // DragonListBox - reading one at the other's stride corrupts silently.
-    // Pass -1 for a list[Any]/list[union] target (requires a box list), an
-    // element tag >= 0 for a concrete list[T] target.
+    // Unboxes a dragon_box_binop result into `targetType`, emitting a runtime tag-check
+    // that raises TypeError (80) on mismatch (mirrors AnnAssign's D039 Phase-7a inline unbox); targetType == box type returns unchanged (Any slot). `wantListElemTag` additionally emits dragon_list_view_check, since the box tag alone can't distinguish DragonList from DragonListBox (silent corruption otherwise): -1 for list[Any]/union, >=0 for concrete list[T].
     llvm::Value* unboxBoxResultChecked(llvm::Value* box, llvm::Type* targetType,
                                        VarKind vk,
                                        int64_t wantListElemTag = kNoListElemCheck);
 
-    /// The dragon_list_view_check argument for a list-typed slot, derived from
-    /// its annotation: -1 for list[Any] / list[union] (box representation), a
-    /// concrete element tag for monomorphized element types, kNoListElemCheck
-    /// when the annotation is not a checkable list shape (bare `list`,
-    /// `list[type]` descriptor lists, type variables, ...).
+    /// The dragon_list_view_check argument for a list-typed slot, from its annotation: -1
+    /// for list[Any]/union (box representation), a concrete tag for monomorphized elements, kNoListElemCheck for a non-checkable shape (bare `list`, `list[type]`, type variables).
     int64_t listViewWantElemTag(TypeExpr* ann);
 
-    /// Convert a raw i64 container slot (as returned by dragon_tuple_get /
-    /// dragon_list_get) to the native LLVM value for `elemType`. Mirrors the
-    /// tuple-unpack coercion in Assign.cpp: float bits -> f64, 0/≠0 -> i1, any
-    /// heap/ptr kind -> i8*, else the i64 stays. Used by C9-B `*tuple` / `*list`
-    /// spread to feed container elements into typed parameter slots.
+    /// Converts a raw i64 container slot (dragon_tuple_get/list_get) to the native LLVM
+    /// value for `elemType`, mirroring Assign.cpp's tuple-unpack coercion. Used by C9-B `*tuple`/`*list` spread to feed container elements into typed parameter slots.
     llvm::Value* containerSlotToNative(llvm::Value* raw, Type* elemType) {
         Type::Kind ek = elemType ? elemType->kind() : Type::Kind::Int;
         switch (ek) {
@@ -3103,13 +2319,8 @@ struct CodeGen::Impl {
         }
     }
 
-    // Emit the runtime tag value for an expression being passed as a union arg.
-    // Returns an i64 constant for known types, or extracts the tag from a
-    // boxed union variable's stored {tag, payload} value.
-    // Compute the {tag, payload} pair for an `Any`/box value passed to a
-    // box-list op (insert/remove/append). `takesOwnership` increfs borrowed
-    // heap payloads (Model B - for ops that keep the value); false = the value
-    // is only inspected (e.g. remove's value-equality search).
+    // emitTagForExpr: runtime tag for an expr passed as a union arg (i64 constant for known
+    // types, or extracted from a boxed union var). boxArgTagPayload: {tag,payload} pair for an Any/box value passed to a box-list op; `takesOwnership` increfs borrowed heap payloads (false = inspection only, e.g. remove's equality search).
     std::pair<llvm::Value*, llvm::Value*> boxArgTagPayload(
             Expr* argExpr, llvm::Value* val, bool takesOwnership);
 
@@ -3118,49 +2329,24 @@ struct CodeGen::Impl {
     // Convert Dragon type annotation to LLVM type
     llvm::Type* typeExprToLLVM(TypeExpr* typeExpr);
 
-    // Coerce a function-call argument to match the expected parameter type.
-    // D030 Phase 5 audit:
-    //  Legitimate widening: int<->float, bool<->int/float, intc bridges (FFI).
-    //  ptr<->int: KEPT because class-field type inference still stores some
-    //  ptr-returning RHS values (e.g. `self.handle = fopen(...)`) as i64
-    //  fields. The proper fix is upstream - class field types should be
-    //  inferred as ptr when the RHS is ptr-typed. Tracked as a follow-up
-    //  to D030 Phase 5; deleting these here today regresses io / re /
-    //  sqlite / threading interop tests.
-    /// D030 Phase 4 call-boundary: when a concrete-typed value crosses into
-    /// an `Any` / `Union[...]` parameter slot (paramType == boxType), the
-    /// compiler MUST emit a `%dragon.box = { i64 tag, i64 payload }` here.
-    /// This is the inverse of D039 Phase 7a's box-to-native unbox at the
-    /// store site - both directions are first-class boundary handling, not
-    /// fallbacks.
-    ///
-    /// The AST is required to derive the right TAG_* for ptr-shaped values
-    /// (str vs list vs dict vs class etc.) - `emitTagForExpr` already does
-    /// that lookup. If the param isn't box-shaped, defer to the regular
-    /// `coerceArg` (i64/i1/f64/ptr/intc widenings, etc.).
+    // coerceArg (below): D030 Phase 5 audit - legitimate widenings are int<->float,
+    // bool<->int/float, intc bridges (FFI); ptr<->int is kept because some class fields still store ptr-returning RHS as i64 (upstream fix tracked, deleting here regresses io/re/sqlite/threading tests).
+    /// coerceArgFromExpr: D030 Phase 4 call-boundary - crossing into an Any/Union param
+    /// (paramType == boxType) emits a `%dragon.box` here, the inverse of D039 Phase 7a's unbox at the store site. Uses emitTagForExpr for ptr-shaped TAG_* derivation; else defers to coerceArg.
     llvm::Value* coerceArgFromExpr(Expr* expr,
                                     llvm::Value* arg,
                                     llvm::Type* paramType) {
         if (paramType == boxType) {
-            // Box an arg into an Any/Union parameter through the single shared
-            // boxing path. takesOwnership=FALSE: an Any param is BORROWED today
-            // (the box does not take its own +1), matching the long-standing
-            // behavior. Completing the "donate" contract (incref a borrowed
-            // source here, then have the callee free a non-escaping Any param at
-            // scope exit) is deferred - it additionally needs an ownership-FLOW
-            // analysis for the free-point that the stack-allocation escape pass
-            // can't provide. Flipping this to true is
-            // the caller half of that future work.
+            // Boxes an arg into an Any/Union param via the shared boxing path.
+            // takesOwnership=false: an Any param is borrowed today (no +1); completing the "donate" contract (incref here, callee frees at scope exit) needs an ownership-flow analysis the escape pass can't yet provide.
             auto tp = boxArgTagPayload(expr, arg, /*takesOwnership=*/false);
             return makeBox(tp.first, tp.second);
         }
         return coerceArg(arg, paramType);
     }
 
-    /// Same tag derivation as `emitTagForExpr` but without the unused
-    /// CodeGen& parameter so we can call it from `coerceArgFromExpr` (which
-    /// doesn't have a CodeGen reference). The original `emitTagForExpr`
-    /// stays in place - call sites that already pass `cg` shouldn't change.
+    /// Same tag derivation as `emitTagForExpr` but without the unused CodeGen& parameter,
+    /// so `coerceArgFromExpr` (no CodeGen reference) can call it. Existing `cg`-passing call sites keep using emitTagForExpr.
     llvm::Value* emitTagForExprNoCG(Expr* expr);
 
     llvm::Value* coerceArg(llvm::Value* arg, llvm::Type* paramType);
@@ -3173,12 +2359,10 @@ struct CodeGen::Impl {
         return val;
     }
 
-    //===------------------------------------------------------------------===//
-    // D030 - Per-callsite spawn trampolines (fire / async / generator)
-    //===------------------------------------------------------------------===//
+    // D030: per-callsite spawn trampolines (fire/async/generator).
 
-    /// Cast a return value of arbitrary type to i64 for transit through the
-    /// vthread result slot. Mirrors the inverse of coerceArg's widenings.
+    /// Casts a return value of arbitrary type to i64 for transit through the vthread
+    /// result slot. Mirrors the inverse of coerceArg's widenings.
     llvm::Value* resultToI64(llvm::Value* res) {
         auto* ty = res->getType();
         if (ty == i64Type) return res;
@@ -3190,20 +2374,12 @@ struct CodeGen::Impl {
         return llvm::ConstantInt::get(i64Type, 0);
     }
 
-    // Inverse of resultToI64: reinterpret the i64 result slot from
-    // dragon_vthread_join back to the task's native result type T (D030).
-    // A float result was bit-PACKED by resultToI64 (CreateBitCast), so we
-    // bitcast back - NOT coerceArg, which would SIToFP-CONVERT and corrupt
-    // the bits. ptr-shaped Ts inttoptr; bool truncates.
-    // Union/Any results are a 16-byte box that cannot fit the i64 slot - a
-    // pre-existing vthread-ABI boundary; left as raw i64 here (not worsened).
+    // Inverse of resultToI64: reinterprets the i64 result from dragon_vthread_join at
+    // the task's native type T. A float was bit-packed, so bitcast back (not coerceArg's SIToFP, which would corrupt the bits); ptr inttoptr, bool truncates. Union/Any (a 16-byte box) can't fit the i64 slot: a pre-existing vthread-ABI limit, left as raw i64.
     llvm::Value* taskResultFromI64(llvm::Value* rawI64, Type* resultType);
 
-    /// Build the per-callsite typed args struct type:
-    ///  { ptr handle, <native_arg_types...> }
-    /// Field 0 is reserved for the runtime to patch (DragonVThread* or
-    /// DragonGenerator*) so the trampoline can address its result/self slot.
-    /// Subsequent fields are the user args at native LLVM types.
+    /// Builds the per-callsite typed args struct: { ptr handle, <native_arg_types...> }.
+    /// Field 0 is reserved for the runtime to patch (DragonVThread*/DragonGenerator*) so the trampoline can address its result/self slot; the rest are user args at native types.
     llvm::StructType* makeSpawnArgsStructType(
         const std::vector<llvm::Type*>& argTypes,
         const std::string& name) {
@@ -3213,9 +2389,8 @@ struct CodeGen::Impl {
         return llvm::StructType::create(*context, fields, name);
     }
 
-    /// Coerce a value loaded from / stored to a struct field whose type
-    /// matches a native LLVM type. Used at spawn-site populate where the
-    /// caller's value type may not exactly match the field type.
+    /// Coerces a value loaded from/stored to a struct field of a native LLVM type. Used
+    /// at spawn-site populate where the caller's value type may not exactly match the field.
     llvm::Value* coerceToFieldType(llvm::Value* val, llvm::Type* fieldType) {
         if (val->getType() == fieldType) return val;
         if (fieldType == i64Type && val->getType()->isPointerTy())
@@ -3233,79 +2408,45 @@ struct CodeGen::Impl {
         return builder->CreateBitCast(val, fieldType);
     }
 
-    /// Build a per-callsite fire/async trampoline that:
-    ///  1. Pulls the args struct out of the coroutine's user_data
-    ///  2. Loads the vthread handle (field 0) and each native arg (fields 1..N)
-    ///  3. Calls the target function with native types
-    ///  4. dragon_vthread_set_result(vt, i64-coerced result)
-    ///  5. Atomically decrefs heap-typed args (balances spawn-site incref)
-    ///  6. free(args buffer) and ret void
-    /// Caller is responsible for atomic-increfing heap args BEFORE spawn.
-    /// targetFn may be a regular Dragon function or a method.
+    /// Builds a per-callsite fire/async trampoline: pulls the args struct from user_data,
+    /// loads the vthread handle + native args, calls targetFn, sets the vthread result, atomically decrefs heap args (balancing the spawn-site incref), frees the buffer. Caller must atomic-incref heap args before spawn; targetFn may be a function or method.
     llvm::Function* buildFireTrampoline(
         llvm::Function* targetFn,
         llvm::StructType* argsStructType,
         const std::vector<VarKind>& argKinds,
         const std::string& siteName);
 
-    /// Build a per-defer-site thunk `void __dragon_defer_<site>(i64* args)`
-    /// that loads targetFn's arguments from the i64 snapshot array (inttoptr /
-    /// trunc / bitcast per param type), calls it, and discards the result.
-    /// One thunk serves BOTH exit paths: emitScopeCleanupFor calls it inline
-    /// on normal exits, and dragon_exc_cleanup_unwind calls it through the
-    /// DCLEAN_DEFER_CALL entry during a longjmp unwind. Defined next to
-    /// buildFireTrampoline in ImplMethods2.cpp.
-    /// vtableIndex >= 0 dispatches the call through the receiver's vtable
-    /// (D026 parity: an overridden method deferred on a base-typed receiver
-    /// must reach the subclass override, exactly like the direct call).
+    /// Builds a per-defer-site thunk `void __dragon_defer_<site>(i64* args)` that loads
+    /// targetFn's args from the i64 snapshot array and calls it, discarding the result. One thunk serves both exit paths (inline normal exit, DCLEAN_DEFER_CALL during longjmp unwind). vtableIndex >= 0 dispatches through the vtable for D026 override parity.
     llvm::Function* buildDeferThunk(llvm::Function* targetFn,
                                     const std::string& siteName,
                                     int vtableIndex = -1);
 
-    /// Build a per-callsite generator trampoline that:
-    ///  1. Pulls the args struct out of user_data
-    ///  2. Loads the generator handle (field 0) and each native arg (fields 1..N)
-    ///  3. Calls the generator body fn with (gen_ptr, native_args...)
-    ///  4. dragon_generator_set_exhausted(gen) and ret void
-    /// Args buffer is owned by the generator and freed at destroy via the
-    /// separately-built decref fn (see buildGeneratorDecrefFn).
+    /// Builds a per-callsite generator trampoline: pulls the args struct from user_data,
+    /// loads the generator handle + native args, calls the body fn, sets exhausted. The args buffer is owned by the generator and freed at destroy via buildGeneratorDecrefFn.
     llvm::Function* buildGeneratorTrampoline(
         llvm::Function* bodyFn,
         llvm::StructType* argsStructType,
         const std::string& siteName);
 
-    /// Build a per-callsite decref function for a generator's args buffer.
-    /// Called by dragon_generator_destroy. Walks heap-typed arg slots and
-    /// atomic-decrefs each (atomic because destroy can race with the worker
-    /// thread, e.g. last decref from another vthread).
-    /// Returns NULL if no heap args (caller passes NULL to create_typed).
+    /// Builds a per-callsite decref fn for a generator's args buffer, called by
+    /// dragon_generator_destroy; walks heap-typed slots and atomic-decrefs each (destroy can race with a worker thread). Returns NULL if there are no heap args.
     llvm::Function* buildGeneratorDecrefFn(
         llvm::StructType* argsStructType,
         const std::vector<VarKind>& argKinds,
         const std::string& siteName);
 
-    /// Populate a stack-allocated spawn args struct with user args.
-    /// Field 0 is left zero (runtime patches it to the vthread/generator).
-    /// User args are stored at fields 1..N at their native types.
+    /// Populates a stack-allocated spawn args struct with user args. Field 0 is left zero
+    /// (runtime patches it to the vthread/generator); user args go in fields 1..N at their native types.
     void populateSpawnArgs(
         llvm::Value* argsAlloca,
         llvm::StructType* argsStructType,
         const std::vector<llvm::Value*>& userArgs);
 
-    //===------------------------------------------------------------------===//
-    // D030 Phase 3.B - Bind a list element to a native-typed alloca
-    //===------------------------------------------------------------------===//
+    // D030 Phase 3.B: binds a list element to a native-typed alloca.
 
-    /// Issue the matching typed get for the loop variable's kind and bind to
-    /// a fresh alloca of the native LLVM type. Used by for-loops and
-    /// comprehensions over typed lists. Caller is responsible for setVar
-    /// (VarKind tracking), borrowed-insertion, and varClassNames bookkeeping.
-    ///
-    ///  Float -> dragon_list_get_f64 -> double, stored in f64 alloca
-    ///  Str / Bytes / List / Dict / Tuple / Set / ClassInstance
-    ///  -> dragon_list_get_ptr -> ptr, stored in i8* alloca
-    ///  Bool -> dragon_list_get (1-byte packing path), truncated to i1
-    ///  else -> dragon_list_get -> i64, stored in i64 alloca (Int / Type / unknown)
+    /// Issues the matching typed get for the loop variable's kind and binds a fresh alloca
+    /// of the native type (for-loops/comprehensions over typed lists; caller handles setVar/borrowed-insertion/varClassNames). Float->list_get_f64, heap kinds->list_get_ptr, Bool->list_get truncated, else->list_get as i64.
     llvm::AllocaInst* bindListElemTyped(
         llvm::Function* func,
         llvm::Value* listVal,
@@ -3313,11 +2454,8 @@ struct CodeGen::Impl {
         const std::string& varName,
         VarKind loopKind);
 
-    /// D030 §5 - Type::Kind-driven loop-var binder. Sizes the alloca and
-    /// picks the matching typed `dragon_list_get_*` runtime call directly
-    /// from the iterable's element Type::Kind, bypassing the legacy
-    /// VarKind hop. The single source of truth for "what shape does a
-    /// loop var of T-typed list[T] have at the LLVM level."
+    /// D030 §5: Type::Kind-driven loop-var binder. Sizes the alloca and picks the matching
+    /// `dragon_list_get_*` call directly from the element Type::Kind, bypassing the legacy VarKind hop. Single source of truth for a list[T] loop var's LLVM shape.
     llvm::AllocaInst* bindListElemByTypeKind(
         llvm::Function* func,
         llvm::Value* listVal,
@@ -3325,27 +2463,8 @@ struct CodeGen::Impl {
         const std::string& varName,
         Type::Kind elemKind);
 
-    // Emit a string-literal byte sequence as an LLVM i8* pointer.
-    //
-    // For pure-ASCII bytes we keep the existing fast path: a global
-    // C-string, zero per-use cost, byte-count == cp-count, full C-FFI
-    // compatibility. The runtime treats it as a borrowed kind=1 buffer.
-    //
-    // For sequences containing any byte >= 0x80 we *cannot* publish a raw
-    // C-string - `dragon_str_concat` and friends interpret a kind=1 input
-    // (or a literal pointer) as one byte == one cp, which silently turns
-    // every multi-byte UTF-8 sequence into Latin-1 code points and then
-    // re-encodes them, producing the dreaded double-encoded "Ã¢â‚¬â€".
-    // Instead we register one module-level i8* slot per distinct byte
-    // sequence; main()'s preamble calls `dragon_str_intern` exactly once
-    // (immortal heap DragonString, decoded to its canonical kind=1/4),
-    // and use sites just emit a load.
-    //
-    // This is the single point of truth for "how do we lower a literal
-    // byte sequence into an LLVM value" - every place that wants to emit
-    // text inline (StringLiteral, TemplateExpr literal segments, f-string
-    // literal segments) routes through here so non-ASCII text in any of
-    // them survives concatenation byte-accurate.
+    // Emits a string-literal byte sequence as an LLVM i8* pointer. ASCII uses a fast global
+    // C-string (kind=1 borrowed buffer); bytes >= 0x80 can't use a raw C-string (dragon_str_concat would read one byte as one cp, mangling UTF-8 into double-encoded Latin-1 mojibake), so each distinct sequence gets a module-level i8* slot interned once via dragon_str_intern. Single point of truth for lowering literal text (StringLiteral, template/f-string segments).
     llvm::Value* emitStringLiteralBytes(const std::string& bytes,
                                         const llvm::Twine& twine = "");
 
@@ -3370,24 +2489,18 @@ struct CodeGen::Impl {
     // Forward-declare all top-level functions in a module
     void forwardDeclareFunctions(dragon::Module& mod); // defined in codegen/ImplInit.cpp
 
-    // When true, visit(ClassDecl) registers field-layout metadata only and
-    // returns before emitting any bodies/globals - the layout pre-pass that runs
-    // for all classes before any method body, so cross-class field references to
-    // later-defined classes resolve correctly.
+    // When true, visit(ClassDecl) registers field-layout metadata only and returns before
+    // emitting bodies/globals: the pre-pass over all classes before any method body, so cross-class field references to later-defined classes resolve.
     bool classLayoutPass = false;
 
     // Forward-declare class constructors and methods in a module.
     void forwardDeclareClasses(dragon::Module& mod); // defined in codegen/ImplInit.cpp
-    // 6.18: AST-level synthesis of __init__ / __eq__ / __repr__ for
-    // @dataclass-decorated classes and NamedTuple subclasses. Defined in
-    // codegen/Classes.cpp. Mutates the class body in place.
+    // 6.18: AST-level synthesis of __init__/__eq__/__repr__ for @dataclass-decorated classes
+    // and NamedTuple subclasses. Defined in codegen/Classes.cpp; mutates the class body in place.
     void synthesizeDataclassMethods(ClassDecl& node);
 
-    // AST-level synthesis for class-based enums (`class C(Enum)`): rewrites
-    // members into singleton static instances with name/value fields, __init__,
-    // __str__/__repr__, a __members__ list, and a value-lookup helper. Defined
-    // in codegen/Classes.cpp. Mutates the class body in place. Must run before
-    // synthesizeDataclassMethods sees the (now non-enum) class.
+    // AST-level synthesis for class-based enums (`class C(Enum)`): rewrites members into
+    // singleton instances with name/value fields, __init__, __str__/__repr__, __members__, and a value-lookup helper. Mutates the class body in place; must run before synthesizeDataclassMethods.
     void synthesizeEnumMethods(ClassDecl& node);
 };
 

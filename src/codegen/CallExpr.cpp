@@ -154,7 +154,6 @@ void CodeGen::visit(CallExpr& node) {
                 std::string initName = impl_->classSymPrefix(name) + "___init__";
                 auto* initFunc = impl_->module->getFunction(initName);
                 if (initFunc) {
-                    // Load self from the first parameter of the current function
                     llvm::Value* selfVal = &*impl_->currentFunction->arg_begin();
                     std::vector<llvm::Value*> args = {selfVal};
                     auto initFuncType = initFunc->getFunctionType();
@@ -212,8 +211,7 @@ void CodeGen::visit(CallExpr& node) {
                             impl_->runtimeFuncs["dragon_dict_update"], {dict, val});
                         continue;
                     }
-                    // Determine tag from the TypedDict schema
-                    int64_t tag = 0; // TAG_INT default
+                    int64_t tag = TAG_INT; // TAG_INT default
                     auto schemaIt = impl_->typedDictFieldKindsBySym.find(impl_->classSym(name));
                     if (schemaIt != impl_->typedDictFieldKindsBySym.end()) {
                         auto fIt = schemaIt->second.find(kwName);
@@ -221,7 +219,6 @@ void CodeGen::visit(CallExpr& node) {
                             tag = Impl::typeKindToTag(fIt->second);
                         if (tag < 0) tag = 0;
                     }
-                    // Coerce value to i64
                     if (val->getType() == impl_->i1Type)
                         val = impl_->builder->CreateZExt(val, impl_->i64Type);
                     else if (val->getType() == impl_->f64Type)
@@ -350,8 +347,12 @@ void CodeGen::visit(CallExpr& node) {
                 if (matchedIdx >= 0) {
                     ctorName = ctorPrefix + "_new_" + std::to_string(matchedIdx);
                 } else {
-                    // No matching arity found -- fall back to first overload
-                    // (type checker should have caught this)
+                    impl_->addError(
+                        "internal error: no constructor overload of '" + name +
+                        "' matches arity " + std::to_string(callArity) +
+                        "; calling the first overload would pass the wrong "
+                        "argument count",
+                        node.location());
                     ctorName = ctorPrefix + "_new_" + std::to_string(arityVec[0].second);
                 }
             } else {
@@ -493,7 +494,7 @@ void CodeGen::visit(CallExpr& node) {
                 impl_->popArgTempCleanups(argTempBases);
                 // Release owned heap-temporary arguments now that the ctor has
                 // borrowed them (the fresh instance can't alias an arg).
-                for (auto& [v, k] : argTemps) impl_->emitDecrefByKind(v, k);
+                impl_->drainBorrowTemps(argTemps);
                 impl_->emitMoveOutSlots(node);
                 return;
             }
@@ -503,12 +504,10 @@ void CodeGen::visit(CallExpr& node) {
         {
             auto decIt = impl_->decoratedFunctions.find(name);
             if (decIt != impl_->decoratedFunctions.end()) {
-                // Load the decorated callable from the module global
                 auto* gv = decIt->second;
                 auto* fnPtr = impl_->builder->CreateLoad(
                     impl_->i8PtrType, gv, name + ".decorated");
 
-                // Get the original function type for proper arg coercion
                 llvm::FunctionType* fnType = nullptr;
                 auto ctIt = impl_->callableTypes.find(name);
                 if (ctIt != impl_->callableTypes.end()) {
@@ -518,7 +517,6 @@ void CodeGen::visit(CallExpr& node) {
                     fnType = llvm::FunctionType::get(impl_->i64Type, pt, false);
                 }
 
-                // Evaluate and coerce arguments
                 std::vector<llvm::Value*> args;
                 for (size_t i = 0; i < node.args.size(); ++i) {
                     node.args[i]->accept(*this);
@@ -740,7 +738,7 @@ void CodeGen::visit(CallExpr& node) {
             impl_->popArgTempCleanups(argTempBases);
             // Release owned heap-temp args (safe even if the callee returns one:
             // the return path increfs borrowed values).
-            for (auto& [v, k] : argTemps) impl_->emitDecrefByKind(v, k);
+            impl_->drainBorrowTemps(argTemps);
             impl_->emitMoveOutSlots(node);
             return;
         }
@@ -807,7 +805,6 @@ void CodeGen::visit(CallExpr& node) {
             if (varKind == Impl::VarKind::ClassInstance) {
                 auto cit = impl_->varClassNames.find(name);
                 if (cit != impl_->varClassNames.end() && impl_->hasDunder(cit->second, "__call__")) {
-                    // Load the instance pointer
                     llvm::Value* objPtr = nullptr;
                     auto* alloca = impl_->lookupVar(name);
                     if (alloca) {
@@ -821,16 +818,13 @@ void CodeGen::visit(CallExpr& node) {
                         }
                     }
                     if (objPtr) {
-                        // Ensure it's a pointer for self param
                         if (!objPtr->getType()->isPointerTy())
                             objPtr = impl_->builder->CreateIntToPtr(objPtr, impl_->i8PtrType);
 
-                        // Find the __call__ function to coerce args
                         std::string defClass = impl_->findDunderClass(cit->second, "__call__");
                         std::string funcName = defClass + "___call__";
                         auto* callFunc = impl_->module->getFunction(funcName);
 
-                        // Evaluate and coerce arguments
                         std::vector<llvm::Value*> extraArgs;
                         for (size_t i = 0; i < node.args.size(); ++i) {
                             node.args[i]->accept(*this);
@@ -841,7 +835,6 @@ void CodeGen::visit(CallExpr& node) {
                             extraArgs.push_back(arg);
                         }
 
-                        // Dispatch: handle void vs non-void return
                         if (callFunc && callFunc->getReturnType() == impl_->voidType) {
                             std::vector<llvm::Value*> args = {objPtr};
                             args.insert(args.end(), extraArgs.begin(), extraArgs.end());
@@ -865,13 +858,11 @@ void CodeGen::visit(CallExpr& node) {
             llvm::Value* calleePtrStorage = nullptr;
             llvm::Type* loadType = nullptr;
 
-            // Check local variable
             auto* alloca = impl_->lookupVar(name);
             if (alloca) {
                 calleePtrStorage = alloca;
                 loadType = alloca->getAllocatedType();
             }
-            // Check module globals
             if (!calleePtrStorage) {
                 auto* gv = impl_->lookupModuleGlobal(name);
                 if (gv && impl_->shouldUseModuleGlobal(name)) {
@@ -881,7 +872,6 @@ void CodeGen::visit(CallExpr& node) {
             }
 
             if (calleePtrStorage) {
-                // Load the value from the variable
                 llvm::Value* calleeVal = impl_->builder->CreateLoad(
                     loadType, calleePtrStorage, name + ".load");
 
@@ -899,7 +889,6 @@ void CodeGen::visit(CallExpr& node) {
                         userFnType = llvm::FunctionType::get(impl_->i64Type, pt, false);
                     }
 
-                    // Evaluate and coerce user arguments.
                     std::vector<llvm::Value*> args;
                     for (size_t i = 0; i < node.args.size(); ++i) {
                         node.args[i]->accept(*this);
@@ -937,14 +926,12 @@ void CodeGen::visit(CallExpr& node) {
                 // is a raw fn ptr, so don't read its tag (undefined byte). Gate on this.
                 const bool valIsTypedCallable = (ctIt != impl_->callableTypes.end());
 
-                // Cast the loaded value to a function pointer of the right type
                 llvm::Value* fnPtr = calleeVal;
                 if (!calleeVal->getType()->isPointerTy()) {
                     fnPtr = impl_->builder->CreateIntToPtr(
                         calleeVal, llvm::PointerType::getUnqual(*impl_->context));
                 }
 
-                // Evaluate and coerce arguments
                 std::vector<llvm::Value*> args;
                 for (size_t i = 0; i < node.args.size(); ++i) {
                     node.args[i]->accept(*this);
@@ -1112,7 +1099,7 @@ void CodeGen::visit(CallExpr& node) {
                     impl_->lastValue = impl_->normalizeIntC(
                         impl_->builder->CreateCall(ctorFunc, args, "inst"));
                     impl_->popArgTempCleanups(argTempBases);
-                    for (auto& [v, k] : argTemps) impl_->emitDecrefByKind(v, k);
+                    impl_->drainBorrowTemps(argTemps);
                     impl_->emitMoveOutSlots(node);
                     return;
                 }
@@ -1187,7 +1174,7 @@ void CodeGen::visit(CallExpr& node) {
                 }
                 impl_->popArgTempCleanups(argTempBases);
                 // Release owned heap-temporary arguments (callee borrowed them).
-                for (auto& [v, k] : argTemps) impl_->emitDecrefByKind(v, k);
+                impl_->drainBorrowTemps(argTemps);
                 impl_->emitMoveOutSlots(node);
                 return;
             }
@@ -1625,15 +1612,15 @@ void CodeGen::emitVarArgCall(llvm::Function* func, CallExpr& node) {
             node.kwArgs[ki].second->accept(*this);
             llvm::Value* val = impl_->lastValue;
             // Determine tag for tagged dict entry
-            int64_t tag = 0; // TAG_INT default
+            int64_t tag = TAG_INT; // TAG_INT default
             if (val->getType() == impl_->i1Type) {
-                tag = 3; // TAG_BOOL
+                tag = TAG_BOOL; // TAG_BOOL
                 val = impl_->builder->CreateZExt(val, impl_->i64Type);
             } else if (val->getType() == impl_->f64Type) {
-                tag = 2; // TAG_FLOAT
+                tag = TAG_FLOAT; // TAG_FLOAT
                 val = impl_->builder->CreateBitCast(val, impl_->i64Type);
             } else if (val->getType()->isPointerTy()) {
-                tag = 1; // TAG_STR (default for pointers)
+                tag = TAG_STR; // TAG_STR (default for pointers)
                 // The dict-set adopts one ref, so incref a borrowed source (f(a=s))
                 // or the dict frees the caller's string (UAF); owned temps already carry +1.
                 if (impl_->options.gcMode == GCMode::RC &&
@@ -2127,7 +2114,7 @@ void CodeGen::Impl::bindParamSlotsFromDict(
             return makeBox(tag, payload);
         }
         if (paramTy->isPointerTy()) {
-            int64_t tag = 1;  // TAG_STR default
+            int64_t tag = TAG_STR;  // TAG_STR default
             if (fpkIt != funcParamKinds.end() && idx < fpkIt->second.size()) {
                 int64_t t = varKindToTag(fpkIt->second[idx]);
                 if (t >= 0) tag = t;
@@ -2218,7 +2205,7 @@ void CodeGen::emitSpreadCall(llvm::Function* func, CallExpr& node,
     impl_->popArgTempCleanups(argTempBases);
     // Release owned heap-temp args (spread elements are borrowed, absent from
     // argTemps; an inline **{...} source is here and released after its borrows).
-    for (auto& [v, k] : argTemps) impl_->emitDecrefByKind(v, k);
+    impl_->drainBorrowTemps(argTemps);
     impl_->emitMoveOutSlots(node);
 }
 

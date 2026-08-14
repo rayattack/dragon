@@ -944,32 +944,14 @@ void CodeGen::visit(AnnAssignStmt& node) {
                         }
                     }
                 }
-                // Fallback: detect class instances from complex expressions
-                if (!impl_->varClassNames.count(name->name)) {
-                    auto cls = impl_->resolveExprClassName(node.value.get());
-                    if (!cls.empty()) {
-                        impl_->varClassNames[name->name] = cls;
-                        std::string owningMod;
-                        if (auto* call = dynamic_cast<CallExpr*>(node.value.get())) {
-                            if (auto* attrCallee = dynamic_cast<AttributeExpr*>(call->callee.get())) {
-                                if (attrCallee->object && attrCallee->object->type &&
-                                    attrCallee->object->type->kind() == Type::Kind::Module) {
-                                    owningMod = static_cast<ModuleType&>(*attrCallee->object->type).name;
-                                } else if (auto* recvName = dynamic_cast<NameExpr*>(attrCallee->object.get())) {
-                                    auto rmIt = impl_->varClassOwningModule.find(recvName->name);
-                                    if (rmIt != impl_->varClassOwningModule.end()) owningMod = rmIt->second;
-                                }
-                            }
-                        }
-                        if (owningMod.empty())
-                            owningMod = impl_->resolveClassOwningModule(cls);
-                        impl_->varClassOwningModule[name->name] = owningMod;
-                        impl_->moduleGlobalClassNames[gKey] = {cls, owningMod};
-                        // Same box-slot guard as above.
-                        if (impl_->options.gcMode == GCMode::RC &&
-                            impl_->classNames.count(cls) && !globalIsBoxSlot)
-                            impl_->moduleGlobalKinds[gKey] = Impl::VarKind::ClassInstance;
-                    }
+                if (auto cls = impl_->recordVarClassFromValue(name->name, node.value.get());
+                    !cls.empty()) {
+                    impl_->moduleGlobalClassNames[gKey] =
+                        {cls, impl_->varClassOwningModule[name->name]};
+                    // Same box-slot guard as above.
+                    if (impl_->options.gcMode == GCMode::RC &&
+                        impl_->classNames.count(cls) && !globalIsBoxSlot)
+                        impl_->moduleGlobalKinds[gKey] = Impl::VarKind::ClassInstance;
                 }
             }
 
@@ -1322,12 +1304,10 @@ void CodeGen::visit(AnnAssignStmt& node) {
                         }
                     }
                 }
-                // Fallback: detect class instances from complex expressions.
                 // Gated on targetMayBeClass for the same reason as above.
-                if (targetMayBeClass && !impl_->varClassNames.count(name->name)) {
-                    auto cls = impl_->resolveExprClassName(node.value.get());
-                    if (!cls.empty()) {
-                        impl_->varClassNames[name->name] = cls;
+                if (targetMayBeClass) {
+                    if (auto cls = impl_->recordVarClassFromValue(name->name, node.value.get());
+                        !cls.empty()) {
                         // Same box-slot guard as above.
                         if (impl_->options.gcMode == GCMode::RC &&
                             impl_->classNames.count(cls) &&

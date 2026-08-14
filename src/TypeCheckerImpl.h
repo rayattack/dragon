@@ -38,9 +38,8 @@ struct TypeChecker::Impl {
 
     // Type name -> type mapping for resolution
     std::unordered_map<std::string, std::shared_ptr<Type>> typeNames;
-    // ADR 054 - one shared ContractType per ContractDecl (true identity,
-    // D053): every annotation/cast/bound view of a contract aliases the same
-    // object, so signatures filled by the pre-pass are visible everywhere.
+    // ADR 054: one shared ContractType per ContractDecl (D053 true identity),
+    // so every view of a contract sees the pre-pass's filled signatures.
     std::unordered_map<const ContractDecl*, std::shared_ptr<ContractType>> contractByDecl;
 
     // Type environment (variable name -> type) with scope stack
@@ -181,13 +180,8 @@ struct TypeChecker::Impl {
     // visit(CallExpr)): `b: Box[int] = Box(5)` infers args. Single-slot, consume-on-read.
     std::shared_ptr<Type> currentExpectedType;
 
-    // The one expression currently ALLOWED to resolve to a bare class method:
-    // the callee of the CallExpr being inferred (`obj.m(...)`), or the object
-    // of a `.__doc__` access (`obj.m.__doc__`, lowered to a .rodata constant).
-    // Set/restored around the respective inferType calls. Anywhere else a
-    // METHOD is not a value (there is no bound-method object; codegen has no
-    // lowering, so it miscompiled to 0 / a SEGV) - visit(AttributeExpr)
-    // rejects it at compile time.
+    // The one expression currently allowed to resolve to a bare class method
+    // (a call's callee, or `.__doc__`'s object); visit(AttributeExpr) rejects it elsewhere.
     const Expr* methodRefOkExpr = nullptr;
 
     // Polymorphic-recursion guard (`Foo[T]` -> `Foo[list[T]]` ...): distinct stamps

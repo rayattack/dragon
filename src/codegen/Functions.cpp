@@ -5,9 +5,8 @@
 
 namespace dragon {
 
-// Shared per-closure-site env GC hook (LambdaExpr + nested def) so
-// DEALLOC/TRAVERSE/CLEAR can't drift. op 1 TRAVERSE's bare-fn-ptr Closure capture
-// is a safe hash-miss (no gate); op 2 CLEAR NULLs slots so later dealloc frees 0.
+// Shared per-closure-site env GC hook (Lambda + nested def) so DEALLOC/TRAVERSE/CLEAR match.
+// TRAVERSE's bare-fn-ptr Closure capture is a safe hash-miss; CLEAR nulls slots so a later dealloc frees 0.
 llvm::Function* CodeGen::Impl::emitEnvGcFn(
         const std::string& baseName, llvm::StructType* envStructType,
         const std::vector<EnvCaptureDesc>& caps) {
@@ -142,31 +141,26 @@ llvm::Function* CodeGen::Impl::emitEnvGcFn(
 }
 
 void CodeGen::visit(LambdaExpr& node) {
-    // Lambda expression: generate a new internal function and return its pointer.
-    // D027: If capturedVars is non-empty, create a closure (env + wrapper).
+    // D027: capturedVars non-empty makes a closure (env + wrapper); otherwise a bare fn ptr.
     // Per-variable metadata dies with the lambda body (stale-type family).
     Impl::VarMetaScope _varMeta(*impl_);
 
     bool hasCaptures = !node.capturedVars.empty();
 
-    // 1. Generate unique function name
     std::string lambdaName = "__dragon_lambda_" + std::to_string(impl_->lambdaCounter++);
 
-    // 2. Determine return type. Expression-body lambda always returns a value
-    // (int default); a block lambda with no value-return is void.
+    // Expression-body lambdas default to int; a block lambda with no value-return is void.
     llvm::Type* retType = impl_->typeExprToLLVM(node.returnType.get());
     if (!node.returnType) {
         retType = (node.body || impl_->bodyReturnsValue(node.bodyStmts))
             ? impl_->i64Type : impl_->voidType;
     }
 
-    // 3. Build parameter types (user-visible params)
     std::vector<llvm::Type*> userParamTypes;
     for (auto& p : node.params) {
         userParamTypes.push_back(impl_->typeExprToLLVM(p.type.get()));
     }
 
-    // 4. Build full param types: user params + optional trailing i8* env
     std::vector<llvm::Type*> paramTypes = userParamTypes;
     if (hasCaptures) {
         paramTypes.push_back(impl_->i8PtrType);  // env pointer
@@ -198,7 +192,6 @@ void CodeGen::visit(LambdaExpr& node) {
             auto cnIt = impl_->varClassNames.find(capName);
             if (cnIt != impl_->varClassNames.end())
                 ci.className = cnIt->second;
-            // Load current value from enclosing scope
             auto* alloca = impl_->lookupVar(capName);
             if (alloca) {
                 ci.value = impl_->builder->CreateLoad(
@@ -216,7 +209,6 @@ void CodeGen::visit(LambdaExpr& node) {
         }
     }
 
-    // 5. Save current codegen state
     auto* prevFunc = impl_->currentFunction;
     auto* prevBlock = impl_->builder->GetInsertBlock();
     // Isolate lambda's scope chain so emitAllScopeCleanup in ReturnStmt
@@ -239,12 +231,10 @@ void CodeGen::visit(LambdaExpr& node) {
         }
     }
 
-    // 6. Set up new function
     impl_->currentFunction = lambdaFunc;
     auto* entry = llvm::BasicBlock::Create(*impl_->context, "entry", lambdaFunc);
     impl_->builder->SetInsertPoint(entry);
 
-    // 7. Push scope, create allocas for user params
     impl_->pushScope();
     size_t idx = 0;
     for (auto& arg : lambdaFunc->args()) {
@@ -303,7 +293,6 @@ void CodeGen::visit(LambdaExpr& node) {
     if (hasCaptures) {
         llvm::Value* envArg = &*(lambdaFunc->arg_end() - 1);
         envArg->setName("__env");
-        // Cast i8* env to the per-lambda env struct pointer
         llvm::Value* envTyped = impl_->builder->CreateBitCast(
             envArg, llvm::PointerType::getUnqual(*impl_->context), "__env.typed");
 
@@ -311,7 +300,6 @@ void CodeGen::visit(LambdaExpr& node) {
             auto& cap = captures[i];
             llvm::Type* fieldType = envStructType->getElementType((unsigned)(i + 1));
 
-            // GEP env, 0, i+1 -> ptr to capture field
             auto* fieldPtr = impl_->builder->CreateStructGEP(
                 envStructType, envTyped, (unsigned)(i + 1), cap.name + ".env.ptr");
             // Load the field at its native type - no bitcast/IntToPtr/ICmpNE round-trip
@@ -333,7 +321,6 @@ void CodeGen::visit(LambdaExpr& node) {
         }
     }
 
-    // 8. Generate body
     if (node.body) {
         node.body->accept(*this);
         llvm::Value* bodyVal = impl_->lastValue;
@@ -376,14 +363,12 @@ void CodeGen::visit(LambdaExpr& node) {
         }
     }
 
-    // 9. Pop scope and restore state
     impl_->popScope();
     impl_->scopes = std::move(savedScopes);
     impl_->cellPromotedLocals = std::move(savedCellPromoted);
     impl_->currentFunction = prevFunc;
     if (prevBlock) impl_->builder->SetInsertPoint(prevBlock);
 
-    // 10. Result
     if (hasCaptures) {
         // Emit the shared multi-op env GC hook, gc-track the env iff it captures
         // a cycle-capable object (scalar/str-only envs stay untracked - #1).
@@ -409,7 +394,6 @@ void CodeGen::visit(LambdaExpr& node) {
                                     envTrackable ? 1 : 0)},
             "closure.env");
 
-        // envVal is i8* - cast to the typed pointer for GEPs
         llvm::Value* envTyped = impl_->builder->CreateBitCast(
             envVal, llvm::PointerType::getUnqual(*impl_->context), "closure.env.typed");
 
@@ -420,8 +404,6 @@ void CodeGen::visit(LambdaExpr& node) {
             llvm::Type* fieldType = envStructType->getElementType((unsigned)(i + 1));
             llvm::Value* storeVal = cap.value;
 
-            // Reconcile loaded value type with field type; adjustment is needed
-            // only for int->float captures or a narrower literal.
             if (storeVal->getType() != fieldType) {
                 if (fieldType == impl_->f64Type && storeVal->getType() == impl_->i64Type)
                     storeVal = impl_->builder->CreateSIToFP(storeVal, fieldType);
@@ -463,7 +445,6 @@ void CodeGen::visit(LambdaExpr& node) {
             }
         }
 
-        // Create closure: dragon_closure_create(fn_ptr, env). Returns ptr.
         impl_->lastValue = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_closure_create"],
             {impl_->builder->CreateBitCast(lambdaFunc, impl_->i8PtrType), envVal},
@@ -718,14 +699,11 @@ bool CodeGen::Impl::functionReturnsClosure(FunctionDecl& node) {
     return everyReturnClosure(node.body, capDefs, sawReturn) && sawReturn;
 }
 
-// Emit a generator function (free fns and methods): builds the inner body fn,
-// then fills `wrapper` to build args struct + trampoline + decref fn and return
-// the gen object. `hasSelf` threads self as a leading heap arg the gen owns
-// (wrapper increfs, destroy decref drops); `userParamStart` skips self/cls.
+// Builds the inner generator body fn, then fills `wrapper` with args struct + trampoline + decref fn returning the gen object.
+// `hasSelf` threads self as a heap arg the gen owns (wrapper increfs, destroy decrefs); `userParamStart` skips self/cls.
 void CodeGen::emitGeneratorFn(FunctionDecl& node, llvm::Function* wrapper,
                               const std::string& siteName, bool hasSelf,
                               const std::string& selfClass, size_t userParamStart) {
-    // 1. Inner body function
     std::vector<llvm::Type*> bodyParamTypes;
     bodyParamTypes.push_back(impl_->i8PtrType);                 // gen
     if (hasSelf) bodyParamTypes.push_back(impl_->i8PtrType);    // self
@@ -793,8 +771,8 @@ void CodeGen::emitGeneratorFn(FunctionDecl& node, llvm::Function* wrapper,
     impl_->globalDeclaredVars = savedGlobalDecls;
     impl_->nonlocalDeclaredVars = savedNonlocalDecls;
 
-    // 2. Wrapper body: create + return the generator object. The wrapper's LLVM
-    // args ARE the captured args, in order: [self?, params...].
+    // Wrapper body creates + returns the generator object; its LLVM args ARE the
+    // captured args, in order: [self?, params...].
     impl_->builder->SetInsertPoint(
         llvm::BasicBlock::Create(*impl_->context, "entry", wrapper));
     unsigned nwrap = (unsigned)wrapper->arg_size();
@@ -946,7 +924,6 @@ void CodeGen::visit(FunctionDecl& node) {
     if (node.isAsync) {
         impl_->needsPthread = true;
 
-        // 1. Create the inner body function: foo__async_body(params) -> original_rettype
         std::vector<llvm::Type*> bodyParamTypes;
         for (auto& p : node.params) {
             bodyParamTypes.push_back(impl_->typeExprToLLVM(p.type.get()));
@@ -960,7 +937,6 @@ void CodeGen::visit(FunctionDecl& node) {
         auto* bodyFunc = llvm::Function::Create(
             bodyFuncType, llvm::Function::InternalLinkage, bodyName, impl_->module.get());
 
-        // Generate body function
         auto* prevFunc = impl_->currentFunction;
         auto* prevBlock = impl_->builder->GetInsertBlock();
 
@@ -1008,8 +984,8 @@ void CodeGen::visit(FunctionDecl& node) {
         impl_->globalDeclaredVars = savedGlobalDecls;
         impl_->nonlocalDeclaredVars = savedNonlocalDecls;
 
-        // 2. Generate wrapper: foo(params) -> ptr (spawns vthread via D030 typed
-        // spawn API). Wrapper forwards; the per-callsite trampoline unpacks+calls.
+        // D030: wrapper foo(params) -> ptr spawns a vthread via the typed spawn API;
+        // wrapper forwards, the per-callsite trampoline unpacks and calls.
         auto* wrapEntry = llvm::BasicBlock::Create(*impl_->context, "entry", func);
         impl_->builder->SetInsertPoint(wrapEntry);
 
@@ -1031,11 +1007,9 @@ void CodeGen::visit(FunctionDecl& node) {
         auto* argsStructType = impl_->makeSpawnArgsStructType(
             argTypes, "async.args." + node.name);
 
-        // Synthesize the per-callsite trampoline.
         auto* tramp = impl_->buildFireTrampoline(
             bodyFunc, argsStructType, paramKinds, node.name);
 
-        // Re-enter the wrapper to populate args and emit the spawn call.
         impl_->builder->SetInsertPoint(wrapEntry);
 
         std::vector<llvm::Value*> userArgs;
@@ -1179,7 +1153,6 @@ void CodeGen::visit(FunctionDecl& node) {
         auto paramKind = impl_->typeExprToKind(node.params[astIdx].type.get());
         impl_->setVar(paramName, alloca, paramKind);
         impl_->trackPtrParam(paramName, node.params[astIdx].type.get());
-        // Track union member kinds for union-typed params
         if (paramKind == Impl::VarKind::Union) {
             impl_->unionMemberKinds[paramName] =
                 impl_->typeExprToUnionMembers(node.params[astIdx].type.get());
@@ -1204,7 +1177,6 @@ void CodeGen::visit(FunctionDecl& node) {
         llvmIdx++;
     }
 
-    // Generate body
     for (auto& stmt : node.body) {
         stmt->accept(*this);
     }
@@ -1222,7 +1194,6 @@ void CodeGen::visit(FunctionDecl& node) {
 
     impl_->popScope();
 
-    // Restore enclosing scope stack, function, and insert point
     impl_->scopes = std::move(savedScopes);
     impl_->unionMemberKinds = std::move(savedUnionMembers);
     impl_->knownNonNeg = std::move(savedNonNeg);
@@ -1341,17 +1312,15 @@ void CodeGen::visit(TypeAliasStmt& node) {
     // Type aliases are compile-time only - no code generation needed
 }
 
-/// Emit a nested `def` (inside another fn's body). Lowers like a capturing lambda:
-/// mangled top-level fn (user params + optional trailing i8* env) + heap env; name
-/// binds to a bare fn ptr or closure; own name resolves via nestedFunctionAliases.
+/// Emits a nested `def` like a capturing lambda: mangled fn (params + optional trailing
+/// i8* env) plus heap env; binds to a bare fn ptr or closure via nestedFunctionAliases.
 void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
     bool hasCaptures = !node.capturedVars.empty();
 
-    // 1. Mangled LLVM name - unique per nested def (siblings can't collide).
+    // Mangled LLVM name: unique per nested def so sibling defs can't collide.
     std::string mangledName =
         "__dragon_nested_" + std::to_string(impl_->lambdaCounter++) + "__" + node.name;
 
-    // 2. Determine return type and user param types.
     llvm::Type* retType = impl_->typeExprToLLVM(node.returnType.get());
     if (!node.returnType) retType = impl_->unannotatedReturnType(node.body);
 
@@ -1361,7 +1330,6 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
         userParamTypes.push_back(impl_->typeExprToLLVM(p.type.get()));
     }
 
-    // 3. Full param types: user params + optional trailing i8* env.
     std::vector<llvm::Type*> paramTypes = userParamTypes;
     if (hasCaptures) paramTypes.push_back(impl_->i8PtrType);
 
@@ -1370,8 +1338,8 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
     auto* nestedFunc = llvm::Function::Create(
         funcType, llvm::Function::InternalLinkage, mangledName, impl_->module.get());
 
-    // 4. Gather capture info from enclosing scope BEFORE switching. D027.1:
-    // `nonlocal` captures travel as a cell ptr so mutations propagate (via cell_get/set).
+    // D027.1: gather capture info from the enclosing scope BEFORE switching context;
+    // `nonlocal` captures travel as a cell ptr so mutations propagate (cell_get/set).
     std::unordered_set<std::string> innerCellRelayed(
         node.mutatedCapturedVars.begin(), node.mutatedCapturedVars.end());
     struct CaptureInfo {
@@ -1410,8 +1378,8 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
         }
     }
 
-    // 5. Save enclosing context. Body metadata dies with the body (stale-type
-    // family); released before step 14 so the parent-scope binding survives.
+    // Save enclosing context; body metadata dies with the body (stale-type family),
+    // released before the name-bind at the end so the parent-scope binding survives.
     std::optional<Impl::VarMetaScope> bodyMeta(*impl_);
     auto* prevFunc = impl_->currentFunction;
     auto* prevBlock = impl_->builder->GetInsertBlock();
@@ -1435,13 +1403,11 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
         }
     }
 
-    // 6. Set up nested function context.
     impl_->currentFunction = nestedFunc;
     auto* entry = llvm::BasicBlock::Create(*impl_->context, "entry", nestedFunc);
     impl_->builder->SetInsertPoint(entry);
     impl_->pushScope();
 
-    // 7. Allocas for user params.
     size_t idx = 0;
     for (auto& arg : nestedFunc->args()) {
         if (idx >= node.params.size()) break;  // skip env param
@@ -1461,8 +1427,7 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
         idx++;
     }
 
-    // 8. Build the env struct type (mirrors LambdaExpr's layout: 24-byte
-    //  header + native-typed capture fields).
+    // Env struct mirrors LambdaExpr's layout: 24-byte header + native-typed capture fields.
     auto kindToCaptureLLVM = [&](Impl::VarKind k) -> llvm::Type* {
         switch (k) {
             case Impl::VarKind::Float: return impl_->f64Type;
@@ -1498,7 +1463,6 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
             *impl_->context, envFields, mangledName + ".env");
     }
 
-    // 9. Unpack captures from env at body entry.
     llvm::Value* envArgValue = nullptr;
     if (hasCaptures) {
         envArgValue = &*(nestedFunc->arg_end() - 1);
@@ -1528,8 +1492,8 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
         }
     }
 
-    // 10. Install the alias so `<funcname>(...)` inside the body resolves
-    //  to a direct LLVM call (with env auto-appended for capturing).
+    // Install the alias so `<funcname>(...)` inside the body resolves to a direct LLVM
+    // call, with env auto-appended for capturing defs.
     Impl::NestedAliasInfo savedAlias;
     bool hadPriorAlias = false;
     {
@@ -1545,7 +1509,6 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
         impl_->nestedFunctionAliases[node.name] = info;
     }
 
-    // 11. Emit body.
     for (auto& stmt : node.body) {
         stmt->accept(*this);
     }
@@ -1558,15 +1521,14 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
         }
     }
 
-    // 12. Restore prior alias state for `node.name`. Sibling defs and the
-    //  enclosing scope use the local-variable closure binding instead.
+    // Restore prior alias state for `node.name`; siblings and the enclosing scope use
+    // the local-variable closure binding instead.
     if (hadPriorAlias) {
         impl_->nestedFunctionAliases[node.name] = savedAlias;
     } else {
         impl_->nestedFunctionAliases.erase(node.name);
     }
 
-    // 13. Restore enclosing context.
     impl_->popScope();
     impl_->scopes = std::move(savedScopes);
     impl_->globalDeclaredVars = std::move(savedGlobalDecls);
@@ -1576,8 +1538,8 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
     if (prevBlock) impl_->builder->SetInsertPoint(prevBlock);
     bodyMeta.reset();
 
-    // 14. Bind the name in the enclosing scope: bare fn pointer for non-capturing
-    // defs, a freshly allocated closure object for capturing ones.
+    // Bind the name in the enclosing scope: a bare fn pointer for non-capturing defs,
+    // a freshly allocated closure object for capturing ones.
     llvm::Value* boundValue = nullptr;
     Impl::VarKind boundKind = Impl::VarKind::Other;
     bool isClosure = false;
@@ -1662,7 +1624,7 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
         isClosure = true;
     }
 
-    // 15. Allocate a local in the enclosing scope, store the bound value.
+    // Allocate a local in the enclosing scope, store the bound value;
     // callableTypes[name] gives the user-visible signature for right-ABI dispatch.
     auto* localAlloca = impl_->createEntryAlloca(
         prevFunc, node.name, impl_->i8PtrType);

@@ -21,30 +21,20 @@ struct EnforcerOptions {
     bool requireFunctionParamTypes = true;
     bool requireReturnTypes = true;
     bool requireModuleVarTypes = true;
-    /// When true, uses "Borders must be secured" message for imported modules
-    bool isImportedModule = false;
+    bool isImportedModule = false;  // true: use "Borders must be secured" message
     std::string importingFile;
 };
 
-/// Enforces PEP-484 type annotations on .py files compiled by Dragon.
-///
-/// This is a separate pass from TypeChecker. TypeChecker validates type
-/// correctness (are the types compatible?). TypeHintEnforcer validates
-/// type annotation presence (did the programmer write type hints?).
-///
-/// Only used for .py files - .dr files have types enforced by the Parser.
+/// Enforces PEP-484 annotation presence on .py files (TypeChecker checks
+/// correctness separately). .dr files are exempt; the Parser enforces types there.
 class TypeHintEnforcer {
 public:
     explicit TypeHintEnforcer(EnforcerOptions options = {});
 
-    /// Walk the module AST and check that all declarations have type annotations.
-    /// Returns true if no errors were found.
+    /// Checks that every declaration has a type annotation; false on any miss.
     bool enforce(Module& module);
 
-    /// Get diagnostics produced during enforcement
     const std::vector<EnforcerDiagnostic>& diagnostics() const { return diagnostics_; }
-
-    /// Whether any errors were found
     bool hasErrors() const;
 
 private:

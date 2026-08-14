@@ -1,6 +1,5 @@
-/// Dragon TypeChecker - expression visitors (calls, attributes, subscripts, literals-composite, comprehensions, lambdas)
-/// Split from TypeChecker.cpp (file-size policy): same class, same behavior -
-/// pure code motion, no logic changes.
+/// Dragon TypeChecker - expression visitors (calls, attributes, subscripts, literals-composite, comprehensions, lambdas).
+/// Split from TypeChecker.cpp (file-size policy): same class, same behavior, pure code motion.
 // FIXME: isinstance() on generic type params still wrong for nested unions
 #include "dragon/TypeChecker.h"
 #include "dragon/Privacy.h"
@@ -15,16 +14,21 @@
 
 namespace dragon {
 
+static bool aggregateElemSupported(const std::string& fn, Type::Kind ek) {
+    bool numeric = ek == Type::Kind::Int || ek == Type::Kind::Float ||
+                   ek == Type::Kind::Bool || ek == Type::Kind::Any ||
+                   ek == Type::Kind::Unknown;
+    return numeric || (fn != "sum" && ek == Type::Kind::Str);
+}
+
 void TypeChecker::visit(CallExpr& node) {
     // D044 - consume the binding's expected-type hint (set by AnnAssign/Assign)
-    // immediately, so it applies to THIS call's generic construction inference
-    // and never leaks into a nested call's arguments.
+    // immediately, so it applies to this call's generic inference and never leaks into a nested call's arguments.
     auto expectedType = impl_->currentExpectedType;
     impl_->currentExpectedType = nullptr;
 
-    // Visit arguments first - generic-function inference needs their types, and
-    // it must run before the callee is resolved as a value (an explicit
-    // `first[int]` callee is a SubscriptExpr that is NOT a real value subscript).
+    // Visit arguments first: generic-function inference needs their types, and it
+    // must run before the callee resolves (an explicit `first[int]` callee is a SubscriptExpr, not a real value subscript).
     for (auto& arg : node.args) {
         inferType(arg.get());
     }
@@ -32,11 +36,8 @@ void TypeChecker::visit(CallExpr& node) {
         inferType(arg.get());
     }
 
-    // D044 - generic free-function call (`first(xs)` inferred / `first[int](xs)`
-    // explicit) and generic class construction (`Box[int](5)` explicit /
-    // `b: Box[int] = Box(5)` inferred). On success each records the
-    // instantiation, retargets the callee to the stamped name, sets the result
-    // type, and the normal callee/arity validation below is bypassed.
+    // D044 - generic free-function call / generic class construction (explicit or
+    // inferred). On success this records the instantiation, retargets the callee to the stamped name, and bypasses the normal validation below.
     {
         std::vector<std::shared_ptr<Type>> argTypes;
         for (auto& a : node.args) {
@@ -49,13 +50,8 @@ void TypeChecker::visit(CallExpr& node) {
         if (tryInstantiateGenericConstruction(node, expectedType)) return;
     }
 
-    // D044 - `T(...)` constructs a value of a type parameter: in a generic
-    // template body T is a TypeVarType, so the call's type IS T (the stamp's
-    // concrete re-check validates the real constructor / conversion). Without
-    // this the call typed as <unknown>; a declared `v: T = T(...)` or
-    // `out.append(T(...))` masked it through leniency, but `[T(...) for r in xs]`
-    // surfaced it as `list[<unknown>]` vs the declared `list[T]`. Fixing it here
-    // makes type-parameter construction type-correct everywhere it appears.
+    // D044 - `T(...)` constructs a value of type param T: in a generic template
+    // body T is a TypeVarType, so the call's type IS T (the stamp's re-check validates the real ctor). Without this it typed <unknown> and leaked through some call sites.
     if (auto* tpCallee = dynamic_cast<NameExpr*>(node.callee.get())) {
         if (auto tv = lookupTypeParam(tpCallee->name)) {
             node.type = tv;
@@ -63,24 +59,15 @@ void TypeChecker::visit(CallExpr& node) {
         }
     }
 
-    // Mark the callee window so visit(AttributeExpr) can tell a genuine call
-    // `obj.method(...)` from a bare `obj.method` read (which must be rejected:
-    // a method is not a value). Save/restore, so a CallExpr nested inside an
-    // ARGUMENT of this call doesn't leak its own window outward.
+    // Mark the callee window so visit(AttributeExpr) can tell a genuine call from
+    // a bare method read (rejected: a method isn't a value); save/restore so a nested CallExpr argument doesn't leak its own window.
     const Expr* savedMethodOk = impl_->methodRefOkExpr;
     impl_->methodRefOkExpr = node.callee.get();
     auto calleeType = inferType(node.callee.get());
     impl_->methodRefOkExpr = savedMethodOk;
 
-    // ADR 010 method-overload resolution. When the callee is `obj.method` (or
-    // `Class.method`) and the receiver's class declares >1 method with that name,
-    // pick the overload whose parameters match this call's argument types - arity
-    // first, then assignability, preferring an exact-type match. The chosen index
-    // is recorded on the node; CodeGen appends `__ovN` to the symbol so the
-    // emitted call is a DIRECT call to one monomorphic function (no runtime
-    // dispatch). Single-definition names never enter methodOverloads, so the
-    // common path is untouched. Spreads/kwargs with an overloaded method are a
-    // clean error rather than a silent wrong pick.
+    // ADR 010 method-overload resolution: pick the overload matching this call's
+    // arg types (arity then assignability, preferring exact); the chosen index gets CodeGen's `__ovN` suffix for a direct monomorphic call, no runtime dispatch.
     if (auto* attr = dynamic_cast<AttributeExpr*>(node.callee.get())) {
         std::shared_ptr<Type> objType = attr->object ? attr->object->type : nullptr;
         const ClassType* cls = nullptr;
@@ -92,11 +79,8 @@ void TypeChecker::visit(CallExpr& node) {
         for (const ClassType* oc = cls; oc; ) {
             auto it = oc->methodOverloads.find(attr->attribute);
             if (it != oc->methodOverloads.end()) { cands = &it->second; break; }
-            // A class that declares the name as a SINGLE method shadows any
-            // ancestor's same-name overload set (standard override semantics):
-            // stop here so the single-method path handles it - do NOT reach past
-            // it to inherit the ancestor's overloads. Inherited overload sets
-            // still resolve when no descendant declares the name at all.
+            // A class declaring the name as a SINGLE method shadows an ancestor's
+            // overload set (standard override semantics); stop here rather than inheriting the ancestor's overloads.
             if (oc->methods.count(attr->attribute)) break;
             oc = (oc->parentClass && oc->parentClass->kind() == Type::Kind::Class)
                      ? static_cast<const ClassType*>(oc->parentClass.get()) : nullptr;
@@ -112,9 +96,8 @@ void TypeChecker::visit(CallExpr& node) {
                 node.type = impl_->anyType;
                 return;
             }
-            // (matches, exact) for one arg against one parameter type. Any/Unknown
-            // on either side is lenient (matches, not exact) so inference gaps
-            // don't spuriously fail or bias resolution.
+            // (matches, exact) for one arg against one param type; Any/Unknown on either
+            // side is lenient (matches, not exact) so inference gaps don't spuriously fail or bias resolution.
             auto argMatch = [&](const std::shared_ptr<Type>& at,
                                 const std::shared_ptr<Type>& pt,
                                 bool& exact) -> bool {
@@ -159,15 +142,8 @@ void TypeChecker::visit(CallExpr& node) {
             }
             node.resolvedMethodOverload = chosen;
             auto& chosenFt = static_cast<FunctionType&>(*(*cands)[chosen]);
-            // The chosen overload's parameter types are this call's expected
-            // types: bless fresh container-literal arguments against them,
-            // exactly like the single-callee path does below (empty literals
-            // adopt the param's representation; non-empty ones force the box
-            // representation for Any/union element types, recursively).
-            // Without this, an inline dict/list literal passed to an
-            // OVERLOADED method kept its monomorphized guess - a nested
-            // `["a", "b"]` inside a dict[str, Any] argument compiled as
-            // list[str] and the callee walked the wrong stride reading it.
+            // Bless fresh container-literal arguments against the chosen overload's param
+            // types, like the single-callee path below; without this a nested literal kept its monomorphized guess and the callee walked the wrong stride.
             for (size_t ai = 0; ai < node.args.size(); ++ai) {
                 const auto& pt = chosenFt.paramTypes[ai];
                 const auto& at = node.args[ai]->type;
@@ -194,14 +170,8 @@ void TypeChecker::visit(CallExpr& node) {
         }
     }
 
-    // C9-B: general call-site spread (`*tuple` / `*list` / `**dict`). C9-A
-    // rejected every non-TypedDict spread here; codegen now lowers the general
-    // forms (decisions/047). This block ALLOWS the implemented shapes and emits
-    // compile-time arity / element-type diagnostics where it can prove a
-    // mismatch, while still rejecting genuinely unsupported shapes (a positional
-    // argument after `*`, which Python makes keyword-only). The block is
-    // self-contained - it sets node.type and returns so the exact-arity
-    // validators below (which assume a 1:1 arg<->param mapping) never see spread.
+    // C9-B: general call-site spread (`*tuple`/`*list`/`**dict`, decisions/047).
+    // Allows implemented shapes with compile-time diagnostics where provable; self-contained, sets node.type and returns so the exact-arity checks below never see a spread.
     {
         int firstStar = -1, posAfterStar = -1;
         for (size_t i = 0; i < node.args.size(); ++i) {
@@ -236,10 +206,8 @@ void TypeChecker::visit(CallExpr& node) {
                 return;
             }
 
-            // Resolve the callee's parameter signature (free function / method
-            // FunctionType, or a single ctor's __init__ - all exclude `self`).
-            // Overloaded ctors and metadata-less signatures (builtins / Callable
-            // annotations) skip the detailed compatibility checks below.
+            // Resolve the callee's param signature (function/method FunctionType, or a
+            // single ctor's __init__, all excluding self); overloaded ctors and metadata-less signatures skip the checks below.
             std::vector<std::shared_ptr<Type>> paramTypes;
             size_t requiredParams = 0;
             bool targetVarArg = false, haveMeta = false;
@@ -273,11 +241,8 @@ void TypeChecker::visit(CallExpr& node) {
                 return;
             }
 
-            // `**dict` spread source checks: it binds parameters by NAME, so
-            // the source must be a str-keyed dict; and when the target
-            // declares `**kwargs: T`, the source's value type must be
-            // assignable to T (the callee reads entries at T's native type -
-            // a mismatched value would be reinterpreted, not converted).
+            // `**dict` spread binds by NAME, so the source must be str-keyed; when the
+            // target declares `**kwargs: T`, the value type must assign to T (else a value is reinterpreted, not converted).
             if (hasKwSpread) {
                 std::shared_ptr<Type> kwElemType;
                 if (calleeType->kind() == Type::Kind::Function) {
@@ -325,11 +290,8 @@ void TypeChecker::visit(CallExpr& node) {
             // Forwarding into a `*args`/`**kwargs` target, or a signature with
             // no metadata: skip compatibility checks (codegen packs/handles it).
             if (haveMeta && !targetVarArg) {
-                // Conservative compatibility (mirrors the exact-arity arg check
-                // below): only fire on a PROVABLE scalar mismatch. Skip
-                // Any/Unknown/Union/None and same-kind containers (Dragon
-                // containers are invariant, but a fresh covariant element is
-                // idiomatic - distinguishing isn't worth a false positive).
+                // Conservative compatibility (mirrors the exact-arity check below): only
+                // fires on a provable scalar mismatch; skips Any/Unknown/Union/None and same-kind containers (a false positive isn't worth distinguishing).
                 auto assignable = [&](const std::shared_ptr<Type>& at,
                                       const std::shared_ptr<Type>& pt) -> bool {
                     if (!at || !pt) return true;
@@ -354,10 +316,8 @@ void TypeChecker::visit(CallExpr& node) {
                         static_cast<StarredExpr&>(*node.args[firstStar]);
                     auto st = starExpr.value ? starExpr.value->type : nullptr;
                     if (st && st->kind() == Type::Kind::Tuple) {
-                        // *tuple: static arity + per-element type checks. With
-                        // no `**` the positional count is exact, so an over- or
-                        // under-fill is a compile-time error (the cost model's
-                        // guarantee).
+                        // *tuple: static arity + per-element type checks. With no `**` the
+                        // positional count is exact, so an over/under-fill is a compile-time error.
                         auto& tt = static_cast<TupleType&>(*st);
                         size_t L = tt.elementTypes.size();
                         size_t totalPos = explicitPos + L;
@@ -416,16 +376,8 @@ void TypeChecker::visit(CallExpr& node) {
         }
     }
 
-    // M1/M2: arity + keyword-argument validation against the param metadata
-    // fillFuncMeta records for user functions/methods/ctors. Returns true (and
-    // emits a located diagnostic) on a wrong-arity / unknown-kwarg / duplicate-
-    // arg call. Skips entirely when the FunctionType has no metadata (builtins,
-    // Callable annotations). For a variadic callee the OPEN-ended checks (too
-    // many positionals, unknown keyword) are skipped - `*args`/`**kwargs` absorb
-    // the surplus - but the required params BEFORE `*args` are still checked, so
-    // `def f(a, b, *xs)` called as `f(1)` is a clean error instead of an LLVM
-    // "Operand is null" codegen crash. (Spread calls never reach here - the
-    // C9-B block above returns early for any `*`/`**` arg.)
+    // M1/M2: arity + kwarg validation against fillFuncMeta's metadata (skipped
+    // for builtins/Callables). A variadic callee skips the open-ended checks but still requires its pre-`*args` params, so `f(a,b,*xs)` called as `f(1)` errors cleanly instead of an LLVM crash.
     auto validateCall = [&](FunctionType& ft, const std::string& dispName) -> bool {
         if (!ft.hasArgMeta) return false;
         size_t nParams = ft.paramNames.size();
@@ -438,10 +390,8 @@ void TypeChecker::visit(CallExpr& node) {
                   std::to_string(node.args.size()) + " were given");
             err = true;
         }
-        // docs/002 2.8: a move has a declaration end and a call-site end, and
-        // BOTH must say own. E13: a NAMED argument to an own parameter needs
-        // the visible move (fresh temps are exempt - no binding to poison).
-        // E14: own at a borrowing parameter has no meaning.
+        // docs/002 2.8: a move needs own at BOTH the declaration and the call site.
+        // E13: a named arg to an own param needs the visible move (fresh temps exempt); E14: own at a borrowing param has no meaning.
         for (size_t i = 0; i < node.args.size() && i < ft.paramOwns.size(); ++i) {
             auto* nm = dynamic_cast<NameExpr*>(node.args[i].get());
             bool argMoved = nm && nm->isMoveMarked;
@@ -462,9 +412,8 @@ void TypeChecker::visit(CallExpr& node) {
             if (kw.first.empty()) continue;  // ** spread - C9 handles
             auto it = std::find(ft.paramNames.begin(), ft.paramNames.end(), kw.first);
             if (it == ft.paramNames.end()) {
-                // Unknown keyword: an error unless the callee has `**kwargs` to
-                // absorb it. A `*args`-only callee (hasVarArg && !hasKwArg) still
-                // rejects names that match no declared parameter.
+                // Unknown keyword: an error unless the callee has `**kwargs` to absorb it; a
+                // `*args`-only callee still rejects names matching no declared param.
                 if (!ft.hasKwArg) {
                     error(node.location(),
                           dispName + " got an unexpected keyword argument '" + kw.first + "'");
@@ -492,15 +441,8 @@ void TypeChecker::visit(CallExpr& node) {
         return err;
     };
 
-    // Conservative positional argument type check + fresh-literal blessing,
-    // shared by plain function/method calls AND single-ctor class calls (the
-    // caller gates on no kwargs + exact arity). Any/Unknown on either side is
-    // skipped (can't prove a violation). This catches the silent miscompile
-    // `def sq(n: int)...; sq("x")` and the str-vs-template[SQL] mismatch, and
-    // blesses container literals against the param's representation. Ctor
-    // calls must run it too: an inline `[11, 22]` passed to a `list[Any]`
-    // ctor param otherwise compiles monomorphized and the callee walks the
-    // wrong stride (`xs[0]` reads a box that was never there).
+    // Conservative positional arg type check + fresh-literal blessing (shared by
+    // calls and single-ctor construction). Catches `sq(n: int); sq("x")` and blesses container literals against the param's representation, including ctor args.
     auto checkPositionalArgs = [&](FunctionType& ft) {
         auto isContainer = [](Type::Kind k) {
             return k == Type::Kind::List || k == Type::Kind::Dict ||
@@ -515,15 +457,8 @@ void TypeChecker::visit(CallExpr& node) {
                 pk == Type::Kind::Unknown)
                 continue;
             if (pk == Type::Kind::Any) {
-                // A container literal ENTERING A BOXED-ELEMENT CONTAINER
-                // (append/remove on a list[Any] receiver - the Any param is
-                // the receiver's element type) is born in the box
-                // representation: it will only ever be read back through
-                // Any. A literal passed to a PLAIN Any param keeps its
-                // concrete monomorphized type (commandment #3) - the box
-                // boundary carries native lists safely (dynamic ops
-                // header-dispatch; builtins like bytes() read natively;
-                // unboxing to list[Any] raises a teaching TypeError).
+                // A literal entering a boxed-element container (e.g. append on a list[Any]
+                // receiver) is born boxed since it's only ever read through Any; a literal to a PLAIN Any param keeps its native type (commandment #3).
                 if (auto* att = dynamic_cast<AttributeExpr*>(node.callee.get())) {
                     bool recvIsBoxList = false;
                     if (att->object && att->object->type) {
@@ -540,25 +475,16 @@ void TypeChecker::visit(CallExpr& node) {
                 }
                 continue;
             }
-            // None is the null pointer - admissible for any ptr-shaped
-            // param (nullable pattern); a Union arg may still need
-            // narrowing the checker can't see. Both are skipped.
+            // None is admissible for any ptr-shaped param (nullable pattern); a Union arg
+            // may need narrowing the checker can't see - both are skipped.
             if (ak == Type::Kind::None_ || ak == Type::Kind::Union ||
                 pk == Type::Kind::Union)
                 continue;
-            // Dragon containers are INVARIANT, but a fresh literal arg of a
-            // covariant element type (`main([SubTest()])` -> list[TestCase])
-            // is sound and idiomatic: bless it via tryExpectedTypeLiteral,
-            // which also forces the box representation for an Any element
-            // type. For NON-literal same-kind container args, defer as
-            // before - EXCEPT when the element layouts differ (list[T] vs
-            // list[Any]/list[union]): passing a monomorphized list as a
-            // box-element list walks the wrong stride inside the callee,
-            // so that specific aliasing is rejected here.
+            // Dragon containers are invariant, but a fresh literal of a covariant element
+            // type is sound (bless via tryExpectedTypeLiteral); a non-literal same-kind arg defers, except when element layouts differ (list[T] vs list[Any]), which is rejected.
             if (isContainer(ak) && ak == pk) {
-                // An EMPTY container literal adopts the param type - the
-                // same contextual typing `x: list[T] = []` gets - so
-                // `f([])` builds the param's representation.
+                // An empty container literal adopts the param type (same contextual typing
+                // as `x: list[T] = []`), so `f([])` builds the param's representation.
                 if (auto* le = dynamic_cast<ListExpr*>(node.args[i].get())) {
                     if (le->elements.empty()) {
                         propagateAnnotationToEmptyLiteral(
@@ -600,9 +526,8 @@ void TypeChecker::visit(CallExpr& node) {
                 continue;
             }
             if (!at->isSubtypeOf(*pt)) {
-                // ADR 054 teaching error: a structurally-matching class that
-                // never DECLARED conformance is rejected with both remedies
-                // spelled out (consumer cast, producer promise).
+                // ADR 054 teaching error: a structurally-matching class that never declared
+                // conformance is rejected with both remedies spelled out (cast, or promise).
                 if (pt->kind() == Type::Kind::Contract &&
                     at->kind() == Type::Kind::Instance) {
                     auto& ct = static_cast<ContractType&>(*pt);
@@ -656,12 +581,8 @@ void TypeChecker::visit(CallExpr& node) {
 
     if (calleeType->kind() == Type::Kind::Function) {
         auto& ft = static_cast<FunctionType&>(*calleeType);
-        // len() of a function value: the argv[1]-class mistake one step
-        // earlier (`len(argv)` instead of `len(argv())`). The builtin's Any
-        // parameter skips the positional subtype check below, so without this
-        // it typed int and miscompiled into a garbage length. Gated on the
-        // builtin signature ([Any] -> int) so a user-defined `len` with a
-        // concrete parameter still resolves through the normal checks.
+        // len() of a function value (`len(argv)` instead of `len(argv())`): the Any
+        // param skips the subtype check, so without this it typed int with a garbage length. Gated on the builtin signature so a user-defined `len` is unaffected.
         if (auto* lcn = dynamic_cast<NameExpr*>(node.callee.get())) {
             if (lcn->name == "len" && node.args.size() == 1 &&
                 ft.paramTypes.size() == 1 && ft.paramTypes[0] &&
@@ -678,9 +599,8 @@ void TypeChecker::visit(CallExpr& node) {
                 return;
             }
         }
-        // M1/M2: validate arity + kwargs for a function (NameExpr) or method
-        // (AttributeExpr) call before the type check below (which assumes exact
-        // arity). On error, stop here with the declared return type.
+        // M1/M2: validate arity + kwargs before the type check below (which assumes
+        // exact arity); on error, stop here with the declared return type.
         {
             std::string dispName;
             bool isBareName = false;
@@ -690,37 +610,23 @@ void TypeChecker::visit(CallExpr& node) {
             } else if (auto* ae = dynamic_cast<AttributeExpr*>(node.callee.get())) {
                 dispName = "method '" + ae->attribute + "'";
             }
-            // Skip a bare-name call that resolved to a METHOD signature: it's a
-            // name-resolution artifact (e.g. socket.dr's method `close()`
-            // shadowing the module extern `close(fd)` in class scope), not a
-            // real call to the method. Genuine `obj.method()` (AttributeExpr)
-            // calls are still validated.
+            // Skip a bare-name call resolved to a METHOD signature (a name-resolution
+            // artifact, e.g. a method shadowing a module extern), not a real method call; genuine `obj.method()` calls are still validated.
             if (!dispName.empty() && !(isBareName && ft.isMethod) &&
                 validateCall(ft, dispName)) {
                 node.type = ft.returnType;
                 return;
             }
         }
-        // Conservative positional argument type check. FunctionType carries no
-        // default/vararg metadata, so we only check a plain function reference
-        // (NameExpr callee) or a method call (AttributeExpr callee) invoked
-        // with no kwargs and EXACT arity; a defaulted or variadic call has a
-        // mismatched count and is skipped. Any/Unknown on either side is also
-        // skipped (can't prove a violation). This catches the silent miscompile
-        // `def sq(n: int)...; sq("x")` AND `db.query(some_str)` where query wants
-        // a template[SQL] (unchecked, the str->SQL mismatch reaches codegen
-        // and segfaults) without misfiring on valid subtype passes
-        // (InstanceType::isSubtypeOf walks the class hierarchy; int<:float etc.).
-        // Method FunctionTypes exclude `self`, so paramTypes.size() == arg count.
+        // Conservative positional check: only a plain function/method call with no
+        // kwargs and exact arity (FunctionType carries no default/vararg metadata); catches `sq("x")` and the str-vs-template[SQL] mismatch without misfiring on valid subtypes.
         if ((dynamic_cast<NameExpr*>(node.callee.get()) ||
              dynamic_cast<AttributeExpr*>(node.callee.get())) &&
             node.kwArgs.empty() && node.args.size() == ft.paramTypes.size()) {
             checkPositionalArgs(ft);
         }
-        // sorted()/reversed() are declared returning `any`, but they preserve
-        // the iterable's element type. Propagate it here (this block runs
-        // before the name-based builtin table) so `list(sorted(xs))` stays
-        // list[T] and assigns to a typed binding instead of collapsing to Any.
+        // sorted()/reversed() are declared returning `any` but preserve the
+        // iterable's element type; propagate it here (before the builtin table) so `list(sorted(xs))` stays list[T].
         if (auto* cn = dynamic_cast<NameExpr*>(node.callee.get())) {
             if ((cn->name == "sorted" || cn->name == "reversed") &&
                 node.args.size() == 1 && node.args[0]->type &&
@@ -729,10 +635,24 @@ void TypeChecker::visit(CallExpr& node) {
                     static_cast<ListType&>(*node.args[0]->type).elementType);
                 return;
             }
-            // map(f, xs) -> list[f.returnType]. Codegen lowers it by desugaring
-            // to a list comprehension [f(x) for x in xs]; the result element
-            // type is the callable's return type (fall back to Any for a
-            // Callable-typed arg whose return type isn't statically known).
+            // min()/max() are declared returning `any` but yield the element
+            // type; unorderable element types are a compile error here.
+            if ((cn->name == "min" || cn->name == "max") &&
+                node.args.size() == 1 && node.args[0]->type &&
+                node.args[0]->type->kind() == Type::Kind::List) {
+                auto elem = static_cast<ListType&>(*node.args[0]->type).elementType;
+                if (elem) {
+                    if (!aggregateElemSupported(cn->name, elem->kind())) {
+                        error(node.location(),
+                              cn->name + "() is not supported for list[" +
+                              elem->toString() + "] elements");
+                    }
+                    node.type = elem;
+                    return;
+                }
+            }
+            // map(f, xs) -> list[f.returnType] (codegen desugars to a list comp); falls
+            // back to Any when the callable's return type isn't statically known.
             if (cn->name == "map" && node.args.size() == 2) {
                 std::shared_ptr<Type> elem = impl_->anyType;
                 if (node.args[0]->type &&
@@ -743,10 +663,8 @@ void TypeChecker::visit(CallExpr& node) {
                 node.type = std::make_shared<ListType>(elem);
                 return;
             }
-            // filter(f, xs) -> list[T] where T is xs's element type (filter
-            // never transforms the elements). Codegen desugars to a list comp
-            // with a condition. Without this the declared `any` return collapsed
-            // `list(filter(...))` to list[Any] and rejected a list[int] binding.
+            // filter(f, xs) -> list[T] (filter never transforms elements; codegen
+            // desugars to a conditioned list comp). Without this, `list(filter(...))` collapsed to list[Any].
             if (cn->name == "filter" && node.args.size() == 2 &&
                 node.args[1]->type &&
                 node.args[1]->type->kind() == Type::Kind::List) {
@@ -761,22 +679,16 @@ void TypeChecker::visit(CallExpr& node) {
 
     if (calleeType->kind() == Type::Kind::Class) {
         auto& ct = static_cast<ClassType&>(*calleeType);
-        // M2: constructor arity check - only when the class has a single ctor
-        // (an overloaded ctor set isn't representable in `methods`, which holds
-        // one __init__ signature; checking it would false-positive on a call
-        // matching a different overload). Skips kwargs spread (C9 handled above).
+        // M2: constructor arity check, only for a single-ctor class (`methods` holds
+        // one __init__ signature; an overloaded ctor set would false-positive). Skips kwargs spread (handled above).
         if (ct.constructorCount <= 1) {
             auto initIt = ct.methods.find("__init__");
             if (initIt != ct.methods.end() && initIt->second &&
                 initIt->second->kind() == Type::Kind::Function) {
                 auto& ift = static_cast<FunctionType&>(*initIt->second);
                 validateCall(ift, "class '" + ct.name + "' constructor");
-                // Positional type check + literal blessing for ctor args,
-                // same gates as the function/method path: no kwargs, exact
-                // arity. Without this a ctor call skips both entirely -
-                // `Cls([11, 22])` against `xs: list[Any]` compiles the
-                // literal monomorphized and every element read in the ctor
-                // walks the wrong stride.
+                // Positional type check + literal blessing for ctor args (same gates as the
+                // function/method path); without it, `Cls([11, 22])` against `xs: list[Any]` compiles monomorphized and reads the wrong stride.
                 if (node.kwArgs.empty() &&
                     node.args.size() == ift.paramTypes.size())
                     checkPositionalArgs(ift);
@@ -787,14 +699,8 @@ void TypeChecker::visit(CallExpr& node) {
         return;
     }
 
-    // Calling an instance value: `obj()` dispatches to the class's `__call__`
-    // dunder (Python parity; the reactive `Signal()` read uses this). The
-    // result type is `__call__`'s return type - already concrete for a generic
-    // instance, since instantiateGenericClass substitutes the class's type
-    // args into every method signature. Walk the inheritance chain so an
-    // inherited `__call__` resolves. Without this the call typed Unknown, and a
-    // chained `obj()[k]` / `obj().field` lost the element/field type and
-    // miscompiled (str-index fallback / silent 0).
+    // `obj()` dispatches to the class's `__call__` dunder (Python parity); walk
+    // the inheritance chain so an inherited one resolves. Without this the call typed Unknown and a chained `obj()[k]` miscompiled.
     if (calleeType->kind() == Type::Kind::Instance) {
         auto& inst = static_cast<InstanceType&>(*calleeType);
         for (const ClassType* cls = inst.classType.get(); cls; ) {
@@ -826,9 +732,8 @@ void TypeChecker::visit(CallExpr& node) {
             node.type = impl_->intType;
             return;
         }
-        // abs follows its argument's numeric type: abs(int)->int,
-        // abs(float)->float (Python parity). A fixed int type would print a
-        // float result through the int path.
+        // abs follows its arg's numeric type (Python parity: abs(int)->int,
+        // abs(float)->float); a fixed int type would print a float result wrong.
         if (n == "abs") {
             if (!node.args.empty() && node.args[0]->type &&
                 node.args[0]->type->kind() == Type::Kind::Float) {
@@ -850,10 +755,8 @@ void TypeChecker::visit(CallExpr& node) {
             node.type = impl_->boolType;
             return;
         }
-        // Builtins returning list
-        // list()/sorted()/reversed()/filter() preserve the iterable's element
-        // type so the result assigns to a typed binding (`list[int] = list(...)`)
-        // instead of being stuck at list[Any].
+        // list()/sorted()/reversed() preserve the iterable's element type so the
+        // result assigns to a typed binding, instead of collapsing to list[Any].
         if (n == "list" || n == "sorted" || n == "reversed") {
             std::shared_ptr<Type> elem = impl_->anyType;
             if (!node.args.empty() && node.args[0]->type &&
@@ -868,9 +771,8 @@ void TypeChecker::visit(CallExpr& node) {
             node.type = std::make_shared<ListType>(impl_->anyType);
             return;
         }
-        // divmod(a, b) -> (quotient, remainder) tuple (Python parity). Must be
-        // a TupleType, not list[any], or `print` uses list repr on the tuple
-        // pointer and emits garbage.
+        // divmod(a, b) -> (quotient, remainder) tuple (Python parity); must be a
+        // TupleType, not list[any], or `print` emits garbage via list repr.
         if (n == "divmod") {
             node.type = std::make_shared<TupleType>(
                 std::vector<std::shared_ptr<Type>>{impl_->intType, impl_->intType});
@@ -880,7 +782,13 @@ void TypeChecker::visit(CallExpr& node) {
         if (n == "min" || n == "max" || n == "sum") {
             if (!node.args.empty() && node.args[0]->type) {
                 if (node.args[0]->type->kind() == Type::Kind::List) {
-                    node.type = static_cast<ListType&>(*node.args[0]->type).elementType;
+                    auto elem = static_cast<ListType&>(*node.args[0]->type).elementType;
+                    if (elem && !aggregateElemSupported(n, elem->kind())) {
+                        error(node.location(),
+                              n + "() is not supported for list[" + elem->toString() +
+                              "] elements");
+                    }
+                    node.type = elem;
                 } else {
                     node.type = node.args[0]->type;
                 }
@@ -919,14 +827,8 @@ void TypeChecker::visit(CallExpr& node) {
 
 void TypeChecker::visit(AttributeExpr& node) {
     resolveAttributeExpr(node);
-    // Builtin receivers (str, bytes, int, float, bool, list, dict, set,
-    // tuple, Task, Lock) expose ONLY methods, never fields, so a Function-
-    // typed result outside the callee/__doc__ window is a bare method read:
-    // `s.upper` / `t.join` without parens. Same rule as the user-class
-    // branches (which check at their resolution sites, since a user FIELD may
-    // legitimately hold a Callable value): a method is not a value - codegen
-    // printed 0 for one, and a Callable binding broke LLVM verification.
-    // Module receivers stay exempt: `mod.fn` is a real function-pointer value.
+    // Builtin receivers expose ONLY methods, never fields, so a Function-typed
+    // result outside the callee/__doc__ window is a bare method read (codegen printed 0 for one; module receivers stay exempt since `mod.fn` is a real value).
     if (!node.type || node.type->kind() != Type::Kind::Function) return;
     if (impl_->methodRefOkExpr == &node) return;
     auto objT = node.object ? node.object->type : nullptr;
@@ -947,11 +849,8 @@ void TypeChecker::visit(AttributeExpr& node) {
     }
 }
 
-// ADR 054 - consumer conformance assertion. Upward only, compile-time only:
-// the operand's STATIC class must satisfy every named contract structurally,
-// and on success the cast costs nothing at runtime (same pointer). The proof
-// is stamped onto the class's ClassDecl so CodeGen's coloring pre-pass knows
-// whose vtables carry the contract slots.
+// ADR 054 - consumer conformance assertion, upward only and compile-time only
+// (the cast costs nothing at runtime). The proof is stamped onto the ClassDecl for CodeGen's coloring pre-pass.
 void TypeChecker::visit(AsCastExpr& node) {
     auto opType = inferType(node.operand.get());
     auto ct = resolveContractSet(node.contracts, node.location(), true);
@@ -1007,27 +906,21 @@ void TypeChecker::visit(AsCastExpr& node) {
 void TypeChecker::visit(ContractSetTypeExpr&) {}
 
 void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
-    // `obj.m.__doc__` is a SUPPORTED method chain (no method value at runtime:
-    // codegen pattern-matches the chain and emits the cached .rodata constant),
-    // so the object of a `.__doc__` access may resolve to a bare method.
+    // `obj.m.__doc__` is a SUPPORTED method chain (codegen pattern-matches it and
+    // emits the cached .rodata constant), so the object of a `.__doc__` access may resolve to a bare method.
     const Expr* savedMethodOk = impl_->methodRefOkExpr;
     if (node.attribute == "__doc__")
         impl_->methodRefOkExpr = node.object.get();
     auto objType = inferType(node.object.get());
     impl_->methodRefOkExpr = savedMethodOk;
 
-    // D044 - unbounded-`T` restriction: a value of type parameter `T` may be
-    // stored, passed, returned, and compared, but its members/methods cannot be
-    // accessed (the checker can't prove they exist for every `T`). A bounded
-    // `T: B` lifts this - access resolves against the bound `B` below.
+    // D044 - an unbounded `T` may be stored/passed/compared, but its members
+    // can't be accessed (unprovable for every T); a bounded `T: B` lifts this, resolving against B below.
     if (objType && objType->kind() == Type::Kind::TypeVar) {
         auto& tv = static_cast<TypeVarType&>(*objType);
         if (tv.bound) {
-            // Bounds - a bounded `T` behaves like its bound. Resolve the member
-            // against the bound type and fall through to the normal member-
-            // access paths below (instance field/method walk, etc.). After
-            // monomorphization the receiver is the concrete arg (a subtype of
-            // the bound), so the member resolves there too.
+            // Bounds - a bounded `T` behaves like its bound: resolve the member against
+            // it and fall through to the normal paths below; after monomorphization the receiver is the concrete arg anyway.
             objType = tv.bound;
         } else {
             // D044 - an UNBOUNDED `T` exposes no members (the checker can't prove
@@ -1041,10 +934,8 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
         }
     }
 
-    // ADR 054 - member access on a contract-typed receiver resolves against
-    // the contract's signature set. Contracts declare methods only, so any
-    // other name is a clean error naming the contract. A bounded `T:
-    // {Amazing}` lands here too via the bound rewrite above.
+    // ADR 054 - member access on a contract-typed receiver resolves against its
+    // signature set (methods only; any other name is a clean error). A bounded `T: {Amazing}` lands here too via the bound rewrite above.
     if (objType && objType->kind() == Type::Kind::Contract) {
         auto& ct = static_cast<ContractType&>(*objType);
         auto mIt = ct.methods.find(node.attribute);
@@ -1058,14 +949,8 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
         return;
     }
 
-    // Commandment #3: a member access on a statically-`Any` receiver cannot be
-    // dispatched - Dragon has no duck typing, so the concrete type must be known
-    // AT the access. Previously this fell through to `Unknown` and silently
-    // miscompiled: a `Task[int]` stored in a bare `list` (= `list[Any]`) lost the
-    // handle tag that drives `join()`, so `for t in tasks { t.join() }` returned
-    // garbage instead of the worker's result. Reject it at compile time and point
-    // at the annotation, rather than box-and-pray. (`Unknown` - a not-yet-inferred
-    // forward/transient type - is intentionally NOT caught here; only real `Any`.)
+    // Commandment #3: member access on a statically-Any receiver can't dispatch
+    // (no duck typing); previously fell through to Unknown and miscompiled (a Task[int] in a bare `list` lost its join() tag). Unknown itself stays uncaught, only real Any.
     if (objType->kind() == Type::Kind::Any) {
         error(node.location(),
               "cannot access '" + node.attribute +
@@ -1076,10 +961,8 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
         return;
     }
 
-    // `expr.__doc__` is `Optional[str]` (= `Union[str, None]`) regardless of
-    // whether the base is a module, function, class, or instance - Python
-    // parity. CodeGen lowers this to a niche-ptr load (D030/D031): non-null
-    // points at a `.rodata` C string, null encodes None.
+    // `expr.__doc__` is Optional[str] regardless of the base kind (Python parity);
+    // CodeGen lowers it to a niche-ptr load (D030/D031): non-null points at .rodata, null encodes None.
     if (node.attribute == "__doc__") {
         bool isDocTarget =
             objType->kind() == Type::Kind::Module    ||
@@ -1093,11 +976,8 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
         }
     }
 
-    // Module attribute access: `controllers.health.health_check` chains through
-    // ModuleType nodes until it bottoms out at a function/class/const export.
-    // Submodule lookup wins over export lookup so a package can re-export a
-    // value with the same name as a sibling submodule without breaking the
-    // submodule walk (matches Python's resolution order).
+    // Module attribute access chains through ModuleType nodes to an export.
+    // Submodule lookup wins over export lookup so a re-exported value can't shadow a sibling submodule (matches Python's resolution order).
     if (objType->kind() == Type::Kind::Module) {
         auto& mt = static_cast<ModuleType&>(*objType);
         auto subIt = mt.submodules.find(node.attribute);
@@ -1120,13 +1000,8 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
 
     if (objType->kind() == Type::Kind::Instance) {
         auto& inst = static_cast<InstanceType&>(*objType);
-        // Look up the attribute on the class AND its ancestors. An inherited-only
-        // field - declared/set in a base ctor and never re-assigned in the
-        // subclass - lives only in the base's `fields` map, so without the parent
-        // walk node.type stayed unset. Downstream tag derivation (emitTagForExpr)
-        // then fell back to TAG_INT, and boxing such a field into `Any` read a str
-        // pointer as an int (and an unset field as 0 instead of None). D030 §5:
-        // the static type is the source of truth, so it must see inherited fields.
+        // Look up the attribute on the class AND its ancestors: an inherited-only
+        // field lives only in the base's `fields` map, so without this walk it fell back to TAG_INT and read a str pointer as an int (D030: static type is the source of truth).
         bool declared = false;
         const ClassType* declaringViaName = nullptr;  // D045: owner of a not-yet-typed field
         for (const ClassType* cls = inst.classType.get(); cls; ) {
@@ -1139,11 +1014,8 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
             auto mit = cls->methods.find(node.attribute);
             if (mit != cls->methods.end()) {
                 checkMemberPrivacy(cls, node.attribute, node.location());  // D045
-                // A method resolves ONLY in callee position (`obj.m(...)`). A
-                // bare `obj.m` has no runtime value - there is no bound-method
-                // object (D033's getattr is the reflection surface) - and
-                // codegen miscompiled it to 0 (printed) or a null Callable
-                // (SEGV when invoked). Reject it here instead.
+                // A method resolves ONLY in callee position; a bare `obj.m` has no runtime
+                // value (no bound-method object) and codegen miscompiled it to 0 or a SEGV-ing null Callable.
                 if (impl_->methodRefOkExpr != &node) {
                     error(node.location(), "method '" + node.attribute +
                           "' of class '" + cls->name +
@@ -1164,25 +1036,12 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
                       ? static_cast<const ClassType*>(cls->parentClass.get())
                       : nullptr;
         }
-        // D045 - a member that resolved only by NAME (declared, but its precise
-        // type isn't inferred yet: an unannotated/forward field) still gets the
-        // privacy check, so a private/protected field can't be reached just
-        // because the type-inference order hasn't caught up.
+        // D045 - a member resolved only by NAME (type not inferred yet) still gets
+        // the privacy check, so a private/protected field can't be reached via inference-order lag.
         if (declared && declaringViaName)
             checkMemberPrivacy(declaringViaName, node.attribute, node.location());
-        // Resolved nowhere with a precise type. If the name is not a declared
-        // member of the class or any ancestor, it does not exist - a hard type
-        // error for BOTH reads and calls, matching Python's AttributeError
-        // (`'C' object has no attribute 'x'`) rather than JS-style silent
-        // undefined. Member NAMES are collected syntactically up front (module
-        // pre-pass), so a miss here is real regardless of declaration order.
-        //
-        // If the name IS a declared field whose precise type just isn't inferred
-        // yet - a read inside the constructor before the post-body field
-        // inference runs, or a forward/cross-class reference - fall through to
-        // the existing default. We deliberately do NOT synthesize a placeholder
-        // type into `fields` here: that map drives codegen's struct layout, and
-        // an Any/unknown placeholder mis-lowers the slot (box vs native).
+        // A name that's not a declared member anywhere in the chain is a hard error
+        // (Python's AttributeError, not JS-style undefined); a declared-but-not-yet-inferred field falls through instead of getting a placeholder type (which would mis-lower the struct slot).
         if (!declared) {
             error(node.location(), "type '" + inst.classType->name +
                   "' has no attribute '" + node.attribute + "'");
@@ -1191,20 +1050,12 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
         }
     }
 
-    // Static / classmethod (and class-level attribute) access via the class
-    // NAME: `ClassName.member` - here the receiver is the class itself, not an
-    // instance. Resolve the member from the ClassType's method/field maps so a
-    // static factory carries its declared return type. Without this, a call
-    // like `Inner.make(...)` / `TcpStream.open(...)` typed to Unknown, so a
-    // field initialized by one (`self.sock = TcpStream.open(...)`) was never
-    // typed, and chained access (`self.sock.fd`) couldn't resolve the struct
-    // layout. The static type IS the truth (D030).
+    // Static/classmethod access via the class NAME (`ClassName.member`): resolve
+    // from the ClassType's maps so a static factory carries its return type. Without this, `TcpStream.open(...)` typed Unknown and broke chained field access.
     if (objType->kind() == Type::Kind::Class) {
         auto& ct = static_cast<ClassType&>(*objType);
-        // Walk the class AND its ancestors, mirroring the Instance branch: an
-        // inherited staticmethod / class-level field is reachable through the
-        // subclass name (`Sub.make(...)`), so the receiver's own maps are not
-        // the whole story.
+        // Walk the class AND its ancestors (mirrors the Instance branch): an
+        // inherited staticmethod/field is reachable through the subclass name.
         bool declared = false;
         const ClassType* declaringViaName = nullptr;  // D045 (see Instance branch)
         for (const ClassType* cls = &ct; cls; ) {
@@ -1241,15 +1092,8 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
         }
         if (declared && declaringViaName)
             checkMemberPrivacy(declaringViaName, node.attribute, node.location());
-        // Neither a method, a typed class-level field, nor a DECLARED field
-        // name anywhere in the chain: the member does not exist. Hard error
-        // for BOTH reads and calls, exactly like the Instance branch - the
-        // module pre-pass collects every member name syntactically before any
-        // body is checked, so a miss here is real regardless of declaration
-        // order. Without this, a call to a removed/renamed static method
-        // (`App.run_timeout(100)`) passed `dragon check` and surfaced only as
-        // a late codegen scale error. A declared-by-name-only member (type
-        // not inferred yet) falls through to the default, as on instances.
+        // A name not found as a method, field, or declared name anywhere is a hard
+        // error (like the Instance branch); without this a removed/renamed static method passed `dragon check` and surfaced only as a late codegen error.
         if (!declared) {
             error(node.location(), "class '" + ct.name +
                   "' has no attribute '" + node.attribute + "'");
@@ -1297,12 +1141,8 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
 
     // str methods
     if (objType->kind() == Type::Kind::Str) {
-        // str.format() has no codegen lowering - it silently returned None
-        // (a miscompile). Dragon's one obvious way to interpolate is the
-        // f-string (`f"{x}"`), the documented flagship. Reject .format()
-        // loudly rather than miscompile it. (Reversible: implement a
-        // dragon_str_format runtime + the {}/{n}/{name}/spec mini-language
-        // if full Python str.format() parity is later wanted.)
+        // str.format() has no codegen lowering (silently returned None); reject it
+        // loudly instead of miscompiling - the f-string is Dragon's one obvious way to interpolate.
         if (node.attribute == "format") {
             error(node.location(),
                   "str.format() is not supported - use an f-string instead, "
@@ -1348,9 +1188,8 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
                 impl_->boolType);
             return;
         }
-        // L3: partition()/rpartition() return a 3-str TUPLE (Python parity), not
-        // a list - must be a TupleType so print() uses tuple repr (parens), like
-        // divmod above. The runtime builds a DragonTuple to match.
+        // L3: partition()/rpartition() return a 3-str TUPLE (Python parity), not a
+        // list, so print() uses tuple repr like divmod above; the runtime builds a matching DragonTuple.
         if (node.attribute == "partition" || node.attribute == "rpartition") {
             node.type = std::make_shared<FunctionType>(
                 std::vector<std::shared_ptr<Type>>{impl_->strType},
@@ -1375,10 +1214,8 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
         }
     }
 
-    // Bytes methods - mirror the codegen dispatch in CallMethods.cpp. Without a
-    // result type here the call node's `type` stays null, so boxing it into Any
-    // (assertEqual, dict/list elements, Union params) falls back to TAG_INT and
-    // a pointer-returning method like `b.decode()` renders as a raw integer.
+    // Bytes methods mirror the codegen dispatch in CallMethods.cpp; without a
+    // result type here, boxing into Any falls back to TAG_INT and `b.decode()` renders as a raw integer.
     if (objType->kind() == Type::Kind::Bytes) {
         // -> str
         if (node.attribute == "decode" || node.attribute == "hex") {
@@ -1426,11 +1263,8 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
                 impl_->noneType);
             return;
         }
-        // extend takes another LIST of the element type, not a single element
-        // (xs.extend(ys) / xs.extend([..])). Grouping it with append above
-        // registered the parameter as `T`, so every extend() failed type-check
-        // ("list[T] not assignable to T"). The codegen already lowers extend to
-        // dragon_list_extend(self, other); only the signature was wrong.
+        // extend takes another LIST of the element type, not a single element;
+        // grouping it with append registered the param as T and every extend() failed type-check.
         if (node.attribute == "extend") {
             node.type = std::make_shared<FunctionType>(
                 std::vector<std::shared_ptr<Type>>{
@@ -1438,10 +1272,8 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
                 impl_->noneType);
             return;
         }
-        // `pop`/`popleft` (deque is modeled as ListType) return the ELEMENT type,
-        // not Any. An unhandled popleft falls through to Any, which forces
-        // boxing and breaks generic callers' type inference (cmd #3: an op
-        // that knows its element type must never report Any).
+        // `pop`/`popleft` (deque = ListType) return the ELEMENT type, not Any: an
+        // unhandled popleft would force boxing and break generic callers (cmd #3).
         if (node.attribute == "pop" || node.attribute == "popleft") {
             node.type = std::make_shared<FunctionType>(
                 std::vector<std::shared_ptr<Type>>{},
@@ -1461,12 +1293,8 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
                 std::make_shared<ListType>(lt.elementType));
             return;
         }
-        // C4: set binary ops return a new set (sets are modeled as ListType,
-        // like copy). Without a result type the inline call node is Unknown, so
-        // `len(a.union(b))`/`print(a.union(b))` can't tell it's a set and fall
-        // through to dragon_str_len / list repr. The arg is another set of the
-        // same element type. (Lists don't define these; a list receiver calling
-        // them still fails at codegen - sets and lists share the ListType model.)
+        // C4: set binary ops return a new set (sets = ListType, like copy); without a
+        // result type, `len(a.union(b))` couldn't tell it's a set and fell through to the wrong repr.
         if (node.attribute == "union" || node.attribute == "intersection" ||
             node.attribute == "difference" || node.attribute == "symmetric_difference") {
             auto setT = std::make_shared<ListType>(lt.elementType);
@@ -1505,11 +1333,8 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
             return;
         }
         if (node.attribute == "items") {
-            // list[tuple[K, V]] - feeds comprehension/for-loop unpack binding
-            // (`{k: v for k, v in d.items()}`), which reads the tuple element
-            // types to type each unpack var. Without this, items() typed
-            // unknown and the comp produced dict[<unknown>, V] - rejecting a
-            // correctly-annotated binding.
+            // list[tuple[K, V]] feeds comprehension/for-loop unpack binding; without
+            // this, items() typed unknown and rejected a correctly-annotated dict comp.
             node.type = std::make_shared<FunctionType>(
                 std::vector<std::shared_ptr<Type>>{},
                 std::make_shared<ListType>(std::make_shared<TupleType>(
@@ -1529,11 +1354,8 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
                 std::make_shared<DictType>(dt.keyType, dt.valueType));
             return;
         }
-        // A non-method attribute on a dict is dot-key access (`d.x` == `d["x"]`,
-        // a sugar the runtime already supports). Type it as the VALUE type, not
-        // Any (cmd #3: honest types) - so `ds[0].x` flows typed and a generic
-        // caller can infer instead of seeing Any. (Method names above shadow a
-        // same-named key in dot position, as before.)
+        // A non-method attribute on a dict is dot-key access (`d.x` == `d["x"]`);
+        // type it as the VALUE type, not Any (cmd #3), so it flows typed for generic callers.
         if (dt.valueType && dt.valueType->kind() != Type::Kind::Unknown) {
             node.type = dt.valueType;
             return;
@@ -1564,13 +1386,8 @@ void TypeChecker::visit(SubscriptExpr& node) {
         }
     }
 
-    // A function value has no elements. `argv[1]` (sys.argv is a FUNCTION;
-    // the list is `argv()[1]`) must be rejected here - falling through to
-    // Unknown compiles into a garbage read out of the function value. The
-    // error message states the remedy.
-    // An explicit generic instantiation (`first[int](xs)`) never gets
-    // here: visit(CallExpr) consumes its SubscriptExpr callee before the
-    // callee is visited as a value, so only real value subscripts remain.
+    // A function value has no elements (`argv[1]` should be `argv()[1]`); reject
+    // it here rather than compiling a garbage read. An explicit generic instantiation never reaches here (visit(CallExpr) consumes it first).
     if (objType && objType->kind() == Type::Kind::Function) {
         if (auto* fname = dynamic_cast<NameExpr*>(node.object.get())) {
             error(node.location(), "cannot subscript the function '" + fname->name +
@@ -1582,7 +1399,6 @@ void TypeChecker::visit(SubscriptExpr& node) {
         return;
     }
 
-    // Check if this is a slice operation
     bool isSlice = dynamic_cast<SliceExpr*>(node.index.get()) != nullptr;
 
     if (objType->kind() == Type::Kind::List) {
@@ -1596,12 +1412,8 @@ void TypeChecker::visit(SubscriptExpr& node) {
     }
     if (objType->kind() == Type::Kind::Dict) {
         auto& dt = static_cast<DictType&>(*objType);
-        // Key-type check (read AND write - the assign path inferTypes the target
-        // subscript too). A dict is monomorphic in its key type, so indexing a
-        // dict[int,V] with a str (or dict[str,V] with an int) is a TYPE error,
-        // not a runtime KeyError / late LLVM-verify crash. Skip when either side
-        // is Unknown (stay conservative), when the key type is Any (accepts any
-        // key), and for slices (a slice is not a key).
+        // Key-type check (read AND write): a dict is monomorphic in its key type, so
+        // a mismatched key is a TYPE error, not a runtime KeyError/LLVM crash. Skipped for Unknown/Any keys and slices.
         if (!isSlice && idxType && dt.keyType &&
             idxType->kind() != Type::Kind::Unknown &&
             dt.keyType->kind() != Type::Kind::Unknown &&
@@ -1635,14 +1447,8 @@ void TypeChecker::visit(SubscriptExpr& node) {
         }
     }
     if (objType->kind() == Type::Kind::Tuple) {
-        // Propagate per-index element type when index is a constant int.
-        // Without this, codegen at the SubscriptExpr site can't know the
-        // tuple element's kind, can't IntToPtr the i64 returned by
-        // dragon_tuple_get back to a native pointer, and the assignment
-        // RC-overwrite skips the borrowed-incref -> double-free on cleanup
-        // when both the source tuple and the new local decref the same heap
-        // pointer. D030 requires values flow at native types; this is the
-        // typechecker side of that contract.
+        // Propagate per-index element type for a constant int index; without this,
+        // codegen can't IntToPtr the returned i64 correctly, and the RC-overwrite skips a needed incref, causing a double-free (D030's native-flow contract).
         auto& tt = static_cast<TupleType&>(*objType);
         if (auto* lit = dynamic_cast<IntegerLiteral*>(node.index.get())) {
             int64_t i = lit->value;
@@ -1661,17 +1467,14 @@ void TypeChecker::visit(SubscriptExpr& node) {
         return;
     }
     if (objType->kind() == Type::Kind::Bytes) {
-        // bytes[a:b] slice -> bytes; bytes[i] index -> int (a byte, Python
-        // parity). Without this the slice expr typed as `unknown`, so a method
-        // chained on it (e.g. `b[a:b].decode()`) mis-dispatched / mis-boxed.
+        // bytes[a:b] slice -> bytes; bytes[i] index -> int (Python parity). Without
+        // this the slice typed `unknown` and a chained `.decode()` mis-dispatched.
         node.type = isSlice ? impl_->bytesType : impl_->intType;
         return;
     }
     if (objType->kind() == Type::Kind::Any) {
-        // Subscripting an Any value. The element type is statically
-        // unknown, so the result is itself Any (a box); codegen lowers this to
-        // dragon_box_subscript, which dispatches on the runtime tag. Mirrors
-        // Python's `Any[...] -> Any`.
+        // Subscripting Any: the element type is statically unknown, so the result is
+        // Any too (codegen lowers to dragon_box_subscript, dispatching on the runtime tag).
         node.type = objType;
         return;
     }
@@ -1686,15 +1489,8 @@ void TypeChecker::visit(SliceExpr& node) {
     node.type = impl_->unknownType;
 }
 
-// Unify a literal's already-inferred element types into ONE concrete element
-// type, so a homogeneous list/set monomorphizes to native storage (i64[]/f64[]/
-// ptr[]) - commandment #1, the hot path is sacred. Takes the common type via
-// subtyping (`[True, 1]` -> int when bool <: int), NOT just elements[0]: a mixed
-// literal (`[1, "a"]`) would otherwise silently mistype as list[<first>] and
-// store the others' bits wrong. No common concrete type -> Unknown, which the
-// inferred-binding (`:=`) check rejects ("annotate"), while an explicit
-// list[Any] annotation overrides this via tryExpectedTypeLiteral. An Unknown
-// element is permissive (skipped) so one untyped element doesn't poison the rest.
+// Unify a literal's element types into ONE concrete type so a homogeneous
+// list/set monomorphizes to native storage (cmd #1). Uses subtyping (`[True, 1]` -> int), not just elements[0]; no common type -> Unknown (annotate, or list[Any] overrides via tryExpectedTypeLiteral).
 static std::shared_ptr<Type> unifyLiteralElements(
     const std::vector<std::unique_ptr<Expr>>& elems,
     const std::shared_ptr<Type>& unknown) {
@@ -1703,14 +1499,8 @@ static std::shared_ptr<Type> unifyLiteralElements(
         auto t = e ? e->type : nullptr;
         if (!t || t->kind() == Type::Kind::Unknown) continue;
         if (!u) { u = t; continue; }
-        // EXACT match required, not subtyping. A subtype unify would fold
-        // `[1, 2.0]` to a numeric type, but the list-literal codegen does not
-        // bit-coerce mismatched scalar elements (int bits read as f64 = garbage),
-        // so a "widened" list silently miscompiles. Demanding one identical
-        // element type keeps every inferred list/set on a native, correctly-built
-        // monomorphic path; anything else is Unknown -> annotate (e.g. an explicit
-        // `list[float]` / `list[Any]`). Subtype/numeric coercion is the
-        // annotation's job, where codegen already coerces per the target type.
+        // EXACT match required, not subtyping: codegen doesn't bit-coerce mismatched
+        // scalars (int bits read as f64 = garbage), so `[1, 2.0]` needs an explicit annotation instead of silently widening.
         if (!t->equals(*u)) return unknown;             // mixed -> ambiguous
     }
     return u ? u : unknown;
@@ -1742,10 +1532,8 @@ void TypeChecker::visit(DictExpr& node) {
             node.type = std::make_shared<DictType>(impl_->unknownType, impl_->unknownType);
         return;
     }
-    // Infer the dict's key/value types from the first entry that pins them - an
-    // explicit `k: v` OR a `**spread` source (whose dict type seeds K/V). Seeding
-    // from spread sources is what makes a leading/all-spread literal (`{**d}`,
-    // `{**a, **b}`) type correctly instead of `dict[<unknown>, <unknown>]`.
+    // Infer the dict's key/value types from the first entry that pins them: an
+    // explicit `k: v`, or a `**spread` source (seeds K/V so `{**d}` types correctly instead of dict[<unknown>, <unknown>]).
     std::shared_ptr<Type> keyType = impl_->unknownType;
     std::shared_ptr<Type> valType = impl_->unknownType;
     for (auto& [k, v] : node.entries) {
@@ -1763,12 +1551,8 @@ void TypeChecker::visit(DictExpr& node) {
     for (auto& [k, v] : node.entries) {
         if (k) {
             auto kt = inferType(k.get());
-            // Dicts are monomorphic in their key type - every key must share one
-            // type. A mixed literal like {1: .., "1": ..} would otherwise infer
-            // only the first key's type and miscompile (the runtime dict can't
-            // hold both int and str keys; codegen LLVM-verify-fails). Reject it
-            // cleanly here. Skip when either side is Unknown or the inferred key
-            // type is Any (a deliberately heterogeneous annotation).
+            // Dicts are monomorphic in their key type; a mixed literal like {1: .., "1": ..}
+            // would otherwise miscompile (runtime dict can't hold both, LLVM-verify-fails). Skipped for Unknown/Any keys.
             if (kt && keyType &&
                 kt->kind() != Type::Kind::Unknown &&
                 keyType->kind() != Type::Kind::Unknown &&
@@ -1810,9 +1594,8 @@ static std::shared_ptr<Type> iterableElementType(
     return unknown;
 }
 
-// Bind one or more comprehension/for-clause loop variables given an iterable
-// type. Single var -> element type. Multi var (e.g. dict comp `for k, v in
-// items.items()`) -> unpack from a tuple element when possible, else unknown.
+// Bind comprehension/for-clause loop vars from an iterable type: single var ->
+// element type; multi var (`for k, v in d.items()`) unpacks a tuple element when possible, else unknown.
 void TypeChecker::bindCompLoopVars(
     const std::vector<std::string>& names,
     const std::shared_ptr<Type>& iterType) {
@@ -1833,9 +1616,8 @@ void TypeChecker::bindCompLoopVars(
     for (auto& n : names) impl_->define(n, impl_->unknownType);
 }
 
-// Type-check the extra `for ... in ... if ...` clauses of a comprehension.
-// Each clause runs in the same lexical scope opened by the outer comprehension
-// so its loop variables remain visible to inner clauses and the body.
+// Type-check the extra `for ... in ... if ...` clauses of a comprehension,
+// in the same lexical scope as the outer comprehension so loop vars stay visible.
 void TypeChecker::checkCompExtraClauses(std::vector<CompClause>& clauses) {
     for (auto& c : clauses) {
         auto cIter = c.iterable ? inferType(c.iterable.get()) : impl_->unknownType;
@@ -1910,16 +1692,8 @@ void TypeChecker::visit(LambdaExpr& node) {
     auto retType = resolveType(node.returnType.get());
     node.type = std::make_shared<FunctionType>(paramTypes, retType);
 
-    // Type-check the body, exactly as visit(FunctionDecl) does for a def.
-    // Before this walk existed nothing inside a lambda was ever type-checked:
-    // `bad: int = "boy"` compiled clean, and a generic method call in a
-    // handler (`db.all[dict[str, Any]](sql)`) was never stamped/retargeted by
-    // the D044 worklist - codegen then either errored loudly ("no codegen
-    // dispatch path matched", the bare-inference form) or, worse, resolved
-    // nothing and produced an empty default silently (the explicit-args
-    // form). The guard runs the walk once per checker instance (a def body
-    // gets the same once-per-walk cadence); node.type above is still set on
-    // every visit.
+    // Type-check the body like visit(FunctionDecl); before this, nothing inside a
+    // lambda was checked (`bad: int = "boy"` compiled clean) and generic calls inside one were never stamped. Runs once per checker instance; node.type is still set every visit.
     if (!impl_->checkedLambdaBodies.insert(&node).second) return;
 
     impl_->pushScope();
@@ -1949,14 +1723,8 @@ void TypeChecker::visit(LambdaExpr& node) {
 void TypeChecker::visit(IfExpr& node) {
     inferType(node.condition.get());
 
-    // isinstance(N, T) narrowing for the ternary's branches. Mirrors the
-    // codegen-side narrowing in Expressions.cpp:visit(IfExpr) so that
-    // `expr.method() if isinstance(u, T) else u` (the canonical Python
-    // pattern when u: T | OtherT) sees u as T in the then-branch and as
-    // the union's other member in the else-branch. Without this, the
-    // then-branch's method call types as Unknown and the result is
-    // unassignable to the obvious target type - see binascii.unhexlify's
-    // first attempt for the failing shape.
+    // isinstance(N, T) narrowing for the ternary's branches, mirroring codegen's
+    // IfExpr narrowing: `x.m() if isinstance(u, T) else u` sees u as T in the then-branch. Without this the then-branch typed Unknown (see binascii.unhexlify).
     auto narrowedTypeFromExpr = [&](Expr* e) -> std::shared_ptr<Type> {
         auto* tn = dynamic_cast<NameExpr*>(e);
         if (!tn) return nullptr;
@@ -1965,12 +1733,8 @@ void TypeChecker::visit(IfExpr& node) {
         if (tn->name == "bool")  return impl_->boolType;
         if (tn->name == "str")   return impl_->strType;
         if (tn->name == "bytes") return impl_->bytesType;
-        // Class types live in the type registry (`typeNames`) - the same place
-        // resolveType() looks them up - NOT in value scopes. Resolving via
-        // lookup() here returned null for every class name, silently disabling
-        // isinstance narrowing for `isinstance(x, SomeClass)` (builtin types
-        // worked only because they are hard-coded above). Check typeNames first,
-        // then fall back to a class bound in scope.
+        // Class types live in typeNames, not value scopes; looking up via lookup()
+        // alone returned null for every class name and silently disabled isinstance narrowing on user classes.
         auto tit = impl_->typeNames.find(tn->name);
         if (tit != impl_->typeNames.end()) return tit->second;
         auto found = impl_->lookup(tn->name);
@@ -2081,16 +1845,5 @@ void TypeChecker::visit(StarredExpr& node) {
     if (node.value) inferType(node.value.get());
     node.type = impl_->unknownType;
 }
-
-//===----------------------------------------------------------------------===//
-// Statement Visitors
-//===----------------------------------------------------------------------===//
-
-// Contextual typing: propagate an annotation type into an empty container literal
-// so that `x: list[str] = []` types the RHS as list[str] instead of list[<unknown>].
-// True if `t` is a container annotation whose element/value type is Any:
-// list[Any] / set[Any] (both ListType) or dict[K, Any]. Such targets are
-// backed by a box container at runtime, so a literal assigned to them must be
-// retyped to force the box representation (see AnnAssignStmt / AssignStmt).
 
 } // namespace dragon

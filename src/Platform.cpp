@@ -49,12 +49,8 @@ int getProcessId() {
 std::string makeSecureTempDir(const std::string& prefix) {
     std::string base = getTempDir();
 #if defined(_WIN32)
-    // No mkdtemp on Windows. CreateDirectoryA fails if the name already exists,
-    // giving us exclusive creation; retry with fresh names until one is unused.
-    // The per-user temp dir's default ACL already restricts other unprivileged
-    // users, so the symlink-redirect attack the POSIX path defends against does
-    // not apply the same way here. Names mix pid + tick + a counter so two
-    // concurrent builds don't collide.
+    // No mkdtemp on Windows: retry fresh pid+tick+counter names until
+    // CreateDirectoryA succeeds; per-user ACL already blocks the symlink attack here.
     static const char hex[] = "0123456789abcdef";
     for (int attempt = 0; attempt < 64; ++attempt) {
         unsigned long long r =
@@ -111,11 +107,8 @@ int getExitCode(int systemResult) {
     return systemResult;
 #else
     if (WIFEXITED(systemResult)) return WEXITSTATUS(systemResult);
-    // The child died from a signal (SIGSEGV, SIGABRT, ...). Surface the
-    // shell-conventional 128+signum so a crashing `dragon run` reports a
-    // meaningful nonzero status (e.g. 139 for SIGSEGV) instead of masking it
-    // as a generic failure. Without this, the old `return systemResult` leaked
-    // the raw status word (signal in the low byte), which callers misread.
+    // Child died from a signal: surface shell-conventional 128+signum (e.g.
+    // 139 for SIGSEGV) instead of the raw status word callers misread.
     if (WIFSIGNALED(systemResult)) return 128 + WTERMSIG(systemResult);
     return systemResult;
 #endif

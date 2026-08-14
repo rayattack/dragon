@@ -4,30 +4,23 @@
 namespace dragon {
 
 void CodeGen::visit(FireExpr& node) {
-    // D030: fire spawns a green thread via a per-callsite trampoline that
-    // knows the target's exact native signature - no i64 funneling, no
-    // generic Fn0..Fn8 dispatch in the runtime.
+    // D030: fire spawns a green thread via a per-callsite trampoline typed to the
+    // target's exact signature - no i64 funneling, no generic Fn0..Fn8 dispatch.
     impl_->needsPthread = true;
 
-    // Resolve the target function. Two shapes:
-    //  (a) fire { block } -> synthesize an internal nullary fn, spawn it
-    //  (b) fire fn(args) -> resolve callee, evaluate user args
+    // Resolve the target function: (a) fire { block } synthesizes an internal nullary
+    // fn; (b) fire fn(args) resolves the callee and evaluates user args.
     llvm::Function* targetFn = nullptr;
     std::vector<llvm::Value*> userArgs;
     std::vector<Impl::VarKind> argKinds;
     std::string siteName;
 
     if (!node.bodyStmts.empty()) {
-        // Block form `fire { ... }`. The body captures enclosing locals (Sema
-        // populated node.capturedVars); we lower the block to a function that
-        // takes those captures AS PARAMETERS and marshal them through the SAME
-        // spawn path as `fire fn(args)` - so the captured values are heap-copied
-        // into the vthread's args buffer with proper atomic-incref / trampoline-
-        // decref refcounting (no cross-function alloca reference, no data race).
+        // Block form `fire { ... }`: lower the body to a fn taking captures as params,
+        // then marshal them through the same spawn path as `fire fn(args)` (atomic-incref in, trampoline decref out; no cross-function alloca reference).
 
-        // Reassigning an enclosing local from the vthread needs a thread-safe
-        // cell, which doesn't exist yet - that would be a data race. Reject it
-        // explicitly rather than silently miscompile.
+        // Reassigning an enclosing local from the vthread would be a data race (no
+        // thread-safe cell exists yet). Reject explicitly rather than miscompile.
         if (!node.mutatedCapturedVars.empty()) {
             impl_->addError(
                 "fire { ... } cannot reassign an enclosing variable '" +
@@ -41,9 +34,8 @@ void CodeGen::visit(FireExpr& node) {
             return;
         }
 
-        // Snapshot each capture's value + kind in the ENCLOSING frame (before we
-        // switch into the fire fn). A name that doesn't resolve to a local
-        // (e.g. a module global) is not a frame capture - skip it.
+        // Snapshot each capture's value + kind in the enclosing frame before switching
+        // into the fire fn. A name that doesn't resolve to a local (e.g. a module global) is skipped.
         struct Cap { std::string name; llvm::Value* val; Impl::VarKind kind; llvm::Type* ty; };
         std::vector<Cap> caps;
         for (const auto& capName : node.capturedVars) {
@@ -68,8 +60,8 @@ void CodeGen::visit(FireExpr& node) {
 
         auto* prevFunc = impl_->currentFunction;
         auto* prevBlock = impl_->builder->GetInsertBlock();
-        // SAVE + CLEAR the scope chain so capture names resolve to the fire fn's
-        // OWN param allocas, not the parent frame's (cross-function reference).
+        // Save+clear the scope chain so capture names resolve to the fire fn's own
+        // param allocas, not the parent frame's.
         auto savedScopes = std::move(impl_->scopes);
         impl_->scopes.clear();
         impl_->currentFunction = fireFn;
@@ -77,9 +69,8 @@ void CodeGen::visit(FireExpr& node) {
         impl_->builder->SetInsertPoint(entry);
         impl_->pushScope();
 
-        // Materialize each capture as a local param. Heap captures are BORROWED
-        // (the spawn site atomic-increfs and the trampoline atomic-decrefs them,
-        // so the body must NOT decref at scope cleanup - avoids a double-free).
+        // Materialize each capture as a local param. Heap captures are borrowed (spawn
+        // site increfs, trampoline decrefs); the body must not decref at scope cleanup or it double-frees.
         unsigned ai = 0;
         for (auto& arg : fireFn->args()) {
             Cap& c = caps[ai++];
@@ -105,9 +96,8 @@ void CodeGen::visit(FireExpr& node) {
         targetFn = fireFn;
         siteName = fireFnName;
 
-        // Marshal captures as the spawn args (mirrors the call form). Atomic-
-        // incref heap captures so they survive on the worker until the
-        // trampoline atomic-decrefs them post-call.
+        // Marshal captures as spawn args (mirrors the call form); atomic-incref heap
+        // captures so they survive until the trampoline decrefs them post-call.
         for (auto& c : caps) { userArgs.push_back(c.val); argKinds.push_back(c.kind); }
         for (size_t i = 0; i < userArgs.size() && i < argKinds.size(); i++)
             impl_->emitAtomicIncref(userArgs[i], argKinds[i]);
@@ -125,11 +115,8 @@ void CodeGen::visit(FireExpr& node) {
         llvm::Value* selfVal = nullptr;
         std::string calleeName;
         if (auto* nameExpr = dynamic_cast<NameExpr*>(callExpr->callee.get())) {
-            // Resolve exactly like a normal call (CallExpr.cpp): import alias,
-            // then the same-module mangled name, then the plain user symbol,
-            // then the bare name. The bare name only exists for entry-module
-            // functions, so `fire` inside an IMPORTED module (e.g. the stdlib
-            // ui rpc bridge) failed to resolve with a bare lookup alone.
+            // Resolve like a normal call: import alias, same-module mangled name, user
+            // symbol, then bare name. Bare-name-only lookup failed for `fire` inside an imported module (e.g. stdlib ui rpc bridge).
             const std::string aliasSym = impl_->lookupImportedAlias(nameExpr->name);
             if (!aliasSym.empty())
                 targetFn = impl_->module->getFunction(aliasSym);
@@ -145,11 +132,8 @@ void CodeGen::visit(FireExpr& node) {
             calleeName = targetFn ? targetFn->getName().str() : nameExpr->name;
         } else if (auto* attrExpr =
                    dynamic_cast<AttributeExpr*>(callExpr->callee.get())) {
-            // Resolve (owningModule, className) the same way CallMethods.cpp
-            // does for instance method dispatch, so `fire self.method(...)`
-            // and `fire obj.method(...)` reach the module-mangled symbol
-            // (`<mod>__Class_method`) instead of the bare className that
-            // pre-mangling codegen used to emit.
+            // Resolve (owningModule, className) like CallMethods.cpp's instance method
+            // dispatch, so `fire self.method(...)`/`fire obj.method(...)` reach the module-mangled symbol, not the old bare className.
             std::string className;
             std::string owningModule;
             if (auto* objName =
@@ -202,26 +186,21 @@ void CodeGen::visit(FireExpr& node) {
         auto kindsIt = impl_->funcParamKinds.find(calleeName);
         if (kindsIt != impl_->funcParamKinds.end()) argKinds = kindsIt->second;
 
-        // docs/002 2.8/2.9: `fire consume(own o)` - the caller's +1 MOVES
-        // with the value, and the callee's own-param scope exit releases it.
-        // Neutralize the kind so BOTH halves of the borrow pair skip it (the
-        // fire-site atomic incref here, the trampoline's post-call decref in
-        // buildFireTrampoline) - keeping the pair double-freed the moved
-        // object (A/B-proven by the spawn-lend probe).
+        // docs/002 2.8/2.9: `fire consume(own o)` moves the caller's +1; neutralize the
+        // kind so neither the fire-site incref nor the trampoline decref touch it - keeping the pair double-freed it (A/B-proven, spawn-lend probe).
         for (size_t i = 0; i < userArgs.size() && i < argKinds.size(); i++)
             if (impl_->paramIsOwn(calleeName, (unsigned)i))
                 argKinds[i] = Impl::VarKind::Other;
 
-        // Atomic-incref heap args at the call site so they survive on the
-        // worker thread until the trampoline atomic-decrefs them post-call.
+        // Atomic-incref heap args at the call site so they survive until the trampoline
+        // decrefs them post-call.
         for (size_t i = 0; i < userArgs.size() && i < argKinds.size(); i++)
             impl_->emitAtomicIncref(userArgs[i], argKinds[i]);
 
         siteName = calleeName + "_" + std::to_string(impl_->lambdaCounter++);
     }
 
-    // Build the per-callsite typed args struct from the target's exact param
-    // types. We use the function's LLVM signature as the source of truth.
+    // Build the per-callsite typed args struct from the target's LLVM signature.
     auto* targetTy = targetFn->getFunctionType();
     std::vector<llvm::Type*> argTypes;
     for (unsigned i = 0; i < targetTy->getNumParams(); i++)
@@ -255,16 +234,14 @@ void CodeGen::visit(FireExpr& node) {
         {trampAsI8, argsAsI8,
          llvm::ConstantInt::get(impl_->i64Type, (int64_t)argsSize)},
         "vthread");
-    // `fire f(own x)`: the args struct now carries the moved +1 - null the
-    // caller's slot so its scope exit sees nothing (docs/002 2.8).
+    // `fire f(own x)`: the args struct now carries the moved +1; null the caller's slot
+    // so its scope exit sees nothing (docs/002 2.8).
     if (auto* movedCall = dynamic_cast<CallExpr*>(node.operand.get()))
         impl_->emitMoveOutSlots(*movedCall);
 }
 
-// ADR 054 - a conformance cast is proof, not conversion: the operand's
-// pointer flows through unchanged (coloring already gave every conforming
-// class's vtable the contract slots). Ownership classification sees through
-// the node (isBorrowedHeapExpr / resolveExprVarKind delegate to the operand).
+// ADR 054: a conformance cast is proof, not conversion - the operand's pointer flows
+// through unchanged. isBorrowedHeapExpr/resolveExprVarKind see through the node to the operand.
 void CodeGen::visit(AsCastExpr& node) {
     node.operand->accept(*this);
 }
@@ -280,20 +257,14 @@ void CodeGen::visit(AwaitExpr& node) {
         handle = impl_->builder->CreateIntToPtr(handle, impl_->i8PtrType);
     }
 
-    // Join the vthread and get the result (i64), then reinterpret it at the
-    // task's native result type T (D030): bitcast for float, inttoptr for
-    // str/list/instance, truncate for bool. node.type is T (await Task[T] -> T).
+    // Join the vthread, get the result (i64), then reinterpret at the task's native type
+    // T (D030): bitcast for float, inttoptr for str/list/instance, truncate for bool.
     auto* rawResult = impl_->builder->CreateCall(
         impl_->runtimeFuncs["dragon_vthread_join"], {handle}, "await.result");
     impl_->lastValue = impl_->taskResultFromI64(rawResult, node.type.get());
 
-    // `await t` CONSUMES the task: the runtime just freed the vthread. Blank the
-    // binding's slot (the `free(p); p = NULL` discipline) so (1) the scope-exit
-    // detach sees an empty slot and does NOT double-free the consumed handle, and
-    // (2) a later `t.is_alive()` / `await t` reads NULL (-> false / 0) instead of
-    // the freed struct - closing the latent use-after-await UAF. Only a bound
-    // NameExpr has a slot; `await fire f()` / `await get()` are owned temps the
-    // join already reclaimed, with no slot to blank. Task-detach tail.
+    // `await t` consumes the task (runtime frees the vthread); null the binding's slot so
+    // scope-exit detach doesn't double-free and a later is_alive/await reads NULL instead of the freed struct (closed a use-after-await UAF). Unbound temps have no slot to blank.
     if (impl_->options.gcMode == GCMode::RC) {
         if (auto* nm = dynamic_cast<NameExpr*>(node.operand.get())) {
             if (auto* slot = impl_->lookupVar(nm->name)) {
@@ -307,7 +278,10 @@ void CodeGen::visit(AwaitExpr& node) {
 }
 void CodeGen::visit(YieldExpr& node) {
     if (!impl_->generatorPtr) {
-        // yield outside a generator function - shouldn't happen, but emit 0 as fallback
+        impl_->addError(
+            "internal error: yield reached codegen outside a generator "
+            "function; the front end should have rejected this",
+            node.location());
         impl_->lastValue = llvm::ConstantInt::get(impl_->i64Type, 0);
         return;
     }
@@ -338,18 +312,12 @@ void CodeGen::visit(YieldExpr& node) {
     impl_->lastValue = llvm::ConstantInt::get(impl_->i64Type, 0);
 }
 void CodeGen::visit(ThreadStmt& node) {
-    // thread { block } - scoped OS thread with auto-join at scope exit.
-    // The body captures enclosing locals (Sema populated node.capturedVars); we
-    // lower it to a function taking those captures as i64 params (the
-    // dragon_thread_fire/dragon_thread_entry ABI passes up to 8 i64 args) and
-    // marshal them as the thread args - so the body never references the parent
-    // frame's allocas (which would be invalid cross-function IR). The thread is
-    // joined synchronously below, so captures stay alive for its lifetime and
-    // are BORROWED (no incref/decref): the parent owns the single reference.
+    // thread { block }: scoped OS thread, auto-joined at scope exit. Lowers the body to
+    // a fn taking captures as i64 params (ABI caps at 8 i64 args), so it never references the parent frame's allocas. Joined synchronously, so captures stay borrowed (no incref/decref).
     impl_->needsPthread = true;
 
-    // Cross-thread reassignment of an enclosing local needs a thread-safe cell
-    // (data race otherwise) - reject explicitly rather than miscompile.
+    // Cross-thread reassignment of an enclosing local would be a data race. Reject
+    // explicitly rather than miscompile.
     if (!node.mutatedCapturedVars.empty()) {
         impl_->addError(
             "thread { ... } cannot reassign an enclosing variable '" +
@@ -398,8 +366,8 @@ void CodeGen::visit(ThreadStmt& node) {
 
     auto* prevFunc = impl_->currentFunction;
     auto* prevBlock = impl_->builder->GetInsertBlock();
-    // SAVE + CLEAR scopes so capture names resolve to the thread fn's own param
-    // allocas, not the parent frame's.
+    // Save+clear scopes so capture names resolve to the thread fn's own param allocas,
+    // not the parent frame's.
     auto savedScopes = std::move(impl_->scopes);
     impl_->scopes.clear();
     impl_->currentFunction = threadFn;
@@ -454,18 +422,4 @@ void CodeGen::visit(ThreadStmt& node) {
         impl_->runtimeFuncs["dragon_thread_join"], {threadHandle}, "thread.join");
 }
 
-/// Lower match/case (PEP 634) to chained conditional branches.
-///
-/// Each case arm becomes a test-and-branch block:
-///  match.caseN.test - evaluate pattern match condition
-///  match.caseN.body - execute body if matched, then branch to match.end
-/// A final match.end block is the merge point.
-///
-/// Pattern kinds:
-///  Wildcard (_) - always true
-///  Literal - compare subject with constant (int: ICmpEQ, str: dragon_str_eq, etc.)
-///  Capture (x) - always true, binds subject value to a local variable
-///  Sequence - check tuple length, then recursively match each element
-///  Or (p1|p2) - short-circuit disjunction of sub-patterns
-///  Value - evaluate dotted-name expression, compare with subject
 } // namespace dragon

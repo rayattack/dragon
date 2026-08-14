@@ -3,14 +3,8 @@
 
 namespace dragon {
 
-// Allocate the monomorphized list variant for an element tag. One source of
-// truth for the f64 / ptr / box / tagged / i64 choice, shared by list literals
-// (visit(ListExpr)) and *args packing (visit(CallExpr)).
-//  TAG_FLOAT (2) -> DragonListF64 (native f64)
-//  TAG_STR/LIST/DICT/BYTES (1/5/6/7) -> DragonListPtr (native ptr)
-//  isAny (Any / union element) -> DragonListBox (16B/elem, per-elem tag)
-//  other non-zero tag -> DragonList tagged
-//  tag 0 -> DragonList i64 (int/bool/untyped)
+// Allocates the monomorphized list variant for an element tag (shared by list literals
+// and *args packing): float->ListF64, str/list/dict/bytes->ListPtr, Any->ListBox, other tag->tagged, else->i64.
 llvm::Value* CodeGen::Impl::emitNewTypedList(int64_t elemTag, bool isAny,
                                              llvm::Value* capVal) {
     bool isF64 = (elemTag == 2);
@@ -36,9 +30,8 @@ llvm::Value* CodeGen::Impl::emitNewTypedList(int64_t elemTag, bool isAny,
     return builder->CreateCall(runtimeFuncs["dragon_list_new"], {capVal}, "list");
 }
 
-// Append one already-evaluated `val` to a list built by emitNewTypedList,
-// matching the storage variant. `elemExpr` is the source expression, used for
-// tag inference (box list) and the borrow/incref + ensureHeapString discipline.
+// Appends an already-evaluated `val` to a list built by emitNewTypedList, matching the
+// storage variant. `elemExpr` drives tag inference and the borrow/incref + ensureHeapString discipline.
 void CodeGen::Impl::emitTypedListAppend(llvm::Value* list, llvm::Value* val,
                                         Expr* elemExpr, int64_t elemTag,
                                         bool isAny, CodeGen& cg) {
@@ -46,10 +39,8 @@ void CodeGen::Impl::emitTypedListAppend(llvm::Value* list, llvm::Value* val,
     bool isPtr = (elemTag == 1 || elemTag == 5 || elemTag == 6 || elemTag == 7 ||
                   elemTag == 10);
     if (isAny) {
-        // list[Any]/box list: store (tag, payload-as-i64). Forward an existing
-        // box directly; otherwise infer the tag and promote to i64 storage.
-        // Model B: the list owns one reference, so a borrowed source is
-        // increfed (shared with append/insert via boxArgTagPayload).
+        // list[Any]/box list stores (tag, payload-as-i64); forwards an existing box or
+        // infers the tag. Model B: the list owns one ref, so a borrowed source is increfed (shared with append/insert via boxArgTagPayload).
         auto tp = boxArgTagPayload(elemExpr, val, /*takesOwnership=*/true);
         builder->CreateCall(
             runtimeFuncs["dragon_list_box_append"], {list, tp.first, tp.second});
@@ -68,8 +59,8 @@ void CodeGen::Impl::emitTypedListAppend(llvm::Value* list, llvm::Value* val,
             if (elemTag == 1)
                 builder->CreateCall(runtimeFuncs["dragon_incref_str"], {val});
             else if (elemTag == 10)
-                // tag-gated incref - borrowed Callable element may be a bare
-                // fn ptr (no header); _callable no-ops on it, increfs a real closure.
+                // tag-gated: a borrowed Callable may be a bare fn ptr (no header);
+                // _callable no-ops on it, increfs a real closure.
                 builder->CreateCall(runtimeFuncs["dragon_incref_callable"], {val});
             else
                 builder->CreateCall(runtimeFuncs["dragon_incref"], {val});
@@ -92,9 +83,8 @@ void CodeGen::visit(ListExpr& node) {
     llvm::Value* capVal = llvm::ConstantInt::get(impl_->i64Type, cap);
     int64_t elemTag = impl_->getListElemTag(&node);
 
-    // D039 Phase 4: detect list[Any]. Element type comes from the typechecker;
-    // when the literal's declared elem kind is Any, use DragonListBox so each
-    // element preserves its own tag.
+    // D039 Phase 4: detect list[Any] from the typechecker's element type; when the
+    // declared elem kind is Any, use DragonListBox so each element keeps its own tag.
     bool isAny = false;
     if (node.type) {
         if (auto* lt = dynamic_cast<ListType*>(node.type.get())) {
@@ -127,9 +117,8 @@ void CodeGen::visit(ListExpr& node) {
     impl_->lastValue = list;
 }
 void CodeGen::visit(TupleExpr& node) {
-    // Create a new tuple with N elements
-    // Dragon tuple layout (runtime): { int64_t* data, int64_t length }
-    // All element values are stored as i64 (pointers via ptrtoint, floats via bitcast)
+    // Tuple layout (runtime): { int64_t* data, int64_t length }; all element values are
+    // stored as i64 (pointers via ptrtoint, floats via bitcast).
     int64_t count = node.elements.size();
     llvm::Value* countVal = llvm::ConstantInt::get(impl_->i64Type, count);
     llvm::Value* tuple = impl_->builder->CreateCall(
@@ -141,15 +130,8 @@ void CodeGen::visit(TupleExpr& node) {
     for (int64_t i = 0; i < count; i++) {
         node.elements[i]->accept(*this);
         llvm::Value* val = impl_->lastValue;
-        // Any / Union element: it is a {tag, payload} box. dragon_tuple_set
-        // wants an i64 slot, so we extract payload + runtime tag from the box
-        // and route through the tagged setter - passing the whole %dragon.box
-        // where an i64 is expected is an LLVM verification failure (e.g.
-        // `t: tuple[Any, int] = (anyVal, 5)`). Mirrors the DictExpr box branch
-        // above. RC: a heap payload boxed from a BORROWED source needs the
-        // tuple to own its own ref (tag-dispatched union incref, a no-op on
-        // int/float/bool); an owned box temp already carries the +1 the tuple
-        // adopts.
+        // Any/Union element is a {tag, payload} box; dragon_tuple_set wants an i64 slot,
+        // so extract payload+tag and route through the tagged setter (passing the box raw is an LLVM verify failure). RC: incref a borrowed source's payload; an owned box temp already owns its +1.
         if (val->getType() == impl_->boxType) {
             llvm::Value* btag = impl_->boxTag(val, "tv.tag");
             llvm::Value* bpayload = impl_->boxPayloadI64(val, "tv.payload");
@@ -170,12 +152,8 @@ void CodeGen::visit(TupleExpr& node) {
             tupleType->elementTypes[i]) {
             Type::Kind slotKind = tupleType->elementTypes[i]->kind();
             if (slotKind == Type::Kind::Any || slotKind == Type::Kind::Union) {
-                // Any/Union slot holding a CONCRETE value (an element that is
-                // itself a box took the branch above): elements are stored
-                // per-slot tagged, so the tag comes from the element's own
-                // static type. typeKindToElemTag(Any) is TAG_INT, which would
-                // store a heap pointer untagged - a leak at destroy and a
-                // wrong-tagged box on read-back.
+                // Any/Union slot holding a concrete value (box case handled above): tag
+                // comes from the element's own static type, since typeKindToElemTag(Any) is TAG_INT and would store a heap pointer untagged (leak + wrong tag on read-back).
                 if (node.elements[i]->type)
                     elemTag =
                         Impl::typeKindToElemTag(node.elements[i]->type->kind());
@@ -184,21 +162,15 @@ void CodeGen::visit(TupleExpr& node) {
             }
         }
         // Promote string literals to heap DragonStrings when stored with TAG_STR
-        if (elemTag == 1 && wasPtr) { // TAG_STR
+        if (elemTag == TAG_STR && wasPtr) { // TAG_STR
             val = impl_->ensureHeapString(val, node.elements[i].get());
             wasPtr = val->getType()->isPointerTy();
         }
-        // Model B: tuple_set takes ownership of one ref per element.
-        // Borrowed sources (a heap-typed local, class field, or container
-        // subscript) need an incref before crossing into the tuple - otherwise
-        // scope cleanup at the enclosing function's return would decref the
-        // local back to 0 while the returned tuple still holds the pointer
-        // (use-after-free when the caller indexes into result[i]).
-        // Fresh sources (literals after ensureHeapString, ListExpr/DictExpr/
-        // CallExpr returns) already own a +1 and must NOT be incref'd.
+        // Model B: tuple_set takes ownership of one ref. Borrowed sources need an incref
+        // first or scope cleanup drops the local to 0 while the tuple still holds the pointer (UAF on result[i]). Fresh sources already own their +1.
         if (impl_->options.gcMode == GCMode::RC && wasPtr && elemTag != 0 &&
             Impl::isBorrowedHeapExpr(node.elements[i].get())) {
-            if (elemTag == 1) // TAG_STR
+            if (elemTag == TAG_STR) // TAG_STR
                 impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_incref_str"], {val});
             else
@@ -227,13 +199,8 @@ void CodeGen::visit(TupleExpr& node) {
     impl_->lastValue = tuple;
 }
 void CodeGen::visit(DictExpr& node) {
-    // Dragon dict literal: {"a": 1, "b": 2}
-    // Lower to: dict = dragon_dict_new(cap); dragon_dict_set(dict, key, val) ...
-    //
-    // D030 Phase 3.G: detect int-keyed literals from the first key's static
-    // type (or the typechecker-resolved expr type) and route setters to the
-    // dragon_dict_int_* family - int keys cross the boundary at i64, no
-    // misrouting through the str-keyed path.
+    // Dict literal: dragon_dict_new + dragon_dict_set per entry. D030 Phase 3.G: int-keyed
+    // literals (from the first key's type) route to dragon_dict_int_* so int keys cross at i64, not the str-keyed path.
     int64_t cap = std::max((int64_t)node.entries.size(), (int64_t)4);
     llvm::Value* capVal = llvm::ConstantInt::get(impl_->i64Type, cap);
     llvm::Value* dict = impl_->builder->CreateCall(
@@ -262,11 +229,9 @@ void CodeGen::visit(DictExpr& node) {
             continue;
         }
 
-        // Evaluate key
         entry.first->accept(*this);
         llvm::Value* key = impl_->lastValue;
 
-        // Evaluate value
         entry.second->accept(*this);
         llvm::Value* val = impl_->lastValue;
 
@@ -323,10 +288,8 @@ void CodeGen::visit(DictExpr& node) {
             int64_t tag = impl_->inferPtrValueTag(entry.second.get());
             llvm::Value* pval = val;
             if (tag == 1) pval = impl_->ensureHeapString(pval, entry.second.get());
-            // Model B: dict_set_str_ptr takes ownership of one ref. Borrowed
-            // sources (a heap-typed local, class field, or container subscript)
-            // need an incref so the new dict's reference outlives the source's
-            // owning scope.
+            // Model B: dict_set_str_ptr takes ownership of one ref. Borrowed sources need
+            // an incref so the new dict's reference outlives the source's owning scope.
             if (impl_->options.gcMode == GCMode::RC &&
                 (tag == 1 || tag == 5 || tag == 6 || tag == 7) &&
                 Impl::isBorrowedHeapExpr(entry.second.get())) {
@@ -342,14 +305,8 @@ void CodeGen::visit(DictExpr& node) {
                 {dict, key, pval, llvm::ConstantInt::get(impl_->i64Type, tag)});
             continue;
         }
-        // Any / Union value: it is a {tag, payload} box. dragon_dict_set_tagged
-        // wants (payload:i64, tag:i64), so we extract both from the box - passing
-        // the whole %dragon.box where an i64 payload is expected is an LLVM
-        // verification failure (e.g. `d: dict[str, Any] = {"k": anyVal}`). RC:
-        // a heap payload boxed from a BORROWED source needs the dict to own its
-        // own ref (tag-dispatched union incref, a no-op on int/float/bool),
-        // mirroring the pointer path above; an owned box temporary already
-        // carries the +1 the dict adopts.
+        // Any/Union value is a {tag, payload} box; dragon_dict_set_tagged wants both
+        // extracted (passing the box raw where i64 is expected is an LLVM verify failure). RC: incref a borrowed source's payload; an owned box temp already owns its +1.
         if (val->getType() == impl_->boxType) {
             llvm::Value* btag = impl_->boxTag(val, "dv.tag");
             llvm::Value* bpayload = impl_->boxPayloadI64(val, "dv.payload");
@@ -376,12 +333,11 @@ void CodeGen::visit(DictExpr& node) {
     impl_->lastValue = dict;
 }
 void CodeGen::visit(SetExpr& node) {
-    // Create a new empty set, then add each element
-    // Dragon set layout (runtime): { int64_t* buckets, uint8_t* states, int64_t capacity, int64_t count }
-    // Uses open addressing with linear probing; values stored as i64
+    // Set layout (runtime): { int64_t* buckets, uint8_t* states, capacity, count }; open
+    // addressing with linear probing, values stored as i64.
 
     // Determine element tag from first element (if any)
-    int64_t elemTag = 0; // TAG_INT default
+    int64_t elemTag = TAG_INT; // TAG_INT default
     if (!node.elements.empty()) {
         auto* first = node.elements[0].get();
         if (first->type) {
@@ -390,11 +346,11 @@ void CodeGen::visit(SetExpr& node) {
         if (elemTag == 0) {
             // Fallback: check AST node type
             if (dynamic_cast<StringLiteral*>(first))
-                elemTag = 1; // TAG_STR
+                elemTag = TAG_STR; // TAG_STR
             else if (dynamic_cast<ListExpr*>(first) || dynamic_cast<ListCompExpr*>(first))
-                elemTag = 5; // TAG_LIST
+                elemTag = TAG_LIST; // TAG_LIST
             else if (dynamic_cast<DictExpr*>(first) || dynamic_cast<DictCompExpr*>(first))
-                elemTag = 6; // TAG_DICT
+                elemTag = TAG_DICT; // TAG_DICT
         }
     }
 
@@ -411,12 +367,8 @@ void CodeGen::visit(SetExpr& node) {
     for (auto& elem : node.elements) {
         elem->accept(*this);
         llvm::Value* val = impl_->lastValue;
-        // dragon_set_add INCREFS to take the set's own reference, so an owned
-        // element temporary (a concat / str() result, or the dup ensureHeapString
-        // just made for a literal) carries a +1 the set does not consume - it must
-        // be released after the add or the set literal leaks one element per build.
-        // Mirrors the set.add method (CallMethods.cpp). A borrowed element (a named
-        // local / field) has no droppable +1 and is skipped by ownedTempDrainKind.
+        // dragon_set_add increfs (doesn't consume), so an owned element temp's +1 must be
+        // released after the add or the literal leaks one ref per build (mirrors set.add in CallMethods.cpp). Borrowed elements have no droppable +1.
         llvm::Value* ownedElem = nullptr;
         Impl::VarKind elemDk = Impl::VarKind::Other;
         // Convert to i64 for storage

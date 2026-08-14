@@ -5,10 +5,6 @@
 
 namespace dragon {
 
-//===----------------------------------------------------------------------===//
-// Lexer Implementation
-//===----------------------------------------------------------------------===//
-
 struct Lexer::Impl {
     std::string_view source;
     LexerOptions options;
@@ -142,10 +138,6 @@ bool Lexer::hasErrors() const {
     return false;
 }
 
-//===----------------------------------------------------------------------===//
-// Character Helpers
-//===----------------------------------------------------------------------===//
-
 char Lexer::advance() {
     char c = impl_->source[impl_->current++];
     if (c == '\n') {
@@ -184,10 +176,6 @@ bool Lexer::isAtEnd(size_t offset) const {
     return (impl_->current + offset) >= impl_->source.length();
 }
 
-//===----------------------------------------------------------------------===//
-// Token Creation
-//===----------------------------------------------------------------------===//
-
 Token Lexer::makeToken(TokenType type) {
     SourceLocation loc{impl_->options.filename, impl_->line,
                        impl_->startColumn, impl_->start};
@@ -206,10 +194,6 @@ Token Lexer::errorToken(const std::string& message) {
     addDiagnostic(LexerDiagnostic::Level::Error, message);
     return makeToken(TokenType::ERROR);
 }
-
-//===----------------------------------------------------------------------===//
-// Main Scanner
-//===----------------------------------------------------------------------===//
 
 Token Lexer::scanToken() {
     char c = advance();
@@ -283,10 +267,8 @@ Token Lexer::scanToken() {
         case ',': return makeToken(TokenType::COMMA);
         case ';': return makeToken(TokenType::SEMICOLON);
 
-        // Colon: : or := or :{ (template content alias inside !{} block).
-        // `:{` is only special when CodeGen is re-lexing the body of a
-        // template `!{...}` block-interpolation - outside that context the
-        // colon keeps its normal meaning (annotation, slice, dict, etc.).
+        // Colon: : or := or :{ (template content alias inside !{} block). `:{`
+        // is only special while CodeGen re-lexes a `!{...}` block-interpolation body; otherwise colon keeps its normal meaning.
         case ':':
             if (match('=')) return makeToken(TokenType::WALRUS);
             if (impl_->options.inTemplateInterpolation && peekChar() == '{') {
@@ -409,10 +391,6 @@ Token Lexer::scanToken() {
     return errorToken(std::string("Unexpected character '") + c + "'");
 }
 
-//===----------------------------------------------------------------------===//
-// String Scanner
-//===----------------------------------------------------------------------===//
-
 Token Lexer::scanString(char quote) {
     // Check for triple-quoted string
     bool isTriple = false;
@@ -463,10 +441,6 @@ Token Lexer::scanString(char quote) {
 
     return errorToken("Unterminated string literal");
 }
-
-//===----------------------------------------------------------------------===//
-// Number Scanner
-//===----------------------------------------------------------------------===//
 
 Token Lexer::scanNumber() {
     // The first digit has already been consumed by scanToken()
@@ -535,10 +509,6 @@ Token Lexer::scanNumber() {
     return makeToken(isFloat ? TokenType::FLOAT : TokenType::INTEGER);
 }
 
-//===----------------------------------------------------------------------===//
-// Identifier Scanner
-//===----------------------------------------------------------------------===//
-
 Token Lexer::scanIdentifier() {
     while (!isAtEnd() && (std::isalnum(peekChar()) || peekChar() == '_')) {
         advance();
@@ -578,13 +548,8 @@ Token Lexer::scanIdentifier() {
                 return scanTemplateBody(contentType);
             }
             if (!isAtEnd() && peekChar() == '(') {
-                // template[X]("file.html") - typed file template
-                // Emit TEMPLATE token with contentType prefix, empty body.
-                // Parser will detect '(' and handle the file path.
-                // Restore to just after ']' so parser sees '(' next.
-                // Actually, we need a different approach: emit the contentType
-                // as a TEMPLATE token and let Parser handle the '(' consumption.
-                // Use contentType + \0 + empty body to signal typed file template.
+                // template[X]("file.html") - typed file template: emit contentType
+                // + '\0' + empty body as a TEMPLATE token; Parser handles the '(' and file path.
                 std::string lexeme = contentType;
                 lexeme += '\0';
                 SourceLocation loc{impl_->options.filename, impl_->line,
@@ -603,9 +568,8 @@ Token Lexer::scanIdentifier() {
 }
 
 Token Lexer::scanTemplateContentBody() {
-    // We are sitting on '{' (the ':' was already consumed by scanToken).
-    // Same brace-depth scan as scanTemplateBody - `!{...}` interpolations
-    // are preserved as raw bytes for the recursive CodeGen pass.
+    // Sitting on '{' (':' already consumed by scanToken); same brace-depth scan
+    // as scanTemplateBody - `!{...}` interpolations stay raw bytes for the recursive CodeGen pass.
     advance(); // consume '{'
 
     int depth = 1;
@@ -621,10 +585,6 @@ Token Lexer::scanTemplateContentBody() {
             if (depth > 0) body += c;
             advance();
         } else {
-            if (c == '\n') {
-                impl_->line++;
-                impl_->column = 0;
-            }
             body += c;
             advance();
         }
@@ -657,10 +617,6 @@ Token Lexer::scanTemplateBody(const std::string& contentType) {
             }
             advance();
         } else {
-            if (c == '\n') {
-                impl_->line++;
-                impl_->column = 0;
-            }
             body += c;
             advance();
         }
@@ -684,10 +640,6 @@ Token Lexer::scanTemplateBody(const std::string& contentType) {
                        impl_->startColumn, impl_->start};
     return Token(TokenType::TEMPLATE, std::move(lexeme), loc);
 }
-
-//===----------------------------------------------------------------------===//
-// Whitespace and Comments
-//===----------------------------------------------------------------------===//
 
 void Lexer::skipWhitespaceAndComments() {
     while (!isAtEnd()) {
@@ -722,10 +674,6 @@ void Lexer::skipWhitespaceAndComments() {
         }
     }
 }
-
-//===----------------------------------------------------------------------===//
-// Indentation (Python mode)
-//===----------------------------------------------------------------------===//
 
 void Lexer::handleIndentation() {
     // Count leading spaces/tabs

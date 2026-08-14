@@ -9,62 +9,51 @@
 
 namespace dragon {
 
-/// A resolved module with its parsed AST
+/// A resolved module with its parsed AST.
 struct ResolvedModule {
-    std::string name;         // module name (e.g., "math_utils")
-    std::string filepath;     // resolved file path
+    std::string name;
+    std::string filepath;
     bool isDragon = false;    // .dr vs .py
-    // Owning egg package name when the module resolved out of `.drx/<pkg>/`
-    // (D022); empty for the root project's own sources and the stdlib. This is
-    // the anchor a future capability-enforcement pass keys off (D022 §8).
+    // Owning egg package if resolved from `.drx/<pkg>/` (D022); "" for
+    // root-project/stdlib sources. Anchor for a future capability-enforcement pass.
     std::string packageOrigin;
     std::unique_ptr<Module> ast;
 };
 
-/// Result of building the import graph
+/// Result of building the import graph.
 struct ImportGraph {
-    /// Modules in topological order (dependencies first, entry module last)
-    std::vector<ResolvedModule> modules;
+    std::vector<ResolvedModule> modules;  // topological order, dependencies first
     bool hasCycle = false;
     std::vector<std::string> cycleParticipants;
 };
 
-/// Options for module resolution
+/// Options for module resolution.
 struct ModuleResolverOptions {
-    /// Additional search paths for modules (from -I flags)
-    std::vector<std::string> searchPaths;
-    /// Directory of the entry source file (for relative imports)
-    std::string sourceDir;
-    /// Project-local egg directory (`.drx/`, D022). Searched as a tier between
-    /// sourceDir and searchPaths/stdlib. Empty disables the tier.
+    std::vector<std::string> searchPaths;  // -I flags
+    std::string sourceDir;                 // entry file's dir, for relative imports
+    // Project-local egg dir (`.drx/`, D022): searched between sourceDir and
+    // searchPaths/stdlib. "" disables the tier.
     std::string drxDir;
-    /// Enable searching in Python site-packages
     bool enableSitePackages = false;
-    /// Explicit site-packages path (auto-detected if empty and enabled)
-    std::string sitePackagesPath;
+    std::string sitePackagesPath;  // auto-detected if empty and enabled
 };
 
-/// Resolves module imports by finding files, lexing, and parsing them.
-///
-/// Builds a full import graph with cycle detection and topological ordering.
+/// Resolves imports by finding/lexing/parsing files into a topologically
+/// ordered import graph with cycle detection.
 class ModuleResolver {
 public:
     explicit ModuleResolver(ModuleResolverOptions options = {});
 
-    /// Find the file for a module name. Returns empty string if not found.
+    /// Finds the file for a module name; "" if not found.
     std::string findModuleFile(const std::string& moduleName) const;
 
-    /// The owning egg package for a resolved filepath, or "" if it isn't under
-    /// `.drx/` (root project / stdlib). Used to tag ResolvedModule.packageOrigin.
+    /// Owning egg package for a filepath, or "" if not under `.drx/`.
     std::string packageOriginFor(const std::string& filepath) const;
 
-    /// Build the import graph starting from an already-parsed entry module.
-    /// Walks import statements, resolves each to a file, lexes/parses them,
-    /// and recursively processes their imports.
-    /// Returns modules in topological order (dependencies first).
+    /// Walks imports from an already-parsed entry module, resolving/lexing/
+    /// parsing each recursively. Returns modules dependencies-first.
     ImportGraph buildGraph(Module& entryModule, const std::string& entryFile);
 
-    /// Get errors encountered during resolution
     const std::vector<std::string>& errors() const { return errors_; }
     bool hasErrors() const { return !errors_.empty(); }
 
@@ -75,8 +64,8 @@ private:
              std::map<std::string, Color>& colors,
              ImportGraph& graph);
 
-    /// Resolve a `from X import Y, Z` statement: enqueue source module X plus
-    /// any Y/Z that resolve to submodule files (Python's submodule fallback).
+    /// Enqueues source module X for `from X import Y, Z`, plus any Y/Z that
+    /// resolve to submodule files (Python's submodule fallback).
     void enqueueFromImport(const FromImportStmt& fromImp,
                             std::map<std::string, Color>& colors,
                             ImportGraph& graph);

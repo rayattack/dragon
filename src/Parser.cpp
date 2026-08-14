@@ -8,11 +8,6 @@
 
 namespace dragon {
 
-//===----------------------------------------------------------------------===//
-// Parser Implementation (Parser::Impl + literal/docstring helpers now live in
-// ParserImpl.h, shared with ParserStmts.cpp)
-//===----------------------------------------------------------------------===//
-
 Parser::Parser(std::vector<Token> tokens, ParserOptions options)
     : impl_(std::make_unique<Impl>()) {
     impl_->tokens = std::move(tokens);
@@ -107,9 +102,8 @@ std::vector<TemplatePart> Parser::parseTemplateBody(
                 if (depth > 0) j++;
             }
             if (depth > 0) {
-                // Ran off the end of the body: the tail would otherwise be
-                // sub-parsed as if it were a complete interpolation and any
-                // failure silently dropped from the rendered output.
+                // Ran off the end of the body: the tail would otherwise be sub-parsed
+                // as if complete and any failure silently dropped from the rendered output.
                 reportError("unterminated '!{' interpolation starting at line " +
                             std::to_string(lineOf(bangPos)) +
                             " of the template body: no matching '}' before the "
@@ -125,20 +119,26 @@ std::vector<TemplatePart> Parser::parseTemplateBody(
             std::string exprText = val.substr(start, j - start);
             i = j + 1;
 
-            // Pipe filter: rightmost top-level '|' (outside any (), [], {}).
-            // Braces matter for block interpolations whose inner `!{e | raw}`
-            // pipes live at brace-depth > 0.
+            // Pipe filter: rightmost top-level '|' (outside any (), [], {}). Braces
+            // matter for block interpolations whose inner `!{e | raw}` pipes sit at brace-depth > 0.
             std::string filterName;
             std::string parseText = exprText;
             {
                 int parenDepth = 0;
                 int lastPipe = -1;
+                char quote = 0;
                 for (size_t fi = 0; fi < parseText.size(); fi++) {
-                    if (parseText[fi] == '(' || parseText[fi] == '[' ||
-                        parseText[fi] == '{') parenDepth++;
-                    else if (parseText[fi] == ')' || parseText[fi] == ']' ||
-                             parseText[fi] == '}') parenDepth--;
-                    else if (parseText[fi] == '|' && parenDepth == 0) {
+                    char pc = parseText[fi];
+                    if (quote) {
+                        if (pc == '\\') { fi++; continue; }
+                        if (pc == quote) quote = 0;
+                        continue;
+                    }
+                    if (pc == '"' || pc == '\'') { quote = pc; continue; }
+                    if (pc == '(' || pc == '[' || pc == '{') parenDepth++;
+                    else if (pc == ')' || pc == ']' || pc == '}') {
+                        if (parenDepth > 0) parenDepth--;
+                    } else if (pc == '|' && parenDepth == 0) {
                         lastPipe = (int)fi;
                     }
                 }
@@ -168,10 +168,8 @@ std::vector<TemplatePart> Parser::parseTemplateBody(
                 }
             }
 
-            // Sub-lex + sub-parse the interpolation body. inTemplateInterpolation
-            // makes `:{` a TEMPLATE_CONTENT_OPEN so block-mode statements can
-            // hold `:{ ... }` content fragments (D017 Phase 4.B). Nested content
-            // aliases created below recurse through primary() -> parseTemplateBody.
+            // Sub-lex + sub-parse the interpolation body; inTemplateInterpolation
+            // makes `:{` a TEMPLATE_CONTENT_OPEN for `:{ ... }` fragments (D017 Phase 4.B), recursing through primary() -> parseTemplateBody.
             LexerOptions fLexOpts;
             fLexOpts.filename = "<template>";
             fLexOpts.inTemplateInterpolation = true;
@@ -190,8 +188,7 @@ std::vector<TemplatePart> Parser::parseTemplateBody(
             p.isSpread = isSpread;
 
             // Expression mode = exactly one ExprStmt; anything else is a block
-            // interpolation (`for`/`if` + `:{}` fragments). parseModule handles
-            // both and yields an AST the later stages walk uniformly.
+            // interpolation (`for`/`if` + `:{}` fragments), both walked uniformly later.
             if (fModule && !fParser.hasErrors()) {
                 if (fModule->body.size() == 1) {
                     if (auto* es = dynamic_cast<ExprStmt*>(fModule->body[0].get())) {
@@ -229,13 +226,8 @@ std::vector<TemplatePart> Parser::parseTemplateBody(
             if (p.expr) p.expr->setLocation(loc);
             out.push_back(std::move(p));
         } else {
-            // Literal text run - stored raw (template text is literal by design;
-            // escapes are NOT processed, matching the original CodeGen scan).
-            // The break condition must mirror the dispatcher above exactly:
-            // stop only at `!{`, `!!{`, or `!!}` starts. A bare `!!` (the JS
-            // boolean-coercion idiom) is literal text; breaking on it left `i`
-            // unadvanced against a dispatcher that consumed nothing - an
-            // infinite loop.
+            // Literal text run, stored raw (escapes aren't processed). Must mirror
+            // the dispatcher's break condition exactly: a bare `!!` (JS boolean-coercion) is literal, not a break - breaking there left `i` unadvanced, an infinite loop.
             size_t start = i;
             while (i < val.size()) {
                 if (val[i] == '!' && i + 1 < val.size()) {
@@ -267,10 +259,6 @@ bool Parser::hasErrors() const {
     }
     return false;
 }
-
-//===----------------------------------------------------------------------===//
-// Token Management
-//===----------------------------------------------------------------------===//
 
 Token Parser::advance() {
     if (!isAtEnd()) impl_->current++;
@@ -323,20 +311,14 @@ void Parser::skipNewlines() {
     while (check(TokenType::NEWLINE)) advance();
 }
 
-//===----------------------------------------------------------------------===//
-// Expression Parsing
-//===----------------------------------------------------------------------===//
-
-// RAII guard for the parser's recursion-depth counter. Increments on entry
-// to a deep recursion sink (expression/statement) and decrements on scope
-// exit, so even error-recovery early returns can't leak depth.
+// RAII guard for the recursion-depth counter: increments on entry to a deep
+// recursion sink, decrements on scope exit, so error-recovery early returns can't leak depth.
 
 std::unique_ptr<Expr> Parser::expression() {
     ParserRecursionGuard guard(impl_->recursionDepth);
     if (impl_->recursionDepth > Impl::kMaxRecursionDepth) {
-        // Cap fired: bail with a benign placeholder so callers (which don't
-        // null-check uniformly) keep working. Synchronize to skip the rest
-        // of the over-nested expression and avoid re-tripping immediately.
+        // Cap fired: bail with a benign placeholder since callers don't all
+        // null-check; synchronize to skip the rest of the over-nested expression and avoid re-tripping.
         error(peek(), "expression nesting too deep");
         auto stub = std::make_unique<IntegerLiteral>();
         stub->setLocation(peek().location());
@@ -371,9 +353,8 @@ std::unique_ptr<Expr> Parser::orExpr() {
         bin->left = std::move(expr);
         bin->op = previous();
         bin->setLocation(bin->op.location());
-        // After a binary operator the parser is committed to a right operand,
-        // so a NEWLINE between the operator and the next operand is purely
-        // cosmetic line continuation (trailing-operator rule).
+        // After a binary operator the parser is committed to a right operand, so a
+        // NEWLINE before it is purely cosmetic line continuation (trailing-operator rule).
         skipNewlines();
         bin->right = andExpr();
         expr = std::move(bin);
@@ -409,13 +390,8 @@ std::unique_ptr<Expr> Parser::notExpr() {
 std::unique_ptr<Expr> Parser::comparison() {
     auto expr = asCast();
 
-    // Recognize a comparison operator at the current cursor, including the
-    // two-word forms `not in` and `is not`. On a match the cursor is advanced
-    // past the operator and `out` is filled with a single Token whose type is
-    // one of {LESS, GREATER, LESS_EQUAL, GREATER_EQUAL, EQUAL_EQUAL, NOT_EQUAL,
-    // IN, IS, NOT_IN, IS_NOT}. The two-word forms synthesize a Token with the
-    // location of the first word and lexeme "not in" / "is not", so AST
-    // printing and diagnostics render them faithfully.
+    // Recognizes a comparison op at the cursor, including two-word `not in`/`is
+    // not`; advances past it and fills `out` with a Token (synthesized, first-word location, combined lexeme) so diagnostics render it faithfully.
     auto tryConsumeCompOp = [&](Token& out) -> bool {
         TokenType t = peek().type();
         switch (t) {
@@ -486,11 +462,8 @@ std::unique_ptr<Expr> Parser::comparison() {
     return chain;
 }
 
-// ADR 054 - conformance cast: `dog as Amazing` / `dog as {Amazing, Speaker}`.
-// Binds tighter than comparisons (`d as A == e` compares the cast result) and
-// looser than arithmetic; .dr mode only (`as` in .py stays statement syntax).
-// A with-item's trailing `as name` binder also lands here first -
-// withStatement() unwraps that shape back into the binder (see AsCastExpr).
+// ADR 054 conformance cast (`dog as Amazing` / `dog as {A, B}`): binds tighter
+// than comparisons, looser than arithmetic, .dr-only. A with-item's trailing `as name` also lands here; withStatement() unwraps it back to the binder.
 std::unique_ptr<Expr> Parser::asCast() {
     auto expr = bitwiseOr();
     if (!impl_->options.isDragonFile) return expr;
@@ -661,9 +634,8 @@ std::unique_ptr<Expr> Parser::call() {
         if (match(TokenType::LEFT_PAREN)) {
             expr = finishCall(std::move(expr));
         } else if (match(TokenType::DOT)) {
-            // Locate at the start of the postfix chain (the object), falling
-            // back to the '.' token. Without this, `del obj.attr` diagnostics
-            // (and any error on an attribute access) report at 0:0.
+            // Locate at the postfix chain's start (the object), falling back to the
+            // '.' token; without this, `del obj.attr` and similar diagnostics report at 0:0.
             SourceLocation loc = expr->location();
             if (loc.line == 0) loc = previous().location();
             auto attr = std::make_unique<AttributeExpr>();
@@ -704,11 +676,8 @@ std::unique_ptr<Expr> Parser::call() {
                 sub->index = std::move(slice);
                 expr = std::move(sub);
             } else {
-                // Regular subscript. Comma-separated indices (`a[i, j]`) form a
-                // tuple index - Python parity, and the form a multi-parameter
-                // generic instantiation `pair[int, str](...)` lands on (the
-                // TypeChecker reads the tuple's elements as type arguments when
-                // the object is a generic callable).
+                // Regular subscript. Comma-separated indices (`a[i, j]`) form a tuple
+                // index (Python parity); a generic instantiation like `pair[int, str](...)` also lands here, TypeChecker reading the tuple as type args.
                 auto sub = std::make_unique<SubscriptExpr>();
                 sub->setLocation(subLoc);
                 sub->object = std::move(expr);
@@ -737,16 +706,14 @@ std::unique_ptr<Expr> Parser::call() {
 std::unique_ptr<Expr> Parser::finishCall(std::unique_ptr<Expr> callee) {
     auto callExpr = std::make_unique<CallExpr>();
     callExpr->callee = std::move(callee);
-    // The call expression starts where its callee does; without this the
-    // CallExpr defaulted to 0:0, so any diagnostic reported on the call node
-    // itself (e.g. an unsolved generic type parameter) had no source location.
+    // The call starts where its callee does; without this CallExpr defaulted to
+    // 0:0, so diagnostics on the call node (e.g. an unsolved generic type param) had no location.
     callExpr->setLocation(callExpr->callee->location());
 
     if (!check(TokenType::RIGHT_PAREN)) {
         do {
-            // **expr - dict/kwargs spread (e.g. Customer(**row)). Represented as
-            // a kwArg with an empty name (the spread sentinel), mirroring the
-            // null-key DictExpr convention for `{**other}`.
+            // **expr - dict/kwargs spread (e.g. Customer(**row)): a kwArg with an
+            // empty name (spread sentinel), mirroring the null-key DictExpr convention for `{**other}`.
             if (match(TokenType::POWER)) {
                 callExpr->kwArgs.emplace_back("", expression());
             // *expr - positional spread (e.g. total(*xs)). Wrapped in StarredExpr.
@@ -772,11 +739,8 @@ std::unique_ptr<Expr> Parser::finishCall(std::unique_ptr<Expr> callee) {
                 callExpr->args.push_back(std::move(dubbed));
             } else if (check(TokenType::IDENTIFIER) && peek().lexeme() == "own" &&
                        peekNext().type() == TokenType::IDENTIFIER) {
-                // `f(own x)` - move argument (docs/002 2.8): the binding's +1
-                // transfers to the callee and x is Moved afterwards. A move
-                // is of a BINDING only; own field/element reads cannot move
-                // (their owner is the container). Ordered after the kwarg
-                // branch so `f(own=3)` stays a keyword argument.
+                // `f(own x)` - move argument (docs/002 2.8): the binding's +1 transfers
+                // to the callee, x becomes Moved. Only a BINDING can move (not a field/element); ordered after the kwarg branch so `f(own=3)` stays a keyword arg.
                 advance();  // 'own'
                 auto moved = std::make_unique<NameExpr>();
                 moved->name = std::string(
@@ -895,15 +859,8 @@ std::unique_ptr<Expr> Parser::primary() {
         return expr;
     }
 
-    // D017 Phase 4.B - `:{ ... }` content alias inside a `!{}` block-interp.
-    // The Lexer only emits TEMPLATE_CONTENT_OPEN when re-lexing the body of
-    // an !{} block (LexerOptions.inTemplateInterpolation). The body has
-    // already been captured as the token's lexeme. ContentType is left empty
-    // here - CodeGen inherits the enclosing template's type from its
-    // context stack at emit time. `isContentAlias` distinguishes this from
-    // an explicit untyped `template { ... }`, which matters at statement
-    // position: a `:{}` ExprStmt appends to the block buffer; a regular
-    // ExprStmt does not.
+    // D017 Phase 4.B: `:{ ... }` content alias inside a `!{}` block-interp (Lexer
+    // emits TEMPLATE_CONTENT_OPEN only there). contentType stays empty (CodeGen inherits it at emit time); isContentAlias makes a `:{}` ExprStmt append to the block buffer instead of acting like a normal one.
     if (match(TokenType::TEMPLATE_CONTENT_OPEN)) {
         auto loc = previous().location();
         auto expr = std::make_unique<TemplateExpr>();
@@ -960,10 +917,8 @@ std::unique_ptr<Expr> Parser::primary() {
         } else if (start < lexeme.size()) {
             lit->value = std::string(lexeme.substr(start + 1, lexeme.size() - start - 2));
         }
-        // Parse f-string interpolations once, here, into a structured AST so
-        // Sema (capture analysis), TypeChecker, and CodeGen all walk the same
-        // tree - without each stage re-lexing the raw text. See Decision 030
-        // (one source of truth) and the closure-capture fix.
+        // Parse f-string interpolations once into a structured AST so Sema,
+        // TypeChecker, and CodeGen all walk the same tree instead of re-lexing raw text (Decision 030, the closure-capture fix).
         if (lit->isFString) {
             const std::string& v = lit->value;
             std::string buf;
@@ -1164,10 +1119,6 @@ std::unique_ptr<Expr> Parser::primary() {
     return nullptr;
 }
 
-//===----------------------------------------------------------------------===//
-// Literal Parsers
-//===----------------------------------------------------------------------===//
-
 std::unique_ptr<Expr> Parser::parseLambda() {
     auto lam = std::make_unique<LambdaExpr>();
     if (match(TokenType::LEFT_PAREN)) {
@@ -1273,11 +1224,8 @@ std::unique_ptr<Expr> Parser::parseList() {
 }
 
 std::unique_ptr<Expr> Parser::parseDict() {
-    // Newlines inside a { } collection literal are insignificant, but the lexer
-    // deliberately does NOT suppress them here the way it does inside ( ) and
-    // [ ] - it cannot tell a dict/set literal from a code block. So skip them at
-    // every structural point, giving multi-line dict/set literals the implicit
-    // line continuation developers expect.
+    // Newlines inside `{ }` are insignificant, but the lexer can't suppress them
+    // there (can't tell a dict/set literal from a code block), so skip them at every structural point for the implicit line continuation developers expect.
     skipNewlines();
     if (match(TokenType::RIGHT_BRACE)) {
         return std::make_unique<DictExpr>();
@@ -1373,10 +1321,8 @@ std::unique_ptr<Expr> Parser::parseDict() {
         // Check for dict comprehension: {k: v for k in iterable}
         if (check(TokenType::FOR)) {
             auto comp = std::make_unique<DictCompExpr>();
-            // In a comprehension the first "key" is the loop variable, not a
-            // literal field name. If it was greedily parsed as a bare-key string
-            // literal (the `.dr` `{name: v}` shorthand), rebuild it as a NameExpr
-            // so `{k: ... for k in xs}` reads k's value, not the string "k".
+            // In a comprehension the first "key" is the loop var, not a literal field
+            // name; if greedily parsed as a bare-key string (the `.dr` `{name: v}` shorthand), rebuild it as a NameExpr so `{k: ... for k in xs}` reads k's value.
             if (firstWasBareKey) {
                 auto keyName = std::make_unique<NameExpr>();
                 keyName->name = firstBareName;
@@ -1516,10 +1462,5 @@ std::unique_ptr<Expr> Parser::parseYield() {
     }
     return yld;
 }
-
-//===----------------------------------------------------------------------===//
-// Statement Parsing
-//===----------------------------------------------------------------------===//
-
 
 } // namespace dragon

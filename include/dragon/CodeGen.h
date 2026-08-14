@@ -45,10 +45,8 @@ struct CodeGenOptions {
     /// Generate debug info
     bool debugInfo = false;
 
-    /// 4.6: emit `__builtin_*_overflow` intrinsics for int +/-/*/** so that
-    /// silent 64-bit wraparound becomes a runtime OverflowError instead.
-    /// Off by default; opt-in via `--check-overflow` for correctness-critical
-    /// programs that don't want CPython's BigInt cost.
+    /// 4.6: emit `__builtin_*_overflow` intrinsics so wraparound raises
+    /// OverflowError. Off by default; opt-in via `--check-overflow`.
     bool checkOverflow = false;
 
     /// Output filename
@@ -78,64 +76,41 @@ struct CodeGenOptions {
     /// Extra library search paths (e.g. "/usr/local/lib")
     std::vector<std::string> librarySearchPaths;
 
-    /// ADR 041 - C/C++ shim sources to compile and link (--cc-source). Each is
-    /// compiled with `c++` (.cpp/.cc/.cxx/.C) or `cc` (otherwise) to a temp
-    /// object and added to the final link; the link driver switches to `c++`
-    /// when any C++ shim is present.
+    /// ADR 041: C/C++ shim sources to compile and link (--cc-source), each
+    /// compiled to a temp object; the link driver switches to `c++` if any is C++.
     std::vector<std::string> ccSources;
 
-    /// D031 - path to the platform webview shell source
-    /// (platform/webview_linux.cpp), resolved by the Driver from the
-    /// platform/ tree installed beside the stdlib. When the
-    /// program references dragon_webview_* externs (`import ui`),
-    /// linkExecutable compiles it in like a --cc-source shim and links
-    /// webkit2gtk via pkg-config. Empty = not resolved (linking a UI program
-    /// then fails with a clear error instead of undefined references).
+    /// D031: platform/webview_linux.cpp, resolved by the Driver; compiled+linked
+    /// (webkit2gtk) when the program imports ui. Empty fails link with a clear error.
     std::string webviewShimPath;
 
-    /// D031 - the program's assets/ directory (next to the entry file),
-    /// resolved by the Driver. When the program imports ui, linkExecutable
-    /// embeds every file in it into the binary (a generated TU exporting
-    /// dragon_ui_assets[]) for the in-process app:// scheme handler. Empty =
-    /// no assets directory; an empty table is emitted so the shell links.
+    /// D031: the program's assets/ dir, embedded into the binary for the
+    /// app:// scheme handler when it imports ui. Empty = an empty table is emitted.
     std::string assetsDir;
 
     /// Include directories (-I) forwarded to the shim compiler for --cc-source.
     std::vector<std::string> includePaths;
 };
 
-/// LLVM IR code generator for Dragon
-///
 /// Visits the type-checked AST and produces LLVM IR.
 class CodeGen : public ASTVisitor {
 public:
     explicit CodeGen(CodeGenOptions options = {});
     ~CodeGen();
 
-    /// Generate LLVM IR for a module
     bool generate(dragon::Module& module);
 
-    /// Generate LLVM IR for a multi-file project
+    /// Generates IR for a multi-file project (entry plus its dependency modules).
     bool generate(dragon::Module& entryModule,
                   const std::vector<dragon::Module*>& depModules);
 
-    /// Get the generated LLVM module
     llvm::Module* getLLVMModule();
-
-    /// Write IR to file (.ll)
-    bool writeIR(const std::string& filename);
-
-    /// Write bitcode to file (.bc)
-    bool writeBitcode(const std::string& filename);
-
-    /// Compile to object file (.o)
+    bool writeIR(const std::string& filename);       // .ll
+    bool writeBitcode(const std::string& filename);  // .bc
     bool compileToObject(const std::string& filename);
-
-    /// Link and create executable
     bool linkExecutable(const std::string& outputFile,
                         const std::string& objectFile);
 
-    /// Get diagnostics
     const std::vector<CodeGenDiagnostic>& diagnostics() const;
     bool hasErrors() const;
 
@@ -179,8 +154,7 @@ public:
     void visit(TemplateExpr& node) override;
     void visit(TemplateFileExpr& node) override;
     // D032: parameter-extraction lowering for content types declaring `build`
-    // (SQL). Constant-folds the canonical $$N text + FNV-1a hash and emits a
-    // native-typed param pack; sets lastValue to a `contentType` instance.
+    // (SQL); folds canonical $$N text + FNV-1a hash into a native param pack.
     void emitSqlTemplate(TemplateExpr& node, const std::string& contentType);
     void visit(ExprStmt& node) override;
     void visit(AssignStmt& node) override;
@@ -211,64 +185,33 @@ public:
     void visit(TypeAliasStmt& node) override;
     void visit(dragon::Module& node) override;
 
-    // Internal dispatch helpers (split across codegen/*.cpp files)
+    // Internal dispatch helpers, split across codegen/*.cpp.
     bool emitBuiltinCall(CallExpr& node, const std::string& name);
     bool emitMethodCall(CallExpr& node, AttributeExpr& attr);
-    // Emit a generator function: an inner body fn (a `gen` ptr, an optional
-    // leading `self`, then the user params) plus the body of `wrapper`, which
-    // creates and returns the generator object. Shared by free-function
-    // generators (hasSelf=false) and generator methods (hasSelf=true, with
-    // `selfClass` typing `self` for field access). `userParamStart` is where the
-    // user params begin in node.params (skips an explicit self/cls). `siteName`
-    // is the mangled symbol used to name the body fn / args struct. Defined in
-    // codegen/Functions.cpp.
+    // Emits the generator body fn plus `wrapper`'s body (creates/returns the
+    // generator object). Shared by free functions and methods (hasSelf, selfClass).
     void emitGeneratorFn(FunctionDecl& node, llvm::Function* wrapper,
                          const std::string& siteName, bool hasSelf,
                          const std::string& selfClass, size_t userParamStart);
-    // Emit a call to a variadic (`*args`/`**kwargs`) function: packs the
-    // trailing positional args into a monomorphized list and the keyword args
-    // into a dict, per the callee's VarArgInfo, then emits the call and sets
-    // lastValue. `func` must be a variadic callee (present in funcVarArgInfo).
-    // Shared by the same-module/imported NameExpr path and the module-qualified
-    // (`mod.fn(...)`) path so both lower varargs identically.
+    // Calls a variadic (`*args`/`**kwargs`) function: packs trailing positional
+    // args into a list and kwargs into a dict per VarArgInfo, then calls.
     void emitVarArgCall(llvm::Function* func, CallExpr& node);
-    // C9-B call-site spread (`*tuple` / `*list` / `**dict`). callHasSpread is
-    // the cheap detector every call path uses to decide whether to route to the
-    // spread machinery. emitSpreadDispatch resolves a NameExpr / module-attr
-    // callee (free function or class ctor) and emits the expanded call, or
-    // returns false for an unsupported spread target (so the caller diagnoses).
-    // emitSpreadCall is the shared core: given a resolved llvm::Function and any
-    // already-evaluated prefix args (e.g. `self`), it expands node.args (with
-    // *spread) and node.kwArgs (with **spread) into the full positional vector,
-    // honoring the box/coerce/refcount/default-fill discipline, then emits the
-    // call and sets lastValue. Spread elements are BORROWED from the source
-    // container (no argTemps entry) - the callee increfs whatever it retains.
+    // C9-B call-site spread (`*tuple`/`*list`/`**dict`): callHasSpread routes,
+    // emitSpreadDispatch resolves+emits, emitSpreadCall expands args (borrowed).
     static bool callHasSpread(CallExpr& node);
     static bool callHasStarArg(CallExpr& node);
-    // Total positional arity of a call when every `*spread` is a `*tuple`
-    // (static length). Returns false (arity unknowable at compile time) if any
-    // spread is a `*list` or a `**dict` is present - used to pick an overloaded
-    // ctor's `_new_N` body.
+    // Static positional arity when every spread is a `*tuple`; false (unknowable)
+    // if a `*list` or `**dict` is present. Used to pick an overloaded ctor body.
     static bool spreadStaticArity(CallExpr& node, int64_t& arityOut);
     bool emitSpreadDispatch(CallExpr& node);
     void emitSpreadCall(llvm::Function* func, CallExpr& node,
                         std::vector<llvm::Value*> prefixArgs,
                         const std::string& dispName);
-    // Emit code that prints one argument with NO trailing newline (the `_raw`
-    // runtime printers). Shared by single- and multi-arg print(); the caller
-    // adds spaces between args and one trailing newline.
+    // Prints one argument with no trailing newline (the `_raw` runtime
+    // printers); print() adds inter-arg spaces and the final newline itself.
     void emitPrintArgRaw(Expr* argExpr);
-    // Emit an indirect call to a callable VALUE whose closure-ness is not known
-    // statically (a closure-returning call result, a Callable list element, a
-    // Callable parameter, ...). Discriminates at runtime via the
-    // DragonObjectHeader type_tag: TAG_CLOSURE => unwrap {fn, env} and call
-    // fn(args, env) (with an env==null sub-case for a bare fn wrapped as a
-    // DragonClosure); otherwise call the value as a raw bare fn pointer.
-    // `fnPtrVal` is the evaluated callee, `userFnType` its user-facing signature
-    // (no trailing env), `args` the already-evaluated+coerced user arguments.
-    // Sets lastValue to the (normalized) result, or null for a void callee. When
-    // `ownedClosure` is true the callee is an owned temporary and is decref'd
-    // (tag-gated) after the call. `label` names the emitted basic blocks.
+    // Indirect call to a callable of unknown closure-ness, discriminated via
+    // the type_tag (TAG_CLOSURE unwraps {fn, env}); ownedClosure decrefs after.
     void emitCallableValueCall(llvm::Value* fnPtrVal,
                                llvm::FunctionType* userFnType,
                                const std::vector<llvm::Value*>& args,
@@ -283,3 +226,4 @@ private:
 } // namespace dragon
 
 #endif // DRAGON_CODEGEN_H
+

@@ -85,10 +85,10 @@ void CodeGen::visit(ExprStmt& node) {
 
     if (retTy->isPointerTy()) {
         int64_t tag = impl_->inferPtrValueTag(node.expr.get());
-        if (tag == 1) { // TAG_STR
+        if (tag == TAG_STR) { // TAG_STR
             impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_decref_str"], {impl_->lastValue});
-        } else if (tag == 5 || tag == 6 || tag == 7) { // TAG_LIST/DICT/BYTES
+        } else if (tag == TAG_LIST || tag == TAG_DICT || tag == TAG_BYTES) {
             impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_decref"], {impl_->lastValue});
         }
@@ -136,7 +136,6 @@ void CodeGen::visit(ExprStmt& node) {
     // Heap tags: Str=1, List=5, Dict=6, Bytes=7.
     if (elemTag != 1 && elemTag != 5 && elemTag != 6 && elemTag != 7) return;
 
-    // Convert i64 -> ptr and decref using the proper variant.
     auto* ptr = impl_->builder->CreateIntToPtr(impl_->lastValue, impl_->i8PtrType,
                                                 "pop.discard.ptr");
     if (elemTag == 1) {
@@ -226,7 +225,6 @@ void CodeGen::visit(IfStmt& node) {
         if (membIt == impl_->unionMemberKinds.end()) return Impl::VarKind::Union;
         auto& members = membIt->second;
         if (members.size() == 2) {
-            // Return the other member
             return (members[0] == matchedKind) ? members[1] : members[0];
         }
         return Impl::VarKind::Union;  // 3+ members: stay union in else
@@ -529,7 +527,7 @@ void CodeGen::visit(ReturnStmt& node) {
                 retVal->getType()->isPointerTy()) {
                 if (auto* tagConst = llvm::dyn_cast<llvm::ConstantInt>(tag)) {
                     int64_t t = tagConst->getSExtValue();
-                    if (t == 1) {  // TAG_STR
+                    if (t == TAG_STR) {  // TAG_STR
                         if (!impl_->isOwnedStrResult(retVal))
                             impl_->builder->CreateCall(
                                 impl_->runtimeFuncs["dragon_incref_str"], {retVal});

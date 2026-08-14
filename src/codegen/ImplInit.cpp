@@ -10,22 +10,13 @@ void CodeGen::Impl::init() {
     module = std::make_unique<llvm::Module>("dragon_module", *context);
     builder = std::make_unique<llvm::IRBuilder<>>(*context);
 
-    // Set target triple
     if (options.targetTriple.empty()) {
         options.targetTriple = llvm::sys::getDefaultTargetTriple();
     }
     module->setTargetTriple(llvm::Triple(options.targetTriple));
 
-    // Set the target DataLayout NOW, at module creation, not just before
-    // compileToObject. Otherwise every getStructLayout()/getTypeAllocSize()
-    // call during IR building sees LLVM's default layout (which, for example,
-    // aligns i64 to 4 bytes), while the final object is lowered with the target
-    // layout (i64 aligned to 8). Any numeric offset/size baked into a constant
-    // during IR building - e.g. the class field byte-offsets emitted for
-    // getattr() reflection - would then disagree with where fields actually
-    // land, returning shifted/garbage values. Looking up the target may fail in
-    // odd toolchains; fall back silently to the default (still better than a
-    // mismatch only for exotic targets without a registered backend).
+    // Must be set now, not before compileToObject: struct offsets baked into
+    // IR during building would otherwise mismatch the final target layout.
     {
         std::string tlErr;
         const llvm::Target* tgt = llvm::TargetRegistry::lookupTarget(
@@ -39,7 +30,6 @@ void CodeGen::Impl::init() {
         }
     }
 
-    // Cache common types
     i64Type = llvm::Type::getInt64Ty(*context);
     // intc = C's int: i16 on 16-bit targets, i32 on 32/64-bit (covers x86_64, ARM64, etc.)
     llvm::Triple triple(options.targetTriple);
@@ -55,9 +45,8 @@ void CodeGen::Impl::init() {
     boxType = llvm::StructType::create(
         *context, {i64Type, i64Type}, "dragon.box");
 
-    // TBAA metadata tree for alias analysis.
-    // Tells LLVM that list struct fields (data ptr, size) don't alias
-    // with list element array data, enabling LICM in loops.
+    // TBAA tree for alias analysis: tells LLVM that list struct fields (data
+    // ptr, size) don't alias element array data, enabling LICM in loops.
     tbaaRoot = llvm::MDNode::get(*context, {
         llvm::MDString::get(*context, "Dragon TBAA")});
     tbaaListHeader = llvm::MDNode::get(*context, {
@@ -67,7 +56,6 @@ void CodeGen::Impl::init() {
         llvm::MDString::get(*context, "list data"), tbaaRoot,
         llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i64Type, 0))});
 
-    // Push global scope
     scopes.push_back({});
 }
 
@@ -360,10 +348,8 @@ void CodeGen::Impl::declareRuntimeFunctions() {
     // i64 dragon_dict_get_checked(ptr dict, ptr key, i64 expected_tag)
     getOrDeclareRuntime("dragon_dict_get_checked",
         llvm::FunctionType::get(i64Type, {i8PtrType, i8PtrType, i64Type}, false));
-    // D039 Phase 2: %dragon.box dragon_dict_get_box(ptr dict, ptr key)
-    // Returns {i64 tag, i64 payload} by value (2 registers on AMD64).
-    // Borrow-return contract - caller increfs the payload by tag when storing
-    // into a longer-lived slot.
+    // dragon_dict_get_box returns {tag, payload} by value (2 registers). Borrow
+    // contract: caller increfs the payload by tag before storing it long-lived.
     getOrDeclareRuntime("dragon_dict_get_box",
         llvm::FunctionType::get(boxType, {i8PtrType, i8PtrType}, false));
     // D039 Phase 3: void dragon_print_box(%dragon.box)
@@ -371,23 +357,20 @@ void CodeGen::Impl::declareRuntimeFunctions() {
     getOrDeclareRuntime("dragon_print_box",
         llvm::FunctionType::get(voidType, {boxType}, false));
 
-    // D039 Phase 4: list[Any] runtime ops - per-element {tag, payload}
-    // storage. Matches Go's []interface{} speed model: 16 bytes/elem, single
-    // cache miss per read.
+    // list[Any] runtime ops: per-element {tag, payload} storage, 16 bytes/elem
+    // like Go's []interface{} - single cache miss per read.
     // ptr dragon_list_box_new(i64 capacity)
     getOrDeclareRuntime("dragon_list_box_new",
         llvm::FunctionType::get(i8PtrType, {i64Type}, false));
     // %dragon.box dragon_list_box_get(ptr list, i64 index)
     getOrDeclareRuntime("dragon_list_box_get",
         llvm::FunctionType::get(boxType, {i8PtrType, i64Type}, false));
-    // void dragon_list_view_check(ptr list, i64 want_elem_tag) - raises
-    // TypeError when a box-tagged list payload's representation (DragonList
-    // vs DragonListBox, elem_tag) doesn't match the typed view unboxing it.
+    // dragon_list_view_check raises TypeError when a box-tagged list's real
+    // representation (DragonList vs DragonListBox, elem_tag) mismatches the typed view.
     getOrDeclareRuntime("dragon_list_view_check",
         llvm::FunctionType::get(voidType, {i8PtrType, i64Type}, false));
-    // i64 dragon_box_len(%dragon.box) - len() of an Any value, tag + header
-    // dispatched (str/list-of-either-representation/dict/bytes); raises the
-    // Python-shaped TypeError for unsized values.
+    // dragon_box_len: len() of an Any value, tag+header dispatched across
+    // str/list/dict/bytes; raises TypeError for unsized values.
     getOrDeclareRuntime("dragon_box_len",
         llvm::FunctionType::get(i64Type, {boxType}, false));
     // void dragon_list_box_set(ptr list, i64 index, i64 tag, i64 payload)
@@ -427,21 +410,17 @@ void CodeGen::Impl::declareRuntimeFunctions() {
     // of an Any-typed value. Returns an owned refcounted heap DragonString.
     getOrDeclareRuntime("dragon_box_to_str",
         llvm::FunctionType::get(i8PtrType, {boxType}, false));
-    // dragon_box_subscript(box container, box index) - `anyVal[i]`.
-    // Tag-dispatched element read for an Any-boxed list/dict/str/bytes; returns
-    // an OWNED box (borrowed container elements are incref'd, mirroring the
-    // owned-str convention so transient results can be released).
+    // dragon_box_subscript = `anyVal[i]`: tag-dispatched read across Any-boxed
+    // list/dict/str/bytes; returns an OWNED box (borrowed elements incref'd).
     getOrDeclareRuntime("dragon_box_subscript",
         llvm::FunctionType::get(boxType, {boxType, boxType}, false));
-    // void dragon_box_decref(box) - release an owned box temporary's payload by
-    // tag (no-op for non-refcounted tags). Frees box_binop / box_subscript
-    // results after a transient use (print / discarded statement).
+    // dragon_box_decref releases an owned box temp's payload by tag (no-op if
+    // non-refcounted); frees box_binop/box_subscript results after transient use.
     getOrDeclareRuntime("dragon_box_decref",
         llvm::FunctionType::get(voidType, {boxType}, false));
 
-    // unittest support: deep container equality. dragon_box_eq recurses
-    // through these, and codegen calls them directly for `list == list` /
-    // `dict == dict` when neither side is box-typed (faster than boxing).
+    // unittest deep-equality support: dragon_box_eq recurses through these;
+    // codegen calls them directly for list==list/dict==dict when neither side is boxed.
     getOrDeclareRuntime("dragon_list_eq",
         llvm::FunctionType::get(i64Type, {i8PtrType, i8PtrType}, false));
     // i64 dragon_list_cmp(ptr a, ptr b) - lexicographic three-way (<0/0/>0) for
@@ -715,10 +694,8 @@ void CodeGen::Impl::declareRuntimeFunctions() {
     // i64 dragon_deque_pop(ptr deque)
     getOrDeclareRuntime("dragon_deque_pop",
         llvm::FunctionType::get(i64Type, {i8PtrType}, false));
-    // ptr dragon_deque_popleft_ptr(ptr deque) / dragon_deque_pop_ptr(ptr deque)
-    // Heap-element pop variants: same transfer semantics, ptr return so the
-    // result is recognized as an OWNED ptr (drained when discarded / passed to a
-    // borrow callee, adopted when bound). Mirrors dragon_dict_get_ptr (#19).
+    // dragon_deque_popleft_ptr/pop_ptr: ptr-return pop variants recognized as an
+    // OWNED ptr (drained/adopted like dragon_dict_get_ptr, #19).
     getOrDeclareRuntime("dragon_deque_popleft_ptr",
         llvm::FunctionType::get(i8PtrType, {i8PtrType}, false));
     getOrDeclareRuntime("dragon_deque_pop_ptr",
@@ -758,20 +735,16 @@ void CodeGen::Impl::declareRuntimeFunctions() {
     // void dragon_raise_exc(i64 type, ptr msg)
     getOrDeclareRuntime("dragon_raise_exc",
         llvm::FunctionType::get(voidType, {i64Type, i8PtrType}, false));
-    // void dragon_raise_exc_cstr(i64 type, ptr msg) - raw C-string message
-    // (rodata literal): the runtime copies it into a heap DragonString so the
-    // exc_msg slot never holds a raw literal pointer (no OOB header probe).
+    // dragon_raise_exc_cstr takes a raw rodata C-string; the runtime copies it
+    // into a heap DragonString so exc_msg never holds a raw literal pointer.
     getOrDeclareRuntime("dragon_raise_exc_cstr",
         llvm::FunctionType::get(voidType, {i64Type, i8PtrType}, false));
-    // void dragon_raise_exc_obj(i64 type, ptr obj, ptr msg) - typed-field
-    // exception raise: `raise UserExc(args)` constructs the instance, then
-    // hands it to the runtime so the matching `except UserExc as e` handler
-    // binds `e` to the full instance (typed fields intact), not just `msg`.
+    // dragon_raise_exc_obj: `raise UserExc(args)` hands the constructed instance
+    // to the runtime so `except UserExc as e` binds the full instance, not just msg.
     getOrDeclareRuntime("dragon_raise_exc_obj",
         llvm::FunctionType::get(voidType, {i64Type, i8PtrType, i8PtrType}, false));
-    // Consume variants: the slot takes the message's owned +1 (concat /
-    // str() / f-string temporaries, retained finally re-raise) instead of
-    // dup'ing a borrow. See dragon_exc_msg_set in runtime_exception.cpp.
+    // Consume variants take the message's owned +1 (concat/str()/f-string temps)
+    // instead of dup'ing a borrow; see dragon_exc_msg_set in runtime_exception.cpp.
     getOrDeclareRuntime("dragon_raise_exc_consume",
         llvm::FunctionType::get(voidType, {i64Type, i8PtrType}, false));
     getOrDeclareRuntime("dragon_raise_exc_obj_consume",
@@ -813,9 +786,8 @@ void CodeGen::Impl::declareRuntimeFunctions() {
     // i64 dragon_exc_matches(i64 raised, i64 caught)
     getOrDeclareRuntime("dragon_exc_matches",
         llvm::FunctionType::get(i64Type, {i64Type, i64Type}, false));
-    // void dragon_vthread_log_uncaught() - emitted by fire-trampoline's
-    // setjmp-arrival branch to log + clear an unhandled exception, so the
-    // worker thread / parent accept loop survives the failed vthread.
+    // dragon_vthread_log_uncaught: emitted by fire-trampoline's setjmp arrival to
+    // log+clear an unhandled exception so the worker/parent loop survives it.
     getOrDeclareRuntime("dragon_vthread_log_uncaught",
         llvm::FunctionType::get(voidType, {}, false));
     // int setjmp(ptr env) -- returns_twice attribute
@@ -842,6 +814,16 @@ void CodeGen::Impl::declareRuntimeFunctions() {
         llvm::FunctionType::get(i64Type, {i8PtrType}, false));
     getOrDeclareRuntime("dragon_sum_list",
         llvm::FunctionType::get(i64Type, {i8PtrType}, false));
+    getOrDeclareRuntime("dragon_min_list_f64",
+        llvm::FunctionType::get(f64Type, {i8PtrType}, false));
+    getOrDeclareRuntime("dragon_max_list_f64",
+        llvm::FunctionType::get(f64Type, {i8PtrType}, false));
+    getOrDeclareRuntime("dragon_min_list_str",
+        llvm::FunctionType::get(i8PtrType, {i8PtrType}, false));
+    getOrDeclareRuntime("dragon_max_list_str",
+        llvm::FunctionType::get(i8PtrType, {i8PtrType}, false));
+    getOrDeclareRuntime("dragon_sum_list_f64",
+        llvm::FunctionType::get(f64Type, {i8PtrType}, false));
     getOrDeclareRuntime("dragon_any_list",
         llvm::FunctionType::get(i64Type, {i8PtrType}, false));
     getOrDeclareRuntime("dragon_all_list",
@@ -1175,13 +1157,8 @@ void CodeGen::Impl::declareRuntimeFunctions() {
     // string's refcount so a cross-worker-thread read never races on it.
     getOrDeclareRuntime("dragon_str_make_immortal",
         llvm::FunctionType::get(voidType, {i8PtrType}, false));
-    // void dragon_incref_callable(ptr) / dragon_decref_callable(ptr)
-    //  Tag-aware RC for `Callable[[...], R]` field slots: a Callable
-    //  field can hold either a bare LLVM fn pointer (no header, no RC) or
-    //  a DragonClosure* (header at offset 0, type_tag at offset 8). The
-    //  helper inspects type_tag and only mutates refcount when the value
-    //  is a DragonClosure. Codegen emits these for class-field stores
-    //  declared as `Callable[...]`.
+    // dragon_{incref,decref}_callable: tag-aware RC for Callable field slots
+    // (bare fn ptr, no RC, vs DragonClosure with header/type_tag); mutates only the latter.
     getOrDeclareRuntime("dragon_incref_callable",
         llvm::FunctionType::get(voidType, {i8PtrType}, false));
     getOrDeclareRuntime("dragon_decref_callable",
@@ -1189,9 +1166,8 @@ void CodeGen::Impl::declareRuntimeFunctions() {
     // ptr dragon_string_dup(ptr s) -- promote string literal to heap DragonString
     getOrDeclareRuntime("dragon_string_dup",
         llvm::FunctionType::get(i8PtrType, {i8PtrType}, false));
-    // ptr dragon_str_retain(ptr s) -- identity incref. str(s)-of-a-str and
-    // single-part f"{s}" route through this so their results are owned +1
-    // CallInsts (the calls-return-owned convention consumers assume).
+    // dragon_str_retain is an identity incref; str(s)-of-a-str and single-part
+    // f"{s}" route through it so results are owned +1 CallInsts.
     getOrDeclareRuntime("dragon_str_retain",
         llvm::FunctionType::get(i8PtrType, {i8PtrType}, false));
     // ptr dragon_exc_msg_preserve(ptr s) -- dup a re-raise message only if mortal heap
@@ -1229,17 +1205,15 @@ void CodeGen::Impl::declareRuntimeFunctions() {
     // void dragon_mark_shared_worklist_push(ptr worklist, ptr obj)
     getOrDeclareRuntime("dragon_mark_shared_worklist_push",
         llvm::FunctionType::get(voidType, {i8PtrType, i8PtrType}, false));
-    // void dragon_mark_shared_callable(ptr worklist, ptr obj) -- tag-gated; a
-    // Callable field may be a bare fn ptr (no header), so it can't go through the
-    // raw worklist push (which would atomic-write gc_flags into .text).
+    // dragon_mark_shared_callable is tag-gated: a Callable field may be a bare
+    // fn ptr (no header), which can't go through the raw worklist push.
     getOrDeclareRuntime("dragon_mark_shared_callable",
         llvm::FunctionType::get(voidType, {i8PtrType, i8PtrType}, false));
     // i64 dragon_class_register_mark_shared(i64 class_id, ptr fn)
     getOrDeclareRuntime("dragon_class_register_mark_shared",
         llvm::FunctionType::get(i64Type, {i64Type, i8PtrType}, false));
-    // void dragon_mark_shared_boxed(i64 tag, i64 payload) -- tag dispatched
-    // mark for union/nay box stored into a module global (str lef or tag gated
-    // clsure / deep or header carrying hepa tags)
+    // dragon_mark_shared_boxed: tag-dispatched SHARED mark for a boxed Any/union
+    // value stored in a module global (str, closure, and heap-tag cases).
     getOrDeclareRuntime("dragon_mark_shared_boxed",
         llvm::FunctionType::get(voidType, {i64Type, i64Type}, false));
     // void dragon_mark_shared_cell(ptr worklist, ptr cell) -- mark a captured
@@ -1328,9 +1302,8 @@ void CodeGen::Impl::declareRuntimeFunctions() {
 
     // --- D027/D030: Closure and environment functions ---
     // ptr dragon_env_alloc(i64 total_size, ptr gc_fn, i32 trackable)
-    //  Allocates header + body. Body layout owned by codegen (per-lambda struct).
-    //  gc_fn is the multi-op env GC hook; trackable=1 gc-tracks
-    //  the env so a closure-capture cycle through it is collectable.
+    //  Allocates header+body (layout owned by codegen). gc_fn is the multi-op
+    //  env GC hook; trackable=1 gc-tracks the env so a capture cycle is collectable.
     getOrDeclareRuntime("dragon_env_alloc",
         llvm::FunctionType::get(i8PtrType,
             {i64Type, i8PtrType, llvm::Type::getInt32Ty(*context)}, false));
@@ -1371,34 +1344,16 @@ void CodeGen::Impl::forwardDeclareFunctions(dragon::Module& mod) {
             // D044 - never forward-declare a generic template; only its stamped
             // monomorphic instantiations (empty typeParams) get LLVM symbols.
             if (!func->typeParams.empty()) continue;
-            // Per-module mangling. Extern-C declarations keep the bare name
-            // since they reference C-ABI symbols (`malloc`, `dragon_str_*`,
-            // etc.) that must NOT be mangled - the linker would not
-            // find them. Same-module Dragon defs get mangled so two stdlib
-            // modules with `def open` produce distinct LLVM symbols.
-            // `extern "C" def CSYM(...) as DRAGON_NAME` stores the
-            // C symbol in `externSymbol` and the Dragon-visible alias in
-            // `name`. The LLVM symbol must use the C name so the linker
-            // resolves it; the Dragon name flows through the alias map
-            // populated below.
+            // Extern-C decls keep the bare C-ABI name so the linker resolves them;
+            // same-module Dragon defs get mangled. `as DRAGON_NAME` aliases the two via externSymbol.
             const std::string externLinkName =
                 func->externSymbol.empty() ? func->name : func->externSymbol;
             const std::string llvmName = func->isExtern
                 ? userFuncName(externLinkName)
                 : mangleFunc(currentModuleName, func->name);
             if (module->getFunction(llvmName)) {
-                // The LLVM symbol already exists (another module declared an
-                // extern with the same C symbol - e.g. glob.dr/path.dr both
-                // declare `getcwd` - or declareRuntimeFunctions pre-declared a
-                // dragon_* symbol). The dedup must NOT skip this module's
-                // Dragon-side alias registration: without it, a call
-                // to the alias (e.g. os's `_libc_getcwd`) resolves to nothing.
-                // It must not skip the RC side maps either: every `dragon_*`
-                // extern collides with the runtime pre-declarations, so
-                // without this its param kinds and FFI drain eligibility are
-                // never registered and owned arg temps at those call sites
-                // never drain (stdlib http's nested dragon_str_concat hits
-                // exactly this).
+                // Even with an existing LLVM symbol (shared C symbol or pre-declared
+                // dragon_* fn), its alias and RC-side maps must still be registered here.
                 if (func->isExtern && !func->externSymbol.empty())
                     importedFuncAliasesByModule[currentModuleName][func->name] = llvmName;
                 if (options.gcMode == GCMode::RC && func->isExtern) {
@@ -1427,11 +1382,8 @@ void CodeGen::Impl::forwardDeclareFunctions(dragon::Module& mod) {
                         // *args -> i8* (list pointer)
                         vaInfo.hasVarArg = true;
                         vaInfo.varArgName = p.name;
-                        // Derive the element representation from `*args: T`.
-                        // The annotation is the per-element type (Python
-                        // semantics), so the call site packs into the matching
-                        // monomorphized list variant. No annotation -> tag 0
-                        // (legacy i64 path, correct for int/bool).
+                        // Derive the element repr from `*args: T`: the call site packs
+                        // into the matching monomorphized list variant; no annotation defaults to tag 0 (i64).
                         if (p.type) {
                             Type::Kind tk =
                                 elemVarKindToTypeKind(typeExprToKind(p.type.get()));
@@ -1454,18 +1406,13 @@ void CodeGen::Impl::forwardDeclareFunctions(dragon::Module& mod) {
                 }
                 if (!seenVarArg)
                     vaInfo.numRegularParams++;
-                // D030 Phase 4: union params are a single {i64, i64} box - no
-                // hidden trailing tag arg. typeExprToLLVM(UnionTypeExpr)
-                // returns boxType.
+                // D030 Phase 4: a union param is a single {i64,i64} box, no
+                // trailing tag arg; typeExprToLLVM(UnionTypeExpr) returns boxType.
                 paramTypes.push_back(typeExprToLLVM(p.type.get()));
                 tagMask.push_back(false);
             }
-            // Side maps key by the LLVM symbol name (post-mangling), not the
-            // bare Dragon name. Two modules with same-named `def open` keep
-            // distinct varargs / param kinds / defaults / return-class /
-            // generator-flag entries; readers resolve via the same chain
-            // (alias -> mangleFunc(currentModule, name) -> userFuncName) via
-            // Impl::resolveCalleeSymbol.
+            // Side maps key by the LLVM symbol (post-mangling), not the bare name,
+            // so two modules with same-named `def open` keep distinct metadata entries.
             if (vaInfo.hasVarArg || vaInfo.hasKwArg)
                 funcVarArgInfo[llvmName] = vaInfo;
             llvm::Type* retType;
@@ -1477,24 +1424,18 @@ void CodeGen::Impl::forwardDeclareFunctions(dragon::Module& mod) {
                 retType = i8PtrType; // generator function returns generator object
                 generatorFunctions.insert(llvmName);
             } else if (!func->returnType) {
-                // No annotation: a procedure (no value-returning return) is
-                // void; otherwise keep the historical int default. Must match
-                // the body-emission site (Functions.cpp) or LLVM verify fails.
+                // No annotation means void unless the body returns a value
+                // (historical int default); must match Functions.cpp's body emission or LLVM verify fails.
                 retType = unannotatedReturnType(func->body);
             } else {
                 retType = typeExprToLLVM(func->returnType.get());
             }
-            // D027: order-independent population of funcReturnsClosure. This
-            // pre-pass runs before ANY body emission, so a class method that
-            // calls a closure factory sees the factory already marked (the
-            // visit(FunctionDecl) site alone is too late for method bodies).
-            // Keyed by the bare Dragon name to match the call-site lookup.
+            // D027: this pre-pass runs before any body emission, so a method
+            // calling a closure factory sees it already marked. Keyed by the bare Dragon name.
             if (functionReturnsClosure(*func))
                 funcReturnsClosure.insert(llvmName);
-            // D027: record which params are Callable[...] so the direct-call arg
-            // path wraps a bare fn passed there into DragonClosure(fn, null),
-            // keeping every Callable value a real DragonClosure (reliable
-            // dispatch). Indexed by AST param position.
+            // D027: records which params are Callable[...] so a bare fn passed
+            // there gets wrapped into DragonClosure(fn, null); indexed by AST param position.
             {
                 std::vector<bool> cp;
                 cp.reserve(func->params.size());
@@ -1505,9 +1446,8 @@ void CodeGen::Impl::forwardDeclareFunctions(dragon::Module& mod) {
             auto* funcType = llvm::FunctionType::get(retType, paramTypes, false);
             auto* llvmFunc = llvm::Function::Create(funcType, llvm::Function::ExternalLinkage,
                                    llvmName, module.get());
-            // GC Phase 4: store param VarKinds for atomic incref at fire/async spawn.
-            // D030 Phase 4: union params are a single box arg - one VarKind slot,
-            // no tag-arg companion.
+            // GC Phase 4: store param VarKinds for atomic incref at fire/async spawn. A
+            // union param is a single box arg - one VarKind slot, no tag-arg companion.
             if (options.gcMode == GCMode::RC) {
                 std::vector<VarKind> pkinds;
                 std::vector<bool> powns;
@@ -1517,10 +1457,8 @@ void CodeGen::Impl::forwardDeclareFunctions(dragon::Module& mod) {
                 }
                 funcParamKinds[llvmName] = std::move(pkinds);
                 funcParamOwns[llvmName] = std::move(powns);
-                // Extern "C" callees follow the FFI v0 ownership contract (see
-                // externDrainableFuncs in CodeGenImpl.h): args borrowed for the
-                // call, managed returns fresh; a `ptr` return may alias an
-                // argument, so only non-ptr-returning externs are drain-eligible.
+                // Extern "C" callees follow the FFI v0 contract (externDrainableFuncs):
+                // args borrowed, returns fresh unless `ptr`-typed (may alias an arg).
                 if (func->isExtern) {
                     externFuncNames.insert(llvmName);
                     bool ptrReturn = false;
@@ -1539,18 +1477,16 @@ void CodeGen::Impl::forwardDeclareFunctions(dragon::Module& mod) {
                 // can eval them with the right module-private symbol scope.
                 funcDefiningModule[llvmName] = currentModuleName;
             }
-            // D040: declared parameter names for keyword-argument binding.
-            // Vararg/kwarg slots get their declared name (or "" for the bare
-            // `*` separator). Call-site kwargs match against these.
+            // D040: declared parameter names for keyword-arg binding; vararg/kwarg
+            // slots use their declared name ("" for the bare `*` separator).
             {
                 std::vector<std::string> names;
                 for (auto& p : func->params)
                     names.push_back(p.name);
                 funcParamNames[llvmName] = std::move(names);
             }
-            // Track top-level functions whose return type is a class instance
-            // so resolveExprClassName can resolve `make_box(...).method()`-style
-            // chained dispatch without the receiver being held in a named var.
+            // Tracks functions returning a class instance so resolveExprClassName
+            // can resolve `make_box(...).method()` chains without a named receiver var.
             if (auto* retNamed = dynamic_cast<NamedTypeExpr*>(func->returnType.get())) {
                 if (classNames.count(retNamed->name))
                     funcReturnClassNames[llvmName] = retNamed->name;
@@ -1564,9 +1500,8 @@ void CodeGen::Impl::forwardDeclareFunctions(dragon::Module& mod) {
             if (func->isExtern && !func->externLib.empty()) {
                 externLibs.insert(func->externLib);
             }
-            // Library-detection heuristics inspect the C symbol, not
-            // the (possibly aliased) Dragon-visible name. For a plain extern
-            // these are the same string; for an aliased extern they diverge.
+            // Heuristics inspect the C symbol, not the (possibly aliased) Dragon
+            // name; for a plain extern these are the same string, for an alias they diverge.
             // Auto-detect sqlite3 usage for bundled lib linking
             if (func->isExtern && externLinkName.substr(0, 7) == "sqlite3") {
                 needsSqlite3 = true;
@@ -1575,13 +1510,8 @@ void CodeGen::Impl::forwardDeclareFunctions(dragon::Module& mod) {
             if (func->isExtern && externLinkName.substr(0, 5) == "pcre2") {
                 needsPcre2 = true;
             }
-            // Auto-detect mbedTLS usage. Two families of runtime entry points
-            // (both in dragon_runtime) pull mbedtls_* symbols, so the program
-            // must link libdragon_mbedtls.a:
-            //  1. the dragon_tls_* TLS shim (runtime_tls.cpp), and
-            //  2. the crypto digests / HMAC (runtime_platform.cpp) - dragon_sha*,
-            //  dragon_md5*, dragon_hmac - since ADR 038 Phase 7 retired the
-            //  hand-rolled cores in favor of mbedTLS.
+            // Auto-detect mbedTLS: both the dragon_tls_* shim and the crypto
+            // digests/HMAC (dragon_sha*/md5*/hmac*, ADR 038 Phase 7) need libdragon_mbedtls.a linked.
             if (func->isExtern &&
                 (externLinkName.substr(0, 10) == "dragon_tls" ||
                  externLinkName.substr(0, 10) == "dragon_sha" ||
@@ -1589,31 +1519,22 @@ void CodeGen::Impl::forwardDeclareFunctions(dragon::Module& mod) {
                  externLinkName.substr(0, 11) == "dragon_hmac")) {
                 needsMbedtls = true;
             }
-            // Auto-detect zlib / zstd usage for system-lib linking. Same
-            // pattern as sqlite3/pcre2: when stdlib gzip.dr / zstandard.dr /
-            // tarfile.dr (or any user code) declares an extern reference to
-            // dragon_zlib_* / dragon_zstd_*, the runtime archive will pull
-            // in compress/decompress symbols that depend on libz/libzstd.
-            // Without these flags, programs that don't touch compression
-            // skip both -lz and -lzstd at link.
+            // Auto-detect zlib/zstd: any extern ref to dragon_zlib_*/dragon_zstd_*
+            // (gzip.dr, zstandard.dr, tarfile.dr, or user code) means the link needs -lz/-lzstd.
             if (func->isExtern && externLinkName.substr(0, 11) == "dragon_zlib") {
                 needsZ = true;
             }
             if (func->isExtern && externLinkName.substr(0, 11) == "dragon_zstd") {
                 needsZstd = true;
             }
-            // Auto-detect the ui module's webview shell (D031). The shell is
-            // not part of the runtime archive (non-UI binaries keep their
-            // tiny footprint), so linkExecutable compiles it in per-app and
-            // links webkit2gtk via pkg-config.
+            // Auto-detect the ui module's webview shell (D031): not part of the
+            // runtime archive, so linkExecutable compiles it in per-app and links webkit2gtk.
             if (func->isExtern &&
                 externLinkName.substr(0, 14) == "dragon_webview") {
                 needsWebview = true;
             }
-            // When the extern has an alias, register `name -> llvmName`
-            // in the current module's alias scope so a Dragon call to the
-            // alias resolves to the C symbol. resolveCalleeSymbol probes this
-            // map first.
+            // An aliased extern registers `name -> llvmName` in the module's alias
+            // scope so a Dragon call to the alias resolves to the C symbol.
             if (func->isExtern && !func->externSymbol.empty()) {
                 importedFuncAliasesByModule[currentModuleName][func->name] = llvmName;
             }
@@ -1622,18 +1543,11 @@ void CodeGen::Impl::forwardDeclareFunctions(dragon::Module& mod) {
     }
 }
 
-// Forward-declare class constructors and methods in a module.
-// Supports multi-constructor overloading: when a class has N>1 __init__
-// methods, they are mangled as ClassName___init___0 .. ClassName___init___N-1
-// and ClassName_new_0 .. ClassName_new_N-1. When N==1 (or 0), the existing
-// un-suffixed names are used so that all legacy code is unaffected.
+// Forward-declares class constructors/methods. N>1 __init__ overloads mangle
+// as ClassName___init___0.._N-1 / _new_0.._N-1; N<=1 keeps the un-suffixed names.
 void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
-    // 6.18: synthesize @dataclass / NamedTuple / enum methods BEFORE scanning
-    // for __init__ - the synthesized methods must be visible to the rest of
-    // forwardDeclareClasses (which creates the LLVM ctor/method functions).
-    // synthesizeEnumMethods runs first: it rewrites `class C(Enum)` into a plain
-    // class (members -> singleton statics), so the dataclass pass then sees a
-    // normal class and leaves it alone.
+    // Synthesizes @dataclass/NamedTuple/enum methods before scanning __init__, so
+    // forwardDeclareClasses sees them; enum runs first so dataclass sees a plain class.
     for (auto& stmt : mod.body) {
         if (auto* classDecl = dynamic_cast<ClassDecl*>(stmt.get())) {
             if (!classDecl->typeParams.empty()) continue;  // D044 - template, not lowered
@@ -1671,15 +1585,10 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
                 }
             } else {
                 classNames.insert(classDecl->name);
-                // Track which module owns this class so call sites can pick
-                // the right `<mod>__<class>_new` symbol when two modules
-                // define same-named classes (last-write-wins is acceptable
-                // because resolveClassOwningModule prefers the same-module
-                // probe over this fallback).
-                // D044 cross-module generics: a stamped instantiation lives in
-                // the instantiating module's body but is OWNED by the template's
-                // defining module, so its symbols match the body emission
-                // (Classes.cpp visit(ClassDecl)).
+                // Tracks which module owns this class for `<mod>__<class>_new` symbol
+                // lookup; last-write-wins is fine since resolveClassOwningModule tries same-module first.
+                // D044 cross-module generics: a stamped instantiation lives in the
+                // instantiating module but is OWNED by the template's defining module.
                 classOwningModule[classDecl->name] =
                     classDecl->genericHomeModule.empty()
                         ? currentModuleName
@@ -1698,11 +1607,8 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
                 classDecl->name);
             if (typedDictClassesBySym.count(csym)) continue;
 
-            // D044 cross-module generics: forward-declare a stamped instantiation's
-            // struct/ctor/method symbols under the template's DEFINING module so
-            // they match the bodies emitted in Classes.cpp visit(ClassDecl) and the
-            // call site's resolveClassOwningModule. Restored at iteration end (incl.
-            // any early continue below). Inert for normal classes.
+            // D044 cross-module generics: forward-declares a stamped instantiation's
+            // symbols under the template's defining module, restored at iteration end.
             std::string _savedMod = currentModuleName;
             struct RM { std::string* s; std::string v; bool a; ~RM(){ if (a) *s = v; } }
                 _rm{&currentModuleName, _savedMod,
@@ -1742,19 +1648,13 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
 
             size_t ctorCount = initDecls.size();
 
-            // Per-module class symbol prefix - mirrors mangleFunc routing
-            // for top-level functions. Two modules with same-named classes
-            // get distinct LLVM symbols so neither body is silently dropped.
+            // Per-module class symbol prefix, mirrors mangleFunc: two modules with
+            // same-named classes get distinct LLVM symbols.
             const std::string clsSym = mangleClass(currentModuleName, classDecl->name);
 
             if (ctorCount == 0) {
-                // No explicit constructor - synthesize a default zero-arg one
-                // (Python parity: `class Foo: pass` is constructible via the
-                // inherited/default __init__). Forward-declare a zero-user-arg
-                // `__init__(self)` and `_new()`. The body (Classes.cpp) calls
-                // the parent's zero-arg __init__ when present so inherited
-                // field initialization still runs. A class that genuinely has
-                // no fields and no parent ctor just gets a zero-init instance.
+                // No explicit constructor: synthesizes a zero-arg __init__/_new
+                // (Python parity for `class Foo: pass`); the body calls the parent's zero-arg ctor if present.
                 std::string initName = clsSym + "___init__";
                 if (!module->getFunction(initName)) {
                     auto* initFuncType = llvm::FunctionType::get(
@@ -1768,10 +1668,8 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
                     llvm::Function::Create(newFuncType, llvm::Function::InternalLinkage,
                                            newName, module.get());
                 }
-                // Zero-arg ctor: register EMPTY param metadata so the entry
-                // exists (the ctor call site treats a missing entry as a
-                // compiler invariant violation - see the descriptor backstop
-                // in CallExpr.cpp).
+                // Zero-arg ctor: registers EMPTY param metadata since a missing
+                // entry is treated as a compiler invariant violation (CallExpr.cpp backstop).
                 if (options.gcMode == GCMode::RC) {
                     funcParamKinds[newName] = {};
                     funcParamOwns[newName] = {};
@@ -1803,15 +1701,8 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
                                            newName, module.get());
                 }
 
-                // Register the ctor's param VarKinds and own flags NOW, before
-                // any method body is lowered (fire-own-fwdref-hang.md). The
-                // body pass (emitNewBody) re-derives the same data, but that
-                // runs in source order - a construction site inside an EARLIER
-                // class's method saw no entry for a forward-referenced class,
-                // paramIsOwn() answered false, and the call site drained the
-                // owned temp an `own` ctor param had adopted (use-after-free
-                // on the owned field). Methods already register here (the
-                // funcParamOwns loop below); ctors must too.
+                // Registers ctor VarKinds/own flags before any method lowers (see
+                // fire-own-fwdref-hang.md) - else a forward-referenced ctor drains an owned param (UAF).
                 if (options.gcMode == GCMode::RC) {
                     std::vector<VarKind> ck;
                     std::vector<bool> cowns;
@@ -1882,9 +1773,8 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
                                                newName, module.get());
                     }
 
-                    // Same forward registration as the single-ctor path: each
-                    // overload's param kinds/own flags must be visible before
-                    // any body is lowered (fire-own-fwdref-hang.md).
+                    // Same forward registration as the single-ctor path
+                    // (fire-own-fwdref-hang.md): param kinds/own flags must be visible before any body lowers.
                     if (options.gcMode == GCMode::RC) {
                         std::vector<VarKind> ck;
                         std::vector<bool> cowns;
@@ -1902,24 +1792,19 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
             for (auto& classStmt : classDecl->body) {
                 auto* methodDecl = dynamic_cast<FunctionDecl*>(classStmt.get());
                 if (!methodDecl || methodDecl->name == "__init__") continue;
-                // D044+ - skip a generic-method TEMPLATE (own type param, T-typed
-                // signature); its concrete stamps (empty typeParams) are appended
-                // to this same body by the monomorphizer and emitted here.
+                // D044+: skips a generic-method template (own type param); its
+                // concrete stamps are appended to this body by the monomorphizer.
                 if (!methodDecl->typeParams.empty()) continue;
 
-                // Track dunder methods for dispatch. D045: gate on the shared
-                // isReservedDunder allowlist so the dispatch table and the
-                // predicate are one source of truth (an unrecognized __x__ is
-                // already a type-check error, so this never silently drops a
-                // method a valid program relies on).
+                // D045: gates on the shared isReservedDunder allowlist so the dispatch
+                // table and predicate share one source of truth (unrecognized __x__ is already an error).
                 if (isReservedDunder(methodDecl->name)) {
                     classDunderMethodsBySym[csym].insert(methodDecl->name);
                 }
 
                 std::string methodName = clsSym + "_" + methodDecl->name;
-                // ADR 010: an overloaded method (class declares >1 with this
-                // name) gets a per-index symbol so its monomorphic functions
-                // don't collide; the call site appends the same `__ovN`.
+                // ADR 010: an overloaded method (>1 decl with this name) gets a
+                // per-index symbol; the call site appends the same `__ovN`.
                 if (methodDecl->methodOverloadCount > 1 &&
                     methodDecl->methodOverloadIndex >= 0)
                     methodName += "__ov" + std::to_string(methodDecl->methodOverloadIndex);
@@ -1932,11 +1817,8 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
                 } else {
                     staticMethods.insert(methodName);
                 }
-                // Determine where user params start in the AST param list:
-                // - static (.dr or @staticmethod): 0 (no self/cls)
-                // - @classmethod: 1 (skip cls param)
-                // - implicit self (.dr instance): 0 (self not in params)
-                // - explicit self (.py instance): 1 (skip self param)
+                // Where user params start: classmethod skips cls (1); static/implicit-self
+                // start at 0; explicit self (.py instance) skips self (1).
                 size_t mParamStart;
                 if (methodDecl->isClassMethod) {
                     mParamStart = 1;  // skip cls
@@ -1945,13 +1827,8 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
                 } else {
                     mParamStart = 1;  // skip explicit self
                 }
-                // Build the LLVM param list. A `*args`/`**kwargs` method param
-                // collapses to a single i8* (list/dict pointer) exactly like a
-                // variadic free function (forwardDeclareFunctions), and its
-                // VarArgInfo drives the call-site packing (packVarArgMethodArgs).
-                // The bare `*` keyword-only separator (isVarArg with an empty
-                // name) has no LLVM param and is skipped everywhere below so the
-                // side maps stay aligned to the LLVM parameter count.
+                // `*args`/`**kwargs` collapse to one i8* like a variadic free function
+                // (VarArgInfo drives call-site packing); the bare `*` separator has no LLVM param.
                 VarArgInfo vaInfo;
                 bool seenVarArg = false;
                 for (size_t i = mParamStart; i < methodDecl->params.size(); ++i) {
@@ -1981,16 +1858,8 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
                     methodParamTypes.push_back(typeExprToLLVM(p.type.get()));
                 }
 
-                // A method whose body contains `yield` is a GENERATOR method:
-                // the method function is the WRAPPER and returns the generator
-                // object (ptr), exactly like a free-function generator (see
-                // visit(FunctionDecl) + buildGeneratorTrampoline). Register it
-                // under its mangled symbol so the for-loop generator path
-                // recognizes `obj.method(...)` calls.
-                // Instance + static generator methods are supported; @classmethod
-                // generators are not yet (cls-as-captured-arg is unhandled), so
-                // they fall through to the normal path. Keep this condition in
-                // lockstep with the method-emission hook in Classes.cpp.
+                // A method with `yield` is a generator: the fn is the WRAPPER returning
+                // the generator object. Instance/static generators work; @classmethod ones don't yet.
                 bool methodIsGenerator =
                     containsYield(methodDecl->body) && !methodDecl->isClassMethod;
                 llvm::Type* retType =
@@ -2001,9 +1870,8 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
                 auto* methodFuncType = llvm::FunctionType::get(retType, methodParamTypes, false);
                 llvm::Function::Create(methodFuncType, llvm::Function::InternalLinkage,
                                        methodName, module.get());
-                // Register variadic metadata under the (post-mangling, post-ovN)
-                // method symbol so the call site packs surplus positionals into
-                // the *args list and surplus keywords into the **kwargs dict.
+                // Registers variadic metadata under the post-mangling/post-ovN symbol
+                // so the call site packs surplus positionals/keywords into *args/**kwargs.
                 if (vaInfo.hasVarArg || vaInfo.hasKwArg)
                     funcVarArgInfo[methodName] = vaInfo;
                 if (methodIsGenerator) {
@@ -2011,12 +1879,8 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
                     generatorYieldKinds[methodName] = inferYieldKind(methodDecl->body);
                 }
 
-                // D018 fix: store method param VarKinds so the fire-site can
-                // emit the correct atomic-incref + mark-shared per arg. Without
-                // this, `fire self.method(...)` had funcParamKinds[methodName]
-                // empty, so the spawn-site emitted no atomic-incref AND no
-                // mark-shared - leaving Router state non-atomic across vthread
-                // bodies and triggering the GC-collect crash at request 87.
+                // D018 fix: stores method param VarKinds so `fire self.method(...)`
+                // emits the right atomic-incref+mark-shared per arg (else Router state raced, crashing GC).
                 if (options.gcMode == GCMode::RC) {
                     std::vector<VarKind> mkinds;
                     std::vector<bool> mowns;
@@ -2065,10 +1929,8 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
                     // evaluate defaults under the owning module's scope.
                     funcDefiningModule[methodName] = currentModuleName;
                 }
-                // D040: parameter names for method keyword-arg binding.
-                // Self slot gets "self" (never a valid kwarg name in practice,
-                // so it harmlessly never matches; the explicit name keeps the
-                // vector length matched to the LLVM param count).
+                // D040: parameter names for method keyword-arg binding; self gets
+                // "self" (never a valid kwarg) to keep the vector aligned to the LLVM param count.
                 {
                     std::vector<std::string> names;
                     if (!methodDecl->isStatic) {
@@ -2087,18 +1949,14 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
                     if (classNames.count(retNamed->name))
                         methodReturnClassNames[methodName] = retNamed->name;
                 }
-                // Track declared return Type::Kind so call sites can pick the
-                // right VarKind for a returned ptr-shaped value (str/list/dict
-                // etc.). Drives the __next__-binding path in ForLoop.cpp so
-                // `for x in iter` carries the right kind through to method
-                // dispatch on `x` (e.g. x.strip() for __next__() -> str).
+                // Tracks the declared return Type::Kind so callers pick the right
+                // VarKind for a returned ptr value; drives ForLoop.cpp's __next__-binding path.
                 if (methodDecl->returnType)
                     methodReturnKinds[methodName] =
                         typeExprToTypeKind(methodDecl->returnType.get());
 
-                // 4.1 @property: register getter / setter metadata for this class.
-                // Setters are mangled by the parser to "<propName>__setter" so they
-                // live in their own vtable slot.
+                // @property: registers getter/setter metadata; setters are parser-mangled
+                // to "<propName>__setter" so they get their own vtable slot.
                 if (methodDecl->isProperty) {
                     classPropertiesBySym[csym].insert(methodDecl->name);
                 }
@@ -2108,13 +1966,8 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
                 }
             }
 
-            // Decision 026: Build vtable method order for this class.
-            // Inherit parent's vtable order, then append new methods / record overrides.
-            //
-            // D033: Also build classOwnMethods (only THIS class's methods, in
-            // declaration order) - same loop, just without the parent merge -
-            // so dir() / find_method don't have to dedupe inherited methods at
-            // runtime (the parent chain walk handles that).
+            // Decision 026: builds vtable method order (parent + overrides). D033:
+            // also builds classOwnMethods (this class's own, in decl order) for dir()/find_method.
             {
                 std::vector<std::string> vtableOrder;
                 std::vector<std::string> ownMethods;
@@ -2152,10 +2005,6 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
     }
 }
 
-//===----------------------------------------------------------------------===//
-// ADR 054 - type contracts: registry + vtable slot coloring
-//===----------------------------------------------------------------------===//
-
 void CodeGen::Impl::collectContracts(dragon::Module& mod) {
     for (auto& stmt : mod.body) {
         auto* cd = dynamic_cast<ContractDecl*>(stmt.get());
@@ -2171,11 +2020,8 @@ void CodeGen::Impl::assignContractSlots() {
     contractSlotsAssigned = true;
     if (contractDeclsInOrder.empty()) return;
 
-    // 1. Conformance sets from the TypeChecker's stamps (promises + proven
-    // casts), keyed by class sym. Then close over inheritance: a subclass
-    // IS-A conforming ancestor, so it must fill the same colored slots -
-    // resolveMethodFunction's MRO walk makes an override win through the
-    // very same index.
+    // 1. Conformance sets from the TypeChecker's stamps, closed over inheritance:
+    // a subclass fills the same colored slots so MRO override resolution wins.
     std::unordered_map<std::string, std::set<const ContractDecl*>> ownAtoms;
     auto gather = [&](dragon::Module* m) {
         if (!m) return;
@@ -2206,10 +2052,8 @@ void CodeGen::Impl::assignContractSlots() {
     }
     if (effAtoms.empty()) return;
 
-    // 2. Color: sequential global indices starting past the largest natural
-    // vtable, so a colored slot can never collide with any class's own
-    // method ordinals. Order is deterministic (module order, then decl
-    // order, then signature order).
+    // 2. Color: sequential indices past the largest natural vtable, so a colored
+    // slot never collides with a class's own method ordinals (deterministic order).
     unsigned base = 0;
     for (auto& [csym, order] : classVtableMethodOrderBySym)
         base = std::max(base, (unsigned)order.size());
@@ -2218,10 +2062,8 @@ void CodeGen::Impl::assignContractSlots() {
         for (auto& m : cd->methods)
             contractMethodSlots[{cd, m->name}] = next++;
 
-    // 3. Extend every conforming class's vtable order. Unused indices pad
-    // with "" (the initializer emits a null pointer there); each used index
-    // gets the METHOD NAME - the existing MRO initializer fill resolves it
-    // to this class's own override or the inherited implementation.
+    // 3. Extends each conforming class's vtable order; unused indices pad with ""
+    // (null ptr), used ones get the method name for MRO resolution to fill in.
     for (auto& [csym, atoms] : effAtoms) {
         auto voIt = classVtableMethodOrderBySym.find(csym);
         if (voIt == classVtableMethodOrderBySym.end()) continue;

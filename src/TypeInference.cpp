@@ -16,7 +16,6 @@ struct TypeInference::Impl {
     // Inferred function parameter types: funcName -> {paramName -> Type}
     std::unordered_map<std::string, std::unordered_map<std::string, std::shared_ptr<Type>>> funcParamTypes;
 
-    // Builtin types
     std::shared_ptr<PrimitiveType> intType = std::make_shared<PrimitiveType>(Type::Kind::Int);
     std::shared_ptr<PrimitiveType> floatType = std::make_shared<PrimitiveType>(Type::Kind::Float);
     std::shared_ptr<PrimitiveType> boolType = std::make_shared<PrimitiveType>(Type::Kind::Bool);
@@ -24,7 +23,7 @@ struct TypeInference::Impl {
     std::shared_ptr<PrimitiveType> noneType = std::make_shared<PrimitiveType>(Type::Kind::None_);
     std::shared_ptr<AnyType> anyType = std::make_shared<AnyType>();
 
-    // Infer type from an expression (quick inference without full constraint solving)
+    // Quick inference, not full constraint solving.
     std::shared_ptr<Type> inferFromExpr(Expr* expr) {
         if (!expr) return anyType;
         if (dynamic_cast<IntegerLiteral*>(expr)) return intType;
@@ -55,13 +54,11 @@ struct TypeInference::Impl {
                 return boolType;
             }
 
-            // String concatenation
             if (op == TokenType::PLUS &&
                 lt->kind() == Type::Kind::Str && rt->kind() == Type::Kind::Str) {
                 return strType;
             }
 
-            // Arithmetic
             if (op == TokenType::SLASH) return floatType;
             if (lt->kind() == Type::Kind::Float || rt->kind() == Type::Kind::Float) return floatType;
             if (lt->kind() == Type::Kind::Int && rt->kind() == Type::Kind::Int) return intType;
@@ -129,7 +126,6 @@ struct TypeInference::Impl {
         return anyType;
     }
 
-    // Create a TypeExpr AST node from a Type
     std::unique_ptr<TypeExpr> typeToTypeExpr(const std::shared_ptr<Type>& type) {
         if (!type || type->kind() == Type::Kind::Any || type->kind() == Type::Kind::Unknown) {
             return nullptr; // No annotation for Any/Unknown
@@ -170,8 +166,8 @@ TypeInference::TypeInference() : impl_(std::make_unique<Impl>()) {}
 TypeInference::~TypeInference() = default;
 
 bool TypeInference::infer(Module& module) {
+    impl_->unresolvedNames.clear();
     collectConstraints(module);
-    solveConstraints();
     applyInferredTypes(module);
     return !hasUnresolvedTypes();
 }
@@ -197,10 +193,8 @@ void TypeInference::collectConstraints(Module& module) {
     // First pass: collect function signatures by analyzing return statements
     for (auto& stmt : module.body) {
         if (auto* func = dynamic_cast<FunctionDecl*>(stmt.get())) {
-            // If function already has return type annotation, use it
             if (func->returnType) continue;
 
-            // Otherwise, infer from return statements
             std::shared_ptr<Type> retType = impl_->noneType;
             for (auto& bodyStmt : func->body) {
                 if (auto* ret = dynamic_cast<ReturnStmt*>(bodyStmt.get())) {
@@ -230,8 +224,11 @@ void TypeInference::collectConstraints(Module& module) {
             // Already has annotation, skip
             continue;
         }
-        // Infer within function bodies too
+        // Infer within function bodies too. Function-local assignments are
+        // scoped: two functions reusing a variable name must not cross-pollute
+        // the flat map (a later function's annotation followed the earlier one's type).
         if (auto* func = dynamic_cast<FunctionDecl*>(stmt.get())) {
+            auto savedVarTypes = impl_->varTypes;
             // Infer parameter types from usage patterns
             for (auto& p : func->params) {
                 if (!p.type && p.defaultValue) {
@@ -252,14 +249,9 @@ void TypeInference::collectConstraints(Module& module) {
                     }
                 }
             }
+            impl_->varTypes = std::move(savedVarTypes);
         }
     }
-}
-
-void TypeInference::solveConstraints() {
-    // Current approach: forward-propagation is done in collectConstraints.
-    // Mark unresolved names: variables with Any type
-    impl_->unresolvedNames.clear();
 }
 
 void TypeInference::applyInferredTypes(Module& module) {
@@ -289,8 +281,10 @@ void TypeInference::applyInferredTypes(Module& module) {
                             p.type = impl_->typeToTypeExpr(pit->second);
                         }
                     }
-                    // If still no type, use Any
+                    // If still no type, use Any and record the gap so
+                    // infer()'s return value is honest about it.
                     if (!p.type) {
+                        impl_->unresolvedNames.push_back(func->name + "." + p.name);
                         auto n = std::make_unique<NamedTypeExpr>();
                         n->name = "Any";
                         p.type = std::move(n);
@@ -299,14 +293,6 @@ void TypeInference::applyInferredTypes(Module& module) {
             }
         }
     }
-}
-
-void TypeInference::analyzeDataFlow(FunctionDecl&) {
-    // Advanced analysis - not needed for basic migration
-}
-
-void TypeInference::analyzeControlFlow(FunctionDecl&) {
-    // Advanced analysis - not needed for basic migration
 }
 
 } // namespace dragon

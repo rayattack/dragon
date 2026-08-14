@@ -5,10 +5,6 @@
 
 namespace dragon {
 
-//===----------------------------------------------------------------------===//
-// AST utilities
-//===----------------------------------------------------------------------===//
-
 std::vector<std::string> instanceFieldOrder(const ClassDecl& cls) {
     std::vector<std::string> order;
     std::set<std::string> seen;
@@ -21,9 +17,8 @@ std::vector<std::string> instanceFieldOrder(const ClassDecl& cls) {
             if (auto* nm = dynamic_cast<NameExpr*>(ann->target.get()))
                 add(nm->name);
     }
-    // 2. `self.X = ...` targets across method bodies (in source order),
-    //  descending into nested blocks. A field first assigned in __init__ or
-    //  any other method lands here.
+    // 2. `self.X = ...` targets across method bodies (in source order, descending
+    // into nested blocks); a field first assigned in __init__ or any other method lands here.
     std::function<void(Stmt*)> walk = [&](Stmt* st) {
         if (!st) return;
         auto selfField = [&](Expr* e) {
@@ -63,9 +58,8 @@ static bool stmtAlwaysTerminates(Stmt* s) {
         dynamic_cast<BreakStmt*>(s) || dynamic_cast<ContinueStmt*>(s))
         return true;
     if (auto* ifs = dynamic_cast<IfStmt*>(s)) {
-        // An `if` terminates only when control cannot fall through it: there is
-        // an `else`, and the then-body, every elif-body, and the else-body all
-        // terminate.
+        // An `if` terminates only when control can't fall through: there's an `else`,
+        // and the then-body, every elif-body, and the else-body all terminate.
         if (ifs->elseBody.empty()) return false;
         if (!stmtsAlwaysTerminate(ifs->thenBody)) return false;
         for (auto& clause : ifs->elifClauses)
@@ -80,10 +74,6 @@ bool stmtsAlwaysTerminate(const std::vector<std::unique_ptr<Stmt>>& stmts) {
     return stmtAlwaysTerminates(stmts.back().get());
 }
 
-//===----------------------------------------------------------------------===//
-// Type Expression Visitors
-//===----------------------------------------------------------------------===//
-
 void NamedTypeExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void GenericTypeExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void OptionalTypeExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
@@ -91,10 +81,6 @@ void UnionTypeExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void CallableTypeExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void TupleTypeExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void ContractSetTypeExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
-
-//===----------------------------------------------------------------------===//
-// Expression Visitors
-//===----------------------------------------------------------------------===//
 
 void IntegerLiteral::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void FloatLiteral::accept(ASTVisitor& visitor) { visitor.visit(*this); }
@@ -128,10 +114,6 @@ void FireExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void YieldExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void StarredExpr::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 
-//===----------------------------------------------------------------------===//
-// Statement Visitors
-//===----------------------------------------------------------------------===//
-
 void ExprStmt::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void AssignStmt::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void AugAssignStmt::accept(ASTVisitor& visitor) { visitor.visit(*this); }
@@ -156,21 +138,13 @@ void DeleteStmt::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void ImportStmt::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void FromImportStmt::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 
-//===----------------------------------------------------------------------===//
-// Declaration Visitors
-//===----------------------------------------------------------------------===//
-
 void FunctionDecl::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void ClassDecl::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void TypeAliasStmt::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void ContractDecl::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void Module::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 
-//===----------------------------------------------------------------------===//
-// DefaultASTVisitor -- visits all children
-//===----------------------------------------------------------------------===//
-
-// Type expressions
+// DefaultASTVisitor: visits all children.
 void DefaultASTVisitor::visit(NamedTypeExpr&) {}
 void DefaultASTVisitor::visit(GenericTypeExpr& node) {
     if (node.base) node.base->accept(*this);
@@ -201,7 +175,6 @@ void DefaultASTVisitor::visit(BooleanLiteral&) {}
 void DefaultASTVisitor::visit(NoneLiteral&) {}
 void DefaultASTVisitor::visit(NameExpr&) {}
 
-// Compound expressions
 void DefaultASTVisitor::visit(BinaryExpr& node) {
     node.left->accept(*this);
     node.right->accept(*this);
@@ -315,7 +288,6 @@ void DefaultASTVisitor::visit(StarredExpr& node) {
     node.value->accept(*this);
 }
 
-// Statements
 void DefaultASTVisitor::visit(ExprStmt& node) {
     node.expr->accept(*this);
 }
@@ -411,7 +383,6 @@ void DefaultASTVisitor::visit(DeleteStmt& node) {
 void DefaultASTVisitor::visit(ImportStmt&) {}
 void DefaultASTVisitor::visit(FromImportStmt&) {}
 
-// Declarations
 void DefaultASTVisitor::visit(FunctionDecl& node) {
     for (auto& dec : node.decorators) dec->accept(*this);
     for (auto& p : node.params) {
@@ -436,10 +407,6 @@ void DefaultASTVisitor::visit(ContractDecl& node) {
 void DefaultASTVisitor::visit(Module& node) {
     for (auto& s : node.body) s->accept(*this);
 }
-
-//===----------------------------------------------------------------------===//
-// AST Printer
-//===----------------------------------------------------------------------===//
 
 void ASTPrinter::write(const std::string& text) {
     output_ += text;
@@ -505,8 +472,6 @@ std::string ASTPrinter::print(ASTNode& node) {
     return output_;
 }
 
-// --- Type Expressions ---
-
 void ASTPrinter::visit(NamedTypeExpr& node) {
     write(node.name);
 }
@@ -562,8 +527,6 @@ void ASTPrinter::visit(ContractSetTypeExpr& node) {
     }
     write("}");
 }
-
-// --- Expressions ---
 
 void ASTPrinter::visit(IntegerLiteral& node) {
     writeLine("(int " + std::to_string(node.value) + ")");
@@ -936,8 +899,6 @@ void ASTPrinter::visit(StarredExpr& node) {
     writeLine(")");
 }
 
-// --- Statements ---
-
 void ASTPrinter::visit(ExprStmt& node) {
     writeLine("(expr-stmt");
     increaseIndent();
@@ -1300,8 +1261,6 @@ void ASTPrinter::visit(FromImportStmt& node) {
     line += ")";
     writeLine(line);
 }
-
-// --- Declarations ---
 
 void ASTPrinter::visit(FunctionDecl& node) {
     std::string header = "(def ";

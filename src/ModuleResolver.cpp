@@ -28,19 +28,14 @@ namespace {
   #define DRAGON_PCLOSE pclose
   static const char* kPythonArgs =
       " -c \"import site; print(site.getsitepackages()[0])\" 2>/dev/null";
-  // Absolute, trusted interpreter locations only. We deliberately do NOT run a
-  // bare `python3`: popen() spawns `/bin/sh -c`, which resolves `python3` via
-  // $PATH, so a writable directory earlier in $PATH (common in CI, e.g.
-  // ./node_modules/.bin) lets an attacker drop a `python3` that runs at every
-  // `dragon build --site-packages`. Resolving to an absolute path closes that.
+  // No bare `python3`: popen() runs it via `/bin/sh -c`, which resolves it
+  // through $PATH, so a writable earlier PATH dir (e.g. CI's ./node_modules/.bin) could hijack it.
   static const char* kPythonCandidates[] = {
       "/usr/bin/python3", "/usr/local/bin/python3", "/bin/python3", nullptr};
 #endif
 
-/// Resolve a trusted, absolute Python interpreter path. Honors an explicit
-/// DRAGON_PYTHON override (the operator vouches for it); otherwise picks the
-/// first existing absolute candidate. Returns "" if none exists - we never fall
-/// back to an unqualified name searched on $PATH.
+/// Trusted absolute Python path: honors a DRAGON_PYTHON override, else the
+/// first existing candidate. Returns "" rather than falling back to $PATH.
 std::string resolvePythonInterpreter() {
     if (const char* env = std::getenv("DRAGON_PYTHON")) {
         if (env[0] != '\0') {
@@ -58,16 +53,14 @@ std::string resolvePythonInterpreter() {
 
 /// Auto-detect the Python site-packages path.
 std::string detectSitePackagesPath() {
-    // Explicit, exec-free path wins: an operator who sets DRAGON_SITE_PACKAGES
-    // gets exactly that directory, no interpreter is launched at all.
+    // DRAGON_SITE_PACKAGES wins if set: no interpreter is launched at all.
     if (const char* env = std::getenv("DRAGON_SITE_PACKAGES")) {
         if (env[0] != '\0') return std::string(env);
     }
     std::string python = resolvePythonInterpreter();
     if (python.empty()) return "";  // no trusted interpreter; skip auto-detect
-    // Command is built from a TRUSTED absolute path + a fixed constant arg
-    // string (no user input), so the popen shell cannot be injected and cannot
-    // be redirected via $PATH.
+    // Built from a trusted absolute path + fixed args (no user input), so the
+    // popen shell can't be injected or redirected via $PATH.
     std::string cmd = "\"" + python + "\"" + kPythonArgs;
     std::array<char, 256> buffer;
     std::string result;
@@ -93,25 +86,13 @@ bool isDirectory(const std::string& path) {
 ModuleResolver::ModuleResolver(ModuleResolverOptions options)
     : options_(std::move(options))
 {
-    // Auto-detect site-packages if enabled but no path given
     if (options_.enableSitePackages && options_.sitePackagesPath.empty()) {
         options_.sitePackagesPath = detectSitePackagesPath();
     }
 }
 
-/// Resolve a module name to a file path.
-///
-/// Rules:
-///  - Flat file (name.dr / name.py) and package dir (name/) are mutually
-///  exclusive. If both exist in the same search directory, emit an error.
-///  - Flat file: name.dr, then name.py
-///  - Package root (.dr mode): name/name.dr
-///  - Package root (.py mode): name/__init__.py
-///  - Dotted names (e.g. "os.path"): split on dots to form path segments.
-///  The first segment is the package root, subsequent segments are
-///  submodules within that package directory.
-///  - Conflict within package root: name/name.dr + name/__init__.py -> error
-///
+/// Resolve a module name to a file path. Flat file and package dir are
+/// mutually exclusive (conflict = error); dotted names split into a package root plus submodule segments.
 std::string ModuleResolver::findModuleFile(const std::string& moduleName) const {
     // Convert dots to directory separators: "os.path" -> "os/path"
     std::string pathName = moduleName;
@@ -119,8 +100,7 @@ std::string ModuleResolver::findModuleFile(const std::string& moduleName) const 
         if (c == '.') c = '/';
     }
 
-    // Extract the top-level segment for conflict detection.
-    // For "os.path" -> topLevel = "os", for "os" -> topLevel = "os"
+    // Top-level segment for conflict detection: "os.path" -> "os", "os" -> "os".
     std::string topLevel = pathName;
     auto slashPos = topLevel.find('/');
     if (slashPos != std::string::npos) {
@@ -132,8 +112,7 @@ std::string ModuleResolver::findModuleFile(const std::string& moduleName) const 
         return f.good();
     };
 
-    // Try resolving in a single base directory. Returns the resolved file,
-    // or empty string if not found. Sets an error on conflict.
+    // Resolve in one base dir; returns the file, "" if not found, sets an error on conflict.
     auto resolveInDir = [&](const std::string& base) -> std::string {
         bool hasFlatDr = tryFile(base + topLevel + ".dr");
         bool hasFlatPy = tryFile(base + topLevel + ".py");
@@ -161,8 +140,7 @@ std::string ModuleResolver::findModuleFile(const std::string& moduleName) const 
         // --- Case 2: Package directory ---
         if (hasDir) {
             if (pathName == topLevel) {
-                // Importing the package root: "os" -> os/os.dr or os/__init__.py
-                // Rule: os/os.dr + os/__init__.py -> error
+                // Package root import ("os" -> os/os.dr or os/__init__.py); both existing is a conflict.
                 bool hasRootDr = tryFile(base + topLevel + "/" + topLevel + ".dr");
                 bool hasInitPy = tryFile(base + topLevel + "/__init__.py");
                 if (hasRootDr && hasInitPy) {
@@ -208,11 +186,8 @@ std::string ModuleResolver::findModuleFile(const std::string& moduleName) const 
         if (!errors_.empty()) return "";  // conflict error - stop searching
     }
 
-    // Search the project-local egg dir `.drx/` (D022), between sourceDir and
-    // the stdlib. An egg may use a `src/` layout or a custom root, recorded in
-    // a `.dragon-entry` hint file that `sync` writes into `.drx/<pkg>/` (one
-    // line, the entry path relative to the package dir). Reading it is a plain
-    // ifstream - zero `.drs` parsing and zero process fork in this hot path.
+    // Project-local egg dir `.drx/` (D022), tried between sourceDir and stdlib.
+    // `.dragon-entry` (one line: entry path) records a custom src/ layout; read via plain ifstream, no `.drs` parsing or fork.
     if (!options_.drxDir.empty()) {
         std::string drxBase = options_.drxDir;
         if (drxBase.back() != '/') drxBase += '/';
@@ -232,9 +207,8 @@ std::string ModuleResolver::findModuleFile(const std::string& moduleName) const 
                 }
             }
             if (!entryRel.empty()) {
-                // Hint-driven: root import -> <pkg>/<entryRel>; submodules resolve
-                // in the entry's directory (so `src/http.dr` puts `http.client`
-                // at `src/client.dr`).
+                // Hint-driven: root import -> <pkg>/<entryRel>; submodules resolve in
+                // the entry's directory (src/http.dr -> http.client at src/client.dr).
                 std::string srcSub;
                 auto sl = entryRel.rfind('/');
                 if (sl != std::string::npos) srcSub = entryRel.substr(0, sl);
@@ -250,8 +224,7 @@ std::string ModuleResolver::findModuleFile(const std::string& moduleName) const 
                     if (tryFile(candPy)) return candPy;
                 }
             }
-            // No hint (or hint miss): fall back to the standard <pkg>/<pkg>.dr +
-            // submodule convention via resolveInDir on the `.drx/` base.
+            // No hint (or miss): fall back to <pkg>/<pkg>.dr + submodule convention.
             std::string result = resolveInDir(drxBase);
             if (!result.empty()) return result;
             if (!errors_.empty()) return "";
@@ -271,7 +244,6 @@ std::string ModuleResolver::findModuleFile(const std::string& moduleName) const 
     if (options_.enableSitePackages && !options_.sitePackagesPath.empty()) {
         std::string base = options_.sitePackagesPath;
         if (!base.empty() && base.back() != '/') base += '/';
-        // Site-packages uses Python conventions only
         std::string pyFile = base + pathName + ".py";
         if (tryFile(pyFile)) return pyFile;
         std::string initPy = base + pathName + "/__init__.py";
@@ -322,13 +294,8 @@ ImportGraph ModuleResolver::buildGraph(Module& entryModule, const std::string& e
     return graph;
 }
 
-// Resolve a FromImportStmt: enqueue the source module, plus any imported name
-// that turns out to be a submodule file. This matches Python's `from X import Y`
-// semantics: Python first looks for attribute Y on X, and falls back to
-// importing the submodule X.Y. The resolver doesn't have an attribute table at
-// this point, so it speculatively probes for X.Y as a submodule file. If the
-// file exists, the submodule is enqueued alongside X; if it doesn't, the probe
-// is silent (TypeChecker will later resolve Y as an exported value of X).
+// Enqueues the source module plus any imported name that's really a submodule
+// (mirrors Python's attribute-vs-submodule `from X import Y` fallback); a miss stays silent since TypeChecker may resolve Y as a value export.
 void ModuleResolver::enqueueFromImport(const FromImportStmt& fromImp,
                                         std::map<std::string, Color>& colors,
                                         ImportGraph& graph) {
@@ -341,9 +308,8 @@ void ModuleResolver::enqueueFromImport(const FromImportStmt& fromImp,
         dfs(moduleName, colors, graph);
     }
 
-    // For each imported name, probe X.Y as a submodule file. Suppress any
-    // diagnostic from the speculative probe (a missing X.Y file is not an
-    // error - Y may simply be a value export).
+    // Probe X.Y as a submodule file for each imported name; suppress any
+    // diagnostic from the probe since a miss just means Y is a value export.
     for (auto& alias : fromImp.names) {
         if (alias.name.empty() || alias.name == "*") continue;
         std::string sub = moduleName + "." + alias.name;
@@ -351,8 +317,7 @@ void ModuleResolver::enqueueFromImport(const FromImportStmt& fromImp,
         size_t errMark = errors_.size();
         std::string subFile = findModuleFile(sub);
         if (subFile.empty()) {
-            // Drop any diagnostic the speculative probe produced (e.g.
-            // "package has no root" if the probed path was a package dir).
+            // Drop any diagnostic from the probe (e.g. "package has no root").
             if (errors_.size() > errMark) errors_.resize(errMark);
             continue;
         }
@@ -422,10 +387,8 @@ void ModuleResolver::dfs(const std::string& moduleName,
     // Recursively process this module's imports
     for (auto& stmt : ast->body) {
         if (auto* fromImp = dynamic_cast<FromImportStmt*>(stmt.get())) {
-            // Track gray-cycle hits across both the source module and any
-            // submodule probes - the helper handles the white->gray DFS,
-            // but cycle detection still needs to fire if either name is
-            // already on the stack.
+            // Cycle detection must check both the source module and submodule
+            // probes: enqueueFromImport only does white->gray DFS, not this check.
             const std::string& depName = fromImp->module;
             if (!depName.empty()) {
                 std::string depFile = findModuleFile(depName);

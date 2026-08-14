@@ -725,7 +725,7 @@ std::pair<llvm::Value*, llvm::Value*> CodeGen::Impl::boxArgTagPayload(
                             llvm::cast<llvm::PointerType>(val->getType()));
                         auto* isNull = builder->CreateICmpEQ(val, nullp, "opt.isnull");
                         tagV = builder->CreateSelect(isNull,
-                            llvm::ConstantInt::get(i64Type, 4),   // TAG_NONE
+                            llvm::ConstantInt::get(i64Type, TAG_NONE),   // TAG_NONE
                             llvm::ConstantInt::get(i64Type, innerTag), "opt.tag");
                     }
                 }
@@ -744,15 +744,15 @@ llvm::Value* CodeGen::Impl::emitTagForExpr(Expr* expr, CodeGen& cg) {
         }
         // Literals -> constant tag (fallback when type wasn't propagated).
         if (dynamic_cast<IntegerLiteral*>(expr))
-            return llvm::ConstantInt::get(i64Type, 0); // TAG_INT
+            return llvm::ConstantInt::get(i64Type, TAG_INT); // TAG_INT
         if (auto* sl = dynamic_cast<StringLiteral*>(expr))
-            return llvm::ConstantInt::get(i64Type, sl->isBytes ? 7 : 1); // TAG_BYTES / TAG_STR
+            return llvm::ConstantInt::get(i64Type, sl->isBytes ? TAG_BYTES : TAG_STR); // TAG_BYTES / TAG_STR
         if (dynamic_cast<FloatLiteral*>(expr))
-            return llvm::ConstantInt::get(i64Type, 2); // TAG_FLOAT
+            return llvm::ConstantInt::get(i64Type, TAG_FLOAT); // TAG_FLOAT
         if (dynamic_cast<BooleanLiteral*>(expr))
-            return llvm::ConstantInt::get(i64Type, 3); // TAG_BOOL
+            return llvm::ConstantInt::get(i64Type, TAG_BOOL); // TAG_BOOL
         if (dynamic_cast<NoneLiteral*>(expr))
-            return llvm::ConstantInt::get(i64Type, 4); // TAG_NONE
+            return llvm::ConstantInt::get(i64Type, TAG_NONE); // TAG_NONE
         // Class constructor call: `Foo(...)` -> TAG_CLASS (7).
         if (auto* call = dynamic_cast<CallExpr*>(expr)) {
             if (auto* nm = dynamic_cast<NameExpr*>(call->callee.get())) {
@@ -1192,7 +1192,6 @@ llvm::Function* CodeGen::Impl::buildGeneratorDecrefFn(
     llvm::StructType* argsStructType,
     const std::vector<VarKind>& argKinds,
     const std::string& siteName) {
-        // Skip if no heap args
         bool anyHeap = false;
         for (auto k : argKinds) {
             if (isHeapKind(k) && k != VarKind::Union) { anyHeap = true; break; }

@@ -30,9 +30,9 @@ struct Symbol {
     bool isConst = false;   // Dragon const binding
     bool isStatic = false;  // Dragon static member
     bool isBuiltin = false; // injected builtin (outer namespace) - may be shadowed
-    bool isModuleForwardDecl = false; // hoisted module-level const in the pre-pass;
-                                      // its own second-pass visit is the real
-                                      // declaration, not a redeclaration
+    // Hoisted module-level const from the pre-pass; its second-pass visit is
+    // the real declaration, not a redeclaration.
+    bool isModuleForwardDecl = false;
 };
 
 /// Represents a scope (function, class, module, etc.)
@@ -80,14 +80,7 @@ struct SemaDiagnostic {
     std::string message;
 };
 
-/// Semantic analyzer
-/// 
-/// Performs:
-/// - Name resolution and binding
-/// - Scope analysis
-/// - Import resolution
-/// - Declaration checking
-/// - Basic semantic validation
+/// Name resolution, scope analysis, import resolution, and basic semantic validation.
 class Sema : public ASTVisitor {
 public:
     Sema();

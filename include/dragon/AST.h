@@ -15,18 +15,14 @@ class ASTVisitor;
 class Type;
 class ContractDecl;
 
-//===----------------------------------------------------------------------===//
-// Base Node Classes
-//===----------------------------------------------------------------------===//
-
 /// Base class for all AST nodes
 class ASTNode {
 public:
     virtual ~ASTNode() = default;
     virtual void accept(ASTVisitor& visitor) = 0;
     
-    SourceLocation location() const { return location_; }
-    void setLocation(SourceLocation loc) { location_ = loc; }
+    const SourceLocation& location() const { return location_; }
+    void setLocation(SourceLocation loc) { location_ = std::move(loc); }
 
 protected:
     SourceLocation location_;
@@ -44,10 +40,6 @@ class Stmt : public ASTNode {};
 
 /// Base class for type annotations
 class TypeExpr : public ASTNode {};
-
-//===----------------------------------------------------------------------===//
-// Type Expressions (Type Annotations)
-//===----------------------------------------------------------------------===//
 
 /// Simple type name: int, str, MyClass
 class NamedTypeExpr : public TypeExpr {
@@ -93,20 +85,13 @@ public:
     void accept(ASTVisitor& visitor) override;
 };
 
-/// ADR 054 - a contract set in type position: `{Amazing, Speaker}`. Two or
-/// more contract names group as a braced set (intersection: the value must
-/// satisfy every member) where a bare comma would be ambiguous (annotations,
-/// bounds, as-casts). A single contract is normally written bare and parses
-/// as NamedTypeExpr; the braced singleton is legal and means the same.
+/// ADR 054: a contract set in type position, `{Amazing, Speaker}` (intersection);
+/// braced form disambiguates from a bare comma. A single contract parses as NamedTypeExpr.
 class ContractSetTypeExpr : public TypeExpr {
 public:
     std::vector<std::string> names;
     void accept(ASTVisitor& visitor) override;
 };
-
-//===----------------------------------------------------------------------===//
-// Expressions
-//===----------------------------------------------------------------------===//
 
 /// Integer literal: 42, 0x1F, 0b1010
 class IntegerLiteral : public Expr {
@@ -140,20 +125,14 @@ public:
     bool isRaw = false;
     bool isFString = false;
     bool isBytes = false;
-    /// Parsed segments for f-strings - populated by Parser when isFString=true so
-    /// Sema/TypeChecker/CodeGen all walk one shared AST instead of re-lexing the
-    /// raw `value` at every stage. For non-f-strings this stays empty.
+    /// Populated by Parser when isFString=true, so later stages share one AST
+    /// instead of re-lexing `value`; empty for non-f-strings.
     std::vector<FStringPart> fstringParts;
     void accept(ASTVisitor& visitor) override;
 };
 
-/// One segment of a template body: a literal text run, a `!{expr}`
-/// interpolation, or a `!{ ...statements... }` block interpolation. Parsed
-/// once by the Parser into TemplateExpr::templateParts so Sema/TypeChecker/
-/// CodeGen all walk one shared AST instead of re-lexing the raw `body` at
-/// every stage (mirrors FStringPart). Without this the interpolations were
-/// invisible to the TypeChecker, so a `!{p[0]}` tuple-subscript never got its
-/// element type and lowered as a raw i64 pointer instead of the value.
+/// One segment of a template body: literal text, `!{expr}`, or `!{ stmts }`.
+/// Without this, e.g. `!{p[0]}` lowered as a raw i64 pointer, not the value.
 struct TemplatePart {
     enum class Kind { Literal, Interpolation, Block };
     Kind kind = Kind::Literal;
@@ -174,20 +153,12 @@ public:
     std::string body;          // raw template text (between outer braces)
     std::string contentType;   // empty = untyped (str), non-empty = typed template
 
-    /// Parsed segments of `body` - populated by the Parser (and, for file
-    /// templates whose content the Parser never saw, lazily by CodeGen). One
-    /// source of truth so the TypeChecker can walk each interpolation at its
-    /// native type. Empty only for a genuinely empty template body.
+    /// Parsed segments of `body`, populated by the Parser (or lazily by
+    /// CodeGen for file templates). Empty only for a genuinely empty body.
     std::vector<TemplatePart> templateParts;
 
-    // D017 Phase 4.B - true when this TemplateExpr was created from a
-    // `:{ ... }` content alias (Parser detected TEMPLATE_CONTENT_OPEN), not
-    // an explicit `template { ... }`. Drives two pieces of CodeGen behavior:
-    //  1. contentType is inherited from the enclosing template[X] via the
-    //  templateContextStack rather than being explicit.
-    //  2. At statement position inside a `!{}` block, the rendered string
-    //  appends to the block buffer (so `:{...}` fragments accumulate).
-    //  Explicit `template { ... }` is not auto-appended.
+    // D017 Phase 4.B: true for a `:{ ... }` content alias (vs explicit
+    // `template { ... }`); inherits contentType and auto-appends to the block buffer.
     bool isContentAlias = false;
     void accept(ASTVisitor& visitor) override;
 };
@@ -218,17 +189,11 @@ public:
 class NameExpr : public Expr {
 public:
     std::string name;
-    /// `own x` at a consuming position (call argument, spawn argument, own-
-    /// field-store RHS): the binding's +1 TRANSFERS to the consumer and the
-    /// name is Moved afterwards (docs/002 ADR 2.4/2.8). Set by the parser
-    /// only where the move grammar is legal; a move is always of a BINDING,
-    /// so it lives on the name instead of a wrapper node.
+    /// `own x` at a consuming position: the binding's +1 transfers to the
+    /// consumer and the name is Moved after (docs/002 ADR 2.4/2.8).
     bool isMoveMarked = false;
-    /// `dub x`: the ONLY second-owner path - a deep copy priced at this
-    /// exact position (docs/002 ADR 2.7). str/bytes lower to an incref
-    /// (immutable payloads are indistinguishable from copies); containers
-    /// deep-copy; non-dubable types are E11 in the TypeChecker. The source
-    /// binding is READ, never consumed.
+    /// `dub x`: the only second-owner path, a deep copy priced here (docs/002
+    /// ADR 2.7); str/bytes incref, containers deep-copy, non-dubable is E11.
     bool isDubMarked = false;
     void accept(ASTVisitor& visitor) override;
 };
@@ -272,13 +237,8 @@ public:
     std::unique_ptr<Expr> callee;
     std::vector<std::unique_ptr<Expr>> args;
     std::vector<std::pair<std::string, std::unique_ptr<Expr>>> kwArgs;
-    // Method-overload dispatch (ADR 010): when the callee resolves to an
-    // OVERLOADED method (a class declares >1 method with this name), the
-    // TypeChecker resolves the call to one overload by arity + parameter types
-    // and records its index here (0-based, in class-body order). CodeGen appends
-    // `__ovN` to the method symbol so the direct call targets the right monomorphic
-    // function - the dispatch is fully compile-time, so there is no runtime cost.
-    // -1 means "not an overloaded method" (the single-method fast path).
+    // ADR 010 overload dispatch: TypeChecker resolves by arity+params and
+    // records the 0-based index here; CodeGen appends `__ovN`. -1 = not overloaded.
     int resolvedMethodOverload = -1;
     void accept(ASTVisitor& visitor) override;
 };
@@ -423,24 +383,17 @@ public:
     void accept(ASTVisitor& visitor) override;
 };
 
-/// ADR 054 - consumer conformance assertion: `dog as Amazing` or
-/// `dog as {Amazing, Speaker}`. Compile-time checked and upward only; the
-/// operand's class must satisfy every named contract. Codegen emits nothing
-/// (same pointer in and out), so ownership classification must treat this
-/// node as transparent - the cast is exactly its operand at runtime.
+/// ADR 054: consumer conformance assertion `dog as Amazing`/`as {A, B}`,
+/// compile-time checked, upward only. Codegen emits nothing; same pointer in and out.
 class AsCastExpr : public Expr {
 public:
     std::unique_ptr<Expr> operand;
     std::vector<std::string> contracts;
-    /// Resolved contract ATOMS (a composed contract expands to the decls that
-    /// declare its methods), stamped by the TypeChecker on a successful check.
-    /// True-identity backpointers (D053): CodeGen keys its vtable coloring off
-    /// these, never off bare names.
+    /// Resolved contract ATOMS, stamped on a successful check. True-identity
+    /// backpointers (D053): CodeGen keys vtable coloring off these, never bare names.
     std::vector<const ContractDecl*> resolvedDecls;
-    /// True when the target was the braced form (`as {A}` / `as {A, B}`).
-    /// A with-item's TRAILING bare single name (`with open() as f`) is
-    /// Python's binder, never a cast - withStatement() unwraps that shape,
-    /// and this flag lets `as {A}` opt out of the unwrap.
+    /// True for the braced form (`as {A}`); lets it opt out of withStatement()'s
+    /// unwrap of a trailing bare `with ... as f` binder.
     bool fromBracedSet = false;
     void accept(ASTVisitor& visitor) override;
 };
@@ -470,10 +423,6 @@ public:
     bool isDoubleStar = false;  // **kwargs vs *args
     void accept(ASTVisitor& visitor) override;
 };
-
-//===----------------------------------------------------------------------===//
-// Statements
-//===----------------------------------------------------------------------===//
 
 /// Expression statement
 class ExprStmt : public Stmt {
@@ -510,11 +459,7 @@ public:
     bool isConst = false;   // true if declared with 'const' (.dr mode)
     bool isStatic = false;  // true if declared with 'static' (.dr mode)
     /// `own f: T` field marker (docs/001-memory.md): the field is the value's
-    /// SOLE owner - death of the instance releases it (raw handles via the
-    /// intrinsic releaser registry, heap values via the normal dealloc
-    /// decref), and stores must transfer ownership (a borrow is a compile
-    /// error). Set by the parser (.dr class bodies), enforced by
-    /// OwnershipCheck, consumed by the dealloc emission in codegen.
+    /// sole owner, released on instance death; stores must transfer ownership.
     bool isOwn = false;
     void accept(ASTVisitor& visitor) override;
 };
@@ -586,14 +531,8 @@ public:
     void accept(ASTVisitor& visitor) override;
 };
 
-/// Defer statement: defer f(x) - run a direct call when the current BLOCK
-/// scope exits, on every exit path (fall-through, return, break, continue,
-/// unwind). The other half of the fire coin: fire runs NOW on another green
-/// thread; defer runs LATER on this thread. Arguments and the method receiver
-/// evaluate AT this statement into snapshot slots; only the call runs at
-/// scope exit. `own x` args move at the statement (OwnershipCheck), and a
-/// pending defer pins every binding it references. The operand is always a
-/// CallExpr (the parser rejects anything else).
+/// `defer f(x)`: runs the call on every block-scope exit path. Args and the
+/// receiver evaluate now into snapshot slots; only the call itself runs later.
 class DeferStmt : public Stmt {
 public:
     std::unique_ptr<Expr> call;
@@ -690,11 +629,8 @@ public:
 class DeleteStmt : public Stmt {
 public:
     std::vector<std::unique_ptr<Expr>> targets;
-    /// Parallel to `targets`, set by OwnershipCheck (docs/002 ADR): 1 when the
-    /// target is a compiler-PROVEN sole-owner local (`Owned`, no escape fact).
-    /// Codegen emits the debug rc==1 assert only for proven targets; an
-    /// unproven `del` keeps the plain scope-exit-identical release. Empty when
-    /// the pass has not run (e.g. partial-analysis tools).
+    /// Parallel to `targets`, set by OwnershipCheck (docs/002 ADR): 1 when
+    /// proven sole-owner. Codegen emits the debug rc==1 assert only then.
     std::vector<uint8_t> provenUnique;
     void accept(ASTVisitor& visitor) override;
 };
@@ -719,10 +655,6 @@ public:
     void accept(ASTVisitor& visitor) override;
 };
 
-//===----------------------------------------------------------------------===//
-// Declarations
-//===----------------------------------------------------------------------===//
-
 /// Function parameter
 struct Parameter {
     std::string name;
@@ -730,19 +662,13 @@ struct Parameter {
     std::unique_ptr<Expr> defaultValue;  // optional
     bool isVarArg = false;   // *args
     bool isKwArg = false;    // **kwargs
-    /// `def f(own p: T)`: the callee OWNS p (docs/002 ADR 2.8) - the caller
-    /// moved its +1 in, the body may consume it, and the callee's scope exit
-    /// releases it if nothing did. Both ends of a move must say own (E13/E14).
+    /// `def f(own p: T)`: the callee owns p (docs/002 ADR 2.8), released at
+    /// scope exit if nothing consumed it. Both ends of a move must say own.
     bool isOwn = false;
 };
 
-/// Generic type parameter (PEP 695): the `T` in `class Foo[T]` / `def f[T]()`.
-/// Per Decision 044, `bound` is reserved for D046 (bounded `T: Base`) and is
-/// always nullptr in v1 - its presence in the AST keeps the surface stable so
-/// D046 doesn't churn it. A decl whose `typeParams` is non-empty is a
-/// *generic template*: it is parsed and abstractly type-checked once, but never
-/// lowered to LLVM directly (it has free type vars) - only the monomorphizer's
-/// stamped instantiations reach CodeGen.
+/// PEP 695 generic type parameter, the `T` in `class Foo[T]`/`def f[T]()`. A
+/// decl with non-empty `typeParams` is type-checked abstractly, never lowered directly.
 struct TypeParam {
     std::string name;
     std::unique_ptr<TypeExpr> bound;  // nullptr in v1 (D046)
@@ -765,25 +691,17 @@ public:
     bool isConstructor = false;    // true if parsed from self() syntax (.dr mode)
     bool isExtern = false;         // true if extern "C" def (C FFI, no body)
     std::string externLib;         // library hint from extern "C" from "lib" { }
-    /// C-side linker symbol for an `extern "C" def CSYM(...) as DRAGON_NAME`
-    /// declaration where CSYM collides with a Dragon keyword (e.g. `raise`).
-    /// When non-empty, `name` holds the Dragon-visible identifier (the alias)
-    /// and `externSymbol` holds the C symbol the linker should resolve to.
-    /// Empty for the plain `extern "C" def fn(...)` shape, where `name` is
-    /// both the C symbol and the Dragon-visible identifier.
+    /// Linker symbol for `extern "C" def CSYM(...) as DRAGON_NAME` when CSYM
+    /// collides with a Dragon keyword; `name` is the alias, this the real C symbol.
     std::string externSymbol;
-    /// D052 process-extern metadata for `dragon ffi sync`: lang tag (python/golang/
-    /// rust; empty = C lane) + the `from` path. Body is parser-synthesized, isExtern stays false.
+    /// D052 process-extern for `dragon ffi sync`: lang tag (empty = C lane) + `from` path.
     std::string externLang;
     std::string externPath;
     bool isProperty = false;       // true if @property - accessed without parens; in vtable
     std::string propertySetterFor; // non-empty if @<name>.setter - name of the property it sets
     int constructorIndex = -1;     // overload index (0, 1, 2, ...) for __init__ methods
-    // ADR 010 method overloading: when a class declares >1 method with this
-    // name, each gets a 0-based index in class-body order and the shared count.
-    // CodeGen mangles the LLVM symbol `Class_method__ovN` only when count > 1, so
-    // a non-overloaded method (count == 1) keeps its bare name and identical
-    // codegen. Resolution is compile-time; the emitted call is a direct call.
+    // ADR 010 overloading: 0-based index in class-body order + shared count;
+    // CodeGen mangles `Class_method__ovN` only when count > 1 (else bare name).
     int methodOverloadIndex = -1;  // -1 = not overloaded
     int methodOverloadCount = 1;   // number of same-name overloads (1 = unique)
     int posOnlyEnd = -1;           // index after last positional-only param (/ separator)
@@ -791,20 +709,14 @@ public:
     std::vector<std::string> capturedVars;  // populated by Sema for nested defs (closure semantics)
     std::vector<std::string> mutatedCapturedVars;  // D027.1: subset of capturedVars marked `nonlocal` in this fn body
     std::optional<std::string> docstring;  // first ExprStmt(StringLiteral) lifted out of body; powers __doc__
-    /// D044 cross-module generics: when this is a stamped generic instantiation
-    /// of a template defined in another module, holds that DEFINING module's
-    /// name. CodeGen resolves the body's bare names (sibling functions, module
-    /// globals) against it, so a `Signal[int]` stamped at a use site can still
-    /// reach its `stdlib/ui` helpers. Empty for normal (non-stamped) decls.
+    /// D044 cross-module generics: defining module of the template this was
+    /// stamped from, so CodeGen resolves bare names against it. Empty otherwise.
     std::string genericHomeModule;
     void accept(ASTVisitor& visitor) override;
 };
 
-/// ADR 054 - `type Name { def sig... }`: a named contract, a block of
-/// bodiless method signatures in the spirit of a .pyi stub. `bases` composes
-/// other contracts (`type C(A, B) {}` unions the signature sets). Methods
-/// reuse FunctionDecl with an always-empty body; the parser rejects bodies,
-/// fields, and defaults inside a contract.
+/// ADR 054: `type Name { def sig... }`, a named contract of bodiless method
+/// signatures (a .pyi-style stub); `bases` composes other contracts via union.
 class ContractDecl : public Stmt {
 public:
     std::string name;
@@ -819,15 +731,11 @@ public:
     std::string name;
     std::vector<TypeParam> typeParams;  // D044 - PEP 695 `class Foo[T]`; empty = non-generic
     std::vector<std::unique_ptr<Expr>> bases;
-    /// ADR 054 - producer promise: the comma list after `->` in the header
-    /// (`class Dog(Animal) -> Amazing, Speaker { ... }`). Each name must be a
-    /// contract; conformance is checked at the class site and the class then
-    /// flows into contract-typed positions with no cast.
+    /// ADR 054: producer promise, the `-> Amazing, Speaker` list in the header;
+    /// checked at the class site so the class flows into contract positions with no cast.
     std::vector<std::string> promises;
-    /// ADR 054 - every contract atom this class PROVENLY conforms to, stamped
-    /// by the TypeChecker from header promises and successful `as` casts
-    /// (deduped). CodeGen's coloring pre-pass reads this - plus each class's
-    /// ancestors' entries - to decide whose vtables carry colored slots.
+    /// ADR 054: every contract atom PROVENLY conformed to (header promises +
+    /// successful `as` casts, deduped). CodeGen's coloring pre-pass reads this.
     std::vector<const ContractDecl*> conformedContracts;
     std::vector<std::pair<std::string, std::unique_ptr<Expr>>> keywords;  // metaclass etc.
     std::vector<std::unique_ptr<Stmt>> body;
@@ -839,14 +747,8 @@ public:
     void accept(ASTVisitor& visitor) override;
 };
 
-/// Canonical positional order of a class's own instance fields, as declared:
-/// class-body annotations first (in source order), then `self.X = ...` targets
-/// across method bodies (in source order), deduplicated. This is the single
-/// source of truth for positional `match` class-pattern destructuring
-/// (`case Point(x, y)`) - BOTH the TypeChecker (capture types) and CodeGen
-/// (field loads) call this on the SAME ClassDecl, so position->field-name is
-/// guaranteed identical across stages. Parent fields are NOT included; callers
-/// prepend the parent's order for inheritance.
+/// Canonical positional field order (class-body annotations then `self.X =`
+/// targets, deduplicated); the source of truth for `match` destructuring.
 std::vector<std::string> instanceFieldOrder(const ClassDecl& cls);
 
 /// Type alias statement (PEP 695): type Point = tuple[int, int]
@@ -856,10 +758,6 @@ public:
     std::unique_ptr<TypeExpr> value;
     void accept(ASTVisitor& visitor) override;
 };
-
-//===----------------------------------------------------------------------===//
-// Module
-//===----------------------------------------------------------------------===//
 
 /// A complete Dragon/Python module
 class Module : public ASTNode {
@@ -872,22 +770,9 @@ public:
     void accept(ASTVisitor& visitor) override;
 };
 
-//===----------------------------------------------------------------------===//
-// AST utilities
-//===----------------------------------------------------------------------===//
-
-/// True if executing `stmts` ALWAYS leaves the current block on every path
-/// (the last statement is a return/raise/break/continue, or an `if` with an
-/// `else` where every branch terminates). A conservative under-approximation:
-/// it may answer `false` for a body that does terminate (e.g. via a `while
-/// true` with no break), never `true` for one that can fall through. Shared by
-/// the TypeChecker and CodeGen so their flow-sensitive narrowing of the code
-/// after a terminating `if` stays in lockstep.
+/// True if `stmts` always leaves the current block on every path (conservative:
+/// may answer false for a terminating body, never true for a falling-through one).
 bool stmtsAlwaysTerminate(const std::vector<std::unique_ptr<Stmt>>& stmts);
-
-//===----------------------------------------------------------------------===//
-// Visitor Pattern
-//===----------------------------------------------------------------------===//
 
 /// Visitor base class for AST traversal
 class ASTVisitor {

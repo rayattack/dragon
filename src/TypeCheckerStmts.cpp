@@ -143,11 +143,8 @@ bool TypeChecker::tryExpectedTypeLiteral(Expr* value, const std::shared_ptr<Type
         lit->type = expected;
         return true;
     }
-    // tuple literal -> tuple[T1, ..., Tn]: arity must match, each element <: Ti.
-    // Sound for the same reason as the list/dict cases: a fresh literal has no
-    // aliases, and tuple elements are stored per-slot tagged (elem_tags), so an
-    // Any slot adopts the element's runtime tag - there is no whole-container
-    // representation split to guard.
+    // tuple literal -> tuple[T1,...,Tn]: arity must match, each element <: Ti.
+    // Sound like list/dict: tuple elements are stored per-slot tagged, so an Any slot just adopts the element's runtime tag.
     if (expected->kind() == Type::Kind::Tuple) {
         auto* lit = dynamic_cast<TupleExpr*>(value);
         if (!lit) return false;
@@ -322,10 +319,8 @@ void TypeChecker::visit(AssignStmt& node) {
                 }
             } else if (auto* attr = dynamic_cast<AttributeExpr*>(target.get())) {
                 auto objType = inferType(attr->object.get());
-                // `obj.method = v` / `Class.method = v` must not compile: a
-                // method is not an assignable slot. It previously compiled
-                // silently and did nothing (the method was untouched), hiding
-                // real bugs like `res.html = ...` for `res.html(...)`.
+                // `obj.method = v` must not compile (a method isn't an assignable slot);
+                // it previously compiled silently and did nothing, hiding real bugs like `res.html = ...`.
                 const ClassType* recvCls = nullptr;
                 if (objType && objType->kind() == Type::Kind::Instance)
                     recvCls = static_cast<const InstanceType&>(*objType).classType.get();
@@ -430,9 +425,8 @@ void TypeChecker::visit(AugAssignStmt& node) {
 void TypeChecker::visit(AnnAssignStmt& node) {
     auto annotType = resolveType(node.annotation.get());
 
-    // `obj.method: T = v` is as invalid as the bare form (see AssignStmt): a
-    // method is not an assignable slot, annotated or not. The ctor's field
-    // declarations (`self.x: str = v`) resolve in `fields` and pass through.
+    // `obj.method: T = v` is as invalid as the bare form (see AssignStmt); the
+    // ctor's field declarations (`self.x: str = v`) resolve in `fields` and pass through.
     if (auto* attr = dynamic_cast<AttributeExpr*>(node.target.get())) {
         auto objType = inferType(attr->object.get());
         const ClassType* recvCls = nullptr;
@@ -1192,7 +1186,6 @@ void TypeChecker::visit(FunctionDecl& node) {
     fillFuncMeta(*funcType, node.params, node.isMethod, node.hasImplicitSelf,
                  node.isClassMethod);
 
-    // Define function in current scope
     impl_->define(node.name, funcType);
 
     // Type check body in new scope
@@ -1328,14 +1321,12 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
         }
     }
 
-    // Register class type name for resolution
     impl_->typeNames[node.name] = std::make_shared<InstanceType>(classType);
     impl_->define(node.name, classType);
 
     // Type check body in new scope
     impl_->pushScope();
 
-    // Define 'self' as instance of this class
     impl_->define("self", std::make_shared<InstanceType>(classType));
 
     // D045 - the lexically-enclosing class for member-access privacy, set for the
@@ -1515,9 +1506,8 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
                             auto* obj = dynamic_cast<NameExpr*>(attr->object.get());
                             if (!obj || obj->name != "self") continue;
                             if (classType->fields.count(attr->attribute)) continue;
-                            // `self.m = v` where m is a METHOD is a compile
-                            // error (AssignStmt visitor); never register it as
-                            // a field here - that would shadow the method.
+                            // `self.m = v` where m is a METHOD is a compile error (AssignStmt
+                            // visitor); never register it as a field here, that would shadow the method.
                             if (classType->methods.count(attr->attribute) ||
                                 classType->methodOverloads.count(attr->attribute))
                                 continue;
@@ -1568,12 +1558,8 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
         }
     }
 
-    // ADR 054 producer promises: `class Dog(Animal) -> Amazing, Speaker`.
-    // Checked HERE, at the class site, after the method-signature pre-pass
-    // filled classType->methods - so breaking a contract errors once, on the
-    // class, listing exactly what is missing. Atoms land in
-    // promisedContracts (value-position assignability) and on the ClassDecl
-    // (CodeGen's coloring pre-pass).
+    // ADR 054 producer promises (`class Dog(Animal) -> Amazing, Speaker`): checked here
+    // after the method-signature pre-pass, so a broken contract errors once, listing what's missing. Atoms land in promisedContracts and on the ClassDecl.
     for (auto& pname : node.promises) {
         auto ct = resolveContractRef(pname, node.location(), true);
         if (!ct) continue;
@@ -1598,9 +1584,8 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
     impl_->popScope();
 }
 
-// ADR 054 - all contract-declaration work (registration, signatures,
-// composition, diagnostics) happens in the registerContracts pre-pass so
-// declaration order never matters; the main walk has nothing left to do.
+// ADR 054 - all contract-declaration work happens in the registerContracts
+// pre-pass so declaration order never matters; the main walk has nothing left to do.
 void TypeChecker::visit(ContractDecl&) {}
 
 void TypeChecker::visit(TypeAliasStmt& node) {

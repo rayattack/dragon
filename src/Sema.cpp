@@ -5,18 +5,14 @@
 
 namespace dragon {
 
-//===----------------------------------------------------------------------===//
-// Scope Implementation
-//===----------------------------------------------------------------------===//
-
 Scope::Scope(Kind kind, Scope* parent) : kind_(kind), parent_(parent) {}
 Scope::~Scope() = default;
 
 bool Scope::define(const Symbol& symbol) {
     auto it = symbols_.find(symbol.name);
     if (it != symbols_.end()) {
-        // A user declaration shadows an injected builtin (which lives in the
-        // outer namespace, not this scope) - replace the builtin entry.
+        // A user declaration shadows an injected builtin (outer namespace) -
+        // replace the builtin entry.
         if (it->second.isBuiltin && !symbol.isBuiltin) {
             it->second = symbol;
             return true;
@@ -60,11 +56,8 @@ struct NameResolution {
     bool crossedFunction = false;   // reaching it passed out of the current function
 };
 
-// Resolve `n` from `from` up the scope chain, recording whether the search
-// crossed a function boundary before finding the binding. Used to enforce that
-// an assignment may not rebind a variable owned by an ENCLOSING function
-// without `nonlocal` - those markers are defined inside the current function,
-// so they are found before the search crosses out.
+// Resolve `n` up the scope chain, tracking whether the search crossed a
+// function boundary. classifyRebind uses that to require nonlocal/global.
 NameResolution resolveAcross(Scope* from, const std::string& n) {
     NameResolution r;
     for (Scope* p = from; p; p = p->parent()) {
@@ -74,10 +67,8 @@ NameResolution resolveAcross(Scope* from, const std::string& n) {
     return r;
 }
 
-// What a bare/compound assignment to `r`'s binding requires when reaching it
-// crossed out of the current function. `nonlocal` for an enclosing function's
-// var, `global` for a module-level one; `Ok` when no boundary was crossed (a
-// local or same-function block) or the owner is a class scope.
+// What rebinding r's binding requires: nonlocal for an enclosing function's
+// var, global for a module var, Ok otherwise (same function, or class scope).
 enum class OuterRebind { Ok, NeedNonlocal, NeedGlobal };
 OuterRebind classifyRebind(const NameResolution& r) {
     if (!r.sym || !r.crossedFunction) return OuterRebind::Ok;
@@ -88,9 +79,8 @@ OuterRebind classifyRebind(const NameResolution& r) {
     }
 }
 
-// The diagnostic for a rejected cross-scope rebind. `nonlocal`/`global` are
-// found inside the current function (markers defined there), so a declared
-// opt-in resolves before the walk crosses out and never reaches here.
+// Diagnostic for a rejected cross-scope rebind; a declared nonlocal/global
+// opt-in resolves before the walk crosses out, so this only fires without one.
 std::string rebindErrorMsg(OuterRebind kind, const std::string& n) {
     if (kind == OuterRebind::NeedNonlocal)
         return "'" + n + "' is owned by an enclosing function; add 'nonlocal " +
@@ -102,10 +92,6 @@ std::string rebindErrorMsg(OuterRebind kind, const std::string& n) {
 }
 } // namespace
 
-//===----------------------------------------------------------------------===//
-// Sema Implementation
-//===----------------------------------------------------------------------===//
-
 struct Sema::Impl {
     std::vector<SemaDiagnostic> diagnostics;
     std::vector<std::unique_ptr<Scope>> scopes;
@@ -113,15 +99,12 @@ struct Sema::Impl {
     bool isInLoop = false;
     bool isInFunction = false;
 
-    // D027: Closure capture tracking.
-    // Stack of capture contexts - one per nested lambda being analyzed.
+    // D027: closure capture tracking, one context per nested lambda being analyzed.
     struct CaptureContext {
         Scope* lambdaScope;  // the lambda's own Function scope
         std::set<std::string> capturedNames;
-        // Subset of capturedNames declared `nonlocal` somewhere in this
-        // function's body - they need heap-cell promotion at the binding
-        // scope and cell-pointer storage in the env (instead of a value
-        // copy) so writes propagate back to the owner.
+        // Subset of capturedNames declared `nonlocal`: needs heap-cell promotion
+        // at the binding scope so writes propagate back to the owner.
         std::set<std::string> nonlocalDeclaredNames;
     };
     std::vector<CaptureContext> captureStack;
@@ -151,10 +134,6 @@ bool Sema::hasErrors() const {
     return false;
 }
 
-//===----------------------------------------------------------------------===//
-// Type Expression Visitors
-//===----------------------------------------------------------------------===//
-
 void Sema::visit(NamedTypeExpr&) {}
 void Sema::visit(GenericTypeExpr& node) {
     if (node.base) node.base->accept(*this);
@@ -176,16 +155,11 @@ void Sema::visit(TupleTypeExpr& node) {
 
 void Sema::visit(ContractSetTypeExpr&) {}
 
-//===----------------------------------------------------------------------===//
-// Expression Visitors
-//===----------------------------------------------------------------------===//
-
 void Sema::visit(IntegerLiteral&) {}
 void Sema::visit(FloatLiteral&) {}
 void Sema::visit(StringLiteral& node) {
-    // F-string interpolations are real expressions in the enclosing scope -
-    // visit them so name resolution + capture analysis fire (e.g. base in
-    // `f"{base}/x"` becomes a closure capture of the surrounding nested def).
+    // F-string interpolations are real expressions in the enclosing scope; visit
+    // them so name resolution and capture analysis fire (e.g. base in f"{base}/x").
     for (auto& part : node.fstringParts) {
         if (part.kind == FStringPart::Kind::Expression && part.expr) {
             part.expr->accept(*this);
@@ -204,10 +178,8 @@ void Sema::visit(NameExpr& node) {
         return;
     }
 
-    // D027: Check if this name is captured from an enclosing scope.
-    // For each lambda on the capture stack, if the name is NOT defined
-    // within that lambda's scope (or below), but IS defined in an outer
-    // non-module scope, it's a capture for that lambda.
+    // D027: for each lambda on the capture stack, a name not defined within
+    // that lambda's scope but defined in an outer non-module scope is a capture.
     if (!impl_->captureStack.empty() &&
         sym->kind != Symbol::Kind::Function &&
         sym->kind != Symbol::Kind::Class &&
@@ -443,7 +415,7 @@ void Sema::visit(AwaitExpr& node) {
 }
 
 void Sema::visit(AsCastExpr& node) {
-    // Contract names are TYPE names resolved by the TypeChecker; only the
+    // Contract names are type names resolved by the TypeChecker; only the
     // operand is a value expression.
     node.operand->accept(*this);
 }
@@ -453,12 +425,8 @@ void Sema::visit(FireExpr& node) {
         node.operand->accept(*this);
         return;
     }
-    // Block form `fire { ... }` runs on a vthread, so it captures enclosing
-    // locals like a lambda - push a Function scope + capture context so codegen
-    // knows exactly which locals to marshal as spawn args (without this the body
-    // referenced the parent frame's allocas directly -> invalid cross-function
-    // IR). nonlocal-mutated captures are rejected in codegen (the cells aren't
-    // thread-safe yet - that would be a data race).
+    // `fire { ... }` runs on a vthread, capturing enclosing locals like a lambda; push a
+    // Function scope + capture context so codegen marshals spawn args (nonlocal-mutated captures rejected: data race).
     pushScope(Scope::Kind::Function);
     Impl::CaptureContext capCtx;
     capCtx.lambdaScope = impl_->currentScope;
@@ -486,36 +454,19 @@ void Sema::visit(StarredExpr& node) {
     node.value->accept(*this);
 }
 
-//===----------------------------------------------------------------------===//
-// Statement Visitors
-//===----------------------------------------------------------------------===//
-
 void Sema::visit(ExprStmt& node) {
     node.expr->accept(*this);
 }
 
 void Sema::visit(AssignStmt& node) {
-    // Visit the value first
     node.value->accept(*this);
     if (node.typeAnnotation) node.typeAnnotation->accept(*this);
 
-    // Define or update targets. Single NameExpr is the common case; a single
-    // TupleExpr target is tuple-unpacking (`a, b = pair`); multiple targets
-    // is chained assignment (`a = b = c`).
-    // A name is declared exactly once per scope via `x: T = ...` (AnnAssignStmt)
-    // or an implicit binding form (tuple-unpack, for/with/except target, walrus).
-    // A bare `x = v` is a *reassignment*: the name must already resolve in scope;
-    // it never introduces a new (possibly shadowing) binding. `allowImplicitDecl`
-    // is set for forms with no annotation slot (tuple-unpack), which may declare.
+    // Targets: single NameExpr, TupleExpr (unpack), or multiple (chained assign).
+    // Bare `x = v` only reassigns; allowImplicitDecl lets annotation-less forms declare.
     auto defineLocal = [&](const std::string& n, SourceLocation loc, bool allowImplicitDecl) {
-        // A bare `=` may freely reassign a binding owned by THIS function - its
-        // params, locals, or any enclosing block of the same function. But a
-        // binding owned by an ENCLOSING FUNCTION needs `nonlocal`, and a MODULE
-        // global needs `global`. Without the marker we reject it - otherwise
-        // codegen would silently spin up a throwaway local (Python's forgot-the-
-        // keyword footgun) and the outer variable would never change. Reads are
-        // unaffected (this path only runs for assignment targets), and the rule
-        // is identical in `.dr` and `.py` - Sema runs once for both.
+        // Bare `=` freely reassigns bindings owned by this function; rebinding an
+        // enclosing function's var needs nonlocal, a module global needs global.
         NameResolution r = resolveAcross(currentScope(), n);
         if (r.sym) {
             if (r.sym->isConst) {
@@ -542,18 +493,15 @@ void Sema::visit(AssignStmt& node) {
         sym.isInitialized = true;
         currentScope()->define(sym);
     };
-    // A bare single-name assignment is strict unless the statement itself carries
-    // an annotation (the vestigial AssignStmt::typeAnnotation declaration form).
+    // Bare single-name assignment is strict unless the statement carries the
+    // vestigial AssignStmt::typeAnnotation declaration form.
     const bool singleNameMayDeclare = (node.typeAnnotation != nullptr);
     for (auto& target : node.targets) {
         if (auto* name = dynamic_cast<NameExpr*>(target.get())) {
             defineLocal(name->name, name->location(), singleNameMayDeclare);
         } else if (auto* tup = dynamic_cast<TupleExpr*>(target.get())) {
-            // Tuple unpacking has no per-element annotation slot, so each name
-            // may implicitly declare (with an inferred type). The const form
-            // (`const a: T, b: U = expr`) is a pure declaration: every name is
-            // fresh (redeclaration is an error, same rule as a single const)
-            // and binds const.
+            // Tuple unpacking has no per-element annotation slot, so each name may
+            // implicitly declare; the const form requires every name be fresh.
             std::function<void(Expr*)> visitTarget = [&](Expr* t) {
                 if (auto* n = dynamic_cast<NameExpr*>(t)) {
                     if (node.isConst) {
@@ -578,11 +526,8 @@ void Sema::visit(AssignStmt& node) {
                 } else if (auto* nestedTup = dynamic_cast<TupleExpr*>(t)) {
                     for (auto& e : nestedTup->elements) visitTarget(e.get());
                 } else if (auto* starred = dynamic_cast<StarredExpr*>(t)) {
-                    // `*rest` / `*init` in a tuple-unpack target declares the
-                    // inner name (bound to a list of the remaining elements).
-                    // Reuse the NameExpr path (incl. const handling); without
-                    // this the starred name was never declared, so a valid
-                    // `first, *rest = [...]` failed with "undefined name 'rest'".
+                    // `*rest` in a tuple-unpack target declares the inner name;
+                    // reuse the NameExpr path so `first, *rest = [...]` resolves.
                     visitTarget(starred->value.get());
                 } else {
                     if (!isValidAssignmentTarget(t)) {
@@ -604,10 +549,8 @@ void Sema::visit(AssignStmt& node) {
 void Sema::visit(AugAssignStmt& node) {
     node.target->accept(*this);
     node.value->accept(*this);
-    // `n += 1` is a read-modify-rebind of `n`, so it obeys the same rule as a
-    // bare `=`: it needs `nonlocal` to rebind an enclosing function's variable
-    // and `global` to rebind a module global (else codegen silently mutates a
-    // throwaway local).
+    // `n += 1` is a read-modify-rebind, so it obeys the same nonlocal/global
+    // rule as bare `=` (else codegen silently mutates a throwaway local).
     if (auto* name = dynamic_cast<NameExpr*>(node.target.get())) {
         NameResolution r = resolveAcross(currentScope(), name->name);
         if (r.sym && r.sym->isConst) {
@@ -622,16 +565,12 @@ void Sema::visit(AnnAssignStmt& node) {
     if (node.annotation) node.annotation->accept(*this);
     if (node.value) node.value->accept(*this);
 
-    // Define the variable. A name may be declared only once per scope: a second
-    // `x: T = ...` for a name already bound in THIS scope (a prior declaration or
-    // a parameter) is a redeclaration - reassign with bare `x = ...` instead.
+    // A name may be declared only once per scope; a second `x: T = ...` for an
+    // already-bound name here is a redeclaration (reassign with bare `x = ...`).
     if (auto* name = dynamic_cast<NameExpr*>(node.target.get())) {
         Symbol* prior = currentScope()->lookupLocal(name->name);
-        // Shadowing an injected builtin (outer namespace) is a fresh declaration,
-        // not a redeclaration - only a genuine same-scope user binding is an error.
-        // A module-level const we hoisted in the pre-pass is THIS statement's own
-        // forward declaration; clear the marker and treat this visit as the real
-        // declaration rather than a redeclaration of itself.
+        // Shadowing an injected builtin is a fresh declaration, not a redeclaration.
+        // A hoisted const's forward-decl marker is cleared to treat this as its real declaration.
         if (prior && prior->isModuleForwardDecl) {
             prior->isModuleForwardDecl = false;
         } else if (prior && !prior->isBuiltin) {
@@ -654,9 +593,8 @@ void Sema::visit(AnnAssignStmt& node) {
 }
 
 void Sema::visit(IfStmt& node) {
-    // Each block body is its own lexical scope (D: block scoping). The
-    // condition is evaluated in the enclosing scope, so a walrus there
-    // (`if (x := f()) > 0`) binds outside the branch, matching Python.
+    // Each block body is its own lexical scope; the condition evaluates in the
+    // enclosing scope, so a walrus there binds outside the branch (Python parity).
     node.condition->accept(*this);
     pushScope(Scope::Kind::Block);
     for (auto& s : node.thenBody) s->accept(*this);
@@ -689,8 +627,7 @@ void Sema::visit(ForStmt& node) {
     node.iterable->accept(*this);
 
     // The loop target and body live in the loop's block scope, so the target
-    // is not visible after the loop. Single-name form (`for x in xs`) and
-    // tuple-unpacking form (`for k, v in d.items()`) both bind here.
+    // isn't visible after the loop; single-name and tuple-unpack forms both bind here.
     pushScope(Scope::Kind::Block);
     auto defineTargetName = [&](const std::string& n, SourceLocation loc) {
         Symbol sym;
@@ -764,12 +701,8 @@ void Sema::visit(WithStmt& node) {
 }
 
 void Sema::visit(ThreadStmt& node) {
-    // thread { ... } runs the body on a scoped OS thread, capturing enclosing
-    // locals (read-only). Mirror the fire-block capture analysis so codegen
-    // marshals the captures as thread args (else the body references the parent
-    // frame's allocas -> invalid cross-function IR). The thread auto-joins at
-    // scope exit, so captures are alive for its whole lifetime; nonlocal-mutated
-    // captures are still rejected in codegen (cross-thread write = data race).
+    // `thread { ... }` runs on a scoped OS thread capturing enclosing locals
+    // read-only; mirrors fire-block capture analysis so codegen marshals thread args.
     pushScope(Scope::Kind::Function);
     Impl::CaptureContext capCtx;
     capCtx.lambdaScope = impl_->currentScope;
@@ -819,8 +752,7 @@ void Sema::visit(ReturnStmt& node) {
 
 void Sema::visit(DeferStmt& node) {
     // No scope ends before process exit at module level, so a module-level
-    // defer could never run; an explicit shutdown-hook mechanism, if ever
-    // wanted, is its own ADR.
+    // defer could never run; a shutdown-hook mechanism would be its own ADR.
     if (!impl_->isInFunction) {
         error(node.location(), "'defer' outside function");
     }
@@ -864,10 +796,8 @@ void Sema::visit(GlobalStmt& node) {
 
 void Sema::visit(NonlocalStmt& node) {
     for (auto& name : node.names) {
-        // Find the TRUE binding scope (not a nested nonlocal marker). We
-        // walk up looking for a non-nonlocal Variable/Parameter binding
-        // inside an enclosing function scope. Module-scope bindings dont
-        // qualify (Python: nonlocal can't reference globals - use `global`).
+        // Find the true binding scope (skip nested nonlocal markers): walk up for
+        // a non-nonlocal binding in an enclosing function scope; module scope doesn't qualify.
         Scope* enclosing = currentScope()->parent();
         Scope* bindingScope = nullptr;
         while (enclosing) {
@@ -884,14 +814,8 @@ void Sema::visit(NonlocalStmt& node) {
         if (!bindingScope) {
             error(node.location(), "no binding for nonlocal '" + name + "' found");
         } else {
-            // Mark every CaptureContext on the stack whose owning function
-            // sits between this `nonlocal` declaration and the binding scope
-            // - each such context must capture the cell pointer (not the
-            // value) and forward it to nested closures unchanged.
-            //
-            // ctx.lambdaScope's parent chain passing through bindingScope
-            // means the binding is reachable from ctx via scope chain, so
-            // ctx must capture it.
+            // Every CaptureContext whose function sits between this nonlocal decl and
+            // the binding scope must capture the cell pointer and forward it unchanged.
             for (auto& ctx : impl_->captureStack) {
                 bool reachableViaScopeChain = false;
                 for (Scope* p = ctx.lambdaScope->parent(); p; p = p->parent()) {
@@ -904,12 +828,8 @@ void Sema::visit(NonlocalStmt& node) {
                 }
             }
         }
-        // Define the nonlocal marker in the current scope so subsequent
-        // AssignStmt's defineLocal path finds it via lookupLocal and skips
-        // the shadow-define branch (writes route to the existing binding,
-        // not a fresh local). Also so NameExpr capture analysis treats
-        // reads as already-captured (the ctx.capturedNames insert above
-        // covered them up-front).
+        // Define the nonlocal marker here so defineLocal's lookupLocal finds it
+        // (writes route to the existing binding) and reads see it as already-captured.
         Symbol sym;
         sym.name = name;
         sym.kind = Symbol::Kind::Variable;
@@ -954,10 +874,6 @@ void Sema::visit(FromImportStmt& node) {
     }
 }
 
-//===----------------------------------------------------------------------===//
-// Declaration Visitors
-//===----------------------------------------------------------------------===//
-
 void Sema::visit(FunctionDecl& node) {
     Symbol funcSym;
     funcSym.name = node.name;
@@ -971,9 +887,8 @@ void Sema::visit(FunctionDecl& node) {
 
     pushScope(Scope::Kind::Function);
 
-    // D044 - bind type parameters (`def f[T]()`) as type symbols so the body
-    // can name them in value position (e.g. an explicit construction `Inner[T]`
-    // or call `g[T](...)`) without a spurious "undefined name 'T'".
+    // D044: bind type params (`def f[T]()`) as type symbols so the body can
+    // name them in value position (e.g. `Inner[T](...)`) without a spurious error.
     for (auto& tp : node.typeParams) {
         Symbol tpSym;
         tpSym.name = tp.name;
@@ -985,9 +900,8 @@ void Sema::visit(FunctionDecl& node) {
 
     bool prevInFunction = impl_->isInFunction;
 
-    // Nested-def capture tracking: when this `def` is lexically inside another
-    // function body, references to enclosing locals must become closure
-    // captures (Python semantics). Reuses the same machinery LambdaExpr uses.
+    // A `def` lexically inside another function body turns references to
+    // enclosing locals into closure captures (Python semantics), via LambdaExpr's machinery.
     bool isNested = prevInFunction && !node.isMethod;
     if (isNested) {
         Impl::CaptureContext capCtx;
@@ -1046,8 +960,7 @@ void Sema::visit(ClassDecl& node) {
     for (auto& [name, val] : node.keywords) val->accept(*this);
 
     pushScope(Scope::Kind::Class);
-    // D044 - bind type parameters (`class Foo[T]`) as type symbols, visible to
-    // every method body (e.g. an in-body construction `Inner[T](...)`).
+    // D044: bind type params (`class Foo[T]`) as type symbols visible to every method body.
     for (auto& tp : node.typeParams) {
         Symbol tpSym;
         tpSym.name = tp.name;
@@ -1061,10 +974,8 @@ void Sema::visit(ClassDecl& node) {
 }
 
 void Sema::visit(ContractDecl& node) {
-    // A contract is a TYPE name, never a value: define it Class-kind so
-    // annotations resolve, and walk the signatures so their annotations get
-    // the same treatment as any other type expression. Contract methods have
-    // no bodies, so there is nothing else to resolve.
+    // A contract is a type name, never a value: define it Class-kind so annotations
+    // resolve, and walk method signatures for their type annotations (no bodies to visit).
     Symbol sym;
     sym.name = node.name;
     sym.kind = Symbol::Kind::Class;
@@ -1089,16 +1000,8 @@ void Sema::visit(TypeAliasStmt& node) {
 }
 
 void Sema::visit(Module& node) {
-    // Python-parity: top-level `def`s and `class`es resolve by name at
-    // call time, not by source order. Pre-register all top-level function
-    // and class symbols so mutual recursion (and forward references in
-    // general) work like Python's:
-    //
-    //  def foo(): bar() # OK - bar is looked up when foo runs
-    //  def bar(): foo()
-    //
-    // Without this pre-pass, foo's body would see `bar` as undefined
-    // because Sema visits statements in source order.
+    // Python-parity: pre-register top-level def/class symbols so mutual recursion
+    // and forward references resolve by name, not source order.
     for (auto& s : node.body) {
         if (auto* fn = dynamic_cast<FunctionDecl*>(s.get())) {
             Symbol funcSym;
@@ -1115,8 +1018,8 @@ void Sema::visit(Module& node) {
             clsSym.isInitialized = true;
             currentScope()->define(clsSym);
         } else if (auto* con = dynamic_cast<ContractDecl*>(s.get())) {
-            // ADR 054 - contracts resolve forward like classes: a class
-            // earlier in the file may promise a contract declared later.
+            // ADR 054: contracts resolve forward like classes, so an earlier
+            // class may promise a contract declared later.
             Symbol conSym;
             conSym.name = con->name;
             conSym.kind = Symbol::Kind::Class;
@@ -1124,15 +1027,8 @@ void Sema::visit(Module& node) {
             conSym.isInitialized = true;
             currentScope()->define(conSym);
         } else if (auto* ann = dynamic_cast<AnnAssignStmt*>(s.get())) {
-            // Hoist module-level typed globals (const / static / plain) so a
-            // forward reference to a const defined later in the file resolves,
-            // matching codegen's order-independent global resolution and
-            // Python module semantics. Without this, `if n > _MAX` used above
-            // its `const _MAX: int = ...` definition is flagged undefined -
-            // a false positive that breaks the stdlib build now that
-            // dependency Sema errors surface. Marked so the
-            // second-pass visit recognizes its own hoist and does not report a
-            // redeclaration.
+            // Hoist module-level typed globals so a forward reference to a later const
+            // resolves; marked so the second pass doesn't flag its own hoist as a redeclaration.
             if (auto* name = dynamic_cast<NameExpr*>(ann->target.get())) {
                 Symbol sym;
                 sym.name = name->name;
@@ -1146,16 +1042,10 @@ void Sema::visit(Module& node) {
             }
         }
     }
-    // Second pass: visit each statement normally. Function/Class visitors
-    // attempt to define again - the duplicate-define is a no-op (returns
-    // false from Scope::define but otherwise harmless; the visitor's body
-    // analysis still runs).
+    // Second pass: visit each statement normally; Function/Class visitors redefine
+    // the symbol, but the duplicate is a harmless no-op and body analysis still runs.
     for (auto& s : node.body) s->accept(*this);
 }
-
-//===----------------------------------------------------------------------===//
-// Helpers
-//===----------------------------------------------------------------------===//
 
 void Sema::pushScope(Scope::Kind kind) {
     auto scope = std::make_unique<Scope>(kind, impl_->currentScope);
@@ -1195,25 +1085,22 @@ void Sema::defineBuiltins() {
     defineBuiltin("dict", Symbol::Kind::Class);
     defineBuiltin("set", Symbol::Kind::Class);
     defineBuiltin("tuple", Symbol::Kind::Class);
-    // `deque` is a global builtin container (like list/set/dict - no import
-    // required); codegen routes its ctor/methods through the __Deque path.
-    // `from collections import deque` (Python parity) also resolves it.
+    // `deque` is a global builtin container (no import required); codegen routes
+    // it through the __Deque path. `from collections import deque` also resolves it.
     defineBuiltin("deque", Symbol::Kind::Class);
     defineBuiltin("type", Symbol::Kind::Class);
     defineBuiltin("object", Symbol::Kind::Class);
-    // D044 - `Any` is a type name; allow it in value position as an explicit
-    // generic type argument (`Box[Any]`). The TypeChecker resolves it to AnyType.
+    // D044: `Any` is a type name, allowed in value position as an explicit
+    // type arg (`Box[Any]`); TypeChecker resolves it to AnyType.
     defineBuiltin("Any", Symbol::Kind::Class);
-    // NOTE: `Lock` is NOT a global builtin - it is import-gated, matching Python
-    // (`from threading import Lock`). It enters scope via FromImportStmt, which
-    // defines imported names unconditionally; bare `Lock()` is undefined here.
+    // `Lock` is NOT a global builtin, it's import-gated like Python's `from
+    // threading import Lock`; bare `Lock()` is undefined until imported.
     defineBuiltin("abs");
     defineBuiltin("min");
     defineBuiltin("max");
     defineBuiltin("sum");
-    // Numeric builtins whose CodeGen handlers live in CallBuiltins.cpp
-    // (round/pow/divmod) and TypeChecker recognizes them - register the
-    // names so Sema doesn't reject the call before CodeGen runs.
+    // round/pow/divmod are handled in CallBuiltins.cpp and recognized by
+    // TypeChecker; register the names so Sema doesn't reject the call first.
     defineBuiltin("pow");
     defineBuiltin("round");
     defineBuiltin("divmod");
@@ -1230,20 +1117,17 @@ void Sema::defineBuiltins() {
     defineBuiltin("hasattr");
     defineBuiltin("getattr");
     // setattr/delattr deliberately absent: dynamic attribute injection is a
-    // non-goal (D021). Declared attributes only; runtime field creation by
-    // string name is barred by commandment #3.
+    // non-goal (D021); runtime field creation by string name is barred by commandment #3.
     defineBuiltin("dir");
-    // Internal intrinsic: does the currently-handled exception match the
-    // given exception-type code? Backs unittest.assertRaises. Underscore
-    // prefix signals "internal" - not part of the user-facing surface.
+    // Internal intrinsic backing unittest.assertRaises: does the current
+    // exception match the given type code? Underscore prefix signals internal.
     defineBuiltin("__exc_matches");
     defineBuiltin("id");
     defineBuiltin("hash");
     defineBuiltin("repr");
     defineBuiltin("chr");
     defineBuiltin("ord");
-    // float<->bits reinterpret intrinsics (the user-reachable bitcast that
-    // struct.pack/unpack + binary wire codecs need; see struct.dr).
+    // float<->bits reinterpret intrinsics that struct.pack/unpack and wire codecs need.
     defineBuiltin("__float_bits");
     defineBuiltin("__float_from_bits");
     defineBuiltin("__float32_bits");
@@ -1255,18 +1139,15 @@ void Sema::defineBuiltins() {
     defineBuiltin("property", Symbol::Kind::Class);
     defineBuiltin("staticmethod", Symbol::Kind::Class);
     defineBuiltin("classmethod", Symbol::Kind::Class);
-    // 6.18: @dataclass / NamedTuple are compile-time recognizers in CodeGen.
-    // Register the names so decorator/base resolution doesn't flag them.
+    // @dataclass/NamedTuple are compile-time recognizers in CodeGen; register
+    // the names so decorator/base resolution doesn't flag them.
     defineBuiltin("dataclass", Symbol::Kind::Class);
     defineBuiltin("NamedTuple", Symbol::Kind::Class);
-    // TypedDict is a compile-time recognizer: TypeChecker tracks it via
-    // isTypedDict and CodeGen lowers it (currently dict-backed). Register the
-    // name here so base-class resolution doesn't flag `class C(TypedDict)` as
-    // an undefined name (mirrors NamedTuple/dataclass above).
+    // TypedDict is a compile-time recognizer (TypeChecker's isTypedDict, CodeGen
+    // lowers it dict-backed); register the name so `class C(TypedDict)` doesn't flag as undefined.
     defineBuiltin("TypedDict", Symbol::Kind::Class);
-    // Built-in exceptions - kept in sync with CodeGenImpl::excTypeCode and
-    // CodeGenImpl::isBuiltinExcName. Codes are wired in the codegen layer; here
-    // we just register the names so Sema doesn't flag them as undefined.
+    // Built-in exceptions, kept in sync with CodeGenImpl::excTypeCode and
+    // isBuiltinExcName; codes are wired in codegen, here we just register names.
     defineBuiltin("BaseException", Symbol::Kind::Class);
     defineBuiltin("SystemExit", Symbol::Kind::Class);
     defineBuiltin("KeyboardInterrupt", Symbol::Kind::Class);

@@ -50,7 +50,6 @@ void CodeGen::visit(AssignStmt& node) {
         }
     }
 
-    // Generate the value
     node.value->accept(*this);
     llvm::Value* val = impl_->lastValue;
 
@@ -67,9 +66,8 @@ void CodeGen::visit(AssignStmt& node) {
         // own reference. Incref the value for targets beyond the first.
         if (firstTargetDone && impl_->options.gcMode == GCMode::RC &&
             val->getType()->isPointerTy()) {
-            // Determine incref variant based on RHS expression type
             auto tag = impl_->inferPtrValueTag(node.value.get());
-            if (tag == 1) { // TAG_STR
+            if (tag == TAG_STR) { // TAG_STR
                 impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_incref_str"], {val});
             } else if (tag == 5 || tag == 6 || tag == 7) { // list/dict/bytes
@@ -1343,32 +1341,12 @@ void CodeGen::visit(AssignStmt& node) {
                     if (dynamic_cast<FireExpr*>(node.value.get())) {
                         impl_->varClassNames[name->name] = "__Thread";
                     }
-                    // Fallback: detect class instances from complex expressions (e.g., a + b)
-                    if (!impl_->varClassNames.count(name->name)) {
-                        auto cls = impl_->resolveExprClassName(node.value.get());
-                        if (!cls.empty()) {
-                            impl_->varClassNames[name->name] = cls;
-                            // `mod.ClassName(args)` carries the owner on the
-                            // ModuleType; else resolveClassOwningModule.
-                            std::string owningMod;
-                            if (auto* call = dynamic_cast<CallExpr*>(node.value.get())) {
-                                if (auto* attrCallee = dynamic_cast<AttributeExpr*>(call->callee.get())) {
-                                    if (attrCallee->object && attrCallee->object->type &&
-                                        attrCallee->object->type->kind() == Type::Kind::Module) {
-                                        owningMod = static_cast<ModuleType&>(*attrCallee->object->type).name;
-                                    } else if (auto* recvName = dynamic_cast<NameExpr*>(attrCallee->object.get())) {
-                                        auto rmIt = impl_->varClassOwningModule.find(recvName->name);
-                                        if (rmIt != impl_->varClassOwningModule.end()) owningMod = rmIt->second;
-                                    }
-                                }
-                            }
-                            if (owningMod.empty())
-                                owningMod = impl_->resolveClassOwningModule(cls);
-                            impl_->varClassOwningModule[name->name] = owningMod;
-                            impl_->moduleGlobalClassNames[gKey] = {cls, owningMod};
-                            if (impl_->options.gcMode == GCMode::RC && impl_->classNames.count(cls))
-                                impl_->moduleGlobalKinds[gKey] = Impl::VarKind::ClassInstance;
-                        }
+                    if (auto cls = impl_->recordVarClassFromValue(name->name, node.value.get());
+                        !cls.empty()) {
+                        impl_->moduleGlobalClassNames[gKey] =
+                            {cls, impl_->varClassOwningModule[name->name]};
+                        if (impl_->options.gcMode == GCMode::RC && impl_->classNames.count(cls))
+                            impl_->moduleGlobalKinds[gKey] = Impl::VarKind::ClassInstance;
                     }
                     continue;
                 }
@@ -1592,32 +1570,11 @@ void CodeGen::visit(AssignStmt& node) {
             if (dynamic_cast<FireExpr*>(node.value.get())) {
                 impl_->varClassNames[name->name] = "__Thread";
             }
-            // Fallback: detect class instances from complex expressions (e.g., a + b)
-            if (!impl_->varClassNames.count(name->name)) {
-                auto cls = impl_->resolveExprClassName(node.value.get());
-                if (!cls.empty()) {
-                    impl_->varClassNames[name->name] = cls;
-                    // `mod.ClassName(args)` carries the owner on the ModuleType;
-                    // else resolveClassOwningModule.
-                    std::string owningMod;
-                    if (auto* call = dynamic_cast<CallExpr*>(node.value.get())) {
-                        if (auto* attrCallee = dynamic_cast<AttributeExpr*>(call->callee.get())) {
-                            if (attrCallee->object && attrCallee->object->type &&
-                                attrCallee->object->type->kind() == Type::Kind::Module) {
-                                owningMod = static_cast<ModuleType&>(*attrCallee->object->type).name;
-                            } else if (auto* recvName = dynamic_cast<NameExpr*>(attrCallee->object.get())) {
-                                auto rmIt = impl_->varClassOwningModule.find(recvName->name);
-                                if (rmIt != impl_->varClassOwningModule.end()) owningMod = rmIt->second;
-                            }
-                        }
-                    }
-                    if (owningMod.empty())
-                        owningMod = impl_->resolveClassOwningModule(cls);
-                    impl_->varClassOwningModule[name->name] = owningMod;
-                    // GC Phase 3: mark as ClassInstance for scope-exit decref
-                    if (impl_->options.gcMode == GCMode::RC && impl_->classNames.count(cls))
-                        impl_->setVar(name->name, alloca, Impl::VarKind::ClassInstance);
-                }
+            if (auto cls = impl_->recordVarClassFromValue(name->name, node.value.get());
+                !cls.empty()) {
+                // GC Phase 3: mark as ClassInstance for scope-exit decref
+                if (impl_->options.gcMode == GCMode::RC && impl_->classNames.count(cls))
+                    impl_->setVar(name->name, alloca, Impl::VarKind::ClassInstance);
             }
         }
     }

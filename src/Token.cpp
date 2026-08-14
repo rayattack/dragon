@@ -3,10 +3,6 @@
 
 namespace dragon {
 
-//===----------------------------------------------------------------------===//
-// Token Implementation
-//===----------------------------------------------------------------------===//
-
 Token::Token() : type_(TokenType::ERROR), lexeme_(""), location_{} {}
 
 Token::Token(TokenType type, std::string lexeme, SourceLocation location)
@@ -156,10 +152,6 @@ const char* Token::tokenTypeName(TokenType type) {
     return "UNKNOWN";
 }
 
-//===----------------------------------------------------------------------===//
-// Keyword Handling
-//===----------------------------------------------------------------------===//
-
 static const std::unordered_map<std::string_view, TokenType> keywords = {
     {"and", TokenType::AND},
     {"as", TokenType::AS},
@@ -204,9 +196,8 @@ static const std::unordered_map<std::string_view, TokenType> keywords = {
     {"const", TokenType::CONST},    // Dragon extension
     {"static", TokenType::STATIC},  // Dragon extension
     {"extern", TokenType::EXTERN},  // Dragon extension (C FFI)
-    // NOTE: "thread" is a contextual keyword - resolved in Parser::statement(),
-    // NOT in the lexer. This allows "thread" as an identifier in all other positions
-    // (parameter names, variable names, etc.).
+    // NOTE: "thread" is contextual, resolved in Parser::statement() instead,
+    // so it stays usable as an identifier elsewhere.
 };
 
 bool isKeyword(std::string_view name) {

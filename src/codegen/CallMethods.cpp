@@ -118,15 +118,15 @@ bool CodeGen::Impl::packVarArgMethodArgs(
             if (kwName.empty()) continue;
             node.kwArgs[ki].second->accept(cg);
             llvm::Value* val = lastValue;
-            int64_t tag = 0;  // TAG_INT
+            int64_t tag = TAG_INT;  // TAG_INT
             if (val->getType() == i1Type) {
-                tag = 3;  // TAG_BOOL
+                tag = TAG_BOOL;  // TAG_BOOL
                 val = builder->CreateZExt(val, i64Type);
             } else if (val->getType() == f64Type) {
-                tag = 2;  // TAG_FLOAT
+                tag = TAG_FLOAT;  // TAG_FLOAT
                 val = builder->CreateBitCast(val, i64Type);
             } else if (val->getType()->isPointerTy()) {
-                tag = 1;  // TAG_STR (default for heap pointers)
+                tag = TAG_STR;  // TAG_STR (default for heap pointers)
                 if (options.gcMode == GCMode::RC &&
                     isBorrowedHeapExpr(node.kwArgs[ki].second.get()))
                     builder->CreateCall(runtimeFuncs["dragon_incref_str"], {val});
@@ -203,9 +203,8 @@ bool CodeGen::Impl::emitContractMethodCall(CodeGen& cg, CallExpr& node,
                                         : voidType;
     auto* fnType = llvm::FunctionType::get(retTy, paramTys, false);
 
-    // Receiver: an ordinary instance pointer (the cast added nothing). An
-    // OWNED receiver temp (`pick().amazing_method()`) must drain after the
-    // call - a bare local stays borrowed and is skipped by the classifier.
+    // Receiver is an ordinary instance pointer. An OWNED receiver temp
+    // (`pick().amazing_method()`) must drain after the call; a bare local stays borrowed.
     attr.object->accept(cg);
     llvm::Value* self = lastValue;
     if (!self->getType()->isPointerTy())
@@ -245,7 +244,7 @@ bool CodeGen::Impl::emitContractMethodCall(CodeGen& cg, CallExpr& node,
             builder->CreateCall(fnType, callee, args, "ccall"));
     }
     popArgTempCleanups(argTempBases);
-    for (auto& [v, k] : argTemps) emitDecrefByKind(v, k);
+    drainBorrowTemps(argTemps);
     return true;
 }
 
@@ -278,10 +277,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         if (!instanceRecv) return false;
     }
 
-    // ADR 054 - contract-typed receiver: the concrete class is unknown by
-    // design, so dispatch through the globally colored vtable slot. The
-    // contract's own signature is the ABI (conformance enforced exact match
-    // against every conforming class, so all implementations agree).
+    // ADR 054: a contract-typed receiver has no known concrete class, so dispatch
+    // through the globally colored vtable slot; the contract's own signature is the ABI.
     if (attr.object && attr.object->type &&
         attr.object->type->kind() == Type::Kind::Contract) {
         return impl_->emitContractMethodCall(*this, node, attr);
@@ -736,13 +733,13 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                         }
                     }
                     if (val->getType() == impl_->i1Type) {
-                        if (elemTag == 0) elemTag = 3;  // TAG_BOOL
+                        if (elemTag == TAG_INT) elemTag = TAG_BOOL;
                         val = impl_->builder->CreateZExt(val, impl_->i64Type);
                     } else if (val->getType() == impl_->f64Type) {
-                        if (elemTag == 0) elemTag = 2;  // TAG_FLOAT
+                        if (elemTag == TAG_INT) elemTag = TAG_FLOAT;
                         val = impl_->builder->CreateBitCast(val, impl_->i64Type);
                     } else if (val->getType()->isPointerTy()) {
-                        if (elemTag == 0) elemTag = 1;  // TAG_STR
+                        if (elemTag == TAG_INT) elemTag = TAG_STR;
                         val = impl_->builder->CreatePtrToInt(val, impl_->i64Type);
                     }
                     impl_->builder->CreateCall(
@@ -902,7 +899,6 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // index/rindex
         if ((method == "index" || method == "rindex") && node.args.size() >= 1) {
             node.args[0]->accept(*this);
             llvm::Value* arg = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
@@ -913,7 +909,6 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // replace(old, new[, count])
         if (method == "replace" && node.args.size() >= 2) {
             node.args[0]->accept(*this);
             llvm::Value* old_s = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
@@ -935,7 +930,6 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // zfill(width)
         if (method == "zfill" && node.args.size() >= 1) {
             node.args[0]->accept(*this);
             llvm::Value* width = impl_->lastValue;
@@ -945,7 +939,6 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // expandtabs(tabsize=8)
         if (method == "expandtabs") {
             llvm::Value* tabsize = llvm::ConstantInt::get(impl_->i64Type, 8);
             if (node.args.size() >= 1) { node.args[0]->accept(*this); tabsize = impl_->lastValue; }
@@ -955,7 +948,6 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // center/ljust/rjust(width[, fillchar])
         if (method == "center" || method == "ljust" || method == "rjust") {
             if (node.args.size() >= 1) {
                 node.args[0]->accept(*this);
@@ -993,7 +985,6 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // join(list)
         if (method == "join" && node.args.size() >= 1) {
             node.args[0]->accept(*this);
             llvm::Value* list = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
@@ -1003,7 +994,6 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // splitlines()
         if (method == "splitlines") {
             auto* fn = impl_->getOrDeclareRuntime("dragon_str_splitlines",
                 llvm::FunctionType::get(impl_->i8PtrType, {impl_->i8PtrType}, false));
@@ -1038,7 +1028,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         return false;  // not a str method - fall through to other dispatch
         }();
         if (strHandled) {
-            for (auto& [v, k] : argTemps) impl_->emitDecrefByKind(v, k);
+            impl_->drainBorrowTemps(argTemps);
             impl_->emitMoveOutSlots(node);
             if (ownedStrRecv)
                 impl_->builder->CreateCall(
@@ -1092,7 +1082,6 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // hex()
         if (method == "hex") {
             impl_->lastValue = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_bytes_hex"], {obj}, "hex");
@@ -1131,7 +1120,6 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // replace(old, new)
         if (method == "replace" && node.args.size() >= 2) {
             node.args[0]->accept(*this);
             llvm::Value* old_b = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
@@ -1142,7 +1130,6 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // split(sep)
         if (method == "split") {
             llvm::Value* sep = llvm::ConstantPointerNull::get(
                 llvm::PointerType::getUnqual(*impl_->context));
@@ -1152,7 +1139,6 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // join(list)
         if (method == "join" && node.args.size() >= 1) {
             node.args[0]->accept(*this);
             llvm::Value* list = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
@@ -1163,7 +1149,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         return false;  // not a bytes method - fall through to other dispatch
         }();
         if (bytesHandled) {
-            for (auto& [v, k] : argTemps) impl_->emitDecrefByKind(v, k);
+            impl_->drainBorrowTemps(argTemps);
             impl_->emitMoveOutSlots(node);
             if (ownedBytesRecv)
                 impl_->builder->CreateCall(
@@ -1205,7 +1191,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                     if (auto* nm = dynamic_cast<NameExpr*>(node.args[1].get()))
                         vk = impl_->lookupVarKind(nm->name);
                     else if (auto* sl = dynamic_cast<StringLiteral*>(node.args[1].get()))
-                        tagVal = sl->isBytes ? 7 : 1;  // TAG_BYTES / TAG_STR
+                        tagVal = sl->isBytes ? TAG_BYTES : TAG_STR;  // TAG_BYTES / TAG_STR
                     else if (dynamic_cast<IntegerLiteral*>(node.args[1].get()))
                         vk = Impl::VarKind::Int;
                     else if (dynamic_cast<FloatLiteral*>(node.args[1].get()))
@@ -1214,7 +1200,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                         vk = Impl::VarKind::Bool;
                     if (tagVal < 0) tagVal = Impl::varKindToTag(vk);
                 }
-                if (tagVal < 0) tagVal = 0;  // TAG_INT default
+                if (tagVal < TAG_INT) tagVal = TAG_INT;  // TAG_INT default
                 // Coerce raw value to i64 for the runtime call.
                 if (raw->getType() == impl_->i1Type)
                     raw = impl_->builder->CreateZExt(raw, impl_->i64Type);
@@ -1227,7 +1213,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             } else {
                 // No value arg -> None
                 val = llvm::ConstantInt::get(impl_->i64Type, 0);
-                tag = llvm::ConstantInt::get(impl_->i64Type, 4); // TAG_NONE
+                tag = llvm::ConstantInt::get(impl_->i64Type, TAG_NONE); // TAG_NONE
             }
             impl_->lastValue = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_dict_fromkeys"],
@@ -1547,7 +1533,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         return false;  // not a list method - fall through to other dispatch
         }();
         if (listHandled) {
-            for (auto& [v, k] : argTemps) impl_->emitDecrefByKind(v, k);
+            impl_->drainBorrowTemps(argTemps);
             impl_->emitMoveOutSlots(node);
             if (ownedListRecv && kListRecvDrainOk.count(method))
                 impl_->builder->CreateCall(
@@ -1607,7 +1593,6 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         std::vector<std::pair<llvm::Value*, Impl::VarKind>> argTemps;
         bool dictHandled = [&]() -> bool {
 
-        // .get(key)
         if (method == "get" && node.args.size() == 1) {
             node.args[0]->accept(*this);
             llvm::Value* key = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
@@ -1627,7 +1612,6 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // .get(key, default)
         if (method == "get" && node.args.size() == 2) {
             node.args[0]->accept(*this);
             llvm::Value* key = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
@@ -1674,14 +1658,12 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // .keys()
         if (method == "keys" && node.args.empty()) {
             impl_->lastValue = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_dict_keys"], {obj}, "dictkeys");
             return true;
         }
 
-        // .has_key(key)
         if (method == "has_key" && node.args.size() == 1) {
             node.args[0]->accept(*this);
             llvm::Value* key = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
@@ -1692,8 +1674,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // .values(); D039: an Any value type routes to dragon_dict_values_box
-        // so the result list keeps per-entry tags (isinstance / print).
+        // D039: an Any value type routes to dragon_dict_values_box so the
+        // result list keeps per-entry tags (isinstance / print).
         if (method == "values" && node.args.empty()) {
             bool valueIsAny = false;
             if (auto* objName = dynamic_cast<NameExpr*>(attr.object.get())) {
@@ -1720,14 +1702,13 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // .items()
         if (method == "items" && node.args.empty()) {
             impl_->lastValue = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_dict_items"], {obj}, "dictitems");
             return true;
         }
 
-        // .popitem() returns DragonTuple* (LIFO; raises KeyError on empty dict).
+        // Returns DragonTuple* (LIFO; raises KeyError on empty dict).
         if (method == "popitem" && node.args.empty()) {
             llvm::Value* tupleI64 = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_dict_popitem"], {obj}, "dictpopitem");
@@ -1736,7 +1717,6 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // .pop(key)
         if (method == "pop" && node.args.size() == 1) {
             node.args[0]->accept(*this);
             llvm::Value* key = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
@@ -1745,7 +1725,6 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // .pop(key, default)
         if (method == "pop" && node.args.size() == 2) {
             node.args[0]->accept(*this);
             llvm::Value* key = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
@@ -1760,14 +1739,12 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // .clear()
         if (method == "clear" && node.args.empty()) {
             impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_dict_clear"], {obj});
             impl_->lastValue = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(*impl_->context));
             return true;
         }
 
-        // .update(other_dict)
         if (method == "update" && node.args.size() == 1) {
             node.args[0]->accept(*this);
             llvm::Value* other = impl_->trackBorrowTemp(node.args[0].get(), impl_->lastValue, argTemps);
@@ -1776,7 +1753,6 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // .setdefault(key, default)
         if (method == "setdefault" && node.args.size() == 2) {
             node.args[0]->accept(*this);
             llvm::Value* key = impl_->lastValue;
@@ -1813,7 +1789,6 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        // .copy()
         if (method == "copy" && node.args.empty()) {
             impl_->lastValue = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_dict_copy"], {obj}, "dictcopy");
@@ -1822,7 +1797,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         return false;  // not a dict method - fall through to other dispatch
         }();
         if (dictHandled) {
-            for (auto& [v, k] : argTemps) impl_->emitDecrefByKind(v, k);
+            impl_->drainBorrowTemps(argTemps);
             impl_->emitMoveOutSlots(node);
             if (ownedDictRecv && kDictRecvDrainOk.count(method))
                 impl_->builder->CreateCall(
@@ -1893,7 +1868,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 if (node.args[0]->type)
                     addTag = impl_->typeKindToElemTag(node.args[0]->type->kind());
                 if (addTag == 0 && dynamic_cast<StringLiteral*>(node.args[0].get()))
-                    addTag = 1; // TAG_STR
+                    addTag = TAG_STR; // TAG_STR
                 if (addTag != 0) {
                     impl_->builder->CreateCall(
                         impl_->runtimeFuncs["dragon_set_adopt_tag"],
@@ -2000,7 +1975,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
         return false;  // not a set method - fall through to other dispatch
         }();
         if (setHandled) {
-            for (auto& [v, k] : argTemps) impl_->emitDecrefByKind(v, k);
+            impl_->drainBorrowTemps(argTemps);
             impl_->emitMoveOutSlots(node);
             if (ownedSetRecv && kSetRecvDrainOk.count(method))
                 impl_->builder->CreateCall(
@@ -2116,7 +2091,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                         impl_->lastValue = impl_->normalizeIntC(
                             impl_->builder->CreateCall(methodFunc, args, "smcall"));
                     }
-                    for (auto& [v, k] : argTemps) impl_->emitDecrefByKind(v, k);
+                    impl_->drainBorrowTemps(argTemps);
                     impl_->emitMoveOutSlots(node);
                     return true;
                 }
@@ -2160,7 +2135,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                         impl_->lastValue = impl_->normalizeIntC(
                             impl_->builder->CreateCall(methodFunc, args, "smcall"));
                     }
-                    for (auto& [v, k] : argTemps) impl_->emitDecrefByKind(v, k);
+                    impl_->drainBorrowTemps(argTemps);
                     impl_->emitMoveOutSlots(node);
                     return true;
                 }
@@ -2384,7 +2359,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                         impl_->builder->CreateCall(methodFuncType, callee, args, "mcall"));
                 }
                 impl_->popArgTempCleanups(argTempBases);
-                for (auto& [v, k] : argTemps) impl_->emitDecrefByKind(v, k);
+                impl_->drainBorrowTemps(argTemps);
                 impl_->emitMoveOutSlots(node);
                 return true;
             }
@@ -2772,7 +2747,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                         impl_->builder->CreateCall(methodFuncType, callee, args, "mcall"));
                 }
                 impl_->popArgTempCleanups(argTempBases);
-                for (auto& [v, k] : argTemps) impl_->emitDecrefByKind(v, k);
+                impl_->drainBorrowTemps(argTemps);
                 impl_->emitMoveOutSlots(node);
                 return true;
             }

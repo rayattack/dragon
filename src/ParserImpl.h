@@ -1,11 +1,5 @@
-/// Dragon Parser - shared internal definitions
-///
-/// Holds the `Parser::Impl` pimpl struct and the small literal/docstring
-/// helpers, so the parser can be split across translation units (Parser.cpp =
-/// expressions + plumbing, ParserStmts.cpp = statement & declaration parsing)
-/// without duplicating state. Pure code motion - no behavior change. The
-/// helpers are `inline` so both TUs may include this header without an ODR
-/// clash.
+/// Parser::Impl pimpl struct and small literal/docstring helpers, shared so
+/// Parser.cpp/ParserStmts.cpp split without duplicating state (helpers are `inline`).
 #ifndef DRAGON_PARSER_IMPL_H
 #define DRAGON_PARSER_IMPL_H
 
@@ -34,10 +28,8 @@ struct Parser::Impl {
     static constexpr int kMaxRecursionDepth = 500;
 };
 
-// Numeric literal conversion guarded against out-of-range/malformed input.
-// The lexer accepts any-length digit runs, so an oversized literal would
-// otherwise propagate std::out_of_range from stoll/stod and terminate the
-// process (compiler is exposed to user input via dragonlang.org).
+// Guards numeric literal conversion: an oversized digit run would otherwise
+// throw std::out_of_range from stoll/stod and terminate the process.
 inline bool parseIntLiteralChecked(const std::string& s, int base, int64_t& out) {
     try {
         size_t pos = 0;
@@ -58,22 +50,16 @@ inline bool parseFloatLiteralChecked(const std::string& s, double& out) {
     }
 }
 
-// RAII guard for the parser's recursion-depth counter. Increments on entry to
-// a deep recursion sink (expression / statement) and decrements on scope exit,
-// so even error-recovery early returns can't leak depth. Shared by both parser
-// TUs. `inline` namespace-scope (not anonymous) so the two TUs reference one
-// type, not two ODR-distinct copies.
+// RAII guard for the recursion-depth counter: increments on entry, decrements
+// on scope exit so error-recovery early returns can't leak depth.
 struct ParserRecursionGuard {
     int& depth;
     explicit ParserRecursionGuard(int& d) : depth(d) { ++depth; }
     ~ParserRecursionGuard() { --depth; }
 };
 
-// A function / class / module body's first statement, if it's a bare string
-// literal (not f-string, not bytes), is the docstring. Python keeps it in the
-// body too - the literal still evaluates at init time and the AST visitor sees
-// it, matching CPython's `Module.body[0]` shape. Net runtime cost is zero (a
-// StrLiteral, no refcount; LLVM DCE removes the dead load).
+// A body's first bare string literal (not f-string, not bytes) is the
+// docstring, left in the body too (matches CPython's `Module.body[0]`).
 inline std::optional<std::string> extractDocstring(
     const std::vector<std::unique_ptr<Stmt>>& body) {
     if (body.empty()) return std::nullopt;

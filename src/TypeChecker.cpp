@@ -12,9 +12,8 @@
 namespace dragon {
 
 namespace {
-// Walk `cls`'s parent chain (set by ClassDecl visit) and return true if any
-// ancestor's name matches `ancestor`. Used for the D017 Phase 4 Template
-// protocol check and the D037 StructTemplate dispatch hook.
+// Walk cls's parent chain for a name match (set by ClassDecl visit).
+// Used by the D017 Template protocol check and D037 StructTemplate dispatch.
 bool classExtendsByName(const ClassType* cls, const std::string& ancestor) {
     while (cls) {
         if (cls->name == ancestor) return true;
@@ -35,13 +34,8 @@ std::string canonFile(const std::string& filePath) {
     return ec ? filePath : p.string();
 }
 
-// D045 - package identity key for a source file (path-based: the entry
-// module's dotted name is empty and bare relative imports drop the package
-// prefix, so the on-disk layout is the only reliable signal). A file under a
-// package directory `pkg/` (where `pkg/pkg.dr` or `pkg/__init__.py` exists)
-// belongs to package `pkg` (keyed by the canonical dir). A flat standalone
-// file is its OWN singleton package, keyed by its own canonical path - so two
-// flat files in the same directory are DISTINCT packages (per the ADR).
+// D045 - path-based package identity: a dir containing `pkg.dr` or
+// `__init__.py` is a package (keyed by dir); otherwise the file is its own singleton package.
 std::string packageKeyOf(const std::string& filePath) {
     if (filePath.empty()) return "";
     namespace fs = std::filesystem;
@@ -60,10 +54,8 @@ std::string packageKeyOf(const std::string& filePath) {
     return p.string();  // flat singleton - keyed by the file itself
 }
 
-// D045 - class identity. One canonical ClassType object exists per source
-// class (pre-pass creates it, visit(ClassDecl) reuses it, exports share the
-// shared_ptr), so pointer identity is the primary test; (name + definingFile)
-// is a defensive fallback for any duplicate that slips through.
+// D045 - class identity: pointer identity is primary (one ClassType per
+// source class); name+definingFile is a fallback for stray duplicates.
 bool isSameClass(const ClassType* a, const ClassType* b) {
     if (!a || !b) return false;
     if (a == b) return true;
@@ -83,26 +75,17 @@ bool isSameOrSubclass(const ClassType* c, const ClassType* d) {
 }
 }  // namespace
 
-//===----------------------------------------------------------------------===//
-// Type Implementation
-//===----------------------------------------------------------------------===//
-
 bool Type::isSubtypeOf(const Type& other) const {
     if (equals(other)) return true;
     if (other.kind() == Kind::Any) return true;
-    // Check if other is a union containing this type
     if (other.kind() == Kind::Union) {
         auto& ut = static_cast<const UnionType&>(other);
         for (auto& t : ut.types) {
             if (isSubtypeOf(*t)) return true;
         }
     }
-    // A function is a code pointer: FunctionType <: ptr. This is the typed-side
-    // sanction for registering a .dr `def` as a C callback (pthread_create,
-    // GTK/WebKit signal handlers, the webview message bridge, ...). `ptr` is the
-    // untyped FFI escape hatch (Kind::Ptr) and codegen already lowers a bare
-    // function name to its address (Expressions.cpp). Only Function->ptr is
-    // admitted here; int->ptr and friends remain errors.
+    // FunctionType <: ptr sanctions passing a `def` as a C callback (pthread_create,
+    // GTK/WebKit handlers, ...); only Function->ptr is admitted, not int->ptr.
     if (other.kind() == Kind::Ptr && kind() == Kind::Function) return true;
     return false;
 }
@@ -137,7 +120,6 @@ bool PrimitiveType::isSubtypeOf(const Type& other) const {
     if (kind_ == Kind::Int && other.kind() == Kind::Float) return true;
     // bool <: float (transitive: bool <: int <: float)
     if (kind_ == Kind::Bool && other.kind() == Kind::Float) return true;
-    // Check union
     return Type::isSubtypeOf(other);
 }
 
@@ -153,17 +135,8 @@ bool ListType::equals(const Type& other) const {
 
 bool ListType::isSubtypeOf(const Type& other) const {
     if (Type::isSubtypeOf(other)) return true;
-    // Lists are INVARIANT in their element type - including against list[Any].
-    // list[T] and list[Any] have different runtime element layouts (a
-    // monomorphized 8B/elem native list vs the 16B/elem {tag, payload} box
-    // list), so letting a list[str] value FLOW as list[Any] is not just the
-    // usual mutable-container variance unsoundness - every element read
-    // through the list[Any] view walks the wrong stride (silent wrong values,
-    // OOB). A FRESH literal is still admitted covariantly by retyping it at
-    // the use site (tryExpectedTypeLiteral) so it is BUILT as a box list.
-    // Class-descriptor lists (`list[type]`, also resolving to list[Any]) are
-    // accepted at the annotated-assign sites, which can still see the `type`
-    // spelling in the annotation AST.
+    // Lists are invariant even against list[Any]: list[T] is 8B/elem native,
+    // list[Any] is 16B/elem boxed, so flowing across would read the wrong stride. A fresh literal still covaries via use-site retyping.
     return false;
 }
 
@@ -282,11 +255,8 @@ bool InstanceType::equals(const Type& other) const {
 bool InstanceType::isSubtypeOf(const Type& other) const {
     // equals / Any / Union handled by the base.
     if (Type::isSubtypeOf(other)) return true;
-    // ADR 054 - value-position conformance is DECLARED, never inferred: an
-    // instance satisfies a contract position iff its class (or an ancestor)
-    // promised every atom in its header. A structurally-matching class that
-    // never promised does not pass here - the call-site check turns that
-    // into the teaching error naming both remedies (cast or promise).
+    // ADR 054 - contract conformance is declared, not inferred: an instance
+    // passes iff its class (or ancestor) explicitly promised every atom; a structural match alone doesn't count.
     if (other.kind() == Kind::Contract) {
         const auto& ct = static_cast<const ContractType&>(other);
         std::set<const ContractDecl*> promised;
@@ -368,10 +338,8 @@ bool UnionType::isSubtypeOf(const Type& other) const {
 }
 
 // ModuleType
-// Modules are uniquely identified by their canonical dotted path. Two
-// ModuleType instances pointing at the same module name are equal even
-// if their exports/submodules maps are populated at different points
-// during type checking - the name is the identity.
+// Modules are identified by their canonical dotted path; two ModuleType
+// instances with the same name are equal regardless of export/submodule population timing.
 bool ModuleType::equals(const Type& other) const {
     if (other.kind() != Kind::Module) return false;
     return name == static_cast<const ModuleType&>(other).name;
@@ -383,13 +351,8 @@ bool TypeVarType::equals(const Type& other) const {
     return name == static_cast<const TypeVarType&>(other).name;
 }
 
-//===----------------------------------------------------------------------===//
-// TypeChecker Implementation
-//===----------------------------------------------------------------------===//
-
-// TypeChecker::Impl is defined in TypeCheckerImpl.h (shared with the D044
-// monomorphization engine in TypeCheckerGenerics.cpp). Only the one member that
-// reaches into this TU's anonymous-namespace helper is defined out-of-line here.
+// TypeChecker::Impl lives in TypeCheckerImpl.h (shared with the D044
+// monomorphization engine in TypeCheckerGenerics.cpp); only this one member is defined here.
 const std::string& TypeChecker::Impl::packageKey(const std::string& file) {
     auto it = packageKeyCache.find(file);
     if (it != packageKeyCache.end()) return it->second;
@@ -409,21 +372,15 @@ void TypeChecker::registerExternalModule(
     auto mt = impl_->getOrCreateModuleType(moduleName);
     mt->exports = exports;
     if (!filepath.empty()) mt->filepath = filepath;  // D045: source-file key
-    // `threading.Lock` is a compiler intrinsic (a fast ptr-erased LockType),
-    // not a Dragon-source class, so it isn't in the module's natural exports.
-    // Inject it so `from threading import Lock` resolves through the normal
-    // import path - exactly how CPython implements Lock in C yet surfaces it
-    // through the `threading` module. (Speed is unchanged: LockType -> ptr.)
+    // threading.Lock is a compiler intrinsic (ptr-erased LockType), not a Dragon
+    // class, so inject it into exports so `from threading import Lock` resolves normally.
     if (moduleName == "threading")
         mt->exports["Lock"] = std::make_shared<LockType>();
 }
 
 std::unordered_map<std::string, std::shared_ptr<Type>> TypeChecker::getExports() const {
-    // Return user-defined symbols from the module scope. Builtins are
-    // filtered by IDENTITY, not by name - a `def open(...)` in stdlib/gzip.dr
-    // shadows the builtin under the same name and MUST be re-exported, while
-    // an unshadowed `print` reference inherited from builtin setup is not
-    // this module's to publish.
+    // User-defined symbols only: builtins are filtered by IDENTITY not name, so
+    // a same-named user redefinition (e.g. `def open` in gzip.dr) is still exported.
     std::unordered_map<std::string, std::shared_ptr<Type>> exports;
     for (auto& [name, type] : impl_->cachedExports) {
         auto bIt = impl_->builtinIdentity.find(name);
@@ -437,9 +394,8 @@ std::unordered_map<std::string, std::shared_ptr<Type>> TypeChecker::getExports()
 }
 
 bool TypeChecker::check(Module& module) {
-    // D045 - capture this module's identity for member/import privacy. The
-    // file path is the authoritative key (the entry module's moduleName is
-    // empty); package is derived path-based.
+    // D045 - capture module identity for privacy checks: file path is
+    // authoritative (the entry module's moduleName is empty); package is derived path-based.
     impl_->currentFile = module.filename;
     impl_->currentModuleName = module.moduleName;
     impl_->currentPackage = impl_->packageKey(module.filename);
@@ -482,10 +438,8 @@ bool TypeChecker::check(Module& module) {
     impl_->define("max", std::make_shared<FunctionType>(
         std::vector<std::shared_ptr<Type>>{impl_->anyType},
         impl_->anyType));
-    // type(x) returns the type's NAME as a str (e.g. "Dog", "int") - not a
-    // class object (ADR 025: classes are not values). Declaring the return as
-    // str (matching codegen) keeps the static type correct, so boxing a
-    // type(x) result into Any/Union carries TAG_STR, not the int fallback.
+    // type(x) returns the type's NAME as a str (ADR 025: classes aren't values);
+    // declaring the return as str keeps boxing correct (TAG_STR, not the int fallback).
     impl_->define("type", std::make_shared<FunctionType>(
         std::vector<std::shared_ptr<Type>>{impl_->anyType},
         impl_->strType));
@@ -510,9 +464,8 @@ bool TypeChecker::check(Module& module) {
     impl_->define("reversed", std::make_shared<FunctionType>(
         std::vector<std::shared_ptr<Type>>{impl_->anyType},
         impl_->anyType));
-    // File I/O has no builtin: open/make/push are ordinary Dragon functions in
-    // stdlib/io.dr returning Reader/Writer class instances. They are reached via
-    // `from io import open, make, push` like any other stdlib symbol.
+    // File I/O has no builtin: open/make/push live in stdlib/io.dr and are
+    // reached via `from io import open, make, push` like any stdlib symbol.
     impl_->define("True", impl_->boolType);
     impl_->define("False", impl_->boolType);
     impl_->define("None", impl_->noneType);
@@ -526,17 +479,8 @@ bool TypeChecker::check(Module& module) {
         }
     }
 
-    // Import-binding pre-pass: bind `import x` / `from x import y` names BEFORE
-    // the class and function-signature pre-passes below, so a signature or field
-    // annotation referencing an IMPORTED type resolves during pre-registration.
-    // Without this, a module function whose parameter is an imported class was
-    // skipped by the signature pre-pass (its annotation resolved Unknown), so a
-    // FORWARD call to it silently typed Any: the call result boxed into a
-    // dict[str, Any] literal carried TAG_INT and read back as a TypeError, and
-    // `const q: int = that_call()` type-checked. The visitors are pure,
-    // idempotent bindings; the main walk re-runs them in statement order (which
-    // still owns shadowing) and owns the diagnostics - any emitted here are
-    // rolled back so privacy/unknown-name errors are not duplicated.
+    // Import-binding pre-pass: bind imports before the class/function pre-passes
+    // so a signature referencing an imported type resolves (else the param stayed Unknown, the call silently typed Any, and it mis-boxed downstream). Diagnostics here are rolled back to avoid duplicates.
     for (auto& stmt : module.body) {
         size_t diagBefore = impl_->diagnostics.size();
         if (auto* imp = dynamic_cast<ImportStmt*>(stmt.get())) {
@@ -548,15 +492,8 @@ bool TypeChecker::check(Module& module) {
             impl_->diagnostics.resize(diagBefore);
     }
 
-    // Class-layout pre-pass (mirrors CodeGen's): register every class's type
-    // name and ANNOTATED field types before checking any method body. Without
-    // this, a method in class A referencing a class B defined later resolved
-    // `b.field` against a not-yet-known B, defaulting the field type to int -
-    // so a non-int (e.g. str) field boxed into Any got TAG_INT and read back as
-    // garbage. Dragon mandates annotations, so field types come straight from
-    // the class-body `name: T` declarations and constructor `self.x: T` ones via
-    // resolveType (no body walk). visit(ClassDecl) reuses these ClassTypes and
-    // its `fields.count(...)` guards skip the already-registered entries.
+    // Class-layout pre-pass (mirrors CodeGen's): register class names and
+    // annotated field types before any method body, so a forward reference to a later class doesn't default its field type to int and mis-box.
     // Sub-pass 1: register all class names so field annotations referencing
     // sibling classes resolve.
     for (auto& stmt : module.body) {
@@ -571,33 +508,24 @@ bool TypeChecker::check(Module& module) {
         impl_->typeNames[cd->name] = std::make_shared<InstanceType>(classType);
         impl_->define(cd->name, classType);
     }
-    // ADR 054 contract pre-pass: register every contract before field types
-    // resolve (a field or parameter may be contract-typed) and before any
-    // promise is checked. Class name shells from sub-pass 1 are already in
-    // typeNames, so signature annotations referencing classes resolve here.
+    // ADR 054 contract pre-pass: register contracts before field types resolve
+    // (fields/params may be contract-typed); class shells from sub-pass 1 are already in typeNames.
     registerContracts(module);
 
     // Sub-pass 2: register annotated field types onto each ClassType.
     for (auto& stmt : module.body) {
         auto* cd = dynamic_cast<ClassDecl*>(stmt.get());
         if (!cd) continue;
-        // D044 - a generic class's field types reference its type parameters,
-        // which aren't bound yet here; collectGenericTemplates (below) populates
-        // them with type-param scope active. Skip to avoid spurious resolution.
+        // D044 - a generic class's field types reference unbound type params here;
+        // collectGenericTemplates populates them later with type-param scope active.
         if (!cd->typeParams.empty()) continue;
         auto tnIt = impl_->typeNames.find(cd->name);
         if (tnIt == impl_->typeNames.end()) continue;
         auto inst = std::dynamic_pointer_cast<InstanceType>(tnIt->second);
         if (!inst || !inst->classType) continue;
         auto& fields = inst->classType->fields;
-        // Resolve an annotation but only register it if it resolved CLEANLY (no
-        // diagnostics, concrete type). Imports / later cross-module types aren't
-        // available yet in this pre-pass, so an unresolved annotation (e.g. a
-        // type from another module) must be left for the main visit(ClassDecl)
-        // walk - which has full context and is the one that reports real errors.
-        // Diagnostics emitted here are rolled back so they aren't duplicated /
-        // mis-located, and the field is NOT registered (so the main pass's
-        // `fields.count(...)` guard doesn't suppress its proper resolution).
+        // Only register if the annotation resolves CLEANLY (no diagnostics, concrete
+        // type); anything else is left for visit(ClassDecl), and diagnostics here are rolled back.
         auto tryRegister = [&](const std::string& fname, TypeExpr* ann) {
             if (!ann || fields.count(fname)) return;
             size_t diagBefore = impl_->diagnostics.size();
@@ -614,11 +542,8 @@ bool TypeChecker::check(Module& module) {
                 if (auto* tgt = dynamic_cast<NameExpr*>(ann->target.get()))
                     tryRegister(tgt->name, ann->annotation.get());
         }
-        // (b) constructor `self.x: T = ...`. Method names are excluded: a
-        // `self.m: T = v` where m is a method is a compile error (AnnAssign
-        // visitor), and registering it as a field here would shadow the
-        // method and suppress that error. ClassType::methods isn't populated
-        // yet in this pre-pass, so collect the names syntactically.
+        // (b) constructor `self.x: T`. Method names are excluded (assigning to one
+        // is a compile error elsewhere) and collected syntactically since ClassType::methods isn't populated yet.
         std::unordered_set<std::string> methodNames;
         for (auto& s : cd->body) {
             auto* fd = dynamic_cast<FunctionDecl*>(s.get());
@@ -642,20 +567,8 @@ bool TypeChecker::check(Module& module) {
         }
     }
 
-    // Function-signature pre-pass (mirrors the class pre-pass): register every
-    // module-level function's signature before any body is checked, so a
-    // forward reference (a method calling a module function defined further
-    // down the file) resolves AT its declared type. Without this the callee
-    // name silently typed Unknown (visit(NameExpr)'s fallback), the call
-    // result carried no static type, and every type-gated consumer went
-    // blind - concretely, ownedTempDrainKind skipped the owned-result drain
-    // and the returned string leaked once per call (the _encode_chunk family
-    // in stdlib/http/server.dr). Signatures that don't resolve cleanly here
-    // (e.g. a param typed by an import processed on the main walk) are rolled
-    // back and left for visit(FunctionDecl), which has full context and owns
-    // the real diagnostics. Generic templates stay with the D044 pre-pass;
-    // already-bound names (imports, builtins a function shadows) are skipped
-    // so main-walk order keeps deciding those.
+    // Function-signature pre-pass: register module-level signatures before any
+    // body check so forward calls resolve typed (an untyped forward call once caused a real string leak in http/server.dr's _encode_chunk family via a skipped owned-result drain). Unresolved signatures roll back to visit(FunctionDecl).
     for (auto& stmt : module.body) {
         auto* fd = dynamic_cast<FunctionDecl*>(stmt.get());
         if (!fd) continue;
@@ -690,10 +603,8 @@ bool TypeChecker::check(Module& module) {
 
     module.accept(*this);
 
-    // D044 - drain the instantiation worklist: stamp each requested
-    // monomorphization into the module body and type-check it (which may enqueue
-    // transitive instantiations), to a fixpoint. Runs while the module scope is
-    // still active so stamped decls see module-level names.
+    // D044 - drain the instantiation worklist to a fixpoint (stamping may enqueue
+    // transitive instantiations); runs while the module scope is still active so stamped decls see module names.
     runMonomorphization();
 
     // Capture module-level exports before popping the scope
@@ -727,11 +638,8 @@ void TypeChecker::warning(const SourceLocation& loc, const std::string& message)
     impl_->diagnostics.push_back({TypeDiagnostic::Level::Warning, loc, message});
 }
 
-// Walks the ancestor chain looking for `member`. A class whose `fields` holds
-// the name resolves it as a field (assignable, readable as a value), so the
-// walk answers nullptr; a hit in `methods`/`methodOverloads` answers the
-// declaring class. Mirrors the fields-then-methods order of the Instance
-// branch in visit(AttributeExpr).
+// Walks the ancestor chain for `member`: a field hit answers nullptr, a
+// methods/methodOverloads hit answers the declaring class (mirrors visit(AttributeExpr)'s fields-then-methods order).
 const ClassType* TypeChecker::findMethodOwner(const ClassType* cls,
                                               const std::string& member) const {
     for (const ClassType* c = cls; c; ) {
@@ -745,10 +653,8 @@ const ClassType* TypeChecker::findMethodOwner(const ClassType* cls,
     return nullptr;
 }
 
-// D045 - member-access privacy. `declaring` is the class that DECLARES
-// `member` (an ancestor of the access base's static type). Fail-open when the
-// declaring class's source file is unknown (synthesized/incomplete) so we
-// never spuriously reject valid code; real user classes always carry it.
+// D045 - member-access privacy; `declaring` is the ancestor class that
+// declared `member`. Fails open when its source file is unknown so valid code is never spuriously rejected.
 void TypeChecker::checkMemberPrivacy(const ClassType* declaring,
                                      const std::string& member,
                                      const SourceLocation& loc) {
@@ -780,9 +686,8 @@ void TypeChecker::checkMemberPrivacy(const ClassType* declaring,
     }
 }
 
-// D045 - module-name privacy at an import or qualified `mod.name` access. Keys
-// on the EXPORTED name's shape (not the local alias). Fail-open when the source
-// module's file is unknown (e.g. a stdlib module type-checked in isolation).
+// D045 - module-name privacy at import/qualified access; keys on the
+// EXPORTED name's shape. Fails open when the source module's file is unknown (e.g. an isolated stdlib check).
 void TypeChecker::checkModuleNamePrivacy(const ModuleType& srcModule,
                                          const std::string& name,
                                          const SourceLocation& loc) {
@@ -809,9 +714,8 @@ void TypeChecker::checkModuleNamePrivacy(const ModuleType& srcModule,
     }
 }
 
-// D045 - declaration-time validation: a `__x__` (reserved-shape) name that is
-// NOT in the recognized set is a compile error (decision 1: unknown dunders
-// are forbidden so no private-looking-but-public name can exist).
+// D045 - an unrecognized `__x__` (reserved-shape) name is a compile error:
+// unknown dunders are forbidden so no private-looking-but-public name can exist.
 void TypeChecker::checkDunderDeclaration(const std::string& name, bool moduleLevel,
                                          const std::string& ownerDesc,
                                          const SourceLocation& loc) {
@@ -847,10 +751,8 @@ void TypeChecker::initBuiltinTypes() {
     impl_->typeNames["Never"] = impl_->neverType;
     impl_->typeNames["object"] = impl_->anyType;
     impl_->typeNames["ptr"] = std::make_shared<PtrType>();
-    // D025: `type` is the meta-type of class values (first-class classes).
-    // Modeled as Any in the type checker - a value of type `type` is some
-    // class, but the concrete class is not statically known, so calls on it
-    // return Any. CodeGen tracks VarKind::Type via typeExprToKind.
+    // D025 - `type` (meta-type of class values) is modeled as Any: the concrete
+    // class isn't statically known, so calls on it return Any (CodeGen tracks VarKind::Type separately).
     impl_->typeNames["type"] = impl_->anyType;
     // Default container types: bare dict -> dict[str, Any], list -> list[Any], etc.
     impl_->typeNames["dict"] = std::make_shared<DictType>(impl_->strType, impl_->anyType);
@@ -867,18 +769,9 @@ void TypeChecker::initBuiltinTypes() {
     // Bare `Task` resolves to Task[Any]; a local decl `t: Task = fire f()`
     // refines its result type from the concrete RHS (see AnnAssignStmt).
     impl_->typeNames["Task"] = std::make_shared<TaskType>(impl_->anyType);
-    // `Lock` is intentionally NOT seeded here - it is import-gated (Python
-    // parity: `from threading import Lock`). The `threading` module exports it
-    // as a LockType (see registerExternalModule); FromImportStmt binds it.
+    // `Lock` isn't seeded here; it's import-gated (`from threading import Lock`),
+    // exported as a LockType by registerExternalModule and bound via FromImportStmt.
 }
-
-//===----------------------------------------------------------------------===//
-// Type Resolution
-//===----------------------------------------------------------------------===//
-
-//===----------------------------------------------------------------------===//
-// ADR 054 - type contracts
-//===----------------------------------------------------------------------===//
 
 // Renders "name(int, str) -> bool" for conformance diagnostics.
 static std::string contractSigToString(const std::string& name,
@@ -913,9 +806,8 @@ void TypeChecker::registerContracts(Module& module) {
         if (!cd->methods.empty()) ct->atoms.push_back(cd);
         impl_->contractByDecl[cd] = ct;
         impl_->typeNames[cd->name] = ct;
-        // Also bind in module scope so the contract EXPORTS like a class and
-        // `from mod import Amazing` works. Contracts are not values - calling
-        // one is rejected at the call site.
+        // Also bind in module scope so the contract exports like a class (`from mod
+        // import Amazing` works); contracts aren't values, calling one is rejected at the call site.
         impl_->define(cd->name, ct);
         decls.push_back(cd);
     }
@@ -941,9 +833,8 @@ void TypeChecker::registerContracts(Module& module) {
             ct->methodOwner[m->name] = cd;
         }
     }
-    // Pass C - composition merge (`type C(A, B) {}` unions the sets).
-    // Recursive with a cycle guard; bases may live in this module or be
-    // imported (resolveContractRef covers both).
+    // Pass C - composition merge (`type C(A, B) {}` unions the sets), recursive
+    // with a cycle guard; bases may be local or imported (resolveContractRef covers both).
     std::set<const ContractDecl*> merging;
     std::function<void(ContractDecl*)> mergeBases = [&](ContractDecl* cd) {
         auto ct = impl_->contractByDecl[cd];
@@ -1109,11 +1000,8 @@ std::shared_ptr<Type> TypeChecker::resolveType(TypeExpr* typeExpr) {
     if (!typeExpr) return impl_->unknownType;
 
     if (auto* named = dynamic_cast<NamedTypeExpr*>(typeExpr)) {
-        // Dotted form (`mod.Class` / `pkg.sub.Class`) - walk through
-        // ModuleType nodes the same way visit(AttributeExpr) does for
-        // value expressions. The first segment must resolve to a module
-        // bound by `import`; intermediate segments must be submodules;
-        // the leaf must be an exported ClassType.
+        // Dotted form (`mod.Class`) walks ModuleType nodes like visit(AttributeExpr)
+        // does for values: first segment is an imported module, middle segments are submodules, leaf is an exported ClassType.
         auto dot = named->name.find('.');
         if (dot != std::string::npos) {
             std::string head = named->name.substr(0, dot);
@@ -1147,21 +1035,18 @@ std::shared_ptr<Type> TypeChecker::resolveType(TypeExpr* typeExpr) {
                 tail = tail.substr(nextDot + 1);
             }
         }
-        // D044 - a bare type-parameter name (`T`) inside a generic template
-        // resolves to its TypeVarType. Checked before typeNames so a type param
-        // shadows any same-named outer type within the template body.
+        // D044 - a bare type-param name (`T`) resolves to its TypeVarType; checked
+        // before typeNames so it shadows any same-named outer type inside the template body.
         if (auto tv = lookupTypeParam(named->name)) return tv;
         auto it = impl_->typeNames.find(named->name);
         if (it != impl_->typeNames.end()) return it->second;
-        // Check if it's a class name in scope
         auto looked = impl_->lookup(named->name);
         if (looked && looked->kind() == Type::Kind::Class) {
             auto cls = std::static_pointer_cast<ClassType>(looked);
             return std::make_shared<InstanceType>(cls);
         }
-        // ADR 054 - an imported contract (`from shapes import Amazing`) binds
-        // in scope, not typeNames; a bare contract name in type position is
-        // the contract itself.
+        // ADR 054 - an imported contract binds in scope, not typeNames; a bare
+        // contract name in type position is the contract itself.
         if (looked && looked->kind() == Type::Kind::Contract) return looked;
         error(named->location(), "unknown type '" + named->name + "'");
         return impl_->unknownType;
@@ -1207,10 +1092,8 @@ std::shared_ptr<Type> TypeChecker::resolveType(TypeExpr* typeExpr) {
         if (baseName->name == "Task" && generic->typeArgs.size() == 1) {
             return std::make_shared<TaskType>(resolveType(generic->typeArgs[0].get()));
         }
-        // D044 - a user-defined generic class instantiated at concrete args
-        // (`Box[int]`, `Pair[int, str]`). Resolve each arg (may itself be a
-        // type param or a nested generic), then build/return the monomorphic
-        // instantiation type and queue it for stamping.
+        // D044 - a user generic class instantiated at concrete args (`Box[int]`);
+        // resolve each arg then build/queue the monomorphic instantiation for stamping.
         if (auto gIt = impl_->genericClasses.find(baseName->name);
             gIt != impl_->genericClasses.end()) {
             std::vector<std::shared_ptr<Type>> args;
@@ -1256,10 +1139,6 @@ std::shared_ptr<Type> TypeChecker::resolveType(TypeExpr* typeExpr) {
     return impl_->unknownType;
 }
 
-//===----------------------------------------------------------------------===//
-// Type Inference (from expressions)
-//===----------------------------------------------------------------------===//
-
 std::shared_ptr<Type> TypeChecker::inferType(Expr* expr) {
     if (!expr) return impl_->unknownType;
     // Visit the expression to set its type
@@ -1267,20 +1146,12 @@ std::shared_ptr<Type> TypeChecker::inferType(Expr* expr) {
     return expr->type ? expr->type : impl_->unknownType;
 }
 
-//===----------------------------------------------------------------------===//
-// Type Expression Visitors
-//===----------------------------------------------------------------------===//
-
 void TypeChecker::visit(NamedTypeExpr&) {}
 void TypeChecker::visit(GenericTypeExpr&) {}
 void TypeChecker::visit(OptionalTypeExpr&) {}
 void TypeChecker::visit(UnionTypeExpr&) {}
 void TypeChecker::visit(CallableTypeExpr&) {}
 void TypeChecker::visit(TupleTypeExpr&) {}
-
-//===----------------------------------------------------------------------===//
-// Literal Visitors
-//===----------------------------------------------------------------------===//
 
 void TypeChecker::visit(IntegerLiteral& node) {
     node.type = impl_->intType;
@@ -1305,13 +1176,8 @@ void TypeChecker::visit(StringLiteral& node) {
 
 void TypeChecker::visit(TemplateExpr& node) {
     node.type = resolveTemplateContentType(node.contentType, node.location());
-    // Walk each interpolation so its expression flows AT its native type,
-    // exactly like an f-string part. Before this, template interpolations were
-    // invisible to the TypeChecker: a `!{p[0]}` tuple-subscript never got its
-    // element type, so CodeGen lowered it as a raw i64 pointer (a big decimal)
-    // instead of the value. Block interpolations (`for`/`if` + `:{}` fragments)
-    // are visited as statements so their loop variables scope at the iterable's
-    // element type; the nested `:{}` content aliases recurse back here.
+    // Walk each interpolation so it flows at its native type like an f-string
+    // part (previously invisible: a `!{p[0]}` tuple-subscript lowered as a raw i64 pointer). Block interpolations are visited as statements so loop vars scope correctly.
     for (auto& part : node.templateParts) {
         if (part.kind == TemplatePart::Kind::Interpolation) {
             if (part.expr) part.expr->accept(*this);
@@ -1333,9 +1199,8 @@ std::shared_ptr<Type> TypeChecker::resolveTemplateContentType(
         return impl_->strType;
     }
 
-    // Resolve the content type name to a ClassType. typeNames maps register
-    // class declarations during visit(ClassDecl); the scope chain holds the
-    // class definition itself.
+    // Resolve the content type name to a ClassType (typeNames maps register class
+    // declarations during visit(ClassDecl); the scope chain holds the definition).
     std::shared_ptr<ClassType> cls;
     auto it = impl_->typeNames.find(contentType);
     if (it != impl_->typeNames.end() && it->second->kind() == Type::Kind::Instance) {
@@ -1353,21 +1218,16 @@ std::shared_ptr<Type> TypeChecker::resolveTemplateContentType(
         }
     }
 
-    // D037 dispatch hook: StructTemplate subclasses are reserved for the
-    // structured-templates lowering described in Decision 037. They share
-    // the `template[X]` surface with string-mode (D017) but lower to a
-    // constructor-call chain instead of dragon_str_concat. Until that path
-    // ships, reject explicitly so users get a clear message rather than a
-    // silent fall-through to string mode.
+    // D037 dispatch hook: StructTemplate shares the `template[X]` surface with
+    // string-mode (D017) but lowers to a constructor-call chain; reject explicitly until that path ships, rather than silently falling through to string mode.
     if (classExtendsByName(cls.get(), "StructTemplate")) {
         error(loc, "template[" + contentType + "]: StructTemplate (structured "
               "templates) is not yet implemented");
         return std::make_shared<InstanceType>(cls);
     }
 
-    // Template protocol check (D017 Phase 4 §"Compiler Resolution"): the
-    // content type MUST extend `Template` so the auto-escape and instance-
-    // wrap codegen paths have well-defined symbols to resolve.
+    // Template protocol check (D017 Phase 4): the content type MUST extend
+    // `Template` so the auto-escape and instance-wrap codegen paths have well-defined symbols to resolve.
     if (!classExtendsByName(cls.get(), "Template")) {
         error(loc, "template[" + contentType + "]: '" + contentType +
               "' must extend Template");
@@ -1385,15 +1245,9 @@ void TypeChecker::visit(NoneLiteral& node) {
     node.type = impl_->noneType;
 }
 
-//===----------------------------------------------------------------------===//
-// Expression Visitors
-//===----------------------------------------------------------------------===//
-
 void TypeChecker::visit(NameExpr& node) {
-    // Module-magic `__doc__` name binds to the current module's docstring,
-    // type Optional[str] (= Union[str, None]). CodeGen lowers the same way
-    // as `<mod>.__doc__`. Sema added it to defineBuiltins so the reference
-    // doesn't error as undefined.
+    // `__doc__` binds to the module's docstring, type Optional[str]; CodeGen
+    // lowers it like `<mod>.__doc__`, and Sema pre-defines it so the bare reference doesn't error.
     if (node.name == "__doc__") {
         std::vector<std::shared_ptr<Type>> opt = {impl_->strType, impl_->noneType};
         node.type = std::make_shared<UnionType>(std::move(opt));
@@ -1406,11 +1260,8 @@ void TypeChecker::visit(NameExpr& node) {
         // Name might be a builtin type name used as value (like True/False/None)
         node.type = impl_->unknownType;
     }
-    // E11 (docs/002 2.7): dubability composes. A dub is a DEEP copy, so it
-    // only exists for types whose whole payload can honestly be copied:
-    // scalars trivially; str/bytes as identity retains (immutable); a
-    // container iff its elements are dubable. Raw resources, Any, closures,
-    // and class instances (v1) refuse with the reason.
+    // E11 (docs/002 2.7): dub is a DEEP copy, so it only exists for payloads
+    // that can honestly be copied (scalars, immutable str/bytes, dubable containers); resources/Any/closures/instances refuse.
     if (node.isDubMarked && node.type) {
         std::string why;
         if (!typeIsDubable(node.type.get(), why))
@@ -1479,11 +1330,8 @@ void TypeChecker::visit(BinaryExpr& node) {
     auto leftType = inferType(node.left.get());
     auto rightType = inferType(node.right.get());
 
-    // Bounds - a bounded type parameter behaves like its bound for operator
-    // resolution: unwrap `T: B` to `B` so the existing numeric / str-list /
-    // instance-dunder logic below applies unchanged. An UNBOUNDED `T` stays a
-    // TypeVar and keeps its current treatment (==/!= allowed, ordering/arith
-    // rejected). After monomorphization the operands are the concrete args.
+    // Bounds - a bounded `T` unwraps to its bound `B` for operator resolution; an
+    // unbounded `T` stays a TypeVar (==/!= allowed, ordering/arith rejected) until monomorphization substitutes the concrete arg.
     if (leftType && leftType->kind() == Type::Kind::TypeVar)
         if (auto b = static_cast<TypeVarType&>(*leftType).bound) leftType = b;
     if (rightType && rightType->kind() == Type::Kind::TypeVar)
@@ -1497,26 +1345,20 @@ void TypeChecker::visit(BinaryExpr& node) {
         op == TokenType::PERCENT || op == TokenType::POWER ||
         op == TokenType::DOUBLE_SLASH) {
 
-        // String concatenation
         if (op == TokenType::PLUS &&
             leftType->kind() == Type::Kind::Str && rightType->kind() == Type::Kind::Str) {
             node.type = impl_->strType;
             return;
         }
 
-        // Bytes concatenation: bytes + bytes
         if (op == TokenType::PLUS &&
             leftType->kind() == Type::Kind::Bytes && rightType->kind() == Type::Kind::Bytes) {
             node.type = impl_->bytesType;
             return;
         }
 
-        // List concatenation: list + list -> list (Python's `a + b`). Dragon
-        // lists are monomorphic, so the element types must match. An empty-list
-        // literal has an Unknown element type and adopts the other side's; a
-        // genuine mismatch (list[int] + list[str]) falls through to the
-        // unsupported-operand error below, consistent with the heterogeneous-
-        // literal rejection.
+        // list + list -> list (Python's `a + b`). Dragon lists are monomorphic, so
+        // element types must match; an empty-list literal adopts the other side's, and a genuine mismatch falls to the unsupported-operand error below.
         if (op == TokenType::PLUS &&
             leftType->kind() == Type::Kind::List && rightType->kind() == Type::Kind::List) {
             auto le = static_cast<ListType&>(*leftType).elementType;
@@ -1525,29 +1367,25 @@ void TypeChecker::visit(BinaryExpr& node) {
             bool rUnknown = !re || re->kind() == Type::Kind::Unknown;
             if (lUnknown) { node.type = rightType; return; }
             if (rUnknown) { node.type = leftType; return; }
-            // A list[Any] on either side absorbs the other (list[T] <: list[Any]);
-            // the result is list[Any] and the runtime concat boxes the concrete
-            // side's elements. Without this, `anyList + [1]` would wrongly error.
+            // A list[Any] on either side absorbs the other (list[T] <: list[Any]); the
+            // result is list[Any] and the runtime concat boxes the concrete side's elements.
             if (le->kind() == Type::Kind::Any) { node.type = leftType; return; }
             if (re->kind() == Type::Kind::Any) { node.type = rightType; return; }
             if (le->toString() == re->toString()) { node.type = leftType; return; }
             // else: element-type mismatch -> fall through to the operand error.
         }
 
-        // String repetition: str * int
         if (op == TokenType::STAR) {
             if ((leftType->kind() == Type::Kind::Str && rightType->isSubtypeOf(*impl_->intType)) ||
                 (leftType->isSubtypeOf(*impl_->intType) && rightType->kind() == Type::Kind::Str)) {
                 node.type = impl_->strType;
                 return;
             }
-            // Bytes repetition: bytes * int
             if ((leftType->kind() == Type::Kind::Bytes && rightType->isSubtypeOf(*impl_->intType)) ||
                 (leftType->isSubtypeOf(*impl_->intType) && rightType->kind() == Type::Kind::Bytes)) {
                 node.type = impl_->bytesType;
                 return;
             }
-            // List repetition: list * int
             if (leftType->kind() == Type::Kind::List && rightType->isSubtypeOf(*impl_->intType)) {
                 node.type = leftType;
                 return;
@@ -1558,17 +1396,13 @@ void TypeChecker::visit(BinaryExpr& node) {
             }
         }
 
-        // Any operand -> result is a box resolved at runtime by dragon_box_binop;
-        // its static type is Any (NOT a concrete numeric). This MUST precede the
-        // numeric check below: AnyType::isSubtypeOf(int) is true, so without this
-        // `Any + Any` (and `int + Any`) would be mistyped as `int` and reject a
-        // later `str`/`float` slot. Unknown stays unknown (permissive).
+        // Any operand -> the result is a box resolved at runtime by dragon_box_binop,
+        // typed Any (not a concrete numeric). Must precede the numeric check: AnyType::isSubtypeOf(int) is true, so `Any + Any` would otherwise mistype as int.
         if (leftType->kind() == Type::Kind::Any || rightType->kind() == Type::Kind::Any) {
             node.type = impl_->anyType;
             return;
         }
 
-        // Numeric arithmetic
         bool leftNum = leftType->isSubtypeOf(*impl_->intType) || leftType->kind() == Type::Kind::Float;
         bool rightNum = rightType->isSubtypeOf(*impl_->intType) || rightType->kind() == Type::Kind::Float;
 
@@ -1578,7 +1412,6 @@ void TypeChecker::visit(BinaryExpr& node) {
                 node.type = impl_->floatType;
                 return;
             }
-            // Power with negative exponent returns float
             // Floor division returns int if both int, else float
             if (op == TokenType::DOUBLE_SLASH) {
                 if (leftType->kind() == Type::Kind::Float || rightType->kind() == Type::Kind::Float) {
@@ -1588,7 +1421,6 @@ void TypeChecker::visit(BinaryExpr& node) {
                 }
                 return;
             }
-            // If either is float, result is float
             if (leftType->kind() == Type::Kind::Float || rightType->kind() == Type::Kind::Float) {
                 node.type = impl_->floatType;
             } else {
@@ -1622,9 +1454,8 @@ void TypeChecker::visit(BinaryExpr& node) {
         node.type = impl_->boolType;
         return;
     }
-    // Relational ordering (<, <=, >, >=): requires ordering semantics, which the
-    // checker can't prove for an unbounded `T` - D044 lists `t < t` as disallowed
-    // (needs a bound). Reject before defaulting to bool.
+    // Relational ordering requires provable ordering semantics, which an
+    // unbounded `T` lacks (D044 disallows `t < t` without a bound); reject before defaulting to bool.
     if (op == TokenType::LESS || op == TokenType::LESS_EQUAL ||
         op == TokenType::GREATER || op == TokenType::GREATER_EQUAL) {
         if ((leftType && leftType->kind() == Type::Kind::TypeVar) ||
@@ -1688,13 +1519,8 @@ void TypeChecker::visit(ChainedCompExpr& node) {
 
 void TypeChecker::visit(WalrusExpr& node) {
     auto valType = inferType(node.value.get());
-    // Reject an inferred binding whose container element type is unresolved - an
-    // empty literal (`x := []` / `x := {}`). Silently binding list[Unknown] /
-    // dict[Unknown, Unknown] yields a de-facto Any container: it accepts any
-    // element, so every insert boxes on the hot path - the spurious-Any leak at
-    // a declaration. The Zen: ambiguity is a compile error to annotate away, not
-    // a box. An annotated decl (`x: list[int] = []`) is an AnnAssign, not a
-    // walrus, so it stays valid - this fires only for inferred `:=` bindings.
+    // Reject an inferred `:=` binding whose container element type is unresolved
+    // (empty literal): it would silently become a de-facto Any container, boxing every insert. An annotated `x: list[int] = []` (AnnAssign) is unaffected.
     auto unresolved = [](const std::shared_ptr<Type>& t) -> const char* {
         if (!t) return nullptr;
         if (t->kind() == Type::Kind::List || t->kind() == Type::Kind::Set) {

@@ -1,8 +1,5 @@
-/// Dragon CodeGen - CodeGen::Impl out-of-line method definitions
-///
-/// Moved from CodeGenImpl.h (file-size policy): the pimpl header keeps
-/// declarations; bodies live here. Pure code motion - no logic changes.
-/// (Compiler-internal: out-of-lining has zero effect on EMITTED code.)
+/// Dragon CodeGen - CodeGen::Impl out-of-line method definitions, moved from
+/// CodeGenImpl.h (file-size policy). Pure code motion, no logic changes.
 #include "../CodeGenImpl.h"
 
 namespace dragon {
@@ -17,17 +14,11 @@ Type::Kind CodeGen::Impl::elemVarKindToTypeKind(VarKind ek) {
             case VarKind::Tuple:         return Type::Kind::Tuple;
             case VarKind::Set:           return Type::Kind::Set;
             case VarKind::ClassInstance: return Type::Kind::Instance;
-            // ADR 046: a Callable element is a refcounted DragonClosure ptr.
-            // Surfacing it as Function routes list/dict element ops through the
-            // ptr (append_ptr / closure-tagged) paths instead of the i64 path -
-            // without this, a `list[Callable]` PARAM (whose element kind flows
-            // through here from trackPtrParam) defaulted to Int and corrupted
-            // the ptr-list on append.
+            // ADR 046: a Callable elem is a refcounted closure ptr; surfacing it as
+            // Function routes list/dict ops through the ptr path, not i64.
             case VarKind::Closure:       return Type::Kind::Function;
-            // D039: Any maps through VarKind::Union per typeExprToKind. When
-            // a container's element/value type is Any/Union, surface that to
-            // varListElemKinds / varDictValueKinds so downstream dispatch
-            // routes through the box-returning runtime ops.
+            // D039: Any maps through VarKind::Union so container element/value
+            // kinds route through the box-returning runtime ops.
             case VarKind::Union:         return Type::Kind::Any;
             default:                     return Type::Kind::Int;
         }
@@ -75,9 +66,8 @@ void CodeGen::Impl::trackPtrParam(const std::string& paramName, TypeExpr* typeEx
             }
             return;
         }
-        // `Callable[...] | None` (niche) - unwrap and propagate so calls
-        // through the optional callable still resolve to the right signature
-        // after a `!= none` narrowing.
+        // `Callable[...] | None` (niche): unwrap so calls through it still
+        // resolve to the right signature after a `!= none` narrowing.
         if (TypeExpr* niche = unionNicheMember(typeExpr)) {
             if (auto* callable = dynamic_cast<CallableTypeExpr*>(niche)) {
                 callableTypes[paramName] = callableTypeExprToFnType(callable);
@@ -207,9 +197,8 @@ llvm::Function* CodeGen::Impl::resolveMethodFunction(
     const std::string& className,
     const std::string& methodName,
     std::string* resolvedSymbol) const {
-        // Leaf first: the explicit (module, class), then the resolver's own
-        // view (corrects a stale caller-supplied module before any parent
-        // walk could mask an override with the base implementation).
+        // Leaf first: explicit (module, class), then the resolver's own view,
+        // so a stale caller-supplied module can't mask an override.
         std::string leafSym = mangleClass(owningModule, className);
         std::string sym = leafSym + "_" + methodName;
         auto* fn = module->getFunction(sym);
@@ -295,14 +284,8 @@ std::string CodeGen::Impl::resolveExprClassName(Expr* expr) {
             }
             auto it = varClassNames.find(nameExpr->name);
             if (it != varClassNames.end() && classNames.count(it->second)) {
-                // varClassNames is keyed by bare variable name (program-wide),
-                // so a class-instance variable named e.g. `c` in one function
-                // leaves a `c -> Class` entry that a *different* function's
-                // `c: str` local would wrongly inherit - making `c == ">"`
-                // take the class __eq__ (pointer-identity) path instead of
-                // string compare. Validate against the authoritative current
-                // VarKind: if the in-scope variable is a known non-instance
-                // (str/int/list/...), the class entry is stale - ignore it.
+                // varClassNames is program-wide by bare name: a stale cross-function
+                // entry could misroute `c == ">"` to class __eq__. Validate VarKind first.
                 VarKind vk = lookupVarKind(nameExpr->name);
                 bool staleNonInstance =
                     vk == VarKind::Str  || vk == VarKind::StrLiteral ||
@@ -317,10 +300,8 @@ std::string CodeGen::Impl::resolveExprClassName(Expr* expr) {
             if (auto* cn = dynamic_cast<NameExpr*>(callExpr->callee.get())) {
                 if (classNames.count(cn->name))
                     return cn->name;
-                // Top-level function whose declared return type is a class.
-                // funcReturnClassNames is keyed by the LLVM symbol
-                // (post-mangling) - apply the alias / current-module /
-                // bare fallback chain.
+                // Top-level fn whose return type is a class: funcReturnClassNames is
+                // keyed by the post-mangling LLVM symbol - resolve via the alias chain.
                 std::string sym = resolveCalleeSymbol(cn->name);
                 auto fit = funcReturnClassNames.find(sym);
                 if (fit != funcReturnClassNames.end())
@@ -328,29 +309,15 @@ std::string CodeGen::Impl::resolveExprClassName(Expr* expr) {
             }
             // Method calls / cross-module ctors: obj.something(...).
             if (auto* attrCallee = dynamic_cast<AttributeExpr*>(callExpr->callee.get())) {
-                // Cross-module class instantiation `mod.ClassName(args)`: the
-                // result is an instance of ClassName (defined in the linked
-                // module). Without this branch, varClassNames tracking falls
-                // back to "" for cross-module ctors and downstream method
-                // dispatch can't resolve.
+                // Cross-module `mod.ClassName(args)`: result is a ClassName instance.
+                // Without this, varClassNames falls back to "" and method dispatch fails.
                 if (attrCallee->object && attrCallee->object->type &&
                     attrCallee->object->type->kind() == Type::Kind::Module &&
                     classNames.count(attrCallee->attribute)) {
                     return attrCallee->attribute;
                 }
-                // Otherwise treat as a method call: look up return class name
-                // from method signature. methodReturnClassNames is keyed by
-                // the LLVM symbol (post-mangling), so resolve the class's
-                // owning module before constructing the key.
-                //
-                // Static-method factory `ClassName.make(...)`: the receiver is
-                // the class itself (a bare class name), not an instance.
-                // resolveExprClassName on a class name returns "" (it only
-                // tracks instance variables), so detect the class-name receiver
-                // here and use it directly as the owning class. Without this, a
-                // field initialized by a static factory (`self.sock =
-                // TcpStream.open(...)`) loses its class, and later
-                // `self.sock.fd` reads the wrong field offset.
+                // Static factory `ClassName.make(...)` has a class-name receiver,
+                // not an instance - else e.g. `self.sock = TcpStream.open(...)` loses its class.
                 std::string objClass;
                 if (auto* on = dynamic_cast<NameExpr*>(attrCallee->object.get())) {
                     if (classNames.count(on->name)) objClass = on->name;
@@ -388,32 +355,8 @@ std::string CodeGen::Impl::resolveExprClassName(Expr* expr) {
         if (auto* sub = dynamic_cast<SubscriptExpr*>(expr)) {
             // Plain local list[ClassName].
             if (auto* nm = dynamic_cast<NameExpr*>(sub->object.get())) {
-                // varListElemClassName is keyed by bare variable name and is
-                // never cleared per-function, so a `parts: list[Widget]` in one
-                // function leaves a program-wide `parts -> Widget` entry that a
-                // DIFFERENT function's `parts: list[str]` would wrongly inherit -
-                // making `parts[i] == "lit"` take the class __eq__ (pointer
-                // identity) path instead of dragon_str_eq (the canonical
-                // false-negative this guards). Trust the entry only when the
-                // in-scope variable is actually a list whose element is a class
-                // instance. The authoritative source is the TypeChecker-resolved
-                // static element type; a non-Instance element (str/int/...) means
-                // the stale entry must be ignored. Same staleness reasoning as
-                // the NameExpr path above. (Mirrors D030: the static type is the
-                // truth.)
-                // Trust the entry ONLY when the receiver's own resolved type is
-                // consistent with a list-of-instances (or genuinely un-pinned,
-                // the `x = []` fallback the map exists for). A concrete receiver
-                // that is NOT a list[Instance] - a `list[str]`, or a plain
-                // `str`/`bytes`/`dict`/... whose subscript can never be a class
-                // instance - means the entry was left by a DIFFERENT function's
-                // same-named `list[Class]` param (the map is never cleared per
-                // function). The original guard only caught the `list[non-inst]`
-                // case, so a `src: str` subscript (`src[i+1]`) sailed through and
-                // inherited a stale `src -> FreeEntry`, making `src[i+1] == "="`
-                // take the instance __eq__ (pointer-identity) path instead of
-                // dragon_str_eq - a silent false-negative that only surfaced when
-                // the polluting module was pulled into the same compile graph.
+                // varListElemClassName is keyed by bare name across functions; a stale entry could misroute `x[i] == "s"` to class __eq__ instead of dragon_str_eq.
+                // Trust it only when the resolved static element type is Instance.
                 bool staleElem = false;
                 if (sub->object->type) {
                     Type::Kind rk = sub->object->type->kind();
@@ -453,11 +396,8 @@ std::string CodeGen::Impl::resolveExprClassName(Expr* expr) {
                     }
                 }
             }
-            // Static-type fallback: TypeChecker propagated the list's element
-            // type onto sub->object's `type` field. Used when sub->object is
-            // a CallExpr whose return type is `list[ClassName]` - covers
-            // `obj.method()[0].field` chains where the user didn't introduce
-            // a typed local. D030-aligned: the static type IS the truth.
+            // Static-type fallback: sub->object's TypeChecker-resolved type covers
+            // `obj.method()[0].field` chains with no typed local (D030: the static type IS the truth).
             if (sub->object && sub->object->type &&
                 sub->object->type->kind() == Type::Kind::List) {
                 if (auto* lt = dynamic_cast<ListType*>(sub->object->type.get())) {
@@ -479,11 +419,8 @@ std::string CodeGen::Impl::resolveExprClassName(Expr* expr) {
         if (auto* unaryExpr = dynamic_cast<UnaryExpr*>(expr)) {
             return resolveExprClassName(unaryExpr->operand.get());
         }
-        // Chained class-instance field access: `obj.x.y` - resolve via the
-        // owner's tracked field-class table. The constructor scan in
-        // extractFields populates classFieldClassName whenever a field is
-        // typed/initialized to a class instance; without this lookup the
-        // outer attribute load fell through to ConstantInt 0.
+        // Chained field access `obj.x.y`: resolve via the owner's tracked
+        // field-class table (populated in extractFields), else the outer load fell through to ConstantInt 0.
         if (auto* attr = dynamic_cast<AttributeExpr*>(expr)) {
             std::string ownerCls;
             if (auto* on = dynamic_cast<NameExpr*>(attr->object.get())) {
@@ -505,13 +442,8 @@ std::string CodeGen::Impl::resolveExprClassName(Expr* expr) {
                 }
             }
         }
-        // Static-type fallback (D030: the static type IS the truth). When the
-        // TypeChecker resolved this expression to a known class instance, use
-        // it - covers cases the structural walks above don't, notably a
-        // module-qualified call `mod.func(...)` whose declared return type is a
-        // class (the analog of the NameExpr `funcReturnClassNames` lookup, but
-        // for an AttributeExpr callee on a module). Last resort, so the precise
-        // name/var/field tracking above still wins first.
+        // Static-type fallback (D030): last resort when the structural walks above
+        // don't cover it, e.g. a module-qualified `mod.func(...)` returning a class.
         if (expr->type && expr->type->kind() == Type::Kind::Instance) {
             if (auto* it = dynamic_cast<InstanceType*>(expr->type.get())) {
                 if (it->classType && classNames.count(it->classType->name))
@@ -576,12 +508,8 @@ CodeGen::Impl::VarKind CodeGen::Impl::resolveExprVarKind(Expr* expr) {
                     }
                 }
             }
-            // Plain local dict[K, V] subscript -> value kind. Mirrors the list
-            // case above. Without this a borrowed dict read in a ternary branch
-            // (e.g. `d["k"] if cond else ""`) resolves to VarKind::Other, so the
-            // ownership-normalizing incref in visit(IfExpr) is skipped and the
-            // borrowed value is decref'd at scope exit - freeing the dict's own
-            // reference and double-freeing on dict/owner teardown.
+            // dict[K,V] subscript -> value kind. Without this a borrowed ternary read
+            // (`d["k"] if cond else ""`) resolves Other, skips the IfExpr incref, and double-frees on teardown.
             if (auto* nm = dynamic_cast<NameExpr*>(sub->object.get())) {
                 if (lookupVarKind(nm->name) == VarKind::Dict) {
                     auto it = varDictValueKinds.find(nm->name);
@@ -609,18 +537,8 @@ CodeGen::Impl::VarKind CodeGen::Impl::resolveExprVarKind(Expr* expr) {
                     }
                 }
             }
-            // Fallback: the subscript's own TypeChecker-assigned result type.
-            // The side-maps (varListElemKinds / classFieldDictValueKinds) are
-            // populated only for bare-variable containers and PEP-526
-            // class-body field annotations; a class whose fields are declared
-            // implicitly by constructor assignment (`self.cookies = parse(...)`,
-            // no class-body `cookies: dict[str,str]`) has no entry, so a
-            // borrowed element read in a ternary arm would resolve to Other,
-            // the ownership-normalizing incref in visit(IfExpr) is skipped, and
-            // scope-exit decref frees the container's own reference (double-free
-            // on teardown). The result type carries the element/value kind
-            // directly - this is the same info the READ path uses to pick the
-            // typed accessor.
+            // Fallback: subscript's own result type. A field declared only via ctor
+            // assignment (`self.cookies = parse(...)`) has no side-map entry, so without this it double-frees on teardown.
             if (sub->type) {
                 VarKind k = kindFromTypeKind(sub->type->kind());
                 if (k != VarKind::Other) return k;
@@ -649,11 +567,8 @@ CodeGen::Impl::VarKind CodeGen::Impl::resolveExprVarKind(Expr* expr) {
         if (dynamic_cast<IntegerLiteral*>(expr)) return VarKind::Int;
         if (dynamic_cast<FloatLiteral*>(expr)) return VarKind::Float;
         if (dynamic_cast<BooleanLiteral*>(expr)) return VarKind::Bool;
-        // C4: an inline set-method result (`a.union(b)`, `a.copy()`, ...) is a
-        // set at runtime but carries no static Set type - sets are modeled as
-        // ListType, so without this its `len()`/`print()` would fall through to
-        // dragon_str_len / dragon_list_len on a DragonSet* (returns ~1 / reads
-        // the wrong header offset). Classify it as Set when the receiver is one.
+        // C4: `a.union(b)` etc. is a set at runtime but carries no static Set type
+        // (sets are modeled as ListType) - without this, len()/print() misread a DragonSet*.
         if (auto* call = dynamic_cast<CallExpr*>(expr)) {
             if (auto* attr = dynamic_cast<AttributeExpr*>(call->callee.get())) {
                 static const std::set<std::string> setResultMethods = {
@@ -667,11 +582,8 @@ CodeGen::Impl::VarKind CodeGen::Impl::resolveExprVarKind(Expr* expr) {
                     if (recvIsSet) return VarKind::Set;
                 }
             }
-            // An inline `set(...)` / `frozenset(...)` constructor returns a
-            // DragonSet* but carries no static Set type (sets are modeled as
-            // ListType). Without this, `print(set(...))` / `len(set(...))`
-            // fell through to the str/list path, which read a DragonSet* as a
-            // string (heap-buffer-overflow) or at the wrong header offset.
+            // Inline `set(...)`/`frozenset(...)` returns a DragonSet* with no static
+            // Set type - without this, print/len read it as a str (heap-buffer-overflow) or at the wrong offset.
             if (auto* cn = dynamic_cast<NameExpr*>(call->callee.get())) {
                 if ((cn->name == "set" || cn->name == "frozenset") &&
                     call->args.size() == 1)
@@ -696,11 +608,8 @@ llvm::Value* CodeGen::Impl::emitDunderCall(llvm::Function* func, const std::stri
                         llvm::Value* self, const std::vector<llvm::Value*>& extraArgs) {
         std::vector<llvm::Value*> args = {self};
         args.insert(args.end(), extraArgs.begin(), extraArgs.end());
-        // Fill any still-undeclared parameters (past self + provided extras) with
-        // None - Constant::getNullValue yields null ptr / 0 int / 0.0 float /
-        // zeroed box per param type. Lets a multi-arg dunder (e.g. Python's
-        // __exit__(self, exc_type, exc_val, exc_tb)) be invoked from a site with
-        // no values to pass, instead of an arity-mismatch verify error.
+        // Fill undeclared params (past self+extras) with None via getNullValue,
+        // so a multi-arg dunder like __exit__ can be called without an arity-mismatch verify error.
         auto* fty = func->getFunctionType();
         for (unsigned p = static_cast<unsigned>(args.size());
              p < fty->getNumParams(); ++p)
@@ -720,9 +629,8 @@ llvm::Value* CodeGen::Impl::toBool(llvm::Value* val, Expr* exprNode) {
         if (val->getType() == f64Type) {
             return builder->CreateFCmpONE(val, llvm::ConstantFP::get(f64Type, 0.0), "tobool");
         }
-        // Pointer type: class instance __bool__, then container/string
-        // emptiness (Python parity: ""/[]/{}/set()/() are falsey), then
-        // __len__, else non-null.
+        // Pointer type: class __bool__, then container/string emptiness
+        // (""/[]/{}/set()/() falsey per Python parity), then __len__, else non-null.
         if (val->getType() == i8PtrType || val->getType()->isPointerTy()) {
             std::string cls;
             if (exprNode) cls = resolveExprClassName(exprNode);
@@ -767,11 +675,8 @@ llvm::Value* CodeGen::Impl::toBool(llvm::Value* val, Expr* exprNode) {
     }
 
 bool CodeGen::Impl::isOwnedStrResult(llvm::Value* v) {
-        // A value-callee (Callable/closure) invocation merges its
-        // closure-bare / closure-env / bare-fn-ptr call results in a PHI of i8*
-        // calls (see emitCallableValueCall). The PHI is owned iff every incoming
-        // is an owned str call. One level only: a nested/loop-carried PHI is
-        // conservatively a borrow, which also prevents infinite recursion.
+        // A Callable/closure invocation merges call results in a PHI (see
+        // emitCallableValueCall); owned iff every incoming is owned. One level only - a nested/loop-carried PHI is conservatively a borrow.
         if (auto* phi = llvm::dyn_cast<llvm::PHINode>(v)) {
             if (phi->getType() != i8PtrType || phi->getNumIncomingValues() == 0)
                 return false;
@@ -786,16 +691,8 @@ bool CodeGen::Impl::isOwnedStrResult(llvm::Value* v) {
         if (!call) return false;
         if (call->getType() != i8PtrType) return false;
         auto* fn = call->getCalledFunction();
-        // Indirect call - a value-callee (Callable / closure) invocation. Every
-        // caller of this predicate is in a str-typed context (the value is known
-        // to be a str), and a Dragon str-returning function/closure returns an
-        // OWNED (+1) string by convention: ReturnStmt increfs a borrowed
-        // NameExpr/AttributeExpr return, and visit(LambdaExpr) does the same for
-        // an expression-body lambda. The borrowed-str returners below are all
-        // *named* runtime helpers, never indirect - so an indirect str call is
-        // always owned, the same as a direct call to a user `def f() -> str`.
-        // Without this a discarded/arg-passed closure str result leaks every call
-        // (e.g. a reactive `bind_text` render closure invoked per Signal.set()).
+        // Indirect call: a str-returning fn/closure returns OWNED by convention
+        // (ReturnStmt increfs a borrow); else a discarded closure result leaks every call (e.g. a `bind_text` render closure).
         if (!fn) return true;
         return !isBorrowedStrReturnerName(fn->getName().str());
     }
@@ -807,13 +704,8 @@ bool CodeGen::Impl::isBorrowedStrReturnerName(const std::string& name) {
             // Returns the dict's stored value pointer; the dict keeps the +1,
             // so the caller must NOT decref it.
             "dragon_dict_get_str_ptr",
-            // Foreign (SQLite) C functions return pointers into SQLite-owned
-            // memory (valid only until the next step/reset/finalize), NOT Dragon
-            // heap strings. They are BORROWED: callers copy the bytes out (e.g.
-            // `"" + sqlite3_column_text(...)`) and must NEVER decref the foreign
-            // pointer - dragon_decref_str would treat (ptr - 16) as a DragonString
-            // header, read out of bounds, and free a non-base address inside
-            // SQLite's heap, corrupting the allocator (malloc_consolidate abort).
+            // Foreign SQLite pointers are BORROWED (valid until next step/reset);
+            // decref would misread (ptr-16) as a DragonString header and abort in malloc_consolidate.
             "sqlite3_column_text",
             "sqlite3_column_name",
             "sqlite3_errmsg",
@@ -850,11 +742,8 @@ bool CodeGen::Impl::isOwnedPtrResult(llvm::Value* v) {
     }
 
 bool CodeGen::Impl::isOwnedBoxResult(llvm::Value* v) {
-        // A value-callee (Callable/closure) invocation merges its call results
-        // in a PHI of box-typed calls (see emitCallableValueCall). The PHI is
-        // owned iff every incoming is an owned box call. One level only (a
-        // nested/loop-carried PHI is conservatively a borrow, and this prevents
-        // infinite recursion) - mirrors isOwnedStrResult.
+        // Box-typed PHI from a Callable/closure call (see emitCallableValueCall):
+        // owned iff every incoming is owned; one level only, mirrors isOwnedStrResult.
         if (auto* phi = llvm::dyn_cast<llvm::PHINode>(v)) {
             if (phi->getType() != boxType || phi->getNumIncomingValues() == 0)
                 return false;
@@ -869,11 +758,8 @@ bool CodeGen::Impl::isOwnedBoxResult(llvm::Value* v) {
         if (!call) return false;
         if (call->getType() != boxType) return false;
         auto* fn = call->getCalledFunction();
-        // Indirect call - a Callable returning Any. By the same convention as
-        // isOwnedStrResult, an Any-returning function/closure yields an OWNED
-        // box (ReturnStmt increfs a borrowed payload before wrapping); the
-        // borrowed-box returners below are all named runtime helpers, never
-        // indirect. So an indirect box call is owned, like a direct user call.
+        // Indirect Callable-returning-Any call: owned by the same convention as
+        // isOwnedStrResult (ReturnStmt increfs before wrapping); named borrowed-box returners below are never indirect.
         if (!fn) return true;
         static const std::unordered_set<std::string> kBorrowedBoxReturners = {
             // Container element reads - the container keeps the +1.
@@ -887,42 +773,35 @@ bool CodeGen::Impl::isOwnedBoxResult(llvm::Value* v) {
 
 int64_t CodeGen::Impl::typeKindToTag(Type::Kind k) {
         switch (k) {
-            case Type::Kind::Int:      return 0; // TAG_INT
-            case Type::Kind::Str:      return 1; // TAG_STR
-            case Type::Kind::Float:    return 2; // TAG_FLOAT
-            case Type::Kind::Bool:     return 3; // TAG_BOOL
-            case Type::Kind::List:     return 5; // TAG_LIST
-            case Type::Kind::Dict:     return 6; // TAG_DICT
-            case Type::Kind::Bytes:    return 7; // TAG_BYTES
-            case Type::Kind::Instance: return 7; // TAG_CLASS (shares slot - both are
-                                                  // refcount-managed heap objects)
-            case Type::Kind::Contract: return 7; // TAG_CLASS - ADR 054, an
-                                                  // instance viewed through a contract
-            case Type::Kind::Tuple:    return 5; // TAG_LIST (tuples reuse list dispatch)
-            case Type::Kind::Set:      return 5; // TAG_LIST (sets reuse list dispatch)
-            case Type::Kind::Function: return 10; // TAG_CLOSURE - a closure
-                                                  // boxed into Any/Union carries
-                                                  // this tag; emitUnion{In,De}cref
-                                                  // route it through the tag-gated
-                                                  // dragon_{in,de}cref_callable.
+            case Type::Kind::Int:      return TAG_INT; // TAG_INT
+            case Type::Kind::Str:      return TAG_STR; // TAG_STR
+            case Type::Kind::Float:    return TAG_FLOAT; // TAG_FLOAT
+            case Type::Kind::Bool:     return TAG_BOOL; // TAG_BOOL
+            case Type::Kind::List:     return TAG_LIST; // TAG_LIST
+            case Type::Kind::Dict:     return TAG_DICT; // TAG_DICT
+            case Type::Kind::Bytes:    return TAG_BYTES; // TAG_BYTES
+            case Type::Kind::Instance: return 7; // TAG_CLASS (shared with Contract - refcounted heap objects)
+            case Type::Kind::Contract: return 7; // TAG_CLASS - ADR 054, instance viewed through a contract
+            case Type::Kind::Tuple:    return TAG_LIST; // TAG_LIST (tuples reuse list dispatch)
+            case Type::Kind::Set:      return TAG_LIST; // TAG_LIST (sets reuse list dispatch)
+            case Type::Kind::Function: return TAG_CALLABLE; // TAG_CLOSURE - Any/Union boxing routes through dragon_{in,de}cref_callable
             default:                   return -1;
         }
     }
 
 int64_t CodeGen::Impl::varKindToTag(VarKind vk) {
         switch (vk) {
-            case VarKind::Int:           return 0; // TAG_INT
+            case VarKind::Int:           return TAG_INT; // TAG_INT
             case VarKind::Str:
-            case VarKind::StrLiteral:    return 1; // TAG_STR
-            case VarKind::Float:         return 2; // TAG_FLOAT
-            case VarKind::Bool:          return 3; // TAG_BOOL
-            case VarKind::List:          return 5; // TAG_LIST
-            case VarKind::Dict:          return 6; // TAG_DICT
-            case VarKind::ClassInstance: return 7; // TAG_CLASS (shares slot with TAG_BYTES - both are
-                                                   // refcount-managed heap objects with DragonObjectHeader)
+            case VarKind::StrLiteral:    return TAG_STR; // TAG_STR
+            case VarKind::Float:         return TAG_FLOAT; // TAG_FLOAT
+            case VarKind::Bool:          return TAG_BOOL; // TAG_BOOL
+            case VarKind::List:          return TAG_LIST; // TAG_LIST
+            case VarKind::Dict:          return TAG_DICT; // TAG_DICT
+            case VarKind::ClassInstance: return 7; // TAG_CLASS (shares slot with TAG_BYTES - both refcounted heap objects)
             case VarKind::Generator:     return 8; // TAG_GENERATOR
             case VarKind::Type:          return 9; // TAG_TYPE
-            case VarKind::Closure:       return 10; // TAG_CLOSURE
+            case VarKind::Closure:       return TAG_CALLABLE; // TAG_CLOSURE
             case VarKind::Union:         return -1; // union: tag must be loaded at runtime
             default:                     return -1; // unknown/Any - no check
         }
@@ -945,9 +824,8 @@ Type::Kind CodeGen::Impl::resolveDictKeyKind(Expr* expr) {
                     if (vit != varClassNames.end()) cls = vit->second;
                 }
             } else {
-                // Nested base (`a.b.d[k]`): resolve the base expression's
-                // static class so the key kind is read off the owning class,
-                // exactly like a single-level field access.
+                // Nested base (`a.b.d[k]`): resolve it recursively, like a
+                // single-level field access.
                 cls = resolveExprClassName(attr->object.get());
             }
             if (!cls.empty()) {
@@ -993,31 +871,50 @@ Type::Kind CodeGen::Impl::resolveDictValueKind(Expr* expr) {
         return Type::Kind::Unknown;
     }
 
+std::string CodeGen::Impl::recordVarClassFromValue(const std::string& varName,
+                                                   Expr* value) {
+    if (varClassNames.count(varName)) return "";
+    auto cls = resolveExprClassName(value);
+    if (cls.empty()) return "";
+    varClassNames[varName] = cls;
+    std::string owningMod;
+    if (auto* call = dynamic_cast<CallExpr*>(value)) {
+        if (auto* attrCallee = dynamic_cast<AttributeExpr*>(call->callee.get())) {
+            if (attrCallee->object && attrCallee->object->type &&
+                attrCallee->object->type->kind() == Type::Kind::Module) {
+                owningMod = static_cast<ModuleType&>(*attrCallee->object->type).name;
+            } else if (auto* recvName = dynamic_cast<NameExpr*>(attrCallee->object.get())) {
+                auto rmIt = varClassOwningModule.find(recvName->name);
+                if (rmIt != varClassOwningModule.end()) owningMod = rmIt->second;
+            }
+        }
+    }
+    if (owningMod.empty()) owningMod = resolveClassOwningModule(cls);
+    varClassOwningModule[varName] = owningMod;
+    return cls;
+}
+
 int64_t CodeGen::Impl::typeKindToElemTag(dragon::Type::Kind k) {
         switch (k) {
-            case Type::Kind::Str:      return 1; // TAG_STR
-            case Type::Kind::Float:    return 2; // TAG_FLOAT
-            case Type::Kind::Bool:     return 3; // TAG_BOOL - packed 1B/elem
-            case Type::Kind::List:     return 5; // TAG_LIST
-            case Type::Kind::Dict:     return 6; // TAG_DICT
-            case Type::Kind::Bytes:    return 7; // TAG_BYTES
-            case Type::Kind::Tuple:    return 5; // TAG_LIST (uses dragon_decref)
-            case Type::Kind::Set:      return 5; // TAG_LIST (uses dragon_decref)
-            case Type::Kind::Instance: return 5; // TAG_LIST (uses dragon_decref)
-            case Type::Kind::Function: return 10; // TAG_CLOSURE - a list[Callable]
-                                                 // element is a refcounted closure OR a
-                                                 // bare fn ptr (no header). Tag 10 picks
-                                                 // the ptr-list variant AND routes the
-                                                 // element store/destroy RC through the
-                                                 // TAG-GATED dragon_{in,de}cref_callable
-                                                 // (frees real closures + env, no-ops on
-                                                 // bare fns) - generic dragon_decref on a
-                                                 // headerless fn ptr would SIGSEGV.
-            case Type::Kind::None_:    return 4; // TAG_NONE - a None value boxed
-                                                 // into Any must read back as
-                                                 // None, not int 0. (None is a
-                                                 // null ptr, so still no decref.)
-            default:                   return 0; // TAG_INT (no cleanup needed)
+            case Type::Kind::Str:      return TAG_STR; // TAG_STR
+            case Type::Kind::Float:    return TAG_FLOAT; // TAG_FLOAT
+            case Type::Kind::Bool:     return TAG_BOOL; // TAG_BOOL - packed 1B/elem
+            case Type::Kind::List:     return TAG_LIST; // TAG_LIST
+            case Type::Kind::Dict:     return TAG_DICT; // TAG_DICT
+            case Type::Kind::Bytes:    return TAG_BYTES; // TAG_BYTES
+            case Type::Kind::Tuple:    return TAG_LIST; // TAG_LIST (uses dragon_decref)
+            case Type::Kind::Set:      return TAG_LIST; // TAG_LIST (uses dragon_decref)
+            case Type::Kind::Instance: return TAG_LIST; // TAG_LIST (uses dragon_decref)
+            case Type::Kind::Function: return TAG_CALLABLE; // TAG_CLOSURE - list[Callable] elem is
+                                                  // a closure or bare fn ptr; tag-gated decref avoids SIGSEGV on bare.
+            case Type::Kind::None_:    return TAG_NONE; // TAG_NONE - a boxed None must read
+                                                 // back as None (null ptr), not int 0.
+            case Type::Kind::Int:
+            case Type::Kind::Any:
+            case Type::Kind::Unknown:
+            default:                   return TAG_INT; // TAG_INT; Unknown here means the
+                                                 // element type was lost upstream - heap elems would skip cleanup, so
+                                                 // keep expr->type flowing (AstClone carries it since the J6 fix).
         }
     }
 
@@ -1026,9 +923,8 @@ std::string CodeGen::Impl::containerReprFn(Expr* e) {
         VarKind vk = resolveExprVarKind(e);
         if (vk == VarKind::List || dynamic_cast<ListExpr*>(e) ||
             dynamic_cast<ListCompExpr*>(e)) {
-            // list[Any] is a DragonListBox (16B/elem) - its repr builder reads
-            // per-element {tag,payload}, unlike the 8B-stride dragon_list_to_str
-            // (which would render garbage). Mirrors the read/print-side dispatch.
+            // list[Any] is a DragonListBox (16B/elem) - its repr reads per-element
+            // {tag,payload}; the 8B-stride dragon_list_to_str would render garbage.
             if (getIterableElementKind(e) == Type::Kind::Any)
                 return "dragon_list_box_to_str";
             return "dragon_list_to_str";
@@ -1067,12 +963,10 @@ CodeGen::Impl::VarKind CodeGen::Impl::typeKindToVarKind(Type::Kind k) {
             // ADR 054 - a contract-typed value IS an instance pointer at
             // runtime; RC treats it identically (the whole zero-cost claim).
             case Type::Kind::Contract: return VarKind::ClassInstance;
-            case Type::Kind::Function: return VarKind::Closure;  // a Callable
-                                       // element / pop-result / return value is a
-                                       // refcounted closure (or bare fn ptr).
-            // D039 Phase 9: list[Any] / dict[str, Any] iteration loop vars
-            // bind to VarKind::Union so the IfStmt narrowing path picks
-            // them up (detectNarrowing requires VarKind::Union on the source).
+            case Type::Kind::Function: return VarKind::Closure;  // a Callable elem/
+                                       // return value is a refcounted closure (or bare fn ptr).
+            // D039 Phase 9: list[Any]/dict[str, Any] loop vars bind to VarKind::Union
+            // so detectNarrowing's IfStmt narrowing path picks them up.
             case Type::Kind::Any:      return VarKind::Union;
             default:                   return VarKind::Int;
         }
@@ -1094,10 +988,8 @@ llvm::Type* CodeGen::Impl::typeKindToLLVM(Type::Kind k) const {
             case Type::Kind::Contract:  // ADR 054 - plain instance pointer
             case Type::Kind::Module:
             case Type::Kind::Class:    return i8PtrType;
-            // D039 Phase 9: Any (and Union via the same channel) lower to
-            // the 16-byte box. Used by for-loop element allocas and any
-            // other Type::Kind-driven LLVM-type selection that should
-            // preserve tag information.
+            // D039 Phase 9: Any (and Union via the same channel) lower to the
+            // 16-byte box, so tag info survives for-loop element allocas etc.
             case Type::Kind::Any:      return boxType;
             // Other unknown kinds - i64 funnel (legacy).
             default:                   return i64Type;
@@ -1113,20 +1005,12 @@ bool CodeGen::Impl::isHeapTypeKind(Type::Kind k) {
             case Type::Kind::Tuple:
             case Type::Kind::Set:
             case Type::Kind::Instance:
-            case Type::Kind::Function:  // a Callable element is a refcounted
-                                        // closure - a `for f in list[Callable]`
-                                        // loop var must be marked BORROWED (the
-                                        // list owns the element) so per-iteration
-                                        // cleanup doesn't decref it and free a
-                                        // closure the list still holds (-> UAF on
-                                        // list destroy).
-            case Type::Kind::Any:       // list[Any] iteration binds each element
-                                        // as a BORROWED box via dragon_list_box_get
-                                        // (the list keeps the +1). Without marking
-                                        // the loop var borrowed, its per-iteration
-                                        // union cleanup decrefs an element the list
-                                        // still owns -> double-free on list destroy
-                                        // (the JSON `for item in list[Any]` UAF).
+            // A `for f in list[Callable]` elem must be BORROWED (the list owns it),
+            // else per-iteration cleanup frees a closure the list still holds (UAF).
+            case Type::Kind::Function:
+            // list[Any] iteration elements are BORROWED boxes (the list keeps the
+            // +1); else per-iteration cleanup double-frees on list destroy (the JSON UAF).
+            case Type::Kind::Any:
                 return true;
             default:
                 return false;
@@ -1161,60 +1045,42 @@ bool CodeGen::Impl::isBareDictIterable(Expr* expr) {
     }
 
 int64_t CodeGen::Impl::inferPtrValueTag(Expr* expr) {
-        // Check resolved AST type first. When the typechecker has resolved
-        // the expression's type, trust it - that's the authoritative answer.
-        // In particular, a `ptr`-typed expression (extern "C" functions like
-        // malloc/memset/fread/dragon_string_alloc returning raw byte buffers)
-        // resolves to Type::Kind::Ptr -> typeKindToElemTag returns 0 -> no
-        // decref is emitted. Falling through to the "assume string" default
-        // below would emit a spurious dragon_decref_str on a buffer with no
-        // DragonObjectHeader, which (depending on heap layout) corrupts the
-        // heap when the 16 bytes preceding the buffer happen to look like a
-        // valid header.
+        // Trust the resolved AST type first: a `ptr`-typed expr (extern "C" buffer)
+        // maps to elem tag 0, no decref - the "assume string" fallback would decref a headerless buffer and corrupt the heap.
         if (expr && expr->type) {
-            // Class instances carry TAG_CLASS (7) in the dict/box VALUE tag
-            // domain - matching typeKindToTag, the boxed-Any tag, and the
-            // annotated-read expectation. typeKindToElemTag's Instance -> 5 is
-            // the LIST elem_tag domain only (variant choice + decref routing);
-            // storing 5 here made every annotated read of a dict[str, Cls]
-            // value raise "is list, not bytes", made isinstance miss on
-            // dict[str, Any]-held instances, and steered print/json.dumps
-            // into walking the instance as a list (ASan OOB). RC-neutral:
-            // tags 5 and 7 both route the generic header-dispatched
-            // dragon_incref/decref in every dict/tuple/set path.
+            // Class instances need TAG_CLASS (7) here, not elemTag's LIST (5) - using 5
+            // broke dict[str,Cls] reads, isinstance, and json.dumps (ASan OOB); tags 5/7 both route the same generic decref, so RC is unaffected.
             if (expr->type->kind() == Type::Kind::Instance) return 7;
             return typeKindToElemTag(expr->type->kind());
         }
         // Type is unresolved - fall back to AST node shape.
         if (auto* sl = dynamic_cast<StringLiteral*>(expr))
-            return sl->isBytes ? 7 : 1; // TAG_BYTES or TAG_STR
+            return sl->isBytes ? TAG_BYTES : TAG_STR; // TAG_BYTES or TAG_STR
         if (dynamic_cast<ListExpr*>(expr) || dynamic_cast<ListCompExpr*>(expr))
-            return 5; // TAG_LIST
+            return TAG_LIST; // TAG_LIST
         if (dynamic_cast<DictExpr*>(expr) || dynamic_cast<DictCompExpr*>(expr))
-            return 6; // TAG_DICT
+            return TAG_DICT; // TAG_DICT
         if (dynamic_cast<TupleExpr*>(expr))
-            return 5; // TAG_LIST (tuples use dragon_decref)
+            return TAG_LIST; // TAG_LIST (tuples use dragon_decref)
         if (dynamic_cast<SetExpr*>(expr) || dynamic_cast<SetCompExpr*>(expr))
-            return 5; // TAG_LIST (sets use dragon_decref)
+            return TAG_LIST; // TAG_LIST (sets use dragon_decref)
         if (auto* nameExpr = dynamic_cast<NameExpr*>(expr)) {
             VarKind vk = lookupVarKind(nameExpr->name);
             switch (vk) {
                 case VarKind::Str:
-                case VarKind::StrLiteral: return 1; // TAG_STR
+                case VarKind::StrLiteral: return TAG_STR; // TAG_STR
                 case VarKind::List:       return 5;
                 case VarKind::Dict:       return 6;
                 case VarKind::Tuple:      return 5;
                 case VarKind::Set:        return 5;
-                case VarKind::ClassInstance: return 7; // TAG_CLASS - see the
-                                                       // resolved-type branch
+                case VarKind::ClassInstance: return 7; // TAG_CLASS - see the resolved-type branch above
                 default: break;
             }
         }
         if (auto* callExpr = dynamic_cast<CallExpr*>(expr)) {
             if (auto* calleeName = dynamic_cast<NameExpr*>(callExpr->callee.get())) {
                 if (classNames.count(calleeName->name))
-                    return 7; // TAG_CLASS (fresh construction) - decref is the
-                              // same generic dragon_decref as tag 5
+                    return 7; // TAG_CLASS (fresh construction) - same generic dragon_decref as tag 5
             }
         }
         return 1; // default for unresolved pointers: assume string
@@ -1236,17 +1102,14 @@ void CodeGen::Impl::emitCleanupPush(const std::string& name, llvm::Value* value,
             scopes.back().cleanupBaseAlloca = createEntryAllocaI32(func, "clbase", -1);
         auto* baseAlloca = scopes.back().cleanupBaseAlloca;
 
-        // Gate the registration on a live exception frame (see
-        // emitActiveFramesNonZero). Coerce the value BEFORE the branch (it
-        // dominates both edges).
+        // Gate on a live exception frame (see emitActiveFramesNonZero); coerce the
+        // value BEFORE the branch since it must dominate both edges.
         auto* valI64 = cleanupValToI64(value);
         auto* kindC = llvm::ConstantInt::get(i32Ty, cleanupKind);
         auto* tagC = tagVal ? builder->CreateTrunc(tagVal, i32Ty, "clean.tag")
                             : llvm::ConstantInt::get(i32Ty, 0);
-        // No skip branch: the slot/base allocas are entry-initialized to -1, and
-        // a declaration's active_frames is constant across a loop's iterations
-        // within one call (it is fixed by the enclosing try structure), so a
-        // gated-out local's sentinel stays -1 without an explicit skip-path store.
+        // No skip branch needed: allocas entry-init to -1, and active_frames is
+        // constant per call (fixed by the enclosing try), so a gated-out local's sentinel just stays -1.
         auto* doBB   = llvm::BasicBlock::Create(*context, "clpush.do", func);
         auto* contBB = llvm::BasicBlock::Create(*context, "clpush.cont", func);
         builder->CreateCondBr(emitActiveFramesNonZero(), doBB, contBB);
@@ -1280,9 +1143,8 @@ void CodeGen::Impl::emitCleanupUpdate(const std::string& name, llvm::Value* valu
         auto* valI64 = cleanupValToI64(value);
         auto* tagC = tagVal ? builder->CreateTrunc(tagVal, i32Ty, "clean.tag")
                             : llvm::ConstantInt::get(i32Ty, 0);
-        // Only update if the local was actually registered (slot >= 0). A local
-        // declared with no frame live (gated-out push) has slot == -1 and needs
-        // no snapshot - skip the runtime call.
+        // Only update if registered (slot >= 0): a local declared with no live
+        // frame (gated-out push) has slot == -1 and needs no snapshot.
         auto* pushed = builder->CreateICmpSGE(
             slot, llvm::ConstantInt::get(i32Ty, 0), "clslot.pushed");
         auto* doBB   = llvm::BasicBlock::Create(*context, "clupd.do", func);
@@ -1343,9 +1205,8 @@ std::vector<llvm::Value*> CodeGen::Impl::pushArgTempCleanups(
         if (options.gcMode != GCMode::RC) return bases;
         for (auto& [v, k] : argTemps) {
             int ck = cleanupKindFor(k);
-            // Tag-independent kinds only: the temp-cleanup path stores no box
-            // value-tag, so DCLEAN_UNION (and non-heap kind 0) are left to the
-            // existing normal-path decref rather than risk a wrong-kind free.
+            // Tag-independent kinds only: temp-cleanup stores no box value-tag, so
+            // DCLEAN_UNION (and kind 0) stay on the normal-path decref to avoid a wrong-kind free.
             if (ck == DCLEAN_STR || ck == DCLEAN_CALLABLE || ck == DCLEAN_OBJ)
                 bases.push_back(emitCleanupPushTemp(v, ck));
         }
@@ -1360,10 +1221,8 @@ void CodeGen::Impl::popArgTempCleanups(const std::vector<llvm::Value*>& bases) {
     }
 
 void CodeGen::Impl::emitScopeCleanupFor(Scope& scope) {
-        // defer.md section 4: this scope's deferred calls run LIFO ahead of
-        // the RC decref pass, so borrowed snapshots are alive at call time.
-        // The thunk loads each argument from the i64 snapshot array written
-        // at the defer statement; own-moved values ride into the callee.
+        // defer.md §4: deferred calls run LIFO ahead of the RC decref pass, so
+        // borrowed snapshots are alive at call time; own-moved values ride into the callee.
         for (auto it = scope.deferred.rbegin(); it != scope.deferred.rend(); ++it) {
             auto* argsPtr = builder->CreateConstInBoundsGEP2_64(
                 it->argSlots->getAllocatedType(), it->argSlots, 0, 0,
@@ -1389,23 +1248,16 @@ void CodeGen::Impl::emitScopeCleanupFor(Scope& scope) {
             auto kindIt = scope.varKinds.find(name);
             if (kindIt == scope.varKinds.end()) continue;
             VarKind kind = kindIt->second;
-            // D027.1: Cell-backed locals have the cell ptr stored in the
-            // alloca, not the value. The cell is a TAG_CELL heap object, so
-            // a single dragon_decref drops it (its dealloc path drops the
-            // held heap value via the kind tag stored on the cell). Inner
-            // scopes that captured the cell ptr from env are marked
-            // borrowed at env-load time and skip this cleanup
+            // D027.1: cell-backed locals store the cell ptr (a TAG_CELL heap object)
+            // in the alloca; one dragon_decref drops both cell and held value.
             if (scope.cellBacked.count(name)) {
                 auto* cellPtr = builder->CreateLoad(i8PtrType, alloca, name + ".cell.gc");
                 builder->CreateCall(runtimeFuncs["dragon_decref"], {cellPtr});
                 continue;
             }
             if (!isHeapKind(kind)) continue;
-            // The slot's LLVM type is the ground truth: a 16-byte box slot MUST
-            // take the tag-dispatched decref no matter what the kind map says.
-            // Kind bookkeeping can drift (an `Any` local later tagged
-            // ClassInstance for member dispatch); loading `ptr` from a box
-            // slot reads the TAG word and dragon_decref(7) SEGVs at scope exit
+            // The slot's LLVM type is ground truth: a box slot MUST take the
+            // tag-dispatched decref regardless of kind-map drift, or dragon_decref(7) SEGVs reading the TAG word as a ptr.
             if (kind == VarKind::Union || alloca->getAllocatedType() == boxType) {
                 // D030 Phase 4: load box, extract tag + payload, conditional
                 // decref based on runtime tag.
@@ -1421,30 +1273,23 @@ void CodeGen::Impl::emitScopeCleanupFor(Scope& scope) {
             if (kind == VarKind::Str) {
                 builder->CreateCall(runtimeFuncs["dragon_decref_str"], {val});
             } else if (kind == VarKind::Closure) {
-                // tag-gated - a `: Callable` local may hold a bare fn ptr
-                // (no header); dragon_decref_callable no-ops on it and frees a
-                // real closure + its env.
+                // Tag-gated: a `: Callable` local may hold a bare fn ptr (no header) -
+                // dragon_decref_callable no-ops on it, frees a real closure + env.
                 builder->CreateCall(runtimeFuncs["dragon_decref_callable"], {val});
             } else {
                 builder->CreateCall(runtimeFuncs["dragon_decref"], {val});
             }
         }
-        // Task-detach tail: detach bound fire-and-forget Task locals (handle ref
-        // never joined/escaped). Separate from the decref loop above - a Task is a
-        // bare DragonVThread* (no DragonObjectHeader), released via the vthread
-        // refcount, NOT dragon_decref. dragon_vthread_detach is idempotent with
-        // join (the `joined` 0->1 CAS), so this is a no-op if the task was joined
-        // and drops the leaked handle ref otherwise - no double-free either way.
+        // Task-detach tail: a fire-and-forget Task is a bare DragonVThread* (no
+        // header), released via vthread refcount not dragon_decref; detach is idempotent with join (CAS), so no double-free either way.
         for (const auto& name : scope.detachOnExit) {
             auto vit = scope.vars.find(name);
             if (vit == scope.vars.end()) continue;
             auto* tv = builder->CreateLoad(i8PtrType, vit->second, name + ".task.detach");
             builder->CreateCall(runtimeFuncs["dragon_vthread_detach"], {tv});
         }
-        // docs/002 ADR 2.10: bare Lock locals - the scope owns the mutex, so
-        // destroy it here. Null-gated: `del lk` already destroyed it and
-        // nulled the slot, so the deleted case is a provably-dead branch, not
-        // a runtime drop flag (E9-at-join forbids path-dependent consumption).
+        // ADR 2.10: the scope owns a bare Lock local's mutex - destroy it here.
+        // Null-gated: `del lk` already nulled the slot, so that path is provably dead, not a runtime drop flag.
         for (const auto& name : scope.lockDestroyOnExit) {
             auto vit = scope.vars.find(name);
             if (vit == scope.vars.end()) continue;
@@ -1467,15 +1312,8 @@ void CodeGen::Impl::emitScopeCleanupFor(Scope& scope) {
             builder->CreateBr(contBB);
             builder->SetInsertPoint(contBB);
         }
-        // Unwind cleanup: this scope's owned heap locals were just decref'd on
-        // the NORMAL exit path, so rewind the cleanup stack to the depth captured
-        // at the scope's first push. This is what makes break/continue/return and
-        // loop-iteration exits safe - they all route through emitScopeCleanupFor,
-        // so a later sibling exception cannot re-free these (already-freed) slots.
-        // Gated on base >= 0: the base sentinel is -1 unless a push actually
-        // happened this scope-instance (the push is itself gated on a live
-        // frame), so a no-exception-handler scope pays nothing. Re-init to -1 so
-        // the next loop iteration starts fresh.
+        // Unwind cleanup: rewind the cleanup stack to the pre-push depth now that
+        // heap locals are decref'd, so a later sibling exception can't re-free these slots (safe across break/continue/return). Gated on base >= 0.
         if (scope.cleanupBaseAlloca) {
             auto* i32Ty = llvm::Type::getInt32Ty(*context);
             auto* func = currentFunction;

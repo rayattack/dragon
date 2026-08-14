@@ -1,9 +1,5 @@
-/// Dragon CodeGen - shared class-emission AST builders
-///
-/// cloneTypeExpr / makeSelfAssign are used by BOTH the class declaration
-/// emitter (Classes.cpp) and the @dataclass / NamedTuple / Enum synthesis
-/// (ClassSynthesis.cpp). `inline` so both TUs can include this without an
-/// ODR clash. Pure code motion from Classes.cpp - no behavior change.
+/// cloneTypeExpr / makeSelfAssign, shared by Classes.cpp and the @dataclass/
+/// NamedTuple/Enum synthesis (ClassSynthesis.cpp); `inline` to avoid an ODR clash.
 #ifndef DRAGON_CODEGEN_CLASSES_SHARED_H
 #define DRAGON_CODEGEN_CLASSES_SHARED_H
 

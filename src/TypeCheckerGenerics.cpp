@@ -430,10 +430,8 @@ std::shared_ptr<Type> TypeChecker::instantiateGenericClass(
         auto& tp = decl->typeParams[i];
         if (tp.bound && args[i] && args[i]->kind() != Type::Kind::TypeVar) {
             auto boundType = resolveType(tp.bound.get());
-            // ADR 054 - a CONTRACT bound checks structurally at stamp time:
-            // no cast and no promise needed, because no contract-typed value
-            // ever exists inside the monomorphized body (every call is a
-            // direct call on the concrete T).
+            // ADR 054 - a CONTRACT bound checks structurally at stamp time: no cast or
+            // promise needed, since no contract-typed value exists inside the monomorphized body.
             if (boundType && boundType->kind() == Type::Kind::Contract &&
                 args[i]->kind() == Type::Kind::Instance) {
                 auto& ct = static_cast<ContractType&>(*boundType);
@@ -518,9 +516,8 @@ bool TypeChecker::tryInstantiateGenericCall(
             return inst->classType;
         return nullptr;
     };
-    // Find generic method `m` on `cls`, walking the MRO so an inherited one resolves
-    // to its declaring class (whose body the stamp is appended to). Identity-first:
-    // the decl-keyed registry never collides across same-named classes.
+    // Find generic method `m` on `cls`, walking the MRO to its declaring class
+    // (whose body the stamp is appended to); identity-first so same-named classes never collide.
     auto findGenericMethod = [&](std::shared_ptr<ClassType> cls, const std::string& m,
                                  std::string& declClass,
                                  std::shared_ptr<ClassType>& declCT) -> FunctionDecl* {
@@ -555,12 +552,8 @@ bool TypeChecker::tryInstantiateGenericCall(
     if (auto* nm = dynamic_cast<NameExpr*>(node.callee.get())) {
         auto it = impl_->genericFunctions.find(nm->name);
         if (it != impl_->genericFunctions.end()) {
-            // genericFunctions is name-keyed and program-global, so a stdlib
-            // generic (e.g. json.decode[T]) must not hijack a same-named function
-            // a package actually imported. If the name is bound in THIS scope to a
-            // concrete (non-generic) function, that binding wins - defer to normal
-            // dispatch. Only take the global generic when the in-scope binding is
-            // itself generic, or the name isn't otherwise bound here.
+            // genericFunctions is name-keyed and program-global, so a stdlib generic (e.g.
+            // json.decode[T]) must not hijack an imported same-named concrete function; only take it when nothing concrete is bound here.
             bool concreteInScope = false;
             if (auto inScope = impl_->lookup(nm->name))
                 if (auto ft = std::dynamic_pointer_cast<FunctionType>(inScope)) {
@@ -718,10 +711,8 @@ bool TypeChecker::tryInstantiateGenericCall(
         auto arg = bit->second;
         if (arg->kind() == Type::Kind::TypeVar) continue;  // still abstract
         auto boundType = resolveType(tp.bound.get());
-        // ADR 054 - a CONTRACT bound checks structurally at stamp time: no
-        // cast and no promise needed, because no contract-typed value ever
-        // exists inside the monomorphized body (every call is direct on the
-        // concrete T).
+        // ADR 054 - a CONTRACT bound checks structurally at stamp time: no cast or
+        // promise needed, since no contract-typed value exists inside the monomorphized body.
         if (boundType && boundType->kind() == Type::Kind::Contract &&
             arg->kind() == Type::Kind::Instance) {
             auto& ct = static_cast<ContractType&>(*boundType);
@@ -1196,9 +1187,7 @@ void TypeChecker::runMonomorphization() {
 
         if (isMethodReq) {
             // Append the stamp into its owning class body and re-type-check it with
-            // self/currentClass bound (else self.X and implicit self would be untyped).
-            // Identity-first: req.ownerCT->decl IS the owning class; the by-name
-            // registry (first-wins across deps) is only the legacy fallback.
+            // self/currentClass bound; identity-first via req.ownerCT->decl, the by-name registry is only a legacy fallback.
             ClassDecl* ownerDecl =
                 req.ownerCT ? req.ownerCT->decl : nullptr;
             if (!ownerDecl) {
@@ -1513,9 +1502,8 @@ std::string sdScalarKindName(Type::Kind k) {
         default: return "";
     }
 }
-// One-call delegation body for the boxed tier: fn(body: bytes) -> retTy
-// { return <target>(body) }. The target is a private json.dr function; the
-// stamp's genericHomeModule (json) resolves the bare name at lowering.
+// One-call delegation body for the boxed tier: fn(body: bytes) -> retTy { return
+// <target>(body) }. Target is a private json.dr function; genericHomeModule resolves the bare name at lowering.
 std::unique_ptr<FunctionDecl> sdBoxedDelegateFn(const std::string& target,
                                                 std::unique_ptr<TypeExpr> retTy,
                                                 SourceLocation loc) {
@@ -1557,11 +1545,8 @@ std::unique_ptr<FunctionDecl> sdCursorFn(SourceLocation loc) {
 
 std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
     const std::shared_ptr<Type>& targetType, SourceLocation loc) {
-    // D048 - the boxed tier's generic door. A spelled-out Any (bare, list
-    // element, or dict[str, _] value) opts into the boxed tree; the stamps
-    // delegate to the ONE _JsonParser entry in json.dr. The gates are literal
-    // Any types only: a concrete T either synthesizes box-free below or
-    // errors - it never falls back to a boxed stamp.
+    // D048 - the boxed tier's generic door: a spelled-out Any opts into the boxed
+    // tree via the ONE _JsonParser entry; a concrete T either synthesizes box-free or errors, never silently falls back to boxed.
     if (targetType && targetType->kind() == Type::Kind::Any)
         return sdBoxedDelegateFn("loadb", sdType("Any", loc), loc);
     // D052 - top-level scalar: one Cursor read is the whole document
@@ -1702,9 +1687,8 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
         return nullptr;
     }
 
-    // kind: scalar ("int"/"str"/"bool"/"float"), "list:<elem>", "class:<Name>",
-    // or "opt:<ik>" for Optional[<ik>]. `optional` means "no seen-check" (absent
-    // is allowed) - true for opt-null fields and for literal-default fields.
+    // kind: scalar, "list:<elem>", "class:<Name>", or "opt:<ik>" for Optional[<ik>].
+    // `optional` means no seen-check (absent allowed): true for opt-null and literal-default fields.
     struct Field { std::string name; std::string kind; bool optional; std::unique_ptr<Expr> dflt; };
     std::vector<Field> fields;
     for (auto& p : ctor->params) {

@@ -14,23 +14,8 @@ struct DADiagnostic {
     std::string message;
 };
 
-/// Definite-assignment (use-before-assignment) analysis.
-///
-/// Dragon variables are introduced by `x: T` (declaration) and may be left
-/// without an initializer. Reading such a variable on a code path where it has
-/// not yet been assigned is a compile error - this pass enforces that promise
-/// (documented in `100-variables.md`). It is a structured forward "must"
-/// dataflow over the AST: a no-initializer local is *tracked* and may only be
-/// read once it is *definitely assigned* on every path that reaches the read.
-///
-/// Only function/method/module-body **locals** are tracked. Parameters,
-/// `global`/`nonlocal` names, imported names, loop/with/except targets, walrus
-/// bindings and any name that resolves outside the current callable are treated
-/// as always-assigned (cross-procedure flow is not modeled - that residue is
-/// covered by safe zero-init of heap-typed fields in CodeGen).
-///
-/// Runs after Sema (names already resolved); it builds its own scope tracking
-/// and does not depend on Sema's symbol table.
+/// Use-before-assignment analysis (100-variables.md): forward "must" dataflow;
+/// a no-initializer local may read only once assigned on every path. Locals only.
 class DefiniteAssignment {
 public:
     DefiniteAssignment();
@@ -53,3 +38,4 @@ private:
 } // namespace dragon
 
 #endif // DRAGON_DEFINITE_ASSIGNMENT_H
+
