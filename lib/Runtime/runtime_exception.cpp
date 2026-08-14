@@ -3,25 +3,11 @@
 
 extern "C" {
 
-//===----------------------------------------------------------------------===//
-// Exception Handling
-//===----------------------------------------------------------------------===//
-
 void dragon_raise_exc(int64_t type, const char* msg);
 void dragon_raise_exc_cstr(int64_t type, const char* msg);
 
-/// Raise an exception
-void dragon_raise(const char* type, const char* message) {
-    fprintf(stderr, "%s: %s\n", type, message);
-    exit(1);
-}
-
-/// Assert - raises a catchable AssertionError (Python parity). Previously
-/// printed and exit(1)'d, which made `assert` the only raise-like construct
-/// a `try` could not observe.
-/// The user-supplied message comes from codegen and may be a heap
-/// DragonString (assert cond, some_str) - route it through the probing
-/// raise; only the fallback literal takes the cstr path.
+/// Assert: raises a catchable AssertionError (Python parity) instead of exit(1).
+/// Message may be a heap DragonString from codegen; only the fallback literal uses the cstr path.
 void dragon_assert(int64_t condition, const char* message) {
     if (!condition) {
         if (message) dragon_raise_exc(24, message);
@@ -34,14 +20,8 @@ void dragon_assert_no_msg(int64_t condition) {
     dragon_assert(condition, nullptr);
 }
 
-//===----------------------------------------------------------------------===//
-// setjmp/longjmp Exception Machinery
-//===----------------------------------------------------------------------===//
-
-// The exception context the machinery reads/writes: a running generator's own
-// isolated context (__dragon_exc_vt) takes precedence over the green-thread
-// context (__current_vthread); when both are NULL the TLS globals are used.
-// See __dragon_exc_vt's comment in runtime_internal.h.
+// Exception context: a generator's own context (__dragon_exc_vt) wins over the
+// green-thread context (__current_vthread); else TLS globals. See runtime_internal.h.
 #define EXC_VT (__dragon_exc_vt ? __dragon_exc_vt : __current_vthread)
 
 
@@ -102,31 +82,16 @@ const char* dragon_exc_get_msg() {
     return __dragon_exc_msg;
 }
 
-/// Get current exception instance (NULL when the raise carried only a message).
-/// Codegen for `except X as e` reads this and, when non-NULL and `X` is the
-/// instance's class (or an ancestor), binds `e` to the instance pointer so
-/// typed fields (e.g. HTTPError.code, URLError.reason) survive unwinding.
+/// Get current exception instance (NULL if the raise carried only a message).
+/// `except X as e` binds `e` to this when X matches, so typed fields (e.g. HTTPError.code) survive unwinding.
 void* dragon_exc_get_obj() {
     if (EXC_VT)
         return EXC_VT->exc_obj;
     return __dragon_exc_obj;
 }
 
-//===----------------------------------------------------------------------===//
-// Exception-message ownership
-//
-// The exc_msg slot OWNS any mortal heap DragonString it holds. A plain raise
-// stores a BORROWED message via dragon_exc_msg_preserve (mortal heap strings
-// are dup'd; rodata C-string literals and interned immortals pass through
-// unchanged). The _consume raise variants take an owned +1 from codegen
-// (concat / str() / f-string temporaries), avoiding the dup. Every overwrite
-// releases the previous slot value - dragon_decref_str's NULL / literal /
-// immortal guards make that release universally safe, so no ownership flag
-// is needed. Before this, the slot borrowed raw pointers and never released
-// anything: every raise with a dynamic message leaked it, and the unwind
-// alias-skip (`keep_msg`) existed only to keep borrowed locals alive by
-// leaking them too.
-//===----------------------------------------------------------------------===//
+// exc_msg OWNS any mortal-heap DragonString: plain raises dup it, _consume raises take codegen's +1.
+// Before this fix the slot only borrowed pointers, leaking every raise with a dynamic message.
 
 static void dragon_exc_msg_set(const char* msg, int consume) {
     const char** slot = EXC_VT ? &EXC_VT->exc_msg
@@ -142,11 +107,8 @@ static void dragon_exc_msg_set(const char* msg, int consume) {
     dragon_decref_str_dispatch(old);
 }
 
-/// Bind the in-flight message for an `except ... as e` handler local. The
-/// binding takes its OWN +1 (mortal heap msgs only; literal/immortal are
-/// no-ops) so a nested raise inside the handler - which overwrites and
-/// releases the slot - cannot leave `e` dangling. The handler's scope
-/// cleanup decrefs the binding.
+/// Bind the in-flight message for `except ... as e`: takes its own +1 (no-op for literal/immortal)
+/// so a nested raise in the handler can't leave `e` dangling. Handler scope cleanup decrefs it.
 const char* dragon_exc_bind_msg(void) {
     const char* m = EXC_VT ? EXC_VT->exc_msg
                                       : __dragon_exc_msg;
@@ -154,22 +116,8 @@ const char* dragon_exc_bind_msg(void) {
     return m;
 }
 
-//===----------------------------------------------------------------------===//
-// Exception-instance ownership (mirrors the exc_msg block above)
-//
-// The exc_obj slot OWNS the +1 the raise site transfers into it. Every
-// overwrite releases the previous instance; a matching `except X as e`
-// handler binds via dragon_exc_bind_obj (its OWN +1, released by the
-// handler's scope / unwind cleanup), and the slot's ref is released by the
-// NEXT raise's overwrite (or by dragon_vthread_log_uncaught). At most one
-// caught instance is retained per exception context between raises - a
-// bounded root, not growth. A bare pointer store with an implicit "the
-// handler will take it" contract is not enough: only the bound user-class
-// handler shape fulfills it, while `except AppError { }` (no `as`) and
-// builtin-typed handlers leak the instance and its fields on every raise,
-// and a second raise overwrites the slot without releasing the first
-// (pinned by test_rc_exc_instance.dr).
-//===----------------------------------------------------------------------===//
+// exc_obj OWNS the +1 transferred at raise; `except X as e` binds via its own +1, and each
+// overwrite releases the previous instance (pinned by test_rc_exc_instance.dr against a prior leak).
 
 static void dragon_exc_obj_set(void* obj, int consume) {
     void** slot = EXC_VT ? &EXC_VT->exc_obj : &__dragon_exc_obj;
@@ -185,19 +133,16 @@ static void dragon_exc_obj_set(void* obj, int consume) {
     if (old) dragon_decref(old);
 }
 
-/// Bind the in-flight instance for an `except X as e` handler local. The
-/// binding takes its OWN +1 so a nested raise inside the handler - which
-/// overwrites and releases the slot - cannot leave `e` dangling. The
-/// handler's scope / unwind cleanup decrefs the binding. NULL-safe
+/// Bind the in-flight instance for `except X as e`: takes its own +1 so a nested raise in the
+/// handler can't leave `e` dangling. Handler scope/unwind cleanup decrefs it. NULL-safe.
 void* dragon_exc_bind_obj(void) {
     void* o = EXC_VT ? EXC_VT->exc_obj : __dragon_exc_obj;
     dragon_incref(o);
     return o;
 }
 
-/// NULL-safe retain for an instance a deferred re-raise saved BEFORE running
-/// a finally body: the consume re-raise transfers this hold back into the
-/// slot (mirrors dragon_exc_bind_msg's retain-at-save discipline).
+/// NULL-safe retain for an instance saved before a `finally` body runs; the deferred re-raise
+/// transfers this hold back into the slot (mirrors dragon_exc_bind_msg's retain-at-save).
 void* dragon_exc_retain_obj(void* o) {
     dragon_incref(o);
     return o;
@@ -206,11 +151,8 @@ void* dragon_exc_retain_obj(void* o) {
 static void dragon_raise_exc_impl(int64_t type, void* obj, const char* msg,
                                   int consume) {
     dragon_exc_msg_set(msg, consume);
-    // The obj is ALWAYS a +1 transfer into the slot (fresh construction,
-    // retained saves) or NULL. Borrowed-instance raise sites (raise of a
-    // bound local, the with-statement re-raise) retain first via
-    // dragon_exc_retain_obj, turning themselves into transfers; the
-    // same-pointer fold in dragon_exc_obj_set keeps re-raises balanced.
+    // obj is always a +1 transfer or NULL; borrowed-instance sites retain first via
+    // dragon_exc_retain_obj so the same-pointer fold in dragon_exc_obj_set keeps re-raises balanced.
     dragon_exc_obj_set(obj, /*consume=*/1);
     if (EXC_VT) {
         EXC_VT->exc_type = (int)type;
@@ -232,9 +174,8 @@ static void dragon_raise_exc_impl(int64_t type, void* obj, const char* msg,
     exit(1);
 }
 
-/// Raise an exception with integer type code. `msg` is borrowed (the slot
-/// stores a protective dup of mortal heap strings).
-/// NB: clears any stale exc_obj - built-in raises don't carry an instance.
+/// Raise with an integer type code. `msg` is borrowed (slot dups mortal heap strings).
+/// Clears any stale exc_obj: built-in raises carry no instance.
 void dragon_raise_exc(int64_t type, const char* msg) {
     dragon_raise_exc_impl(type, NULL, msg, 0);
 }
@@ -245,51 +186,32 @@ void dragon_raise_exc_consume(int64_t type, const char* msg) {
     dragon_raise_exc_impl(type, NULL, msg, 1);
 }
 
-/// Raise with a raw C string message (see runtime_internal.h). Copies the
-/// message into a fresh heap DragonString and transfers that +1 into the
-/// slot, so the slot never holds a raw C pointer. Raises are cold paths -
-/// the copy is noise next to the longjmp + handler dispatch.
+/// Raise with a raw C string message: copies it into a fresh heap DragonString and transfers
+/// that +1 into the slot, so the slot never holds a raw C pointer. Raises are cold, so the copy is noise.
 void dragon_raise_exc_cstr(int64_t type, const char* msg) {
     dragon_raise_exc_impl(type, NULL, msg ? dragon_string_dup_cstr(msg) : NULL, 1);
 }
 
-/// Raise MemoryError WITHOUT allocating - the only raise entry that may
-/// claim that. _cstr dups its message through dragon_xmalloc, so an OOM
-/// raise routed there re-enters the failing allocator and recurses to stack
-/// death (A/B-proven 3700-frame SIGSEGV; pinned by oom_sustained.dr). The
-/// rodata literal is classified by the image range gate: stored borrowed,
-/// never dup'd, skipped by refcount ops.
+/// Raise MemoryError WITHOUT allocating: routing through _cstr's dragon_xmalloc dup would re-enter
+/// the failing allocator and stack-overflow (A/B-proven 3700-frame SIGSEGV; pinned by oom_sustained.dr).
 void dragon_raise_oom(void) {
     dragon_raise_exc_impl(43, NULL, "MemoryError: out of memory", 0);
 }
 
-/// Raise a typed-field exception with an attached user-class instance.
-/// `obj` TRANSFERS a +1 into the owning exc_obj slot (a fresh construction's
-/// ref, or an explicit dragon_exc_retain_obj hold for borrowed-instance and
-/// slot re-raise sites; the same-pointer fold keeps re-raises balanced).
-/// A matching `except X as e` handler binds via dragon_exc_bind_obj (its own
-/// +1); the slot's ref is released by the next overwrite or the uncaught
-/// path. `msg` is the best-effort string rendering (e.g. the user's reason
-/// field) so handlers that only read the message string still work.
+/// Raise a typed exception with an attached user-class instance: `obj` transfers a +1 into
+/// exc_obj (released on the next overwrite or uncaught path); `msg` is a best-effort string rendering.
 void dragon_raise_exc_obj(int64_t type, void* obj, const char* msg) {
     dragon_raise_exc_impl(type, obj, msg, 0);
 }
 
-/// Obj-raise consuming an owned +1 message - used by the deferred re-raise
-/// after `finally`, whose saved message AND instance were retained at record
-/// time (both holds transfer back into the slots here).
+/// Obj-raise consuming an owned +1 message; used by the deferred re-raise after `finally`,
+/// whose saved message and instance were retained at record time.
 void dragon_raise_exc_obj_consume(int64_t type, void* obj, const char* msg) {
     dragon_raise_exc_impl(type, obj, msg, 1);
 }
 
-//===----------------------------------------------------------------------===//
-// Unwind Cleanup Stack
-//===----------------------------------------------------------------------===//
-//
-// Side channel that lets a longjmp-based unwind free the owned heap locals it
-// skips over (see the DragonCleanupStack comment in runtime_internal.h). All
-// entry points are dual-path (per-vthread struct first, TLS fallback) so green
-// threads on the same worker keep independent stacks.
+// Lets a longjmp-based unwind free the owned heap locals it skips over (see DragonCleanupStack
+// in runtime_internal.h). Entry points are dual-path so green threads on a worker keep independent stacks.
 
 static inline DragonCleanupStack* dragon_cleanup_active_stack() {
     return EXC_VT ? &EXC_VT->cleanup : &__dragon_cleanup;
@@ -303,19 +225,16 @@ static inline int dragon_cleanup_active_exc_sp() {
 
 static void dragon_cleanup_grow(DragonCleanupStack* cs) {
     int32_t newcap = cs->cap ? cs->cap * 2 : 64;
-    // Abort (not raise) on OOM: this IS the exception machinery, so raising
-    // would re-enter the unwind mid-failure. xrealloc_or_abort also fixes the
-    // self-assign - on failure it aborts before NULL can land in the field, so
-    // the old buffers stay valid.
+    // Abort (not raise) on OOM: this IS the exception machinery, so raising would re-enter the
+    // unwind mid-failure. xrealloc_or_abort aborts before NULL can land in the field on failure.
     cs->vals  = (int64_t*) dragon_xrealloc_or_abort(cs->vals,  (size_t)newcap * sizeof(int64_t));
     cs->kinds = (int32_t*) dragon_xrealloc_or_abort(cs->kinds, (size_t)newcap * sizeof(int32_t));
     cs->tags  = (int32_t*) dragon_xrealloc_or_abort(cs->tags,  (size_t)newcap * sizeof(int32_t));
     cs->cap = newcap;
 }
 
-/// Register an owned heap local for unwind cleanup. Returns the slot index so
-/// codegen can target it on reassignment (dragon_cleanup_update). UNGATED: only
-/// emitted by codegen for owned heap kinds, so a hot numeric loop never calls it.
+/// Register an owned heap local for unwind cleanup; returns the slot index for later
+/// dragon_cleanup_update. Only emitted by codegen for owned heap kinds, never a hot numeric loop.
 int32_t dragon_cleanup_push(int64_t val, int32_t kind, int32_t tag) {
     DragonCleanupStack* cs = dragon_cleanup_active_stack();
     if (cs->sp >= cs->cap) dragon_cleanup_grow(cs);
@@ -327,9 +246,8 @@ int32_t dragon_cleanup_push(int64_t val, int32_t kind, int32_t tag) {
     return slot;
 }
 
-/// Refresh a registered local's snapshot after reassignment so the unwind frees
-/// the CURRENT value (the old one was already decref'd by storeWithRCOverwrite).
-/// slot < 0 means the local was never pushed (no live frame) - no-op.
+/// Refresh a registered local's snapshot after reassignment so unwind frees the CURRENT value
+/// (the old one was already decref'd). slot < 0 means never pushed - no-op.
 void dragon_cleanup_update(int32_t slot, int64_t val, int32_t tag) {
     if (slot < 0) return;
     DragonCleanupStack* cs = dragon_cleanup_active_stack();
@@ -345,18 +263,15 @@ int32_t dragon_cleanup_depth(void) {
     return dragon_cleanup_active_stack()->sp;
 }
 
-/// Rewind to `depth` WITHOUT freeing (the codegen-emitted emitScopeCleanupFor
-/// already decref'd these locals on the normal-exit path). Pops the snapshots so
-/// a LATER sibling exception cannot re-free them.
+/// Rewind to `depth` WITHOUT freeing (emitScopeCleanupFor already decref'd these on the normal-exit
+/// path); pops the snapshots so a later sibling exception can't re-free them.
 void dragon_cleanup_reset(int32_t depth) {
     DragonCleanupStack* cs = dragon_cleanup_active_stack();
     if (depth >= 0 && depth <= cs->sp) cs->sp = depth;
 }
 
-/// Free every owned heap local registered since the current top exc frame was
-/// pushed - i.e. the locals a longjmp into that frame skipped over. Mirrors
-/// emitScopeCleanupFor's per-kind dispatch exactly. Called at every longjmp
-/// arrival BEFORE dragon_exc_pop_frame (so it reads the frame's saved depth).
+/// Free every owned heap local registered since the top exc frame was pushed (what a longjmp into
+/// it skipped). Mirrors emitScopeCleanupFor; called at longjmp arrival BEFORE dragon_exc_pop_frame.
 void dragon_exc_cleanup_unwind(void) {
     int sp_exc = dragon_cleanup_active_exc_sp();
     if (sp_exc < 0) return;  // malformed arrival - free nothing rather than guess
@@ -365,14 +280,8 @@ void dragon_exc_cleanup_unwind(void) {
     int32_t target = saved[sp_exc];
     if (target < 0) target = 0;
 
-    // The exc_obj slot now OWNS its own +1 (dragon_exc_obj_set: raise sites
-    // transfer a fresh construction or an explicit dragon_exc_retain_obj
-    // hold), exactly like exc_msg - never an alias of a scope local's ref.
-    // So a local aliasing the in-flight instance is correctly freed right
-    // here. The historical `keep_obj` skip protected the old borrowed-slot
-    // contract; under the owning contract it inverted into a leak: every
-    // `raise <local instance>` unwinding through its frame kept one ref
-    // alive per raise (unbounded in a retry loop).
+    // exc_obj now OWNS its +1, so an aliasing local is freed here safely. The old `keep_obj`
+    // skip (built for the prior borrowed-slot contract) would leak one ref per raise in a retry loop.
 
     while (cs->sp > target) {
         int32_t i = --cs->sp;
@@ -382,10 +291,8 @@ void dragon_exc_cleanup_unwind(void) {
             case DCLEAN_CALLABLE: dragon_decref_callable(p); break;
             case DCLEAN_OBJ:      dragon_decref(p); break;
             case DCLEAN_DEFER_CALL: {
-                // Pending defer: run the thunk over its snapshot values (the
-                // `tag` entries directly below, still on the stack so every
-                // borrowed value is alive). The loop then pops those entries
-                // normally, draining each owned snapshot per its own kind.
+                // Pending defer: run the thunk over its snapshot values (still on the stack, so
+                // every borrowed value is alive); the loop then pops and drains each entry normally.
                 int32_t argc = cs->tags[i];
                 if (argc >= 0 && i >= argc) {
                     void (*thunk)(int64_t*) = (void (*)(int64_t*))p;
@@ -409,19 +316,8 @@ void dragon_exc_cleanup_unwind(void) {
     cs->sp = target;
 }
 
-//===----------------------------------------------------------------------===//
-// VThread Top-Frame Containment
-//===----------------------------------------------------------------------===//
-//
-// Each codegen-emitted fire trampoline pushes a top-level setjmp frame around
-// the body call. If the body raises and no inner handler catches, dragon_raise_exc
-// longjmps to the trampoline frame. The trampoline then calls this helper to
-// log + clear the exception, sets result=0, atomically decrefs args, and returns
-// cleanly so mco_resume returns and the worker marks the vthread done.
-//
-// Without this containment, an unhandled raise inside `fire f()` would call
-// exit(1) and kill the entire process - including the parent thread's accept
-// loop / scheduler / other vthreads.
+// Each fire trampoline pushes a setjmp frame; an uncaught raise inside longjmps here, which logs
+// + clears the exception so the worker marks the vthread done, instead of exit(1) killing the whole process.
 
 static const char* dragon_exc_name_for_code(int code) {
     switch (code) {
@@ -480,10 +376,8 @@ static const char* dragon_exc_name_for_code(int code) {
     }
 }
 
-/// Emitted by codegen at the top of each fire trampoline as the
-/// longjmp-arrival branch. Logs the in-flight exception (vthread struct
-/// preferred, TLS fallback) and clears it so the next vthread on this
-/// worker sees a clean state.
+/// Emitted by codegen as the longjmp-arrival branch atop each fire trampoline. Logs the in-flight
+/// exception (vthread struct preferred, TLS fallback) and clears it for the next vthread.
 void dragon_vthread_log_uncaught() {
     int code = 0;
     const char* msg = NULL;
@@ -506,24 +400,12 @@ void dragon_vthread_log_uncaught() {
     fprintf(stderr, "vthread terminated by uncaught %s: %s\n",
             dragon_exc_name_for_code(code), msg ? msg : "");
     fflush(stderr);
-    // The slot owned the message (dragon_exc_msg_set); release it now that
-    // it's been logged and the slot is cleared.
+    // Slot owned the message (dragon_exc_msg_set); release it now that it's logged and cleared.
     dragon_decref_str_dispatch(msg);
-    // Release the attached exception INSTANCE too. A typed raise
-    // (`raise MyError(...)` -> dragon_raise_exc_obj) carries a +1 that the
-    // unwind cleanup deliberately SKIPS (keep_obj) because a matching
-    // `except ... as e` handler is expected to take it. When the raise is
-    // uncaught in a fired vthread there is no handler, so that +1 lands here -
-    // without this release the instance (and its typed fields) leaks on every
-    // uncaught vthread exception: unbounded RSS on a server whose handler
-    // green-threads can throw. exc_obj is a class instance, freed
-    // with the generic object decref (same as the DCLEAN_OBJ unwind case).
+    // Typed raises carry a +1 that unwind cleanup skips (keep_obj) for a matching handler to take;
+    // uncaught in a fired vthread there's no handler, so release it here or it leaks (unbounded RSS).
     if (obj) dragon_decref_dispatch(obj);
 }
-
-//===----------------------------------------------------------------------===//
-// User-Defined Exception Hierarchy
-//===----------------------------------------------------------------------===//
 
 // Built-in exception ranges: {code, hi} for parent exceptions
 static struct { int64_t code; int64_t hi; } __builtin_exc_ranges[] = {

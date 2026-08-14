@@ -9,9 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-// On Windows, winsock2 must be included BEFORE windows.h (and before any
-// header that might transitively pull in the legacy winsock.h, including
-// MinGW's <unistd.h>). Including it up front pins the v2 API.
+// winsock2 must be included before windows.h (and before MinGW's <unistd.h>) to pin the v2 API.
 #ifdef _WIN32
   #ifndef WIN32_LEAN_AND_MEAN
     #define WIN32_LEAN_AND_MEAN
@@ -31,25 +29,14 @@
   #include <errno.h>
   #define dragon_sock_errno() errno
 #endif
-// Windows MinGW ships winpthreads, so <pthread.h> works on all platforms we
-// support. unistd.h is also provided by MinGW for the small subset of POSIX
-// calls we use (close, read, write, pipe, getpid). MSVC is not a target.
+// MinGW ships winpthreads (pthread.h) and unistd.h for the POSIX subset we use; MSVC is not a target.
 #include <pthread.h>
 #include <unistd.h>
 // Atomics: use __atomic_* builtins only. Do NOT include <stdatomic.h>; it is a
 // C11 header that GCC < 13 rejects in C++ TUs (breaks the ubuntu-22.04 CI).
 
-// minicoro - declarations only (MINICORO_IMPL defined in runtime_concurrency.cpp).
-// MCO_USE_VMEM_ALLOCATOR makes every green-thread stack a virtual-memory
-// (mmap / VirtualAlloc) region of ~2 MB instead of a 56 KB calloc'd heap block.
-// Two wins: (1) lazily-committed pages mean the 2 MB costs ~0 physical memory
-// until actually used, and (2) overflowing the stack runs into the unmapped
-// pages just past the region and faults (SIGSEGV) instead of silently
-// corrupting adjacent heap objects' refcount headers - the latter was an
-// exploitable memory-safety hole (a deep/large-frame fired handler could smash
-// a neighbouring object). This is the same guarded-stack model pthread uses for
-// OS threads. MUST be defined before EVERY include of minicoro.h (it changes
-// MCO_DEFAULT_STACK_SIZE and the allocator), hence here in the shared header.
+// minicoro decls only (MINICORO_IMPL in runtime_concurrency.cpp). VMEM allocator guards each
+// green-thread's ~2MB stack so overflow faults instead of corrupting a neighbour's refcount header (was exploitable). Must precede every minicoro.h include.
 #ifndef MCO_USE_VMEM_ALLOCATOR
 #define MCO_USE_VMEM_ALLOCATOR
 #endif
@@ -58,10 +45,6 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-//===----------------------------------------------------------------------===//
-// GC Object Header (Decision 018 - Reference Counting)
-//===----------------------------------------------------------------------===//
 
 typedef struct {
     int64_t  refcount;       // 8 bytes (offset 0)
@@ -74,20 +57,11 @@ typedef struct {
 // GC flag constants
 #define GC_FLAG_TRACKED   0x01
 #define GC_FLAG_REACHABLE 0x02
-// Set on objects that have escaped to another OS thread (via fire/thread or
-// reachable from a SHARED parent). When set, dragon_incref/decref route to the
-// atomic variants; when clear, they use the plain non-atomic fast path. The
-// bit lives in the same cache line as `refcount` (offset 0-15), so the check
-// is essentially free for non-shared objects.
+// Set on objects that escaped to another OS thread (via fire/thread or a SHARED parent); gates
+// dragon_incref/decref to the atomic variants. Lives in refcount's cache line so the check is free.
 #define GC_FLAG_SHARED    0x04
-// Set by the cycle collector on every object queued into `to_free` after
-// trial-deletion identifies it as unreachable. Cleared implicitly when the
-// object's storage is freed (next allocation re-inits via dragon_obj_init).
-// Mutator decref paths use this bit (not bare `gc_collecting`) so that ONLY
-// objects the collector owns the dealloc of are skipped - concurrent decrefs
-// on reachable / untracked / never-collected objects still free eagerly,
-// which is what keeps gc_tracked from bloating with refcount-0 orphans
-// (the cause of an O(N^2) GC slowdown under multi-threaded allocation).
+// Set by the cycle collector on objects queued into `to_free` after trial-deletion; cleared
+// implicitly on next dragon_obj_init. Mutator decref checks this (not bare gc_collecting) so only collector-owned objects are skipped, keeping gc_tracked from bloating with refcount-0 orphans (was an O(N^2) GC slowdown under multi-threaded allocation).
 #define GC_FLAG_IN_TO_FREE 0x08
 #define GC_FLAG_HEAP_OBJ  0x80
 
@@ -97,14 +71,8 @@ static inline bool dragon_is_immortal(void* obj) {
     return obj && ((DragonObjectHeader*)obj)->refcount >= DRAGON_IMMORTAL_REFCOUNT;
 }
 
-// Header fields read by plain refcount paths while another thread may be
-// writing them atomically (mark-shared's fetch_or on gc_flags; atomic
-// refcount ops on refcount). A RELAXED atomic load emits the same single
-// load instruction on x86-64 and AArch64 as the plain read, but stops the
-// compiler from tearing, caching, or reordering it - the plain reads were
-// formally data races. Ordering beyond that is provided by the protocol:
-// objects are marked SHARED (deep walk) before being published to another
-// thread; the lazy SHARED-set inside the *_atomic entry points is a backstop.
+// Header fields another thread may write atomically (mark-shared's fetch_or on gc_flags; atomic
+// refcount ops). RELAXED load emits the same instruction as a plain read but isn't a data race; ordering comes from the protocol (SHARED-marked before publishing to another thread).
 static inline uint8_t dragon_gc_flags_load(const DragonObjectHeader* h) {
     return __atomic_load_n(&h->gc_flags, __ATOMIC_RELAXED);
 }
@@ -137,65 +105,24 @@ static inline void dragon_obj_init(DragonObjectHeader* h, uint8_t tag) {
     h->gc_track_idx = -1;
 }
 
-// Value type tags for dict entries and container elements
-enum DragonValueTag : int8_t {
-    TAG_INT = 0,
-    TAG_STR = 1,
-    TAG_FLOAT = 2,
-    TAG_BOOL = 3,
-    TAG_NONE = 4,
-    TAG_LIST = 5,
-    TAG_DICT = 6,
-    TAG_BYTES = 7,
-};
+// Value tags for dict entries and container elements: shared with codegen via
+// include/dragon/ValueTags.h (single source of truth for the tag ABI).
+#include "dragon/ValueTags.h"
+static_assert(TAG_CALLABLE == (int8_t)DRAGON_TAG_CLOSURE,
+              "value-tag slot 10 must stay aligned with the closure object tag");
 
-// A container element's value-tag is "traceable" iff it points at a heap object
-// the cycle collector must follow to find cycles: list, dict, bytes, or a
-// Callable slot (DRAGON_TAG_CLOSURE = 10). A Callable element may be a real
-// DragonClosure whose env can point back at the container (a genuine cycle)
-// or a bare fn pointer with no header; including tag 10 here is
-// safe because the traverse visit fns only dereference children found in the
-// tracked set, so a bare fn ptr is a hash-miss no-op. Class instances / sets /
-// tuples stored as elements are stamped TAG_LIST=5 by codegen; str=1 and the
-// scalar tags 0/2/3/4 are leaves the collector never follows.
-// SINGLE SOURCE OF TRUTH shared by the container traverse functions AND the
-// acyclic-skip allocation/insert gates, so the two cannot diverge - a gate that
-// skipped tracking something the traverse follows would leak a live cycle.
-// (The divergence is not hypothetical: if the traverse fns have explicit
-// closure arms while the dict/tuple insert gates use this predicate without
-// tag 10, a dict/tuple whose only heap values are closures is never enrolled
-// and closure cycles through them are never collected.)
+// A value-tag is "traceable" iff the cycle collector must follow it: list, dict, bytes, or
+// Callable (tag 10; a bare fn ptr is a safe hash-miss no-op). Single source of truth shared by the traverse fns and the acyclic-skip allocation gates so they can't diverge (a gap here once meant closure-only dicts/tuples were never enrolled and their cycles never collected).
 static inline bool dragon_value_tag_is_traceable(int8_t tag) {
     return tag == TAG_LIST || tag == TAG_DICT || tag == TAG_BYTES ||
            tag == (int8_t)DRAGON_TAG_CLOSURE;
 }
 
-//===----------------------------------------------------------------------===//
-// Exception stack constants
-//===----------------------------------------------------------------------===//
-
 #define DRAGON_EXC_STACK_SIZE 32
 #define DRAGON_EXC_MAX_USER 256
 
-//===----------------------------------------------------------------------===//
-// Exception-unwind cleanup stack
-//===----------------------------------------------------------------------===//
-//
-// setjmp/longjmp unwinding restores the C stack pointer directly, bypassing the
-// codegen-emitted scope cleanup (emitScopeCleanupFor) that decrefs owned heap
-// locals at NORMAL exits. Without a side channel, every owned heap local (str,
-// closure, container, instance, cell, union) in a frame the longjmp skips over
-// LEAKS its reference.
-//
-// This stack is that side channel: codegen pushes a {value, kind, tag} snapshot
-// for each owned heap local as it is declared, UPDATEs it on reassignment, and
-// rewinds the stack pointer at normal scope exit (where the codegen decref
-// already ran). Each try-frame records the cleanup depth at push; on longjmp
-// arrival the dispatch frees everything above that depth (the leaked locals),
-// mirroring emitScopeCleanupFor exactly. It is per-context (per-OS-thread TLS +
-// per-vthread) because interleaved green threads on one worker would otherwise
-// corrupt a shared LIFO. Grown lazily (cap=0 until first push) so a context
-// that never declares an owned heap local inside a try costs zero memory.
+// Side channel for longjmp unwinding, which skips codegen's scope-cleanup decrefs and would
+// otherwise leak owned heap locals. Codegen pushes/updates a snapshot per local; per-context (TLS + per-vthread) since interleaved green threads would corrupt a shared LIFO.
 typedef struct DragonCleanupStack {
     int64_t* vals;   // snapshot of the owned heap pointer (i64-shaped)
     int32_t* kinds;  // DragonCleanupKind - which decref to call on unwind
@@ -204,21 +131,15 @@ typedef struct DragonCleanupStack {
     int32_t  cap;    // allocated capacity
 } DragonCleanupStack;
 
-// How to release a cleanup entry on unwind - mirrors emitScopeCleanupFor's
-// per-VarKind dispatch. Kept distinct from DragonValueTag/DragonTypeTag so the
-// codegen→runtime contract is explicit.
+// How to release a cleanup entry on unwind, mirrors emitScopeCleanupFor's per-VarKind dispatch.
+// Kept distinct from DragonValueTag/DragonTypeTag so the codegen/runtime contract is explicit.
 enum DragonCleanupKind {
     DCLEAN_STR      = 1,  // dragon_decref_str(val)
     DCLEAN_CALLABLE = 2,  // dragon_decref_callable(val)  (tag-gated: no-ops on bare fn ptr)
     DCLEAN_OBJ      = 3,  // dragon_decref(val)           (containers, instances, cells, deque, file)
     DCLEAN_UNION    = 4,  // tag-conditional, using the entry's `tag` (mirrors emitUnionDecref)
-    // A pending `defer` call (defer.md): val is a codegen-built thunk
-    // `void(*)(int64_t*)`, tag is its snapshot-arg count. The `tag` entries
-    // pushed directly below carry the snapshot VALUES, each with its own
-    // release kind (0 for scalars and own-moved values the callee adopts).
-    // The unwinder calls the thunk over those entries while they are still
-    // on the stack, then keeps popping so they drain per-kind as usual -
-    // defers therefore run before the release of everything they borrow.
+    // Pending `defer` call (defer.md): val is a codegen thunk `void(*)(int64_t*)`, tag is its
+    // snapshot-arg count; those entries carry the snapshot values and drain per-kind so defers run before the borrowed values release.
     DCLEAN_DEFER_CALL = 5,
 };
 
@@ -228,32 +149,15 @@ enum VThreadYieldReason {
     YIELD_SLEEP = 2
 };
 
-//===----------------------------------------------------------------------===//
-// Struct declarations
-//===----------------------------------------------------------------------===//
-
-/// Dragon string - PEP 393-lite layout.
-///
-/// Storage modes ("kind"):
-///   1 = ASCII / Latin-1 fast path. Each code point fits in one byte.
-///       For pure ASCII (cp <= 0x7F), `data` is also a valid NUL-terminated
-///       UTF-8 / C string, so existing C-FFI sites keep working.
-///   4 = UCS-4. `data` is an array of uint32_t code points (host endian).
-///       Used for any string containing a code point >= 0x80. Not NUL-
-///       terminated as a C string.
-///
-/// `len` is the **code-point count** (Python's `len()`), never byte length.
-/// Byte length of `data` is `len * kind`.
+/// Dragon string, PEP 393-lite layout. kind=1: ASCII/Latin-1, NUL-terminated C string.
+/// kind=4: UCS-4 code points, not NUL-terminated. `len` is code-point count, not byte length (byte len = len*kind).
 typedef struct {
     DragonObjectHeader header;
     int64_t len;          // code-point count
     uint8_t kind;         // 1 or 4
     uint8_t _pad[3];      // pad to 4-byte boundary for `cap`
-    int32_t cap;          // byte capacity of `data` (excl. NUL terminator), for
-                          // amortized in-place append. Packed into the former
-                          // padding → header stays 32 B and `data[]` is
-                          // still 8-byte aligned. A `cap` of 2 GiB is the ceiling
-                          // for the in-place fast path; larger strings fall back.
+    int32_t cap;          // byte capacity of `data` (excl NUL), for amortized append;
+                          // packed into former padding so header stays 32B/8-aligned. 2 GiB cap; larger strings fall back.
     char    data[];       // len * kind bytes; kind=1 NUL-terminated
 } DragonString;
 
@@ -262,25 +166,14 @@ static inline int64_t dragon_str_byte_len(const DragonString* s) {
     return s->len * (int64_t)s->kind;
 }
 
-/// Clamp a byte count to the int32 `cap` field range. Strings larger
-/// than 2 GiB simply never enter the in-place append fast path - `cap` then
-/// understates the true buffer size, which is safe (forces a realloc) but
-/// never overstates it (which would risk an overflow).
+/// Clamp a byte count to the int32 `cap` range. Strings over 2GiB skip the in-place append
+/// fast path; `cap` then understates the buffer (safe: forces realloc) but never overstates it.
 static inline int32_t dragon_cap_clamp(int64_t bytes) {
     return bytes > 0x7fffffff ? (int32_t)0x7fffffff : (int32_t)bytes;
 }
 
-/// Packed-element storage. `elem_size` is the per-element width in bytes -
-/// 1 for `list[bool]` (TAG_BOOL), 8 for everything else. Callers MUST go
-/// through `dragon_list_load` / `dragon_list_store` to read/write so the
-/// dispatch on width is centralized. The legacy `int64_t* data` field name
-/// is kept as a bag of bytes; the actual indexing stride is `elem_size`.
-///
-/// Why packed bool:
-///   `list[bool]` of size N took 8*N bytes; sieve's 1M-element `is_prime`
-///   was 8MB and spilled out of L2. Packing to 1B/elem drops it to 1MB
-///   (fits in L2 on every machine made in the last 15 years), turning the
-///   counting-loop linear scan into a cache-resident hot path.
+/// Packed-element storage. elem_size is 1 for list[bool] (TAG_BOOL), 8 otherwise; callers
+/// MUST use dragon_list_load/store. Bool packing dropped a 1M-element is_prime sieve from 8MB (L2-spilling) to 1MB (L2-resident).
 struct DragonList {
     DragonObjectHeader header;
     void*    data;        // bytes; stride = elem_size
@@ -290,34 +183,15 @@ struct DragonList {
     uint8_t  elem_size;   // 1 (bool) or 8 (int/float/ptr/etc.)
 };
 
-/// Native `Any`/`Union` value: layout matches `%dragon.box = { i64, i64 }` in
-/// LLVM (D039). Passed in two registers (System V ABI for <=16-byte structs).
-/// Single source of truth shared by every TU that takes/returns a box.
+/// Native Any/Union value: layout matches `%dragon.box = {i64,i64}` in LLVM (D039), passed in
+/// two registers (SysV ABI, <=16B structs). Single source of truth for every TU using a box.
 struct DragonBox {
     int64_t tag;
     int64_t payload;
 };
 
-/// D030 Phase 3 - Monomorphized list family.
-///
-/// `DragonList` (above) is the I64 variant: int + bool elements, with bool
-/// 1-byte packing preserved (D028). It will be renamed to DragonListI64 in
-/// Phase 3.D once codegen has migrated.
-///
-/// The two new variants below have IDENTICAL memory layout to DragonList -
-/// same field order, same offsets, same total size. The only difference is
-/// the static type of `data`: `double*` for F64 and `void**` for Ptr. This
-/// lets polymorphic ops (dragon_list_destroy, dragon_list_len, GC traverse)
-/// cast a `DragonList*` to any of these and read header / size / capacity /
-/// elem_tag at the same offsets. Per-element access uses the typed `data`
-/// pointer in each per-type op - no stride math, no bitcast at the call site.
-///
-/// Codegen picks the variant from `list[T]`:
-///   list[int], list[bool]                  → DragonList (I64; bool packs)
-///   list[float]                            → DragonListF64
-///   list[str], list[<container>], list[<class>], list[bytes], etc.
-///                                          → DragonListPtr
-///   list[Any], untyped list                → DragonListBox (Phase 4)
+/// D030 Phase 3: monomorphized list family. DragonList (above) is the I64 variant (int/bool,
+/// packed bool). DragonListF64/Ptr share its exact layout/offsets (only `data`'s static type differs) so polymorphic ops can cast between them; codegen picks by list[T]: int/bool->DragonList, float->F64, heap types->Ptr, Any->DragonListBox.
 
 /// list[float] - native f64 storage, no bitcast at load/store.
 struct DragonListF64 {
@@ -340,14 +214,8 @@ struct DragonListPtr {
     uint8_t  elem_size;   // 8
 };
 
-/// D039 Phase 4: list[Any] - per-element {tag, payload} storage. Dragon's
-/// equivalent of Go's `[]interface{}` / Rust's `Vec<Box<dyn Any>>`. Each
-/// element is a 16-byte box, contiguous; one cache miss per read.
-///
-/// Refcount discipline matches DragonListPtr's Model-B pattern: the list
-/// owns +1 on each refcounted payload (TAG_STR / TAG_LIST / TAG_DICT /
-/// TAG_BYTES / TAG_CLASS). Set/append/destroy own the increment & decrement
-/// accounting; codegen is free to borrow.
+/// D039 Phase 4: list[Any], per-element {tag, payload} 16-byte box storage (Go's []interface{}
+/// analog). List owns +1 on each refcounted payload; set/append/destroy own the RC accounting so codegen is free to borrow.
 struct DragonListBoxElem {
     int64_t tag;
     int64_t payload;
@@ -374,9 +242,8 @@ static inline int64_t dragon_list_load(const struct DragonList* l, int64_t i) {
     return ((const int64_t*)l->data)[i];
 }
 
-/// Write element `i` of a DragonList. For kind=1 we truncate to a byte;
-/// for kind=8 we write the full slot. Caller is responsible for any RC
-/// management on the previous value (this helper is byte-only).
+/// Write element `i` of a DragonList: truncates to a byte for kind=1, writes the full slot
+/// for kind=8. Byte-only; caller handles RC on the previous value.
 static inline void dragon_list_store(struct DragonList* l, int64_t i, int64_t v) {
     if (l->elem_size == 1) ((uint8_t*)l->data)[i] = (uint8_t)(v & 0xFF);
     else ((int64_t*)l->data)[i] = v;
@@ -387,12 +254,8 @@ struct DictEntry {
     const char* key;
     int64_t value;
     int8_t tag;
-    // Lazy-delete tombstone (audit 4.2/4.3). A removed entry is marked dead in
-    // place (key/value cleared) instead of shifting the whole dense array down
-    // and rebuilding the index on every delete - that was O(n) per delete and
-    // O(n^2) for bulk deletion, a real algorithmic DoS. Dead dense slots are
-    // skipped by every full scan and reclaimed lazily by dict_compact. Fits in
-    // the existing 32-byte padding, so no per-entry memory cost.
+    // Lazy-delete tombstone (audit 4.2/4.3): a removed entry is marked dead in place instead of
+    // shifting the dense array (was O(n) per delete, O(n^2) bulk - an algorithmic DoS). Skipped by scans, reclaimed by dict_compact; fits existing padding.
     int8_t dead;
 };
 
@@ -400,20 +263,15 @@ struct DragonDict {
     DragonObjectHeader header;
     DictEntry* entries;
     int64_t* indices;
-    // High-water mark of the dense `entries` array, INCLUDING dead (tombstoned)
-    // slots. New inserts append at `size`; deletes never shrink it (they mark
-    // dead). dict_compact resets it to `used`.
+    // High-water mark of dense `entries`, including dead slots. Inserts append at `size`;
+    // deletes never shrink it (mark dead); dict_compact resets it to `used`.
     int64_t size;
-    // Live entry count (size minus dead slots). This is what len() returns and
-    // what every "count" decision uses. Kept in lockstep with the index table's
-    // live entries.
+    // Live entry count (size minus dead slots); what len() returns.
     int64_t used;
     int64_t capacity;
     int64_t index_size;
-    // 0 = int-keyed (the `key` slot holds an i64 cast to a pointer - NEVER
-    // decref it); 1 = str-keyed (the dict OWNS one DragonString ref per key,
-    // per the codegen contract in Assign.cpp, and must release it on removal/
-    // destroy). Set only by the str setter, so int keys are never touched.
+    // 0 = int-keyed (key is an i64 cast to pointer, never decref); 1 = str-keyed (dict owns
+    // one DragonString ref per key per Assign.cpp's contract, released on removal/destroy).
     uint8_t keys_are_ptr;
 };
 
@@ -444,57 +302,31 @@ typedef struct DragonVThread {
     int         exc_sp;
     int         exc_type;
     const char* exc_msg;
-    // Typed-field exception instance carried alongside type+msg. NULL for
-    // built-in raises (`dragon_raise_exc`); set by `dragon_raise_exc_obj` when
-    // the raise site constructed a user-class instance via its __init__. The
-    // except handler reads it via `dragon_exc_get_obj` to bind `as e` to the
-    // instance (with all typed fields intact) instead of just the message.
+    // Typed exception instance alongside type+msg; NULL for built-in raises, set by
+    // dragon_raise_exc_obj when the raise site constructed a user-class instance. Read by the except handler to bind `as e` to the instance.
     void*       exc_obj;
-    // Per-vthread unwind cleanup stack (see DragonCleanupStack). Mirrors the TLS
-    // __dragon_cleanup so a vthread's owned heap locals are freed when a raise
-    // unwinds its frames. cleanup_saved[i] holds the cleanup depth recorded when
-    // exc frame i was pushed; the longjmp arrival frees back down to it.
+    // Per-vthread unwind cleanup stack (mirrors TLS __dragon_cleanup) so a raise frees a
+    // vthread's owned heap locals. cleanup_saved[i] is the depth at frame i's push; longjmp arrival frees back down to it.
     DragonCleanupStack cleanup;
     int32_t     cleanup_saved[DRAGON_EXC_STACK_SIZE];
-    // Live exception-frame count for this vthread - the scheduler swaps it in/out
-    // of the TLS __dragon_active_frames around mco_resume so the inline cleanup
-    // gate stays correct when the vthread migrates workers across a yield.
+    // Live exception-frame count; the scheduler swaps it with TLS __dragon_active_frames
+    // around mco_resume so the inline cleanup gate stays correct across a worker migration.
     int         active_frames;
     mco_coro*   coro;
     int64_t     result;
     volatile int8_t done;
     volatile int8_t yield_reason;
-    // I/O park handshake (see dragon_io_arm_park / dragon_io_wake /
-    // scheduler worker loop). Resolves the "wakeup armed before the yield
-    // completes" race: without it the reactor could scheduler_enqueue() a
-    // vthread whose coroutine had not yet reached mco_yield (still MCO_RUNNING),
-    // giving a lost wakeup (a worker drops a non-suspended coro) or a
-    // double-enqueue (reactor + the resuming worker both re-queue). States:
-    //   0 PARK_NONE  - not in an I/O/sleep wait (a cooperative yield stays here)
-    //   1 PARK_ARMED - request posted, coro about to / in the middle of yielding
-    //   2 PARK_PARKED- worker confirmed the coro is suspended; reactor may enqueue
-    //   3 PARK_FIRED - reactor fired before the worker parked; worker enqueues
-    // Exactly one of {worker, reactor} wins the ARMED transition, so the vthread
-    // is enqueued exactly once, always after the coroutine is suspended.
+    // I/O park handshake (dragon_io_arm_park/wake): resolves a lost-wakeup/double-enqueue race
+    // between the reactor and worker. States: 0 NONE, 1 ARMED, 2 PARKED (reactor may enqueue), 3 FIRED (worker enqueues); exactly one side wins the ARMED transition.
     volatile int32_t park_state;
-    // Set by the I/O reactor to 1 when a deadline-bearing fd watch fired due to
-    // its timeout rather than the fd becoming ready (R1 idle/read timeout). The
-    // waiter (dragon_nb_recv_timeout) clears it to 0 before each watch and reads
-    // it after resuming to tell "timed out" from "data ready". Untouched by the
-    // no-deadline watch paths, which never read it.
+    // Set to 1 by the I/O reactor when a deadline-bearing fd watch timed out rather than became
+    // ready; dragon_nb_recv_timeout clears it before each watch and reads it after resuming to tell timeout from data-ready.
     volatile int8_t io_timed_out;
-    // CAS'd 0->1 by dragon_vthread_join so only the first joiner destroys the
-    // coroutine + frees the handle. A second join (UB double-mco_destroy +
-    // double-free otherwise) returns the cached result. A Task handle is
-    // single-owner in the type system, so a losing caller is a still-live
-    // deliberately-shared handle.
+    // CAS'd 0->1 by dragon_vthread_join so only the first joiner destroys the coroutine and
+    // frees the handle (else a double-mco_destroy/double-free); a second join returns the cached result.
     volatile int8_t joined;
-    // Dual-ownership refcount (init 2 at spawn): one ref for the running coro
-    // (the scheduler worker drops it on MCO_DEAD, gated by the done 0->1 CAS so a
-    // re-enqueued-after-finish vthread can't double-drop) and one for the Task
-    // handle (dropped by the join winner, or by dragon_vthread_detach for a
-    // discarded fire-and-forget). The last release frees the struct + coroutine
-    // stack - so a fire-and-forget vthread cannot leak.
+    // Dual-ownership refcount (init 2 at spawn): one for the running coro (dropped on MCO_DEAD,
+    // gated by the done CAS), one for the Task handle (dropped by the join winner or dragon_vthread_detach). Last release frees the struct + coroutine stack.
     volatile int8_t refs;
     pthread_mutex_t join_lock;
     pthread_cond_t  join_cond;
@@ -506,26 +338,15 @@ struct DragonGenerator {
     mco_coro*   coro;
     int64_t     yielded_value;
     int8_t      state;
-    // D030: codegen-allocated typed args struct + per-callsite decref function.
-    // The args buffer holds (Generator*, native-typed user args...). It outlives
-    // the body (heap captures must survive abandonment) - destroy calls the
-    // decref fn then frees args.
+    // D030: codegen-allocated typed args struct + per-callsite decref fn. Buffer holds
+    // (Generator*, user args...) and outlives the body; destroy calls the decref fn then frees args.
     void*       args;
     void      (*args_decref_fn)(void*);
-    // Isolated exception context for the generator BODY (installed as
-    // __dragon_exc_vt while the body runs - see dragon_generator_next). A
-    // generator that yields inside a try keeps its setjmp frames here, separate
-    // from the caller's exc stack, so the caller's frame push/pop across the
-    // suspend cannot clobber them. Allocated lazily on first resume (a
-    // created-but-never-iterated generator pays nothing). Used purely as an
-    // exc-state container - its scheduler/join fields are never touched.
+    // Isolated exception context for the generator body (installed as __dragon_exc_vt during
+    // resume): a generator yielding inside a try keeps its setjmp frames here so the caller's push/pop can't clobber them. Lazily allocated; only its exc fields are used.
     DragonVThread* exc_vt;
-    // Set by the trampoline's setjmp barrier when the body raised an exception
-    // that was NOT caught inside the generator. dragon_generator_next reads it
-    // after the resume (with the caller's exc context restored) and re-raises
-    // the exception (type/msg/obj live in exc_vt) into the CALLER's frame -
-    // instead of a cross-stack longjmp out of the coroutine (which would skip
-    // generator_next's context restore and leave a dangling exc context).
+    // Set by the trampoline's setjmp barrier on an uncaught exception in the body.
+    // dragon_generator_next reads it post-resume and re-raises (type/msg/obj in exc_vt) into the caller's frame, instead of a cross-stack longjmp that would skip the context restore.
     int8_t      pending_exc;
 };
 
@@ -543,44 +364,22 @@ struct DragonClassDescriptor {
     int64_t*     field_offsets;  // parallel array of BYTE offsets into the instance
     int64_t*     field_widths;   // parallel array of field byte widths (1/8/...)
     int64_t      num_fields;
-    // D033: Method reflection - own (non-inherited) methods of this class.
-    // Each class only stores its own methods; inheritance is resolved by
-    // walking the `parent` chain in dragon_class_find_method / dragon_dir.
-    // method_kinds entries: 0 = instance, 1 = static, 2 = classmethod.
+    // D033: own (non-inherited) methods; inheritance resolved by walking `parent` in
+    // dragon_class_find_method/dragon_dir. method_kinds: 0=instance, 1=static, 2=classmethod.
     const char** method_names;
     void**       method_fn_ptrs;
     uint8_t*     method_kinds;
     int64_t      num_methods;
-    // D033 Phase 3: parallel array of "bound thunks" - codegen-emitted
-    // wrappers with closure ABI (user_args..., env: ptr) that unpack `self`
-    // from env and call the underlying method. Used by getattr() to build
-    // a bound DragonClosure without a runtime trampoline per call. Null
-    // when the class has no own methods (set_methods skipped).
+    // D033 Phase 3: "bound thunks", codegen wrappers (user_args..., env: ptr) that unpack
+    // `self` and call the method. Lets getattr() build a bound DragonClosure with no runtime trampoline; NULL when the class has no own methods.
     void**       method_bound_thunks;
 };
 
-// D027/D030: Closure environment - heap-allocated, refcounted.
-// The body layout (captured values) is owned by codegen as a per-lambda
-// LLVM struct type with native field types. The runtime only sees the
-// header + gc fn; the body is opaque memory immediately following.
-//   sizeof(DragonEnv) = 24 bytes (16 header + 8 fn ptr) - codegen relies on
-//   this offset to GEP into the body. Do not insert fields here.
-//
-// `gc_fn` is a MULTI-OP hook (one codegen-emitted fn per closure
-// site) so the cycle collector can see through an env to the heap objects it
-// captured. It replaces the old single-purpose `dealloc_fn` WITHOUT growing the
-// struct (still one fn ptr; sizeof stays 24). The op selects the behavior:
-//   DEALLOC  - decref each heap capture (the former dealloc_fn body).
-//   TRAVERSE - call visit(capture, arg) for each capture that can close a cycle
-//              (the cycle collector subtracts the env's internal ref to it).
-//   CLEAR    - decref + NULL each heap capture slot (break the cycle; the later
-//              env dealloc then sees emptied slots and double-frees nothing).
-// NULL only for scalar-only envs (no heap captures) - those are never tracked.
+// D027/D030: heap-allocated refcounted closure env; body is a per-lambda LLVM struct following
+// header+gc_fn. sizeof=24 (codegen GEPs this offset; never add fields). gc_fn ops: DEALLOC decrefs captures, TRAVERSE visits cycle-closing captures (skips strings, which can't cycle), CLEAR decrefs+nulls slots (breaks cycles), MARK_SHARED marks every capture incl. strings; NULL only for scalar-only envs.
 #define DRAGON_ENV_OP_DEALLOC  0
 #define DRAGON_ENV_OP_TRAVERSE 1
 #define DRAGON_ENV_OP_CLEAR    2
-// SHARED-mark every heap capture (str included - TRAVERSE deliberately sksips strings
-// since they cannot close a cycle, but SHARED propagation must reach them).
 #define DRAGON_ENV_OP_MARK_SHARED 3
 struct DragonEnv {
     DragonObjectHeader header;
@@ -594,18 +393,8 @@ struct DragonClosure {
     DragonEnv* env;              // captured environment (may be NULL for future use)
 };
 
-// Heap-boxed mutable binding for `nonlocal` semantics.
-//   Layout: { 16B header, 8B value, 4B kind, 4B holds_heap } = 32 bytes.
-//   `value` carries either a raw integer (int/bool zext) or a pointer-as-i64
-//   (str/list/dict/instance/etc. via ptrtoint). `kind` records the
-//   DragonValueTag so the cell's destructor knows how to drop the held ref.
-//   `holds_heap` is set when `value` aliases a heap object (so RC discipline
-//   applies on overwrite + dealloc); cleared for plain ints/bools/floats.
-//
-// One cell per nonlocal-declared variable. Both the owning function and
-// every closure that captures it operate through `dragon_cell_get/set`,
-// so reads chain and writes mutate through a single backing slot - the
-// Python `nonlocal` story without the proxy-globals hack.
+// Heap-boxed mutable binding for `nonlocal`: {16B header, 8B value, 4B kind, 4B holds_heap} = 32B.
+// `value` is a raw int or ptr-as-i64; `kind` (DragonValueTag) drives the destructor, `holds_heap` gates RC. One cell per nonlocal var; owner + capturing closures share it via dragon_cell_get/set.
 struct DragonCell {
     DragonObjectHeader header;
     int64_t value;
@@ -624,20 +413,13 @@ struct DragonDeque {
     uint8_t  elem_tag;  // DragonValueTag of elements - drives RC, equality, repr
 };
 
-//===----------------------------------------------------------------------===//
-// Shared state - extern declarations (defined in runtime_core.cpp)
-//===----------------------------------------------------------------------===//
-
 // GC class tables
 typedef void (*dragon_class_dealloc_fn)(void*);
 typedef void (*dragon_class_clear_fn)(void*);
 typedef void (*dragon_gc_visit_fn)(void* child, void* arg);
 typedef void (*dragon_class_traverse_fn)(void*, dragon_gc_visit_fn, void*);
-// Per-class shared-mark fn: visits every heap-typed field (incl. strings) and
-// calls `dragon_mark_shared` (containers/instances) or `dragon_mark_shared_str`
-// (strings) directly. Codegen-generated; registered via
-// `dragon_class_register_mark_shared`. Receives an opaque worklist pointer so
-// container/class children can be queued for further BFS traversal.
+// Per-class shared-mark fn: visits every heap-typed field (incl. strings), calling
+// dragon_mark_shared/_str directly. Codegen-generated, registered via dragon_class_register_mark_shared; the worklist arg lets children queue for further BFS.
 typedef void (*dragon_class_mark_shared_fn)(void* self, void* worklist);
 
 #define DRAGON_MAX_CLASS_IDS 4096
@@ -652,19 +434,12 @@ extern int __next_class_id;
 // emits one of these per class with heap fields).
 int64_t dragon_class_register_mark_shared(int64_t class_id, void* fn);
 
-// Worklist push for the per-class mark-shared fn - codegen calls this for
-// container/class children so the BFS can continue from them. Idempotent:
-// objects already SHARED skip the push.
+// Worklist push for the per-class mark-shared fn, called for container/class children so
+// BFS continues from them. Idempotent: already-SHARED objects skip the push.
 void dragon_mark_shared_worklist_push(void* worklist, void* obj);
 
-// GC tracking state
-// Thread-safety:
-//   - `gc_tracked`, `gc_tracked_size`, `gc_tracked_cap`: protected by `gc_lock`
-//     (see runtime_core.cpp). All track/untrack/collect access takes the lock.
-//   - `gc_alloc_counter`: accessed via `__atomic_*` (RELAXED). It's a soft trigger.
-//   - `gc_threshold`: accessed via `__atomic_*` (RELAXED).
-//   - `gc_collecting`: accessed via `__atomic_*` (ACQUIRE/RELEASE). Read by
-//     `dragon_decref` / `dragon_decref_str` from any thread.
+// GC tracking state. Thread-safety: gc_tracked/_size/_cap are protected by gc_lock; gc_alloc_counter
+// and gc_threshold use __atomic_* RELAXED; gc_collecting uses ACQUIRE/RELEASE (read by dragon_decref/_str from any thread).
 extern pthread_mutex_t gc_lock;
 extern void** gc_tracked;
 extern int32_t gc_tracked_size;
@@ -673,59 +448,21 @@ extern int32_t gc_alloc_counter;
 extern int32_t gc_threshold;
 extern int gc_collecting;
 
-// Concurrency latch. 0 = a single OS thread can touch the heap, so track /
-// untrack / decref-to-zero / collect run WITHOUT gc_lock (the collector runs
-// synchronously on that same thread between mutator ops, so there is no race).
-// Latched to 1 - permanently - by dragon_gc_go_concurrent() at the first spawn
-// of a second heap-mutating OS thread (scheduler workers, Thread/thread, I/O
-// thread). No production GC takes a global lock per allocation; this keeps the
-// uncontended single-threaded fast path lock-free. Accessed via __atomic_*.
+// Concurrency latch: 0 means a single OS thread touches the heap, so track/untrack/decref-to-zero/
+// collect skip gc_lock entirely (lock-free fast path). Latched to 1 permanently by dragon_gc_go_concurrent() at the first second heap-mutating thread spawn. Accessed via __atomic_*.
 extern int gc_concurrent;
-// Set gc_concurrent=1 (idempotent). Call BEFORE pthread_create of any thread
-// that can allocate/free Dragon heap objects.
+// Set gc_concurrent=1 (idempotent); call before pthread_create of any heap-touching thread.
 void dragon_gc_go_concurrent(void);
 
-//===----------------------------------------------------------------------===//
-// Concurrent-mutation detector for SHARED containers (best-effort, Go-style)
-//===----------------------------------------------------------------------===//
-//
-// Contract: reads of shared state are lock-free and safe; STRUCTURAL mutation
-// of shared state must be serialized by the program (threading.Lock). An
-// unlocked concurrent mutation corrupts memory silently ("realloc(): invalid
-// next size", torn dense arrays). Rather than corrupt, the runtime detects
-// the overlap and aborts loudly at the first colliding mutation, exactly like
-// Go's "concurrent map writes" fatal error.
-//
-// Mechanism: structural mutators of dict/list/set/deque wrap their mutation
-// section in begin/end. begin sets GC_FLAG_MUTATING; a second mutator seeing
-// the bit already set has caught a real overlap (vthreads never yield inside
-// a container op, so same-worker green threads can NEVER interleave inside a
-// mutation window - only true OS-parallel mutators collide).
-//
-// Cost: gated first on the gc_concurrent latch (a single-OS-thread program
-// pays one relaxed load + predicted branch, no RMW) and then on
-// GC_FLAG_SHARED (request-local containers skip the RMW too). Only mutations
-// of actually-shared containers in an actually-multi-threaded program pay
-// the two flag RMWs, and those mutations are supposed to be under a Lock.
-//
-// Placement rules (each instrumented site verified individually):
-//   - begin AFTER any validation that can raise, OR end explicitly on the
-//     raise branch first: a longjmp does not run C++ destructors, and a
-//     stranded MUTATING bit would false-abort the next mutation.
-//   - end BEFORE decref-of-old sections where practical: today no user
-//     finalizer can run inside a decref (class deallocs are generated
-//     field-releases only), but if user __del__ ever lands, a finalizer
-//     re-mutating the same container would self-collide with the guard.
-//   - Wrappers that delegate to an instrumented core (dict_set, dict_update,
-//     setdefault, list_sort) are NOT instrumented - nesting would self-abort.
+// Concurrent-mutation detector (best-effort, Go-style): structural mutators of a SHARED
+// dict/list/set/deque set GC_FLAG_MUTATING on begin and abort loudly if a second mutator finds it already set, catching unlocked concurrent structural writes (which corrupt memory silently) instead. Gated on gc_concurrent + GC_FLAG_SHARED so single-threaded/unshared paths pay nothing. A raise between begin/end must end the guard BEFORE longjmp, since unwind skips the end call.
 #define GC_FLAG_MUTATING 0x10
 
 // Report the collision and abort. Defined in runtime_core.cpp. Never returns.
 void dragon_fatal_concurrent_mutation(const char* kind);
 
-// Arm the detector for a structural mutation of `h`. Returns whether it was
-// armed (caller must pass that to dragon_shared_mut_end on EVERY exit path
-// that follows, except a longjmp-raise path, which must end BEFORE raising).
+// Arm the detector for a structural mutation of `h`; returns whether armed. Caller must pass
+// that to dragon_shared_mut_end on every exit path except a longjmp-raise, which must end BEFORE raising.
 static inline bool dragon_shared_mut_begin(DragonObjectHeader* h, const char* kind) {
     if (!__atomic_load_n(&gc_concurrent, __ATOMIC_RELAXED)) return false;
     if (!(dragon_gc_flags_load(h) & GC_FLAG_SHARED)) return false;
@@ -746,87 +483,48 @@ extern __thread jmp_buf     __dragon_exc_stack[DRAGON_EXC_STACK_SIZE];
 extern __thread int         __dragon_exc_sp;
 extern __thread int         __dragon_exc_type;
 extern __thread const char* __dragon_exc_msg;
-// Typed-field exception instance - paired with __dragon_exc_msg. See the
-// comment on DragonVThread::exc_obj. NULL when the raise site didn't
-// construct a user-class instance (i.e. built-in raises through
-// dragon_raise_exc).
+// Typed exception instance paired with __dragon_exc_msg (see DragonVThread::exc_obj); NULL
+// when the raise site didn't construct a user-class instance (built-in raises via dragon_raise_exc).
 extern __thread void*       __dragon_exc_obj;
 extern __thread DragonVThread* __current_vthread;
-// Exception-storage OVERRIDE. Normally NULL: exception state then lives in
-// __current_vthread (a green thread) or the TLS globals (the bare OS thread).
-// A running GENERATOR sets this to its own DragonVThread-shaped exc context
-// (dragon_generator_next swaps it around mco_resume) so the generator body's
-// try/except frames are ISOLATED from the caller's: a generator that yields
-// inside a try keeps its setjmp frame alive across the suspend, instead of
-// sharing the caller's exc stack (where the caller's per-iteration
-// push/pop would overwrite the suspended generator's jmp_buf - a wrong-frame
-// longjmp -> SIGSEGV). Kept separate from __current_vthread so it overrides
-// ONLY exception storage; I/O / scheduler code keeps reading __current_vthread
-// for the real green-thread identity.
+// Exception-storage override, normally NULL (state then lives in __current_vthread or the TLS
+// globals). A running generator sets its own exc context here (swapped by dragon_generator_next around mco_resume) so its try/except frames stay isolated from the caller's, else overlapping push/pop could longjmp a wrong frame -> SIGSEGV. Kept separate from __current_vthread so scheduler/I/O code still sees the real green-thread identity there.
 extern __thread DragonVThread* __dragon_exc_vt;
 
-// Per-OS-thread unwind cleanup stack + per-frame saved depths (TLS fallback for
-// the main thread / non-vthread code; vthreads use the mirror inside their
-// struct). See DragonCleanupStack.
+// Per-OS-thread unwind cleanup stack + saved depths (TLS fallback for non-vthread code;
+// vthreads mirror this inside their struct). See DragonCleanupStack.
 extern __thread DragonCleanupStack __dragon_cleanup;
 extern __thread int32_t            __dragon_cleanup_saved[DRAGON_EXC_STACK_SIZE];
-// Live exception-frame count on the current context (see runtime_core.cpp). The
-// gate codegen reads inline to skip unwind-cleanup registration when no frame is
-// live. Saved/restored per vthread by the scheduler.
+// Live exception-frame count on the current context; codegen's inline gate reads it to skip
+// unwind-cleanup registration when no frame is live. Saved/restored per vthread by the scheduler.
 extern __thread int                __dragon_active_frames;
 
-// Scheduler-aware socket I/O (defined in runtime_concurrency.cpp; ADR 038
-// Phase 8). dragon_nb_connect is called from stdlib/socket.dr; the rest are
-// used by the TLS BIO (runtime_tls.cpp) so TLS handshake/read/write yield to
-// the green-thread scheduler on EAGAIN instead of blocking the carrier thread.
+// Scheduler-aware socket I/O (ADR 038 Phase 8, impl in runtime_concurrency.cpp). dragon_nb_connect
+// is called from stdlib/socket.dr; the rest back the TLS BIO so handshake/read/write yield to the scheduler on EAGAIN instead of blocking the carrier thread.
 extern "C" {
 int64_t dragon_nb_connect(int64_t fd, void* addr, int64_t addrlen);
 int  dragon_io_wait_readable(int fd);   // 0 when readable, -1 on poll error/HUP
 int  dragon_io_wait_writable(int fd);   // 0 when writable, -1 on poll error/HUP
-// Deadline-bounded readability wait (R1): 0 readable, 1 timeout, -1 error.
-// timeout_ms <= 0 means no deadline. Used by the TLS BIO so a stalled encrypted
-// peer is dropped instead of pinning the green thread.
+// Deadline-bounded readability wait (R1): 0 readable, 1 timeout, -1 error; timeout_ms<=0 means
+// no deadline. Used by the TLS BIO so a stalled encrypted peer is dropped instead of pinning the green thread.
 int  dragon_io_wait_readable_timeout(int fd, int64_t timeout_ms);
 void dragon_set_nonblocking(int64_t fd);
-// Binary (bytes) variants of the scheduler-aware recv/send - same yielding
-// path as dragon_nb_recv/_send, but DragonBytes-typed so binary wire protocols
-// (e.g. the Postgres/MySQL drivers, D032) are not forced through `str`.
+// Binary (bytes) variants of the scheduler-aware recv/send, same yielding path as
+// dragon_nb_recv/_send but DragonBytes-typed so wire protocols (Postgres/MySQL, D032) aren't forced through `str`.
 DragonBytes* dragon_nb_recv_bytes(int64_t fd, int64_t max_len);
 int64_t      dragon_nb_send_bytes(int64_t fd, DragonBytes* data);
 }
 
-// TLS atomic-context flag.
-// Set non-zero by `dragon_decref_atomic` (and the atomic string variant) for
-// the duration of a recursive dealloc - when we are tearing down a heap object
-// whose final reference was dropped by an atomic decref, child decrefs must
-// also use atomic variants because other threads may share those children.
-// `dragon_dealloc` and per-type destroy functions consult this flag and route
-// child decrefs through `dragon_decref_dispatch` / `dragon_decref_str_dispatch`.
-//
-// Save-and-restore semantics: nested atomic-context calls preserve the
-// outer value (set to 1, restore old value on exit) - never unconditionally
-// clear, so a non-atomic dealloc nested inside an atomic dealloc still uses
-// the atomic path on its children.
+// TLS atomic-context flag: set by dragon_decref_atomic (and the atomic str variant) during a
+// recursive dealloc so child decrefs also route atomic (via dragon_decref_dispatch/_str_dispatch), since other threads may share those children. Nested calls save/restore rather than clear, so a non-atomic dealloc nested inside an atomic one still uses the atomic path.
 extern __thread int __dragon_atomic_context;
-
-//===----------------------------------------------------------------------===//
-// Shared inline helpers
-//===----------------------------------------------------------------------===//
 
 static inline DragonString* dragon_string_from_data(const char* data) {
     return (DragonString*)((char*)data - offsetof(DragonString, data));
 }
 
-// Bounds of the executable image, used to range-gate the heap-string probe
-// below.
-// - ELF (Linux/BSD): linker-provided symbols (GNU ld default script; correct
-//   under PIE after relocation).
-// - Mach-O (macOS): no _end/__executable_start exist. runtime_core.cpp walks
-//   the main image's LC_SEGMENT_64 load commands once at load time (via a
-//   constructor) and publishes the span here. The startup defaults cover the
-//   whole address space, which fails SAFE: until initialized, every pointer
-//   classifies as "in image" (treated as a literal, never probed backwards),
-//   never the reverse.
+// Bounds of the executable image, used to range-gate the heap-string probe below. ELF uses
+// linker symbols; Mach-O has no _end/__executable_start, so runtime_core.cpp walks LC_SEGMENT_64 load commands at startup. Until initialized, every pointer fails SAFE as "in image" (treated as literal, never probed backwards).
 #ifdef __APPLE__
 extern const char* __dragon_image_lo;
 extern const char* __dragon_image_hi;
@@ -839,19 +537,8 @@ extern char _end[];
 #define DRAGON_IMAGE_HI ((const char*)_end)
 #endif
 
-/// Heap-vs-literal check for a `const char*` string pointer. Borrowed C
-/// literals don't have a DragonObjectHeader; heap DragonStrings do, with
-/// `type_tag == DRAGON_TAG_STR` and the GC_FLAG_HEAP_OBJ bit set.
-///
-/// The image range check MUST come before the header probe. A literal lives
-/// in the binary's rodata, and probing the bytes BEFORE it is unsound: an
-/// unlucky neighboring symbol can fake a valid header purely by layout
-/// coincidence (not theoretical: a rodata layout shift once made an ssl.dr
-/// literal's neighbor match tag+flags, and the next exception-slot decref
-/// WROTE a refcount into the read-only page - SEGV in
-/// test_ssl_roundtrip). Heap allocations can never live inside the image, so
-/// the two compares are both sufficient and cheaper than the header loads
-/// they replace on the literal path
+/// Heap-vs-literal check: literals have no DragonObjectHeader, heap DragonStrings have
+/// type_tag==DRAGON_TAG_STR + GC_FLAG_HEAP_OBJ. Image-range check MUST precede the header probe: probing rodata bytes before a literal is unsound (a layout shift once faked a valid header and SEGV'd in test_ssl_roundtrip via a write into read-only memory).
 static inline int dragon_str_is_heap(const char* s) {
     if (!s) return 0;
     if (s >= DRAGON_IMAGE_LO && s < DRAGON_IMAGE_HI) return 0;
@@ -871,14 +558,8 @@ static inline int64_t dragon_str_total_bytes(const char* s) {
     return (int64_t)strlen(s);
 }
 
-// HashDoS defense: the dict/set string hash is keyed with a per-process random
-// secret (seeded once at startup from the OS CSPRNG - dragon_hash_secret_init,
-// runtime_platform.cpp). An unkeyed hash (the old FNV-1a) lets an attacker who
-// knows the algorithm precompute keys that all land in one bucket, turning an
-// O(1) dict into O(n) per probe and O(n^2) per request - a trivial DoS on any
-// server that builds a dict/set from request data (JSON body, query params,
-// headers). SipHash-1-3 is the same construction CPython and Rust's default
-// HashMap use; keying it makes collisions unpredictable across processes.
+// HashDoS defense: dict/set string hash is keyed with a per-process random secret (seeded
+// from the OS CSPRNG at startup, dragon_hash_secret_init). An unkeyed hash (old FNV-1a) let an attacker precompute keys landing in one bucket, turning O(1) dict ops into O(n)/O(n^2) DoS; SipHash-1-3 (like CPython/Rust) keyed makes collisions unpredictable.
 extern uint64_t __dragon_hash_k0;
 extern uint64_t __dragon_hash_k1;
 void dragon_hash_secret_init(void);  // idempotent; called from a constructor
@@ -932,10 +613,8 @@ static inline uint64_t dragon_siphash13(const void* in, size_t inlen,
     return v0 ^ v1 ^ v2 ^ v3;
 }
 
-/// Keyed content hash of a Dragon string's underlying bytes. Uses
-/// `dragon_str_total_bytes` so kind=4 strings hash all of their UCS-4 bytes
-/// (not just up to the first internal NUL). Canonical-kind storage ensures
-/// equal-content strings have equal byte representations.
+/// Keyed content hash of a Dragon string's bytes. Uses dragon_str_total_bytes so kind=4 strings
+/// hash all UCS-4 bytes, not just up to the first internal NUL.
 static inline uint64_t dragon_str_content_hash(const char* s) {
     int64_t n = dragon_str_total_bytes(s);
     uint64_t h = dragon_siphash13(s, (size_t)n, __dragon_hash_k0, __dragon_hash_k1);
@@ -956,19 +635,36 @@ static inline int dragon_str_bytes_equal(const char* a, const char* b) {
 static inline void dragon_incref_tagged(int64_t val, uint8_t tag);
 static inline void dragon_decref_tagged(int64_t val, uint8_t tag);
 
-//===----------------------------------------------------------------------===//
-// Core runtime functions used across TUs
-//===----------------------------------------------------------------------===//
+// Container-walk guard shared by the repr/json/print recursion (runtime_collections.cpp):
+// detects cycles (self-referential containers SIGSEGV'd via unbounded recursion) and
+// caps depth so pathological nesting cannot overflow the C stack.
+#define DRAGON_WALK_MAX 256
+extern thread_local const void* __dragon_walk_seen[DRAGON_WALK_MAX];
+extern thread_local int __dragon_walk_depth;
+
+enum { DRAGON_WALK_OK = 0, DRAGON_WALK_CYCLE = 1, DRAGON_WALK_TOO_DEEP = 2 };
+
+static inline int dragon_walk_enter(const void* obj) {
+    for (int i = 0; i < __dragon_walk_depth; i++)
+        if (__dragon_walk_seen[i] == obj) return DRAGON_WALK_CYCLE;
+    if (__dragon_walk_depth >= DRAGON_WALK_MAX) return DRAGON_WALK_TOO_DEEP;
+    __dragon_walk_seen[__dragon_walk_depth++] = obj;
+    return DRAGON_WALK_OK;
+}
+
+static inline void dragon_walk_exit(void) {
+    if (__dragon_walk_depth > 0) __dragon_walk_depth--;
+}
+
+static inline void dragon_walk_reset(void) { __dragon_walk_depth = 0; }
 
 // GC / refcounting
 void dragon_incref(void* obj);
 void dragon_decref(void* obj);
 void dragon_incref_atomic(void* obj);
 void dragon_decref_atomic(void* obj);
-// TAG-GATED closure RC (defined in runtime_builtins.cpp). Safe on a bare
-// fn ptr (no header) and null - used by dragon_{in,de}cref_tagged for
-// TAG_CLOSURE elements so Callable containers RC closures without touching a
-// headerless code pointer.
+// Tag-gated closure RC (runtime_builtins.cpp); safe on a bare fn ptr (no header) and null. Used
+// by dragon_{in,de}cref_tagged for TAG_CLOSURE elements so Callable containers RC closures without touching a headerless code pointer.
 void dragon_incref_callable(void* p);
 void dragon_decref_callable(void* p);
 void dragon_make_immortal(void* obj);
@@ -979,16 +675,12 @@ void dragon_gc_set_threshold(int64_t n);
 int64_t dragon_gc_collect();
 int64_t dragon_gc_tracked_count();
 
-// Mark an object SHARED (atomic OR into gc_flags). Idempotent; safe under
-// concurrent callers. Does NOT recurse into children. Used at the leaf of
-// `dragon_mark_shared_deep` and inside RC-atomic entry points.
+// Mark an object SHARED (atomic OR into gc_flags); idempotent, safe under concurrent callers,
+// does not recurse into children. Used at the leaf of dragon_mark_shared_deep and inside RC-atomic entry points.
 void dragon_mark_shared(void* obj);
 
-// Mark `obj` and every transitively-reachable child SHARED. Walks via the
-// per-type `dragon_traverse` table; visits each object at most once via the
-// SHARED bit acting as a "seen" marker. Called from the fire-site (before
-// atomic-incref'ing the heap arg) and from container write-barriers when a
-// new value is stored into a SHARED parent.
+// Mark `obj` and every transitively-reachable child SHARED, walking the per-type dragon_traverse
+// table (SHARED bit doubles as "seen"). Called from the fire-site and from container write-barriers when a value is stored into a SHARED parent.
 void dragon_mark_shared_deep(void* obj);
 
 // Same for str - `s` is a `const char*` pointer into a heap DragonString's
@@ -1007,16 +699,20 @@ const char* dragon_string_dup(const char* s);
 // Dup a KNOWN plain C string without the DragonString header probe
 // (safe for stack snprintf buffers - see runtime_string.cpp).
 const char* dragon_string_dup_cstr(const char* s);
+
+static inline void dragon_hex_encode(char* dst, const unsigned char* src, int64_t n) {
+    static const char* hexd = "0123456789abcdef";
+    for (int64_t i = 0; i < n; i++) {
+        dst[i * 2] = hexd[src[i] >> 4];
+        dst[i * 2 + 1] = hexd[src[i] & 0xF];
+    }
+}
 // Snapshot a message for re-raising only if it is a mortal heap string (else
 // return it unchanged - no dup, no leak). See definition in runtime_string.cpp.
 const char* dragon_exc_msg_preserve(const char* s);
 
-// Force-free a heap string when its refcount has hit 0 inside the
-// cycle collector's clear_refs phase. Bypasses `dragon_decref_str`'s
-// `gc_collecting` guard, which would otherwise leave the string allocated
-// because Phase 4 zeros the container's size and Phase 6's destroy iterates
-// nothing. Safe because the string is owned exclusively by the unreachable
-// container we're tearing down. Always honors the immortal sentinel.
+// Force-free a heap string at refcount 0 inside the cycle collector's clear_refs phase,
+// bypassing dragon_decref_str's gc_collecting guard (else Phase 4/6 would leave it allocated). Safe since the string is owned exclusively by the unreachable container being torn down; still honors the immortal sentinel.
 void dragon_str_force_free_if_zero(const char* s);
 
 // Container constructors (needed by sync wrappers, builtins, etc.)
@@ -1056,9 +752,8 @@ DragonList* dragon_list_repeat(DragonList* src, int64_t count);
 // to dragon_list_box_concat when either operand is a list[Any] (DragonListBox).
 DragonList* dragon_list_concat(DragonList* a, DragonList* b);
 
-// D030 Phase 3 - Monomorphized list ops. Codegen calls these by element kind;
-// each returns / accepts the native type (double, void*) - no i64 funnel.
-// Polymorphic destroy still dispatches off elem_tag (shared layout prefix).
+// D030 Phase 3: monomorphized list ops. Codegen calls these by element kind, each returning/
+// accepting its native type (double, void*), no i64 funnel; polymorphic destroy still dispatches off elem_tag (shared layout prefix).
 
 // list[float] - native f64
 DragonListF64* dragon_list_new_f64(int64_t capacity);
@@ -1078,10 +773,8 @@ DragonListBox* dragon_list_box_new(int64_t capacity);
 void           dragon_list_box_append(DragonListBox* list, int64_t tag, int64_t payload);
 void           dragon_list_box_delitem(DragonListBox* list, int64_t index);
 
-// Typed list[str] join - used by D017 Phase 4.B block-interp flatten and
-// Phase 4.C `| join` filter / `!{*expr}` spread. Direct ptr-array walk; no
-// per-element box decode, no tag dispatch. Sep may be NULL or "" to
-// concatenate without a separator.
+// Typed list[str] join (D017 Phase 4.B block-interp flatten, 4.C `| join`/`!{*expr}` spread).
+// Direct ptr-array walk, no per-element box decode; sep may be NULL/"" for no separator.
 const char*    dragon_str_join_ptr(const char* sep, DragonListPtr* list);
 
 DragonDict* dragon_dict_new(int64_t cap);
@@ -1100,20 +793,15 @@ int64_t dragon_dict_get_default(DragonDict* d, const char* key, int64_t def);
 void   dragon_dict_del(DragonDict* d, const char* key);
 DragonList* dragon_dict_keys(DragonDict* d);
 
-// D030 Phase 3.E - Typed dict ops for str-keyed monomorphic dicts. Codegen
-// calls these so the value crosses the codegen↔runtime boundary at its
-// native LLVM type instead of being i64-bashed.
+// D030 Phase 3.E: typed dict ops for str-keyed monomorphic dicts, so the value crosses the
+// codegen/runtime boundary at its native LLVM type instead of being i64-bashed.
 double dragon_dict_get_str_f64(DragonDict* d, const char* key);
 void   dragon_dict_set_str_f64(DragonDict* d, const char* key, double value);
 void*  dragon_dict_get_str_ptr(DragonDict* d, const char* key, int64_t expected_tag);
 void   dragon_dict_set_str_ptr(DragonDict* d, const char* key, void* value, int64_t tag);
 
-// D030 Phase 3.G - Typed dict ops for int-keyed monomorphic dicts. Reuses
-// the DragonDict layout: the i64 key is stored verbatim in the existing
-// `const char* key` slot (8 bytes either way) and hashed via SplitMix64
-// instead of FNV-1a. Codegen picks this family when the static dict type
-// is `dict[int, V]`. Setters handle refcount semantics on overwrite the
-// same way the str-keyed variants do.
+// D030 Phase 3.G: typed dict ops for int-keyed monomorphic dicts. Reuses the DragonDict layout
+// (i64 key stored verbatim in the `key` slot, hashed via SplitMix64 instead of FNV-1a); codegen picks this family for `dict[int, V]`. Setters handle overwrite RC like the str-keyed variants.
 void   dragon_dict_int_set(DragonDict* d, int64_t key, int64_t value);
 void   dragon_dict_int_set_tagged(DragonDict* d, int64_t key, int64_t value, int64_t tag);
 void   dragon_dict_int_set_f64(DragonDict* d, int64_t key, double value);
@@ -1150,9 +838,8 @@ int64_t dragon_set_contains(DragonSet* s, int64_t val);
 DragonBytes* dragon_bytes_new(const uint8_t* data, int64_t len);
 DragonBytes* dragon_bytes_from_list(DragonList* list);
 
-// Compression (gzip via libz, zstd via libzstd) - implemented in
-// runtime_compress.cpp. Bytes-in / bytes-out one-shot; callers stream by
-// chunking at the Dragon layer (stdlib/gzip.dr, stdlib/zstandard.dr).
+// Compression (gzip via libz, zstd via libzstd; runtime_compress.cpp). Bytes-in/bytes-out
+// one-shot; callers stream by chunking at the Dragon layer (stdlib/gzip.dr, stdlib/zstandard.dr).
 DragonBytes* dragon_zlib_compress(DragonBytes* src, int64_t level);
 DragonBytes* dragon_zlib_decompress(DragonBytes* src);
 DragonBytes* dragon_zstd_compress(DragonBytes* src, int64_t level);
@@ -1177,17 +864,11 @@ void dragon_generator_abandon(void* gen_ptr);
 
 // Exception functions (used by generators, concurrency)
 void dragon_raise_exc(int64_t type, const char* msg);
-// Raise with a RAW C string message (rodata literal, stack snprintf buffer,
-// errno/library text). Copies it into a fresh heap DragonString before the
-// longjmp, so the exc_msg slot never holds a raw C pointer: the is_heap
-// probe on the slot always reads a valid header (no OOB read 24 bytes before
-// a literal), and a stack buffer can't dangle after the raising frame is
-// unwound. Every runtime-internal raise site MUST use this; the plain
-// dragon_raise_exc above is for codegen str-typed messages only.
+// Raise with a raw C string (literal/stack buffer/errno text): copies it into a fresh heap
+// DragonString before the longjmp, so exc_msg never holds a raw C pointer (no OOB header probe, no dangling stack buffer). Every runtime-internal raise site must use this; dragon_raise_exc is for codegen str-typed messages only.
 void dragon_raise_exc_cstr(int64_t type, const char* msg);
-// Allocation-free MemoryError raise for the OOM branches below. _cstr dups
-// its message THROUGH dragon_xmalloc, so raising OOM there recurses to
-// stack death. Every other runtime-internal raise still MUST use _cstr.
+// Allocation-free MemoryError raise for OOM branches: _cstr dups its message through
+// dragon_xmalloc, so raising OOM there would recurse to stack death. Every other raise still must use _cstr.
 void dragon_raise_oom(void);
 // Consume variants: take an owned +1 message (freshly dup'd / allocated)
 // into the slot instead of dup'ing a borrow. See dragon_exc_msg_set.
@@ -1199,19 +880,8 @@ void dragon_raise_exc_obj_consume(int64_t type, void* obj, const char* msg);
 const char* dragon_exc_bind_msg(void);
 int64_t dragon_exc_matches(int64_t raised, int64_t caught);
 
-// Checked allocation. Callers were dereferencing a NULL malloc
-// result on OOM -> SIGSEGV (e.g. chr() via dragon_string_alloc_ucs4), or
-// overwriting the only pointer before checking realloc (-> NULL-write/leak).
-// These centralize the contract:
-//   *_x*   raise MemoryError (longjmp) - for user-reachable allocations. The
-//          raise never returns, so a failed dragon_xrealloc leaves the caller's
-//          OLD pointer intact (the realloc-into-temp pattern, built in).
-//          OOM branches raise via dragon_raise_oom, never _cstr: the _cstr
-//          message dup allocates, which recursed to stack death under OOM.
-//   *_or_abort  abort with a diagnostic - for the GC / exception machinery,
-//          where raising would re-enter the very subsystem mid-failure.
-// One branch, hinted unlikely, so the hot (success) path costs nothing - the
-// same discipline dragon_string_alloc_raw already documents.
+// Checked allocation, fixing NULL-malloc derefs on OOM and NULL-write/leaks from overwriting a
+// pointer before checking realloc. `_x*` raises MemoryError (longjmp; failed xrealloc leaves the old pointer intact) for user-reachable allocations; `_or_abort` aborts with a diagnostic for GC/exception code where raising would re-enter the failing subsystem. Hot path costs nothing (hinted unlikely branch).
 static inline void* dragon_xmalloc(size_t n) {
     void* p = malloc(n);
     if (__builtin_expect(p == nullptr, 0))
@@ -1241,28 +911,8 @@ static inline void* dragon_xrealloc_or_abort(void* old, size_t n) {
     return p;
 }
 
-// Count-based variants. The multiply that turns an ELEMENT COUNT into a BYTE
-// COUNT belongs here, not at the call site. `capacity * elem_size` is an i64
-// multiply and it wraps: `[1] * n` with n = 2^61+2 clears dragon_list_repeat's
-// `count > INT64_MAX / size` guard (that guard only proves the element count
-// is sane, and says nothing about the byte count), then 2^61+2 * 8 wraps to a
-// 16-byte request. A-B proven under gdb: malloc served 16 bytes, returned a
-// valid heap pointer, and the repeat memcpy then marched 2.3 quintillion
-// elements through the heap. That is a controlled heap overflow, not an
-// allocation failure.
-// Guarding one caller only re-opens the hole at the next caller that sizes a
-// buffer, so the trap lives where the byte count is formed. Nothing below may
-// hand-compute a data-buffer size.
-//
-// `extra` covers the trailing-byte shapes so they never get hand-added either:
-// a NUL terminator (`malloc(n + 1)`), or an inline header
-// (`sizeof(DragonString) + bytes + 1`). `n + 1` is its own overflow at
-// n == INT64_MAX, so the add is checked too, not just the multiply.
-//
-// __builtin_mul_overflow rather than a divide-guard: it is exact, it cannot be
-// written wrong, and it collapses the six different hand-rolled spellings that
-// were scattered across this runtime into one. The repo's only prior checked
-// builtin is the older suffixed form at runtime_builtins.cpp:136.
+// Count-based variants: the count*elem_size multiply belongs here, not at the call site. A-B
+// proven: `[1]*n` with n=2^61+2 wrapped dragon_list_repeat's guard and the byte multiply to a 16-byte malloc, then memcpy'd 2.3 quintillion elements (controlled heap overflow). `extra` covers NUL/header trailing bytes so `n+1` is checked too; __builtin_mul_overflow replaces six hand-rolled guards scattered across the runtime.
 static inline bool dragon_alloc_bytes_try(int64_t count, size_t elem_size,
                                           size_t extra, size_t* out) {
     // elem_size == 0 would make any count "fit" and yield a 0-byte buffer that
@@ -1296,11 +946,8 @@ static inline void* dragon_xmalloc_ex(int64_t count, size_t elem_size, size_t ex
 static inline void* dragon_xrealloc_n(void* old, int64_t count, size_t elem_size) {
     return dragon_xrealloc(old, dragon_alloc_bytes_ex(count, elem_size, 0));
 }
-// calloc had NO helper at all, while 24 sites call it directly. Its own
-// product check returns NULL rather than truncating, but every one of those
-// sites then wrote through the NULL - so the wrap was safe and the result was
-// not. Route the count through the same trap so the two failures report
-// differently (size overflow vs out of memory) instead of both as a SIGSEGV.
+// calloc had no helper despite 24 direct call sites; its product check returns NULL rather
+// than truncating, but every site then wrote through that NULL. Routes the count through the same trap so overflow vs OOM report differently instead of both SIGSEGV-ing.
 static inline void* dragon_xcalloc_n(int64_t count, size_t elem_size) {
     size_t bytes;
     if (__builtin_expect(!dragon_alloc_bytes_try(count, elem_size, 0, &bytes), 0))
@@ -1312,20 +959,8 @@ static inline void* dragon_xcalloc_n(int64_t count, size_t elem_size) {
 }
 static inline void* dragon_xcalloc(size_t n) { return dragon_xcalloc_n((int64_t)n, 1); }
 
-// Non-raising siblings, for the container GROW paths. Those run between
-// dragon_shared_mut_begin and dragon_shared_mut_end, so a longjmp out of them
-// would escape with GC_FLAG_MUTATING still set on the object - and the next
-// legitimate mutation of that same container would then trip
-// dragon_fatal_concurrent_mutation. A caught MemoryError must not arm a
-// spurious fatal later, so the grow paths keep their abort-on-failure
-// contract and only gain the overflow trap.
-//
-// Use the _or_abort form when ANY of these hold, else use the raising form:
-//   1. the site sits inside an armed dragon_shared_mut_begin window
-//   2. the site is inside the GC collector or the exception machinery
-//      (raising re-enters the very subsystem that is mid-failure)
-//   3. the site has already freed or half-swapped a buffer a live object still
-//      points at, so an unwind would expose a dangling pointer
+// Non-raising siblings for container GROW paths: a longjmp between dragon_shared_mut_begin/end
+// would strand GC_FLAG_MUTATING and false-trip dragon_fatal_concurrent_mutation later, so grow paths keep abort-on-failure and only gain the overflow trap. Use _or_abort when: inside an armed mut_begin window, inside the GC/exception machinery, or after freeing/half-swapping a buffer a live object still points at; use the raising form otherwise.
 static inline size_t dragon_alloc_bytes_ex_or_abort(int64_t count, size_t elem_size,
                                                     size_t extra) {
     size_t bytes;
@@ -1356,19 +991,16 @@ static inline void* dragon_xcalloc_n_or_abort(int64_t count, size_t elem_size) {
     return p;
 }
 
-// Unwind cleanup stack (see DragonCleanupStack). Codegen emits push at each
-// owned-heap-local declaration, update on reassignment, and reset-by-depth at
-// normal scope exit; dragon_exc_cleanup_unwind runs at every longjmp arrival.
+// Unwind cleanup stack (DragonCleanupStack). Codegen pushes at each owned-heap-local decl,
+// updates on reassignment, resets-by-depth at normal scope exit; dragon_exc_cleanup_unwind runs at every longjmp arrival.
 int32_t dragon_cleanup_push(int64_t val, int32_t kind, int32_t tag);
 void    dragon_cleanup_update(int32_t slot, int64_t val, int32_t tag);
 int32_t dragon_cleanup_depth(void);
 void    dragon_cleanup_reset(int32_t depth);
 void    dragon_exc_cleanup_unwind(void);
 
-// D033: Method reflection setters and lookup. Called from codegen at module
-// init time (after dragon_class_descriptor_create). dragon_class_find_method
-// walks the parent chain via DragonClassDescriptor.parent so each class only
-// needs to advertise its OWN methods.
+// D033: method reflection setters/lookup, called from codegen at module init time (after
+// dragon_class_descriptor_create). dragon_class_find_method walks `parent` so each class only advertises its own methods.
 void  dragon_class_descriptor_set_methods(int64_t descriptor,
                                           const char** method_names,
                                           void** method_fn_ptrs,
@@ -1380,19 +1012,16 @@ void* dragon_class_find_method(int64_t descriptor, const char* name);
 int64_t dragon_class_find_method_kind(int64_t descriptor, const char* name);
 void* dragon_class_find_method_bound(int64_t descriptor, const char* name);
 
-// D033 Phase 2: dir() builtin. Walks the instance's (or descriptor's) class
-// MRO collecting field + method names; returns a sorted DragonListPtr[str]
-// of refcounted heap strings. `is_descriptor` selects between instance ptr
-// (look up class_id) and descriptor ptr.
+// D033 Phase 2: dir() builtin. Walks the class MRO collecting field+method names into a sorted
+// DragonListPtr[str]; `is_descriptor` selects between an instance ptr (look up class_id) and a descriptor ptr.
 DragonListPtr* dragon_dir(int64_t instance_or_desc, int64_t is_descriptor);
 
 // String allocation helpers (used by string and other TUs)
 const char* dragon_string_alloc(const char* src, int64_t len);
 const char* dragon_str_intern(const char* utf8_bytes, int64_t byte_len);
 DragonString* dragon_string_alloc_raw(int64_t len);
-/// UTF-8 encode helper. For kind=1 / literals, returns NULL (caller uses
-/// `s` directly). For kind=4, returns a freshly malloc'd UTF-8 buffer the
-/// caller must free. `*out_byte_len` is set in both cases.
+/// UTF-8 encode helper: kind=1/literals return NULL (caller uses `s` directly); kind=4 returns
+/// a freshly malloc'd buffer the caller must free. `*out_byte_len` is set either way.
 char* dragon_str_to_utf8_alloc(const char* s, int64_t* out_byte_len);
 
 // Print helpers (used in collections printing)
@@ -1401,9 +1030,8 @@ void dragon_print_tagged(int64_t value, int64_t tag);
 // String operations (used by builtins, collections)
 const char* dragon_int_to_str(int64_t value);
 const char* dragon_float_to_str(double value);
-/// Python-repr float formatter shared by scalar print, str(), f-strings and
-/// container repr (single source of truth). Writes into `buf` (>= 32 bytes),
-/// returns length. Defined in runtime_string.cpp.
+/// Python-repr float formatter shared by scalar print, str(), f-strings, and container repr
+/// (single source of truth). Writes into `buf` (>=32 bytes), returns length.
 int dragon_format_double_into(double value, char* buf, size_t bufsz);
 void dragon_slice_indices(int64_t len, int64_t* start, int64_t* stop, int64_t step);
 void dragon_print_str(const char* s);
@@ -1448,9 +1076,8 @@ static inline void dragon_decref_tagged(int64_t val, uint8_t tag) {
         dragon_decref_callable((void*)(uintptr_t)val);
 }
 
-// Route a child decref through the atomic variant if we're inside
-// an atomic-context dealloc, otherwise use the normal variant. Per-type
-// destroy functions invoked from `dragon_dealloc` MUST go through these.
+// Route a child decref through the atomic variant inside an atomic-context dealloc, else the
+// normal variant. Per-type destroy functions invoked from dragon_dealloc must go through these.
 static inline void dragon_decref_dispatch(void* obj) {
     if (__dragon_atomic_context) dragon_decref_atomic(obj);
     else dragon_decref(obj);

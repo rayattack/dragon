@@ -1,25 +1,10 @@
-/// Dragon Runtime - getpass: no-echo password entry, POSIX termios.
-///
-/// Its OWN translation unit (mirroring runtime_ed25519.cpp / runtime_crypto.cpp):
-/// the security-critical terminal-state dance is done entirely in C so it is
-/// atomic and the ECHO flag is *always* restored - even on EOF, EINTR, or a
-/// read error. A program that never prompts for a password pays nothing.
-///
-/// The .dr side (stdlib/getpass.dr) owns the policy: prompt default, the
-/// GetPassWarning fallback when stdin is not a tty, and getuser()'s env lookup.
-/// This TU exposes the two primitives that genuinely need C:
-///   dragon_getpass_read  - read one line from /dev/tty (or stderr/stdin) with
-///                          ECHO cleared, restoring the saved termios on every
-///                          exit path.
-///   dragon_getpass_pwname - getpwuid(getuid())->pw_name, the last-resort
-///                          username source for getuser() (matches CPython).
-///
-/// Windows is deferred per D019; on _WIN32 these degrade to an echoing read and
-/// an empty username so the module still links.
+/// Dragon Runtime - getpass: no-echo password entry, POSIX termios. Own TU so
+/// the terminal-state dance stays atomic in C, with ECHO always restored (even
+/// on EOF/EINTR/error). stdlib/getpass.dr owns policy (prompt default,
+/// GetPassWarning fallback, env lookup); Windows degrades to an echoing read (D019).
 
-// Request POSIX.1-2008 so glibc declares getline()/ssize_t even when the TU is
-// compiled as strict -std=c++17 (no _GNU_SOURCE). Harmless if already defined
-// by the build's gnu++ extensions.
+// Request POSIX.1-2008 so glibc declares getline()/ssize_t under strict
+// -std=c++17. Harmless if already defined by the build's gnu++ extensions.
 #ifndef _WIN32
   #ifndef _POSIX_C_SOURCE
     #define _POSIX_C_SOURCE 200809L
@@ -39,35 +24,15 @@
   #include <errno.h>
 #endif
 
-//===----------------------------------------------------------------------===//
-// Runtime helpers borrowed from other TUs (declared here, NOT in
-// runtime_internal.h - this TU owns its own forward declarations).
-//
-// dragon_string_alloc copies `len` bytes into a fresh heap DragonString and
-// returns the `.data` pointer Dragon treats as a `str` (refcount = 1, owned by
-// the caller). The empty-string and error paths route through it so every
-// return value is a real Dragon str, never a borrowed C literal.
-//===----------------------------------------------------------------------===//
+// Forward-declared here (not in runtime_internal.h): copies `len` bytes into
+// a fresh heap DragonString, refcount 1, so every return is a real owned str.
 extern "C" const char* dragon_string_alloc(const char* src, int64_t len);
 
 extern "C" {
 
-/// Read one line of input with terminal echo disabled, then restore the
-/// terminal to its prior state. Returns a freshly-allocated Dragon `str` with
-/// the trailing newline stripped (CPython strips the '\n', keeps the rest).
-///
-/// Behavior, matching CPython's _getpass on POSIX:
-///   * The prompt is written to /dev/tty when it can be opened (so the prompt
-///     is visible even with stdout redirected); otherwise to stderr.
-///   * Input is read from /dev/tty when available, else from stdin (fd 0).
-///   * tcgetattr saves the current attrs; ECHO is cleared (ECHONL kept so the
-///     user's Enter still produces a visible newline) and applied with
-///     TCSAFLUSH (discards any typed-ahead echoed bytes). The saved attrs are
-///     restored on EVERY exit path - EOF, EINTR, or error included.
-///
-/// If stdin is not a terminal, tcgetattr fails with ENOTTY; the .dr layer is
-/// expected to have already taken the GetPassWarning echo path, but we still
-/// degrade gracefully here by reading with echo (no termios change to undo).
+/// Read one line with terminal echo disabled (via /dev/tty, else stderr/stdin),
+/// restoring the saved termios on every exit path (EOF/EINTR/error included).
+/// If stdin isn't a tty, tcgetattr fails and we degrade to an echoing read.
 const char* dragon_getpass_read(const char* prompt) {
 #ifdef _WIN32
     // Windows deferred (D019): echo the prompt and read a line with echo on.
@@ -122,15 +87,11 @@ const char* dragon_getpass_read(const char* prompt) {
     size_t cap  = 0;
     ssize_t got = getline(&line, &cap, tty_in);
 
-    // ALWAYS restore the terminal before returning - this is the security
-    // invariant. Done before building the result so an allocation fault can't
-    // leave echo disabled.
+    // Security invariant: restore the terminal before building the result, so
+    // an allocation fault can't leave echo disabled.
     if (restore) {
-        // Retry across EINTR so a signal can't leave the terminal silent.
-        while (tcsetattr(in_fd, TCSAFLUSH, &saved) != 0 && errno == EINTR) {}
-        // tcsetattr with TCSAFLUSH already drained; emit a trailing newline to
-        // mirror the Enter the user pressed (their newline was swallowed by the
-        // flush in some shells), matching CPython's getpass which prints '\n'.
+        while (tcsetattr(in_fd, TCSAFLUSH, &saved) != 0 && errno == EINTR) {}  // retry: EINTR must not leave echo off
+        // Mirror the swallowed Enter, matching CPython's getpass trailing '\n'.
         if (tty_out) { fputc('\n', tty_out); fflush(tty_out); }
     }
 
@@ -156,10 +117,8 @@ const char* dragon_getpass_read(const char* prompt) {
 #endif
 }
 
-/// Last-resort username for getuser(): getpwuid(getuid())->pw_name.
-/// Returns "" when the uid has no passwd entry (the .dr layer falls back to
-/// env vars first, this only when those are unset). Matches CPython's
-/// getpass.getuser() final branch.
+/// Last-resort username for getuser(): getpwuid(getuid())->pw_name, or ""
+/// when the uid has no passwd entry. Matches CPython's getuser() final branch.
 const char* dragon_getpass_pwname(void) {
 #ifdef _WIN32
     return dragon_string_alloc("", 0);

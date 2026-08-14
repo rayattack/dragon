@@ -1,9 +1,6 @@
-/// Dragon Runtime - Zstandard wrappers
-///
-/// One-shot bytes-in / bytes-out wrappers around the system libzstd. The
-/// streaming decompress path (used when a frame omits the content-size
-/// hint) keeps this TU dependent on libzstd only - symbol references stay
-/// inside this object, so the linker pulls libzstd just when `needsZstd`.
+/// Dragon Runtime - Zstandard wrappers. One-shot bytes-in/bytes-out around
+/// system libzstd; the streaming decompress path handles frames that omit the
+/// content-size hint. Own TU so libzstd links only when `needsZstd`.
 
 #include "runtime_internal.h"
 
@@ -11,9 +8,8 @@
 
 #include <cstdlib>
 
-// Hard ceiling on decompressed output (matches DRAGON_ZLIB_MAX_OUTPUT). A
-// crafted zstd frame can lie about its content-size or stream forever; we cap
-// both paths to keep the decompression-bomb attack from OOMing the process.
+// Hard ceiling on decompressed output (matches DRAGON_ZLIB_MAX_OUTPUT): a
+// crafted frame can lie about content-size or stream forever otherwise.
 static constexpr int64_t DRAGON_ZSTD_MAX_OUTPUT = 1LL << 28;
 
 extern "C" {
@@ -37,17 +33,16 @@ DragonBytes* dragon_zstd_compress(DragonBytes* src, int64_t level) {
     return out;
 }
 
-/// Decompress a Zstandard frame. Uses the embedded content-size field for
-/// a single-shot allocation when present, falls back to streaming when the
-/// frame was produced without size hints (e.g. piped through `zstd -`).
+/// Decompress a Zstandard frame: single-shot allocation when the embedded
+/// content-size field is present, else falls back to streaming.
 DragonBytes* dragon_zstd_decompress(DragonBytes* src) {
     if (!src || src->len == 0) return dragon_bytes_new(nullptr, 0);
     unsigned long long expected =
         ZSTD_getFrameContentSize(src->data, (size_t)src->len);
     if (expected != ZSTD_CONTENTSIZE_ERROR &&
         expected != ZSTD_CONTENTSIZE_UNKNOWN) {
-        // Content-size is attacker-controlled - refuse before allocating to
-        // block the "tiny frame claims a TB of output" allocator-DoS path.
+        // Content-size is attacker-controlled; refuse before allocating to
+        // block a tiny frame claiming a TB of output (allocator DoS).
         if ((int64_t)expected > DRAGON_ZSTD_MAX_OUTPUT) {
             dragon_raise_exc_cstr(50, "zstd: decompressed output exceeds maximum size");
             return nullptr;
@@ -69,10 +64,8 @@ DragonBytes* dragon_zstd_decompress(DragonBytes* src) {
         std::free(buf);
         return out;
     }
-    // Streaming path - frame produced without content-size hint. Pull
-    // chunks through ZSTD_decompressStream and grow the output buffer
-    // geometrically. ZSTD_DStreamInSize / OutSize are the algorithm's
-    // recommended block sizes (currently 128KB out / 128KB in).
+    // Streaming path: no content-size hint. Pull chunks through
+    // ZSTD_decompressStream, growing the output buffer geometrically.
     if (expected == ZSTD_CONTENTSIZE_ERROR) {
         dragon_raise_exc_cstr(50, "zstd: not a valid zstd frame");
         return nullptr;
@@ -98,10 +91,8 @@ DragonBytes* dragon_zstd_decompress(DragonBytes* src) {
         return nullptr;
     }
     size_t used = 0;
-    // r holds the last ZSTD_decompressStream return. It is 0 only when a
-    // frame has been fully decoded; any other value means "more input
-    // expected". Start at a nonzero sentinel so an input that never reaches
-    // end-of-frame is treated as incomplete. See the post-loop check.
+    // r is the last ZSTD_decompressStream return; 0 means frame fully decoded.
+    // Nonzero sentinel start so an input that never completes reads incomplete.
     size_t r = 1;
     ZSTD_inBuffer in = { src->data, (size_t)src->len, 0 };
     while (in.pos < in.size) {
@@ -139,13 +130,9 @@ DragonBytes* dragon_zstd_decompress(DragonBytes* src) {
         if (r == 0) break;          // frame complete
     }
     ZSTD_freeDStream(ds);
-    // Truncated frame: the loop drained all input (in.pos == in.size) but
-    // ZSTD never signalled end-of-frame (the last r was nonzero, meaning it
-    // still expected more bytes). Unlike zlib, zstd's streaming API does not
-    // raise on premature end - it just stops producing output - so without
-    // this check we would hand the caller a SHORT (often empty) payload and
-    // report success. That is silent data loss on a corrupt/clipped archive
-    // or a half-received network message. Raise instead.
+    // Unlike zlib, zstd's streaming API doesn't raise on premature end - it
+    // just stops producing output - so a nonzero final `r` here means a
+    // truncated frame that would otherwise silently return a short payload as success.
     if (r != 0) {
         std::free(buf);
         dragon_raise_exc_cstr(50, "zstd: truncated or incomplete frame");

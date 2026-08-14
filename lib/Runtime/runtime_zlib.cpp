@@ -1,14 +1,7 @@
-/// Dragon Runtime - gzip / zlib wrappers
-///
-/// One-shot bytes-in / bytes-out wrappers around the system zlib library.
-/// Pythonic streaming layers on top in stdlib/gzip.dr by chunking - the
-/// runtime stays on zlib's hottest path (single deflate pass, single
-/// inflate pass) without Dragon-side state machinery.
-///
-/// Lives in its own TU so the static archive can be pulled into a binary
-/// that uses zstd alone (or vice versa) without dragging libz too. The
-/// linker emits `-lz` only when forwardDeclareFunctions saw a
-/// `dragon_zlib_*` extern (gated on `needsZ`).
+/// Dragon Runtime - gzip/zlib wrappers. One-shot bytes-in/bytes-out around
+/// system zlib (single deflate/inflate pass); stdlib/gzip.dr layers Pythonic
+/// streaming on top by chunking. Own TU so `-lz` links only when a program
+/// uses `dragon_zlib_*` (gated on `needsZ`), independent of zstd linking.
 
 #include "runtime_internal.h"
 
@@ -17,11 +10,9 @@
 #include <cstdlib>
 #include <cstring>
 
-// Hard ceiling on decompressed output. A few kB of crafted zlib can otherwise
-// expand into GBs (the classic decompression-bomb) and OOM the process. Python
-// exposes zlib.decompress(..., max_length=N); we apply the same idea but with
-// an implicit cap when the Dragon API doesn't take one. 256 MiB matches the
-// envelope of the largest legitimate payload we ship (vendored stdlib tarballs).
+// Hard ceiling on decompressed output: a few kB of crafted zlib can expand to
+// GBs (decompression-bomb) and OOM the process. 256 MiB matches our largest
+// legitimate payload (vendored stdlib tarballs).
 static constexpr int64_t DRAGON_ZLIB_MAX_OUTPUT = 1LL << 28;
 
 extern "C" {
@@ -32,8 +23,7 @@ DragonBytes* dragon_zlib_compress(DragonBytes* src, int64_t level) {
     if (!src || src->len == 0) return dragon_bytes_new(nullptr, 0);
     z_stream s;
     std::memset(&s, 0, sizeof(s));
-    // windowBits = 15 (max LZ77 window) + 16 (gzip wrapper). MEM_LEVEL=8
-    // is zlib's default, balanced for speed/RAM on registry-class inputs.
+    // windowBits = 15 (max LZ77 window) + 16 (gzip wrapper); MEM_LEVEL=8 default.
     if (deflateInit2(&s, (int)level, Z_DEFLATED, 15 + 16, 8,
                      Z_DEFAULT_STRATEGY) != Z_OK) {
         dragon_raise_exc_cstr(50 /* OSError */, "zlib: deflateInit2 failed");
@@ -41,8 +31,7 @@ DragonBytes* dragon_zlib_compress(DragonBytes* src, int64_t level) {
     }
     s.next_in = (Bytef*)src->data;
     s.avail_in = (uInt)src->len;
-    // deflateBound is exact for Z_FINISH single-call compression - no realloc
-    // loop needed, so we allocate once and never copy.
+    // deflateBound is exact for single-call Z_FINISH: allocate once, no realloc.
     uLong cap = deflateBound(&s, (uLong)src->len);
     uint8_t* buf = (uint8_t*)std::malloc(cap > 0 ? cap : 1);
     s.next_out = buf;
@@ -61,9 +50,8 @@ DragonBytes* dragon_zlib_compress(DragonBytes* src, int64_t level) {
     return out;
 }
 
-/// Decompress gzip- or zlib-format bytes. windowBits = 15 + 32 enables the
-/// auto-detect mode that handles both wrappers (matches Python's
-/// `zlib.decompress(..., wbits=47)` shortcut and `gzip.decompress`).
+/// Decompress gzip- or zlib-format bytes. windowBits = 15 + 32 auto-detects
+/// either wrapper (matches Python's `zlib.decompress(..., wbits=47)`).
 DragonBytes* dragon_zlib_decompress(DragonBytes* src) {
     if (!src || src->len == 0) return dragon_bytes_new(nullptr, 0);
     z_stream s;
@@ -74,9 +62,8 @@ DragonBytes* dragon_zlib_decompress(DragonBytes* src) {
     }
     s.next_in = (Bytef*)src->data;
     s.avail_in = (uInt)src->len;
-    // Output size is unknown up front. Start with 4x the input (typical
-    // text compression ratio) and grow geometrically. Geometric growth
-    // gives O(n) total work even for pathological inputs.
+    // Unknown output size: start at 4x input (typical text ratio), grow
+    // geometrically for O(n) total work even on pathological inputs.
     size_t cap = (size_t)src->len * 4;
     if (cap < 4096) cap = 4096;
     if ((int64_t)cap > DRAGON_ZLIB_MAX_OUTPUT) cap = (size_t)DRAGON_ZLIB_MAX_OUTPUT;
@@ -155,20 +142,14 @@ DragonBytes* dragon_zlib_decompress(DragonBytes* src) {
     return out;
 }
 
-/// Compress `src` to RAW DEFLATE bytes (RFC 1951 - no zlib/gzip header or
-/// trailer). This is the exact stream a PKWARE ZIP entry (method 8) stores:
-/// the local file header carries CRC-32 / sizes out-of-band, so the deflate
-/// payload itself must be header-less. Selected via deflateInit2 with a
-/// NEGATIVE windowBits (-15 = max 32 KiB window, raw mode). NOT a stripped
-/// wrapper - zlib emits the header-less stream directly. `level` is 0..9
-/// (zlib's scale; -1 = default 6). Used by stdlib/zipfile.dr.
+/// Compress `src` to RAW DEFLATE bytes (RFC 1951, no zlib/gzip header/trailer) -
+/// the exact stream a PKWARE ZIP method-8 entry stores. Used by stdlib/zipfile.dr.
 DragonBytes* dragon_zlib_compress_raw(DragonBytes* src, int64_t level) {
     if (!src || src->len == 0) return dragon_bytes_new(nullptr, 0);
     z_stream s;
     std::memset(&s, 0, sizeof(s));
-    // windowBits = -15: the negative sign selects raw deflate (RFC 1951),
-    // suppressing both the 2-byte zlib header and the 4-byte adler trailer.
-    // |15| is the maximum LZ77 window; MEM_LEVEL=8 is zlib's default.
+    // windowBits = -15 selects raw deflate (RFC 1951): no zlib header/adler
+    // trailer; |15| is the max LZ77 window, MEM_LEVEL=8 is zlib's default.
     if (deflateInit2(&s, (int)level, Z_DEFLATED, -15, 8,
                      Z_DEFAULT_STRATEGY) != Z_OK) {
         dragon_raise_exc_cstr(50 /* OSError */, "zlib: deflateInit2 (raw) failed");
@@ -194,11 +175,8 @@ DragonBytes* dragon_zlib_compress_raw(DragonBytes* src, int64_t level) {
     return out;
 }
 
-/// Decompress RAW DEFLATE bytes (RFC 1951 - no header/trailer), the inverse
-/// of dragon_zlib_compress_raw and the consumer for a ZIP method-8 entry's
-/// stored payload. windowBits = -15 puts inflate in raw mode (no wrapper
-/// expected). Same geometric-growth + decompression-bomb guard as the
-/// wrapped path. Used by stdlib/zipfile.dr.
+/// Decompress RAW DEFLATE bytes (RFC 1951, no header/trailer): the inverse of
+/// dragon_zlib_compress_raw, used by stdlib/zipfile.dr for ZIP method-8 entries.
 DragonBytes* dragon_zlib_decompress_raw(DragonBytes* src) {
     if (!src || src->len == 0) return dragon_bytes_new(nullptr, 0);
     z_stream s;

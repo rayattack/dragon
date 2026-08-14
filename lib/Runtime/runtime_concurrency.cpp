@@ -3,13 +3,8 @@
 #include "runtime_internal.h"
 #include <errno.h>
 #include <time.h>  // clock_gettime / timespec / nanosleep for timed lock acquire
-// C++ standard library headers must be included before extern "C" - they
-// declare C++ types/templates that don't make sense in C linkage. The Windows
-// I/O loop below uses <vector>/<chrono>/<algorithm> for its WSAPoll dispatch.
-// These stay Windows-only: on Linux/macOS the runtime archive is linked into
-// Dragon programs with `cc` (no libstdc++), so the non-Windows paths must be
-// pure C - the R1 deadline side list uses an intrusive list + clock_gettime,
-// not std::vector/std::chrono, precisely to keep that link C-only.
+// C++ headers must precede extern "C" (Windows-only, for WSAPoll's <vector>/<chrono>). Linux/macOS
+// link this archive with `cc`, no libstdc++, so those paths stay pure C (intrusive list, not std::vector).
 #ifdef _WIN32
   #include <vector>
   #include <chrono>
@@ -41,16 +36,8 @@
 
 extern "C" {
 
-// SIGPIPE suppression for socket writes. A peer that resets its connection (a
-// WebSocket/HTTP client closing with unread data) makes the server's next
-// send(2) raise SIGPIPE, whose default disposition kills the whole process -
-// one dropped client would take the server down. We suppress it PER SEND
-// (MSG_NOSIGNAL on Linux, the SO_NOSIGPIPE socket option on macOS/BSD) rather
-// than ignoring SIGPIPE process-wide: a process-wide SIG_IGN is inherited
-// across fork/execve into child processes (e.g. a `popen("yes | head")`
-// pipeline), suppressing the SIGPIPE that those children rely on to terminate.
-// Per-send suppression affects only our own socket writes; send() then returns
-// EPIPE, which dragon_nb_send surfaces as -1 and the caller handles gracefully.
+// A reset peer's next send(2) raises SIGPIPE, whose default disposition kills the whole process.
+// Suppressed PER SEND (MSG_NOSIGNAL/SO_NOSIGPIPE), not via process-wide SIG_IGN, which child pipelines rely on.
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0   // not defined on macOS/BSD; SO_NOSIGPIPE covers those
 #endif
@@ -106,29 +93,24 @@ static void* dragon_thread_entry(void* raw) {
 }
 
 DragonThread* dragon_thread_fire(void* fn, int64_t* args, int64_t nargs) {
-    DragonThread* t = (DragonThread*)malloc(sizeof(DragonThread));
+    DragonThread* t = (DragonThread*)dragon_xmalloc(sizeof(DragonThread));
     t->result = 0;
     t->done = 0;
     t->joined = 0;
     t->started = 0;
-    DragonFireArgs* fa = (DragonFireArgs*)malloc(sizeof(DragonFireArgs));
+    DragonFireArgs* fa = (DragonFireArgs*)dragon_xmalloc(sizeof(DragonFireArgs));
     fa->thread = t;
     fa->fn = fn;
     if (nargs > 0) {
-        fa->args = (int64_t*)malloc(sizeof(int64_t) * nargs);
+        fa->args = (int64_t*)dragon_xmalloc_n(nargs, sizeof(int64_t));
         memcpy(fa->args, args, sizeof(int64_t) * nargs);
     } else {
         fa->args = NULL;
     }
     fa->nargs = nargs;
     dragon_gc_go_concurrent();  // a heap-mutating OS thread is starting
-    // Check pthread_create: on EAGAIN (thread-limit exhaustion, the exact
-    // long-running-process failure mode) the entry never runs, so t->done is
-    // never set and t->tid is garbage. The scoped-fire join would then
-    // pthread_join a garbage tid (undefined behavior) and block forever on
-    // done, and fa / fa->args / t all leak. On failure,
-    // mark the handle done with an error result and free the args so the join
-    // returns immediately instead of hanging on UB.
+    // On pthread_create EAGAIN (thread-limit exhaustion) the entry never runs, so join would block
+    // forever on a garbage tid and leak fa/args/t. Mark done + free args here so join returns instead.
     int rc = pthread_create(&t->tid, NULL, dragon_thread_entry, fa);
     if (rc != 0) {
         if (fa->args) free(fa->args);
@@ -147,29 +129,21 @@ int64_t dragon_thread_is_done(DragonThread* t) {
 
 int64_t dragon_thread_join(DragonThread* t) {
     if (!t) return 0;
-    // Defeat a double-join: pthread_join twice on one tid is UB and free(t)
-    // twice is a double-free. Only the CAS winner joins + frees. A Task handle
-    // is single-owner in the type system (the binding annotation is mandatory
-    // and rebinding is rejected), so a losing caller can only be a deliberately
-    // shared still-live handle; it returns the result without touching t again.
+    // Defeat a double-join (pthread_join twice is UB, free(t) twice is a double-free): only the CAS
+    // winner joins+frees. Task handles are single-owner, so a losing caller just returns the cached result.
     int8_t expected = 0;
     if (!__atomic_compare_exchange_n(&t->joined, &expected, (int8_t)1, false,
                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
         return __atomic_load_n(&t->result, __ATOMIC_ACQUIRE);
     }
-    // Only join a thread that actually started: on a pthread_create failure
-    // t->tid is garbage, and pthread_join on it is undefined. The
-    // failed handle already has done=1 and result=0.
+    // Only join a thread that actually started: on pthread_create failure t->tid is garbage
+    // (pthread_join on it is UB); the failed handle already has done=1, result=0.
     if (t->started)
         pthread_join(t->tid, NULL);
     int64_t result = t->result;
     free(t);
     return result;
 }
-
-//===----------------------------------------------------------------------===//
-// OS Thread API (manual Thread class)
-//===----------------------------------------------------------------------===//
 
 typedef struct {
     pthread_t tid;
@@ -209,12 +183,12 @@ static void* dragon_osthread_entry(void* raw) {
 
 /// Create an OS thread handle (does not start yet)
 void* dragon_osthread_new(void* fn, int64_t* args, int64_t nargs) {
-    DragonOSThread* t = (DragonOSThread*)calloc(1, sizeof(DragonOSThread));
+    DragonOSThread* t = (DragonOSThread*)dragon_xcalloc_n(1, sizeof(DragonOSThread));
     t->fn = fn;
     t->done = 0;
     t->started = 0;
     if (nargs > 0 && args) {
-        t->args = (int64_t*)malloc(sizeof(int64_t) * nargs);
+        t->args = (int64_t*)dragon_xmalloc_n(nargs, sizeof(int64_t));
         memcpy(t->args, args, sizeof(int64_t) * nargs);
     } else {
         t->args = NULL;
@@ -266,36 +240,16 @@ int64_t dragon_osthread_is_alive(void* handle) {
     return (started && !done) ? 1 : 0;
 }
 
-//===----------------------------------------------------------------------===//
-// Sync primitive sizes - ask the platform, do not guess
-//===----------------------------------------------------------------------===//
-// stdlib/threading.dr used to malloc hardcoded x86_64-Linux struct sizes and
-// call them "padded for other platforms' layouts". They are not: Darwin's
-// pthread_rwlock_t is 200 bytes against the 64 assumed, so pthread_rwlock_init
-// wrote 136 bytes past the end of the block and RWLock segfaulted on macOS.
-//
-// Only the runtime is compiled against the target's own pthread.h, so only the
-// runtime can answer this. Callers allocate sizeof(), never a literal.
+// stdlib/threading.dr malloc'd hardcoded x86_64-Linux struct sizes: Darwin's pthread_rwlock_t is
+// 200 bytes against the 64 assumed, so pthread_rwlock_init wrote past the block and segfaulted on macOS.
 
 int64_t dragon_sizeof_mutex(void)  { return (int64_t)sizeof(pthread_mutex_t); }
 int64_t dragon_sizeof_rwlock(void) { return (int64_t)sizeof(pthread_rwlock_t); }
 int64_t dragon_sizeof_cond(void)   { return (int64_t)sizeof(pthread_cond_t); }
 int64_t dragon_sizeof_sem(void)    { return (int64_t)sizeof(sem_t); }
 
-//===----------------------------------------------------------------------===//
-// Barrier - portable rendezvous for threading.Barrier
-//===----------------------------------------------------------------------===//
-// pthread_barrier_* is an *optional* part of POSIX (the _POSIX_BARRIERS option)
-// and Apple has never shipped it. stdlib/threading.dr called it directly, which
-// left three undefined symbols in every macOS link that pulled in `threading` -
-// and that is every program importing the module, because the class's methods
-// are emitted whether or not the program ever constructs a Barrier.
-//
-// Implemented here as a mutex + condition variable with a generation counter,
-// the textbook construction. Deliberately pure C: on Linux/macOS this archive
-// is linked into user programs with `cc` and no libstdc++, so std::mutex and
-// std::condition_variable are off-limits (see the header comment at the top of
-// this file). pthread mutexes and condvars are mandatory POSIX, unlike barriers.
+// pthread_barrier_* is optional POSIX and Apple never shipped it, leaving 3 undefined symbols on
+// every macOS link that imports threading. Implemented here as mutex+condvar+generation, pure C.
 
 typedef struct DragonBarrier {
     pthread_mutex_t mutex;
@@ -325,10 +279,8 @@ void* dragon_barrier_new(int64_t count) {
     return b;
 }
 
-/// Block until `count` threads have arrived. Returns 1 to exactly one waiter
-/// per trip - mirroring PTHREAD_BARRIER_SERIAL_THREAD, so callers can elect a
-/// single thread to do post-rendezvous work - and 0 to the others. -1 on a
-/// NULL handle.
+/// Block until `count` threads have arrived. Returns 1 to exactly one waiter per trip (mirroring
+/// PTHREAD_BARRIER_SERIAL_THREAD) and 0 to the others; -1 on a NULL handle.
 int64_t dragon_barrier_wait(void* handle) {
     DragonBarrier* b = (DragonBarrier*)handle;
     if (!b) return -1;
@@ -343,9 +295,8 @@ int64_t dragon_barrier_wait(void* handle) {
         pthread_mutex_unlock(&b->mutex);
         return 1;
     }
-    // Wait on the generation rather than a flag: a thread that re-enters a
-    // reused barrier must not be released by the previous trip's broadcast,
-    // and the loop absorbs spurious wakeups.
+    // Wait on the generation rather than a flag: a thread re-entering a reused barrier must
+    // not be released by the previous trip's broadcast; the loop absorbs spurious wakeups.
     while (gen == b->generation) {
         pthread_cond_wait(&b->cond, &b->mutex);
     }
@@ -362,10 +313,6 @@ int64_t dragon_barrier_destroy(void* handle) {
     free(b);
     return 0;
 }
-
-//===----------------------------------------------------------------------===//
-// Green Thread Runtime (M:N scheduling via minicoro)
-//===----------------------------------------------------------------------===//
 
 // Forward: DragonVThread was declared near exception globals (Phase 1).
 // We extend it here with the coroutine handle and run-queue linkage.
@@ -406,19 +353,14 @@ static void scheduler_enqueue(DragonVThread* vt) {
 #define PARK_PARKED 2
 #define PARK_FIRED  3
 
-// Called by every scheduler-parking path (via io_post_request) right BEFORE the
-// request becomes visible to the reactor, marking that this vthread is about to
-// suspend for I/O. Release so the reactor thread sees a coherent view.
+// Called by every scheduler-parking path right BEFORE the request becomes visible to the reactor,
+// marking this vthread about to suspend for I/O. Release so the reactor sees a coherent view.
 static inline void dragon_io_arm_park(DragonVThread* vt) {
     __atomic_store_n(&vt->park_state, PARK_ARMED, __ATOMIC_RELEASE);
 }
 
-// Called by the reactor when a watched fd/timer fires, INSTEAD of enqueuing
-// directly. Enqueues iff the worker has already confirmed the coro is parked;
-// otherwise it hands the enqueue duty to the worker (which will observe FIRED
-// when it finishes parking). Idempotent against a spurious second fire (a
-// NONE/FIRED state simply does nothing). This is the reactor half of the
-// exactly-once, park-then-enqueue guarantee.
+// Called by the reactor when a watched fd/timer fires, instead of enqueuing directly: enqueues iff
+// the worker already confirmed parked, else hands the duty to the worker. Idempotent (NONE/FIRED no-ops).
 static void dragon_io_wake(DragonVThread* vt) {
     for (;;) {
         int32_t st = __atomic_load_n(&vt->park_state, __ATOMIC_ACQUIRE);
@@ -442,10 +384,8 @@ static void dragon_io_wake(DragonVThread* vt) {
     }
 }
 
-// Called by the worker AFTER mco_resume returns and the coro is suspended, to
-// finish the park for an I/O/sleep yield. Returns true if the worker must
-// enqueue the vthread now (the reactor already fired during the yield window);
-// false if the vthread is safely parked and the reactor will enqueue on fire.
+// Called by the worker after mco_resume returns and the coro is suspended, to finish the park
+// for an I/O/sleep yield. Returns true if the reactor already fired and the worker must enqueue now.
 static bool dragon_vthread_finish_park(DragonVThread* vt) {
     int32_t expected = PARK_ARMED;
     if (__atomic_compare_exchange_n(&vt->park_state, &expected, PARK_PARKED,
@@ -468,15 +408,11 @@ static DragonVThread* scheduler_dequeue() {
     return vt;
 }
 
-// D030: Generic vthread_entry deleted. Each spawn site now generates its own
-// per-callsite trampoline that knows the exact native signature of its target,
-// loads args from a typed struct via direct GEPs, and stores the result via
-// dragon_vthread_set_result. No i64 funneling, no nargs switch, no Fn0..Fn8.
+// D030: generic vthread_entry deleted. Each spawn site generates its own per-callsite trampoline
+// that knows its target's exact native signature and stores the result via dragon_vthread_set_result.
 
-// Drop one reference on a vthread; the last one frees the struct + coroutine
-// stack + lazily-grown unwind arrays. Used for both the worker's coro ref and
-// the Task handle ref (join winner / detach), so neither side needs to know if
-// it is last - the atomic decrement-to-zero decides.
+// Drop one reference on a vthread; the last one frees the struct + coroutine stack + unwind arrays.
+// Used by both the worker's coro ref and the Task handle ref; the atomic decrement-to-zero decides.
 static void vthread_release(DragonVThread* vt) {
     if (__atomic_sub_fetch(&vt->refs, 1, __ATOMIC_ACQ_REL) != 0) return;
     mco_destroy(vt->coro);
@@ -491,10 +427,8 @@ static void vthread_release(DragonVThread* vt) {
     free(vt);
 }
 
-// A finished (MCO_DEAD) vthread: mark done, wake any joiner, drop the coro ref -
-// EXACTLY ONCE, even if processed at MCO_DEAD more than once (the I/O reactor can
-// re-enqueue a vthread that finished concurrently). The done 0->1 CAS is the
-// single-fire gate: the second processing CASes a no-op and returns.
+// A finished (MCO_DEAD) vthread: mark done, wake any joiner, drop the coro ref EXACTLY ONCE, even
+// if processed twice (the reactor can re-enqueue a concurrently-finished vthread). done 0->1 CAS gates it.
 static void vthread_mark_done_and_release(DragonVThread* vt) {
     int8_t expected = 0;
     if (!__atomic_compare_exchange_n(&vt->done, &expected, (int8_t)1, false,
@@ -522,25 +456,12 @@ static void* scheduler_worker(void* arg) {
 
         if (!vt) continue;
 
-        // Set per-worker TLS so exception functions use this vthread's state.
-        // Do NOT reset vt->exc_sp here: it is initialized to -1 once at spawn
-        // (dragon_vthread_spawn_typed) and must PERSIST across I/O yields. A
-        // green thread that yields inside a try/except (e.g. a blocking recv)
-        // is resumed through this same path; resetting exc_sp would discard its
-        // live exception frames, so the eventual raise would find no handler
-        // (it would print "Unhandled exception" and unwind past the try). The
-        // setjmp buffers live in vt->exc_stack and stay valid across yields
-        // because the coroutine keeps its own stack.
+        // Set per-worker TLS so exception functions use this vthread's state. Do NOT reset
+        // vt->exc_sp here: it must PERSIST across I/O yields or a resumed try/except loses its handler.
         __current_vthread = vt;
 
-        // Only ever resume a parked (SUSPENDED) coroutine. A vthread can be
-        // enqueued by the I/O reactor when a watched fd becomes ready; under a
-        // rare timing the same vthread can be enqueued for a readiness that
-        // resolves as it is already finishing, so a worker may dequeue one that
-        // has already reached MCO_DEAD. Resuming a non-suspended coroutine is a
-        // minicoro error and would corrupt the scheduler - guard it. If it is
-        // DEAD, make sure any joiner is woken (idempotent with the normal
-        // completion path below) before dropping it.
+        // Only ever resume a parked (SUSPENDED) coroutine: a rare timing can enqueue a vthread that
+        // reaches MCO_DEAD before dequeue. Resuming a non-suspended coroutine corrupts the scheduler.
         if (mco_status(vt->coro) != MCO_SUSPENDED) {
             if (mco_status(vt->coro) == MCO_DEAD) {
                 vthread_mark_done_and_release(vt);
@@ -549,12 +470,8 @@ static void* scheduler_worker(void* arg) {
             continue;
         }
 
-        // Swap in this vthread's live-frame count for the inline cleanup gate.
-        // The worker thread itself runs no Dragon try-frames between vthreads, so
-        // its TLS count is 0 here; save it, install the vthread's, and on
-        // yield/return save the vthread's count back (it may resume on a
-        // different worker, so the count must travel with the vthread, not the
-        // OS thread). Balanced with push/pop_frame inside the body.
+        // Swap in this vthread's live-frame count for the inline cleanup gate: it must travel with
+        // the vthread (which may resume on a different worker), not the OS thread. Save/restore around resume.
         int __saved_active_frames = __dragon_active_frames;
         __dragon_active_frames = vt->active_frames;
 
@@ -565,23 +482,16 @@ static void* scheduler_worker(void* arg) {
         __current_vthread = NULL;
 
         if (mco_status(vt->coro) == MCO_DEAD) {
-            // Vthread finished: mark done (RELEASE, pairs with the lock-free
-            // is_alive / join reads), wake any joiner, and drop the coro ref -
-            // which frees the vthread if its handle was already detached/joined.
+            // Vthread finished: mark done (RELEASE, pairs with lock-free is_alive/join reads), wake
+            // any joiner, and drop the coro ref (frees the vthread if already detached/joined).
             vthread_mark_done_and_release(vt);
         } else if (__atomic_load_n(&vt->park_state, __ATOMIC_ACQUIRE) == PARK_NONE) {
-            // Cooperative yield (never armed for I/O) - re-enqueue immediately.
-            // Keyed on park_state, NOT vt->yield_reason: the reactor overwrites
-            // yield_reason to YIELD_COOP when it fires, so a yield_reason test
-            // here raced with the reactor and could re-enqueue an I/O-parked
-            // vthread the reactor had ALSO enqueued (the double-enqueue half of
-            // the armed-before-yield bug).
+            // Cooperative yield: re-enqueue immediately. Keyed on park_state, NOT vt->yield_reason
+            // (the reactor overwrites it to YIELD_COOP on fire, which could double-enqueue).
             scheduler_enqueue(vt);
         } else {
-            // I/O / sleep park. Complete the handshake now that the coro is
-            // suspended. If the reactor already fired during the yield window,
-            // WE enqueue (it deferred to us); otherwise the vthread is parked
-            // and the reactor will enqueue exactly once when the fd/timer fires.
+            // I/O/sleep park: complete the handshake now the coro is suspended. If the reactor
+            // already fired during the yield window we enqueue; otherwise it will, exactly once.
             if (dragon_vthread_finish_park(vt)) {
                 scheduler_enqueue(vt);
             }
@@ -594,7 +504,7 @@ static void scheduler_init() {
     // Scheduler workers are heap-mutating OS threads - switch GC track/untrack/
     // decref onto the locked path from now on (see gc_concurrent).
     dragon_gc_go_concurrent();
-    __scheduler = (DragonScheduler*)calloc(1, sizeof(DragonScheduler));
+    __scheduler = (DragonScheduler*)dragon_xcalloc_n(1, sizeof(DragonScheduler));
     pthread_mutex_init(&__scheduler->lock, NULL);
     pthread_cond_init(&__scheduler->not_empty, NULL);
     __scheduler->head = NULL;
@@ -621,18 +531,13 @@ static void scheduler_init() {
     }
 }
 
-/// D030: Spawn a green thread with a per-callsite typed args struct.
-///   trampoline: codegen-synthesized; receives mco_coro* and unpacks args itself
-///   args:       pointer to a stack-allocated typed args struct at the call site
-///               (field 0 reserved for the DragonVThread*, patched here)
-///   args_size:  byte size of the struct for malloc + memcpy (0 if no args)
-/// The trampoline owns the heap copy and is responsible for free()ing it
-/// before returning; dragon_vthread_join never touches args.
+/// D030: Spawn a green thread with a per-callsite typed args struct (field 0 reserved for the
+/// DragonVThread*, patched here). The trampoline owns the heap copy and frees it; join never touches args.
 DragonVThread* dragon_vthread_spawn_typed(
     void (*trampoline)(mco_coro*), void* args, int64_t args_size) {
     pthread_once(&__scheduler_once, scheduler_init);
 
-    DragonVThread* vt = (DragonVThread*)calloc(1, sizeof(DragonVThread));
+    DragonVThread* vt = (DragonVThread*)dragon_xcalloc_n(1, sizeof(DragonVThread));
     vt->exc_sp = -1;
     vt->done = 0;
     vt->yield_reason = YIELD_COOP;
@@ -665,25 +570,19 @@ DragonVThread* dragon_vthread_spawn_typed(
     return vt;
 }
 
-/// D030: Trampoline-side helper to record the green thread's return value.
-/// Codegen emits this call inside the per-callsite trampoline after the
-/// target returns. The store happens-before the worker's release-store of
-/// vt->done (in scheduler_worker), so join's acquire-load sees a coherent
-/// result without further sync.
+/// D030: Trampoline-side helper to record the green thread's return value. The store happens-before
+/// the worker's release-store of vt->done, so join's acquire-load sees a coherent result.
 void dragon_vthread_set_result(DragonVThread* vt, int64_t res) {
     if (vt) vt->result = res;
 }
 
-/// Join a green thread: block until done, return result, free resources.
-/// D030: args buffer is owned by the per-callsite trampoline (free'd before
-/// the coroutine returns) - join must never free args.
+/// Join a green thread: block until done, return result, free resources. D030: args buffer is
+/// owned by the per-callsite trampoline (free'd before return) - join must never free args.
 int64_t dragon_vthread_join(DragonVThread* vt) {
     if (!vt) return 0;
 
-    // Double-join guard: only the CAS winner destroys + frees. A losing caller
-    // must still see a completed result, so block on done first, then return
-    // the cached result without touching the (possibly-freed) handle's owned
-    // resources. See the `joined` field comment for the ownership rationale.
+    // Double-join guard: only the CAS winner destroys + frees. A losing caller still blocks on
+    // done, then returns the cached result without touching the (possibly-freed) handle's resources.
     int8_t expected = 0;
     bool winner = __atomic_compare_exchange_n(&vt->joined, &expected, (int8_t)1,
                                               false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
@@ -696,18 +595,14 @@ int64_t dragon_vthread_join(DragonVThread* vt) {
     pthread_mutex_unlock(&vt->join_lock);
 
     int64_t result = vt->result;
-    // The CAS winner owns the handle ref and drops it (frees iff the coro is
-    // also done). A losing caller (a deliberately-shared still-live handle)
-    // holds no ref and must not release - it just returns the cached result.
+    // The CAS winner owns the handle ref and drops it (frees iff the coro is also done); a losing
+    // caller holds no ref and must not release - it just returns the cached result.
     if (winner) vthread_release(vt);
     return result;
 }
 
-/// Detach a fire-and-forget vthread: a `fire fn()` / `fire { ... }` whose Task
-/// handle is discarded (never awaited / joined). Claim the handle via the same
-/// CAS join uses (so a stray later join is a no-op loser) and drop the handle
-/// ref. The worker drops the coro ref on MCO_DEAD; the last release frees the
-/// struct + its ~2MB coroutine stack - closing the fire-and-forget leak (#2).
+/// Detach a fire-and-forget vthread whose Task handle is discarded: claims the handle via the
+/// same CAS join uses and drops the handle ref, closing the fire-and-forget leak (#2).
 void dragon_vthread_detach(DragonVThread* vt) {
     if (!vt) return;
     int8_t expected = 0;
@@ -722,25 +617,8 @@ int64_t dragon_vthread_is_alive(DragonVThread* vt) {
     return !__atomic_load_n(&vt->done, __ATOMIC_ACQUIRE) ? 1 : 0;
 }
 
-/// Reclaim a generator whose body raised an exception that propagated out.
-///
-/// Dragon's setjmp/longjmp exception model longjmps DIRECTLY out of the
-/// generator's mco_resume (it does not unwind back through mco_yield), so the
-/// coroutine is abandoned mid-run: it stays MCO_RUNNING and minicoro's
-/// per-thread running-coroutine pointer (`mco_current_co`) is left dangling at
-/// it - which both prevents mco_destroy from reclaiming the ~12KB coroutine
-/// stack AND would corrupt the next resume on this thread. This undoes
-/// _mco_prepare_jumpin's bookkeeping (restoring the resumer as the running
-/// coroutine) and marks the abandoned coroutine MCO_DEAD so a subsequent
-/// dragon_generator_destroy reclaims it cleanly. Idempotent / no-op unless the
-/// coroutine is actually MCO_RUNNING. Must run on the same thread, at the
-/// longjmp-arrival site, BEFORE any further coroutine is resumed.
-///
-/// Only the MINICORO_IMPL translation unit (this file) can see mco_current_co,
-/// so this lives here rather than alongside dragon_generator_destroy.
-/// The generator body's own owned heap locals are NOT freed here - they were
-/// pushed onto the consumer's unwind cleanup stack and are freed by the
-/// consumer's dragon_exc_cleanup_unwind at the same longjmp arrival.
+/// Reclaim a generator whose body raised via longjmp out of mco_resume (stuck MCO_RUNNING, dangling
+/// mco_current_co). Must run same-thread, at the longjmp site, before any other coroutine resumes.
 void dragon_generator_abandon(void* gen_ptr) {
     DragonGenerator* gen = (DragonGenerator*)gen_ptr;
     if (!gen || !gen->coro) return;
@@ -753,10 +631,8 @@ void dragon_generator_abandon(void* gen_ptr) {
     co->state = MCO_DEAD;                        // now reclaimable by mco_destroy
 }
 
-//===----------------------------------------------------------------------===//
-// Platform I/O Event Loop - dedicated thread for non-blocking I/O + timers
-// Replaces libuv with raw epoll (Linux) / kqueue (macOS)
-//===----------------------------------------------------------------------===//
+// Platform I/O Event Loop: dedicated thread for non-blocking I/O + timers.
+// Replaces libuv with raw epoll (Linux) / kqueue (macOS).
 
 // I/O event types for the event loop
 enum IoEventType {
@@ -770,19 +646,15 @@ typedef struct IoRequest {
     DragonVThread*    vt;
     int               fd;        // -1 for timer-only requests
     int               event_type;
-    // For IO_EVENT_TIMER: the sleep duration in ms. For a deadline-bearing fd
-    // watch (R1 recv timeout): the timeout in ms - the reactor converts it to an
-    // absolute deadline. 0 on a plain fd watch means "no timeout, wait forever".
+    // Timer: sleep duration in ms. Deadline-bearing fd watch (R1 recv timeout): timeout in ms,
+    // converted to an absolute deadline by the reactor. 0 on a plain fd watch means wait forever.
     int64_t           timer_ms;
-    // Absolute monotonic deadline (ms) computed by the reactor when it registers
-    // a deadline-bearing fd watch; 0 = none. Lets the reactor fire the watch on
-    // timeout even if the fd never becomes ready (slowloris defense).
+    // Absolute monotonic deadline (ms) set when registering a deadline-bearing fd watch (0 = none),
+    // so the reactor can fire on timeout even if the fd never becomes ready (slowloris defense).
     int64_t           deadline_ms;
     struct IoRequest* next;     // pending-queue link (producer → reactor)
-    // Intrusive link for the reactor's deadline side list (R1, non-Windows). A
-    // plain pointer list instead of std::vector keeps the Linux/macOS runtime
-    // free of libstdc++ so Dragon programs link it with `cc`. NULL when the
-    // request is not on the deadline list.
+    // Intrusive link for the reactor's deadline side list (R1, non-Windows): a plain pointer list,
+    // not std::vector, keeps the Linux/macOS runtime libstdc++-free for the `cc` link.
     struct IoRequest* dl_next;
 } IoRequest;
 
@@ -852,10 +724,8 @@ static int win_make_socketpair(SOCKET out[2]) {
 #endif
 
 static void io_post_request(IoRequest* req) {
-    // Arm the park BEFORE the request becomes visible to the reactor. Every
-    // scheduler-parking path (fd watch, deadline watch, sleep) funnels through
-    // here immediately before its mco_yield, so this is the one place that
-    // marks "this vthread is about to suspend for I/O" for the park handshake.
+    // Arm the park BEFORE the request becomes visible to the reactor: every scheduler-parking path
+    // funnels through here right before its mco_yield, so this is the one park-handshake arm site.
     if (req->vt) dragon_io_arm_park(req->vt);
     pthread_mutex_lock(&__io_pending_lock);
     req->next = __io_pending_head;
@@ -879,20 +749,8 @@ static IoRequest* io_drain_pending() {
 }
 
 #ifndef _WIN32
-// --- Deadline-bearing fd watches (R1 recv timeout), epoll/kqueue platforms ---
-//
-// A normal fd watch parks a vthread until the fd is ready (or forever). A
-// deadline-bearing watch additionally fires on a timeout, so a peer that goes
-// silent mid-read can't pin the green thread (slowloris defense). epoll/kqueue
-// have no per-fd timeout, so the reactor tracks these in a side list and scans
-// it each loop tick, shortening the wait to the soonest deadline. Touched ONLY
-// on the single reactor thread (io_process_pending + io_thread_entry both run
-// there), so no lock is needed.
-//
-// The list is an INTRUSIVE singly-linked list (IoRequest.dl_next), not a
-// std::vector: the Linux/macOS runtime archive is linked into Dragon programs
-// with `cc`, so it must not pull in libstdc++. Windows uses its own __io_active
-// (std::vector) instead - it links with a C++ toolchain.
+// Deadline-bearing fd watches (R1 recv timeout), epoll/kqueue: fires on timeout too, so a silent peer
+// can't pin the green thread. Tracked in an intrusive side list (dl_next, not std::vector); reactor-thread-only, no lock.
 static IoRequest* __io_deadline_head = NULL;
 
 // Monotonic clock in ms - steady so a wall-clock jump can't skew a deadline.
@@ -996,9 +854,8 @@ static void* io_thread_entry(void*) {
                     // side-list entry so the expiry scan won't double-fire it.
                     io_deadline_remove(req);
                 }
-                // Park handshake: enqueue via dragon_io_wake, which enqueues only
-                // once the coro is confirmed suspended (or hands off to the
-                // parking worker). Direct scheduler_enqueue here raced the yield.
+                // Park handshake: dragon_io_wake enqueues only once suspended (or hands off to the
+                // parking worker). A direct scheduler_enqueue here used to race the yield.
                 DragonVThread* wv = req->vt;
                 free(req);
                 dragon_io_wake(wv);
@@ -1096,9 +953,8 @@ static void* io_thread_entry(void*) {
                     // Resolved by readiness before its deadline.
                     io_deadline_remove(req);
                 }
-                // Park handshake (see dragon_io_wake) - enqueue only once the
-                // coro is confirmed parked. Was a direct scheduler_enqueue that
-                // raced the yield.
+                // Park handshake (see dragon_io_wake): enqueue only once parked. Was a direct
+                // scheduler_enqueue that raced the yield.
                 DragonVThread* wv = req->vt;
                 free(req);
                 dragon_io_wake(wv);
@@ -1145,17 +1001,8 @@ static void io_init() {
 }
 
 #elif defined(_WIN32)
-// --- Windows: WSAPoll + per-tick deadline scan for timers ---
-//
-// Windows has no epoll / kqueue / timerfd. WSAPoll is the modern equivalent of
-// poll(2) for sockets and is available on Vista+. We track active fd watches
-// and timer deadlines in two plain arrays under __io_pending_lock; each event
-// loop tick we (1) snapshot pending requests, (2) build a pollfd array, (3)
-// wait with the next timer's relative deadline, then (4) re-enqueue any
-// fired/ready vthreads.
-//
-// This is good enough for v0.0.1 Windows preview. Performance is O(n) per
-// tick rather than O(1) like epoll - switch to IOCP if it becomes a bottleneck.
+// Windows: WSAPoll + per-tick deadline scan for timers (no epoll/kqueue/timerfd). O(n) per tick,
+// not O(1) like epoll - good enough for v0.0.1; switch to IOCP if it becomes a bottleneck.
 
 // File-local C++ helper types. extern "C" controls linkage of declared
 // functions, not the use of C++ types inside function bodies.
@@ -1181,9 +1028,8 @@ static void io_process_pending() {
         IoRequest* next = req->next;
         WinIoEntry e{};
         e.req = req;
-        // A timer, OR a deadline-bearing fd watch (R1 recv timeout: an fd watch
-        // with timer_ms > 0), carries an absolute deadline; a plain fd watch has
-        // none (waits forever for readiness).
+        // A timer, or a deadline-bearing fd watch (timer_ms > 0), carries an absolute deadline;
+        // a plain fd watch has none (waits forever for readiness).
         e.deadline_ms = (req->event_type == IO_EVENT_TIMER || req->timer_ms > 0)
                             ? (now + req->timer_ms) : 0;
         __io_active.push_back(e);
@@ -1319,7 +1165,7 @@ static void io_init() {
 
 void dragon_io_watch_fd(int fd, int event_type, DragonVThread* vt) {
     pthread_once(&__io_once, io_init);
-    IoRequest* req = (IoRequest*)malloc(sizeof(IoRequest));
+    IoRequest* req = (IoRequest*)dragon_xmalloc(sizeof(IoRequest));
     req->vt = vt;
     req->fd = fd;
     req->event_type = event_type;
@@ -1331,14 +1177,12 @@ void dragon_io_watch_fd(int fd, int event_type, DragonVThread* vt) {
     io_post_request(req);
 }
 
-// Watch `fd` for readiness with a timeout (R1). Like dragon_io_watch_fd, but the
-// reactor also fires the watch after `timeout_ms` if the fd never becomes ready,
-// setting vt->io_timed_out = 1 so the waiter can distinguish "timed out" from
-// "ready" after it resumes. `timeout_ms <= 0` degrades to a plain forever watch.
+// Watch `fd` for readiness with a timeout (R1): the reactor also fires after `timeout_ms` if the
+// fd never becomes ready, setting vt->io_timed_out. `timeout_ms <= 0` degrades to a forever watch.
 void dragon_io_watch_fd_deadline(int fd, int event_type, DragonVThread* vt,
                                  int64_t timeout_ms) {
     pthread_once(&__io_once, io_init);
-    IoRequest* req = (IoRequest*)malloc(sizeof(IoRequest));
+    IoRequest* req = (IoRequest*)dragon_xmalloc(sizeof(IoRequest));
     req->vt = vt;
     req->fd = fd;
     req->event_type = event_type;
@@ -1368,7 +1212,7 @@ void dragon_vthread_sleep(int64_t ms) {
     }
 
     // Post a timer request to the I/O thread
-    IoRequest* req = (IoRequest*)malloc(sizeof(IoRequest));
+    IoRequest* req = (IoRequest*)dragon_xmalloc(sizeof(IoRequest));
     req->vt = vt;
     req->fd = -1;
     req->event_type = IO_EVENT_TIMER;
@@ -1391,12 +1235,8 @@ void dragon_vthread_yield() {
     }
 }
 
-//===----------------------------------------------------------------------===//
-// Lock Functions
-//===----------------------------------------------------------------------===//
-
 void* dragon_lock_new() {
-    pthread_mutex_t* m = (pthread_mutex_t*)malloc(sizeof(pthread_mutex_t));
+    pthread_mutex_t* m = (pthread_mutex_t*)dragon_xmalloc(sizeof(pthread_mutex_t));
     pthread_mutex_init(m, NULL);
     return m;
 }
@@ -1405,13 +1245,8 @@ void dragon_lock_acquire(void* lock) {
     pthread_mutex_lock((pthread_mutex_t*)lock);
 }
 
-// Python threading.Lock.acquire(blocking, timeout) shape. Returns 1 if the
-// lock was acquired, 0 otherwise:
-//   blocking == 0           -> try once (timeout ignored, as in CPython)
-//   blocking, timeout < 0   -> wait forever, always succeeds (returns 1)
-//   blocking, timeout >= 0  -> wait up to `timeout` seconds, 0 on timeout
-// Used for runtime/dynamic blocking|timeout; codegen fast-paths the no-arg
-// (always-blocking, no-timeout) case straight to dragon_lock_acquire.
+// Python threading.Lock.acquire(blocking, timeout) shape: blocking=0 tries once, timeout<0 waits
+// forever, timeout>=0 waits up to that many seconds. Codegen fast-paths the no-arg case to dragon_lock_acquire.
 int64_t dragon_lock_acquire_ex(void* lock, int64_t blocking, double timeout) {
     pthread_mutex_t* m = (pthread_mutex_t*)lock;
     if (!blocking) {
@@ -1452,16 +1287,8 @@ int64_t dragon_lock_try_acquire(void* lock) {
     return pthread_mutex_trylock((pthread_mutex_t*)lock) == 0 ? 1 : 0;
 }
 
-//===----------------------------------------------------------------------===//
-// Timed acquire for RWLock / Semaphore - gives them the same
-// acquire(blocking=True, timeout=T) shape as Lock. Build an absolute
-// CLOCK_REALTIME deadline = now + `seconds` (what the POSIX timed primitives
-// expect), then call the timed-wait variant. macOS ships neither
-// pthread_rwlock_timed*lock nor a working sem_timedwait, so there we poll the
-// try* variant until the deadline (same fallback as dragon_lock_acquire_ex).
-// Each returns 1 if acquired, 0 on timeout. The caller (threading.dr) only
-// reaches these when blocking && timeout >= 0.
-//===----------------------------------------------------------------------===//
+// Timed acquire for RWLock/Semaphore, same acquire(blocking=True, timeout=T) shape as Lock. macOS
+// ships neither pthread_rwlock_timed*lock nor a working sem_timedwait, so there we poll try* until the deadline.
 
 static void dragon__abs_deadline(double seconds, struct timespec* d) {
     clock_gettime(CLOCK_REALTIME, d);
@@ -1471,9 +1298,8 @@ static void dragon__abs_deadline(double seconds, struct timespec* d) {
     if (d->tv_nsec >= 1000000000L) { d->tv_sec += 1; d->tv_nsec -= 1000000000L; }
 }
 
-// Used by the macOS poll-until-deadline fallbacks below and, on every platform,
-// by dragon_sem_timedacquire_sec to bound a condvar wait against spurious
-// wakeups. Not __APPLE__-only for that reason.
+// Used by the macOS poll-until-deadline fallbacks below and, on every platform, by
+// dragon_sem_timedacquire_sec to bound a condvar wait against spurious wakeups.
 static int dragon__deadline_passed(const struct timespec* d) {
     struct timespec now;
     clock_gettime(CLOCK_REALTIME, &now);
@@ -1533,17 +1359,8 @@ int dragon_sem_timedwait_sec(void* sem, double seconds) {
 #endif
 }
 
-//===----------------------------------------------------------------------===//
-// Semaphore - counting semaphore that also works on Darwin
-//===----------------------------------------------------------------------===//
-// sem_init() is deprecated on macOS and returns -1 with ENOSYS: Darwin ships
-// only *named* semaphores (sem_open). stdlib/threading.dr called sem_init and
-// ignored the result, so every Semaphore on macOS was a zeroed sem_t that had
-// never been initialised - acquire/release then behaved arbitrarily instead of
-// failing loudly, which is the worst of both worlds.
-//
-// Built from a mutex + condvar, which POSIX does mandate everywhere. Same
-// reasoning as the Barrier above, and pure C for the same link-with-cc reason.
+// sem_init() returns -1 ENOSYS on macOS (Darwin ships only named semaphores); stdlib/threading.dr
+// ignored the failure, so every macOS Semaphore ran on a never-initialized sem_t. Built from mutex+condvar instead.
 
 typedef struct DragonSem {
     pthread_mutex_t mutex;
@@ -1650,17 +1467,13 @@ void dragon_lock_destroy(void* lock) {
     free(lock);
 }
 
-//===----------------------------------------------------------------------===//
-// SyncList - thread-safe list (DragonList + mutex)
-//===----------------------------------------------------------------------===//
-
 typedef struct {
     DragonList* list;
     pthread_mutex_t mtx;
 } DragonSyncList;
 
 DragonSyncList* dragon_synclist_new() {
-    auto* sl = (DragonSyncList*)malloc(sizeof(DragonSyncList));
+    auto* sl = (DragonSyncList*)dragon_xmalloc(sizeof(DragonSyncList));
     sl->list = dragon_list_new(8);
     pthread_mutex_init(&sl->mtx, NULL);
     return sl;
@@ -1751,7 +1564,7 @@ void dragon_synclist_reverse(DragonSyncList* sl) {
 
 DragonSyncList* dragon_synclist_copy(DragonSyncList* sl) {
     pthread_mutex_lock(&sl->mtx);
-    DragonSyncList* cp = (DragonSyncList*)malloc(sizeof(DragonSyncList));
+    DragonSyncList* cp = (DragonSyncList*)dragon_xmalloc(sizeof(DragonSyncList));
     cp->list = dragon_list_copy(sl->list);
     pthread_mutex_init(&cp->mtx, NULL);
     pthread_mutex_unlock(&sl->mtx);
@@ -1764,17 +1577,13 @@ void dragon_synclist_destroy(DragonSyncList* sl) {
     free(sl);
 }
 
-//===----------------------------------------------------------------------===//
-// SyncDict - thread-safe dict (DragonDict + rwlock)
-//===----------------------------------------------------------------------===//
-
 typedef struct {
     DragonDict* dict;
     pthread_rwlock_t rwl;
 } DragonSyncDict;
 
 DragonSyncDict* dragon_syncdict_new() {
-    auto* sd = (DragonSyncDict*)malloc(sizeof(DragonSyncDict));
+    auto* sd = (DragonSyncDict*)dragon_xmalloc(sizeof(DragonSyncDict));
     sd->dict = dragon_dict_new(8);
     pthread_rwlock_init(&sd->rwl, NULL);
     return sd;
@@ -1870,7 +1679,7 @@ int64_t dragon_syncdict_setdefault(DragonSyncDict* sd, const char* key, int64_t 
 
 DragonSyncDict* dragon_syncdict_copy(DragonSyncDict* sd) {
     pthread_rwlock_rdlock(&sd->rwl);
-    DragonSyncDict* cp = (DragonSyncDict*)malloc(sizeof(DragonSyncDict));
+    DragonSyncDict* cp = (DragonSyncDict*)dragon_xmalloc(sizeof(DragonSyncDict));
     cp->dict = dragon_dict_copy(sd->dict);
     pthread_rwlock_init(&cp->rwl, NULL);
     pthread_rwlock_unlock(&sd->rwl);
@@ -1885,10 +1694,7 @@ void dragon_syncdict_destroy(DragonSyncDict* sd) {
 
 // Socket Helpers are in runtime_platform.cpp
 
-//===----------------------------------------------------------------------===//
-// Non-Blocking Socket I/O (green-thread-aware)
-// These yield the current green thread on EAGAIN, resume when fd is ready.
-//===----------------------------------------------------------------------===//
+// Non-Blocking Socket I/O (green-thread-aware): yields on EAGAIN, resumes when fd is ready.
 
 static void make_nonblocking(int fd) {
 #ifdef _WIN32
@@ -1898,19 +1704,16 @@ static void make_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags != -1) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 #ifdef SO_NOSIGPIPE
-    // macOS/BSD have no MSG_NOSIGNAL; this socket option is the per-socket
-    // equivalent - writes to a reset peer return EPIPE instead of raising
-    // SIGPIPE. Idempotent; harmless on listener/non-send fds.
+    // macOS/BSD have no MSG_NOSIGNAL; this socket option is the per-socket equivalent - writes to
+    // a reset peer return EPIPE instead of raising SIGPIPE. Idempotent; harmless on listener fds.
     int nosigpipe = 1;
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe));
 #endif
 #endif
 }
 
-// When called outside a green thread, wait for the fd to become ready using
-// poll() (POSIX) / WSAPoll (Windows). Returns 0 if the fd is ready, -1 on
-// error (e.g. EBADF). Without this, EAGAIN/EWOULDBLOCK on a bad/closed fd
-// causes a 100% CPU infinite usleep loop.
+// When called outside a green thread, wait for the fd to become ready via poll()/WSAPoll. Without
+// this, EAGAIN/EWOULDBLOCK on a bad/closed fd causes a 100% CPU infinite usleep loop.
 #ifdef _WIN32
 static int nb_wait_fd(int fd, short events) {
     WSAPOLLFD pfd = {};
@@ -1952,12 +1755,8 @@ static int nb_wait_fd(int fd, short events) {
         return -1;
     }
 }
-// Bounded variant for the off-vthread recv-timeout fallback (R1). Returns 1 if
-// ready, 0 on a genuine timeout, -1 on error. EINTR must NOT surface as a
-// timeout - the sole caller treats 0 as "give up and close the connection", so
-// collapsing a signal-interrupted wait into 0 would spuriously drop a healthy
-// connection. Loop on EINTR with the remaining budget, matching the unbounded
-// nb_wait_fd's EINTR discipline.
+// Bounded variant for the off-vthread recv-timeout fallback (R1). EINTR must NOT surface as a
+// timeout - the sole caller treats 0 as "close the connection", so loop on EINTR with the remaining budget.
 static int nb_wait_fd_timeout(int fd, short events, int timeout_ms) {
     struct pollfd pfd = { fd, events, 0 };
     struct timespec start;
@@ -2054,9 +1853,8 @@ int64_t dragon_nb_send(int64_t fd, const char* buf, int64_t len) {
 #ifdef _WIN32
         int n = send((SOCKET)fd, buf + total, (int)(len - total), 0);
 #else
-        // MSG_NOSIGNAL: return EPIPE instead of raising SIGPIPE when the peer
-        // has closed (no-op flag on platforms without it - macOS uses the
-        // SO_NOSIGPIPE option set in make_nonblocking instead).
+        // MSG_NOSIGNAL: EPIPE instead of SIGPIPE on a closed peer (no-op where undefined - macOS
+        // uses SO_NOSIGPIPE from make_nonblocking instead).
         ssize_t n = send((int)fd, buf + total, (size_t)(len - total), MSG_NOSIGNAL);
 #endif
         if (n >= 0) {
@@ -2080,9 +1878,8 @@ int64_t dragon_nb_send(int64_t fd, const char* buf, int64_t len) {
 
 /// Non-blocking recv that returns a Dragon string. Reads up to max_len bytes.
 const char* dragon_nb_recv_str(int64_t fd, int64_t max_len) {
-    // max_len is caller-supplied (socket.dr recv size). Clamp non-positive
-    // like recv_bytes; the checked helper traps the +1 wrap at INT64_MAX and
-    // raises MemoryError instead of handing recv a NULL buffer.
+    // max_len is caller-supplied; the checked helper traps the +1 wrap at INT64_MAX and raises
+    // MemoryError instead of handing recv a NULL buffer.
     int64_t cap = max_len > 0 ? max_len : 1;
     char* buf = (char*)dragon_xmalloc_ex(cap, 1, 1);
     int64_t n = dragon_nb_recv(fd, buf, max_len);
@@ -2093,10 +1890,8 @@ const char* dragon_nb_recv_str(int64_t fd, int64_t max_len) {
     return result;
 }
 
-/// Non-blocking recv returning DragonBytes (binary-safe - unlike _str it does
-/// not depend on NUL termination). Reads up to max_len bytes via the same
-/// scheduler-yielding path; empty bytes on EOF/error. For length-prefixed wire
-/// protocols a caller loops this into a read-exact helper (recv may short-read).
+/// Non-blocking recv returning DragonBytes (binary-safe, unlike _str which depends on NUL
+/// termination). Empty bytes on EOF/error; a length-prefixed caller loops this into a read-exact helper.
 DragonBytes* dragon_nb_recv_bytes(int64_t fd, int64_t max_len) {
     int64_t cap = max_len > 0 ? max_len : 1;
     uint8_t* buf = (uint8_t*)dragon_xmalloc_n(cap, 1);
@@ -2107,16 +1902,8 @@ DragonBytes* dragon_nb_recv_bytes(int64_t fd, int64_t max_len) {
     return result;
 }
 
-/// Non-blocking recv with an idle/read timeout (R1). Like dragon_nb_recv_bytes,
-/// but if no data arrives within `timeout_ms` the wait is abandoned and EMPTY
-/// bytes are returned - the same signal as EOF, so the HTTP request framer
-/// closes the connection (a silent peer can't pin the green thread; slowloris
-/// defense). `timeout_ms <= 0` means "no timeout" (identical to recv_bytes).
-///
-/// Returning empty for BOTH timeout and EOF is deliberate: in either case the
-/// connection must be torn down, and the framer already does exactly that on an
-/// empty read (clean keep-alive end between requests, or `bad`/truncated mid
-/// body). The distinction matters only to metrics, not to control flow.
+/// Non-blocking recv with an idle/read timeout (R1): if no data arrives within `timeout_ms`,
+/// returns EMPTY bytes (same signal as EOF, so the framer tears down the connection either way - slowloris defense).
 DragonBytes* dragon_nb_recv_timeout(int64_t fd, int64_t max_len, int64_t timeout_ms) {
     if (timeout_ms <= 0) return dragon_nb_recv_bytes(fd, max_len);
     make_nonblocking((int)fd);
@@ -2151,17 +1938,15 @@ DragonBytes* dragon_nb_recv_timeout(int64_t fd, int64_t max_len, int64_t timeout
     return result;
 }
 
-/// Non-blocking send of a DragonBytes' full contents (binary-safe). Reuses
-/// dragon_nb_send, which yields until every byte is written. Returns bytes
-/// sent, -1 on error.
+/// Non-blocking send of a DragonBytes' full contents. Reuses dragon_nb_send, which yields
+/// until every byte is written. Returns bytes sent, -1 on error.
 int64_t dragon_nb_send_bytes(int64_t fd, DragonBytes* data) {
     if (!data || data->len == 0) return 0;
     return dragon_nb_send(fd, (const char*)data->data, data->len);
 }
 
-// connect(2) signals "in progress" differently from recv/send: EINPROGRESS on
-// POSIX, WSAEWOULDBLOCK/WSAEINPROGRESS on Winsock (NOT EAGAIN), so it needs its
-// own would-block test rather than dragon_sock_wouldblock().
+// connect(2) signals "in progress" differently from recv/send (EINPROGRESS on POSIX, not EAGAIN),
+// so it needs its own would-block test rather than dragon_sock_wouldblock().
 static inline bool dragon_connect_in_progress() {
 #ifdef _WIN32
     int e = WSAGetLastError();
@@ -2171,9 +1956,8 @@ static inline bool dragon_connect_in_progress() {
 #endif
 }
 
-/// Non-blocking connect: yields the green thread until the connection completes
-/// (or fails). Returns 0 on success, -1 on error. The socket becomes writable
-/// when the connect resolves; SO_ERROR then distinguishes success from failure.
+/// Non-blocking connect: yields until the connection resolves, when the socket becomes writable;
+/// SO_ERROR then distinguishes success from failure. Returns 0 on success, -1 on error.
 int64_t dragon_nb_connect(int64_t fd, void* addr, int64_t addrlen) {
     make_nonblocking((int)fd);
 #ifdef _WIN32
@@ -2208,11 +1992,8 @@ int64_t dragon_nb_connect(int64_t fd, void* addr, int64_t addrlen) {
     return 0;
 }
 
-// Scheduler-aware wait for `fd` to reach readiness. On a green thread: park via
-// the reactor + yield (resumed when ready). Off a green thread: block in poll().
-// Returns 0 when ready, -1 on poll error/HUP (off-vthread only; the on-vthread
-// path lets the caller's retried syscall surface the error). Used by the TLS
-// BIO so mbedTLS yields instead of blocking the carrier OS thread.
+// Scheduler-aware wait for `fd` readiness: parks via the reactor + yield on a green thread, blocks
+// in poll() off one. Used by the TLS BIO so mbedTLS yields instead of blocking the carrier OS thread.
 static int dragon_io_wait(int fd, int event_type, short poll_events) {
     DragonVThread* vt = __current_vthread;
     if (vt && vt->coro) {
@@ -2226,10 +2007,8 @@ static int dragon_io_wait(int fd, int event_type, short poll_events) {
 int dragon_io_wait_readable(int fd) { return dragon_io_wait(fd, IO_EVENT_FD_READ, POLLIN); }
 int dragon_io_wait_writable(int fd) { return dragon_io_wait(fd, IO_EVENT_FD_WRITE, POLLOUT); }
 
-// Deadline-bounded readability wait (R1) - the TLS BIO's slowloris defense.
-// Returns 0 readable, 1 timeout, -1 error. With no deadline it is exactly
-// dragon_io_wait_readable. On a green thread it parks via the deadline reactor
-// and reads vt->io_timed_out; off a green thread it falls back to a bounded poll.
+// Deadline-bounded readability wait (R1), the TLS BIO's slowloris defense. On a green thread it
+// parks via the deadline reactor and reads vt->io_timed_out; off one, a bounded poll.
 int dragon_io_wait_readable_timeout(int fd, int64_t timeout_ms) {
     if (timeout_ms <= 0) return dragon_io_wait_readable(fd);
     DragonVThread* vt = __current_vthread;
@@ -2243,26 +2022,18 @@ int dragon_io_wait_readable_timeout(int fd, int64_t timeout_ms) {
     return pr > 0 ? 0 : (pr == 0 ? 1 : -1);
 }
 
-/// Set O_NONBLOCK on a socket fd. Exposed for the TLS BIO: an accepted fd does
-/// NOT inherit O_NONBLOCK from its listener, so the TLS conn must set it itself
-/// or its BIO recv/send would block the carrier thread instead of yielding.
+/// Set O_NONBLOCK on a socket fd. Exposed for the TLS BIO: an accepted fd does not inherit
+/// O_NONBLOCK from its listener, so the TLS conn must set it or its BIO recv/send would block.
 void dragon_set_nonblocking(int64_t fd) { make_nonblocking((int)fd); }
 
-/// Close a file descriptor (treats as socket on Windows since Dragon's nb_*
-/// helpers operate on sockets - file descriptors and sockets are distinct on
-/// Windows but Dragon currently routes both through this helper).
+/// Close a file descriptor (treats as socket on Windows, since Dragon's nb_* helpers operate
+/// on sockets and currently route both kinds through this helper).
 void dragon_close_fd(int64_t fd) {
 #ifdef _WIN32
     closesocket((SOCKET)fd);
 #else
-    // Remove any pending reactor watch for this fd BEFORE closing it. The
-    // kernel already drops a closed fd from the epoll/kqueue interest set once
-    // its last reference goes away, but doing it explicitly here also covers
-    // the case where a dup'd reference keeps the description alive: otherwise a
-    // stale readiness event could resume the vthread that WAS waiting on this
-    // fd after the fd number is recycled by a new connection - waking one
-    // connection's handler with another connection's bytes (cross-tenant data
-    // leak). Idempotent: deleting an unregistered fd returns ENOENT, ignored.
+    // Remove any pending reactor watch BEFORE closing: a dup'd fd keeps the kernel interest-set alive,
+    // risking a cross-tenant leak - a stale event could deliver another connection's bytes to the new owner.
     if (__io_epfd >= 0) {
         #ifdef __linux__
         epoll_ctl(__io_epfd, EPOLL_CTL_DEL, (int)fd, NULL);
@@ -2288,8 +2059,5 @@ void dragon_setsockopt_reuse(int64_t fd) {
     setsockopt((int)fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 #endif
 }
-
-//===----------------------------------------------------------------------===//
-// HTTP Parsing (llhttp - bundled Node.js HTTP/1.1 parser)
 
 } // extern "C"

@@ -6,9 +6,8 @@ extern "C" {
 
 
 
-/// Decode one UTF-8 code point starting at `p` (length `remaining` bytes
-/// available). Writes the decoded code point into `*out_cp` and returns the
-/// number of bytes consumed (1..4). Returns 0 on invalid encoding.
+/// Decode one UTF-8 code point at `p` (remaining bytes available); writes it
+/// to `*out_cp` and returns bytes consumed (1..4), or 0 on invalid encoding.
 static int dragon_utf8_decode_one(const unsigned char* p, int64_t remaining,
                                   uint32_t* out_cp) {
     if (remaining <= 0) return 0;
@@ -38,10 +37,8 @@ static int dragon_utf8_decode_one(const unsigned char* p, int64_t remaining,
     return 0;
 }
 
-/// Allocate a new refcounted string from a UTF-8 byte buffer of length
-/// `byte_len`. Scans the bytes: if pure ASCII, allocates kind=1 with a
-/// byte-for-byte copy. Otherwise decodes UTF-8 to UCS-4 and allocates kind=4.
-/// Returns the public data pointer.
+/// Allocate a refcounted string from a UTF-8 buffer of `byte_len` bytes: pure
+/// ASCII gets a byte-for-byte kind=1 copy, else it UTF-8-decodes to kind=4.
 const char* dragon_string_alloc(const char* src, int64_t byte_len) {
     if (byte_len <= 0) {
         DragonString* s = dragon_string_alloc_ascii(0);
@@ -65,9 +62,8 @@ const char* dragon_string_alloc(const char* src, int64_t byte_len) {
         uint32_t cp;
         int n = dragon_utf8_decode_one(p + i, byte_len - i, &cp);
         if (n <= 0) {
-            // Invalid UTF-8: treat the byte as Latin-1 (replacement-style),
-            // counting it as one code point. Keeps the caller alive even when
-            // they hand us non-UTF-8 byte sequences.
+            // Invalid UTF-8: treat the byte as Latin-1, one code point, so a
+            // non-UTF-8 input doesn't crash the caller.
             n = 1;
         }
         cp_count++;
@@ -89,15 +85,8 @@ const char* dragon_string_alloc(const char* src, int64_t byte_len) {
     return s->data;
 }
 
-// --- Codec helpers for str.encode / bytes.decode ---
-//
-// Dragon ships exactly the UTF-8 + ASCII codecs and the strict/replace error
-// handlers (no pluggable codec registry - that dynamic machinery has no place
-// in a statically typed language). `str` is already decoded code points, so
-// these operate purely at the bytes<->str boundary. Unknown encoding or error
-// handler -> LookupError(40). Strict decode of invalid input -> UnicodeDecode
-// Error(92) (Python parity; the old silent Latin-1 fallback was a correctness
-// bug). Strict ascii-encode of a non-ASCII char -> UnicodeEncodeError(93).
+// Dragon ships only UTF-8/ASCII codecs with strict/replace handlers. Bad
+// encoding/handler -> LookupError(40); strict invalid input -> UnicodeDecodeError(92)/UnicodeEncodeError(93).
 
 // Case-insensitive match of an encoding/handler name against `lc_target`
 // (which must be lowercase). Avoids a locale-coupled strcasecmp.
@@ -121,11 +110,8 @@ static int dragon_errors_policy(const char* errors) {
     return -1;
 }
 
-// Core decode: `ascii_only` selects the ASCII codec (every byte must be < 0x80)
-// vs UTF-8; `pol` is strict(0)/replace(1). On a strict failure this raises and
-// returns "" (the raise longjmps away in practice). On replace, each invalid
-// unit becomes U+FFFD. Mirrors dragon_string_alloc's two-pass build but with
-// defined error behavior instead of a silent Latin-1 reinterpretation.
+// Core decode: ascii_only picks ASCII vs UTF-8, pol is strict(0)/replace(1).
+// Strict failure raises and returns ""; replace maps each invalid unit to U+FFFD.
 static const char* dragon_decode_checked(const unsigned char* p, int64_t n,
                                          int ascii_only, int pol) {
     int64_t cp_count = 0;
@@ -180,8 +166,8 @@ static const char* dragon_decode_checked(const unsigned char* p, int64_t n,
     return s->data;
 }
 
-// bytes.decode(encoding="utf-8", errors="strict"). Honors the arguments that
-// the bare dragon_bytes_decode silently ignored.
+// bytes.decode(encoding="utf-8", errors="strict"); honors args that the bare
+// dragon_bytes_decode silently ignored.
 const char* dragon_bytes_decode_ex(DragonBytes* b, const char* encoding,
                                    const char* errors) {
     int pol = dragon_errors_policy(errors);
@@ -265,19 +251,14 @@ DragonBytes* dragon_str_encode_ex(const char* s, const char* encoding,
     return bts;
 }
 
-/// Allocate a DragonString but return the raw struct pointer (for in-place
-/// building). Always allocates a kind=1 (byte-oriented) buffer of `byte_len`
-/// bytes. Callers that need UCS-4 must use the kind-aware helpers.
+/// Allocate a DragonString, returning the raw struct pointer (for in-place
+/// building). Always kind=1 of `byte_len` bytes; UCS-4 needs the kind-aware helpers.
 DragonString* dragon_string_alloc_raw(int64_t byte_len) {
-    // Defense in depth for all callers: a negative/overflowed size must never
-    // under-allocate. `sizeof + negative` wraps to a huge size_t -> malloc
-    // returns NULL -> the unconditional deref below would SIGSEGV. Callers that
-    // derive sizes from user input bound them up front (the real fix); this is
-    // the backstop. One predictable branch - no hot-path cost.
+    // A negative/overflowed byte_len would wrap sizeof+len to a huge size_t,
+    // making malloc return NULL and the deref below SIGSEGV; this clamp is the backstop.
     if (byte_len < 0) byte_len = 0;
-    // dragon_xmalloc raises MemoryError on OOM. (Previously raised OverflowError,
-    // conflating a genuine out-of-memory with an overflowing size; the negative/
-    // overflow case is the clamp above, OOM is a MemoryError.)
+    // dragon_xmalloc raises MemoryError on OOM (previously raised OverflowError,
+    // conflating OOM with an overflowing size; overflow is handled by the clamp above).
     DragonString* s = (DragonString*)dragon_xmalloc(sizeof(DragonString) + (size_t)byte_len + 1);
     dragon_obj_init(&s->header, DRAGON_TAG_STR);
     s->len = byte_len;   // for kind=1 ASCII, cp_count == byte count
@@ -287,20 +268,8 @@ DragonString* dragon_string_alloc_raw(int64_t byte_len) {
     return s;
 }
 
-/// Duplicate a string (possibly a literal) into a heap-allocated DragonString.
-/// Safe to call on any const char* - always returns a refcounted copy.
-/// Preserves the source kind: kind=4 strings round-trip as kind=4 (no UTF-8
-/// re-decode), kind=1 / borrowed literals copy bytes verbatim.
-/// Snapshot a message string for re-raising, but ONLY when it could be freed
-/// out from under the in-flight exception. A re-raise site dups the in-flight
-/// exc_msg before running scope cleanup, because cleanup may decref a local that
-/// owns the message buffer (UAF otherwise). But unconditionally dup'ing leaks:
-/// the dup is set as the borrowed exc_msg and never freed. The vast majority of
-/// messages are string literals / interned immortals that scope cleanup can
-/// NEVER free - return those unchanged (no dup, no leak). Only a MORTAL heap
-/// string needs the protective copy. (That copy is itself the broader
-/// exception-message-ownership leak - exc_msg has no owner to free it - but it
-/// is rare and UAF-avoidance dominates.)
+/// Dup a message string before re-raising only when it's a MORTAL heap string
+/// scope cleanup could free out from under the exception (UAF); literals/immortals return unchanged (no leak, cleanup never frees them).
 const char* dragon_exc_msg_preserve(const char* s) {
     if (!s) return s;
     if (!dragon_str_is_heap(s)) return s;  // C-string literal - never freed
@@ -309,12 +278,8 @@ const char* dragon_exc_msg_preserve(const char* s) {
     return dragon_string_dup(s);  // mortal heap - must snapshot before cleanup
 }
 
-/// Dup a KNOWN plain C string (stack snprintf buffer, errno text, ...) into a
-/// fresh heap DragonString. Unlike dragon_string_dup it never probes for a
-/// DragonString header - reading header bytes BEFORE an arbitrary stack/heap
-/// buffer is out-of-bounds (ASan stack-buffer-underflow) even when it
-/// happens to work. Use this whenever the input is by construction not a
-/// DragonString data pointer.
+/// Dup a KNOWN plain C string (stack buffer, errno text, ...); unlike
+/// dragon_string_dup it never probes for a header (that read is OOB - ASan stack-underflow - even when it happens to work).
 const char* dragon_string_dup_cstr(const char* s) {
     if (!s) return dragon_string_alloc("", 0);
     return dragon_string_alloc(s, (int64_t)strlen(s));
@@ -339,10 +304,8 @@ const char* dragon_string_dup(const char* s) {
     return dragon_string_alloc(s, (int64_t)strlen(s));
 }
 
-/// One-shot interning: allocate from a UTF-8 byte buffer and mark the result
-/// immortal. Used by codegen for non-ASCII string literals so that subsequent
-/// loads at use sites are zero-cost (just a pointer load) and refcount
-/// machinery skips the literal as it does for plain C-string literals today.
+/// One-shot interning: allocate from UTF-8 bytes and mark immortal. Used by
+/// codegen for non-ASCII literals so loads are zero-cost and refcounting skips them like C literals.
 const char* dragon_str_intern(const char* utf8_bytes, int64_t byte_len) {
     const char* data = dragon_string_alloc(utf8_bytes, byte_len);
     if (data) {
@@ -352,24 +315,15 @@ const char* dragon_str_intern(const char* utf8_bytes, int64_t byte_len) {
     return data;
 }
 
-/// PRomote a heap string to immortal (refcount staturated), so incref/decref
-/// becomes no-ops on it forever. Codegen calls this on a module-global whose
-/// value is a program-lifetime constant. The HTTP server multiplexes handlers
-/// across a POOL of OS worker threads, and Dragon's default refcount is
-/// not atomic, so a shared global with a live refcount races (concurrent
-/// incref/decref -> torn count -> premature free -> use-after-free). An immortal
-/// never touches its refcount, so concurrent reads are safe with zero synchronization.
-/// No-op on a string literal (no header) or an already-immortal STRING. This does not
-/// make a MUTABLE shared object thread-safe - only its refcount; use a pool/lock for
-/// objects whose contents mutate.
+/// Promote a heap string to immortal (refcount saturated) so incref/decref no-op.
+/// Used on module-globals shared across HTTP threads to avoid a racing non-atomic refcount (torn count -> UAF).
 void dragon_str_make_immortal(const char* s) {
     if (!s || !dragon_is_heap_string(s)) return;
     DragonString* ds = dragon_string_from_data(s);
     ds->header.refcount = DRAGON_IMMORTAL_REFCOUNT;
 }
 
-// Forward decl - defined further below alongside the refcount helpers.
-// Forward decl for the kind-aware substring scan (used by replace).
+// Forward decl for the kind-aware substring scan (used by replace); defined below.
 static int64_t dragon_str_find_cp(const char* haystack, const char* needle, int64_t start);
 
 /// Encode a single Unicode code point as UTF-8 into `out`. `out` must have at
@@ -397,24 +351,19 @@ static int dragon_utf8_encode_one(uint32_t cp, char* out) {
     return 4;
 }
 
-/// Encode a kind=4 DragonString as a freshly-malloc'd UTF-8 byte buffer.
-/// Sets `*out_byte_len` to the byte length (excluding NUL). Caller frees.
-/// For kind=1 strings the public data pointer is already valid UTF-8 - use
-/// `dragon_str_byte_view` (a header inline) and avoid this allocation.
+/// Encode a kind=4 DragonString to a freshly malloc'd UTF-8 buffer (caller
+/// frees), setting `*out_byte_len`. kind=1 data is already valid UTF-8 - use `dragon_str_byte_view` instead.
 char* dragon_str_to_utf8_alloc(const char* s, int64_t* out_byte_len) {
     if (!s) { if (out_byte_len) *out_byte_len = 0; return NULL; }
     DragonString* ds = dragon_is_heap_string(s)
         ? dragon_string_from_data(s) : NULL;
     if (!ds || ds->kind == 1) {
-        // Borrow path: caller must use the raw pointer instead. Returning NULL
-        // signals "no allocation needed; use s directly".
+        // Borrow path: NULL signals no allocation needed, use s directly.
         if (out_byte_len) *out_byte_len = ds ? ds->len : (int64_t)strlen(s);
         return NULL;
     }
-    // kind=4: bound the worst case at 4 bytes per code point. Guard the
-    // multiply - ds->len is a code-point count that, while not directly
-    // attacker-sized here, could overflow int64 on a pathological string and
-    // wrap to a tiny malloc followed by a gigabyte-scale encode loop.
+    // kind=4: worst case is 4 bytes/cp. Guard the multiply - ds->len could
+    // overflow int64 on a pathological string, wrapping to a tiny malloc then a huge encode loop.
     if (ds->len < 0 || ds->len > INT64_MAX / 4) {
         dragon_raise_exc_cstr(43, "MemoryError: string too large to encode");
     }
@@ -431,27 +380,15 @@ char* dragon_str_to_utf8_alloc(const char* s, int64_t* out_byte_len) {
     return buf;
 }
 
-/// Public wire-byte-length helper - returns the UTF-8-encoded byte count.
-/// kind=1 strings are already UTF-8 bytes (ds->len == byte count). kind=4
-/// strings store one cp per 4-byte slot; the UTF-8 wire length is the sum
-/// of utf8_encode_one widths over each cp. String literals (no header) fall
-/// back to strlen - they're plain bytes by construction.
-///
-/// This is the right input to wire-protocol code (HTTP content-length,
-/// nb_send length, fwrite count) where the contract is bytes. Returning
-/// 4×cp_count for kind=4 (the storage byte count) advertises a wire size
-/// that overshoots the actual UTF-8 payload by ~3-4×, leaving the client
-/// waiting for bytes that never arrive (curl: `transfer closed with N
-/// bytes remaining`). The cp-count from `len()` undershoots in the
-/// opposite direction.
+/// Returns the actual UTF-8-encoded byte count (not kind=4 storage bytes or cp
+/// count) - the right input for wire code (HTTP content-length); using storage size instead overshoots and truncates transfers.
 int64_t dragon_str_byte_len_pub(const char* s) {
     if (!s) return 0;
     if (!dragon_is_heap_string(s)) return (int64_t)strlen(s);
     DragonString* ds = dragon_string_from_data(s);
     if (ds->kind == 1) return ds->len;
-    // kind=4: sum the UTF-8 width per code point. Each cp encodes to 1..4
-    // bytes; ASCII (the common case for HTML/JSON wrapping a single
-    // multibyte char) stays at 1 byte.
+    // kind=4: sum the UTF-8 width per code point (1..4 bytes each); ASCII
+    // stays 1 byte, the common case for HTML/JSON wrapping a single multibyte char.
     const uint32_t* cps = (const uint32_t*)ds->data;
     int64_t bytes = 0;
     for (int64_t i = 0; i < ds->len; ++i) {
@@ -464,20 +401,14 @@ int64_t dragon_str_byte_len_pub(const char* s) {
     return bytes;
 }
 
-/// Identity retain: incref (no-op for literals / immortals) and return `s`.
-/// Codegen routes `str(s)`-of-a-str and single-part `f"{s}"` through this so
-/// the result is an owned +1 CallInst, matching the calls-return-owned
-/// convention (isBorrowedHeapExpr) that assignment / arg-temp / raise
-/// consumers assume. Without it those identity paths handed out a borrow
-/// that consumers released anyway - over-release, then use-after-free on
-/// the next reader (e.g. the exception slot after `msg = str(e)`).
+/// Identity retain: incref (no-op for literals/immortals), return `s`. Codegen
+/// routes str(s)/f"{s}" through this for an owned result; without it, consumers over-released a borrow, causing UAF (e.g. `msg = str(e)`).
 const char* dragon_str_retain(const char* s) {
     dragon_incref_str(s);
     return s;
 }
 
-/// Increment refcount of a heap-allocated DragonString.
-/// Safely skips string literals (no DragonObjectHeader) via heap validation.
+/// Increment refcount of a heap DragonString; skips string literals (no header) safely.
 void dragon_incref_str(const char* s) {
     if (!s) return;
     if (!dragon_is_heap_string(s)) return;  // string literal - skip
@@ -491,16 +422,14 @@ void dragon_incref_str(const char* s) {
     ds->header.refcount++;
 }
 
-/// Decrement refcount of a heap-allocated DragonString.
-/// Safely skips string literals (no DragonObjectHeader) via heap validation.
-/// Frees the entire DragonString allocation when refcount reaches 0.
+/// Decrement refcount of a heap DragonString, freeing it at zero. Skips
+/// string literals (no header) safely.
 void dragon_decref_str(const char* s) {
     if (!s) return;
     if (!dragon_is_heap_string(s)) return;  // string literal - skip
     DragonString* ds = dragon_string_from_data(s);
     if (dragon_refcount_load(&ds->header) >= DRAGON_IMMORTAL_REFCOUNT) return;  // immortal guard
-    // SHARED strings route through the atomic decref path so concurrent
-    // mutators on different OS threads don't tear the refcount.
+    // SHARED strings decref atomically so concurrent mutators don't tear the refcount.
     if (dragon_gc_flags_load(&ds->header) & GC_FLAG_SHARED) {
         if (__atomic_sub_fetch(&ds->header.refcount, 1, __ATOMIC_ACQ_REL) == 0) {
             int collecting = __atomic_load_n(&gc_collecting, __ATOMIC_ACQUIRE);
@@ -514,15 +443,13 @@ void dragon_decref_str(const char* s) {
     }
 }
 
-// --- Thread-safe atomic variants for strings (Decision 018 Phase 4) ---
-
 void dragon_incref_str_atomic(const char* s) {
     if (!s) return;
     if (!dragon_is_heap_string(s)) return;  // string literal - skip
     DragonString* ds = dragon_string_from_data(s);
     if (dragon_refcount_load(&ds->header) >= DRAGON_IMMORTAL_REFCOUNT) return;  // immortal guard
-    // Atomic op implies the string has escaped to another OS thread; mark
-    // SHARED so subsequent plain dragon_*_str calls also use atomic ops.
+    // Atomic op implies the string escaped to another thread; mark SHARED so
+    // later plain calls also go atomic.
     if (!(dragon_gc_flags_load(&ds->header) & GC_FLAG_SHARED))
         __atomic_fetch_or(&ds->header.gc_flags, GC_FLAG_SHARED, __ATOMIC_RELAXED);
     __atomic_fetch_add(&ds->header.refcount, 1, __ATOMIC_RELAXED);
@@ -539,12 +466,8 @@ void dragon_decref_str_atomic(const char* s) {
         free(ds);
 }
 
-/// Cycle-collector helper. Decrement a string's refcount and free
-/// it directly if it hits zero, bypassing `dragon_decref_str`'s
-/// `gc_collecting` guard. Used by `dragon_*_clear_refs` while we're tearing
-/// down an unreachable cycle: the string is owned exclusively by the
-/// container being cleared, so no other thread can resurrect it. Honors
-/// the immortal sentinel and string-literal pointers.
+/// Cycle-collector helper: decref and free at zero, bypassing dragon_decref_str's
+/// gc_collecting guard. Used by dragon_*_clear_refs tearing down an unreachable cycle it owns exclusively.
 void dragon_str_force_free_if_zero(const char* s) {
     if (!s) return;
     if (!dragon_is_heap_string(s)) return;          // string literal - skip
@@ -554,25 +477,19 @@ void dragon_str_force_free_if_zero(const char* s) {
 }
 
 
-//===----------------------------------------------------------------------===//
-// String Operations
-//===----------------------------------------------------------------------===//
-
 /// Concatenate two strings. Result kind is the minimum that fits all code
 /// points (canonical storage so memcmp comparison + identical hashing work).
 const char* dragon_str_concat(const char* a, const char* b) {
-    // Probe BEFORE substituting "" for a NULL operand: dragon_is_heap_string("")
-    // would read the header of a header-less rodata literal out of bounds. The
-    // probe is NULL-safe, so feed it the original pointer, then materialize ""
-    // for the byte-copy paths (where the corresponding length is already 0).
+    // Probe BEFORE substituting "" for NULL: dragon_is_heap_string("") would
+    // read a header-less rodata literal OOB. Probe the original pointer, then materialize "".
     DragonString* da = dragon_is_heap_string(a) ? dragon_string_from_data(a) : NULL;
     DragonString* db = dragon_is_heap_string(b) ? dragon_string_from_data(b) : NULL;
     int64_t na = da ? da->len : (a ? (int64_t)strlen(a) : 0);
     int64_t nb = db ? db->len : (b ? (int64_t)strlen(b) : 0);
     if (!a) a = "";
     if (!b) b = "";
-    // Guard the addition: na/nb come from user-controlled string lengths.
-    // Mirrors str_repeat's hard-fail; callers have no recoverable path.
+    // Guard the addition: na/nb are user-controlled lengths; mirrors
+    // str_repeat's hard-fail, callers have no recoverable path.
     if (na < 0 || nb < 0 || na > INT64_MAX - nb) {
         dragon_raise_exc_cstr(43, "MemoryError: string concat too large");
     }
@@ -614,31 +531,14 @@ const char* dragon_str_concat(const char* a, const char* b) {
     return ds->data;
 }
 
-/// Append `b` onto `a`, mutating in place when `a` is uniquely owned.
-///
-/// OWNERSHIP:
-///   - Consumes one reference to `a`. After this call the old `a` pointer is
-///     dead; the returned pointer is the new authoritative value of the slot.
-///   - Borrows `b` (reads only; no incref, no free).
-///
-/// FAST PATH (no new DragonString allocated): taken iff `a` is a heap kind=1
-/// string with refcount==1, not immortal, not SHARED, distinct from `b`, and
-/// `b` is kind=1-appendable (heap kind=1, or a borrowed ASCII literal - non-
-/// ASCII literals are interned as kind=4 heap strings). The buffer grows with
-/// geometric capacity via realloc only when the existing `cap` can't hold the
-/// result; refcount stays 1, so a `while` accumulator loop is amortized O(n).
-///
-/// FALLBACK (any gate fails - refcount>1 aliasing, immortal, SHARED, a kind=4
-/// operand, a==b, or a >2 GiB result): returns dragon_str_concat(a, b) and
-/// decrefs `a` once, consuming the input reference. Correct under aliasing:
-/// `t = s; s = s + x` forces this path (a's refcount is 2), so t's buffer is
-/// never mutated. The result kind stays canonical (concat downgrades kind=4→1
-/// when all cps < 0x80), preserving the minimum-kind storage invariant.
+/// Append `b` onto `a`, mutating in place only when `a` is a uniquely-owned kind=1
+/// string (refcount==1, not immortal/SHARED, a!=b) AND `b` is kind=1-appendable
+/// (heap kind=1, or an ASCII literal - non-ASCII literals intern as kind=4).
+/// Consumes `a`, borrows `b`; otherwise falls back to dragon_str_concat + decref(a)
+/// (safe under aliasing like `t=s; s=s+x`), which also restores the minimum-kind invariant.
 const char* dragon_str_append_inplace(const char* a, const char* b) {
-    // Do not substitute "" for a NULL operand before probing: the probe is
-    // NULL-safe, but dragon_is_heap_string("") would read a header-less rodata
-    // literal out of bounds, and so would the fallback decref of that "". Keep
-    // `a`/`b` original; dragon_str_concat and the decref family are NULL-safe.
+    // Don't substitute "" for NULL before probing: dragon_is_heap_string("")
+    // would read a header-less literal OOB. Keep a/b original; concat and decref are NULL-safe.
     if (a != b && dragon_is_heap_string(a)) {
         DragonString* da = dragon_string_from_data(a);
         bool a_unique = da->header.refcount == 1
@@ -658,9 +558,8 @@ const char* dragon_str_append_inplace(const char* a, const char* b) {
                         int64_t new_cap = (int64_t)da->cap * 2;
                         if (new_cap < need) new_cap = need;
                         if (new_cap > 0x7fffffff) new_cap = 0x7fffffff;
-                        // realloc-into-tmp so a NULL return doesn't orphan `da`
-                        // (caller still holds `a` == da->data; fall back to the
-                        // fresh-alloc path below, which uses dragon_str_concat).
+                        // realloc into tmp so a NULL return doesn't orphan `da`;
+                        // on failure we fall back to the fresh-alloc path (dragon_str_concat) below.
                         DragonString* tmp = (DragonString*)realloc(
                             da, sizeof(DragonString) + (size_t)new_cap + 1);
                         if (tmp) {
@@ -688,12 +587,8 @@ const char* dragon_str_append_inplace(const char* a, const char* b) {
     return r;
 }
 
-/// String length - code-point count (Python `len()` semantics).
-/// For heap DragonStrings, returns the precomputed `len` field.
-/// For string literals (no DragonString header), falls back to `strlen` -
-/// safe because literals are emitted as ASCII / valid UTF-8 *byte* sequences
-/// today, but NOTE: literal codegen will switch to emit DragonString-header'd
-/// globals in Phase E so that non-ASCII literals also report cp count.
+/// String length: code-point count (Python len() semantics). Heap strings
+/// return the precomputed len; literals fall back to strlen (safe while ASCII-only; Phase E will header non-ASCII literals too).
 int64_t dragon_str_len(const char* s) {
     if (!s) return 0;
     if (dragon_is_heap_string(s)) {
@@ -704,11 +599,8 @@ int64_t dragon_str_len(const char* s) {
 
 /// Int to string
 const char* dragon_int_to_str(int64_t value) {
-    // Hot path (str(int) shows up in logging, formatting, dict keys, ...).
-    // Hand-rolled itoa straight into the string buffer beats snprintf("%ld")
-    // ~4× (no format-string parse / locale handling), and we allocate the
-    // kind=1 buffer directly so we also skip the non-ASCII rescan that the
-    // generic dragon_string_alloc would do - digits and '-' are always ASCII.
+    // Hot path (str(int) in logging/dict keys/...): hand-rolled itoa beats
+    // snprintf ~4x and skips dragon_string_alloc's non-ASCII rescan (digits/'-' are always ASCII).
     char tmp[20];                 // INT64_MIN = "-9223372036854775808" = 20 chars
     int n = 0;
     // Negate into unsigned so INT64_MIN (no positive counterpart) is handled.
@@ -726,21 +618,14 @@ const char* dragon_int_to_str(int64_t value) {
     return s->data;
 }
 
-/// Format `value` into `buf` exactly as Python's `repr(float)` would: the
-/// shortest decimal string that round-trips to the same double, always
-/// carrying a fractional part or exponent so it reads back as a float
-/// (`1.0`, not `1`). Returns the written length. `buf` must be >= 32 bytes.
-///
-/// Single source of truth for ALL float formatting (scalar print, str(),
-/// f-strings, and container repr) so there is exactly one notion of how a
-/// Dragon float prints.
+/// Format `value` like Python's repr(float): shortest round-tripping decimal,
+/// always with a fractional part or exponent (`1.0` not `1`); `buf` must be >= 32 bytes.
 int dragon_format_double_into(double value, char* buf, size_t bufsz) {
     if (std::isnan(value)) return snprintf(buf, bufsz, "nan");
     if (std::isinf(value)) return snprintf(buf, bufsz, value < 0 ? "-inf" : "inf");
 
-    // Shortest significant-digit count P in [1,17] that round-trips. `%e`
-    // always yields P-1 fractional digits => exactly P significant digits,
-    // free of the trailing zeros %g would invent at a fixed precision.
+    // Shortest significant-digit count P in [1,17] that round-trips; %e gives
+    // exactly P significant digits without the trailing zeros a fixed-precision %g would add.
     char ebuf[40];
     int P = 17;
     for (int p = 1; p <= 17; p++) {
@@ -778,19 +663,8 @@ const char* dragon_float_to_str(double value) {
     return dragon_string_alloc(tmp, len);
 }
 
-//===----------------------------------------------------------------------===//
-// Python format mini-language
-//
-//   [[fill]align][sign][#][0][width][grouping][.precision][type]
-//
-// Implemented end-to-end (no printf passthrough of the user's spec) so
-// alignment (< > ^ =), fill, sign (+ - space), '#' alt-form, '0'-padding,
-// ',' / '_' grouping and the '%' percent type all match CPython. Because the
-// user's spec text never becomes a printf format string (we build fixed
-// directives like "%.*f" and pass the parsed precision as an int argument),
-// this is also inherently free of the format-string-injection risk the old
-// validator existed to guard against.
-//===----------------------------------------------------------------------===//
+// Python format mini-language: [[fill]align][sign][#][0][width][grouping][.precision][type].
+// Implemented end-to-end (never a printf passthrough of the user's spec), avoiding format-string injection.
 
 typedef struct {
     char fill;       // pad character (default ' ')
@@ -870,16 +744,14 @@ static void dragon_fmt_group(const char* in, char sep, int group, char* out) {
     out[oi] = '\0';
 }
 
-// Pad `prefix`+`body` to `o->width` honouring align/fill. `prefix` holds the
-// sign and any alt marker (0x/0o/0b); `body` holds the magnitude digits so the
-// '=' alignment can slot the fill between them. Returns a fresh Dragon string.
+// Pad `prefix`+`body` to `o->width` honoring align/fill. `prefix` holds sign/alt
+// marker, `body` the magnitude digits, so '=' align can slot fill between them.
 static const char* dragon_fmt_pad(const DragonFmtSpec* o, const char* prefix, const char* body) {
     size_t plen = strlen(prefix), blen = strlen(body);
     size_t total = plen + blen;
     long width = o->width;
     size_t pad = (long)total >= width ? 0 : (size_t)(width - (long)total);
-    // width is user-supplied via the format spec, so this is an honest
-    // arbitrarily-large request; it must raise, not NULL-write.
+    // width is user-supplied and can be arbitrarily large; must raise, not NULL-write.
     char* buf = (char*)dragon_xmalloc(total + pad + 1);
     char align = o->align ? o->align : '>';   // numbers default to right-align
     char fill = o->fill;
@@ -1007,9 +879,8 @@ const char* dragon_float_format(double value, const char* spec) {
     return result;
 }
 
-/// Format an int using the full Python format mini-language ("d", "x", "08b",
-/// ">6", "+,d", "#06x", ...). Float-presentation types (e/f/g/%) convert to
-/// float and delegate.
+/// Format an int using the Python format mini-language ("d", "x", "08b", ">6",
+/// "#06x", ...); float-presentation types (e/f/g/%) convert to float and delegate.
 const char* dragon_int_format(int64_t value, const char* spec) {
     if (!spec || !*spec) return dragon_int_to_str(value);
     size_t slen = strlen(spec);
@@ -1066,9 +937,8 @@ const char* dragon_int_format(int64_t value, const char* spec) {
     return dragon_fmt_pad(&o, prefix, grouped);
 }
 
-/// String equality. For canonical-kind storage (every alloc picks min kind)
-/// memcmp on equal-kind strings would suffice, but we may have transient
-/// non-canonical strings during concat/replace etc. - compare code points.
+/// String equality: canonical-kind storage would let memcmp suffice, but
+/// transient non-canonical strings (mid concat/replace) mean we compare code points instead.
 int64_t dragon_str_eq(const char* a, const char* b) {
     if (a == b) return 1;
     if (!a || !b) return 0;
@@ -1079,12 +949,8 @@ int64_t dragon_str_eq(const char* a, const char* b) {
     if (la != lb) return 0;
     bool a_k1 = (!da || da->kind == 1);
     bool b_k1 = (!db || db->kind == 1);
-    // Both kind=1: compare all `la` bytes with memcmp, NOT strcmp. strcmp stops
-    // at the first NUL, so two equal-length kind=1 strings that share a prefix
-    // up to an embedded NUL but differ afterwards - e.g. "ab\0cd" vs "ab\0ce" -
-    // wrongly compared equal (and comparing a token/hash byte string this way
-    // could accept a wrong secret). Lengths already match, and each buffer holds
-    // la bytes + a terminator, so memcmp neither under- nor over-reads.
+    // memcmp not strcmp: strcmp stops at the first NUL, so "ab\0cd" vs "ab\0ce"
+    // would wrongly compare equal (accepting a wrong secret/token). Lengths already match, so memcmp is exact here.
     if (a_k1 && b_k1) return memcmp(a, b, (size_t)la) == 0 ? 1 : 0;
     for (int64_t i = 0; i < la; ++i) {
         if (dragon_str_cp_at(a, da, i) != dragon_str_cp_at(b, db, i)) return 0;
@@ -1092,13 +958,8 @@ int64_t dragon_str_eq(const char* a, const char* b) {
     return 1;
 }
 
-/// Constant-time string equality for security-sensitive comparisons (auth
-/// tokens, HMAC/MAC tags, password hashes). Unlike dragon_str_eq (which uses
-/// strcmp and early-exits on the first differing byte), this never branches on
-/// content and never early-exits, so an attacker timing the response cannot
-/// learn the shared-prefix length of a secret. Compares the UTF-8 wire bytes
-/// (kind-safe) in time proportional to `b`'s length, folding in any length
-/// mismatch - the established compare_digest pattern. Backs hmac.compare_digest.
+/// Constant-time equality for security-sensitive compares (auth tokens, HMAC
+/// tags, password hashes): never early-exits, so timing can't leak a secret's shared-prefix length. Backs hmac.compare_digest.
 int64_t dragon_str_eq_const(const char* a, const char* b) {
     if (!a || !b) return (a == b) ? 1 : 0;
     int64_t la = 0, lb = 0;
@@ -1130,10 +991,8 @@ int64_t dragon_str_cmp(const char* a, const char* b) {
     int64_t lb = db ? db->len : (int64_t)strlen(b);
     bool a_k1 = (!da || da->kind == 1);
     bool b_k1 = (!db || db->kind == 1);
-    // Both kind=1: memcmp over the shorter length + length tiebreak, NOT strcmp.
-    // strcmp would stop ordering at an embedded NUL (same class as the eq bug
-    // above). memcmp compares raw bytes lexicographically, which for kind=1
-    // (byte==code point) is the correct code-point ordering.
+    // memcmp not strcmp: strcmp would stop ordering at an embedded NUL (same
+    // bug class as eq above). memcmp's raw byte order is the correct code-point order for kind=1.
     if (a_k1 && b_k1) {
         int64_t n0 = la < lb ? la : lb;
         int c = memcmp(a, b, (size_t)n0);
@@ -1151,23 +1010,8 @@ int64_t dragon_str_cmp(const char* a, const char* b) {
 }
 
 
-//===----------------------------------------------------------------------===//
-// Type Conversions
-//===----------------------------------------------------------------------===//
-
-/// String to int
-/// int(str) - Python-parity strict parse (base 10).
-///
-/// Accepts: optional surrounding ASCII whitespace, an optional +/- sign, one
-/// or more decimal digits, with single underscores permitted BETWEEN digits
-/// (`1_000` → 1000) - never leading, trailing, or doubled. Anything else
-/// raises ValueError (code 90), matching CPython's
-/// "invalid literal for int() with base 10: '...'". Out-of-i64-range input
-/// raises OverflowError (code 22) - Dragon ints are i64, not bignums.
-///
-/// Replaces the old lenient `atol` (which silently returned 0 on garbage).
-/// All internal stdlib callers (json/tomllib/drs lexers, http param_int via
-/// _is_int_str) pre-validate, so the stricter contract doesn't break them.
+/// int(str): strict Python-parity base-10 parse (digits, underscores only between
+/// them); bad input -> ValueError(90), overflow -> OverflowError(22). Replaces the old atol's silent 0-on-garbage.
 int64_t dragon_str_to_int(const char* s) {
     char tls_msg[320];
     auto is_ws = [](char c) {
@@ -1237,15 +1081,29 @@ int64_t dragon_str_to_int(const char* s) {
     return (int64_t)acc;
 }
 
-/// String to float
+/// String to float: strict Python float(str) semantics - surrounding
+/// whitespace allowed, anything else raises instead of returning 0.0.
 double dragon_str_to_float(const char* s) {
-    return s ? atof(s) : 0.0;
+    DragonString* ds = (s && dragon_str_is_heap(s)) ? dragon_string_from_data(s) : NULL;
+    if (!s || (ds && ds->kind == 4)) {
+        dragon_raise_exc_cstr(90, "ValueError: could not convert string to float");
+    }
+    const char* p = s;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' ||
+           *p == '\f' || *p == '\v') p++;
+    char* end = nullptr;
+    double v = strtod(p, &end);
+    while (end && (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r' ||
+                   *end == '\f' || *end == '\v')) end++;
+    if (end == p || (end && *end)) {
+        char msg[128];
+        snprintf(msg, sizeof(msg),
+                 "ValueError: could not convert string to float: '%s'", s);
+        dragon_raise_exc_cstr(90, msg);
+    }
+    return v;
 }
 
-
-//===----------------------------------------------------------------------===//
-// String Indexing
-//===----------------------------------------------------------------------===//
 
 /// Get character at index as a new string (supports negative indexing)
 const char* dragon_str_index(const char* s, int64_t index) {
@@ -1273,10 +1131,6 @@ const char* dragon_str_index(const char* s, int64_t index) {
     ((uint32_t*)out->data)[0] = cp;
     return out->data;
 }
-
-//===----------------------------------------------------------------------===//
-// Bool to String (for f-strings)
-//===----------------------------------------------------------------------===//
 
 const char* dragon_bool_to_str(int64_t value) {
     return value ? dragon_string_alloc("True", 4) : dragon_string_alloc("False", 5);

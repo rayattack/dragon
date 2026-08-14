@@ -1,20 +1,7 @@
-/// Dragon Runtime - Argon2id (RFC 9106) password hashing.
-///
-/// Its OWN translation unit, mirroring runtime_ed25519.cpp / runtime_crypto.cpp:
-/// the linker pulls this object ONLY when a program references the argon2id
-/// entry point - a program that never hashes a password pays nothing.
-///
-/// Argon2id is memory-hard and perf-critical, so the whole core lives in C++
-/// (legitimate FFI per the dogfooding policy, same as ed25519/scrypt). The .dr
-/// layer (stdlib/argon2id.dr) is a thin API wrapper.
-///
-/// mbedTLS in this build provides NO BLAKE2b, so BLAKE2b (RFC 7693) is
-/// implemented here from scratch, then the Argon2 variable-length hash H'
-/// (RFC 9106 §3.2), the compression function G over 1024-byte blocks
-/// (§3.5/§3.6), the data-independent/dependent indexing for Argon2id (§3.4.1.2),
-/// and the t-pass / p-lane / 4-slice memory fill + finalize.
-///
-/// All intermediate state (blocks, H' buffers, BLAKE2b state) is wiped with
+/// Dragon Runtime - Argon2id (RFC 9106) password hashing, own translation unit
+/// (linked only when a program uses it). mbedTLS ships no BLAKE2b, so BLAKE2b
+/// (RFC 7693) and the full Argon2 pipeline are implemented here from scratch;
+/// stdlib/argon2id.dr is a thin wrapper. All intermediate state is wiped with
 /// argon2_secure_zero before release.
 
 #include "runtime_internal.h"
@@ -22,23 +9,15 @@
 #include <cstdlib>
 #include <cstdint>
 
-// Self-contained secure zeroize. argon2id implements its own BLAKE2b and has no
-// other mbedTLS dependency, so it must NOT pull in mbedtls_platform_zeroize:
-// codegen only links the mbedTLS engine for TLS/crypto symbols, so an
-// argon2id-only user program would fail to link (and we don't want to drag the
-// whole TLS engine into every password-hashing binary). A volatile function
-// pointer to memset defeats dead-store elimination, the same guarantee
-// mbedtls_platform_zeroize provides.
+// Must not use mbedtls_platform_zeroize: that would force-link the whole TLS
+// engine into password-only binaries. Volatile fn ptr to memset defeats
+// dead-store elimination instead.
 static void* (*const volatile argon2_memset_v)(void*, int, size_t) = memset;
 static void argon2_secure_zero(void* p, size_t n) {
     if (p && n) argon2_memset_v(p, 0, n);
 }
 
 extern "C" {
-
-//===-------------------------------------------------------------------===//
-// BLAKE2b (RFC 7693)
-//===-------------------------------------------------------------------===//
 
 static const uint64_t blake2b_IV[8] = {
     0x6a09e667f3bcc908ULL, 0xbb67ae8584caa73bULL,
@@ -146,10 +125,8 @@ static int blake2b_init(blake2b_state* S, size_t outlen,
     if (keylen > BLAKE2B_OUTBYTES) return -1;
     memset(S, 0, sizeof(*S));
     for (int i = 0; i < 8; i++) S->h[i] = blake2b_IV[i];
-    // Parameter block: digest_length(1) | key_length(1) | fanout(1)=1 |
-    // depth(1)=1 | leaf_length(4)=0 | node_offset(8)=0 | node_depth(1)=0 |
-    // inner_length(1)=0 | reserved(14)=0 | salt(16)=0 | personal(16)=0.
-    // Only the low 8 bytes (h[0]) are non-zero here.
+    // Parameter block digest|key|fanout=1|depth=1|...|salt|personal, packed
+    // little-endian; only the low 8 bytes (h[0]) are non-zero here.
     uint64_t param0 = (uint64_t)outlen | ((uint64_t)keylen << 8) |
                       ((uint64_t)1 << 16) | ((uint64_t)1 << 24);
     S->h[0] ^= param0;
@@ -171,8 +148,7 @@ static void blake2b_update(blake2b_state* S, const uint8_t* in, size_t inlen) {
     size_t left = S->buflen;
     size_t fill = BLAKE2B_BLOCKBYTES - left;
     if (inlen > fill) {
-        // top off the buffer and compress (there is more to come, so this is
-        // never the final block)
+        // Top off and compress; more input follows so this isn't the final block.
         memcpy(S->buf + left, in, fill);
         S->t[0] += BLAKE2B_BLOCKBYTES;
         if (S->t[0] < BLAKE2B_BLOCKBYTES) S->t[1]++;
@@ -215,13 +191,8 @@ static void blake2b(uint8_t* out, size_t outlen,
     argon2_secure_zero(&S, sizeof(S));
 }
 
-//===-------------------------------------------------------------------===//
-// Argon2 variable-length hash H' (RFC 9106 §3.2)
-//===-------------------------------------------------------------------===//
-//
-// H'^T(A): if T <= 64, BLAKE2b(LE32(T) || A, T). Otherwise let r = ceil(T/32)-2;
-// V_1 = BLAKE2b(LE32(T) || A, 64); V_{i+1} = BLAKE2b(V_i, 64); the output is the
-// first 32 bytes of each V_1..V_r, then the final (T - 32*r) bytes of V_{r+1}.
+// Argon2 H'^T(A) (RFC 9106 SS3.2): direct BLAKE2b if T<=64, else a chained
+// stretch emitting 32 bytes per round until the final short round.
 static void argon2_H_prime(uint8_t* out, uint32_t outlen,
                            const uint8_t* in, size_t inlen) {
     uint8_t lenbuf[4];
@@ -263,24 +234,19 @@ static void argon2_H_prime(uint8_t* out, uint32_t outlen,
     argon2_secure_zero(V, sizeof(V));
 }
 
-//===-------------------------------------------------------------------===//
-// Compression function G over 1024-byte blocks (RFC 9106 §3.5/§3.6)
-//===-------------------------------------------------------------------===//
-
 #define ARGON2_QWORDS_IN_BLOCK 128       // 1024 bytes / 8
 #define ARGON2_BLOCK_SIZE      1024
 
 typedef struct { uint64_t v[ARGON2_QWORDS_IN_BLOCK]; } block;
 
+// Argon2 mixing multiply (RFC 9106 SS3.5): x + y + 2*(lo32 x)*(lo32 y).
 static inline uint64_t fBlaMka(uint64_t x, uint64_t y) {
-    // The modular-multiply mixing of the Argon2 G rounds:
-    //   x + y + 2 * (lower-32-of-x) * (lower-32-of-y)
     const uint64_t m = 0xFFFFFFFFULL;
     uint64_t xy = (x & m) * (y & m);
     return x + y + 2 * xy;
 }
 
-// The BLAKE2b round function GB used inside the permutation P (§3.6).
+// BLAKE2b round function GB used inside permutation P (SS3.6).
 #define ARGON2_G(a, b, c, d)                       \
     do {                                           \
         a = fBlaMka(a, b);                         \
@@ -293,7 +259,7 @@ static inline uint64_t fBlaMka(uint64_t x, uint64_t y) {
         b = rotr64(b ^ c, 63);                     \
     } while (0)
 
-// Permutation P operating on 16 64-bit words v0..v15 (§3.6).
+// Permutation P over 16 64-bit words v0..v15 (SS3.6).
 #define ARGON2_P(v0,v1,v2,v3,v4,v5,v6,v7,v8,v9,v10,v11,v12,v13,v14,v15) \
     do {                                                               \
         ARGON2_G(v0, v4, v8,  v12);                                    \
@@ -306,10 +272,8 @@ static inline uint64_t fBlaMka(uint64_t x, uint64_t y) {
         ARGON2_G(v3, v4, v9,  v14);                                    \
     } while (0)
 
-// G(X, Y): R = X ^ Y; apply P column-wise over each of the 8 rows of 16 words,
-// then row-wise over each of the 8 columns, then result = Z ^ R. When
-// `with_xor` is set, the destination already holds a value to XOR in too (used
-// for t>0 / passes that overwrite existing blocks).
+// G(X,Y): R = X^Y, apply P column-wise then row-wise over Z = R, result = Z^R.
+// with_xor means the destination already holds a value to fold in (t>0 passes).
 static void fill_block(const block* prev, const block* ref, block* next,
                        int with_xor) {
     block R, Z;
@@ -321,15 +285,12 @@ static void fill_block(const block* prev, const block* ref, block* next,
             R.v[i] ^= next->v[i];
     }
 
-    // Apply P to each of the 8 rows (column step). Each row is 16 words; the
-    // 16 words map to the 8x2 matrix as v[2k] / v[2k+1] interleave per §3.6.
+    // P over each of the 8 rows, then each of the 8 columns (SS3.6 layout).
     for (int i = 0; i < 8; i++) {
         uint64_t* p = &Z.v[16 * i];
         ARGON2_P(p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7],
                  p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15]);
     }
-    // Apply P to each of the 8 columns (row step). Column i gathers the two
-    // words 2*i and 2*i+1 from each of the 8 rows -> 16 words.
     for (int i = 0; i < 8; i++) {
         uint64_t* p = Z.v;
         ARGON2_P(p[2*i], p[2*i+1],
@@ -347,10 +308,6 @@ static void fill_block(const block* prev, const block* ref, block* next,
     argon2_secure_zero(&R, sizeof(R));
     argon2_secure_zero(&Z, sizeof(Z));
 }
-
-//===-------------------------------------------------------------------===//
-// Indexing (RFC 9106 §3.4.1.1 / §3.4.1.2)
-//===-------------------------------------------------------------------===//
 
 #define ARGON2_SYNC_POINTS 4
 #define ARGON2_ID 2          // type code embedded in H0 and address blocks
@@ -372,10 +329,8 @@ typedef struct {
     uint32_t index;          // index of the block within the segment
 } argon2_position;
 
-// Generate the next address block for data-independent (Argon2i) indexing
-// (§3.4.1.2). `input_block` carries the counter state; `address_block` receives
-// the 128 pseudo-random J1/J2 pairs; `zero_block` is an all-zero block used as
-// the "prev" feed for the two compression invocations.
+// Argon2i data-independent addressing (SS3.4.1.2): bumps the counter in
+// input_block, fills address_block with 128 pseudo-random J1/J2 pairs.
 static void next_addresses(block* address_block, block* input_block,
                            const block* zero_block) {
     input_block->v[6]++;
@@ -383,20 +338,15 @@ static void next_addresses(block* address_block, block* input_block,
     fill_block(zero_block, address_block, address_block, 0);
 }
 
-// Compute the reference block index for the block at (position) given the
-// pseudo-random value `pseudo_rand` (low 64 bits: J1 in low 32, J2 in high 32).
+// Reference block index for `pos`, mirroring the reference implementation's
+// index_alpha exactly (including the index==0/other-lane -1 adjustment).
 static uint32_t index_alpha(const argon2_instance* inst,
                             const argon2_position* pos,
                             uint32_t pseudo_rand,
                             int same_lane) {
-    // reference_area_size: the number of blocks that may be referenced.
-    // Mirrors the reference implementation's index_alpha exactly, including the
-    // "subtract one more when index==0 and referencing another lane" rule.
     uint32_t reference_area_size;
     if (pos->pass == 0) {
         if (pos->slice == 0) {
-            // first slice, first pass: only blocks already produced in this
-            // segment (index - 1).
             reference_area_size = pos->index - 1;
         } else if (same_lane) {
             reference_area_size = pos->slice * inst->segment_length
@@ -415,14 +365,12 @@ static uint32_t index_alpha(const argon2_instance* inst,
         }
     }
 
-    // Map the 32-bit pseudo_rand to a relative position with the spec's
-    // non-uniform mapping (favours recent blocks).
+    // Non-uniform mapping favouring recent blocks (spec SS3.4.1.1).
     uint64_t relative_position = pseudo_rand;
     relative_position = relative_position * relative_position >> 32;
     relative_position = reference_area_size - 1
                         - (reference_area_size * relative_position >> 32);
 
-    // start_position: where the referenceable window begins for this segment.
     uint32_t start_position = 0;
     if (pos->pass != 0) {
         start_position = (pos->slice == ARGON2_SYNC_POINTS - 1)
@@ -433,10 +381,6 @@ static uint32_t index_alpha(const argon2_instance* inst,
         (uint32_t)((start_position + relative_position) % inst->lane_length);
     return absolute_position;
 }
-
-//===-------------------------------------------------------------------===//
-// Segment fill
-//===-------------------------------------------------------------------===//
 
 static void fill_segment(argon2_instance* inst, const argon2_position* pos_in) {
     argon2_position position = *pos_in;
@@ -464,7 +408,6 @@ static void fill_segment(argon2_instance* inst, const argon2_position* pos_in) {
     if (position.pass == 0 && position.slice == 0) {
         starting_index = 2;               // blocks 0 and 1 are seeded already
         if (data_independent) {
-            // produce the first address block (counter -> 1)
             next_addresses(&address_block, &input_block, &zero_block);
         }
     }
@@ -483,11 +426,9 @@ static void fill_segment(argon2_instance* inst, const argon2_position* pos_in) {
     for (uint32_t i = starting_index; i < inst->segment_length;
          i++, curr_offset++, prev_offset++) {
         if (curr_offset % inst->lane_length == 1) {
-            // moved to a new lane row boundary; prev is the block right before
-            prev_offset = curr_offset - 1;
+            prev_offset = curr_offset - 1;  // new lane row: prev is right before
         }
 
-        // pseudo-random value driving the reference index
         uint64_t pseudo_rand;
         if (data_independent) {
             if (i % ARGON2_QWORDS_IN_BLOCK == 0) {
@@ -498,7 +439,6 @@ static void fill_segment(argon2_instance* inst, const argon2_position* pos_in) {
             pseudo_rand = inst->memory[prev_offset].v[0];
         }
 
-        // which lane the reference block comes from
         uint32_t ref_lane;
         if (position.pass == 0 && position.slice == 0) {
             ref_lane = position.lane;     // can only reference own lane
@@ -528,10 +468,6 @@ static void fill_segment(argon2_instance* inst, const argon2_position* pos_in) {
     }
 }
 
-//===-------------------------------------------------------------------===//
-// Top-level Argon2id
-//===-------------------------------------------------------------------===//
-
 static inline const uint8_t* b_data(DragonBytes* b) {
     static const uint8_t empty[1] = {0};
     return (b && b->data) ? b->data : empty;
@@ -540,9 +476,7 @@ static inline uint32_t b_len(DragonBytes* b) {
     return b ? (uint32_t)b->len : 0;
 }
 
-// Build H0 = BLAKE2b( LE32(p) || LE32(tag_len) || LE32(m) || LE32(t) ||
-//   LE32(version=0x13) || LE32(type=Argon2id) || LE32(|P|) || P ||
-//   LE32(|S|) || S || LE32(|K|) || K || LE32(|X|) || X ), 64 ).
+// H0 = BLAKE2b(LE32(p,tag_len,m,t,version=0x13,type) || len-prefixed P,S,K,X, 64).
 static void compute_H0(uint8_t H0[BLAKE2B_OUTBYTES],
                        DragonBytes* pwd, DragonBytes* salt,
                        DragonBytes* secret, DragonBytes* ad,
@@ -578,14 +512,10 @@ DragonBytes* dragon_argon2id_raw(DragonBytes* pwd, DragonBytes* salt,
                                  DragonBytes* secret, DragonBytes* ad,
                                  int64_t t_cost, int64_t m_cost_kib,
                                  int64_t parallelism, int64_t tag_len) {
-    // Every parameter below is narrowed to uint32_t before use. The guards
-    // must therefore reject anything that would CHANGE VALUE when narrowed,
-    // not just anything below the minimum. A bare `< 1` / `< min` test lets a
-    // value >= 2^32 through: it truncates (e.g. 2^32 -> 0), and a zero cost
-    // silently produces a password-independent tag while a zero m_cost makes
-    // the fill loop write past a calloc(0). Each upper bound is the RFC 9106
-    // ceiling for that field (all 2^32 - 1 except parallelism's 2^24 - 1), so
-    // the guard both fixes the truncation and documents the real domain.
+    // Guards must reject values that CHANGE under the uint32_t narrowing below,
+    // not just below-minimum values (e.g. a >=2^32 cost truncates to 0 and
+    // silently weakens the hash, or overflows the calloc). Bounds are the
+    // RFC 9106 field ceilings.
     if (parallelism < 1 || parallelism > 0xFFFFFF) {
         dragon_raise_exc_cstr(90, "argon2id: parallelism must be in [1, 2^24)");
         return nullptr;
@@ -598,8 +528,7 @@ DragonBytes* dragon_argon2id_raw(DragonBytes* pwd, DragonBytes* salt,
         dragon_raise_exc_cstr(90, "argon2id: time cost must be in [1, 2^32)");
         return nullptr;
     }
-    // 8*parallelism is at most 8 * (2^24 - 1) < 2^32, so this lower bound is
-    // exact; the upper bound stops the m -> 0 truncation / calloc(0) overflow.
+    // 8*parallelism < 2^32 always, so this lower bound is exact.
     if (m_cost_kib < 8 * parallelism || m_cost_kib > 0xFFFFFFFFLL) {
         dragon_raise_exc_cstr(90, "argon2id: memory cost must be in [8*parallelism, 2^32) KiB");
         return nullptr;
@@ -617,17 +546,14 @@ DragonBytes* dragon_argon2id_raw(DragonBytes* pwd, DragonBytes* salt,
 
     block* memory = (block*)calloc(memory_blocks, sizeof(block));
     if (!memory) {
-        dragon_raise_exc_cstr(90, "argon2id: out of memory");
+        dragon_raise_exc_cstr(43, "MemoryError: argon2id: out of memory");
         return nullptr;
     }
 
-    // H0
     uint8_t H0[BLAKE2B_OUTBYTES + 8];     // 64 + room for LE32(lane)|LE32(0/1)
     compute_H0(H0, pwd, salt, secret, ad, t, m, p, outlen);
 
-    // Seed the first two blocks of every lane:
-    //   B[i][0] = H'(H0 || LE32(0) || LE32(i))
-    //   B[i][1] = H'(H0 || LE32(1) || LE32(i))
+    // Seed blocks 0/1 of every lane: B[i][0/1] = H'(H0 || LE32(0/1) || LE32(i)).
     uint8_t blockhash[ARGON2_BLOCK_SIZE];
     for (uint32_t lane = 0; lane < p; lane++) {
         store32(H0 + 64, 0);
@@ -653,7 +579,6 @@ DragonBytes* dragon_argon2id_raw(DragonBytes* pwd, DragonBytes* salt,
     inst.segment_length = segment_length;
     inst.memory_blocks = memory_blocks;
 
-    // Fill: t passes, 4 slices each, p lanes per slice.
     for (uint32_t pass = 0; pass < t; pass++) {
         for (uint32_t slice = 0; slice < ARGON2_SYNC_POINTS; slice++) {
             for (uint32_t lane = 0; lane < p; lane++) {
@@ -686,7 +611,7 @@ DragonBytes* dragon_argon2id_raw(DragonBytes* pwd, DragonBytes* salt,
         free(memory);
         argon2_secure_zero(&final_block, sizeof(final_block));
         argon2_secure_zero(final_bytes, sizeof(final_bytes));
-        dragon_raise_exc_cstr(90, "argon2id: out of memory");
+        dragon_raise_exc_cstr(43, "MemoryError: argon2id: out of memory");
         return nullptr;
     }
     argon2_H_prime(tag, outlen, final_bytes, ARGON2_BLOCK_SIZE);

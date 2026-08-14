@@ -1,9 +1,5 @@
-/// Dragon Runtime - shared low-level string helpers
-///
-/// Used by both runtime_string.cpp (alloc / encode / RC / concat / format)
-/// and runtime_string_methods.cpp (case ops, strip, find, slice, split, ...).
-/// `static inline` so each TU gets a local copy - pure code motion from
-/// runtime_string.cpp, no behavior change.
+/// Dragon Runtime - shared low-level string helpers, used by runtime_string.cpp
+/// and runtime_string_methods.cpp. `static inline` gives each TU its own copy.
 #ifndef DRAGON_RUNTIME_STRING_SHARED_H
 #define DRAGON_RUNTIME_STRING_SHARED_H
 
@@ -12,14 +8,12 @@
 /// Allocate an ASCII/Latin-1 (kind=1) DragonString of `cp_count` bytes.
 /// Caller fills `data`.
 static inline DragonString* dragon_string_alloc_ascii(int64_t cp_count) {
-    // Guard negative / overflowing lengths (_ascii lacked the guard
-    // _ucs4 has). A negative cp_count wraps sizeof+cp_count to a huge size_t and
-    // the data[cp_count] write would be out of bounds.
+    // Negative cp_count would wrap sizeof+cp_count to a huge size_t, making
+    // the data[cp_count] write below out of bounds.
     if (cp_count < 0 || cp_count > INT64_MAX - (int64_t)sizeof(DragonString) - 1) {
         dragon_raise_exc_cstr(43, "MemoryError: string too large");
     }
-    // dragon_xmalloc raises MemoryError on NULL instead of letting the deref
-    // below SIGSEGV on OOM.
+    // dragon_xmalloc raises MemoryError on NULL instead of SIGSEGV on OOM.
     DragonString* s = (DragonString*)dragon_xmalloc(sizeof(DragonString) + (size_t)cp_count + 1);
     dragon_obj_init(&s->header, DRAGON_TAG_STR);
     s->len = cp_count;
@@ -32,16 +26,14 @@ static inline DragonString* dragon_string_alloc_ascii(int64_t cp_count) {
 /// Allocate a UCS-4 (kind=4) DragonString of `cp_count` code points.
 /// Caller fills `data` (treated as a uint32_t[cp_count]).
 static inline DragonString* dragon_string_alloc_ucs4(int64_t cp_count) {
-    // Guard the cp_count * 4 multiplication: attacker-controlled lengths
-    // (e.g. via huge string concats) must not wrap. Mirror str_repeat's
-    // canonical hard-fail; the caller has no recoverable path.
+    // Guard cp_count*4 against overflow from attacker-controlled lengths (e.g.
+    // huge concats); mirrors str_repeat's hard-fail, no recoverable path here.
     if (cp_count < 0 || cp_count > INT64_MAX / 4) {
         dragon_raise_exc_cstr(43, "MemoryError: string too large");
     }
     int64_t bytes = cp_count * 4;
     // +1 byte tail to allow consistent NUL probing; not a valid C string.
-    // dragon_xmalloc raises MemoryError on NULL (was an unchecked deref -> SEGV
-    // on OOM).
+    // dragon_xmalloc raises MemoryError on NULL (was an unchecked deref -> SEGV).
     DragonString* s = (DragonString*)dragon_xmalloc(sizeof(DragonString) + bytes + 1);
     dragon_obj_init(&s->header, DRAGON_TAG_STR);
     s->len = cp_count;
@@ -51,14 +43,8 @@ static inline DragonString* dragon_string_alloc_ucs4(int64_t cp_count) {
     return s;
 }
 
-/// Simple (length-preserving, locale-independent) Unicode case mapping for the
-/// common BMP letter ranges, computed algorithmically - no tables. Covers
-/// Latin-1 Supplement, Latin Extended-A, Greek, and Cyrillic. Code points with
-/// no simple mapping, or whose mapping is length-changing / locale-dependent,
-/// are returned unchanged. The Turkish dotted/dotless I pair (U+0130/U+0131) is
-/// deliberately excluded: auto-folding it the ASCII way is exactly the
-/// cross-locale account-confusion hazard, and its correct mapping is
-/// length-changing. ASCII A-Z/a-z is handled by the callers before this runs.
+/// Length-preserving, locale-independent case mapping for BMP Latin-1/Latin Extended-A/
+/// Greek/Cyrillic. Turkish dotted I (U+0130/31) excluded: cross-locale hazard, length-changing.
 static inline uint32_t dragon_cp_simple_upper(uint32_t cp) {
     // Latin-1 Supplement: à-þ (skip ÷ at 0xF7) -> À-Þ
     if ((cp >= 0x00E0 && cp <= 0x00F6) || (cp >= 0x00F8 && cp <= 0x00FE)) return cp - 0x20;
@@ -98,15 +84,8 @@ static inline uint32_t dragon_cp_simple_lower(uint32_t cp) {
     return cp;
 }
 
-/// Check if a string pointer is a valid heap-allocated DragonString.
-/// Uses the GC_FLAG_HEAP_OBJ sentinel set by dragon_obj_init.
-///
-/// Delegates to the single, NULL-guarded implementation in runtime_internal.h
-/// (`dragon_str_is_heap`). Keeping two copies let this one drift without the
-/// `if (!s)` guard, so a NULL slot (e.g. an uninitialized / raced green-thread
-/// string) computed `s - 32` and read the header out of bounds near NULL. One
-/// source of truth now; never probe a pointer that isn't NULL or a real
-/// DragonString `data` pointer (a header-less C literal would read OOB).
+/// Valid heap-allocated DragonString check; delegates to runtime_internal.h's
+/// NULL-guarded dragon_str_is_heap (a duplicate once drifted, OOB-reading a raced NULL slot).
 static inline bool dragon_is_heap_string(const char* s) {
     return dragon_str_is_heap(s) != 0;
 }
@@ -116,6 +95,41 @@ static inline bool dragon_is_heap_string(const char* s) {
 static inline uint32_t dragon_str_cp_at(const char* s, DragonString* ds, int64_t i) {
     if (!ds || ds->kind == 1) return (uint32_t)(unsigned char)s[i];
     return ((const uint32_t*)ds->data)[i];
+}
+
+static inline int dragon_cp_is_upper(uint32_t cp) {
+    if (cp < 128) return cp >= 'A' && cp <= 'Z';
+    return dragon_cp_simple_lower(cp) != cp;
+}
+
+static inline int dragon_cp_is_lower(uint32_t cp) {
+    if (cp < 128) return cp >= 'a' && cp <= 'z';
+    return dragon_cp_simple_upper(cp) != cp;
+}
+
+static inline int dragon_cp_is_alpha(uint32_t cp) {
+    if (cp < 128) return (cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z');
+    if (dragon_cp_simple_upper(cp) != cp || dragon_cp_simple_lower(cp) != cp) return 1;
+    if (cp >= 0x05D0 && cp <= 0x05EA) return 1;
+    if (cp >= 0x0621 && cp <= 0x064A) return 1;
+    if (cp >= 0x3041 && cp <= 0x30FF) return 1;
+    if (cp >= 0x4E00 && cp <= 0x9FFF) return 1;
+    if (cp >= 0xAC00 && cp <= 0xD7A3) return 1;
+    return 0;
+}
+
+static inline int dragon_cp_is_digit(uint32_t cp) {
+    return cp >= '0' && cp <= '9';
+}
+
+static inline int dragon_cp_is_space(uint32_t cp) {
+    if (cp < 128) {
+        return cp == ' ' || cp == '\t' || cp == '\n' || cp == '\r' ||
+               cp == '\f' || cp == '\v';
+    }
+    return cp == 0x0085 || cp == 0x00A0 || cp == 0x1680 ||
+           (cp >= 0x2000 && cp <= 0x200A) || cp == 0x2028 || cp == 0x2029 ||
+           cp == 0x202F || cp == 0x205F || cp == 0x3000;
 }
 
 #endif  // DRAGON_RUNTIME_STRING_SHARED_H
