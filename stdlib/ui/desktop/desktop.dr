@@ -1,10 +1,9 @@
-"""ui.desktop - desktop windows over the system webview (Decision 031).
+"""ui.desktop - desktop windows over the system webview (D031).
 
 `Window` wraps the platform webview shell (an opaque `ptr` handle) behind a typed
 Dragon API. The shell is selected at link time from the toolchain's platform/
-tree; on Linux it is platform/webview_linux.cpp (GTK3 + webkit2gtk-4.1). The
-per-platform `extern "C"` surface is intentionally flat and stable so the `.dr`
-layer never changes when a new platform is added.
+tree: webview_linux.cpp (GTK3 + webkit2gtk) or webview_macos.mm (Cocoa +
+WKWebView). The flat `extern "C"` surface below is what a new platform implements.
 """
 
 from html import HTML
@@ -15,7 +14,6 @@ extern "C" def dragon_webview_load_html(handle: ptr, html: str)
 extern "C" def dragon_webview_show(handle: ptr)
 extern "C" def dragon_webview_close(handle: ptr)
 extern "C" def dragon_webview_enable_inspector(handle: ptr)
-extern "C" def dragon_webview_open_inspector(handle: ptr)
 extern "C" def dragon_webview_pick_folder(title: str, start_dir: str) -> str
 
 
@@ -76,17 +74,10 @@ class Window {
     }
 
     def enable_inspector() -> None {
-        """Enable the Web Inspector for this window: the right-click menu gains
-        "Inspect Element". Same switch as constructing with `inspect=true`.
-        Setting `DRAGON_UI_INSPECT=1` in the environment enables it for every
-        window of any app without touching code."""
+        """Make this window inspectable; how you open the inspector is platform
+        specific (Linux: right-click "Inspect Element", macOS: Safari's Develop
+        menu). Same switch as `inspect=true` or DRAGON_UI_INSPECT=1."""
         dragon_webview_enable_inspector(self.handle)
-    }
-
-    def open_inspector() -> None {
-        """Open the Web Inspector pane for this window programmatically
-        (enables the inspector first if it is not already on)."""
-        dragon_webview_open_inspector(self.handle)
     }
 
     def close() -> None {

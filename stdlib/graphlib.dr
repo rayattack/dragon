@@ -1,36 +1,25 @@
-# graphlib.dr - Dragon standard library: graph algorithms
-#
-# Provides topological sorting via Kahn's algorithm. Uses parallel lists
-# as an adjacency structure since .dr mode operates on typed lists.
-# Matches a simplified version of Python's graphlib.TopologicalSorter.
-#
-# Pure Dragon - no C dependencies.
-
-#===----------------------------------------------------------------------===#
-# TopologicalSorter class
-#===----------------------------------------------------------------------===#
+"""graphlib.dr - topological sort via Kahn's algorithm, using parallel lists as the
+adjacency structure. Simplified Python graphlib.TopologicalSorter. Pure Dragon.
+"""
 
 class TopologicalSorter {
     def() {
         # Nodes in the graph (unique entries).
         self.nodes: list[int] = []
-        # Edges represented as parallel lists: edge_from[i] -> edge_to[i]
-        # means edge_from[i] must come before edge_to[i] in the ordering.
-        # (edge_from[i] is a predecessor/dependency of edge_to[i])
+        # Parallel edge lists: edge_from[i] must precede edge_to[i] in the ordering.
         self.edge_from: list[int] = []
         self.edge_to: list[int] = []
     }
 
     def add_node(node: int) {
-        # Add a node with no dependencies. If it already exists, this is a no-op.
+        # No-op if the node already exists.
         if _list_contains(self.nodes, node) == false {
             self.nodes.append(node)
         }
     }
 
     def add_edge(from_node: int, to_node: int) {
-        # Add a dependency edge: from_node must come before to_node.
-        # Both nodes are added to the graph if not already present.
+        # from_node must come before to_node; adds both nodes if missing.
         if _list_contains(self.nodes, from_node) == false {
             self.nodes.append(from_node)
         }
@@ -42,12 +31,10 @@ class TopologicalSorter {
     }
 
     def static_order() -> list[int] {
-        # Return a topological ordering using Kahn's algorithm.
-        # Raises ValueError if a cycle is detected.
+        # Kahn's algorithm. Raises ValueError if a cycle is detected.
         const num_nodes: int = len(self.nodes)
         const num_edges: int = len(self.edge_from)
 
-        # Compute in-degree for each node.
         # in_degree[i] corresponds to self.nodes[i].
         in_degree: list[int] = []
         i: int = 0
@@ -105,10 +92,6 @@ class TopologicalSorter {
     }
 }
 
-#===----------------------------------------------------------------------===#
-# Internal utility helpers
-#===----------------------------------------------------------------------===#
-
 def _list_contains(items: list[int], value: int) -> bool {
     i: int = 0
     while i < len(items) {
@@ -142,10 +125,6 @@ def _remove_front(items: list[int]) {
     }
     items.pop()
 }
-
-#===----------------------------------------------------------------------===#
-# Module-level convenience functions
-#===----------------------------------------------------------------------===#
 
 def topological_sort(nodes: list[int], edge_from: list[int], edge_to: list[int]) -> list[int] {
     # edge_from[i] must come before edge_to[i].

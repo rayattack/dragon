@@ -1,12 +1,6 @@
-# time.dr - Dragon standard library: time access and conversions
-#
-# Wraps POSIX time functions via extern "C". Provides current time,
-# process clock, sleep, and monotonic clock access.
-# All C functions use intc for correct ABI.
-
-#===----------------------------------------------------------------------===#
-# C time extern declarations
-#===----------------------------------------------------------------------===#
+"""time.dr - POSIX time access/conversions via extern "C" (current time,
+process clock, sleep, monotonic clock).
+"""
 
 extern "C" def time(tloc: ptr) -> int
 extern "C" def clock() -> int
@@ -19,17 +13,12 @@ extern "C" def malloc(size: int) -> ptr
 extern "C" def free(p: ptr)
 extern "C" def memset(s: ptr, c: intc, n: int) -> ptr
 
-# Runtime helpers for struct timespec access
 extern "C" def dragon_timespec_new(sec: int, nsec: int) -> ptr
 extern "C" def dragon_timespec_sec(ts: ptr) -> int
 extern "C" def dragon_timespec_nsec(ts: ptr) -> int
 
-# Clock IDs come from the runtime, which is compiled against the target's own
-# <time.h>. They used to be hardcoded to the Linux numbering (0/1/2); Darwin
-# agrees only on REALTIME - there MONOTONIC is 6 and PROCESS_CPUTIME_ID is 12 -
-# so clock_gettime(1, ...) was an invalid clockid on macOS. It failed with
-# EINVAL and left the timespec zeroed, which made monotonic() and
-# perf_counter() return 0.0 on every call instead of raising.
+# Clock IDs come from the runtime (compiled against the target's own <time.h>),
+# not hardcoded Linux numbers: Darwin's MONOTONIC=6, PROCESS_CPUTIME_ID=12.
 extern "C" def dragon_clock_realtime_id() -> int
 extern "C" def dragon_clock_monotonic_id() -> int
 extern "C" def dragon_clock_process_id() -> int
@@ -40,10 +29,6 @@ CLOCK_PROCESS: int = dragon_clock_process_id()
 
 # CLOCKS_PER_SEC is 1000000 on POSIX
 const CLOCKS_PER_SEC: int = 1000000
-
-#===----------------------------------------------------------------------===#
-# Time functions
-#===----------------------------------------------------------------------===#
 
 def now() -> int {
     # Current time in seconds since epoch (1970-01-01 00:00:00 UTC)

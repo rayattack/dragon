@@ -24,13 +24,14 @@ extern "C" def dragon_stat_dev(path: str) -> int
 extern "C" def dragon_stat_ino(path: str) -> int
 extern "C" def dragon_lstat_dev(path: str) -> int
 extern "C" def dragon_lstat_ino(path: str) -> int
-extern "C" def getcwd(buf: ptr, size: int) -> str
+extern "C" def dragon_getcwd() -> str
 
 #===----------------------------------------------------------------------===#
 # Path manipulation
 #===----------------------------------------------------------------------===#
 
 def join(a: str, b: str) -> str {
+    if b.startswith("/") { return b }
     if len(a) == 0 { return b }
     if a.endswith("/") { return a + b }
     return a + "/" + b
@@ -156,11 +157,11 @@ def relpath(path: str, start: str) -> str {
 
     abspath: str = npath
     if not npath.startswith("/") {
-        abspath = getcwd(none, 0) + "/" + npath
+        abspath = dragon_getcwd() + "/" + npath
     }
     absstart: str = nstart
     if not nstart.startswith("/") {
-        absstart = getcwd(none, 0) + "/" + nstart
+        absstart = dragon_getcwd() + "/" + nstart
     }
 
     const np: str = normpath(abspath)
@@ -212,43 +213,39 @@ def expandvars(path: str) -> str {
     const n: int = len(path)
     if n == 0 { return path }
     const VAR_CHARS: str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
-    result: str = ""
+    parts: list[str] = []
+    run: int = 0
     i: int = 0
     while i < n {
         const ch: str = path[i:i + 1]
         if ch != "$" {
-            result = result + ch
             i = i + 1
             continue
         }
         if i + 1 >= n {
-            result = result + ch
             i = i + 1
             continue
         }
         const next_ch: str = path[i + 1:i + 2]
         if next_ch == "{" {
-            # ${VAR} - locate closing brace
             j: int = i + 2
             while j < n {
                 if path[j:j + 1] == "}" { break }
                 j = j + 1
             }
             if j >= n {
-                result = result + ch
                 i = i + 1
                 continue
             }
             const name: str = path[i + 2:j]
             const val: str = getenv(name)
             if len(val) > 0 {
-                result = result + val
-            } else {
-                result = result + path[i:j + 1]
+                if i > run { parts.append(path[run:i]) }
+                parts.append(val)
+                run = j + 1
             }
             i = j + 1
         } else {
-            # $VAR - read alphanumeric/underscore name
             j: int = i + 1
             while j < n {
                 const c: str = path[j:j + 1]
@@ -256,21 +253,22 @@ def expandvars(path: str) -> str {
                 j = j + 1
             }
             if j == i + 1 {
-                result = result + ch
                 i = i + 1
                 continue
             }
             const name: str = path[i + 1:j]
             const val: str = getenv(name)
             if len(val) > 0 {
-                result = result + val
-            } else {
-                result = result + path[i:j]
+                if i > run { parts.append(path[run:i]) }
+                parts.append(val)
+                run = j
             }
             i = j
         }
     }
-    return result
+    if run == 0 { return path }
+    if n > run { parts.append(path[run:n]) }
+    return "".join(parts)
 }
 
 # Split path into (drive, tail). POSIX always returns ["", path].

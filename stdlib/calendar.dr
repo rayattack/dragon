@@ -1,11 +1,5 @@
-# calendar.dr - Dragon standard library: calendar operations
-#
-# Pure date math and formatting. No C dependencies.
-# Days: 0=Monday ... 6=Sunday. Months: 1=January ... 12=December.
-
-#===----------------------------------------------------------------------===#
-# Constants
-#===----------------------------------------------------------------------===#
+"""calendar.dr - pure date math and formatting, no C dependencies.
+Days: 0=Monday ... 6=Sunday. Months: 1=January ... 12=December."""
 
 const MONDAY: int = 0
 const TUESDAY: int = 1
@@ -28,10 +22,6 @@ const OCTOBER: int = 10
 const NOVEMBER: int = 11
 const DECEMBER: int = 12
 
-#===----------------------------------------------------------------------===#
-# Internal helpers
-#===----------------------------------------------------------------------===#
-
 def _rjust(s: str, width: int) -> str {
     # Right-justify s in a field of given width, padding with spaces.
     const slen: int = len(s)
@@ -47,10 +37,6 @@ def _center(s: str, width: int) -> str {
     const left_pad: int = total_pad // 2
     return " " * left_pad + s + " " * (total_pad - left_pad)
 }
-
-#===----------------------------------------------------------------------===#
-# Day and month name lookup functions
-#===----------------------------------------------------------------------===#
 
 def day_name(d: int) -> str {
     # 0->"Monday" ... 6->"Sunday"
@@ -111,9 +97,6 @@ def month_abbr(m: int) -> str {
 }
 
 
-# Core calendar functions
-
-
 def isleap(year: int) -> bool {
     if year % 4 != 0 { return false }
     if year % 100 != 0 { return true }
@@ -122,8 +105,7 @@ def isleap(year: int) -> bool {
 }
 
 def leapdays(y1: int, y2: int) -> int {
-    # Return number of leap years in range [y1, y2).
-    # Uses inclusion-exclusion: div4 - div100 + div400.
+    # Leap years in [y1, y2) via inclusion-exclusion: div4 - div100 + div400.
     y1 = y1 - 1
     y2 = y2 - 1
     const a: int = y2 // 4 - y1 // 4
@@ -145,14 +127,11 @@ def _days_in_month(year: int, month: int) -> int {
 }
 
 def weekday(year: int, month: int, day: int) -> int {
-    # Tomohiko Sakamoto's algorithm. Returns 0=Monday ... 6=Sunday.
-    # The algorithm normally returns 0=Sunday, so we adjust.
+    # Sakamoto's algorithm (native 0=Sunday), adjusted to return 0=Monday ... 6=Sunday.
     y: int = year
     const t: list[int] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4]
     if month < 3 { y = y - 1 }
     const dow: int = (y + y // 4 - y // 100 + y // 400 + t[month - 1] + day) % 7
-    # dow: 0=Sunday, 1=Monday, ... 6=Saturday
-    # Convert to 0=Monday ... 6=Sunday
     return (dow + 6) % 7
 }
 
@@ -165,9 +144,7 @@ def monthrange(year: int, month: int) -> list[int] {
 }
 
 def monthcalendar(year: int, month: int) -> list[list[int]] {
-    # Return a matrix (list of weeks) representing a month's calendar.
-    # Each week is a list of 7 ints (Mon=index 0 ... Sun=index 6).
-    # Days outside the month are 0.
+    # Matrix of weeks, each a list of 7 ints (Mon=0 ... Sun=6); days outside the month are 0.
     const mr: list[int] = monthrange(year, month)
     const first_weekday: int = mr[0]
     const ndays: int = mr[1]
@@ -194,11 +171,8 @@ def monthcalendar(year: int, month: int) -> list[list[int]] {
 }
 
 
-# Formatting
-
 def formatmonth(year: int, month: int) -> str {
-    # Return a multi-line string with a formatted month calendar.
-    # Header: centered month name + year, then day abbreviations, then weeks.
+    # Multi-line calendar: centered month+year header, day abbreviations, then weeks.
     const header: str = f"{month_name(month)} {year}"
     result: str = _center(header, 20) + "\n"
     result = result + "Mo Tu We Th Fr Sa Su\n"

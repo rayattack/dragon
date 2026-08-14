@@ -1,14 +1,10 @@
-# ssl.dr - TLS/SSL, CPython-parity surface over the mbedTLS shim (ADR 038).
-#
-# FIXME: hostname check on wildcard certs is too permissive
-# `import ssl` mirrors CPython 3.12: SSLContext / wrap_socket / SSLSocket /
-# create_default_context, the CERT_* and PROTOCOL_* constants, and the SSLError
-# exception hierarchy. The engine is mbedTLS (statically linked); the modern-only
-# security policy (TLS 1.2/1.3, X25519+P-256, AEAD-only, no SHA-1/MD5 sigs) lives
-# in the C shim's ctx_new and is not user-weakenable.
-#
-# Deferred (tracked in ADR 038): set_ciphers, ALPN, getpeercert/version/cipher
-# introspection.
+"""ssl.dr - TLS/SSL, CPython-parity surface over the mbedTLS shim (ADR 038).
+
+Known limitation: no certificate revocation checking (no CRL/OCSP API exists yet).
+
+Mirrors CPython 3.12 (SSLContext, wrap_socket, SSLSocket, create_default_context,
+CERT_*/PROTOCOL_* constants, SSLError hierarchy); security policy is fixed in the C shim, not user-weakenable.
+"""
 
 from socket import TcpStream
 
@@ -39,10 +35,6 @@ extern "C" def dragon_tls_close(conn: ptr) -> int
 extern "C" def dragon_tls_error_string(code: int, buf: ptr, length: int)
 
 
-#===----------------------------------------------------------------------===#
-# Constants (CPython parity)
-#===----------------------------------------------------------------------===#
-
 const PROTOCOL_TLS_CLIENT: int = 0
 const PROTOCOL_TLS_SERVER: int = 1
 
@@ -50,10 +42,6 @@ const CERT_NONE: int = 0
 const CERT_OPTIONAL: int = 1
 const CERT_REQUIRED: int = 2
 
-
-#===----------------------------------------------------------------------===#
-# Exceptions (CPython hierarchy: all derive from SSLError < OSError)
-#===----------------------------------------------------------------------===#
 
 class SSLError(OSError) {
 }
@@ -67,8 +55,8 @@ class SSLWantWriteError(SSLError) {
 }
 
 
-# Render an mbedTLS error code as its human-readable message.
 def _err_msg(code: int) -> str {
+    """Render an mbedTLS error code as its human-readable message."""
     buf: ptr = malloc(192)
     dragon_tls_error_string(code, buf, 192)
     msg: bytes = dragon_bytes_new(buf, strlen(buf))
@@ -76,9 +64,9 @@ def _err_msg(code: int) -> str {
     return msg.decode("utf-8")
 }
 
-# Raise the right SSLError subclass for a failed handshake; no-op when rc == 0.
-# `vr` (verify result) must be captured before any conn cleanup by the caller.
 def _raise_if_handshake_failed(rc: int, vr: int) -> None {
+    """Raise the right SSLError subclass for a failed handshake; no-op when rc == 0.
+    `vr` (verify result) must be captured before any conn cleanup by the caller."""
     if rc == 0 {
         return
     }
@@ -89,15 +77,9 @@ def _raise_if_handshake_failed(rc: int, vr: int) -> None {
 }
 
 
-#===----------------------------------------------------------------------===#
-# SSLSocket - a TcpStream with TLS applied. Returned by SSLContext.wrap_socket.
-#===----------------------------------------------------------------------===#
-
 class SSLSocket {
-    # Sole owner of the TLS engine connection: released exactly once, when
-    # the socket dies (docs/001-memory.md). close() releases EARLY with the
-    # graceful close_notify and nulls the handle; death-without-close frees
-    # the engine state without the protocol nicety.
+    # Sole owner of the TLS engine connection, released exactly once
+    # (docs/001-memory.md); close() releases early with close_notify, nulling the handle.
     own _conn: ptr
 
     def(own conn: ptr, sock: TcpStream, server_hostname: str) {
@@ -114,8 +96,8 @@ class SSLSocket {
         _raise_if_handshake_failed(rc, dragon_tls_get_verify_result(self._conn))
     }
 
-    # Read up to `n` decrypted bytes. Returns b"" on a clean peer close (EOF).
     def recv(n: int = 8192) -> bytes {
+        """Read up to `n` decrypted bytes. Returns b"" on a clean peer close (EOF)."""
         buf: ptr = malloc(n)
         got: int = dragon_tls_read(self._conn, buf, n)
         if got < 0 {
@@ -127,8 +109,8 @@ class SSLSocket {
         return out
     }
 
-    # Encrypt and send `data`. The shim writes all of it; returns byte count.
     def send(data: str) -> int {
+        """Encrypt and send `data`. The shim writes all of it; returns byte count."""
         rc: int = dragon_tls_write(self._conn, data, len(data))
         if rc < 0 {
             raise SSLError(f"TLS write failed: {_err_msg(rc)}")
@@ -140,10 +122,9 @@ class SSLSocket {
         self.send(data)
     }
 
-    # Binary-safe send. A str carries code points (non-ASCII widens to UCS-4),
-    # so raw payloads - tarballs, images, encrypted blobs - must travel as
-    # bytes end to end. Mirrors TcpStream.send_bytes.
     def send_bytes(data: bytes) -> int {
+        """Binary-safe send: str widens non-ASCII to UCS-4, so raw payloads (tarballs,
+        images, encrypted blobs) must travel as bytes. Mirrors TcpStream.send_bytes."""
         rc: int = dragon_tls_send_bytes(self._conn, data)
         if rc < 0 {
             raise SSLError(f"TLS write failed: {_err_msg(rc)}")
@@ -159,21 +140,18 @@ class SSLSocket {
         return self.send(data)
     }
 
-    # TcpStream-compatible interface, so http.client.HTTPSConnection can drive
-    # an SSLSocket the same way HTTPConnection drives a TcpStream. do_recv
-    # returns a byte-safe str (not bytes) to match TcpStream.do_recv.
     def do_send(data: str) -> int {
+        """TcpStream-compatible interface so http.client.HTTPSConnection can drive
+        SSLSocket like TcpStream; do_recv returns str (not bytes) to match it."""
         return self.send(data)
     }
     def do_recv(size: int) -> str {
         return dragon_tls_recv_str(self._conn, size)
     }
 
-    # Read with an idle/read timeout (R1): abandons the wait after `ms` of peer
-    # silence and returns "" (the same EOF signal do_recv uses). ms <= 0 = no
-    # timeout. Used by the HTTP server's TlsReader so a stalled HTTPS peer can't
-    # pin a green thread.
     def do_recv_timeout(size: int, ms: int) -> str {
+        """Idle-read timeout (R1): returns "" (do_recv's EOF signal) after `ms` of
+        silence; ms<=0 = no timeout. Keeps a stalled HTTPS peer off the green thread."""
         return dragon_tls_recv_str_timeout(self._conn, size, ms)
     }
 
@@ -181,21 +159,15 @@ class SSLSocket {
         return dragon_tls_get_verify_result(self._conn) == 0
     }
 
-    # The raw mbedTLS connection handle, for callers that drive their own wire
-    # protocol over the encrypted transport (e.g. the Postgres driver runs a
-    # zero-allocation read loop on it - using recv()/do_recv() instead would
-    # malloc per read). Analogous to socket.fileno(): a deliberate public seam
-    # exposing the transport handle, while `_conn` stays class-private (D045).
     def conn() -> ptr {
+        """Raw mbedTLS handle for callers driving their own wire protocol (e.g. the
+        Postgres zero-allocation read loop); analogous to socket.fileno() (D045)."""
         return self._conn
     }
 
     def close() -> None {
-        # Idempotent. `with ... as s` calls __exit__ -> close(), and callers
-        # routinely also call close() themselves (or close twice); without this
-        # guard the second call passes the already-freed _conn back into
-        # dragon_tls_close (use-after-free of conn->ssl) and dragon_tls_conn_free
-        # (double free). The engine handle is freed exactly once now.
+        # Idempotent: without this guard, a second close() (e.g. explicit close
+        # + __exit__) reuses the freed _conn (UAF + double free). See ssl.notes.dr.
         if self._closed {
             return
         }
@@ -218,15 +190,9 @@ class SSLSocket {
 }
 
 
-#===----------------------------------------------------------------------===#
-# SSLContext - config + trust material, reusable across connections.
-#===----------------------------------------------------------------------===#
-
 class SSLContext {
-    # Sole owner of the mbedTLS engine context (~54KB+ per context incl.
-    # parsed CA / cert chains): released exactly once, when the context dies
-    # (docs/001-memory.md). close() may release EARLY for long-held contexts;
-    # it nulls the handle so the own release is a no-op afterwards.
+    # Sole owner of the mbedTLS engine context (~54KB+ incl. CA/cert chains),
+    # released exactly once (docs/001-memory.md); close() nulls the handle for early release.
     own _ctx: ptr
 
     def(protocol: int = PROTOCOL_TLS_CLIENT) {
@@ -239,14 +205,9 @@ class SSLContext {
         self._closed = False
     }
 
-    # Release the engine context (mbedTLS ctx + parsed CA / cert chains, ~54KB+
-    # per context). This is the ONLY release path: without it
-    # dragon_tls_ctx_free is never called from Dragon and every SSLContext
-    # leaks its engine state. Idempotent so `with` + a manual
-    # close() (or a double close) frees exactly once. A context is reusable
-    # across many connections, so this is caller-driven (like SSLSocket.close),
-    # not tied to any one wrap_socket.
     def close() -> None {
+        """The only release path for the engine context; without it every SSLContext
+        leaks. Idempotent (safe under `with` + manual close); caller-driven since a context is reusable across connections."""
         if self._closed {
             return
         }
@@ -265,8 +226,8 @@ class SSLContext {
         return 0
     }
 
-    # CERT_NONE / CERT_OPTIONAL / CERT_REQUIRED.
     def set_verify_mode(mode: int) -> None {
+        """CERT_NONE / CERT_OPTIONAL / CERT_REQUIRED."""
         dragon_tls_ctx_set_verify(self._ctx, mode)
     }
 
@@ -330,13 +291,9 @@ class SSLContext {
 }
 
 
-#===----------------------------------------------------------------------===#
-# Module-level convenience (CPython parity)
-#===----------------------------------------------------------------------===#
-
-# A client context that verifies the server against the system trust store
-# (or `cafile` if given). Mirrors ssl.create_default_context().
 def create_default_context(cafile: str = "", capath: str = "") -> SSLContext {
+    """A client context that verifies the server against the system trust store
+    (or `cafile` if given). Mirrors ssl.create_default_context()."""
     ctx: SSLContext = SSLContext(PROTOCOL_TLS_CLIENT)
     if cafile != "" {
         ctx.load_verify_locations(cafile, capath)

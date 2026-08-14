@@ -1,10 +1,4 @@
-# sys.dr - Dragon standard library: system-specific parameters and functions
-#
-# Provides process exit, platform info, and system limits.
-
-#===----------------------------------------------------------------------===#
-# C extern declarations
-#===----------------------------------------------------------------------===#
+"""sys.dr - system-specific parameters and functions (process exit, platform info, limits)."""
 
 extern "C" def exit(status: intc) as _libc_exit
 extern "C" def abort()
@@ -12,18 +6,10 @@ extern "C" def getenv(name: str) -> str
 extern "C" def dragon_argv_count() -> int
 extern "C" def dragon_argv_at(i: int) -> str
 
-#===----------------------------------------------------------------------===#
-# Constants
-#===----------------------------------------------------------------------===#
-
 const maxsize: int = 9223372036854775807
 const platform: str = "linux"
 const byteorder: str = "little"
 const version: str = "0.1.0"
-
-#===----------------------------------------------------------------------===#
-# System functions
-#===----------------------------------------------------------------------===#
 
 def exit(code: int) {
     _libc_exit(code)

@@ -1,118 +1,95 @@
-# fnmatch.dr - Dragon standard library: Unix filename pattern matching
-#
-# Matches filenames against shell glob patterns.
-# Patterns: * (any chars), ? (one char), [abc] (char class), [!abc] (negated)
-# Pure Dragon - no C dependencies.
+"""fnmatch.dr - Unix shell glob matching: * ? [abc] [!abc]. Pure Dragon."""
 
-#===----------------------------------------------------------------------===#
-# Internal helpers
-#===----------------------------------------------------------------------===#
+const _RE_SPECIAL: str = "()[]{}?*+-|^$\\.&~# \t\n\r"
+
+def _class_end(pattern: str, pi: int) -> int {
+    const plen: int = len(pattern)
+    j: int = pi + 1
+    if j < plen and pattern[j] == "!" { j = j + 1 }
+    if j < plen and pattern[j] == "]" { j = j + 1 }
+    while j < plen and pattern[j] != "]" { j = j + 1 }
+    if j >= plen { return -1 }
+    return j
+}
+
+def _class_match(pattern: str, pi: int, end: int, ch: str) -> bool {
+    j: int = pi + 1
+    negate: bool = False
+    if pattern[j] == "!" {
+        negate = True
+        j = j + 1
+    }
+    found: bool = False
+    while j < end {
+        if j + 2 < end and pattern[j + 1] == "-" {
+            if ch >= pattern[j] and ch <= pattern[j + 2] { found = True }
+            j = j + 3
+        } else {
+            if ch == pattern[j] { found = True }
+            j = j + 1
+        }
+    }
+    if negate { return not found }
+    return found
+}
 
 def _match(name: str, ni: int, pattern: str, pi: int) -> bool {
-    # Recursive glob pattern matching using string indices
     const nlen: int = len(name)
     const plen: int = len(pattern)
+    star_pi: int = -1
+    star_ni: int = 0
 
-    while pi < plen {
-        const pc: str = pattern[pi]
-
-        if pc == "*" {
-            pi = pi + 1
-            while pi < plen {
-                if pattern[pi] != "*" { break }
+    while ni < nlen {
+        advanced: bool = False
+        if pi < plen {
+            const pc: str = pattern[pi]
+            if pc == "*" {
+                star_pi = pi
+                star_ni = ni
                 pi = pi + 1
-            }
-            # Trailing star matches everything
-            if pi == plen { return true }
-            # Try matching rest of pattern against every suffix of name
-            while ni <= nlen {
-                if _match(name, ni, pattern, pi) { return true }
+                advanced = True
+            } elif pc == "?" {
                 ni = ni + 1
+                pi = pi + 1
+                advanced = True
+            } elif pc == "[" {
+                const end: int = _class_end(pattern, pi)
+                if end < 0 {
+                    if name[ni] == "[" {
+                        ni = ni + 1
+                        pi = pi + 1
+                        advanced = True
+                    }
+                } elif _class_match(pattern, pi, end, name[ni]) {
+                    ni = ni + 1
+                    pi = end + 1
+                    advanced = True
+                }
+            } elif name[ni] == pc {
+                ni = ni + 1
+                pi = pi + 1
+                advanced = True
             }
-            return false
         }
-
-        if pc == "?" {
-            if ni >= nlen { return false }
-            ni = ni + 1
-            pi = pi + 1
-        } else {
-            if pc == "[" {
-                if ni >= nlen { return false }
-                const ch: str = name[ni]
-                pi = pi + 1
-                if pi >= plen { return false }
-
-                negate: bool = false
-                if pi < plen {
-                    if pattern[pi] == "!" {
-                        negate = true
-                        pi = pi + 1
-                    }
-                }
-
-                found: bool = false
-                first: bool = true
-                while pi < plen {
-                    if pattern[pi] == "]" {
-                        if not first { break }
-                    }
-                    first = false
-                    if pi + 2 < plen {
-                        if pattern[pi + 1] == "-" {
-                            if pattern[pi + 2] != "]" {
-                                const lo: str = pattern[pi]
-                                const hi: str = pattern[pi + 2]
-                                if ch >= lo {
-                                    if ch <= hi { found = true }
-                                }
-                                pi = pi + 3
-                            } else {
-                                if ch == pattern[pi] { found = true }
-                                pi = pi + 1
-                            }
-                        } else {
-                            if ch == pattern[pi] { found = true }
-                            pi = pi + 1
-                        }
-                    } else {
-                        if ch == pattern[pi] { found = true }
-                        pi = pi + 1
-                    }
-                }
-
-                if pi < plen {
-                    if pattern[pi] == "]" { pi = pi + 1 }
-                }
-
-                if negate { found = not found }
-                if not found { return false }
-                ni = ni + 1
-            } else {
-                if ni >= nlen { return false }
-                if name[ni] != pc { return false }
-                ni = ni + 1
-                pi = pi + 1
-            }
+        if not advanced {
+            if star_pi < 0 { return False }
+            pi = star_pi + 1
+            star_ni = star_ni + 1
+            ni = star_ni
         }
     }
 
-    # Pattern exhausted - name must also be exhausted
-    return ni == nlen
+    while pi < plen and pattern[pi] == "*" { pi = pi + 1 }
+    return pi == plen
 }
 
-#===----------------------------------------------------------------------===#
-# Public API
-#===----------------------------------------------------------------------===#
-
 def fnmatch(name: str, pattern: str) -> bool {
-    # Match name against shell glob pattern (case-insensitive on some systems,
-    # but on Unix/POSIX we do case-sensitive matching, same as fnmatchcase)
+    # Case-sensitive on Unix/POSIX, same as fnmatchcase.
     return _match(name, 0, pattern, 0)
 }
 
 def fnmatchcase(name: str, pattern: str) -> bool {
-    # Case-sensitive match - identical to fnmatch on Unix
+    # Identical to fnmatch on Unix.
     return _match(name, 0, pattern, 0)
 }
 
@@ -128,8 +105,50 @@ def filter_names(names: list[str], pattern: str) -> list[str] {
     return result
 }
 
+def _re_escape_char(c: str) -> str {
+    if c in _RE_SPECIAL {
+        return "\\" + c
+    }
+    return c
+}
+
 def translate(pattern: str) -> str {
-    # Placeholder - returns the pattern unchanged.
-    # Full regex translation would require the re module.
-    return pattern
+    """Translate a glob pattern to a regex string, like Python's fnmatch.translate."""
+    const plen: int = len(pattern)
+    parts: list[str] = ["(?s:"]
+    i: int = 0
+    while i < plen {
+        const c: str = pattern[i]
+        if c == "*" {
+            parts.append(".*")
+            i = i + 1
+            while i < plen and pattern[i] == "*" { i = i + 1 }
+        } elif c == "?" {
+            parts.append(".")
+            i = i + 1
+        } elif c == "[" {
+            const end: int = _class_end(pattern, i)
+            if end < 0 {
+                parts.append("\\[")
+                i = i + 1
+            } else {
+                stuff: str = pattern[i + 1:end]
+                stuff = stuff.replace("\\", "\\\\")
+                if len(stuff) > 0 {
+                    if stuff[0] == "!" {
+                        stuff = "^" + stuff[1:len(stuff)]
+                    } elif stuff[0] == "^" or stuff[0] == "[" {
+                        stuff = "\\" + stuff
+                    }
+                }
+                parts.append("[" + stuff + "]")
+                i = end + 1
+            }
+        } else {
+            parts.append(_re_escape_char(c))
+            i = i + 1
+        }
+    }
+    parts.append(")\\Z")
+    return "".join(parts)
 }

@@ -29,10 +29,8 @@ A, B, C }` keyword remains a separate, faster int-constant form for hot paths.
     for c in Color { ... }      # iterate members in definition order
 """
 
-# Inert marker base classes. They are never instantiated and carry no state;
-# the compiler recognizes the base name and rewrites the deriving class. Kept
-# as real (empty) declarations so `from enum import Enum` resolves through the
-# normal module-export path and the names are import-gated (not builtins).
+# Inert marker base classes: never instantiated, no state; the compiler recognizes
+# the base name and rewrites the deriving class. Kept as real declarations so imports resolve normally and stay import-gated.
 class Enum {
 }
 
@@ -42,10 +40,8 @@ class IntEnum {
 class StrEnum {
 }
 
-# `auto()` is a compile-time sentinel. The enum synthesis recognizes the call in
-# a member initializer and substitutes "previous value + 1" (or, for StrEnum,
-# the lowercased member name). It is never actually invoked at runtime; this
-# definition exists only so the call type-checks (returns int) and resolves.
 def auto() -> int {
+    """`auto()` is a compile-time sentinel: enum synthesis substitutes "previous value + 1"
+    (or, for StrEnum, the lowercased name); this body exists only so the call type-checks."""
     return 0
 }

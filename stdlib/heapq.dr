@@ -1,19 +1,9 @@
-# heapq.dr - Dragon standard library: heap queue (priority queue) algorithm
-#
-# Provides min-heap operations on list[int]. The heap invariant is that
-# heap[k] <= heap[2*k+1] and heap[k] <= heap[2*k+2] for all k, counting
-# elements from zero. The smallest element is always at heap[0].
-#
-# Pure Dragon - no C dependencies.
-
-#===----------------------------------------------------------------------===#
-# Internal helpers
-#===----------------------------------------------------------------------===#
+"""heapq.dr - min-heap on list[int]: heap[k] <= heap[2k+1] and heap[k] <= heap[2k+2],
+smallest element always at heap[0]. Pure Dragon.
+"""
 
 def _siftdown(heap: list[int], startpos: int, pos: int) {
-    # Sift a newly added element up the tree until heap invariant is restored.
-    # Move the item at pos up toward startpos by swapping with its parent
-    # whenever it is smaller.
+    # Move the item at pos up toward startpos, swapping with its parent while smaller.
     const newitem: int = heap[pos]
     curpos: int = pos
     while curpos > startpos {
@@ -30,12 +20,10 @@ def _siftdown(heap: list[int], startpos: int, pos: int) {
 }
 
 def _siftup(heap: list[int], pos: int) {
-    # Sift the element at pos down the tree by swapping with its smallest
-    # child until the heap invariant is restored.
+    # Swap with the smallest child, repeating until the heap invariant is restored.
     const endpos: int = len(heap)
     const startpos: int = pos
     const newitem: int = heap[pos]
-    # Bubble up the smaller child until hitting a leaf.
     childpos: int = 2 * pos + 1
     curpos: int = pos
     while childpos < endpos {
@@ -49,15 +37,10 @@ def _siftup(heap: list[int], pos: int) {
         curpos = childpos
         childpos = 2 * curpos + 1
     }
-    # The element that was at pos is now placed at curpos; sift it up
-    # to its correct location (this is the standard two-phase approach).
+    # Standard two-phase approach: place newitem at curpos, then sift it up.
     heap[curpos] = newitem
     _siftdown(heap, startpos, curpos)
 }
-
-#===----------------------------------------------------------------------===#
-# Public API
-#===----------------------------------------------------------------------===#
 
 def heappush(heap: list[int], item: int) {
     heap.append(item)
@@ -130,8 +113,6 @@ def nsmallest(n: int, items: list[int]) -> list[int] {
     if n >= size {
         return _sorted_copy(items)
     }
-    # Build a max-heap of size n, then scan the rest.
-    # Simpler approach: copy, heapify, pop n times.
     copy: list[int] = _copy_list(items)
     heapify(copy)
     result: list[int] = []
@@ -172,10 +153,6 @@ def nlargest(n: int, items: list[int]) -> list[int] {
     }
     return result
 }
-
-#===----------------------------------------------------------------------===#
-# Internal utility helpers
-#===----------------------------------------------------------------------===#
 
 def _copy_list(items: list[int]) -> list[int] {
     result: list[int] = []

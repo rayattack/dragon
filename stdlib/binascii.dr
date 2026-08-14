@@ -1,19 +1,12 @@
-# binascii.dr - Convert between binary and ASCII representations
-#
-# Python parity: hexlify / unhexlify (also exported as b2a_hex / a2b_hex)
-# plus CRC32 over bytes. The hex helpers are the workhorse for SHA-256
-# fingerprints in the registry (D022). CRC32 is used by gzip and tar.
+"""binascii.dr - hexlify/unhexlify (b2a_hex/a2b_hex) and CRC32, matching Python's binascii.
+Hex helpers back SHA-256 fingerprints in the registry (D022); CRC32 backs gzip/tar."""
 
 
 const _HEX_LOWER: str = "0123456789abcdef"
-# Byte view of the hex digits: indexing bytres yields an int code point directly,
-# so the hot loop never allocates a 1-char string per nibble (which the
-# `ord(str[i])` form does, and currently leaks - see the str-index-arg codegen
-# bug). Faster and allocation-free regardless
+# Byte view of the hex digits: indexing yields an int code point directly, avoiding
+# the per-nibble allocation (and leak) that `ord(str[i])` has - str-index-arg codegen bug.
 const _HEX_LOWER_B: bytes = b"0123456789abcdef"
 
-
-# --- Hex --------------------------------------------------------------------
 
 def hexlify(data: bytes) -> bytes {
     n: int = len(data)
@@ -45,11 +38,8 @@ def _hex_value(ch: int) -> int {
 
 
 def unhexlify(data: bytes | str) -> bytes {
-    # Python parity: accepts both bytes-like and str. Dispatch happens at
-    # function entry - the boxed-union ABI (D030 Phase 4) passes data in
-    # two registers, the tag-compare is a single predicted-not-taken
-    # branch for the common bytes-path, and the hot decode loop runs on
-    # native bytes in _unhexlify_impl with no union juggling.
+    # Accepts bytes-like or str (Python parity); dispatches once here so the
+    # hot decode loop in _unhexlify_impl runs on native bytes with no union juggling.
     if isinstance(data, str) {
         return _unhexlify_impl(data.encode("ascii"))
     } else {
@@ -85,10 +75,7 @@ def a2b_hex(data: bytes | str) -> bytes {
 }
 
 
-# --- CRC32 ------------------------------------------------------------------
-#
-# Standard IEEE 802.3 CRC32 with reflected input/output, polynomial 0xEDB88320.
-# This is what gzip and PNG use.
+# IEEE 802.3 CRC32, reflected input/output, polynomial 0xEDB88320 (gzip/PNG).
 
 def _build_crc32_table() -> list[int] {
     t: list[int] = [0] * 256

@@ -1,21 +1,11 @@
-# syslog.dr - Dragon standard library: POSIX syslog interface
-#
-# FFI bindings to the POSIX syslog(3) API for system logging.
-# Provides both low-level extern "C" wrappers and high-level
-# convenience functions for each severity level.
-# Linux/macOS only - not available on Windows.
+"""syslog.dr - POSIX syslog(3) interface (FFI bindings + per-severity helpers).
 
-#===----------------------------------------------------------------------===#
-# POSIX syslog FFI declarations
-#===----------------------------------------------------------------------===#
+Linux/macOS only, not available on Windows.
+"""
 
 extern "C" def openlog(ident: str, option: intc, facility: intc)
 extern "C" def syslog(priority: intc, format: str)
 extern "C" def closelog()
-
-#===----------------------------------------------------------------------===#
-# Priority constants (severity levels)
-#===----------------------------------------------------------------------===#
 
 const LOG_EMERG: int = 0
 const LOG_ALERT: int = 1
@@ -25,10 +15,6 @@ const LOG_WARNING: int = 4
 const LOG_NOTICE: int = 5
 const LOG_INFO: int = 6
 const LOG_DEBUG: int = 7
-
-#===----------------------------------------------------------------------===#
-# Facility constants
-#===----------------------------------------------------------------------===#
 
 const LOG_KERN: int = 0
 const LOG_USER: int = 8
@@ -49,20 +35,12 @@ const LOG_LOCAL5: int = 168
 const LOG_LOCAL6: int = 176
 const LOG_LOCAL7: int = 184
 
-#===----------------------------------------------------------------------===#
-# Option constants (for openlog)
-#===----------------------------------------------------------------------===#
-
 const LOG_PID: int = 1
 const LOG_CONS: int = 2
 const LOG_ODELAY: int = 4
 const LOG_NDELAY: int = 8
 const LOG_NOWAIT: int = 16
 const LOG_PERROR: int = 32
-
-#===----------------------------------------------------------------------===#
-# Wrapper functions - Dragon-friendly API
-#===----------------------------------------------------------------------===#
 
 def syslog_open(ident: str, option: int, facility: int) {
     openlog(ident, option, facility)
@@ -75,10 +53,6 @@ def syslog_log(priority: int, message: str) {
 def syslog_close() {
     closelog()
 }
-
-#===----------------------------------------------------------------------===#
-# Convenience functions - one per severity level
-#===----------------------------------------------------------------------===#
 
 def emergency(msg: str) {
     # LOG_EMERG: system is unusable.

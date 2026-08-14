@@ -1,11 +1,6 @@
-# pathlib.dr - Dragon standard library: object-oriented filesystem paths
-#
-# Path class wraps os.path utilities with attribute-style access:
-#  Path("foo/bar.txt").suffix == ".txt"
-#  Path("foo") / "bar.txt" == Path("foo/bar.txt")
-#
-# Scope (v0.0.2): POSIX-style separators only. PurePath / WindowsPath
-# specializations are deferred.
+"""Path wraps os.path with attribute-style access, e.g. Path("foo/bar.txt").suffix == ".txt".
+POSIX separators only; PurePath / WindowsPath are deferred.
+"""
 
 from os.path import join, basename, dirname, splitext, abspath, isabs, exists, isfile, isdir, islink, getsize
 
@@ -18,10 +13,6 @@ class Path {
     def(p: str) {
         self.raw = p
     }
-
-    #===-------------------------------------------------------------------===#
-    # Properties
-    #===-------------------------------------------------------------------===#
 
     @property
     def name() -> str {
@@ -63,10 +54,6 @@ class Path {
         return result
     }
 
-    #===-------------------------------------------------------------------===#
-    # Predicates
-    #===-------------------------------------------------------------------===#
-
     def exists() -> bool {
         return exists(self.raw)
     }
@@ -95,10 +82,6 @@ class Path {
         return getsize(self.raw)
     }
 
-    #===-------------------------------------------------------------------===#
-    # Path composition
-    #===-------------------------------------------------------------------===#
-
     def joinpath(other: str) -> Path {
         return Path(join(self.raw, other))
     }
@@ -121,10 +104,6 @@ class Path {
         return Path(join(parent_str, new_name))
     }
 
-    #===-------------------------------------------------------------------===#
-    # String conversion + dunders
-    #===-------------------------------------------------------------------===#
-
     def __str__() -> str {
         return self.raw
     }
@@ -137,10 +116,6 @@ class Path {
         return self.raw == other.raw
     }
 }
-
-#===----------------------------------------------------------------------===#
-# Module-level helper
-#===----------------------------------------------------------------------===#
 
 def cwd() -> Path {
     return Path(abspath("."))

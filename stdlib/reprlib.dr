@@ -1,15 +1,5 @@
-# reprlib.dr - alternative repr() with output-size limits.
-#
-# Useful for logging and pprint, where dumping a 1M-element list verbatim is
-# noise. The Repr class holds per-type caps and produces truncated output
-# matching Python's `reprlib`.
-#
-# Adaptation: Dragon's static typing means we can't dispatch by runtime type
-# the way CPython does. The `repr_*` helpers below are typed entry points;
-# pick the one that matches your value, or call repr_str() / repr_int() for
-# scalars.
-#
-# Pure Dragon - no C dependencies.
+# Alternative repr() with output-size caps, matching Python's `reprlib`. Static
+# typing forecloses runtime dispatch, so `repr_*` below are typed entry points; pick the one matching your value.
 
 
 class Repr {
@@ -34,10 +24,6 @@ class Repr {
         self.fillvalue = fillvalue
     }
 
-    #-------------------------------------------------------------------#
-    # Scalars
-    #-------------------------------------------------------------------#
-
     def repr_int(value: int) -> str {
         const s: str = str(value)
         if len(s) <= self.maxlong {
@@ -61,8 +47,7 @@ class Repr {
     }
 
     def repr_str(value: str) -> str {
-        # Quote and escape, then truncate to maxstring keeping the trailing
-        # quote so output is still well-formed.
+        # Quote and escape, then truncate to maxstring, keeping the trailing quote well-formed.
         const escaped: str = _escape_str(value)
         const quoted: str = "'" + escaped + "'"
         if len(quoted) <= self.maxstring {
@@ -75,10 +60,6 @@ class Repr {
         return "'" + escaped[0:i] + self.fillvalue + escaped[len(escaped) - i:len(escaped)] + "'"
     }
 
-    #-------------------------------------------------------------------#
-    # Containers (typed entry points)
-    #-------------------------------------------------------------------#
-
     def repr_list_int(value: list[int]) -> str {
         return _join_truncated_int(value, self.maxlist, self.fillvalue, "[", "]")
     }
@@ -88,8 +69,7 @@ class Repr {
     }
 
     def repr_tuple_int(value: list[int]) -> str {
-        # Dragon tuples and lists share the same access shape at this layer;
-        # accept list[int] as the source of values.
+        # Tuples and lists share the same access shape here; list[int] is the source.
         return _join_truncated_int(value, self.maxtuple, self.fillvalue, "(", ")")
     }
 
@@ -143,9 +123,7 @@ class Repr {
 }
 
 
-# Module-level singleton + convenience proxies (match Python's `aRepr`)
-# ---------------------------------------
-
+# Module-level singleton + convenience proxies (match Python's `aRepr`).
 aRepr: Repr = Repr()
 
 def repr_int(value: int) -> str { return aRepr.repr_int(value) }
@@ -158,12 +136,8 @@ def repr_dict_str_int(value: dict[str, int]) -> str { return aRepr.repr_dict_str
 def repr_dict_str_str(value: dict[str, str]) -> str { return aRepr.repr_dict_str_str(value) }
 
 
-# Internal helpers
-# ----------------------------------------
-
 def _escape_str(s: str) -> str {
-    # Verbatim spans between escape-needing characters are copied whole; a
-    # string that needs no escaping is returned unchanged.
+    # Verbatim spans between escape-needing chars are copied whole; unescaped strings pass through unchanged.
     parts: list[str] = []
     i: int = 0
     run: int = 0

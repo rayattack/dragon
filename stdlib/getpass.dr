@@ -20,10 +20,6 @@ EINTR, or error - it can never be left half-applied by Dragon control flow.
 
 import warnings
 
-#===----------------------------------------------------------------------===#
-# Native shim (lib/Runtime/runtime_getpass.cpp) + libc isatty
-#===----------------------------------------------------------------------===#
-
 # Read one line with echo disabled, restoring terminal state on every path.
 # Degrades to an echoing read when fd 0 is not a tty.
 extern "C" def dragon_getpass_read(prompt: str) -> str
@@ -37,20 +33,11 @@ extern "C" def isatty(fd: intc) -> intc
 # libc: read an environment variable; returns "" when unset.
 extern "C" def getenv(name: str) -> str
 
-#===----------------------------------------------------------------------===#
-# Constants
-#===----------------------------------------------------------------------===#
-
-# CPython exposes GetPassWarning as a UserWarning subclass; Dragon's warnings
-# module uses string category names, so this matches by name (see warnings.dr).
+# Dragon's warnings module matches categories by string name (see warnings.dr).
 const GetPassWarning: str = "GetPassWarning"
 
-# Stdin file descriptor - the stream getpass reads from when checking for a tty.
+# Stdin fd - the stream getpass checks for a tty.
 const _STDIN_FD: int = 0
-
-#===----------------------------------------------------------------------===#
-# Public API
-#===----------------------------------------------------------------------===#
 
 def getpass(prompt: str = "Password: ") -> str {
     """Prompt for a password with echoing turned off.
@@ -67,8 +54,7 @@ def getpass(prompt: str = "Password: ") -> str {
         return dragon_getpass_read(prompt)
     }
 
-    # No tty: cannot suppress echo. Warn (CPython parity) and fall back to a
-    # plain read. `input` echoes; that is the documented, unavoidable behavior.
+    # No tty: cannot suppress echo. Warn (CPython parity) and fall back to a plain read.
     warnings.warn("Can not control echo on the terminal.", GetPassWarning)
     return input(prompt)
 }

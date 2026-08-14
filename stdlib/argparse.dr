@@ -1,17 +1,5 @@
-# argparse.dr - Dragon standard library: command-line argument parsing
-#
-# Subset of Python's argparse:
-#  parser = ArgumentParser("prog", "description")
-#  parser.add_argument("--port", "int", "8080", "listen port")
-#  parser.add_argument("--debug", "bool", "false", "enable debug mode")
-#  parser.add_argument("path", "str", "", "input path")
-#  args = parser.parse_args(sys.argv())
-#  port: int = int(args["port"])
-#
-# Scope (v0.0.2): single ArgumentParser, no subparsers, no nargs, no choices.
-# Defaults and types are stored as strings; user converts at use site.
-# Boolean optional args (`--flag`) are present-or-absent - passing the flag
-# sets the value to the literal string "true"; absence keeps the default.
+"""argparse.dr - subset of Python's argparse: single ArgumentParser, no subparsers/nargs/choices.
+Defaults/types stored as strings, converted at use site; `--flag` bools are present-or-absent."""
 
 class ArgSpec {
     name: str

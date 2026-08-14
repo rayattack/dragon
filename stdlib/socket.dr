@@ -1,8 +1,7 @@
-# socket.dr - Dragon standard library: TCP/UDP networking (BSD socket wrappers)
-#
-# Uses runtime helpers for sockaddr_in struct packing since Dragon
-# cannot directly construct C structs. No external dependencies.
-# All C functions use intc (C's int = i32) for correct ABI.
+"""socket.dr - TCP/UDP networking (BSD socket wrappers).
+
+sockaddr_in structs are packed via runtime helpers; all C fns use intc (i32 ABI).
+"""
 
 extern "C" def malloc(size: int) -> ptr
 extern "C" def free(p: ptr)
@@ -16,18 +15,13 @@ extern "C" def close(fd: intc) -> intc
 extern "C" def setsockopt(fd: intc, level: intc, optname: intc, optval: ptr, optlen: intc) -> intc
 extern "C" def shutdown(fd: intc, how: intc) -> intc
 
-# Scheduler-aware TCP I/O (runtime_concurrency.cpp). These set the fd
-# non-blocking and yield the current green thread on EAGAIN instead of blocking
-# the carrier OS thread, resuming when the fd is ready (ADR 038 Phase 8). The
-# API stays blocking (CPython parity) - only the mechanism underneath yields;
-# off a green thread they fall back to poll(). Replace the raw libc
-# accept/connect/send/recv so socket work issued from a `fire` vthread scales.
+# Scheduler-aware TCP I/O (ADR 038 Phase 8): yields the green thread on EAGAIN
+# instead of blocking the OS thread; falls back to poll() off a green thread.
 extern "C" def dragon_nb_accept(server_fd: int, addr: ptr, addrlen: ptr) -> int
 extern "C" def dragon_nb_connect(fd: int, addr: ptr, addrlen: int) -> int
 extern "C" def dragon_nb_send(fd: int, buf: str, length: int) -> int
 extern "C" def dragon_nb_recv_str(fd: int, max_len: int) -> str
-# Binary (bytes) variants - same scheduler-yielding path, but DragonBytes-typed
-# for binary wire protocols (Postgres/MySQL, D032). recv_bytes may short-read.
+# Binary (bytes) variants, DragonBytes-typed for wire protocols (D032); recv_bytes may short-read.
 extern "C" def dragon_nb_recv_bytes(fd: int, max_len: int) -> bytes
 extern "C" def dragon_nb_send_bytes(fd: int, data: bytes) -> int
 # Timeout-capable recv (R1): returns b"" after `ms` of silence, the same EOF
@@ -56,28 +50,14 @@ const SHUT_WR: int = 1
 const SHUT_RDWR: int = 2
 
 
-# Resolve a hostname to a dotted IPv4 address string (Python parity). Literal
-# IPv4 addresses pass through unchanged; returns "" if the name can't be
-# resolved. IPv4-only - matches the AF_INET sockets this module creates.
 def gethostbyname(host: str) -> str {
+    """Resolve a hostname to a dotted IPv4 address (Python parity); literal IPs
+    pass through, "" if unresolved. IPv4-only, matching this module's sockets."""
     return dragon_resolve4(host)
 }
 
-#===----------------------------------------------------------------------===#
-# SocketHandle - the one claim on a kernel socket (docs/1604-ownership)
-#===----------------------------------------------------------------------===#
-
-# A kernel socket is an IDENTITY, not data: exactly one exists, the outside
-# world can see it, and closing it is irreversible. This handle is the single
-# claim on one. Owners hold it as an `own` field, so the ordinary ownership
-# rules forbid a second wrapper over the same claim; close() poisons the
-# descriptor so a second close no-ops and a stale use reads -1 instead of
-# whichever stranger's connection inherited the recycled fd.
-#
-# adopt_raw() is the ONE door in from a bare descriptor - Dragon's spelling
-# of Rust's from_raw_fd. It is public because runtimes, accept loops, and FFI
-# genuinely need it, and greppable because every use is a trust decision:
-# the caller asserts nothing else claims that fd.
+# The one claim on a kernel socket (docs/1604-ownership); close() poisons the
+# fd against reuse. adopt_raw() is the only door in from a bare descriptor.
 class SocketHandle {
     _fd: int
     _closed: bool
@@ -92,17 +72,17 @@ class SocketHandle {
         return SocketHandle(fd)
     }
 
-    # The live descriptor, or -1 once the claim has been put down.
     def fd() -> int {
+        """The live descriptor, or -1 once the claim has been put down."""
         if self._closed {
             return -1
         }
         return self._fd
     }
 
-    # Close the kernel object and poison the handle. Idempotent: the claim
-    # can only be put down once, however many times someone tries.
     def close() -> None {
+        """Close the kernel object and poison the handle. Idempotent: the claim
+        can only be put down once, however many times someone tries."""
         if not self._closed {
             self._closed = True
             close(self._fd)
@@ -110,32 +90,15 @@ class SocketHandle {
     }
 }
 
-#===----------------------------------------------------------------------===#
-# TcpStream - Bidirectional TCP connection
-#===----------------------------------------------------------------------===#
-
 class TcpStream {
-    # The one claim on this connection's kernel socket. Constructing a stream
-    # CONSUMES a handle (move a binding in with `own`, or pass a fresh mint);
-    # a second stream over the same claim is unrepresentable, and `dub`
-    # refuses the class. The descriptor is readable through raw_fd() - a
-    # BORROW for FFI seams, never a transfer.
-    #
-    # Defined before TcpListener (which constructs one in do_accept) purely as
-    # dependency order; definition order is not load-bearing. It briefly was:
-    # a forward reference to an own-field class's constructor miscompiled
-    # into a use-after-free hang, fixed at the root in codegen
-    # (fire-own-fwdref-hang.md, locked by test/dr/test_fire_own_fwdref.dr).
+    # The one claim on this connection; own-consumed, raw_fd() only borrows.
+    # Defined before TcpListener: a fwd-ref to an own-field ctor once miscompiled into a UAF hang (fixed in codegen, test_fire_own_fwdref.dr).
     own _sock: SocketHandle
 
     def(own sock: SocketHandle) {
         self._sock = sock
-        # Disable Nagle's algorithm (TCP_NODELAY). Request/response wire protocols
-        # (MySQL/Postgres prepared statements, HTTP) send a small packet and then
-        # wait for the reply; with Nagle on, the kernel holds that small send
-        # until a prior segment is ACKed, and the peer's delayed-ACK won't arrive
-        # for ~40ms - so every round-trip stalls ~40ms. Both client (open) and
-        # accepted (do_accept) streams flow through here, so both get it.
+        # Disable Nagle (TCP_NODELAY): request/response protocols (MySQL/Postgres,
+        # HTTP) would otherwise stall ~40ms per round-trip waiting on delayed-ACK.
         const optval: ptr = malloc(4)
         memset(optval, 0, 4)
         dragon_ptr_write_i32(optval, 0, 1)
@@ -145,9 +108,8 @@ class TcpStream {
 
     @staticmethod
     def open(host: str, port: int) -> TcpStream {
-        # Resolve hostnames to an IPv4 address (literal IPs pass through).
-        # The kernel mints the descriptor here; it is adopted into a claim on
-        # the spot and never exists as a free-floating number.
+        # Resolves hostnames to IPv4 (literal IPs pass through); the kernel-minted
+        # fd is adopted into a claim immediately, never free-floating.
         const ip: str = dragon_resolve4(host)
         const fd: int = socket(AF_INET, SOCK_STREAM, 0)
         const addr: ptr = dragon_sockaddr_in_new(port, ip)
@@ -165,10 +127,9 @@ class TcpStream {
         return dragon_nb_recv_str(self._sock.fd(), size)
     }
 
-    # Binary I/O - for protocols that aren't text. send_bytes writes all of
-    # `data` (yielding); recv_bytes reads up to `size` bytes (may short-read,
-    # so length-prefixed protocols loop it into a read-exact helper).
     def send_bytes(data: bytes) -> int {
+        """Binary I/O: send_bytes writes all of `data` (yielding); recv_bytes may
+        short-read, so length-prefixed protocols loop it into a read-exact helper."""
         return dragon_nb_send_bytes(self._sock.fd(), data)
     }
 
@@ -176,11 +137,9 @@ class TcpStream {
         return dragon_nb_recv_bytes(self._sock.fd(), size)
     }
 
-    # Timeout-capable binary read: abandons the wait after `timeout_ms` ms of
-    # silence and returns b"" (the same EOF signal recv_bytes uses). Parks the
-    # green thread on the reactor, never the carrier. timeout_ms <= 0 reads
-    # without a deadline.
     def recv_timeout(size: int, timeout_ms: int) -> bytes {
+        """Timeout-capable read: returns b"" (recv_bytes's EOF signal) after
+        `timeout_ms` ms idle; parks the green thread, not the carrier. <=0 = no deadline."""
         return dragon_nb_recv_timeout(self._sock.fd(), size, timeout_ms)
     }
 
@@ -188,18 +147,16 @@ class TcpStream {
         return shutdown(self._sock.fd(), how)
     }
 
-    # Put the claim down. Idempotent by the handle's poison: later reads and
-    # writes see fd -1 and fail loudly, never a recycled descriptor.
     def close() -> int {
+        """Put the claim down. Idempotent by the handle's poison: later reads and
+        writes see fd -1 and fail loudly, never a recycled descriptor."""
         self._sock.close()
         return 0
     }
 
-    # The raw descriptor, BORROWED (as_raw_fd, not into_raw_fd): the stream
-    # keeps the claim, the caller gets the number for an FFI seam (the TLS
-    # engine, WebSocket frame I/O) and must not close or adopt it. Reads -1
-    # once the claim is down.
     def raw_fd() -> int {
+        """BORROWED descriptor (as_raw_fd, not into_raw_fd): caller gets the number
+        for an FFI seam (TLS, WebSocket I/O) but must not close/adopt it; -1 once closed."""
         return self._sock.fd()
     }
 
@@ -213,14 +170,9 @@ class TcpStream {
     }
 }
 
-#===----------------------------------------------------------------------===#
-# TcpListener - Server-side TCP socket
-#===----------------------------------------------------------------------===#
-
 class TcpListener {
-    # The one claim on the listening socket (docs/1604-ownership, "Identity
-    # resources"). Minted here at the kernel boundary - the descriptor never
-    # travels naked.
+    # The one claim on the listening socket (docs/1604-ownership); minted at
+    # the kernel boundary, the descriptor never travels naked.
     own _sock: SocketHandle
     host: str
     port: int
@@ -232,9 +184,8 @@ class TcpListener {
         self._sock = SocketHandle.adopt_raw(sfd)
         self.host = host
         self.port = port
-        # Set SO_REUSEADDR: a prior run's server-side close parks the port in
-        # TIME_WAIT for 60s; without this, bind fails EADDRINUSE (a checked
-        # bind + this option is mandatory socket hygiene - see test_fire_own_io.dr).
+        # SO_REUSEADDR: without it, a prior close leaves the port in TIME_WAIT
+        # (~60s) and bind fails EADDRINUSE (see test_fire_own_io.dr).
         const optval: ptr = malloc(4)
         memset(optval, 0, 4)
         dragon_ptr_write_i32(optval, 0, 1)
@@ -254,10 +205,9 @@ class TcpListener {
         return listen(self._sock.fd(), backlog)
     }
 
-    # Accept one connection. The kernel mints a fresh descriptor for exactly
-    # this client; it is adopted into a claim on the very next line and never
-    # exists as a free-floating number outside this method.
     def do_accept() -> TcpStream {
+        """Accepts one connection; the kernel-minted fd is adopted into a claim
+        on the very next line, never free-floating outside this method."""
         const client_fd: int = dragon_nb_accept(self._sock.fd(), none, none)
         return TcpStream(SocketHandle.adopt_raw(client_fd))
     }
@@ -276,10 +226,6 @@ class TcpListener {
         return 0
     }
 }
-
-#===----------------------------------------------------------------------===#
-# UdpSocket - Datagram communication
-#===----------------------------------------------------------------------===#
 
 class UdpSocket {
     own _sock: SocketHandle

@@ -1,22 +1,6 @@
-# tarfile.dr - POSIX USTAR tar archive read/write.
-#
-# Surface mirrors CPython's `tarfile` for the registry's primary workflow:
-# build `.tar`, `.tar.gz`, or `.tar.zst` archives from a directory tree;
-# unpack the same. Pure Dragon implementation of the USTAR header format
-# (RFC-equivalent: GNU tar manual §7) plus composition with gzip /
-# zstandard for compressed flavors.
-#
-#  import tarfile
-#  with tarfile.open("pkg.tar.zst", "w:zst") as t {
-#  t.add("src/")
-#  }
-#  with tarfile.open("pkg.tar.zst", "r:zst") as t {
-#  t.extractall("/tmp/install")
-#  }
-#
-# Supports regular files, directories, and symlinks. PAX/GNU extensions
-# for paths >100 chars are deferred - the registry's package layout fits
-# inside USTAR's 100/155 prefix limits in practice.
+"""tarfile.dr - POSIX USTAR tar archive read/write, mirroring CPython's tarfile.
+Files/dirs/symlinks only; paths must fit USTAR's 100/155 char limits (no PAX/GNU).
+"""
 
 
 from os import listdir, makedirs, isfile, isdir, islink, readlink
@@ -35,26 +19,18 @@ extern "C" def dragon_stat_mtime(path: str) -> int
 extern "C" def dragon_stat_mode(path: str) -> int
 
 
-# Tar typeflag codes per the USTAR spec. We accept legacy '\0' as REGTYPE
-# (older tar versions left typeflag NUL for regular files).
+# Tar typeflag codes (USTAR spec); legacy NUL typeflag also counts as REGTYPE.
 const REGTYPE: str = "0"
 const DIRTYPE: str = "5"
 const SYMTYPE: str = "2"
 const LNKTYPE: str = "1"
 
 
-# --- Helpers ----------------------------------------------------------------
-
-
-# Format an int as an octal-ASCII string of exactly `width` characters,
-# zero-padded on the left, then NUL-terminated by truncating the last byte.
-# USTAR's numeric fields use this exact convention (mode/uid/gid/size/mtime
-# all width=8, except size which is width=12). The trailing NUL is what
-# distinguishes the value from any arbitrary characters in the rest of the
-# 512-byte header block.
 def _octal(n: int, width: int) -> bytes {
+    """Octal-ASCII string of exactly `width` chars, zero-padded, NUL-terminated
+    (USTAR numeric field convention: width=8, except size which is 12)."""
     out: list[int] = [0] * width
-    # `width - 1` digits + 1 trailing NUL. n=0 still prints as "0...0\0".
+    # width-1 digits + trailing NUL; n=0 prints as all zeros.
     digits: int = width - 1
     v: int = n
     i: int = digits - 1
@@ -63,16 +39,15 @@ def _octal(n: int, width: int) -> bytes {
         v = v // 8
         i = i - 1
     }
-    # Last byte stays 0 (NUL). Octal overflow truncates silently - POSIX
-    # tar handles >8GB files via a magic 0x80-prefixed binary encoding;
-    # we don't emit that yet, so very large files raise on add().
+    # Last byte stays NUL. Values that overflow the octal width truncate
+    # silently (no GNU 0x80 large-file extension emitted yet).
     return bytes(out)
 }
 
 
-# Parse an octal-ASCII numeric field. Stops at the first NUL or space (both
-# legal terminators per USTAR). Returns 0 for empty fields.
 def _parse_octal(data: bytes, off: int, width: int) -> int {
+    """Octal-ASCII field parse, stopping at the first NUL or space (USTAR
+    terminators); an empty field yields 0."""
     v: int = 0
     i: int = 0
     while i < width {
@@ -89,12 +64,9 @@ def _parse_octal(data: bytes, off: int, width: int) -> int {
 }
 
 
-# Lift `s`'s UTF-8 byte sequence into the leading `width` slots of `out`,
-# zero-padding the tail. The header's text fields (name, linkname, magic,
-# uname/gname, prefix) all use this layout. We bake the bytes manually
-# instead of going through encode() so the header builder stays one
-# allocation per record.
 def _set_str(out: list[int], off: int, s: str, width: int) -> None {
+    """Writes s's UTF-8 bytes into out[off:off+width], zero-padded, for the
+    header's text fields (name/linkname/magic/uname/gname/prefix)."""
     sb: bytes = s.encode("utf-8")
     n: int = len(sb)
     if n > width {
@@ -108,9 +80,8 @@ def _set_str(out: list[int], off: int, s: str, width: int) -> None {
 }
 
 
-# Read a NUL-terminated text field starting at `off`. Returns the decoded
-# UTF-8 string. Empty string when the first byte is NUL.
 def _get_str(data: bytes, off: int, width: int) -> str {
+    """NUL-terminated text field read, UTF-8 decoded; empty string if the first byte is NUL."""
     end: int = off
     while end < off + width and data[end] != 0 {
         end = end + 1
@@ -128,12 +99,9 @@ def _get_str(data: bytes, off: int, width: int) -> str {
 }
 
 
-# USTAR checksum: sum of all 512 header bytes with the 8-byte chksum field
-# (offset 148) treated as spaces. The spec's reference algorithm is the
-# unsigned-byte sum; tar implementations must accept either signed-byte
-# variants on legacy archives, but since we only PRODUCE conforming
-# unsigned-byte checksums here we don't have to handle the signed form.
 def _compute_chksum(header: bytes) -> int {
+    """USTAR checksum: unsigned byte-sum of all 512 header bytes with the
+    8-byte chksum field (offset 148) treated as spaces."""
     s: int = 0
     i: int = 0
     while i < 512 {
@@ -148,13 +116,8 @@ def _compute_chksum(header: bytes) -> int {
 }
 
 
-# --- TarInfo ---------------------------------------------------------------
-
-
-# A single archive entry. Mirrors tarfile.TarInfo. Fields are mutable so a
-# user can rewrite uid/gid/mtime before .addfile() (parity with Python's
-# tar-rewriting workflows). `data` is non-empty only for regular files -
-# directories and symlinks have no payload bytes.
+# One archive entry (mirrors tarfile.TarInfo); fields are mutable for
+# pre-addfile() edits. `data` holds payload bytes only for regular files.
 class TarInfo {
     def(name: str) {
         self.name = name
@@ -182,13 +145,11 @@ class TarInfo {
         return self.typeflag == SYMTYPE
     }
 
-    # Build the 512-byte USTAR header for this entry. Caller appends the
-    # payload (file bytes for REGTYPE, nothing otherwise) and zero-pads the
-    # payload to a multiple of 512.
     def to_header() -> bytes {
+        """Builds the 512-byte USTAR header; caller appends payload bytes
+        (REGTYPE only) padded to a 512 multiple."""
         h: list[int] = [0] * 512
-        # Name + prefix: USTAR splits paths >100 chars at a '/' boundary
-        # into name (up to 100) and prefix (up to 155). Combined max 256.
+        # USTAR splits paths >100 chars into name (<=100) and prefix (<=155).
         name: str = self.name
         prefix: str = ""
         if len(name) > 100 {
@@ -198,8 +159,7 @@ class TarInfo {
                 prefix = name[0:sp]
                 name = name[sp + 1:len(name)]
             }
-            # If prefix or name still too long the archive is malformed;
-            # raise so the caller can shorten or move to PAX.
+            # Still too long after split: raise so caller can shorten or use PAX.
             if len(prefix) > 155 or len(name) > 100 {
                 raise ValueError(f"tarfile: name too long for USTAR: '{self.name}'")
             }
@@ -224,7 +184,6 @@ class TarInfo {
         i = 0
         while i < 12 { h[136 + i] = mtime_bytes[i]; i = i + 1 }
 
-        # typeflag + linkname
         h[156] = ord(self.typeflag)
         _set_str(h, 157, self.linkname, 100)
 
@@ -236,9 +195,8 @@ class TarInfo {
         _set_str(h, 265, self.uname, 32)
         _set_str(h, 297, self.gname, 32)
 
-        # Compute and write checksum. We seed bytes(h) so the helper sees
-        # the spaces-in-chksum convention without us having to splice them
-        # in twice.
+        # Compute checksum from bytes(h) so the spaces-in-chksum convention
+        # is honored without double-splicing.
         partial: bytes = bytes(h)
         s: int = _compute_chksum(partial)
         # Encode as 6-octal-digits + NUL + space (USTAR's exact convention).
@@ -253,10 +211,9 @@ class TarInfo {
 }
 
 
-# Build a TarInfo from a raw 512-byte header block at `data[off:off+512]`.
-# Returns None-equivalent (TarInfo with empty name) for the trailing zero
-# blocks so callers can detect end-of-archive without raising.
 def _parse_header(data: bytes, off: int) -> TarInfo {
+    """Builds a TarInfo from the 512-byte header at data[off:off+512].
+    Returns an empty-name TarInfo for the trailing zero-block end marker."""
     name: str = _get_str(data, off, 100)
     prefix: str = _get_str(data, off + 345, 155)
     full: str = name
@@ -282,27 +239,19 @@ def _parse_header(data: bytes, off: int) -> TarInfo {
 }
 
 
-# --- TarFile ---------------------------------------------------------------
-
-
 class TarFile {
     def(filename: str, mode: str) {
         self.filename = filename
         self.mode = mode
         self.closed = False
-        # Annotated empty-list init: lifts the list[TarInfo] element class
-        # into the field-tracking maps so for-in iteration over self.members
-        # gives loop vars typed as TarInfo (otherwise an unannotated `[]`
-        # carries no elem class and chained access like `m.name` returns 0).
+        # Annotated `list[TarInfo] = []` so for-in loop vars are typed as
+        # TarInfo (a bare `[]` carries no elem class).
         self.members: list[TarInfo] = []
-        # Track raw bytes for the wb path; on close we serialize and either
-        # write straight to disk or pipe through gzip/zstandard depending on
-        # the mode suffix recorded by `open()`.
+        # Raw bytes for the write path; close() serializes and optionally
+        # pipes through gzip/zstandard per the mode suffix from open().
         self._buffer = bytes()
         self._compress = ""
     }
-
-    # --- read paths -------------------------------------------------------
 
     def getmembers() -> list[TarInfo] {
         return self.members
@@ -316,16 +265,14 @@ class TarFile {
         return out
     }
 
-    # Walk the archive bytes, parsing 512-byte headers, slurping payload
-    # data, and stopping on the two-zero-block end marker. We populate
-    # self.members in archive order (mirrors tarfile.getmembers()).
     def _load_members(raw: bytes) -> None {
+        """Walks the archive, parsing 512-byte headers and payloads until the
+        two-zero-block end marker; populates self.members in archive order."""
         n: int = len(raw)
         off: int = 0
         while off + 512 <= n {
-            # End-of-archive: header block of all zeros. We don't strictly
-            # need to see two consecutive zeros (some emitters cheat), one
-            # is enough to stop.
+            # End of archive: a zero header block. One zero block is enough
+            # to stop (some emitters skip the second).
             if raw[off] == 0 and raw[off + 1] == 0 and raw[off + 100] == 0 {
                 break
             }
@@ -347,15 +294,10 @@ class TarFile {
         }
     }
 
-    # Write a single member's bytes to disk under `path` (treated as the
-    # root for relative archive names). Creates parent dirs as needed,
-    # mirroring CPython's TarFile.extract behaviour.
-    #
-    # `member.name` is attacker-controlled: it is whatever the archive says.
-    # safe_join refuses any name that resolves outside `path`, so a member
-    # called "../../.ssh/authorized_keys" raises instead of landing there.
-    # it turns out that CPython shipped this unguarded for 15 years (CVE-2007-4559). ;-)
     def extract(member: TarInfo, path: str) -> None {
+        """Writes one member under `path`, creating parent dirs as needed.
+        `member.name` is attacker-controlled; safe_join rejects paths that
+        resolve outside `path` (CVE-2007-4559 in CPython's tarfile)."""
         target: str = safe_join(path, member.name)
         if member.isdir() {
             makedirs(target)
@@ -369,16 +311,13 @@ class TarFile {
             dragon_write_file_bytes(target, member.data)
             return
         }
-        # Symlinks etc. fall through silently for now - `os.symlink` isn't
-        # bound from Dragon yet; PRs welcome. The archive still parses
-        # cleanly; callers can post-process by inspecting .typeflag.
+        # Symlinks fall through silently for now (os.symlink not yet bound);
+        # callers can post-process via .typeflag.
     }
 
     def extractall(path: str = ".") -> None {
-        # First-pass: create all directories so files can land into them
-        # in the second pass. Tar archives don't guarantee dir-before-file
-        # ordering, so doing this in two passes is more robust than relying
-        # on the layout.
+        # Two passes (dirs then files): USTAR doesn't guarantee
+        # dir-before-file ordering in the archive.
         for m in self.members {
             if m.isdir() {
                 self.extract(m, path)
@@ -391,12 +330,9 @@ class TarFile {
         }
     }
 
-    # --- write paths ------------------------------------------------------
-
-    # Append a TarInfo + its data to the in-memory archive buffer. Used by
-    # both `add` (which wraps a filesystem path) and direct callers that
-    # construct synthetic archives.
     def addfile(info: TarInfo) -> None {
+        """Appends a TarInfo + its data to the archive buffer; used by both
+        add() and callers building synthetic archives directly."""
         self.members.append(info)
         self._buffer += info.to_header()
         if info.isfile() and len(info.data) > 0 {
@@ -410,10 +346,9 @@ class TarFile {
         }
     }
 
-    # Recursively add a filesystem path to the archive. arcname controls
-    # the name stored inside the archive - defaults to `name` itself.
-    # Mirrors tarfile.add(name, arcname).
     def add(name: str, arcname: str = "") -> None {
+        """Recursively adds a filesystem path; arcname is the stored name
+        (defaults to `name`)."""
         if len(arcname) == 0 {
             arcname = name
         }
@@ -452,9 +387,8 @@ class TarFile {
         }
     }
 
-    # Finalize: append the two-zero-block end marker, optionally pipe the
-    # archive through gzip/zstandard, and write the result to disk.
     def close() -> None {
+        """Appends the two-zero-block end marker, optionally compresses, and writes to disk."""
         if self.closed {
             return
         }
@@ -482,17 +416,9 @@ class TarFile {
 }
 
 
-# --- Factory ---------------------------------------------------------------
-
-
-# Open a tar archive. Mode encodes both direction and compression:
-#  "r" / "rb" - read uncompressed
-#  "w" / "wb" - write uncompressed
-#  "r:gz" - read gzip-compressed
-#  "w:gz" - write gzip-compressed (level 9)
-#  "r:zst" - read zstd-compressed
-#  "w:zst" - write zstd-compressed (level 3)
 def open(filename: str, mode: str = "r") -> TarFile {
+    """Opens a tar archive; mode encodes direction + compression:
+    r/rb, w/wb (uncompressed), r:gz/w:gz (gzip), r:zst/w:zst (zstd)."""
     direction: str = mode[0:1]
     if direction != "r" and direction != "w" {
         raise ValueError(f"tarfile: mode must start with 'r' or 'w', got '{mode}'")

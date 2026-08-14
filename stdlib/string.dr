@@ -1,9 +1,7 @@
-# string.dr - Dragon standard library: string constants and utilities
-#
-# Provides standard string constants matching Python's string module.
-# Pure Dragon - no C dependencies.
+"""string.dr - string constants and utilities (Python `string` module parity).
 
-# String constants
+Pure Dragon, no C dependencies.
+"""
 
 const ascii_lowercase: str = "abcdefghijklmnopqrstuvwxyz"
 const ascii_uppercase: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -16,18 +14,23 @@ const whitespace: str = " \t\n\r"
 const printable: str = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~ \t\n\r"
 
 
-# String utility functions
-
 def capwords(s: str) -> str {
-    # Capitalize each word in the string (split on spaces)
-    const words: list[str] = s.split(" ")
     parts: list[str] = []
+    const n: int = len(s)
     i: int = 0
-    while i < len(words) {
-        const w: str = words[i]
-        if len(w) > 0 {
-            if i > 0 { parts.append(" ") }
-            parts.append(w.capitalize())
+    start: int = 0
+    while i <= n {
+        sep: bool = True
+        if i < n {
+            const c: str = s[i]
+            sep = c == " " or c == "\t" or c == "\n" or c == "\r"
+        }
+        if sep {
+            if i > start {
+                if len(parts) > 0 { parts.append(" ") }
+                parts.append(s[start:i].capitalize())
+            }
+            start = i + 1
         }
         i = i + 1
     }
@@ -55,6 +58,12 @@ def rjust(s: str, width: int, fillchar: str) -> str {
 }
 
 def zfill(s: str, width: int) -> str {
+    if len(s) > 0 and len(s) < width {
+        const sign: str = s[0]
+        if sign == "-" or sign == "+" {
+            return sign + "0" * (width - len(s)) + s[1:len(s)]
+        }
+    }
     return rjust(s, width, "0")
 }
 

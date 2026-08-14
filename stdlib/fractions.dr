@@ -1,23 +1,11 @@
-# fractions.dr - Dragon standard library: rational number arithmetic
-#
-# Provides a Fraction class for exact rational arithmetic. All fractions
-# are stored in reduced form with the sign on the numerator.
-# Pure Dragon - no C dependencies.
+"""fractions.dr - exact rational arithmetic; Fraction is always stored reduced, sign on the numerator."""
 
 from math import gcd
-
-#===----------------------------------------------------------------------===#
-# Helper functions
-#===----------------------------------------------------------------------===#
 
 def _abs_int(x: int) -> int {
     if x < 0 { return 0 - x }
     return x
 }
-
-#===----------------------------------------------------------------------===#
-# Fraction class
-#===----------------------------------------------------------------------===#
 
 class Fraction {
     def(num: int, den: int) {
@@ -37,8 +25,6 @@ class Fraction {
             self.den = self.den // g
         }
     }
-
-    #--- Arithmetic (return new Fraction) ---#
 
     def add(other: Fraction) -> Fraction {
         const n: int = self.num * other.den + other.num * self.den
@@ -67,15 +53,13 @@ class Fraction {
         return Fraction(n, d)
     }
 
-    #--- Comparison ---#
-
     def eq(other: Fraction) -> bool {
-        # Both are already reduced, so direct compare works
+        # Both are already reduced, so direct compare works.
         return self.num == other.num and self.den == other.den
     }
 
     def lt(other: Fraction) -> bool {
-        # Compare cross-multiplied: a/b < c/d iff a*d < c*b (both denoms positive)
+        # Cross-multiplied: a/b < c/d iff a*d < c*b (both denoms positive).
         return self.num * other.den < other.num * self.den
     }
 
@@ -91,8 +75,6 @@ class Fraction {
         return self.num * other.den >= other.num * self.den
     }
 
-    #--- Conversion ---#
-
     def to_float() -> float {
         return float(self.num) / float(self.den)
     }
@@ -103,8 +85,6 @@ class Fraction {
         }
         return f"{self.num}/{self.den}"
     }
-
-    #--- Utility ---#
 
     def abs() -> Fraction {
         n: int = self.num
@@ -124,7 +104,7 @@ class Fraction {
     }
 
     def limit_denominator(max_den: int) -> Fraction {
-        # Stern-Brocot / continued fraction algorithm (matches Python's Fraction)
+        # Stern-Brocot / continued fraction algorithm (matches Python's Fraction).
         if self.den <= max_den {
             return Fraction(self.num, self.den)
         }
@@ -137,8 +117,7 @@ class Fraction {
         }
         d: int = self.den
 
-        # Continued fraction convergents
-        # p0/q0 = 0/1, p1/q1 = 1/0 (infinity sentinel)
+        # Continued fraction convergents: p0/q0=0/1, p1/q1=1/0 (infinity sentinel).
         p0: int = 0
         q0: int = 1
         p1: int = 1
@@ -152,10 +131,10 @@ class Fraction {
             const q2: int = a * q1 + q0
 
             if q2 > max_den {
-                # Binary search for the best semi-convergent
+                # Binary search for the best semi-convergent.
                 const k: int = (max_den - q0) // q1
                 if k < 1 {
-                    # p0/q0 is the best we have
+                    # p0/q0 is the best we have.
                     if q0 == 0 {
                         return Fraction(sign * p1, q1)
                     }
@@ -163,10 +142,7 @@ class Fraction {
                 }
                 const sp: int = k * p1 + p0
                 const sq: int = k * q1 + q0
-                # Compare semi-convergent with previous convergent p1/q1
-                # Pick the one closer to n/d
-                # |sp/sq - n/d| vs |p1/q1 - n/d|
-                # sp*d - n*sq vs n*q1 - p1*d (both sides multiplied by sq*d and q1*d)
+                # Pick whichever of the semi-convergent or previous convergent p1/q1 is closer to n/d.
                 const diff_semi: int = _abs_int(sp * d - n * sq)
                 const diff_prev: int = _abs_int(p1 * d - n * q1)
                 if diff_semi * q1 <= diff_prev * sq {
@@ -180,7 +156,7 @@ class Fraction {
                 return Fraction(sign * p2, q2)
             }
 
-            # Shift for next iteration
+            # Shift for next iteration.
             n = d
             d = r
             p0 = p1
@@ -188,18 +164,13 @@ class Fraction {
             p1 = p2
             q1 = q2
         }
-        # Unreachable, but satisfy the compiler
+        # Unreachable, but satisfy the compiler.
         return Fraction(sign * p1, q1)
     }
 }
 
-#===----------------------------------------------------------------------===#
-# Module-level constructors
-#===----------------------------------------------------------------------===#
-
 def from_float(f: float) -> Fraction {
-    # Approximate a float as a fraction using continued fraction expansion.
-    # Limits denominator to 10^6 for reasonable precision.
+    # Approximate a float via continued-fraction expansion, denominator capped at 10^6.
     const max_den: int = 1000000
     const max_iter: int = 30
 
@@ -213,21 +184,18 @@ def from_float(f: float) -> Fraction {
     whole: int = int(val)
     frac: float = val - float(whole)
 
-    # Build convergents via continued fraction
+    # Build convergents via continued fraction.
     p0: int = whole
     q0: int = 1
     p1: int = 1
     q1: int = 0
 
-    # Swap so p0/q0 is the latest convergent
-    # Actually start: convergent[-1] = p1/q1 = 1/0, convergent[0] = p0/q0 = whole/1
-    # We need to iterate on the fractional part
     iter: int = 0
     x: float = frac
 
     while iter < max_iter {
         if x < 0.000000001 {
-            # Fractional part is essentially zero
+            # Fractional part is essentially zero.
             return Fraction(sign * p0, q0)
         }
         x = 1.0 / x

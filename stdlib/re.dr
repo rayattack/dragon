@@ -1,13 +1,7 @@
-# re.dr - Dragon standard library: regular expressions
-#
-# Uses bundled PCRE2 (10.44) - no external dependencies.
-# Provides Pattern class for compiled regex, plus convenience functions
-# for match, search, sub, findall, and split.
-# C functions use intc for correct ABI.
-
-#===----------------------------------------------------------------------===#
-# C and PCRE2 extern declarations
-#===----------------------------------------------------------------------===#
+"""Regular expressions over bundled PCRE2 (10.44), no external deps. Pattern class
+for compiled regex, plus match/search/sub/findall/split convenience functions.
+C externs below use `intc` (not `int`) for correct ABI.
+"""
 
 extern "C" def malloc(size: int) -> ptr
 extern "C" def free(p: ptr)
@@ -17,6 +11,7 @@ extern "C" def memcpy(dst: ptr, src: ptr, n: int) -> ptr
 # PCRE2 C API (linked from bundled static library)
 extern "C" def pcre2_compile_8(pattern: str, length: int, options: intc,
                                 errorcode: ptr, erroroffset: ptr, ccontext: ptr) -> ptr
+extern "C" def pcre2_get_error_message_8(errorcode: intc, buffer: ptr, bufflen: int) -> intc
 extern "C" def pcre2_match_data_create_from_pattern_8(code: ptr, gcontext: ptr) -> ptr
 extern "C" def pcre2_match_8(code: ptr, subject: str, length: int, startoffset: int,
                               options: intc, match_data: ptr, mcontext: ptr) -> intc
@@ -27,24 +22,37 @@ extern "C" def pcre2_code_free_8(code: ptr)
 # Runtime helpers for match extraction and ovector access
 extern "C" def dragon_re_get_match(subject: str, ovector: ptr, index: intc) -> str
 extern "C" def dragon_re_ovector_get(ovector: ptr, index: intc) -> int
+extern "C" def dragon_string_alloc(src: ptr, byte_len: int) -> str
 
-# PCRE2 options (common flags)
+
+class error(Exception) {}
+
 const PCRE2_CASELESS: int = 1
 const PCRE2_MULTILINE: int = 2
 const PCRE2_DOTALL: int = 4
-
-#===----------------------------------------------------------------------===#
-# Pattern - Compiled regular expression
-#===----------------------------------------------------------------------===#
 
 class Pattern {
     def(pattern: str) {
         const errcode: ptr = malloc(8)
         const erroffset: ptr = malloc(8)
+        memset(errcode, 0, 8)
+        memset(erroffset, 0, 8)
         self.code = pcre2_compile_8(pattern, len(pattern), 0, errcode, erroffset, none)
         self.pattern = pattern
+        const ec: int = dragon_re_ovector_get(errcode, 0)
+        const eo: int = dragon_re_ovector_get(erroffset, 0)
         free(errcode)
         free(erroffset)
+        if not self.code {
+            const buf: ptr = malloc(256)
+            const mlen: int = pcre2_get_error_message_8(ec, buf, 256)
+            msg: str = f"pcre2 compile error {ec}"
+            if mlen > 0 {
+                msg = dragon_string_alloc(buf, mlen)
+            }
+            free(buf)
+            raise error(f"{msg} at position {eo} in pattern '{pattern}'")
+        }
     }
 
     def match(subject: str) -> int {
@@ -84,11 +92,10 @@ class Pattern {
         results: list[str] = []
         offset: int = 0
         const slen: int = len(subject)
+        const md: ptr = pcre2_match_data_create_from_pattern_8(self.code, none)
         while offset < slen {
-            const md: ptr = pcre2_match_data_create_from_pattern_8(self.code, none)
             const rc: int = pcre2_match_8(self.code, subject, slen, offset, 0, md, none)
             if rc < 1 {
-                pcre2_match_data_free_8(md)
                 break
             }
             const ovector: ptr = pcre2_get_ovector_pointer_8(md)
@@ -100,8 +107,8 @@ class Pattern {
             } else {
                 offset = match_end
             }
-            pcre2_match_data_free_8(md)
         }
+        pcre2_match_data_free_8(md)
         return results
     }
 
@@ -109,11 +116,10 @@ class Pattern {
         parts: list[str] = []
         offset: int = 0
         const slen: int = len(subject)
+        const md: ptr = pcre2_match_data_create_from_pattern_8(self.code, none)
         while offset <= slen {
-            const md: ptr = pcre2_match_data_create_from_pattern_8(self.code, none)
             const rc: int = pcre2_match_8(self.code, subject, slen, offset, 0, md, none)
             if rc < 1 {
-                pcre2_match_data_free_8(md)
                 # No more matches - add remainder
                 parts.append(subject[offset:])
                 break
@@ -127,21 +133,16 @@ class Pattern {
             } else {
                 offset = match_end
             }
-            pcre2_match_data_free_8(md)
         }
+        pcre2_match_data_free_8(md)
         return parts
     }
 
-    # Expand backreferences in a replacement template against the current
-    # match. Supports `\1`..`\9` and `\g<N>` (numbered groups); `\\` collapses
-    # to a single backslash. `ngroups` is the match's group count (the `rc`
-    # from pcre2_match_8): group 0 is the whole match, 1..ngroups-1 the
-    # captures. An out-of-range or non-participating group expands to "".
-    # Named `\g<name>` is not handled here - PCRE2's name->number lookup is not
-    # exposed through the current externs (dragon_re_get_match is index-only).
     def _expand(tmpl: str, subject: str, ovector: ptr, ngroups: int) -> str {
-        # Accumulate into a list and join once - avoids the O(n^2) of repeated
-        # `out = out + ch` on immutable strings.
+        """Expand backreferences (`\1`-`\9`, `\g<N>`, `\\\\`) against the match; an
+        out-of-range or non-participating group expands to "". Named `\g<name>` is unsupported (index-only externs).
+        """
+        # Accumulate into a list and join once - avoids O(n^2) string concatenation.
         parts: list[str] = []
         i: int = 0
         const tlen: int = len(tmpl)
@@ -205,40 +206,35 @@ class Pattern {
     }
 
     def sub(replacement: str, subject: str) -> str {
-        result: str = ""
+        parts: list[str] = []
         offset: int = 0
         const slen: int = len(subject)
+        const md: ptr = pcre2_match_data_create_from_pattern_8(self.code, none)
         while offset < slen {
-            const md: ptr = pcre2_match_data_create_from_pattern_8(self.code, none)
             const rc: int = pcre2_match_8(self.code, subject, slen, offset, 0, md, none)
             if rc < 1 {
-                pcre2_match_data_free_8(md)
-                result = result + subject[offset:]
                 break
             }
             const ovector: ptr = pcre2_get_ovector_pointer_8(md)
             const match_start: int = dragon_re_ovector_get(ovector, 0)
             const match_end: int = dragon_re_ovector_get(ovector, 1)
-            result = result + subject[offset:match_start]
-            result = result + self._expand(replacement, subject, ovector, rc)
+            parts.append(subject[offset:match_start])
+            parts.append(self._expand(replacement, subject, ovector, rc))
             if match_end <= offset {
                 offset = offset + 1
             } else {
                 offset = match_end
             }
-            pcre2_match_data_free_8(md)
         }
-        return result
+        pcre2_match_data_free_8(md)
+        parts.append(subject[offset:])
+        return "".join(parts)
     }
 
     def destroy() {
         pcre2_code_free_8(self.code)
     }
 }
-
-#===----------------------------------------------------------------------===#
-# Module-level convenience functions
-#===----------------------------------------------------------------------===#
 
 def compile(pattern: str) -> Pattern {
     return Pattern(pattern)

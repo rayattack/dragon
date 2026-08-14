@@ -1,41 +1,45 @@
-# html.dr - Dragon standard library: HTML escaping and utilities
-#
-# Provides functions for escaping/unescaping HTML entities, stripping tags,
-# and encoding/decoding individual character entities.
-# Pure Dragon - no C dependencies.
-#
-# Also home to the angle-bracket markup `template[X]` content types (D032
-# domain co-location): HTML, CSS, and XML. They all auto-escape each !{expr}
-# and concatenate, differing only in the escape table - so they live together
-# in the markup/presentation domain. The module-level `escape(s)` above and a
-# content type's `@staticmethod escape` are distinct namespaces and do not
-# collide.
+"""html.dr - HTML entity escape/unescape, tag stripping, and entity codecs.
+Also home to the template[X] markup types (HTML/CSS/XML, D032): each auto-escapes
+!{expr} via its own @staticmethod escape, a separate namespace from module-level escape(s).
+"""
 
 from template import Template
 
-#===----------------------------------------------------------------------===#
-# Escaping
-#===----------------------------------------------------------------------===#
-
 def escape(s: str) -> str {
-    # & must be replaced first to avoid double-escaping.
-    result: str = s
-    result = result.replace("&", "&amp;")
-    result = result.replace("<", "&lt;")
-    result = result.replace(">", "&gt;")
-    result = result.replace("\"", "&quot;")
-    result = result.replace("'", "&#x27;")
-    return result
+    # Single pass over spans; clean input is returned unchanged.
+    const n: int = len(s)
+    dirty: int = -1
+    i: int = 0
+    while i < n {
+        const c: str = s[i]
+        if c == "&" or c == "<" or c == ">" or c == "\"" or c == "'" {
+            dirty = i
+            break
+        }
+        i = i + 1
+    }
+    if dirty < 0 { return s }
+
+    parts: list[str] = []
+    run: int = 0
+    i = dirty
+    while i < n {
+        const c: str = s[i]
+        if c == "&" or c == "<" or c == ">" or c == "\"" or c == "'" {
+            if i > run { parts.append(s[run:i]) }
+            parts.append(encode_entity(c))
+            i = i + 1
+            run = i
+        } else {
+            i = i + 1
+        }
+    }
+    if n > run { parts.append(s[run:n]) }
+    return "".join(parts)
 }
 
-#===----------------------------------------------------------------------===#
-# Unescaping
-#===----------------------------------------------------------------------===#
-
 def unescape(s: str) -> str {
-    # Replace HTML entities with their character equivalents. Text between
-    # entities is copied as whole spans; a string with no entities is
-    # returned unchanged.
+    # Text between entities is copied as whole spans; no-entity input is returned unchanged.
     parts: list[str] = []
     i: int = 0
     run: int = 0
@@ -62,13 +66,8 @@ def unescape(s: str) -> str {
     return "".join(parts)
 }
 
-#===----------------------------------------------------------------------===#
-# Tag stripping
-#===----------------------------------------------------------------------===#
-
 def strip_tags(s: str) -> str {
-    # Text outside tags is copied as whole spans between the angle brackets;
-    # an unterminated trailing tag is dropped.
+    # Text outside tags is copied as whole spans; an unterminated trailing tag is dropped.
     parts: list[str] = []
     in_tag: bool = false
     i: int = 0
@@ -93,10 +92,6 @@ def strip_tags(s: str) -> str {
     return "".join(parts)
 }
 
-#===----------------------------------------------------------------------===#
-# Entity helpers
-#===----------------------------------------------------------------------===#
-
 def encode_entity(ch: str) -> str {
     if ch == "&" { return "&amp;" }
     if ch == "<" { return "&lt;" }
@@ -107,27 +102,34 @@ def encode_entity(ch: str) -> str {
 }
 
 def decode_entity(entity: str) -> str {
-    # Named entities
     if entity == "&amp;" { return "&" }
     if entity == "&lt;" { return "<" }
     if entity == "&gt;" { return ">" }
     if entity == "&quot;" { return "\"" }
     if entity == "&apos;" { return "'" }
 
-    # Numeric entities: &#NNN; or &#xHH;
+    # Numeric entities: &#NNN; or &#xHH;. Invalid or out-of-range references
+    # stay verbatim.
     if entity.startswith("&#") {
         if entity.endswith(";") {
             const inner: str = entity[2:len(entity) - 1]
 
             if inner.startswith("x") {
-                const hex_str: str = inner[1:]
-                const code: int = _hex_to_int(hex_str)
-                return _code_to_char(code)
-            } else {
-                if len(inner) > 0 {
-                    if inner.isdigit() {
-                        const code: int = int(inner)
-                        return _code_to_char(code)
+                const hcode: int = _hex_to_int(inner[1:])
+                if hcode >= 0 and hcode <= 1114111 {
+                    return chr(hcode)
+                }
+            } elif len(inner) > 0 {
+                if inner.isdigit() {
+                    num: str = inner
+                    z: int = 0
+                    while z < len(num) - 1 and num[z] == "0" { z = z + 1 }
+                    num = num[z:len(num)]
+                    if len(num) <= 7 {
+                        const dcode: int = int(num)
+                        if dcode <= 1114111 {
+                            return chr(dcode)
+                        }
                     }
                 }
             }
@@ -137,51 +139,32 @@ def decode_entity(entity: str) -> str {
     return entity
 }
 
-#===----------------------------------------------------------------------===#
-# Internal helpers
-#===----------------------------------------------------------------------===#
-
-def _code_to_char(code: int) -> str {
-    # Printable ASCII (32..126) maps directly; anything else stays a numeric entity.
-    if code >= 32 and code <= 126 {
-        return chr(code)
-    }
-    return f"&#{code};"
-}
-
 def _hex_to_int(s: str) -> int {
+    const n: int = len(s)
+    if n == 0 { return -1 }
     result: int = 0
     i: int = 0
-    const n: int = len(s)
-
     while i < n {
-        const ch: str = s[i]
-        result = result * 16
-        const digit: int = _hex_digit_value(ch)
-        result = result + digit
+        const digit: int = _hex_digit_value(s[i])
+        if digit < 0 { return -1 }
+        if result <= 1114111 {
+            result = result * 16 + digit
+        }
         i = i + 1
     }
-
     return result
 }
 
 def _hex_digit_value(ch: str) -> int {
-    # Hex digit -> 0..15 (0 for a non-hex char).
     const c: int = ord(ch)
-    if c >= 48 and c <= 57 { return c - 48 }      # 0-9
-    if c >= 97 and c <= 102 { return c - 87 }     # a-f
-    if c >= 65 and c <= 70 { return c - 55 }      # A-F
-    return 0
+    if c >= 48 and c <= 57 { return c - 48 }
+    if c >= 97 and c <= 102 { return c - 87 }
+    if c >= 65 and c <= 70 { return c - 55 }
+    return -1
 }
 
-#===----------------------------------------------------------------------===#
-# template[X] content types - markup family (D032 domain co-location).
-#
-# Each auto-escapes every !{expr} via its `escape` static method, then the
-# compiler concatenates the escaped segments into the instance's string. A
-# user `class MyHTML(HTML)` inherits HTML's escape automatically.
-#===----------------------------------------------------------------------===#
-
+# template[X] markup family (D032): each auto-escapes !{expr} via its `escape`
+# static method; `class MyHTML(HTML)` inherits HTML's escape automatically.
 class HTML(Template) {
     def(inner: str) {
         self._inner = inner

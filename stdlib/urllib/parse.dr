@@ -410,13 +410,8 @@ def urljoin(base: str, ref: str) -> str {
 
 #===----------------------------------------------------------------------===#
 # template[URL] content type (D032 domain co-location). Auto-escapes each
-# !{expr} as a percent-encoded URL component, then the compiler concatenates.
-#
-# NOTE: the escape body below is preserved verbatim from its previous home in
-# template.dr - an ad-hoc subset encoder. Now co-located with the full
-# RFC 3986 `quote()`, it should delegate to `quote(s, "")` for complete and
-# parity-correct encoding; left as a follow-up so this relocation stays a pure
-# move and does not silently change URL-escaping semantics.
+# !{expr} as a percent-encoded URL component via the RFC 3986 quote() above,
+# then the compiler concatenates.
 #===----------------------------------------------------------------------===#
 
 class URL(Template) {
@@ -426,7 +421,7 @@ class URL(Template) {
 
     @staticmethod
     def escape(s: str) -> str {
-        return s.replace(" ", "%20").replace("&", "%26").replace("=", "%3D").replace("?", "%3F").replace("#", "%23").replace("+", "%2B")
+        return quote(s, "")
     }
 }
 

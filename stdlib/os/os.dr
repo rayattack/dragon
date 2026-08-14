@@ -9,7 +9,7 @@
 #===----------------------------------------------------------------------===#
 
 # File system
-extern "C" def getcwd(buf: ptr, size: int) -> str as _libc_getcwd
+extern "C" def dragon_getcwd() -> str
 extern "C" def chdir(path: str) -> intc
 extern "C" def mkdir(path: str, mode: intc) -> intc
 extern "C" def rmdir(path: str) -> intc
@@ -113,11 +113,8 @@ const name: str = "posix"
 # File system operations
 #===----------------------------------------------------------------------===#
 
-# Python parity: os.getcwd() is the 0-arg current-working-directory call.
-# The libc 2-arg `getcwd(buf, size)` is bound as `_libc_getcwd` (C symbol still
-# `getcwd`); glibc's getcwd(NULL, 0) mallocs and returns the path.
 def getcwd() -> str {
-    return _libc_getcwd(none, 0)
+    return dragon_getcwd()
 }
 
 def cwd() -> str {

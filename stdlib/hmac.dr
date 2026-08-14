@@ -1,10 +1,7 @@
-# hmac.dr - Keyed-Hashing for Message Authentication (RFC 2104)
-#
-# Python-parity HMAC backed by the runtime's mbedTLS engine (ADR 038 Phase 7).
-# HMAC-SHA-256 backs token signing; HMAC-SHA-1 is the inner primitive of TOTP
-# (RFC 6238). mbedTLS's dragon_hmac performs the full RFC 2104 construction -
-# including block-size key normalization - so this module only buffers the
-# message and delegates the keyed hash (no hand-rolled ipad/opad two-pass).
+"""hmac.dr - Python-parity HMAC (RFC 2104) over the runtime's mbedTLS engine. HMAC-SHA-256
+backs token signing, HMAC-SHA-1 backs TOTP (RFC 6238); mbedTLS does the full construction
+(incl. key normalization), so this module only buffers the message and delegates the hash.
+"""
 
 from binascii import hexlify, unhexlify
 
@@ -13,9 +10,8 @@ from binascii import hexlify, unhexlify
 extern "C" def dragon_hmac(name: str, key: bytes, msg: bytes) -> bytes
 
 
-# Block / digest sizes for the supported algorithms - exposed as the
-# HMAC.block_size / HMAC.digest_size attributes (Python parity).
 def _block_size(name: str) -> int {
+    """Block/digest sizes for HMAC.block_size / HMAC.digest_size (Python parity)."""
     # SHA-384/512 hash 128-byte blocks; the rest use 64.
     if name == "sha256" { return 64 }
     if name == "sha224" { return 64 }
@@ -45,8 +41,7 @@ class HMAC {
         self.digest_size = _digest_size(name)
         # Raw key - mbedTLS normalizes it to the block size internally.
         self.key = key
-        # Buffered message - Python's hmac is incremental; we mirror it and
-        # compute the keyed hash once in digest().
+        # Buffered message: Python's hmac is incremental; the keyed hash is computed once in digest().
         self.buf = bytes()
     }
 
@@ -79,10 +74,10 @@ def new(key: bytes, msg: bytes = b"", digestmod: str = "sha256") -> HMAC {
 }
 
 
-# Constant-time byte comparison. Useful for verifying tokens / MACs without
-# leaking timing information about the matching prefix. Stays pure-Dragon -
-# it is a comparison utility, not part of the crypto engine.
 def compare_digest(a: bytes, b: bytes) -> bool {
+    """Constant-time byte comparison for verifying tokens/MACs without leaking timing
+    information about the matching prefix. Pure-Dragon, not part of the crypto engine.
+    """
     la: int = len(a)
     lb: int = len(b)
     diff: int = la ^ lb
@@ -102,12 +97,10 @@ def compare_digest(a: bytes, b: bytes) -> bool {
 extern "C" def dragon_str_eq_const(a: str, b: str) -> int
 
 
-# Constant-time comparison for `str` tokens (auth tokens, signatures expressed
-# as hex/base64 text). Use this instead of `==` whenever the comparison is
-# security-sensitive and an operand is attacker-influenced - `==` is fast but
-# its early-exit timing reveals how many leading characters matched. For raw
-# MAC bytes, prefer compare_digest(bytes, bytes) above.
 def compare_digest_str(a: str, b: str) -> bool {
+    """Constant-time comparison for `str` tokens (hex/base64 signatures). Use instead of `==`
+    when an operand is attacker-influenced, since `==` leaks prefix-match timing via strcmp.
+    """
     return dragon_str_eq_const(a, b) == 1
 }
 

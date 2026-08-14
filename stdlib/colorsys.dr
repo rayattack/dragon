@@ -24,8 +24,6 @@ def _fmin3(a: float, b: float, c: float) -> float {
 }
 
 
-# ---- RGB <-> YIQ ----
-
 def rgb_to_yiq(r: float, g: float, b: float) -> tuple[float, float, float] {
     y: float = 0.30 * r + 0.59 * g + 0.11 * b
     i: float = 0.74 * (r - y) - 0.27 * (b - y)
@@ -46,8 +44,6 @@ def yiq_to_rgb(y: float, i: float, q: float) -> tuple[float, float, float] {
     return (r, g, b)
 }
 
-
-# ---- RGB <-> HSV ----
 
 def rgb_to_hsv(r: float, g: float, b: float) -> tuple[float, float, float] {
     maxc: float = _fmax3(r, g, b)

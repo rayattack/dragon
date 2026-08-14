@@ -1,25 +1,12 @@
-# glob.dr - Dragon standard library: Unix-style pathname pattern expansion
-#
-# Returns lists of paths matching shell glob patterns.
-# Minimal OS FFI inline; pattern matching delegates to the fnmatch module
-# (one matcher, no copy).
+"""glob.dr - Unix pathname pattern expansion; pattern matching delegates to fnmatch."""
 
 from fnmatch import fnmatchcase
-
-#===----------------------------------------------------------------------===#
-# POSIX / libc extern declarations (minimal set for globbing)
-#===----------------------------------------------------------------------===#
 
 extern "C" def opendir(path: str) -> ptr
 extern "C" def closedir(dirp: ptr) -> intc
 extern "C" def dragon_readdir_name(dirp: ptr) -> str
 extern "C" def access(path: str, mode: intc) -> intc
 extern "C" def dragon_stat_isdir(path: str) -> intc
-extern "C" def getcwd(buf: ptr, size: int) -> str
-
-#===----------------------------------------------------------------------===#
-# Internal OS helpers
-#===----------------------------------------------------------------------===#
 
 def _listdir(path: str) -> list[str] {
     const dirp: ptr = opendir(path)
@@ -53,13 +40,6 @@ def _path_join(a: str, b: str) -> str {
     return a + "/" + b
 }
 
-#===----------------------------------------------------------------------===#
-# Internal fnmatch (duplicated to avoid cross-module import)
-#===----------------------------------------------------------------------===#
-#===----------------------------------------------------------------------===#
-# Internal helpers
-#===----------------------------------------------------------------------===#
-
 def _split_path(pattern: str) -> list[str] {
     return pattern.split("/")
 }
@@ -75,7 +55,7 @@ def _glob_in_dir(dirname: str, pattern: str) -> list[str] {
     i: int = 0
     while i < len(names) {
         const name: str = names[i]
-        # Skip hidden files unless pattern starts with "."
+        # Skip hidden files unless pattern starts with ".".
         skip: bool = false
         if len(name) > 0 {
             if name[0] == "." {
@@ -97,7 +77,7 @@ def _glob_in_dir(dirname: str, pattern: str) -> list[str] {
 }
 
 def _walk_dirs(base: str) -> list[str] {
-    # Recursively collect all directories under base (for ** support)
+    # Recursively collect all directories under base (for ** support).
     result: list[str] = []
     result.append(base)
     const entries: list[str] = _listdir(base)
@@ -122,12 +102,8 @@ def _walk_dirs(base: str) -> list[str] {
     return result
 }
 
-#===----------------------------------------------------------------------===#
-# Public API
-#===----------------------------------------------------------------------===#
-
 def has_magic(pattern: str) -> bool {
-    # Check if pattern contains glob special characters
+    # True if pattern contains glob special characters.
     i: int = 0
     while i < len(pattern) {
         const ch: str = pattern[i]

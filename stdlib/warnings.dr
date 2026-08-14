@@ -1,28 +1,8 @@
-# warnings.dr - issue warnings without aborting.
-#
-# Mirrors the surface of CPython's `warnings`: warn(), filterwarnings(),
-# simplefilter(), resetwarnings(), formatwarning(), and a small filter list
-# the runtime walks when warn() is called.
-#
-# Adaptation: Dragon's `warnings` uses string category names instead of
-# exception class objects. The category constants below match Python's class
-# names exactly so `warn("msg", UserWarning)` reads identically.
-#
-# Filter actions:
-#  "default" - print the first occurrence of (message, category, module)
-#  "error" - promote to a raised RuntimeError
-#  "always" - print every occurrence
-#  "module" - print the first occurrence per module
-#  "once" - print the first occurrence regardless of context
-#  "ignore" - drop silently
-#
-# Pure Dragon - uses dragon_log_stderr from the runtime.
+"""warnings.dr - mirrors CPython's warnings (warn/filterwarnings/etc.), with
+string category names. Filter actions: default/error/always/module/once/ignore.
+"""
 
 extern "C" def dragon_log_stderr(msg: str)
-
-#===----------------------------------------------------------------------===#
-# Category constants (string-based; mirror Python's class names)
-#===----------------------------------------------------------------------===#
 
 const Warning: str = "Warning"
 const UserWarning: str = "UserWarning"
@@ -36,12 +16,8 @@ const UnicodeWarning: str = "UnicodeWarning"
 const BytesWarning: str = "BytesWarning"
 const ResourceWarning: str = "ResourceWarning"
 
-#===----------------------------------------------------------------------===#
-# Filter state
-#===----------------------------------------------------------------------===#
-# Each filter is a tuple-shaped tiny dict: action, message_substr, category.
-# A category of "" matches all categories. message_substr matches anywhere
-# in the warning text - empty matches all.
+# Each filter: action, message_substr, category. Empty category matches all;
+# empty message_substr matches all; otherwise it matches anywhere in the text.
 
 class _Filter {
     def(action: str, message: str, category: str) {
@@ -53,8 +29,7 @@ class _Filter {
 
 _filters: list[_Filter] = [_Filter("default", "", "")]
 
-# Tracks (category|message|once_key) we've already emitted under "once" /
-# "module" / "default" actions so we avoid duplicates.
+# Tracks (category|message|once_key) already emitted under once/module/default, to avoid duplicates.
 _seen: dict[str, bool] = {}
 
 
@@ -88,10 +63,6 @@ def _resolve_action(message: str, category: str) -> str {
 }
 
 
-#===----------------------------------------------------------------------===#
-# Public API
-#===----------------------------------------------------------------------===#
-
 def formatwarning(message: str, category: str, filename: str, lineno: int) -> str {
     # Match Python's "filename:lineno: Category: message\n" shape.
     if filename == "" {
@@ -108,10 +79,8 @@ def showwarning(message: str, category: str, filename: str, lineno: int) -> None
 
 
 def _emit(message: str, category: str, filename: str, lineno: int) -> None {
-    # Shared body for warn / warn_explicit: resolve the filter action, honour
-    # ignore/error, dedup once/default/module by a (location, category, message)
-    # key, then hand off to showwarning. The dedup key is internal, so warn()'s
-    # empty filename/0 lineno still yield a stable per-(category,message) key.
+    # Shared body for warn/warn_explicit: resolves the filter action, honors
+    # ignore/error, and dedups once/default/module by a (location, category, message) key.
     const action: str = _resolve_action(message, category)
     if action == "ignore" {
         return

@@ -1,24 +1,17 @@
-# tomllib.dr - Dragon standard library: TOML parser (read-only)
-#
-# Pure Dragon implementation of a TOML parser matching the Python 3.11+
-# tomllib module. Supports a practical subset of TOML: sections, dotted
-# keys, strings, integers, floats, booleans, and comments.
-# Does not support: arrays of tables, inline tables, multi-line strings,
-# or datetime values.
+"""tomllib.dr - read-only TOML parser matching Python 3.11+ tomllib.
+No arrays-of-tables, inline tables, multi-line strings, or datetimes.
+"""
 
 extern "C" def dragon_str_to_int(s: str) -> int
 extern "C" def dragon_str_to_float(s: str) -> float
 
-
-# Internal helpers
 
 def _strip(s: str) -> str {
     return s.strip(" \t\r")
 }
 
 def _strip_comment(line: str) -> str {
-    # Remove trailing comments from a line. A # outside of a quoted
-    # string marks the start of a comment.
+    # Removes a trailing comment; a # outside a quoted string starts it.
     in_string: bool = false
     i: int = 0
     while i < len(line) {
@@ -38,14 +31,12 @@ def _strip_comment(line: str) -> str {
 }
 
 def _unquote(s: str) -> str {
-    # Remove surrounding double quotes from a string if present.
-    # Also handles basic string escapes.
+    # Removes surrounding double quotes if present; also unescapes basic sequences.
     if len(s) < 2 { return s }
     if s[0:1] == "\"" {
         if s[len(s) - 1:len(s)] == "\"" {
             const inner: str = s[1:len(s) - 1]
-            # Process escape sequences: verbatim spans between backslashes are
-            # copied whole; an unknown escape keeps its backslash.
+            # Copies verbatim spans between backslashes; unknown escapes keep the backslash.
             parts: list[str] = []
             i: int = 0
             run: int = 0
@@ -81,64 +72,36 @@ def _unquote(s: str) -> str {
 }
 
 def _parse_value(raw: str) -> str {
-    # Parse a TOML value and return its string representation.
-    # Strings are unquoted; booleans, numbers returned as-is.
+    # Parses a TOML scalar; strings are unquoted, booleans/numbers returned as-is.
     const val: str = _strip(raw)
     if len(val) == 0 { return "" }
 
-    # Quoted string
     const first: str = val[0:1]
     if first == "\"" { return _unquote(val) }
     if first == "'" { return _unquote(val) }
 
-    # Boolean
     if val == "true" { return "true" }
     if val == "false" { return "false" }
 
-    # Number (integer or float) - return as-is for typed getters
+    # Number (int or float): returned as-is for typed getters.
     return val
 }
 
 
-# TomlDoc class - holds parsed TOML data as flat dotted key-value pairs
-
 class TomlDoc {
     def() {
-        self.keys: list[str] = []
-        self.values: list[str] = []
-    }
-
-    def _find(key: str) -> int {
-        # Return the index of a key, or -1 if not found.
-        i: int = 0
-        while i < len(self.keys) {
-            if self.keys[i] == key {
-                return i
-            }
-            i = i + 1
-        }
-        return 0 - 1
+        self._data: dict[str, str] = {}
     }
 
     def _set(key: str, value: str) {
-        # Set or overwrite a key-value pair.
-        const idx: int = self._find(key)
-        if idx >= 0 {
-            self.values[idx] = value
-        } else {
-            self.keys.append(key)
-            self.values.append(value)
-        }
+        self._data[key] = value
     }
 
     def get(key: str) -> str {
-        # Return the string value for the given dotted key.
-        # Raises ValueError if the key is not found.
-        const idx: int = self._find(key)
-        if idx < 0 {
+        if key not in self._data {
             raise ValueError(f"TOML key not found: {key}")
         }
-        return self.values[idx]
+        return self._data[key]
     }
 
     def get_int(key: str) -> int {
@@ -158,28 +121,17 @@ class TomlDoc {
     }
 
     def has(key: str) -> bool {
-        return self._find(key) >= 0
+        return key in self._data
     }
 
     def all_keys() -> list[str] {
-        # Return a list of all dotted keys in insertion order.
-        result: list[str] = []
-        i: int = 0
-        while i < len(self.keys) {
-            result.append(self.keys[i])
-            i = i + 1
-        }
-        return result
+        return self._data.keys()
     }
 }
 
 
-# Parser
-
 def loads(text: str) -> TomlDoc {
-    # Parse a TOML string and return a TomlDoc.
-    # Supports: [section] headers, dotted keys, strings, integers,
-    # floats, booleans, and # comments.
+    # Parses TOML text (sections, dotted keys, scalars, comments) into a TomlDoc.
     doc: TomlDoc = TomlDoc()
     const lines: list[str] = text.split("\n")
     current_prefix: str = ""
@@ -203,7 +155,6 @@ def loads(text: str) -> TomlDoc {
                             # Array of tables - skip (unsupported)
                             i = i + 1
                         } else {
-                            # Standard table
                             const close: int = raw.find("]")
                             if close > 0 {
                                 current_prefix = _strip(raw[1:close])
@@ -214,7 +165,6 @@ def loads(text: str) -> TomlDoc {
                         i = i + 1
                     }
                 } else {
-                    # Key-value pair
                     const cleaned: str = _strip_comment(raw)
                     const eq_pos: int = cleaned.find("=")
                     if eq_pos > 0 {

@@ -3,8 +3,6 @@
 
 from template import Template
 
-# Extern C helpers (minimal - only for str<->number conversion)
-
 extern "C" def dragon_str_to_int(s: str) -> int
 extern "C" def dragon_str_to_float(s: str) -> float
 extern "C" def dragon_int_to_str(value: int) -> str
@@ -18,16 +16,12 @@ extern "C" def dragon_bytes_get(b: bytes, idx: int) -> int
 extern "C" def dragon_chr(code: int) -> str
 extern "C" def dragon_ord(s: str) -> int
 
-# String escaping
-
 const _HEX_DIGITS: str = "0123456789abcdef"
 
-# The escape implementation. Module-level `escape` and the JSON template's
-# static `escape` both delegate here so the two surfaces cannot drift.
+# Module-level `escape` and the JSON template's static `escape` both delegate here so the two can't drift.
 def _escape_body(s: str) -> str {
-    # RFC 8259 §7: `"`, `\`, and every control character U+0000-U+001F must be
-    # escaped. Byte-level scan; escape-needing bytes are all ASCII, so span
-    # boundaries always land on UTF-8 sequence starts.
+    # RFC 8259 §7: escape `"`, `\`, and control chars U+0000-U+001F. Escape bytes
+    # are all ASCII, so byte-level span boundaries always land on UTF-8 sequence starts.
     const b: bytes = s.encode("utf-8")
     const n: int = len(b)
     dirty: int = -1
@@ -88,8 +82,7 @@ def _hex_val(ch: str) -> int {
     return -1
 }
 
-# Parse the 4 hex digits of a \uXXXX escape at s[i:i+4]; returns the 16-bit code
-# unit, or -1 if there aren't 4 valid hex digits there.
+# Parse the 4 hex digits of a \uXXXX escape at s[i:i+4]; -1 if not 4 valid hex digits.
 def _parse_u4(s: str, i: int) -> int {
     if i + 4 > len(s) {
         return -1
@@ -105,8 +98,7 @@ def _parse_u4(s: str, i: int) -> int {
 }
 
 def unescape(s: str) -> str {
-    # Unescape JSON escapes (RFC 8259 §7): two-char escapes + \uXXXX (incl.
-    # surrogate pairs). An unrecognized escape is kept verbatim.
+    # Unescape JSON escapes (RFC 8259 §7): two-char + \uXXXX (incl. surrogate pairs); unknown escapes kept verbatim.
     parts: list[str] = []
     i: int = 0
     const n: int = len(s)
@@ -159,22 +151,15 @@ def unescape(s: str) -> str {
     return "".join(parts)
 }
 
-# Encoding (Dragon values -> JSON strings)
-
-# Generic dumps: serialize any value (scalar or nested list/dict) to JSON,
-# dispatching on the runtime tag - Python parity for json.dumps(obj). A
-# monomorphized list/dict passes straight through: the runtime walker reads
-# native elements into one output buffer (header-tag dispatch), so there is
-# no typed dumps_* family - for a known shape at bytes, encode[T] is the
-# box-free pair.
+# dumps(obj) dispatches on the runtime tag (boxed path) - Python parity for json.dumps.
+# For a known shape, use encode[T] instead: box-free, no typed dumps_* family needed.
 def dumps(obj: Any) -> str {
     return dragon_json_dumps(obj)
 }
 
 
-# The boxed-tree decoder (D048): byte-scanning recursive descent, zero
-# per-char allocation. Backs the decode[Any]-family stamps (the convenience
-# tier; every concrete decode[T] is box-free and never comes through here).
+# Boxed-tree decoder (D048): byte-scanning recursive descent, zero per-char allocation.
+# Backs decode[Any]-family stamps only; every concrete decode[T] is box-free and skips this.
 
 # ASCII byte constants for the structural tokens.
 const _B_LBRACE: int = 123       # {
@@ -193,6 +178,17 @@ def _is_ws_byte(c: int) -> bool {
 
 def _is_digit_byte(c: int) -> bool {
     return c >= 48 and c <= 57
+}
+
+def _is_hex_byte(c: int) -> bool {
+    if c >= 48 and c <= 57 { return true }
+    if c >= 97 and c <= 102 { return true }
+    return c >= 65 and c <= 70
+}
+
+def _is_escapable_byte(c: int) -> bool {
+    if c == _B_QUOTE or c == _B_BACKSLASH or c == 47 { return true }
+    return c == 98 or c == 102 or c == 110 or c == 114 or c == 116
 }
 
 class _JsonParser {
@@ -245,9 +241,8 @@ class _JsonParser {
         return none     # unreachable (_fail raised); satisfies all-paths-return
     }
 
-    # Verify and consume a true/false/null keyword without allocating. The
-    # caller already matched byte 0 via peek; b1..b3 are the rest, b4 is the
-    # 5th byte ("false") or -1 for the 4-byte keywords.
+    # Verify/consume a true/false/null keyword without allocating (byte 0 already
+    # matched via peek); b1..b3 are the rest, b4 is byte 5 ('false') or -1 for 4-byte keywords.
     def _expect_kw(b1: int, b2: int, b3: int, b4: int) -> None {
         wlen: int = 4
         if b4 >= 0 { wlen = 5 }
@@ -272,11 +267,31 @@ class _JsonParser {
         saw_escape: bool = false
         while self.pos < self.n {
             const c: int = dragon_bytes_get(self.buf, self.pos)
+            if c < 32 {
+                self._fail("invalid control character in string")
+            }
             if c == _B_BACKSLASH {
-                # Skip the backslash + its escaped byte; \uXXXX hex digits stay in
-                # the span and unescape() decodes them.
+                # Validate the escape here; \uXXXX hex digits stay in the span for unescape() to decode.
                 saw_escape = true
-                self.pos = self.pos + 2
+                if self.pos + 1 >= self.n {
+                    self._fail("unterminated string")
+                }
+                const e: int = dragon_bytes_get(self.buf, self.pos + 1)
+                if _is_escapable_byte(e) {
+                    self.pos = self.pos + 2
+                    continue
+                }
+                if e != 117 {
+                    self._fail("invalid escape in string")
+                }
+                if self.pos + 6 > self.n or
+                   not _is_hex_byte(dragon_bytes_get(self.buf, self.pos + 2)) or
+                   not _is_hex_byte(dragon_bytes_get(self.buf, self.pos + 3)) or
+                   not _is_hex_byte(dragon_bytes_get(self.buf, self.pos + 4)) or
+                   not _is_hex_byte(dragon_bytes_get(self.buf, self.pos + 5)) {
+                    self._fail("invalid \\uXXXX escape in string")
+                }
+                self.pos = self.pos + 6
                 continue
             }
             if c == _B_QUOTE {
@@ -297,8 +312,7 @@ class _JsonParser {
     }
 
     def _parse_number() -> Any {
-        # Validate the number grammar (-? int (.frac)? ([eE][+-]?exp)?) so a malformed
-        # number raises instead of dragon_str_to_float returning a partial value.
+        # Validate the number grammar (-? int (.frac)? ([eE][+-]?exp)?) so malformed numbers raise instead of parsing partial values.
         const start: int = self.pos
         is_float: bool = false
         if self._peek() == _B_MINUS {
@@ -418,8 +432,8 @@ class _JsonParser {
     }
 }
 
-# D048 box-free cursor: reads native slots instead of a boxed Any tree. Driven
-# by the compiler-emitted decode[T] skeleton; skip_value() allocates nothing.
+# D048 box-free cursor reading native slots (not boxed Any), driven by the
+# compiler's decode[T] skeleton; skip_value() allocates nothing.
 class Cursor {
     p: _JsonParser
     _need_comma: bool
@@ -586,8 +600,7 @@ class Cursor {
         return out
     }
 
-    # dict[str, scalar] parsers. begin_object/next_field reset _need_comma, so a
-    # completed nested dict must leave it true for the ENCLOSING field loop.
+    # dict[str, scalar] parsers; a nested dict must leave _need_comma true for the enclosing field loop.
     def parse_int_dict() -> dict[str, int] {
         const out: dict[str, int] = {}
         self.begin_object()
@@ -804,8 +817,8 @@ class Cursor {
 }
 
 
-# Box-free streaming writer, the write-side mirror of Cursor: values written AT
-# their type into one str buffer, joined once. (Not "Writer": io.Writer exists.)
+# Box-free streaming writer, write-side mirror of Cursor; values written AT their
+# type into one str buffer, joined once (not "Writer": io.Writer exists).
 class JsonWriter {
     _parts: list[str]
     _need_comma: bool
@@ -815,8 +828,7 @@ class JsonWriter {
         self._need_comma = false
     }
 
-    # Emit the separating ',' when a sibling precedes; value writes leave the
-    # flag set, key()/begin_*() clear it for what follows them.
+    # Emit the separating ',' when a sibling precedes; value writes leave the flag set, key()/begin_*() clear it.
     def _pre_value() -> None {
         if self._need_comma {
             self._parts.append(",")
@@ -973,26 +985,20 @@ class JsonWriter {
 }
 
 
-# D048 schema-directed decode into T. The compiler synthesizes each stamp's body
-# from T's fields (one Cursor read per field); this template is never lowered.
-# Box-free for every concrete T. A spelled-out Any (decode[Any],
-# decode[dict[str, Any]], decode[list[Any]]) opts into the boxed tree
-# (loadb / the _decode_*_any privates below); a concrete T never falls
-# back to a boxed stamp - unsupported shapes stay compile errors.
+# D048: compiler synthesizes each decode[T] stamp from T's fields (box-free); this template body is never lowered.
+# decode[Any]/dict[str,Any]/list[Any] opt into the boxed tree via loadb; a concrete T never falls back - unsupported shapes are compile errors.
 def decode[T](body: bytes) -> T {
     raise ValueError("json.decode requires a concrete type: decode[T](body)")
 }
 
 
-# D052 mirror of decode: the compiler synthesizes each stamp from T's fields,
-# one typed Writer call per field; this template is never lowered.
+# D052 mirror of decode: compiler synthesizes each stamp from T's fields (one typed Writer call per field); never lowered.
 def encode[T](value: T) -> bytes {
     raise ValueError("json.encode requires a concrete type: encode[T](value)")
 }
 
 
-# Decode JSON bytes into a boxed Any tree (D048); raises ValueError with the byte
-# offset on malformed input. Used by Request.json() and the decode[Any] stamp.
+# Decode JSON bytes into a boxed Any tree (D048); raises ValueError with the byte offset on malformed input.
 def loadb(data: bytes) -> Any {
     const p: _JsonParser = _JsonParser(data)
     const v: Any = p.parse_value()
@@ -1008,9 +1014,8 @@ def loads(s: str) -> Any {
     return loadb(s.encode("utf-8"))
 }
 
-# Shaped entries to the boxed tree, private on purpose: their public spelling
-# is decode[dict[str, Any]] / decode[list[Any]] (the compiler's stamps
-# delegate here; decode[Any] delegates to loadb directly).
+# Shaped entries to the boxed tree, private on purpose; public spelling is
+# decode[dict[str, Any]] / decode[list[Any]], whose compiler stamps delegate here.
 
 def _decode_obj_any(data: bytes) -> dict[str, Any] {
     const v: Any = loadb(data)
@@ -1030,8 +1035,7 @@ def _decode_list_any(data: bytes) -> list[Any] {
     raise ValueError("JSON top-level value is not an array")
 }
 
-# template[JSON] content type (D032 domain co-location). Auto-escapes each
-# !{expr} as a JSON string body, then the compiler concatenates the segments.
+# template[JSON] (D032): auto-escapes each !{expr} as a JSON string body; the compiler concatenates the segments.
 
 class JSON(Template) {
     def(inner: str) {
@@ -1124,8 +1128,7 @@ def _json_eq(a: Any, b: Any) -> bool {
         return x == y
     }
     if ka == "array" {
-        # Walk the Any values directly (header-dispatched len/subscript), so parsed
-        # box lists and monomorphized Dragon lists compare alike.
+        # Walk the Any values directly (header-dispatched len/subscript) so boxed and monomorphized lists compare alike.
         if len(a) != len(b) {
             return False
         }
@@ -1180,8 +1183,7 @@ class ValidationResult {
 }
 
 
-# The walker. `refdepth` counts consecutive $ref hops (reset when the walk consumes
-# structure), so a pure ref cycle is reported instead of overflowing the stack.
+# The walker; `refdepth` counts consecutive $ref hops (reset when the walk consumes structure) so a pure ref cycle is reported, not stack-overflowed.
 def _schema_check(schemas: dict[str, dict[str, Any]], schema: dict[str, Any],
                   value: Any, path: str, refdepth: int,
                   errors: list[ValidationError]) -> None {
@@ -1275,8 +1277,7 @@ def _schema_check(schemas: dict[str, dict[str, Any]], schema: dict[str, Any],
     }
 
     if kind == "array" {
-        # Size/iterate the Any value directly (header-dispatched), so parsed box
-        # lists and monomorphized Dragon lists validate identically.
+        # Size/iterate the Any value directly (header-dispatched) so boxed and monomorphized lists validate identically.
         if "minItems" in schema {
             const m: int = schema["minItems"]
             if len(value) < m {

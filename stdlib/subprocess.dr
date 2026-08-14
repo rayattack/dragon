@@ -40,11 +40,8 @@ extern "C" def dragon_subprocess_drain(fd: intc) -> bytes
 extern "C" def dragon_subprocess_write(fd: intc, data: bytes) -> int
 extern "C" def dragon_subprocess_close(fd: intc)
 
-# Concurrent drain+feed. Multiplexes all captured fds with poll(2): feeds
-# `stdin_data` to `in_fd` while draining `out_fd`/`err_fd` to EOF, bounded by
-# `timeout_ms` (< 0 = no timeout). CLOSES every captured fd on the way out.
-# Returns a list[bytes] of length 3: [stdout, stderr, flag] where flag is one
-# byte - 0 = completed within budget, 1 = timed out (partial output returned).
+# Multiplexes captured fds via poll(2): feeds stdin_data, drains out/err to EOF,
+# bounded by timeout_ms (<0=none). Returns [stdout, stderr, flag] (flag: 0=ok, 1=timeout); closes all fds.
 extern "C" def dragon_subprocess_pump(in_fd: intc, stdin_data: bytes, out_fd: intc, err_fd: intc, timeout_ms: int) -> list[bytes]
 
 # waitpid + kill come straight from libc / the os runtime helper.
@@ -59,10 +56,6 @@ const SIGKILL: int = 9
 # waitpid flag: return immediately if no child has exited (for poll()).
 const _WNOHANG: int = 1
 
-
-#===----------------------------------------------------------------------===#
-# Status decode - translate a raw waitpid() status into a Python returncode.
-#===----------------------------------------------------------------------===#
 
 def _decode_status(status: int) -> int {
     """A clean exit yields its exit code (0..255); death by signal N yields -N.
@@ -83,10 +76,6 @@ def _decode_status(status: int) -> int {
     return 0 - sig
 }
 
-
-#===----------------------------------------------------------------------===#
-# Exceptions
-#===----------------------------------------------------------------------===#
 
 class SubprocessError(Exception) {}
 
@@ -124,10 +113,6 @@ class CalledProcessError(SubprocessError) {
 }
 
 
-#===----------------------------------------------------------------------===#
-# CompletedProcess - the result object returned by run().
-#===----------------------------------------------------------------------===#
-
 class CompletedProcess {
     args: list[str]
     returncode: int
@@ -150,14 +135,10 @@ class CompletedProcess {
 }
 
 
-#===----------------------------------------------------------------------===#
-# Popen - the low-level handle. Spawns at construction time.
-#===----------------------------------------------------------------------===#
-
 class Popen {
     args: list[str]
     pid: int
-    returncode: int          # -1 == still running / not yet reaped
+    returncode: int          # meaningful only once running() is false; -1 until reaped
     _stdin_fd: int
     _stdout_fd: int
     _stderr_fd: int
@@ -197,9 +178,8 @@ class Popen {
         indefinitely. On expiry the child is killed and reaped and
         `TimeoutExpired` is raised carrying the partial output captured so far
         (Python parity)."""
-        # The pump owns the I/O loop AND closes every captured fd it is handed.
-        # Pass -1 for any stream we did not capture (the pump treats -1 as
-        # nothing-to-write / already-at-EOF).
+        # The pump owns the I/O loop and closes every fd it is handed; -1 means
+        # nothing-to-write / already-at-EOF for an uncaptured stream.
         const r: list[bytes] = dragon_subprocess_pump(self._stdin_fd, input, self._stdout_fd, self._stderr_fd, timeout)
         # Pump has closed our ends; forget them so wait()/close paths are no-ops.
         self._stdin_fd = -1
@@ -219,12 +199,9 @@ class Popen {
         return (out, err)
     }
 
-    # Close any still-open captured pipe end (idempotent; -1 means already
-    # closed or never captured). Without this, `Popen(args); p.wait()` leaks
-    # the 2-3 parent-held read/write ends per spawn, and a chatty child can
-    # deadlock on a full pipe nobody is draining. Called from communicate(),
-    # wait(), poll(), and close().
     def _close_fds() -> None {
+        """Idempotent pipe-end close (-1 = already closed/never captured); without it
+        Popen leaks parent-held fds and a chatty child can deadlock on a full pipe."""
         if self._stdin_fd >= 0 {
             dragon_subprocess_close(self._stdin_fd)
             self._stdin_fd = -1
@@ -239,9 +216,9 @@ class Popen {
         }
     }
 
-    # Explicit release for callers not using communicate(). Idempotent, and
-    # safe to call alongside wait()/poll() (which also close the fds).
     def close() -> None {
+        """Explicit release for callers not using communicate(). Idempotent, and
+        safe to call alongside wait()/poll() (which also close the fds)."""
         self._close_fds()
     }
 
@@ -269,17 +246,16 @@ class Popen {
         return self.returncode
     }
 
-    def poll() -> int {
-        """Non-blocking check. Returns the returncode if the child has exited,
-        or -1 if it is still running (Python returns None; Dragon uses -1)."""
+    def running() -> bool {
+        """Non-blocking liveness check; returncode is meaningful only once this returns false."""
         if self._reaped {
-            return self.returncode
+            return false
         }
         const r: list[int] = dragon_waitpid(self.pid, _WNOHANG)
         # WNOHANG: r == [0, 0] means "still running" (the runtime returns the
         # waitpid pid, which is 0 when no child has changed state).
         if r[0] == 0 {
-            return -1
+            return true
         }
         if r[0] < 0 {
             raise OSError(f"waitpid({self.pid}) failed")
@@ -287,6 +263,15 @@ class Popen {
         self.returncode = _decode_status(r[1])
         self._reaped = true
         self._close_fds()
+        return false
+    }
+
+    def poll() -> int {
+        """Non-blocking reap: the returncode once exited, -1 while running; -1 also
+        means killed-by-SIGHUP after exit, so use running() to distinguish."""
+        if self.running() {
+            return -1
+        }
         return self.returncode
     }
 
@@ -306,10 +291,6 @@ class Popen {
     }
 }
 
-
-#===----------------------------------------------------------------------===#
-# High-level front ends
-#===----------------------------------------------------------------------===#
 
 def run(args: list[str], capture_output: bool = false, check: bool = false, input: bytes = b"", cwd: str = "", timeout: int = -1) -> CompletedProcess {
     """Run `args` to completion and return a CompletedProcess.

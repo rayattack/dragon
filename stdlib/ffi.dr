@@ -63,9 +63,9 @@ class SchemaError(FFIError) {
 }
 
 
-# Trusted interpreter resolution (mirrors the compiler's): DRAGON_PYTHON wins,
-# else absolute candidates; never a bare name searched on $PATH (hijack surface).
 def python3() -> str {
+    """Trusted interpreter resolution (mirrors the compiler's): DRAGON_PYTHON wins,
+    else absolute candidates; never a bare name searched on $PATH (hijack surface)."""
     const override: str = getenv("DRAGON_PYTHON")
     if len(override) > 0 {
         if exists(override) {
@@ -86,9 +86,9 @@ def python3() -> str {
 }
 
 
-# Capture stdin so the child gets EOF, not the parent's stdin (else it hangs).
-# OSError here is execvp failure in the spawned child - the SpawnError signal.
 def _capture(argv: list[str], input: bytes) -> CompletedProcess {
+    """Capture stdin so the child gets EOF, not the parent's stdin (else it hangs).
+    OSError here is execvp failure in the spawned child - the SpawnError signal."""
     try {
         const proc: Popen = Popen(argv, "", true, true, true)
         const both: tuple[bytes, bytes] = proc.communicate(input)
@@ -101,7 +101,7 @@ def _capture(argv: list[str], input: bytes) -> CompletedProcess {
 }
 
 
-# --- D052 v2: the baton frame protocol + warm sidecars ---
+# D052 v2: the baton frame protocol + warm sidecars.
 
 def _u32le(n: int) -> bytes {
     return bytes([n % 256, (n // 256) % 256, (n // 65536) % 256, (n // 16777216) % 256])
@@ -174,16 +174,16 @@ class Sidecar {
         self._teardown()
     }
 
-    # Transport death: tear down and surface as ForeignError (no decode, ever).
     def _dead(where: str) -> None {
+        """Transport death: tear down and surface as ForeignError (no decode, ever)."""
         self._teardown()
         const msg: str = "foreign sidecar died (" + where + ")"
         const nothing: bytes = b""
         raise ForeignError(msg, self.argv, -1, nothing)
     }
 
-    # Write one call frame; false = the child was already gone (restart candidate).
     def _send(body: bytes, blobs: list[bytes]) -> bool {
+        """Write one call frame; false = the child was already gone (restart candidate)."""
         w: JsonWriter = JsonWriter()
         w.begin_object()
         w.key("body_len"); w.write_int(len(body))

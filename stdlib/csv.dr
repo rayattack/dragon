@@ -1,10 +1,5 @@
-# csv.dr - Dragon standard library: CSV parsing and writing
-#
-# Provides functions for reading and writing CSV (comma-separated values)
-# data. Supports quoted fields, escaped quotes, and configurable delimiters.
-# Pure Dragon - no C dependencies.
-
-# Constants
+"""csv.dr - CSV read/write: quoted fields, escaped quotes, configurable delimiters.
+Pure Dragon, no C dependencies."""
 
 const COMMA: str = ","
 const TAB: str = "\t"
@@ -12,14 +7,9 @@ const QUOTE: str = "\""
 const NEWLINE: str = "\n"
 
 
-# Parsing
-
 def parse_row(line: str, delimiter: str) -> list[str] {
-    # Split a single CSV line into fields, handling quoted fields.
-    # Quoted fields may contain delimiters and escaped quotes ("").
-    # Example: "hello","wor,ld" -> ["hello", "wor,ld"]
-    # Field text is collected as spans between structural characters and
-    # joined once per field - no per-character string building.
+    # Splits into fields, handling quoted fields with embedded delimiters/escaped
+    # quotes. Field text collects as spans, joined once per field, no per-char building.
     fields: list[str] = []
     parts: list[str] = []
     in_quotes: bool = false
@@ -71,33 +61,66 @@ def parse_row(line: str, delimiter: str) -> list[str] {
 }
 
 def parse_rows(text: str, delimiter: str) -> list[list[str]] {
-    # Split CSV text into rows of fields on line boundaries. NOTE: this splits
-    # on "\n" first, so a newline inside a quoted field is NOT preserved - the
-    # record is broken across rows. Use parse_row on a single line when a field
-    # may contain embedded newlines.
+    # One span-based scan over the whole document (RFC 4180): a "\n" inside a
+    # quoted field stays in the field; an unquoted "\n" ends the row.
     rows: list[list[str]] = []
-    const lines: list[str] = text.split("\n")
+    fields: list[str] = []
+    parts: list[str] = []
+    in_quotes: bool = false
     i: int = 0
-    const n: int = len(lines)
+    run: int = 0
+    last_flush: int = 0
+    const n: int = len(text)
 
     while i < n {
-        const line: str = lines[i]
-        # Skip empty trailing lines
-        if i == n - 1 {
-            if len(line) == 0 {
-                i = i + 1
+        const ch: str = text[i]
+
+        if in_quotes {
+            if ch == "\"" {
+                if i > run { parts.append(text[run:i]) }
+                if i + 1 < n and text[i + 1] == "\"" {
+                    parts.append("\"")
+                    i = i + 2
+                } else {
+                    in_quotes = false
+                    i = i + 1
+                }
+                run = i
             } else {
-                const row: list[str] = parse_row(line, delimiter)
-                rows.append(row)
                 i = i + 1
             }
         } else {
-            const row: list[str] = parse_row(line, delimiter)
-            rows.append(row)
-            i = i + 1
+            if ch == "\"" {
+                if i > run { parts.append(text[run:i]) }
+                in_quotes = true
+                i = i + 1
+                run = i
+            } elif ch == delimiter {
+                if i > run { parts.append(text[run:i]) }
+                fields.append("".join(parts))
+                parts = []
+                i = i + 1
+                run = i
+            } elif ch == "\n" {
+                if i > run { parts.append(text[run:i]) }
+                fields.append("".join(parts))
+                rows.append(fields)
+                fields = []
+                parts = []
+                i = i + 1
+                run = i
+                last_flush = i
+            } else {
+                i = i + 1
+            }
         }
     }
 
+    if n > run { parts.append(text[run:n]) }
+    if n > last_flush {
+        fields.append("".join(parts))
+        rows.append(fields)
+    }
     return rows
 }
 
@@ -107,11 +130,9 @@ def parse_row_simple(line: str, delimiter: str) -> list[str] {
 }
 
 
-# Writing
-
 def quote_field(field: str, delimiter: str) -> str {
-    # Quote a field if it contains the delimiter, a double quote, or a newline.
-    # Internal quotes are escaped by doubling them.
+    # Quotes if the field contains the delimiter, a quote, or a newline; internal
+    # quotes are escaped by doubling.
     const has_delim: bool = field.contains(delimiter)
     const has_quote: bool = field.contains("\"")
     const has_newline: bool = field.contains("\n")
@@ -153,16 +174,13 @@ def format_rows(rows: list[list[str]], delimiter: str) -> str {
 }
 
 
-# Convenience helpers
-
 def field_count(line: str, delimiter: str) -> int {
     const fields: list[str] = parse_row(line, delimiter)
     return len(fields)
 }
 
 def has_header(text: str, delimiter: str) -> bool {
-    # Heuristic: returns true if the first row contains no purely numeric fields.
-    # This is a simple guess, not definitive.
+    # Heuristic, not definitive: true if the first row has no purely numeric fields.
     const rows: list[list[str]] = parse_rows(text, delimiter)
     if len(rows) == 0 { return false }
 

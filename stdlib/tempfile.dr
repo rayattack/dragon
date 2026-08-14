@@ -1,9 +1,4 @@
-# tempfile.dr - Dragon standard library: temporary file and directory creation
-#
-# Provides functions for creating temporary files and directories.
-# Wraps POSIX/libc via extern "C".
-
-# POSIX / libc extern declarations
+"""tempfile.dr - temporary file/directory creation, wrapping POSIX/libc via extern "C"."""
 
 extern "C" def getenv(name: str) -> str
 extern "C" def access(path: str, mode: intc) -> intc
@@ -11,18 +6,13 @@ extern "C" def mkdir(path: str, mode: intc) -> intc
 extern "C" def unlink(path: str) -> intc
 extern "C" def rmdir(path: str) -> intc
 
-# OS CSPRNG bytes (getrandom/getentropy/BCryptGenRandom). Temp names MUST come
-# from the CSPRNG, not rand() seeded by time*31+pid: a guessable seed lets a
-# local attacker predict the name and pre-plant a symlink at it.
+# OS CSPRNG bytes. Temp names must come from the CSPRNG, not rand() seeded
+# by time/pid: a guessable seed lets an attacker pre-plant a symlink at the name.
 extern "C" def dragon_urandom(n: int) -> bytes
 
-# Atomically create a fresh file with O_CREAT|O_EXCL|O_NOFOLLOW and mode 0600.
-# Returns 0 on success, -1 if it exists / is a symlink / on error. Replaces the
-# racy _exists()-then-fopen("w") pattern (TOCTOU + symlink-follow + 0644).
+# Atomically creates a file (O_CREAT|O_EXCL|O_NOFOLLOW, mode 0600); 0 on
+# success, -1 if it exists/is a symlink. Replaces the racy exists()-then-open race.
 extern "C" def dragon_create_excl(path: str) -> intc
-
-
-# Internal helpers
 
 def _random_name(length: int) -> str {
     # Generate a random alphanumeric string from the OS CSPRNG.
@@ -43,9 +33,6 @@ def _exists(path: str) -> bool {
     return access(path, 0) == 0
 }
 
-
-# Public API
-
 def gettempdir() -> str {
     # Checks TMPDIR, TEMP, TMP environment variables, falls back to /tmp.
     const tmpdir: str = getenv("TMPDIR")
@@ -61,11 +48,8 @@ def gettempdir() -> str {
 }
 
 def mktemp(prefix: str, suffix: str) -> str {
-    # DEPRECATED (as in CPython): returns a name WITHOUT creating the file, so
-    # there is an unavoidable race between this call and whoever opens the path
-    # - an attacker can create the file (or a symlink) in the gap. Prefer
-    # mkstemp, which creates the file atomically. Kept for API parity; names now
-    # come from the CSPRNG so the path is at least unguessable.
+    # DEPRECATED (like CPython): returns a name without creating the file, so
+    # a race window exists; prefer mkstemp. Name still comes from the CSPRNG.
     const tmpdir: str = gettempdir()
     attempts: int = 0
     while attempts < 100 {
@@ -79,10 +63,8 @@ def mktemp(prefix: str, suffix: str) -> str {
 }
 
 def mkstemp(prefix: str, suffix: str) -> str {
-    # Create a temporary file and return its path. The file is created
-    # ATOMICALLY with O_CREAT|O_EXCL|O_NOFOLLOW and mode 0600 (owner-only), so
-    # there is no check-then-create window and a pre-planted symlink cannot
-    # redirect the create. Each attempt uses a fresh CSPRNG name.
+    # Creates the file atomically (O_CREAT|O_EXCL|O_NOFOLLOW, mode 0600), so
+    # there's no check-then-create window and no symlink redirect.
     const tmpdir: str = gettempdir()
     attempts: int = 0
     while attempts < 100 {
