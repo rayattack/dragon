@@ -51,6 +51,9 @@ value, the same markup type the template system produces and the web
 framework's `res.body` carries. Assigning it paints the window:
 
 ```dragon
+from html import HTML
+from ui.desktop import Window
+
 win: Window = Window("Hello", 360, 200)
 win.body = template[HTML] { <h1>Hello, Dragon</h1> }   # paints now
 win.body = template[HTML] { <h1>Updated</h1> }         # repaints
@@ -89,6 +92,9 @@ serves them all, and it returns only when the *last* open window closes.
 Closing one of three keeps the other two alive.
 
 ```dragon
+import ui
+from ui.desktop import Window
+
 main_win: Window = Window("Post Office", 800, 600)
 inspector: Window = Window("Inspector", 400, 600)
 main_win.show()
@@ -100,6 +106,10 @@ ui.App.run()   # returns when BOTH windows have been closed
 its close button:
 
 ```dragon
+from ui.desktop import Window
+
+inspector: Window = Window("Inspector", 400, 600)
+
 def dismiss_inspector() -> None {
     inspector.close()
 }
@@ -116,11 +126,18 @@ document. It is off by default. From code, opt a window in at construction
 or later:
 
 ```dragon
+from ui.desktop import Window
+
 win: Window = Window("Hello", 360, 200, inspect = true)   # on from birth
 
-win.enable_inspector()   # right-click in the window gains "Inspect Element"
-win.open_inspector()     # open the inspector pane now (enables it first)
+win.enable_inspector()   # make this window inspectable
 ```
+
+How you then open the inspector depends on the platform: on Linux the
+window's right-click menu gains "Inspect Element"; on macOS the window
+becomes attachable from Safari's **Develop** menu (Develop > your app >
+the page). There is no programmatic "open the pane now" call - WKWebView
+has no public API for it, so Dragon does not pretend to offer one.
 
 For a build you cannot or do not want to touch, set `DRAGON_UI_INSPECT=1`
 in the environment - every window of the app comes up inspectable, no

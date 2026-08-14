@@ -66,6 +66,8 @@ from odb import connect, ODB
 from odb.ha import HAReplica, RaftTransport, CONFIRMED
 
 db: ODB = connect("node1.odb")
+transport: RaftTransport = RaftTransport()
+seed: int = 42
 rep: HAReplica = HAReplica(db, 1, [1, 2, 3], transport, seed)
 ```
 

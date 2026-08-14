@@ -367,7 +367,7 @@ stdlib already covers.
 cargo build --release      // → target/release/app
 ```
 
-```dragon
+```bash
 # Dragon: no manifest for stdlib capabilities
 dragon build app.dr        # → ./app, stdlib statically linked in
 ```

@@ -9,6 +9,10 @@ the file keeps.
 ## Retention
 
 ```dragon
+from odb import connect, ODB
+
+db: ODB = connect("shop.odb")
+
 db.retain("1024 txns")     # the default
 db.retain("7d")            # or a duration: s, m, h, d
 db.retain("none")          # no history: smallest file, no feeds, no travel
@@ -25,7 +29,9 @@ matching committed change after the point it was opened, shaped by its own
 projection:
 
 ```dragon
-from odb import Watch, Change
+from odb import connect, ODB, OQL, Watch, Change
+
+db: ODB = connect("shop.odb")
 
 status: str = "paid"
 w: Watch = db.watch(template[OQL] { orders ? status == !{status} { id, total } })
@@ -54,6 +60,10 @@ CSN. `db.csn()` tells you where the database is now, so bracketing a change
 is natural:
 
 ```dragon
+from odb import connect, ODB, Document, OQL
+
+db: ODB = connect("shop.odb")
+
 at: int = db.csn()
 db.run(template[OQL] { set customers ? id == 4 { city: "Enugu" } })
 
@@ -72,6 +82,10 @@ retention window.
 ## Backup, restore, and shrink
 
 ```dragon
+from odb import connect, ODB
+
+db: ODB = connect("shop.odb")
+
 text: str = db.dump()            # every schema, meta, and document, JSONL
 db2: ODB = connect("restored.odb")
 loaded: int = db2.load(text)     # rebuilt in ref-safe order
@@ -93,5 +107,9 @@ instead (see [Replication](/docs/1316-odb-replication)).
 And whenever you want proof, not vibes:
 
 ```dragon
+from odb import connect, ODB
+
+db: ODB = connect("shop.odb")
+
 print(db.check().ok)             # structure, indexes, refs - one pass
 ```

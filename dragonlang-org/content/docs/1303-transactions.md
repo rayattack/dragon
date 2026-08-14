@@ -42,6 +42,12 @@ unwound out of the block - the transaction is **rolled back**. Nothing it did
 persists:
 
 ```dragon
+import database
+from database import SQL
+
+db: database.Connection = database.open("sqlite::memory:")
+db.raw("create table t(n integer)")
+
 with db.transaction() as tx {
     tx.run(template[SQL] { insert into t(n) values(!{1}) })
     tx.run(template[SQL] { insert into t(n) values(!{2}) })
@@ -62,6 +68,14 @@ transaction quietly committed - is one your code can't accidentally produce.
 that it shouldn't proceed:
 
 ```dragon
+import database
+from database import SQL
+
+db: database.Connection = database.open("sqlite::memory:")
+db.raw("create table inventory(sku text, qty integer)")
+sku: str = "PEN-1"
+n: int = 3
+
 with db.transaction() as tx {
     tx.run(template[SQL] { update inventory set qty = qty - !{n} where sku = !{sku} })
     on_hand: int = tx.val(template[SQL] { select qty from inventory where sku = !{sku} })
@@ -80,6 +94,12 @@ insert - `db.runs([...])` executes them as one batch without the explicit-commit
 ceremony:
 
 ```dragon
+import database
+from database import SQL
+
+db: database.Connection = database.open("sqlite::memory:")
+db.raw("create table players(name text, score integer)")
+
 db.runs([
     template[SQL] { insert into players(name, score) values(!{"Ada"}, !{10}) },
     template[SQL] { insert into players(name, score) values(!{"Linus"}, !{20}) },

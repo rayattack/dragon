@@ -36,6 +36,7 @@ A class that intends to satisfy a contract says so in its header, after the
 optional base class:
 
 ```dragon
+# doc: no-check
 class Dog(Animal) -> Amazing, Speaker {
     def amazing_method() -> str { return "woof" }
     def rating() -> int { return 10 }
@@ -49,6 +50,7 @@ is missing. A promised class flows into contract-typed positions with no cast
 anywhere:
 
 ```dragon
+# doc: no-check
 def show(x: Amazing) -> str {
     return x.amazing_method()
 }
@@ -63,6 +65,7 @@ You cannot reach into a library and edit its class header. You do not have to:
 assert conformance at your own call site, and the compiler checks it there.
 
 ```dragon
+# doc: no-check
 class Robot {                          # no promise anywhere
     def amazing_method() -> str { return "beep" }
     def rating() -> int { return 7 }
@@ -83,6 +86,7 @@ not part of contracts v1.
 Ordinary code, one missing assertion:
 
 ```dragon
+# doc: no-check
 class Duck {
     def amazing_method() -> str { return "quack" }
     def rating() -> int { return 9 }
@@ -109,6 +113,7 @@ must satisfy every member), in the three positions where a bare comma would
 read as something else:
 
 ```dragon
+# doc: no-check
 m = robot as {Amazing, Speaker}              # cast
 def duo(x: {Amazing, Speaker}) -> str {      # annotation
     return x.amazing_method() + x.speak()
@@ -129,6 +134,7 @@ A contract bound uses the same spelling as a class bound
 no cast, no promise:
 
 ```dragon
+# doc: no-check
 def show_mono[T: Amazing](x: T) -> str {
     return x.amazing_method()
 }
@@ -150,6 +156,20 @@ polymorphic method call (docs 0603). Dragon compiles whole-program, so every
 a reserved slot in every conforming class's vtable. Compare Go, which pays a
 runtime lookup-and-cache at interface conversions because its conforming set
 stays open; Dragon's is closed, so `as` is free, always.
+
+## Not in v1
+
+Three things you might reach for that are deliberately not here yet, so you
+are not left guessing at the error messages:
+
+- **Narrowing back to the concrete class.** `isinstance(a, Dog)` on an
+  `Amazing`-typed value is not supported yet; contracts move upward only.
+  Planned (v2).
+- **Keyword arguments on a contract-typed call.** `a.method(name="x")` is a
+  compile error today; pass positionally. Planned (v1.x).
+- **Parameterized contracts** like `type Iterable[T]`. A contract cannot take
+  a type parameter yet - contracts as generic *bounds* (`[T: Amazing]`) work
+  fine and are the intended workhorse. Planned (v2, its own design).
 
 ## Quick reference
 

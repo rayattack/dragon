@@ -30,6 +30,7 @@ The condition is any expression that evaluates to `bool`. Truthiness is
 The Python ternary works:
 
 ```dragon
+response_code: int = 200
 const status: str = "ok" if response_code < 400 else "error"
 ```
 
@@ -51,6 +52,14 @@ A `while` runs its body as long as the condition is true. Use `break`
 to exit early, `continue` to skip to the next iteration:
 
 ```dragon
+def read_line() -> str {
+    return input()
+}
+
+def process(line: str) {
+    print(line)
+}
+
 while true {
     const line: str = read_line()
     if line == "" {
@@ -84,6 +93,8 @@ Iterating a dict iterates its keys, just like Python. Use `.items()`
 to get key-value pairs:
 
 ```dragon
+counts: dict[str, int] = {"the": 3, "a": 2}
+
 for word in counts {
     print(f"{word}: {counts[word]}")
 }
@@ -98,6 +109,9 @@ for word, count in counts.items() {
 `while` loops. The Python `else` clause on loops works too:
 
 ```dragon
+primes: list[int] = [2, 3, 5, 7, 11]
+target: int = 7
+
 for candidate in primes {
     if candidate == target {
         print("found")
@@ -117,7 +131,14 @@ mode each arm uses a brace body (the `.py` form uses the indented
 `case …:` block):
 
 ```dragon
-const value: str | int = parse(token)
+def parse(token: str) -> str | int {
+    if token.isdigit() {
+        return int(token)
+    }
+    return token
+}
+
+const value: str | int = parse("42")
 
 match value {
     case 0 { print("zero") }

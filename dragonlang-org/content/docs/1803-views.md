@@ -43,6 +43,8 @@ user data is safe without you remembering to escape it (the same guarantee
 the [web chapter](/docs/1701-web-application) leans on):
 
 ```dragon
+from html import HTML
+
 user_input: str = "<script>alert('xss')</script>"
 view: HTML = template[HTML] {
   <h1>!{user_input}</h1>
@@ -57,6 +59,10 @@ double-escaping. This is exactly why a view-building function should return
 `HTML`, not `str`:
 
 ```dragon
+from html import HTML
+
+user_input: str = "<script>alert('xss')</script>"
+
 def badge(text: str) -> HTML {
     return template[HTML] { <span class="badge">!{text}</span> }
 }

@@ -164,7 +164,12 @@ If a value can be either `None` or some other type, declare it as a
 union - `int | None` for "an int or nothing":
 
 ```dragon
-result: int | None = lookup(key)
+def lookup(key: str) -> int | None {
+    if key == "answer" { return 42 }
+    return None
+}
+
+result: int | None = lookup("answer")
 if result == none {
     print("not found")
 } else {

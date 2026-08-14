@@ -169,11 +169,11 @@ bundled browser engine would add. It is not fully self-contained, though: it
 dynamically links GTK3 and webkit2gtk-4.1, so the target machine needs those
 libraries installed (they ship with most Linux desktops).
 
-The same `.dr` source is designed to build on every desktop platform. The
-platform shell - the only non-Dragon code in the stack - is selected at build
-time: WebKitGTK on Linux, WKWebView on macOS, WebView2 on Windows. Your signals,
-views, and handlers are identical across all three. For installers (`.deb`,
-`.dmg`, `.msi`), see [Packaging](/docs/1003-packaging-eggs).
+The platform shell - the only non-Dragon code in the stack - is selected at
+build time: WebKitGTK on Linux, WKWebView on macOS. Your signals, views, and
+handlers are identical on both. Windows has no shell yet, so `import ui` does
+not build there. For installers (`.deb`, `.dmg`), see
+[Packaging](/docs/1003-packaging-eggs).
 
 One more piece completes the desktop story: when the page runs its own
 JavaScript - a library you dropped into `assets/`, or plain script you wrote -

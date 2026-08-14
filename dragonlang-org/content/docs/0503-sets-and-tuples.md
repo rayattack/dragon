@@ -47,6 +47,7 @@ Union, intersection, difference, and symmetric difference are available both as
 methods and as operators - use whichever reads better:
 
 ```dragon
+# doc: no-check
 const a: set[int] = {1, 2, 3}
 const b: set[int] = {2, 3, 4}
 

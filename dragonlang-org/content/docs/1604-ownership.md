@@ -36,6 +36,14 @@ for moving between them.
 A quick tour of all five:
 
 ```dragon
+def read_all(p: str) -> str {
+    return "data from " + p
+}
+
+def work(own s: str) -> None {
+    print(len(s))
+}
+
 def states_tour(p: str) {
     a: str = read_all(p)   # a: Owned     - fresh call result, 'a' is the sole owner
     b: str = a             # b: Borrowed  - names a value owned elsewhere
@@ -54,6 +62,13 @@ fresh value, or hand me a view of an existing one?" Fresh values are owned;
 views are borrowed:
 
 ```dragon
+from ssl import SSLContext
+
+class Router {
+    host: str
+    def() { self.host = "localhost" }
+}
+
 def creation(xs: list[str], d: dict[str, str], r: Router) {
     a: str = "hi" * 3             # fresh result (concat)   -> Owned
     b: SSLContext = SSLContext()  # constructor             -> Owned
@@ -72,6 +87,7 @@ Reading a dead name is a compile error, and `Moved` and `Deleted` behave
 identically; they differ only in what the diagnostic says:
 
 ```dragon
+# doc: no-check
 job: Job = make_job()
 fire run(own job)
 print(job.id)          # error E1: 'job' was moved into 'fire run' at line 2
@@ -107,6 +123,7 @@ When the proof fails, the error names the escape site, and this is where `del`
 earns its keep as a diagnostic tool:
 
 ```dragon
+# doc: no-check
 cache: dict[str, str] = {}
 
 buf: str = read_all(p)
@@ -122,6 +139,7 @@ by the type checker.
 The full set of refusals:
 
 ```dragon
+# doc: no-check
 first: str = xs[0]     # Borrowed
 del first              # error E4: 'first' is not the owner (it borrows xs[0]);
                        # only the sole owner can be deleted or moved
@@ -164,6 +182,14 @@ The motivating example is a TLS context, which holds tens of kilobytes of
 engine state in a raw handle:
 
 ```dragon
+class TlsCtx { }
+
+def tls_ctx_new(protocol: int) -> TlsCtx {
+    return TlsCtx()
+}
+
+const PROTOCOL_TLS_CLIENT: int = 0
+
 class SSLContext {
     own _ctx: TlsCtx       # sole owner: released exactly once, when the context dies
 
@@ -182,6 +208,9 @@ Owners compose. When an object holding `own` fields dies, the fields release
 depth-first:
 
 ```dragon
+from threading import Lock
+from ssl import SSLContext
+
 class Router {
     own _storage_lock: Lock
     own _ssl_context: SSLContext
@@ -195,6 +224,7 @@ class Router {
 Reads and reassignment behave the way the one-owner rule predicts:
 
 ```dragon
+# doc: no-check
 h: TlsCtx = self._ctx        # h: Borrowed, like any field read; may not outlive self
 self._ctx = tls_ctx_new(1)   # releases the PREVIOUS handle first, then adopts the new one
 ```
@@ -209,6 +239,7 @@ reference count will ever destroy one. Whoever holds one either owns it
 statically or it leaks. So a field holding one *must* be `own`:
 
 ```dragon
+# doc: no-check
 class Router {
     _storage_lock: Lock        # error E15: Lock is a resource type; a Lock field
 }                              # must be declared own (a non-own Lock has no
@@ -219,6 +250,7 @@ Locals stay unannotated and free (the scope owns them and releases them at
 scope exit), and containers of raw resources are refused:
 
 ```dragon
+# doc: no-check
 locks: list[Lock] = []         # error E16: a list cannot hold raw Lock values;
                                # wrap the resource in a class with an own field
 
@@ -238,6 +270,7 @@ stored. That gives a method three legal spellings, and this is where `own`
 appears in a `def`:
 
 ```dragon
+# doc: no-check
 class Config {
     own _data: dict[str, str]
 
@@ -262,6 +295,7 @@ class Config {
 A move has two ends, and **both ends must say `own`**:
 
 ```dragon
+# doc: no-check
 cfg: Config = Config()
 headers: dict[str, str] = {"Accept": "application/json"}
 
@@ -290,6 +324,7 @@ both ends.)
 Mismatches are compile errors, not coercions:
 
 ```dragon
+# doc: no-check
 cfg.set_moved(headers)       # error E13: set_moved takes ownership of its argument;
                              # write set_moved(own headers) to move it, or
                              # set_moved(dub headers) to keep yours and pass a copy
@@ -303,6 +338,7 @@ keyword, because there is no binding to poison and no later line that could
 misread it:
 
 ```dragon
+# doc: no-check
 cfg.set_moved({"Accept": "text/html"})   # ok: a fresh temp transfers directly
 ```
 
@@ -313,6 +349,7 @@ recording "was it moved?", so the compiler refuses programs whose answer
 depends on the branch taken:
 
 ```dragon
+# doc: no-check
 def branchy(cond: bool) {
     x: Job = make_job()
     if cond {
@@ -343,6 +380,7 @@ the loop cannot be consumed inside it, because iteration two would use a dead
 name:
 
 ```dragon
+# doc: no-check
 def loopy(paths: list[str]) {
     buf: str = read_all(paths[0])
     for p in paths {
@@ -365,6 +403,10 @@ the line you wrote. Searching a program for `dub` shows you every copy it
 makes.
 
 ```dragon
+def load() -> list[dict[str, str]] {
+    return [{"row": "1"}]
+}
+
 base: dict[str, str] = {"Accept": "application/json"}
 mine: dict[str, str] = dub base   # deep copy: a new dict with dubbed values
 
@@ -385,6 +427,7 @@ A class is dubable if and only if every field is dubable, and things that
 cannot meaningfully be copied refuse:
 
 ```dragon
+# doc: no-check
 lk: Lock = Lock()
 lk2: Lock = dub lk               # error E11: Lock is not dubable
 
@@ -402,6 +445,7 @@ And there is one place `dub` is *required* rather than optional. Mutating a
 container while iterating it looks correct and is silently wrong:
 
 ```dragon
+# doc: no-check
 names: list[str] = ["a", "tmp1", "tmp2", "b"]
 for name in names {
     if name.startswith("tmp") {
@@ -417,6 +461,8 @@ famous footgun; Dragon refuses to inherit it.) The fix is the priced snapshot,
 taken once before the loop starts:
 
 ```dragon
+names: list[str] = ["a", "tmp1", "tmp2", "b"]
+
 for name in dub names {        # snapshot iteration: the copy is visible and priced
     if name.startswith("tmp") {
         names.remove(name)     # mutating the original is now well-defined
@@ -443,6 +489,10 @@ shape every serious ecosystem converged on (Rust's `OwnedFd` over `RawFd`,
 C++'s deleted-copy RAII wrappers):
 
 ```dragon
+from socket import SocketHandle
+
+fd: int = 3
+
 # socket.SocketHandle - the one claim on a kernel socket
 h: SocketHandle = SocketHandle.adopt_raw(fd)   # the ONE door in from a raw fd
 h.fd()                          # the descriptor, while the claim is live
@@ -457,6 +507,7 @@ layer: anything that keeps a connection holds the handle as an `own` field,
 so the ordinary field rules do the enforcement with no new machinery:
 
 ```dragon
+# doc: no-check
 class FdReader(ConnReader) {
     own _sock: SocketHandle          # sole owner of the claim
 
@@ -490,6 +541,7 @@ Three consequences fall out of composition, none of them special-cased:
   out of the stream puts the claim down exactly once.
 
 ```dragon
+# doc: no-check
 def stream(conn: ConnReader) -> None {
     defer conn.close()               # the new owner's first act: schedule
     while true {                     # the last one
@@ -508,6 +560,7 @@ without data races and without atomic reference counts. Every heap value
 crossing into a green thread must arrive through one of four doors:
 
 ```dragon
+# doc: no-check
 req: Request = parse_request(conn)      # Owned
 counts: dict[str, int] = load_counts()  # Owned
 

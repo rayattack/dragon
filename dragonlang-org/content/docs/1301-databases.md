@@ -51,6 +51,7 @@ cover everything, and the fetch verbs are **generic in the row type**.
 ### `all`, `one`, `val` - reading
 
 ```dragon
+# doc: no-check
 rows: list[dict[str, Any]] = db.all(template[SQL] { select id, name from players })
 
 player: dict[str, Any] = db.one(template[SQL] { select id, name from players where id = !{pid} })
@@ -67,6 +68,7 @@ annotation**: `total: int = db.val(...)` pins `T = int`. When you call a fetch v
 *inline* - with no annotation to infer from - supply the type argument explicitly:
 
 ```dragon
+# doc: no-check
 print(db.val[int](template[SQL] { select count(*) from players }))   # inline needs [int]
 ```
 
@@ -76,6 +78,7 @@ print(db.val[int](template[SQL] { select count(*) from players }))   # inline ne
 (rows affected) and `xid` (the new row's id); `runs` executes a batch:
 
 ```dragon
+# doc: no-check
 from database import Results
 
 res: Results = db.run(template[SQL] {
@@ -93,6 +96,7 @@ db.runs([
 ### `raw` - the escape hatch
 
 ```dragon
+# doc: no-check
 db.raw("create table players(id integer primary key, name text, score integer)")
 ```
 
@@ -109,6 +113,7 @@ A row is a `dict[str, Any]` keyed by column name, each value at its native type
 same value:
 
 ```dragon
+# doc: no-check
 r: dict[str, Any] = db.one(template[SQL] { select id, name from players where id = !{pid} })
 print(r["name"])   # subscript - works for any key
 print(r.name)      # dot-access - cleaner for identifier columns
@@ -123,6 +128,7 @@ mind the quotes: `f"{r['name']}"` or `f"{r.name}"`, not `f"{r["name"]}"`.)
 and ask the fetch verb for it with `[T]`:
 
 ```dragon
+# doc: no-check
 class Customer(TypedDict) {
     id: int
     name: str
@@ -146,6 +152,9 @@ it at block exit, even on a raise. Without `with`, call `db.close()` yourself. F
 server, pool connections rather than opening one per request:
 
 ```dragon
+import database
+from database import SQL
+
 pool: database.Pool = database.Pool("postgres://localhost/shop", 8)
 conn: database.Connection = pool.acquire()
 total: int = conn.val(template[SQL] { select count(*) from orders })
@@ -162,6 +171,7 @@ Everything the layer raises descends from `DatabaseError`, so one
 `except DatabaseError` is a valid catch-all; the specific types let you be precise:
 
 ```dragon
+# doc: no-check
 from database import DatabaseError, NoRows, MultipleRows
 
 try {

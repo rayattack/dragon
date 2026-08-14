@@ -56,6 +56,12 @@ bottom, first match wins. Put **specific** types first and **broad** ones last -
 leading `except Exception` would swallow everything:
 
 ```dragon
+def classify(s: str) -> None {
+    if s == "v" { raise ValueError("bad value") }
+    if s == "t" { raise TypeError("bad type") }
+    raise KeyError("unknown")
+}
+
 def handle(s: str) -> None {
     try {
         classify(s)
@@ -195,6 +201,14 @@ runtime for heap memory behind the scenes - you never write `malloc`, Dragon doe
 it for you:
 
 ```dragon
+import json
+
+a: str = "left"
+b: str = "right"
+code: int = 65
+name: str = "ada"
+rec: dict[str, int] = {"n": 1}
+
 s: str = a + b               # concat allocates a new string
 c: str = chr(code)           # a one-character string
 u: str = name.upper()        # the upper-cased copy

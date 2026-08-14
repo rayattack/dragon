@@ -121,6 +121,7 @@ bind stubs that exist.
 ## Three failures, three catchable types
 
 ```dragon
+# doc: no-check
 from ffi import FFIError, SpawnError, ForeignError, SchemaError
 
 try {
@@ -158,6 +159,14 @@ the kernel underneath is public:
 ```dragon
 from ffi import runs
 
+class Summary {
+    def(ok: bool, total: int) {
+        self.ok = ok
+        self.total = total
+    }
+}
+
+const payload: bytes = b'{"rows": [1, 2, 3]}'
 const report: Summary = runs[Summary](["./analyze", "--fast"], payload)
 ```
 

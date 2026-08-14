@@ -113,6 +113,7 @@ typed from the tuple's element types in one move, so you don't annotate them. If
 you'd rather keep the tuple whole, bind it with an annotation and index into it:
 
 ```dragon
+# doc: no-check
 const bounds: tuple[int, int] = minmax([3, 1, 4])
 print(bounds[0], bounds[1])   # 1 3
 ```

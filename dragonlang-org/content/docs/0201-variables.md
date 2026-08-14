@@ -17,6 +17,7 @@ binding, the name can be reassigned as many times as you like, as long
 as every assignment matches the declared type:
 
 ```dragon
+# doc: no-check
 name: str = "Alice"
 name = "Bob"            # ok - still str
 name = 42               # error - int doesn't match str
@@ -26,6 +27,10 @@ You can declare a variable without an initial value if you give it a
 type:
 
 ```dragon
+def compute_left() -> int { return 1 }
+def compute_right() -> int { return 2 }
+
+some_condition: bool = True
 result: int
 if some_condition {
     result = compute_left()
@@ -70,6 +75,7 @@ const greeting: str = "Hello, World!"
 reassign a `const` is a compile-time error:
 
 ```dragon
+# doc: no-check
 const port: int = 2018
 port = 8080         # error - cannot reassign const
 ```
@@ -125,6 +131,7 @@ Python, which scopes by function and leaks `if`/`for` locals into the
 rest of the enclosing function:
 
 ```dragon
+# doc: no-check
 if condition {
     result: int = 42
 }
@@ -135,6 +142,8 @@ Because each block is its own scope, sibling blocks can reuse a name
 freely; they are independent variables that never collide:
 
 ```dragon
+ready: bool = True
+done: bool = False
 if ready {
     msg: str = "go"
     print(msg)

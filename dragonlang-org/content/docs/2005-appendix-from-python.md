@@ -119,6 +119,7 @@ n = "hello"   # n is now a str
 ```
 
 ```dragon
+# doc: no-check
 # Dragon
 n: int = 5
 n = "hello"
@@ -145,6 +146,7 @@ print(z)   # 99
 ```
 
 ```dragon
+# doc: no-check
 # Dragon - z is local to the if block
 if true {
     z: int = 99
@@ -359,6 +361,7 @@ does not have, so a named concrete list is rejected at the boundary instead
 of being silently misread:
 
 ```dragon
+# doc: no-check
 def first_len(xs: list[Any]) -> int {
     return len(xs)
 }

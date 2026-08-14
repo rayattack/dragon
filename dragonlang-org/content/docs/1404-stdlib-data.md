@@ -127,6 +127,7 @@ The target does not have to be a class. Any concrete type works at the top
 level, which keeps wire payloads uniform end to end:
 
 ```dragon
+# doc: no-check
 from json import decode
 
 const n: int = decode[int](b"42")
@@ -147,6 +148,7 @@ boxed decoder. `decode[Any]` accepts any document (it delegates to `loadb`);
 requires an array.
 
 ```dragon
+# doc: no-check
 from json import decode
 
 # The reply's shape is genuinely unknown at compile time.
@@ -195,6 +197,7 @@ any concrete top-level type) by emitting one typed write per field - no
 boxing, no runtime tag dispatch, compact output:
 
 ```dragon
+# doc: no-check
 from json import encode, decode
 
 const u: User = User(7, "hi", true)

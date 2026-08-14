@@ -228,8 +228,15 @@ keeps the default. Because the value is still a `str`, you test it by
 comparing against `"true"`:
 
 ```dragon
+from argparse import ArgumentParser
+import sys
+
+parser: ArgumentParser = ArgumentParser("tool", "demo")
+parser.add_argument("--verbose", "bool", "false", "chatty output")
+args: dict[str, str] = parser.parse_args(sys.argv())
+
 if args["verbose"] == "true" {
-    # the flag was passed
+    print("verbose mode on")    # the flag was passed
 }
 ```
 
@@ -238,19 +245,18 @@ its presence *is* the signal, which is exactly how `grep -v` or `ls -l`
 behave. (A bool flag does not consume the next word; `--verbose foo`
 leaves `foo` free to fill a positional.)
 
-## Exit codes: `sys.exit_code`
+## Exit codes: `sys.exit`
 
 A command-line tool's return value is its **exit status** - the integer
 the shell reads as `$?`. Zero means success; anything non-zero means
 something went wrong, and conventions assign meaning (`1` general error,
-`2` misuse). Dragon exits the process with `sys.exit_code(code)`.
+`2` misuse). Dragon exits the process with `sys.exit(code)`.
 
-> **The function is `exit_code`, not `exit`.** Python spells this
-> `sys.exit(code)`. Dragon's `sys` module exposes it as
-> `exit_code(code: int)` (the bare `exit` is the raw libc extern). Use
-> `sys.exit_code(0)` for success, `sys.exit_code(1)` for failure. This
-> is a naming divergence - the behavior is the same: it ends the process
-> immediately with that status.
+> **`exit` ends the process immediately.** Python's `sys.exit(code)`
+> raises `SystemExit`, which a `try`/`except` up the stack can intercept.
+> Dragon's `sys.exit(code: int)` calls the C runtime's exit: the process
+> ends right there with that status, and nothing catches it. Use
+> `sys.exit(0)` for success, `sys.exit(1)` for failure.
 
 ```dragon
 from argparse import ArgumentParser
@@ -264,12 +270,12 @@ text: str = args["text"]
 
 if len(text) == 0 {
     print("error: no text given")
-    sys.exit_code(1)
+    sys.exit(1)
 }
 
 words: list[str] = text.split(" ")
 print("word count: " + str(len(words)))
-sys.exit_code(0)
+sys.exit(0)
 ```
 
 ```bash
@@ -293,12 +299,12 @@ error: no text given
 exit=1
 ```
 
-You don't *have* to call `sys.exit_code` - a program that simply runs off
+You don't *have* to call `sys.exit` - a program that simply runs off
 the end of its top-level statements exits `0`. But calling it explicitly
 makes failure paths unambiguous, and it lets you bail out early from deep
 inside a branch without restructuring the whole file. (You can also reach
-for it from the `from sys import argv, exit_code` form and call
-`exit_code(1)` bare - the import style is your choice, the behavior is
+for it from the `from sys import argv, exit` form and call
+`exit(1)` bare - the import style is your choice, the behavior is
 identical.)
 
 ## Reading from standard input: `input()`
@@ -364,12 +370,12 @@ path: str = args["path"]
 
 if len(pattern) == 0 or len(path) == 0 {
     print("usage: dgrep <pattern> <path> [--count]")
-    sys.exit_code(2)
+    sys.exit(2)
 }
 
 if not exists(path) {
     print("dgrep: " + path + ": no such file")
-    sys.exit_code(1)
+    sys.exit(1)
 }
 
 lines: list[str] = open(path).lines()
@@ -390,9 +396,9 @@ if count_only == "true" {
 }
 
 if matches == 0 {
-    sys.exit_code(1)
+    sys.exit(1)
 }
-sys.exit_code(0)
+sys.exit(0)
 ```
 
 Build it, make a data file, and exercise every path:
@@ -437,7 +443,7 @@ porter, here they are in one place:
 | Concern | Python | Dragon |
 |---------|--------|--------|
 | Read the argument list | `sys.argv` (attribute) | `sys.argv()` (**function call**) |
-| Exit with a status | `sys.exit(code)` | `sys.exit_code(code)` |
+| Exit with a status | `sys.exit(code)` raises `SystemExit` | `sys.exit(code)` exits immediately |
 | `argparse` value types | typed (`type=int` → `int`) | always `str`; you call `int(...)` / `float(...)` |
 | `parse_args` return | `Namespace` object, `args.name` | `dict[str, str]`, `args["name"]` |
 | `add_argument` parameters | mixed types, keywords | four **string** positionals: `name, arg_type, default, help` |
@@ -460,8 +466,8 @@ shape of the same idea.
 | Read a number value | `count: int = int(args["count"])` |
 | Test a boolean flag | `if args["verbose"] == "true" { ... }` |
 | Read one line of stdin | `line: str = input("prompt> ")` |
-| Exit successfully | `sys.exit_code(0)` |
-| Exit with an error | `sys.exit_code(1)` *(or `2` for misuse)* |
+| Exit successfully | `sys.exit(0)` |
+| Exit with an error | `sys.exit(1)` *(or `2` for misuse)* |
 
 The shape of a Dragon CLI is the shape of the file: declare your parser,
 parse `argv()`, do the work, and exit with a status the shell can read.

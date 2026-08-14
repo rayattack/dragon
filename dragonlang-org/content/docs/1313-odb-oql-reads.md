@@ -12,6 +12,10 @@ the query text - so an injection payload is just a string nobody matches, not
 a query that runs. The typed verbs return your own row classes:
 
 ```dragon
+from odb import connect, ODB, Document, OQL
+
+db: ODB = connect("shop.odb")
+
 class Customer {
     id: int
     name: str
@@ -53,6 +57,7 @@ compose with `&`, `|`, `!` and parentheses; comparisons are the usual six
 `~*` (case-insensitive); membership is `in`:
 
 ```dragon
+# doc: no-check
 db.all[Customer](template[OQL] { customers ? name ~ !{pattern} { name } })
 db.find(template[OQL] { orders ? status in ["paid", "shipped"] })
 db.find(template[OQL] { customers ? city == !{c} & (vip | missing!(vip)) })
@@ -75,6 +80,10 @@ cardinality driving the shape: a 1:N ref nests an array, an N:1 ref nests an
 object.
 
 ```dragon
+from odb import connect, ODB, Document, OQL
+
+db: ODB = connect("shop.odb")
+
 # each customer with their paid orders nested inside
 status: str = "paid"
 rows: list[Document] = db.find(
@@ -88,6 +97,7 @@ existence operators - `+` keeps parents that have a match, `-` keeps parents
 that have none:
 
 ```dragon
+# doc: no-check
 db.find(template[OQL] { customers + (orders ? status == !{status}) { name } })
 db.find(template[OQL] { customers - orders { name } })   # with no orders at all
 ```
@@ -98,6 +108,10 @@ A block of only aggregates summarizes the whole set; `by` groups first and
 reads like English:
 
 ```dragon
+from odb import connect, ODB, Document, OQL
+
+db: ODB = connect("shop.odb")
+
 totals: list[Document] = db.find(template[OQL] { orders { n: count!(), revenue: sum!(total) } })
 print(totals[0]["n"], totals[0]["revenue"])
 
@@ -115,6 +129,10 @@ standing on: to summarize a relationship, query from the many side (group
 Stages after the block transform the result set, in order:
 
 ```dragon
+from odb import connect, ODB, Document, OQL
+
+db: ODB = connect("shop.odb")
+
 floor: int = 0
 top: list[Document] = db.find(
     template[OQL] { orders ? total > !{floor} { id, total } | sort -total, id | take 10 | skip 0 })
@@ -137,7 +155,11 @@ presence is the question, ask it explicitly with `exists!(x)` /
 almost always want:
 
 ```dragon
-db.find(template[OQL] { customers { name, tier: vip ?? false } })
+from odb import connect, ODB, Document, OQL
+
+db: ODB = connect("shop.odb")
+
+rows: list[Document] = db.find(template[OQL] { customers { name, tier: vip ?? false } })
 ```
 
 ## Mistakes fail before they run
@@ -147,7 +169,10 @@ field, a type-mismatched comparison, an aggregate outside a block - all are
 `PrepareError` before any document is touched:
 
 ```dragon
+from odb import connect, ODB, OQL
 from odb.errors import PrepareError
+
+db: ODB = connect("shop.odb")
 
 try {
     db.find(template[OQL] { customers ? age == 3 })        # no such field
@@ -172,6 +197,14 @@ report builder. For those, `find` and `run` also accept plain text with
 `$name` parameters, injected as values exactly like `!{}`:
 
 ```dragon
+from odb import connect, ODB, Document
+
+db: ODB = connect("shop.odb")
+
+def load_saved_query() -> str {
+    return "customers ? city == $c { name }"
+}
+
 q: str = load_saved_query()                         # text decided at runtime
 rows: list[Document] = db.find(q, {"c": "Kano"})    # $c inside q is a bound value
 ```

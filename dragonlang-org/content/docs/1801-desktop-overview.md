@@ -12,7 +12,7 @@ bolt on top, in a second language.
 
 Dragon ships a reactive desktop UI in its standard library, written in
 Dragon, rendered through the webview the operating system already ships
-(WebKitGTK on Linux, WKWebView on macOS, WebView2 on Windows). You write
+(WebKitGTK on Linux, WKWebView on macOS; Windows is not yet supported). You write
 one language, you get one native binary, and the renderer is the OS's -
 so your app stays small. The state lives in Dragon `Signal`s, the view is
 a Dragon `HTML` [template](/docs/1201-templates), and the compiler wires

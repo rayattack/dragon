@@ -7,6 +7,10 @@ number of documents affected, and every single call is one atomic
 transaction - including its integrity checks.
 
 ```dragon
+from odb import connect, ODB, OQL
+
+db: ODB = connect("shop.odb")
+
 name: str = "Tunde"
 n: int = db.run(template[OQL] { add customers { id: 4, name: !{name}, email: "t@x.com", city: "Lagos" } })
 print(n)                                   # 1
@@ -25,7 +29,12 @@ document, so counters and derived updates stay in the database - and a bound
 `!{value}` slots into that expression as data:
 
 ```dragon
+from odb import connect, ODB, OQL
+
+db: ODB = connect("shop.odb")
+
 city: str = "Ibadan"
+bump: int = 5
 db.run(template[OQL] { set customers ? id == 4 { city: !{city} } })
 db.run(template[OQL] { set orders ? id == 20 { total: total + !{bump} } })
 ```
@@ -35,6 +44,10 @@ there is no magic null - and unsetting a required field is a prepare-time
 error, because the document would no longer match its schema:
 
 ```dragon
+from odb import connect, ODB, OQL
+
+db: ODB = connect("shop.odb")
+
 db.run(template[OQL] { unset customers ? id == 4 { vip } })
 ```
 
@@ -42,6 +55,13 @@ db.run(template[OQL] { unset customers ? id == 4 { vip } })
 primary key in the new body must match or be absent:
 
 ```dragon
+from odb import connect, ODB, OQL
+
+db: ODB = connect("shop.odb")
+
+name: str = "Tunde"
+email: str = "t@x.com"
+city: str = "Ibadan"
 db.run(template[OQL] { put customers ? id == 4 { id: 4, name: !{name}, email: !{email}, city: !{city} } })
 ```
 
@@ -49,6 +69,10 @@ db.run(template[OQL] { put customers ? id == 4 { id: 4, name: !{name}, email: !{
 commit:
 
 ```dragon
+from odb import connect, ODB, OQL
+
+db: ODB = connect("shop.odb")
+
 status: str = "draft"
 db.run(template[OQL] { del orders ? status == !{status} })
 ```
@@ -61,6 +85,10 @@ inside the block you may reorder freely, even leaving a ref dangling for a
 statement or two:
 
 ```dragon
+from odb import connect, ODB, OQL
+
+db: ODB = connect("shop.odb")
+
 db.run(template[OQL] { atomic {
     add orders { id: 22, customer_id: 4, status: "paid", total: 60 }
     set customers ? id == 4 { city: "Lagos" }
@@ -97,7 +125,10 @@ A refused write rolls back completely. There is no partial state to clean
 up, ever - that is what "integrity at commit" buys:
 
 ```dragon
+from odb import connect, ODB, OQL
 from odb.errors import IntegrityError
+
+db: ODB = connect("shop.odb")
 
 try {
     db.run(template[OQL] { del customers ? id == 4 })   # orders still reference it

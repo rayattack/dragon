@@ -45,6 +45,10 @@ query *text*; it's a bound value compared against the `name` column. You get
 parameterized queries for free, with the readability of an inline literal:
 
 ```dragon
+from database import SQL
+
+user_id: int = 42
+
 # This looks like string interpolation, but it is a safe, parameterized query:
 q: SQL = template[SQL] { select * from orders where customer = !{user_id} }
 ```

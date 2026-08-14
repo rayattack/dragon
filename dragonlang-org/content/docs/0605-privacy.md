@@ -45,6 +45,7 @@ Reach for `__balance` from *outside* the class and the compiler stops you. This
 does **not** compile:
 
 ```dragon
+# doc: no-check
 a: Account = Account()
 a.deposit(100)
 print(a.__balance)   # error

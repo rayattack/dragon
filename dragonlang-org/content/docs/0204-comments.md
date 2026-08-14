@@ -66,11 +66,24 @@ worse than no comment, because it takes time to read and rots out of
 sync with the code.
 
 ```dragon
+def sum_descending(values: list[int]) -> int {
+    total: int = 0
+    for v in values {
+        total += v
+    }
+    return total
+}
+
+i: int = 0
+a: int = 3
+b: int = 4
+values: list[int] = [9, 5, 1]
+
 # bad: restates the code
 i = i + 1                    # increment i
 
 # bad: explains an obvious operation
-total = a + b                # add a and b
+total: int = a + b           # add a and b
 
 # good: hidden constraint a reader couldn't see
 # Dragon's int is 64-bit; values above 2^53 lose precision when round-

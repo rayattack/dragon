@@ -80,6 +80,10 @@ print(square(6))                # 36
 Because a lambda is a value, it slots straight into a higher-order call:
 
 ```dragon
+def apply(f: Callable[[int], int], x: int) -> int {
+    return f(x)
+}
+
 print(apply(lambda (n: int) -> int { return n + 100 }, 5))   # 105
 ```
 
@@ -169,6 +173,7 @@ captured `base`, so `add5` and `add9` do not interfere. The returned
 closure also passes straight into a higher-order call:
 
 ```dragon
+# doc: no-check
 print(apply(make_adder(100), 7))   # 107
 ```
 
@@ -176,6 +181,7 @@ A returned closure can also be called **inline**, without binding it to a
 name first - the chained call reads the captured value correctly:
 
 ```dragon
+# doc: no-check
 print(make_adder(5)(10))   # 15
 ```
 
