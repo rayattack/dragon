@@ -484,7 +484,7 @@ DragonTuple* dragon_tuple_new(int64_t count) {
     // first; the count*elem_size multiply lives inside the trap, not here.
     int64_t* data = count > 0
         ? (int64_t*)dragon_xmalloc_n(count, sizeof(int64_t)) : nullptr;
-    auto* t = (DragonTuple*)malloc(sizeof(DragonTuple));
+    auto* t = (DragonTuple*)dragon_malloc_nullable(sizeof(DragonTuple));
     if (!t) { free(data); dragon_raise_oom(); }
     dragon_obj_init(&t->header, DRAGON_TAG_TUPLE);
     t->length = count;
@@ -616,9 +616,9 @@ static DragonSet* dragon_set_alloc(int64_t cap, uint8_t elem_tag = 0) {
     // Tables allocated before header (OOM longjmp can't strand them); gc_track
     // runs after all three so a raise never hands the collector a half-built set.
     auto* buckets = (int64_t*)dragon_xcalloc_n(cap, sizeof(int64_t));
-    auto* states = (uint8_t*)calloc((size_t)cap, sizeof(uint8_t));
+    auto* states = (uint8_t*)dragon_calloc_nullable((size_t)cap, sizeof(uint8_t));
     if (!states) { free(buckets); dragon_raise_oom(); }
-    auto* s = (DragonSet*)malloc(sizeof(DragonSet));
+    auto* s = (DragonSet*)dragon_malloc_nullable(sizeof(DragonSet));
     if (!s) { free(states); free(buckets); dragon_raise_oom(); }
     dragon_obj_init(&s->header, DRAGON_TAG_SET);
     s->capacity = cap;
@@ -1254,9 +1254,9 @@ DragonBytes* dragon_str_to_utf8_bytes(const char* s) {
     const uint8_t* src = (const uint8_t*)(enc ? enc : (s ? s : ""));
     // enc is a live owned transcode: free it before raising, since the
     // longjmp skips this frame's cleanup.
-    auto* data = (uint8_t*)malloc((size_t)(blen > 0 ? blen : 0) + 1);
+    auto* data = (uint8_t*)dragon_malloc_nullable((size_t)(blen > 0 ? blen : 0) + 1);
     if (!data) { if (enc) free(enc); dragon_raise_oom(); }
-    auto* b = (DragonBytes*)malloc(sizeof(DragonBytes));
+    auto* b = (DragonBytes*)dragon_malloc_nullable(sizeof(DragonBytes));
     if (!b) { free(data); if (enc) free(enc); dragon_raise_oom(); }
     dragon_obj_init(&b->header, DRAGON_TAG_BYTES);
     b->len = blen;
@@ -1621,7 +1621,7 @@ DragonDeque* dragon_deque_new(int64_t maxlen, int64_t elem_tag) {
     if (maxlen >= 0 && maxlen < capacity) capacity = maxlen > 0 ? maxlen : 1;
     // Data before header, so an OOM raise cannot strand the header.
     auto* data = (int64_t*)dragon_xmalloc_n(capacity, sizeof(int64_t));
-    DragonDeque* d = (DragonDeque*)calloc(1, sizeof(DragonDeque));
+    DragonDeque* d = (DragonDeque*)dragon_calloc_nullable(1, sizeof(DragonDeque));
     if (!d) { free(data); dragon_raise_oom(); }
     dragon_obj_init(&d->header, DRAGON_TAG_DEQUE);
     d->data = data;

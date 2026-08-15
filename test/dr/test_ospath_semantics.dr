@@ -3,6 +3,7 @@
 
 from unittest import TestCase, main
 from os.path import join, split, splitext, expandvars
+import os
 
 
 class JoinTests(TestCase) {
@@ -75,4 +76,12 @@ class ExpandvarsTests(TestCase) {
 }
 
 
-main([JoinTests(), SplitPairTests(), ExpandvarsTests()])
+class ShellTests(TestCase) {
+    def test_shell_runs_through_a_shell() {
+        self.assertEqual(os.shell("true"), 0)
+        self.assertNotEqual(os.shell("false"), 0)
+        self.assertEqual(os.shell("echo pipe | grep -q pipe"), 0)
+    }
+}
+
+main([JoinTests(), SplitPairTests(), ExpandvarsTests(), ShellTests()])

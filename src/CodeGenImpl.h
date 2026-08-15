@@ -463,8 +463,6 @@ struct CodeGen::Impl {
     std::unordered_map<std::string, std::unordered_map<std::string, unsigned>> classMethodVtableIndicesBySym;
     // className -> ordered list of method names in vtable order
     std::unordered_map<std::string, std::vector<std::string>> classVtableMethodOrderBySym;
-    // className -> llvm::GlobalVariable* for @ClassName__vtable
-    std::unordered_map<std::string, llvm::GlobalVariable*> classVtables;
 
     // ADR 054 type contracts: coloring assigns every contract method a globally unique
     // vtable slot (base = the largest natural vtable), so a contract call is load-vtable + call-slot on a plain instance pointer. Keys are the ContractDecl* identity (D053), never bare names.

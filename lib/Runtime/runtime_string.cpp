@@ -235,7 +235,7 @@ DragonBytes* dragon_str_encode_ex(const char* s, const char* encoding,
         if (adv <= 0) adv = 1;
         outn++; i += adv;
     }
-    uint8_t* buf = (uint8_t*)malloc(outn > 0 ? (size_t)outn : 1);
+    uint8_t* buf = (uint8_t*)dragon_malloc_nullable(outn > 0 ? (size_t)outn : 1);
     if (!buf) { if (enc) free(enc); dragon_raise_oom(); }
     int64_t w = 0;
     for (int64_t i = 0; i < blen; ) {
@@ -368,7 +368,7 @@ char* dragon_str_to_utf8_alloc(const char* s, int64_t* out_byte_len) {
         dragon_raise_exc_cstr(43, "MemoryError: string too large to encode");
     }
     int64_t max_bytes = ds->len * 4;
-    char* buf = (char*)malloc((size_t)max_bytes + 1);
+    char* buf = (char*)dragon_malloc_nullable((size_t)max_bytes + 1);
     if (!buf) dragon_raise_exc_cstr(43, "MemoryError: out of memory encoding string");
     const uint32_t* cps = (const uint32_t*)ds->data;
     int64_t w = 0;
@@ -560,7 +560,7 @@ const char* dragon_str_append_inplace(const char* a, const char* b) {
                         if (new_cap > 0x7fffffff) new_cap = 0x7fffffff;
                         // realloc into tmp so a NULL return doesn't orphan `da`;
                         // on failure we fall back to the fresh-alloc path (dragon_str_concat) below.
-                        DragonString* tmp = (DragonString*)realloc(
+                        DragonString* tmp = (DragonString*)dragon_realloc_nullable(
                             da, sizeof(DragonString) + (size_t)new_cap + 1);
                         if (tmp) {
                             da = tmp;
@@ -850,7 +850,7 @@ const char* dragon_float_format(double value, const char* spec) {
             char grouped[540];
             dragon_fmt_group(intpart, o.grouping, 3, grouped);
             size_t cap2 = strlen(grouped) + strlen(mag + ilen) + 2;
-            grpbuf = (char*)malloc(cap2);
+            grpbuf = (char*)dragon_malloc_nullable(cap2);
             if (!grpbuf) { free(heapmag); dragon_raise_oom(); }
             snprintf(grpbuf, cap2, "%s%s", grouped, mag + ilen);
             finalmag = grpbuf;
@@ -860,7 +860,7 @@ const char* dragon_float_format(double value, const char* spec) {
     char* withpct = NULL;
     if (percent) {
         size_t cap3 = strlen(finalmag) + 2;
-        withpct = (char*)malloc(cap3);
+        withpct = (char*)dragon_malloc_nullable(cap3);
         if (!withpct) { free(grpbuf); free(heapmag); dragon_raise_oom(); }
         snprintf(withpct, cap3, "%s%%", finalmag);
         finalmag = withpct;

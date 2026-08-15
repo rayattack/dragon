@@ -101,7 +101,7 @@ int dragon_ed25519_verify(DragonBytes* pk, DragonBytes* msg, DragonBytes* sig) {
     // ref10's _open consumes the combined sig||msg and recovers the message.
     unsigned long long smlen = (unsigned long long)mlen + 64;
     unsigned char* sm = (unsigned char*)dragon_xmalloc((size_t)smlen);
-    unsigned char* mout = (unsigned char*)malloc((size_t)smlen);
+    unsigned char* mout = (unsigned char*)dragon_malloc_nullable((size_t)smlen);
     if (!mout) { free(sm); dragon_raise_oom(); }
     memcpy(sm, sig->data, 64);
     if (mlen) memcpy(sm + 64, mp, mlen);

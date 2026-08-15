@@ -11,6 +11,8 @@
 // the BIO callbacks yield to dragon_io_wait_* on EAGAIN (parking a green
 // thread) or fall back to poll() off one, so mbedTLS always sees a "blocking" BIO.
 
+#include "runtime_internal.h"
+
 #include <mbedtls/ssl.h>
 #include <mbedtls/ssl_ciphersuites.h>
 #include <mbedtls/x509_crt.h>
@@ -26,7 +28,6 @@
 #include <cerrno>
 #include <sys/socket.h>
 
-#include "runtime_internal.h"  // DragonString + dragon_string_alloc_raw (recv-str)
 
 // Modern-only policy lists (static storage - mbedTLS keeps the pointers).
 
@@ -159,7 +160,7 @@ void dragon_tls_ctx_free(void* handle) {
 
 // is_server: 0 = client, 1 = server. Returns an opaque ctx ptr, or NULL.
 void* dragon_tls_ctx_new(int64_t is_server) {
-    DragonTlsCtx* c = (DragonTlsCtx*)calloc(1, sizeof(DragonTlsCtx));
+    DragonTlsCtx* c = (DragonTlsCtx*)dragon_calloc_nullable(1, sizeof(DragonTlsCtx));
     if (!c) return nullptr;
     mbedtls_ssl_config_init(&c->conf);
     mbedtls_ctr_drbg_init(&c->drbg);
@@ -285,10 +286,10 @@ void* dragon_tls_conn_new(void* ctx_handle, int64_t fd, const char* server_hostn
                          "ssl: empty server_hostname with CERT_REQUIRED");
         return nullptr;
     }
-    DragonTlsConn* conn = (DragonTlsConn*)calloc(1, sizeof(DragonTlsConn));
+    DragonTlsConn* conn = (DragonTlsConn*)dragon_calloc_nullable(1, sizeof(DragonTlsConn));
     if (!conn) {
-        dragon_raise_exc_cstr(50 /* OSError; SSLError derives from it */,
-                         "ssl: out of memory allocating TLS connection");
+        dragon_raise_exc_cstr(43,
+                         "MemoryError: ssl: out of memory allocating TLS connection");
         return nullptr;
     }
     conn->fd = (int)fd;
@@ -367,7 +368,7 @@ int64_t dragon_tls_write(void* handle, const void* buf, int64_t len) {
 // clean EOF or error, mirroring TcpStream.do_recv's loop-until-empty contract.
 const char* dragon_tls_recv_str(void* handle, int64_t maxlen) {
     if (maxlen <= 0) maxlen = 8192;
-    unsigned char* buf = (unsigned char*)malloc((size_t)maxlen);
+    unsigned char* buf = (unsigned char*)dragon_malloc_nullable((size_t)maxlen);
     if (!buf) {
         // Match the "empty string = EOF/error" contract callers loop on.
         DragonString* ds = dragon_string_alloc_raw(0);

@@ -632,6 +632,14 @@ void CodeGen::Impl::declareRuntimeFunctions() {
     // i64 dragon_set_contains(ptr set, i64 value)
     getOrDeclareRuntime("dragon_set_contains",
         llvm::FunctionType::get(i64Type, {i8PtrType, i64Type}, false));
+    getOrDeclareRuntime("dragon_set_union",
+        llvm::FunctionType::get(i8PtrType, {i8PtrType, i8PtrType}, false));
+    getOrDeclareRuntime("dragon_set_intersection",
+        llvm::FunctionType::get(i8PtrType, {i8PtrType, i8PtrType}, false));
+    getOrDeclareRuntime("dragon_set_difference",
+        llvm::FunctionType::get(i8PtrType, {i8PtrType, i8PtrType}, false));
+    getOrDeclareRuntime("dragon_set_symmetric_difference",
+        llvm::FunctionType::get(i8PtrType, {i8PtrType, i8PtrType}, false));
     // void dragon_set_remove(ptr set, i64 value)
     getOrDeclareRuntime("dragon_set_remove",
         llvm::FunctionType::get(voidType, {i8PtrType, i64Type}, false));

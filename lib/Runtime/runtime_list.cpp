@@ -60,7 +60,7 @@ void dragon_list_append(DragonList* list, int64_t value) {
         int64_t new_cap = list->capacity * 2;
         // Realloc into a temp: on NULL the original buffer is still valid;
         // self-assigning the result would leak the live buffer + NULL-deref.
-        void* tmp = realloc(list->data,
+        void* tmp = dragon_realloc_nullable(list->data,
                             dragon_alloc_bytes_or_abort(new_cap, list->elem_size));
         if (!tmp) { fprintf(stderr, "dragon: out of memory\n"); abort(); }
         list->data = tmp;
@@ -196,7 +196,7 @@ void dragon_list_insert(DragonList* list, int64_t index, int64_t value) {
     if (index > list->size) index = list->size;
     if (list->size >= list->capacity) {
         int64_t new_cap = list->capacity * 2;
-        void* tmp = realloc(list->data,
+        void* tmp = dragon_realloc_nullable(list->data,
                             dragon_alloc_bytes_or_abort(new_cap, list->elem_size));
         if (!tmp) { fprintf(stderr, "dragon: out of memory\n"); abort(); }
         list->data = tmp;
@@ -469,7 +469,8 @@ void dragon_list_sort_ex(DragonList* list, int64_t reverse) {
     if (n > INT64_MAX / 16) {
         dragon_raise_exc_cstr(43, "MemoryError: list too large to sort");
     }
-    int64_t* buf = (int64_t*)malloc((size_t)n * 2 * sizeof(int64_t));
+    int64_t* buf = (int64_t*)dragon_malloc_nullable(
+        dragon_alloc_bytes(n * 2, sizeof(int64_t)));
     if (!buf) {
         dragon_raise_exc_cstr(43, "MemoryError: out of memory sorting list");
     }
@@ -722,7 +723,7 @@ void dragon_list_append_f64(DragonListF64* list, double value) {
     bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     if (list->size >= list->capacity) {
         int64_t new_cap = list->capacity * 2;
-        double* tmp = (double*)realloc(
+        double* tmp = (double*)dragon_realloc_nullable(
             list->data, dragon_alloc_bytes_or_abort(new_cap, sizeof(double)));
         if (!tmp) { fprintf(stderr, "dragon: out of memory\n"); abort(); }
         list->data = tmp;
@@ -804,7 +805,7 @@ void dragon_list_append_ptr(DragonListPtr* list, void* value) {
     bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     if (list->size >= list->capacity) {
         int64_t new_cap = list->capacity * 2;
-        void** tmp = (void**)realloc(
+        void** tmp = (void**)dragon_realloc_nullable(
             list->data, dragon_alloc_bytes_or_abort(new_cap, sizeof(void*)));
         if (!tmp) { fprintf(stderr, "dragon: out of memory\n"); abort(); }
         list->data = tmp;
@@ -972,7 +973,7 @@ void dragon_list_box_append(DragonListBox* list, int64_t tag, int64_t payload) {
     bool mut_armed = dragon_shared_mut_begin(&list->header, "list");
     if (list->size >= list->capacity) {
         int64_t new_cap = list->capacity * 2;
-        DragonListBoxElem* tmp = (DragonListBoxElem*)realloc(list->data,
+        DragonListBoxElem* tmp = (DragonListBoxElem*)dragon_realloc_nullable(list->data,
             dragon_alloc_bytes_or_abort(new_cap, sizeof(DragonListBoxElem)));
         if (!tmp) { fprintf(stderr, "dragon: out of memory\n"); abort(); }
         list->data = tmp;
@@ -1092,7 +1093,7 @@ void dragon_list_box_insert(DragonListBox* list, int64_t index, int64_t tag, int
     if (index > list->size) index = list->size;
     if (list->size >= list->capacity) {
         int64_t new_cap = list->capacity * 2;
-        DragonListBoxElem* tmp = (DragonListBoxElem*)realloc(list->data,
+        DragonListBoxElem* tmp = (DragonListBoxElem*)dragon_realloc_nullable(list->data,
             dragon_alloc_bytes_or_abort(new_cap, sizeof(DragonListBoxElem)));
         if (!tmp) { fprintf(stderr, "dragon: out of memory\n"); abort(); }
         list->data = tmp;

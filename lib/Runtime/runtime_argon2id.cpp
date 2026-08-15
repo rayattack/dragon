@@ -544,7 +544,7 @@ DragonBytes* dragon_argon2id_raw(DragonBytes* pwd, DragonBytes* salt,
     uint32_t memory_blocks = segment_length * p * ARGON2_SYNC_POINTS;
     uint32_t lane_length = segment_length * ARGON2_SYNC_POINTS;
 
-    block* memory = (block*)calloc(memory_blocks, sizeof(block));
+    block* memory = (block*)dragon_calloc_nullable(memory_blocks, sizeof(block));
     if (!memory) {
         dragon_raise_exc_cstr(43, "MemoryError: argon2id: out of memory");
         return nullptr;
@@ -605,7 +605,7 @@ DragonBytes* dragon_argon2id_raw(DragonBytes* pwd, DragonBytes* salt,
     for (int i = 0; i < ARGON2_QWORDS_IN_BLOCK; i++)
         store64(final_bytes + i * 8, final_block.v[i]);
 
-    uint8_t* tag = (uint8_t*)malloc(outlen);
+    uint8_t* tag = (uint8_t*)dragon_malloc_nullable(outlen);
     if (!tag) {
         argon2_secure_zero(memory, (size_t)memory_blocks * sizeof(block));
         free(memory);

@@ -1360,6 +1360,46 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
         }
     }
 
+    if (objType->kind() == Type::Kind::Set) {
+        auto& st = static_cast<SetType&>(*objType);
+        auto setT = std::make_shared<SetType>(st.elementType);
+        if (node.attribute == "union" || node.attribute == "intersection" ||
+            node.attribute == "difference" ||
+            node.attribute == "symmetric_difference") {
+            node.type = std::make_shared<FunctionType>(
+                std::vector<std::shared_ptr<Type>>{setT}, setT);
+            return;
+        }
+        if (node.attribute == "copy") {
+            node.type = std::make_shared<FunctionType>(
+                std::vector<std::shared_ptr<Type>>{}, setT);
+            return;
+        }
+        if (node.attribute == "add" || node.attribute == "remove" ||
+            node.attribute == "discard") {
+            node.type = std::make_shared<FunctionType>(
+                std::vector<std::shared_ptr<Type>>{st.elementType},
+                impl_->noneType);
+            return;
+        }
+        if (node.attribute == "clear") {
+            node.type = std::make_shared<FunctionType>(
+                std::vector<std::shared_ptr<Type>>{}, impl_->noneType);
+            return;
+        }
+        if (node.attribute == "issubset" || node.attribute == "issuperset" ||
+            node.attribute == "isdisjoint") {
+            node.type = std::make_shared<FunctionType>(
+                std::vector<std::shared_ptr<Type>>{setT}, impl_->boolType);
+            return;
+        }
+        if (node.attribute == "pop") {
+            node.type = std::make_shared<FunctionType>(
+                std::vector<std::shared_ptr<Type>>{}, st.elementType);
+            return;
+        }
+    }
+
     // Dict methods
     if (objType->kind() == Type::Kind::Dict) {
         auto& dt = static_cast<DictType&>(*objType);
@@ -1621,11 +1661,11 @@ void TypeChecker::visit(DictExpr& node) {
 void TypeChecker::visit(SetExpr& node) {
     if (node.elements.empty()) {
         if (!node.type || node.type->kind() == Type::Kind::Unknown)
-            node.type = std::make_shared<ListType>(impl_->unknownType);
+            node.type = std::make_shared<SetType>(impl_->unknownType);
         return;
     }
     for (auto& e : node.elements) inferType(e.get());
-    node.type = std::make_shared<ListType>(
+    node.type = std::make_shared<SetType>(
         unifyLiteralElements(node.elements, impl_->unknownType));
 }
 
@@ -1637,6 +1677,9 @@ static std::shared_ptr<Type> iterableElementType(
     if (!iter) return unknown;
     if (iter->kind() == Type::Kind::List) {
         return static_cast<ListType&>(*iter).elementType;
+    }
+    if (iter->kind() == Type::Kind::Set) {
+        return static_cast<SetType&>(*iter).elementType;
     }
     if (iter->kind() == Type::Kind::Dict) {
         return static_cast<DictType&>(*iter).keyType;
@@ -1714,11 +1757,10 @@ void TypeChecker::visit(SetCompExpr& node) {
     if (node.condition) inferType(node.condition.get());
     checkCompExtraClauses(node.extraClauses);
     if (node.element) {
-        inferType(node.element.get());
+        node.type = std::make_shared<SetType>(inferType(node.element.get()));
+    } else {
+        node.type = std::make_shared<SetType>(impl_->unknownType);
     }
-    // Set type is unparameterized today - the element kind is exercised but
-    // not surfaced in the result type.
-    node.type = impl_->unknownType;
     impl_->popScope();
 }
 

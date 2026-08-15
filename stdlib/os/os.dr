@@ -600,7 +600,7 @@ def egid() -> int {
     return getegid()
 }
 
-def run(cmd: str) -> int {
+def shell(cmd: str) -> int {
     return system(cmd)
 }
 

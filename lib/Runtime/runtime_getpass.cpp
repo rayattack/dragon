@@ -11,6 +11,8 @@
   #endif
 #endif
 
+#include "runtime_internal.h"
+
 #include <cstring>
 #include <cstdlib>
 #include <cstdint>

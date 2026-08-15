@@ -320,7 +320,7 @@ static size_t dragon_md_digest(mbedtls_md_type_t mdt, const unsigned char* msg,
 // to INCLUDE that terminator. DragonBytes need not be, so copy. Caller frees.
 static unsigned char* dragon_pem_dup(DragonBytes* b, size_t* outlen) {
     size_t n = b ? (size_t)b->len : 0;
-    unsigned char* buf = (unsigned char*)malloc(n + 1);
+    unsigned char* buf = (unsigned char*)dragon_malloc_nullable(n + 1);
     if (!buf) { *outlen = 0; return nullptr; }
     if (n && b->data) memcpy(buf, b->data, n);
     buf[n] = 0;
@@ -446,7 +446,7 @@ DragonBytes* dragon_aes_gcm_encrypt(DragonBytes* key, DragonBytes* nonce,
         return nullptr;
     }
     size_t ptlen = dragon_b_len(pt);
-    unsigned char* out = (unsigned char*)malloc(ptlen + DRAGON_AEAD_TAG);
+    unsigned char* out = (unsigned char*)dragon_malloc_nullable(ptlen + DRAGON_AEAD_TAG);
     if (!out) {
         mbedtls_gcm_free(&ctx);
         dragon_raise_exc_cstr(43, "MemoryError: aes_gcm: out of memory");
@@ -489,7 +489,7 @@ DragonBytes* dragon_aes_gcm_decrypt(DragonBytes* key, DragonBytes* nonce,
     }
     const unsigned char* base = dragon_b_ptr(ct);
     size_t out_capacity = ptlen ? ptlen : 1;
-    unsigned char* out = (unsigned char*)malloc(out_capacity);
+    unsigned char* out = (unsigned char*)dragon_malloc_nullable(out_capacity);
     if (!out) {
         mbedtls_gcm_free(&ctx);
         dragon_raise_exc_cstr(43, "MemoryError: aes_gcm: out of memory");
@@ -527,7 +527,7 @@ DragonBytes* dragon_chacha20poly1305_encrypt(DragonBytes* key, DragonBytes* nonc
         return nullptr;
     }
     size_t ptlen = dragon_b_len(pt);
-    unsigned char* out = (unsigned char*)malloc(ptlen + DRAGON_AEAD_TAG);
+    unsigned char* out = (unsigned char*)dragon_malloc_nullable(ptlen + DRAGON_AEAD_TAG);
     if (!out) {
         mbedtls_chachapoly_free(&ctx);
         dragon_raise_exc_cstr(43, "MemoryError: chacha20poly1305: out of memory");
@@ -565,7 +565,7 @@ DragonBytes* dragon_chacha20poly1305_decrypt(DragonBytes* key, DragonBytes* nonc
     }
     const unsigned char* base = dragon_b_ptr(ct);
     size_t out_capacity = ptlen ? ptlen : 1;
-    unsigned char* out = (unsigned char*)malloc(out_capacity);
+    unsigned char* out = (unsigned char*)dragon_malloc_nullable(out_capacity);
     if (!out) {
         mbedtls_chachapoly_free(&ctx);
         dragon_raise_exc_cstr(43, "MemoryError: chacha20poly1305: out of memory");

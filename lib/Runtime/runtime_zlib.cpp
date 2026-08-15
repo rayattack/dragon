@@ -33,7 +33,8 @@ DragonBytes* dragon_zlib_compress(DragonBytes* src, int64_t level) {
     s.avail_in = (uInt)src->len;
     // deflateBound is exact for single-call Z_FINISH: allocate once, no realloc.
     uLong cap = deflateBound(&s, (uLong)src->len);
-    uint8_t* buf = (uint8_t*)std::malloc(cap > 0 ? cap : 1);
+    uint8_t* buf = (uint8_t*)dragon_malloc_nullable(cap > 0 ? cap : 1);
+    if (!buf) { deflateEnd(&s); dragon_raise_oom(); }
     s.next_out = buf;
     s.avail_out = (uInt)cap;
     int ret = deflate(&s, Z_FINISH);
@@ -67,10 +68,10 @@ DragonBytes* dragon_zlib_decompress(DragonBytes* src) {
     size_t cap = (size_t)src->len * 4;
     if (cap < 4096) cap = 4096;
     if ((int64_t)cap > DRAGON_ZLIB_MAX_OUTPUT) cap = (size_t)DRAGON_ZLIB_MAX_OUTPUT;
-    uint8_t* buf = (uint8_t*)std::malloc(cap);
+    uint8_t* buf = (uint8_t*)dragon_malloc_nullable(cap);
     if (!buf) {
         inflateEnd(&s);
-        dragon_raise_exc_cstr(50, "zlib: out of memory while decompressing");
+        dragon_raise_exc_cstr(43, "MemoryError: zlib: out of memory while decompressing");
         return nullptr;
     }
     size_t used = 0;
@@ -95,11 +96,11 @@ DragonBytes* dragon_zlib_decompress(DragonBytes* src) {
                 size_t newCap = cap * 2;
                 if ((int64_t)newCap > DRAGON_ZLIB_MAX_OUTPUT)
                     newCap = (size_t)DRAGON_ZLIB_MAX_OUTPUT;
-                uint8_t* nbuf = (uint8_t*)std::realloc(buf, newCap);
+                uint8_t* nbuf = (uint8_t*)dragon_realloc_nullable(buf, newCap);
                 if (!nbuf) {
                     inflateEnd(&s);
                     std::free(buf);
-                    dragon_raise_exc_cstr(50, "zlib: out of memory while decompressing");
+                    dragon_raise_exc_cstr(43, "MemoryError: zlib: out of memory while decompressing");
                     return nullptr;
                 }
                 buf = nbuf;
@@ -119,11 +120,11 @@ DragonBytes* dragon_zlib_decompress(DragonBytes* src) {
             size_t newCap = cap * 2;
             if ((int64_t)newCap > DRAGON_ZLIB_MAX_OUTPUT)
                 newCap = (size_t)DRAGON_ZLIB_MAX_OUTPUT;
-            uint8_t* nbuf = (uint8_t*)std::realloc(buf, newCap);
+            uint8_t* nbuf = (uint8_t*)dragon_realloc_nullable(buf, newCap);
             if (!nbuf) {
                 inflateEnd(&s);
                 std::free(buf);
-                dragon_raise_exc_cstr(50, "zlib: out of memory while decompressing");
+                dragon_raise_exc_cstr(43, "MemoryError: zlib: out of memory while decompressing");
                 return nullptr;
             }
             buf = nbuf;
@@ -158,7 +159,8 @@ DragonBytes* dragon_zlib_compress_raw(DragonBytes* src, int64_t level) {
     s.next_in = (Bytef*)src->data;
     s.avail_in = (uInt)src->len;
     uLong cap = deflateBound(&s, (uLong)src->len);
-    uint8_t* buf = (uint8_t*)std::malloc(cap > 0 ? cap : 1);
+    uint8_t* buf = (uint8_t*)dragon_malloc_nullable(cap > 0 ? cap : 1);
+    if (!buf) { deflateEnd(&s); dragon_raise_oom(); }
     s.next_out = buf;
     s.avail_out = (uInt)cap;
     int ret = deflate(&s, Z_FINISH);
@@ -190,10 +192,10 @@ DragonBytes* dragon_zlib_decompress_raw(DragonBytes* src) {
     size_t cap = (size_t)src->len * 4;
     if (cap < 4096) cap = 4096;
     if ((int64_t)cap > DRAGON_ZLIB_MAX_OUTPUT) cap = (size_t)DRAGON_ZLIB_MAX_OUTPUT;
-    uint8_t* buf = (uint8_t*)std::malloc(cap);
+    uint8_t* buf = (uint8_t*)dragon_malloc_nullable(cap);
     if (!buf) {
         inflateEnd(&s);
-        dragon_raise_exc_cstr(50, "zlib: out of memory while decompressing");
+        dragon_raise_exc_cstr(43, "MemoryError: zlib: out of memory while decompressing");
         return nullptr;
     }
     size_t used = 0;
@@ -217,11 +219,11 @@ DragonBytes* dragon_zlib_decompress_raw(DragonBytes* src) {
                 size_t newCap = cap * 2;
                 if ((int64_t)newCap > DRAGON_ZLIB_MAX_OUTPUT)
                     newCap = (size_t)DRAGON_ZLIB_MAX_OUTPUT;
-                uint8_t* nbuf = (uint8_t*)std::realloc(buf, newCap);
+                uint8_t* nbuf = (uint8_t*)dragon_realloc_nullable(buf, newCap);
                 if (!nbuf) {
                     inflateEnd(&s);
                     std::free(buf);
-                    dragon_raise_exc_cstr(50, "zlib: out of memory while decompressing");
+                    dragon_raise_exc_cstr(43, "MemoryError: zlib: out of memory while decompressing");
                     return nullptr;
                 }
                 buf = nbuf;
@@ -239,11 +241,11 @@ DragonBytes* dragon_zlib_decompress_raw(DragonBytes* src) {
             size_t newCap = cap * 2;
             if ((int64_t)newCap > DRAGON_ZLIB_MAX_OUTPUT)
                 newCap = (size_t)DRAGON_ZLIB_MAX_OUTPUT;
-            uint8_t* nbuf = (uint8_t*)std::realloc(buf, newCap);
+            uint8_t* nbuf = (uint8_t*)dragon_realloc_nullable(buf, newCap);
             if (!nbuf) {
                 inflateEnd(&s);
                 std::free(buf);
-                dragon_raise_exc_cstr(50, "zlib: out of memory while decompressing");
+                dragon_raise_exc_cstr(43, "MemoryError: zlib: out of memory while decompressing");
                 return nullptr;
             }
             buf = nbuf;

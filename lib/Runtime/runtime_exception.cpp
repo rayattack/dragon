@@ -224,12 +224,16 @@ static inline int dragon_cleanup_active_exc_sp() {
 }
 
 static void dragon_cleanup_grow(DragonCleanupStack* cs) {
+    if (cs->cap > INT32_MAX / 2) {
+        fprintf(stderr, "dragon: cleanup stack exceeds int32 capacity\n");
+        abort();
+    }
     int32_t newcap = cs->cap ? cs->cap * 2 : 64;
     // Abort (not raise) on OOM: this IS the exception machinery, so raising would re-enter the
     // unwind mid-failure. xrealloc_or_abort aborts before NULL can land in the field on failure.
-    cs->vals  = (int64_t*) dragon_xrealloc_or_abort(cs->vals,  (size_t)newcap * sizeof(int64_t));
-    cs->kinds = (int32_t*) dragon_xrealloc_or_abort(cs->kinds, (size_t)newcap * sizeof(int32_t));
-    cs->tags  = (int32_t*) dragon_xrealloc_or_abort(cs->tags,  (size_t)newcap * sizeof(int32_t));
+    cs->vals  = (int64_t*) dragon_xrealloc_n_or_abort(cs->vals,  newcap, sizeof(int64_t));
+    cs->kinds = (int32_t*) dragon_xrealloc_n_or_abort(cs->kinds, newcap, sizeof(int32_t));
+    cs->tags  = (int32_t*) dragon_xrealloc_n_or_abort(cs->tags,  newcap, sizeof(int32_t));
     cs->cap = newcap;
 }
 

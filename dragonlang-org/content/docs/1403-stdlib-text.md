@@ -36,7 +36,7 @@ the pattern, runs it, and frees it for you:
 ```dragon
 import re
 
-print(re.match("h.llo", "hello world"))    # 1
+print(re.match("h.llo", "hello world"))    # True
 print(re.search("[0-9]+", "order 42 ready"))   # 42
 print(re.findall("[0-9]+", "1 a 22 b 333"))    # ['1', '22', '333']
 print(re.split(",", "a,b,c"))               # ['a', 'b', 'c']
@@ -45,9 +45,11 @@ print(re.sub("[0-9]+", "#", "a1b22c"))      # a#b#c
 
 The signatures are:
 
-- `re.match(pattern: str, subject: str) -> int` - anchored match at the
-  start of `subject`. Returns the PCRE2 group count (`1` for a match
-  with no captures, `n+1` with `n` captures), or `-1` on no match. It
+- `re.match(pattern: str, subject: str) -> bool` - anchored match at the
+  start of `subject`. Returns `True` on a match and `False` on no match;
+  a genuine PCRE2 failure (for example the backtracking limit being
+  exhausted by a pathological pattern) raises `re.error` instead of
+  being folded into "no match". It
   is a count, **not** a boolean and **not** a `Match` - test it with
   `>= 1`.
 - `re.search(pattern: str, subject: str) -> str` - the first matching
@@ -66,8 +68,8 @@ called - `match` returns a negative `int`, `search` returns an empty
 ```dragon
 import re
 
-print(re.match("zzz", "abc"))            # -1  (no match)
-print(re.match("a", "abc"))              # 1   (matched, no groups)
+print(re.match("zzz", "abc"))            # False  (no match)
+print(re.match("a", "abc"))              # True
 print(f"[{re.search('zzz', 'abc')}]")    # []  (no match -> "")
 ```
 
@@ -85,7 +87,7 @@ is the whole match):
 import re
 
 const p: re.Pattern = re.compile("([a-z]+)=([0-9]+)")
-print(p.match("port=8080"))         # 3  (whole match + 2 groups)
+print(p.match("port=8080"))         # True
 print(p.find("the port=8080 ok"))   # port=8080  (whole match text)
 print(p.group("port=8080", 1))      # port  (first capture)
 print(p.group("port=8080", 2))      # 8080  (second capture)
@@ -94,8 +96,7 @@ p.destroy()
 
 The `Pattern` methods are:
 
-- `p.match(subject) -> int` - same count/-1 semantics as the module
-  `re.match`.
+- `p.match(subject) -> bool` - same semantics as the module `re.match`.
 - `p.find(subject) -> str` - the whole matched text (the module
   `re.search` is a wrapper over this), `""` on no match.
 - `p.group(subject, index: int) -> str` - the text of capture group
@@ -124,8 +125,8 @@ lookup is not exposed through the current externs, so only numeric group
 references expand.
 
 > **Differs from Python.** There is no `Match` object anywhere in this
-> module. `re.match` returns an `int` group-count (test `>= 1`), not a
-> truthy/`None` `Match`. `re.search` returns the matched **string**, not
+> module. `re.match` returns a plain `bool`, so `if re.match(...)` reads
+> exactly like Python. `re.search` returns the matched **string**, not
 > a `Match` - read captures with a compiled `Pattern.group(subject, n)`.
 > `re.findall` always returns the **whole** match even when the pattern
 > has capture groups (Python returns the captured groups instead), so
@@ -316,7 +317,7 @@ The signatures are:
 
 | You want to... | Write |
 |----------------|-------|
-| Test a pattern at the start | `if re.match(pat, s) >= 1 { ... }` |
+| Test a pattern at the start | `if re.match(pat, s) { ... }` |
 | Find the first match's text | `hit: str = re.search(pat, s)` |
 | Find every match | `all: list[str] = re.findall(pat, s)` |
 | Replace matches | `out: str = re.sub(pat, repl, s)` |

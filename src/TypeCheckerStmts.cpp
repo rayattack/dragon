@@ -645,6 +645,8 @@ void TypeChecker::visit(ForStmt& node) {
     if (auto* name = dynamic_cast<NameExpr*>(node.target.get())) {
         if (iterType->kind() == Type::Kind::List) {
             impl_->define(name->name, static_cast<ListType&>(*iterType).elementType);
+        } else if (iterType->kind() == Type::Kind::Set) {
+            impl_->define(name->name, static_cast<SetType&>(*iterType).elementType);
         } else {
             impl_->define(name->name, impl_->unknownType);
         }

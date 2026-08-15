@@ -99,10 +99,10 @@ DragonList* dragon_subprocess_spawn(DragonList* argv, int cap_in, int cap_out,
     // Marshal argv (same pattern as dragon_execvp), in the PARENT: malloc isn't async-signal-safe
     // between fork and exec, so the vector is built before forking and reaches the child via copy-on-write.
     int n = (int)dragon_list_len(argv);
-    char** args = (char**)malloc((size_t)(n + 1) * sizeof(char*));
+    char** args = (char**)dragon_malloc_nullable((size_t)(n + 1) * sizeof(char*));
     // Parallel array of UTF-8 temporaries we own and must free: owned[i] is non-NULL only when arg i needed
     // encoding, else NULL and args[i] borrows the DragonString bytes. calloc'd so an early-exit free is safe.
-    char** owned = (char**)calloc((size_t)(n > 0 ? n : 1), sizeof(char*));
+    char** owned = (char**)dragon_calloc_nullable((size_t)(n > 0 ? n : 1), sizeof(char*));
     if (!args || !owned) {
         int e = ENOMEM;
         free(args); free(owned);
@@ -224,13 +224,12 @@ DragonBytes* dragon_subprocess_drain(int fd) {
     if (fd < 0) return dragon_bytes_new((const uint8_t*)"", 0);
     size_t cap = 4096;
     size_t len = 0;
-    uint8_t* buf = (uint8_t*)malloc(cap);
-    if (!buf) return dragon_bytes_new((const uint8_t*)"", 0);
+    uint8_t* buf = (uint8_t*)dragon_xmalloc(cap);
     for (;;) {
         if (len == cap) {
             size_t ncap = cap * 2;
-            uint8_t* nbuf = (uint8_t*)realloc(buf, ncap);
-            if (!nbuf) { free(buf); return dragon_bytes_new((const uint8_t*)"", 0); }
+            uint8_t* nbuf = (uint8_t*)dragon_realloc_nullable(buf, ncap);
+            if (!nbuf) { free(buf); dragon_raise_oom(); }
             buf = nbuf;
             cap = ncap;
         }
@@ -357,7 +356,7 @@ static bool pumpbuf_append(PumpBuf* b, const uint8_t* src, size_t n) {
     if (b->len + n > b->cap) {
         size_t ncap = b->cap ? b->cap : 4096;
         while (ncap < b->len + n) ncap *= 2;
-        uint8_t* nbuf = (uint8_t*)realloc(b->buf, ncap);
+        uint8_t* nbuf = (uint8_t*)dragon_realloc_nullable(b->buf, ncap);
         if (!nbuf) return false;
         b->buf = nbuf;
         b->cap = ncap;
@@ -538,7 +537,7 @@ DragonBytes* dragon_subprocess_read_n(int fd, int64_t n) {
     return dragon_bytes_new((const uint8_t*)"", 0);
 #else
     if (fd < 0 || n <= 0) return dragon_bytes_new((const uint8_t*)"", 0);
-    uint8_t* buf = (uint8_t*)malloc((size_t)n);
+    uint8_t* buf = (uint8_t*)dragon_malloc_nullable((size_t)n);
     if (!buf) return dragon_bytes_new((const uint8_t*)"", 0);
     size_t got = 0;
     struct pollfd pf;

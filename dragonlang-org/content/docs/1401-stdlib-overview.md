@@ -58,8 +58,9 @@ prominent are:
   known shapes at bytes). It also ships a JSON Schema
   validator (the `Schema` class: register named schemas, validate by
   name, compose with `$ref`) with no CPython-stdlib counterpart.
-- **`re.match`/`re.search`** return an `int` index (or `-1`), not a
-  `Match` object; captures come from a `Pattern` API.
+- **`re.match`** returns a `bool` and **`re.search`** returns the matched
+  text (`""` for no match), not a `Match` object; captures come from a
+  `Pattern` API.
 - **`csv`** exposes `parse_row`/`format_row` with an explicit delimiter,
   not Python's `reader`/`writer` objects.
 - **`tomllib.loads`** returns a typed `TomlDoc` with dotted-key

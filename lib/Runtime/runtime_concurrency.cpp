@@ -529,7 +529,7 @@ static void scheduler_init() {
         if (n > 0) ncpu = n;
     }
     __scheduler->num_workers = (int)ncpu;
-    __scheduler->workers = (pthread_t*)calloc(ncpu, sizeof(pthread_t));
+    __scheduler->workers = (pthread_t*)dragon_xcalloc_n_or_abort(ncpu, sizeof(pthread_t));
     for (int i = 0; i < __scheduler->num_workers; i++) {
         pthread_create(&__scheduler->workers[i], NULL, scheduler_worker, NULL);
     }
@@ -554,7 +554,13 @@ DragonVThread* dragon_vthread_spawn_typed(
     // Heap-copy the codegen-built args struct so it outlives the spawn call.
     void* heap_args = NULL;
     if (args_size > 0 && args) {
-        heap_args = malloc((size_t)args_size);
+        heap_args = dragon_malloc_nullable((size_t)args_size);
+        if (!heap_args) {
+            pthread_mutex_destroy(&vt->join_lock);
+            pthread_cond_destroy(&vt->join_cond);
+            free(vt);
+            dragon_raise_oom();
+        }
         memcpy(heap_args, args, (size_t)args_size);
         // Patch field 0 (DragonVThread*) so the trampoline can store the result.
         *(DragonVThread**)heap_args = vt;

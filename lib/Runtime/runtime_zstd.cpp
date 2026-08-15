@@ -19,7 +19,8 @@ extern "C" {
 DragonBytes* dragon_zstd_compress(DragonBytes* src, int64_t level) {
     if (!src || src->len == 0) return dragon_bytes_new(nullptr, 0);
     size_t cap = ZSTD_compressBound((size_t)src->len);
-    uint8_t* buf = (uint8_t*)std::malloc(cap);
+    uint8_t* buf = (uint8_t*)dragon_malloc_nullable(cap);
+    if (!buf) { dragon_raise_exc_cstr(43, "MemoryError: zstd: out of memory"); return nullptr; }
     size_t outLen = ZSTD_compress(buf, cap, src->data,
                                    (size_t)src->len, (int)level);
     if (ZSTD_isError(outLen)) {
@@ -47,9 +48,9 @@ DragonBytes* dragon_zstd_decompress(DragonBytes* src) {
             dragon_raise_exc_cstr(50, "zstd: decompressed output exceeds maximum size");
             return nullptr;
         }
-        uint8_t* buf = (uint8_t*)std::malloc(expected > 0 ? expected : 1);
+        uint8_t* buf = (uint8_t*)dragon_malloc_nullable(expected > 0 ? expected : 1);
         if (!buf) {
-            dragon_raise_exc_cstr(50, "zstd: out of memory");
+            dragon_raise_exc_cstr(43, "MemoryError: zstd: out of memory");
             return nullptr;
         }
         size_t actual = ZSTD_decompress(buf, (size_t)expected,
@@ -84,10 +85,10 @@ DragonBytes* dragon_zstd_decompress(DragonBytes* src) {
     }
     size_t outBlock = ZSTD_DStreamOutSize();
     size_t cap = outBlock;
-    uint8_t* buf = (uint8_t*)std::malloc(cap);
+    uint8_t* buf = (uint8_t*)dragon_malloc_nullable(cap);
     if (!buf) {
         ZSTD_freeDStream(ds);
-        dragon_raise_exc_cstr(50, "zstd: out of memory");
+        dragon_raise_exc_cstr(43, "MemoryError: zstd: out of memory");
         return nullptr;
     }
     size_t used = 0;
@@ -107,11 +108,11 @@ DragonBytes* dragon_zstd_decompress(DragonBytes* src) {
             size_t newCap = cap * 2;
             if ((int64_t)newCap > DRAGON_ZSTD_MAX_OUTPUT)
                 newCap = (size_t)DRAGON_ZSTD_MAX_OUTPUT;
-            uint8_t* nbuf = (uint8_t*)std::realloc(buf, newCap);
+            uint8_t* nbuf = (uint8_t*)dragon_realloc_nullable(buf, newCap);
             if (!nbuf) {
                 ZSTD_freeDStream(ds);
                 std::free(buf);
-                dragon_raise_exc_cstr(50, "zstd: out of memory");
+                dragon_raise_exc_cstr(43, "MemoryError: zstd: out of memory");
                 return nullptr;
             }
             buf = nbuf;

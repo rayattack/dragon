@@ -27,6 +27,17 @@ extern "C" def dragon_string_alloc(src: ptr, byte_len: int) -> str
 
 class error(Exception) {}
 
+def _raise_match_error(rc: int) -> None {
+    const buf: ptr = malloc(256)
+    const mlen: int = pcre2_get_error_message_8(rc, buf, 256)
+    msg: str = f"pcre2 match error {rc}"
+    if mlen > 0 {
+        msg = dragon_string_alloc(buf, mlen)
+    }
+    free(buf)
+    raise error(msg)
+}
+
 const PCRE2_CASELESS: int = 1
 const PCRE2_MULTILINE: int = 2
 const PCRE2_DOTALL: int = 4
@@ -55,11 +66,14 @@ class Pattern {
         }
     }
 
-    def match(subject: str) -> int {
+    def match(subject: str) -> bool {
         const md: ptr = pcre2_match_data_create_from_pattern_8(self.code, none)
         const rc: int = pcre2_match_8(self.code, subject, len(subject), 0, 0, md, none)
         pcre2_match_data_free_8(md)
-        return rc
+        if rc < -1 {
+            _raise_match_error(rc)
+        }
+        return rc >= 1
     }
 
     def find(subject: str) -> str {
@@ -67,6 +81,9 @@ class Pattern {
         const rc: int = pcre2_match_8(self.code, subject, len(subject), 0, 0, md, none)
         if rc < 1 {
             pcre2_match_data_free_8(md)
+            if rc < -1 {
+                _raise_match_error(rc)
+            }
             return ""
         }
         const ovector: ptr = pcre2_get_ovector_pointer_8(md)
@@ -80,6 +97,9 @@ class Pattern {
         const rc: int = pcre2_match_8(self.code, subject, len(subject), 0, 0, md, none)
         if rc < 1 {
             pcre2_match_data_free_8(md)
+            if rc < -1 {
+                _raise_match_error(rc)
+            }
             return ""
         }
         const ovector: ptr = pcre2_get_ovector_pointer_8(md)
@@ -96,6 +116,10 @@ class Pattern {
         while offset < slen {
             const rc: int = pcre2_match_8(self.code, subject, slen, offset, 0, md, none)
             if rc < 1 {
+                if rc < -1 {
+                    pcre2_match_data_free_8(md)
+                    _raise_match_error(rc)
+                }
                 break
             }
             const ovector: ptr = pcre2_get_ovector_pointer_8(md)
@@ -120,6 +144,10 @@ class Pattern {
         while offset <= slen {
             const rc: int = pcre2_match_8(self.code, subject, slen, offset, 0, md, none)
             if rc < 1 {
+                if rc < -1 {
+                    pcre2_match_data_free_8(md)
+                    _raise_match_error(rc)
+                }
                 # No more matches - add remainder
                 parts.append(subject[offset:])
                 break
@@ -213,6 +241,10 @@ class Pattern {
         while offset < slen {
             const rc: int = pcre2_match_8(self.code, subject, slen, offset, 0, md, none)
             if rc < 1 {
+                if rc < -1 {
+                    pcre2_match_data_free_8(md)
+                    _raise_match_error(rc)
+                }
                 break
             }
             const ovector: ptr = pcre2_get_ovector_pointer_8(md)
@@ -240,37 +272,32 @@ def compile(pattern: str) -> Pattern {
     return Pattern(pattern)
 }
 
-def match(pattern: str, subject: str) -> int {
+def match(pattern: str, subject: str) -> bool {
     const p: Pattern = compile(pattern)
-    const rc: int = p.match(subject)
-    p.destroy()
-    return rc
+    defer p.destroy()
+    return p.match(subject)
 }
 
 def search(pattern: str, subject: str) -> str {
     const p: Pattern = compile(pattern)
-    const result: str = p.find(subject)
-    p.destroy()
-    return result
+    defer p.destroy()
+    return p.find(subject)
 }
 
 def findall(pattern: str, subject: str) -> list[str] {
     const p: Pattern = compile(pattern)
-    const results: list[str] = p.findall(subject)
-    p.destroy()
-    return results
+    defer p.destroy()
+    return p.findall(subject)
 }
 
 def split(pattern: str, subject: str) -> list[str] {
     const p: Pattern = compile(pattern)
-    const parts: list[str] = p.split(subject)
-    p.destroy()
-    return parts
+    defer p.destroy()
+    return p.split(subject)
 }
 
 def sub(pattern: str, replacement: str, subject: str) -> str {
     const p: Pattern = compile(pattern)
-    const result: str = p.sub(replacement, subject)
-    p.destroy()
-    return result
+    defer p.destroy()
+    return p.sub(replacement, subject)
 }

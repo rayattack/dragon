@@ -89,6 +89,7 @@ def random() -> float {
 def randint(a: int, b: int) -> int {
     # Returns a random integer N such that a <= N <= b
     _ensure_seeded()
+    if b < a { raise ValueError(f"empty range in randint({a}, {b})") }
     const range: int = b - a + 1
     return a + rand() % range
 }

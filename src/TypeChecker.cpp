@@ -140,6 +140,28 @@ bool ListType::isSubtypeOf(const Type& other) const {
     return false;
 }
 
+std::string SetType::toString() const {
+    return "set[" + elementType->toString() + "]";
+}
+
+bool SetType::equals(const Type& other) const {
+    if (other.kind() != Kind::Set) return false;
+    return elementType->equals(*static_cast<const SetType&>(other).elementType);
+}
+
+bool SetType::isSubtypeOf(const Type& other) const {
+    if (Type::isSubtypeOf(other)) return true;
+    if (other.kind() == Kind::Set) {
+        auto& o = static_cast<const SetType&>(other);
+        if (o.elementType->kind() == Kind::Any ||
+            o.elementType->kind() == Kind::Unknown ||
+            elementType->kind() == Kind::Unknown) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // TaskType
 std::string TaskType::toString() const {
     return "Task[" + resultType->toString() + "]";
@@ -761,7 +783,7 @@ void TypeChecker::initBuiltinTypes() {
     impl_->typeNames["List"] = std::make_shared<ListType>(impl_->anyType);
     impl_->typeNames["tuple"] = std::make_shared<TupleType>(std::vector<std::shared_ptr<Type>>{impl_->anyType});
     impl_->typeNames["Tuple"] = std::make_shared<TupleType>(std::vector<std::shared_ptr<Type>>{impl_->anyType});
-    impl_->typeNames["set"] = std::make_shared<ListType>(impl_->anyType);
+    impl_->typeNames["set"] = std::make_shared<SetType>(impl_->anyType);
     impl_->typeNames["Set"] = std::make_shared<ListType>(impl_->anyType);
     // deque -> list[Any] for element typing (codegen routes ctor/methods via the
     // __Deque path keyed on the `deque(...)` ctor, independent of this type).
@@ -1087,8 +1109,7 @@ std::shared_ptr<Type> TypeChecker::resolveType(TypeExpr* typeExpr) {
             return std::make_shared<TupleType>(std::move(elems));
         }
         if (baseName->name == "set" && generic->typeArgs.size() == 1) {
-            // Treat set[T] as a list[T] for now (simplified)
-            return std::make_shared<ListType>(resolveType(generic->typeArgs[0].get()));
+            return std::make_shared<SetType>(resolveType(generic->typeArgs[0].get()));
         }
         if (baseName->name == "deque" && generic->typeArgs.size() == 1) {
             // deque[T] - runtime deque; typed as list[T] for element checking
@@ -1332,6 +1353,18 @@ bool TypeChecker::typeIsDubable(const Type* t, std::string& why) {
     }
 }
 
+static bool setOperandsCompatible(const std::shared_ptr<Type>& l,
+                                  const std::shared_ptr<Type>& r) {
+    auto& le = static_cast<SetType&>(*l).elementType;
+    auto& re = static_cast<SetType&>(*r).elementType;
+    if (!le || !re) return true;
+    if (le->kind() == Type::Kind::Unknown || le->kind() == Type::Kind::Any ||
+        re->kind() == Type::Kind::Unknown || re->kind() == Type::Kind::Any) {
+        return true;
+    }
+    return le->equals(*re);
+}
+
 static bool foldedConstInt(
     const std::unordered_map<const Expr*, long long>& folds, Expr* e,
     long long& out) {
@@ -1378,6 +1411,24 @@ void TypeChecker::visit(BinaryExpr& node) {
         op == TokenType::STAR || op == TokenType::SLASH ||
         op == TokenType::PERCENT || op == TokenType::POWER ||
         op == TokenType::DOUBLE_SLASH) {
+
+        if (leftType->kind() == Type::Kind::Set ||
+            rightType->kind() == Type::Kind::Set) {
+            if (op == TokenType::MINUS &&
+                leftType->kind() == Type::Kind::Set &&
+                rightType->kind() == Type::Kind::Set &&
+                setOperandsCompatible(leftType, rightType)) {
+                node.type = leftType;
+                return;
+            }
+            std::string hint =
+                op == TokenType::PLUS ? "; use | for set union" : "";
+            error(node.location(), "unsupported operand types for " +
+                  node.op.lexeme() + ": '" + leftType->toString() + "' and '" +
+                  rightType->toString() + "'" + hint);
+            node.type = impl_->unknownType;
+            return;
+        }
 
         long long lcv = 0;
         long long rcv = 0;
@@ -1573,6 +1624,21 @@ void TypeChecker::visit(BinaryExpr& node) {
     if (op == TokenType::AMPERSAND || op == TokenType::PIPE ||
         op == TokenType::CARET || op == TokenType::LEFT_SHIFT ||
         op == TokenType::RIGHT_SHIFT) {
+        if (leftType->kind() == Type::Kind::Set ||
+            rightType->kind() == Type::Kind::Set) {
+            if (op != TokenType::LEFT_SHIFT && op != TokenType::RIGHT_SHIFT &&
+                leftType->kind() == Type::Kind::Set &&
+                rightType->kind() == Type::Kind::Set &&
+                setOperandsCompatible(leftType, rightType)) {
+                node.type = leftType;
+                return;
+            }
+            error(node.location(), "unsupported operand types for " +
+                  node.op.lexeme() + ": '" + leftType->toString() + "' and '" +
+                  rightType->toString() + "'");
+            node.type = impl_->unknownType;
+            return;
+        }
         long long lcv = 0;
         long long rcv = 0;
         if (foldedConstInt(impl_->constIntFolds, node.left.get(), lcv) &&

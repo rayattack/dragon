@@ -53,6 +53,16 @@ public:
     bool isSubtypeOf(const Type& other) const override;
 };
 
+class SetType : public Type {
+public:
+    std::shared_ptr<Type> elementType;
+    explicit SetType(std::shared_ptr<Type> elem) : elementType(std::move(elem)) {}
+    Kind kind() const override { return Kind::Set; }
+    std::string toString() const override;
+    bool equals(const Type& other) const override;
+    bool isSubtypeOf(const Type& other) const override;
+};
+
 /// Task[T]: handle from `fire`/`async def`, erases to a DragonVThread* ptr at
 /// LLVM; T is the result type recovered by await/.join().
 class TaskType : public Type {

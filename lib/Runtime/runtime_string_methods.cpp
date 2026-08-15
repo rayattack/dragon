@@ -1055,8 +1055,8 @@ static const char* dragon_join_utf8(const char* sep, const char** items, int64_t
 
     // Encode each element to UTF-8 once (NULL = kind=1, use raw pointer),
     // tracking the owned transcode + byte length. owned is calloc'd so failure paths can free it blind.
-    char** owned = (char**)calloc((size_t)n, sizeof(char*));
-    int64_t* blens = owned ? (int64_t*)calloc((size_t)n, sizeof(int64_t)) : NULL;
+    char** owned = (char**)dragon_calloc_nullable((size_t)n, sizeof(char*));
+    int64_t* blens = owned ? (int64_t*)dragon_calloc_nullable((size_t)n, sizeof(int64_t)) : NULL;
     if (!owned || !blens) {
         free(owned);
         if (sep_enc) free(sep_enc);
@@ -1075,7 +1075,7 @@ static const char* dragon_join_utf8(const char* sep, const char** items, int64_t
         if (add > INT64_MAX - total) { overflow = true; break; }
         total += add;
     }
-    char* buf = overflow ? NULL : (char*)malloc(total > 0 ? (size_t)total : 1);
+    char* buf = overflow ? NULL : (char*)dragon_malloc_nullable(total > 0 ? (size_t)total : 1);
     if (!buf) {
         for (int64_t i = 0; i < n; ++i) free(owned[i]);
         free(owned);

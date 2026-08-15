@@ -203,8 +203,7 @@ static int http_on_url(llhttp_t* p, const char* at, size_t len) {
     // result would leak the live buffer and NULL-deref on the next memcpy.
     while (s->url_len + (int)len >= s->url_cap) {
         int new_cap = s->url_cap * 2;
-        char* tmp = (char*)realloc(s->url, new_cap);
-        if (!tmp) { fprintf(stderr, "dragon: out of memory\n"); abort(); }
+        char* tmp = (char*)dragon_xrealloc_or_abort(s->url, new_cap);
         s->url = tmp;
         s->url_cap = new_cap;
     }
@@ -226,8 +225,7 @@ static int http_on_header_field(llhttp_t* p, const char* at, size_t len) {
     if (idx >= DRAGON_HTTP_MAX_HEADERS) return 0;
     if (s->header_bytes + (int)len > DRAGON_HTTP_HEADERS_MAX) return -1;
     int old_len = s->header_key_lens[idx];
-    char* tmp = (char*)realloc(s->header_keys[idx], old_len + len + 1);
-    if (!tmp) { fprintf(stderr, "dragon: out of memory\n"); abort(); }
+    char* tmp = (char*)dragon_xrealloc_or_abort(s->header_keys[idx], old_len + len + 1);
     s->header_keys[idx] = tmp;
     // Lowercase the header name during copy
     for (size_t i = 0; i < len; i++) {
@@ -247,8 +245,7 @@ static int http_on_header_value(llhttp_t* p, const char* at, size_t len) {
     if (idx >= DRAGON_HTTP_MAX_HEADERS) return 0;
     if (s->header_bytes + (int)len > DRAGON_HTTP_HEADERS_MAX) return -1;
     int old_len = s->header_val_lens[idx];
-    char* tmp = (char*)realloc(s->header_vals[idx], old_len + len + 1);
-    if (!tmp) { fprintf(stderr, "dragon: out of memory\n"); abort(); }
+    char* tmp = (char*)dragon_xrealloc_or_abort(s->header_vals[idx], old_len + len + 1);
     s->header_vals[idx] = tmp;
     memcpy(s->header_vals[idx] + old_len, at, len);
     s->header_val_lens[idx] += (int)len;
@@ -263,8 +260,7 @@ static int http_on_body(llhttp_t* p, const char* at, size_t len) {
     while (s->body_len + (int)len >= s->body_cap) {
         int new_cap = s->body_cap * 2;
         if (new_cap > DRAGON_HTTP_MAX_BODY) new_cap = DRAGON_HTTP_MAX_BODY + 1;
-        char* tmp = (char*)realloc(s->body, new_cap);
-        if (!tmp) { fprintf(stderr, "dragon: out of memory\n"); abort(); }
+        char* tmp = (char*)dragon_xrealloc_or_abort(s->body, new_cap);
         s->body = tmp;
         s->body_cap = new_cap;
     }
@@ -291,10 +287,12 @@ static int http_on_message_complete(llhttp_t* p) {
 void* dragon_http_parse_request(const char* buf, int64_t len) {
     HttpParseState* state = (HttpParseState*)dragon_xcalloc_n(1, sizeof(HttpParseState));
     state->url_cap = 256;
-    state->url = (char*)malloc(state->url_cap);
+    state->url = (char*)dragon_malloc_nullable(state->url_cap);
+    if (!state->url) { free(state); dragon_raise_oom(); }
     state->url[0] = '\0';
     state->body_cap = 1024;
-    state->body = (char*)malloc(state->body_cap);
+    state->body = (char*)dragon_malloc_nullable(state->body_cap);
+    if (!state->body) { free(state->url); free(state); dragon_raise_oom(); }
     state->body[0] = '\0';
 
     llhttp_settings_t settings;
@@ -524,7 +522,7 @@ static void dragon_hash_secret_ctor(void) { dragon_hash_secret_init(); }
 /// to /dev/urandom. Raises OSError rather than returning a partial buffer (would leak uninitialized heap).
 DragonBytes* dragon_urandom(int64_t n) {
     if (n <= 0) return dragon_bytes_new(nullptr, 0);
-    auto* buf = (uint8_t*)malloc((size_t)n);
+    auto* buf = (uint8_t*)dragon_xmalloc((size_t)n);
     int64_t got = 0;
 #ifdef _WIN32
     extern "C" {
@@ -906,8 +904,8 @@ int32_t dragon_execv(const char* path, DragonList* argv) {
     return -1;
 #else
     int n = (int)dragon_list_len(argv);
-    char** args = (char**)malloc((size_t)(n + 1) * sizeof(char*));
-    char** owned = (char**)calloc((size_t)(n > 0 ? n : 1), sizeof(char*));
+    char** args = (char**)dragon_malloc_nullable((size_t)(n + 1) * sizeof(char*));
+    char** owned = (char**)dragon_calloc_nullable((size_t)(n > 0 ? n : 1), sizeof(char*));
     if (!args || !owned) { free(args); free(owned); errno = ENOMEM; return -1; }
     // Encode each arg to UTF-8: a UCS-4 DragonString handed raw to execv would reach the new
     // image as wide chars, silently corrupting a non-ASCII arg.
@@ -935,8 +933,8 @@ int32_t dragon_execvp(const char* file, DragonList* argv) {
     return -1;
 #else
     int n = (int)dragon_list_len(argv);
-    char** args = (char**)malloc((size_t)(n + 1) * sizeof(char*));
-    char** owned = (char**)calloc((size_t)(n > 0 ? n : 1), sizeof(char*));
+    char** args = (char**)dragon_malloc_nullable((size_t)(n + 1) * sizeof(char*));
+    char** owned = (char**)dragon_calloc_nullable((size_t)(n > 0 ? n : 1), sizeof(char*));
     if (!args || !owned) { free(args); free(owned); errno = ENOMEM; return -1; }
     // See dragon_execv: encode UCS-4 args to UTF-8 so a non-ASCII argument is
     // not truncated at its first embedded NUL when the new image reads argv.
@@ -1034,7 +1032,7 @@ const char* dragon_realpath(const char* path) {
     char cwd[4096];
     if (getcwd(cwd, sizeof(cwd))) {
         size_t cl = strlen(cwd), pl = strlen(path);
-        char* joined = (char*)malloc(cl + 1 + pl + 1);
+        char* joined = (char*)dragon_xmalloc(cl + 1 + pl + 1);
         memcpy(joined, cwd, cl);
         joined[cl] = '/';
         memcpy(joined + cl + 1, path, pl);

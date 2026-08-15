@@ -987,6 +987,7 @@ void CodeGen::visit(ClassDecl& node) {
         auto* entry = llvm::BasicBlock::Create(*impl_->context, "entry", initFunc);
         impl_->builder->SetInsertPoint(entry);
         impl_->pushScope();
+        Impl::VarMetaScope _varMeta(*impl_);
 
         // First arg is always self (ptr)
         auto initFuncType = initFunc->getFunctionType();
@@ -1060,7 +1061,6 @@ void CodeGen::visit(ClassDecl& node) {
                 llvm::GlobalValue::InternalLinkage,
                 llvm::ConstantAggregateZero::get(vtableArrayType),
                 clsSym + "__vtable");
-            impl_->classVtables[node.name] = vtableGlobal;
         }
     }
 
@@ -1888,7 +1888,7 @@ void CodeGen::visit(ClassDecl& node) {
 
         // Isolate union-member-kind tracking to this method body: without it, isinstance
         // ELSE-narrowing on a `T | str` param can't resolve the complement arm and stores the raw 16-byte box into a native field, corrupting memory. Save/clear/restore so entries don't leak between methods.
-        auto savedUnionMembers = std::move(impl_->unionMemberKinds);
+        Impl::VarMetaScope _varMeta(*impl_);
         impl_->unionMemberKinds.clear();
 
         auto methodFuncType = methodFunc->getFunctionType();
@@ -2049,7 +2049,6 @@ void CodeGen::visit(ClassDecl& node) {
         }
 
         impl_->popScope();
-        impl_->unionMemberKinds = std::move(savedUnionMembers);
         impl_->currentClassName = prevClassName;
         impl_->currentFunction = prevFunc;
         if (prevBlock) impl_->builder->SetInsertPoint(prevBlock);

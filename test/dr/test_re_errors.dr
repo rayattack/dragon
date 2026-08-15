@@ -3,6 +3,7 @@
 
 from unittest import TestCase, main
 from re import compile, sub, findall, split, error, Pattern
+import re
 
 
 class ReCompileErrorTests(TestCase) {
@@ -83,4 +84,43 @@ class ReScanTests(TestCase) {
 }
 
 
-main([ReCompileErrorTests(), ReSubTests(), ReScanTests()])
+class ReMatchBoolTests(TestCase) {
+    def test_match_returns_bool() {
+        self.assertTrue(re.match("h.llo", "hello world"))
+        self.assertFalse(re.match("zzz", "abc"))
+    }
+
+    def test_no_match_is_falsy_in_if() {
+        accepted: bool = false
+        if re.match("^[0-9]+$", "not-a-number") {
+            accepted = true
+        }
+        self.assertFalse(accepted)
+    }
+
+    def test_pattern_match_returns_bool() {
+        const p: Pattern = compile("^ab")
+        self.assertTrue(p.match("abc"))
+        self.assertFalse(p.match("xabc"))
+        p.destroy()
+    }
+
+    def test_match_limit_exhaustion_raises() {
+        def explode() {
+            re.match("(a|a)+$", ("a" * 40) + "b")
+        }
+        self.assertRaises(error, explode)
+    }
+
+    def test_find_reports_match_errors() {
+        def explode() {
+            const p: Pattern = compile("(a|a)+$")
+            defer p.destroy()
+            p.find(("a" * 40) + "b")
+        }
+        self.assertRaises(error, explode)
+    }
+}
+
+
+main([ReCompileErrorTests(), ReSubTests(), ReScanTests(), ReMatchBoolTests()])

@@ -1,0 +1,94 @@
+from unittest import TestCase, main
+
+class SetOperatorTests(TestCase) {
+    def test_union() {
+        a: set[int] = {1, 2}
+        b: set[int] = {2, 3}
+        c: set[int] = a | b
+        self.assertEqual(len(c), 3)
+        self.assertTrue(1 in c)
+        self.assertTrue(2 in c)
+        self.assertTrue(3 in c)
+    }
+
+    def test_intersection() {
+        a: set[int] = {1, 2, 4}
+        b: set[int] = {2, 4, 8}
+        c: set[int] = a & b
+        self.assertEqual(len(c), 2)
+        self.assertTrue(2 in c)
+        self.assertTrue(4 in c)
+        self.assertFalse(1 in c)
+    }
+
+    def test_difference() {
+        a: set[int] = {1, 2, 4}
+        b: set[int] = {2, 8}
+        c: set[int] = a - b
+        self.assertEqual(len(c), 2)
+        self.assertTrue(1 in c)
+        self.assertTrue(4 in c)
+        self.assertFalse(2 in c)
+    }
+
+    def test_symmetric_difference() {
+        a: set[int] = {1, 2}
+        b: set[int] = {2, 3}
+        c: set[int] = a ^ b
+        self.assertEqual(len(c), 2)
+        self.assertTrue(1 in c)
+        self.assertTrue(3 in c)
+        self.assertFalse(2 in c)
+    }
+
+    def test_str_element_sets() {
+        a: set[str] = {"red", "green"}
+        b: set[str] = {"green", "blue"}
+        u: set[str] = a | b
+        self.assertEqual(len(u), 3)
+        i: set[str] = a & b
+        self.assertEqual(len(i), 1)
+        self.assertTrue("green" in i)
+        d: set[str] = a - b
+        self.assertEqual(len(d), 1)
+        self.assertTrue("red" in d)
+    }
+
+    def test_operands_survive_unchanged() {
+        a: set[int] = {1, 2}
+        b: set[int] = {2, 3}
+        c: set[int] = a | b
+        d: set[int] = a & b
+        self.assertEqual(len(a), 2)
+        self.assertEqual(len(b), 2)
+        self.assertEqual(len(c), 3)
+        self.assertEqual(len(d), 1)
+    }
+
+    def test_ops_on_returned_sets() {
+        def evens() -> set[int] {
+            return {0, 2, 4}
+        }
+        def small() -> set[int] {
+            return {0, 1, 2}
+        }
+        c: set[int] = evens() & small()
+        self.assertEqual(len(c), 2)
+        self.assertTrue(0 in c)
+        self.assertTrue(2 in c)
+    }
+
+    def test_chained_ops() {
+        a: set[int] = {1, 2}
+        b: set[int] = {2, 3}
+        e: set[int] = {9}
+        c: set[int] = (a | b) - (a & b) | e
+        self.assertEqual(len(c), 3)
+        self.assertTrue(1 in c)
+        self.assertTrue(3 in c)
+        self.assertTrue(9 in c)
+        self.assertFalse(2 in c)
+    }
+}
+
+main([SetOperatorTests()])

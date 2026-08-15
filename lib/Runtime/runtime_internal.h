@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <stdlib.h>
 #include <cstring>
 // winsock2 must be included before windows.h (and before MinGW's <unistd.h>) to pin the v2 API.
 #ifdef _WIN32
@@ -273,9 +274,12 @@ struct DragonDict {
     int64_t used;
     int64_t capacity;
     int64_t index_size;
-    // 0 = int-keyed (key is an i64 cast to pointer, never decref); 1 = str-keyed (dict owns
-    // one DragonString ref per key per Assign.cpp's contract, released on removal/destroy).
-    uint8_t keys_are_ptr;
+    uint8_t key_kind;
+};
+
+enum DragonDictKeyKind : uint8_t {
+    DRAGON_DICT_KEY_INT = 0,
+    DRAGON_DICT_KEY_STR = 1,
 };
 
 struct DragonTuple {
@@ -1007,6 +1011,14 @@ static inline void* dragon_xcalloc_n_or_abort(int64_t count, size_t elem_size) {
     return p;
 }
 
+static inline void* dragon_malloc_nullable(size_t n) { return malloc(n); }
+static inline void* dragon_realloc_nullable(void* old, size_t n) {
+    return realloc(old, n);
+}
+static inline void* dragon_calloc_nullable(size_t count, size_t elem_size) {
+    return calloc(count, elem_size);
+}
+
 // Unwind cleanup stack (DragonCleanupStack). Codegen pushes at each owned-heap-local decl,
 // updates on reassignment, resets-by-depth at normal scope exit; dragon_exc_cleanup_unwind runs at every longjmp arrival.
 int32_t dragon_cleanup_push(int64_t val, int32_t kind, int32_t tag);
@@ -1107,5 +1119,7 @@ static inline void dragon_decref_str_dispatch(const char* s) {
 #ifdef __cplusplus
 }
 #endif
+
+#pragma GCC poison malloc realloc calloc
 
 #endif // DRAGON_RUNTIME_INTERNAL_H

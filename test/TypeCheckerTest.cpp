@@ -2655,6 +2655,37 @@ TEST(TypeCheckerTest, ConstantDivModByZeroStaysRuntimeError) {
     EXPECT_FALSE(checkHasErrors("x: int = 7 % -2\n"));
 }
 
+TEST(TypeCheckerTest, SetTypeIsHonest) {
+    auto t = getExprType(
+        "s: set[int] = {1, 2}\n"
+        "s\n");
+    ASSERT_NE(t, nullptr);
+    EXPECT_EQ(t->kind(), Type::Kind::Set);
+    EXPECT_EQ(t->toString(), "set[int]");
+}
+
+TEST(TypeCheckerTest, SetOperatorsTyped) {
+    EXPECT_FALSE(checkHasErrors(
+        "a: set[int] = {1, 2}\n"
+        "b: set[int] = {2, 3}\n"
+        "c: set[int] = a | b\n"
+        "d: set[int] = a & b\n"
+        "e: set[int] = a - b\n"
+        "f: set[int] = a ^ b\n"));
+    EXPECT_TRUE(checkHasErrors(
+        "a: set[int] = {1, 2}\n"
+        "b: set[int] = {2, 3}\n"
+        "c: set[int] = a + b\n"));
+    EXPECT_TRUE(checkHasErrors(
+        "a: set[int] = {1, 2}\n"
+        "xs: list[int] = [1]\n"
+        "c: set[int] = a | xs\n"));
+    EXPECT_TRUE(checkHasErrors(
+        "a: set[int] = {1, 2}\n"
+        "b: set[str] = {\"x\"}\n"
+        "c: set[int] = a | b\n"));
+}
+
 TEST(TypeCheckerTest, ConstantShiftCountRejected) {
     EXPECT_TRUE(checkHasErrors("x: int = 1 << 64\n"));
     EXPECT_TRUE(checkHasErrors("x: int = 1 << -1\n"));

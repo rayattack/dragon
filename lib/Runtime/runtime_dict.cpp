@@ -164,14 +164,14 @@ DragonDict* dragon_dict_new(int64_t cap) {
         free(entries);
         dragon_raise_exc_cstr(43, "MemoryError: allocation size overflow");
     }
-    auto* indices = (int64_t*)malloc(ibytes);
+    auto* indices = (int64_t*)dragon_malloc_nullable(ibytes);
     if (!indices) { free(entries); dragon_raise_oom(); }
-    auto* d = (DragonDict*)malloc(sizeof(DragonDict));
+    auto* d = (DragonDict*)dragon_malloc_nullable(sizeof(DragonDict));
     if (!d) { free(indices); free(entries); dragon_raise_oom(); }
     dragon_obj_init(&d->header, DRAGON_TAG_DICT);
     d->size = 0;
     d->used = 0;
-    d->keys_are_ptr = 0;     // flipped to 1 by the str setter; int-keyed dicts stay 0
+    d->key_kind = DRAGON_DICT_KEY_INT;
     d->capacity = cap;
     d->index_size = index_size;
     d->entries = entries;
@@ -189,7 +189,7 @@ DragonDict* dragon_dict_new(int64_t cap) {
 // Release one owned str key (dict owns one ref per key, codegen contract in
 // Assign.cpp). No-op for int-keyed/NULL/literal/immortal keys; frees only dup'd heap keys.
 static inline void dragon_dict_release_key(const DragonDict* d, const char* key) {
-    if (!d->keys_are_ptr) return;
+    if (d->key_kind != DRAGON_DICT_KEY_STR) return;
     if (key) dragon_decref_str_dispatch(key);
 }
 
@@ -198,8 +198,8 @@ void dragon_dict_set_tagged(DragonDict* d, const char* key, int64_t value, int64
     // hashWriting); ends before old-value decrefs, or at function exit on insert.
     bool mut_armed = dragon_shared_mut_begin(&d->header, "dict");
     // str-key path: the dict owns one ref per key. Mark str-keyed so
-    // destroy/clear/del release keys; int-keyed dicts never flip this bit.
-    d->keys_are_ptr = 1;
+    // destroy/clear/del release keys; int-keyed dicts never flip this.
+    d->key_kind = DRAGON_DICT_KEY_STR;
     // Acyclic-skip enrollment: enroll on the first traceable value inserted
     // (str keys are leaves); shares its gate with dragon_dict_traverse.
     if (value && dragon_value_tag_is_traceable((int8_t)tag) &&
@@ -389,7 +389,7 @@ int64_t dragon_dict_has_key(DragonDict* d, const char* key) {
 /// keyword argument") for the first stray key in source order; no-op for int-keyed/empty dicts.
 void dragon_dict_reject_unknown_keys(DragonDict* d, const char** allowed,
                                      int64_t n, const char* func_name) {
-    if (!d || !d->keys_are_ptr) return;
+    if (!d || d->key_kind != DRAGON_DICT_KEY_STR) return;
     for (int64_t i = 0; i < d->size; i++) {
         if (d->entries[i].dead) continue;
         const char* k = d->entries[i].key;
@@ -485,7 +485,7 @@ void* dragon_dict_get_ptr_default(DragonDict* d, const char* key, void* def) {
 }
 
 DragonList* dragon_dict_keys(DragonDict* d) {
-    if (d && d->keys_are_ptr) {
+    if (d && d->key_kind == DRAGON_DICT_KEY_STR) {
         // str-keyed: the keys list co-owns each key (incref + TAG_STR) so it
         // stays valid after the dict dies; without this, keys would dangle once the dict frees them.
         DragonList* l = dragon_list_new_tagged(d->used, TAG_STR);
@@ -649,7 +649,7 @@ DragonList* dragon_dict_items(DragonDict* d) {
             DragonTuple* t = dragon_tuple_new(2);
             // Tuple co-owns the key (incref + TAG_STR) so it survives past
             // the dict's destroy; int-keyed dict stores the i64 untagged (no ownership).
-            if (d->keys_are_ptr) {
+            if (d->key_kind == DRAGON_DICT_KEY_STR) {
                 dragon_incref_str(d->entries[i].key);
                 dragon_tuple_set_tagged(t, 0, (int64_t)d->entries[i].key, TAG_STR);
             } else {
@@ -703,7 +703,7 @@ int64_t dragon_dict_popitem(DragonDict* d) {
     DragonTuple* t = dragon_tuple_new(2);
     // Move the dict's key ref into the tuple (TAG_STR, no incref - ownership
     // transfers once); int-keyed "key" is an i64, stored untagged.
-    if (d->keys_are_ptr) {
+    if (d->key_kind == DRAGON_DICT_KEY_STR) {
         dragon_tuple_set_tagged(t, 0, (int64_t)e.key, TAG_STR);
     } else {
         dragon_tuple_set(t, 0, (int64_t)e.key);
@@ -712,7 +712,7 @@ int64_t dragon_dict_popitem(DragonDict* d) {
     // (no incref - net refcount is unchanged across the pop).
     dragon_tuple_set_tagged(t, 1, e.value, e.tag);
     // Invalidate the index slot for this key, then tombstone the dense entry.
-    int64_t slot = d->keys_are_ptr ? dict_probe(d, e.key, e.hash)
+    int64_t slot = d->key_kind == DRAGON_DICT_KEY_STR ? dict_probe(d, e.key, e.hash)
                                    : dict_probe_i64(d, (int64_t)(uintptr_t)e.key, e.hash);
     d->indices[slot] = DICT_TOMBSTONE;
     d->entries[lastIdx].dead = 1;
@@ -857,8 +857,8 @@ void dragon_dict_update(DragonDict* d, DragonDict* other) {
         // on insert, so the destination dict needs its own reference.
         dragon_incref_tagged(other->entries[i].value, other->entries[i].tag);
         // Key dispatch by source key flavor: routing an int key through the
-        // str setter dereferenced it as a char* (SEGV) and poisoned keys_are_ptr on the destination.
-        if (other->keys_are_ptr) {
+        // str setter dereferenced it as a char* (SEGV) and poisoned key_kind on the destination.
+        if (other->key_kind == DRAGON_DICT_KEY_STR) {
             // d takes its own ref to each str key; without it, d's keys
             // would dangle when `other` dies and d's destroy would double-free.
             dragon_incref_str(other->entries[i].key);
@@ -914,7 +914,7 @@ DragonDict* dragon_dict_copy_excluding(DragonDict* d, const char** names,
     if (!d) return copy;
     for (int64_t i = 0; i < d->size; i++) {
         if (d->entries[i].dead) continue;
-        if (d->keys_are_ptr && name_count > 0) {
+        if (d->key_kind == DRAGON_DICT_KEY_STR && name_count > 0) {
             bool excluded = false;
             for (int64_t j = 0; j < name_count; j++) {
                 if (names[j] && strcmp(d->entries[i].key, names[j]) == 0) {
@@ -931,7 +931,7 @@ DragonDict* dragon_dict_copy_excluding(DragonDict* d, const char** names,
         if (val) dragon_incref_tagged(val, tag);
         // Key dispatch by key flavor: an int-keyed dict's key would be
         // dereferenced as a char* by the str setter (SEGV) if misrouted.
-        if (d->keys_are_ptr) {
+        if (d->key_kind == DRAGON_DICT_KEY_STR) {
             dragon_incref_str(d->entries[i].key);
             dragon_dict_set_tagged(copy, d->entries[i].key, val, tag);
         } else {
@@ -951,7 +951,7 @@ DragonDict* dragon_dict_deep_copy(DragonDict* d) {
             if (d->entries[i].dead) continue;
             int64_t val = dragon_deep_copy_tagged(d->entries[i].value,
                                                   d->entries[i].tag);
-            if (d->keys_are_ptr) {
+            if (d->key_kind == DRAGON_DICT_KEY_STR) {
                 dragon_incref_str(d->entries[i].key);
                 dragon_dict_set_tagged(copy, d->entries[i].key, val,
                                        d->entries[i].tag);
@@ -977,8 +977,8 @@ DragonDict* dragon_dict_copy(DragonDict* d) {
             // them (dict[str, Callable].copy() double-freed closures).
             if (val) dragon_incref_tagged(val, tag);
             // Key dispatch by key flavor: the str setter would dereference
-            // an int key as a char* (SEGV) and poison keys_are_ptr on the copy.
-            if (d->keys_are_ptr) {
+            // an int key as a char* (SEGV) and poison key_kind on the copy.
+            if (d->key_kind == DRAGON_DICT_KEY_STR) {
                 // The copy takes its OWN ref to each str key (mirrors the
                 // value incref) so both dicts release independently.
                 dragon_incref_str(d->entries[i].key);

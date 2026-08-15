@@ -68,14 +68,19 @@ program. There is also **no `scripts`/`tasks` block** in the manifest and no com
 to run one - a project command is just a `.dr` file you `dragon run`. That single
 choice neutralizes the attack class that dominates npm and PyPI.
 
-## Capability permissions
+## Capability permissions (designed - not yet enforced)
 
-A package must declare the system capabilities it needs (`net`, `fs:read`,
-`fs:write`, `proc`, `env`, `ffi`); the consuming project must explicitly grant them.
-Undeclared use is a compile-time error, not a warning - the code never reaches code
-generation. The safe default is **pure**: no file access, no network, no FFI, no
-subprocesses. When a JSON formatter asks for `net` or `ffi`, that is a red flag you
-see in your `dragon.drs` before you ever run the code.
+The design: a package declares the system capabilities it needs (`net`, `fs:read`,
+`fs:write`, `proc`, `env`, `ffi`); the consuming project must explicitly grant them,
+undeclared use is a compile-time error, and the safe default is **pure** - no file
+access, no network, no FFI, no subprocesses.
+
+**None of that is enforced today.** The manifest schema accepts a `permissions`
+block and nothing reads it (same status as the egg model on the
+[packaging page](/docs/1003-packaging-eggs)). Until the enforcement pass lands, do
+not base a trust decision on a package's declared permissions; the mitigation you
+actually have is that packages are source you can read, and nothing in them runs
+until your program does.
 
 ## The manifest is sandboxed against hostile input
 
@@ -186,7 +191,7 @@ rate-limited - credential stuffing is the number-one attack on package registrie
 |---|---|
 | Tampered package / mirror | SHA-256 pin verified on every fetch; signed Merkle inclusion proof |
 | Install-time code execution | No install scripts; packages are source, nothing runs until you build |
-| Malicious code in a legit package | Capability permissions, denied by default; compile-time enforced |
+| Malicious code in a legit package | Packages are readable source and run nothing at install; capability permissions are designed but **not yet enforced** |
 | Hostile manifest | `.drs` evaluation confined (bounded `range`, confined `include`) |
 | Rewritten / equivocating registry | Append-only log, Ed25519-signed checkpoints, consistency proofs, `dragon scan` |
 | Compromised maintainer | Author signing + pinned `signed_by`, verified per install |

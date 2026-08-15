@@ -573,6 +573,44 @@ void CodeGen::visit(BinaryExpr& node) {
         }
     }
 
+    if ((op == TokenType::PIPE || op == TokenType::AMPERSAND ||
+         op == TokenType::CARET || op == TokenType::MINUS) &&
+        node.left->type && node.left->type->kind() == Type::Kind::Set &&
+        node.right->type && node.right->type->kind() == Type::Kind::Set) {
+        if (lhs->getType() == impl_->i64Type)
+            lhs = impl_->builder->CreateIntToPtr(lhs, impl_->i8PtrType);
+        if (rhs->getType() == impl_->i64Type)
+            rhs = impl_->builder->CreateIntToPtr(rhs, impl_->i8PtrType);
+        bool lhsOwned = false, rhsOwned = false;
+        if (impl_->options.gcMode == GCMode::RC) {
+            lhsOwned = dynamic_cast<SetExpr*>(node.left.get()) ||
+                       dynamic_cast<SetCompExpr*>(node.left.get()) ||
+                       impl_->ownedTempDrainKind(node.left.get(), lhs) !=
+                           Impl::VarKind::Other;
+            rhsOwned = dynamic_cast<SetExpr*>(node.right.get()) ||
+                       dynamic_cast<SetCompExpr*>(node.right.get()) ||
+                       impl_->ownedTempDrainKind(node.right.get(), rhs) !=
+                           Impl::VarKind::Other;
+        }
+        std::vector<llvm::Value*> opBases;
+        if (lhsOwned) impl_->pushTempCleanupByKind(lhs, Impl::VarKind::Set, opBases);
+        if (rhsOwned) impl_->pushTempCleanupByKind(rhs, Impl::VarKind::Set, opBases);
+        const char* setOpFn =
+            op == TokenType::PIPE        ? "dragon_set_union"
+            : op == TokenType::AMPERSAND ? "dragon_set_intersection"
+            : op == TokenType::MINUS     ? "dragon_set_difference"
+                                         : "dragon_set_symmetric_difference";
+        auto* result = impl_->builder->CreateCall(
+            impl_->runtimeFuncs[setOpFn], {lhs, rhs}, "setop");
+        impl_->popArgTempCleanups(opBases);
+        if (lhsOwned)
+            impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {lhs});
+        if (rhsOwned)
+            impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {rhs});
+        impl_->lastValue = result;
+        return;
+    }
+
     // list+list makes a fresh list; must precede the i8*+i8* string-concat
     // fallthrough below, which would misread two list pointers as C-strings.
     if (op == TokenType::PLUS) {

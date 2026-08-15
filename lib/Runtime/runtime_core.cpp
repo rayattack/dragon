@@ -363,7 +363,8 @@ static inline void gc_tracked_append(DragonObjectHeader* h, void* obj) {
             fprintf(stderr, "dragon: GC tracked-set exhausted (INT32_MAX objects)\n");
             abort();
         }
-        void** grown = (void**)realloc(gc_tracked, (size_t)new_cap * sizeof(void*));
+        void** grown = (void**)dragon_realloc_nullable(
+            gc_tracked, dragon_alloc_bytes_or_abort(new_cap, sizeof(void*)));
         if (!grown) {
             fprintf(stderr, "dragon: out of memory growing GC tracked-set\n");
             abort();  // old gc_tracked is intact but we cannot proceed.
@@ -628,7 +629,7 @@ static void dragon_dict_clear_refs(void* obj) {
         d->entries[i].value = 0;
         // Release the owned str key (force-free bypasses gc_collecting, like the value above),
         // then null it so the later dragon_dict_destroy (size now 0) can't re-release.
-        if (d->keys_are_ptr && d->entries[i].key)
+        if (d->key_kind == DRAGON_DICT_KEY_STR && d->entries[i].key)
             dragon_str_force_free_if_zero(d->entries[i].key);
         d->entries[i].key = nullptr;
     }
@@ -790,8 +791,10 @@ static int32_t gc_ht_lookup(GCHashEntry* ht, int32_t mask, void* key) {
     }
 }
 
-static void* gc_alloc_or_abort(size_t bytes, int zero) {
-    void* p = zero ? calloc(1, bytes) : malloc(bytes);
+static void* gc_alloc_or_abort(int64_t count, size_t elem_size, int zero) {
+    size_t bytes = dragon_alloc_bytes_ex_or_abort(count, elem_size, 0);
+    void* p = zero ? dragon_calloc_nullable(1, bytes)
+                   : dragon_malloc_nullable(bytes);
     if (!p && bytes) {
         fprintf(stderr, "dragon: out of memory during gc\n");
         abort();
@@ -856,9 +859,9 @@ int64_t dragon_gc_collect() {
     }
     int32_t ht_cap = (int32_t)ht_cap64;
     int32_t ht_mask = ht_cap - 1;
-    auto* ht = (GCHashEntry*)gc_alloc_or_abort((size_t)ht_cap * sizeof(GCHashEntry), 1);
+    auto* ht = (GCHashEntry*)gc_alloc_or_abort(ht_cap, sizeof(GCHashEntry), 1);
 
-    auto* refs = (int64_t*)gc_alloc_or_abort((size_t)n * sizeof(int64_t), 0);
+    auto* refs = (int64_t*)gc_alloc_or_abort(n, sizeof(int64_t), 0);
     for (int32_t i = 0; i < n; i++) {
         DragonObjectHeader* h = (DragonObjectHeader*)gc_tracked[i];
         // Atomic snapshot read: other threads run atomic fetch_add/sub on refcount concurrently;
@@ -876,7 +879,7 @@ int64_t dragon_gc_collect() {
         dragon_traverse(gc_tracked[i], gc_visit_subtract, nullptr);
     }
 
-    auto* queue = (int32_t*)gc_alloc_or_abort(((size_t)n + 1) * sizeof(int32_t), 0);
+    auto* queue = (int32_t*)gc_alloc_or_abort((int64_t)n + 1, sizeof(int32_t), 0);
     queue[0] = 0;
 
     for (int32_t i = 0; i < n; i++) {
@@ -897,7 +900,7 @@ int64_t dragon_gc_collect() {
 
     __atomic_store_n(&gc_collecting, 1, __ATOMIC_RELEASE);
     int64_t collected = 0;
-    void** to_free = (void**)gc_alloc_or_abort((size_t)n * sizeof(void*), 0);
+    void** to_free = (void**)gc_alloc_or_abort(n, sizeof(void*), 0);
     int32_t to_free_count = 0;
     // Two-pass tear-down: Pass 1 marks every unreachable object IN_TO_FREE so Pass 2's clear_refs
     // and any concurrent mutator decref both skip dealloc (owned by the loop below). The flag must precede any clear_refs decref into to_free children, else a sibling decref races the flag-set -> UAF.
@@ -989,10 +992,14 @@ static void shared_worklist_free(DragonSharedWorklist* w) {
 
 static void shared_worklist_push_internal(DragonSharedWorklist* w, void* obj) {
     if (w->size >= w->cap) {
+        if (w->cap > INT32_MAX / 2) {
+            fprintf(stderr, "dragon: shared worklist exceeds int32 capacity\n");
+            abort();
+        }
         w->cap = w->cap ? w->cap * 2 : 32;
         // Abort (not raise) on OOM: runs inside mark-shared/GC, where raising would re-enter at
         // an arbitrary point. xrealloc_or_abort also fixes the self-assign NULL-write.
-        w->entries = (void**)dragon_xrealloc_or_abort(w->entries, w->cap * sizeof(void*));
+        w->entries = (void**)dragon_xrealloc_n_or_abort(w->entries, w->cap, sizeof(void*));
     }
     w->entries[w->size++] = obj;
 }
@@ -1080,9 +1087,9 @@ static void shared_walk_dict(DragonDict* d, DragonSharedWorklist* w) {
             else if (tag == DRAGON_TAG_CLOSURE)
                 dragon_mark_shared_callable(w, (void*)(uintptr_t)v);
         }
-        // Keys are DragonStrings only when keys_are_ptr==1; an int-keyed dict casts the i64 key
+        // Keys are DragonStrings only for DRAGON_DICT_KEY_STR; an int-keyed dict casts the i64 key
         // into the pointer slot, so treating it as a string header reads wild memory (CodeGenE2E.DictEqIntKeyed).
-        if (d->keys_are_ptr && d->entries[i].key)
+        if (d->key_kind == DRAGON_DICT_KEY_STR && d->entries[i].key)
             dragon_mark_shared_str(d->entries[i].key);
     }
 }

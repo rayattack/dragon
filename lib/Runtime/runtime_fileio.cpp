@@ -34,7 +34,8 @@ DragonBytes* dragon_read_file_bytes(const char* path) {
         return nullptr;
     }
     std::rewind(f);
-    uint8_t* buf = (uint8_t*)std::malloc(size > 0 ? (size_t)size : 1);
+    uint8_t* buf = (uint8_t*)dragon_malloc_nullable(size > 0 ? (size_t)size : 1);
+    if (!buf) { std::fclose(f); dragon_raise_oom(); }
     size_t n = std::fread(buf, 1, (size_t)size, f);
     std::fclose(f);
     if ((long)n != size) {
@@ -95,7 +96,7 @@ int64_t dragon_file_write_bytes(void* handle, DragonBytes* data) {
 const char* dragon_file_read_text(void* handle, int64_t size) {
     FILE* f = (FILE*)handle;
     if (!f || size <= 0) return dragon_string_alloc("", 0);
-    uint8_t* buf = (uint8_t*)std::malloc((size_t)size + 4);  // headroom for top-up
+    uint8_t* buf = (uint8_t*)dragon_xmalloc((size_t)size + 4);  // headroom for top-up
     size_t n = std::fread(buf, 1, (size_t)size, f);
     if (n > 0) {
         // Walk back over up to 3 continuation bytes (10xxxxxx) to the lead byte.

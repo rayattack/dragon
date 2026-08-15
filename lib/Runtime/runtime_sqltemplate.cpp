@@ -3,11 +3,11 @@
 // fallback, dynamic composition); MUST hash identically to
 // CodeGen::Impl::sqlCanonicalHash so both land in the same cache bucket.
 
+#include "runtime_internal.h"
+
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
-
-#include "runtime_internal.h"
 
 extern "C" {
 

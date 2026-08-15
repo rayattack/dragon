@@ -592,7 +592,7 @@ const char* dragon_file_read(void* handle) {
         if (size >= 0 && fseek(f, pos, SEEK_SET) == 0) {
             long remaining = size - pos;
             if (remaining <= 0) return dragon_string_alloc("", 0);
-            char* buf = (char*)malloc(remaining + 1);
+            char* buf = (char*)dragon_xmalloc((size_t)remaining + 1);
             size_t nread = fread(buf, 1, remaining, f);
             buf[nread] = '\0';
             const char* result = dragon_string_alloc(buf, (int64_t)nread);
@@ -603,12 +603,12 @@ const char* dragon_file_read(void* handle) {
     // Non-seekable: read in chunks until EOF.
     size_t cap = 4096;
     size_t len = 0;
-    char* buf = (char*)malloc(cap);
+    char* buf = (char*)dragon_xmalloc(cap);
     while (1) {
         if (len + 1024 > cap) {
             cap *= 2;
-            char* nb = (char*)realloc(buf, cap);
-            if (!nb) { free(buf); return dragon_string_alloc("", 0); }
+            char* nb = (char*)dragon_realloc_nullable(buf, cap);
+            if (!nb) { free(buf); dragon_raise_oom(); }
             buf = nb;
         }
         size_t n = fread(buf + len, 1, cap - len - 1, f);
@@ -643,12 +643,12 @@ const char* dragon_file_read_bytes(void* handle) {
     // DragonString so the result is still a single allocation.
     size_t cap = 4096;
     size_t len = 0;
-    char* buf = (char*)malloc(cap);
+    char* buf = (char*)dragon_xmalloc(cap);
     while (1) {
         if (len + 1024 > cap) {
             cap *= 2;
-            char* nb = (char*)realloc(buf, cap);
-            if (!nb) { free(buf); return dragon_string_alloc("", 0); }
+            char* nb = (char*)dragon_realloc_nullable(buf, cap);
+            if (!nb) { free(buf); dragon_raise_oom(); }
             buf = nb;
         }
         size_t n = fread(buf + len, 1, cap - len, f);
@@ -697,7 +697,8 @@ DragonGenerator* dragon_generator_create_typed(
 
     void* heap_args = NULL;
     if (args_size > 0 && args) {
-        heap_args = malloc((size_t)args_size);
+        heap_args = dragon_malloc_nullable((size_t)args_size);
+        if (!heap_args) { free(gen); dragon_raise_oom(); }
         memcpy(heap_args, args, (size_t)args_size);
         // Patch field 0 (DragonGenerator*) so the trampoline can address self.
         *(DragonGenerator**)heap_args = gen;
@@ -860,7 +861,7 @@ int64_t dragon_class_descriptor_create(const char* name, int64_t constructor,
             p = ((DragonClassDescriptor*)(void*)p)->parent;
         }
     }
-    desc->ancestor_ids = (int64_t*)malloc(count * sizeof(int64_t));
+    desc->ancestor_ids = (int64_t*)dragon_xmalloc_n(count, sizeof(int64_t));
     desc->num_ancestors = count;
     desc->ancestor_ids[0] = class_id;
     {
