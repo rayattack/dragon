@@ -1,0 +1,3 @@
+from zzz_no_such_module import qqq
+
+print("hi")

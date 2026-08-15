@@ -1,0 +1,41 @@
+"""Same Box / BoxHolder names as collide_methret_one.dr; describe returns a
+different class whose only method is rattle, not shout."""
+
+
+class Gadget {
+    def() {
+        self.gear: str = "two-gadget"
+    }
+
+    def rattle() -> str {
+        return "rattle:" + self.gear
+    }
+}
+
+
+class Box {
+    def() {
+        self.label: str = "two-box"
+    }
+
+    def describe() -> Gadget {
+        return Gadget()
+    }
+}
+
+
+class BoxHolder {
+    def() {
+        self.b: Box = Box()
+    }
+
+    def poke() -> str {
+        return self.b.describe().rattle()
+    }
+}
+
+
+def two_poke() -> str {
+    h: BoxHolder = BoxHolder()
+    return h.poke()
+}

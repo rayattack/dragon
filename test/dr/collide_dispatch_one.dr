@@ -1,0 +1,89 @@
+"""Declares Worker / WorkerIter with module-one method bodies;
+collide_dispatch_two.dr reuses the names with identical layouts."""
+
+LOG: list[str] = []
+
+
+class Worker {
+    def() {
+        self.tag: str = "one-tag"
+    }
+
+    def run() -> str {
+        return "one:" + self.tag
+    }
+
+    def log_run() -> str {
+        entry: str = "one:" + self.tag
+        LOG.append(entry)
+        return entry
+    }
+}
+
+
+class WorkerIter {
+    def() {
+        self.i: int = 0
+    }
+
+    def __iter__() -> WorkerIter {
+        return self
+    }
+
+    def __next__() -> Worker {
+        if self.i >= 1 {
+            raise StopIteration("done")
+        }
+        self.i = self.i + 1
+        return Worker()
+    }
+}
+
+
+def one_direct() -> str {
+    out: str = ""
+    for w in WorkerIter() {
+        out = w.run()
+    }
+    return out
+}
+
+
+def one_defer() -> str {
+    before: int = len(LOG)
+    for w in WorkerIter() {
+        defer w.log_run()
+    }
+    if len(LOG) == before {
+        return "missing"
+    }
+    return LOG[len(LOG) - 1]
+}
+
+
+def one_make_iter() -> WorkerIter {
+    return WorkerIter()
+}
+
+
+def one_log_last() -> str {
+    if len(LOG) == 0 {
+        return "empty"
+    }
+    return LOG[len(LOG) - 1]
+}
+
+
+def one_log_len() -> int {
+    return len(LOG)
+}
+
+
+def one_fire() -> str {
+    out: str = ""
+    for w in WorkerIter() {
+        t: Task[str] = fire w.run()
+        out = t.join()
+    }
+    return out
+}

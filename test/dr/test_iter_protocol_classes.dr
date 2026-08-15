@@ -1,0 +1,121 @@
+"""The __iter__/__next__ protocol with a separate iterator class, and typed
+loop variables from __next__'s declared return. Pre-fix: __next__ resolved
+against the iterable's class, so a non-self-returning __iter__ crashed the
+compiler, and a protocol loop variable stayed untyped (fire w.run() reported
+Task[<unknown>])."""
+
+from unittest import TestCase, main
+
+
+class Counter {
+    def(limit: int) {
+        self.limit: int = limit
+    }
+
+    def __iter__() -> CounterIter {
+        return CounterIter(self.limit)
+    }
+}
+
+
+class CounterIter {
+    def(limit: int) {
+        self.limit: int = limit
+        self.i: int = 0
+    }
+
+    def __next__() -> int {
+        if self.i >= self.limit {
+            raise StopIteration("done")
+        }
+        self.i = self.i + 1
+        return self.i
+    }
+}
+
+
+class Words {
+    def() {
+        self.done: bool = False
+    }
+
+    def __iter__() -> WordsIter {
+        return WordsIter()
+    }
+}
+
+
+class WordsIter {
+    def() {
+        self.i: int = 0
+    }
+
+    def __next__() -> str {
+        if self.i >= 2 {
+            raise StopIteration("done")
+        }
+        self.i = self.i + 1
+        return "w" + str(self.i)
+    }
+}
+
+
+class Job {
+    def(name: str) {
+        self.name: str = name
+    }
+
+    def run() -> str {
+        return "ran:" + self.name
+    }
+}
+
+
+class Jobs {
+    def() {
+        self.i: int = 0
+    }
+
+    def __iter__() -> Jobs {
+        return self
+    }
+
+    def __next__() -> Job {
+        if self.i >= 1 {
+            raise StopIteration("done")
+        }
+        self.i = self.i + 1
+        return Job("j1")
+    }
+}
+
+
+class IterProtocolClassTests(TestCase) {
+    def test_separate_iterator_class() {
+        total: int = 0
+        for n in Counter(3) {
+            total = total + n
+        }
+        self.assertEqual(total, 6)
+    }
+
+    def test_separate_iterator_str_elements() {
+        joined: str = ""
+        for w in Words() {
+            joined = joined + w.upper()
+        }
+        self.assertEqual(joined, "W1W2")
+    }
+
+    def test_fire_on_protocol_loop_var() {
+        out: str = ""
+        for j in Jobs() {
+            t: Task[str] = fire j.run()
+            out = t.join()
+        }
+        self.assertEqual(out, "ran:j1")
+    }
+}
+
+
+main([IterProtocolClassTests()])

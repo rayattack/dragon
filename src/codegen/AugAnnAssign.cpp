@@ -238,7 +238,8 @@ void CodeGen::visit(AugAssignStmt& node) {
         // d[key] OP= value / lst[i] OP= value. KeyError-if-absent is preserved
         // by the runtime get (Python reads d[k] before the op).
         Type::Kind vk = impl_->resolveDictValueKind(sub->object.get());
-        bool intKeyed = impl_->dictKeyIsInt(sub->object.get());
+        Type::Kind dictKk = impl_->resolveDictKeyKind(sub->object.get());
+        bool intKeyed = dictKk == Type::Kind::Int || dictKk == Type::Kind::Float;
         bool strKeyed = !intKeyed;
         // str-keyed dict, int value: fused single-probe read-modify-write.
         if (strKeyed && vk == Type::Kind::Int) {
@@ -285,6 +286,8 @@ void CodeGen::visit(AugAssignStmt& node) {
             llvm::Value* dict = impl_->lastValue;
             sub->index->accept(*this);
             llvm::Value* key = impl_->lastValue;
+            if (dictKk == Type::Kind::Float)
+                key = impl_->emitFloatDictKeyBits(key);
             if (key->getType() == impl_->i1Type)
                 key = impl_->builder->CreateZExt(key, impl_->i64Type);
             llvm::Value* tagInt = llvm::ConstantInt::get(impl_->i64Type, /*TAG_INT*/0);
@@ -314,6 +317,8 @@ void CodeGen::visit(AugAssignStmt& node) {
             llvm::Value* key = impl_->lastValue;
             llvm::Value* cur = nullptr;
             if (intKeyed) {
+                if (dictKk == Type::Kind::Float)
+                    key = impl_->emitFloatDictKeyBits(key);
                 if (key->getType() == impl_->i1Type)
                     key = impl_->builder->CreateZExt(key, impl_->i64Type);
                 cur = impl_->builder->CreateCall(
@@ -354,6 +359,8 @@ void CodeGen::visit(AugAssignStmt& node) {
             llvm::Value* key = impl_->lastValue;
             llvm::Value* cur = nullptr;
             if (intKeyed) {
+                if (dictKk == Type::Kind::Float)
+                    key = impl_->emitFloatDictKeyBits(key);
                 if (key->getType() == impl_->i1Type)
                     key = impl_->builder->CreateZExt(key, impl_->i64Type);
                 cur = impl_->builder->CreateCall(

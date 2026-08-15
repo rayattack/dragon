@@ -152,7 +152,12 @@ DragonBytes* dragon_hash_ctx_new(const char* algorithm) {
 
 DragonBytes* dragon_hash_ctx_updated(DragonBytes* state, DragonBytes* data) {
     dragon_hash_ctx_check(state);
-    DragonBytes* out = dragon_bytes_new((const uint8_t*)state->data, state->len);
+    bool unique = state->header.refcount == 1 &&
+                  !dragon_is_immortal(state) &&
+                  !(state->header.gc_flags & GC_FLAG_SHARED);
+    DragonBytes* out = unique
+        ? state
+        : dragon_bytes_new((const uint8_t*)state->data, state->len);
     DragonHashCtx* c = (DragonHashCtx*)out->data;
     size_t n = data ? (size_t)data->len : 0;
     const unsigned char* p = (data && data->data)

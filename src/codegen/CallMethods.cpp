@@ -1568,7 +1568,12 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
 
         // Int-keyed dicts store native i64 keys: route to the dragon_dict_int_*
         // family, else the char*-keyed generics are a signature mismatch.
-        bool intKeyed = impl_->dictKeyIsInt(attr.object.get());
+        Type::Kind dictKk = impl_->resolveDictKeyKind(attr.object.get());
+        bool intKeyed = dictKk == Type::Kind::Int || dictKk == Type::Kind::Float;
+        auto normDictKey = [&](llvm::Value* k) {
+            return dictKk == Type::Kind::Float ? impl_->emitFloatDictKeyBits(k)
+                                               : k;
+        };
 
         // dragon_dict_get* return raw i64: re-cast to the dict's native value
         // type (D030), else a target-less f"{d.get(k)}" prints a pointer int.
@@ -1618,7 +1623,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
 
         if (method == "get" && node.args.size() == 1) {
             node.args[0]->accept(*this);
-            llvm::Value* key = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+            llvm::Value* key = normDictKey(impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases));
             // Heap-valued dict: own the returned value (the getter increfs) so
             // the binding's scope-decref balances - a bare borrow would UAF.
             if (isHeapValueKind(dictValueKind())) {
@@ -1637,7 +1642,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
 
         if (method == "get" && node.args.size() == 2) {
             node.args[0]->accept(*this);
-            llvm::Value* key = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+            llvm::Value* key = normDictKey(impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases));
             node.args[1]->accept(*this);
             llvm::Value* defVal = impl_->lastValue;
             // Str-keyed str-valued dict: route to the owned-str getter; the
@@ -1689,7 +1694,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
 
         if (method == "has_key" && node.args.size() == 1) {
             node.args[0]->accept(*this);
-            llvm::Value* key = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+            llvm::Value* key = normDictKey(impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases));
             impl_->lastValue = impl_->builder->CreateCall(
                 impl_->runtimeFuncs[intKeyed ? "dragon_dict_int_has_key"
                                              : "dragon_dict_has_key"],
@@ -1742,23 +1747,28 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
 
         if (method == "pop" && node.args.size() == 1) {
             node.args[0]->accept(*this);
-            llvm::Value* key = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
-            impl_->lastValue = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_dict_pop"], {obj, key}, "dictpop");
+            llvm::Value* key = normDictKey(impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases));
+            llvm::Value* popped = impl_->builder->CreateCall(
+                impl_->runtimeFuncs[intKeyed ? "dragon_dict_int_pop"
+                                             : "dragon_dict_pop"],
+                {obj, key}, "dictpop");
+            impl_->lastValue = intKeyed ? coerceDictValue(popped) : popped;
             return true;
         }
 
         if (method == "pop" && node.args.size() == 2) {
             node.args[0]->accept(*this);
-            llvm::Value* key = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+            llvm::Value* key = normDictKey(impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases));
             node.args[1]->accept(*this);
             llvm::Value* defVal = impl_->lastValue;
             if (defVal->getType() == impl_->i1Type) defVal = impl_->builder->CreateZExt(defVal, impl_->i64Type);
             else if (defVal->getType() == impl_->f64Type) defVal = impl_->builder->CreateBitCast(defVal, impl_->i64Type);
             else if (defVal->getType()->isPointerTy()) defVal = impl_->builder->CreatePtrToInt(defVal, impl_->i64Type);
-            impl_->lastValue = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_dict_pop_default"],
+            llvm::Value* popped = impl_->builder->CreateCall(
+                impl_->runtimeFuncs[intKeyed ? "dragon_dict_int_pop_default"
+                                             : "dragon_dict_pop_default"],
                 {obj, key, defVal}, "dictpopdef");
+            impl_->lastValue = intKeyed ? coerceDictValue(popped) : popped;
             return true;
         }
 
@@ -1778,7 +1788,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
 
         if (method == "setdefault" && node.args.size() == 2) {
             node.args[0]->accept(*this);
-            llvm::Value* key = impl_->lastValue;
+            llvm::Value* key = normDictKey(impl_->lastValue);
             node.args[1]->accept(*this);
             llvm::Value* defVal = impl_->lastValue;
             // Heap-valued setdefault: own the result via the incref-on-return
@@ -1807,7 +1817,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             else if (defVal->getType() == impl_->f64Type) defVal = impl_->builder->CreateBitCast(defVal, impl_->i64Type);
             else if (defVal->getType()->isPointerTy()) defVal = impl_->builder->CreatePtrToInt(defVal, impl_->i64Type);
             impl_->lastValue = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_dict_setdefault"],
+                impl_->runtimeFuncs[intKeyed ? "dragon_dict_int_setdefault"
+                                             : "dragon_dict_setdefault"],
                 {obj, key, defVal}, "dictsetdef");
             return true;
         }
@@ -2782,48 +2793,6 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 impl_->popArgTempCleanups(argTempBases);
                 impl_->drainBorrowTemps(argTemps);
                 impl_->emitMoveOutSlots(node);
-                return true;
-            }
-        }
-    }
-
-    // Stdlib module method dispatch (e.g. math.sqrt)
-    if (auto* objName = dynamic_cast<NameExpr*>(attr.object.get())) {
-        std::string qualName = objName->name + "." + method;
-        auto aliasIt = impl_->symbolAliases.find(qualName);
-        if (aliasIt != impl_->symbolAliases.end()) {
-            const std::string& cName = aliasIt->second;
-            // Math functions: double -> double
-            if (node.args.size() == 1) {
-                node.args[0]->accept(*this);
-                llvm::Value* arg = impl_->lastValue;
-                if (arg->getType() == impl_->i64Type)
-                    arg = impl_->builder->CreateSIToFP(arg, impl_->f64Type);
-                auto* fn = impl_->getOrDeclareRuntime(cName,
-                    llvm::FunctionType::get(impl_->f64Type, {impl_->f64Type}, false));
-                impl_->lastValue = impl_->builder->CreateCall(fn, {arg}, cName);
-                return true;
-            }
-            // Two-arg math functions (e.g., pow)
-            if (node.args.size() == 2) {
-                node.args[0]->accept(*this);
-                llvm::Value* arg1 = impl_->lastValue;
-                node.args[1]->accept(*this);
-                llvm::Value* arg2 = impl_->lastValue;
-                if (arg1->getType() == impl_->i64Type)
-                    arg1 = impl_->builder->CreateSIToFP(arg1, impl_->f64Type);
-                if (arg2->getType() == impl_->i64Type)
-                    arg2 = impl_->builder->CreateSIToFP(arg2, impl_->f64Type);
-                auto* fn = impl_->getOrDeclareRuntime(cName,
-                    llvm::FunctionType::get(impl_->f64Type, {impl_->f64Type, impl_->f64Type}, false));
-                impl_->lastValue = impl_->builder->CreateCall(fn, {arg1, arg2}, cName);
-                return true;
-            }
-            // Zero-arg (e.g., time.time()) - returns double
-            if (node.args.empty()) {
-                auto* fn = impl_->getOrDeclareRuntime(cName,
-                    llvm::FunctionType::get(impl_->f64Type, {}, false));
-                impl_->lastValue = impl_->builder->CreateCall(fn, {}, cName);
                 return true;
             }
         }

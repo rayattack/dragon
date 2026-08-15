@@ -150,9 +150,8 @@ void CodeGen::visit(FireExpr& node) {
                     if (vmIt != impl_->varClassOwningModule.end()) {
                         owningModule = vmIt->second;
                     } else if (!className.empty()) {
-                        auto cmIt = impl_->classOwningModule.find(className);
-                        if (cmIt != impl_->classOwningModule.end())
-                            owningModule = cmIt->second;
+                        owningModule =
+                            impl_->resolveClassOwningModule(className);
                     }
                 }
             }

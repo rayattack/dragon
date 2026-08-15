@@ -451,6 +451,9 @@ void CodeGen::Impl::declareRuntimeFunctions() {
     getOrDeclareRuntime("dragon_dict_set_str_ptr",
         llvm::FunctionType::get(voidType, {i8PtrType, i8PtrType, i8PtrType, i64Type}, false));
 
+    getOrDeclareRuntime("dragon_dict_mark_float_keys",
+        llvm::FunctionType::get(voidType, {i8PtrType}, false));
+
     // --- D030 Phase 3.G: typed dict ops for int-keyed monomorphic dicts ---
     // void dragon_dict_int_set(ptr dict, i64 key, i64 value)
     getOrDeclareRuntime("dragon_dict_int_set",

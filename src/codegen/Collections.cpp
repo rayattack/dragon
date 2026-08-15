@@ -207,15 +207,33 @@ void CodeGen::visit(DictExpr& node) {
         impl_->runtimeFuncs["dragon_dict_new"], {capVal}, "dict");
 
     bool intKeys = false;
+    bool floatKeys = false;
+    if (auto* dt = dynamic_cast<DictType*>(node.type.get())) {
+        if (dt->keyType && dt->keyType->kind() == Type::Kind::Int) intKeys = true;
+        if (dt->keyType && dt->keyType->kind() == Type::Kind::Float) {
+            intKeys = true;
+            floatKeys = true;
+        }
+    }
     for (auto& entry : node.entries) {
         if (!entry.first) continue;
         if (entry.first->type && entry.first->type->kind() == Type::Kind::Int) {
             intKeys = true;
+        } else if (entry.first->type &&
+                   entry.first->type->kind() == Type::Kind::Float) {
+            intKeys = true;
+            floatKeys = true;
         } else if (dynamic_cast<IntegerLiteral*>(entry.first.get())) {
             intKeys = true;
+        } else if (dynamic_cast<FloatLiteral*>(entry.first.get())) {
+            intKeys = true;
+            floatKeys = true;
         }
         break;
     }
+    if (floatKeys)
+        impl_->builder->CreateCall(
+            impl_->runtimeFuncs["dragon_dict_mark_float_keys"], {dict});
 
     for (auto& entry : node.entries) {
         // {**other_dict, ...} -> dragon_dict_update(dict, other_dict)
@@ -236,6 +254,7 @@ void CodeGen::visit(DictExpr& node) {
         llvm::Value* val = impl_->lastValue;
 
         if (intKeys) {
+            if (floatKeys) key = impl_->emitFloatDictKeyBits(key);
             // Coerce the key to i64 (bool widens; ptr would be a type bug at this point).
             if (key->getType() == impl_->i1Type)
                 key = impl_->builder->CreateZExt(key, impl_->i64Type);

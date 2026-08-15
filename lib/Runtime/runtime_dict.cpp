@@ -484,6 +484,10 @@ void* dragon_dict_get_ptr_default(DragonDict* d, const char* key, void* def) {
     return v;
 }
 
+void dragon_dict_mark_float_keys(DragonDict* d) {
+    if (d) d->key_kind = DRAGON_DICT_KEY_FLOAT;
+}
+
 DragonList* dragon_dict_keys(DragonDict* d) {
     if (d && d->key_kind == DRAGON_DICT_KEY_STR) {
         // str-keyed: the keys list co-owns each key (incref + TAG_STR) so it
@@ -497,8 +501,11 @@ DragonList* dragon_dict_keys(DragonDict* d) {
         return l;
     }
     // int-keyed (or empty): keys are raw i64s in the pointer slot - TAG_INT,
-    // never incref'd/decref'd as strings.
-    DragonList* l = dragon_list_new(d ? d->used : 0);
+    // never incref'd/decref'd as strings. Float-keyed: same bits, TAG_FLOAT
+    // so the list renders them as doubles.
+    DragonList* l = (d && d->key_kind == DRAGON_DICT_KEY_FLOAT)
+        ? dragon_list_new_tagged(d->used, TAG_FLOAT)
+        : dragon_list_new(d ? d->used : 0);
     if (d) {
         for (int64_t i = 0; i < d->size; i++) {
             if (d->entries[i].dead) continue;
@@ -652,6 +659,8 @@ DragonList* dragon_dict_items(DragonDict* d) {
             if (d->key_kind == DRAGON_DICT_KEY_STR) {
                 dragon_incref_str(d->entries[i].key);
                 dragon_tuple_set_tagged(t, 0, (int64_t)d->entries[i].key, TAG_STR);
+            } else if (d->key_kind == DRAGON_DICT_KEY_FLOAT) {
+                dragon_tuple_set_tagged(t, 0, (int64_t)d->entries[i].key, TAG_FLOAT);
             } else {
                 dragon_tuple_set(t, 0, (int64_t)d->entries[i].key);
             }
@@ -705,6 +714,8 @@ int64_t dragon_dict_popitem(DragonDict* d) {
     // transfers once); int-keyed "key" is an i64, stored untagged.
     if (d->key_kind == DRAGON_DICT_KEY_STR) {
         dragon_tuple_set_tagged(t, 0, (int64_t)e.key, TAG_STR);
+    } else if (d->key_kind == DRAGON_DICT_KEY_FLOAT) {
+        dragon_tuple_set_tagged(t, 0, (int64_t)e.key, TAG_FLOAT);
     } else {
         dragon_tuple_set(t, 0, (int64_t)e.key);
     }
@@ -867,6 +878,8 @@ void dragon_dict_update(DragonDict* d, DragonDict* other) {
         } else {
             dragon_dict_int_set_tagged(d, (int64_t)(uintptr_t)other->entries[i].key,
                                        other->entries[i].value, other->entries[i].tag);
+            if (other->key_kind == DRAGON_DICT_KEY_FLOAT)
+                d->key_kind = DRAGON_DICT_KEY_FLOAT;
         }
     }
 }
@@ -912,6 +925,7 @@ DragonDict* dragon_dict_copy_excluding(DragonDict* d, const char** names,
                                        int64_t name_count) {
     DragonDict* copy = dragon_dict_new(d ? d->capacity : 4);
     if (!d) return copy;
+    copy->key_kind = d->key_kind;
     for (int64_t i = 0; i < d->size; i++) {
         if (d->entries[i].dead) continue;
         if (d->key_kind == DRAGON_DICT_KEY_STR && name_count > 0) {
@@ -947,6 +961,7 @@ DragonDict* dragon_dict_copy_excluding(DragonDict* d, const char** names,
 DragonDict* dragon_dict_deep_copy(DragonDict* d) {
     DragonDict* copy = dragon_dict_new(d ? d->capacity : 4);
     if (d) {
+        copy->key_kind = d->key_kind;
         for (int64_t i = 0; i < d->size; i++) {
             if (d->entries[i].dead) continue;
             int64_t val = dragon_deep_copy_tagged(d->entries[i].value,
@@ -969,6 +984,7 @@ DragonDict* dragon_dict_deep_copy(DragonDict* d) {
 DragonDict* dragon_dict_copy(DragonDict* d) {
     DragonDict* copy = dragon_dict_new(d ? d->capacity : 4);
     if (d) {
+        copy->key_kind = d->key_kind;
         for (int64_t i = 0; i < d->size; i++) {
             if (d->entries[i].dead) continue;
             int64_t val = d->entries[i].value;

@@ -334,19 +334,15 @@ std::string CodeGen::Impl::resolveExprClassName(Expr* expr) {
                             if (rmIt != varClassOwningModule.end()) objMod = rmIt->second;
                         }
                     }
-                    if (objMod.empty()) {
-                        auto cmIt = classOwningModule.find(objClass);
-                        if (cmIt != classOwningModule.end()) objMod = cmIt->second;
+                    if (objMod.empty()) objMod = resolveClassOwningModule(objClass);
+                    std::string resolvedSym;
+                    if (resolveMethodFunction(objMod, objClass,
+                                              attrCallee->attribute,
+                                              &resolvedSym)) {
+                        auto mIt = methodReturnClassNames.find(resolvedSym);
+                        if (mIt != methodReturnClassNames.end())
+                            return mIt->second;
                     }
-                    std::string methKey = mangleClass(objMod, objClass) + "_" + attrCallee->attribute;
-                    auto mIt = methodReturnClassNames.find(methKey);
-                    if (mIt != methodReturnClassNames.end())
-                        return mIt->second;
-                    // Fallback to bare key for legacy / non-mangled paths.
-                    methKey = objClass + "_" + attrCallee->attribute;
-                    auto mIt2 = methodReturnClassNames.find(methKey);
-                    if (mIt2 != methodReturnClassNames.end())
-                        return mIt2->second;
                 }
             }
         }
@@ -947,12 +943,12 @@ std::string CodeGen::Impl::containerReprFn(Expr* e) {
             return "dragon_set_to_str";
         if (vk == VarKind::Dict || dynamic_cast<DictExpr*>(e) ||
             dynamic_cast<DictCompExpr*>(e))
-            return dictKeyIsInt(e) ? "dragon_dict_int_to_str" : "dragon_dict_to_str";
+            return dictKeyUsesIntEngine(e) ? "dragon_dict_int_to_str" : "dragon_dict_to_str";
         if (vk == VarKind::Tuple || dynamic_cast<TupleExpr*>(e))
             return "dragon_tuple_to_str";
         if (e->type) {
             if (e->type->kind() == Type::Kind::Dict)
-                return dictKeyIsInt(e) ? "dragon_dict_int_to_str" : "dragon_dict_to_str";
+                return dictKeyUsesIntEngine(e) ? "dragon_dict_int_to_str" : "dragon_dict_to_str";
             if (e->type->kind() == Type::Kind::Tuple) return "dragon_tuple_to_str";
             // List kind is ambiguous (set is also a ListType) - VarKind above
             // already classified those, so don't guess from the type kind here.

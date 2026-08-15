@@ -39,7 +39,7 @@ bool CodeGen::generate(dragon::Module& entryModule,
     impl_->depModulePtrs = depModules;
     impl_->entryModulePtr = &entryModule;
 
-    // Track which modules were resolved as files (skip StdlibRegistry for them)
+    // Track which modules were resolved as files from the compile-time import DAG
     for (auto* dep : depModules) {
         if (!dep->moduleName.empty())
             impl_->fileResolvedModules.insert(dep->moduleName);

@@ -743,45 +743,6 @@ void CodeGen::visit(CallExpr& node) {
             return;
         }
 
-        // Check stdlib symbol aliases (from `from math import sqrt` etc.)
-        auto aliasIt = impl_->symbolAliases.find(name);
-        if (aliasIt != impl_->symbolAliases.end()) {
-            // C-aliased functions are positional-only; diagnose kwargs rather than
-            // silently dropping them (D040).
-            if (!node.kwArgs.empty()) {
-                impl_->addError(
-                    "function '" + name + "' (C alias) does not accept "
-                    "keyword arguments",
-                    node.location());
-                return;
-            }
-            const std::string& cName = aliasIt->second;
-            if (node.args.size() == 1) {
-                node.args[0]->accept(*this);
-                llvm::Value* arg = impl_->lastValue;
-                if (arg->getType() == impl_->i64Type)
-                    arg = impl_->builder->CreateSIToFP(arg, impl_->f64Type);
-                auto* fn = impl_->getOrDeclareRuntime(cName,
-                    llvm::FunctionType::get(impl_->f64Type, {impl_->f64Type}, false));
-                impl_->lastValue = impl_->builder->CreateCall(fn, {arg}, cName);
-                return;
-            }
-            if (node.args.size() == 2) {
-                node.args[0]->accept(*this);
-                llvm::Value* a1 = impl_->lastValue;
-                node.args[1]->accept(*this);
-                llvm::Value* a2 = impl_->lastValue;
-                if (a1->getType() == impl_->i64Type)
-                    a1 = impl_->builder->CreateSIToFP(a1, impl_->f64Type);
-                if (a2->getType() == impl_->i64Type)
-                    a2 = impl_->builder->CreateSIToFP(a2, impl_->f64Type);
-                auto* fn = impl_->getOrDeclareRuntime(cName,
-                    llvm::FunctionType::get(impl_->f64Type, {impl_->f64Type, impl_->f64Type}, false));
-                impl_->lastValue = impl_->builder->CreateCall(fn, {a1, a2}, cName);
-                return;
-            }
-        }
-
         // No dynamic construction through a class value (D021/D025): a VarKind::Type
         // var whose concrete class isn't known at compile time can't be constructed.
         {

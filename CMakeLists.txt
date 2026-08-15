@@ -94,7 +94,6 @@ set(DRAGON_SOURCES
     src/codegen/ImplMethods.cpp
     src/codegen/ImplMethods2.cpp
     src/codegen/EscapeAnalysis.cpp
-    src/StdlibRegistry.cpp
     src/DiagnosticFormatter.cpp
     src/TypeHintEnforcer.cpp
     src/ModuleResolver.cpp

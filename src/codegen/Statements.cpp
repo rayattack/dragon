@@ -724,9 +724,7 @@ void CodeGen::visit(DeferStmt& node) {
                 if (vmIt != impl_->varClassOwningModule.end()) {
                     owningModule = vmIt->second;
                 } else if (!className.empty()) {
-                    auto cmIt = impl_->classOwningModule.find(className);
-                    if (cmIt != impl_->classOwningModule.end())
-                        owningModule = cmIt->second;
+                    owningModule = impl_->resolveClassOwningModule(className);
                 }
             }
         }
@@ -735,12 +733,10 @@ void CodeGen::visit(DeferStmt& node) {
         if (className.empty() && attrExpr->object->type) {
             if (auto* inst = dynamic_cast<InstanceType*>(
                     attrExpr->object->type.get())) {
-                if (inst->classType) className = inst->classType->name;
-            }
-            if (!className.empty()) {
-                auto cmIt = impl_->classOwningModule.find(className);
-                if (cmIt != impl_->classOwningModule.end())
-                    owningModule = cmIt->second;
+                if (inst->classType) {
+                    className = inst->classType->name;
+                    owningModule = inst->classType->definingModule;
+                }
             }
         }
         if (!className.empty()) {
@@ -1273,13 +1269,17 @@ void CodeGen::visit(DeleteStmt& node) {
                 continue;
             }
 
-            bool intKeyed = impl_->dictKeyIsInt(sub->object.get());
+            Type::Kind dictKk = impl_->resolveDictKeyKind(sub->object.get());
+            bool intKeyed =
+                dictKk == Type::Kind::Int || dictKk == Type::Kind::Float;
             sub->object->accept(*this);
             llvm::Value* dict = impl_->lastValue;
             sub->index->accept(*this);
             llvm::Value* key = impl_->lastValue;
 
             if (intKeyed) {
+                if (dictKk == Type::Kind::Float)
+                    key = impl_->emitFloatDictKeyBits(key);
                 if (key->getType() == impl_->i1Type)
                     key = impl_->builder->CreateZExt(key, impl_->i64Type);
                 else if (key->getType()->isPointerTy())
@@ -1374,17 +1374,7 @@ void CodeGen::visit(DeleteStmt& node) {
         }
     }
 }
-void CodeGen::visit(ImportStmt& node) {
-    auto& registry = StdlibRegistry::instance();
-    std::set<std::string> dummy;
-    for (auto& alias : node.names) {
-        // Skip StdlibRegistry for modules resolved as .dr/.py files
-        if (impl_->fileResolvedModules.count(alias.name)) continue;
-        registry.resolveImport(alias.name, alias.asName,
-                               impl_->symbolAliases, dummy);
-        impl_->importedModules.insert(alias.name);
-    }
-}
+void CodeGen::visit(ImportStmt&) {}
 
 void CodeGen::visit(FromImportStmt& node) {
     // For file-resolved modules the imported name enters scope bare, but its LLVM symbol is
@@ -1426,17 +1416,6 @@ void CodeGen::visit(FromImportStmt& node) {
             }
         }
         return;
-    }
-    auto& registry = StdlibRegistry::instance();
-    std::set<std::string> dummy;
-    if (node.names.empty()) {
-        registry.resolveFromImportStar(node.module,
-                                       impl_->symbolAliases, dummy);
-    } else {
-        for (auto& alias : node.names) {
-            registry.resolveFromImport(node.module, alias.name, alias.asName,
-                                       impl_->symbolAliases, dummy);
-        }
     }
 }
 

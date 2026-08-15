@@ -2543,11 +2543,28 @@ TEST(TypeCheckerTest, GenericAndMonomorphicSameNameRejected) {
         "}\n"));
 }
 
-TEST(TypeCheckerTest, DictFloatKeyRejected) {
-    // No float key path exists in the runtime/codegen (J1); without this
-    // rejection the program died on LLVM verification instead of a diagnostic.
+TEST(TypeCheckerTest, IterReturningClassWithoutNextRejected) {
     EXPECT_TRUE(checkHasErrors(
-        "d: dict[float, int] = {}\n"));
+        "class Bag {\n"
+        "    def() {\n"
+        "        self.n: int = 0\n"
+        "    }\n"
+        "    def __iter__() -> Sack {\n"
+        "        return Sack()\n"
+        "    }\n"
+        "}\n"
+        "class Sack {\n"
+        "    def() {\n"
+        "        self.n: int = 0\n"
+        "    }\n"
+        "}\n"
+        "def f() -> int {\n"
+        "    total: int = 0\n"
+        "    for x in Bag() {\n"
+        "        total = total + 1\n"
+        "    }\n"
+        "    return total\n"
+        "}\n"));
 }
 
 TEST(TypeCheckerTest, InOnScalarRejected) {

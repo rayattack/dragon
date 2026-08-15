@@ -142,7 +142,9 @@ void CodeGen::visit(AssignStmt& node) {
             if (isDict) {
                 // D030: int-keyed dicts route through dragon_dict_int_*; resolve
                 // the key kind before evaluating so the whole write path branches once.
-                bool intKeyed = impl_->dictKeyIsInt(sub->object.get());
+                Type::Kind dictKk = impl_->resolveDictKeyKind(sub->object.get());
+                bool intKeyed =
+                    dictKk == Type::Kind::Int || dictKk == Type::Kind::Float;
 
                 sub->object->accept(*this);
                 llvm::Value* dict = impl_->lastValue;
@@ -150,6 +152,8 @@ void CodeGen::visit(AssignStmt& node) {
                 llvm::Value* key = impl_->lastValue;
 
                 if (intKeyed) {
+                    if (dictKk == Type::Kind::Float)
+                        key = impl_->emitFloatDictKeyBits(key);
                     if (key->getType() == impl_->i1Type)
                         key = impl_->builder->CreateZExt(key, impl_->i64Type);
                     else if (key->getType()->isPointerTy())

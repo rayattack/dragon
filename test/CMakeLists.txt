@@ -218,6 +218,13 @@ foreach(_guard decode_dict_class_guard decode_dict_intkey_guard)
         PASS_REGULAR_EXPRESSION "never falls back to Any")
 endforeach()
 
+foreach(_guard import_missing_guard from_import_missing_guard)
+    add_test(NAME dr_${_guard}
+        COMMAND $<TARGET_FILE:dragon> check ${CMAKE_CURRENT_SOURCE_DIR}/dr/${_guard}.dr)
+    set_tests_properties(dr_${_guard} PROPERTIES
+        PASS_REGULAR_EXPRESSION "cannot find module 'zzz_no_such_module'")
+endforeach()
+
 # D044 - generics `.py`-mode parity. Registered explicitly because the test_*.dr
 # glob above is .dr-only; this file must keep its .py extension to parse in
 # indentation mode (the whole point of the surface-parity check).

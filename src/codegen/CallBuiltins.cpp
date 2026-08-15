@@ -54,19 +54,17 @@ void CodeGen::emitPrintArgRaw(Expr* argExpr) {
                     impl_->runtimeFuncs["dragon_print_str_raw"], {arg});
                 return;
             }
-            bool intKeyedSub = impl_->dictKeyIsInt(subscript->object.get());
-            if (!intKeyedSub && subscript->object->type &&
-                subscript->object->type->kind() == Type::Kind::Dict) {
-                if (auto* dt = dynamic_cast<DictType*>(subscript->object->type.get())) {
-                    if (dt->keyType && dt->keyType->kind() == Type::Kind::Int)
-                        intKeyedSub = true;
-                }
-            }
+            Type::Kind subDictKk =
+                impl_->resolveDictKeyKind(subscript->object.get());
+            bool intKeyedSub = subDictKk == Type::Kind::Int ||
+                               subDictKk == Type::Kind::Float;
             subscript->object->accept(*this);
             llvm::Value* dict = impl_->lastValue;
             subscript->index->accept(*this);
             llvm::Value* key = impl_->lastValue;
             if (intKeyedSub) {
+                if (subDictKk == Type::Kind::Float)
+                    key = impl_->emitFloatDictKeyBits(key);
                 if (key->getType() == impl_->i1Type)
                     key = impl_->builder->CreateZExt(key, impl_->i64Type);
                 else if (key->getType()->isPointerTy())
@@ -257,11 +255,9 @@ void CodeGen::emitPrintArgRaw(Expr* argExpr) {
         impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_print_set_raw"], {arg});
     } else if (isPrintDict && (argType == impl_->i8PtrType || argType->isPointerTy())) {
-        bool keyIsInt = impl_->dictKeyIsInt(argExpr);
+        bool keyIsInt = impl_->dictKeyUsesIntEngine(argExpr);
         bool valIsNested = false;  // dict value is itself a container
         if (auto* dt = dynamic_cast<DictType*>(argExpr->type.get())) {
-            if (dt->keyType && dt->keyType->kind() == Type::Kind::Int)
-                keyIsInt = true;
             if (dt->valueType) {
                 auto vk = dt->valueType->kind();
                 valIsNested = vk == Type::Kind::List || vk == Type::Kind::Dict ||

@@ -1,0 +1,148 @@
+"""dict[float, V]: float keys hash and compare by normalized IEEE bits through
+the int-keyed engine. -0.0 and 0.0 are one key; every NaN is one key; keys
+read back (iteration, keys, items, pop) come back as floats."""
+
+import json
+from math import nan
+from unittest import TestCase, main
+
+
+class DictFloatKeyTests(TestCase) {
+    def test_literal_set_get_overwrite() {
+        d: dict[float, str] = {1.5: "a", 2.25: "b"}
+        self.assertEqual(d[1.5], "a")
+        self.assertEqual(d[2.25], "b")
+        d[1.5] = "c"
+        self.assertEqual(d[1.5], "c")
+        self.assertEqual(len(d), 2)
+    }
+
+    def test_empty_annotated_insert() {
+        d: dict[float, int] = {}
+        d[0.5] = 10
+        d[100.125] = 20
+        self.assertEqual(d[0.5], 10)
+        self.assertEqual(d[100.125], 20)
+        self.assertEqual(len(d), 2)
+    }
+
+    def test_negative_zero_folds_to_zero() {
+        d: dict[float, str] = {}
+        d[0.0] = "zero"
+        d[-0.0] = "negzero"
+        self.assertEqual(len(d), 1)
+        self.assertEqual(d[0.0], "negzero")
+        self.assertEqual(d[-0.0], "negzero")
+    }
+
+    def test_nan_is_one_key() {
+        d: dict[float, str] = {}
+        d[nan] = "first"
+        other: float = 0.0 / 0.0
+        d[other] = "second"
+        self.assertEqual(len(d), 1)
+        self.assertEqual(d[nan], "second")
+    }
+
+    def test_contains_and_del() {
+        d: dict[float, int] = {1.25: 1, 2.5: 2}
+        self.assertTrue(1.25 in d)
+        self.assertFalse(9.75 in d)
+        del d[1.25]
+        self.assertFalse(1.25 in d)
+        self.assertEqual(len(d), 1)
+    }
+
+    def test_get_with_default() {
+        d: dict[float, str] = {1.5: "a"}
+        self.assertEqual(d.get(1.5, "z"), "a")
+        self.assertEqual(d.get(9.5, "missing"), "missing")
+        self.assertEqual(d.get(1.5), "a")
+    }
+
+    def test_pop() {
+        d: dict[float, str] = {1.5: "a", 2.5: "b"}
+        got: str = d.pop(1.5)
+        self.assertEqual(got, "a")
+        self.assertEqual(len(d), 1)
+    }
+
+    def test_for_key_loop() {
+        d: dict[float, str] = {0.5: "a", 1.5: "b", 2.5: "c"}
+        total: float = 0.0
+        for k in d {
+            total = total + k
+        }
+        self.assertEqual(total, 4.5)
+    }
+
+    def test_for_key_loop_subscript() {
+        d: dict[float, int] = {0.5: 10, 1.5: 20}
+        keysum: float = 0.0
+        valsum: int = 0
+        for k in d {
+            keysum = keysum + k
+            valsum = valsum + d[k]
+        }
+        self.assertEqual(keysum, 2.0)
+        self.assertEqual(valsum, 30)
+    }
+
+    def test_items_unpack() {
+        d: dict[float, str] = {0.5: "a", 1.5: "b"}
+        keysum: float = 0.0
+        joined: str = ""
+        for k, v in d.items() {
+            keysum = keysum + k
+            joined = joined + v
+        }
+        self.assertEqual(keysum, 2.0)
+        self.assertEqual(joined, "ab")
+    }
+
+    def test_keys_list() {
+        d: dict[float, str] = {0.5: "a", 1.5: "b", 2.5: "c"}
+        ks: list[float] = [k for k in d]
+        self.assertEqual(len(ks), 3)
+        self.assertEqual(ks[0], 0.5)
+        self.assertEqual(ks[2], 2.5)
+    }
+
+    def test_float_values_untouched() {
+        d: dict[float, float] = {0.5: 5.0, 1.5: 15.0}
+        self.assertEqual(d[0.5] + d[1.5], 20.0)
+    }
+
+    def test_str_of_float_keyed_dict() {
+        d: dict[float, str] = {1.5: "a"}
+        self.assertEqual(str(d), "{1.5: 'a'}")
+    }
+
+    def test_str_of_empty_then_filled() {
+        d: dict[float, int] = {}
+        d[2.5] = 7
+        self.assertEqual(str(d), "{2.5: 7}")
+    }
+
+    def test_json_dumps_float_keys() {
+        d: dict[float, str] = {1.5: "a"}
+        self.assertEqual(json.dumps(d), '{"1.5": "a"}')
+    }
+
+    def test_copy_keeps_float_keys() {
+        d: dict[float, str] = {1.5: "a"}
+        c: dict[float, str] = d.copy()
+        self.assertEqual(c[1.5], "a")
+        self.assertEqual(str(c), "{1.5: 'a'}")
+    }
+
+    def test_int_and_str_keyed_unaffected() {
+        di: dict[int, str] = {1: "a", 2: "b"}
+        ds: dict[str, int] = {"x": 1}
+        self.assertEqual(di[2], "b")
+        self.assertEqual(ds["x"], 1)
+    }
+}
+
+
+main([DictFloatKeyTests()])

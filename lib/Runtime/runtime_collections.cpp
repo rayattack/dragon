@@ -221,9 +221,16 @@ static void dragon_repr_dict_int(DragonStrBuf* out, DragonDict* d) {
             if (d->entries[i].dead) continue;
             if (!first) sb_puts(out, ", ");
             first = false;
-            char tmp[32];
-            snprintf(tmp, sizeof(tmp), "%ld",
-                     (long)(int64_t)(uintptr_t)d->entries[i].key);
+            char tmp[64];
+            if (d->key_kind == DRAGON_DICT_KEY_FLOAT) {
+                double fk;
+                int64_t bits = (int64_t)(uintptr_t)d->entries[i].key;
+                memcpy(&fk, &bits, sizeof(double));
+                dragon_format_double_into(fk, tmp, sizeof(tmp));
+            } else {
+                snprintf(tmp, sizeof(tmp), "%ld",
+                         (long)(int64_t)(uintptr_t)d->entries[i].key);
+            }
             sb_puts(out, tmp);
             sb_puts(out, ": ");
             dragon_repr_value(out, d->entries[i].value, (uint8_t)d->entries[i].tag);
@@ -382,7 +389,23 @@ static void dragon_json_dict(DragonStrBuf* out, DragonDict* d) {
             if (!first) sb_puts(out, ", ");
             first = false;
             DictEntry& e = d->entries[i];
-            dragon_json_escape(out, e.key);     // JSON object keys are strings
+            if (d->key_kind == DRAGON_DICT_KEY_FLOAT) {
+                double fk;
+                int64_t bits = (int64_t)(uintptr_t)e.key;
+                memcpy(&fk, &bits, sizeof(double));
+                char tmp[64];
+                dragon_format_double_into(fk, tmp, sizeof(tmp));
+                sb_putc(out, '"');
+                sb_puts(out, tmp);
+                sb_putc(out, '"');
+            } else if (d->key_kind == DRAGON_DICT_KEY_INT) {
+                char tmp[32];
+                snprintf(tmp, sizeof(tmp), "\"%ld\"",
+                         (long)(int64_t)(uintptr_t)e.key);
+                sb_puts(out, tmp);
+            } else {
+                dragon_json_escape(out, e.key);     // JSON object keys are strings
+            }
             sb_puts(out, ": ");
             dragon_json_value(out, e.value, (uint8_t)e.tag);
         }

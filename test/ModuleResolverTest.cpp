@@ -256,11 +256,12 @@ TEST(ModuleResolver, DragonImportsPython) {
 }
 
 //===----------------------------------------------------------------------===//
-// buildGraph - stdlib import skipped (not local file)
+// buildGraph - an unresolvable import is an error (issue-22)
 //===----------------------------------------------------------------------===//
 
-TEST(ModuleResolver, StdlibImportSkipped) {
-    // import math should not try to resolve a local file
+TEST(ModuleResolver, UnresolvableImportIsError) {
+    // With no stdlib search path configured, `math` resolves to nothing; that
+    // must be a loud error, never an empty namespace.
     auto module = parse("from math import sqrt\nprint(sqrt(4.0))\n", /*isDragon=*/true);
     ASSERT_NE(module, nullptr);
 
@@ -268,6 +269,19 @@ TEST(ModuleResolver, StdlibImportSkipped) {
     auto graph = resolver.buildGraph(*module, "<test>");
 
     EXPECT_FALSE(graph.hasCycle);
+    EXPECT_TRUE(graph.modules.empty());
+    ASSERT_TRUE(resolver.hasErrors());
+    EXPECT_NE(resolver.errors()[0].find("cannot find module 'math'"),
+              std::string::npos);
+}
+
+TEST(ModuleResolver, TypingPseudoModuleAllowed) {
+    auto module = parse("from typing import Optional\n", /*isDragon=*/true);
+    ASSERT_NE(module, nullptr);
+
+    ModuleResolver resolver;
+    auto graph = resolver.buildGraph(*module, "<test>");
+
     EXPECT_TRUE(graph.modules.empty());
     EXPECT_FALSE(resolver.hasErrors());
 }

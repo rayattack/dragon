@@ -72,6 +72,19 @@ class IncrementalSemanticsTests(TestCase) {
         }
     }
 
+    def test_interleaved_copy_update_chains() {
+        a: hashlib.Hash = hashlib.sha256(b"seed")
+        b: hashlib.Hash = a.copy()
+        c: hashlib.Hash = b.copy()
+        a.update(b"-a1")
+        b.update(b"-b1")
+        a.update(b"-a2")
+        c.update(b"-c1")
+        self.assertEqual(a.hexdigest(), hashlib.sha256(b"seed-a1-a2").hexdigest())
+        self.assertEqual(b.hexdigest(), hashlib.sha256(b"seed-b1").hexdigest())
+        self.assertEqual(c.hexdigest(), hashlib.sha256(b"seed-c1").hexdigest())
+    }
+
     def test_update_spanning_block_boundaries() {
         const chunk: bytes = b"z" * 61
         h: hashlib.Hash = hashlib.sha384()

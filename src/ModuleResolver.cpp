@@ -266,6 +266,10 @@ std::string ModuleResolver::packageOriginFor(const std::string& filepath) const 
     return "";
 }
 
+static bool isPseudoModule(const std::string& name) {
+    return name == "typing";
+}
+
 ImportGraph ModuleResolver::buildGraph(Module& entryModule, const std::string& entryFile) {
     errors_.clear();
     ImportGraph graph;
@@ -280,9 +284,8 @@ ImportGraph ModuleResolver::buildGraph(Module& entryModule, const std::string& e
         }
         if (auto* imp = dynamic_cast<ImportStmt*>(stmt.get())) {
             for (auto& alias : imp->names) {
-                // Only resolve local modules, not stdlib
-                std::string file = findModuleFile(alias.name);
-                if (!file.empty() && colors.find(alias.name) == colors.end()) {
+                if (isPseudoModule(alias.name)) continue;
+                if (colors.find(alias.name) == colors.end()) {
                     colors[alias.name] = Color::White;
                     dfs(alias.name, colors, graph);
                 }
@@ -303,7 +306,8 @@ void ModuleResolver::enqueueFromImport(const FromImportStmt& fromImp,
     if (moduleName.empty()) return;
 
     // Enqueue the source module (e.g. "controllers" for `from controllers import health`).
-    if (!findModuleFile(moduleName).empty() && colors.find(moduleName) == colors.end()) {
+    if (isPseudoModule(moduleName)) return;
+    if (colors.find(moduleName) == colors.end()) {
         colors[moduleName] = Color::White;
         dfs(moduleName, colors, graph);
     }
@@ -416,8 +420,7 @@ void ModuleResolver::dfs(const std::string& moduleName,
         }
         if (auto* imp = dynamic_cast<ImportStmt*>(stmt.get())) {
             for (auto& alias : imp->names) {
-                std::string depFile = findModuleFile(alias.name);
-                if (depFile.empty()) continue;
+                if (isPseudoModule(alias.name)) continue;
 
                 auto it = colors.find(alias.name);
                 if (it == colors.end()) {

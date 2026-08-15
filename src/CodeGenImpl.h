@@ -9,7 +9,6 @@
 #include <limits>
 #include "dragon/CodeGen.h"
 #include "dragon/TypeChecker.h"
-#include "dragon/StdlibRegistry.h"
 #include "dragon/Lexer.h"
 #include "dragon/Parser.h"
 
@@ -346,9 +345,7 @@ struct CodeGen::Impl {
         }
     }
 
-    // Stdlib import tracking
-    std::map<std::string, std::string> symbolAliases;
-    std::set<std::string> importedModules;
+    // Modules resolved as .dr/.py files, from the compile-time import DAG.
     std::set<std::string> fileResolvedModules;
 
     // Class support: each class becomes an LLVM StructType with fields extracted from
@@ -448,11 +445,11 @@ struct CodeGen::Impl {
     // className -> (field, per-instance default-expr), persisted from the layout pre-pass
     // (visits every class in source order before any _new body) so emitNewBody applies inherited defaults regardless of source order. Expr* is AST-owned, valid for CodeGen's lifetime.
     std::unordered_map<std::string, std::vector<std::pair<std::string, Expr*>>> classPerInstanceDefaultsBySym;
-    std::unordered_map<std::string, std::string> methodReturnClassNames; // "Class_method" -> returnClassName
+    std::unordered_map<std::string, std::string> methodReturnClassNames; // "<classSym>_method" -> returnClassName
     std::unordered_map<std::string, std::string> funcReturnClassNames;   // top-level funcName -> returnClassName
-    // "Class_method" -> declared return Type::Kind, needed because `ptr` is overloaded
+    // "<classSym>_method" -> declared return Type::Kind, needed because `ptr` is overloaded
     // (str/list/dict/bytes/instance all lower to ptr); the AST kind disambiguates so callers pick the right VarKind, e.g. `for x in iter` binding x correctly when __next__() -> str.
-    std::unordered_map<std::string, Type::Kind> methodReturnKinds;       // "Class_method" -> Type::Kind
+    std::unordered_map<std::string, Type::Kind> methodReturnKinds;       // "<classSym>_method" -> Type::Kind
 
     // Decision 025: First-class class descriptors
     std::unordered_map<std::string, llvm::GlobalVariable*> classDescriptorGlobalsBySym; // className -> @ClassName__descriptor
@@ -582,21 +579,29 @@ struct CodeGen::Impl {
     // Resolves which module owns a bare class name: imported alias, then a same-module
     // `<mod>__<className>_new` probe, then the global owning-module map (last-wins fallback), then currentModuleName.
     std::string resolveClassOwningModule(const std::string& bareName) const {
-        std::string aliasMod = lookupImportedClassAlias(bareName);
-        if (!aliasMod.empty()) return aliasMod;
+        return resolveClassOwningModuleFrom(currentModuleName, bareName);
+    }
+
+    std::string resolveClassOwningModuleFrom(const std::string& fromModule,
+                                             const std::string& bareName) const {
+        auto modIt = importedClassAliasesByModule.find(fromModule);
+        if (modIt != importedClassAliasesByModule.end()) {
+            auto nameIt = modIt->second.find(bareName);
+            if (nameIt != modIt->second.end()) return nameIt->second;
+        }
         if (module) {
             // Same-module probe - robust to last-write-wins on classOwningModule.
-            std::string mangled = mangleClass(currentModuleName, bareName);
+            std::string mangled = mangleClass(fromModule, bareName);
             if (module->getFunction(mangled + "_new") ||
                 module->getFunction(mangled + "_new_0") ||
                 module->getFunction(mangled + "___init__") ||
                 module->getFunction(mangled + "___init___0")) {
-                return currentModuleName;
+                return fromModule;
             }
         }
         auto cmIt = classOwningModule.find(bareName);
         if (cmIt != classOwningModule.end()) return cmIt->second;
-        return currentModuleName;
+        return fromModule;
     }
 
     // Returns the LLVM symbol prefix for a bare class name, resolved from the current
@@ -643,12 +648,6 @@ struct CodeGen::Impl {
     // Per-instance owning module: var -> owning module of the class instance it holds.
     // Mirrors varClassNames so method dispatch picks the right `<owner>__<className>_<method>` symbol when two modules define same-named classes.
     std::unordered_map<std::string, std::string> varClassOwningModule;
-
-
-    // Owning module per class-typed field (see classFieldClassNameBySym); same purpose as
-    // varClassOwningModule but for `self.x: Foo` / `self.x = Foo(...)` reads.
-    std::unordered_map<std::string,
-        std::unordered_map<std::string, std::string>> classFieldOwningModule;
 
     /// 6.12(B): a variable is in this set when its value is provably >= 0 (int literal,
     /// len()/abs(), or +/*/** of non-negative operands). Lets Attributes.cpp/Assign.cpp skip the `idx + (idx<0 ? size : 0)` correction; cleared on any not-provably-non-negative assignment.
@@ -1006,11 +1005,28 @@ struct CodeGen::Impl {
     /// used by subscript/`in`/print to branch str-keyed vs int-keyed. Returns Unknown when no annotation reached this site.
     Type::Kind resolveDictKeyKind(Expr* expr);
 
-    /// True iff `expr` denotes a dict[int, V].
-    bool dictKeyIsInt(Expr* expr) {
-        return resolveDictKeyKind(expr) == Type::Kind::Int;
+    bool dictKeyUsesIntEngine(Expr* expr) {
+        Type::Kind k = resolveDictKeyKind(expr);
+        return k == Type::Kind::Int || k == Type::Kind::Float;
     }
 
+    llvm::Value* emitFloatDictKeyBits(llvm::Value* key) {
+        if (key->getType() == i64Type)
+            key = builder->CreateSIToFP(key, f64Type, "fkey.widen");
+        if (key->getType() != f64Type) return key;
+        auto* isNan = builder->CreateFCmpUNO(key, key, "fkey.isnan");
+        auto* bits = builder->CreateBitCast(key, i64Type, "fkey.bits");
+        auto* noNegZero = builder->CreateSelect(
+            builder->CreateICmpEQ(
+                bits, llvm::ConstantInt::get(i64Type, 0x8000000000000000ULL),
+                "fkey.isnegz"),
+            llvm::ConstantInt::get(i64Type, 0), bits);
+        return builder->CreateSelect(
+            isNan, llvm::ConstantInt::get(i64Type, 0x7FF8000000000000LL),
+            noNegZero, "fkey.norm");
+    }
+
+    /// True iff `expr` denotes a dict[int, V].
     /// Resolves the VALUE kind of a dict expression (the V in dict[K, V]), mirroring
     /// resolveDictKeyKind but reading the value-kind maps. Used to pick the typed path for `d[k] OP= v`.
     Type::Kind resolveDictValueKind(Expr* expr);

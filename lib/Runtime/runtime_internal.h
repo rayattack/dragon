@@ -280,6 +280,7 @@ struct DragonDict {
 enum DragonDictKeyKind : uint8_t {
     DRAGON_DICT_KEY_INT = 0,
     DRAGON_DICT_KEY_STR = 1,
+    DRAGON_DICT_KEY_FLOAT = 2,
 };
 
 struct DragonTuple {

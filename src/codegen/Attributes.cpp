@@ -224,22 +224,6 @@ void CodeGen::visit(AttributeExpr& node) {
         // now. Will need expansion as more module export kinds gain values.
     }
 
-    // Check for stdlib constants (e.g., math.pi, math.e)
-    if (auto* objName = dynamic_cast<NameExpr*>(node.object.get())) {
-        std::string qualName = objName->name + "." + node.attribute;
-        auto it = impl_->symbolAliases.find(qualName);
-        if (it != impl_->symbolAliases.end()) {
-            if (it->second == "M_PI") {
-                impl_->lastValue = llvm::ConstantFP::get(impl_->f64Type, 3.14159265358979323846);
-                return;
-            }
-            if (it->second == "M_E") {
-                impl_->lastValue = llvm::ConstantFP::get(impl_->f64Type, 2.71828182845904523536);
-                return;
-            }
-        }
-    }
-
     // Static field access: ClassName.field (where ClassName is a known class, not an instance)
     if (auto* objName = dynamic_cast<NameExpr*>(node.object.get())) {
         auto sfIt = impl_->staticFieldGlobalsBySym.find(impl_->classSym(objName->name));
@@ -783,15 +767,8 @@ void CodeGen::visit(SubscriptExpr& node) {
     if (isDict) {
         // D030 Phase 3.G: route int-keyed dict reads through dragon_dict_int_*.
         // The key kind is resolved from the dict's tracked annotation before evaluating the index, picking the entry point in one pass.
-        bool intKeyed = impl_->dictKeyIsInt(node.object.get());
-        // Fallback: typechecker-propagated DictType key.
-        if (!intKeyed && node.object->type &&
-            node.object->type->kind() == Type::Kind::Dict) {
-            if (auto* dt = dynamic_cast<DictType*>(node.object->type.get())) {
-                if (dt->keyType && dt->keyType->kind() == Type::Kind::Int)
-                    intKeyed = true;
-            }
-        }
+        Type::Kind dictKk = impl_->resolveDictKeyKind(node.object.get());
+        bool intKeyed = dictKk == Type::Kind::Int || dictKk == Type::Kind::Float;
 
         node.object->accept(*this);
         llvm::Value* dict = impl_->lastValue;
@@ -974,6 +951,8 @@ void CodeGen::visit(SubscriptExpr& node) {
         // D030 Phase 3.G: int-keyed dispatch - same checkTag matrix but the
         // dragon_dict_int_* family. Key crosses at i64 (its native type).
         if (intKeyed) {
+            if (dictKk == Type::Kind::Float)
+                key = impl_->emitFloatDictKeyBits(key);
             if (key->getType() == impl_->i1Type)
                 key = impl_->builder->CreateZExt(key, impl_->i64Type);
             else if (key->getType()->isPointerTy())

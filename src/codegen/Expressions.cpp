@@ -993,16 +993,13 @@ void CodeGen::visit(BinaryExpr& node) {
                 rhsIsDict = true;
             }
             if (rhsIsDict) {
-                bool intKeyed = impl_->dictKeyIsInt(node.right.get());
-                if (!intKeyed && node.right && node.right->type &&
-                    node.right->type->kind() == Type::Kind::Dict) {
-                    if (auto* dt = dynamic_cast<DictType*>(node.right->type.get())) {
-                        if (dt->keyType && dt->keyType->kind() == Type::Kind::Int)
-                            intKeyed = true;
-                    }
-                }
+                Type::Kind dictKk = impl_->resolveDictKeyKind(node.right.get());
+                bool intKeyed =
+                    dictKk == Type::Kind::Int || dictKk == Type::Kind::Float;
                 if (intKeyed && rhs->getType()->isPointerTy()) {
                     llvm::Value* k = lhs;
+                    if (dictKk == Type::Kind::Float)
+                        k = impl_->emitFloatDictKeyBits(k);
                     if (k->getType() == impl_->i1Type)
                         k = impl_->builder->CreateZExt(k, impl_->i64Type);
                     else if (k->getType()->isPointerTy())

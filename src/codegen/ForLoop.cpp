@@ -326,36 +326,88 @@ void CodeGen::visit(ForStmt& node) {
     // --- __iter__/__next__ protocol for class instances ---
     {
         std::string iterClassName = impl_->resolveExprClassName(node.iterable.get());
+        std::string iterDisplayName = iterClassName;
+        if (node.iterable->type) {
+            if (auto* inst =
+                    dynamic_cast<InstanceType*>(node.iterable->type.get())) {
+                if (inst->classType) {
+                    iterDisplayName = inst->classType->name;
+                    iterClassName = Impl::mangleClass(
+                        inst->classType->definingModule, inst->classType->name);
+                }
+            }
+        }
         auto* targetName = dynamic_cast<NameExpr*>(node.target.get());
         if (!iterClassName.empty() && targetName &&
             impl_->hasDunder(iterClassName, "__iter__")) {
             auto* func = impl_->currentFunction;
 
             node.iterable->accept(*this);
-            llvm::Value* iterable = impl_->lastValue;
+            std::vector<std::pair<llvm::Value*, Impl::VarKind>> iterableTemps;
+            std::vector<llvm::Value*> iterableTempBases;
+            llvm::Value* iterable = impl_->trackBorrowTempGuarded(
+                node.iterable.get(), impl_->lastValue, iterableTemps,
+                iterableTempBases);
             auto* iterator = impl_->callDunder(iterClassName, "__iter__", iterable);
+            impl_->popArgTempCleanups(iterableTempBases);
+            impl_->drainBorrowTemps(iterableTemps);
 
             // LLVM `ptr` is ambiguous (str/list/dict/bytes/instance all lower to it);
             // consult methodReturnKinds for the real VarKind, else `x.strip()` on a str-typed __next__ falls to int handling and returns 0.
             llvm::Type* loopVarType = impl_->i8PtrType; // default
             Impl::VarKind loopVarKind = Impl::VarKind::Other;
             std::string loopVarClassName;
+            std::string loopVarClassModule;
+            std::string nextOwner = iterClassName;
+            std::string nextOwnerDisplay = iterDisplayName;
             {
-                std::string nextClass = impl_->findDunderClass(iterClassName, "__next__");
-                if (!nextClass.empty()) {
-                    // nextClass IS the defining class's sym; methodReturnKinds /
-                    // methodReturnClassNames are keyed by that mangled symbol.
-                    std::string methKey = nextClass + "___next__";
-                    auto* nextFn = impl_->module->getFunction(methKey);
-                    if (nextFn) loopVarType = nextFn->getReturnType();
-                    auto rkIt = impl_->methodReturnKinds.find(methKey);
-                    if (rkIt != impl_->methodReturnKinds.end())
-                        loopVarKind = Impl::typeKindToVarKind(rkIt->second);
-                    // __next__ returning a class instance: record the concrete class
-                    // too, so attribute access on `x` resolves via the right struct.
-                    auto rcIt = impl_->methodReturnClassNames.find(methKey);
-                    if (rcIt != impl_->methodReturnClassNames.end())
-                        loopVarClassName = rcIt->second;
+                std::string iterDef =
+                    impl_->findDunderClass(iterClassName, "__iter__");
+                if (!iterDef.empty()) {
+                    auto rIt =
+                        impl_->methodReturnClassNames.find(iterDef + "___iter__");
+                    if (rIt != impl_->methodReturnClassNames.end()) {
+                        auto fdmIt =
+                            impl_->funcDefiningModule.find(iterDef + "___iter__");
+                        nextOwnerDisplay = rIt->second;
+                        nextOwner = Impl::mangleClass(
+                            impl_->resolveClassOwningModuleFrom(
+                                fdmIt != impl_->funcDefiningModule.end()
+                                    ? fdmIt->second
+                                    : impl_->currentModuleName,
+                                rIt->second),
+                            rIt->second);
+                    }
+                }
+            }
+            {
+                std::string nextClass = impl_->findDunderClass(nextOwner, "__next__");
+                if (nextClass.empty()) {
+                    impl_->addError(
+                        "cannot iterate: __iter__ returns '" + nextOwnerDisplay +
+                        "', which has no __next__ method",
+                        node.location());
+                    return;
+                }
+                // nextClass IS the defining class's sym; methodReturnKinds /
+                // methodReturnClassNames are keyed by that mangled symbol.
+                std::string methKey = nextClass + "___next__";
+                auto* nextFn = impl_->module->getFunction(methKey);
+                if (nextFn) loopVarType = nextFn->getReturnType();
+                auto rkIt = impl_->methodReturnKinds.find(methKey);
+                if (rkIt != impl_->methodReturnKinds.end())
+                    loopVarKind = Impl::typeKindToVarKind(rkIt->second);
+                // __next__ returning a class instance: record the concrete class
+                // too, so attribute access on `x` resolves via the right struct.
+                auto rcIt = impl_->methodReturnClassNames.find(methKey);
+                if (rcIt != impl_->methodReturnClassNames.end()) {
+                    loopVarClassName = rcIt->second;
+                    auto fdmIt = impl_->funcDefiningModule.find(methKey);
+                    loopVarClassModule = impl_->resolveClassOwningModuleFrom(
+                        fdmIt != impl_->funcDefiningModule.end()
+                            ? fdmIt->second
+                            : impl_->currentModuleName,
+                        loopVarClassName);
                 }
             }
             auto* loopVar = impl_->createEntryAlloca(func, targetName->name, loopVarType);
@@ -363,8 +415,10 @@ void CodeGen::visit(ForStmt& node) {
             // previous element before storing - a null previous no-ops.
             impl_->emitNullSlot(loopVar);
             impl_->setVar(targetName->name, loopVar, loopVarKind);
-            if (!loopVarClassName.empty())
+            if (!loopVarClassName.empty()) {
                 impl_->varClassNames[targetName->name] = loopVarClassName;
+                impl_->varClassOwningModule[targetName->name] = loopVarClassModule;
+            }
             // __next__ returns OWNED (+1); a prior borrowed-mark on the loop var (copied
             // from the generator-yield convention) leaked one element per iter of `for line in open(p)` (A/B-proven).
 
@@ -407,7 +461,7 @@ void CodeGen::visit(ForStmt& node) {
 
             // Normal path: call __next__()
             impl_->builder->SetInsertPoint(nextBB);
-            auto* nextVal = impl_->callDunder(iterClassName, "__next__", iterObj);
+            auto* nextVal = impl_->callDunder(nextOwner, "__next__", iterObj);
             impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_exc_pop_frame"], {});
             // RC overwrite: the loop var owns each element (+1 method return); release
             // the previous one before storing next, else all but the last leaked (A/B-proven).
@@ -747,12 +801,15 @@ void CodeGen::visit(ForStmt& node) {
     // Str-keyed dict keys are heap DragonStrings (heap kind, borrowed - no per-iter
     // decref); int-keyed dict keys stay i64/StrLiteral and must never be treated as strings.
     bool dictKeysAreInt = false;
+    bool dictKeysAreFloat = false;
     if (isDictKeysIterable || isDictItemsIterable) {
         Expr* dictExpr = node.iterable.get();
         if (auto* iterCall = dynamic_cast<CallExpr*>(dictExpr))
             if (auto* attr = dynamic_cast<AttributeExpr*>(iterCall->callee.get()))
                 dictExpr = attr->object.get();
-        dictKeysAreInt = impl_->dictKeyIsInt(dictExpr);
+        Type::Kind kk = impl_->resolveDictKeyKind(dictExpr);
+        dictKeysAreInt = kk == Type::Kind::Int || kk == Type::Kind::Float;
+        dictKeysAreFloat = kk == Type::Kind::Float;
     }
 
     // Evaluate iterable, converting dicts to lists as needed
@@ -873,7 +930,13 @@ void CodeGen::visit(ForStmt& node) {
                 llvm::Value* val = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_tuple_get"], {tuplePtr, idx}, "unpack");
                 if (i == 0) {
-                    if (dictKeysAreInt) {
+                    if (dictKeysAreFloat) {
+                        auto* alloca = impl_->createEntryAlloca(func, name->name, impl_->f64Type);
+                        impl_->builder->CreateStore(
+                            impl_->builder->CreateBitCast(val, impl_->f64Type, "k.f"),
+                            alloca);
+                        impl_->setVar(name->name, alloca, Impl::VarKind::Float);
+                    } else if (dictKeysAreInt) {
                         // int-keyed dict: items() stores the key as a native untagged i64.
                         // Bind VarKind::Int in an i64 slot - IntToPtr'ing it into ptr made `print(k)` SIGSEGV.
                         auto* alloca = impl_->createEntryAlloca(func, name->name, impl_->i64Type);
@@ -1015,7 +1078,13 @@ void CodeGen::visit(ForStmt& node) {
         // int-keyed -> the raw i64 key. The two need different loop-var bindings.
         llvm::Value* elem = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_list_get"], {iterLoaded, currentIdx}, "elem");
-        if (dictKeysAreInt) {
+        if (dictKeysAreFloat) {
+            auto* targetAlloca = impl_->createEntryAlloca(func, targetName->name, impl_->f64Type);
+            impl_->builder->CreateStore(
+                impl_->builder->CreateBitCast(elem, impl_->f64Type, "key.f"),
+                targetAlloca);
+            impl_->setVar(targetName->name, targetAlloca, Impl::VarKind::Float);
+        } else if (dictKeysAreInt) {
             // int-keyed dict: bind VarKind::Int in an i64 slot. The old path
             // IntToPtr'd it into a ptr slot, so `print(k)` on key 1 deref'd address 0x1 -> SIGSEGV.
             auto* targetAlloca = impl_->createEntryAlloca(func, targetName->name, impl_->i64Type);

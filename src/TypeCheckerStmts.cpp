@@ -647,6 +647,37 @@ void TypeChecker::visit(ForStmt& node) {
             impl_->define(name->name, static_cast<ListType&>(*iterType).elementType);
         } else if (iterType->kind() == Type::Kind::Set) {
             impl_->define(name->name, static_cast<SetType&>(*iterType).elementType);
+        } else if (iterType->kind() == Type::Kind::Dict) {
+            auto keyT = static_cast<DictType&>(*iterType).keyType;
+            impl_->define(name->name, keyT ? keyT : impl_->unknownType);
+        } else if (iterType->kind() == Type::Kind::Instance) {
+            auto methodReturn = [&](const ClassType* cls, const std::string& m)
+                -> std::shared_ptr<Type> {
+                if (const ClassType* owner = findMethodOwner(cls, m)) {
+                    auto it = owner->methods.find(m);
+                    if (it != owner->methods.end() && it->second &&
+                        it->second->kind() == Type::Kind::Function)
+                        return static_cast<FunctionType&>(*it->second).returnType;
+                }
+                return nullptr;
+            };
+            std::shared_ptr<Type> bind = impl_->unknownType;
+            const ClassType* iterCls =
+                static_cast<InstanceType&>(*iterType).classType.get();
+            if (auto iterRet = methodReturn(iterCls, "__iter__")) {
+                const ClassType* nextCls = iterCls;
+                if (iterRet->kind() == Type::Kind::Instance)
+                    nextCls = static_cast<InstanceType&>(*iterRet).classType.get();
+                else if (iterRet->kind() == Type::Kind::Class)
+                    nextCls = static_cast<ClassType*>(iterRet.get());
+                if (auto nextRet = methodReturn(nextCls, "__next__"))
+                    bind = nextRet;
+                else if (nextCls)
+                    error(node.location(),
+                          "cannot iterate: __iter__ returns '" + nextCls->name +
+                          "', which has no __next__ method");
+            }
+            impl_->define(name->name, bind);
         } else {
             impl_->define(name->name, impl_->unknownType);
         }
