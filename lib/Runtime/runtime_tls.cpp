@@ -365,7 +365,7 @@ int64_t dragon_tls_write(void* handle, const void* buf, int64_t len) {
 }
 
 // Like dragon_tls_read, but returns a byte-safe Dragon string. Returns "" on
-// clean EOF or error, mirroring TcpStream.do_recv's loop-until-empty contract.
+// clean EOF or error, mirroring TcpStream.recv's loop-until-empty contract.
 const char* dragon_tls_recv_str(void* handle, int64_t maxlen) {
     if (maxlen <= 0) maxlen = 8192;
     unsigned char* buf = (unsigned char*)dragon_malloc_nullable((size_t)maxlen);

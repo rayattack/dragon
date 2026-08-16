@@ -96,8 +96,9 @@ class SSLSocket {
         _raise_if_handshake_failed(rc, dragon_tls_get_verify_result(self._conn))
     }
 
-    def recv(n: int = 8192) -> bytes {
-        """Read up to `n` decrypted bytes. Returns b"" on a clean peer close (EOF)."""
+    def recv_bytes(n: int = 8192) -> bytes {
+        """Read up to `n` decrypted bytes. Returns b"" on a clean peer close (EOF).
+        Mirrors TcpStream.recv_bytes; recv(size) is the str-typed read."""
         buf: ptr = malloc(n)
         got: int = dragon_tls_read(self._conn, buf, n)
         if got < 0 {
@@ -134,23 +135,20 @@ class SSLSocket {
 
     # CPython SSLSocket aliases.
     def read(n: int = 8192) -> bytes {
-        return self.recv(n)
+        return self.recv_bytes(n)
     }
     def write(data: str) -> int {
         return self.send(data)
     }
 
-    def do_send(data: str) -> int {
-        """TcpStream-compatible interface so http.client.HTTPSConnection can drive
-        SSLSocket like TcpStream; do_recv returns str (not bytes) to match it."""
-        return self.send(data)
-    }
-    def do_recv(size: int) -> str {
+    def recv(size: int) -> str {
+        """TcpStream-compatible read so http.client.HTTPSConnection can drive
+        SSLSocket like TcpStream; returns str (recv_bytes is the binary read)."""
         return dragon_tls_recv_str(self._conn, size)
     }
 
-    def do_recv_timeout(size: int, ms: int) -> str {
-        """Idle-read timeout (R1): returns "" (do_recv's EOF signal) after `ms` of
+    def recv_timeout(size: int, ms: int) -> str {
+        """Idle-read timeout (R1): returns "" (recv's EOF signal) after `ms` of
         silence; ms<=0 = no timeout. Keeps a stalled HTTPS peer off the green thread."""
         return dragon_tls_recv_str_timeout(self._conn, size, ms)
     }

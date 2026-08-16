@@ -26,16 +26,16 @@ from socket import TcpListener, TcpStream
 # Accept one connection, capture the full request (head + body), reply with a
 # canned response whose body arrives across several sends, then close.
 def _serve_one(lis: TcpListener) -> str {
-    conn: TcpStream = lis.do_accept()
+    conn: TcpStream = lis.accept()
     got: str = ""
     while got.find("\r\n\r\nhello body") < 0 {
-        const chunk: str = conn.do_recv(2048)
+        const chunk: str = conn.recv(2048)
         if len(chunk) == 0 { break }
         got = got + chunk
     }
-    conn.do_send("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nX-Tag: t1\r\n\r\n")
-    conn.do_send("part-one:")
-    conn.do_send("part-two")
+    conn.send("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nX-Tag: t1\r\n\r\n")
+    conn.send("part-one:")
+    conn.send("part-two")
     conn.close()
     return got
 }
@@ -44,8 +44,8 @@ def _serve_one(lis: TcpListener) -> str {
 class ClientRoundTripTests(TestCase) {
     def test_request_and_response() {
         lis: TcpListener = TcpListener("127.0.0.1", 54481)
-        lis.do_bind()
-        lis.do_listen(2)
+        lis.bind()
+        lis.listen(2)
         t: Task[str] = fire _serve_one(lis)
 
         conn: HTTPConnection = HTTPConnection("127.0.0.1", 54481)
@@ -75,18 +75,18 @@ class ClientRoundTripTests(TestCase) {
 # so the client reassembles frames that straddle recv boundaries. The first
 # chunk-size line carries an extension; the last-chunk carries a trailer.
 def _serve_chunked(lis: TcpListener) -> str {
-    conn: TcpStream = lis.do_accept()
+    conn: TcpStream = lis.accept()
     got: str = ""
     while got.find("\r\n\r\n") < 0 {
-        const chunk: str = conn.do_recv(2048)
+        const chunk: str = conn.recv(2048)
         if len(chunk) == 0 { break }
         got = got + chunk
     }
-    conn.do_send("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n")
-    conn.do_send("15;chunk-ext=1\r\n{\"mfa_required\":true}\r\n")
-    conn.do_send("b\r\nhello ")
-    conn.do_send("world\r\n")
-    conn.do_send("0\r\nX-Trailer: yes\r\n\r\n")
+    conn.send("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n")
+    conn.send("15;chunk-ext=1\r\n{\"mfa_required\":true}\r\n")
+    conn.send("b\r\nhello ")
+    conn.send("world\r\n")
+    conn.send("0\r\nX-Trailer: yes\r\n\r\n")
     conn.close()
     return got
 }
@@ -95,15 +95,15 @@ def _serve_chunked(lis: TcpListener) -> str {
 # Reply with framing whose chunk-size line is not hex: the client must raise,
 # never hand the garbage to the caller as a body.
 def _serve_bad_chunked(lis: TcpListener) -> str {
-    conn: TcpStream = lis.do_accept()
+    conn: TcpStream = lis.accept()
     got: str = ""
     while got.find("\r\n\r\n") < 0 {
-        const chunk: str = conn.do_recv(2048)
+        const chunk: str = conn.recv(2048)
         if len(chunk) == 0 { break }
         got = got + chunk
     }
-    conn.do_send("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
-    conn.do_send("zz\r\nnot a chunk\r\n0\r\n\r\n")
+    conn.send("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+    conn.send("zz\r\nnot a chunk\r\n0\r\n\r\n")
     conn.close()
     return got
 }
@@ -112,8 +112,8 @@ def _serve_bad_chunked(lis: TcpListener) -> str {
 class ChunkedResponseTests(TestCase) {
     def test_chunked_body_decoded() {
         lis: TcpListener = TcpListener("127.0.0.1", 54482)
-        lis.do_bind()
-        lis.do_listen(2)
+        lis.bind()
+        lis.listen(2)
         t: Task[str] = fire _serve_chunked(lis)
 
         conn: HTTPConnection = HTTPConnection("127.0.0.1", 54482)
@@ -132,8 +132,8 @@ class ChunkedResponseTests(TestCase) {
 
     def test_malformed_chunk_size_raises() {
         lis: TcpListener = TcpListener("127.0.0.1", 54483)
-        lis.do_bind()
-        lis.do_listen(2)
+        lis.bind()
+        lis.listen(2)
         t: Task[str] = fire _serve_bad_chunked(lis)
 
         conn: HTTPConnection = HTTPConnection("127.0.0.1", 54483)

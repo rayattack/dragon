@@ -10,9 +10,9 @@ from socket import TcpListener, TcpStream
 
 
 def _peer(l: TcpListener) -> None {
-    conn: TcpStream = l.do_accept()
-    conn.do_send("hello")
-    conn.do_recv(16)
+    conn: TcpStream = l.accept()
+    conn.send("hello")
+    conn.recv(16)
     conn.close()
 }
 
@@ -20,20 +20,20 @@ def _peer(l: TcpListener) -> None {
 class SocketRecvOomTests(TestCase) {
     def test_recv_size_failure_raises_not_segv() -> None {
         lis: TcpListener = TcpListener("127.0.0.1", 54483)
-        lis.do_bind()
-        lis.do_listen(4)
+        lis.bind()
+        lis.listen(4)
         t: Task[None] = fire _peer(lis)
         c: TcpStream = TcpStream.open("127.0.0.1", 54483)
 
         caught: int = 0
         try {
-            s: str = c.do_recv(4611686018427387904)
+            s: str = c.recv(4611686018427387904)
             print(len(s))
         } except MemoryError {
             caught = caught + 1
         }
         try {
-            s2: str = c.do_recv(9223372036854775807)    # the +1 wrap case
+            s2: str = c.recv(9223372036854775807)    # the +1 wrap case
             print(len(s2))
         } except MemoryError {
             caught = caught + 1
@@ -53,9 +53,9 @@ class SocketRecvOomTests(TestCase) {
         self.assertEqual(caught, 4)
 
         # The connection survives every failed receive.
-        got: str = c.do_recv(16)
+        got: str = c.recv(16)
         self.assertEqual(got, "hello")
-        c.do_send("bye")
+        c.send("bye")
         c.close()
     }
 }

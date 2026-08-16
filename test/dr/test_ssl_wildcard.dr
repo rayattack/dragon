@@ -85,7 +85,7 @@ const g_listener: TcpListener = TcpListener("127.0.0.1", PORT)
 
 def _serve_once(certfile: str, keyfile: str) -> None {
     try {
-        const conn: TcpStream = g_listener.do_accept()
+        const conn: TcpStream = g_listener.accept()
         const sctx: SSLContext = SSLContext(PROTOCOL_TLS_SERVER)
         sctx.load_cert_chain(certfile, keyfile)
         const tls: SSLSocket = sctx.wrap_socket(conn, True, "")
@@ -108,8 +108,8 @@ def server_star_example() -> int {
 }
 
 
-g_listener.do_bind()
-g_listener.do_listen(16)
+g_listener.bind()
+g_listener.listen(16)
 
 
 class WildcardTests(TestCase) {

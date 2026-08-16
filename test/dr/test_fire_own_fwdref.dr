@@ -62,13 +62,13 @@ class Lstn {
         setsockopt(self._s.fd(), 1, 2, o, 4)
         free(o)
     }
-    def do_bind() -> int {
+    def bind() -> int {
         const a: ptr = dragon_sockaddr_in_new(self.port, self.host)
         const rc: int = bind(self._s.fd(), a, dragon_sockaddr_in_size())
         free(a)
         return rc
     }
-    def do_listen(n: int) -> int { return listen(self._s.fd(), n) }
+    def listen(n: int) -> int { return listen(self._s.fd(), n) }
     def accept() -> Strm {
         return Strm(SocketHandle.adopt_raw(dragon_nb_accept(self._s.fd(), none, none)))
     }
@@ -98,13 +98,13 @@ class LstnF {
         setsockopt(self._s.fd(), 1, 2, o, 4)
         free(o)
     }
-    def do_bind() -> int {
+    def bind() -> int {
         const a: ptr = dragon_sockaddr_in_new(self.port, self.host)
         const rc: int = bind(self._s.fd(), a, dragon_sockaddr_in_size())
         free(a)
         return rc
     }
-    def do_listen(n: int) -> int { return listen(self._s.fd(), n) }
+    def listen(n: int) -> int { return listen(self._s.fd(), n) }
     def accept() -> StrmF {
         return StrmF(SocketHandle.adopt_raw(dragon_nb_accept(self._s.fd(), none, none)))
     }
@@ -136,10 +136,10 @@ class KwHolder {
 class FireOwnFwdRefTests(TestCase) {
     def test_backward_ref_construction_fires_ok() {
         ls: Lstn = Lstn("127.0.0.1", 55851)
-        brc: int = ls.do_bind()
+        brc: int = ls.bind()
         self.assertEqual(brc, 0, "bind failed: port 55851 busy")
         if brc != 0 { return }
-        ls.do_listen(8)
+        ls.listen(8)
         t: Task[None] = fire _echo(ls)
 
         cfd: int = socket(2, 1, 0)
@@ -157,10 +157,10 @@ class FireOwnFwdRefTests(TestCase) {
 
     def test_forward_ref_construction_fires_ok() {
         ls: LstnF = LstnF("127.0.0.1", 55852)
-        brc: int = ls.do_bind()
+        brc: int = ls.bind()
         self.assertEqual(brc, 0, "bind failed: port 55852 busy")
         if brc != 0 { return }
-        ls.do_listen(8)
+        ls.listen(8)
         t: Task[None] = fire _echo_fwd(ls)
 
         cfd: int = socket(2, 1, 0)

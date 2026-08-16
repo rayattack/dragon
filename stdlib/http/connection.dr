@@ -15,7 +15,7 @@ from ssl import SSLSocket
 from socket import SocketHandle, TcpStream
 
 # Raw socket I/O lives behind TcpStream now (recv_bytes / recv_timeout /
-# do_send are all binary-safe and scheduler-yielding); this module holds no
+# send are all binary-safe and scheduler-yielding); this module holds no
 # fd-level externs of its own.
 extern "C" def dragon_close_fd(fd: int)
 
@@ -121,7 +121,7 @@ class FdReader(ConnReader) {
     }
 
     def send(data: str) -> int {
-        return self._stream.do_send(data)
+        return self._stream.send(data)
     }
 
     def close() -> None {
@@ -133,7 +133,7 @@ class FdReader(ConnReader) {
     }
 }
 
-# TLS reader - wraps an already-handshaken SSLSocket. do_recv returns a
+# TLS reader - wraps an already-handshaken SSLSocket. recv returns a
 # byte-safe `str`; re-encode it to `bytes` so the buffering layer is uniform.
 # For pure-ASCII (typical) headers .encode() is a verbatim byte copy.
 class TlsReader(ConnReader) {
@@ -144,7 +144,7 @@ class TlsReader(ConnReader) {
     }
 
     def recv(max_len: int) -> bytes {
-        const s: str = self.tls.do_recv(max_len)
+        const s: str = self.tls.recv(max_len)
         return s.encode("utf-8")
     }
 
@@ -152,12 +152,12 @@ class TlsReader(ConnReader) {
     # peer is dropped instead of pinning the green thread (the BIO recv parks on
     # the reactor with a deadline). timeout_ms <= 0 -> plain read.
     def recv_timeout(max_len: int, timeout_ms: int) -> bytes {
-        const s: str = self.tls.do_recv_timeout(max_len, timeout_ms)
+        const s: str = self.tls.recv_timeout(max_len, timeout_ms)
         return s.encode("utf-8")
     }
 
     def send(data: str) -> int {
-        return self.tls.do_send(data)
+        return self.tls.send(data)
     }
 
     def close() -> None {

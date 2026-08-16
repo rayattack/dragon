@@ -183,8 +183,8 @@ def _serve_shop(lis: TcpListener, conns: int) -> int {
 class SocketRoundtripTest(TestCase) {
     def test_client_roundtrip() -> None {
         lis: TcpListener = TcpListener("127.0.0.1", 54471)
-        lis.do_bind()
-        lis.do_listen(8)
+        lis.bind()
+        lis.listen(8)
         t: Task[int] = fire _serve_shop(lis, 1)
 
         c: ODBClient = ODBClient("127.0.0.1", 54471)

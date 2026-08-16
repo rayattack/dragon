@@ -122,11 +122,11 @@ const g_listener: TcpListener = TcpListener("127.0.0.1", PORT)
 # than crashing the thread.
 def _serve_once(certfile: str, keyfile: str) -> None {
     try {
-        const conn: TcpStream = g_listener.do_accept()
+        const conn: TcpStream = g_listener.accept()
         const sctx: SSLContext = SSLContext(PROTOCOL_TLS_SERVER)
         sctx.load_cert_chain(certfile, keyfile)
         const tls: SSLSocket = sctx.wrap_socket(conn, True, "")
-        const req: bytes = tls.recv(4096)
+        const req: bytes = tls.recv_bytes(4096)
         tls.send(SERVER_REPLY)
         tls.close()
     } except Exception {
@@ -146,7 +146,7 @@ def server_expired() -> int {
 
 # R1: a TLS read must be bounded by an idle timeout, so a peer that handshakes
 # then goes silent is dropped instead of pinning the server. Captures whether
-# do_recv_timeout returned empty (timeout) and how long it waited; read after
+# recv_timeout returned empty (timeout) and how long it waited; read after
 # join(). Runs on a real OS thread, so it exercises the off-vthread bounded-poll
 # fallback path of the TLS recv timeout.
 class _TlsProbe {
@@ -161,12 +161,12 @@ const g_probe: _TlsProbe = _TlsProbe()
 
 def server_recv_timeout() -> int {
     try {
-        const conn: TcpStream = g_listener.do_accept()
+        const conn: TcpStream = g_listener.accept()
         const sctx: SSLContext = SSLContext(PROTOCOL_TLS_SERVER)
         sctx.load_cert_chain(valid_cert_file, valid_key_file)
         const tls: SSLSocket = sctx.wrap_socket(conn, True, "")
         const t0: float = monotonic()
-        const data: str = tls.do_recv_timeout(4096, 300)
+        const data: str = tls.recv_timeout(4096, 300)
         const t1: float = monotonic()
         g_probe.elapsed_ms = (t1 - t0) * 1000.0
         g_probe.timed_out = len(data) == 0
@@ -177,8 +177,8 @@ def server_recv_timeout() -> int {
 }
 
 
-g_listener.do_bind()
-g_listener.do_listen(16)
+g_listener.bind()
+g_listener.listen(16)
 
 
 #===----------------------------------------------------------------------===#
@@ -197,7 +197,7 @@ class TlsLoopbackTests(TestCase) {
         const raw: TcpStream = TcpStream.open("127.0.0.1", PORT)
         const s: SSLSocket = ctx.wrap_socket(raw, False, "localhost")
         s.send("ping")
-        const resp: bytes = s.recv(4096)
+        const resp: bytes = s.recv_bytes(4096)
         self.assertEqual(resp.decode("utf-8"), SERVER_REPLY)
         self.assertTrue(s.getpeer_verified())
         s.close()
@@ -245,7 +245,7 @@ class TlsLoopbackTests(TestCase) {
     }
 
     # R1: after a successful handshake the client sends nothing; the server's
-    # do_recv_timeout(300) must fire (~300ms) with an empty result rather than
+    # recv_timeout(300) must fire (~300ms) with an empty result rather than
     # blocking forever - the encrypted-path slowloris defense.
     def test_recv_timeout_on_silent_peer() {
         const th: Thread = Thread(server_recv_timeout)

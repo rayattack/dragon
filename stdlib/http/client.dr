@@ -308,7 +308,7 @@ class HTTPConnection {
         if len(body) > 0 {
             req = req + body
         }
-        self.stream.do_send(req)
+        self.stream.send(req)
     }
 
     # Read the full response off the socket and parse it. Connection: close
@@ -317,7 +317,7 @@ class HTTPConnection {
     def getresponse() -> HTTPResponse {
         chunks: list[str] = []
         while True {
-            const chunk: str = self.stream.do_recv(8192)
+            const chunk: str = self.stream.recv(8192)
             if len(chunk) == 0 {
                 break
             }
@@ -428,13 +428,13 @@ class HTTPSConnection {
         if len(body) > 0 {
             req = req + body
         }
-        self.stream.do_send(req)
+        self.stream.send(req)
     }
 
     def getresponse() -> HTTPSResponse {
         chunks: list[str] = []
         while True {
-            const chunk: str = self.stream.do_recv(8192)
+            const chunk: str = self.stream.recv(8192)
             if len(chunk) == 0 {
                 break
             }
@@ -459,7 +459,7 @@ class HTTPSConnection {
     # always sent here, even for an empty body (unchanged behavior).
     def request_bytes(method: str, url: str, body: bytes, headers: dict[str, str]) -> None {
         self.connect()
-        self.stream.do_send(_request_head(method, url, self.host, self.port,
+        self.stream.send(_request_head(method, url, self.host, self.port,
                                           len(body), headers))
         if len(body) > 0 {
             self.stream.send_bytes(body)
@@ -472,7 +472,7 @@ class HTTPSConnection {
     def getresponse_bytes() -> HTTPSBytesResponse {
         chunks: list[bytes] = []
         while True {
-            c: bytes = self.stream.recv(65536)
+            c: bytes = self.stream.recv_bytes(65536)
             if len(c) == 0 {
                 break
             }

@@ -72,7 +72,7 @@ class ODBServer {
     def serve_on(lst: TcpListener, n: int) -> int {
         i: int = 0
         while i < n {
-            stream: TcpStream = lst.do_accept()
+            stream: TcpStream = lst.accept()
             conn: SocketConn = SocketConn(stream)
             self.serve_conn(conn)
             conn.close()
@@ -85,11 +85,11 @@ class ODBServer {
     # handled. serve() wraps this for the run-forever case.
     def serve_n(n: int) -> int {
         lst: TcpListener = TcpListener(self.host, self.port)
-        if lst.do_bind() != 0 {
+        if lst.bind() != 0 {
             lst.close()
             raise ODBError("odb server: cannot bind " + self.host + ":" + str(self.port))
         }
-        lst.do_listen(16)
+        lst.listen(16)
         served: int = self.serve_on(lst, n)
         lst.close()
         return served
@@ -97,13 +97,13 @@ class ODBServer {
 
     def serve() -> None {
         lst: TcpListener = TcpListener(self.host, self.port)
-        if lst.do_bind() != 0 {
+        if lst.bind() != 0 {
             lst.close()
             raise ODBError("odb server: cannot bind " + self.host + ":" + str(self.port))
         }
-        lst.do_listen(16)
+        lst.listen(16)
         while True {
-            stream: TcpStream = lst.do_accept()
+            stream: TcpStream = lst.accept()
             conn: SocketConn = SocketConn(stream)
             self.serve_conn(conn)
             conn.close()

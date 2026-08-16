@@ -261,7 +261,7 @@ class LiveWatchTest(TestCase) {
 def _serve_live(lis: TcpListener) -> int {
     db: ODB = _db()
     app: Router = gateway(db)
-    conn: TcpStream = lis.do_accept()
+    conn: TcpStream = lis.accept()
     app.serve_connection(FdReader(own conn))
     return 1
 }
@@ -269,15 +269,15 @@ def _serve_live(lis: TcpListener) -> int {
 class LiveWatchSocketTest(TestCase) {
     def test_live_stream_over_socket() -> None {
         lis: TcpListener = TcpListener("127.0.0.1", 54473)
-        lis.do_bind()
-        lis.do_listen(4)
+        lis.bind()
+        lis.listen(4)
         t: Task[int] = fire _serve_live(lis)
 
         c: TcpStream = TcpStream.open("127.0.0.1", 54473)
-        c.do_send("GET /watch?q=customers&since=0&live=1 HTTP/1.1\r\nHost: h\r\n\r\n")
+        c.send("GET /watch?q=customers&since=0&live=1 HTTP/1.1\r\nHost: h\r\n\r\n")
         got: str = ""
         while got.find("Ada") < 0 or got.find("Zed") < 0 {
-            chunk: str = c.do_recv(2048)
+            chunk: str = c.recv(2048)
             if len(chunk) == 0 {
                 break
             }

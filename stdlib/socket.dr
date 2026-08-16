@@ -119,11 +119,11 @@ class TcpStream {
         return TcpStream(SocketHandle.adopt_raw(fd))
     }
 
-    def do_send(data: str) -> int {
+    def send(data: str) -> int {
         return dragon_nb_send(self._sock.fd(), data, len(data))
     }
 
-    def do_recv(size: int) -> str {
+    def recv(size: int) -> str {
         return dragon_nb_recv_str(self._sock.fd(), size)
     }
 
@@ -143,7 +143,7 @@ class TcpStream {
         return dragon_nb_recv_timeout(self._sock.fd(), size, timeout_ms)
     }
 
-    def do_shutdown(how: int) -> int {
+    def shutdown(how: int) -> int {
         return shutdown(self._sock.fd(), how)
     }
 
@@ -193,7 +193,7 @@ class TcpListener {
         free(optval)
     }
 
-    def do_bind() -> int {
+    def bind() -> int {
         const addr: ptr = dragon_sockaddr_in_new(self.port, self.host)
         const addrlen: int = dragon_sockaddr_in_size()
         const rc: int = bind(self._sock.fd(), addr, addrlen)
@@ -201,11 +201,11 @@ class TcpListener {
         return rc
     }
 
-    def do_listen(backlog: int) -> int {
+    def listen(backlog: int) -> int {
         return listen(self._sock.fd(), backlog)
     }
 
-    def do_accept() -> TcpStream {
+    def accept() -> TcpStream {
         """Accepts one connection; the kernel-minted fd is adopted into a claim
         on the very next line, never free-floating outside this method."""
         const client_fd: int = dragon_nb_accept(self._sock.fd(), none, none)
@@ -238,7 +238,7 @@ class UdpSocket {
         self.port = port
     }
 
-    def do_bind() -> int {
+    def bind() -> int {
         const addr: ptr = dragon_sockaddr_in_new(self.port, self.host)
         const addrlen: int = dragon_sockaddr_in_size()
         const rc: int = bind(self._sock.fd(), addr, addrlen)

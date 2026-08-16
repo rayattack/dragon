@@ -11,9 +11,9 @@ from http.server import FdReader
 
 # Accept one connection, greet, wait for the client's goodbye, close.
 def _peer(l: TcpListener) -> None {
-    conn: TcpStream = l.do_accept()
-    conn.do_send("hello")
-    conn.do_recv(16)
+    conn: TcpStream = l.accept()
+    conn.send("hello")
+    conn.recv(16)
     conn.close()
 }
 
@@ -39,8 +39,8 @@ class SocketHandleTest(TestCase) {
     # reads the poisoned -1 instead of a recycled descriptor.
     def test_fdreader_owns_the_claim() -> None {
         lis: TcpListener = TcpListener("127.0.0.1", 54479)
-        lis.do_bind()
-        lis.do_listen(4)
+        lis.bind()
+        lis.listen(4)
 
         t: Task[None] = fire _peer(lis)
 

@@ -70,7 +70,7 @@ def _ws_echo(ws: WebSocket) -> None {
 def _ws_accept_serve(lis: TcpListener, app: Router, n: int, fds: list[int]) -> None {
     i: int = 0
     while i < n {
-        const conn: TcpStream = lis.do_accept()
+        const conn: TcpStream = lis.accept()
         fds.append(conn.raw_fd())
         const reader: ConnReader = FdReader(own conn)
         app.serve_connection(reader)
@@ -137,7 +137,7 @@ def _recv_handshake(stream: TcpStream) -> str {
         if "\r\n\r\n" in buf {
             return buf
         }
-        const chunk: str = stream.do_recv(1024)
+        const chunk: str = stream.recv(1024)
         if len(chunk) == 0 {
             return buf
         }
@@ -219,13 +219,13 @@ class WebSocketServerTests(TestCase) {
         const app: Router = Router()
         app.ws("/echo", _ws_echo)
         const lis: TcpListener = TcpListener("127.0.0.1", 8971)
-        lis.do_bind()
-        lis.do_listen(64)
+        lis.bind()
+        lis.listen(64)
         const fds: list[int] = []
         const t: Task[None] = fire _ws_accept_serve(lis, app, 1, fds)
 
         const stream: TcpStream = TcpStream.open("127.0.0.1", 8971)
-        stream.do_send(_upgrade_get("/echo"))
+        stream.send(_upgrade_get("/echo"))
         const resp: str = _recv_handshake(stream)
         self.assertIn("101 Switching Protocols", resp)
         self.assertIn("sec-websocket-accept: " + _RFC_ACCEPT, resp)
@@ -258,8 +258,8 @@ class WebSocketServerTests(TestCase) {
         const app: Router = Router()
         app.ws("/echo", _ws_echo)
         const lis: TcpListener = TcpListener("127.0.0.1", 8972)
-        lis.do_bind()
-        lis.do_listen(128)
+        lis.bind()
+        lis.listen(128)
         const fds: list[int] = []
         const N: int = 60
         const t: Task[None] = fire _ws_accept_serve(lis, app, N, fds)
@@ -268,7 +268,7 @@ class WebSocketServerTests(TestCase) {
         i: int = 0
         while i < N {
             const c: TcpStream = TcpStream.open("127.0.0.1", 8972)
-            c.do_send(_upgrade_get("/echo"))
+            c.send(_upgrade_get("/echo"))
             const resp: str = _recv_handshake(c)
             if i == N - 1 {
                 last_upgraded = "101 Switching Protocols" in resp

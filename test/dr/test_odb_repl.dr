@@ -297,8 +297,8 @@ class WireFollowerTest(TestCase) {
         primary: ODB = _mem()
         _seed(primary)
         lis: TcpListener = TcpListener("127.0.0.1", 54491)
-        lis.do_bind()
-        lis.do_listen(8)
+        lis.bind()
+        lis.listen(8)
         t: Task[int] = fire _serve(lis, primary, 2)
 
         fdb: ODB = _mem()
@@ -351,8 +351,8 @@ class ReadYourWritesTest(TestCase) {
         primary: ODB = _mem()
         _seed(primary)
         plis: TcpListener = TcpListener("127.0.0.1", 54492)
-        plis.do_bind()
-        plis.do_listen(8)
+        plis.bind()
+        plis.listen(8)
         pt: Task[int] = fire _serve(plis, primary, 1)
 
         fdb: ODB = _mem()
@@ -363,8 +363,8 @@ class ReadYourWritesTest(TestCase) {
         fsrv: ODBServer = ODBServer(fdb, 0)
         fsrv.waiter = FollowerWaiter(f)
         flis: TcpListener = TcpListener("127.0.0.1", 54493)
-        flis.do_bind()
-        flis.do_listen(8)
+        flis.bind()
+        flis.listen(8)
         ft: Task[int] = fire _serve_with(flis, fsrv, 1)
 
         # write on the primary; the follower has not seen it yet
