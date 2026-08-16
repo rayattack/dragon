@@ -236,6 +236,15 @@ bool TupleType::equals(const Type& other) const {
     return true;
 }
 
+bool TupleType::isSubtypeOf(const Type& other) const {
+    if (Type::isSubtypeOf(other)) return true;
+    if (other.kind() != Kind::Tuple) return false;
+    auto& o = static_cast<const TupleType&>(other);
+    return o.elementTypes.size() == 1 &&
+           (o.elementTypes[0]->kind() == Kind::Any ||
+            o.elementTypes[0]->kind() == Kind::Unknown);
+}
+
 // FunctionType
 std::string FunctionType::toString() const {
     std::string s = "(";

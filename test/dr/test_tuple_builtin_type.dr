@@ -1,0 +1,31 @@
+"""tuple([...]) from a list literal is typed as a concrete tuple, not Any.
+
+Regression: the tuple() builtin call fell through the checker's builtin
+return-type block to Unknown, so `print(tuple([1, 2]))` rendered blank (print
+dispatches on the static type and Unknown is not Tuple kind) and a wrong-arity
+binding silently type-checked. The checker now infers exact arity from a list
+literal, and bare `tuple` still accepts any tuple.
+"""
+
+from unittest import TestCase, main
+
+class TupleBuiltinType(TestCase) {
+    def test_exact_arity_binding() {
+        const t: tuple[int, int] = tuple([1, 2])
+        self.assertEqual(t[0], 1)
+        self.assertEqual(t[1], 2)
+    }
+
+    def test_str_of_tuple_builtin() {
+        self.assertEqual(str(tuple([1, 2])), "(1, 2)")
+    }
+
+    def test_bare_tuple_accepts_any_arity() {
+        const a: tuple = tuple([1, 2, 3])
+        const b: tuple = tuple(["x", "y"])
+        self.assertEqual(len(a), 3)
+        self.assertEqual(len(b), 2)
+    }
+}
+
+main([TupleBuiltinType()])

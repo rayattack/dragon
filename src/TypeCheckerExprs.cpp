@@ -828,6 +828,19 @@ void TypeChecker::visit(CallExpr& node) {
                 std::vector<std::shared_ptr<Type>>{impl_->intType, impl_->intType});
             return;
         }
+        if (n == "tuple" && node.args.size() == 1) {
+            if (auto* le = dynamic_cast<ListExpr*>(node.args[0].get())) {
+                std::shared_ptr<Type> elem = impl_->anyType;
+                if (node.args[0]->type &&
+                    node.args[0]->type->kind() == Type::Kind::List) {
+                    auto et = static_cast<ListType&>(*node.args[0]->type).elementType;
+                    if (et) elem = et;
+                }
+                node.type = std::make_shared<TupleType>(
+                    std::vector<std::shared_ptr<Type>>(le->elements.size(), elem));
+                return;
+            }
+        }
         // Builtins returning the argument type
         if (n == "min" || n == "max" || n == "sum") {
             if (!node.args.empty() && node.args[0]->type) {

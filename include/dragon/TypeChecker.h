@@ -107,6 +107,7 @@ public:
     Kind kind() const override { return Kind::Tuple; }
     std::string toString() const override;
     bool equals(const Type& other) const override;
+    bool isSubtypeOf(const Type& other) const override;
 };
 
 /// Function type: (T1, T2, ...) -> R
