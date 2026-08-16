@@ -16,6 +16,29 @@ void CodeGen::visit(StarredExpr& node) {
 void CodeGen::visit(ExprStmt& node) {
     node.expr->accept(*this);
 
+    if (impl_->lastValue && impl_->options.gcMode == GCMode::RC &&
+        dynamic_cast<AwaitExpr*>(node.expr.get()) && node.expr->type) {
+        int64_t tag = Impl::taskResultReleaseTag(node.expr->type->kind());
+        if (tag != TAG_INT) {
+            llvm::Value* v = impl_->lastValue;
+            if (!v->getType()->isPointerTy())
+                v = impl_->builder->CreateIntToPtr(v, impl_->i8PtrType);
+            if (tag == TAG_TASK_HANDLE)
+                impl_->builder->CreateCall(
+                    impl_->runtimeFuncs["dragon_vthread_detach"], {v});
+            else if (tag == TAG_STR)
+                impl_->builder->CreateCall(
+                    impl_->runtimeFuncs["dragon_decref_str"], {v});
+            else if (tag == TAG_CALLABLE)
+                impl_->builder->CreateCall(
+                    impl_->runtimeFuncs["dragon_decref_callable"], {v});
+            else
+                impl_->builder->CreateCall(
+                    impl_->runtimeFuncs["dragon_decref"], {v});
+        }
+        return;
+    }
+
     // Discarded `fire fn()` drops its Task handle: detach the vthread so it frees
     // itself (no struct + ~2MB stack leak). Binding / `await fire` keep it. Not RC-gated.
     if (impl_->lastValue && dynamic_cast<FireExpr*>(node.expr.get())) {
@@ -1197,6 +1220,18 @@ void CodeGen::visit(DeleteStmt& node) {
                     if (p->getType()->isPointerTy())
                         impl_->builder->CreateCall(
                             impl_->runtimeFuncs["dragon_lock_destroy"], {p});
+                }
+                else if (nameExpr->type &&
+                         nameExpr->type->kind() == Type::Kind::Task) {
+                    auto* val = impl_->builder->CreateLoad(
+                        alloca->getAllocatedType(), alloca,
+                        nameExpr->name + ".del.task");
+                    llvm::Value* p = val;
+                    if (p->getType()->isIntegerTy())
+                        p = impl_->builder->CreateIntToPtr(p, impl_->i8PtrType);
+                    if (p->getType()->isPointerTy())
+                        impl_->builder->CreateCall(
+                            impl_->runtimeFuncs["dragon_vthread_detach"], {p});
                 }
             }
             // Store null/zero to the slot to prevent double-free on scope cleanup

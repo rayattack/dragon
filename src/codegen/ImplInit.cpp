@@ -989,9 +989,9 @@ void CodeGen::Impl::declareRuntimeFunctions() {
     // D030: ptr dragon_vthread_spawn_typed(ptr trampoline, ptr args, i64 args_size)
     getOrDeclareRuntime("dragon_vthread_spawn_typed",
         llvm::FunctionType::get(i8PtrType, {i8PtrType, i8PtrType, i64Type}, false));
-    // D030: void dragon_vthread_set_result(ptr vt, i64 res)
+    // D030: void dragon_vthread_set_result(ptr vt, i64 res, i64 tag)
     getOrDeclareRuntime("dragon_vthread_set_result",
-        llvm::FunctionType::get(voidType, {i8PtrType, i64Type}, false));
+        llvm::FunctionType::get(voidType, {i8PtrType, i64Type, i64Type}, false));
     // D030: ptr mco_get_user_data(ptr co) - minicoro API used inside codegen-emitted trampolines
     getOrDeclareRuntime("mco_get_user_data",
         llvm::FunctionType::get(i8PtrType, {i8PtrType}, false));
@@ -1873,8 +1873,10 @@ void CodeGen::Impl::forwardDeclareClasses(dragon::Module& mod) {
                 // the generator object. Instance/static generators work; @classmethod ones don't yet.
                 bool methodIsGenerator =
                     containsYield(methodDecl->body) && !methodDecl->isClassMethod;
+                bool methodIsAsync =
+                    methodDecl->isAsync && !methodDecl->isClassMethod;
                 llvm::Type* retType =
-                    methodIsGenerator ? i8PtrType
+                    (methodIsGenerator || methodIsAsync) ? i8PtrType
                     : (methodDecl->returnType
                         ? typeExprToLLVM(methodDecl->returnType.get())
                         : unannotatedReturnType(methodDecl->body));

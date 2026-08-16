@@ -208,8 +208,12 @@ void CodeGen::visit(FireExpr& node) {
         impl_->makeSpawnArgsStructType(argTypes, "fire.args." + siteName);
 
     // Build the trampoline (off the current insert point).
+    int64_t resultTag = 0;
+    if (auto* resultCall = dynamic_cast<CallExpr*>(node.operand.get()))
+        if (resultCall->type)
+            resultTag = Impl::taskResultReleaseTag(resultCall->type->kind());
     auto* tramp = impl_->buildFireTrampoline(
-        targetFn, argsStructType, argKinds, siteName);
+        targetFn, argsStructType, argKinds, siteName, resultTag);
 
     // Coerce user args to match the target's param types (e.g. i1 -> i1, i64 -> i64).
     for (size_t i = 0; i < userArgs.size() && i < argTypes.size(); i++)

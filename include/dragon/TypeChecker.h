@@ -123,6 +123,7 @@ public:
     size_t requiredParams = 0;
     bool hasVarArg = false;  // any param is *args or **kwargs
     bool hasKwArg = false;  // specifically **kwargs, to name unknown-kw errors precisely
+    bool spawnsFreshTask = false;
     // True once fillFuncMeta has run: a real 0-param function vs. no metadata
     // (builtins/Callable, never checked).
     bool hasArgMeta = false;

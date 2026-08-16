@@ -322,6 +322,8 @@ typedef struct DragonVThread {
     int         active_frames;
     mco_coro*   coro;
     int64_t     result;
+    int64_t     result_tag;
+    volatile int8_t result_claimed;
     volatile int8_t done;
     volatile int8_t yield_reason;
     // I/O park handshake (dragon_io_arm_park/wake): resolves a lost-wakeup/double-enqueue race

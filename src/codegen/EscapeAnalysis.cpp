@@ -310,7 +310,7 @@ void CodeGen::Impl::analyzeBlockForStackAlloc(
 
         // 2b. `t: Task[...] = fire ...`: an unjoined, non-escaping Task leaks its handle
         // ref, so mark it for scope-exit detach. Detaching an escaped Task would UAF, so the gate is strict non-escape.
-        if (dynamic_cast<FireExpr*>(an->value.get())) {
+        if (dynamic_cast<FireExpr*>(an->value.get()) || an->valueIsFreshTask) {
             bool isTaskAnnot = false;
             if (auto* nt = dynamic_cast<NamedTypeExpr*>(an->annotation.get()))
                 isTaskAnnot = (nt->name == "Task");
@@ -373,8 +373,11 @@ static void forEachNestedBlock(
     }
 }
 
-void CodeGen::Impl::computeStackAllocSites(Module& entryModule) {
+void CodeGen::Impl::computeStackAllocSites(Module& entryModule,
+                                           const std::vector<Module*>& depModules) {
     if (options.gcMode != GCMode::RC) return;  // gc=none has no RC to avoid
+    for (auto* dep : depModules)
+        analyzeBlockForStackAlloc(dep->body, /*isModuleTopLevel=*/true);
     analyzeBlockForStackAlloc(entryModule.body, /*isModuleTopLevel=*/true);
 }
 

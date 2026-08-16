@@ -232,6 +232,12 @@ bool CodeGen::generate(dragon::Module& entryModule,
         impl_->bindGlobalClassVar(gKey, name->name, ann->annotation.get());
     }
 
+    // B Phase 1: decide which class constructions can stack-allocate and which
+    // Task locals detach at scope exit. Must run before ANY body emits (dep
+    // functions and class methods emit below), or their declarations register
+    // against an empty detachableTaskDecls/stackAllocSites set.
+    impl_->computeStackAllocSites(entryModule, depModules);
+
     for (auto* dep : depModules) {
         impl_->currentModuleName = dep->moduleName;
         for (auto& stmt : dep->body) {
@@ -661,10 +667,6 @@ bool CodeGen::generate(dragon::Module& entryModule,
         }
     }
     impl_->currentModuleName = "";
-
-    // B Phase 1: decide which class constructions can stack-allocate. Runs after
-    // class/function forward-declaration and class bodies, before any entry-body statement lowers.
-    impl_->computeStackAllocSites(entryModule);
 
     // Generate entry module code (ClassDecl bodies already emitted pre-main). Decorated
     // classes apply decorators at the class's source position so module-level state they depend on is already initialized.

@@ -2708,3 +2708,57 @@ TEST(TypeCheckerTest, ConstantShiftCountRejected) {
     EXPECT_TRUE(checkHasErrors("x: int = 1 << -1\n"));
     EXPECT_FALSE(checkHasErrors("x: int = 1 << 62\n"));
 }
+
+TEST(TypeCheckerTest, DiscardedTaskStatementRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "async def fetch(url: str) -> str {\n"
+        "    return url\n"
+        "}\n"
+        "fetch(\"http://x\")\n"));
+}
+
+TEST(TypeCheckerTest, BareFireStatementAccepted) {
+    EXPECT_FALSE(checkHasErrors(
+        "def work(n: int) -> int {\n"
+        "    return n\n"
+        "}\n"
+        "fire work(1)\n"));
+}
+
+TEST(TypeCheckerTest, BoundTaskDeclarationAccepted) {
+    EXPECT_FALSE(checkHasErrors(
+        "async def fetch(url: str) -> str {\n"
+        "    return url\n"
+        "}\n"
+        "def go() -> str {\n"
+        "    t: Task[str] = fetch(\"http://x\")\n"
+        "    return await t\n"
+        "}\n"));
+}
+
+TEST(TypeCheckerTest, AsyncAnyReturnRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "async def gives(n: int) -> Any {\n"
+        "    return n\n"
+        "}\n"));
+}
+
+TEST(TypeCheckerTest, FireOnAnyReturningCalleeRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "def gives(n: int) -> Any {\n"
+        "    return n\n"
+        "}\n"
+        "t: Task[Any] = fire gives(1)\n"));
+}
+
+TEST(TypeCheckerTest, DubOfTaskRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "async def fetch(url: str) -> str {\n"
+        "    return url\n"
+        "}\n"
+        "def go() -> str {\n"
+        "    t: Task[str] = fetch(\"http://x\")\n"
+        "    u: Task[str] = dub t\n"
+        "    return await u\n"
+        "}\n"));
+}

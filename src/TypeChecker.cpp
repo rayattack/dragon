@@ -618,6 +618,7 @@ bool TypeChecker::check(Module& module) {
                                              std::make_shared<TaskType>(retType))
                                        : retType;
         auto funcType = std::make_shared<FunctionType>(paramTypes, externalRet);
+        funcType->spawnsFreshTask = fd->isAsync;
         fillFuncMeta(*funcType, fd->params, fd->isMethod, fd->hasImplicitSelf,
                      fd->isClassMethod);
         impl_->define(fd->name, funcType);
@@ -1336,6 +1337,10 @@ bool TypeChecker::typeIsDubable(const Type* t, std::string& why) {
             return false;
         case Type::Kind::Function:
             why = "a closure's captured environment has identity";
+            return false;
+        case Type::Kind::Task:
+            why = "a task handle is single-owner; a second joiner would race "
+                  "the result move - await it and dub the value instead";
             return false;
         case Type::Kind::Instance:
             why = "class dub is not in v1; copy the fields you need";

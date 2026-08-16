@@ -512,6 +512,7 @@ std::unique_ptr<Stmt> cloneStmt(const Stmt* s, const TypeSubst& subst) {
         r->isConst = n->isConst;
         r->isStatic = n->isStatic;
         r->isOwn = n->isOwn;
+        r->valueIsFreshTask = n->valueIsFreshTask;
         setLoc(r, *s);
         return r;
     }

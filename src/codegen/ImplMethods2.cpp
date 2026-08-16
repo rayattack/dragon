@@ -949,11 +949,65 @@ llvm::Value* CodeGen::Impl::taskResultFromI64(llvm::Value* rawI64, Type* resultT
         }
     }
 
+void CodeGen::Impl::emitAsyncMethodWrapper(llvm::Function* wrapper,
+                                           llvm::Function* bodyFn,
+                                           const FunctionDecl& decl,
+                                           const std::string& methodSym) {
+    needsPthread = true;
+    auto* prevFunc = currentFunction;
+    auto* prevBlock = builder->GetInsertBlock();
+
+    std::vector<VarKind> kinds;
+    auto kIt = funcParamKinds.find(methodSym);
+    if (kIt != funcParamKinds.end()) kinds = kIt->second;
+    while (kinds.size() < wrapper->arg_size()) kinds.push_back(VarKind::Other);
+
+    auto* bodyTy = bodyFn->getFunctionType();
+    std::vector<llvm::Type*> argTypes;
+    for (unsigned i = 0; i < bodyTy->getNumParams(); i++)
+        argTypes.push_back(bodyTy->getParamType(i));
+    auto* argsStructType =
+        makeSpawnArgsStructType(argTypes, "async.args." + methodSym);
+
+    auto* tramp = buildFireTrampoline(
+        bodyFn, argsStructType, kinds, methodSym,
+        taskResultReleaseTag(typeExprToTypeKind(decl.returnType.get())));
+
+    currentFunction = wrapper;
+    auto* entry = llvm::BasicBlock::Create(*context, "entry", wrapper);
+    builder->SetInsertPoint(entry);
+
+    for (unsigned i = 0; i < wrapper->arg_size() && i < kinds.size(); i++)
+        emitAtomicIncref(wrapper->getArg(i), kinds[i]);
+
+    std::vector<llvm::Value*> userArgs;
+    for (unsigned i = 0; i < wrapper->arg_size(); i++)
+        userArgs.push_back(wrapper->getArg(i));
+
+    auto* argsAlloca = createEntryAlloca(wrapper, "async.args", argsStructType);
+    populateSpawnArgs(argsAlloca, argsStructType, userArgs);
+
+    const auto& dl = module->getDataLayout();
+    uint64_t argsSize = dl.getTypeAllocSize(argsStructType);
+    auto* argsAsI8 = builder->CreateBitCast(argsAlloca, i8PtrType);
+    auto* trampAsI8 = builder->CreateBitCast(tramp, i8PtrType);
+    auto* handle = builder->CreateCall(
+        runtimeFuncs["dragon_vthread_spawn_typed"],
+        {trampAsI8, argsAsI8,
+         llvm::ConstantInt::get(i64Type, (int64_t)argsSize)},
+        "async.task");
+    builder->CreateRet(handle);
+
+    currentFunction = prevFunc;
+    if (prevBlock) builder->SetInsertPoint(prevBlock);
+}
+
 llvm::Function* CodeGen::Impl::buildFireTrampoline(
     llvm::Function* targetFn,
     llvm::StructType* argsStructType,
     const std::vector<VarKind>& argKinds,
-    const std::string& siteName) {
+    const std::string& siteName,
+    int64_t resultTag) {
         // Build trampoline function: void (mco_coro*)
         auto* trampType = llvm::FunctionType::get(voidType, {i8PtrType}, false);
         auto* tramp = llvm::Function::Create(
@@ -1011,7 +1065,8 @@ llvm::Function* CodeGen::Impl::buildFireTrampoline(
         auto* res = builder->CreateCall(
             targetFn, callArgs, returnsVoid ? "" : "fire.res");
         auto* resI64 = resultToI64(res);
-        builder->CreateCall(setRes, {vt, resI64});
+        builder->CreateCall(setRes,
+            {vt, resI64, llvm::ConstantInt::get(i64Type, resultTag)});
         builder->CreateCall(runtimeFuncs["dragon_exc_pop_frame"], {});
         builder->CreateBr(cleanupBB);
 
@@ -1021,7 +1076,9 @@ llvm::Function* CodeGen::Impl::buildFireTrampoline(
         builder->CreateCall(runtimeFuncs["dragon_exc_cleanup_unwind"], {});
         builder->CreateCall(runtimeFuncs["dragon_exc_pop_frame"], {});
         builder->CreateCall(runtimeFuncs["dragon_vthread_log_uncaught"], {});
-        builder->CreateCall(setRes, {vt, llvm::ConstantInt::get(i64Type, 0)});
+        builder->CreateCall(setRes,
+            {vt, llvm::ConstantInt::get(i64Type, 0),
+             llvm::ConstantInt::get(i64Type, 0)});
         builder->CreateBr(cleanupBB);
 
         // Cleanup: balance spawn-site atomic-incref of heap args, free the

@@ -108,7 +108,8 @@ struct CodeGen::Impl {
 
     // B Phase 1 escape analysis (EscapeAnalysis.cpp): walks the entry module's top-level
     // statements + function bodies, recording each non-escaping `v: T = T(args)` ctor CallExpr* in `stackAllocSites` (conservative: any use beyond a plain `v.field` read disqualifies). The CallExpr fork applies the remaining gates (scalar-only class, single non-self-escaping ctor).
-    void computeStackAllocSites(Module& entryModule);
+    void computeStackAllocSites(Module& entryModule,
+                                const std::vector<Module*>& depModules);
     // isModuleTopLevel: direct children of the module body are module globals (whole-program
     // visibility), so they're never stack-allocated; only their nested blocks are analyzed. Function bodies and nested blocks get full candidate detection.
     void analyzeBlockForStackAlloc(const std::vector<std::unique_ptr<Stmt>>& stmts,
@@ -1034,6 +1035,21 @@ struct CodeGen::Impl {
     /// Phase 5: maps a Type::Kind to a DragonValueTag for container elem_tag (0/TAG_INT
     /// for non-heap types). 6.12: TAG_BOOL=3 unlocks 1-byte packed storage, so list[bool] of 1M elements drops from 8MB to 1MB and fits in L2.
     static int64_t typeKindToElemTag(dragon::Type::Kind k);
+
+    static int64_t taskResultReleaseTag(dragon::Type::Kind k) {
+        switch (k) {
+            case Type::Kind::Str:      return TAG_STR;
+            case Type::Kind::Bytes:    return TAG_BYTES;
+            case Type::Kind::List:
+            case Type::Kind::Set:
+            case Type::Kind::Tuple:    return TAG_LIST;
+            case Type::Kind::Dict:     return TAG_DICT;
+            case Type::Kind::Instance: return 7;
+            case Type::Kind::Function: return TAG_CALLABLE;
+            case Type::Kind::Task:     return TAG_TASK_HANDLE;
+            default:                   return TAG_INT;
+        }
+    }
 
     /// If `e` is a container (list/dict/set/tuple), returns the runtime function that
     /// renders it to a DragonString, else "". Used by str()/f-strings so a container renders as its repr instead of an empty misread string pointer. Sets type as ListType, so VarKind/AST disambiguates list vs set first.
@@ -2463,7 +2479,13 @@ struct CodeGen::Impl {
         llvm::Function* targetFn,
         llvm::StructType* argsStructType,
         const std::vector<VarKind>& argKinds,
-        const std::string& siteName);
+        const std::string& siteName,
+        int64_t resultTag);
+
+    void emitAsyncMethodWrapper(llvm::Function* wrapper,
+                                llvm::Function* bodyFn,
+                                const FunctionDecl& decl,
+                                const std::string& methodSym);
 
     /// Builds a per-defer-site thunk `void __dragon_defer_<site>(i64* args)` that loads
     /// targetFn's args from the i64 snapshot array and calls it, discarding the result. One thunk serves both exit paths (inline normal exit, DCLEAN_DEFER_CALL during longjmp unwind). vtableIndex >= 0 dispatches through the vtable for D026 override parity.

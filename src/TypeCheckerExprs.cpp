@@ -1917,6 +1917,13 @@ void TypeChecker::visit(FireExpr& node) {
     if (node.operand) {
         // fire fn(args) -> Task[<result type of fn>]
         auto opType = inferType(node.operand.get());
+        if (opType && (opType->kind() == Type::Kind::Any ||
+                       opType->kind() == Type::Kind::Union)) {
+            error(node.location(), "cannot fire a call returning '" +
+                  opType->toString() +
+                  "': a task result crosses the spawn boundary monomorphized; "
+                  "annotate the callee's concrete return type");
+        }
         node.type = std::make_shared<TaskType>(
             opType ? opType : std::static_pointer_cast<Type>(impl_->unknownType));
         return;

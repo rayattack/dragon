@@ -1008,7 +1008,9 @@ void CodeGen::visit(FunctionDecl& node) {
             argTypes, "async.args." + node.name);
 
         auto* tramp = impl_->buildFireTrampoline(
-            bodyFunc, argsStructType, paramKinds, node.name);
+            bodyFunc, argsStructType, paramKinds, node.name,
+            Impl::taskResultReleaseTag(
+                impl_->typeExprToTypeKind(node.returnType.get())));
 
         impl_->builder->SetInsertPoint(wrapEntry);
 

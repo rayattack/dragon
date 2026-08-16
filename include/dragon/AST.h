@@ -461,6 +461,7 @@ public:
     /// `own f: T` field marker (docs/001-memory.md): the field is the value's
     /// sole owner, released on instance death; stores must transfer ownership.
     bool isOwn = false;
+    bool valueIsFreshTask = false;
     void accept(ASTVisitor& visitor) override;
 };
 

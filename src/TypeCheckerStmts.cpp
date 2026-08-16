@@ -243,7 +243,15 @@ void TypeChecker::propagateAnnotationToEmptyLiteral(Expr* value, const std::shar
 }
 
 void TypeChecker::visit(ExprStmt& node) {
-    if (node.expr) inferType(node.expr.get());
+    if (!node.expr) return;
+    auto exprType = inferType(node.expr.get());
+    if (exprType && exprType->kind() == Type::Kind::Task &&
+        !dynamic_cast<FireExpr*>(node.expr.get())) {
+        error(node.location(), "this expression produces a '" +
+              exprType->toString() +
+              "' that is silently discarded; bind it, then await, join, or "
+              "del it (`fire fn()` is the explicit fire-and-forget spelling)");
+    }
 }
 
 void TypeChecker::visit(AssignStmt& node) {
@@ -452,6 +460,12 @@ void TypeChecker::visit(AnnAssignStmt& node) {
         impl_->currentExpectedType = annotType;
         auto valueType = inferType(node.value.get());
         impl_->currentExpectedType = nullptr;
+        if (auto* spawnCall = dynamic_cast<CallExpr*>(node.value.get())) {
+            auto calleeType = spawnCall->callee ? spawnCall->callee->type : nullptr;
+            if (calleeType && calleeType->kind() == Type::Kind::Function &&
+                static_cast<const FunctionType&>(*calleeType).spawnsFreshTask)
+                node.valueIsFreshTask = true;
+        }
         // A literal into list[Any] / dict[K, Any] must be built boxed: else the narrow
         // type passes and `x[i]` reads two native slots as a box. `list[type]` excluded.
         bool elemIsType = containerElementAnnotationIsType(node.annotation.get());
@@ -1211,12 +1225,26 @@ void TypeChecker::visit(FunctionDecl& node) {
         paramTypes.push_back(resolveType(node.params[i].type.get()));
     }
     auto retType = resolveType(node.returnType.get());
+    if (node.isAsync && node.isClassMethod) {
+        error(node.location(),
+              "an async @classmethod is not supported; make it an async "
+              "instance method or a module-level async function");
+    }
+    if (node.isAsync && retType &&
+        (retType->kind() == Type::Kind::Any ||
+         retType->kind() == Type::Kind::Union)) {
+        error(node.location(), "an async function cannot return '" +
+              retType->toString() +
+              "': a task result crosses the spawn boundary monomorphized; "
+              "annotate the concrete return type");
+    }
     // `async def f() -> T` is callable as `f(): Task[T]`; the body still returns T,
     // so the external FunctionType wraps in Task while return-checks use T.
     auto externalRet = node.isAsync ? std::static_pointer_cast<Type>(
                                           std::make_shared<TaskType>(retType))
                                     : retType;
     auto funcType = std::make_shared<FunctionType>(paramTypes, externalRet);
+    funcType->spawnsFreshTask = node.isAsync;
     fillFuncMeta(*funcType, node.params, node.isMethod, node.hasImplicitSelf,
                  node.isClassMethod);
 
@@ -1432,6 +1460,7 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
                                               std::make_shared<TaskType>(retType))
                                          : retType;
         auto fType = std::make_shared<FunctionType>(paramTypes, externalRet);
+        fType->spawnsFreshTask = func->isAsync;
         fillFuncMeta(*fType, func->params, func->isMethod, func->hasImplicitSelf,
                      func->isClassMethod);
         if (func->isProperty) {

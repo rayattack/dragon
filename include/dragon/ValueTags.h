@@ -21,4 +21,6 @@ enum DragonValueTag : int8_t {
 // ptr); numerically equal to the runtime object tag DRAGON_TAG_CLOSURE.
 constexpr int8_t TAG_CALLABLE = 10;
 
+constexpr int8_t TAG_TASK_HANDLE = 100;
+
 #endif  // DRAGON_VALUE_TAGS_H

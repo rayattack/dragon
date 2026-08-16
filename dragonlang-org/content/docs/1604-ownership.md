@@ -581,6 +581,59 @@ path pays zero synchronization. Sharing mutable state without a lock is not a
 race you debug at 3am; it is error E12 at the fire line. See
 [Synchronization](/docs/1104-synchronization) for the locked-type door.
 
+## The outbound edge: the task's result
+
+The doors above govern values crossing *into* a green thread. Exactly one
+value crosses back *out*: the result. Its rule is the own-field rule you
+already know - **the result slot is an `own` field of the Task**. `await` and
+`join()` are the move out; a task that dies with its result unclaimed releases
+it, exactly as any owner releases what it still holds when it dies.
+
+```dragon
+# doc: no-check
+t: Task[Response] = fire post(url, payload)
+
+r: Response = await t   # the result MOVES out of the task into `r`
+                        # (own-move, symmetric to `fire f(own x)` inbound)
+
+v: Response = await t   # error: 't' was already awaited or joined;
+                        # a task's result moves out exactly once
+
+del t                   # explicit fire-and-forget: the handle is released now,
+                        # the task runs on, and an unclaimed result dies with
+                        # the task via own-slot cleanup
+
+post(url, payload)      # error: this expression produces a 'Task[Response]'
+                        # that is silently discarded; bind it, then await,
+                        # join, or del it
+
+u: Task[Response] = dub t   # error E11: a task handle is single-owner; a
+                            # second joiner would race the result move
+```
+
+Three consequences fall out of stating it this way:
+
+- **Nothing is stranded.** A bound task that simply falls off its scope edge
+  detaches; when it finishes, the runtime releases the unclaimed result by its
+  static type (the spawn site is monomorphized, so it knows the release kind).
+  This holds for a `str`, a class instance, a container, even a nested
+  `Task` from firing an async call.
+- **`del t` is the honest spelling of fire-and-forget.** The drop is a
+  statement you wrote, not an absence the reader must notice. `del` of a Task
+  means "claim and detach", not the debug `assert(rc == 1); free` - the
+  running coroutine still holds its reference. And `del t` while a borrow is
+  still lent to `t` refuses at the del line: destroying the only handle that
+  could end the lend would strand it.
+- **A discarded `await t` still releases.** `await t` in statement position
+  receives the moved result and releases it on the spot; ignoring a response
+  does not leak it.
+
+`fire fn()` in statement position stays legal - the keyword *is* the visible
+declaration of fire-and-forget intent, and every borrowed argument of a
+discarded-handle fire already crossed through a safe door (E12). What the
+compiler refuses is the drop you cannot see: a bare async call whose Task
+vanishes between two statements.
+
 The same `own`/`dub` argument modes work at [`defer`](/docs/1105-defer), the
 scope-exit twin of `fire`. `defer archive(own log)` moves the binding at the
 defer STATEMENT (every later use is a use-after-move error, same as any move),

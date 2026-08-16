@@ -413,10 +413,23 @@ static DragonVThread* scheduler_dequeue() {
 // D030: generic vthread_entry deleted. Each spawn site generates its own per-callsite trampoline
 // that knows its target's exact native signature and stores the result via dragon_vthread_set_result.
 
+void dragon_vthread_detach(DragonVThread* vt);
+
+static void vthread_result_release_unclaimed(DragonVThread* vt) {
+    if (vt->result_claimed || !vt->result) return;
+    int64_t tag = vt->result_tag;
+    void* p = (void*)(uintptr_t)vt->result;
+    if (tag == TAG_TASK_HANDLE) dragon_vthread_detach((DragonVThread*)p);
+    else if (tag == TAG_STR) dragon_decref_str_dispatch((const char*)p);
+    else if (tag == (int8_t)DRAGON_TAG_CLOSURE) dragon_decref_callable(p);
+    else if (tag >= TAG_LIST) dragon_decref_dispatch(p);
+}
+
 // Drop one reference on a vthread; the last one frees the struct + coroutine stack + unwind arrays.
 // Used by both the worker's coro ref and the Task handle ref; the atomic decrement-to-zero decides.
 static void vthread_release(DragonVThread* vt) {
     if (__atomic_sub_fetch(&vt->refs, 1, __ATOMIC_ACQ_REL) != 0) return;
+    vthread_result_release_unclaimed(vt);
     mco_destroy(vt->coro);
     pthread_mutex_destroy(&vt->join_lock);
     pthread_cond_destroy(&vt->join_cond);
@@ -582,8 +595,11 @@ DragonVThread* dragon_vthread_spawn_typed(
 
 /// D030: Trampoline-side helper to record the green thread's return value. The store happens-before
 /// the worker's release-store of vt->done, so join's acquire-load sees a coherent result.
-void dragon_vthread_set_result(DragonVThread* vt, int64_t res) {
-    if (vt) vt->result = res;
+void dragon_vthread_set_result(DragonVThread* vt, int64_t res, int64_t tag) {
+    if (vt) {
+        vt->result = res;
+        vt->result_tag = tag;
+    }
 }
 
 /// Join a green thread: block until done, return result, free resources. D030: args buffer is
@@ -605,6 +621,7 @@ int64_t dragon_vthread_join(DragonVThread* vt) {
     pthread_mutex_unlock(&vt->join_lock);
 
     int64_t result = vt->result;
+    vt->result_claimed = 1;
     // The CAS winner owns the handle ref and drops it (frees iff the coro is also done); a losing
     // caller holds no ref and must not release - it just returns the cached result.
     if (winner) vthread_release(vt);

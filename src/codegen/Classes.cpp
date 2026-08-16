@@ -1876,6 +1876,21 @@ void CodeGen::visit(ClassDecl& node) {
             continue;
         }
 
+        llvm::Function* asyncWrapperFn = nullptr;
+        if (methodDecl->isAsync && !methodDecl->isClassMethod) {
+            asyncWrapperFn = methodFunc;
+            auto* wrapTy = methodFunc->getFunctionType();
+            std::vector<llvm::Type*> bodyParamTypes(wrapTy->param_begin(),
+                                                    wrapTy->param_end());
+            llvm::Type* bodyRet =
+                impl_->typeExprToLLVM(methodDecl->returnType.get());
+            if (bodyRet == impl_->voidType) bodyRet = impl_->i64Type;
+            methodFunc = llvm::Function::Create(
+                llvm::FunctionType::get(bodyRet, bodyParamTypes, false),
+                llvm::Function::InternalLinkage,
+                methodFuncName + "__async_body", impl_->module.get());
+        }
+
         auto* prevFunc = impl_->currentFunction;
         auto* prevBlock = impl_->builder->GetInsertBlock();
         std::string prevClassName = impl_->currentClassName;
@@ -2052,6 +2067,10 @@ void CodeGen::visit(ClassDecl& node) {
         impl_->currentClassName = prevClassName;
         impl_->currentFunction = prevFunc;
         if (prevBlock) impl_->builder->SetInsertPoint(prevBlock);
+
+        if (asyncWrapperFn)
+            impl_->emitAsyncMethodWrapper(asyncWrapperFn, methodFunc, *methodDecl,
+                                          methodFuncName);
     }
 
     // D033: emit a per-method "bound thunk" (closure ABI: user_args..., env) that
