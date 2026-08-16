@@ -763,11 +763,11 @@ for i in range(1, len(args)) {
 }
 ```
 
-> **`argv()` reflects the compiled binary's arguments.** Build the
-> program (`dragon build prog.dr -o prog`) and run `./prog one two`, and
-> you get `["./prog", "one", "two"]`. Under `dragon run prog.dr one
-> two`, the trailing words are taken as *more files to compile*, not
-> program arguments - so test argument handling against a built binary.
+> **`argv()` reflects the program's arguments under both `run` and a built
+> binary.** `dragon run prog.dr one two` forwards `one two` to the program, so
+> `argv()` is `[<path>, "one", "two"]`; a built `./prog one two` gives
+> `["./prog", "one", "two"]`. Use `--` (`dragon run prog.dr -- --flag`) when an
+> argument would otherwise be read as a compiler flag.
 
 A typical argument check looks like any other Dragon code - it's just a
 list:
@@ -875,7 +875,7 @@ shutil.rmtree(work)
 | Match paths on disk | `glob.glob("src/**/*.dr")` |
 | Match one name | `fnmatch.fnmatch(name, "*.txt")` |
 | Scratch dir / file | `tempfile.mkdtemp(p, "")` / `tempfile.mkstemp(p, s)` |
-| Object-style path | `Path("/a/b").suffix()` *(call accessors with `()`)* |
+| Object-style path | `Path("/a/b").suffix` *(accessors are `@property`, no `()`)* |
 | Read an env var | `os.environ[name]` / `getenv(name)` / `environ_get(name, default)` |
 | Current directory | `os.cwd()` |
 | Read CLI arguments | `args: list[str] = argv()` *(args from index 1)* |

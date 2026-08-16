@@ -139,8 +139,8 @@ try {
 # recovered: disk full
 ```
 
-Translating a low-level failure into a domain-specific one - `raise MyError(...) from e`
-- is covered with [Custom Exceptions](/docs/0902-custom-exceptions).
+Translating a low-level failure into a domain-specific one (catch it, then
+`raise MyError(...)`) is covered in [Custom Exceptions](/docs/0902-custom-exceptions).
 
 ## `finally` and `else`
 
@@ -184,15 +184,17 @@ try {
 }
 ```
 
-The one error that still **aborts** the process - printing to stderr and exiting,
-*bypassing* `try`/`except` - is a failed `assert`:
+A failed `assert` raises a catchable `AssertionError` (Python parity), so a
+`try`/`except` around it works like any other exception:
 
 ```dragon
-assert False, "boom"     # prints "AssertionError: boom", exits 1 - NOT catchable
+assert False, "boom"     # raises AssertionError("boom")
 ```
 
-That's by design: `assert` is for invariants that must hold, not recoverable
-conditions. If you want a catchable failure, `raise AssertionError(...)` explicitly.
+Left uncaught, it terminates the process with exit 1, printing the message to
+stderr as `Unhandled exception: boom`. Use `assert` for invariants that must
+hold; a broad `except Exception` will catch it, so guard invariant checks with a
+narrower handler if you do not want them swallowed.
 
 ## Running out of memory: `MemoryError`
 

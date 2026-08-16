@@ -118,7 +118,7 @@ process around it.
 
 | Module | Purpose | Chapter |
 |--------|---------|---------|
-| `io` | Read and write files - a `File` class with `with`-block support | [Files](/docs/1402-stdlib-io) |
+| `io` | Read and write files - `open`/`make`/`push` return `with`-scoped `Reader`/`Writer` (plus `BytesIO`/`StringIO`) | [Files](/docs/1402-stdlib-io) |
 | `os` | The OS interface: directory listings, environment, processes | [Files](/docs/1402-stdlib-io) |
 | `os.path` | Pure path-string surgery: `join`, `basename`, `splitext`, existence checks | [Files](/docs/1402-stdlib-io) |
 | `pathlib` | Object-oriented paths - a `Path` class with `/` joining | [Files](/docs/1402-stdlib-io) |
@@ -148,7 +148,7 @@ Reading and writing structured data: JSON, CSV, INI, TOML, and binary.
 
 | Module | Purpose | Chapter |
 |--------|---------|---------|
-| `json` | JSON encode/decode/validate (schema-directed `decode[T]`/`encode[T]`; `loads` → `Any`; typed `dumps_*`; the `Schema` registry) | [Data Formats](/docs/1404-stdlib-data) |
+| `json` | JSON encode/decode/validate (schema-directed `decode[T]`/`encode[T]`; `loads` → `Any`; `dumps(obj)`; the `Schema` registry) | [Data Formats](/docs/1404-stdlib-data) |
 | `csv` | CSV `parse_row`/`format_row` with explicit delimiter | [Data Formats](/docs/1404-stdlib-data) |
 | `configparser` | INI files - sections, key-values, comments | [Data Formats](/docs/1404-stdlib-data) |
 | `tomllib` | Read-only TOML, returning a typed `TomlDoc` | [Data Formats](/docs/1404-stdlib-data) |

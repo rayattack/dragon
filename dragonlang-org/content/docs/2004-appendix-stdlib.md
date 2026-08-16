@@ -88,7 +88,7 @@ statically linked the same way. Either way, nothing is fetched at build time.
 | `fileinput` | Iterate over lines from many input streams as one stream, matching Python's `fileinput`. |
 | `linecache` | Cache lines from text files for line-number lookup, matching Python's `linecache`. |
 | `mimetypes` | Guess a file's MIME type from its name/extension. Pure Dragon. |
-| `io` | File I/O - a `File` class with context-manager support over C stdio. |
+| `io` | File I/O - `open`/`make`/`push` return `with`-scoped `Reader`/`Writer` (plus `BytesIO`/`StringIO`); no mode strings (ADR 050). |
 | `tempfile` | Temporary file and directory creation over POSIX/libc. |
 | `getpass` | Portable no-echo password input and current-user lookup over a native terminal shim plus libc. |
 | `subprocess` | Spawn child processes with pipe capture - a Python-parity subset over a native spawn plus a `poll(2)` pump. |
