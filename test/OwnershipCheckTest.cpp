@@ -766,3 +766,153 @@ TEST(OwnershipCheckTest, OwnCtorMoveAccepted) {
         "    return r.probe()\n"
         "}\n")));
 }
+
+TEST(OwnershipCheckTest, DelOfLentTaskErrorsAtDelSite) {
+    std::string e = ownError(
+        "class Counter {\n"
+        "    n: int\n"
+        "    def(n: int) {\n"
+        "        self.n = n\n"
+        "    }\n"
+        "}\n"
+        "def worker(c: Counter) -> int {\n"
+        "    c.n = c.n + 1\n"
+        "    return c.n\n"
+        "}\n"
+        "def run() -> int {\n"
+        "    c: Counter = Counter(7)\n"
+        "    t: Task[int] = fire worker(c)\n"
+        "    del t\n"
+        "    return 0\n"
+        "}\n");
+    EXPECT_NE(e.find("cannot del task 't'"), std::string::npos) << e;
+}
+
+TEST(OwnershipCheckTest, DelOfUnlentTaskAccepted) {
+    EXPECT_TRUE(ownAccepts(
+        "async def make(n: int) -> str {\n"
+        "    return \"x\"\n"
+        "}\n"
+        "def run() -> None {\n"
+        "    t: Task[str] = make(1)\n"
+        "    del t\n"
+        "}\n"));
+}
+
+TEST(OwnershipCheckTest, DoubleAwaitRejected) {
+    std::string e = ownError(
+        "async def make(n: int) -> str {\n"
+        "    return str(n)\n"
+        "}\n"
+        "def run() -> str {\n"
+        "    t: Task[str] = make(1)\n"
+        "    a: str = await t\n"
+        "    b: str = await t\n"
+        "    return a + b\n"
+        "}\n");
+    EXPECT_NE(e.find("moves out exactly once"), std::string::npos) << e;
+}
+
+TEST(OwnershipCheckTest, AwaitThenJoinRejected) {
+    std::string e = ownError(
+        "async def make(n: int) -> str {\n"
+        "    return str(n)\n"
+        "}\n"
+        "def run() -> str {\n"
+        "    t: Task[str] = make(1)\n"
+        "    a: str = await t\n"
+        "    return t.join()\n"
+        "}\n");
+    EXPECT_NE(e.find("moves out exactly once"), std::string::npos) << e;
+}
+
+TEST(OwnershipCheckTest, IsAliveAfterAwaitRejected) {
+    std::string e = ownError(
+        "async def make(n: int) -> str {\n"
+        "    return str(n)\n"
+        "}\n"
+        "def run() -> bool {\n"
+        "    t: Task[str] = make(1)\n"
+        "    a: str = await t\n"
+        "    return t.is_alive()\n"
+        "}\n");
+    EXPECT_NE(e.find("moves out exactly once"), std::string::npos) << e;
+}
+
+TEST(OwnershipCheckTest, AwaitInLoopOfOuterTaskRejected) {
+    std::string e = ownError(
+        "async def make(n: int) -> str {\n"
+        "    return str(n)\n"
+        "}\n"
+        "def run() -> int {\n"
+        "    t: Task[str] = make(1)\n"
+        "    total: int = 0\n"
+        "    i: int = 0\n"
+        "    while i < 3 {\n"
+        "        s: str = await t\n"
+        "        total = total + len(s)\n"
+        "        i = i + 1\n"
+        "    }\n"
+        "    return total\n"
+        "}\n");
+    EXPECT_NE(e.find("awaited on iteration 1"), std::string::npos) << e;
+}
+
+TEST(OwnershipCheckTest, ConditionalAwaitThenSecondAwaitRejected) {
+    std::string e = ownError(
+        "async def make(n: int) -> str {\n"
+        "    return str(n)\n"
+        "}\n"
+        "def run(ready: bool) -> str {\n"
+        "    t: Task[str] = make(1)\n"
+        "    early: str = \"\"\n"
+        "    if ready {\n"
+        "        early = await t\n"
+        "    }\n"
+        "    late: str = await t\n"
+        "    return early + late\n"
+        "}\n");
+    EXPECT_NE(e.find("moves out exactly once"), std::string::npos) << e;
+}
+
+TEST(OwnershipCheckTest, ConditionalAwaitAloneAccepted) {
+    EXPECT_TRUE(ownAccepts(
+        "async def make(n: int) -> str {\n"
+        "    return str(n)\n"
+        "}\n"
+        "def run(ready: bool) -> str {\n"
+        "    t: Task[str] = make(1)\n"
+        "    if ready {\n"
+        "        return await t\n"
+        "    }\n"
+        "    return \"skipped\"\n"
+        "}\n"));
+}
+
+TEST(OwnershipCheckTest, PollThenAwaitAccepted) {
+    EXPECT_TRUE(ownAccepts(
+        "async def make(n: int) -> str {\n"
+        "    return str(n)\n"
+        "}\n"
+        "def run() -> str {\n"
+        "    t: Task[str] = make(1)\n"
+        "    while t.is_alive() {\n"
+        "        pass\n"
+        "    }\n"
+        "    return await t\n"
+        "}\n"));
+}
+
+TEST(OwnershipCheckTest, RebindThenAwaitAccepted) {
+    EXPECT_TRUE(ownAccepts(
+        "async def make(n: int) -> str {\n"
+        "    return str(n)\n"
+        "}\n"
+        "def run() -> str {\n"
+        "    t: Task[str] = make(1)\n"
+        "    a: str = await t\n"
+        "    t = make(2)\n"
+        "    b: str = await t\n"
+        "    return a + b\n"
+        "}\n"));
+}

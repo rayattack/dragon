@@ -10,13 +10,14 @@ abandoned ones. So:
     it; the await path emptied the slot so the scope-exit detach is a no-op (no
     double-free) - this is the conditional-await case that used to leak
   - returned / passed / stored / captured -> TRANSFERRED -> the new owner frees it
-A second `await t` / `t.is_alive()` after a consume reads the emptied slot (NULL ->
-0 / false), NOT the freed struct - closing a latent use-after-await UAF. All cases
-below are ASan/LSan-clean (no leak, no UAF, no double-free); the leak/UAF
-magnitudes are A/B-proven in the scratch probes.
+A second `await t` / `t.join()` / `t.is_alive()` after a consume is a compile
+error (the result moves out exactly once); polling BEFORE the await stays legal.
+All cases below are ASan/LSan-clean (no leak, no UAF, no double-free); the
+leak/UAF magnitudes are A/B-proven in the scratch probes.
 """
 
 from unittest import TestCase, main
+from time import sleep_ms
 
 
 def square(n: int) -> int {
@@ -76,15 +77,14 @@ def conditional(n: int, c: bool) -> int {
 }
 
 
-# Use-after-await: reading the slot after consuming it must NOT touch freed memory
-# (it reads NULL -> is_alive() false), and the result stays correct.
-def use_after_await(n: int) -> int {
+# Poll-then-await: is_alive() reads stay legal BEFORE the consume, and the
+# awaited result is still correct after the polling loop.
+def poll_then_await(n: int) -> int {
     t: Task[int] = fire square(n)
-    r: int = await t
-    if t.is_alive() {
-        return 0 - 1
+    while t.is_alive() {
+        sleep_ms(1)
     }
-    return r
+    return await t
 }
 
 
@@ -155,12 +155,12 @@ class TaskDetachRcTests(TestCase) {
         self.assertEqual(dropped, 0 - 50)  # -1 each, 50 times
     }
 
-    def test_use_after_await_no_uaf() {
+    def test_poll_then_await_no_uaf() {
         # is_alive() after await reads the emptied slot (false), not freed memory.
         i: int = 1
         total: int = 0
         while i <= 50 {
-            total = total + use_after_await(i)
+            total = total + poll_then_await(i)
             i = i + 1
         }
         self.assertEqual(total, 42925)

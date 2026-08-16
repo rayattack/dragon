@@ -244,19 +244,24 @@ t: Task[int] = fire work(9)
 r: int = t.join()
 print(r)                # 81
 
-# is_alive() reports whether the green thread is still running.
+# is_alive() reports whether the green thread is still running; poll it
+# BEFORE you collect the result.
 t2: Task[int] = fire work(5)
-v: int = await t2
-print(t2.is_alive())    # False
+while t2.is_alive() {
+    pass                # room to do other work while it runs
+}
+v: int = await t2       # the result moves out exactly once
+print(v)                # 25
 ```
 
-This prints `81` then `False`. After you've collected a task's result
-(via `await` or `.join()`), `is_alive()` reports `False` - the green
-thread has finished. `.join()` and `await` are interchangeable for the
+This prints `81` then `25`. Awaiting or joining a task *consumes* it: the
+result moves out of the task exactly once, so a second `await t`,
+`t.join()`, or even `t.is_alive()` after the first collect is a compile
+error, not a stale read. `.join()` and `await` are interchangeable for the
 *value*; the difference is only in scheduling behavior (`await` yields a
 green-thread awaiter; `.join()` is the plain blocking name). Use `await`
 in concurrent code, reach for `.is_alive()` when you genuinely want to
-ask "are you done?" without waiting.
+ask "are you done?" without waiting - before you collect.
 
 ## Tier 2: a CPU-bound block on a real OS thread
 

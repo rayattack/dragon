@@ -33,6 +33,7 @@ struct BindState {
     SourceLocation condLiveLoc;
     // Dead: HOW it died - del (killWasDel) or a move into killDesc.
     bool killWasDel = true;
+    bool killWasAwait = false;
     std::string killDesc;
     // Dead/LENT (E12 joined-Task door): a borrow crossed `fire` into the named
     // bound Task and REVIVES to Owned at await/join (the machine's only backwards transition); checker-only, no runtime change.
@@ -337,6 +338,11 @@ struct OwnershipCheck::Impl {
                       "'" + n->name + "' is lent to " + b.killDesc +
                           " until it is awaited or joined - touching it here "
                           "races the thread");
+            else if (b.killWasAwait)
+                error(n->location(),
+                      "'" + n->name + "' was already awaited or joined at " +
+                          b.killDesc +
+                          "; a task's result moves out exactly once");
             else
                 error(n->location(),
                       b.killWasDel
@@ -419,12 +425,19 @@ struct OwnershipCheck::Impl {
                           "; only the sole owner can be " + verb);
                 return 0;
             case St::Dead:
-                error(n->location(),
-                      b.killWasDel
-                          ? "'" + n->name + "' was already deleted at " +
-                                lineRef(b.killLoc)
-                          : "'" + n->name + "' was already moved into " +
-                                b.killDesc);
+                if (b.killWasAwait)
+                    error(n->location(),
+                          "'" + n->name +
+                              "' was already awaited or joined at " +
+                              b.killDesc +
+                              "; a task's result moves out exactly once");
+                else
+                    error(n->location(),
+                          b.killWasDel
+                              ? "'" + n->name + "' was already deleted at " +
+                                    lineRef(b.killLoc)
+                              : "'" + n->name + "' was already moved into " +
+                                    b.killDesc);
                 return 0;
             case St::CondDead:
                 error(n->location(),
@@ -508,6 +521,10 @@ struct OwnershipCheck::Impl {
                 }
             }
             if (anyDead && anyAlive) {
+                if (deadSt->killWasAwait) {
+                    st = *deadSt;
+                    continue;
+                }
                 if (!reported.count(id)) {
                     reported.insert(id);
                     auto nm = slotNames.count(id) ? slotNames[id] : "value";
@@ -697,6 +714,21 @@ struct OwnershipCheck::Impl {
     // copied (dub), fresh, internally locked, or (if the Task handle is bound) LENT until await/join; a discarded handle makes a borrow a hard E12.
 
     // Revive every binding lent to `taskName` (the only backwards transition).
+    void consumeTaskHandle(NameExpr* tn, Flow& flow) {
+        if (!tn->type || tn->type->kind() != Type::Kind::Task) return;
+        VarSlot* s = resolve(tn->name);
+        if (!s) return;
+        auto it = flow.states.find(s->id);
+        if (it != flow.states.end() && it->second.st == St::Dead) return;
+        BindState d;
+        d.st = St::Dead;
+        d.killWasDel = false;
+        d.killWasAwait = true;
+        d.killLoc = tn->location();
+        d.killDesc = lineRef(tn->location());
+        flow.states[s->id] = d;
+    }
+
     void reviveLends(const std::string& taskName, Flow& flow) {
         for (auto& [id, st] : flow.states) {
             if (st.st == St::Dead && st.lentTask == taskName) {
@@ -932,9 +964,12 @@ struct OwnershipCheck::Impl {
                 calleeDesc = "'" + ca->attribute + "()'";
             // `t.join()` is the same happens-before edge as `await t`.
             if (auto* jat = dynamic_cast<AttributeExpr*>(call->callee.get()))
-                if (jat->attribute == "join")
-                    if (auto* jt = dynamic_cast<NameExpr*>(jat->object.get()))
+                if (jat->attribute == "join" && call->args.empty() &&
+                    call->kwArgs.empty())
+                    if (auto* jt = dynamic_cast<NameExpr*>(jat->object.get())) {
                         reviveLends(jt->name, flow);
+                        consumeTaskHandle(jt, flow);
+                    }
             for (auto& a : call->args) {
                 // `f(own x)`: the caller's +1 transfers (ADR 2.4/2.8) via the same
                 // consuming ladder as del, leaving x Moved; E13/E14 signature matching is the TypeChecker's job.
@@ -1040,6 +1075,7 @@ struct OwnershipCheck::Impl {
             if (auto* tn = dynamic_cast<NameExpr*>(aw->operand.get())) {
                 checkRead(tn, flow);
                 reviveLends(tn->name, flow);  // the happens-before edge
+                consumeTaskHandle(tn, flow);
                 return;
             }
             checkExpr(aw->operand.get(), flow);
@@ -1243,6 +1279,17 @@ struct OwnershipCheck::Impl {
             }
             auto* n = dynamic_cast<NameExpr*>(t);
             if (!n) continue;
+            for (auto& [lid, lst] : flow.states) {
+                if (lst.st == St::Dead && lst.lentTask == n->name &&
+                    !reported.count(lid)) {
+                    reported.insert(lid);
+                    auto lname = slotNames.count(lid) ? slotNames[lid]
+                                                      : "a binding";
+                    error(n->location(),
+                          "cannot del task '" + n->name + "' while '" + lname +
+                              "' is lent to it; await or join it first");
+                }
+            }
             // Shared consuming-transition ladder (ADR 2.4): provenUnique marks only the
             // PROVEN-Owned case, since the -O0 rc==1 assert applies to compiler-proven sole owners, never scalars.
             int r = consumeBinding(n, flow, /*isDel=*/true, "");
@@ -1268,9 +1315,17 @@ struct OwnershipCheck::Impl {
             if ((it->second.st == St::Dead || it->second.st == St::CondDead) &&
                 !reported.count(id)) {
                 reported.insert(id);
-                error(it->second.killLoc.line ? it->second.killLoc : loopLoc,
-                      "deleted on iteration 1; iteration 2 would use a dead "
-                      "name - delete it after the loop instead");
+                if (it->second.killWasAwait)
+                    error(it->second.killLoc.line ? it->second.killLoc
+                                                  : loopLoc,
+                          "awaited on iteration 1; iteration 2 would await an "
+                          "already-consumed task - bind a fresh task inside "
+                          "the loop");
+                else
+                    error(it->second.killLoc.line ? it->second.killLoc
+                                                  : loopLoc,
+                          "deleted on iteration 1; iteration 2 would use a dead "
+                          "name - delete it after the loop instead");
                 it->second = st;  // heal to entry state
             }
         }
