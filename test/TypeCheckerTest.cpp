@@ -2762,3 +2762,15 @@ TEST(TypeCheckerTest, DubOfTaskRejected) {
         "    return await u\n"
         "}\n"));
 }
+
+TEST(TypeCheckerTest, RaiseFromCauseRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "class E(Exception) {\n"
+        "    def(m: str) { self.message = m }\n"
+        "}\n"
+        "try {\n"
+        "    raise ValueError(\"low\")\n"
+        "} except ValueError as e {\n"
+        "    raise E(\"high\") from e\n"
+        "}\n"));
+}

@@ -1063,7 +1063,11 @@ void TypeChecker::visit(ReturnStmt& node) {
 
 void TypeChecker::visit(RaiseStmt& node) {
     if (node.exception) inferType(node.exception.get());
-    if (node.cause) inferType(node.cause.get());
+    if (node.cause) {
+        error(node.cause->location(),
+              "exception chaining with 'from' is not supported: the cause is not "
+              "retained and cannot be read back. Raise the new exception without 'from'.");
+    }
 }
 
 void TypeChecker::visit(BreakStmt&) {}
