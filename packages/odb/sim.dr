@@ -114,7 +114,7 @@ def check_accounting(p: Pager) -> str {
 }
 
 # One copy-on-write commit. Returns the page id it installed as the new root.
-def _do_commit(p: Pager, counter: int) -> int {
+def _commit_once(p: Pager, counter: int) -> int {
     newpg: int = p.alloc()
     pending_csn: int = p.last_csn + 1
     p.stage(newpg, PT_DATA, _payload(counter, pending_csn))
@@ -172,7 +172,7 @@ def run_crash_trials(n_seeds: int) -> SimResult {
         i: int = 0
         while i < k {
             counter = counter + 1
-            r: int = _do_commit(p, counter)
+            r: int = _commit_once(p, counter)
             old_csn = p.last_csn
             old_root = r
             old_counter = counter
@@ -183,7 +183,7 @@ def run_crash_trials(n_seeds: int) -> SimResult {
         budget: int = rng.below(7)
         v.arm(budget, Rng((seed * 2654435761) & 0xFFFFFFFF))
         counter = counter + 1
-        new_root: int = _do_commit(p, counter)
+        new_root: int = _commit_once(p, counter)
         expect_new_csn: int = old_csn + 1
 
         # Reopen the frozen post-crash disk into a fresh pager. A CorruptionError
@@ -238,7 +238,7 @@ def run_crash_trials(n_seeds: int) -> SimResult {
                 j: int = 0
                 while j < 3 and res.failures == fail_before {
                     cval: int = 1000 + j
-                    _do_commit(rp, cval)
+                    _commit_once(rp, cval)
                     readback: bytes = rp.read_page(rp.catalog_root)
                     if get_u64(readback, 0) != cval {
                         res._fail(seed, "post-recovery commit read back " + str(get_u64(readback, 0)))
@@ -413,7 +413,7 @@ def _tail_payload(i: int) -> bytes {
 }
 
 # One raft flush: append entry `idx` at `term`, stamp term/vote, flip.
-def _do_state_flush(p: Pager, tail: RaftTail, idx: int, term: int) -> None {
+def _flush_state(p: Pager, tail: RaftTail, idx: int, term: int) -> None {
     tail.append(idx, term, _tail_payload(idx))
     p.raft_term = term
     p.raft_vote = (idx % 5) + 1
@@ -439,10 +439,10 @@ def run_state_crash_trials(n_seeds: int) -> SimResult {
         while i < steps {
             if rng.flip() {
                 counter = counter + 1
-                _do_commit(p, counter)
+                _commit_once(p, counter)
             } else {
                 idx = idx + 1
-                _do_state_flush(p, tail, idx, term)
+                _flush_state(p, tail, idx, term)
             }
             i = i + 1
         }
@@ -461,10 +461,10 @@ def run_state_crash_trials(n_seeds: int) -> SimResult {
         crash_state: bool = rng.flip()
         if crash_state {
             idx = idx + 1
-            _do_state_flush(p, tail, idx, term + 1)
+            _flush_state(p, tail, idx, term + 1)
         } else {
             counter = counter + 1
-            _do_commit(p, counter)
+            _commit_once(p, counter)
         }
 
         fail_before: int = res.failures
@@ -530,10 +530,10 @@ def run_state_crash_trials(n_seeds: int) -> SimResult {
                     res._fail(seed, "post-recovery accounting: " + acct)
                 } else {
                     nidx: int = idx + 10
-                    _do_state_flush(rp, rtail, nidx, term + 2)
+                    _flush_state(rp, rtail, nidx, term + 2)
                     cval: int = 500
-                    _do_commit(rp, cval)
-                    _do_commit(rp, cval + 1)
+                    _commit_once(rp, cval)
+                    _commit_once(rp, cval + 1)
                     acct2: str = check_accounting(rp)
                     if acct2 != "" {
                         res._fail(seed, "post-recovery accounting after work: " + acct2)

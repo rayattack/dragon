@@ -97,7 +97,7 @@ def _split_target(url: str) -> tuple[str, int, str] {
 # Issue a single HTTP request and return the response. The caller owns the
 # returned HTTPResponse and must close it (urlopen_request closes the
 # intermediate responses it follows through redirects).
-def _do_request(req: Request) -> HTTPResponse {
+def _request(req: Request) -> HTTPResponse {
     target: tuple[str, int, str] = _split_target(req.full_url)
     host: str = target[0]
     port: int = target[1]
@@ -119,7 +119,7 @@ def urlopen(target: str) -> HTTPResponse {
 def urlopen_request(req: Request) -> HTTPResponse {
     redirects: int = 0
     while redirects <= MAX_REDIRECTS {
-        resp: HTTPResponse = _do_request(req)
+        resp: HTTPResponse = _request(req)
         # 3xx with a Location header: follow once, swap method to GET on 303
         # to match RFC 7231. 301/302/307/308 keep the original method.
         if resp.status >= 300 and resp.status < 400 {
