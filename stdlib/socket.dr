@@ -258,6 +258,7 @@ class UdpSocket {
         const buf: ptr = malloc(size + 1)
         memset(buf, 0, size + 1)
         const result: str = dragon_recv_to_str(self._sock.fd(), buf, size, 0)
+        free(buf)
         return result
     }
 

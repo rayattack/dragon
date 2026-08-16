@@ -596,6 +596,7 @@ DragonBox dragon_box_subscript(DragonBox container, DragonBox index) {
                 case TAG_LIST:
                 case TAG_DICT:
                 case TAG_BYTES:
+                case DRAGON_TAG_CLOSURE:
                     // Borrowed pointer from the list - incref for the owned
                     // contract.
                     r.payload = (int64_t)(uintptr_t)((void* const*)l->data)[idx];
