@@ -28,7 +28,7 @@
     #include <sys/epoll.h>
     #include <sys/timerfd.h>
     #include <fcntl.h>
-  #elif defined(__APPLE__)
+  #elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
     #include <sys/event.h>
     #include <fcntl.h>
   #endif
@@ -930,8 +930,8 @@ static void io_init() {
     pthread_create(&__io_thread, NULL, io_thread_entry, NULL);
 }
 
-#elif defined(__APPLE__)
-// --- macOS: kqueue + EVFILT_TIMER ---
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
+// --- macOS/BSD: kqueue + EVFILT_TIMER ---
 
 // On macOS we use a unique ident for each timer to avoid collisions
 static volatile int64_t __kqueue_timer_id = 1;
@@ -945,8 +945,13 @@ static void io_process_pending() {
             int64_t ms = req->timer_ms;
             uintptr_t timer_id = (uintptr_t)__sync_fetch_and_add(&__kqueue_timer_id, 1);
             req->fd = -1; // no real fd for kqueue timer
+            #ifdef NOTE_USECONDS
             EV_SET(&kev, timer_id, EVFILT_TIMER, EV_ADD | EV_ONESHOT,
                    NOTE_USECONDS, ms * 1000, req);
+            #else
+            EV_SET(&kev, timer_id, EVFILT_TIMER, EV_ADD | EV_ONESHOT,
+                   0, ms, req);
+            #endif
             kevent(__io_epfd, &kev, 1, NULL, 0, NULL);
         } else {
             int16_t filter = (req->event_type == IO_EVENT_FD_READ)

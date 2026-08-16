@@ -19,9 +19,10 @@
   #include <arpa/inet.h>
   #include <netdb.h>           // getaddrinfo for dragon_resolve4
   #include <fcntl.h>
-  #ifdef __APPLE__
-    #include <sys/random.h>    // getentropy lives here on macOS, not unistd.h
+  #if defined(__APPLE__) || defined(__FreeBSD__)
+    #include <sys/random.h>    // getentropy lives here on macOS/FreeBSD, not unistd.h
   #endif
+  #include <sys/syscall.h>     // SYS_getrandom for the Linux raw-syscall path
 #endif
 #include "llhttp.h"
 #ifndef _WIN32
@@ -471,9 +472,9 @@ static int64_t dragon_fill_os_random(unsigned char* buf, int64_t n) {
     }
     if (BCryptGenRandom(nullptr, buf, (unsigned long)n, 2) >= 0) got = n;
 #else
-    #if defined(__linux__)
+    #if defined(__linux__) && defined(SYS_getrandom)
     while (got < n) {
-        long r = syscall(318L, buf + got, (size_t)(n - got), 0u);
+        long r = syscall(SYS_getrandom, buf + got, (size_t)(n - got), 0u);
         if (r <= 0) break;
         got += r;
     }
@@ -533,11 +534,11 @@ DragonBytes* dragon_urandom(int64_t n) {
                               2 /* BCRYPT_USE_SYSTEM_PREFERRED_RNG */);
     if (st >= 0) got = n;
 #else
-    #if defined(__linux__)
+    #if defined(__linux__) && defined(SYS_getrandom)
     while (got < n) {
-        // SYS_getrandom = 318 on x86_64 Linux. Use the syscall directly so
-        // we don't pull in glibc 2.25+ symbols (older base distros lack them).
-        long r = syscall(318L, buf + got, (size_t)(n - got), 0u);
+        // Raw syscall (arch-correct SYS_getrandom, not hardcoded 318) so we
+        // don't pull in glibc 2.25+ symbols (older base distros lack them).
+        long r = syscall(SYS_getrandom, buf + got, (size_t)(n - got), 0u);
         if (r <= 0) break;
         got += r;
     }

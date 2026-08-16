@@ -1226,7 +1226,9 @@ bool CodeGen::linkExecutable(const std::string& outputFile,
     if (impl_->needsPthread) {
         args.push_back("-lpthread");
     }
+#if !defined(__OpenBSD__)
     args.push_back("-ldl");
+#endif
 #endif
 
     bool ok = runTool(args);
