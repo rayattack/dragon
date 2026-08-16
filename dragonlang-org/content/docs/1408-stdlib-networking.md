@@ -1,10 +1,78 @@
 # Networking
 
-Dragon's networking stack is layered the way you would expect. At the bottom is `socket`, a thin set of wrappers over the BSD socket syscalls. Above that, `http.client` speaks HTTP/1.1 over a TCP stream. Above *that*, `urllib.request` adds redirect-following and a convenient `urlopen` entry point, and `urllib.parse` handles the URL and query-string bookkeeping that every HTTP client needs. The four modules compose top to bottom: `urllib.request` is written in terms of `http.client`, which is written in terms of `socket`.
+Dragon's networking stack is layered the way you would expect. At the bottom is `socket`, a thin set of wrappers over the BSD socket syscalls. Above that, `http.client` speaks HTTP/1.1 over a TCP stream. Above *that* sit the conveniences: the `http` package root is the request API you should reach for first (`get`/`post`/`Client`), `urllib.request` adds Python-parity `urlopen`, and `urllib.parse` handles the URL and query-string bookkeeping that every HTTP client needs. The modules compose top to bottom: `http` and `urllib.request` are written in terms of `http.client`, which is written in terms of `socket`.
 
-One property runs through the whole stack and is worth stating up front: **the I/O is colorless and scheduler-aware**. The socket calls present a blocking API - `do_send` returns when the bytes are queued, `do_recv` returns when data arrives - but underneath, when a call would block, it yields the current green thread to the scheduler instead of parking the carrier OS thread. Issue your network work from a `fire`'d vthread (see [Concurrency](/docs/1101-green-threads)) and thousands of in-flight connections share a handful of OS threads. Off a green thread the same calls fall back to `poll()`, so nothing breaks. You write straight-line blocking code; the runtime makes it scale. This is the design spec's I/O model and it is the reason there is no `async`/`await` split in any of these signatures.
+One property runs through the whole stack and is worth stating up front: **the I/O is colorless and scheduler-aware**. The socket calls present a blocking API - `send` returns when the bytes are queued, `recv` returns when data arrives - but underneath, when a call would block, it yields the current green thread to the scheduler instead of parking the carrier OS thread. Thousands of in-flight connections share a handful of OS threads; off a green thread the same calls fall back to `poll()`, so nothing breaks. You write straight-line blocking code; the runtime makes it scale. And because Dragon's `await` is [colorless](/docs/1102-async-await), the `async def` verbs at the top of the stack impose nothing on their callers - there is no sync/async split to maintain anywhere below.
 
 This chapter covers the **client** side. The HTTP *server* - routing, request parsing, the `App`/`Router` API - lives in its own chapter, [Web Application](/docs/1701-web-application); the minimal hand-rolled servers below exist only to give the client examples something to talk to.
+
+## http - the request API
+
+`from http import get, post` is the way most programs should make HTTP
+requests. Every verb (`get`, `post`, `put`, `patch`, `delete`, `head`,
+`options`) is an `async def` returning a `Response`, so one definition serves
+both straight-line and concurrent use:
+
+```dragon
+from http import get, post, Response
+
+r: Response = await get("https://api.example.com/users?page=2")
+print(r.status)                   # 200
+print(r.header("content-type"))   # application/json
+print(r.text)
+
+payload: dict[str, Any] = {"name": "Ada"}
+created: Response = await post("https://api.example.com/users", json=payload)
+
+a: Task[Response] = get("https://api.example.com/users/1")   # two requests
+b: Task[Response] = get("https://api.example.com/users/2")   # in flight
+first: Response = await a
+second: Response = await b
+```
+
+A `Response` is **fully buffered**: the connection is drained and closed
+inside the verb, so a `Response` never owns a socket - not even one stranded
+in a dropped `Task` (see [Ownership](/docs/1604-ownership) for what happens
+to a dropped task's result). Its surface: `status`, `reason`, `text`, `url`,
+the as-received `headers` dict plus case-insensitive `header(name, default)`,
+`ok()` (status < 400), `json() -> Any` (the boxed decode tier), and
+`raise_for_status()`, which raises `HTTPStatusError` on 4xx/5xx and returns
+the response otherwise so it chains:
+
+```dragon
+from http import get, Response, HTTPStatusError
+
+try {
+    user: Response = (await get("https://api.example.com/me")).raise_for_status()
+    print(user.text)
+} except HTTPStatusError as e {
+    print(f"request failed: {e.status} {e.reason} for {e.url}")
+}
+```
+
+Request bodies are mutually exclusive typed keywords: `body: str` (raw, wins),
+`json: dict[str, Any]` (serialized, `Content-Type: application/json`), and
+`data: dict[str, str]` (form-encoded). `params: dict[str, str]` appends to
+the query string; `headers: dict[str, str]` adds or overrides per call. An
+empty `json` dict sends no body - send a literal empty object as
+`body="{}"` with an explicit Content-Type header.
+
+`Client` carries shared defaults - a `base_url` prefix and headers sent with
+every call (per-call headers win) - and is `with`-scoped:
+
+```dragon
+from http import Client, Response
+
+auth: dict[str, str] = {"Authorization": "Bearer token"}
+with Client("https://api.example.com", headers=auth) as api {
+    users: Response = await api.get("/v1/users")
+    gone: Response = await api.delete("/v1/users/9")
+}
+```
+
+Two v1 limits, stated honestly: redirects are not followed (`r.status` tells
+you what the server said), and there is no per-request timeout yet. Both the
+verbs and `Client` open one connection per request.
 
 ## urllib.parse - URLs and query strings
 
@@ -116,9 +184,9 @@ print(f"{frag[0]} | {frag[1]}")            # http://h/p | section
 
 `socket` wraps the BSD socket syscalls behind three classes. It is deliberately object-oriented rather than mirroring CPython's single `socket.socket()` factory: a server uses `TcpListener`, a connection (either end) is a `TcpStream`, and datagrams go through `UdpSocket`.
 
-`TcpStream.open(host: str, port: int)` is a static method that resolves the host, connects, and returns a connected stream. On it you call `do_send(data: str) -> int`, `do_recv(size: int) -> str`, and `close() -> int`. For binary protocols there are `send_bytes(data: bytes)` and `recv_bytes(size: int) -> bytes` on the same scheduler-yielding path. A `TcpStream` is a context manager, so `with` closes it for you.
+`TcpStream.open(host: str, port: int)` is a static method that resolves the host, connects, and returns a connected stream. On it you call `send(data: str) -> int`, `recv(size: int) -> str`, and `close() -> int`. For binary protocols there are `send_bytes(data: bytes)` and `recv_bytes(size: int) -> bytes` on the same scheduler-yielding path. A `TcpStream` is a context manager, so `with` closes it for you.
 
-On the server side, construct `TcpListener(host, port)`, then call `do_bind()`, `do_listen(backlog)`, and `do_accept() -> TcpStream`. `gethostbyname(host: str) -> str` resolves a name to a dotted IPv4 string (a literal IP passes through unchanged):
+On the server side, construct `TcpListener(host, port)`, then call `bind()`, `listen(backlog)`, and `accept() -> TcpStream`. `gethostbyname(host: str) -> str` resolves a name to a dotted IPv4 string (a literal IP passes through unchanged):
 
 ```dragon
 from socket import gethostbyname
@@ -126,36 +194,36 @@ from socket import gethostbyname
 print(gethostbyname("127.0.0.1"))   # 127.0.0.1
 ```
 
-Here is a complete loopback echo. Note the ordering: the listener binds and listens on the main thread *before* anything connects, and only the blocking `do_accept()` runs on a fired vthread. That guarantees the socket is listening before the client dials it.
+Here is a complete loopback echo. Note the ordering: the listener binds and listens on the main thread *before* anything connects, and only the blocking `accept()` runs on a fired vthread. That guarantees the socket is listening before the client dials it.
 
 ```dragon
 from socket import TcpListener, TcpStream
 
 # Bind + listen first so the socket is ready before the client connects.
 listener: TcpListener = TcpListener("127.0.0.1", 8765)
-listener.do_bind()
-listener.do_listen(1)
+listener.bind()
+listener.listen(1)
 
 def serve() -> None {
-    conn: TcpStream = listener.do_accept()
-    data: str = conn.do_recv(1024)
-    conn.do_send(f"echo:{data}")
+    conn: TcpStream = listener.accept()
+    data: str = conn.recv(1024)
+    conn.send(f"echo:{data}")
     conn.close()
 }
 
 server: Task[None] = fire serve()
 
 with TcpStream.open("127.0.0.1", 8765) as client {
-    client.do_send("hello")
-    print(client.do_recv(1024))   # echo:hello
+    client.send("hello")
+    print(client.recv(1024))   # echo:hello
 }
 server.join()
 listener.close()
 ```
 
-`UdpSocket(host, port)` rounds out the module for datagrams, with `do_bind()`, `sendto(data, host, port) -> int`, `recvfrom(size) -> str`, and `close()`.
+`UdpSocket(host, port)` rounds out the module for datagrams, with `bind()`, `sendto(data, host, port) -> int`, `recvfrom(size) -> str`, and `close()`.
 
-> **Differs from Python.** There is no single `socket.socket()` object with `connect`/`bind`/`send`/`recv` methods and a family/type argument - Dragon splits the roles into `TcpListener`, `TcpStream`, and `UdpSocket`, and the read/write methods are named `do_send`/`do_recv`/`do_bind`/`do_accept` (the `do_` prefix keeps `accept`/`bind` free as ordinary words and sidesteps clashes with the libc syscalls of the same name that the module imports). Sockets are IPv4-only (`AF_INET`); there is no IPv6, no `socket.gethostname()`, and no address-family/socket-type constants - the variants are the three classes. Every `TcpStream` sets `TCP_NODELAY` in its constructor, so request/response protocols do not eat a Nagle/delayed-ACK stall.
+> **Differs from Python.** There is no single `socket.socket()` object with `connect`/`bind`/`send`/`recv` methods and a family/type argument - Dragon splits the roles into `TcpListener`, `TcpStream`, and `UdpSocket`; the method names themselves (`bind`, `listen`, `accept`, `send`, `recv`, `shutdown`) match Python's. Sockets are IPv4-only (`AF_INET`); there is no IPv6, no `socket.gethostname()`, and no address-family/socket-type constants - the variants are the three classes. Every `TcpStream` sets `TCP_NODELAY` in its constructor, so request/response protocols do not eat a Nagle/delayed-ACK stall.
 
 ## http.client - HTTP/1.1 requests
 
@@ -171,13 +239,13 @@ from http.client import HTTPConnection, HTTPResponse
 
 # A one-shot HTTP server to answer the request below.
 listener: TcpListener = TcpListener("127.0.0.1", 8767)
-listener.do_bind()
-listener.do_listen(1)
+listener.bind()
+listener.listen(1)
 
 def serve() -> None {
-    conn: TcpStream = listener.do_accept()
-    conn.do_recv(4096)
-    conn.do_send("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\npong")
+    conn: TcpStream = listener.accept()
+    conn.recv(4096)
+    conn.send("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\npong")
     conn.close()
 }
 
@@ -210,15 +278,15 @@ from http.client import HTTPResponse
 
 # Server that answers two requests, then exits.
 listener: TcpListener = TcpListener("127.0.0.1", 8768)
-listener.do_bind()
-listener.do_listen(2)
+listener.bind()
+listener.listen(2)
 
 def serve(n: int) -> None {
     i: int = 0
     while i < n {
-        conn: TcpStream = listener.do_accept()
-        conn.do_recv(4096)
-        conn.do_send("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
+        conn: TcpStream = listener.accept()
+        conn.recv(4096)
+        conn.send("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
         conn.close()
         i = i + 1
     }
@@ -245,7 +313,7 @@ listener.close()
 | Module | Import | Key entry points | Notes |
 |---|---|---|---|
 | `urllib.parse` | `from urllib.parse import quote, urlencode, urlsplit` | `quote`/`unquote`/`quote_plus`/`unquote_plus`, `urlencode`, `parse_qs`/`parse_qsl`, `urlsplit`/`urlparse`, `urljoin`, `urldefrag` | Pure, no I/O; `urlencode` is dict-only; `urljoin` does not normalize `..` |
-| `socket` | `from socket import TcpListener, TcpStream, UdpSocket` | `TcpStream.open`/`do_send`/`do_recv`, `TcpListener.do_bind`/`do_listen`/`do_accept`, `UdpSocket`, `gethostbyname` | IPv4 only; three role classes, not one factory; scheduler-yielding I/O; `with` closes |
+| `socket` | `from socket import TcpListener, TcpStream, UdpSocket` | `TcpStream.open`/`send`/`recv`, `TcpListener.bind`/`listen`/`accept`, `UdpSocket`, `gethostbyname` | IPv4 only; three role classes, not one factory; scheduler-yielding I/O; `with` closes |
 | `http.client` | `from http.client import HTTPConnection, HTTPResponse` | `HTTPConnection.request`/`getresponse`, `HTTPResponse.read`/`getheader`/`status` | `request` needs all four args; `Connection: close`, one request per connection; `HTTPSConnection` for TLS |
 | `urllib.request` | `from urllib.request import urlopen, Request` | `urlopen`, `urlopen_request`, `Request`/`add_header` | Follows up to 5 redirects; `http://` only; `data` is `str` |
 

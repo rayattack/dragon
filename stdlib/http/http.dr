@@ -1,15 +1,325 @@
-# http.dr - Dragon HTTP package root
-#
-# Usage:
-#  from http import HTTPServer
-#  from http.server import Router, Request, Response, Context
+"""http.dr - Dragon HTTP package root: the request API.
 
-from http.server import Router, Request, Response, Context
+The adoption surface over http.client (D-level: requests/httpx shape, Dragon
+semantics). Every verb is `async def`, so one definition serves both modes:
+
+    r: Response = await get("http://api.example.com/users")
+
+    a: Task[Response] = get(url_one)
+    b: Task[Response] = get(url_two)
+    first: Response = await a
+    second: Response = await b
+
+A Response is fully buffered: the connection is drained and closed inside the
+verb, so a Response (even one stranded in a dropped Task) never owns a socket.
+Bodies are mutually exclusive: `body` (raw str) wins over `json` wins over
+`data` (form-encoded). An empty `json` dict sends no body; send a literal
+empty object with `body="{}"` plus a Content-Type header. No redirects are
+followed in v1; `r.status` tells you what the server said.
+
+Server constants live on HTTPServer; the server itself is `http.server`.
+"""
+
+from http.client import HTTPConnection, HTTPSConnection, HTTPResponse, HTTPSResponse
+from urllib.parse import urlsplit, urlencode, SplitResult
+from json import dumps as _json_dumps, loads as _json_loads
 
 
-#===----------------------------------------------------------------------===#
-# HTTPServer - status code constants and lifecycle event names
-#===----------------------------------------------------------------------===#
+class HTTPStatusError(Exception) {
+    status: int
+    reason: str
+    url: str
+
+    def(status: int, reason: str, url: str) {
+        self.status = status
+        self.reason = reason
+        self.url = url
+    }
+}
+
+
+class Response {
+    status: int
+    reason: str
+    headers: dict[str, str]
+    text: str
+    url: str
+
+    def(status: int, reason: str, headers: dict[str, str], text: str, url: str) {
+        self.status = status
+        self.reason = reason
+        self.headers = headers
+        self.text = text
+        self.url = url
+    }
+
+    def ok() -> bool {
+        return self.status < 400
+    }
+
+    def header(name: str, default: str = "") -> str {
+        """Case-insensitive single-header lookup over the as-received dict."""
+        target: str = name.lower()
+        for k in self.headers {
+            if k.lower() == target {
+                return self.headers[k]
+            }
+        }
+        return default
+    }
+
+    def json() -> Any {
+        return _json_loads(self.text)
+    }
+
+    def raise_for_status() -> Response {
+        """Raises HTTPStatusError on a 4xx/5xx status; returns self otherwise
+        so a call can chain: `r: Response = (await get(url)).raise_for_status()`."""
+        if self.status >= 400 {
+            raise HTTPStatusError(self.status, self.reason, self.url)
+        }
+        return self
+    }
+}
+
+
+class _Target {
+    scheme: str
+    host: str
+    port: int
+    path: str
+
+    def(scheme: str, host: str, port: int, path: str) {
+        self.scheme = scheme
+        self.host = host
+        self.port = port
+        self.path = path
+    }
+}
+
+
+def _target_of(url: str, params: dict[str, str]) -> _Target {
+    parts: SplitResult = urlsplit(url)
+    scheme: str = parts.scheme
+    if scheme != "http" and scheme != "https" {
+        raise ValueError(f"unsupported URL scheme '{scheme}' (expected http or https): {url}")
+    }
+    host: str = parts.netloc
+    port: int = 80
+    if scheme == "https" {
+        port = 443
+    }
+    colon: int = host.find(":")
+    if colon >= 0 {
+        port = int(host[colon + 1:len(host)])
+        host = host[0:colon]
+    }
+    path: str = parts.path
+    if len(path) == 0 {
+        path = "/"
+    }
+    query: str = parts.query
+    if len(params) > 0 {
+        extra: str = urlencode(params)
+        if len(query) > 0 {
+            query = query + "&" + extra
+        } else {
+            query = extra
+        }
+    }
+    if len(query) > 0 {
+        path = path + "?" + query
+    }
+    return _Target(scheme, host, port, path)
+}
+
+
+def _has_header(headers: dict[str, str], name: str) -> bool {
+    target: str = name.lower()
+    for k in headers {
+        if k.lower() == target {
+            return True
+        }
+    }
+    return False
+}
+
+
+def _request(method: str, url: str, headers: dict[str, str],
+             params: dict[str, str], body: str, json_body: dict[str, Any],
+             form: dict[str, str]) -> Response {
+    target: _Target = _target_of(url, params)
+    payload: str = body
+    content_type: str = ""
+    if len(payload) == 0 and len(json_body) > 0 {
+        payload = _json_dumps(json_body)
+        content_type = "application/json"
+    }
+    if len(payload) == 0 and len(form) > 0 {
+        payload = urlencode(form)
+        content_type = "application/x-www-form-urlencoded"
+    }
+    send_headers: dict[str, str] = {}
+    for k in headers {
+        send_headers[k] = headers[k]
+    }
+    if len(content_type) > 0 and not _has_header(send_headers, "Content-Type") {
+        send_headers["Content-Type"] = content_type
+    }
+    if target.scheme == "https" {
+        sconn: HTTPSConnection = HTTPSConnection(target.host, target.port)
+        sconn.request(method, target.path, payload, send_headers)
+        sresp: HTTPSResponse = sconn.getresponse()
+        sout: Response = Response(sresp.status, sresp.reason, sresp.headers,
+                                  sresp.read(), url)
+        sconn.close()
+        return sout
+    }
+    conn: HTTPConnection = HTTPConnection(target.host, target.port)
+    conn.request(method, target.path, payload, send_headers)
+    resp: HTTPResponse = conn.getresponse()
+    out: Response = Response(resp.status, resp.reason, resp.headers,
+                             resp.read(), url)
+    conn.close()
+    return out
+}
+
+
+async def get(url: str, headers: dict[str, str] = {},
+              params: dict[str, str] = {}) -> Response {
+    return _request("GET", url, headers, params, "", {}, {})
+}
+
+
+async def post(url: str, body: str = "", json: dict[str, Any] = {},
+               data: dict[str, str] = {}, headers: dict[str, str] = {},
+               params: dict[str, str] = {}) -> Response {
+    return _request("POST", url, headers, params, body, json, data)
+}
+
+
+async def put(url: str, body: str = "", json: dict[str, Any] = {},
+              data: dict[str, str] = {}, headers: dict[str, str] = {},
+              params: dict[str, str] = {}) -> Response {
+    return _request("PUT", url, headers, params, body, json, data)
+}
+
+
+async def patch(url: str, body: str = "", json: dict[str, Any] = {},
+                data: dict[str, str] = {}, headers: dict[str, str] = {},
+                params: dict[str, str] = {}) -> Response {
+    return _request("PATCH", url, headers, params, body, json, data)
+}
+
+
+async def delete(url: str, headers: dict[str, str] = {},
+                 params: dict[str, str] = {}) -> Response {
+    return _request("DELETE", url, headers, params, "", {}, {})
+}
+
+
+async def head(url: str, headers: dict[str, str] = {},
+               params: dict[str, str] = {}) -> Response {
+    return _request("HEAD", url, headers, params, "", {}, {})
+}
+
+
+async def options(url: str, headers: dict[str, str] = {},
+                  params: dict[str, str] = {}) -> Response {
+    return _request("OPTIONS", url, headers, params, "", {}, {})
+}
+
+
+class Client {
+    """Shared defaults for a family of requests: a base_url prefix and headers
+    sent with every call (per-call headers win on conflict). with-scoped for
+    interface symmetry; v1 opens one connection per request, so close() holds
+    no resources."""
+    base_url: str
+    headers: dict[str, str]
+
+    def(base_url: str = "", headers: dict[str, str] = {}) {
+        self.base_url = base_url
+        self.headers = headers
+    }
+
+    def _full_url(path: str) -> str {
+        if path.startswith("http://") or path.startswith("https://") {
+            return path
+        }
+        return self.base_url + path
+    }
+
+    def _merged(extra: dict[str, str]) -> dict[str, str] {
+        merged: dict[str, str] = {}
+        for k in self.headers {
+            merged[k] = self.headers[k]
+        }
+        for k in extra {
+            merged[k] = extra[k]
+        }
+        return merged
+    }
+
+    async def get(path: str, headers: dict[str, str] = {},
+                  params: dict[str, str] = {}) -> Response {
+        return _request("GET", self._full_url(path), self._merged(headers),
+                        params, "", {}, {})
+    }
+
+    async def post(path: str, body: str = "", json: dict[str, Any] = {},
+                   data: dict[str, str] = {}, headers: dict[str, str] = {},
+                   params: dict[str, str] = {}) -> Response {
+        return _request("POST", self._full_url(path), self._merged(headers),
+                        params, body, json, data)
+    }
+
+    async def put(path: str, body: str = "", json: dict[str, Any] = {},
+                  data: dict[str, str] = {}, headers: dict[str, str] = {},
+                  params: dict[str, str] = {}) -> Response {
+        return _request("PUT", self._full_url(path), self._merged(headers),
+                        params, body, json, data)
+    }
+
+    async def patch(path: str, body: str = "", json: dict[str, Any] = {},
+                    data: dict[str, str] = {}, headers: dict[str, str] = {},
+                    params: dict[str, str] = {}) -> Response {
+        return _request("PATCH", self._full_url(path), self._merged(headers),
+                        params, body, json, data)
+    }
+
+    async def delete(path: str, headers: dict[str, str] = {},
+                     params: dict[str, str] = {}) -> Response {
+        return _request("DELETE", self._full_url(path), self._merged(headers),
+                        params, "", {}, {})
+    }
+
+    async def head(path: str, headers: dict[str, str] = {},
+                   params: dict[str, str] = {}) -> Response {
+        return _request("HEAD", self._full_url(path), self._merged(headers),
+                        params, "", {}, {})
+    }
+
+    async def options(path: str, headers: dict[str, str] = {},
+                      params: dict[str, str] = {}) -> Response {
+        return _request("OPTIONS", self._full_url(path), self._merged(headers),
+                        params, "", {}, {})
+    }
+
+    def close() -> None {
+        return
+    }
+
+    def __enter__() -> Client {
+        return self
+    }
+
+    def __exit__() -> int {
+        self.close()
+        return 0
+    }
+}
+
 
 class HTTPServer {
     # 2xx Success

@@ -1,0 +1,191 @@
+"""The requests-style http package root (get/post/Client/Response) end to end
+over real loopback sockets: request assembly (params, headers, json/form
+bodies), Response accessors (text, json(), header(), ok()), raise_for_status,
+Client base_url + header merging, and async fan-out of two in-flight verbs."""
+
+from unittest import TestCase, main
+from http import get, post, delete, Client, Response, HTTPStatusError
+from socket import TcpListener, TcpStream
+
+
+def _serve_once(lis: TcpListener, status_line: str, extra_headers: str, body: str) -> str {
+    conn: TcpStream = lis.accept()
+    got: str = ""
+    while got.find("\r\n\r\n") < 0 {
+        const chunk: str = conn.recv(4096)
+        if len(chunk) == 0 {
+            break
+        }
+        got = got + chunk
+    }
+    content_len: int = _content_length_of(got)
+    while len(got) < got.find("\r\n\r\n") + 4 + content_len {
+        const more: str = conn.recv(4096)
+        if len(more) == 0 {
+            break
+        }
+        got = got + more
+    }
+    reply: str = status_line + "\r\nContent-Type: application/json\r\n" + extra_headers + "Connection: close\r\n\r\n" + body
+    conn.send(reply)
+    conn.close()
+    return got
+}
+
+
+def _content_length_of(head: str) -> int {
+    marker: str = "Content-Length: "
+    at: int = head.find(marker)
+    if at < 0 {
+        return 0
+    }
+    end: int = head.find("\r\n", at)
+    return int(head[at + len(marker):end])
+}
+
+
+class RequestApiTests(TestCase) {
+    def test_get_assembles_params_and_headers() {
+        lis: TcpListener = TcpListener("127.0.0.1", 19180)
+        lis.bind()
+        lis.listen(1)
+        srv: Task[str] = fire _serve_once(lis, "HTTP/1.1 200 OK", "X-Tag: t9\r\n", "{\"who\": \"dragon\"}")
+        h: dict[str, str] = {"X-Client": "drtest"}
+        p: dict[str, str] = {"page": "2", "q": "fire"}
+        r: Response = await get("http://127.0.0.1:19180/users", headers=h, params=p)
+        captured: str = await srv
+        lis.close()
+        self.assertEqual(r.status, 200)
+        self.assertTrue(r.ok())
+        self.assertEqual(r.header("x-tag"), "t9")
+        self.assertEqual(r.header("content-type"), "application/json")
+        self.assertEqual(r.text, "{\"who\": \"dragon\"}")
+        self.assertTrue(captured.startswith("GET /users?page=2&q=fire HTTP/1.1\r\n"))
+        self.assertTrue(captured.find("X-Client: drtest\r\n") >= 0)
+    }
+
+    def test_response_json_is_boxed_tier() {
+        lis: TcpListener = TcpListener("127.0.0.1", 19181)
+        lis.bind()
+        lis.listen(1)
+        srv: Task[str] = fire _serve_once(lis, "HTTP/1.1 200 OK", "", "{\"n\": 7, \"tag\": \"ok\"}")
+        r: Response = await get("http://127.0.0.1:19181/j")
+        await srv
+        lis.close()
+        decoded: dict[str, Any] = r.json()
+        self.assertEqual(decoded["tag"], "ok")
+        self.assertEqual(decoded["n"], 7)
+    }
+
+    def test_post_json_body_and_content_type() {
+        lis: TcpListener = TcpListener("127.0.0.1", 19182)
+        lis.bind()
+        lis.listen(1)
+        srv: Task[str] = fire _serve_once(lis, "HTTP/1.1 201 Created", "", "{}")
+        payload: dict[str, Any] = {"name": "Ada", "admin": True}
+        r: Response = await post("http://127.0.0.1:19182/users", json=payload)
+        captured: str = await srv
+        lis.close()
+        self.assertEqual(r.status, 201)
+        self.assertTrue(captured.startswith("POST /users HTTP/1.1\r\n"))
+        self.assertTrue(captured.find("Content-Type: application/json\r\n") >= 0)
+        self.assertTrue(captured.find("\"name\": \"Ada\"") >= 0)
+    }
+
+    def test_post_form_body() {
+        lis: TcpListener = TcpListener("127.0.0.1", 19183)
+        lis.bind()
+        lis.listen(1)
+        srv: Task[str] = fire _serve_once(lis, "HTTP/1.1 200 OK", "", "{}")
+        form: dict[str, str] = {"user": "ada lovelace", "role": "eng"}
+        r: Response = await post("http://127.0.0.1:19183/login", data=form)
+        captured: str = await srv
+        lis.close()
+        self.assertEqual(r.status, 200)
+        self.assertTrue(captured.find("Content-Type: application/x-www-form-urlencoded\r\n") >= 0)
+        self.assertTrue(captured.find("user=ada+lovelace&role=eng") >= 0)
+    }
+
+    def test_raise_for_status_on_404() {
+        lis: TcpListener = TcpListener("127.0.0.1", 19184)
+        lis.bind()
+        lis.listen(1)
+        srv: Task[str] = fire _serve_once(lis, "HTTP/1.1 404 Not Found", "", "{\"error\": \"nope\"}")
+        r: Response = await get("http://127.0.0.1:19184/missing")
+        await srv
+        lis.close()
+        self.assertFalse(r.ok())
+        caught_status: int = 0
+        try {
+            r.raise_for_status()
+        } except HTTPStatusError as e {
+            caught_status = e.status
+        }
+        self.assertEqual(caught_status, 404)
+    }
+
+    def test_raise_for_status_passes_success_through() {
+        lis: TcpListener = TcpListener("127.0.0.1", 19185)
+        lis.bind()
+        lis.listen(1)
+        srv: Task[str] = fire _serve_once(lis, "HTTP/1.1 200 OK", "", "fine")
+        r: Response = (await get("http://127.0.0.1:19185/ok")).raise_for_status()
+        await srv
+        lis.close()
+        self.assertEqual(r.text, "fine")
+    }
+
+    def test_client_base_url_and_header_merge() {
+        lis: TcpListener = TcpListener("127.0.0.1", 19186)
+        lis.bind()
+        lis.listen(1)
+        srv: Task[str] = fire _serve_once(lis, "HTTP/1.1 200 OK", "", "[]")
+        base_headers: dict[str, str] = {"Authorization": "Bearer tok", "X-Base": "b"}
+        with Client("http://127.0.0.1:19186", headers=base_headers) as api {
+            call_headers: dict[str, str] = {"X-Base": "override"}
+            r: Response = await api.get("/v1/items", headers=call_headers)
+            self.assertEqual(r.status, 200)
+        }
+        captured: str = await srv
+        lis.close()
+        self.assertTrue(captured.startswith("GET /v1/items HTTP/1.1\r\n"))
+        self.assertTrue(captured.find("Authorization: Bearer tok\r\n") >= 0)
+        self.assertTrue(captured.find("X-Base: override\r\n") >= 0)
+        self.assertEqual(captured.find("X-Base: b\r\n"), -1)
+    }
+
+    def test_two_requests_in_flight() {
+        lis_a: TcpListener = TcpListener("127.0.0.1", 19187)
+        lis_a.bind()
+        lis_a.listen(1)
+        lis_b: TcpListener = TcpListener("127.0.0.1", 19188)
+        lis_b.bind()
+        lis_b.listen(1)
+        srv_a: Task[str] = fire _serve_once(lis_a, "HTTP/1.1 200 OK", "", "alpha")
+        srv_b: Task[str] = fire _serve_once(lis_b, "HTTP/1.1 200 OK", "", "beta")
+        ta: Task[Response] = get("http://127.0.0.1:19187/a")
+        tb: Task[Response] = get("http://127.0.0.1:19188/b")
+        ra: Response = await ta
+        rb: Response = await tb
+        await srv_a
+        await srv_b
+        lis_a.close()
+        lis_b.close()
+        self.assertEqual(ra.text, "alpha")
+        self.assertEqual(rb.text, "beta")
+    }
+
+    def test_delete_verb_line() {
+        lis: TcpListener = TcpListener("127.0.0.1", 19189)
+        lis.bind()
+        lis.listen(1)
+        srv: Task[str] = fire _serve_once(lis, "HTTP/1.1 204 No Content", "", "")
+        r: Response = await delete("http://127.0.0.1:19189/users/9")
+        captured: str = await srv
+        lis.close()
+        self.assertEqual(r.status, 204)
+        self.assertTrue(captured.startswith("DELETE /users/9 HTTP/1.1\r\n"))
+    }
+}
+
+main([RequestApiTests()])
