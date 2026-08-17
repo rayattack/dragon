@@ -1084,6 +1084,14 @@ bool CodeGen::linkExecutable(const std::string& outputFile,
         args.push_back("-L/opt/homebrew/lib");
         args.push_back("-L/usr/local/lib");
     }
+#elif defined(__FreeBSD__) || defined(__OpenBSD__)
+    if (impl_->needsZstd && impl_->options.zstdLibPath.empty()) {
+        args.push_back("-L/usr/local/lib");
+    }
+#elif defined(__NetBSD__)
+    if (impl_->needsZstd && impl_->options.zstdLibPath.empty()) {
+        args.push_back("-L/usr/pkg/lib");
+    }
 #endif
     if (impl_->needsZ) {
         args.push_back("-lz");

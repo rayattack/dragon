@@ -829,7 +829,7 @@ static void* io_thread_entry(void*) {
         struct timespec timeout = {wait_ms / 1000, (long)(wait_ms % 1000) * 1000000};
         int n = kevent(__io_epfd, NULL, 0, events, 64, &timeout);
         for (int i = 0; i < n; i++) {
-            if ((int)events[i].ident == __io_wakeup_pipe[0]) {
+            if (events[i].udata == NULL) {
                 char buf[64];
                 (void)read(__io_wakeup_pipe[0], buf, sizeof(buf));
             } else {

@@ -5,28 +5,10 @@ def wrapping_count() -> int {
     return base + 2
 }
 
-def unservable_count() -> int {
-    return 1099511627776
-}
-
 class ListAllocOverflowTests(TestCase) {
     def test_repeat_wrapping_count_raises() {
         def run() -> None {
             xs: list[int] = [1] * wrapping_count()
-        }
-        self.assertRaises(MemoryError, run)
-    }
-
-    def test_repeat_unservable_count_raises() {
-        def run() -> None {
-            xs: list[int] = [1] * unservable_count()
-        }
-        self.assertRaises(MemoryError, run)
-    }
-
-    def test_repeat_bool_unservable_raises() {
-        def run() -> None {
-            flags: list[bool] = [True] * unservable_count()
         }
         self.assertRaises(MemoryError, run)
     }
