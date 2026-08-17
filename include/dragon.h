@@ -14,7 +14,7 @@
 
 namespace dragon {
 
-constexpr const char* VERSION = "0.0.3";
+constexpr const char* VERSION = "0.0.4";
 
 void initialize();
 
