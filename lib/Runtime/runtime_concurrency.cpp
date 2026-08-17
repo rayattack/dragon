@@ -1569,7 +1569,9 @@ static int nb_wait_fd(int fd, short events) {
     while (1) {
         int r = poll(&pfd, 1, -1);
         if (r > 0) {
-            if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) return -1;
+            // POLLHUP/POLLERR still mean "the syscall will not block": macOS raises
+            // POLLHUP on peer close with data still buffered, so only POLLNVAL fails here.
+            if (pfd.revents & POLLNVAL) return -1;
             return 0;
         }
         if (r < 0 && errno == EINTR) continue;
@@ -1584,7 +1586,7 @@ static int nb_wait_fd_timeout(int fd, short events, int timeout_ms) {
     while (1) {
         int r = poll(&pfd, 1, remaining);
         if (r > 0) {
-            if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) return -1;
+            if (pfd.revents & POLLNVAL) return -1;
             return 1;
         }
         if (r == 0) return 0;

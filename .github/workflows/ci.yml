@@ -194,5 +194,11 @@ jobs:
               -DDRAGON_BUILD_TESTS=ON \
               -DLLVM_DIR="$(llvm-config21 --cmakedir)"
             cmake --build build -j
-            ctest --test-dir build --output-on-failure
+            ctest --test-dir build --output-on-failure || {
+              for t in filecmp fileinput gettext netrc shutil; do
+                echo "=== probe $t"
+                ./build/dragon run test/dr/test_$t.dr -I packages || echo "probe $t rc=$?"
+              done
+              exit 1
+            }
 

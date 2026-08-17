@@ -116,21 +116,21 @@ set_tests_properties(dr_test_zz_nb_probe PROPERTIES ENVIRONMENT "DRAGON_NB_DEBUG
 # huge reservations Linux overcommit refuses, so no oom probe can fail there.
 if(NOT APPLE)
     add_test(NAME dr_oom_sustained
-        COMMAND bash -c "$<TARGET_FILE:dragon> build ${CMAKE_CURRENT_SOURCE_DIR}/dr/oom_sustained.dr -o ${CMAKE_CURRENT_BINARY_DIR}/oom_sustained && ulimit -v 262144 && exec ${CMAKE_CURRENT_BINARY_DIR}/oom_sustained")
+        COMMAND sh -c "$<TARGET_FILE:dragon> build ${CMAKE_CURRENT_SOURCE_DIR}/dr/oom_sustained.dr -o ${CMAKE_CURRENT_BINARY_DIR}/oom_sustained && ulimit -v 262144 && exec ${CMAKE_CURRENT_BINARY_DIR}/oom_sustained")
     set_tests_properties(dr_oom_sustained PROPERTIES TIMEOUT 90)
     add_test(NAME dr_oom_bytes
-        COMMAND bash -c "$<TARGET_FILE:dragon> build ${CMAKE_CURRENT_SOURCE_DIR}/dr/oom_bytes.dr -o ${CMAKE_CURRENT_BINARY_DIR}/oom_bytes && ulimit -v 262144 && exec ${CMAKE_CURRENT_BINARY_DIR}/oom_bytes")
+        COMMAND sh -c "$<TARGET_FILE:dragon> build ${CMAKE_CURRENT_SOURCE_DIR}/dr/oom_bytes.dr -o ${CMAKE_CURRENT_BINARY_DIR}/oom_bytes && ulimit -v 262144 && exec ${CMAKE_CURRENT_BINARY_DIR}/oom_bytes")
     set_tests_properties(dr_oom_bytes PROPERTIES TIMEOUT 90)
     add_test(NAME dr_oom_containers
-        COMMAND bash -c "$<TARGET_FILE:dragon> build ${CMAKE_CURRENT_SOURCE_DIR}/dr/oom_containers.dr -o ${CMAKE_CURRENT_BINARY_DIR}/oom_containers && ulimit -v 262144 && exec ${CMAKE_CURRENT_BINARY_DIR}/oom_containers")
+        COMMAND sh -c "$<TARGET_FILE:dragon> build ${CMAKE_CURRENT_SOURCE_DIR}/dr/oom_containers.dr -o ${CMAKE_CURRENT_BINARY_DIR}/oom_containers && ulimit -v 262144 && exec ${CMAKE_CURRENT_BINARY_DIR}/oom_containers")
     set_tests_properties(dr_oom_containers PROPERTIES TIMEOUT 90)
     add_test(NAME dr_oom_unservable
-        COMMAND bash -c "$<TARGET_FILE:dragon> build ${CMAKE_CURRENT_SOURCE_DIR}/dr/oom_unservable.dr -o ${CMAKE_CURRENT_BINARY_DIR}/oom_unservable && ulimit -v 262144 && exec ${CMAKE_CURRENT_BINARY_DIR}/oom_unservable")
+        COMMAND sh -c "$<TARGET_FILE:dragon> build ${CMAKE_CURRENT_SOURCE_DIR}/dr/oom_unservable.dr -o ${CMAKE_CURRENT_BINARY_DIR}/oom_unservable && ulimit -v 262144 && exec ${CMAKE_CURRENT_BINARY_DIR}/oom_unservable")
     set_tests_properties(dr_oom_unservable PROPERTIES TIMEOUT 90)
 
     foreach(_grow set deque)
         add_test(NAME dr_oom_${_grow}_grow
-            COMMAND bash -c "$<TARGET_FILE:dragon> build ${CMAKE_CURRENT_SOURCE_DIR}/dr/oom_${_grow}_grow.dr -o ${CMAKE_CURRENT_BINARY_DIR}/oom_${_grow}_grow && ( ulimit -v 32768 && ${CMAKE_CURRENT_BINARY_DIR}/oom_${_grow}_grow 2>&1 ; echo \"rc=$?\" ) | grep -q 'rc=134'")
+            COMMAND sh -c "$<TARGET_FILE:dragon> build ${CMAKE_CURRENT_SOURCE_DIR}/dr/oom_${_grow}_grow.dr -o ${CMAKE_CURRENT_BINARY_DIR}/oom_${_grow}_grow && ( ulimit -v 32768 && ${CMAKE_CURRENT_BINARY_DIR}/oom_${_grow}_grow 2>&1 ; echo \"rc=$?\" ) | grep -q 'rc=134'")
         set_tests_properties(dr_oom_${_grow}_grow PROPERTIES TIMEOUT 90)
     endforeach()
 endif()
