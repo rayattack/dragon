@@ -2,6 +2,7 @@
 #include "dragon/Lexer.h"
 #include "dragon/Parser.h"
 #include "dragon/Platform.h"
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <map>
@@ -71,6 +72,24 @@ bool isDirectory(const std::string& path) {
     return platform::isDirectory(path);
 }
 
+static bool relPathCaseExact(const std::string& base, const std::string& rel) {
+    namespace fs = std::filesystem;
+    fs::path cur = base.empty() ? fs::path(".") : fs::path(base);
+    for (const auto& comp : fs::path(rel)) {
+        std::error_code ec;
+        bool found = false;
+        for (fs::directory_iterator it(cur, ec), end; !ec && it != end; it.increment(ec)) {
+            if (it->path().filename() == comp) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+        cur /= comp;
+    }
+    return true;
+}
+
 }
 
 ModuleResolver::ModuleResolver(ModuleResolverOptions options)
@@ -93,16 +112,19 @@ std::string ModuleResolver::findModuleFile(const std::string& moduleName) const 
         topLevel = topLevel.substr(0, slashPos);
     }
 
-    auto tryFile = [](const std::string& path) -> bool {
-        std::ifstream f(path);
-        return f.good();
+    auto tryFile = [](const std::string& base, const std::string& rel) -> bool {
+        std::ifstream f(base + rel);
+        return f.good() && relPathCaseExact(base, rel);
+    };
+    auto tryDir = [](const std::string& base, const std::string& rel) -> bool {
+        return isDirectory(base + rel) && relPathCaseExact(base, rel);
     };
 
     auto resolveInDir = [&](const std::string& base) -> std::string {
-        bool hasFlatDr = tryFile(base + topLevel + ".dr");
-        bool hasFlatPy = tryFile(base + topLevel + ".py");
+        bool hasFlatDr = tryFile(base, topLevel + ".dr");
+        bool hasFlatPy = tryFile(base, topLevel + ".py");
         bool hasFlat = hasFlatDr || hasFlatPy;
-        bool hasDir = isDirectory(base + topLevel);
+        bool hasDir = tryDir(base, topLevel);
 
         if (hasFlat && hasDir) {
             std::string flatFile = hasFlatDr
@@ -121,8 +143,8 @@ std::string ModuleResolver::findModuleFile(const std::string& moduleName) const 
 
         if (hasDir) {
             if (pathName == topLevel) {
-                bool hasRootDr = tryFile(base + topLevel + "/" + topLevel + ".dr");
-                bool hasInitPy = tryFile(base + topLevel + "/__init__.py");
+                bool hasRootDr = tryFile(base, topLevel + "/" + topLevel + ".dr");
+                bool hasInitPy = tryFile(base, topLevel + "/__init__.py");
                 if (hasRootDr && hasInitPy) {
                     errors_.push_back(
                         "package conflict: both '" + base + topLevel + "/" + topLevel + ".dr"
@@ -138,16 +160,14 @@ std::string ModuleResolver::findModuleFile(const std::string& moduleName) const 
                     + ".dr' or '" + topLevel + "/__init__.py')");
                 return "";
             } else {
-                std::string drFile = base + pathName + ".dr";
-                if (tryFile(drFile)) return drFile;
-                std::string pyFile = base + pathName + ".py";
-                if (tryFile(pyFile)) return pyFile;
-                if (isDirectory(base + pathName)) {
+                if (tryFile(base, pathName + ".dr")) return base + pathName + ".dr";
+                if (tryFile(base, pathName + ".py")) return base + pathName + ".py";
+                if (tryDir(base, pathName)) {
                     std::string lastSeg = pathName.substr(pathName.rfind('/') + 1);
-                    std::string subRootDr = base + pathName + "/" + lastSeg + ".dr";
-                    if (tryFile(subRootDr)) return subRootDr;
-                    std::string subInitPy = base + pathName + "/__init__.py";
-                    if (tryFile(subInitPy)) return subInitPy;
+                    std::string subRootDr = pathName + "/" + lastSeg + ".dr";
+                    if (tryFile(base, subRootDr)) return base + subRootDr;
+                    std::string subInitPy = pathName + "/__init__.py";
+                    if (tryFile(base, subInitPy)) return base + subInitPy;
                 }
             }
         }
@@ -165,7 +185,7 @@ std::string ModuleResolver::findModuleFile(const std::string& moduleName) const 
         std::string drxBase = options_.drxDir;
         if (drxBase.back() != '/') drxBase += '/';
         std::string pkgRoot = drxBase + topLevel;
-        if (isDirectory(pkgRoot)) {
+        if (tryDir(drxBase, topLevel)) {
             std::string entryRel;
             {
                 std::ifstream hint(pkgRoot + "/.dragon-entry");
@@ -184,14 +204,15 @@ std::string ModuleResolver::findModuleFile(const std::string& moduleName) const 
                 if (sl != std::string::npos) srcSub = entryRel.substr(0, sl);
                 std::string srcDir = srcSub.empty() ? pkgRoot : (pkgRoot + "/" + srcSub);
                 if (pathName == topLevel) {
-                    std::string cand = pkgRoot + "/" + entryRel;
-                    if (tryFile(cand)) return cand;
+                    std::string cand = topLevel + "/" + entryRel;
+                    if (tryFile(drxBase, cand)) return drxBase + cand;
                 } else {
                     std::string sub = pathName.substr(topLevel.size() + 1);
-                    std::string candDr = srcDir + "/" + sub + ".dr";
-                    if (tryFile(candDr)) return candDr;
-                    std::string candPy = srcDir + "/" + sub + ".py";
-                    if (tryFile(candPy)) return candPy;
+                    std::string srcRel = srcSub.empty()
+                        ? (topLevel + "/" + sub)
+                        : (topLevel + "/" + srcSub + "/" + sub);
+                    if (tryFile(drxBase, srcRel + ".dr")) return srcDir + "/" + sub + ".dr";
+                    if (tryFile(drxBase, srcRel + ".py")) return srcDir + "/" + sub + ".py";
                 }
             }
             std::string result = resolveInDir(drxBase);
@@ -211,10 +232,8 @@ std::string ModuleResolver::findModuleFile(const std::string& moduleName) const 
     if (options_.enableSitePackages && !options_.sitePackagesPath.empty()) {
         std::string base = options_.sitePackagesPath;
         if (!base.empty() && base.back() != '/') base += '/';
-        std::string pyFile = base + pathName + ".py";
-        if (tryFile(pyFile)) return pyFile;
-        std::string initPy = base + pathName + "/__init__.py";
-        if (tryFile(initPy)) return initPy;
+        if (tryFile(base, pathName + ".py")) return base + pathName + ".py";
+        if (tryFile(base, pathName + "/__init__.py")) return base + pathName + "/__init__.py";
     }
 
     return "";

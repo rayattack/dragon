@@ -28,6 +28,7 @@ extern "C" def dragon_ptr_write_i32(p: ptr, offset: intc, val: intc)
 extern "C" def dragon_recv_to_str(fd: intc, buf: ptr, length: int, flags: intc) -> str
 extern "C" def dragon_udp_sendto(fd: intc, buf: str, length: int, flags: intc, addr: ptr, addrlen: intc) -> int
 extern "C" def dragon_resolve4(host: str) -> str
+extern "C" def dragon_setsockopt_reuse(fd: int)
 
 const AF_INET: int = 2
 const SOCK_STREAM: int = 1
@@ -165,11 +166,7 @@ class TcpListener {
         self._sock = SocketHandle.adopt_raw(sfd)
         self.host = host
         self.port = port
-        const optval: ptr = malloc(4)
-        memset(optval, 0, 4)
-        dragon_ptr_write_i32(optval, 0, 1)
-        setsockopt(self._sock.fd(), SOL_SOCKET, SO_REUSEADDR, optval, 4)
-        free(optval)
+        dragon_setsockopt_reuse(self._sock.fd())
     }
 
     def bind() -> int {

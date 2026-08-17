@@ -829,7 +829,7 @@ static void* io_thread_entry(void*) {
         struct timespec timeout = {wait_ms / 1000, (long)(wait_ms % 1000) * 1000000};
         int n = kevent(__io_epfd, NULL, 0, events, 64, &timeout);
         for (int i = 0; i < n; i++) {
-            if ((int)events[i].ident == __io_wakeup_pipe[0]) {
+            if (events[i].udata == NULL) {
                 char buf[64];
                 (void)read(__io_wakeup_pipe[0], buf, sizeof(buf));
             } else {
@@ -1567,7 +1567,9 @@ static int nb_wait_fd(int fd, short events) {
     while (1) {
         int r = poll(&pfd, 1, -1);
         if (r > 0) {
-            if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) return -1;
+            // POLLHUP/POLLERR still mean "the syscall will not block": macOS raises
+            // POLLHUP on peer close with data still buffered, so only POLLNVAL fails here.
+            if (pfd.revents & POLLNVAL) return -1;
             return 0;
         }
         if (r < 0 && errno == EINTR) continue;
@@ -1582,7 +1584,7 @@ static int nb_wait_fd_timeout(int fd, short events, int timeout_ms) {
     while (1) {
         int r = poll(&pfd, 1, remaining);
         if (r > 0) {
-            if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) return -1;
+            if (pfd.revents & POLLNVAL) return -1;
             return 1;
         }
         if (r == 0) return 0;

@@ -686,6 +686,20 @@ bool CodeGen::generate(dragon::Module& entryModule,
             llvm::ConstantInt::get(llvm::Type::getInt32Ty(*impl_->context), 0));
     }
 
+    // One module = every Dragon symbol goes internal (main + the ui asset table stay external):
+    auto keepExternal = [](llvm::StringRef n) {
+        return n == "main" || n == "dragon_ui_assets" || n == "dragon_ui_asset_count" ||
+               n.starts_with("llvm.");
+    };
+    for (auto& fn : *impl_->module) {
+        if (fn.isDeclaration() || keepExternal(fn.getName())) continue;
+        fn.setLinkage(llvm::GlobalValue::InternalLinkage);
+    }
+    for (auto& gv : impl_->module->globals()) {
+        if (gv.isDeclaration() || keepExternal(gv.getName())) continue;
+        gv.setLinkage(llvm::GlobalValue::InternalLinkage);
+    }
+
     std::string verifyErr;
     llvm::raw_string_ostream verifyStream(verifyErr);
     if (llvm::verifyModule(*impl_->module, &verifyStream)) {
@@ -1084,6 +1098,14 @@ bool CodeGen::linkExecutable(const std::string& outputFile,
         args.push_back("-L/opt/homebrew/lib");
         args.push_back("-L/usr/local/lib");
     }
+#elif defined(__FreeBSD__) || defined(__OpenBSD__)
+    if (impl_->needsZstd && impl_->options.zstdLibPath.empty()) {
+        args.push_back("-L/usr/local/lib");
+    }
+#elif defined(__NetBSD__)
+    if (impl_->needsZstd && impl_->options.zstdLibPath.empty()) {
+        args.push_back("-L/usr/pkg/lib");
+    }
 #endif
     if (impl_->needsZ) {
         args.push_back("-lz");
@@ -1114,13 +1136,11 @@ bool CodeGen::linkExecutable(const std::string& outputFile,
     args.push_back("-lpsapi");
     args.push_back("-luserenv");
 #elif defined(__APPLE__)
-    if (impl_->needsPthread) {
-        args.push_back("-lpthread");
-    }
+    args.push_back("-lpthread");
 #else
-    if (impl_->needsPthread) {
-        args.push_back("-lpthread");
-    }
+    // The runtime always references pthreads (scheduler, GC lock, IO thread); glibc
+    // resolves them from libc but the BSDs' libc stubs omit the timed lock variants.
+    args.push_back("-lpthread");
 #if !defined(__OpenBSD__)
     args.push_back("-ldl");
 #endif

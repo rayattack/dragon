@@ -41,7 +41,7 @@ def _serve_once(lis: TcpListener, app: Router) -> None {
 class RecvTimeoutTests(TestCase) {
     def test_silent_peer_times_out() {
         lis: TcpListener = TcpListener("127.0.0.1", 54480)
-        lis.bind()
+        self.assertEqual(lis.bind(), 0)
         lis.listen(8)
         const probe: _Probe = _Probe()
         t: Task[None] = fire _recv_once(lis, probe, 250)
@@ -58,7 +58,7 @@ class RecvTimeoutTests(TestCase) {
 
     def test_data_arrives_no_false_timeout() {
         lis: TcpListener = TcpListener("127.0.0.1", 54481)
-        lis.bind()
+        self.assertEqual(lis.bind(), 0)
         lis.listen(8)
         const probe: _Probe = _Probe()
         t: Task[None] = fire _recv_once(lis, probe, 2000)
@@ -75,7 +75,7 @@ class RecvTimeoutTests(TestCase) {
 
     def test_serve_connection_drops_stalled_midbody() {
         lis: TcpListener = TcpListener("127.0.0.1", 54482)
-        lis.bind()
+        self.assertEqual(lis.bind(), 0)
         lis.listen(8)
         const app: Router = Router(0)
         app.set_idle_timeout(250)

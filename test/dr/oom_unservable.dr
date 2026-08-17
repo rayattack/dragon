@@ -1,0 +1,23 @@
+from unittest import TestCase, main
+
+def unservable_count() -> int {
+    return 1099511627776
+}
+
+class UnservableAllocTests(TestCase) {
+    def test_repeat_unservable_count_raises() {
+        def run() -> None {
+            xs: list[int] = [1] * unservable_count()
+        }
+        self.assertRaises(MemoryError, run)
+    }
+
+    def test_repeat_bool_unservable_raises() {
+        def run() -> None {
+            flags: list[bool] = [True] * unservable_count()
+        }
+        self.assertRaises(MemoryError, run)
+    }
+}
+
+main([UnservableAllocTests()])

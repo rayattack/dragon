@@ -77,7 +77,11 @@ std::string findBundledLib(const std::string& prefix,
             if (fs::is_regular_file(candidate, ec)) return candidate.string();
         }
     }
-    return compileTimePath;
+    std::error_code ec;
+    if (!compileTimePath.empty() && fs::is_regular_file(compileTimePath, ec)) {
+        return compileTimePath;
+    }
+    return "";
 }
 
 std::string resolveStdlibDir() {
