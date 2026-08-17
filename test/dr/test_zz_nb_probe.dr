@@ -1,0 +1,34 @@
+from unittest import TestCase, main
+from socket import TcpListener, TcpStream
+
+def _echo_once(lis: TcpListener) -> None {
+    print("S: accepting")
+    const conn: TcpStream = lis.accept()
+    print("S: accepted fd=" + str(conn.raw_fd()))
+    const msg: str = conn.recv(1024)
+    print("S: recv len=" + str(len(msg)) + " msg=" + msg)
+    const n: int = conn.send("echo:" + msg)
+    print("S: send rc=" + str(n))
+    conn.close()
+    print("S: closed")
+}
+
+class NbProbeTests(TestCase) {
+    def test_fire_echo_roundtrip_narrated() {
+        lis: TcpListener = TcpListener("127.0.0.1", 54499)
+        print("C: bind rc=" + str(lis.bind()))
+        print("C: listen rc=" + str(lis.listen(8)))
+        t: Task[None] = fire _echo_once(lis)
+        const c: TcpStream = TcpStream.open("127.0.0.1", 54499)
+        print("C: opened fd=" + str(c.raw_fd()))
+        print("C: send rc=" + str(c.send("ping")))
+        const reply: str = c.recv(1024)
+        print("C: reply len=" + str(len(reply)) + " reply=" + reply)
+        await t
+        c.close()
+        lis.close()
+        self.assertEqual(reply, "echo:ping")
+    }
+}
+
+main([NbProbeTests()])

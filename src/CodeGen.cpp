@@ -1122,13 +1122,11 @@ bool CodeGen::linkExecutable(const std::string& outputFile,
     args.push_back("-lpsapi");
     args.push_back("-luserenv");
 #elif defined(__APPLE__)
-    if (impl_->needsPthread) {
-        args.push_back("-lpthread");
-    }
+    args.push_back("-lpthread");
 #else
-    if (impl_->needsPthread) {
-        args.push_back("-lpthread");
-    }
+    // The runtime always references pthreads (scheduler, GC lock, IO thread); glibc
+    // resolves them from libc but the BSDs' libc stubs omit the timed lock variants.
+    args.push_back("-lpthread");
 #if !defined(__OpenBSD__)
     args.push_back("-ldl");
 #endif

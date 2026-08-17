@@ -110,6 +110,7 @@ foreach(_dr ${DR_TEST_FILES})
     add_test(NAME dr_${_name} COMMAND $<TARGET_FILE:dragon> run ${_dr}
         -I ${CMAKE_SOURCE_DIR}/packages)
 endforeach()
+set_tests_properties(dr_test_zz_nb_probe PROPERTIES ENVIRONMENT "DRAGON_NB_DEBUG=1")
 
 # Linux-only: macOS accepts but does not enforce RLIMIT_AS, and it lazily grants
 # huge reservations Linux overcommit refuses, so no oom probe can fail there.
