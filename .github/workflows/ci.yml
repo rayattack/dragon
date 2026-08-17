@@ -197,7 +197,9 @@ jobs:
             ctest --test-dir build --output-on-failure || {
               for t in filecmp fileinput gettext netrc shutil; do
                 echo "=== probe $t"
-                ./build/dragon run test/dr/test_$t.dr -I packages || echo "probe $t rc=$?"
+                ./build/dragon build test/dr/test_$t.dr -o /tmp/probe_$t -I packages || continue
+                truss -f -o /tmp/truss_$t /tmp/probe_$t || echo "probe $t rc=$?"
+                tail -60 /tmp/truss_$t
               done
               exit 1
             }
