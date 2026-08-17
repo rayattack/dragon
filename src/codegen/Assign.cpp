@@ -1,4 +1,3 @@
-/// Dragon CodeGen - Assignment (Assign, AugAssign, AnnAssign)
 #include "../CodeGenImpl.h"
 
 namespace dragon {
@@ -6,12 +5,8 @@ namespace dragon {
 void CodeGen::visit(AssignStmt& node) {
     if (node.targets.empty()) return;
 
-    // Reset the capturing-lambda flag so it reflects only THIS statement's RHS;
-    // stale from a lambda call-arg it would mis-mark the var Closure (SIGSEGV).
     impl_->lastClosureCallableType = nullptr;
 
-    // `s = s + x` self-reassign: amortized in-place append for a Str slot
-    // (fresh concat per iteration is O(n^2)). Must run before the RHS visit.
     if (node.targets.size() == 1) {
         if (auto* tName = dynamic_cast<NameExpr*>(node.targets[0].get())) {
             if (auto* bin = dynamic_cast<BinaryExpr*>(node.value.get())) {
@@ -21,8 +16,6 @@ void CodeGen::visit(AssignStmt& node) {
                     !impl_->isCellBacked(tName->name)) {
                     auto vk = impl_->lookupVarKind(tName->name);
                     if (vk == Impl::VarKind::Str || vk == Impl::VarKind::StrLiteral) {
-                        // Resolve the slot: local alloca, else a usable module
-                        // global - mirroring the += path (AugAssignStmt).
                         llvm::Value* storeTarget = nullptr;
                         llvm::Type* loadType = nullptr;
                         if (auto* alloca = impl_->lookupVar(tName->name)) {
@@ -34,8 +27,6 @@ void CodeGen::visit(AssignStmt& node) {
                                 loadType = gv->getValueType();
                             }
                         }
-                        // Commit only for a string-pointer slot; `str + rhs`
-                        // guarantees rhs is str, so evaluating it alone is sound.
                         if (storeTarget && loadType == impl_->i8PtrType) {
                             llvm::Value* cur = impl_->builder->CreateLoad(
                                 loadType, storeTarget, tName->name);
@@ -50,39 +41,31 @@ void CodeGen::visit(AssignStmt& node) {
         }
     }
 
-    // One-shot RHS signals: only THIS assignment's value expression may set
-    // them; a stale flag from an earlier statement stamps the wrong VarKind
-    // (Type/Closure) and scope cleanup then skips the decref.
     impl_->lastValueIsType = false;
     impl_->lastClosureCallableType = nullptr;
     node.value->accept(*this);
     llvm::Value* val = impl_->lastValue;
 
     bool firstTargetDone = false;
-    // 6.12(B): track non-negativity of plain-name targets so subsequent
-    // subscripts can skip the negative-index correction.
     bool rhsNonNeg = impl_->isExprDefinitelyNonNeg(node.value.get());
     for (auto& target : node.targets) {
         if (auto* name = dynamic_cast<NameExpr*>(target.get())) {
             if (rhsNonNeg) impl_->knownNonNeg.insert(name->name);
             else           impl_->knownNonNeg.erase(name->name);
         }
-        // Multiple assignment (a = b = expr): each additional target needs its
-        // own reference. Incref the value for targets beyond the first.
         if (firstTargetDone && impl_->options.gcMode == GCMode::RC &&
             val->getType()->isPointerTy()) {
             auto tag = impl_->inferPtrValueTag(node.value.get());
-            if (tag == TAG_STR) { // TAG_STR
+            if (tag == TAG_STR) {
                 impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_incref_str"], {val});
-            } else if (tag == 5 || tag == 6 || tag == 7) { // list/dict/bytes
+            } else if (tag == 5 || tag == 6 || tag == 7) {
                 impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_incref"], {val});
             }
         }
         firstTargetDone = true;
 
-        // __setitem__ dunder dispatch for class instances
         if (auto* sub = dynamic_cast<SubscriptExpr*>(target.get())) {
             std::string setClassName = impl_->resolveExprClassName(sub->object.get());
             if (!setClassName.empty() && impl_->hasDunder(setClassName, "__setitem__")) {
@@ -95,8 +78,6 @@ void CodeGen::visit(AssignStmt& node) {
             }
         }
 
-        // d["key"] = v, incl. obj.field["key"] = v for a dict field - without
-        // the AttributeExpr branch the field-dict write silently no-ops.
         auto isDictFieldOf = [this](const std::string& className,
                                     const std::string& fieldName) -> bool {
             auto fkIt = impl_->classFieldKindsBySym.find(impl_->classSym(className));
@@ -121,8 +102,6 @@ void CodeGen::visit(AssignStmt& node) {
                 if (vit != impl_->varClassNames.end()) return vit->second;
                 return "";
             }
-            // Nested base (`self.pager.pending[k] = v`): a chained store must
-            // land like a single-level one (pinned by test_nested_attr_store.dr).
             return impl_->resolveExprClassName(attrExpr->object.get());
         };
         if (auto* sub = dynamic_cast<SubscriptExpr*>(target.get())) {
@@ -134,14 +113,10 @@ void CodeGen::visit(AssignStmt& node) {
                 if (!cls.empty() && isDictFieldOf(cls, objAttr->attribute))
                     isDict = true;
             }
-            // Chained stores (`m[0]["k"] = v`): the receiver is no bare name or
-            // field, so only the typechecker's type identifies it.
             if (!isDict && sub->object->type &&
                 sub->object->type->kind() == Type::Kind::Dict)
                 isDict = true;
             if (isDict) {
-                // D030: int-keyed dicts route through dragon_dict_int_*; resolve
-                // the key kind before evaluating so the whole write path branches once.
                 Type::Kind dictKk = impl_->resolveDictKeyKind(sub->object.get());
                 bool intKeyed =
                     dictKk == Type::Kind::Int || dictKk == Type::Kind::Float;
@@ -197,8 +172,6 @@ void CodeGen::visit(AssignStmt& node) {
                     continue;
                 }
 
-                // The runtime stores the key pointer directly: promote literal
-                // keys to heap and incref borrowed ones, else the dict dangles.
                 if (impl_->options.gcMode == GCMode::RC && key &&
                     key->getType()->isPointerTy()) {
                     Expr* keyExpr = sub->index.get();
@@ -216,13 +189,9 @@ void CodeGen::visit(AssignStmt& node) {
                     }
                 }
 
-                // D039: a boxed RHS decomposes into (payload, tag); the dict
-                // takes one ref, so incref refcounted payloads before storing.
                 if (val->getType() == impl_->boxType) {
                     auto* tagV = impl_->boxTag(val, "set.tag");
                     auto* payloadV = impl_->boxPayloadI64(val, "set.payload");
-                    // An OWNED box temporary (box_binop / box_subscript) already
-                    // carries the +1 the dict takes - don't double-count it.
                     if (impl_->options.gcMode == GCMode::RC &&
                         !impl_->isOwnedBoxResult(val))
                         impl_->emitUnionIncref(payloadV, tagV);
@@ -232,7 +201,6 @@ void CodeGen::visit(AssignStmt& node) {
                     continue;
                 }
 
-                // D030: dispatch by native LLVM type - no bitcast at the boundary.
                 if (val->getType() == impl_->f64Type) {
                     impl_->builder->CreateCall(
                         impl_->runtimeFuncs["dragon_dict_set_str_f64"], {dict, key, val});
@@ -242,8 +210,6 @@ void CodeGen::visit(AssignStmt& node) {
                     int64_t tag = impl_->inferPtrValueTag(node.value.get());
                     llvm::Value* pval = val;
                     if (tag == 1) pval = impl_->ensureHeapString(pval, node.value.get());
-                    // Model B: dict_set_str_ptr takes one ref; borrowed sources
-                    // need an incref to outlive their owning scope.
                     if (impl_->options.gcMode == GCMode::RC &&
                         (tag == 1 || tag == 5 || tag == 6 || tag == 7 || tag == 10) &&
                         Impl::isBorrowedHeapExpr(node.value.get())) {
@@ -251,8 +217,6 @@ void CodeGen::visit(AssignStmt& node) {
                             impl_->builder->CreateCall(
                                 impl_->runtimeFuncs["dragon_incref_str"], {pval});
                         else if (tag == 10)
-                            // borrowed Callable dict value - tag-gated incref
-                            // (bare fn ptr safe). dict destroy decrefs via tag 10.
                             impl_->builder->CreateCall(
                                 impl_->runtimeFuncs["dragon_incref_callable"], {pval});
                         else
@@ -264,11 +228,10 @@ void CodeGen::visit(AssignStmt& node) {
                         {dict, key, pval, llvm::ConstantInt::get(impl_->i64Type, tag)});
                     continue;
                 }
-                // Int / Bool: legacy i64 path with per-entry tag.
                 llvm::Value* storeVal = val;
                 int64_t tag = 0;
                 if (storeVal->getType() == impl_->i1Type) {
-                    tag = 3; // bool
+                    tag = 3;
                     storeVal = impl_->builder->CreateZExt(storeVal, impl_->i64Type);
                 }
                 llvm::Value* tagVal = llvm::ConstantInt::get(impl_->i64Type, tag);
@@ -276,8 +239,6 @@ void CodeGen::visit(AssignStmt& node) {
                     impl_->runtimeFuncs["dragon_dict_set_tagged"], {dict, key, storeVal, tagVal});
                 continue;
             }
-            // List subscript assignment: lst[i] = value
-            // Also: obj.field[i] = value where field is a list on obj's class.
             bool isList = false;
             if (auto* objName = dynamic_cast<NameExpr*>(sub->object.get())) {
                 isList = impl_->lookupVarKind(objName->name) == Impl::VarKind::List;
@@ -312,19 +273,15 @@ void CodeGen::visit(AssignStmt& node) {
                         setElemKind = astElemKind;
                 }
 
-                // D039: list[Any] holds 16-byte boxes - dragon_list_box_set, never
-                // dragon_list_set (8-byte storage would scramble the boxes).
                 if (impl_->getIterableElementKind(sub->object.get()) == Type::Kind::Any) {
                     auto tp = impl_->boxArgTagPayload(node.value.get(), val,
-                                                      /*takesOwnership=*/true);
+                                                      true);
                     impl_->builder->CreateCall(
                         impl_->runtimeFuncs["dragon_list_box_set"],
                         {list, idx, tp.first, tp.second});
                     continue;
                 }
 
-                // D030: heap elements go through dragon_list_set_ptr (RC on
-                // overwrite); Function too, else the replaced closure leaks.
                 bool isPtrElem = (setElemKind == Type::Kind::Str      ||
                                   setElemKind == Type::Kind::Bytes    ||
                                   setElemKind == Type::Kind::List     ||
@@ -339,15 +296,12 @@ void CodeGen::visit(AssignStmt& node) {
                         pval = impl_->ensureHeapString(pval, node.value.get());
                     if (!pval->getType()->isPointerTy())
                         pval = impl_->builder->CreateIntToPtr(pval, impl_->i8PtrType);
-                    // Model B: set_ptr decrefs the old element and takes the new
-                    // ref; borrowed sources need an incref to outlive their scope.
                     if (impl_->options.gcMode == GCMode::RC &&
                         Impl::isBorrowedHeapExpr(node.value.get())) {
                         if (setElemKind == Type::Kind::Str)
                             impl_->builder->CreateCall(
                                 impl_->runtimeFuncs["dragon_incref_str"], {pval});
                         else if (setElemKind == Type::Kind::Function)
-                            // tag-gated - element may be a bare fn ptr.
                             impl_->builder->CreateCall(
                                 impl_->runtimeFuncs["dragon_incref_callable"], {pval});
                         else
@@ -368,15 +322,11 @@ void CodeGen::visit(AssignStmt& node) {
                     storeVal = impl_->builder->CreatePtrToInt(storeVal, impl_->i64Type);
                 }
 
-                // Check if elements are primitive (no decref needed on overwrite).
-                // After the heap dispatch above, only Int/Float/Bool remain primitive.
                 bool primElems = (setElemKind == Type::Kind::Int   ||
                                   setElemKind == Type::Kind::Float ||
                                   setElemKind == Type::Kind::Bool);
 
                 if (primElems) {
-                    // Inline list set for primitive elements (no GC needed)
-                    // TBAA tags: header fields vs array data (enables LICM)
                     auto* tbaaHdrTag = llvm::MDNode::get(*impl_->context,
                         {impl_->tbaaListHeader, impl_->tbaaListHeader,
                          llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(impl_->i64Type, 0))});
@@ -395,7 +345,6 @@ void CodeGen::visit(AssignStmt& node) {
                     llvm::cast<llvm::Instruction>(sizeLoad)->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaHdrTag);
                     auto* size = sizeLoad;
 
-                    // 6.12(B) Negative-index elision (see Attributes.cpp).
                     llvm::Value* finalIdx;
                     if (impl_->isExprDefinitelyNonNeg(sub->index.get())) {
                         finalIdx = idx;
@@ -412,15 +361,12 @@ void CodeGen::visit(AssignStmt& node) {
                     auto* oobBB = llvm::BasicBlock::Create(*impl_->context, "lset.oob", func);
                     impl_->builder->CreateCondBr(inBounds, okBB, oobBB);
 
-                    // OOB: dragon_list_set prints error and exits
                     impl_->builder->SetInsertPoint(oobBB);
                     impl_->builder->CreateCall(
                         impl_->runtimeFuncs["dragon_list_set"], {list, idx, storeVal});
                     impl_->builder->CreateUnreachable();
 
                     impl_->builder->SetInsertPoint(okBB);
-                    // Stride matches the list variant (bool i8, float f64, else
-                    // i64) - same dispatch as the read path in Attributes.cpp.
                     bool isBoolElem  = (setElemKind == Type::Kind::Bool);
                     bool isFloatElem = (setElemKind == Type::Kind::Float);
                     auto* i8Ty = llvm::Type::getInt8Ty(*impl_->context);
@@ -428,13 +374,11 @@ void CodeGen::visit(AssignStmt& node) {
                     llvm::Value* elemVal;
                     if (isBoolElem) {
                         strideTy = i8Ty;
-                        elemVal = storeVal;  // i64 from earlier coercion
+                        elemVal = storeVal;
                         if (elemVal->getType() != i8Ty)
                             elemVal = impl_->builder->CreateTrunc(elemVal, i8Ty, "lset.elem.trunc");
                     } else if (isFloatElem) {
                         strideTy = impl_->f64Type;
-                        // Use the original native value, not the i64-bitcast.
-                        // Promote int / bool literals to f64 if needed.
                         elemVal = val;
                         if (elemVal->getType() == impl_->i64Type)
                             elemVal = impl_->builder->CreateSIToFP(elemVal, impl_->f64Type);
@@ -449,14 +393,12 @@ void CodeGen::visit(AssignStmt& node) {
                     auto* elemStore = impl_->builder->CreateStore(elemVal, elemGEP);
                     elemStore->setMetadata(llvm::LLVMContext::MD_tbaa, tbaaDataTag);
                 } else {
-                    // Heap-element lists: use runtime call for correct GC
                     impl_->builder->CreateCall(
                         impl_->runtimeFuncs["dragon_list_set"], {list, idx, storeVal});
                 }
                 continue;
             }
         }
-        // Dict dot-access write (.dr mode): data.name = val -> dragon_dict_set_tagged(data, "name", val, tag)
         if (impl_->isDragonFile) {
             if (auto* attrTarget = dynamic_cast<AttributeExpr*>(target.get())) {
                 if (auto* objName = dynamic_cast<NameExpr*>(attrTarget->object.get())) {
@@ -465,12 +407,12 @@ void CodeGen::visit(AssignStmt& node) {
                         llvm::Value* dict = impl_->lastValue;
                         auto* keyStr = impl_->builder->CreateGlobalString(attrTarget->attribute);
                         llvm::Value* storeVal = val;
-                        int64_t tag = 0; // default: int
+                        int64_t tag = 0;
                         if (storeVal->getType() == impl_->i1Type) {
-                            tag = 3; // bool
+                            tag = 3;
                             storeVal = impl_->builder->CreateZExt(storeVal, impl_->i64Type);
                         } else if (storeVal->getType() == impl_->f64Type) {
-                            tag = 2; // float
+                            tag = 2;
                             storeVal = impl_->builder->CreateBitCast(storeVal, impl_->i64Type);
                         } else if (storeVal->getType()->isPointerTy()) {
                             tag = impl_->inferPtrValueTag(node.value.get());
@@ -485,7 +427,6 @@ void CodeGen::visit(AssignStmt& node) {
                 }
             }
         }
-        // Static field assignment: ClassName.field = val
         if (auto* attrTarget = dynamic_cast<AttributeExpr*>(target.get())) {
             if (auto* objName = dynamic_cast<NameExpr*>(attrTarget->object.get())) {
                 auto sfIt = impl_->staticFieldGlobalsBySym.find(impl_->classSym(objName->name));
@@ -495,7 +436,6 @@ void CodeGen::visit(AssignStmt& node) {
                         llvm::GlobalVariable* gv = gvIt->second;
                         llvm::Value* storeVal = val;
                         llvm::Type* fieldType = gv->getValueType();
-                        // Type coercion to match the global's type
                         if (storeVal->getType() != fieldType) {
                             if (fieldType == impl_->f64Type && storeVal->getType() == impl_->i64Type)
                                 storeVal = impl_->builder->CreateSIToFP(storeVal, impl_->f64Type);
@@ -504,7 +444,6 @@ void CodeGen::visit(AssignStmt& node) {
                             else if (fieldType == impl_->i64Type && storeVal->getType() == impl_->f64Type)
                                 storeVal = impl_->builder->CreateFPToSI(storeVal, impl_->i64Type);
                         }
-                        // RC overwrite: decref old static field value before storing new
                         {
                             Impl::VarKind fieldKind = Impl::VarKind::Other;
                             auto fkIt = impl_->classFieldKindsBySym.find(impl_->classSym(objName->name));
@@ -512,7 +451,6 @@ void CodeGen::visit(AssignStmt& node) {
                                 auto fkIt2 = fkIt->second.find(attrTarget->attribute);
                                 if (fkIt2 != fkIt->second.end()) fieldKind = fkIt2->second;
                             }
-                            // Infer newKind from RHS
                             Impl::VarKind newKind = Impl::VarKind::Other;
                             if (auto* sl = dynamic_cast<StringLiteral*>(node.value.get()))
                                 newKind = (sl->isBytes ? Impl::VarKind::List : Impl::VarKind::StrLiteral);
@@ -528,8 +466,6 @@ void CodeGen::visit(AssignStmt& node) {
                 }
             }
         }
-        // @property setter dispatch on instance.x = val; walks inheritance,
-        // falls through to a plain field write when no setter matches.
         if (auto* attrTarget = dynamic_cast<AttributeExpr*>(target.get())) {
             {
                 std::string className;
@@ -541,8 +477,6 @@ void CodeGen::visit(AssignStmt& node) {
                         if (vit != impl_->varClassNames.end()) className = vit->second;
                     }
                 } else {
-                    // Nested base (`a.b.prop = v`): chained targets dispatch
-                    // setters exactly like single-level ones.
                     className = impl_->resolveExprClassName(attrTarget->object.get());
                 }
                 if (!className.empty()) {
@@ -563,8 +497,6 @@ void CodeGen::visit(AssignStmt& node) {
                         cur = pp->second;
                     }
                     if (!setterClass.empty()) {
-                        // Cross-module setter symbol is `<mod>__<Class>_<setter>`,
-                        // mirroring the getter in Attributes.cpp.
                         std::string setterFuncName =
                             impl_->classSymPrefix(setterClass) + "_" + setterMethodName;
                         auto* setterFn = impl_->module->getFunction(setterFuncName);
@@ -573,10 +505,6 @@ void CodeGen::visit(AssignStmt& node) {
                             llvm::Value* obj = impl_->lastValue;
                             if (!obj->getType()->isPointerTy())
                                 obj = impl_->builder->CreateIntToPtr(obj, impl_->i8PtrType);
-                            // The setter borrows its param and the receiver, so
-                            // owned temps drain here; unwind-guarded for a
-                            // raising setter body. Sole-target only: a shared
-                            // multi-target RHS is still live for later targets.
                             std::vector<std::pair<llvm::Value*, Impl::VarKind>>
                                 setterTemps;
                             Impl::VarKind rdk = impl_->ownedTempDrainKind(
@@ -605,8 +533,6 @@ void CodeGen::visit(AssignStmt& node) {
             }
         }
 
-        // Class field assignment (self.x / instance.x / chained base) - without
-        // the nested-base case the store silently no-ops (test_nested_attr_store.dr).
         if (auto* attrTarget = dynamic_cast<AttributeExpr*>(target.get())) {
             {
                 std::string className;
@@ -627,14 +553,11 @@ void CodeGen::visit(AssignStmt& node) {
                     if (structIt != impl_->classStructTypesBySym.end() && fieldIt != impl_->classFieldIndicesBySym.end()) {
                         auto idxIt = fieldIt->second.find(attrTarget->attribute);
                         if (idxIt != fieldIt->second.end()) {
-                            // Load object pointer
                             attrTarget->object->accept(*this);
                             llvm::Value* objPtr = impl_->lastValue;
-                            // GEP to field
                             auto* gep = impl_->builder->CreateStructGEP(
                                 structIt->second, objPtr, idxIt->second,
                                 attrTarget->attribute + "_ptr");
-                            // Coerce value type to match field type
                             auto* fieldType = impl_->classFieldTypesBySym[impl_->classSym(className)][attrTarget->attribute];
                             llvm::Value* storeVal = val;
                             if (storeVal->getType() != fieldType) {
@@ -645,8 +568,6 @@ void CodeGen::visit(AssignStmt& node) {
                                 else if (fieldType == impl_->i64Type && storeVal->getType() == impl_->f64Type)
                                     storeVal = impl_->builder->CreateFPToSI(storeVal, impl_->i64Type);
                             }
-                            // Callable field: incref new + decref old via tag-aware
-                            // helpers (no-op for a bare fn ptr; the field owns a ref).
                             {
                                 auto cfIt = impl_->classFieldCallableTypeBySym.find(impl_->classSym(className));
                                 if (cfIt != impl_->classFieldCallableTypeBySym.end() &&
@@ -659,8 +580,6 @@ void CodeGen::visit(AssignStmt& node) {
                                              newPtr->getType()->isPointerTy())
                                         newPtr = impl_->builder->CreateBitCast(
                                             newPtr, impl_->i8PtrType);
-                                    // Incref only a BORROWED closure; an owned temp
-                                    // already carries the +1 (incref again = leak).
                                     if (Impl::isBorrowedHeapExpr(node.value.get()))
                                         impl_->builder->CreateCall(
                                             impl_->runtimeFuncs["dragon_incref_callable"],
@@ -679,14 +598,12 @@ void CodeGen::visit(AssignStmt& node) {
                                     impl_->builder->CreateCall(
                                         impl_->runtimeFuncs["dragon_decref_callable"],
                                         {oldPtr});
-                                    // D018 field write barrier (Callable form)
                                     impl_->emitFieldSharedBarrier(
                                         objPtr, newPtr, Impl::VarKind::Closure);
                                     impl_->builder->CreateStore(storeVal, gep);
                                     continue;
                                 }
                             }
-                            // RC overwrite: decref old instance field value before storing new
                             {
                                 Impl::VarKind fieldKind = Impl::VarKind::Other;
                                 auto fkIt = impl_->classFieldKindsBySym.find(impl_->classSym(className));
@@ -694,15 +611,12 @@ void CodeGen::visit(AssignStmt& node) {
                                     auto fkIt2 = fkIt->second.find(attrTarget->attribute);
                                     if (fkIt2 != fkIt->second.end()) fieldKind = fkIt2->second;
                                 }
-                                // Infer newKind from RHS
                                 Impl::VarKind newKind = Impl::VarKind::Other;
                                 if (auto* sl = dynamic_cast<StringLiteral*>(node.value.get()))
                                     newKind = (sl->isBytes ? Impl::VarKind::List : Impl::VarKind::StrLiteral);
                                 else if (fieldKind != Impl::VarKind::Other)
                                     newKind = fieldKind;
                                 bool rhsBorrowed = Impl::isBorrowedHeapExpr(node.value.get());
-                                // D039 box -> native unbox for a typed field; a 16-byte
-                                // store spills into the next field (test_any_field_store.dr).
                                 bool ownedBoxUnboxed = false;
                                 llvm::Value* ownedBoxPayload = nullptr;
                                 llvm::Value* ownedBoxTag = nullptr;
@@ -723,33 +637,23 @@ void CodeGen::visit(AssignStmt& node) {
                                             fieldType == impl_->i1Type ? Type::Kind::Bool :
                                             fieldType->isPointerTy() ? Type::Kind::Str :
                                             Type::Kind::Int));
-                                    // Borrowed box payload: the field takes its own
-                                    // ref; an owned box's +1 transfers to the field.
                                     if (impl_->options.gcMode == GCMode::RC &&
                                         !ownedBoxUnboxed && fieldType->isPointerTy())
                                         rhsBorrowed = true;
                                 }
-                                // Any/Union field: box a NATIVE RHS, else the store
-                                // clobbers the tag half (test_rc_any_field.dr).
                                 if (fieldKind == Impl::VarKind::Union &&
                                     storeVal->getType() != impl_->boxType) {
                                     auto tp = impl_->boxArgTagPayload(
                                         node.value.get(), storeVal,
-                                        /*takesOwnership=*/true);
+                                        true);
                                     storeVal = impl_->makeBox(tp.first, tp.second);
                                     rhsBorrowed = false;
                                 }
-                                // A heap value stored into a SHARED instance's field becomes
-                                // globally reachable - mark it (inline-gated on the object's SHARED bit).
                                 impl_->emitFieldSharedBarrier(objPtr, storeVal, fieldKind);
                                 impl_->storeWithRCOverwrite(
                                     gep, fieldType, storeVal, fieldKind, newKind, rhsBorrowed,
                                     className + "." + attrTarget->attribute);
-                                // `self._f = own x`: the field adopted the +1;
-                                // null the source so scope exit sees nothing.
                                 impl_->emitMoveOutIfMarked(node.value.get());
-                                // Release the owned box temp's +1 when the store
-                                // took its own ref (tag-gated, non-heap no-op).
                                 if (ownedBoxUnboxed && rhsBorrowed)
                                     impl_->emitUnionDecref(ownedBoxPayload, ownedBoxTag);
                             }
@@ -759,13 +663,9 @@ void CodeGen::visit(AssignStmt& node) {
                 }
             }
         }
-        // Tuple unpacking: a, b = (1, 2) or a, b = func()
         if (auto* tupleTarget = dynamic_cast<TupleExpr*>(target.get())) {
-            // val is a pointer to a DragonTuple or DragonList - extract elements
             int64_t numTargets = tupleTarget->elements.size();
 
-            // The get fn must match the RHS's runtime shape: dragon_list_get
-            // reads elem_size past a DragonTuple's allocation (OOB misload).
             bool rhsIsTuple = dynamic_cast<TupleExpr*>(node.value.get()) != nullptr;
             if (!rhsIsTuple) {
                 if (auto* rhsName = dynamic_cast<NameExpr*>(node.value.get())) {
@@ -778,7 +678,6 @@ void CodeGen::visit(AssignStmt& node) {
             const std::string elemGetFn =
                 rhsIsTuple ? "dragon_tuple_get" : "dragon_list_get";
 
-            // Find starred target index (if any) for starred unpacking
             int64_t starIdx = -1;
             for (int64_t i = 0; i < numTargets; i++) {
                 if (dynamic_cast<StarredExpr*>(tupleTarget->elements[i].get())) {
@@ -788,12 +687,9 @@ void CodeGen::visit(AssignStmt& node) {
             }
 
             if (starIdx >= 0) {
-                // first, *rest, last: DragonTuple::length aliases DragonList::size,
-                // so list_len reads both shapes; per-element gets still dispatch.
                 llvm::Value* totalLen = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_list_len"], {val}, "totallen");
 
-                // Pre-star elements
                 for (int64_t i = 0; i < starIdx; i++) {
                     llvm::Value* idx = llvm::ConstantInt::get(impl_->i64Type, i);
                     llvm::Value* elem = impl_->builder->CreateCall(
@@ -811,29 +707,24 @@ void CodeGen::visit(AssignStmt& node) {
                             : Impl::VarKind::Other;
                         impl_->storeWithRCOverwrite(
                             alloca, impl_->i64Type, elem,
-                            oldKind, Impl::VarKind::Other, /*newIsBorrowed=*/true,
+                            oldKind, Impl::VarKind::Other, true,
                             nameTarget->name);
                     }
                 }
 
-                // Post-star elements count
                 int64_t postStarCount = numTargets - starIdx - 1;
 
-                // Starred element: collect middle into a new list
                 auto* starredExpr = dynamic_cast<StarredExpr*>(tupleTarget->elements[starIdx].get());
                 if (auto* starName = dynamic_cast<NameExpr*>(starredExpr->value.get())) {
-                    // rest_len = total_len - pre_star - post_star
                     llvm::Value* preCount = llvm::ConstantInt::get(impl_->i64Type, starIdx);
                     llvm::Value* postCount = llvm::ConstantInt::get(impl_->i64Type, postStarCount);
                     llvm::Value* restLen = impl_->builder->CreateSub(totalLen, preCount);
                     restLen = impl_->builder->CreateSub(restLen, postCount, "restlen");
 
-                    // Create new list for starred target
                     llvm::Value* capVal = llvm::ConstantInt::get(impl_->i64Type, 8);
                     llvm::Value* restList = impl_->builder->CreateCall(
                         impl_->runtimeFuncs["dragon_list_new"], {capVal}, "restlist");
 
-                    // Loop: for j in range(rest_len): rest.append(source[starIdx + j])
                     auto* func = impl_->currentFunction;
                     auto* loopBB = llvm::BasicBlock::Create(*impl_->context, "star.loop", func);
                     auto* bodyBB = llvm::BasicBlock::Create(*impl_->context, "star.body", func);
@@ -871,9 +762,7 @@ void CodeGen::visit(AssignStmt& node) {
                     impl_->builder->CreateStore(restList, alloca);
                 }
 
-                // Post-star elements
                 for (int64_t i = 0; i < postStarCount; i++) {
-                    // idx = total_len - post_star_count + i
                     llvm::Value* offset = llvm::ConstantInt::get(impl_->i64Type, postStarCount - i);
                     llvm::Value* idx = impl_->builder->CreateSub(totalLen, offset, "postidx");
                     llvm::Value* elem = impl_->builder->CreateCall(
@@ -892,16 +781,13 @@ void CodeGen::visit(AssignStmt& node) {
                             : Impl::VarKind::Other;
                         impl_->storeWithRCOverwrite(
                             alloca, impl_->i64Type, elem,
-                            oldKind, Impl::VarKind::Other, /*newIsBorrowed=*/true,
+                            oldKind, Impl::VarKind::Other, true,
                             nameTarget->name);
                     }
                 }
             } else {
-                // Simple unpacking: a, b, c = (1, 2, 3).
                 std::string getFuncName = elemGetFn;
 
-                // Per-element static type so each slot gets its native form
-                // (f64 bitcast back, ptrs reconstituted) - not raw i64 bits.
                 auto rhsElemType = [&](int64_t i) -> std::shared_ptr<Type> {
                     if (!node.value->type) return nullptr;
                     if (auto* tt = dynamic_cast<TupleType*>(node.value->type.get())) {
@@ -917,7 +803,6 @@ void CodeGen::visit(AssignStmt& node) {
                     llvm::Value* elem = impl_->builder->CreateCall(
                         impl_->runtimeFuncs[getFuncName], {val, idx}, "unpack");
 
-                    // Coerce the i64 storage value to the element's native type.
                     llvm::Type* slotTy = impl_->i64Type;
                     Impl::VarKind newKind = Impl::VarKind::Other;
                     std::string elemClassName;
@@ -955,8 +840,6 @@ void CodeGen::visit(AssignStmt& node) {
                     }
 
                     if (auto* nameTarget = dynamic_cast<NameExpr*>(tupleTarget->elements[i].get())) {
-                        // Module-level unpack targets are module globals, not
-                        // main-frame allocas; mirror the AnnAssign global path.
                         bool unpackModuleLevel =
                             (impl_->currentFunction == impl_->mainFunction) &&
                             (impl_->scopes.size() <= impl_->moduleBodyScopeDepth);
@@ -968,7 +851,7 @@ void CodeGen::visit(AssignStmt& node) {
                                 : Impl::VarKind::Other;
                             if (!gv) {
                                 gv = new llvm::GlobalVariable(
-                                    *impl_->module, slotTy, /*isConstant=*/false,
+                                    *impl_->module, slotTy, false,
                                     llvm::GlobalValue::InternalLinkage,
                                     llvm::Constant::getNullValue(slotTy),
                                     "global." + gKey);
@@ -978,7 +861,7 @@ void CodeGen::visit(AssignStmt& node) {
                             bool gborrowed = (slotTy == impl_->i8PtrType);
                             impl_->storeWithRCOverwrite(
                                 gv, slotTy, elem, oldKind, newKind,
-                                /*newIsBorrowed=*/gborrowed, nameTarget->name);
+                                gborrowed, nameTarget->name);
                             if (!elemClassName.empty()) {
                                 impl_->varClassNames[nameTarget->name] = elemClassName;
                                 impl_->varClassOwningModule[nameTarget->name] =
@@ -989,8 +872,6 @@ void CodeGen::visit(AssignStmt& node) {
                                     impl_->moduleGlobalKinds[gKey] =
                                         Impl::VarKind::ClassInstance;
                             }
-                            // D018: const str -> immortal, other heap -> SHARED
-                            // (same rules as the AnnAssign hook).
                             if (impl_->options.gcMode == GCMode::RC &&
                                 slotTy == impl_->i8PtrType) {
                                 Impl::VarKind sk =
@@ -1016,19 +897,16 @@ void CodeGen::visit(AssignStmt& node) {
                             Impl::VarKind oldKind = hadSlot
                                 ? impl_->lookupVarKind(nameTarget->name)
                                 : Impl::VarKind::Other;
-                            // Heap elements come borrowed from the tuple/list get.
                             bool borrowed = (slotTy == impl_->i8PtrType);
                             impl_->storeWithRCOverwrite(
                                 alloca, slotTy, elem,
-                                oldKind, newKind, /*newIsBorrowed=*/borrowed,
+                                oldKind, newKind, borrowed,
                                 nameTarget->name);
                             if (!elemClassName.empty())
                                 impl_->varClassNames[nameTarget->name] = elemClassName;
                         }
                     }
                 }
-                // Drop an OWNED RHS temp (elements are in slots; borrowed stays
-                // with its owner). Simple-unpack only: starred stores borrowed.
                 if (impl_->options.gcMode == GCMode::RC &&
                     val->getType()->isPointerTy() &&
                     !Impl::isBorrowedHeapExpr(node.value.get()) &&
@@ -1039,13 +917,10 @@ void CodeGen::visit(AssignStmt& node) {
             continue;
         }
         if (auto* name = dynamic_cast<NameExpr*>(target.get())) {
-            // D027: cell-backed (nonlocal-mutable) write goes through
-            // dragon_cell_set; cell ops carry their own RC.
             if (impl_->isCellBacked(name->name)) {
                 auto* alloca = impl_->lookupVar(name->name);
                 Impl::VarKind cellKind = impl_->lookupVarKind(name->name);
                 llvm::Value* coerced = val;
-                // Mirror storeWithRCOverwrite's bool/float/ptr boundary coercions.
                 if (cellKind == Impl::VarKind::Bool && coerced->getType() == impl_->i64Type)
                     coerced = impl_->builder->CreateICmpNE(
                         coerced, llvm::ConstantInt::get(impl_->i64Type, 0), "tobool");
@@ -1053,8 +928,6 @@ void CodeGen::visit(AssignStmt& node) {
                     coerced = impl_->builder->CreateZExt(coerced, impl_->i64Type, "boolext");
                 else if (cellKind == Impl::VarKind::Float && coerced->getType() == impl_->i64Type)
                     coerced = impl_->builder->CreateSIToFP(coerced, impl_->f64Type, "i2f");
-                // An OWNED RHS already carries the +1 (incref again leaked one
-                // string per mutation); a borrowed RHS gets the cell's incref.
                 impl_->emitCellWrite(alloca, cellKind, coerced, name->name,
                                      Impl::isBorrowedHeapExpr(node.value.get()));
                 continue;
@@ -1074,27 +947,22 @@ void CodeGen::visit(AssignStmt& node) {
                 if (auto* sl = dynamic_cast<StringLiteral*>(node.value.get()))
                     return (sl->isBytes ? Impl::VarKind::List : Impl::VarKind::StrLiteral);
                 if (auto* rhsName = dynamic_cast<NameExpr*>(node.value.get())) {
-                    // Decision 025: bare class name -> VarKind::Type
                     if (impl_->classNames.count(rhsName->name))
                         return Impl::VarKind::Type;
                     return impl_->lookupVarKind(rhsName->name);
                 }
-                // D025: call to a function whose return type is `type`
                 if (auto* callExpr = dynamic_cast<CallExpr*>(node.value.get())) {
                     if (auto* calleeName = dynamic_cast<NameExpr*>(callExpr->callee.get())) {
                         if (impl_->funcReturnsType.count(impl_->resolveCalleeSymbol(calleeName->name)))
                             return Impl::VarKind::Type;
                     }
                 }
-                // D025: subscript of a dict[K, type] yields a class descriptor
                 if (auto* sub = dynamic_cast<SubscriptExpr*>(node.value.get())) {
                     if (auto* objName = dynamic_cast<NameExpr*>(sub->object.get())) {
                         if (impl_->varDictValueIsType.count(objName->name))
                             return Impl::VarKind::Type;
                     }
                 }
-                // Callable RHS resolves to Closure from the static type BEFORE
-                // the llvm-type checks (else misread as Int/Str; cleanup skips decref).
                 if (node.value && node.value->type &&
                     node.value->type->kind() == Type::Kind::Function)
                     return Impl::VarKind::Closure;
@@ -1103,10 +971,8 @@ void CodeGen::visit(AssignStmt& node) {
                 if (rhsVal->getType() == impl_->i1Type) return Impl::VarKind::Bool;
                 if (rhsVal->getType() == impl_->i8PtrType &&
                     !dynamic_cast<NoneLiteral*>(node.value.get())) {
-                    // Check if RHS is a call to a generator function or TypedDict
                     if (auto* callExpr = dynamic_cast<CallExpr*>(node.value.get())) {
                         if (auto* calleeName = dynamic_cast<NameExpr*>(callExpr->callee.get())) {
-                            // generatorFunctions is keyed by the resolved LLVM symbol.
                             if (impl_->generatorFunctions.count(
                                     impl_->resolveCalleeSymbol(calleeName->name)))
                                 return Impl::VarKind::Generator;
@@ -1114,26 +980,20 @@ void CodeGen::visit(AssignStmt& node) {
                                 return Impl::VarKind::Dict;
                             if (impl_->classNames.count(calleeName->name))
                                 return Impl::VarKind::ClassInstance;
-                            // D025: function returning `type` -> caller gets a class descriptor
                             if (impl_->funcReturnsType.count(impl_->resolveCalleeSymbol(calleeName->name)))
                                 return Impl::VarKind::Type;
-                            // D025: function returning `ptr` - receiving var is a fn pointer.
-                            // Record so the indirect-call site has a callable signal.
                             if (impl_->funcReturnsPtr.count(impl_->resolveCalleeSymbol(calleeName->name))) {
                                 for (auto& t : node.targets) {
                                     if (auto* tgtName = dynamic_cast<NameExpr*>(t.get()))
                                         impl_->varIsPtrCallable.insert(tgtName->name);
                                 }
                             }
-                            // D026: dynamic construction via first-class class value
                             if (impl_->lookupVarKind(calleeName->name) == Impl::VarKind::Type)
                                 return Impl::VarKind::ClassInstance;
                         }
                     }
                     if (dynamic_cast<FireExpr*>(node.value.get()))
                         return Impl::VarKind::ClassInstance;
-                    // The static type is authoritative for ptr-shaped heap RHS:
-                    // a Str default would corrupt via the in-place append path.
                     if (node.value->type) {
                         switch (node.value->type->kind()) {
                             case Type::Kind::Bytes:
@@ -1144,8 +1004,6 @@ void CodeGen::visit(AssignStmt& node) {
                             case Type::Kind::Instance:
                                 return Impl::typeKindToVarKind(node.value->type->kind());
                             case Type::Kind::Ptr:
-                                // Raw `ptr` is unmanaged; the Str default would
-                                // decref_str a FILE*/raw buffer at scope exit.
                                 return Impl::VarKind::Other;
                             default: break;
                         }
@@ -1155,29 +1013,21 @@ void CodeGen::visit(AssignStmt& node) {
                 return Impl::VarKind::Other;
             };
             if (!alloca) {
-                // Check module globals: .dr mode uses scope-chain (AssignStmt = update existing),
-                // .py mode uses explicit `global x` declarations
                 auto* gv = impl_->lookupModuleGlobal(name->name);
                 if (gv && impl_->shouldUseModuleGlobal(name->name)) {
-                    // Store directly to the global variable
                     llvm::Type* gvType = gv->getValueType();
                     Impl::VarKind oldKind = impl_->lookupVarKind(name->name);
-                    // Union global is a 16-byte box slot: box the value, else a
-                    // bare 8-byte store lands in the tag half, payload stale.
                     if (oldKind == Impl::VarKind::Union && gvType == impl_->boxType) {
                         if (val->getType() == impl_->boxType) {
                             if (impl_->options.gcMode == GCMode::RC) {
                                 auto* oldBox = impl_->builder->CreateLoad(impl_->boxType, gv, "old.box");
                                 impl_->emitUnionDecref(impl_->boxPayloadI64(oldBox, "op"),
                                                        impl_->boxTag(oldBox, "ot"));
-                                // Owned box temporary already owns its +1.
                                 if (!impl_->isOwnedBoxResult(val))
                                     impl_->emitUnionIncref(impl_->boxPayloadI64(val, "np"),
                                                            impl_->boxTag(val, "nt"));
                             }
                             impl_->builder->CreateStore(val, gv);
-                            // D018: the payload is now vthread-reachable - mark
-                            // SHARED so refcount ops route to the atomic path.
                             if (impl_->options.gcMode == GCMode::RC)
                                 impl_->builder->CreateCall(
                                     impl_->runtimeFuncs["dragon_mark_shared_boxed"],
@@ -1193,7 +1043,6 @@ void CodeGen::visit(AssignStmt& node) {
                                     impl_->emitUnionIncref(impl_->nativeToPayloadI64(val), newTag);
                             }
                             impl_->builder->CreateStore(impl_->makeBox(newTag, val), gv);
-                            // D018 completion: same as the box-valued branch.
                             if (impl_->options.gcMode == GCMode::RC)
                                 impl_->builder->CreateCall(
                                     impl_->runtimeFuncs["dragon_mark_shared_boxed"],
@@ -1201,8 +1050,6 @@ void CodeGen::visit(AssignStmt& node) {
                         }
                         continue;
                     }
-                    // D039 box -> native unbox for a typed global reassignment;
-                    // a 16-byte store into the 8-byte slot overran the global.
                     if (val->getType() == impl_->boxType && gvType != impl_->boxType) {
                         val = impl_->boxPayloadAsKind(
                             val, Impl::typeKindToVarKind(
@@ -1222,21 +1069,17 @@ void CodeGen::visit(AssignStmt& node) {
                         gv, gvType, val, oldKind, newKind, rhsBorrowed, name->name);
                     if (newKind != Impl::VarKind::Other)
                         impl_->moduleGlobalKinds[impl_->globalKeyOrOwn(name->name)] = newKind;
-                    // const reassignment is a compile error, so mark shared, never immortal.
                     impl_->emitMarkSharedGlobal(val, newKind);
                     continue;
                 }
-                // Module-level new var in main(): create GlobalVariable (no local alloca)
-                // so functions can access it via `global` (.py) or scope-chain (.dr)
                 if (impl_->currentFunction == impl_->mainFunction) {
                     std::string gKey = impl_->globalKeyOrOwn(name->name);
                     auto* gv = new llvm::GlobalVariable(
-                        *impl_->module, val->getType(), /*isConstant=*/false,
+                        *impl_->module, val->getType(), false,
                         llvm::GlobalValue::InternalLinkage,
                         llvm::Constant::getNullValue(val->getType()),
                         "global." + gKey);
                     impl_->moduleGlobals[gKey] = gv;
-                    // Infer VarKind
                     Impl::VarKind vk = Impl::VarKind::Other;
                     if (dynamic_cast<ListExpr*>(node.value.get()) || dynamic_cast<ListCompExpr*>(node.value.get()))
                         vk = Impl::VarKind::List;
@@ -1248,7 +1091,6 @@ void CodeGen::visit(AssignStmt& node) {
                         vk = Impl::VarKind::Set;
                     else if (auto* sl = dynamic_cast<StringLiteral*>(node.value.get()))
                         vk = (sl->isBytes ? Impl::VarKind::List : Impl::VarKind::StrLiteral);
-                    // Decision 025: bare class name -> VarKind::Type
                     else if (auto* rhsNE = dynamic_cast<NameExpr*>(node.value.get())) {
                         if (impl_->classNames.count(rhsNE->name))
                             vk = Impl::VarKind::Type;
@@ -1256,26 +1098,23 @@ void CodeGen::visit(AssignStmt& node) {
                         else if (val->getType() == impl_->f64Type) vk = Impl::VarKind::Float;
                         else if (val->getType() == impl_->i1Type) vk = Impl::VarKind::Bool;
                     }
-                    // D025: call to a function returning `type` (LLVM ret i64)
                     else if (auto* callVal2 = dynamic_cast<CallExpr*>(node.value.get())) {
                         if (auto* calleeNm = dynamic_cast<NameExpr*>(callVal2->callee.get())) {
                             if (impl_->funcReturnsType.count(impl_->resolveCalleeSymbol(calleeNm->name)))
                                 vk = Impl::VarKind::Type;
                         }
                     }
-                    // D025: subscript of dict[K, type] yields a class descriptor
                     else if (auto* sub2 = dynamic_cast<SubscriptExpr*>(node.value.get())) {
                         if (auto* objName2 = dynamic_cast<NameExpr*>(sub2->object.get())) {
                             if (impl_->varDictValueIsType.count(objName2->name))
                                 vk = Impl::VarKind::Type;
                         }
                     }
-                    if (vk != Impl::VarKind::Other) { /* set above */ }
+                    if (vk != Impl::VarKind::Other) { }
                     else if (val->getType() == impl_->i64Type) vk = Impl::VarKind::Int;
                     else if (val->getType() == impl_->f64Type) vk = Impl::VarKind::Float;
                     else if (val->getType() == impl_->i1Type) vk = Impl::VarKind::Bool;
                     else if (val->getType() == impl_->i8PtrType && vk == Impl::VarKind::Other) {
-                        // RHS call: generator / TypedDict / ctor / type- or ptr-returning fn.
                         if (auto* callVal = dynamic_cast<CallExpr*>(node.value.get())) {
                             if (auto* calleeName = dynamic_cast<NameExpr*>(callVal->callee.get())) {
                                 if (impl_->generatorFunctions.count(
@@ -1284,30 +1123,26 @@ void CodeGen::visit(AssignStmt& node) {
                                 else if (impl_->typedDictClassesBySym.count(impl_->classSym(calleeName->name)))
                                     vk = Impl::VarKind::Dict;
                                 else if (impl_->funcReturnsType.count(impl_->resolveCalleeSymbol(calleeName->name)))
-                                    vk = Impl::VarKind::Type;  // D025: -> type return
+                                    vk = Impl::VarKind::Type;
                                 else if (impl_->funcReturnsPtr.count(impl_->resolveCalleeSymbol(calleeName->name)))
                                     impl_->varIsPtrCallable.insert(name->name);
                             }
                         }
                         if (vk == Impl::VarKind::Other)
-                            vk = Impl::VarKind::Str;  // ptr from runtime call -> dynamic string
+                            vk = Impl::VarKind::Str;
                     }
                     impl_->moduleGlobalKinds[gKey] = vk;
                     impl_->storeWithRCOverwrite(
                         gv, gv->getValueType(), val, Impl::VarKind::Other, vk, rhsBorrowed, name->name);
-                    // D027: closure from capturing lambda (module global)
                     if (impl_->lastClosureCallableType) {
                         impl_->callableTypes[name->name] = impl_->lastClosureCallableType;
                         impl_->moduleGlobalKinds[gKey] = Impl::VarKind::Closure;
                         impl_->lastClosureCallableType = nullptr;
                     }
-                    // D025 Phase 4: type() returned a class descriptor (module global)
                     if (impl_->lastValueIsType) {
                         impl_->moduleGlobalKinds[gKey] = Impl::VarKind::Type;
                         impl_->lastValueIsType = false;
                     }
-                    // A module global is vthread-reachable: mark the graph
-                    // SHARED (after the kind fix-ups); literal strs go immortal.
                     {
                         Impl::VarKind sharedKind = impl_->moduleGlobalKinds[gKey];
                         if (sharedKind == Impl::VarKind::StrLiteral &&
@@ -1317,8 +1152,6 @@ void CodeGen::visit(AssignStmt& node) {
                         else
                             impl_->emitMarkSharedGlobal(val, sharedKind);
                     }
-                    // Track callable types for first-class functions (module
-                    // globals); class-as-value aliasing is rejected per D025.
                     if (auto* lambdaFn = llvm::dyn_cast<llvm::Function>(val)) {
                         impl_->callableTypes[name->name] = lambdaFn->getFunctionType();
                     } else if (auto* rhsNameExpr = dynamic_cast<NameExpr*>(node.value.get())) {
@@ -1341,7 +1174,6 @@ void CodeGen::visit(AssignStmt& node) {
                                 impl_->callableTypes[name->name] = ctIt->second;
                         }
                     }
-                    // Track class instances and TypedDict
                     if (auto* callVal = dynamic_cast<CallExpr*>(node.value.get())) {
                         if (auto* calleeName = dynamic_cast<NameExpr*>(callVal->callee.get())) {
                             if (impl_->typedDictClassesBySym.count(impl_->classSym(calleeName->name))) {
@@ -1352,12 +1184,9 @@ void CodeGen::visit(AssignStmt& node) {
                                 impl_->varClassNames[name->name] = calleeName->name;
                                 impl_->varClassOwningModule[name->name] = ownMod;
                                 impl_->moduleGlobalClassNames[gKey] = {calleeName->name, ownMod};
-                                // GC Phase 3: mark module global as ClassInstance
                                 if (impl_->options.gcMode == GCMode::RC)
                                     impl_->moduleGlobalKinds[gKey] = Impl::VarKind::ClassInstance;
                             } else if (impl_->lookupVarKind(calleeName->name) == Impl::VarKind::Type) {
-                                // ADR 025 removal: Type callee already errored in
-                                // CallExpr; tag ClassInstance so cleanup is well-formed.
                                 if (impl_->options.gcMode == GCMode::RC)
                                     impl_->moduleGlobalKinds[gKey] = Impl::VarKind::ClassInstance;
                             }
@@ -1374,7 +1203,6 @@ void CodeGen::visit(AssignStmt& node) {
                             }
                         }
                     }
-                    // Track fire expressions as __Thread handles
                     if (dynamic_cast<FireExpr*>(node.value.get())) {
                         impl_->varClassNames[name->name] = "__Thread";
                     }
@@ -1387,17 +1215,12 @@ void CodeGen::visit(AssignStmt& node) {
                     }
                     continue;
                 }
-                // Function-level new variable - create alloca
                 alloca = impl_->createEntryAlloca(
                     impl_->currentFunction, name->name, val->getType());
                 impl_->setVar(name->name, alloca);
             }
             llvm::Type* allocType = alloca->getAllocatedType();
-            // D039 box -> native unbox for typed slots (sound after isinstance
-            // narrowing); a 16-byte store corrupts the adjacent alloca.
             bool didUnboxToNative = false;
-            // An OWNED box's +1 would be orphaned by the unbox - capture
-            // payload+tag before, release after the store (borrowed: leave it).
             bool ownedBoxUnboxed = false;
             llvm::Value* ownedBoxPayload = nullptr;
             llvm::Value* ownedBoxTag = nullptr;
@@ -1416,8 +1239,6 @@ void CodeGen::visit(AssignStmt& node) {
                              Type::Kind::Int));
                 didUnboxToNative = true;
             }
-            // A BORROWED box unboxed into an owned heap slot takes its own ref;
-            // keyed off real box ownership (a ternary defeats the syntactic check).
             if (impl_->options.gcMode == GCMode::RC && didUnboxToNative &&
                 !ownedBoxUnboxed && allocType->isPointerTy())
                 rhsBorrowed = true;
@@ -1448,10 +1269,8 @@ void CodeGen::visit(AssignStmt& node) {
                     newKind = oldKind;
             }
 
-            // D030: Union target - decref old payload, incref new, store the box.
             if (oldKind == Impl::VarKind::Union) {
                 newKind = Impl::VarKind::Union;
-                // D039 Phase 2: RHS already a box - forward without re-wrapping.
                 if (val->getType() == impl_->boxType) {
                     if (impl_->options.gcMode == GCMode::RC) {
                         auto* oldBox = impl_->builder->CreateLoad(
@@ -1461,13 +1280,10 @@ void CodeGen::visit(AssignStmt& node) {
                         impl_->emitUnionDecref(oldPayload, oldTag);
                         auto* newTag = impl_->boxTag(val, "new.tag");
                         auto* newPayload = impl_->boxPayloadI64(val, "new.payload");
-                        // Owned box temporary already carries the +1 the slot
-                        // needs - take ownership instead of double-counting.
                         if (!impl_->isOwnedBoxResult(val))
                             impl_->emitUnionIncref(newPayload, newTag);
                     }
                     impl_->builder->CreateStore(val, alloca);
-                    // Refresh the unwind cleanup snapshot (union reassignment).
                     if (impl_->options.gcMode == GCMode::RC) {
                         auto* clTag = impl_->boxTag(val, "cl.tag");
                         auto* clPayload = impl_->boxPayloadI64(val, "cl.payload");
@@ -1488,7 +1304,6 @@ void CodeGen::visit(AssignStmt& node) {
                     }
                     llvm::Value* boxVal = impl_->makeBox(newTag, val);
                     impl_->builder->CreateStore(boxVal, alloca);
-                    // Refresh the unwind cleanup snapshot (union reassignment).
                     if (impl_->options.gcMode == GCMode::RC) {
                         auto* clPayload = impl_->boxPayloadI64(boxVal, "cl.payload");
                         impl_->emitCleanupUpdate(name->name, clPayload, newTag);
@@ -1503,42 +1318,30 @@ void CodeGen::visit(AssignStmt& node) {
             if (ownedBoxUnboxed && rhsBorrowed)
                 impl_->emitUnionDecref(ownedBoxPayload, ownedBoxTag);
 
-            // D027: If RHS was a closure (from capturing lambda), track it
             if (impl_->lastClosureCallableType) {
                 impl_->callableTypes[name->name] = impl_->lastClosureCallableType;
                 impl_->setVar(name->name, alloca, Impl::VarKind::Closure);
                 impl_->lastClosureCallableType = nullptr;
             }
-            // D025 Phase 4: type() returned a class descriptor
             else if (impl_->lastValueIsType) {
                 impl_->setVar(name->name, alloca, Impl::VarKind::Type);
                 impl_->lastValueIsType = false;
             }
-            // Refresh VarKind on reassignment so it never goes stale; Union and
-            // unboxed slots keep their shape (varKind must match the alloca).
             else if (oldKind == Impl::VarKind::Union) {
-                // Keep Union kind.
             } else if (didUnboxToNative) {
-                // Keep the concrete varKind matching the native slot.
             } else if (newKind != Impl::VarKind::Other) {
-                // Never promote a non-box alloca to Union: Union cleanup loads
-                // a 16-byte box and would overrun the 8-byte slot.
                 if (newKind == Impl::VarKind::Union &&
                     alloca->getAllocatedType() != impl_->boxType) {
-                    // Keep the existing varKind; the value is coerced to the slot.
                 } else {
                     impl_->setVar(name->name, alloca, newKind);
                 }
             } else if (auto* rhsName = dynamic_cast<NameExpr*>(node.value.get())) {
-                // Propagate VarKind from the source variable (preserves Str vs StrLiteral)
                 auto rhsKind = impl_->lookupVarKind(rhsName->name);
                 if (rhsKind != Impl::VarKind::Other &&
                     !(rhsKind == Impl::VarKind::Union &&
                       alloca->getAllocatedType() != impl_->boxType))
                     impl_->setVar(name->name, alloca, rhsKind);
             }
-            // Track callable types for first-class functions; unconditional so
-            // the else-if chain above cannot swallow it.
             if (auto* lambdaFn = llvm::dyn_cast<llvm::Function>(val)) {
                 impl_->callableTypes[name->name] = lambdaFn->getFunctionType();
             } else if (auto* rhsName = dynamic_cast<NameExpr*>(node.value.get())) {
@@ -1564,7 +1367,6 @@ void CodeGen::visit(AssignStmt& node) {
                 }
             }
 
-            // Track class name for instances assigned from constructor calls
             if (auto* callVal = dynamic_cast<CallExpr*>(node.value.get())) {
                 if (auto* calleeName = dynamic_cast<NameExpr*>(callVal->callee.get())) {
                     if (impl_->typedDictClassesBySym.count(impl_->classSym(calleeName->name))) {
@@ -1573,20 +1375,14 @@ void CodeGen::visit(AssignStmt& node) {
                         impl_->varClassNames[name->name] = calleeName->name;
                         impl_->varClassOwningModule[name->name] =
                             impl_->resolveClassOwningModule(calleeName->name);
-                        // GC Phase 3: mark as ClassInstance for scope-exit decref
                         if (impl_->options.gcMode == GCMode::RC)
                             impl_->setVar(name->name, alloca, Impl::VarKind::ClassInstance);
                     } else if (impl_->lookupVarKind(calleeName->name) == Impl::VarKind::Type) {
-                        // D025: Type callee already errored in CallExpr; tag
-                        // ClassInstance so cleanup stays well-formed.
                         if (impl_->options.gcMode == GCMode::RC)
                             impl_->setVar(name->name, alloca, Impl::VarKind::ClassInstance);
                     }
-                    // Track Lock() calls
                     if (calleeName->name == "Lock") {
                         impl_->varClassNames[name->name] = "__Lock";
-                        // Bare Lock local: the scope owns it - arm the null-gated
-                        // destroy (module globals live for the process, never armed).
                         if (!impl_->scopes.empty())
                             impl_->scopes.back().lockDestroyOnExit.insert(
                                 name->name);
@@ -1603,13 +1399,11 @@ void CodeGen::visit(AssignStmt& node) {
                     }
                 }
             }
-            // Track fire expressions as __Thread handles
             if (dynamic_cast<FireExpr*>(node.value.get())) {
                 impl_->varClassNames[name->name] = "__Thread";
             }
             if (auto cls = impl_->recordVarClassFromValue(name->name, node.value.get());
                 !cls.empty()) {
-                // GC Phase 3: mark as ClassInstance for scope-exit decref
                 if (impl_->options.gcMode == GCMode::RC && impl_->classNames.count(cls))
                     impl_->setVar(name->name, alloca, Impl::VarKind::ClassInstance);
             }
@@ -1618,4 +1412,4 @@ void CodeGen::visit(AssignStmt& node) {
 }
 
 
-} // namespace dragon
+}

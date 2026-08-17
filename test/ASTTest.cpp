@@ -4,10 +4,6 @@
 using namespace dragon;
 using namespace dragon::test;
 
-//===----------------------------------------------------------------------===//
-// ASTPrinter Tests
-//===----------------------------------------------------------------------===//
-
 TEST(ASTPrinterTest, EmptyModule) {
     auto module = parse("");
     ASSERT_NE(module, nullptr);
@@ -294,11 +290,6 @@ TEST(ASTPrinterTest, AssertStatement) {
     EXPECT_NE(output.find("(msg"), std::string::npos);
 }
 
-//===----------------------------------------------------------------------===//
-// DefaultASTVisitor Tests
-//===----------------------------------------------------------------------===//
-
-// Simple visitor that counts nodes
 class NodeCounter : public DefaultASTVisitor {
 public:
     int count = 0;
@@ -324,7 +315,7 @@ TEST(DefaultASTVisitorTest, CountsModuleNode) {
     ASSERT_NE(module, nullptr);
     NodeCounter counter;
     module->accept(counter);
-    EXPECT_EQ(counter.count, 1);  // just the Module
+    EXPECT_EQ(counter.count, 1);
 }
 
 TEST(DefaultASTVisitorTest, CountsExpressionNodes) {
@@ -332,7 +323,6 @@ TEST(DefaultASTVisitorTest, CountsExpressionNodes) {
     ASSERT_NE(module, nullptr);
     NodeCounter counter;
     module->accept(counter);
-    // Module + ExprStmt + BinaryExpr + IntegerLiteral(1) + IntegerLiteral(2) = 5
     EXPECT_EQ(counter.count, 5);
 }
 
@@ -341,7 +331,6 @@ TEST(DefaultASTVisitorTest, CountsFunctionNodes) {
     ASSERT_NE(module, nullptr);
     NodeCounter counter;
     module->accept(counter);
-    // Module + FunctionDecl + PassStmt = 3
     EXPECT_EQ(counter.count, 3);
 }
 
@@ -350,6 +339,5 @@ TEST(DefaultASTVisitorTest, TraversesNestedCalls) {
     ASSERT_NE(module, nullptr);
     NodeCounter counter;
     module->accept(counter);
-    // Module + ExprStmt + CallExpr(f) + NameExpr(f) + CallExpr(g) + NameExpr(g) + NameExpr(x) = 7
     EXPECT_EQ(counter.count, 7);
 }

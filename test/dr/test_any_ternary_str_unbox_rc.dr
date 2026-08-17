@@ -35,7 +35,6 @@ BODY: str = "{\"action\":\"order.placed\",\"subject_type\":\"service\",\"subject
 
 
 def churn() -> int {
-    # Reuse freed slabs so a dangling pointer reads reused bytes, not stale ones.
     junk: list[str] = []
     i: int = 0
     while i < 300 {
@@ -47,7 +46,6 @@ def churn() -> int {
 
 
 def read_const(body: str) -> str {
-    # const (annotated declaration) target - AugAnnAssign Phase 7a unbox.
     const doc: dict[str, Any] = decode[dict[str, Any]](body.encode("utf-8"))
     const action: str = doc["action"] if "action" in doc else ""
     churn()
@@ -56,21 +54,18 @@ def read_const(body: str) -> str {
 
 
 def read_return(body: str) -> str {
-    # the ternary flows straight into a return - the value outlives `doc`.
     const doc: dict[str, Any] = decode[dict[str, Any]](body.encode("utf-8"))
     return doc["subject_name"] if "subject_name" in doc else "?"
 }
 
 
 def arg_len(s: str) -> int {
-    # a borrow callee: reads its str arg after some heap churn.
     churn()
     return len(s)
 }
 
 
 def any_action(body: str) -> Any {
-    # returns an Any holding a str -> an OWNED box at the call site.
     const doc: dict[str, Any] = decode[dict[str, Any]](body.encode("utf-8"))
     return doc["action"]
 }
@@ -86,7 +81,6 @@ class TestAnyTernaryStrUnbox(TestCase) {
     }
 
     def test_reassign_target() -> None {
-        # reassignment to an existing str slot - the Assign.cpp unbox path.
         i: int = 0
         while i < 30 {
             const doc: dict[str, Any] = decode[dict[str, Any]](BODY.encode("utf-8"))
@@ -109,7 +103,6 @@ class TestAnyTernaryStrUnbox(TestCase) {
     }
 
     def test_bool_arm_still_correct() -> None {
-        # control: the sibling bool read was always fine (scalar, no refcount).
         const doc: dict[str, Any] = decode[dict[str, Any]](BODY.encode("utf-8"))
         if "read" in doc {
             const rv: bool = doc["read"]
@@ -118,9 +111,6 @@ class TestAnyTernaryStrUnbox(TestCase) {
     }
 
     def test_argpass_borrowed_box() -> None {
-        # the ternary / bare Any-subscript passed DIRECTLY as a str arg. Before
-        # the fix this failed the LLVM verifier (a box where the signature wants
-        # a str ptr); the arg is a BORROWED box (the dict owns the +1).
         i: int = 0
         while i < 30 {
             const doc: dict[str, Any] = decode[dict[str, Any]](BODY.encode("utf-8"))
@@ -131,8 +121,6 @@ class TestAnyTernaryStrUnbox(TestCase) {
     }
 
     def test_argpass_owned_box() -> None {
-        # an Any-returning call result passed as a str arg is an OWNED box: its
-        # +1 must be released after the call (drained as a Union), no leak.
         i: int = 0
         while i < 30 {
             self.assertEqual(arg_len(any_action(BODY)), 12)

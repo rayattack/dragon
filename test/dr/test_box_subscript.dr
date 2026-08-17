@@ -1,19 +1,8 @@
-# test/dr/test_box_subscript.dr - subscripting an Any/Union (box) value.
-#
-# Regression guard: `anyVal[index]` returned 0. The static type is
-# `Any`, so codegen couldn't pick a typed subscript path; the receiver was a
-# 16-byte box (not a pointer), so the SubscriptExpr fast path hit a
-# `return constant 0` fallback. The fix boxes the index and routes through the
-# runtime dragon_box_subscript, which dispatches on the receiver's runtime tag
-# (list / dict / str / bytes) and returns a result box - preserving the
-# element's tag for downstream print / isinstance / unbox-on-assign.
-
 from unittest import TestCase, main
 
 
 class BoxSubscriptTests(TestCase) {
     def test_int_list_index() {
-        # The original repro.
         a: Any = [10, 20, 30]
         self.assertEqual(a[0], 10)
         self.assertEqual(a[1], 20)

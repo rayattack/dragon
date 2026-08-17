@@ -48,13 +48,11 @@ class TupleUnpackRcTests(TestCase) {
             acc = acc + q + r
             i = i + 1
         }
-        # divmod(i,7): q*7 + r == i, so sum of (q+r) is bounded and deterministic.
-        self.assertEqual(q, 42)   # divmod(299,7) = (42, 5)
+        self.assertEqual(q, 42)
         self.assertEqual(r, 5)
     }
 
     def test_partition_heap_elements_survive() {
-        # The 3 str elements must outlive the source tuple's free.
         k: str = ""
         sep: str = ""
         v: str = ""
@@ -67,8 +65,6 @@ class TupleUnpackRcTests(TestCase) {
         self.assertEqual(k, "key199")
         self.assertEqual(sep, "=")
         self.assertEqual(v, "value")
-        # And the captured strings are still valid (a premature free would have
-        # corrupted these reads).
         self.assertEqual(len(sep), 1)
     }
 
@@ -85,17 +81,14 @@ class TupleUnpackRcTests(TestCase) {
     }
 
     def test_borrowed_source_not_double_freed() {
-        # Unpacking a NAMED tuple var must NOT free the source - it stays usable.
         t: tuple[int, int] = (7, 9)
         a: int = 0
         b: int = 0
         a, b = t
         self.assertEqual(a, 7)
         self.assertEqual(b, 9)
-        # Source still alive and correct after the unpack.
         self.assertEqual(t[0], 7)
         self.assertEqual(t[1], 9)
-        # Unpack it a second time - still valid (not freed by the first unpack).
         c: int = 0
         d: int = 0
         c, d = t
@@ -116,7 +109,6 @@ def mk_any_str_tuple(i: int) -> tuple[Any, int] {
 
 class TupleAnyElemTests(TestCase) {
     def test_boxed_scalar_element() {
-        # The original repro: crashed LLVM verification at compile time.
         a: Any = 1
         t: tuple[Any, int] = (a, 5)
         self.assertEqual(t[1], 5)
@@ -162,9 +154,6 @@ class TupleAnyElemTests(TestCase) {
     }
 
     def test_boxed_list_element() {
-        # A traceable (list) payload exercises the gc-track enrollment path.
-        # list[Any] declaration: lists stay invariant wrt Any, so the payload
-        # must be a box list to read back as list[Any].
         xs: list[Any] = [1, 2, 3]
         a: Any = xs
         t: tuple[Any, int] = (a, 4)
@@ -180,9 +169,6 @@ class TupleAnyElemTests(TestCase) {
     }
 
     def test_concrete_str_in_any_slot() {
-        # No intermediate Any local: the literal retype (tryExpectedTypeLiteral)
-        # admits the fresh tuple literal at the annotation, and the element is
-        # stored with its own runtime tag.
         s: str = "hy" + "dra"
         t: tuple[Any, int] = (s, 5)
         self.assertEqual(t[1], 5)
@@ -194,7 +180,6 @@ class TupleAnyElemTests(TestCase) {
             matched = True
         }
         self.assertTrue(matched)
-        # The source is a borrow - it must stay valid alongside the tuple.
         self.assertEqual(s, "hydra")
     }
 

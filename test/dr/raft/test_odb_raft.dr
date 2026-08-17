@@ -1,14 +1,3 @@
-# ODB M11 regression suite: Raft HA over the commit log (spec section 19 v3b).
-#
-# Three ODB replicas, one in-process hub. The leader IS the committer: a
-# write executes on the leader, is captured instead of committed, replicates
-# through packages/raft, and applies at CSN = index+1 through the identical
-# apply() path on every replica. Quorum gates every commit; failover is an
-# election; a minority leader's unreplicated write is SUPERSEDED - truncated
-# by consensus and applied nowhere - which retires the M10 fork for good.
-# Restarts rebuild consensus state from the file (meta fields + tail chain),
-# and a lagging replica catches up through the committed-history feed.
-
 from unittest import TestCase, main
 from odb import ODB, Document, CheckReport
 from odb.vfs import SimVFS
@@ -27,7 +16,6 @@ def _items_schema() -> dict[str, Any] {
 }
 
 
-# The in-process network: every replica sends here; the cluster delivers.
 class Hub(RaftTransport) {
     q: list[Msg]
 
@@ -41,8 +29,6 @@ class Hub(RaftTransport) {
 }
 
 
-# A three-node cluster on SimVFS disks. Nodes 2..n adopt node 1's file uuid
-# (the M10 bootstrap rule): one lineage, N replicas.
 class Cluster {
     hub: Hub
     ids: list[int]
@@ -79,7 +65,6 @@ class Cluster {
         }
     }
 
-    # Deliver queued messages and serve snapshot requests until quiet.
     def pump() -> None {
         guard: int = 0
         while True {
@@ -113,7 +98,6 @@ class Cluster {
         }
     }
 
-    # Tick `nid` through one full election timeout, delivering as we go.
     def elect(nid: int) -> None {
         n: int = self.reps[nid].node.election_timeout
         i: int = 0
@@ -124,7 +108,6 @@ class Cluster {
         self.pump()
     }
 
-    # One leader heartbeat interval plus delivery: spreads commit indexes.
     def heartbeat(nid: int) -> None {
         i: int = 0
         while i < self.reps[nid].node.heartbeat_ticks {
@@ -134,7 +117,6 @@ class Cluster {
         self.pump()
     }
 
-    # Propose on `nid` and drive the cluster until the proposal resolves.
     def write(nid: int, oql: str) -> int {
         idx: int = self.reps[nid].run(oql)
         self.pump()
@@ -142,8 +124,6 @@ class Cluster {
         return idx
     }
 
-    # Graceful stop + reopen from the same disk: consensus state must come
-    # back from the file alone.
     def restart(nid: int) -> None {
         self.reps[nid].db.close()
         p: Pager = open_pager(self.vfss[nid])
@@ -179,7 +159,6 @@ class ElectAndWriteTest(TestCase) {
         self.assertEqual(c.reps[1].outcome(idx), CONFIRMED)
         c.write(1, "add items { id: 2, name: \"grace\", total: 7 }")
 
-        # Every replica: same csn, same bytes, clean check, readable rows.
         for nid in c.ids {
             self.assertEqual(c.reps[nid].csn(), c.reps[1].csn())
             self.assertEqual(_dump(c, nid), _dump(c, 1))
@@ -188,7 +167,6 @@ class ElectAndWriteTest(TestCase) {
             docs: list[Document] = c.reps[nid].db.find("items ? total >= 3")
             self.assertEqual(len(docs), 2)
         }
-        # The lineage pair matches everywhere: same uuid, same csn.
         self.assertEqual(c.reps[2].db.uuid(), c.reps[1].db.uuid())
     }
 
@@ -201,7 +179,7 @@ class ElectAndWriteTest(TestCase) {
         } except ODBError {
             raised = True
         }
-        self.assertTrue(raised)                  # even on the leader: consensus or nothing
+        self.assertTrue(raised)
     }
 
     def test_follower_rejects_writes_with_redirect() -> None {
@@ -212,7 +190,7 @@ class ElectAndWriteTest(TestCase) {
             c.reps[2].run("add items { id: 9, name: \"x\", total: 1 }")
         } except ODBError as e {
             raised2 = True
-            self.assertTrue("node 1" in str(e))  # the redirect names the leader
+            self.assertTrue("node 1" in str(e))
         }
         self.assertTrue(raised2)
     }
@@ -225,7 +203,6 @@ class QuorumTest(TestCase) {
         c.bootstrap()
         base_csn: int = c.reps[1].csn()
 
-        # Minority: both followers dark. The write must NOT commit.
         c.up[2] = False
         c.up[3] = False
         idx: int = c.reps[1].run("add items { id: 1, name: \"solo\", total: 1 }")
@@ -235,7 +212,6 @@ class QuorumTest(TestCase) {
         self.assertEqual(c.reps[1].outcome(idx), PENDING)
         self.assertEqual(c.reps[1].csn(), base_csn)
 
-        # One follower returns: 2/3 is a quorum; the same proposal commits.
         c.up[2] = True
         c.heartbeat(1)
         c.heartbeat(1)
@@ -253,15 +229,13 @@ class FailoverTest(TestCase) {
         c.bootstrap()
         c.write(1, "add items { id: 1, name: \"before\", total: 1 }")
 
-        c.up[1] = False                          # the leader goes dark
+        c.up[1] = False
         c.elect(2)
         self.assertTrue(c.reps[2].is_leader())
 
         idx: int = c.write(2, "add items { id: 2, name: \"after\", total: 2 }")
         self.assertEqual(c.reps[2].outcome(idx), CONFIRMED)
 
-        # The old leader returns: demoted by the higher term, caught up by
-        # the feed, identical history.
         c.up[1] = True
         c.heartbeat(2)
         c.heartbeat(2)
@@ -273,9 +247,6 @@ class FailoverTest(TestCase) {
     }
 
     def test_minority_leader_write_is_superseded_never_applied() -> None {
-        # The M10 fork, retired: a leader whose write reached nobody loses it
-        # to consensus. No replica ever applies it; the CSN slot goes to the
-        # new leader's history; the old leader's own database never forks.
         c: Cluster = Cluster(3)
         c.bootstrap()
         base_csn: int = c.reps[1].csn()
@@ -285,16 +256,16 @@ class FailoverTest(TestCase) {
         idx: int = c.reps[1].run("add items { id: 66, name: \"lost\", total: 6 }")
         c.pump()
         self.assertEqual(c.reps[1].outcome(idx), PENDING)
-        self.assertEqual(c.reps[1].csn(), base_csn)   # captured, never committed locally
+        self.assertEqual(c.reps[1].csn(), base_csn)
 
-        c.up[1] = False                          # minority leader goes dark too
+        c.up[1] = False
         c.up[2] = True
         c.up[3] = True
         c.elect(2)
         self.assertTrue(c.reps[2].is_leader())
         c.write(2, "add items { id: 77, name: \"won\", total: 7 }")
 
-        c.up[1] = True                           # the old leader rejoins
+        c.up[1] = True
         c.heartbeat(2)
         c.heartbeat(2)
         self.assertEqual(c.reps[1].outcome(idx), SUPERSEDED)
@@ -315,7 +286,7 @@ class RestartTest(TestCase) {
 
         c.up[3] = False
         c.write(1, "add items { id: 2, name: \"b\", total: 2 }")
-        c.restart(3)                             # reopen from disk, rejoin
+        c.restart(3)
         c.heartbeat(1)
         c.heartbeat(1)
         c.pump()
@@ -332,10 +303,10 @@ class RestartTest(TestCase) {
         old_term: int = c.reps[1].node.term
         old_csn: int = c.reps[1].csn()
 
-        c.restart(1)                             # graceful stop + reopen
-        self.assertEqual(c.reps[1].node.term, old_term)   # hard state from the file
+        c.restart(1)
+        self.assertEqual(c.reps[1].node.term, old_term)
         self.assertEqual(c.reps[1].csn(), old_csn)
-        self.assertTrue(not c.reps[1].is_leader())        # role is volatile
+        self.assertTrue(not c.reps[1].is_leader())
 
         c.elect(2)
         idx: int = c.write(2, "add items { id: 2, name: \"c\", total: 2 }")
@@ -359,7 +330,7 @@ class CatchupTest(TestCase) {
         c.heartbeat(1)
         c.heartbeat(1)
         c.pump()
-        self.assertTrue(c.snapshots_served > 0)  # the feed did the heavy lift
+        self.assertTrue(c.snapshots_served > 0)
         self.assertEqual(c.reps[3].csn(), c.reps[1].csn())
         self.assertEqual(_dump(c, 3), _dump(c, 1))
         self.assertEqual(len(c.reps[3].db.find("items ? total >= 1")), 10)
@@ -373,7 +344,7 @@ class ReadYourWritesTest(TestCase) {
         c.bootstrap()
         idx: int = c.write(1, "add items { id: 5, name: \"tok\", total: 5 }")
         self.assertEqual(c.reps[1].outcome(idx), CONFIRMED)
-        token: int = idx + 1                     # the write's CSN, clusterwide
+        token: int = idx + 1
         self.assertTrue(c.reps[2].csn() >= token)
         self.assertTrue(c.reps[3].csn() >= token)
         docs: list[Document] = c.reps[3].db.find("items ? id == 5")

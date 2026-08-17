@@ -1,13 +1,3 @@
-# json.dumps and container repr of non-ASCII (kind=4 / UCS-4) strings.
-#
-# A str holding any code point >= 0x80 stores one code point per 4-byte slot
-# (kind=4). The runtime's json/repr buffer builders appended those payloads
-# with strlen-family walks, which stop at the first zero byte of the first
-# slot: json.dumps({c: "arrow → here"}) returned {"c": "a"}, a leading
-# non-ASCII char produced garbage ("→..." became "!"), and str(["a→b"])
-# returned ['a']. The builders now encode payloads via dragon_str_to_utf8_alloc
-# (same boundary rule as dragon_http_build_response).
-
 from unittest import TestCase, main
 import json
 from json import decode

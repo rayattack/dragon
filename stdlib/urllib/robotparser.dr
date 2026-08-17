@@ -45,8 +45,6 @@ class _Entry {
     }
 
     def allowance(path: str) -> bool {
-        # CPython's spec: the longest matching prefix wins; ties go to
-        # Allow over Disallow. An empty Disallow path = allow everything.
         best_match_len: int = -1
         best_allow: bool = true
         for rule in self.rules {

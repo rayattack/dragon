@@ -18,13 +18,8 @@ uniform typed API regardless of int vs float column.
 from csv import parse_rows, format_row
 from math import sqrt
 
-# str <-> number conversion (same externs json.dr uses)
 extern "C" def dragon_str_to_int(s: str) -> int
 extern "C" def dragon_str_to_float(s: str) -> float
-
-#===----------------------------------------------------------------------===#
-# dtype tags
-#===----------------------------------------------------------------------===#
 
 const DT_INT: int = 0
 const DT_FLOAT: int = 1
@@ -37,15 +32,10 @@ def dtype_name(dt: int) -> str {
 }
 
 
-#===----------------------------------------------------------------------===#
-# Series - one typed column
-#===----------------------------------------------------------------------===#
-
 class Series {
     def(name: str, dtype: int) {
         self.name: str = name
         self.dtype: int = dtype
-        # Exactly one of these is populated, selected by `dtype`.
         self.idata: list[int] = []
         self.fdata: list[float] = []
         self.sdata: list[str] = []
@@ -61,8 +51,6 @@ class Series {
         return self.dtype == DT_INT or self.dtype == DT_FLOAT
     }
 
-    #--- element access ---#
-
     def get_int(i: int) -> int { return self.idata[i] }
     def get_float(i: int) -> float { return self.fdata[i] }
     def get_str(i: int) -> str { return self.sdata[i] }
@@ -73,7 +61,6 @@ class Series {
         return str(self.idata[i])
     }
 
-    # Numeric value at row i as float (int columns promote). Caller ensures numeric.
     def _numf(i: int) -> float {
         if self.dtype == DT_FLOAT { return self.fdata[i] }
         return float(self.idata[i])
@@ -84,8 +71,6 @@ class Series {
             raise ValueError(f"column '{self.name}' is not numeric")
         }
     }
-
-    #--- reductions (numeric, return float) ---#
 
     def sum() -> float {
         self._check_numeric()
@@ -151,8 +136,6 @@ class Series {
         }
         return sqrt(ss / float(n - 1))
     }
-
-    #--- comparison masks (for DataFrame.filter) ---#
 
     def gt(x: float) -> list[bool] {
         self._check_numeric()
@@ -225,8 +208,6 @@ class Series {
         return out
     }
 
-    #--- reorder/subset by row indices (workhorse for filter/sort/join) ---#
-
     def take(idx: list[int]) -> Series {
         out: Series = Series(self.name, self.dtype)
         k: int = 0
@@ -245,7 +226,6 @@ class Series {
         return out
     }
 
-    # Three-way compare of rows i and j (ascending sense): -1, 0, or 1.
     def _cmp(i: int, j: int) -> int {
         if self.dtype == DT_FLOAT {
             const af: float = self.fdata[i]
@@ -268,10 +248,6 @@ class Series {
     }
 }
 
-#===----------------------------------------------------------------------===#
-# Series factories
-#===----------------------------------------------------------------------===#
-
 def int_series(name: str, data: list[int]) -> Series {
     s: Series = Series(name, DT_INT)
     s.idata = data
@@ -289,10 +265,6 @@ def str_series(name: str, data: list[str]) -> Series {
     s.sdata = data
     return s
 }
-
-#===----------------------------------------------------------------------===#
-# DataFrame
-#===----------------------------------------------------------------------===#
 
 class DataFrame {
     def(cols: list[Series]) {
@@ -377,7 +349,6 @@ class DataFrame {
         return DataFrame(out)
     }
 
-    # Stable sort of all rows by one column (merge sort, O(n log n)).
     def sort_values(by: str, ascending: bool = true) -> DataFrame {
         const key: Series = self.col(by)
         const idx: list[int] = _argsort(key, ascending)
@@ -394,13 +365,10 @@ class DataFrame {
         return GroupBy(self, by)
     }
 
-    # Inner join on a shared key column. Right-side `on` column is dropped from
-    # the result. Non-key columns that collide by name are kept as-is (v1).
     def join(other: DataFrame, on: str) -> DataFrame {
         const lkey: Series = self.col(on)
         const rkey: Series = other.col(on)
 
-        # index right rows by key string
         rindex: dict[str, list[int]] = {}
         j: int = 0
         const rn: int = other.nrows()
@@ -415,7 +383,6 @@ class DataFrame {
             j = j + 1
         }
 
-        # pair up matching rows
         lidx: list[int] = []
         ridx: list[int] = []
         i: int = 0
@@ -474,7 +441,6 @@ class DataFrame {
         const nc: int = len(names)
         const nr: int = self.nrows()
 
-        # column display widths
         widths: list[int] = []
         c: int = 0
         while c < nc {
@@ -491,7 +457,6 @@ class DataFrame {
 
         lines: list[str] = []
 
-        # header
         hparts: list[str] = []
         c = 0
         while c < nc {
@@ -500,7 +465,6 @@ class DataFrame {
         }
         lines.append("  ".join(hparts))
 
-        # separator
         sparts: list[str] = []
         c = 0
         while c < nc {
@@ -509,7 +473,6 @@ class DataFrame {
         }
         lines.append("  ".join(sparts))
 
-        # rows (numbers right-aligned, strings left-aligned)
         r: int = 0
         while r < nr {
             parts: list[str] = []
@@ -531,16 +494,12 @@ class DataFrame {
     }
 }
 
-#===----------------------------------------------------------------------===#
-# GroupBy - split-apply-combine on one key column
-#===----------------------------------------------------------------------===#
-
 class GroupBy {
     def(df: DataFrame, by: str) {
         self.df: DataFrame = df
         self.by: str = by
-        self.keys: list[str] = []          # display key per group (first appearance order)
-        self.groups: list[list[int]] = []  # source row indices per group
+        self.keys: list[str] = []
+        self.groups: list[list[int]] = []
 
         const key: Series = df.col(by)
         const n: int = df.nrows()
@@ -561,7 +520,6 @@ class GroupBy {
         }
     }
 
-    # Key column for the result, reusing the original dtype (take first row of each group).
     def _key_col() -> Series {
         firstidx: list[int] = []
         g: int = 0
@@ -572,7 +530,6 @@ class GroupBy {
         return self.df.col(self.by).take(firstidx)
     }
 
-    # op: 0 = sum, 1 = mean
     def _agg(value: str, op: int) -> DataFrame {
         const src: Series = self.df.col(value)
         if not src.is_numeric() {
@@ -614,11 +571,6 @@ class GroupBy {
     }
 }
 
-#===----------------------------------------------------------------------===#
-# Helpers
-#===----------------------------------------------------------------------===#
-
-# Stable merge-sort of row indices by a key column. O(n log n).
 def _argsort(key: Series, ascending: bool) -> list[int] {
     const n: int = key.size()
     base: list[int] = []
@@ -714,10 +666,6 @@ def _looks_float(s: str) -> bool {
     return dots == 1 and digits >= 1
 }
 
-#===----------------------------------------------------------------------===#
-# read_csv - parse + per-column dtype inference (int -> float -> str)
-#===----------------------------------------------------------------------===#
-
 def read_csv(text: str, header: bool = true) -> DataFrame {
     const rows: list[list[str]] = parse_rows(text, ",")
     empty: list[Series] = []
@@ -740,7 +688,6 @@ def read_csv(text: str, header: bool = true) -> DataFrame {
     cols: list[Series] = []
     c: int = 0
     while c < ncol {
-        # gather the raw string cells for this column
         cells: list[str] = []
         r: int = start
         while r < len(rows) {
@@ -753,7 +700,6 @@ def read_csv(text: str, header: bool = true) -> DataFrame {
             r = r + 1
         }
 
-        # infer dtype across the whole column
         all_int: bool = len(cells) > 0
         all_float: bool = len(cells) > 0
         k: int = 0

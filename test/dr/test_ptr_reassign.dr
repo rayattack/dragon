@@ -1,16 +1,5 @@
-# Regression: reassigning a `ptr` local must not treat it as a heap string.
-#
-# You did nothing wrong writing ordinary code:
-#
-#     h: ptr = fopen(path, "r+b")
-#     if not h { h = fopen(path, "w+b") }   # reassign a raw handle
-#
-# Codegen inferred the reassigned variable's kind from its right-hand side, and
-# a `ptr`-typed value fell through to the string default. So the raw FILE* (or
-# malloc buffer) was tagged a heap string, and scope cleanup ran
-# dragon_decref_str over it - reading a DragonString header 16 bytes before a
-# FILE*, a heap-buffer-overflow / use-after-free. A `ptr` is unmanaged; it must
-# never be refcounted. Under ASan this test crashed before the fix; now clean.
+# A reassigned `ptr` local inferred its kind from the RHS and fell through to the string default,
+# so scope cleanup ran dragon_decref_str over a raw FILE* (ASan crash pre-fix). ptr is never refcounted.
 
 from unittest import TestCase, main
 
@@ -25,8 +14,8 @@ class PtrReassignTest(TestCase) {
         a: ptr = malloc(8)
         b: ptr = malloc(8)
         p: ptr = a
-        p = b                       # the trigger: reassign a raw ptr local
-        memset(p, 65, 8)            # write 'A' bytes through it
+        p = b
+        memset(p, 65, 8)
         res: bytes = dragon_bytes_new(p, 8)
         free(a)
         free(b)
@@ -38,7 +27,7 @@ class PtrReassignTest(TestCase) {
         p: ptr = malloc(4)
         if len(bytes([1])) == 1 {
             free(p)
-            p = malloc(16)          # reassign inside a branch
+            p = malloc(16)
         }
         memset(p, 7, 4)
         out: bytes = dragon_bytes_new(p, 4)

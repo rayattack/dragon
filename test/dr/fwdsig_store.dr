@@ -1,7 +1,3 @@
-# Helper module for test_fwd_import_sig.dr: the class lives HERE so that
-# fwdsig_mod.dr's function signatures reference an IMPORTED class.
-
-
 class FwdStore {
     n: int
 

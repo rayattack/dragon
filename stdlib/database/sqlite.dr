@@ -11,10 +11,6 @@ so Dragon's i64 `int` round-trips losslessly.
 
 from database.base import Connection, SQL, Results, QueryError, ConnectionError
 
-#===----------------------------------------------------------------------===#
-# SQLite C API (bundled amalgamation).
-#===----------------------------------------------------------------------===#
-
 extern "C" def malloc(size: int) -> ptr
 extern "C" def free(p: ptr)
 extern "C" def dragon_ptr_deref(pp: ptr) -> ptr
@@ -33,10 +29,6 @@ extern "C" def sqlite3_column_int64(stmt: ptr, iCol: intc) -> int
 extern "C" def sqlite3_column_double(stmt: ptr, iCol: intc) -> float
 extern "C" def sqlite3_column_text(stmt: ptr, iCol: intc) -> str
 extern "C" def sqlite3_column_bytes(stmt: ptr, iCol: intc) -> intc
-# Copies `byte_len` bytes from a raw C pointer into a fresh Dragon string. Unlike
-# `"" + cstr`, this never feeds the foreign pointer to dragon_is_heap_string (which
-# would OOB-read a bogus header and corrupt the heap), so it is the correct way to
-# ingest SQLite's borrowed column text.
 extern "C" def dragon_string_alloc(src: str, byte_len: int) -> str
 extern "C" def sqlite3_bind_int64(stmt: ptr, index: intc, value: int) -> intc
 extern "C" def sqlite3_bind_double(stmt: ptr, index: intc, value: float) -> intc
@@ -46,7 +38,6 @@ extern "C" def sqlite3_errmsg(db: ptr) -> str
 extern "C" def sqlite3_changes(db: ptr) -> intc
 extern "C" def sqlite3_last_insert_rowid(db: ptr) -> int
 
-# SQLite result codes / column types.
 const SQLITE_OK: int = 0
 const SQLITE_ROW: int = 100
 const SQLITE_DONE: int = 101
@@ -62,19 +53,12 @@ class SqliteConnection(Connection) {
         const rc: int = sqlite3_open(path, self.dbpp)
         self.db = dragon_ptr_deref(self.dbpp)
         if rc != SQLITE_OK {
-            # SQLite's contract: a FAILED open still returns an allocated handle
-            # that must be passed to sqlite3_close. Skipping it (and the 8-byte
-            # out-param) leaks the error handle on every failed open - a bad
-            # path, permissions error, or retry against a locked volume.
-            # Close and free before raising.
             const ignored: int = sqlite3_close(self.db)
             free(self.dbpp)
             raise ConnectionError("cannot open database: " + path)
         }
     }
 
-    # Rewrite the dialect-free canonical `$$N` placeholders to SQLite's numbered
-    # `?N+1` form. Descending N avoids the `$$1`-is-a-prefix-of-`$$10` hazard.
     def _to_sqlite(canonical: str, nparams: int) -> str {
         sql: str = canonical
         k: int = nparams - 1
@@ -85,7 +69,6 @@ class SqliteConnection(Connection) {
         return sql
     }
 
-    # Prepare + bind the SQL value's params, returning the statement handle.
     def _prepare(sql: SQL) -> ptr {
         nparams: int = len(sql.params)
         text: str = self._to_sqlite(sql.canonical, nparams)
@@ -96,7 +79,6 @@ class SqliteConnection(Connection) {
         if rc != SQLITE_OK {
             raise QueryError(sqlite3_errmsg(self.db))
         }
-        # Bind params by their native type (carried in each Any box's tag).
         i: int = 0
         while i < nparams {
             p: Any = sql.params[i]
@@ -116,8 +98,6 @@ class SqliteConnection(Connection) {
                 sqlite3_bind_double(stmt, idx, fv)
             } else if isinstance(p, str) {
                 sv: str = p
-                # -1 = NUL-terminated; the DragonString outlives the step, so
-                # the static (none) destructor is safe (no copy needed).
                 sqlite3_bind_text(stmt, idx, sv, -1, none)
             } else {
                 sqlite3_bind_null(stmt, idx)
@@ -127,9 +107,6 @@ class SqliteConnection(Connection) {
         return stmt
     }
 
-    # Read the current row of a stepped statement into a `dict[str, Any]`
-    # keyed by column name. Each value is stored at its native type (the
-    # dict[str, Any] tags it on insert), so int/float/str/NULL round-trip.
     def _read_row(stmt: ptr, names: list[str]) -> dict[str, Any] {
         row: dict[str, Any] = {}
         ncol: int = len(names)
@@ -142,9 +119,6 @@ class SqliteConnection(Connection) {
             } else if ct == SQLITE_FLOAT {
                 row[nm] = sqlite3_column_double(stmt, c)
             } else if ct == SQLITE_TEXT {
-                # Copy out of SQLite's buffer (valid only until the next step).
-                # Use the explicit byte length + dragon_string_alloc so the
-                # borrowed C pointer is never handled as a Dragon string.
                 const blen: int = sqlite3_column_bytes(stmt, c)
                 row[nm] = dragon_string_alloc(sqlite3_column_text(stmt, c), blen)
             } else {
@@ -166,10 +140,6 @@ class SqliteConnection(Connection) {
         return names
     }
 
-    # run - step the prepared statement, collecting any result rows, then report
-    # the write outcome (changes + last-insert rowid). One primitive serves both
-    # SELECT (rows populated) and DML (rows empty, xid/ran populated). Both
-    # last_insert_rowid and changes are local C calls - no extra round-trip.
     def run(sql: SQL) -> Results {
         stmt: ptr = self._prepare(sql)
         names: list[str] = self._column_names(stmt)
@@ -186,9 +156,6 @@ class SqliteConnection(Connection) {
         return Results(rows, sqlite3_last_insert_rowid(self.db), sqlite3_changes(self.db))
     }
 
-    # raw - verbatim text (DDL / maintenance / multi-statement). sqlite3_exec
-    # runs every statement and does not surface rows here; the Results carries
-    # the write outcome only.
     def raw(text: str) -> Results {
         const rc: int = sqlite3_exec(self.db, text, none, none, none)
         if rc != SQLITE_OK {

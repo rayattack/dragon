@@ -4,8 +4,6 @@
 
 using namespace dragon;
 
-// ===== Dragon Theme (default) =====
-
 TEST(DiagnosticFormatter, DragonThemeError) {
     DiagnosticFormatter fmt;
     auto result = fmt.format("test.dr", 10, 5, "error", "undeclared variable 'x'");
@@ -42,14 +40,11 @@ TEST(DiagnosticFormatter, DragonThemeNoSuggestionWhenEmpty) {
     EXPECT_EQ(result.find("Suggestion"), std::string::npos);
 }
 
-// ===== Plain Mode =====
-
 TEST(DiagnosticFormatter, PlainModeError) {
     DiagnosticStyle style;
     style.useDragonTheme = false;
     DiagnosticFormatter fmt(style);
     auto result = fmt.format("test.py", 5, 3, "error", "syntax error");
-    // Should be: test.py:5:3: error: syntax error
     EXPECT_NE(result.find("test.py:5:3: error: syntax error"), std::string::npos);
     EXPECT_EQ(result.find("DRAGON"), std::string::npos);
 }
@@ -71,8 +66,6 @@ TEST(DiagnosticFormatter, PlainModeWithSuggestion) {
     EXPECT_NE(result.find("try this"), std::string::npos);
 }
 
-// ===== Suggestion Toggle =====
-
 TEST(DiagnosticFormatter, SuggestionsDisabled) {
     DiagnosticStyle style;
     style.showSuggestions = false;
@@ -82,14 +75,11 @@ TEST(DiagnosticFormatter, SuggestionsDisabled) {
     EXPECT_EQ(result.find("should not appear"), std::string::npos);
 }
 
-// ===== Color Output =====
-
 TEST(DiagnosticFormatter, ColorOutputContainsAnsiCodes) {
     DiagnosticStyle style;
     style.colorOutput = true;
     DiagnosticFormatter fmt(style);
     auto result = fmt.format("test.dr", 1, 1, "error", "msg");
-    // ANSI escape code \033[ should be present
     EXPECT_NE(result.find("\033["), std::string::npos);
 }
 
@@ -100,8 +90,6 @@ TEST(DiagnosticFormatter, NoColorOutputNoAnsiCodes) {
     auto result = fmt.format("test.dr", 1, 1, "error", "msg");
     EXPECT_EQ(result.find("\033["), std::string::npos);
 }
-
-// ===== Missing Type Formatter =====
 
 TEST(DiagnosticFormatter, MissingTypeDragonTheme) {
     DiagnosticFormatter fmt;
@@ -131,8 +119,6 @@ TEST(DiagnosticFormatter, MissingTypeReturnType) {
     EXPECT_NE(result.find("return type"), std::string::npos);
 }
 
-// ===== Untyped Import Formatter =====
-
 TEST(DiagnosticFormatter, UntypedImportMessage) {
     DiagnosticFormatter fmt;
     auto result = fmt.formatUntypedImport("utils.py");
@@ -140,8 +126,6 @@ TEST(DiagnosticFormatter, UntypedImportMessage) {
     EXPECT_NE(result.find("utils.py"), std::string::npos);
     EXPECT_NE(result.find("strictly typed"), std::string::npos);
 }
-
-// ===== Style Accessor =====
 
 TEST(DiagnosticFormatter, StyleAccessor) {
     DiagnosticStyle style;
@@ -153,8 +137,6 @@ TEST(DiagnosticFormatter, StyleAccessor) {
     EXPECT_TRUE(fmt.style().colorOutput);
     EXPECT_FALSE(fmt.style().showSuggestions);
 }
-
-// ===== Default Construction =====
 
 TEST(DiagnosticFormatter, DefaultStyleIsDragonThemed) {
     DiagnosticFormatter fmt;

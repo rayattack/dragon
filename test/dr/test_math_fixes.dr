@@ -1,6 +1,3 @@
-# Pre-fix: factorial(-1), isqrt(-1), and log_int on bad input returned the
-# sentinel -1 instead of raising ValueError.
-
 from unittest import TestCase, main
 from math import factorial, isqrt, log_int
 

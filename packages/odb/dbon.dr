@@ -1,19 +1,3 @@
-# odb.dbon - DBON, the on-disk and on-wire document codec (spec section 12).
-#
-# A document is laid out so predicates and index maintenance on required fields
-# never parse it - they read a fixed offset. That is the speed thesis made
-# physical: required fields shred into a fixed region, optional fields live in a
-# tagged, id-sorted tail, and variable payloads (strings) sit in a var region.
-#
-#   [header 12B: schema_id u16, version u16, flags u8, _pad, total_len u32]
-#   [required region: one fixed slot per required field, in field-id order]
-#   [optional tail: count u16, then count 12B slots (field_id u16, tag u8, _pad,
-#                   payload 8B), sorted by field id -> binary-searchable]
-#   [var region: string/bytes payloads, referenced by (u32 off, u32 len)]
-#
-# Slot/payload encoding by tag: bool = 1 byte; integer = i64 two's complement;
-# number = IEEE-754 f64; string = (u32 absolute offset, u32 length) into var
-
 from odb.schema import CompiledSchema, FieldSpec, validate_doc, slot_size
 from odb.schema import T_BOOL, T_INT, T_NUM, T_STR, T_BYTES
 from odb.codec import blank, put_u8, put_u16, put_u32, put_u64, put_bytes
@@ -53,9 +37,6 @@ def _append(dst: list[int], src: list[int]) -> None {
     }
 }
 
-# Write a value into an 8-byte-max slot at `off`. Strings append their bytes to
-# `var` and store an absolute (offset, length) reference; var offsets count from
-# var_base (the start of the var region within the whole document).
 def _write_slot(buf: list[int], off: int, tag: int, v: Any, var: list[int], var_base: int) -> None {
     if tag == T_BOOL {
         b: int = 0
@@ -73,7 +54,6 @@ def _write_slot(buf: list[int], off: int, tag: int, v: Any, var: list[int], var_
         put_bytes(buf, off, pack_f64_le(_float_of(v)))
         return
     }
-    # T_STR / T_BYTES
     sb: bytes = _str_of(v).encode()
     start: int = var_base + len(var)
     _append(var, _bytes_to_ints(sb))
@@ -108,7 +88,6 @@ def _read_slot(data: bytes, off: int, tag: int) -> Any {
         rf: Any = fv
         return rf
     }
-    # T_STR / T_BYTES
     voff: int = get_u32(data, off)
     vlen: int = get_u32(data, off + 4)
     sv: str = get_bytes(data, voff, vlen).decode()
@@ -116,7 +95,6 @@ def _read_slot(data: bytes, off: int, tag: int) -> Any {
     return rs
 }
 
-# Sort field specs ascending by field id (small lists; insertion sort).
 def _sort_by_id(fields: list[FieldSpec]) -> None {
     i: int = 1
     while i < len(fields) {
@@ -131,7 +109,6 @@ def _sort_by_id(fields: list[FieldSpec]) -> None {
     }
 }
 
-# Encode a validated document into DBON bytes.
 def encode(schema: CompiledSchema, doc: dict[str, Any]) -> bytes {
     validate_doc(schema, doc)
 
@@ -180,7 +157,6 @@ def encode(schema: CompiledSchema, doc: dict[str, Any]) -> bytes {
     return bytes(out)
 }
 
-# Decode DBON bytes back into a document dict.
 def decode(schema: CompiledSchema, data: bytes) -> dict[str, Any] {
     doc: dict[str, Any] = {}
     for f in schema.required {
@@ -202,9 +178,6 @@ def decode(schema: CompiledSchema, data: bytes) -> dict[str, Any] {
     return doc
 }
 
-# Read a single field without decoding the whole document. Required scalars are
-# one fixed-offset access (the speed thesis); optional fields scan the tail.
-# Raises KeyError if the field is absent from this document.
 def read_field(schema: CompiledSchema, data: bytes, name: str) -> Any {
     f: FieldSpec = schema.field(name)
     if f.required {
@@ -225,7 +198,6 @@ def read_field(schema: CompiledSchema, data: bytes, name: str) -> Any {
     raise KeyError("field '" + name + "' absent from document")
 }
 
-# The schema id stamped in a document header (for dispatch without the schema).
 def doc_schema_id(data: bytes) -> int {
     return get_u16(data, 0)
 }

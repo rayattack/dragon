@@ -42,7 +42,6 @@ extern "C" def trunc(x: float) -> float
 extern "C" def round(x: float) -> float
 extern "C" def copysign(x: float, y: float) -> float
 
-# These return intc; callers normalize to int.
 extern "C" def isnan(x: float) -> intc
 extern "C" def isinf(x: float) -> intc
 extern "C" def isfinite(x: float) -> intc
@@ -116,7 +115,6 @@ def comb(n: int, k: int) -> int {
     if k > n { return 0 }
     if k == 0 { return 1 }
     if k == n { return 1 }
-    # Use symmetry: C(n,k) = C(n,n-k)
     r: int = k
     if r > n - r { r = n - r }
     result: int = 1

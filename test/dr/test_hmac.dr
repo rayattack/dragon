@@ -1,10 +1,3 @@
-# test/dr/test_hmac.dr - Known-answer tests for HMAC (RFC 2104).
-#
-# HMAC-SHA-256 vectors: RFC 4231 §4. HMAC-SHA-1 vectors: RFC 2202 §3.
-# The large-key cases (TC6/TC7) exercise hmac._normalize_key's "hash the key
-# when it exceeds the block size" path - a common place for off-by-one bugs.
-# HMAC-SHA-256 backs token signing; HMAC-SHA-1 is the inner primitive of TOTP.
-
 from unittest import TestCase, main
 from hmac import new, HMAC
 

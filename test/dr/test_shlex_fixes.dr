@@ -1,6 +1,3 @@
-# Pre-fix: split() and quote() built output one character per concat (quadratic).
-# These pin exact outputs so the span-based rewrite cannot drift.
-
 from unittest import TestCase, main
 from shlex import split, quote, join
 

@@ -6,16 +6,11 @@ extern "C" def mkdir(path: str, mode: intc) -> intc
 extern "C" def unlink(path: str) -> intc
 extern "C" def rmdir(path: str) -> intc
 
-# OS CSPRNG bytes. Temp names must come from the CSPRNG, not rand() seeded
-# by time/pid: a guessable seed lets an attacker pre-plant a symlink at the name.
 extern "C" def dragon_urandom(n: int) -> bytes
 
-# Atomically creates a file (O_CREAT|O_EXCL|O_NOFOLLOW, mode 0600); 0 on
-# success, -1 if it exists/is a symlink. Replaces the racy exists()-then-open race.
 extern "C" def dragon_create_excl(path: str) -> intc
 
 def _random_name(length: int) -> str {
-    # Generate a random alphanumeric string from the OS CSPRNG.
     const chars: str = "abcdefghijklmnopqrstuvwxyz0123456789"
     const nchars: int = 36
     const raw: bytes = dragon_urandom(length)
@@ -34,7 +29,6 @@ def _exists(path: str) -> bool {
 }
 
 def gettempdir() -> str {
-    # Checks TMPDIR, TEMP, TMP environment variables, falls back to /tmp.
     const tmpdir: str = getenv("TMPDIR")
     if len(tmpdir) > 0 { return tmpdir }
 
@@ -48,8 +42,6 @@ def gettempdir() -> str {
 }
 
 def mktemp(prefix: str, suffix: str) -> str {
-    # DEPRECATED (like CPython): returns a name without creating the file, so
-    # a race window exists; prefer mkstemp. Name still comes from the CSPRNG.
     const tmpdir: str = gettempdir()
     attempts: int = 0
     while attempts < 100 {
@@ -58,13 +50,10 @@ def mktemp(prefix: str, suffix: str) -> str {
         if not _exists(path) { return path }
         attempts = attempts + 1
     }
-    # Fallback: return last generated path even if it exists
     return tmpdir + "/" + prefix + _random_name(8) + suffix
 }
 
 def mkstemp(prefix: str, suffix: str) -> str {
-    # Creates the file atomically (O_CREAT|O_EXCL|O_NOFOLLOW, mode 0600), so
-    # there's no check-then-create window and no symlink redirect.
     const tmpdir: str = gettempdir()
     attempts: int = 0
     while attempts < 100 {
@@ -79,7 +68,6 @@ def mkstemp(prefix: str, suffix: str) -> str {
 }
 
 def mkdtemp(prefix: str, suffix: str) -> str {
-    # Uses mode 0o700 (448 decimal) for owner-only access.
     const tmpdir: str = gettempdir()
     attempts: int = 0
     while attempts < 100 {
@@ -91,7 +79,6 @@ def mkdtemp(prefix: str, suffix: str) -> str {
         }
         attempts = attempts + 1
     }
-    # Last resort
     const fallback: str = tmpdir + "/" + prefix + _random_name(8) + suffix
     mkdir(fallback, 0o700)
     return fallback

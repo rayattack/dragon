@@ -60,8 +60,6 @@ class LambdaBodyTypeTests(TestCase) {
     }
 
     def test_loop_statements_in_lambda_body() {
-        # Statements inside lambda bodies are on the newly-checked walk;
-        # a loop with typed locals must both check and run correctly.
         q: Callable[[list[int]], int] = lambda (xs: list[int]) -> int {
             total: int = 0
             for x in xs {

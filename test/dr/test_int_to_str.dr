@@ -27,7 +27,7 @@ class IntToStrTests(TestCase) {
     def test_int64_bounds() {
         self.assertEqual(str(9223372036854775807), "9223372036854775807")
         mn: int = -9223372036854775807
-        mn = mn - 1   # INT64_MIN, computed (cannot be a literal)
+        mn = mn - 1
         self.assertEqual(str(mn), "-9223372036854775808")
     }
 
@@ -38,7 +38,6 @@ class IntToStrTests(TestCase) {
     }
 
     def test_len_of_conversion() {
-        # length must match the digit count (no stray NUL / off-by-one)
         self.assertEqual(len(str(0)), 1)
         self.assertEqual(len(str(-1)), 2)
         self.assertEqual(len(str(12345)), 5)

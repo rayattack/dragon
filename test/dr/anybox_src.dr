@@ -1,7 +1,3 @@
-# Helper module for test_any_bytes_unbox.dr: the Any comes from another
-# module so the checked unbox at the binding site cannot be folded away.
-
-
 def give_bytes() -> Any {
     return b"abc"
 }

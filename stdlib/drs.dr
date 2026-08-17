@@ -69,15 +69,10 @@ def _is_alnum(ch: str) -> bool {
     return false
 }
 
-# Error reporting (Phase 6)
-
 def _err(msg: str, line: int, col: int) -> None {
     full: str = msg + " at line " + dragon_int_to_str(line) + ", column " + dragon_int_to_str(col)
     dragon_raise_exc(80, full)
 }
-
-# Phase 0: Tokenizer. Returns flat list[int], 4 ints/token: [type, start, end, line].
-# Comments (# line, /* block */) discarded; double quotes raise a parse error per D023.
 
 def _tokenize(src: str) -> list[int] {
     tokens: list[int] = []
@@ -103,7 +98,6 @@ def _tokenize(src: str) -> list[int] {
             continue
         }
 
-        # Line comment (#...)
         if ch == "#" {
             while i < n {
                 c2: str = src[i:i+1]
@@ -113,7 +107,6 @@ def _tokenize(src: str) -> list[int] {
             continue
         }
 
-        # Block comment (/*...*/) - falls through to TK_SLASH if not /*
         if ch == "/" {
             if i + 1 < n {
                 nxt: str = src[i+1:i+2]
@@ -145,13 +138,11 @@ def _tokenize(src: str) -> list[int] {
             continue
         }
 
-        # Double quote - forbidden
         if ch == "\"" {
             col: int = i - line_start + 1
             _err("Double quotes are not allowed in .drs files. Use single quotes or backticks instead", line, col)
         }
 
-        # Single-quoted string (also triple-quoted '''...''')
         if ch == "'" {
             is_triple: bool = false
             if i + 2 < n {
@@ -213,7 +204,6 @@ def _tokenize(src: str) -> list[int] {
             continue
         }
 
-        # Backtick raw string (also triple-backtick ```...```)
         if ch == "`" {
             is_triple_r: bool = false
             if i + 2 < n {
@@ -271,7 +261,6 @@ def _tokenize(src: str) -> list[int] {
             continue
         }
 
-        # Number - int or float. Negative handled at parse-time (unary minus).
         if _is_digit(ch) {
             num_start: int = i
             is_float: bool = false
@@ -299,7 +288,6 @@ def _tokenize(src: str) -> list[int] {
             continue
         }
 
-        # Identifier or keyword
         if _is_alpha(ch) {
             id_start: int = i
             while i < n {
@@ -329,7 +317,6 @@ def _tokenize(src: str) -> list[int] {
             continue
         }
 
-        # ${...}
         if ch == "$" {
             if i + 1 < n {
                 nxt3: str = src[i+1:i+2]
@@ -344,7 +331,6 @@ def _tokenize(src: str) -> list[int] {
             }
         }
 
-        # Punctuation
         if ch == "{" { tokens.append(TK_LBRACE); tokens.append(i); tokens.append(i + 1); tokens.append(line); i = i + 1; continue }
         if ch == "}" { tokens.append(TK_RBRACE); tokens.append(i); tokens.append(i + 1); tokens.append(line); i = i + 1; continue }
         if ch == "[" { tokens.append(TK_LBRACKET); tokens.append(i); tokens.append(i + 1); tokens.append(line); i = i + 1; continue }
@@ -485,9 +471,6 @@ def _raw_content(src: str, tokens: list[int], pos: list[int]) -> str {
     return src[s+1:e-1]
 }
 
-# Skips a `: type` annotation (with optional generic args); Dragon doesn't
-# enforce drs annotations, so they're accepted and discarded as documentation.
-
 def _skip_type_ann(tokens: list[int], pos: list[int]) -> None {
     _skip_nl(tokens, pos)
     if _tk(tokens, pos) != TK_COLON { return }
@@ -509,9 +492,6 @@ def _skip_type_ann(tokens: list[int], pos: list[int]) -> None {
         }
     }
 }
-
-# Phase 3: ${...} evaluator; precedence low->high: ternary/or/and/not/comparison/add-sub/mul-div-mod/unary/primary.
-# Each level returns boxed Any, tag-dispatched: int+int->int, float promotes, str+str->concat.
 
 def _box_truthy(v: Any) -> bool {
     """Truthiness for box values, per Python semantics."""
@@ -703,7 +683,6 @@ def _eval_mul(src: str, tokens: list[int], pos: list[int], bindings: dict[str, A
         }
         _adv(pos)
         right: Any = _eval_unary(src, tokens, pos, bindings)
-        # Numeric dispatch; floats promote.
         lf: bool = isinstance(left, float)
         rf: bool = isinstance(right, float)
         if lf or rf {
@@ -747,7 +726,6 @@ def _eval_add(src: str, tokens: list[int], pos: list[int], bindings: dict[str, A
         }
         _adv(pos)
         right: Any = _eval_mul(src, tokens, pos, bindings)
-        # String concat: only when both sides are strings.
         if tk == TK_PLUS {
             if isinstance(left, str) {
                 if isinstance(right, str) {
@@ -930,7 +908,6 @@ def _interp_str(s: str, bindings: dict[str, Any]) -> str {
         if ch == "$" {
             if i + 1 < n {
                 if s[i+1:i+2] == "{" {
-                    # Find matching '}' (no nesting allowed inside ${...} per spec)
                     j: int = i + 2
                     depth: int = 1
                     while j < n {
@@ -959,9 +936,6 @@ def _interp_str(s: str, bindings: dict[str, Any]) -> str {
     return out
 }
 
-# Phase 1+3+4: value parser (header bindings, ${} exprs, if/else, for, use composition).
-# Returns Any directly, no box-dict; nested objects/lists materialize as dict[str, Any]/list[Any].
-
 def _parse_value(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any]) -> Any {
     _skip_nl(tokens, pos)
     tk: int = _tk(tokens, pos)
@@ -969,7 +943,6 @@ def _parse_value(src: str, tokens: list[int], pos: list[int], bindings: dict[str
     if tk == TK_STRING {
         s: str = _str_content(src, tokens, pos)
         _adv(pos)
-        # Phase 3: interpolate ${} markers in single-quoted strings.
         return _interp_str(s, bindings)
     }
     if tk == TK_RAW_STRING {
@@ -1006,7 +979,6 @@ def _parse_value(src: str, tokens: list[int], pos: list[int], bindings: dict[str
     if tk == TK_FALSE { _adv(pos); return false }
     if tk == TK_NONE { _adv(pos); return None }
 
-    # Phase 3: ${...} expression as a value.
     if tk == TK_DOLLAR_BRACE {
         _adv(pos)
         v: Any = _eval_ternary(src, tokens, pos, bindings)
@@ -1017,13 +989,10 @@ def _parse_value(src: str, tokens: list[int], pos: list[int], bindings: dict[str
         return v
     }
 
-    # Phase 4: for-expression - produces a list.
-    #  for IDENT in iter [if cond] { body }
     if tk == TK_FOR {
         return _parse_for_expr(src, tokens, pos, bindings)
     }
 
-    # Nested object - supports `if/else`, `for`, `use`, `${}` inside.
     if tk == TK_LBRACE {
         _adv(pos)
         obj: dict[str, Any] = {}
@@ -1031,7 +1000,6 @@ def _parse_value(src: str, tokens: list[int], pos: list[int], bindings: dict[str
         return obj
     }
 
-    # List
     if tk == TK_LBRACKET {
         _adv(pos)
         items: list[Any] = []
@@ -1057,7 +1025,6 @@ def _parse_value(src: str, tokens: list[int], pos: list[int], bindings: dict[str
 
 def _parse_for_expr(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any]) -> Any {
     """Phase 4: parses `for IDENT in iter [if cond] { body }`; `iter` may be `range(N)` or any list-valued expr."""
-    # tk is currently TK_FOR
     _adv(pos)
     _skip_nl(tokens, pos)
     if _tk(tokens, pos) != TK_IDENT {
@@ -1100,7 +1067,6 @@ def _parse_for_expr(src: str, tokens: list[int], pos: list[int], bindings: dict[
             _err("for-expression iterable must be a list", _tk_line(tokens, pos), 1)
         }
     }
-    # Optional filter: `if cond`
     has_filter: bool = false
     filter_start: int = pos[0]
     _skip_nl(tokens, pos)
@@ -1108,7 +1074,6 @@ def _parse_for_expr(src: str, tokens: list[int], pos: list[int], bindings: dict[
         _adv(pos)
         has_filter = true
         filter_start = pos[0]
-        # Skips the filter expression here; re-tokenized per iteration from this token range.
         depth: int = 0
         while true {
             tt: int = _tk(tokens, pos)
@@ -1125,10 +1090,7 @@ def _parse_for_expr(src: str, tokens: list[int], pos: list[int], bindings: dict[
     }
     body_lbrace_pos: int = pos[0]
     _adv(pos)
-    # Body is one expression or a `{...}` block; capture its token range and re-parse per iteration.
     body_start_tok: int = pos[0]
-    # Finds the body's matching '}'. Both `{` and `${` open brace-balanced regions
-    # closing on `}`; counting only TK_LBRACE would let `${expr}` short-close the body.
     bdepth: int = 1
     while bdepth > 0 {
         tt2: int = _tk(tokens, pos)
@@ -1140,8 +1102,7 @@ def _parse_for_expr(src: str, tokens: list[int], pos: list[int], bindings: dict[
         if tt2 == TK_RBRACE { bdepth = bdepth - 1 }
         _adv(pos)
     }
-    body_end_tok: int = pos[0] - 1  # position of the closing '}'
-    # Now iterate; for each element, re-parse the body with the loop var bound.
+    body_end_tok: int = pos[0] - 1
     result: list[Any] = []
     local_bindings: dict[str, Any] = bindings
     i_iter: int = 0
@@ -1175,7 +1136,6 @@ def _parse_object_body(src: str, tokens: list[int], pos: list[int], bindings: di
         }
         if curr == TK_COMMA { _adv(pos); continue }
 
-        # `use NAME` merges a dict header binding into the current object; later keys override.
         if curr == TK_USE {
             _adv(pos)
             _skip_nl(tokens, pos)
@@ -1206,7 +1166,6 @@ def _parse_object_body(src: str, tokens: list[int], pos: list[int], bindings: di
             continue
         }
 
-        # `if cond { ... } else { ... }` - conditional bindings into current obj
         if curr == TK_IF {
             _parse_if_into_obj(src, tokens, pos, bindings, obj)
             _skip_nl(tokens, pos)
@@ -1214,7 +1173,6 @@ def _parse_object_body(src: str, tokens: list[int], pos: list[int], bindings: di
             continue
         }
 
-        # key = value
         key: str = ""
         if curr == TK_IDENT {
             key = _tk_text(src, tokens, pos)
@@ -1243,7 +1201,7 @@ def _parse_object_body(src: str, tokens: list[int], pos: list[int], bindings: di
 
 def _parse_if_into_obj(src: str, tokens: list[int], pos: list[int], bindings: dict[str, Any], obj: dict[str, Any]) -> None {
     """Evaluates `if cond {...} [else {...}]` at parse time, merging the matching branch into `obj`."""
-    _adv(pos)  # consume 'if'
+    _adv(pos)
     _skip_nl(tokens, pos)
     cond_v: Any = _eval_ternary(src, tokens, pos, bindings)
     _skip_nl(tokens, pos)
@@ -1253,7 +1211,6 @@ def _parse_if_into_obj(src: str, tokens: list[int], pos: list[int], bindings: di
     _adv(pos)
     if _box_truthy(cond_v) {
         _parse_object_body(src, tokens, pos, bindings, obj)
-        # Skip an optional else branch
         _skip_nl(tokens, pos)
         if _tk(tokens, pos) == TK_ELSE {
             _adv(pos)
@@ -1262,7 +1219,6 @@ def _parse_if_into_obj(src: str, tokens: list[int], pos: list[int], bindings: di
                 _err("Expected '{' after 'else'", _tk_line(tokens, pos), 1)
             }
             _adv(pos)
-            # Skip the else body
             depth: int = 1
             while depth > 0 {
                 tt: int = _tk(tokens, pos)
@@ -1275,7 +1231,6 @@ def _parse_if_into_obj(src: str, tokens: list[int], pos: list[int], bindings: di
             }
         }
     } else {
-        # Skip the then body
         depth2: int = 1
         while depth2 > 0 {
             tt2: int = _tk(tokens, pos)
@@ -1304,11 +1259,6 @@ def _parse_if_into_bindings(src: str, tokens: list[int], pos: list[int], binding
     _parse_if_into_obj(src, tokens, pos, bindings, bindings)
 }
 
-# Top-level parser: header zone (`ident = value` bindings) up to the bare `{` root payload.
-# Phase 1 collects bindings into a symbol table referenced by Phase 2/3/4 via `use`/`${}`/`if`.
-
-# Hard limits on an evaluated .drs doc: a manifest is parsed BEFORE trust, so a hostile
-# dependency's unbounded `for range(N)` or long include chain must be bounded (path traversal is blocked separately in _include_drs).
 const _DRS_MAX_RANGE: int = 1000000
 const _DRS_MAX_INCLUDES: int = 64
 
@@ -1375,8 +1325,6 @@ def _include_drs(ipath: str, bindings: dict[str, Any], seen: dict[str, bool], ba
     h: ptr = dragon_file_open(full, "r")
     content: str = dragon_file_read(h)
     dragon_file_close(h)
-    # Parses only the header (includes carry bindings, not payload data); nested
-    # includes stay confined to base_dir.
     toks: list[int] = _tokenize(content)
     p: list[int] = [0]
     _parse_header_into(content, toks, p, bindings, seen, base_dir)
@@ -1391,7 +1339,6 @@ def _parse_header_into(src: str, tokens: list[int], pos: list[int], bindings: di
         if tk == TK_LBRACE { return }
         if tk == TK_EOF { return }
 
-        # include 'path'
         if tk == TK_INCLUDE {
             _adv(pos)
             _skip_nl(tokens, pos)
@@ -1409,16 +1356,11 @@ def _parse_header_into(src: str, tokens: list[int], pos: list[int], bindings: di
             continue
         }
 
-        # if/else in header - merge bindings from the matching branch.
         if tk == TK_IF {
             _parse_if_into_bindings(src, tokens, pos, bindings)
             continue
         }
 
-        # Bare `for` in the header has no target (spec uses `name = for ... {...}`,
-        # covered below as name=value); standalone `for` here is an error.
-
-        # name = value
         if tk == TK_IDENT {
             hkey: str = _tk_text(src, tokens, pos)
             _adv(pos)
@@ -1478,8 +1420,6 @@ def _parse_drs_env(src: str, env: dict[str, Any], base_dir: str = "") -> dict[st
     }
     return payload
 }
-
-# Phase 5: dumps() - emit dict[str, Any] back to .drs text.
 
 def _indent(level: int) -> str {
     out: str = ""
@@ -1566,7 +1506,6 @@ def load(path: str) -> dict[str, Any] {
     handle: ptr = dragon_file_open(path, "r")
     content: str = dragon_file_read(handle)
     dragon_file_close(handle)
-    # Confine any `include` in this file to the file's own directory.
     empty: dict[str, Any] = {}
     return _parse_drs_env(content, empty, _drs_dirname(path))
 }
@@ -1575,14 +1514,8 @@ def dumps(data: dict[str, Any]) -> str {
     return _dump_value(data, 0)
 }
 
-# Schema-directed binding + env injection (D022 Phase 0 dep). No runtime reflection (D036),
-# so parse() validates dict[str, Any] against a Schema via direct isinstance checks, no live type metadata.
-
-# Raised by parse()/parse_with() on a schema violation (missing/wrong-typed/unknown key);
-# distinct from the parse-level error (code 80/TypeError) so callers can `except DragonScriptSchemaError`.
 class DragonScriptSchemaError(Exception) {}
 
-# One declared Schema field; type_tag: "str"|"int"|"float"|"bool"|"list"|"dict"|"any".
 class SchemaField {
     name: str
     type_tag: str
@@ -1599,8 +1532,6 @@ class SchemaField {
     }
 }
 
-# Ordered list of field specs, built fluently:
-#  Schema().field("name", "str", true).optional("entry", "str", "main.dr")
 class Schema {
     fields: list[SchemaField]
     allow_unknown: bool

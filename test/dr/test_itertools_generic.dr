@@ -1,6 +1,3 @@
-# Pre-fix: the itertools header claimed Dragon has no generic functions; these
-# [T] forms replace that claim and are pinned here at str, int, and float.
-
 from unittest import TestCase, main
 from itertools import chain_t, repeat_t, islice_t, pairwise_t, take_t
 

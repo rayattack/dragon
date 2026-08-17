@@ -6,7 +6,6 @@ Also home to the template[X] markup types (HTML/CSS/XML, D032): each auto-escape
 from template import Template
 
 def escape(s: str) -> str {
-    # Single pass over spans; clean input is returned unchanged.
     const n: int = len(s)
     dirty: int = -1
     i: int = 0
@@ -39,7 +38,6 @@ def escape(s: str) -> str {
 }
 
 def unescape(s: str) -> str {
-    # Text between entities is copied as whole spans; no-entity input is returned unchanged.
     parts: list[str] = []
     i: int = 0
     run: int = 0
@@ -61,13 +59,12 @@ def unescape(s: str) -> str {
         run = i
     }
 
-    if run == 0 { return s }        # no entity decoded
+    if run == 0 { return s }
     if n > run { parts.append(s[run:n]) }
     return "".join(parts)
 }
 
 def strip_tags(s: str) -> str {
-    # Text outside tags is copied as whole spans; an unterminated trailing tag is dropped.
     parts: list[str] = []
     in_tag: bool = false
     i: int = 0
@@ -108,8 +105,6 @@ def decode_entity(entity: str) -> str {
     if entity == "&quot;" { return "\"" }
     if entity == "&apos;" { return "'" }
 
-    # Numeric entities: &#NNN; or &#xHH;. Invalid or out-of-range references
-    # stay verbatim.
     if entity.startswith("&#") {
         if entity.endswith(";") {
             const inner: str = entity[2:len(entity) - 1]
@@ -163,8 +158,6 @@ def _hex_digit_value(ch: str) -> int {
     return -1
 }
 
-# template[X] markup family (D032): each auto-escapes !{expr} via its `escape`
-# static method; `class MyHTML(HTML)` inherits HTML's escape automatically.
 class HTML(Template) {
     def(inner: str) {
         self._inner = inner

@@ -105,9 +105,9 @@ class TestLifetimes(TestCase) {
     def test_overwrite_del_and_hold() -> None {
         d: dict[str, Thing] = {}
         d["a"] = Thing(1)
-        d["a"] = Thing(2)          # overwrite releases the old value once
+        d["a"] = Thing(2)
         const kept: Thing = d["a"]
-        del d["a"]                 # the held reference stays alive
+        del d["a"]
         self.assertEqual(kept.n, 2)
     }
 
@@ -156,8 +156,6 @@ class TestBoxDomains(TestCase) {
     }
 
     def test_dumps_of_instance_dict_raises() -> None {
-        # Python parity: not JSON serializable -> catchable TypeError,
-        # never a misread of the instance as a list/bytes.
         d: dict[str, Thing] = {}
         d["a"] = Thing(7)
         caught: bool = False
@@ -171,8 +169,6 @@ class TestBoxDomains(TestCase) {
     }
 
     def test_dict_of_schema_instances() -> None {
-        # the original motivation: Schema instances stored in and read back
-        # from a dict at their annotated type
         registries: dict[str, Schema] = {}
         s: Schema = Schema("draft-07")
         s.register("thing.made", {"type": "object", "required": ["n"], "properties": {"n": {"type": "integer", "minimum": 1}}})

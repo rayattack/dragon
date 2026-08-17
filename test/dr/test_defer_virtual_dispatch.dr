@@ -1,15 +1,3 @@
-# A deferred method call must dispatch exactly like the direct call: through
-# the vtable when any subclass overrides the method. It was resolved
-# statically at the defer statement, so ordinary seam-shaped code
-#
-#   def stream(conn: ConnReader) -> None {
-#       defer conn.close()        # conn is a subclass at runtime
-#       ...
-#   }
-#
-# silently ran the BASE close (a no-op) and the subclass cleanup never
-# happened - no error anywhere, the resource just stayed open.
-
 from unittest import TestCase, main
 
 
@@ -62,14 +50,12 @@ class DeferVirtualDispatchTest(TestCase) {
         self.assertEqual(",".join(b.hits), "base")
     }
 
-    # A method NO subclass overrides keeps the devirtualized direct call.
     def test_non_overridden_stays_direct() -> None {
         s: Sub = Sub()
         deferred_tag(s)
         self.assertEqual(",".join(s.hits), "base-tag")
     }
 
-    # The unwind path shares the same thunk: the override runs on raise too.
     def test_dispatch_on_unwind() -> None {
         s: Sub = Sub()
         raised: bool = False

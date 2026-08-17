@@ -1,7 +1,3 @@
-/// Dragon Runtime - crypto digests (hashlib / hmac / crypto.dr), backed by
-/// mbedTLS (ADR 038 Phase 7). Own translation unit so mbedtls_* symbols link
-/// only when a program references a crypto entry point (mirrors runtime_tls.cpp).
-
 #include "runtime_internal.h"
 #include <cstdio>
 #include <cstring>
@@ -21,7 +17,6 @@
 
 extern "C" {
 
-/// Convert raw bytes buffer to hex string
 const char* dragon_raw_bytes_hex(const void* data, int64_t len) {
     if (len < 0 || len > INT64_MAX / 2) {
         dragon_raise_exc_cstr(43, "MemoryError: hex output too large");
@@ -32,32 +27,26 @@ const char* dragon_raw_bytes_hex(const void* data, int64_t len) {
     return ds->data;
 }
 
-// A valid non-NULL pointer for zero-length inputs: mbedTLS's *_update returns
-// early on ilen==0, but we never want to hand it a NULL buffer.
 static const unsigned char dragon_empty_input[1] = {0};
 
-/// SHA-256 hash - returns hex string
 const char* dragon_sha256(const char* data, int64_t len) {
     uint8_t hash[32];
     mbedtls_sha256((const unsigned char*)data, (size_t)len, hash, 0);
     return dragon_raw_bytes_hex(hash, 32);
 }
 
-/// SHA-1 hash - returns hex string
 const char* dragon_sha1(const char* data, int64_t len) {
     uint8_t hash[20];
     mbedtls_sha1((const unsigned char*)data, (size_t)len, hash);
     return dragon_raw_bytes_hex(hash, 20);
 }
 
-/// MD5 hash - returns hex string
 const char* dragon_md5(const char* data, int64_t len) {
     uint8_t hash[16];
     mbedtls_md5((const unsigned char*)data, (size_t)len, hash);
     return dragon_raw_bytes_hex(hash, 16);
 }
 
-/// SHA-256 hash - returns raw 32-byte DragonBytes
 DragonBytes* dragon_sha256_bytes(DragonBytes* data) {
     uint8_t hash[32];
     size_t n = data ? (size_t)data->len : 0;
@@ -67,7 +56,6 @@ DragonBytes* dragon_sha256_bytes(DragonBytes* data) {
     return dragon_bytes_new(hash, 32);
 }
 
-/// SHA-1 hash - returns raw 20-byte DragonBytes
 DragonBytes* dragon_sha1_bytes(DragonBytes* data) {
     uint8_t hash[20];
     size_t n = data ? (size_t)data->len : 0;
@@ -77,7 +65,6 @@ DragonBytes* dragon_sha1_bytes(DragonBytes* data) {
     return dragon_bytes_new(hash, 20);
 }
 
-/// MD5 hash - returns raw 16-byte DragonBytes
 DragonBytes* dragon_md5_bytes(DragonBytes* data) {
     uint8_t hash[16];
     size_t n = data ? (size_t)data->len : 0;
@@ -215,31 +202,24 @@ DragonBytes* dragon_hash_ctx_digest(DragonBytes* state) {
     return dragon_bytes_new(out, dlen);
 }
 
-// SHA-224 is SHA-256 truncated to 28 bytes (`is224=1`); SHA-384 is SHA-512
-// truncated to 48 bytes (`is384=1`). mbedTLS fills the full-width buffer either way.
-
-/// SHA-224 hash - returns hex string
 const char* dragon_sha224(const char* data, int64_t len) {
     uint8_t hash[32];
     mbedtls_sha256((const unsigned char*)data, (size_t)len, hash, 1);
     return dragon_raw_bytes_hex(hash, 28);
 }
 
-/// SHA-384 hash - returns hex string
 const char* dragon_sha384(const char* data, int64_t len) {
     uint8_t hash[64];
     mbedtls_sha512((const unsigned char*)data, (size_t)len, hash, 1);
     return dragon_raw_bytes_hex(hash, 48);
 }
 
-/// SHA-512 hash - returns hex string
 const char* dragon_sha512(const char* data, int64_t len) {
     uint8_t hash[64];
     mbedtls_sha512((const unsigned char*)data, (size_t)len, hash, 0);
     return dragon_raw_bytes_hex(hash, 64);
 }
 
-/// SHA-224 hash - returns raw 28-byte DragonBytes
 DragonBytes* dragon_sha224_bytes(DragonBytes* data) {
     uint8_t hash[32];
     size_t n = data ? (size_t)data->len : 0;
@@ -249,7 +229,6 @@ DragonBytes* dragon_sha224_bytes(DragonBytes* data) {
     return dragon_bytes_new(hash, 28);
 }
 
-/// SHA-384 hash - returns raw 48-byte DragonBytes
 DragonBytes* dragon_sha384_bytes(DragonBytes* data) {
     uint8_t hash[64];
     size_t n = data ? (size_t)data->len : 0;
@@ -259,7 +238,6 @@ DragonBytes* dragon_sha384_bytes(DragonBytes* data) {
     return dragon_bytes_new(hash, 48);
 }
 
-/// SHA-512 hash - returns raw 64-byte DragonBytes
 DragonBytes* dragon_sha512_bytes(DragonBytes* data) {
     uint8_t hash[64];
     size_t n = data ? (size_t)data->len : 0;
@@ -269,8 +247,6 @@ DragonBytes* dragon_sha512_bytes(DragonBytes* data) {
     return dragon_bytes_new(hash, 64);
 }
 
-/// HMAC(key, msg) for digestmod name (sha256/sha512/sha384/sha224/sha1/md5),
-/// full RFC 2104 construction via mbedTLS. Unrecognized name returns NULL.
 DragonBytes* dragon_hmac(const char* name, DragonBytes* key, DragonBytes* msg) {
     mbedtls_md_type_t mdt;
     if (strcmp(name, "sha256") == 0)      mdt = MBEDTLS_MD_SHA256;
@@ -291,16 +267,12 @@ DragonBytes* dragon_hmac(const char* name, DragonBytes* key, DragonBytes* msg) {
     const unsigned char* mp = (msg && msg->data) ? (const unsigned char*)msg->data
                                                   : dragon_empty_input;
 
-    uint8_t out[64];  // SHA-512 is the widest digest we support
+    uint8_t out[64];
     mbedtls_md_hmac(info, kp, klen, mp, mlen, out);
     DragonBytes* result = dragon_bytes_new(out, (int64_t)mbedtls_md_get_size(info));
-    // wipe MAC scratch: HMAC tag derived from the secret key - clear from stack.
     mbedtls_platform_zeroize(out, sizeof(out));
     return result;
 }
-
-// One sign/verify pair covers RSA and ECDSA: mbedTLS's `pk` layer dispatches
-// on the parsed key type (PKCS#1 v1.5 for RSA, ECDSA DER for EC).
 
 static mbedtls_md_type_t dragon_md_type(const char* name) {
     if (strcmp(name, "sha256") == 0) return MBEDTLS_MD_SHA256;
@@ -311,8 +283,6 @@ static mbedtls_md_type_t dragon_md_type(const char* name) {
     return MBEDTLS_MD_NONE;
 }
 
-// Hash `msg` with `mdt` into `out` (>=64 bytes); returns digest length, or 0
-// on failure/unknown algorithm.
 static size_t dragon_md_digest(mbedtls_md_type_t mdt, const unsigned char* msg,
                                size_t mlen, unsigned char* out) {
     const mbedtls_md_info_t* info = mbedtls_md_info_from_type(mdt);
@@ -321,8 +291,6 @@ static size_t dragon_md_digest(mbedtls_md_type_t mdt, const unsigned char* msg,
     return mbedtls_md_get_size(info);
 }
 
-// PEM is text: mbedTLS requires the buffer to be NUL-terminated and the length
-// to INCLUDE that terminator. DragonBytes need not be, so copy. Caller frees.
 static unsigned char* dragon_pem_dup(DragonBytes* b, size_t* outlen) {
     size_t n = b ? (size_t)b->len : 0;
     unsigned char* buf = (unsigned char*)dragon_malloc_nullable(n + 1);
@@ -333,8 +301,6 @@ static unsigned char* dragon_pem_dup(DragonBytes* b, size_t* outlen) {
     return buf;
 }
 
-/// Sign `msg` (hashed with `md_name`) using a PEM private key (RSA or EC).
-/// Returns the signature bytes, or empty bytes on any failure.
 DragonBytes* dragon_pk_sign(const char* md_name, DragonBytes* priv_pem,
                             DragonBytes* msg) {
     mbedtls_md_type_t mdt = dragon_md_type(md_name);
@@ -351,7 +317,7 @@ DragonBytes* dragon_pk_sign(const char* md_name, DragonBytes* priv_pem,
     unsigned char* keybuf = nullptr;
     size_t keybuf_len = 0;
     unsigned char hash[64] = {0};
-    unsigned char sig[1024] = {0};   // exceeds any RSA-4096 (512B) / ECDSA DER sig
+    unsigned char sig[1024] = {0};
     const char* pers = "dragon_pk_sign";
 
     do {
@@ -378,18 +344,14 @@ DragonBytes* dragon_pk_sign(const char* md_name, DragonBytes* priv_pem,
     mbedtls_ctr_drbg_free(&ctr_drbg);
     mbedtls_entropy_free(&entropy);
     if (keybuf) {
-        // wipe PEM private-key bytes before free: prevents heap-reuse disclosure.
         mbedtls_platform_zeroize(keybuf, keybuf_len);
         free(keybuf);
     }
-    // wipe digest + signature scratch: sig buffer briefly held key-derived state.
     mbedtls_platform_zeroize(hash, sizeof(hash));
     mbedtls_platform_zeroize(sig, sizeof(sig));
     return result ? result : dragon_bytes_new(nullptr, 0);
 }
 
-/// Verify `sig` over `msg` (hashed with `md_name`) using a PEM public key.
-/// Returns 1 if the signature is valid, 0 otherwise.
 int dragon_pk_verify(const char* md_name, DragonBytes* pub_pem,
                      DragonBytes* msg, DragonBytes* sig) {
     mbedtls_md_type_t mdt = dragon_md_type(md_name);
@@ -424,9 +386,6 @@ int dragon_pk_verify(const char* md_name, DragonBytes* pub_pem,
     return ok;
 }
 
-// Encrypt appends a 16-byte tag (Python `cryptography` AESGCM convention).
-// decrypt raises ValueError on tag mismatch - never hands back unauthenticated plaintext.
-
 #define DRAGON_AEAD_TAG 16
 
 static const unsigned char* dragon_b_ptr(DragonBytes* b) {
@@ -434,7 +393,6 @@ static const unsigned char* dragon_b_ptr(DragonBytes* b) {
 }
 static size_t dragon_b_len(DragonBytes* b) { return b ? (size_t)b->len : 0; }
 
-/// AES-GCM encrypt -> ciphertext || 16-byte tag.
 DragonBytes* dragon_aes_gcm_encrypt(DragonBytes* key, DragonBytes* nonce,
                                     DragonBytes* pt, DragonBytes* aad) {
     size_t klen = dragon_b_len(key);
@@ -470,7 +428,6 @@ DragonBytes* dragon_aes_gcm_encrypt(DragonBytes* key, DragonBytes* nonce,
     return result;
 }
 
-/// AES-GCM decrypt of ciphertext || tag. Raises ValueError on auth failure.
 DragonBytes* dragon_aes_gcm_decrypt(DragonBytes* key, DragonBytes* nonce,
                                     DragonBytes* ct, DragonBytes* aad) {
     size_t klen = dragon_b_len(key);
@@ -506,20 +463,17 @@ DragonBytes* dragon_aes_gcm_decrypt(DragonBytes* key, DragonBytes* nonce,
                                        base + ptlen, DRAGON_AEAD_TAG, base, out);
     mbedtls_gcm_free(&ctx);
     if (ret != 0) {
-        // wipe scratch on auth failure: mbedTLS may leave partial plaintext.
         mbedtls_platform_zeroize(out, out_capacity);
         free(out);
         dragon_raise_exc_cstr(90, "aes_gcm: authentication failed");
         return nullptr;
     }
     DragonBytes* result = dragon_bytes_new(out, (int64_t)ptlen);
-    // wipe plaintext scratch before free: only copy, would otherwise linger in heap reuse.
     mbedtls_platform_zeroize(out, out_capacity);
     free(out);
     return result;
 }
 
-/// ChaCha20-Poly1305 encrypt -> ciphertext || 16-byte tag. key=32B, nonce=12B.
 DragonBytes* dragon_chacha20poly1305_encrypt(DragonBytes* key, DragonBytes* nonce,
                                              DragonBytes* pt, DragonBytes* aad) {
     if (dragon_b_len(key) != 32) { dragon_raise_exc_cstr(90, "chacha20poly1305: key must be 32 bytes"); return nullptr; }
@@ -550,7 +504,6 @@ DragonBytes* dragon_chacha20poly1305_encrypt(DragonBytes* key, DragonBytes* nonc
     return result;
 }
 
-/// ChaCha20-Poly1305 decrypt of ciphertext || tag. Raises ValueError on auth failure.
 DragonBytes* dragon_chacha20poly1305_decrypt(DragonBytes* key, DragonBytes* nonce,
                                              DragonBytes* ct, DragonBytes* aad) {
     if (dragon_b_len(key) != 32) { dragon_raise_exc_cstr(90, "chacha20poly1305: key must be 32 bytes"); return nullptr; }
@@ -581,17 +534,15 @@ DragonBytes* dragon_chacha20poly1305_decrypt(DragonBytes* key, DragonBytes* nonc
                                               base + ptlen, base, out);
     mbedtls_chachapoly_free(&ctx);
     if (ret != 0) {
-        // wipe scratch on auth failure: mbedTLS may leave partial plaintext.
         mbedtls_platform_zeroize(out, out_capacity);
         free(out);
         dragon_raise_exc_cstr(90, "chacha20poly1305: authentication failed");
         return nullptr;
     }
     DragonBytes* result = dragon_bytes_new(out, (int64_t)ptlen);
-    // wipe plaintext scratch before free: defense-in-depth, same as AES-GCM.
     mbedtls_platform_zeroize(out, out_capacity);
     free(out);
     return result;
 }
 
-}  // extern "C"
+}

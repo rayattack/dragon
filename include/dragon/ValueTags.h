@@ -3,9 +3,6 @@
 
 #include <cstdint>
 
-// The boxed-value tag ABI shared by the runtime (container elem_tag, DragonBox.tag)
-// and codegen (which emits these values as constants). This header is the single
-// source of truth; renumbering here is an ABI break for every compiled program.
 enum DragonValueTag : int8_t {
     TAG_INT = 0,
     TAG_STR = 1,
@@ -17,10 +14,8 @@ enum DragonValueTag : int8_t {
     TAG_BYTES = 7,
 };
 
-// Value-tag slot 10 carries a Callable payload (a DragonClosure or bare fn
-// ptr); numerically equal to the runtime object tag DRAGON_TAG_CLOSURE.
 constexpr int8_t TAG_CALLABLE = 10;
 
 constexpr int8_t TAG_TASK_HANDLE = 100;
 
-#endif  // DRAGON_VALUE_TAGS_H
+#endif

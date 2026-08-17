@@ -1,24 +1,20 @@
-/// Dragon Runtime - Tuple, Set, and Bytes Operations
 #include "runtime_internal.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-
-// Container repr for str()/f-string interpolation: these RETURN a DragonString
-// (dispatched per element tag) using a C growable buffer, since the runtime links via plain `cc` (no libstdc++).
 
 typedef struct { char* buf; size_t len; size_t cap; } DragonStrBuf;
 
 static void sb_init(DragonStrBuf* b) {
     b->cap = 64;
     b->len = 0;
-    b->buf = (char*)dragon_xmalloc(b->cap);   // was unchecked -> SEGV on OOM (#6)
+    b->buf = (char*)dragon_xmalloc(b->cap);
     b->buf[0] = '\0';
 }
 static void sb_ensure(DragonStrBuf* b, size_t extra) {
     if (b->len + extra + 1 > b->cap) {
         while (b->len + extra + 1 > b->cap) b->cap *= 2;
-        b->buf = (char*)dragon_xrealloc(b->buf, b->cap);   // self-assign fixed (#7)
+        b->buf = (char*)dragon_xrealloc(b->buf, b->cap);
     }
 }
 static void sb_putc(DragonStrBuf* b, char c) {
@@ -35,8 +31,6 @@ static void sb_puts(DragonStrBuf* b, const char* s) {
     b->buf[b->len] = '\0';
 }
 
-// Append a Dragon string's true UTF-8 bytes: kind=4 (UCS-4) storage stops any
-// strlen-family walk inside the first slot; NULL here means kind=1/literal data is already UTF-8.
 static void sb_put_dstr(DragonStrBuf* b, const char* s) {
     if (!s) return;
     int64_t blen = 0;
@@ -55,10 +49,8 @@ static void dragon_repr_dict(DragonStrBuf* out, DragonDict* d);
 static void dragon_repr_set(DragonStrBuf* out, DragonSet* s);
 static void dragon_repr_tuple(DragonStrBuf* out, DragonTuple* t);
 
-// Defined in runtime_builtins.cpp - class-id -> name for `<Name instance>`.
 extern "C" const char* dragon_instance_class_name(void* instance);
 
-// Append the repr of one element (carrying tag `tag`) to `out`.
 static void dragon_repr_value(DragonStrBuf* out, int64_t val, uint8_t tag) {
     switch (tag) {
         case TAG_STR: {
@@ -79,8 +71,6 @@ static void dragon_repr_value(DragonStrBuf* out, int64_t val, uint8_t tag) {
         case TAG_BOOL: sb_puts(out, val ? "True" : "False"); break;
         case TAG_NONE: sb_puts(out, "None"); break;
         case TAG_LIST: {
-            // Payload may be a monomorphic DragonList or DragonListBox
-            // (list[Any], 16B/elem); dispatch on the header to avoid an 8B-stride misread.
             DragonObjectHeader* h = (DragonObjectHeader*)(uintptr_t)val;
             if (h && h->type_tag == DRAGON_TAG_LIST_BOX)
                 dragon_repr_list_box(out, (DragonListBox*)h);
@@ -90,8 +80,6 @@ static void dragon_repr_value(DragonStrBuf* out, int64_t val, uint8_t tag) {
         }
         case TAG_DICT: dragon_repr_dict(out, (DragonDict*)(uintptr_t)val); break;
         case TAG_BYTES: {
-            // TAG_BYTES == TAG_CLASS: gate on the real header (see
-            // dragon_print_box_raw); a blind bytes cast on an instance read out of bounds.
             DragonObjectHeader* h = (DragonObjectHeader*)(uintptr_t)val;
             if (h && h->type_tag == DRAGON_TAG_BYTES) {
                 auto* bv = (DragonBytes*)h;
@@ -119,7 +107,7 @@ static void dragon_repr_value(DragonStrBuf* out, int64_t val, uint8_t tag) {
             }
             break;
         }
-        default: {  // TAG_INT and anything without a richer repr
+        default: {
             char tmp[32];
             snprintf(tmp, sizeof(tmp), "%ld", (long)val);
             sb_puts(out, tmp);
@@ -141,8 +129,6 @@ static void dragon_repr_list(DragonStrBuf* out, DragonList* l) {
     if (l) dragon_walk_exit();
 }
 
-// list[Any] repr: each element carries its own {tag,payload}; render via
-// dragon_repr_value per element (mirrors dragon_repr_list for 16B/elem storage).
 static void dragon_repr_list_box(DragonStrBuf* out, DragonListBox* l) {
     if (l && dragon_walk_enter(l) != DRAGON_WALK_OK) { sb_puts(out, "[...]"); return; }
     sb_putc(out, '[');
@@ -165,14 +151,14 @@ static void dragon_repr_tuple(DragonStrBuf* out, DragonTuple* t) {
             uint8_t tag = t->elem_tags ? t->elem_tags[i] : (uint8_t)TAG_INT;
             dragon_repr_value(out, t->data[i], tag);
         }
-        if (t->length == 1) sb_putc(out, ',');   // singleton tuple: (x,)
+        if (t->length == 1) sb_putc(out, ',');
     }
     sb_putc(out, ')');
     if (t) dragon_walk_exit();
 }
 
 static void dragon_repr_set(DragonStrBuf* out, DragonSet* s) {
-    if (!s || s->count == 0) {                    // Python renders empty set as set()
+    if (!s || s->count == 0) {
         sb_puts(out, "set()");
         return;
     }
@@ -194,7 +180,7 @@ static void dragon_repr_dict(DragonStrBuf* out, DragonDict* d) {
     if (d && dragon_walk_enter(d) != DRAGON_WALK_OK) { sb_puts(out, "{...}"); return; }
     sb_putc(out, '{');
     if (d) {
-        bool first = true;  // skip dead (tombstoned) slots; comma keys off output
+        bool first = true;
         for (int64_t i = 0; i < d->size; i++) {
             if (d->entries[i].dead) continue;
             if (!first) sb_puts(out, ", ");
@@ -210,8 +196,6 @@ static void dragon_repr_dict(DragonStrBuf* out, DragonDict* d) {
     if (d) dragon_walk_exit();
 }
 
-// Int-keyed dict: the key int is stored cast through the `key` pointer slot
-// (mirrors dragon_print_dict_int_raw); keys render unquoted.
 static void dragon_repr_dict_int(DragonStrBuf* out, DragonDict* d) {
     if (d && dragon_walk_enter(d) != DRAGON_WALK_OK) { sb_puts(out, "{...}"); return; }
     sb_putc(out, '{');
@@ -240,11 +224,6 @@ static void dragon_repr_dict_int(DragonStrBuf* out, DragonDict* d) {
     if (d) dragon_walk_exit();
 }
 
-// json.dumps: same tag-driven recursion as the repr family, in JSON syntax
-// (ADR 044, no user-facing generics needed). Backs `json.dumps(obj: Any) -> str`.
-
-// String bodies arrive as Dragon payloads: encode kind=4 (UCS-4) to real
-// UTF-8 and walk by byte length (a UCS-4 slot's zero bytes ended the old NUL-terminated walk after one character).
 static void dragon_json_escape(DragonStrBuf* out, const char* s) {
     sb_putc(out, '"');
     if (s) {
@@ -262,12 +241,12 @@ static void dragon_json_escape(DragonStrBuf* out, const char* s) {
                 case '\b': sb_puts(out, "\\b"); break;
                 case '\f': sb_puts(out, "\\f"); break;
                 default:
-                    if (c < 0x20) {           // other controls -> \u00XX
+                    if (c < 0x20) {
                         char u[8];
                         snprintf(u, sizeof(u), "\\u%04x", (unsigned)c);
                         sb_puts(out, u);
                     } else {
-                        sb_putc(out, (char)c);  // UTF-8 bytes pass through
+                        sb_putc(out, (char)c);
                     }
             }
         }
@@ -280,8 +259,6 @@ static void dragon_json_list(DragonStrBuf* out, DragonList* l);
 static void dragon_json_list_box(DragonStrBuf* out, DragonListBox* l);
 static void dragon_json_dict(DragonStrBuf* out, DragonDict* d);
 
-// Non-serializable value seen during dumps (bytes/class instance): recorded
-// here, raised after the output buffer frees. thread_local for concurrent dumps.
 static thread_local const char* json_dumps_error = nullptr;
 static thread_local char json_dumps_error_buf[128];
 static thread_local int64_t json_dumps_error_code = 80;
@@ -317,8 +294,6 @@ static void dragon_json_value(DragonStrBuf* out, int64_t val, uint8_t tag) {
         case TAG_BOOL: sb_puts(out, val ? "true" : "false"); break;
         case TAG_NONE: sb_puts(out, "null"); break;
         case TAG_LIST: {
-            // TAG_LIST covers both DragonList and DragonListBox (list[Any]);
-            // dispatch on type_tag - the monomorphic stride on a box misread values (ASan heap-buffer-overflow).
             DragonObjectHeader* h = (DragonObjectHeader*)(uintptr_t)val;
             if (val && h->type_tag == DRAGON_TAG_LIST_BOX)
                 dragon_json_list_box(out, (DragonListBox*)(uintptr_t)val);
@@ -328,8 +303,6 @@ static void dragon_json_value(DragonStrBuf* out, int64_t val, uint8_t tag) {
         }
         case TAG_DICT: dragon_json_dict(out, (DragonDict*)(uintptr_t)val); break;
         case TAG_BYTES: {
-            // Neither bytes nor class instances are JSON-serializable (Python
-            // parity); error is recorded here and raised after the buffer frees, since raising mid-recursion would leak it via longjmp.
             DragonObjectHeader* h = (DragonObjectHeader*)(uintptr_t)val;
             const char* nm = nullptr;
             if (h && h->type_tag != DRAGON_TAG_BYTES)
@@ -343,7 +316,7 @@ static void dragon_json_value(DragonStrBuf* out, int64_t val, uint8_t tag) {
             sb_puts(out, "null");
             break;
         }
-        default: {  // TAG_INT
+        default: {
             char tmp[32]; snprintf(tmp, sizeof(tmp), "%lld", (long long)val);
             sb_puts(out, tmp);
             break;
@@ -351,7 +324,6 @@ static void dragon_json_value(DragonStrBuf* out, int64_t val, uint8_t tag) {
     }
 }
 
-// Separators match CPython's json.dumps default (indent=None): ", " and ": ".
 static void dragon_json_list(DragonStrBuf* out, DragonList* l) {
     if (l && !dragon_json_guard(out, l)) return;
     sb_putc(out, '[');
@@ -365,7 +337,6 @@ static void dragon_json_list(DragonStrBuf* out, DragonList* l) {
     if (l) dragon_walk_exit();
 }
 
-// list[Any]: every element carries its own {tag, payload}; recurse per tag.
 static void dragon_json_list_box(DragonStrBuf* out, DragonListBox* l) {
     if (l && !dragon_json_guard(out, l)) return;
     sb_putc(out, '[');
@@ -404,7 +375,7 @@ static void dragon_json_dict(DragonStrBuf* out, DragonDict* d) {
                          (long)(int64_t)(uintptr_t)e.key);
                 sb_puts(out, tmp);
             } else {
-                dragon_json_escape(out, e.key);     // JSON object keys are strings
+                dragon_json_escape(out, e.key);
             }
             sb_puts(out, ": ");
             dragon_json_value(out, e.value, (uint8_t)e.tag);
@@ -415,28 +386,23 @@ static void dragon_json_dict(DragonStrBuf* out, DragonDict* d) {
 }
 
 extern "C" {
-/// Generic json.dumps(obj). `obj` arrives boxed (Any), so dispatch on its tag.
 const char* dragon_json_dumps(DragonBox box) {
     json_dumps_error = nullptr;
     dragon_walk_reset();
     DragonStrBuf b; sb_init(&b);
     dragon_json_value(&b, box.payload, (uint8_t)box.tag);
     if (json_dumps_error) {
-        // Free the buffer BEFORE raising - the raise longjmps to the handler
-        // (or exits) and never returns here.
         free(b.buf);
         const char* msg = json_dumps_error;
         json_dumps_error = nullptr;
         dragon_raise_exc_cstr(json_dumps_error_code, msg);
-        return dragon_string_alloc("", 0);  // unreachable
+        return dragon_string_alloc("", 0);
     }
     const char* r = dragon_string_alloc(b.buf, (int64_t)b.len);
     free(b.buf);
     return r;
 }
 
-// JSON-encode a single string as a quoted, escaped JSON literal. Used by the
-// ui reactivity layer to build `window.dr._patch(...)` safely, never raw-concat.
 const char* dragon_json_escape_str(const char* s) {
     DragonStrBuf b; sb_init(&b);
     dragon_json_escape(&b, s);
@@ -476,8 +442,6 @@ const char* dragon_tuple_to_str(DragonTuple* t) {
     const char* r = dragon_string_alloc(b.buf, (int64_t)b.len); free(b.buf); return r;
 }
 
-// C5: print a nested container's full repr straight to stdout via the
-// recursive dragon_repr_* builders, no refcounted intermediate string (no per-print leak).
 void dragon_print_list_nested_raw(DragonList* l) {
     dragon_walk_reset();
     DragonStrBuf b; sb_init(&b); dragon_repr_list(&b, l);
@@ -498,13 +462,11 @@ void dragon_print_list_box_nested_raw(DragonListBox* l) {
     DragonStrBuf b; sb_init(&b); dragon_repr_list_box(&b, l);
     fwrite(b.buf, 1, (size_t)b.len, stdout); free(b.buf);
 }
-} // extern "C"
+}
 
 extern "C" {
 
 DragonTuple* dragon_tuple_new(int64_t count) {
-    // Data before header: an OOM longjmp would strand a header allocated
-    // first; the count*elem_size multiply lives inside the trap, not here.
     int64_t* data = count > 0
         ? (int64_t*)dragon_xmalloc_n(count, sizeof(int64_t)) : nullptr;
     auto* t = (DragonTuple*)dragon_malloc_nullable(sizeof(DragonTuple));
@@ -512,9 +474,7 @@ DragonTuple* dragon_tuple_new(int64_t count) {
     dragon_obj_init(&t->header, DRAGON_TAG_TUPLE);
     t->length = count;
     t->data = data;
-    t->elem_tags = nullptr;  // NULL = all ints (no heap elements)
-    // Acyclic skip: created untracked; dragon_tuple_set_tagged enrolls it on
-    // its first traceable element. Counter bump stays unconditional.
+    t->elem_tags = nullptr;
     if (__atomic_add_fetch(&gc_alloc_counter, 1, __ATOMIC_RELAXED)
         >= __atomic_load_n(&gc_threshold, __ATOMIC_RELAXED)) {
         dragon_gc_collect();
@@ -522,24 +482,18 @@ DragonTuple* dragon_tuple_new(int64_t count) {
     return t;
 }
 
-/// Set a tuple element with a type tag (allocates elem_tags on first heap element)
 void dragon_tuple_set_tagged(DragonTuple* t, int64_t index, int64_t val, int64_t tag) {
     if (!t || index < 0 || index >= t->length) return;
-    // Acyclic-skip enrollment: enroll before the store on the first traceable
-    // element, so a concurrent collector never sees the edge before the tuple is a root.
     if (val && dragon_value_tag_is_traceable((int8_t)tag) &&
         !(t->header.gc_flags & GC_FLAG_TRACKED)) {
         dragon_gc_track(t);
     }
-    // Write barrier - see runtime_list.cpp dragon_list_append.
     if (val && (t->header.gc_flags & GC_FLAG_SHARED)) {
         if (tag == TAG_STR)
             dragon_mark_shared_str((const char*)(uintptr_t)val);
         else if (tag == TAG_LIST || tag == TAG_DICT || tag == TAG_BYTES)
             dragon_mark_shared_deep((void*)(uintptr_t)val);
     }
-    // Tag array allocated before the value store: if the store came first and
-    // this alloc then raised, elem_tags would stay NULL and leak that element as "all ints" at destroy.
     if (tag != TAG_INT && !t->elem_tags)
         t->elem_tags = (uint8_t*)dragon_xcalloc_n(t->length, sizeof(uint8_t));
     t->data[index] = val;
@@ -561,8 +515,6 @@ void dragon_tuple_set(DragonTuple* t, int64_t index, int64_t val) {
     }
 }
 
-/// Read element `index` as a 16-byte {tag, payload} box (tuple[Any, ...]
-/// element read; BORROW contract, matching dragon_list_box_get / dragon_dict_get_box).
 DragonBox dragon_tuple_box_get(DragonTuple* t, int64_t index) {
     if (index < 0) index += t->length;
     if (index < 0 || index >= t->length) {
@@ -579,8 +531,6 @@ int64_t dragon_tuple_len(DragonTuple* t) {
     return t ? t->length : 0;
 }
 
-/// tuple(list): builds a tuple from a list's elements (Python parity); one
-/// converter covers all monomorphized list variants. Heap elements are incref'd.
 DragonTuple* dragon_tuple_from_list(DragonList* l) {
     if (!l) return dragon_tuple_new(0);
     int64_t n = l->size;
@@ -595,8 +545,6 @@ DragonTuple* dragon_tuple_from_list(DragonList* l) {
 }
 
 void dragon_print_tuple_raw(DragonTuple* t) {
-    // Route through the tag-aware dragon_repr_tuple so heterogeneous tuples
-    // print by tag, not as raw %ld payloads.
     DragonStrBuf b; sb_init(&b);
     dragon_repr_tuple(&b, t);
     fwrite(b.buf, 1, b.len, stdout);
@@ -607,11 +555,8 @@ void dragon_print_tuple(DragonTuple* t) {
     putchar('\n');
 }
 
-/// Destroy a tuple and free its memory (GC support).
-/// Child decrefs go through the dispatch helpers (atomic-safe in atomic context).
 void dragon_tuple_destroy(DragonTuple* t) {
     if (!t) return;
-    // Phase 5: decref heap-typed elements
     if (t->elem_tags && t->data) {
         for (int64_t i = 0; i < t->length; i++) {
             uint8_t tag = t->elem_tags[i];
@@ -621,8 +566,6 @@ void dragon_tuple_destroy(DragonTuple* t) {
             } else if (val && (tag == TAG_LIST || tag == TAG_DICT || tag == TAG_BYTES)) {
                 dragon_decref_dispatch((void*)(uintptr_t)val);
             } else if (val && tag == DRAGON_TAG_CLOSURE) {
-                // Every fill path takes a ref on tag-10 elements; without
-                // this arm every such tuple leaks the closure + its env.
                 dragon_decref_callable((void*)(uintptr_t)val);
             }
         }
@@ -632,12 +575,7 @@ void dragon_tuple_destroy(DragonTuple* t) {
     free(t);
 }
 
-// Set Operations
-
-
 static DragonSet* dragon_set_alloc(int64_t cap, uint8_t elem_tag = 0) {
-    // Tables allocated before header (OOM longjmp can't strand them); gc_track
-    // runs after all three so a raise never hands the collector a half-built set.
     auto* buckets = (int64_t*)dragon_xcalloc_n(cap, sizeof(int64_t));
     auto* states = (uint8_t*)dragon_calloc_nullable((size_t)cap, sizeof(uint8_t));
     if (!states) { free(buckets); dragon_raise_oom(); }
@@ -649,9 +587,7 @@ static DragonSet* dragon_set_alloc(int64_t cap, uint8_t elem_tag = 0) {
     s->elem_tag = elem_tag;
     s->buckets = buckets;
     s->states = states;
-    // Phase 5b: track for cycle collection
     dragon_gc_track(s);
-    // Atomic counter: many threads may allocate concurrently.
     if (__atomic_add_fetch(&gc_alloc_counter, 1, __ATOMIC_RELAXED)
         >= __atomic_load_n(&gc_threshold, __ATOMIC_RELAXED)) {
         dragon_gc_collect();
@@ -659,8 +595,6 @@ static DragonSet* dragon_set_alloc(int64_t cap, uint8_t elem_tag = 0) {
     return s;
 }
 
-/// Hash a set element: string elements hash by content (FNV-1a) so distinct
-/// heap allocations of the same string still collide; others integer-mix the raw value.
 static inline uint64_t dragon_set_hash(int64_t val, uint8_t tag) {
     if (tag == TAG_STR && val) {
         return dragon_str_content_hash((const char*)(uintptr_t)val);
@@ -668,8 +602,6 @@ static inline uint64_t dragon_set_hash(int64_t val, uint8_t tag) {
     return (uint64_t)val * 2654435761ULL;
 }
 
-/// Equality test for a set element matching a candidate slot's stored value.
-/// Uses content equality for strings, raw equality otherwise.
 static inline int dragon_set_value_eq(int64_t a, int64_t b, uint8_t tag) {
     if (a == b) return 1;
     if (tag == TAG_STR) {
@@ -684,8 +616,6 @@ static void dragon_set_grow(DragonSet* s) {
     int64_t* oldBuckets = s->buckets;
     uint8_t* oldStates = s->states;
     s->capacity = oldCap * 2;
-    // ABORT, never raise: this runs inside dragon_set_add's armed mutation
-    // window (a longjmp would arm a spurious fatal), and by the second calloc the set is already half-swapped.
     s->buckets = (int64_t*)dragon_xcalloc_n_or_abort(s->capacity, sizeof(int64_t));
     s->states = (uint8_t*)dragon_xcalloc_n_or_abort(s->capacity, sizeof(uint8_t));
     s->count = 0;
@@ -713,16 +643,12 @@ DragonSet* dragon_set_new_tagged(int64_t elem_tag) {
     return dragon_set_alloc(16, (uint8_t)elem_tag);
 }
 
-/// Adopt an element tag for a still-empty, untagged set() (default elem_tag 0
-/// hashes strings by pointer and skips their decref); free while empty (no rehash).
 void dragon_set_adopt_tag(DragonSet* s, int64_t tag) {
     if (s && s->count == 0 && s->elem_tag == 0 && tag != 0) {
         s->elem_tag = (uint8_t)tag;
     }
 }
 
-/// set(list): seeds a new set from a list's elements, carrying its element
-/// tag; dragon_set_add increfs each value so the set owns its own references.
 DragonSet* dragon_set_from_list(DragonList* list) {
     if (!list) return dragon_set_new();
     DragonSet* s = dragon_set_new_tagged(list->elem_tag);
@@ -732,8 +658,6 @@ DragonSet* dragon_set_from_list(DragonList* list) {
     return s;
 }
 
-/// Backward-shift deletion (Knuth 6.4, Algorithm R): re-packs the probe
-/// cluster after `idx` so no tombstones remain (old tombstones let an add/remove workload probe forever on a membership miss).
 static void dragon_set_delete_slot(DragonSet* s, int64_t idx) {
     s->states[idx] = 0;
     s->buckets[idx] = 0;
@@ -741,11 +665,9 @@ static void dragon_set_delete_slot(DragonSet* s, int64_t idx) {
     int64_t j = idx;
     for (;;) {
         j = (j + 1) % s->capacity;
-        if (s->states[j] != 1) break;  // end of the probe cluster
+        if (s->states[j] != 1) break;
         int64_t home = (int64_t)(dragon_set_hash(s->buckets[j], s->elem_tag)
                                  % (uint64_t)s->capacity);
-        // Element at j stays put iff its home lies cyclically in (hole, j];
-        // otherwise move it into the hole and continue with its old slot as the new hole.
         bool stays = (hole < j) ? (home > hole && home <= j)
                                 : (home > hole || home <= j);
         if (!stays) {
@@ -759,8 +681,6 @@ static void dragon_set_delete_slot(DragonSet* s, int64_t idx) {
 }
 
 void dragon_set_add(DragonSet* s, int64_t val) {
-    // Concurrent-mutation detector (runtime_internal.h): grow + probe +
-    // store is the window; no raise below. Set union/ior ride on this guard.
     bool mut_armed = dragon_shared_mut_begin(&s->header, "set");
     if (s->count * 2 >= s->capacity) dragon_set_grow(s);
     uint64_t h = dragon_set_hash(val, s->elem_tag);
@@ -768,13 +688,11 @@ void dragon_set_add(DragonSet* s, int64_t val) {
     while (s->states[idx] == 1) {
         if (dragon_set_value_eq(s->buckets[idx], val, s->elem_tag)) {
             dragon_shared_mut_end(&s->header, mut_armed);
-            return; // dedup
+            return;
         }
         idx = (idx + 1) % s->capacity;
     }
-    // Incref: the set now owns a reference to this value
     dragon_incref_tagged(val, s->elem_tag);
-    // Write barrier - see runtime_list.cpp dragon_list_append.
     if (val && (s->header.gc_flags & GC_FLAG_SHARED)) {
         if (s->elem_tag == TAG_STR)
             dragon_mark_shared_str((const char*)(uintptr_t)val);
@@ -799,16 +717,12 @@ int64_t dragon_set_contains(DragonSet* s, int64_t val) {
 }
 
 void dragon_set_remove(DragonSet* s, int64_t val) {
-    // Concurrent-mutation detector: window covers the probe (a concurrent
-    // cluster re-pack invalidates it); the not-found raise closes it first.
     bool mut_armed = dragon_shared_mut_begin(&s->header, "set");
     uint64_t h = dragon_set_hash(val, s->elem_tag);
     int64_t idx = (int64_t)(h % (uint64_t)s->capacity);
     while (s->states[idx] != 0) {
         if (s->states[idx] == 1 &&
             dragon_set_value_eq(s->buckets[idx], val, s->elem_tag)) {
-            // Capture the stored value before the shift re-packs the cluster
-            // (may differ from `val` for strings: the set's own refcounted copy).
             int64_t stored = s->buckets[idx];
             s->count--;
             dragon_set_delete_slot(s, idx);
@@ -818,8 +732,6 @@ void dragon_set_remove(DragonSet* s, int64_t val) {
             else if (stored && (s->elem_tag == TAG_LIST || s->elem_tag == TAG_DICT || s->elem_tag == TAG_BYTES))
                 dragon_decref_dispatch((void*)(uintptr_t)stored);
             else if (stored && s->elem_tag == DRAGON_TAG_CLOSURE)
-                // dragon_set_add increfs tag-10 elements; release paths must
-                // mirror it (tag-gated, bare fn ptr safe).
                 dragon_decref_callable((void*)(uintptr_t)stored);
             return;
         }
@@ -835,7 +747,6 @@ void dragon_set_remove(DragonSet* s, int64_t val) {
 }
 
 void dragon_set_discard(DragonSet* s, int64_t val) {
-    // Concurrent-mutation detector - see dragon_set_remove.
     bool mut_armed = dragon_shared_mut_begin(&s->header, "set");
     uint64_t h = dragon_set_hash(val, s->elem_tag);
     int64_t idx = (int64_t)(h % (uint64_t)s->capacity);
@@ -851,7 +762,6 @@ void dragon_set_discard(DragonSet* s, int64_t val) {
             else if (stored && (s->elem_tag == TAG_LIST || s->elem_tag == TAG_DICT || s->elem_tag == TAG_BYTES))
                 dragon_decref_dispatch((void*)(uintptr_t)stored);
             else if (stored && s->elem_tag == DRAGON_TAG_CLOSURE)
-                // Mirrors dragon_set_remove: release the ref dragon_set_add took.
                 dragon_decref_callable((void*)(uintptr_t)stored);
             return;
         }
@@ -866,11 +776,7 @@ int64_t dragon_set_len(DragonSet* s) {
 
 void dragon_set_clear(DragonSet* s) {
     if (s) {
-        // Concurrent-mutation detector: whole teardown is the window; decrefs
-        // stay inside (see dragon_dict_clear for the rationale).
         bool mut_armed = dragon_shared_mut_begin(&s->header, "set");
-        // Non-dispatch decref is correct here (unlike destroy): clear() is
-        // never reached from an atomic-context dealloc chain (revisit if __del__ lands).
         uint8_t tag = s->elem_tag;
         if (tag == TAG_STR) {
             for (int64_t i = 0; i < s->capacity; i++) {
@@ -883,7 +789,6 @@ void dragon_set_clear(DragonSet* s) {
                     dragon_decref((void*)(uintptr_t)s->buckets[i]);
             }
         } else if (tag == DRAGON_TAG_CLOSURE) {
-            // Mirrors dragon_set_remove/destroy: release the refs dragon_set_add took.
             for (int64_t i = 0; i < s->capacity; i++) {
                 if (s->states[i] == 1 && s->buckets[i])
                     dragon_decref_callable((void*)(uintptr_t)s->buckets[i]);
@@ -901,7 +806,6 @@ DragonSet* dragon_set_copy(DragonSet* s) {
     memcpy(n->buckets, s->buckets, s->capacity * sizeof(int64_t));
     memcpy(n->states, s->states, s->capacity * sizeof(uint8_t));
     n->count = s->count;
-    // Incref copied elements
     uint8_t tag = s->elem_tag;
     if (tag == TAG_STR) {
         for (int64_t i = 0; i < n->capacity; i++) {
@@ -1005,8 +909,6 @@ int64_t dragon_set_pop(DragonSet* s) {
     }
     for (int64_t i = 0; i < s->capacity; i++) {
         if (s->states[i] == 1) {
-            // Ownership of the stored value transfers to the caller (no
-            // decref here); only slot bookkeeping moved to the tombstone-free delete.
             int64_t v = s->buckets[i];
             s->count--;
             dragon_set_delete_slot(s, i);
@@ -1026,8 +928,6 @@ void dragon_set_update(DragonSet* a, DragonSet* b) {
 }
 
 void dragon_print_set_raw(DragonSet* s) {
-    // Route through the tag-aware repr builder: the old `%ld`-per-element
-    // loop printed string/float/bool elements as raw pointers/bit patterns.
     DragonStrBuf b; sb_init(&b); dragon_repr_set(&b, s);
     fwrite(b.buf, 1, (size_t)b.len, stdout); free(b.buf);
 }
@@ -1036,8 +936,6 @@ void dragon_print_set(DragonSet* s) {
     putchar('\n');
 }
 
-/// Destroy a set and free its memory (GC support).
-/// Child decrefs go through the dispatch helpers (atomic-safe in atomic context).
 void dragon_set_destroy(DragonSet* s) {
     if (!s) return;
     uint8_t tag = s->elem_tag;
@@ -1052,8 +950,6 @@ void dragon_set_destroy(DragonSet* s) {
                 dragon_decref_dispatch((void*)(uintptr_t)s->buckets[i]);
         }
     } else if (tag == DRAGON_TAG_CLOSURE) {
-        // dragon_set_add/dragon_set_copy take a ref on tag-10 elements;
-        // without this arm every set[Callable] leaks its closures + envs.
         for (int64_t i = 0; i < s->capacity; i++) {
             if (s->states[i] == 1 && s->buckets[i])
                 dragon_decref_callable((void*)(uintptr_t)s->buckets[i]);
@@ -1064,21 +960,12 @@ void dragon_set_destroy(DragonSet* s) {
     free(s);
 }
 
-// Bytes Operations
-
-// DragonBytes struct defined above (near forward declarations) so printing
-// functions can access the real layout.
-
 DragonBytes* dragon_bytes_new(const uint8_t* data, int64_t len) {
-    // Data before header: an OOM longjmp out of dragon_xmalloc must not
-    // strand a bare header allocation (same ordering as dragon_list_new_tagged).
     auto* buf = (uint8_t*)dragon_xmalloc(len > 0 ? (size_t)len : 1);
     auto* b = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
     dragon_obj_init(&b->header, DRAGON_TAG_BYTES);
     b->len = len;
     b->data = buf;
-    // NULL data = zero-filled constructor (`bytes(n)`); leaving the buffer
-    // uninitialized would hand the program stale heap contents.
     if (data && len > 0) memcpy(b->data, data, len);
     else if (len > 0) memset(b->data, 0, (size_t)len);
     return b;
@@ -1088,8 +975,6 @@ DragonBytes* dragon_bytes_from_literal(const char* data, int64_t len) {
     return dragon_bytes_new((const uint8_t*)data, len);
 }
 
-// Construct DragonBytes from a list[int]; each element truncates to a byte
-// (mirrors CPython's stricter 0-255 raw-byte behavior, not mod-256 wrap).
 DragonBytes* dragon_bytes_from_list(DragonList* list) {
     if (!list) return dragon_bytes_new(nullptr, 0);
     int64_t n = list->size;
@@ -1108,8 +993,6 @@ int64_t dragon_bytes_len(DragonBytes* b) {
     return b ? b->len : 0;
 }
 
-// ADR 041 (FFI): hand a C library the raw byte buffer behind a `bytes`; valid
-// for the object's lifetime (caller keeps it in scope). Pair with dragon_bytes_len.
 uint8_t* dragon_bytes_data(DragonBytes* b) {
     return b ? b->data : nullptr;
 }
@@ -1138,13 +1021,9 @@ void dragon_print_bytes(DragonBytes* b) {
 DragonBytes* dragon_bytes_concat(DragonBytes* a, DragonBytes* b) {
     int64_t na = a ? a->len : 0;
     int64_t nb = b ? b->len : 0;
-    // Overflow guard (mirrors dragon_bytes_repeat): without it, na+nb wraps
-    // negative and the malloc truncates to a buffer the memcpys then overrun.
     if (na > INT64_MAX - nb)
         dragon_raise_exc_cstr(43, "MemoryError: allocation size overflow");
     int64_t newLen = na + nb;
-    // Data before header: an OOM longjmp out of dragon_xmalloc must not
-    // strand a bare header allocation (same ordering as dragon_list_new_tagged).
     auto* data = (uint8_t*)dragon_xmalloc(newLen > 0 ? (size_t)newLen : 1);
     auto* result = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
     dragon_obj_init(&result->header, DRAGON_TAG_BYTES);
@@ -1157,13 +1036,9 @@ DragonBytes* dragon_bytes_concat(DragonBytes* a, DragonBytes* b) {
 
 DragonBytes* dragon_bytes_repeat(DragonBytes* b, int64_t n) {
     if (!b || n <= 0 || b->len == 0) return dragon_bytes_new(nullptr, 0);
-    // Keeps the int64 product below well-defined; the byte-count wrap is
-    // trapped again inside dragon_xmalloc_n where the size_t multiply lives.
     if (n > INT64_MAX / b->len)
         dragon_raise_exc_cstr(43, "MemoryError: allocation size overflow");
     int64_t newLen = b->len * n;
-    // Data before header: an OOM longjmp out of dragon_xmalloc_n must not
-    // strand a bare header allocation (same ordering as dragon_list_new_tagged).
     auto* data = (uint8_t*)dragon_xmalloc_n(n, (size_t)b->len);
     auto* result = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
     dragon_obj_init(&result->header, DRAGON_TAG_BYTES);
@@ -1209,7 +1084,6 @@ DragonBytes* dragon_bytes_slice(DragonBytes* b, int64_t start, int64_t stop, int
         dragon_raise_exc_cstr(90, "ValueError: slice step cannot be zero");
     }
     dragon_slice_indices(b->len, &start, &stop, step);
-    // Count elements
     int64_t count = 0;
     if (step > 0) { for (int64_t i = start; i < stop; i += step) count++; }
     else { for (int64_t i = start; i > stop; i += step) count++; }
@@ -1249,17 +1123,13 @@ const char* dragon_bytes_decode(DragonBytes* b) {
     return dragon_string_alloc((const char*)b->data, b->len);
 }
 
-// W6 (gzip response): wraps a bytes buffer as a kind=1 Dragon str byte-for-byte,
-// no UTF-8 decode (dragon_bytes_decode's re-decode caused a 67->86 byte expansion that broke binary sends).
 const char* dragon_str_from_bytes(DragonBytes* b) {
     if (!b || b->len == 0) return dragon_string_alloc("", 0);
-    DragonString* s = dragon_string_alloc_raw(b->len);   // kind=1, len=b->len
-    memcpy(s->data, b->data, (size_t)b->len);            // verbatim, incl. NULs
-    return s->data;                                      // alloc_raw wrote the NUL tail
+    DragonString* s = dragon_string_alloc_raw(b->len);
+    memcpy(s->data, b->data, (size_t)b->len);
+    return s->data;
 }
 
-// str.encode(): kind=1 (ASCII) data is already UTF-8; kind=4 (UCS-4) is
-// transcoded. The old strlen()-based body truncated kind=4 at the first embedded NUL.
 DragonBytes* dragon_str_encode(const char* s) {
     if (!s) return dragon_bytes_new(nullptr, 0);
     int64_t blen = 0;
@@ -1269,14 +1139,10 @@ DragonBytes* dragon_str_encode(const char* s) {
     return b;
 }
 
-// ADR 041 (FFI): converts a `str` to NUL-terminated UTF-8 `bytes` for C
-// handoff; correct for arbitrary text (unlike a raw str pointer, valid only for ASCII).
 DragonBytes* dragon_str_to_utf8_bytes(const char* s) {
     int64_t blen = 0;
     char* enc = s ? dragon_str_to_utf8_alloc(s, &blen) : nullptr;
     const uint8_t* src = (const uint8_t*)(enc ? enc : (s ? s : ""));
-    // enc is a live owned transcode: free it before raising, since the
-    // longjmp skips this frame's cleanup.
     auto* data = (uint8_t*)dragon_malloc_nullable((size_t)(blen > 0 ? blen : 0) + 1);
     if (!data) { if (enc) free(enc); dragon_raise_oom(); }
     auto* b = (DragonBytes*)dragon_malloc_nullable(sizeof(DragonBytes));
@@ -1339,7 +1205,7 @@ int64_t dragon_bytes_count(DragonBytes* haystack, DragonBytes* needle) {
     for (int64_t i = 0; i <= haystack->len - needle->len; i++) {
         if (memcmp(haystack->data + i, needle->data, needle->len) == 0) {
             count++;
-            i += needle->len - 1; // non-overlapping
+            i += needle->len - 1;
         }
     }
     return count;
@@ -1369,13 +1235,9 @@ DragonBytes* dragon_bytes_replace(DragonBytes* b, DragonBytes* old_b, DragonByte
     }
     if (count == 0) return dragon_bytes_new(b->data, b->len);
     int64_t delta = new_b ? new_b->len - old_b->len : -old_b->len;
-    // Only growth can overflow (shrink removes at most b->len bytes); an
-    // unchecked count*delta wrap would pick a 1-byte buffer for a full-length write loop.
     if (delta > 0 && count > (INT64_MAX - b->len) / delta)
         dragon_raise_exc_cstr(43, "MemoryError: allocation size overflow");
     int64_t newLen = b->len + count * delta;
-    // Data before header: an OOM longjmp out of dragon_xmalloc must not
-    // strand a bare header allocation (same ordering as dragon_list_new_tagged).
     auto* data = (uint8_t*)dragon_xmalloc(newLen > 0 ? (size_t)newLen : 1);
     auto* result = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
     dragon_obj_init(&result->header, DRAGON_TAG_BYTES);
@@ -1442,7 +1304,6 @@ DragonList* dragon_bytes_split(DragonBytes* b, DragonBytes* sep) {
     DragonList* result = dragon_list_new_tagged(8, TAG_BYTES);
     if (!b || b->len == 0) return result;
     if (!sep || sep->len == 0) {
-        // Split on whitespace
         int64_t i = 0;
         while (i < b->len) {
             while (i < b->len && is_ascii_whitespace(b->data[i])) i++;
@@ -1470,8 +1331,6 @@ DragonList* dragon_bytes_split(DragonBytes* b, DragonBytes* sep) {
 
 DragonBytes* dragon_bytes_join(DragonBytes* sep, DragonList* list) {
     if (!list || list->size == 0) return dragon_bytes_new(nullptr, 0);
-    // Total length can be amplified far past any real buffer if the list
-    // references the same bytes object many times, so every add is overflow-checked.
     int64_t totalLen = 0;
     for (int64_t i = 0; i < list->size; i++) {
         auto* part = (DragonBytes*)(intptr_t)dragon_list_load(list, i);
@@ -1482,8 +1341,6 @@ DragonBytes* dragon_bytes_join(DragonBytes* sep, DragonList* list) {
             dragon_raise_exc_cstr(43, "MemoryError: allocation size overflow");
         if (i > 0 && sep) totalLen += sep->len;
     }
-    // Data before header: an OOM longjmp out of dragon_xmalloc must not
-    // strand a bare header allocation (same ordering as dragon_list_new_tagged).
     auto* data = (uint8_t*)dragon_xmalloc(totalLen > 0 ? (size_t)totalLen : 1);
     auto* result = (DragonBytes*)dragon_xmalloc(sizeof(DragonBytes));
     dragon_obj_init(&result->header, DRAGON_TAG_BYTES);
@@ -1543,9 +1400,6 @@ const char* dragon_bytes_hex(DragonBytes* b) {
 
 DragonBytes* dragon_bytes_fromhex(const char* hex_str) {
     if (!hex_str) return dragon_bytes_new(nullptr, 0);
-    // Every invalid-input path raises BEFORE any allocation (no leak on raise),
-    // and a kind=4 string cannot be valid hex, so reject it up front instead
-    // of strlen-truncating its UCS-4 storage.
     if (dragon_str_is_heap(hex_str) &&
         dragon_string_from_data(hex_str)->kind == 4) {
         dragon_raise_exc_cstr(90, "ValueError: non-hexadecimal number found in fromhex() arg");
@@ -1587,22 +1441,16 @@ DragonBytes* dragon_bytes_fromhex(const char* hex_str) {
     return result;
 }
 
-/// Destroy bytes and free its memory (GC support)
 void dragon_bytes_destroy(DragonBytes* b) {
     if (!b) return;
     free(b->data);
     free(b);
 }
 
-// Deque: O(1) circular buffer (collections.deque parity).
-
 static void _deque_grow(DragonDeque* d) {
     int64_t newCap = d->capacity * 2;
     if (newCap < 8) newCap = 8;
-    // ABORT, never raise: called inside the armed dragon_shared_mut_begin
-    // window of append/appendleft; a longjmp would arm a spurious fatal on the next mutation.
     int64_t* newData = (int64_t*)dragon_xmalloc_n_or_abort(newCap, sizeof(int64_t));
-    // Linearize: copy from head to end, then wrap to beginning
     for (int64_t i = 0; i < d->size; i++) {
         newData[i] = d->data[(d->head + i) % d->capacity];
     }
@@ -1612,10 +1460,8 @@ static void _deque_grow(DragonDeque* d) {
     d->capacity = newCap;
 }
 
-int64_t dragon_str_cmp(const char* a, const char* b);  // runtime_string.cpp
+int64_t dragon_str_cmp(const char* a, const char* b);
 
-// Tag-aware element equality - same rules as dragon_list_elem_eq (str/bytes
-// by content, float by value, everything else by raw i64).
 static bool _deque_elem_eq(uint8_t tag, int64_t a, int64_t b) {
     switch (tag) {
         case TAG_STR:
@@ -1637,12 +1483,9 @@ static bool _deque_elem_eq(uint8_t tag, int64_t a, int64_t b) {
     }
 }
 
-/// Create a new empty deque. maxlen < 0 = unbounded (Python parity); elem_tag
-/// is the DragonValueTag, refreshed on every append.
 DragonDeque* dragon_deque_new(int64_t maxlen, int64_t elem_tag) {
     int64_t capacity = 8;
     if (maxlen >= 0 && maxlen < capacity) capacity = maxlen > 0 ? maxlen : 1;
-    // Data before header, so an OOM raise cannot strand the header.
     auto* data = (int64_t*)dragon_xmalloc_n(capacity, sizeof(int64_t));
     DragonDeque* d = (DragonDeque*)dragon_calloc_nullable(1, sizeof(DragonDeque));
     if (!d) { free(data); dragon_raise_oom(); }
@@ -1656,19 +1499,13 @@ DragonDeque* dragon_deque_new(int64_t maxlen, int64_t elem_tag) {
     return d;
 }
 
-/// Append to right end. The deque OWNS one ref per heap element (mirrors the
-/// list containers); a full bounded deque discards from the LEFT (Python).
 void dragon_deque_append(DragonDeque* d, int64_t value, int64_t tag) {
     if (tag) d->elem_tag = (uint8_t)tag;
-    if (d->maxlen == 0) return;  // Python: maxlen-0 deque silently discards
-    // Acyclic-skip enrollment: enroll on the first traceable element before
-    // the store (mirrors dict/tuple), so a concurrent collector never sees the edge before the deque is a root.
+    if (d->maxlen == 0) return;
     if (value && dragon_value_tag_is_traceable((int8_t)d->elem_tag) &&
         !(d->header.gc_flags & GC_FLAG_TRACKED)) {
         dragon_gc_track(d);
     }
-    // Concurrent-mutation detector: no raise below; the bounded-eviction
-    // decref stays inside (see dragon_dict_clear for the rationale).
     bool mut_armed = dragon_shared_mut_begin(&d->header, "deque");
     dragon_incref_tagged(value, d->elem_tag);
     if (d->maxlen > 0 && d->size == d->maxlen) {
@@ -1684,16 +1521,13 @@ void dragon_deque_append(DragonDeque* d, int64_t value, int64_t tag) {
     dragon_shared_mut_end(&d->header, mut_armed);
 }
 
-/// Append to left end; a full bounded deque discards from the RIGHT (Python).
 void dragon_deque_appendleft(DragonDeque* d, int64_t value, int64_t tag) {
     if (tag) d->elem_tag = (uint8_t)tag;
     if (d->maxlen == 0) return;
-    // Acyclic-skip enrollment - see dragon_deque_append
     if (value && dragon_value_tag_is_traceable((int8_t)d->elem_tag) &&
         !(d->header.gc_flags & GC_FLAG_TRACKED)) {
         dragon_gc_track(d);
     }
-    // Concurrent-mutation detector - see dragon_deque_append.
     bool mut_armed = dragon_shared_mut_begin(&d->header, "deque");
     dragon_incref_tagged(value, d->elem_tag);
     if (d->maxlen > 0 && d->size == d->maxlen) {
@@ -1708,12 +1542,9 @@ void dragon_deque_appendleft(DragonDeque* d, int64_t value, int64_t tag) {
     dragon_shared_mut_end(&d->header, mut_armed);
 }
 
-/// Remove and return from left end (O(1)). Ownership of the element's ref
-/// transfers to the caller. Raises catchable IndexError when empty.
 int64_t dragon_deque_popleft(DragonDeque* d) {
     if (!d || d->size == 0)
         dragon_raise_exc_cstr(41, "IndexError: pop from an empty deque");
-    // Concurrent-mutation detector: armed after the raise-y validation.
     bool mut_armed = dragon_shared_mut_begin(&d->header, "deque");
     int64_t val = d->data[d->head];
     d->head = (d->head + 1) % d->capacity;
@@ -1722,12 +1553,9 @@ int64_t dragon_deque_popleft(DragonDeque* d) {
     return val;
 }
 
-/// Remove and return from right end (O(1)). Same ownership/raise contract as
-/// popleft.
 int64_t dragon_deque_pop(DragonDeque* d) {
     if (!d || d->size == 0)
         dragon_raise_exc_cstr(41, "IndexError: pop from an empty deque");
-    // Concurrent-mutation detector: armed after the raise-y validation.
     bool mut_armed = dragon_shared_mut_begin(&d->header, "deque");
     d->size--;
     int64_t idx = (d->head + d->size) % d->capacity;
@@ -1736,8 +1564,6 @@ int64_t dragon_deque_pop(DragonDeque* d) {
     return val;
 }
 
-/// Heap-element pop variants: same TRANSFER semantics as pop/popleft, but
-/// return a ptr so codegen sees an OWNED result. Mirrors dragon_dict_get_ptr.
 void* dragon_deque_popleft_ptr(DragonDeque* d) {
     return (void*)(uintptr_t)dragon_deque_popleft(d);
 }
@@ -1745,12 +1571,10 @@ void* dragon_deque_pop_ptr(DragonDeque* d) {
     return (void*)(uintptr_t)dragon_deque_pop(d);
 }
 
-/// Length
 int64_t dragon_deque_len(DragonDeque* d) {
     return d ? d->size : 0;
 }
 
-/// Membership - tag-aware value equality over the live window.
 int64_t dragon_deque_contains(DragonDeque* d, int64_t value) {
     if (!d) return 0;
     for (int64_t i = 0; i < d->size; i++) {
@@ -1760,7 +1584,6 @@ int64_t dragon_deque_contains(DragonDeque* d, int64_t value) {
     return 0;
 }
 
-// Python repr: deque([1, 2, 3]) / deque(['a'], maxlen=4).
 static void dragon_repr_deque(DragonStrBuf* out, DragonDeque* d) {
     sb_puts(out, "deque([");
     if (d) {
@@ -1789,8 +1612,6 @@ void dragon_print_deque_raw(DragonDeque* d) {
     fwrite(b.buf, 1, (size_t)b.len, stdout); free(b.buf);
 }
 
-/// Create deque from a list (copies the elements, taking a ref per heap
-/// element). With a bound, Python keeps the RIGHTMOST maxlen elements.
 DragonDeque* dragon_deque_from_list(void* listPtr, int64_t maxlen) {
     DragonList* l = (DragonList*)listPtr;
     DragonDeque* d = dragon_deque_new(maxlen, l ? l->elem_tag : 0);
@@ -1802,8 +1623,6 @@ DragonDeque* dragon_deque_from_list(void* listPtr, int64_t maxlen) {
     return d;
 }
 
-/// Destroy deque (GC support): dispatch-aware child decrefs, tag-gated for
-/// Callable elements; the old TAG_STR/BYTES/LIST/DICT whitelist leaked deque[Callable] closures.
 void dragon_deque_destroy(DragonDeque* d) {
     if (!d) return;
     if (d->data && d->size > 0) {
@@ -1818,11 +1637,10 @@ void dragon_deque_destroy(DragonDeque* d) {
             } else if (d->elem_tag == DRAGON_TAG_CLOSURE) {
                 dragon_decref_callable((void*)(uintptr_t)v);
             }
-            // TAG_INT/FLOAT/BOOL/NONE: scalar leaves, no heap cleanup needed
         }
     }
     free(d->data);
     free(d);
 }
 
-} // extern "C"
+}

@@ -1,7 +1,3 @@
-# Alternative repr() with output-size caps, matching Python's `reprlib`. Static
-# typing forecloses runtime dispatch, so `repr_*` below are typed entry points; pick the one matching your value.
-
-
 class Repr {
     """Repr - holds the size caps applied during truncation"""
     def(maxlevel: int = 6,
@@ -47,7 +43,6 @@ class Repr {
     }
 
     def repr_str(value: str) -> str {
-        # Quote and escape, then truncate to maxstring, keeping the trailing quote well-formed.
         const escaped: str = _escape_str(value)
         const quoted: str = "'" + escaped + "'"
         if len(quoted) <= self.maxstring {
@@ -69,7 +64,6 @@ class Repr {
     }
 
     def repr_tuple_int(value: list[int]) -> str {
-        # Tuples and lists share the same access shape here; list[int] is the source.
         return _join_truncated_int(value, self.maxtuple, self.fillvalue, "(", ")")
     }
 
@@ -123,7 +117,6 @@ class Repr {
 }
 
 
-# Module-level singleton + convenience proxies (match Python's `aRepr`).
 aRepr: Repr = Repr()
 
 def repr_int(value: int) -> str { return aRepr.repr_int(value) }
@@ -137,7 +130,6 @@ def repr_dict_str_str(value: dict[str, str]) -> str { return aRepr.repr_dict_str
 
 
 def _escape_str(s: str) -> str {
-    # Verbatim spans between escape-needing chars are copied whole; unescaped strings pass through unchanged.
     parts: list[str] = []
     i: int = 0
     run: int = 0

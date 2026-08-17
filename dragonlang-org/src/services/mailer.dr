@@ -1,13 +1,3 @@
-# mailer.dr - outbound email through Resend (https://resend.com).
-#
-# One capability: send(to, subject, html) -> "" on success, else a short error
-# string (the AuthResult error convention). The base class is the seam: the
-# app wires ResendMailer (real HTTPS calls to api.resend.com), tests wire
-# CaptureMailer and assert on what would have been sent - no network, no key.
-#
-# The API key comes from the environment (deps.dr), NEVER from source: this
-# tree is public and a committed key is a leaked key
-
 from json import dumps
 from http.client import HTTPSConnection, HTTPSResponse
 from html import HTML
@@ -16,14 +6,11 @@ class Mailer {
     def() {
     }
 
-    # Deliver one message. Returns "" on success or a short error string.
     def send(to: str, subject: str, body: HTML) -> str {
         return "mailer not configured"
     }
 }
 
-# The real thing: POST https://api.resend.com/emails with a bearer key.
-# Body is a JSON document built from real values (never concatenated text).
 class ResendMailer(Mailer) {
     api_key: str
     from_addr: str
@@ -61,7 +48,6 @@ class ResendMailer(Mailer) {
     }
 }
 
-# Test double: records every message instead of sending it.
 class CaptureMailer(Mailer) {
     to: list[str]
     subjects: list[str]

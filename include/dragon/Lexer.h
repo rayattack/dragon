@@ -9,7 +9,6 @@
 
 namespace dragon {
 
-/// Diagnostic message from the lexer
 struct LexerDiagnostic {
     enum class Level { Warning, Error };
     Level level;
@@ -17,19 +16,14 @@ struct LexerDiagnostic {
     std::string message;
 };
 
-/// Configuration options for the lexer.
 struct LexerOptions {
-    bool useBraceBlocks = true;  // braces vs indentation for blocks
+    bool useBraceBlocks = true;
     int tabWidth = 4;
     std::string filename = "<stdin>";
 
-    // True inside a `!{ ... }` body, where `:{` means TEMPLATE_CONTENT_OPEN
-    // (D017 Phase 4) instead of a parse error. Set by CodeGen when re-lexing it.
     bool inTemplateInterpolation = false;
 };
 
-/// Lexer for Dragon (.dr, brace blocks) and Python (.py, indentation blocks)
-/// source, producing the token stream the parser consumes.
 class Lexer {
 public:
     explicit Lexer(std::string_view source, LexerOptions options = {});
@@ -42,7 +36,6 @@ public:
     Token nextToken();
     Token peek();
 
-    /// Peeks token N positions ahead (0 = next token).
     Token peekAhead(int n);
 
     bool isAtEnd() const;
@@ -66,8 +59,6 @@ private:
     Token scanNumber();
     Token scanIdentifier();
     Token scanTemplateBody(const std::string& contentType = "");
-    // D017 Phase 4: scans a `:{ ... }` content fragment inside `!{}` (caller
-    // already consumed `:`), brace-depth matched like scanTemplateBody.
     Token scanTemplateContentBody();
     void skipWhitespaceAndComments();
     void handleIndentation();
@@ -82,6 +73,6 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-} // namespace dragon
+}
 
-#endif // DRAGON_LEXER_H
+#endif

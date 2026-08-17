@@ -1,18 +1,12 @@
-/// Dragon Runtime - String Methods (case ops, strip, find, slice, split, join,
-/// predicates) + dragon_list_slice. Split from runtime_string.cpp (file-size policy).
 #include "runtime_internal.h"
 #include "runtime_string_shared.h"
 
 extern "C" {
 
-// Kind-aware substring scan (defined below; used by replace before its def).
 static int64_t dragon_str_find_cp(const char* haystack, const char* needle, int64_t start);
 
-// Forward decl: kind-aware slice (defined later); used by the strip family to avoid strlen() on kind=4 data.
 const char* dragon_str_slice(const char* s, int64_t start, int64_t stop, int64_t step);
 
-// Code-point case mapping: ASCII A-Z<->a-z inline, wider BMP ranges (Latin-1,
-// Latin Extended-A, Greek, Cyrillic) via dragon_cp_simple_* so non-ASCII letters fold too.
 static inline uint32_t cp_ascii_upper(uint32_t cp) {
     if (cp < 0x80) return (cp >= 'a' && cp <= 'z') ? cp - 32 : cp;
     return dragon_cp_simple_upper(cp);
@@ -23,18 +17,14 @@ static inline uint32_t cp_ascii_lower(uint32_t cp) {
 }
 static inline uint32_t cp_ascii_swapcase(uint32_t cp) {
     uint32_t up = cp_ascii_upper(cp);
-    if (up != cp) return up;            // had a lowercase form -> uppercase it
-    return cp_ascii_lower(cp);          // else lowercase (no-op if uncased)
+    if (up != cp) return up;
+    return cp_ascii_lower(cp);
 }
 
-// Whitespace set for the no-arg strip family (space/tab/newline/CR, matching
-// historical behavior); all ASCII, so a kind=4 string only matches in its ASCII cps.
 static inline int dragon_cp_is_strip_ws(uint32_t cp) {
     return cp == ' ' || cp == '\t' || cp == '\n' || cp == '\r';
 }
 
-// Kind-aware no-arg strip: walk code points (dragon_str_cp_at handles all kinds)
-// and slice the trimmed window via dragon_str_slice - never strlen() a UCS-4 pointer.
 static const char* dragon_str_strip_ws_impl(const char* s, int do_left, int do_right) {
     if (!s) return dragon_string_alloc("", 0);
     DragonString* ds = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
@@ -45,8 +35,6 @@ static const char* dragon_str_strip_ws_impl(const char* s, int do_left, int do_r
     return dragon_str_slice(s, start, stop, 1);
 }
 
-/// Apply a per-cp transform (e.g. upper/lower) into a new canonical-kind string;
-/// kind=1/literal input takes the same byte-loop fast path as before Unicode support.
 static const char* dragon_str_map_cp(const char* s, uint32_t (*xform)(uint32_t)) {
     if (!s) return dragon_string_alloc("", 0);
     DragonString* ds = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
@@ -83,8 +71,6 @@ const char* dragon_str_strip(const char* s)  { return dragon_str_strip_ws_impl(s
 const char* dragon_str_lstrip(const char* s) { return dragon_str_strip_ws_impl(s, 1, 0); }
 const char* dragon_str_rstrip(const char* s) { return dragon_str_strip_ws_impl(s, 0, 1); }
 
-// Python str.strip(chars): trims any leading/trailing char in the set `chars`
-// (not a prefix/suffix), code-point aware; codegen always passes a real string here.
 static inline int dragon_cp_in_set(uint32_t cp, const char* set, DragonString* set_ds) {
     int64_t n = set_ds ? set_ds->len : (int64_t)strlen(set);
     for (int64_t i = 0; i < n; ++i)
@@ -92,8 +78,6 @@ static inline int dragon_cp_in_set(uint32_t cp, const char* set, DragonString* s
     return 0;
 }
 
-// Kind-aware strip against a character set. Walks cps, slices the trimmed
-// window via dragon_str_slice - never strlen() a UCS-4 pointer.
 static const char* dragon_str_strip_chars_impl(const char* s, const char* chars,
                                                int do_left, int do_right) {
     if (!s) return dragon_string_alloc("", 0);
@@ -124,8 +108,6 @@ const char* dragon_str_rstrip_chars(const char* s, const char* chars) {
     return dragon_str_strip_chars_impl(s, chars, 0, 1);
 }
 
-// Build a canonical-kind string from a filled UCS-4 buffer: downgrade to kind=1
-// when every cp is <0x80, else keep kind=4. Takes ownership of `out`, freeing it on downgrade.
 static const char* dragon_str_finish_cps(DragonString* out, uint32_t* dst,
                                          int64_t n, uint32_t max_cp) {
     if (max_cp < 0x80) {
@@ -199,12 +181,8 @@ const char* dragon_str_casefold(const char* s) {
     return dragon_str_lower(s);
 }
 
-// Core replace, bounded by max_count: replace the first max_count matches, or
-// all matches when max_count < 0 (Python semantics; count=0 replaces nothing).
 const char* dragon_str_replace_n(const char* s, const char* old_s, const char* new_s, int64_t max_count) {
     if (!s) return dragon_string_alloc("", 0);
-    // Probe before substituting "" for NULL old/new: dragon_is_heap_string("")
-    // would read a header-less literal OOB. Feed it the originals, then materialize "" after.
     DragonString* ds = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
     DragonString* dold = dragon_is_heap_string(old_s) ? dragon_string_from_data(old_s) : NULL;
     DragonString* dnew = dragon_is_heap_string(new_s) ? dragon_string_from_data(new_s) : NULL;
@@ -213,16 +191,12 @@ const char* dragon_str_replace_n(const char* s, const char* old_s, const char* n
     int64_t nlen = dnew ? dnew->len : (new_s ? (int64_t)strlen(new_s) : 0);
     if (!old_s) old_s = "";
     if (!new_s) new_s = "";
-    // Nothing to replace: return a kind-correct copy. The old code passed a
-    // cp-count to dragon_string_alloc as a byte length, corrupting every non-ASCII string here.
     if (olen == 0 || max_count == 0) return dragon_str_slice(s, 0, slen, 1);
 
     bool s_k1 = (!ds || ds->kind == 1);
     bool o_k1 = (!dold || dold->kind == 1);
     bool n_k1 = (!dnew || dnew->kind == 1);
 
-    // All-kind=1 fast path: bounded by KNOWN lengths, never NUL termination -
-    // the old strstr/strlen version treated "a\0b" as "a", under-counting matches and truncating the tail.
     if (s_k1 && o_k1 && n_k1) {
         int64_t count = 0;
         int64_t i = 0;
@@ -258,7 +232,7 @@ const char* dragon_str_replace_n(const char* s, const char* old_s, const char* n
                     k = j + 1;
                 }
             }
-            if (f < 0) {  // copy the (length-bounded) tail and finish
+            if (f < 0) {
                 memcpy(w, s + pos, (size_t)(slen - pos)); w += slen - pos;
                 break;
             }
@@ -272,7 +246,6 @@ const char* dragon_str_replace_n(const char* s, const char* old_s, const char* n
         return out->data;
     }
 
-    // CP-aware path. Two passes: count matches → allocate result → fill.
     int64_t count = 0;
     int64_t pos = 0;
     while (true) {
@@ -287,7 +260,6 @@ const char* dragon_str_replace_n(const char* s, const char* old_s, const char* n
     }
     int64_t rlen = slen + count * (nlen - olen);
     if (rlen < 0) rlen = 0;
-    // Build kind=4 result; canonicalize at end.
     DragonString* out = dragon_string_alloc_ucs4(rlen);
     uint32_t* dst = (uint32_t*)out->data;
     int64_t w = 0;
@@ -333,8 +305,6 @@ const char* dragon_str_replace(const char* s, const char* old_s, const char* new
 const char* dragon_str_repeat(const char* s, int64_t n) {
     if (!s || n <= 0) return dragon_string_alloc("", 0);
     DragonString* in = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-    // kind=1 (ASCII/Latin-1): byte copy is correct, but size by ds->len - NOT
-    // strlen - so an embedded NUL in a kind=1 string doesn't truncate the unit.
     if (!in || in->kind == 1) {
         int64_t len = in ? in->len : (int64_t)strlen(s);
         if (len > 0 && (uint64_t)n > (uint64_t)INT64_MAX / (uint64_t)len) {
@@ -347,8 +317,6 @@ const char* dragon_str_repeat(const char* s, int64_t n) {
         ds->len = total;
         return ds->data;
     }
-    // kind=4: the storage is one uint32 per code point, so strlen/memcpy of
-    // raw bytes duplicated the first byte of the first cp. Repeat CODE POINTS.
     int64_t len = in->len;
     if (len > 0 && (uint64_t)n > (uint64_t)INT64_MAX / (uint64_t)len) {
         dragon_raise_exc_cstr(43, "MemoryError: string repeat too large");
@@ -374,7 +342,7 @@ const char* dragon_str_removeprefix(const char* s, const char* prefix) {
         int64_t i = 0;
         for (; i < pn; i++)
             if (dragon_str_cp_at(s, ds, i) != dragon_str_cp_at(prefix, pds, i)) break;
-        if (i == pn) return dragon_str_slice(s, pn, n, 1);  // matched: drop prefix cps
+        if (i == pn) return dragon_str_slice(s, pn, n, 1);
     }
     return dragon_str_slice(s, 0, n, 1);
 }
@@ -390,17 +358,12 @@ const char* dragon_str_removesuffix(const char* s, const char* suffix) {
         int64_t i = 0;
         for (; i < xn; i++)
             if (dragon_str_cp_at(s, ds, n - xn + i) != dragon_str_cp_at(suffix, xds, i)) break;
-        if (i == xn) return dragon_str_slice(s, 0, n - xn, 1);  // matched: drop suffix cps
+        if (i == xn) return dragon_str_slice(s, 0, n - xn, 1);
     }
     return dragon_str_slice(s, 0, n, 1);
 }
 
-// Hostile-input cap for padding/justification widths: 256 MiB is far above any
-// legitimate use, anything larger is an overflow vector into the malloc arg.
 static constexpr int64_t DRAGON_STR_MAX_WIDTH = 1LL << 28;
-
-// Padding helpers take width in code points; strlen on a UCS-4 string stops at
-// the first embedded NUL, so "café".center(8) saw length 1 and emitted corrupted output.
 
 const char* dragon_str_center(const char* s, int64_t w, char fill) {
     if (!s) return dragon_string_alloc("", 0);
@@ -410,7 +373,7 @@ const char* dragon_str_center(const char* s, int64_t w, char fill) {
     }
     DragonString* in = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
     int64_t len = in ? in->len : (int64_t)strlen(s);
-    if (len >= w) return dragon_str_slice(s, 0, len, 1);  // kind-correct copy
+    if (len >= w) return dragon_str_slice(s, 0, len, 1);
     int64_t pad = w - len, left = pad / 2, right = pad - left;
     if (!in || in->kind == 1) {
         DragonString* ds = dragon_string_alloc_raw(w);
@@ -493,12 +456,11 @@ const char* dragon_str_zfill(const char* s, int64_t w) {
         return dragon_string_alloc("", 0);
     }
     DragonString* ds = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-    int64_t n = ds ? ds->len : (int64_t)strlen(s);  // code-point count (kind-safe)
+    int64_t n = ds ? ds->len : (int64_t)strlen(s);
     if (n >= w) return dragon_str_slice(s, 0, n, 1);
     if (!ds || ds->kind == 1) {
         DragonString* out = dragon_string_alloc_raw(w);
         int64_t off = 0;
-        // Guard the s[0] read on n>0 (an empty string has no sign char).
         if (n > 0 && (s[0] == '+' || s[0] == '-')) { out->data[0] = s[0]; off = 1; }
         memset(out->data + off, '0', (size_t)(w - n));
         memcpy(out->data + (w - n) + off, s + off, (size_t)(n - off));
@@ -519,13 +481,11 @@ const char* dragon_str_zfill(const char* s, int64_t w) {
 
 const char* dragon_str_expandtabs(const char* s, int64_t tabsize) {
     if (!s) return dragon_string_alloc("", 0);
-    if (tabsize <= 0) tabsize = 8;  // guard against division by zero in loop body
+    if (tabsize <= 0) tabsize = 8;
     DragonString* ds = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-    int64_t n = ds ? ds->len : (int64_t)strlen(s);  // code-point count (kind-safe)
+    int64_t n = ds ? ds->len : (int64_t)strlen(s);
     int64_t count = 0;
     for (int64_t i = 0; i < n; i++) if (dragon_str_cp_at(s, ds, i) == '\t') count++;
-    // Bound the expanded size against a hostile tabsize (like center/ljust/rjust/
-    // zfill): n+count*tabsize would wrap and under-allocate, then the fill loop runs off the heap.
     int64_t budget = DRAGON_STR_MAX_WIDTH - n;
     if (budget < 0 || (count != 0 && tabsize > budget / count)) {
         dragon_raise_exc_cstr(22, "OverflowError: expandtabs result too large");
@@ -565,8 +525,6 @@ const char* dragon_str_expandtabs(const char* s, int64_t tabsize) {
     return dragon_str_finish_cps(out, dst, w, max_cp);
 }
 
-/// Kind-aware substring scan: cp index of the first `needle` in `haystack`
-/// within [start, end) or -1 (end<0 means hlen; empty needle matches at start).
 static int64_t dragon_str_find_cp_se(const char* haystack, const char* needle,
                                      int64_t start, int64_t end) {
     if (!haystack || !needle) return -1;
@@ -584,10 +542,8 @@ static int64_t dragon_str_find_cp_se(const char* haystack, const char* needle,
     bool h_kind1 = (!dh || dh->kind == 1);
     bool n_kind1 = (!dn || dn->kind == 1);
     if (h_kind1 && n_kind1) {
-        // strstr would walk past `end`; bound the search window to the haystack length we scan.
         const char* base = haystack + start;
         int64_t window = end - start;
-        // memmem is GNU-only; fall back to a bounded strstr equivalent.
         for (int64_t i = 0; i + nlen <= window; ++i) {
             if (memcmp(base + i, needle, (size_t)nlen) == 0) {
                 return start + i;
@@ -595,7 +551,6 @@ static int64_t dragon_str_find_cp_se(const char* haystack, const char* needle,
         }
         return -1;
     }
-    // CP-by-CP scan, bounded by `end`.
     for (int64_t i = start; i + nlen <= end; ++i) {
         bool match = true;
         for (int64_t j = 0; j < nlen; ++j) {
@@ -610,7 +565,6 @@ static int64_t dragon_str_find_cp_se(const char* haystack, const char* needle,
     return -1;
 }
 
-/// Backwards-compat shim - start-only window, end = haystack length.
 static int64_t dragon_str_find_cp(const char* haystack, const char* needle,
                                   int64_t start) {
     return dragon_str_find_cp_se(haystack, needle, start, -1);
@@ -620,7 +574,6 @@ int64_t dragon_str_find(const char* s, const char* sub) {
     return dragon_str_find_cp_se(s, sub, 0, -1);
 }
 
-/// Python-parity `str.find(sub, start[, end])`. `end < 0` means len(s).
 int64_t dragon_str_find_se(const char* s, const char* sub, int64_t start, int64_t end) {
     return dragon_str_find_cp_se(s, sub, start, end);
 }
@@ -641,7 +594,6 @@ int64_t dragon_str_rfind(const char* s, const char* sub) {
     return last;
 }
 
-/// Python-parity `str.rfind(sub, start[, end])`.
 int64_t dragon_str_rfind_se(const char* s, const char* sub, int64_t start, int64_t end) {
     int64_t last = -1;
     int64_t pos = start < 0 ? 0 : start;
@@ -658,8 +610,6 @@ int64_t dragon_str_rfind_se(const char* s, const char* sub, int64_t start, int64
     return last;
 }
 
-/// Substring search (raises ValueError if not found)
-/// Named _index_of to avoid collision with dragon_str_index (char-at-position)
 int64_t dragon_str_index_of(const char* s, const char* sub) {
     int64_t r = dragon_str_find(s, sub);
     if (r < 0) {
@@ -691,8 +641,6 @@ int64_t dragon_str_count(const char* s, const char* sub) {
     return c;
 }
 
-/// Python-parity `str.count(sub, start[, end])`. Counts non-overlapping
-/// occurrences of `sub` within the cp-window [start, end).
 int64_t dragon_str_count_se(const char* s, const char* sub, int64_t start, int64_t end) {
     if (!s || !sub) return 0;
     DragonString* dn = dragon_is_heap_string(sub) ? dragon_string_from_data(sub) : NULL;
@@ -845,8 +793,6 @@ int64_t dragon_str_istitle(const char* s) {
 int64_t dragon_str_isascii(const char* s) {
     if (!s) return 1;
     DragonString* ds = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
-    // A kind=4 string exists only because some code point is >= 0x80, so it is
-    // never all-ASCII. kind=1 / literals: scan bytes (NUL-terminated).
     if (ds && ds->kind == 4) {
         int64_t n = ds->len;
         const uint32_t* cps = (const uint32_t*)ds->data;
@@ -866,8 +812,6 @@ int64_t dragon_str_isprintable(const char* s) {
     if (ds && ds->kind == 4) {
         int64_t n = ds->len;
         const uint32_t* cps = (const uint32_t*)ds->data;
-        // Match the historical ASCII-control test on code points; non-ASCII cps
-        // are treated as printable (as the old byte loop did with high bytes).
         for (int64_t i = 0; i < n; i++) if (cps[i] < 32 || cps[i] == 127) return 0;
         return 1;
     }
@@ -910,8 +854,6 @@ const char* dragon_str_slice(const char* s, int64_t start, int64_t stop, int64_t
     int64_t cp_count = in ? in->len : (int64_t)strlen(s);
     dragon_slice_indices(cp_count, &start, &stop, step);
     if (!in || in->kind == 1) {
-        // ASCII fast path: allocate the OUTPUT length, not the source length -
-        // the old code sized every slice at cp_count, so split()-ing a 1 MB string into 10k fields requested ~10 GB.
         int64_t out_count = 0;
         if (step > 0) { for (int64_t i = start; i < stop; i += step) out_count++; }
         else          { for (int64_t i = start; i > stop; i += step) out_count++; }
@@ -923,13 +865,11 @@ const char* dragon_str_slice(const char* s, int64_t start, int64_t stop, int64_t
         ds->len = w;
         return ds->data;
     }
-    // kind=4: copy code points, then pick min kind for the result.
     const uint32_t* src = (const uint32_t*)in->data;
     int64_t out_count = 0;
     if (step > 0) { for (int64_t i = start; i < stop; i += step) out_count++; }
     else          { for (int64_t i = start; i > stop; i += step) out_count++; }
     if (out_count == 0) return dragon_string_alloc("", 0);
-    // Scan for max code point in the result.
     uint32_t max_cp = 0;
     if (step > 0) {
         for (int64_t i = start; i < stop; i += step) {
@@ -941,7 +881,6 @@ const char* dragon_str_slice(const char* s, int64_t start, int64_t stop, int64_t
         }
     }
     if (max_cp < 0x80) {
-        // All ASCII - emit kind=1
         DragonString* ds = dragon_string_alloc_ascii(out_count);
         int64_t w = 0;
         if (step > 0) { for (int64_t i = start; i < stop; i += step) ds->data[w++] = (char)src[i]; }
@@ -980,13 +919,9 @@ DragonList* dragon_list_slice(DragonList* l, int64_t start, int64_t stop, int64_
     return r;
 }
 
-// maxsplit < 0 means unlimited; at the cap the unsplit remainder becomes the
-// final field. Whitespace mode (sep==NULL/"") skips leading but keeps trailing ws, matching CPython.
 DragonList* dragon_str_split_max(const char* s, const char* sep, int64_t maxsplit) {
     DragonList* l = dragon_list_new_tagged(8, TAG_STR);
     if (!s) return l;
-    // The pre-D018 byte-walk read a kind=4 string's first cp's high zero byte
-    // as the NUL terminator, collapsing the whole input to its first cp; now routed through kind-aware helpers.
     DragonString* ds = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
     int64_t slen = ds ? ds->len : (int64_t)strlen(s);
     DragonString* dsep = (sep && dragon_is_heap_string(sep))
@@ -1001,16 +936,12 @@ DragonList* dragon_str_split_max(const char* s, const char* sep, int64_t maxspli
 
     int64_t nsplits = 0;
     if (!sep || seplen == 0) {
-        // Python-parity whitespace split: collapse runs of [ \t\n\r],
-        // skip leading/trailing whitespace, never emit empty fragments.
         int64_t i = 0;
         while (i < slen) {
             while (i < slen && is_ws_cp(dragon_str_cp_at(s, ds, i))) i++;
             if (i >= slen) break;
             int64_t start = i;
             if (maxsplit >= 0 && nsplits >= maxsplit) {
-                // Cap reached: remainder (leading ws already skipped, trailing
-                // ws preserved) is the final field.
                 dragon_list_append(l, (int64_t)dragon_str_slice(s, start, slen, 1));
                 break;
             }
@@ -1045,16 +976,12 @@ DragonList* dragon_str_split(const char* s, const char* sep) {
     return dragon_str_split_max(s, sep, -1);
 }
 
-// UTF-8-correct join of `n` elements with `sep` (D017 Phase 4.B/C, D030
-// monomorphized containers); the old strlen+memcpy path truncated "café" to "c" at the embedded NUL.
 static const char* dragon_join_utf8(const char* sep, const char** items, int64_t n) {
     if (n <= 0) return dragon_string_alloc("", 0);
     int64_t sep_blen = 0;
     char* sep_enc = sep ? dragon_str_to_utf8_alloc(sep, &sep_blen) : NULL;
     const char* sep_bytes = sep_enc ? sep_enc : sep;
 
-    // Encode each element to UTF-8 once (NULL = kind=1, use raw pointer),
-    // tracking the owned transcode + byte length. owned is calloc'd so failure paths can free it blind.
     char** owned = (char**)dragon_calloc_nullable((size_t)n, sizeof(char*));
     int64_t* blens = owned ? (int64_t*)dragon_calloc_nullable((size_t)n, sizeof(int64_t)) : NULL;
     if (!owned || !blens) {
@@ -1069,8 +996,6 @@ static const char* dragon_join_utf8(const char* sep, const char** items, int64_t
         int64_t bl = 0;
         owned[i] = elem ? dragon_str_to_utf8_alloc(elem, &bl) : NULL;
         blens[i] = elem ? bl : 0;
-        // The list can reference the same string many times, so the sum is
-        // amplified far past any real buffer; check every add.
         int64_t add = blens[i] + (i > 0 ? sep_blen : 0);
         if (add > INT64_MAX - total) { overflow = true; break; }
         total += add;
@@ -1095,8 +1020,6 @@ static const char* dragon_join_utf8(const char* sep, const char** items, int64_t
         }
         if (owned[i]) free(owned[i]);
     }
-    // string_alloc raises on OOM; the DCLEAN_FREE entries free the scratches
-    // during unwind (per-element transcodes were already freed in the loop).
     int32_t clbase = dragon_cleanup_depth();
     dragon_cleanup_push((int64_t)(uintptr_t)buf, DCLEAN_FREE, 0);
     dragon_cleanup_push((int64_t)(uintptr_t)owned, DCLEAN_FREE, 0);
@@ -1140,8 +1063,6 @@ const char* dragon_str_join(const char* sep, DragonList* l) {
 DragonList* dragon_str_splitlines(const char* s) {
     DragonList* r = dragon_list_new_tagged(8, TAG_STR);
     if (!s) return r;
-    // Iterate code points, not bytes: the old byte scan walked UCS-4 storage as
-    // C bytes, finding a newline byte but then re-encoding wide bytes as kind=1, corrupting non-ASCII lines.
     DragonString* in = dragon_is_heap_string(s) ? dragon_string_from_data(s) : NULL;
     int64_t n = in ? in->len : (int64_t)strlen(s);
     int64_t start = 0;
@@ -1151,7 +1072,6 @@ DragonList* dragon_str_splitlines(const char* s) {
         if (cp == '\n' || cp == '\r') {
             const char* w = dragon_str_slice(s, start, i, 1);
             dragon_list_append(r, (int64_t)w);
-            // Treat "\r\n" as one line break.
             if (cp == '\r' && i + 1 < n && dragon_str_cp_at(s, in, i + 1) == '\n') i++;
             i++;
             start = i;
@@ -1164,8 +1084,6 @@ DragonList* dragon_str_splitlines(const char* s) {
     return r;
 }
 
-// partition/rpartition return a 3-TUPLE (Python parity), built directly as a
-// DragonTuple. The old strstr/strlen approach missed or mismatched on UCS-4 embedded NULs; now searches by code point.
 DragonTuple* dragon_str_partition(const char* s, const char* sep) {
     DragonTuple* r = dragon_tuple_new(3);
     if (!s || !sep) {
@@ -1207,7 +1125,6 @@ DragonTuple* dragon_str_rpartition(const char* s, const char* sep) {
     DragonString* pi = dragon_is_heap_string(sep) ? dragon_string_from_data(sep) : NULL;
     int64_t sn = si ? si->len : (int64_t)strlen(s);
     int64_t sl = pi ? pi->len : (int64_t)strlen(sep);
-    // Walk every code-point match; keep the last.
     int64_t last = -1;
     if (sl > 0) {
         int64_t pos = 0;
@@ -1233,8 +1150,6 @@ DragonTuple* dragon_str_rpartition(const char* s, const char* sep) {
 DragonList* dragon_str_rsplit(const char* s, const char* sep, int64_t maxsplit) {
     if (maxsplit < 0) return dragon_str_split(s, sep);
     DragonList* all = dragon_str_split(s, sep);
-    // Phrased so maxsplit+1 is never computed here: at INT64_MAX it would
-    // signed-overflow to INT64_MIN. maxsplit >= 0 past this point, so maxsplit+1 below is overflow-free.
     if (maxsplit >= all->size - 1) return all;
     DragonList* result = dragon_list_new_tagged(maxsplit + 1, TAG_STR);
     DragonList* head = dragon_list_new_tagged(all->size - maxsplit, TAG_STR);
@@ -1250,9 +1165,9 @@ DragonList* dragon_str_rsplit(const char* s, const char* sep, int64_t maxsplit) 
         dragon_incref_str((const char*)(uintptr_t)v);
         dragon_list_append(result, v);
     }
-    dragon_decref(head);  // decrefs head's elements (the incref'd copies)
-    dragon_decref(all);   // decrefs all's original elements
+    dragon_decref(head);
+    dragon_decref(all);
     return result;
 }
 
-} // extern "C"
+}

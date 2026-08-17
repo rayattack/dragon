@@ -1,9 +1,5 @@
 #include "CodeGenTestHelpers.h"
 
-//===----------------------------------------------------------------------===//
-// Comprehension IR Tests
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenTest, ListCompRange) {
     auto ir = generateIR("xs: list[int] = [i * 2 for i in range(5)]");
     EXPECT_NE(ir.find("dragon_list_new"), std::string::npos);
@@ -16,10 +12,6 @@ TEST(CodeGenTest, ListCompWithCond) {
     EXPECT_NE(ir.find("dragon_list_append"), std::string::npos);
     EXPECT_NE(ir.find("icmp sgt"), std::string::npos);
 }
-
-//===----------------------------------------------------------------------===//
-// Comprehension E2E Tests
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenE2E, ForInAndListComp) {
     auto output = compileAndRun(
@@ -86,7 +78,6 @@ TEST(CodeGenE2E, DictCompOverRange) {
         "d: dict[str, int] = {\"k\": i for i in range(3)}\n"
         "print(len(d))"
     );
-    // Dict with same key "k" reassigned 3 times -> len is 1
     EXPECT_EQ(output, "1\n");
 }
 
@@ -120,21 +111,6 @@ TEST(CodeGenE2E, NestedListCompRange) {
     EXPECT_EQ(output, "6\n1\n2\n");
 }
 
-//===----------------------------------------------------------------------===//
-// Regression: comprehension scope cleanup
-//
-// list/dict/set/generator comprehensions must call `emitScopeCleanup()`
-// before every `popScope()`. With Int loop vars skipping it is
-// harmless (no decrefs needed), but heap-typed loop vars (str/list/dict/
-// instance) leak through every iteration without the cleanup.
-//
-// Companion to the codegen scope cleanup: the type checker binds
-// the loop variable's type from the iterable's element type, and codegen
-// uses the matching VarKind (heap-aware) for the loop var so the body
-// can call methods on it. The loop var is marked borrowed so per-iter
-// cleanup doesn't free strings still owned by the source list.
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, ListCompRangeStillWorks) {
     auto output = compileAndRun(
         "xs: list[int] = [i * 2 for i in range(5)]\n"
@@ -154,7 +130,6 @@ TEST(CodeGenE2E, ListCompCollectionStillWorks) {
 }
 
 TEST(CodeGenE2E, NestedListCompStillWorks) {
-    // Nested comprehension exercises the extra-clause path's cleanup.
     auto output = compileAndRun(
         "pairs: list[int] = [x + y for x in range(3) for y in range(3) if x != y]\n"
         "print(len(pairs))\n"
@@ -163,9 +138,6 @@ TEST(CodeGenE2E, NestedListCompStillWorks) {
 }
 
 TEST(CodeGenE2E, ListCompLoopBounded) {
-    // Build the comprehension 10k times. Pre-fix, if a future heap-typed
-    // loop var ever landed without cleanup, this pattern would surface
-    // the leak. Today it's a regression check on the int path.
     auto output = compileAndRun(
         "last_len: int = 0\n"
         "for i in range(10000) {\n"
@@ -195,8 +167,6 @@ TEST(CodeGenE2E, DictCompStillWorks) {
 }
 
 TEST(CodeGenE2E, GeneratorExprStillWorks) {
-    // Generator expressions need an explicit list[int] annotation today
-    // for the type checker to accept indexed access on the result.
     auto output = compileAndRun(
         "g: list[int] = (x * 2 for x in range(5))\n"
         "print(len(g))\n"
@@ -204,12 +174,6 @@ TEST(CodeGenE2E, GeneratorExprStillWorks) {
     );
     EXPECT_EQ(output, "5\n4\n");
 }
-
-//===----------------------------------------------------------------------===//
-// Heap-typed comprehensions - exercises the per-iter scope cleanup with a
-// real heap-typed loop variable. Used to fail with `list[<unknown>]` in the
-// type checker and "None" output at runtime.
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenE2E, ListCompStrIdentity) {
     auto output = compileAndRun(
@@ -243,8 +207,6 @@ TEST(CodeGenE2E, ListCompStrConcat) {
 }
 
 TEST(CodeGenE2E, ListCompStrSourcePreserved) {
-    // Source list must remain intact after the comprehension consumes it
-    // (loop var is a borrowed reference; cleanup must not free its strings).
     auto output = compileAndRun(
         "names: list[str] = [\"alice\", \"bob\"]\n"
         "copies: list[str] = [n for n in names]\n"
@@ -281,9 +243,6 @@ TEST(CodeGenE2E, ForInOverStrComprehension) {
 }
 
 TEST(CodeGenE2E, ListCompStrLoopBounded) {
-    // Bounded heap usage with heap-typed loop var. Per-iter cleanup must
-    // be a no-op (borrowed) for the loop var, but must run for the
-    // owned concat result before it gets stored in the list.
     auto output = compileAndRun(
         "src: list[str] = [\"foo\", \"bar\", \"baz\"]\n"
         "last: int = 0\n"

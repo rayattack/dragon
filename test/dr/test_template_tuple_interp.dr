@@ -31,15 +31,12 @@ def tmpl_pair(p: tuple[str, str]) -> str {
 
 
 def tmpl_mixed(t: tuple[int, str]) -> str {
-    # int element then str element - both element types must survive.
     h: HTML = template[HTML] {!{t[0]}:!{t[1]}}
     return h.to_str()
 }
 
 
 def tmpl_block(pairs: list[tuple[str, str]]) -> str {
-    # The memory-sensitive block-interp path: a list[str] buffer joins each
-    # rendered fragment. Every `!{p[0]}` inside is a tuple subscript too.
     h: HTML = template[HTML] {
         <ul>!{ for p in pairs { :{ <li>!{p[0]}=!{p[1]}</li> } } }</ul>
     }
@@ -50,7 +47,6 @@ def tmpl_block(pairs: list[tuple[str, str]]) -> str {
 class TemplateTupleInterpTests(TestCase) {
     def test_str_tuple_matches_fstring() {
         p: tuple[str, str] = ("a", "x")
-        # The template rendering must equal the f-string rendering, not a pointer.
         self.assertEqual(tmpl_pair(p).strip(), "a=x")
         self.assertEqual(tmpl_pair(p).strip(), f"{p[0]}={p[1]}")
     }
@@ -62,7 +58,6 @@ class TemplateTupleInterpTests(TestCase) {
 
     def test_tuple_subscript_in_block_interp() {
         pairs: list[tuple[str, str]] = [("a", "x"), ("b", "y")]
-        # Bounded loop so the block-buffer path stays leak-checkable under ASan.
         out: str = ""
         i: int = 0
         while i < 20 {
@@ -71,7 +66,6 @@ class TemplateTupleInterpTests(TestCase) {
         }
         self.assertTrue("<li>a=x</li>" in out)
         self.assertTrue("<li>b=y</li>" in out)
-        # No stray pointer decimals leaked into the markup.
         self.assertTrue("=x</li>" in out)
         self.assertFalse("0x" in out)
     }

@@ -1,10 +1,3 @@
-# test/dr/test_merkle.dr - RFC 6962 Merkle tree exhaustive small-tree KAT.
-#
-# Cross-checks proof GENERATION (recursive MTH/PATH/SUBPROOF) against proof
-# VERIFICATION (iterative decomposition) for every tree size, leaf index, and
-# (m <= n) consistency pair up to N - the standard way CT implementations are
-# validated - plus negative cases (wrong leaf / wrong root / rewritten tree).
-
 from unittest import TestCase, main
 from merkle import root, inclusion_proof, verify_inclusion, consistency_proof, verify_consistency
 
@@ -29,7 +22,6 @@ class MerkleTests(TestCase) {
             while idx < size {
                 const p: list[bytes] = inclusion_proof(lvs, idx)
                 self.assertTrue(verify_inclusion(lvs[idx], idx, size, p, r))
-                # a different leaf at the same position must not verify
                 self.assertFalse(verify_inclusion(("x" + str(idx)).encode("utf-8"), idx, size, p, r))
                 idx = idx + 1
             }
@@ -68,8 +60,6 @@ class MerkleTests(TestCase) {
         const seven: list[bytes] = _leaves(7)
         const proof: list[bytes] = consistency_proof(seven, 5, 7)
         self.assertTrue(verify_consistency(5, 7, proof, root(five), root(seven)))
-        # a "new" tree whose history was rewritten (leaf 0 changed) is NOT an
-        # append of the size-5 tree, so the same proof must fail against it.
         forged: list[bytes] = _leaves(7)
         forged[0] = b"rewritten"
         self.assertFalse(verify_consistency(5, 7, proof, root(five), root(forged)))

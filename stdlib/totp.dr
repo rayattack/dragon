@@ -43,8 +43,6 @@ def hotp(secret: bytes, counter: int, digits: int = 6, algorithm: str = "sha1") 
     if n < 20 {
         raise ValueError("HMAC digest too short for dynamic truncation")
     }
-    # Low 4 bits of the last digest byte select the truncation offset (RFC
-    # 4226 §5.4); this generalizes correctly to SHA-256/512 (RFC 6238 vectors).
     offset: int = digest[n - 1] & 0x0F
     bin_code: int = ((digest[offset] & 0x7F) << 24) | ((digest[offset + 1] & 0xFF) << 16) | ((digest[offset + 2] & 0xFF) << 8) | (digest[offset + 3] & 0xFF)
     modulo: int = 10 ** digits

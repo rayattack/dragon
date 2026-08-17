@@ -1,11 +1,6 @@
 #include "CodeGenTestHelpers.h"
 
-//===----------------------------------------------------------------------===//
-// Literals IR Tests
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenTest, IntegerLiteral) {
-    // Use print() so the constant appears in IR as a call argument
     auto ir = generateIR("print(42)");
     EXPECT_NE(ir.find("42"), std::string::npos);
     EXPECT_NE(ir.find("dragon_print_int"), std::string::npos);
@@ -22,15 +17,10 @@ TEST(CodeGenTest, StringLiteral) {
 }
 
 TEST(CodeGenTest, BoolLiteral) {
-    // Bare True is a valid ExprStmt; constant-folded away but IR is valid
     auto ir = generateIR("True");
     EXPECT_NE(ir.find("define i32 @main("), std::string::npos);
     EXPECT_EQ(ir.find("<codegen failed"), std::string::npos);
 }
-
-//===----------------------------------------------------------------------===//
-// String IR Tests
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenTest, StringIndex) {
     auto ir = generateIR("s: str = \"hello\"\nprint(s[0])");
@@ -68,7 +58,6 @@ TEST(CodeGenTest, StringIsDigit) {
 }
 
 TEST(CodeGenIR, StringCmpDeclared) {
-    // dragon_str_cmp should be declared in IR when string ordering is used
     auto ir = generateIR(
         "a: str = \"x\"\n"
         "b: str = \"y\"\n"
@@ -77,10 +66,6 @@ TEST(CodeGenIR, StringCmpDeclared) {
     EXPECT_NE(ir.find("dragon_str_cmp"), std::string::npos)
         << "Expected dragon_str_cmp call for string < comparison\nIR:\n" << ir;
 }
-
-//===----------------------------------------------------------------------===//
-// F-String IR Tests
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenTest, FStringSimple) {
     auto ir = generateIR("x: int = 42\nprint(f\"value is {x}\")");
@@ -96,45 +81,32 @@ TEST(CodeGenTest, FStringFormatSpecIR) {
     EXPECT_NE(ir.find("dragon_float_format"), std::string::npos);
 }
 
-//===----------------------------------------------------------------------===//
-// F-String / String RC IR Tests
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenIR, FStringIntermediateDecref) {
-    // F-string with 3+ parts should emit decref for concat intermediates
     auto ir = generateIR(
         "x: int = 1\n"
         "y: int = 2\n"
         "s: str = f\"a {x} b {y} c\"\n"
     );
-    // Should contain dragon_decref_str calls for intermediates
     auto count = 0;
     std::string::size_type pos = 0;
     while ((pos = ir.find("dragon_decref_str", pos)) != std::string::npos) {
         count++;
         pos += 17;
     }
-    // Expect at least some decref_str calls (intermediates + conversion results)
     EXPECT_GE(count, 2)
         << "Expected decref_str for f-string intermediates\nIR:\n" << ir;
 }
 
 TEST(CodeGenIR, BinaryStringConcatChainDecref) {
-    // a + b + c should decref the intermediate concat(a,b) result
     auto ir = generateIR(
         "a: str = \"x\"\n"
         "b: str = \"y\"\n"
         "c: str = \"z\"\n"
         "s: str = a + b + c\n"
     );
-    // The IR should contain dragon_decref_str to clean up the a+b intermediate
     EXPECT_NE(ir.find("dragon_decref_str"), std::string::npos)
         << "Expected decref_str for concat chain intermediate\nIR:\n" << ir;
 }
-
-//===----------------------------------------------------------------------===//
-// F-String E2E Tests
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenE2E, FStringArithmetic) {
     auto output = compileAndRun(
@@ -228,7 +200,6 @@ TEST(CodeGenE2E, FStringMixed) {
 }
 
 TEST(CodeGenE2E, FStringMultiInterpolation) {
-    // F-string with many interpolations should work correctly
     auto output = compileAndRun(
         "x: int = 1\n"
         "y: int = 2\n"
@@ -237,14 +208,6 @@ TEST(CodeGenE2E, FStringMultiInterpolation) {
     );
     EXPECT_EQ(output, "1 + 2 = 3\n");
 }
-
-//===----------------------------------------------------------------------===//
-// Format-spec validator tests (security)
-//===----------------------------------------------------------------------===//
-// Unvalidated, user-controlled format specs flow directly into snprintf,
-// allowing %n stack writes and %s stack reads, plus a strncpy overflow on
-// the 32-byte prefix buffer. The validator rejects any non-grammar input
-// with ValueError; long specs are bounds-clamped as defense-in-depth.
 
 TEST(CodeGenE2E, FStringRejectsPercentN) {
     auto output = compileAndRun(
@@ -271,11 +234,6 @@ TEST(CodeGenE2E, FStringRejectsPercentS) {
 }
 
 TEST(CodeGenE2E, FStringLongAllZeroSpec) {
-    // A 100-char all-zeros spec must not crash. It is a VALID Python spec
-    // (leading 0 => zero-fill, the remaining zeros => width 0), so Python and
-    // Dragon both render the bare value "42" - not a ValueError. (An absurd
-    // *non-zero* width like 999999999 is still rejected; see
-    // FStringRejectsHugeWidth.)
     auto output = compileAndRun(
         "x: int = 42\n"
         "print(f\"{x:00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d}\")\n"
@@ -284,8 +242,6 @@ TEST(CodeGenE2E, FStringLongAllZeroSpec) {
 }
 
 TEST(CodeGenE2E, FStringRejectsHugeWidth) {
-    // Width beyond the 1,000,000 cap raises ValueError rather than attempting a
-    // gigantic allocation.
     auto output = compileAndRun(
         "x: int = 42\n"
         "try {\n"
@@ -310,7 +266,6 @@ TEST(CodeGenE2E, FStringRejectsFloatPercentN) {
 }
 
 TEST(CodeGenE2E, FStringValidSpecsStillWork) {
-    // Regression: validator must accept all previously-working specs.
     auto output = compileAndRun(
         "v: float = 3.14159\n"
         "x: int = 42\n"
@@ -323,10 +278,6 @@ TEST(CodeGenE2E, FStringValidSpecsStillWork) {
     );
     EXPECT_EQ(output, "3.14\n2a\n2A\n52\n101010\n00042\n");
 }
-
-//===----------------------------------------------------------------------===//
-// String E2E Tests
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenE2E, StringOperations) {
     auto output = compileAndRun(
@@ -366,8 +317,6 @@ TEST(CodeGenE2E, StringSlice) {
 }
 
 TEST(CodeGenE2E, ExprStmtStringMethodNoLeak) {
-    // Expression-as-statement returning a string should not crash
-    // (tests that the decref on discarded result is correct)
     auto output = compileAndRun(
         "s: str = \"hello\"\n"
         "s.upper()\n"
@@ -377,7 +326,6 @@ TEST(CodeGenE2E, ExprStmtStringMethodNoLeak) {
 }
 
 TEST(CodeGenE2E, StringConcatChainE2E) {
-    // Chained string concat should produce correct result
     auto output = compileAndRun(
         "a: str = \"hello\"\n"
         "b: str = \" \"\n"
@@ -388,7 +336,6 @@ TEST(CodeGenE2E, StringConcatChainE2E) {
 }
 
 TEST(CodeGenE2E, StringOrdering) {
-    // Bug 3: string ordering comparisons (<, >, <=, >=) should work
     auto output = compileAndRun(
         "print(\"apple\" < \"banana\")\n"
         "print(\"cat\" > \"bat\")\n"
@@ -399,7 +346,6 @@ TEST(CodeGenE2E, StringOrdering) {
 }
 
 TEST(CodeGenE2E, StringOrderingVariables) {
-    // String ordering with variables (like fnmatch character ranges)
     auto output = compileAndRun(
         "ch: str = \"d\"\n"
         "lo: str = \"a\"\n"
@@ -414,7 +360,6 @@ TEST(CodeGenE2E, StringOrderingVariables) {
 }
 
 TEST(CodeGenE2E, ListStrSubscript) {
-    // Bug 2: list[str] subscript should return a string, not a raw pointer
     auto output = compileAndRun(
         "names: list[str] = [\"alice\", \"bob\", \"charlie\"]\n"
         "print(names[0])\n"
@@ -424,8 +369,6 @@ TEST(CodeGenE2E, ListStrSubscript) {
 }
 
 TEST(CodeGenE2E, ListFloatSubscript) {
-    // Bug 4: list[float] subscript should return a float, not garbage
-    // Use values that produce a non-integer sum to verify float unboxing
     auto output = compileAndRun(
         "vals: list[float] = [1.5, 2.3, 3.5]\n"
         "x: float = vals[0]\n"
@@ -434,10 +377,6 @@ TEST(CodeGenE2E, ListFloatSubscript) {
     );
     EXPECT_EQ(output, "3.8\n");
 }
-
-//===----------------------------------------------------------------------===//
-// Bytes IR Tests
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenTest, BytesLiteralIR) {
     auto ir = generateIR("b: bytes = b\"hello\"\n");
@@ -476,10 +415,6 @@ TEST(CodeGenTest, StrEncodeIR) {
     );
     EXPECT_NE(ir.find("dragon_str_encode"), std::string::npos);
 }
-
-//===----------------------------------------------------------------------===//
-// Bytes E2E Tests
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenE2E, BytesLiteralPrint) {
     auto output = compileAndRun("print(b\"hello\")\n");
@@ -699,22 +634,7 @@ TEST(CodeGenE2E, BytesIsDigit) {
     EXPECT_EQ(output, "True\n");
 }
 
-//===----------------------------------------------------------------------===//
-// Regression: string concat intermediate leaks
-//
-// Verifies that intermediate strings from runtime calls (str.upper(),
-// str.lower(), str.replace(), str() coercion, slice) are decref'd when
-// consumed by an outer concat expression, instead of leaking on every
-// iteration.
-//
-// To run under valgrind:
-//  valgrind --leak-check=full ./dragon_codegen_tests \
-//  --gtest_filter='CodeGenE2E.ConcatIntermediate*'
-// Bounded heap usage = success.
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, ConcatIntermediateUpperLowerLoop) {
-    // s.upper() + s.lower() in a loop - both sides are owned intermediates.
     auto output = compileAndRun(
         "s: str = \"AbCdE\"\n"
         "last: str = \"\"\n"
@@ -727,7 +647,6 @@ TEST(CodeGenE2E, ConcatIntermediateUpperLowerLoop) {
 }
 
 TEST(CodeGenE2E, ConcatIntermediateStrCoercionLoop) {
-    // str(x) + str(y) in a loop - both sides go through dragon_int_to_str.
     auto output = compileAndRun(
         "last: str = \"\"\n"
         "for i in range(10000) {\n"
@@ -739,7 +658,6 @@ TEST(CodeGenE2E, ConcatIntermediateStrCoercionLoop) {
 }
 
 TEST(CodeGenE2E, ConcatIntermediateSliceLoop) {
-    // s[0:3] + s[3:6] in a loop - both sides are dragon_str_slice results.
     auto output = compileAndRun(
         "s: str = \"abcdef\"\n"
         "last: str = \"\"\n"
@@ -752,10 +670,6 @@ TEST(CodeGenE2E, ConcatIntermediateSliceLoop) {
 }
 
 TEST(CodeGenE2E, ConcatIntermediateTriple) {
-    // Triple concat: a.upper() + b.lower() + c.replace("x", "y")
-    // The first concat result is itself a CallInst returning i8* and must be
-    // decref'd by the outer concat. All three method-call intermediates must
-    // also be cleaned up.
     auto output = compileAndRun(
         "a: str = \"AAA\"\n"
         "b: str = \"BBB\"\n"
@@ -770,8 +684,6 @@ TEST(CodeGenE2E, ConcatIntermediateTriple) {
 }
 
 TEST(CodeGenE2E, ConcatIntermediateLiteralPlusStrPlusLiteral) {
-    // "prefix-" + str(n) + "-suffix" - literals must NOT be decref'd
-    // (they're immortal/global), but str(n) is an intermediate.
     auto output = compileAndRun(
         "last: str = \"\"\n"
         "for i in range(10000) {\n"
@@ -782,14 +694,7 @@ TEST(CodeGenE2E, ConcatIntermediateLiteralPlusStrPlusLiteral) {
     EXPECT_EQ(output, "prefix-9999-suffix\n");
 }
 
-//===----------------------------------------------------------------------===//
-// IR-level checks: confirm decref_str is emitted for intermediates that
-// would otherwise leak.
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenIR, ConcatBroadDecrefUpperLower) {
-    // s.upper() + s.lower() - must decref BOTH intermediates (not just
-    // dragon_str_concat results). Pre-fix, neither side was decref'd.
     auto ir = generateIR(
         "s: str = \"AbCdE\"\n"
         "r: str = s.upper() + s.lower()\n"
@@ -797,8 +702,6 @@ TEST(CodeGenIR, ConcatBroadDecrefUpperLower) {
     EXPECT_NE(ir.find("dragon_str_upper"), std::string::npos);
     EXPECT_NE(ir.find("dragon_str_lower"), std::string::npos);
     EXPECT_NE(ir.find("dragon_str_concat"), std::string::npos);
-    // Count decref_str calls - expect at least 2 for the two intermediates
-    // (the outer assignment may emit more for the result).
     auto count = 0;
     std::string::size_type pos = 0;
     while ((pos = ir.find("dragon_decref_str", pos)) != std::string::npos) {
@@ -811,7 +714,6 @@ TEST(CodeGenIR, ConcatBroadDecrefUpperLower) {
 }
 
 TEST(CodeGenIR, ConcatBroadDecrefIntToStr) {
-    // str(x) + str(y) - both dragon_int_to_str results are owned intermediates.
     auto ir = generateIR(
         "x: int = 1\n"
         "y: int = 2\n"
@@ -829,18 +731,6 @@ TEST(CodeGenIR, ConcatBroadDecrefIntToStr) {
         << "Expected at least 2 decref_str calls for int_to_str intermediates\n"
         << "IR:\n" << ir;
 }
-
-//===----------------------------------------------------------------------===//
-// Regression: str.join NULL element guard
-//
-// Pre-fix: dragon_str_join called strlen() on each element with no NULL guard,
-// crashing if any list slot was NULL. The fix skips NULL elements and only
-// reads strlen on non-NULL.
-//
-// We can't construct a NULL-string list directly from .dr code (empty strings
-// are non-NULL DragonString*), so these tests pin down the surrounding happy
-// paths to lock in the behavior the fix was supposed to preserve.
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenE2E, StrJoinEmptyList) {
     auto output = compileAndRun(
@@ -861,7 +751,6 @@ TEST(CodeGenE2E, StrJoinSingleElement) {
 }
 
 TEST(CodeGenE2E, StrJoinAllEmptyStrings) {
-    // Empty strings are valid (not NULL); separator must still appear between them.
     auto output = compileAndRun(
         "xs: list[str] = [\"\", \"\", \"\"]\n"
         "r: str = \"|\".join(xs)\n"
@@ -889,9 +778,6 @@ TEST(CodeGenE2E, StrJoinEmptySeparator) {
 }
 
 TEST(CodeGenE2E, StrJoinLoopBounded) {
-    // Tight loop - verifies the NULL guard's `continue` path is well-formed
-    // (early-return was the alternative; `continue` keeps the separator slot
-    // count consistent so we don't get crashes or extra-separator artifacts).
     auto output = compileAndRun(
         "xs: list[str] = [\"alpha\", \"\", \"beta\"]\n"
         "last: str = \"\"\n"
@@ -903,21 +789,7 @@ TEST(CodeGenE2E, StrJoinLoopBounded) {
     EXPECT_EQ(output, "alpha--beta\n");
 }
 
-//===----------------------------------------------------------------------===//
-// Regression: str.replace signed arithmetic
-//
-// Pre-fix: `slen + count * (nlen - olen)` used unsigned size_t arithmetic.
-// When replacement is shorter than the search string, `nlen - olen` wraps
-// negative as a huge unsigned value. The result was accidentally correct
-// via the unsigned-wrap invariant but is fragile. The fix casts to int64_t
-// before subtraction.
-//
-// These tests exercise the three regimes: shrink (nlen < olen),
-// expand (nlen > olen), equal-length, and zero-match.
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, StrReplaceShrink) {
-    // Replacement shorter than search -> result smaller than input.
     auto output = compileAndRun(
         "s: str = \"xxxxxxxx\"\n"
         "r: str = s.replace(\"xx\", \"y\")\n"
@@ -954,7 +826,6 @@ TEST(CodeGenE2E, StrReplaceNoMatch) {
 }
 
 TEST(CodeGenE2E, StrReplaceShrinkToEmpty) {
-    // Aggressive shrink: replacement empty -> exercises (0 - olen) signed math.
     auto output = compileAndRun(
         "s: str = \"a-b-c-d\"\n"
         "r: str = s.replace(\"-\", \"\")\n"
@@ -972,12 +843,7 @@ TEST(CodeGenE2E, StrReplaceFullString) {
     EXPECT_EQ(output, "[]\n");
 }
 
-//===----------------------------------------------------------------------===//
-// 4.7 PEP 393-lite Unicode strings - code-point semantics
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, Utf8LenIsCodePointCount) {
-    // Python 3 semantics: len() returns code-point count, not byte count.
     auto output = compileAndRun(
         "a: str = \"hello\"\n"
         "b: str = \"caf\xc3\xa9\"\n"
@@ -1034,8 +900,6 @@ TEST(CodeGenE2E, Utf8ConcatMixedKind) {
 }
 
 TEST(CodeGenE2E, Utf8ConcatCanonicalDowngrade) {
-    // Replace that strips the only non-ASCII char must produce a kind=1
-    // (canonical-storage) result; len/indexing/print all remain correct.
     auto output = compileAndRun(
         "s: str = \"h\xc3\xa9llo\"\n"
         "r: str = s.replace(\"\xc3\xa9\", \"e\")\n"
@@ -1123,11 +987,6 @@ TEST(CodeGenE2E, Utf8AsciiUpperLowerStillWork) {
 }
 
 TEST(CodeGenE2E, Utf8CaseMapsLatin1) {
-    // Simple Unicode case folding (algorithmic, no tables): Latin-1 Supplement
-    // letters fold like ASCII. é (U+00E9) -> É (U+00C9), ö (U+00F6) -> Ö
-    // (U+00D6). (Was identity-only in v0.0.1; the security pass widened folding
-    // to Latin-1/Latin-Ext-A/Greek/Cyrillic so username case-compares are not
-    // fooled by un-folded non-ASCII letters.)
     auto output = compileAndRun(
         "s: str = \"h\xc3\xa9llo w\xc3\xb6rld\"\n"
         "print(s.upper())\n"
@@ -1135,18 +994,6 @@ TEST(CodeGenE2E, Utf8CaseMapsLatin1) {
     EXPECT_EQ(output, "H\xc3\x89LLO W\xc3\x96RLD\n");
 }
 
-// Regression for the wire-byte-count contract of `dragon_str_byte_len_pub`.
-// The helper backs HTTP `Content-Length` and `nb_send` length, where the
-// caller needs the bytes that will actually travel on the wire (UTF-8). The
-// pre-fix implementation returned `ds->len * ds->kind` for kind=4 strings -
-// i.e. the storage byte count (4×cp_count), not the UTF-8 wire byte count
-// - making clients hang waiting for bytes that never arrived. The fix walks
-// the cps and sums `utf8_encode_one` widths.
-//
-// Test inputs cover the three wire widths the helper has to compute:
-//  - "caf\xc3\xa9" (kind=4, 4 cps, 5 wire bytes - one 2-byte cp)
-//  - 3 CJK cps (kind=4, 3 cps, 9 wire bytes - three 3-byte cps)
-//  - pure ASCII (kind=1, 5 cps, 5 wire bytes - fast path)
 TEST(CodeGenE2E, Utf8ByteLenPubReturnsWireBytes) {
     auto output = compileAndRun(
         "extern \"C\" def dragon_str_byte_len_pub(s: str) -> int\n"
@@ -1162,10 +1009,6 @@ TEST(CodeGenE2E, Utf8ByteLenPubReturnsWireBytes) {
            "kind=4 (would yield 16 / 12 / 5 instead of 5 / 9 / 5):\n"
         << output;
 }
-
-//===----------------------------------------------------------------------===//
-// Multi-arg print() - Python sep=' ', end='\n'
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenE2E, PrintMultiArgStrings) {
     EXPECT_EQ(compileAndRun("print(\"a\", \"b\", \"c\")\n"), "a b c\n");
@@ -1190,7 +1033,6 @@ TEST(CodeGenE2E, PrintMultiArgVariables) {
 }
 
 TEST(CodeGenE2E, PrintMultiArgWithList) {
-    // A container as a non-final arg renders inline (no stray newline).
     EXPECT_EQ(compileAndRun(
         "xs: list[int] = [1, 2, 3]\n"
         "print(\"xs:\", xs)\n"),
@@ -1198,7 +1040,6 @@ TEST(CodeGenE2E, PrintMultiArgWithList) {
 }
 
 TEST(CodeGenE2E, PrintSingleArgUnchanged) {
-    // Single-arg formatting must be byte-identical to the pre-refactor path.
     EXPECT_EQ(compileAndRun("print(42)\n"), "42\n");
     EXPECT_EQ(compileAndRun("print(\"solo\")\n"), "solo\n");
 }

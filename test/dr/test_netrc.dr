@@ -54,7 +54,6 @@ class NetrcTests(TestCase) {
         self.assertEqual(b[0], "user_b")
         self.assertEqual(b[1], "acct_b")
         self.assertEqual(b[2], "pw_b")
-        # Default kicks in for unknown hosts.
         self.assertEqual(d[0], "anon")
         self.assertEqual(d[2], "guest")
         os.remove(path)
@@ -78,7 +77,6 @@ class NetrcTests(TestCase) {
 "  password p\n")
         nrc: netrc.netrc = netrc.netrc(path)
         miss: tuple[str, str, str] = nrc.authenticators("c.unknown")
-        # No default - all three fields empty.
         self.assertEqual(miss[0], "")
         self.assertEqual(miss[1], "")
         self.assertEqual(miss[2], "")

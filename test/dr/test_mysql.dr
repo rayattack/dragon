@@ -28,7 +28,6 @@ class MySqlTests(TestCase) {
             db.raw("use dragontest")
             db.raw("create temporary table dr_my_test(id int auto_increment primary key, name varchar(64), score double, flag tinyint)")
 
-            # Parameterized insert (binary prepared statement) - injection-safe.
             nm: str = "'; drop table dr_my_test; --"
             sc: float = 9.5
             fl: int = 1
@@ -38,7 +37,6 @@ class MySqlTests(TestCase) {
             self.assertEqual(res.ran, 1)
             self.assertEqual(res.xid, 1)
 
-            # Parameterized query with a bound predicate; verify typed decode.
             minscore: float = 5.0
             rows: list[dict[str, Any]] = db.all(template[SQL] {
                 select id, name, score, flag from dr_my_test where score > !{minscore}
@@ -46,14 +44,13 @@ class MySqlTests(TestCase) {
             self.assertEqual(len(rows), 1)
             r: dict[str, Any] = rows[0]
             self.assertEqual(r["id"], 1)
-            self.assertEqual(r["name"], "'; drop table dr_my_test; --")  # stored verbatim
+            self.assertEqual(r["name"], "'; drop table dr_my_test; --")
             got: float = r["score"]
-            self.assertAlmostEqual(got, 9.5)                              # DOUBLE binary decode
+            self.assertAlmostEqual(got, 9.5)
             self.assertEqual(r["flag"], 1)
 
-            # scalar + one (shared base methods, virtual-dispatched to MySqlConnection).
             cnt: int = db.val(template[SQL] { select count(*) as n from dr_my_test })
-            self.assertEqual(cnt, 1)                                      # table survived the payload
+            self.assertEqual(cnt, 1)
             one: dict[str, Any] = db.one(template[SQL] { select name from dr_my_test })
             self.assertEqual(one["name"], "'; drop table dr_my_test; --")
             db.close()

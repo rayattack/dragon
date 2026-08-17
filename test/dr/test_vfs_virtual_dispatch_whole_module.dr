@@ -34,8 +34,6 @@ from tempfile import mktemp
 
 class VfsVirtualDispatchTests(TestCase) {
     def test_filevfs_size_dispatches_to_override() {
-        # A fresh file is empty. If this reached VFS.size() (the base) it would
-        # raise "size not implemented" and never return a value.
         v: FileVFS = FileVFS(mktemp("dr_vfs_", ".bin"))
         self.assertEqual(v.size(), 0)
         v.close()
@@ -54,8 +52,6 @@ class VfsVirtualDispatchTests(TestCase) {
     }
 
     def test_simvfs_size_dispatches_to_override() {
-        # A second VFS subclass, so the guard is not one incidental variable
-        # name: its size()/write_at() overrides must run too.
         s: SimVFS = SimVFS()
         self.assertEqual(s.size(), 0)
         s.write_at(0, bytes([9, 9]))

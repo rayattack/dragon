@@ -29,7 +29,6 @@ extern "C" def dragon_tls_write(conn: ptr, buf: str, length: int) -> int
 extern "C" def dragon_tls_send_bytes(conn: ptr, data: bytes) -> int
 extern "C" def dragon_tls_read(conn: ptr, buf: ptr, length: int) -> int
 extern "C" def dragon_tls_recv_str(conn: ptr, maxlen: int) -> str
-# R1: bounded read - abandons after `ms` of silence, returning "" (EOF contract).
 extern "C" def dragon_tls_recv_str_timeout(conn: ptr, maxlen: int, ms: int) -> str
 extern "C" def dragon_tls_close(conn: ptr) -> int
 extern "C" def dragon_tls_error_string(code: int, buf: ptr, length: int)
@@ -78,8 +77,6 @@ def _raise_if_handshake_failed(rc: int, vr: int) -> None {
 
 
 class SSLSocket {
-    # Sole owner of the TLS engine connection, released exactly once
-    # (docs/001-memory.md); close() releases early with close_notify, nulling the handle.
     own _conn: ptr
 
     def(own conn: ptr, sock: TcpStream, server_hostname: str) {
@@ -133,7 +130,6 @@ class SSLSocket {
         return rc
     }
 
-    # CPython SSLSocket aliases.
     def read(n: int = 8192) -> bytes {
         return self.recv_bytes(n)
     }
@@ -165,15 +161,13 @@ class SSLSocket {
 
     def close() -> None {
         # Idempotent: without this guard, a second close() (e.g. explicit close
-        # + __exit__) reuses the freed _conn (UAF + double free). See ssl.notes.dr.
+        # + __exit__) reuses the freed _conn (UAF + double free).
         if self._closed {
             return
         }
         self._closed = True
         dragon_tls_close(self._conn)
         dragon_tls_conn_free(self._conn)
-        # Null the handle: the own release at socket death is null-gated,
-        # so close() and the automatic release free exactly once.
         self._conn = 0
         self._sock.close()
     }
@@ -189,8 +183,6 @@ class SSLSocket {
 
 
 class SSLContext {
-    # Sole owner of the mbedTLS engine context (~54KB+ incl. CA/cert chains),
-    # released exactly once (docs/001-memory.md); close() nulls the handle for early release.
     own _ctx: ptr
 
     def(protocol: int = PROTOCOL_TLS_CLIENT) {
@@ -211,8 +203,6 @@ class SSLContext {
         }
         self._closed = True
         dragon_tls_ctx_free(self._ctx)
-        # Null the handle: the own release at instance death is null-gated,
-        # so an early close() and the automatic release free exactly once.
         self._ctx = 0
     }
 
@@ -232,8 +222,6 @@ class SSLContext {
     def load_verify_locations(cafile: str = "", capath: str = "") -> None {
         if cafile != "" {
             rc: int = dragon_tls_ctx_load_ca_file(self._ctx, cafile)
-            # parse returns >=0 (count of unparseable entries, tolerated); a
-            # negative result is a hard load failure.
             if rc < 0 {
                 raise SSLError(f"failed to load CA file '{cafile}': {_err_msg(rc)}")
             }
@@ -247,8 +235,6 @@ class SSLContext {
     }
 
     def load_default_certs() -> None {
-        # Portable resolution (dragon_default_ca_file): $SSL_CERT_FILE > known
-        # system bundles > Dragon's bundled Mozilla cacert.pem; plus $SSL_CERT_DIR.
         cafile: str = dragon_default_ca_file()
         if cafile != "" {
             self.load_verify_locations(cafile, "")
@@ -276,10 +262,8 @@ class SSLContext {
         conn: ptr = dragon_tls_conn_new(self._ctx, sock.raw_fd(), server_hostname)
         if do_handshake_on_connect {
             rc: int = dragon_tls_handshake(conn)
-            vr: int = dragon_tls_get_verify_result(conn)  # capture before cleanup
+            vr: int = dragon_tls_get_verify_result(conn)
             if rc != 0 {
-                # The owning SSLSocket isn't constructed on this path, so free
-                # the engine context here rather than leaking it.
                 dragon_tls_conn_free(conn)
             }
             _raise_if_handshake_failed(rc, vr)

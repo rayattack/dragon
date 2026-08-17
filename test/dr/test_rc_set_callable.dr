@@ -20,22 +20,20 @@ class SetCallableRcTests(TestCase) {
             s.add(g)
             s.add(h)
             s.add(k)
-            s.remove(g)     # release path 1
-            s.discard(h)    # release path 2
+            s.remove(g)
+            s.discard(h)
             if i % 2 == 0 {
-                s.clear()   # release path 3; else destroy covers path 4
+                s.clear()
             }
             total = total + len(s)
             i = i + 1
         }
-        # odd iterations keep 2 elements: 250 * 2
         self.assertEqual(total, 500)
     }
 
     def test_copy_coowns_closures() {
-        # The copy must incref tag-10 elements: drop the original, collect
-        # nothing, and the copy's closures must still be callable (a missing
-        # incref would make this a double-free / UAF under ASan).
+        # The copy must incref tag-10 elements: drop the original, collect nothing, and the
+        # copy's closures stay callable (a missing incref is a double-free / UAF under ASan).
         s: set[Callable[[], int]] = set()
         f: Callable[[], int] = make(41)
         s.add(f)

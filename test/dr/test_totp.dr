@@ -18,7 +18,6 @@ const SECRET: bytes = b"12345678901234567890"
 
 class HotpRfc4226Tests(TestCase) {
     def test_rfc4226_appendix_d_table() {
-        # The full RFC 4226 §6.2 truncated 6-digit value column, counters 0..9.
         expected: list[str] = ["755224", "287082", "359152", "969429",
             "338314", "254676", "287922", "162583", "399871", "520489"]
         i: int = 0
@@ -33,8 +32,6 @@ class HotpRfc4226Tests(TestCase) {
     }
 
     def test_zero_left_padding_preserved() {
-        # Counter 0's code is 755224 (no leading zero here), but the contract is
-        # that the result is always exactly `digits` wide - assert the width.
         code: str = hotp(SECRET, 4, 8)
         self.assertEqual(len(code), 8)
     }
@@ -43,7 +40,6 @@ class HotpRfc4226Tests(TestCase) {
 
 class TotpRfc6238Tests(TestCase) {
     def test_t59_maps_to_counter_one() {
-        # RFC 6238: t=59, step=30 -> floor(59/30)=1 -> HOTP counter 1 = 287082.
         self.assertEqual(totp_at(SECRET, 59, 30, 6), "287082")
     }
 
@@ -59,8 +55,6 @@ class TotpRfc6238Tests(TestCase) {
 
 class VerifyTests(TestCase) {
     def test_verify_accepts_current_window() {
-        # verify() reads the live clock; the code it just computed for the
-        # current counter must verify with the default skew.
         code: str = totp_at(SECRET, _live_counter_time(), 30, 6)
         self.assertTrue(verify(code, SECRET))
     }
@@ -70,16 +64,12 @@ class VerifyTests(TestCase) {
     }
 
     def test_verify_rejects_distant_window() {
-        # A code computed ~1000 steps away can never land in the live scan
-        # window (skew=0..a few), so this is immune to clock-boundary races.
         far: str = totp_at(SECRET, _live_counter_time() + 30000, 30, 6)
         self.assertFalse(verify(far, SECRET, 30, 6, 1))
     }
 }
 
 
-# Read the live clock the same way totp()/verify() do, so the test's expected
-# code lines up with the window verify() will scan.
 def _live_counter_time() -> int {
     return _now()
 }

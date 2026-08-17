@@ -1,6 +1,3 @@
-# Pre-fix: re.compile("(") stored pcre2's NULL result without checking, so the
-# error was silent and a later match() passed NULL into pcre2 and crashed.
-
 from unittest import TestCase, main
 from re import compile, sub, findall, split, error, Pattern
 import re

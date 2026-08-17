@@ -1,7 +1,3 @@
-# const u: User = User(**decode[dict[str, Any]](body))  # boxed detour
-# const u: User = decode[User](body)                     # the real thing
-# no more building dict[str, Any] first e.g. moving from map[string]interface{} to serde style
-
 from unittest import TestCase, main
 from json import decode
 
@@ -23,7 +19,6 @@ class DecodeBasicTests(TestCase) {
         self.assertTrue(u.active)
     }
 
-    # Document order need not match declaration order.
     def test_out_of_order() {
         const u: User = decode[User]('{"tag": "x", "active": false, "id": 3}'.encode("utf-8"))
         self.assertEqual(u.id, 3)
@@ -31,7 +26,6 @@ class DecodeBasicTests(TestCase) {
         self.assertFalse(u.active)
     }
 
-    # Unrequested keys (scalar, nested object, array) are skipped, not materialized.
     def test_skips_unrequested_keys() {
         const body: bytes = '{"id": 1, "extra": {"a": [1,2,3], "b": "zzz"}, "tag": "t", "junk": 999, "active": true}'.encode("utf-8")
         const u: User = decode[User](body)
@@ -43,8 +37,6 @@ class DecodeBasicTests(TestCase) {
 
 
 class DecodeAdversarialTests(TestCase) {
-    # Leak probe: skip_value() over many unrequested keys must not allocate, so
-    # RSS stays flat across the loop (LSan under build-asan; ulimit -v otherwise).
     def test_skip_key_no_leak() {
         const body: bytes = '{"id": 42, "k0": "aaaaaaaa", "k1": [1,2,3,4,5], "k2": {"n": {"d": "deep"}}, "tag": "hot", "k3": 3.14159, "active": true, "k4": null}'.encode("utf-8")
         i: int = 0
@@ -67,7 +59,6 @@ class DecodeAdversarialTests(TestCase) {
         })
     }
 
-    # Malformed mid-decode raises and frees the partial instance (checked under build-asan).
     def test_malformed_raises() {
         self.assertRaises(ValueError, lambda () -> None {
             const u: User = decode[User]('{"id": 1, "tag": "t", "active": tru'.encode("utf-8"))
@@ -113,7 +104,6 @@ class DecodeListTests(TestCase) {
         self.assertEqual(len(t.ids), 0)
     }
 
-    # Leak probe: list-field decode/drop loop must stay flat under build-asan.
     def test_list_no_leak() {
         i: int = 0
         while i < 3000 {
@@ -161,7 +151,6 @@ class DecodeNestedTests(TestCase) {
         })
     }
 
-    # Leak probe: nested capture + recursive decode drop loop, under build-asan.
     def test_nested_no_leak() {
         i: int = 0
         while i < 3000 {
@@ -259,7 +248,6 @@ class DecodeOptionalTypeTests(TestCase) {
         }
     }
 
-    # Leak probe: optional decode/drop loop, under build-asan.
     def test_optional_no_leak() {
         i: int = 0
         while i < 3000 {

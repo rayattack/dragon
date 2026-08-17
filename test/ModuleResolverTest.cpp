@@ -9,7 +9,6 @@
 using namespace dragon;
 using namespace dragon::test;
 
-// Helper: create a temp directory and return its path
 static std::string makeTempDir(const std::string& suffix) {
     std::string tmpl = "/tmp/dragon_test_" + suffix + "_XXXXXX";
     std::vector<char> buf(tmpl.begin(), tmpl.end());
@@ -18,15 +17,10 @@ static std::string makeTempDir(const std::string& suffix) {
     return result ? std::string(result) : "";
 }
 
-// Helper: write a file at the given path
 static void writeFile(const std::string& path, const std::string& content) {
     std::ofstream out(path);
     out << content;
 }
-
-//===----------------------------------------------------------------------===//
-// findModuleFile
-//===----------------------------------------------------------------------===//
 
 TEST(ModuleResolver, FindDragonModule) {
     auto dir = makeTempDir("find_dr");
@@ -107,12 +101,8 @@ TEST(ModuleResolver, FindInSearchPath) {
     rmdir(libDir.c_str());
 }
 
-//===----------------------------------------------------------------------===//
-// buildGraph - single file (no imports)
-//===----------------------------------------------------------------------===//
-
 TEST(ModuleResolver, NoImports) {
-    auto module = parse("x: int = 5\nprint(x)\n", /*isDragon=*/true);
+    auto module = parse("x: int = 5\nprint(x)\n", true);
     ASSERT_NE(module, nullptr);
 
     ModuleResolver resolver;
@@ -123,18 +113,13 @@ TEST(ModuleResolver, NoImports) {
     EXPECT_FALSE(resolver.hasErrors());
 }
 
-//===----------------------------------------------------------------------===//
-// buildGraph - single import
-//===----------------------------------------------------------------------===//
-
 TEST(ModuleResolver, SingleImport) {
     auto dir = makeTempDir("single_imp");
     ASSERT_FALSE(dir.empty());
     writeFile(dir + "/utils.dr",
         "def helper(x: int) -> int {\n    return x + 1\n}\n");
 
-    // Entry module imports utils
-    auto module = parse("from utils import helper\nprint(helper(5))\n", /*isDragon=*/true);
+    auto module = parse("from utils import helper\nprint(helper(5))\n", true);
     ASSERT_NE(module, nullptr);
 
     ModuleResolverOptions opts;
@@ -152,25 +137,17 @@ TEST(ModuleResolver, SingleImport) {
     rmdir(dir.c_str());
 }
 
-//===----------------------------------------------------------------------===//
-// buildGraph - diamond dependency
-//===----------------------------------------------------------------------===//
-
 TEST(ModuleResolver, DiamondDependency) {
     auto dir = makeTempDir("diamond");
     ASSERT_FALSE(dir.empty());
 
-    // C depends on nothing
     writeFile(dir + "/modC.dr", "def c_func() -> int { return 1 }");
-    // A depends on C
     writeFile(dir + "/modA.dr", "from modC import c_func\ndef a_func() -> int { return c_func() }");
-    // B depends on C
     writeFile(dir + "/modB.dr", "from modC import c_func\ndef b_func() -> int { return c_func() }");
 
-    // Entry depends on A and B
     auto module = parse(
         "from modA import a_func\nfrom modB import b_func\nprint(a_func() + b_func())\n",
-        /*isDragon=*/true);
+        true);
     ASSERT_NE(module, nullptr);
 
     ModuleResolverOptions opts;
@@ -179,9 +156,7 @@ TEST(ModuleResolver, DiamondDependency) {
     auto graph = resolver.buildGraph(*module, dir + "/main.dr");
 
     EXPECT_FALSE(graph.hasCycle);
-    // Should have modC, modA, modB (C first since both A and B depend on it)
     ASSERT_EQ(graph.modules.size(), 3u);
-    // modC must come before modA and modB
     size_t cIdx = SIZE_MAX, aIdx = SIZE_MAX, bIdx = SIZE_MAX;
     for (size_t i = 0; i < graph.modules.size(); ++i) {
         if (graph.modules[i].name == "modC") cIdx = i;
@@ -200,19 +175,14 @@ TEST(ModuleResolver, DiamondDependency) {
     rmdir(dir.c_str());
 }
 
-//===----------------------------------------------------------------------===//
-// buildGraph - circular import detection
-//===----------------------------------------------------------------------===//
-
 TEST(ModuleResolver, CircularImportDetected) {
     auto dir = makeTempDir("circular");
     ASSERT_FALSE(dir.empty());
 
-    // A imports B, B imports A
     writeFile(dir + "/modA.dr", "from modB import b_func\ndef a_func() -> int { return 1 }");
     writeFile(dir + "/modB.dr", "from modA import a_func\ndef b_func() -> int { return 1 }");
 
-    auto module = parse("from modA import a_func\nprint(a_func())\n", /*isDragon=*/true);
+    auto module = parse("from modA import a_func\nprint(a_func())\n", true);
     ASSERT_NE(module, nullptr);
 
     ModuleResolverOptions opts;
@@ -228,17 +198,13 @@ TEST(ModuleResolver, CircularImportDetected) {
     rmdir(dir.c_str());
 }
 
-//===----------------------------------------------------------------------===//
-// buildGraph - .dr importing .py
-//===----------------------------------------------------------------------===//
-
 TEST(ModuleResolver, DragonImportsPython) {
     auto dir = makeTempDir("dr_imports_py");
     ASSERT_FALSE(dir.empty());
     writeFile(dir + "/pymod.py",
         "def py_func(x: int) -> int:\n    return x * 2\n");
 
-    auto module = parse("from pymod import py_func\nprint(py_func(5))\n", /*isDragon=*/true);
+    auto module = parse("from pymod import py_func\nprint(py_func(5))\n", true);
     ASSERT_NE(module, nullptr);
 
     ModuleResolverOptions opts;
@@ -255,14 +221,8 @@ TEST(ModuleResolver, DragonImportsPython) {
     rmdir(dir.c_str());
 }
 
-//===----------------------------------------------------------------------===//
-// buildGraph - an unresolvable import is an error (issue-22)
-//===----------------------------------------------------------------------===//
-
 TEST(ModuleResolver, UnresolvableImportIsError) {
-    // With no stdlib search path configured, `math` resolves to nothing; that
-    // must be a loud error, never an empty namespace.
-    auto module = parse("from math import sqrt\nprint(sqrt(4.0))\n", /*isDragon=*/true);
+    auto module = parse("from math import sqrt\nprint(sqrt(4.0))\n", true);
     ASSERT_NE(module, nullptr);
 
     ModuleResolver resolver;
@@ -276,7 +236,7 @@ TEST(ModuleResolver, UnresolvableImportIsError) {
 }
 
 TEST(ModuleResolver, TypingPseudoModuleAllowed) {
-    auto module = parse("from typing import Optional\n", /*isDragon=*/true);
+    auto module = parse("from typing import Optional\n", true);
     ASSERT_NE(module, nullptr);
 
     ModuleResolver resolver;
@@ -286,19 +246,14 @@ TEST(ModuleResolver, TypingPseudoModuleAllowed) {
     EXPECT_FALSE(resolver.hasErrors());
 }
 
-//===----------------------------------------------------------------------===//
-// buildGraph - missing module produces error
-//===----------------------------------------------------------------------===//
-
 TEST(ModuleResolver, MissingModuleInDependency) {
     auto dir = makeTempDir("missing_dep");
     ASSERT_FALSE(dir.empty());
 
-    // modA imports missing_mod which doesn't exist
     writeFile(dir + "/modA.dr",
         "from missing_mod import something\ndef a_func() -> int { return 1 }");
 
-    auto module = parse("from modA import a_func\n", /*isDragon=*/true);
+    auto module = parse("from modA import a_func\n", true);
     ASSERT_NE(module, nullptr);
 
     ModuleResolverOptions opts;
@@ -306,8 +261,6 @@ TEST(ModuleResolver, MissingModuleInDependency) {
     ModuleResolver resolver(opts);
     auto graph = resolver.buildGraph(*module, dir + "/main.dr");
 
-    // modA was still resolved, but missing_mod was not found
-    // The resolver should still have modA in the graph
     EXPECT_GE(graph.modules.size(), 1u);
 
     std::remove((dir + "/modA.dr").c_str());

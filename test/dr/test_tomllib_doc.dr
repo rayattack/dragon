@@ -1,6 +1,3 @@
-# Pre-fix: pins TomlDoc key order, overwrite, and miss behavior before the
-# parallel-list _find storage became dict-backed.
-
 from unittest import TestCase, main
 import tomllib
 

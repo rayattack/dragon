@@ -1,15 +1,3 @@
-# os/path.dr - Dragon standard library: path utilities
-#
-# Python-compatible os.path submodule. Usage:
-#  from os.path import join, basename, isabs
-#
-# These are the same functions as os.dr's path_* variants
-# but with shorter names, matching Python's os.path API.
-
-# Safe canonicalization wrapper: copies the libc result into a Dragon string
-# and frees the libc buffer. The bare `extern realpath` (which returns a
-# malloc'd char* the runtime would mis-treat as a DragonString) corrupted the
-# heap on every call.
 extern "C" def dragon_realpath(path: str) -> str
 extern "C" def access(path: str, mode: intc) -> intc
 extern "C" def getenv(name: str) -> str
@@ -25,10 +13,6 @@ extern "C" def dragon_stat_ino(path: str) -> int
 extern "C" def dragon_lstat_dev(path: str) -> int
 extern "C" def dragon_lstat_ino(path: str) -> int
 extern "C" def dragon_getcwd() -> str
-
-#===----------------------------------------------------------------------===#
-# Path manipulation
-#===----------------------------------------------------------------------===#
 
 def join(a: str, b: str) -> str {
     if b.startswith("/") { return b }
@@ -77,10 +61,6 @@ def isabs(path: str) -> bool {
     return path.startswith("/")
 }
 
-# Normalize a path: collapse repeated "/", drop ".", and resolve ".."
-# against the preceding component. Matches Python's POSIX os.path.normpath
-# except that "//" is collapsed to "/" (Dragon does not preserve the POSIX
-# implementation-defined double-slash root).
 def normpath(path: str) -> str {
     if len(path) == 0 { return "." }
     const is_abs: bool = path.startswith("/")
@@ -93,8 +73,6 @@ def normpath(path: str) -> str {
             if len(comps) > 0 and comps[len(comps) - 1] != ".." {
                 comps.pop()
             } elif not is_abs {
-                # leading ".." in a relative path is preserved; for an
-                # absolute path ".." at the root is discarded.
                 comps.append("..")
             }
             continue
@@ -113,17 +91,6 @@ def normpath(path: str) -> str {
     return result
 }
 
-# Join `name` onto `root` and return the result only if it stays inside
-# `root`. Raises ValueError otherwise.
-#
-# Use this wherever `name` came from outside the program: an archive member,
-# an upload's declared filename, a URL path segment. Plain `join` will happily
-# build "root/../../etc/passwd", and the caller usually cannot tell by looking
-# at the result that it left the directory they asked for.
-#
-# Containment is decided on the *normalized* path, so an interior ".." that
-# stays inside ("sub/../ok.txt") is allowed while one that climbs out is not.
-# Absolute names are rejected outright rather than silently reinterpreted.
 def safe_join(root: str, name: str) -> str {
     if isabs(name) {
         raise ValueError(f"unsafe path '{name}': absolute names are not allowed here")
@@ -139,7 +106,6 @@ def safe_join(root: str, name: str) -> str {
     return target
 }
 
-# Split a path into its non-empty "/"-separated segments.
 def _segments(p: str) -> list[str] {
     parts: list[str] = []
     const segs: list[str] = p.split("/")
@@ -149,8 +115,6 @@ def _segments(p: str) -> list[str] {
     return parts
 }
 
-# Path to `path` relative to `start`. Both are normalized and made absolute
-# (against the cwd) before the common-prefix walk, matching os.path.relpath.
 def relpath(path: str, start: str) -> str {
     const npath: str = normpath(path)
     const nstart: str = normpath(start)
@@ -208,7 +172,6 @@ def expanduser(path: str) -> str {
     return path
 }
 
-# Expand $VAR and ${VAR} from environment. Unknown vars stay literal.
 def expandvars(path: str) -> str {
     const n: int = len(path)
     if n == 0 { return path }
@@ -271,14 +234,10 @@ def expandvars(path: str) -> str {
     return "".join(parts)
 }
 
-# Split path into (drive, tail). POSIX always returns ["", path].
 def splitdrive(path: str) -> tuple[str, str] {
     return ("", path)
 }
 
-# Longest character-level common prefix of paths. Note: character-level,
-# so commonprefix(["/usr/lib", "/usr/local"]) returns "/usr/l" - use
-# commonpath() for path-segment-aware behaviour.
 def commonprefix(paths: list[str]) -> str {
     if len(paths) == 0 { return "" }
     const ref: str = paths[0]
@@ -303,8 +262,6 @@ def commonprefix(paths: list[str]) -> str {
     return ref[:minlen]
 }
 
-# Longest common sub-path of paths (segment-aware). Raises ValueError
-# on empty input or mixed absolute/relative paths.
 def commonpath(paths: list[str]) -> str {
     if len(paths) == 0 {
         raise ValueError("commonpath() arg is an empty sequence")
@@ -363,10 +320,6 @@ def commonpath(paths: list[str]) -> str {
     return result
 }
 
-#===----------------------------------------------------------------------===#
-# Path queries (stat-based)
-#===----------------------------------------------------------------------===#
-
 def exists(path: str) -> bool {
     return access(path, 0) == 0
 }
@@ -413,10 +366,6 @@ def getctime(path: str) -> int {
     return dragon_stat_ctime(path)
 }
 
-#===----------------------------------------------------------------------===#
-# samefile / ismount (Python: os.path.samefile, os.path.ismount)
-#===----------------------------------------------------------------------===#
-
 def samefile(p1: str, p2: str) -> bool {
     if access(p1, 0) != 0 {
         raise OSError(f"No such file: '{p1}'")
@@ -443,10 +392,6 @@ def ismount(path: str) -> bool {
     if ino1 == ino2 { return true }
     return false
 }
-
-#===----------------------------------------------------------------------===#
-# Constants
-#===----------------------------------------------------------------------===#
 
 const sep: str = "/"
 const extsep: str = "."

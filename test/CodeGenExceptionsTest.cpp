@@ -1,9 +1,5 @@
 #include "CodeGenTestHelpers.h"
 
-// ============================================================
-// Try/Except IR Tests
-// ============================================================
-
 TEST(CodeGenTest, TryExceptBasic) {
     auto ir = generateIR(
         "try {\n"
@@ -80,9 +76,6 @@ TEST(CodeGenTest, RaiseValueError) {
 TEST(CodeGenTest, RaiseBare) {
     auto ir = generateIR("raise");
     EXPECT_NE(ir.find("dragon_raise_exc"), std::string::npos);
-    // Bare `raise` re-raises the in-flight exception, preserving its type and
-    // message - so it reads the current exception state rather than fabricating
-    // a literal SystemExit/"Exception" (the old, incorrect behavior).
     EXPECT_NE(ir.find("dragon_exc_get_type"), std::string::npos);
     EXPECT_NE(ir.find("dragon_exc_get_msg"), std::string::npos);
 }
@@ -99,7 +92,6 @@ TEST(CodeGenTest, TryExceptNamedHandler) {
 }
 
 TEST(CodeGenIR, ExceptStarParsesIR) {
-    // except* should parse and generate IR (handler body runs if matched)
     auto ir = generateIR(
         "try {\n"
         "    x: int = 1\n"
@@ -107,16 +99,10 @@ TEST(CodeGenIR, ExceptStarParsesIR) {
         "    x: int = 2\n"
         "}\n"
     );
-    // Should generate valid IR with the try/except structure
     EXPECT_NE(ir.find("define"), std::string::npos);
 }
 
-// ============================================================
-// Exception Hierarchy IR Tests
-// ============================================================
-
 TEST(CodeGenTest, ExcHierarchyMatchCallIR) {
-    // All typed handlers now use dragon_exc_matches runtime function
     auto ir = generateIR(
         "try {\n"
         "  print(1)\n"
@@ -129,7 +115,6 @@ TEST(CodeGenTest, ExcHierarchyMatchCallIR) {
 }
 
 TEST(CodeGenTest, ExcHierarchyLeafMatchIR) {
-    // Leaf exception also uses dragon_exc_matches (unified dispatch)
     auto ir = generateIR(
         "try {\n"
         "  print(1)\n"
@@ -142,7 +127,6 @@ TEST(CodeGenTest, ExcHierarchyLeafMatchIR) {
 }
 
 TEST(CodeGenTest, ExcHierarchyExceptionMatchIR) {
-    // Exception (wide parent) also uses dragon_exc_matches
     auto ir = generateIR(
         "try {\n"
         "  print(1)\n"
@@ -153,12 +137,7 @@ TEST(CodeGenTest, ExcHierarchyExceptionMatchIR) {
     EXPECT_NE(ir.find("dragon_exc_matches"), std::string::npos);
 }
 
-// ============================================================
-// User Exception IR Tests
-// ============================================================
-
 TEST(CodeGenTest, UserExcRegisterCallIR) {
-    // User exception class should generate dragon_exc_register call
     auto ir = generateIR(
         "class MyError(Exception) {\n"
         "  def(msg: str) {\n"
@@ -171,7 +150,6 @@ TEST(CodeGenTest, UserExcRegisterCallIR) {
 }
 
 TEST(CodeGenTest, UserExcMatchesCallIR) {
-    // except MyError should use dragon_exc_matches
     auto ir = generateIR(
         "class MyError(Exception) {\n"
         "  def(msg: str) {\n"
@@ -187,10 +165,6 @@ TEST(CodeGenTest, UserExcMatchesCallIR) {
     EXPECT_NE(ir.find("dragon_exc_matches"), std::string::npos);
     EXPECT_NE(ir.find("exc.match.0"), std::string::npos);
 }
-
-// ============================================================
-// Try/Except E2E Tests
-// ============================================================
 
 TEST(CodeGenE2E, TryCatchBasic) {
     auto output = compileAndRun(
@@ -232,7 +206,6 @@ TEST(CodeGenE2E, TryCatchElse) {
 }
 
 TEST(CodeGenE2E, FinallyOnReturn) {
-    // Finally block must execute even when return exits the try body
     auto output = compileAndRun(
         "def foo() -> int {\n"
         "    try {\n"
@@ -249,7 +222,6 @@ TEST(CodeGenE2E, FinallyOnReturn) {
 }
 
 TEST(CodeGenE2E, FinallyOnBreak) {
-    // Finally block must execute when break exits a loop inside try
     auto output = compileAndRun(
         "for i in range(5) {\n"
         "    try {\n"
@@ -267,7 +239,6 @@ TEST(CodeGenE2E, FinallyOnBreak) {
 }
 
 TEST(CodeGenE2E, FinallyOnContinue) {
-    // Finally block must execute when continue skips rest of loop body
     auto output = compileAndRun(
         "for i in range(3) {\n"
         "    try {\n"
@@ -282,10 +253,6 @@ TEST(CodeGenE2E, FinallyOnContinue) {
     );
     EXPECT_EQ(output, "0\nf\nf\n2\nf\n");
 }
-
-// ============================================================
-// Exception Hierarchy E2E Tests
-// ============================================================
 
 TEST(CodeGenE2E, ExcHierarchyArithmeticCatchesZeroDiv) {
     auto output = compileAndRun(
@@ -360,7 +327,6 @@ TEST(CodeGenE2E, ExcHierarchyOSErrorCatchesFileNotFound) {
 }
 
 TEST(CodeGenE2E, ExcHierarchyOSErrorCatchesConnectionChild) {
-    // Nested hierarchy: OSError > ConnectionError > ConnectionRefusedError
     auto output = compileAndRun(
         "try {\n"
         "  raise ConnectionRefusedError(\"refused\")\n"
@@ -409,7 +375,6 @@ TEST(CodeGenE2E, ExcHierarchyRuntimeCatchesNotImpl) {
 }
 
 TEST(CodeGenE2E, ExcHierarchyLeafNoMatchReraise) {
-    // IndexError should NOT catch KeyError - re-raise to outer handler
     auto output = compileAndRun(
         "try {\n"
         "  try {\n"
@@ -426,7 +391,6 @@ TEST(CodeGenE2E, ExcHierarchyLeafNoMatchReraise) {
 }
 
 TEST(CodeGenE2E, ExcHierarchyMultiSpecific) {
-    // Multiple handlers - most specific first
     auto output = compileAndRun(
         "try {\n"
         "  raise IndexError(\"idx\")\n"
@@ -464,10 +428,6 @@ TEST(CodeGenE2E, ExcHierarchyImportCatchesModuleNotFound) {
     );
     EXPECT_EQ(output, "caught\nno mod\n");
 }
-
-// ============================================================
-// User Exception E2E Tests
-// ============================================================
 
 TEST(CodeGenE2E, UserExcBasicRaiseCatch) {
     auto output = compileAndRun(
@@ -509,7 +469,6 @@ TEST(CodeGenE2E, UserExcParentCatchesChild) {
 }
 
 TEST(CodeGenE2E, UserExcBuiltinParentCatchesUser) {
-    // except RuntimeError should catch user-defined child
     auto output = compileAndRun(
         "class MyRuntimeError(RuntimeError) {\n"
         "  def(msg: str) {\n"
@@ -527,7 +486,6 @@ TEST(CodeGenE2E, UserExcBuiltinParentCatchesUser) {
 }
 
 TEST(CodeGenE2E, UserExcExceptionCatchesUser) {
-    // except Exception should catch any user-defined exception
     auto output = compileAndRun(
         "class MyError(ValueError) {\n"
         "  def(msg: str) {\n"
@@ -545,7 +503,6 @@ TEST(CodeGenE2E, UserExcExceptionCatchesUser) {
 }
 
 TEST(CodeGenE2E, UserExcNoMatchReraise) {
-    // Sibling user exception should NOT be caught
     auto output = compileAndRun(
         "class ErrorA(Exception) {\n"
         "  def(msg: str) {\n"
@@ -572,7 +529,6 @@ TEST(CodeGenE2E, UserExcNoMatchReraise) {
 }
 
 TEST(CodeGenE2E, UserExcMultiHandler) {
-    // Multiple user exception handlers, most specific first
     auto output = compileAndRun(
         "class BaseError(Exception) {\n"
         "  def(msg: str) {\n"
@@ -598,7 +554,6 @@ TEST(CodeGenE2E, UserExcMultiHandler) {
 }
 
 TEST(CodeGenE2E, UserExcGrandparentCatches) {
-    // Three-level hierarchy: grandparent catches grandchild
     auto output = compileAndRun(
         "class Level1(Exception) {\n"
         "  def(msg: str) {\n"
@@ -626,10 +581,6 @@ TEST(CodeGenE2E, UserExcGrandparentCatches) {
 }
 
 TEST(CodeGenE2E, UserExcNoArgDefaultMsg) {
-    // User exception with no message arg uses class name. The ctor gives msg a
-    // default equal to the class name so the no-arg `raise EmptyError()` is a
-    // valid call (ctor requires its declared param otherwise) while the printed
-    // message stays "EmptyError".
     auto output = compileAndRun(
         "class EmptyError(Exception) {\n"
         "  def(msg: str = \"EmptyError\") {\n"
@@ -646,10 +597,6 @@ TEST(CodeGenE2E, UserExcNoArgDefaultMsg) {
     EXPECT_EQ(output, "caught\nEmptyError\n");
 }
 
-// ============================================================
-// Match/Case IR Tests
-// ============================================================
-
 TEST(CodeGenIR, MatchStmtIR) {
     auto ir = generateIR(
         "x: int = 42\n"
@@ -658,7 +605,6 @@ TEST(CodeGenIR, MatchStmtIR) {
         "    case _ { print(20) }\n"
         "}\n"
     );
-    // Should contain match-related basic block labels.
     EXPECT_NE(ir.find("match.subject"), std::string::npos);
     EXPECT_NE(ir.find("match.end"), std::string::npos);
     EXPECT_NE(ir.find("match.case0"), std::string::npos);
@@ -678,10 +624,6 @@ TEST(CodeGenIR, PyMatchCaseIR) {
     EXPECT_NE(ir.find("define"), std::string::npos);
     EXPECT_NE(ir.find("dragon_print_int"), std::string::npos);
 }
-
-// ============================================================
-// Match/Case E2E Tests
-// ============================================================
 
 TEST(CodeGenE2E, MatchIntLiteral) {
     auto output = compileAndRun(
@@ -742,7 +684,6 @@ TEST(CodeGenE2E, MatchOrPattern) {
 }
 
 TEST(CodeGenE2E, MatchNoArmMatches) {
-    // When no arm matches, execution should fall through silently.
     auto output = compileAndRun(
         "x: int = 99\n"
         "match x {\n"
@@ -779,7 +720,6 @@ TEST(CodeGenE2E, MatchWithGuard) {
 }
 
 TEST(CodeGenE2E, MatchCommaOrPattern) {
-    // .dr mode comma-based OR pattern
     auto output = compileAndRun(
         "x: int = 2\n"
         "match x {\n"
@@ -792,7 +732,6 @@ TEST(CodeGenE2E, MatchCommaOrPattern) {
 }
 
 TEST(CodeGenE2E, MatchPipeOrPatternRegression) {
-    // Verify existing | OR patterns still work after comma support
     auto output = compileAndRun(
         "x: int = 4\n"
         "match x {\n"
@@ -818,28 +757,7 @@ TEST(CodeGenE2E, PyMatchCaseE2E) {
     EXPECT_EQ(out, "20\n");
 }
 
-//===----------------------------------------------------------------------===//
-// Regression: match arm scope cleanup
-//
-// When a match arm falls through to `match.end`, its arm scope must run
-// `emitScopeCleanup()` before it is popped. Capture-bound
-// match patterns (e.g. `case y { ... }`) introduce new variables into
-// the arm scope; heap-typed captures leak without the cleanup.
-//
-// MatchStmt emits `emitScopeCleanup()` before the unconditional branch to
-// the match-end block.
-//
-// Today's matches mostly bind ints (which need no decref), so the
-// inserted cleanup is a no-op there. The IR test below pins down the
-// fact that string-pattern arms still compile and execute correctly,
-// and the loop test confirms heap-typed bindings don't leak per arm.
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, MatchArmCaptureBoundedLoop) {
-    // Capture binding inside the match arm. Each iteration binds y to the
-    // subject value and falls through. Pre-fix: scope popped without
-    // cleanup. Post-fix: cleanup is a no-op for int captures, but the path
-    // is exercised so it's locked in.
     auto output = compileAndRun(
         "total: int = 0\n"
         "for i in range(10000) {\n"
@@ -850,13 +768,10 @@ TEST(CodeGenE2E, MatchArmCaptureBoundedLoop) {
         "}\n"
         "print(total)\n"
     );
-    // 1 + sum(1..9999) = 1 + 9999*10000/2 = 1 + 49995000
     EXPECT_EQ(output, "49995001\n");
 }
 
 TEST(CodeGenE2E, MatchStringSubjectLoopBounded) {
-    // Match a string subject - exercises the string-comparison path through
-    // the cleanup-then-fallthrough.
     auto output = compileAndRun(
         "labels: list[str] = [\"go\", \"stop\", \"caution\"]\n"
         "go_count: int = 0\n"
@@ -878,14 +793,7 @@ TEST(CodeGenE2E, MatchStringSubjectLoopBounded) {
     EXPECT_EQ(output, "3000\n3000\n3000\n");
 }
 
-//===----------------------------------------------------------------------===//
-// 4.5 Exception hierarchy audit - raise + catch round-trip
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, ExceptionRaiseAndCatch_AllBuiltins) {
-    // Each raise/except pair confirms the exception name is wired in Sema
-    // (parses cleanly), excTypeCode (gets a code), and runtime range table
-    // (caught by its parent class).
     auto out = compileAndRun(
         "def t(name: str) {\n"
         "    print(name)\n"
@@ -913,11 +821,6 @@ TEST(CodeGenE2E, ExceptionRaiseAndCatch_AllBuiltins) {
 }
 
 TEST(CodeGenIR, MatchArmEmitsCleanupBeforeEndBranch) {
-    // MatchStmt visit emits emitScopeCleanup() before the
-    // br to match.end. With Int captures the cleanup is a no-op, so the
-    // crispest IR signal is that the structure still terminates correctly:
-    // every arm body has a terminator (br to match.end) and match.end
-    // exists.
     auto ir = generateIR(
         "x: int = 7\n"
         "match x {\n"
@@ -927,20 +830,11 @@ TEST(CodeGenIR, MatchArmEmitsCleanupBeforeEndBranch) {
     );
     EXPECT_NE(ir.find("match.end"), std::string::npos)
         << "Expected match.end basic block\nIR:\n" << ir;
-    // The cleanup-then-branch should not have introduced an unterminated BB.
-    // Look for the standard match dispatch infrastructure.
     EXPECT_NE(ir.find("match.subject"), std::string::npos);
     EXPECT_NE(ir.find("match.case0"), std::string::npos);
 }
 
-//===----------------------------------------------------------------------===//
-// First-class exception classes (integer-code model). An exception name in
-// value context lowers to its type code; __exc_matches range-checks the
-// currently-handled exception against an expected code. Backs assertRaises.
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, ExceptionClassAsValue) {
-    // A bare exception name is usable as a value (its integer type code).
     auto out = compileAndRun(
         "def take(t: type) -> int { return 1 }\n"
         "print(take(ValueError))\n"
@@ -962,7 +856,6 @@ TEST(CodeGenE2E, ExcMatchesExactType) {
 }
 
 TEST(CodeGenE2E, ExcMatchesParentRange) {
-    // A raised ValueError matches an expected Exception (parent range).
     auto out = compileAndRun(
         "matched: bool = False\n"
         "try {\n"
@@ -976,7 +869,6 @@ TEST(CodeGenE2E, ExcMatchesParentRange) {
 }
 
 TEST(CodeGenE2E, ExcMatchesWrongType) {
-    // A raised ValueError does NOT match an expected KeyError.
     auto out = compileAndRun(
         "matched: bool = True\n"
         "try {\n"
@@ -988,11 +880,6 @@ TEST(CodeGenE2E, ExcMatchesWrongType) {
     );
     EXPECT_EQ(out, "False\n");
 }
-
-//===----------------------------------------------------------------------===//
-// int(str) - Python-parity strict parse: valid forms convert, invalid input
-// raises ValueError (was a silent atol()->0 lenient parse before).
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenE2E, IntStrValidForms) {
     auto out = compileAndRun(
@@ -1018,7 +905,6 @@ TEST(CodeGenE2E, IntStrInvalidRaisesValueError) {
 }
 
 TEST(CodeGenE2E, IntStrFloatStringRaises) {
-    // "4.5" is not a valid int literal in Python -> ValueError.
     auto out = compileAndRun(
         "ok: bool = False\n"
         "try {\n"

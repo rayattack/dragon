@@ -8,26 +8,18 @@ extern "C" def dragon_sha384(data: str, length: int) -> str
 extern "C" def dragon_sha1(data: str, length: int) -> str
 extern "C" def dragon_md5(data: str, length: int) -> str
 
-# mbedTLS `pk` dispatches on key type, so one pair serves RSA (PKCS#1 v1.5) and
-# EC (ECDSA). Sign returns empty bytes on failure; verify returns 1/0.
 extern "C" def dragon_pk_sign(md_name: str, private_key_pem: bytes, message: bytes) -> bytes
 extern "C" def dragon_pk_verify(md_name: str, public_key_pem: bytes, message: bytes, signature: bytes) -> int
 
-# AEAD ciphers - encrypt returns ciphertext||16-byte-tag; decrypt raises
-# ValueError on tag mismatch (never returns unauthenticated plaintext).
 extern "C" def dragon_aes_gcm_encrypt(key: bytes, nonce: bytes, plaintext: bytes, aad: bytes) -> bytes
 extern "C" def dragon_aes_gcm_decrypt(key: bytes, nonce: bytes, ciphertext: bytes, aad: bytes) -> bytes
 extern "C" def dragon_chacha20poly1305_encrypt(key: bytes, nonce: bytes, plaintext: bytes, aad: bytes) -> bytes
 extern "C" def dragon_chacha20poly1305_decrypt(key: bytes, nonce: bytes, ciphertext: bytes, aad: bytes) -> bytes
 
-# Ed25519 (EdDSA) - vendored ref10 (OpenSSH-portable). Private key is the
-# 32-byte seed, public key is 32 bytes, signatures are 64-byte detached.
 extern "C" def dragon_ed25519_keypair() -> bytes
 extern "C" def dragon_ed25519_public_from_seed(private_key: bytes) -> bytes
 extern "C" def dragon_ed25519_sign(private_key: bytes, message: bytes) -> bytes
 extern "C" def dragon_ed25519_verify(public_key: bytes, message: bytes, signature: bytes) -> int
-
-# Hash functions - return hex-encoded digest strings.
 
 def sha256(data: str) -> str {
     return dragon_sha256(data, len(data))
@@ -53,8 +45,6 @@ def md5(data: str) -> str {
     return dragon_md5(data, len(data))
 }
 
-# Asymmetric signatures (RSA/ECDSA) - superset surface, no Python stdlib peer.
-
 def sign(private_key_pem: bytes, message: bytes, hash_name: str = "sha256") -> bytes {
     """Key type chooses the algorithm: RSA signs PKCS#1 v1.5, EC signs ECDSA (DER).
     Raises on an unsupported hash or unparseable key."""
@@ -70,9 +60,6 @@ def verify(public_key_pem: bytes, message: bytes, signature: bytes,
     """Returns false for any mismatch or parse failure; never raises on a bad signature."""
     return dragon_pk_verify(hash_name, public_key_pem, message, signature) == 1
 }
-
-# AEAD ciphers (authenticated encryption) - superset surface. encrypt() appends
-# a 16-byte tag; decrypt() raises ValueError on tag/aad mismatch. Never reuse a (key, nonce) pair.
 
 def aes_gcm_encrypt(key: bytes, nonce: bytes, plaintext: bytes, aad: bytes = b"") -> bytes {
     """AES-GCM. `key` is 16/24/32 bytes (AES-128/192/256); `nonce` is typically 12."""
@@ -92,12 +79,9 @@ def chacha20poly1305_decrypt(key: bytes, nonce: bytes, ciphertext: bytes, aad: b
     return dragon_chacha20poly1305_decrypt(key, nonce, ciphertext, aad)
 }
 
-# Ed25519 (EdDSA) - superset surface, vendored OpenSSH ref10, deterministic
-# (no per-signature RNG). Private key is a 32-byte seed; public key 32 bytes; signatures 64-byte detached.
-
 def ed25519_keypair() -> tuple[bytes, bytes] {
     """Generate a fresh keypair -> (private_key, public_key). Keep private_key secret."""
-    const sk: bytes = dragon_ed25519_keypair()   # seed(32) || public(32)
+    const sk: bytes = dragon_ed25519_keypair()
     return (sk[0:32], sk[32:64])
 }
 

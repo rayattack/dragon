@@ -1,19 +1,12 @@
-# Pre-fix: dragon_xmalloc's OOM raise dup'd its message through dragon_xmalloc
-# again; with small allocations failing, the raise recursed to stack death
-# (A/B-proven, 3700-frame SIGSEGV). Fixed by dragon_raise_oom: raising
-# allocates nothing, so MemoryError stays catchable under sustained OOM.
-# Not named test_*.dr on purpose: only meaningful under RLIMIT_AS, so it is
-# registered capped in test/CMakeLists.txt instead of via the glob.
+# Pre-fix: the OOM raise dup'd its message through dragon_xmalloc and recursed to stack death
+# (A/B-proven 3700-frame SIGSEGV). Not test_*.dr on purpose: registered capped (RLIMIT_AS) in test/CMakeLists.txt.
 
 from unittest import TestCase, main
 
-# behind a call so the repeat cannot constant-fold to a stored literal
 def unit_len() -> int {
     return 8
 }
 
-# Hoard small strings in a PREALLOCATED list (grow paths abort on OOM by
-# contract) until the allocator dies, then catch 200 consecutive raises.
 def hoard_until_dead(cap_slots: int) -> int {
     xs: list[str] = [""] * cap_slots
     deaths: int = 0
@@ -29,8 +22,6 @@ def hoard_until_dead(cap_slots: int) -> int {
         }
         i = i + 1
     }
-    # returning frees the hoard via scope cleanup; any write here (even
-    # `xs[i] = ""`) allocates and would raise outside the try
     return deaths
 }
 
@@ -38,7 +29,7 @@ class SustainedOomTests(TestCase) {
     def test_memoryerror_stays_catchable_under_sustained_oom() {
         deaths: int = hoard_until_dead(6000000)
         self.assertEqual(deaths, 200)
-        ys: list[str] = ["ok"] * 4    # recovery is real: allocation works again
+        ys: list[str] = ["ok"] * 4
         self.assertEqual(len(ys), 4)
         self.assertEqual(ys[3], "ok")
     }

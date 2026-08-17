@@ -23,8 +23,6 @@ from http.client import HTTPConnection, HTTPResponse
 from socket import TcpListener, TcpStream
 
 
-# Accept one connection, capture the full request (head + body), reply with a
-# canned response whose body arrives across several sends, then close.
 def _serve_one(lis: TcpListener) -> str {
     conn: TcpStream = lis.accept()
     got: str = ""
@@ -71,9 +69,6 @@ class ClientRoundTripTests(TestCase) {
 }
 
 
-# Accept one connection, reply with a chunked-encoded body split across sends
-# so the client reassembles frames that straddle recv boundaries. The first
-# chunk-size line carries an extension; the last-chunk carries a trailer.
 def _serve_chunked(lis: TcpListener) -> str {
     conn: TcpStream = lis.accept()
     got: str = ""
@@ -92,8 +87,6 @@ def _serve_chunked(lis: TcpListener) -> str {
 }
 
 
-# Reply with framing whose chunk-size line is not hex: the client must raise,
-# never hand the garbage to the caller as a body.
 def _serve_bad_chunked(lis: TcpListener) -> str {
     conn: TcpStream = lis.accept()
     got: str = ""

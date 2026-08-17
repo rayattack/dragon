@@ -1,21 +1,6 @@
-# test/dr/test_http_keepalive.dr - W1 connection-lifecycle tests.
-#
-# Covers the RequestReader full-body reassembly that fixes the data-loss bug
-# (bodies >64 KB or fragmented across packets were silently truncated by the
-# old single-64 KB-read handlers), plus chunked request decoding, the shared
-# keep-alive loop, Connection: close, and chunked response output.
-#
-# Everything runs against an in-memory ConnReader fake (MemoryReader) so the
-# suite needs no sockets: fragmentation, large bodies, chunked framing and the
-# header/body split point are all reproduced by choosing how the canned byte
-# chunks are diced. MemoryReader.sent captures the wire bytes written back, so
-# response-side assertions are network-free too.
-
 from unittest import TestCase, main
 from http.server import Router, Request, Response, Context
 from http.server import MemoryReader, RequestReader, FramedRequest, ConnReader
-
-# --- Handlers used by the keep-alive / response tests ---
 
 def _echo_path(req: Request, res: Response, ctx: Context) -> None {
     res.text("hi:" + req.path)
@@ -39,7 +24,6 @@ def _build_app() -> Router {
     return app
 }
 
-# Repeat a small ASCII piece into a `bytes` body of exactly `count` pieces.
 def _make_body(piece: bytes, count: int) -> bytes {
     out: bytes = b""
     i: int = 0
@@ -52,7 +36,6 @@ def _make_body(piece: bytes, count: int) -> bytes {
 
 
 class RequestReaderTests(TestCase) {
-    # A Content-Length body arriving in one read is framed exactly.
     def test_content_length_single_read() {
         const req: bytes = b"POST /x HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\n\r\nhello"
         const rr: RequestReader = RequestReader(MemoryReader([req]))
@@ -61,7 +44,6 @@ class RequestReaderTests(TestCase) {
         self.assertEqual(fr.body.decode("utf-8"), "hello")
     }
 
-    # A body split across multiple recv chunks is reassembled intact.
     def test_fragmented_body() {
         const rr: RequestReader = RequestReader(MemoryReader([
             b"POST /x HTTP/1.1\r\nContent-Length: 11\r\n\r\nhel",
@@ -72,8 +54,6 @@ class RequestReaderTests(TestCase) {
         self.assertEqual(fr.body.decode("utf-8"), "hello world")
     }
 
-    # The \r\n\r\n header terminator itself straddling a chunk boundary still
-    # frames correctly (the read loop keeps pulling until it appears).
     def test_header_body_split_across_boundary() {
         const rr: RequestReader = RequestReader(MemoryReader([
             b"POST /x HTTP/1.1\r\nContent-Length: 4\r\n\r",
@@ -83,10 +63,8 @@ class RequestReaderTests(TestCase) {
         self.assertEqual(fr.body.decode("utf-8"), "WXYZ")
     }
 
-    # A body larger than the old 64 KB single-read limit reassembles fully -
-    # this is the data-loss bug the W1 reader fixes. 100 KB here.
     def test_large_body_over_64k() {
-        const body: bytes = _make_body(b"abcdefghij", 10000)   # 100000 bytes
+        const body: bytes = _make_body(b"abcdefghij", 10000)
         const head: bytes = b"POST /x HTTP/1.1\r\nContent-Length: 100000\r\n\r\n"
         const rr: RequestReader = RequestReader(MemoryReader([head + body]))
         const fr: FramedRequest = rr.read_request()
@@ -94,10 +72,9 @@ class RequestReaderTests(TestCase) {
         self.assertEqual(len(fr.body), 100000)
     }
 
-    # A large body fragmented across many small reads reassembles intact.
     def test_large_body_fragmented() {
         const head: bytes = b"POST /x HTTP/1.1\r\nContent-Length: 30000\r\n\r\n"
-        const piece: bytes = _make_body(b"x", 1000)            # 1000-byte chunks
+        const piece: bytes = _make_body(b"x", 1000)
         const chunks: list[bytes] = [head]
         i: int = 0
         while i < 30 {
@@ -110,21 +87,17 @@ class RequestReaderTests(TestCase) {
         self.assertEqual(len(fr.body), 30000)
     }
 
-    # Transfer-Encoding: chunked de-chunks into a contiguous body and rewrites
-    # the head to carry an accurate Content-Length for the downstream parser.
     def test_chunked_request_decodes() {
         const req: bytes = b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"
         const rr: RequestReader = RequestReader(MemoryReader([req]))
         const fr: FramedRequest = rr.read_request()
         self.assertTrue(fr.ok)
         self.assertEqual(fr.body.decode("utf-8"), "hello world")
-        # Head was rewritten: TE removed, Content-Length added.
         const raw: str = fr.raw.decode("utf-8")
         self.assertIn("content-length: 11", raw)
         self.assertNotIn("transfer-encoding", raw)
     }
 
-    # A chunked body whose chunk data is fragmented across reads still decodes.
     def test_chunked_request_fragmented() {
         const rr: RequestReader = RequestReader(MemoryReader([
             b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhe",
@@ -135,7 +108,6 @@ class RequestReaderTests(TestCase) {
         self.assertEqual(fr.body.decode("utf-8"), "hello world")
     }
 
-    # A clean EOF before any bytes is a normal keep-alive end, not an error.
     def test_eof_is_clean() {
         const rr: RequestReader = RequestReader(MemoryReader([]))
         const fr: FramedRequest = rr.read_request()
@@ -143,8 +115,6 @@ class RequestReaderTests(TestCase) {
         self.assertFalse(fr.bad)
     }
 
-    # A connection that dies mid-body yields a `bad` framing (truncated - must
-    # not be served as if complete).
     def test_truncated_body_is_bad() {
         const rr: RequestReader = RequestReader(MemoryReader([
             b"POST /x HTTP/1.1\r\nContent-Length: 100\r\n\r\nonly-a-few"]))
@@ -155,7 +125,6 @@ class RequestReaderTests(TestCase) {
 
 
 class KeepAliveLoopTests(TestCase) {
-    # Two pipelined requests on one HTTP/1.1 connection both get served.
     def test_two_sequential_requests() {
         const mr: MemoryReader = MemoryReader([
             b"GET /a HTTP/1.1\r\nHost: h\r\n\r\n",
@@ -166,7 +135,6 @@ class KeepAliveLoopTests(TestCase) {
         self.assertTrue(mr.closed)
     }
 
-    # Connection: close stops the loop after a single request.
     def test_connection_close() {
         const mr: MemoryReader = MemoryReader([
             b"GET /a HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n",
@@ -174,11 +142,9 @@ class KeepAliveLoopTests(TestCase) {
         _build_app().serve_connection(mr)
         self.assertIn("hi:/a", mr.sent)
         self.assertNotIn("hi:/b", mr.sent)
-        # The close response advertises Connection: close.
         self.assertIn("connection: close", mr.sent)
     }
 
-    # HTTP/1.0 defaults to closing after one request (no keep-alive opt-in).
     def test_http10_closes_by_default() {
         const mr: MemoryReader = MemoryReader([
             b"GET /a HTTP/1.0\r\nHost: h\r\n\r\n",
@@ -188,8 +154,6 @@ class KeepAliveLoopTests(TestCase) {
         self.assertNotIn("hi:/b", mr.sent)
     }
 
-    # A POST body delivered fragmented across reads is fully visible to the
-    # handler (end-to-end through the loop, not just the reader).
     def test_post_body_through_loop() {
         const body: bytes = _make_body(b"z", 5000)
         const head: bytes = b"POST /body HTTP/1.1\r\nHost: h\r\nConnection: close\r\nContent-Length: 5000\r\n\r\n"
@@ -201,27 +165,20 @@ class KeepAliveLoopTests(TestCase) {
 
 
 class ChunkedResponseTests(TestCase) {
-    # A handler that streams via res.chunk() produces a Transfer-Encoding:
-    # chunked response with no Content-Length and a 0-length terminating chunk.
     def test_chunked_response_framing() {
         const mr: MemoryReader = MemoryReader([
             b"GET /s HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n"])
         _build_app().serve_connection(mr)
         self.assertIn("transfer-encoding: chunked", mr.sent)
         self.assertNotIn("content-length", mr.sent)
-        # Each chunk framed `{hexlen}\r\n{data}\r\n`; 6=len("part1-"), 5=len("part2").
         self.assertIn("6\r\npart1-\r\n", mr.sent)
         self.assertIn("5\r\npart2\r\n", mr.sent)
-        # Terminating zero-length chunk.
         self.assertIn("0\r\n\r\n", mr.sent)
     }
 }
 
 
 class CedeSeamTests(TestCase) {
-    # A response is a document OR a handoff, never both: cede() on a
-    # response that already carries a body (or chunks) fails closed instead
-    # of silently shipping the body ahead of the handoff.
     def test_cede_with_body_raises() -> None {
         const res: Response = Response()
         res.text("half a document")
@@ -247,8 +204,6 @@ class CedeSeamTests(TestCase) {
         self.assertTrue(raised)
     }
 
-    # res.cede(fn) hands the live ConnReader to a callback and exits the
-    # loop WITHOUT closing the fd - the W2 WebSocket-upgrade seam.
     def test_cede_invokes_callback_and_skips_close() {
         const app: Router = Router(0)
 
@@ -265,8 +220,6 @@ class CedeSeamTests(TestCase) {
         const mr: MemoryReader = MemoryReader([
             b"GET /ws HTTP/1.1\r\nHost: h\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"])
         app.serve_connection(mr)
-        # The 101 went out, then the cede callback wrote "OWNED" over the
-        # same reader, and the loop returned without close() (W2 owns the fd).
         self.assertIn("101", mr.sent)
         self.assertIn("OWNED", mr.sent)
         self.assertFalse(mr.closed)

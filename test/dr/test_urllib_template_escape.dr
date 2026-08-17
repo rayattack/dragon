@@ -1,6 +1,3 @@
-# Pre-fix: template[URL].escape was an ad-hoc replace() subset that never
-# escaped "%" itself, so "50%" corrupted on round-trip.
-
 from unittest import TestCase, main
 from urllib.parse import URL, quote, unquote
 

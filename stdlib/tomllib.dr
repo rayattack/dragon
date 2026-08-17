@@ -11,7 +11,6 @@ def _strip(s: str) -> str {
 }
 
 def _strip_comment(line: str) -> str {
-    # Removes a trailing comment; a # outside a quoted string starts it.
     in_string: bool = false
     i: int = 0
     while i < len(line) {
@@ -31,12 +30,10 @@ def _strip_comment(line: str) -> str {
 }
 
 def _unquote(s: str) -> str {
-    # Removes surrounding double quotes if present; also unescapes basic sequences.
     if len(s) < 2 { return s }
     if s[0:1] == "\"" {
         if s[len(s) - 1:len(s)] == "\"" {
             const inner: str = s[1:len(s) - 1]
-            # Copies verbatim spans between backslashes; unknown escapes keep the backslash.
             parts: list[str] = []
             i: int = 0
             run: int = 0
@@ -62,7 +59,6 @@ def _unquote(s: str) -> str {
             return "".join(parts)
         }
     }
-    # Also handle single-quoted (literal) strings
     if s[0:1] == "'" {
         if s[len(s) - 1:len(s)] == "'" {
             return s[1:len(s) - 1]
@@ -72,7 +68,6 @@ def _unquote(s: str) -> str {
 }
 
 def _parse_value(raw: str) -> str {
-    # Parses a TOML scalar; strings are unquoted, booleans/numbers returned as-is.
     const val: str = _strip(raw)
     if len(val) == 0 { return "" }
 
@@ -83,7 +78,6 @@ def _parse_value(raw: str) -> str {
     if val == "true" { return "true" }
     if val == "false" { return "false" }
 
-    # Number (int or float): returned as-is for typed getters.
     return val
 }
 
@@ -105,12 +99,10 @@ class TomlDoc {
     }
 
     def get_int(key: str) -> int {
-        # TOML allows underscores in integers (e.g. 1_000) - strip them.
         return dragon_str_to_int(self.get(key).replace("_", ""))
     }
 
     def get_float(key: str) -> float {
-        # TOML allows underscores in floats - strip them.
         return dragon_str_to_float(self.get(key).replace("_", ""))
     }
 
@@ -131,7 +123,6 @@ class TomlDoc {
 
 
 def loads(text: str) -> TomlDoc {
-    # Parses TOML text (sections, dotted keys, scalars, comments) into a TomlDoc.
     doc: TomlDoc = TomlDoc()
     const lines: list[str] = text.split("\n")
     current_prefix: str = ""
@@ -140,19 +131,15 @@ def loads(text: str) -> TomlDoc {
     while i < len(lines) {
         raw: str = _strip(lines[i])
 
-        # Skip empty lines and full-line comments
         if len(raw) == 0 {
             i = i + 1
         } else {
             if raw[0:1] == "#" {
                 i = i + 1
             } else {
-                # Section header: [name] or [a.b.c]
                 if raw[0:1] == "[" {
-                    # Ensure it's not an array of tables [[...]]
                     if len(raw) > 1 {
                         if raw[1:2] == "[" {
-                            # Array of tables - skip (unsupported)
                             i = i + 1
                         } else {
                             const close: int = raw.find("]")

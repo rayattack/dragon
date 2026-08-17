@@ -63,8 +63,6 @@ class Probe(TestCase) {
     }
 
     def test_borrowed_guards() {
-        # Borrowed receiver (slot) and borrowed key (slot) must NOT be
-        # released - their owners still hold them.
         xs: list[int] = [9, 8, 7]
         d: dict[str, int] = {"kx": 7}
         k: str = "kx"

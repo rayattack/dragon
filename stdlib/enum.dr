@@ -29,8 +29,6 @@ A, B, C }` keyword remains a separate, faster int-constant form for hot paths.
     for c in Color { ... }      # iterate members in definition order
 """
 
-# Inert marker base classes: never instantiated, no state; the compiler recognizes
-# the base name and rewrites the deriving class. Kept as real declarations so imports resolve normally and stay import-gated.
 class Enum {
 }
 

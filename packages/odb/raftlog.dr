@@ -1,35 +1,3 @@
-# odb.raftlog - the persisted raft tail (spec section 19 v3b).
-#
-# Raft demands that a node's log entries be durable before it acknowledges
-# them. In ODB the log below the applied index IS the database (every applied
-# entry is a committed transaction, replayable from the commit log), so only
-# the TAIL - entries above the applied index, not yet safe to apply - needs
-# its own storage. It lives in PT_RAFT pages chained backward exactly like
-# the commit log, referenced from the meta's raft_root, and flipped durable
-# by pager.commit_state() without consuming a CSN.
-#
-# The chain is append-only. A truncation (a new leader overwriting an
-# unapplied suffix) just appends the replacement entries; readers reconstruct
-# the live log as the contiguous run of indexes ending at the NEWEST chain
-# entry, which is correct because every append batch ends at the log's end.
-# Superseded duplicates and orphans stay in the chain as dead weight until
-# pruning frees them.
-#
-# Pruning rides the data commit that applies an entry: the caller sets the
-# base forward and frees every chain entry that the post-crash walk can no
-# longer reach, and the pager's next meta flip publishes the new base, the
-# freed pages, and the applied CSN in ONE atomic write. There is no crash
-# point at which a page is both unreachable and unfreed, and none at which a
-# reachable page is freed
-#
-#   raft page payload:
-#     0  prev_entry u64   first page of the previous chain entry (0 = oldest)
-#     8  next_page  u64   continuation page within THIS entry (0 = last)
-#     16 chunk_len  u32   entry bytes stored in this page
-#     20 index      u64   raft log index (repeated on every page)
-#     28 term       u64   raft term (repeated on every page)
-#     36 data
-
 from odb.pager import Pager, PT_RAFT
 from odb.codec import blank, put_u32, put_u64, put_bytes
 from odb.codec import get_u32, get_u64, get_bytes
@@ -42,7 +10,6 @@ const _RP_INDEX: int = 20
 const _RP_TERM: int = 28
 const _RP_DATA: int = 36
 
-# One live tail entry, ascending order, as handed to the consensus layer.
 class TailEntry {
     index: int
     term: int
@@ -55,8 +22,6 @@ class TailEntry {
     }
 }
 
-# One chain entry as physically written, in write order. Dead entries
-# (superseded duplicates, truncated orphans) keep their record until pruned.
 class ChainRec {
     index: int
     term: int
@@ -71,7 +36,7 @@ class ChainRec {
 
 class RaftTail {
     pager: Pager
-    recs: list[ChainRec]        # write order, oldest first
+    recs: list[ChainRec]
 
     def(pager: Pager) {
         self.pager = pager
@@ -83,9 +48,6 @@ class RaftTail {
         return self.pager.payload_size() - _RP_DATA
     }
 
-    # Rebuild the write-order record list from the committed chain: walk
-    # backward from raft_root, stopping after the first entry at or below the
-    # base (the stop entry anchors the walk; nothing past it is reachable).
     def reload() -> None {
         self.recs = []
         rev: list[ChainRec] = []
@@ -121,9 +83,6 @@ class RaftTail {
         }
     }
 
-    # The live tail: the contiguous run of indexes above the base that ends at
-    # the newest chain entry. Anything else in the chain is a superseded
-    # duplicate or a truncated orphan and is skipped.
     def entries() -> list[TailEntry] {
         out: list[TailEntry] = []
         if len(self.recs) == 0 {
@@ -163,8 +122,6 @@ class RaftTail {
         return bytes(chunks)
     }
 
-    # Stage one entry at the head of the chain. Durable at the next
-    # commit_state() (or data commit) flip, never before.
     def append(index: int, term: int, data: bytes) -> None {
         cap: int = self._capacity()
         n: int = len(data)
@@ -203,21 +160,6 @@ class RaftTail {
         self.recs.append(ChainRec(index, term, ids))
     }
 
-    # Advance the base to `applied_index` and free every chain entry the
-    # post-crash walk can no longer reach: everything OLDER (in write order)
-    # than the newest entry at or below the new base. Runs INSIDE the data
-    # transaction that applies `applied_index` (odb.apply / fast_forward call
-    # it between begin and commit), so the frees, the base, and the applied
-    # CSN publish in one atomic meta flip: no crash point leaks a page or
-    # loses one that is still reachable.
-    #
-    # The base term comes from the chain's own record of the entry: every
-    # entry a replica applies through consensus was chained before it was
-    # acknowledged. An entry with no record (a catch-up apply, shipped as
-    # already-committed history) leaves the base where it is: a base that
-    # UNDERSTATES the applied position is safe (the node just re-receives
-    # committed entries and skips them), while a base stamped with a guessed
-    # term could misjudge a vote.
     def prune(applied_index: int) -> None {
         rec_term: int = -1
         ri: int = len(self.recs) - 1
@@ -261,9 +203,6 @@ class RaftTail {
         self.recs = kept
     }
 
-    # The newest chain entry's index: the log end as of the last flush (every
-    # append batch ends at the log end). The base when the chain is empty or
-    # fully pruned.
     def last_index() -> int {
         if len(self.recs) == 0 {
             return self.pager.raft_base
@@ -271,8 +210,6 @@ class RaftTail {
         return self.recs[len(self.recs) - 1].index
     }
 
-    # Term of the live (newest-written) chain entry at `index`, or -1 if the
-    # chain does not hold that index.
     def term_at(index: int) -> int {
         i: int = len(self.recs) - 1
         while i >= 0 {
@@ -284,7 +221,6 @@ class RaftTail {
         return -1
     }
 
-    # Every page the chain currently holds (live and dead), for accounting.
     def pages() -> list[int] {
         out: list[int] = []
         for r in self.recs {

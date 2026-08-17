@@ -1,10 +1,3 @@
-# Pre-fix: dragon_nb_recv_str malloc'd max_len + 1 unchecked, so a huge
-# recv size wrote the NUL terminator through a NULL buffer (SIGSEGV), and
-# max_len == INT64_MAX wrapped the +1 before that. recv_bytes/recv_timeout
-# shared the unchecked malloc. All three now raise catchable MemoryError
-# before touching the socket, so the connection stays usable. The 2^62
-# request is deterministic uncapped: no 64-bit VA space can map it.
-
 from unittest import TestCase, main
 from socket import TcpListener, TcpStream
 
@@ -33,7 +26,7 @@ class SocketRecvOomTests(TestCase) {
             caught = caught + 1
         }
         try {
-            s2: str = c.recv(9223372036854775807)    # the +1 wrap case
+            s2: str = c.recv(9223372036854775807)
             print(len(s2))
         } except MemoryError {
             caught = caught + 1
@@ -52,7 +45,6 @@ class SocketRecvOomTests(TestCase) {
         }
         self.assertEqual(caught, 4)
 
-        # The connection survives every failed receive.
         got: str = c.recv(16)
         self.assertEqual(got, "hello")
         c.send("bye")

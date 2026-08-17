@@ -1,10 +1,3 @@
-# test/dr/test_errno.dr - errno code/name mapping and its lazy cache.
-#
-# Regression cover: `errorcode()` and `errorcode_dict()` assigned the module
-# global `_errorcode_cache` without a `global` declaration, so `import errno`
-# was a hard compile error. Importing this module at all guards that; the cache
-# assertions below guard the lazy-build path that the missing `global` broke.
-
 from unittest import TestCase, main
 import errno
 
@@ -20,12 +13,9 @@ class ErrnoTests(TestCase) {
     }
 
     def test_cache_is_built_once_and_reused() {
-        # Both entry points must see the same populated cache. If the global
-        # assignment does not stick, the second call rebuilds from empty.
         const first: int = len(errno.errorcode_dict())
         self.assertTrue(first > 0)
         self.assertEqual(len(errno.errorcode_dict()), first)
-        # A lookup after the dict call must still resolve from the same cache.
         self.assertEqual(errno.errorcode(2), "ENOENT")
     }
 

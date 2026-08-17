@@ -1,17 +1,6 @@
-# test/dr/test_socket_vthread.dr - socket I/O is scheduler-aware (ADR 038 Phase 8).
-#
-# Exercises stdlib/socket.dr's accept/connect/recv/send running on a `fire` green
-# thread: they now yield to the scheduler on EAGAIN instead of blocking the
-# carrier OS thread. A loopback echo server runs on a vthread; the client runs on
-# the main thread. Before Phase 8 socket.dr bound raw blocking libc calls, so a
-# fire'd server would stall its carrier (and had to be a threading.Thread) - this
-# proves the vthread path works end to end.
-
 from unittest import TestCase, main
 from socket import TcpListener, TcpStream
 
-# Accept one connection, echo its message back with an "echo:" prefix. Runs on a
-# green thread; accept/recv/send park the vthread until the fd is ready.
 def _echo_once(lis: TcpListener) -> None {
     const conn: TcpStream = lis.accept()
     const msg: str = conn.recv(1024)
@@ -21,8 +10,6 @@ def _echo_once(lis: TcpListener) -> None {
 
 class SocketVthreadTests(TestCase) {
     def test_fire_server_roundtrip() {
-        # bind/listen synchronously so the listener is ready before we connect,
-        # then run the accept+echo handler on a vthread.
         lis: TcpListener = TcpListener("127.0.0.1", 54421)
         lis.bind()
         lis.listen(8)

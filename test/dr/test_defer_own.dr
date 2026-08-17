@@ -167,7 +167,6 @@ class DeferOwnTests(TestCase) {
     }
 
     def test_loop_body_defer_churn() {
-        # Block scoping: the defer runs each iteration; nothing accumulates.
         i: int = 0
         while i < 3000 {
             s: str = "x" + str(i)

@@ -1,4 +1,3 @@
-// D052 `dragon ffi sync` tool tests: stub provenance guard + idempotence
 #include <gtest/gtest.h>
 #include "../src/FfiSync.h"
 #include <filesystem>
@@ -38,7 +37,7 @@ const char* kImgClass =
     "    }\n"
     "}\n";
 
-}  // namespace
+}
 
 TEST(FfiSyncTest, GeneratesAndStaysIdempotent) {
     fs::path dir = freshDir("dragon-ffisync-idem");
@@ -49,7 +48,6 @@ TEST(FfiSyncTest, GeneratesAndStaysIdempotent) {
     const std::string stub = slurp(dir / "gen" / "imgtool_stub.go");
     ASSERT_NE(stub.find("AUTO-GENERATED"), std::string::npos);
     ASSERT_NE(stub.find("from tools_a.dr"), std::string::npos);
-    // Re-sync from the same owner: unchanged, exit 0, --check clean.
     ASSERT_EQ(runFfiSync((dir / "tools_a.dr").string(), false), 0);
     EXPECT_EQ(slurp(dir / "gen" / "imgtool_stub.go"), stub);
     EXPECT_EQ(runFfiSync((dir / "tools_a.dr").string(), true), 0);
@@ -60,14 +58,13 @@ TEST(FfiSyncTest, ProvenanceGuardRefusesForeignOwner) {
     writeFile(dir / "tools_a.dr",
               std::string("extern \"golang\" def resize(w: int, h: int) -> Img "
                           "from \"gen/imgtool\"\n\n") + kImgClass);
-    // Same binary, different param names: the silent zero-fill shape.
     writeFile(dir / "tools_b.dr",
               std::string("extern \"golang\" def resize(width: int, height: int) -> Img "
                           "from \"gen/imgtool\"\n\n") + kImgClass);
     ASSERT_EQ(runFfiSync((dir / "tools_a.dr").string(), false), 0);
     const std::string owned = slurp(dir / "gen" / "imgtool_stub.go");
     EXPECT_EQ(runFfiSync((dir / "tools_b.dr").string(), false), 1);
-    EXPECT_EQ(slurp(dir / "gen" / "imgtool_stub.go"), owned);  // untouched
+    EXPECT_EQ(slurp(dir / "gen" / "imgtool_stub.go"), owned);
 }
 
 TEST(FfiSyncTest, RefusesToClobberHumanFile) {

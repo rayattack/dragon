@@ -1,44 +1,27 @@
-# odb.wire - the native wire protocol (spec section 18)
-#
-# Length-framed messages over any byte channel:
-#
-#   frame = length: u32 LE | type: u8 | payload
-#
-# where `length` counts the type byte plus the payload. Control payloads are
-# JSON text; document results (R_DOCS) are binary - the stored DBON blobs ride
-# from the leaf page to the socket without re-encoding, and the client decodes
-# them with the same compiled schemas the server uses (fetched at connect)
-#
-# The channel is a seam (WireConn) exactly like the pager's VFS: SocketConn
-# rides a TcpStream; MemoryConn is canned bytes for network-free tests
-
 from socket import TcpStream
 from odb.codec import blank, put_u8, put_u32, put_bytes, get_u8, get_u32
 from odb.errors import ODBError
 
-# Message types. Q_* travel client -> server; R_* travel back.
 const Q_HELLO: int = 1
 const R_HELLO: int = 2
 const Q_FIND: int = 3
-const R_ROWS: int = 4        # JSON: {"rows": [...]}
-const R_DOCS: int = 5        # binary: sid u16, count u32, (docid u64, len u32, dbon)*
+const R_ROWS: int = 4
+const R_DOCS: int = 5
 const Q_RUN: int = 6
-const R_COUNT: int = 7       # JSON: {"count": n}
+const R_COUNT: int = 7
 const Q_SCHEMAS: int = 8
-const R_SCHEMAS: int = 9     # JSON: {"schemas": [{sid, name, version, schema, meta}]}
-const Q_WATCH: int = 10      # JSON: {"q": "...", "since": n}
-const R_CHANGES: int = 11    # JSON: {"changes": [...], "resume": n}
+const R_SCHEMAS: int = 9
+const Q_WATCH: int = 10
+const R_CHANGES: int = 11
 const Q_PING: int = 12
 const R_PONG: int = 13
-const R_ERROR: int = 14      # JSON: {"error": "IntegrityError", "message": "..."}
-# Replication (spec section 19): a follower pulls committed log entries.
-const Q_STREAM: int = 15     # JSON: {"since": n, "uuid": "<hex>"}
-const R_LOGENTRY: int = 16   # binary: one encoded LogEntry (commitlog wire form)
-const R_STREAM_END: int = 17 # JSON: {"csn": n} - the source's committed csn
+const R_ERROR: int = 14
+const Q_STREAM: int = 15
+const R_LOGENTRY: int = 16
+const R_STREAM_END: int = 17
 
 const WIRE_VERSION: int = 1
 
-# One decoded frame. eof marks a cleanly closed connection (no frame).
 class Frame {
     ftype: int
     payload: bytes
@@ -51,12 +34,7 @@ class Frame {
     }
 }
 
-#===----------------------------------------------------------------------===#
-# The byte channel seam
-#===----------------------------------------------------------------------===#
-
 class WireConn {
-    # Exactly n bytes, or fewer only at EOF.
     def read_exact(n: int) -> bytes {
         raise ODBError("read_exact not implemented")
     }
@@ -80,7 +58,7 @@ class SocketConn(WireConn) {
         while len(out) < n {
             chunk: bytes = self.stream.recv_bytes(n - len(out))
             if len(chunk) == 0 {
-                return out           # EOF mid-read; caller treats short as EOF
+                return out
             }
             out = out + chunk
         }
@@ -96,8 +74,6 @@ class SocketConn(WireConn) {
     }
 }
 
-# Canned input + captured output, for tests. Feed whole frames in `inbox`;
-# everything written lands in `sent`.
 class MemoryConn(WireConn) {
     inbox: bytes
     pos: int
@@ -130,7 +106,6 @@ class MemoryConn(WireConn) {
         self.closed = True
     }
 
-    # Everything written, as one byte string (for frame-level assertions).
     def all_sent() -> bytes {
         out: bytes = bytes([])
         for d in self.sent {
@@ -139,10 +114,6 @@ class MemoryConn(WireConn) {
         return out
     }
 }
-
-#===----------------------------------------------------------------------===#
-# Framing
-#===----------------------------------------------------------------------===#
 
 def write_frame(c: WireConn, ftype: int, payload: bytes) -> None {
     head: list[int] = blank(5)
@@ -178,7 +149,6 @@ def read_frame(c: WireConn) -> Frame {
     return Frame(ftype, payload, False)
 }
 
-# Encode one whole request frame as bytes (for MemoryConn inboxes).
 def frame_bytes(ftype: int, payload: bytes) -> bytes {
     head: list[int] = blank(5)
     put_u32(head, 0, len(payload) + 1)

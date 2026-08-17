@@ -1,8 +1,3 @@
-/// Dragon Runtime - gzip/zlib wrappers. One-shot bytes-in/bytes-out around
-/// system zlib (single deflate/inflate pass); stdlib/gzip.dr layers Pythonic
-/// streaming on top by chunking. Own TU so `-lz` links only when a program
-/// uses `dragon_zlib_*` (gated on `needsZ`), independent of zstd linking.
-
 #include "runtime_internal.h"
 
 #include <zlib.h>
@@ -10,28 +5,21 @@
 #include <cstdlib>
 #include <cstring>
 
-// Hard ceiling on decompressed output: a few kB of crafted zlib can expand to
-// GBs (decompression-bomb) and OOM the process. 256 MiB matches our largest
-// legitimate payload (vendored stdlib tarballs).
 static constexpr int64_t DRAGON_ZLIB_MAX_OUTPUT = 1LL << 28;
 
 extern "C" {
 
-/// Compress `src` to gzip-format bytes (RFC 1952). `level` is 0..9 (zlib's
-/// scale: 0=store, 1=fastest, 9=best, -1=default which is 6).
 DragonBytes* dragon_zlib_compress(DragonBytes* src, int64_t level) {
     if (!src || src->len == 0) return dragon_bytes_new(nullptr, 0);
     z_stream s;
     std::memset(&s, 0, sizeof(s));
-    // windowBits = 15 (max LZ77 window) + 16 (gzip wrapper); MEM_LEVEL=8 default.
     if (deflateInit2(&s, (int)level, Z_DEFLATED, 15 + 16, 8,
                      Z_DEFAULT_STRATEGY) != Z_OK) {
-        dragon_raise_exc_cstr(50 /* OSError */, "zlib: deflateInit2 failed");
+        dragon_raise_exc_cstr(50 , "zlib: deflateInit2 failed");
         return nullptr;
     }
     s.next_in = (Bytef*)src->data;
     s.avail_in = (uInt)src->len;
-    // deflateBound is exact for single-call Z_FINISH: allocate once, no realloc.
     uLong cap = deflateBound(&s, (uLong)src->len);
     uint8_t* buf = (uint8_t*)dragon_malloc_nullable(cap > 0 ? cap : 1);
     if (!buf) { deflateEnd(&s); dragon_raise_oom(); }
@@ -51,8 +39,6 @@ DragonBytes* dragon_zlib_compress(DragonBytes* src, int64_t level) {
     return out;
 }
 
-/// Decompress gzip- or zlib-format bytes. windowBits = 15 + 32 auto-detects
-/// either wrapper (matches Python's `zlib.decompress(..., wbits=47)`).
 DragonBytes* dragon_zlib_decompress(DragonBytes* src) {
     if (!src || src->len == 0) return dragon_bytes_new(nullptr, 0);
     z_stream s;
@@ -63,8 +49,6 @@ DragonBytes* dragon_zlib_decompress(DragonBytes* src) {
     }
     s.next_in = (Bytef*)src->data;
     s.avail_in = (uInt)src->len;
-    // Unknown output size: start at 4x input (typical text ratio), grow
-    // geometrically for O(n) total work even on pathological inputs.
     size_t cap = (size_t)src->len * 4;
     if (cap < 4096) cap = 4096;
     if ((int64_t)cap > DRAGON_ZLIB_MAX_OUTPUT) cap = (size_t)DRAGON_ZLIB_MAX_OUTPUT;
@@ -86,7 +70,6 @@ DragonBytes* dragon_zlib_decompress(DragonBytes* src) {
         if (ret == Z_OK) {
             used = cap - s.avail_out;
             if (s.avail_out == 0) {
-                // Decompression-bomb guard: refuse to grow past the cap.
                 if ((int64_t)cap >= DRAGON_ZLIB_MAX_OUTPUT) {
                     inflateEnd(&s);
                     std::free(buf);
@@ -108,8 +91,6 @@ DragonBytes* dragon_zlib_decompress(DragonBytes* src) {
             }
             continue;
         }
-        // Z_BUF_ERROR is recoverable when we just need more output room;
-        // any other error is fatal.
         if (ret == Z_BUF_ERROR && s.avail_out == 0) {
             if ((int64_t)cap >= DRAGON_ZLIB_MAX_OUTPUT) {
                 inflateEnd(&s);
@@ -143,17 +124,13 @@ DragonBytes* dragon_zlib_decompress(DragonBytes* src) {
     return out;
 }
 
-/// Compress `src` to RAW DEFLATE bytes (RFC 1951, no zlib/gzip header/trailer) -
-/// the exact stream a PKWARE ZIP method-8 entry stores. Used by stdlib/zipfile.dr.
 DragonBytes* dragon_zlib_compress_raw(DragonBytes* src, int64_t level) {
     if (!src || src->len == 0) return dragon_bytes_new(nullptr, 0);
     z_stream s;
     std::memset(&s, 0, sizeof(s));
-    // windowBits = -15 selects raw deflate (RFC 1951): no zlib header/adler
-    // trailer; |15| is the max LZ77 window, MEM_LEVEL=8 is zlib's default.
     if (deflateInit2(&s, (int)level, Z_DEFLATED, -15, 8,
                      Z_DEFAULT_STRATEGY) != Z_OK) {
-        dragon_raise_exc_cstr(50 /* OSError */, "zlib: deflateInit2 (raw) failed");
+        dragon_raise_exc_cstr(50 , "zlib: deflateInit2 (raw) failed");
         return nullptr;
     }
     s.next_in = (Bytef*)src->data;
@@ -177,8 +154,6 @@ DragonBytes* dragon_zlib_compress_raw(DragonBytes* src, int64_t level) {
     return out;
 }
 
-/// Decompress RAW DEFLATE bytes (RFC 1951, no header/trailer): the inverse of
-/// dragon_zlib_compress_raw, used by stdlib/zipfile.dr for ZIP method-8 entries.
 DragonBytes* dragon_zlib_decompress_raw(DragonBytes* src) {
     if (!src || src->len == 0) return dragon_bytes_new(nullptr, 0);
     z_stream s;
@@ -264,4 +239,4 @@ DragonBytes* dragon_zlib_decompress_raw(DragonBytes* src) {
     return out;
 }
 
-} // extern "C"
+}

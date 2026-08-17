@@ -24,7 +24,6 @@ from json import decode
 
 
 def anylist_returner() -> list[Any] {
-    # a fresh literal blessed against the declared return type - born boxed
     return ["r1", "r2"]
 }
 
@@ -33,7 +32,6 @@ class TestBornBoxedLiterals(TestCase) {
     def test_nested_in_dict_literal() -> None {
         const d: dict[str, Any] = {"required": ["a", "b", "c", "d", "e", "f"]}
         const xs: list[Any] = d["required"]
-        # index 0 AND an index past size/2 (the old 16B-stride OOB zone)
         const first: str = xs[0]
         const last: str = xs[5]
         self.assertEqual(first, "a")
@@ -90,8 +88,6 @@ class TestBornBoxedLiterals(TestCase) {
 
 class TestMatchingViews(TestCase) {
     def test_native_roundtrip_concrete_type() -> None {
-        # a concrete list stored through Any and read back at ITS type is a
-        # view (same pointer), not a copy
         names: list[str] = ["a", "b"]
         d: dict[str, Any] = {}
         d["k"] = names
@@ -112,8 +108,6 @@ class TestMatchingViews(TestCase) {
     }
 
     def test_dict_value_covariance_is_uniform() -> None {
-        # dicts have ONE tagged representation - a dict[str, int] read back
-        # through Any works (no list-style split)
         m: dict[str, int] = {"a": 1, "b": 2}
         holder: dict[str, Any] = {"m": m}
         const back: dict[str, Any] = holder["m"]
@@ -125,13 +119,11 @@ class TestMatchingViews(TestCase) {
 
 class TestCrossViewsRaise(TestCase) {
     def test_boxlist_as_concrete_raises() -> None {
-        # json.loads builds boxed-element lists; a monomorphized view over one
-        # must raise, never misread
         const schema: dict[str, Any] = decode[dict[str, Any]]('{"k": ["a", "b"]}'.encode("utf-8"))
         caught: bool = False
         try {
             const names: list[str] = schema["k"]
-            self.assertEqual(len(names), -1)  # unreachable
+            self.assertEqual(len(names), -1)
         } except {
             caught = True
         }
@@ -139,14 +131,13 @@ class TestCrossViewsRaise(TestCase) {
     }
 
     def test_native_as_anylist_raises() -> None {
-        # a concrete list VARIABLE stored through Any then viewed as list[Any]
         names: list[str] = ["a", "b"]
         d: dict[str, Any] = {}
         d["k"] = names
         caught: bool = False
         try {
             const xs: list[Any] = d["k"]
-            self.assertEqual(len(xs), -1)  # unreachable
+            self.assertEqual(len(xs), -1)
         } except {
             caught = True
         }
@@ -154,15 +145,13 @@ class TestCrossViewsRaise(TestCase) {
     }
 
     def test_wrong_concrete_elem_raises() -> None {
-        # list[str] through Any viewed as list[int]: pointer-as-int misread
-        # before the fix, TypeError now
         names: list[str] = ["a", "b"]
         d: dict[str, Any] = {}
         d["k"] = names
         caught: bool = False
         try {
             const xs: list[int] = d["k"]
-            self.assertEqual(len(xs), -1)  # unreachable
+            self.assertEqual(len(xs), -1)
         } except {
             caught = True
         }
@@ -170,7 +159,6 @@ class TestCrossViewsRaise(TestCase) {
     }
 
     def test_elem_narrow_tag_check() -> None {
-        # narrowing a box-list ELEMENT to the wrong scalar raises
         const any_l: Any = json.loads('[1, 2]')
         const xs: list[Any] = any_l
         caught: bool = False

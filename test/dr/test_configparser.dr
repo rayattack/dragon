@@ -1,6 +1,3 @@
-# Pre-fix: pins ConfigParser's public API before the parallel-list storage became
-# dict-backed; the list version also lost key overwrites (nested subscript store no-op).
-
 from unittest import TestCase, main
 from configparser import ConfigParser
 

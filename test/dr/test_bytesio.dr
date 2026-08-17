@@ -1,6 +1,3 @@
-# Pre-fix: BytesIO stored a boxed per-byte list[int] and looped byte-by-byte,
-# and seek() accepted negative offsets that later made write() index negatively.
-
 from unittest import TestCase, main
 from io import BytesIO, Reader, open, make
 

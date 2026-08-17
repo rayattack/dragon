@@ -43,7 +43,6 @@ class EscapeControlTests(TestCase) {
     def test_clean_string_unchanged() {
         self.assertEqual(escape("plain text, no escapes"), "plain text, no escapes")
         self.assertEqual(escape(""), "")
-        # Multibyte code points need no escaping and pass through intact.
         self.assertEqual(escape("aλb → c"), "aλb → c")
     }
 
@@ -52,8 +51,6 @@ class EscapeControlTests(TestCase) {
     }
 
     def test_template_static_escape_agrees() {
-        # JSON.escape (the template[JSON] auto-escape) delegates to the same
-        # implementation as module-level escape.
         self.assertEqual(JSON.escape(chr(8) + "x\"y"), "\\bx\\\"y")
         self.assertEqual(JSON.escape("clean"), "clean")
     }

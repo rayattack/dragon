@@ -28,16 +28,11 @@ from socket import TcpStream
 from hashlib import sha1, sha256
 import struct
 
-#===----------------------------------------------------------------------===#
-# Command + type constants.
-#===----------------------------------------------------------------------===#
-
 const COM_QUERY: int = 0x03
 const COM_STMT_PREPARE: int = 0x16
 const COM_STMT_EXECUTE: int = 0x17
 const COM_STMT_CLOSE: int = 0x19
 
-# Capability flags we advertise.
 const CLIENT_LONG_PASSWORD: int = 0x1
 const CLIENT_PROTOCOL_41: int = 0x200
 const CLIENT_SECURE_CONNECTION: int = 0x8000
@@ -45,7 +40,6 @@ const CLIENT_PLUGIN_AUTH: int = 0x80000
 const CLIENT_DEPRECATE_EOF: int = 0x1000000
 const CLIENT_CONNECT_WITH_DB: int = 0x8
 
-# Column / param types (subset we decode).
 const MT_TINY: int = 1
 const MT_SHORT: int = 2
 const MT_LONG: int = 3
@@ -64,9 +58,6 @@ const MT_VAR_STRING: int = 253
 const MT_STRING: int = 254
 
 
-# A lenenc integer decoded from a buffer: its value plus the byte width it
-# consumed (so the caller can advance). Returned as a 2-int list to dodge the
-# lack of a variadic-arity runtime tuple.
 def _lenenc(b: bytes, o: int) -> list[int] {
     first: int = b[o]
     if first < 0xFB {
@@ -78,11 +69,9 @@ def _lenenc(b: bytes, o: int) -> list[int] {
     if first == 0xFD {
         return [b[o + 1] | (b[o + 2] << 8) | (b[o + 3] << 16), 4]
     }
-    # 0xFE: 8-byte
     return [struct.unpack_u64_le(b, o + 1), 9]
 }
 
-# Encode a length-encoded integer.
 def _put_lenenc(v: int) -> bytes {
     if v < 0xFB {
         return bytes([v])
@@ -104,13 +93,9 @@ def _put_lenenc(v: int) -> bytes {
 
 
 class MySqlConnection(Connection) {
-    # Declared so the field's class is statically KNOWN (see postgres.dr's
-    # twin note): a ctor-inferred instance field loses its kind and dealloc
-    # skipped it - one leaked TcpStream per connection
     sock: TcpStream
 
     def(dsn: str) {
-        # Parse mysql://user:password@host:port/dbname
         rest: str = dsn
         if rest.startswith("mysql://") {
             rest = rest[8:]
@@ -150,28 +135,22 @@ class MySqlConnection(Connection) {
 
         self.dbname = dbname
         self.seq = 0
-        self._affected = 0       # declared here so it is a real instance field
-        self._had_resultset = false   # last _run saw a result set (SELECT) vs an OK packet (DML)
-        self._stmt_cache: dict[str, int] = {}   # canonical SQL -> server stmt id
-        self._rbuf = bytes()     # socket read buffer (header+body served from one recv)
-        self._rpos = 0           # consumed offset into _rbuf
+        self._affected = 0
+        self._had_resultset = false
+        self._stmt_cache: dict[str, int] = {}
+        self._rbuf = bytes()
+        self._rpos = 0
         self.sock = TcpStream.open(host, port)
         self._authenticate(user, password, dbname)
     }
 
-    #--- Packet framing -----------------------------------------------------#
-
     def _recv_exact(n: int) -> bytes {
-        # Serve `n` bytes from the read buffer, refilling from the socket in large
-        # chunks. A packet's 4-byte header and its body then come from one recv,
-        # and a result set's many row packets batch into a few recvs - one syscall
-        # per refill instead of two per packet.
         while (len(self._rbuf) - self._rpos) < n {
             if self._rpos == len(self._rbuf) {
-                self._rbuf = bytes()           # fully drained: reset, no copy
+                self._rbuf = bytes()
                 self._rpos = 0
             } else if self._rpos > 0 {
-                self._rbuf = self._rbuf[self._rpos:]   # drop consumed prefix
+                self._rbuf = self._rbuf[self._rpos:]
                 self._rpos = 0
             }
             chunk: bytes = self.sock.recv_bytes(65536)
@@ -185,8 +164,6 @@ class MySqlConnection(Connection) {
         return out
     }
 
-    # Read one protocol packet, tracking the sequence id so the next write can
-    # use seq+1 (MySQL rejects out-of-order packets).
     def _read_packet() -> bytes {
         hdr: bytes = self._recv_exact(4)
         plen: int = hdr[0] | (hdr[1] << 8) | (hdr[2] << 16)
@@ -201,21 +178,17 @@ class MySqlConnection(Connection) {
         self.seq = seq
     }
 
-    # Send a fresh command (resets the sequence to 0).
     def _command(cmd: int, body: bytes) {
         self._write_packet(0, bytes([cmd]) + body)
     }
 
     def _err_text(p: bytes) -> str {
-        # ERR packet: 0xFF + 2-byte code + (#SQLSTATE 6 bytes) + message.
         msg_off: int = 3
-        if len(p) > 9 and p[3] == 35 {       # '#' SQLSTATE marker
+        if len(p) > 9 and p[3] == 35 {
             msg_off = 9
         }
         return p[msg_off:].decode("utf-8")
     }
-
-    #--- Authentication -----------------------------------------------------#
 
     def _xor(a: bytes, b: bytes) -> bytes {
         out: list[int] = []
@@ -226,7 +199,6 @@ class MySqlConnection(Connection) {
         }
         return bytes(out)
     }
-    # mysql_native_password: SHA1(pw) XOR SHA1(salt + SHA1(SHA1(pw)))
     def _scramble_native(password: str, salt: bytes) -> bytes {
         if password == "" {
             return bytes()
@@ -235,7 +207,6 @@ class MySqlConnection(Connection) {
         t: bytes = sha1(salt + sha1(s1).digest()).digest()
         return self._xor(s1, t)
     }
-    # caching_sha2_password fast path: SHA256(pw) XOR SHA256(SHA256(SHA256(pw)) + salt)
     def _scramble_csha2(password: str, salt: bytes) -> bytes {
         if password == "" {
             return bytes()
@@ -247,16 +218,15 @@ class MySqlConnection(Connection) {
 
     def _authenticate(user: str, password: str, dbname: str) {
         hs: bytes = self._read_packet()
-        # parse server salt + advertised plugin
         o: int = 1
         while hs[o] != 0 {
             o = o + 1
         }
-        o = o + 1 + 4                       # server version NUL + connection id
+        o = o + 1 + 4
         salt1: bytes = hs[o:o + 8]
-        o = o + 8 + 1 + 2 + 1 + 2 + 2       # salt1 filler caplo charset status caphi
+        o = o + 8 + 1 + 2 + 1 + 2 + 2
         authlen: int = hs[o]
-        o = o + 1 + 10                      # authlen byte + reserved
+        o = o + 1 + 10
         salt: bytes = salt1 + hs[o:o + (authlen - 9)]
 
         caps: int = CLIENT_LONG_PASSWORD | CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION | CLIENT_PLUGIN_AUTH | CLIENT_DEPRECATE_EOF
@@ -287,7 +257,6 @@ class MySqlConnection(Connection) {
             } else if r[0] == 0xFF {
                 raise ConnectionError("mysql auth failed: " + self._err_text(r))
             } else if r[0] == 0xFE {
-                # Auth Switch Request: 0xFE + plugin NUL + salt(EOF).
                 j: int = 1
                 while r[j] != 0 {
                     j = j + 1
@@ -305,8 +274,6 @@ class MySqlConnection(Connection) {
                 }
                 self._write_packet(self.seq + 1, sw)
             } else if r[0] == 0x01 {
-                # AuthMoreData: 0x03 = fast-auth success (OK follows);
-                # 0x04 = full auth required (needs RSA or TLS - not available).
                 if r[1] != 0x03 {
                     raise ConnectionError("mysql: caching_sha2_password full auth requires TLS (server-side cache miss); use a mysql_native_password account or a TLS DSN")
                 }
@@ -314,10 +281,6 @@ class MySqlConnection(Connection) {
         }
     }
 
-    #--- Prepared-statement helpers ----------------------------------------#
-
-    # Rewrite the canonical `$$N` placeholders to MySQL's positional `?`.
-    # Descending N avoids the `$$1`-prefix-of-`$$10` hazard.
     def _to_mysql(canonical: str, nparams: int) -> str {
         sql: str = canonical
         k: int = nparams - 1
@@ -328,13 +291,11 @@ class MySqlConnection(Connection) {
         return sql
     }
 
-    # Parse a column-definition packet, returning [name, type]. `name` is the
-    # 5th lenenc string; `type` is the 1-byte type past the fixed-length block.
     def _parse_column_def(p: bytes) -> dict[str, Any] {
         o: int = 0
         f: int = 0
         name: str = ""
-        while f < 5 {                       # catalog schema table org_table name
+        while f < 5 {
             li: list[int] = _lenenc(p, o)
             slen: int = li[0]
             o = o + li[1]
@@ -344,12 +305,10 @@ class MySqlConnection(Connection) {
             o = o + slen
             f = f + 1
         }
-        # org_name (lenenc string), then lenenc fixed-length (0x0c).
         on: list[int] = _lenenc(p, o)
         o = o + on[1] + on[0]
         fl: list[int] = _lenenc(p, o)
         o = o + fl[1]
-        # charset(2) column_length(4) type(1) ...
         ctype: int = p[o + 6]
         flags: int = struct.unpack_u16_le(p, o + 7)
         col: dict[str, Any] = {}
@@ -359,14 +318,10 @@ class MySqlConnection(Connection) {
         return col
     }
 
-    # A packet is the EOF / OK terminator (DEPRECATE_EOF folds EOF into OK):
-    # header 0xFE with a short body.
     def _is_eof(p: bytes) -> bool {
         return p[0] == 0xFE and len(p) < 9
     }
 
-    # Bind a single param into the EXECUTE body: appends its type (2 bytes) to
-    # `types` and its binary value to `values`. NULL sets the null bitmap bit.
     def _bind_param(p: Any, types: list[int], values: list[int], null_bitmap: list[int], idx: int) {
         if isinstance(p, bool) {
             types.append(MT_TINY)
@@ -413,15 +368,12 @@ class MySqlConnection(Connection) {
                 k = k + 1
             }
         } else {
-            # NULL: set the bitmap bit, emit type NULL, no value bytes.
             types.append(MT_NULL)
             types.append(0)
             null_bitmap[idx >> 3] = null_bitmap[idx >> 3] | (1 << (idx & 7))
         }
     }
 
-    # Decode one binary-protocol column value at offset `o`; returns
-    # [value, nextoffset] (value boxed as Any).
     def _decode_value(data: bytes, o: int, ctype: int) -> dict[str, Any] {
         r: dict[str, Any] = {}
         if ctype == MT_TINY {
@@ -447,13 +399,12 @@ class MySqlConnection(Connection) {
             r["v"] = r2["v"]
             r["n"] = r2["n"]
         } else {
-            # String-like: VAR_STRING / STRING / NEWDECIMAL / BLOB / etc.
             li: list[int] = _lenenc(data, o)
             slen: int = li[0]
             start: int = o + li[1]
             raw: str = data[start:start + slen].decode("utf-8")
             if ctype == MT_NEWDECIMAL {
-                r["v"] = float(raw)            # numeric -> float (matches PG NUMERIC)
+                r["v"] = float(raw)
             } else {
                 r["v"] = raw
             }
@@ -462,9 +413,6 @@ class MySqlConnection(Connection) {
         return r
     }
 
-    # Zero-pad a 0-99 value to two digits. Defined before its caller so the
-    # type checker (which registers methods in source order) resolves its `str`
-    # return type inside _decode_datetime's string-building chain.
     def _pad2(v: int) -> str {
         if v < 10 {
             return "0" + str(v)
@@ -472,8 +420,6 @@ class MySqlConnection(Connection) {
         return str(v)
     }
 
-    # Binary DATE/DATETIME/TIMESTAMP: 1-byte length then components. Rendered as
-    # an ISO-ish string (the dict[str, Any] vehicle has no native date type).
     def _decode_datetime(data: bytes, o: int) -> dict[str, Any] {
         ln: int = data[o]
         r: dict[str, Any] = {}
@@ -497,8 +443,6 @@ class MySqlConnection(Connection) {
         return r
     }
 
-    # Prepare `sql_text` (already in MySQL `?` dialect), drain its param- and
-    # column-definition packets, and return the server statement id.
     def _prepare(sql_text: str, nparams: int) -> int {
         self._command(COM_STMT_PREPARE, sql_text.encode("utf-8"))
         head: bytes = self._read_packet()
@@ -508,14 +452,11 @@ class MySqlConnection(Connection) {
         stmt_id: int = struct.unpack_u32_le(head, 1)
         num_cols: int = struct.unpack_u16_le(head, 5)
         np: int = struct.unpack_u16_le(head, 7)
-        # Drain param-definition packets (CLIENT_DEPRECATE_EOF => no EOF).
         pi: int = 0
         while pi < np {
             self._read_packet()
             pi = pi + 1
         }
-        # Drain column-definition packets. The result set after EXECUTE carries
-        # its own column defs, so these are consumed only to clear the wire.
         ci: int = 0
         while ci < num_cols {
             self._read_packet()
@@ -524,10 +465,6 @@ class MySqlConnection(Connection) {
         return stmt_id
     }
 
-    # The cached server statement id for `canonical`, preparing it on first use.
-    # Keyed by the dialect-free canonical text, so a repeated `template[SQL]`
-    # site is prepared once and only EXECUTEd thereafter (the dominant win for
-    # insert/select loops). Cached ids are closed in close().
     def _get_stmt(canonical: str, nparams: int) -> int {
         if canonical in self._stmt_cache {
             return self._stmt_cache[canonical]
@@ -538,20 +475,16 @@ class MySqlConnection(Connection) {
         return sid
     }
 
-    # Execute the (cached) prepared statement for `canonical` with `params`,
-    # returning result rows. DDL/empty result sets return []. Records affected
-    # rows in self._affected. The statement is NOT closed - it stays cached.
     def _run(canonical: str, params: list[Any]) -> list[dict[str, Any]] {
         nparams: int = len(params)
         stmt_id: int = self._get_stmt(canonical, nparams)
 
-        # COM_STMT_EXECUTE.
         body: list[int] = []
         b0: bytes = struct.pack_u32_le(stmt_id)
         k: int = 0
         while k < 4 { body.append(b0[k]); k = k + 1 }
-        body.append(0)                          # flags = CURSOR_TYPE_NO_CURSOR
-        body.append(1); body.append(0); body.append(0); body.append(0)   # iteration count = 1
+        body.append(0)
+        body.append(1); body.append(0); body.append(0); body.append(0)
         if nparams > 0 {
             nb_len: int = (nparams + 7) >> 3
             null_bitmap: list[int] = [0] * nb_len
@@ -564,7 +497,7 @@ class MySqlConnection(Connection) {
             }
             k = 0
             while k < nb_len { body.append(null_bitmap[k]); k = k + 1 }
-            body.append(1)                      # new-params-bound flag
+            body.append(1)
             k = 0
             while k < len(types) { body.append(types[k]); k = k + 1 }
             k = 0
@@ -579,13 +512,11 @@ class MySqlConnection(Connection) {
             raise QueryError(self._err_text(first))
         }
         if first[0] == 0x00 {
-            # OK packet (no result set): affected rows is a lenenc int at [1].
             ar: list[int] = _lenenc(first, 1)
             self._affected = ar[0]
             self._had_resultset = false
         } else {
             self._had_resultset = true
-            # Result set: `first` is the lenenc column count; column defs follow.
             rci: int = 0
             rnames: list[str] = []
             rtypes: list[int] = []
@@ -599,7 +530,6 @@ class MySqlConnection(Connection) {
                 rtypes.append(rtype)
                 rci = rci + 1
             }
-            # Binary rows until the EOF/OK terminator.
             reading: bool = True
             while reading {
                 pkt: bytes = self._read_packet()
@@ -615,17 +545,14 @@ class MySqlConnection(Connection) {
         return rows
     }
 
-    # Decode one binary-protocol result row into a dict[str, Any].
     def _decode_binary_row(pkt: bytes, names: list[str], ctypes: list[int]) -> dict[str, Any] {
         ncol: int = len(names)
-        # null bitmap: (ncol + 7 + 2) / 8 bytes, starting after the 0x00 header.
         nb_len: int = (ncol + 9) >> 3
         o: int = 1 + nb_len
         row: dict[str, Any] = {}
         c: int = 0
         while c < ncol {
             nm: str = names[c]
-            # column c's null bit is at bit (c + 2).
             bitpos: int = c + 2
             isnull: bool = (pkt[1 + (bitpos >> 3)] & (1 << (bitpos & 7))) != 0
             if isnull {
@@ -633,7 +560,7 @@ class MySqlConnection(Connection) {
             } else {
                 dv: dict[str, Any] = self._decode_value(pkt, o, ctypes[c])
                 row[nm] = dv["v"]
-                no: int = dv["n"]              # unbox Any -> int before advancing
+                no: int = dv["n"]
                 o = no
             }
             c = c + 1
@@ -641,35 +568,24 @@ class MySqlConnection(Connection) {
         return row
     }
 
-    #--- Connection surface -------------------------------------------------#
-
-    # run - one COM_STMT_EXECUTE via _run, which captures the result rows (SELECT)
-    # or the OK-packet affected count (DML) and records which in _had_resultset.
-    # last_insert_id needs its own round-trip, so it is fetched ONLY for a write
-    # (no result set) - a SELECT never pays it, matching the old query() cost.
     def run(sql: SQL) -> Results {
         rows: list[dict[str, Any]] = self._run(sql.canonical, sql.params)
         aff: int = self._affected
         xid: int = 0
         if not self._had_resultset {
-            # Capture before _last_insert_id()'s own query resets self._affected.
             xid = self._last_insert_id()
         }
         return Results(rows, xid, aff)
     }
 
-    # raw - verbatim text query (DDL / maintenance / transaction control), no
-    # params. Drains the response; rows are not surfaced through this escape hatch.
     def raw(text: str) -> Results {
         self._command(COM_QUERY, text.encode("utf-8"))
         empty: list[dict[str, Any]] = []
-        # Drain the response: OK / ERR, or a result set (col count, defs, rows).
         p: bytes = self._read_packet()
         if p[0] == 0xFF {
             raise QueryError(self._err_text(p))
         }
         if p[0] == 0x00 {
-            # OK packet: affected rows is a lenenc int at [1].
             ar: list[int] = _lenenc(p, 1)
             return Results(empty, 0, ar[0])
         }
@@ -698,16 +614,15 @@ class MySqlConnection(Connection) {
         if len(rows) == 0 {
             return 0
         }
-        iid: int = rows[0]["id"]               # unbox Any -> int
+        iid: int = rows[0]["id"]
         return iid
     }
 
     def close() -> int {
-        # Release every cached prepared statement, then quit.
         for canonical in self._stmt_cache {
             self._command(COM_STMT_CLOSE, struct.pack_u32_le(self._stmt_cache[canonical]))
         }
-        self._command(0x01, bytes())       # COM_QUIT
+        self._command(0x01, bytes())
         self.sock.close()
         return 0
     }

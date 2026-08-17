@@ -94,14 +94,11 @@ def _capture(argv: list[str], input: bytes) -> CompletedProcess {
         const both: tuple[bytes, bytes] = proc.communicate(input)
         return CompletedProcess(argv, proc.returncode, both[0], both[1])
     } except OSError as e {
-        # Bind to a name first: the raise site adopts a pure str NAME as str(e).
         const hint: str = str(e)
         raise SpawnError(hint, argv)
     }
 }
 
-
-# D052 v2: the baton frame protocol + warm sidecars.
 
 def _u32le(n: int) -> bytes {
     return bytes([n % 256, (n // 256) % 256, (n // 65536) % 256, (n // 16777216) % 256])
@@ -269,8 +266,6 @@ class Sidecar {
 }
 
 
-# One warm sidecar per distinct argv, module-owned (tiny linear registry: a
-# program declares a handful of endpoints, not thousands).
 _sc_keys: list[str] = []
 _sc_procs: list[Sidecar] = []
 

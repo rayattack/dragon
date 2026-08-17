@@ -7,9 +7,8 @@ def make(n: int) -> Callable[[], int] {
 
 
 def tuple_literal_once(n: int) -> int {
-    # Borrowed Callable in a tuple literal: codegen increfs it into the
-    # tuple; tuple destroy must give that ref back (and must NOT double-free
-    # f, which scope cleanup releases after the tuple)
+    # Borrowed Callable in a tuple literal: codegen increfs it into the tuple; tuple destroy
+    # gives that ref back and must NOT double-free f (scope cleanup releases it after the tuple).
     f: Callable[[], int] = make(n)
     t: tuple[Callable[[], int], int] = (f, n)
     return f() + len(t)
@@ -51,7 +50,6 @@ class TupleCallableRcTests(TestCase) {
             total = total + tuple_literal_once(i)
             i = i + 1
         }
-        # sum(i + 2 for i in 0..499) = 124750 + 1000
         self.assertEqual(total, 125750)
     }
 }

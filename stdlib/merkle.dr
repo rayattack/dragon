@@ -181,15 +181,12 @@ def verify_consistency(m: int, n: int, proof: list[bytes], old_root: bytes, new_
         return compare_digest(old_root, new_root)
     }
     if m == 0 {
-        # An empty tree is a prefix of any tree; nothing to prove.
         return len(proof) == 0
     }
-    # `border` uses the full decomposition inner; `inner` is then reduced by `shift`.
     const decomp_inner: int = _bit_len((m - 1) ^ (n - 1))
     const border: int = _popcount((m - 1) >> decomp_inner)
     const shift: int = _trailing_zeros(m)
     const inner: int = decomp_inner - shift
-    # If m is a power of two the seed is old_root itself; otherwise the first proof element.
     seed: bytes = old_root
     start: int = 0
     if m != (1 << shift) {

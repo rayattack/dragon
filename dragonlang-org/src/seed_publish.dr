@@ -1,5 +1,3 @@
-# seed_publish.dr - create a publisher account + token for the demo, print it.
-# Run with cwd = dragonlang-org/. Imports deps so the data dir + DB exist.
 from deps import AUTH
 from services.auth import AuthResult
 

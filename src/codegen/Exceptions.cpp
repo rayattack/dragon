@@ -1,4 +1,3 @@
-/// Dragon CodeGen - Exception Handling (Try, With, Match, Raise)
 #include "../CodeGenImpl.h"
 
 namespace dragon {
@@ -7,7 +6,6 @@ void CodeGen::visit(AssertStmt& node) {
     node.test->accept(*this);
     llvm::Value* cond = impl_->lastValue;
     if (cond->getType() == impl_->i64Type) {
-        // Already int
     } else if (cond->getType() == impl_->i1Type) {
         cond = impl_->builder->CreateZExt(cond, impl_->i64Type);
     }
@@ -17,8 +15,6 @@ void CodeGen::visit(AssertStmt& node) {
         llvm::Value* msgVal = impl_->lastValue;
         impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_assert"], {cond, msgVal});
-        // Passing path: an owned message temp (concat/f-string) is released here or every passing assert leaks it.
-        // Failing path: raise longjmps past this decref; the slot's dup keeps it alive but leaks once per CAUGHT assert (rare, bounded).
         if (impl_->options.gcMode == GCMode::RC &&
             impl_->isOwnedStrResult(msgVal))
             impl_->builder->CreateCall(
@@ -40,8 +36,8 @@ void CodeGen::visit(TryStmt& node) {
     struct HandlerInfo {
         llvm::BasicBlock* checkBB = nullptr;
         llvm::BasicBlock* bodyBB  = nullptr;
-        int64_t typeCode = 0; // 0 = catch-all
-        std::vector<int64_t> altCodes; // `except (A, B, ...)` extra type codes
+        int64_t typeCode = 0;
+        std::vector<int64_t> altCodes;
     };
     std::vector<HandlerInfo> handlerInfos;
     bool hasCatchAll = false;
@@ -53,7 +49,7 @@ void CodeGen::visit(TryStmt& node) {
 
         auto& handler = node.handlers[i];
         if (handler.type) {
-            hi.typeCode = 10; // default to Exception
+            hi.typeCode = 10;
             if (auto* named = dynamic_cast<NamedTypeExpr*>(handler.type.get())) {
                 hi.typeCode = impl_->excTypeCode(named->name);
             }
@@ -68,7 +64,6 @@ void CodeGen::visit(TryStmt& node) {
         handlerInfos.push_back(hi);
     }
 
-    // Unmatched block for re-raise (only if no catch-all)
     llvm::BasicBlock* unmatchedBB = nullptr;
     if (!hasCatchAll && !node.handlers.empty()) {
         unmatchedBB = llvm::BasicBlock::Create(*impl_->context,
@@ -87,8 +82,6 @@ void CodeGen::visit(TryStmt& node) {
 
     auto* endBB = llvm::BasicBlock::Create(*impl_->context, prefix + ".end", func);
 
-    // An unhandled exception must still run `finally` and THEN re-raise, never swallow it: these slots record
-    // the in-flight exception and re-raise at reraiseCheckBB after finally runs (allocas, not registers - setjmp-safe).
     auto* reraiseFlag = impl_->createEntryAlloca(func, prefix + ".rr.flag", impl_->i1Type);
     auto* savedType = impl_->createEntryAlloca(func, prefix + ".rr.type", impl_->i64Type);
     auto* savedObj  = impl_->createEntryAlloca(func, prefix + ".rr.obj", impl_->i8PtrType);
@@ -98,8 +91,6 @@ void CodeGen::visit(TryStmt& node) {
     auto* reraiseCheckBB = llvm::BasicBlock::Create(*impl_->context, prefix + ".rrcheck", func);
     auto* doReraiseBB = llvm::BasicBlock::Create(*impl_->context, prefix + ".reraise", func);
 
-    // Determine merge points. `finally` (when present) flows into
-    // reraiseCheckBB; with no finally, unhandled paths jump straight there.
     llvm::BasicBlock* afterHandlerBB = finallyBB ? finallyBB : reraiseCheckBB;
     llvm::BasicBlock* afterTryBodyBB = elseBB ? elseBB : afterHandlerBB;
 
@@ -113,7 +104,6 @@ void CodeGen::visit(TryStmt& node) {
         "is.normal");
     impl_->builder->CreateCondBr(isNormal, tryBodyBB, dispatchBB);
 
-    // Push the exit-cleanup stack entry so return/break/continue can inline finally.
     if (!node.finallyBody.empty()) {
         Impl::ExitCleanup ec;
         ec.isWith = false;
@@ -124,8 +114,6 @@ void CodeGen::visit(TryStmt& node) {
     }
 
     impl_->builder->SetInsertPoint(tryBodyBB);
-    // Frame is live for the body's duration so a return/break/continue inside it pops it (the normal-exit pop
-    // below is bypassed once they set a terminator); keyed by function for free nested-function isolation.
     impl_->tryFrameFuncs.push_back(func);
     // The try body is its own lexical scope: its owned heap locals are freed EITHER by codegen (normal completion)
     // OR by dragon_exc_cleanup_unwind (longjmp), never both - in the enclosing scope they'd double-free on the caught path.
@@ -133,8 +121,6 @@ void CodeGen::visit(TryStmt& node) {
     for (auto& stmt : node.tryBody) stmt->accept(*this);
     bool tryTerminated = impl_->builder->GetInsertBlock()->getTerminator() != nullptr;
     if (!tryTerminated) {
-        // Normal completion: codegen decrefs the try-body locals and rewinds the
-        // cleanup stack to this try's depth.
         impl_->emitScopeCleanup();
     }
     impl_->popScope();
@@ -145,8 +131,6 @@ void CodeGen::visit(TryStmt& node) {
     }
 
     impl_->builder->SetInsertPoint(dispatchBB);
-    // Frees the owned heap locals the longjmp skipped over (declared after this frame's setjmp); runs BEFORE
-    // pop_frame so it reads this frame's saved cleanup depth (see DragonCleanupStack).
     impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_exc_cleanup_unwind"], {});
     impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_exc_pop_frame"], {});
     auto* excType = impl_->builder->CreateCall(
@@ -156,12 +140,9 @@ void CodeGen::visit(TryStmt& node) {
         if (handlerInfos[0].checkBB) {
             impl_->builder->CreateBr(handlerInfos[0].checkBB);
         } else {
-            // First handler is catch-all
             impl_->builder->CreateBr(handlerInfos[0].bodyBB);
         }
     } else {
-        // No handlers (try with only finally): record the exception, run finally, then re-raise (never swallow it).
-        // Retain BOTH instance and message (+1 each) - an internal finally raise/catch would otherwise free them first.
         auto* curObj = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_exc_retain_obj"],
             {impl_->builder->CreateCall(
@@ -180,11 +161,8 @@ void CodeGen::visit(TryStmt& node) {
         auto& hi = handlerInfos[i];
         auto& handler = node.handlers[i];
 
-        // Emit check block (typed handlers only)
         if (hi.checkBB) {
             impl_->builder->SetInsertPoint(hi.checkBB);
-            // dragon_exc_matches handles both built-in and user-defined types; for `except (A, B, ...)` the handler
-            // matches if ANY listed type matches, so OR the per-type results together.
             auto matchCode = [&](int64_t code, const std::string& tag) -> llvm::Value* {
                 auto* r = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_exc_matches"],
@@ -201,7 +179,6 @@ void CodeGen::visit(TryStmt& node) {
                     "exc.any." + std::to_string(i) + "." + std::to_string(a));
             }
 
-            // Find next block if this handler doesn't match
             llvm::BasicBlock* nextBB = nullptr;
             for (size_t j = i + 1; j < handlerInfos.size(); ++j) {
                 if (handlerInfos[j].checkBB) {
@@ -218,28 +195,19 @@ void CodeGen::visit(TryStmt& node) {
             impl_->builder->CreateCondBr(cmp, hi.bodyBB, nextBB);
         }
 
-        // Emit handler body
         impl_->builder->SetInsertPoint(hi.bodyBB);
         impl_->pushScope();
 
-        // Named handler binds two ways: a typed-field raise (`raise UserExc(args)`) binds `e` to the instance so
-        // `e.code` etc. work; a built-in raise binds `e` to the message string. The instance wins when both are possible.
         if (!handler.name.empty()) {
             bool boundInstance = false;
             if (auto* named = dynamic_cast<NamedTypeExpr*>(handler.type.get())) {
-                // Bind as instance only when the handler types its binding to a user-defined exception class; built-in
-                // handler types (Exception, ValueError, ...) keep the message-string binding since they have no struct shape.
                 if (impl_->userExcCodesBySym.count(impl_->classSym(named->name)) > 0 &&
                     impl_->classNames.count(named->name)) {
-                    // dragon_exc_bind_obj returns the in-flight instance with its OWN +1 (the slot keeps its own ref); the
-                    // binding's scope cleanup drops this +1 normally, the unwind cleanup entry drops it if a nested raise longjmps past.
                     auto* obj = impl_->builder->CreateCall(
                         impl_->runtimeFuncs["dragon_exc_bind_obj"], {}, "exc.obj");
                     auto* alloca = impl_->createEntryAlloca(
                         func, handler.name, impl_->i8PtrType);
                     impl_->builder->CreateStore(obj, alloca);
-                    // ClassInstance binding routes attribute/method access to the class struct + emitted methods; varClassNames
-                    // pins the concrete class for resolveExprClassName so `e.code` etc. lower via the right struct GEP.
                     impl_->setVar(handler.name, alloca, Impl::VarKind::ClassInstance);
                     impl_->varClassNames[handler.name] = named->name;
                     impl_->emitCleanupPush(handler.name, obj, Impl::DCLEAN_OBJ);
@@ -247,8 +215,6 @@ void CodeGen::visit(TryStmt& node) {
                 }
             }
             if (!boundInstance) {
-                // dragon_exc_bind_msg returns the message with its OWN +1 (mortal heap only, no-op for literals), so a
-                // nested raise overwriting the slot can't leave `e` dangling; scope/unwind cleanup drop that +1 (dragon_decref_str is literal-safe).
                 auto* msg = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_exc_bind_msg"], {}, "exc.msg");
                 auto* alloca = impl_->createEntryAlloca(
@@ -257,8 +223,6 @@ void CodeGen::visit(TryStmt& node) {
                 impl_->setVar(handler.name, alloca, Impl::VarKind::Str);
                 impl_->emitCleanupPush(handler.name, msg, Impl::DCLEAN_STR);
             }
-            // Track the bound name so `raise <name>` inside this body is
-            // recognized as a re-raise of the in-flight exception (RaiseStmt).
             impl_->handlerExcVars.push_back(handler.name);
         }
 
@@ -273,13 +237,10 @@ void CodeGen::visit(TryStmt& node) {
             impl_->builder->CreateBr(afterHandlerBB);
     }
 
-    // Preserve the original instance pointer too so a typed-field exception
-    // raised inside this try block keeps its instance for an outer handler.
     if (unmatchedBB) {
         impl_->builder->SetInsertPoint(unmatchedBB);
         auto* reType = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_exc_get_type"], {}, "reraise.type");
-        // Retained (+1) saves - see the no-handler path above.
         auto* reObj = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_exc_retain_obj"],
             {impl_->builder->CreateCall(
@@ -287,8 +248,6 @@ void CodeGen::visit(TryStmt& node) {
             "reraise.obj");
         auto* reMsg = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_exc_bind_msg"], {}, "reraise.msg");
-        // Record + route through finally (if any) before re-raising, so a
-        // non-matching handler doesn't skip the finally block.
         impl_->builder->CreateStore(reType, savedType);
         impl_->builder->CreateStore(reObj, savedObj);
         impl_->builder->CreateStore(reMsg, savedMsg);
@@ -314,8 +273,6 @@ void CodeGen::visit(TryStmt& node) {
         impl_->exitCleanupStack.pop_back();
     }
 
-    // Reached after `finally` (or directly, when there is none). If the
-    // exception went unhandled, re-raise it now that finally has run.
     impl_->builder->SetInsertPoint(reraiseCheckBB);
     {
         auto* flag = impl_->builder->CreateLoad(impl_->i1Type, reraiseFlag, "rr.load");
@@ -326,8 +283,6 @@ void CodeGen::visit(TryStmt& node) {
         auto* t = impl_->builder->CreateLoad(impl_->i64Type, savedType, "rr.t");
         auto* o = impl_->builder->CreateLoad(impl_->i8PtrType, savedObj, "rr.o");
         auto* m = impl_->builder->CreateLoad(impl_->i8PtrType, savedMsg, "rr.m");
-        // The save retained the message (+1, dragon_exc_bind_msg); the
-        // consume raise transfers that hold into the slot.
         impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_raise_exc_obj_consume"], {t, o, m});
         impl_->builder->CreateUnreachable();
@@ -337,32 +292,26 @@ void CodeGen::visit(TryStmt& node) {
 }
 
 void CodeGen::visit(WithStmt& node) {
-    // `val` is the ctor temp the with owns (one ref); `enterResult` is __enter__'s return bound to `as` -
-    // for `return self` it's the same object with a second ref. Both refs release at exit; releasing only `val` leaks the other.
     struct CtxInfo {
         llvm::Value* val;
         bool isClassCtx;
         bool isLock;
         std::string className;
-        llvm::Value* enterResult = nullptr;  // class CMs only; may == val
-        bool isLockTemp = false;  // anonymous `with Lock()` - the with owns + frees it
-        bool subjectOwned = true;  // false = borrowed subject (bound local/attr): with-exit must not
+        llvm::Value* enterResult = nullptr;
+        bool isLockTemp = false;
+        bool subjectOwned = true;
                                    // decref `val` - doing so was an A/B-proven UAF (test_d045_privacy / test_rc_with_subject.dr).
-        llvm::Function* exitFn = nullptr;  // true-identity __exit__; null = name path
+        llvm::Function* exitFn = nullptr;
     };
     std::vector<CtxInfo> contextHandles;
 
     for (auto& item : node.items) {
         std::string ctxClassName = impl_->resolveExprClassName(item.contextExpr.get());
-        // Fallback: resolveExprClassName can't name a `mod.func(...)` result (only `mod.Class(...)`/`func(...)`), so use
-        // the expr's InstanceType to class-track the `as` var - without it, generic method calls on it silently fail to resolve.
         if (ctxClassName.empty() && item.contextExpr->type) {
             if (auto inst = std::dynamic_pointer_cast<InstanceType>(item.contextExpr->type))
                 if (inst->classType && impl_->classNames.count(inst->classType->name))
                     ctxClassName = inst->classType->name;
         }
-        // TRUE class identity from the expr's type: with two same-named classes in
-        // the build, the name-keyed maps guess (last-write-wins) and can segfault.
         const ClassType* ctxCT = nullptr;
         if (item.contextExpr->type)
             if (auto inst = std::dynamic_pointer_cast<InstanceType>(item.contextExpr->type))
@@ -373,14 +322,9 @@ void CodeGen::visit(WithStmt& node) {
         llvm::Function* exitFn =
             ctxCT ? impl_->methodFromClassType(ctxCT, "__exit__") : nullptr;
 
-        // Intrinsic `Lock` context (`with lock {}` / `with Lock() {}`): no class/dunders, lowers directly to
-        // acquire on entry and release on every exit (normal + exception).
         bool isLockCtx = false;
-        bool isLockTemp = false;  // `with Lock()` mints an anonymous lock the with OWNS: must be DESTROYED
-                                  // (not released only) on exit or it leaks the mutex; a named `with g:` lock is release-only.
+        bool isLockTemp = false;
         if (impl_->isLockExpr(item.contextExpr.get())) {
-            // Covers a tagged local/global AND a Lock-typed instance field (`with self._storage_lock`): a NameExpr-only
-            // check let field locks silently skip acquire/release (found by the concurrent-mutation detector).
             isLockCtx = true;
         } else if (auto* ce = dynamic_cast<CallExpr*>(item.contextExpr.get())) {
             if (auto* cn = dynamic_cast<NameExpr*>(ce->callee.get()))
@@ -389,13 +333,9 @@ void CodeGen::visit(WithStmt& node) {
 
         item.contextExpr->accept(*this);
         llvm::Value* ctxVal = impl_->lastValue;
-        llvm::Value* enterResultV = nullptr;  // __enter__ result (class CMs)
-        // Ownership follows the subject EXPRESSION: `with Guard()` mints a ctor temp the with owns (+1 dropped
-        // at exit); `with g` / `with self.guard` borrow the slot's reference.
+        llvm::Value* enterResultV = nullptr;
         bool subjectOwned = !Impl::isBorrowedHeapExpr(item.contextExpr.get());
 
-        // Identity-resolved fns decide when the type is known; the name-keyed
-        // hasDunder pair remains the fallback for untyped context exprs.
         bool isClassCtx = !isLockCtx && !ctxClassName.empty() &&
             (ctxCT ? (enterFn != nullptr && exitFn != nullptr)
                    : (impl_->hasDunder(ctxClassName, "__enter__") &&
@@ -403,7 +343,6 @@ void CodeGen::visit(WithStmt& node) {
             (ctxVal->getType() == impl_->i8PtrType || ctxVal->getType()->isPointerTy());
 
         if (isLockCtx) {
-            // Acquire on entry; `__enter__` on a Lock returns self.
             impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_lock_acquire"], {ctxVal});
             if (item.optionalVars) {
@@ -416,12 +355,10 @@ void CodeGen::visit(WithStmt& node) {
                 }
             }
         } else if (isClassCtx) {
-            // Call __enter__() - result is bound to `as` variable
             enterResultV = enterFn
                 ? impl_->emitDunderCall(enterFn, "__enter__", ctxVal)
                 : impl_->callDunder(ctxClassName, "__enter__", ctxVal);
             if (!enterResultV) {
-                // Never a crash: report and bind the manager itself.
                 impl_->addError("internal error: cannot resolve __enter__ on class '" +
                                 ctxClassName + "' (two classes may share the name)",
                                 node.location());
@@ -435,14 +372,11 @@ void CodeGen::visit(WithStmt& node) {
                     impl_->builder->CreateStore(enterResultV, alloca);
                     impl_->setVar(nameExpr->name, alloca);
                     impl_->varClassNames[nameExpr->name] = ctxClassName;
-                    // Pin the binding to the value's OWN module so method dispatch
-                    // on it never falls to the last-write-wins global map
                     if (ctxCT)
                         impl_->varClassOwningModule[nameExpr->name] = ctxCT->definingModule;
                 }
             }
         } else {
-            // Non-class, non-lock context - bind ctxVal directly.
             if (item.optionalVars) {
                 if (auto* nameExpr = dynamic_cast<NameExpr*>(item.optionalVars.get())) {
                     auto* alloca = impl_->createEntryAlloca(
@@ -455,15 +389,12 @@ void CodeGen::visit(WithStmt& node) {
         contextHandles.push_back({ctxVal, isClassCtx, isLockCtx, ctxClassName, enterResultV, isLockTemp, subjectOwned, exitFn});
     }
 
-    // Class context managers (__exit__) and locks (release) both need an
-    // exception-safe exit, so both take the setjmp/longjmp-wrapped path.
     bool needsExcSafe = false;
     for (auto& ci : contextHandles) {
         if (ci.isClassCtx || ci.isLock) { needsExcSafe = true; break; }
     }
 
     if (needsExcSafe) {
-        // Wrap body in setjmp/longjmp for exception-safe __exit__ calls
         auto* func = impl_->currentFunction;
         auto* bodyBB = llvm::BasicBlock::Create(*impl_->context, "with.body", func);
         auto* excBB = llvm::BasicBlock::Create(*impl_->context, "with.exc", func);
@@ -480,12 +411,8 @@ void CodeGen::visit(WithStmt& node) {
             "is.normal");
         impl_->builder->CreateCondBr(isNormal, bodyBB, excBB);
 
-        // Normal body. Frame is live for its duration so a return/break/
-        // continue inside the `with` pops it (mirrors the try-body handling).
         impl_->builder->SetInsertPoint(bodyBB);
         impl_->tryFrameFuncs.push_back(func);
-        // Register this with's __exit__/lock-release set so an early
-        // return/break/continue inside the body replays it.
         {
             Impl::ExitCleanup ec;
             ec.isWith = true;
@@ -495,8 +422,6 @@ void CodeGen::visit(WithStmt& node) {
                 ec.withItems.push_back({ci.isClassCtx, ci.isLock, ci.className, ci.val, ci.enterResult, ci.exitFn, ci.isLockTemp, ci.subjectOwned});
             impl_->exitCleanupStack.push_back(std::move(ec));
         }
-        // The with body is its own lexical scope, so a defer registered in it
-        // runs at the body's exit - BEFORE __exit__ (defer.md section 4).
         impl_->pushScope();
         for (auto& stmt : node.body) stmt->accept(*this);
         if (!impl_->builder->GetInsertBlock()->getTerminator())
@@ -504,15 +429,11 @@ void CodeGen::visit(WithStmt& node) {
         impl_->popScope();
         impl_->exitCleanupStack.pop_back();
         impl_->tryFrameFuncs.pop_back();
-        // Pop frame + fall to cleanup only if the body didn't terminate: a `break`/`continue` already terminated the
-        // block via its own branch, and appending here produced invalid IR ("terminator in the middle of a block").
         if (!impl_->builder->GetInsertBlock()->getTerminator()) {
             impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_exc_pop_frame"], {});
             impl_->builder->CreateBr(cleanupBB);
         }
 
-        // Exception path: free unwound body locals, pop frame, call __exit__/release locks, re-raise. The unwind
-        // rewinds the cleanup stack to this frame's depth so a chained outer unwind won't re-free the same locals.
         impl_->builder->SetInsertPoint(excBB);
         impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_exc_cleanup_unwind"], {});
         impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_exc_pop_frame"], {});
@@ -520,8 +441,8 @@ void CodeGen::visit(WithStmt& node) {
             if (ci.isClassCtx) {
                 if (ci.exitFn) impl_->emitDunderCall(ci.exitFn, "__exit__", ci.val);
                 else impl_->callDunder(ci.className, "__exit__", ci.val);
-                if (impl_->options.gcMode == GCMode::RC) {   // release the CM object (#8)
-                    if (ci.subjectOwned)  // borrowed subject: the slot owns it
+                if (impl_->options.gcMode == GCMode::RC) {
+                    if (ci.subjectOwned)
                         impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {ci.val});
                     if (ci.enterResult && ci.enterResult->getType()->isPointerTy())
                         impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {ci.enterResult});
@@ -529,7 +450,7 @@ void CodeGen::visit(WithStmt& node) {
             } else if (ci.isLock) {
                 impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_lock_release"], {ci.val});
-                if (ci.isLockTemp)  // anonymous `with Lock()` - free the mutex
+                if (ci.isLockTemp)
                     impl_->builder->CreateCall(
                         impl_->runtimeFuncs["dragon_lock_destroy"], {ci.val});
             }
@@ -537,8 +458,6 @@ void CodeGen::visit(WithStmt& node) {
         {
             auto* reType = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_exc_get_type"], {}, "reraise.type");
-            // Preserve the typed-field instance: the msg-only raise entry would NULL exc_obj and drop a downstream
-            // handler's instance binding. This re-raise borrows the slot's pointer, so retain first (net no-op via same-pointer fold).
             auto* reObj = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_exc_retain_obj"],
                 {impl_->builder->CreateCall(
@@ -547,22 +466,18 @@ void CodeGen::visit(WithStmt& node) {
                 "reraise.obj");
             auto* reMsg = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_exc_get_msg"], {}, "reraise.msg");
-            // msg == slot: dragon_exc_msg_set's self-store no-op keeps the
-            // slot's existing ownership - plain (non-consume) is correct here.
             impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_raise_exc_obj"], {reType, reObj, reMsg});
         }
         impl_->builder->CreateUnreachable();
 
-        // Normal cleanup: __exit__ runs first (may still use the object), then release the ctor's +1 on the CM
-        // object itself - decref AFTER __exit__, never before.
         impl_->builder->SetInsertPoint(cleanupBB);
         for (auto& ci : contextHandles) {
             if (ci.isClassCtx) {
                 if (ci.exitFn) impl_->emitDunderCall(ci.exitFn, "__exit__", ci.val);
                 else impl_->callDunder(ci.className, "__exit__", ci.val);
                 if (impl_->options.gcMode == GCMode::RC) {
-                    if (ci.subjectOwned)  // borrowed subject: the slot owns it
+                    if (ci.subjectOwned)
                         impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {ci.val});
                     if (ci.enterResult && ci.enterResult->getType()->isPointerTy())
                         impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {ci.enterResult});
@@ -570,7 +485,7 @@ void CodeGen::visit(WithStmt& node) {
             } else if (ci.isLock) {
                 impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_lock_release"], {ci.val});
-                if (ci.isLockTemp)  // anonymous `with Lock()` - free the mutex
+                if (ci.isLockTemp)
                     impl_->builder->CreateCall(
                         impl_->runtimeFuncs["dragon_lock_destroy"], {ci.val});
             }
@@ -579,8 +494,6 @@ void CodeGen::visit(WithStmt& node) {
 
         impl_->builder->SetInsertPoint(endBB);
     } else {
-        // No class context managers or locks - nothing to clean up on exit,
-        // but the body is still its own lexical scope (defers, block locals).
         impl_->pushScope();
         for (auto& stmt : node.body) stmt->accept(*this);
         if (!impl_->builder->GetInsertBlock()->getTerminator())
@@ -599,12 +512,8 @@ void CodeGen::visit(MatchStmt& node) {
     auto* subjectAlloca = impl_->createEntryAlloca(func, "match.subject", subjectTy);
     impl_->builder->CreateStore(subjectVal, subjectAlloca);
 
-    // Class/type-test patterns (`case TypeName()`): the subject's static type drives ptr-shaped discrimination
-    // (str vs list vs class) and the class-chain walk; a Union/Any subject uses the runtime box tag instead.
     std::shared_ptr<Type> subjectStaticType =
         node.subject ? node.subject->type : nullptr;
-    // Resolve a class name from a (possibly union/Optional) static type: class instance ptrs carry no runtime
-    // type tag, so `case ClassName()` leans on the static type, including the non-None member of `Class | None`.
     auto classNameOfType = [](Type* t) -> std::string {
         if (!t) return "";
         if (auto* inst = dynamic_cast<InstanceType*>(t))
@@ -622,8 +531,6 @@ void CodeGen::visit(MatchStmt& node) {
     if (subjectClassName.empty() && subjectStaticType)
         subjectClassName = classNameOfType(subjectStaticType.get());
 
-    // #1 narrowing: a bare-name subject `v` in a scalar type-test arm (`case int() {...}`) is shadowed with the
-    // unboxed native payload so the body emits native i64/f64 ops instead of boxed ones (kept in sync with the TypeChecker).
     auto* subjectNameExpr = dynamic_cast<NameExpr*>(node.subject.get());
     std::string subjectName = subjectNameExpr ? subjectNameExpr->name : "";
     auto scalarNarrowKind = [&](const std::string& tn) -> Impl::VarKind {
@@ -636,7 +543,6 @@ void CodeGen::visit(MatchStmt& node) {
 
     auto* endBB = llvm::BasicBlock::Create(*impl_->context, "match.end", func);
 
-    // Recursively tests `val` (of type `valTy`) against a pattern; returns i1 (true = match).
     std::function<llvm::Value*(llvm::Value*, llvm::Type*, const MatchPattern&)>
     emitPatternMatch = [&](llvm::Value* val, llvm::Type* valTy,
                            const MatchPattern& pat) -> llvm::Value* {
@@ -647,8 +553,6 @@ void CodeGen::visit(MatchStmt& node) {
             return llvm::ConstantInt::get(impl_->i1Type, 1);
 
         case Kind::Capture: {
-            // VarKind comes from the captured value's LLVM type; strings bind as StrLiteral (no decref) since the
-            // captured string's provenance is unknown here.
             Impl::VarKind kind = Impl::VarKind::Other;
             if (valTy == impl_->i64Type)     kind = Impl::VarKind::Int;
             else if (valTy == impl_->f64Type) kind = Impl::VarKind::Float;
@@ -667,29 +571,26 @@ void CodeGen::visit(MatchStmt& node) {
             pat.literal->accept(*this);
             llvm::Value* litVal = impl_->lastValue;
 
-            // Boxed subject: must check tag AND payload, else the compare runs against the raw {tag,payload} struct and
-            // silently never matches; the string compare derefs so it's guarded behind the tag check (int/float/bool aren't).
             if (valTy == impl_->boxType) {
                 auto* boxTagV = impl_->boxTag(val, "lit.tag");
                 if (dynamic_cast<NoneLiteral*>(pat.literal.get()))
                     return impl_->builder->CreateICmpEQ(
                         boxTagV, llvm::ConstantInt::get(impl_->i64Type, 4),
-                        "lit.none");  // TAG_NONE
-                int64_t litTag = TAG_INT;            // TAG_INT
+                        "lit.none");
+                int64_t litTag = TAG_INT;
                 Impl::VarKind payKind = Impl::VarKind::Int;
                 if (litVal->getType() == impl_->i8PtrType) {
-                    litTag = TAG_STR; payKind = Impl::VarKind::Str;       // TAG_STR
+                    litTag = TAG_STR; payKind = Impl::VarKind::Str;
                 } else if (litVal->getType() == impl_->f64Type) {
-                    litTag = TAG_FLOAT; payKind = Impl::VarKind::Float;     // TAG_FLOAT
+                    litTag = TAG_FLOAT; payKind = Impl::VarKind::Float;
                 } else if (litVal->getType() == impl_->i1Type) {
-                    litTag = TAG_BOOL; payKind = Impl::VarKind::Bool;      // TAG_BOOL
+                    litTag = TAG_BOOL; payKind = Impl::VarKind::Bool;
                 }
                 auto* tagEq = impl_->builder->CreateICmpEQ(
                     boxTagV, llvm::ConstantInt::get(impl_->i64Type, litTag),
                     "lit.tageq");
                 llvm::Value* payload = impl_->boxPayloadAsKind(val, payKind);
                 if (litTag == 1) {
-                    // Guard the string deref behind the tag check.
                     auto* entryBB = impl_->builder->GetInsertBlock();
                     auto* cmpBB = llvm::BasicBlock::Create(*impl_->context, "lit.str.cmp", func);
                     auto* doneBB = llvm::BasicBlock::Create(*impl_->context, "lit.str.done", func);
@@ -717,12 +618,10 @@ void CodeGen::visit(MatchStmt& node) {
                 return impl_->builder->CreateAnd(tagEq, valEq, "lit.match");
             }
 
-            // None check: subject is a null pointer.
             if (dynamic_cast<NoneLiteral*>(pat.literal.get())) {
                 return impl_->builder->CreateIsNull(val, "match.none");
             }
 
-            // String comparison via runtime.
             if (valTy == impl_->i8PtrType && litVal->getType() == impl_->i8PtrType) {
                 auto* eq = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_str_eq"], {val, litVal}, "match.streq");
@@ -730,18 +629,14 @@ void CodeGen::visit(MatchStmt& node) {
                     eq, llvm::ConstantInt::get(impl_->i64Type, 0), "match.streq.bool");
             }
 
-            // Bool comparison (i1).
             if (valTy == impl_->i1Type && litVal->getType() == impl_->i1Type) {
                 return impl_->builder->CreateICmpEQ(val, litVal, "match.booleq");
             }
 
-            // Float comparison.
             if (valTy == impl_->f64Type && litVal->getType() == impl_->f64Type) {
                 return impl_->builder->CreateFCmpOEQ(val, litVal, "match.floateq");
             }
 
-            // Integer comparison (i64). Also widen bool->i64 or float->i64
-            // if the subject/literal types don't line up.
             llvm::Value* lhs = val;
             llvm::Value* rhs = litVal;
             if (lhs->getType() == impl_->i1Type)
@@ -755,7 +650,6 @@ void CodeGen::visit(MatchStmt& node) {
             if (lhs->getType() == impl_->i64Type && rhs->getType() == impl_->i64Type)
                 return impl_->builder->CreateICmpEQ(lhs, rhs, "match.inteq");
 
-            // Fallback: no match (type mismatch at codegen time).
             return llvm::ConstantInt::get(impl_->i1Type, 0);
         }
 
@@ -765,7 +659,6 @@ void CodeGen::visit(MatchStmt& node) {
             pat.literal->accept(*this);
             llvm::Value* patVal = impl_->lastValue;
 
-            // String comparison via runtime.
             if (valTy == impl_->i8PtrType && patVal->getType() == impl_->i8PtrType) {
                 auto* eq = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_str_eq"], {val, patVal}, "match.valeq");
@@ -773,7 +666,6 @@ void CodeGen::visit(MatchStmt& node) {
                     eq, llvm::ConstantInt::get(impl_->i64Type, 0), "match.valeq.bool");
             }
 
-            // Integer comparison.
             llvm::Value* lhs = val;
             llvm::Value* rhs = patVal;
             if (lhs->getType() == impl_->i1Type)
@@ -787,7 +679,6 @@ void CodeGen::visit(MatchStmt& node) {
         }
 
         case Kind::Sequence: {
-            // val must be a ptr (tuple). Check length first.
             auto* tupleLen = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_tuple_len"], {val}, "match.tuplen");
             auto* expectedLen = llvm::ConstantInt::get(
@@ -795,7 +686,6 @@ void CodeGen::visit(MatchStmt& node) {
             auto* lenOk = impl_->builder->CreateICmpEQ(
                 tupleLen, expectedLen, "match.lencheck");
 
-            // Short-circuit: if length doesn't match, skip element checks.
             auto* elemCheckBB = llvm::BasicBlock::Create(
                 *impl_->context, "match.seq.elem", func);
             auto* seqFailBB = llvm::BasicBlock::Create(
@@ -811,15 +701,11 @@ void CodeGen::visit(MatchStmt& node) {
                 auto* idx = llvm::ConstantInt::get(impl_->i64Type, static_cast<int64_t>(i));
                 auto* elem = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_tuple_get"], {val, idx}, "match.elem");
-                // dragon_tuple_get returns i64; sub-pattern matching treats captured values as i64 (ints stored directly,
-                // ptrs via inttoptr later when user code needs them).
                 llvm::Value* elemMatch = emitPatternMatch(
                     elem, impl_->i64Type, pat.subPatterns[i]);
                 allMatch = impl_->builder->CreateAnd(allMatch, elemMatch, "match.seq.and");
             }
             impl_->builder->CreateBr(seqDoneBB);
-            // Save the block we ended up in (lambdas inside emitPatternMatch
-            // may have created new blocks).
             auto* elemEndBB = impl_->builder->GetInsertBlock();
 
             impl_->builder->SetInsertPoint(seqFailBB);
@@ -836,7 +722,6 @@ void CodeGen::visit(MatchStmt& node) {
             if (pat.subPatterns.empty())
                 return llvm::ConstantInt::get(impl_->i1Type, 0);
 
-            // Chain of short-circuit OR: try each sub-pattern.
             auto* orDoneBB = llvm::BasicBlock::Create(
                 *impl_->context, "match.or.done", func);
 
@@ -848,15 +733,12 @@ void CodeGen::visit(MatchStmt& node) {
                 auto* currentBB = impl_->builder->GetInsertBlock();
 
                 if (i + 1 < pat.subPatterns.size()) {
-                    // Not the last alternative: branch to done on success,
-                    // otherwise try next.
                     auto* nextBB = llvm::BasicBlock::Create(
                         *impl_->context, "match.or.next", func);
                     impl_->builder->CreateCondBr(subMatch, orDoneBB, nextBB);
                     incoming.push_back({llvm::ConstantInt::get(impl_->i1Type, 1), currentBB});
                     impl_->builder->SetInsertPoint(nextBB);
                 } else {
-                    // Last alternative: branch unconditionally to done.
                     impl_->builder->CreateBr(orDoneBB);
                     incoming.push_back({subMatch, currentBB});
                 }
@@ -871,31 +753,25 @@ void CodeGen::visit(MatchStmt& node) {
             return phi;
         }
 
-        // Class pattern: type test `case TypeName()`, plus positional field destructuring
-        // `case TypeName(p0, p1, ...)` (handled below).
         case Kind::Class: {
             auto tagFor = [&](const std::string& tn) -> int64_t {
-                if (tn == "int")   return TAG_INT;   // TAG_INT
-                if (tn == "str")   return TAG_STR;   // TAG_STR
-                if (tn == "float") return TAG_FLOAT;   // TAG_FLOAT
-                if (tn == "bool")  return TAG_BOOL;   // TAG_BOOL
-                if (tn == "list")  return TAG_LIST;   // TAG_LIST
-                if (tn == "dict")  return TAG_DICT;   // TAG_DICT
-                if (tn == "bytes") return TAG_BYTES;   // TAG_BYTES
-                if (impl_->classNames.count(tn)) return 7;  // TAG_CLASS
+                if (tn == "int")   return TAG_INT;
+                if (tn == "str")   return TAG_STR;
+                if (tn == "float") return TAG_FLOAT;
+                if (tn == "bool")  return TAG_BOOL;
+                if (tn == "list")  return TAG_LIST;
+                if (tn == "dict")  return TAG_DICT;
+                if (tn == "bytes") return TAG_BYTES;
+                if (impl_->classNames.count(tn)) return 7;
                 return -1;
             };
 
-            // Compute the type test (classTest) and, for a class match that
-            // we will destructure, the instance pointer to load fields from.
             bool wantDestructure =
                 !pat.subPatterns.empty() && impl_->classNames.count(pat.name) > 0;
             llvm::Value* classTest = nullptr;
             llvm::Value* instPtr = nullptr;
 
             if (valTy == impl_->boxType) {
-                // Union/Any subject (16-byte box): runtime tag check mirrors isinstance's box-tag path; a TAG_CLASS
-                // box's payload is the instance pointer (used for destructuring).
                 int64_t tag = tagFor(pat.name);
                 if (tag < 0) {
                     classTest = llvm::ConstantInt::get(impl_->i1Type, 0);
@@ -914,8 +790,6 @@ void CodeGen::visit(MatchStmt& node) {
             } else if (valTy == impl_->i1Type) {
                 classTest = llvm::ConstantInt::get(impl_->i1Type, pat.name == "bool" ? 1 : 0);
             } else if (valTy->isPointerTy()) {
-                // Ptr subject: the dynamic class is recovered from the static type (no runtime tag on a class ptr).
-                // If pat.name is in the subject's class chain, the match is a non-null check (null = None, not an instance).
                 if (impl_->classNames.count(pat.name)) {
                     std::string cur = subjectClassName;
                     bool inChain = false;
@@ -946,12 +820,9 @@ void CodeGen::visit(MatchStmt& node) {
                 classTest = llvm::ConstantInt::get(impl_->i1Type, 0);
             }
 
-            // Plain type test (no field destructuring) - return the test.
             if (!wantDestructure || !instPtr)
                 return classTest;
 
-            // Field order is ancestors-first then own (matches the TypeChecker's list); field loads are guarded
-            // behind classTest (never read a non-matching object's fields) and ANDed with each sub-pattern's match.
             std::vector<std::string> order;
             {
                 std::vector<std::string> chain;
@@ -1003,11 +874,9 @@ void CodeGen::visit(MatchStmt& node) {
         }
         }
 
-        // Unreachable, but satisfy compiler.
         return llvm::ConstantInt::get(impl_->i1Type, 0);
     };
 
-    // Emits case arms as a chain of test-and-branch blocks.
     size_t numCases = node.cases.size();
     for (size_t i = 0; i < numCases; ++i) {
         auto& arm = node.cases[i];
@@ -1017,22 +886,15 @@ void CodeGen::visit(MatchStmt& node) {
         auto* bodyBB = llvm::BasicBlock::Create(
             *impl_->context, "match.case" + std::to_string(i) + ".body", func);
 
-        // Branch from previous block (or entry) into this test.
         impl_->builder->CreateBr(testBB);
         impl_->builder->SetInsertPoint(testBB);
 
-        // Push a scope so capture bindings are visible in the body and
-        // guard, but don't leak to subsequent arms.
         impl_->pushScope();
 
-        // Reload the subject from its alloca (IR is SSA - each block needs
-        // its own load).
         llvm::Value* subject = impl_->builder->CreateLoad(subjectTy, subjectAlloca, "match.subj");
 
         llvm::Value* matched = emitPatternMatch(subject, subjectTy, arm.pattern);
 
-        // Guard (if present) is evaluated only when the pattern matches. `fallthroughBB` is where control resumes
-        // on no-match; restoring the insert point there lets the next iteration's branch chain correctly.
         llvm::BasicBlock* fallthroughBB = nullptr;
 
         if (arm.guard) {
@@ -1057,7 +919,6 @@ void CodeGen::visit(MatchStmt& node) {
 
             fallthroughBB = guardFailBB;
         } else {
-            // No guard: branch directly on pattern match.
             auto* fallBB = llvm::BasicBlock::Create(
                 *impl_->context, "match.case" + std::to_string(i) + ".fall", func);
             impl_->builder->CreateCondBr(matched, bodyBB, fallBB);
@@ -1065,8 +926,6 @@ void CodeGen::visit(MatchStmt& node) {
         }
 
         impl_->builder->SetInsertPoint(bodyBB);
-        // #1 narrowing: extracts the box payload at the matched native type and shadows the bare-name subject
-        // for this arm (mirrors IfStmt's isinstance narrowing); borrowed, so scope cleanup must not decref it.
         if (!subjectName.empty() && subjectTy == impl_->boxType &&
             arm.pattern.kind == MatchPattern::Kind::Class &&
             arm.pattern.subPatterns.empty()) {
@@ -1086,14 +945,10 @@ void CodeGen::visit(MatchStmt& node) {
             stmt->accept(*this);
         }
         if (!impl_->builder->GetInsertBlock()->getTerminator()) {
-            // Decref any heap-typed capture bindings the pattern bound into
-            // this arm's scope before falling through to match.end.
             impl_->emitScopeCleanup();
             impl_->builder->CreateBr(endBB);
         }
 
-        // Restore the insert point to the fallthrough block: terminate with a branch to match.end if this is the
-        // last case, else leave it unterminated so the next iteration's testBB branch chains onto it.
         impl_->builder->SetInsertPoint(fallthroughBB);
         if (i + 1 >= numCases) {
             impl_->builder->CreateBr(endBB);
@@ -1102,7 +957,6 @@ void CodeGen::visit(MatchStmt& node) {
         impl_->popScope();
     }
 
-    // If there were no cases at all, we still need to branch to endBB.
     if (numCases == 0) {
         impl_->builder->CreateBr(endBB);
     }
@@ -1110,4 +964,4 @@ void CodeGen::visit(MatchStmt& node) {
     impl_->builder->SetInsertPoint(endBB);
 }
 
-} // namespace dragon
+}

@@ -1,6 +1,3 @@
-# Fork-join parallel reduction. Each worker folds a 30M-element chunk with a
-# data-dependent recurrence (resists closed-form optimization); partials are
-# summed after join. Dragon uses `fire` green threads (M:N, real multicore).
 def work(lo: int, hi: int) -> int {
     acc: int = 0
     i: int = lo

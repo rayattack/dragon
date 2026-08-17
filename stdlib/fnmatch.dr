@@ -84,12 +84,10 @@ def _match(name: str, ni: int, pattern: str, pi: int) -> bool {
 }
 
 def fnmatch(name: str, pattern: str) -> bool {
-    # Case-sensitive on Unix/POSIX, same as fnmatchcase.
     return _match(name, 0, pattern, 0)
 }
 
 def fnmatchcase(name: str, pattern: str) -> bool {
-    # Identical to fnmatch on Unix.
     return _match(name, 0, pattern, 0)
 }
 

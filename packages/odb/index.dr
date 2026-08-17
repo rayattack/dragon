@@ -1,41 +1,12 @@
-# odb.index - the bytes-keyed copy-on-write B+tree (spec sections 12, 14).
-#
-# The doc tree and catalog are keyed by a u64 docid/schema id (odb.btree), where
-# an integer compare is the fastest possible descent. Index trees are different:
-# their keys are memcomparable BYTES produced by odb.keyenc (a field value, a
-# composite, a reverse-index edge), and every comparison is a plain byte-wise
-# memcmp (Dragon's `bytes <`). This tree is that substrate. It shares the exact
-# copy-on-write / path-copying algorithm of the u64 tree - writers never touch a
-# live page, readers pin an immutable snapshot - and differs only in physical
-# layout: keys AND values are variable length, so pages are SLOTTED (a directory
-# of offsets, payloads packed from the end) rather than fixed-width.
-#
-# Page layouts (payload region [0, payload_size)):
-#
-#   Leaf (PT_IX_LEAF):
-#     u16 count
-#     count dir entries at offset 2: (key_off u16, key_len u16, val_off u16, val_len u16)
-#     key/value payloads packed downward from the end of the region
-#
-#   Branch (PT_IX_BRANCH):
-#     u16 count                     (number of separator keys)
-#     u64 child0 at offset 8        (subtree for keys < sep[0])
-#     count dir entries at offset 16: (child u64, sep_off u16, sep_len u16)
-#       child[i] holds keys in [sep[i], sep[i+1])
-#     separator payloads packed downward from the end
-#
-# A single (key, value) that cannot fit an otherwise-empty leaf raises: overflow
-# page chains for oversized entries are a later milestone (spec section 12)
-
 from odb.pager import Pager, PT_IX_LEAF, PT_IX_BRANCH
 from odb.codec import blank, put_u16, put_u64, put_bytes, get_u16, get_u64, get_bytes
 from odb.errors import ODBError
 
-const _IXL_DIR: int = 2       # leaf directory starts here
-const _IXL_ENT: int = 8       # bytes per leaf directory entry
-const _IXB_CHILD0: int = 8    # branch leftmost child offset
-const _IXB_DIR: int = 16      # branch directory starts here
-const _IXB_ENT: int = 12      # bytes per branch directory entry
+const _IXL_DIR: int = 2
+const _IXL_ENT: int = 8
+const _IXB_CHILD0: int = 8
+const _IXB_DIR: int = 16
+const _IXB_ENT: int = 12
 
 class IxLeaf {
     keys: list[bytes]
@@ -61,22 +32,16 @@ class IxBranch {
 
 class IndexTree {
     pager: Pager
-    root: int          # root page id; 0 = empty tree
+    root: int
 
     def(pager: Pager, root: int) {
         self.pager = pager
         self.root = root
     }
 
-    #--- byte-key comparison ----------------------------------------------#
-    # Dragon's `bytes <` is a memcmp with shorter-prefix-first ordering, which
-    # is exactly what odb.keyenc's encodings are designed against.
-
     def _lt(a: bytes, b: bytes) -> bool {
         return a < b
     }
-
-    #--- sizing -----------------------------------------------------------#
 
     def _leaf_bytes(node: IxLeaf) -> int {
         total: int = _IXL_DIR + len(node.keys) * _IXL_ENT
@@ -105,8 +70,6 @@ class IndexTree {
     def _branch_fits(node: IxBranch) -> bool {
         return self._branch_bytes(node) <= self.pager.payload_size()
     }
-
-    #--- serialization ----------------------------------------------------#
 
     def _stage_leaf(pgid: int, node: IxLeaf) -> None {
         ps: int = self.pager.payload_size()
@@ -196,8 +159,6 @@ class IndexTree {
         return IxBranch(child0, keys, children)
     }
 
-    #--- page placement (COW vs in-place) ---------------------------------#
-
     def _writable(pgid: int) -> int {
         if pgid != 0 and self.pager.is_fresh(pgid) {
             return pgid
@@ -209,8 +170,6 @@ class IndexTree {
         return np
     }
 
-    #--- routing / search -------------------------------------------------#
-
     def _route(branch: IxBranch, k: bytes) -> int {
         child: int = branch.child0
         i: int = 0
@@ -221,7 +180,6 @@ class IndexTree {
         return child
     }
 
-    # Index of k in a sorted key list, or -1. Binary search over byte keys.
     def _find(keys: list[bytes], k: bytes) -> int {
         lo: int = 0
         hi: int = len(keys) - 1
@@ -239,7 +197,6 @@ class IndexTree {
         return -1
     }
 
-    # First index whose key is >= k (insertion point).
     def _lower_bound(keys: list[bytes], k: bytes) -> int {
         lo: int = 0
         hi: int = len(keys)
@@ -253,8 +210,6 @@ class IndexTree {
         }
         return lo
     }
-
-    #--- public reads -----------------------------------------------------#
 
     def contains(k: bytes) -> bool {
         pid: int = self.root
@@ -271,7 +226,6 @@ class IndexTree {
         return self._find(leaf.keys, k) >= 0
     }
 
-    # Return the value for k. Raises KeyError if absent.
     def get(k: bytes) -> bytes {
         pid: int = self.root
         if pid != 0 {
@@ -290,8 +244,6 @@ class IndexTree {
         raise KeyError("key not in index tree")
     }
 
-    #--- split helper -----------------------------------------------------#
-
     def _split_leaf(node: IxLeaf) -> list[IxLeaf] {
         total: int = self._leaf_bytes(node)
         target: int = total // 2
@@ -300,7 +252,6 @@ class IndexTree {
         acc: int = _IXL_DIR
         i: int = 0
         n: int = len(node.keys)
-        # Keep at least one entry on each side.
         while i < n - 1 {
             entry_sz: int = _IXL_ENT + len(node.keys[i]) + len(node.vals[i])
             if len(lk) > 0 and acc + entry_sz > target {
@@ -316,10 +267,7 @@ class IndexTree {
         return [IxLeaf(lk, lv), IxLeaf(rk, rv)]
     }
 
-    #--- insert -----------------------------------------------------------#
-
     def insert(k: bytes, v: bytes) -> None {
-        # A single entry must fit an empty leaf (dir + one slot + key + value).
         if _IXL_DIR + _IXL_ENT + len(k) + len(v) > self.pager.payload_size() {
             raise ODBError("index entry too large for inline storage (overflow pages pending)")
         }
@@ -442,12 +390,6 @@ class IndexTree {
         self.root = nr
     }
 
-    #--- delete -----------------------------------------------------------#
-
-    # Remove a key. Returns True if it was present. Delete-without-merge (M4):
-    # under-full nodes are not rebalanced (compaction is a later milestone);
-    # routing still lands each remaining key in its own leaf, so lookups stay
-    # correct.
     def delete(k: bytes) -> bool {
         if self.root == 0 {
             return False
@@ -474,9 +416,6 @@ class IndexTree {
         return True
     }
 
-    #--- ordered scan -----------------------------------------------------#
-
-    # All (key, value) pairs in ascending key order.
     def items() -> list[list[bytes]] {
         out: list[list[bytes]] = []
         if self.root != 0 {
@@ -506,8 +445,6 @@ class IndexTree {
         }
     }
 
-    # (key, value) pairs whose key has `prefix` as a byte prefix, ascending.
-    # Powers reverse-index traversal (all edges from one target docid).
     def scan_prefix(prefix: bytes) -> list[list[bytes]] {
         out: list[list[bytes]] = []
         for pair in self.items() {

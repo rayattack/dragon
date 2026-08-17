@@ -4,9 +4,6 @@ POSIX separators only; PurePath / WindowsPath are deferred.
 
 from os.path import join, basename, dirname, splitext, abspath, isabs, exists, isfile, isdir, islink, getsize
 
-# Path is path manipulation only. To read or write a file's contents, use the
-# io surface on the path string: `open(p.raw).text()`, `make(p.raw).write(s)`.
-
 class Path {
     raw: str
 
@@ -91,7 +88,6 @@ class Path {
     }
 
     def with_suffix(new_suffix: str) -> Path {
-        # Replace the extension. Empty new_suffix removes it.
         const parts: tuple[str, str] = splitext(self.raw)
         return Path(parts[0] + new_suffix)
     }

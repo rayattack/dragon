@@ -1,7 +1,3 @@
-# Regression: a forward call to a module function whose signature mentions an
-# IMPORTED class must type at its declared type.
-
-
 from unittest import TestCase, main
 from fwdsig_mod import build_bundle
 

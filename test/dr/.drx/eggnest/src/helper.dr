@@ -1,4 +1,3 @@
-# Submodule of the src-layout fixture egg (eggnest.helper -> src/helper.dr).
 def bump(n: int) -> int {
     return n + 1
 }

@@ -1,6 +1,3 @@
-# Pre-fix: join("/usr", "/etc") returned "/usr//etc" instead of discarding the
-# accumulated path when the next component is absolute (Python semantics).
-
 from unittest import TestCase, main
 from os.path import join, split, splitext, expandvars
 import os

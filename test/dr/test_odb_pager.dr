@@ -1,7 +1,3 @@
-# ODB M0 regression suite: the pager, its crash-recovery guarantee, checksum
-# corruption detection, and MVCC page-reuse safety. All dogfooded in Dragon and
-# run end to end through the real compiler under ctest.
-
 from unittest import TestCase, main
 from odb.vfs import SimVFS, VFS
 from odb.pager import create, open_pager, Pager, Snapshot, PT_DATA, PT_FREELIST
@@ -31,7 +27,6 @@ def _commit_counter(p: Pager, counter: int) -> int {
 
 
 class PagerBasicsTest(TestCase) {
-    # Create, commit a chain of COW updates, reopen, and read back the state.
     def test_create_commit_reopen() -> None {
         v: SimVFS = SimVFS()
         p: Pager = create(v, 4096)
@@ -52,7 +47,6 @@ class PagerBasicsTest(TestCase) {
         self.assertEqual(get_u64(page, 8), 21)
     }
 
-    # A fresh database opens with an empty catalog and the expected page count.
     def test_empty_reopen() -> None {
         v: SimVFS = SimVFS()
         p: Pager = create(v, 4096)
@@ -65,15 +59,11 @@ class PagerBasicsTest(TestCase) {
 
 
 class ChecksumTest(TestCase) {
-    # A single flipped byte in a live page is caught by crc32c, never silently
-    # served as data. Corruption must be loud (spec section 13).
     def test_corrupt_page_detected() -> None {
         v: SimVFS = SimVFS()
         p: Pager = create(v, 4096)
         root: int = _commit_counter(p, 7)
 
-        # Flip one byte inside the data page and re-sync it behind the pager's
-        # back, simulating bit rot on disk.
         off: int = root * 4096 + 3
         v.live[off] = v.live[off] ^ 0xFF
         v.durable = v.live[:]
@@ -88,16 +78,12 @@ class ChecksumTest(TestCase) {
         self.assertTrue(raised)
     }
 
-    # A torn write to one meta page is survived: the other meta (the previous
-    # consistent state) is adopted on reopen.
     def test_torn_meta_falls_back() -> None {
         v: SimVFS = SimVFS()
         p: Pager = create(v, 4096)
-        _commit_counter(p, 1)          # live meta is now slot 1, csn 2
-        _commit_counter(p, 2)          # live meta is now slot 2, csn 3
+        _commit_counter(p, 1)
+        _commit_counter(p, 2)
 
-        # Corrupt the live meta (slot 2, page 2). Reopen must fall back to the
-        # older valid meta (slot 1, csn 2) rather than fail.
         v.live[2 * 4096 + 10] = v.live[2 * 4096 + 10] ^ 0xFF
         v.durable = v.live[:]
 
@@ -110,8 +96,6 @@ class ChecksumTest(TestCase) {
 
 
 class ReuseSafetyTest(TestCase) {
-    # A pinned read snapshot must prevent the pager from reusing a page the
-    # snapshot still needs (MVCC safety). Once released, reuse resumes.
     def test_reader_pins_pages() -> None {
         v: SimVFS = SimVFS()
         p: Pager = create(v, 4096)
@@ -120,8 +104,6 @@ class ReuseSafetyTest(TestCase) {
 
         snap: Snapshot = p.begin_read()
 
-        # Churn several commits while the snapshot is held. The snapshot's page
-        # must not be reused out from under it.
         n: int = 0
         while n < 5 {
             newpg: int = p.alloc()
@@ -134,7 +116,6 @@ class ReuseSafetyTest(TestCase) {
             n = n + 1
         }
 
-        # The snapshot still reads its original value through the pinned page.
         page: bytes = snap.page(root_at_snapshot)
         self.assertEqual(get_u64(page, 0), 1)
         snap.close()
@@ -142,9 +123,6 @@ class ReuseSafetyTest(TestCase) {
 }
 
 
-# A write-only VFS that counts freelist page writes instead of storing bytes.
-# The scaling test below runs thousands of commits; holding the file image in
-# memory would dominate the run, and nothing in its loop ever reads a page back.
 class CountingVFS(VFS) {
     length: int
     fl_pages: int
@@ -205,8 +183,8 @@ class FreelistScalingTest(TestCase) {
             j = j + 1
         }
 
-        early: int = 0      # freelist pages written in commits (200, 300]
-        late: int = 0       # freelist pages written in commits (700, 800]
+        early: int = 0
+        late: int = 0
         mark: int = 0
         n: int = 1
         while n <= 800 {
@@ -221,7 +199,6 @@ class FreelistScalingTest(TestCase) {
                 k = k + 1
             }
             p.commit()
-            # Emulate the retention window's pin, as the commit log does.
             floor: int = p.last_csn - window
             if floor < 1 {
                 floor = 1
@@ -240,31 +217,21 @@ class FreelistScalingTest(TestCase) {
             n = n + 1
         }
 
-        # Flat: a late hundred commits cost about what an early hundred did.
         self.assertTrue(late < early * 4)
-        # And proportional to churn in absolute terms: ~9 freed pages per
-        # commit fit comfortably in one freelist page per commit.
         self.assertTrue(late <= 400)
     }
 }
 
 
 class CrashRecoveryTest(TestCase) {
-    # The headline M0 proof: crash at every I/O boundary across many seeds; the
-    # database always reopens to a consistent all-or-nothing snapshot.
     def test_crash_at_every_boundary() -> None {
         res: SimResult = run_crash_trials(600)
         self.assertEqual(res.trials, 600)
         self.assertEqual(res.failures, 0)
-        # Both recovery outcomes must actually be exercised, or the harness is
-        # not testing what it claims.
         self.assertTrue(res.recovered_old > 0)
         self.assertTrue(res.recovered_new > 0)
     }
 
-    # Format v3: consensus-state flips (commit_state) crash-proven the same
-    # way, interleaved with data commits. The CSN never moves on a state
-    # flip, raft fields recover all-or-nothing, and the file keeps working.
     def test_state_flip_crash_at_every_boundary() -> None {
         res: SimResult = run_state_crash_trials(400)
         self.assertEqual(res.trials, 400)

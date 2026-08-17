@@ -30,8 +30,6 @@ test locks in the rendered VALUES end to end.
 from unittest import TestCase, main
 
 
-# Read-only over its list param: no append/insert/pop/subscript-store, so it is
-# provably safe to share. Fired concurrently over the SAME `shared` list.
 def sum_lengths(s: list[str]) -> int {
     n: int = 0
     i: int = 0
@@ -43,7 +41,6 @@ def sum_lengths(s: list[str]) -> int {
 }
 
 
-# A second read-only worker over a shared dict, to cover the dict receiver too.
 def sum_values(d: dict[str, int]) -> int {
     total: int = 0
     total = total + d["a"]
@@ -55,7 +52,7 @@ def sum_values(d: dict[str, int]) -> int {
 
 class FireReadOnlyShareTests(TestCase) {
     def test_list_fanout_joins_to_expected_total() {
-        shared: list[str] = ["item_a", "item_b", "item_c"]   # 3 x 6 = 18
+        shared: list[str] = ["item_a", "item_b", "item_c"]
         tasks: list[Task[int]] = []
         w: int = 0
         while w < 8 {
@@ -67,11 +64,11 @@ class FireReadOnlyShareTests(TestCase) {
         for t in tasks {
             total = total + t.join()
         }
-        self.assertEqual(total, 144)   # 8 workers x 18
+        self.assertEqual(total, 144)
     }
 
     def test_dict_fanout_joins_to_expected_total() {
-        cfg: dict[str, int] = {a: 10, b: 20, c: 30}   # 60 per worker
+        cfg: dict[str, int] = {a: 10, b: 20, c: 30}
         tasks: list[Task[int]] = []
         w: int = 0
         while w < 5 {
@@ -83,7 +80,7 @@ class FireReadOnlyShareTests(TestCase) {
         for t in tasks {
             total = total + t.join()
         }
-        self.assertEqual(total, 300)   # 5 workers x 60
+        self.assertEqual(total, 300)
     }
 }
 

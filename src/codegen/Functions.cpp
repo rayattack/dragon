@@ -1,12 +1,9 @@
-/// Dragon CodeGen - Lambda, Function Declaration, TypeAlias
 #include "../CodeGenImpl.h"
 
 #include <optional>
 
 namespace dragon {
 
-// Shared per-closure-site env GC hook (Lambda + nested def) so DEALLOC/TRAVERSE/CLEAR match.
-// TRAVERSE's bare-fn-ptr Closure capture is a safe hash-miss; CLEAR nulls slots so a later dealloc frees 0.
 llvm::Function* CodeGen::Impl::emitEnvGcFn(
         const std::string& baseName, llvm::StructType* envStructType,
         const std::vector<EnvCaptureDesc>& caps) {
@@ -40,10 +37,10 @@ llvm::Function* CodeGen::Impl::emitEnvGcFn(
     auto* retBB      = llvm::BasicBlock::Create(*context, "op.ret", gcFn);
 
     auto* sw = builder->CreateSwitch(opArg, retBB, 4);
-    sw->addCase(llvm::ConstantInt::get(i32Ty, 0 /*DEALLOC*/),  deallocBB);
-    sw->addCase(llvm::ConstantInt::get(i32Ty, 1 /*TRAVERSE*/), traverseBB);
-    sw->addCase(llvm::ConstantInt::get(i32Ty, 2 /*CLEAR*/),    clearBB);
-    sw->addCase(llvm::ConstantInt::get(i32Ty, 3 /*MARK_SHARED*/), markBB);
+    sw->addCase(llvm::ConstantInt::get(i32Ty, 0 ),  deallocBB);
+    sw->addCase(llvm::ConstantInt::get(i32Ty, 1 ), traverseBB);
+    sw->addCase(llvm::ConstantInt::get(i32Ty, 2 ),    clearBB);
+    sw->addCase(llvm::ConstantInt::get(i32Ty, 3 ), markBB);
 
     auto* visitFnPtrType = llvm::FunctionType::get(
         voidType, {i8PtrType, i8PtrType}, false);
@@ -54,8 +51,6 @@ llvm::Function* CodeGen::Impl::emitEnvGcFn(
         auto* ptr = builder->CreateLoad(i8PtrType, fieldPtr);
         return std::make_pair(fieldPtr, ptr);
     };
-    // Per-kind decref (cell/str/closure/generic), reused by DEALLOC and CLEAR.
-    // Closure goes through tag-gated _callable (bare-fn-ptr safe).
     auto emitCapDecref = [&](const EnvCaptureDesc& c, llvm::Value* ptr) {
         if (c.isCellRelay)
             builder->CreateCall(runtimeFuncs["dragon_decref"], {ptr});
@@ -67,7 +62,6 @@ llvm::Function* CodeGen::Impl::emitEnvGcFn(
             builder->CreateCall(runtimeFuncs["dragon_decref"], {ptr});
     };
 
-    // DEALLOC
     builder->SetInsertPoint(deallocBB);
     for (size_t i = 0; i < caps.size(); i++) {
         if (caps[i].isCellRelay || isHeapKind(caps[i].kind)) {
@@ -77,7 +71,6 @@ llvm::Function* CodeGen::Impl::emitEnvGcFn(
     }
     builder->CreateRetVoid();
 
-    // TRAVERSE
     builder->SetInsertPoint(traverseBB);
     for (size_t i = 0; i < caps.size(); i++) {
         if (!envCaptureIsCyclic(caps[i].kind, caps[i].isCellRelay)) continue;
@@ -95,7 +88,6 @@ llvm::Function* CodeGen::Impl::emitEnvGcFn(
     }
     builder->CreateRetVoid();
 
-    // CLEAR
     builder->SetInsertPoint(clearBB);
     for (size_t i = 0; i < caps.size(); i++) {
         if (caps[i].isCellRelay || isHeapKind(caps[i].kind)) {
@@ -109,8 +101,6 @@ llvm::Function* CodeGen::Impl::emitEnvGcFn(
     }
     builder->CreateRetVoid();
 
-    // Propagate SHARED into every heap capture, str included: a capture read
-    // out of a shared closure increfs, so unmarked refcounts tear cross-thread.
     builder->SetInsertPoint(markBB);
     for (size_t i = 0; i < caps.size(); i++) {
         if (!(caps[i].isCellRelay || isHeapKind(caps[i].kind))) continue;
@@ -122,7 +112,6 @@ llvm::Function* CodeGen::Impl::emitEnvGcFn(
             builder->CreateCall(runtimeFuncs["dragon_mark_shared_str"],
                                 {pr.second});
         } else if (caps[i].kind == VarKind::Closure) {
-            // Tag-gated: a Callable capture may be a bare fn pointer.
             builder->CreateCall(runtimeFuncs["dragon_mark_shared_callable"],
                                 {dataArg, pr.second});
         } else {
@@ -141,15 +130,12 @@ llvm::Function* CodeGen::Impl::emitEnvGcFn(
 }
 
 void CodeGen::visit(LambdaExpr& node) {
-    // D027: capturedVars non-empty makes a closure (env + wrapper); otherwise a bare fn ptr.
-    // Per-variable metadata dies with the lambda body (stale-type family).
     Impl::VarMetaScope _varMeta(*impl_);
 
     bool hasCaptures = !node.capturedVars.empty();
 
     std::string lambdaName = "__dragon_lambda_" + std::to_string(impl_->lambdaCounter++);
 
-    // Expression-body lambdas default to int; a block lambda with no value-return is void.
     llvm::Type* retType = impl_->typeExprToLLVM(node.returnType.get());
     if (!node.returnType) {
         retType = (node.body || impl_->bodyReturnsValue(node.bodyStmts))
@@ -163,22 +149,20 @@ void CodeGen::visit(LambdaExpr& node) {
 
     std::vector<llvm::Type*> paramTypes = userParamTypes;
     if (hasCaptures) {
-        paramTypes.push_back(impl_->i8PtrType);  // env pointer
+        paramTypes.push_back(impl_->i8PtrType);
     }
 
     auto* funcType = llvm::FunctionType::get(retType, paramTypes, false);
     auto* lambdaFunc = llvm::Function::Create(
         funcType, llvm::Function::InternalLinkage, lambdaName, impl_->module.get());
 
-    // D027: Gather capture info BEFORE switching context (load values from the
-    // caller scope). D027.1: `nonlocal` captures relay as cell ptrs (cell_get/set).
     std::unordered_set<std::string> innerCellRelayed(
         node.mutatedCapturedVars.begin(), node.mutatedCapturedVars.end());
     struct CaptureInfo {
         std::string name;
         llvm::Value* value;
         Impl::VarKind kind;
-        std::string className;  // for ClassInstance captures
+        std::string className;
         bool isCellRelay = false;
     };
     std::vector<CaptureInfo> captures;
@@ -188,7 +172,6 @@ void CodeGen::visit(LambdaExpr& node) {
             ci.name = capName;
             ci.kind = impl_->lookupVarKind(capName);
             ci.isCellRelay = innerCellRelayed.count(capName) > 0;
-            // Capture class name for field access inside lambda
             auto cnIt = impl_->varClassNames.find(capName);
             if (cnIt != impl_->varClassNames.end())
                 ci.className = cnIt->second;
@@ -211,12 +194,8 @@ void CodeGen::visit(LambdaExpr& node) {
 
     auto* prevFunc = impl_->currentFunction;
     auto* prevBlock = impl_->builder->GetInsertBlock();
-    // Isolate lambda's scope chain so emitAllScopeCleanup in ReturnStmt
-    // doesn't walk into the enclosing function's scopes.
     auto savedScopes = std::move(impl_->scopes);
     impl_->scopes.clear();
-    // D027.1: lambda's own cell-promoted locals (from any nonlocal in its
-    // own nested defs) are computed independently. Save/restore the parent's.
     auto savedCellPromoted = std::move(impl_->cellPromotedLocals);
     impl_->cellPromotedLocals.clear();
     {
@@ -238,7 +217,7 @@ void CodeGen::visit(LambdaExpr& node) {
     impl_->pushScope();
     size_t idx = 0;
     for (auto& arg : lambdaFunc->args()) {
-        if (idx >= node.params.size()) break;  // skip env param
+        if (idx >= node.params.size()) break;
         std::string paramName = node.params[idx].name;
         arg.setName(paramName);
         auto* alloca = impl_->createEntryAlloca(lambdaFunc, paramName, funcType->getParamType(idx));
@@ -254,8 +233,6 @@ void CodeGen::visit(LambdaExpr& node) {
         idx++;
     }
 
-    // D030: Per-lambda env struct { [24 x i8] header+dealloc_fn; native capture
-    // fields... }. Used at body unpack, capture populate, and dealloc fn.
     auto kindToCaptureLLVM = [&](Impl::VarKind k) -> llvm::Type* {
         switch (k) {
             case Impl::VarKind::Float: return impl_->f64Type;
@@ -272,7 +249,7 @@ void CodeGen::visit(LambdaExpr& node) {
             case Impl::VarKind::Closure:
                 return impl_->i8PtrType;
             default:
-                return impl_->i64Type;  // Int / Other / unknown
+                return impl_->i64Type;
         }
     };
 
@@ -280,7 +257,7 @@ void CodeGen::visit(LambdaExpr& node) {
     if (hasCaptures) {
         std::vector<llvm::Type*> envFields;
         envFields.push_back(llvm::ArrayType::get(
-            llvm::Type::getInt8Ty(*impl_->context), 24));  // header + dealloc_fn
+            llvm::Type::getInt8Ty(*impl_->context), 24));
         for (auto& cap : captures) {
             envFields.push_back(cap.isCellRelay
                 ? impl_->i8PtrType : kindToCaptureLLVM(cap.kind));
@@ -289,7 +266,6 @@ void CodeGen::visit(LambdaExpr& node) {
             *impl_->context, envFields, lambdaName + ".env");
     }
 
-    // D030: Load captures from env into local variables via typed GEPs (no i64 round-trip).
     if (hasCaptures) {
         llvm::Value* envArg = &*(lambdaFunc->arg_end() - 1);
         envArg->setName("__env");
@@ -302,19 +278,15 @@ void CodeGen::visit(LambdaExpr& node) {
 
             auto* fieldPtr = impl_->builder->CreateStructGEP(
                 envStructType, envTyped, (unsigned)(i + 1), cap.name + ".env.ptr");
-            // Load the field at its native type - no bitcast/IntToPtr/ICmpNE round-trip
             auto* typedVal = impl_->builder->CreateLoad(
                 fieldType, fieldPtr, cap.name + ".env");
 
             auto* alloca = impl_->createEntryAlloca(lambdaFunc, cap.name, fieldType);
             impl_->builder->CreateStore(typedVal, alloca);
             impl_->setVar(cap.name, alloca, cap.kind);
-            // Restore class name mapping for ClassInstance captures
             if (!cap.className.empty())
                 impl_->varClassNames[cap.name] = cap.className;
-            // Captures are borrowed from the env - don't decref at scope exit
             impl_->scopes.back().borrowed.insert(cap.name);
-            // D027.1: cell-relayed captures use cell ops for read/write.
             if (cap.isCellRelay) {
                 impl_->markCellBacked(cap.name);
             }
@@ -335,8 +307,6 @@ void CodeGen::visit(LambdaExpr& node) {
         if (impl_->options.gcMode == GCMode::RC) {
             if (auto* nameExpr = dynamic_cast<NameExpr*>(node.body.get())) {
                 auto kind = impl_->lookupVarKind(nameExpr->name);
-                // emitIncrefByKind dispatches Str/Closure/generic; Closure is
-                // tag-gated (a returned bare-fn Callable has no refcount slot).
                 impl_->emitIncrefByKind(bodyVal, kind);
             }
         }
@@ -370,8 +340,6 @@ void CodeGen::visit(LambdaExpr& node) {
     if (prevBlock) impl_->builder->SetInsertPoint(prevBlock);
 
     if (hasCaptures) {
-        // Emit the shared multi-op env GC hook, gc-track the env iff it captures
-        // a cycle-capable object (scalar/str-only envs stay untracked - #1).
         std::vector<Impl::EnvCaptureDesc> capDescs;
         capDescs.reserve(captures.size());
         bool envTrackable = false;
@@ -382,7 +350,6 @@ void CodeGen::visit(LambdaExpr& node) {
         }
         auto* gcFn = impl_->emitEnvGcFn(lambdaName, envStructType, capDescs);
 
-        // D030: Allocate env at exact native size, then populate via typed GEPs.
         const auto& dl = impl_->module->getDataLayout();
         uint64_t envSize = dl.getTypeAllocSize(envStructType);
 
@@ -397,8 +364,6 @@ void CodeGen::visit(LambdaExpr& node) {
         llvm::Value* envTyped = impl_->builder->CreateBitCast(
             envVal, llvm::PointerType::getUnqual(*impl_->context), "closure.env.typed");
 
-        // Populate captures with native-typed stores; coerce only when the
-        // loaded value's type doesn't match the field type (legitimate widening).
         for (size_t i = 0; i < captures.size(); i++) {
             auto& cap = captures[i];
             llvm::Type* fieldType = envStructType->getElementType((unsigned)(i + 1));
@@ -413,7 +378,6 @@ void CodeGen::visit(LambdaExpr& node) {
                     storeVal = impl_->builder->CreateIntToPtr(storeVal, fieldType);
                 else if (fieldType->isIntegerTy() && storeVal->getType()->isPointerTy())
                     storeVal = impl_->builder->CreatePtrToInt(storeVal, fieldType);
-                // Otherwise: assume bitcast-compatible (rare; LLVM will assert if not)
                 else
                     storeVal = impl_->builder->CreateBitCast(storeVal, fieldType);
             }
@@ -422,8 +386,6 @@ void CodeGen::visit(LambdaExpr& node) {
                 envStructType, envTyped, (unsigned)(i + 1), cap.name + ".env.slot");
             impl_->builder->CreateStore(storeVal, fieldPtr);
 
-            // Incref heap captures - env now holds a ref. Cell-relayed travel as
-            // TAG_CELL, so plain dragon_incref (not _str, which misreads the cell).
             if (impl_->options.gcMode == GCMode::RC) {
                 if (cap.isCellRelay) {
                     impl_->builder->CreateCall(
@@ -433,8 +395,6 @@ void CodeGen::visit(LambdaExpr& node) {
                         impl_->builder->CreateCall(
                             impl_->runtimeFuncs["dragon_incref_str"], {storeVal});
                     } else if (cap.kind == Impl::VarKind::Closure) {
-                        // A captured Callable may hold a BARE fn ptr; generic incref
-                        // would write into code bytes (SIGSEGV). Tag-gated variant is safe.
                         impl_->builder->CreateCall(
                             impl_->runtimeFuncs["dragon_incref_callable"], {storeVal});
                     } else {
@@ -450,18 +410,13 @@ void CodeGen::visit(LambdaExpr& node) {
             {impl_->builder->CreateBitCast(lambdaFunc, impl_->i8PtrType), envVal},
             "closure");
 
-        // Record user-facing callable type for indirect call dispatch
         impl_->lastClosureCallableType = llvm::FunctionType::get(
             retType, userParamTypes, false);
     } else {
-        // Non-capturing: result is bare function pointer (unchanged behavior)
         impl_->lastValue = lambdaFunc;
         impl_->lastClosureCallableType = nullptr;
     }
 }
-
-// D027.1: Recursively collect nested-fn `mutatedCapturedVars`. Names nonlocal-
-// mutated in nested defs/lambdas, intersected with own locals, get cell-promoted.
 
 void CodeGen::Impl::collectNestedMutatedCaptures(
     const std::vector<std::unique_ptr<Stmt>>& body,
@@ -475,8 +430,6 @@ void CodeGen::Impl::collectNestedMutatedCaptures(Stmt* s,
 {
     if (!s) return;
     if (auto* fd = dynamic_cast<FunctionDecl*>(s)) {
-        // The nested fn's own `nonlocal` decls surface as cell-backings here;
-        // recurse to pick up grandchildren whose targets bind further out.
         for (const auto& n : fd->mutatedCapturedVars) out.insert(n);
         collectNestedMutatedCaptures(fd->body, out);
         return;
@@ -540,8 +493,6 @@ void CodeGen::Impl::collectNestedMutatedCaptures(Stmt* s,
         return;
     }
     if (auto* th = dynamic_cast<ThreadStmt*>(s)) {
-        // ThreadStmt blocks are capture sites: their mutatedCapturedVars bubble
-        // up so the owning function cell-promotes the right locals.
         for (const auto& n : th->mutatedCapturedVars) out.insert(n);
         collectNestedMutatedCaptures(th->body, out);
         return;
@@ -560,8 +511,6 @@ void CodeGen::Impl::collectNestedMutatedCaptures(Expr* e,
     }
     if (auto* fe = dynamic_cast<FireExpr*>(e)) {
         for (const auto& n : fe->mutatedCapturedVars) out.insert(n);
-        // FireExpr wraps either a CallExpr (via `operand`) or a body block
-        // (via `bodyStmts`); recurse into both.
         if (fe->operand) collectNestedMutatedCaptures(fe->operand.get(), out);
         for (auto& s : fe->bodyStmts) collectNestedMutatedCaptures(s.get(), out);
         return;
@@ -596,24 +545,18 @@ void CodeGen::Impl::collectNestedMutatedCaptures(Expr* e,
         collectNestedMutatedCaptures(attr->object.get(), out);
         return;
     }
-    // Leaf expressions and ones that can't host a nested fn/lambda body
-    // don't matter for this scan.
 }
 
 namespace {
-// D027 closure-return analysis: mark the receiving var VarKind::Closure only
-// when EVERY value-return is provably a closure (mis-marking crashes dispatch).
 
 void collectCapturingDefs(const std::vector<std::unique_ptr<Stmt>>& body,
                           std::unordered_set<std::string>& out);
 
-// Names of nested defs declared in `s` (NOT inside deeper nested fns/lambdas)
-// that capture an enclosing var -> they materialize as DragonClosures.
 void collectCapturingDefsStmt(Stmt* s, std::unordered_set<std::string>& out) {
     if (!s) return;
     if (auto* fd = dynamic_cast<FunctionDecl*>(s)) {
         if (!fd->capturedVars.empty()) out.insert(fd->name);
-        return;  // a nested def's own inner defs are ITS closures, not ours
+        return;
     }
     if (auto* ifs = dynamic_cast<IfStmt*>(s)) {
         collectCapturingDefs(ifs->thenBody, out);
@@ -643,21 +586,19 @@ bool everyReturnClosure(const std::vector<std::unique_ptr<Stmt>>& body,
                         const std::unordered_set<std::string>& capDefs,
                         bool& sawReturn);
 
-// False on the first value-return that is NOT provably a closure (incl. a bare
-// `return`), so any path that could yield a bare fn vetoes the whole function.
 bool everyReturnClosureStmt(Stmt* s,
                             const std::unordered_set<std::string>& capDefs,
                             bool& sawReturn) {
     if (!s) return true;
-    if (dynamic_cast<FunctionDecl*>(s)) return true;  // nested def's returns are its own
+    if (dynamic_cast<FunctionDecl*>(s)) return true;
     if (auto* r = dynamic_cast<ReturnStmt*>(s)) {
-        if (!r->value) return false;                  // bare return -> not all-closure
+        if (!r->value) return false;
         sawReturn = true;
         if (auto* le = dynamic_cast<LambdaExpr*>(r->value.get()))
             return !le->capturedVars.empty();
         if (auto* ne = dynamic_cast<NameExpr*>(r->value.get()))
             return capDefs.count(ne->name) > 0;
-        return false;                                 // unknown returned expr -> conservative
+        return false;
     }
     if (auto* ifs = dynamic_cast<IfStmt*>(s)) {
         if (!everyReturnClosure(ifs->thenBody, capDefs, sawReturn)) return false;
@@ -689,7 +630,7 @@ bool everyReturnClosure(const std::vector<std::unique_ptr<Stmt>>& body,
         if (!everyReturnClosureStmt(s.get(), capDefs, sawReturn)) return false;
     return true;
 }
-} // namespace
+}
 
 bool CodeGen::Impl::functionReturnsClosure(FunctionDecl& node) {
     if (!dynamic_cast<CallableTypeExpr*>(node.returnType.get())) return false;
@@ -699,14 +640,12 @@ bool CodeGen::Impl::functionReturnsClosure(FunctionDecl& node) {
     return everyReturnClosure(node.body, capDefs, sawReturn) && sawReturn;
 }
 
-// Builds the inner generator body fn, then fills `wrapper` with args struct + trampoline + decref fn returning the gen object.
-// `hasSelf` threads self as a heap arg the gen owns (wrapper increfs, destroy decrefs); `userParamStart` skips self/cls.
 void CodeGen::emitGeneratorFn(FunctionDecl& node, llvm::Function* wrapper,
                               const std::string& siteName, bool hasSelf,
                               const std::string& selfClass, size_t userParamStart) {
     std::vector<llvm::Type*> bodyParamTypes;
-    bodyParamTypes.push_back(impl_->i8PtrType);                 // gen
-    if (hasSelf) bodyParamTypes.push_back(impl_->i8PtrType);    // self
+    bodyParamTypes.push_back(impl_->i8PtrType);
+    if (hasSelf) bodyParamTypes.push_back(impl_->i8PtrType);
     for (size_t i = userParamStart; i < node.params.size(); ++i)
         bodyParamTypes.push_back(impl_->typeExprToLLVM(node.params[i].type.get()));
     auto* bodyFuncType = llvm::FunctionType::get(impl_->voidType, bodyParamTypes, false);
@@ -742,7 +681,7 @@ void CodeGen::emitGeneratorFn(FunctionDecl& node, llvm::Function* wrapper,
         auto* selfAlloca = impl_->createEntryAlloca(bodyFunc, "self", impl_->i8PtrType);
         impl_->builder->CreateStore(&*argIt, selfAlloca);
         impl_->setVar("self", selfAlloca, Impl::VarKind::ClassInstance);
-        impl_->scopes.back().borrowed.insert("self");  // generator owns the ref; body borrows
+        impl_->scopes.back().borrowed.insert("self");
         ++argIt;
     }
     for (size_t pi = userParamStart; argIt != bodyFunc->arg_end(); ++argIt, ++pi) {
@@ -761,7 +700,7 @@ void CodeGen::emitGeneratorFn(FunctionDecl& node, llvm::Function* wrapper,
 
     if (!impl_->builder->GetInsertBlock()->getTerminator()) {
         impl_->emitScopeCleanup();
-        impl_->builder->CreateRetVoid();  // trampoline marks the generator exhausted
+        impl_->builder->CreateRetVoid();
     }
     impl_->popScope();
     impl_->generatorPtr = prevGenPtr;
@@ -771,8 +710,6 @@ void CodeGen::emitGeneratorFn(FunctionDecl& node, llvm::Function* wrapper,
     impl_->globalDeclaredVars = savedGlobalDecls;
     impl_->nonlocalDeclaredVars = savedNonlocalDecls;
 
-    // Wrapper body creates + returns the generator object; its LLVM args ARE the
-    // captured args, in order: [self?, params...].
     impl_->builder->SetInsertPoint(
         llvm::BasicBlock::Create(*impl_->context, "entry", wrapper));
     unsigned nwrap = (unsigned)wrapper->arg_size();
@@ -791,8 +728,6 @@ void CodeGen::emitGeneratorFn(FunctionDecl& node, llvm::Function* wrapper,
     auto* decrefFn = impl_->buildGeneratorDecrefFn(argsStructType, argKinds, siteName);
     impl_->builder->SetInsertPoint(&wrapper->getEntryBlock());
 
-    // Incref heap captured args (incl self) so they survive past the wrapper's
-    // return; the matching decref runs at generator destroy via decrefFn.
     for (unsigned i = 0; i < nwrap; ++i)
         if (Impl::isHeapKind(argKinds[i]) && argKinds[i] != Impl::VarKind::Union)
             impl_->emitIncrefByKind(wrapper->getArg(i), argKinds[i]);
@@ -823,8 +758,6 @@ void CodeGen::emitGeneratorFn(FunctionDecl& node, llvm::Function* wrapper,
 void CodeGen::Impl::preregisterDecoratedFunction(FunctionDecl& node) {
     if (node.isExtern || node.isMethod || !node.typeParams.empty()) return;
     if (node.decorators.empty()) return;
-    // Same user-decorator filter as visit(FunctionDecl): built-in flags
-    // (staticmethod/classmethod/property, @x.setter) produce no dispatch global.
     bool hasUser = false;
     for (auto& dec : node.decorators) {
         if (auto* n = dynamic_cast<NameExpr*>(dec.get())) {
@@ -841,7 +774,7 @@ void CodeGen::Impl::preregisterDecoratedFunction(FunctionDecl& node) {
         break;
     }
     if (!hasUser) return;
-    if (decoratedFunctions.count(node.name)) return;  // already registered
+    if (decoratedFunctions.count(node.name)) return;
     auto* func = module->getFunction(mangleFunc(currentModuleName, node.name));
     if (!func) return;
     auto* gv = new llvm::GlobalVariable(
@@ -853,11 +786,7 @@ void CodeGen::Impl::preregisterDecoratedFunction(FunctionDecl& node) {
 }
 
 void CodeGen::visit(FunctionDecl& node) {
-    // D044 - a generic template (`def f[T](...)`) is never lowered; only its
-    // stamped monomorphic instantiations (empty typeParams) are emitted.
     if (!node.typeParams.empty()) return;
-    // Mirror forwardDeclareFunctions: externs keep the bare C symbol, Dragon
-    // defs get per-module mangling; aliased externs use `externSymbol`.
     const std::string externLinkName =
         node.externSymbol.empty() ? node.name : node.externSymbol;
     const std::string llvmName = node.isExtern
@@ -865,8 +794,6 @@ void CodeGen::visit(FunctionDecl& node) {
         : Impl::mangleFunc(impl_->currentModuleName, node.name);
     auto* func = impl_->module->getFunction(llvmName);
 
-    // Nested `def` detection: no LLVM symbol (func == nullptr), or shadows a
-    // module-level def while emitting inside another fn body. Methods handled separately.
     bool nested = !node.isMethod &&
                   (!func ||
                    (impl_->currentFunction != nullptr &&
@@ -876,18 +803,12 @@ void CodeGen::visit(FunctionDecl& node) {
         return;
     }
     if (!func) return;
-    // Per-variable metadata dies with this body (stale-type family). The nested
-    // path scopes its own guard so the parent-scope binding it installs survives.
     Impl::VarMetaScope _varMeta(*impl_);
 
-    // Extern "C" functions are declarations only - no body to emit
     if (node.isExtern) return;
 
-    // Skip if already has a body (was already generated)
     if (!func->empty()) return;
 
-    // D052 - stamped cross-module generic: symbol resolved above under the instantiation
-    // module; swap to genericHomeModule for the body so bare calls/globals resolve there.
     const std::string _savedModForGeneric = impl_->currentModuleName;
     struct RestoreModuleName {
         std::string* slot; std::string saved; bool active;
@@ -897,8 +818,6 @@ void CodeGen::visit(FunctionDecl& node) {
     if (!node.genericHomeModule.empty())
         impl_->currentModuleName = node.genericHomeModule;
 
-    // Stash the docstring so `.__doc__` (Attributes.cpp) can lazily emit .rodata.
-    // Top-level keyed by mangled name (cross-module distinct); methods by (class, method).
     if (node.docstring) {
         if (node.isMethod && !impl_->currentClassName.empty())
             impl_->methodDocstringsBySym[impl_->classSym(impl_->currentClassName)][node.name] = *node.docstring;
@@ -906,8 +825,6 @@ void CodeGen::visit(FunctionDecl& node) {
             impl_->functionDocstrings[llvmName] = *node.docstring;
     }
 
-    // D025: track functions returning class descriptors (-> type) or fn ptrs
-    // (-> ptr); callers set the receiving var's VarKind/varIsPtrCallable.
     if (auto* retNamed = dynamic_cast<NamedTypeExpr*>(node.returnType.get())) {
         if (retNamed->name == "type")
             impl_->funcReturnsType.insert(llvmName);
@@ -915,12 +832,9 @@ void CodeGen::visit(FunctionDecl& node) {
             impl_->funcReturnsPtr.insert(llvmName);
     }
 
-    // D027: track fns returning a CLOSURE so `g = make_closure()` marks g Closure
-    // (call site unpacks fn+env, avoiding SIGSEGV). Idempotent backstop; see ImplInit.
     if (impl_->functionReturnsClosure(node))
         impl_->funcReturnsClosure.insert(llvmName);
 
-    // async def: inner body fn + wrapper that spawns vthread
     if (node.isAsync) {
         impl_->needsPthread = true;
 
@@ -929,7 +843,6 @@ void CodeGen::visit(FunctionDecl& node) {
             bodyParamTypes.push_back(impl_->typeExprToLLVM(p.type.get()));
         }
         llvm::Type* bodyRetType = impl_->typeExprToLLVM(node.returnType.get());
-        // If return type is void, use i64 so the result can be passed through the vthread
         if (bodyRetType == impl_->voidType) bodyRetType = impl_->i64Type;
 
         auto* bodyFuncType = llvm::FunctionType::get(bodyRetType, bodyParamTypes, false);
@@ -984,15 +897,11 @@ void CodeGen::visit(FunctionDecl& node) {
         impl_->globalDeclaredVars = savedGlobalDecls;
         impl_->nonlocalDeclaredVars = savedNonlocalDecls;
 
-        // D030: wrapper foo(params) -> ptr spawns a vthread via the typed spawn API;
-        // wrapper forwards, the per-callsite trampoline unpacks and calls.
         auto* wrapEntry = llvm::BasicBlock::Create(*impl_->context, "entry", func);
         impl_->builder->SetInsertPoint(wrapEntry);
 
         int64_t nargs = (int64_t)node.params.size();
 
-        // Atomic-incref heap params crossing the thread boundary so they
-        // survive on the worker until the trampoline atomic-decrefs them.
         std::vector<Impl::VarKind> paramKinds;
         for (int64_t i = 0; i < nargs; i++) {
             auto pk = impl_->typeExprToKind(node.params[i].type.get());
@@ -1000,7 +909,6 @@ void CodeGen::visit(FunctionDecl& node) {
             impl_->emitAtomicIncref(func->getArg(i), pk);
         }
 
-        // Build typed args struct from the body fn's signature.
         std::vector<llvm::Type*> argTypes;
         for (unsigned i = 0; i < bodyFuncType->getNumParams(); i++)
             argTypes.push_back(bodyFuncType->getParamType(i));
@@ -1034,48 +942,35 @@ void CodeGen::visit(FunctionDecl& node) {
             "async.task");
         impl_->builder->CreateRet(handle);
 
-        // Restore insert point back to caller (e.g. main)
         impl_->currentFunction = prevFunc;
         if (prevBlock) impl_->builder->SetInsertPoint(prevBlock);
 
         return;
     }
 
-    // Generator function: body fn + wrapper that returns generator
     if (Impl::containsYield(node.body)) {
         impl_->generatorFunctions.insert(node.name);
-        // Record the yielded value's VarKind so for-in consumers type their loop
-        // var correctly (heap yields round-trip as ptr, not raw i64).
         impl_->generatorYieldKinds[node.name] = impl_->inferYieldKind(node.body);
-        // Free-function generator: no self, all params are user params.
         emitGeneratorFn(node, func, node.name,
-                        /*hasSelf=*/false, /*selfClass=*/"", /*userParamStart=*/0);
+                        false, "", 0);
         return;
     }
 
-    // Normal (non-async, non-generator) function codegen
     auto* prevFunc = impl_->currentFunction;
     auto* prevBlock = impl_->builder->GetInsertBlock();
 
-    // Save per-function global/nonlocal state (.py mode)
     auto savedGlobalDecls = impl_->globalDeclaredVars;
     auto savedNonlocalDecls = impl_->nonlocalDeclaredVars;
     impl_->globalDeclaredVars.clear();
     impl_->nonlocalDeclaredVars.clear();
 
-    // Save and replace scope stack - functions get a clean scope, not the
-    // enclosing allocas. Module globals go through GlobalVariable.
     auto savedScopes = std::move(impl_->scopes);
     impl_->scopes.clear();
     auto savedUnionMembers = std::move(impl_->unionMemberKinds);
     impl_->unionMemberKinds.clear();
-    // 6.12(B): non-neg tracking is per-function (names refer to local
-    // allocas, not the enclosing function's `i`).
     auto savedNonNeg = std::move(impl_->knownNonNeg);
     impl_->knownNonNeg.clear();
 
-    // D027.1: recompute which OWN locals to cell-promote: names marked `nonlocal`
-    // in nested defs/lambdas, minus our own mutated-captures (relayed, not owned).
     auto savedCellPromoted = std::move(impl_->cellPromotedLocals);
     impl_->cellPromotedLocals.clear();
     {
@@ -1084,7 +979,7 @@ void CodeGen::visit(FunctionDecl& node) {
         std::unordered_set<std::string> ownRelay(
             node.mutatedCapturedVars.begin(), node.mutatedCapturedVars.end());
         for (const auto& n : nestedMutated) {
-            if (ownRelay.count(n)) continue;  // forwarded, not owned
+            if (ownRelay.count(n)) continue;
             impl_->cellPromotedLocals.insert(n);
         }
     }
@@ -1094,18 +989,14 @@ void CodeGen::visit(FunctionDecl& node) {
     impl_->currentFunction = func;
     impl_->pushScope();
 
-    // Create allocas for parameters. D030 Phase 4: union params are a single
-    // {i64, i64} box arg - no hidden trailing tag, no funcUnionTagMask.
     auto funcType = func->getFunctionType();
     size_t astIdx = 0;
     size_t llvmIdx = 0;
     for (auto& arg : func->args()) {
-        // Skip bare * separator (no name, no LLVM param)
         while (astIdx < node.params.size() && node.params[astIdx].isVarArg && node.params[astIdx].name.empty())
             astIdx++;
         if (astIdx >= node.params.size()) break;
 
-        // *args or **kwargs param: bind as list/dict
         if (node.params[astIdx].isVarArg) {
             std::string paramName = node.params[astIdx].name;
             arg.setName(paramName);
@@ -1113,8 +1004,6 @@ void CodeGen::visit(FunctionDecl& node) {
             impl_->builder->CreateStore(&arg, alloca);
             impl_->setVar(paramName, alloca, Impl::VarKind::List);
             impl_->scopes.back().borrowed.insert(paramName);
-            // `*args: T` is the per-element type: register the list elem kind like
-            // a `list[T]` param so `for a in args`/`args[i]` read native T, not int.
             if (TypeExpr* elemTy = node.params[astIdx].type.get()) {
                 Impl::VarKind ek = impl_->typeExprToKind(elemTy);
                 impl_->varListElemKinds[paramName] = Impl::elemVarKindToTypeKind(ek);
@@ -1137,8 +1026,6 @@ void CodeGen::visit(FunctionDecl& node) {
             impl_->builder->CreateStore(&arg, alloca);
             impl_->setVar(paramName, alloca, Impl::VarKind::Dict);
             impl_->scopes.back().borrowed.insert(paramName);
-            // Register dict key/value kinds like `dict[K,V]`: **kwargs keys are str,
-            // `**kwargs: T` is the value type. Else subscript falls to untyped dict_get.
             impl_->varDictKeyKinds[paramName] = Type::Kind::Str;
             impl_->varDictValueKinds[paramName] = Impl::elemVarKindToTypeKind(
                 impl_->typeExprToKind(node.params[astIdx].type.get()));
@@ -1147,7 +1034,6 @@ void CodeGen::visit(FunctionDecl& node) {
             continue;
         }
 
-        // Normal param
         std::string paramName = node.params[astIdx].name;
         arg.setName(paramName);
         auto* alloca = impl_->createEntryAlloca(func, paramName, funcType->getParamType(llvmIdx));
@@ -1159,16 +1045,11 @@ void CodeGen::visit(FunctionDecl& node) {
             impl_->unionMemberKinds[paramName] =
                 impl_->typeExprToUnionMembers(node.params[astIdx].type.get());
         }
-        // Track class name for class-typed parameters (enables field access)
         if (paramKind == Impl::VarKind::ClassInstance) {
             impl_->bindClassVar(paramName, node.params[astIdx].type.get());
         }
-        // GC: params are borrowed - caller owns the ref. An `own` param (docs/002
-        // 2.8) moved its +1 in, so the callee owns it and scope exit releases it.
         if (Impl::isHeapKind(paramKind) && !node.params[astIdx].isOwn)
             impl_->scopes.back().borrowed.insert(paramName);
-        // An own Lock param: the callee owns the mutex - arm the null-gated
-        // scope-exit destroy exactly like a bare Lock local.
         if (node.params[astIdx].isOwn && node.params[astIdx].type) {
             if (auto* nt = dynamic_cast<NamedTypeExpr*>(
                     node.params[astIdx].type.get()))
@@ -1183,7 +1064,6 @@ void CodeGen::visit(FunctionDecl& node) {
         stmt->accept(*this);
     }
 
-    // GC: emit scope cleanup before implicit return
     if (!impl_->builder->GetInsertBlock()->getTerminator()) {
         impl_->emitScopeCleanup();
         if (func->getReturnType() == impl_->voidType) {
@@ -1203,13 +1083,10 @@ void CodeGen::visit(FunctionDecl& node) {
     impl_->currentFunction = prevFunc;
     if (prevBlock) impl_->builder->SetInsertPoint(prevBlock);
 
-    // Restore per-function global/nonlocal state
     impl_->globalDeclaredVars = savedGlobalDecls;
     impl_->nonlocalDeclaredVars = savedNonlocalDecls;
 
-    // D024: Apply user-defined decorators (bottom-up, skip staticmethod/classmethod)
     if (!node.decorators.empty()) {
-        // Collect user-defined decorators (skip built-in flags already handled by parser)
         std::vector<Expr*> userDecorators;
         for (auto& dec : node.decorators) {
             if (auto* n = dynamic_cast<NameExpr*>(dec.get())) {
@@ -1217,7 +1094,6 @@ void CodeGen::visit(FunctionDecl& node) {
                     n->name == "property")
                     continue;
             }
-            // @<name>.setter is handled at attribute-access site, not as a runtime wrapper
             if (auto* a = dynamic_cast<AttributeExpr*>(dec.get())) {
                 if (a->attribute == "setter" &&
                     dynamic_cast<NameExpr*>(a->object.get()) != nullptr)
@@ -1227,27 +1103,21 @@ void CodeGen::visit(FunctionDecl& node) {
         }
 
         if (!userDecorators.empty()) {
-            // Start with the function pointer as i8*
             llvm::Value* current = impl_->builder->CreateBitCast(func, impl_->i8PtrType);
 
-            // Apply decorators bottom-up (last decorator in source is applied first)
             for (int i = (int)userDecorators.size() - 1; i >= 0; i--) {
                 auto* decExpr = userDecorators[i];
-                // Resolve decorator to a callable
                 llvm::Function* decFn = nullptr;
                 if (auto* nameExpr = dynamic_cast<NameExpr*>(decExpr)) {
                     decFn = impl_->module->getFunction(nameExpr->name);
                 }
                 if (decFn) {
-                    // Call decorator(fn_ptr) -> returns new fn_ptr
                     llvm::Value* arg = current;
-                    // Coerce arg to match decorator's first param type
                     if (decFn->getFunctionType()->getNumParams() > 0) {
                         auto* paramType = decFn->getFunctionType()->getParamType(0);
                         arg = impl_->coerceArg(arg, paramType);
                     }
                     llvm::Value* result = impl_->builder->CreateCall(decFn, {arg}, "decorated");
-                    // Coerce result back to i8* for chaining
                     if (result->getType() != impl_->i8PtrType) {
                         if (result->getType() == impl_->i64Type)
                             result = impl_->builder->CreateIntToPtr(result, impl_->i8PtrType);
@@ -1256,20 +1126,16 @@ void CodeGen::visit(FunctionDecl& node) {
                     }
                     current = result;
                 } else {
-                    // Decorator not a bare NameExpr - evaluate it. A factory closure
-                    // SIGSEGVs if called as a bare fn ptr; route via closure-vs-bare.
                     decExpr->accept(*this);
                     llvm::Value* decVal = impl_->lastValue;
                     if (!decVal->getType()->isPointerTy())
                         decVal = impl_->builder->CreateIntToPtr(decVal, impl_->i8PtrType);
                     if (current->getType() != impl_->i8PtrType)
                         current = impl_->builder->CreateBitCast(current, impl_->i8PtrType);
-                    // Decorator ABI signature: (i8* fn) -> i8* fn. ownedClosure
-                    // frees the transient factory-produced closure after one use.
                     auto* decoFnType = llvm::FunctionType::get(
                         impl_->i8PtrType, {impl_->i8PtrType}, false);
                     emitCallableValueCall(decVal, decoFnType, {current},
-                                          /*ownedClosure=*/true, "decapply");
+                                          true, "decapply");
                     current = impl_->lastValue;
                     if (current->getType() != impl_->i8PtrType) {
                         if (current->getType() == impl_->i64Type)
@@ -1282,8 +1148,6 @@ void CodeGen::visit(FunctionDecl& node) {
                 }
             }
 
-            // Store decorated result in a module global. Reuse the pre-pass global
-            // (same symbol a method body loads); create here only if not pre-registered.
             llvm::GlobalVariable* gv = nullptr;
             auto preIt = impl_->decoratedFunctions.find(node.name);
             if (preIt != impl_->decoratedFunctions.end()) {
@@ -1298,28 +1162,21 @@ void CodeGen::visit(FunctionDecl& node) {
                 impl_->decoratedFunctions[node.name] = gv;
             }
             impl_->builder->CreateStore(current, gv);
-            // Track callable type for indirect dispatch
             impl_->callableTypes[node.name] = func->getFunctionType();
         }
     }
 }
 
-// ADR 054 - contracts are compile-time shapes: no code, no symbols. The
-// registry work happened in collectContracts/assignContractSlots.
 void CodeGen::visit(ContractDecl&) {}
 
 void CodeGen::visit(ContractSetTypeExpr&) {}
 
 void CodeGen::visit(TypeAliasStmt& node) {
-    // Type aliases are compile-time only - no code generation needed
 }
 
-/// Emits a nested `def` like a capturing lambda: mangled fn (params + optional trailing
-/// i8* env) plus heap env; binds to a bare fn ptr or closure via nestedFunctionAliases.
 void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
     bool hasCaptures = !node.capturedVars.empty();
 
-    // Mangled LLVM name: unique per nested def so sibling defs can't collide.
     std::string mangledName =
         "__dragon_nested_" + std::to_string(impl_->lambdaCounter++) + "__" + node.name;
 
@@ -1340,8 +1197,6 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
     auto* nestedFunc = llvm::Function::Create(
         funcType, llvm::Function::InternalLinkage, mangledName, impl_->module.get());
 
-    // D027.1: gather capture info from the enclosing scope BEFORE switching context;
-    // `nonlocal` captures travel as a cell ptr so mutations propagate (cell_get/set).
     std::unordered_set<std::string> innerCellRelayed(
         node.mutatedCapturedVars.begin(), node.mutatedCapturedVars.end());
     struct CaptureInfo {
@@ -1349,7 +1204,7 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
         llvm::Value* value;
         Impl::VarKind kind;
         std::string className;
-        bool isCellRelay = false;  // env field carries a cell ptr, not the value
+        bool isCellRelay = false;
     };
     std::vector<CaptureInfo> captures;
     if (hasCaptures) {
@@ -1363,8 +1218,6 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
                 ci.className = cnIt->second;
             auto* alloca = impl_->lookupVar(capName);
             if (alloca) {
-                // For cell-relayed captures: alloca holds the cell ptr (i8*),
-                // which is exactly what we want to forward.
                 ci.value = impl_->builder->CreateLoad(
                     alloca->getAllocatedType(), alloca, capName + ".cap");
             } else {
@@ -1380,8 +1233,6 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
         }
     }
 
-    // Save enclosing context; body metadata dies with the body (stale-type family),
-    // released before the name-bind at the end so the parent-scope binding survives.
     std::optional<Impl::VarMetaScope> bodyMeta(*impl_);
     auto* prevFunc = impl_->currentFunction;
     auto* prevBlock = impl_->builder->GetInsertBlock();
@@ -1391,7 +1242,6 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
     auto savedNonlocalDecls = impl_->nonlocalDeclaredVars;
     impl_->globalDeclaredVars.clear();
     impl_->nonlocalDeclaredVars.clear();
-    // D027.1: nested fn computes its own cell-promoted locals from its body.
     auto savedCellPromoted = std::move(impl_->cellPromotedLocals);
     impl_->cellPromotedLocals.clear();
     {
@@ -1412,7 +1262,7 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
 
     size_t idx = 0;
     for (auto& arg : nestedFunc->args()) {
-        if (idx >= node.params.size()) break;  // skip env param
+        if (idx >= node.params.size()) break;
         std::string paramName = node.params[idx].name;
         arg.setName(paramName);
         auto* alloca = impl_->createEntryAlloca(
@@ -1429,7 +1279,6 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
         idx++;
     }
 
-    // Env struct mirrors LambdaExpr's layout: 24-byte header + native-typed capture fields.
     auto kindToCaptureLLVM = [&](Impl::VarKind k) -> llvm::Type* {
         switch (k) {
             case Impl::VarKind::Float: return impl_->f64Type;
@@ -1456,8 +1305,6 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
         envFields.push_back(llvm::ArrayType::get(
             llvm::Type::getInt8Ty(*impl_->context), 24));
         for (auto& cap : captures) {
-            // D027.1: cell-relayed captures always carry an i8* cell ptr
-            // regardless of the source variable's native type.
             envFields.push_back(cap.isCellRelay
                 ? impl_->i8PtrType : kindToCaptureLLVM(cap.kind));
         }
@@ -1484,18 +1331,13 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
             impl_->setVar(cap.name, alloca, cap.kind);
             if (!cap.className.empty())
                 impl_->varClassNames[cap.name] = cap.className;
-            // Captures are borrowed from the env - don't decref at scope exit.
             impl_->scopes.back().borrowed.insert(cap.name);
-            // D027.1: cell-relayed captures - alloca holds the cell ptr; route
-            // reads/writes via dragon_cell_get/set so mutations reach the owner's slot.
             if (cap.isCellRelay) {
                 impl_->markCellBacked(cap.name);
             }
         }
     }
 
-    // Install the alias so `<funcname>(...)` inside the body resolves to a direct LLVM
-    // call, with env auto-appended for capturing defs.
     Impl::NestedAliasInfo savedAlias;
     bool hadPriorAlias = false;
     {
@@ -1523,8 +1365,6 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
         }
     }
 
-    // Restore prior alias state for `node.name`; siblings and the enclosing scope use
-    // the local-variable closure binding instead.
     if (hadPriorAlias) {
         impl_->nestedFunctionAliases[node.name] = savedAlias;
     } else {
@@ -1540,18 +1380,14 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
     if (prevBlock) impl_->builder->SetInsertPoint(prevBlock);
     bodyMeta.reset();
 
-    // Bind the name in the enclosing scope: a bare fn pointer for non-capturing defs,
-    // a freshly allocated closure object for capturing ones.
     llvm::Value* boundValue = nullptr;
     Impl::VarKind boundKind = Impl::VarKind::Other;
     bool isClosure = false;
 
     if (!hasCaptures) {
         boundValue = impl_->builder->CreateBitCast(nestedFunc, impl_->i8PtrType);
-        boundKind = Impl::VarKind::Other;  // bare fn pointer - not a heap object
+        boundKind = Impl::VarKind::Other;
     } else {
-        // multi-op env GC hook + gc-track gate (see LambdaExpr).
-        // Shared emitter so the nested-def and lambda sites never drift.
         std::vector<Impl::EnvCaptureDesc> capDescs;
         capDescs.reserve(captures.size());
         bool envTrackable = false;
@@ -1597,8 +1433,6 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
             impl_->builder->CreateStore(storeVal, fieldPtr);
             if (impl_->options.gcMode == GCMode::RC) {
                 if (cap.isCellRelay) {
-                    // The env owns a refcount on the cell itself (TAG_CELL): plain
-                    // dragon_incref, not `_str` (which would misread the cell's bytes).
                     impl_->builder->CreateCall(
                         impl_->runtimeFuncs["dragon_incref"], {storeVal});
                 } else if (Impl::isHeapKind(cap.kind)) {
@@ -1606,8 +1440,6 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
                         impl_->builder->CreateCall(
                             impl_->runtimeFuncs["dragon_incref_str"], {storeVal});
                     } else if (cap.kind == Impl::VarKind::Closure) {
-                        // tag-gated - a captured Callable may hold a BARE fn ptr;
-                        // generic incref would write a refcount into code bytes (SIGSEGV).
                         impl_->builder->CreateCall(
                             impl_->runtimeFuncs["dragon_incref_callable"], {storeVal});
                     } else {
@@ -1626,8 +1458,6 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
         isClosure = true;
     }
 
-    // Allocate a local in the enclosing scope, store the bound value;
-    // callableTypes[name] gives the user-visible signature for right-ABI dispatch.
     auto* localAlloca = impl_->createEntryAlloca(
         prevFunc, node.name, impl_->i8PtrType);
     impl_->builder->CreateStore(boundValue, localAlloca);
@@ -1638,4 +1468,4 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
     }
 }
 
-} // namespace dragon
+}

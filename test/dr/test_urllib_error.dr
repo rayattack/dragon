@@ -40,7 +40,6 @@ class URLErrorTests(TestCase) {
             raise HTTPError("http://x/y", 404, "Not Found", hdrs)
         } except URLError as e {
             caught = true
-            # URLError-level view of an HTTPError.
             self.assertEqual(e.reason, "Not Found")
             self.assertEqual(e.filename, "http://x/y")
         }

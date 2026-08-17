@@ -38,8 +38,6 @@ class Repo {
 
 
 class OtherRepo {
-    # Same method name and shape on a DIFFERENT class: its stamp must not
-    # collide with Repo's in the re-visit return-type record.
     def cast[T](x: T) -> T {
         return x
     }
@@ -72,8 +70,6 @@ class GenericMethodReassignTests(TestCase) {
     }
 
     def test_reassignment_in_loop_revisits() {
-        # The same call node is re-checked repeatedly; every visit after
-        # the first sees the retargeted stamped name.
         const r: Repo = Repo()
         acc: int = 0
         i: int = 0

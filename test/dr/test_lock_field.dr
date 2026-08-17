@@ -3,8 +3,6 @@ from threading import Lock
 
 
 class WithBox {
-    # E15 (docs/002 2.10): a Lock field must be declared own - a raw mutex
-    # has no refcount, so a non-own Lock field has no owner to destroy it.
     own _lock: Lock
 
     def() {
@@ -77,8 +75,6 @@ class LockFieldTests(TestCase) {
         t2: Task = fire with_worker("b")
         t1.join()
         t2.join()
-        # 2 workers x 5000 unique keys: exact only if the lock really locks
-        # (an unlocked overlap corrupts the dict or trips the detector).
         self.assertEqual(WB.size(), 10000)
     }
 

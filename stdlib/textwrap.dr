@@ -37,7 +37,6 @@ class TextWrapper {
     }
 
     def _split_words(text: str) -> list[str] {
-        # Whitespace-delimited tokens; preserves internal punctuation.
         words: list[str] = []
         i: int = 0
         start: int = 0
@@ -90,7 +89,6 @@ class TextWrapper {
             const w: str = words[i]
             const w_len: int = len(w)
 
-            # Word longer than the column width: break_long_words splits it, else emit as-is.
             if w_len > self.width - len(cur_indent) {
                 if self.break_long_words {
                     remaining: str = w
@@ -141,7 +139,6 @@ class TextWrapper {
             lines.append(cur)
         }
 
-        # max_lines truncation with placeholder.
         if self.max_lines >= 0 {
             if len(lines) > self.max_lines {
                 kept: list[str] = []
@@ -181,7 +178,6 @@ def fill(text: str, width: int = 70) -> str {
 
 
 def dedent(text: str) -> str {
-    # Strips the longest common leading whitespace run across non-empty lines.
     const lines: list[str] = _split_lines_keepends(text)
     if len(lines) == 0 {
         return text
@@ -194,7 +190,6 @@ def dedent(text: str) -> str {
         const line: str = lines[i]
         const stripped: str = _lstrip_ws(line)
         if len(stripped) == 0 {
-            # Blank line - ignore for margin computation, like Python.
             i = i + 1
             continue
         }
@@ -234,7 +229,6 @@ def dedent(text: str) -> str {
 
 
 def indent(text: str, prefix: str) -> str {
-    # Add `prefix` to every non-empty line.
     const lines: list[str] = _split_lines_keepends(text)
     parts: list[str] = []
     i: int = 0
@@ -259,7 +253,6 @@ def shorten(text: str, width: int, placeholder: str = " [...]") -> str {
     if len(trimmed) <= width {
         return trimmed
     }
-    # Walk back to the nearest word boundary so we don't slice mid-word.
     const cut: int = width - len(placeholder)
     if cut <= 0 {
         return _lstrip_ws(placeholder)
@@ -272,7 +265,6 @@ def shorten(text: str, width: int, placeholder: str = " [...]") -> str {
         j = j - 1
     }
     if j == 0 {
-        # No whitespace found - hard-truncate.
         return trimmed[0:cut] + placeholder
     }
     return _rstrip_ws(trimmed[0:j]) + placeholder
@@ -395,7 +387,6 @@ def _join_lines(lines: list[str]) -> str {
 
 
 def _word_sep(cur: str, cur_indent: str) -> str {
-    # Space between words, except when cur is still just the indent (first word).
     if cur == cur_indent {
         return ""
     }

@@ -37,10 +37,6 @@ def mk_schema() -> dict[str, Any] {
              "required": ["id", "name"] }
 }
 
-# Deeper nesting: the born-box retype must reach a list literal sitting under a
-# CONCRETE container type (list[dict[str, Any]] / dict[str, dict[str, Any]]),
-# not only under a bare Any. The recursion that does this is why braces around
-# the `if (Any) ... else if (container)` are load-bearing.
 def mk_list_of_dict() -> list[dict[str, Any]] { return [{"required": ["id", "name"]}] }
 def mk_dict_of_dict() -> dict[str, dict[str, Any]] {
     return {"outer": {"required": ["id", "name", "x"]}}
@@ -62,36 +58,30 @@ def count_dict(s: dict[str, Any], key: str) -> int {
 
 class DictAnyListLiteralBornBoxed(TestCase) {
     def test_str_list_value() -> None {
-        # ["id", "name"] as a dict[str, Any] value, returned then read as list[Any].
         self.assertEqual(count_list(mk_str_list(), "required"), 2)
     }
 
     def test_int_list_value() -> None {
-        # A different element type ([1,2,3,4]) exercises the same born-box path.
         self.assertEqual(count_list(mk_int_list(), "nums"), 4)
     }
 
     def test_nested_dict_and_list() -> None {
-        # JSON-schema shape: nested dict values (recursed into) plus a list value.
         sch: dict[str, Any] = mk_schema()
         self.assertEqual(count_dict(sch, "properties"), 2)
         self.assertEqual(count_list(sch, "required"), 2)
     }
 
     def test_read_inline_still_works() -> None {
-        # Same-function read (no boundary crossing) was never broken; keep it green.
         s: dict[str, Any] = {"tags": ["a", "b", "c"]}
         self.assertEqual(count_list(s, "tags"), 3)
     }
 
     def test_list_of_dict_any() -> None {
-        # list[dict[str, Any]]: nested list born-boxed under a concrete list type.
         xs: list[dict[str, Any]] = mk_list_of_dict()
         self.assertEqual(count_list(xs[0], "required"), 2)
     }
 
     def test_dict_of_dict_any() -> None {
-        # dict[str, dict[str, Any]]: born-box must recurse two container levels.
         s: dict[str, dict[str, Any]] = mk_dict_of_dict()
         inner: dict[str, Any] = s["outer"]
         self.assertEqual(count_list(inner, "required"), 3)

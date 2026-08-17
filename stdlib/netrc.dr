@@ -107,7 +107,6 @@ class netrc {
                     raise NetrcParseError("missing macdef name", path, 0)
                 }
                 mac_name: str = tokens[i]
-                # Macro body runs until an empty line; stash an empty marker.
                 self.macros[mac_name] = ""
             }
             i += 1

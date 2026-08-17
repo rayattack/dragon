@@ -1,9 +1,4 @@
-// TODO: these IR string asserts are brittle, switch to FileCheck eventually
 #include "CodeGenTestHelpers.h"
-
-//===----------------------------------------------------------------------===//
-// Function IR
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenTest, FunctionDecl) {
     auto ir = generateIR("def add(a: int, b: int) -> int {\n  return a + b\n}");
@@ -26,7 +21,6 @@ TEST(CodeGenTest, VoidFunction) {
 }
 
 TEST(CodeGenTest, ForwardDeclaration) {
-    // Functions should be forward-declared so order doesn't matter
     auto ir = generateIR(
         "def foo() -> int {\n  return bar()\n}\n"
         "def bar() -> int {\n  return 42\n}"
@@ -44,19 +38,12 @@ TEST(CodeGenTest, LambdaSimple) {
     EXPECT_NE(ir.find("__dragon_lambda_"), std::string::npos);
 }
 
-//===----------------------------------------------------------------------===//
-// Type Alias IR
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenIR, TypeAliasNoOp) {
-    // Type alias is compile-time only - should not emit any runtime code for it
     auto ir = generateIR(
         "type IntList = list[int]\n"
         "x: int = 42\n"
         "print(x)\n"
     );
-    // The IR should still have main and the print call, but no runtime
-    // representation of the type alias
     EXPECT_NE(ir.find("define"), std::string::npos);
     EXPECT_NE(ir.find("dragon_print_int"), std::string::npos);
 }
@@ -67,17 +54,11 @@ TEST(CodeGenIR, PyTypeAliasIR) {
         "x: int = 42\n"
         "print(x)\n"
     );
-    // Type alias is no-op - IR should still have main and print
     EXPECT_NE(ir.find("define"), std::string::npos);
     EXPECT_NE(ir.find("dragon_print_int"), std::string::npos);
 }
 
-//===----------------------------------------------------------------------===//
-// Indirect Call IR
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenIR, IndirectCallIR) {
-    // Verify that an indirect call is generated for a variable holding a function
     auto ir = generateIR(
         "def inc(x: int) -> int {\n"
         "  return x + 1\n"
@@ -85,14 +66,9 @@ TEST(CodeGenIR, IndirectCallIR) {
         "f: ptr = inc\n"
         "y: int = f(10)\n"
     );
-    // Should contain an indirect call (icall) or at least a load of f
     EXPECT_NE(ir.find("f.load"), std::string::npos)
         << "Expected f.load for indirect call\nIR:\n" << ir;
 }
-
-//===----------------------------------------------------------------------===//
-// Function E2E
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenE2E, FunctionAndLoop) {
     auto output = compileAndRun(
@@ -152,8 +128,6 @@ TEST(CodeGenE2E, PositionalOnlyParamFunc) {
 }
 
 TEST(CodeGenE2E, KeywordOnlyParamFunc) {
-    // Keyword-only params parse correctly; call with positional args for now
-    // (keyword call syntax is a future feature)
     auto output = compileAndRun(
         "def greet(a: int, *, count: int) -> int {\n"
         "    return a + count\n"
@@ -172,10 +146,6 @@ TEST(CodeGenE2E, MixedParamSeparators) {
     );
     EXPECT_EQ(output, "6\n");
 }
-
-//===----------------------------------------------------------------------===//
-// First-class Function E2E
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenE2E, LambdaAssignedToVariableThenCalled) {
     auto output = compileAndRun(
@@ -235,8 +205,6 @@ TEST(CodeGenE2E, FirstClassFuncMultipleArgs) {
 }
 
 TEST(CodeGenE2E, HigherOrderFunctionReturningFunction) {
-    // Note: Dragon lambdas do not capture outer variables (no closures yet),
-    // so we test returning a self-contained lambda from a function.
     auto output = compileAndRun(
         "def get_doubler() -> ptr {\n"
         "  return lambda (x: int) -> int { return x * 2 }\n"
@@ -248,7 +216,6 @@ TEST(CodeGenE2E, HigherOrderFunctionReturningFunction) {
 }
 
 TEST(CodeGenE2E, FirstClassFuncExistingCallsStillWork) {
-    // Regression: existing named function calls must still work
     auto output = compileAndRun(
         "def greet(name: str) -> str {\n"
         "  return \"hello\"\n"
@@ -268,12 +235,7 @@ TEST(CodeGenE2E, LambdaAssignedWithAnnotation) {
     EXPECT_EQ(output, "36\n");
 }
 
-//===----------------------------------------------------------------------===//
-// Closure tests
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenTest, ClosureCaptureInt) {
-    // Lambda captures an integer from enclosing function scope
     auto output = compileAndRun(
         "def make_adder(n: int) -> int {\n"
         "    f: ptr = lambda (x: int) -> int { return x + n }\n"
@@ -286,7 +248,6 @@ TEST(CodeGenTest, ClosureCaptureInt) {
 }
 
 TEST(CodeGenTest, ClosureCaptureStr) {
-    // Lambda captures a string from enclosing function scope
     auto output = compileAndRun(
         "def greet(greeting: str, name: str) -> str {\n"
         "    f: ptr = lambda (n: str) -> str { return greeting + \", \" + n }\n"
@@ -299,7 +260,6 @@ TEST(CodeGenTest, ClosureCaptureStr) {
 }
 
 TEST(CodeGenTest, ClosureMultipleCaptures) {
-    // Lambda captures multiple variables of different types
     auto output = compileAndRun(
         "def fmt(prefix: str, multiplier: int, x: int) -> str {\n"
         "    f: ptr = lambda (v: int) -> str {\n"
@@ -314,7 +274,6 @@ TEST(CodeGenTest, ClosureMultipleCaptures) {
 }
 
 TEST(CodeGenTest, ClosureByValueSemantics) {
-    // Closure captures by value - changes to outer variable don't affect closure
     auto output = compileAndRun(
         "def test() -> int {\n"
         "    x: int = 10\n"
@@ -328,7 +287,6 @@ TEST(CodeGenTest, ClosureByValueSemantics) {
 }
 
 TEST(CodeGenTest, NonCapturingLambdaUnchanged) {
-    // Non-capturing lambdas still work as bare function pointers
     auto output = compileAndRun(
         "f: ptr = lambda (x: int, y: int) -> int { return x + y }\n"
         "print(f(3, 4))\n"
@@ -337,7 +295,6 @@ TEST(CodeGenTest, NonCapturingLambdaUnchanged) {
 }
 
 TEST(CodeGenTest, ClosureCaptureBool) {
-    // Lambda captures a boolean
     auto output = compileAndRun(
         "def check(flag: bool, x: int) -> str {\n"
         "    f: ptr = lambda (v: int) -> str {\n"
@@ -355,7 +312,6 @@ TEST(CodeGenTest, ClosureCaptureBool) {
 }
 
 TEST(CodeGenTest, ClosureCaptureFloat) {
-    // Lambda captures a float
     auto output = compileAndRun(
         "def scale(factor: float, x: float) -> float {\n"
         "    f: ptr = lambda (v: float) -> float { return v * factor }\n"
@@ -363,11 +319,10 @@ TEST(CodeGenTest, ClosureCaptureFloat) {
         "}\n"
         "print(scale(2.0, 3.5))\n"
     );
-    EXPECT_EQ(output, "7.0\n");  // float repr keeps .0 (Python parity)
+    EXPECT_EQ(output, "7.0\n");
 }
 
 TEST(CodeGenTest, ClosureReturnedFromFunction) {
-    // Closure returned and called from outer scope (the key use case)
     auto output = compileAndRun(
         "def make_adder(n: int) -> int {\n"
         "    adder: ptr = lambda (x: int) -> int { return x + n }\n"
@@ -379,13 +334,7 @@ TEST(CodeGenTest, ClosureReturnedFromFunction) {
     EXPECT_EQ(output, "105\n142\n");
 }
 
-//===----------------------------------------------------------------------===//
-// Nested `def` (regression: top-level def inside another def - closure
-// semantics matching Python). See src/codegen/Functions.cpp:emitNestedFunctionDecl.
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenTest, NestedDefWithCapture) {
-    // Inner def captures an int from the enclosing scope.
     auto output = compileAndRun(
         "def outer(x: int) -> int {\n"
         "    def inner(y: int) -> int {\n"
@@ -399,7 +348,6 @@ TEST(CodeGenTest, NestedDefWithCapture) {
 }
 
 TEST(CodeGenTest, NestedDefWithoutCapture) {
-    // Inner def references no enclosing locals - bare fn pointer, no env.
     auto output = compileAndRun(
         "def outer() -> int {\n"
         "    def inner(y: int) -> int {\n"
@@ -413,7 +361,6 @@ TEST(CodeGenTest, NestedDefWithoutCapture) {
 }
 
 TEST(CodeGenTest, NestedDefSiblings) {
-    // Two sibling nested defs in the same outer, each called from outer.
     auto output = compileAndRun(
         "def outer() -> int {\n"
         "    def first(a: int) -> int {\n"
@@ -428,13 +375,10 @@ TEST(CodeGenTest, NestedDefSiblings) {
         "}\n"
         "print(outer())\n"
     );
-    // first(5)=6, second(3)=30, total=36
     EXPECT_EQ(output, "36\n");
 }
 
 TEST(CodeGenTest, NestedDefRecursive) {
-    // Recursive nested def - self-reference resolves through
-    // nestedFunctionAliases during body emission.
     auto output = compileAndRun(
         "def outer(n: int) -> int {\n"
         "    def fact(k: int) -> int {\n"
@@ -451,8 +395,6 @@ TEST(CodeGenTest, NestedDefRecursive) {
 }
 
 TEST(CodeGenTest, NestedDefRecursiveWithCapture) {
-    // Recursive nested def that ALSO captures an enclosing local -
-    // env arg is auto-appended on the recursive call.
     auto output = compileAndRun(
         "def outer(base: int, n: int) -> int {\n"
         "    def step(k: int) -> int {\n"
@@ -465,12 +407,10 @@ TEST(CodeGenTest, NestedDefRecursiveWithCapture) {
         "}\n"
         "print(outer(7, 4))\n"
     );
-    // step(4)=base+step(3)=7+7+step(2)=...= 7 + 7*4 = 35
     EXPECT_EQ(output, "35\n");
 }
 
 TEST(CodeGenTest, NestedDefStrCapture) {
-    // String capture survives across the call boundary with proper refcount.
     auto output = compileAndRun(
         "def greet(name: str) -> str {\n"
         "    def make_greeting(suffix: str) -> str {\n"
@@ -484,10 +424,6 @@ TEST(CodeGenTest, NestedDefStrCapture) {
 }
 
 TEST(CodeGenTest, NestedDefDoesNotLeakIntoModule) {
-    // Inner name is scoped to the enclosing function - calling it at
-    // module level is an error, matching Python's NameError semantics.
-    // We verify by defining a top-level `inner` whose body and the nested
-    // `inner` both run, with the nested one not shadowing module-level use.
     auto output = compileAndRun(
         "def inner(x: int) -> int {\n"
         "    return x + 100\n"
@@ -501,13 +437,8 @@ TEST(CodeGenTest, NestedDefDoesNotLeakIntoModule) {
         "print(outer())\n"
         "print(inner(50))\n"
     );
-    // outer's nested inner: 50-1=49; module's inner: 50+100=150
     EXPECT_EQ(output, "49\n150\n");
 }
-
-//===----------------------------------------------------------------------===//
-// Generator IR
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenTest, GeneratorStoredInVarIR) {
     auto ir = generateIR(
@@ -522,10 +453,7 @@ TEST(CodeGenTest, GeneratorStoredInVarIR) {
         "    print(x)\n"
         "}\n"
     );
-    // Check that the for-in detected the generator (not the list iteration path)
     EXPECT_NE(ir.find("dragon_generator_next"), std::string::npos) << "Missing generator_next in IR:\n" << ir;
-    // Should NOT use list iteration for the generator
-    // Find dragon_print_int after the generator_next (meaning x is printed as int)
     EXPECT_NE(ir.find("dragon_print_int"), std::string::npos) << "Missing print_int in IR:\n" << ir;
 }
 
@@ -544,10 +472,6 @@ TEST(CodeGenTest, GeneratorIR) {
     EXPECT_NE(ir.find("dragon_generator_yield"), std::string::npos);
     EXPECT_NE(ir.find("gen__gen_body"), std::string::npos);
 }
-
-//===----------------------------------------------------------------------===//
-// Generator E2E
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenE2E, GeneratorBasic) {
     auto output = compileAndRun(
@@ -634,10 +558,7 @@ TEST(CodeGenE2E, GeneratorStoredInVar) {
     EXPECT_EQ(output, "1\n2\n3\n");
 }
 
-// ===== D024: Decorator Tests =====
-
 TEST(CodeGenTest, BasicFunctionDecorator) {
-    // A decorator that wraps a function, calling it and adding behavior
     auto output = compileAndRun(
         "def loud(f: ptr) -> ptr {\n"
         "    # For now, just return the function as-is (identity decorator)\n"
@@ -652,10 +573,6 @@ TEST(CodeGenTest, BasicFunctionDecorator) {
     EXPECT_EQ(output, "hello\n");
 }
 
-//===----------------------------------------------------------------------===//
-// *args and **kwargs (variadic arguments)
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenIR, VarArgsIR) {
     auto ir = generateIR(
         "def foo(a: int, *args: int) {\n"
@@ -663,7 +580,6 @@ TEST(CodeGenIR, VarArgsIR) {
         "}\n"
         "foo(1, 2, 3)\n"
     );
-    // Should see dragon_list_new for packing extra args (int element -> i64 list)
     EXPECT_NE(ir.find("dragon_list_new"), std::string::npos);
 }
 
@@ -732,7 +648,6 @@ TEST(CodeGenE2E, VarArgsAndKwargs) {
 }
 
 TEST(CodeGenE2E, VarArgsOnlyRegular) {
-    // Call with only regular args (no extras for *args)
     auto out = compileAndRun(
         "def add(a: int, b: int, *rest: Any) -> int {\n"
         "  return a + b\n"
@@ -742,11 +657,6 @@ TEST(CodeGenE2E, VarArgsOnlyRegular) {
     EXPECT_EQ(out, "42\n");
 }
 
-// Typed *args preserve each element's native type instead of erasing to i64.
-// The `*args: T` annotation is the per-element type, so the call site packs the
-// monomorphized list variant (visit(CallExpr) -> emitNewTypedList /
-// emitTypedListAppend) and the callee binds the matching element kind. Before
-// this, `*args: float`/`str`/union miscompiled to bit-patterns / raw pointers.
 TEST(CodeGenE2E, VarArgsTypedFloat) {
     auto out = compileAndRun(
         "def addf(*args: float) -> float {\n"
@@ -756,7 +666,7 @@ TEST(CodeGenE2E, VarArgsTypedFloat) {
         "}\n"
         "print(addf(1.5, 2.5))\n"
     );
-    EXPECT_EQ(out, "4.0\n");  // float repr keeps .0 (Python parity)
+    EXPECT_EQ(out, "4.0\n");
 }
 
 TEST(CodeGenE2E, VarArgsTypedStr) {
@@ -770,7 +680,6 @@ TEST(CodeGenE2E, VarArgsTypedStr) {
 }
 
 TEST(CodeGenE2E, VarArgsTypedListElem) {
-    // *args: list[int] - each positional arg is itself a list[int]
     auto out = compileAndRun(
         "def f(*args: list[int]) {\n"
         "  for a in args { print(a[0]) }\n"
@@ -781,7 +690,6 @@ TEST(CodeGenE2E, VarArgsTypedListElem) {
 }
 
 TEST(CodeGenE2E, VarArgsUnionElem) {
-    // *args: list[int] | str - heterogeneous element type -> box list
     auto out = compileAndRun(
         "def f(*args: list[int] | str) {\n"
         "  for a in args { print(a) }\n"
@@ -791,22 +699,7 @@ TEST(CodeGenE2E, VarArgsUnionElem) {
     EXPECT_EQ(out, "[1, 2]\nhi\n");
 }
 
-//===----------------------------------------------------------------------===//
-// Regression: generator reraise scope cleanup
-//
-// The for-in loop over a generator cleans up `__iter` and
-// the loop variable on the StopIteration exit path. When the generator
-// raises a non-StopIteration exception, codegen builds a "reraise"
-// block that calls `dragon_raise_exc` directly, bypassing scope cleanup -
-// heap-typed locals allocated *before* the for-loop would leak. The
-// reraise BB therefore calls `emitAllScopeCleanup()` before the
-// raise, so all live heap variables are decref'd on the abnormal exit.
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenIR, GeneratorReraiseEmitsScopeCleanup) {
-    // The reraise path must emit dragon_decref / dragon_decref_str for the
-    // outer-scope heap-typed locals. We look for cleanup calls in/near the
-    // gen.reraise basic block.
     auto ir = generateIR(
         "def gen() {\n"
         "  yield 1\n"
@@ -820,25 +713,14 @@ TEST(CodeGenIR, GeneratorReraiseEmitsScopeCleanup) {
         "}\n"
         "caller()\n"
     );
-    // Generator infrastructure must be present
     EXPECT_NE(ir.find("dragon_generator_next"), std::string::npos);
-    // The reraise BB must exist
     EXPECT_NE(ir.find("gen.reraise"), std::string::npos)
         << "Expected gen.reraise basic block\nIR:\n" << ir;
-    // Scope cleanup is emitted before dragon_raise_exc.
-    // We expect dragon_decref_str to appear somewhere in the function so
-    // the outer-scope `buf` is freed on the reraise path.
     EXPECT_NE(ir.find("dragon_decref_str"), std::string::npos)
         << "Expected scope cleanup (decref_str) in caller\nIR:\n" << ir;
 }
 
 TEST(CodeGenE2E, GeneratorReraiseDoesntLeakOuterLocals) {
-    // Generator that raises mid-iteration. The for-loop catches it in the
-    // outer try/except. Pre-fix, `buf` would leak per iteration.
-    //
-    // To run under valgrind:
-    //  valgrind --leak-check=full ./dragon_codegen_tests \
-    //  --gtest_filter='*GeneratorReraise*Tier25*'
     auto out = compileAndRun(
         "def explode() {\n"
         "  yield 1\n"
@@ -849,7 +731,7 @@ TEST(CodeGenE2E, GeneratorReraiseDoesntLeakOuterLocals) {
         "  try {\n"
         "    buf: str = \"per-iter-string-\" + str(i)\n"
         "    for x in explode() {\n"
-        "      _u: str = buf\n"  // keep buf live across the for-in
+        "      _u: str = buf\n"
         "    }\n"
         "  } except ValueError {\n"
         "    errors = errors + 1\n"
@@ -861,8 +743,6 @@ TEST(CodeGenE2E, GeneratorReraiseDoesntLeakOuterLocals) {
 }
 
 TEST(CodeGenE2E, GeneratorReraiseExceptionPropagates) {
-    // Sanity: non-StopIteration exceptions still propagate
-    // (the cleanup emit must NOT swallow the exception).
     auto out = compileAndRun(
         "def explode() {\n"
         "  yield 1\n"
@@ -881,29 +761,7 @@ TEST(CodeGenE2E, GeneratorReraiseExceptionPropagates) {
     EXPECT_EQ(out, "1\n1\n");
 }
 
-//===----------------------------------------------------------------------===//
-// Regression: abandoned generator arg leak
-//
-// The generator wrapper packs args into an i64 array. If it does NOT
-// incref heap-typed args, and
-// dragon_generator_destroy does NOT decref them, then a caller's scope
-// dropping a heap reference (e.g. a string) before the generator runs
-// leaves the generator holding a dangling pointer, and a generator
-// abandoned mid-iteration leaks the captured heap-typed args.
-//
-// The contract:
-//  - Codegen emits `dragon_generator_create_tagged(body, args, tags, n)`
-//  instead of `_create`. The tags array carries the per-arg
-//  DragonValueTag so the runtime knows which slots are heap-typed.
-//  - Runtime incref's heap-typed args at pack time (so the generator
-//  owns its own reference, independent of the caller's scope).
-//  - Runtime decrefs heap-typed args in dragon_generator_destroy.
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenIR, GeneratorWrapperUsesTypedCreate) {
-    // D030: generator wrapper calls dragon_generator_create_typed (per-callsite
-    // trampoline + decref fn pattern). The decref fn handles heap args at
-    // destroy - replaces the prior tags-array approach.
     auto ir = generateIR(
         "def echo(prefix: str) {\n"
         "  yield prefix\n"
@@ -914,9 +772,7 @@ TEST(CodeGenIR, GeneratorWrapperUsesTypedCreate) {
     );
     EXPECT_NE(ir.find("dragon_generator_create_typed"), std::string::npos)
         << "Expected dragon_generator_create_typed call\nIR:\n" << ir;
-    // The body function must still exist
     EXPECT_NE(ir.find("echo__gen_body"), std::string::npos);
-    // Per-callsite trampoline + decref fn for the heap-typed (str) arg
     EXPECT_NE(ir.find("__dragon_gen_tramp_echo"), std::string::npos)
         << "Expected per-callsite generator trampoline\nIR:\n" << ir;
     EXPECT_NE(ir.find("__dragon_gen_decref_echo"), std::string::npos)
@@ -924,8 +780,6 @@ TEST(CodeGenIR, GeneratorWrapperUsesTypedCreate) {
 }
 
 TEST(CodeGenIR, GeneratorTypedCreateDeclaration) {
-    // D030 runtime entry point: declare ptr @dragon_generator_create_typed(
-    //  ptr trampoline, ptr args, i64 args_size, ptr decref_fn).
     auto ir = generateIR(
         "def gen(s: str) {\n"
         "  yield s\n"
@@ -939,9 +793,6 @@ TEST(CodeGenIR, GeneratorTypedCreateDeclaration) {
 }
 
 TEST(CodeGenE2E, GeneratorWithStringArgRunsCorrectly) {
-    // Sanity: generator with str arg consumes the captured value correctly,
-    // and yielded str values round-trip through for-in (yield kind tracking
-    // wires this up - see generatorYieldKinds in CodeGen).
     auto out = compileAndRun(
         "def echo(prefix: str) {\n"
         "  yield prefix\n"
@@ -955,9 +806,6 @@ TEST(CodeGenE2E, GeneratorWithStringArgRunsCorrectly) {
 }
 
 TEST(CodeGenE2E, GeneratorYieldsStringRoundTrips) {
-    // Yield kind tracking - the loop var is bound as Str (not Int) when
-    // the generator body's yields produce strings. Pre-fix this printed
-    // raw pointer-as-int values like "107358526377990".
     auto out = compileAndRun(
         "def labels() {\n"
         "  yield \"first\"\n"
@@ -972,13 +820,6 @@ TEST(CodeGenE2E, GeneratorYieldsStringRoundTrips) {
 }
 
 TEST(CodeGenE2E, GeneratorAbandonedNoLeak) {
-    // Create a generator with heap-typed args, take ONE next, then
-    // abandon (let it go out of scope). The destroy path must decref
-    // the captured str so it doesn't leak per iteration.
-    //
-    // To run under valgrind:
-    //  valgrind --leak-check=full ./dragon_codegen_tests \
-    //  --gtest_filter='*GeneratorAbandonedNoLeak*'
     auto out = compileAndRun(
         "def chunks(s: str) {\n"
         "  yield s\n"
@@ -988,7 +829,7 @@ TEST(CodeGenE2E, GeneratorAbandonedNoLeak) {
         "def consume_one() {\n"
         "  s: str = \"abandon-me-\" + str(7)\n"
         "  for v in chunks(s) {\n"
-        "    break\n"  // abandons after first yield
+        "    break\n"
         "  }\n"
         "}\n"
         "for i in range(5000) {\n"
@@ -1000,8 +841,6 @@ TEST(CodeGenE2E, GeneratorAbandonedNoLeak) {
 }
 
 TEST(CodeGenE2E, GeneratorMultipleHeapArgsBalance) {
-    // Multiple heap-typed args. Each must be incref'd at pack time and
-    // decref'd at destroy time exactly once.
     auto out = compileAndRun(
         "def two_strs(a: str, b: str) {\n"
         "  yield a\n"
@@ -1011,7 +850,7 @@ TEST(CodeGenE2E, GeneratorMultipleHeapArgsBalance) {
         "  s1: str = \"s1-\" + str(i)\n"
         "  s2: str = \"s2-\" + str(i)\n"
         "  for v in two_strs(s1, s2) {\n"
-        "    break\n"  // abandon after one yield
+        "    break\n"
         "  }\n"
         "}\n"
         "print(\"ok\")\n"
@@ -1020,8 +859,6 @@ TEST(CodeGenE2E, GeneratorMultipleHeapArgsBalance) {
 }
 
 TEST(CodeGenE2E, GeneratorIntArgStillWorks) {
-    // Regression: int args (TAG_INT=0) must NOT trigger spurious
-    // incref/decref. The tag array holds 0 -> runtime is a no-op.
     auto out = compileAndRun(
         "def count_to(n: int) {\n"
         "  i: int = 0\n"
@@ -1039,34 +876,7 @@ TEST(CodeGenE2E, GeneratorIntArgStillWorks) {
     EXPECT_EQ(out, "4950\n");
 }
 
-//===----------------------------------------------------------------------===//
-// Regression: file_read on non-seekable streams
-//
-// Sizing the buffer with ftell/fseek alone breaks
-// on pipes/FIFOs/stdin: ftell returns -1 and fseek fails, so
-// `remaining = size - pos` comes out 0 and the function silently returns
-// an empty string - even though there is readable content.
-//
-// dragon_file_read tries the seek-based fast path, and on failure falls
-// through to an incremental fread loop with a doubling buffer (4KB -> 8KB -> ...).
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, FileReadFromPipe) {
-    // popen produces a non-seekable FILE*. Pre-fix, `f.read()` on a popen'd
-    // handle returned an empty string. Post-fix, it drains the pipe via
-    // incremental fread.
-    //
-    // We can't open a popen'd FILE from .dr code directly. The next-best
-    // proxy is to read from a regular (seekable) file and verify the content,
-    // exercising the seek-based fast path of dragon_file_read. The
-    // non-seekable path is exercised by Dragon's own subprocess primitives -
-    // see the FileReadShellPipe test below.
-    //
-    // The handle is bound via extern "C" fopen rather than open(): open()'s
-    // return type is the opaque `file` class, which has no annotatable type
-    // name (it is not registered in initBuiltinTypes), so a top-level
-    // `g: <type> = open(...)` cannot name it. The seek-based read intent and
-    // the exact round-tripped content are preserved.
     auto out = compileAndRun(
         "extern \"C\" def fopen(path: str, mode: str) -> ptr\n"
         "extern \"C\" def fclose(stream: ptr) -> intc\n"
@@ -1084,9 +894,6 @@ TEST(CodeGenE2E, FileReadFromPipe) {
 }
 
 TEST(CodeGenE2E, FileReadShellPipe) {
-    // Use Dragon's FFI to popen() a shell command. popen returns a
-    // non-seekable FILE*. Pre-fix dragon_file_read would return empty.
-    // Post-fix it drains the pipe and we get the full output.
     auto out = compileAndRun(
         "extern \"C\" def popen(cmd: str, mode: str) -> ptr\n"
         "extern \"C\" def pclose(stream: ptr) -> intc\n"
@@ -1100,16 +907,11 @@ TEST(CodeGenE2E, FileReadShellPipe) {
 }
 
 TEST(CodeGenE2E, FileReadShellPipeLargeOutput) {
-    // Pipe output larger than the initial 4KB buffer - exercises the
-    // realloc/double-and-grow path in the non-seekable fallback.
     auto out = compileAndRun(
         "extern \"C\" def popen(cmd: str, mode: str) -> ptr\n"
         "extern \"C\" def pclose(stream: ptr) -> intc\n"
         "extern \"C\" def dragon_file_read(handle: ptr) -> str\n"
         "extern \"C\" def dragon_str_len(s: str) -> int\n"
-        // yes outputs a stream of 'y\n' (2 bytes per line) until SIGPIPE.
-        // We cap with `head -c 20000` for a deterministic 20000-byte read,
-        // safely past the 4KB seed buffer to force at least one realloc.
         "p: ptr = popen(\"yes | head -c 20000\", \"r\")\n"
         "content: str = dragon_file_read(p)\n"
         "_: intc = pclose(p)\n"
@@ -1119,8 +921,6 @@ TEST(CodeGenE2E, FileReadShellPipeLargeOutput) {
 }
 
 TEST(CodeGenE2E, FileReadShellPipeEmpty) {
-    // Empty pipe (command produces no output). Must still return an empty
-    // string cleanly, no crash, no garbage.
     auto out = compileAndRun(
         "extern \"C\" def popen(cmd: str, mode: str) -> ptr\n"
         "extern \"C\" def pclose(stream: ptr) -> intc\n"

@@ -19,7 +19,6 @@ class DictRecvScalarTests(TestCase) {
     }
 
     def test_borrowed_receiver_guard() {
-        # A slot receiver is borrowed - must never be released
         d: dict[str, int] = {"k": 9}
         i: int = 0
         while i < 3000 {

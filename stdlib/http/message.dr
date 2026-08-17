@@ -1,26 +1,3 @@
-# message.dr - Dragon HTTP request representation + routing primitives.
-#
-# Split out of server.dr at a clean producer/consumer boundary (R5): this module
-# is the LEAF of the http package's dependency graph - it depends only on sibling
-# value modules (urllib.parse, http.multipart, http.sessions) and NEVER on
-# server.dr. server.dr (Response + Router + serve loop) imports from here in one
-# direction, so there is no import cycle.
-#
-# What lives here:
-#  - Request - the parsed inbound HTTP request + typed accessors.
-#  - Context - per-request state bag.
-#  - Type validators - _is_int_str / _is_float_str / _validate_type ... : the
-#  textual type checks Request's param_*/query_* accessors
-#  and the Router's typed-segment matching both rely on.
-#  - Route matching - _match_route / _middleware_matches : pure functions over
-#  path segments (no Router/Response coupling).
-#  - Parsing helpers - _split_path / _parse_query_string / _parse_cookies.
-#  - _NO_SESSION - the shared empty-Session default for Request.session.
-#
-# Response (which references Router in its deferred-task callable type) and the
-# Router/route-registration surface stay in server.dr - moving them here would
-# create the very Request<->Response<->Router cycle this split is designed to avoid.
-
 from urllib.parse import unquote_plus, parse_qsl
 from http.multipart import parse_multipart, boundary_from_content_type, Part
 from http.sessions import Session
@@ -36,12 +13,7 @@ extern "C" def dragon_str_to_int(s: str) -> int
 extern "C" def dragon_str_to_float(s: str) -> float
 
 
-#===----------------------------------------------------------------------===#
-# Path helpers
-#===----------------------------------------------------------------------===#
-
 def _split_path(path: str) -> list[str] {
-    # Split "/a/b/c" into ["a", "b", "c"], filtering empty segments
     const parts: list[str] = path.split("/")
     const result: list[str] = []
     for part in parts {
@@ -52,16 +24,6 @@ def _split_path(path: str) -> list[str] {
     return result
 }
 
-
-#===----------------------------------------------------------------------===#
-# Type validators (pure Dragon)
-#===----------------------------------------------------------------------===#
-#
-# URL decoding (`_url_decode`) and query-string parsing (`_parse_query_string`)
-# now live in urllib.parse - see unquote_plus / parse_qsl. The previous
-# in-house variants were ASCII-only and didn't reassemble multibyte UTF-8
-# percent-sequences (`%E2%9C%93` for produced mojibake). Routing /
-# Request.form() now go through urllib.parse.
 
 def _is_digit_char(c: int) -> bool {
     return c >= 48 and c <= 57
@@ -81,14 +43,13 @@ def _is_hex_char(c: int) -> bool {
 }
 
 def _is_int_str(s: str) -> bool {
-    # Optional sign followed by one-or-more digits.
     const n: int = len(s)
     if n == 0 {
         return false
     }
     start: int = 0
     const first: int = dragon_ord(s[0:1])
-    if first == 43 or first == 45 {     # '+' or '-'
+    if first == 43 or first == 45 {
         start = 1
         if n == 1 {
             return false
@@ -105,7 +66,6 @@ def _is_int_str(s: str) -> bool {
 }
 
 def _is_float_str(s: str) -> bool {
-    # Optional sign, digits, optional fractional, optional exponent.
     const n: int = len(s)
     if n == 0 {
         return false
@@ -124,7 +84,7 @@ def _is_float_str(s: str) -> bool {
         saw_digit = true
         i = i + 1
     }
-    if i < n and dragon_ord(s[i:i + 1]) == 46 {  # '.'
+    if i < n and dragon_ord(s[i:i + 1]) == 46 {
         i = i + 1
         while i < n {
             const c2: int = dragon_ord(s[i:i + 1])
@@ -140,7 +100,7 @@ def _is_float_str(s: str) -> bool {
     }
     if i < n {
         const ec: int = dragon_ord(s[i:i + 1])
-        if ec == 101 or ec == 69 {  # 'e' or 'E'
+        if ec == 101 or ec == 69 {
             i = i + 1
             if i < n {
                 const sg: int = dragon_ord(s[i:i + 1])
@@ -172,7 +132,6 @@ def _is_bool_str(s: str) -> bool {
 }
 
 def _is_uuid_str(s: str) -> bool {
-    # 8-4-4-4-12 hex with hyphens, lowercase or uppercase.
     if len(s) != 36 {
         return false
     }
@@ -180,7 +139,7 @@ def _is_uuid_str(s: str) -> bool {
     while i < 36 {
         const c: int = dragon_ord(s[i:i + 1])
         if i == 8 or i == 13 or i == 18 or i == 23 {
-            if c != 45 {                 # '-'
+            if c != 45 {
                 return false
             }
         } else {
@@ -194,7 +153,6 @@ def _is_uuid_str(s: str) -> bool {
 }
 
 def _validate_type(value: str, type_name: str) -> bool {
-    # Returns true if `value` parses cleanly as the named type.
     if type_name == "str" or len(type_name) == 0 {
         return true
     }
@@ -210,25 +168,18 @@ def _validate_type(value: str, type_name: str) -> bool {
     if type_name == "uuid" {
         return _is_uuid_str(value)
     }
-    # Unknown type - accept as-is (forward compatibility).
     return true
 }
 
 def _match_route(pattern_segs: list[str], path_segs: list[str],
                  param_names: list[str], param_types: list[str]) -> tuple[bool, dict[str, str]] {
-    # Returns (matched: bool, params: dict). Typed param segments
-    # ":id:int", ":id:float", ":id:bool", ":id:uuid" only match if the
-    # provided value parses as the named type - otherwise this route
-    # is skipped and the next is tried.
     params: dict[str, str] = {}
     const empty: dict[str, str] = {}
-    pi: int = 0  # param index
+    pi: int = 0
 
     if len(pattern_segs) != len(path_segs) {
-        # Check for wildcard at end
         if len(pattern_segs) > 0 and pattern_segs[len(pattern_segs) - 1] == "*" {
             if len(path_segs) >= len(pattern_segs) - 1 {
-                # Match leading segments before wildcard
                 j: int = 0
                 while j < len(pattern_segs) - 1 {
                     if j >= len(path_segs) {
@@ -251,7 +202,6 @@ def _match_route(pattern_segs: list[str], path_segs: list[str],
                     }
                     j = j + 1
                 }
-                # Capture the wildcard remainder into params["*"]
                 const rest_parts: list[str] = []
                 k: int = len(pattern_segs) - 1
                 while k < len(path_segs) {
@@ -270,7 +220,6 @@ def _match_route(pattern_segs: list[str], path_segs: list[str],
         const pseg: str = pattern_segs[i]
         const rseg: str = unquote_plus(path_segs[i])
         if len(pseg) > 0 and pseg[0] == ":" {
-            # Parameter segment - extract value, validate type
             if pi < len(param_names) {
                 const t: str = param_types[pi] if pi < len(param_types) else "str"
                 if not _validate_type(rseg, t) {
@@ -280,7 +229,6 @@ def _match_route(pattern_segs: list[str], path_segs: list[str],
                 pi = pi + 1
             }
         } elif pseg == "*" {
-            # Wildcard at last position - capture rest
             const rest_parts: list[str] = []
             w: int = i
             while w < len(path_segs) {
@@ -298,7 +246,6 @@ def _match_route(pattern_segs: list[str], path_segs: list[str],
 }
 
 def _middleware_matches(mw_segs: list[str], path_segs: list[str]) -> bool {
-    # Middleware patterns: exact match, or /* wildcard at end
     if len(mw_segs) == 0 {
         return true
     }
@@ -319,11 +266,6 @@ def _middleware_matches(mw_segs: list[str], path_segs: list[str]) -> bool {
 }
 
 def _parse_query_string(qs: str) -> dict[str, str] {
-    # Server-side single-value flattening of urllib.parse.parse_qsl. CPython's
-    # parse_qs returns dict[str, list[str]] (multi-value), but the heaven-style
-    # Request.query / Request.form contracts here are dict[str, str] - last
-    # write wins, matching what existing handlers already expect. Pairs with
-    # an empty value are kept (so `?flag` and `?flag=` both expose `flag`).
     result: dict[str, str] = {}
     items: list[tuple[str, str]] = parse_qsl(qs, True)
     for kv in items {
@@ -333,7 +275,6 @@ def _parse_query_string(qs: str) -> dict[str, str] {
 }
 
 def _parse_cookies(header: str) -> dict[str, str] {
-    # Parse "name=value; name2=value2" into a dict
     result: dict[str, str] = {}
     if len(header) == 0 {
         return result
@@ -351,18 +292,8 @@ def _parse_cookies(header: str) -> dict[str, str] {
 }
 
 
-# Shared empty session used as the default for `Request.session` so handlers
-# never face a None (avoiding the `ClassInstance | None` field round-trip and
-# keeping the disabled path zero-allocation - it's just a pointer copy). When
-# sessions are enabled the router replaces req.session with a real one per
-# request. Do NOT mutate this in a sessions-disabled app (writes are ignored
-# and would alias across requests).
 _NO_SESSION: Session = Session("")
 
-
-#===----------------------------------------------------------------------===#
-# Request - parsed HTTP request
-#===----------------------------------------------------------------------===#
 
 class Request {
     def(method: str, path: str, url: str, body: str,
@@ -373,9 +304,6 @@ class Request {
         self.path = path
         self.url = url
         self.body = body
-        # Verbatim request body bytes (W1 RequestReader keeps these byte-exact;
-        # `body` is the lenient-decoded text view). multipart/file uploads MUST
-        # use body_bytes - UTF-8 decoding a binary part corrupts it (W3).
         self.body_bytes = body_bytes
         self.headers = headers
         self.query = query
@@ -383,25 +311,14 @@ class Request {
         self.http_version = http_version
         self.route = ""
 
-        # Derived fields
         self.host = headers["host"] if "host" in headers else ""
         self.scheme = headers["x-forwarded-proto"] if "x-forwarded-proto" in headers else "http"
         self.cookies = _parse_cookies(headers["cookie"] if "cookie" in headers else "")
 
-        # Set by the router during dispatch
         self.app = none
         self.mounted = none
-        # Subdomain extracted from the Host header (e.g. "api" for
-        # "api.example.com"). Empty string when no subdomain is present
-        # (apex request) or when no Host header was sent. Set by the
-        # router right before handler dispatch - never by user code.
         self.subdomain = ""
 
-        # Session wiring (W5). `session` is ALWAYS a valid Session - the shared
-        # empty placeholder until the router loads a real one (when sessions are
-        # enabled) - so handlers never need a None check. _session_sid carries
-        # the id decoded from the signed cookie (or a freshly minted one);
-        # _csrf_token is the per-session token minted for forms when CSRF is on.
         self.session: Session = _NO_SESSION
         self._session_sid: str = ""
         self._session_was_new: bool = false
@@ -409,12 +326,6 @@ class Request {
     }
 
     def json() -> Any {
-        # Parse the request body as JSON into a boxed Any tree (D048): objects ->
-        # dict[str, Any], arrays -> list[Any], scalars boxed. Decodes the VERBATIM
-        # body bytes (not the lenient-decoded `body` str), so a body with high
-        # bytes round-trips byte-exact. Raises ValueError (with the byte offset)
-        # on malformed JSON. The raw body is still available as `req.body`; for a
-        # known shape, prefer the box-free `decode[T](req.body_bytes)`.
         return loadb(self.body_bytes)
     }
 
@@ -455,13 +366,6 @@ class Request {
         }
         return parse_multipart(self.body_bytes, boundary)
     }
-
-    # --- Typed parameter accessors ---
-    #
-    # The router validates the textual form of typed segments at match
-    # time, so calling these for a route that declared the matching type
-    # is guaranteed to succeed. Calling them on an untyped param raises
-    # an error if the value isn't actually parseable.
 
     def param_int(name: str) -> int {
         if name not in self.params {
@@ -531,10 +435,6 @@ class Request {
     }
 }
 
-
-#===----------------------------------------------------------------------===#
-# Context - per-request state bag
-#===----------------------------------------------------------------------===#
 
 class Context {
     def() {

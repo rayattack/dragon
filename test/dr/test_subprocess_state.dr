@@ -1,6 +1,3 @@
-# Pre-fix: Popen.returncode == -1 meant both "still running" and "killed by
-# signal 1 (SIGHUP)"; there was no way to tell the two apart.
-
 from unittest import TestCase, main
 from subprocess import Popen
 

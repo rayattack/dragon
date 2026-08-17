@@ -39,7 +39,6 @@ def check_param(v: str | None) -> bool {
 }
 
 
-# int is not ptr-shaped, so int | None stays a tagged box (no niche).
 def check_box_param(v: int | None) -> bool {
     return isinstance(v, int)
 }

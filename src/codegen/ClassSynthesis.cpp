@@ -1,14 +1,8 @@
-/// Dragon CodeGen - @dataclass / NamedTuple / Enum compile-time synthesis
-/// Split from Classes.cpp (file-size policy): pure code motion.
 #include "../CodeGenImpl.h"
 #include "ClassesShared.h"
 
 namespace dragon {
 
-// 6.18 - @dataclass / NamedTuple compile-time synthesis
-
-// Helper: build a binary-op expression a <op> b (string concat / and-chain
-// for synthesized __eq__ and __repr__).
 static std::unique_ptr<Expr> makeBinaryOp(std::unique_ptr<Expr> lhs,
                                           TokenType op,
                                           const std::string& lexeme,
@@ -22,7 +16,6 @@ static std::unique_ptr<Expr> makeBinaryOp(std::unique_ptr<Expr> lhs,
     return bin;
 }
 
-// Helper: build `self.<field>` AttributeExpr.
 static std::unique_ptr<Expr> makeSelfDot(const std::string& field,
                                          SourceLocation loc) {
     auto attr = std::make_unique<AttributeExpr>();
@@ -35,7 +28,6 @@ static std::unique_ptr<Expr> makeSelfDot(const std::string& field,
     return attr;
 }
 
-// Helper: build `str(<expr>)` call.
 static std::unique_ptr<Expr> makeStrCall(std::unique_ptr<Expr> arg,
                                          SourceLocation loc) {
     auto call = std::make_unique<CallExpr>();
@@ -48,7 +40,6 @@ static std::unique_ptr<Expr> makeStrCall(std::unique_ptr<Expr> arg,
     return call;
 }
 
-// Helper: build a string literal expression.
 static std::unique_ptr<Expr> makeStrLiteral(const std::string& s,
                                             SourceLocation loc) {
     auto sl = std::make_unique<StringLiteral>();
@@ -57,7 +48,6 @@ static std::unique_ptr<Expr> makeStrLiteral(const std::string& s,
     return sl;
 }
 
-// Helper: build a NamedTypeExpr.
 static std::unique_ptr<TypeExpr> makeNamedType(const std::string& name,
                                                SourceLocation loc) {
     auto t = std::make_unique<NamedTypeExpr>();
@@ -67,7 +57,6 @@ static std::unique_ptr<TypeExpr> makeNamedType(const std::string& name,
 }
 
 void CodeGen::Impl::synthesizeDataclassMethods(ClassDecl& node) {
-    // Detect markers: @dataclass decorator OR NamedTuple base class.
     bool isDataclass = false, isNamedTuple = false;
     for (auto& dec : node.decorators) {
         if (auto* ne = dynamic_cast<NameExpr*>(dec.get())) {
@@ -81,7 +70,6 @@ void CodeGen::Impl::synthesizeDataclassMethods(ClassDecl& node) {
     }
     if (!isDataclass && !isNamedTuple) return;
 
-    // What does the user already define?
     bool hasInit = false, hasEq = false, hasRepr = false;
     for (auto& stmt : node.body) {
         if (auto* fd = dynamic_cast<FunctionDecl*>(stmt.get())) {
@@ -91,12 +79,10 @@ void CodeGen::Impl::synthesizeDataclassMethods(ClassDecl& node) {
         }
     }
 
-    // Collect fields: bare-name AnnAssignStmts (not static). Default values
-    // are MOVED out of the AnnAssignStmt into the synthesized parameter.
     struct DCField {
         std::string name;
         std::unique_ptr<TypeExpr> type;
-        std::unique_ptr<Expr> defaultValue;  // nullable
+        std::unique_ptr<Expr> defaultValue;
         SourceLocation loc;
     };
     std::vector<DCField> fields;
@@ -113,7 +99,6 @@ void CodeGen::Impl::synthesizeDataclassMethods(ClassDecl& node) {
         fields.push_back(std::move(f));
     }
 
-    // For NamedTuple, drop the marker base.
     if (isNamedTuple) {
         std::vector<std::unique_ptr<Expr>> filtered;
         for (auto& base : node.bases) {
@@ -127,7 +112,6 @@ void CodeGen::Impl::synthesizeDataclassMethods(ClassDecl& node) {
 
     SourceLocation loc = node.location();
 
-    // Synthesize __init__ from the fields.
     if (!hasInit && !fields.empty()) {
         auto init = std::make_unique<FunctionDecl>();
         init->name = "__init__";
@@ -148,7 +132,6 @@ void CodeGen::Impl::synthesizeDataclassMethods(ClassDecl& node) {
         node.body.insert(node.body.begin(), std::move(init));
     }
 
-    // Synthesize __eq__: field-by-field equality against another instance.
     if (!hasEq) {
         auto eq = std::make_unique<FunctionDecl>();
         eq->name = "__eq__";
@@ -156,7 +139,6 @@ void CodeGen::Impl::synthesizeDataclassMethods(ClassDecl& node) {
         eq->hasImplicitSelf = true;
         eq->returnType = makeNamedType("bool", loc);
         eq->setLocation(loc);
-        // single param: other: ClassName
         Parameter p;
         p.name = "other";
         p.type = makeNamedType(node.name, loc);
@@ -193,7 +175,6 @@ void CodeGen::Impl::synthesizeDataclassMethods(ClassDecl& node) {
         node.body.push_back(std::move(eq));
     }
 
-    // Synthesize __repr__: "ClassName(f1=..., f2=...)".
     if (!hasRepr) {
         auto repr = std::make_unique<FunctionDecl>();
         repr->name = "__repr__";
@@ -230,10 +211,8 @@ void CodeGen::Impl::synthesizeDataclassMethods(ClassDecl& node) {
         node.body.push_back(std::move(repr));
     }
 
-    // Track for later passes (TypeChecker registration, etc.)
     std::vector<std::string> fieldNames;
     for (auto& f : fields) fieldNames.push_back(f.name);
-    // Synthesis runs before classNames registration, so mangle directly.
     const std::string dcSym = mangleClass(
         node.genericHomeModule.empty() ? currentModuleName : node.genericHomeModule,
         node.name);
@@ -241,7 +220,6 @@ void CodeGen::Impl::synthesizeDataclassMethods(ClassDecl& node) {
     dataclassClassNamesBySym.insert(dcSym);
 }
 
-// Helper: is this expression a call to the enum `auto()` sentinel?
 static bool isEnumAutoCall(Expr* e) {
     auto* call = dynamic_cast<CallExpr*>(e);
     if (!call || !call->args.empty()) return false;
@@ -249,7 +227,6 @@ static bool isEnumAutoCall(Expr* e) {
     return callee && callee->name == "auto";
 }
 
-// Helper: build `list[ElemName]` type expression.
 static std::unique_ptr<TypeExpr> makeListType(const std::string& elemName,
                                               SourceLocation loc) {
     auto g = std::make_unique<GenericTypeExpr>();
@@ -259,8 +236,6 @@ static std::unique_ptr<TypeExpr> makeListType(const std::string& elemName,
     return g;
 }
 
-// Synthesize class-based enums (class C(Enum) { RED: int = 1 }): each member a
-// singleton with .name/.value; lookup/iteration wired in CallExpr/ForLoop.
 void CodeGen::Impl::synthesizeEnumMethods(ClassDecl& node) {
     EnumKind kind = EnumKind::Plain;
     bool isEnum = false;
@@ -277,10 +252,9 @@ void CodeGen::Impl::synthesizeEnumMethods(ClassDecl& node) {
     bool isStr = (kind == EnumKind::Str);
     std::string valueTy = isStr ? "str" : "int";
 
-    // Collect member declarations: non-static `NAME: T = <literal|auto()>`.
     struct EMember { std::string name; int64_t ival = 0; std::string sval; SourceLocation loc; };
     std::vector<EMember> members;
-    int64_t running = 0;  // int auto() counter: next auto == running + 1
+    int64_t running = 0;
     for (auto& stmt : node.body) {
         auto* ann = dynamic_cast<AnnAssignStmt*>(stmt.get());
         if (!ann || ann->isStatic || !ann->value) continue;
@@ -291,11 +265,11 @@ void CodeGen::Impl::synthesizeEnumMethods(ClassDecl& node) {
             if (auto* sl = dynamic_cast<StringLiteral*>(ann->value.get())) {
                 m.sval = sl->value;
             } else if (isEnumAutoCall(ann->value.get())) {
-                m.sval = m.name;  // StrEnum auto() -> lowercased member name
+                m.sval = m.name;
                 for (auto& c : m.sval)
                     if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
             } else {
-                continue;  // not a synthesizable member
+                continue;
             }
         } else {
             if (auto* il = dynamic_cast<IntegerLiteral*>(ann->value.get())) {
@@ -318,8 +292,6 @@ void CodeGen::Impl::synthesizeEnumMethods(ClassDecl& node) {
     std::unordered_set<std::string> memberSet;
     for (auto& m : members) memberSet.insert(m.name);
 
-    // Drop the member declarations (they become static singletons, not instance
-    // fields) and the marker base.
     std::vector<std::unique_ptr<Stmt>> kept;
     for (auto& stmt : node.body) {
         if (auto* ann = dynamic_cast<AnnAssignStmt*>(stmt.get())) {
@@ -342,7 +314,6 @@ void CodeGen::Impl::synthesizeEnumMethods(ClassDecl& node) {
         node.bases = std::move(filtered);
     }
 
-    // Instance fields: value: <T> ; name: str (insert at front; name ends up first).
     auto declField = [&](const std::string& fn, std::unique_ptr<TypeExpr> ty) {
         auto f = std::make_unique<AnnAssignStmt>();
         auto t = std::make_unique<NameExpr>(); t->name = fn; t->setLocation(loc);
@@ -354,7 +325,6 @@ void CodeGen::Impl::synthesizeEnumMethods(ClassDecl& node) {
     declField("value", makeNamedType(valueTy, loc));
     declField("name", makeNamedType("str", loc));
 
-    // __init__(self, name: str, value: <T>) { self.name = name; self.value = value }
     {
         auto init = std::make_unique<FunctionDecl>();
         init->name = "__init__";
@@ -369,7 +339,6 @@ void CodeGen::Impl::synthesizeEnumMethods(ClassDecl& node) {
         node.body.push_back(std::move(init));
     }
 
-    // __str__(self) -> str { return "ClassName." + self.name }
     {
         auto m = std::make_unique<FunctionDecl>();
         m->name = "__str__"; m->isMethod = true; m->hasImplicitSelf = true;
@@ -381,7 +350,6 @@ void CodeGen::Impl::synthesizeEnumMethods(ClassDecl& node) {
         node.body.push_back(std::move(m));
     }
 
-    // __repr__(self) -> str { return "<ClassName." + self.name + ": " + str(self.value) + ">" }
     {
         auto m = std::make_unique<FunctionDecl>();
         m->name = "__repr__"; m->isMethod = true; m->hasImplicitSelf = true;
@@ -397,8 +365,6 @@ void CodeGen::Impl::synthesizeEnumMethods(ClassDecl& node) {
         node.body.push_back(std::move(m));
     }
 
-    // Static singleton members: static RED: ClassName = ClassName("RED", <value>).
-    // Non-literal static inits -> built once in main's preamble.
     for (auto& m : members) {
         auto ctor = std::make_unique<CallExpr>();
         auto callee = std::make_unique<NameExpr>(); callee->name = node.name; callee->setLocation(m.loc);
@@ -422,7 +388,6 @@ void CodeGen::Impl::synthesizeEnumMethods(ClassDecl& node) {
         node.body.push_back(std::move(sf));
     }
 
-    // Static member list (definition order): static __members__: list[ClassName] = [ClassName.RED, ...].
     {
         auto listE = std::make_unique<ListExpr>();
         for (auto& m : members) {
@@ -444,8 +409,6 @@ void CodeGen::Impl::synthesizeEnumMethods(ClassDecl& node) {
         node.body.push_back(std::move(sf));
     }
 
-    // Static _lookup(value): scan members for the matching singleton or raise.
-    // CallExpr redirects ClassName(v) here.
     {
         auto fn = std::make_unique<FunctionDecl>();
         fn->name = "_lookup";
@@ -456,14 +419,13 @@ void CodeGen::Impl::synthesizeEnumMethods(ClassDecl& node) {
         fn->setLocation(loc);
         { Parameter p; p.name = "value"; p.type = makeNamedType(valueTy, loc); fn->params.push_back(std::move(p)); }
 
-        // for m in ClassName { if m.value == value { return m } }
         auto forStmt = std::make_unique<ForStmt>();
         { auto t = std::make_unique<NameExpr>(); t->name = "m"; t->setLocation(loc); forStmt->target = std::move(t); }
         { auto it = std::make_unique<NameExpr>(); it->name = node.name; it->setLocation(loc); forStmt->iterable = std::move(it); }
         forStmt->setLocation(loc);
 
         auto ifStmt = std::make_unique<IfStmt>();
-        { // m.value == value
+        {
             auto mval = std::make_unique<AttributeExpr>();
             auto mn = std::make_unique<NameExpr>(); mn->name = "m"; mn->setLocation(loc);
             mval->object = std::move(mn); mval->attribute = "value"; mval->setLocation(loc);
@@ -479,7 +441,6 @@ void CodeGen::Impl::synthesizeEnumMethods(ClassDecl& node) {
         forStmt->body.push_back(std::move(ifStmt));
         fn->body.push_back(std::move(forStmt));
 
-        // raise ValueError("<value> is not a valid ClassName")
         auto raise = std::make_unique<RaiseStmt>();
         auto exc = std::make_unique<CallExpr>();
         auto vn = std::make_unique<NameExpr>(); vn->name = "ValueError"; vn->setLocation(loc);
@@ -493,8 +454,6 @@ void CodeGen::Impl::synthesizeEnumMethods(ClassDecl& node) {
         node.body.push_back(std::move(fn));
     }
 
-    // Record for CallExpr/ForLoop/Expressions wiring. Synthesis runs before
-    // classNames registration, so mangle directly.
     const std::string enSym = mangleClass(
         node.genericHomeModule.empty() ? currentModuleName : node.genericHomeModule,
         node.name);
@@ -504,4 +463,4 @@ void CodeGen::Impl::synthesizeEnumMethods(ClassDecl& node) {
     enumMemberNamesBySym[enSym] = std::move(names);
 }
 
-} // namespace dragon
+}

@@ -63,7 +63,6 @@ def make_accum(seed: str) -> Callable[[str], str] {
 }
 
 
-# Module globals: marked at store; the walker must traverse each shape
 const TAGGER: Callable[[str], str] = make_tagger("pre-")
 const COUNTER: Callable[[], int] = make_counter()
 const ACCUM: Callable[[str], str] = make_accum("s:")
@@ -73,7 +72,6 @@ const NUMS: deque[int] = deque([10, 20, 30])
 
 class SharedWalkerCoverageTests(TestCase) {
     def test_global_closure_str_capture_survives_marking() {
-        # The captured "pre-" was walked at store time; every call reads it
         self.assertEqual(TAGGER("x"), "pre-x")
         i: int = 0
         while i < 1000 {
@@ -84,10 +82,8 @@ class SharedWalkerCoverageTests(TestCase) {
     }
 
     def test_global_closure_cell_captures() {
-        # int cell (holds_heap = 0: the mark helper's early-out path)
         self.assertEqual(COUNTER(), 1)
         self.assertEqual(COUNTER(), 2)
-        # str cell (holds_heap = 1: the tag-dispatched mark path)
         self.assertEqual(ACCUM("a"), "s:a")
         self.assertEqual(ACCUM("b"), "s:ab")
     }

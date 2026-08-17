@@ -11,28 +11,20 @@ extern "C" def memset(s: ptr, c: intc, n: int) -> ptr
 extern "C" def dragon_timespec_sec(ts: ptr) -> int
 extern "C" def dragon_timespec_nsec(ts: ptr) -> int
 
-# OS CSPRNG, declared directly (not via `secrets`) so a die-roll program doesn't
-# drag base64/binascii/hmac into the binary.
 extern "C" def dragon_urandom(n: int) -> bytes
 
 const RAND_MAX: int = 2147483647
 
-# srand() takes a C `unsigned int`; mask every seed into signed 32-bit range.
 const _SEED_MASK: int = 2147483647
 
-# libc rand() is an LCG whose first output tracks the seed almost linearly;
-# burn a few draws after seeding so the first value doesn't leak the seed.
 const _WARMUP: int = 16
 
-# Knuth's multiplicative constant, mixed in per seed_time() call to separate
-# seeds from calls landing in the same clock tick.
 const _CALL_STRIDE: int = 2654435761
 
 _seeded: bool = false
 _seed_time_calls: int = 0
 
 def _srand_warm(s: int) {
-    # Single seeding path: mask, seed, diffuse, mark seeded so auto-entropy never re-runs.
     global _seeded
     srand(s & _SEED_MASK)
     i: int = 0
@@ -44,7 +36,6 @@ def _srand_warm(s: int) {
 }
 
 def _entropy_seed() -> int {
-    # 32 bits straight from the OS CSPRNG.
     const b: bytes = dragon_urandom(4)
     s: int = 0
     i: int = 0
@@ -62,13 +53,10 @@ def _ensure_seeded() {
 }
 
 def seed(s: int) {
-    # Deterministic seeding; once called, nothing re-seeds behind you.
     _srand_warm(s)
 }
 
 def seed_time() {
-    # Wall-clock seed + per-call stride, since CLOCK_REALTIME's tick is coarser
-    # than its ns field and back-to-back calls could otherwise collide. Prefer seed(n) instead.
     global _seed_time_calls
     const ts: ptr = malloc(16)
     memset(ts, 0, 16)
@@ -81,13 +69,11 @@ def seed_time() {
 }
 
 def random() -> float {
-    # Returns a random float in [0.0, 1.0)
     _ensure_seeded()
     return float(rand()) / (float(RAND_MAX) + 1.0)
 }
 
 def randint(a: int, b: int) -> int {
-    # Returns a random integer N such that a <= N <= b
     _ensure_seeded()
     if b < a { raise ValueError(f"empty range in randint({a}, {b})") }
     const range: int = b - a + 1
@@ -95,7 +81,6 @@ def randint(a: int, b: int) -> int {
 }
 
 def randrange(start: int, stop: int) -> int {
-    # Returns a random integer N such that start <= N < stop
     _ensure_seeded()
     const range: int = stop - start
     if range <= 0 { raise ValueError(f"empty range in randrange({start}, {stop})") }
@@ -103,7 +88,6 @@ def randrange(start: int, stop: int) -> int {
 }
 
 def uniform(a: float, b: float) -> float {
-    # Returns a random float N such that a <= N <= b
     return a + (b - a) * random()
 }
 
@@ -124,7 +108,6 @@ def choice_int(items: list[int]) -> int {
 }
 
 def shuffle(items: list[int]) -> list[int] {
-    # Fisher-Yates shuffle (returns new shuffled list)
     _ensure_seeded()
     result: list[int] = []
     i: int = 0
@@ -144,7 +127,6 @@ def shuffle(items: list[int]) -> list[int] {
 }
 
 def sample(items: list[int], k: int) -> list[int] {
-    # k unique random elements (without replacement), via reservoir sampling.
     _ensure_seeded()
     if k < 0 or k > len(items) { raise ValueError("Sample larger than population or is negative") }
     result: list[int] = []

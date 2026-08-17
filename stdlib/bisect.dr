@@ -2,7 +2,6 @@
 Pure Dragon, no C dependencies."""
 
 def bisect_left(a: list[int], x: int) -> int {
-    # Leftmost insertion index i: a[:i] < x, a[i:] >= x.
     lo: int = 0
     hi: int = len(a)
     while lo < hi {
@@ -17,7 +16,6 @@ def bisect_left(a: list[int], x: int) -> int {
 }
 
 def bisect_right(a: list[int], x: int) -> int {
-    # Rightmost insertion index i: a[:i] <= x, a[i:] > x.
     lo: int = 0
     hi: int = len(a)
     while lo < hi {
@@ -36,7 +34,6 @@ def bisect(a: list[int], x: int) -> int {
 }
 
 def insort_left(a: list[int], x: int) {
-    # Insert x maintaining sort order; ties go to the left of existing entries.
     const idx: int = bisect_left(a, x)
     a.append(x)
     j: int = len(a) - 1
@@ -48,7 +45,6 @@ def insort_left(a: list[int], x: int) {
 }
 
 def insort_right(a: list[int], x: int) {
-    # Insert x maintaining sort order; ties go to the right of existing entries.
     const idx: int = bisect_right(a, x)
     a.append(x)
     j: int = len(a) - 1
@@ -64,7 +60,6 @@ def insort(a: list[int], x: int) {
 }
 
 def index(a: list[int], x: int) -> int {
-    # Binary-search index of x; raises ValueError if absent.
     const i: int = bisect_left(a, x)
     if i < len(a) {
         if a[i] == x {
@@ -75,7 +70,6 @@ def index(a: list[int], x: int) -> int {
 }
 
 def contains(a: list[int], x: int) -> bool {
-    # Binary-search membership test.
     const i: int = bisect_left(a, x)
     if i < len(a) {
         if a[i] == x {

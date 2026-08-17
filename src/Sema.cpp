@@ -10,8 +10,6 @@ Scope::~Scope() = default;
 bool Scope::define(const Symbol& symbol) {
     auto it = symbols_.find(symbol.name);
     if (it != symbols_.end()) {
-        // A user declaration shadows an injected builtin (outer namespace) -
-        // replace the builtin entry.
         if (it->second.isBuiltin && !symbol.isBuiltin) {
             it->second = symbol;
             return true;
@@ -50,13 +48,11 @@ Scope* Scope::enclosingClass() {
 
 namespace {
 struct NameResolution {
-    Symbol* sym = nullptr;          // the binding, or null if unresolved
-    Scope* owner = nullptr;         // the scope that owns the binding
-    bool crossedFunction = false;   // reaching it passed out of the current function
+    Symbol* sym = nullptr;
+    Scope* owner = nullptr;
+    bool crossedFunction = false;
 };
 
-// Resolve `n` up the scope chain, tracking whether the search crossed a
-// function boundary. classifyRebind uses that to require nonlocal/global.
 NameResolution resolveAcross(Scope* from, const std::string& n) {
     NameResolution r;
     for (Scope* p = from; p; p = p->parent()) {
@@ -66,8 +62,6 @@ NameResolution resolveAcross(Scope* from, const std::string& n) {
     return r;
 }
 
-// What rebinding r's binding requires: nonlocal for an enclosing function's
-// var, global for a module var, Ok otherwise (same function, or class scope).
 enum class OuterRebind { Ok, NeedNonlocal, NeedGlobal };
 OuterRebind classifyRebind(const NameResolution& r) {
     if (!r.sym || !r.crossedFunction) return OuterRebind::Ok;
@@ -78,8 +72,6 @@ OuterRebind classifyRebind(const NameResolution& r) {
     }
 }
 
-// Diagnostic for a rejected cross-scope rebind; a declared nonlocal/global
-// opt-in resolves before the walk crosses out, so this only fires without one.
 std::string rebindErrorMsg(OuterRebind kind, const std::string& n) {
     if (kind == OuterRebind::NeedNonlocal)
         return "'" + n + "' is owned by an enclosing function; add 'nonlocal " +
@@ -89,7 +81,7 @@ std::string rebindErrorMsg(OuterRebind kind, const std::string& n) {
            "inside a function, or declare a new local with '" + n +
            ": <type> = ...'";
 }
-} // namespace
+}
 
 struct Sema::Impl {
     std::vector<SemaDiagnostic> diagnostics;
@@ -98,12 +90,9 @@ struct Sema::Impl {
     bool isInLoop = false;
     bool isInFunction = false;
 
-    // D027: closure capture tracking, one context per nested lambda being analyzed.
     struct CaptureContext {
-        Scope* lambdaScope;  // the lambda's own Function scope
+        Scope* lambdaScope;
         std::set<std::string> capturedNames;
-        // Subset of capturedNames declared `nonlocal`: needs heap-cell promotion
-        // at the binding scope so writes propagate back to the owner.
         std::set<std::string> nonlocalDeclaredNames;
     };
     std::vector<CaptureContext> captureStack;
@@ -157,8 +146,6 @@ void Sema::visit(ContractSetTypeExpr&) {}
 void Sema::visit(IntegerLiteral&) {}
 void Sema::visit(FloatLiteral&) {}
 void Sema::visit(StringLiteral& node) {
-    // F-string interpolations are real expressions in the enclosing scope; visit
-    // them so name resolution and capture analysis fire (e.g. base in f"{base}/x").
     for (auto& part : node.fstringParts) {
         if (part.kind == FStringPart::Kind::Expression && part.expr) {
             part.expr->accept(*this);
@@ -177,15 +164,12 @@ void Sema::visit(NameExpr& node) {
         return;
     }
 
-    // D027: for each lambda on the capture stack, a name not defined within
-    // that lambda's scope but defined in an outer non-module scope is a capture.
     if (!impl_->captureStack.empty() &&
         sym->kind != Symbol::Kind::Function &&
         sym->kind != Symbol::Kind::Class &&
         sym->kind != Symbol::Kind::Module &&
         sym->kind != Symbol::Kind::TypeAlias) {
         for (auto& ctx : impl_->captureStack) {
-            // Check if name is defined within the lambda's own scope tree
             bool definedInLambda = false;
             for (Scope* s = impl_->currentScope; s && s != ctx.lambdaScope->parent(); s = s->parent()) {
                 if (s->lookupLocal(node.name)) {
@@ -194,7 +178,6 @@ void Sema::visit(NameExpr& node) {
                 }
             }
             if (!definedInLambda) {
-                // Verify it's defined in a non-module scope above the lambda
                 for (Scope* s = ctx.lambdaScope->parent(); s; s = s->parent()) {
                     if (s->lookupLocal(node.name)) {
                         if (s->kind() != Scope::Kind::Module) {
@@ -261,7 +244,7 @@ void Sema::visit(TupleExpr& node) {
 
 void Sema::visit(DictExpr& node) {
     for (auto& [key, val] : node.entries) {
-        if (key) key->accept(*this);  // null key = **spread entry
+        if (key) key->accept(*this);
         if (val) val->accept(*this);
     }
 }
@@ -382,7 +365,6 @@ void Sema::visit(LambdaExpr& node) {
     }
     if (node.returnType) node.returnType->accept(*this);
 
-    // D027: Push capture context before visiting body
     Impl::CaptureContext capCtx;
     capCtx.lambdaScope = impl_->currentScope;
     impl_->captureStack.push_back(std::move(capCtx));
@@ -393,7 +375,6 @@ void Sema::visit(LambdaExpr& node) {
     for (auto& s : node.bodyStmts) s->accept(*this);
     impl_->isInFunction = prevInFunction;
 
-    // D027: Store captured variables and pop context
     auto& ctx = impl_->captureStack.back();
     node.capturedVars.assign(ctx.capturedNames.begin(), ctx.capturedNames.end());
     node.mutatedCapturedVars.assign(
@@ -414,8 +395,6 @@ void Sema::visit(AwaitExpr& node) {
 }
 
 void Sema::visit(AsCastExpr& node) {
-    // Contract names are type names resolved by the TypeChecker; only the
-    // operand is a value expression.
     node.operand->accept(*this);
 }
 
@@ -424,8 +403,6 @@ void Sema::visit(FireExpr& node) {
         node.operand->accept(*this);
         return;
     }
-    // `fire { ... }` runs on a vthread, capturing enclosing locals like a lambda; push a
-    // Function scope + capture context so codegen marshals spawn args (nonlocal-mutated captures rejected: data race).
     pushScope(Scope::Kind::Function);
     Impl::CaptureContext capCtx;
     capCtx.lambdaScope = impl_->currentScope;
@@ -461,11 +438,7 @@ void Sema::visit(AssignStmt& node) {
     node.value->accept(*this);
     if (node.typeAnnotation) node.typeAnnotation->accept(*this);
 
-    // Targets: single NameExpr, TupleExpr (unpack), or multiple (chained assign).
-    // Bare `x = v` only reassigns; allowImplicitDecl lets annotation-less forms declare.
     auto defineLocal = [&](const std::string& n, SourceLocation loc, bool allowImplicitDecl) {
-        // Bare `=` freely reassigns bindings owned by this function; rebinding an
-        // enclosing function's var needs nonlocal, a module global needs global.
         NameResolution r = resolveAcross(currentScope(), n);
         if (r.sym) {
             if (r.sym->isConst) {
@@ -477,7 +450,7 @@ void Sema::visit(AssignStmt& node) {
                 error(loc, rebindErrorMsg(ob, n));
                 return;
             }
-            r.sym->isInitialized = true;  // reassignment of a visible binding
+            r.sym->isInitialized = true;
             return;
         }
         if (!allowImplicitDecl) {
@@ -492,15 +465,11 @@ void Sema::visit(AssignStmt& node) {
         sym.isInitialized = true;
         currentScope()->define(sym);
     };
-    // Bare single-name assignment is strict unless the statement carries the
-    // vestigial AssignStmt::typeAnnotation declaration form.
     const bool singleNameMayDeclare = (node.typeAnnotation != nullptr);
     for (auto& target : node.targets) {
         if (auto* name = dynamic_cast<NameExpr*>(target.get())) {
             defineLocal(name->name, name->location(), singleNameMayDeclare);
         } else if (auto* tup = dynamic_cast<TupleExpr*>(target.get())) {
-            // Tuple unpacking has no per-element annotation slot, so each name may
-            // implicitly declare; the const form requires every name be fresh.
             std::function<void(Expr*)> visitTarget = [&](Expr* t) {
                 if (auto* n = dynamic_cast<NameExpr*>(t)) {
                     if (node.isConst) {
@@ -521,12 +490,10 @@ void Sema::visit(AssignStmt& node) {
                         currentScope()->define(sym);
                         return;
                     }
-                    defineLocal(n->name, n->location(), /*allowImplicitDecl=*/true);
+                    defineLocal(n->name, n->location(), true);
                 } else if (auto* nestedTup = dynamic_cast<TupleExpr*>(t)) {
                     for (auto& e : nestedTup->elements) visitTarget(e.get());
                 } else if (auto* starred = dynamic_cast<StarredExpr*>(t)) {
-                    // `*rest` in a tuple-unpack target declares the inner name;
-                    // reuse the NameExpr path so `first, *rest = [...]` resolves.
                     visitTarget(starred->value.get());
                 } else {
                     if (!isValidAssignmentTarget(t)) {
@@ -548,8 +515,6 @@ void Sema::visit(AssignStmt& node) {
 void Sema::visit(AugAssignStmt& node) {
     node.target->accept(*this);
     node.value->accept(*this);
-    // `n += 1` is a read-modify-rebind, so it obeys the same nonlocal/global
-    // rule as bare `=` (else codegen silently mutates a throwaway local).
     if (auto* name = dynamic_cast<NameExpr*>(node.target.get())) {
         NameResolution r = resolveAcross(currentScope(), name->name);
         if (r.sym && r.sym->isConst) {
@@ -564,12 +529,8 @@ void Sema::visit(AnnAssignStmt& node) {
     if (node.annotation) node.annotation->accept(*this);
     if (node.value) node.value->accept(*this);
 
-    // A name may be declared only once per scope; a second `x: T = ...` for an
-    // already-bound name here is a redeclaration (reassign with bare `x = ...`).
     if (auto* name = dynamic_cast<NameExpr*>(node.target.get())) {
         Symbol* prior = currentScope()->lookupLocal(name->name);
-        // Shadowing an injected builtin is a fresh declaration, not a redeclaration.
-        // A hoisted const's forward-decl marker is cleared to treat this as its real declaration.
         if (prior && prior->isModuleForwardDecl) {
             prior->isModuleForwardDecl = false;
         } else if (prior && !prior->isBuiltin) {
@@ -592,8 +553,6 @@ void Sema::visit(AnnAssignStmt& node) {
 }
 
 void Sema::visit(IfStmt& node) {
-    // Each block body is its own lexical scope; the condition evaluates in the
-    // enclosing scope, so a walrus there binds outside the branch (Python parity).
     node.condition->accept(*this);
     pushScope(Scope::Kind::Block);
     for (auto& s : node.thenBody) s->accept(*this);
@@ -625,8 +584,6 @@ void Sema::visit(WhileStmt& node) {
 void Sema::visit(ForStmt& node) {
     node.iterable->accept(*this);
 
-    // The loop target and body live in the loop's block scope, so the target
-    // isn't visible after the loop; single-name and tuple-unpack forms both bind here.
     pushScope(Scope::Kind::Block);
     auto defineTargetName = [&](const std::string& n, SourceLocation loc) {
         Symbol sym;
@@ -681,7 +638,6 @@ void Sema::visit(TryStmt& node) {
 }
 
 void Sema::visit(WithStmt& node) {
-    // The context-manager `as` bindings and the body share the with-block scope.
     pushScope(Scope::Kind::Block);
     for (auto& item : node.items) {
         item.contextExpr->accept(*this);
@@ -700,8 +656,6 @@ void Sema::visit(WithStmt& node) {
 }
 
 void Sema::visit(ThreadStmt& node) {
-    // `thread { ... }` runs on a scoped OS thread capturing enclosing locals
-    // read-only; mirrors fire-block capture analysis so codegen marshals thread args.
     pushScope(Scope::Kind::Function);
     Impl::CaptureContext capCtx;
     capCtx.lambdaScope = impl_->currentScope;
@@ -720,7 +674,6 @@ void Sema::visit(ThreadStmt& node) {
 
 void Sema::visit(MatchStmt& node) {
     node.subject->accept(*this);
-    // Recursively traverse pattern tree to define captures and visit literals
     std::function<void(MatchPattern&)> defineCaptures = [&](MatchPattern& pat) {
         if (pat.kind == MatchPattern::Kind::Capture) {
             Symbol sym;
@@ -750,8 +703,6 @@ void Sema::visit(ReturnStmt& node) {
 }
 
 void Sema::visit(DeferStmt& node) {
-    // No scope ends before process exit at module level, so a module-level
-    // defer could never run; a shutdown-hook mechanism would be its own ADR.
     if (!impl_->isInFunction) {
         error(node.location(), "'defer' outside function");
     }
@@ -795,8 +746,6 @@ void Sema::visit(GlobalStmt& node) {
 
 void Sema::visit(NonlocalStmt& node) {
     for (auto& name : node.names) {
-        // Find the true binding scope (skip nested nonlocal markers): walk up for
-        // a non-nonlocal binding in an enclosing function scope; module scope doesn't qualify.
         Scope* enclosing = currentScope()->parent();
         Scope* bindingScope = nullptr;
         while (enclosing) {
@@ -813,8 +762,6 @@ void Sema::visit(NonlocalStmt& node) {
         if (!bindingScope) {
             error(node.location(), "no binding for nonlocal '" + name + "' found");
         } else {
-            // Every CaptureContext whose function sits between this nonlocal decl and
-            // the binding scope must capture the cell pointer and forward it unchanged.
             for (auto& ctx : impl_->captureStack) {
                 bool reachableViaScopeChain = false;
                 for (Scope* p = ctx.lambdaScope->parent(); p; p = p->parent()) {
@@ -827,8 +774,6 @@ void Sema::visit(NonlocalStmt& node) {
                 }
             }
         }
-        // Define the nonlocal marker here so defineLocal's lookupLocal finds it
-        // (writes route to the existing binding) and reads see it as already-captured.
         Symbol sym;
         sym.name = name;
         sym.kind = Symbol::Kind::Variable;
@@ -881,17 +826,14 @@ void Sema::visit(FunctionDecl& node) {
     funcSym.isInitialized = true;
     currentScope()->define(funcSym);
 
-    // Visit decorators in outer scope
     for (auto& dec : node.decorators) dec->accept(*this);
 
     pushScope(Scope::Kind::Function);
 
-    // D044: bind type params (`def f[T]()`) as type symbols so the body can
-    // name them in value position (e.g. `Inner[T](...)`) without a spurious error.
     for (auto& tp : node.typeParams) {
         Symbol tpSym;
         tpSym.name = tp.name;
-        tpSym.kind = Symbol::Kind::Class;  // a type name
+        tpSym.kind = Symbol::Kind::Class;
         tpSym.declaration = node.location();
         tpSym.isInitialized = true;
         currentScope()->define(tpSym);
@@ -899,8 +841,6 @@ void Sema::visit(FunctionDecl& node) {
 
     bool prevInFunction = impl_->isInFunction;
 
-    // A `def` lexically inside another function body turns references to
-    // enclosing locals into closure captures (Python semantics), via LambdaExpr's machinery.
     bool isNested = prevInFunction && !node.isMethod;
     if (isNested) {
         Impl::CaptureContext capCtx;
@@ -953,17 +893,15 @@ void Sema::visit(ClassDecl& node) {
     classSym.isInitialized = true;
     currentScope()->define(classSym);
 
-    // Visit decorators and bases in outer scope
     for (auto& dec : node.decorators) dec->accept(*this);
     for (auto& base : node.bases) base->accept(*this);
     for (auto& [name, val] : node.keywords) val->accept(*this);
 
     pushScope(Scope::Kind::Class);
-    // D044: bind type params (`class Foo[T]`) as type symbols visible to every method body.
     for (auto& tp : node.typeParams) {
         Symbol tpSym;
         tpSym.name = tp.name;
-        tpSym.kind = Symbol::Kind::Class;  // a type name
+        tpSym.kind = Symbol::Kind::Class;
         tpSym.declaration = node.location();
         tpSym.isInitialized = true;
         currentScope()->define(tpSym);
@@ -973,8 +911,6 @@ void Sema::visit(ClassDecl& node) {
 }
 
 void Sema::visit(ContractDecl& node) {
-    // A contract is a type name, never a value: define it Class-kind so annotations
-    // resolve, and walk method signatures for their type annotations (no bodies to visit).
     Symbol sym;
     sym.name = node.name;
     sym.kind = Symbol::Kind::Class;
@@ -999,8 +935,6 @@ void Sema::visit(TypeAliasStmt& node) {
 }
 
 void Sema::visit(Module& node) {
-    // Python-parity: pre-register top-level def/class symbols so mutual recursion
-    // and forward references resolve by name, not source order.
     for (auto& s : node.body) {
         if (auto* fn = dynamic_cast<FunctionDecl*>(s.get())) {
             Symbol funcSym;
@@ -1017,8 +951,6 @@ void Sema::visit(Module& node) {
             clsSym.isInitialized = true;
             currentScope()->define(clsSym);
         } else if (auto* con = dynamic_cast<ContractDecl*>(s.get())) {
-            // ADR 054: contracts resolve forward like classes, so an earlier
-            // class may promise a contract declared later.
             Symbol conSym;
             conSym.name = con->name;
             conSym.kind = Symbol::Kind::Class;
@@ -1026,8 +958,6 @@ void Sema::visit(Module& node) {
             conSym.isInitialized = true;
             currentScope()->define(conSym);
         } else if (auto* ann = dynamic_cast<AnnAssignStmt*>(s.get())) {
-            // Hoist module-level typed globals so a forward reference to a later const
-            // resolves; marked so the second pass doesn't flag its own hoist as a redeclaration.
             if (auto* name = dynamic_cast<NameExpr*>(ann->target.get())) {
                 Symbol sym;
                 sym.name = name->name;
@@ -1041,8 +971,6 @@ void Sema::visit(Module& node) {
             }
         }
     }
-    // Second pass: visit each statement normally; Function/Class visitors redefine
-    // the symbol, but the duplicate is a harmless no-op and body analysis still runs.
     for (auto& s : node.body) s->accept(*this);
 }
 
@@ -1070,7 +998,6 @@ void Sema::defineBuiltins() {
         currentScope()->define(sym);
     };
 
-    // Built-in functions
     defineBuiltin("print");
     defineBuiltin("len");
     defineBuiltin("range");
@@ -1084,22 +1011,14 @@ void Sema::defineBuiltins() {
     defineBuiltin("dict", Symbol::Kind::Class);
     defineBuiltin("set", Symbol::Kind::Class);
     defineBuiltin("tuple", Symbol::Kind::Class);
-    // `deque` is a global builtin container (no import required); codegen routes
-    // it through the __Deque path. `from collections import deque` also resolves it.
     defineBuiltin("deque", Symbol::Kind::Class);
     defineBuiltin("type", Symbol::Kind::Class);
     defineBuiltin("object", Symbol::Kind::Class);
-    // D044: `Any` is a type name, allowed in value position as an explicit
-    // type arg (`Box[Any]`); TypeChecker resolves it to AnyType.
     defineBuiltin("Any", Symbol::Kind::Class);
-    // `Lock` is NOT a global builtin, it's import-gated like Python's `from
-    // threading import Lock`; bare `Lock()` is undefined until imported.
     defineBuiltin("abs");
     defineBuiltin("min");
     defineBuiltin("max");
     defineBuiltin("sum");
-    // round/pow/divmod are handled in CallBuiltins.cpp and recognized by
-    // TypeChecker; register the names so Sema doesn't reject the call first.
     defineBuiltin("pow");
     defineBuiltin("round");
     defineBuiltin("divmod");
@@ -1115,18 +1034,13 @@ void Sema::defineBuiltins() {
     defineBuiltin("issubclass");
     defineBuiltin("hasattr");
     defineBuiltin("getattr");
-    // setattr/delattr deliberately absent: dynamic attribute injection is a
-    // non-goal (D021); runtime field creation by string name is barred by commandment #3.
     defineBuiltin("dir");
-    // Internal intrinsic backing unittest.assertRaises: does the current
-    // exception match the given type code? Underscore prefix signals internal.
     defineBuiltin("__exc_matches");
     defineBuiltin("id");
     defineBuiltin("hash");
     defineBuiltin("repr");
     defineBuiltin("chr");
     defineBuiltin("ord");
-    // float<->bits reinterpret intrinsics that struct.pack/unpack and wire codecs need.
     defineBuiltin("__float_bits");
     defineBuiltin("__float_from_bits");
     defineBuiltin("__float32_bits");
@@ -1138,15 +1052,9 @@ void Sema::defineBuiltins() {
     defineBuiltin("property", Symbol::Kind::Class);
     defineBuiltin("staticmethod", Symbol::Kind::Class);
     defineBuiltin("classmethod", Symbol::Kind::Class);
-    // @dataclass/NamedTuple are compile-time recognizers in CodeGen; register
-    // the names so decorator/base resolution doesn't flag them.
     defineBuiltin("dataclass", Symbol::Kind::Class);
     defineBuiltin("NamedTuple", Symbol::Kind::Class);
-    // TypedDict is a compile-time recognizer (TypeChecker's isTypedDict, CodeGen
-    // lowers it dict-backed); register the name so `class C(TypedDict)` doesn't flag as undefined.
     defineBuiltin("TypedDict", Symbol::Kind::Class);
-    // Built-in exceptions, kept in sync with CodeGenImpl::excTypeCode and
-    // isBuiltinExcName; codes are wired in codegen, here we just register names.
     defineBuiltin("BaseException", Symbol::Kind::Class);
     defineBuiltin("SystemExit", Symbol::Kind::Class);
     defineBuiltin("KeyboardInterrupt", Symbol::Kind::Class);
@@ -1171,7 +1079,7 @@ void Sema::defineBuiltins() {
     defineBuiltin("NameError", Symbol::Kind::Class);
     defineBuiltin("UnboundLocalError", Symbol::Kind::Class);
     defineBuiltin("OSError", Symbol::Kind::Class);
-    defineBuiltin("IOError", Symbol::Kind::Class);  // Py3 alias of OSError
+    defineBuiltin("IOError", Symbol::Kind::Class);
     defineBuiltin("FileNotFoundError", Symbol::Kind::Class);
     defineBuiltin("FileExistsError", Symbol::Kind::Class);
     defineBuiltin("IsADirectoryError", Symbol::Kind::Class);
@@ -1200,7 +1108,6 @@ void Sema::defineBuiltins() {
     defineBuiltin("RuntimeWarning", Symbol::Kind::Class);
     defineBuiltin("UserWarning", Symbol::Kind::Class);
 
-    // Built-in constants
     defineBuiltin("True", Symbol::Kind::Variable);
     defineBuiltin("False", Symbol::Kind::Variable);
     defineBuiltin("None", Symbol::Kind::Variable);
@@ -1210,7 +1117,6 @@ void Sema::defineBuiltins() {
 }
 
 void Sema::resolveImport(const std::string&) {
-    // Import resolution is a no-op for now
 }
 
 bool Sema::isValidAssignmentTarget(Expr* expr) {
@@ -1243,4 +1149,4 @@ void Sema::warning(const SourceLocation& loc, const std::string& message) {
     impl_->diagnostics.push_back({SemaDiagnostic::Level::Warning, loc, message});
 }
 
-} // namespace dragon
+}

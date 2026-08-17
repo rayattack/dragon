@@ -1,11 +1,3 @@
-# test/dr/test_sha256.dr - Known-answer tests for runtime SHA-256.
-#
-# Vectors: NIST FIPS 180-2 Appendix B (the canonical "", "abc", and 56-byte
-# multi-block messages). First consumer of stdlib/unittest.dr.
-#
-# test_incremental_equiv locks hashlib.Hash.update() to the one-shot digest so
-# the eventual streaming rewrite (ADR 038 Phase 2) cannot silently regress.
-
 from unittest import TestCase, main
 from hashlib import sha256, new, Hash
 

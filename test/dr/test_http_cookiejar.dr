@@ -29,7 +29,6 @@ class CookieJarTests(TestCase) {
         self.assertEqual(len(sent_root), 1)
         self.assertEqual(sent_root[0].name, "a")
         sent_api: list[Cookie] = jar.cookies_for("x.com", "/api/data", false)
-        # Both / and /api match /api/data prefix.
         self.assertEqual(len(sent_api), 2)
     }
 
@@ -54,8 +53,8 @@ class CookieJarTests(TestCase) {
 
     def test_clear_expired() {
         jar: CookieJar = CookieJar()
-        jar.set_cookie(Cookie("session", "x", "y", "/", 0))      # no expiry
-        jar.set_cookie(Cookie("stale", "x", "y", "/", 100))      # past
+        jar.set_cookie(Cookie("session", "x", "y", "/", 0))
+        jar.set_cookie(Cookie("stale", "x", "y", "/", 100))
         jar.set_cookie(Cookie("fresh", "x", "y", "/", 9999999999))
         removed: int = jar.clear_expired(1000)
         self.assertEqual(removed, 1)

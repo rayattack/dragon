@@ -1,4 +1,3 @@
-/// Dragon CodeGen - Module Visitor
 #include "../CodeGenImpl.h"
 
 namespace dragon {
@@ -9,4 +8,4 @@ void CodeGen::visit(dragon::Module& node) {
     }
 }
 
-} // namespace dragon
+}

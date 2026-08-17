@@ -4,9 +4,6 @@ run via unittest.main(list[TestCase]) (see tests.md for design/deferred features
 
 from sys import exit
 
-# Per-suite tallies; TestRunner.run owns one, and TestCase.assert* call into
-# it via `self._result` instead of a thread-local singleton.
-
 class TestResult {
     runs_total: int
     failures_total: int
@@ -30,7 +27,6 @@ class TestResult {
 
     def record_failure(msg: str) {
         if not self.current_failed {
-            # First failure counts once; later assert failures still print but don't double-bump.
             self.failures_total = self.failures_total + 1
             self.current_failed = True
         }
@@ -48,15 +44,11 @@ class TestResult {
     }
 }
 
-# TestCase: subclass and add `test_*` methods. Assertions funnel through
-# `_fail` so only one failure counts per test even after repeated misses.
-
 class TestCase {
-    # Borrowed from TestRunner.run while a test is in flight. NULL outside.
     _result: TestResult
 
     def() {
-        self._result = TestResult()  # placeholder; runner swaps in its own
+        self._result = TestResult()
     }
 
     def _fail(msg: str) {
@@ -68,8 +60,6 @@ class TestCase {
     }
 
     def _fail_with(label: str, msg: str, default: str) {
-        # Shared failure tail for assert* helpers: caller's msg if given, else the
-        # default (built only on the failure path, so passing asserts pay nothing).
         extra: str = msg
         if extra == "" {
             extra = default
@@ -156,7 +146,6 @@ class TestCase {
     }
 
     def assertAlmostEqual(first: float, second: float, places: int = 7, msg: str = "") {
-        # Rounds the diff to `places` decimals; abs() on float avoids an int/float overload mismatch.
         diff: float = first - second
         if diff < 0.0 {
             diff = -diff
@@ -173,8 +162,6 @@ class TestCase {
     }
 
     def assertRaises(exc_type: type, fn: Callable[[], None], msg: str = "") {
-        # Precise match via integer-code + [lo,hi] range: exc_type is the expected
-        # type's code, and __exc_matches range-checks the caught exception (subclasses match).
         raised: bool = False
         matched: bool = False
         try {
@@ -190,9 +177,6 @@ class TestCase {
         }
     }
 }
-
-# Walks dir(case) for `test_*` names, binds each via getattr, calls, tallies.
-# Uncaught exceptions inside a test count as errors, not assertion failures.
 
 class TestRunner {
     result: TestResult
@@ -245,7 +229,6 @@ def main(cases: list[TestCase]) -> int {
     if not runner.result.passed() {
         code = 1
     }
-    # Exits with the suite's status so `dragon run`/CTest see non-zero on failure.
     exit(code)
     return code
 }

@@ -19,13 +19,10 @@ def mean(data: list[float]) -> float {
 }
 
 def fmean(data: list[float]) -> float {
-    # Python compatibility alias for mean
     return mean(data)
 }
 
 def geometric_mean(data: list[float]) -> float {
-    # Geometric mean = (product of values)^(1/n)
-    # Computed via exp(mean(log(values))) for numerical stability.
     if len(data) == 0 {
         raise ValueError("geometric_mean requires at least one data point")
     }
@@ -42,7 +39,6 @@ def geometric_mean(data: list[float]) -> float {
 }
 
 def harmonic_mean(data: list[float]) -> float {
-    # Harmonic mean = n / sum(1/x_i)
     if len(data) == 0 {
         raise ValueError("harmonic_mean requires at least one data point")
     }
@@ -72,8 +68,6 @@ def median(data: list[float]) -> float {
 }
 
 def median_low(data: list[float]) -> float {
-    # For odd n, returns the middle value.
-    # For even n, returns the lower of the two middle values.
     if len(data) == 0 {
         raise ValueError("median_low requires at least one data point")
     }
@@ -87,8 +81,6 @@ def median_low(data: list[float]) -> float {
 }
 
 def median_high(data: list[float]) -> float {
-    # For odd n, returns the middle value.
-    # For even n, returns the higher of the two middle values.
     if len(data) == 0 {
         raise ValueError("median_high requires at least one data point")
     }
@@ -175,7 +167,6 @@ def mode_int(data: list[int]) -> int {
 }
 
 def variance(data: list[float]) -> float {
-    # Sample variance (Bessel's correction: divide by n-1)
     if len(data) < 2 {
         raise ValueError("variance requires at least two data points")
     }
@@ -191,7 +182,6 @@ def variance(data: list[float]) -> float {
 }
 
 def pvariance(data: list[float]) -> float {
-    # Population variance (divide by n)
     if len(data) < 1 {
         raise ValueError("pvariance requires at least one data point")
     }
@@ -207,12 +197,10 @@ def pvariance(data: list[float]) -> float {
 }
 
 def stdev(data: list[float]) -> float {
-    # Sample standard deviation
     return sqrt(variance(data))
 }
 
 def pstdev(data: list[float]) -> float {
-    # Population standard deviation
     return sqrt(pvariance(data))
 }
 
@@ -241,11 +229,7 @@ def quantiles(data: list[float], n: int) -> list[float] {
     return result
 }
 
-# Internal math helpers, duplicated here to avoid a circular import with math.dr.
-
 def _ln(x: float) -> float {
-    # Natural log for x > 0: range-reduce x to m in [0.5, 2), then compute
-    # ln(m) = 2*atanh((m-1)/(m+1)) via a 30-term Taylor series (z + z^3/3 + ...).
     const LN2: float = 0.6931471805599453
 
     k: int = 0
@@ -273,8 +257,6 @@ def _ln(x: float) -> float {
 }
 
 def _exp(x: float) -> float {
-    # Exponential function via Taylor series with range reduction.
-    # exp(x) = 2^k * exp(r) where r = x - k*ln(2), |r| < ln(2)/2
     const LN2: float = 0.6931471805599453
 
     k: int = int(x / LN2)
@@ -283,7 +265,6 @@ def _exp(x: float) -> float {
     }
     const r: float = x - float(k) * LN2
 
-    # Taylor series for exp(r): 1 + r + r^2/2! + r^3/3! + ...
     result: float = 1.0
     term: float = 1.0
     i: int = 1
@@ -293,7 +274,6 @@ def _exp(x: float) -> float {
         i = i + 1
     }
 
-    # Multiply by 2^k
     pow2: float = 1.0
     if k >= 0 {
         j: int = 0

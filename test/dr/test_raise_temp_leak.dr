@@ -16,7 +16,6 @@ from unittest import TestCase, main
 
 class InlineTempLeakOnRaise(TestCase) {
     def test_bytes_index_inline_receiver_and_arg() {
-        # Leaked the b"abc" receiver temp AND the b"zz" arg temp pre-fix.
         i: int = 0
         hits: int = 0
         while i < 3000 {
@@ -59,7 +58,6 @@ class InlineTempLeakOnRaise(TestCase) {
     }
 
     def test_str_index_computed_receiver_and_arg() {
-        # Concats force fresh heap strings so the temps are observable leaks.
         i: int = 0
         hits: int = 0
         while i < 3000 {

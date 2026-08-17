@@ -3,8 +3,6 @@ Hex helpers back SHA-256 fingerprints in the registry (D022); CRC32 backs gzip/t
 
 
 const _HEX_LOWER: str = "0123456789abcdef"
-# Byte view of the hex digits: indexing yields an int code point directly, avoiding
-# the per-nibble allocation (and leak) that `ord(str[i])` has - str-index-arg codegen bug.
 const _HEX_LOWER_B: bytes = b"0123456789abcdef"
 
 
@@ -38,8 +36,6 @@ def _hex_value(ch: int) -> int {
 
 
 def unhexlify(data: bytes | str) -> bytes {
-    # Accepts bytes-like or str (Python parity); dispatches once here so the
-    # hot decode loop in _unhexlify_impl runs on native bytes with no union juggling.
     if isinstance(data, str) {
         return _unhexlify_impl(data.encode("ascii"))
     } else {
@@ -74,8 +70,6 @@ def a2b_hex(data: bytes | str) -> bytes {
     return unhexlify(data)
 }
 
-
-# IEEE 802.3 CRC32, reflected input/output, polynomial 0xEDB88320 (gzip/PNG).
 
 def _build_crc32_table() -> list[int] {
     t: list[int] = [0] * 256

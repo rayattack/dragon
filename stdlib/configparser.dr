@@ -5,7 +5,6 @@ def _strip(s: str) -> str {
 }
 
 def _find_separator(line: str) -> int {
-    # Position of the first = or : separator, or -1 if none.
     i: int = 0
     while i < len(line) {
         const ch: str = line[i:i + 1]
@@ -21,7 +20,6 @@ def _find_separator(line: str) -> int {
 }
 
 def _is_comment(line: str) -> bool {
-    # True if line starts with # or ;.
     if len(line) == 0 { return false }
     const ch: str = line[0:1]
     if ch == "#" { return true }
@@ -30,7 +28,6 @@ def _is_comment(line: str) -> bool {
 }
 
 def _is_section_header(line: str) -> bool {
-    # True if line starts with [ and ends with ].
     if len(line) < 3 { return false }
     if line[0:1] == "[" {
         if line[len(line) - 1:len(line)] == "]" {
@@ -114,7 +111,6 @@ class ConfigParser {
     }
 
     def get_bool(section: str, key: str) -> bool {
-        # Recognizes true/yes/on/1 (case-sensitive) as true; everything else false.
         const val: str = self.get(section, key)
         if val == "true" { return true }
         if val == "yes" { return true }

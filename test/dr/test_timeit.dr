@@ -35,7 +35,6 @@ class TimeitTests(TestCase) {
         _counter = 0
         measurements: list[float] = timeit.repeat(_bump, 3, 100)
         self.assertEqual(len(measurements), 3)
-        # Counter was bumped 3 * 100 = 300 times.
         self.assertEqual(_counter, 300)
     }
 

@@ -6,7 +6,6 @@
 using namespace dragon;
 using namespace dragon::test;
 
-// Helper: migrate Python source to Dragon with braces
 static std::string migrate(const std::string& source, bool addTypes = true) {
     MigrationOptions opts;
     opts.useBraces = true;
@@ -15,7 +14,6 @@ static std::string migrate(const std::string& source, bool addTypes = true) {
     return migrator.migrateSource(source);
 }
 
-// Helper: migrate Python without braces (keep indentation)
 static std::string migrateIndent(const std::string& source) {
     MigrationOptions opts;
     opts.useBraces = false;
@@ -23,10 +21,6 @@ static std::string migrateIndent(const std::string& source) {
     PythonMigrator migrator(opts);
     return migrator.migrateSource(source);
 }
-
-//===----------------------------------------------------------------------===//
-// Basic Expression Emission
-//===----------------------------------------------------------------------===//
 
 TEST(MigratorTest, IntegerLiteral) {
     auto result = migrate("42\n");
@@ -53,10 +47,6 @@ TEST(MigratorTest, FunctionCall) {
     EXPECT_NE(result.find("print(42)"), std::string::npos);
 }
 
-//===----------------------------------------------------------------------===//
-// Statement Emission
-//===----------------------------------------------------------------------===//
-
 TEST(MigratorTest, PassStatement) {
     auto result = migrate("pass\n");
     EXPECT_NE(result.find("pass"), std::string::npos);
@@ -76,10 +66,6 @@ TEST(MigratorTest, ContinueStatement) {
     auto result = migrate("while True:\n    continue\n");
     EXPECT_NE(result.find("continue"), std::string::npos);
 }
-
-//===----------------------------------------------------------------------===//
-// Brace Conversion
-//===----------------------------------------------------------------------===//
 
 TEST(MigratorTest, IfWithBraces) {
     auto result = migrate("if True:\n    pass\n");
@@ -116,10 +102,6 @@ TEST(MigratorTest, ClassWithBraces) {
     EXPECT_NE(result.find("class Foo {"), std::string::npos);
 }
 
-//===----------------------------------------------------------------------===//
-// Indent Mode (no braces)
-//===----------------------------------------------------------------------===//
-
 TEST(MigratorTest, IfWithIndent) {
     auto result = migrateIndent("if True:\n    pass\n");
     EXPECT_NE(result.find("if True:"), std::string::npos);
@@ -133,39 +115,27 @@ TEST(MigratorTest, FunctionWithIndent) {
     EXPECT_EQ(result.find("{"), std::string::npos);
 }
 
-//===----------------------------------------------------------------------===//
-// Type Inference & Annotation
-//===----------------------------------------------------------------------===//
-
 TEST(MigratorTest, FunctionGetsReturnType) {
     auto result = migrate("def add(x, y):\n    return x + y\n");
-    // Function should get a return type annotation
     EXPECT_NE(result.find("def add("), std::string::npos);
-    EXPECT_NE(result.find(":"), std::string::npos); // return type annotation present
+    EXPECT_NE(result.find(":"), std::string::npos);
 }
 
 TEST(MigratorTest, FunctionParamsGetTypes) {
     auto result = migrate("def greet(name):\n    print(name)\n");
-    // Parameters should get type annotations
     EXPECT_NE(result.find("name: "), std::string::npos);
 }
 
 TEST(MigratorTest, FunctionWithDefaultGetsType) {
     auto result = migrate("def foo(x=5):\n    return x\n");
-    // Default value 5 -> int type
     EXPECT_NE(result.find("int"), std::string::npos);
 }
 
 TEST(MigratorTest, NoTypeAnnotationsWhenDisabled) {
-    auto result = migrate("def foo(x):\n    return x\n", /*addTypes=*/false);
-    // No type annotations should be added
+    auto result = migrate("def foo(x):\n    return x\n", false);
     EXPECT_EQ(result.find(": int"), std::string::npos);
     EXPECT_EQ(result.find(": Any"), std::string::npos);
 }
-
-//===----------------------------------------------------------------------===//
-// TypeInference Direct Tests
-//===----------------------------------------------------------------------===//
 
 TEST(TypeInferenceTest, InferIntLiteral) {
     TypeInference ti;
@@ -211,10 +181,6 @@ TEST(TypeInferenceTest, InferNoneLiteral) {
     EXPECT_EQ(type->kind(), Type::Kind::None_);
 }
 
-//===----------------------------------------------------------------------===//
-// Complex Migration
-//===----------------------------------------------------------------------===//
-
 TEST(MigratorTest, MultipleStatements) {
     auto result = migrate("x = 10\ny = 20\nprint(x + y)\n");
     EXPECT_NE(result.find("x = 10"), std::string::npos);
@@ -229,7 +195,6 @@ TEST(MigratorTest, NestedBlocks) {
         "        return 1\n"
         "    return 0\n"
     );
-    // Should have nested braces
     EXPECT_NE(result.find("def foo("), std::string::npos);
     EXPECT_NE(result.find("if True {"), std::string::npos);
     EXPECT_NE(result.find("return 1"), std::string::npos);

@@ -1,6 +1,3 @@
-# Pre-fix: zfill("-5", 4) padded in front of the sign giving "00-5", and
-# capwords(" hello") kept the leading separator giving " Hello".
-
 from unittest import TestCase, main
 from string import zfill, capwords
 

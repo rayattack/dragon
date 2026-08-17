@@ -20,7 +20,6 @@ from unittest import TestCase, main
 
 
 class ListConcatSortExtendTests(TestCase) {
-    # ---- #4: reverse-aware sorting ----
     def test_sorted_reverse_int() {
         self.assertEqual(sorted([3, 1, 2], reverse=True), [3, 2, 1])
         self.assertEqual(sorted([3, 1, 2], reverse=False), [1, 2, 3])
@@ -56,7 +55,6 @@ class ListConcatSortExtendTests(TestCase) {
         self.assertEqual(nums, [1, 2, 5, 8])
     }
 
-    # ---- #5: extend ----
     def test_extend_int() {
         xs: list[int] = [1, 2]
         xs.extend([3, 4])
@@ -82,7 +80,6 @@ class ListConcatSortExtendTests(TestCase) {
         self.assertEqual(xs, [1, 2, 3])
     }
 
-    # ---- #6: list + list ----
     def test_concat_int() {
         a: list[int] = [1, 2]
         b: list[int] = [3, 4]
@@ -117,7 +114,6 @@ class ListConcatSortExtendTests(TestCase) {
         self.assertEqual(c, [1, 2, 3, 4])
     }
 
-    # ---- #6: list += list (in-place extend) ----
     def test_augconcat_variable() {
         a: list[int] = [1, 2]
         b: list[int] = [3, 4]
@@ -137,7 +133,6 @@ class ListConcatSortExtendTests(TestCase) {
         self.assertEqual(ss, ["a", "b", "c"])
     }
 
-    # ---- list[Any] (box variant), homogeneous operations ----
     def test_any_concat() {
         a: list[Any] = [1, "two", 3.0]
         b: list[Any] = [True, "four"]

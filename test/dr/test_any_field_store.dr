@@ -85,8 +85,6 @@ class TestAnyFieldStore(TestCase) {
     }
 
     def test_mixed_fields_ctor() -> None {
-        # The two-field case crashed outright (str field held a bogus
-        # pointer); assert both fields land correctly.
         c: MixedFields = MixedFields({'id': 7, name: 'Peter'})
         self.assertEqual(c.id, 7)
         self.assertEqual(c.name, "Peter")

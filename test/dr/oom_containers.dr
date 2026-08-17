@@ -1,26 +1,7 @@
-# Container sibling of oom_bytes: the count-sized data buffers in the container
-# CONSTRUCTORS must raise a catchable MemoryError when the allocator fails,
-# not write through the NULL they used to ignore (pre-fix SIGSEGV under
-# RLIMIT_AS). Not named test_*.dr on purpose: only meaningful capped, so it is
-# registered with ulimit -v in test/CMakeLists.txt instead of via the glob.
-#
-# The cap matters. At the 256MB used here the 160MB operand fits and its copy
-# does not. Do NOT raise it to a value where the copy also fits: the assertions
-# then pass without ever reaching an allocation failure.
-#
-# The container GROW paths are deliberately not tested here. They abort by
-# design (runtime_internal.h: a longjmp out of an armed dragon_shared_mut_begin
-# window would escape with GC_FLAG_MUTATING set and arm a spurious fatal on the
-# next mutation), so they cannot be asserted from inside a process that has to
-# exit 0. They have their own exit-code tests: oom_set_grow.dr, oom_deque_grow.dr.
-
 from unittest import TestCase, main
 
 class ContainerOomTests(TestCase) {
     def test_tuple_from_list_oom_is_catchable() {
-        # tuple(xs) sizes its data buffer from the list length, so the 160MB
-        # operand needs a second 160MB that does not fit under the cap.
-        # before - dragon_tuple_new wrote through an unchecked malloc (SIGSEGV).
         xs: list[int] = [0] * 20000000
         caught: bool = False
         try {
@@ -32,10 +13,6 @@ class ContainerOomTests(TestCase) {
         self.assertTrue(caught)
     }
     def test_recovery_after_container_oom() {
-        # Recovery is real: the caught MemoryError left the allocator usable
-        # and left no container mid-mutation. A grow path wrongly converted to
-        # raise would escape with GC_FLAG_MUTATING still set, and the fatal
-        # would surface here, on the next mutation, rather than at the failure.
         xs: list[int] = [0] * 20000000
         caught: bool = False
         try {

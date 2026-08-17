@@ -6,7 +6,6 @@ honours single/double quotes and backslash escapes; `quote` shell-escapes a
 single argument; `join` quotes and space-joins a list.
 """
 
-# Characters that force quoting in a POSIX shell word.
 const _UNSAFE: str = "|&;<>()$`\\\"' \t\n*?[#~=%!{}"
 
 
@@ -104,7 +103,6 @@ def quote(s: str) -> str {
     if safe {
         return s
     }
-    # Wrap in single quotes; embedded single quotes become '"'"'.
     parts: list[str] = ["'"]
     run: int = 0
     i: int = 0

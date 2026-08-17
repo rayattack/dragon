@@ -1,9 +1,5 @@
 #include "CodeGenTestHelpers.h"
 
-//===----------------------------------------------------------------------===//
-// Dunder Str/Repr/Eq/Hash/Bool IR
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenTest, DunderStrIR) {
     auto ir = generateIR(
         "class Foo {\n"
@@ -17,7 +13,6 @@ TEST(CodeGenTest, DunderStrIR) {
         "f: Foo = Foo()\n"
         "print(f)\n"
     );
-    // Should call Foo___str__ instead of printing "<Foo instance>"
     EXPECT_NE(ir.find("Foo___str__"), std::string::npos);
     EXPECT_EQ(ir.find("Foo instance"), std::string::npos);
 }
@@ -36,7 +31,6 @@ TEST(CodeGenTest, DunderEqIR) {
         "b: Bar = Bar(2)\n"
         "x: bool = a == b\n"
     );
-    // Should call Bar___eq__
     EXPECT_NE(ir.find("Bar___eq__"), std::string::npos);
 }
 
@@ -53,7 +47,6 @@ TEST(CodeGenTest, DunderHashIR) {
         "k: Key = Key(5)\n"
         "h: int = hash(k)\n"
     );
-    // Should call Key___hash__
     EXPECT_NE(ir.find("Key___hash__"), std::string::npos);
 }
 
@@ -70,13 +63,8 @@ TEST(CodeGenTest, DunderBoolIR) {
         "f: Flag = Flag(1)\n"
         "x: bool = bool(f)\n"
     );
-    // Should call Flag___bool__
     EXPECT_NE(ir.find("Flag___bool__"), std::string::npos);
 }
-
-//===----------------------------------------------------------------------===//
-// Dunder Arithmetic IR
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenTest, DunderAddIR) {
     auto ir = generateIR(
@@ -160,10 +148,6 @@ TEST(CodeGenTest, DunderAbsIR) {
     );
     EXPECT_NE(ir.find("Num___abs__"), std::string::npos);
 }
-
-//===----------------------------------------------------------------------===//
-// Dunder Container IR
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenTest, DunderLenIR) {
     auto ir = generateIR(
@@ -254,10 +238,6 @@ TEST(CodeGenTest, DunderIterIR) {
     EXPECT_NE(ir.find("Counter___next__"), std::string::npos);
 }
 
-//===----------------------------------------------------------------------===//
-// Dunder Context Manager IR
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenTest, DunderEnterExitIR) {
     auto ir = generateIR(
         "class Ctx {\n"
@@ -278,10 +258,6 @@ TEST(CodeGenTest, DunderEnterExitIR) {
     EXPECT_NE(ir.find("Ctx___enter__"), std::string::npos);
     EXPECT_NE(ir.find("Ctx___exit__"), std::string::npos);
 }
-
-//===----------------------------------------------------------------------===//
-// Dunder Str/Repr E2E
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenE2E, DunderStrPrint) {
     auto out = compileAndRun(
@@ -334,7 +310,6 @@ TEST(CodeGenE2E, DunderStrFString) {
 }
 
 TEST(CodeGenE2E, DunderStrFallbackRepr) {
-    // No __str__ but has __repr__ - print should fall back to __repr__
     auto out = compileAndRun(
         "class Box {\n"
         "  def(n: int) {\n"
@@ -351,7 +326,6 @@ TEST(CodeGenE2E, DunderStrFallbackRepr) {
 }
 
 TEST(CodeGenE2E, DunderStrNoMethod) {
-    // No __str__ or __repr__ - should print <ClassName instance>
     auto out = compileAndRun(
         "class Empty {\n"
         "  def() {\n"
@@ -393,10 +367,6 @@ TEST(CodeGenE2E, DunderRepr) {
     EXPECT_EQ(out, "Num(5)\n");
 }
 
-//===----------------------------------------------------------------------===//
-// Dunder Eq/Ne/Comparison E2E
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, DunderEq) {
     auto out = compileAndRun(
         "class Vec {\n"
@@ -417,7 +387,6 @@ TEST(CodeGenE2E, DunderEq) {
 }
 
 TEST(CodeGenE2E, DunderNeFallback) {
-    // __ne__ not defined, but __eq__ is - should negate __eq__
     auto out = compileAndRun(
         "class ID {\n"
         "  def(v: int) {\n"
@@ -457,7 +426,6 @@ TEST(CodeGenE2E, DunderNeExplicit) {
 }
 
 TEST(CodeGenE2E, DunderEqDefaultPointer) {
-    // No __eq__ defined - should use pointer equality (two different instances != each other)
     auto out = compileAndRun(
         "class Node {\n"
         "  def(v: int) {\n"
@@ -504,7 +472,6 @@ TEST(CodeGenE2E, DunderLt) {
 }
 
 TEST(CodeGenE2E, DunderGtFallback) {
-    // __gt__ not defined, but __lt__ is - should use other.__lt__(self)
     auto out = compileAndRun(
         "class Rank {\n"
         "  def(v: int) {\n"
@@ -522,7 +489,6 @@ TEST(CodeGenE2E, DunderGtFallback) {
 }
 
 TEST(CodeGenE2E, DunderLeFallback) {
-    // __le__ not defined, but __lt__ and __eq__ are - should use __lt__ || __eq__
     auto out = compileAndRun(
         "class Val {\n"
         "  def(v: int) {\n"
@@ -545,7 +511,6 @@ TEST(CodeGenE2E, DunderLeFallback) {
 }
 
 TEST(CodeGenE2E, DunderGeFallback) {
-    // __ge__ not defined, but __lt__ is - should use not __lt__
     auto out = compileAndRun(
         "class Level {\n"
         "  def(v: int) {\n"
@@ -590,10 +555,6 @@ TEST(CodeGenE2E, DunderAllComparisons) {
     EXPECT_EQ(out, "eq\nne\nlt\ngt\nle\nge\n");
 }
 
-//===----------------------------------------------------------------------===//
-// Dunder Bool/Hash E2E
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, DunderBool) {
     auto out = compileAndRun(
         "class Truthy {\n"
@@ -613,7 +574,6 @@ TEST(CodeGenE2E, DunderBool) {
 }
 
 TEST(CodeGenE2E, DunderBoolDefault) {
-    // No __bool__ - class instances default to true
     auto out = compileAndRun(
         "class Thing {\n"
         "  def() {\n"
@@ -643,7 +603,6 @@ TEST(CodeGenE2E, DunderHash) {
 }
 
 TEST(CodeGenE2E, DunderHashDefault) {
-    // No __hash__ - default is pointer-as-int (non-zero for heap-allocated object)
     auto out = compileAndRun(
         "class Obj {\n"
         "  def() {\n"
@@ -656,10 +615,6 @@ TEST(CodeGenE2E, DunderHashDefault) {
     );
     EXPECT_EQ(out, "nonzero\n");
 }
-
-//===----------------------------------------------------------------------===//
-// Dunder Inherited/Combined E2E
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenE2E, DunderInherited) {
     auto out = compileAndRun(
@@ -705,10 +660,6 @@ TEST(CodeGenE2E, DunderCombinedPy) {
     );
     EXPECT_EQ(out, "1/2\neq\nlt\n");
 }
-
-//===----------------------------------------------------------------------===//
-// Dunder Arithmetic E2E
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenE2E, DunderAdd) {
     auto out = compileAndRun(
@@ -1115,10 +1066,6 @@ TEST(CodeGenE2E, DunderAbsReturnsInt) {
     EXPECT_EQ(out, "100\n");
 }
 
-//===----------------------------------------------------------------------===//
-// Dunder Container E2E
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, DunderLen) {
     auto out = compileAndRun(
         "class Bag {\n"
@@ -1376,10 +1323,6 @@ TEST(CodeGenE2E, DunderCombinedContainer) {
     EXPECT_EQ(out, "1\n42\nyes\n");
 }
 
-//===----------------------------------------------------------------------===//
-// Dunder Context Manager E2E
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, DunderWithBasic) {
     auto out = compileAndRun(
         "class Ctx {\n"
@@ -1549,10 +1492,6 @@ TEST(CodeGenE2E, DunderWithAfterBlock) {
     EXPECT_EQ(out, "inside\ncleaned\nafter\n");
 }
 
-//===----------------------------------------------------------------------===//
-// __call__ dunder - instances as callables
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenTest, DunderCallIR) {
     auto ir = generateIR(
         "class Multiplier {\n"
@@ -1671,10 +1610,6 @@ TEST(CodeGenTest, DunderCallVoid) {
     EXPECT_EQ(out, "fired\n");
 }
 
-// A `__call__` returning a non-primitive, then chained-accessed inline:
-// `obj()[k]` / `obj().field`. Regression for the silent miscompile where the
-// call-return type wasn't propagated, so the subscript fell back to
-// dragon_str_index (dict -> LLVM verify crash) / attribute read 0.
 TEST(CodeGenTest, DunderCallReturningDictSubscriptedInline) {
     auto out = compileAndRun(
         "class Box {\n"
@@ -1716,9 +1651,6 @@ TEST(CodeGenTest, DunderCallReturningInstanceAttributeInline) {
     EXPECT_EQ(out, "42\n");
 }
 
-// An entry-file generic class whose method/`__call__` return the class type
-// parameter T, chained-accessed inline. Regression for the double-type-check
-// that re-resolved the stamped class's `-> T` to Any on the second pass.
 TEST(CodeGenTest, GenericCellChainedAccessInline) {
     auto out = compileAndRun(
         "class Cell[T] {\n"

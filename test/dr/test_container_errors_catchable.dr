@@ -1,5 +1,3 @@
-# Pre-fix: these paths called exit(1), killing the process instead of raising.
-
 from unittest import TestCase, main
 
 

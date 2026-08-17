@@ -1,31 +1,3 @@
-# odb.commitlog - the in-file commit log (spec section 17).
-#
-# Every commit appends one logical entry: (csn, timestamp, txn ops). Ops carry
-# the schema id, docid, primary-key value, and the DBON post-image (or nothing
-# for a delete), so the log is logical: watch streams it, time travel resolves
-# it, and a replica of a different ODB version can apply it. Each entry also
-# records the catalog root that commit published, which is what lets
-# `schema@csn(N)` read straight through the snapshot at N with zero replay.
-#
-# Physical shape: entries live in ordinary COW pages (PT_LOG) allocated fresh
-# at commit time and chained BACKWARD - each entry's first page points at the
-# previous entry's first page. Nothing ever mutates a committed log page, so
-# the crash story is the pager's own: the entry becomes visible exactly when
-# the meta page flips log_tail to it. Pages of an entry larger than one page
-# chain FORWARD within the entry.
-#
-#   log page payload:
-#     0  prev_entry u64   first page of the previous entry (0 = oldest)
-#     8  next_page  u64   continuation page within THIS entry (0 = last)
-#     16 chunk_len  u32   entry bytes stored in this page
-#     20 data
-#
-# Retention (spec section 17): `retain = <n> txns | <duration> | none`,
-# default 1024 txns. Trimming frees an entry's pages into the ordinary free
-# list; the oldest retained CSN becomes the pager's retain floor, pinning
-# page reuse exactly like a live reader so every retained snapshot stays
-# readable. The cost of history is visible in file size, never hidden
-
 from odb.pager import Pager, PT_LOG, RETAIN_NONE, RETAIN_TXNS, RETAIN_SECS
 from odb.codec import blank, put_u32, put_u64, put_bytes
 from odb.codec import get_u8, get_u16, get_u32, get_u64, get_bytes
@@ -36,22 +8,18 @@ const _LP_NEXT: int = 8
 const _LP_LEN: int = 16
 const _LP_DATA: int = 20
 
-# Op kinds. add/set/put carry the full DBON post-image; del carries only the
-# docid + pk; define carries the schema/meta JSON so a fresh follower can
-# replay DDL too.
 const OP_ADD: int = 1
 const OP_SET: int = 2
 const OP_DEL: int = 3
 const OP_PUT: int = 4
 const OP_DEFINE: int = 5
 
-# One logical operation inside a committed transaction.
 class LogOp {
     kind: int
     schema_id: int
     docid: int
-    pk_json: str          # the primary-key value as JSON ("" if none)
-    image: bytes          # DBON post-image; define: JSON payload; del: empty
+    pk_json: str
+    image: bytes
 
     def(kind: int, schema_id: int, docid: int, pk_json: str, image: bytes) {
         self.kind = kind
@@ -62,16 +30,15 @@ class LogOp {
     }
 }
 
-# One committed transaction as recorded in the log.
 class LogEntry {
     csn: int
-    ts: int               # unix seconds at commit
-    catalog_root: int     # the catalog root this commit published
+    ts: int
+    catalog_root: int
     docid_counter: int
     ops: list[LogOp]
-    first_page: int       # runtime: where this entry starts on disk
-    pages: list[int]      # runtime: every page the entry occupies
-    prev_page: int        # runtime: first page of the previous entry
+    first_page: int
+    pages: list[int]
+    prev_page: int
 
     def(csn: int, ts: int, catalog_root: int, docid_counter: int) {
         self.csn = csn
@@ -84,8 +51,6 @@ class LogEntry {
         self.prev_page = 0
     }
 }
-
-#--- entry (de)serialization ----------------------------------------------#
 
 def _out_u8(out: list[int], v: int) -> None {
     out.append(v & 0xFF)
@@ -141,9 +106,6 @@ def _encode_entry(e: LogEntry) -> bytes {
     return bytes(out)
 }
 
-# The wire form of one entry. Replication (spec section 19) ships committed
-# entries verbatim in this encoding: what the primary appended is byte for
-# byte what the follower applies.
 def encode_entry(e: LogEntry) -> bytes {
     return _encode_entry(e)
 }
@@ -179,11 +141,9 @@ def _decode_entry(data: bytes) -> LogEntry {
     return e
 }
 
-#--- the log --------------------------------------------------------------#
-
 class CommitLog {
     pager: Pager
-    retained: list[LogEntry]     # oldest first, decoded, with page lists
+    retained: list[LogEntry]
 
     def(pager: Pager) {
         self.pager = pager
@@ -191,8 +151,6 @@ class CommitLog {
         self.reload()
     }
 
-    # Deferred variant: the caller reload()s on first use, so opening a file
-    # for plain reads never walks the retained chain.
     def(pager: Pager, load: bool) {
         self.pager = pager
         self.retained = []
@@ -201,9 +159,6 @@ class CommitLog {
         }
     }
 
-    # Rebuild the in-memory retained list from the committed on-disk chain:
-    # walk backward from log_tail via prev pointers, stopping at log_head
-    # (pointers past the head reference trimmed pages and are never followed).
     def reload() -> None {
         self.retained = []
         pg: int = self.pager.log_tail
@@ -224,8 +179,6 @@ class CommitLog {
         }
     }
 
-    # Read one whole entry starting at its first page, following the intra-
-    # entry forward chain.
     def _read_entry(first_pgid: int) -> LogEntry {
         chunks: list[int] = []
         pages: list[int] = []
@@ -256,13 +209,10 @@ class CommitLog {
         return e
     }
 
-    # Bytes of entry data one log page can hold.
     def _chunk_capacity() -> int {
         return self.pager.payload_size() - _LP_DATA
     }
 
-    # Stage `e` into fresh COW pages and link it as the new tail. Part of the
-    # surrounding pager transaction: nothing is durable until pager.commit().
     def append(e: LogEntry) -> None {
         data: bytes = _encode_entry(e)
         cap: int = self._chunk_capacity()
@@ -309,15 +259,11 @@ class CommitLog {
         self.retained.append(e)
     }
 
-    # Drop entries that fall outside the retention window, freeing their pages
-    # into the ordinary free list, and re-pin the pager's retain floor at the
-    # oldest CSN that stays readable. Runs inside the commit that appends the
-    # newest entry, so head/tail flip atomically with everything else.
     def trim(now_ts: int) -> None {
         mode: int = self.pager.retain_mode
         value: int = self.pager.retain_value
 
-        keep_from: int = 0                       # index of first kept entry
+        keep_from: int = 0
         if mode == RETAIN_NONE {
             keep_from = len(self.retained)
         } else if mode == RETAIN_TXNS {
@@ -351,7 +297,6 @@ class CommitLog {
         }
     }
 
-    # Entries with csn > since, oldest first (the watch/replication feed).
     def since(csn: int) -> list[LogEntry] {
         out: list[LogEntry] = []
         for e in self.retained {
@@ -362,9 +307,6 @@ class CommitLog {
         return out
     }
 
-    # The newest entry whose CSN is <= the asked-for CSN (time travel by CSN),
-    # or the newest whose timestamp is <= the asked-for time (by date). Returns
-    # an index into `retained`, or -1.
     def at_csn(csn: int) -> int {
         i: int = len(self.retained) - 1
         while i >= 0 {
@@ -395,7 +337,6 @@ class CommitLog {
         return len(self.retained)
     }
 
-    # The oldest retained CSN, or 0 if no history is retained.
     def oldest_csn() -> int {
         if len(self.retained) == 0 {
             return 0
@@ -419,8 +360,6 @@ def _all_digits(s: str) -> bool {
     return True
 }
 
-# Parse the user-facing retention knob: "none", "<n> txns", or a duration
-# "<n>s|m|h|d" (spec section 17). Returns [mode, value].
 def parse_retain(spec: str) -> list[int] {
     s: str = spec.strip()
     if s == "none" {

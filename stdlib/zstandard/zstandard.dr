@@ -1,15 +1,3 @@
-# zstandard.dr - Zstandard (zstd) compression / decompression.
-#
-# Dragon-specific stdlib module (zstd is not in CPython's stdlib). The
-# surface mirrors the popular `python-zstandard` package's high-level API
-# for parity with downstream code.
-#
-# Default compression level is 3 - the same as the `zstd` CLI tool's
-# default and python-zstandard's ZstdCompressor default. zstd accepts
-# 1..22 (or negative ultra-fast values down to -7); 3 is a strong
-# size/speed trade-off for tarball workloads.
-
-
 extern "C" def dragon_zstd_compress(src: bytes, level: int) -> bytes
 extern "C" def dragon_zstd_decompress(src: bytes) -> bytes
 extern "C" def dragon_read_file_bytes(path: str) -> bytes
@@ -19,9 +7,6 @@ extern "C" def dragon_write_file_bytes(path: str, data: bytes) -> int
 const _DEFAULT_LEVEL: int = 3
 
 
-# Module-level convenience: the most-used path. Matches the python-zstandard
-# top-level helpers (which internally allocate a fresh ZstdCompressor and
-# discard it). For repeated work on the same dictionary, use ZstdCompressor.
 def compress(data: bytes, level: int = _DEFAULT_LEVEL) -> bytes {
     return dragon_zstd_compress(data, level)
 }
@@ -32,11 +17,6 @@ def decompress(data: bytes) -> bytes {
 }
 
 
-# Reusable compressor - currently a thin wrapper around the level. When
-# zstd dictionaries land we'll cache the dictionary on `self` so consecutive
-# calls share the prepared compression context. python-zstandard's
-# ZstdCompressor is the API we mirror; copy_stream / chunker etc. are
-# follow-ups (zstd's streaming API is exposed but not yet wrapped).
 class ZstdCompressor {
     def(level: int = _DEFAULT_LEVEL) {
         self.level = level
@@ -55,8 +35,6 @@ class ZstdDecompressor {
 }
 
 
-# File-style helpers. For symmetry with `gzip.open`, these read/write the
-# whole file in one shot and compose with the disk-side runtime helpers.
 class ZstdFile {
     def(filename: str, mode: str, level: int) {
         self.filename = filename

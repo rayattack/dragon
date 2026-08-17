@@ -6,7 +6,6 @@ import signal
 
 class SignalTests(TestCase) {
     def test_qualified_constants() {
-        # Module-qualified access (gap #7 verification).
         self.assertEqual(signal.SIGINT, 2)
         self.assertEqual(signal.SIGKILL, 9)
         self.assertEqual(signal.SIGTERM, 15)

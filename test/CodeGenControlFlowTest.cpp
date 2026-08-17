@@ -1,9 +1,5 @@
 #include "CodeGenTestHelpers.h"
 
-//===----------------------------------------------------------------------===//
-// Control Flow IR Tests
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenTest, IfStatement) {
     auto ir = generateIR("x: int = 5\nif x > 3 {\n  print(x)\n}");
     EXPECT_NE(ir.find("br i1"), std::string::npos);
@@ -28,7 +24,6 @@ TEST(CodeGenTest, WhileLoop) {
 }
 
 TEST(CodeGenTest, IfFloatConditionCoercion) {
-    // Float conditions should be coerced to bool via FCmpONE
     auto ir = generateIR("x: float = 1.0\nif x {\n  print(1)\n}");
     EXPECT_NE(ir.find("fcmp one"), std::string::npos);
 }
@@ -39,18 +34,14 @@ TEST(CodeGenTest, WhileFloatConditionCoercion) {
 }
 
 TEST(CodeGenTest, ElifFloatConditionCoercion) {
-    // Elif with float should also be coerced (was missing f64 handling)
     auto ir = generateIR(
         "x: int = 0\n"
         "y: float = 1.0\n"
         "if x {\n  print(1)\n} elif y {\n  print(2)\n}");
-    // Should have two fcmp/icmp coercions: one for if (int), one for elif (float)
     EXPECT_NE(ir.find("tobool"), std::string::npos);
 }
 
 TEST(CodeGenE2E, ElseIfChainSameAsElif) {
-    // `else if` is accepted as an alias for `elif`. Mixing the two
-    // in one chain works too.
     auto out = compileAndRun(
         "def cls(x: int) -> str {\n"
         "    if x > 100 {\n"
@@ -103,7 +94,6 @@ TEST(CodeGenTest, ReturnStatement) {
 }
 
 TEST(CodeGenTest, PassStatement) {
-    // Pass is a no-op, should generate valid IR
     auto ir = generateIR("pass");
     EXPECT_NE(ir.find("define i32 @main("), std::string::npos);
 }
@@ -112,10 +102,6 @@ TEST(CodeGenTest, AssertStatement) {
     auto ir = generateIR("assert True");
     EXPECT_NE(ir.find("dragon_assert"), std::string::npos);
 }
-
-//===----------------------------------------------------------------------===//
-// For-In IR Tests
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenTest, ForInList) {
     auto ir = generateIR("nums: list[int] = [1, 2, 3]\nfor x in nums {\n  print(x)\n}");
@@ -154,10 +140,6 @@ TEST(CodeGenTest, ForInDictItems) {
     EXPECT_NE(ir.find("dragon_tuple_get"), std::string::npos)
         << "Expected tuple unpacking for dict items";
 }
-
-//===----------------------------------------------------------------------===//
-// Control Flow E2E Tests
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenE2E, ForRangeThreeArgs) {
     auto output = compileAndRun(
@@ -246,12 +228,7 @@ TEST(CodeGenE2E, ForInDictValues) {
     EXPECT_EQ(output, "100\n200\n");
 }
 
-//===----------------------------------------------------------------------===//
-// Statement E2E Tests
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, DeleteStmtBasic) {
-    // del should release the variable and set it to null
     auto output = compileAndRun(
         "x: int = 42\n"
         "del x\n"
@@ -261,7 +238,6 @@ TEST(CodeGenE2E, DeleteStmtBasic) {
 }
 
 TEST(CodeGenE2E, DeleteStmtString) {
-    // del on a string variable should decref and zero the slot
     auto output = compileAndRun(
         "s: str = \"hello\" + \" world\"\n"
         "del s\n"
@@ -271,7 +247,6 @@ TEST(CodeGenE2E, DeleteStmtString) {
 }
 
 TEST(CodeGenTest, DeleteStmtIR) {
-    // IR should contain dragon_decref_str for del on a string variable
     auto ir = generateIR(
         "s: str = \"hello\" + \" world\"\n"
         "del s\n"

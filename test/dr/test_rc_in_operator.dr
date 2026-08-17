@@ -42,7 +42,6 @@ class Probe(TestCase) {
     }
 
     def test_borrowed_guards() {
-        # Slot operands and borrowed getters must NOT be drained.
         s: str = "abc-wwwwwwwwwwwwwwww"
         d: dict[int, str] = {1: "one-wwwwwwwwwwwwwwww"}
         i: int = 0

@@ -5,12 +5,10 @@
 extern "C" def dragon_urandom(n: int) -> bytes
 
 def _hex_char(v: int) -> str {
-    # Map 0-15 to "0"-"f".
     return f"{v:x}"
 }
 
 def _hex_byte(v: int) -> str {
-    # Map 0-255 to two hex characters, high nibble first.
     return _hex_char((v >> 4) & 15) + _hex_char(v & 15)
 }
 
@@ -25,12 +23,10 @@ def _hex_range(b: bytes, start: int, end: int) -> str {
 }
 
 def uuid4() -> str {
-    # Format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx (RFC 4122 §4.4). Takes 16
-    # random bytes, then forces the version nibble to 4 and variant bits to 10.
     const b: bytes = dragon_urandom(16)
 
-    const b6: int = (b[6] & 15) | 64      # 0x4_ : version 4
-    const b8: int = (b[8] & 63) | 128     # 10xx xxxx : RFC 4122 variant
+    const b6: int = (b[6] & 15) | 64
+    const b8: int = (b[8] & 63) | 128
 
     const p1: str = _hex_range(b, 0, 4)
     const p2: str = _hex_range(b, 4, 6)
@@ -55,7 +51,6 @@ def uuid_hex(uuid: str) -> str {
 }
 
 def uuid_version(uuid: str) -> int {
-    # The version char is at position 14 (the char after the second dash).
     const ch: str = uuid[14:15]
     if ch == "0" { return 0 }
     if ch == "1" { return 1 }
@@ -93,7 +88,6 @@ def _is_hex_char(ch: str) -> bool {
 }
 
 def uuid_is_valid(uuid: str) -> bool {
-    # Validate UUID format: 8-4-4-4-12, all hex digits, version 1-5.
     if len(uuid) != 36 { return false }
 
     if uuid[8:9] != "-" { return false }
@@ -101,7 +95,6 @@ def uuid_is_valid(uuid: str) -> bool {
     if uuid[18:19] != "-" { return false }
     if uuid[23:24] != "-" { return false }
 
-    # Check all non-dash characters are hex
     i: int = 0
     while i < 36 {
         if i != 8 {
@@ -126,7 +119,6 @@ def uuid_is_valid(uuid: str) -> bool {
 }
 
 def uuid_compare(a: str, b: str) -> int {
-    # Lexicographic compare on the hex-only (dash-stripped) form; -1/0/1.
     const ha: str = uuid_hex(a)
     const hb: str = uuid_hex(b)
     if ha < hb { return -1 }

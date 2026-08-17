@@ -1,11 +1,7 @@
-# test/dr/test_decode_any.dr - the boxed tier through the generic door 
-
-
 from unittest import TestCase, main
 from json import decode
 
 
-# The ffi.call[T] shape: a generic that holds only a T and forwards it.
 def route[T](body: bytes) -> T {
     return decode[T](body)
 }
@@ -134,7 +130,6 @@ class DecodeDictAnyTests(TestCase) {
 
 
 class DecodeAnyGenericDoorTests(TestCase) {
-    # The whole point of the stamps: generic code that holds only a T.
     def test_transitive_dict_composition() {
         const d: dict[str, Any] = route[dict[str, Any]]('{"ok": true, "n": 5}'.encode("utf-8"))
         self.assertEqual(len(d), 2)
@@ -148,8 +143,6 @@ class DecodeAnyGenericDoorTests(TestCase) {
         self.assertEqual(s, "plain")
     }
 
-    # The box-free stamps and the boxed Any stamps coexist in one program;
-    # the concrete stamps must keep decoding natively next to the Any ones.
     def test_box_free_stamps_coexist() {
         const d: dict[str, int] = decode[dict[str, int]]('{"a": 1, "b": 2}'.encode("utf-8"))
         self.assertEqual(d["a"], 1)

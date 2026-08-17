@@ -1,31 +1,3 @@
-# odb - the embedded object database (ODB). Single .odb file, ACID, crash-safe.
-#
-#   from odb import ODB, Documents, Document
-#
-#   db: ODB = ODB("shop.odb")                       # or connect("shop.odb")
-#   customers: Documents = db.schema("customers", customers_schema).meta({
-#       primary: ["id"], unique: ["email"], index: ["city"],
-#   })
-#   ada: Document = customers.save({id: 1, name: "Ada", email: "ada@x.com"})
-#   ada.edit({city: "Abuja"})
-#   ada.wipe()
-#   one: Document = customers.read(ada.id)          # by _id; raises NotFound if gone
-#   by_email: Document = customers.read(email="ada@x.com")   # by unique index
-#   rows: list[Document] = customers.all()
-#
-# A .odb file is a forest of B+trees under one catalog (spec section 13). The
-# catalog tree is keyed by schema id; each entry carries the schema's compiled
-# definition, its metadata, the root of its document tree (docid -> DBON), and
-# the root of every index tree it declares (memcomparable key -> docid). A write
-# copy-on-writes the document tree AND every affected index tree AND the catalog
-# entry, then commits them in ONE atomic pager commit, so a crash leaves the
-# whole database on the previous or the next consistent snapshot, never between
-#
-# Integrity (uniqueness) is validated during the write and the whole thing rolls
-# back on violation (spec section 7): a rejected save never leaves staged pages
-# behind. M4 scope: primary/unique/index maintenance and keyed reads; refs and
-# OQL (db.find) arrive with the M4 refs stage and M5
-
 from odb.vfs import FileVFS, VFS
 from odb.pager import Pager, create, open_pager, RETAIN_NONE
 from odb.commitlog import CommitLog, LogEntry, LogOp, parse_retain
@@ -53,16 +25,6 @@ from json import dumps, loads
 from time import now
 from binascii import unhexlify
 
-# Catalog entry layout (value in the catalog tree, keyed by schema id):
-#   0  doc_tree_root   u64
-#   8  schema_id       u16
-#   10 version         u16
-#   12 name_len        u16
-#   14 schema_json_len u32
-#   18 meta_json_len   u32
-#   22 index_count     u16
-#   24 name | schema_json | meta_json | index table
-#      index table: index_count * (name_len u16, name bytes, root u64)
 const _E_DOC_ROOT: int = 0
 const _E_SID: int = 8
 const _E_VER: int = 10
@@ -87,8 +49,6 @@ def _decode_key(kb: bytes) -> int {
     return v
 }
 
-# 8-byte big-endian docid, used as an index-tree value and as the tiebreaker
-# suffix of a non-unique index key.
 def _docid_be(d: int) -> bytes {
     out: list[int] = []
     i: int = 7
@@ -148,7 +108,6 @@ def _copy_si(d: dict[str, int]) -> dict[str, int] {
 }
 
 
-# The result of `db.check()`: the whole-database verification pass (spec 21).
 class CheckReport {
     ok: bool
     docs: int
@@ -177,24 +136,22 @@ class ODB {
     catalog: BTree
     _schemas: dict[str, CompiledSchema]
     _metac: dict[str, CompiledMeta]
-    _roots: dict[int, int]              # schema_id -> doc tree root
-    _index_roots: dict[str, int]        # "sid/name" -> index tree root
-    _metas: dict[str, str]              # meta_json per schema name
-    _by_sid: dict[int, str]             # schema_id -> schema name
-    _touched: dict[int, bool]           # schema ids whose entry changed this txn
+    _roots: dict[int, int]
+    _index_roots: dict[str, int]
+    _metas: dict[str, str]
+    _by_sid: dict[int, str]
+    _touched: dict[int, bool]
     _next_id: int
-    _wlock: Optional[WriterLock]        # cross-process writer lock (file-backed)
-    _log: CommitLog                     # the commit log (spec section 17)
-    _log_loaded: bool                   # retained entries loaded lazily
-    _txn_ops: list[LogOp]               # ops recorded by the current txn
-    _frozen: bool                       # a time-travel view: reads only
-    _following: bool                    # paired to a primary: local writes fork
-    _raft: Optional[RaftTail]           # attached by the HA layer (S19 v3b)
-    _capture: bool                      # leader capture mode: _flush captures
-    _captured_entries: list[LogEntry]   # entries captured for consensus
+    _wlock: Optional[WriterLock]
+    _log: CommitLog
+    _log_loaded: bool
+    _txn_ops: list[LogOp]
+    _frozen: bool
+    _following: bool
+    _raft: Optional[RaftTail]
+    _capture: bool
+    _captured_entries: list[LogEntry]
 
-    # Open (or create) a database file. Acquires the cross-process writer lock
-    # on the `<path>.lock` sidecar (spec section 16): a second writer fails fast.
     def(path: str) {
         v: FileVFS = FileVFS(path)
         pg: Pager = Pager(v)
@@ -212,13 +169,10 @@ class ODB {
         self._wlock = wl
     }
 
-    # Low-level: wrap an already-open vfs + pager (used by tests and reopen).
     def(vfs: VFS, pager: Pager) {
         self._boot_at(vfs, pager, pager.catalog_root, False)
     }
 
-    # A read-only view of the database as of an old catalog root (time travel).
-    # Shares the pager; every write path refuses.
     def(vfs: VFS, pager: Pager, catalog_root: int) {
         self._boot_at(vfs, pager, catalog_root, True)
     }
@@ -247,19 +201,10 @@ class ODB {
         self._load_catalog()
     }
 
-    # Attach the persisted raft tail (spec section 19 v3b). From here on,
-    # apply() and fast_forward() prune the tail inside their own commit, so
-    # the consensus base, the freed chain pages, and the applied CSN always
-    # publish in one atomic meta flip.
     def attach_raft(tail: RaftTail) -> None {
         self._raft = tail
     }
 
-    # Leader capture (v3b): execute exactly like a local write, but instead
-    # of committing, _flush raises CaptureSignal so the statement rolls back,
-    # and the would-be commit is preserved here as a log entry for consensus
-    # to replicate. The entry replays through apply() - the identical path a
-    # follower uses - once a quorum holds it.
     def capture(on: bool) -> None {
         self._capture = on
     }
@@ -270,9 +215,6 @@ class ODB {
         return out
     }
 
-    # Load the retained commit log on first use (watch, time travel, or the
-    # first write) and pin the retention floor so page reuse never eats a
-    # snapshot the retention window still guarantees.
     def _ensure_log() -> None {
         if not self._log_loaded {
             self._log.reload()
@@ -284,10 +226,6 @@ class ODB {
         }
     }
 
-    # While a Follower is paired to this database, local writes are refused:
-    # a local commit would consume a CSN that aliases the primary's next
-    # entry, and the aliased entry would then be silently unappliable - a
-    # fork the (uuid, csn) lineage pair cannot see. Detach to promote.
     def set_following(on: bool) -> None {
         self._following = on
     }
@@ -307,8 +245,6 @@ class ODB {
             raise ODBError("this handle is a read-only time-travel snapshot")
         }
     }
-
-    #--- catalog ----------------------------------------------------------#
 
     def _load_catalog() -> None {
         if self.catalog.root == 0 {
@@ -383,7 +319,6 @@ class ODB {
         return sid
     }
 
-    # Serialize the current on-disk state of one schema into its catalog value.
     def _make_entry(cs: CompiledSchema) -> bytes {
         sid: int = cs.schema_id
         doc_root: int = self._roots[sid]
@@ -417,7 +352,6 @@ class ODB {
         return head + name_b + sj_b + mj_b + bytes(ix)
     }
 
-    # Stage this schema's catalog entry into the catalog tree (no commit yet).
     def _write_entry(cs: CompiledSchema) -> None {
         entry: bytes = self._make_entry(cs)
         self.catalog.insert(cs.schema_id, entry)
@@ -432,20 +366,12 @@ class ODB {
         return IndexTree(self.pager, self._index_roots[_ikey(sid, decl.name)])
     }
 
-    # Record that schema `sid`'s catalog entry changed, so _flush rewrites it.
     def _mark(sid: int) -> None {
         self._touched[sid] = True
     }
 
-    # Rewrite every touched schema's catalog entry into the catalog tree,
-    # append this transaction's log entry, trim retention, and commit the
-    # whole thing (doc trees, index trees, catalog, log, meta) atomically.
     def _flush() -> None {
         if self._capture {
-            # Leader capture (v3b): everything this write did - validation,
-            # docid allocation, integrity - stands, but nothing commits here.
-            # The op list becomes the consensus payload and the statement
-            # unwinds through its ordinary rollback path.
             if self.pager.retain_mode == RETAIN_NONE {
                 raise ODBError("consensus requires a retention window: ops are not recorded under retain 'none'")
             }
@@ -469,8 +395,6 @@ class ODB {
         self.pager.commit()
     }
 
-    # Undo a failed transaction: restore the in-memory root maps, drop staged
-    # pages, and rebuild the retained-log view from the committed chain.
     def _rollback(sr: dict[int, int], si: dict[str, int]) -> None {
         self._roots = sr
         self._index_roots = si
@@ -482,8 +406,6 @@ class ODB {
         }
     }
 
-    # Record one logical op for the commit log. Skipped entirely when history
-    # is off (retain none), so bulk paths never buffer post-images for nothing.
     def _record(kind: int, cs: CompiledSchema, docid: int, doc: dict[str, Any], image: bytes) -> None {
         if self.pager.retain_mode == RETAIN_NONE {
             return
@@ -500,8 +422,6 @@ class ODB {
         self._txn_ops.append(LogOp(kind, cs.schema_id, docid, pk_json, image))
     }
 
-    # Record a DDL op (schema define / metadata change) so followers and
-    # `changes()` consumers see structure changes too, not just data.
     def _record_define(cs: CompiledSchema, meta_json: str) -> None {
         if self.pager.retain_mode == RETAIN_NONE {
             return
@@ -514,8 +434,6 @@ class ODB {
         self._txn_ops.append(LogOp(OP_DEFINE, cs.schema_id, 0, "", dumps(payload).encode()))
     }
 
-    #--- rollback snapshotting --------------------------------------------#
-
     def _snap_ii() -> dict[int, int] {
         return _copy_ii(self._roots)
     }
@@ -523,8 +441,6 @@ class ODB {
     def _snap_si() -> dict[str, int] {
         return _copy_si(self._index_roots)
     }
-
-    #--- index maintenance ------------------------------------------------#
 
     def _index_add(cs: CompiledSchema, decl: IndexDecl, doc: dict[str, Any], docid: int) -> None {
         sid: int = cs.schema_id
@@ -561,8 +477,6 @@ class ODB {
         self._mark(sid)
     }
 
-    # Field indexes only; reverse (ref) trees are keyed by docids and maintained
-    # by _refs_add / _refs_remove, so they are skipped here.
     def _index_add_all(cs: CompiledSchema, cm: CompiledMeta, doc: dict[str, Any], docid: int) -> None {
         for decl in cm.indexes {
             if decl.kind != IK_REVERSE {
@@ -579,10 +493,6 @@ class ODB {
         }
     }
 
-    #--- refs: forward checks + reverse index + on_delete -----------------#
-
-    # Resolve a ref value to the target document's docid via the target's unique
-    # index. Raises IntegrityError if the target is missing (forward check).
     def _resolve_ref(r: RefDecl, val: Any) -> int {
         if r.target_schema not in self._schemas {
             raise IntegrityError("ref '" + r.source_path + "' target schema '" + r.target_schema + "' is not defined")
@@ -625,7 +535,6 @@ class ODB {
         return out
     }
 
-    # Forward-check every ref of a document and record its reverse edges.
     def _refs_add(cs: CompiledSchema, cm: CompiledMeta, doc: dict[str, Any], docid: int) -> None {
         for r in cm.refs {
             target_docid: int = self._resolve_ref(r, doc[r.source_path])
@@ -640,9 +549,6 @@ class ODB {
         }
     }
 
-    # Enforce on_delete for every ref (in any schema) that targets this document
-    # before it is removed. restrict blocks; cascade wipes the referrers within
-    # the same transaction. `visited` breaks reference cycles.
     def _handle_incoming_refs(target_cs: CompiledSchema, target_docid: int, visited: dict[str, bool]) -> None {
         for sname in self._metac {
             scm: CompiledMeta = self._metac[sname]
@@ -667,9 +573,6 @@ class ODB {
         }
     }
 
-    #--- schema handles ---------------------------------------------------#
-
-    # Declare a collection and return its handle.
     def schema(name: str, definition: dict[str, Any]) -> Documents {
         self._assert_writable()
         self._assert_not_following()
@@ -695,9 +598,6 @@ class ODB {
             self._mark(sid)
             self._flush()
         } except Exception as e {
-            # A failed (or captured) define must also unwind the registries,
-            # not just the trees: a schema whose entry maps exist while its
-            # roots do not is a KeyError waiting in every later lookup.
             del self._schemas[name]
             del self._by_sid[sid]
             del self._metas[name]
@@ -709,7 +609,6 @@ class ODB {
         return Documents(self, cs)
     }
 
-    # Fetch an already-declared collection's handle.
     def schema(name: str) -> Documents {
         if name not in self._schemas {
             raise NotFound("no schema named '" + name + "'")
@@ -717,29 +616,20 @@ class ODB {
         return Documents(self, self._schemas[name])
     }
 
-    # OQL reads (spec section 8). Three overloads: runtime text, text with
-    # $name params, and the template[OQL] value (the blessed injection-safe
-    # form). Parsed and type-checked at prepare time, then executed over the
-    # document tree.
     def find(query: str) -> list[Document] {
         return self._find_q(parse(query))
     }
 
-    # OQL read with `$name` parameters injected as values.
     def find(query: str, params: dict[str, Any]) -> list[Document] {
         q: OqlQuery = parse(query)
         bind_query(q, params)
         return self._find_q(q)
     }
 
-    # OQL read from a `template[OQL]` value: the canonical `$$N` text plus its
-    # extracted parameters, bound positionally through the same value-only
-    # injection path as `$name`. Parameters are never spliced into the text.
     def find(query: OQL) -> list[Document] {
         return self._find_q(self._bind_template(query))
     }
 
-    # Parse a template[OQL] value and bind its extracted params positionally.
     def _bind_template(query: OQL) -> OqlQuery {
         q: OqlQuery = parse(query.canonical)
         binds: dict[str, Any] = self._tpl_binds(query)
@@ -749,14 +639,6 @@ class ODB {
         return q
     }
 
-    #--- Typed reads (spec section 20) -------------------------------------#
-    # Row classes hydrate themselves: T's constructor takes the matched
-    # Document and pulls fields by subscript. The typed verbs accept only
-    # template[OQL] values (a generic method has exactly one signature), so
-    # typed rows always ride the injection-safe parameter path; runtime
-    # strings stay on the untyped find().
-
-    # Every match, hydrated: one T per matching document.
     def all[T](query: OQL) -> list[T] {
         docs: list[Document] = self.find(query)
         out: list[T] = []
@@ -766,7 +648,6 @@ class ODB {
         return out
     }
 
-    # Exactly one match: zero raises NoRows, two or more raises MultipleRows.
     def one[T](query: OQL) -> T {
         docs: list[Document] = self.find(query)
         if len(docs) == 0 {
@@ -778,8 +659,6 @@ class ODB {
         return T(docs[0])
     }
 
-    # A single scalar: exactly one row AND exactly one projected plain field,
-    # e.g. val[int](template[OQL] { customers ? id == !{uid} { age } }).
     def val[T](query: OQL) -> T {
         q: OqlQuery = self._bind_template(query)
         if q.project_all or len(q.fields) != 1 {
@@ -818,7 +697,6 @@ class ODB {
         out: list[Document] = []
 
         if is_aggregate(q) {
-            # collect the matching documents, then group + aggregate into rows
             hits: list[dict[str, Any]] = []
             for pair in tree.items() {
                 doc: dict[str, Any] = decode(cs, pair[1])
@@ -846,9 +724,6 @@ class ODB {
         return self._pipeline(out, q.stages)
     }
 
-    # Apply the pipeline stages (sort / take / skip) in order, mutating ONE
-    # owned working list in place - no intermediate lists, no reassignment - so
-    # the shared Document refs are never churned through list create/destroy.
     def _pipeline(rows: list[Document], stages: list[Stage]) -> list[Document] {
         if len(stages) == 0 {
             return rows
@@ -869,12 +744,6 @@ class ODB {
         return work
     }
 
-    #--- OQL writes (spec section 9) --------------------------------------#
-
-    # Execute an OQL write statement (or an `atomic { ... }` block) and return
-    # the number of documents affected. The whole program commits as ONE
-    # transaction: any failure (validation, uniqueness, ref integrity) rolls the
-    # entire thing back.
     def run(oql: str) -> int {
         empty: dict[str, Any] = {}
         return self._run(oql, empty)
@@ -884,9 +753,6 @@ class ODB {
         return self._run(oql, params)
     }
 
-    # OQL write from a `template[OQL]` value: canonical `$$N` text plus its
-    # extracted parameters, bound as values (never spliced into the text) -
-    # the injection-safe write form, symmetric with find(OQL).
     def run(query: OQL) -> int {
         return self._run(query.canonical, self._tpl_binds(query))
     }
@@ -920,7 +786,6 @@ class ODB {
         }
         cs: CompiledSchema = self._schemas[st.source]
 
-        # prepare-time checks: filter + body expressions against the schema
         if st.has_filter {
             tc_pred(cs, st.filter)
         }
@@ -962,7 +827,6 @@ class ODB {
         return len(ids)
     }
 
-    # Build a fresh document from an add body (exprs evaluate against no doc).
     def _build_doc(cs: CompiledSchema, wd: WriteDoc) -> dict[str, Any] {
         empty: dict[str, Any] = {}
         doc: dict[str, Any] = {}
@@ -974,8 +838,6 @@ class ODB {
         return doc
     }
 
-    # Build a set patch (exprs evaluate against the CURRENT document, so
-    # `total: total + 10` works).
     def _build_patch(cs: CompiledSchema, docid: int, wd: WriteDoc) -> dict[str, Any] {
         doc: dict[str, Any] = decode(cs, self._tree(cs).get(docid))
         patch: dict[str, Any] = {}
@@ -987,10 +849,6 @@ class ODB {
         return patch
     }
 
-    #--- OQL with nested refs / existence joins (M5.4) --------------------#
-
-    # A ref query nests related collections (N:1 -> object, 1:N -> array via the
-    # reverse index) and/or constrains the parent by existence (+ / -).
     def _find_refs(cs: CompiledSchema, q: OqlQuery) -> list[Document] {
         if q.has_filter {
             tc_pred(cs, q.filter)
@@ -1054,7 +912,6 @@ class ODB {
         return out
     }
 
-    # Resolve one nested-ref field: a single object (N:1) or a list (1:N).
     def _resolve_ref(cs: CompiledSchema, pf: ProjField, doc: dict[str, Any], docid: int) -> Any {
         rel: _Rel = self._resolve_rel(cs, pf.alias)
         if rel.kind == 1 {
@@ -1089,7 +946,6 @@ class ODB {
         return res_arr
     }
 
-    # The target docid a forward ref points at, or -1 if it does not resolve.
     def _probe_target(cs: CompiledSchema, rel: _Rel, doc: dict[str, Any]) -> int {
         tcs: CompiledSchema = rel.other_cs
         tcm: CompiledMeta = self._metac[tcs.name]
@@ -1145,9 +1001,6 @@ class ODB {
         return False
     }
 
-    # Resolve a relationship name from `cs`: a forward ref (kind 1, N:1) whose
-    # source field is `relname` or `relname_id`, or a reverse ref (kind 2, 1:N)
-    # from a schema named `relname` that references `cs`.
     def _resolve_rel(cs: CompiledSchema, relname: str) -> _Rel {
         cm: CompiledMeta = self._metac[cs.name]
         i: int = 0
@@ -1171,12 +1024,6 @@ class ODB {
         raise PrepareError("OQL: '" + relname + "' is not a relationship of '" + cs.name + "'")
     }
 
-    #--- time travel (spec section 17) -------------------------------------#
-
-    # Execute a `source@csn(N)` / `source@<date>` read: resolve the newest log
-    # entry at or before the target, then read through a frozen view booted
-    # from the catalog root that commit published. The retention floor
-    # guarantees every page of a retained snapshot is still intact.
     def _find_at(q: OqlQuery) -> list[Document] {
         self._ensure_log()
         idx: int = -1
@@ -1197,10 +1044,6 @@ class ODB {
         return view._find_q(q)
     }
 
-    #--- commit log feeds: changes() and watch (spec section 17) ----------#
-
-    # The raw logical feed: every op committed after `since`, oldest first,
-    # including deletes and DDL. This is what replication (M10) ships.
     def changes(since: int) -> list[Change] {
         self._ensure_log()
         out: list[Change] = []
@@ -1234,9 +1077,6 @@ class ODB {
         return ch
     }
 
-    # `watch orders ? status == "paid" { id, total }`: a resumable feed of
-    # matching post-images (spec section 17). Starts at the current CSN (only
-    # future commits) unless `since` resumes from an earlier token.
     def watch(query: str) -> Watch {
         empty: dict[str, Any] = {}
         return self._watch_q(query, empty, self.pager.last_csn)
@@ -1251,8 +1091,6 @@ class ODB {
         return self._watch_q(query, params, since)
     }
 
-    # Watch a template[OQL] query: same injection-safe value binding as
-    # find(OQL), from the current CSN or an explicit resume token.
     def watch(query: OQL) -> Watch {
         return self._watch_q(query.canonical, self._tpl_binds(query), self.pager.last_csn)
     }
@@ -1261,8 +1099,6 @@ class ODB {
         return self._watch_q(query.canonical, self._tpl_binds(query), since)
     }
 
-    # Extract a template[OQL] value's positional params into the $name-shaped
-    # dict the parse/bind path consumes ("0", "1", ...).
     def _tpl_binds(query: OQL) -> dict[str, Any] {
         binds: dict[str, Any] = {}
         i: int = 0
@@ -1302,10 +1138,6 @@ class ODB {
         return Watch(self, cs, q, since)
     }
 
-    #--- retention knob (spec section 17) ----------------------------------#
-
-    # `retain = <n> txns | <duration> | none` (default 1024 txns). Trims
-    # immediately and persists in the meta page, so a reopen keeps the policy.
     def retain(spec: str) -> None {
         self._assert_writable()
         self._assert_not_following()
@@ -1318,31 +1150,18 @@ class ODB {
         self.pager.commit()
     }
 
-    #--- replication: the apply side (spec section 19) ---------------------#
-
-    # The committed commit-sequence number. Paired with uuid() it identifies
-    # replica lineage: same uuid + same csn = same history.
     def csn() -> int {
         return self.pager.last_csn
     }
 
-    # The file uuid (hex), stamped at create and immutable except for a
-    # pristine file adopting a primary's identity (adopt_uuid).
     def uuid() -> str {
         return self.pager.uuid.hex()
     }
 
-    # True while nothing has ever been committed: a fresh file that may still
-    # become a follower by adopting a primary's identity and replaying its
-    # history from csn 1.
     def pristine() -> bool {
         return self.pager.last_csn == 1 and len(self._schemas) == 0
     }
 
-    # Take on a primary's identity (uuid hex) so a brand-new file can follow
-    # it. Only a pristine file may adopt: anything already written is a
-    # different database, and applying another history onto it would be a
-    # silent merge.
     def adopt_uuid(uuid_hex: str) -> None {
         self._assert_writable()
         if not self.pristine() {
@@ -1351,10 +1170,6 @@ class ODB {
         self.pager.set_uuid(unhexlify(uuid_hex))
     }
 
-    # The replication feed: every committed entry after `since`, oldest first
-    # (spec section 19). Loud when it cannot be served exactly: a follower
-    # ahead of us has diverged, and a follower behind the retention window
-    # re-seeds from a fresh copy. It never silently skips history.
     def entries_since(since: int) -> list[LogEntry] {
         self._ensure_log()
         if since > self.pager.last_csn {
@@ -1374,11 +1189,6 @@ class ODB {
         return self._log.since(since)
     }
 
-    # Apply one of a primary's committed log entries to this follower,
-    # committing at the entry's own CSN. Ops replay in exactly the order the
-    # primary executed them, so every schema and integrity check that passed
-    # there passes here; cascaded deletes were each recorded as their own op,
-    # so applying never re-runs cascade logic.
     def apply(entry: LogEntry) -> None {
         self._assert_writable()
         self._ensure_log()
@@ -1414,10 +1224,6 @@ class ODB {
         }
     }
 
-    # Advance the committed CSN with an empty commit. A primary commit that
-    # recorded no ops (a config change) still consumed a CSN; the follower
-    # mirrors the gap so the (uuid, csn) lineage pair stays exact and
-    # read-your-writes tokens resolve.
     def fast_forward(csn: int) -> None {
         self._assert_writable()
         if csn <= self.pager.last_csn {
@@ -1432,9 +1238,6 @@ class ODB {
         self.pager.commit_at(csn)
     }
 
-    # The _flush of an applied entry: identical commit tail, but the log
-    # keeps the primary's csn/ts/ops (with THIS file's catalog root, since
-    # page ids are per-file) and the commit lands at the entry's csn.
     def _flush_at(src: LogEntry) -> None {
         for sid in self._touched {
             self._write_entry(self._schemas[self._by_sid[sid]])
@@ -1450,9 +1253,6 @@ class ODB {
         self.pager.commit_at(src.csn)
     }
 
-    # After a failed apply, rebuild every in-memory structure from the
-    # committed on-disk state: a define op may have half-mutated the schema
-    # maps, and the catalog handle must drop any staged root.
     def _recover_committed() -> None {
         self.pager.abort()
         self.catalog = BTree(self.pager, self.pager.catalog_root)
@@ -1482,9 +1282,6 @@ class ODB {
         return self._schemas[self._by_sid[sid]]
     }
 
-    # Replay one OP_DEFINE: a schema declaration or a metadata change.
-    # Schema ids must land identically on both replicas; a mismatch means the
-    # histories diverged and is an error, never a remap.
     def _apply_define(op: LogOp) -> None {
         payload_any: Any = loads(op.image.decode())
         if not isinstance(payload_any, dict) {
@@ -1531,8 +1328,6 @@ class ODB {
                     self._index_roots[ik] = 0
                 }
             }
-            # Backfill exactly like _set_meta: index and ref edges for every
-            # document already present (idempotent for edges already there).
             tree: BTree = self._tree(cs)
             for pair in tree.items() {
                 docid: int = _decode_key(pair[0])
@@ -1560,7 +1355,6 @@ class ODB {
         }
     }
 
-    # Replay an insert at the primary's docid, storing its exact DBON image.
     def _apply_add(op: LogOp) -> None {
         cs: CompiledSchema = self._schema_by_sid(op.schema_id)
         cm: CompiledMeta = self._metac[cs.name]
@@ -1582,8 +1376,6 @@ class ODB {
         self._mark(cs.schema_id)
     }
 
-    # Replay a set/put as a whole-image replacement at the docid: the log
-    # stores post-images, so both collapse into the same operation.
     def _apply_replace(op: LogOp) -> None {
         cs: CompiledSchema = self._schema_by_sid(op.schema_id)
         cm: CompiledMeta = self._metac[cs.name]
@@ -1605,9 +1397,6 @@ class ODB {
         self._mark(cs.schema_id)
     }
 
-    # Replay a delete WITHOUT cascade logic: the primary recorded every
-    # cascaded removal as its own op, so re-running the consequences here
-    # would apply them twice.
     def _apply_del(op: LogOp) -> None {
         cs: CompiledSchema = self._schema_by_sid(op.schema_id)
         cm: CompiledMeta = self._metac[cs.name]
@@ -1626,10 +1415,6 @@ class ODB {
         self._mark(cs.schema_id)
     }
 
-    #--- dump / load / compact (spec section 22) ---------------------------#
-
-    # JSONL export: schema records first (definition + metadata), then every
-    # document with its _id, schema-ordered. The inverse of load().
     def dump() -> str {
         lines: list[str] = []
         sids: list[int] = self._sorted_sids()
@@ -1661,10 +1446,6 @@ class ODB {
         return "\n".join(lines)
     }
 
-    # Import a dump() into this (empty) database as ONE transaction. Documents
-    # keep their _id. Ref integrity is validated once every document is in
-    # (integrity at commit, spec section 7), so reference cycles load cleanly
-    # regardless of line order. Returns the number of documents loaded.
     def load(text: str) -> int {
         self._assert_writable()
         self._assert_not_following()
@@ -1760,8 +1541,6 @@ class ODB {
                 loaded_ids.append(docid)
                 count = count + 1
             }
-            # Commit-time integrity: with every document present, check all
-            # refs and build the reverse edges. Cycle-proof by construction.
             i: int = 0
             while i < count {
                 self._refs_add(loaded_cs[i], self._metac[loaded_cs[i].name], loaded_docs[i], loaded_ids[i])
@@ -1781,7 +1560,6 @@ class ODB {
         return count
     }
 
-    # Register one schema record from a dump (no commit; joins load's txn).
     def _load_schema_rec(rec: dict[str, Any]) -> None {
         name_any: Any = rec["name"]
         if not isinstance(name_any, str) {
@@ -1824,9 +1602,6 @@ class ODB {
         self._mark(sid)
     }
 
-    # VACUUM-INTO-style snapshot copy (spec section 22): rebuild this database
-    # into a fresh file at `dest_path` - same schema ids, same docids, same
-    # document bytes, freshly packed trees, no history. Doubles as hot backup.
     def compact(dest_path: str) -> None {
         dv: FileVFS = FileVFS(dest_path)
         if dv.size() != 0 {
@@ -1846,12 +1621,9 @@ class ODB {
         dest.close()
     }
 
-    # Copy every schema and live document of `src` into this fresh empty
-    # database in one transaction. History is dropped on purpose: compaction
-    # IS the vacuum that trims the log (spec section 13).
     def _absorb(src: ODB) -> None {
         saved_mode: int = self.pager.retain_mode
-        self.pager.retain_mode = RETAIN_NONE       # no ops buffered for the copy
+        self.pager.retain_mode = RETAIN_NONE
         sids: list[int] = src._sorted_sids()
         self.pager.begin()
         try {
@@ -1898,7 +1670,6 @@ class ODB {
                 self._roots[sid2] = t.root
                 self._mark(sid2)
             }
-            # Reverse-ref edges once every document is in (order-proof).
             for sid3 in sids {
                 name3: str = src._by_sid[sid3]
                 cs3: CompiledSchema = self._schemas[name3]
@@ -1948,7 +1719,7 @@ class ODB {
 
     def close() -> None {
         if self._frozen {
-            return                     # a view shares the parent's vfs/pager
+            return
         }
         wl: Optional[WriterLock] = self._wlock
         if isinstance(wl, WriterLock) {
@@ -1958,14 +1729,11 @@ class ODB {
         self.vfs.close()
     }
 
-    #--- operations the handles delegate to -------------------------------#
-
-    # Attach metadata and (re)build its indexes over any existing documents.
     def _set_meta(cs: CompiledSchema, meta: dict[str, Any]) -> None {
         self._assert_writable()
         self._assert_not_following()
         self._ensure_log()
-        cm: CompiledMeta = compile_meta(cs, meta)      # validates paths; may raise
+        cm: CompiledMeta = compile_meta(cs, meta)
         old_cm: CompiledMeta = self._metac[cs.name]
         old_mj: str = self._metas[cs.name]
         sid: int = cs.schema_id
@@ -1982,8 +1750,6 @@ class ODB {
                     self._index_roots[ik] = 0
                 }
             }
-            # Backfill: index every document already present, and record its ref
-            # edges so integrity holds retroactively.
             tree: BTree = self._tree(cs)
             for pair in tree.items() {
                 docid: int = _decode_key(pair[0])
@@ -2027,16 +1793,14 @@ class ODB {
         return Document(self, cs, docid, data)
     }
 
-    # The insert mutation without begin/commit, so it can join a larger txn
-    # (atomic block, multi-statement write). Returns the new docid.
     def _save_internal(cs: CompiledSchema, doc: dict[str, Any]) -> int {
         cm: CompiledMeta = self._metac[cs.name]
         sid: int = cs.schema_id
-        blob: bytes = encode(cs, doc)              # validates
+        blob: bytes = encode(cs, doc)
         docid: int = self.pager.docid_counter + 1
         self.pager.set_docid_counter(docid)
-        self._index_add_all(cs, cm, doc, docid)    # unique probes may raise
-        self._refs_add(cs, cm, doc, docid)         # forward ref checks may raise
+        self._index_add_all(cs, cm, doc, docid)
+        self._refs_add(cs, cm, doc, docid)
         tree: BTree = self._tree(cs)
         tree.insert(docid, blob)
         self._roots[sid] = tree.root
@@ -2078,8 +1842,6 @@ class ODB {
         return Document(self, cs, docid, data)
     }
 
-    # Deep(shallow-for-M4)-merge patch, without begin/commit. Returns the merged
-    # document. `replace` = full-document replacement (OQL `put`).
     def _edit_internal(cs: CompiledSchema, docid: int, patch: dict[str, Any]) -> dict[str, Any] {
         cm: CompiledMeta = self._metac[cs.name]
         sid: int = cs.schema_id
@@ -2113,7 +1875,7 @@ class ODB {
 
         self._index_remove_all(cs, cm, old, docid)
         self._refs_remove(cs, cm, old, docid)
-        newblob: bytes = encode(cs, merged)        # revalidates
+        newblob: bytes = encode(cs, merged)
         self._index_add_all(cs, cm, merged, docid)
         self._refs_add(cs, cm, merged, docid)
         tree.insert(docid, newblob)
@@ -2123,7 +1885,6 @@ class ODB {
         return merged
     }
 
-    # Full-document replace (OQL `put`), keeping docid; pk must be unchanged.
     def _put_internal(cs: CompiledSchema, docid: int, newdoc: dict[str, Any]) -> None {
         cm: CompiledMeta = self._metac[cs.name]
         sid: int = cs.schema_id
@@ -2142,12 +1903,12 @@ class ODB {
                     raise PrepareError("put may not change primary key field '" + pkf + "'")
                 }
             } else {
-                newdoc[pkf] = old[pkf]                 # preserve pk if omitted
+                newdoc[pkf] = old[pkf]
             }
         }
         self._index_remove_all(cs, cm, old, docid)
         self._refs_remove(cs, cm, old, docid)
-        newblob: bytes = encode(cs, newdoc)            # full validation
+        newblob: bytes = encode(cs, newdoc)
         self._index_add_all(cs, cm, newdoc, docid)
         self._refs_add(cs, cm, newdoc, docid)
         tree.insert(docid, newblob)
@@ -2156,7 +1917,6 @@ class ODB {
         self._record(OP_PUT, cs, docid, newdoc, newblob)
     }
 
-    # Remove optional fields (OQL `unset`); unsetting a required field errors.
     def _unset_internal(cs: CompiledSchema, docid: int, fields: list[str]) -> None {
         cm: CompiledMeta = self._metac[cs.name]
         sid: int = cs.schema_id
@@ -2217,11 +1977,6 @@ class ODB {
         return removed
     }
 
-    # Remove one document and everything that must go with it: the on_delete
-    # consequences for referrers (restrict blocks, cascade removes them first),
-    # this document's own outgoing reverse edges and field indexes, then the
-    # document. No commit - the public _wipe wraps the whole graph in one
-    # transaction so a restrict deep in a cascade rolls the entire delete back.
     def _wipe_internal(cs: CompiledSchema, docid: int, visited: dict[str, bool]) -> bool {
         cm: CompiledMeta = self._metac[cs.name]
         blob: bytes = bytes([])
@@ -2236,10 +1991,6 @@ class ODB {
         }
         old: dict[str, Any] = decode(cs, blob)
 
-        # A cascade may delete other documents of THIS schema, advancing its doc
-        # tree root, so re-fetch the tree AFTER the cascade rather than binding
-        # it up front (a stale binding would rebuild from the pre-cascade root
-        # and resurrect the cascaded documents).
         self._handle_incoming_refs(cs, docid, visited)
         self._refs_remove(cs, cm, old, docid)
         self._index_remove_all(cs, cm, old, docid)
@@ -2268,8 +2019,6 @@ class ODB {
         return self._tree(cs).count()
     }
 
-    # Dispatch a read: keyword fields => equality lookup by an index (single or
-    # composite); otherwise the positional docid (the internal _id).
     def _read_dispatch(cs: CompiledSchema, docid: int, keys: dict[str, Any]) -> Document {
         if len(keys) > 0 {
             return self._read_by(cs, keys)
@@ -2280,15 +2029,12 @@ class ODB {
         return self._read(cs, docid)
     }
 
-    # Equality lookup: the provided field(s) must exactly match some index (pk,
-    # unique, or plain), single or composite. Returns the first match or raises
-    # NotFound.
     def _read_by(cs: CompiledSchema, keys: dict[str, Any]) -> Document {
         cm: CompiledMeta = self._metac[cs.name]
         decl: IndexDecl = _index_for_fields(cm, keys, cs.name)
         sid: int = cs.schema_id
         t: IndexTree = self._index_tree(sid, decl)
-        keybytes: bytes = enc_decl_key(decl, keys)     # keys holds exactly decl.fields
+        keybytes: bytes = enc_decl_key(decl, keys)
         if decl.unique {
             if t.contains(keybytes) {
                 return self._read(cs, _be_to_docid(t.get(keybytes)))
@@ -2304,15 +2050,6 @@ class ODB {
         return self._read(cs, docid)
     }
 
-    #--- odb check --------------------------------------------------------#
-
-    # One-pass whole-database verification (spec section 21): every tree's
-    # checksums + structure (via check_tree / check_index_tree), index
-    # completeness (each document is present in each of its indexes and each
-    # index holds exactly one entry per document), unique claims (each unique key
-    # maps to the right docid), and referential integrity (every ref resolves to
-    # an existing target). Returns a report; does not raise on a logical
-    # violation, so a damaged file can be inspected rather than crash the caller.
     def check() -> CheckReport {
         rep: CheckReport = CheckReport()
         for name in self._schemas {
@@ -2332,7 +2069,6 @@ class ODB {
                 doc: dict[str, Any] = decode(cs, pair[1])
                 doc_count = doc_count + 1
 
-                # every field index must contain this document's key
                 for decl in cm.indexes {
                     if decl.kind != IK_REVERSE {
                         it: IndexTree = self._index_tree(sid, decl)
@@ -2353,7 +2089,6 @@ class ODB {
                     }
                 }
 
-                # every ref must resolve to an existing target
                 for r in cm.refs {
                     if r.target_schema not in self._schemas {
                         rep._bad("ref '" + r.source_path + "' in '" + name + "' targets undefined schema '" + r.target_schema + "'")
@@ -2370,9 +2105,6 @@ class ODB {
             }
             rep.docs = rep.docs + doc_count
 
-            # every index tree (field and reverse) is structurally sound and,
-            # since every M4 index path is required, holds exactly one entry per
-            # document (index completeness with no orphans and no phantoms).
             for decl in cm.indexes {
                 iroot: int = self._index_roots[_ikey(sid, decl.name)]
                 ichk: CheckResult = check_index_tree(self.pager, iroot)
@@ -2392,9 +2124,6 @@ class ODB {
 }
 
 
-# Find the value index (unique or plain) whose fields exactly match the provided
-# key set, single or composite. Reverse (ref) trees are keyed by docids, never by
-# a field value, so they are never a lookup target.
 def _index_for_fields(cm: CompiledMeta, keys: dict[str, Any], schema_name: str) -> IndexDecl {
     for d in cm.indexes {
         if d.kind != IK_REVERSE and len(d.fields) == len(keys) {
@@ -2412,8 +2141,6 @@ def _index_for_fields(cm: CompiledMeta, keys: dict[str, Any], schema_name: str) 
     raise PrepareError("no index on the given field(s) in '" + schema_name + "'")
 }
 
-# A resolved relationship: forward (N:1) or reverse (1:N), the RefDecl it rides,
-# and the other schema (target for forward, source for reverse).
 class _Rel {
     kind: int
     ref: RefDecl
@@ -2426,7 +2153,6 @@ class _Rel {
     }
 }
 
-# `customer_id` -> `customer` for naming a forward ref's nested object.
 def _strip_id(name: str) -> str {
     if len(name) > 3 and name[len(name) - 3:] == "_id" {
         return name[0:len(name) - 3]
@@ -2434,9 +2160,6 @@ def _strip_id(name: str) -> str {
     return name
 }
 
-# The single-field UNIQUE index (pk or unique) on `field`, which a ref must
-# target (spec section 7). Raises SchemaError if the target field is not
-# uniquely indexed.
 def _unique_index_on(cm: CompiledMeta, field: str, schema_name: str) -> IndexDecl {
     for d in cm.indexes {
         if d.unique and len(d.fields) == 1 and d.fields[0] == field {
@@ -2447,9 +2170,6 @@ def _unique_index_on(cm: CompiledMeta, field: str, schema_name: str) -> IndexDec
 }
 
 
-#--- pipeline helpers (sort / take / skip) --------------------------------#
-
-# take: drop everything past the first n (in place).
 def _truncate(work: list[Document], n: int) -> None {
     k: int = n
     if k < 0 {
@@ -2460,7 +2180,6 @@ def _truncate(work: list[Document], n: int) -> None {
     }
 }
 
-# skip: drop the first n (in place).
 def _drop_front(work: list[Document], n: int) -> None {
     i: int = 0
     while i < n and len(work) > 0 {
@@ -2469,9 +2188,6 @@ def _drop_front(work: list[Document], n: int) -> None {
     }
 }
 
-# Stable insertion sort in place by the given keys; ties break by _id ascending.
-# Absent values order after present ones regardless of direction (spec section
-# 8). O(n^2); a bottom-up merge is a perf follow-up for large result sets.
 def _sort_in_place(work: list[Document], keys: list[SortKey]) -> None {
     i: int = 1
     n: int = len(work)
@@ -2510,7 +2226,7 @@ def _cmp_key(a: Document, b: Document, k: SortKey) -> int {
         return 0
     }
     if not ap {
-        return 1                    # a absent -> orders after (never negated)
+        return 1
     }
     if not bp {
         return -1
@@ -2583,7 +2299,6 @@ def _cmp_present(x: Any, y: Any) -> int {
 }
 
 
-# A bound collection handle: every operation knows its collection.
 class Documents {
     db: ODB
     cs: CompiledSchema
@@ -2593,8 +2308,6 @@ class Documents {
         self.cs = cs
     }
 
-    # Attach metadata (primary/unique/index/refs) and return self, so a define
-    # chains: db.schema(name, shape).meta({...}).
     def meta(m: dict[str, Any]) -> Documents {
         self.db._set_meta(self.cs, m)
         return self
@@ -2604,9 +2317,6 @@ class Documents {
         return self.db._save(self.cs, doc)
     }
 
-    # Read one document. Positional is the internal _id (docid); keyword fields
-    # are an equality lookup on an index - single (read(id=1)) or composite
-    # (read(id=1, eid=2)). Raises NotFound if absent.
     def read(docid: int = 0, **keys: Any) -> Document {
         return self.db._read_dispatch(self.cs, docid, keys)
     }
@@ -2628,7 +2338,6 @@ class Documents {
     }
 }
 
-# A single document handle, carrying its collection and _id.
 class Document {
     db: ODB
     cs: CompiledSchema
@@ -2646,20 +2355,16 @@ class Document {
         return self.data[k]
     }
 
-    # Update this document in place and persist.
     def edit(patch: dict[str, Any]) -> Document {
         updated: Document = self.db._edit(self.cs, self.id, patch)
         self.data = updated.data
         return self
     }
 
-    # Delete this document.
     def wipe() -> None {
         self.db._wipe(self.cs, self.id)
     }
 }
-
-#--- commit log feed types (spec section 17) ------------------------------#
 
 def _kind_name(kind: int) -> str {
     if kind == OP_ADD {
@@ -2680,12 +2385,9 @@ def _kind_name(kind: int) -> str {
     return "unknown"
 }
 
-# One committed operation as seen by changes() / watch. `doc` is the
-# post-image (projected, for watch); empty for a delete. The pk value rides as
-# JSON text so a delete still identifies its document by domain key.
 class Change {
     csn: int
-    kind: str            # "add" | "set" | "put" | "del" | "define"
+    kind: str
     schema: str
     docid: int
     pk_json: str
@@ -2708,9 +2410,6 @@ class Change {
     }
 }
 
-# A resumable OQL feed over the commit log (spec section 17). poll() returns
-# every matching post-image committed since the last poll (or the resume
-# token this Watch was opened at); resume_token() is the CSN to reopen from.
 class Watch {
     db: ODB
     cs: CompiledSchema
@@ -2729,8 +2428,6 @@ class Watch {
     }
 
     def poll() -> list[Change] {
-        # Exactly-resumable or loud: if the retention window has trimmed past
-        # the resume token, changes may be gone; never silently skip them.
         if self.db._log.count() > 0 {
             e0: LogEntry = self.db._log.entry(0)
             if e0.prev_page != 0 and self.last < e0.csn - 1 {
@@ -2764,7 +2461,6 @@ class Watch {
     }
 }
 
-# Familiar factory alias: connect("shop.odb") is identical to ODB("shop.odb").
 def connect(path: str) -> ODB {
     return ODB(path)
 }

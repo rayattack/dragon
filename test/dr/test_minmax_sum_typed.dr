@@ -1,6 +1,3 @@
-# Pre-fix: min/max/sum over list[float]/list[str] compared raw int64 bit
-# patterns, and min([])/max([]) returned 0 instead of raising.
-
 from unittest import TestCase, main
 
 

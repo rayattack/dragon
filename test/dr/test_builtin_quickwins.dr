@@ -35,7 +35,6 @@ class NumericBuiltins(TestCase) {
     }
 
     def test_divmod_floor_semantics() {
-        # Python floor-division semantics for negatives: divmod(-7, 3) == (-3, 2)
         q, r = divmod(-7, 3)
         self.assertEqual(q, -3)
         self.assertEqual(r, 2)
@@ -45,12 +44,10 @@ class NumericBuiltins(TestCase) {
 
 class ImportAlias(TestCase) {
     def test_extern_c_alias() {
-        # `sqrt` is extern "C"; the `as root` rename must still resolve.
         self.assertAlmostEqual(root(16.0), 4.0)
     }
 
     def test_dr_function_alias() {
-        # `isqrt` is a regular .dr function; aliasing still works.
         self.assertEqual(iq(17), 4)
     }
 }
@@ -75,7 +72,6 @@ class DictDelete(TestCase) {
     }
 
     def test_del_str_value_no_corruption() {
-        # str values are owned (decref'd on delete); subsequent reads stay valid.
         ds: dict[str, str] = {"k1": "v1", "k2": "v2"}
         del ds["k1"]
         self.assertEqual(len(ds), 1)

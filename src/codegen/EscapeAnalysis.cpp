@@ -1,5 +1,3 @@
-/// Escape analysis (B Phase 1): finds `v: T = T(args)` locals that never escape their
-/// block, so they can stack-allocate instead of heap+refcount. Defaults to "escapes" when unsure.
 #include "../CodeGenImpl.h"
 #include <functional>
 
@@ -7,8 +5,6 @@ namespace dragon {
 
 namespace {
 
-/// Finds any NameExpr(name) mention in a subtree. Fallback for capture contexts and
-/// node kinds the structural walk below doesn't special-case.
 class NameMentionVisitor : public DefaultASTVisitor {
 public:
     explicit NameMentionVisitor(std::string n) : target(std::move(n)) {}
@@ -21,8 +17,6 @@ public:
     }
 };
 
-/// Task-detach transfer walk. True only on a real transfer (return/store/pass/capture/rebind);
-/// await/join (consume, nulls the slot) and is_alive (read) are not transfers, so detach after them is safe. Kept separate from exprEscapes/stmtEscapes so it never weakens stack-alloc.
 class TaskTransferVisitor : public DefaultASTVisitor {
 public:
     explicit TaskTransferVisitor(std::string n) : target(std::move(n)) {}
@@ -33,7 +27,6 @@ public:
         auto* n = dynamic_cast<NameExpr*>(e);
         return n && n->name == target;
     }
-    // Any mention of `target` in `node` (capture bodies: no carve-out).
     bool mentions(Expr& node) {
         NameMentionVisitor m(target); node.accept(m); return m.found;
     }
@@ -44,30 +37,25 @@ public:
     void visit(NameExpr& n) override { if (n.name == target) transferred = true; }
 
     void visit(WalrusExpr& w) override {
-        if (w.name == target) { transferred = true; return; }  // rebind: transfer
+        if (w.name == target) { transferred = true; return; }
         if (w.value) w.value->accept(*this);
     }
 
     void visit(AwaitExpr& a) override {
-        // `await t` consumes t (slot nulled after); not a transfer, don't count the
-        // bare operand. `await other` recurses normally.
         if (isTarget(a.operand.get())) return;
         if (a.operand) a.operand->accept(*this);
     }
 
     void visit(CallExpr& c) override {
-        // `t.join()` consumes (slot nulled after); `t.is_alive()` reads. Neither is a transfer.
         if (auto* attr = dynamic_cast<AttributeExpr*>(c.callee.get()))
             if (isTarget(attr->object.get()) && c.args.empty() && c.kwArgs.empty() &&
                 (attr->attribute == "join" || attr->attribute == "is_alive"))
-                return;  // do not descend into the `t` receiver
+                return;
         if (c.callee) c.callee->accept(*this);
         for (auto& a : c.args) if (a) a->accept(*this);
         for (auto& kv : c.kwArgs) if (kv.second) kv.second->accept(*this);
     }
 
-    // Capture contexts take the VARIABLE, so any mention inside (even is_alive) escapes
-    // the handle. No carve-out; scan the whole body.
     void visit(LambdaExpr& n) override    { if (mentions(n)) transferred = true; }
     void visit(FireExpr& n) override      { if (mentions(n)) transferred = true; }
     void visit(GeneratorExpr& n) override { if (mentions(n)) transferred = true; }
@@ -75,7 +63,7 @@ public:
     void visit(FunctionDecl& n) override  { if (mentions(n)) transferred = true; }
 };
 
-} // namespace
+}
 
 bool CodeGen::Impl::nodeMentionsName(Expr* e, const std::string& name) {
     if (!e) return false;
@@ -101,20 +89,16 @@ bool CodeGen::Impl::taskLocalTransferEscapes(Stmt* s, const std::string& name) {
 bool CodeGen::Impl::exprEscapes(Expr* e, const std::string& name) {
     if (!e) return false;
 
-    // `v.field` reads a scalar field (copies out, pointer doesn't flow): safe, don't descend
-    // into bare `v`. A deeper object (`other.field`) recurses normally.
     if (auto* attr = dynamic_cast<AttributeExpr*>(e)) {
         if (auto* ne = dynamic_cast<NameExpr*>(attr->object.get()))
             if (ne->name == name) return false;
         return exprEscapes(attr->object.get(), name);
     }
 
-    // `v.method(...)` escapes (method may retain self); otherwise recurse into callee and
-    // args so a bare `v` passed as an arg is caught.
     if (auto* call = dynamic_cast<CallExpr*>(e)) {
         if (auto* cae = dynamic_cast<AttributeExpr*>(call->callee.get()))
             if (auto* ne = dynamic_cast<NameExpr*>(cae->object.get()))
-                if (ne->name == name) return true;  // v.method(...)
+                if (ne->name == name) return true;
         if (exprEscapes(call->callee.get(), name)) return true;
         for (auto& a : call->args)
             if (exprEscapes(a.get(), name)) return true;
@@ -123,7 +107,6 @@ bool CodeGen::Impl::exprEscapes(Expr* e, const std::string& name) {
         return false;
     }
 
-    // `v[i]` is __getitem__, a method call on the instance.
     if (auto* sub = dynamic_cast<SubscriptExpr*>(e)) {
         if (auto* ne = dynamic_cast<NameExpr*>(sub->object.get()))
             if (ne->name == name) return true;
@@ -131,12 +114,9 @@ bool CodeGen::Impl::exprEscapes(Expr* e, const std::string& name) {
                exprEscapes(sub->index.get(), name);
     }
 
-    // Bare occurrence of `v` anywhere not whitelisted above -> escape.
     if (auto* ne = dynamic_cast<NameExpr*>(e))
         return ne->name == name;
 
-    // Compound expressions (`v.x + v.y`, `[v.x]`, `{k: v.x}`) recurse and stay safe since
-    // only scalar field values flow; a bare `v` inside still escapes.
     if (auto* be = dynamic_cast<BinaryExpr*>(e))
         return exprEscapes(be->left.get(), name) || exprEscapes(be->right.get(), name);
     if (auto* ue = dynamic_cast<UnaryExpr*>(e))
@@ -178,14 +158,11 @@ bool CodeGen::Impl::exprEscapes(Expr* e, const std::string& name) {
         }
         return false;
     }
-    // Walrus binding to `v` rebinds the name: disqualify.
     if (auto* we = dynamic_cast<WalrusExpr*>(e)) {
         if (we->name == name) return true;
         return exprEscapes(we->value.get(), name);
     }
 
-    // Capture/opaque contexts (lambda, fire, comprehensions, await/yield, templates) and
-    // any unrecognized kind: closures capture the VARIABLE, so any mention of `v` escapes.
     return nodeMentionsName(e, name);
 }
 
@@ -196,14 +173,11 @@ bool CodeGen::Impl::stmtEscapes(Stmt* s, const std::string& name) {
         return exprEscapes(es->expr.get(), name);
 
     if (auto* as = dynamic_cast<AssignStmt*>(s)) {
-        // `v = ...` and `other[v] = ...` escape via the target walk; `v.field = ...` is a
-        // safe scalar store. Also checks the RHS.
         for (auto& t : as->targets)
             if (exprEscapes(t.get(), name)) return true;
         return exprEscapes(as->value.get(), name);
     }
     if (auto* an = dynamic_cast<AnnAssignStmt*>(s)) {
-        // `v: T = ...` rebinds/shadows v: escape.
         if (an->target && exprEscapes(an->target.get(), name)) return true;
         return an->value ? exprEscapes(an->value.get(), name) : false;
     }
@@ -234,7 +208,6 @@ bool CodeGen::Impl::stmtEscapes(Stmt* s, const std::string& name) {
         return false;
     }
     if (auto* f = dynamic_cast<ForStmt*>(s)) {
-        // A for-target binding `v` shadows it: escape.
         if (exprEscapes(f->target.get(), name)) return true;
         if (exprEscapes(f->iterable.get(), name)) return true;
         for (auto& st : f->body) if (stmtEscapes(st.get(), name)) return true;
@@ -244,7 +217,7 @@ bool CodeGen::Impl::stmtEscapes(Stmt* s, const std::string& name) {
     if (auto* t = dynamic_cast<TryStmt*>(s)) {
         for (auto& st : t->tryBody) if (stmtEscapes(st.get(), name)) return true;
         for (auto& h : t->handlers) {
-            if (h.name == name) return true;  // `except E as v` rebinds v
+            if (h.name == name) return true;
             for (auto& st : h.body) if (stmtEscapes(st.get(), name)) return true;
         }
         for (auto& st : t->elseBody) if (stmtEscapes(st.get(), name)) return true;
@@ -255,7 +228,7 @@ bool CodeGen::Impl::stmtEscapes(Stmt* s, const std::string& name) {
         for (auto& it : ws->items) {
             if (exprEscapes(it.contextExpr.get(), name)) return true;
             if (it.optionalVars && exprEscapes(it.optionalVars.get(), name))
-                return true;  // `with x as v` rebinds v
+                return true;
         }
         for (auto& st : ws->body) if (stmtEscapes(st.get(), name)) return true;
         return false;
@@ -264,15 +237,11 @@ bool CodeGen::Impl::stmtEscapes(Stmt* s, const std::string& name) {
         return exprEscapes(as2->test.get(), name) ||
                (as2->msg ? exprEscapes(as2->msg.get(), name) : false);
 
-    // A nested def/thread body naming `v` captures it: escape (lambda/fire caught at
-    // expr level).
     if (auto* fd = dynamic_cast<FunctionDecl*>(s))
         return nodeMentionsName(fd, name);
     if (auto* th = dynamic_cast<ThreadStmt*>(s))
         return nodeMentionsName(th, name);
 
-    // Rare/opaque kinds (match, delete, global/nonlocal, class) and anything else fall
-    // back to the exhaustive mention probe: any appearance of v is an escape.
     if (dynamic_cast<BreakStmt*>(s) || dynamic_cast<ContinueStmt*>(s) ||
         dynamic_cast<PassStmt*>(s) || dynamic_cast<ImportStmt*>(s) ||
         dynamic_cast<FromImportStmt*>(s) || dynamic_cast<TypeAliasStmt*>(s) ||
@@ -282,7 +251,6 @@ bool CodeGen::Impl::stmtEscapes(Stmt* s, const std::string& name) {
     return nodeMentionsName(s, name);
 }
 
-// Recurses into nested blocks/function bodies so buried candidate declarations are found.
 static void forEachNestedBlock(
     Stmt* s, const std::function<void(const std::vector<std::unique_ptr<Stmt>>&)>& fn);
 
@@ -292,17 +260,12 @@ void CodeGen::Impl::analyzeBlockForStackAlloc(
         Stmt* s = stmts[i].get();
         if (!s) continue;
 
-        // 1. Recurse into nested blocks first; they're real lexical scopes, never
-        // module-level.
         forEachNestedBlock(s, [this](const std::vector<std::unique_ptr<Stmt>>& b) {
-            analyzeBlockForStackAlloc(b, /*isModuleTopLevel=*/false);
+            analyzeBlockForStackAlloc(b, false);
         });
 
-        // Module globals are visible program-wide, so the sibling scan below can't see
-        // earlier-defined function uses. Never promote globals; only nested blocks are eligible.
         if (isModuleTopLevel) continue;
 
-        // 2. Is this a candidate `v: T = ClassName(args)` declaration?
         auto* an = dynamic_cast<AnnAssignStmt*>(s);
         if (!an || !an->value) continue;
         auto* targetName = dynamic_cast<NameExpr*>(an->target.get());
@@ -318,15 +281,13 @@ void CodeGen::Impl::analyzeBlockForStackAlloc(
                 if (auto* gb = dynamic_cast<NamedTypeExpr*>(gt->base.get()))
                     isTaskAnnot = (gb->name == "Task");
             if (isTaskAnnot) {
-                // await/join (consume) and is_alive (read) are not escapes here, so a
-                // conditionally-joined or polled Task stays detachable. Only a real transfer forbids detach.
                 const std::string& tv = targetName->name;
                 bool taskEscaped = false;
                 for (size_t j = i + 1; j < stmts.size(); ++j)
                     if (taskLocalTransferEscapes(stmts[j].get(), tv)) { taskEscaped = true; break; }
                 if (!taskEscaped) detachableTaskDecls.insert(an);
             }
-            continue;  // a fire value is never a stack-alloc ctor candidate
+            continue;
         }
 
         auto* ctorCall = dynamic_cast<CallExpr*>(an->value.get());
@@ -334,8 +295,6 @@ void CodeGen::Impl::analyzeBlockForStackAlloc(
         auto* calleeName = dynamic_cast<NameExpr*>(ctorCall->callee.get());
         if (!calleeName || !classNames.count(calleeName->name)) continue;
 
-        // 3. Does `v` escape the rest of this block? It's only in scope in subsequent
-        // siblings (Dragon block scoping), never earlier or outside the block.
         const std::string& v = targetName->name;
         bool escaped = false;
         for (size_t j = i + 1; j < stmts.size(); ++j) {
@@ -365,9 +324,9 @@ static void forEachNestedBlock(
     } else if (auto* th = dynamic_cast<ThreadStmt*>(s)) {
         fn(th->body);
     } else if (auto* fd = dynamic_cast<FunctionDecl*>(s)) {
-        fn(fd->body);  // free function or method body - its own scope
+        fn(fd->body);
     } else if (auto* cd = dynamic_cast<ClassDecl*>(s)) {
-        fn(cd->body);  // recurse to reach method FunctionDecls
+        fn(cd->body);
     } else if (auto* ms = dynamic_cast<MatchStmt*>(s)) {
         for (auto& c : ms->cases) fn(c.body);
     }
@@ -375,10 +334,10 @@ static void forEachNestedBlock(
 
 void CodeGen::Impl::computeStackAllocSites(Module& entryModule,
                                            const std::vector<Module*>& depModules) {
-    if (options.gcMode != GCMode::RC) return;  // gc=none has no RC to avoid
+    if (options.gcMode != GCMode::RC) return;
     for (auto* dep : depModules)
-        analyzeBlockForStackAlloc(dep->body, /*isModuleTopLevel=*/true);
-    analyzeBlockForStackAlloc(entryModule.body, /*isModuleTopLevel=*/true);
+        analyzeBlockForStackAlloc(dep->body, true);
+    analyzeBlockForStackAlloc(entryModule.body, true);
 }
 
-} // namespace dragon
+}

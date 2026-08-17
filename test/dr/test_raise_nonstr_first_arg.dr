@@ -28,8 +28,6 @@ class RaiseNonStrTests(TestCase) {
         self.assertTrue(raised)
     }
 
-    # Each pass allocates and frees a heap string, so a stale message pointer
-    # lands on freed memory.
     def test_repeated_raise_no_uaf() {
         i: int = 0
         while i < 2000 {

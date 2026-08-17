@@ -31,10 +31,6 @@ from database.mysql import MySqlConnection
 from threading import Lock
 
 
-# open(dsn) - connect by DSN, routing on the scheme to the backend driver.
-# The dispatch lives in `_open` so other code in this module (the Pool) can
-# reach it by an unambiguous name: a bare `open(...)` call resolves to the
-# builtin file `open`, not to this module-level function.
 def open(dsn: str) -> Connection {
     return _open(dsn)
 }
@@ -46,20 +42,12 @@ def _open(dsn: str) -> Connection {
     if dsn.startswith("mysql://") {
         return MySqlConnection(dsn)
     }
-    # SQLite (default): sqlite://PATH, sqlite::memory:, :memory:, or bare path.
     path: str = dsn
     if dsn.startswith("sqlite://") {
         path = dsn[9:]
     } else if dsn.startswith("sqlite:") {
         path = dsn[7:]
     }
-    # Empty path means in-memory. Return the literal straight to the ctor rather
-    # than reassigning `path = ":memory:"`: `path` may hold an OWNED slice here
-    # (dsn[7:] / dsn[9:]), and a slot that is owned-string on one branch and a
-    # string LITERAL on another has its cleanup-kind collapsed to StrLiteral
-    # (lexically-last wins), so scope cleanup skips the decref and the slice
-    # leaks once per open. Passing the literal directly sidesteps the mixed-kind
-    # slot entirely
     if path == "" {
         return SqliteConnection(":memory:")
     }
@@ -67,25 +55,7 @@ def _open(dsn: str) -> Connection {
 }
 
 
-#===----------------------------------------------------------------------===#
-# Pool - a thread-safe connection pool (D032 Phase 5).
-#
-# `acquire()` reuses an idle connection or opens a fresh one; `release(conn)`
-# returns it to the pool (closing it instead when the idle set is already at
-# `max_idle`, so the pool never grows without bound). A `threading.Lock`
-# guards the idle list so the pool is safe to share across green threads and
-# OS threads; the lock is never held across a connect or a query (only around
-# the list mutation), so acquiring one connection never blocks another's work.
-#
-#  pool: database.Pool = database.Pool("postgres://...", 8)
-#  conn: database.Connection = pool.acquire()
-#  rows: list[dict[str, Any]] = conn.all(template[SQL] { ... })
-#  pool.release(conn)
-#===----------------------------------------------------------------------===#
-
 class Pool {
-    # Sole owner of the pool mutex: destroyed when the pool dies (a bare
-    # Lock() has no owner of last resort, so its pthread mutex would leak)
     own lock: Lock
 
     def(dsn: str, max_idle: int = 8) {
@@ -95,8 +65,6 @@ class Pool {
         self.lock = Lock()
     }
 
-    # Borrow a connection: reuse an idle one, else open a fresh one. The
-    # connect happens outside the lock so concurrent acquirers don't serialize.
     def acquire() -> Connection {
         self.lock.acquire()
         n: int = len(self.idle)
@@ -110,8 +78,6 @@ class Pool {
         return _open(self.dsn)
     }
 
-    # Return a connection. Kept for reuse while under max_idle; otherwise closed
-    # (outside the lock) so the idle set stays bounded.
     def release(conn: Connection) {
         self.lock.acquire()
         if len(self.idle) < self.max_idle {
@@ -123,8 +89,6 @@ class Pool {
         }
     }
 
-    # Close every pooled (idle) connection. In-flight (acquired) connections are
-    # the caller's to close/release.
     def close() {
         self.lock.acquire()
         i: int = 0

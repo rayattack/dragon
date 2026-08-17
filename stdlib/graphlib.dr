@@ -4,22 +4,18 @@ adjacency structure. Simplified Python graphlib.TopologicalSorter. Pure Dragon.
 
 class TopologicalSorter {
     def() {
-        # Nodes in the graph (unique entries).
         self.nodes: list[int] = []
-        # Parallel edge lists: edge_from[i] must precede edge_to[i] in the ordering.
         self.edge_from: list[int] = []
         self.edge_to: list[int] = []
     }
 
     def add_node(node: int) {
-        # No-op if the node already exists.
         if _list_contains(self.nodes, node) == false {
             self.nodes.append(node)
         }
     }
 
     def add_edge(from_node: int, to_node: int) {
-        # from_node must come before to_node; adds both nodes if missing.
         if _list_contains(self.nodes, from_node) == false {
             self.nodes.append(from_node)
         }
@@ -31,11 +27,9 @@ class TopologicalSorter {
     }
 
     def static_order() -> list[int] {
-        # Kahn's algorithm. Raises ValueError if a cycle is detected.
         const num_nodes: int = len(self.nodes)
         const num_edges: int = len(self.edge_from)
 
-        # in_degree[i] corresponds to self.nodes[i].
         in_degree: list[int] = []
         i: int = 0
         while i < num_nodes {
@@ -104,7 +98,6 @@ def _list_contains(items: list[int], value: int) -> bool {
 }
 
 def _index_of(items: list[int], value: int) -> int {
-    # Return the index of value in items, or -1 if not found.
     i: int = 0
     while i < len(items) {
         if items[i] == value {
@@ -116,7 +109,6 @@ def _index_of(items: list[int], value: int) -> int {
 }
 
 def _remove_front(items: list[int]) {
-    # Remove the first element of a list by shifting all elements left.
     const n: int = len(items)
     i: int = 0
     while i < n - 1 {
@@ -127,7 +119,6 @@ def _remove_front(items: list[int]) {
 }
 
 def topological_sort(nodes: list[int], edge_from: list[int], edge_to: list[int]) -> list[int] {
-    # edge_from[i] must come before edge_to[i].
     const sorter: TopologicalSorter = TopologicalSorter()
     i: int = 0
     while i < len(nodes) {

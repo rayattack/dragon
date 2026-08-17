@@ -68,7 +68,6 @@ class Calc {
 class Wrap {
     c: Calc
     def(c: Calc) { self.c = c }
-    # self.field.method(*tuple) - attribute-chain receiver
     def run(t: tuple[int, int, int]) -> int { return self.c.add3(*t) }
 }
 
@@ -120,7 +119,7 @@ class TupleSpreadDirectTests(TestCase) {
 
     def test_spread_fills_before_default() {
         ab: tuple[int, int] = (1, 2)
-        self.assertEqual(with_default(*ab), 103)        # c defaults to 100
+        self.assertEqual(with_default(*ab), 103)
     }
 
     def test_spread_overrides_default_via_full_tuple() {
@@ -140,8 +139,6 @@ class TupleSpreadCtorTests(TestCase) {
     def test_ctor_leading_positional_then_spread() {
         rest: tuple[str] = ("hp",)
         c: Calc = Calc(50)
-        # heterogeneous tuple as a ctor arg via spread is covered by methods;
-        # here just confirm a leading-positional + spread ctor builds correctly.
         coords: tuple[int] = (9,)
         p: Point = Point(1, *coords)
         self.assertEqual(p.manhattan(), 10)
@@ -181,12 +178,12 @@ class TupleSpreadMethodTests(TestCase) {
 
 
 def _add3_too_few() -> None {
-    xs: list[int] = [1, 2]                  # need 3 -> runtime TypeError
+    xs: list[int] = [1, 2]
     r: int = add3(*xs)
 }
 
 def _add3_too_many() -> None {
-    xs: list[int] = [1, 2, 3, 4]            # need 3 -> runtime TypeError
+    xs: list[int] = [1, 2, 3, 4]
     r: int = add3(*xs)
 }
 
@@ -202,7 +199,6 @@ def four_ints(a: int, b: int, c: int, d: int) -> int {
 }
 
 def forward_sum(*args: int) -> int {
-    # `args` is a list[int] here; re-spread it into a fixed-arity callee.
     return add3(*args)
 }
 
@@ -212,7 +208,7 @@ def count_args(*args: int) -> int {
 
 
 def _cfg_missing_required() -> None {
-    d: dict[str, Any] = {"host": "h"}       # 'port' absent -> runtime TypeError
+    d: dict[str, Any] = {"host": "h"}
     s: str = cfg(**d)
 }
 
@@ -256,8 +252,6 @@ class ListSpreadTests(TestCase) {
     }
 
     def test_wrong_length_too_few_raises() {
-        # Bare top-level helpers (not capturing lambdas) - assertRaises' callee
-        # escapes to a foreign setjmp frame; a closure capture would segfault.
         self.assertRaises(TypeError, _add3_too_few)
     }
 
@@ -274,7 +268,7 @@ class DictSpreadTests(TestCase) {
     }
 
     def test_optional_defaulted() {
-        d: dict[str, Any] = {"host": "h", "port": 99}    # debug absent
+        d: dict[str, Any] = {"host": "h", "port": 99}
         self.assertEqual(cfg(**d), "h:99/False")
     }
 
@@ -315,8 +309,6 @@ class MixedSpreadTests(TestCase) {
 
 
 class ForwardingTests(TestCase) {
-    # `*args: T` binds as `list[T]` in the body (matches codegen's packing), so
-    # the packed varargs can be re-spread into a fixed-arity callee.
     def test_vararg_list_forward() {
         self.assertEqual(forward_sum(1, 2, 3), 6)
     }

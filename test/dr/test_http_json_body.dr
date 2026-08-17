@@ -1,9 +1,3 @@
-# test/dr/test_http_json_body.dr - Request.json() through the live server.
-#
-# Proves the D048 generic decoder is wired into the HTTP request path: a POST
-# with a JSON body, parsed via req.json() into a boxed Any tree, end to end
-# through serve_connection (MemoryReader, no sockets).
-
 from unittest import TestCase, main
 from http.server import Router, Request, Response, Context, MemoryReader
 
@@ -20,7 +14,6 @@ def _greet(req: Request, res: Response, ctx: Context) -> None {
 }
 
 def _post(path: str, body: str) -> str {
-    # Content-Length is the byte count; the bodies here are ASCII so len == bytes.
     const clen: str = str(len(body))
     return "POST " + path + " HTTP/1.1\r\nHost: h\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: " + clen + "\r\n\r\n" + body
 }

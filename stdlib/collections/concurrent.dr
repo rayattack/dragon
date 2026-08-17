@@ -1,9 +1,3 @@
-# collections/concurrent.dr - Thread-safe collection wrappers
-#
-# These are Dragon class wrappers around the builtin SyncList/SyncDict
-# runtime types. They provide the same API but can be extended with
-# custom methods, decorators, and subclassing.
-
 extern "C" def dragon_synclist_new() -> ptr
 extern "C" def dragon_synclist_append(sl: ptr, val: int)
 extern "C" def dragon_synclist_get(sl: ptr, idx: int) -> int
@@ -28,10 +22,6 @@ extern "C" def dragon_syncdict_has_key(sd: ptr, key: str) -> int
 extern "C" def dragon_syncdict_pop(sd: ptr, key: str) -> int
 extern "C" def dragon_syncdict_clear(sd: ptr)
 extern "C" def dragon_syncdict_destroy(sd: ptr)
-
-#===----------------------------------------------------------------------===#
-# ConcurrentList - Thread-safe list wrapper
-#===----------------------------------------------------------------------===#
 
 class ConcurrentList {
     def() {
@@ -90,10 +80,6 @@ class ConcurrentList {
         dragon_synclist_destroy(self._handle)
     }
 }
-
-#===----------------------------------------------------------------------===#
-# ConcurrentDict - Thread-safe dict wrapper
-#===----------------------------------------------------------------------===#
 
 class ConcurrentDict {
     def() {

@@ -56,8 +56,6 @@ class ConstUnpackGlobalTests(TestCase) {
     }
 
     def test_repeated_reads_of_unpacked_str_global() {
-        # The const str target is immortal-promoted at store; copies must
-        # stay intact across many reads
         i: int = 0
         while i < 2000 {
             const v: str = HOST

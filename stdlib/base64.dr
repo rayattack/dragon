@@ -4,7 +4,7 @@ bytes in/out (str accepted on encode via UTF-8); decode tolerates padding presen
 
 const _STD_ALPHABET: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 const _URL_ALPHABET: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-const _PAD: int = 0x3D                 # '='
+const _PAD: int = 0x3D
 
 
 def _build_decode_table(alphabet: str) -> list[int] {
@@ -16,8 +16,6 @@ def _build_decode_table(alphabet: str) -> list[int] {
         t[i] = -1
         i = i + 1
     }
-    # Byte view avoids ord(alphabet[j]): str-indexing allocates (and leaks) a
-    # 1-char string per char - str-index-arg codegen bug; bytes[j] is a scalar int.
     const ab: bytes = alphabet.encode()
     j: int = 0
     while j < len(alphabet) {
@@ -37,10 +35,7 @@ def _encode_into(data: bytes, alphabet: str) -> bytes {
     if n == 0 {
         return bytes()
     }
-    # Byte view avoids ord(alphabet[i]) per symbol, which currently leaks
-    # (str-index-arg codegen bug).
     const ab: bytes = alphabet.encode()
-    # Output length is always 4 * ceil(n / 3) (with `=` padding to align).
     out_len: int = 4 * ((n + 2) // 3)
     out: list[int] = [0] * out_len
     i: int = 0
@@ -120,7 +115,6 @@ def _decode_with(data: bytes, table: list[int]) -> bytes {
         }
         qi = qi + 1
         if qi == 4 {
-            # Emit 1, 2, or 3 bytes depending on how many `=` slots we saw.
             a: int = quad[0]
             b: int = quad[1]
             c: int = quad[2]
@@ -143,8 +137,6 @@ def _decode_with(data: bytes, table: list[int]) -> bytes {
             quad[3] = 0
         }
     }
-    # Unpadded tail: RFC 4648 §3.2 requires padding, but jose/JWS often elides
-    # it; we accept both.
     if qi == 2 {
         a: int = quad[0]
         b: int = quad[1]

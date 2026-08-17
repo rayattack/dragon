@@ -1,8 +1,3 @@
-# ODB M9 regression suite: the HTTP/JSON gateway (spec section 18). Driven
-# network-free through Router.serve_connection over canned request bytes,
-# exactly like the stdlib http keep-alive suite: the full router pipeline
-# runs, and the wire bytes written back carry the assertions.
-
 from unittest import TestCase, main
 from odb import ODB, Documents
 from odb.vfs import SimVFS
@@ -40,7 +35,6 @@ def _get(path: str, extra: str) -> bytes {
     return ("GET " + path + " HTTP/1.1\r\nHost: h\r\n" + extra + "Connection: close\r\n\r\n").encode()
 }
 
-# The JSON body is the last line of the HTTP response text.
 def _body_json(sent: str) -> dict[str, Any] {
     sep: int = sent.find("\r\n\r\n")
     body: str = sent[sep + 4:]
@@ -88,7 +82,6 @@ class QueryEndpointTest(TestCase) {
         n_any: Any = reply["count"]
         n: int = n_any
         self.assertEqual(n, 1)
-        # and it actually landed
         self.assertEqual(len(db.find("customers ? city == \"Lagos\"")), 2)
     }
 
@@ -132,8 +125,6 @@ class SchemasEndpointTest(TestCase) {
 
 
 class WatchEndpointTest(TestCase) {
-    # SSE: one event per matching change, id: carries the resume CSN, and the
-    # stream ends with an `event: end` carrying the token to reconnect from.
     def test_sse_events() -> None {
         db: ODB = _db()
         sent: str = _drive(db, _get("/watch?q=customers&since=0", ""))
@@ -145,7 +136,6 @@ class WatchEndpointTest(TestCase) {
         self.assertIn("id: " + str(db.pager.last_csn), sent)
     }
 
-    # Last-Event-ID resumes past what was already delivered.
     def test_last_event_id_resumes() -> None {
         db: ODB = _db()
         mark: int = db.pager.last_csn
@@ -155,7 +145,6 @@ class WatchEndpointTest(TestCase) {
         self.assertNotIn("Ada", sent)
     }
 
-    # A resume point older than retention is a loud 409, never a silent gap.
     def test_trimmed_resume_is_409() -> None {
         db: ODB = _db()
         db.retain("1 txns")
@@ -171,9 +160,6 @@ class WatchEndpointTest(TestCase) {
 }
 
 
-# A connection fake for LIVE streams: serves one canned request, captures
-# every send, and reports the client gone after `budget` sends - which is how
-# a live stream's infinite loop is proven to terminate on disconnect.
 class CappedConn(ConnReader) {
     inbox: bytes
     served: bool
@@ -213,9 +199,6 @@ class CappedConn(ConnReader) {
 
 
 class LiveWatchTest(TestCase) {
-    # The cede path end to end through serve_connection: headers first,
-    # then retained events pushed, heartbeats on the quiet feed, and a clean
-    # termination + close (via the callback's defer) when the client is gone.
     def test_live_stream_pushes_and_closes() -> None {
         db: ODB = _db()
         app: Router = gateway(db)
@@ -226,13 +209,11 @@ class LiveWatchTest(TestCase) {
         self.assertIn("text/event-stream", conn.sent[0])
         self.assertIn("Ada", all_sent)
         self.assertIn("Zed", all_sent)
-        self.assertIn(": hb", all_sent)          # heartbeats flowed after the drain
-        self.assertNotIn("event: end", all_sent) # live streams do not end themselves
-        self.assertTrue(conn.closed)             # defer conn.close() ran on the way out
+        self.assertIn(": hb", all_sent)
+        self.assertNotIn("event: end", all_sent)
+        self.assertTrue(conn.closed)
     }
 
-    # Falling behind retention mid-stream ends the stream with a loud SSE
-    # error event, never a silent gap.
     def test_live_stream_retention_overrun_is_loud() -> None {
         db: ODB = _db()
         db.retain("1 txns")
@@ -254,10 +235,6 @@ class LiveWatchTest(TestCase) {
 }
 
 
-# Real-socket smoke: the live stream over an actual loopback connection. The
-# server task owns the db and serves exactly one connection; the client reads
-# the pushed events off the wire and hangs up; the heartbeat probe then fails
-# and the stream (and the fired task) terminate.
 def _serve_live(lis: TcpListener) -> int {
     db: ODB = _db()
     app: Router = gateway(db)
@@ -283,12 +260,12 @@ class LiveWatchSocketTest(TestCase) {
             }
             got = got + chunk
         }
-        c.close()                        # hang up; the server's heartbeat probe fails
+        c.close()
 
         self.assertIn("text/event-stream", got)
         self.assertIn("Ada", got)
         self.assertIn("Zed", got)
-        served: int = t.join()           # the stream terminated and the task returned
+        served: int = t.join()
         self.assertEqual(served, 1)
         lis.close()
     }

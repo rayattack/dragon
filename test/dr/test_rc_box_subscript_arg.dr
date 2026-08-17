@@ -3,13 +3,10 @@ from unittest import TestCase, main
 const N: int = 3000
 
 def sink_any(x: Any) -> int {
-    # Borrow x (do not store it): the callee never retains, so the caller's
-    # owned box temp is the caller's to release
     return 1
 }
 
 class BoxSubscriptArgRc(TestCase) {
-    # OWNED: dragon_box_subscript returns +1; passed as a bare Any arg -> drain
     def test_any_subscript_as_arg_no_leak() {
         i: int = 0
         while i < N {
@@ -43,7 +40,6 @@ class BoxSubscriptArgRc(TestCase) {
         }
     }
 
-    # BORROWED: list[Any] element via dragon_list_box_get.
     def test_listany_borrowed_as_arg() {
         i: int = 0
         while i < N {
@@ -54,7 +50,6 @@ class BoxSubscriptArgRc(TestCase) {
         }
     }
 
-    # OWNED: dragon_box_binop (Any + str) result passed as a bare Any arg.
     def test_box_binop_as_arg() {
         i: int = 0
         while i < N {

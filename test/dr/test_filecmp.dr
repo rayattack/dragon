@@ -74,13 +74,10 @@ class FileCmpTests(TestCase) {
         L: str = join(root, "L")
         R: str = join(root, "R")
         dc: filecmp.dircmp = filecmp.dircmp(L, R)
-        # left_only/right_only contain the unique files.
         self.assertTrue("only_l.txt" in dc.left_only)
         self.assertTrue("only_r.txt" in dc.right_only)
-        # same.txt is identical, diff.txt is not.
         self.assertTrue("same.txt" in dc.same_files)
         self.assertTrue("diff.txt" in dc.diff_files)
-        # common_dirs contains subdir.
         self.assertTrue("subdir" in dc.common_dirs)
         shutil.rmtree(root)
     }

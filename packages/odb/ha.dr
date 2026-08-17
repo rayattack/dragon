@@ -1,34 +1,3 @@
-# odb.ha - Raft HA over the commit log (spec section 19, v3b; milestone M11).
-#
-# The architecture the spec decided: the engine already wants a single
-# committer, so the Raft leader IS the committer. A write executes on the
-# leader exactly like a local write - validation, docid allocation, integrity,
-# everything - but instead of committing, the would-be commit is CAPTURED as a
-# logical log entry (odb.errors.CaptureSignal unwinds the statement through
-# its ordinary rollback), proposed to the cluster, and applied through
-# db.apply() - the identical path every follower uses - once a quorum holds
-# it. One code path applies writes on every replica; commits acknowledge at
-# quorum; failover is an election, not an operator.
-#
-# Alignment invariant: raft log index i is the write that commits at CSN i+1,
-# on every replica (CSN 1 is the empty database). Election no-ops consume
-# their CSN via fast_forward, exactly like M10's op-less commits, so the
-# (uuid, csn) lineage pair stays in lockstep clusterwide - and unlike M10,
-# same-CSN forks are now IMPOSSIBLE rather than latched away: a minority
-# leader's unreplicated entry is truncated by consensus, never applied.
-#
-# Durability: term, vote, and the unapplied log tail persist in the file
-# through pager.commit_state() (format v3) BEFORE any message leaves the
-# node, per the raft host contract. The applied prefix needs no second copy:
-# the database itself is the raft snapshot, and a peer that has fallen below
-# a leader's compaction base is caught up with the committed-history feed
-# (entries_since), M10's bootstrap machinery re-used as Raft's
-# InstallSnapshot.
-#
-# Transport is a seam, like server.dr's CsnWaiter: HAReplica emits Msg values
-# through RaftTransport.send and receives them via deliver(). Tests drive an
-# in-process hub; served mode's peer loop rides the same seam
-
 from odb import ODB
 from odb.raftlog import RaftTail
 from odb.pager import RETAIN_NONE
@@ -37,22 +6,15 @@ from odb.errors import ODBError, CorruptionError, CaptureSignal
 from raft import RaftNode, Entry, Msg, HardState, restore
 from raft.rng import Rng
 
-# Proposal outcomes (see HAReplica.outcome).
 const PENDING: int = -1
 const SUPERSEDED: int = 0
 const CONFIRMED: int = 1
 
-# The host's network seam. send() fires one protocol message toward its
-# `to` node; delivery failures are the network's business - raft retries by
-# design. The base implementation drops everything (a partitioned node).
 class RaftTransport {
     def send(m: Msg) -> None {
     }
 }
 
-# One replica's committed history above a follower's position, plus the
-# leader's compaction point: Raft's install-snapshot, with the database as
-# the snapshot.
 class SnapshotBatch {
     entries: list[LogEntry]
     base_index: int
@@ -70,12 +32,10 @@ class HAReplica {
     tail: RaftTail
     node: RaftNode
     transport: RaftTransport
-    # Single in-flight proposal (the engine is a single committer; group
-    # commit batches ABOVE this seam). Tracking one is tracking all.
-    last_proposal: int          # raft index of the newest proposal (0 = none)
+    last_proposal: int
     last_proposal_term: int
-    last_proposal_data: bytes   # the encoded entry, for history resolution
-    last_outcome: int           # PENDING | SUPERSEDED | CONFIRMED
+    last_proposal_data: bytes
+    last_outcome: int
 
     def(db: ODB, id: int, ids: list[int], transport: RaftTransport, seed: int) {
         if db.pager.retain_mode == RETAIN_NONE {
@@ -84,11 +44,6 @@ class HAReplica {
         self.db = db
         self.tail = RaftTail(db.pager)
         db.attach_raft(self.tail)
-        # Consensus state lives in the file: term/vote/base in the meta, the
-        # unapplied tail in the chain. The database's own CSN is the applied
-        # position; a base that understates it (a crash between an apply and
-        # the next flip) just means committed entries get re-offered and
-        # skipped - never re-applied.
         log: list[Entry] = []
         for te in self.tail.entries() {
             log.append(Entry(te.term, te.data))
@@ -101,12 +56,8 @@ class HAReplica {
         self.last_proposal_term = 0
         self.last_proposal_data = bytes([])
         self.last_outcome = PENDING
-        # Every replica latches local writes: on a leader they go through
-        # capture; on a follower they are refused outright. One rule.
         db.set_following(True)
     }
-
-    #--- the host loop ------------------------------------------------------#
 
     def tick() -> None {
         self.node.tick()
@@ -130,21 +81,14 @@ class HAReplica {
         return self.db.csn()
     }
 
-    #--- writes (leader only) ----------------------------------------------#
-
-    # Execute one OQL write statement through consensus. Returns the raft
-    # index it was proposed at; the write is durable once outcome() for that
-    # index turns CONFIRMED (its CSN is index+1, the read-your-writes token).
     def run(oql: str) -> int {
         return self._propose_captured(1, oql, "", {})
     }
 
-    # DDL through consensus: define (or evolve) a schema.
     def define_schema(name: str, definition: dict[str, Any]) -> int {
         return self._propose_captured(2, name, "", definition)
     }
 
-    # DDL through consensus: attach metadata to a defined schema.
     def define_meta(name: str, meta: dict[str, Any]) -> int {
         return self._propose_captured(3, name, "", meta)
     }
@@ -197,9 +141,6 @@ class HAReplica {
         return idx
     }
 
-    # PENDING until consensus resolves raft index `idx`; then CONFIRMED, or
-    # SUPERSEDED when a failover overwrote the slot (the write never
-    # happened anywhere and can be retried against the new leader).
     def outcome(idx: int) -> int {
         if idx != self.last_proposal {
             raise ODBError("outcome: index " + str(idx) + " is not the tracked proposal")
@@ -207,23 +148,15 @@ class HAReplica {
         return self.last_outcome
     }
 
-    #--- catch-up (the snapshot feed) ---------------------------------------#
-
-    # Leader side: committed history a lagging peer needs, straight off the
-    # commit log. Raises (loudly) when retention no longer covers
-    # the peer: it must re-seed from a file copy.
     def snapshot_for(follower_csn: int) -> SnapshotBatch {
         return SnapshotBatch(self.db.entries_since(follower_csn),
                              self.node.base_index, self.node.base_term)
     }
 
-    # Which peers currently need snapshot_for (drained on read).
     def snapshot_needed() -> list[int] {
         return self.node.take_snapshot_needed()
     }
 
-    # Follower side: apply committed history, close any no-op gaps, and
-    # rejoin consensus at the shipped base.
     def install_snapshot(b: SnapshotBatch) -> None {
         for e in b.entries {
             if e.csn > self.db.csn() {
@@ -235,11 +168,6 @@ class HAReplica {
         }
         self.node.install_base(b.base_index, b.base_term)
         self._service()
-        # The snapshot may have jumped the base past a pending proposal
-        # without it ever flowing through take_committed. History decides:
-        # the write is CONFIRMED only if the commit log holds our exact
-        # entry at our slot's CSN; an absent slot (an election no-op) or
-        # different bytes mean consensus gave the slot to someone else.
         if self.last_outcome == PENDING and self.last_proposal > 0 and self.node.base_index >= self.last_proposal {
             won: bool = False
             for he in self.db.entries_since(self.last_proposal) {
@@ -255,18 +183,11 @@ class HAReplica {
         }
     }
 
-    #--- internals ----------------------------------------------------------#
-
-    # The service pass, in host-contract order: (1) make hard state durable,
-    # (2) release messages, (3) apply what consensus committed.
     def _service() -> None {
         dirty: bool = False
         if self.db.pager.raft_term != self.node.term or self.db.pager.raft_vote != self.node.voted_for {
             dirty = True
         }
-        # Sync the chain to the node's log: find the highest index where they
-        # agree and append everything above it (covers plain appends AND
-        # truncation-replacements; the chain dedups by index on read).
         start: int = self.tail.last_index()
         if start > self.node.last_index() {
             start = self.node.last_index()
@@ -310,10 +231,10 @@ class HAReplica {
             }
             target: int = idx + 1
             if len(ce.data) == 0 {
-                self.db.fast_forward(target)     # election no-op: the slot is consumed
+                self.db.fast_forward(target)
             } else {
                 if target <= self.db.csn() {
-                    continue                     # already applied (re-offered after a restart)
+                    continue
                 }
                 le: LogEntry = decode_entry(ce.data)
                 if le.csn != target {
@@ -323,10 +244,6 @@ class HAReplica {
             }
         }
 
-        # Compact the consensus log to the applied position: those entries
-        # live in the database (and its commit-log feed) now, and holding
-        # them again in memory would grow without bound and never be read.
-        # A peer behind the base is served by the snapshot feed, by design.
         if self.node.applied > self.node.base_index {
             bt: int = self.node.log[self.node.applied - self.node.base_index - 1].term
             self.node.install_base(self.node.applied, bt)

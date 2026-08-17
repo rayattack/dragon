@@ -1,7 +1,3 @@
-# MUST NOT COMPILE (registered in test/CMakeLists.txt with a pass-regex on the
-# error). D048 guardrail: the boxed stamp is exactly dict[str, Any] - a non-str
-# key must stay a compile error even with an Any value type.
-
 from json import decode
 
 const body: bytes = '{"1": true}'.encode("utf-8")

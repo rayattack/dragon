@@ -7,13 +7,10 @@ namespace dragon {
 struct TypeInference::Impl {
     std::vector<std::string> unresolvedNames;
 
-    // Inferred types for variables: name -> Type
     std::unordered_map<std::string, std::shared_ptr<Type>> varTypes;
 
-    // Inferred function return types: funcName -> Type
     std::unordered_map<std::string, std::shared_ptr<Type>> funcReturnTypes;
 
-    // Inferred function parameter types: funcName -> {paramName -> Type}
     std::unordered_map<std::string, std::unordered_map<std::string, std::shared_ptr<Type>>> funcParamTypes;
 
     std::shared_ptr<PrimitiveType> intType = std::make_shared<PrimitiveType>(Type::Kind::Int);
@@ -23,7 +20,6 @@ struct TypeInference::Impl {
     std::shared_ptr<PrimitiveType> noneType = std::make_shared<PrimitiveType>(Type::Kind::None_);
     std::shared_ptr<AnyType> anyType = std::make_shared<AnyType>();
 
-    // Quick inference, not full constraint solving.
     std::shared_ptr<Type> inferFromExpr(Expr* expr) {
         if (!expr) return anyType;
         if (dynamic_cast<IntegerLiteral*>(expr)) return intType;
@@ -45,7 +41,6 @@ struct TypeInference::Impl {
             auto rt = inferFromExpr(bin->right.get());
             auto op = bin->op.type();
 
-            // Comparison operators always return bool
             if (op == TokenType::EQUAL_EQUAL || op == TokenType::NOT_EQUAL ||
                 op == TokenType::LESS || op == TokenType::LESS_EQUAL ||
                 op == TokenType::GREATER || op == TokenType::GREATER_EQUAL ||
@@ -73,7 +68,6 @@ struct TypeInference::Impl {
 
         if (auto* call = dynamic_cast<CallExpr*>(expr)) {
             if (auto* callee = dynamic_cast<NameExpr*>(call->callee.get())) {
-                // Built-in function return types
                 if (callee->name == "len" || callee->name == "abs" ||
                     callee->name == "int" || callee->name == "ord") return intType;
                 if (callee->name == "float") return floatType;
@@ -86,7 +80,6 @@ struct TypeInference::Impl {
                 if (callee->name == "sorted" || callee->name == "list" ||
                     callee->name == "reversed") return std::make_shared<ListType>(anyType);
 
-                // User function
                 auto it = funcReturnTypes.find(callee->name);
                 if (it != funcReturnTypes.end()) return it->second;
             }
@@ -128,7 +121,7 @@ struct TypeInference::Impl {
 
     std::unique_ptr<TypeExpr> typeToTypeExpr(const std::shared_ptr<Type>& type) {
         if (!type || type->kind() == Type::Kind::Any || type->kind() == Type::Kind::Unknown) {
-            return nullptr; // No annotation for Any/Unknown
+            return nullptr;
         }
         switch (type->kind()) {
             case Type::Kind::Int: { auto n = std::make_unique<NamedTypeExpr>(); n->name = "int"; return n; }
@@ -190,7 +183,6 @@ std::vector<std::string> TypeInference::unresolvedNames() const {
 }
 
 void TypeInference::collectConstraints(Module& module) {
-    // First pass: collect function signatures by analyzing return statements
     for (auto& stmt : module.body) {
         if (auto* func = dynamic_cast<FunctionDecl*>(stmt.get())) {
             if (func->returnType) continue;
@@ -208,7 +200,6 @@ void TypeInference::collectConstraints(Module& module) {
         }
     }
 
-    // Second pass: collect variable types from assignments
     for (auto& stmt : module.body) {
         if (auto* assign = dynamic_cast<AssignStmt*>(stmt.get())) {
             if (assign->value && !assign->targets.empty()) {
@@ -221,22 +212,16 @@ void TypeInference::collectConstraints(Module& module) {
             }
         }
         if (auto* ann = dynamic_cast<AnnAssignStmt*>(stmt.get())) {
-            // Already has annotation, skip
             continue;
         }
-        // Infer within function bodies too. Function-local assignments are
-        // scoped: two functions reusing a variable name must not cross-pollute
-        // the flat map (a later function's annotation followed the earlier one's type).
         if (auto* func = dynamic_cast<FunctionDecl*>(stmt.get())) {
             auto savedVarTypes = impl_->varTypes;
-            // Infer parameter types from usage patterns
             for (auto& p : func->params) {
                 if (!p.type && p.defaultValue) {
                     auto type = impl_->inferFromExpr(p.defaultValue.get());
                     impl_->funcParamTypes[func->name][p.name] = type;
                 }
             }
-            // Scan body for variable assignments
             for (auto& bodyStmt : func->body) {
                 if (auto* assign = dynamic_cast<AssignStmt*>(bodyStmt.get())) {
                     if (assign->value && !assign->targets.empty()) {
@@ -255,10 +240,8 @@ void TypeInference::collectConstraints(Module& module) {
 }
 
 void TypeInference::applyInferredTypes(Module& module) {
-    // Apply inferred types to AST nodes that lack annotations
     for (auto& stmt : module.body) {
         if (auto* func = dynamic_cast<FunctionDecl*>(stmt.get())) {
-            // Add return type annotation if missing
             if (!func->returnType) {
                 auto it = impl_->funcReturnTypes.find(func->name);
                 if (it != impl_->funcReturnTypes.end()) {
@@ -271,7 +254,6 @@ void TypeInference::applyInferredTypes(Module& module) {
                 }
             }
 
-            // Add parameter type annotations if missing
             for (auto& p : func->params) {
                 if (!p.type) {
                     auto it2 = impl_->funcParamTypes.find(func->name);
@@ -281,8 +263,6 @@ void TypeInference::applyInferredTypes(Module& module) {
                             p.type = impl_->typeToTypeExpr(pit->second);
                         }
                     }
-                    // If still no type, use Any and record the gap so
-                    // infer()'s return value is honest about it.
                     if (!p.type) {
                         impl_->unresolvedNames.push_back(func->name + "." + p.name);
                         auto n = std::make_unique<NamedTypeExpr>();
@@ -295,4 +275,4 @@ void TypeInference::applyInferredTypes(Module& module) {
     }
 }
 
-} // namespace dragon
+}

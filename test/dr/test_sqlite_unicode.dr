@@ -1,13 +1,3 @@
-# sqlite text params crossing the C ABI as real UTF-8 bytes.
-#
-# A Dragon str holding any code point >= 0x80 is stored UCS-4 (one code point
-# per 4-byte slot, zero bytes mid-buffer). sqlite3_bind_text / sqlite3_exec /
-# sqlite3_prepare_v2 read their text arguments as NUL-terminated C strings,
-# so a bound value like "arrow → here" was stored in the database as "a" and
-# SQL containing a non-ASCII literal executed truncated. The wrappers now
-# encode every outbound text to UTF-8 bytes (dragon_bytes_data + explicit
-# byte length) and pin bound buffers on the Cursor until finalize().
-
 from unittest import TestCase, main
 from sqlite import Database, Cursor
 from tempfile import mkdtemp
@@ -28,7 +18,6 @@ class TestSqliteUnicode(TestCase) {
             rd: Cursor = db.prepare("SELECT body, length(body) FROM t WHERE id = 1")
             self.assertEqual(rd.step(), 100)
             self.assertEqual(rd.column_text(0), BODY)
-            # length() counts SQLite characters: proves what landed on disk.
             self.assertEqual(rd.column_int(1), len(BODY))
             rd.finalize()
         }
@@ -47,8 +36,6 @@ class TestSqliteUnicode(TestCase) {
     }
 
     def test_bound_buffer_survives_until_step() {
-        # The encoded bytes must stay alive across bind -> step (SQLITE_STATIC
-        # binding): bind in one call frame, step later, then read back.
         const dir: str = mkdtemp("dr-sqlite-pin-", "")
         with Database(dir + "/p.db") as db {
             db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT, b TEXT)")
@@ -82,8 +69,6 @@ class TestSqliteUnicode(TestCase) {
 
 
 def _bind_pair(cur: Cursor) -> None {
-    # Locals here die when this frame returns - the Cursor's pin list is what
-    # must keep the encoded buffers alive for the later step().
     a: str = "left →"
     b: str = "right §"
     cur.bind_text(1, a)

@@ -1,6 +1,3 @@
-// Deep-clone utilities for the D044 generics monomorphization engine (see
-// AstClone.h). Every node type is handled explicitly or fails loudly; a new AST node needs a clone case here too.
-
 #include "dragon/AstClone.h"
 
 #include <cassert>
@@ -10,8 +7,6 @@
 namespace dragon {
 
 namespace {
-// A missing case is a compiler bug: the monomorphizer's `if (!cloned) continue;`
-// would silently omit a statement or null a sub-expr and miscompile; fires on stderr always, asserts under tests.
 [[maybe_unused]] std::nullptr_t cloneMissingCase(const char* kind,
                                                  const ASTNode& node) {
     std::fprintf(stderr,
@@ -20,7 +15,7 @@ namespace {
         kind, typeid(node).name());
     std::abort();
 }
-}  // namespace
+}
 
 namespace {
 
@@ -75,12 +70,9 @@ std::vector<CompClause> cloneClauses(const std::vector<CompClause>& v,
     return out;
 }
 
-// TypeExpr -> value-position expr, for type args parsed as value subscripts
-// (`Inner[T]`, `g[T](...)`): T->int becomes `int`. Used by cloneExpr's NameExpr case.
 std::unique_ptr<Expr> typeExprToValueExpr(const TypeExpr* t) {
     if (!t) return nullptr;
     if (auto* n = dynamic_cast<const NamedTypeExpr*>(t)) {
-        // A dotted type name ("mod.Class") becomes an attribute chain.
         auto dot = n->name.find('.');
         if (dot == std::string::npos) {
             auto e = std::make_unique<NameExpr>();
@@ -117,13 +109,11 @@ std::unique_ptr<Expr> typeExprToValueExpr(const TypeExpr* t) {
         }
         return sub;
     }
-    // A union (`int | str`) type arg becomes a left-folded `|` BinaryExpr chain
-    // (exprToTypeExpr flattens it back, so it round-trips; covers Optional too, normalized to a union at parse time).
     if (auto* u = dynamic_cast<const UnionTypeExpr*>(t)) {
         std::unique_ptr<Expr> acc;
         for (auto& mem : u->types) {
             auto v = typeExprToValueExpr(mem.get());
-            if (!v) return nullptr;  // a member isn't value-denotable
+            if (!v) return nullptr;
             if (!acc) { acc = std::move(v); continue; }
             auto bin = std::make_unique<BinaryExpr>();
             bin->left = std::move(acc);
@@ -131,9 +121,8 @@ std::unique_ptr<Expr> typeExprToValueExpr(const TypeExpr* t) {
             bin->right = std::move(v);
             acc = std::move(bin);
         }
-        return acc;  // null only if the union was empty (never produced)
+        return acc;
     }
-    // Callables and bare tuple-type-exprs are not value-position type args.
     return nullptr;
 }
 
@@ -147,13 +136,11 @@ MatchPattern clonePattern(const MatchPattern& p, const TypeSubst& subst) {
     return q;
 }
 
-}  // namespace
+}
 
 std::unique_ptr<TypeExpr> cloneTypeExpr(const TypeExpr* t, const TypeSubst& subst) {
     if (!t) return nullptr;
     if (auto* n = dynamic_cast<const NamedTypeExpr*>(t)) {
-        // The substitution pivot: a bare type-param name becomes the concrete
-        // type arg's TypeExpr (cloned, so the template isn't aliased into the stamped decl). Dotted names never match a type-param key.
         auto it = subst.find(n->name);
         if (it != subst.end()) return cloneTypeExpr(it->second, {});
         auto r = std::make_unique<NamedTypeExpr>();
@@ -237,8 +224,6 @@ std::unique_ptr<Expr> cloneExpr(const Expr* e, const TypeSubst& subst) {
         auto r = std::make_unique<NoneLiteral>(); setLoc(r, *e); return r;
     }
     if (auto* n = dynamic_cast<const NameExpr*>(e)) {
-        // A type param in VALUE position (the `T` in `Inner[T]` / `g[T](...)`) is
-        // substituted to its concrete type's value-syntax form; safe because a bare `T` in a generic body is always a type reference, never a value.
         auto it = subst.find(n->name);
         if (it != subst.end()) {
             if (auto v = typeExprToValueExpr(it->second)) { v->setLocation(e->location()); return v; }
@@ -442,8 +427,6 @@ std::unique_ptr<Expr> cloneExpr(const Expr* e, const TypeSubst& subst) {
         r->body = n->body;
         r->contentType = n->contentType;
         r->isContentAlias = n->isContentAlias;
-        // Deep-clone the pre-parsed interpolations so a template inside a generic
-        // body keeps its typed AST after monomorphization (mirrors fstringParts above); otherwise the clone carries `body` but no parts and lowers to empty output.
         for (auto& part : n->templateParts) {
             TemplatePart tp;
             tp.kind = part.kind;
@@ -656,8 +639,6 @@ std::unique_ptr<Stmt> cloneStmt(const Stmt* s, const TypeSubst& subst) {
     if (auto* n = dynamic_cast<const FunctionDecl*>(s)) {
         auto r = std::make_unique<FunctionDecl>();
         r->name = n->name;
-        // typeParams intentionally copied verbatim; the monomorphizer clears
-        // them on a stamped instantiation (a concrete decl is not a template).
         for (auto& tp : n->typeParams) {
             TypeParam q;
             q.name = tp.name;
@@ -735,4 +716,4 @@ std::unique_ptr<Stmt> cloneStmt(const Stmt* s, const TypeSubst& subst) {
     return cloneMissingCase("Stmt", *s);
 }
 
-}  // namespace dragon
+}

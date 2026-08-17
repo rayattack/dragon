@@ -20,8 +20,6 @@ def consume(own o: Op) -> int {
 
 class SpawnLendTests(TestCase) {
     def test_lend_then_await_then_use() {
-        # The joined-Task borrow door: o crosses as a plain borrow, is
-        # untouchable while lent, and revives at the await
         i: int = 0
         while i < 2000 {
             o: Op = Op("payload")
@@ -45,7 +43,6 @@ class SpawnLendTests(TestCase) {
     }
 
     def test_await_fire_inline() {
-        # `await fire f(o)`: the borrow window IS the await.
         o: Op = Op("xyz")
         const r: int = await fire sum_of(o, 10)
         self.assertEqual(r, 13)

@@ -1,5 +1,3 @@
-/// Dragon TypeChecker - statement & declaration visitors (assign, control flow,
-/// imports, functions, classes). Split from TypeChecker.cpp; same class + behavior.
 #include "dragon/TypeChecker.h"
 #include "dragon/Privacy.h"
 #include "TypeCheckerImpl.h"
@@ -22,8 +20,6 @@ static bool annotationElementIsAny(const std::shared_ptr<Type>& t) {
     return false;
 }
 
-// `list[type]` / `dict[K, type]` use class-descriptor i64 handles, not the box,
-// though they resolve to Any: box-forcing in AnnAssignStmt must skip `type` elems.
 static bool containerElementAnnotationIsType(TypeExpr* ann) {
     auto* g = dynamic_cast<GenericTypeExpr*>(ann);
     if (!g) return false;
@@ -45,13 +41,11 @@ static bool containerElementAnnotationIsType(TypeExpr* ann) {
 bool TypeChecker::diagnoseHeterogeneousLiteral(
     Expr* value, const std::shared_ptr<Type>& annot) {
     if (!value || !annot) return false;
-    // Only list/set literals against a list-shaped annotation (sets are
-    // represented as ListType today). Dict literals have their own keyed check.
     if (annot->kind() != Type::Kind::List) return false;
     const auto& elemT = static_cast<const ListType&>(*annot).elementType;
     if (!elemT || elemT->kind() == Type::Kind::Any ||
         elemT->kind() == Type::Kind::Unknown)
-        return false;  // list[Any] / unbound: every element is admissible
+        return false;
 
     const std::vector<std::unique_ptr<Expr>>* elems = nullptr;
     if (auto* lit = dynamic_cast<ListExpr*>(value)) elems = &lit->elements;
@@ -73,10 +67,7 @@ bool TypeChecker::diagnoseHeterogeneousLiteral(
 
 bool TypeChecker::tryExpectedTypeLiteral(Expr* value, const std::shared_ptr<Type>& expected) {
     if (!value || !expected) return false;
-    // list literal -> list[Base]: accept when every element <: Base.
     if (expected->kind() == Type::Kind::List) {
-        // A SET literal types as ListType but has its own runtime repr (dragon_set_*):
-        // accept without retyping; there is no monomorphized/boxed split to guard.
         if (auto* setLit = dynamic_cast<SetExpr*>(value)) {
             const auto& base =
                 static_cast<const ListType&>(*expected).elementType;
@@ -96,26 +87,19 @@ bool TypeChecker::tryExpectedTypeLiteral(Expr* value, const std::shared_ptr<Type
             if (!el->type->isSubtypeOf(*base)) return false;
         }
         if (base->kind() == Type::Kind::Any) {
-            // Class-descriptor literals ([Foo, Bar] into list[type]): accept without
-            // retyping - descriptor lists are native i64 handles, never boxed.
             for (auto& el : lit->elements)
                 if (el->type && el->type->kind() == Type::Kind::Class)
                     return true;
-            // Any element type must reach INTO nested literals: the outer is a box
-            // list, so a nested literal left narrow would build mono but walk boxed.
             for (auto& el : lit->elements)
                 boxNestedContainerLiteralForAny(el.get());
         } else if (base->kind() == Type::Kind::List ||
                    base->kind() == Type::Kind::Dict) {
-            // base is a concrete container (`list[dict[str, Any]]`): recurse at the
-            // exact base so nested Any slots are born boxed, concrete ones stay native.
             for (auto& el : lit->elements)
                 tryExpectedTypeLiteral(el.get(), base);
         }
-        lit->type = expected;  // fresh literal -> sound covariant retype
+        lit->type = expected;
         return true;
     }
-    // dict literal -> dict[K, V]: keys must equal K, values <: V.
     if (expected->kind() == Type::Kind::Dict) {
         auto* lit = dynamic_cast<DictExpr*>(value);
         if (!lit || lit->entries.empty()) return false;
@@ -128,23 +112,17 @@ bool TypeChecker::tryExpectedTypeLiteral(Expr* value, const std::shared_ptr<Type
                 if (!v->type || !v->type->isSubtypeOf(*dt.valueType)) return false;
             }
         }
-        // Any propagation for dict VALUES (a nested list in an Any slot born boxed).
-        // Braces are load-bearing: the `else if` must bind here, not to inner `if (v)`.
         if (dt.valueType && dt.valueType->kind() == Type::Kind::Any) {
             for (auto& [k, v] : lit->entries)
                 if (v) boxNestedContainerLiteralForAny(v.get());
         } else if (dt.valueType && (dt.valueType->kind() == Type::Kind::List ||
                                     dt.valueType->kind() == Type::Kind::Dict)) {
-            // Concrete-container value type (`dict[str, dict[str, Any]]`): recurse so
-            // a nested value is built in the exact value type, its Any slots boxed.
             for (auto& [k, v] : lit->entries)
                 if (v) tryExpectedTypeLiteral(v.get(), dt.valueType);
         }
         lit->type = expected;
         return true;
     }
-    // tuple literal -> tuple[T1,...,Tn]: arity must match, each element <: Ti.
-    // Sound like list/dict: tuple elements are stored per-slot tagged, so an Any slot just adopts the element's runtime tag.
     if (expected->kind() == Type::Kind::Tuple) {
         auto* lit = dynamic_cast<TupleExpr*>(value);
         if (!lit) return false;
@@ -156,8 +134,6 @@ bool TypeChecker::tryExpectedTypeLiteral(Expr* value, const std::shared_ptr<Type
             if (!want || !el || !el->type) return false;
             if (!el->type->isSubtypeOf(*want)) return false;
         }
-        // Any propagation per SLOT: a nested container literal in an Any slot
-        // is born boxed; a concrete-container slot recurses at its exact type.
         for (size_t i = 0; i < lit->elements.size(); ++i) {
             const auto& want = tt.elementTypes[i];
             if (want->kind() == Type::Kind::Any) {
@@ -174,8 +150,6 @@ bool TypeChecker::tryExpectedTypeLiteral(Expr* value, const std::shared_ptr<Type
     return false;
 }
 
-// True when a literal's elements are class descriptors ([Foo, Bar]) - those
-// lists use native i64 handles (list[type]), never the box representation.
 static bool literalElementsAreClassDescriptors(ListExpr* lit) {
     for (auto& el : lit->elements)
         if (el->type && el->type->kind() == Type::Kind::Class) return true;
@@ -198,8 +172,6 @@ void TypeChecker::boxNestedContainerLiteralForAny(Expr* value) {
         if (!keyT) keyT = impl_->strType;
         value->type = std::make_shared<DictType>(keyT, impl_->anyType);
     }
-    // Set literals keep their type: sets ride ListType but have their own build path;
-    // an Any-held set is untested, so do not silently retype it here.
 }
 
 std::string TypeChecker::listReprMismatchHint(const Type& from, const Type& to) {
@@ -219,21 +191,18 @@ std::string TypeChecker::listReprMismatchHint(const Type& from, const Type& to) 
 void TypeChecker::propagateAnnotationToEmptyLiteral(Expr* value, const std::shared_ptr<Type>& annotType) {
     if (!value || !annotType) return;
 
-    // Empty list literal [] with list[T] annotation
     if (auto* list = dynamic_cast<ListExpr*>(value)) {
         if (list->elements.empty() && annotType->kind() == Type::Kind::List) {
             list->type = annotType;
         }
         return;
     }
-    // Empty dict literal {} with dict[K,V] annotation
     if (auto* dict = dynamic_cast<DictExpr*>(value)) {
         if (dict->entries.empty() && annotType->kind() == Type::Kind::Dict) {
             dict->type = annotType;
         }
         return;
     }
-    // Empty set literal (parsed as SetExpr) with set annotation
     if (auto* set = dynamic_cast<SetExpr*>(value)) {
         if (set->elements.empty() && annotType->kind() == Type::Kind::List) {
             set->type = annotType;
@@ -255,22 +224,15 @@ void TypeChecker::visit(ExprStmt& node) {
 }
 
 void TypeChecker::visit(AssignStmt& node) {
-    // If there's a type annotation, propagate it into empty container literals
-    // so that e.g. `x: list[str] = []` resolves to list[str] instead of list[<unknown>]
     if (node.typeAnnotation) {
         auto annotType = resolveType(node.typeAnnotation.get());
         propagateAnnotationToEmptyLiteral(node.value.get(), annotType);
-        // D044 - expected-type hint for bare generic construction (see AnnAssign).
         impl_->currentExpectedType = annotType;
         auto valueType = inferType(node.value.get());
         impl_->currentExpectedType = nullptr;
-        // Force box repr for a literal assigned to list[Any] / dict[K, Any] (see
-        // AnnAssignStmt); `list[type]` resolves to Any but uses descriptors, excluded.
         bool elemIsType = containerElementAnnotationIsType(node.typeAnnotation.get());
         if (annotationElementIsAny(annotType) && !elemIsType)
             tryExpectedTypeLiteral(node.value.get(), annotType);
-        // Per-element check first: a later element can mismatch (list[int] = [1,"x"]).
-        // `list[type]` accepts any list value (both native i64 handles, invariance aside).
         if (!diagnoseHeterogeneousLiteral(node.value.get(), annotType) &&
             annotType->kind() != Type::Kind::Unknown &&
             valueType->kind() != Type::Kind::Unknown &&
@@ -281,13 +243,10 @@ void TypeChecker::visit(AssignStmt& node) {
                   "' to variable of type '" + annotType->toString() + "'" +
                   listReprMismatchHint(*valueType, *annotType));
         }
-        // Define with the annotation type
         for (auto& target : node.targets) {
             if (auto* name = dynamic_cast<NameExpr*>(target.get())) {
                 impl_->define(name->name, annotType);
             } else if (auto* tup = dynamic_cast<TupleExpr*>(target.get())) {
-                // const multi-target unpack: a tuple[...] annotation binds each name
-                // at its annotated element type (arity matched in the parser).
                 if (annotType->kind() == Type::Kind::Tuple) {
                     auto& tupleAnn = static_cast<TupleType&>(*annotType);
                     for (size_t i = 0; i < tup->elements.size() &&
@@ -303,12 +262,8 @@ void TypeChecker::visit(AssignStmt& node) {
         auto valueType = inferType(node.value.get());
         for (auto& target : node.targets) {
             if (auto* name = dynamic_cast<NameExpr*>(target.get())) {
-                // A binding's type is fixed at its declaration; a bare `x = v` is a
-                // reassignment (assignable to it, never re-typed - codegen fixes LLVM types).
                 auto existing = impl_->lookup(name->name);
                 if (existing) {
-                    // An empty literal (`x = []`) has no element type; push the declared
-                    // type in (as at the decl site) so a valid reassignment isn't rejected.
                     propagateAnnotationToEmptyLiteral(node.value.get(), existing);
                     valueType = inferType(node.value.get());
                     if (!diagnoseHeterogeneousLiteral(node.value.get(), existing) &&
@@ -321,14 +276,10 @@ void TypeChecker::visit(AssignStmt& node) {
                               "' (a variable's type is fixed at its declaration)");
                     }
                 } else {
-                    // Brand-new binding (e.g. tuple-unpack element, or a form
-                    // Sema permits as an implicit declaration): record its type.
                     impl_->define(name->name, valueType);
                 }
             } else if (auto* attr = dynamic_cast<AttributeExpr*>(target.get())) {
                 auto objType = inferType(attr->object.get());
-                // `obj.method = v` must not compile (a method isn't an assignable slot);
-                // it previously compiled silently and did nothing, hiding real bugs like `res.html = ...`.
                 const ClassType* recvCls = nullptr;
                 if (objType && objType->kind() == Type::Kind::Instance)
                     recvCls = static_cast<const InstanceType&>(*objType).classType.get();
@@ -341,8 +292,6 @@ void TypeChecker::visit(AssignStmt& node) {
                           "call it: `." + attr->attribute + "(...)`?");
                     continue;
                 }
-                // `obj.attr = []` bare reassign of a class field: push the field's
-                // declared type into the empty literal (else it falls back to TAG_INT).
                 if (objType && objType->kind() == Type::Kind::Instance) {
                     const auto& inst = static_cast<const InstanceType&>(*objType);
                     std::shared_ptr<Type> fieldType;
@@ -359,8 +308,6 @@ void TypeChecker::visit(AssignStmt& node) {
                     }
                 }
             } else if (auto* tup = dynamic_cast<TupleExpr*>(target.get())) {
-                // Tuple-unpack, no annotation: bind each NEW name to the RHS tuple's
-                // element type (honest types), not Any; a declared name stays fixed.
                 if (valueType->kind() == Type::Kind::Tuple) {
                     auto& tt = static_cast<TupleType&>(*valueType);
                     for (size_t i = 0; i < tup->elements.size() &&
@@ -371,8 +318,6 @@ void TypeChecker::visit(AssignStmt& node) {
                     }
                 }
             } else if (auto* sub = dynamic_cast<SubscriptExpr*>(target.get())) {
-                // `d[k] = [..]` into a dict[K, Any] / list[Any] slot flows into Any,
-                // so the literal must be born boxed (as tryExpectedTypeLiteral does).
                 auto contType = inferType(sub->object.get());
                 bool slotIsAny = false;
                 if (auto* dt = dynamic_cast<DictType*>(contType.get()))
@@ -392,13 +337,9 @@ void TypeChecker::visit(AssignStmt& node) {
 void TypeChecker::visit(AugAssignStmt& node) {
     auto targetType = inferType(node.target.get());
     auto valueType = inferType(node.value.get());
-    // `x += y` desugars to `x = x <op> y`: obey the same operand rules as the binary
-    // op (else `x: int; x += "s"` slips through). Mirrors visit(BinaryExpr)'s table.
     if (!targetType || !valueType) return;
     auto tk = targetType->kind();
     auto vk = valueType->kind();
-    // Unknown / Any / instances (dunder dispatch) / type params resolve elsewhere or
-    // at CodeGen - passed through here, as visit(BinaryExpr) does.
     auto opaque = [](Type::Kind k) {
         return k == Type::Kind::Unknown || k == Type::Kind::Any ||
                k == Type::Kind::Instance || k == Type::Kind::TypeVar;
@@ -412,14 +353,12 @@ void TypeChecker::visit(AugAssignStmt& node) {
     TokenType op = node.op.type();
     bool ok = false;
     if (tNum && vNum) {
-        ok = true;  // int/float arithmetic in any combination
+        ok = true;
     } else if (op == TokenType::PLUS_EQUAL) {
-        // Concatenation forms: str += str, bytes += bytes, list += list.
         ok = (tk == Type::Kind::Str && vk == Type::Kind::Str) ||
              (tk == Type::Kind::Bytes && vk == Type::Kind::Bytes) ||
              (tk == Type::Kind::List && vk == Type::Kind::List);
     } else if (op == TokenType::STAR_EQUAL) {
-        // Repetition: str/bytes/list *= int (target is the sequence).
         ok = (tk == Type::Kind::Str || tk == Type::Kind::Bytes ||
               tk == Type::Kind::List) && vNum;
     }
@@ -433,8 +372,6 @@ void TypeChecker::visit(AugAssignStmt& node) {
 void TypeChecker::visit(AnnAssignStmt& node) {
     auto annotType = resolveType(node.annotation.get());
 
-    // `obj.method: T = v` is as invalid as the bare form (see AssignStmt); the
-    // ctor's field declarations (`self.x: str = v`) resolve in `fields` and pass through.
     if (auto* attr = dynamic_cast<AttributeExpr*>(node.target.get())) {
         auto objType = inferType(attr->object.get());
         const ClassType* recvCls = nullptr;
@@ -452,11 +389,7 @@ void TypeChecker::visit(AnnAssignStmt& node) {
     }
 
     if (node.value) {
-        // Propagate annotation type into empty container literals
-        // so that e.g. `x: list[str] = []` resolves to list[str]
         propagateAnnotationToEmptyLiteral(node.value.get(), annotType);
-        // D044 - hand the annotation to the value as an expected type, so a bare
-        // generic construction `Box(5)` infers its type args from `Box[int]`.
         impl_->currentExpectedType = annotType;
         auto valueType = inferType(node.value.get());
         impl_->currentExpectedType = nullptr;
@@ -466,13 +399,9 @@ void TypeChecker::visit(AnnAssignStmt& node) {
                 static_cast<const FunctionType&>(*calleeType).spawnsFreshTask)
                 node.valueIsFreshTask = true;
         }
-        // A literal into list[Any] / dict[K, Any] must be built boxed: else the narrow
-        // type passes and `x[i]` reads two native slots as a box. `list[type]` excluded.
         bool elemIsType = containerElementAnnotationIsType(node.annotation.get());
         if (annotationElementIsAny(annotType) && !elemIsType)
             tryExpectedTypeLiteral(node.value.get(), annotType);
-        // Per-element check first (see AssignStmt): catch a later element that violates
-        // the elem type. `list[type]` accepts any list value (native i64 handles).
         if (!diagnoseHeterogeneousLiteral(node.value.get(), annotType) &&
             annotType->kind() != Type::Kind::Unknown &&
             valueType->kind() != Type::Kind::Unknown &&
@@ -485,8 +414,6 @@ void TypeChecker::visit(AnnAssignStmt& node) {
         }
     }
 
-    // Bare `t: Task = fire f()` refines to Task[T] from the RHS (sound, no boxing),
-    // not the lossy Task[Any]; an explicit `Task[T]` is already concrete, kept.
     std::shared_ptr<Type> declType = annotType;
     if (node.value && annotType->kind() == Type::Kind::Task &&
         static_cast<TaskType&>(*annotType).resultType->kind() == Type::Kind::Any &&
@@ -494,15 +421,12 @@ void TypeChecker::visit(AnnAssignStmt& node) {
         declType = node.value->type;
     }
 
-    // Define with annotation type
     if (auto* name = dynamic_cast<NameExpr*>(node.target.get())) {
         impl_->define(name->name, declType);
     }
 }
 
 void TypeChecker::visit(IfStmt& node) {
-    // D039 - statement-level isinstance narrowing: `isinstance(name, T)` types name
-    // as T in the then-body, (union - T) or Any in the else. Mirrors IfExpr.
     auto narrowedTypeFromExpr = [&](Expr* e) -> std::shared_ptr<Type> {
         auto* tn = dynamic_cast<NameExpr*>(e);
         if (!tn) return nullptr;
@@ -511,8 +435,6 @@ void TypeChecker::visit(IfStmt& node) {
         if (tn->name == "bool")  return impl_->boolType;
         if (tn->name == "str")   return impl_->strType;
         if (tn->name == "bytes") return impl_->bytesType;
-        // Class types live in typeNames (where resolveType looks), not value scopes;
-        // check typeNames first (else class-name narrowing silently no-ops), then scope.
         auto tit = impl_->typeNames.find(tn->name);
         if (tit != impl_->typeNames.end()) return tit->second;
         auto found = impl_->lookup(tn->name);
@@ -530,13 +452,9 @@ void TypeChecker::visit(IfStmt& node) {
         if (remaining.size() == 1) return remaining[0];
         return std::make_shared<UnionType>(std::move(remaining));
     };
-    // Inspect a condition for `isinstance(name, T)` and produce the narrowed
-    // then-type and else-type. Returns true if narrowing applies.
     auto analyzeIsinstance = [&](Expr* cond, std::string& outName,
                                  std::shared_ptr<Type>& outThenT,
                                  std::shared_ptr<Type>& outElseT) -> bool {
-        // `x is None` / `x == None` / `x is not None` / `x != None` against a
-        // union narrows None vs its non-None complement across the branches.
         if (auto* bin = dynamic_cast<BinaryExpr*>(cond)) {
             auto op = bin->op.type();
             bool isEq = (op == TokenType::IS || op == TokenType::EQUAL_EQUAL);
@@ -570,14 +488,12 @@ void TypeChecker::visit(IfStmt& node) {
         auto curType = impl_->lookup(argName->name);
         auto narrowT = narrowedTypeFromExpr(call->args[1].get());
         if (!curType || !narrowT) return false;
-        // Union source: narrow to T in then, (union - T) in else.
         if (curType->kind() == Type::Kind::Union) {
             outName = argName->name;
             outThenT = narrowT;
             outElseT = subtractFromUnion(curType, narrowT);
             return true;
         }
-        // Any source: narrow to T in then; else stays Any (the universe).
         if (curType->kind() == Type::Kind::Any) {
             outName = argName->name;
             outThenT = narrowT;
@@ -589,7 +505,6 @@ void TypeChecker::visit(IfStmt& node) {
 
     if (node.condition) inferType(node.condition.get());
 
-    // Then-branch with optional narrowing.
     std::string nName;
     std::shared_ptr<Type> nThen;
     std::shared_ptr<Type> nElse;
@@ -600,8 +515,6 @@ void TypeChecker::visit(IfStmt& node) {
     for (auto& s : node.thenBody) s->accept(*this);
     impl_->popScope();
 
-    // Elif chain: each clause is its own scope; collect narrowings independently.
-    // Note: this doesn't model the cumulative else-of-prior-elifs narrowing yet.
     for (auto& [cond, body] : node.elifClauses) {
         if (cond) inferType(cond.get());
         std::string en;
@@ -614,15 +527,11 @@ void TypeChecker::visit(IfStmt& node) {
         impl_->popScope();
     }
 
-    // Else-branch with the anti-narrowed type (only when the head condition
-    // produced a narrowing).
     impl_->pushScope();
     if (narrowedHere) impl_->define(nName, nElse ? nElse : impl_->unknownType);
     for (auto& s : node.elseBody) s->accept(*this);
     impl_->popScope();
 
-    // Fall-through narrowing: if the then-branch always terminates with no elif/else,
-    // code after the `if` sees the else-type (early-return idiom; matches CodeGen).
     if (narrowedHere && node.elifClauses.empty() && node.elseBody.empty() &&
         stmtsAlwaysTerminate(node.thenBody)) {
         impl_->define(nName, nElse ? nElse : impl_->unknownType);
@@ -643,8 +552,6 @@ void TypeChecker::visit(ForStmt& node) {
     impl_->rangeValueOkExprs.insert(node.iterable.get());
     auto iterType = inferType(node.iterable.get());
 
-    // A function value is not iterable (`for a in argv` where argv is a function, not
-    // `argv()`); without this it fell through to an untyped loop over garbage.
     if (iterType && iterType->kind() == Type::Kind::Function) {
         if (auto* fn = dynamic_cast<NameExpr*>(node.iterable.get())) {
             error(node.location(), "cannot iterate the function '" + fn->name +
@@ -654,7 +561,6 @@ void TypeChecker::visit(ForStmt& node) {
         }
     }
 
-    // Loop variable and body share the loop's block scope.
     impl_->pushScope();
     if (auto* name = dynamic_cast<NameExpr*>(node.target.get())) {
         if (iterType->kind() == Type::Kind::List) {
@@ -696,8 +602,6 @@ void TypeChecker::visit(ForStmt& node) {
             impl_->define(name->name, impl_->unknownType);
         }
     } else if (auto* tup = dynamic_cast<TupleExpr*>(node.target.get())) {
-        // Tuple-unpack `for a, b in it`: type each var from the element type, not
-        // unknown->int (else a str element is keyed as int at static-type sites).
         std::shared_ptr<Type> elemT = impl_->unknownType;
         if (iterType->kind() == Type::Kind::List)
             elemT = static_cast<ListType&>(*iterType).elementType;
@@ -728,8 +632,6 @@ void TypeChecker::visit(TryStmt& node) {
     impl_->popScope();
     for (auto& handler : node.handlers) {
         impl_->pushScope();
-        // Bind `handler.name` to its declared type so `ex.reason` resolves; builtin
-        // exception names bind an OPAQUE instance (`e` IS the exception, str(e) = msg).
         if (!handler.name.empty() && handler.type) {
             if (auto* named = dynamic_cast<NamedTypeExpr*>(handler.type.get())) {
                 std::shared_ptr<Type> bind;
@@ -745,8 +647,6 @@ void TypeChecker::visit(TryStmt& node) {
                     }
                 }
                 if (!bind) {
-                    // Builtin exception (name validated by Sema): one opaque field-less
-                    // ClassType per name - attribute access errors, str routes to message.
                     static std::unordered_map<std::string,
                                               std::shared_ptr<ClassType>> cache;
                     auto& cls = cache[named->name];
@@ -772,8 +672,6 @@ void TypeChecker::visit(WithStmt& node) {
     for (auto& item : node.items) {
         std::shared_ptr<Type> ctxType = impl_->unknownType;
         if (item.contextExpr) ctxType = inferType(item.contextExpr.get());
-        // Bind the `as` var to the context type (self-returning managers): else it is
-        // untyped and breaks type-directed body code, notably generic method calls.
         if (item.optionalVars) {
             if (auto* nm = dynamic_cast<NameExpr*>(item.optionalVars.get()))
                 impl_->define(nm->name, ctxType);
@@ -790,15 +688,11 @@ void TypeChecker::visit(ThreadStmt& node) {
 }
 
 void TypeChecker::visit(DeferStmt& node) {
-    // The operand type-checks as an ordinary call (E13/E14 apply); its return
-    // value is discarded by the grammar, nothing to flow.
     if (node.call) inferType(node.call.get());
 }
 
 void TypeChecker::visit(MatchStmt& node) {
     if (node.subject) inferType(node.subject.get());
-    // Full positional field order of a class pattern (ancestors first, then own),
-    // from each ClassType's fieldOrder; CodeGen rebuilds it identically (positions agree).
     auto classFullFieldOrder =
         [](const std::shared_ptr<ClassType>& ct) -> std::vector<std::string> {
         std::vector<ClassType*> chain;
@@ -836,8 +730,6 @@ void TypeChecker::visit(MatchStmt& node) {
                       "unknown type '" + pat.name + "' in class pattern");
 
             if (!pat.subPatterns.empty()) {
-                // Positional destructuring `case T(p0, ...)`: only user classes have
-                // positional fields; a builtin scalar/container is a pure type test.
                 if (isPrim) {
                     error(node.location(), "`" + pat.name + "` has no positional "
                           "fields to destructure - write `case " + pat.name +
@@ -856,7 +748,6 @@ void TypeChecker::visit(MatchStmt& node) {
                               "(...)` has " + std::to_string(pat.subPatterns.size()) +
                               " sub-patterns but `" + pat.name + "` has " +
                               std::to_string(order.size()) + " field(s)");
-                    // Type each sub-pattern against its field; bind captures.
                     for (size_t i = 0; i < pat.subPatterns.size(); ++i) {
                         auto& sub = pat.subPatterns[i];
                         std::shared_ptr<Type> fieldT = impl_->anyType;
@@ -865,26 +756,24 @@ void TypeChecker::visit(MatchStmt& node) {
                             if (fit != ct->fields.end() && fit->second)
                                 fieldT = fit->second;
                         }
-                        inferPatternTypes(sub);  // nested literals / sub-patterns
+                        inferPatternTypes(sub);
                         if (sub.kind == MatchPattern::Kind::Capture && !sub.name.empty())
                             impl_->define(sub.name, fieldT);
                     }
-                    return;  // sub-patterns handled; skip the generic recurse
+                    return;
                 }
             }
         }
         for (auto& sub : pat.subPatterns) inferPatternTypes(sub);
     };
 
-    // #1 in-arm narrowing: `case T()` on a bare-name subject narrows it to T in the arm.
-    // CodeGen unboxes exactly this set (Exceptions.cpp), so the predicates must agree.
     auto* subjName = dynamic_cast<NameExpr*>(node.subject.get());
     auto patternNarrowType = [&](const std::string& tn) -> std::shared_ptr<Type> {
         if (tn == "int")   return impl_->intType;
         if (tn == "float") return impl_->floatType;
         if (tn == "bool")  return impl_->boolType;
         if (tn == "str")   return impl_->strType;
-        return nullptr;  // class / container / bytes narrowing lands later (#4)
+        return nullptr;
     };
 
     for (auto& c : node.cases) {
@@ -900,8 +789,6 @@ void TypeChecker::visit(MatchStmt& node) {
         impl_->popScope();
     }
 
-    // #2 exhaustiveness + #3 reachability (compile-time): a closed scrutinee (union,
-    // bool) must cover every case or carry `_`; converts silent fall-through to a bug.
     auto memberMatchName = [](Type* t) -> std::string {
         if (!t) return "";
         switch (t->kind()) {
@@ -922,14 +809,12 @@ void TypeChecker::visit(MatchStmt& node) {
         }
     };
 
-    std::set<std::string> coveredTypes;   // `case T()` type-test names
-    std::set<int64_t>     coveredInts;    // `case 5` int literals (dup detection)
-    std::set<std::string> coveredStrs;    // `case "x"` str literals (dup detection)
+    std::set<std::string> coveredTypes;
+    std::set<int64_t>     coveredInts;
+    std::set<std::string> coveredStrs;
     bool coveredNone = false, coveredTrue = false, coveredFalse = false;
     int catchAllIdx = -1;
 
-    // Irrefutable = matches every value: wildcard, capture, or a class destructuring
-    // with all sub-patterns irrefutable. `case Point(a, b)` covers Point; `Point(0, y)` not.
     std::function<bool(const MatchPattern&)> isIrrefutable =
         [&](const MatchPattern& p) -> bool {
         if (p.kind == MatchPattern::Kind::Wildcard ||
@@ -942,8 +827,6 @@ void TypeChecker::visit(MatchStmt& node) {
         }
         return false;
     };
-    // A class arm covers its type for exhaustiveness iff the destructuring (if
-    // any) is irrefutable - a bare `case T()` or `case T(a, b)`.
     auto collectTypeTest = [&](const MatchPattern& p) {
         if (p.kind == MatchPattern::Kind::Class && isIrrefutable(p))
             coveredTypes.insert(p.name);
@@ -954,14 +837,11 @@ void TypeChecker::visit(MatchStmt& node) {
         auto& pat = c.pattern;
         bool guarded = (c.guard != nullptr) || (pat.guard != nullptr);
 
-        // #3: any arm after an UNGUARDED catch-all is dead.
         if (catchAllIdx >= 0)
             error(node.location(),
                   "unreachable case: a previous catch-all (`case _` or a bare "
                   "capture) already matches every value");
 
-        // Coverage only counts for an UNGUARDED arm (a guard may fail at runtime,
-        // so the type isn't guaranteed handled).
         if (!guarded) {
             collectTypeTest(pat);
             if (pat.kind == MatchPattern::Kind::Or)
@@ -970,8 +850,6 @@ void TypeChecker::visit(MatchStmt& node) {
 
         if (pat.kind == MatchPattern::Kind::Literal && pat.literal) {
             Expr* lit = pat.literal.get();
-            // None/bool coverage counts only for an unguarded arm; duplicate
-            // detection (below) runs regardless of guard.
             if (!guarded && dynamic_cast<NoneLiteral*>(lit)) coveredNone = true;
             else if (auto* b = dynamic_cast<BooleanLiteral*>(lit)) {
                 if (!guarded) { if (b->value) coveredTrue = true; else coveredFalse = true; }
@@ -992,7 +870,6 @@ void TypeChecker::visit(MatchStmt& node) {
             catchAllIdx = (int)i;
     }
 
-    // #2: exhaustiveness on a closed scrutinee, only when there is no catch-all.
     auto subjType = node.subject ? node.subject->type : nullptr;
     if (catchAllIdx < 0 && subjType) {
         if (subjType->kind() == Type::Kind::Union) {
@@ -1030,12 +907,8 @@ void TypeChecker::visit(MatchStmt& node) {
 void TypeChecker::visit(ReturnStmt& node) {
     if (node.value) {
         auto retType = inferType(node.value.get());
-        // Check against the expected return type; a fresh literal is blessed against it
-        // (tryExpectedTypeLiteral) so `return ["a"]` in `-> list[Any]` builds a box list.
         if (!impl_->returnTypeStack.empty()) {
             auto& expected = impl_->returnTypeStack.back();
-            // A literal returned into dict[K, Any] / list[Any] must be born boxed:
-            // dict[K,V] <: dict[K,Any] passes the check below, so force the retype here.
             if (annotationElementIsAny(expected))
                 tryExpectedTypeLiteral(node.value.get(), expected);
             if (expected->kind() != Type::Kind::Unknown &&
@@ -1049,7 +922,6 @@ void TypeChecker::visit(ReturnStmt& node) {
             }
         }
     } else {
-        // return without value -- check that return type is None or unknown
         if (!impl_->returnTypeStack.empty()) {
             auto& expected = impl_->returnTypeStack.back();
             if (expected->kind() != Type::Kind::Unknown &&
@@ -1087,21 +959,15 @@ void TypeChecker::visit(DeleteStmt& node) {
 }
 
 void TypeChecker::visit(ImportStmt& node) {
-    // Python rule: `import x` binds x; `import x.y` binds x (x.y via attribute);
-    // `import x.y as z` binds z to the leaf module x.y.
     for (auto& alias : node.names) {
         if (!alias.asName.empty()) {
-            // Aliased: bind asName to the leaf module's ModuleType.
             auto mt = impl_->getOrCreateModuleType(alias.name);
             impl_->define(alias.asName, mt);
         } else {
-            // No alias: bind only the topmost segment.
             auto dot = alias.name.find('.');
             std::string topName = (dot == std::string::npos)
                 ? alias.name
                 : alias.name.substr(0, dot);
-            // Make sure the full chain exists in the registry so attribute
-            // walks (`x.y.z`) succeed even if no FromImport touched the leaf.
             impl_->getOrCreateModuleType(alias.name);
             auto topMt = impl_->getOrCreateModuleType(topName);
             impl_->define(topName, topMt);
@@ -1110,29 +976,20 @@ void TypeChecker::visit(ImportStmt& node) {
 }
 
 void TypeChecker::visit(FromImportStmt& node) {
-    // Source module not registered: silently skip (avoids spurious errors during
-    // partial analysis, e.g. stdlib modules type-checked in isolation).
     auto modIt = impl_->moduleTypes.find(node.module);
     if (modIt == impl_->moduleTypes.end()) return;
 
     auto& srcModule = *modIt->second;
     for (auto& alias : node.names) {
         std::string defName = alias.asName.empty() ? alias.name : alias.asName;
-        // D045 privacy is keyed on the EXPORTED name (alias.name), not the local alias.
-        // Error-and-continue so binding still happens (no secondary "undefined" cascade).
         checkModuleNamePrivacy(srcModule, alias.name, node.location());
-        // Submodule import (`from controllers import health`, a sibling .dr): bind the
-        // name to the submodule's ModuleType so `health.health_check` walks.
         auto subIt = srcModule.submodules.find(alias.name);
         if (subIt != srcModule.submodules.end()) {
             impl_->define(defName, subIt->second);
             continue;
         }
-        // Value import: function, class, const, etc. exported by the module.
         auto symIt = srcModule.exports.find(alias.name);
         if (symIt != srcModule.exports.end()) {
-            // Intrinsic export (threading.Lock -> LockType): bind as a ctor + register
-            // the type. Aliasing is rejected (codegen keys on "Lock"; alias miscompiles).
             if (symIt->second && symIt->second->kind() == Type::Kind::Lock) {
                 if (!alias.asName.empty() && alias.asName != alias.name) {
                     error(node.location(),
@@ -1147,31 +1004,23 @@ void TypeChecker::visit(FromImportStmt& node) {
                 continue;
             }
             impl_->define(defName, symIt->second);
-            // Register imported class types in typeNames so resolveType() finds them
             if (symIt->second && symIt->second->kind() == Type::Kind::Class) {
                 auto cls = std::static_pointer_cast<ClassType>(symIt->second);
                 impl_->typeNames[defName] = std::make_shared<InstanceType>(cls);
             }
             continue;
         }
-        // `from collections import deque`: deque is a global builtin (no import needed);
-        // honor the spelling as a no-op binding rather than erroring.
         if (node.module == "collections" && alias.name == "deque") {
             auto tnIt = impl_->typeNames.find("deque");
             if (tnIt != impl_->typeNames.end())
                 impl_->typeNames[defName] = tnIt->second;
             continue;
         }
-        // Not in submodules or exports -> real error.
         error(node.location(),
               "cannot import name '" + alias.name + "' from module '" + node.module + "'");
     }
 }
 
-// Declaration visitors.
-
-// M1/M2: populate call-validation metadata on a FunctionType from a param list.
-// `self` excluded (aligns with paramTypes); *args/**kwargs sets hasVarArg (open arity).
 void fillFuncMeta(FunctionType& ft, const std::vector<Parameter>& params,
                   bool isMethod, bool hasImplicitSelf,
                   bool isClassMethod) {
@@ -1184,8 +1033,6 @@ void fillFuncMeta(FunctionType& ft, const std::vector<Parameter>& params,
     ft.isMethod = isMethod;
     for (size_t i = 0; i < params.size(); ++i) {
         const auto& p = params[i];
-        // Exclude the implicit receiver from call-site arity/binding metadata:
-        // `self` for an instance method, `cls` for a @classmethod.
         if (isMethod && !hasImplicitSelf && i == 0 &&
             (p.name == "self" || (isClassMethod && p.name == "cls")))
             continue;
@@ -1201,17 +1048,11 @@ void fillFuncMeta(FunctionType& ft, const std::vector<Parameter>& params,
 }
 
 void TypeChecker::visit(FunctionDecl& node) {
-    // D044 - a generic template is fully checked once by the generic pre-pass;
-    // the main module walk must not re-check it (and it is never lowered).
     if (!node.typeParams.empty() && impl_->genericChecked.count(&node)) return;
-    // D044+ generic METHOD (`def m[T]()`): checked here (self/currentClass bound),
-    // stamped per use site; bind type params to TypeVarTypes (unbounded-T gated).
     bool pushedTP = !node.typeParams.empty();
     if (pushedTP) {
         std::unordered_map<std::string, std::shared_ptr<Type>> frame;
         for (auto& tp : node.typeParams) {
-            // Bounds - resolve the bound (`T: Bound`) so member/operator access on
-            // `T` in the body can be checked against it; nullptr = unbounded.
             std::shared_ptr<Type> bnd =
                 tp.bound ? resolveType(tp.bound.get()) : nullptr;
             frame[tp.name] = std::make_shared<TypeVarType>(tp.name, bnd);
@@ -1220,10 +1061,8 @@ void TypeChecker::visit(FunctionDecl& node) {
         impl_->genericTemplateDepth++;
     }
 
-    // Build function type - exclude self for methods (both modes)
     std::vector<std::shared_ptr<Type>> paramTypes;
     for (size_t i = 0; i < node.params.size(); ++i) {
-        // In .py mode, skip explicit self from FunctionType
         if (node.isMethod && !node.hasImplicitSelf && node.params[i].name == "self")
             continue;
         paramTypes.push_back(resolveType(node.params[i].type.get()));
@@ -1242,8 +1081,6 @@ void TypeChecker::visit(FunctionDecl& node) {
               "': a task result crosses the spawn boundary monomorphized; "
               "annotate the concrete return type");
     }
-    // `async def f() -> T` is callable as `f(): Task[T]`; the body still returns T,
-    // so the external FunctionType wraps in Task while return-checks use T.
     auto externalRet = node.isAsync ? std::static_pointer_cast<Type>(
                                           std::make_shared<TaskType>(retType))
                                     : retType;
@@ -1254,24 +1091,19 @@ void TypeChecker::visit(FunctionDecl& node) {
 
     impl_->define(node.name, funcType);
 
-    // Type check body in new scope
     impl_->pushScope();
     impl_->returnTypeStack.push_back(retType);
 
-    // For implicit-self methods, define self in method scope
     if (node.isMethod && node.hasImplicitSelf) {
         auto selfType = impl_->lookup("self");
         if (selfType) impl_->define("self", selfType);
     }
 
-    // Define parameters
     size_t typeIdx = 0;
     for (size_t i = 0; i < node.params.size(); ++i) {
         if (node.isMethod && !node.hasImplicitSelf && node.params[i].name == "self")
             continue;
         auto pt = paramTypes[typeIdx++];
-        // In the body `*args: T` is a list[T] and `**kw: T` a dict[str, T] (how codegen
-        // packs them); the external FunctionType is unchanged, only the body binding wraps.
         if (node.params[i].isVarArg)
             pt = std::make_shared<ListType>(pt);
         else if (node.params[i].isKwArg)
@@ -1289,11 +1121,7 @@ void TypeChecker::visit(FunctionDecl& node) {
 }
 
 void TypeChecker::visit(ClassDecl& node) {
-    // D044 - skip re-checking a generic template on the main walk (done by the
-    // generic pre-pass); it is never lowered.
     if (!node.typeParams.empty() && impl_->genericChecked.count(&node)) return;
-    // D044 v1 does not support subclassing a generic instantiation (`class
-    // Dog(Animal[str])`): report it, else inheritance silently loses members.
     for (auto& base : node.bases) {
         if (dynamic_cast<SubscriptExpr*>(base.get())) {
             error(node.location(), "subclassing a generic instantiation (e.g. "
@@ -1306,8 +1134,6 @@ void TypeChecker::visit(ClassDecl& node) {
     if (pushedTP) {
         std::unordered_map<std::string, std::shared_ptr<Type>> frame;
         for (auto& tp : node.typeParams) {
-            // Bounds - resolve the bound (`T: Bound`) so member/operator access on
-            // `T` in the body can be checked against it; nullptr = unbounded.
             std::shared_ptr<Type> bnd =
                 tp.bound ? resolveType(tp.bound.get()) : nullptr;
             frame[tp.name] = std::make_shared<TypeVarType>(tp.name, bnd);
@@ -1320,8 +1146,6 @@ void TypeChecker::visit(ClassDecl& node) {
 }
 
 void TypeChecker::visitClassDeclBody(ClassDecl& node) {
-    // Reuse the ClassType the layout pre-pass registered (annotated fields populated)
-    // so forward refs stay one object; fall back to a fresh type if it was skipped.
     std::shared_ptr<ClassType> classType;
     if (auto tnIt = impl_->typeNames.find(node.name); tnIt != impl_->typeNames.end()) {
         if (auto inst = std::dynamic_pointer_cast<InstanceType>(tnIt->second))
@@ -1329,26 +1153,20 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
     }
     if (!classType) classType = std::make_shared<ClassType>(node.name);
 
-    // D045 - stamp the declaring module/file so member-access privacy can compute
-    // this class's package; survives the export boundary on the shared_ptr.
     classType->definingModule = impl_->currentModuleName;
     classType->definingFile = impl_->currentFile;
     classType->decl = &node;
 
-    // D045 - reject a reserved-shape (`__x__`) member name that isn't a known special
-    // method; validate explicit method and annotated-field declarations.
     for (auto& s : node.body) {
         if (auto* func = dynamic_cast<FunctionDecl*>(s.get()))
-            checkDunderDeclaration(func->name, /*moduleLevel=*/false, node.name,
+            checkDunderDeclaration(func->name, false, node.name,
                                    func->location());
         else if (auto* ann = dynamic_cast<AnnAssignStmt*>(s.get()))
             if (auto* tgt = dynamic_cast<NameExpr*>(ann->target.get()))
-                checkDunderDeclaration(tgt->name, /*moduleLevel=*/false, node.name,
+                checkDunderDeclaration(tgt->name, false, node.name,
                                        ann->location());
     }
 
-    // Detect TypedDict base and wire the first concrete parent (single-inheritance:
-    // only the first non-special base -> parentClass), populating the ancestry chain.
     std::shared_ptr<Type> enumValueType = impl_->intType;
     for (auto& base : node.bases) {
         if (auto* baseName = dynamic_cast<NameExpr*>(base.get())) {
@@ -1356,8 +1174,6 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
                 classType->isTypedDict = true;
                 continue;
             }
-            // Enum markers (`from enum import Enum`): a marker base, not a real parent;
-            // record the shape so member access type-checks (codegen makes the statics).
             if (baseName->name == "Enum" || baseName->name == "IntEnum" ||
                 baseName->name == "StrEnum") {
                 classType->isEnum = true;
@@ -1365,7 +1181,7 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
                 continue;
             }
         }
-        if (classType->parentClass) continue;  // already set (first concrete base wins)
+        if (classType->parentClass) continue;
         std::shared_ptr<Type> baseType;
         if (auto* baseName = dynamic_cast<NameExpr*>(base.get())) {
             baseType = impl_->lookup(baseName->name);
@@ -1374,8 +1190,6 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
                 if (tit != impl_->typeNames.end()) baseType = tit->second;
             }
         } else if (dynamic_cast<AttributeExpr*>(base.get())) {
-            // Dotted cross-module base (`unittest.TestCase`): resolve via the
-            // AttributeExpr visitor, else the parentClass chain misses imported parents.
             baseType = inferType(base.get());
         }
         if (!baseType) continue;
@@ -1390,18 +1204,13 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
     impl_->typeNames[node.name] = std::make_shared<InstanceType>(classType);
     impl_->define(node.name, classType);
 
-    // Type check body in new scope
     impl_->pushScope();
 
     impl_->define("self", std::make_shared<InstanceType>(classType));
 
-    // D045 - the lexically-enclosing class for member-access privacy, set for the
-    // whole body walk; save/restore handles nested classes.
     const ClassType* prevClass = impl_->currentClass;
     impl_->currentClass = classType.get();
 
-    // Register class-body field declarations (PEP 526 `name: T`); the annotation is
-    // authoritative (D030), so run this BEFORE the ctor `self.X = ...` inference walk.
     if (!classType->isTypedDict) {
         for (auto& s : node.body) {
             auto* ann = dynamic_cast<AnnAssignStmt*>(s.get());
@@ -1412,8 +1221,6 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
         }
     }
 
-    // Class-based enum: each member is a singleton INSTANCE of this class; type the
-    // member fields as InstanceType(self) + expose .name/.value (CodeGen trusts these).
     if (classType->isEnum) {
         auto selfInstance = std::make_shared<InstanceType>(classType);
         for (auto& s : node.body) {
@@ -1427,11 +1234,7 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
         classType->fields["value"] = enumValueType;
     }
 
-    // Method-signature pre-pass: register every method's FunctionType before checking
-    // any body, so a forward call `self.later()` resolves its return type. Idempotent.
-    classType->constructorCount = 0;  // M2: recount on each visit (idempotent)
-    // ADR 010 overloading: pre-count same-name methods so each records its index/count
-    // (excludes ctors, properties, generics). Rebuilt each visit, so must not double-count.
+    classType->constructorCount = 0;
     classType->methodOverloads.clear();
     std::unordered_map<std::string, int> _ovlCount;
     for (auto& s : node.body) {
@@ -1440,19 +1243,15 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
         if (f->name == "__init__" || f->isConstructor) continue;
         _ovlCount[f->name]++;
     }
-    std::unordered_map<std::string, int> _ovlNext;  // running index per name
+    std::unordered_map<std::string, int> _ovlNext;
     for (auto& s : node.body) {
         auto* func = dynamic_cast<FunctionDecl*>(s.get());
         if (!func) continue;
-        // D044 - a generic method is rejected in visit(FunctionDecl); resolving its
-        // T-typed signature here (no type-param scope) would add "unknown type" noise.
         if (!func->typeParams.empty()) continue;
         if (func->name == "__init__" || func->isConstructor)
             classType->constructorCount++;
         std::vector<std::shared_ptr<Type>> paramTypes;
         for (size_t i = 0; i < func->params.size(); ++i) {
-            // Exclude the implicit receiver (self, or cls for a @classmethod) from the
-            // call-site signature; @staticmethod has none, so nothing is skipped.
             if (func->isMethod && !func->hasImplicitSelf &&
                 (func->params[i].name == "self" ||
                  (func->isClassMethod && func->params[i].name == "cls")))
@@ -1472,8 +1271,6 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
                 classType->fields[func->name] = retType;
         } else {
             classType->methods[func->name] = fType;
-            // ADR 010: record overload index/count and collect the overload set (only
-            // when genuinely overloaded, so single-method dispatch is untouched).
             if (func->name != "__init__" && !func->isConstructor) {
                 int cnt = _ovlCount[func->name];
                 func->methodOverloadCount = cnt;
@@ -1487,8 +1284,6 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
     for (auto& s : node.body) {
         s->accept(*this);
 
-        // Collect method types. @property methods are accessed without parens,
-        // so register them as fields of the property's return type.
         if (auto* func = dynamic_cast<FunctionDecl*>(s.get())) {
             auto fType = impl_->lookup(func->name);
             if (fType) {
@@ -1498,8 +1293,6 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
                     classType->methods[func->name] = fType;
                 }
             }
-            // Infer field types from ctor `self.X = ...`. Outside the fn scope (params
-            // gone), so build a param -> type map + handle type-obvious literal RHSs.
             if (func->name == "__init__" || func->isConstructor) {
                 std::unordered_map<std::string, std::shared_ptr<Type>> paramTypes;
                 for (auto& p : func->params) {
@@ -1510,8 +1303,6 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
                 std::function<std::shared_ptr<Type>(Expr*)> rhsLiteralType =
                     [&](Expr* rhs) -> std::shared_ptr<Type> {
                     if (!rhs) return nullptr;
-                    // D030 single source of truth: trust rhs->type if already typed by
-                    // the FunctionDecl visit (else `self.x = userFn()` fields miss -> garbage).
                     if (rhs->type && rhs->type->kind() != Type::Kind::Unknown) {
                         return rhs->type;
                     }
@@ -1520,8 +1311,6 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
                     if (dynamic_cast<FloatLiteral*>(rhs)) return impl_->floatType;
                     if (dynamic_cast<BooleanLiteral*>(rhs)) return impl_->boolType;
                     if (dynamic_cast<NoneLiteral*>(rhs)) return impl_->noneType;
-                    // Element-type inference for literals: if every entry agrees on one
-                    // concrete type, propagate it (else `self.h = {"k":"v"}` -> dict[Any,Any]).
                     if (auto* le = dynamic_cast<ListExpr*>(rhs)) {
                         if (le->elements.empty())
                             return std::make_shared<ListType>(impl_->anyType);
@@ -1555,8 +1344,6 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
                         auto it = paramTypes.find(n->name);
                         if (it != paramTypes.end()) return it->second;
                     }
-                    // `self.x = bytes()` - recognize the builtin bytes ctor so chained
-                    // `.decode()` routes through bytes ops, not instance-method resolution.
                     if (auto* ce = dynamic_cast<CallExpr*>(rhs)) {
                         if (auto* cn = dynamic_cast<NameExpr*>(ce->callee.get())) {
                             if (cn->name == "bytes") return impl_->bytesType;
@@ -1573,8 +1360,6 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
                             auto* obj = dynamic_cast<NameExpr*>(attr->object.get());
                             if (!obj || obj->name != "self") continue;
                             if (classType->fields.count(attr->attribute)) continue;
-                            // `self.m = v` where m is a METHOD is a compile error (AssignStmt
-                            // visitor); never register it as a field here, that would shadow the method.
                             if (classType->methods.count(attr->attribute) ||
                                 classType->methodOverloads.count(attr->attribute))
                                 continue;
@@ -1614,7 +1399,6 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
             }
         }
 
-        // TypedDict: collect annotated fields as per-key types
         if (classType->isTypedDict) {
             if (auto* ann = dynamic_cast<AnnAssignStmt*>(s.get())) {
                 if (auto* fieldName = dynamic_cast<NameExpr*>(ann->target.get())) {
@@ -1625,8 +1409,6 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
         }
     }
 
-    // ADR 054 producer promises (`class Dog(Animal) -> Amazing, Speaker`): checked here
-    // after the method-signature pre-pass, so a broken contract errors once, listing what's missing. Atoms land in promisedContracts and on the ClassDecl.
     for (auto& pname : node.promises) {
         auto ct = resolveContractRef(pname, node.location(), true);
         if (!ct) continue;
@@ -1647,28 +1429,20 @@ void TypeChecker::visitClassDeclBody(ClassDecl& node) {
         }
     }
 
-    impl_->currentClass = prevClass;  // D045 - restore enclosing-class context
+    impl_->currentClass = prevClass;
     impl_->popScope();
 }
 
-// ADR 054 - all contract-declaration work happens in the registerContracts
-// pre-pass so declaration order never matters; the main walk has nothing left to do.
 void TypeChecker::visit(ContractDecl&) {}
 
 void TypeChecker::visit(TypeAliasStmt& node) {
-    // PEP 695 `type X = <expr>`: resolve the aliased type and register X in typeNames
-    // so later annotations (`x: X`) resolve; else the alias parsed but was unusable.
     if (!node.value) return;
     auto resolved = resolveType(node.value.get());
     if (resolved) impl_->typeNames[node.name] = resolved;
 }
 
 void TypeChecker::visit(Module& node) {
-    // ADR 054 - contracts register before anything resolves annotations
-    // against them (idempotent; check() also runs it for the entry module).
     registerContracts(node);
-    // Pre-pass: register all top-level class names so annotations referencing a class
-    // defined later in the module resolve (else mutual refs fail "unknown type").
     for (auto& stmt : node.body) {
         if (auto* cd = dynamic_cast<ClassDecl*>(stmt.get())) {
             std::shared_ptr<ClassType> classType;
@@ -1680,8 +1454,6 @@ void TypeChecker::visit(Module& node) {
                            impl_->typeNames[cd->name])) {
                 classType = inst->classType;
             }
-            // D045 - stamp the declaring file NOW (pre-pass) so a forward-referenced
-            // class carries its package for any earlier class that touches it.
             if (classType && classType->definingFile.empty()) {
                 classType->definingModule = impl_->currentModuleName;
                 classType->definingFile = impl_->currentFile;
@@ -1690,8 +1462,6 @@ void TypeChecker::visit(Module& node) {
         }
     }
 
-    // Method pre-pass: register each class's METHOD names (existence + arity, Any
-    // types) before any body, so a cross-class forward `b.method()` resolves.
     for (auto& stmt : node.body) {
         auto* cd = dynamic_cast<ClassDecl*>(stmt.get());
         if (!cd) continue;
@@ -1702,19 +1472,13 @@ void TypeChecker::visit(Module& node) {
         }
         if (!ct) continue;
 
-        // Canonical positional field order for match destructuring (own fields;
-        // ancestors are prepended at the use site by walking parentClass).
         ct->fieldOrder = instanceFieldOrder(*cd);
 
-        // Method existence: correct arity, Any types; visit(ClassDecl) overwrites with
-        // the precise signatures. @property is left to visit(ClassDecl).
         for (auto& s : cd->body) {
             auto* func = dynamic_cast<FunctionDecl*>(s.get());
             if (!func || func->isProperty) continue;
             size_t nparams = 0;
             for (auto& p : func->params)
-                // Exclude the implicit receiver (self, or cls for @classmethod) from
-                // call-site arity; mirrors the precise-signature loop in visit(ClassDecl).
                 if (!(func->isMethod && !func->hasImplicitSelf &&
                       (p.name == "self" || (func->isClassMethod && p.name == "cls"))))
                     ++nparams;
@@ -1722,8 +1486,6 @@ void TypeChecker::visit(Module& node) {
             ct->methods[func->name] = std::make_shared<FunctionType>(ps, impl_->anyType);
         }
 
-        // Field-NAME existence (syntactic, no types): class-body `x: T` + every `self.X`
-        // target across ALL methods - what AttributeExpr consults; never touches `fields`.
         for (auto& s : cd->body) {
             auto* ann = dynamic_cast<AnnAssignStmt*>(s.get());
             if (!ann || !ann->annotation) continue;
@@ -1767,39 +1529,33 @@ void TypeChecker::visit(Module& node) {
         }
     }
 
-    // D045 - reject a reserved-shape (`__x__`) module-level name that isn't known
-    // metadata; covers top-level functions, classes, and assignment targets.
     for (auto& stmt : node.body) {
         if (auto* func = dynamic_cast<FunctionDecl*>(stmt.get()))
-            checkDunderDeclaration(func->name, /*moduleLevel=*/true, "", func->location());
+            checkDunderDeclaration(func->name, true, "", func->location());
         else if (auto* cd = dynamic_cast<ClassDecl*>(stmt.get()))
-            checkDunderDeclaration(cd->name, /*moduleLevel=*/true, "", cd->location());
+            checkDunderDeclaration(cd->name, true, "", cd->location());
         else if (auto* ann = dynamic_cast<AnnAssignStmt*>(stmt.get())) {
             if (auto* tgt = dynamic_cast<NameExpr*>(ann->target.get()))
-                checkDunderDeclaration(tgt->name, /*moduleLevel=*/true, "", ann->location());
+                checkDunderDeclaration(tgt->name, true, "", ann->location());
         } else if (auto* as = dynamic_cast<AssignStmt*>(stmt.get())) {
             for (auto& t : as->targets)
                 if (auto* tgt = dynamic_cast<NameExpr*>(t.get()))
-                    checkDunderDeclaration(tgt->name, /*moduleLevel=*/true, "", as->location());
+                    checkDunderDeclaration(tgt->name, true, "", as->location());
         }
     }
 
-    // D052 - bind module-level imports BEFORE the generic pre-pass, so a template body
-    // can name an imported type; the main walk skips them (avoids double privacy checks).
     auto isImport = [](Stmt* s) {
         return dynamic_cast<ImportStmt*>(s) || dynamic_cast<FromImportStmt*>(s);
     };
     for (auto& stmt : node.body)
         if (isImport(stmt.get())) stmt->accept(*this);
 
-    // D044 - register + abstractly check generic templates AFTER the method/field
-    // pre-passes but BEFORE the main walk (so `Box[int]` finds a complete ClassType).
     collectGenericTemplates(node);
 
     for (auto& stmt : node.body) {
-        if (isImport(stmt.get())) continue;  // already bound above
+        if (isImport(stmt.get())) continue;
         stmt->accept(*this);
     }
 }
 
-} // namespace dragon
+}

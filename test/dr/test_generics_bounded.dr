@@ -48,12 +48,10 @@ class Vec {
     }
 }
 
-# bounded free function - method + attribute access on T
 def describe[T: Animal](x: T) -> str {
     return x.name + ": " + x.speak()
 }
 
-# bounded generic class - stores a T, calls its bound method
 class Shelter[T: Animal] {
     occupant: T
     def(occupant: T) {
@@ -65,13 +63,11 @@ class Shelter[T: Animal] {
 }
 
 class Registry {
-    # bounded generic METHOD declaring its own T: Animal
     def loudest[T: Animal](a: T) -> str {
         return a.speak()
     }
 }
 
-# operator (dunder) dispatch through a bounded T, returning T (closed under +)
 def sum_pair[T: Vec](a: T, b: T) -> T {
     return a + b
 }
@@ -84,7 +80,6 @@ class BoundedGenericsTests(TestCase) {
 
     def test_subclass_arg_dispatches_override() {
         d: Dog = Dog("Rex")
-        # T = Dog: the override runs, not Animal.speak
         self.assertEqual(describe[Dog](d), "Rex: Rex says woof")
     }
 

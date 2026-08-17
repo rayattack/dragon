@@ -19,23 +19,15 @@ extern "C" def fileno(handle: ptr) -> intc
 extern "C" def ftruncate(fd: intc, length: int) -> intc
 extern "C" def isatty(fd: intc) -> intc
 
-# Memory
 extern "C" def malloc(size: int) -> ptr
 extern "C" def free(p: ptr)
 extern "C" def memset(s: ptr, c: intc, n: int) -> ptr
 extern "C" def strlen(s: ptr) -> int
 
-# Wraps a raw byte buffer into a heap-tracked DragonString: a bare malloc'd ptr
-# returned as `str` has no DragonObjectHeader, so scope-exit decref would free a
-# misaligned address. Auto-detects ASCII (kind=1) vs UTF-8 (kind=4, one cp per slot).
 extern "C" def dragon_string_alloc(src: ptr, byte_len: int) -> str
 
-# Wraps a raw byte buffer as verbatim `bytes` (no codec), so binary reads don't
-# silently UTF-8-decode (and corrupt) arbitrary bytes.
 extern "C" def dragon_bytes_new(data: ptr, len: int) -> bytes
 
-# UTF-8-safe file helpers: read_text never splits a code point mid-sequence, write_text
-# encodes to UTF-8 before writing, readline has no line-length cap. See runtime_fileio.cpp.
 extern "C" def dragon_file_read_text(handle: ptr, size: int) -> str
 extern "C" def dragon_file_write_text(handle: ptr, s: str) -> int
 extern "C" def dragon_file_write_bytes(handle: ptr, data: bytes) -> int
@@ -45,12 +37,9 @@ const SEEK_SET: int = 0
 const SEEK_CUR: int = 1
 const SEEK_END: int = 2
 
-# Reader (open()): read-only by type, writing is a compile error. Whole-file reads
-# self-close (leak-free, no `with`); streaming reads (line/take, for-loop) need `with open(p) as r`.
 class Reader {
     def(path: str) {
         self.handle = fopen(path, "r")
-        # fopen returns NULL on a missing file/bad path/perms; raise catchable FileNotFoundError.
         if not self.handle {
             raise FileNotFoundError("[Errno 2] No such file or directory: '" + path + "'")
         }
@@ -59,7 +48,6 @@ class Reader {
     }
 
     def text() -> str {
-        # Whole file as UTF-8 text, then close (the file is consumed).
         if self.closed {
             return ""
         }
@@ -76,7 +64,6 @@ class Reader {
     }
 
     def bytes() -> bytes {
-        # Whole file as raw bytes (no UTF-8 decode), then close.
         if self.closed {
             return b""
         }
@@ -92,7 +79,6 @@ class Reader {
     }
 
     def lines() -> list[str] {
-        # Every line (each keeps its trailing newline), then close.
         out: list[str] = []
         if self.closed {
             return out
@@ -107,7 +93,6 @@ class Reader {
     }
 
     def line() -> str {
-        # One line with trailing newline, "" at EOF. Streaming: does not close.
         if self.closed {
             return ""
         }
@@ -115,8 +100,6 @@ class Reader {
     }
 
     def take(n: int) -> str {
-        # Up to n bytes of text; never splits a UTF-8 code point (the runtime
-        # tops up trailing continuation bytes). Streaming - does not close.
         if self.closed {
             return ""
         }
@@ -124,7 +107,6 @@ class Reader {
     }
 
     def close() -> int {
-        # Idempotent: a self-close in text()/bytes()/lines() plus a `with` exit must never double-fclose.
         if self.closed {
             return 0
         }
@@ -146,7 +128,6 @@ class Reader {
     }
 
     def __next__() -> str {
-        # `for line in open(p)` - lazy, one line per iteration, memory-bounded.
         if self.closed {
             raise StopIteration("end of file")
         }
@@ -158,8 +139,6 @@ class Reader {
     }
 }
 
-# Writer (make()/push()): write-only by type, reading is a compile error. Dragon has no
-# finalizer, so scope it with `with make(p) as w { ... }` or close explicitly, else it leaks.
 class Writer {
     def(path: str, mode: str) {
         self.handle = fopen(path, mode)
@@ -171,13 +150,10 @@ class Writer {
     }
 
     def write(data: str) -> int {
-        # UTF-8-encode the text before writing (a bare fwrite of a non-ASCII
-        # str would emit its raw UCS-4 buffer).
         return dragon_file_write_text(self.handle, data)
     }
 
     def write(data: bytes) -> int {
-        # Verbatim binary write - no codec touches the buffer.
         return dragon_file_write_bytes(self.handle, data)
     }
 
@@ -188,7 +164,6 @@ class Writer {
     }
 
     def lines(items: list[str]) -> int {
-        # Write each item verbatim (no separators added). Returns total bytes.
         total: int = 0
         for item in items {
             total = total + self.write(item)
@@ -218,8 +193,6 @@ class Writer {
     }
 }
 
-# BytesIO - growable in-memory binary stream over the File read/seek API. Append-only
-# writes join once in list[bytes] (O(n) not per-byte); materialized on read()/getvalue().
 class BytesIO {
     def(initial: bytes = b"") {
         self._chunks: list[bytes] = []
@@ -243,8 +216,6 @@ class BytesIO {
     def write(data: bytes) -> int {
         const n: int = len(data)
         if self._pos >= self._len {
-            # Append at end - fast path, defer the join. A cursor seeked past
-            # EOF zero-fills the gap first (Python parity).
             if self._pos > self._len {
                 self._chunks.append(bytes(self._pos - self._len))
                 self._len = self._pos
@@ -254,7 +225,6 @@ class BytesIO {
             self._pos = self._len
             self._dirty = true
         } else {
-            # Overwrite at the cursor - flatten once and splice.
             const cur: bytes = self._join()
             const head: bytes = cur[0:self._pos]
             const tail_start: int = self._pos + n
@@ -342,8 +312,6 @@ class BytesIO {
     def __exit__() -> int { return 0 }
 }
 
-# StringIO - growable text buffer over the File API. Append-only writes join once in
-# list[str] (O(n) not O(n^2)); seek()/tell() count CODE POINTS, unlike CPython's opaque cookie.
 class StringIO {
     def(initial: str = "") {
         self._chunks: list[str] = []
@@ -367,13 +335,11 @@ class StringIO {
     def write(s: str) -> int {
         const slen: int = len(s)
         if self._pos == self._len {
-            # Append at end - fast path, defer the join.
             self._chunks.append(s)
             self._len = self._len + slen
             self._pos = self._len
             self._dirty = true
         } else {
-            # Overwrite at the cursor - flatten once and splice.
             const cur: str = self._join()
             const head: str = cur[0:self._pos]
             const tail_start: int = self._pos + slen
@@ -510,7 +476,5 @@ def push(path: str) -> Writer {
 }
 
 def normalize_newlines(text: str) -> str {
-    # Explicit, opt-in universal-newline op: CRLF and lone CR both collapse to LF.
-    # Dragon has no hidden per-stream newline-translation mode.
     return text.replace("\r\n", "\n").replace("\r", "\n")
 }

@@ -1,6 +1,3 @@
-# Pre-fix: quantiles() used the inclusive index formula while claiming the
-# exclusive method, so quantiles([1,2,3,4], n=4) returned [1.0, 2.0, 3.0].
-
 from unittest import TestCase, main
 from statistics import quantiles, median, median_low, median_high, mode_float, mode_int
 

@@ -1,11 +1,3 @@
-# test/dr/test_ed25519.dr - KATs for Ed25519 (crypto.dr superset surface).
-#
-# Backed by the vendored OpenSSH ref10 implementation. Expected public keys and
-# signatures were produced by an INDEPENDENT reference (Python `cryptography`,
-# OpenSSL-backed); SEED2/SEED3 are the canonical RFC 8032 §7.1 secret seeds, so
-# their public keys (3d4017c3.. / fc51cd8e..) are the RFC's own values. A match
-# proves the ref10 wiring computes standard Ed25519, not a variant.
-
 from unittest import TestCase, main
 from binascii import unhexlify
 from crypto import ed25519_keypair, ed25519_public_key, ed25519_sign, ed25519_verify
@@ -21,7 +13,6 @@ const PK3: str = "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb9115489080
 const MSG2: bytes = b"abc"
 const MSG3: bytes = b"The quick brown fox jumps over the lazy dog"
 
-# Signatures (seed, message) from the independent reference.
 const SIG1_EMPTY: str = "8f895b3cafe2c9506039d0e2a66382568004674fe8d237785092e40d6aaf483e4fc60168705f31f101596138ce21aa357c0d32a064f423dc3ee4aa3abf53f803"
 const SIG2_ABC: str = "a377ba06339de184aa1a88b883d8558b704b96f7e4b2ac3e7984fc297e9549bd4ee1bcbb72553fc768400ec2395a702311e7aed969a713387b3377855a537701"
 const SIG3_FOX: str = "5be4d500bb415c0095a7988d18f5a4dc84078ff64257a914255e153b63dd5cbbc13e2b6881bff075bddf5a88e4e8923281efd1e23f580faeba44265f194b490c"
@@ -65,8 +56,6 @@ class Ed25519Tests(TestCase) {
     }
 
     def test_keypair_roundtrip() {
-        # Random keypair: the public key must match derivation, and a fresh
-        # signature must verify.
         const kp: tuple[bytes, bytes] = ed25519_keypair()
         const priv: bytes = kp[0]
         const pub: bytes = kp[1]

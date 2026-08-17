@@ -23,15 +23,12 @@ def decompress(data: bytes) -> bytes {
 }
 
 
-# File-like wrapper around a gzip-on-disk file: read decompresses the whole file
-# eagerly, write buffers in memory and flushes on close. No streaming IO yet.
 class GzipFile {
     def(filename: str, mode: str, compresslevel: int) {
         self.filename = filename
         self.mode = mode
         self.compresslevel = compresslevel
         self.closed = False
-        # Read mode decompresses eagerly; write mode starts with an empty buffer.
         if mode == "rb" or mode == "r" {
             raw: bytes = dragon_read_file_bytes(filename)
             self._buffer = dragon_zlib_decompress(raw)
@@ -62,7 +59,6 @@ class GzipFile {
             return
         }
         self.closed = True
-        # Write mode: gzip the buffer and flush it to disk in one fwrite.
         if self.mode == "wb" or self.mode == "w" {
             compressed: bytes = dragon_zlib_compress(self._buffer, self.compresslevel)
             dragon_write_file_bytes(self.filename, compressed)

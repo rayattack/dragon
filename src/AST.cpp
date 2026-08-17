@@ -11,14 +11,11 @@ std::vector<std::string> instanceFieldOrder(const ClassDecl& cls) {
     auto add = [&](const std::string& n) {
         if (seen.insert(n).second) order.push_back(n);
     };
-    // 1. Class-body annotations: `x: T` / `x: T = ...` (in source order).
     for (auto& s : cls.body) {
         if (auto* ann = dynamic_cast<AnnAssignStmt*>(s.get()))
             if (auto* nm = dynamic_cast<NameExpr*>(ann->target.get()))
                 add(nm->name);
     }
-    // 2. `self.X = ...` targets across method bodies (in source order, descending
-    // into nested blocks); a field first assigned in __init__ or any other method lands here.
     std::function<void(Stmt*)> walk = [&](Stmt* st) {
         if (!st) return;
         auto selfField = [&](Expr* e) {
@@ -58,8 +55,6 @@ static bool stmtAlwaysTerminates(Stmt* s) {
         dynamic_cast<BreakStmt*>(s) || dynamic_cast<ContinueStmt*>(s))
         return true;
     if (auto* ifs = dynamic_cast<IfStmt*>(s)) {
-        // An `if` terminates only when control can't fall through: there's an `else`,
-        // and the then-body, every elif-body, and the else-body all terminate.
         if (ifs->elseBody.empty()) return false;
         if (!stmtsAlwaysTerminate(ifs->thenBody)) return false;
         for (auto& clause : ifs->elifClauses)
@@ -144,7 +139,6 @@ void TypeAliasStmt::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void ContractDecl::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 void Module::accept(ASTVisitor& visitor) { visitor.visit(*this); }
 
-// DefaultASTVisitor: visits all children.
 void DefaultASTVisitor::visit(NamedTypeExpr&) {}
 void DefaultASTVisitor::visit(GenericTypeExpr& node) {
     if (node.base) node.base->accept(*this);
@@ -165,7 +159,6 @@ void DefaultASTVisitor::visit(TupleTypeExpr& node) {
 }
 void DefaultASTVisitor::visit(ContractSetTypeExpr&) {}
 
-// Literals (no children)
 void DefaultASTVisitor::visit(IntegerLiteral&) {}
 void DefaultASTVisitor::visit(FloatLiteral&) {}
 void DefaultASTVisitor::visit(StringLiteral&) {}
@@ -349,7 +342,6 @@ void DefaultASTVisitor::visit(DeferStmt& node) {
 }
 void DefaultASTVisitor::visit(MatchStmt& node) {
     node.subject->accept(*this);
-    // Recursively visit all expressions inside a pattern tree
     std::function<void(MatchPattern&)> visitPattern = [&](MatchPattern& pat) {
         if (pat.literal) pat.literal->accept(*this);
         if (pat.guard) pat.guard->accept(*this);
@@ -797,7 +789,6 @@ void ASTPrinter::visit(LambdaExpr& node) {
         std::string param = p.name;
         if (p.type) {
             param += ": ";
-            // Inline type printing
             std::string savedOutput = output_;
             int savedIndent = indent_;
             output_.clear();
@@ -1063,7 +1054,6 @@ void ASTPrinter::visit(TryStmt& node) {
     for (auto& handler : node.handlers) {
         std::string label = "(catch";
         if (handler.type) {
-            // Inline type to string
             label += " ";
         }
         if (!handler.name.empty()) {
@@ -1369,4 +1359,4 @@ void ASTPrinter::visit(Module& node) {
     writeLine(")");
 }
 
-} // namespace dragon
+}

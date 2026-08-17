@@ -8,7 +8,6 @@ extern "C" def free(p: ptr)
 extern "C" def memset(s: ptr, c: intc, n: int) -> ptr
 extern "C" def memcpy(dst: ptr, src: ptr, n: int) -> ptr
 
-# PCRE2 C API (linked from bundled static library)
 extern "C" def pcre2_compile_8(pattern: str, length: int, options: intc,
                                 errorcode: ptr, erroroffset: ptr, ccontext: ptr) -> ptr
 extern "C" def pcre2_get_error_message_8(errorcode: intc, buffer: ptr, bufflen: int) -> intc
@@ -19,7 +18,6 @@ extern "C" def pcre2_get_ovector_pointer_8(match_data: ptr) -> ptr
 extern "C" def pcre2_match_data_free_8(match_data: ptr)
 extern "C" def pcre2_code_free_8(code: ptr)
 
-# Runtime helpers for match extraction and ovector access
 extern "C" def dragon_re_get_match(subject: str, ovector: ptr, index: intc) -> str
 extern "C" def dragon_re_ovector_get(ovector: ptr, index: intc) -> int
 extern "C" def dragon_string_alloc(src: ptr, byte_len: int) -> str
@@ -148,7 +146,6 @@ class Pattern {
                     pcre2_match_data_free_8(md)
                     _raise_match_error(rc)
                 }
-                # No more matches - add remainder
                 parts.append(subject[offset:])
                 break
             }
@@ -170,7 +167,6 @@ class Pattern {
         """Expand backreferences (`\1`-`\9`, `\g<N>`, `\\\\`) against the match; an
         out-of-range or non-participating group expands to "". Named `\g<name>` is unsupported (index-only externs).
         """
-        # Accumulate into a list and join once - avoids O(n^2) string concatenation.
         parts: list[str] = []
         i: int = 0
         const tlen: int = len(tmpl)
@@ -188,7 +184,6 @@ class Pattern {
                     }
                     i = i + 2
                 } else if nxt == "g" and i + 2 < tlen and tmpl[i + 2] == "<" {
-                    # \g<N> - scan to the closing '>' and parse the digits.
                     j: int = i + 3
                     digits: str = ""
                     while j < tlen and tmpl[j] != ">" {
@@ -202,12 +197,10 @@ class Pattern {
                         }
                         i = j + 1
                     } else {
-                        # Malformed \g<...> - emit the backslash literally.
                         parts.append(ch)
                         i = i + 1
                     }
                 } else {
-                    # Unknown escape - preserve the backslash and the next char.
                     parts.append(ch)
                     i = i + 1
                 }

@@ -1,27 +1,17 @@
-# JSON encode/decode in pure Dragon (minimal extern "C" for str<->number).
-# Also home to the template[JSON] content type (D032).
-
 from template import Template
 
 extern "C" def dragon_str_to_int(s: str) -> int
 extern "C" def dragon_str_to_float(s: str) -> float
 extern "C" def dragon_int_to_str(value: int) -> str
 extern "C" def dragon_float_to_str(value: float) -> str
-# Generic serializer: dispatches on the boxed value's runtime tag and recurses
-# through lists/dicts via their element tags. No user-facing generics needed.
 extern "C" def dragon_json_dumps(obj: Any) -> str
-# Byte-level scan primitives (D048): dragon_bytes_get reads a byte with zero
-# allocation; dragon_chr/dragon_ord back the \uXXXX unescape.
 extern "C" def dragon_bytes_get(b: bytes, idx: int) -> int
 extern "C" def dragon_chr(code: int) -> str
 extern "C" def dragon_ord(s: str) -> int
 
 const _HEX_DIGITS: str = "0123456789abcdef"
 
-# Module-level `escape` and the JSON template's static `escape` both delegate here so the two can't drift.
 def _escape_body(s: str) -> str {
-    # RFC 8259 §7: escape `"`, `\`, and control chars U+0000-U+001F. Escape bytes
-    # are all ASCII, so byte-level span boundaries always land on UTF-8 sequence starts.
     const b: bytes = s.encode("utf-8")
     const n: int = len(b)
     dirty: int = -1
@@ -35,10 +25,10 @@ def _escape_body(s: str) -> str {
         i = i + 1
     }
     if dirty < 0 {
-        return s        # nothing to escape - the common case allocates nothing
+        return s
     }
     parts: list[str] = []
-    run: int = 0        # start of the current clean span
+    run: int = 0
     i = dirty
     while i < n {
         const c: int = dragon_bytes_get(b, i)
@@ -69,20 +59,17 @@ def _escape_body(s: str) -> str {
 }
 
 def escape(s: str) -> str {
-    # Escape a string for use as a JSON string body (no surrounding quotes).
     return _escape_body(s)
 }
 
-# Hex digit value, or -1 if not a hex digit.
 def _hex_val(ch: str) -> int {
     const c: int = dragon_ord(ch)
-    if c >= 48 and c <= 57 { return c - 48 }        # 0-9
-    if c >= 97 and c <= 102 { return c - 97 + 10 }  # a-f
-    if c >= 65 and c <= 70 { return c - 65 + 10 }   # A-F
+    if c >= 48 and c <= 57 { return c - 48 }
+    if c >= 97 and c <= 102 { return c - 97 + 10 }
+    if c >= 65 and c <= 70 { return c - 65 + 10 }
     return -1
 }
 
-# Parse the 4 hex digits of a \uXXXX escape at s[i:i+4]; -1 if not 4 valid hex digits.
 def _parse_u4(s: str, i: int) -> int {
     if i + 4 > len(s) {
         return -1
@@ -98,7 +85,6 @@ def _parse_u4(s: str, i: int) -> int {
 }
 
 def unescape(s: str) -> str {
-    # Unescape JSON escapes (RFC 8259 §7): two-char + \uXXXX (incl. surrogate pairs); unknown escapes kept verbatim.
     parts: list[str] = []
     i: int = 0
     const n: int = len(s)
@@ -110,7 +96,7 @@ def unescape(s: str) -> str {
             continue
         }
         if i + 1 >= n {
-            parts.append(ch)        # trailing lone backslash
+            parts.append(ch)
             i = i + 1
             continue
         }
@@ -126,17 +112,16 @@ def unescape(s: str) -> str {
         elif next == "u" {
             const cu: int = _parse_u4(s, i + 2)
             if cu < 0 {
-                parts.append(ch)    # malformed \u - keep the backslash
+                parts.append(ch)
                 i = i + 1
             } elif cu >= 0xD800 and cu <= 0xDBFF and i + 7 < n and s[i + 6:i + 7] == "\\" and s[i + 7:i + 8] == "u" {
-                # High surrogate followed by a \u - try to combine with the low.
                 const lo: int = _parse_u4(s, i + 8)
                 if lo >= 0xDC00 and lo <= 0xDFFF {
                     const cp: int = 0x10000 + ((cu - 0xD800) * 1024) + (lo - 0xDC00)
                     parts.append(dragon_chr(cp))
                     i = i + 12
                 } else {
-                    parts.append(dragon_chr(cu))   # unpaired high surrogate
+                    parts.append(dragon_chr(cu))
                     i = i + 6
                 }
             } else {
@@ -144,36 +129,30 @@ def unescape(s: str) -> str {
                 i = i + 6
             }
         } else {
-            parts.append(ch)        # unknown escape - keep verbatim
+            parts.append(ch)
             i = i + 1
         }
     }
     return "".join(parts)
 }
 
-# dumps(obj) dispatches on the runtime tag (boxed path) - Python parity for json.dumps.
-# For a known shape, use encode[T] instead: box-free, no typed dumps_* family needed.
 def dumps(obj: Any) -> str {
     return dragon_json_dumps(obj)
 }
 
 
-# Boxed-tree decoder (D048): byte-scanning recursive descent, zero per-char allocation.
-# Backs decode[Any]-family stamps only; every concrete decode[T] is box-free and skips this.
-
-# ASCII byte constants for the structural tokens.
-const _B_LBRACE: int = 123       # {
-const _B_RBRACE: int = 125       # }
-const _B_LBRACKET: int = 91      # [
-const _B_RBRACKET: int = 93      # ]
-const _B_QUOTE: int = 34         # "
-const _B_COLON: int = 58         # :
-const _B_COMMA: int = 44         # ,
-const _B_BACKSLASH: int = 92     # \
-const _B_MINUS: int = 45         # -
+const _B_LBRACE: int = 123
+const _B_RBRACE: int = 125
+const _B_LBRACKET: int = 91
+const _B_RBRACKET: int = 93
+const _B_QUOTE: int = 34
+const _B_COLON: int = 58
+const _B_COMMA: int = 44
+const _B_BACKSLASH: int = 92
+const _B_MINUS: int = 45
 
 def _is_ws_byte(c: int) -> bool {
-    return c == 32 or c == 9 or c == 10 or c == 13     # space tab nl cr
+    return c == 32 or c == 9 or c == 10 or c == 13
 }
 
 def _is_digit_byte(c: int) -> bool {
@@ -216,7 +195,6 @@ class _JsonParser {
         }
     }
 
-    # Current byte, or -1 at end of input.
     def _peek() -> int {
         if self.pos >= self.n {
             return -1
@@ -233,16 +211,14 @@ class _JsonParser {
         if c == _B_LBRACE { return self._parse_object() }
         if c == _B_LBRACKET { return self._parse_array() }
         if c == _B_QUOTE { return self._parse_string() }
-        if c == 116 { self._expect_kw(114, 117, 101, -1); return true }      # true
-        if c == 102 { self._expect_kw(97, 108, 115, 101); return false }     # false
-        if c == 110 { self._expect_kw(117, 108, 108, -1); return none }      # null
+        if c == 116 { self._expect_kw(114, 117, 101, -1); return true }
+        if c == 102 { self._expect_kw(97, 108, 115, 101); return false }
+        if c == 110 { self._expect_kw(117, 108, 108, -1); return none }
         if c == _B_MINUS or _is_digit_byte(c) { return self._parse_number() }
         self._fail("unexpected character")
-        return none     # unreachable (_fail raised); satisfies all-paths-return
+        return none
     }
 
-    # Verify/consume a true/false/null keyword without allocating (byte 0 already
-    # matched via peek); b1..b3 are the rest, b4 is byte 5 ('false') or -1 for 4-byte keywords.
     def _expect_kw(b1: int, b2: int, b3: int, b4: int) -> None {
         wlen: int = 4
         if b4 >= 0 { wlen = 5 }
@@ -261,7 +237,6 @@ class _JsonParser {
     }
 
     def _parse_string() -> str {
-        # self.pos is at the opening quote.
         self.pos = self.pos + 1
         const start: int = self.pos
         saw_escape: bool = false
@@ -271,7 +246,6 @@ class _JsonParser {
                 self._fail("invalid control character in string")
             }
             if c == _B_BACKSLASH {
-                # Validate the escape here; \uXXXX hex digits stay in the span for unescape() to decode.
                 saw_escape = true
                 if self.pos + 1 >= self.n {
                     self._fail("unterminated string")
@@ -303,22 +277,20 @@ class _JsonParser {
             self._fail("unterminated string")
         }
         const span: bytes = self.buf[start:self.pos]
-        self.pos = self.pos + 1             # consume closing quote
+        self.pos = self.pos + 1
         const text: str = span.decode("utf-8")
         if saw_escape {
             return unescape(text)
         }
-        return text                         # clean string - skip the unescape walk
+        return text
     }
 
     def _parse_number() -> Any {
-        # Validate the number grammar (-? int (.frac)? ([eE][+-]?exp)?) so malformed numbers raise instead of parsing partial values.
         const start: int = self.pos
         is_float: bool = false
         if self._peek() == _B_MINUS {
             self.pos = self.pos + 1
         }
-        # Integer part - at least one digit required.
         int_digits: int = 0
         while self.pos < self.n and _is_digit_byte(dragon_bytes_get(self.buf, self.pos)) {
             self.pos = self.pos + 1
@@ -327,8 +299,7 @@ class _JsonParser {
         if int_digits == 0 {
             self._fail("invalid number: no integer digits")
         }
-        # Fraction - '.' must be followed by at least one digit.
-        if self.pos < self.n and dragon_bytes_get(self.buf, self.pos) == 46 {   # .
+        if self.pos < self.n and dragon_bytes_get(self.buf, self.pos) == 46 {
             is_float = true
             self.pos = self.pos + 1
             frac_digits: int = 0
@@ -340,15 +311,14 @@ class _JsonParser {
                 self._fail("invalid number: no digits after '.'")
             }
         }
-        # Exponent - [eE] [+-]? must be followed by at least one digit.
         if self.pos < self.n {
             const ec: int = dragon_bytes_get(self.buf, self.pos)
-            if ec == 101 or ec == 69 {                 # e E
+            if ec == 101 or ec == 69 {
                 is_float = true
                 self.pos = self.pos + 1
                 if self.pos < self.n {
                     const sg: int = dragon_bytes_get(self.buf, self.pos)
-                    if sg == 43 or sg == 45 {          # + -
+                    if sg == 43 or sg == 45 {
                         self.pos = self.pos + 1
                     }
                 }
@@ -371,7 +341,7 @@ class _JsonParser {
 
     def _parse_array() -> list[Any] {
         const arr: list[Any] = []
-        self.pos = self.pos + 1             # consume [
+        self.pos = self.pos + 1
         self._skip_ws()
         if self._peek() == _B_RBRACKET {
             self.pos = self.pos + 1
@@ -397,7 +367,7 @@ class _JsonParser {
 
     def _parse_object() -> dict[str, Any] {
         const obj: dict[str, Any] = {}
-        self.pos = self.pos + 1             # consume {
+        self.pos = self.pos + 1
         self._skip_ws()
         if self._peek() == _B_RBRACE {
             self.pos = self.pos + 1
@@ -432,8 +402,6 @@ class _JsonParser {
     }
 }
 
-# D048 box-free cursor reading native slots (not boxed Any), driven by the
-# compiler's decode[T] skeleton; skip_value() allocates nothing.
 class Cursor {
     p: _JsonParser
     _need_comma: bool
@@ -443,7 +411,6 @@ class Cursor {
         self._need_comma = false
     }
 
-    # Consume '{' or raise.
     def begin_object() -> None {
         self.p._skip_ws()
         if self.p._peek() != _B_LBRACE {
@@ -453,7 +420,6 @@ class Cursor {
         self._need_comma = false
     }
 
-    # True and advance to the next key; false consumes the closing '}'.
     def next_field() -> bool {
         self.p._skip_ws()
         const c: int = self.p._peek()
@@ -473,7 +439,6 @@ class Cursor {
         return true
     }
 
-    # Parse "key" and the following ':'; return the key.
     def field_key() -> str {
         self.p._skip_ws()
         if self.p._peek() != _B_QUOTE {
@@ -516,19 +481,18 @@ class Cursor {
     def parse_bool() -> bool {
         self.p._skip_ws()
         const c: int = self.p._peek()
-        if c == 116 {                                       # t
-            self.p._expect_kw(114, 117, 101, -1)            # true
+        if c == 116 {
+            self.p._expect_kw(114, 117, 101, -1)
             return true
         }
-        if c == 102 {                                       # f
-            self.p._expect_kw(97, 108, 115, 101)            # false
+        if c == 102 {
+            self.p._expect_kw(97, 108, 115, 101)
             return false
         }
         self.p._fail("expected boolean")
-        return false                        # unreachable (_fail raised)
+        return false
     }
 
-    # Consume '[' or raise.
     def array_begin() -> None {
         self.p._skip_ws()
         if self.p._peek() != _B_LBRACKET {
@@ -537,7 +501,6 @@ class Cursor {
         self.p.pos = self.p.pos + 1
     }
 
-    # True if another element follows; false consumes the closing ']'.
     def array_more(first: bool) -> bool {
         self.p._skip_ws()
         const c: int = self.p._peek()
@@ -600,7 +563,6 @@ class Cursor {
         return out
     }
 
-    # dict[str, scalar] parsers; a nested dict must leave _need_comma true for the enclosing field loop.
     def parse_int_dict() -> dict[str, int] {
         const out: dict[str, int] = {}
         self.begin_object()
@@ -645,17 +607,15 @@ class Cursor {
         return out
     }
 
-    # If the next value is null, consume it and return true.
     def try_null() -> bool {
         self.p._skip_ws()
-        if self.p._peek() == 110 {                          # n
-            self.p._expect_kw(117, 108, 108, -1)            # null
+        if self.p._peek() == 110 {
+            self.p._expect_kw(117, 108, 108, -1)
             return true
         }
         return false
     }
 
-    # Skip the next value and return its raw bytes (for a nested decode[T]).
     def capture_value() -> bytes {
         self.p._skip_ws()
         const start: int = self.p.pos
@@ -663,7 +623,6 @@ class Cursor {
         return self.p.buf[start:self.p.pos]
     }
 
-    # Advance past any value; allocates nothing.
     def skip_value() -> None {
         self.p._skip_ws()
         const c: int = self.p._peek()
@@ -673,9 +632,9 @@ class Cursor {
         if c == _B_QUOTE { self._skip_string_span(); return }
         if c == _B_LBRACE { self._skip_object(); return }
         if c == _B_LBRACKET { self._skip_array(); return }
-        if c == 116 { self.p._expect_kw(114, 117, 101, -1); return }     # true
-        if c == 102 { self.p._expect_kw(97, 108, 115, 101); return }     # false
-        if c == 110 { self.p._expect_kw(117, 108, 108, -1); return }     # null
+        if c == 116 { self.p._expect_kw(114, 117, 101, -1); return }
+        if c == 102 { self.p._expect_kw(97, 108, 115, 101); return }
+        if c == 110 { self.p._expect_kw(117, 108, 108, -1); return }
         if c == _B_MINUS or _is_digit_byte(c) {
             self._scan_number()
             return
@@ -683,7 +642,6 @@ class Cursor {
         self.p._fail("unexpected character in value")
     }
 
-    # Advance over a JSON number; true if it has a fraction/exponent.
     def _scan_number() -> bool {
         is_float: bool = false
         const b: bytes = self.p.buf
@@ -699,7 +657,7 @@ class Cursor {
         if int_digits == 0 {
             self.p._fail("invalid number: no integer digits")
         }
-        if self.p.pos < n and dragon_bytes_get(b, self.p.pos) == 46 {        # .
+        if self.p.pos < n and dragon_bytes_get(b, self.p.pos) == 46 {
             is_float = true
             self.p.pos = self.p.pos + 1
             frac_digits: int = 0
@@ -713,12 +671,12 @@ class Cursor {
         }
         if self.p.pos < n {
             const ec: int = dragon_bytes_get(b, self.p.pos)
-            if ec == 101 or ec == 69 {                                      # e E
+            if ec == 101 or ec == 69 {
                 is_float = true
                 self.p.pos = self.p.pos + 1
                 if self.p.pos < n {
                     const sg: int = dragon_bytes_get(b, self.p.pos)
-                    if sg == 43 or sg == 45 {                               # + -
+                    if sg == 43 or sg == 45 {
                         self.p.pos = self.p.pos + 1
                     }
                 }
@@ -735,7 +693,6 @@ class Cursor {
         return is_float
     }
 
-    # Skip a string span (pos at opening quote), escape-aware.
     def _skip_string_span() -> None {
         const b: bytes = self.p.buf
         const n: int = self.p.n
@@ -754,10 +711,9 @@ class Cursor {
         if self.p.pos >= n {
             self.p._fail("unterminated string")
         }
-        self.p.pos = self.p.pos + 1                 # closing quote
+        self.p.pos = self.p.pos + 1
     }
 
-    # Skip an object (pos at '{'); keys skipped as spans so quoted braces don't miscount.
     def _skip_object() -> None {
         self.p.pos = self.p.pos + 1
         self.p._skip_ws()
@@ -791,7 +747,6 @@ class Cursor {
         }
     }
 
-    # Skip an array (pos at '[').
     def _skip_array() -> None {
         self.p.pos = self.p.pos + 1
         self.p._skip_ws()
@@ -817,8 +772,6 @@ class Cursor {
 }
 
 
-# Box-free streaming writer, write-side mirror of Cursor; values written AT their
-# type into one str buffer, joined once (not "Writer": io.Writer exists).
 class JsonWriter {
     _parts: list[str]
     _need_comma: bool
@@ -828,7 +781,6 @@ class JsonWriter {
         self._need_comma = false
     }
 
-    # Emit the separating ',' when a sibling precedes; value writes leave the flag set, key()/begin_*() clear it.
     def _pre_value() -> None {
         if self._need_comma {
             self._parts.append(",")
@@ -897,7 +849,6 @@ class JsonWriter {
         self._parts.append("null")
     }
 
-    # Splice a pre-encoded JSON fragment verbatim (a nested encode[T] result).
     def write_raw(fragment: bytes) -> None {
         self._pre_value()
         self._parts.append(fragment.decode("utf-8"))
@@ -985,20 +936,16 @@ class JsonWriter {
 }
 
 
-# D048: compiler synthesizes each decode[T] stamp from T's fields (box-free); this template body is never lowered.
-# decode[Any]/dict[str,Any]/list[Any] opt into the boxed tree via loadb; a concrete T never falls back - unsupported shapes are compile errors.
 def decode[T](body: bytes) -> T {
     raise ValueError("json.decode requires a concrete type: decode[T](body)")
 }
 
 
-# D052 mirror of decode: compiler synthesizes each stamp from T's fields (one typed Writer call per field); never lowered.
 def encode[T](value: T) -> bytes {
     raise ValueError("json.encode requires a concrete type: encode[T](value)")
 }
 
 
-# Decode JSON bytes into a boxed Any tree (D048); raises ValueError with the byte offset on malformed input.
 def loadb(data: bytes) -> Any {
     const p: _JsonParser = _JsonParser(data)
     const v: Any = p.parse_value()
@@ -1009,13 +956,9 @@ def loadb(data: bytes) -> Any {
     return v
 }
 
-# Decode a JSON document (str) into a boxed Any tree. Python-parity name/shape.
 def loads(s: str) -> Any {
     return loadb(s.encode("utf-8"))
 }
-
-# Shaped entries to the boxed tree, private on purpose; public spelling is
-# decode[dict[str, Any]] / decode[list[Any]], whose compiler stamps delegate here.
 
 def _decode_obj_any(data: bytes) -> dict[str, Any] {
     const v: Any = loadb(data)
@@ -1035,8 +978,6 @@ def _decode_list_any(data: bytes) -> list[Any] {
     raise ValueError("JSON top-level value is not an array")
 }
 
-# template[JSON] (D032): auto-escapes each !{expr} as a JSON string body; the compiler concatenates the segments.
-
 class JSON(Template) {
     def(inner: str) {
         self._inner = inner
@@ -1044,16 +985,11 @@ class JSON(Template) {
 
     @staticmethod
     def escape(s: str) -> str {
-        # Same escaping as module-level json.escape (one implementation).
         return _escape_body(s)
     }
 }
 
 
-# JSON Schema validation (Draft 7 subset) via the Schema class: type/enum/$ref,
-# object required/properties, array items/min/maxItems, string + number bounds.
-
-# The JSON kind of a runtime value, in JSON Schema's own vocabulary.
 def _json_kind(v: Any) -> str {
     if isinstance(v, bool) {
         return "boolean"
@@ -1081,12 +1017,10 @@ def _type_matches(want: str, kind: str) -> bool {
     if want == kind {
         return True
     }
-    # JSON Schema: every integer is also a number.
     return want == "number" and kind == "integer"
 }
 
 
-# A numeric Any (int or float) as float, for bound comparisons.
 def _num_val(v: Any) -> float {
     if isinstance(v, int) {
         const i: int = v
@@ -1097,7 +1031,6 @@ def _num_val(v: Any) -> float {
 }
 
 
-# Deep equality across two parsed JSON values (enum membership).
 def _json_eq(a: Any, b: Any) -> bool {
     const ka: str = _json_kind(a)
     const kb: str = _json_kind(b)
@@ -1128,7 +1061,6 @@ def _json_eq(a: Any, b: Any) -> bool {
         return x == y
     }
     if ka == "array" {
-        # Walk the Any values directly (header-dispatched len/subscript) so boxed and monomorphized lists compare alike.
         if len(a) != len(b) {
             return False
         }
@@ -1160,7 +1092,6 @@ def _json_eq(a: Any, b: Any) -> bool {
 }
 
 
-# One violation: the JSON path of the offending value and what went wrong.
 class ValidationError {
     path: str
     message: str
@@ -1183,7 +1114,6 @@ class ValidationResult {
 }
 
 
-# The walker; `refdepth` counts consecutive $ref hops (reset when the walk consumes structure) so a pure ref cycle is reported, not stack-overflowed.
 def _schema_check(schemas: dict[str, dict[str, Any]], schema: dict[str, Any],
                   value: Any, path: str, refdepth: int,
                   errors: list[ValidationError]) -> None {
@@ -1226,7 +1156,6 @@ def _schema_check(schemas: dict[str, dict[str, Any]], schema: dict[str, Any],
         }
         if not matched {
             errors.append(ValidationError(path, f"expected {want}, got {kind}"))
-            # The wrong kind - none of the kind-specific keywords below apply.
             return
         }
     }
@@ -1277,7 +1206,6 @@ def _schema_check(schemas: dict[str, dict[str, Any]], schema: dict[str, Any],
     }
 
     if kind == "array" {
-        # Size/iterate the Any value directly (header-dispatched) so boxed and monomorphized lists validate identically.
         if "minItems" in schema {
             const m: int = schema["minItems"]
             if len(value) < m {
@@ -1324,8 +1252,6 @@ def _schema_check(schemas: dict[str, dict[str, Any]], schema: dict[str, Any],
 }
 
 
-# Schema validation entry point: owns a registry of named schemas ($ref by name).
-# Register at startup (it mutates); validation is read-only and safe to share.
 class Schema {
     _dialect: str
     _schemas: dict[str, dict[str, Any]]

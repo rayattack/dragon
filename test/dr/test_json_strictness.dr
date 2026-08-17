@@ -1,6 +1,3 @@
-# Pre-fix: the parser kept unknown escapes like \x verbatim and accepted raw
-# control characters (byte < 0x20) inside strings instead of raising.
-
 from unittest import TestCase, main
 from json import loads
 

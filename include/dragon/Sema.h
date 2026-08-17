@@ -9,7 +9,6 @@
 
 namespace dragon {
 
-/// Represents a symbol in the symbol table
 struct Symbol {
     enum class Kind {
         Variable,
@@ -27,15 +26,12 @@ struct Symbol {
     bool isGlobal = false;
     bool isNonlocal = false;
     bool isInitialized = false;
-    bool isConst = false;   // Dragon const binding
-    bool isStatic = false;  // Dragon static member
-    bool isBuiltin = false; // injected builtin (outer namespace) - may be shadowed
-    // Hoisted module-level const from the pre-pass; its second-pass visit is
-    // the real declaration, not a redeclaration.
+    bool isConst = false;
+    bool isStatic = false;
+    bool isBuiltin = false;
     bool isModuleForwardDecl = false;
 };
 
-/// Represents a scope (function, class, module, etc.)
 class Scope {
 public:
     enum class Kind {
@@ -48,19 +44,14 @@ public:
     Scope(Kind kind, Scope* parent = nullptr);
     ~Scope();
 
-    /// Define a new symbol in this scope
     bool define(const Symbol& symbol);
 
-    /// Look up a symbol, searching parent scopes if not found
     Symbol* lookup(const std::string& name);
 
-    /// Look up a symbol in this scope only (no parent search)
     Symbol* lookupLocal(const std::string& name);
 
-    /// Get the enclosing function scope (or nullptr)
     Scope* enclosingFunction();
 
-    /// Get the enclosing class scope (or nullptr)
     Scope* enclosingClass();
 
     Kind kind() const { return kind_; }
@@ -72,7 +63,6 @@ private:
     std::unordered_map<std::string, Symbol> symbols_;
 };
 
-/// Diagnostic from semantic analysis
 struct SemaDiagnostic {
     enum class Level { Warning, Error };
     Level level;
@@ -80,22 +70,17 @@ struct SemaDiagnostic {
     std::string message;
 };
 
-/// Name resolution, scope analysis, import resolution, and basic semantic validation.
 class Sema : public ASTVisitor {
 public:
     Sema();
     ~Sema();
 
-    /// Analyze a module
     bool analyze(Module& module);
 
-    /// Get all diagnostics
     const std::vector<SemaDiagnostic>& diagnostics() const;
 
-    /// Check if any errors occurred
     bool hasErrors() const;
 
-    // Visitor methods
     void visit(NamedTypeExpr& node) override;
     void visit(GenericTypeExpr& node) override;
     void visit(OptionalTypeExpr& node) override;
@@ -167,17 +152,14 @@ public:
     void visit(Module& node) override;
 
 private:
-    // Scope management
     void pushScope(Scope::Kind kind);
     void popScope();
     Scope* currentScope();
 
-    // Helper methods
     void defineBuiltins();
     void resolveImport(const std::string& moduleName);
     bool isValidAssignmentTarget(Expr* expr);
-    
-    // Error reporting
+
     void error(const SourceLocation& loc, const std::string& message);
     void warning(const SourceLocation& loc, const std::string& message);
 
@@ -185,6 +167,6 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-} // namespace dragon
+}
 
-#endif // DRAGON_SEMA_H
+#endif

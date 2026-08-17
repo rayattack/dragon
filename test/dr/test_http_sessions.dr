@@ -1,26 +1,3 @@
-# test/dr/test_http_sessions.dr - Behavioral tests for http.sessions (W5 + W7).
-#
-# Covers the network-independent signing/crypto core:
-#  (a) sign_session -> verify_session round-trips and returns the payload;
-#  (b) a token with a flipped byte in the signature is REJECTED;
-#  (c) an expired token is rejected (real time-based path: sign with a 1s
-#  lifetime, sleep 2s via the runtime clock, then verify);
-#  (d) MemoryStore save -> load round-trips a Session (incl. via a base-typed
-#  SessionStore receiver, exercising D026 virtual dispatch);
-#  (e) csrf_verify accepts a freshly-minted csrf_token and rejects a tampered one.
-#
-# verify_session signals failure by RAISING ValueError (never a sentinel
-# string), so tamper/expiry cases assert via assertRaises.
-#
-# NOTE on test shape: the failure-path checks pass *bare named module-level
-# functions* to assertRaises rather than `lambda () -> None { ... }` closures.
-# A capturing lambda crashes when a longjmp exception unwinds back through its
-# frame to assertRaises' setjmp - a pre-existing compiler bug in the
-# closure-capture + exception-unwinding interaction, unrelated to this module
-# (it reproduces with `unittest` + builtin `int()` alone). A bare top-level
-# function reference carries no captured environment, so it sidesteps the bug
-# and still exercises the exact verify_session reject path. See the final report.
-
 from unittest import TestCase, main
 from time import sleep_secs
 from http.sessions import sign_session, verify_session, new_session_id
@@ -32,7 +9,6 @@ const _KEY: bytes = b"0123456789abcdef0123456789abcdef"
 const _OTHER_KEY: bytes = b"ffffffffffffffffffffffffffffffff"
 
 
-# Flip the first character of `s` to a different one so the result != s.
 def _flip_first(s: str) -> str {
     if len(s) == 0 {
         return "X"
@@ -43,11 +19,6 @@ def _flip_first(s: str) -> str {
     return "A" + s[1:len(s)]
 }
 
-
-# --- Failure-path helpers (bare refs handed to assertRaises) ----------------
-# Each builds its corrupt/expired token and calls verify_session in its OWN
-# frame, so verify's raise is caught by assertRaises without a capturing
-# closure on the unwind path.
 
 def _verify_tampered_signature() -> None {
     tok: str = sign_session("payload", _KEY)
@@ -62,8 +33,6 @@ def _verify_tampered_payload() -> None {
 }
 
 def _verify_tampered_expiry() -> None {
-    # Editing the expiry segment to extend the lifetime must fail - the MAC
-    # covers the expiry too, so it cannot be forged without the key.
     tok: str = sign_session("payload", _KEY, 60)
     parts: list[str] = tok.split(".")
     verify_session(parts[0] + "." + _flip_first(parts[1]) + "." + parts[2], _KEY)
@@ -79,8 +48,6 @@ def _verify_malformed() -> None {
 }
 
 def _verify_expired() -> None {
-    # Real time-based expiry: 1-second lifetime, advance the clock past it via
-    # the runtime sleep, then verify must raise.
     tok: str = sign_session("payload", _KEY, 1)
     sleep_secs(2)
     verify_session(tok, _KEY)
@@ -95,8 +62,6 @@ class SignVerifyTests(TestCase) {
     }
 
     def test_roundtrip_empty_payload() {
-        # An empty payload round-trips to "" - and the failure path RAISES
-        # (never returns ""), so a forgery can't masquerade as empty.
         tok: str = sign_session("", _KEY)
         self.assertEqual(verify_session(tok, _KEY), "")
     }
@@ -195,7 +160,7 @@ class MemoryStoreTests(TestCase) {
     def test_save_load_roundtrip() {
         ms: MemoryStore = MemoryStore()
         sid: str = "sess-xyz"
-        s: Session = ms.load(sid)        # fresh empty session
+        s: Session = ms.load(sid)
         s.set("count", "7")
         ms.save(sid, s)
 
@@ -204,7 +169,6 @@ class MemoryStoreTests(TestCase) {
     }
 
     def test_roundtrip_via_base_receiver() {
-        # D026: a SessionStore-typed receiver dispatches to MemoryStore.load.
         ms: MemoryStore = MemoryStore()
         sid: str = "sess-base"
         s: Session = ms.load(sid)
@@ -250,7 +214,6 @@ class CsrfTests(TestCase) {
     }
 
     def test_verify_rejects_wrong_session() {
-        # A token bound to one session must not validate for another.
         tok: str = csrf_token("session-A", _KEY)
         self.assertFalse(csrf_verify(tok, "session-B", _KEY))
     }

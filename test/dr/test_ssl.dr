@@ -1,13 +1,3 @@
-# test/dr/test_ssl.dr - `ssl` module surface tests (no live peer).
-#
-# Phase 6 of ADR 038. Exercises the Python-parity surface that needs no socket:
-# the PROTOCOL_*/CERT_* constants, SSLContext construction, create_default_context
-# loading the bundled trust store, the SSLError exception hierarchy (SSLError <
-# OSError; every *Error leaf < SSLError, matched parent-first like CPython), and
-# the bad-input failure paths (a missing cert/CA file must raise SSLError, not
-# segfault or silently succeed). Handshake + round-trip behavior is covered by
-# test_ssl_roundtrip.dr.
-
 from unittest import TestCase, main
 from ssl import SSLContext, SSLError, SSLCertVerificationError, SSLZeroReturnError, SSLWantReadError, SSLWantWriteError, create_default_context, PROTOCOL_TLS_CLIENT, PROTOCOL_TLS_SERVER, CERT_NONE, CERT_OPTIONAL, CERT_REQUIRED
 
@@ -32,7 +22,6 @@ class SslContextTests(TestCase) {
         self.assertIsNotNone(s)
     }
     def test_create_default_context() {
-        # Loads the bundled Mozilla CA bundle (or a system bundle); must not raise.
         const ctx: SSLContext = create_default_context()
         self.assertIsNotNone(ctx)
     }
@@ -60,9 +49,6 @@ class SslBadInputTests(TestCase) {
 }
 
 class SslExceptionHierarchyTests(TestCase) {
-    # ssl.dr declares SSLError(OSError) and derives every leaf from SSLError.
-    # assertRaises matches subclasses parent-first, so each leaf is catchable
-    # as SSLError and SSLError is catchable as OSError.
     def test_cert_verify_is_ssl_error() {
         self.assertRaises(SSLError, lambda () -> None { raise SSLCertVerificationError("verify") })
     }

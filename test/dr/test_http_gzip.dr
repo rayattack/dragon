@@ -1,34 +1,20 @@
-# test/dr/test_http_gzip.dr - W6 response compression (gzip) gate.
-#
-# Drives the server with an in-memory ConnReader (MemoryReader) - no sockets.
-# The body-compression byte-exactness of the dragon_str_from_bytes bridge is
-# proven separately; here we test the negotiation GATE end-to-end through
-# serialize(): compress iff the client advertised gzip AND the content-type is
-# compressible AND the body clears _GZIP_MIN_BODY (1400) AND it isn't already
-# encoded. Correctness signal: when compression fires, the distinctive plaintext
-# marker must be ABSENT from the wire bytes (it was deflated); when it doesn't,
-# the marker is present verbatim.
-
 from unittest import TestCase, main
 from http.server import Router, Request, Response, Context
 from http.server import MemoryReader
 
 const MARKER: str = "DRAGON_GZIP_MARKER_"
 
-# ~3800 bytes of text/plain (compressible, well over the 1400-byte floor).
 def _big(req: Request, res: Response, ctx: Context) -> None {
     res.text(MARKER * 200)
 }
 
-# Tiny body - below the floor, must never be compressed.
 def _small(req: Request, res: Response, ctx: Context) -> None {
     res.text("hi")
 }
 
-# Large but already-compressed content-type - must not be re-compressed.
 def _png(req: Request, res: Response, ctx: Context) -> None {
     res.text(MARKER * 200)
-    res.set_header("content-type", "image/png")   # after text() - text() forces text/plain
+    res.set_header("content-type", "image/png")
 }
 
 def _app() -> Router {
@@ -46,17 +32,14 @@ def _req(path: str, accept_gzip: bool) -> bytes {
 }
 
 class GzipGateTests(TestCase) {
-    # Large compressible body + Accept-Encoding: gzip -> compressed.
     def test_compresses_large_text() {
         const mr: MemoryReader = MemoryReader([_req("/big", true)])
         _app().serve_connection(mr)
         self.assertIn("content-encoding: gzip", mr.sent)
         self.assertIn("vary: Accept-Encoding", mr.sent)
-        # Deflated: the plaintext marker must not survive on the wire.
         self.assertNotIn(MARKER, mr.sent)
     }
 
-    # Same body, no Accept-Encoding -> sent verbatim, no encoding header.
     def test_no_accept_encoding_uncompressed() {
         const mr: MemoryReader = MemoryReader([_req("/big", false)])
         _app().serve_connection(mr)
@@ -64,7 +47,6 @@ class GzipGateTests(TestCase) {
         self.assertIn(MARKER, mr.sent)
     }
 
-    # Body below _GZIP_MIN_BODY -> not compressed even with gzip offered.
     def test_small_body_not_compressed() {
         const mr: MemoryReader = MemoryReader([_req("/small", true)])
         _app().serve_connection(mr)
@@ -72,7 +54,6 @@ class GzipGateTests(TestCase) {
         self.assertIn("hi", mr.sent)
     }
 
-    # Non-compressible content-type -> left alone even when large + gzip offered.
     def test_incompressible_type_skipped() {
         const mr: MemoryReader = MemoryReader([_req("/png", true)])
         _app().serve_connection(mr)

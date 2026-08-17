@@ -6,22 +6,17 @@ namespace dragon {
 
 namespace {
 
-/// Every name a target introduces under Dragon's declare-vs-reassign rule
-/// (`:` declares, `=` reassigns): a bare NameExpr only if annotated; tuple/list unpacking always declares.
 void collectImplicitlyDeclaredNames(Expr* target, std::set<std::string>& out) {
     if (auto* name = dynamic_cast<NameExpr*>(target)) {
         out.insert(name->name);
     } else if (auto* tup = dynamic_cast<TupleExpr*>(target)) {
         for (auto& e : tup->elements) collectImplicitlyDeclaredNames(e.get(), out);
     } else if (auto* lst = dynamic_cast<ListExpr*>(target)) {
-        // `[a, b] = pair` unpacking - also an annotation-less binding form.
         for (auto& e : lst->elements) collectImplicitlyDeclaredNames(e.get(), out);
     }
-    // SubscriptExpr / AttributeExpr targets mutate an existing object and
-    // never introduce a module-level binding - intentionally ignored.
 }
 
-} // namespace
+}
 
 TypeHintEnforcer::TypeHintEnforcer(EnforcerOptions options)
     : options_(std::move(options)) {}
@@ -29,8 +24,6 @@ TypeHintEnforcer::TypeHintEnforcer(EnforcerOptions options)
 bool TypeHintEnforcer::enforce(Module& module) {
     diagnostics_.clear();
 
-    // Runs before name resolution, so it tracks declared names itself
-    // (Sema's `:` declares / `=` reassigns) to spot first-declaration vs reassignment.
     std::set<std::string> declaredModuleNames;
 
     for (auto& stmt : module.body) {
@@ -39,12 +32,8 @@ bool TypeHintEnforcer::enforce(Module& module) {
         } else if (auto* cls = dynamic_cast<ClassDecl*>(stmt.get())) {
             checkClass(*cls);
         } else if (auto* ann = dynamic_cast<AnnAssignStmt*>(stmt.get())) {
-            // `x: int = 0` is the declaration form; record the name so a later
-            // bare `x = x + 1` is recognized as a reassignment, not a new var.
             collectImplicitlyDeclaredNames(ann->target.get(), declaredModuleNames);
         } else if (auto* assign = dynamic_cast<AssignStmt*>(stmt.get())) {
-            // Decide declare-vs-reassign before tracking, since the binding a
-            // statement introduces is visible only to *subsequent* statements.
             const bool isBareSingleName =
                 assign->targets.size() == 1 &&
                 dynamic_cast<NameExpr*>(assign->targets[0].get()) != nullptr;
@@ -53,12 +42,8 @@ bool TypeHintEnforcer::enforce(Module& module) {
                 declaredModuleNames.count(
                     static_cast<NameExpr*>(assign->targets[0].get())->name) != 0;
 
-            // Mutations (subscript/attribute targets, bare reassignment) never
-            // require an annotation; only a genuine first declaration is checked.
             if (!isReassign) checkModuleLevelAssign(*assign);
 
-            // Record names bound for later reassignments; a bare single `=`
-            // introduces no new binding (already declared or errored above).
             if (assign->typeAnnotation || !isBareSingleName) {
                 for (auto& target : assign->targets) {
                     collectImplicitlyDeclaredNames(target.get(), declaredModuleNames);
@@ -81,18 +66,15 @@ void TypeHintEnforcer::checkFunction(FunctionDecl& func, bool isMethod) {
     if (!options_.requireFunctionParamTypes && !options_.requireReturnTypes)
         return;
 
-    // Check parameter types
     if (options_.requireFunctionParamTypes) {
         for (size_t i = 0; i < func.params.size(); ++i) {
             auto& param = func.params[i];
 
-            // Skip 'self' and 'cls' as first parameter of methods
             if (isMethod && i == 0 &&
                 (param.name == "self" || param.name == "cls")) {
                 continue;
             }
 
-            // *args and **kwargs don't strictly require type annotations
             if (param.isVarArg || param.isKwArg) continue;
 
             if (!param.type) {
@@ -103,9 +85,7 @@ void TypeHintEnforcer::checkFunction(FunctionDecl& func, bool isMethod) {
         }
     }
 
-    // Check return type
     if (options_.requireReturnTypes) {
-        // __init__ implicitly returns None
         if (func.name != "__init__" && !func.returnType) {
             addError(func.location(),
                 "missing return type annotation for function '" + func.name + "'");
@@ -116,7 +96,7 @@ void TypeHintEnforcer::checkFunction(FunctionDecl& func, bool isMethod) {
 void TypeHintEnforcer::checkClass(ClassDecl& cls) {
     for (auto& stmt : cls.body) {
         if (auto* method = dynamic_cast<FunctionDecl*>(stmt.get())) {
-            checkFunction(*method, /*isMethod=*/true);
+            checkFunction(*method, true);
         }
     }
 }
@@ -124,18 +104,14 @@ void TypeHintEnforcer::checkClass(ClassDecl& cls) {
 void TypeHintEnforcer::checkModuleLevelAssign(AssignStmt& assign) {
     if (!options_.requireModuleVarTypes) return;
 
-    // A statement that already carries an annotation is a complete declaration.
     if (assign.typeAnnotation) return;
 
-    // `enforce()` already filters reassignments; subscript/attribute targets
-    // and tuple/list unpacking have no annotation slot, so only a bare NameExpr counts.
     if (assign.targets.size() != 1) return;
     auto* name = dynamic_cast<NameExpr*>(assign.targets[0].get());
     if (!name) return;
 
     const std::string& varName = name->name;
 
-    // Skip dunder variables like __all__, __version__, etc.
     if (varName.size() >= 4 && varName.substr(0, 2) == "__" &&
         varName.substr(varName.size() - 2) == "__") {
         return;
@@ -153,4 +129,4 @@ void TypeHintEnforcer::addError(SourceLocation loc, const std::string& message) 
     diagnostics_.push_back(std::move(diag));
 }
 
-} // namespace dragon
+}

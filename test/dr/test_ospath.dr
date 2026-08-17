@@ -1,14 +1,3 @@
-# test/dr/test_ospath.dr - normpath / relpath behavioral parity.
-#
-# These two functions moved out of the C++ runtime (dragon_normpath /
-# dragon_relpath) into native Dragon in stdlib/os/path.dr (ADR 042). This
-# suite pins their behavior so the port can't silently regress, and checks
-# that os.dr's flat path_* variants still delegate correctly.
-#
-# relpath assertions use absolute inputs only, so results don't depend on the
-# process cwd. Expected values match Python's posixpath, except that normpath
-# collapses "//" to "/" (Dragon does not preserve the POSIX double-slash root).
-
 from unittest import TestCase, main
 from os.path import normpath, relpath
 import os
@@ -94,7 +83,6 @@ class RelpathTests(TestCase) {
 }
 
 class OsFlatVariantTests(TestCase) {
-    # os.dr exposes flat path_* names that delegate to os.path's natives.
     def test_path_normpath_delegates() {
         self.assertEqual(os.path_normpath("/foo/../bar"), "/bar")
         self.assertEqual(os.path_normpath("a/b/c/../../d"), "a/d")

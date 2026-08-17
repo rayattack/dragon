@@ -1,44 +1,11 @@
-# odb.graphql - the GraphQL adapter (spec section 11).
-#
-# A thin translator, never a second engine: queries compile to OQL and run
-# through the same prepare-time checks and executor as native reads; the
-# pk-keyed simple mutations ride the Documents API. Object types come from the
-# compiled schemas; relation fields come from declared refs (forward N:1
-# nests an object, reverse 1:N nests a list) - the metadata IS the on-clause.
-#
-#   query {
-#     customers(where: {city: {_eq: "Lagos"}}, order_by: {id: desc}, limit: 5) {
-#       name
-#       orders(where: {status: {_eq: "paid"}}) { id total }
-#     }
-#     customers_agg(where: {city: {_eq: "Lagos"}}) { count }
-#   }
-#   mutation {
-#     insert_customers_one(object: {id: 7, name: "Ada"}) { id name }
-#     update_customers_by_pk(id: 7, _set: {name: "Ada L"}) { id name }
-#     delete_customers_by_pk(id: 7) { id }
-#   }
-#
-# Where operators: _eq _neq _gt _gte _lt _lte _like (glob ~) _ilike (~*) _in,
-# plus _and / _or / _not combinators. Sibling fields AND together.
-#
-# v1 gap, on purpose: full __schema introspection is not served yet; sdl()
-# renders the type system as SDL text for humans and tools that read it
-
 from odb import ODB, Documents, Document
 from odb.schema import CompiledSchema, FieldSpec, T_BOOL, T_INT, T_NUM, T_STR
 from odb.meta import CompiledMeta, RefDecl
 from odb.errors import ODBError, PrepareError, IntegrityError, NotFound, SchemaError, ConflictError
 from json import dumps, loads
 
-#===----------------------------------------------------------------------===#
-# GraphQL document parser (queries + simple mutations)
-#===----------------------------------------------------------------------===#
-
 class GqlError(ODBError) {}
 
-# One field in a selection set: name, arguments (JSON-shaped values; enums
-# arrive as plain strings), and an optional nested selection set.
 class GqlField {
     name: str
     args: dict[str, Any]
@@ -54,7 +21,7 @@ class GqlField {
 }
 
 class GqlDoc {
-    op: str                       # "query" | "mutation"
+    op: str
     fields: list[GqlField]
 
     def(op: str) {
@@ -74,7 +41,6 @@ class _P {
         self.n = len(src)
     }
 
-    # GraphQL treats commas as insignificant, exactly like whitespace.
     def _ws() -> None {
         while self.pos < self.n {
             c: str = self.src[self.pos]
@@ -132,7 +98,7 @@ class _P {
             }
             op = kw
             if self._peek() != "{" {
-                self._name()                       # optional operation name
+                self._name()
             }
         }
         doc: GqlDoc = GqlDoc(op)
@@ -217,7 +183,7 @@ class _P {
         if word == "null" {
             raise GqlError("graphql: null literals are not supported in v1")
         }
-        re: Any = word                             # enum value (asc / desc / ...)
+        re: Any = word
         return re
     }
 
@@ -286,10 +252,6 @@ class _P {
 def parse_graphql(text: str) -> GqlDoc {
     return _P(text).parse()
 }
-
-#===----------------------------------------------------------------------===#
-# where / order_by / value rendering into OQL text
-#===----------------------------------------------------------------------===#
 
 def _oql_value(v: Any) -> str {
     if isinstance(v, bool) {
@@ -363,7 +325,6 @@ def _op_to_oql(field: str, op: str, v: Any) -> str {
     raise GqlError("graphql: unknown where operator '" + op + "'")
 }
 
-# {field: {_op: v}, _or: [...], _and: [...], _not: {...}} -> an OQL predicate.
 def where_to_oql(w: dict[str, Any]) -> str {
     parts: list[str] = []
     for key in w {
@@ -432,12 +393,6 @@ def _order_to_oql(ob: Any) -> str {
     return " | sort " + ", ".join(keys)
 }
 
-#===----------------------------------------------------------------------===#
-# Query translation and execution
-#===----------------------------------------------------------------------===#
-
-# Render one root field's selections as an OQL projection block. Nested
-# selections become nested-ref projections (declared refs drive the join).
 def _selection_block(fields: list[GqlField]) -> str {
     parts: list[str] = []
     for f in fields {
@@ -460,7 +415,6 @@ def _selection_block(fields: list[GqlField]) -> str {
     return "{ " + ", ".join(parts) + " }"
 }
 
-# One root query field -> complete OQL text.
 def field_to_oql(f: GqlField) -> str {
     q: str = f.name
     if "where" in f.args {
@@ -495,7 +449,6 @@ def field_to_oql(f: GqlField) -> str {
     return q
 }
 
-# <schema>_agg with a {count} selection -> whole-set aggregate OQL.
 def _agg_to_oql(f: GqlField, source: str) -> str {
     q: str = source
     if "where" in f.args {
@@ -513,8 +466,6 @@ def _agg_to_oql(f: GqlField, source: str) -> str {
     return q + " { count: count!() }"
 }
 
-# Project a flat result document through a selection set (mutations return
-# whichever stored fields the selection names; nested refs are query-side).
 def _project_doc(doc: dict[str, Any], fields: list[GqlField]) -> dict[str, Any] {
     out: dict[str, Any] = {}
     for f in fields {
@@ -524,10 +475,6 @@ def _project_doc(doc: dict[str, Any], fields: list[GqlField]) -> dict[str, Any] 
     }
     return out
 }
-
-#===----------------------------------------------------------------------===#
-# The executor: one GraphQL document in, one JSON response text out
-#===----------------------------------------------------------------------===#
 
 def graphql_execute(db: ODB, text: str) -> str {
     try {
@@ -640,7 +587,6 @@ def _run_mutation(db: ODB, f: GqlField) -> Any {
     raise GqlError("graphql: unsupported mutation '" + name + "' (v1 serves insert_*_one, update_*_by_pk, delete_*_by_pk)")
 }
 
-# Resolve the pk argument(s) of a *_by_pk mutation to the target document.
 def _by_pk(db: ODB, schema: str, args: dict[str, Any]) -> Document {
     keys: dict[str, Any] = {}
     for k in args {
@@ -653,10 +599,6 @@ def _by_pk(db: ODB, schema: str, args: dict[str, Any]) -> Document {
     }
     return db._read_by(db._schemas[schema], keys)
 }
-
-#===----------------------------------------------------------------------===#
-# SDL rendering (the human-readable type surface; introspection is a v1 gap)
-#===----------------------------------------------------------------------===#
 
 def _gql_type(fs: FieldSpec) -> str {
     base: str = "String"
@@ -694,9 +636,6 @@ def _type_name(schema_name: str) -> str {
     return out
 }
 
-# Render every schema as an SDL object type: scalar fields typed from the
-# compiled schema, one object field per forward ref (N:1), one list field per
-# reverse ref (1:N).
 def graphql_sdl(db: ODB) -> str {
     lines: list[str] = []
     for sid in db._sorted_sids() {
@@ -718,7 +657,6 @@ def graphql_sdl(db: ODB) -> str {
             }
             lines.append("  " + rel + ": " + _type_name(r.target_schema))
         }
-        # reverse edges: schemas whose refs target this one
         for sid2 in db._sorted_sids() {
             other: str = db._by_sid[sid2]
             ocm: CompiledMeta = db._metac[other]

@@ -43,8 +43,8 @@ class DoubleMonoTests(TestCase) {
     def test_both_class_and_method_params() {
         c: Container[int] = Container[int](7)
         p: tuple[int, str] = c.pair[str]("hi")
-        self.assertEqual(p[0], 7)      # T = int (from the class instantiation)
-        self.assertEqual(p[1], "hi")   # U = str (from the method call)
+        self.assertEqual(p[0], 7)
+        self.assertEqual(p[1], "hi")
     }
 
     def test_multiple_class_instantiations_share_method() {
@@ -57,7 +57,7 @@ class DoubleMonoTests(TestCase) {
 
     def test_inferred_method_param() {
         c: Container[int] = Container[int](7)
-        r: str = c.wrap("inferred")   # U inferred from the binding annotation
+        r: str = c.wrap("inferred")
         self.assertEqual(r, "inferred")
     }
 

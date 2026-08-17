@@ -1,16 +1,3 @@
-# test/dr/test_drs_schema.dr - D023/D022 schema-bind + env-injection tests.
-#
-# Covers drs.parse(Schema, content): field reads, default-fill for absent
-# optionals, and the three validation failures (missing-required, wrong-type,
-# unknown/typo key) each raising a catchable DragonScriptSchemaError. Plus
-# envs()/parse_with()/loads_with() seeding header bindings so in-file
-# conditionals (`if platform == 'linux'`) resolve against the build env.
-#
-# Failure-path checks pass bare module-level zero-arg functions to
-# assertRaises (which wants Callable[[], None]); each builds its bad input and
-# calls parse in its own frame, so the raise unwinds cleanly to assertRaises'
-# setjmp without a capturing closure on the path.
-
 from unittest import TestCase, main
 from drs import parse, parse_with, loads_with, envs, Schema, DragonScriptSchemaError
 
@@ -22,8 +9,6 @@ def _manifest_schema() -> Schema {
     s.field("eggs", "dict", false)
     return s
 }
-
-# --- Failure-path helpers (bare refs handed to assertRaises) ---
 
 def _missing_required() -> None {
     s: Schema = _manifest_schema()

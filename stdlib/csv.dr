@@ -8,13 +8,11 @@ const NEWLINE: str = "\n"
 
 
 def parse_row(line: str, delimiter: str) -> list[str] {
-    # Splits into fields, handling quoted fields with embedded delimiters/escaped
-    # quotes. Field text collects as spans, joined once per field, no per-char building.
     fields: list[str] = []
     parts: list[str] = []
     in_quotes: bool = false
     i: int = 0
-    run: int = 0                # start of the current verbatim span
+    run: int = 0
     const n: int = len(line)
 
     while i < n {
@@ -24,11 +22,9 @@ def parse_row(line: str, delimiter: str) -> list[str] {
             if ch == "\"" {
                 if i > run { parts.append(line[run:i]) }
                 if i + 1 < n and line[i + 1] == "\"" {
-                    # Escaped quote "" - emit a single quote
                     parts.append("\"")
                     i = i + 2
                 } else {
-                    # Closing quote (also when the quote ends the line)
                     in_quotes = false
                     i = i + 1
                 }
@@ -38,7 +34,6 @@ def parse_row(line: str, delimiter: str) -> list[str] {
             }
         } else {
             if ch == "\"" {
-                # Opening quote - only valid at start of field
                 if i > run { parts.append(line[run:i]) }
                 in_quotes = true
                 i = i + 1
@@ -61,8 +56,6 @@ def parse_row(line: str, delimiter: str) -> list[str] {
 }
 
 def parse_rows(text: str, delimiter: str) -> list[list[str]] {
-    # One span-based scan over the whole document (RFC 4180): a "\n" inside a
-    # quoted field stays in the field; an unquoted "\n" ends the row.
     rows: list[list[str]] = []
     fields: list[str] = []
     parts: list[str] = []
@@ -125,14 +118,11 @@ def parse_rows(text: str, delimiter: str) -> list[list[str]] {
 }
 
 def parse_row_simple(line: str, delimiter: str) -> list[str] {
-    # Simple split with no quote handling, for maximum performance.
     return line.split(delimiter)
 }
 
 
 def quote_field(field: str, delimiter: str) -> str {
-    # Quotes if the field contains the delimiter, a quote, or a newline; internal
-    # quotes are escaped by doubling.
     const has_delim: bool = field.contains(delimiter)
     const has_quote: bool = field.contains("\"")
     const has_newline: bool = field.contains("\n")
@@ -146,7 +136,6 @@ def quote_field(field: str, delimiter: str) -> str {
 }
 
 def format_row(fields: list[str], delimiter: str) -> str {
-    # Fields are quoted only when necessary.
     parts: list[str] = []
     i: int = 0
     const n: int = len(fields)
@@ -160,7 +149,6 @@ def format_row(fields: list[str], delimiter: str) -> str {
 }
 
 def format_rows(rows: list[list[str]], delimiter: str) -> str {
-    # Rows are separated by newlines.
     parts: list[str] = []
     i: int = 0
     const n: int = len(rows)
@@ -180,7 +168,6 @@ def field_count(line: str, delimiter: str) -> int {
 }
 
 def has_header(text: str, delimiter: str) -> bool {
-    # Heuristic, not definitive: true if the first row has no purely numeric fields.
     const rows: list[list[str]] = parse_rows(text, delimiter)
     if len(rows) == 0 { return false }
 

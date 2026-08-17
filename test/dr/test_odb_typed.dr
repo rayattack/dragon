@@ -186,12 +186,9 @@ class TypedReadTest(TestCase) {
     }
 
     def test_run_template_injection_is_data() -> None {
-        # An injection payload through a write param stays a value: it should only
-        # change the field it targets, never inject a secnod statement.
         db: ODB = _db()
         evil: str = "z\" } add customers { id: 99, name: \"h\", age: 1"
         db.run(template[OQL] { set customers ? id == 1 { name: !{evil} } })
-        # no id 99 was created; only three seeded customers remain.
         all_rows: list[Customer] = db.all[Customer](template[OQL] { customers ? id > 0 })
         self.assertEqual(len(all_rows), 3)
     }

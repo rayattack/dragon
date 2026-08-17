@@ -1,11 +1,3 @@
-# test/dr/test_scrypt.dr - Known-answer tests for hashlib.scrypt (RFC 7914 §12).
-#
-# scrypt is a native Dragon implementation (mbedTLS ships no scrypt). These
-# vectors lock the full pipeline: PBKDF2 bookends + ROMix/BlockMix/Salsa20-8.
-# Vector 1 is RFC 7914 §12 canonical (N=16,r=1,p=1). The r=8 and r=4/p=2
-# vectors (kept at N=16 so the suite stays fast) exercise BlockMix reordering
-# and p>1 parallel blocks; expected values from CPython's reference scrypt.
-
 from unittest import TestCase, main
 from hashlib import scrypt
 
@@ -30,7 +22,6 @@ class ScryptTests(TestCase) {
     }
 
     def test_dklen_short() {
-        # A shorter derived key is just the prefix length the caller asked for.
         const dk: bytes = scrypt(b"", b"", 16, 1, 1, 0, 16)
         self.assertEqual(len(dk), 16)
         self.assertEqual(dk.hex(), _V1[0:32])

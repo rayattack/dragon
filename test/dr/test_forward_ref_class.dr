@@ -14,14 +14,14 @@ from unittest import TestCase, main
 class ForwardRefTests(TestCase) {
     def test_int_field_read() {
         c: Counter = Counter()
-        self.assertEqual(c.n, 42)        # read a field set in the ctor
+        self.assertEqual(c.n, 42)
     }
 
     def test_method_call_and_str_field() {
         b: Buf = Buf()
         b.add("ab")
         b.add("cd")
-        self.assertEqual(b.s, "abcd")    # method that mutates a heap field
+        self.assertEqual(b.s, "abcd")
         self.assertEqual(len(b.s), 4)
     }
 
@@ -30,11 +30,10 @@ class ForwardRefTests(TestCase) {
         c.bump()
         c.bump()
         c.bump()
-        self.assertEqual(c.n, 45)        # 42 + 3
+        self.assertEqual(c.n, 45)
     }
 }
 
-# Defined AFTER ForwardRefTests on purpose (forward reference from its methods).
 class Counter {
     def() {
         self.n: int = 42

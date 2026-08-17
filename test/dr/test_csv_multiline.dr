@@ -1,6 +1,3 @@
-# Pre-fix: parse_rows split on "\n" before quote handling, so a quoted field
-# containing a newline was corrupted into separate rows.
-
 from unittest import TestCase, main
 from csv import parse_rows, format_rows
 

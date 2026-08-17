@@ -8,7 +8,6 @@
 
 namespace dragon {
 
-/// Diagnostic produced by the TypeHintEnforcer
 struct EnforcerDiagnostic {
     enum class Level { Error, Warning };
     Level level = Level::Error;
@@ -16,22 +15,18 @@ struct EnforcerDiagnostic {
     std::string message;
 };
 
-/// Options for controlling type hint enforcement
 struct EnforcerOptions {
     bool requireFunctionParamTypes = true;
     bool requireReturnTypes = true;
     bool requireModuleVarTypes = true;
-    bool isImportedModule = false;  // true: use "Borders must be secured" message
+    bool isImportedModule = false;
     std::string importingFile;
 };
 
-/// Enforces PEP-484 annotation presence on .py files (TypeChecker checks
-/// correctness separately). .dr files are exempt; the Parser enforces types there.
 class TypeHintEnforcer {
 public:
     explicit TypeHintEnforcer(EnforcerOptions options = {});
 
-    /// Checks that every declaration has a type annotation; false on any miss.
     bool enforce(Module& module);
 
     const std::vector<EnforcerDiagnostic>& diagnostics() const { return diagnostics_; }
@@ -48,6 +43,6 @@ private:
     std::vector<EnforcerDiagnostic> diagnostics_;
 };
 
-} // namespace dragon
+}
 
-#endif // DRAGON_TYPE_HINT_ENFORCER_H
+#endif

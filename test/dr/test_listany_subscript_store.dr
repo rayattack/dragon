@@ -1,16 +1,3 @@
-# test/dr/test_listany_subscript_store.dr - subscript STORE into a list[Any].
-#
-# Regression guard for a silent miscompile: `xs[i] = v` on a list[Any] was
-# lowered to dragon_list_set (the 8-byte DragonList setter) even though a
-# list[Any] is a DragonListBox with 16-byte {tag,payload} elements. The store
-# either silently no-op'd (the slot kept its OLD value) or wrote a corrupt box
-# (`<box tag=... payload=...>`). The fix routes list[Any] subscript stores to
-# dragon_list_box_set, boxing the RHS via boxArgTagPayload (which increfs a
-# borrowed source so the list's owned ref outlives it; box_set decrefs the
-# overwritten element). list[int]/list[str]/... stores were never affected.
-#
-# These assertions FAIL (wrong value) or crash on the pre-fix compiler.
-
 from unittest import TestCase, main
 
 
@@ -26,8 +13,6 @@ class ListAnySubscriptStoreTests(TestCase) {
     }
 
     def test_store_overwrites_old_value() {
-        # The pre-fix bug kept the OLD value on overwrite - this is the exact
-        # `anys[1] = "TWO"` -> still "two" repro.
         anys: list[Any] = [1, "two", 3]
         anys[1] = "TWO"
         self.assertEqual(anys[1], "TWO")
@@ -42,12 +27,9 @@ class ListAnySubscriptStoreTests(TestCase) {
     }
 
     def test_overwrite_heap_with_other_type() {
-        # Overwriting a heap element (list) with a str exercises box_set's
-        # decref-of-old path; must not corrupt or leak.
         xs: list[Any] = [[1, 2, 3]]
         xs[0] = "done"
         self.assertEqual(xs[0], "done")
-        # And overwrite str -> list back again.
         xs[0] = [4, 5]
         self.assertEqual(xs[0], [4, 5])
     }

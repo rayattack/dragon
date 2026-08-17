@@ -45,8 +45,6 @@ class Window {
     _body: HTML
 
     def(title: str, width: int, height: int, inspect: bool = false) {
-        # gtk_init is idempotent; calling it per-window is safe and keeps the
-        # Window self-contained until a dedicated App.init() phase exists.
         dragon_webview_init()
         self.handle = dragon_webview_window_new(title, width, height)
         self._body = HTML("")

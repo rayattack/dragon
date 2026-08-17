@@ -55,41 +55,33 @@ def syslog_close() {
 }
 
 def emergency(msg: str) {
-    # LOG_EMERG: system is unusable.
     syslog(LOG_EMERG, msg)
 }
 
 def alert(msg: str) {
-    # LOG_ALERT: action must be taken immediately.
     syslog(LOG_ALERT, msg)
 }
 
 def critical(msg: str) {
-    # LOG_CRIT: critical conditions.
     syslog(LOG_CRIT, msg)
 }
 
 def error(msg: str) {
-    # LOG_ERR: error conditions.
     syslog(LOG_ERR, msg)
 }
 
 def warning(msg: str) {
-    # LOG_WARNING: warning conditions.
     syslog(LOG_WARNING, msg)
 }
 
 def notice(msg: str) {
-    # LOG_NOTICE: normal but significant condition.
     syslog(LOG_NOTICE, msg)
 }
 
 def info(msg: str) {
-    # LOG_INFO: informational message.
     syslog(LOG_INFO, msg)
 }
 
 def debug(msg: str) {
-    # LOG_DEBUG: debug-level message.
     syslog(LOG_DEBUG, msg)
 }

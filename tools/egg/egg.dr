@@ -1,17 +1,3 @@
-# tools/egg/egg.dr - the `dragon-egg` sidecar: the package-manager CLI (D022).
-#
-# The C++ Driver cannot call the pure-Dragon .drs parser (stdlib/drs.dr)
-# directly, so it exec's this compiled sidecar and reads its stdout / exit
-# code. This keeps the ENTIRE egg CLI - manifest reading, `init`, and (later)
-# grab/sync/drop - in Dragon (dogfooded), with zero .drs logic duplicated in
-# C++ (the rejected workaround). Built to a `dragon-egg` binary during the
-# CMake build; the Driver falls back to compiling this source in a dev tree.
-#
-# Subcommands:
-#  init scaffold a dragon.drs in the current directory
-#  entry <dir> print the resolved `entry` file from <dir>/dragon.drs
-#  grab/sync/drop package fetch/verify/remove (step 4 - not yet wired)
-
 from sys import argv, exit
 from os import getcwd, makedirs, getenv, listdir
 from os.path import join, exists, basename, isdir, isfile
@@ -32,8 +18,6 @@ from pathlib import Path
 from http.client import HTTPConnection, HTTPResponse, HTTPSConnection, HTTPSResponse, HTTPSBytesResponse
 
 
-# Whole-file write: a truncating Writer, scoped so the handle always closes.
-# Returns the byte count (callers ignore it, but it keeps the old shape).
 def _write(path: str, content: str) -> int {
     total: int = 0
     with make(path) as w {
@@ -43,9 +27,6 @@ def _write(path: str, content: str) -> int {
 }
 
 
-# The manifest schema (D022 §147-196). Strict by default so a typo'd top-level
-# key (`verison`) is reported, not silently ignored. Nested egg specs live
-# inside the `eggs`/`permissions` dicts, so they don't trip top-level checks.
 def _manifest_schema() -> Schema {
     s: Schema = Schema()
     s.field("name", "str", true)
@@ -60,7 +41,6 @@ def _manifest_schema() -> Schema {
     return s
 }
 
-# `dragon init` - scaffold a manifest. Refuses to clobber an existing one.
 def _cmd_init() -> int {
     if exists("dragon.drs") {
         print("dragon.drs already exists - not overwriting")
@@ -82,8 +62,6 @@ def _cmd_init() -> int {
     return 0
 }
 
-# `dragon entry <dir>` - print the resolved entry file for `dragon run <dir>`.
-# Prints ONLY the entry path to stdout on success (the Driver captures it).
 def _cmd_entry(dir: str) -> int {
     manifest_path: str = join(dir, "dragon.drs")
     if not exists(manifest_path) {
@@ -98,10 +76,6 @@ def _cmd_entry(dir: str) -> int {
     return 0
 }
 
-# --- grab / sync / drop (D022 Phase 1) ------------------------------------
-
-# Determine a dep's entry file (relative to its .drx/<pkg>/ dir): the dep's own
-# dragon.drs `entry` if it ships one, else the flat `<name>.dr` convention.
 def _dep_entry(dest: str, name: str) -> str {
     dep_manifest: str = join(dest, "dragon.drs")
     if exists(dep_manifest) {
@@ -120,7 +94,6 @@ def _ensure_drx() -> None {
     }
 }
 
-# Sync one path dep: fresh-copy <src> into .drx/<name>/ and write the entry hint.
 def _sync_path(name: str, src: str, dest: str) -> int {
     if not exists(src) {
         print("egg '" + name + "': path '" + src + "' does not exist")
@@ -135,8 +108,6 @@ def _sync_path(name: str, src: str, dest: str) -> int {
     return 0
 }
 
-# Sync one git dep: clone, checkout the pinned commit if a `git:<sha>` hash is
-# given, write the entry hint. Network - exercised against a real repo.
 def _sync_git(name: str, url: str, spec: dict[str, Any], dest: str) -> int {
     _ensure_drx()
     if exists(dest) { rmtree(dest) }
@@ -198,8 +169,6 @@ def _sync_one(name: str, spec: dict[str, Any]) -> int {
     return 1
 }
 
-# GET a registry path; returns (status, body). For the JSON CLI endpoints.
-# Speaks TLS when $DRAGON_REGISTRY is https:// (the live registry).
 def _http_get(path: str) -> tuple[int, str] {
     const target: tuple[str, int] = _registry_target()
     const headers: dict[str, str] = {}
@@ -221,7 +190,6 @@ def _http_get(path: str) -> tuple[int, str] {
     return (status, body)
 }
 
-# POST a registry path; returns (status, body). TLS-aware like _http_get.
 def _http_post(path: str, body: str, headers: dict[str, str]) -> tuple[int, str] {
     const target: tuple[str, int] = _registry_target()
     if _registry_tls() {
@@ -242,8 +210,6 @@ def _http_post(path: str, body: str, headers: dict[str, str]) -> tuple[int, str]
     return (rstatus, rbody)
 }
 
-# Download a presigned https URL (R2-backed registries) as raw bytes. The
-# binary-safe response path matters: a tarball must never ride through a str.
 def _download_url(url: str) -> bytes {
     if not url.startswith("https://") {
         raise ValueError("refusing non-https download url")
@@ -265,10 +231,6 @@ def _download_url(url: str) -> bytes {
     return resp.body
 }
 
-# The tarball for a /api/fetch JSON response: either a presigned `url` the
-# bytes are fetched from directly (R2-backed registry), or an inline base64
-# `tarball` (disk-backed registry). The caller hashes whichever bytes arrive
-# and verifies against the pinned digest, so the transport is never trusted.
 def _tarball_from_fetch(body: str) -> bytes {
     const obj: dict[str, Any] = loads(body)
     if "url" in obj {
@@ -281,16 +243,11 @@ def _tarball_from_fetch(body: str) -> bytes {
     return b64decode(tb64.encode("utf-8"))
 }
 
-# The transparency-log leaf hash for (name, version, hash, ts, uid). MUST match
-# services/translog.dr's leaf_hash byte-for-byte so the client can recompute and
-# confirm the registry's log commits to the exact bytes it received.
 def _leaf_hash(name: str, version: str, pkg_hash: str, ts: int, uid: int) -> str {
     const inp: str = name + "\n" + version + "\n" + pkg_hash + "\n" + str(ts) + "\n" + str(uid)
     return "sha256:" + hexdigest("sha256", inp.encode("utf-8"))
 }
 
-# Verify the /api/fetch response carries a transparency-log receipt whose leaf
-# binds exactly (name, version, got_hash). Returns "" on success or an error.
 def _verify_leaf(name: str, version: str, got_hash: str, body: str) -> str {
     const obj: dict[str, Any] = loads(body)
     if not ("log" in obj) {
@@ -311,12 +268,6 @@ def _verify_leaf(name: str, version: str, got_hash: str, body: str) -> str {
     return ""
 }
 
-# --- signed-checkpoint verification (ADR 022 addendum B) -------------------
-# The log checkpoint is Ed25519-signed by the registry. The client pins the
-# registry's public key trust-on-first-use and verifies every checkpoint against
-# it, so a MITM or rogue mirror cannot forge the log head a client sees.
-
-# Trust store: ~/.dragon/trusted-keys, one line per registry: "host key_id pubkey".
 def _trust_path() -> str {
     return join(join(getenv("HOME"), ".dragon"), "trusted-keys")
 }
@@ -326,8 +277,6 @@ def _registry_host_key() -> str {
     return t[0] + ":" + str(t[1])
 }
 
-# Per-registry last-verified log state (~/.dragon/log-state: "host size root"),
-# so `scan` can prove the log only appended since last time (consistency proof).
 def _log_state_path() -> str {
     return join(join(getenv("HOME"), ".dragon"), "log-state")
 }
@@ -379,8 +328,6 @@ def _pin_key(host: str, key_id: str, pubkey_hex: str) -> None {
     with make(path) as w { m: int = w.write(existing + host + " " + key_id + " " + pubkey_hex + "\n") }
 }
 
-# Resolve the trusted pubkey (hex) for this registry, pinning on first contact.
-# Returns (pubkey_hex, error). A key_id differing from the pinned one is refused.
 def _trusted_pubkey(seen_key_id: str) -> tuple[str, str] {
     const host: str = _registry_host_key()
     const path: str = _trust_path()
@@ -417,8 +364,6 @@ def _trusted_pubkey(seen_key_id: str) -> tuple[str, str] {
     return (pinned_pub, "")
 }
 
-# Fetch + verify the Ed25519-signed checkpoint. Returns (error, root_hex, size);
-# error == "" means the head is authentic (signed by the pinned registry key).
 def _verify_checkpoint() -> tuple[str, str, int] {
     const cr: tuple[int, str] = _http_get("/api/log/checkpoint")
     if cr[0] != 200 {
@@ -446,9 +391,6 @@ def _verify_checkpoint() -> tuple[str, str, int] {
     return ("", root, size)
 }
 
-# Succinct membership proof: confirm (name, version) with leaf data `leaf_hash_str`
-# is in the size-`tree_size` Merkle tree committed to by `root_hex` (signed
-# checkpoint) - an O(log n) check that needs no full-log download. Returns "" ok.
 def _verify_inclusion(name: str, version: str, leaf_hash_str: str, root_hex: str, tree_size: int) -> str {
     const ir: tuple[int, str] = _http_get("/api/log/inclusion/" + name + "/" + version + "?tree_size=" + str(tree_size))
     if ir[0] != 200 {
@@ -472,15 +414,10 @@ def _verify_inclusion(name: str, version: str, leaf_hash_str: str, root_hex: str
     return ""
 }
 
-# --- author package signing (ADR 022 Section 9) ----------------------------
-
-# The publisher's Ed25519 signing seed lives here (hex). Never transmitted.
 def _author_key_path() -> str {
     return join(join(getenv("HOME"), ".dragon"), "author.key")
 }
 
-# `dragon keygen` - generate (or show) the author signing keypair. The public
-# key is what consumers pin as `signed-by` in their dragon.drs.
 def _cmd_keygen() -> int {
     const dir: str = join(getenv("HOME"), ".dragon")
     if not exists(dir) { n: int = makedirs(dir) }
@@ -501,9 +438,6 @@ def _cmd_keygen() -> int {
     return 0
 }
 
-# Verify the author signature in a /api/fetch response over the tarball bytes.
-# If `expected_signer` (the manifest's pinned `signed-by`) is set, the fetched
-# signer must match it and the package must be signed. Returns "" on success.
 def _verify_author_sig(body: str, tarball: bytes, expected_signer: str) -> str {
     const obj: dict[str, Any] = loads(body)
     sb: str = ""
@@ -536,10 +470,6 @@ def _verify_author_sig(body: str, tarball: bytes, expected_signer: str) -> str {
     return ""
 }
 
-# Fetch <name>@<version>, verify sha256(tarball) == `expected` (the manifest
-# pin), and extract into .drx/<name>/. A hash mismatch is a HARD ERROR - the
-# whole point of pinning. The registry is never trusted for integrity; the
-# bytes are. Returns 0 on success.
 def _sync_registry(name: str, version: str, expected: str, dest: str, expected_signer: str = "") -> int {
     const r: tuple[int, str] = _http_get("/api/fetch/" + name + "/" + version)
     if r[0] != 200 {
@@ -554,17 +484,11 @@ def _sync_registry(name: str, version: str, expected: str, dest: str, expected_s
         print("  computed from bytes: " + got)
         return 1
     }
-    # Transparency check: confirm the registry's append-only log commits to
-    # exactly these bytes for (name, version). A registry that later swaps the
-    # bytes can't change the logged leaf, so this binds the install to an
-    # auditable record (re-verifiable end-to-end with `dragon scan`).
     const leaf_err: str = _verify_leaf(name, version, got, r[1])
     if len(leaf_err) > 0 {
         print("egg '" + name + "': " + leaf_err)
         return 1
     }
-    # Author signature: if the manifest pins a signer it must match + verify; an
-    # invalid signature on a signed package is always a hard error.
     const sig_err: str = _verify_author_sig(r[1], tarball, expected_signer)
     if len(sig_err) > 0 {
         print("egg '" + name + "': " + sig_err)
@@ -585,14 +509,7 @@ def _sync_registry(name: str, version: str, expected: str, dest: str, expected_s
     return 0
 }
 
-# `dragon scan` - audit the registry's transparency log and this project's deps.
-# (1) Recompute the whole append-only chain and check it against the signed
-# checkpoint head: any rewrite of past history changes the head and is caught.
-# (2) Confirm every pinned registry dependency appears in the log with the exact
-# hash this project trusts. This is the end-to-end provenance check that the
-# per-install leaf verification commits to.
 def _cmd_scan() -> int {
-    # 1. Verify the checkpoint is Ed25519-signed by the registry key we trust.
     const cpv: tuple[str, str, int] = _verify_checkpoint()
     if len(cpv[0]) > 0 {
         print("scan: " + cpv[0])
@@ -602,8 +519,6 @@ def _cmd_scan() -> int {
     const size: int = cpv[2]
     print("scan: checkpoint signature verified (size " + str(size) + ", root " + root_hex[0:16] + "...)")
 
-    # 2. Consistency proof: prove the log only APPENDED since we last saw it
-    # (O(log n), no full download). A rewrite of past history is rejected here.
     const prev: tuple[int, str] = _read_log_state()
     if prev[0] > 0 {
         if prev[0] <= size {
@@ -628,9 +543,6 @@ def _cmd_scan() -> int {
         }
     }
 
-    # 3. Download the log; recompute the Merkle root over the first `size` leaves
-    # and confirm it equals the SIGNED root (links the dump to the signature),
-    # while indexing name@version -> pkg_hash for the dep check.
     const lr: tuple[int, str] = _http_get("/api/log")
     if lr[0] != 200 {
         print("scan: cannot fetch transparency log (HTTP " + str(lr[0]) + ")")
@@ -668,7 +580,6 @@ def _cmd_scan() -> int {
     print("scan: Merkle root verified (" + str(size) + " entries)")
     _write_log_state(size, root_hex)
 
-    # Cross-check pinned registry deps against the log.
     if not exists("dragon.drs") {
         print("scan: no dragon.drs - log chain OK, no deps to check")
         return 0
@@ -712,8 +623,6 @@ def _cmd_scan() -> int {
     return 0
 }
 
-# `grab <name>[@version]` from the registry: discover the version if omitted,
-# fetch, compute the hash from the bytes received, pin it in dragon.drs, install.
 def _grab_registry(name: str, version: str) -> int {
     ver: str = version
     if ver == "" {
@@ -737,7 +646,6 @@ def _grab_registry(name: str, version: str) -> int {
     }
     const tarball: bytes = _tarball_from_fetch(fr[1])
     const our_hash: str = "sha256:" + hexdigest("sha256", tarball)
-    # Cross-check the registry's stated hash; pin OUR computed hash regardless.
     const fobj: dict[str, Any] = loads(fr[1])
     const srv_any: Any = fobj["hash"]
     const srv: str = srv_any
@@ -746,10 +654,6 @@ def _grab_registry(name: str, version: str) -> int {
         print("  stated:   " + srv)
         print("  computed: " + our_hash + "  (pinning this)")
     }
-    # First acquisition: verify the registry's checkpoint is signed by the key we
-    # trust (pinning it TOFU), then prove THIS package's leaf is in that signed
-    # Merkle tree with an O(log n) inclusion proof - no full-log download. A
-    # MITM/rogue mirror can forge neither the signature nor the membership.
     const cpv: tuple[str, str, int] = _verify_checkpoint()
     if len(cpv[0]) > 0 {
         print("egg '" + name + "': " + cpv[0])
@@ -768,8 +672,6 @@ def _grab_registry(name: str, version: str) -> int {
         return 1
     }
     print("  inclusion proof verified against signed Merkle root " + cpv[1][0:16] + "...")
-    # If the package is author-signed, pin that author key in dragon.drs (TOFU),
-    # so future syncs require the same signer.
     signer: str = ""
     if "signed_by" in fobj {
         const sgb_any: Any = fobj["signed_by"]
@@ -786,7 +688,6 @@ def _grab_registry(name: str, version: str) -> int {
     return _sync_registry(name, ver, our_hash, dest, exp_signer)
 }
 
-# `dragon sync` - populate .drx/ from every egg declared in dragon.drs.
 def _cmd_sync() -> int {
     if not exists("dragon.drs") {
         print("no dragon.drs in the current directory")
@@ -813,9 +714,6 @@ def _cmd_sync() -> int {
     return 0
 }
 
-# Splice a prebuilt one-line egg entry into the `eggs { }` block, preserving the
-# rest of the manifest verbatim (comments + formatting). drs.dumps is lossy, so
-# we splice text rather than round-trip the parsed dict.
 def _manifest_insert(name: str, entry_line: str) -> int {
     content: str = open("dragon.drs").text()
     if (name + " = {") in content {
@@ -852,11 +750,6 @@ def _manifest_add_egg(name: str, mode: str, loc: str) -> int {
     return _manifest_insert(name, entry_line)
 }
 
-# A registry dep is pinned by version + content hash: this is the security
-# keystone (ADR 022). `grab` computes the hash from the bytes it actually
-# received; `sync` re-verifies it on every install.
-# NB: the pin key is `signed_by` (underscore), not `signed-by`: .drs keys are
-# identifiers and a hyphen is the minus operator, so `signed-by` would not parse.
 def _manifest_add_registry(name: str, version: str, hash: str, signed_by: str) -> int {
     base: str = "    " + name + " = { version = '" + version + "', hash = '" + hash + "'"
     if len(signed_by) > 0 {
@@ -866,7 +759,6 @@ def _manifest_add_registry(name: str, version: str, hash: str, signed_by: str) -
 }
 
 def _infer_name(loc: str) -> str {
-    # Strip a trailing slash, take the basename, drop a .git suffix.
     b: str = basename(loc)
     if len(b) > 4 {
         if b[len(b)-4:] == ".git" { b = b[0:len(b)-4] }
@@ -874,9 +766,6 @@ def _infer_name(loc: str) -> str {
     return b
 }
 
-# `dragon grab <name>[@version] | --path <dir> | --git <url> [--name <n>]`
-# A bare positional name grabs from the registry (version+hash pinned); --path
-# and --git are the local / git escape hatches.
 def _cmd_grab(args: list[str]) -> int {
     mode: str = ""
     loc: str = ""
@@ -910,7 +799,6 @@ def _cmd_grab(args: list[str]) -> int {
             print("usage: dragon grab <name>[@version] | --path <dir> | --git <url> [--name <n>]")
             return 1
         }
-        # Registry grab: split an optional name@version.
         rname: str = pkg
         rver: str = ""
         const at: int = pkg.find("@")
@@ -923,11 +811,9 @@ def _cmd_grab(args: list[str]) -> int {
     if name == "" { name = _infer_name(loc) }
     rc: int = _manifest_add_egg(name, mode, loc)
     if rc != 0 { return rc }
-    # Populate .drx/ for the new dep (full sync is idempotent).
     return _cmd_sync()
 }
 
-# `dragon drop <name>` - remove the egg's one-line entry + its .drx/<name>/.
 def _cmd_drop(args: list[str]) -> int {
     if len(args) < 3 {
         print("usage: dragon drop <name>")
@@ -962,10 +848,6 @@ def _cmd_drop(args: list[str]) -> int {
     return 0
 }
 
-# --- push / find (D022 Phase 3: registry) ---------------------------------
-
-# Resolve the registry host:port from $DRAGON_REGISTRY (default local dev).
-# An https:// registry defaults to port 443 and speaks TLS (_registry_tls).
 def _registry_target() -> tuple[str, int] {
     reg: str = getenv("DRAGON_REGISTRY")
     if reg == "" {
@@ -995,12 +877,6 @@ def _registry_tls() -> bool {
     return reg.startswith("https://")
 }
 
-# Files a published package includes - a STRICT allowlist, never the whole cwd.
-# The old `t.add(".", name)` swept in .drx/, data/ (the registry's own SQLite DB
-# + blobs), .git/, and any .env/credentials sitting in the working directory -
-# a data-exfiltration-on-publish footgun. We add only known package components
-# (ADR 022 Section 6): the manifest, src/, tests/, README/LICENSE, and top-level
-# .dr sources (flat-layout packages like frames).
 def _package_files() -> list[str] {
     out: list[str] = []
     out.append("dragon.drs")
@@ -1010,8 +886,6 @@ def _package_files() -> list[str] {
     for f in ["README.md", "README", "README.txt", "LICENSE", "LICENSE.md", "LICENSE.txt"] {
         if isfile(f) { out.append(f) }
     }
-    # Top-level .dr files. The ".dr" suffix test never matches ".drs", so the
-    # manifest is not double-added.
     for entry in listdir(".") {
         if isfile(entry) {
             if len(entry) > 3 {
@@ -1022,9 +896,6 @@ def _package_files() -> list[str] {
     return out
 }
 
-# `dragon push` - tarball the current package and upload it to the registry.
-# Auth via $DRAGON_REGISTRY_TOKEN (create one at /account). The tarball is
-# base64-encoded so it travels intact through the string-bodied HTTP client.
 def _cmd_push(sign: bool) -> int {
     if not exists("dragon.drs") {
         print("no dragon.drs in the current directory")
@@ -1043,8 +914,6 @@ def _cmd_push(sign: bool) -> int {
         return 1
     }
 
-    # Build the archive in a private (0o700) temp dir, not a predictable /tmp
-    # path. Format is .tar.zst to match the content-addressed blob store.
     const tmpdir: str = mkdtemp("dragon-push-", "")
     const tarpath: str = join(tmpdir, name + ".tar.zst")
     const files: list[str] = _package_files()
@@ -1086,14 +955,12 @@ def _cmd_push(sign: bool) -> int {
     return 1
 }
 
-# `dragon find <query>` - search the registry.
 def _cmd_find(query: str) -> int {
     const r: tuple[int, str] = _http_get("/api/search?q=" + query)
     print(r[1])
     return 0
 }
 
-# --- dispatch -------------------------------------------------------------
 args: list[str] = argv()
 if len(args) < 2 {
     print("usage: dragon <init|entry|grab|sync|drop> [args]")

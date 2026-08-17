@@ -16,7 +16,6 @@ def _write(path: str, body: str) -> None {
 
 class ShutilTests(TestCase) {
     def _setup(root: str) -> None {
-        # Fresh tree: <root>/a.txt and <root>/sub/b.txt
         if exists(root) {
             shutil.rmtree(root)
         }
@@ -61,7 +60,6 @@ class ShutilTests(TestCase) {
     }
 
     def test_which() {
-        # `sh` is present on every POSIX system used for CI.
         found: str = shutil.which("sh")
         self.assertTrue(found != "")
         self.assertEqual(shutil.which("dr_no_such_binary_zzz"), "")

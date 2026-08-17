@@ -1,15 +1,12 @@
-/// Dragon CodeGen - Core Expressions (Name, Binary, Unary, If, Walrus, ChainedComp)
 #include "../CodeGenImpl.h"
 #include "llvm/IR/Intrinsics.h"
 
 namespace dragon {
 
 void CodeGen::visit(NameExpr& node) {
-    // `dub x` (docs/002 2.7): containers deep-copy; immutable payloads (str/bytes/
-    // tuples) identity-retain through a CALL so the result classifies owned.
     if (node.isDubMarked && impl_->options.gcMode == GCMode::RC) {
         node.isDubMarked = false;
-        node.accept(*this);  // plain load (single re-entry)
+        node.accept(*this);
         node.isDubMarked = true;
         llvm::Value* v = impl_->lastValue;
         auto k = node.type ? node.type->kind() : Type::Kind::Unknown;
@@ -21,7 +18,7 @@ void CodeGen::visit(NameExpr& node) {
             case Type::Kind::Set:   fn = "dragon_set_copy"; break;
             case Type::Kind::Bytes:
             case Type::Kind::Tuple: fn = "dragon_obj_retain"; break;
-            default: break;  // E11 rejected everything else upstream
+            default: break;
         }
         if (fn && v->getType()->isPointerTy()) {
             auto* callee = impl_->getOrDeclareRuntime(fn,
@@ -32,8 +29,6 @@ void CodeGen::visit(NameExpr& node) {
         }
         return;
     }
-    // Module-typed names have no runtime representation; reaching here means
-    // the TypeChecker missed a misuse, so raise an internal error instead of falling through.
     if (node.type && node.type->kind() == Type::Kind::Module) {
         impl_->addError("module '" + node.name + "' used as a runtime value",
                         node.location());
@@ -41,7 +36,6 @@ void CodeGen::visit(NameExpr& node) {
         return;
     }
 
-    // Special names
     if (node.name == "True") {
         impl_->lastValue = llvm::ConstantInt::get(impl_->i1Type, 1);
         return;
@@ -56,8 +50,6 @@ void CodeGen::visit(NameExpr& node) {
         return;
     }
 
-    // Bare `__doc__` resolves to the module's docstring (Python parity); reuses
-    // the same `.rodata` cache as `<mod>.__doc__` in Attributes.cpp.
     if (node.name == "__doc__") {
         const std::string& modName = impl_->currentModuleName;
         auto cIt = impl_->moduleDocConstants.find(modName);
@@ -80,8 +72,6 @@ void CodeGen::visit(NameExpr& node) {
         return;
     }
 
-    // Decision 025: a class name in value context loads its descriptor global,
-    // except exception classes, which lower to their integer type code so exc_matches range-checks work.
     if (!impl_->resolvingCallTarget && impl_->classNames.count(node.name) &&
         !impl_->isExcType(node.name)) {
         auto descIt = impl_->classDescriptorGlobalsBySym.find(impl_->classSym(node.name));
@@ -92,8 +82,6 @@ void CodeGen::visit(NameExpr& node) {
         }
     }
 
-    // A bare exception name in value context lowers to its integer type code,
-    // so dragon_exc_matches is a single range compare (no descriptor walk, no RTTI).
     if (!impl_->resolvingCallTarget && impl_->isExcType(node.name) &&
         !impl_->lookupVar(node.name)) {
         impl_->lastValue = llvm::ConstantInt::get(
@@ -104,15 +92,12 @@ void CodeGen::visit(NameExpr& node) {
 
     auto* alloca = impl_->lookupVar(node.name);
     if (!alloca) {
-        // Check module-level globals (.dr: always; .py: only if `global` declared)
         auto* gv = impl_->lookupModuleGlobal(node.name);
         if (gv && impl_->shouldUseModuleGlobal(node.name)) {
             impl_->lastValue = impl_->builder->CreateLoad(
                 gv->getValueType(), gv, node.name);
             return;
         }
-        // May be a function name (function pointers/references); resolution
-        // mirrors CallExpr: importedFuncAliases, then mangleFunc(currentModule), then userFuncName.
         llvm::Function* func = nullptr;
         std::string aliasSym = impl_->lookupImportedAlias(node.name);
         if (!aliasSym.empty()) {
@@ -133,8 +118,6 @@ void CodeGen::visit(NameExpr& node) {
         impl_->lastValue = llvm::ConstantInt::get(impl_->i64Type, 0);
         return;
     }
-    // D027.1: cell-backed names (nonlocal-mutable) route through dragon_cell_get
-    // so reads chain to the same backing slot the writer mutates.
     if (impl_->isCellBacked(node.name)) {
         impl_->lastValue = impl_->emitCellRead(
             alloca, impl_->lookupVarKind(node.name), node.name);
@@ -145,8 +128,6 @@ void CodeGen::visit(NameExpr& node) {
 }
 
 void CodeGen::visit(BinaryExpr& node) {
-    // Desugars `not in`/`is not` into NOT(IN)/NOT(IS) by re-entering visit with
-    // the op rewritten, then inverting the i1 result; RAII restores the op after.
     if (node.op.type() == TokenType::NOT_IN || node.op.type() == TokenType::IS_NOT) {
         const Token saved = node.op;
         const TokenType inner = (saved.type() == TokenType::NOT_IN)
@@ -165,12 +146,10 @@ void CodeGen::visit(BinaryExpr& node) {
         return;
     }
 
-    // Short-circuit for 'and' and 'or'
     if (node.op.type() == TokenType::AND || node.op.type() == TokenType::OR) {
         node.left->accept(*this);
         llvm::Value* lhs = impl_->lastValue;
 
-        // Convert to i1 if needed
         if (lhs->getType() == impl_->i64Type) {
             lhs = impl_->builder->CreateICmpNE(
                 lhs, llvm::ConstantInt::get(impl_->i64Type, 0), "tobool");
@@ -212,8 +191,6 @@ void CodeGen::visit(BinaryExpr& node) {
         return;
     }
 
-    // IntEnum/StrEnum members compare by value (Python parity): rewrites an
-    // operand `e` to `e.value` so normal int/str comparison codegen handles it, no boxing.
     {
         auto opk = node.op.type();
         bool isCmp = opk == TokenType::EQUAL_EQUAL || opk == TokenType::NOT_EQUAL ||
@@ -245,7 +222,6 @@ void CodeGen::visit(BinaryExpr& node) {
         }
     }
 
-    // Resolve class name from LHS AST before visiting (for dunder dispatch)
     std::string lhsClassName = impl_->resolveExprClassName(node.left.get());
 
     node.left->accept(*this);
@@ -255,8 +231,6 @@ void CodeGen::visit(BinaryExpr& node) {
 
     auto op = node.op.type();
 
-    // Union (`T | None`) vs `none`: extract the tag and compare to TAG_NONE (4),
-    // since the box ({i64,i64}) and NoneLiteral's i8* null are different LLVM types.
     if (op == TokenType::EQUAL_EQUAL || op == TokenType::NOT_EQUAL) {
         bool lhsIsNone = dynamic_cast<NoneLiteral*>(node.left.get()) != nullptr;
         bool rhsIsNone = dynamic_cast<NoneLiteral*>(node.right.get()) != nullptr;
@@ -265,14 +239,12 @@ void CodeGen::visit(BinaryExpr& node) {
         if ((lhsIsBox && rhsIsNone) || (rhsIsBox && lhsIsNone)) {
             llvm::Value* box = lhsIsBox ? lhs : rhs;
             auto* tag = impl_->boxTag(box);
-            auto* tagNone = llvm::ConstantInt::get(impl_->i64Type, TAG_NONE); // TAG_NONE
+            auto* tagNone = llvm::ConstantInt::get(impl_->i64Type, TAG_NONE);
             impl_->lastValue = (op == TokenType::EQUAL_EQUAL)
                 ? impl_->builder->CreateICmpEQ(tag, tagNone, "is.none")
                 : impl_->builder->CreateICmpNE(tag, tagNone, "not.none");
             return;
         }
-        // box==box/box!=box: tag-then-payload compare via dragon_box_eq, since
-        // LLVM's ICmp rejects struct types (AssertOK would trip).
         if (lhsIsBox && rhsIsBox) {
             auto* eqI64 = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_box_eq"], {lhs, rhs}, "box.eq");
@@ -283,14 +255,10 @@ void CodeGen::visit(BinaryExpr& node) {
                 : impl_->builder->CreateNot(eqBool, "box.ne");
             return;
         }
-        // Gap #9: box vs native (`x == ""` where x is Any): boxes the native side
-        // by its AST-derived tag, then dispatches through dragon_box_eq like box==box.
         if (lhsIsBox != rhsIsBox) {
             Expr* nativeExpr = lhsIsBox ? node.right.get() : node.left.get();
             llvm::Value* boxVal  = lhsIsBox ? lhs : rhs;
             llvm::Value* nativeVal = lhsIsBox ? rhs : lhs;
-            // Skip dunder-dispatching class instances; they're handled by the
-            // dunder block below where the box side would be rejected anyway.
             std::string nativeClassName =
                 impl_->resolveExprClassName(nativeExpr);
             bool isDunderClass = !nativeClassName.empty() &&
@@ -312,19 +280,15 @@ void CodeGen::visit(BinaryExpr& node) {
         }
     }
 
-    // Dunder dispatch for class instances (comparison + arithmetic operators)
     if (!lhsClassName.empty() && (lhs->getType() == impl_->i8PtrType || lhs->getType()->isPointerTy())) {
-        // Map operator to dunder method name
         std::string dunder;
         switch (op) {
-            // Comparison dunders
             case TokenType::EQUAL_EQUAL: dunder = "__eq__"; break;
             case TokenType::NOT_EQUAL:   dunder = "__ne__"; break;
             case TokenType::LESS:        dunder = "__lt__"; break;
             case TokenType::LESS_EQUAL:  dunder = "__le__"; break;
             case TokenType::GREATER:     dunder = "__gt__"; break;
             case TokenType::GREATER_EQUAL: dunder = "__ge__"; break;
-            // Arithmetic dunders
             case TokenType::PLUS:         dunder = "__add__"; break;
             case TokenType::MINUS:        dunder = "__sub__"; break;
             case TokenType::STAR:         dunder = "__mul__"; break;
@@ -340,14 +304,11 @@ void CodeGen::visit(BinaryExpr& node) {
         if (!dunder.empty()) {
             if (impl_->hasDunder(lhsClassName, dunder)) {
                 auto* result = impl_->callDunder(lhsClassName, dunder, lhs, {rhs});
-                // Comparison dunders: normalize to i1 (bool)
                 if (isComparison && result->getType() == impl_->i64Type)
                     result = impl_->builder->CreateICmpNE(result, llvm::ConstantInt::get(impl_->i64Type, 0));
-                // Arithmetic dunders: use raw result (i8*/i64/f64)
                 impl_->lastValue = result;
                 return;
             }
-            // Fallback for __ne__: negate __eq__ if available
             if (dunder == "__ne__" && impl_->hasDunder(lhsClassName, "__eq__")) {
                 auto* eqResult = impl_->callDunder(lhsClassName, "__eq__", lhs, {rhs});
                 if (eqResult->getType() == impl_->i64Type)
@@ -355,16 +316,13 @@ void CodeGen::visit(BinaryExpr& node) {
                 impl_->lastValue = impl_->builder->CreateNot(eqResult, "ne");
                 return;
             }
-            // Fallback for __gt__: use other.__lt__(self) - only if same class
             if (dunder == "__gt__" && impl_->hasDunder(lhsClassName, "__lt__")) {
-                // Swap operands: rhs.__lt__(lhs)
                 auto* result = impl_->callDunder(lhsClassName, "__lt__", rhs, {lhs});
                 if (result->getType() == impl_->i64Type)
                     result = impl_->builder->CreateICmpNE(result, llvm::ConstantInt::get(impl_->i64Type, 0));
                 impl_->lastValue = result;
                 return;
             }
-            // Fallback for __ge__: not __lt__
             if (dunder == "__ge__" && impl_->hasDunder(lhsClassName, "__lt__")) {
                 auto* ltResult = impl_->callDunder(lhsClassName, "__lt__", lhs, {rhs});
                 if (ltResult->getType() == impl_->i64Type)
@@ -372,7 +330,6 @@ void CodeGen::visit(BinaryExpr& node) {
                 impl_->lastValue = impl_->builder->CreateNot(ltResult, "ge");
                 return;
             }
-            // Fallback for __le__: __lt__ or __eq__
             if (dunder == "__le__" && impl_->hasDunder(lhsClassName, "__lt__") && impl_->hasDunder(lhsClassName, "__eq__")) {
                 auto* ltResult = impl_->callDunder(lhsClassName, "__lt__", lhs, {rhs});
                 if (ltResult->getType() == impl_->i64Type)
@@ -383,7 +340,6 @@ void CodeGen::visit(BinaryExpr& node) {
                 impl_->lastValue = impl_->builder->CreateOr(ltResult, eqResult, "le");
                 return;
             }
-            // Default for __eq__/__ne__ on class instances: pointer equality
             if (dunder == "__eq__") {
                 impl_->lastValue = impl_->builder->CreateICmpEQ(lhs, rhs, "ptreq");
                 return;
@@ -395,8 +351,6 @@ void CodeGen::visit(BinaryExpr& node) {
         }
     }
 
-    // Box arithmetic dispatches through dragon_box_binop (result type depends on
-    // runtime tags); must run after dunder dispatch but before the bytes/str/set paths below.
     {
         bool eitherBox = (lhs->getType() == impl_->boxType ||
                           rhs->getType() == impl_->boxType);
@@ -407,8 +361,6 @@ void CodeGen::visit(BinaryExpr& node) {
                     *this, node.left.get(), lhs, node.right.get(), rhs, opcode);
                 return;
             }
-            // Box ordering (< <= > >=) had no handler and crashed on ICmp of a
-            // {i64,i64}; routes through dragon_box_cmp and compares the three-way result to 0.
             int64_t cmpOp = -1;
             switch (op) {
                 case TokenType::LESS:          cmpOp = 0; break;
@@ -436,8 +388,6 @@ void CodeGen::visit(BinaryExpr& node) {
         }
     }
 
-    // [H5] Set ordering (< <= > >=) is subset/superset (Python parity), not a
-    // pointer compare: a<=b -> issubset(a,b); a<b -> issubset(a,b) & !issubset(b,a) (mirrored for >/>=).
     {
         auto isSetOperand = [&](Expr* e) -> bool {
             if (!e) return false;
@@ -468,7 +418,7 @@ void CodeGen::visit(BinaryExpr& node) {
                         subset(lhs, rhs),
                         impl_->builder->CreateNot(subset(rhs, lhs), "n"), "psub");
                     break;
-                default:  // GREATER
+                default:
                     impl_->lastValue = impl_->builder->CreateAnd(
                         subset(rhs, lhs),
                         impl_->builder->CreateNot(subset(lhs, rhs), "n"), "psup");
@@ -478,8 +428,6 @@ void CodeGen::visit(BinaryExpr& node) {
         }
     }
 
-    // Bytes ops must be checked before string (both are i8*); exprIsBytes covers
-    // calls/attrs/nested exprs, or e.g. `bytes(l1)+bytes(l2)` falls into str_concat.
     {
         bool lhsIsBytes = impl_->exprIsBytes(node.left.get());
         bool rhsIsBytes = impl_->exprIsBytes(node.right.get());
@@ -496,8 +444,6 @@ void CodeGen::visit(BinaryExpr& node) {
                 impl_->lastValue = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_bytes_concat"], {lhs, rhs}, "bytescat");
                 impl_->popArgTempCleanups(opBases);
-                // Decrefs owned intermediate bytes operands from chained exprs
-                // ((a+b)+c); the str/list paths already did this, bytes didn't (leaked).
                 if (impl_->options.gcMode == GCMode::RC) {
                     if (impl_->isOwnedPtrResult(lhs))
                         impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {lhs});
@@ -515,14 +461,10 @@ void CodeGen::visit(BinaryExpr& node) {
                 impl_->lastValue = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_bytes_repeat"], {bv, iv}, "bytesrep");
                 impl_->popArgTempCleanups(opBases);
-                // Drop an owned bytes operand temp ((a + b) * 3); the count is a
-                // scalar, no decref. Mirrors the str-repeat path.
                 if (impl_->options.gcMode == GCMode::RC && impl_->isOwnedPtrResult(bv))
                     impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {bv});
                 return;
             }
-            // Drops owned bytes operand temps consumed only by == / != (the eq/cmp
-            // helpers only READ), mirroring the str-compare path below.
             auto releaseOwnedBytesCmpOperands = [&]() {
                 if (impl_->options.gcMode != GCMode::RC) return;
                 if (!Impl::isBorrowedHeapExpr(node.left.get()) &&
@@ -611,8 +553,6 @@ void CodeGen::visit(BinaryExpr& node) {
         return;
     }
 
-    // list+list makes a fresh list; must precede the i8*+i8* string-concat
-    // fallthrough below, which would misread two list pointers as C-strings.
     if (op == TokenType::PLUS) {
         auto isListOperand = [&](Expr* e, llvm::Value* v) -> bool {
             if (e && e->type && e->type->kind() == Type::Kind::List) return true;
@@ -643,8 +583,6 @@ void CodeGen::visit(BinaryExpr& node) {
             auto* result = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_list_concat"], {lhs, rhs}, "listcat");
             impl_->popArgTempCleanups(opBases);
-            // Decrefs owned temp operands: literals/comprehensions plus nested-
-            // concat results via ownedTempDrainKind (`a+b+[5]` leaked the inner concat's +1).
             if (lhsOwned)
                 impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {lhs});
             if (rhsOwned)
@@ -654,7 +592,6 @@ void CodeGen::visit(BinaryExpr& node) {
         }
     }
 
-    // List repetition: list * int or int * list
     if (op == TokenType::STAR) {
         bool lhsIsList = dynamic_cast<ListExpr*>(node.left.get()) ||
                          dynamic_cast<ListCompExpr*>(node.left.get());
@@ -694,8 +631,6 @@ void CodeGen::visit(BinaryExpr& node) {
         }
     }
 
-    // str*int/int*str (bytes/lists already handled above); without this it fell
-    // to the ptr/i64 path, multiplying the string's ADDRESS and segfaulting.
     if (op == TokenType::STAR) {
         auto isStrOperand = [&](Expr* e, llvm::Value* v) -> bool {
             if (e && e->type && e->type->kind() == Type::Kind::Str) return true;
@@ -719,8 +654,6 @@ void CodeGen::visit(BinaryExpr& node) {
             if (countVal->getType() == impl_->i1Type)
                 countVal = impl_->builder->CreateZExt(countVal, impl_->i64Type);
 
-            // Peephole: literal-string * constant-int folds to a baked literal
-            // (e.g. `"=" * 80`), zero runtime cost; a 64 KiB cap defers huge repeats to the runtime call.
             if (auto* strLit = dynamic_cast<StringLiteral*>(strExpr)) {
                 auto* countConst = llvm::dyn_cast<llvm::ConstantInt>(countVal);
                 if (countConst && !strLit->isFString && !strLit->isBytes) {
@@ -749,8 +682,6 @@ void CodeGen::visit(BinaryExpr& node) {
             auto* result = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_str_repeat"], {strVal, countVal}, "strrep");
             impl_->popArgTempCleanups(opBases);
-            // Decref an owned intermediate operand (e.g. ("a"+"b") * 3) so the
-            // consumed temporary isn't leaked, mirroring str concat.
             if (strIsTemp && impl_->options.gcMode == GCMode::RC) {
                 impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_decref_str"], {strVal});
@@ -760,8 +691,6 @@ void CodeGen::visit(BinaryExpr& node) {
         }
     }
 
-    // list==list/dict==dict (unboxed) route through dragon_list_eq/dict_eq for
-    // element-wise equality; must precede the i8*-i8* string-eq fallthrough below.
     if ((op == TokenType::EQUAL_EQUAL || op == TokenType::NOT_EQUAL) &&
         lhs->getType()->isPointerTy() && rhs->getType()->isPointerTy()) {
         auto isListLike = [&](Expr* e) -> bool {
@@ -781,7 +710,6 @@ void CodeGen::visit(BinaryExpr& node) {
         if (bothList || bothDict) {
             const char* fnName = "dragon_list_eq";
             if (bothDict) {
-                // Pick str-vs-int-keyed variant from the static dict type.
                 bool intKeyed = false;
                 auto checkIntKeyed = [&](Expr* e) {
                     if (!e || !e->type) return;
@@ -805,8 +733,6 @@ void CodeGen::visit(BinaryExpr& node) {
         }
     }
 
-    // list<list (also <= > >=) routes through dragon_list_cmp for element-wise
-    // ordering; the default pointer compare below would be silently wrong.
     if ((op == TokenType::LESS || op == TokenType::LESS_EQUAL ||
          op == TokenType::GREATER || op == TokenType::GREATER_EQUAL) &&
         lhs->getType()->isPointerTy() && rhs->getType()->isPointerTy()) {
@@ -834,7 +760,6 @@ void CodeGen::visit(BinaryExpr& node) {
         }
     }
 
-    // String concatenation
     if (lhs->getType() == impl_->i8PtrType && rhs->getType() == impl_->i8PtrType) {
         if (op == TokenType::PLUS) {
             std::vector<llvm::Value*> opBases;
@@ -847,8 +772,6 @@ void CodeGen::visit(BinaryExpr& node) {
             impl_->lastValue = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_str_concat"], {lhs, rhs}, "strcat");
             impl_->popArgTempCleanups(opBases);
-            // Decrefs owned intermediate string operands from chained concats
-            // ((a+b)+c); see isOwnedStrResult for ownership convention and borrowed-returner blocklist.
             if (impl_->options.gcMode == GCMode::RC) {
                 if (impl_->isOwnedStrResult(lhs)) {
                     impl_->builder->CreateCall(
@@ -861,8 +784,6 @@ void CodeGen::visit(BinaryExpr& node) {
             }
             return;
         }
-        // Owned heap-string temps used as compare operands (slices/concats/
-        // f-strings) carry a +1 the compare only READS; drain after, gated on the expr not just the value.
         auto releaseOwnedStrCmpOperands = [&]() {
             if (impl_->options.gcMode != GCMode::RC) return;
             if (!Impl::isBorrowedHeapExpr(node.left.get()) &&
@@ -892,7 +813,6 @@ void CodeGen::visit(BinaryExpr& node) {
             impl_->lastValue = res;
             return;
         }
-        // String ordering: <, >, <=, >= via dragon_str_cmp (strcmp wrapper)
         if (op == TokenType::LESS || op == TokenType::GREATER ||
             op == TokenType::LESS_EQUAL || op == TokenType::GREATER_EQUAL) {
             auto* cmp = impl_->builder->CreateCall(
@@ -913,7 +833,6 @@ void CodeGen::visit(BinaryExpr& node) {
         }
     }
 
-    // 'in' operator: check membership in a set or string containment
     if (op == TokenType::IN) {
         // `in` only READS its operands; an owned heap temp on either side
         // (`f() in hay`) leaks unless drained (ownedTempDrainKind); skipped in chains (would UAF the next link).
@@ -924,7 +843,6 @@ void CodeGen::visit(BinaryExpr& node) {
             Impl::VarKind rk = impl_->ownedTempDrainKind(node.right.get(), rhs);
             if (rk != Impl::VarKind::Other) impl_->emitDecrefByKind(rhs, rk);
         };
-        // __contains__ dunder dispatch for class instances (RHS)
         std::string rhsClassName = impl_->resolveExprClassName(node.right.get());
         if (!rhsClassName.empty() && impl_->hasDunder(rhsClassName, "__contains__") &&
             (rhs->getType() == impl_->i8PtrType || rhs->getType()->isPointerTy())) {
@@ -936,14 +854,11 @@ void CodeGen::visit(BinaryExpr& node) {
             return;
         }
 
-        // Resolves the RHS kind once so attr/subscript exprs get the same
-        // treatment as bare locals; else `"k" in r.params` fell through to dragon_str_contains (always False).
         Impl::VarKind rhsKind = impl_->resolveExprVarKind(node.right.get());
 
         bool isSet = dynamic_cast<SetExpr*>(node.right.get()) != nullptr ||
                      rhsKind == Impl::VarKind::Set;
         if (isSet) {
-            // left value (i64), right is set ptr
             llvm::Value* val = lhs;
             if (val->getType() == impl_->i1Type)
                 val = impl_->builder->CreateZExt(val, impl_->i64Type);
@@ -958,8 +873,6 @@ void CodeGen::visit(BinaryExpr& node) {
             releaseOwnedInOperands();
             return;
         }
-        // Bytes containment (int/bytes in bytes): D030 S5 identifies bytes-ness
-        // by static type/AST shape since VarKind::Bytes was deleted (slots use VarKind::List).
         {
             bool rhsIsBytes = node.right && node.right->type &&
                               node.right->type->kind() == Type::Kind::Bytes;
@@ -969,11 +882,9 @@ void CodeGen::visit(BinaryExpr& node) {
             (void)rhsKind;
             if (rhsIsBytes) {
                 if (lhs->getType()->isPointerTy()) {
-                    // bytes in bytes
                     impl_->lastValue = impl_->builder->CreateCall(
                         impl_->runtimeFuncs["dragon_bytes_contains_bytes"], {rhs, lhs}, "bytescontains");
                 } else {
-                    // int in bytes
                     impl_->lastValue = impl_->builder->CreateCall(
                         impl_->runtimeFuncs["dragon_bytes_contains"], {rhs, lhs}, "bytescontains");
                 }
@@ -983,8 +894,6 @@ void CodeGen::visit(BinaryExpr& node) {
                 return;
             }
         }
-        // Dict membership dispatches on dict_has_key; D030 Phase 3.G routes
-        // int-keyed dicts through dragon_dict_int_has_key so the key crosses at i64.
         {
             bool rhsIsDict = rhsKind == Impl::VarKind::Dict ||
                              dynamic_cast<DictExpr*>(node.right.get()) != nullptr;
@@ -1023,8 +932,6 @@ void CodeGen::visit(BinaryExpr& node) {
                 }
             }
         }
-        // Deque membership must precede the list block: a deque is typed as
-        // ListType, and dragon_list_contains would misread its header as list data (always False).
         {
             bool rhsIsDeque = rhsKind == Impl::VarKind::Deque;
             if (!rhsIsDeque) {
@@ -1054,8 +961,6 @@ void CodeGen::visit(BinaryExpr& node) {
                 return;
             }
         }
-        // List membership must precede string-containment: a str-in-str-list has
-        // ptr LHS/RHS and would misroute to dragon_str_contains otherwise.
         {
             bool rhsIsList = rhsKind == Impl::VarKind::List ||
                              dynamic_cast<ListExpr*>(node.right.get()) != nullptr;
@@ -1081,7 +986,6 @@ void CodeGen::visit(BinaryExpr& node) {
                 return;
             }
         }
-        // String containment: "sub" in "string"
         if (lhs->getType()->isPointerTy() && rhs->getType()->isPointerTy()) {
             impl_->lastValue = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_str_contains"], {rhs, lhs}, "strcontains");
@@ -1099,11 +1003,7 @@ void CodeGen::visit(BinaryExpr& node) {
         return;
     }
 
-    // 'is' identity comparison: raw pointer / integer equality after coercion.
-    // Matches the chained-comparison IS path so single and chained forms agree.
     if (op == TokenType::IS) {
-        // `box is None`: compares the box's tag to TAG_NONE (4); an ICmp of
-        // {i64,i64} vs i8* null would trip LLVM's AssertOK.
         bool lhsIsNone = dynamic_cast<NoneLiteral*>(node.left.get()) != nullptr;
         bool rhsIsNone = dynamic_cast<NoneLiteral*>(node.right.get()) != nullptr;
         bool lhsIsBox = lhs->getType() == impl_->boxType;
@@ -1111,7 +1011,7 @@ void CodeGen::visit(BinaryExpr& node) {
         if ((lhsIsBox && rhsIsNone) || (rhsIsBox && lhsIsNone)) {
             llvm::Value* box = lhsIsBox ? lhs : rhs;
             auto* tag = impl_->boxTag(box);
-            auto* tagNone = llvm::ConstantInt::get(impl_->i64Type, TAG_NONE); // TAG_NONE
+            auto* tagNone = llvm::ConstantInt::get(impl_->i64Type, TAG_NONE);
             impl_->lastValue = impl_->builder->CreateICmpEQ(tag, tagNone, "is.none");
             return;
         }
@@ -1133,7 +1033,6 @@ void CodeGen::visit(BinaryExpr& node) {
         return;
     }
 
-    // Float promotion
     bool isFloat = (lhs->getType() == impl_->f64Type || rhs->getType() == impl_->f64Type);
     if (isFloat) {
         if (lhs->getType() == impl_->i64Type)
@@ -1146,7 +1045,6 @@ void CodeGen::visit(BinaryExpr& node) {
             rhs = impl_->builder->CreateUIToFP(rhs, impl_->f64Type, "btof");
     }
 
-    // Bool to int promotion for arithmetic
     if (!isFloat) {
         if (lhs->getType() == impl_->i1Type)
             lhs = impl_->builder->CreateZExt(lhs, impl_->i64Type, "btoi");
@@ -1154,7 +1052,6 @@ void CodeGen::visit(BinaryExpr& node) {
             rhs = impl_->builder->CreateZExt(rhs, impl_->i64Type, "btoi");
     }
 
-    // True division always returns float
     if (op == TokenType::SLASH && !isFloat) {
         lhs = impl_->builder->CreateSIToFP(lhs, impl_->f64Type, "itof");
         rhs = impl_->builder->CreateSIToFP(rhs, impl_->f64Type, "itof");
@@ -1176,18 +1073,13 @@ void CodeGen::visit(BinaryExpr& node) {
                 impl_->lastValue = impl_->builder->CreateFDiv(lhs, rhs, "fdiv");
                 return;
             case TokenType::POWER:
-                // Float exponentiation (`n ** 0.5`); without this it fell to the
-                // integer switch and called dragon_pow_int on f64 operands (verify failure).
                 impl_->lastValue = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_pow_float"], {lhs, rhs}, "fpow");
                 return;
             case TokenType::DOUBLE_SLASH:
-                // Float floor-division floor(a/b); previously fell to the integer
-                // path and emitted ICmp on f64 operands (type-mismatch assertion crash).
                 impl_->lastValue = impl_->emitFloatFloorDiv(lhs, rhs);
                 return;
             case TokenType::PERCENT:
-                // Python float modulo (sign follows the divisor); same prior crash.
                 impl_->lastValue = impl_->emitFloatMod(lhs, rhs);
                 return;
             case TokenType::EQUAL_EQUAL:
@@ -1212,13 +1104,9 @@ void CodeGen::visit(BinaryExpr& node) {
         }
     }
 
-    // Mixed ptr/i64 (e.g. a str field defaulting to i64): ==/!= routes to
-    // dragon_str_eq; other ops coerce ptr->i64 via PtrToInt.
     if ((lhs->getType()->isPointerTy() && rhs->getType() == impl_->i64Type) ||
         (lhs->getType() == impl_->i64Type && rhs->getType()->isPointerTy())) {
         if (op == TokenType::EQUAL_EQUAL || op == TokenType::NOT_EQUAL) {
-            // One side is ptr (likely a string), the other is i64 (likely a string
-            // stored via i64-boxed field). Coerce i64->ptr and call dragon_str_eq.
             llvm::Value* origL = lhs;
             llvm::Value* origR = rhs;
             if (lhs->getType() == impl_->i64Type)
@@ -1227,8 +1115,6 @@ void CodeGen::visit(BinaryExpr& node) {
                 rhs = impl_->builder->CreateIntToPtr(rhs, impl_->i8PtrType);
             auto* streqResult = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_str_eq"], {lhs, rhs}, "streq");
-            // Drains owned str temps (a method's str result reaches here i64-
-            // shaped, so `p.peek() == "a"` leaked per compare); gated on non-borrow expr, str type, non-borrowed-returner callee.
             if (impl_->options.gcMode == GCMode::RC) {
                 auto drainMixed = [&](Expr* e, llvm::Value* orig,
                                       llvm::Value* coerced) {
@@ -1255,8 +1141,6 @@ void CodeGen::visit(BinaryExpr& node) {
             return;
         }
         if (op == TokenType::PLUS) {
-            // Mixed ptr/i64 with +: likely string concatenation where one side
-            // is a string field loaded as i64. Coerce i64->ptr and call str_concat.
             if (lhs->getType() == impl_->i64Type)
                 lhs = impl_->builder->CreateIntToPtr(lhs, impl_->i8PtrType);
             if (rhs->getType() == impl_->i64Type)
@@ -1265,15 +1149,12 @@ void CodeGen::visit(BinaryExpr& node) {
                 impl_->runtimeFuncs["dragon_str_concat"], {lhs, rhs}, "strcat");
             return;
         }
-        // For non-equality ops, coerce ptr->i64
         if (lhs->getType()->isPointerTy())
             lhs = impl_->builder->CreatePtrToInt(lhs, impl_->i64Type);
         if (rhs->getType()->isPointerTy())
             rhs = impl_->builder->CreatePtrToInt(rhs, impl_->i64Type);
     }
 
-    // --check-overflow emits llvm.s{add,sub,mul}.with.overflow.i64 and raises
-    // OverflowError (code 22) via dragon_raise_exc when the overflow flag is set.
     auto emitCheckedIntOp = [&](llvm::Intrinsic::ID id, const char* name,
                                 const char* msg) {
         auto* fn = llvm::Intrinsic::getOrInsertDeclaration(
@@ -1289,13 +1170,12 @@ void CodeGen::visit(BinaryExpr& node) {
         auto* msgPtr = impl_->builder->CreateGlobalString(msg);
         impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_raise_exc_cstr"],
-            {llvm::ConstantInt::get(impl_->i64Type, /*OverflowError*/22), msgPtr});
+            {llvm::ConstantInt::get(impl_->i64Type, 22), msgPtr});
         impl_->builder->CreateUnreachable();
         impl_->builder->SetInsertPoint(okBB);
         return val;
     };
 
-    // Integer operations
     switch (op) {
         case TokenType::PLUS:
             impl_->lastValue = impl_->options.checkOverflow
@@ -1368,8 +1248,6 @@ void CodeGen::visit(BinaryExpr& node) {
     }
 }
 
-/// Chained comparisons (a < b < c) desugar to (a op b) and (b op c) and ...,
-/// each operand evaluated once, short-circuiting to i1 on the first false.
 void CodeGen::visit(ChainedCompExpr& node) {
     if (node.operands.size() < 2 || node.operators.empty()) {
         impl_->lastValue = llvm::ConstantInt::get(impl_->i1Type, 1);
@@ -1379,8 +1257,6 @@ void CodeGen::visit(ChainedCompExpr& node) {
     auto* func = impl_->currentFunction;
     auto* endBB = llvm::BasicBlock::Create(*impl_->context, "chain.end", func);
 
-    // [H5] Detects a set operand via tracked VarKind (mirrors the `in` path): a
-    // set[T] var is modeled as ListType, so type->kind() alone would miss it.
     auto isSetOperand = [&](Expr* e) -> bool {
         if (!e) return false;
         if (dynamic_cast<SetExpr*>(e) || dynamic_cast<SetCompExpr*>(e)) return true;
@@ -1389,16 +1265,12 @@ void CodeGen::visit(ChainedCompExpr& node) {
         if (e->type && e->type->kind() == Type::Kind::Set) return true;
         return false;
     };
-    // Mirrors the single-comparison list detection so chained list comparisons
-    // get element-wise semantics instead of a pointer-address compare.
     auto isListOperand = [&](Expr* e) -> bool {
         if (!e) return false;
         if (dynamic_cast<ListExpr*>(e) || dynamic_cast<ListCompExpr*>(e)) return true;
         if (e->type && e->type->kind() == Type::Kind::List) return true;
         return impl_->resolveExprVarKind(e) == Impl::VarKind::List;
     };
-    // Mirrors the single-comparison string detection; without it, chained string
-    // equality fell to pointer identity (test_rc_chained_compare.dr pins the bug).
     auto isStrOperand = [&](Expr* e) -> bool {
         if (!e) return false;
         if (auto* sl = dynamic_cast<StringLiteral*>(e)) return !sl->isBytes;
@@ -1409,8 +1281,6 @@ void CodeGen::visit(ChainedCompExpr& node) {
         }
         return false;
     };
-    // Owned heap temps (`"a"+b == c == c`) carry a +1 the compare only reads;
-    // each is drained exactly once at its last use, gated by ownedTempDrainKind (borrows skipped).
     auto drainOwnedOperand = [&](Expr* e, llvm::Value* v) {
         if (impl_->options.gcMode != GCMode::RC || !e || !v) return;
         Impl::VarKind dk = impl_->ownedTempDrainKind(e, v);
@@ -1421,24 +1291,17 @@ void CodeGen::visit(ChainedCompExpr& node) {
         return impl_->ownedTempDrainKind(e, v) != Impl::VarKind::Other;
     };
 
-    // Collect incoming edges for the PHI node at endBB.
-    // Each edge provides an i1 value (true or false) and the block it came from.
     std::vector<std::pair<llvm::Value*, llvm::BasicBlock*>> phiIncoming;
 
-    // Evaluate first operand
     node.operands[0]->accept(*this);
     llvm::Value* prevVal = impl_->lastValue;
 
     for (size_t i = 0; i < node.operators.size(); ++i) {
-        // Evaluate the next operand
         node.operands[i + 1]->accept(*this);
         llvm::Value* curVal = impl_->lastValue;
 
-        // Perform the comparison between prevVal and curVal
         llvm::Value* cmpResult = nullptr;
         auto opTypeRaw = node.operators[i].type();
-        // `not in` and `is not` reuse the IN/IS emission and invert at the end
-        // of this slot - keeps the per-slot short-circuit logic uniform.
         const bool negateSlot =
             (opTypeRaw == TokenType::NOT_IN || opTypeRaw == TokenType::IS_NOT);
         const TokenType opType =
@@ -1446,7 +1309,6 @@ void CodeGen::visit(ChainedCompExpr& node) {
             : (opTypeRaw == TokenType::IS_NOT) ? TokenType::IS
             : opTypeRaw;
 
-        // Handle 'in' operator: membership test on set or string containment
         if (opType == TokenType::IN) {
             bool isSet = dynamic_cast<SetExpr*>(node.operands[i + 1].get()) != nullptr;
             if (!isSet) {
@@ -1454,7 +1316,6 @@ void CodeGen::visit(ChainedCompExpr& node) {
                     isSet = impl_->lookupVarKind(rhsName->name) == Impl::VarKind::Set;
                 }
             }
-            // Check if RHS is a list (mirrors the single-`in` path).
             bool rhsIsList = dynamic_cast<ListExpr*>(node.operands[i + 1].get()) != nullptr;
             if (!rhsIsList) {
                 if (auto* rhsName = dynamic_cast<NameExpr*>(node.operands[i + 1].get()))
@@ -1491,7 +1352,6 @@ void CodeGen::visit(ChainedCompExpr& node) {
                 cmpResult = impl_->builder->CreateICmpNE(
                     containsResult, llvm::ConstantInt::get(impl_->i64Type, 0), "inbool");
             } else if (prevVal->getType()->isPointerTy() && curVal->getType()->isPointerTy()) {
-                // String containment
                 auto* containsResult = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_str_contains"], {curVal, prevVal}, "strcontains");
                 cmpResult = impl_->builder->CreateICmpNE(
@@ -1500,10 +1360,8 @@ void CodeGen::visit(ChainedCompExpr& node) {
                 cmpResult = llvm::ConstantInt::get(impl_->i1Type, 0);
             }
         } else if (opType == TokenType::IS) {
-            // Identity comparison: compare raw pointer/integer values
             llvm::Value* lv = prevVal;
             llvm::Value* rv = curVal;
-            // Promote to i64 for uniform comparison
             if (lv->getType() == impl_->i1Type)
                 lv = impl_->builder->CreateZExt(lv, impl_->i64Type);
             if (rv->getType() == impl_->i1Type)
@@ -1518,7 +1376,6 @@ void CodeGen::visit(ChainedCompExpr& node) {
                    prevVal->getType()->isPointerTy() && curVal->getType()->isPointerTy() &&
                    isSetOperand(node.operands[i].get()) &&
                    isSetOperand(node.operands[i + 1].get())) {
-            // [H5] set subset/superset ordering.
             auto* subsetFn = impl_->runtimeFuncs["dragon_set_issubset"];
             auto callSubset = [&](llvm::Value* x, llvm::Value* y) -> llvm::Value* {
                 auto* r = impl_->builder->CreateCall(subsetFn, {x, y}, "setsub");
@@ -1549,8 +1406,6 @@ void CodeGen::visit(ChainedCompExpr& node) {
                    (opType == TokenType::LESS || opType == TokenType::LESS_EQUAL ||
                     opType == TokenType::GREATER || opType == TokenType::GREATER_EQUAL ||
                     opType == TokenType::EQUAL_EQUAL || opType == TokenType::NOT_EQUAL)) {
-            // Native list comparison in a chained expr: ordering via
-            // dragon_list_cmp, equality via dragon_list_eq, both element-wise.
             if (opType == TokenType::EQUAL_EQUAL || opType == TokenType::NOT_EQUAL) {
                 auto* eq = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_list_eq"], {prevVal, curVal}, "list.eq");
@@ -1578,8 +1433,6 @@ void CodeGen::visit(ChainedCompExpr& node) {
                    (opType == TokenType::LESS || opType == TokenType::LESS_EQUAL ||
                     opType == TokenType::GREATER || opType == TokenType::GREATER_EQUAL ||
                     opType == TokenType::EQUAL_EQUAL || opType == TokenType::NOT_EQUAL)) {
-            // A box operand in a chained comparison would ICmp a {i64,i64}
-            // struct and crash; mirrors the BinaryExpr box paths (dragon_box_cmp/dragon_box_eq).
             if (opType == TokenType::EQUAL_EQUAL || opType == TokenType::NOT_EQUAL) {
                 llvm::Value* ba = impl_->boxNativeOperand(*this, node.operands[i].get(), prevVal);
                 llvm::Value* bb = impl_->boxNativeOperand(*this, node.operands[i + 1].get(), curVal);
@@ -1614,8 +1467,6 @@ void CodeGen::visit(ChainedCompExpr& node) {
                    (opType == TokenType::LESS || opType == TokenType::LESS_EQUAL ||
                     opType == TokenType::GREATER || opType == TokenType::GREATER_EQUAL ||
                     opType == TokenType::EQUAL_EQUAL || opType == TokenType::NOT_EQUAL)) {
-            // Native string comparison in a chained expr: equality via
-            // dragon_str_eq, ordering via dragon_str_cmp, mirroring the BinaryExpr path.
             if (opType == TokenType::EQUAL_EQUAL || opType == TokenType::NOT_EQUAL) {
                 auto* eq = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_str_eq"], {prevVal, curVal}, "str.eq");
@@ -1639,14 +1490,12 @@ void CodeGen::visit(ChainedCompExpr& node) {
                 }
             }
         } else {
-            // Numeric comparisons: handle float promotion and int/bool types
             llvm::Value* lv = prevVal;
             llvm::Value* rv = curVal;
 
             bool isFloat = (lv->getType() == impl_->f64Type ||
                             rv->getType() == impl_->f64Type);
             if (isFloat) {
-                // Promote to f64
                 if (lv->getType() == impl_->i64Type)
                     lv = impl_->builder->CreateSIToFP(lv, impl_->f64Type, "itof");
                 if (lv->getType() == impl_->i1Type)
@@ -1682,7 +1531,6 @@ void CodeGen::visit(ChainedCompExpr& node) {
                         break;
                 }
             } else {
-                // Integer comparisons: promote bool to i64
                 if (lv->getType() == impl_->i1Type)
                     lv = impl_->builder->CreateZExt(lv, impl_->i64Type, "btoi");
                 if (rv->getType() == impl_->i1Type)
@@ -1720,14 +1568,9 @@ void CodeGen::visit(ChainedCompExpr& node) {
             cmpResult = impl_->builder->CreateNot(cmpResult, "negcmp");
         }
 
-        // The PREV operand had its last use in the comparison above - drain it
-        // here so both the continue and short-circuit paths release it.
         drainOwnedOperand(node.operands[i].get(), prevVal);
 
-        // Short-circuit: if this comparison is false, jump to endBB with false
         if (i < node.operators.size() - 1) {
-            // Not the last comparison: when the CUR operand is an owned temp,
-            // the false edge is its last use too, so drain via a dedicated block (curVal doesn't dominate endBB there).
             auto* nextBB = llvm::BasicBlock::Create(
                 *impl_->context, "chain.next", func);
             if (operandNeedsDrain(node.operands[i + 1].get(), curVal)) {
@@ -1741,26 +1584,20 @@ void CodeGen::visit(ChainedCompExpr& node) {
                     {llvm::ConstantInt::get(impl_->i1Type, 0), failBB});
             } else {
                 impl_->builder->CreateCondBr(cmpResult, nextBB, endBB);
-                // Record the false edge for the PHI
                 phiIncoming.push_back(
                     {llvm::ConstantInt::get(impl_->i1Type, 0),
                      impl_->builder->GetInsertBlock()});
             }
             impl_->builder->SetInsertPoint(nextBB);
         } else {
-            // Last comparison: the CUR operand's last use was this comparison,
-            // so drain in-block (covers both PHI edges).
             drainOwnedOperand(node.operands[i + 1].get(), curVal);
             impl_->builder->CreateBr(endBB);
             phiIncoming.push_back({cmpResult, impl_->builder->GetInsertBlock()});
         }
 
-        // The current value becomes the left operand of the next comparison.
-        // Use curVal (NOT the promoted lv/rv) so the original type is preserved.
         prevVal = curVal;
     }
 
-    // Build the PHI at endBB
     impl_->builder->SetInsertPoint(endBB);
     auto* phi = impl_->builder->CreatePHI(impl_->i1Type,
                                            phiIncoming.size(), "chain.result");
@@ -1770,16 +1607,12 @@ void CodeGen::visit(ChainedCompExpr& node) {
     impl_->lastValue = phi;
 }
 
-/// Walrus operator (name := value): evaluates the RHS, assigns it to the named
-/// variable (creating it if needed), and yields the value as the expression's result.
 void CodeGen::visit(WalrusExpr& node) {
-    // Evaluate the value expression
     node.value->accept(*this);
     llvm::Value* val = impl_->lastValue;
 
     llvm::Type* valType = val->getType();
 
-    // Infer VarKind from the LLVM type and the RHS expression
     Impl::VarKind kind = Impl::VarKind::Other;
     if (valType == impl_->i64Type) {
         kind = Impl::VarKind::Int;
@@ -1788,9 +1621,8 @@ void CodeGen::visit(WalrusExpr& node) {
     } else if (valType == impl_->i1Type) {
         kind = Impl::VarKind::Bool;
     } else if (valType->isPointerTy()) {
-        // Check the RHS expression to disambiguate pointer types
         if (auto* sl = dynamic_cast<StringLiteral*>(node.value.get())) {
-            kind = sl->isBytes ? Impl::VarKind::List : Impl::VarKind::StrLiteral;  // D030 §5: bytes uses generic-heap VarKind; bytes-ness flows via Type::Kind
+            kind = sl->isBytes ? Impl::VarKind::List : Impl::VarKind::StrLiteral;
         } else if (dynamic_cast<ListExpr*>(node.value.get()) ||
                    dynamic_cast<ListCompExpr*>(node.value.get())) {
             kind = Impl::VarKind::List;
@@ -1803,14 +1635,12 @@ void CodeGen::visit(WalrusExpr& node) {
                    dynamic_cast<SetCompExpr*>(node.value.get())) {
             kind = Impl::VarKind::Set;
         } else if (auto* rhsName = dynamic_cast<NameExpr*>(node.value.get())) {
-            // Propagate VarKind from the source variable
             kind = impl_->lookupVarKind(rhsName->name);
         } else {
-            kind = Impl::VarKind::Str;  // default for ptr: assume dynamic string
+            kind = Impl::VarKind::Str;
         }
     }
 
-    // Look up existing variable or create a new alloca
     auto* alloca = impl_->lookupVar(node.name);
     bool hadExistingSlot = (alloca != nullptr);
     if (!alloca) {
@@ -1819,7 +1649,6 @@ void CodeGen::visit(WalrusExpr& node) {
         impl_->setVar(node.name, alloca, kind);
     }
 
-    // Store with RC overwrite semantics for heap values.
     Impl::VarKind oldKind = hadExistingSlot
         ? impl_->lookupVarKind(node.name)
         : Impl::VarKind::Other;
@@ -1834,13 +1663,11 @@ void CodeGen::visit(WalrusExpr& node) {
 }
 
 void CodeGen::visit(UnaryExpr& node) {
-    // Resolve class name before visiting (for dunder dispatch)
     std::string operandClassName = impl_->resolveExprClassName(node.operand.get());
 
     node.operand->accept(*this);
     llvm::Value* operand = impl_->lastValue;
 
-    // Dunder dispatch for class instances (unary operators)
     if (!operandClassName.empty() &&
         (operand->getType() == impl_->i8PtrType || operand->getType()->isPointerTy())) {
         if (node.op.type() == TokenType::MINUS && impl_->hasDunder(operandClassName, "__neg__")) {
@@ -1864,8 +1691,6 @@ void CodeGen::visit(UnaryExpr& node) {
             }
             return;
         case TokenType::NOT: {
-            // Routes through the shared truthiness rule so int/float/bool and
-            // pointers/containers all invert correctly (old code crashed on a raw pointer and ignored container emptiness).
             llvm::Value* boolVal = impl_->toBool(operand, node.operand.get());
             impl_->lastValue = impl_->builder->CreateNot(boolVal, "not");
             return;
@@ -1882,9 +1707,6 @@ void CodeGen::visit(UnaryExpr& node) {
 }
 
 void CodeGen::visit(IfExpr& node) {
-    // Ternary: thenExpr if condition else elseExpr -> cond ? then : else
-    // D030 Phase 4: isinstance narrowing applies to ternary branches like IfStmt;
-    // without it, a union-typed operand stays boxed in both branches and the PHI fails to merge unbox-result with the raw box.
     auto detectNarrowing = [this](Expr* cond) -> std::pair<std::string, Impl::VarKind> {
         if (auto* bin = dynamic_cast<BinaryExpr*>(cond)) {
             if (bin->op.type() == TokenType::NOT_EQUAL) {
@@ -1923,10 +1745,8 @@ void CodeGen::visit(IfExpr& node) {
         else if (typeName->name == "float") nk = Impl::VarKind::Float;
         else if (typeName->name == "bool")  nk = Impl::VarKind::Bool;
         else if (typeName->name == "str")   nk = Impl::VarKind::Str;
-        else if (typeName->name == "bytes") nk = Impl::VarKind::List;  // D030 §5: bytes/list share generic-heap dispatch
+        else if (typeName->name == "bytes") nk = Impl::VarKind::List;
         else if (typeName->name == "list") {
-            // Bare-Any list narrowing keeps the box binding (layout unknown);
-            // gates on a DECLARED list member since a bare Any param also registers.
             auto membIt = impl_->unionMemberKinds.find(argName->name);
             bool declaredListMember =
                 membIt != impl_->unionMemberKinds.end() &&
@@ -1957,7 +1777,6 @@ void CodeGen::visit(IfExpr& node) {
     node.condition->accept(*this);
     llvm::Value* cond = impl_->lastValue;
 
-    // Convert to i1
     if (cond->getType() == impl_->i64Type) {
         cond = impl_->builder->CreateICmpNE(
             cond, llvm::ConstantInt::get(impl_->i64Type, 0));
@@ -1975,10 +1794,8 @@ void CodeGen::visit(IfExpr& node) {
 
     impl_->builder->CreateCondBr(cond, thenBB, elseBB);
 
-    // Normalizes each branch to +1 owned before the merge, else a ternary mixing
-    // a borrowed value with a literal (`xs[0] if c else "lit"`) skips the incref and use-after-frees the slot's only +1.
-    // The retain must flow through the identity-retain CALL (not a void incref):
-    // arg-position consumers require an owned CALL to classify the PHI owned, or the retained value leaks once per eval (gzip ternary bug).
+    // Normalizes each branch to +1 owned via the identity-retain CALL before the merge: a borrowed/literal
+    // ternary otherwise use-after-frees the slot's only +1, and a void incref leaks once per eval (gzip ternary bug).
     auto normalizeBranchOwnership = [&](Expr* branchExpr,
                                         llvm::Value* val) -> llvm::Value* {
         if (impl_->options.gcMode != GCMode::RC) return val;
@@ -1994,8 +1811,6 @@ void CodeGen::visit(IfExpr& node) {
             case Type::Kind::Tuple:
             case Type::Kind::Instance: fn = "dragon_obj_retain"; break;
             default: {
-                // Pre-existing behavior for kinds without a returning retain
-                // (closures): in-place incref of borrowed heap arms.
                 if (!Impl::isBorrowedHeapExpr(branchExpr)) return val;
                 Impl::VarKind k = impl_->resolveExprVarKind(branchExpr);
                 if (!Impl::isHeapKind(k) || k == Impl::VarKind::Union) return val;
@@ -2003,8 +1818,6 @@ void CodeGen::visit(IfExpr& node) {
                 return val;
             }
         }
-        // An arm that is already an owned call result (fresh concat, method
-        // call) keeps its +1 and its owned classification as-is.
         bool alreadyOwned = !Impl::isBorrowedHeapExpr(branchExpr) &&
             (tk == Type::Kind::Str ? impl_->isOwnedStrResult(val)
                                    : impl_->isOwnedPtrResult(val));
@@ -2016,8 +1829,6 @@ void CodeGen::visit(IfExpr& node) {
                                           "tern.retain");
     };
 
-    // Enters narrowing for varName: unboxes the current box value and shadows
-    // the local with a typed alloca, mirroring the IfStmt branch-entry logic.
     auto enterNarrowing = [&](const std::string& varName, Impl::VarKind kind) -> bool {
         if (varName.empty() || kind == Impl::VarKind::Union) return false;
         impl_->pushScope();
@@ -2054,8 +1865,6 @@ void CodeGen::visit(IfExpr& node) {
         impl_->emitScopeCleanup();
         impl_->popScope();
     }
-    // Defers the branch to mergeBB: a type mismatch between arms may need
-    // coercion/boxing emitted in the arm's own block so it dominates the PHI.
     llvm::BasicBlock* thenEnd = impl_->builder->GetInsertBlock();
 
     impl_->builder->SetInsertPoint(elseBB);
@@ -2072,21 +1881,15 @@ void CodeGen::visit(IfExpr& node) {
     }
     llvm::BasicBlock* elseEnd = impl_->builder->GetInsertBlock();
 
-    // Unifies arm types for the PHI (arms flow at native LLVM types: i1/i64/f64/
-    // ptr/box). Numeric arms widen to a common type (stays unboxed, commandment #1); otherwise both arms box into the {i64,i64} union.
-    // Coercion is emitted in each arm's own end block so it dominates the PHI;
-    // the prior code only handled i64->f64 and crashed on any other mismatch (the H12 ternary crash).
     auto isNumeric = [&](llvm::Type* t) {
         return t == impl_->i1Type || t == impl_->i64Type || t == impl_->f64Type;
     };
     auto boxArm = [&](Expr* e, llvm::Value* v, llvm::BasicBlock* bb) -> llvm::Value* {
-        if (v->getType() == impl_->boxType) return v;  // already a box
+        if (v->getType() == impl_->boxType) return v;
         impl_->builder->SetInsertPoint(bb);
         return impl_->makeBox(impl_->emitTagForExpr(e, *this), v);
     };
     bool typesDiffer = thenVal->getType() != elseVal->getType();
-    // node.type is a UnionType when arms have different Dragon types even if
-    // they share an LLVM type (e.g. str|None are both ptr); a raw-ptr PHI there would be misread by a box-shaped Any slot.
     bool nodeIsUnion = node.type && node.type->kind() == Type::Kind::Union;
     llvm::Type* resultType = thenVal->getType();
     if (typesDiffer && isNumeric(thenVal->getType()) && isNumeric(elseVal->getType())) {
@@ -2097,25 +1900,20 @@ void CodeGen::visit(IfExpr& node) {
             if (v->getType() == resultType) return v;
             impl_->builder->SetInsertPoint(bb);
             if (resultType == impl_->f64Type) {
-                if (v->getType() == impl_->i1Type)  // bool is unsigned 0/1
+                if (v->getType() == impl_->i1Type)
                     v = impl_->builder->CreateZExt(v, impl_->i64Type, "b2i");
                 return impl_->builder->CreateSIToFP(v, impl_->f64Type, "i2f");
             }
-            return impl_->builder->CreateZExt(v, impl_->i64Type, "b2i");  // i1 -> i64
+            return impl_->builder->CreateZExt(v, impl_->i64Type, "b2i");
         };
         thenVal = widen(thenVal, thenEnd);
         elseVal = widen(elseVal, elseEnd);
     } else if (typesDiffer || (nodeIsUnion && thenVal->getType() != impl_->boxType)) {
-        // Heterogeneous arms (ptr, None, instance, box) or a same-ptr union
-        // (str|None) box both arms into the {i64,i64} union box the consumer expects.
         resultType = impl_->boxType;
         thenVal = boxArm(node.thenExpr.get(), thenVal, thenEnd);
         elseVal = boxArm(node.elseExpr.get(), elseVal, elseEnd);
     }
-    // else: arms share an LLVM type and the result isn't a union -> PHI at that
-    // type (the unchanged fast path).
 
-    // Terminate both arms now that their values are unified to resultType.
     impl_->builder->SetInsertPoint(thenEnd);
     impl_->builder->CreateBr(mergeBB);
     thenEnd = impl_->builder->GetInsertBlock();
@@ -2130,4 +1928,4 @@ void CodeGen::visit(IfExpr& node) {
     impl_->lastValue = phi;
 }
 
-} // namespace dragon
+}

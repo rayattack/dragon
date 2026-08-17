@@ -95,10 +95,8 @@ def IPv4Address_from_str(s: str) -> IPv4Address {
 }
 
 
-# IPv6's 128 bits don't fit a Dragon int (i64), so stored as 8 16-bit groups in a list[int].
 class IPv6Address {
     def(groups: list[int]) {
-        # Defensive copy so caller mutations don't leak in.
         gs: list[int] = [0] * 8
         i: int = 0
         while i < 8 {
@@ -110,7 +108,6 @@ class IPv6Address {
 
     def __str__() -> str {
         """RFC 5952 compressed form: collapse the longest run of zero groups to "::"."""
-        # Find the longest run of zeros (length >= 2 to be eligible).
         best_start: int = -1
         best_len: int = 0
         run_start: int = -1
@@ -136,8 +133,6 @@ class IPv6Address {
         }
         out: str = ""
         i = 0
-        # If the run starts at index 0, "::" already carries both colons, so the next group
-        # must skip its own leading ":" (else `::1` becomes `:::1`); otherwise the loop still adds it.
         skip_next_colon: bool = False
         while i < 8 {
             if i == best_start {
@@ -260,7 +255,6 @@ class IPv4Network {
         }
         self.netmask = m
         self.prefixlen = prefixlen
-        # Mask host bits off so `network` is the canonical zero-host address.
         self.network_int = network & m
     }
 
@@ -311,7 +305,6 @@ def IPv4Network_from_str(s: str) -> IPv4Network {
 
 
 def ip_address(s: str) -> IPv4Address {
-    # No Union return in Dragon yet; callers needing v6 must call IPv6Address_from_str directly.
     return IPv4Address_from_str(s)
 }
 

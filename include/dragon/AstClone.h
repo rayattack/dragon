@@ -9,19 +9,16 @@
 
 namespace dragon {
 
-// Deep-clone utilities for generics monomorphization (D044): substitutes each
-// `T` via TypeSubst (`list[T]` -> `list[int]`); `Expr::type` is re-checked, not copied.
 using TypeSubst = std::unordered_map<std::string, const TypeExpr*>;
 
 std::unique_ptr<TypeExpr> cloneTypeExpr(const TypeExpr* t, const TypeSubst& subst = {});
 std::unique_ptr<Expr> cloneExpr(const Expr* e, const TypeSubst& subst = {});
 std::unique_ptr<Stmt> cloneStmt(const Stmt* s, const TypeSubst& subst = {});
 
-// Clone a statement body (vector of owned Stmts), threading the substitution.
 std::vector<std::unique_ptr<Stmt>> cloneBody(
     const std::vector<std::unique_ptr<Stmt>>& body, const TypeSubst& subst = {});
 
-}  // namespace dragon
+}
 
-#endif  // DRAGON_AST_CLONE_H
+#endif
 

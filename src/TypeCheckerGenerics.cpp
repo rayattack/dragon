@@ -1,6 +1,3 @@
-// D044 generics engine: stamp a native monomorphic copy of each generic per
-// concrete type-arg, worklist to fixpoint. Integration hooks in TypeChecker.cpp.
-
 #include "dragon/TypeChecker.h"
 #include "TypeCheckerImpl.h"
 #include "dragon/AstClone.h"
@@ -11,8 +8,6 @@ namespace dragon {
 
 namespace {
 
-// Concrete (stampable) iff no free type var. A non-concrete arg (Inner[T] inside
-// Outer[T]) is produced transitively when Outer[int] stamps, so it isn't enqueued.
 bool typeIsConcrete(const Type* t) {
     if (!t) return true;
     switch (t->kind()) {
@@ -49,7 +44,7 @@ bool typeIsConcrete(const Type* t) {
             return true;
         }
         default:
-            return true;  // primitives, Any, Never, Ptr, Lock, Module
+            return true;
     }
 }
 
@@ -58,8 +53,6 @@ bool argsAreConcrete(const std::vector<std::shared_ptr<Type>>& args) {
     return true;
 }
 
-// Structural nesting depth (list[list[int]] -> 3). Bounds polymorphic recursion
-// (go[U] -> go[list[U]] -> ...) that drains iteratively past the class depth cap.
 int typeNestingDepth(const Type* t, int budget = 1024) {
     if (!t || budget <= 0) return 1;
     int d = 0;
@@ -90,7 +83,7 @@ int typeNestingDepth(const Type* t, int budget = 1024) {
             break;
         }
         default:
-            break;  // scalars / Any / Ptr - depth 1
+            break;
     }
     return d + 1;
 }
@@ -104,7 +97,6 @@ std::unique_ptr<TypeExpr> exprToTypeExpr(const Expr* e) {
         return t;
     }
     if (auto* a = dynamic_cast<const AttributeExpr*>(e)) {
-        // Reconstruct a dotted name `pkg.mod.Class` from the attribute chain.
         std::function<bool(const Expr*, std::string&)> dotted =
             [&](const Expr* x, std::string& out) -> bool {
             if (auto* nm = dynamic_cast<const NameExpr*>(x)) { out = nm->name; return true; }
@@ -123,8 +115,6 @@ std::unique_ptr<TypeExpr> exprToTypeExpr(const Expr* e) {
         t->setLocation(e->location());
         return t;
     }
-    // A `|` in value-subscript position (Box[int | str](...)) parses as a BinaryExpr;
-    // flatten to a UnionTypeExpr so it matches the annotation form's UnionType.
     if (auto* b = dynamic_cast<const BinaryExpr*>(e)) {
         if (b->op.type() == TokenType::PIPE) {
             auto u = std::make_unique<UnionTypeExpr>();
@@ -167,9 +157,7 @@ std::unique_ptr<TypeExpr> exprToTypeExpr(const Expr* e) {
     return nullptr;
 }
 
-}  // namespace
-
-// Type-parameter scope lookup
+}
 
 std::shared_ptr<Type> TypeChecker::lookupTypeParam(const std::string& name) {
     for (auto it = impl_->typeParamScopes.rbegin(); it != impl_->typeParamScopes.rend(); ++it) {
@@ -178,9 +166,6 @@ std::shared_ptr<Type> TypeChecker::lookupTypeParam(const std::string& name) {
     }
     return nullptr;
 }
-
-// Canonical instantiation name (cache key / stamped decl / LLVM symbol). Brackets
-// can't occur in a user identifier, so it never collides with hand-written names.
 
 std::string TypeChecker::mangleInstantiation(
     const std::string& genericName,
@@ -193,8 +178,6 @@ std::string TypeChecker::mangleInstantiation(
     s += "]";
     return s;
 }
-
-// Type substitution: deep-copy a Type, replacing TypeVarType by name.
 
 std::shared_ptr<Type> TypeChecker::substituteType(
     const std::shared_ptr<Type>& t,
@@ -246,8 +229,6 @@ std::shared_ptr<Type> TypeChecker::substituteType(
         case Type::Kind::Instance: {
             auto& inst = static_cast<const InstanceType&>(*t);
             auto ct = inst.classType;
-            // Transitive instantiation: a `Inner[T]` field inside `Outer[T]`
-            // re-instantiates to `Inner[int]` when stamping `Outer[int]`.
             if (ct && !ct->genericOrigin.empty()) {
                 bool changed = false;
                 std::vector<std::shared_ptr<Type>> newArgs;
@@ -263,14 +244,13 @@ std::shared_ptr<Type> TypeChecker::substituteType(
                                                        SourceLocation{});
                 }
             }
-            return t;  // ordinary concrete class - no type vars inside
+            return t;
         }
         default:
-            return t;  // primitives, Any, Never, Ptr, Lock, Module, Unknown
+            return t;
     }
 }
 
-// Type -> TypeExpr (drives AST substitution when stamping).
 std::unique_ptr<TypeExpr> TypeChecker::typeToTypeExpr(const std::shared_ptr<Type>& t) {
     auto named = [](const std::string& n) {
         auto x = std::make_unique<NamedTypeExpr>();
@@ -306,8 +286,6 @@ std::unique_ptr<TypeExpr> TypeChecker::typeToTypeExpr(const std::shared_ptr<Type
         case Type::Kind::Task:
             return generic("Task", {static_cast<const TaskType&>(*t).resultType});
         case Type::Kind::Instance:
-            // Names a concrete class (incl. a stamped instantiation like
-            // "Box[int]"); resolveType finds it in typeNames.
             return named(static_cast<const InstanceType&>(*t).classType->name);
         case Type::Kind::Class:
             return named(static_cast<const ClassType&>(*t).name);
@@ -318,8 +296,6 @@ std::unique_ptr<TypeExpr> TypeChecker::typeToTypeExpr(const std::shared_ptr<Type
             return ue;
         }
         case Type::Kind::Function: {
-            // A callable type arg (Box[Callable[[int],int]]): rebuild the Callable
-            // annotation so the field keeps its signature instead of degrading to Any.
             auto& f = static_cast<const FunctionType&>(*t);
             auto ce = std::make_unique<CallableTypeExpr>();
             for (auto& p : f.paramTypes) ce->paramTypes.push_back(typeToTypeExpr(p));
@@ -328,13 +304,9 @@ std::unique_ptr<TypeExpr> TypeChecker::typeToTypeExpr(const std::shared_ptr<Type
         }
         case Type::Kind::Lock:  return named("Lock");
         case Type::Kind::Never: return named("Never");
-        // Module / Unknown can't be a real concrete type argument; Any is the
-        // only safe denotation and any downstream use is already an error.
         default: return named("Any");
     }
 }
-
-// Unification: solve type parameters from a concrete actual type.
 
 bool TypeChecker::unifyTypeParam(
     const std::shared_ptr<Type>& declared, const std::shared_ptr<Type>& actual,
@@ -344,7 +316,6 @@ bool TypeChecker::unifyTypeParam(
         const std::string& nm = static_cast<const TypeVarType&>(*declared).name;
         auto it = out.find(nm);
         if (it == out.end()) { out[nm] = actual; return true; }
-        // Already bound: a second occurrence must agree (e.g. `def f[T](a:T,b:T)`).
         return it->second && it->second->equals(*actual);
     }
     if (declared->kind() == Type::Kind::List && actual->kind() == Type::Kind::List)
@@ -376,22 +347,13 @@ bool TypeChecker::unifyTypeParam(
             if (!unifyTypeParam(d.paramTypes[i], a.paramTypes[i], out)) return false;
         return unifyTypeParam(d.returnType, a.returnType, out);
     }
-    // No type variable to refine here - not a hard failure; the concrete check
-    // happens when the stamped body is type-checked.
     return true;
 }
 
-// Generic-class instantiation: build (once) the monomorphic placeholder type
-// and record a stamping request.
-
 std::shared_ptr<Type> TypeChecker::instantiateGenericClass(
     ClassDecl* decl, std::vector<std::shared_ptr<Type>> args, const SourceLocation& loc) {
-    // Once any cap has tripped, every further instantiation is a no-op so the
-    // partially-built program drains immediately instead of doing 4096× work.
     if (impl_->genericsAborted) return impl_->unknownType;
 
-    // A transitive re-instantiation carries no use-site location; inherit the
-    // enclosing one so diagnostics never report at 0:0.
     const SourceLocation& effLoc = (loc.line != 0) ? loc : impl_->lastInstLoc;
     if (loc.line != 0) impl_->lastInstLoc = loc;
 
@@ -403,12 +365,9 @@ std::shared_ptr<Type> TypeChecker::instantiateGenericClass(
     }
     std::string key = mangleInstantiation(decl->name, args);
 
-    // Dedup: a second `Box[int]` reuses the placeholder built the first time.
     if (auto it = impl_->typeNames.find(key); it != impl_->typeNames.end())
         return it->second;
 
-    // Polymorphic-recursion guard: Foo[T] -> Foo[list[T]] -> ... defeats dedup.
-    // Depth + breadth caps trip as a clean compile error, never a hang (D044).
     auto abortGenerics = [&](const char* why) {
         if (!impl_->instCapReported) {
             error(effLoc, std::string("too many generic instantiations of '") +
@@ -429,8 +388,6 @@ std::shared_ptr<Type> TypeChecker::instantiateGenericClass(
         return impl_->unknownType;
     }
 
-    // The generic ClassType (TypeVar-typed members), populated by the generic
-    // pre-pass. Without it we can't build the specialization's signature.
     std::shared_ptr<ClassType> genericCT;
     if (auto it = impl_->typeNames.find(decl->name); it != impl_->typeNames.end())
         if (auto inst = std::dynamic_pointer_cast<InstanceType>(it->second))
@@ -440,13 +397,9 @@ std::shared_ptr<Type> TypeChecker::instantiateGenericClass(
     bool boundViolated = false;
     for (size_t i = 0; i < decl->typeParams.size(); ++i) {
         bindings[decl->typeParams[i].name] = args[i];
-        // Bounded T: the concrete arg must be the bound class or a subclass. A
-        // still-abstract arg (TypeVar) is skipped; re-checked when it stamps concretely.
         auto& tp = decl->typeParams[i];
         if (tp.bound && args[i] && args[i]->kind() != Type::Kind::TypeVar) {
             auto boundType = resolveType(tp.bound.get());
-            // ADR 054 - a CONTRACT bound checks structurally at stamp time: no cast or
-            // promise needed, since no contract-typed value exists inside the monomorphized body.
             if (boundType && boundType->kind() == Type::Kind::Contract &&
                 args[i]->kind() == Type::Kind::Instance) {
                 auto& ct = static_cast<ContractType&>(*boundType);
@@ -485,20 +438,14 @@ std::shared_ptr<Type> TypeChecker::instantiateGenericClass(
         ph->constructorCount = genericCT->constructorCount;
         ph->declaredFieldNames = genericCT->declaredFieldNames;
     }
-    // Register BEFORE substituting members so a self-referential generic (Node[T]
-    // with next: Node[T]) resolves to this placeholder instead of recursing forever.
     auto phInst = std::make_shared<InstanceType>(ph);
     impl_->typeNames[key] = phInst;
     impl_->define(key, ph);
 
-    // Enqueue only when fully concrete (a free Inner[T] is stamped transitively
-    // later) and no bound was violated (else a confusing error cascade).
     if (argsAreConcrete(args) && !boundViolated)
-        impl_->pendingInsts.push_back({key, decl->name, /*isClass=*/true, args});
+        impl_->pendingInsts.push_back({key, decl->name, true, args});
 
     if (genericCT) {
-        // Member substitution can re-enter instantiateGenericClass (transitive +
-        // self-deeper generics); bracket it with the depth counter.
         impl_->instDepth++;
         for (auto& [fn, ft] : genericCT->fields) ph->fields[fn] = substituteType(ft, bindings);
         for (auto& [mn, mt] : genericCT->methods) ph->methods[mn] = substituteType(mt, bindings);
@@ -508,31 +455,24 @@ std::shared_ptr<Type> TypeChecker::instantiateGenericClass(
     return phInst;
 }
 
-// Generic-function call: instantiate, retarget the callee, set the result type.
-
 bool TypeChecker::tryInstantiateGenericCall(
     CallExpr& node, const std::vector<std::shared_ptr<Type>>& argTypes,
     const std::shared_ptr<Type>& expected) {
-    // Identify the generic function/method and any explicit `[...]` type args.
     FunctionDecl* decl = nullptr;
     std::string fnName;
     std::vector<std::unique_ptr<TypeExpr>> explicitArgs;
-    // Method-call state (empty owningClass => generic FREE function).
-    std::string owningClass;           // the class that DECLARES the generic method
-    std::shared_ptr<ClassType> owningCT;  // its true identity (threads into the InstReq)
-    AttributeExpr* methodAttr = nullptr;  // the `recv.method` node, for retargeting
-    const ClassType* probeCls = nullptr;  // receiver class of a method-shaped call
-    std::string probeMethod;              // its method name (for a clean deferral)
+    std::string owningClass;
+    std::shared_ptr<ClassType> owningCT;
+    AttributeExpr* methodAttr = nullptr;
+    const ClassType* probeCls = nullptr;
+    std::string probeMethod;
 
-    // Resolve a receiver expression to the ClassType it is an instance of.
     auto receiverClass = [&](Expr* recv) -> std::shared_ptr<ClassType> {
         auto t = inferType(recv);
         if (auto inst = std::dynamic_pointer_cast<InstanceType>(t))
             return inst->classType;
         return nullptr;
     };
-    // Find generic method `m` on `cls`, walking the MRO to its declaring class
-    // (whose body the stamp is appended to); identity-first so same-named classes never collide.
     auto findGenericMethod = [&](std::shared_ptr<ClassType> cls, const std::string& m,
                                  std::string& declClass,
                                  std::shared_ptr<ClassType>& declCT) -> FunctionDecl* {
@@ -549,7 +489,6 @@ bool TypeChecker::tryInstantiateGenericCall(
                     }
                 }
             }
-            // Name fallback for classes with no decl backpointer (builtins).
             auto it = impl_->genericMethods.find(c->name + "." + m);
             if (it != impl_->genericMethods.end()) { declClass = c->name; declCT = c; return it->second; }
             if (!c->genericOrigin.empty()) {
@@ -567,8 +506,6 @@ bool TypeChecker::tryInstantiateGenericCall(
     if (auto* nm = dynamic_cast<NameExpr*>(node.callee.get())) {
         auto it = impl_->genericFunctions.find(nm->name);
         if (it != impl_->genericFunctions.end()) {
-            // genericFunctions is name-keyed and program-global, so a stdlib generic (e.g.
-            // json.decode[T]) must not hijack an imported same-named concrete function; only take it when nothing concrete is bound here.
             bool concreteInScope = false;
             if (auto inScope = impl_->lookup(nm->name))
                 if (auto ft = std::dynamic_pointer_cast<FunctionType>(inScope)) {
@@ -591,8 +528,6 @@ bool TypeChecker::tryInstantiateGenericCall(
                 }
             }
         } else if (auto* at = dynamic_cast<AttributeExpr*>(sub->object.get())) {
-            // Generic method with explicit args: recv.method[T](args). Resolve the
-            // receiver's class and look the method up by class+name.
             if (auto cls = receiverClass(at->object.get())) {
                 probeCls = cls.get(); probeMethod = at->attribute;
                 if (FunctionDecl* m = findGenericMethod(cls, at->attribute, owningClass, owningCT)) {
@@ -606,8 +541,6 @@ bool TypeChecker::tryInstantiateGenericCall(
             }
         }
     } else if (auto* at = dynamic_cast<AttributeExpr*>(node.callee.get())) {
-        // Generic method, args inferred: recv.method(args). Non-generic methods
-        // leave decl null and fall through to normal dispatch.
         if (auto cls = receiverClass(at->object.get())) {
             probeCls = cls.get(); probeMethod = at->attribute;
             if (FunctionDecl* m = findGenericMethod(cls, at->attribute, owningClass, owningCT)) {
@@ -616,8 +549,6 @@ bool TypeChecker::tryInstantiateGenericCall(
         }
     }
     if (!decl) {
-        // Re-visit of an already-stamped call (callee renamed to `take[int]`, which
-        // contains '['): restore the recorded return type instead of clobbering it.
         if (auto* nm = dynamic_cast<NameExpr*>(node.callee.get())) {
             if (nm->name.find('[') != std::string::npos) {
                 auto it = impl_->stampedCallReturnType.find(nm->name);
@@ -625,8 +556,6 @@ bool TypeChecker::tryInstantiateGenericCall(
                 return true;
             }
         }
-        // Same re-visit for a stamped method (attribute renamed to `cast[int]`):
-        // restore the recorded return type, keying on the declaring class then bare name.
         if (auto* at2 = dynamic_cast<AttributeExpr*>(node.callee.get())) {
             if (at2->attribute.find('[') != std::string::npos) {
                 if (auto cls = receiverClass(at2->object.get())) {
@@ -650,20 +579,16 @@ bool TypeChecker::tryInstantiateGenericCall(
                 return true;
             }
         }
-        return false;  // not a generic call - normal dispatch handles it
+        return false;
     }
 
     const bool isMethodCall = !owningClass.empty();
     const char* kindWord = isMethodCall ? "method" : "function";
 
-    // The generic FunctionType (TypeVar params/return). A free function's comes from
-    // the pre-pass; a method's is built on demand with its type-param frame bound.
     std::shared_ptr<FunctionType> genericFt;
     if (!isMethodCall) {
         genericFt = std::dynamic_pointer_cast<FunctionType>(impl_->lookup(fnName));
     } else {
-        // Double monomorphization: on a stamped receiver (Container[int]), push the
-        // class frame (T->int) so the method signature's class `T` resolves concretely.
         bool pushedClassFrame = false;
         if (probeCls && !probeCls->genericOrigin.empty()) {
             if (auto gcIt = impl_->genericClasses.find(probeCls->genericOrigin);
@@ -679,8 +604,6 @@ bool TypeChecker::tryInstantiateGenericCall(
         }
         std::unordered_map<std::string, std::shared_ptr<Type>> frame;
         for (auto& tp : decl->typeParams) {
-            // Bounds - carry the generic method's own type-param bounds (`m[U: B]`)
-            // so the body can resolve members/operators on `U` against `B`.
             std::shared_ptr<Type> bnd =
                 tp.bound ? resolveType(tp.bound.get()) : nullptr;
             frame[tp.name] = std::make_shared<TypeVarType>(tp.name, bnd);
@@ -689,7 +612,7 @@ bool TypeChecker::tryInstantiateGenericCall(
         std::vector<std::shared_ptr<Type>> pts;
         for (size_t i = 0; i < decl->params.size(); ++i) {
             if (decl->isMethod && !decl->hasImplicitSelf && decl->params[i].name == "self")
-                continue;  // .py-mode explicit self is not part of the signature
+                continue;
             pts.push_back(resolveType(decl->params[i].type.get()));
         }
         auto rt = resolveType(decl->returnType.get());
@@ -711,23 +634,18 @@ bool TypeChecker::tryInstantiateGenericCall(
             bindings[decl->typeParams[i].name] = t;
         }
     } else if (genericFt) {
-        // Infer from argument types vs declared (TypeVar-containing) params.
         for (size_t i = 0; i < genericFt->paramTypes.size() && i < argTypes.size(); ++i)
             unifyTypeParam(genericFt->paramTypes[i], argTypes[i], bindings);
     }
 
-    // Enforce bounds on the type args (T: B requires B or a subclass), mirroring
-    // the generic-class check above.
     bool boundViolated = false;
     for (auto& tp : decl->typeParams) {
         if (!tp.bound) continue;
         auto bit = bindings.find(tp.name);
         if (bit == bindings.end() || !bit->second) continue;
         auto arg = bit->second;
-        if (arg->kind() == Type::Kind::TypeVar) continue;  // still abstract
+        if (arg->kind() == Type::Kind::TypeVar) continue;
         auto boundType = resolveType(tp.bound.get());
-        // ADR 054 - a CONTRACT bound checks structurally at stamp time: no cast or
-        // promise needed, since no contract-typed value exists inside the monomorphized body.
         if (boundType && boundType->kind() == Type::Kind::Contract &&
             arg->kind() == Type::Kind::Instance) {
             auto& ct = static_cast<ContractType&>(*boundType);
@@ -751,12 +669,8 @@ bool TypeChecker::tryInstantiateGenericCall(
             boundViolated = true;
         }
     }
-    // Bound already reported - resolve the call to an error type without stamping
-    // the offending instantiation (its body would cascade-fail on the bad type).
     if (boundViolated) { node.type = impl_->unknownType; return true; }
 
-    // Type-check concrete (non-TypeVar) params against the actual args - otherwise a
-    // str passed to a `sql: SQL` param reached codegen with no diagnostic.
     if (genericFt) {
         auto isContainer = [](Type::Kind k) {
             return k == Type::Kind::List || k == Type::Kind::Dict ||
@@ -767,14 +681,14 @@ bool TypeChecker::tryInstantiateGenericCall(
             const auto& pt = genericFt->paramTypes[i];
             const auto& aT = argTypes[i];
             if (!pt || !aT) continue;
-            if (!typeIsConcrete(pt.get())) continue;  // generic param: inferred
+            if (!typeIsConcrete(pt.get())) continue;
             auto pk = pt->kind(), ak = aT->kind();
             if (pk == Type::Kind::Unknown || pk == Type::Kind::Any ||
                 ak == Type::Kind::Unknown || ak == Type::Kind::Any ||
                 ak == Type::Kind::None_ || ak == Type::Kind::Union ||
                 pk == Type::Kind::Union)
                 continue;
-            if (isContainer(ak) && ak == pk) continue;  // container invariance
+            if (isContainer(ak) && ak == pk) continue;
             if (!aT->isSubtypeOf(*pt)) {
                 error(node.location(), "argument " + std::to_string(i + 1) +
                       " of type '" + aT->toString() + "' is not assignable to "
@@ -783,8 +697,6 @@ bool TypeChecker::tryInstantiateGenericCall(
         }
     }
 
-    // D049: a still-unbound T is inferred from the expected type (the binding
-    // annotation), so bracket-less `c: Customer = db.one(sql)` binds T=Customer.
     if (explicitArgs.empty() && genericFt && expected &&
         expected->kind() != Type::Kind::Unknown) {
         bool anyUnbound = false;
@@ -794,7 +706,6 @@ bool TypeChecker::tryInstantiateGenericCall(
             unifyTypeParam(genericFt->returnType, expected, bindings);
     }
 
-    // Assemble the ordered argument list; any unsolved parameter is an error.
     std::vector<std::shared_ptr<Type>> args;
     for (auto& tp : decl->typeParams) {
         auto it = bindings.find(tp.name);
@@ -808,28 +719,20 @@ bool TypeChecker::tryInstantiateGenericCall(
         args.push_back(it->second);
     }
 
-    // Stamped name is the type-arg form (all[int]); the dedup KEY additionally carries
-    // the class (Class.all[int]) so two classes' all[T] never collide.
     std::string stampedName = mangleInstantiation(fnName, args);
     std::string key = isMethodCall
                           ? mangleInstantiation(owningClass + "." + fnName, args)
                           : stampedName;
-    // Only enqueue concrete instantiations (a `first[T](...)` call inside another
-    // generic body defers to the enclosing instantiation, like classes do).
     if (argsAreConcrete(args) && !impl_->instDone.count(key)) {
         bool pending = false;
         for (auto& r : impl_->pendingInsts) if (r.key == key) { pending = true; break; }
         if (!pending)
             impl_->pendingInsts.push_back(
-                {key, fnName, /*isClass=*/false, args, owningClass, owningCT});
+                {key, fnName, false, args, owningClass, owningCT});
     }
 
-    // Retarget the callee to the stamped specialization, only when concrete (a
-    // non-concrete g[T](...) inside a generic body retargets at stamp time).
     if (argsAreConcrete(args)) {
         if (isMethodCall) {
-            // Rename the method to its stamped name (dispatch unchanged); collapse the
-            // explicit-[T] SubscriptExpr to the bare AttributeExpr for CodeGen.
             methodAttr->attribute = stampedName;
             if (auto* sub = dynamic_cast<SubscriptExpr*>(node.callee.get()))
                 node.callee = std::move(sub->object);
@@ -841,11 +744,8 @@ bool TypeChecker::tryInstantiateGenericCall(
         }
     }
 
-    // Result type = the generic return type with type parameters substituted.
     node.type = genericFt ? substituteType(genericFt->returnType, bindings)
                           : impl_->unknownType;
-    // Record the result type under the stamped name so a later re-visit restores it
-    // (methods key on the class too, so same-named stamps don't collide).
     if (argsAreConcrete(args) && node.type) {
         if (isMethodCall)
             impl_->stampedCallReturnType[owningClass + "." + stampedName] = node.type;
@@ -862,7 +762,6 @@ bool TypeChecker::tryInstantiateGenericConstruction(
     std::vector<std::shared_ptr<Type>> args;
 
     if (auto* sub = dynamic_cast<SubscriptExpr*>(node.callee.get())) {
-        // Explicit: `Box[int](5)` / `Pair[int, str](...)`.
         if (auto* nm = dynamic_cast<NameExpr*>(sub->object.get())) {
             auto it = impl_->genericClasses.find(nm->name);
             if (it != impl_->genericClasses.end()) {
@@ -881,7 +780,6 @@ bool TypeChecker::tryInstantiateGenericConstruction(
             }
         }
     } else if (auto* nm = dynamic_cast<NameExpr*>(node.callee.get())) {
-        // Inferred from the binding annotation: `b: Box[int] = Box(5)`.
         auto it = impl_->genericClasses.find(nm->name);
         if (it != impl_->genericClasses.end() && expected) {
             auto exInst = std::dynamic_pointer_cast<InstanceType>(expected);
@@ -891,8 +789,6 @@ bool TypeChecker::tryInstantiateGenericConstruction(
                 clsName = nm->name;
                 args = exInst->classType->genericArgs;
             } else {
-                // The class is generic but no concrete instantiation is pinned -
-                // a bare `Box(5)` with no (matching) annotation can't be lowered.
                 error(node.location(),
                       "cannot infer type arguments for generic class '" + nm->name +
                       "'; annotate the binding (e.g. `x: " + nm->name +
@@ -906,8 +802,6 @@ bool TypeChecker::tryInstantiateGenericConstruction(
     if (!decl) return false;
 
     auto instType = instantiateGenericClass(decl, args, node.location());
-    // Retarget to the stamped class name (only when concrete) so CodeGen constructs
-    // the specialization; a non-concrete Inner[T](...) retargets at stamp time.
     if (argsAreConcrete(args)) {
         std::string key = mangleInstantiation(clsName, args);
         auto newCallee = std::make_unique<NameExpr>();
@@ -919,20 +813,14 @@ bool TypeChecker::tryInstantiateGenericConstruction(
     return true;
 }
 
-// Generic pre-pass: register + fully check every top-level generic template.
-
 void TypeChecker::collectGenericTemplates(Module& module) {
     impl_->currentModule = &module;
     for (auto& stmt : module.body) {
         if (auto* cd = dynamic_cast<ClassDecl*>(stmt.get())) {
-            // Record EVERY class so a stamped generic method can be appended, and scan
-            // for generic methods (they live on ordinary classes too - db.all[T]).
             impl_->classDeclByName[cd->name] = cd;
             for (auto& m : cd->body) {
                 auto* fd = dynamic_cast<FunctionDecl*>(m.get());
                 if (!fd || fd->typeParams.empty()) continue;
-                // D049: a generic method may not share its name with another method
-                // (a bracket-less obj.m(...) infers T; a rival definition is ambiguous).
                 for (auto& other : cd->body) {
                     if (other.get() == m.get()) continue;
                     auto* od = dynamic_cast<FunctionDecl*>(other.get());
@@ -946,8 +834,6 @@ void TypeChecker::collectGenericTemplates(Module& module) {
                         break;
                     }
                 }
-                // A method type-param that shadows the class's own is ambiguous under
-                // double monomorphization (one name, two bindings); reject it.
                 if (!cd->typeParams.empty())
                     for (auto& mtp : fd->typeParams)
                         for (auto& ctp : cd->typeParams)
@@ -963,9 +849,6 @@ void TypeChecker::collectGenericTemplates(Module& module) {
                 impl_->genericClasses[cd->name] = cd;
         } else if (auto* fd = dynamic_cast<FunctionDecl*>(stmt.get())) {
             if (fd->typeParams.empty()) continue;
-            // D049 module-level twin: a bracket-less f(...) call infers T, so a
-            // rival same-name definition is ambiguous and one of the two would
-            // silently never be callable.
             for (auto& other : module.body) {
                 if (other.get() == stmt.get()) continue;
                 auto* od = dynamic_cast<FunctionDecl*>(other.get());
@@ -984,8 +867,6 @@ void TypeChecker::collectGenericTemplates(Module& module) {
                 impl_->schemaEncodeFns.insert(fd);
         }
     }
-    // Visit each template once (type params bound to TypeVar) to populate its type
-    // and abstractly check its body; marked checked so the main walk skips it.
     for (auto& stmt : module.body) {
         auto* cd = dynamic_cast<ClassDecl*>(stmt.get());
         auto* fd = dynamic_cast<FunctionDecl*>(stmt.get());
@@ -996,14 +877,9 @@ void TypeChecker::collectGenericTemplates(Module& module) {
     }
 }
 
-// Register an imported module's generic templates so a use site can stamp them
-// (no visiting - the home module's checker already abstractly checked them).
-
 void TypeChecker::registerExternalGenerics(Module& mod) {
     for (auto& stmt : mod.body) {
         if (auto* cd = dynamic_cast<ClassDecl*>(stmt.get())) {
-            // Record the imported class so a stamped generic method can be appended,
-            // and surface its generic methods (they live on ordinary classes - db.all[T]).
             impl_->classDeclByName.emplace(cd->name, cd);
             for (auto& m : cd->body)
                 if (auto* fd = dynamic_cast<FunctionDecl*>(m.get()))
@@ -1027,8 +903,6 @@ void TypeChecker::registerExternalGenerics(Module& mod) {
             }
         }
     }
-    // D052 - record imported class bindings so a stamped generic body can name an
-    // imported type; source exports are already registered, so resolve against them.
     for (auto& stmt : mod.body) {
         auto* fi = dynamic_cast<FromImportStmt*>(stmt.get());
         if (!fi) continue;
@@ -1044,8 +918,6 @@ void TypeChecker::registerExternalGenerics(Module& mod) {
     }
 }
 
-// Worklist: stamp the transitive closure of instantiations to a fixpoint.
-
 void TypeChecker::runMonomorphization() {
     if (!impl_->currentModule) return;
     while (!impl_->pendingInsts.empty()) {
@@ -1054,11 +926,7 @@ void TypeChecker::runMonomorphization() {
         impl_->pendingInsts.erase(impl_->pendingInsts.begin());
         if (impl_->instDone.count(req.key)) continue;
         impl_->instDone.insert(req.key);
-        // (The class-recursion cap lives in instantiateGenericClass; on trip it stops
-        // enqueueing, so this loop drains and terminates.)
 
-        // Build the AST substitution (type-param name -> concrete TypeExpr).
-        // The TypeExprs are owned here for the lifetime of the clone call.
         const bool isMethodReq = !req.owningClass.empty();
         std::vector<std::unique_ptr<TypeExpr>> owned;
         TypeSubst subst;
@@ -1069,15 +937,12 @@ void TypeChecker::runMonomorphization() {
             if (it == impl_->genericClasses.end()) continue;
             template_ = it->second; tps = &it->second->typeParams;
         } else if (isMethodReq) {
-            // On a stamped owning class (Container[int]) the method template lives under
-            // the origin name; seed the subst with the class frame (T->arg) so cloning does both.
             std::shared_ptr<ClassType> ownerCT = req.ownerCT;
             if (!ownerCT)
                 if (auto tnIt = impl_->typeNames.find(req.owningClass);
                     tnIt != impl_->typeNames.end())
                     if (auto inst = std::dynamic_pointer_cast<InstanceType>(tnIt->second))
                         ownerCT = inst->classType;
-            // Identity-first template lookup; by-name maps only as fallback.
             FunctionDecl* tmplFn = nullptr;
             if (ownerCT) {
                 for (const ClassDecl* dkey :
@@ -1122,8 +987,6 @@ void TypeChecker::runMonomorphization() {
             subst[(*tps)[i].name] = owned.back().get();
         }
 
-        // Recursion caps for function/method stamps (go[U] -> go[list[U]] -> ...):
-        // depth + breadth caps trip as a clean compile error, never a hang (D044).
         if (!req.isClass) {
             auto abortGen = [&](const std::string& why) {
                 if (!impl_->instCapReported) {
@@ -1149,8 +1012,6 @@ void TypeChecker::runMonomorphization() {
             }
         }
 
-        // Cross-module: record the template's home module so CodeGen resolves the
-        // stamped body's bare names there, not at the instantiation site (D044).
         std::string homeModule;
         if (auto modIt = impl_->genericTemplateModule.find(template_);
             modIt != impl_->genericTemplateModule.end())
@@ -1159,13 +1020,10 @@ void TypeChecker::runMonomorphization() {
         std::unique_ptr<Stmt> cloned;
         if (!req.isClass && !isMethodReq &&
             impl_->schemaDecodeFns.count(dynamic_cast<const FunctionDecl*>(template_))) {
-            // D048: generate the box-free decoder body from T's fields rather
-            // than cloning the (never-lowered) template body.
             cloned = synthesizeSchemaDecoder(
                 req.args.empty() ? nullptr : req.args[0], template_->location());
         } else if (!req.isClass && !isMethodReq &&
                    impl_->schemaEncodeFns.count(dynamic_cast<const FunctionDecl*>(template_))) {
-            // D052: the write-side mirror - generate the box-free encoder body.
             cloned = synthesizeSchemaEncoder(
                 req.args.empty() ? nullptr : req.args[0], template_->location());
         } else {
@@ -1174,21 +1032,15 @@ void TypeChecker::runMonomorphization() {
         if (!cloned) continue;
         if (auto* cc = dynamic_cast<ClassDecl*>(cloned.get())) {
             cc->name = req.key;
-            cc->typeParams.clear();  // a stamped instantiation is not a template
+            cc->typeParams.clear();
             cc->genericHomeModule = homeModule;
-            // Register so a later method stamp (Container[int].wrap[str]) can append
-            // into this class body; the raw pointer survives the std::move below.
             impl_->classDeclByName[req.key] = cc;
         } else if (auto* cf = dynamic_cast<FunctionDecl*>(cloned.get())) {
-            // A method's on-disk name is the type-arg-only form (`all[int]`) - the
-            // owning ClassDecl scopes it; a free function's is the full key.
             cf->name = isMethodReq ? mangleInstantiation(req.genericName, req.args) : req.key;
             cf->typeParams.clear();
             cf->genericHomeModule = homeModule;
         }
 
-        // Inject the home module's exported class types into typeNames so the stamped
-        // body's bare references to sibling types resolve at re-check (saved/restored).
         std::vector<std::pair<std::string, std::shared_ptr<Type>>> savedTypeNames;
         std::vector<std::string> addedTypeNames;
         if (auto modIt = impl_->genericTemplateModule.find(template_);
@@ -1207,7 +1059,6 @@ void TypeChecker::runMonomorphization() {
                 mtIt != impl_->moduleTypes.end())
                 for (auto& [ename, etype] : mtIt->second->exports)
                     injectClass(ename, etype);
-            // D052 - also the home module's IMPORTED classes (not in its exports).
             if (auto imIt = impl_->moduleImportedTypes.find(modIt->second);
                 imIt != impl_->moduleImportedTypes.end())
                 for (auto& [ename, etype] : imIt->second)
@@ -1215,8 +1066,6 @@ void TypeChecker::runMonomorphization() {
         }
 
         if (isMethodReq) {
-            // Append the stamp into its owning class body and re-type-check it with
-            // self/currentClass bound; identity-first via req.ownerCT->decl, the by-name registry is only a legacy fallback.
             ClassDecl* ownerDecl =
                 req.ownerCT ? req.ownerCT->decl : nullptr;
             if (!ownerDecl) {
@@ -1248,20 +1097,15 @@ void TypeChecker::runMonomorphization() {
             impl_->currentClass = prevClass;
             impl_->popScope();
         } else {
-            // Append to the module body so CodeGen emits it, then type-check it
-            // (populates ClassType.fields/methods + expr->type; may enqueue more).
             Stmt* stamped = cloned.get();
             impl_->currentModule->body.push_back(std::move(cloned));
             stamped->accept(*this);
         }
 
-        // Restore the type-name scope mutated for the cross-module re-check.
         for (auto& [n, t] : savedTypeNames) impl_->typeNames[n] = t;
         for (auto& n : addedTypeNames) impl_->typeNames.erase(n);
     }
 }
-
-// D048 schema-decode synthesis: build decode[T]'s box-free body from T's fields.
 
 namespace {
 
@@ -1283,8 +1127,6 @@ std::unique_ptr<Expr> sdZero(const std::string& kind, SourceLocation loc) {
     if (kind == "bool") return sdBool(false, loc);
     return sdStr("", loc);
 }
-// "list:<elem>" -> list[<elem>] type expr; a scalar kind -> its NamedTypeExpr.
-// Base type for a field kind (no opt wrapper): scalar, list[<elem>], or a class.
 std::unique_ptr<TypeExpr> sdInnerType(const std::string& kind, SourceLocation loc) {
     if (kind.rfind("list:", 0) == 0) {
         auto g = std::make_unique<GenericTypeExpr>();
@@ -1304,7 +1146,6 @@ std::unique_ptr<TypeExpr> sdInnerType(const std::string& kind, SourceLocation lo
     if (kind.rfind("class:", 0) == 0) return sdType(kind.substr(6), loc);
     return sdType(kind, loc);
 }
-// Field type: "opt:<ik>" -> <ik> | None; otherwise the inner type.
 std::unique_ptr<TypeExpr> sdFieldType(const std::string& kind, SourceLocation loc) {
     if (kind.rfind("opt:", 0) == 0) {
         auto u = std::make_unique<UnionTypeExpr>();
@@ -1336,7 +1177,6 @@ std::unique_ptr<Expr> sdBytesEmpty(SourceLocation loc) {
 std::unique_ptr<Expr> sdNone(SourceLocation loc) {
     auto e = std::make_unique<NoneLiteral>(); e->setLocation(loc); return e;
 }
-// decode[<cls>](<arg>) - feed a bytes expression back through decode.
 std::unique_ptr<Expr> sdDecodeExpr(const std::string& cls, std::unique_ptr<Expr> arg,
                                    SourceLocation loc) {
     auto sub = std::make_unique<SubscriptExpr>();
@@ -1349,8 +1189,6 @@ std::unique_ptr<Expr> sdDecodeExpr(const std::string& cls, std::unique_ptr<Expr>
     call->setLocation(loc);
     return call;
 }
-// Rebuild a LITERAL default so an optional field can initialize to it; nullptr
-// for anything non-literal.
 std::unique_ptr<Expr> sdRebuildLiteral(const Expr* d, SourceLocation loc) {
     if (auto* i = dynamic_cast<const IntegerLiteral*>(d)) {
         auto e = std::make_unique<IntegerLiteral>(); e->value = i->value; e->setLocation(loc); return e;
@@ -1370,7 +1208,6 @@ std::unique_ptr<Expr> sdRebuildLiteral(const Expr* d, SourceLocation loc) {
         if (l->elements.empty()) { auto e = std::make_unique<ListExpr>(); e->setLocation(loc); return e; }
     return nullptr;
 }
-// c.method() with no args
 std::unique_ptr<Expr> sdCall0(const std::string& recv, const std::string& method, SourceLocation loc) {
     auto attr = std::make_unique<AttributeExpr>();
     attr->object = sdName(recv, loc);
@@ -1384,7 +1221,6 @@ std::unique_ptr<Expr> sdCall0(const std::string& recv, const std::string& method
 std::unique_ptr<Stmt> sdExprStmt(std::unique_ptr<Expr> e, SourceLocation loc) {
     auto s = std::make_unique<ExprStmt>(); s->expr = std::move(e); s->setLocation(loc); return s;
 }
-// name: type = value  (reassignable local declaration)
 std::unique_ptr<Stmt> sdDecl(const std::string& name, std::unique_ptr<TypeExpr> ty,
                              std::unique_ptr<Expr> val, SourceLocation loc) {
     auto s = std::make_unique<AnnAssignStmt>();
@@ -1394,7 +1230,6 @@ std::unique_ptr<Stmt> sdDecl(const std::string& name, std::unique_ptr<TypeExpr> 
     s->setLocation(loc);
     return s;
 }
-// name = value  (reassignment)
 std::unique_ptr<Stmt> sdAssign(const std::string& name, std::unique_ptr<Expr> val, SourceLocation loc) {
     auto s = std::make_unique<AssignStmt>();
     s->targets.push_back(sdName(name, loc));
@@ -1403,8 +1238,6 @@ std::unique_ptr<Stmt> sdAssign(const std::string& name, std::unique_ptr<Expr> va
     return s;
 }
 
-// Field kind shared by encode/decode synthesis: scalar name, "list:<scalar>",
-// "class:<Name>", or "" for an unsupported shape
 std::string sdDetectKind(const std::unordered_map<std::string, ClassDecl*>& classes,
                          const TypeExpr* t) {
     if (auto* nt = dynamic_cast<const NamedTypeExpr*>(t)) {
@@ -1421,7 +1254,6 @@ std::string sdDetectKind(const std::unordered_map<std::string, ClassDecl*>& clas
                     if (e == "int" || e == "str" || e == "bool" || e == "float")
                         return "list:" + e;
                 }
-            // dict[str, scalar] - str keys only (JSON object keys ARE strings).
             if (b->name == "dict" && gt->typeArgs.size() == 2) {
                 auto* kt = dynamic_cast<const NamedTypeExpr*>(gt->typeArgs[0].get());
                 auto* vt = dynamic_cast<const NamedTypeExpr*>(gt->typeArgs[1].get());
@@ -1434,7 +1266,6 @@ std::string sdDetectKind(const std::unordered_map<std::string, ClassDecl*>& clas
         }
     return "";
 }
-// Optional[X] (parsed as `X | None`) -> "opt:<ik>"; "" if not that shape.
 std::string sdOptKind(const std::unordered_map<std::string, ClassDecl*>& classes,
                       const TypeExpr* t) {
     auto* u = dynamic_cast<const UnionTypeExpr*>(t);
@@ -1450,7 +1281,6 @@ std::string sdOptKind(const std::unordered_map<std::string, ClassDecl*>& classes
     std::string ik = sdDetectKind(classes, inner);
     return ik.empty() ? "" : "opt:" + ik;
 }
-// obj.field
 std::unique_ptr<Expr> sdAttr(const std::string& obj, const std::string& field,
                              SourceLocation loc) {
     auto attr = std::make_unique<AttributeExpr>();
@@ -1459,7 +1289,6 @@ std::unique_ptr<Expr> sdAttr(const std::string& obj, const std::string& field,
     attr->setLocation(loc);
     return attr;
 }
-// recv.method(arg)
 std::unique_ptr<Expr> sdCall1(const std::string& recv, const std::string& method,
                               std::unique_ptr<Expr> arg, SourceLocation loc) {
     auto attr = std::make_unique<AttributeExpr>();
@@ -1472,7 +1301,6 @@ std::unique_ptr<Expr> sdCall1(const std::string& recv, const std::string& method
     call->setLocation(loc);
     return call;
 }
-// encode[<cls>](<arg>) - the write-side mirror of sdDecodeExpr.
 std::unique_ptr<Expr> sdEncodeExpr(const std::string& cls, std::unique_ptr<Expr> arg,
                                    SourceLocation loc) {
     auto sub = std::make_unique<SubscriptExpr>();
@@ -1497,23 +1325,20 @@ std::string sdWriteMethodFor(const std::string& k) {
     if (k == "dict:int") return "write_int_dict";
     if (k == "dict:float") return "write_float_dict";
     if (k == "dict:bool") return "write_bool_dict";
-    return "write_str_dict";  // dict:str
+    return "write_str_dict";
 }
-// w: JsonWriter = JsonWriter()
 std::unique_ptr<Stmt> sdWriterDecl(SourceLocation loc) {
     auto ctorCall = std::make_unique<CallExpr>();
     ctorCall->callee = sdName("JsonWriter", loc);
     ctorCall->setLocation(loc);
     return sdDecl("w", sdType("JsonWriter", loc), std::move(ctorCall), loc);
 }
-// return w.finish()
 std::unique_ptr<Stmt> sdReturnFinish(SourceLocation loc) {
     auto ret = std::make_unique<ReturnStmt>();
     ret->value = sdCall0("w", "finish", loc);
     ret->setLocation(loc);
     return ret;
 }
-// One statement writing a value expr of kind k through w (recursive encode for classes).
 std::unique_ptr<Stmt> sdWriteValueStmt(const std::string& k, std::unique_ptr<Expr> val,
                                        SourceLocation loc) {
     if (k.rfind("class:", 0) == 0)
@@ -1521,7 +1346,6 @@ std::unique_ptr<Stmt> sdWriteValueStmt(const std::string& k, std::unique_ptr<Exp
                                   sdEncodeExpr(k.substr(6), std::move(val), loc), loc), loc);
     return sdExprStmt(sdCall1("w", sdWriteMethodFor(k), std::move(val), loc), loc);
 }
-// Scalar kind name for a top-level type; "" when not a JSON scalar.
 std::string sdScalarKindName(Type::Kind k) {
     switch (k) {
         case Type::Kind::Int: return "int";
@@ -1531,8 +1355,6 @@ std::string sdScalarKindName(Type::Kind k) {
         default: return "";
     }
 }
-// One-call delegation body for the boxed tier: fn(body: bytes) -> retTy { return
-// <target>(body) }. Target is a private json.dr function; genericHomeModule resolves the bare name at lowering.
 std::unique_ptr<FunctionDecl> sdBoxedDelegateFn(const std::string& target,
                                                 std::unique_ptr<TypeExpr> retTy,
                                                 SourceLocation loc) {
@@ -1554,7 +1376,6 @@ std::unique_ptr<FunctionDecl> sdBoxedDelegateFn(const std::string& target,
     return fn;
 }
 
-// Shared decoder prologue: fn(body: bytes) with `c: Cursor = Cursor(body)`.
 std::unique_ptr<FunctionDecl> sdCursorFn(SourceLocation loc) {
     auto fn = std::make_unique<FunctionDecl>();
     fn->setLocation(loc);
@@ -1570,15 +1391,12 @@ std::unique_ptr<FunctionDecl> sdCursorFn(SourceLocation loc) {
     return fn;
 }
 
-}  // namespace
+}
 
 std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
     const std::shared_ptr<Type>& targetType, SourceLocation loc) {
-    // D048 - the boxed tier's generic door: a spelled-out Any opts into the boxed
-    // tree via the ONE _JsonParser entry; a concrete T either synthesizes box-free or errors, never silently falls back to boxed.
     if (targetType && targetType->kind() == Type::Kind::Any)
         return sdBoxedDelegateFn("loadb", sdType("Any", loc), loc);
-    // D052 - top-level scalar: one Cursor read is the whole document
     if (targetType) {
         const std::string sk = sdScalarKindName(targetType->kind());
         if (!sk.empty()) {
@@ -1591,7 +1409,6 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
             return fn;
         }
     }
-    // D052 - top-level dict[str, scalar]: one Cursor call reads the whole object.
     if (targetType && targetType->kind() == Type::Kind::Dict) {
         auto& dt = static_cast<DictType&>(*targetType);
         const bool strKey = dt.keyType && dt.keyType->kind() == Type::Kind::Str;
@@ -1612,7 +1429,6 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
         fn->body.push_back(std::move(ret));
         return fn;
     }
-    // D052 - top-level list[Class] / list[scalar]: decode a JSON array
     if (targetType && targetType->kind() == Type::Kind::List) {
         auto& lt = static_cast<ListType&>(*targetType);
         if (lt.elementType && lt.elementType->kind() == Type::Kind::Any)
@@ -1697,8 +1513,6 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
                    "those, or a spelled Any (boxed tree)");
         return nullptr;
     }
-    // True identity first; the by-name registry folds every dep's classes
-    // first-wins, so a same-named class elsewhere must never supply the fields.
     if (!classDecl) {
         auto cdIt = impl_->classDeclByName.find(className);
         if (cdIt != impl_->classDeclByName.end()) classDecl = cdIt->second;
@@ -1716,8 +1530,6 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
         return nullptr;
     }
 
-    // kind: scalar, "list:<elem>", "class:<Name>", or "opt:<ik>" for Optional[<ik>].
-    // `optional` means no seen-check (absent allowed): true for opt-null and literal-default fields.
     struct Field { std::string name; std::string kind; bool optional; std::unique_ptr<Expr> dflt; };
     std::vector<Field> fields;
     for (auto& p : ctor->params) {
@@ -1754,7 +1566,7 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
             }
             optional = true;
         }
-        if (isOptNull && !dflt) dflt = sdNone(loc);   // absent Optional -> None
+        if (isOptNull && !dflt) dflt = sdNone(loc);
         fields.push_back({p.name, kind, optional, std::move(dflt)});
     }
     if (fields.empty()) {
@@ -1774,7 +1586,7 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
         if (k == "dict:int") return "parse_int_dict";
         if (k == "dict:float") return "parse_float_dict";
         if (k == "dict:bool") return "parse_bool_dict";
-        return "parse_str_dict";  // dict:str
+        return "parse_str_dict";
     };
 
     auto fn = std::make_unique<FunctionDecl>();
@@ -1785,15 +1597,12 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
     bodyParam.type = sdType("bytes", loc);
     fn->params.push_back(std::move(bodyParam));
 
-    // c: Cursor = Cursor(body)
     auto ctorCall = std::make_unique<CallExpr>();
     ctorCall->callee = sdName("Cursor", loc);
     ctorCall->args.push_back(sdName("body", loc));
     ctorCall->setLocation(loc);
     fn->body.push_back(sdDecl("c", sdType("Cursor", loc), std::move(ctorCall), loc));
 
-    // per-field local + presence flag. A nested class captures raw bytes (b"" has
-    // a zero; a class-typed local does not); an optional field inits to its default.
     for (auto& f : fields) {
         if (f.kind.rfind("class:", 0) == 0) {
             fn->body.push_back(sdDecl("_" + f.name + "_bytes", sdType("bytes", loc), sdBytesEmpty(loc), loc));
@@ -1810,7 +1619,6 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
 
     fn->body.push_back(sdExprStmt(sdCall0("c", "begin_object", loc), loc));
 
-    // while c.next_field() { k: str = c.field_key(); if/elif/else }
     auto wh = std::make_unique<WhileStmt>();
     wh->condition = sdCall0("c", "next_field", loc);
     wh->setLocation(loc);
@@ -1824,7 +1632,6 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
         bin->setLocation(loc);
         return bin;
     };
-    // Read a value of inner-kind `ik` from cursor c into local `L`.
     auto readInto = [&](const std::string& ik, const std::string& L) -> std::unique_ptr<Stmt> {
         if (ik.rfind("class:", 0) == 0)
             return sdAssign(L, sdDecodeExpr(ik.substr(6), sdCall0("c", "capture_value", loc), loc), loc);
@@ -1833,7 +1640,6 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
     auto assignBody = [&](const Field& f) {
         std::vector<std::unique_ptr<Stmt>> b;
         if (f.kind.rfind("opt:", 0) == 0) {
-            // if c.try_null() { _f = None } else { _f = <read inner> }
             auto ifn = std::make_unique<IfStmt>();
             ifn->setLocation(loc);
             ifn->condition = sdCall0("c", "try_null", loc);
@@ -1861,7 +1667,6 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
     wh->body.push_back(std::move(iff));
     fn->body.push_back(std::move(wh));
 
-    // required-field checks (optional fields keep their default): if not _seen, raise
     for (auto& f : fields) {
         if (f.optional) continue;
         auto notseen = std::make_unique<UnaryExpr>();
@@ -1882,7 +1687,6 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
         fn->body.push_back(std::move(guard));
     }
 
-    // return ClassName(f0=_f0, f1=_f1, ...)
     auto build = std::make_unique<CallExpr>();
     build->callee = sdName(className, loc);
     for (auto& f : fields) {
@@ -1900,12 +1704,8 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaDecoder(
     return fn;
 }
 
-// D052 schema-encode synthesis: build encode[T]'s box-free Writer-driven body
-// from T's ctor fields - the write-side mirror of synthesizeSchemaDecoder.
-
 std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaEncoder(
     const std::shared_ptr<Type>& targetType, SourceLocation loc) {
-    // Top-level scalar: one typed Writer call is the whole document.
     if (targetType) {
         const std::string sk = sdScalarKindName(targetType->kind());
         if (!sk.empty()) {
@@ -1922,7 +1722,6 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaEncoder(
             return fn;
         }
     }
-    // Top-level dict[str, scalar]: one typed Writer call is the whole object.
     if (targetType && targetType->kind() == Type::Kind::Dict) {
         auto& dt = static_cast<DictType&>(*targetType);
         const std::string vk = dt.valueType ? sdScalarKindName(dt.valueType->kind()) : "";
@@ -1942,7 +1741,6 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaEncoder(
         fn->body.push_back(sdReturnFinish(loc));
         return fn;
     }
-    // Top-level list[Class] / list[scalar]: encode a JSON array.
     if (targetType && targetType->kind() == Type::Kind::List) {
         auto& lt = static_cast<ListType&>(*targetType);
         const std::string elemScalar =
@@ -2013,7 +1811,6 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaEncoder(
         error(loc, "json.encode[T]: T must be a class type (or list of a class)");
         return nullptr;
     }
-    // True identity first, mirroring the decode side.
     if (!classDecl) {
         auto cdIt = impl_->classDeclByName.find(className);
         if (cdIt != impl_->classDeclByName.end()) classDecl = cdIt->second;
@@ -2068,8 +1865,6 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaEncoder(
     for (auto& f : fields) {
         if (f.kind.rfind("opt:", 0) == 0) {
             const std::string ik = f.kind.substr(4);
-            // _f: <ik> | None = value.f; `== None` keys on the runtime state and the
-            // else-branch narrows _f to the native member (isinstance would answer statically).
             fn->body.push_back(sdDecl("_" + f.name, sdFieldType(f.kind, loc),
                                       sdAttr("value", f.name, loc), loc));
             fn->body.push_back(sdExprStmt(sdCall1("w", "key", sdStr(f.name, loc), loc), loc));
@@ -2095,4 +1890,4 @@ std::unique_ptr<Stmt> TypeChecker::synthesizeSchemaEncoder(
     return fn;
 }
 
-}  // namespace dragon
+}

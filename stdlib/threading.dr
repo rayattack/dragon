@@ -6,14 +6,12 @@ extern "C" def malloc(size: int) -> ptr
 extern "C" def free(p: ptr)
 extern "C" def memset(s: ptr, c: intc, n: int) -> ptr
 
-# pthread mutex - 40 bytes on x86_64 Linux
 extern "C" def pthread_mutex_init(mtx: ptr, attr: ptr) -> intc
 extern "C" def pthread_mutex_lock(mtx: ptr) -> intc
 extern "C" def pthread_mutex_trylock(mtx: ptr) -> intc
 extern "C" def pthread_mutex_unlock(mtx: ptr) -> intc
 extern "C" def pthread_mutex_destroy(mtx: ptr) -> intc
 
-# pthread rwlock - 56 bytes on x86_64 Linux
 extern "C" def pthread_rwlock_init(rw: ptr, attr: ptr) -> intc
 extern "C" def pthread_rwlock_rdlock(rw: ptr) -> intc
 extern "C" def pthread_rwlock_wrlock(rw: ptr) -> intc
@@ -21,25 +19,19 @@ extern "C" def pthread_rwlock_tryrdlock(rw: ptr) -> intc
 extern "C" def pthread_rwlock_trywrlock(rw: ptr) -> intc
 extern "C" def pthread_rwlock_unlock(rw: ptr) -> intc
 extern "C" def pthread_rwlock_destroy(rw: ptr) -> intc
-# Timed acquire (deadline + macOS fallback live in the C runtime); 1 if acquired, 0 on timeout.
 extern "C" def dragon_rwlock_timedrdlock_sec(rw: ptr, seconds: float) -> intc
 extern "C" def dragon_rwlock_timedwrlock_sec(rw: ptr, seconds: float) -> intc
 
-# pthread condition variable - 48 bytes on x86_64 Linux
 extern "C" def pthread_cond_init(cond: ptr, attr: ptr) -> intc
 extern "C" def pthread_cond_wait(cond: ptr, mtx: ptr) -> intc
 extern "C" def pthread_cond_signal(cond: ptr) -> intc
 extern "C" def pthread_cond_broadcast(cond: ptr) -> intc
 extern "C" def pthread_cond_destroy(cond: ptr) -> intc
 
-# Uses the Dragon runtime, not pthread_barrier_* (optional in POSIX, absent on
-# macOS, which broke linking); the runtime builds one from mutex + condvar.
 extern "C" def dragon_barrier_new(count: int) -> ptr
 extern "C" def dragon_barrier_wait(barrier: ptr) -> int
 extern "C" def dragon_barrier_destroy(barrier: ptr) -> int
 
-# Uses the Dragon runtime, not sem_init/sem_wait (macOS deprecated unnamed
-# POSIX semaphores; sem_init returned -1/ENOSYS there).
 extern "C" def dragon_sem_new(value: int) -> ptr
 extern "C" def dragon_sem_acquire(sem: ptr) -> int
 extern "C" def dragon_sem_tryacquire(sem: ptr) -> int
@@ -47,7 +39,6 @@ extern "C" def dragon_sem_timedacquire_sec(sem: ptr, seconds: float) -> int
 extern "C" def dragon_sem_release(sem: ptr) -> int
 extern "C" def dragon_sem_free(sem: ptr) -> int
 
-# pthread thread - 8 bytes (pthread_t is unsigned long on x86_64 Linux)
 extern "C" def pthread_create(thread: ptr, attr: ptr, start_routine: ptr, arg: ptr) -> intc
 extern "C" def pthread_join(thread: int, retval: ptr) -> intc
 extern "C" def pthread_detach(thread: int) -> intc
@@ -57,16 +48,11 @@ extern "C" def dragon_atomic_load(p: ptr) -> int
 extern "C" def dragon_atomic_store(p: ptr, val: int)
 extern "C" def dragon_atomic_add(p: ptr, val: int) -> int
 
-# Runtime-computed (not hardcoded): Darwin's pthread_rwlock_t is 200 bytes vs
-# the 64 once assumed, which overran the block and segfaulted RWLock on macOS.
 extern "C" def dragon_sizeof_mutex() -> int
 extern "C" def dragon_sizeof_rwlock() -> int
 extern "C" def dragon_sizeof_cond() -> int
 
-const _EVENT_FLAG_SIZE: int = 8   # i64 atomic flag; not a pthread struct, size is ours to pick.
-
-# Lock is a compiler intrinsic (not a Dragon class): `Lock()` lowers directly
-# to dragon_lock_* runtime calls, no instance/GC overhead. Needs no import.
+const _EVENT_FLAG_SIZE: int = 8
 
 class RWLock {
     def() {
@@ -119,7 +105,6 @@ class RWLock {
 
 class Semaphore {
     def(value: int) {
-        # The runtime owns the allocation; destroy() releases it.
         self.sem = dragon_sem_new(value)
     }
 
@@ -156,13 +141,11 @@ class Semaphore {
 
 class Barrier {
     def(count: int) {
-        # The runtime allocates and owns the barrier; destroy() releases it.
         self.bar = dragon_barrier_new(count)
         self.count = count
     }
 
     def wait() -> int {
-        # Returns 1 to exactly one thread per trip, 0 to the rest; reusable across trips.
         return dragon_barrier_wait(self.bar)
     }
 

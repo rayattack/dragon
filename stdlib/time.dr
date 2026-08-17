@@ -17,8 +17,6 @@ extern "C" def dragon_timespec_new(sec: int, nsec: int) -> ptr
 extern "C" def dragon_timespec_sec(ts: ptr) -> int
 extern "C" def dragon_timespec_nsec(ts: ptr) -> int
 
-# Clock IDs come from the runtime (compiled against the target's own <time.h>),
-# not hardcoded Linux numbers: Darwin's MONOTONIC=6, PROCESS_CPUTIME_ID=12.
 extern "C" def dragon_clock_realtime_id() -> int
 extern "C" def dragon_clock_monotonic_id() -> int
 extern "C" def dragon_clock_process_id() -> int
@@ -27,11 +25,9 @@ CLOCK_REALTIME: int = dragon_clock_realtime_id()
 CLOCK_MONOTONIC: int = dragon_clock_monotonic_id()
 CLOCK_PROCESS: int = dragon_clock_process_id()
 
-# CLOCKS_PER_SEC is 1000000 on POSIX
 const CLOCKS_PER_SEC: int = 1000000
 
 def now() -> int {
-    # Current time in seconds since epoch (1970-01-01 00:00:00 UTC)
     return time(none)
 }
 
@@ -46,7 +42,6 @@ def now_float() -> float {
 }
 
 def monotonic() -> float {
-    # Monotonic clock (not affected by system clock changes)
     const ts: ptr = malloc(16)
     memset(ts, 0, 16)
     clock_gettime(CLOCK_MONOTONIC, ts)
@@ -79,6 +74,5 @@ def sleep_float(seconds: float) -> int {
 }
 
 def perf_counter() -> float {
-    # High-resolution performance counter (alias for monotonic)
     return monotonic()
 }

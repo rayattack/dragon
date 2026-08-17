@@ -1,6 +1,3 @@
-# Pre-fix: translate() returned the pattern unchanged, and _match backtracked
-# exponentially on multi-star patterns.
-
 from unittest import TestCase, main
 from fnmatch import fnmatch, fnmatchcase, filter_names, translate
 

@@ -25,7 +25,6 @@ def square(n: int) -> int {
 }
 
 
-# ESCAPE via return - TRANSFERRED, not detached here (the caller owns + awaits it).
 def make_task(n: int) -> Task[int] {
     t: Task[int] = fire square(n)
     return t
@@ -37,20 +36,17 @@ def consume(task: Task[int]) -> int {
 }
 
 
-# ESCAPE via argument pass-through - TRANSFERRED to the callee.
 def make_and_pass(n: int) -> int {
     t: Task[int] = fire square(n)
     return consume(t)
 }
 
 
-# Bound fire-and-forget: never used -> abandoned -> freed at scope exit.
 def fire_unused(n: int) -> None {
     t: Task[int] = fire square(n)
 }
 
 
-# is_alive-polled, never joined: a pure read; abandoned -> freed at scope exit.
 def poll_no_join(n: int) -> int {
     t: Task[int] = fire square(n)
     spins: int = 0
@@ -64,10 +60,8 @@ def poll_no_join(n: int) -> int {
 }
 
 
-# CONDITIONAL await (the case that used to leak): awaited when `c`, abandoned
-# otherwise. On the await path the consume empties the slot (scope-exit detach is
-# a no-op); on the drop path the scope frees the still-held handle. No leak on
-# EITHER path, no double-free.
+# CONDITIONAL await (the case that used to leak): the await path consumes and empties the slot,
+# the drop path frees the still-held handle at scope exit. No leak or double-free on EITHER path.
 def conditional(n: int, c: bool) -> int {
     t: Task[int] = fire square(n)
     if c {
@@ -77,8 +71,6 @@ def conditional(n: int, c: bool) -> int {
 }
 
 
-# Poll-then-await: is_alive() reads stay legal BEFORE the consume, and the
-# awaited result is still correct after the polling loop.
 def poll_then_await(n: int) -> int {
     t: Task[int] = fire square(n)
     while t.is_alive() {
@@ -97,7 +89,7 @@ class TaskDetachRcTests(TestCase) {
             total = total + await t
             i = i + 1
         }
-        self.assertEqual(total, 42925)   # sum of squares 1..50
+        self.assertEqual(total, 42925)
     }
 
     def test_passed_task_joined_in_callee() {
@@ -142,21 +134,19 @@ class TaskDetachRcTests(TestCase) {
     }
 
     def test_conditional_await_both_paths() {
-        # The await path and the drop path must BOTH be leak-free and crash-free.
         i: int = 1
         awaited: int = 0
         dropped: int = 0
         while i <= 50 {
-            awaited = awaited + conditional(i, True)    # await path -> i*i
-            dropped = dropped + conditional(i, False)   # drop path -> -1
+            awaited = awaited + conditional(i, True)
+            dropped = dropped + conditional(i, False)
             i = i + 1
         }
-        self.assertEqual(awaited, 42925)   # sum of squares 1..50
-        self.assertEqual(dropped, 0 - 50)  # -1 each, 50 times
+        self.assertEqual(awaited, 42925)
+        self.assertEqual(dropped, 0 - 50)
     }
 
     def test_poll_then_await_no_uaf() {
-        # is_alive() after await reads the emptied slot (false), not freed memory.
         i: int = 1
         total: int = 0
         while i <= 50 {

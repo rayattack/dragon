@@ -18,8 +18,6 @@ class LockBox {
 
 class OwnFieldTests(TestCase) {
     def test_lock_field_released_on_death() {
-        # 3000 instances, each with a pthread mutex: without the own release
-        # this leaks 3000 * 40B of dragon_lock_new.
         i: int = 0
         total: int = 0
         while i < 3000 {
@@ -31,8 +29,6 @@ class OwnFieldTests(TestCase) {
     }
 
     def test_del_of_lock_local() {
-        # del releases a proven sole-owner local EARLY; scope exit would
-        # otherwise release it anyway (2.10).
         g: Lock = Lock()
         with g {
             self.assertEqual(1, 1)
@@ -42,9 +38,6 @@ class OwnFieldTests(TestCase) {
     }
 
     def test_bare_local_lock_scope_exit() {
-        # No del, no with, no own: the scope owns a bare Lock local (ADR
-        # 2.10) - leak-free purely from scope exit. The 40-byte-per-Lock
-        # leak family is unwritable now.
         i: int = 0
         while i < 3000 {
             lk: Lock = Lock()
@@ -56,8 +49,6 @@ class OwnFieldTests(TestCase) {
     }
 
     def test_del_then_scope_exit_no_double_destroy() {
-        # del destroys and nulls the slot; the scope-exit release is
-        # null-gated, so the pair frees exactly once.
         i: int = 0
         while i < 3000 {
             lk: Lock = Lock()

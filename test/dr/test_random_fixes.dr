@@ -1,6 +1,3 @@
-# Pre-fix: choice([]) returned "" and choice_int([]) returned 0, randrange(5, 5)
-# silently returned start, and sample with k > len(items) returned fewer items.
-
 from unittest import TestCase, main
 import random
 

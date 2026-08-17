@@ -1,13 +1,8 @@
 #include <gtest/gtest.h>
-// FIXME: split match/case tests into their own file already
 #include "TestHelpers.h"
 
 using namespace dragon;
 using namespace dragon::test;
-
-//===----------------------------------------------------------------------===//
-// Module & Basic Structure
-//===----------------------------------------------------------------------===//
 
 TEST(ParserTest, EmptyModule) {
     auto module = parse("");
@@ -23,10 +18,6 @@ TEST(ParserTest, MultipleStatements) {
         EXPECT_NE(dynamic_cast<PassStmt*>(stmt.get()), nullptr);
     }
 }
-
-//===----------------------------------------------------------------------===//
-// Literal Expressions
-//===----------------------------------------------------------------------===//
 
 TEST(ParserTest, IntegerLiteral) {
     auto module = parse("42");
@@ -70,8 +61,6 @@ TEST(ParserTest, StringLiteral) {
     auto* strLit = dynamic_cast<StringLiteral*>(exprStmt->expr.get());
     ASSERT_NE(strLit, nullptr);
     EXPECT_EQ(strLit->value, "hello");
-    // Lone module-top string literal also populates the docstring slot
-    // (Python parity - `__doc__` is set to that string).
     ASSERT_TRUE(module->docstring.has_value());
     EXPECT_EQ(*module->docstring, "hello");
 }
@@ -81,7 +70,6 @@ TEST(ParserTest, ModuleDocstringLifted) {
     ASSERT_NE(module, nullptr);
     ASSERT_TRUE(module->docstring.has_value());
     EXPECT_EQ(*module->docstring, "module doc.");
-    // Body still contains the docstring statement (non-destructive lift).
     ASSERT_EQ(module->body.size(), 2u);
 }
 
@@ -165,10 +153,6 @@ TEST(ParserTest, NameExpression) {
     EXPECT_EQ(name->name, "x");
 }
 
-//===----------------------------------------------------------------------===//
-// Binary Expressions & Precedence
-//===----------------------------------------------------------------------===//
-
 TEST(ParserTest, BinaryAddition) {
     auto module = parse("1 + 2");
     ASSERT_NE(module, nullptr);
@@ -238,25 +222,21 @@ TEST(ParserTest, BinaryFloorDivision) {
 }
 
 TEST(ParserTest, PrecedenceMultiplyOverAdd) {
-    // 1 + 2 * 3 should be 1 + (2 * 3)
     auto module = parse("1 + 2 * 3");
     ASSERT_NE(module, nullptr);
     auto* exprStmt = dynamic_cast<ExprStmt*>(module->body[0].get());
     auto* add = dynamic_cast<BinaryExpr*>(exprStmt->expr.get());
     ASSERT_NE(add, nullptr);
     EXPECT_EQ(add->op.type(), TokenType::PLUS);
-    // Left should be int 1
     auto* left = dynamic_cast<IntegerLiteral*>(add->left.get());
     ASSERT_NE(left, nullptr);
     EXPECT_EQ(left->value, 1);
-    // Right should be 2 * 3
     auto* mul = dynamic_cast<BinaryExpr*>(add->right.get());
     ASSERT_NE(mul, nullptr);
     EXPECT_EQ(mul->op.type(), TokenType::STAR);
 }
 
 TEST(ParserTest, PrecedencePowerOverMultiply) {
-    // 2 * 3 ** 4 should be 2 * (3 ** 4)
     auto module = parse("2 * 3 ** 4");
     ASSERT_NE(module, nullptr);
     auto* exprStmt = dynamic_cast<ExprStmt*>(module->body[0].get());
@@ -269,7 +249,6 @@ TEST(ParserTest, PrecedencePowerOverMultiply) {
 }
 
 TEST(ParserTest, PrecedenceParentheses) {
-    // (1 + 2) * 3 should be (1 + 2) * 3
     auto module = parse("(1 + 2) * 3");
     ASSERT_NE(module, nullptr);
     auto* exprStmt = dynamic_cast<ExprStmt*>(module->body[0].get());
@@ -282,7 +261,6 @@ TEST(ParserTest, PrecedenceParentheses) {
 }
 
 TEST(ParserTest, LeftAssociativity) {
-    // 1 - 2 - 3 should be (1 - 2) - 3
     auto module = parse("1 - 2 - 3");
     ASSERT_NE(module, nullptr);
     auto* exprStmt = dynamic_cast<ExprStmt*>(module->body[0].get());
@@ -292,14 +270,12 @@ TEST(ParserTest, LeftAssociativity) {
     auto* inner = dynamic_cast<BinaryExpr*>(outer->left.get());
     ASSERT_NE(inner, nullptr);
     EXPECT_EQ(inner->op.type(), TokenType::MINUS);
-    // Right of outer should be 3
     auto* three = dynamic_cast<IntegerLiteral*>(outer->right.get());
     ASSERT_NE(three, nullptr);
     EXPECT_EQ(three->value, 3);
 }
 
 TEST(ParserTest, PowerRightAssociativity) {
-    // 2 ** 3 ** 4 should be 2 ** (3 ** 4)
     auto module = parse("2 ** 3 ** 4");
     ASSERT_NE(module, nullptr);
     auto* exprStmt = dynamic_cast<ExprStmt*>(module->body[0].get());
@@ -313,10 +289,6 @@ TEST(ParserTest, PowerRightAssociativity) {
     ASSERT_NE(inner, nullptr);
     EXPECT_EQ(inner->op.type(), TokenType::POWER);
 }
-
-//===----------------------------------------------------------------------===//
-// Comparison Operators
-//===----------------------------------------------------------------------===//
 
 TEST(ParserTest, ComparisonLess) {
     auto module = parse("a < b");
@@ -372,10 +344,6 @@ TEST(ParserTest, ComparisonIs) {
     EXPECT_EQ(bin->op.type(), TokenType::IS);
 }
 
-//===----------------------------------------------------------------------===//
-// Logical Operators
-//===----------------------------------------------------------------------===//
-
 TEST(ParserTest, LogicalAnd) {
     auto module = parse("a and b");
     ASSERT_NE(module, nullptr);
@@ -404,7 +372,6 @@ TEST(ParserTest, LogicalNot) {
 }
 
 TEST(ParserTest, LogicalPrecedence) {
-    // a or b and c should be a or (b and c)
     auto module = parse("a or b and c");
     ASSERT_NE(module, nullptr);
     auto* exprStmt = dynamic_cast<ExprStmt*>(module->body[0].get());
@@ -415,10 +382,6 @@ TEST(ParserTest, LogicalPrecedence) {
     ASSERT_NE(andExpr, nullptr);
     EXPECT_EQ(andExpr->op.type(), TokenType::AND);
 }
-
-//===----------------------------------------------------------------------===//
-// Bitwise Operators
-//===----------------------------------------------------------------------===//
 
 TEST(ParserTest, BitwiseAnd) {
     auto module = parse("a & b");
@@ -465,10 +428,6 @@ TEST(ParserTest, BitwiseShiftRight) {
     EXPECT_EQ(bin->op.type(), TokenType::RIGHT_SHIFT);
 }
 
-//===----------------------------------------------------------------------===//
-// Unary Expressions
-//===----------------------------------------------------------------------===//
-
 TEST(ParserTest, UnaryMinus) {
     auto module = parse("-42");
     ASSERT_NE(module, nullptr);
@@ -499,10 +458,6 @@ TEST(ParserTest, UnaryBitwiseNot) {
     EXPECT_EQ(unary->op.type(), TokenType::TILDE);
 }
 
-//===----------------------------------------------------------------------===//
-// Ternary / If Expression
-//===----------------------------------------------------------------------===//
-
 TEST(ParserTest, TernaryExpression) {
     auto module = parse("a if cond else b");
     ASSERT_NE(module, nullptr);
@@ -519,10 +474,6 @@ TEST(ParserTest, TernaryExpression) {
     ASSERT_NE(elseExpr, nullptr);
     EXPECT_EQ(elseExpr->name, "b");
 }
-
-//===----------------------------------------------------------------------===//
-// Call Expressions
-//===----------------------------------------------------------------------===//
 
 TEST(ParserTest, SimpleCall) {
     auto module = parse("f()");
@@ -579,10 +530,6 @@ TEST(ParserTest, NestedCalls) {
     ASSERT_NE(innerCall, nullptr);
 }
 
-//===----------------------------------------------------------------------===//
-// Attribute Access
-//===----------------------------------------------------------------------===//
-
 TEST(ParserTest, SimpleAttribute) {
     auto module = parse("obj.attr");
     ASSERT_NE(module, nullptr);
@@ -619,10 +566,6 @@ TEST(ParserTest, MethodCall) {
     EXPECT_EQ(call->args.size(), 2u);
 }
 
-//===----------------------------------------------------------------------===//
-// Subscript
-//===----------------------------------------------------------------------===//
-
 TEST(ParserTest, SimpleSubscript) {
     auto module = parse("arr[0]");
     ASSERT_NE(module, nullptr);
@@ -647,10 +590,6 @@ TEST(ParserTest, StringSubscript) {
     ASSERT_NE(idx, nullptr);
     EXPECT_EQ(idx->value, "key");
 }
-
-//===----------------------------------------------------------------------===//
-// List, Dict, Set Literals
-//===----------------------------------------------------------------------===//
 
 TEST(ParserTest, EmptyList) {
     auto module = parse("[]");
@@ -722,10 +661,6 @@ TEST(ParserTest, EmptyDict) {
     ASSERT_NE(dict, nullptr);
     EXPECT_TRUE(dict->entries.empty());
 }
-
-//===----------------------------------------------------------------------===//
-// Simple Statements
-//===----------------------------------------------------------------------===//
 
 TEST(ParserTest, PassStatement) {
     auto module = parse("pass");
@@ -879,10 +814,6 @@ TEST(ParserTest, FromImportMultiple) {
     EXPECT_EQ(imp->names.size(), 2u);
 }
 
-//===----------------------------------------------------------------------===//
-// Assignment Statements
-//===----------------------------------------------------------------------===//
-
 TEST(ParserTest, SimpleAssignment) {
     auto module = parse("x = 5");
     ASSERT_NE(module, nullptr);
@@ -960,10 +891,6 @@ TEST(ParserTest, AssignmentExpression) {
     ASSERT_NE(bin, nullptr);
     EXPECT_EQ(bin->op.type(), TokenType::PLUS);
 }
-
-//===----------------------------------------------------------------------===//
-// Compound Statements (Dragon brace syntax)
-//===----------------------------------------------------------------------===//
 
 TEST(ParserTest, IfStatementBrace) {
     auto module = parse("if x {\n  pass\n}");
@@ -1051,10 +978,6 @@ TEST(ParserTest, WithStatementBrace) {
     EXPECT_FALSE(withStmt->body.empty());
 }
 
-//===----------------------------------------------------------------------===//
-// Function Declaration (Dragon brace syntax)
-//===----------------------------------------------------------------------===//
-
 TEST(ParserTest, SimpleFunctionBrace) {
     auto module = parse("def foo() {\n  pass\n}");
     ASSERT_NE(module, nullptr);
@@ -1107,7 +1030,6 @@ TEST(ParserTest, FunctionWithDefaultParam) {
 }
 
 TEST(ParserTest, FunctionVarArgs) {
-    // Typing is not optional for variadics - annotate the element type.
     auto module = parse("def f(*args: int) {\n  pass\n}");
     ASSERT_NE(module, nullptr);
     auto* func = dynamic_cast<FunctionDecl*>(module->body[0].get());
@@ -1128,19 +1050,11 @@ TEST(ParserTest, FunctionKwArgs) {
 }
 
 TEST(ParserTest, BareVarArgsRequiresAnnotation) {
-    // Bare *args / **kwargs (no element type) is rejected: an unannotated
-    // variadic has no element type to monomorphize on and would silently erase
-    // every element to i64. Use `*args: Any` or a concrete element type.
     EXPECT_FALSE(parseErrors("def f(*args) {\n  pass\n}").empty());
     EXPECT_FALSE(parseErrors("def g(**kwargs) {\n  pass\n}").empty());
-    // Annotated forms are accepted; the bare `*` keyword-only separator is exempt.
     EXPECT_TRUE(parseErrors("def h(*args: Any) {\n  pass\n}").empty());
     EXPECT_TRUE(parseErrors("def k(a: int, *, b: int) -> int {\n  return b\n}").empty());
 }
-
-//===----------------------------------------------------------------------===//
-// Class Declaration
-//===----------------------------------------------------------------------===//
 
 TEST(ParserTest, SimpleClass) {
     auto module = parse("class Foo {\n  pass\n}");
@@ -1183,10 +1097,6 @@ TEST(ParserTest, ClassWithMethod) {
     ASSERT_NE(method, nullptr);
     EXPECT_EQ(method->name, "bar");
 }
-
-//===----------------------------------------------------------------------===//
-// Type Annotations
-//===----------------------------------------------------------------------===//
 
 TEST(ParserTest, SimpleTypeAnnotation) {
     auto module = parse("x: int");
@@ -1234,10 +1144,6 @@ TEST(ParserTest, UnionTypeAnnotation) {
     EXPECT_EQ(unionType->types.size(), 2u);
 }
 
-//===----------------------------------------------------------------------===//
-// Decorators
-//===----------------------------------------------------------------------===//
-
 TEST(ParserTest, DecoratedFunction) {
     auto module = parse("@staticmethod\ndef foo() {\n  pass\n}");
     ASSERT_NE(module, nullptr);
@@ -1267,10 +1173,6 @@ TEST(ParserTest, DecoratedClass) {
     ASSERT_EQ(cls->decorators.size(), 1u);
 }
 
-//===----------------------------------------------------------------------===//
-// Complex / Integration Tests
-//===----------------------------------------------------------------------===//
-
 TEST(ParserTest, PrintCall) {
     auto module = parse("print(\"hello\")");
     ASSERT_NE(module, nullptr);
@@ -1288,7 +1190,6 @@ TEST(ParserTest, PrintCall) {
 }
 
 TEST(ParserTest, VariableDeclarationAndUse) {
-    // Two separate statements
     auto module = parse("x: int = 42\nprint(x)");
     ASSERT_NE(module, nullptr);
     ASSERT_EQ(module->body.size(), 2u);
@@ -1338,7 +1239,6 @@ TEST(ParserTest, ClassWithMethods) {
     auto* cls = dynamic_cast<ClassDecl*>(module->body[0].get());
     ASSERT_NE(cls, nullptr);
     EXPECT_EQ(cls->name, "Point");
-    // Should have at least the two methods
     EXPECT_GE(cls->body.size(), 2u);
 }
 
@@ -1354,7 +1254,6 @@ TEST(ParserTest, ForWithRange) {
     auto* target = dynamic_cast<NameExpr*>(forStmt->target.get());
     ASSERT_NE(target, nullptr);
     EXPECT_EQ(target->name, "i");
-    // iterable should be a CallExpr for range(10)
     auto* call = dynamic_cast<CallExpr*>(forStmt->iterable.get());
     ASSERT_NE(call, nullptr);
 }
@@ -1399,7 +1298,6 @@ TEST(ParserTest, TryCatchFinallyFull) {
 }
 
 TEST(ParserTest, ComplexExpression) {
-    // x + y * z - w should be (x + (y * z)) - w
     auto module = parse("x + y * z - w");
     ASSERT_NE(module, nullptr);
     auto* exprStmt = dynamic_cast<ExprStmt*>(module->body[0].get());
@@ -1418,24 +1316,17 @@ TEST(ParserTest, ChainedMethodCalls) {
     auto module = parse("a.b().c()");
     ASSERT_NE(module, nullptr);
     auto* exprStmt = dynamic_cast<ExprStmt*>(module->body[0].get());
-    // Outermost should be a call to .c()
     auto* outerCall = dynamic_cast<CallExpr*>(exprStmt->expr.get());
     ASSERT_NE(outerCall, nullptr);
-    // callee should be AttributeExpr .c
     auto* attrC = dynamic_cast<AttributeExpr*>(outerCall->callee.get());
     ASSERT_NE(attrC, nullptr);
     EXPECT_EQ(attrC->attribute, "c");
-    // object of .c should be the call a.b()
     auto* innerCall = dynamic_cast<CallExpr*>(attrC->object.get());
     ASSERT_NE(innerCall, nullptr);
     auto* attrB = dynamic_cast<AttributeExpr*>(innerCall->callee.get());
     ASSERT_NE(attrB, nullptr);
     EXPECT_EQ(attrB->attribute, "b");
 }
-
-//===----------------------------------------------------------------------===//
-// Slice Parsing Tests
-//===----------------------------------------------------------------------===//
 
 TEST(ParserTest, SimpleSlice) {
     auto module = parse("x[1:3]");
@@ -1447,9 +1338,9 @@ TEST(ParserTest, SimpleSlice) {
     ASSERT_NE(sub, nullptr);
     auto* slice = dynamic_cast<SliceExpr*>(sub->index.get());
     ASSERT_NE(slice, nullptr);
-    EXPECT_NE(slice->lower, nullptr);  // 1
-    EXPECT_NE(slice->upper, nullptr);  // 3
-    EXPECT_EQ(slice->step, nullptr);   // no step
+    EXPECT_NE(slice->lower, nullptr);
+    EXPECT_NE(slice->upper, nullptr);
+    EXPECT_EQ(slice->step, nullptr);
 }
 
 TEST(ParserTest, SliceWithStep) {
@@ -1474,8 +1365,8 @@ TEST(ParserTest, SliceOpenStart) {
     ASSERT_NE(sub, nullptr);
     auto* slice = dynamic_cast<SliceExpr*>(sub->index.get());
     ASSERT_NE(slice, nullptr);
-    EXPECT_EQ(slice->lower, nullptr);   // open start
-    EXPECT_NE(slice->upper, nullptr);   // 5
+    EXPECT_EQ(slice->lower, nullptr);
+    EXPECT_NE(slice->upper, nullptr);
 }
 
 TEST(ParserTest, SliceOpenEnd) {
@@ -1486,8 +1377,8 @@ TEST(ParserTest, SliceOpenEnd) {
     ASSERT_NE(sub, nullptr);
     auto* slice = dynamic_cast<SliceExpr*>(sub->index.get());
     ASSERT_NE(slice, nullptr);
-    EXPECT_NE(slice->lower, nullptr);   // 2
-    EXPECT_EQ(slice->upper, nullptr);   // open end
+    EXPECT_NE(slice->lower, nullptr);
+    EXPECT_EQ(slice->upper, nullptr);
 }
 
 TEST(ParserTest, SliceReverse) {
@@ -1516,10 +1407,6 @@ TEST(ParserTest, SliceAllOpen) {
     EXPECT_EQ(slice->step, nullptr);
 }
 
-//===----------------------------------------------------------------------===//
-// Implicit Self (Decision 006)
-//===----------------------------------------------------------------------===//
-
 TEST(ParserTest, ImplicitSelfMethod) {
     auto module = parse(
         "class Point {\n"
@@ -1535,7 +1422,6 @@ TEST(ParserTest, ImplicitSelfMethod) {
     ASSERT_NE(method, nullptr);
     EXPECT_TRUE(method->isMethod);
     EXPECT_TRUE(method->hasImplicitSelf);
-    // Only 'other' in params - self is implicit
     EXPECT_EQ(method->params.size(), 1u);
     EXPECT_EQ(method->params[0].name, "other");
 }
@@ -1557,7 +1443,7 @@ TEST(ParserTest, ExplicitSelfInPyModeOk) {
         "class Foo:\n"
         "    def bar(self):\n"
         "        pass\n",
-        /*isDragon=*/false
+        false
     );
     ASSERT_NE(module, nullptr);
     auto* cls = dynamic_cast<ClassDecl*>(module->body[0].get());
@@ -1581,7 +1467,6 @@ TEST(ParserTest, TopLevelFunctionNotMethod) {
 }
 
 TEST(ParserTest, SelfUsableOutsideClass) {
-    // self is not a keyword - it can be used as a variable name outside classes
     auto module = parse("self: int = 42");
     ASSERT_NE(module, nullptr);
     EXPECT_FALSE(module->body.empty());
@@ -1598,22 +1483,16 @@ TEST(ParserTest, FStringParsed) {
     EXPECT_NE(str->value.find("name"), std::string::npos);
 }
 
-//===----------------------------------------------------------------------===//
-// Tuple Unpacking
-//===----------------------------------------------------------------------===//
-
 TEST(ParserTest, TupleUnpackingSimple) {
     auto module = parse("a, b = 1, 2");
     ASSERT_NE(module, nullptr);
     ASSERT_EQ(module->body.size(), 1u);
     auto* assign = dynamic_cast<AssignStmt*>(module->body[0].get());
     ASSERT_NE(assign, nullptr);
-    // First target should be a TupleExpr
     ASSERT_EQ(assign->targets.size(), 1u);
     auto* lhs = dynamic_cast<TupleExpr*>(assign->targets[0].get());
     ASSERT_NE(lhs, nullptr);
     EXPECT_EQ(lhs->elements.size(), 2u);
-    // RHS should also be a TupleExpr
     auto* rhs = dynamic_cast<TupleExpr*>(assign->value.get());
     ASSERT_NE(rhs, nullptr);
     EXPECT_EQ(rhs->elements.size(), 2u);
@@ -1650,7 +1529,6 @@ TEST(ParserTest, StarredUnpacking) {
     auto* lhs = dynamic_cast<TupleExpr*>(assign->targets[0].get());
     ASSERT_NE(lhs, nullptr);
     EXPECT_EQ(lhs->elements.size(), 2u);
-    // Second element should be StarredExpr
     auto* starred = dynamic_cast<StarredExpr*>(lhs->elements[1].get());
     ASSERT_NE(starred, nullptr);
 }
@@ -1675,10 +1553,6 @@ TEST(ParserTest, ForLoopTripleTupleTarget) {
     EXPECT_EQ(target->elements.size(), 3u);
 }
 
-//===----------------------------------------------------------------------===//
-// Set Comprehensions
-//===----------------------------------------------------------------------===//
-
 TEST(ParserTest, SetComprehension) {
     auto module = parse("{x for x in items}");
     ASSERT_NE(module, nullptr);
@@ -1700,10 +1574,6 @@ TEST(ParserTest, SetComprehensionWithCondition) {
     EXPECT_NE(comp->condition, nullptr);
 }
 
-//===----------------------------------------------------------------------===//
-// Generator Expressions
-//===----------------------------------------------------------------------===//
-
 TEST(ParserTest, GeneratorExpression) {
     auto module = parse("(x for x in items)");
     ASSERT_NE(module, nullptr);
@@ -1724,10 +1594,6 @@ TEST(ParserTest, GeneratorExpressionWithCondition) {
     ASSERT_NE(gen, nullptr);
     EXPECT_NE(gen->condition, nullptr);
 }
-
-//===----------------------------------------------------------------------===//
-// Nested Comprehensions
-//===----------------------------------------------------------------------===//
 
 TEST(ParserTest, NestedListComprehension) {
     auto module = parse("[x + y for x in a for y in b]");
@@ -1752,10 +1618,6 @@ TEST(ParserTest, NestedListCompWithCondition) {
     ASSERT_EQ(comp->extraClauses.size(), 1u);
     EXPECT_NE(comp->extraClauses[0].condition, nullptr);
 }
-
-//===----------------------------------------------------------------------===//
-// Chained Comparisons
-//===----------------------------------------------------------------------===//
 
 TEST(ParserTest, ChainedCompTwoOps) {
     auto module = parse("a < b < c");
@@ -1790,10 +1652,6 @@ TEST(ParserTest, SingleCompStillBinaryExpr) {
     EXPECT_EQ(chain, nullptr);
 }
 
-//===----------------------------------------------------------------------===//
-// Walrus Operator
-//===----------------------------------------------------------------------===//
-
 TEST(ParserTest, WalrusBasic) {
     auto module = parse("(n := 10)");
     ASSERT_NE(module, nullptr);
@@ -1803,10 +1661,6 @@ TEST(ParserTest, WalrusBasic) {
     ASSERT_NE(walrus, nullptr);
     EXPECT_EQ(walrus->name, "n");
 }
-
-//===----------------------------------------------------------------------===//
-// Positional-Only and Keyword-Only Parameters
-//===----------------------------------------------------------------------===//
 
 TEST(ParserTest, PositionalOnlyParams) {
     auto module = parse("def foo(a: int, b: int, /) -> int {\n  return a + b\n}");
@@ -1829,7 +1683,6 @@ TEST(ParserTest, KeywordOnlyParams) {
 }
 
 TEST(ParserTest, MixedParamSeparators) {
-    // def foo(a, b, /, c, *, d) - a,b positional-only, c normal, d keyword-only
     auto module = parse("def foo(a: int, b: int, /, c: int, *, d: int) -> int {\n  return a\n}");
     ASSERT_NE(module, nullptr);
     auto* func = dynamic_cast<FunctionDecl*>(module->body[0].get());
@@ -1844,12 +1697,10 @@ TEST(ParserTest, MixedParamSeparators) {
 }
 
 TEST(ParserTest, BareStarWithVarArgs) {
-    // def foo(*args, key=1) - *args is vararg, key is keyword-only
     auto module = parse("def foo(*args: int, key: int = 1) -> int {\n  return key\n}");
     ASSERT_NE(module, nullptr);
     auto* func = dynamic_cast<FunctionDecl*>(module->body[0].get());
     ASSERT_NE(func, nullptr);
-    // *args has a name, so it's a real vararg, not a kw-only separator
     EXPECT_EQ(func->kwOnlyStart, -1);
     bool hasVarArg = false;
     for (auto& p : func->params) {
@@ -1865,10 +1716,6 @@ TEST(ParserTest, DecoratorsParsed) {
     ASSERT_NE(func, nullptr);
     EXPECT_EQ(func->decorators.size(), 1u);
 }
-
-//===----------------------------------------------------------------------===//
-// Match/Case (PEP 634)
-//===----------------------------------------------------------------------===//
 
 TEST(ParserTest, MatchIntLiteralCases) {
     auto module = parse("match x {\n  case 1 { pass }\n  case 2 { pass }\n}");
@@ -1964,7 +1811,6 @@ TEST(ParserTest, MatchBoolNoneLiterals) {
 }
 
 TEST(ParserTest, MatchCommaOrPatternDrMode) {
-    // In .dr mode, comma should work as OR separator
     auto module = parse("match x {\n  case 1, 2, 3 { pass }\n}");
     ASSERT_NE(module, nullptr);
     auto* ms = dynamic_cast<MatchStmt*>(module->body[0].get());
@@ -1985,10 +1831,6 @@ TEST(ParserTest, MatchCommaOrWithWildcardDefault) {
     EXPECT_EQ(ms->cases[0].pattern.subPatterns.size(), 2u);
     EXPECT_EQ(ms->cases[1].pattern.kind, MatchPattern::Kind::Wildcard);
 }
-
-//===----------------------------------------------------------------------===//
-// Phase I: Type Alias, Exception Groups, Multiple Inheritance
-//===----------------------------------------------------------------------===//
 
 TEST(ParserTest, TypeAliasSimple) {
     auto module = parse("type Point = tuple[int, int]");
@@ -2040,12 +1882,6 @@ TEST(ParserTest, MultipleInheritanceParsed) {
     ASSERT_NE(cls, nullptr);
     EXPECT_EQ(cls->bases.size(), 2u);
 }
-
-//===----------------------------------------------------------------------===//
-// Phase J: Dual-Mode Syntax Verification (.py mode)
-//===----------------------------------------------------------------------===//
-
-// --- Match/Case in .py mode ---
 
 TEST(ParserTest, PyMatchIntLiteralCases) {
     auto module = parse(
@@ -2132,8 +1968,6 @@ TEST(ParserTest, PyMatchMultipleBodies) {
     EXPECT_EQ(ms->cases[1].body.size(), 1u);
 }
 
-// --- Type Alias in .py mode (same syntax, no blocks) ---
-
 TEST(ParserTest, PyTypeAliasSimple) {
     auto module = parse("type Point = tuple[int, int]", false);
     ASSERT_NE(module, nullptr);
@@ -2150,8 +1984,6 @@ TEST(ParserTest, PyTypeAliasUnion) {
     ASSERT_NE(alias, nullptr);
     EXPECT_EQ(alias->name, "Number");
 }
-
-// --- Exception Groups in .py mode ---
 
 TEST(ParserTest, PyExceptStarParsed) {
     auto module = parse(
@@ -2182,8 +2014,6 @@ TEST(ParserTest, PyExceptStarWithAs) {
     EXPECT_EQ(tryStmt->handlers[0].name, "eg");
 }
 
-// --- Multiple Inheritance in .py mode ---
-
 TEST(ParserTest, PyMultipleInheritanceParsed) {
     auto module = parse(
         "class Child(Base1, Base2):\n"
@@ -2194,8 +2024,6 @@ TEST(ParserTest, PyMultipleInheritanceParsed) {
     ASSERT_NE(cls, nullptr);
     EXPECT_EQ(cls->bases.size(), 2u);
 }
-
-// --- Class with methods in .py mode (explicit self) ---
 
 TEST(ParserTest, PyClassMethodExplicitSelf) {
     auto module = parse(
@@ -2212,8 +2040,6 @@ TEST(ParserTest, PyClassMethodExplicitSelf) {
     EXPECT_EQ(cls->body.size(), 2u);
 }
 
-// --- With statement in .py mode ---
-
 TEST(ParserTest, PyWithStatement) {
     auto module = parse(
         "with open(\"test.txt\", \"r\") as f:\n"
@@ -2226,8 +2052,6 @@ TEST(ParserTest, PyWithStatement) {
     EXPECT_NE(ws->items[0].optionalVars, nullptr);
 }
 
-// --- For loop in .py mode ---
-
 TEST(ParserTest, PyForLoop) {
     auto module = parse(
         "for i in range(10):\n"
@@ -2237,8 +2061,6 @@ TEST(ParserTest, PyForLoop) {
     auto* fs = dynamic_cast<ForStmt*>(module->body[0].get());
     ASSERT_NE(fs, nullptr);
 }
-
-// --- Try/except/else/finally in .py mode ---
 
 TEST(ParserTest, PyTryExceptElseFinally) {
     auto module = parse(
@@ -2260,8 +2082,6 @@ TEST(ParserTest, PyTryExceptElseFinally) {
     EXPECT_FALSE(tryStmt->finallyBody.empty());
 }
 
-// --- Function with positional-only and keyword-only params in .py mode ---
-
 TEST(ParserTest, PyFunctionPosOnlyKwOnly) {
     auto module = parse(
         "def foo(a, b, /, c, *, d, e):\n"
@@ -2275,8 +2095,6 @@ TEST(ParserTest, PyFunctionPosOnlyKwOnly) {
     EXPECT_EQ(fn->params.size(), 5u);
 }
 
-// --- Walrus operator in .py mode ---
-
 TEST(ParserTest, PyWalrusOperator) {
     auto module = parse(
         "if (n := 10) > 5:\n"
@@ -2286,12 +2104,6 @@ TEST(ParserTest, PyWalrusOperator) {
     auto* ifStmt = dynamic_cast<IfStmt*>(module->body[0].get());
     ASSERT_NE(ifStmt, nullptr);
 }
-
-//===----------------------------------------------------------------------===//
-// Decision 009: const, static, self() constructors
-//===----------------------------------------------------------------------===//
-
-// --- const ---
 
 TEST(ParserTest, ConstDeclaration) {
     auto module = parse("const MAX: int = 100");
@@ -2313,18 +2125,14 @@ TEST(ParserTest, ConstInFunction) {
 }
 
 TEST(ParserTest, ConstNotInPyMode) {
-    // In .py mode, 'const' is just an identifier - should parse as expression
     auto module = parse("const = 5", false);
     ASSERT_NE(module, nullptr);
 }
 
 TEST(ParserTest, ConstRequiresInit) {
-    // const without = should produce a parser error
     auto errs = parseErrors("const X: int");
     EXPECT_FALSE(errs.empty());
 }
-
-// --- static ---
 
 TEST(ParserTest, StaticField) {
     auto module = parse("class Foo {\n  static x: int = 0\n}");
@@ -2361,12 +2169,9 @@ TEST(ParserTest, StaticConst) {
 }
 
 TEST(ParserTest, StaticNotInPyMode) {
-    // In .py mode, 'static' is just an identifier
     auto module = parse("static = 5", false);
     ASSERT_NE(module, nullptr);
 }
-
-// --- def() anonymous constructor ---
 
 TEST(ParserTest, DefCtorBasic) {
     auto module = parse("class Foo {\n  def(x: int) {\n    self.x = x\n  }\n}");
@@ -2409,7 +2214,6 @@ TEST(ParserTest, DefCtorMultiple) {
 }
 
 TEST(ParserTest, DefCtorWithDefInit) {
-    // Mixing def() and def __init__() - both get __init__ name
     auto module = parse(
         "class Foo {\n"
         "  def(x: int) {\n"
@@ -2430,12 +2234,8 @@ TEST(ParserTest, DefCtorWithDefInit) {
     EXPECT_EQ(fn0->constructorIndex, 0);
     EXPECT_EQ(fn1->constructorIndex, 1);
     EXPECT_TRUE(fn0->isConstructor);
-    EXPECT_FALSE(fn1->isConstructor); // def __init__ is NOT isConstructor
+    EXPECT_FALSE(fn1->isConstructor);
 }
-
-//===----------------------------------------------------------------------===//
-// extern "C" FFI Tests
-//===----------------------------------------------------------------------===//
 
 TEST(ParserTest, ExternCSingleFunc) {
     auto module = parse(
@@ -2501,22 +2301,17 @@ TEST(ParserTest, ExternCWithPtrType) {
 }
 
 TEST(ParserTest, ExternCNotInPyMode) {
-    // extern keyword should not be parsed in .py mode
     auto module = parse(
         "extern = 42\n",
         false);
     ASSERT_NE(module, nullptr);
-    // Should parse as an assignment (extern is just an identifier in .py mode)
     EXPECT_GE(module->body.size(), 1u);
 }
-
-// D052 process-lane extern: extern "python"/"golang"/"rust" ... from "path"
 
 TEST(ParserTest, ProcessExternSynthesizesWrapper) {
     auto module = parse(
         "extern \"golang\" def resize(w: int, h: int) -> Img from \"./imgtool\"\n");
     ASSERT_NE(module, nullptr);
-    // Injected ffi/json imports must precede the wrapper def in the body.
     ASSERT_EQ(module->body.size(), 3u);
     auto* ffiImport = dynamic_cast<FromImportStmt*>(module->body[0].get());
     ASSERT_NE(ffiImport, nullptr);
@@ -2527,16 +2322,15 @@ TEST(ParserTest, ProcessExternSynthesizesWrapper) {
     auto* fn = dynamic_cast<FunctionDecl*>(module->body[2].get());
     ASSERT_NE(fn, nullptr);
     EXPECT_EQ(fn->name, "resize");
-    EXPECT_FALSE(fn->isExtern);              // a real def with a synthesized body
-    EXPECT_EQ(fn->externLang, "golang");     // metadata for `dragon ffi sync`
+    EXPECT_FALSE(fn->isExtern);
+    EXPECT_EQ(fn->externLang, "golang");
     EXPECT_EQ(fn->externPath, "./imgtool");
     EXPECT_FALSE(fn->body.empty());
-    // Body ends in `return sidecar_call[Img](...)` (the warm framed transport).
     auto* ret = dynamic_cast<ReturnStmt*>(fn->body.back().get());
     ASSERT_NE(ret, nullptr);
     auto* call = dynamic_cast<CallExpr*>(ret->value.get());
     ASSERT_NE(call, nullptr);
-    ASSERT_EQ(call->args.size(), 3u);  // argv, body, blobs
+    ASSERT_EQ(call->args.size(), 3u);
     auto* sub = dynamic_cast<SubscriptExpr*>(call->callee.get());
     ASSERT_NE(sub, nullptr);
     auto* scName = dynamic_cast<NameExpr*>(sub->object.get());
@@ -2559,8 +2353,6 @@ TEST(ParserTest, ProcessExternUnknownLangRejected) {
 }
 
 TEST(ParserTest, ProcessExternBytesCrossAsBlobs) {
-    // bytes params compile (they ride as raw blobs); a bytes RETURN routes
-    // through sidecar_call_bytes instead of the generic decode path.
     auto module = parse(
         "extern \"python\" def double(img: bytes, tag: str) -> bytes from \"x.py\"\n");
     ASSERT_NE(module, nullptr);
@@ -2589,10 +2381,6 @@ TEST(ParserTest, ProcessExternRequiresReturnType) {
     ASSERT_FALSE(errs.empty());
     EXPECT_NE(errs[0].message.find("return type"), std::string::npos);
 }
-
-//===----------------------------------------------------------------------===//
-// @staticmethod / @classmethod decorator wiring tests
-//===----------------------------------------------------------------------===//
 
 TEST(ParserTest, StaticmethodDecoratorPy) {
     auto module = parse(
@@ -2631,7 +2419,6 @@ TEST(ParserTest, ClassmethodDecoratorPy) {
 }
 
 TEST(ParserTest, StaticmethodDecoratorDr) {
-    // @staticmethod should also work in .dr mode
     auto module = parse(
         "class Foo {\n"
         "  @staticmethod\n"
@@ -2649,8 +2436,6 @@ TEST(ParserTest, StaticmethodDecoratorDr) {
 }
 
 TEST(ParserTest, NonMethodDecoratorNoEffect) {
-    // @staticmethod on a module-level function should NOT set isStatic
-    // (it's only valid on methods)
     auto module = parse(
         "@staticmethod\n"
         "def foo(x: int) -> int {\n"
@@ -2663,12 +2448,7 @@ TEST(ParserTest, NonMethodDecoratorNoEffect) {
     EXPECT_FALSE(func->isMethod);
 }
 
-// ============================================================
-// Dict Ergonomics (Decision 012 Parts 1-3)
-// ============================================================
-
 TEST(ParserTest, BareKeyDict) {
-    // .dr mode: bare identifier keys become string literals
     auto module = parse("{name: 1, age: 2}");
     ASSERT_NE(module, nullptr);
     auto* exprStmt = dynamic_cast<ExprStmt*>(module->body[0].get());
@@ -2676,7 +2456,6 @@ TEST(ParserTest, BareKeyDict) {
     auto* dict = dynamic_cast<DictExpr*>(exprStmt->expr.get());
     ASSERT_NE(dict, nullptr);
     EXPECT_EQ(dict->entries.size(), 2u);
-    // Keys should be StringLiteral, not NameExpr
     auto* key0 = dynamic_cast<StringLiteral*>(dict->entries[0].first.get());
     ASSERT_NE(key0, nullptr);
     EXPECT_EQ(key0->value, "name");
@@ -2686,18 +2465,15 @@ TEST(ParserTest, BareKeyDict) {
 }
 
 TEST(ParserTest, BareKeyDictMixedWithQuoted) {
-    // Mix bare keys with quoted keys
     auto module = parse("{name: 1, \"content-type\": 2}");
     ASSERT_NE(module, nullptr);
     auto* exprStmt = dynamic_cast<ExprStmt*>(module->body[0].get());
     auto* dict = dynamic_cast<DictExpr*>(exprStmt->expr.get());
     ASSERT_NE(dict, nullptr);
     EXPECT_EQ(dict->entries.size(), 2u);
-    // First key: bare -> StringLiteral
     auto* key0 = dynamic_cast<StringLiteral*>(dict->entries[0].first.get());
     ASSERT_NE(key0, nullptr);
     EXPECT_EQ(key0->value, "name");
-    // Second key: quoted -> StringLiteral
     auto* key1 = dynamic_cast<StringLiteral*>(dict->entries[1].first.get());
     ASSERT_NE(key1, nullptr);
     EXPECT_EQ(key1->value, "content-type");
@@ -2716,32 +2492,27 @@ TEST(ParserTest, BareKeyDictSingleEntry) {
 }
 
 TEST(ParserTest, ComputedKeyDict) {
-    // Computed key: (expr) evaluates the expression
     auto module = parse("{(x): 1, name: 2}");
     ASSERT_NE(module, nullptr);
     auto* exprStmt = dynamic_cast<ExprStmt*>(module->body[0].get());
     auto* dict = dynamic_cast<DictExpr*>(exprStmt->expr.get());
     ASSERT_NE(dict, nullptr);
     EXPECT_EQ(dict->entries.size(), 2u);
-    // First key: computed -> NameExpr (variable reference)
     auto* key0 = dynamic_cast<NameExpr*>(dict->entries[0].first.get());
     ASSERT_NE(key0, nullptr);
     EXPECT_EQ(key0->name, "x");
-    // Second key: bare -> StringLiteral
     auto* key1 = dynamic_cast<StringLiteral*>(dict->entries[1].first.get());
     ASSERT_NE(key1, nullptr);
     EXPECT_EQ(key1->value, "name");
 }
 
 TEST(ParserTest, PyModeDictNotBareKey) {
-    // .py mode: bare identifiers are variable lookups, NOT string keys
     auto module = parse("{name: 1}", false);
     ASSERT_NE(module, nullptr);
     auto* exprStmt = dynamic_cast<ExprStmt*>(module->body[0].get());
     auto* dict = dynamic_cast<DictExpr*>(exprStmt->expr.get());
     ASSERT_NE(dict, nullptr);
     EXPECT_EQ(dict->entries.size(), 1u);
-    // Key should be NameExpr (variable lookup), NOT StringLiteral
     auto* key = dynamic_cast<NameExpr*>(dict->entries[0].first.get());
     ASSERT_NE(key, nullptr);
     EXPECT_EQ(key->name, "name");
@@ -2758,10 +2529,6 @@ TEST(ParserTest, BareKeyDictWithNumericValue) {
     ASSERT_NE(key0, nullptr);
     EXPECT_EQ(key0->value, "status");
 }
-
-//===----------------------------------------------------------------------===//
-// Template Expression Tests
-//===----------------------------------------------------------------------===//
 
 TEST(ParserTest, TemplateExprParsed) {
     auto module = parse("x: str = template {hello world}");
@@ -2836,13 +2603,6 @@ TEST(ParserTest, UntypedTemplateHasEmptyContentType) {
     EXPECT_EQ(tmpl->body, "hello");
 }
 
-//===----------------------------------------------------------------------===//
-// defer: contextual statement keyword. `defer <call>` parses to a DeferStmt
-// whose operand is a direct call; anything else after `defer` is a parse
-// error. `defer` stays a legal identifier everywhere else (the stdlib http
-// router has a method named defer).
-//===----------------------------------------------------------------------===//
-
 TEST(ParserTest, DeferFunctionCallParses) {
     auto module = parse(
         "def f(n: int) -> None { pass }\n"
@@ -2886,8 +2646,6 @@ TEST(ParserTest, DeferBinaryExprRejected) {
     EXPECT_FALSE(errs.empty());
 }
 
-// `defer` is NOT a reserved word: assignment, call, attribute, and method
-// uses all still parse.
 TEST(ParserTest, DeferRemainsUsableAsIdentifier) {
     auto module = parse(
         "def defer_task(defer: int) -> int { return defer }\n"
@@ -2898,14 +2656,6 @@ TEST(ParserTest, DeferRemainsUsableAsIdentifier) {
     ASSERT_NE(module, nullptr);
 }
 
-//===----------------------------------------------------------------------===//
-// Template body scanning (parseTemplateBody)
-//===----------------------------------------------------------------------===//
-
-// A bare `!!` with no `{`/`}` after it is literal text (the JS boolean-
-// coercion idiom `!!x`), not an escape prefix. The literal-run scanner used
-// to break at any `!!` while the dispatcher consumed nothing, so this input
-// spun forever. Terminating at all IS the regression assertion.
 TEST(ParserTest, TemplateBodyDoubleBangIsLiteral) {
     SourceLocation loc;
     auto parts = Parser::parseTemplateBody("var a = !!b;", loc, true);
@@ -2922,9 +2672,6 @@ TEST(ParserTest, TemplateBodyDoubleBangAtEndOfBody) {
     EXPECT_EQ(parts[0].literal, "a !!");
 }
 
-// Runs of 3+ bangs: away from a brace they are pure literal text; abutting
-// a `{` or `}` the LAST two bangs form the escape and the rest stay literal
-// (`!!!{` -> `!!{`, `!!!!{` -> `!!!{`). Pins the greedy-leftmost scan.
 TEST(ParserTest, TemplateBodyBangRuns) {
     SourceLocation loc;
     auto render = [&](const std::string& body) {
@@ -2941,8 +2688,6 @@ TEST(ParserTest, TemplateBodyBangRuns) {
     EXPECT_EQ(render("k !!!} m"), "k !} m");
 }
 
-// The documented escapes are exactly `!!{` -> `!{` and `!!}` -> `}`; they
-// must keep working with the tightened literal-run break condition.
 TEST(ParserTest, TemplateBodyEscapesUnchanged) {
     SourceLocation loc;
     auto parts = Parser::parseTemplateBody("x !!{y!!} z", loc, true);
@@ -2954,8 +2699,6 @@ TEST(ParserTest, TemplateBodyEscapesUnchanged) {
     EXPECT_EQ(joined, "x !{y} z");
 }
 
-// An unterminated `!{` used to sub-parse the ragged tail and silently drop
-// it from the rendered output on failure. It is a reported error now.
 TEST(ParserTest, TemplateBodyUnterminatedInterpolationIsError) {
     SourceLocation loc;
     std::vector<std::string> errs;
@@ -2966,7 +2709,6 @@ TEST(ParserTest, TemplateBodyUnterminatedInterpolationIsError) {
     EXPECT_TRUE(parts.back().parseFailed);
 }
 
-// An interpolation body that is not valid Dragon was silently dropped too.
 TEST(ParserTest, TemplateBodyUnparsableInterpolationIsError) {
     SourceLocation loc;
     std::vector<std::string> errs;
@@ -2983,8 +2725,6 @@ TEST(ParserTest, TemplateBodyEmptyInterpolationIsError) {
     EXPECT_NE(errs[0].find("empty '!{}'"), std::string::npos);
 }
 
-// End-to-end through the real parser: a bad interpolation inside an inline
-// `template { ... }` must surface as a parser diagnostic, not vanish.
 TEST(ParserTest, InlineTemplateBadInterpolationSurfacesError) {
     auto diags = parseErrors("x: str = template {a !{1 +} b}");
     bool hasError = false;

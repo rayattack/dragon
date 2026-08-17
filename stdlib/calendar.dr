@@ -23,14 +23,12 @@ const NOVEMBER: int = 11
 const DECEMBER: int = 12
 
 def _rjust(s: str, width: int) -> str {
-    # Right-justify s in a field of given width, padding with spaces.
     const slen: int = len(s)
     if slen >= width { return s }
     return " " * (width - slen) + s
 }
 
 def _center(s: str, width: int) -> str {
-    # Center s in a field of given width, padding with spaces.
     const slen: int = len(s)
     if slen >= width { return s }
     const total_pad: int = width - slen
@@ -39,7 +37,6 @@ def _center(s: str, width: int) -> str {
 }
 
 def day_name(d: int) -> str {
-    # 0->"Monday" ... 6->"Sunday"
     if d == 0 { return "Monday" }
     if d == 1 { return "Tuesday" }
     if d == 2 { return "Wednesday" }
@@ -51,7 +48,6 @@ def day_name(d: int) -> str {
 }
 
 def day_abbr(d: int) -> str {
-    # 0->"Mon" ... 6->"Sun"
     if d == 0 { return "Mon" }
     if d == 1 { return "Tue" }
     if d == 2 { return "Wed" }
@@ -63,7 +59,6 @@ def day_abbr(d: int) -> str {
 }
 
 def month_name(m: int) -> str {
-    # 1->"January" ... 12->"December"
     if m == 1 { return "January" }
     if m == 2 { return "February" }
     if m == 3 { return "March" }
@@ -80,7 +75,6 @@ def month_name(m: int) -> str {
 }
 
 def month_abbr(m: int) -> str {
-    # 1->"Jan" ... 12->"Dec"
     if m == 1 { return "Jan" }
     if m == 2 { return "Feb" }
     if m == 3 { return "Mar" }
@@ -105,7 +99,6 @@ def isleap(year: int) -> bool {
 }
 
 def leapdays(y1: int, y2: int) -> int {
-    # Leap years in [y1, y2) via inclusion-exclusion: div4 - div100 + div400.
     y1 = y1 - 1
     y2 = y2 - 1
     const a: int = y2 // 4 - y1 // 4
@@ -127,7 +120,6 @@ def _days_in_month(year: int, month: int) -> int {
 }
 
 def weekday(year: int, month: int, day: int) -> int {
-    # Sakamoto's algorithm (native 0=Sunday), adjusted to return 0=Monday ... 6=Sunday.
     y: int = year
     const t: list[int] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4]
     if month < 3 { y = y - 1 }
@@ -136,7 +128,6 @@ def weekday(year: int, month: int, day: int) -> int {
 }
 
 def monthrange(year: int, month: int) -> list[int] {
-    # Return [weekday_of_first_day, number_of_days_in_month].
     const first_day: int = weekday(year, month, 1)
     const ndays: int = _days_in_month(year, month)
     result: list[int] = [first_day, ndays]
@@ -144,7 +135,6 @@ def monthrange(year: int, month: int) -> list[int] {
 }
 
 def monthcalendar(year: int, month: int) -> list[list[int]] {
-    # Matrix of weeks, each a list of 7 ints (Mon=0 ... Sun=6); days outside the month are 0.
     const mr: list[int] = monthrange(year, month)
     const first_weekday: int = mr[0]
     const ndays: int = mr[1]
@@ -172,7 +162,6 @@ def monthcalendar(year: int, month: int) -> list[list[int]] {
 
 
 def formatmonth(year: int, month: int) -> str {
-    # Multi-line calendar: centered month+year header, day abbreviations, then weeks.
     const header: str = f"{month_name(month)} {year}"
     result: str = _center(header, 20) + "\n"
     result = result + "Mo Tu We Th Fr Sa Su\n"
@@ -200,7 +189,6 @@ def formatmonth(year: int, month: int) -> str {
 }
 
 def formatyear(year: int) -> str {
-    # Return a string with 12 month calendars for the given year.
     result: str = _center(str(year), 20) + "\n\n"
     m: int = 1
     while m <= 12 {

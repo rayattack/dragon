@@ -1,8 +1,3 @@
-/// Dragon Runtime - bytes-aware whole-file IO. Split out of the compression TU
-/// so file IO links without dragging libz/libzstd. Unlike the legacy
-/// `dragon_file_read_bytes` (a DragonString masquerading as bytes), these
-/// helpers operate exclusively on DragonBytes - no codec touches the buffer.
-
 #include "runtime_internal.h"
 
 #include <cstdio>
@@ -10,11 +5,9 @@
 
 extern "C" {
 
-/// Read the entire file at `path` into a fresh DragonBytes. Raises OSError
-/// on open/read failure (matching CPython's `Path.read_bytes()` contract).
 DragonBytes* dragon_read_file_bytes(const char* path) {
     if (!path) {
-        dragon_raise_exc_cstr(50 /* OSError */, "read_file_bytes: null path");
+        dragon_raise_exc_cstr(50 , "read_file_bytes: null path");
         return nullptr;
     }
     FILE* f = std::fopen(path, "rb");
@@ -48,8 +41,6 @@ DragonBytes* dragon_read_file_bytes(const char* path) {
     return out;
 }
 
-/// Write `data` to `path`, replacing any existing file. Returns the byte
-/// count written.
 int64_t dragon_write_file_bytes(const char* path, DragonBytes* data) {
     if (!path) {
         dragon_raise_exc_cstr(50, "write_file_bytes: null path");
@@ -64,16 +55,12 @@ int64_t dragon_write_file_bytes(const char* path, DragonBytes* data) {
     if (data && data->len > 0) {
         size_t w = std::fwrite(data->data, 1, (size_t)data->len, f);
         n = (int64_t)w;
-        // A short fwrite means the write failed (e.g. ENOSPC). Callers ignore
-        // the return value, so a partial count would masquerade as success.
         if ((int64_t)w != data->len) {
             std::fclose(f);
             dragon_raise_exc_cstr(50, "write_file_bytes: short write (disk full?)");
             return 0;
         }
     }
-    // fclose flushes the stdio buffer; a disk-full error can surface only
-    // here, so an unchecked fclose is the same silent-truncation bug.
     if (std::fclose(f) != 0) {
         dragon_raise_exc_cstr(50, "write_file_bytes: close failed (write not flushed)");
         return 0;
@@ -81,8 +68,6 @@ int64_t dragon_write_file_bytes(const char* path, DragonBytes* data) {
     return n;
 }
 
-/// Write `data` (raw bytes, no codec) to an open FILE*. Backs Writer.write(bytes);
-/// the str overload encodes UTF-8, but binary data must land verbatim.
 int64_t dragon_file_write_bytes(void* handle, DragonBytes* data) {
     FILE* f = (FILE*)handle;
     if (!f || !data || data->len <= 0) return 0;
@@ -90,16 +75,12 @@ int64_t dragon_file_write_bytes(void* handle, DragonBytes* data) {
     return (int64_t)w;
 }
 
-/// Read up to `size` bytes of text from an open FILE*, decoded as UTF-8. If
-/// `size` lands mid-multibyte-sequence, up to 3 extra continuation bytes are
-/// read so the final code point is whole (fixes File.read splitting a char).
 const char* dragon_file_read_text(void* handle, int64_t size) {
     FILE* f = (FILE*)handle;
     if (!f || size <= 0) return dragon_string_alloc("", 0);
-    uint8_t* buf = (uint8_t*)dragon_xmalloc((size_t)size + 4);  // headroom for top-up
+    uint8_t* buf = (uint8_t*)dragon_xmalloc((size_t)size + 4);
     size_t n = std::fread(buf, 1, (size_t)size, f);
     if (n > 0) {
-        // Walk back over up to 3 continuation bytes (10xxxxxx) to the lead byte.
         size_t i = n, cont = 0;
         while (i > 0 && (buf[i - 1] & 0xC0) == 0x80 && cont < 3) { i--; cont++; }
         if (i > 0) {
@@ -123,9 +104,6 @@ const char* dragon_file_read_text(void* handle, int64_t size) {
     return result;
 }
 
-/// Write a str to an open FILE* as UTF-8. A bare `fwrite(data, 1, len(data), h)`
-/// is wrong for non-ASCII text: `len` is the code-point count but the buffer is
-/// UCS-4, so it emitted truncated garbage; encoding to UTF-8 first is the fix.
 int64_t dragon_file_write_text(void* handle, const char* s) {
     FILE* f = (FILE*)handle;
     if (!f || !s) return 0;
@@ -137,4 +115,4 @@ int64_t dragon_file_write_text(void* handle, const char* s) {
     return (int64_t)w;
 }
 
-} // extern "C"
+}

@@ -90,7 +90,6 @@ def countOf(seq: list[int], val: int) -> int {
 }
 
 def indexOf(seq: list[int], val: int) -> int {
-    # First index where seq[i] == val. ValueError if not found.
     i: int = 0
     while i < len(seq) {
         if seq[i] == val { return i }
@@ -104,7 +103,6 @@ def length_hint(seq: list[int], default: int = 0) -> int { return len(seq) }
 def getitem(seq: list[int], idx: int) -> int { return seq[idx] }
 def setitem(seq: list[int], idx: int, val: int) -> None { seq[idx] = val }
 
-# Pure-functional shape: each returns the new value, matching `a += b` semantics.
 def iadd(a: int, b: int) -> int { return a + b }
 def isub(a: int, b: int) -> int { return a - b }
 def imul(a: int, b: int) -> int { return a * b }

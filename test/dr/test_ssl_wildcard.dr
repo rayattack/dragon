@@ -1,6 +1,3 @@
-# Pre-fix: vendored mbedTLS x509_check_wildcard had no minimum-label rule, so a
-# leaf with SAN "*.com" verified against any second-level host (e.g. evil.com).
-
 from unittest import TestCase, main
 from socket import TcpListener, TcpStream
 from ssl import SSLContext, SSLSocket, SSLCertVerificationError

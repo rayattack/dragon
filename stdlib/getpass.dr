@@ -20,23 +20,16 @@ EINTR, or error - it can never be left half-applied by Dragon control flow.
 
 import warnings
 
-# Read one line with echo disabled, restoring terminal state on every path.
-# Degrades to an echoing read when fd 0 is not a tty.
 extern "C" def dragon_getpass_read(prompt: str) -> str
 
-# getpwuid(getuid())->pw_name; "" when the uid has no passwd entry.
 extern "C" def dragon_getpass_pwname() -> str
 
-# libc: 1 when fd refers to a terminal, 0 otherwise.
 extern "C" def isatty(fd: intc) -> intc
 
-# libc: read an environment variable; returns "" when unset.
 extern "C" def getenv(name: str) -> str
 
-# Dragon's warnings module matches categories by string name (see warnings.dr).
 const GetPassWarning: str = "GetPassWarning"
 
-# Stdin fd - the stream getpass checks for a tty.
 const _STDIN_FD: int = 0
 
 def getpass(prompt: str = "Password: ") -> str {
@@ -54,7 +47,6 @@ def getpass(prompt: str = "Password: ") -> str {
         return dragon_getpass_read(prompt)
     }
 
-    # No tty: cannot suppress echo. Warn (CPython parity) and fall back to a plain read.
     warnings.warn("Can not control echo on the terminal.", GetPassWarning)
     return input(prompt)
 }

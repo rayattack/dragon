@@ -1,6 +1,3 @@
-# Pre-fix: unescape decoded only &#32..&#126 so "&#233;" came back unchanged,
-# and "&#xZZ;" decoded as "&#0;" because junk hex digits mapped to 0.
-
 from unittest import TestCase, main
 from html import escape, unescape
 

@@ -31,9 +31,6 @@ class Sink {
 }
 
 
-# A constructor whose `own` param is CONSUMED (read) but not stored into a
-# field. The caller moved its +1 in, so the ctor owns it and its scope exit
-# must release it - the same leak class as a method, on the constructor path.
 class Discard {
     seen: int = 0
 
@@ -43,11 +40,8 @@ class Discard {
 }
 
 
-# The move-out guard: an `own` param a NON-constructor method moves into an own
-# field. The move nulls the slot so scope exit does not free it (that would be
-# a double-free once the field owns it); the field-overwrite next iteration
-# must drop the previous value. Fixing the consume-and-drop leak must not
-# regress this into a double-free.
+# Move-out guard: an own param moved into an own field nulls the slot (scope exit must not free
+# it) and the field overwrite drops the previous value; the leak fix must not become a double-free.
 class Keeper {
     own held: str
 

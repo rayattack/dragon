@@ -28,7 +28,6 @@ def getrecursionlimit() -> int {
 }
 
 def argv() -> list[str] {
-    # Process argv as a list: [executable, arg1, arg2, ...].
     const result: list[str] = []
     const n: int = dragon_argv_count()
     for i in range(n) {

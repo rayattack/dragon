@@ -21,7 +21,6 @@ class FunctoolsTests(TestCase) {
     def test_reduce_init() {
         self.assertEqual(reduce_init(lambda (a: int, b: int) -> int { return a * b },
                                      [1, 2, 3, 4], 1), 24)
-        # init participates even for an empty sequence
         self.assertEqual(reduce_init(lambda (a: int, b: int) -> int { return a + b },
                                      [], 42), 42)
     }

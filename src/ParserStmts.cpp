@@ -1,5 +1,3 @@
-/// Dragon Parser - statement & declaration parsing. Split from Parser.cpp
-/// (file-size policy, pure code motion); shared pimpl state + literal/docstring helpers live in ParserImpl.h.
 #include "dragon/Parser.h"
 #include "ParserImpl.h"
 #include <cctype>
@@ -13,8 +11,6 @@ namespace dragon {
 std::unique_ptr<Stmt> Parser::statement() {
     ParserRecursionGuard guard(impl_->recursionDepth);
     if (impl_->recursionDepth > Impl::kMaxRecursionDepth) {
-        // Deeply nested compound statements (if/if/if/...) would otherwise
-        // blow the C stack. Return PassStmt placeholder and synchronize.
         error(peek(), "statement nesting too deep");
         auto stub = std::make_unique<PassStmt>();
         stub->setLocation(peek().location());
@@ -30,7 +26,6 @@ std::unique_ptr<Stmt> Parser::statement() {
             if (decl) {
                 if (auto* func = dynamic_cast<FunctionDecl*>(decl.get())) {
                     func->decorators = std::move(decorators);
-                    // Wire @staticmethod / @classmethod / @property / @<name>.setter on class methods
                     if (func->isMethod) {
                         for (auto& dec : func->decorators) {
                             if (auto* n = dynamic_cast<NameExpr*>(dec.get())) {
@@ -48,8 +43,6 @@ std::unique_ptr<Stmt> Parser::statement() {
                                 if (a->attribute == "setter") {
                                     if (auto* base = dynamic_cast<NameExpr*>(a->object.get())) {
                                         func->propertySetterFor = base->name;
-                                        // Python convention names getter and setter identically.
-                                        // Mangle the setter so it occupies a distinct vtable slot.
                                         func->name = base->name + "__setter";
                                     }
                                 }
@@ -80,35 +73,27 @@ std::unique_ptr<Stmt> Parser::statement() {
     if (check(TokenType::TRY)) return tryStatement();
     if (check(TokenType::WITH)) return withStatement();
 
-    // Contextual keyword: "thread" is only a keyword at statement start
     if (check(TokenType::IDENTIFIER) && current().lexeme() == "thread")
         return threadStatement();
 
-    // Contextual keyword: "enum" is only a keyword at statement start in
-    // .dr mode. Lowered at parse time to a ClassDecl with static int fields.
     if (impl_->options.isDragonFile &&
         check(TokenType::IDENTIFIER) && current().lexeme() == "enum" &&
         peek().type() == TokenType::IDENTIFIER) {
         return enumDeclaration();
     }
 
-    // Contextual keyword: `own f: T` sole-owner field marker (docs/001-memory).
-    // Two consecutive identifiers can't start any other statement, so one-token lookahead disambiguates and `own` still works as a plain name.
     if (impl_->options.isDragonFile &&
         check(TokenType::IDENTIFIER) && current().lexeme() == "own" &&
         peekNext().type() == TokenType::IDENTIFIER) {
         return ownDeclaration();
     }
 
-    // Contextual keyword: `defer f(...)` scope-exit call (fire's other half).
-    // One-token lookahead disambiguates it, so `defer` still works as a name (e.g. the http router's defer method).
     if (impl_->options.isDragonFile &&
         check(TokenType::IDENTIFIER) && current().lexeme() == "defer" &&
         peekNext().type() == TokenType::IDENTIFIER) {
         return deferStatement();
     }
 
-    // Dragon-specific keywords (.dr mode only)
     if (impl_->options.isDragonFile && check(TokenType::EXTERN)) {
         return externDeclaration();
     }
@@ -119,15 +104,12 @@ std::unique_ptr<Stmt> Parser::statement() {
         return staticDeclaration();
     }
 
-    // Soft keyword: match at statement position
     if (check(TokenType::IDENTIFIER) && peek().lexeme() == "match") {
         return matchStatement();
     }
 
-    // Soft keyword: `type` at statement position. `=` after the name is a
-    // PEP 695 alias; `{` or `(` opens an ADR 054 contract declaration.
     if (check(TokenType::IDENTIFIER) && peek().lexeme() == "type") {
-        advance(); // skip 'type'
+        advance();
         auto typeLoc = previous().location();
         std::string typeName = std::string(
             consume(TokenType::IDENTIFIER, "Expect type name").lexeme());
@@ -165,13 +147,11 @@ std::unique_ptr<Stmt> Parser::simpleStatement() {
 
 std::unique_ptr<Stmt> Parser::compoundStatement() { return statement(); }
 
-// Assignment RHS that may be a MOVE: `self._f = own x` transfers the binding's
-// +1 into an own field (docs/002 2.4/2.8); `x = own + 1` still works for a variable named own.
 std::unique_ptr<Expr> Parser::maybeMoveRhs() {
     if (impl_->options.isDragonFile && check(TokenType::IDENTIFIER) &&
         current().lexeme() == "own" &&
         peekNext().type() == TokenType::IDENTIFIER) {
-        advance();  // 'own'
+        advance();
         auto moved = std::make_unique<NameExpr>();
         moved->name = std::string(
             consume(TokenType::IDENTIFIER,
@@ -183,11 +163,10 @@ std::unique_ptr<Expr> Parser::maybeMoveRhs() {
                   "(its container owns it) - bind it first or dub it");
         return moved;
     }
-    // `mine = dub base` - a fresh, independent, priced copy (docs/002 2.7).
     if (impl_->options.isDragonFile && check(TokenType::IDENTIFIER) &&
         current().lexeme() == "dub" &&
         peekNext().type() == TokenType::IDENTIFIER) {
-        advance();  // 'dub'
+        advance();
         auto dubbed = std::make_unique<NameExpr>();
         dubbed->name = std::string(
             consume(TokenType::IDENTIFIER,
@@ -200,15 +179,11 @@ std::unique_ptr<Expr> Parser::maybeMoveRhs() {
 }
 
 std::unique_ptr<Stmt> Parser::expressionStatement() {
-    // Statement location = its first token, captured before any tokens are
-    // consumed and stamped on every node built below, so assignment diagnostics never fall back to 0:0.
     SourceLocation stmtLoc = peek().location();
-    // Check for starred expression at start: *name, ... = ...
     std::unique_ptr<Expr> expr;
     if (check(TokenType::STAR) && !check(TokenType::STAR_EQUAL)) {
-        // Peek: if STAR followed by IDENTIFIER followed by COMMA or EQUAL, it's starred unpacking
         size_t saved = impl_->current;
-        advance(); // consume STAR
+        advance();
         if (check(TokenType::IDENTIFIER)) {
             auto name = std::make_unique<NameExpr>();
             name->name = std::string(advance().lexeme());
@@ -216,7 +191,6 @@ std::unique_ptr<Stmt> Parser::expressionStatement() {
             starred->value = std::move(name);
             expr = std::move(starred);
         } else {
-            // Not a starred target, rewind
             impl_->current = saved;
             expr = expression();
         }
@@ -225,19 +199,14 @@ std::unique_ptr<Stmt> Parser::expressionStatement() {
     }
     if (!expr) return nullptr;
 
-    // Check for comma after first expression - could be tuple unpacking target
-    // e.g. a, b = 1, 2 or a, *rest = [1, 2, 3]
     if (check(TokenType::COMMA) && !check(TokenType::NEWLINE)) {
-        // Look ahead: is there an = sign after the comma-separated list?
-        // We speculatively collect comma-separated targets
         auto tuple = std::make_unique<TupleExpr>();
         tuple->elements.push_back(std::move(expr));
         while (match(TokenType::COMMA)) {
             if (check(TokenType::EQUAL) || check(TokenType::NEWLINE) ||
                 check(TokenType::RIGHT_PAREN) || isAtEnd()) break;
-            // Handle *name in target
             if (check(TokenType::STAR)) {
-                advance(); // consume STAR
+                advance();
                 auto inner = primary();
                 auto starred = std::make_unique<StarredExpr>();
                 starred->value = std::move(inner);
@@ -250,8 +219,6 @@ std::unique_ptr<Stmt> Parser::expressionStatement() {
             auto stmt = std::make_unique<AssignStmt>();
             stmt->setLocation(stmtLoc);
             stmt->targets.push_back(std::move(tuple));
-            // Parse RHS (also comma-separated as tuple). After `=` the parser is
-            // committed to a RHS expression, so a NEWLINE before it is cosmetic continuation (Python multi-line assignment).
             skipNewlines();
             auto rhsFirst = expression();
             if (check(TokenType::COMMA)) {
@@ -267,8 +234,6 @@ std::unique_ptr<Stmt> Parser::expressionStatement() {
             }
             return stmt;
         }
-        // No = found - it's just a tuple expression statement
-        // (rare but valid: `a, b` as a bare expression)
         if (tuple->elements.size() == 1) {
             auto exprStmt = std::make_unique<ExprStmt>();
             exprStmt->setLocation(stmtLoc);
@@ -285,8 +250,6 @@ std::unique_ptr<Stmt> Parser::expressionStatement() {
         auto stmt = std::make_unique<AssignStmt>();
         stmt->setLocation(stmtLoc);
         stmt->targets.push_back(std::move(expr));
-        // Parse RHS (also comma-separated as tuple). After `=` the parser is
-        // committed to a RHS expression, so a NEWLINE before it is cosmetic continuation (Python multi-line assignment).
         skipNewlines();
         auto rhsFirst = maybeMoveRhs();
         if (check(TokenType::COMMA)) {
@@ -309,8 +272,6 @@ std::unique_ptr<Stmt> Parser::expressionStatement() {
         stmt->target = std::move(expr);
         stmt->annotation = parseType();
         if (match(TokenType::EQUAL)) {
-            // Same rationale as above: `=` commits to a RHS, so allow a
-            // line break between the `=` and the start of the expression.
             skipNewlines();
             stmt->value = maybeMoveRhs();
         }
@@ -329,7 +290,6 @@ std::unique_ptr<Stmt> Parser::expressionStatement() {
         stmt->setLocation(stmtLoc);
         stmt->target = std::move(expr);
         stmt->op = op;
-        // The aug-assign operator commits to a RHS just like `=` does.
         skipNewlines();
         stmt->value = expression();
         return stmt;
@@ -389,10 +349,8 @@ std::unique_ptr<Stmt> Parser::nonlocalStatement() {
     return stmt;
 }
 
-// defer <call>: schedule a direct call for scope exit; the operand must BE a
-// call (function/method/bound-closure), so anything value-shaped is rejected here, not later.
 std::unique_ptr<Stmt> Parser::deferStatement() {
-    Token kw = advance();  // the 'defer' identifier
+    Token kw = advance();
     auto stmt = std::make_unique<DeferStmt>();
     stmt->setLocation(kw.location());
     auto operand = expression();
@@ -406,7 +364,7 @@ std::unique_ptr<Stmt> Parser::deferStatement() {
 
 std::unique_ptr<Stmt> Parser::deleteStatement() {
     auto stmt = std::make_unique<DeleteStmt>();
-    stmt->setLocation(previous().location());  // the 'del' keyword
+    stmt->setLocation(previous().location());
     do {
         stmt->targets.push_back(expression());
     } while (match(TokenType::COMMA));
@@ -442,12 +400,8 @@ std::unique_ptr<Stmt> Parser::fromImportStatement() {
     }
     consume(TokenType::IMPORT, "Expect 'import'");
     if (match(TokenType::STAR)) return stmt;
-    // Python parity: `from X import (a, b, c,)` spans multiple lines with a
-    // trailing comma; the lexer already suppresses NEWLINE inside `()`, so we just accept `(`, tolerate the trailing comma, and consume `)`.
     bool parenthesized = match(TokenType::LEFT_PAREN);
     do {
-        // Trailing comma support: `from os import (a, b,)` exits the loop
-        // here once we see the closing paren after a comma.
         if (parenthesized && check(TokenType::RIGHT_PAREN)) break;
         ImportStmt::Alias alias;
         alias.name = std::string(consume(TokenType::IDENTIFIER, "Expect name").lexeme());
@@ -463,8 +417,6 @@ std::unique_ptr<Stmt> Parser::ifStatement() {
     auto stmt = std::make_unique<IfStmt>();
     stmt->condition = expression();
     stmt->thenBody = parseBlock();
-    // Accepts both `elif` and C/Java/JS-style `else if` (also valid Python); also
-    // skips NEWLINE between `}` and a following `else`/`elif` so multi-line and same-line forms both work.
     auto skipNewlines = [&]() {
         while (match(TokenType::NEWLINE) || match(TokenType::SEMICOLON)) {}
     };
@@ -478,15 +430,13 @@ std::unique_ptr<Stmt> Parser::ifStatement() {
             continue;
         }
         if (check(TokenType::ELSE) && peekNext().type() == TokenType::IF) {
-            advance(); // ELSE
-            advance(); // IF
+            advance();
+            advance();
             auto cond = expression();
             auto body = parseBlock();
             stmt->elifClauses.emplace_back(std::move(cond), std::move(body));
             continue;
         }
-        // Not an elif/else-if continuation - rewind so newlines don't get eaten
-        // when there's no else clause (the block parser depends on them as statement separators).
         impl_->current = saved;
         break;
     }
@@ -512,10 +462,7 @@ std::unique_ptr<Stmt> Parser::whileStatement() {
 std::unique_ptr<Stmt> Parser::forStatement() {
     consume(TokenType::FOR, "Expect 'for'");
     auto stmt = std::make_unique<ForStmt>();
-    // Parse target as a primary expression (name, tuple) -- not full expression
-    // to avoid consuming 'in' as a comparison operator
     auto target = primary();
-    // Check for comma: for a, b in ... (tuple unpacking)
     if (check(TokenType::COMMA)) {
         auto tuple = std::make_unique<TupleExpr>();
         tuple->elements.push_back(std::move(target));
@@ -528,12 +475,10 @@ std::unique_ptr<Stmt> Parser::forStatement() {
         stmt->target = std::move(target);
     }
     consume(TokenType::IN, "Expect 'in'");
-    // `for x in dub names` - snapshot iteration (docs/002 2.7/E17): the loop walks
-    // a priced copy evaluated once, so mutating the original inside the body is well-defined.
     if (impl_->options.isDragonFile && check(TokenType::IDENTIFIER) &&
         current().lexeme() == "dub" &&
         peekNext().type() == TokenType::IDENTIFIER) {
-        advance();  // 'dub'
+        advance();
         auto dubbed = std::make_unique<NameExpr>();
         dubbed->name = std::string(
             consume(TokenType::IDENTIFIER,
@@ -556,7 +501,6 @@ std::unique_ptr<Stmt> Parser::tryStatement() {
 
     while (match(TokenType::EXCEPT) || match(TokenType::CATCH)) {
         TryStmt::ExceptHandler handler;
-        // Check for except* (PEP 654 exception groups)
         if (match(TokenType::STAR)) {
             handler.isStar = true;
         }
@@ -564,11 +508,9 @@ std::unique_ptr<Stmt> Parser::tryStatement() {
             if (check(TokenType::IDENTIFIER)) {
                 std::string first = std::string(advance().lexeme());
                 if (match(TokenType::COLON)) {
-                    // (name: Type) - Dragon typed-binding form.
                     handler.name = first;
                     handler.type = parseType();
                 } else {
-                    // (Type) or (T1, T2, ...) - match any of the listed types.
                     auto t = std::make_unique<NamedTypeExpr>();
                     t->name = first;
                     handler.type = std::move(t);
@@ -579,7 +521,6 @@ std::unique_ptr<Stmt> Parser::tryStatement() {
                 }
             }
             consume(TokenType::RIGHT_PAREN, "Expect ')'");
-            // `except (A, B) as e`
             if (match(TokenType::AS)) {
                 handler.name = std::string(consume(TokenType::IDENTIFIER, "Expect name").lexeme());
             }
@@ -607,8 +548,6 @@ std::unique_ptr<Stmt> Parser::withStatement() {
         WithStmt::WithItem item;
         item.contextExpr = expression();
         if (match(TokenType::AS)) item.optionalVars = expression();
-        // ADR 054 gives expression-position `as` to conformance casts, so `open()
-        // as f` parses as AsCastExpr(open(), {f}); a bare single name here is always the with-binder (braced `as {A}` stays a cast), so unwrap it back.
         if (!item.optionalVars) {
             if (auto* cast = dynamic_cast<AsCastExpr*>(item.contextExpr.get())) {
                 if (cast->contracts.size() == 1 && !cast->fromBracedSet) {
@@ -627,7 +566,6 @@ std::unique_ptr<Stmt> Parser::withStatement() {
 }
 
 std::unique_ptr<Stmt> Parser::threadStatement() {
-    // "thread" is a contextual keyword - consumed as IDENTIFIER, not THREAD token
     consume(TokenType::IDENTIFIER, "Expect 'thread'");
     auto stmt = std::make_unique<ThreadStmt>();
     stmt->setLocation(previous().location());
@@ -638,8 +576,6 @@ std::unique_ptr<Stmt> Parser::threadStatement() {
 std::unique_ptr<Stmt> Parser::constDeclaration() {
     consume(TokenType::CONST, "Expect 'const'");
     auto loc = previous().location();
-    // One or more `name: type` pairs: a single pair is an ordinary const decl,
-    // two or more is a const tuple-unpack (`const q: int, r: int = divmod(7, 2)`), every target annotated.
     std::vector<std::unique_ptr<NameExpr>> names;
     std::vector<std::unique_ptr<TypeExpr>> annotations;
     do {
@@ -663,8 +599,6 @@ std::unique_ptr<Stmt> Parser::constDeclaration() {
         return stmt;
     }
 
-    // Multi-target: lower onto the existing tuple-unpack AssignStmt path with a
-    // synthesized tuple[...] annotation, so Sema/TypeChecker/CodeGen reuse the one unpack implementation.
     auto tup = std::make_unique<TupleExpr>();
     tup->setLocation(loc);
     for (auto& n : names) tup->elements.push_back(std::move(n));
@@ -682,10 +616,8 @@ std::unique_ptr<Stmt> Parser::constDeclaration() {
 }
 
 std::unique_ptr<Stmt> Parser::ownDeclaration() {
-    // `own f: T [= value]` - sole-owner field marker (docs/001-memory.md).
-    // The `own` identifier itself was matched contextually by statement().
     auto loc = current().location();
-    advance();  // consume 'own'
+    advance();
     auto name = std::make_unique<NameExpr>();
     name->name = std::string(
         consume(TokenType::IDENTIFIER, "Expect field name after 'own'").lexeme());
@@ -709,19 +641,16 @@ std::unique_ptr<Stmt> Parser::staticDeclaration() {
     consume(TokenType::STATIC, "Expect 'static'");
     auto loc = previous().location();
 
-    // static const name: type = value
     if (check(TokenType::CONST)) {
         auto stmt = constDeclaration();
         if (auto* ann = dynamic_cast<AnnAssignStmt*>(stmt.get())) {
             ann->isStatic = true;
         } else {
-            // constDeclaration returned the multi-target unpack form.
             error("'static const' declares a single name; unpack is not supported here");
         }
         return stmt;
     }
 
-    // static def method() { ... }
     if (check(TokenType::DEF) || check(TokenType::ASYNC)) {
         auto decl = functionDeclaration();
         if (auto* func = dynamic_cast<FunctionDecl*>(decl.get())) {
@@ -731,7 +660,6 @@ std::unique_ptr<Stmt> Parser::staticDeclaration() {
         return decl;
     }
 
-    // static name: type = value (static field)
     if (check(TokenType::IDENTIFIER)) {
         auto name = std::make_unique<NameExpr>();
         name->name = std::string(consume(TokenType::IDENTIFIER, "Expect field name after 'static'").lexeme());
@@ -759,8 +687,6 @@ std::unique_ptr<Stmt> Parser::externDeclaration() {
     consume(TokenType::EXTERN, "Expect 'extern'");
     auto loc = previous().location();
 
-    // Language tag string (lexeme includes quotes): "C" is the in-process lane,
-    // "python"/"golang"/"rust" the D052 process lane.
     auto stripQuotes = [](const std::string& s) -> std::string {
         if (s.size() >= 2 && (s.front() == '"' || s.front() == '\''))
             return s.substr(1, s.size() - 2);
@@ -780,19 +706,17 @@ std::unique_ptr<Stmt> Parser::externDeclaration() {
               "\" (supported: \"C\", \"python\", \"golang\", \"rust\")");
         return nullptr;
     }
-    advance(); // consume the language tag
+    advance();
     if (lang != "C") return parseProcessExternDef(lang);
 
-    // Form 1: extern "C" from "lib" { def ...; def ...; }
     if (check(TokenType::FROM)) {
-        advance(); // consume 'from'
+        advance();
         if (!check(TokenType::STRING)) {
             error("Expect library name string after 'from'");
             return nullptr;
         }
         std::string libName = stripQuotes(std::string(advance().lexeme()));
         consume(TokenType::LEFT_BRACE, "Expect '{' after library name");
-        // Parse multiple extern function signatures inside the block
         std::vector<std::unique_ptr<Stmt>> decls;
         while (!check(TokenType::RIGHT_BRACE) && !isAtEnd()) {
             while (match(TokenType::NEWLINE) || match(TokenType::SEMICOLON)) {}
@@ -805,14 +729,12 @@ std::unique_ptr<Stmt> Parser::externDeclaration() {
             error("Empty extern block");
             return nullptr;
         }
-        // Stash extra declarations for the module to pick up
         for (size_t i = 1; i < decls.size(); i++) {
             impl_->pendingStmts.push_back(std::move(decls[i]));
         }
         return std::move(decls[0]);
     }
 
-    // Form 2: extern "C" def func(params) -> ret
     return parseExternFuncSig("");
 }
 
@@ -824,8 +746,6 @@ std::unique_ptr<Stmt> Parser::parseExternFuncSig(const std::string& libHint) {
     decl->setLocation(loc);
     decl->isExtern = true;
     decl->externLib = libHint;
-    // The C-symbol slot accepts an IDENTIFIER or any Dragon keyword whose lexeme
-    // is a valid C identifier (e.g. `raise`); if it's a keyword, `as ALIAS` is then required so Dragon code has a usable name.
     auto isCIdentLike = [](const std::string& s) -> bool {
         if (s.empty()) return false;
         if (!(std::isalpha(static_cast<unsigned char>(s[0])) || s[0] == '_'))
@@ -841,8 +761,6 @@ std::unique_ptr<Stmt> Parser::parseExternFuncSig(const std::string& libHint) {
     if (check(TokenType::IDENTIFIER)) {
         cSymbol = std::string(advance().lexeme());
     } else if (isCIdentLike(std::string(peek().lexeme()))) {
-        // Lexer classified this as a keyword (e.g. RAISE) but the lexeme is
-        // a valid C identifier - accept it as the external symbol name.
         nameIsKeyword = true;
         cSymbol = std::string(advance().lexeme());
     } else {
@@ -856,8 +774,6 @@ std::unique_ptr<Stmt> Parser::parseExternFuncSig(const std::string& libHint) {
     if (match(TokenType::ARROW)) {
         decl->returnType = parseType();
     }
-    // `as DRAGON_NAME` lets a C symbol colliding with a Dragon keyword bind under
-    // an alias: decl->name is Dragon-visible, externSymbol keeps the real C symbol. Mandatory iff the C name is a keyword; optional renaming sugar otherwise.
     if (match(TokenType::AS)) {
         std::string alias = std::string(consume(TokenType::IDENTIFIER, "Expect alias name").lexeme());
         decl->name = alias;
@@ -865,15 +781,13 @@ std::unique_ptr<Stmt> Parser::parseExternFuncSig(const std::string& libHint) {
     } else if (nameIsKeyword) {
         error("extern 'C' symbol '" + cSymbol + "' is a Dragon keyword; "
               "add `as <alias>` so Dragon code can call it");
-        decl->name = cSymbol; // best-effort recovery
+        decl->name = cSymbol;
     } else {
         decl->name = cSymbol;
     }
-    // No body for extern declarations
     return decl;
 }
 
-// D052 process-lane extern AST builders (file-local).
 namespace {
 
 std::unique_ptr<NameExpr> ffiName(const std::string& n, SourceLocation loc) {
@@ -882,7 +796,6 @@ std::unique_ptr<NameExpr> ffiName(const std::string& n, SourceLocation loc) {
 std::unique_ptr<Expr> ffiStr(const std::string& s, SourceLocation loc) {
     auto e = std::make_unique<StringLiteral>(); e->value = s; e->setLocation(loc); return e;
 }
-// recv.method(args...) as a statement.
 std::unique_ptr<Stmt> ffiCallStmt(const std::string& recv, const std::string& method,
                                   std::vector<std::unique_ptr<Expr>> args, SourceLocation loc) {
     auto attr = std::make_unique<AttributeExpr>();
@@ -898,8 +811,6 @@ std::unique_ptr<Stmt> ffiCallStmt(const std::string& recv, const std::string& me
     s->setLocation(loc);
     return s;
 }
-// A TypeExpr as a value expression (`list[User]` -> subscript) for explicit
-// generic args; null for shapes the process lane does not carry (unions, callables).
 std::unique_ptr<Expr> ffiTypeExprToExpr(const TypeExpr* t) {
     if (auto* nt = dynamic_cast<const NamedTypeExpr*>(t)) return ffiName(nt->name, t->location());
     if (auto* gt = dynamic_cast<const GenericTypeExpr*>(t)) {
@@ -926,10 +837,8 @@ std::unique_ptr<Expr> ffiTypeExprToExpr(const TypeExpr* t) {
     return nullptr;
 }
 
-}  // namespace
+}
 
-// extern "python"|"golang"|"rust" def NAME(params) -> RET from "path": body
-// synthesized here so the module carries its ffi/json imports before the resolver runs.
 std::unique_ptr<Stmt> Parser::parseProcessExternDef(const std::string& lang) {
     consume(TokenType::DEF, "Expect 'def' in extern declaration");
     auto loc = previous().location();
@@ -977,7 +886,6 @@ std::unique_ptr<Stmt> Parser::parseProcessExternDef(const std::string& lang) {
         return nt && nt->name == "bytes";
     };
 
-    // Resolve the path relative to the declaring file at compile time.
     std::string resolvedPath = decl->externPath;
     {
         std::filesystem::path p(decl->externPath);
@@ -988,8 +896,6 @@ std::unique_ptr<Stmt> Parser::parseProcessExternDef(const std::string& lang) {
         if (!ec) resolvedPath = abs.lexically_normal().string();
     }
 
-    // Body: <w> = JsonWriter(); the args object keyed by param name; a framed
-    // sidecar_call[RET]. Fresh-name locals so user params can never collide.
     auto freshName = [&](std::string seed) -> std::string {
         for (bool clash = true; clash;) {
             clash = false;
@@ -1019,7 +925,7 @@ std::unique_ptr<Stmt> Parser::parseProcessExternDef(const std::string& lang) {
         std::vector<std::unique_ptr<Expr>> none;
         decl->body.push_back(ffiCallStmt(wn, "begin_object", std::move(none), loc));
     }
-    std::vector<std::string> blobParams;  // bytes params, in declaration order
+    std::vector<std::string> blobParams;
     for (auto& p : decl->params) {
         {
             std::vector<std::unique_ptr<Expr>> kargs;
@@ -1027,7 +933,6 @@ std::unique_ptr<Stmt> Parser::parseProcessExternDef(const std::string& lang) {
             decl->body.push_back(ffiCallStmt(wn, "key", std::move(kargs), loc));
         }
         if (isBytesType(p.type.get())) {
-            // bytes ride raw as blob i; the body carries {"$blob": i} in its place.
             std::vector<std::unique_ptr<Expr>> none0;
             decl->body.push_back(ffiCallStmt(wn, "begin_object", std::move(none0), loc));
             std::vector<std::unique_ptr<Expr>> bkey;
@@ -1067,7 +972,6 @@ std::unique_ptr<Stmt> Parser::parseProcessExternDef(const std::string& lang) {
         decl->body.push_back(ffiCallStmt(wn, "end_object", std::move(none), loc));
     }
     {
-        // <bn>: list[bytes] = [<bytes params in order>]
         auto lb = std::make_unique<ListExpr>();
         for (auto& n : blobParams) lb->elements.push_back(ffiName(n, loc));
         lb->setLocation(loc);
@@ -1111,7 +1015,6 @@ std::unique_ptr<Stmt> Parser::parseProcessExternDef(const std::string& lang) {
     };
     auto scCall = std::make_unique<CallExpr>();
     if (isBytesType(decl->returnType.get())) {
-        // bytes return: the reply's first blob, raw - no decode[T] involved.
         scCall->callee = ffiName("sidecar_call_bytes", loc);
     } else {
         auto retTypeE = ffiTypeExprToExpr(decl->returnType.get());
@@ -1134,8 +1037,6 @@ std::unique_ptr<Stmt> Parser::parseProcessExternDef(const std::string& lang) {
     ret->setLocation(loc);
     decl->body.push_back(std::move(ret));
 
-    // Inject the ffi/json imports once per module, BEFORE the wrapper in body
-    // order (codegen registers aliases at visit time): return one, pend the rest.
     if (!impl_->ffiProcessImportsInjected) {
         impl_->ffiProcessImportsInjected = true;
         auto mkFrom = [&](const std::string& mod,
@@ -1154,67 +1055,51 @@ std::unique_ptr<Stmt> Parser::parseProcessExternDef(const std::string& lang) {
     return decl;
 }
 
-// selfConstructor() removed - def() syntax replaces self() (Decision 009 update)
-
 std::unique_ptr<Stmt> Parser::matchStatement() {
-    // Consume 'match' (it's an IDENTIFIER used as soft keyword)
-    advance(); // skip 'match'
+    advance();
     auto stmt = std::make_unique<MatchStmt>();
     stmt->setLocation(previous().location());
     stmt->subject = expression();
 
-    // In .dr mode: match subject { case ... { } case ... { } }
-    // In .py mode: match subject:\n case ...:
     if (impl_->options.isDragonFile) {
         consume(TokenType::LEFT_BRACE, "Expect '{' after match subject");
-        // Forward-progress invariant: consume()/statement()/parsePattern() can all
-        // bottom out without advancing, so an unguarded loop would spin forever; synchronize and watch the cursor in both loops to prevent it.
         while (!check(TokenType::RIGHT_BRACE) && !isAtEnd()) {
             size_t caseLoopStart = impl_->current;
             while (match(TokenType::NEWLINE) || match(TokenType::SEMICOLON)) {}
             if (check(TokenType::RIGHT_BRACE)) break;
-            // Expect 'case' (soft keyword)
             if (!check(TokenType::IDENTIFIER) || peek().lexeme() != "case") {
                 error("Expect 'case' in match block");
                 break;
             }
-            advance(); // skip 'case'
+            advance();
             MatchStmt::MatchCase matchCase;
             matchCase.pattern = parsePattern();
-            // Optional guard: if expr
             if (check(TokenType::IF)) {
                 advance();
                 matchCase.guard = expression();
             }
-            // Case body must be brace-delimited (`case p { ... }`); the colon form
-            // is unsupported - report it, synchronize past the bad token, and stop parsing further cases.
             if (!check(TokenType::LEFT_BRACE)) {
                 error("Expect '{' after case pattern");
                 synchronize();
                 break;
             }
-            advance(); // consume '{'
+            advance();
             while (!check(TokenType::RIGHT_BRACE) && !isAtEnd()) {
                 while (match(TokenType::NEWLINE) || match(TokenType::SEMICOLON)) {}
                 if (check(TokenType::RIGHT_BRACE)) break;
                 auto s = statement();
                 if (s) matchCase.body.push_back(std::move(s));
-                else if (!isAtEnd()) advance(); // statement() may not advance on error
+                else if (!isAtEnd()) advance();
             }
             consume(TokenType::RIGHT_BRACE, "Expect '}' after case body");
             stmt->cases.push_back(std::move(matchCase));
-            // Backstop: if a case parse consumed nothing (pattern and body both
-            // bottomed out), force progress so the outer loop can never spin on the same token.
             if (impl_->current == caseLoopStart) {
-                // Invariant: a parsed case consumes at least `case`; no progress means
-                // a grammar gap, so surface it and stop rather than silently skip a token.
                 error("malformed case in match block");
                 break;
             }
         }
         consume(TokenType::RIGHT_BRACE, "Expect '}' after match block");
     } else {
-        // .py mode: colon + indented block of cases
         consume(TokenType::COLON, "Expect ':' after match subject");
         match(TokenType::NEWLINE);
         consume(TokenType::INDENT, "Expect indented block after match");
@@ -1226,22 +1111,16 @@ std::unique_ptr<Stmt> Parser::matchStatement() {
                 error("Expect 'case' in match block");
                 break;
             }
-            advance(); // skip 'case'
+            advance();
             MatchStmt::MatchCase matchCase;
             matchCase.pattern = parsePattern();
-            // Optional guard: if expr
             if (check(TokenType::IF)) {
                 advance();
                 matchCase.guard = expression();
             }
-            // Case body: colon + indented block
             matchCase.body = parseBlock();
             stmt->cases.push_back(std::move(matchCase));
-            // Backstop: guarantee forward progress even if pattern/body parsing
-            // bottomed out on a bad token without advancing (see .dr branch).
             if (impl_->current == caseLoopStart) {
-                // See the .dr branch: no progress means a grammar gap; surface it
-                // and stop, rather than silently skipping a token.
                 error("malformed case in match block");
                 break;
             }
@@ -1252,8 +1131,6 @@ std::unique_ptr<Stmt> Parser::matchStatement() {
 }
 
 MatchPattern Parser::parsePattern(bool allowCommaOr) {
-    // Same recursion cap as expression()/statement(): nested sequence patterns
-    // recurse with no other bound, so a deeply nested pattern would otherwise overflow the stack and SIGSEGV the compiler.
     ParserRecursionGuard guard(impl_->recursionDepth);
     if (impl_->recursionDepth > Impl::kMaxRecursionDepth) {
         error(peek(), "pattern nesting too deep");
@@ -1262,10 +1139,8 @@ MatchPattern Parser::parsePattern(bool allowCommaOr) {
         tooDeep.kind = MatchPattern::Kind::Wildcard;
         return tooDeep;
     }
-    // Class pattern: `TypeName(...)` / `pkg.Class(...)`, currently a type test only;
-    // field destructuring parses but is rejected downstream (clean error, not a miscompile).
     auto parseClassPattern = [&](const std::string& className) -> MatchPattern {
-        advance();  // consume '('
+        advance();
         MatchPattern p;
         p.kind = MatchPattern::Kind::Class;
         p.name = className;
@@ -1276,8 +1151,8 @@ MatchPattern Parser::parsePattern(bool allowCommaOr) {
                 if (check(TokenType::EQUAL)) {
                     error("keyword class patterns (e.g. `Point(x=0)`) are not "
                           "yet supported; use `case TypeName()` or a guard");
-                    advance();             // consume '='
-                    parsePattern(false);   // discard the value pattern
+                    advance();
+                    parsePattern(false);
                 } else {
                     p.subPatterns.push_back(std::move(sub));
                 }
@@ -1287,17 +1162,13 @@ MatchPattern Parser::parsePattern(bool allowCommaOr) {
         return p;
     };
 
-    // Or pattern: p1 | p2 | p3 (or p1, p2, p3 in .dr mode)
-    // Parse primary pattern first, then check for | or comma
     auto parsePrimaryPattern = [&]() -> MatchPattern {
-        // Wildcard: _
         if (check(TokenType::IDENTIFIER) && peek().lexeme() == "_") {
             advance();
             MatchPattern p;
             p.kind = MatchPattern::Kind::Wildcard;
             return p;
         }
-        // Sequence pattern: [p1, p2, ...]
         if (check(TokenType::LEFT_BRACKET)) {
             advance();
             MatchPattern p;
@@ -1312,7 +1183,6 @@ MatchPattern Parser::parsePattern(bool allowCommaOr) {
             consume(TokenType::RIGHT_BRACKET, "Expect ']' after sequence pattern");
             return p;
         }
-        // Sequence pattern: (p1, p2, ...)
         if (check(TokenType::LEFT_PAREN)) {
             advance();
             MatchPattern p;
@@ -1327,7 +1197,6 @@ MatchPattern Parser::parsePattern(bool allowCommaOr) {
             consume(TokenType::RIGHT_PAREN, "Expect ')' after sequence pattern");
             return p;
         }
-        // Literal patterns: numbers, strings, True, False, None
         if (check(TokenType::INTEGER) || check(TokenType::FLOAT)) {
             auto lit = primary();
             MatchPattern p;
@@ -1349,7 +1218,6 @@ MatchPattern Parser::parsePattern(bool allowCommaOr) {
             p.literal = std::move(lit);
             return p;
         }
-        // Negative number literal: -42
         if (check(TokenType::MINUS)) {
             auto unary = expression();
             MatchPattern p;
@@ -1357,11 +1225,8 @@ MatchPattern Parser::parsePattern(bool allowCommaOr) {
             p.literal = std::move(unary);
             return p;
         }
-        // Capture, Value (dotted name like Color.RED), or Class (`Name(...)`)
         if (check(TokenType::IDENTIFIER)) {
             std::string name = std::string(advance().lexeme());
-            // Dotted name: a value pattern (Color.RED) or a dotted class
-            // pattern (pkg.Class(...)).
             if (check(TokenType::DOT)) {
                 auto nameExpr = std::make_unique<NameExpr>();
                 nameExpr->name = name;
@@ -1378,17 +1243,13 @@ MatchPattern Parser::parsePattern(bool allowCommaOr) {
                     cur = std::move(attr);
                     full += "." + attrName;
                 }
-                // pkg.Class(...) - a class pattern with a dotted name.
                 if (check(TokenType::LEFT_PAREN)) return parseClassPattern(full);
-                // Color.RED - a value pattern.
                 MatchPattern p;
                 p.kind = MatchPattern::Kind::Value;
                 p.literal = std::move(cur);
                 return p;
             }
-            // Class pattern: Name(...)
             if (check(TokenType::LEFT_PAREN)) return parseClassPattern(name);
-            // Capture pattern: name
             MatchPattern p;
             p.kind = MatchPattern::Kind::Capture;
             p.name = name;
@@ -1402,8 +1263,6 @@ MatchPattern Parser::parsePattern(bool allowCommaOr) {
 
     auto first = parsePrimaryPattern();
 
-    // Check for Or pattern: pattern | pattern (both modes)
-    // In .dr mode, comma also serves as OR separator at top level: case 1, 2, 3
     auto isOrSep = [&]() -> bool {
         if (check(TokenType::PIPE)) return true;
         if (allowCommaOr && impl_->options.isDragonFile && check(TokenType::COMMA)) return true;
@@ -1428,7 +1287,6 @@ std::unique_ptr<Stmt> Parser::functionDeclaration() {
     consume(TokenType::DEF, "Expect 'def'");
     decl->setLocation(previous().location());
 
-    // def() in .dr class body = anonymous constructor (becomes __init__)
     if (impl_->inClassBody && impl_->options.isDragonFile &&
         check(TokenType::LEFT_PAREN)) {
         decl->name = "__init__";
@@ -1438,14 +1296,11 @@ std::unique_ptr<Stmt> Parser::functionDeclaration() {
     } else {
         decl->name = std::string(consume(TokenType::IDENTIFIER, "Expect function name").lexeme());
     }
-    // D044 - optional PEP 695 type-parameter list `def f[T](...)`. Parsed
-    // between the name and the parameter list (`[` here is unambiguous).
     decl->typeParams = parseTypeParams();
     consume(TokenType::LEFT_PAREN, "Expect '('");
     decl->params = parseParameters();
     consume(TokenType::RIGHT_PAREN, "Expect ')'");
 
-    // Extract positional-only (/) and keyword-only (bare *) separators
     {
         std::vector<Parameter> cleaned;
         int realIdx = 0;
@@ -1468,7 +1323,6 @@ std::unique_ptr<Stmt> Parser::functionDeclaration() {
         decl->returnType = parseType();
     }
 
-    // Mark methods and enforce implicit self in .dr mode
     if (impl_->inClassBody) {
         decl->isMethod = true;
         if (impl_->options.isDragonFile) {
@@ -1491,8 +1345,6 @@ std::unique_ptr<Stmt> Parser::functionDeclaration() {
         }
     }
 
-    // Clear inClassBody while parsing the body so a nested `def` isn't misclassified
-    // as a method itself; inClassBody tracks direct membership, not transitive enclosure.
     bool savedInClassForBody = impl_->inClassBody;
     impl_->inClassBody = false;
     decl->body = parseBlock();
@@ -1506,8 +1358,6 @@ std::unique_ptr<Stmt> Parser::classDeclaration() {
     auto decl = std::make_unique<ClassDecl>();
     decl->setLocation(previous().location());
     decl->name = std::string(consume(TokenType::IDENTIFIER, "Expect class name").lexeme());
-    // D044 - optional PEP 695 type-parameter list `class Foo[T]`. Parsed before
-    // the base list; a `[` directly after the class name is unambiguous.
     decl->typeParams = parseTypeParams();
     if (match(TokenType::LEFT_PAREN)) {
         if (!check(TokenType::RIGHT_PAREN)) {
@@ -1515,8 +1365,6 @@ std::unique_ptr<Stmt> Parser::classDeclaration() {
         }
         consume(TokenType::RIGHT_PAREN, "Expect ')'");
     }
-    // ADR 054 producer promise: `class Dog(Animal) -> Amazing, Speaker { }`. The
-    // comma list is delimited by `->` and body `{`, so it needs no braces; each name must resolve to a contract (TypeChecker enforces).
     if (impl_->options.isDragonFile && match(TokenType::ARROW)) {
         do {
             decl->promises.push_back(std::string(consume(
@@ -1530,7 +1378,6 @@ std::unique_ptr<Stmt> Parser::classDeclaration() {
     impl_->inClassBody = savedInClass;
     decl->docstring = extractDocstring(decl->body);
 
-    // Assign constructor indices to __init__ overloads
     int ctorIdx = 0;
     for (auto& stmt : decl->body) {
         if (auto* fd = dynamic_cast<FunctionDecl*>(stmt.get())) {
@@ -1543,8 +1390,6 @@ std::unique_ptr<Stmt> Parser::classDeclaration() {
     return decl;
 }
 
-/// ADR 054: parse a contract declaration body (`type`/name already consumed;
-/// cursor sits on `(` or `{`). Bodiless `def name(params) -> ret` signatures only - fields, statements, bodies, and defaults are compile errors.
 std::unique_ptr<Stmt> Parser::contractDeclaration(std::string name) {
     auto decl = std::make_unique<ContractDecl>();
     decl->name = std::move(name);
@@ -1568,7 +1413,7 @@ std::unique_ptr<Stmt> Parser::contractDeclaration(std::string name) {
             synchronize();
             continue;
         }
-        advance();  // consume 'def'
+        advance();
         auto method = std::make_unique<FunctionDecl>();
         method->setLocation(previous().location());
         method->name = std::string(consume(
@@ -1600,11 +1445,9 @@ std::unique_ptr<Stmt> Parser::contractDeclaration(std::string name) {
     return decl;
 }
 
-/// Parse `enum Color { RED, GREEN, BLUE }` (members auto-number from 0; an
-/// explicit value resets the counter). Lowered to `class Name { static M: int = V ... }` so class infra handles storage, lookup, and codegen.
 std::unique_ptr<Stmt> Parser::enumDeclaration() {
     Token enumTok = current();
-    advance(); // consume the contextual "enum" identifier
+    advance();
     auto decl = std::make_unique<ClassDecl>();
     decl->setLocation(enumTok.location());
     decl->name = std::string(consume(TokenType::IDENTIFIER, "Expect enum name").lexeme());
@@ -1617,8 +1460,6 @@ std::unique_ptr<Stmt> Parser::enumDeclaration() {
         Token memberTok = consume(TokenType::IDENTIFIER, "Expect enum member name");
         int64_t memberValue;
         if (match(TokenType::EQUAL)) {
-            // Only int literal initializers supported in v0.0.1.
-            // Negative values via UnaryExpr(-, IntegerLiteral).
             std::unique_ptr<Expr> v = expression();
             if (auto* lit = dynamic_cast<IntegerLiteral*>(v.get())) {
                 memberValue = lit->value;
@@ -1643,7 +1484,6 @@ std::unique_ptr<Stmt> Parser::enumDeclaration() {
             memberValue = nextValue++;
         }
 
-        // Build: static <member>: int = <memberValue>
         auto name = std::make_unique<NameExpr>();
         name->setLocation(memberTok.location());
         name->name = std::string(memberTok.lexeme());
@@ -1665,7 +1505,6 @@ std::unique_ptr<Stmt> Parser::enumDeclaration() {
 
         decl->body.push_back(std::move(field));
 
-        // Comma optional between members; newline always allowed.
         match(TokenType::COMMA);
         while (match(TokenType::NEWLINE)) {}
     }
@@ -1683,8 +1522,6 @@ std::vector<std::unique_ptr<Expr>> Parser::parseDecorators() {
 }
 
 std::unique_ptr<TypeExpr> Parser::parseType() {
-    // Same recursion cap as expression()/statement(): `list[list[...]]]` nesting
-    // recurses with no other bound, so an attacker-supplied deep annotation could SIGSEGV the compiler (exposed via the web playground).
     ParserRecursionGuard guard(impl_->recursionDepth);
     if (impl_->recursionDepth > Impl::kMaxRecursionDepth) {
         error(peek(), "type nesting too deep");
@@ -1711,8 +1548,6 @@ std::unique_ptr<TypeExpr> Parser::parseUnionType() {
 }
 
 std::unique_ptr<TypeExpr> Parser::parsePrimaryType() {
-    // ADR 054: a braced contract set `{Amazing, Speaker}` in type position; braces
-    // group a PLURAL set where a bare comma would be ambiguous, a singleton set means the same as the bare name.
     if (impl_->options.isDragonFile && check(TokenType::LEFT_BRACE)) {
         advance();
         auto cs = std::make_unique<ContractSetTypeExpr>();
@@ -1733,13 +1568,11 @@ std::unique_ptr<TypeExpr> Parser::parsePrimaryType() {
     }
     if (match(TokenType::IDENTIFIER)) {
         auto t = std::make_unique<NamedTypeExpr>();
-        t->setLocation(previous().location());  // start of the (possibly dotted) name
+        t->setLocation(previous().location());
         t->name = std::string(previous().lexeme());
-        // Accept dotted type names (`a: ipaddress.IPv4Address`) after `import
-        // ipaddress`; the full dotted path is stored in NamedTypeExpr.name, TypeChecker walks it through ModuleType chains in resolveType.
         while (check(TokenType::DOT) && peekNext().type() == TokenType::IDENTIFIER) {
-            advance();              // consume DOT
-            advance();              // consume IDENTIFIER
+            advance();
+            advance();
             t->name += ".";
             t->name += std::string(previous().lexeme());
         }
@@ -1750,12 +1583,9 @@ std::unique_ptr<TypeExpr> Parser::parsePrimaryType() {
 }
 
 std::unique_ptr<TypeExpr> Parser::parseGenericType(std::unique_ptr<TypeExpr> base) {
-    // Capture the type's start (e.g. `Shelter` in `Shelter[int]`) BEFORE moving
-    // `base`, so every node here has a real location; otherwise instantiation errors (arity, bound, unknown-generic) report at 0:0.
     SourceLocation startLoc = base ? base->location() : peek().location();
     consume(TokenType::LEFT_BRACKET, "Expect '['");
     if (check(TokenType::LEFT_BRACKET)) {
-        // Callable[[params], return]
         advance();
         auto callable = std::make_unique<CallableTypeExpr>();
         callable->setLocation(startLoc);
@@ -1779,8 +1609,6 @@ std::unique_ptr<TypeExpr> Parser::parseGenericType(std::unique_ptr<TypeExpr> bas
     }
     consume(TokenType::RIGHT_BRACKET, "Expect ']'");
 
-    // Normalize Union[A, B, ...] and Optional[T] into the pipe-form UnionTypeExpr
-    // so every downstream stage treats them like `A | B` - one representation, no per-form special-casing.
     if (auto* gb = dynamic_cast<NamedTypeExpr*>(generic->base.get())) {
         if (gb->name == "Union" && !generic->typeArgs.empty()) {
             auto u = std::make_unique<UnionTypeExpr>();
@@ -1804,19 +1632,15 @@ std::unique_ptr<TypeExpr> Parser::parseGenericType(std::unique_ptr<TypeExpr> bas
 std::vector<TypeParam> Parser::parseTypeParams() {
     std::vector<TypeParam> params;
     if (!match(TokenType::LEFT_BRACKET)) return params;
-    // `class Foo[]` / `def f[]()` is meaningless - reject the empty bracket pair
-    // as a user error rather than silently treating the decl as non-generic.
     if (check(TokenType::RIGHT_BRACKET)) {
         error("Expect at least one type parameter inside '[]'");
-        advance();  // consume ']' to keep parsing
+        advance();
         return params;
     }
     do {
         TypeParam tp;
         tp.name = std::string(consume(TokenType::IDENTIFIER,
                                       "Expect type-parameter name").lexeme());
-        // Bounds - bounded type param `T: Bound`, stored on the TypeParam:
-        // consulted when the generic body accesses members/operators on a `T` value, and enforced at each instantiation (the type arg must satisfy the bound).
         if (match(TokenType::COLON)) {
             tp.bound = parseType();
         }
@@ -1828,8 +1652,6 @@ std::vector<TypeParam> Parser::parseTypeParams() {
 
 std::vector<std::unique_ptr<Stmt>> Parser::parseBlock() {
     std::vector<std::unique_ptr<Stmt>> stmts;
-    // Forward-progress invariant: statement() can return nullptr without advancing
-    // (e.g. primary() on a bad token), so an unguarded loop would spin and OOM; parseModule has the same guard, this one had been missing it.
     if (impl_->options.isDragonFile) {
         consume(TokenType::LEFT_BRACE, "Expect '{' before block");
         while (!check(TokenType::RIGHT_BRACE) && !isAtEnd()) {
@@ -1841,7 +1663,6 @@ std::vector<std::unique_ptr<Stmt>> Parser::parseBlock() {
         }
         consume(TokenType::RIGHT_BRACE, "Expect '}' after block");
     } else {
-        // Colon may already have been consumed (e.g., by functionDeclaration)
         match(TokenType::COLON);
         match(TokenType::NEWLINE);
         if (match(TokenType::INDENT)) {
@@ -1865,7 +1686,6 @@ std::vector<Parameter> Parser::parseParameters() {
     std::vector<Parameter> params;
     if (check(TokenType::RIGHT_PAREN)) return params;
     do {
-        // Positional-only separator: /
         if (match(TokenType::SLASH)) {
             Parameter sep;
             sep.name = "/";
@@ -1875,11 +1695,9 @@ std::vector<Parameter> Parser::parseParameters() {
         Parameter param;
         if (match(TokenType::STAR)) {
             if (check(TokenType::COMMA) || check(TokenType::RIGHT_PAREN)) {
-                // Bare * - keyword-only separator (no name)
                 param.isVarArg = true;
                 param.name = "";
             } else {
-                // *args
                 param.isVarArg = true;
                 if (check(TokenType::IDENTIFIER)) param.name = std::string(advance().lexeme());
             }
@@ -1887,8 +1705,6 @@ std::vector<Parameter> Parser::parseParameters() {
             param.isKwArg = true;
             param.name = std::string(consume(TokenType::IDENTIFIER, "Expect parameter name").lexeme());
         } else {
-            // `own p: T` - the callee owns the parameter (docs/002 2.8). Contextual:
-            // two consecutive identifiers can't otherwise start a parameter, so `own` still works as a plain name.
             if (check(TokenType::IDENTIFIER) && current().lexeme() == "own" &&
                 peekNext().type() == TokenType::IDENTIFIER) {
                 advance();
@@ -1898,8 +1714,6 @@ std::vector<Parameter> Parser::parseParameters() {
         }
         if (match(TokenType::COLON)) param.type = parseType();
         if (match(TokenType::EQUAL)) param.defaultValue = expression();
-        // Variadics require a type annotation (the bare `*` separator is exempt):
-        // without one there's no element type to monomorphize on, so elements would silently erase to i64. Use `*args: Any` for heterogeneous args, or a concrete type.
         if ((param.isVarArg || param.isKwArg) && !param.name.empty() && !param.type) {
             std::string sig = param.isKwArg ? "**" : "*";
             error("'" + sig + param.name + "' requires a type annotation: use '" +
@@ -1945,4 +1759,4 @@ bool Parser::isAtBlockEnd() const {
     return check(TokenType::RIGHT_BRACE) || check(TokenType::DEDENT);
 }
 
-} // namespace dragon
+}

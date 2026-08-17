@@ -33,7 +33,7 @@ class ConversionTests(TestCase) {
         d: dict[str, Any] = {}
         d["k"] = none
         d["k"] = "s"
-        d["k"] = none          # exercise the none<->str overwrite cleanup path
+        d["k"] = none
         self.assertIsNone(d["k"])
     }
 }

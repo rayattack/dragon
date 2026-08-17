@@ -1,6 +1,3 @@
-# Pre-fix: ord/is*/repr/hash walked kind=4 storage as a C string
-# (ord("€")==172, "éabc".isalpha()==False, repr truncated, hash collided).
-
 from unittest import TestCase, main
 
 
@@ -66,14 +63,12 @@ class PredicateTests(TestCase) {
     }
 
     def test_isdigit_nonascii() {
-        # Non-digit code points must be classified, not garbage-scanned.
         self.assertFalse("€2".isdigit())
         self.assertFalse("Ā".isdigit())
         self.assertTrue("123".isdigit())
     }
 
     def test_isspace_nonascii() {
-        # U+00A0 no-break space and U+2028 line separator are whitespace.
         self.assertTrue(chr(160).isspace())
         self.assertTrue(chr(8232).isspace())
         self.assertTrue((" " + chr(160)).isspace())
@@ -90,7 +85,6 @@ class PredicateTests(TestCase) {
         self.assertTrue("σδ".islower())
         self.assertTrue("ЖУК".isupper())
         self.assertTrue("жук".islower())
-        # Uncased code points do not flip the verdict.
         self.assertTrue("É€".isupper())
         self.assertTrue("é€".islower())
         self.assertFalse("€".isupper())
@@ -105,8 +99,6 @@ class PredicateTests(TestCase) {
     }
 
     def test_isidentifier_nonascii() {
-        # Dragon identifiers are ASCII; a non-ASCII cp is classified, not
-        # byte-scanned into a false positive.
         self.assertFalse("€x".isidentifier())
         self.assertFalse("aé".isidentifier())
         self.assertTrue("a_1".isidentifier())
@@ -132,14 +124,11 @@ class ReprTests(TestCase) {
 
 class HashTests(TestCase) {
     def test_equal_content_equal_hash() {
-        # Same content built two different ways must hash the same.
         self.assertEqual(hash("é€"), hash("é" + "€"))
         self.assertEqual(hash("Āabc"), hash("Ā" + "abc"))
     }
 
     def test_distinct_nonascii_strings_differ() {
-        # Pre-fix, djb2 stopped at the first 0x00 storage byte, so all of these
-        # collided with each other (and with the empty string's hash).
         self.assertNotEqual(hash("Ā"), hash("Ă"))
         self.assertNotEqual(hash("Āx"), hash("Āy"))
         self.assertNotEqual(hash("Ā"), hash(""))

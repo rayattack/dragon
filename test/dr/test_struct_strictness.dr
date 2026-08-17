@@ -1,6 +1,3 @@
-# Pre-fix: pack() crashed with a raw index error on missing args and silently
-# ignored extras; format "c" was advertised by calcsize but not implemented.
-
 from unittest import TestCase, main
 from struct import pack, unpack, calcsize, error
 

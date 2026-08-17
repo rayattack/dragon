@@ -23,9 +23,9 @@ class SetOrderingTests(TestCase) {
         b: set[int] = {1, 2, 3}
         d: set[int] = {1, 2}
         self.assertTrue(a <= b)
-        self.assertTrue(a <= d)        # equal is a (non-proper) subset
-        self.assertTrue(a < b)         # proper subset
-        self.assertFalse(a < d)        # equal is not a proper subset
+        self.assertTrue(a <= d)
+        self.assertTrue(a < b)
+        self.assertFalse(a < d)
         self.assertTrue(b >= a)
         self.assertTrue(b > a)
         self.assertFalse(a > b)
@@ -107,9 +107,6 @@ class NestedReprTests(TestCase) {
 
 class PartitionTests(TestCase) {
     def test_partition_tuple() {
-        # L3: partition returns a 3-tuple, so its repr uses parens (not list
-        # brackets). assertEqual on whole tuples would compare by identity, so
-        # assert the repr - that is precisely the behavior L3 fixed.
         self.assertEqual(str("k=v".partition("=")), "('k', '=', 'v')")
         self.assertEqual(str("no-sep".partition("=")), "('no-sep', '', '')")
     }
@@ -180,11 +177,6 @@ class TernaryTests(TestCase) {
 }
 
 
-# Decorator factory (`@register("name")`) whose inner decorator captures the
-# factory argument: the inner decorator is a capturing closure, and the
-# decorator-application lowering used to call it as a bare function pointer
-# (jumping into the closure struct -> SIGSEGV). It now routes through the same
-# closure-vs-bare runtime discrimination as any Callable-value call.
 _handlers: dict[str, Callable[[int], int]] = {}
 
 def register(name: str) -> Callable[[Callable[[int], int]], Callable[[int], int]] {
@@ -221,18 +213,15 @@ def tagged_square(x: int) -> int { return x * x }
 
 class DecoratorFactoryTests(TestCase) {
     def test_capturing_factory_registers_and_calls() {
-        # the captured `name` keyed the handler, and the decorated fn still runs
         self.assertEqual(_handlers["square"](6), 36)
         self.assertEqual(reg_square(6), 36)
     }
 
     def test_wrapping_factory() {
-        # @multiply(10) wraps inc: (4 + 1) * 10
         self.assertEqual(inc(4), 50)
     }
 
     def test_non_capturing_factory() {
-        # inner decorator captures nothing -> bare fn ptr, must still work
         self.assertEqual(tagged_square(6), 36)
     }
 }

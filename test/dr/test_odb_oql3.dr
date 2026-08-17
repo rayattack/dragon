@@ -1,8 +1,3 @@
-# ODB M5.3 regression suite: OQL aggregates + grouping. Whole-set aggregate
-# blocks (count! sum! avg! min! max! any! all!), `by field` grouping (one row per
-# group), count!(field) skipping absent, aggregate arithmetic, and the
-# prepare-time rules (no bare ungrouped field, no aggregate in a filter).
-
 from unittest import TestCase, main
 from odb import ODB, Documents, Document
 from odb.vfs import SimVFS
@@ -18,7 +13,7 @@ def _schema() -> dict[str, Any] {
     props["qty"] = {"type": "integer"}
     props["paid"] = {"type": "boolean"}
     props["region"] = {"type": "string"}
-    props["coupon"] = {"type": "number"}          # optional
+    props["coupon"] = {"type": "number"}
     req: list[Any] = ["id", "status", "total", "qty", "paid", "region"]
     s: dict[str, Any] = {}
     s["type"] = "object"
@@ -79,7 +74,7 @@ class WholeSetAggregateTest(TestCase) {
         rows: list[Document] = c.db.find("orders { withcoupon: count!(coupon), allrows: count!() }")
         wc: int = rows[0]["withcoupon"]
         ar: int = rows[0]["allrows"]
-        self.assertEqual(wc, 1)                 # only order 1 has a coupon
+        self.assertEqual(wc, 1)
         self.assertEqual(ar, 5)
     }
 
@@ -91,19 +86,19 @@ class WholeSetAggregateTest(TestCase) {
         first: str = rows[0]["first"]
         self.assertEqual(lo, 20.0)
         self.assertEqual(hi, 200.0)
-        self.assertEqual(first, "draft")       # lexicographic min
+        self.assertEqual(first, "draft")
     }
 
     def test_avg_and_bool_aggregates() -> None {
         c: Documents = _db()
         rows: list[Document] = c.db.find("orders ? status == \"paid\" { a: avg!(total) }")
         a: float = rows[0]["a"]
-        self.assertTrue(a > 56.6 and a < 56.7)  # 170/3
+        self.assertTrue(a > 56.6 and a < 56.7)
         allrows: list[Document] = c.db.find("orders { anyp: any!(paid), allp: all!(paid) }")
         ap: bool = allrows[0]["anyp"]
         alp: bool = allrows[0]["allp"]
         self.assertTrue(ap)
-        self.assertFalse(alp)                   # order 3 (draft) is not paid
+        self.assertFalse(alp)
     }
 }
 
@@ -112,7 +107,7 @@ class GroupingTest(TestCase) {
     def test_group_by_status() -> None {
         c: Documents = _db()
         rows: list[Document] = c.db.find("orders by status { status, n: count!(), rev: sum!(total) }")
-        self.assertEqual(len(rows), 3)          # paid, draft, shipped (first-seen order)
+        self.assertEqual(len(rows), 3)
         s0: str = rows[0]["status"]
         n0: int = rows[0]["n"]
         r0: float = rows[0]["rev"]
@@ -131,14 +126,13 @@ class GroupingTest(TestCase) {
         self.assertEqual(len(rows), 2)
         rg0: str = rows[0]["region"]
         n0: int = rows[0]["n"]
-        self.assertEqual(rg0, "west")           # west first (order 1)
+        self.assertEqual(rg0, "west")
         self.assertEqual(n0, 3)
     }
 
     def test_aggregate_arithmetic() -> None {
         c: Documents = _db()
         rows: list[Document] = c.db.find("orders ? status == \"paid\" by region { region, avgtot: sum!(total) / count!() }")
-        # west paid: 100 + 50 = 150 over 2 = 75.0 ; east paid: 20 over 1 = 20.0
         self.assertEqual(len(rows), 2)
         a0: float = rows[0]["avgtot"]
         a1: float = rows[1]["avgtot"]

@@ -1,45 +1,34 @@
 #include "dragon/OwnershipCheck.h"
-#include "dragon/TypeChecker.h"  // Type::Kind - the heap-typed binding gate
+#include "dragon/TypeChecker.h"
 
 #include <unordered_map>
 #include <unordered_set>
 
 namespace dragon {
 
-// del/own/dub ownership analysis (docs/001-memory.md, ADR docs/002): a structured
-// forward dataflow (modeled on DefiniteAssignment) tracking per-id ownership state; `del x` compiles only when x is a proven sole owner, refusal-conservative otherwise.
-
 namespace {
 
 enum class St : uint8_t {
-    Untracked,  // scalar / unknown type: no ownership, del only poisons
-    Owned,      // sole owner, no facts
-    OwnedFact,  // sole owner, but escaped/aliased/captured (del refuses)
-    Borrowed,   // names a value owned elsewhere
-    Dead,       // deleted (moved arrives with `own` transfer)
-    CondDead,   // dead on one branch of a join only
+    Untracked,
+    Owned,
+    OwnedFact,
+    Borrowed,
+    Dead,
+    CondDead,
 };
 
 struct BindState {
     St st = St::Untracked;
-    // OwnedFact: what happened and where.
     SourceLocation factLoc;
     std::string factDesc;
     bool factIsCapture = false;
-    // Borrowed: who owns it (may be empty for field/element reads).
     std::string borrowOwner;
-    // Dead / CondDead: where the kill happened (and, for CondDead, a live branch).
     SourceLocation killLoc;
     SourceLocation condLiveLoc;
-    // Dead: HOW it died - del (killWasDel) or a move into killDesc.
     bool killWasDel = true;
     bool killWasAwait = false;
     std::string killDesc;
-    // Dead/LENT (E12 joined-Task door): a borrow crossed `fire` into the named
-    // bound Task and REVIVES to Owned at await/join (the machine's only backwards transition); checker-only, no runtime change.
-    std::string lentTask;  // non-empty = lent flavor
-    // Pinned by a pending defer (defer.md sec 3): the defer holds a snapshotted
-    // pointer, so a later own-move/del would strand it; reads stay legal, only consumption refuses (pinDepth=scopes.size(), 0=unpinned).
+    std::string lentTask;
     size_t pinDepth = 0;
     SourceLocation pinLoc;
     std::string pinDesc;
@@ -56,28 +45,23 @@ struct Flow {
     bool terminated = false;
 };
 
-} // namespace
+}
 
 struct OwnershipCheck::Impl {
     std::vector<OwnDiagnostic> diags;
 
     std::vector<std::unordered_map<std::string, VarSlot>> scopes;
     std::vector<std::vector<Flow>> loopBreaks;
-    std::unordered_set<std::string> globalNames;  // `global` / `nonlocal` names
-    std::unordered_set<int> reported;             // ids already diagnosed (no cascades)
+    std::unordered_set<std::string> globalNames;
+    std::unordered_set<int> reported;
     int nextId = 0;
     bool atModuleLevel = false;
 
-    // own fields (docs/001-memory.md): class name -> its own-marked fields, collected
-    // in a prepass over ClassDecls; consulted at every field store (E8: a borrow can't fill a sole-owner field).
     std::unordered_map<std::string, std::unordered_set<std::string>> classOwnFields;
-    std::string currentClassName;  // enclosing class while analyzing a method
-    std::unordered_map<int, std::string> slotNames;  // id -> name (join diags)
-    std::unordered_set<std::string> e15Reported;     // "cls.field" once-only
-    // ADR 2.9 door 4: classes with an own Lock field are internally locked; their instances may cross a spawn as borrows.
+    std::string currentClassName;
+    std::unordered_map<int, std::string> slotNames;
+    std::unordered_set<std::string> e15Reported;
     std::unordered_set<std::string> lockGuardedClasses;
-    // ADR 2.9 door 5 (read-only share): top-level free functions by name, so `fire
-    // worker(shared)` can consult the callee's body to prove it never mutates the parameter (collected in a prepass).
     std::unordered_map<std::string, FunctionDecl*> funcsByName;
 
     void pushFrame() { scopes.emplace_back(); }
@@ -105,13 +89,10 @@ struct OwnershipCheck::Impl {
     static std::string lineRef(const SourceLocation& loc) {
         return "line " + std::to_string(loc.line);
     }
-    // "<desc> at line N", omitting the suffix when the location is unset.
     static std::string atLine(const std::string& desc, const SourceLocation& loc) {
         return loc.line > 0 ? desc + " at line " + std::to_string(loc.line) : desc;
     }
 
-    // Type gate: ownership covers heap values plus Lock, a raw OS resource with no
-    // refcount whose only owners are own fields, with-temps, and proven locals (del releases).
     static bool typeIsHeap(const Type* t) {
         if (!t) return false;
         switch (t->kind()) {
@@ -132,7 +113,6 @@ struct OwnershipCheck::Impl {
         }
     }
 
-    // Resolve the class a field store/read targets ("" when unknown).
     std::string resolveFieldClass(AttributeExpr* at) {
         if (auto* obj = dynamic_cast<NameExpr*>(at->object.get()))
             if (obj->name == "self") return currentClassName;
@@ -144,7 +124,6 @@ struct OwnershipCheck::Impl {
         return "";
     }
 
-    // Does this attribute store target an `own` field?
     bool isOwnFieldStore(AttributeExpr* at) {
         std::string cls = resolveFieldClass(at);
         if (cls.empty()) return false;
@@ -152,8 +131,6 @@ struct OwnershipCheck::Impl {
         return it != classOwnFields.end() && it->second.count(at->attribute) != 0;
     }
 
-    // ADR 2.10: raw resource types (the releaser-registry types); registering a
-    // releaser IS what makes the mandatory rules apply. Surface names for the v1 entries.
     static bool isRawResourceTypeName(const std::string& n) {
         return n == "Lock";
     }
@@ -161,8 +138,6 @@ struct OwnershipCheck::Impl {
         return n == "Lock" || n == "dragon_lock_new" || n == "dragon_tls_ctx_new";
     }
 
-    // E16 (ADR 2.10): a raw resource nested inside any container/box type.
-    // Syntactic walk so it works on unresolved annotations too.
     static bool typeExprNestsRawResource(TypeExpr* t, bool nested) {
         if (!t) return false;
         if (auto* n = dynamic_cast<NamedTypeExpr*>(t))
@@ -193,14 +168,12 @@ struct OwnershipCheck::Impl {
     }
 
     void checkE16(TypeExpr* annotation, const SourceLocation& loc) {
-        if (typeExprNestsRawResource(annotation, /*nested=*/false))
+        if (typeExprNestsRawResource(annotation, false))
             error(loc,
                   "a container cannot hold raw Lock values; wrap the "
                   "resource in a class with an own field");
     }
 
-    // Class prepass: collect own fields (enforcing E15/E16) and, for ADR 2.9 door 5,
-    // index top-level free functions so a fire-site can prove a callee's params are read-only (methods/extern skip, conservative).
     void collectFunctions(Module& module) {
         for (auto& s : module.body) {
             if (auto* fn = dynamic_cast<FunctionDecl*>(s.get())) {
@@ -210,8 +183,6 @@ struct OwnershipCheck::Impl {
         }
     }
 
-    // ADR 2.9 door 5: is param idx provably read-only (no direct mutation, reusing E17's
-    // proof)? Read-only means safe to share at zero copy (mark_shared_deep keeps refcount atomic, no writer = no race); own/vararg/kwarg excluded.
     bool paramIsReadOnly(FunctionDecl* fn, size_t idx) {
         if (!fn || idx >= fn->params.size()) return false;
         const Parameter& p = fn->params[idx];
@@ -232,7 +203,6 @@ struct OwnershipCheck::Impl {
                 checkE16(ann->annotation.get(), ann->location());
                 auto* named = dynamic_cast<NamedTypeExpr*>(ann->annotation.get());
                 if (!ann->isOwn) {
-                    // E15: a declared raw-resource field without own.
                     if (named && isRawResourceTypeName(named->name) &&
                         e15Reported.insert(cd->name + "." + tgt->name).second) {
                         error(ann->location(),
@@ -251,8 +221,6 @@ struct OwnershipCheck::Impl {
                               " is copied, not owned)");
                     continue;
                 }
-                // An own Lock field declares the class internally locked (2.9 door 4):
-                // instances pass the spawn boundary as borrows; own only means the class's death destroys the mutex.
                 if (named && named->name == "Lock")
                     lockGuardedClasses.insert(cd->name);
                 classOwnFields[cd->name].insert(tgt->name);
@@ -260,7 +228,6 @@ struct OwnershipCheck::Impl {
         }
     }
 
-    // RHS classification (ADR 2.1). Refusal-conservative: default is Borrowed.
     BindState classifyRhs(Expr* v) {
         BindState b;
         if (!v || !typeIsHeap(v->type.get())) {
@@ -268,8 +235,6 @@ struct OwnershipCheck::Impl {
             return b;
         }
         if (auto* n = dynamic_cast<NameExpr*>(v)) {
-            // `dub x` mints a fresh independent owner (docs/002 2.7); a bare
-            // name is a borrow of the named binding.
             if (n->isDubMarked) {
                 b.st = St::Owned;
                 return b;
@@ -283,8 +248,6 @@ struct OwnershipCheck::Impl {
             return b;
         }
         if (auto* sub = dynamic_cast<SubscriptExpr*>(v)) {
-            // A slice or str element read returns a FRESH value (see isBorrowedHeapExpr);
-            // other element reads borrow the container's reference.
             if (dynamic_cast<SliceExpr*>(sub->index.get()) ||
                 (sub->object && sub->object->type &&
                  sub->object->type->kind() == Type::Kind::Str)) {
@@ -301,8 +264,6 @@ struct OwnershipCheck::Impl {
                                                             : St::Borrowed;
             return b;
         }
-        // Fresh-owning shapes: literals, constructors, calls, operators,
-        // comprehensions, f-strings, dub (later slice).
         if (dynamic_cast<CallExpr*>(v) || dynamic_cast<BinaryExpr*>(v) ||
             dynamic_cast<UnaryExpr*>(v) || dynamic_cast<ListExpr*>(v) ||
             dynamic_cast<DictExpr*>(v) || dynamic_cast<SetExpr*>(v) ||
@@ -313,7 +274,7 @@ struct OwnershipCheck::Impl {
             b.st = St::Owned;
             return b;
         }
-        b.st = St::Borrowed;  // anything else: refuse-conservative
+        b.st = St::Borrowed;
         return b;
     }
 
@@ -324,7 +285,6 @@ struct OwnershipCheck::Impl {
         return it == flow.states.end() ? nullptr : &it->second;
     }
 
-    // A read of `name`. Dead/CondDead names are compile errors (E1/E2/E9).
     void checkRead(NameExpr* n, Flow& flow) {
         VarSlot* s = resolve(n->name);
         if (!s) return;
@@ -350,7 +310,7 @@ struct OwnershipCheck::Impl {
                                 lineRef(b.killLoc)
                           : "'" + n->name + "' was moved into " + b.killDesc);
             b = BindState{};
-            b.st = St::Owned;  // heal
+            b.st = St::Owned;
         } else if (b.st == St::CondDead && !reported.count(s->id)) {
             reported.insert(s->id);
             error(n->location(),
@@ -361,12 +321,10 @@ struct OwnershipCheck::Impl {
                       " but not on every path; consume it on every path or "
                       "on none");
             b = BindState{};
-            b.st = St::Owned;  // heal
+            b.st = St::Owned;
         }
     }
 
-    // Consume `name` (del or move) via the shared precondition ladder (ADR 2.4).
-    // Returns 0 = diagnosed, 1 = consumed untracked (poison only), 2 = consumed PROVEN Owned (rc==1 assert applies).
     int consumeBinding(NameExpr* n, Flow& flow, bool isDel,
                        const std::string& sinkDesc) {
         VarSlot* s = resolve(n->name);
@@ -380,8 +338,6 @@ struct OwnershipCheck::Impl {
         }
         auto it = flow.states.find(s->id);
         BindState b = it == flow.states.end() ? BindState{} : it->second;
-        // A defer-pinned binding can't be consumed: nulling it wouldn't disarm the
-        // defer's already-snapshotted pointer, which would then call into a value someone else owns (defer.md sec 3).
         if (b.pinDepth > 0 && b.st != St::Dead && b.st != St::CondDead) {
             error(n->location(),
                   "'" + n->name + "' is pinned by a pending defer (" +
@@ -391,8 +347,6 @@ struct OwnershipCheck::Impl {
         }
         switch (b.st) {
             case St::Untracked: {
-                // Untracked bindings (scalars, raw handles) consume as poison-only: the
-                // name dies with no RC bookkeeping, e.g. SSLSocket(own conn); the rc==1 assert never applies (return 1, not 2).
                 BindState d;
                 d.st = St::Dead;
                 d.killLoc = n->location();
@@ -450,8 +404,6 @@ struct OwnershipCheck::Impl {
         return 0;
     }
 
-    // Pin a heap-tracked binding for the block's lifetime when a pending defer
-    // references it (arg or receiver); scalars/untracked bindings need no pin since their snapshot is a copy.
     void pinBinding(NameExpr* n, Flow& flow, SourceLocation deferLoc,
                     const std::string& desc) {
         VarSlot* s = resolve(n->name);
@@ -467,8 +419,6 @@ struct OwnershipCheck::Impl {
         }
     }
 
-    // Called after a frame pop: pins created inside the popped block expire
-    // with it - the block's defers have run by the time control is here.
     void clearExpiredPins(Flow& flow) {
         for (auto& [id, b] : flow.states)
             if (b.pinDepth > scopes.size()) {
@@ -477,7 +427,6 @@ struct OwnershipCheck::Impl {
             }
     }
 
-    // Record an escape/alias/capture fact on `name` if it is a tracked owner.
     void recordFact(const std::string& name, Flow& flow, SourceLocation loc,
                     const std::string& desc, bool isCapture = false) {
         BindState* b = stateOf(name, flow);
@@ -490,8 +439,6 @@ struct OwnershipCheck::Impl {
         }
     }
 
-    // Sibling paths that disagree on consumption error at the JOIN: the non-consuming
-    // branch's scope-exit release would otherwise depend on which branch ran (a runtime drop flag); del on it discharges the obligation.
     Flow merge(const std::vector<Flow>& branches) {
         std::vector<const Flow*> live;
         for (const auto& b : branches)
@@ -501,7 +448,6 @@ struct OwnershipCheck::Impl {
             out.terminated = true;
             return out;
         }
-        // Union of ids across live branches; join states per id.
         for (const Flow* f : live)
             for (const auto& [id, st] : f->states)
                 if (!out.states.count(id)) out.states[id] = st;
@@ -541,7 +487,7 @@ struct OwnershipCheck::Impl {
                                   "consume it on every path (del it where "
                                   "there is nothing to move into) or on none");
                 }
-                st = *aliveSt;  // heal to the alive state, suppress cascades
+                st = *aliveSt;
                 continue;
             }
             for (const Flow* f : live) {
@@ -555,8 +501,6 @@ struct OwnershipCheck::Impl {
 
     static BindState join(const BindState& a, const BindState& b) {
         if (a.st == b.st) {
-            // Prefer the one carrying a fact (Owned + OwnedFact handled below;
-            // equal states with different facts keep the first fact).
             return a;
         }
         auto rank = [](St s) {
@@ -572,7 +516,6 @@ struct OwnershipCheck::Impl {
         };
         const BindState& hi = rank(a.st) >= rank(b.st) ? a : b;
         const BindState& lo = rank(a.st) >= rank(b.st) ? b : a;
-        // Dead on one side, alive on the other: conditionally dead (E9 on use).
         if (hi.st == St::Dead && lo.st != St::Dead) {
             BindState out = hi;
             out.st = St::CondDead;
@@ -581,9 +524,7 @@ struct OwnershipCheck::Impl {
             return out;
         }
         if (hi.st == St::CondDead) return hi;
-        // Owned + OwnedFact: the fact survives the join.
         if (hi.st == St::OwnedFact && lo.st == St::Owned) return hi;
-        // Classification disagreement (Owned vs Borrowed, or Untracked mix): refuse-conservative to Borrowed.
         BindState out = hi;
         if (hi.st == St::Borrowed || lo.st == St::Borrowed) {
             out.st = St::Borrowed;
@@ -592,8 +533,6 @@ struct OwnershipCheck::Impl {
         return out;
     }
 
-    // Container methods that RETAIN their argument (outlives the call); a name passed
-    // here escapes. Missing one here is safe: worst case is a `del` that trips the debug rc==1 assert.
     static bool isRetainingMethod(const std::string& m) {
         static const std::unordered_set<std::string> k = {
             "append", "appendleft", "insert", "add", "extend",
@@ -602,8 +541,6 @@ struct OwnershipCheck::Impl {
         return k.count(m) != 0;
     }
 
-    // E17 (docs/002 2.11): direct mutating ops on a binding, the v1 checker's claim
-    // for mutation-during-iteration; aliases/mutation inside callees stay with the runtime detector.
     static bool isMutatingMethod(const std::string& m) {
         static const std::unordered_set<std::string> k = {
             "remove", "append", "appendleft", "insert", "pop", "popleft",
@@ -613,8 +550,6 @@ struct OwnershipCheck::Impl {
         return k.count(m) != 0;
     }
 
-    // Does this statement tree DIRECTLY mutate the binding `name`?
-    // (method calls on the name, subscript-assign, del name[k])
     bool bodyMutatesBinding(const std::vector<std::unique_ptr<Stmt>>& body,
                             const std::string& name, SourceLocation& where,
                             std::string& how) {
@@ -649,8 +584,6 @@ struct OwnershipCheck::Impl {
                         how = "a subscript store on '" + name + "'";
                         return true;
                     }
-            // A field store `name.f = ...` mutates the binding like a subscript store:
-            // it disqualifies the door-5 read-only proof and is a genuine mutation for E17's iteration check too.
             if (auto* at = dynamic_cast<AttributeExpr*>(t))
                 if (auto* obj = dynamic_cast<NameExpr*>(at->object.get()))
                     if (obj->name == name) {
@@ -662,8 +595,6 @@ struct OwnershipCheck::Impl {
         };
         if (auto* e = dynamic_cast<ExprStmt*>(s))
             return exprMutatesBinding(e->expr.get(), name, where, how);
-        // A deferred mutating call still mutates - at the end of the very
-        // iteration that registered it, which is inside the loop.
         if (auto* d = dynamic_cast<DeferStmt*>(s))
             return exprMutatesBinding(d->call.get(), name, where, how);
         if (auto* as = dynamic_cast<AssignStmt*>(s)) {
@@ -710,10 +641,6 @@ struct OwnershipCheck::Impl {
         return false;
     }
 
-    // E12 - the spawn boundary (ADR 2.9): every heap value crossing `fire` must be moved,
-    // copied (dub), fresh, internally locked, or (if the Task handle is bound) LENT until await/join; a discarded handle makes a borrow a hard E12.
-
-    // Revive every binding lent to `taskName` (the only backwards transition).
     void consumeTaskHandle(NameExpr* tn, Flow& flow) {
         if (!tn->type || tn->type->kind() != Type::Kind::Task) return;
         VarSlot* s = resolve(tn->name);
@@ -739,30 +666,27 @@ struct OwnershipCheck::Impl {
         }
     }
 
-    // One expression crossing the spawn boundary.
-    // taskName empty + !immediateAwait = discarded handle (hard E12).
     void checkSpawnCrossing(Expr* e, Flow& flow, const std::string& taskName,
                             bool immediateAwait, SourceLocation fireLoc,
                             FunctionDecl* calleeFn = nullptr, int paramIdx = -1) {
         if (!e) return;
         if (auto* mv = dynamic_cast<NameExpr*>(e); mv && mv->isMoveMarked) {
-            consumeBinding(mv, flow, /*isDel=*/false,
+            consumeBinding(mv, flow, false,
                            atLine("a spawned task", fireLoc));
             return;
         }
         if (auto* db = dynamic_cast<NameExpr*>(e); db && db->isDubMarked) {
-            checkRead(db, flow);  // a fresh copy crosses; the source stays
+            checkRead(db, flow);
             return;
         }
         auto* nm = dynamic_cast<NameExpr*>(e);
         if (!nm) {
-            checkExpr(e, flow);  // fresh temp / literal: implicit move
+            checkExpr(e, flow);
             return;
         }
         checkRead(nm, flow);
-        if (!nm->type || !typeIsHeap(nm->type.get())) return;  // scalar / raw
-        if (nm->type->kind() == Type::Kind::Lock) return;  // the lock IS a door
-        // Internally-locked class instance (door 4).
+        if (!nm->type || !typeIsHeap(nm->type.get())) return;
+        if (nm->type->kind() == Type::Kind::Lock) return;
         if (nm->type->kind() == Type::Kind::Instance) {
             auto& inst = static_cast<InstanceType&>(*nm->type);
             if (inst.classType && lockGuardedClasses.count(inst.classType->name))
@@ -770,10 +694,7 @@ struct OwnershipCheck::Impl {
         }
         if (nm->name == "self" && lockGuardedClasses.count(currentClassName))
             return;
-        if (immediateAwait) return;  // `await fire f(o)`: the borrow window
-                                     // IS the await - already synchronized
-        // Door 5 (read-only share): a provably-read-only callee lets N tasks read the
-        // SAME value at zero copy (mark_shared_deep, atomic refcount); NOT lent-dead (parent keeps access), but DOES escape (later del/own-move refused). Mutating callees fall back to lend/E12.
+        if (immediateAwait) return;
         if (calleeFn && paramIdx >= 0 &&
             paramIsReadOnly(calleeFn, (size_t)paramIdx)) {
             recordFact(nm->name, flow, fireLoc,
@@ -784,7 +705,6 @@ struct OwnershipCheck::Impl {
         auto it = s ? flow.states.find(s->id) : flow.states.end();
         BindState b = it == flow.states.end() ? BindState{} : it->second;
         if (!taskName.empty() && b.st == St::Owned) {
-            // LEND: reads blocked until the task's await/join revives it.
             BindState d;
             d.st = St::Dead;
             d.killLoc = nm->location();
@@ -794,7 +714,7 @@ struct OwnershipCheck::Impl {
             flow.states[s->id] = d;
             return;
         }
-        if (b.st == St::Untracked) return;  // unknown type: runtime doors
+        if (b.st == St::Untracked) return;
         std::string why =
             taskName.empty()
                 ? "the Task handle is discarded, so no await/join can ever "
@@ -814,21 +734,18 @@ struct OwnershipCheck::Impl {
         for (const auto& cap : fire->capturedVars)
             recordFact(cap, flow, fire->location(),
                        atLine("a green thread", fire->location()),
-                       /*isCapture=*/true);
+                       true);
         if (!fire->bodyStmts.empty()) analyzeStmtsFresh(fire->bodyStmts);
         auto* call = dynamic_cast<CallExpr*>(fire->operand.get());
         if (!call) {
             checkExpr(fire->operand.get(), flow);
             return;
         }
-        // Door 5: resolve a plain free-function callee so each positional arg can be
-        // proven read-only; method fires and unknown callees leave calleeFn null, keeping lend/E12 rules.
         FunctionDecl* calleeFn = nullptr;
         if (auto* cn = dynamic_cast<NameExpr*>(call->callee.get())) {
             auto fit = funcsByName.find(cn->name);
             if (fit != funcsByName.end()) calleeFn = fit->second;
         }
-        // The RECEIVER of a fired method call crosses too (no param mapping).
         if (auto* at = dynamic_cast<AttributeExpr*>(call->callee.get()))
             checkSpawnCrossing(at->object.get(), flow, taskName,
                                immediateAwait, fire->location());
@@ -841,11 +758,9 @@ struct OwnershipCheck::Impl {
                                immediateAwait, fire->location());
     }
 
-    // `defer f(args)`: args/receiver evaluate AT this statement (defer.md sec 2); `own x`
-    // moves through the normal ladder, `dub x` copies, and a plain borrow is PINNED until the block closes.
     void processDefer(DeferStmt* d, Flow& flow) {
         auto* call = dynamic_cast<CallExpr*>(d->call.get());
-        if (!call) return;  // non-call operand: already a parse error
+        if (!call) return;
         std::string calleeDesc = "a deferred call";
         if (auto* cn = dynamic_cast<NameExpr*>(call->callee.get()))
             calleeDesc = "the deferred '" + cn->name + "()'";
@@ -853,8 +768,6 @@ struct OwnershipCheck::Impl {
             calleeDesc = "the deferred '" + ca->attribute + "()'";
         const std::string sink = atLine(calleeDesc, d->location());
 
-        // Method receiver / bound-closure callee: read now, pin until the block exits
-        // (a free function name isn't a local binding, so pinBinding no-ops on it).
         if (auto* at = dynamic_cast<AttributeExpr*>(call->callee.get())) {
             checkExpr(at->object.get(), flow);
             if (auto* rn = dynamic_cast<NameExpr*>(at->object.get()))
@@ -868,7 +781,7 @@ struct OwnershipCheck::Impl {
         for (auto& a : call->args) {
             if (auto* mv = dynamic_cast<NameExpr*>(a.get());
                 mv && mv->isMoveMarked) {
-                consumeBinding(mv, flow, /*isDel=*/false, sink);
+                consumeBinding(mv, flow, false, sink);
                 continue;
             }
             if (auto* dn = dynamic_cast<NameExpr*>(a.get());
@@ -883,7 +796,7 @@ struct OwnershipCheck::Impl {
         for (auto& kw : call->kwArgs) {
             if (auto* mv = dynamic_cast<NameExpr*>(kw.second.get());
                 mv && mv->isMoveMarked) {
-                consumeBinding(mv, flow, /*isDel=*/false, sink);
+                consumeBinding(mv, flow, false, sink);
                 continue;
             }
             checkExpr(kw.second.get(), flow);
@@ -892,8 +805,6 @@ struct OwnershipCheck::Impl {
         }
     }
 
-    // A scope is closing (return / callable end): a still-lent binding means
-    // the runtime release would race the thread that borrowed it.
     void checkNoOutstandingLends(const Flow& flow, SourceLocation loc,
                                  const char* where) {
         for (const auto& [id, st] : flow.states) {
@@ -947,8 +858,6 @@ struct OwnershipCheck::Impl {
         }
         if (auto* call = dynamic_cast<CallExpr*>(e)) {
             checkExpr(call->callee.get(), flow);
-            // A retaining container method escapes NameExpr args; every other call
-            // arg is a plain borrow for the call's duration (`d = sha256(buf); del buf` must still compile).
             bool retains = false;
             std::string mname;
             if (auto* at = dynamic_cast<AttributeExpr*>(call->callee.get())) {
@@ -962,7 +871,6 @@ struct OwnershipCheck::Impl {
                 calleeDesc = "'" + cn->name + "()'";
             else if (auto* ca = dynamic_cast<AttributeExpr*>(call->callee.get()))
                 calleeDesc = "'" + ca->attribute + "()'";
-            // `t.join()` is the same happens-before edge as `await t`.
             if (auto* jat = dynamic_cast<AttributeExpr*>(call->callee.get()))
                 if (jat->attribute == "join" && call->args.empty() &&
                     call->kwArgs.empty())
@@ -971,11 +879,9 @@ struct OwnershipCheck::Impl {
                         consumeTaskHandle(jt, flow);
                     }
             for (auto& a : call->args) {
-                // `f(own x)`: the caller's +1 transfers (ADR 2.4/2.8) via the same
-                // consuming ladder as del, leaving x Moved; E13/E14 signature matching is the TypeChecker's job.
                 if (auto* mv = dynamic_cast<NameExpr*>(a.get());
                     mv && mv->isMoveMarked) {
-                    consumeBinding(mv, flow, /*isDel=*/false,
+                    consumeBinding(mv, flow, false,
                                    atLine(calleeDesc, call->location()));
                     continue;
                 }
@@ -1005,8 +911,6 @@ struct OwnershipCheck::Impl {
             checkExpr(sl->step.get(), flow);
             return;
         }
-        // Container literals RETAIN their elements, so a stored name escapes (gets a
-        // second owner). Conservative: even a transient literal (print([x])) records the fact; refusal is a diagnostic, never a wrong free.
         if (auto* l = dynamic_cast<ListExpr*>(e)) {
             for (auto& el : l->elements)
                 factForNameElements(el.get(), flow,
@@ -1053,28 +957,23 @@ struct OwnershipCheck::Impl {
             for (const auto& cap : lam->capturedVars)
                 recordFact(cap, flow, lam->location(),
                            atLine("a closure", lam->location()),
-                           /*isCapture=*/true);
+                           true);
             std::vector<Parameter> none;
-            // Body reads of outer names re-resolve in a fresh context (becoming
-            // Untracked there); the capture facts recorded above carry the ownership consequence.
             analyzeLambdaBody(lam);
             return;
         }
         if (auto* fire = dynamic_cast<FireExpr*>(e)) {
-            // A FireExpr reaching the generic walker isn't bound to a Task name (bound
-            // fires are intercepted at the assignment handlers); treat it conservatively as a discarded handle.
-            processFire(fire, flow, "", /*immediateAwait=*/false);
+            processFire(fire, flow, "", false);
             return;
         }
         if (auto* aw = dynamic_cast<AwaitExpr*>(e)) {
             if (auto* fire = dynamic_cast<FireExpr*>(aw->operand.get())) {
-                // `await fire f(o)`: the borrow window IS the await.
-                processFire(fire, flow, "", /*immediateAwait=*/true);
+                processFire(fire, flow, "", true);
                 return;
             }
             if (auto* tn = dynamic_cast<NameExpr*>(aw->operand.get())) {
                 checkRead(tn, flow);
-                reviveLends(tn->name, flow);  // the happens-before edge
+                reviveLends(tn->name, flow);
                 consumeTaskHandle(tn, flow);
                 return;
             }
@@ -1082,7 +981,6 @@ struct OwnershipCheck::Impl {
             return;
         }
         if (auto* ac = dynamic_cast<AsCastExpr*>(e)) {
-            // ADR 054 - a conformance cast reads its operand, nothing more.
             checkExpr(ac->operand.get(), flow);
             return;
         }
@@ -1096,7 +994,7 @@ struct OwnershipCheck::Impl {
         }
         if (auto* lc = dynamic_cast<ListCompExpr*>(e)) {
             checkExpr(lc->iterable.get(), flow);
-            return;  // comprehension bodies run in their own scope
+            return;
         }
         if (auto* dc = dynamic_cast<DictCompExpr*>(e)) {
             checkExpr(dc->iterable.get(), flow);
@@ -1106,12 +1004,9 @@ struct OwnershipCheck::Impl {
             checkExpr(sc->iterable.get(), flow);
             return;
         }
-        // Literals and anything else: no reads to track.
     }
 
     void bindTarget(Expr* target, Expr* value, Flow& flow) {
-        // A move-marked RHS only matters where something CONSUMES the +1 (an own
-        // field, or an own param at call sites); a local/global target would just be an alias wearing a costume.
         auto* mvRhs = dynamic_cast<NameExpr*>(value);
         bool rhsIsMove = mvRhs && mvRhs->isMoveMarked;
         if (auto* n = dynamic_cast<NameExpr*>(target)) {
@@ -1122,8 +1017,6 @@ struct OwnershipCheck::Impl {
                           " = own " + mvRhs->name + "' would only alias");
                 return;
             }
-            // Assignment to a `global`/`nonlocal` name stores into an outer
-            // owner: the RHS name (if any) escapes.
             if (globalNames.count(n->name)) {
                 if (auto* rn = dynamic_cast<NameExpr*>(value))
                     recordFact(rn->name, flow, n->location(),
@@ -1131,14 +1024,10 @@ struct OwnershipCheck::Impl {
                                    lineRef(n->location()));
                 return;
             }
-            // `y = x`: y borrows x, and x gains an alias fact (one owner,
-            // one name - Q2 signed off as a compile error on `del x`).
             if (auto* rn = dynamic_cast<NameExpr*>(value)) {
                 recordFact(rn->name, flow, n->location(),
                            "alias '" + n->name + "' at " + lineRef(n->location()));
             }
-            // Rebinding a Task name while something is lent to it loses the only handle
-            // that could ever end the lend (and a later await of the NEW task would falsely revive the old one).
             for (auto& [lid, lst] : flow.states) {
                 if (lst.st == St::Dead && lst.lentTask == n->name &&
                     !reported.count(lid)) {
@@ -1154,11 +1043,10 @@ struct OwnershipCheck::Impl {
             VarSlot* s = resolve(n->name);
             int id = s ? s->id : declare(n->name, n->location());
             flow.states[id] = b;
-            reported.erase(id);  // a rebind is a fresh generation
+            reported.erase(id);
             return;
         }
         if (auto* t = dynamic_cast<TupleExpr*>(target)) {
-            // Unpack: every element borrows from the unpacked value.
             for (auto& el : t->elements) {
                 if (auto* n2 = dynamic_cast<NameExpr*>(el.get())) {
                     BindState b;
@@ -1173,7 +1061,6 @@ struct OwnershipCheck::Impl {
             return;
         }
         if (auto* sub = dynamic_cast<SubscriptExpr*>(target)) {
-            // c[k] = x - x escapes into the container.
             checkExpr(sub->object.get(), flow);
             checkExpr(sub->index.get(), flow);
             if (auto* rn = dynamic_cast<NameExpr*>(value))
@@ -1183,8 +1070,6 @@ struct OwnershipCheck::Impl {
         }
         if (auto* at = dynamic_cast<AttributeExpr*>(target)) {
             checkExpr(at->object.get(), flow);
-            // E15 (ADR 2.10): a raw resource stored into a non-own field has no owner
-            // to destroy it; keyed on the allocator callee so undeclared (ctor-assigned-only) fields are caught too.
             if (!isOwnFieldStore(at)) {
                 if (auto* call = dynamic_cast<CallExpr*>(value)) {
                     auto* callee = dynamic_cast<NameExpr*>(call->callee.get());
@@ -1201,26 +1086,18 @@ struct OwnershipCheck::Impl {
                     }
                 }
             }
-            // An own field takes SOLE ownership (docs/001-memory.md): only a fresh value
-            // may be stored (a borrow is E8); `self._f = own x` arrives via the own-transfer slice below.
             if (isOwnFieldStore(at)) {
-                // `self._f = own x` (ADR 2.4 row 3): the named binding's +1 moves into
-                // the field via the shared consuming ladder (Owned-clean required); the name is Moved afterwards.
                 if (rhsIsMove) {
-                    consumeBinding(mvRhs, flow, /*isDel=*/false,
+                    consumeBinding(mvRhs, flow, false,
                                    atLine("own field '" + at->attribute + "'",
                                           target->location()));
                     return;
                 }
-                // The own-transfer slice (ADR 2.4): a bare name that is a LIVE sole
-                // owner (own param or fresh local) stored into an own field is an IMPLICIT move; OwnedFact/Borrowed still fall to E8 below.
                 if (auto* rn = dynamic_cast<NameExpr*>(value)) {
                     BindState* bs = stateOf(rn->name, flow);
                     if (bs && bs->st == St::Owned) {
-                        // Mark the name as a move so codegen adopts its +1 (isBorrowedHeapExpr
-                        // keys off isMoveMarked), identical to explicit `own x`; without this the store would incref a borrow and leak the moved-in owner.
                         rn->isMoveMarked = true;
-                        consumeBinding(rn, flow, /*isDel=*/false,
+                        consumeBinding(rn, flow, false,
                                        atLine("own field '" + at->attribute +
                                                   "'",
                                               target->location()));
@@ -1247,7 +1124,6 @@ struct OwnershipCheck::Impl {
                       "move needs a consuming destination");
                 return;
             }
-            // obj.f = x - x escapes into a plain field.
             if (auto* rn = dynamic_cast<NameExpr*>(value))
                 recordFact(rn->name, flow, target->location(),
                            "field '" + at->attribute + "' at " +
@@ -1271,8 +1147,6 @@ struct OwnershipCheck::Impl {
                 continue;
             }
             if (auto* sub = dynamic_cast<SubscriptExpr*>(t)) {
-                // Container-element deletion (del d[k], del xs[i]) is the
-                // existing statement semantics, not an ownership event.
                 checkExpr(sub->object.get(), flow);
                 checkExpr(sub->index.get(), flow);
                 continue;
@@ -1290,9 +1164,7 @@ struct OwnershipCheck::Impl {
                               "' is lent to it; await or join it first");
                 }
             }
-            // Shared consuming-transition ladder (ADR 2.4): provenUnique marks only the
-            // PROVEN-Owned case, since the -O0 rc==1 assert applies to compiler-proven sole owners, never scalars.
-            int r = consumeBinding(n, flow, /*isDel=*/true, "");
+            int r = consumeBinding(n, flow, true, "");
             if (r == 2) del->provenUnique[i] = 1;
         }
     }
@@ -1301,12 +1173,10 @@ struct OwnershipCheck::Impl {
         pushFrame();
         for (const auto& s : body) flow = analyzeStmt(s.get(), std::move(flow));
         popFrame();
-        clearExpiredPins(flow);  // the block's defers have run at its exit
+        clearExpiredPins(flow);
         return flow;
     }
 
-    // Loop rule (ADR 2.5): a binding that predates the loop must leave the
-    // body in the state it entered with; killed-on-the-back-edge is E10.
     void checkBackEdge(const Flow& entry, Flow& exit, SourceLocation loopLoc) {
         for (const auto& [id, st] : entry.states) {
             if (st.st == St::Dead || st.st == St::CondDead) continue;
@@ -1326,7 +1196,7 @@ struct OwnershipCheck::Impl {
                                                   : loopLoc,
                           "deleted on iteration 1; iteration 2 would use a dead "
                           "name - delete it after the loop instead");
-                it->second = st;  // heal to entry state
+                it->second = st;
             }
         }
     }
@@ -1343,8 +1213,6 @@ struct OwnershipCheck::Impl {
             return flow;
         }
         if (auto* as = dynamic_cast<AssignStmt*>(s)) {
-            // `t = fire f(o)`: a BOUND task lends plain heap borrows to `t` instead of
-            // hard-E12ing; the target binds FIRST so the lend attaches to `t`'s fresh generation, not a rebind-while-lent.
             auto* fireVal = dynamic_cast<FireExpr*>(as->value.get());
             auto* soleName = as->targets.size() == 1
                                  ? dynamic_cast<NameExpr*>(as->targets[0].get())
@@ -1359,13 +1227,11 @@ struct OwnershipCheck::Impl {
                 bindTarget(as->targets[0].get(), as->value.get(), flow);
             } else {
                 for (auto& t : as->targets)
-                    bindTarget(t.get(), /*value=*/nullptr, flow);
+                    bindTarget(t.get(), nullptr, flow);
             }
             return flow;
         }
         if (auto* an = dynamic_cast<AnnAssignStmt*>(s)) {
-            // Class-body field declarations never reach here (ClassDecl only recurses
-            // into methods), so an isOwn AnnAssign in statement position is misplaced by construction.
             if (an->isOwn)
                 error(an->location(),
                       "own marks a class FIELD as sole owner; it has no "
@@ -1376,7 +1242,6 @@ struct OwnershipCheck::Impl {
                 auto* fireVal = dynamic_cast<FireExpr*>(an->value.get());
                 auto* tn = dynamic_cast<NameExpr*>(an->target.get());
                 if (fireVal && tn) {
-                    // Bind the task name first, then lend (see AssignStmt).
                     bindTarget(an->target.get(), an->value.get(), flow);
                     processFire(fireVal, flow, tn->name, false);
                     return flow;
@@ -1388,8 +1253,6 @@ struct OwnershipCheck::Impl {
         }
         if (auto* aug = dynamic_cast<AugAssignStmt*>(s)) {
             checkExpr(aug->value.get(), flow);
-            // The target is read and rewritten; classification is type-dependent (str +=
-            // rebinds, list += mutates in place), so state is left unchanged, refuse-conservative for del.
             checkExpr(aug->target.get(), flow);
             return flow;
         }
@@ -1418,15 +1281,13 @@ struct OwnershipCheck::Impl {
             std::vector<Flow> outs = std::move(loopBreaks.back());
             loopBreaks.pop_back();
             outs.push_back(std::move(bodyOut));
-            outs.push_back(entry);  // loop may run zero times
+            outs.push_back(entry);
             Flow out = merge(outs);
             if (!wh->elseBody.empty()) out = analyzeBlock(wh->elseBody, std::move(out));
             return out;
         }
         if (auto* fo = dynamic_cast<ForStmt*>(s)) {
             checkExpr(fo->iterable.get(), flow);
-            // E17 (docs/002 2.11, the one mandatory-dub site): mutating a binding while
-            // iterating it silently skips elements (remove() shifts past the cursor); `for x in dub xs` iterates a snapshot instead.
             if (auto* itn = dynamic_cast<NameExpr*>(fo->iterable.get());
                 itn && !itn->isDubMarked) {
                 SourceLocation where;
@@ -1442,8 +1303,6 @@ struct OwnershipCheck::Impl {
             } else if (auto* dn = dynamic_cast<NameExpr*>(fo->iterable.get());
                        dn && dn->isDubMarked && dn->type) {
                 auto k = dn->type->kind();
-                // A snapshot of an immutable is the value itself: iterating
-                // it cannot observe mutations, so the dub buys nothing.
                 if (k == Type::Kind::Str || k == Type::Kind::Bytes ||
                     k == Type::Kind::Tuple) {
                     error(dn->location(),
@@ -1454,8 +1313,7 @@ struct OwnershipCheck::Impl {
             Flow entry = flow;
             loopBreaks.emplace_back();
             pushFrame();
-            // Loop targets borrow the iterable's elements.
-            bindTarget(fo->target.get(), /*value=*/nullptr, flow);
+            bindTarget(fo->target.get(), nullptr, flow);
             Flow bodyOut = flow;
             for (const auto& st : fo->body)
                 bodyOut = analyzeStmt(st.get(), std::move(bodyOut));
@@ -1472,8 +1330,6 @@ struct OwnershipCheck::Impl {
         }
         if (auto* tr = dynamic_cast<TryStmt*>(s)) {
             Flow tryOut = analyzeBlock(tr->tryBody, flow);
-            // A handler can run after ANY prefix of the try body: its entry is
-            // the conservative join of the entry and the try's fall-through.
             std::vector<Flow> handlerEntryParts;
             handlerEntryParts.push_back(flow);
             handlerEntryParts.push_back(tryOut);
@@ -1488,7 +1344,7 @@ struct OwnershipCheck::Impl {
                 pushFrame();
                 if (!h.name.empty()) {
                     BindState b;
-                    b.st = St::Borrowed;  // the exception slot owns it
+                    b.st = St::Borrowed;
                     int id = declare(h.name, SourceLocation{});
                     hf.states[id] = b;
                 }
@@ -1535,13 +1391,11 @@ struct OwnershipCheck::Impl {
                 clearExpiredPins(cf);
                 branches.push_back(std::move(cf));
             }
-            branches.push_back(flow);  // no case may match
+            branches.push_back(flow);
             return merge(branches);
         }
         if (auto* r = dynamic_cast<ReturnStmt*>(s)) {
             checkExpr(r->value.get(), flow);
-            // Returning while a binding is lent: the scope's release would
-            // race the thread still borrowing it.
             checkNoOutstandingLends(flow, r->location(), "this return");
             flow.terminated = true;
             return flow;
@@ -1578,7 +1432,7 @@ struct OwnershipCheck::Impl {
             for (const auto& cap : th->capturedVars)
                 recordFact(cap, flow, th->location(),
                            "a thread block at " + lineRef(th->location()),
-                           /*isCapture=*/true);
+                           true);
             return analyzeBlock(th->body, std::move(flow));
         }
         if (auto* fn = dynamic_cast<FunctionDecl*>(s)) {
@@ -1586,7 +1440,7 @@ struct OwnershipCheck::Impl {
                 recordFact(cap, flow, fn->location(),
                            "nested function '" + fn->name + "' at " +
                                lineRef(fn->location()),
-                           /*isCapture=*/true);
+                           true);
             for (const auto& p : fn->params)
                 checkE16(p.type.get(), fn->location());
             checkE16(fn->returnType.get(), fn->location());
@@ -1601,12 +1455,11 @@ struct OwnershipCheck::Impl {
                     for (const auto& p : mfn->params)
                         checkE16(p.type.get(), mfn->location());
                     checkE16(mfn->returnType.get(), mfn->location());
-                    analyzeCallable(mfn->params, mfn->body, /*isMethod=*/true);
+                    analyzeCallable(mfn->params, mfn->body, true);
                 }
             currentClassName = savedClass;
             return flow;
         }
-        // Import / Pass / everything else: no ownership consequence.
         return flow;
     }
 
@@ -1615,7 +1468,7 @@ struct OwnershipCheck::Impl {
             case MatchPattern::Kind::Capture:
                 if (!p.name.empty() && p.name != "_") {
                     BindState b;
-                    b.st = St::Borrowed;  // pattern captures borrow the subject
+                    b.st = St::Borrowed;
                     int id = declare(p.name, SourceLocation{});
                     flow.states[id] = b;
                 }
@@ -1650,15 +1503,11 @@ struct OwnershipCheck::Impl {
         }
         for (const auto& p : params) {
             BindState b;
-            // ADR 2.1: plain parameters borrow; `own p: T` arrives OWNED (the caller
-            // moved its +1 in), released at scope exit if the body never consumed it.
             b.st = p.isOwn ? St::Owned : St::Borrowed;
             int id = declare(p.name, SourceLocation{});
             flow.states[id] = b;
         }
         Flow out = analyzeBlock(body, std::move(flow));
-        // The callable is closing: every lend must have ended (the scope's
-        // releases would otherwise race the borrowing thread).
         if (!out.terminated)
             checkNoOutstandingLends(out, SourceLocation{}, "the end of the function");
         popFrame();
@@ -1696,7 +1545,7 @@ struct OwnershipCheck::Impl {
 
     void analyzeStmtsFresh(const std::vector<std::unique_ptr<Stmt>>& body) {
         std::vector<Parameter> none;
-        analyzeCallable(none, body, /*isMethod=*/false);
+        analyzeCallable(none, body, false);
     }
 };
 
@@ -1711,8 +1560,6 @@ bool OwnershipCheck::analyze(Module& module) {
     impl_->reported.clear();
     impl_->nextId = 0;
 
-    // Module top level: bindings here are globals; `del` on them refuses
-    // (v1: locals only). Function/class bodies analyze as callables.
     impl_->classOwnFields.clear();
     impl_->currentClassName.clear();
     impl_->funcsByName.clear();
@@ -1735,4 +1582,4 @@ const std::vector<OwnDiagnostic>& OwnershipCheck::diagnostics() const {
 
 bool OwnershipCheck::hasErrors() const { return !impl_->diags.empty(); }
 
-} // namespace dragon
+}

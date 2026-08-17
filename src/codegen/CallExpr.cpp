@@ -1,12 +1,8 @@
-/// Call-expression dispatch: class/TypedDict ctors, decorators, __call__,
-/// indirect/closure calls. Routes to emitBuiltinCall / emitMethodCall.
 #include "../CodeGenImpl.h"
 
 namespace dragon {
 
 void CodeGen::visit(CallExpr& node) {
-    // Call-site spread (*tuple / *list / **dict): TypedDict T(**row) and method
-    // spread fall through; everything else routes to emitSpreadDispatch.
     if (callHasSpread(node)) {
         bool isTypedDict = false;
         if (auto* c = dynamic_cast<NameExpr*>(node.callee.get()))
@@ -16,8 +12,6 @@ void CodeGen::visit(CallExpr& node) {
             isMethodCall = !(attr->object && attr->object->type &&
                              attr->object->type->kind() == Type::Kind::Module);
         if (!isTypedDict) {
-            // dict(**a, **b) / dict(x=1, **d): desugar to a DictExpr and reuse its
-            // spread-merge codegen. Callee is `dict` or the subscripted `dict[K,V]`.
             NameExpr* dc = dynamic_cast<NameExpr*>(node.callee.get());
             if (!dc)
                 if (auto* sub = dynamic_cast<SubscriptExpr*>(node.callee.get()))
@@ -28,7 +22,6 @@ void CodeGen::visit(CallExpr& node) {
                     synth.setLocation(node.location());
                     for (auto& kw : node.kwArgs) {
                         if (kw.first.empty()) {
-                            // `**src` spread entry (empty-name kwArg sentinel)
                             synth.entries.emplace_back(nullptr, std::move(kw.second));
                         } else {
                             auto keyLit = std::make_unique<StringLiteral>();
@@ -48,7 +41,6 @@ void CodeGen::visit(CallExpr& node) {
             } else if (emitSpreadDispatch(node)) {
                 return;
             }
-            // Unsupported spread target - diagnose rather than miscompile (#2).
             impl_->addError(
                 "call-site spread (`*` / `**`) into this callable is not "
                 "supported", node.location());
@@ -56,14 +48,11 @@ void CodeGen::visit(CallExpr& node) {
                 llvm::PointerType::getUnqual(*impl_->context));
             return;
         }
-        // isTypedDict: fall through to the TypedDict ctor path below.
     }
 
     if (auto* callee = dynamic_cast<NameExpr*>(node.callee.get())) {
         const std::string& name = callee->name;
 
-        // .dr `super(args)`: delegate to the parent ctor (opt-in, no implicit
-        // chaining). .py-mode super() proxy semantics are handled in emitBuiltinCall.
         if (name == "super" && impl_->isDragonFile) {
             if (impl_->currentClassName.empty()) {
                 impl_->addError("super(...) is only valid inside a method of a "
@@ -85,8 +74,6 @@ void CodeGen::visit(CallExpr& node) {
             std::string initName = impl_->classSymPrefix(parentName) + "___init__";
             auto* initFunc = impl_->module->getFunction(initName);
             if (!initFunc) {
-                // Builtin exception parents have no __init__ to delegate to; the
-                // msg slot is set at the raise site, so evaluate args and no-op.
                 if (impl_->isBuiltinExcName(parentName)) {
                     for (size_t i = 0; i < node.args.size(); ++i) {
                         node.args[i]->accept(*this);
@@ -101,7 +88,6 @@ void CodeGen::visit(CallExpr& node) {
                     llvm::PointerType::getUnqual(*impl_->context));
                 return;
             }
-            // Pass the current self (param 0 of the enclosing method) plus args.
             llvm::Value* selfVal = &*impl_->currentFunction->arg_begin();
             std::vector<llvm::Value*> args = {selfVal};
             auto initFuncType = initFunc->getFunctionType();
@@ -118,8 +104,6 @@ void CodeGen::visit(CallExpr& node) {
             return;
         }
 
-        // A user binding (import alias, local, global, same-module def) shadows a
-        // same-named builtin; without this, imported `open` would hit the builtin.
         bool nameIsUserBound = false;
         {
             std::string aliasSym = impl_->lookupImportedAlias(name);
@@ -141,16 +125,12 @@ void CodeGen::visit(CallExpr& node) {
             }
         }
 
-        // Builtin function dispatch (print, len, abs, int, float, str, etc.)
         if (!nameIsUserBound && emitBuiltinCall(node, name)) return;
 
-        // Constructor delegation: ParentClass(args...) inside a child class method
-        // calls ParentClass___init__(self, args...) instead of allocating a new instance.
         if (impl_->classNames.count(name) && !impl_->currentClassName.empty()) {
             auto parentIt = impl_->classParentNamesBySym.find(
                 impl_->classSym(impl_->currentClassName));
             if (parentIt != impl_->classParentNamesBySym.end() && parentIt->second == name) {
-                // Delegate to the parent's __init__ with the current self.
                 std::string initName = impl_->classSymPrefix(name) + "___init__";
                 auto* initFunc = impl_->module->getFunction(initName);
                 if (initFunc) {
@@ -172,19 +152,12 @@ void CodeGen::visit(CallExpr& node) {
             }
         }
 
-        // TypedDict constructor: ClassName({...}) -> create dict with tagged values
         if (impl_->typedDictClassesBySym.count(impl_->classSym(name))) {
-            // TypedDict(dict_literal): evaluate the DictExpr (already tagged).
             if (node.args.size() == 1) {
                 node.args[0]->accept(*this);
-                // The caller tracks the TypedDict class via varTypedDictClass.
                 return;
             }
-            // TypedDict() with keyword args: ClassName(name="Jon", age=10)
-            // Build a new dict and set each kwarg as a tagged entry
             if (!node.kwArgs.empty()) {
-                // Fast path Customer(**row) (single ** spread): one dragon_dict_copy,
-                // no per-entry rehash. The result owns its own +1 refs.
                 if (node.kwArgs.size() == 1 && node.kwArgs[0].first.empty()) {
                     node.kwArgs[0].second->accept(*this);
                     llvm::Value* src = impl_->lastValue;
@@ -194,16 +167,12 @@ void CodeGen::visit(CallExpr& node) {
                         impl_->runtimeFuncs["dragon_dict_copy"], {src}, "td");
                     return;
                 }
-                // General path: fresh dict; merge each ** spread, set each named
-                // kwarg by schema tag. Handles Customer(**a, **b, x=1).
                 auto* cap = llvm::ConstantInt::get(impl_->i64Type, node.kwArgs.size());
                 llvm::Value* dict = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_dict_new"], {cap}, "td");
                 for (auto& [kwName, kwVal] : node.kwArgs) {
                     kwVal->accept(*this);
                     llvm::Value* val = impl_->lastValue;
-                    // `**spread` (empty-name sentinel): merge the source dict's
-                    // tagged entries into the fresh TypedDict; result owns +1 refs.
                     if (kwName.empty()) {
                         if (!val->getType()->isPointerTy())
                             val = impl_->builder->CreateIntToPtr(val, impl_->i8PtrType);
@@ -211,7 +180,7 @@ void CodeGen::visit(CallExpr& node) {
                             impl_->runtimeFuncs["dragon_dict_update"], {dict, val});
                         continue;
                     }
-                    int64_t tag = TAG_INT; // TAG_INT default
+                    int64_t tag = TAG_INT;
                     auto schemaIt = impl_->typedDictFieldKindsBySym.find(impl_->classSym(name));
                     if (schemaIt != impl_->typedDictFieldKindsBySym.end()) {
                         auto fIt = schemaIt->second.find(kwName);
@@ -234,15 +203,12 @@ void CodeGen::visit(CallExpr& node) {
                 impl_->lastValue = dict;
                 return;
             }
-            // No args: empty TypedDict
             auto* cap = llvm::ConstantInt::get(impl_->i64Type, 0);
             impl_->lastValue = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_dict_new"], {cap}, "td");
             return;
         }
 
-        // Enum value lookup Color(v) -> Color._lookup(v) (not construction). The
-        // internal 2-arg singleton ctor has arity 2, so it isn't intercepted.
         if (impl_->enumKindBySym.count(impl_->classSym(name)) && node.args.size() == 1) {
             auto call = std::make_unique<CallExpr>();
             auto attr = std::make_unique<AttributeExpr>();
@@ -257,13 +223,9 @@ void CodeGen::visit(CallExpr& node) {
             return;
         }
 
-        // Class constructor ClassName(args) -> ClassName_new(args). Resolved
-        // statically from a literal class name (D021/D025 - no class values).
         const std::string ctorClassName =
             impl_->classNames.count(name) ? name : std::string();
         if (impl_->classNames.count(ctorClassName)) {
-            // Class decorators are unsupported (would need runtime descriptor
-            // construction, removed by D025). @dataclass etc. are compile-time.
             if (impl_->decoratedClassesBySym.count(impl_->classSym(ctorClassName))) {
                 impl_->addError(
                     "class decorators are not supported: classes are "
@@ -275,13 +237,9 @@ void CodeGen::visit(CallExpr& node) {
                 return;
             }
 
-            // Rebind so the rest of this block constructs the resolved class
-            // (handles both `Dog(...)` and `X(...)` where `X = Dog`).
             const std::string& name = ctorClassName;
             (void)name;
 
-            // Stack-construct a proven-non-escaping scalar-only instance: entry
-            // alloca + memset + immortal rc + direct __init__, no malloc/gc/decref.
             if (impl_->stackAllocSites.count(&node) &&
                 impl_->stackEligibleClassesBySym.count(impl_->classSym(name))) {
                 auto stIt = impl_->classStructTypesBySym.find(impl_->classSym(name));
@@ -306,14 +264,10 @@ void CodeGen::visit(CallExpr& node) {
                     impl_->builder->CreateCall(memsetFunc,
                         {self, llvm::ConstantInt::get(
                                    llvm::Type::getInt32Ty(*impl_->context), 0), sizeVal});
-                    // Immortal refcount (index 0): a stray decref becomes a no-op
-                    // rather than free()ing stack memory.
                     auto* rcGEP = impl_->builder->CreateStructGEP(structType, self, 0, "rc_ptr");
                     impl_->builder->CreateStore(
                         llvm::ConstantInt::get(impl_->i64Type, 0x4000000000000000LL), rcGEP);
 
-                    // Evaluate ctor args, coerce to __init__'s param types
-                    // (param 0 is self), then call __init__ on the stack slot.
                     auto* initTy = initFn->getFunctionType();
                     std::vector<llvm::Value*> initArgs = {self};
                     for (size_t i = 0; i < node.args.size(); ++i) {
@@ -331,13 +285,10 @@ void CodeGen::visit(CallExpr& node) {
                 }
             }
 
-            // Pick the _new symbol: arity-dispatched ClassName_new_N for
-            // multi-ctor classes, else ClassName_new. Mangled per owning module.
             const std::string ctorPrefix = impl_->classSymPrefix(name);
             std::string ctorName;
             auto ctorCountIt = impl_->classCtorCountBySym.find(impl_->classSym(name));
             if (ctorCountIt != impl_->classCtorCountBySym.end() && ctorCountIt->second > 1) {
-                // Multi-constructor: match call arity against classCtorArities
                 size_t callArity = node.args.size();
                 auto& arityVec = impl_->classCtorAritiesBySym[impl_->classSym(name)];
                 int matchedIdx = -1;
@@ -372,8 +323,6 @@ void CodeGen::visit(CallExpr& node) {
                     return;
                 }
                 std::vector<llvm::Value*> args;
-                // Owned heap-temporary args to release after the call (the
-                // ctor borrows; `self.f = param` increfs what it retains).
                 std::vector<std::pair<llvm::Value*, Impl::VarKind>> argTemps;
                 auto pkIt = impl_->funcParamKinds.find(ctorName);
                 auto ctorFuncType = ctorFunc->getFunctionType();
@@ -393,8 +342,6 @@ void CodeGen::visit(CallExpr& node) {
                         }
                     }
                     if (!argDrained) {
-                        // Monomorphized generic ctor: its erased-T param reads as
-                        // non-heap, so drain the owned temp here or it leaks per call.
                         if (arg->getType() == impl_->boxType) {
                             if (impl_->isOwnedBoxResult(arg))
                                 argTemps.emplace_back(arg, Impl::VarKind::Union);
@@ -405,15 +352,11 @@ void CodeGen::visit(CallExpr& node) {
                                 argTemps.emplace_back(arg, dk);
                         }
                     }
-                    // coerceArgFromExpr boxes a concrete arg into an Any/Union ctor
-                    // param with the right tag; coerceArg would fail the verifier.
                     if (i < ctorFuncType->getNumParams())
                         arg = impl_->coerceArgFromExpr(
                             node.args[i].get(), arg, ctorFuncType->getParamType(i));
                     args.push_back(arg);
                 }
-                // D040: bind ctor kwargs to named params (else Config(timeout=30)
-                // silently kept the default).
                 if (!node.kwArgs.empty()) {
                     auto pnIt = impl_->funcParamNames.find(ctorName);
                     if (pnIt != impl_->funcParamNames.end()) {
@@ -465,7 +408,6 @@ void CodeGen::visit(CallExpr& node) {
                                 }
                             }
                             if (!kwDrained) {
-                                // Same erased-T fallback as the positional loop.
                                 if (arg->getType() == impl_->boxType) {
                                     if (impl_->isOwnedBoxResult(arg))
                                         argTemps.emplace_back(
@@ -479,28 +421,21 @@ void CodeGen::visit(CallExpr& node) {
                             }
                             llvm::Type* paramTy =
                                 ctorFuncType->getParamType((unsigned)idx);
-                            // coerceArgFromExpr (not coerceArg) boxes a concrete kwarg
-                            // into an Any/Union/Optional param, like the positional path.
                             args[idx] = impl_->coerceArgFromExpr(kwVal.get(), arg, paramTy);
                         }
                     }
                 }
                 impl_->fillDefaultArgs(ctorName, ctorFunc, args, *this, &argTemps);
-                // Exception-safe temps: unwind frees on raise (a ctor body can
-                // raise), pop+decref on normal return.
                 auto argTempBases = impl_->pushArgTempCleanups(argTemps);
                 impl_->lastValue = impl_->normalizeIntC(
                     impl_->builder->CreateCall(ctorFunc, args, "inst"));
                 impl_->popArgTempCleanups(argTempBases);
-                // Release owned heap-temporary arguments now that the ctor has
-                // borrowed them (the fresh instance can't alias an arg).
                 impl_->drainBorrowTemps(argTemps);
                 impl_->emitMoveOutSlots(node);
                 return;
             }
         }
 
-        // D024: Check if function was wrapped by a decorator - use indirect dispatch
         {
             auto decIt = impl_->decoratedFunctions.find(name);
             if (decIt != impl_->decoratedFunctions.end()) {
@@ -526,18 +461,14 @@ void CodeGen::visit(CallExpr& node) {
                     args.push_back(arg);
                 }
 
-                // A wrapping decorator stores a DragonClosure*, not a bare fn ptr,
-                // so route through the closure-vs-bare discrimination (else SIGSEGV).
                 emitCallableValueCall(fnPtr, fnType, args,
-                                      /*ownedClosure=*/false, "deccall");
+                                      false, "deccall");
                 if (fnType->getReturnType() != impl_->voidType)
                     impl_->lastValue = impl_->normalizeIntC(impl_->lastValue);
                 return;
             }
         }
 
-        // Nested-def alias: inside a nested def's body, its own name maps to the
-        // mangled symbol so self-recursion is a direct call. Must precede getFunction.
         {
             auto naIt = impl_->nestedFunctionAliases.find(name);
             if (naIt != impl_->nestedFunctionAliases.end()) {
@@ -565,8 +496,6 @@ void CodeGen::visit(CallExpr& node) {
             }
         }
 
-        // User-defined function call. Lookup: import alias, then same-module
-        // mangleFunc, then userFuncName. A local callable shadows a module fn.
         llvm::Function* func = nullptr;
         std::string aliasSym = impl_->lookupImportedAlias(name);
         if (!aliasSym.empty()) {
@@ -582,23 +511,15 @@ void CodeGen::visit(CallExpr& node) {
         bool shadowedByLocal =
             func && impl_->callableTypes.count(name) && impl_->lookupVar(name);
         if (func && !shadowedByLocal) {
-            // funcVarArgInfo is keyed by the resolved LLVM symbol so same-named
-            // varargs functions in two modules don't clobber each other.
             auto vaIt = impl_->funcVarArgInfo.find(func->getName().str());
             bool hasVarArgs = (vaIt != impl_->funcVarArgInfo.end());
 
-            // *args/**kwargs call path: pack extra positional args into list,
-            // kwargs into dict (shared with the module-qualified call path).
             if (hasVarArgs) {
                 emitVarArgCall(func, node);
                 return;
             }
 
-            // Normal call path. A union-box param gets a {tag,payload} box built
-            // at the call site (D030); other params use coerceArg.
             std::vector<llvm::Value*> args;
-            // Owned heap-temp args to release after the call (callee borrows).
-            // Extern "C" callees are drainable unless they return ptr (FFI v0).
             std::vector<std::pair<llvm::Value*, Impl::VarKind>> argTemps;
             const std::string calleeSym = func->getName().str();
             const bool externNoDrain = impl_->externFuncNames.count(calleeSym) &&
@@ -610,8 +531,6 @@ void CodeGen::visit(CallExpr& node) {
             for (size_t i = 0; i < node.args.size() && i < funcType->getNumParams(); ++i) {
                 node.args[i]->accept(*this);
                 llvm::Value* arg = impl_->lastValue;
-                // D027: a bare fn passed to a Callable param is wrapped as
-                // DragonClosure(fn, null) for reliable dispatch; freed after the call.
                 bool argWrapped = false;
                 {
                     auto cpIt = impl_->funcCallableParam.find(func->getName().str());
@@ -627,7 +546,6 @@ void CodeGen::visit(CallExpr& node) {
                     }
                 }
                 if (argWrapped) {
-                    // Free the per-call wrapper after the call (callee borrows).
                     argTemps.emplace_back(arg, Impl::VarKind::Closure);
                 } else if (impl_->externDrainableFuncs.count(calleeSym)) {
                     // Extern callee: drain by the arg's own static type, not the
@@ -646,24 +564,17 @@ void CodeGen::visit(CallExpr& node) {
                     }
                 }
                 llvm::Type* paramTy = funcType->getParamType(i);
-                // Owner-aware box-or-coerce: a borrowed heap value boxed into an
-                // Any param is incref'd (donate); typed params just coerce.
                 args.push_back(
                     impl_->coerceArgFromExpr(node.args[i].get(), arg, paramTy));
             }
-            // Handle extra args beyond declared params (default-fill below catches missing).
             for (size_t i = funcType->getNumParams(); i < node.args.size(); ++i) {
                 node.args[i]->accept(*this);
                 args.push_back(impl_->lastValue);
             }
-            // D040: bind call-site kwargs to named params (else they were silently
-            // dropped and defaults filled the slots).
             if (!node.kwArgs.empty()) {
                 auto pnIt = impl_->funcParamNames.find(func->getName().str());
                 if (pnIt != impl_->funcParamNames.end()) {
                     const auto& paramNames = pnIt->second;
-                    // Resize args to the full param count with nullptr holes;
-                    // positional values stay at indices 0..node.args.size()-1.
                     size_t numParams = funcType->getNumParams();
                     if (args.size() < numParams)
                         args.resize(numParams, nullptr);
@@ -676,8 +587,6 @@ void CodeGen::visit(CallExpr& node) {
                                 "' got an unexpected keyword argument '" +
                                 kwName + "'",
                                 node.location());
-                            // Poison lastValue so a consumer of this aborted call
-                            // doesn't read a stale cross-function SSA value.
                             impl_->lastValue = llvm::ConstantPointerNull::get(
                                 llvm::PointerType::getUnqual(*impl_->context));
                             return;
@@ -719,11 +628,7 @@ void CodeGen::visit(CallExpr& node) {
                     }
                 }
             }
-            // Fill missing args with default values; key by the resolved
-            // LLVM symbol (matches funcParamDefaults' post-mangling write).
             impl_->fillDefaultArgs(func->getName().str(), func, args, *this, &argTemps);
-            // Register temps on the cleanup stack so an owned temp is freed on a
-            // raise too (the decref below only runs on normal return).
             auto argTempBases = impl_->pushArgTempCleanups(argTemps);
             if (func->getReturnType() == impl_->voidType) {
                 impl_->builder->CreateCall(func, args);
@@ -733,18 +638,12 @@ void CodeGen::visit(CallExpr& node) {
                 impl_->lastValue = impl_->normalizeIntC(
                     impl_->builder->CreateCall(func, args, "call"));
             }
-            // Normal return: rewind the cleanup entries (does NOT free) BEFORE
-            // the decref, so each temp is released exactly once (here).
             impl_->popArgTempCleanups(argTempBases);
-            // Release owned heap-temp args (safe even if the callee returns one:
-            // the return path increfs borrowed values).
             impl_->drainBorrowTemps(argTemps);
             impl_->emitMoveOutSlots(node);
             return;
         }
 
-        // No dynamic construction through a class value (D021/D025): a VarKind::Type
-        // var whose concrete class isn't known at compile time can't be constructed.
         {
             auto varKind = impl_->lookupVarKind(name);
             if (varKind == Impl::VarKind::Type) {
@@ -759,8 +658,6 @@ void CodeGen::visit(CallExpr& node) {
             }
         }
 
-        // __call__ dunder: class instance used as callable.
-        // If the variable holds a class instance and the class has __call__, dispatch to it.
         {
             auto varKind = impl_->lookupVarKind(name);
             if (varKind == Impl::VarKind::ClassInstance) {
@@ -790,7 +687,6 @@ void CodeGen::visit(CallExpr& node) {
                         for (size_t i = 0; i < node.args.size(); ++i) {
                             node.args[i]->accept(*this);
                             llvm::Value* arg = impl_->lastValue;
-                            // Coerce to match __call__ param type (skip param 0 = self)
                             if (callFunc && (i + 1) < callFunc->getFunctionType()->getNumParams())
                                 arg = impl_->coerceArg(arg, callFunc->getFunctionType()->getParamType(i + 1));
                             extraArgs.push_back(arg);
@@ -813,8 +709,6 @@ void CodeGen::visit(CallExpr& node) {
             }
         }
 
-        // First-class call: indirect call through a var holding a function pointer
-        // (lambda, function reference, or ptr-typed parameter).
         {
             llvm::Value* calleePtrStorage = nullptr;
             llvm::Type* loadType = nullptr;
@@ -836,11 +730,8 @@ void CodeGen::visit(CallExpr& node) {
                 llvm::Value* calleeVal = impl_->builder->CreateLoad(
                     loadType, calleePtrStorage, name + ".load");
 
-                // D027/D030: Check if this is a closure (VarKind::Closure)
                 auto calleeKind = impl_->lookupVarKind(name);
                 if (calleeKind == Impl::VarKind::Closure) {
-                    // Get the user-facing signature from callableTypes (fallback:
-                    // all-i64 params, i64 return).
                     llvm::FunctionType* userFnType = nullptr;
                     auto ctIt = impl_->callableTypes.find(name);
                     if (ctIt != impl_->callableTypes.end()) {
@@ -859,15 +750,11 @@ void CodeGen::visit(CallExpr& node) {
                         args.push_back(arg);
                     }
 
-                    // A VarKind::Closure value may be a bare fn ptr, not a real
-                    // DragonClosure; emitCallableValueCall discriminates at runtime.
                     emitCallableValueCall(calleeVal, userFnType, args,
-                                          /*ownedClosure=*/false, name);
+                                          false, name);
                     return;
                 }
 
-                // Non-closure indirect call. Without a callableTypes entry or a
-                // `: ptr` annotation the value may not be a fn pointer - error.
                 llvm::FunctionType* fnType = nullptr;
                 auto ctIt = impl_->callableTypes.find(name);
                 if (ctIt != impl_->callableTypes.end()) {
@@ -883,8 +770,6 @@ void CodeGen::visit(CallExpr& node) {
                     impl_->lastValue = llvm::ConstantInt::get(impl_->i64Type, 0);
                     return;
                 }
-                // Only a typed Callable value can hold a DragonClosure; a `: ptr`
-                // is a raw fn ptr, so don't read its tag (undefined byte). Gate on this.
                 const bool valIsTypedCallable = (ctIt != impl_->callableTypes.end());
 
                 llvm::Value* fnPtr = calleeVal;
@@ -902,8 +787,6 @@ void CodeGen::visit(CallExpr& node) {
                     args.push_back(arg);
                 }
 
-                // The value may be a DragonClosure: discriminate at runtime by the
-                // type_tag @ offset 8 (TAG_CLOSURE 10 -> unwrap fn+env, else bare fn).
                 if (valIsTypedCallable) {
                     auto* i8Ty = llvm::Type::getInt8Ty(*impl_->context);
                     auto* tagAddr = impl_->builder->CreateGEP(
@@ -919,7 +802,6 @@ void CodeGen::visit(CallExpr& node) {
                     impl_->builder->CreateCondBr(isClosure, closBB, bareBB);
                     const bool retVoid = fnType->getReturnType() == impl_->voidType;
 
-                    // Closure path: unwrap { [16 x i8] hdr, fn_ptr, env }.
                     impl_->builder->SetInsertPoint(closBB);
                     auto* closureStructType = llvm::StructType::getTypeByName(
                         *impl_->context, "DragonClosure");
@@ -943,8 +825,6 @@ void CodeGen::visit(CallExpr& node) {
                         closureStructType, fnPtr, 2, "closure.env.ptr");
                     auto* envPtr = impl_->builder->CreateLoad(
                         impl_->i8PtrType, envAddr, "closure.env");
-                    // Null env: the closure wraps a bare fn - call with the user
-                    // signature; a non-null env calls fn(args, env).
                     auto* nullEnv = llvm::ConstantPointerNull::get(
                         llvm::cast<llvm::PointerType>(impl_->i8PtrType));
                     auto* envNull = impl_->builder->CreateICmpEQ(
@@ -969,8 +849,6 @@ void CodeGen::visit(CallExpr& node) {
                     impl_->builder->CreateBr(contBB);
                     cEnvBB = impl_->builder->GetInsertBlock();
 
-                    // Bare path: call the value as a plain fn pointer (fallback
-                    // for an unwrapped raw fn ptr - tag != TAG_CLOSURE).
                     impl_->builder->SetInsertPoint(bareBB);
                     llvm::Value* bareRet = nullptr;
                     if (retVoid) impl_->builder->CreateCall(fnType, fnPtr, args);
@@ -992,7 +870,6 @@ void CodeGen::visit(CallExpr& node) {
                     }
                     return;
                 } else {
-                    // `: ptr` raw function pointer - plain bare call, no tag read.
                     if (fnType->getReturnType() == impl_->voidType) {
                         impl_->builder->CreateCall(fnType, fnPtr, args);
                         impl_->lastValue = llvm::ConstantPointerNull::get(
@@ -1011,16 +888,10 @@ void CodeGen::visit(CallExpr& node) {
         return;
     }
 
-    // Module-attr direct call pkg.sub.fn(args): emit a direct LLVM call (not
-    // emitMethodCall). Don't visit attr->object - modules have no runtime value.
     if (auto* attr = dynamic_cast<AttributeExpr*>(node.callee.get())) {
         if (attr->object && attr->object->type &&
             attr->object->type->kind() == Type::Kind::Module) {
-            // Cross-module ctor mod.Foo(args) -> Foo_new / Foo_new_N, same registry
-            // + arity lookup as the same-module path.
             if (impl_->classNames.count(attr->attribute)) {
-                // Owning module comes straight from the AttributeExpr's ModuleType;
-                // mangle with it so same-named classes across modules stay distinct.
                 const std::string& srcModuleName =
                     static_cast<ModuleType&>(*attr->object->type).name;
                 const std::string ctorPrefix =
@@ -1041,8 +912,6 @@ void CodeGen::visit(CallExpr& node) {
                 }
                 if (auto* ctorFunc = impl_->module->getFunction(ctorName)) {
                     std::vector<llvm::Value*> args;
-                    // Owned heap-temp args to release (ctor borrows); else mod.Foo(a+b)
-                    // leaks the temp per call.
                     std::vector<std::pair<llvm::Value*, Impl::VarKind>> argTemps;
                     auto ctorFuncType = ctorFunc->getFunctionType();
                     for (size_t i = 0; i < node.args.size(); ++i) {
@@ -1055,7 +924,6 @@ void CodeGen::visit(CallExpr& node) {
                         args.push_back(arg);
                     }
                     impl_->fillDefaultArgs(ctorName, ctorFunc, args, *this, &argTemps);
-                    // Exception-safe temps (see the same-module ctor path).
                     auto argTempBases = impl_->pushArgTempCleanups(argTemps);
                     impl_->lastValue = impl_->normalizeIntC(
                         impl_->builder->CreateCall(ctorFunc, args, "inst"));
@@ -1065,8 +933,6 @@ void CodeGen::visit(CallExpr& node) {
                     return;
                 }
             }
-            // Bare imported function - direct call via the source module's mangled
-            // symbol (so gzip.open and tarfile.open stay distinct), else un-mangled.
             const std::string& srcModuleName =
                 static_cast<ModuleType&>(*attr->object->type).name;
             const std::string mangled = Impl::mangleFunc(srcModuleName, attr->attribute);
@@ -1075,16 +941,12 @@ void CodeGen::visit(CallExpr& node) {
                 func = impl_->module->getFunction(Impl::userFuncName(attr->attribute));
             }
             if (func) {
-                // Variadic module fn (mod.pack(fmt, *args)): pack trailing args into
-                // a list / kwargs into a dict, like the NameExpr path.
                 if (impl_->funcVarArgInfo.count(func->getName().str())) {
                     emitVarArgCall(func, node);
                     return;
                 }
                 auto funcType = func->getFunctionType();
                 std::vector<llvm::Value*> args;
-                // Owned heap-temp args to release (callee borrows). Extern "C"
-                // callees are drainable unless they return ptr (FFI v0).
                 std::vector<std::pair<llvm::Value*, Impl::VarKind>> argTemps;
                 const std::string calleeSym2 = func->getName().str();
                 const bool externNoDrain2 =
@@ -1103,7 +965,6 @@ void CodeGen::visit(CallExpr& node) {
                         if (dk != Impl::VarKind::Other)
                             argTemps.emplace_back(arg, dk);
                     } else if (fpkIt != impl_->funcParamKinds.end() && i < fpkIt->second.size()) {
-                        // own param: the callee adopts the +1 - no caller drain.
                         if (!impl_->paramIsOwn(calleeSym2, (unsigned)i)) {
                             Impl::VarKind dk = impl_->argTempDecrefKind(
                                 node.args[i].get(), fpkIt->second[i], arg);
@@ -1112,18 +973,12 @@ void CodeGen::visit(CallExpr& node) {
                         }
                     }
                     if (i < funcType->getNumParams()) {
-                        // Owner-aware box-or-coerce: an Any param gets a box owning
-                        // a +1 (borrowed source incref'd); typed params coerce.
                         arg = impl_->coerceArgFromExpr(
                             node.args[i].get(), arg, funcType->getParamType(i));
                     }
                     args.push_back(arg);
                 }
-                // Fill missing default args, keyed by the resolved LLVM symbol
-                // (funcParamDefaults is post-mangling).
                 impl_->fillDefaultArgs(func->getName().str(), func, args, *this, &argTemps);
-                // Exception-safe temps: unwind frees on raise, pop+decref on
-                // normal return (see the same-module direct-call path).
                 auto argTempBases = impl_->pushArgTempCleanups(argTemps);
                 if (func->getReturnType() == impl_->voidType) {
                     impl_->builder->CreateCall(func, args);
@@ -1134,7 +989,6 @@ void CodeGen::visit(CallExpr& node) {
                         impl_->builder->CreateCall(func, args, "modcall"));
                 }
                 impl_->popArgTempCleanups(argTempBases);
-                // Release owned heap-temporary arguments (callee borrowed them).
                 impl_->drainBorrowTemps(argTemps);
                 impl_->emitMoveOutSlots(node);
                 return;
@@ -1148,11 +1002,8 @@ void CodeGen::visit(CallExpr& node) {
         }
     }
 
-    // Method calls: obj.method(args)
     if (auto* attr = dynamic_cast<AttributeExpr*>(node.callee.get())) {
         if (emitMethodCall(node, *attr)) return;
-        // No dispatch path matched this method call: compile-error rather than
-        // silently no-op (#2 - a dropped `self._lock.acquire()` locked nothing).
         std::string recv = "<expression>";
         if (auto* on = dynamic_cast<NameExpr*>(attr->object.get()))
             recv = "'" + on->name + "'";
@@ -1167,18 +1018,13 @@ void CodeGen::visit(CallExpr& node) {
         return;
     }
 
-    // Call of a callable value: the callee is a value expr (make_adder(5)(10),
-    // funcs[i](x)). emitCallableValueCall discriminates closure-vs-bare at runtime.
     if (!dynamic_cast<AttributeExpr*>(node.callee.get()) &&
         node.callee->type && node.callee->type->kind() == Type::Kind::Function) {
         auto& fnTy = static_cast<FunctionType&>(*node.callee->type);
 
-        // A CallExpr callee (make_adder(5)(10)) yields an OWNED transient closure -
-        // decref after the call; a borrowed source (funcs[i], a field/var) must not.
         bool closureOwned =
             dynamic_cast<CallExpr*>(node.callee.get()) != nullptr;
 
-        // User-facing signature from the semantic Callable type.
         std::vector<llvm::Type*> userParamTypes;
         userParamTypes.reserve(fnTy.paramTypes.size());
         for (auto& p : fnTy.paramTypes)
@@ -1188,7 +1034,6 @@ void CodeGen::visit(CallExpr& node) {
             ? impl_->typeKindToLLVM(fnTy.returnType->kind()) : impl_->i64Type;
         auto* userFnType = llvm::FunctionType::get(userRet, userParamTypes, false);
 
-        // Evaluate the callee, then the args (Python order), then dispatch.
         node.callee->accept(*this);
         llvm::Value* calleeVal = impl_->lastValue;
 
@@ -1212,8 +1057,6 @@ void CodeGen::visit(CallExpr& node) {
     impl_->lastValue = llvm::ConstantInt::get(impl_->i64Type, 0);
 }
 
-// Indirect call to a callable value of unknown closure-ness: discriminate at
-// runtime (tag@8 == TAG_CLOSURE), with an env==null sub-case for a wrapped bare fn.
 void CodeGen::emitCallableValueCall(llvm::Value* fnPtrVal,
                                     llvm::FunctionType* userFnType,
                                     const std::vector<llvm::Value*>& args,
@@ -1227,15 +1070,12 @@ void CodeGen::emitCallableValueCall(llvm::Value* fnPtrVal,
 
     const bool retVoid = userFnType->getReturnType() == impl_->voidType;
 
-    // Closure fn type = user params + trailing env ptr.
     std::vector<llvm::Type*> closParamTypes(
         userFnType->param_begin(), userFnType->param_end());
     closParamTypes.push_back(impl_->i8PtrType);
     auto* closFnType = llvm::FunctionType::get(
         userFnType->getReturnType(), closParamTypes, false);
 
-    // Discriminate at runtime: DragonObjectHeader.type_tag @ offset 8 ==
-    // TAG_CLOSURE (10)? (offset 8 of a real fn ptr is a .text byte, ~never 10.)
     auto* tagAddr = impl_->builder->CreateGEP(
         i8Ty, fnPtr, llvm::ConstantInt::get(impl_->i64Type, 8), label + ".tag.addr");
     auto* tagByte = impl_->builder->CreateLoad(i8Ty, tagAddr, label + ".tag");
@@ -1247,8 +1087,6 @@ void CodeGen::emitCallableValueCall(llvm::Value* fnPtrVal,
     auto* contBB = llvm::BasicBlock::Create(*impl_->context, label + ".cont", fnHere);
     impl_->builder->CreateCondBr(isClosure, closBB, bareBB);
 
-    // Closure path: unwrap {hdr, fn, env}. Null env -> call with the user signature;
-    // non-null env -> call fn(args, env).
     impl_->builder->SetInsertPoint(closBB);
     auto* closureStructType = llvm::StructType::getTypeByName(
         *impl_->context, "DragonClosure");
@@ -1289,7 +1127,6 @@ void CodeGen::emitCallableValueCall(llvm::Value* fnPtrVal,
     impl_->builder->CreateBr(contBB);
     cEnvBB = impl_->builder->GetInsertBlock();
 
-    // Bare path: call the value as a plain fn pointer (tag != TAG_CLOSURE).
     impl_->builder->SetInsertPoint(bareBB);
     llvm::Value* bareRet = nullptr;
     if (retVoid) impl_->builder->CreateCall(userFnType, fnPtr, args);
@@ -1310,7 +1147,6 @@ void CodeGen::emitCallableValueCall(llvm::Value* fnPtrVal,
         impl_->lastValue = impl_->normalizeIntC(phi);
     }
 
-    // Free an owned transient closure (tag-gated decref no-ops on the bare path).
     if (ownedClosure && impl_->options.gcMode == GCMode::RC) {
         impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_decref_callable"], {fnPtr});
@@ -1319,7 +1155,7 @@ void CodeGen::emitCallableValueCall(llvm::Value* fnPtrVal,
 
 void CodeGen::emitVarArgCall(llvm::Function* func, CallExpr& node) {
     auto vaIt = impl_->funcVarArgInfo.find(func->getName().str());
-    if (vaIt == impl_->funcVarArgInfo.end()) return;  // caller guarantees variadic
+    if (vaIt == impl_->funcVarArgInfo.end()) return;
     auto& vaInfo = vaIt->second;
     std::vector<llvm::Value*> args;
     auto funcType = func->getFunctionType();
@@ -1330,12 +1166,9 @@ void CodeGen::emitVarArgCall(llvm::Function* func, CallExpr& node) {
             llvm::PointerType::getUnqual(*impl_->context));
     };
 
-    // 1. Emit regular positional args (before *args)
     size_t llvmIdx = 0;
     for (size_t i = 0; i < vaInfo.numRegularParams && i < node.args.size(); ++i) {
         if (dynamic_cast<StarredExpr*>(node.args[i].get())) {
-            // A *list spread into a fixed regular slot needs runtime arity-splitting;
-            // deferred - diagnose rather than miscompile (#2).
             spreadFail("call-site spread into a positional parameter before "
                        "`*args` is not yet supported", node.args[i]->location());
             return;
@@ -1348,20 +1181,14 @@ void CodeGen::emitVarArgCall(llvm::Function* func, CallExpr& node) {
         llvmIdx++;
     }
 
-    // Pad omitted regular slots (a default before *args) with nullptr holes, else
-    // the *args list lands in the wrong slot; fillDefaultArgs fills them.
     while (args.size() < vaInfo.numRegularParams) {
         args.push_back(nullptr);
         llvmIdx++;
     }
 
-    // The *args pack and **kwargs dict are call-site-owned temps (callee borrows);
-    // tracked so the call tail can release them.
     llvm::Value* packedArgsList = nullptr;
     llvm::Value* packedKwargsDict = nullptr;
 
-    // Pack remaining positional args into the *args list, keyed by the declared
-    // element tag so native types (f64/str/box) are preserved, not erased to i64.
     if (vaInfo.hasVarArg) {
         size_t extraCount = (node.args.size() > vaInfo.numRegularParams)
             ? node.args.size() - vaInfo.numRegularParams : 0;
@@ -1370,8 +1197,6 @@ void CodeGen::emitVarArgCall(llvm::Function* func, CallExpr& node) {
             vaInfo.varArgElemTag, vaInfo.varArgElemIsAny, cap);
         for (size_t i = vaInfo.numRegularParams; i < node.args.size(); ++i) {
             if (auto* st = dynamic_cast<StarredExpr*>(node.args[i].get())) {
-                // Spread *list[T] into the *args pack: bulk-extend via
-                // dragon_list_extend when the monomorphs match, else per-element append.
                 auto* lt = dynamic_cast<ListType*>(st->value->type.get());
                 bool srcConcrete = lt && lt->elementType &&
                     lt->elementType->kind() != Type::Kind::Any;
@@ -1388,8 +1213,6 @@ void CodeGen::emitVarArgCall(llvm::Function* func, CallExpr& node) {
                         impl_->runtimeFuncs["dragon_list_extend"],
                         {argsList, src});
                 } else {
-                    // Box `*args: Any`, element-type mismatch, or a `*tuple`
-                    // source aren't bulk-extendable into the pack yet.
                     spreadFail(
                         "call-site spread into `*args` is supported only for a "
                         "`*list[T]` whose element type matches the `*args: T` "
@@ -1407,15 +1230,11 @@ void CodeGen::emitVarArgCall(llvm::Function* func, CallExpr& node) {
         packedArgsList = argsList;
         llvmIdx++;
     }
-    // Register the *args pack on the unwind stack too, since the binding guards
-    // below can raise and would otherwise leak it.
     llvm::Value* packedArgsCleanupBase = nullptr;
     if (packedArgsList)
         packedArgsCleanupBase =
             impl_->emitCleanupPushTemp(packedArgsList, Impl::DCLEAN_OBJ);
 
-    // Bind kwargs that name a regular param into that slot (D040 for variadics);
-    // others fall to the **kwargs pack. Without this the slot stayed null.
     std::vector<bool> kwConsumed(node.kwArgs.size(), false);
     if (!node.kwArgs.empty()) {
         auto pnIt = impl_->funcParamNames.find(func->getName().str());
@@ -1423,11 +1242,11 @@ void CodeGen::emitVarArgCall(llvm::Function* func, CallExpr& node) {
             const auto& paramNames = pnIt->second;
             for (size_t ki = 0; ki < node.kwArgs.size(); ++ki) {
                 const std::string& kwName = node.kwArgs[ki].first;
-                if (kwName.empty()) continue;  // ** spread - handled elsewhere
+                if (kwName.empty()) continue;
                 auto nameIt = std::find(paramNames.begin(), paramNames.end(), kwName);
-                if (nameIt == paramNames.end()) continue;  // unknown -> **kwargs
+                if (nameIt == paramNames.end()) continue;
                 size_t idx = (size_t)std::distance(paramNames.begin(), nameIt);
-                if (idx >= vaInfo.numRegularParams) continue;  // *args/**kwargs name -> **kwargs
+                if (idx >= vaInfo.numRegularParams) continue;
                 if (idx < args.size() && args[idx] != nullptr) {
                     spreadFail("function got multiple values for argument '" +
                                kwName + "'", node.location());
@@ -1443,15 +1262,13 @@ void CodeGen::emitVarArgCall(llvm::Function* func, CallExpr& node) {
         }
     }
 
-    // A **dict spread into a variadic callee: unfilled regular slots bind by name
-    // from it; a key naming a filled slot raises; the rest flow to **kwargs (D047).
     std::string dispName = "function '" + func->getName().str() + "'";
     if (auto* cn = dynamic_cast<NameExpr*>(node.callee.get()))
         dispName = "function '" + cn->name + "'";
     else if (auto* ca = dynamic_cast<AttributeExpr*>(node.callee.get()))
         dispName = "function '" + ca->attribute + "'";
     llvm::Value* spreadSrc = nullptr;
-    Expr* spreadSrcExpr = nullptr;  // the `**source` expr, for the owned-temp drain
+    Expr* spreadSrcExpr = nullptr;
     {
         Expr* spreadExpr = nullptr;
         int spreadCount = 0;
@@ -1471,14 +1288,10 @@ void CodeGen::emitVarArgCall(llvm::Function* func, CallExpr& node) {
                     spreadSrc, impl_->i8PtrType);
         }
     }
-    // Register an inline **{literal} spread source on the unwind stack, else the
-    // raising guards below leak the synthesized dict (test_kwargs_spread_*_raises).
     llvm::Value* spreadCleanupBase = nullptr;
     if (spreadSrc && spreadSrcExpr &&
         impl_->ownedTempDrainKind(spreadSrcExpr, spreadSrc) != Impl::VarKind::Other)
         spreadCleanupBase = impl_->emitCleanupPushTemp(spreadSrc, Impl::DCLEAN_OBJ);
-    // Emit `if dict has <name>: raise TypeError multiple values` against the
-    // spread source - used for filled regular slots and explicit keywords.
     auto emitSpreadDupCheck = [&](const std::string& argName) {
         auto* keyStr = impl_->builder->CreateGlobalString(argName);
         auto* has = impl_->builder->CreateCall(
@@ -1499,8 +1312,6 @@ void CodeGen::emitVarArgCall(llvm::Function* func, CallExpr& node) {
         impl_->builder->CreateUnreachable();
         impl_->builder->SetInsertPoint(okBB);
     };
-    // Build an i8*[] of param-name globals (the excluding-copy / stray-key
-    // reject argument). Returns {arrayPtr, count}.
     auto buildNamesArray = [&](const std::vector<std::string>& names)
             -> std::pair<llvm::Value*, int64_t> {
         if (names.empty())
@@ -1541,8 +1352,6 @@ void CodeGen::emitVarArgCall(llvm::Function* func, CallExpr& node) {
         impl_->bindParamSlotsFromDict(*this, func, spreadSrc, args, bindIdx,
                                       paramNames, dispName);
         if (!vaInfo.hasKwArg) {
-            // *args-only callee: a spread key that is not a regular param is
-            // an unexpected keyword - reject at runtime.
             auto [arrPtr, n] = buildNamesArray(regularNames);
             impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_dict_reject_unknown_keys"],
@@ -1552,8 +1361,6 @@ void CodeGen::emitVarArgCall(llvm::Function* func, CallExpr& node) {
         }
     }
 
-    // Pack remaining kwargs into the **kwargs dict; with a **dict spread it starts
-    // as a copy of the spread minus the already-bound regular-param names.
     if (vaInfo.hasKwArg) {
         llvm::Value* kwargsDict = nullptr;
         if (spreadSrc) {
@@ -1569,23 +1376,21 @@ void CodeGen::emitVarArgCall(llvm::Function* func, CallExpr& node) {
                 impl_->runtimeFuncs["dragon_dict_new"], {cap}, "kwargs");
         }
         for (size_t ki = 0; ki < node.kwArgs.size(); ++ki) {
-            if (kwConsumed[ki]) continue;  // already bound to a regular param
+            if (kwConsumed[ki]) continue;
             const std::string& kwName = node.kwArgs[ki].first;
-            if (kwName.empty()) continue;  // the `**dict` spread itself
-            // An explicit keyword also present in the spread is a duplicate.
+            if (kwName.empty()) continue;
             if (spreadSrc) emitSpreadDupCheck(kwName);
             node.kwArgs[ki].second->accept(*this);
             llvm::Value* val = impl_->lastValue;
-            // Determine tag for tagged dict entry
-            int64_t tag = TAG_INT; // TAG_INT default
+            int64_t tag = TAG_INT;
             if (val->getType() == impl_->i1Type) {
-                tag = TAG_BOOL; // TAG_BOOL
+                tag = TAG_BOOL;
                 val = impl_->builder->CreateZExt(val, impl_->i64Type);
             } else if (val->getType() == impl_->f64Type) {
-                tag = TAG_FLOAT; // TAG_FLOAT
+                tag = TAG_FLOAT;
                 val = impl_->builder->CreateBitCast(val, impl_->i64Type);
             } else if (val->getType()->isPointerTy()) {
-                tag = TAG_STR; // TAG_STR (default for pointers)
+                tag = TAG_STR;
                 // The dict-set adopts one ref, so incref a borrowed source (f(a=s))
                 // or the dict frees the caller's string (UAF); owned temps already carry +1.
                 if (impl_->options.gcMode == GCMode::RC &&
@@ -1605,8 +1410,6 @@ void CodeGen::emitVarArgCall(llvm::Function* func, CallExpr& node) {
         packedKwargsDict = kwargsDict;
         llvmIdx++;
     } else {
-        // *args-only callee: a keyword that bound to no regular param is
-        // unexpected. Guard so codegen never silently drops it.
         for (size_t ki = 0; ki < node.kwArgs.size(); ++ki) {
             if (!kwConsumed[ki] && !node.kwArgs[ki].first.empty()) {
                 spreadFail("function got an unexpected keyword argument '" +
@@ -1616,8 +1419,6 @@ void CodeGen::emitVarArgCall(llvm::Function* func, CallExpr& node) {
         }
     }
 
-    // Fill missing regular-arg defaults (params before *args), keyed by the
-    // resolved LLVM symbol so per-module defaults don't clobber.
     impl_->fillDefaultArgs(func->getName().str(), func, args, *this);
 
     if (func->getReturnType() == impl_->voidType) {
@@ -1629,26 +1430,19 @@ void CodeGen::emitVarArgCall(llvm::Function* func, CallExpr& node) {
             impl_->builder->CreateCall(func, args, "call"));
     }
 
-    // Normal path: rewind the unwind entries (no free) before the decrefs, in
-    // reverse push order, so each pack is released exactly once.
     if (spreadCleanupBase) impl_->emitCleanupPopTemp(spreadCleanupBase);
     if (packedArgsCleanupBase) impl_->emitCleanupPopTemp(packedArgsCleanupBase);
 
-    // Release the call-site-owned packs (callee borrowed them).
     if (packedArgsList)
         impl_->emitDecrefByKind(packedArgsList, Impl::VarKind::List);
     if (packedKwargsDict)
         impl_->emitDecrefByKind(packedKwargsDict, Impl::VarKind::Dict);
-    // Drain an inline **{literal} spread source (owned temp); a named **opts stays
-    // its owner's. Without this f(**{...}) leaks the synthesized dict per call.
     if (spreadSrc && spreadSrcExpr) {
         Impl::VarKind dk = impl_->ownedTempDrainKind(spreadSrcExpr, spreadSrc);
         if (dk != Impl::VarKind::Other)
             impl_->emitDecrefByKind(spreadSrc, dk);
     }
 }
-
-// C9-B - general call-site spread (`*tuple` / `*list` / `**dict`)
 
 bool CodeGen::callHasStarArg(CallExpr& node) {
     for (auto& a : node.args)
@@ -1659,19 +1453,14 @@ bool CodeGen::callHasStarArg(CallExpr& node) {
 bool CodeGen::callHasSpread(CallExpr& node) {
     if (callHasStarArg(node)) return true;
     for (auto& kw : node.kwArgs)
-        if (kw.first.empty()) return true;  // `**dict` sentinel (empty key)
+        if (kw.first.empty()) return true;
     return false;
 }
 
-// Resolve a NameExpr / module-attr callee to a free function or class ctor and
-// emit the spread call. Returns false for unhandled callee shapes (caller diagnoses).
 bool CodeGen::emitSpreadDispatch(CallExpr& node) {
-    // NameExpr callee: free function or same-module class ctor.
     if (auto* callee = dynamic_cast<NameExpr*>(node.callee.get())) {
         const std::string& name = callee->name;
 
-        // Class ctor spread: an overloaded ctor resolves only when the positional
-        // arity is statically known (codegen must pick a _new_N body up front).
         if (impl_->classNames.count(name) &&
             !impl_->typedDictClassesBySym.count(impl_->classSym(name)) &&
             !impl_->decoratedClassesBySym.count(impl_->classSym(name))) {
@@ -1680,7 +1469,6 @@ bool CodeGen::emitSpreadDispatch(CallExpr& node) {
             auto ctorCountIt = impl_->classCtorCountBySym.find(impl_->classSym(name));
             if (ctorCountIt != impl_->classCtorCountBySym.end() &&
                 ctorCountIt->second > 1) {
-                // Need a statically-known positional arity to pick the overload.
                 int64_t arity = -1;
                 if (spreadStaticArity(node, arity)) {
                     auto& arityVec = impl_->classCtorAritiesBySym[impl_->classSym(name)];
@@ -1691,7 +1479,7 @@ bool CodeGen::emitSpreadDispatch(CallExpr& node) {
                         ctorName = ctorPrefix + "_new_" +
                                    std::to_string(matchedIdx);
                 }
-                if (ctorName.empty()) return false;  // can't disambiguate
+                if (ctorName.empty()) return false;
             } else {
                 ctorName = ctorPrefix + "_new";
             }
@@ -1702,14 +1490,10 @@ bool CodeGen::emitSpreadDispatch(CallExpr& node) {
             return false;
         }
 
-        // Decorated / nested-alias callables are first-class indirect dispatch;
-        // spread into them is deferred (increment 6).
         if (impl_->decoratedFunctions.count(name) ||
             impl_->nestedFunctionAliases.count(name))
             return false;
 
-        // Plain user function - resolve with the same lookup order as the
-        // direct-call path (imported alias -> same-module mangled -> extern/entry).
         llvm::Function* func = nullptr;
         std::string aliasSym = impl_->lookupImportedAlias(name);
         if (!aliasSym.empty()) func = impl_->module->getFunction(aliasSym);
@@ -1721,8 +1505,6 @@ bool CodeGen::emitSpreadDispatch(CallExpr& node) {
         bool shadowedByLocal =
             func && impl_->callableTypes.count(name) && impl_->lookupVar(name);
         if (func && !shadowedByLocal) {
-            // Spread into a variadic target routes through emitVarArgCall (packs
-            // *list into *args, binds/forwards **dict).
             if (impl_->funcVarArgInfo.count(func->getName().str())) {
                 emitVarArgCall(func, node);
                 return true;
@@ -1733,13 +1515,11 @@ bool CodeGen::emitSpreadDispatch(CallExpr& node) {
         return false;
     }
 
-    // Module-qualified callee: mod.fn(*args) / mod.Foo(*args).
     if (auto* attr = dynamic_cast<AttributeExpr*>(node.callee.get())) {
         if (attr->object && attr->object->type &&
             attr->object->type->kind() == Type::Kind::Module) {
             const std::string& srcModuleName =
                 static_cast<ModuleType&>(*attr->object->type).name;
-            // Cross-module class ctor.
             if (impl_->classNames.count(attr->attribute) &&
                 !impl_->typedDictClassesBySym.count(
                     Impl::mangleClass(srcModuleName, attr->attribute))) {
@@ -1770,7 +1550,6 @@ bool CodeGen::emitSpreadDispatch(CallExpr& node) {
                 }
                 return false;
             }
-            // Bare module function.
             const std::string mangled =
                 Impl::mangleFunc(srcModuleName, attr->attribute);
             llvm::Function* func = impl_->module->getFunction(mangled);
@@ -1791,11 +1570,9 @@ bool CodeGen::emitSpreadDispatch(CallExpr& node) {
     return false;
 }
 
-// Statically-known positional arity when every spread is a *tuple; false if a
-// *list (runtime length) or **dict is present.
 bool CodeGen::spreadStaticArity(CallExpr& node, int64_t& arityOut) {
     for (auto& kw : node.kwArgs)
-        if (kw.first.empty()) return false;   // `**dict` -> arity unknown
+        if (kw.first.empty()) return false;
     int64_t total = 0;
     for (auto& a : node.args) {
         if (auto* st = dynamic_cast<StarredExpr*>(a.get())) {
@@ -1803,7 +1580,7 @@ bool CodeGen::spreadStaticArity(CallExpr& node, int64_t& arityOut) {
             if (ty && ty->kind() == Type::Kind::Tuple)
                 total += (int64_t)static_cast<TupleType&>(*ty).elementTypes.size();
             else
-                return false;                  // `*list` -> arity unknown
+                return false;
         } else {
             total += 1;
         }
@@ -1812,8 +1589,6 @@ bool CodeGen::spreadStaticArity(CallExpr& node, int64_t& arityOut) {
     return true;
 }
 
-// Shared spread expansion: fill `args` from node's positional (*tuple/*list) and
-// kwargs (**dict), coercing per param slot. Spread elements are borrowed (no argTemps).
 bool CodeGen::Impl::expandSpreadCallArgs(
         CodeGen& cg, llvm::Function* func, CallExpr& node,
         std::vector<llvm::Value*>& args,
@@ -1836,8 +1611,6 @@ bool CodeGen::Impl::expandSpreadCallArgs(
         return false;
     };
 
-    // Coerce one positional value into the next param slot. srcExpr is set for an
-    // explicit arg; spread elements pass srcExpr=nullptr, borrowed=true.
     auto pushPositional = [&](llvm::Value* v, Expr* srcExpr, bool borrowed,
                               std::shared_ptr<Type> staticType) {
         unsigned pidx = (unsigned)args.size();
@@ -1852,8 +1625,6 @@ bool CodeGen::Impl::expandSpreadCallArgs(
                 if (srcExpr) {
                     v = coerceArgFromExpr(srcExpr, v, paramTy);
                 } else {
-                    // Borrowed spread element (from a tuple/list): box without
-                    // taking ownership, matching the Any-param borrow model.
                     int64_t t = staticType ? typeKindToTag(staticType->kind()) : 0;
                     if (t < 0) t = 0;
                     v = makeBox(llvm::ConstantInt::get(i64Type, t), v);
@@ -1866,7 +1637,6 @@ bool CodeGen::Impl::expandSpreadCallArgs(
         args.push_back(v);
     };
 
-    // 1. Positional args, expanding any `*spread`.
     for (auto& a : node.args) {
         if (auto* st = dynamic_cast<StarredExpr*>(a.get())) {
             st->value->accept(cg);
@@ -1875,8 +1645,6 @@ bool CodeGen::Impl::expandSpreadCallArgs(
                 src = builder->CreateIntToPtr(src, i8PtrType);
             auto srcTy = st->value->type;
             if (auto* tt = dynamic_cast<TupleType*>(srcTy.get())) {
-                // *tuple (static arity): per-element typed loads, no runtime
-                // check. ~free, heterogeneous element types OK.
                 size_t L = tt->elementTypes.size();
                 for (size_t k = 0; k < L; ++k) {
                     auto* idx = llvm::ConstantInt::get(i64Type, (int64_t)k);
@@ -1885,11 +1653,9 @@ bool CodeGen::Impl::expandSpreadCallArgs(
                         "spread.elem");
                     auto et = tt->elementTypes[k];
                     llvm::Value* native = containerSlotToNative(raw, et.get());
-                    pushPositional(native, nullptr, /*borrowed=*/true, et);
+                    pushPositional(native, nullptr, true, et);
                 }
             } else if (auto* lt = dynamic_cast<ListType*>(srcTy.get())) {
-                // *list[T] must fill exactly the R remaining positional slots (LLVM
-                // arity is fixed): runtime len==R check + R typed loads. Last positional only.
                 if (&a != &node.args.back())
                     return fail("`*list` spread must be the last positional "
                                 "argument", st->location());
@@ -1905,7 +1671,6 @@ bool CodeGen::Impl::expandSpreadCallArgs(
                 if (R < 0)
                     return fail("too many positional arguments before `*list` "
                                 "spread", st->location());
-                // Runtime length check: dragon_list_len(src) == R else raise.
                 llvm::Value* len = builder->CreateCall(
                     runtimeFuncs["dragon_list_len"], {src}, "spread.len");
                 auto* rConst = llvm::ConstantInt::get(i64Type, R);
@@ -1924,8 +1689,6 @@ bool CodeGen::Impl::expandSpreadCallArgs(
                      builder->CreateGlobalString(msg)});
                 builder->CreateUnreachable();
                 builder->SetInsertPoint(okBB);
-                // Pick the typed getter by element kind so values cross the
-                // boundary at their native type (no i64 funnel).
                 Type::Kind ek = et ? et->kind() : Type::Kind::Int;
                 for (int64_t k = 0; k < R; ++k) {
                     auto* idx = llvm::ConstantInt::get(i64Type, k);
@@ -1942,15 +1705,14 @@ bool CodeGen::Impl::expandSpreadCallArgs(
                             runtimeFuncs["dragon_list_get_ptr"], {src, idx},
                             "spread.elem");
                     } else {
-                        // int / bool - DragonListI64 storage.
                         llvm::Value* raw = builder->CreateCall(
                             runtimeFuncs["dragon_list_get"], {src, idx},
                             "spread.elem");
                         elem = (ek == Type::Kind::Bool)
-                            ? containerSlotToNative(raw, et.get())  // i64 -> i1
+                            ? containerSlotToNative(raw, et.get())
                             : raw;
                     }
-                    pushPositional(elem, nullptr, /*borrowed=*/true, et);
+                    pushPositional(elem, nullptr, true, et);
                 }
             } else {
                 return fail("cannot spread a non-tuple/non-list value",
@@ -1958,15 +1720,13 @@ bool CodeGen::Impl::expandSpreadCallArgs(
             }
         } else {
             a->accept(cg);
-            pushPositional(lastValue, a.get(), /*borrowed=*/false, nullptr);
+            pushPositional(lastValue, a.get(), false, nullptr);
         }
     }
 
-    // 2. Keyword args + `**dict` spread.
     if (!node.kwArgs.empty()) {
         if (args.size() < numParams) args.resize(numParams, nullptr);
         auto pnIt = funcParamNames.find(symName);
-        // First bind explicit named kwargs; collect the (at most one) `**dict`.
         Expr* dictSpread = nullptr;
         int dictSpreadCount = 0;
         for (auto& [kwName, kwVal] : node.kwArgs) {
@@ -1992,8 +1752,6 @@ bool CodeGen::Impl::expandSpreadCallArgs(
             args[idx] = coerceArgFromExpr(kwVal.get(), v, paramTy);
         }
 
-        // **dict general spread: bind each unfilled param by name (missing required
-        // -> raise; optional -> default; stray key -> raise). Values borrowed (D047).
         if (dictSpread) {
             if (dictSpreadCount > 1)
                 return fail("multiple `**dict` spreads into one call are not "
@@ -2006,16 +1764,12 @@ bool CodeGen::Impl::expandSpreadCallArgs(
             llvm::Value* d = lastValue;
             if (!d->getType()->isPointerTy())
                 d = builder->CreateIntToPtr(d, i8PtrType);
-            // Drain an inline literal spread source (owned temp) after the call via
-            // argTemps, else it leaks per call; a named **opts stays its owner's.
             {
                 VarKind spreadDk = ownedTempDrainKind(dictSpread, d);
                 if (spreadDk != VarKind::Other) argTemps.emplace_back(d, spreadDk);
             }
             auto defIt = funcParamDefaults.find(symName);
 
-            // Bindable names = still-unfilled params; reject any dict key outside
-            // this set, then bind each.
             std::vector<llvm::Constant*> allowedPtrs;
             std::vector<size_t> bindIdx;
             for (size_t idx = 0; idx < numParams && idx < paramNames.size(); ++idx) {
@@ -2063,8 +1817,6 @@ void CodeGen::Impl::bindParamSlotsFromDict(
                           : funcParamKinds.find(symName);
     auto defIt = funcParamDefaults.find(symName);
 
-    // Extract one param's value from the dict at its native LLVM type
-    // (key-present path only).
     auto extractParam = [&](size_t idx, llvm::Value* keyStr) -> llvm::Value* {
         llvm::Type* paramTy = funcType->getParamType((unsigned)idx);
         if (paramTy == f64Type)
@@ -2079,7 +1831,7 @@ void CodeGen::Impl::bindParamSlotsFromDict(
             return makeBox(tag, payload);
         }
         if (paramTy->isPointerTy()) {
-            int64_t tag = TAG_STR;  // TAG_STR default
+            int64_t tag = TAG_STR;
             if (fpkIt != funcParamKinds.end() && idx < fpkIt->second.size()) {
                 int64_t t = varKindToTag(fpkIt->second[idx]);
                 if (t >= 0) tag = t;
@@ -2107,7 +1859,6 @@ void CodeGen::Impl::bindParamSlotsFromDict(
             has, llvm::ConstantInt::get(i64Type, 0), "kw.present");
         auto* fn = currentFunction;
         if (!hasDefault) {
-            // Required: raise if absent, else bind.
             auto* okBB = llvm::BasicBlock::Create(*context, "kw.ok", fn);
             auto* missBB = llvm::BasicBlock::Create(*context, "kw.miss", fn);
             builder->CreateCondBr(hasB, okBB, missBB);
@@ -2122,7 +1873,6 @@ void CodeGen::Impl::bindParamSlotsFromDict(
             builder->SetInsertPoint(okBB);
             args[idx] = extractParam(idx, keyStr);
         } else {
-            // Optional: present -> dict value, absent -> default expr.
             auto* presentBB = llvm::BasicBlock::Create(*context, "kw.have", fn);
             auto* absentBB = llvm::BasicBlock::Create(*context, "kw.def", fn);
             auto* contBB = llvm::BasicBlock::Create(*context, "kw.cont", fn);
@@ -2133,8 +1883,6 @@ void CodeGen::Impl::bindParamSlotsFromDict(
             builder->CreateBr(contBB);
             builder->SetInsertPoint(absentBB);
             defIt->second[idx]->accept(cg);
-            // coerceArgFromExpr (not coerceArg) so a native default into
-            // an `Any`/box param is boxed - matching extractParam's box.
             llvm::Value* vDef = coerceArgFromExpr(
                 defIt->second[idx], lastValue, paramTy);
             auto* absentEnd = builder->GetInsertBlock();
@@ -2153,11 +1901,9 @@ void CodeGen::emitSpreadCall(llvm::Function* func, CallExpr& node,
                              const std::string& dispName) {
     std::vector<std::pair<llvm::Value*, Impl::VarKind>> argTemps;
     if (!impl_->expandSpreadCallArgs(*this, func, node, args, argTemps, dispName))
-        return;  // error diagnosed; lastValue poisoned to null
+        return;
 
-    // Fill remaining holes with defaults, then emit the call.
     impl_->fillDefaultArgs(func->getName().str(), func, args, *this, &argTemps);
-    // Exception-safe temps: unwind frees on raise, pop+decref on normal return.
     auto argTempBases = impl_->pushArgTempCleanups(argTemps);
     if (func->getReturnType() == impl_->voidType) {
         impl_->builder->CreateCall(func, args);
@@ -2168,10 +1914,8 @@ void CodeGen::emitSpreadCall(llvm::Function* func, CallExpr& node,
             impl_->builder->CreateCall(func, args, "spreadcall"));
     }
     impl_->popArgTempCleanups(argTempBases);
-    // Release owned heap-temp args (spread elements are borrowed, absent from
-    // argTemps; an inline **{...} source is here and released after its borrows).
     impl_->drainBorrowTemps(argTemps);
     impl_->emitMoveOutSlots(node);
 }
 
-} // namespace dragon
+}

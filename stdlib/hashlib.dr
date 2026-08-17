@@ -5,7 +5,6 @@ digest() (str->hex helpers live in crypto.dr); also provides pbkdf2_hmac (RFC 80
 
 import hmac
 
-# Raw-digest primitives (mbedTLS-backed): bytes in, bytes out.
 extern "C" def dragon_hash_ctx_new(algorithm: str) -> bytes
 extern "C" def dragon_hash_ctx_updated(state: bytes, data: bytes) -> bytes
 extern "C" def dragon_hash_ctx_digest(state: bytes) -> bytes
@@ -16,8 +15,6 @@ extern "C" def dragon_sha384_bytes(data: bytes) -> bytes
 extern "C" def dragon_sha1_bytes(data: bytes) -> bytes
 extern "C" def dragon_md5_bytes(data: bytes) -> bytes
 
-# Algorithm dispatch: every digest/size/pbkdf2 entry routes through these
-# instead of repeating a per-algorithm if-ladder.
 const _ALGORITHMS: list[str] = ["md5", "sha1", "sha224", "sha256", "sha384", "sha512"]
 
 def _raw_digest(algorithm: str, data: bytes) -> bytes {
@@ -45,7 +42,6 @@ def _digest_size(algorithm: str) -> int {
 }
 
 def _block_size(algorithm: str) -> int {
-    # SHA-384/512 process 128-byte blocks; the rest use 64.
     match algorithm {
         case "sha512" { return 128 }
         case "sha384" { return 128 }
@@ -123,7 +119,6 @@ def md5(data: bytes = b"") -> Hash {
 }
 
 def new(algorithm: str, data: bytes = b"") -> Hash {
-    # Algorithm must be one of algorithms_available(): sha256/sha224/sha512/sha384/sha1/md5.
     if not (algorithm in _ALGORITHMS) {
         raise ValueError(f"unsupported hash algorithm: {algorithm}")
     }
@@ -131,7 +126,6 @@ def new(algorithm: str, data: bytes = b"") -> Hash {
 }
 
 def hexdigest(algorithm: str, data: bytes = b"") -> str {
-    # One-shot hash: hex digest of data using the given algorithm.
     return _raw_digest(algorithm, data).hex()
 }
 
@@ -162,7 +156,6 @@ def pbkdf2_hmac(hash_name: str, password: bytes, salt: bytes,
     result: list[int] = []
     block_index: int = 1
     while len(result) < out_len {
-        # First HMAC input is the salt with the big-endian block counter.
         ib: list[int] = [
             (block_index >> 24) & 0xFF,
             (block_index >> 16) & 0xFF,
@@ -170,7 +163,6 @@ def pbkdf2_hmac(hash_name: str, password: bytes, salt: bytes,
             block_index & 0xFF
         ]
         u: bytes = hmac.digest(password, salt + bytes(ib), hash_name)
-        # T_i starts as U_1, then XOR-accumulates U_2..U_c (each fed from prev).
         t: list[int] = [0] * dlen
         j: int = 0
         while j < dlen {
@@ -197,9 +189,6 @@ def pbkdf2_hmac(hash_name: str, password: bytes, salt: bytes,
     return bytes(result[0:out_len])
 }
 
-# scrypt (RFC 7914), memory-hard KDF. mbedTLS ships no scrypt, so this is native:
-# PBKDF2-HMAC-SHA256 bookends ROMix(BlockMix(Salsa20/8)) on masked-i64 32-bit words. KAT: RFC 7914 §12.
-
 const _U32: int = 0xFFFFFFFF
 
 def _rotl32(x: int, c: int) -> int {
@@ -216,8 +205,7 @@ def _salsa20_8(b: list[int], off: int, x: list[int]) -> None {
         i = i + 1
     }
     r: int = 0
-    while r < 4 {                       # 8 rounds, two per iteration
-        # column round
+    while r < 4 {
         x[4]  = x[4]  ^ _rotl32((x[0]  + x[12]) & _U32, 7)
         x[8]  = x[8]  ^ _rotl32((x[4]  + x[0])  & _U32, 9)
         x[12] = x[12] ^ _rotl32((x[8]  + x[4])  & _U32, 13)
@@ -234,7 +222,6 @@ def _salsa20_8(b: list[int], off: int, x: list[int]) -> None {
         x[7]  = x[7]  ^ _rotl32((x[3]  + x[15]) & _U32, 9)
         x[11] = x[11] ^ _rotl32((x[7]  + x[3])  & _U32, 13)
         x[15] = x[15] ^ _rotl32((x[11] + x[7])  & _U32, 18)
-        # row round
         x[1]  = x[1]  ^ _rotl32((x[0]  + x[3])  & _U32, 7)
         x[2]  = x[2]  ^ _rotl32((x[1]  + x[0])  & _U32, 9)
         x[3]  = x[3]  ^ _rotl32((x[2]  + x[1])  & _U32, 13)
@@ -255,7 +242,7 @@ def _salsa20_8(b: list[int], off: int, x: list[int]) -> None {
     }
     i = 0
     while i < 16 {
-        b[off + i] = (b[off + i] + x[i]) & _U32   # add original (b untouched above)
+        b[off + i] = (b[off + i] + x[i]) & _U32
         i = i + 1
     }
 }
@@ -292,7 +279,7 @@ def _blockmix(bw: list[int], out: list[int], r: int,
     }
     pos: int = 0
     j: int = 0
-    while j < r {                       # even blocks Y[0], Y[2], ...
+    while j < r {
         const src: int = (2 * j) * 16
         i = 0
         while i < 16 {
@@ -303,7 +290,7 @@ def _blockmix(bw: list[int], out: list[int], r: int,
         j = j + 1
     }
     j = 0
-    while j < r {                       # odd blocks Y[1], Y[3], ...
+    while j < r {
         const src2: int = (2 * j + 1) * 16
         i = 0
         while i < 16 {
@@ -326,9 +313,9 @@ def _romix(bw: list[int], r: int, n: int) -> list[int] {
         x[i] = bw[i]
         i = i + 1
     }
-    rx: list[int] = [0] * 16               # BlockMix running block
-    y: list[int] = [0] * nwords            # BlockMix reorder scratch
-    scratch: list[int] = [0] * 16          # Salsa20/8 scratch
+    rx: list[int] = [0] * 16
+    y: list[int] = [0] * nwords
+    scratch: list[int] = [0] * 16
     v: list[int] = [0] * (n * nwords)
     k: int = 0
     while k < n {
@@ -338,12 +325,12 @@ def _romix(bw: list[int], r: int, n: int) -> list[int] {
             v[base + i] = x[i]
             i = i + 1
         }
-        _blockmix(x, x, r, rx, y, scratch)         # X = BlockMix(X), in place
+        _blockmix(x, x, r, rx, y, scratch)
         k = k + 1
     }
     k = 0
     while k < n {
-        const j: int = x[(2 * r - 1) * 16] & (n - 1)   # Integerify(X) mod n
+        const j: int = x[(2 * r - 1) * 16] & (n - 1)
         const vb: int = j * nwords
         i = 0
         while i < nwords {
@@ -404,7 +391,7 @@ def scrypt(password: bytes, salt: bytes, n: int, r: int, p: int,
     const b0: bytes = pbkdf2_hmac("sha256", password, salt, 1, blen)
     bwords: list[int] = _le32_words(b0)
 
-    const wpb: int = 32 * r                # words per p-block
+    const wpb: int = 32 * r
     i: int = 0
     while i < p {
         const base: int = i * wpb

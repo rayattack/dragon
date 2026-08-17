@@ -6,13 +6,11 @@ backs token signing, HMAC-SHA-1 backs TOTP (RFC 6238); mbedTLS does the full con
 from binascii import hexlify, unhexlify
 
 
-# Computes HMAC-<name> over (key, msg) in the runtime via mbedtls_md_hmac.
 extern "C" def dragon_hmac(name: str, key: bytes, msg: bytes) -> bytes
 
 
 def _block_size(name: str) -> int {
     """Block/digest sizes for HMAC.block_size / HMAC.digest_size (Python parity)."""
-    # SHA-384/512 hash 128-byte blocks; the rest use 64.
     if name == "sha256" { return 64 }
     if name == "sha224" { return 64 }
     if name == "sha512" { return 128 }
@@ -36,12 +34,9 @@ def _digest_size(name: str) -> int {
 class HMAC {
     def(key: bytes, name: str) {
         self.name = name
-        # _block_size validates `name`, rejecting unsupported algorithms early.
         self.block_size = _block_size(name)
         self.digest_size = _digest_size(name)
-        # Raw key - mbedTLS normalizes it to the block size internally.
         self.key = key
-        # Buffered message: Python's hmac is incremental; the keyed hash is computed once in digest().
         self.buf = bytes()
     }
 
@@ -92,8 +87,6 @@ def compare_digest(a: bytes, b: bytes) -> bool {
 }
 
 
-# Runtime constant-time string equality (never early-exits, unlike `==` which
-# lowers to strcmp and leaks the shared-prefix length via timing). Returns 1/0.
 extern "C" def dragon_str_eq_const(a: str, b: str) -> int
 
 

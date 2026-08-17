@@ -1,7 +1,3 @@
-# ODB M2 regression suite: the schema compiler and the DBON document codec -
-# required-field shredding, the optional tail, fixed-offset reads, and
-# validation. Dogfooded through the real compiler under ctest.
-
 from unittest import TestCase, main
 from odb.schema import compile_schema, CompiledSchema
 from odb.dbon import encode, decode, read_field, doc_schema_id
@@ -93,7 +89,6 @@ class DbonRoundtripTest(TestCase) {
         doc["email"] = "bo@x.com"
         blob: bytes = encode(cs, doc)
         back: dict[str, Any] = decode(cs, blob)
-        # only the three required fields come back
         self.assertEqual(len(back), 3)
         self.assertFalse("age" in back)
     }
@@ -119,7 +114,7 @@ class DbonFixedOffsetTest(TestCase) {
 
         raised: bool = False
         try {
-            read_field(cs, blob, "balance")   # optional, absent
+            read_field(cs, blob, "balance")
         } except KeyError {
             raised = True
         }
@@ -144,28 +139,28 @@ class DbonValidationTest(TestCase) {
         missing: dict[str, Any] = {}
         missing["id"] = 1
         missing["name"] = "X"
-        self.assertTrue(self._bad(cs, missing))          # missing email
+        self.assertTrue(self._bad(cs, missing))
 
         wrong: dict[str, Any] = {}
         wrong["id"] = 1
         wrong["name"] = "X"
         wrong["email"] = "e"
         wrong["age"] = "oops"
-        self.assertTrue(self._bad(cs, wrong))            # age wrong type
+        self.assertTrue(self._bad(cs, wrong))
 
         oob: dict[str, Any] = {}
         oob["id"] = 1
         oob["name"] = "X"
         oob["email"] = "e"
         oob["age"] = 999
-        self.assertTrue(self._bad(cs, oob))              # age above maximum
+        self.assertTrue(self._bad(cs, oob))
 
         unknown: dict[str, Any] = {}
         unknown["id"] = 1
         unknown["name"] = "X"
         unknown["email"] = "e"
         unknown["nickname"] = "xx"
-        self.assertTrue(self._bad(cs, unknown))          # undeclared field
+        self.assertTrue(self._bad(cs, unknown))
     }
 }
 

@@ -7,7 +7,6 @@ extern "C" def malloc(size: int) -> ptr
 extern "C" def free(p: ptr)
 extern "C" def memset(s: ptr, c: intc, n: int) -> ptr
 
-# BSD socket syscalls (all in libc)
 extern "C" def socket(domain: intc, type: intc, protocol: intc) -> intc
 extern "C" def bind(fd: intc, addr: ptr, addrlen: intc) -> intc
 extern "C" def listen(fd: intc, backlog: intc) -> intc
@@ -15,20 +14,14 @@ extern "C" def close(fd: intc) -> intc
 extern "C" def setsockopt(fd: intc, level: intc, optname: intc, optval: ptr, optlen: intc) -> intc
 extern "C" def shutdown(fd: intc, how: intc) -> intc
 
-# Scheduler-aware TCP I/O (ADR 038 Phase 8): yields the green thread on EAGAIN
-# instead of blocking the OS thread; falls back to poll() off a green thread.
 extern "C" def dragon_nb_accept(server_fd: int, addr: ptr, addrlen: ptr) -> int
 extern "C" def dragon_nb_connect(fd: int, addr: ptr, addrlen: int) -> int
 extern "C" def dragon_nb_send(fd: int, buf: str, length: int) -> int
 extern "C" def dragon_nb_recv_str(fd: int, max_len: int) -> str
-# Binary (bytes) variants, DragonBytes-typed for wire protocols (D032); recv_bytes may short-read.
 extern "C" def dragon_nb_recv_bytes(fd: int, max_len: int) -> bytes
 extern "C" def dragon_nb_send_bytes(fd: int, data: bytes) -> int
-# Timeout-capable recv (R1): returns b"" after `ms` of silence, the same EOF
-# signal recv_bytes uses, so stalled peers can't pin a green thread.
 extern "C" def dragon_nb_recv_timeout(fd: int, max_len: int, ms: int) -> bytes
 
-# Runtime helpers for sockaddr_in construction and data transfer
 extern "C" def dragon_sockaddr_in_new(port: intc, addr: str) -> ptr
 extern "C" def dragon_sockaddr_in_size() -> intc
 extern "C" def dragon_ptr_write_i32(p: ptr, offset: intc, val: intc)
@@ -36,8 +29,6 @@ extern "C" def dragon_recv_to_str(fd: intc, buf: ptr, length: int, flags: intc) 
 extern "C" def dragon_udp_sendto(fd: intc, buf: str, length: int, flags: intc, addr: ptr, addrlen: intc) -> int
 extern "C" def dragon_resolve4(host: str) -> str
 
-# BSD socket constants (Linux values). The libc calls above take these; they
-# are also the public Python-parity names (socket.AF_INET, socket.SOCK_STREAM, ...).
 const AF_INET: int = 2
 const SOCK_STREAM: int = 1
 const SOCK_DGRAM: int = 2
@@ -56,8 +47,6 @@ def gethostbyname(host: str) -> str {
     return dragon_resolve4(host)
 }
 
-# The one claim on a kernel socket (docs/1604-ownership); close() poisons the
-# fd against reuse. adopt_raw() is the only door in from a bare descriptor.
 class SocketHandle {
     _fd: int
     _closed: bool
@@ -97,8 +86,6 @@ class TcpStream {
 
     def(own sock: SocketHandle) {
         self._sock = sock
-        # Disable Nagle (TCP_NODELAY): request/response protocols (MySQL/Postgres,
-        # HTTP) would otherwise stall ~40ms per round-trip waiting on delayed-ACK.
         const optval: ptr = malloc(4)
         memset(optval, 0, 4)
         dragon_ptr_write_i32(optval, 0, 1)
@@ -108,8 +95,6 @@ class TcpStream {
 
     @staticmethod
     def open(host: str, port: int) -> TcpStream {
-        # Resolves hostnames to IPv4 (literal IPs pass through); the kernel-minted
-        # fd is adopted into a claim immediately, never free-floating.
         const ip: str = dragon_resolve4(host)
         const fd: int = socket(AF_INET, SOCK_STREAM, 0)
         const addr: ptr = dragon_sockaddr_in_new(port, ip)
@@ -171,21 +156,15 @@ class TcpStream {
 }
 
 class TcpListener {
-    # The one claim on the listening socket (docs/1604-ownership); minted at
-    # the kernel boundary, the descriptor never travels naked.
     own _sock: SocketHandle
     host: str
     port: int
 
     def(host: str, port: int) {
-        # Widen the intc from socket() so the fd flows to both the intc libc
-        # calls (bind/listen/close) and the int dragon_nb_* helpers.
         const sfd: int = socket(AF_INET, SOCK_STREAM, 0)
         self._sock = SocketHandle.adopt_raw(sfd)
         self.host = host
         self.port = port
-        # SO_REUSEADDR: without it, a prior close leaves the port in TIME_WAIT
-        # (~60s) and bind fails EADDRINUSE (see test_fire_own_io.dr).
         const optval: ptr = malloc(4)
         memset(optval, 0, 4)
         dragon_ptr_write_i32(optval, 0, 1)

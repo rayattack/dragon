@@ -10,7 +10,6 @@
 
 namespace dragon::test {
 
-/// Lex source code and return token vector (includes trailing EOF)
 inline std::vector<Token> lex(const std::string& source, bool isDragon = true) {
     LexerOptions opts;
     opts.useBraceBlocks = isDragon;
@@ -19,7 +18,6 @@ inline std::vector<Token> lex(const std::string& source, bool isDragon = true) {
     return lexer.tokenize();
 }
 
-/// Parse source code and return the Module AST
 inline std::unique_ptr<Module> parse(const std::string& source, bool isDragon = true) {
     auto tokens = lex(source, isDragon);
     ParserOptions opts;
@@ -30,7 +28,6 @@ inline std::unique_ptr<Module> parse(const std::string& source, bool isDragon = 
     return parser.parseModule();
 }
 
-/// Parse source and return parser diagnostics (for error-checking tests)
 inline std::vector<ParserDiagnostic> parseErrors(const std::string& source, bool isDragon = true) {
     auto tokens = lex(source, isDragon);
     ParserOptions opts;
@@ -42,7 +39,6 @@ inline std::vector<ParserDiagnostic> parseErrors(const std::string& source, bool
     return parser.diagnostics();
 }
 
-/// Lex source and return lexer diagnostics
 inline std::vector<LexerDiagnostic> lexErrors(const std::string& source, bool isDragon = true) {
     LexerOptions opts;
     opts.useBraceBlocks = isDragon;
@@ -52,4 +48,4 @@ inline std::vector<LexerDiagnostic> lexErrors(const std::string& source, bool is
     return lexer.diagnostics();
 }
 
-} // namespace dragon::test
+}

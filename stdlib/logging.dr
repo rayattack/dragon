@@ -1,6 +1,3 @@
-# Logger plus module-level debug/info/warning/error/critical, stderr only,
-# fixed `LEVEL [name] message` format; root level is a module var (class-instance globals have forward-decl gaps).
-
 extern "C" def dragon_log_stderr(msg: str)
 
 const NOTSET: int = 0
@@ -19,7 +16,6 @@ def _level_name(level: int) -> str {
     return "NOTSET"
 }
 
-# Threshold used by module-level funcs and the default Logger; set via basicConfig().
 _root_level: int = WARNING
 
 def basicConfig(level: int) -> None {
@@ -79,7 +75,6 @@ def getLogger(name: str) -> Logger {
     return Logger(name)
 }
 
-# Module-level convenience helpers - write straight to stderr without allocating a Logger.
 def debug(message: str) -> None    { _emit_to_stderr("root", DEBUG,    message) }
 def info(message: str) -> None     { _emit_to_stderr("root", INFO,     message) }
 def warning(message: str) -> None  { _emit_to_stderr("root", WARNING,  message) }

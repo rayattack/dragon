@@ -23,8 +23,6 @@ class Engine {
 }
 
 
-# Deferred-init field: `engine` is assigned by install(), not the constructor.
-# The pass allows this (a non-ctor method initializes it).
 class Car {
     wheels: int
     engine: Engine

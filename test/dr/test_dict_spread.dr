@@ -76,8 +76,6 @@ class DictSpreadTests(TestCase) {
     }
 
     def test_call_is_a_copy_not_alias() {
-        # dict(**a) is an independent copy (Python semantics): mutating the result
-        # must not touch the source.
         a: dict[str, int] = {"x": 1}
         m: dict[str, int] = dict(**a)
         m["x"] = 99
@@ -94,7 +92,7 @@ class DictSpreadTests(TestCase) {
 
     def test_d049_untyped_dict_path() {
         res: Results = Results([{"id": 2, "name": "bob"}])
-        row: dict[str, Any] = res.one()      # T = dict[str, Any] -> dict(**row)
+        row: dict[str, Any] = res.one()
         self.assertEqual(row["name"], "bob")
     }
 }

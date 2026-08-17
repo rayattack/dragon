@@ -8,8 +8,6 @@ Dragon's static str avoids Optional here - "" is the unknown sentinel).
 from os.path import splitext
 
 
-# Extension (lowercase, with dot) -> MIME type. Built lazily by _ensure_mime_table
-# since module top-level statements don't run and multi-line dict literals can't.
 _MIME_TABLE: dict[str, str] = {}
 _mime_built: bool = false
 

@@ -40,17 +40,6 @@ class App {
 }
 
 
-#===----------------------------------------------------------------------===#
-# Event-handler bridge (Decision 031).
-#
-# The compiler extracts an event-attribute interpolation - `<button
-# onclick="!{handler}">` - into `register_callback(handler)` (run at render time,
-# returning an integer id) and emits `window.dr.invoke(<id>)` into the HTML. The
-# webview shell delivers each invoke message to `_ui_dispatch`, which calls the
-# registered handler by id. `register_callback` is invoked from compiler-generated
-# template code, so its name/signature are load-bearing.
-#===----------------------------------------------------------------------===#
-
 _ui_callbacks: list[Callable[[], None]] = []
 
 def register_callback(fn: Callable[[], None]) -> int {
@@ -75,17 +64,6 @@ def _ui_dispatch(msg: str) -> None {
 }
 
 
-#===----------------------------------------------------------------------===#
-# JSON bridge (Decision 031 Phase 0): named handlers callable from page JS.
-#
-# JS calls `window.dr.call(name, payload)` and gets a Promise; the shim posts
-# `rpc:<id>:<name>:<payload>` to native. The handler runs on a green thread so
-# the UI thread never blocks; its return value (conventionally JSON text)
-# resolves the promise, a raised exception rejects it. Completion crosses back
-# to the UI thread through dragon_webview_post (g_idle_add), because webkit
-# calls are only legal there.
-#===----------------------------------------------------------------------===#
-
 _rpc_handlers: dict[str, Callable[[str], str]] = {}
 _rpc_done: list[tuple[int, bool, str]] = []
 _rpc_lock: Lock = Lock()
@@ -97,8 +75,6 @@ def rpc(name: str, fn: Callable[[str], str]) -> None {
 }
 
 def _settle_js(rid: int, ok: bool, data: str) -> str {
-    # JSON-escape the data so an arbitrary string can never break out of the
-    # literal or inject script (same rule as __patch_text_js).
     const okjs: str = "true" if ok else "false"
     return "window.dr._settle(" + str(rid) + "," + okjs + "," +
            dragon_json_escape_str(data) + ")"
@@ -136,9 +112,6 @@ def _rpc_exec(rid: int, name: str, payload: str) -> None {
 }
 
 def _rpc_dispatch(msg: str) -> None {
-    # msg = "rpc:<id>:<name>:<payload>"; the payload may itself contain ':'.
-    # _rpc_exec is defined ABOVE because `fire` cannot resolve a forward
-    # reference yet (compiler gap, same family as the signature pre-pass).
     const rest: str = msg[4:]
     const p1: int = rest.find(":")
     if p1 < 0 {
@@ -153,25 +126,12 @@ def _rpc_dispatch(msg: str) -> None {
     const name: str = rest2[:p2]
     const payload: str = rest2[p2 + 1:]
     if name not in _rpc_handlers {
-        # Settled directly: we are already on the UI thread.
         dragon_webview_eval_js(_settle_js(rid, false, f"no rpc handler named '{name}'"))
         return
     }
     fire _rpc_exec(rid, name, payload)
 }
 
-
-#===----------------------------------------------------------------------===#
-# Reactivity (Decision 031): fine-grained signals + effects.
-#
-# A Signal is a reactive cell. Reading it inside a running effect subscribes that
-# effect; writing it re-runs every subscribed effect. No virtual DOM, no diff -
-# the effect that re-runs is exactly the one that touches the changed node.
-#
-# Effects are no-arg closures kept in a module-global registry, referenced by
-# an integer id, and invoked BY INDEX (`_effects[eid]()`) because subscribers
-# are tracked as ids, not as the closures themselves.
-#===----------------------------------------------------------------------===#
 
 _effects: list[Callable[[], None]] = []
 _active_effect: int = -1
@@ -237,20 +197,6 @@ def effect(fn: Callable[[], None]) -> None {
 }
 
 
-#===----------------------------------------------------------------------===#
-# Reactive DOM bindings (Decision 031, rollout #4): targeted node patches.
-#
-# When the compiler sees a reactive value interpolated into template text -
-# `<h1>!{count()}</h1>` where `count` is a module-global Signal - it lowers the
-# slot to: (1) a synthesized `() -> str` render closure that re-evaluates the
-# interpolation, (2) a `bind_text(render)` call returning a fresh node id, and
-# (3) the markup `<span data-dr="<id>">initial</span>`. `bind_text` registers
-# the render as an effect that patches DOM node `<id>` on every dependency
-# change. No virtual DOM, no diff: the patched node is exactly the one whose
-# signal changed. `bind_text`/`_next_node_id` are invoked from compiler-
-# generated template code, so their names/signatures are load-bearing.
-#===----------------------------------------------------------------------===#
-
 _node_id_counter: int = 0
 
 def _next_node_id() -> int {
@@ -274,11 +220,6 @@ def __patch_text_js(node_id: int, value: str) -> str {
 
 def __patch_text(node_id: int, value: str) -> None {
     """Push a targeted text patch to DOM node `node_id` in the current window."""
-    # Bind the built script to a local so block-scope cleanup frees it. An
-    # `extern "C"` callee is assumed to borrow its args (Dragon can't know
-    # whether a foreign function takes ownership, so it never releases an
-    # owned temp passed straight into one) - `dragon_webview_eval_js` only
-    # reads the script, so the owning local is the right place to drop it.
     js: str = __patch_text_js(node_id, value)
     dragon_webview_eval_js(js)
 }

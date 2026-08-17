@@ -1,6 +1,3 @@
-# Pre-fix: self-referential containers crashed print/str/json.dumps with
-# unbounded recursion, and getattr on a missing attribute returned 0.
-
 from unittest import TestCase, main
 from json import dumps
 

@@ -1,9 +1,5 @@
 #include "CodeGenTestHelpers.h"
 
-//===----------------------------------------------------------------------===//
-// Print IR Tests
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenTest, PrintIntCall) {
     auto ir = generateIR("print(42)");
     EXPECT_NE(ir.find("dragon_print_int"), std::string::npos);
@@ -40,10 +36,6 @@ TEST(CodeGenTest, PrintListFloatDispatch) {
     EXPECT_NE(ir.find("dragon_print_list_float"), std::string::npos);
 }
 
-//===----------------------------------------------------------------------===//
-// Math IR Tests
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenTest, MathSqrt) {
     auto ir = generateIR("from math import sqrt\nx: float = sqrt(4.0)");
     EXPECT_NE(ir.find("call double @sqrt"), std::string::npos);
@@ -51,14 +43,9 @@ TEST(CodeGenTest, MathSqrt) {
 
 TEST(CodeGenTest, MathPi) {
     auto ir = generateIR("import math\nx: float = math.pi");
-    // LLVM stores pi as hex double 0x400921FB54442D18
     EXPECT_NE(ir.find("double"), std::string::npos);
     EXPECT_NE(ir.find("400921FB54442D18"), std::string::npos);
 }
-
-//===----------------------------------------------------------------------===//
-// Builtins IR Tests
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenIR, MinMaxInt) {
     auto ir = generateIR("print(min(3, 7))");
@@ -136,20 +123,10 @@ TEST(CodeGenIR, EmptyConstructors) {
     EXPECT_NE(ir3.find("dragon_set_new"), std::string::npos);
 }
 
-// File I/O (open/make/push -> Reader/Writer) behavior is covered by the
-// dogfooded unittest at test/dr/test_io_streams.dr, not by C++ IR assertions:
-// the surface is ordinary Dragon classes, so there are no special runtime
-// symbols to grep for.
-
-//===----------------------------------------------------------------------===//
-// Extern C IR Tests
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenTest, ExternCSingleDeclIR) {
     auto ir = generateIR(
         "extern \"C\" def puts(s: str) -> int\n"
     );
-    // Should have a declaration (no body) for puts
     EXPECT_NE(ir.find("declare i64 @puts(ptr)"), std::string::npos)
         << "Expected extern puts declaration:\n" << ir;
 }
@@ -178,17 +155,6 @@ TEST(CodeGenTest, ExternCPtrTypeIR) {
         << "Expected free declaration:\n" << ir;
 }
 
-// Regression: a discarded `ptr`-returning extern call (e.g. `memset(buf, 0,
-// n)`) must NOT emit `dragon_decref_str` on the return value. The call's
-// resolved type is `ptr` (no DragonObjectHeader), so a spurious
-// `dragon_decref_str` would interpret the 16 bytes preceding the buffer as a
-// fake header and (rarely) free a misaligned pointer - manifesting as
-// `malloc_consolidate(): unaligned fastbin chunk detected` later.
-//
-// Pre-fix path: ExprStmt -> inferPtrValueTag returned 1 (TAG_STR) by default
-// when typeKindToElemTag(Ptr) returned 0 and the if-guard `t != 0` skipped
-// returning it, falling through to the "assume string" tail. Fix: trust a
-// resolved expr->type unconditionally - Ptr resolves to 0 -> no decref.
 TEST(CodeGenTest, ExprStmtDiscardingPtrReturnNoDecrefStr) {
     auto ir = generateIR(
         "extern \"C\" def malloc(size: int) -> ptr\n"
@@ -198,15 +164,9 @@ TEST(CodeGenTest, ExprStmtDiscardingPtrReturnNoDecrefStr) {
         "memset(buf, 0, 64)\n"
         "free(buf)\n"
     );
-    // The discarded `memset` must not produce a dragon_decref_str call. Any
-    // such call would be against the raw malloc'd buffer and corrupt the heap.
     EXPECT_EQ(ir.find("call void @dragon_decref_str"), std::string::npos)
         << "Spurious dragon_decref_str on discarded ptr-returning call:\n" << ir;
 }
-
-//===----------------------------------------------------------------------===//
-// isinstance/type E2E Tests
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenE2E, IsinstanceInt) {
     auto output = compileAndRun(
@@ -274,10 +234,6 @@ TEST(CodeGenE2E, TypeBool) {
     EXPECT_EQ(output, "bool\n");
 }
 
-//===----------------------------------------------------------------------===//
-// Print E2E Tests
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, PrintListStr) {
     auto output = compileAndRun(
         "x: list[str] = [\"hello\", \"world\"]\n"
@@ -309,10 +265,6 @@ TEST(CodeGenE2E, PrintList) {
     );
     EXPECT_EQ(output, "[1, 2, 3]\n");
 }
-
-//===----------------------------------------------------------------------===//
-// Builtins E2E Tests
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenE2E, MinMaxTwoArgs) {
     auto out = compileAndRun("print(min(3, 7))\nprint(max(3, 7))");
@@ -385,15 +337,7 @@ TEST(CodeGenE2E, SortedReversed) {
     EXPECT_EQ(out, "1\n5\n5\n3\n");
 }
 
-// File write/read E2E (open/make/push) is covered by the dogfooded unittest at
-// test/dr/test_io_streams.dr.
-
-//===----------------------------------------------------------------------===//
-// Extern C E2E Tests
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, ExternCCallPuts) {
-    // Call libc puts() via extern "C"
     auto out = compileAndRun(
         "extern \"C\" def puts(s: str) -> int\n"
         "puts(\"hello from C\")\n"
@@ -402,7 +346,6 @@ TEST(CodeGenE2E, ExternCCallPuts) {
 }
 
 TEST(CodeGenE2E, ExternCCallAbs) {
-    // Call libc abs() via extern "C"
     auto out = compileAndRun(
         "extern \"C\" def abs(x: int) -> int\n"
         "x: int = abs(-42)\n"
@@ -410,10 +353,6 @@ TEST(CodeGenE2E, ExternCCallAbs) {
     );
     EXPECT_EQ(out, "42\n");
 }
-
-//===----------------------------------------------------------------------===//
-// hasattr() / getattr() - runtime attribute reflection
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenIR, HasattrIR) {
     auto ir = generateIR(

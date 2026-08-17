@@ -1,8 +1,3 @@
-# ODB M9 regression suite: the GraphQL adapter (spec section 11). A thin
-# translator: queries become OQL text (asserted verbatim), run through the
-# same prepare-time checks and executor as native reads; relation fields ride
-# the declared refs; the pk-keyed simple mutations ride the Documents API.
-
 from unittest import TestCase, main
 from odb import ODB, Documents
 from odb.vfs import SimVFS
@@ -194,13 +189,11 @@ class MutationTest(TestCase) {
 
     def test_delete_by_pk_and_restrict() -> None {
         db: ODB = _db()
-        # customer 1 has orders: the restrict ref surfaces as a GraphQL error
         reply: str = graphql_execute(db, "mutation { delete_customers_by_pk(id: 1) { id } }")
         obj_any: Any = loads(reply)
         obj: dict[str, Any] = obj_any
         self.assertTrue("errors" in obj)
 
-        # deleting the orders first, then the customer, succeeds
         graphql_execute(db, "mutation { delete_orders_by_pk(id: 10) { id } }")
         graphql_execute(db, "mutation { delete_orders_by_pk(id: 11) { id } }")
         reply2: str = graphql_execute(db, "mutation { delete_customers_by_pk(id: 1) { id name } }")
@@ -216,8 +209,6 @@ class MutationTest(TestCase) {
 
 
 class SdlTest(TestCase) {
-    # Type names mirror the schema names exactly (capitalized, underscores
-    # camel-cased) - no depluralization magic to guess wrong on real names.
     def test_sdl_renders_types_and_relations() -> None {
         db: ODB = _db()
         sdl: str = graphql_sdl(db)
@@ -225,8 +216,8 @@ class SdlTest(TestCase) {
         self.assertIn("type Orders {", sdl)
         self.assertIn("id: Int!", sdl)
         self.assertIn("city: String", sdl)
-        self.assertIn("customer: Customers", sdl)     # forward N:1
-        self.assertIn("orders: [Orders!]", sdl)       # reverse 1:N
+        self.assertIn("customer: Customers", sdl)
+        self.assertIn("orders: [Orders!]", sdl)
     }
 }
 

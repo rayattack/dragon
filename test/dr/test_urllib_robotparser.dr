@@ -24,9 +24,7 @@ class RobotParserTests(TestCase) {
         body: str = "User-agent: BadBot\nDisallow: /\nUser-agent: *\nDisallow: /admin/\n"
         rp: RobotFileParser = RobotFileParser()
         rp.parse(body)
-        # BadBot is fully blocked.
         self.assertFalse(rp.can_fetch("BadBot", "http://x/page"))
-        # Other bots: only /admin blocked.
         self.assertTrue(rp.can_fetch("GoodBot", "http://x/page"))
         self.assertFalse(rp.can_fetch("GoodBot", "http://x/admin/users"))
     }

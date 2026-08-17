@@ -51,7 +51,6 @@ bool PythonMigrator::migrate(const std::string& inputFile,
 }
 
 std::string PythonMigrator::migrateSource(const std::string& source) {
-    // Parse as Python (indent mode)
     LexerOptions lexOpts;
     lexOpts.useBraceBlocks = false;
     Lexer lexer(source, lexOpts);
@@ -106,7 +105,6 @@ void PythonMigrator::addTypeAnnotations(Module& module) {
 }
 
 void PythonMigrator::convertBlocksToBraces(Module&) {
-    // Block conversion is handled at emission time, not AST level
 }
 
 void PythonMigrator::validateDragonCompatibility(Module& module) {
@@ -519,4 +517,4 @@ std::string PythonMigrator::emitStmt(Stmt* stmt, int level) {
     return ind(level) + "# <unknown statement>\n";
 }
 
-} // namespace dragon
+}

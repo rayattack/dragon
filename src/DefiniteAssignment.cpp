@@ -6,57 +6,43 @@
 
 namespace dragon {
 
-// A structured forward "must" dataflow: each tracked no-initializer local gets an
-// id; a Flow tracks which ids are definitely assigned (joins intersect surviving, non-terminated predecessors).
-
 namespace {
 
-/// Dataflow fact at a program point.
 struct Flow {
-    std::unordered_set<int> assigned;  // ids known definitely-assigned here
-    bool terminated = false;           // path already left (return/raise/break/continue)
+    std::unordered_set<int> assigned;
+    bool terminated = false;
 };
 
-/// A name binding in a lexical scope frame.
 struct VarSlot {
     int id;
-    bool tracked;  // true only for no-initializer locals we must guard
+    bool tracked;
     SourceLocation declLoc;
-    bool isModuleConst = false;  // a module-level const/global (eager, source-ordered init)
+    bool isModuleConst = false;
 };
 
-} // namespace
+}
 
 struct DefiniteAssignment::Impl {
     std::vector<DADiagnostic> diags;
 
-    // Lexical scope stack for the callable currently being analyzed. Each frame
-    // maps a name to its slot. Reads resolve innermost-first.
     std::vector<std::unordered_map<std::string, VarSlot>> scopes;
 
-    // Per-loop collector of break-edge states (one vector per enclosing loop).
     std::vector<std::vector<Flow>> loopBreaks;
 
     int nextId = 0;
 
-    // Ids already reported as used-before-assignment, to avoid cascading
-    // duplicate errors for the same variable.
     std::unordered_set<int> reported;
 
-    // Active only while analyzing a constructor body. Each own-declared field with
-    // no class-body default gets a slot id; the constructor must leave every slot assigned on all exits.
     bool inConstructor = false;
-    std::unordered_map<std::string, int> ctorFieldSlot;  // field name -> slot id
-    std::unordered_set<int> ctorAllFieldIds;             // every field slot id
-    std::vector<Flow>* returnCollector = nullptr;        // flow at each `return`
+    std::unordered_map<std::string, int> ctorFieldSlot;
+    std::unordered_set<int> ctorAllFieldIds;
+    std::vector<Flow>* returnCollector = nullptr;
 
-    // Module consts/globals init eagerly in source order; a binding whose initializer reads
-    // another before it runs would capture a zeroed slot. The module top level is modeled as its own definite-init flow: a read of a not-yet-initialized binding (even through a called function/ctor) is a compile error.
-    bool inModuleInit = false;               // true only while walking the module top level
-    std::string currentInitConst;            // binding whose initializer is running (diagnostics)
-    std::unordered_map<std::string, SourceLocation> moduleConsts;  // name -> decl loc
-    std::unordered_map<std::string, FunctionDecl*> moduleFuncs;    // top-level fn name -> decl
-    std::unordered_map<std::string, ClassDecl*> moduleClasses;     // class name -> decl (for ctor)
+    bool inModuleInit = false;
+    std::string currentInitConst;
+    std::unordered_map<std::string, SourceLocation> moduleConsts;
+    std::unordered_map<std::string, FunctionDecl*> moduleFuncs;
+    std::unordered_map<std::string, ClassDecl*> moduleClasses;
     std::unordered_map<const FunctionDecl*, std::unordered_set<std::string>> readSetMemo;
 
     void pushFrame() { scopes.emplace_back(); }
@@ -70,23 +56,17 @@ struct DefiniteAssignment::Impl {
         return nullptr;
     }
 
-    // Declare a name in the innermost frame. `tracked` no-init locals start
-    // unassigned; everything else is declared already-assigned by the caller.
     int declare(const std::string& name, bool tracked, SourceLocation loc) {
         int id = nextId++;
         scopes.back()[name] = VarSlot{id, tracked, loc};
         return id;
     }
 
-    // Declare a name that is immediately assigned (param, init'd decl, loop /
-    // with / except target, import, walrus, ...).
     void declareAssigned(const std::string& name, SourceLocation loc, Flow& flow) {
-        int id = declare(name, /*tracked=*/false, loc);
+        int id = declare(name, false, loc);
         flow.assigned.insert(id);
     }
 
-    // Mark an existing name assigned (`x = ...`); if it's not a local of this callable
-    // it's a global/outer binding, recorded as an assigned untracked local so later reads don't warn.
     void markAssigned(const std::string& name, SourceLocation loc, Flow& flow) {
         if (VarSlot* s = resolve(name)) {
             flow.assigned.insert(s->id);
@@ -99,8 +79,6 @@ struct DefiniteAssignment::Impl {
         diags.push_back(DADiagnostic{loc, msg});
     }
 
-    // Join several branch outcomes: a variable is assigned afterwards only if
-    // assigned on every surviving branch. Terminated branches don't constrain.
     Flow merge(const std::vector<Flow>& branches) {
         std::vector<const Flow*> live;
         for (const auto& b : branches)
@@ -108,7 +86,7 @@ struct DefiniteAssignment::Impl {
 
         Flow out;
         if (live.empty()) {
-            out.terminated = true;  // every path left
+            out.terminated = true;
             return out;
         }
         out.assigned = live[0]->assigned;
@@ -121,8 +99,6 @@ struct DefiniteAssignment::Impl {
         return out;
     }
 
-    // Analyze a function/method/module/lambda body in isolation: a fresh scope
-    // stack and loop context, with parameters pre-declared as assigned.
     void analyzeCallable(const std::vector<Parameter>& params,
                          const std::vector<std::unique_ptr<Stmt>>& body) {
         auto savedScopes = std::move(scopes);
@@ -133,9 +109,9 @@ struct DefiniteAssignment::Impl {
         std::string savedInitConst = std::move(currentInitConst);
         scopes.clear();
         loopBreaks.clear();
-        inConstructor = false;       // a nested def is not the constructor
-        returnCollector = nullptr;   // its returns are its own
-        inModuleInit = false;        // its body runs at call time, not module load
+        inConstructor = false;
+        returnCollector = nullptr;
+        inModuleInit = false;
         currentInitConst.clear();
 
         pushFrame();
@@ -153,8 +129,6 @@ struct DefiniteAssignment::Impl {
         currentInitConst = std::move(savedInitConst);
     }
 
-    // Analyze a constructor body: in addition to the usual local-read checks,
-    // verify every own-declared non-defaulted field is assigned on all paths.
     void analyzeConstructor(
         const std::string& className,
         const std::vector<std::pair<std::string, SourceLocation>>& fields,
@@ -172,14 +146,14 @@ struct DefiniteAssignment::Impl {
         ctorFieldSlot.clear();
         ctorAllFieldIds.clear();
         inConstructor = true;
-        inModuleInit = false;        // since ctor body runs at call time, not module load
+        inModuleInit = false;
         currentInitConst.clear();
         std::vector<Flow> returnStates;
         returnCollector = &returnStates;
 
         pushFrame();
         Flow flow;
-        declareAssigned("self", SourceLocation{}, flow);  // implicit in .dr
+        declareAssigned("self", SourceLocation{}, flow);
         for (const auto& p : ctor->params)
             declareAssigned(p.name, SourceLocation{}, flow);
         for (const auto& f : fields) {
@@ -215,7 +189,6 @@ struct DefiniteAssignment::Impl {
         currentInitConst = std::move(savedInitConst);
     }
 
-    // Process a block as its own lexical scope; returns the outgoing flow.
     Flow analyzeBlock(const std::vector<std::unique_ptr<Stmt>>& body, Flow flow) {
         pushFrame();
         for (const auto& s : body) {
@@ -228,8 +201,6 @@ struct DefiniteAssignment::Impl {
     Flow analyzeStmt(Stmt* s, Flow flow);
     void checkExpr(Expr* e, Flow& flow);
 
-    // Resolve a call's callee to a this-module function/constructor, or null for
-    // imported/method/indirect callees; computeReadSet unions the module consts a callable's body reads transitively, memoized.
     static FunctionDecl* classCtor(ClassDecl* cd);
     FunctionDecl* resolveModuleCallable(Expr* callee);
     const std::unordered_set<std::string>& computeReadSet(
@@ -248,8 +219,6 @@ struct DefiniteAssignment::Impl {
                        std::unordered_set<std::string>& constReads,
                        std::vector<FunctionDecl*>& callees);
 
-    // Mark the variables written by an assignment target (names, tuple/list unpacking,
-    // starred targets); container/attribute targets only read their object.
     void assignTarget(Expr* target, Flow& flow) {
         if (auto* n = dynamic_cast<NameExpr*>(target)) {
             markAssigned(n->name, n->location(), flow);
@@ -264,7 +233,6 @@ struct DefiniteAssignment::Impl {
             checkExpr(sub->index.get(), flow);
         } else if (auto* at = dynamic_cast<AttributeExpr*>(target)) {
             checkExpr(at->object.get(), flow);
-            // `self.field = ...` inside a constructor assigns that field slot.
             if (inConstructor) {
                 if (auto* obj = dynamic_cast<NameExpr*>(at->object.get())) {
                     if (obj->name == "self") {
@@ -277,7 +245,6 @@ struct DefiniteAssignment::Impl {
         }
     }
 
-    // Bind names introduced by a match pattern (captures / sequence elements).
     void bindPattern(const MatchPattern& p, Flow& flow) {
         switch (p.kind) {
             case MatchPattern::Kind::Capture:
@@ -293,8 +260,6 @@ struct DefiniteAssignment::Impl {
         }
     }
 
-    // Collect field names assigned via `self.<field> = ...` anywhere in a body (nested
-    // blocks included); detects the deferred-init pattern so the constructor isn't required to assign them.
     void collectAssignedSelfFields(const std::vector<std::unique_ptr<Stmt>>& body,
                                    std::unordered_set<std::string>& out) {
         for (auto& s : body) collectStmtSelfFields(s.get(), out);
@@ -369,14 +334,13 @@ void DefiniteAssignment::Impl::checkExpr(Expr* e, Flow& flow) {
                       "variable '" + n->name +
                           "' may be read before it is assigned a value");
             }
-            // Suppress cascading reports for this variable downstream.
             flow.assigned.insert(s->id);
         }
         return;
     }
     if (auto* w = dynamic_cast<WalrusExpr*>(e)) {
         checkExpr(w->value.get(), flow);
-        declareAssigned(w->name, w->location(), flow);  // n := v binds n
+        declareAssigned(w->name, w->location(), flow);
         return;
     }
     if (auto* b = dynamic_cast<BinaryExpr*>(e)) {
@@ -396,8 +360,6 @@ void DefiniteAssignment::Impl::checkExpr(Expr* e, Flow& flow) {
         checkExpr(call->callee.get(), flow);
         for (auto& a : call->args) checkExpr(a.get(), flow);
         for (auto& kw : call->kwArgs) checkExpr(kw.second.get(), flow);
-        // Module-init order: a call during eager init runs the callee's body NOW; a
-        // forward read of a not-yet-initialized const (even transitively) is rejected. Only this-module callees are inspected.
         if (inModuleInit) {
             if (FunctionDecl* target = resolveModuleCallable(call->callee.get())) {
                 std::unordered_set<const FunctionDecl*> visiting;
@@ -420,8 +382,6 @@ void DefiniteAssignment::Impl::checkExpr(Expr* e, Flow& flow) {
                 }
             }
         }
-        // Constructor leniency: once `self` escapes to a helper (self.setup(),
-        // register(self)), that callee may assign any field, so treat all field slots as assigned.
         if (inConstructor && !ctorAllFieldIds.empty()) {
             bool selfEscapes = false;
             if (auto* ce = dynamic_cast<AttributeExpr*>(call->callee.get()))
@@ -483,8 +443,6 @@ void DefiniteAssignment::Impl::checkExpr(Expr* e, Flow& flow) {
     }
     if (auto* tern = dynamic_cast<IfExpr*>(e)) {
         checkExpr(tern->condition.get(), flow);
-        // Only one branch runs; check both for reads but don't let a branch's
-        // walrus escape (conditional binding can't be relied on afterwards).
         Flow t = flow;
         checkExpr(tern->thenExpr.get(), t);
         Flow f = flow;
@@ -495,7 +453,7 @@ void DefiniteAssignment::Impl::checkExpr(Expr* e, Flow& flow) {
         checkExpr(aw->operand.get(), flow);
         return;
     }
-    if (auto* cast = dynamic_cast<AsCastExpr*>(e)) {  // ADR 054 - transparent
+    if (auto* cast = dynamic_cast<AsCastExpr*>(e)) {
         checkExpr(cast->operand.get(), flow);
         return;
     }
@@ -507,8 +465,6 @@ void DefiniteAssignment::Impl::checkExpr(Expr* e, Flow& flow) {
         checkExpr(star->value.get(), flow);
         return;
     }
-    // Comprehensions: the *first* iterable is evaluated in the enclosing scope;
-    // the bound variable and remaining clauses live in the comprehension scope.
     auto comp = [&](Expr* element, Expr* element2, const std::string& varName,
                     const std::vector<std::string>& varNames, Expr* iterable,
                     Expr* condition, const std::vector<CompClause>& extra) {
@@ -548,8 +504,6 @@ void DefiniteAssignment::Impl::checkExpr(Expr* e, Flow& flow) {
              dc->condition.get(), dc->extraClauses);
         return;
     }
-    // Nested callables: analyze their bodies independently (captures are treated
-    // as assigned because cross-procedure flow isn't modeled).
     if (auto* lam = dynamic_cast<LambdaExpr*>(e)) {
         std::vector<Parameter> params;
         for (auto& p : lam->params) {
@@ -558,7 +512,6 @@ void DefiniteAssignment::Impl::checkExpr(Expr* e, Flow& flow) {
             params.push_back(std::move(q));
         }
         if (lam->body) {
-            // Single-expression lambda: its body runs at call time, not module load.
             auto saved = std::move(scopes);
             auto savedLoops = std::move(loopBreaks);
             bool savedInModuleInit = inModuleInit;
@@ -586,13 +539,10 @@ void DefiniteAssignment::Impl::checkExpr(Expr* e, Flow& flow) {
         }
         return;
     }
-    // Literals / templates / type-less leaves: nothing to read.
 }
 
 Flow DefiniteAssignment::Impl::analyzeStmt(Stmt* s, Flow flow) {
     if (!s || flow.terminated) {
-        // Still descend into declarations even on a dead path so nested callables get
-        // analyzed; straight statements have nothing observable once terminated.
         if (!s) return flow;
     }
 
@@ -601,17 +551,12 @@ Flow DefiniteAssignment::Impl::analyzeStmt(Stmt* s, Flow flow) {
         return flow;
     }
     if (auto* ds = dynamic_cast<DeferStmt*>(s)) {
-        // Arguments and receiver evaluate AT the defer statement, so every
-        // name it references must be definitely assigned here, not at exit.
         checkExpr(ds->call.get(), flow);
         return flow;
     }
     if (auto* an = dynamic_cast<AnnAssignStmt*>(s)) {
-        // `self.x: T = v` / `obj.x: T` - attribute target, not a local.
         if (auto* nm = dynamic_cast<NameExpr*>(an->target.get())) {
             if (an->value) {
-                // A module-level binding was pre-declared as a tracked slot; set the
-                // diagnostic context, check its initializer (forward reads fire here), then mark it assigned instead of shadowing it.
                 VarSlot* modSlot =
                     inModuleInit ? resolve(nm->name) : nullptr;
                 if (modSlot && !modSlot->isModuleConst) modSlot = nullptr;
@@ -628,8 +573,7 @@ Flow DefiniteAssignment::Impl::analyzeStmt(Stmt* s, Flow flow) {
                     declareAssigned(nm->name, nm->location(), flow);
                 }
             } else {
-                // No initializer: a tracked local that must be assigned before use.
-                declare(nm->name, /*tracked=*/true, nm->location());
+                declare(nm->name, true, nm->location());
             }
         } else {
             if (an->value) checkExpr(an->value.get(), flow);
@@ -643,7 +587,6 @@ Flow DefiniteAssignment::Impl::analyzeStmt(Stmt* s, Flow flow) {
         return flow;
     }
     if (auto* aug = dynamic_cast<AugAssignStmt*>(s)) {
-        // `x += v` reads x then writes it.
         checkExpr(aug->target.get(), flow);
         checkExpr(aug->value.get(), flow);
         if (auto* nm = dynamic_cast<NameExpr*>(aug->target.get()))
@@ -651,7 +594,7 @@ Flow DefiniteAssignment::Impl::analyzeStmt(Stmt* s, Flow flow) {
         return flow;
     }
     if (auto* iff = dynamic_cast<IfStmt*>(s)) {
-        Flow cond = flow;  // threads walrus effects through the chain of tests
+        Flow cond = flow;
         checkExpr(iff->condition.get(), cond);
         std::vector<Flow> outs;
         outs.push_back(analyzeBlock(iff->thenBody, cond));
@@ -662,23 +605,20 @@ Flow DefiniteAssignment::Impl::analyzeStmt(Stmt* s, Flow flow) {
         if (!iff->elseBody.empty())
             outs.push_back(analyzeBlock(iff->elseBody, cond));
         else
-            outs.push_back(cond);  // implicit empty else: falls through unchanged
+            outs.push_back(cond);
         return merge(outs);
     }
     if (auto* wh = dynamic_cast<WhileStmt*>(s)) {
         checkExpr(wh->condition.get(), flow);
         loopBreaks.emplace_back();
-        analyzeBlock(wh->body, flow);  // body may run; assignments don't escape
+        analyzeBlock(wh->body, flow);
         std::vector<Flow> breaks = std::move(loopBreaks.back());
         loopBreaks.pop_back();
 
         std::vector<Flow> outs = std::move(breaks);
         if (isConstTrue(wh->condition.get())) {
-            // `while True { ... }` - only reachable afterward via break.
             return merge(outs);
         }
-        // Otherwise the loop may run zero times / exit when the condition fails:
-        // that path carries the else clause (if any), else the incoming flow.
         if (!wh->elseBody.empty())
             outs.push_back(analyzeBlock(wh->elseBody, flow));
         else
@@ -688,7 +628,6 @@ Flow DefiniteAssignment::Impl::analyzeStmt(Stmt* s, Flow flow) {
     if (auto* fo = dynamic_cast<ForStmt*>(s)) {
         checkExpr(fo->iterable.get(), flow);
         loopBreaks.emplace_back();
-        // Loop target is scoped to the body and assigned within it.
         pushFrame();
         Flow body = flow;
         assignTarget(fo->target.get(), body);
@@ -697,8 +636,6 @@ Flow DefiniteAssignment::Impl::analyzeStmt(Stmt* s, Flow flow) {
         std::vector<Flow> breaks = std::move(loopBreaks.back());
         loopBreaks.pop_back();
 
-        // A for-loop always has a zero-iteration path, so body assignments never survive;
-        // the post-state is the incoming flow (or else clause) joined with any break edges.
         std::vector<Flow> outs = std::move(breaks);
         if (!fo->elseBody.empty())
             outs.push_back(analyzeBlock(fo->elseBody, flow));
@@ -707,15 +644,12 @@ Flow DefiniteAssignment::Impl::analyzeStmt(Stmt* s, Flow flow) {
         return merge(outs);
     }
     if (auto* tr = dynamic_cast<TryStmt*>(s)) {
-        // try completed normally -> optional else.
         Flow tryFlow = analyzeBlock(tr->tryBody, flow);
         std::vector<Flow> outs;
         if (!tr->elseBody.empty())
             outs.push_back(analyzeBlock(tr->elseBody, tryFlow));
         else
             outs.push_back(tryFlow);
-        // Each handler may fire after an exception anywhere in try, so it starts
-        // from the pre-try state (plus its bound exception name).
         for (auto& h : tr->handlers) {
             Flow hf = flow;
             pushFrame();
@@ -725,8 +659,6 @@ Flow DefiniteAssignment::Impl::analyzeStmt(Stmt* s, Flow flow) {
             outs.push_back(hf);
         }
         Flow post = merge(outs);
-        // finally always runs; its reads are checked against the minimal
-        // pre-try state, and its assignments are unconditionally added.
         if (!tr->finallyBody.empty()) {
             Flow fin = analyzeBlock(tr->finallyBody, flow);
             for (int id : fin.assigned) post.assigned.insert(id);
@@ -743,7 +675,7 @@ Flow DefiniteAssignment::Impl::analyzeStmt(Stmt* s, Flow flow) {
         return analyzeBlock(w->body, flow);
     }
     if (auto* th = dynamic_cast<ThreadStmt*>(s)) {
-        analyzeCallable({}, th->body);  // independent concurrent block
+        analyzeCallable({}, th->body);
         return flow;
     }
     if (auto* m = dynamic_cast<MatchStmt*>(s)) {
@@ -762,12 +694,11 @@ Flow DefiniteAssignment::Impl::analyzeStmt(Stmt* s, Flow flow) {
             if (patternIsIrrefutable(c.pattern) && c.guard == nullptr)
                 hasCatchAll = true;
         }
-        if (!hasCatchAll) outs.push_back(flow);  // no case matched
+        if (!hasCatchAll) outs.push_back(flow);
         return merge(outs);
     }
     if (auto* ret = dynamic_cast<ReturnStmt*>(s)) {
         checkExpr(ret->value.get(), flow);
-        // A `return` is a constructor exit: record the field-init state here.
         if (returnCollector) returnCollector->push_back(flow);
         flow.terminated = true;
         return flow;
@@ -817,7 +748,6 @@ Flow DefiniteAssignment::Impl::analyzeStmt(Stmt* s, Flow flow) {
     if (auto* imp = dynamic_cast<ImportStmt*>(s)) {
         for (auto& a : imp->names) {
             const std::string& bound = a.asName.empty() ? a.name : a.asName;
-            // `import a.b.c` binds the top-level name `a` when unaliased.
             std::string top = bound;
             if (a.asName.empty()) {
                 auto dot = top.find('.');
@@ -842,12 +772,8 @@ Flow DefiniteAssignment::Impl::analyzeStmt(Stmt* s, Flow flow) {
     if (auto* cd = dynamic_cast<ClassDecl*>(s)) {
         if (!cd->name.empty()) declareAssigned(cd->name, cd->location(), flow);
 
-        // A decorator may rewrite the class (e.g. @dataclass synthesizes field assignment),
-        // so skip constructor field-init enforcement on decorated classes and on abstract generic templates.
         bool enforceFields = cd->decorators.empty() && cd->typeParams.empty();
 
-        // Deferred-init detection: a field a non-constructor method assigns (the
-        // listen_tls()/connect() pattern) is exempt from the constructor requirement; ctor-only fields still get full checking.
         std::unordered_set<std::string> deferredFields;
         if (enforceFields) {
             for (auto& member : cd->body) {
@@ -858,8 +784,6 @@ Flow DefiniteAssignment::Impl::analyzeStmt(Stmt* s, Flow flow) {
             }
         }
 
-        // Own-declared fields with no class-body default and not deferred are exactly
-        // the slots a constructor must fill (the parent ctor handles inherited ones).
         std::vector<std::pair<std::string, SourceLocation>> requiredFields;
         if (enforceFields) {
             for (auto& member : cd->body) {
@@ -871,8 +795,6 @@ Flow DefiniteAssignment::Impl::analyzeStmt(Stmt* s, Flow flow) {
             }
         }
 
-        // Analyze methods independently; route explicit constructors through the
-        // field-init check when the class has required fields.
         for (auto& member : cd->body) {
             if (auto* method = dynamic_cast<FunctionDecl*>(member.get())) {
                 if (method->isExtern) continue;
@@ -892,11 +814,6 @@ Flow DefiniteAssignment::Impl::analyzeStmt(Stmt* s, Flow flow) {
     return flow;
 }
 
-// These helpers compute, memoized, the module consts a this-module callable's body
-// reads transitively through further calls (deps.dr's `const _READY = _ensure_data()`); the module-init walk errors on a read of a not-yet-initialized one.
-// Conservative by construction: unresolved callees and nested lambdas/comprehensions
-// contribute nothing - a false negative, never a false positive that rejects correct code.
-
 FunctionDecl* DefiniteAssignment::Impl::classCtor(ClassDecl* cd) {
     if (!cd) return nullptr;
     for (auto& m : cd->body)
@@ -907,14 +824,13 @@ FunctionDecl* DefiniteAssignment::Impl::classCtor(ClassDecl* cd) {
 
 FunctionDecl* DefiniteAssignment::Impl::resolveModuleCallable(Expr* callee) {
     auto* n = dynamic_cast<NameExpr*>(callee);
-    if (!n) return nullptr;  // method/attribute/indirect callee: Stage 2 (logged)
+    if (!n) return nullptr;
     if (auto it = moduleFuncs.find(n->name); it != moduleFuncs.end()) return it->second;
     if (auto it = moduleClasses.find(n->name); it != moduleClasses.end())
         return classCtor(it->second);
-    return nullptr;          // imported / builtin: cannot read this module's consts
+    return nullptr;
 }
 
-// Names bound as a local by an assignment/for/with target expression.
 static void da_targetNames(Expr* t, std::unordered_set<std::string>& out) {
     if (auto* n = dynamic_cast<NameExpr*>(t)) out.insert(n->name);
     else if (auto* tup = dynamic_cast<TupleExpr*>(t)) {
@@ -1037,7 +953,6 @@ void DefiniteAssignment::Impl::scanReadsStmt(
     } else if (auto* del = dynamic_cast<DeleteStmt*>(s)) {
         for (auto& t : del->targets) E(t.get());
     }
-    // Nested FunctionDecl/ClassDecl are separate callables, not run by this call.
 }
 
 void DefiniteAssignment::Impl::scanReadsExpr(
@@ -1083,11 +998,10 @@ void DefiniteAssignment::Impl::scanReadsExpr(
         return;
     }
     if (auto* aw = dynamic_cast<AwaitExpr*>(e)) { R(aw->operand.get()); return; }
-    if (auto* ac = dynamic_cast<AsCastExpr*>(e)) { R(ac->operand.get()); return; }  // ADR 054
+    if (auto* ac = dynamic_cast<AsCastExpr*>(e)) { R(ac->operand.get()); return; }
     if (auto* y = dynamic_cast<YieldExpr*>(e)) { R(y->value.get()); return; }
     if (auto* star = dynamic_cast<StarredExpr*>(e)) { R(star->value.get()); return; }
     if (auto* wl = dynamic_cast<WalrusExpr*>(e)) { R(wl->value.get()); return; }
-    // Lambdas / fire / comprehensions / templates / literals: not descended (Stage 2).
 }
 
 const std::unordered_set<std::string>& DefiniteAssignment::Impl::computeReadSet(
@@ -1095,7 +1009,7 @@ const std::unordered_set<std::string>& DefiniteAssignment::Impl::computeReadSet(
     static const std::unordered_set<std::string> kEmpty;
     if (!f) return kEmpty;
     if (auto it = readSetMemo.find(f); it != readSetMemo.end()) return it->second;
-    if (visiting.count(f)) return kEmpty;  // recursion cycle: under-approx (Stage 2)
+    if (visiting.count(f)) return kEmpty;
     visiting.insert(f);
 
     std::unordered_set<std::string> bound;
@@ -1127,8 +1041,6 @@ bool DefiniteAssignment::analyze(Module& module) {
     impl_->readSetMemo.clear();
     impl_->currentInitConst.clear();
 
-    // Collect inputs to the module-init order check: every module-level value binding
-    // (eager, source-ordered init), plus top-level functions/classes whose bodies may read a const during init.
     for (auto& s : module.body) {
         Stmt* st = s.get();
         if (auto* an = dynamic_cast<AnnAssignStmt*>(st)) {
@@ -1146,14 +1058,11 @@ bool DefiniteAssignment::analyze(Module& module) {
         }
     }
 
-    // The module top-level body is its own flow scope (executed top to bottom).
     impl_->scopes.clear();
     impl_->loopBreaks.clear();
     impl_->pushFrame();
-    // Pre-declare every module binding as a tracked slot, so a read before its
-    // initializer runs is caught by the same use-before-assignment guard that protects no-initializer locals.
     for (auto& kv : impl_->moduleConsts) {
-        impl_->declare(kv.first, /*tracked=*/true, kv.second);
+        impl_->declare(kv.first, true, kv.second);
         impl_->scopes.back()[kv.first].isModuleConst = true;
     }
     impl_->inModuleInit = true;
@@ -1174,4 +1083,4 @@ bool DefiniteAssignment::hasErrors() const {
     return !impl_->diags.empty();
 }
 
-} // namespace dragon
+}

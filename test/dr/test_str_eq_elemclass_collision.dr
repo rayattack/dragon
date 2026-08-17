@@ -39,15 +39,11 @@ class FreeEntry {
 }
 
 
-# Same-named `src` param typed list[<class>]: leaves a program-wide
-# varListElemClassName["src"] = FreeEntry entry that must NOT bleed below.
 def copy_freelist(src: list[FreeEntry]) -> int {
     return len(src)
 }
 
 
-# `src: str` here - `src[i] == "="` must value-compare, not inherit FreeEntry's
-# instance pointer-identity __eq__.
 def count_eq(src: str) -> int {
     n: int = 0
     i: int = 0
@@ -61,8 +57,6 @@ def count_eq(src: str) -> int {
 }
 
 
-# Two-char operator formation is the exact odb.oql tokenizer shape that broke:
-# `>=` only forms when `src[i + 1] == "="` value-compares correctly.
 def count_ge(src: str) -> int {
     n: int = 0
     i: int = 0
@@ -81,17 +75,14 @@ def count_ge(src: str) -> int {
 
 class StrEqElemClassCollisionTests(TestCase) {
     def test_list_class_param_does_not_poison_str_eq() {
-        # Exercise the polluter first so its element-class entry exists.
         fl: list[FreeEntry] = [FreeEntry(1), FreeEntry(2)]
         self.assertEqual(copy_freelist(fl), 2)
-        # "a >= b == c" holds three '=' characters.
         self.assertEqual(count_eq("a >= b == c"), 3)
     }
 
     def test_two_char_operator_forms() {
         fl: list[FreeEntry] = [FreeEntry(9)]
         self.assertEqual(copy_freelist(fl), 1)
-        # ">=" appears twice; a lone ">" must not count.
         self.assertEqual(count_ge("a >= b >= c > d"), 2)
     }
 }
