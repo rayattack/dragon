@@ -1,10 +1,11 @@
 from unittest import TestCase, main
-from threading import Barrier, Semaphore, RWLock, Thread
+from threading import Barrier, Semaphore, RWLock, Thread, Lock
 import time
 
 const N: int = 4
 
 barrier: Barrier = Barrier(N)
+counter_lock: Lock = Lock()
 serial_count: int = 0
 arrivals: int = 0
 
@@ -12,24 +13,30 @@ def barrier_worker() -> None {
     global serial_count
     global arrivals
     const rc: int = barrier.wait()
-    if rc == 1 {
-        serial_count = serial_count + 1
+    with counter_lock {
+        if rc == 1 {
+            serial_count = serial_count + 1
+        }
+        arrivals = arrivals + 1
     }
-    arrivals = arrivals + 1
 }
 
 class BarrierTests(TestCase) {
     def test_rendezvous_elects_one_serial_thread() {
+        global serial_count
         t1: Thread = Thread(target=barrier_worker)
         t2: Thread = Thread(target=barrier_worker)
         t3: Thread = Thread(target=barrier_worker)
         t1.start()
         t2.start()
         t3.start()
-        barrier.wait()
+        const rc: int = barrier.wait()
         t1.join()
         t2.join()
         t3.join()
+        if rc == 1 {
+            serial_count = serial_count + 1
+        }
         self.assertEqual(arrivals, N - 1)
         self.assertEqual(serial_count, 1)
     }
