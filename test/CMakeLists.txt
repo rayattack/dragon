@@ -113,18 +113,25 @@ endforeach()
 
 # Linux-only: macOS accepts but does not enforce RLIMIT_AS, and it lazily grants
 # huge reservations Linux overcommit refuses, so no oom probe can fail there.
+# FreeBSD's jemalloc/libthr reserve ~90MB more VA than glibc, so the cap grows there
+# to keep the load-bearing window: the 160MB operands fit, their copies still fail.
+if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+    set(DRAGON_OOM_CAP_KB 327680)
+else()
+    set(DRAGON_OOM_CAP_KB 262144)
+endif()
 if(NOT APPLE)
     add_test(NAME dr_oom_sustained
-        COMMAND sh -c "$<TARGET_FILE:dragon> build ${CMAKE_CURRENT_SOURCE_DIR}/dr/oom_sustained.dr -o ${CMAKE_CURRENT_BINARY_DIR}/oom_sustained && ulimit -v 262144 && exec ${CMAKE_CURRENT_BINARY_DIR}/oom_sustained")
+        COMMAND sh -c "$<TARGET_FILE:dragon> build ${CMAKE_CURRENT_SOURCE_DIR}/dr/oom_sustained.dr -o ${CMAKE_CURRENT_BINARY_DIR}/oom_sustained && ulimit -v ${DRAGON_OOM_CAP_KB} && exec ${CMAKE_CURRENT_BINARY_DIR}/oom_sustained")
     set_tests_properties(dr_oom_sustained PROPERTIES TIMEOUT 90)
     add_test(NAME dr_oom_bytes
-        COMMAND sh -c "$<TARGET_FILE:dragon> build ${CMAKE_CURRENT_SOURCE_DIR}/dr/oom_bytes.dr -o ${CMAKE_CURRENT_BINARY_DIR}/oom_bytes && ulimit -v 262144 && exec ${CMAKE_CURRENT_BINARY_DIR}/oom_bytes")
+        COMMAND sh -c "$<TARGET_FILE:dragon> build ${CMAKE_CURRENT_SOURCE_DIR}/dr/oom_bytes.dr -o ${CMAKE_CURRENT_BINARY_DIR}/oom_bytes && ulimit -v ${DRAGON_OOM_CAP_KB} && exec ${CMAKE_CURRENT_BINARY_DIR}/oom_bytes")
     set_tests_properties(dr_oom_bytes PROPERTIES TIMEOUT 90)
     add_test(NAME dr_oom_containers
-        COMMAND sh -c "$<TARGET_FILE:dragon> build ${CMAKE_CURRENT_SOURCE_DIR}/dr/oom_containers.dr -o ${CMAKE_CURRENT_BINARY_DIR}/oom_containers && ulimit -v 262144 && exec ${CMAKE_CURRENT_BINARY_DIR}/oom_containers")
+        COMMAND sh -c "$<TARGET_FILE:dragon> build ${CMAKE_CURRENT_SOURCE_DIR}/dr/oom_containers.dr -o ${CMAKE_CURRENT_BINARY_DIR}/oom_containers && ulimit -v ${DRAGON_OOM_CAP_KB} && exec ${CMAKE_CURRENT_BINARY_DIR}/oom_containers")
     set_tests_properties(dr_oom_containers PROPERTIES TIMEOUT 90)
     add_test(NAME dr_oom_unservable
-        COMMAND sh -c "$<TARGET_FILE:dragon> build ${CMAKE_CURRENT_SOURCE_DIR}/dr/oom_unservable.dr -o ${CMAKE_CURRENT_BINARY_DIR}/oom_unservable && ulimit -v 262144 && exec ${CMAKE_CURRENT_BINARY_DIR}/oom_unservable")
+        COMMAND sh -c "$<TARGET_FILE:dragon> build ${CMAKE_CURRENT_SOURCE_DIR}/dr/oom_unservable.dr -o ${CMAKE_CURRENT_BINARY_DIR}/oom_unservable && ulimit -v ${DRAGON_OOM_CAP_KB} && exec ${CMAKE_CURRENT_BINARY_DIR}/oom_unservable")
     set_tests_properties(dr_oom_unservable PROPERTIES TIMEOUT 90)
 
     foreach(_grow set deque)
