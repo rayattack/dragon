@@ -185,7 +185,7 @@ jobs:
           usesh: true
           copyback: false
           prepare: |
-            pkg install -y cmake ninja git python3 llvm21 zstd
+            pkg install -y cmake ninja git python3 llvm21 zstd gdb
           run: |
             # `set -e` is needed for failures to register. https://github.com/vmactions/freebsd-vm/issues/72
             set -e -x
@@ -195,11 +195,14 @@ jobs:
               -DLLVM_DIR="$(llvm-config21 --cmakedir)"
             cmake --build build -j
             ctest --test-dir build --output-on-failure || {
+              ulimit -c unlimited
               for t in filecmp fileinput gettext netrc shutil; do
                 echo "=== probe $t"
                 ./build/dragon build test/dr/test_$t.dr -o /tmp/probe_$t -I packages || continue
-                truss -f -o /tmp/truss_$t /tmp/probe_$t || echo "probe $t rc=$?"
-                tail -60 /tmp/truss_$t
+                ( cd /tmp && ./probe_$t ) || echo "probe $t rc=$?"
+                if [ -f /tmp/probe_$t.core ]; then
+                  gdb -batch -ex bt /tmp/probe_$t /tmp/probe_$t.core 2>/dev/null | tail -30
+                fi
               done
               exit 1
             }
