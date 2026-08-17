@@ -1,0 +1,92 @@
+from unittest import TestCase, main
+from struct import pack, unpack, calcsize, error
+
+
+def _missing_arg() {
+    const b: bytes = pack(">ii", 1)
+}
+
+def _missing_str_arg() {
+    const b: bytes = pack("4s")
+}
+
+def _missing_repeat_arg() {
+    const b: bytes = pack("3h", 1, 2)
+}
+
+def _extra_arg() {
+    const b: bytes = pack(">i", 1, 2)
+}
+
+def _c_int_arg() {
+    const b: bytes = pack("c", 65)
+}
+
+def _c_long_bytes() {
+    const b: bytes = pack("c", b"AB")
+}
+
+def _c_missing_arg() {
+    const b: bytes = pack("c")
+}
+
+
+class PackArgCountTests(TestCase) {
+    def test_missing_arg_raises() {
+        self.assertRaises(error, _missing_arg)
+        self.assertRaises(error, _missing_str_arg)
+        self.assertRaises(error, _missing_repeat_arg)
+    }
+
+    def test_extra_arg_raises() {
+        self.assertRaises(error, _extra_arg)
+    }
+
+    def test_exact_count_ok() {
+        self.assertEqual(pack(">ii", 1, 2).hex(), "0000000100000002")
+        self.assertEqual(pack("x").hex(), "00")
+    }
+}
+
+
+class CharFormatTests(TestCase) {
+    def test_pack_c() {
+        self.assertEqual(pack("c", b"A").hex(), "41")
+        self.assertEqual(pack("2c", b"A", b"B").hex(), "4142")
+    }
+
+    def test_unpack_c() {
+        const vals: list[Any] = unpack("c", b"A")
+        self.assertEqual(len(vals), 1)
+        const got: Any = vals[0]
+        self.assertTrue(isinstance(got, bytes))
+        self.assertEqual(len(got), 1)
+        const b0: int = got[0]
+        self.assertEqual(b0, 65)
+    }
+
+    def test_calcsize_c() {
+        self.assertEqual(calcsize("c"), 1)
+        self.assertEqual(calcsize(">c h"), 3)
+    }
+
+    def test_c_rejects_bad_args() {
+        self.assertRaises(error, _c_int_arg)
+        self.assertRaises(error, _c_long_bytes)
+        self.assertRaises(error, _c_missing_arg)
+    }
+
+    def test_c_roundtrip_mixed() {
+        const b: bytes = pack(">ch", b"Z", -2)
+        self.assertEqual(b.hex(), "5afffe")
+        const vals: list[Any] = unpack(">ch", b)
+        const c0: Any = vals[0]
+        self.assertTrue(isinstance(c0, bytes))
+        const z0: int = c0[0]
+        self.assertEqual(z0, 90)
+        self.assertEqual(vals[1], -2)
+    }
+}
+
+
+main([PackArgCountTests(), CharFormatTests()])

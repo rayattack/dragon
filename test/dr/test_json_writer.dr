@@ -120,7 +120,6 @@ class WriterListHelperTests(TestCase) {
 
 
 class WriterOwnershipTests(TestCase) {
-    # Build+finish+drop in a loop: the parts buffer, join, and bytes must all free.
     def test_no_leak() {
         i: int = 0
         while i < 2000 {

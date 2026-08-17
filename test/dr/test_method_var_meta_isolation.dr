@@ -1,0 +1,94 @@
+from unittest import TestCase, main
+
+class NegIndexLeak {
+    xs: list[str]
+
+    def(xs: list[str]) {
+        self.xs = xs
+    }
+
+    def tracks_i_as_nonneg() -> str {
+        i: int = 0
+        return self.xs[i]
+    }
+
+    def indexes_with_param(i: int) -> str {
+        return self.xs[i]
+    }
+}
+
+class DictKeyKindLeak {
+    def int_keyed_local() -> str {
+        cfg: dict[int, str] = {7: "seven"}
+        return cfg[7]
+    }
+
+    def str_keyed_local() -> str {
+        cfg: dict[str, str] = {"k": "vee"}
+        return cfg["k"]
+    }
+
+    def str_keyed_param(cfg: dict[str, str]) -> str {
+        return cfg["k"]
+    }
+}
+
+class ListElemKindLeak {
+    def str_elems() -> str {
+        vals: list[str] = ["a", "b"]
+        return vals[1]
+    }
+
+    def int_elems() -> int {
+        vals: list[int] = [10, 20]
+        return vals[1]
+    }
+
+    def float_elems() -> float {
+        vals: list[float] = [1.5, 2.5]
+        return vals[1]
+    }
+}
+
+class ParamClassLeak {
+    def takes_list(other: list[int]) -> int {
+        return other[0]
+    }
+
+    def takes_str(other: str) -> int {
+        return len(other)
+    }
+}
+
+class MethodVarMetaIsolationTests(TestCase) {
+    def test_negative_index_after_nonneg_tracking_method() {
+        const o: NegIndexLeak = NegIndexLeak(["first", "second", "third"])
+        self.assertEqual(o.tracks_i_as_nonneg(), "first")
+        self.assertEqual(o.indexes_with_param(-1), "third")
+        self.assertEqual(o.indexes_with_param(-3), "first")
+        self.assertEqual(o.indexes_with_param(1), "second")
+    }
+
+    def test_dict_key_kind_does_not_leak_between_methods() {
+        const d: DictKeyKindLeak = DictKeyKindLeak()
+        self.assertEqual(d.int_keyed_local(), "seven")
+        self.assertEqual(d.str_keyed_local(), "vee")
+        const cfg: dict[str, str] = {"k": "param"}
+        self.assertEqual(d.str_keyed_param(cfg), "param")
+    }
+
+    def test_list_elem_kind_does_not_leak_between_methods() {
+        const l: ListElemKindLeak = ListElemKindLeak()
+        self.assertEqual(l.str_elems(), "b")
+        self.assertEqual(l.int_elems(), 20)
+        self.assertEqual(l.float_elems(), 2.5)
+    }
+
+    def test_param_shape_does_not_leak_between_methods() {
+        const p: ParamClassLeak = ParamClassLeak()
+        self.assertEqual(p.takes_list([42, 7]), 42)
+        self.assertEqual(p.takes_str("abcd"), 4)
+    }
+}
+
+main([MethodVarMetaIsolationTests()])

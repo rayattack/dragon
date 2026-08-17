@@ -1,7 +1,3 @@
-# records.dr - plain data records for the egg registry domain.
-# These mirror the DB rows; services build them from cursors.
-
-# Minimal row for the login lookup (id + password hash).
 class UserAuth {
     def(id: int, password_hash: str) {
         self.id: int = id
@@ -19,7 +15,6 @@ class User {
     }
 }
 
-# `revoked` mirrors the DB column (0/1) so `conn.all[Token]` materializes via T(**row).
 class Token {
     def(id: int, user_id: int, label: str, created_at: int, last_used_at: int, revoked: int) {
         self.id: int = id
@@ -41,10 +36,6 @@ class Package {
     }
 }
 
-# One leaf of the append-only transparency log. `leaf_hash` binds
-# (name,version,pkg_hash,ts,published_by); `chain_head` = sha256(prev_head +
-# leaf_hash), so the sequence is tamper-evident. Mirrors the DB columns for
-# `conn.all[LogEntry]` materialization (T(**row)).
 class LogEntry {
     def(seq: int, name: str, version: str, pkg_hash: str, published_by: int, ts: int, leaf_hash: str, chain_head: str) {
         self.seq: int = seq
@@ -58,8 +49,6 @@ class LogEntry {
     }
 }
 
-# `yanked` (0 live / 1 soft / 2 security) and `yank_reason` mirror the DB columns
-# so `conn.all[Version]` materializes via T(**row).
 class Version {
     def(id: int, package_id: int, version: str, hash: str, yanked: int, yank_reason: str, published_at: int, published_by: int) {
         self.id: int = id

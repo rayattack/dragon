@@ -5,7 +5,6 @@
 using namespace dragon;
 using namespace dragon::test;
 
-// Helper to type check and expect no errors
 static bool checkOk(const std::string& source) {
     auto module = parse(source);
     if (!module) return false;
@@ -15,7 +14,6 @@ static bool checkOk(const std::string& source) {
     return tc.check(*module);
 }
 
-// Helper to type check and expect errors
 static bool checkHasErrors(const std::string& source) {
     auto module = parse(source);
     if (!module) return false;
@@ -26,7 +24,6 @@ static bool checkHasErrors(const std::string& source) {
     return tc.hasErrors();
 }
 
-// Helper to get the type of an expression after type checking
 static std::shared_ptr<Type> getExprType(const std::string& source) {
     auto module = parse(source);
     if (!module || module->body.empty()) return nullptr;
@@ -34,7 +31,6 @@ static std::shared_ptr<Type> getExprType(const std::string& source) {
     sema.analyze(*module);
     TypeChecker tc;
     tc.check(*module);
-    // Get the last expression statement
     for (int i = static_cast<int>(module->body.size()) - 1; i >= 0; --i) {
         if (auto* es = dynamic_cast<ExprStmt*>(module->body[i].get())) {
             return es->expr ? es->expr->type : nullptr;
@@ -42,10 +38,6 @@ static std::shared_ptr<Type> getExprType(const std::string& source) {
     }
     return nullptr;
 }
-
-//===----------------------------------------------------------------------===//
-// Basic Tests
-//===----------------------------------------------------------------------===//
 
 TEST(TypeCheckerTest, EmptyModule) {
     EXPECT_TRUE(checkOk(""));
@@ -74,10 +66,6 @@ TEST(TypeCheckerTest, BooleanLiteral) {
 TEST(TypeCheckerTest, NoneLiteral) {
     EXPECT_TRUE(checkOk("None"));
 }
-
-//===----------------------------------------------------------------------===//
-// Literal Type Inference
-//===----------------------------------------------------------------------===//
 
 TEST(TypeCheckerTest, IntegerLiteralType) {
     auto t = getExprType("42");
@@ -111,10 +99,6 @@ TEST(TypeCheckerTest, NoneLiteralType) {
     ASSERT_NE(t, nullptr);
     EXPECT_EQ(t->kind(), Type::Kind::None_);
 }
-
-//===----------------------------------------------------------------------===//
-// Arithmetic Type Rules
-//===----------------------------------------------------------------------===//
 
 TEST(TypeCheckerTest, IntPlusInt) {
     auto t = getExprType("1 + 2");
@@ -198,13 +182,6 @@ TEST(TypeCheckerTest, IntPlusStringError) {
     EXPECT_TRUE(checkHasErrors("1 + \"hello\""));
 }
 
-//===----------------------------------------------------------------------===//
-// Function values are not containers (the sys.argv `argv[1]` mistake).
-// Subscript, len(), and iteration over a function value previously fell
-// through to Unknown and miscompiled into garbage reads; each must be a
-// compile error that says "call it first".
-//===----------------------------------------------------------------------===//
-
 TEST(TypeCheckerTest, FunctionValueSubscriptRejected) {
     EXPECT_TRUE(checkHasErrors(
         "def args() -> list[str] {\n"
@@ -232,7 +209,6 @@ TEST(TypeCheckerTest, FunctionValueIterationRejected) {
 }
 
 TEST(TypeCheckerTest, CalledFunctionResultStaysUsable) {
-    // The corrected forms must all stay legal.
     EXPECT_FALSE(checkHasErrors(
         "def args() -> list[str] {\n"
         "    return [\"a\"]\n"
@@ -244,12 +220,7 @@ TEST(TypeCheckerTest, CalledFunctionResultStaysUsable) {
         "}\n"));
 }
 
-//===----------------------------------------------------------------------===//
-// List variance (expected-type-directed covariance for FRESH literals only)
-//===----------------------------------------------------------------------===//
-
 TEST(TypeCheckerTest, FreshListLiteralCovariantToBase) {
-    // A fresh literal of subclass instances is assignable to list[Base].
     EXPECT_FALSE(checkHasErrors(
         "class Animal { def() {} }\n"
         "class Dog(Animal) { def() {} }\n"
@@ -257,8 +228,6 @@ TEST(TypeCheckerTest, FreshListLiteralCovariantToBase) {
 }
 
 TEST(TypeCheckerTest, NamedListStaysInvariant) {
-    // A named (aliasable, mutable) list[Dog] is NOT assignable to
-    // list[Animal] - that would be the unsound blanket-covariance hole.
     EXPECT_TRUE(checkHasErrors(
         "class Animal { def() {} }\n"
         "class Dog(Animal) { def() {} }\n"
@@ -267,20 +236,13 @@ TEST(TypeCheckerTest, NamedListStaysInvariant) {
 }
 
 TEST(TypeCheckerTest, FreshListNonSubclassRejected) {
-    // Covariance only fires when every element IS a subtype of the base.
     EXPECT_TRUE(checkHasErrors(
         "class Animal { def() {} }\n"
         "class Plant { def() {} }\n"
         "pets: list[Animal] = [Plant()]\n"));
 }
 
-//===----------------------------------------------------------------------===//
-// Heterogeneous literal rejection (per-element check beats first-elem inference)
-//===----------------------------------------------------------------------===//
-
 TEST(TypeCheckerTest, HeterogeneousListLiteralRejected) {
-    // First-element inference said list[int]; the str element must still be
-    // caught (previously silently dropped -> garbage at runtime).
     EXPECT_TRUE(checkHasErrors("xs: list[int] = [1, 2, \"three\"]\n"));
 }
 
@@ -289,20 +251,12 @@ TEST(TypeCheckerTest, HomogeneousListLiteralOk) {
 }
 
 TEST(TypeCheckerTest, ListLiteralIntToFloatPromotionOk) {
-    // int <: float widening inside a list[float] literal stays valid.
     EXPECT_FALSE(checkHasErrors("xs: list[float] = [1, 2.0, 3]\n"));
 }
 
 TEST(TypeCheckerTest, ListLiteralAnyAcceptsHeterogeneous) {
     EXPECT_FALSE(checkHasErrors("xs: list[Any] = [1, \"two\", 3.0]\n"));
 }
-
-//===----------------------------------------------------------------------===//
-// List representation invariance wrt Any: list[T] and list[Any] have
-// different element layouts (monomorphized 8B/elem vs boxed 16B/elem), so a
-// concrete list VALUE must never flow as list[Any] - only a fresh literal is
-// admitted, by being retyped and BUILT as a box list.
-//===----------------------------------------------------------------------===//
 
 TEST(TypeCheckerTest, NamedConcreteListNotAssignableToListAny) {
     EXPECT_TRUE(checkHasErrors(
@@ -336,23 +290,16 @@ TEST(TypeCheckerTest, FreshLiteralArgStillPassableToListAnyParam) {
 }
 
 TEST(TypeCheckerTest, ListAnyNotAssignableToConcreteList) {
-    // The reverse view is equally unsound (boxed elements read natively).
     EXPECT_TRUE(checkHasErrors(
         "xs: list[Any] = [\"a\", \"b\"]\n"
         "names: list[str] = xs\n"));
 }
 
 TEST(TypeCheckerTest, DictValueCovarianceToAnyStillAllowed) {
-    // Dicts have ONE uniform tagged representation - dict[K, V] may still
-    // flow as dict[K, Any].
     EXPECT_FALSE(checkHasErrors(
         "m: dict[str, int] = {\"a\": 1}\n"
         "d: dict[str, Any] = m\n"));
 }
-
-//===----------------------------------------------------------------------===//
-// Positional argument type checking (catches str passed to int param, etc.)
-//===----------------------------------------------------------------------===//
 
 TEST(TypeCheckerTest, StrArgToIntParamRejected) {
     EXPECT_TRUE(checkHasErrors(
@@ -373,7 +320,6 @@ TEST(TypeCheckerTest, ScalarArgToContainerParamRejected) {
 }
 
 TEST(TypeCheckerTest, IntArgToFloatParamOk) {
-    // int <: float promotion at the call boundary.
     EXPECT_FALSE(checkHasErrors(
         "def area(w: float, h: float) -> float { return w * h }\n"
         "area(3, 4)\n"));
@@ -389,9 +335,6 @@ TEST(TypeCheckerTest, SubclassArgToBaseParamOk) {
 }
 
 TEST(TypeCheckerTest, FreshListLiteralArgToBaseListParamOk) {
-    // The unittest `main([SubTest()])` idiom: a fresh list literal of subclass
-    // instances passed to a list[Base] param must not trip the arg check
-    // (containers are invariant, but a fresh literal is covariant-sound).
     EXPECT_FALSE(checkHasErrors(
         "class Animal { def() {} }\n"
         "class Dog(Animal) { def() {} }\n"
@@ -399,11 +342,6 @@ TEST(TypeCheckerTest, FreshListLiteralArgToBaseListParamOk) {
         "feed([Dog()])\n"));
 }
 
-// A generic call consults its args for type-parameter inference but previously
-// never type-checked the CONCRETE (non-type-variable) params - so a bad arg to
-// a non-generic param (e.g. `str` where the `sql: SQL` of `db.all[T](sql: SQL)`
-// is declared) slipped past `check` and only failed at codegen. The concrete
-// param `tag: str` here stands in for that SQL param without needing stdlib.
 TEST(TypeCheckerTest, GenericCallConcreteParamMismatchRejected) {
     EXPECT_TRUE(checkHasErrors(
         "def first[T](xs: list[T], tag: str) -> T { return xs[0] }\n"
@@ -411,16 +349,11 @@ TEST(TypeCheckerTest, GenericCallConcreteParamMismatchRejected) {
 }
 
 TEST(TypeCheckerTest, GenericCallConcreteParamOkStillInfers) {
-    // The type-variable param (list[T]) is fixed by inference and must not be
-    // flagged; the concrete `tag: str` matches, so no error.
     EXPECT_FALSE(checkHasErrors(
         "def first[T](xs: list[T], tag: str) -> T { return xs[0] }\n"
         "first([1, 2], \"label\")\n"));
 }
 
-// match class/type-test patterns: `case int()` is a supported type test, but
-// field destructuring and unknown type names must error cleanly at check time
-// (not parser-cascade or silently never-match).
 TEST(TypeCheckerTest, MatchTypeTestPatternOk) {
     EXPECT_FALSE(checkHasErrors(
         "v: int | str = 5\n"
@@ -430,10 +363,6 @@ TEST(TypeCheckerTest, MatchTypeTestPatternOk) {
         "}\n"));
 }
 
-// Positional field destructuring (`case Point(a, b)`) is now supported - the
-// behavior is dogfooded in test/dr/test_match_type_patterns.dr. What must still
-// be REJECTED is a pattern with MORE sub-patterns than the class has fields
-// (a must-not-compile check, so it stays a gtest).
 TEST(TypeCheckerTest, MatchClassPatternArityMismatchRejected) {
     EXPECT_TRUE(checkHasErrors(
         "class Point { def(x: int) { self.x = x } }\n"
@@ -447,8 +376,6 @@ TEST(TypeCheckerTest, MatchClassPatternUnknownTypeRejected) {
         "match x { case Nope() { print(\"x\") } }\n"));
 }
 
-// #2 exhaustiveness: a match over a CLOSED scrutinee (union / bool) with no
-// catch-all must cover every case, else a value silently falls through.
 TEST(TypeCheckerTest, MatchNonExhaustiveUnionRejected) {
     EXPECT_TRUE(checkHasErrors(
         "v: int | str = 5\n"
@@ -465,12 +392,6 @@ TEST(TypeCheckerTest, MatchNonExhaustiveBoolRejected) {
         "}\n"));
 }
 
-// (The positive cases - an exhaustive union match with no `_`, and an open-type
-// match relying on intentional fall-through - compile and RUN, so they are
-// dogfooded in test/dr/test_match_type_patterns.dr, not asserted here.)
-
-// #3 reachability: an arm after an unguarded catch-all, or a duplicate literal,
-// is dead.
 TEST(TypeCheckerTest, MatchUnreachableAfterWildcardRejected) {
     EXPECT_TRUE(checkHasErrors(
         "x: int = 1\n"
@@ -493,10 +414,6 @@ TEST(TypeCheckerTest, MatchDuplicateLiteralRejected) {
 TEST(TypeCheckerTest, StringMinusStringError) {
     EXPECT_TRUE(checkHasErrors("\"a\" - \"b\""));
 }
-
-//===----------------------------------------------------------------------===//
-// Comparison Operators
-//===----------------------------------------------------------------------===//
 
 TEST(TypeCheckerTest, ComparisonReturnsBool) {
     auto t = getExprType("1 < 2");
@@ -522,10 +439,6 @@ TEST(TypeCheckerTest, GreaterEqualReturnsBool) {
     EXPECT_EQ(t->kind(), Type::Kind::Bool);
 }
 
-//===----------------------------------------------------------------------===//
-// Unary Operators
-//===----------------------------------------------------------------------===//
-
 TEST(TypeCheckerTest, UnaryMinusInt) {
     auto t = getExprType("-42");
     ASSERT_NE(t, nullptr);
@@ -547,10 +460,6 @@ TEST(TypeCheckerTest, UnaryNotReturnsBool) {
 TEST(TypeCheckerTest, UnaryMinusStringError) {
     EXPECT_TRUE(checkHasErrors("-\"hello\""));
 }
-
-//===----------------------------------------------------------------------===//
-// Bitwise Operators
-//===----------------------------------------------------------------------===//
 
 TEST(TypeCheckerTest, BitwiseAndIntInt) {
     auto t = getExprType("5 & 3");
@@ -580,10 +489,6 @@ TEST(TypeCheckerTest, BitwiseStringError) {
     EXPECT_TRUE(checkHasErrors("\"a\" & \"b\""));
 }
 
-//===----------------------------------------------------------------------===//
-// Type Annotations & Assignments
-//===----------------------------------------------------------------------===//
-
 TEST(TypeCheckerTest, AnnotatedAssignmentOk) {
     EXPECT_TRUE(checkOk("x: int = 5"));
 }
@@ -597,17 +502,14 @@ TEST(TypeCheckerTest, AnnotatedAssignmentStrOk) {
 }
 
 TEST(TypeCheckerTest, AnnotatedAssignmentBoolToInt) {
-    // bool <: int, so this should be OK
     EXPECT_TRUE(checkOk("x: int = True"));
 }
 
 TEST(TypeCheckerTest, AnnotatedAssignmentIntToFloat) {
-    // int <: float, so this should be OK
     EXPECT_TRUE(checkOk("x: float = 5"));
 }
 
 TEST(TypeCheckerTest, AnnotatedAssignmentFloatToInt) {
-    // float is NOT subtype of int
     EXPECT_TRUE(checkHasErrors("x: int = 3.14"));
 }
 
@@ -622,10 +524,6 @@ TEST(TypeCheckerTest, AnnAssignTypeMismatch) {
 TEST(TypeCheckerTest, AnnAssignNoneToInt) {
     EXPECT_TRUE(checkHasErrors("x: int = None"));
 }
-
-//===----------------------------------------------------------------------===//
-// Variable Type Tracking
-//===----------------------------------------------------------------------===//
 
 TEST(TypeCheckerTest, VariableTypeFromAssignment) {
     auto module = parse("x = 42\nx");
@@ -656,10 +554,6 @@ TEST(TypeCheckerTest, VariableTypeFromAnnotation) {
     ASSERT_NE(es->expr->type, nullptr);
     EXPECT_EQ(es->expr->type->kind(), Type::Kind::Str);
 }
-
-//===----------------------------------------------------------------------===//
-// Function Type Checking
-//===----------------------------------------------------------------------===//
 
 TEST(TypeCheckerTest, FunctionDeclOk) {
     EXPECT_TRUE(checkOk(
@@ -729,10 +623,6 @@ TEST(TypeCheckerTest, FunctionParamBadReturn) {
     ));
 }
 
-//===----------------------------------------------------------------------===//
-// Collections
-//===----------------------------------------------------------------------===//
-
 TEST(TypeCheckerTest, ListLiteral) {
     auto t = getExprType("[1, 2, 3]");
     ASSERT_NE(t, nullptr);
@@ -767,10 +657,6 @@ TEST(TypeCheckerTest, TupleLiteral) {
     EXPECT_EQ(tt.elementTypes[2]->kind(), Type::Kind::Bool);
 }
 
-//===----------------------------------------------------------------------===//
-// Subscript Typing
-//===----------------------------------------------------------------------===//
-
 TEST(TypeCheckerTest, ListSubscriptType) {
     auto module = parse("x: list[int] = [1, 2, 3]\nx[0]");
     ASSERT_NE(module, nullptr);
@@ -801,10 +687,6 @@ TEST(TypeCheckerTest, StringSubscriptType) {
     EXPECT_EQ(es->expr->type->kind(), Type::Kind::Str);
 }
 
-//===----------------------------------------------------------------------===//
-// Type Resolution
-//===----------------------------------------------------------------------===//
-
 TEST(TypeCheckerTest, ResolveListType) {
     EXPECT_TRUE(checkOk("x: list[int] = [1, 2, 3]"));
 }
@@ -816,10 +698,6 @@ TEST(TypeCheckerTest, ResolveDictType) {
 TEST(TypeCheckerTest, ResolveUnknownType) {
     EXPECT_TRUE(checkHasErrors("x: Foo = 5"));
 }
-
-//===----------------------------------------------------------------------===//
-// Subtyping
-//===----------------------------------------------------------------------===//
 
 TEST(TypeCheckerTest, BoolSubtypeOfInt) {
     auto boolType = std::make_shared<PrimitiveType>(Type::Kind::Bool);
@@ -866,10 +744,6 @@ TEST(TypeCheckerTest, SubtypeOfUnion) {
     EXPECT_TRUE(strType->isSubtypeOf(*unionType));
 }
 
-//===----------------------------------------------------------------------===//
-// Type Equality
-//===----------------------------------------------------------------------===//
-
 TEST(TypeCheckerTest, PrimitiveTypeEquality) {
     auto a = std::make_shared<PrimitiveType>(Type::Kind::Int);
     auto b = std::make_shared<PrimitiveType>(Type::Kind::Int);
@@ -914,10 +788,6 @@ TEST(TypeCheckerTest, TypeToString) {
         "(int, int) -> int");
 }
 
-//===----------------------------------------------------------------------===//
-// Control Flow
-//===----------------------------------------------------------------------===//
-
 TEST(TypeCheckerTest, IfStatement) {
     EXPECT_TRUE(checkOk(
         "x = 10\n"
@@ -954,10 +824,6 @@ TEST(TypeCheckerTest, TryStatement) {
     ));
 }
 
-//===----------------------------------------------------------------------===//
-// Class Type Checking
-//===----------------------------------------------------------------------===//
-
 TEST(TypeCheckerTest, ClassDecl) {
     EXPECT_TRUE(checkOk(
         "class Point {\n"
@@ -968,12 +834,7 @@ TEST(TypeCheckerTest, ClassDecl) {
     ));
 }
 
-//===----------------------------------------------------------------------===//
-// Implicit Self (Decision 006)
-//===----------------------------------------------------------------------===//
-
 TEST(TypeCheckerTest, ImplicitSelfMethodType) {
-    // FunctionType for method should exclude self
     auto module = parse(
         "class Point {\n"
         "  def(x: int, y: int) -> None {\n"
@@ -995,7 +856,6 @@ TEST(TypeCheckerTest, ImplicitSelfMethodType) {
     ASSERT_NE(it, exports.end());
     auto* classType = dynamic_cast<ClassType*>(it->second.get());
     ASSERT_NE(classType, nullptr);
-    // distance() should have 0 params in its FunctionType
     auto methodIt = classType->methods.find("distance");
     ASSERT_NE(methodIt, classType->methods.end());
     auto* funcType = dynamic_cast<FunctionType*>(methodIt->second.get());
@@ -1004,7 +864,6 @@ TEST(TypeCheckerTest, ImplicitSelfMethodType) {
 }
 
 TEST(TypeCheckerTest, ImplicitSelfFieldAccess) {
-    // self.x should type check correctly inside method
     EXPECT_TRUE(checkOk(
         "class Point {\n"
         "  def(x: int, y: int) -> None {\n"
@@ -1016,12 +875,11 @@ TEST(TypeCheckerTest, ImplicitSelfFieldAccess) {
 }
 
 TEST(TypeCheckerTest, ExplicitSelfPyModeType) {
-    // .py mode: explicit self in params, but FunctionType still excludes self
     auto module = parse(
         "class Point:\n"
         "    def distance(self) -> float:\n"
         "        return 0.0\n",
-        /*isDragon=*/false
+        false
     );
     ASSERT_NE(module, nullptr);
     Sema sema;
@@ -1037,7 +895,6 @@ TEST(TypeCheckerTest, ExplicitSelfPyModeType) {
     ASSERT_NE(methodIt, classType->methods.end());
     auto* funcType = dynamic_cast<FunctionType*>(methodIt->second.get());
     ASSERT_NE(funcType, nullptr);
-    // self is excluded from FunctionType even in .py mode
     EXPECT_EQ(funcType->paramTypes.size(), 0u);
 }
 
@@ -1060,10 +917,6 @@ TEST(TypeCheckerTest, ClassInstantiation) {
     ASSERT_NE(es->expr->type, nullptr);
     EXPECT_EQ(es->expr->type->kind(), Type::Kind::Instance);
 }
-
-//===----------------------------------------------------------------------===//
-// Builtin Function Types
-//===----------------------------------------------------------------------===//
 
 TEST(TypeCheckerTest, PrintReturnsNone) {
     auto t = getExprType("print(\"hello\")");
@@ -1088,10 +941,6 @@ TEST(TypeCheckerTest, RangeReturnsList) {
     ASSERT_NE(t, nullptr);
     EXPECT_EQ(t->kind(), Type::Kind::List);
 }
-
-//===----------------------------------------------------------------------===//
-// Integration Tests
-//===----------------------------------------------------------------------===//
 
 TEST(TypeCheckerTest, FibonacciFunction) {
     EXPECT_TRUE(checkOk(
@@ -1121,7 +970,6 @@ TEST(TypeCheckerTest, MultipleStatements) {
     ));
 }
 
-// Slice type inference tests
 TEST(TypeCheckerTest, ListSliceReturnsListType) {
     auto type = getExprType("x: list[int] = [1, 2, 3]\nx[1:3]");
     ASSERT_NE(type, nullptr);
@@ -1140,7 +988,6 @@ TEST(TypeCheckerTest, StringSubscriptReturnsStr) {
     EXPECT_EQ(type->kind(), Type::Kind::Str);
 }
 
-// New string method type tests
 TEST(TypeCheckerTest, StringCasefoldReturnsStr) {
     auto type = getExprType("s: str = \"Hello\"\ns.casefold()");
     ASSERT_NE(type, nullptr);
@@ -1153,7 +1000,6 @@ TEST(TypeCheckerTest, StringCasefoldReturnsStr) {
 TEST(TypeCheckerTest, StringPartitionReturnsList) {
     auto type = getExprType("s: str = \"hello world\"\ns.partition(\" \")");
     ASSERT_NE(type, nullptr);
-    // partition returns a call result, which should be list[str] through the function return
 }
 
 TEST(TypeCheckerTest, IsOperatorReturnsBool) {
@@ -1168,12 +1014,7 @@ TEST(TypeCheckerTest, InOperatorReturnsBool) {
     EXPECT_EQ(type->kind(), Type::Kind::Bool);
 }
 
-//===----------------------------------------------------------------------===//
-// Cross-File Type Checking Tests
-//===----------------------------------------------------------------------===//
-
 TEST(TypeCheckerTest, RegisterExternalModuleResolvesImport) {
-    // Parse a module that imports from "utils"
     auto module = parse(
         "from utils import add\n"
         "result: int = add(1, 2)\n"
@@ -1183,7 +1024,6 @@ TEST(TypeCheckerTest, RegisterExternalModuleResolvesImport) {
     Sema sema;
     sema.analyze(*module);
 
-    // Register external module exports
     std::unordered_map<std::string, std::shared_ptr<Type>> exports;
     exports["add"] = std::make_shared<FunctionType>(
         std::vector<std::shared_ptr<Type>>{
@@ -1197,8 +1037,6 @@ TEST(TypeCheckerTest, RegisterExternalModuleResolvesImport) {
     tc.registerExternalModule("utils", exports);
     tc.check(*module);
 
-    // The call to add() should resolve to int return type
-    // Find the assignment value
     for (auto& stmt : module->body) {
         if (auto* assign = dynamic_cast<AssignStmt*>(stmt.get())) {
             if (assign->value && assign->value->type) {
@@ -1223,14 +1061,12 @@ TEST(TypeCheckerTest, GetExportsReturnsDefinedFunctions) {
     tc.check(*module);
 
     auto exports = tc.getExports();
-    // Should contain "multiply" and "x", but not builtins like "print"
     EXPECT_TRUE(exports.count("multiply") > 0);
     EXPECT_TRUE(exports.count("x") > 0);
     EXPECT_TRUE(exports.count("print") == 0);
 }
 
 TEST(TypeCheckerTest, UnknownImportProducesError) {
-    // Import a name that doesn't exist in the external module
     auto module = parse(
         "from utils import nonexistent\n"
     );
@@ -1239,7 +1075,6 @@ TEST(TypeCheckerTest, UnknownImportProducesError) {
     Sema sema;
     sema.analyze(*module);
 
-    // Register utils with only "add" exported
     std::unordered_map<std::string, std::shared_ptr<Type>> exports;
     exports["add"] = std::make_shared<PrimitiveType>(Type::Kind::Int);
 
@@ -1247,13 +1082,10 @@ TEST(TypeCheckerTest, UnknownImportProducesError) {
     tc.registerExternalModule("utils", exports);
     tc.check(*module);
 
-    // Should have an error about "nonexistent" not found in "utils"
     EXPECT_TRUE(tc.hasErrors());
 }
 
 TEST(TypeCheckerTest, CrossModuleTypeInfoFlowsToCallExpr) {
-    // Verify that a function imported from an external module
-    // gets its return type properly propagated to call expressions
     auto module = parse(
         "from math_utils import square\n"
         "result = square(5)\n"
@@ -1275,7 +1107,6 @@ TEST(TypeCheckerTest, CrossModuleTypeInfoFlowsToCallExpr) {
     tc.registerExternalModule("math_utils", exports);
     tc.check(*module);
 
-    // Find the assignment and check the call result type
     for (auto& stmt : module->body) {
         if (auto* assign = dynamic_cast<AssignStmt*>(stmt.get())) {
             if (assign->value) {
@@ -1288,13 +1119,6 @@ TEST(TypeCheckerTest, CrossModuleTypeInfoFlowsToCallExpr) {
     }
 }
 
-//===----------------------------------------------------------------------===//
-// D017 Phase 4 - typed templates (template[X]) protocol enforcement.
-// Each `template[X]` content type must extend Template. The reserved-for-
-// D037 dispatch hook rejects StructTemplate subclasses with a distinct
-// error so users get a clear message before that path ships.
-//===----------------------------------------------------------------------===//
-
 static const std::string TPL_BASE_TC =
     "class Template {\n"
     "    def(inner: str) { self._inner = inner }\n"
@@ -1303,7 +1127,6 @@ static const std::string TPL_BASE_TC =
     "}\n";
 
 TEST(TypeCheckerTest, TypedTemplateRequiresTemplateBase) {
-    // Bare class without Template base -> must error
     EXPECT_TRUE(checkHasErrors(
         "class Foo {\n"
         "  def(inner: str) { self._inner = inner }\n"
@@ -1314,7 +1137,6 @@ TEST(TypeCheckerTest, TypedTemplateRequiresTemplateBase) {
 }
 
 TEST(TypeCheckerTest, TypedTemplateExtendsTemplateOK) {
-    // Direct subclass of Template - no errors
     EXPECT_TRUE(checkOk(
         TPL_BASE_TC +
         "class Foo(Template) {\n"
@@ -1326,7 +1148,6 @@ TEST(TypeCheckerTest, TypedTemplateExtendsTemplateOK) {
 }
 
 TEST(TypeCheckerTest, TypedTemplateGrandchildExtendsTemplateOK) {
-    // Indirect extension (grandchild) is fine - parent-chain walk finds Template
     EXPECT_TRUE(checkOk(
         TPL_BASE_TC +
         "class HTML(Template) {\n"
@@ -1341,15 +1162,12 @@ TEST(TypeCheckerTest, TypedTemplateGrandchildExtendsTemplateOK) {
 }
 
 TEST(TypeCheckerTest, TypedTemplateUnknownContentTypeErrors) {
-    // template[NonExistent] - content type not declared
     EXPECT_TRUE(checkHasErrors(
         "y = template[NoSuchType] {hello}\n"
     ));
 }
 
 TEST(TypeCheckerTest, TypedTemplateStructTemplateReservedForD037) {
-    // class extending StructTemplate is reserved for the D037 lowering;
-    // accepting it silently would mask the missing struct-mode codegen.
     auto module = parse(
         "class StructTemplate {\n"
         "  def() { pass }\n"
@@ -1377,9 +1195,6 @@ TEST(TypeCheckerTest, TypedTemplateStructTemplateReservedForD037) {
 }
 
 TEST(TypeCheckerTest, UntypedTemplateUnchangedStillStr) {
-    // Plain `template { ... }` (no [X]) keeps its str type regardless of
-    // any unrelated classes in scope - the protocol check applies only to
-    // typed templates.
     auto module = parse("y: str = template {hello}\n");
     ASSERT_NE(module, nullptr);
     Sema sema;
@@ -1388,10 +1203,6 @@ TEST(TypeCheckerTest, UntypedTemplateUnchangedStillStr) {
     tc.check(*module);
     EXPECT_FALSE(tc.hasErrors());
 }
-
-//===----------------------------------------------------------------------===//
-// Task[T] - fire / await / async def (D016)
-//===----------------------------------------------------------------------===//
 
 TEST(TypeCheckerTest, FireProducesTaskOfCalleeReturn) {
     EXPECT_TRUE(checkOk(
@@ -1407,8 +1218,6 @@ TEST(TypeCheckerTest, AwaitUnwrapsAsyncDefReturn) {
 }
 
 TEST(TypeCheckerTest, BareTaskAnnotationRefinesFromRHS) {
-    // `t: Task = fire work()` pins the result type from the concrete RHS,
-    // so join() recovers int (assignable to int, not str).
     EXPECT_TRUE(checkOk(
         "def work() -> int { return 1 }\n"
         "t: Task = fire work()\n"
@@ -1420,8 +1229,6 @@ TEST(TypeCheckerTest, BareTaskAnnotationRefinesFromRHS) {
 }
 
 TEST(TypeCheckerTest, AwaitIntResultNotAssignableToStr) {
-    // The former soundness hole: await produced `unknown`, so this compiled
-    // and miscompiled. Now await Task[int] -> int, str assignment is an error.
     EXPECT_TRUE(checkHasErrors(
         "async def fetch() -> int { return 99 }\n"
         "r: str = await fetch()\n"));
@@ -1438,11 +1245,6 @@ TEST(TypeCheckerTest, WrongExplicitTaskParamIsError) {
         "def work() -> int { return 5 }\n"
         "t: Task[str] = fire work()\n"));
 }
-
-//===----------------------------------------------------------------------===//
-// Dict key-type checks - a dict is monomorphic in its key type, so a key of the
-// wrong type is a TYPE error (was a runtime KeyError / late LLVM-verify crash).
-//===----------------------------------------------------------------------===//
 
 TEST(TypeCheckerTest, DictIntKeyIntIndexOk) {
     EXPECT_TRUE(checkOk(
@@ -1469,7 +1271,6 @@ TEST(TypeCheckerTest, DictStrKeyIntIndexIsError) {
 }
 
 TEST(TypeCheckerTest, DictWrongKeyTypeOnAssignIsError) {
-    // The write side (d[k] = v) is type-checked too.
     EXPECT_TRUE(checkHasErrors(
         "d: dict[int, str] = {1: \"a\"}\n"
         "d[\"1\"] = \"b\"\n"));
@@ -1485,11 +1286,6 @@ TEST(TypeCheckerTest, DictMixedKeyLiteralIsError) {
         "d: dict[int, str] = {1: \"a\", \"2\": \"b\"}\n"));
 }
 
-//===----------------------------------------------------------------------===//
-// D045 - member & module privacy (single-file enforcement) + reserved dunders
-//===----------------------------------------------------------------------===//
-
-// Collect error messages from type-checking a single source.
 static std::vector<std::string> checkMessages(const std::string& source) {
     std::vector<std::string> out;
     auto module = parse(source);
@@ -1505,8 +1301,6 @@ static bool msgsContain(const std::vector<std::string>& m, const std::string& ne
     return false;
 }
 
-// ---- Positive: legitimate access compiles ----
-
 TEST(TypeCheckerTest, D045_SameClassPrivateAccessOk) {
     EXPECT_TRUE(checkOk(
         "class A {\n"
@@ -1519,8 +1313,6 @@ TEST(TypeCheckerTest, D045_SameClassPrivateAccessOk) {
 }
 
 TEST(TypeCheckerTest, D045_SamePackageProtectedAccessOk) {
-    // A free function in the SAME file (= same singleton package) may touch a
-    // _protected member.
     EXPECT_TRUE(checkOk(
         "class A {\n"
         "    _shared: int = 5\n"
@@ -1555,8 +1347,6 @@ TEST(TypeCheckerTest, D045_RecognizedModuleMetadataOk) {
     EXPECT_TRUE(checkOk("__version__: str = \"1.0\"\n"));
 }
 
-// ---- Negative: privacy violations are compile errors ----
-
 TEST(TypeCheckerTest, D045_PrivateAcrossClassesRejected) {
     auto m = checkMessages(
         "class A {\n"
@@ -1569,7 +1359,6 @@ TEST(TypeCheckerTest, D045_PrivateAcrossClassesRejected) {
 }
 
 TEST(TypeCheckerTest, D045_SubclassCannotTouchParentPrivate) {
-    // __private is declaring-class-only - a subclass is locked out.
     auto m = checkMessages(
         "class Base {\n"
         "    __secret: int = 1\n"
@@ -1608,12 +1397,7 @@ TEST(TypeCheckerTest, D045_UnrecognizedModuleDunderRejected) {
     EXPECT_TRUE(msgsContain(m, "not a recognized module metadata name"));
 }
 
-// ---- isReservedDunder regression: the predicate is a SUPERSET of every
-// dunder the codegen dispatch sites use. If codegen learns a new dunder, this
-// test fails until the predicate is extended (and vice-versa keeps it honest).
 TEST(TypeCheckerTest, D045_ReservedDunderCoversDispatchedSet) {
-    // Enumerated from the codegen dispatch sites (Expressions/Assign/
-    // CallBuiltins/Attributes/ForLoop/Exceptions/CallExpr/CodeGenImpl/ImplInit).
     const char* dispatched[] = {
         "__init__", "__str__", "__repr__",
         "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__", "__hash__",
@@ -1631,17 +1415,14 @@ TEST(TypeCheckerTest, D045_ReservedDunderCoversDispatchedSet) {
     for (const char* d : dispatched)
         EXPECT_TRUE(isReservedDunder(d)) << "dispatched dunder not reserved: " << d;
 
-    // Names codegen does NOT dispatch must NOT be reserved (no recognized-but-
-    // dead wart): bitwise/reflected/etc.
     for (const char* d : {"__and__", "__or__", "__xor__", "__invert__",
                           "__radd__", "__delitem__", "__frob__"})
         EXPECT_FALSE(isReservedDunder(d)) << "unexpectedly reserved: " << d;
 }
 
-// classifyName tiers.
 TEST(TypeCheckerTest, D045_NameClassification) {
     EXPECT_EQ(classifyName("name"), NameVisibility::Public);
-    EXPECT_EQ(classifyName("_"), NameVisibility::Public);      // wildcard
+    EXPECT_EQ(classifyName("_"), NameVisibility::Public);
     EXPECT_EQ(classifyName("_x"), NameVisibility::Protected);
     EXPECT_EQ(classifyName("_routes_by_sd"), NameVisibility::Protected);
     EXPECT_EQ(classifyName("__x"), NameVisibility::Private);
@@ -1649,10 +1430,6 @@ TEST(TypeCheckerTest, D045_NameClassification) {
     EXPECT_EQ(classifyName("__init__"), NameVisibility::ReservedDunder);
     EXPECT_EQ(classifyName("__doc__"), NameVisibility::ReservedDunder);
 }
-
-//===----------------------------------------------------------------------===//
-// D044 - Generics (monomorphization)
-//===----------------------------------------------------------------------===//
 
 TEST(TypeCheckerTest, GenericClassAndFunctionAccepted) {
     EXPECT_TRUE(checkOk(
@@ -1667,25 +1444,18 @@ TEST(TypeCheckerTest, GenericClassAndFunctionAccepted) {
         "s: str = first(xs)\n"));
 }
 
-// Unbounded `T`: a method/attribute call on a value of type parameter `T` is
-// rejected. A bound (`T: B`) is what lifts this; without one the
-// member can't be proven to exist for every `T`.
 TEST(TypeCheckerTest, GenericUnboundedMethodCallRejected) {
     EXPECT_TRUE(checkHasErrors(
         "def f[T](t: T) -> int { return t.foo() }\n"
         "x: int = f[int](5)\n"));
 }
 
-// A `T`-typed value cannot be subscripted under v1 unbounded rules.
 TEST(TypeCheckerTest, GenericUnboundedSubscriptRejected) {
     EXPECT_TRUE(checkHasErrors(
         "def f[T](t: T) -> int { return t[0] }\n"
         "x: int = f[int](5)\n"));
 }
 
-// Polymorphic recursion (`Foo[T]` instantiating a strictly deeper `Foo[list[T]]`)
-// is bounded by the instantiation-depth cap and reported as a compile error -
-// not a silent truncation and, critically, not a hang.
 TEST(TypeCheckerTest, GenericPolymorphicRecursionCapped) {
     EXPECT_TRUE(checkHasErrors(
         "class Foo[T] {\n"
@@ -1695,7 +1465,6 @@ TEST(TypeCheckerTest, GenericPolymorphicRecursionCapped) {
         "x: Foo[int] = Foo[int](1)\n"));
 }
 
-// Wrong type-argument arity on a generic class is rejected.
 TEST(TypeCheckerTest, GenericClassArityMismatchRejected) {
     EXPECT_TRUE(checkHasErrors(
         "class Pair[K, V] {\n"
@@ -1704,8 +1473,6 @@ TEST(TypeCheckerTest, GenericClassArityMismatchRejected) {
         "p: Pair[int] = Pair[int](1)\n"));
 }
 
-// Unbounded `T`: equality (==/!=) is allowed, but ORDERING (<, >, <=, >=) needs a
-// bound and is rejected (D044 lists `t < t` as disallowed).
 TEST(TypeCheckerTest, GenericEqualityAllowedOrderingRejected) {
     EXPECT_TRUE(checkOk(
         "def eq[T](a: T, b: T) -> bool { return a == b }\n"
@@ -1715,17 +1482,6 @@ TEST(TypeCheckerTest, GenericEqualityAllowedOrderingRejected) {
         "x: bool = lt[int](1, 2)\n"));
 }
 
-// Generic METHODS (a method declaring its OWN type parameter) - D044+. The
-// POSITIVE behavioral cases (accept + run: explicit/inferred type args, list[T]
-// return, inheritance, multi-param, T-construction) live in the .dr E2E suite
-// test/dr/test_generics_method.dr. Only compiler REJECTION cases live here -
-// a program that must fail to compile cannot be a passing .dr unittest.
-
-// D049 - a bracket-less call infers T from the binding annotation, but a
-// genuinely CONTEXT-FREE call (no annotation to infer from, no argument that
-// pins T) is a clean error, not a crash. (`x: int = r.make()` would now SUCCEED
-// by inferring T=int - that is the optional-[T] feature; the unsolved case is
-// the discarded-result statement below.)
 TEST(TypeCheckerTest, GenericMethodUnsolvedTypeParamRejected) {
     EXPECT_TRUE(checkHasErrors(
         "class Reg {\n"
@@ -1735,9 +1491,6 @@ TEST(TypeCheckerTest, GenericMethodUnsolvedTypeParamRejected) {
         "r.make()\n"));
 }
 
-// Overloading-by-genericity is rejected: a generic method may not share its name
-// with another method on the class (the dual-definition footgun). Optional-[T]
-// is ONE generic method whose T is inferred at the call site.
 TEST(TypeCheckerTest, GenericMethodDualDefinitionRejected) {
     EXPECT_TRUE(checkHasErrors(
         "class Conn {\n"
@@ -1747,7 +1500,6 @@ TEST(TypeCheckerTest, GenericMethodDualDefinitionRejected) {
         "b: Conn = Conn()\n"));
 }
 
-// Wrong explicit type-argument arity on a generic method is rejected.
 TEST(TypeCheckerTest, GenericMethodArityMismatchRejected) {
     EXPECT_TRUE(checkHasErrors(
         "class Reg {\n"
@@ -1757,9 +1509,6 @@ TEST(TypeCheckerTest, GenericMethodArityMismatchRejected) {
         "x: int = r.pair[int](1, 2)\n"));
 }
 
-// The unbounded-`T` restriction still applies inside a generic method body:
-// member access on a `T`-typed value needs a bound; without one it is
-// rejected.
 TEST(TypeCheckerTest, GenericMethodUnboundedMemberAccessRejected) {
     EXPECT_TRUE(checkHasErrors(
         "class Reg {\n"
@@ -1769,10 +1518,6 @@ TEST(TypeCheckerTest, GenericMethodUnboundedMemberAccessRejected) {
         "n: int = r.grow[int](3)\n"));
 }
 
-// Double monomorphization: a generic method on a generic-class instantiation
-// (`Container[int].wrap[str]`) now type-checks clean - the engine composes the
-// class frame (T) and method frame (U). (Behavioral/runtime cases live in
-// test/dr/test_generics_double_mono.dr.)
 TEST(TypeCheckerTest, GenericMethodOnGenericClassDoubleMonoOk) {
     EXPECT_TRUE(checkOk(
         "class Container[T] {\n"
@@ -1784,8 +1529,6 @@ TEST(TypeCheckerTest, GenericMethodOnGenericClassDoubleMonoOk) {
         "p: tuple[int, str] = c.pair[str](\"hi\")\n"));
 }
 
-// A method type parameter shadowing the generic class's own type parameter
-// makes the double-monomorphization substitution ambiguous - rejected.
 TEST(TypeCheckerTest, GenericMethodShadowsClassTypeParamRejected) {
     EXPECT_TRUE(checkHasErrors(
         "class C[T] {\n"
@@ -1794,10 +1537,6 @@ TEST(TypeCheckerTest, GenericMethodShadowsClassTypeParamRejected) {
         "}\n"));
 }
 
-// Polymorphic recursion through a generic METHOD's type args - the method
-// analog of GenericPolymorphicRecursionCapped. Must be a clean compile error,
-// not a hang (it drains iteratively, bypassing the class-path depth counter, so
-// a structural type-arg-depth cap stops it fast).
 TEST(TypeCheckerTest, GenericMethodPolymorphicRecursionCapped) {
     EXPECT_TRUE(checkHasErrors(
         "class R[T] {\n"
@@ -1813,7 +1552,6 @@ TEST(TypeCheckerTest, GenericMethodPolymorphicRecursionCapped) {
         "print(r.go[int](5, 3))\n"));
 }
 
-// Subclassing a generic instantiation is not yet supported - rejected clearly.
 TEST(TypeCheckerTest, GenericInstantiationSubclassRejected) {
     EXPECT_TRUE(checkHasErrors(
         "class Animal[T] {\n"
@@ -1824,7 +1562,6 @@ TEST(TypeCheckerTest, GenericInstantiationSubclassRejected) {
         "}\n"));
 }
 
-// A union used as a generic type argument (both annotation and explicit forms).
 TEST(TypeCheckerTest, GenericUnionTypeArgumentAccepted) {
     EXPECT_TRUE(checkOk(
         "class Box[T] {\n"
@@ -1835,12 +1572,6 @@ TEST(TypeCheckerTest, GenericUnionTypeArgumentAccepted) {
         "b: Box[int | str] = Box(7)\n"));
 }
 
-//===----------------------------------------------------------------------===//
-// Bounded type parameters (`T: Bound`)
-//===----------------------------------------------------------------------===//
-
-// A bounded `T: Animal` may read the bound's attributes and call its methods
-// inside the generic body - the unbounded restriction is lifted by the bound.
 TEST(TypeCheckerTest, BoundedTypeParamMemberAccessOk) {
     EXPECT_TRUE(checkOk(
         "class Animal {\n"
@@ -1853,7 +1584,6 @@ TEST(TypeCheckerTest, BoundedTypeParamMemberAccessOk) {
         "s: str = describe[Animal](a)\n"));
 }
 
-// The bound class itself and any subclass satisfy the bound.
 TEST(TypeCheckerTest, BoundedTypeParamSubclassArgAccepted) {
     EXPECT_TRUE(checkOk(
         "class Animal { def() { } def speak() -> str { return \"a\" } }\n"
@@ -1863,7 +1593,6 @@ TEST(TypeCheckerTest, BoundedTypeParamSubclassArgAccepted) {
         "s: str = describe[Dog](d)\n"));
 }
 
-// A bounded generic CLASS: store a `T` and call its bound method.
 TEST(TypeCheckerTest, BoundedGenericClassMemberAccessOk) {
     EXPECT_TRUE(checkOk(
         "class Animal { def() { } def speak() -> str { return \"a\" } }\n"
@@ -1875,7 +1604,6 @@ TEST(TypeCheckerTest, BoundedGenericClassMemberAccessOk) {
         "sh: Shelter[Animal] = Shelter[Animal](Animal())\n"));
 }
 
-// A type argument that is neither the bound class nor a subclass is rejected.
 TEST(TypeCheckerTest, BoundedTypeParamArgViolatesBoundRejected) {
     EXPECT_TRUE(checkHasErrors(
         "class Animal { def() { } def speak() -> str { return \"a\" } }\n"
@@ -1885,7 +1613,6 @@ TEST(TypeCheckerTest, BoundedTypeParamArgViolatesBoundRejected) {
         "s: str = describe[Cat](c)\n"));
 }
 
-// Same, through a generic-CLASS instantiation with a non-satisfying argument.
 TEST(TypeCheckerTest, BoundedGenericClassArgViolatesBoundRejected) {
     EXPECT_TRUE(checkHasErrors(
         "class Animal { def() { } def speak() -> str { return \"a\" } }\n"
@@ -1896,14 +1623,11 @@ TEST(TypeCheckerTest, BoundedGenericClassArgViolatesBoundRejected) {
         "sh: Shelter[int] = Shelter[int](5)\n"));
 }
 
-// Regression: an UNBOUNDED `T` still cannot access members - the bound is what
-// lifts the D044 restriction; without one, member access stays an error.
 TEST(TypeCheckerTest, UnboundedTypeParamMemberAccessStillRejected) {
     EXPECT_TRUE(checkHasErrors(
         "def bad[T](x: T) -> str { return x.speak() }\n"));
 }
 
-// A bounded generic METHOD (its own `T: Bound`) resolves members on the bound.
 TEST(TypeCheckerTest, BoundedGenericMethodOk) {
     EXPECT_TRUE(checkOk(
         "class Animal { def() { } def speak() -> str { return \"a\" } }\n"
@@ -1914,13 +1638,6 @@ TEST(TypeCheckerTest, BoundedGenericMethodOk) {
         "r: Registry = Registry()\n"
         "s: str = r.loudest[Animal](Animal())\n"));
 }
-
-//===----------------------------------------------------------------------===//
-// Inferred binding (`:=`) must not silently produce an Any-element container.
-// An empty literal has no derivable element type; binding list[Unknown] /
-// dict[Unknown, Unknown] is a de-facto Any (accepts anything -> boxes on the
-// hot path). The Zen: ambiguity is a compile error to annotate away.
-//===----------------------------------------------------------------------===//
 
 TEST(TypeCheckerTest, WalrusEmptyListInferRejected) {
     EXPECT_TRUE(checkHasErrors("xs := []\n"));
@@ -1935,29 +1652,18 @@ TEST(TypeCheckerTest, WalrusConcreteListInferOk) {
 }
 
 TEST(TypeCheckerTest, AnnotatedEmptyListOk) {
-    // The annotation supplies the element type, so the empty literal is fine -
-    // this path is an AnnAssign, not a walrus, and must stay valid.
     EXPECT_TRUE(checkOk("xs: list[int] = []\n"));
 }
 
 TEST(TypeCheckerTest, WalrusExprConcreteOk) {
-    // Walrus in expression position binding a concrete scalar is unaffected.
     EXPECT_TRUE(checkOk("if (n := 5) > 0 {\n  print(n)\n}\n"));
 }
-
-// A non-empty literal must UNIFY its element types, not silently take the first.
-// A mixed literal has no concrete element type, so an inferred `:=` binding is
-// rejected (annotate). Homogeneous stays native; an explicit list[Any]
-// annotation is the opt-in for genuine heterogeneity.
 
 TEST(TypeCheckerTest, WalrusMixedListInferRejected) {
     EXPECT_TRUE(checkHasErrors("xs := [1, \"a\"]\n"));
 }
 
 TEST(TypeCheckerTest, WalrusIntFloatListInferRejected) {
-    // int + float don't unify (the literal codegen can't bit-coerce them - a
-    // silent list[float] would store the int's bits as garbage). Annotate
-    // `list[float]` instead, where codegen coerces per the target type.
     EXPECT_TRUE(checkHasErrors("xs := [1, 2.0]\n"));
 }
 
@@ -1966,21 +1672,12 @@ TEST(TypeCheckerTest, WalrusHomogeneousListInferOk) {
 }
 
 TEST(TypeCheckerTest, AnnotatedAnyMixedListOk) {
-    // Explicit list[Any] is the opt-in for heterogeneous data - must stay valid.
     EXPECT_TRUE(checkOk("xs: list[Any] = [1, \"a\", 3.0]\n"));
 }
 
 TEST(TypeCheckerTest, MixedListAgainstIntAnnotationRejected) {
     EXPECT_TRUE(checkHasErrors("xs: list[int] = [1, \"a\"]\n"));
 }
-
-//===----------------------------------------------------------------------===//
-// Lambda bodies are type-checked. visit(LambdaExpr) used to build
-// the FunctionType from the annotations and skip the body entirely, so
-// `bad: int = "boy"` inside a lambda compiled clean and generic method calls
-// in handlers were never stamped (silent empty results at runtime). The
-// runtime half of the fix is dogfooded in test/dr/test_lambda_body_types.dr.
-//===----------------------------------------------------------------------===//
 
 TEST(TypeCheckerTest, LambdaBodyBadBindingRejected) {
     EXPECT_TRUE(checkHasErrors(
@@ -2005,14 +1702,6 @@ TEST(TypeCheckerTest, LambdaBodyWellTypedOk) {
         "}\n"));
 }
 
-//===----------------------------------------------------------------------===//
-// Member access on `Any` is rejected (commandment #3: no duck typing)
-//===----------------------------------------------------------------------===//
-
-// A `Task[int]` stored in a bare `list` (= `list[Any]`) loses the handle tag
-// that drives `.join()` dispatch, so pre-fix `for t in tasks { t.join() }`
-// silently miscompiled to garbage. Dragon has no runtime member dispatch on
-// `Any`, so the access must be a compile error pointing at the annotation.
 TEST(TypeCheckerTest, MethodOnAnyReceiverRejected) {
     EXPECT_TRUE(checkHasErrors(
         "def worker(n: int) -> int { return n }\n"
@@ -2024,8 +1713,6 @@ TEST(TypeCheckerTest, MethodOnAnyReceiverRejected) {
         "}\n"));
 }
 
-// The honest form - the element type is spelled out - resolves the member and
-// compiles cleanly.
 TEST(TypeCheckerTest, MethodOnTypedTaskListOk) {
     EXPECT_TRUE(checkOk(
         "def worker(n: int) -> int { return n }\n"
@@ -2037,7 +1724,6 @@ TEST(TypeCheckerTest, MethodOnTypedTaskListOk) {
         "}\n"));
 }
 
-// Field read on an `Any` value is rejected for the same reason (not just calls).
 TEST(TypeCheckerTest, FieldReadOnAnyReceiverRejected) {
     EXPECT_TRUE(checkHasErrors(
         "xs: list = []\n"
@@ -2045,11 +1731,6 @@ TEST(TypeCheckerTest, FieldReadOnAnyReceiverRejected) {
         "    y: int = e.value\n"
         "}\n"));
 }
-
-//===----------------------------------------------------------------------===//
-// defer: the operand call type-checks like any call, so the own-mode
-// signature rules (E13/E14) apply unchanged at the defer statement.
-//===----------------------------------------------------------------------===//
 
 TEST(TypeCheckerTest, DeferOwnArgToBorrowingParamRejected) {
     EXPECT_TRUE(checkHasErrors(
@@ -2089,13 +1770,8 @@ TEST(TypeCheckerTest, DeferWellTypedCallOk) {
         "}\n"));
 }
 
-//===----------------------------------------------------------------------===//
-// Identity resources (docs/1604 "Identity resources": the SocketHandle
-// shape). The typechecker owns two of the book's bouncer cases: the
-// borrow-forge into an own-param constructor and the dub of a claim holder.
-// The move/claim cases (use-after-move, double-move) live in
-// OwnershipCheckTest.cpp (OwnCtor*).
-//===----------------------------------------------------------------------===//
+// Identity resources: the typechecker owns the borrow-forge into an own-param ctor and the dub
+// of a claim holder; the move/claim cases (use-after-move, double-move) live in OwnershipCheckTest.cpp.
 
 TEST(TypeCheckerTest, IdentityResourceBorrowIntoOwnCtorRejected) {
     EXPECT_TRUE(checkHasErrors(
@@ -2141,13 +1817,6 @@ TEST(TypeCheckerTest, IdentityResourceBlessedSpellingsOk) {
         "    moved: R = R(own h)\n"
         "}\n"));
 }
-
-//===----------------------------------------------------------------------===//
-// Issue #25 - methods are not values: reassigning a method must not compile
-// (it previously compiled silently and did nothing), and a bare method
-// reference outside call position must not compile (it previously
-// miscompiled to 0, or a SEGV when bound to a Callable and invoked).
-//===----------------------------------------------------------------------===//
 
 static const char* kIss25Class =
     "class Test {\n"
@@ -2214,9 +1883,6 @@ TEST(TypeCheckerTest, InheritedMethodReassignRejected) {
         "s.print_junk = \"nope\"\n"));
 }
 
-// Builtin receivers: their members are only ever methods, so a bare read is
-// the same defect on a different resolution branch (`print(s.upper)` printed
-// 0; a signature-matching Callable binding broke LLVM verification).
 TEST(TypeCheckerTest, BareBuiltinMethodReadRejected) {
     EXPECT_TRUE(checkHasErrors(
         "s: str = \"abc\"\n"
@@ -2250,10 +1916,6 @@ TEST(TypeCheckerTest, BuiltinMethodCallsStillOk) {
         "r: int = t.join()\n"));
 }
 
-// Unknown members on a CLASS receiver: the static/classmethod surface must
-// reject a nonexistent member at check time, exactly like the instance
-// branch. Before this, `App.run_timeout(100)` against a renamed API passed
-// `dragon check` and only failed as a late codegen scale error.
 TEST(TypeCheckerTest, UnknownStaticMethodCallOnClassRejected) {
     EXPECT_TRUE(checkHasErrors(
         "class Box {\n"
@@ -2286,10 +1948,6 @@ TEST(TypeCheckerTest, StaticMethodCallOnClassOk) {
         "lim: int = Box.limit\n"));
 }
 
-// The parent-chain walk: an inherited staticmethod is reachable through the
-// subclass name (it silently typed Unknown before, hiding the member from
-// downstream inference), while a genuinely-unknown member on the same chain
-// is a hard error.
 TEST(TypeCheckerTest, InheritedStaticMethodThroughSubclassOk) {
     EXPECT_TRUE(checkOk(
         "class Base {\n"
@@ -2316,4 +1974,444 @@ TEST(TypeCheckerTest, UnknownMemberOnSubclassChainRejected) {
         "    pass\n"
         "}\n"
         "Sub.fabricate()\n"));
+}
+
+static const char* kAmazing =
+    "type Amazing {\n"
+    "    def amazing_method() -> str\n"
+    "}\n";
+
+static std::string checkErrorText(const std::string& source) {
+    auto module = parse(source);
+    if (!module) return "<parse failed>";
+    Sema sema;
+    sema.analyze(*module);
+    TypeChecker tc;
+    tc.check(*module);
+    std::string all;
+    for (auto& d : tc.diagnostics()) all += d.message + "\n";
+    return all;
+}
+
+TEST(TypeCheckerTest, ContractValuePositionNeedsDeclaredConformance) {
+    std::string src = std::string(kAmazing) +
+        "class Duck {\n"
+        "    def amazing_method() -> str {\n"
+        "        return \"quack\"\n"
+        "    }\n"
+        "}\n"
+        "def show(x: Amazing) -> str {\n"
+        "    return x.amazing_method()\n"
+        "}\n"
+        "d: Duck = Duck()\n"
+        "show(d)\n";
+    EXPECT_TRUE(checkHasErrors(src));
+    std::string text = checkErrorText(src);
+    EXPECT_NE(text.find("matching method set but no declared conformance"),
+              std::string::npos);
+    EXPECT_NE(text.find("d as Amazing"), std::string::npos);
+    EXPECT_NE(text.find("class Duck -> Amazing"), std::string::npos);
+}
+
+TEST(TypeCheckerTest, ContractCastMissingMethodRejected) {
+    EXPECT_TRUE(checkHasErrors(std::string(kAmazing) +
+        "class Rock {\n"
+        "    def weight() -> int {\n"
+        "        return 3\n"
+        "    }\n"
+        "}\n"
+        "r: Rock = Rock()\n"
+        "a: Amazing = r as Amazing\n"));
+}
+
+TEST(TypeCheckerTest, ContractPromiseMissingMethodRejectedAtClass) {
+    EXPECT_TRUE(checkHasErrors(std::string(kAmazing) +
+        "class Cat -> Amazing {\n"
+        "    def other() -> str {\n"
+        "        return \"meow\"\n"
+        "    }\n"
+        "}\n"));
+}
+
+TEST(TypeCheckerTest, ContractSignatureMismatchRejected) {
+    EXPECT_TRUE(checkHasErrors(std::string(kAmazing) +
+        "class Off {\n"
+        "    def amazing_method(n: int) -> str {\n"
+        "        return \"x\"\n"
+        "    }\n"
+        "}\n"
+        "o: Off = Off()\n"
+        "a: Amazing = o as Amazing\n"));
+}
+
+TEST(TypeCheckerTest, ContractReturnTypeMismatchRejected) {
+    EXPECT_TRUE(checkHasErrors(std::string(kAmazing) +
+        "class Wrong {\n"
+        "    def amazing_method() -> int {\n"
+        "        return 3\n"
+        "    }\n"
+        "}\n"
+        "w: Wrong = Wrong()\n"
+        "a: Amazing = w as Amazing\n"));
+}
+
+TEST(TypeCheckerTest, AsTargetMustBeAContract) {
+    EXPECT_TRUE(checkHasErrors(std::string(kAmazing) +
+        "class Dog -> Amazing {\n"
+        "    def amazing_method() -> str {\n"
+        "        return \"woof\"\n"
+        "    }\n"
+        "}\n"
+        "class Other {\n"
+        "    def hi() -> int {\n"
+        "        return 1\n"
+        "    }\n"
+        "}\n"
+        "d: Dog = Dog()\n"
+        "x: Amazing = d as Other\n"));
+}
+
+TEST(TypeCheckerTest, ContractDownwardReviewRejected) {
+    EXPECT_TRUE(checkHasErrors(std::string(kAmazing) +
+        "type Speaker {\n"
+        "    def speak() -> str\n"
+        "}\n"
+        "class Dog -> Amazing {\n"
+        "    def amazing_method() -> str {\n"
+        "        return \"woof\"\n"
+        "    }\n"
+        "}\n"
+        "d: Dog = Dog()\n"
+        "a: Amazing = d as Amazing\n"
+        "s: Speaker = a as Speaker\n"));
+}
+
+TEST(TypeCheckerTest, ContractCompositionConflictRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "type A {\n"
+        "    def m() -> str\n"
+        "}\n"
+        "type B {\n"
+        "    def m() -> int\n"
+        "}\n"
+        "type C(A, B) {}\n"));
+}
+
+TEST(TypeCheckerTest, ContractCannotBeConstructed) {
+    EXPECT_TRUE(checkHasErrors(std::string(kAmazing) +
+        "a: Amazing = Amazing()\n"));
+}
+
+TEST(TypeCheckerTest, ContractBoundViolationListsMissingMethod) {
+    EXPECT_TRUE(checkHasErrors(std::string(kAmazing) +
+        "class Rock {\n"
+        "    def weight() -> int {\n"
+        "        return 3\n"
+        "    }\n"
+        "}\n"
+        "def go[T: Amazing](x: T) -> str {\n"
+        "    return x.amazing_method()\n"
+        "}\n"
+        "r: Rock = Rock()\n"
+        "go(r)\n"));
+}
+
+TEST(TypeCheckerTest, SumRejectsNonNumericElements) {
+    EXPECT_TRUE(checkHasErrors(
+        "xs: list[str] = [\"a\", \"b\"]\n"
+        "s: str = sum(xs)\n"));
+    EXPECT_FALSE(checkHasErrors(
+        "xs: list[float] = [1.5, 2.5]\n"
+        "t: float = sum(xs)\n"));
+}
+
+TEST(TypeCheckerTest, MinMaxRejectContainerElements) {
+    EXPECT_TRUE(checkHasErrors(
+        "xs: list[list[int]] = [[1], [2]]\n"
+        "m: list[int] = min(xs)\n"));
+    EXPECT_FALSE(checkHasErrors(
+        "xs: list[str] = [\"a\", \"b\"]\n"
+        "m: str = min(xs)\n"));
+}
+
+TEST(TypeCheckerTest, ContractDeclaresNoSuchMethodRejected) {
+    EXPECT_TRUE(checkHasErrors(std::string(kAmazing) +
+        "class Dog -> Amazing {\n"
+        "    def amazing_method() -> str {\n"
+        "        return \"woof\"\n"
+        "    }\n"
+        "    def bark() -> str {\n"
+        "        return \"!\"\n"
+        "    }\n"
+        "}\n"
+        "d: Dog = Dog()\n"
+        "a: Amazing = d\n"
+        "a.bark()\n"));
+}
+
+TEST(ParserTest, ContractBodyRejectsFieldsBodiesDefaultsAndEmpty) {
+    EXPECT_FALSE(parseErrors("type T {\n    def m() -> str\n}\n").empty()
+                 ? false : true);
+    EXPECT_TRUE(parseErrors("type Empty { }\n").size() > 0);
+    EXPECT_TRUE(parseErrors("type Bad {\n    name: str\n}\n").size() > 0);
+    EXPECT_TRUE(parseErrors(
+        "type Bad {\n    def m() -> str { return \"x\" }\n}\n").size() > 0);
+    EXPECT_TRUE(parseErrors(
+        "type Bad {\n    def m(n: int = 3) -> str\n}\n").size() > 0);
+}
+
+TEST(TypeCheckerTest, GenericAndMonomorphicSameNameRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "def f(x: int) -> int {\n"
+        "    return x + 1\n"
+        "}\n"
+        "def f[T](x: T) -> T {\n"
+        "    return x\n"
+        "}\n"));
+    EXPECT_TRUE(checkHasErrors(
+        "def f[T](x: T) -> T {\n"
+        "    return x\n"
+        "}\n"
+        "def f(x: int) -> int {\n"
+        "    return x + 1\n"
+        "}\n"));
+    EXPECT_TRUE(checkHasErrors(
+        "def f[T](x: T) -> T {\n"
+        "    return x\n"
+        "}\n"
+        "def f[T](x: T, y: T) -> T {\n"
+        "    return x\n"
+        "}\n"));
+}
+
+TEST(TypeCheckerTest, IterReturningClassWithoutNextRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "class Bag {\n"
+        "    def() {\n"
+        "        self.n: int = 0\n"
+        "    }\n"
+        "    def __iter__() -> Sack {\n"
+        "        return Sack()\n"
+        "    }\n"
+        "}\n"
+        "class Sack {\n"
+        "    def() {\n"
+        "        self.n: int = 0\n"
+        "    }\n"
+        "}\n"
+        "def f() -> int {\n"
+        "    total: int = 0\n"
+        "    for x in Bag() {\n"
+        "        total = total + 1\n"
+        "    }\n"
+        "    return total\n"
+        "}\n"));
+}
+
+TEST(TypeCheckerTest, InOnScalarRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "x: int = 5\n"
+        "b: bool = x in 3\n"));
+    EXPECT_TRUE(checkHasErrors(
+        "b: bool = \"b\" in 5.5\n"));
+    EXPECT_FALSE(checkHasErrors(
+        "xs: list[int] = [1, 2]\n"
+        "b: bool = 1 in xs\n"));
+    EXPECT_FALSE(checkHasErrors(
+        "d: dict[str, int] = {\"a\": 1}\n"
+        "b: bool = \"a\" in d\n"));
+    EXPECT_FALSE(checkHasErrors(
+        "b: bool = 1 in {1, 2}\n"));
+    EXPECT_FALSE(checkHasErrors(
+        "b: bool = b\"a\" in b\"abc\"\n"));
+}
+
+TEST(TypeCheckerTest, InOnTupleRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "t: tuple[int, int, int] = (1, 2, 3)\n"
+        "b: bool = 2 in t\n"));
+}
+
+TEST(TypeCheckerTest, StrInRequiresStrLeft) {
+    EXPECT_TRUE(checkHasErrors(
+        "b: bool = 5 in \"abc\"\n"));
+    EXPECT_FALSE(checkHasErrors(
+        "b: bool = \"a\" in \"abc\"\n"));
+}
+
+TEST(TypeCheckerTest, InOnInstanceNeedsContains) {
+    EXPECT_TRUE(checkHasErrors(
+        "class Box {\n"
+        "    v: int\n"
+        "    def(v: int) { self.v = v }\n"
+        "}\n"
+        "b: Box = Box(5)\n"
+        "ok: bool = 1 in b\n"));
+    EXPECT_FALSE(checkHasErrors(
+        "class Bag {\n"
+        "    xs: list[int]\n"
+        "    def(xs: list[int]) { self.xs = xs }\n"
+        "    def __contains__(v: int) -> bool { return v in self.xs }\n"
+        "}\n"
+        "b: Bag = Bag([1])\n"
+        "ok: bool = 1 in b\n"));
+}
+
+TEST(TypeCheckerTest, BareRangeValueRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "print(range(5))\n"));
+    EXPECT_TRUE(checkHasErrors(
+        "xs: list[int] = sorted(range(5))\n"));
+    EXPECT_FALSE(checkHasErrors(
+        "for i in range(3) { print(i) }\n"));
+    EXPECT_FALSE(checkHasErrors(
+        "xs: list[int] = list(range(3))\n"));
+    EXPECT_FALSE(checkHasErrors(
+        "xs: list[int] = [i * 2 for i in range(3)]\n"));
+}
+
+TEST(TypeCheckerTest, IsinstanceSecondArgMustBeType) {
+    EXPECT_TRUE(checkHasErrors(
+        "x: int = 5\n"
+        "n: int = 3\n"
+        "b: bool = isinstance(x, n)\n"));
+    EXPECT_FALSE(checkHasErrors(
+        "x: int = 5\n"
+        "b: bool = isinstance(x, int)\n"));
+    EXPECT_FALSE(checkHasErrors(
+        "class Cow {\n"
+        "    v: int\n"
+        "    def(v: int) { self.v = v }\n"
+        "}\n"
+        "c: Cow = Cow(1)\n"
+        "b: bool = isinstance(c, Cow)\n"));
+}
+
+TEST(TypeCheckerTest, NonCallableCalleeRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "xs: list[int] = [10, 20]\n"
+        "print(xs[0](3))\n"));
+}
+
+TEST(TypeCheckerTest, ConstantIntOverflowRejected) {
+    EXPECT_TRUE(checkHasErrors("x: int = 2 ** 100\n"));
+    EXPECT_TRUE(checkHasErrors("x: int = 2 ** 63\n"));
+    EXPECT_TRUE(checkHasErrors("x: int = 9223372036854775807 + 1\n"));
+    EXPECT_TRUE(checkHasErrors("x: int = -9223372036854775807 - 2\n"));
+    EXPECT_TRUE(checkHasErrors("x: int = 4611686018427387904 * 2\n"));
+    EXPECT_TRUE(checkHasErrors("x: int = (2 ** 50) * (2 ** 50)\n"));
+    EXPECT_FALSE(checkHasErrors("x: int = 2 ** 62\n"));
+    EXPECT_FALSE(checkHasErrors("x: int = 9223372036854775806 + 1\n"));
+    EXPECT_FALSE(checkHasErrors("x: int = -9223372036854775807 - 1\n"));
+}
+
+TEST(TypeCheckerTest, ConstantDivModByZeroStaysRuntimeError) {
+    EXPECT_FALSE(checkHasErrors("x: int = 1 // 0\n"));
+    EXPECT_FALSE(checkHasErrors("x: int = 1 % 0\n"));
+    EXPECT_FALSE(checkHasErrors("x: int = 7 // 2\n"));
+    EXPECT_FALSE(checkHasErrors("x: int = -7 // 2\n"));
+    EXPECT_FALSE(checkHasErrors("x: int = 7 % -2\n"));
+}
+
+TEST(TypeCheckerTest, SetTypeIsHonest) {
+    auto t = getExprType(
+        "s: set[int] = {1, 2}\n"
+        "s\n");
+    ASSERT_NE(t, nullptr);
+    EXPECT_EQ(t->kind(), Type::Kind::Set);
+    EXPECT_EQ(t->toString(), "set[int]");
+}
+
+TEST(TypeCheckerTest, SetOperatorsTyped) {
+    EXPECT_FALSE(checkHasErrors(
+        "a: set[int] = {1, 2}\n"
+        "b: set[int] = {2, 3}\n"
+        "c: set[int] = a | b\n"
+        "d: set[int] = a & b\n"
+        "e: set[int] = a - b\n"
+        "f: set[int] = a ^ b\n"));
+    EXPECT_TRUE(checkHasErrors(
+        "a: set[int] = {1, 2}\n"
+        "b: set[int] = {2, 3}\n"
+        "c: set[int] = a + b\n"));
+    EXPECT_TRUE(checkHasErrors(
+        "a: set[int] = {1, 2}\n"
+        "xs: list[int] = [1]\n"
+        "c: set[int] = a | xs\n"));
+    EXPECT_TRUE(checkHasErrors(
+        "a: set[int] = {1, 2}\n"
+        "b: set[str] = {\"x\"}\n"
+        "c: set[int] = a | b\n"));
+}
+
+TEST(TypeCheckerTest, ConstantShiftCountRejected) {
+    EXPECT_TRUE(checkHasErrors("x: int = 1 << 64\n"));
+    EXPECT_TRUE(checkHasErrors("x: int = 1 << -1\n"));
+    EXPECT_FALSE(checkHasErrors("x: int = 1 << 62\n"));
+}
+
+TEST(TypeCheckerTest, DiscardedTaskStatementRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "async def fetch(url: str) -> str {\n"
+        "    return url\n"
+        "}\n"
+        "fetch(\"http://x\")\n"));
+}
+
+TEST(TypeCheckerTest, BareFireStatementAccepted) {
+    EXPECT_FALSE(checkHasErrors(
+        "def work(n: int) -> int {\n"
+        "    return n\n"
+        "}\n"
+        "fire work(1)\n"));
+}
+
+TEST(TypeCheckerTest, BoundTaskDeclarationAccepted) {
+    EXPECT_FALSE(checkHasErrors(
+        "async def fetch(url: str) -> str {\n"
+        "    return url\n"
+        "}\n"
+        "def go() -> str {\n"
+        "    t: Task[str] = fetch(\"http://x\")\n"
+        "    return await t\n"
+        "}\n"));
+}
+
+TEST(TypeCheckerTest, AsyncAnyReturnRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "async def gives(n: int) -> Any {\n"
+        "    return n\n"
+        "}\n"));
+}
+
+TEST(TypeCheckerTest, FireOnAnyReturningCalleeRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "def gives(n: int) -> Any {\n"
+        "    return n\n"
+        "}\n"
+        "t: Task[Any] = fire gives(1)\n"));
+}
+
+TEST(TypeCheckerTest, DubOfTaskRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "async def fetch(url: str) -> str {\n"
+        "    return url\n"
+        "}\n"
+        "def go() -> str {\n"
+        "    t: Task[str] = fetch(\"http://x\")\n"
+        "    u: Task[str] = dub t\n"
+        "    return await u\n"
+        "}\n"));
+}
+
+TEST(TypeCheckerTest, RaiseFromCauseRejected) {
+    EXPECT_TRUE(checkHasErrors(
+        "class E(Exception) {\n"
+        "    def(m: str) { self.message = m }\n"
+        "}\n"
+        "try {\n"
+        "    raise ValueError(\"low\")\n"
+        "} except ValueError as e {\n"
+        "    raise E(\"high\") from e\n"
+        "}\n"));
 }

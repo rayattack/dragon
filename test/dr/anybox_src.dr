@@ -1,0 +1,7 @@
+def give_bytes() -> Any {
+    return b"abc"
+}
+
+def give_str() -> Any {
+    return "xyz"
+}

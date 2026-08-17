@@ -12,7 +12,7 @@ bolt on top, in a second language.
 
 Dragon ships a reactive desktop UI in its standard library, written in
 Dragon, rendered through the webview the operating system already ships
-(WebKitGTK on Linux, WKWebView on macOS, WebView2 on Windows). You write
+(WebKitGTK on Linux, WKWebView on macOS; Windows is not yet supported). You write
 one language, you get one native binary, and the renderer is the OS's -
 so your app stays small. The state lives in Dragon `Signal`s, the view is
 a Dragon `HTML` [template](/docs/1201-templates), and the compiler wires
@@ -31,7 +31,10 @@ This topic builds a real reactive app end to end, one concept per page:
 - **[Event Handlers](/docs/1805-event-handlers)** - point an HTML event at
   a Dragon function; build the full interactive counter.
 - **[Styling, Assets, and Shipping](/docs/1806-assets-and-shipping)** - a
-  complete app, a stylesheet, and one command to a native binary.
+  complete app, a stylesheet, embedded `app://` assets, and one command to
+  a native binary.
+- **[Page Script and the Bridge](/docs/1807-the-bridge)** - the page runs
+  its own JavaScript and calls Dragon handlers by name.
 
 Everything above the thin platform shell is `.dr` you can read in
 `stdlib/ui/`.

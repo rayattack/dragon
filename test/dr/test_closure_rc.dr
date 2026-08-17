@@ -1,12 +1,5 @@
-# test/dr/test_closure_rc.dr - closure / Callable reference-counting.
-#
-# Regression guard for making VarKind::Closure a fully refcounted kind: a
-# `: Callable` local / param / field / list element / dict value is a heap
-# DragonClosure (or a bare fn ptr) that must be RC'd via the tag-gated
-# dragon_{in,de}cref_callable. These cases were leaking (closure + env) or, in
-# the bare-fn-in-container case, crashing on generic dragon_decref of a
-# headerless fn ptr. The correctness (right values, no crash) is asserted here;
-# the leak/double-free freedom is verified under ASan separately.
+# Callable locals/params/fields/elements must be RC'd via the tag-gated dragon_{in,de}cref_callable:
+# these cases leaked (closure + env) or crashed on generic dragon_decref of a headerless fn ptr.
 
 from unittest import TestCase, main
 
@@ -97,7 +90,6 @@ class ClosureRcTests(TestCase) {
     }
 
     def test_bare_fns_in_list() {
-        # A list[Callable] may hold bare top-level functions (no closure header).
         fs: list[Callable[[int], int]] = [inc, mk(10), dec]
         self.assertEqual(fs[0](5), 6)
         self.assertEqual(fs[1](5), 15)
@@ -115,7 +107,7 @@ class ClosureRcTests(TestCase) {
         d: dict[str, Callable[[int], int]] = {}
         d["a"] = mk(1)
         d["b"] = mk(2)
-        d["a"] = mk(9)   # overwrite - old closure released
+        d["a"] = mk(9)
         f: Callable[[int], int] = d["a"]
         self.assertEqual(f(0), 9)
     }

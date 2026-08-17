@@ -1,23 +1,3 @@
-# odb.vfs - the I/O seam.
-#
-# Every byte ODB reads or writes goes through a VFS. Two implementations sit
-# behind one interface (spec section 21):
-#
-#   FileVFS - a real file on disk (positioned reads/writes, real fsync).
-#   SimVFS  - an in-memory disk that models durability honestly: writes are
-#             NOT durable until sync(), and a simulated crash can lose, tear,
-#             or reorder any write that had not been synced. This is what lets
-#             the crash tests inject a fault at EVERY I/O boundary and prove
-#             the pager always reopens to a consistent snapshot
-#
-# The contract, shared by both:
-#   read_at(off, n)   -> exactly n bytes from offset off (zero past EOF)
-#   write_at(off, d)  -> buffer a write; not durable until sync()
-#   sync()            -> make all prior writes durable (fsync)
-#   truncate(n)       -> set the file length to n
-#   size()            -> current length in bytes
-#   close()           -> release the underlying handle
-
 from odb.rng import Rng
 
 extern "C" def fopen(path: str, mode: str) -> ptr
@@ -40,8 +20,6 @@ const _SEEK_END: intc = 2
 
 class VfsError(Exception) {}
 
-# Abstract base. The methods exist so the pager can hold a `VFS` and dispatch
-# virtually; concrete subclasses override every one.
 class VFS {
     def read_at(off: int, n: int) -> bytes {
         raise VfsError("read_at not implemented")
@@ -63,10 +41,6 @@ class VFS {
     }
 }
 
-#===----------------------------------------------------------------------===#
-# FileVFS - a real file.
-#===----------------------------------------------------------------------===#
-
 class FileVFS(VFS) {
     handle: ptr
     path: str
@@ -75,7 +49,6 @@ class FileVFS(VFS) {
     def(path: str) {
         self.path = path
         self.closed = False
-        # Open read/write preserving contents; create if absent.
         h: ptr = fopen(path, "r+b")
         if not h {
             h = fopen(path, "w+b")
@@ -92,8 +65,6 @@ class FileVFS(VFS) {
         }
         fseek(self.handle, off, _SEEK_SET)
         buf: ptr = malloc(n)
-        # Zero first so a short read past EOF yields deterministic zeros, never
-        # uninitialised heap bytes.
         memset(buf, 0, n)
         fread(buf, 1, n, self.handle)
         out: bytes = dragon_bytes_new(buf, n)
@@ -130,12 +101,6 @@ class FileVFS(VFS) {
     }
 }
 
-#===----------------------------------------------------------------------===#
-# SimVFS - an in-memory disk that models crash durability.
-#===----------------------------------------------------------------------===#
-
-# One buffered, not-yet-synced write. Retained so a crash can decide, per write,
-# whether it fully landed, landed torn (a prefix only), or was lost.
 class SimWrite {
     off: int
     data: bytes
@@ -147,13 +112,10 @@ class SimWrite {
 }
 
 class SimVFS(VFS) {
-    live: list[int]         # what reads see now (durable + pending applied)
-    durable: list[int]      # last synced image; a crash cannot go below this
-    pending: list[SimWrite] # writes issued since the last sync
+    live: list[int]
+    durable: list[int]
+    pending: list[SimWrite]
 
-    # Crash arming: when armed, the (budget)th I/O boundary triggers a crash
-    # that faults the not-yet-synced writes and freezes the disk in place, so a
-    # subsequent open_pager sees exactly what a reopen after kill -9 would.
     armed: bool
     budget: int
     crashed: bool
@@ -169,8 +131,6 @@ class SimVFS(VFS) {
         self.crash_rng = Rng(1)
     }
 
-    # Arm a crash after `budget` I/O boundaries (write_at / sync each count as
-    # one). `rng` drives the per-write lost/torn/full decisions.
     def arm(budget: int, rng: Rng) -> None {
         self.armed = True
         self.budget = budget
@@ -178,9 +138,6 @@ class SimVFS(VFS) {
         self.crashed = False
     }
 
-    # Called at the top of every I/O boundary. Returns True if the boundary
-    # should be skipped because the disk has crashed. When the budget runs out
-    # it faults pending writes into a frozen post-crash image in place.
     def _tick() -> bool {
         if not self.armed {
             return False
@@ -239,7 +196,6 @@ class SimVFS(VFS) {
         if self._tick() {
             return
         }
-        # Everything issued so far is now durable.
         self.durable = self.live[:]
         self.pending = []
     }
@@ -263,11 +219,6 @@ class SimVFS(VFS) {
     }
 }
 
-# The heart of the crash model. Starting from the durable snapshot, replay the
-# not-yet-synced writes, deciding per write whether it fully landed, landed torn
-# (only a prefix reached disk), or was lost - and optionally reordering them,
-# since without an fsync barrier the OS guarantees no ordering. Returns the
-# resulting on-disk byte image. The same rng seed reproduces the same crash.
 def _fault_image(durable: list[int], pending: list[SimWrite], rng: Rng, reorder: bool) -> list[int] {
     image: list[int] = durable[:]
 
@@ -278,7 +229,6 @@ def _fault_image(durable: list[int], pending: list[SimWrite], rng: Rng, reorder:
         i = i + 1
     }
     if reorder {
-        # Fisher-Yates over the pending indices.
         j: int = len(order) - 1
         while j > 0 {
             k: int = rng.below(j + 1)
@@ -293,15 +243,12 @@ def _fault_image(durable: list[int], pending: list[SimWrite], rng: Rng, reorder:
         w: SimWrite = pending[idx]
         roll: int = rng.below(4)
         if roll == 0 {
-            # lost: never reached disk
             continue
         }
         landed: int = len(w.data)
         if roll == 1 {
-            # torn: only a prefix of the bytes reached disk
             landed = rng.below(len(w.data) + 1)
         }
-        # roll 2 or 3: fully landed
         p: int = 0
         need: int = w.off + landed
         while len(image) < need {
@@ -315,8 +262,6 @@ def _fault_image(durable: list[int], pending: list[SimWrite], rng: Rng, reorder:
     return image
 }
 
-# Build a fresh SimVFS positioned exactly as a reopen after `kill -9` would find
-# `vfs`: the durable snapshot plus a fault-injected subset of the pending writes.
 def sim_crash(vfs: SimVFS, rng: Rng, reorder: bool) -> SimVFS {
     image: list[int] = _fault_image(vfs.durable, vfs.pending, rng, reorder)
     out: SimVFS = SimVFS()

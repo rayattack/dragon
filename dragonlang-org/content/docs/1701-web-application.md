@@ -46,14 +46,14 @@ rest of the chapter dissects:
 
 ```dragon
 from http.server import Router, Request, Response, Context
-from html import escape
+from html import escape, HTML
 import database
 from database import SQL
 
 db: database.Connection = database.open("sqlite:///tmp/players.db")
 db.raw("create table if not exists players (id integer primary key, name text, score integer)")
 
-def render_page() -> str {
+def render_page() -> HTML {
     rows: list[dict[str, Any]] = db.all(template[SQL] { select name, score from players order by score desc })
     items: str = ""
     for row in rows {
@@ -61,7 +61,7 @@ def render_page() -> str {
         sc: Any = row["score"]
         items = items + "<li>" + escape(nm) + ": " + str(sc) + "</li>"
     }
-    return template {
+    page: str = template {
         <!doctype html>
         <title>Players</title>
         <h1>Leaderboard</h1>
@@ -70,6 +70,7 @@ def render_page() -> str {
           <input name="name"><input name="score"><button>Add</button>
         </form>
     }
+    return HTML(page)
 }
 
 app: Router = Router(8731, "127.0.0.1")
@@ -125,6 +126,8 @@ we will come back to why it matters.
 A `Router` is constructed with a port and a host:
 
 ```dragon
+from http.server import Router
+
 app: Router = Router(8731, "127.0.0.1")
 ```
 
@@ -138,6 +141,14 @@ You attach handlers with one method per HTTP verb. The full set is
 every verb at once. Each takes a path pattern and a handler:
 
 ```dragon
+from http.server import Router, Request, Response, Context
+
+def home(req: Request, res: Response, ctx: Context) -> None { res.text("home") }
+def add_player(req: Request, res: Response, ctx: Context) -> None { res.text("added") }
+def remove_player(req: Request, res: Response, ctx: Context) -> None { res.text("removed") }
+
+app: Router = Router(8731, "127.0.0.1")
+
 app.GET("/", home)
 app.POST("/add", add_player)
 app.DELETE("/players/:id:int", remove_player)
@@ -182,6 +193,10 @@ path. The string accessor takes a default for the missing case, so you
 never branch on presence:
 
 ```dragon
+from http.server import Router, Request, Response, Context
+
+app: Router = Router(8735, "127.0.0.1")
+
 app.GET("/search", lambda (req: Request, res: Response, ctx: Context) -> None {
     term: str = req.query_str("q", "none")
     res.text("searching for: " + term)
@@ -262,6 +277,7 @@ or `multipart/form-data`) into a `dict[str, str]`. It is what the
 leaderboard's `/add` handler uses:
 
 ```dragon
+# doc: no-check
 form: dict[str, str] = req.form()
 nm: str = form["name"]
 sc: int = int(form["score"])
@@ -288,13 +304,16 @@ mismatched fields raising `ValueError` - see the schema-directed decoders
 in [Data Formats](/docs/1404-stdlib-data):
 
 ```dragon
+# doc: no-check
 from json import decode
 
 api.POST("/users", lambda (req: Request, res: Response, ctx: Context) -> None {
     const u: User = decode[User](req.body_bytes)
     res.json(json.dumps({"ok": true, "id": u.id}))
 })
-``` `req.query_str(name, default)` and its typed
+```
+
+`req.query_str(name, default)` and its typed
 siblings, covered above, read the query string. Between these you can
 read any request a browser or API client will send.
 
@@ -323,6 +342,7 @@ when it reads better.
 `res.out(status, body)` is the workhorse for non-200 replies:
 
 ```dragon
+# doc: no-check
 app.GET("/teapot", lambda (req: Request, res: Response, ctx: Context) -> None {
     res.out(418, "I'm a teapot")
 })
@@ -342,6 +362,7 @@ visitor's browser. The leaderboard built each row by hand, so it escaped
 by hand:
 
 ```dragon
+# doc: no-check
 items = items + "<li>" + escape(nm) + ": " + str(sc) + "</li>"
 ```
 
@@ -404,6 +425,14 @@ system *rejects* a bare `str` at `all`/`run`, so there is no call site
 where an attacker-controlled value can be spliced into SQL text:
 
 ```dragon
+import database
+from database import SQL
+
+db: database.Connection = database.open("sqlite::memory:")
+db.raw("create table players (id integer primary key, name text, score integer)")
+nm: str = "Ada"
+sc: int = 10
+
 db.run(template[SQL] { insert into players (name, score) values (!{nm}, !{sc}) })
 ```
 
@@ -442,6 +471,13 @@ known-string column straight into a `str` and a numeric column into an
 `Any` you can `str(...)` for display - exactly what `render_page` does:
 
 ```dragon
+import database
+from database import SQL
+from html import escape
+
+db: database.Connection = database.open("sqlite:///tmp/players.db")
+items: str = ""
+
 rows: list[dict[str, Any]] = db.all(template[SQL] { select name, score from players order by score desc })
 for row in rows {
     nm: str = row["name"]
@@ -463,12 +499,13 @@ path as the filename:
 
 ```dragon
 from http.server import Router, Request, Response, Context
+from html import HTML
 
 app: Router = Router(8734, "127.0.0.1")
 app.ASSETS("public", "/assets/*")        # GET /assets/style.css -> public/style.css
 
 app.GET("/", lambda (req: Request, res: Response, ctx: Context) -> None {
-    res.html('<link rel="stylesheet" href="/assets/style.css"><h1>home</h1>')
+    res.html(template[HTML] { <link rel="stylesheet" href="/assets/style.css"><h1>home</h1> })
 })
 
 app.listen()
@@ -488,6 +525,10 @@ the same `Callable[[Request, Response, Context], None]` signature as a
 route handler - it reads and writes the same `req`/`res`/`ctx`:
 
 ```dragon
+from http.server import Router, Request, Response, Context
+
+app: Router = Router(8738, "127.0.0.1")
+
 app.BEFORE("/*", lambda (req: Request, res: Response, ctx: Context) -> None {
     res.set_header("x-app", "leaderboard")
 })

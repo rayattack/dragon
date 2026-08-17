@@ -18,6 +18,10 @@ Schemas compile to a flat validation program and a layout; nothing walks a
 schema tree at runtime.
 
 ```dragon
+from odb import connect, ODB, Documents
+
+db: ODB = connect("shop.odb")
+
 orders: Documents = db.schema("orders", {
     "type": "object",
     "properties": {
@@ -50,6 +54,7 @@ Each schema name is defined once; redefining it is refused.
 Metadata is a plain document attached with `.meta()`:
 
 ```dragon
+# doc: no-check
 orders.meta({
     "primary": ["id"],
     "index":   ["status"],
@@ -89,6 +94,7 @@ You did nothing wrong if you hit one of these - they are the constraints
 doing their job:
 
 ```dragon
+# doc: no-check
 from odb.errors import IntegrityError
 
 try {

@@ -1,0 +1,17 @@
+from unittest import TestCase, main
+from fwdsig_mod import build_bundle
+
+
+class FwdImportSigTest(TestCase) {
+    def test_forward_call_result_keeps_list_tag() {
+        const b: dict[str, Any] = build_bundle("p")
+        const rows: list[dict[str, Any]] = b["rows"]
+        self.assertEqual(len(rows), 1)
+        const row: dict[str, Any] = rows[0]
+        const a: int = row["a"]
+        self.assertEqual(a, 9)
+    }
+}
+
+main([FwdImportSigTest()])
+

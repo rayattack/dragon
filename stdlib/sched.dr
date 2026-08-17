@@ -54,7 +54,6 @@ class scheduler {
     }
 
     def _insert(ev: _SchedEvent) -> None {
-        # Linear-insert keeping list ordered by (when, priority).
         i: int = 0
         n: int = len(self._events)
         while i < n {

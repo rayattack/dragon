@@ -1,11 +1,3 @@
-# deps.dr - composition root.
-#
-# Creates the single Db connection, the auth + registry services, and the
-# session secret, as module-level singletons. Controllers import these. Module
-# top-level code runs once on import, so the schema is created exactly once.
-#
-# Run the server with cwd = dragonlang-org/ so `data/` lands beside the site.
-
 from os import makedirs, getenv
 from os.path import exists, join
 from binascii import unhexlify
@@ -94,7 +86,6 @@ def _env_default(name: str, fallback: str) -> str {
 
 const MAILER: Mailer = _load_mailer()
 
-# Absolute base for links that leave the site (the confirmation email).
 const BASE_URL: str = _env_default("DRAGON_SITE_BASE_URL", "https://dragonlang.org")
 
 const _READY: str = _ensure_data()

@@ -17,20 +17,13 @@ The default cost parameters (t=3, m=64 MiB, p=1) follow the argon2-cffi
 """
 
 import base64
-# Constant-time byte comparison lives in hmac (one shared impl, no timing leak).
 from hmac import compare_digest as _ct_equal
 
-# Memory-hard core (runtime). Validates params and raises ValueError on bad
-# input; wipes all intermediate memory before returning the raw tag.
 extern "C" def dragon_argon2id_raw(password: bytes, salt: bytes, secret: bytes,
                                    ad: bytes, t_cost: int, m_cost_kib: int,
                                    parallelism: int, tag_len: int) -> bytes
 
-const ARGON2_VERSION: int = 0x13     # 19, the current RFC 9106 version
-
-#===----------------------------------------------------------------------===#
-# Raw API (bytes in, bytes out) - argon2-cffi low_level.hash_secret_raw shape
-#===----------------------------------------------------------------------===#
+const ARGON2_VERSION: int = 0x13
 
 def hash_raw(password: bytes, salt: bytes, time_cost: int = 3,
              memory_cost: int = 65536, parallelism: int = 1,
@@ -56,16 +49,8 @@ def verify_raw(expected: bytes, password: bytes, salt: bytes,
     return _ct_equal(computed, expected)
 }
 
-#===----------------------------------------------------------------------===#
-# PHC encoded-string API - $argon2id$v=19$m=..,t=..,p=..$<b64salt>$<b64tag>
-#===----------------------------------------------------------------------===#
-#
-# The PHC string format uses standard base64 with the trailing '=' padding
-# stripped (B64 in the PHC spec). We strip on encode and re-pad on decode.
-
 def _b64_nopad(data: bytes) -> str {
     s: str = base64.b64encode(data).decode("utf-8")
-    # drop PHC's omitted '=' padding
     while len(s) > 0 and s[len(s) - 1] == "=" {
         s = s[0:len(s) - 1]
     }
@@ -73,7 +58,6 @@ def _b64_nopad(data: bytes) -> str {
 }
 
 def _b64_decode_nopad(s: str) -> bytes {
-    # restore the padding base64 needs (length must be a multiple of 4)
     padded: str = s
     while len(padded) % 4 != 0 {
         padded = padded + "="
@@ -102,7 +86,6 @@ def verify(encoded: str, password: bytes, secret: bytes = b"",
     using its embedded parameters/salt, and constant-time compare. Returns
     False (never raises) when the string is malformed or not argon2id."""
     parts: list[str] = encoded.split("$")
-    # parts == ["", "argon2id", "v=19", "m=..,t=..,p=..", "<salt>", "<tag>"]
     if len(parts) != 6 {
         return false
     }
@@ -117,9 +100,9 @@ def verify(encoded: str, password: bytes, secret: bytes = b"",
     if len(cost_fields) != 3 {
         return false
     }
-    memory_cost: int = int(cost_fields[0][2:])    # strip "m="
-    time_cost: int = int(cost_fields[1][2:])      # strip "t="
-    parallelism: int = int(cost_fields[2][2:])    # strip "p="
+    memory_cost: int = int(cost_fields[0][2:])
+    time_cost: int = int(cost_fields[1][2:])
+    parallelism: int = int(cost_fields[2][2:])
 
     salt: bytes = _b64_decode_nopad(parts[4])
     expected: bytes = _b64_decode_nopad(parts[5])

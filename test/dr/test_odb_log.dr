@@ -1,8 +1,3 @@
-# ODB M8 regression suite: the commit log (spec section 17). Every commit
-# appends one logical entry; entries survive reopen; retention trims and the
-# trimmed pages cycle back through the free list; a crash mid-commit never
-# tears the log (the entry becomes visible exactly when the meta flips).
-
 from unittest import TestCase, main
 from odb import ODB, Documents, Document, Change
 from odb.vfs import SimVFS, sim_crash
@@ -27,8 +22,6 @@ def _mem() -> ODB {
 
 
 class LogFeedTest(TestCase) {
-    # Every write kind lands in the feed with the right kind, docid, pk, and
-    # post-image; the define op records the DDL too.
     def test_ops_recorded() -> None {
         db: ODB = _mem()
         items: Documents = db.schema("items", _schema()).meta({primary: ["id"]})
@@ -37,7 +30,6 @@ class LogFeedTest(TestCase) {
         items.wipe(r.id)
 
         chs: list[Change] = db.changes(0)
-        # define (schema), define (meta), add, set, del
         self.assertEqual(len(chs), 5)
         self.assertEqual(chs[0].kind, "define")
         self.assertEqual(chs[1].kind, "define")
@@ -61,7 +53,6 @@ class LogFeedTest(TestCase) {
         self.assertEqual(dl.docid, r.id)
         self.assertEqual(len(dl.doc), 0)
 
-        # CSNs are strictly increasing along the feed.
         i: int = 1
         while i < len(chs) {
             self.assertTrue(chs[i].csn >= chs[i - 1].csn)
@@ -69,7 +60,6 @@ class LogFeedTest(TestCase) {
         }
     }
 
-    # changes(since) resumes exactly after a CSN.
     def test_since_resumes() -> None {
         db: ODB = _mem()
         items: Documents = db.schema("items", _schema())
@@ -84,7 +74,6 @@ class LogFeedTest(TestCase) {
         self.assertEqual(nm, "b")
     }
 
-    # The log survives reopen: same feed from the reopened file.
     def test_reopen_keeps_log() -> None {
         sim: SimVFS = SimVFS()
         p: Pager = create(sim, 4096)
@@ -103,8 +92,6 @@ class LogFeedTest(TestCase) {
         self.assertEqual(nm, "b")
     }
 
-    # An entry larger than one page (an atomic batch of documents) round-trips
-    # intact through the intra-entry page chain.
     def test_multipage_entry() -> None {
         db: ODB = _mem()
         items: Documents = db.schema("items", _schema())
@@ -114,7 +101,7 @@ class LogFeedTest(TestCase) {
             pieces.append("abcdefgh")
             i = i + 1
         }
-        note: str = "".join(pieces)    # ~640 bytes per doc, inline-friendly
+        note: str = "".join(pieces)
         stmts: list[str] = []
         stmts.append("atomic {")
         i = 0
@@ -123,7 +110,7 @@ class LogFeedTest(TestCase) {
             i = i + 1
         }
         stmts.append("}")
-        db.run("\n".join(stmts))       # ONE txn: ~6.4 KiB entry > one 4 KiB page
+        db.run("\n".join(stmts))
 
         chs: list[Change] = db.changes(0)
         adds: int = 0
@@ -135,14 +122,12 @@ class LogFeedTest(TestCase) {
             }
         }
         self.assertEqual(adds, 10)
-        # all ten adds share one entry, so one CSN
         self.assertEqual(chs[len(chs) - 1].csn, chs[len(chs) - 2].csn)
     }
 }
 
 
 class RetentionTest(TestCase) {
-    # `retain <n> txns` keeps exactly the newest n entries; older ones trim.
     def test_txn_window_trims() -> None {
         db: ODB = _mem()
         db.retain("3 txns")
@@ -154,12 +139,10 @@ class RetentionTest(TestCase) {
         }
         chs: list[Change] = db.changes(0)
         self.assertEqual(len(chs), 3)
-        # the retained tail is the newest three adds
         nm: str = chs[2].doc["name"]
         self.assertEqual(nm, "n7")
     }
 
-    # The retention policy persists in the meta page across reopen.
     def test_policy_survives_reopen() -> None {
         sim: SimVFS = SimVFS()
         p: Pager = create(sim, 4096)
@@ -175,13 +158,11 @@ class RetentionTest(TestCase) {
         p2: Pager = open_pager(sim)
         db2: ODB = ODB(sim, p2)
         self.assertEqual(len(db2.changes(0)), 2)
-        # and the reopened writer keeps trimming at 2
         it2: Documents = db2.schema("items")
         it2.save({id: 100, name: "y"})
         self.assertEqual(len(db2.changes(0)), 2)
     }
 
-    # retain none writes no history at all.
     def test_retain_none() -> None {
         db: ODB = _mem()
         db.retain("none")
@@ -191,7 +172,6 @@ class RetentionTest(TestCase) {
         self.assertEqual(db.pager.log_tail, 0)
     }
 
-    # Switching to a smaller window trims immediately.
     def test_shrink_trims_now() -> None {
         db: ODB = _mem()
         items: Documents = db.schema("items", _schema())
@@ -206,7 +186,6 @@ class RetentionTest(TestCase) {
         self.assertEqual(len(db.changes(0)), 1)
     }
 
-    # A bad retain spec is rejected loudly.
     def test_bad_spec_raises() -> None {
         db: ODB = _mem()
         raised: bool = False
@@ -218,8 +197,6 @@ class RetentionTest(TestCase) {
         self.assertTrue(raised)
     }
 
-    # Trimmed log pages cycle back through the free list: heavy churn under a
-    # small window must not grow the file without bound.
     def test_trimmed_pages_recycle() -> None {
         sim: SimVFS = SimVFS()
         p: Pager = create(sim, 4096)
@@ -239,17 +216,12 @@ class RetentionTest(TestCase) {
             i = i + 1
         }
         hw2: int = db.pager.high_water
-        # 200 further edits reuse freed pages; the file grows marginally if at
-        # all once the steady state is reached.
         self.assertTrue(hw2 - hw1 < 40)
     }
 }
 
 
 class LogCrashTest(TestCase) {
-    # Crash at a random I/O boundary mid-commit, reopen, and require: the doc
-    # state and the log tail agree (both old or both new), and the retained
-    # chain reads back cleanly. The log must never tear.
     def _trial(seed: int) -> bool {
         sim: SimVFS = SimVFS()
         p: Pager = create(sim, 4096)
@@ -280,7 +252,6 @@ class LogCrashTest(TestCase) {
             return False
         }
 
-        # the feed decodes cleanly and its adds equal the visible docs
         adds: int = 0
         for ch in db2.changes(0) {
             if ch.kind == "add" {

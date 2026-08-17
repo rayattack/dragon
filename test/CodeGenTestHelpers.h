@@ -24,8 +24,6 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
 
-// Platform-specific link flags for the test linker invocation. Mirrors the
-// logic in src/CodeGen.cpp's linkExecutable().
 #if defined(_WIN32)
   #define DRAGON_TEST_CC          "gcc"
   #define DRAGON_TEST_LINK_FLAGS  " -lpthread -lws2_32 -liphlpapi -lpsapi -luserenv 2>nul"
@@ -46,7 +44,6 @@
 using namespace dragon;
 using namespace dragon::test;
 
-// One-time LLVM initialization
 struct LLVMInit {
     LLVMInit() {
         llvm::InitializeNativeTarget();
@@ -60,17 +57,6 @@ inline LLVMInit& getLLVMInit() {
 }
 static auto& llvmInit_ = getLLVMInit();
 
-// Resolve imports and run the full front end exactly as the real Driver does:
-// every module's Sema + TypeChecker (with cross-module exports registered),
-// gating on ANY error. The harness must NOT proceed to codegen on a rejected
-// module, or it tests programs the real `dragon run`/`dragon build` refuses
-// (e.g. top-level bare `=`, or a `from threading import Lock` whose type the
-// resolver-less harness couldn't see).
-//
-// On success returns "" and fills `graph` (which OWNS the resolved dependency
-// ASTs - it MUST outlive the CodeGen call) and `depModules` (raw pointers into
-// graph, to hand to CodeGen::generate). On failure returns a "<... failed>"
-// string. Mirrors src/Driver.cpp and test/InteropTest.cpp's resolution.
 static std::string frontendResolve(Module& module, bool isDragon,
                                    ImportGraph& graph,
                                    std::vector<Module*>& depModules) {
@@ -79,14 +65,11 @@ static std::string frontendResolve(Module& module, bool isDragon,
         for (auto& d : stage.diagnostics()) e += d.message + "\n";
         return e;
     };
-    // 1. Entry Sema (catches declaration-rule errors independent of imports).
     {
         Sema sema;
         if (!sema.analyze(module))
             return "<sema failed: " + collect(sema) + ">";
     }
-    // 2. Resolve imports against the stdlib search path (snippets have no local
-    //  imports, so sourceDir is just a valid scratch dir).
     ModuleResolverOptions ropts;
     ropts.sourceDir = dragon::platform::getTempDir() +
                       std::string(1, dragon::platform::pathSeparator());
@@ -97,7 +80,6 @@ static std::string frontendResolve(Module& module, bool isDragon,
     graph = resolver.buildGraph(module, isDragon ? "test.dr" : "test.py");
     if (graph.hasCycle) return "<resolve failed: import cycle>";
 
-    // 3. Sema + TypeCheck every dependency, threading cross-module exports.
     std::unordered_map<std::string,
         std::unordered_map<std::string, std::shared_ptr<Type>>> allExports;
     std::unordered_map<std::string, std::string> filepaths;
@@ -115,7 +97,6 @@ static std::string frontendResolve(Module& module, bool isDragon,
         allExports[mod.name] = modTc.getExports();
         depModules.push_back(mod.ast.get());
     }
-    // 4. Re-check the entry module with cross-file type info.
     TypeChecker entryTc;
     for (auto& [mn, ex] : allExports)
         entryTc.registerExternalModule(mn, ex, filepaths[mn]);
@@ -125,13 +106,12 @@ static std::string frontendResolve(Module& module, bool isDragon,
     return "";
 }
 
-// Helper: parse + sema + typecheck + codegen, return IR string
 static std::string generateIR(const std::string& source) {
     auto module = parse(source);
     if (!module) return "<parse failed>";
     ImportGraph graph;
     std::vector<Module*> depModules;
-    if (auto fe = frontendResolve(*module, /*isDragon=*/true, graph, depModules);
+    if (auto fe = frontendResolve(*module, true, graph, depModules);
         !fe.empty()) return fe;
     CodeGen codegen;
     if (!codegen.generate(*module, depModules)) {
@@ -145,13 +125,12 @@ static std::string generateIR(const std::string& source) {
     return ir;
 }
 
-// Helper: parse + sema + typecheck + codegen for .py mode, return IR string
 static std::string generateIRPy(const std::string& source) {
     auto module = parse(source, false);
     if (!module) return "<parse failed>";
     ImportGraph graph;
     std::vector<Module*> depModules;
-    if (auto fe = frontendResolve(*module, /*isDragon=*/false, graph, depModules);
+    if (auto fe = frontendResolve(*module, false, graph, depModules);
         !fe.empty()) return fe;
     CodeGen codegen;
     if (!codegen.generate(*module, depModules)) {
@@ -176,13 +155,12 @@ static size_t countSubstring(const std::string& haystack, const std::string& nee
     return count;
 }
 
-// Helper: compile and run .py mode source via LLVM backend, return stdout
 static std::string compileAndRunPy(const std::string& source) {
     auto module = parse(source, false);
     if (!module) return "<parse failed>";
     ImportGraph graph;
     std::vector<Module*> depModules;
-    if (auto fe = frontendResolve(*module, /*isDragon=*/false, graph, depModules);
+    if (auto fe = frontendResolve(*module, false, graph, depModules);
         !fe.empty()) return fe;
 
     CodeGen codegen;
@@ -219,14 +197,13 @@ static std::string compileAndRunPy(const std::string& source) {
     return ss.str();
 }
 
-// Helper: compile and run via LLVM backend, return stdout
 static std::string compileAndRun(const std::string& source,
                                   const CodeGenOptions& opts = {}) {
     auto module = parse(source);
     if (!module) return "<parse failed>";
     ImportGraph graph;
     std::vector<Module*> depModules;
-    if (auto fe = frontendResolve(*module, /*isDragon=*/true, graph, depModules);
+    if (auto fe = frontendResolve(*module, true, graph, depModules);
         !fe.empty()) return fe;
 
     CodeGen codegen(opts);
@@ -244,7 +221,6 @@ static std::string compileAndRun(const std::string& source,
 
     if (!codegen.compileToObject(objFile)) return "<compile failed>";
 
-    // Link with runtime + pthread
     std::string runtimeLib = std::string(CMAKE_BINARY_DIR) + "/libdragon_runtime.a";
     std::string llhttpLib = std::string(DRAGON_LLHTTP_LIB);
     std::string cmd = std::string(DRAGON_TEST_CC) + " -o " + exe + " " + objFile + " " + runtimeLib + " " + llhttpLib;

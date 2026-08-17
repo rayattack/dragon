@@ -69,9 +69,6 @@ class OqlTemplateTest(TestCase) {
     }
 
     def test_injection_is_data_not_syntax() -> None {
-        # If this string were spliced into the query text it would widen the
-        # filter to every row (or fail to parse). Parameterized, it is just a
-        # name nobody has: zero rows, no error.
         c: Documents = _db()
         evil: str = "Ada\" | id > 0"
         rows: list[Document] = c.db.find(template[OQL] { customers ? name == !{evil} })
@@ -102,17 +99,11 @@ class OqlTemplateTest(TestCase) {
     }
 
     def test_double_bang_is_literal_query_text() -> None {
-        # `!!` with no brace after it is literal query text (Postgres has a
-        # prefix `!!` operator), not an escape. The SQL parameter-extraction
-        # scanner used to spin forever on it, exactly like the str template
-        # scanner. No db needed: the canonical text is built at compile time.
         q: OQL = template[OQL] { customers ? flag == !!x }
         self.assertTrue("!!x" in q.canonical)
     }
 
     def test_query_is_a_value() -> None {
-        # The whole point of the content type: a query travels as a typed
-        # value, parameters already bound to it.
         c: Documents = _db()
         target: int = 3
         q: OQL = template[OQL] { customers ? id == !{target} }

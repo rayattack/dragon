@@ -1,0 +1,18 @@
+from fwdsig_store import fwd_connect, FwdStore
+
+
+def build_bundle(path: str) -> dict[str, Any] {
+    src: FwdStore = fwd_connect(path)
+    const bundle: dict[str, Any] = {
+        rows: collect(src, "x")
+    }
+    src.close()
+    return bundle
+}
+
+
+def collect(src: FwdStore, name: str) -> list[dict[str, Any]] {
+    out: list[dict[str, Any]] = []
+    out.append({a: src.n})
+    return out
+}

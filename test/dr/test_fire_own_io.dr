@@ -1,20 +1,3 @@
-# test/dr/test_fire_own_io.dr - own field + fire share + fd-I/O reactor parking.
-#
-# Regression lock (a documented wall). A class
-# holding `own _s: SocketHandle`, shared read-only into a `fire` green thread
-# that parks on fd I/O (accept/recv) while the parent thread also does fd I/O,
-# was believed to deadlock the parent. Runtime debugging (strace) showed the
-# runtime was innocent: the probe ignored bind()'s EADDRINUSE (the port sat in
-# TIME_WAIT for 60s after any successful run), listen() then listened on a
-# kernel-assigned ephemeral port, the client's connect to the hardcoded port
-# was refused, and `await` parked forever on an accept no one could reach. A
-# plain (non-own) field hung identically under the same port state, so the
-# "own-specific" discriminator was an artifact of when each probe ran.
-#
-# This test keeps the exact own+fire+fd shape from the bug doc, with correct
-# port hygiene (SO_REUSEADDR + checked bind), plus the two controls from the
-# doc's matrix: a plain-field fd echo and an own-field timer-parking worker.
-
 from unittest import TestCase, main
 from socket import SocketHandle
 from time import sleep_ms
@@ -34,8 +17,6 @@ extern "C" def dragon_sockaddr_in_new(port: intc, addr: str) -> ptr
 extern "C" def dragon_sockaddr_in_size() -> intc
 extern "C" def free(p: ptr)
 
-# A stream wrapper whose one claim on the kernel socket is an `own` field -
-# the exact shape the TcpStream/TcpListener duality removal migrates to.
 class OwnStream {
     own _s: SocketHandle
     def(own s: SocketHandle) { self._s = s }
@@ -51,7 +32,6 @@ class OwnListener {
     def close() -> None { self._s.close() }
 }
 
-# Plain-field control: same wiring, no `own` on the listener's field.
 class PlainListener {
     _s: SocketHandle
     def(s: SocketHandle) { self._s = s }
@@ -59,18 +39,13 @@ class PlainListener {
     def close() -> None { self._s.close() }
 }
 
-# Timer control: an own-field holder crossing fire with sleep parking only.
 class OwnBox {
-    own _v: SocketHandle          # any heap object behind `own`; never used as an fd
+    own _v: SocketHandle
     _n: int
     def(own v: SocketHandle, n: int) { self._v = v; self._n = n }
     def n() -> int { return self._n }
 }
 
-# Bind a fresh listening socket on 127.0.0.1:port with SO_REUSEADDR set (a
-# prior run's server-side close parks the port in TIME_WAIT for 60s; without
-# the option, bind fails and listen() silently uses an ephemeral port).
-# Returns the listener fd, or -1 if bind failed.
 def _listen_on(port: int) -> int {
     lfd: int = socket(2, 1, 0)
     optval: ptr = malloc(4)

@@ -1,8 +1,3 @@
-# ODB M4(a) regression suite: the bytes-keyed copy-on-write B+tree (odb.index)
-# built on the memcomparable encoder (odb.keyenc). Basics, split + reopen +
-# `odb check`, prefix scan (reverse-index traversal shape), and the end-to-end
-# crash-recovery proof over memcomparable keys. Dogfooded through ctest.
-
 from unittest import TestCase, main
 from odb.vfs import SimVFS
 from odb.pager import create, open_pager, Pager
@@ -60,7 +55,6 @@ class IndexBasicsTest(TestCase) {
         v: SimVFS = SimVFS()
         p: Pager = create(v, 4096)
         t: IndexTree = IndexTree(p, 0)
-        # Insert in scrambled order; items() must come back memcmp-ascending.
         words: list[str] = ["pear", "apple", "fig", "banana", "cherry", "date"]
         for w in words {
             t.insert(enc_str(w), _val(len(w)))
@@ -81,8 +75,6 @@ class IndexBasicsTest(TestCase) {
 
 
 class IndexSplitPersistTest(TestCase) {
-    # A tree large enough to split into multiple levels round-trips every key
-    # through a reopen, stays memcmp-ordered, and passes the index check.
     def test_many_keys_persist_and_check() -> None {
         v: SimVFS = SimVFS()
         p: Pager = create(v, 4096)
@@ -121,7 +113,6 @@ class IndexSplitPersistTest(TestCase) {
             t.insert(enc_int(_key(i)), _val(i))
             i = i + 1
         }
-        # Delete every other key; the rest must remain findable and ordered.
         i = 0
         while i < n {
             t.delete(enc_int(_key(i)))
@@ -141,13 +132,10 @@ class IndexSplitPersistTest(TestCase) {
 
 
 class IndexPrefixScanTest(TestCase) {
-    # The shape a reverse index uses: composite keys (target_docid, referrer)
-    # and a prefix scan that pulls every edge from one target.
     def test_scan_prefix() -> None {
         v: SimVFS = SimVFS()
         p: Pager = create(v, 4096)
         t: IndexTree = IndexTree(p, 0)
-        # target 1 has referrers {10, 11, 12}; target 2 has {20, 21}.
         refs1: list[int] = [10, 11, 12]
         for r in refs1 {
             t.insert(enc_composite([enc_int(1), enc_int(r)]), bytes([]))
@@ -165,10 +153,6 @@ class IndexPrefixScanTest(TestCase) {
 
 
 class IndexCrashRecoveryTest(TestCase) {
-    # The M4(a) headline proof, identical in spirit to the u64 tree's: crash an
-    # in-flight COW insert into a committed multi-level bytes-keyed tree; the
-    # reopened tree always passes the index check and holds exactly the pre-crash
-    # key set or that set plus the one in-flight key.
     def test_crash_during_index_commit() -> None {
         res: SimResult = run_index_crash_trials(150)
         self.assertEqual(res.trials, 150)

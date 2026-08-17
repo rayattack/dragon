@@ -73,9 +73,9 @@ class FramesCoreTests(TestCase) {
         const df: DataFrame = read_csv(text, true)
         self.assertEqual(df.ncols(), 3)
         self.assertEqual(df.nrows(), 2)
-        self.assertEqual(df.col("name").dtype, 2)   # DT_STR
-        self.assertEqual(df.col("age").dtype, 0)    # DT_INT
-        self.assertEqual(df.col("score").dtype, 1)  # DT_FLOAT
+        self.assertEqual(df.col("name").dtype, 2)
+        self.assertEqual(df.col("age").dtype, 0)
+        self.assertEqual(df.col("score").dtype, 1)
         self.assertEqual(df.col("age").get_int(1), 25)
         self.assertEqual(df.col("score").get_float(0), 9.5)
         self.assertEqual(df.col("name").get_str(0), "alice")
@@ -93,7 +93,6 @@ class FramesCoreTests(TestCase) {
         b: Series = str_series("b", ["p", "q", "r", "s"])
         df: DataFrame = DataFrame([a, b])
         const s: DataFrame = df.sort_values("a", true)
-        # values sorted; ties (the two 1s) keep original order q before s
         self.assertEqual(s.col("a").get_int(0), 1)
         self.assertEqual(s.col("b").get_str(0), "q")
         self.assertEqual(s.col("b").get_str(1), "s")
@@ -144,7 +143,7 @@ class FramesCoreTests(TestCase) {
         right: DataFrame = DataFrame([rid, rval])
 
         const j: DataFrame = left.join(right, "id")
-        self.assertEqual(j.nrows(), 2)               # ids 2 and 3 match
+        self.assertEqual(j.nrows(), 2)
         self.assertEqual("|".join(j.colnames()), "id|name|val")
         self.assertEqual(j.col("id").get_int(0), 2)
         self.assertEqual(j.col("name").get_str(0), "b")

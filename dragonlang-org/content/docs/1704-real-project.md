@@ -58,6 +58,7 @@ registered with HTTP-verb methods. A route handler takes a `Request`, a
 function works identically:
 
 ```dragon
+# doc: no-check
 app.GET('/', lambda (req: Request, res: Response, ctx: Context) -> None {
     res.redirect("/docs/0001-foreword")
 })
@@ -80,6 +81,7 @@ calling `listen()` at module level is the whole entry point.
 Static assets get a wildcard route:
 
 ```dragon
+# doc: no-check
 app.ASSETS(STATIC_DIR, "/assets/*")
 ```
 
@@ -91,6 +93,7 @@ is how `app.css` and `app.js` reach the browser.
 Serving a chapter is: find the file, render it, wrap it in the layout, send it.
 
 ```dragon
+# doc: no-check
 def _serve_chapter(kind: str, dir: str, slug: str, res: Response) -> None {
     const path: str = path_join(dir, slug + ".md")
     if not isfile(path) {
@@ -136,6 +139,7 @@ assigning chapter numbers (`1.`, `1.1.`) and detecting the appendix block. It
 runs at module load, bound to a `const`:
 
 ```dragon
+# doc: no-check
 const DOCS_CHAPTERS: list[Chapter] = _load_summary(DOCS_DIR)
 ```
 
@@ -174,6 +178,7 @@ When the loop hits a fenced block it buffers the body and, at the closing
 fence, hands the whole block to the highlighter:
 
 ```dragon
+# doc: no-check
 def _render_code_block(lang: str, lines: list[str]) -> str {
     body: str = ""
     i: int = 0
@@ -209,6 +214,7 @@ The classifier checks a word against the tables in order - keyword, constant,
 character is `(` to decide if it's a function call:
 
 ```dragon
+# doc: no-check
 def _classify_dragon(word: str, code: str, j: int, n: int) -> str {
     if word in _KW {
         return "tok-kw"
@@ -249,6 +255,7 @@ the `!{}` slots interpolate the rendered pieces, escaping any plain `str`
 automatically and composing `HTML` values without re-escaping:
 
 ```dragon
+# doc: no-check
 def _render_page(kind: str, slug: str, title: str, content_html: str) -> HTML {
     const sidebar_html: HTML = _render_sidebar(kind, slug)
     const prevnext_html: HTML = _render_prev_next(kind, slug)
@@ -300,6 +307,7 @@ is built with `template[HTML]`, not string concatenation - each piece returns
 an `HTML` value and composes into the next without manual escaping:
 
 ```dragon
+# doc: no-check
 return template[HTML] {
   <details class="sb-chapter" open data-ch="!{idx}"!{active_attr | raw}>
     <summary class="sb-chapter-head"><span class="sb-caret" aria-hidden="true"></span>!{num}<span class="sb-title">!{c.title}</span></summary>

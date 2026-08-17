@@ -21,7 +21,6 @@ def parse(header: str) -> dict[str, str] {
         }
         key: str = piece[0:eq].strip()
         val: str = piece[eq + 1:len(piece)].strip()
-        # Strip surrounding double quotes if present.
         if len(val) >= 2 and val[0] == "\"" and val[len(val) - 1] == "\"" {
             val = val[1:len(val) - 1]
         }

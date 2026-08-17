@@ -1,16 +1,8 @@
-# Bytes-path sibling of oom_sustained: the concat data malloc must raise a
-# catchable MemoryError when the allocator fails, not write through the NULL
-# it used to ignore (pre-fix SIGSEGV under RLIMIT_AS). Not named test_*.dr
-# on purpose: only meaningful capped, so it is registered with ulimit -v in
-# test/CMakeLists.txt instead of via the glob.
-
 from unittest import TestCase, main
 from crypto import ed25519_keypair, ed25519_sign
 
 class BytesOomTests(TestCase) {
     def test_slice_oom_is_catchable() {
-        # The 160MB operand fits under the 256MB cap; its copy does not.
-        # Pre-fix the slice wrote through an unchecked malloc (SIGSEGV).
         big: bytes = b"x" * 167772160
         caught: bool = False
         try {
@@ -22,8 +14,6 @@ class BytesOomTests(TestCase) {
         self.assertTrue(caught)
     }
     def test_ed25519_sign_oom_is_catchable() {
-        # Signing allocates a sig||msg scratch the size of the message; the
-        # second 160MB does not fit. Pre-fix ref10 wrote through the NULL.
         big: bytes = b"x" * 167772160
         keys: tuple[bytes, bytes] = ed25519_keypair()
         caught: bool = False
@@ -36,8 +26,6 @@ class BytesOomTests(TestCase) {
         self.assertTrue(caught)
     }
     def test_concat_oom_is_catchable() {
-        # Two 90MB operands fit under the 256MB cap; the 180MB concat
-        # buffer does not.
         a: bytes = b"x" * 94371840
         b: bytes = b"y" * 94371840
         caught: bool = False
@@ -48,7 +36,7 @@ class BytesOomTests(TestCase) {
             caught = True
         }
         self.assertTrue(caught)
-        d: bytes = b"ok" * 2    # recovery is real: allocation works again
+        d: bytes = b"ok" * 2
         self.assertEqual(len(d), 4)
     }
 }

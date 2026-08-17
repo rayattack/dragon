@@ -68,7 +68,7 @@ Proof it holds up: [dragonlang.org](https://dragonlang.org) (site, docs, and pac
 | Platform                        | Status                                                                                         |
 | ------------------------------- | ---------------------------------------------------------------------------------------------- |
 | Linux x86-64                    | Installers on [releases](https://github.com/rayattack/dragon/releases) (.deb / .rpm / .tar.gz) |
-| macOS (Apple Silicon and Intel) | Building in CI now; .dmg lands on the same releases page                                       |
+| macOS (Apple Silicon and Intel) | Built and tested in CI; install via `install.sh` (`.tar.gz` on the releases page, no `.dmg`)         |
 | Windows x86-64                  | Parked pending a MinGW toolchain rework                                                        |
 
 The compiler needs a C compiler (gcc or clang) on PATH for the final link; the .deb declares that dependency and apt resolves it.

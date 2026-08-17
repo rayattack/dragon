@@ -1,5 +1,3 @@
-# String-keyed frequency count: 3M increments over 200K distinct keys, then a
-# weighted-sum checksum. Stresses string hashing + dict insert/lookup/update.
 n: int = 3000000
 k: int = 200000
 counts: dict[str, int] = {}

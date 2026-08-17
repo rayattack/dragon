@@ -12,10 +12,6 @@ Cases here were each reproduced as no-ops before the fix; the working controls
 
 from unittest import TestCase, main
 
-# Helper classes are defined BEFORE the TestCase that uses them: a class
-# referenced before its definition (forward reference) is a separate, pre-existing
-# codegen bug (field access no-ops entirely - longhand and numeric alike), unrelated
-# to aug-assign.
 class StrBuf {
     def() {
         self.s: str = ""
@@ -159,7 +155,6 @@ class FieldAug(TestCase) {
     }
 
     def test_str_field_accumulate_loop() {
-        # RC stress: 500 overwrite-decrefs must stay balanced (no crash) + correct.
         b: StrBuf = StrBuf()
         i: int = 0
         while i < 500 {
@@ -170,6 +165,4 @@ class FieldAug(TestCase) {
     }
 }
 
-# StrBuf / ByteBuf are defined at the top of this file (before FieldAug) - a
-# forward reference would hit a separate pre-existing codegen bug.
 main([IntKeyedDictAug(), StrKeyedDictAug(), ListElementAug(), FieldAug()])

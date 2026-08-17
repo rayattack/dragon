@@ -3,7 +3,6 @@ from unittest import TestCase, main
 const N: int = 3000
 
 class BoxUnboxSlotRc(TestCase) {
-    # OWNED (dragon_box_subscript): unbox into a str slot must release the +1.
     def test_any_subscript_unbox_str() {
         i: int = 0
         while i < N {
@@ -14,7 +13,6 @@ class BoxUnboxSlotRc(TestCase) {
         }
     }
 
-    # OWNED, non-heap payload: unbox into int slot (tag-gated release is a no-op).
     def test_any_subscript_unbox_int() {
         i: int = 0
         while i < N {
@@ -37,8 +35,6 @@ class BoxUnboxSlotRc(TestCase) {
         }
     }
 
-    # OWNED, plain reassignment (Assign.cpp path, not const/AnnAssign): the same
-    # unbox-owned-box-into-str-slot must release the +1.
     def test_any_subscript_plain_reassign() {
         nm: str = "init"
         i: int = 0
@@ -50,7 +46,6 @@ class BoxUnboxSlotRc(TestCase) {
         }
     }
 
-    # BORROWED: list[Any] element via dragon_list_box_get unboxed to str.
     def test_listany_unbox_str() {
         i: int = 0
         while i < N {

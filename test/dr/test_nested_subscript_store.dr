@@ -1,0 +1,66 @@
+"""Chained subscript stores must mutate the inner container (J7).
+
+Regression for the silent-no-op family: `outer[0][1] = x`, `d["a"][0] = x`,
+`m[0]["k"] = x` and their augmented twins compiled to nothing because the
+assign path only recognized bare-name and field receivers, never a subscript
+receiver typed by the checker. Aliasing through a local always worked, which
+is exactly what made the bug invisible.
+"""
+
+from unittest import TestCase, main
+
+class NestedSubscriptStore(TestCase) {
+    def test_list_in_list_store() {
+        outer: list[list[int]] = [[1, 2], [3, 4]]
+        outer[0][1] = 9
+        self.assertEqual(outer[0][1], 9)
+        outer[1][0] = -5
+        self.assertEqual(outer[1][0], -5)
+    }
+
+    def test_list_in_dict_store() {
+        d: dict[str, list[int]] = {"a": [1, 2]}
+        d["a"][0] = 7
+        self.assertEqual(d["a"][0], 7)
+    }
+
+    def test_dict_in_list_store() {
+        m: list[dict[str, int]] = [{"k": 1}]
+        m[0]["k"] = 5
+        self.assertEqual(m[0]["k"], 5)
+    }
+
+    def test_three_level_store() {
+        deep: list[list[list[int]]] = [[[1]]]
+        deep[0][0][0] = 42
+        self.assertEqual(deep[0][0][0], 42)
+    }
+
+    def test_heap_elem_store() {
+        names: list[list[str]] = [["a", "b"]]
+        names[0][1] = "z"
+        self.assertEqual(names[0][1], "z")
+    }
+
+    def test_aug_assign_list_in_list() {
+        outer: list[list[int]] = [[1, 2], [3, 4]]
+        outer[0][1] += 10
+        self.assertEqual(outer[0][1], 12)
+        outer[1][1] -= 4
+        self.assertEqual(outer[1][1], 0)
+    }
+
+    def test_aug_assign_list_in_dict() {
+        d: dict[str, list[int]] = {"a": [1, 2]}
+        d["a"][0] += 6
+        self.assertEqual(d["a"][0], 7)
+    }
+
+    def test_aug_assign_dict_in_list() {
+        m: list[dict[str, int]] = [{"k": 1}]
+        m[0]["k"] += 4
+        self.assertEqual(m[0]["k"], 5)
+    }
+}
+
+main([NestedSubscriptStore()])

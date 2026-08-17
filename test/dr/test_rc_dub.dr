@@ -2,8 +2,6 @@ from unittest import TestCase, main
 
 class DubTests(TestCase) {
     def test_snapshot_iteration_fixes_the_repro() {
-        # The user's live repro: remove() used to shift tmp2 past the cursor
-        # and the loop printed ['a', 'tmp2', 'b'] silently
         names: list[str] = ["a", "tmp1", "tmp2", "b"]
         for name in dub names {
             if name.startswith("tmp") {

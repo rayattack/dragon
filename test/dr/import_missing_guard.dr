@@ -1,0 +1,3 @@
+import zzz_no_such_module
+
+print("hi")

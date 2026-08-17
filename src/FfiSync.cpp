@@ -1,5 +1,3 @@
-// D052 `dragon ffi sync`: stubs are always regenerated (DO NOT EDIT); skeletons
-// are written once and never overwritten; --check diffs stubs and writes nothing.
 #include "FfiSync.h"
 #include "dragon/AST.h"
 #include "dragon/Lexer.h"
@@ -27,11 +25,10 @@ namespace fs = std::filesystem;
 struct ClassField { std::string name; const TypeExpr* type; };
 using ClassMap = std::map<std::string, std::vector<ClassField>>;
 
-// The field/param shapes the process lane carries (mirrors the wrapper + encode[T]).
 struct FKind {
     enum Base { Scalar, Klass, ListScalar, ListClass, DictScalar, OptScalar, OptClass, Blob, Bad };
     Base base = Bad;
-    std::string name;  // scalar spelling (int/str/bool/float) or the class name
+    std::string name;
 };
 
 bool isScalarName(const std::string& n) {
@@ -84,7 +81,6 @@ FKind parseKind(const TypeExpr* t, const ClassMap& classes) {
     return k;
 }
 
-// Dragon spelling of a TypeExpr for the embedded signature line.
 std::string dragonTypeName(const TypeExpr* t) {
     if (auto* nt = dynamic_cast<const NamedTypeExpr*>(t)) return nt->name;
     if (auto* gt = dynamic_cast<const GenericTypeExpr*>(t)) {
@@ -115,7 +111,6 @@ std::string signatureOf(const FunctionDecl* fn) {
     return s + ") -> " + dragonTypeName(fn->returnType.get());
 }
 
-// Classes an extern reaches, dependencies first (nested classes precede users).
 std::vector<std::string> referencedClasses(const FunctionDecl* fn, const ClassMap& classes,
                                            std::string& missing) {
     std::vector<std::string> order;
@@ -141,8 +136,6 @@ std::string capitalize(std::string s) {
     return s;
 }
 
-// ---- Python ----
-
 std::string pyTypeOf(const FKind& k) {
     switch (k.base) {
         case FKind::Scalar: return k.name;
@@ -157,7 +150,6 @@ std::string pyTypeOf(const FKind& k) {
     }
 }
 
-// Expression converting the raw json value `src` into the typed shape.
 std::string pyInExpr(const FKind& k, const std::string& src) {
     switch (k.base) {
         case FKind::Klass: return "_in_" + k.name + "(" + src + ")";
@@ -200,8 +192,6 @@ std::string renderPythonStub(const FunctionDecl* fn, const std::vector<std::stri
     o << "\n\ndef _reply(header, payload=b\"\"):\n"
       << "    sys.stdout.buffer.write(struct.pack(\"<I\", len(header)) + header + payload)\n"
       << "    sys.stdout.buffer.flush()\n";
-    // The baton frame loop: EOF on the length prefix is a clean shutdown; a
-    // raised exception is an ok:false frame and the child keeps serving.
     o << "\n\ndef serve(fn):\n"
       << "    while True:\n"
       << "        pre = sys.stdin.buffer.read(4)\n"
@@ -257,8 +247,6 @@ std::string renderPythonSkeleton(const FunctionDecl* fn, const std::vector<std::
     return o.str();
 }
 
-// ---- Go ----
-
 std::string goTypeOf(const FKind& k) {
     auto scalar = [](const std::string& n) -> std::string {
         if (n == "int") return "int64";
@@ -301,7 +289,6 @@ std::string renderGoStub(const FunctionDecl* fn, const std::vector<std::string>&
       << "\tvar pre [4]byte\n"
       << "\tbinary.LittleEndian.PutUint32(pre[:], uint32(len(header)))\n"
       << "\tout.Write(pre[:])\n\tout.Write(header)\n\tout.Write(payload)\n\tout.Flush()\n}\n";
-    // The baton frame loop: EOF on the length prefix is a clean shutdown.
     o << "\nfunc main() {\n"
       << "\tin := bufio.NewReader(os.Stdin)\n"
       << "\tout := bufio.NewWriter(os.Stdout)\n"
@@ -325,7 +312,7 @@ std::string renderGoStub(const FunctionDecl* fn, const std::vector<std::string>&
       << "\t\tvar args struct {\n";
     for (auto& p : fn->params) {
         FKind k = parseKind(p.type.get(), classes);
-        if (k.base == FKind::Blob) continue;  // rides as a blob, not in the body
+        if (k.base == FKind::Blob) continue;
         o << "\t\t\t" << capitalize(p.name) << " " << goTypeOf(k)
           << " `json:\"" << p.name << "\"`\n";
     }
@@ -364,8 +351,6 @@ std::string renderGoSkeleton(const FunctionDecl* fn, const ClassMap& classes) {
       << "\tpanic(\"implement " << signatureOf(fn) << "\")\n}\n";
     return o.str();
 }
-
-// ---- Rust ----
 
 std::string rustTypeOf(const FKind& k) {
     auto scalar = [](const std::string& n) -> std::string {
@@ -409,11 +394,10 @@ std::string renderRustStub(const FunctionDecl* fn, const std::vector<std::string
     o << "\n#[derive(Deserialize)]\nstruct DragonArgs {\n";
     for (auto& p : fn->params) {
         FKind k = parseKind(p.type.get(), classes);
-        if (k.base == FKind::Blob) continue;  // rides as a blob, not in the body
+        if (k.base == FKind::Blob) continue;
         o << "    " << p.name << ": " << rustTypeOf(k) << ",\n";
     }
     o << "}\n";
-    // The baton frame loop: EOF on the length prefix is a clean shutdown.
     o << "\nfn main() {\n"
       << "    let mut sin = std::io::stdin().lock();\n"
       << "    let mut sout = std::io::stdout().lock();\n"
@@ -487,7 +471,6 @@ std::string stubOwner(const std::string& content) {
     return content.substr(start, end - start);
 }
 
-// Where an extern's generated stub lives (shared by sync and dragon-check).
 fs::path stubPathFor(const FunctionDecl* fn, const fs::path& srcDir) {
     fs::path target(fn->externPath);
     if (target.is_relative()) target = srcDir / target;
@@ -514,7 +497,7 @@ bool writeWhole(const fs::path& p, const std::string& content) {
     return true;
 }
 
-}  // namespace
+}
 
 int runFfiSync(const std::string& filename, bool checkOnly) {
     std::ifstream in(filename, std::ios::binary);
@@ -524,7 +507,6 @@ int runFfiSync(const std::string& filename, bool checkOnly) {
     }
     std::ostringstream ss;
     ss << in.rdbuf();
-    // Token lexemes are views into the source: it must outlive lex AND parse.
     const std::string source = ss.str();
 
     LexerOptions lexOpts;
@@ -546,7 +528,6 @@ int runFfiSync(const std::string& filename, bool checkOnly) {
         return 1;
     }
 
-    // Same-file classes (v1 scope): name -> ctor fields.
     ClassMap classes;
     for (auto& stmt : module->body) {
         auto* cd = dynamic_cast<ClassDecl*>(stmt.get());
@@ -563,7 +544,7 @@ int runFfiSync(const std::string& filename, bool checkOnly) {
 
     const std::string srcBase = fs::path(filename).filename().string();
     const fs::path srcDir = fs::path(filename).parent_path();
-    std::map<std::string, std::string> usedPaths;  // from-path -> extern name
+    std::map<std::string, std::string> usedPaths;
     std::vector<std::string> stale;
 
     for (auto& stmt : module->body) {
@@ -611,8 +592,6 @@ int runFfiSync(const std::string& filename, bool checkOnly) {
         std::error_code exc;
         const bool stubExists = fs::exists(stubPath, exc);
         const std::string existing = stubExists ? readWhole(stubPath) : std::string();
-        // Ownership guard: a differing stub owned by ANOTHER .dr must not be
-        // overwritten - last-sync-wins would zero-fill the loser's args silently.
         if (stubExists && existing != stubContent) {
             const std::string owner = stubOwner(existing);
             if (owner.empty()) {
@@ -675,10 +654,10 @@ int verifyFfiStubSignatures(const Module& module) {
         if (!fn || fn->externLang.empty()) continue;
         fs::path stubPath = stubPathFor(fn, srcDir);
         std::error_code ec;
-        if (!fs::exists(stubPath, ec)) continue;  // stubless children are legit
+        if (!fs::exists(stubPath, ec)) continue;
         const std::string content = readWhole(stubPath);
         auto at = content.find("signature: ");
-        if (at == std::string::npos) continue;    // not one of ours
+        if (at == std::string::npos) continue;
         auto start = at + 11;
         auto eol = content.find('\n', start);
         std::string line = content.substr(start, eol - start);
@@ -696,4 +675,4 @@ int verifyFfiStubSignatures(const Module& module) {
     return staleCount;
 }
 
-}  // namespace dragon
+}

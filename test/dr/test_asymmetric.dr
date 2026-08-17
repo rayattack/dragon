@@ -1,10 +1,3 @@
-# test/dr/test_asymmetric.dr - RSA + ECDSA sign/verify (crypto.dr superset).
-#
-# One sign/verify pair serves both algorithms; the PEM key type selects RSA
-# (PKCS#1 v1.5) vs EC (ECDSA). ECDSA signatures are non-deterministic, so the
-# correctness oracle is round-trip verify plus negative cases (tampered message,
-# cross-key, wrong hash). Test keys are ephemeral RSA-2048 / EC-P256 pairs.
-
 from unittest import TestCase, main
 from crypto import sign, verify
 
@@ -40,7 +33,6 @@ class AsymmetricTests(TestCase) {
     }
 
     def test_cross_key_rejected() {
-        # An RSA signature must not verify under the EC public key, nor vice versa.
         const rsa_sig: bytes = sign(RSA_PRIV, MSG)
         self.assertFalse(verify(EC_PUB, MSG, rsa_sig))
         const ec_sig: bytes = sign(EC_PRIV, MSG)
@@ -48,7 +40,6 @@ class AsymmetricTests(TestCase) {
     }
 
     def test_hash_choice_must_match() {
-        # A signature made under sha512 must not verify when checked as sha256.
         const sig: bytes = sign(RSA_PRIV, MSG, "sha512")
         self.assertTrue(verify(RSA_PUB, MSG, sig, "sha512"))
         self.assertFalse(verify(RSA_PUB, MSG, sig, "sha256"))

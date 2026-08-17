@@ -1,0 +1,132 @@
+from unittest import TestCase, main
+from configparser import ConfigParser
+
+
+const _INI: str = "orphan = ignored\n[server]\nhost = localhost\nport: 8080\n# comment\n; also a comment\n\n[auth]\nuser = ada\nempty =\n"
+
+
+def _parsed() -> ConfigParser {
+    cp: ConfigParser = ConfigParser()
+    cp.read_string(_INI)
+    return cp
+}
+
+
+def _get_missing_section() {
+    _parsed().get("nope", "host")
+}
+
+
+def _get_missing_key() {
+    _parsed().get("server", "nope")
+}
+
+
+def _items_missing_section() {
+    _parsed().items("nope")
+}
+
+
+class ConfigParserParseTests(TestCase) {
+    def test_get_both_separators() {
+        const cp: ConfigParser = _parsed()
+        self.assertEqual(cp.get("server", "host"), "localhost")
+        self.assertEqual(cp.get("server", "port"), "8080")
+        self.assertEqual(cp.get("auth", "user"), "ada")
+        self.assertEqual(cp.get("auth", "empty"), "")
+    }
+
+    def test_separator_in_value_kept() {
+        cp: ConfigParser = ConfigParser()
+        cp.read_string("[s]\nurl = http://x\nu: a=b\n")
+        self.assertEqual(cp.get("s", "url"), "http://x")
+        self.assertEqual(cp.get("s", "u"), "a=b")
+    }
+
+    def test_orphan_pairs_before_section_ignored() {
+        const cp: ConfigParser = _parsed()
+        self.assertFalse(cp.has_option("server", "orphan"))
+        self.assertEqual(len(cp.sections()), 2)
+    }
+
+    def test_sections_insertion_order() {
+        self.assertEqual(_parsed().sections(), ["server", "auth"])
+    }
+
+    def test_duplicate_section_header_merges() {
+        cp: ConfigParser = ConfigParser()
+        cp.read_string("[a]\nx = 1\n[b]\ny = 2\n[a]\nz = 3\nx = 9\n")
+        self.assertEqual(cp.sections(), ["a", "b"])
+        self.assertEqual(cp.get("a", "x"), "9")
+        self.assertEqual(cp.get("a", "z"), "3")
+        self.assertEqual(cp.get("b", "y"), "2")
+    }
+}
+
+
+class ConfigParserApiTests(TestCase) {
+    def test_has_section_and_option() {
+        const cp: ConfigParser = _parsed()
+        self.assertTrue(cp.has_section("server"))
+        self.assertFalse(cp.has_section("nope"))
+        self.assertTrue(cp.has_option("server", "host"))
+        self.assertFalse(cp.has_option("server", "nope"))
+        self.assertFalse(cp.has_option("nope", "host"))
+    }
+
+    def test_missing_lookups_raise() {
+        self.assertRaises(ValueError, _get_missing_section)
+        self.assertRaises(ValueError, _get_missing_key)
+        self.assertRaises(ValueError, _items_missing_section)
+    }
+
+    def test_typed_getters() {
+        cp: ConfigParser = ConfigParser()
+        cp.read_string("[t]\nn = 42\nf = 2.5\nb1 = true\nb2 = yes\nb3 = on\nb4 = 1\nb5 = True\n")
+        self.assertEqual(cp.get_int("t", "n"), 42)
+        self.assertEqual(cp.get_float("t", "f"), 2.5)
+        self.assertTrue(cp.get_bool("t", "b1"))
+        self.assertTrue(cp.get_bool("t", "b2"))
+        self.assertTrue(cp.get_bool("t", "b3"))
+        self.assertTrue(cp.get_bool("t", "b4"))
+        self.assertFalse(cp.get_bool("t", "b5"))
+    }
+
+    def test_set_creates_and_overwrites() {
+        cp: ConfigParser = ConfigParser()
+        cp.set("fresh", "k", "v1")
+        self.assertTrue(cp.has_section("fresh"))
+        self.assertEqual(cp.get("fresh", "k"), "v1")
+        cp.set("fresh", "k", "v2")
+        self.assertEqual(cp.get("fresh", "k"), "v2")
+        self.assertEqual(len(cp.items("fresh")), 1)
+    }
+
+    def test_add_section_noop_when_present() {
+        cp: ConfigParser = _parsed()
+        cp.add_section("server")
+        self.assertEqual(cp.sections(), ["server", "auth"])
+        self.assertEqual(cp.get("server", "host"), "localhost")
+    }
+
+    def test_items_pairs_in_order() {
+        const pairs: list[list[str]] = _parsed().items("server")
+        self.assertEqual(len(pairs), 2)
+        self.assertEqual(pairs[0], ["host", "localhost"])
+        self.assertEqual(pairs[1], ["port", "8080"])
+    }
+
+    def test_to_string_roundtrip() {
+        const cp: ConfigParser = _parsed()
+        const text: str = cp.to_string()
+        self.assertEqual(text, "[server]\nhost = localhost\nport = 8080\n\n[auth]\nuser = ada\nempty = \n")
+        back: ConfigParser = ConfigParser()
+        back.read_string(text)
+        self.assertEqual(back.sections(), ["server", "auth"])
+        self.assertEqual(back.get("server", "port"), "8080")
+        self.assertEqual(back.get("auth", "empty"), "")
+    }
+}
+
+
+main([ConfigParserParseTests(), ConfigParserApiTests()])

@@ -29,19 +29,17 @@ class Animal {
 class Dog(Animal) {
     breed: str
     def(n: str, b: str) {
-        super(n, 4)          # delegate to Animal.__init__
+        super(n, 4)
         self.breed = b
     }
     def sound() -> str {
         return "woof"
     }
-    # super.method(): call the parent's version of an overridden method.
     def full() -> str {
         return super.describe() + " (" + self.breed + ", " + self.sound() + ")"
     }
 }
 
-# Child that deliberately skips super(...): parent ctor must NOT auto-run.
 class Cat(Animal) {
     indoor: bool
     def(i: bool) {
@@ -52,29 +50,23 @@ class Cat(Animal) {
 class SuperTests(TestCase) {
     def test_ctor_delegation_runs_parent_ctor() {
         d: Dog = Dog("Rex", "Lab")
-        self.assertEqual(d.name, "Rex")     # set by super(n, 4)
-        self.assertEqual(d.legs, 4)         # set by super(n, 4)
-        self.assertEqual(d.breed, "Lab")    # set by Dog ctor
+        self.assertEqual(d.name, "Rex")
+        self.assertEqual(d.legs, 4)
+        self.assertEqual(d.breed, "Lab")
     }
 
     def test_super_method_dispatch() {
         d: Dog = Dog("Rex", "Lab")
-        # super.describe() reaches the parent method even though Dog overrides sound()
         self.assertEqual(d.full(), "Rex has 4 legs (Lab, woof)")
     }
 
     def test_override_still_virtual() {
         d: Dog = Dog("Rex", "Lab")
-        self.assertEqual(d.sound(), "woof")     # Dog's override
-        self.assertEqual(d.describe(), "Rex has 4 legs")  # inherited, unoverridden
+        self.assertEqual(d.sound(), "woof")
+        self.assertEqual(d.describe(), "Rex has 4 legs")
     }
 
     def test_opt_in_skip_leaves_defaults() {
-        # Cat ctor never calls super(...): the parent ctor does not run, so the
-        # parent's int field keeps its zero default - the unambiguous witness
-        # that base init was skipped (Python parity: no implicit base chaining).
-        # A typed `str` field is non-optional, so its unset value is a null str
-        # (still TAG_STR), not None, and is intentionally not asserted here.
         c: Cat = Cat(true)
         self.assertTrue(c.indoor)
         self.assertEqual(c.legs, 0)

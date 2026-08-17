@@ -51,7 +51,6 @@ def park_and_return(n: int) -> int {
 
 class BoxedInstanceScopeTests(TestCase) {
     def test_boxed_instance_scope_exit_no_crash() {
-        # Before the fix the FIRST call SEGV'd at scope exit
         self.assertEqual(park_and_return(1), 2)
         i: int = 0
         while i < 500 {
@@ -65,7 +64,6 @@ class BoxedInstanceScopeTests(TestCase) {
         if isinstance(p, Dog) {
             self.assertEqual(p.get_name(), "odo")
         }
-        # p leaves this method's scope boxed - cleanup must tag-dispatch
         self.assertTrue(True)
     }
 }

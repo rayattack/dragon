@@ -4,10 +4,6 @@
 using namespace dragon;
 using namespace dragon::test;
 
-//===----------------------------------------------------------------------===//
-// Basic Tests
-//===----------------------------------------------------------------------===//
-
 TEST(LexerTest, EmptyInput) {
     auto tokens = lex("");
     ASSERT_EQ(tokens.size(), 1u);
@@ -38,10 +34,6 @@ TEST(LexerTest, NoErrors) {
     auto diags = lexErrors("42");
     EXPECT_TRUE(diags.empty());
 }
-
-//===----------------------------------------------------------------------===//
-// Integer Literals
-//===----------------------------------------------------------------------===//
 
 TEST(LexerTest, DecimalInteger) {
     auto tokens = lex("42");
@@ -96,10 +88,6 @@ TEST(LexerTest, UnderscoreInInteger) {
     EXPECT_EQ(tokens[0].lexeme(), "1_000_000");
 }
 
-//===----------------------------------------------------------------------===//
-// Float Literals
-//===----------------------------------------------------------------------===//
-
 TEST(LexerTest, SimpleFloat) {
     auto tokens = lex("3.14");
     ASSERT_GE(tokens.size(), 2u);
@@ -126,10 +114,6 @@ TEST(LexerTest, ScientificNotationPositive) {
     ASSERT_GE(tokens.size(), 2u);
     EXPECT_EQ(tokens[0].type(), TokenType::FLOAT);
 }
-
-//===----------------------------------------------------------------------===//
-// String Literals
-//===----------------------------------------------------------------------===//
 
 TEST(LexerTest, DoubleQuotedString) {
     auto tokens = lex("\"hello\"");
@@ -203,10 +187,6 @@ TEST(LexerTest, UnterminatedStringNewline) {
     EXPECT_FALSE(diags.empty());
 }
 
-//===----------------------------------------------------------------------===//
-// Boolean and None Literals
-//===----------------------------------------------------------------------===//
-
 TEST(LexerTest, TrueLiteral) {
     auto tokens = lex("True");
     ASSERT_GE(tokens.size(), 2u);
@@ -242,10 +222,6 @@ TEST(LexerTest, LowercaseNoneAlias) {
     ASSERT_GE(tokens.size(), 2u);
     EXPECT_EQ(tokens[0].type(), TokenType::NONE);
 }
-
-//===----------------------------------------------------------------------===//
-// Identifiers and Keywords
-//===----------------------------------------------------------------------===//
 
 TEST(LexerTest, SimpleIdentifier) {
     auto tokens = lex("hello");
@@ -288,10 +264,6 @@ TEST(LexerTest, AllKeywords) {
     }
 }
 
-//===----------------------------------------------------------------------===//
-// Single-Character Delimiters
-//===----------------------------------------------------------------------===//
-
 TEST(LexerTest, AllSingleCharDelimiters) {
     auto tokens = lex("( ) [ ] { } , : ; .");
     ASSERT_GE(tokens.size(), 11u);
@@ -306,10 +278,6 @@ TEST(LexerTest, AllSingleCharDelimiters) {
     EXPECT_EQ(tokens[8].type(), TokenType::SEMICOLON);
     EXPECT_EQ(tokens[9].type(), TokenType::DOT);
 }
-
-//===----------------------------------------------------------------------===//
-// Operators
-//===----------------------------------------------------------------------===//
 
 TEST(LexerTest, ArithmeticOperators) {
     auto tokens = lex("+ - * / %");
@@ -376,10 +344,6 @@ TEST(LexerTest, SpecialOperators) {
     EXPECT_EQ(tokens[6].type(), TokenType::WALRUS);
     EXPECT_EQ(tokens[7].type(), TokenType::AT_EQUAL);
 }
-
-//===----------------------------------------------------------------------===//
-// Multi-Token Sequences
-//===----------------------------------------------------------------------===//
 
 TEST(LexerTest, VariableDeclaration) {
     auto tokens = lex("x: int = 42");
@@ -467,7 +431,6 @@ TEST(LexerTest, DecoratorSyntax) {
 }
 
 TEST(LexerTest, MultilineInBraceMode) {
-    // In brace mode, newlines are emitted as NEWLINE tokens (statement separators)
     auto tokens = lex("x = 1\ny = 2");
     ASSERT_GE(tokens.size(), 8u);
     EXPECT_EQ(tokens[0].type(), TokenType::IDENTIFIER);
@@ -478,10 +441,6 @@ TEST(LexerTest, MultilineInBraceMode) {
     EXPECT_EQ(tokens[5].type(), TokenType::EQUAL);
     EXPECT_EQ(tokens[6].type(), TokenType::INTEGER);
 }
-
-//===----------------------------------------------------------------------===//
-// Token Utilities
-//===----------------------------------------------------------------------===//
 
 TEST(TokenTest, TokenTypeNames) {
     EXPECT_STREQ(Token::tokenTypeName(TokenType::INTEGER), "INTEGER");
@@ -516,10 +475,6 @@ TEST(TokenTest, IsKeyword) {
     EXPECT_FALSE(isKeyword(""));
 }
 
-//===----------------------------------------------------------------------===//
-// Error Cases
-//===----------------------------------------------------------------------===//
-
 TEST(LexerTest, UnexpectedCharacter) {
     auto diags = lexErrors("`");
     EXPECT_FALSE(diags.empty());
@@ -551,10 +506,6 @@ TEST(LexerTest, IdentifierStartingWithKeyword) {
     EXPECT_EQ(tokens[0].lexeme(), "iffy");
 }
 
-//===----------------------------------------------------------------------===//
-// Template Block Tests
-//===----------------------------------------------------------------------===//
-
 TEST(LexerTest, TemplateSimple) {
     auto tokens = lex("template {hello world}");
     ASSERT_GE(tokens.size(), 2u);
@@ -584,7 +535,6 @@ TEST(LexerTest, TemplateMultiline) {
 }
 
 TEST(LexerTest, TemplateNotKeywordAlone) {
-    // "template" without { is just an identifier
     auto tokens = lex("template = 5");
     ASSERT_GE(tokens.size(), 2u);
     EXPECT_EQ(tokens[0].type(), TokenType::IDENTIFIER);
@@ -600,7 +550,6 @@ TEST(LexerTest, TypedTemplateSimple) {
     auto tokens = lex("template[HTML] {<h1>hi</h1>}");
     ASSERT_GE(tokens.size(), 2u);
     EXPECT_EQ(tokens[0].type(), TokenType::TEMPLATE);
-    // Lexeme encodes "HTML\0<h1>hi</h1>"
     auto lex = tokens[0].lexeme();
     auto nul = lex.find('\0');
     ASSERT_NE(nul, std::string::npos);
@@ -619,8 +568,6 @@ TEST(LexerTest, TypedTemplateCustomType) {
 }
 
 TEST(LexerTest, TypedTemplateFileForm) {
-    // template[HTML]("file.html") - Lexer emits TEMPLATE with "HTML\0"
-    // followed by LEFT_PAREN (which the Parser handles)
     auto tokens = lex("template[HTML](\"file.html\")");
     ASSERT_GE(tokens.size(), 2u);
     EXPECT_EQ(tokens[0].type(), TokenType::TEMPLATE);
@@ -629,7 +576,6 @@ TEST(LexerTest, TypedTemplateFileForm) {
     ASSERT_NE(nul, std::string::npos);
     EXPECT_EQ(lex.substr(0, nul), "HTML");
     EXPECT_EQ(lex.substr(nul + 1), "");
-    // Next tokens should be ( "file.html" )
     EXPECT_EQ(tokens[1].type(), TokenType::LEFT_PAREN);
 }
 

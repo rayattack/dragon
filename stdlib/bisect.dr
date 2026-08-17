@@ -1,18 +1,7 @@
-# bisect.dr - Dragon standard library: array bisection algorithm
-#
-# Provides binary search functions for maintaining sorted list[int] sequences.
-# Matches the Python bisect module API.
-#
-# Pure Dragon - no C dependencies.
-
-#===----------------------------------------------------------------------===#
-# Binary search functions
-#===----------------------------------------------------------------------===#
+"""bisect.dr - binary search over sorted list[int], matching Python's bisect module API.
+Pure Dragon, no C dependencies."""
 
 def bisect_left(a: list[int], x: int) -> int {
-    # Locate the leftmost insertion point for x in sorted list a.
-    # Returns an index i such that all elements a[:i] have value < x,
-    # and all elements a[i:] have value >= x.
     lo: int = 0
     hi: int = len(a)
     while lo < hi {
@@ -27,9 +16,6 @@ def bisect_left(a: list[int], x: int) -> int {
 }
 
 def bisect_right(a: list[int], x: int) -> int {
-    # Locate the rightmost insertion point for x in sorted list a.
-    # Returns an index i such that all elements a[:i] have value <= x,
-    # and all elements a[i:] have value > x.
     lo: int = 0
     hi: int = len(a)
     while lo < hi {
@@ -44,19 +30,11 @@ def bisect_right(a: list[int], x: int) -> int {
 }
 
 def bisect(a: list[int], x: int) -> int {
-    # Alias for bisect_right.
     return bisect_right(a, x)
 }
 
-#===----------------------------------------------------------------------===#
-# Insertion functions
-#===----------------------------------------------------------------------===#
-
 def insort_left(a: list[int], x: int) {
-    # Insert x into sorted list a, maintaining sort order.
-    # If x is already in a, insert to the left of existing entries.
     const idx: int = bisect_left(a, x)
-    # Append a placeholder to grow the list by one, then shift elements right.
     a.append(x)
     j: int = len(a) - 1
     while j > idx {
@@ -67,10 +45,7 @@ def insort_left(a: list[int], x: int) {
 }
 
 def insort_right(a: list[int], x: int) {
-    # Insert x into sorted list a, maintaining sort order.
-    # If x is already in a, insert to the right of existing entries.
     const idx: int = bisect_right(a, x)
-    # Append a placeholder to grow the list by one, then shift elements right.
     a.append(x)
     j: int = len(a) - 1
     while j > idx {
@@ -81,17 +56,10 @@ def insort_right(a: list[int], x: int) {
 }
 
 def insort(a: list[int], x: int) {
-    # Alias for insort_right.
     insort_right(a, x)
 }
 
-#===----------------------------------------------------------------------===#
-# Utility functions
-#===----------------------------------------------------------------------===#
-
 def index(a: list[int], x: int) -> int {
-    # Find the index of x in sorted list a using binary search.
-    # Raises ValueError if x is not present.
     const i: int = bisect_left(a, x)
     if i < len(a) {
         if a[i] == x {
@@ -102,7 +70,6 @@ def index(a: list[int], x: int) -> int {
 }
 
 def contains(a: list[int], x: int) -> bool {
-    # Check if x is present in sorted list a using binary search.
     const i: int = bisect_left(a, x)
     if i < len(a) {
         if a[i] == x {

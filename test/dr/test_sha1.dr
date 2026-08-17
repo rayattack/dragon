@@ -1,9 +1,3 @@
-# test/dr/test_sha1.dr - Known-answer tests for runtime SHA-1.
-#
-# Vectors: FIPS 180-2 / RFC 3174 ("", "abc", and the 56-byte multi-block
-# message). SHA-1 is legacy/parity only - never a TLS security primitive
-# (ADR 038 §2) - but it backs HMAC-SHA-1 (TOTP) so its bytes must be correct.
-
 from unittest import TestCase, main
 from hashlib import sha1, new, Hash
 

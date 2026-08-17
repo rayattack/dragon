@@ -84,8 +84,6 @@ class ListAnyIterTest(TestCase) {
     }
 
     def test_dict_transfer_loop() -> None {
-        # The shape that exposed the bug: keying a dict off a counter while
-        # iterating a field-held list[Any].
         h: Holder = Holder(_mixed())
         binds: dict[str, Any] = {}
         i: int = 0

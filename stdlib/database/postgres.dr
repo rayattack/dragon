@@ -31,9 +31,6 @@ from base64 import b64encode, b64decode
 from urllib.parse import urlsplit, SplitResult
 import secrets
 
-# Raw TLS I/O for the optional encrypted transport (see _maybe_tls). buf is a
-# `void*` at the C ABI, so a `ptr` from dragon_bytes_data and a `str` are
-# interchangeable - these reuse the same symbols ssl.dr declares.
 extern "C" def malloc(size: int) -> ptr
 extern "C" def free(p: ptr)
 extern "C" def dragon_tls_write(conn: ptr, buf: ptr, length: int) -> int
@@ -43,32 +40,23 @@ extern "C" def dragon_tls_conn_free(conn: ptr)
 extern "C" def dragon_bytes_data(b: bytes) -> ptr
 extern "C" def dragon_bytes_new(data: ptr, length: int) -> bytes
 
-#===----------------------------------------------------------------------===#
-# Wire primitives. Postgres frames are big-endian; lengths are Int32 and count
-# their own 4 bytes. These are pure integer arithmetic (no float bytes), so
-# they need nothing from `struct`.
-#===----------------------------------------------------------------------===#
-
 const NUL: bytes = bytes([0])
 
-# Frontend message type bytes.
-const FE_PASSWORD: int = 112   # 'p' - SASLInitialResponse / SASLResponse
-const FE_QUERY: int = 81       # 'Q' - simple Query
-const FE_PARSE: int = 80       # 'P'
-const FE_BIND: int = 66        # 'B'
-const FE_DESCRIBE: int = 68    # 'D'
-const FE_EXECUTE: int = 69     # 'E'
-const FE_SYNC: int = 83        # 'S'
+const FE_PASSWORD: int = 112
+const FE_QUERY: int = 81
+const FE_PARSE: int = 80
+const FE_BIND: int = 66
+const FE_DESCRIBE: int = 68
+const FE_EXECUTE: int = 69
+const FE_SYNC: int = 83
 
-# Backend message type bytes.
-const BE_AUTH: int = 82            # 'R'
-const BE_ERROR: int = 69           # 'E'
-const BE_ROW_DESCRIPTION: int = 84 # 'T'
-const BE_DATA_ROW: int = 68        # 'D'
-const BE_COMMAND_COMPLETE: int = 67 # 'C'
-const BE_READY_FOR_QUERY: int = 90 # 'Z'
+const BE_AUTH: int = 82
+const BE_ERROR: int = 69
+const BE_ROW_DESCRIPTION: int = 84
+const BE_DATA_ROW: int = 68
+const BE_COMMAND_COMPLETE: int = 67
+const BE_READY_FOR_QUERY: int = 90
 
-# Type oids we map to native Dragon values; everything else stays str.
 const OID_BOOL: int = 16
 const OID_INT8: int = 20
 const OID_INT2: int = 21
@@ -100,14 +88,11 @@ def _xor_bytes(a: bytes, b: bytes) -> bytes {
     return bytes(out)
 }
 
-# A typed frontend message: type byte + Int32 length (self-inclusive) + payload.
 def _msg(mtype: int, payload: bytes) -> bytes {
     return bytes([mtype]) + _be32(4 + len(payload)) + payload
 }
 
 
-# A received backend message: a one-byte type and its already-read payload
-# (the framing length is consumed by _read_msg).
 class PgMsg {
     def(mtype: int, payload: bytes) {
         self.mtype = mtype
@@ -115,7 +100,6 @@ class PgMsg {
     }
 }
 
-# Look up `key` in a `&`-joined `k=v` query string; return `fallback` if absent.
 def _query_value(query: str, key: str, fallback: str) -> str {
     pairs: list[str] = query.split("&")
     i: int = 0
@@ -132,21 +116,11 @@ def _query_value(query: str, key: str, fallback: str) -> str {
 
 
 class PgConnection(Connection) {
-    # TLS owners, assigned only by _maybe_tls (declared here so the fields
-    # exist and dispatch before TLS is enabled - guarded by tls_conn != none,
-    # mirroring Router._ssl_context). SSLContext owns the engine config,
-    # SSLSocket owns the conn; both must outlive tls_conn, the borrowed
-    # fast-path handle - the old code kept only the raw handle and relied on
-    # the owners leaking.
     tls_ctx: SSLContext
     tls_sock: SSLSocket
-    # Declared so the field's class is statically KNOWN: a ctor-inferred
-    # instance field (from TcpStream.open's result) loses its kind and the
-    # connection's dealloc skipped it - one leaked TcpStream per connection.
     sock: TcpStream
 
     def(dsn: str) {
-        # Parse postgres://user:password@host:port/dbname?params
         parts: SplitResult = urlsplit(dsn)
         netloc: str = parts.netloc
         user: str = "postgres"
@@ -181,18 +155,16 @@ class PgConnection(Connection) {
         if dbname == "" {
             dbname = user
         }
-        # sslmode: disable | prefer (default) | require. `prefer`/`require`
-        # send an SSLRequest before the startup; `require` fails if refused.
         sslmode: str = _query_value(parts.query, "sslmode", "prefer")
 
         self.user = user
         self.dbname = dbname
         self._affected = 0
-        self._stmt_cache: dict[str, str] = {}   # canonical SQL -> prepared stmt name
-        self._stmt_seq = 0                       # source of unique statement names
-        self._rbuf = bytes()                     # socket read buffer
-        self._rpos = 0                           # consumed offset into _rbuf
-        self.tls_conn = none           # BORROWED hot-path handle (see class head)
+        self._stmt_cache: dict[str, str] = {}
+        self._stmt_seq = 0
+        self._rbuf = bytes()
+        self._rpos = 0
+        self.tls_conn = none
         self.sock = TcpStream.open(host, port)
         if sslmode != "disable" {
             self._maybe_tls(host, sslmode)
@@ -200,23 +172,16 @@ class PgConnection(Connection) {
         self._authenticate(user, password, dbname)
     }
 
-    # Negotiate TLS via the Postgres SSLRequest (Int32 length 8 + the magic
-    # 80877103). On 'S' the socket is wrapped (encrypt-only; sslmode=require
-    # does not verify the cert - verify-full is a later refinement). On 'N' a
-    # `require` connection fails; `prefer` continues in plaintext on the same
-    # socket (the SSLRequest consumed nothing else).
     def _maybe_tls(host: str, sslmode: str) {
         self.sock.send_bytes(_be32(8) + _be32(80877103))
         resp: bytes = self.sock.recv_bytes(1)
         if len(resp) == 0 {
             raise ConnectionError("postgres: no response to SSLRequest")
         }
-        if resp[0] == 83 {             # 'S'
+        if resp[0] == 83 {
             ctx: SSLContext = SSLContext(PROTOCOL_TLS_CLIENT)
             ctx.set_verify_mode(CERT_NONE)
             sslsock: SSLSocket = ctx.wrap_socket(self.sock, False, host, True)
-            # Keep the owners alive for the connection's lifetime; tls_conn
-            # is the borrowed fast-path handle for _send/_recv_chunk.
             self.tls_ctx = ctx
             self.tls_sock = sslsock
             self.tls_conn = sslsock.conn()
@@ -227,8 +192,6 @@ class PgConnection(Connection) {
         }
     }
 
-    #--- Low-level framing (transparently plaintext or TLS) -----------------#
-
     def _send(data: bytes) -> int {
         if self.tls_conn != none {
             return dragon_tls_write(self.tls_conn, dragon_bytes_data(data), len(data))
@@ -236,7 +199,6 @@ class PgConnection(Connection) {
         return self.sock.send_bytes(data)
     }
 
-    # Read up to `want` bytes from whichever transport is active.
     def _recv_chunk(want: int) -> bytes {
         if self.tls_conn != none {
             b: ptr = malloc(want)
@@ -253,16 +215,12 @@ class PgConnection(Connection) {
     }
 
     def _recv_exact(n: int) -> bytes {
-        # Serve `n` bytes from the read buffer, refilling in large chunks. A
-        # message's 5-byte header and body then come from one recv, and the
-        # several backend messages answering one pipelined statement batch into
-        # a single recv - one syscall per refill instead of two per message.
         while (len(self._rbuf) - self._rpos) < n {
             if self._rpos == len(self._rbuf) {
-                self._rbuf = bytes()           # fully drained: reset, no copy
+                self._rbuf = bytes()
                 self._rpos = 0
             } else if self._rpos > 0 {
-                self._rbuf = self._rbuf[self._rpos:]   # drop consumed prefix
+                self._rbuf = self._rbuf[self._rpos:]
                 self._rpos = 0
             }
             chunk: bytes = self._recv_chunk(65536)
@@ -283,8 +241,6 @@ class PgConnection(Connection) {
         return PgMsg(hdr[0], payload)
     }
 
-    # Extract the human-readable 'M' field from an ErrorResponse payload (a
-    # sequence of <code byte><cstring> fields, terminated by a 0 byte).
     def _error_text(payload: bytes) -> str {
         o: int = 0
         msg: str = "postgres error"
@@ -297,25 +253,20 @@ class PgConnection(Connection) {
             }
             val: str = payload[start:o].decode("utf-8")
             o = o + 1
-            if code == 77 {            # 'M' - primary human-readable message
+            if code == 77 {
                 msg = val
             }
         }
         return msg
     }
 
-    #--- SCRAM-SHA-256 authentication --------------------------------------#
-
     def _authenticate(user: str, password: str, dbname: str) {
-        # StartupMessage: protocol 196608 (3.0) + key/value params + final NUL.
         params: bytes = "user".encode("utf-8") + NUL + user.encode("utf-8") + NUL + "database".encode("utf-8") + NUL + dbname.encode("utf-8") + NUL + NUL
         body: bytes = _be32(196608) + params
         self._send(_be32(4 + len(body)) + body)
 
-        # Expect AuthenticationSASL (R, code 10) advertising SCRAM-SHA-256.
         self._read_msg()
 
-        # client-first
         nonce: str = secrets.token_hex(18)
         client_first_bare: str = "n=,r=" + nonce
         client_first: str = "n,," + client_first_bare
@@ -323,16 +274,13 @@ class PgConnection(Connection) {
         sasl_init: bytes = "SCRAM-SHA-256".encode("utf-8") + NUL + _be32(len(cf)) + cf
         self._send(_msg(FE_PASSWORD, sasl_init))
 
-        # server-first: AuthenticationSASLContinue (R, code 11).
         m2: PgMsg = self._read_msg()
-        sfirst: str = m2.payload[4:].decode("utf-8")     # skip the 4-byte auth code
+        sfirst: str = m2.payload[4:].decode("utf-8")
         sparts: list[str] = sfirst.split(",")
         srv_nonce: str = sparts[0][2:]
         salt: bytes = b64decode(sparts[1][2:].encode("utf-8"))
         iters: int = int(sparts[2][2:])
 
-        # Proof. SaltedPassword = PBKDF2(password, salt, iters); the rest is the
-        # standard SCRAM client-proof construction (RFC 5802).
         salted: bytes = pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iters)
         client_key: bytes = hmac_digest(salted, "Client Key".encode("utf-8"), "sha256")
         stored_key: bytes = sha256(client_key).digest()
@@ -343,7 +291,6 @@ class PgConnection(Connection) {
         client_final: bytes = client_final_bare.encode("utf-8") + ",p=".encode("utf-8") + b64encode(proof)
         self._send(_msg(FE_PASSWORD, client_final))
 
-        # server-final: AuthenticationSASLFinal (R, code 12) carries v=ServerSignature.
         m3: PgMsg = self._read_msg()
         if m3.mtype == BE_ERROR {
             raise ConnectionError(self._error_text(m3.payload))
@@ -356,8 +303,6 @@ class PgConnection(Connection) {
             raise ConnectionError("postgres: server signature verification failed")
         }
 
-        # Drain AuthenticationOk + ParameterStatus/BackendKeyData until the
-        # first ReadyForQuery; surface any ErrorResponse along the way.
         ready: bool = False
         while not ready {
             m: PgMsg = self._read_msg()
@@ -369,10 +314,6 @@ class PgConnection(Connection) {
         }
     }
 
-    #--- Query execution ----------------------------------------------------#
-
-    # Rewrite the dialect-free canonical `$$N` placeholders to Postgres's
-    # `$N+1`. Descending N avoids the `$$1`-is-a-prefix-of-`$$10` hazard.
     def _to_pg(canonical: str, nparams: int) -> str {
         sql: str = canonical
         k: int = nparams - 1
@@ -383,8 +324,6 @@ class PgConnection(Connection) {
         return sql
     }
 
-    # TEXT-format encoding of one bound parameter. None is handled by the
-    # caller (it sends an Int32 length of -1 with no bytes).
     def _param_text(p: Any) -> str {
         if isinstance(p, bool) {
             b: bool = p
@@ -425,12 +364,6 @@ class PgConnection(Connection) {
         return "drs" + str(n)
     }
 
-    # Build the whole extended-protocol pipeline for one statement into a single
-    # buffer and send it in ONE write (vs five separate sends), then read the
-    # response stream. `parse` controls whether a Parse precedes the Bind - for a
-    # cached named statement the Parse is sent only on first use. Collects result
-    # rows (typed by column oids) and records the CommandComplete affected-row
-    # count in self._affected.
     def _pipeline(name: str, sql: str, params: list[Any], parse: bool) -> list[dict[str, Any]] {
         np: int = len(params)
         nb: bytes = name.encode("utf-8")
@@ -438,8 +371,6 @@ class PgConnection(Connection) {
         if parse {
             out = out + _msg(FE_PARSE, nb + NUL + sql.encode("utf-8") + NUL + _be16(0))
         }
-        # Bind: unnamed portal, statement `name`, 0 param-format codes (=> all
-        # text), then the params, then 0 result-format codes (=> all text).
         bind: bytes = NUL + nb + NUL + _be16(0) + _be16(np)
         i: int = 0
         while i < np {
@@ -448,16 +379,16 @@ class PgConnection(Connection) {
                 pv: bytes = self._param_text(p).encode("utf-8")
                 bind = bind + _be32(len(pv)) + pv
             } else {
-                bind = bind + _be32(0xFFFFFFFF)    # NULL - Int32 length of -1
+                bind = bind + _be32(0xFFFFFFFF)
             }
             i = i + 1
         }
         bind = bind + _be16(0)
         out = out + _msg(FE_BIND, bind)
-        out = out + _msg(FE_DESCRIBE, "P".encode("utf-8") + NUL)   # describe portal
-        out = out + _msg(FE_EXECUTE, NUL + _be32(0))               # unlimited rows
+        out = out + _msg(FE_DESCRIBE, "P".encode("utf-8") + NUL)
+        out = out + _msg(FE_EXECUTE, NUL + _be32(0))
         out = out + _msg(FE_SYNC, bytes())
-        self._send(out)                                            # one syscall
+        self._send(out)
 
         names: list[str] = []
         oids: list[int] = []
@@ -478,8 +409,6 @@ class PgConnection(Connection) {
                     }
                     names.append(p[start:o].decode("utf-8"))
                     o = o + 1
-                    # field layout past the name NUL: tableoid(4) colno(2)
-                    # typeoid(4) typelen(2) typemod(4) format(2) - typeoid at +6.
                     oids.append(_rd_u32(p, o + 6))
                     o = o + 18
                     f = f + 1
@@ -514,8 +443,6 @@ class PgConnection(Connection) {
                 }
                 rows.append(row)
             } else if m.mtype == BE_COMMAND_COMPLETE {
-                # Tag like "INSERT 0 5" / "UPDATE 3" / "DELETE 2" / "SELECT 7":
-                # the trailing token is the affected/returned row count.
                 tag: str = m.payload[0:len(m.payload) - 1].decode("utf-8")
                 tparts: list[str] = tag.split(" ")
                 last: str = tparts[len(tparts) - 1]
@@ -525,7 +452,6 @@ class PgConnection(Connection) {
             } else if m.mtype == BE_READY_FOR_QUERY {
                 done = True
             } else if m.mtype == BE_ERROR {
-                # Drain to ReadyForQuery so the connection stays usable.
                 etext: str = self._error_text(m.payload)
                 draining: bool = True
                 while draining {
@@ -540,10 +466,6 @@ class PgConnection(Connection) {
         return rows
     }
 
-    # query()/exec() path: Parse a statement once per canonical text and reuse it
-    # by name on every later call (the SQL.hash field anticipates this cache).
-    # DDL / transaction-control go through exec_raw on the unnamed statement,
-    # since utility statements can't be reused as named prepared statements.
     def _run(canonical: str, params: list[Any]) -> list[dict[str, Any]] {
         if canonical in self._stmt_cache {
             return self._pipeline(self._stmt_cache[canonical], "", params, False)
@@ -555,20 +477,11 @@ class PgConnection(Connection) {
         return rows
     }
 
-    # run - one extended-protocol round-trip via _run, which captures both the
-    # result rows and the CommandComplete affected-row count (self._affected).
-    # Postgres has no implicit last-insert-id; the portable idiom is
-    # `INSERT ... RETURNING id`, whose returned row _run captures - _returned_id
-    # surfaces it as `xid` (0 without a RETURNING clause). No extra round-trip.
     def run(sql: SQL) -> Results {
         rows: list[dict[str, Any]] = self._run(sql.canonical, sql.params)
         return Results(rows, self._returned_id(rows), self._affected)
     }
 
-    # Extract a last-insert-id from the rows produced by a RETURNING clause.
-    # Prefers a column literally named "id" (the conventional `RETURNING id`);
-    # otherwise falls back to the first column of the first row. Non-integer
-    # returned values (or no rows) yield 0.
     def _returned_id(rows: list[dict[str, Any]]) -> int {
         if len(rows) == 0 {
             return 0
@@ -593,10 +506,6 @@ class PgConnection(Connection) {
         return 0
     }
 
-    # raw - the explicit escape hatch: verbatim text through the extended
-    # protocol with an empty parameter list (DDL / maintenance / transaction
-    # control). Unnamed statement, not cached: utility statements cannot be
-    # reused as named prepared statements.
     def raw(text: str) -> Results {
         self._pipeline("", text, [], True)
         empty: list[dict[str, Any]] = []
@@ -604,10 +513,6 @@ class PgConnection(Connection) {
     }
 
     def close() -> int {
-        # Terminate ('X' = 88), then tear down TLS (if any) + the socket.
-        # SSLSocket.close() does the graceful close_notify, frees the conn
-        # exactly once (it nulls its own handle; the own release at death is
-        # null-gated), and closes the underlying TcpStream.
         self._send(_msg(88, bytes()))
         if self.tls_conn != none {
             self.tls_sock.close()

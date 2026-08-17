@@ -1,15 +1,3 @@
-# test/dr/test_drs_hardening.dr - D022/D023 untrusted-manifest hardening.
-#
-# A dependency's dragon.drs is evaluated by the package resolver BEFORE the
-# package is trusted, so an `include`/`for` in it runs on the consumer's
-# machine. These tests pin the guards added for that threat:
-#  - range(N) is capped so a manifest cannot generate an unbounded list
-#  (memory/CPU exhaustion);
-#  - includes are rejected when parsing from a string (no filesystem anchor);
-#  - file includes are confined to the document's own directory - no absolute
-#  path and no parent-directory (`..`) traversal out of the package.
-# Legit small ranges and same-directory includes must still work.
-
 from unittest import TestCase, main
 from drs import loads, load
 from io import make
@@ -17,8 +5,6 @@ from tempfile import mkdtemp
 from os import makedirs
 from os.path import join
 
-# Failure-path helpers: bare module-level zero-arg fns handed to assertRaises,
-# so the raise unwinds cleanly without a capturing closure on the path.
 def _range_bomb() -> None {
     d: dict[str, Any] = loads("{\n  xs = for i in range(99999999) { i }\n}")
 }
@@ -26,8 +12,6 @@ def _include_from_string() -> None {
     d: dict[str, Any] = loads("include 'x.drs'\n{\n  a = 1\n}")
 }
 
-# One temp package dir, built once and shared. base.drs is a sibling include
-# (legit); evil_abs.drs / sub/evil_parent.drs are the traversal attacks.
 def _setup_dir() -> str {
     d: str = mkdtemp("drs_harden_", "")
     makedirs(join(d, "sub"))

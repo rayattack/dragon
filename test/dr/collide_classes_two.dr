@@ -56,7 +56,6 @@ def two_point() -> str {
 
 
 def probe_two() -> str {
-    # one's Boom must pass through this module's `except Boom`.
     try {
         throw_one()
     } except Boom as e {

@@ -20,7 +20,7 @@ class CodecTests(TestCase) {
         const s: str = "café ☃ 🐉"
         const b: bytes = s.encode()
         self.assertEqual(b.decode(), s)
-        self.assertEqual(len(b), 14)            # UTF-8 byte length
+        self.assertEqual(len(b), 14)
     }
 
     def test_decode_strict_raises_on_invalid() {
@@ -37,7 +37,7 @@ class CodecTests(TestCase) {
     def test_decode_replace() {
         const bad: bytes = bytes([0xFF, 0xFE, 0x41])
         const r: str = bad.decode("utf-8", "replace")
-        self.assertEqual(len(r), 3)             # U+FFFD, U+FFFD, 'A'
+        self.assertEqual(len(r), 3)
     }
 
     def test_ascii_encode_strict_raises() {
@@ -87,7 +87,6 @@ class ReaderWriterTests(TestCase) {
             w.write("second\n")
         }
         self.assertEqual(open(p).text(), "first\nsecond\n")
-        # make() truncates the prior content.
         with make(p) as w {
             w.write("fresh\n")
         }
@@ -98,18 +97,16 @@ class ReaderWriterTests(TestCase) {
         const p: str = "/tmp/dragon_test_rw_c.bin"
         const raw: bytes = bytes([0, 255, 128, 65, 10])
         with make(p) as w {
-            const n: int = w.write(raw)         # bytes overload
+            const n: int = w.write(raw)
             self.assertEqual(n, 5)
         }
         const back: bytes = open(p).bytes()
         self.assertEqual(len(back), 5)
-        self.assertEqual(back[1], 255)          # 0xFF preserved (no codec)
+        self.assertEqual(back[1], 255)
         self.assertEqual(back[3], 65)
     }
 
     def test_write_str_and_bytes_overload() {
-        # write(str) UTF-8-encodes; write(bytes) is verbatim. For an ASCII
-        # payload both land the same three bytes on disk.
         const ps: str = "/tmp/dragon_test_rw_s.txt"
         const pb: str = "/tmp/dragon_test_rw_d.bin"
         with make(ps) as w {
@@ -121,7 +118,7 @@ class ReaderWriterTests(TestCase) {
         self.assertEqual(open(ps).text(), "ABC")
         const bb: bytes = open(pb).bytes()
         self.assertEqual(len(bb), 3)
-        self.assertEqual(bb[0], 65)             # 'A'
+        self.assertEqual(bb[0], 65)
     }
 
     def test_lines_and_streaming_line() {
@@ -174,11 +171,11 @@ class ReaderWriterTests(TestCase) {
             w.write("data")
         }
         const r: Reader = open(p)
-        const first: str = r.text()             # consumes + self-closes
+        const first: str = r.text()
         self.assertEqual(first, "data")
         self.assertTrue(r.closed)
-        self.assertEqual(r.text(), "")          # spent reader yields empty
-        const z: int = r.close()                # idempotent: no double fclose
+        self.assertEqual(r.text(), "")
+        const z: int = r.close()
         self.assertEqual(z, 0)
     }
 
@@ -206,9 +203,9 @@ class BytesIOTests(TestCase) {
     }
 
     def test_initial_and_overwrite() {
-        const bio: BytesIO = BytesIO(bytes([65, 66, 67]))   # ABC
+        const bio: BytesIO = BytesIO(bytes([65, 66, 67]))
         bio.seek(1)
-        bio.write(bytes([90]))                              # overwrite B -> Z
+        bio.write(bytes([90]))
         self.assertEqual(bio.getvalue().decode(), "AZC")
     }
 
@@ -235,7 +232,7 @@ class StringIOTests(TestCase) {
     def test_overwrite_at_cursor() {
         const sio: StringIO = StringIO("hello")
         sio.write("XY")
-        self.assertEqual(sio.getvalue(), "XYllo")          # Python parity
+        self.assertEqual(sio.getvalue(), "XYllo")
     }
 
     def test_read_and_readline() {

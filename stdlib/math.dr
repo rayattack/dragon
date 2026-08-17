@@ -1,11 +1,4 @@
-# math.dr - Dragon standard library: mathematical functions
-#
-# Wraps libm via extern "C". All functions use float (f64) arguments.
-# Constants are module-level globals.
-
-#===----------------------------------------------------------------------===#
-# Constants
-#===----------------------------------------------------------------------===#
+"""Wraps libm via extern "C"; all functions take float (f64) arguments."""
 
 const pi: float = 3.14159265358979323846
 const e: float = 2.71828182845904523536
@@ -13,11 +6,6 @@ const tau: float = 6.28318530717958647692
 const inf: float = 1.0e308 * 10.0
 const nan: float = 0.0 / 0.0
 
-#===----------------------------------------------------------------------===#
-# Core libm functions (extern "C")
-#===----------------------------------------------------------------------===#
-
-# Basic operations
 extern "C" def sqrt(x: float) -> float
 extern "C" def fabs(x: float) -> float
 extern "C" def fmod(x: float, y: float) -> float
@@ -33,7 +21,6 @@ extern "C" def log1p(x: float) -> float
 extern "C" def cbrt(x: float) -> float
 extern "C" def hypot(x: float, y: float) -> float
 
-# Trigonometric
 extern "C" def sin(x: float) -> float
 extern "C" def cos(x: float) -> float
 extern "C" def tan(x: float) -> float
@@ -42,7 +29,6 @@ extern "C" def acos(x: float) -> float
 extern "C" def atan(x: float) -> float
 extern "C" def atan2(y: float, x: float) -> float
 
-# Hyperbolic
 extern "C" def sinh(x: float) -> float
 extern "C" def cosh(x: float) -> float
 extern "C" def tanh(x: float) -> float
@@ -50,21 +36,15 @@ extern "C" def asinh(x: float) -> float
 extern "C" def acosh(x: float) -> float
 extern "C" def atanh(x: float) -> float
 
-# Rounding
 extern "C" def ceil(x: float) -> float
 extern "C" def floor(x: float) -> float
 extern "C" def trunc(x: float) -> float
 extern "C" def round(x: float) -> float
 extern "C" def copysign(x: float, y: float) -> float
 
-# Classification (return intc, but we normalize to int)
 extern "C" def isnan(x: float) -> intc
 extern "C" def isinf(x: float) -> intc
 extern "C" def isfinite(x: float) -> intc
-
-#===----------------------------------------------------------------------===#
-# Dragon wrappers - idiomatic API over libm
-#===----------------------------------------------------------------------===#
 
 def degrees(x: float) -> float {
     return x * 180.0 / pi
@@ -119,7 +99,7 @@ def lcm(a: int, b: int) -> int {
 }
 
 def factorial(n: int) -> int {
-    if n < 0 { return -1 }
+    if n < 0 { raise ValueError("factorial() not defined for negative values") }
     if n <= 1 { return 1 }
     result: int = 1
     i: int = 2
@@ -135,7 +115,6 @@ def comb(n: int, k: int) -> int {
     if k > n { return 0 }
     if k == 0 { return 1 }
     if k == n { return 1 }
-    # Use symmetry: C(n,k) = C(n,n-k)
     r: int = k
     if r > n - r { r = n - r }
     result: int = 1
@@ -160,7 +139,7 @@ def perm(n: int, k: int) -> int {
 }
 
 def isqrt(n: int) -> int {
-    if n < 0 { return -1 }
+    if n < 0 { raise ValueError("isqrt() argument must be nonnegative") }
     if n == 0 { return 0 }
     x: int = n
     y: int = (x + 1) // 2
@@ -172,8 +151,8 @@ def isqrt(n: int) -> int {
 }
 
 def log_int(x: int, base: int) -> int {
-    if x <= 0 { return -1 }
-    if base <= 1 { return -1 }
+    if x <= 0 { raise ValueError("math domain error") }
+    if base <= 1 { raise ValueError("math domain error") }
     result: int = 0
     val: int = x
     while val >= base {

@@ -37,7 +37,7 @@ statically linked the same way. Either way, nothing is fetched at build time.
 
 | Module | Purpose |
 |--------|---------|
-| `json` | JSON encode/decode/validate. Schema-directed `decode[T](bytes) -> T` / `encode[T](value) -> bytes` treat your class as the schema - synthesized per type at compile time, box-free, defaults/`Optional`/nesting honored, `ValueError` with byte offset on mismatch (also the FFI process-lane wire pair). Generic `dumps(obj)` / `loads -> Any` for the convenience tier, plus a *monomorphized* typed family (`dumps_int`, `loads_list_str`, ...) for scalar hot paths, public `Cursor` / `JsonWriter` for streaming irregular shapes, and a JSON Schema validator - the `Schema` class owns a registry: `register(name, schema)` compiles immediately, `validate(name, payload)` -> `ValidationResult`, schemas compose via `$ref` (Draft 7 subset; replaces the third-party `jsonschema` dependency). Also hosts the `JSON` `template` content type. |
+| `json` | JSON encode/decode/validate. Schema-directed `decode[T](bytes) -> T` / `encode[T](value) -> bytes` treat your class as the schema - synthesized per type at compile time, box-free, defaults/`Optional`/nesting honored, `ValueError` with byte offset on mismatch (also the FFI process-lane wire pair). Generic `dumps(obj)` / `loads -> Any` (bytes: `loadb`) for the convenience tier - a spelled-out `Any` in `decode[T]` (`decode[Any]`, `decode[dict[str, Any]]`, `decode[list[Any]]`) is the same boxed tier through the generic door - public `Cursor` / `JsonWriter` for streaming irregular shapes, and a JSON Schema validator - the `Schema` class owns a registry: `register(name, schema)` compiles immediately, `validate(name, payload)` -> `ValidationResult`, schemas compose via `$ref` (Draft 7 subset; replaces the third-party `jsonschema` dependency). Also hosts the `JSON` `template` content type. |
 | `csv` | CSV reading/writing with quoted fields, escaped quotes, configurable delimiters. Pure Dragon. |
 | `configparser` | INI-file parser - sections, `=`/`:` key-values, `#`/`;` comments, whitespace stripping. Pure Dragon. |
 | `tomllib` | Read-only TOML parser matching Python 3.11+ `tomllib` (practical subset; no arrays-of-tables, inline tables, multi-line strings, or datetimes). |
@@ -88,7 +88,7 @@ statically linked the same way. Either way, nothing is fetched at build time.
 | `fileinput` | Iterate over lines from many input streams as one stream, matching Python's `fileinput`. |
 | `linecache` | Cache lines from text files for line-number lookup, matching Python's `linecache`. |
 | `mimetypes` | Guess a file's MIME type from its name/extension. Pure Dragon. |
-| `io` | File I/O - a `File` class with context-manager support over C stdio. |
+| `io` | File I/O - `open`/`make`/`push` return `with`-scoped `Reader`/`Writer` (plus `BytesIO`/`StringIO`); no mode strings (ADR 050). |
 | `tempfile` | Temporary file and directory creation over POSIX/libc. |
 | `getpass` | Portable no-echo password input and current-user lookup over a native terminal shim plus libc. |
 | `subprocess` | Spawn child processes with pipe capture - a Python-parity subset over a native spawn plus a `poll(2)` pump. |
@@ -186,7 +186,7 @@ See [Desktop Applications](/docs/1801-desktop-overview) for the full guide.
 
 | Module | Purpose |
 |--------|---------|
-| `ui` | Dragon's desktop UI toolkit (the design spec) - the `App` lifecycle/main loop and reactive `Signal` primitives. Views are `template[HTML]`; the renderer is the OS webview. |
+| `ui` | Dragon's desktop UI toolkit (the design spec) - the `App` lifecycle/main loop, reactive `Signal` primitives, and the `rpc` bridge page script calls by name. Views are `template[HTML]`; the renderer is the OS webview, assets embed behind `app://`. |
 | `ui.desktop` | The platform `Window` and native shell bindings beneath `ui` (webview host). |
 
 ## A note on coverage

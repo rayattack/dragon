@@ -1,15 +1,3 @@
-# test/dr/test_archive_traversal.dr - Extraction containment for tar and zip.
-#
-# An archive member name is attacker-controlled data. A name like
-# "../../evil" must never place bytes outside the directory the caller asked
-# to extract into. CPython carried this defect for 15 years (CVE-2007-4559)
-# because extract() joined the member name onto the destination and trusted
-# the result.
-#
-# These tests pin the contract from the caller's side: after attempting to
-# extract a hostile archive, the escape target does not exist, and the
-# attempt was refused loudly rather than skipped quietly.
-
 from unittest import TestCase, main
 from tarfile import open as tar_open, TarFile, TarInfo
 from zipfile import open as zip_open, ZipFile
@@ -18,7 +6,6 @@ from os.path import exists, join
 from os import makedirs
 
 
-# Build a one-member archive whose name walks out of the extraction root.
 def _write_hostile_tar(path: str, member_name: str) {
     const t: TarFile = tar_open(path, "w")
     info: TarInfo = TarInfo(member_name)
@@ -31,8 +18,6 @@ def _write_hostile_tar(path: str, member_name: str) {
 
 class TarTraversalTests(TestCase) {
     def test_dotdot_member_is_refused() {
-        # The caller asks for extraction under <tmp>/root/deep/deeper.
-        # The member name reaches two levels above that.
         const tmp: str = mkdtemp("dragon-slip-", "")
         const deep: str = join(join(tmp, "root"), join("deep", "deeper"))
         makedirs(deep)
@@ -46,16 +31,11 @@ class TarTraversalTests(TestCase) {
         self.assertRaises(ValueError, run)
         t.close()
 
-        # The decisive assertion: nothing landed outside the requested root.
         self.assertFalse(exists(join(join(tmp, "root"), "ESCAPED.txt")),
                          "member escaped the extraction directory")
     }
 
     def test_absolute_member_is_refused() {
-        # An absolute member name must not be honoured either. Today it is
-        # contained only because Dragon's os.path.join concatenates instead
-        # of resetting on an absolute right-hand side - an accident that a
-        # future parity fix to join() would silently undo.
         const tmp: str = mkdtemp("dragon-slip-abs-", "")
         const dest: str = join(tmp, "dest")
         makedirs(dest)
@@ -74,8 +54,6 @@ class TarTraversalTests(TestCase) {
     }
 
     def test_ordinary_member_still_extracts() {
-        # The guard must not break the normal case. A plain relative name,
-        # including one with a subdirectory, still lands where asked.
         const tmp: str = mkdtemp("dragon-ok-", "")
         const dest: str = join(tmp, "dest")
         makedirs(dest)
@@ -91,9 +69,6 @@ class TarTraversalTests(TestCase) {
     }
 
     def test_interior_dotdot_that_stays_inside_is_allowed() {
-        # "sub/../ok.txt" normalises to "ok.txt", which is inside the root.
-        # Containment is decided on the resolved path, not on the presence
-        # of the characters "..", so this must still extract.
         const tmp: str = mkdtemp("dragon-interior-", "")
         const dest: str = join(tmp, "dest")
         makedirs(dest)

@@ -51,7 +51,6 @@ bool PythonMigrator::migrate(const std::string& inputFile,
 }
 
 std::string PythonMigrator::migrateSource(const std::string& source) {
-    // Parse as Python (indent mode)
     LexerOptions lexOpts;
     lexOpts.useBraceBlocks = false;
     Lexer lexer(source, lexOpts);
@@ -106,7 +105,6 @@ void PythonMigrator::addTypeAnnotations(Module& module) {
 }
 
 void PythonMigrator::convertBlocksToBraces(Module&) {
-    // Block conversion is handled at emission time, not AST level
 }
 
 void PythonMigrator::validateDragonCompatibility(Module& module) {
@@ -120,10 +118,6 @@ void PythonMigrator::validateDragonCompatibility(Module& module) {
         }
     }
 }
-
-//===----------------------------------------------------------------------===//
-// Dragon Code Emission
-//===----------------------------------------------------------------------===//
 
 static std::string ind(int level) {
     return std::string(level * 4, ' ');
@@ -293,7 +287,6 @@ std::string PythonMigrator::emitType(TypeExpr* type) {
     return "Any";
 }
 
-// Helper to emit a block of statements (with braces or indent)
 static std::string emitBlockHelper(PythonMigrator* self, const std::vector<std::unique_ptr<Stmt>>& stmts,
                                    int level, bool useBraces) {
     std::string out;
@@ -424,7 +417,7 @@ std::string PythonMigrator::emitStmt(Stmt* stmt, int level) {
             if (p.defaultValue) out += " = " + emitExpr(p.defaultValue.get());
         }
         out += ")";
-        if (func->returnType) out += " : " + emitType(func->returnType.get());
+        if (func->returnType) out += " -> " + emitType(func->returnType.get());
         out += emitBlockHelper(this, func->body, level, useBraces);
         out += "\n";
         return out;
@@ -524,4 +517,4 @@ std::string PythonMigrator::emitStmt(Stmt* stmt, int level) {
     return ind(level) + "# <unknown statement>\n";
 }
 
-} // namespace dragon
+}

@@ -1,0 +1,106 @@
+from unittest import TestCase, main
+
+
+def _min_empty_int() {
+    xs: list[int] = []
+    min(xs)
+}
+
+
+def _max_empty_float() {
+    xs: list[float] = []
+    max(xs)
+}
+
+
+def _min_empty_str() {
+    xs: list[str] = []
+    min(xs)
+}
+
+
+class MinMaxSumTypedTests(TestCase) {
+    def test_sum_float() {
+        self.assertAlmostEqual(sum([1.5, 2.5]), 4.0)
+        self.assertAlmostEqual(sum([0.5, 0.25, -0.75]), 0.0)
+    }
+
+    def test_min_max_float() {
+        self.assertAlmostEqual(min([3.0, 1.5, 2.0]), 1.5)
+        self.assertAlmostEqual(max([-1.5, -2.5]), -1.5)
+        self.assertAlmostEqual(min([-0.5, 0.25]), -0.5)
+    }
+
+    def test_min_max_str() {
+        self.assertEqual(min(["banana", "apple", "cherry"]), "apple")
+        self.assertEqual(max(["banana", "apple", "cherry"]), "cherry")
+        self.assertEqual(min(["b", "a", "c"]) + max(["b", "a", "c"]), "ac")
+    }
+
+    def test_int_paths_unchanged() {
+        self.assertEqual(sum([1, 2, 3]), 6)
+        self.assertEqual(min([3, 1, 2]), 1)
+        self.assertEqual(max([3, 1, 2]), 3)
+        xs: list[int] = []
+        self.assertEqual(sum(xs), 0)
+    }
+
+    def test_empty_raises() {
+        self.assertRaises(ValueError, _min_empty_int)
+        self.assertRaises(ValueError, _max_empty_float)
+        self.assertRaises(ValueError, _min_empty_str)
+    }
+}
+
+
+class SortedLargeTests(TestCase) {
+    def test_sorted_large_int() {
+        xs: list[int] = []
+        i: int = 0
+        while i < 5000 {
+            xs.append((i * 7919) % 1000)
+            i = i + 1
+        }
+        const ys: list[int] = sorted(xs)
+        self.assertEqual(len(ys), 5000)
+        self.assertEqual(ys[0], 0)
+        self.assertEqual(ys[4999], 999)
+        j: int = 1
+        ordered: bool = true
+        while j < 5000 {
+            if ys[j - 1] > ys[j] { ordered = false }
+            j = j + 1
+        }
+        self.assertTrue(ordered)
+    }
+
+    def test_sorted_float_and_str() {
+        const fs: list[float] = sorted([2.5, -1.5, 0.0, -1.5])
+        self.assertAlmostEqual(fs[0], -1.5)
+        self.assertAlmostEqual(fs[1], -1.5)
+        self.assertAlmostEqual(fs[3], 2.5)
+        const ss: list[str] = sorted(["b", "a", "c"])
+        self.assertEqual(ss[0], "a")
+        self.assertEqual(ss[2], "c")
+    }
+
+    def test_sort_reverse_large() {
+        xs: list[int] = []
+        i: int = 0
+        while i < 3000 {
+            xs.append((i * 31) % 500)
+            i = i + 1
+        }
+        xs.sort(reverse=true)
+        j: int = 1
+        ordered: bool = true
+        while j < 3000 {
+            if xs[j - 1] < xs[j] { ordered = false }
+            j = j + 1
+        }
+        self.assertTrue(ordered)
+    }
+}
+
+
+main([MinMaxSumTypedTests(), SortedLargeTests()])

@@ -11,7 +11,6 @@ void initialize() {
 }
 
 void shutdown() {
-    // LLVM handles cleanup automatically via static destructors
 }
 
-} // namespace dragon
+}

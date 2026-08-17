@@ -1,19 +1,6 @@
-# operator.dr - function versions of Python operators
-#
-# Mirrors CPython's `operator` module: arithmetic, comparison, logical, and
-# sequence operators surfaced as plain functions that can be passed to higher
-# order constructs (functools.reduce, sorted's key, map/filter).
-#
-# Dragon's static typing forces monomorphic signatures, so the arithmetic and
-# comparison ops are provided as `int` variants (the common case). Float and
-# string variants are exposed under suffixed names where the operator is
-# ambiguous; they keep the same semantics as Python's `__add__` / `__lt__`.
-#
-# Pure Dragon - no C dependencies.
-
-#===----------------------------------------------------------------------===#
-# Comparison operators
-#===----------------------------------------------------------------------===#
+"""Mirrors CPython's `operator` module as plain functions (for reduce/sorted-key/map).
+Static typing forces monomorphic signatures: `int` is the default, float/str get suffixed names.
+"""
 
 def lt(a: int, b: int) -> bool { return a < b }
 def le(a: int, b: int) -> bool { return a <= b }
@@ -36,10 +23,6 @@ def ne_s(a: str, b: str) -> bool { return a != b }
 def gt_s(a: str, b: str) -> bool { return a > b }
 def ge_s(a: str, b: str) -> bool { return a >= b }
 
-#===----------------------------------------------------------------------===#
-# Logical operators
-#===----------------------------------------------------------------------===#
-
 def not_(a: bool) -> bool { return not a }
 
 def truth(a: int) -> bool { return a != 0 }
@@ -47,10 +30,6 @@ def truth_s(a: str) -> bool { return len(a) > 0 }
 
 def is_(a: int, b: int) -> bool { return a == b }
 def is_not(a: int, b: int) -> bool { return a != b }
-
-#===----------------------------------------------------------------------===#
-# Arithmetic operators (int)
-#===----------------------------------------------------------------------===#
 
 def add(a: int, b: int) -> int { return a + b }
 def sub(a: int, b: int) -> int { return a - b }
@@ -76,10 +55,6 @@ def rshift(a: int, b: int) -> int { return a >> b }
 
 def index(a: int) -> int { return a }
 
-#===----------------------------------------------------------------------===#
-# Arithmetic operators (float)
-#===----------------------------------------------------------------------===#
-
 def add_f(a: float, b: float) -> float { return a + b }
 def sub_f(a: float, b: float) -> float { return a - b }
 def mul_f(a: float, b: float) -> float { return a * b }
@@ -90,10 +65,6 @@ def abs_f(a: float) -> float {
     if a < 0.0 { return -a }
     return a
 }
-
-#===----------------------------------------------------------------------===#
-# Sequence / string operators
-#===----------------------------------------------------------------------===#
 
 def concat(a: str, b: str) -> str { return a + b }
 
@@ -119,7 +90,6 @@ def countOf(seq: list[int], val: int) -> int {
 }
 
 def indexOf(seq: list[int], val: int) -> int {
-    # First index where seq[i] == val. ValueError if not found.
     i: int = 0
     while i < len(seq) {
         if seq[i] == val { return i }
@@ -132,13 +102,6 @@ def length_hint(seq: list[int], default: int = 0) -> int { return len(seq) }
 
 def getitem(seq: list[int], idx: int) -> int { return seq[idx] }
 def setitem(seq: list[int], idx: int, val: int) -> None { seq[idx] = val }
-
-#===----------------------------------------------------------------------===#
-# In-place operators
-#===----------------------------------------------------------------------===#
-# Pure-functional shape: each returns the new value (Dragon's lists/dicts are
-# mutated through their own methods, so iadd/isub on int returns the result
-# matching `a += b` semantics).
 
 def iadd(a: int, b: int) -> int { return a + b }
 def isub(a: int, b: int) -> int { return a - b }

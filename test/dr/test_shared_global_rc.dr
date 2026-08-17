@@ -43,11 +43,8 @@ layout while doing it
 
 from unittest import TestCase, main
 
-# const str, runtime-computed (NOT a literal): immortal-promoted at store.
 const CSTR: str = str(8091) + "/runtime/computed"
-# const str from a literal: stays immortal-promoted (pre-existing behavior).
 const CLIT: str = "just a literal"
-# const containers: deep-marked at store.
 const CLIST: list[int] = [1, 2, 3, 4, 5]
 const CDICT_INT: dict[int, str] = {1: "alpha", 2: "beta"}
 const CDICT_STR: dict[str, list[int]] = {"xs": [10, 20], "ys": [30]}
@@ -67,18 +64,14 @@ class Cfg {
 }
 
 
-# const instance: deep-marked through the per-class walker (str + list fields).
 const CINST: Cfg = Cfg("cfg" + str(1), [10, 20, 30])
 
-# Non-const globals: mark_shared at init AND at every reassignment.
 GSTR: str = "start" + str(0)
 GDICT: dict[str, int] = {"one": 1, "two": 2}
 
 
 class SharedGlobalRcTests(TestCase) {
     def test_const_runtime_str_survives_repeated_copies() {
-        # Copying a global str to a local increfs it; on the immortal-promoted
-        # const this is a no-op. A torn/freed value would corrupt the reads.
         i: int = 0
         while i < 2000 {
             v: str = CSTR
@@ -90,7 +83,6 @@ class SharedGlobalRcTests(TestCase) {
     }
 
     def test_const_list_copy_like_a_handler() {
-        # The exact h_copy pattern from the crashing server, minus the vthreads.
         i: int = 0
         while i < 2000 {
             const x: list[int] = CLIST
@@ -101,9 +93,6 @@ class SharedGlobalRcTests(TestCase) {
     }
 
     def test_int_keyed_dict_global_marks_without_wild_read() {
-        # Regression proper: before the keys_are_ptr gate in shared_walk_dict,
-        # marking THIS global at startup read the int key 1 as a string header
-        # and crashed the whole file.
         self.assertEqual(CDICT_INT[1], "alpha")
         const d: dict[int, str] = CDICT_INT
         self.assertEqual(d[2], "beta")
@@ -111,7 +100,6 @@ class SharedGlobalRcTests(TestCase) {
     }
 
     def test_nested_dict_global_bfs() {
-        # dict -> list values walked via the worklist; values must be intact.
         const xs: list[int] = CDICT_STR["xs"]
         self.assertEqual(xs[1], 20)
         self.assertEqual(CDICT_STR["ys"][0], 30)
@@ -125,7 +113,6 @@ class SharedGlobalRcTests(TestCase) {
     }
 
     def test_instance_global_fields_intact() {
-        # Per-class mark walker visits str + list fields; values must survive.
         self.assertEqual(CINST.get_name(), "cfg1")
         self.assertEqual(CINST.vals[2], 30)
         const v: list[int] = CINST.vals
@@ -133,8 +120,6 @@ class SharedGlobalRcTests(TestCase) {
     }
 
     def test_nonconst_str_reassignment_marks_new_value() {
-        # Assign-path marking: the replacement value is global-reachable and
-        # must be marked (never immortalized: the slot is reassignable).
         global GSTR
         self.assertEqual(GSTR, "start0")
         GSTR = "second" + str(2)
@@ -144,8 +129,6 @@ class SharedGlobalRcTests(TestCase) {
     }
 
     def test_tombstoned_dict_marks_dead_slots_skipped() {
-        # pop() leaves a dead dense slot (key/value cleared). Assigning the
-        # dict to a global re-marks it; the walker must skip the tombstone.
         global GDICT
         d: dict[str, int] = {"a": 1, "b": 2, "c": 3}
         d.pop("b")

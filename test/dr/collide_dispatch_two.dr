@@ -1,0 +1,89 @@
+"""Same Worker / WorkerIter names and layouts as collide_dispatch_one.dr;
+the method bodies stamp module two."""
+
+LOG: list[str] = []
+
+
+class Worker {
+    def() {
+        self.tag: str = "two-tag"
+    }
+
+    def run() -> str {
+        return "two:" + self.tag
+    }
+
+    def log_run() -> str {
+        entry: str = "two:" + self.tag
+        LOG.append(entry)
+        return entry
+    }
+}
+
+
+class WorkerIter {
+    def() {
+        self.i: int = 0
+    }
+
+    def __iter__() -> WorkerIter {
+        return self
+    }
+
+    def __next__() -> Worker {
+        if self.i >= 1 {
+            raise StopIteration("done")
+        }
+        self.i = self.i + 1
+        return Worker()
+    }
+}
+
+
+def two_direct() -> str {
+    out: str = ""
+    for w in WorkerIter() {
+        out = w.run()
+    }
+    return out
+}
+
+
+def two_defer() -> str {
+    before: int = len(LOG)
+    for w in WorkerIter() {
+        defer w.log_run()
+    }
+    if len(LOG) == before {
+        return "missing"
+    }
+    return LOG[len(LOG) - 1]
+}
+
+
+def two_make_iter() -> WorkerIter {
+    return WorkerIter()
+}
+
+
+def two_log_last() -> str {
+    if len(LOG) == 0 {
+        return "empty"
+    }
+    return LOG[len(LOG) - 1]
+}
+
+
+def two_log_len() -> int {
+    return len(LOG)
+}
+
+
+def two_fire() -> str {
+    out: str = ""
+    for w in WorkerIter() {
+        t: Task[str] = fire w.run()
+        out = t.join()
+    }
+    return out
+}

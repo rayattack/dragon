@@ -1,0 +1,106 @@
+"""json.escape control-character handling (RFC 8259 §7).
+
+escape() used to emit control bytes raw: JsonWriter.write_str(chr(8)) produced
+a literal 0x08 between the quotes, so encode[T] emitted JSON that strict
+parsers reject while dumps() (the C runtime walker) escaped it correctly.
+These tests pin the fixed behavior: every byte under 0x20 leaves escape() as
+\b \f \n \r \t or \u00XX, both spellings of escape agree, and the encode/decode
+round trip preserves control characters.
+"""
+
+from unittest import TestCase, main
+from json import escape, unescape, loads, JsonWriter, encode, decode, JSON
+
+
+class Note {
+    def(body: str) {
+        self.body = body
+    }
+}
+
+
+class EscapeControlTests(TestCase) {
+    def test_named_short_forms() {
+        self.assertEqual(escape(chr(8)), "\\b")
+        self.assertEqual(escape(chr(12)), "\\f")
+        self.assertEqual(escape("\n"), "\\n")
+        self.assertEqual(escape("\r"), "\\r")
+        self.assertEqual(escape("\t"), "\\t")
+    }
+
+    def test_other_controls_become_u00xx() {
+        self.assertEqual(escape(chr(0)), "\\u0000")
+        self.assertEqual(escape(chr(1)), "\\u0001")
+        self.assertEqual(escape(chr(27)), "\\u001b")
+        self.assertEqual(escape(chr(31)), "\\u001f")
+    }
+
+    def test_quote_and_backslash() {
+        self.assertEqual(escape("a\"b"), "a\\\"b")
+        self.assertEqual(escape("a\\b"), "a\\\\b")
+    }
+
+    def test_clean_string_unchanged() {
+        self.assertEqual(escape("plain text, no escapes"), "plain text, no escapes")
+        self.assertEqual(escape(""), "")
+        self.assertEqual(escape("aλb → c"), "aλb → c")
+    }
+
+    def test_mixed_spans() {
+        self.assertEqual(escape("ab" + chr(8) + "cd\ne"), "ab\\bcd\\ne")
+    }
+
+    def test_template_static_escape_agrees() {
+        self.assertEqual(JSON.escape(chr(8) + "x\"y"), "\\bx\\\"y")
+        self.assertEqual(JSON.escape("clean"), "clean")
+    }
+
+    def test_unescape_inverts_escape() {
+        const gnarly: str = "a\"b\\c" + chr(8) + chr(12) + "\n\r\t" + chr(1) + chr(31) + "zλ"
+        self.assertEqual(unescape(escape(gnarly)), gnarly)
+    }
+}
+
+
+class WriterControlTests(TestCase) {
+    def test_writer_emits_valid_json() {
+        const w: JsonWriter = JsonWriter()
+        w.write_str(chr(8) + "x" + chr(31))
+        self.assertEqual(w.finish().decode("utf-8"), "\"\\bx\\u001f\"")
+    }
+
+    def test_writer_key_escaped() {
+        const w: JsonWriter = JsonWriter()
+        w.begin_object()
+        w.key("a\tb")
+        w.write_int(1)
+        w.end_object()
+        self.assertEqual(w.finish().decode("utf-8"), "{\"a\\tb\":1}")
+    }
+
+    def test_writer_output_parses_back() {
+        const w: JsonWriter = JsonWriter()
+        w.write_str("bell" + chr(7))
+        const v: Any = loads(w.finish().decode("utf-8"))
+        const s: str = v
+        self.assertEqual(s, "bell" + chr(7))
+    }
+}
+
+
+class EncodeControlTests(TestCase) {
+    def test_encode_decode_roundtrip_control_chars() {
+        const n: Note = Note("del" + chr(8) + "eted" + chr(1))
+        const back: Note = decode[Note](encode[Note](n))
+        self.assertEqual(back.body, "del" + chr(8) + "eted" + chr(1))
+    }
+
+    def test_encode_bytes_are_escaped() {
+        const n: Note = Note(chr(8))
+        self.assertEqual(encode[Note](n).decode("utf-8"), "{\"body\":\"\\b\"}")
+    }
+}
+
+
+main([EscapeControlTests(), WriterControlTests(), EncodeControlTests()])
+

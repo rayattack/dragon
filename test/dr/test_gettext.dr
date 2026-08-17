@@ -50,7 +50,6 @@ class GettextTests(TestCase) {
     }
 
     def test_missing_file_safe() {
-        # Empty catalog - fallback to msgid.
         t: GNUTranslations = GNUTranslations("/no/such/dr_zzz.po")
         self.assertEqual(t.gettext("hello"), "hello")
     }

@@ -49,7 +49,6 @@ class Dog(Animal):
         return self.name + " woof"
 
 
-# Bounded type parameter: the bound's members are usable on T.
 def describe[T: Animal](x: T) -> str:
     return x.name + ": " + x.speak()
 

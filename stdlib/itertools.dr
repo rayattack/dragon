@@ -1,11 +1,4 @@
-"""itertools - iterator building blocks (Python `itertools`, monomorphic subset).
-
-Dragon has no generic functions, so these are concrete `int`-list variants
-(the common case; mirrors operator.dr's monomorphic policy). They return eager
-`list[int]` rather than lazy iterators - sufficient for finite inputs and free
-of boxing. Lazy/infinite forms (count, cycle) and arbitrary-type variants await
-a generic-functions language feature.
-"""
+"""itertools - eager list building blocks: monomorphic int variants plus generic *_t forms; accumulate stays int-only (no + on an unbound T)."""
 
 
 def accumulate(iterable: list[int]) -> list[int] {
@@ -76,4 +69,57 @@ def pairwise(iterable: list[int]) -> list[tuple[int, int]] {
 def take(iterable: list[int], n: int) -> list[int] {
     """First `n` elements (or fewer)."""
     return islice(iterable, 0, n)
+}
+
+
+def chain_t[T](a: list[T], b: list[T]) -> list[T] {
+    """Generic chain: concatenate two sequences of any element type."""
+    out: list[T] = []
+    for x in a { out.append(x) }
+    for y in b { out.append(y) }
+    return out
+}
+
+
+def repeat_t[T](value: T, times: int) -> list[T] {
+    """Generic repeat: `value` repeated `times` times."""
+    out: list[T] = []
+    i: int = 0
+    while i < times {
+        out.append(value)
+        i = i + 1
+    }
+    return out
+}
+
+
+def islice_t[T](iterable: list[T], start: int, stop: int) -> list[T] {
+    """Generic islice: slice [start, stop) of a sequence."""
+    out: list[T] = []
+    i: int = start
+    const n: int = len(iterable)
+    while i < stop and i < n {
+        out.append(iterable[i])
+        i = i + 1
+    }
+    return out
+}
+
+
+def pairwise_t[T](iterable: list[T]) -> list[tuple[T, T]] {
+    """Generic pairwise: successive overlapping pairs."""
+    out: list[tuple[T, T]] = []
+    const n: int = len(iterable)
+    i: int = 1
+    while i < n {
+        out.append((iterable[i - 1], iterable[i]))
+        i = i + 1
+    }
+    return out
+}
+
+
+def take_t[T](iterable: list[T], n: int) -> list[T] {
+    """Generic take: first `n` elements (or fewer)."""
+    return islice_t(iterable, 0, n)
 }

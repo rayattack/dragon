@@ -1,13 +1,3 @@
-# test/dr/test_header_injection.dr - Response header CR/LF rejection.
-#
-# A header value carrying CR/LF ends the current header and starts a new one
-# on the wire, so a single tainted value becomes an attacker-chosen header
-# (or, with a doubled CRLF, an entire forged response). `set_header` has
-# always rejected control bytes; the `res.headers = k, v` shorthand is the
-# other documented way to write the same header and must reject them too.
-#
-# Both spellings write the same dict, so both must enforce the same rule.
-
 from unittest import TestCase, main
 from http.server import Response
 
@@ -25,7 +15,6 @@ class HeaderInjectionTests(TestCase) {
     }
 
     def test_tuple_setter_rejects_crlf_in_value() {
-        # The shorthand form the docstring recommends for brevity.
         res: Response = Response()
         def run() {
             res.headers = "x-trace", TAINTED
@@ -42,7 +31,6 @@ class HeaderInjectionTests(TestCase) {
     }
 
     def test_tuple_setter_still_sets_ordinary_headers() {
-        # The guard must not break the normal case.
         res: Response = Response()
         res.body = "hi"
         res.headers = "x-trace", "abc123"
@@ -51,8 +39,6 @@ class HeaderInjectionTests(TestCase) {
     }
 
     def test_injected_header_never_reaches_the_wire() {
-        # Belt-and-braces: whatever the failure mode, a forged header must
-        # not appear in serialized output.
         res: Response = Response()
         res.body = "hi"
         try {

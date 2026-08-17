@@ -11,7 +11,7 @@ from unittest import TestCase, main
 class Animal {
     def(n: str) { self.nm = n }
     def speak() -> str { return "..." }
-    def name() -> str { return self.nm }      # never overridden -> direct
+    def name() -> str { return self.nm }
 }
 class Dog(Animal) {
     def(n: str) { self.nm = n }
@@ -19,7 +19,7 @@ class Dog(Animal) {
 }
 class Puppy(Dog) {
     def(n: str) { self.nm = n }
-    def speak() -> str { return "yip" }        # override two levels deep
+    def speak() -> str { return "yip" }
 }
 def make(k: str) -> Animal {
     if k == "dog" { return Dog("rex") }

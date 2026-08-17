@@ -22,7 +22,7 @@ def _schema() -> dict[str, Any] {
     props["id"] = {"type": "integer"}
     props["name"] = {"type": "string"}
     props["city"] = {"type": "string"}
-    props["nickname"] = {"type": "string"}        # optional
+    props["nickname"] = {"type": "string"}
     s: dict[str, Any] = {}
     s["type"] = "object"
     s["properties"] = props
@@ -43,9 +43,6 @@ def _db() -> ODB {
     return ODB(sim, p)
 }
 
-# A shell whose database already holds the customers schema plus two
-# documents saved through the API (the define rides the schema() builtin, so
-# the round trip crosses both surfaces).
 def _shell() -> Shell {
     sh: Shell = Shell(_db())
     line: str = "schema(\"customers\", " + dumps(_schema()) + ", " + dumps(_meta()) + ")"
@@ -74,7 +71,6 @@ class ClassifyTests(TestCase) {
     }
 
     def test_builtin_names_without_call_shape_stay_oql() {
-        # A collection may share a builtin's name: bare `check` is a query.
         self.assertEqual(classify("check"), L_READ)
         self.assertEqual(classify("schema"), L_READ)
         self.assertEqual(classify("namespaces ? x == 1"), L_READ)
@@ -92,7 +88,7 @@ class ClassifyTests(TestCase) {
         self.assertEqual(classify("customers ? id == 1"), L_READ)
         self.assertEqual(classify("customers { name }"), L_READ)
         self.assertEqual(classify("customers"), L_READ)
-        self.assertEqual(classify("addresses"), L_READ)   # `add` prefix, not the word
+        self.assertEqual(classify("addresses"), L_READ)
     }
 
     def test_builtin_name_extraction() {
@@ -166,8 +162,6 @@ class FormatTests(TestCase) {
     }
 
     def test_format_docs_projection_order_and_footer() {
-        # `_id` is always readable on every document (spec section 3), so the
-        # engine returns it with every projection and it leads the columns.
         sh: Shell = _shell()
         docs: list[Document] = sh.db.find("customers { name, city } | sort name")
         lines: list[str] = format_docs(docs)
@@ -247,7 +241,6 @@ class ShellRoundTripTests(TestCase) {
         sh: Shell = _shell()
         lines: list[str] = sh.execute("check()")
         self.assertEqual(len(lines), 1)
-        # two indexes (primary id + city) over two docs = 4 entries
         self.assertEqual(lines[0], "ok: 2 docs, 4 index entries")
     }
 

@@ -326,14 +326,14 @@ print(args[0])          # the running binary's path
 print(len(args))        # 1 when no extra args were passed
 ```
 
-To end the program with a specific status, call `exit_code(code)`. The
+To end the program with a specific status, call `exit(code)`. The
 shell sees that integer as the process exit status:
 
 ```dragon
 import sys
 
 print("before exit")
-sys.exit_code(3)        # process exits here with status 3
+sys.exit(3)             # process exits here with status 3
 print("never printed")
 ```
 
@@ -358,9 +358,10 @@ print(sys.byteorder)    # little
 print(sys.version)      # 0.1.0
 ```
 
-> **Differs from Python.** `argv` and `exit` are **functions** here:
-> `sys.argv()` (not the list attribute `sys.argv`) and `sys.exit_code(n)`
-> (not `sys.exit(n)`). There are no `sys.stdin`/`sys.stdout`/`sys.stderr`
+> **Differs from Python.** `argv` is a **function** here: `sys.argv()`
+> (not the list attribute `sys.argv`). `sys.exit(n)` ends the process
+> immediately - it does not raise a catchable `SystemExit` the way
+> Python's does. There are no `sys.stdin`/`sys.stdout`/`sys.stderr`
 > stream objects - use `print` and `input`, or the `io` module, for I/O.
 > `sys.platform` is the constant string `"linux"`; for the *actual*
 > running OS, use `platform.system()`.
@@ -381,7 +382,7 @@ print(sys.version)      # 0.1.0
 | Current login name | `getpass.getuser` | `getuser() -> str` |
 | OS / machine identity | `platform.system`, `platform.machine` | `system() -> str`, `machine() -> str` |
 | The command-line arguments | `sys.argv` | `argv() -> list[str]` |
-| Exit with a status code | `sys.exit_code` | `exit_code(code)` |
+| Exit with a status code | `sys.exit` | `exit(code)` |
 
 With the OS boundary covered from the Dragon side, the next part crosses
 it in the other direction - calling into native libraries from your own

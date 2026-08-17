@@ -1,7 +1,3 @@
-// Tests for the definite-assignment pass: reading a no-initializer local
-// before it is assigned on all paths, and a constructor that leaves an
-// own-declared non-defaulted field unassigned, are both compile errors.
-
 #include "TestHelpers.h"
 #include "dragon/DefiniteAssignment.h"
 #include <gtest/gtest.h>
@@ -11,7 +7,6 @@ using namespace dragon::test;
 
 namespace {
 
-// Parse + Sema + definite-assignment; return true if a DA error was reported.
 bool daHasError(const std::string& src, bool isDragon = true) {
     auto mod = parse(src, isDragon);
     Sema sema;
@@ -20,11 +15,7 @@ bool daHasError(const std::string& src, bool isDragon = true) {
     return !da.analyze(*mod);
 }
 
-} // namespace
-
-//===----------------------------------------------------------------------===//
-// Locals
-//===----------------------------------------------------------------------===//
+}
 
 TEST(DefiniteAssignmentTest, ReadUnassignedLocalErrors) {
     EXPECT_TRUE(daHasError("x: int\nprint(x)\n"));
@@ -97,18 +88,12 @@ TEST(DefiniteAssignmentTest, ParameterIsAssignedOk) {
 }
 
 TEST(DefiniteAssignmentTest, GlobalDeclaredNameOk) {
-    // A name read inside a function that isn't a function-local is treated as
-    // an outer/global binding (not tracked) - no false positive.
     EXPECT_FALSE(daHasError(
         "g: int = 0\n"
         "def f() -> int {\n"
         "    return g\n"
         "}\n"));
 }
-
-//===----------------------------------------------------------------------===//
-// Constructor field initialization
-//===----------------------------------------------------------------------===//
 
 TEST(DefiniteAssignmentTest, CtorForgetsFieldErrors) {
     EXPECT_TRUE(daHasError(
@@ -150,8 +135,6 @@ TEST(DefiniteAssignmentTest, FieldAssignedInOneCtorBranchErrors) {
 }
 
 TEST(DefiniteAssignmentTest, DeferredInitViaMethodOk) {
-    // A field assigned by a non-constructor method is the deferred-init pattern
-    // (Swift would model it as Optional) - exempt from the constructor check.
     EXPECT_FALSE(daHasError(
         "class Engine {\n"
         "    n: int\n"
@@ -166,8 +149,6 @@ TEST(DefiniteAssignmentTest, DeferredInitViaMethodOk) {
 }
 
 TEST(DefiniteAssignmentTest, CtorAssignsViaSelfHelperOk) {
-    // self escaping to a helper call defers field-init judgement (the helper
-    // may assign it) - no false positive.
     EXPECT_FALSE(daHasError(
         "class C {\n"
         "    x: int\n"

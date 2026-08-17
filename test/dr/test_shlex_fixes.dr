@@ -1,0 +1,59 @@
+from unittest import TestCase, main
+from shlex import split, quote, join
+
+
+class SplitTests(TestCase) {
+    def test_backslash_escape() {
+        self.assertEqual(split("a\\ b"), ["a b"])
+        self.assertEqual(split("a\\"), ["a"])
+    }
+
+    def test_adjacent_quotes_merge() {
+        self.assertEqual(split("ab'cd'ef"), ["abcdef"])
+        self.assertEqual(split("a'b c'\"d e\"f"), ["ab cd ef"])
+    }
+
+    def test_double_quote_escapes() {
+        self.assertEqual(split("\"a\\\"b\""), ["a\"b"])
+        self.assertEqual(split("\"a\\\\b\""), ["a\\b"])
+        self.assertEqual(split("\"a\\nb\""), ["a\\nb"])
+    }
+
+    def test_empty_quoted_token() {
+        self.assertEqual(split("''"), [""])
+        self.assertEqual(split("a '' b"), ["a", "", "b"])
+    }
+
+    def test_unterminated_quote_takes_rest() {
+        self.assertEqual(split("a 'bc def"), ["a", "bc def"])
+    }
+
+    def test_larger_input() {
+        words: list[str] = []
+        i: int = 0
+        while i < 300 {
+            words.append(f"word{i}")
+            i = i + 1
+        }
+        const line: str = " ".join(words)
+        self.assertEqual(split(line), words)
+    }
+}
+
+
+class QuoteJoinTests(TestCase) {
+    def test_quote() {
+        self.assertEqual(quote("plain"), "plain")
+        self.assertEqual(quote(""), "''")
+        self.assertEqual(quote("it's"), "'it'\"'\"'s'")
+        self.assertEqual(quote("a'b'c"), "'a'\"'\"'b'\"'\"'c'")
+    }
+
+    def test_join_roundtrip() {
+        const args: list[str] = ["a b", "it's", "plain", "x\"y"]
+        self.assertEqual(split(join(args)), args)
+    }
+}
+
+
+main([SplitTests(), QuoteJoinTests()])

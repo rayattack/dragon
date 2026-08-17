@@ -76,6 +76,38 @@ writing a straight-line sequence that happens to touch the network or disk. They
 the same machinery - a `Task[T]` on a green thread - wearing two names that read
 right in two different situations.
 
+Methods spawn the same way: an `async def` method on a class returns a
+`Task[T]` when called and unwraps with `await`, exactly like a free function
+(`@classmethod` is the one place `async` is refused).
+
+## Dropping a task
+
+A `Task[T]` in statement position with nobody holding it is a silent detach -
+the reader sees an ordinary call, the runtime sees fire-and-forget. Dragon
+refuses it at compile time:
+
+```dragon
+# doc: no-check
+post(url, payload)   # error: this expression produces a 'Task[Response]'
+                     # that is silently discarded; bind it, then await,
+                     # join, or del it
+```
+
+Every legal spelling states its intent:
+
+```dragon
+# doc: no-check
+r: Response = await post(url, payload)   # wait inline
+t: Task[Response] = post(url, payload)   # hold the handle for later
+del t                                    # explicit fire-and-forget
+fire log_metric(n)                       # fire IS the explicit detach verb
+```
+
+A dropped-but-bound task detaches at scope exit and its unclaimed result is
+released when the task finishes - the result slot is an `own` field of the
+Task, moved out by `await`/`join` and freed with the task otherwise. The
+ownership story lives in [Ownership](/docs/1604-ownership).
+
 ## At a glance
 
 | You want to... | Write |
@@ -84,6 +116,7 @@ right in two different situations.
 | Run it and wait inline | `x: T = await f(...)` |
 | Run it, hold the handle | `t: Task[T] = f(...)` then `await t` |
 | Use `await` in a plain function | just do it - no `async` needed on the caller |
+| Fire-and-forget a held handle | `del t` |
 
 `await` and `join` wait on green threads. When you need *real* hardware
 parallelism instead, drop to the OS-thread tiers:

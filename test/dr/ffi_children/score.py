@@ -1,4 +1,3 @@
-# Written once by `dragon ffi sync` - this file is yours; edit freely.
 from score_stub import User, Scored, serve
 
 

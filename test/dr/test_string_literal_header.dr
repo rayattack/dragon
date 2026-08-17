@@ -11,9 +11,6 @@ from unittest import TestCase, main
 
 class StringLiteralHeaderTests(TestCase) {
     def test_eq_is_commutative_literal_vs_heap() {
-        # `parts[1]` is a heap substring from split(); `"b"` is a literal. The
-        # comparison must be correct AND commutative (the non-commutative `==`
-        # was the original smoking gun).
         const parts: list[str] = "a$b$c".split("$")
         self.assertTrue(parts[1] == "b")
         self.assertTrue("b" == parts[1])
@@ -43,7 +40,6 @@ class StringLiteralHeaderTests(TestCase) {
     }
 
     def test_literal_list_roundtrip() {
-        # Literals into a list and back - exercises append/decref of literals.
         xs: list[str] = ["one", "two", "three"]
         self.assertEqual(len(xs), 3)
         self.assertEqual(xs[1], "two")

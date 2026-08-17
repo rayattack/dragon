@@ -1,9 +1,5 @@
 #include "CodeGenTestHelpers.h"
 
-//===----------------------------------------------------------------------===//
-// List IR Tests
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenTest, ListLiteral) {
     auto ir = generateIR("x: list[int] = [1, 2, 3]");
     EXPECT_NE(ir.find("dragon_list_new"), std::string::npos);
@@ -12,10 +8,8 @@ TEST(CodeGenTest, ListLiteral) {
 
 TEST(CodeGenTest, ListSubscript) {
     auto ir = generateIR("x: list[int] = [10, 20, 30]\nprint(x[1])");
-    // Inline list access: direct GEP instead of dragon_list_get on the hot path
     EXPECT_NE(ir.find("list.data.gep"), std::string::npos);
     EXPECT_NE(ir.find("list.elem"), std::string::npos);
-    // OOB path still references dragon_list_get for error handling
     EXPECT_NE(ir.find("dragon_list_get"), std::string::npos);
 }
 
@@ -33,10 +27,6 @@ TEST(CodeGenTest, ListSlice) {
     auto ir = generateIR("x: list[int] = [1, 2, 3, 4, 5]\ny: list[int] = x[1:3]");
     EXPECT_NE(ir.find("dragon_list_slice"), std::string::npos);
 }
-
-//===----------------------------------------------------------------------===//
-// Dict IR Tests
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenTest, DictExprEmpty) {
     auto ir = generateIR("d: dict[str, int] = {}");
@@ -65,13 +55,11 @@ TEST(CodeGenTest, DictPrint) {
 }
 
 TEST(CodeGenTest, BareKeyDictIR) {
-    // Bare-key dict in .dr mode should compile to string-keyed dict
     auto ir = generateIR(
         "d: dict = {name: \"Jon\", age: 10}\n"
     );
     EXPECT_NE(ir.find("dragon_dict_new"), std::string::npos);
     EXPECT_NE(ir.find("dragon_dict_set"), std::string::npos);
-    // The bare keys "name" and "age" should appear as global strings
     EXPECT_NE(ir.find("name"), std::string::npos);
     EXPECT_NE(ir.find("age"), std::string::npos);
 }
@@ -81,7 +69,6 @@ TEST(CodeGenTest, DictDotAccessReadIR) {
         "d: dict = {\"x\": 1}\n"
         "v: int = d.x\n"
     );
-    // Should call dragon_dict_get with "x" as key string
     EXPECT_NE(ir.find("dragon_dict_get"), std::string::npos);
     EXPECT_NE(ir.find("dictdot"), std::string::npos);
 }
@@ -91,12 +78,10 @@ TEST(CodeGenTest, DictDotAccessWriteIR) {
         "d: dict = {\"x\": 1}\n"
         "d.x = 2\n"
     );
-    // Should call dragon_dict_set with "x" as key string
     EXPECT_NE(ir.find("dragon_dict_set"), std::string::npos);
 }
 
 TEST(CodeGenTest, DictGetCheckedIR) {
-    // Annotated dict access should emit dragon_dict_get_checked
     auto ir = generateIR(
         "d: dict = {name: \"Jon\", age: 10}\n"
         "x: int = d[\"age\"]\n"
@@ -105,7 +90,6 @@ TEST(CodeGenTest, DictGetCheckedIR) {
 }
 
 TEST(CodeGenTest, DictGetCheckedDotAccessIR) {
-    // Annotated dot-access should emit dragon_dict_get_checked
     auto ir = generateIR(
         "d: dict = {name: \"Jon\", age: 10}\n"
         "x: int = d.age\n"
@@ -113,12 +97,7 @@ TEST(CodeGenTest, DictGetCheckedDotAccessIR) {
     EXPECT_NE(ir.find("dragon_dict_get_checked"), std::string::npos);
 }
 
-//===----------------------------------------------------------------------===//
-// TypedDict IR Tests
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenTest, TypedDictIR) {
-    // TypedDict should compile to dict operations, not struct
     auto ir = generateIR(
         "class Config(TypedDict) {\n"
         "    host: str\n"
@@ -126,14 +105,11 @@ TEST(CodeGenTest, TypedDictIR) {
         "}\n"
         "cfg: Config = Config({host: \"localhost\", port: 8080})\n"
     );
-    // Should use dict_new, NOT struct allocation
     EXPECT_NE(ir.find("dragon_dict_new"), std::string::npos);
-    // Should NOT have a Config struct type
     EXPECT_EQ(ir.find("%Config = type"), std::string::npos);
 }
 
 TEST(CodeGenTest, TypedDictCheckedAccessIR) {
-    // TypedDict subscript should emit dragon_dict_get_checked
     auto ir = generateIR(
         "class Config(TypedDict) {\n"
         "    host: str\n"
@@ -144,10 +120,6 @@ TEST(CodeGenTest, TypedDictCheckedAccessIR) {
     );
     EXPECT_NE(ir.find("dragon_dict_get_checked"), std::string::npos);
 }
-
-//===----------------------------------------------------------------------===//
-// Tuple IR Tests
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenTest, TupleCreate) {
     auto ir = generateIR("t: tuple[int, int, int] = (1, 2, 3)");
@@ -175,10 +147,6 @@ TEST(CodeGenTest, TupleEmpty) {
     EXPECT_NE(ir.find("dragon_tuple_new"), std::string::npos);
 }
 
-//===----------------------------------------------------------------------===//
-// Set IR Tests
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenTest, SetCreate) {
     auto ir = generateIR("s: set = {1, 2, 3}");
     EXPECT_NE(ir.find("dragon_set_new"), std::string::npos);
@@ -194,10 +162,6 @@ TEST(CodeGenTest, SetPrint) {
     auto ir = generateIR("s: set = {1, 2, 3}\nprint(s)");
     EXPECT_NE(ir.find("dragon_print_set"), std::string::npos);
 }
-
-//===----------------------------------------------------------------------===//
-// List E2E Tests
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenE2E, ListBasic) {
     auto output = compileAndRun(
@@ -353,10 +317,6 @@ TEST(CodeGenE2E, ListCopy) {
     EXPECT_EQ(output, "4\n3\n");
 }
 
-//===----------------------------------------------------------------------===//
-// Dict E2E Tests
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, DictBasic) {
     auto output = compileAndRun(
         "d: dict[str, int] = {\"a\": 1, \"b\": 2}\n"
@@ -426,7 +386,6 @@ TEST(CodeGenE2E, BareKeyDictBasic) {
 }
 
 TEST(CodeGenE2E, BareKeyDictMixed) {
-    // Mix bare keys with quoted keys
     auto output = compileAndRun(
         "d: dict = {host: \"localhost\", \"port\": 8080}\n"
         "print(d[\"host\"])\n"
@@ -455,7 +414,6 @@ TEST(CodeGenE2E, DictDotAccessRead) {
 }
 
 TEST(CodeGenE2E, DictDotAccessReadBareKey) {
-    // Combine bare-key dict with dot-access read
     auto output = compileAndRun(
         "d: dict = {name: \"Jon\", age: 25}\n"
         "print(d.name)\n"
@@ -474,7 +432,6 @@ TEST(CodeGenE2E, DictDotAccessWrite) {
 }
 
 TEST(CodeGenE2E, DictDotAccessWriteNew) {
-    // Write a new key via dot-access
     auto output = compileAndRun(
         "d: dict = {\"x\": 1}\n"
         "d.y = 99\n"
@@ -484,7 +441,6 @@ TEST(CodeGenE2E, DictDotAccessWriteNew) {
 }
 
 TEST(CodeGenE2E, DictMethodsStillWork) {
-    // Dict methods (keys, get, etc.) should still work with parens
     auto output = compileAndRun(
         "d: dict = {name: \"Jon\", age: 25}\n"
         "v: str = d.get(\"name\")\n"
@@ -493,12 +449,7 @@ TEST(CodeGenE2E, DictMethodsStillWork) {
     EXPECT_EQ(output, "Jon\n");
 }
 
-//===----------------------------------------------------------------------===//
-// 6.17 - Missing dict methods: items() unpack, popitem(), fromkeys()
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, DictItemsTupleUnpacking) {
-    // for k, v in d.items() - Sema must define both names in the loop scope.
     auto out = compileAndRun(
         "d: dict[str, int] = {\"a\": 1, \"b\": 2, \"c\": 3}\n"
         "for k, v in d.items() {\n"
@@ -510,7 +461,6 @@ TEST(CodeGenE2E, DictItemsTupleUnpacking) {
 }
 
 TEST(CodeGenE2E, DictPopitemLifoOrder) {
-    // popitem returns (key, value) of the LAST inserted entry.
     auto out = compileAndRun(
         "d: dict[str, int] = {\"a\": 1, \"b\": 2, \"c\": 3}\n"
         "d.popitem()\n"
@@ -522,7 +472,6 @@ TEST(CodeGenE2E, DictPopitemLifoOrder) {
 }
 
 TEST(CodeGenE2E, DictPopitemRepeated) {
-    // popitem repeatedly drains the dict in LIFO order.
     auto out = compileAndRun(
         "d: dict[str, int] = {\"a\": 1, \"b\": 2, \"c\": 3}\n"
         "d.popitem()\n"
@@ -534,7 +483,6 @@ TEST(CodeGenE2E, DictPopitemRepeated) {
 }
 
 TEST(CodeGenE2E, DictFromkeysWithDefault) {
-    // dict.fromkeys(iterable, default) - every key gets the same value.
     auto out = compileAndRun(
         "keys: list[str] = [\"x\", \"y\", \"z\"]\n"
         "d: dict[str, int] = dict.fromkeys(keys, 99)\n"
@@ -547,8 +495,6 @@ TEST(CodeGenE2E, DictFromkeysWithDefault) {
 }
 
 TEST(CodeGenE2E, DictFromkeysWithoutDefault) {
-    // dict.fromkeys(iterable) without value - default None, but the dict
-    // still has the right keys and length.
     auto out = compileAndRun(
         "d: dict[str, int] = dict.fromkeys([\"a\", \"b\"])\n"
         "print(len(d))\n"
@@ -559,7 +505,6 @@ TEST(CodeGenE2E, DictFromkeysWithoutDefault) {
 }
 
 TEST(CodeGenE2E, TupleUnpackAssignment) {
-    // Sema fix: `a, b = expr` defines both names in the enclosing scope.
     auto out = compileAndRun(
         "def pair() -> tuple[int, int] {\n"
         "    return (3, 4)\n"
@@ -570,13 +515,7 @@ TEST(CodeGenE2E, TupleUnpackAssignment) {
     EXPECT_EQ(out, "7\n");
 }
 
-//===----------------------------------------------------------------------===//
-// for k, v in dict.items() tracks value VarKind for str/bool/etc.
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, DictItemsValueVarKindStr) {
-    // The value gets the dict's declared V type so `print(v)` dispatches
-    // as str, not as a raw pointer printed as int.
     auto out = compileAndRun(
         "d: dict[str, str] = {\"a\": \"alpha\", \"b\": \"beta\"}\n"
         "for k, v in d.items() {\n"
@@ -617,7 +556,6 @@ TEST(CodeGenE2E, DictDotAccessReadWriteCombined) {
 }
 
 TEST(CodeGenE2E, DictWithNestedContainersE2E) {
-    // Dict containing list values - verify no crash on cleanup
     auto out = compileAndRun(
         "d: dict = {\"a\": 1, \"b\": 2}\n"
         "print(d[\"a\"])\n"
@@ -627,7 +565,6 @@ TEST(CodeGenE2E, DictWithNestedContainersE2E) {
 }
 
 TEST(CodeGenE2E, DictGetCheckedCorrectType) {
-    // Reading with correct type annotation should succeed
     auto output = compileAndRun(
         "d: dict = {name: \"Jon\", age: 10}\n"
         "x: int = d[\"age\"]\n"
@@ -637,7 +574,6 @@ TEST(CodeGenE2E, DictGetCheckedCorrectType) {
 }
 
 TEST(CodeGenE2E, DictGetCheckedStringCorrect) {
-    // Reading a string with str annotation should succeed
     auto output = compileAndRun(
         "d: dict = {name: \"Jon\", age: 10}\n"
         "x: str = d[\"name\"]\n"
@@ -647,7 +583,6 @@ TEST(CodeGenE2E, DictGetCheckedStringCorrect) {
 }
 
 TEST(CodeGenE2E, DictGetCheckedDotAccess) {
-    // Dot-access with annotation should use checked get
     auto output = compileAndRun(
         "d: dict = {name: \"Jon\", age: 10}\n"
         "x: int = d.age\n"
@@ -656,12 +591,7 @@ TEST(CodeGenE2E, DictGetCheckedDotAccess) {
     EXPECT_EQ(output, "10\n");
 }
 
-//===----------------------------------------------------------------------===//
-// TypedDict E2E Tests
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, TypedDictBasic) {
-    // TypedDict with dict literal construction
     auto output = compileAndRun(
         "class Config(TypedDict) {\n"
         "    host: str\n"
@@ -675,7 +605,6 @@ TEST(CodeGenE2E, TypedDictBasic) {
 }
 
 TEST(CodeGenE2E, TypedDictDotAccess) {
-    // TypedDict dot-access should use checked get
     auto output = compileAndRun(
         "class Config(TypedDict) {\n"
         "    host: str\n"
@@ -691,7 +620,6 @@ TEST(CodeGenE2E, TypedDictDotAccess) {
 }
 
 TEST(CodeGenE2E, TypedDictMixedTypes) {
-    // TypedDict with different value types
     auto output = compileAndRun(
         "class Settings(TypedDict) {\n"
         "    name: str\n"
@@ -707,7 +635,6 @@ TEST(CodeGenE2E, TypedDictMixedTypes) {
 }
 
 TEST(CodeGenE2E, TypedDictAnnotatedAccess) {
-    // Accessing TypedDict field into annotated variable
     auto output = compileAndRun(
         "class Config(TypedDict) {\n"
         "    host: str\n"
@@ -723,7 +650,6 @@ TEST(CodeGenE2E, TypedDictAnnotatedAccess) {
 }
 
 TEST(CodeGenE2E, TypedDictWithoutAnnotation) {
-    // TypedDict constructed from a dict literal
     auto output = compileAndRun(
         "class Config(TypedDict) {\n"
         "    host: str\n"
@@ -736,9 +662,6 @@ TEST(CodeGenE2E, TypedDictWithoutAnnotation) {
     EXPECT_EQ(output, "localhost\n8080\n");
 }
 
-// Call-site ** spread into a TypedDict - the D032 typed-row gate
-// (`Customer(**row)` / `[Customer(**r) for r in rows]`). Lowers the single-
-// spread form to one dragon_dict_copy (Python **-unpack copy semantics).
 TEST(CodeGenE2E, TypedDictDoubleStarSpread) {
     auto output = compileAndRun(
         "class Customer(TypedDict) {\n"
@@ -771,10 +694,6 @@ TEST(CodeGenE2E, TypedDictDoubleStarSpreadInComprehension) {
     );
     EXPECT_EQ(output, "Ada\n");
 }
-
-//===----------------------------------------------------------------------===//
-// Tuple E2E Tests
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenE2E, TupleCreateAndPrint) {
     auto output = compileAndRun(
@@ -894,10 +813,6 @@ TEST(CodeGenE2E, ForLoopTupleUnpack) {
     EXPECT_EQ(output, "11\n22\n33\n");
 }
 
-//===----------------------------------------------------------------------===//
-// Set E2E Tests
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, SetLen) {
     auto output = compileAndRun(
         "s: set = {10, 20, 30}\n"
@@ -915,8 +830,6 @@ TEST(CodeGenE2E, SetDeduplicate) {
 }
 
 TEST(CodeGenE2E, SetEmptyLen) {
-    // empty set literal is actually a dict, so use set() later
-    // For now test a set with one element
     auto output = compileAndRun(
         "s: set = {42}\n"
         "print(len(s))"
@@ -948,13 +861,7 @@ TEST(CodeGenE2E, SetNotContainsViaIn) {
     EXPECT_EQ(output, "0\n");
 }
 
-//===----------------------------------------------------------------------===//
-// Immortal Objects E2E Tests
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, ImmortalObjectSurvivesDecref) {
-    // Verify that dragon_make_immortal stamps the immortal refcount
-    // and dragon_is_immortal_obj confirms it.
     auto output = compileAndRun(
         "extern \"C\" def dragon_make_immortal(obj: list[int]) -> None\n"
         "extern \"C\" def dragon_is_immortal_obj(obj: list[int]) -> int\n"
@@ -967,7 +874,6 @@ TEST(CodeGenE2E, ImmortalObjectSurvivesDecref) {
 }
 
 TEST(CodeGenE2E, NonImmortalObjectReportsZero) {
-    // Verify that a normal (non-immortal) object reports 0 for is_immortal.
     auto output = compileAndRun(
         "extern \"C\" def dragon_is_immortal_obj(obj: list[int]) -> int\n"
         "x: list[int] = [10, 20]\n"
@@ -976,10 +882,6 @@ TEST(CodeGenE2E, NonImmortalObjectReportsZero) {
     );
     EXPECT_EQ(output, "0\n");
 }
-
-//===----------------------------------------------------------------------===//
-// List/Dict Spread Operators
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenE2E, ListSpreadBasic) {
     auto out = compileAndRun(
@@ -1028,10 +930,6 @@ TEST(CodeGenE2E, DictSpreadOverride) {
     );
     EXPECT_EQ(out, "99\n");
 }
-
-//===----------------------------------------------------------------------===//
-// Deque (collections.deque)
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenIR, DequeNewIR) {
     auto ir = generateIR(
@@ -1099,10 +997,6 @@ TEST(CodeGenE2E, DequeFromList) {
     EXPECT_EQ(out, "3\n10\n");
 }
 
-//===----------------------------------------------------------------------===//
-// List Repetition Tests
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenTest, ListRepeatIR) {
     auto ir = generateIR("x: list[bool] = [True] * 5");
     EXPECT_NE(ir.find("dragon_list_repeat"), std::string::npos);
@@ -1115,7 +1009,6 @@ TEST(CodeGenE2E, ListRepeatBool) {
         "print(x[0])\n"
         "print(x[4])\n"
     );
-    // list[bool] subscript dispatches as bool (a raw-int dispatch prints 1/0).
     EXPECT_EQ(out, "5\nTrue\nTrue\n");
 }
 
@@ -1159,12 +1052,6 @@ TEST(CodeGenE2E, ListRepeatSingleInt) {
     EXPECT_EQ(out, "4\n0\n0\n");
 }
 
-//===----------------------------------------------------------------------===//
-// Regression: discarded pop() must not leak
-//===----------------------------------------------------------------------===//
-
-// list[str].pop() discarded - popped strings must be decref'd.
-// In IR mode we verify a decref_str runs after the listpop call site.
 TEST(CodeGenIR, DiscardedListStrPopEmitsDecref) {
     auto ir = generateIR(
         "x: list[str] = [\"hello\", \"world\"]\n"
@@ -1175,9 +1062,6 @@ TEST(CodeGenIR, DiscardedListStrPopEmitsDecref) {
         << "Discarded list[str].pop() must decref the popped string";
 }
 
-// E2E: many list[str].pop() iterations, the loop body discards the
-// returned string. Without the discard decref this leaks every pop; with
-// it memory stays bounded - completion within the test timeout suffices.
 TEST(CodeGenE2E, DiscardedListStrPopLoopBounded) {
     auto out = compileAndRun(
         "x: list[str] = [\"a\", \"b\", \"c\", \"d\"]\n"
@@ -1190,15 +1074,12 @@ TEST(CodeGenE2E, DiscardedListStrPopLoopBounded) {
     EXPECT_EQ(out, "4\n");
 }
 
-// list[list[int]].pop() - popped sublists must be decref'd via dragon_decref.
 TEST(CodeGenIR, DiscardedListListIntPopEmitsDecref) {
     auto ir = generateIR(
         "x: list[list[int]] = [[1, 2], [3, 4]]\n"
         "x.pop()\n"
     );
     EXPECT_NE(ir.find("dragon_list_pop"), std::string::npos);
-    // Non-string heap elements (list/dict/bytes) get an inttoptr followed
-    // by dragon_decref.
     EXPECT_NE(ir.find("pop.discard.ptr"), std::string::npos)
         << "Expected IntToPtr conversion of popped i64 value";
     EXPECT_NE(ir.find("dragon_decref"), std::string::npos);
@@ -1216,7 +1097,6 @@ TEST(CodeGenE2E, DiscardedListListIntPopLoopBounded) {
     EXPECT_EQ(out, "3\n");
 }
 
-// dict[str, str].pop("k") discarded - the popped value must be decref'd.
 TEST(CodeGenIR, DiscardedDictStrStrPopEmitsDecref) {
     auto ir = generateIR(
         "d: dict[str, str] = {\"k\": \"v\"}\n"
@@ -1239,15 +1119,12 @@ TEST(CodeGenE2E, DiscardedDictStrStrPopLoopBounded) {
     EXPECT_EQ(out, "0\n");
 }
 
-// list[int].pop() - primitives don't need decref. Make sure the new
-// code path doesn't crash and doesn't emit an extra (wrong) decref.
 TEST(CodeGenIR, DiscardedListIntPopNoDecref) {
     auto ir = generateIR(
         "x: list[int] = [1, 2, 3]\n"
         "x.pop()\n"
     );
     EXPECT_NE(ir.find("dragon_list_pop"), std::string::npos);
-    // No "pop.discard.ptr" should be emitted for primitive elem_tag.
     EXPECT_EQ(ir.find("pop.discard.ptr"), std::string::npos)
         << "Discarded list[int].pop must not emit decref conversion";
 }
@@ -1261,9 +1138,8 @@ TEST(CodeGenE2E, DiscardedListIntPopRuns) {
     EXPECT_EQ(out, "2\n");
 }
 
-// Negative test: assigned pop() result must NOT be double-freed.
-// The assignment path increments to keep ownership; our discard fix
-// must only fire on ExprStmt with no consumer.
+// Assigned pop() result must NOT be double-freed: the assignment increfs to keep
+// ownership, so the discard fix may only fire on ExprStmt with no consumer.
 TEST(CodeGenE2E, AssignedListStrPopNoDoubleFree) {
     auto out = compileAndRun(
         "x: list[str] = [\"hello\", \"world\"]\n"
@@ -1275,8 +1151,6 @@ TEST(CodeGenE2E, AssignedListStrPopNoDoubleFree) {
 }
 
 TEST(CodeGenE2E, AssignedListStrPopLoopNoDoubleFree) {
-    // Heavier stress: assign-to-var pop in a loop. If our discard logic
-    // double-decrefs the value, this corrupts memory or aborts.
     auto out = compileAndRun(
         "x: list[str] = [\"a\", \"b\", \"c\", \"d\"]\n"
         "last: str = \"\"\n"
@@ -1290,9 +1164,6 @@ TEST(CodeGenE2E, AssignedListStrPopLoopNoDoubleFree) {
     EXPECT_EQ(out, "hello\n4\n");
 }
 
-// Negative test: my_list[0] = my_list.pop() - value flows into a
-// subscript assignment, must not be decref'd by our new discard path
-// (the ExprStmt is the AssignStmt, not the inner pop call).
 TEST(CodeGenE2E, AnnAssignConsumesPopNoDoubleFree) {
     auto out = compileAndRun(
         "x: list[str] = [\"hello\", \"world\"]\n"
@@ -1303,9 +1174,6 @@ TEST(CodeGenE2E, AnnAssignConsumesPopNoDoubleFree) {
     EXPECT_EQ(out, "world\n");
 }
 
-// Regression: dict.values() mixed-type, and list.extend tag adoption.
-// (Dragon source can't easily build a mixed-tag dict, so the values()
-//  regression exercises the uniform path; the mixed case is by inspection.)
 TEST(CodeGenE2E, DictValuesUniformLoopBounded) {
     auto out = compileAndRun(
         "d: dict[str, str] = {}\nd[\"a\"] = \"x\"\nd[\"b\"] = \"y\"\n"
@@ -1320,9 +1188,8 @@ TEST(CodeGenE2E, ListExtendAdoptsTag) {
     );
     EXPECT_EQ(out, "c\n");
 }
-// Regression: enumerate/zip incref+tag elements so tuple owners survive
-// source destruction (a read after source destruction is otherwise a UAF),
-// and refcounts must balance (no leak per iteration).
+// enumerate/zip must incref+tag elements so tuple owners survive source destruction
+// (a borrowed read is a UAF) with balanced refcounts (no per-iteration leak).
 TEST(CodeGenE2E, EnumerateZipBalancedRefcount) {
     auto out = compileAndRun(
         "for i in range(1000) {\n"
@@ -1334,22 +1201,7 @@ TEST(CodeGenE2E, EnumerateZipBalancedRefcount) {
     EXPECT_EQ(out, "ok\n");
 }
 
-//===----------------------------------------------------------------------===//
-// Regression: dict_get_checked TypeError message must not leak
-//
-// A `strdup(buf)` for the TypeError message passed to dragon_raise_exc
-// leaks: the exception machinery stores the pointer by reference (no
-// ownership transfer), so the strdup'd memory is never freed - once per
-// raised TypeError, and repeated TypeErrors mean unbounded growth.
-//
-// dict_get_checked instead formats into a per-thread
-// `static __thread char tls_msg[256]` buffer:
-// each call overwrites the previous message, no malloc/free traffic.
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, DictGetCheckedTypeErrorMessage) {
-    // Sanity: TypeError is still raised on tag mismatch, and the message
-    // reports the offending key + actual/expected types.
     auto out = compileAndRun(
         "d: dict = {age: \"ten\"}\n"
         "try {\n"
@@ -1363,13 +1215,6 @@ TEST(CodeGenE2E, DictGetCheckedTypeErrorMessage) {
 }
 
 TEST(CodeGenE2E, DictGetCheckedTypeErrorLoopBounded) {
-    // Trigger the same TypeError 100k times. Pre-fix: each strdup leaked
-    // ~80 bytes -> ~8MB of growth. Post-fix: bounded (the TLS buffer is
-    // reused).
-    //
-    // To run under valgrind:
-    //  valgrind --leak-check=full ./dragon_codegen_tests \
-    //  --gtest_filter='*DictGetCheckedTypeErrorLoopBounded*'
     auto out = compileAndRun(
         "d: dict = {age: \"ten\"}\n"
         "errors: int = 0\n"
@@ -1386,9 +1231,6 @@ TEST(CodeGenE2E, DictGetCheckedTypeErrorLoopBounded) {
 }
 
 TEST(CodeGenE2E, DictGetCheckedAlternatingErrors) {
-    // Two different TypeErrors alternating - confirms the TLS buffer is
-    // overwritten cleanly each time without cross-thread bleed (single
-    // thread here, but exercises the overwrite path).
     auto out = compileAndRun(
         "d: dict = {age: \"ten\", name: 42}\n"
         "errors: int = 0\n"
@@ -1409,20 +1251,13 @@ TEST(CodeGenE2E, DictGetCheckedAlternatingErrors) {
     EXPECT_EQ(out, "100000\n");
 }
 
-//===----------------------------------------------------------------------===//
-// 4.4 set: real hash-table-backed set - content hashing + method dispatch
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, SetStrContainsContentHashed) {
-    // Two distinct heap allocations of "hello" must collide on the same
-    // bucket via content hashing. Pre-fix, set used pointer hashing and
-    // these miscompared.
     auto out = compileAndRun(
         "s: set[str] = {\"hello\", \"world\"}\n"
         "if \"hello\" in s {\n"
         "    print(\"a\")\n"
         "}\n"
-        "x: str = \"hel\" + \"lo\"\n"  // built at runtime, different pointer
+        "x: str = \"hel\" + \"lo\"\n"
         "if x in s {\n"
         "    print(\"b\")\n"
         "}\n"
@@ -1431,11 +1266,10 @@ TEST(CodeGenE2E, SetStrContainsContentHashed) {
 }
 
 TEST(CodeGenE2E, SetStrAddDedup) {
-    // Adding a string equal-by-content to an existing element must dedup.
     auto out = compileAndRun(
         "s: set[str] = {\"a\", \"b\"}\n"
         "y: str = \"a\"\n"
-        "z: str = \"a\" + \"\"\n"  // runtime concat, different pointer
+        "z: str = \"a\" + \"\"\n"
         "s.add(y)\n"
         "s.add(z)\n"
         "print(len(s))\n"
@@ -1450,7 +1284,7 @@ TEST(CodeGenE2E, SetMethodAddRemoveDiscard) {
         "print(len(s))\n"
         "s.remove(1)\n"
         "print(len(s))\n"
-        "s.discard(99)\n"  // not present - no-op
+        "s.discard(99)\n"
         "print(len(s))\n"
         "if 3 in s {\n"
         "    print(\"y\")\n"
@@ -1490,7 +1324,6 @@ TEST(CodeGenE2E, SetIssubsetIssupersetIsdisjoint) {
 }
 
 TEST(CodeGenE2E, SetUtf8Keys) {
-    // Set with non-ASCII string elements: lookup, dedup, union all work.
     auto out = compileAndRun(
         "s: set[str] = {\"caf\xc3\xa9\", \"tea\", \"\xe6\x97\xa5\xe6\x9c\xac\"}\n"
         "if \"caf\xc3\xa9\" in s {\n"
@@ -1535,10 +1368,6 @@ TEST(CodeGenE2E, SetUpdate) {
     EXPECT_EQ(out, "3\ny\n");
 }
 
-// Regression: print() / len() on a chained-subscript receiver. Pre-fix the
-// dispatch heuristics only checked NameExpr/literal/AttributeExpr, so
-// print(a[0]) and len(a[0]) where a: list[list[T]] fell through to the
-// str-dispatch catch-all and produced garbage / wrong counts.
 TEST(CodeGenE2E, PrintAndLenOnChainedSubscript) {
     auto out = compileAndRun(
         "a: list[list[str]] = []\n"
@@ -1553,10 +1382,6 @@ TEST(CodeGenE2E, PrintAndLenOnChainedSubscript) {
     EXPECT_EQ(out, "['hello', 'world']\n2\n1\n");
 }
 
-// Regression: method dispatch on a chained-subscript str receiver.
-// Pre-fix `paths[0].startswith(...)` used the catch-all str detection, but
-// `paths[0].split("/")` and `.find()` returned wrong types because the
-// dispatch site only checked NameExpr.
 TEST(CodeGenE2E, MethodCallOnSubscriptedStr) {
     auto out = compileAndRun(
         "xs: list[str] = [\"/usr/lib\", \"home\"]\n"
@@ -1567,8 +1392,6 @@ TEST(CodeGenE2E, MethodCallOnSubscriptedStr) {
     EXPECT_EQ(out, "True\n3\n");
 }
 
-// Regression: for-in over list[ClassInstance] without a tracked NameExpr
-// origin. Pre-fix elemVarKind defaulted to Int and `f.name` returned 0.
 TEST(CodeGenE2E, ForInOverListOfClassInstances) {
     auto out = compileAndRun(
         "class Box {\n"
@@ -1584,8 +1407,6 @@ TEST(CodeGenE2E, ForInOverListOfClassInstances) {
     EXPECT_EQ(out, "a\nb\nc\n");
 }
 
-// Regression: bool predicates flow as native i1 (D030). Pre-fix
-// startswith/endswith/contains/isXxx returned i64 0/1 and printed "1"/"0".
 TEST(CodeGenE2E, StrBoolPredicatesPrintTrueFalse) {
     auto out = compileAndRun(
         "s: str = \"/foo\"\n"
@@ -1597,9 +1418,6 @@ TEST(CodeGenE2E, StrBoolPredicatesPrintTrueFalse) {
     EXPECT_EQ(out, "True\nFalse\nTrue\nFalse\n");
 }
 
-// Regression: dict subscript-set from a borrowed local string. After the
-// source local is reassigned (or its scope ends), the dict's value must
-// remain valid.
 TEST(CodeGenE2E, DictSetFromBorrowedLocalStr) {
     auto out = compileAndRun(
         "def build() -> dict[str, str] {\n"
@@ -1616,8 +1434,6 @@ TEST(CodeGenE2E, DictSetFromBorrowedLocalStr) {
     EXPECT_EQ(out, "dragon\n");
 }
 
-// Regression: list[i] = borrowed_local_str must incref the new value so the
-// list owns a live reference after the source's scope ends.
 TEST(CodeGenE2E, ListSetFromBorrowedLocalStr) {
     auto out = compileAndRun(
         "def fill(target: list[str]) -> None {\n"
@@ -1633,8 +1449,6 @@ TEST(CodeGenE2E, ListSetFromBorrowedLocalStr) {
     EXPECT_EQ(out, "x\nb\n");
 }
 
-// Regression: tuple literal element that is a borrowed name (heap dict)
-// must be incref'd so the returned tuple's reference outlives the local.
 TEST(CodeGenE2E, TupleReturnFromBorrowedDictLocal) {
     auto out = compileAndRun(
         "def make() -> tuple[bool, dict[str, str]] {\n"
@@ -1649,10 +1463,6 @@ TEST(CodeGenE2E, TupleReturnFromBorrowedDictLocal) {
     );
     EXPECT_EQ(out, "v\n");
 }
-
-//===----------------------------------------------------------------------===//
-// Deep container equality (drives assertEqual in stdlib/unittest.dr)
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenE2E, ListEqIntElementwise) {
     auto out = compileAndRun(
@@ -1752,9 +1562,6 @@ TEST(CodeGenE2E, BoxedBytesEqViaAny) {
     EXPECT_EQ(out, "True\nFalse\n");
 }
 
-// Regression: const x = list[i] (subscript-source assignment) must incref the
-// element so x stays valid after the source list's lifetime ends. Tests the
-// SubscriptExpr extension to isBorrowedHeapExpr.
 TEST(CodeGenE2E, ConstAssignFromListSubscript) {
     auto out = compileAndRun(
         "def first(xs: list[str]) -> str {\n"
@@ -1768,14 +1575,7 @@ TEST(CodeGenE2E, ConstAssignFromListSubscript) {
     EXPECT_EQ(out, "hello\n");
 }
 
-//===----------------------------------------------------------------------===//
-// list[Any] - heterogeneous literal builds a box list (D039 Phase 4)
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, ListAnyMixedLiteralIndexedPrintsValues) {
-    // A heterogeneous literal assigned to list[Any] must build a BOX list so
-    // x[i] unboxes to the real value - not leak <box tag=.. payload=..> or read
-    // adjacent native slots as a malformed box.
     auto out = compileAndRun(
         "x: list[Any] = [10, \"hi\", 2.5]\n"
         "print(x[0])\n"
@@ -1785,8 +1585,6 @@ TEST(CodeGenE2E, ListAnyMixedLiteralIndexedPrintsValues) {
 }
 
 TEST(CodeGenE2E, ListAnyHomogeneousIntLiteralIndexed) {
-    // All-int contents would infer list[int]; the list[Any] annotation must
-    // still force a box list (else x[0] reads garbage / prints blank).
     auto out = compileAndRun(
         "x: list[Any] = [1, 2, 3]\n"
         "print(x[0])\n"
@@ -1795,8 +1593,6 @@ TEST(CodeGenE2E, ListAnyHomogeneousIntLiteralIndexed) {
 }
 
 TEST(CodeGenE2E, ListAnyElementIsCastableViaIsinstance) {
-    // x[i] returns a proper Any box, so isinstance narrowing recovers the
-    // native type.
     auto out = compileAndRun(
         "x: list[Any] = [10, \"hi\"]\n"
         "v: Any = x[0]\n"
@@ -1816,12 +1612,6 @@ TEST(CodeGenE2E, ListAnyIteration) {
     EXPECT_EQ(out, "1\ntwo\n3.0\n");
 }
 
-// C5 (Any-box container repr): a list/dict reached through an Any box carries
-// its element kind in the pointed-to object's elem_tag, so print() must render
-// it tag-aware. A tag-blind dragon_print_*_raw call prints a
-// nested list[str]/list[float] payload (and a dict[str,Any] container value) as
-// a raw pointer integer; only the int-element case renders correctly by luck.
-// str()/f-strings always used the tag-aware repr path; these guard print().
 TEST(CodeGenE2E, ListAnyHoldingStrListPrintsTagAware) {
     auto out = compileAndRun(
         "xs: list[Any] = [[\"a\", \"b\"], [1, 2], [1.5, 2.5]]\n"
@@ -1842,6 +1632,3 @@ TEST(CodeGenE2E, DictIntAnyHoldingListPrintsTagAware) {
         "print(d)\n");
     EXPECT_EQ(out, "{1: ['x', 'y']}\n");
 }
-
-// NOTE: float(str) parsing and None/float boxing in dict[str, Any] are covered
-// by the dogfooded `.dr` unittest suite (test/dr/test_conversions.dr).

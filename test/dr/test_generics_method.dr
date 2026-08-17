@@ -24,17 +24,14 @@ class Customer {
 }
 
 class Repo {
-    # identity - isolates the mechanism from any T-construction
     def cast[T](x: T) -> T {
         return x
     }
-    # list[T] return - the db.all[T] result shape
     def wrap[T](x: T) -> list[T] {
         ys: list[T] = []
         ys.append(x)
         return ys
     }
-    # construct T(...) inside the body - substitutes to the concrete ctor
     def make[T](n: int) -> list[T] {
         out: list[T] = []
         i: int = 0
@@ -44,21 +41,15 @@ class Repo {
         }
         return out
     }
-    # a method calling a sibling generic method through self
     def cast_via_self[T](x: T) -> T {
         return self.cast[T](x)
     }
-    # multiple type parameters
     def second[K, V](k: K, v: V) -> V {
         return v
     }
-    # comprehension that CONSTRUCTS T per element - the db.all[T] materialization
-    # shape `[T(**r) for r in rows]`. Regression: the comprehension element type
-    # must infer as T (not <unknown>), so the body types as list[T].
     def fetch[T](rows: list[dict[str, Any]]) -> list[T] {
         return [T(**r) for r in rows]
     }
-    # comprehension with POSITIONAL T(...) construction
     def gather[T](xs: list[int]) -> list[T] {
         return [T(x, "g") for x in xs]
     }
@@ -152,19 +143,16 @@ class GenericsMethodTests(TestCase) {
         self.assertEqual(cs[0].name, "g")
     }
 
-    # D049 optional-[T]: a bracket-less call infers T from the binding annotation
-    # (no [T] needed). This is the surface that makes `c: Customer = db.one()` and
-    # `rows: list[Customer] = db.all()` work without explicit type args.
     def test_bracketless_infers_T_from_annotation() {
         r: Repo = Repo()
-        cs: list[Customer] = r.gather([8, 9])   # infer T=Customer from list[Customer]
+        cs: list[Customer] = r.gather([8, 9])
         self.assertEqual(len(cs), 2)
         self.assertEqual(cs[1].id, 9)
     }
 
     def test_bracketless_scalar_infers_from_annotation() {
         r: Repo = Repo()
-        x: int = r.cast(5)        # infer T=int from arg (already worked)
+        x: int = r.cast(5)
         self.assertEqual(x, 5)
     }
 }

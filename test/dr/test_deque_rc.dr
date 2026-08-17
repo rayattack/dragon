@@ -28,8 +28,6 @@ def bump(x: int) -> int {
 
 class DequeRcTests(TestCase) {
     def test_int_deque_local_churn() {
-        # Exercises the missing dealloc case: many short-lived deque[int]
-        # locals. Correctness must hold while the teardown is balanced.
         i: int = 0
         total: int = 0
         while i < 200 {
@@ -38,7 +36,6 @@ class DequeRcTests(TestCase) {
             total = total + d.pop()
             i = i + 1
         }
-        # Last appended value popped back each iteration: sum 0..199.
         self.assertEqual(total, 19900)
     }
 
@@ -56,8 +53,6 @@ class DequeRcTests(TestCase) {
     }
 
     def test_callable_deque_closures() {
-        # deque[Callable] holding capturing closures - each closure + env must be
-        # released on teardown (the whitelist used to skip TAG_CLOSURE).
         d: deque[Callable[[int], int]] = deque()
         base: int = 10
         d.append(lambda (x: int) -> int { return x + base })
@@ -69,23 +64,17 @@ class DequeRcTests(TestCase) {
     }
 
     def test_deque_from_borrowed_list_no_double_free() {
-        # deque(xs) borrows xs (copies + increfs elements); xs must NOT be freed
-        # by the ctor and must stay usable afterwards.
         xs: list[int] = [7, 8, 9]
         d: deque[int] = deque(xs)
         self.assertEqual(len(d), 3)
-        # Source list still alive and correct after constructing the deque.
         self.assertEqual(xs[0], 7)
         self.assertEqual(xs[2], 9)
         self.assertEqual(len(xs), 3)
-        # And the deque has an independent copy.
         self.assertEqual(d.popleft(), 7)
         self.assertEqual(xs[0], 7)
     }
 
     def test_bounded_deque_eviction_balanced() {
-        # A bounded deque drops the far end on overflow - the evicted element's
-        # ref must be released (decref-on-evict), and teardown frees the rest.
         b: deque[str] = deque(maxlen=3)
         i: int = 0
         while i < 100 {

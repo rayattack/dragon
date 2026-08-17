@@ -193,7 +193,7 @@ _ops: dict[str, Callable[[int], int]] = {}
 _ops["double"] = double
 _ops["square"] = square
 
-name: str = read_choice()             # computed at runtime
+name: str = input()                   # computed at runtime
 op: Callable[[int], int] = _ops[name] # look the handler up by name
 print(op(5))
 ```

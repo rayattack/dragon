@@ -1,31 +1,3 @@
-# odb.shell - the interactive OQL shell (spec section 22a).
-#
-#   dragon run packages/odb/shell.dr app.odb -I packages
-#
-# The shell is a SUPERSET of OQL, the way psql is a superset of SQL. A line is
-# either a shell builtin (call-shaped admin operations - never OQL grammar, so
-# the spec's "no OQL DDL" decision stays intact) or it passes through verbatim
-# to the engine: reads run db.find(), write programs run db.run(). Results
-# pretty-print as aligned rows HERE - presentation belongs to the shell, the
-# engine returns documents
-#
-# Builtins:
-#   schema("name", <json-schema>[, <meta>])  define a collection (the
-#                                            canonical JSON-Schema DDL
-#                                            artifact, fed interactively)
-#   schema("name")                           show a collection
-#   namespaces()                             list collections
-#   check()                                  verify the whole database
-#   help                                     command summary
-#   quit                                     leave
-#
-# Dispatch and formatting are pure functions (classify, builtin_name,
-# call_args, split_args, cell_text, doc_columns, format_table, format_docs),
-# and Shell.execute() maps one input line to its output lines with no I/O, so
-# the whole surface is value-testable from test/dr/test_odb_shell.dr. Only the
-# bottom-of-file entry loop touches stdin/stdout, and only when this file IS
-# the program; importing the module never starts it.
-
 from sys import argv
 from json import loads, dumps
 from odb import ODB, Documents, Document, CheckReport
@@ -33,20 +5,15 @@ from odb.schema import CompiledSchema
 from odb.errors import ODBError, SchemaError, PrepareError, IntegrityError, ConflictError
 from odb.errors import CorruptionError, NotFound
 
-# stdio for the entry loop only. The prompt and every result line go through
-# ONE FILE* flushed per command: print() writes through a different buffered
-# stream, and mixing the two reorders output on pipes.
 extern "C" def fopen(path: str, mode: str) -> ptr
 extern "C" def fflush(handle: ptr) -> intc
 extern "C" def dragon_file_write_text(handle: ptr, s: str) -> int
 extern "C" def dragon_file_readline(handle: ptr) -> str
 
-#--- line classification ---------------------------------------------------#
-
-const L_EMPTY: int = 0     # blank line or `#` comment: nothing to run
-const L_BUILTIN: int = 1   # a shell builtin
-const L_WRITE: int = 2     # an OQL write program -> db.run()
-const L_READ: int = 3      # everything else -> db.find()
+const L_EMPTY: int = 0
+const L_BUILTIN: int = 1
+const L_WRITE: int = 2
+const L_READ: int = 3
 
 def _is_ident_char(c: str) -> bool {
     if c >= "a" and c <= "z" {
@@ -61,7 +28,6 @@ def _is_ident_char(c: str) -> bool {
     return c == "_"
 }
 
-# The leading identifier of a line ("add customers ..." -> "add").
 def leading_word(line: str) -> str {
     s: str = line.strip()
     n: int = len(s)
@@ -72,11 +38,6 @@ def leading_word(line: str) -> str {
     return s[0:i]
 }
 
-# The builtin a line invokes, or "" when it is not a builtin. `help` and
-# `quit` are bare words; the admin builtins are call-shaped (`check()`,
-# `namespaces()`, `schema(...)`), so a collection that happens to share a
-# builtin's name stays queryable: bare `check` is OQL, `check()` is the
-# builtin.
 def builtin_name(line: str) -> str {
     s: str = line.strip()
     if s == "help" or s == "quit" {
@@ -96,16 +57,12 @@ def builtin_name(line: str) -> str {
     return w
 }
 
-# The argument text inside a call-shaped builtin's parentheses.
 def call_args(line: str) -> str {
     s: str = line.strip()
     i: int = s.find("(")
     return s[i + 1:len(s) - 1]
 }
 
-# Split builtin argument text on top-level commas, respecting nesting
-# ({} [] ()) and double-quoted strings with backslash escapes, so a JSON
-# schema rides through as one argument no matter how many commas it holds.
 def split_args(args: str) -> list[str] {
     out: list[str] = []
     cur: list[str] = []
@@ -149,8 +106,6 @@ def split_args(args: str) -> list[str] {
     return out
 }
 
-# Classify one input line. Builtins win over OQL only in their call shape;
-# the write words route to db.run(), everything else is a read for db.find().
 def classify(line: str) -> int {
     s: str = line.strip()
     if s == "" or s[0] == "#" {
@@ -166,10 +121,6 @@ def classify(line: str) -> int {
     return L_READ
 }
 
-#--- result formatting -----------------------------------------------------#
-
-# One cell of output: strings print bare (psql-style), everything else in its
-# JSON form (ints, floats, true/false, null, nested objects and arrays).
 def cell_text(v: Any) -> str {
     if isinstance(v, str) {
         s: str = v
@@ -178,8 +129,6 @@ def cell_text(v: Any) -> str {
     return dumps(v)
 }
 
-# Column order across a result set: first-seen field order, `_id` always
-# leading when present (it is the one engine-provided column).
 def doc_columns(rows: list[Document]) -> list[str] {
     cols: list[str] = []
     seen: dict[str, bool] = {}
@@ -223,10 +172,6 @@ def _dashes(w: int) -> str {
     return "".join(parts)
 }
 
-# Aligned rows: header, dash rule, one line per row. Every column pads to its
-# widest cell; the last column stays unpadded and each line is right-trimmed,
-# so no line carries trailing spaces (an empty last cell would otherwise
-# leave an invisible one behind the separator).
 def format_table(cols: list[str], rows: list[list[str]]) -> list[str] {
     out: list[str] = []
     ncols: int = len(cols)
@@ -270,9 +215,6 @@ def format_table(cols: list[str], rows: list[list[str]]) -> list[str] {
     return out
 }
 
-# A find() result as output lines: aligned rows plus the psql-style count
-# footer. An absent optional field renders as an empty cell, never a silent
-# zero.
 def format_docs(rows: list[Document]) -> list[str] {
     if len(rows) == 0 {
         return ["(0 rows)"]
@@ -299,8 +241,6 @@ def format_docs(rows: list[Document]) -> list[str] {
     return out
 }
 
-#--- the shell -------------------------------------------------------------#
-
 const _HELP: list[str] = [
     "The ODB shell. Any line that is not a builtin is OQL:",
     "  reads  (customers ? city == \"Lagos\" { name })   run db.find()",
@@ -323,8 +263,6 @@ class Shell {
         self.done = False
     }
 
-    # One input line -> its output lines. Never raises: every engine error
-    # prints with its taxonomy class and the session continues.
     def execute(line: str) -> list[str] {
         out: list[str] = []
         s: str = line.strip()
@@ -422,10 +360,6 @@ class Shell {
         }
     }
 
-    # schema("name") shows; schema("name", <json-schema>[, <meta>]) defines.
-    # The arguments are JSON documents - the same canonical DDL artifact the
-    # catalog stores and `odb define` accepts - so a definition pastes into
-    # the shell exactly as it lives in a .schema.json file.
     def _schema(args: list[str], out: list[str]) -> None {
         if len(args) < 1 or len(args) > 3 {
             out.append("usage: schema(\"name\") or schema(\"name\", <json-schema>[, <meta>])")
@@ -468,11 +402,6 @@ class Shell {
     }
 }
 
-#--- the entry loop --------------------------------------------------------#
-
-# Read lines until EOF or `quit`. dragon_file_readline keeps the trailing
-# newline on real lines and returns "" only at EOF, so an empty line at the
-# prompt and end-of-input never conflate.
 def repl_loop(db: ODB, inp: ptr, outp: ptr) -> None {
     sh: Shell = Shell(db)
     while not sh.done {
@@ -490,9 +419,6 @@ def repl_loop(db: ODB, inp: ptr, outp: ptr) -> None {
     }
 }
 
-# Entry: runs only when this file is the program (imports never execute a
-# module's top level). Opening a path that does not exist yet creates the
-# database, sqlite-style.
 _args: list[str] = argv()
 if len(_args) < 2 {
     _usage_out: ptr = fopen("/dev/stdout", "a")

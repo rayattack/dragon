@@ -23,7 +23,6 @@
 using namespace dragon;
 using namespace dragon::test;
 
-// One-time LLVM initialization
 struct LLVMInit {
     LLVMInit() {
         llvm::InitializeNativeTarget();
@@ -33,11 +32,9 @@ struct LLVMInit {
 };
 static LLVMInit llvmInit;
 
-// Helper: create a temp directory
 static std::string makeTempDir(const std::string& suffix) {
     namespace fs = std::filesystem;
 #if defined(_WIN32)
-    // mkdtemp is POSIX. Roll our own with GetTempPathA + a counter.
     static std::atomic<int> counter{0};
     auto base = fs::path(dragon::platform::getTempDir())
         / ("dragon_interop_" + suffix + "_" +
@@ -56,28 +53,17 @@ static std::string makeTempDir(const std::string& suffix) {
 #endif
 }
 
-// Helper: write a file
 static void writeFile(const std::string& path, const std::string& content) {
     std::ofstream out(path);
     out << content;
 }
 
-// Helper: compile and run a Dragon project via LLVM CodeGen
-// Returns the exit code, captures stdout in 'output'
 static int compileAndRun(const std::string& dir,
                           const std::string& entryFile,
                           const std::string& source,
                           std::string& output) {
-    // Write the entry source to disk too (not just the dep modules). The real
-    // driver always runs an entry file that exists on disk; D045 package-privacy
-    // detection (TypeChecker `packageKeyOf`) decides "same package" by checking
-    // whether the package-root file (e.g. `app/app.dr`) exists on disk. Parsing
-    // the entry only in-memory made that check fail, so a legitimate
-    // same-package protected import was wrongly rejected once the harness gates
-    // on TypeChecker errors. Writing it makes the harness faithful.
     writeFile(entryFile, source);
 
-    // Parse entry module
     bool isDragon = entryFile.size() > 3 &&
                     entryFile.substr(entryFile.size() - 3) == ".dr";
     auto tokens = lex(source, isDragon);
@@ -89,13 +75,9 @@ static int compileAndRun(const std::string& dir,
     auto module = parser.parseModule();
     if (parser.hasErrors()) return -1;
 
-    // Faithful to the real Driver: a front-end (Sema/TypeChecker) error aborts
-    // compilation. The entry TypeChecker runs after imports resolve (below);
-    // entry Sema runs here (imports bind their names regardless of resolution).
     Sema sema;
     if (!sema.analyze(*module)) return -5;
 
-    // Resolve imports
     ModuleResolverOptions resolverOpts;
     resolverOpts.sourceDir = dir + "/";
 #ifdef DRAGON_STDLIB_DIR
@@ -105,13 +87,9 @@ static int compileAndRun(const std::string& dir,
     auto graph = resolver.buildGraph(*module, entryFile);
     if (graph.hasCycle) return -2;
 
-    // Process dependencies and collect exports for cross-file type checking
     std::vector<Module*> depModules;
     std::unordered_map<std::string,
         std::unordered_map<std::string, std::shared_ptr<Type>>> allExports;
-    // D045 -- mirror the Driver: thread each module's source path so member/
-    // import privacy can compute packages. Without this the privacy rule would
-    // silently fail-open in this test harness (divergent from the real CLI).
     std::unordered_map<std::string, std::string> moduleFilepaths;
     for (auto& mod : graph.modules) moduleFilepaths[mod.name] = mod.filepath;
 
@@ -122,13 +100,6 @@ static int compileAndRun(const std::string& dir,
         for (auto& [modName, exports] : allExports) {
             modTc.registerExternalModule(modName, exports, moduleFilepaths[modName]);
         }
-        // D044 cross-module generics - mirror the real Driver (Driver.cpp): a
-        // module must see earlier deps' generic TEMPLATES so it can instantiate
-        // them. Without this the harness compiled a call to an imported generic
-        // (e.g. unittest.dr's assertEqual[T]) without stamping the template, so
-        // the body's `!=` never fired and `assertEqual(1, 2)` silently passed -
-        // making the interop suite assert on a program the real CLI never
-        // produces.
         for (auto* prior : depModules) {
             modTc.registerExternalGenerics(*prior);
         }
@@ -138,17 +109,11 @@ static int compileAndRun(const std::string& dir,
         depModules.push_back(mod.ast.get());
     }
 
-    // Re-run TypeChecker on the entry module with cross-file type info, gating
-    // on any error. Runs even with no deps so a single-file entry's type errors
-    // are caught too (the throwaway pre-resolve entry tc was removed).
     {
         TypeChecker entryTc;
         for (auto& [modName, exports] : allExports) {
             entryTc.registerExternalModule(modName, exports, moduleFilepaths[modName]);
         }
-        // D044 cross-module generics - see the dep loop above. The entry module
-        // must see every dependency's generic templates so a call like
-        // assertEqual[T] gets stamped; this is the exact step Driver.cpp runs.
         for (auto* dep : depModules) {
             entryTc.registerExternalGenerics(*dep);
         }
@@ -156,7 +121,6 @@ static int compileAndRun(const std::string& dir,
         if (entryTc.hasErrors()) return -5;
     }
 
-    // Generate LLVM IR
     CodeGenOptions codegenOpts;
 #ifdef DRAGON_RUNTIME_LIB
     codegenOpts.runtimeLibPath = DRAGON_RUNTIME_LIB;
@@ -177,7 +141,6 @@ static int compileAndRun(const std::string& dir,
     CodeGen codegen(codegenOpts);
     if (!codegen.generate(*module, depModules)) return -3;
 
-    // Compile to object and link
     std::string objFile = dir + "/test_output.o";
     std::string exe = dir + "/test_output";
 
@@ -188,7 +151,6 @@ static int compileAndRun(const std::string& dir,
     }
     std::remove(objFile.c_str());
 
-    // Run and capture output
     std::string runCmd = exe + " 2>&1";
 #if defined(_WIN32)
     FILE* pipe = _popen(runCmd.c_str(), "r");
@@ -206,17 +168,11 @@ static int compileAndRun(const std::string& dir,
     int exitCode = pclose(pipe);
 #endif
 
-    // Cleanup
     std::remove(exe.c_str());
 
     return dragon::platform::getExitCode(exitCode);
 }
 
-// Helper: resolve + type-check a multi-file project (entry + deps) the way the
-// real Driver does (threading each module's filepath through
-// registerExternalModule so D045 privacy is enforced) and return every error
-// diagnostic's message. Used for compile-error tests where compileAndRun can't
-// help (it ignores type-check errors and proceeds to codegen).
 static std::vector<std::string> typeCheckProjectErrors(
         const std::string& dir, const std::string& entryFile,
         const std::string& source) {
@@ -264,23 +220,17 @@ static std::vector<std::string> typeCheckProjectErrors(
     return errs;
 }
 
-// True if any error message contains `needle`.
 static bool anyContains(const std::vector<std::string>& errs, const std::string& needle) {
     for (auto& e : errs)
         if (e.find(needle) != std::string::npos) return true;
     return false;
 }
 
-// Helper: cleanup temp dir (removes all known files and the dir)
 static void cleanupDir(const std::string& dir,
                         const std::vector<std::string>& files) {
     for (auto& f : files) std::remove((dir + "/" + f).c_str());
     std::error_code rmEc; std::filesystem::remove_all(dir, rmEc);
 }
-
-//===----------------------------------------------------------------------===//
-// .dr imports .dr
-//===----------------------------------------------------------------------===//
 
 TEST(InteropTest, DragonImportsDragon) {
     auto dir = makeTempDir("dr_dr");
@@ -305,16 +255,6 @@ TEST(InteropTest, DragonImportsDragon) {
     cleanupDir(dir, {"utils.dr"});
 }
 
-//===----------------------------------------------------------------------===//
-// Cross-module @property regressions:
-//  - bare-attribute getter/setter on an IMPORTED class must mangle the
-//  symbol with the class's owning module (`<mod>__<Class>_<attr>`), not
-//  the bare `<Class>_<attr>`. A class-returning property + str() otherwise
-//  aborts LLVM verification with `self` = i64 0 (Attributes.cpp/Assign.cpp).
-//  - a property accessed on an EXPRESSION result (chained `b.twin.val`)
-//  must invoke the getter too, not fall through to a `0` fallback.
-//===----------------------------------------------------------------------===//
-
 TEST(InteropTest, CrossModulePropertyGetterSetter) {
     auto dir = makeTempDir("xmod_property");
     ASSERT_FALSE(dir.empty());
@@ -335,26 +275,20 @@ TEST(InteropTest, CrossModulePropertyGetterSetter) {
     std::string source =
         "from shapes import Box\n"
         "b: Box = Box()\n"
-        "b.val = 7\n"                          // N4: cross-module @property setter
-        "print(b.val)\n"                      // N4: cross-module @property getter (scalar)
-        "print(str(b.twin))\n"                // N4: class-returning property + str() (the crash case)
-        "print(f\"chained={b.twin.val}\")\n"; // N5: property on an expression result (chained)
+        "b.val = 7\n"
+        "print(b.val)\n"
+        "print(str(b.twin))\n"
+        "print(f\"chained={b.twin.val}\")\n";
 
     std::string output;
     int exitCode = compileAndRun(dir, dir + "/main.dr", source, output);
 
     EXPECT_EQ(exitCode, 0);
-    EXPECT_NE(output.find("box"), std::string::npos);     // N4: did not crash
-    EXPECT_NE(output.find("chained=7"), std::string::npos); // N5: chained getter returned 7, not 0
+    EXPECT_NE(output.find("box"), std::string::npos);
+    EXPECT_NE(output.find("chained=7"), std::string::npos);
 
     cleanupDir(dir, {"shapes.dr"});
 }
-
-//===----------------------------------------------------------------------===//
-// __doc__ across module boundaries: `from mod import f; f.__doc__` resolves
-// the imported name through the same alias map (importedFuncAliasesByModule)
-// that Call / Assign use. `mod.__doc__` reads the module's lifted docstring.
-//===----------------------------------------------------------------------===//
 
 TEST(InteropTest, ImportedFunctionDocstring) {
     auto dir = makeTempDir("docstring_fromimport");
@@ -381,9 +315,6 @@ TEST(InteropTest, ImportedFunctionDocstring) {
     cleanupDir(dir, {"lib.dr"});
 }
 
-// NOTE: module-qualified call chaining (`mod.func(args).method()`) is covered
-// by the dogfooded `.dr` unittest suite (test/dr/test_qualified_chain.dr).
-
 TEST(InteropTest, ImportedModuleDocstring) {
     auto dir = makeTempDir("docstring_moduledoc");
     ASSERT_FALSE(dir.empty());
@@ -405,10 +336,6 @@ TEST(InteropTest, ImportedModuleDocstring) {
 
     cleanupDir(dir, {"lib.dr"});
 }
-
-//===----------------------------------------------------------------------===//
-// .dr imports typed .py
-//===----------------------------------------------------------------------===//
 
 TEST(InteropTest, DragonImportsTypedPython) {
     auto dir = makeTempDir("dr_py");
@@ -432,10 +359,6 @@ TEST(InteropTest, DragonImportsTypedPython) {
     cleanupDir(dir, {"pyutils.py"});
 }
 
-//===----------------------------------------------------------------------===//
-// Single file, no imports
-//===----------------------------------------------------------------------===//
-
 TEST(InteropTest, SingleFileNoImports) {
     auto dir = makeTempDir("single");
     ASSERT_FALSE(dir.empty());
@@ -450,10 +373,6 @@ TEST(InteropTest, SingleFileNoImports) {
 
     std::error_code rmEc; std::filesystem::remove_all(dir, rmEc);
 }
-
-//===----------------------------------------------------------------------===//
-// Diamond import pattern (deduplicated)
-//===----------------------------------------------------------------------===//
 
 TEST(InteropTest, DiamondImportCompiles) {
     auto dir = makeTempDir("diamond_e2e");
@@ -486,27 +405,20 @@ TEST(InteropTest, DiamondImportCompiles) {
     int exitCode = compileAndRun(dir, dir + "/main.dr", source, output);
 
     EXPECT_EQ(exitCode, 0);
-    // base_val()=10, left=11, right=12, sum=23
     EXPECT_NE(output.find("23"), std::string::npos);
 
     cleanupDir(dir, {"base.dr", "left.dr", "right.dr"});
 }
 
-//===----------------------------------------------------------------------===//
-// Untyped .py import produces "Borders must be secured" error
-//===----------------------------------------------------------------------===//
-
 TEST(InteropTest, UntypedPyImportRejected) {
     auto dir = makeTempDir("untyped_py");
     ASSERT_FALSE(dir.empty());
 
-    // Untyped Python module
     writeFile(dir + "/bad_module.py",
         "def process(data):\n"
         "    return data\n"
     );
 
-    // Parse entry module
     std::string source = "from bad_module import process\nprint(process(5))\n";
     auto tokens = lex(source, true);
     ParserOptions parseOpts;
@@ -517,7 +429,6 @@ TEST(InteropTest, UntypedPyImportRejected) {
     auto module = parser.parseModule();
     ASSERT_NE(module, nullptr);
 
-    // Resolve imports
     ModuleResolverOptions resolverOpts;
     resolverOpts.sourceDir = dir + "/";
     ModuleResolver resolver(resolverOpts);
@@ -526,17 +437,12 @@ TEST(InteropTest, UntypedPyImportRejected) {
     ASSERT_EQ(graph.modules.size(), 1u);
     ASSERT_FALSE(graph.modules[0].isDragon);
 
-    // TypeHintEnforcer should reject it
     TypeHintEnforcer enforcer;
     bool ok = enforcer.enforce(*graph.modules[0].ast);
     EXPECT_FALSE(ok);
 
     cleanupDir(dir, {"bad_module.py"});
 }
-
-//===----------------------------------------------------------------------===//
-// String operations across modules (end-to-end)
-//===----------------------------------------------------------------------===//
 
 TEST(InteropTest, StringConcatAcrossModules) {
     auto dir = makeTempDir("str_concat");
@@ -561,10 +467,6 @@ TEST(InteropTest, StringConcatAcrossModules) {
     cleanupDir(dir, {"greet.dr"});
 }
 
-//===----------------------------------------------------------------------===//
-// Function name across modules (end-to-end)
-//===----------------------------------------------------------------------===//
-
 TEST(InteropTest, FunctionNameAcrossModules) {
     auto dir = makeTempDir("funcname");
     ASSERT_FALSE(dir.empty());
@@ -588,12 +490,6 @@ TEST(InteropTest, FunctionNameAcrossModules) {
     cleanupDir(dir, {"ops.dr"});
 }
 
-// Two modules each defining a `class Conflict` with identical layout --
-// instantiated through the cross-module form `a.Conflict(...)` /
-// `b.Conflict(...)`. Without per-module class-symbol mangling, the second
-// module's `_new` body gets silently dropped at LLVM linking, both `a` and
-// `b` end up sharing one body, and the test would observe a single state
-// where both calls modify the same instance state.
 TEST(InteropTest, ClassNameAcrossModules) {
     auto dir = makeTempDir("classname");
     ASSERT_FALSE(dir.empty());
@@ -637,10 +533,6 @@ TEST(InteropTest, ClassNameAcrossModules) {
 
     cleanupDir(dir, {"a.dr", "b.dr"});
 }
-
-//===----------------------------------------------------------------------===//
-// Stdlib .dr module tests (Phase 13)
-//===----------------------------------------------------------------------===//
 
 TEST(InteropTest, StdlibMathSqrt) {
     auto dir = makeTempDir("stdlib_sqrt");
@@ -705,45 +597,19 @@ TEST(InteropTest, StdlibOsCwd) {
     int exitCode = compileAndRun(dir, dir + "/main.dr", source, output);
 
     EXPECT_EQ(exitCode, 0);
-    // cwd() should return a non-empty string (a path)
     EXPECT_FALSE(output.empty());
     EXPECT_NE(output.find("/"), std::string::npos);
 
     std::error_code rmEc; std::filesystem::remove_all(dir, rmEc);
 }
 
-// Regression for two bugs that surfaced together when serving markdown files
-// containing non-ASCII characters from the docs site:
-//
-// 1. `stdlib/io.dr::File.read_all` used to return a raw `malloc`'d buffer
-//  typed as `str`. The buffer had no `DragonObjectHeader`, so the caller's
-//  scope-exit `dragon_decref_str` read the 16 bytes preceding the buffer
-//  as a fake header and (rarely) free()'d a misaligned non-heap address --
-//  surfacing downstream as `malloc_consolidate(): unaligned fastbin chunk
-//  detected`.
-// 2. `dragon_str_split` walked the input with `*p` and `strstr(p, sep)`, both
-//  byte-oriented. For a kind=4 (UCS-4) input the first cp's high zero
-//  byte was read as a NUL terminator, collapsing the entire input to its
-//  first cp before any separator could match.
-//
-// The shared trigger is "read a file with at least one non-ASCII byte, then
-// process it with normal Dragon string ops" -- exactly what the docs site's
-// markdown rendering does on `decisions/027-closures.md` (em-dash at byte
-// 368). A correct fix produces the cp-count length (Python parity) and a
-// split that yields one entry per logical newline-separated record.
 TEST(InteropTest, ReadTextNonAsciiSplit) {
     auto dir = makeTempDir("read_text_nonascii");
     ASSERT_FALSE(dir.empty());
 
-    // Three lines, second carries an em-dash (U+2013, 0xE2 0x80 0x93). Line
-    // counts: 3 lines + a trailing empty after the final \n = 4 entries.
-    // Byte length: 5 + 1 + 13 + 3 + 6 + 1 + 5 + 1 = 35 bytes (em-dash is 3
-    // bytes); cp length = 33.
     std::string samplePath = dir + "/sample.txt";
     writeFile(samplePath, "alpha\nmiddle has — dash\nomega\n");
 
-    // Absolute path so the spawned binary doesn't depend on cwd; popen
-    // inherits the test runner's cwd which differs from `dir`.
     std::string source =
         "from io import open\n"
         "const t: str = open(\"" + samplePath + "\").text()\n"
@@ -759,30 +625,17 @@ TEST(InteropTest, ReadTextNonAsciiSplit) {
     std::string output;
     int exitCode = compileAndRun(dir, dir + "/main.dr", source, output);
 
-    // Pre-Bug-B-fix: exitCode could be SIGABRT (134) from the spurious
-    // decref_str on the raw FFI buffer. Post-fix: clean exit.
     EXPECT_EQ(exitCode, 0) << "process aborted — likely FFI-string-return "
                               "decref of a raw malloc'd buffer. output:\n"
                            << output;
 
-    // Cp count (Python parity): 3 lines × content + 2 newlines + final \n.
-    // "alpha" (5) + \n + "middle has -- dash" (17 cps incl. em-dash) + \n
-    // + "omega" (5) + \n = 30 cps. Pre-fix paths produced 32 (byte count
-    // returned via strlen on a raw FFI buffer) or 1 (kind=4 walk
-    // truncated at the first cp's high zero byte).
     EXPECT_EQ(output.substr(0, 3), "30\n")
         << "len(open(file).text()) should be cp count = 30:\n" << output;
 
-    // split("\n") should yield 4 entries: "alpha", "middle has -- dash",
-    // "omega", "" (the trailing empty after the final newline). Pre-fix
-    // dragon_str_split's byte-walking path returned 1 entry for kind=4
-    // input.
     EXPECT_NE(output.find("\n4\n"), std::string::npos)
         << "split('\\n') on kind=4 input should return 4 entries:\n"
         << output;
 
-    // Each line individually present in the output (catches a split that
-    // produces the right count but wrong content).
     EXPECT_NE(output.find("alpha"), std::string::npos) << output;
     EXPECT_NE(output.find("middle has"), std::string::npos) << output;
     EXPECT_NE(output.find("dash"), std::string::npos) << output;
@@ -803,7 +656,6 @@ TEST(InteropTest, StdlibOsGetpid) {
     int exitCode = compileAndRun(dir, dir + "/main.dr", source, output);
 
     EXPECT_EQ(exitCode, 0);
-    // pid should be a positive integer
     int pidVal = std::atoi(output.c_str());
     EXPECT_GT(pidVal, 0);
 
@@ -816,13 +668,12 @@ TEST(InteropTest, StdlibOsGetenv) {
 
     std::string source =
         "from os import environ\n"
-        "print(environ[\"HOME\"])\n";  // os.environ is now a dict (Python parity)
+        "print(environ[\"HOME\"])\n";
 
     std::string output;
     int exitCode = compileAndRun(dir, dir + "/main.dr", source, output);
 
     EXPECT_EQ(exitCode, 0);
-    // HOME should be a non-empty path
     EXPECT_FALSE(output.empty());
     EXPECT_NE(output.find("/"), std::string::npos);
 
@@ -919,7 +770,7 @@ TEST(InteropTest, StdlibOsPathSplitdrive) {
 
     std::string source =
         "from os.path import splitdrive\n"
-        "const r: list[str] = splitdrive(\"/usr/lib\")\n"
+        "const r: tuple[str, str] = splitdrive(\"/usr/lib\")\n"
         "print(\"d=\" + r[0])\n"
         "print(\"p=\" + r[1])\n";
 
@@ -937,7 +788,6 @@ TEST(InteropTest, StdlibOsPathSamefile) {
     auto dir = makeTempDir("stdlib_ospath_same");
     ASSERT_FALSE(dir.empty());
 
-    // Create a file and confirm samefile() reports identity.
     std::string fpath = dir + "/probe.txt";
     { std::ofstream f(fpath); f << "x"; }
 
@@ -969,8 +819,6 @@ TEST(InteropTest, StdlibOsPathIsmount) {
     int exitCode = compileAndRun(dir, dir + "/main.dr", source, output);
 
     EXPECT_EQ(exitCode, 0);
-    // "/" is virtually always a mount point on POSIX.
-    // The temp dir typically isn't.
     EXPECT_NE(output.find("True"), std::string::npos);
     EXPECT_NE(output.find("False"), std::string::npos);
 
@@ -981,11 +829,6 @@ TEST(InteropTest, StdlibOsScandir) {
     auto dir = makeTempDir("stdlib_scandir");
     ASSERT_FALSE(dir.empty());
 
-    // Populate a DEDICATED subdir with a file + a subdir, and scan THAT - not
-    // `dir` itself, which compileAndRun fills with harness artifacts (the entry
-    // .dr it now writes to disk for faithful package detection, plus the
-    // compiled object/exe). Scanning a clean subdir keeps the count stable and
-    // actually tests scandir rather than incidentally counting build outputs.
     std::filesystem::create_directory(dir + "/scan");
     { std::ofstream f(dir + "/scan/a.txt"); f << "data"; }
     std::filesystem::create_directory(dir + "/scan/sub");
@@ -1002,7 +845,6 @@ TEST(InteropTest, StdlibOsScandir) {
     int exitCode = compileAndRun(dir, dir + "/main.dr", source, output);
 
     EXPECT_EQ(exitCode, 0);
-    // 2 entries in the clean subdir: a.txt, sub.
     EXPECT_NE(output.find("2"), std::string::npos);
     EXPECT_NE(output.find("a.txt file=True dir=False"), std::string::npos);
     EXPECT_NE(output.find("sub file=False dir=True"), std::string::npos);
@@ -1095,8 +937,6 @@ TEST(InteropTest, StdlibOsRemovedirsRecursive) {
     auto dir = makeTempDir("stdlib_rmdirs");
     ASSERT_FALSE(dir.empty());
 
-    // Source creates a/b/c, removedirs(a/b/c), then verifies parents
-    // were pruned but the temp root stays (we still need it for cleanup).
     std::string source =
         "from os import makedirs, removedirs, exists\n"
         "makedirs(\"" + dir + "/a/b/c\")\n"
@@ -1147,8 +987,6 @@ TEST(InteropTest, StdlibOsChown) {
     std::string fpath = dir + "/probe.txt";
     { std::ofstream f(fpath); f << "x"; }
 
-    // chown to current uid/gid is a no-op but exercises the FFI path.
-    // Using -1 changes neither (POSIX convention).
     std::string source =
         "from os import chown_path\n"
         "chown_path(\"" + fpath + "\", -1, -1)\n"
@@ -1167,8 +1005,6 @@ TEST(InteropTest, StdlibOsChrootEPERM) {
     auto dir = makeTempDir("stdlib_chroot");
     ASSERT_FALSE(dir.empty());
 
-    // chroot needs CAP_SYS_CHROOT (root). The test only confirms the FFI
-    // is reachable and raises OSError when it can't proceed.
     std::string source =
         "from os import chroot_to\n"
         "try {\n"
@@ -1182,7 +1018,6 @@ TEST(InteropTest, StdlibOsChrootEPERM) {
     int exitCode = compileAndRun(dir, dir + "/main.dr", source, output);
 
     EXPECT_EQ(exitCode, 0);
-    // Either succeeds (CI runs as root) or raises -- both prove the bridge works.
     EXPECT_TRUE(output.find("raised") != std::string::npos ||
                 output.find("unexpected") != std::string::npos);
 
@@ -1216,8 +1051,6 @@ TEST(InteropTest, StdlibOsPathExpandvars) {
     auto dir = makeTempDir("stdlib_ospath_evars");
     ASSERT_FALSE(dir.empty());
 
-    // HOME is set in nearly all environments; the test uses it as a probe
-    // and also checks unknown-var passthrough.
     std::string source =
         "from os.path import expandvars\n"
         "print(expandvars(\"${HOME}/bin\"))\n"
@@ -1282,22 +1115,10 @@ TEST(InteropTest, StdlibIoContextManager) {
     std::error_code rmEc; std::filesystem::remove_all(dir, rmEc);
 }
 
-//===----------------------------------------------------------------------===//
-// Stdlib threading.dr tests
-//===----------------------------------------------------------------------===//
-
-// Lock is import-gated (Python parity: `from threading import Lock`). These
-// cover the full API end-to-end through real stdlib module resolution: the
-// canonical typed form, blocking/non-blocking/timeout acquire, with-statement
-// (incl. exception-safety).
-
 TEST(InteropTest, StdlibThreadingLock) {
     auto dir = makeTempDir("stdlib_lock");
     ASSERT_FALSE(dir.empty());
 
-    // Typed decl + blocking acquire/release, then `with lock { }` actually holds
-    // the lock (acquire(blocking=False) inside -> False) and releases after
-    // (-> True).
     std::string source =
         "from threading import Lock\n"
         "lock: Lock = Lock()\n"
@@ -1323,8 +1144,6 @@ TEST(InteropTest, StdlibThreadingLockTimeout) {
     auto dir = makeTempDir("stdlib_lock_to");
     ASSERT_FALSE(dir.empty());
 
-    // timeout on a free lock -> True immediately; on a held lock -> waits up to
-    // the timeout then gives up -> False (does not block forever).
     std::string source =
         "from threading import Lock\n"
         "lock: Lock = Lock()\n"
@@ -1346,7 +1165,6 @@ TEST(InteropTest, StdlibThreadingLockWithExceptionSafe) {
     auto dir = makeTempDir("stdlib_lock_exc");
     ASSERT_FALSE(dir.empty());
 
-    // `with lock { }` releases even when an exception escapes the body.
     std::string source =
         "from threading import Lock\n"
         "lock: Lock = Lock()\n"
@@ -1441,10 +1259,6 @@ TEST(InteropTest, StdlibThreadingCondition) {
     std::error_code rmEc; std::filesystem::remove_all(dir, rmEc);
 }
 
-//===----------------------------------------------------------------------===//
-// Stdlib crypto.dr tests
-//===----------------------------------------------------------------------===//
-
 TEST(InteropTest, StdlibCryptoSha256) {
     auto dir = makeTempDir("stdlib_sha");
     ASSERT_FALSE(dir.empty());
@@ -1457,7 +1271,6 @@ TEST(InteropTest, StdlibCryptoSha256) {
     int exitCode = compileAndRun(dir, dir + "/main.dr", source, output);
 
     EXPECT_EQ(exitCode, 0);
-    // SHA256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
     EXPECT_NE(output.find("2cf24dba"), std::string::npos);
 
     std::error_code rmEc; std::filesystem::remove_all(dir, rmEc);
@@ -1475,7 +1288,6 @@ TEST(InteropTest, StdlibCryptoMd5) {
     int exitCode = compileAndRun(dir, dir + "/main.dr", source, output);
 
     EXPECT_EQ(exitCode, 0);
-    // MD5("hello") = 5d41402abc4b2a76b9719d911017c592
     EXPECT_NE(output.find("5d41402abc4b2a76"), std::string::npos);
 
     std::error_code rmEc; std::filesystem::remove_all(dir, rmEc);
@@ -1493,15 +1305,10 @@ TEST(InteropTest, StdlibCryptoSha1) {
     int exitCode = compileAndRun(dir, dir + "/main.dr", source, output);
 
     EXPECT_EQ(exitCode, 0);
-    // SHA1("hello") = aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d
     EXPECT_NE(output.find("aaf4c61d"), std::string::npos);
 
     std::error_code rmEc; std::filesystem::remove_all(dir, rmEc);
 }
-
-//===----------------------------------------------------------------------===//
-// Stdlib re.dr tests (bundled PCRE2)
-//===----------------------------------------------------------------------===//
 
 TEST(InteropTest, StdlibReMatch) {
     auto dir = makeTempDir("stdlib_re_match");
@@ -1559,10 +1366,6 @@ TEST(InteropTest, StdlibReCompileFind) {
 
     std::error_code rmEc; std::filesystem::remove_all(dir, rmEc);
 }
-
-//===----------------------------------------------------------------------===//
-// Stdlib sqlite.dr tests
-//===----------------------------------------------------------------------===//
 
 TEST(InteropTest, StdlibSqliteBasic) {
     auto dir = makeTempDir("stdlib_sql");
@@ -1656,19 +1459,10 @@ TEST(InteropTest, StdlibSqliteContextManager) {
     std::error_code rmEc; std::filesystem::remove_all(dir, rmEc);
 }
 
-// NOTE: the D032 database stdlib E2E (template[SQL] param binding, dict[str,Any]
-// rows, Customer(**row) conversion, injection safety) is covered by the
-// dogfooded `.dr` unittest suite (test/dr/test_database.dr).
-
-//===----------------------------------------------------------------------===//
-// Stdlib socket.dr tests
-//===----------------------------------------------------------------------===//
-
 TEST(InteropTest, StdlibSocketCreate) {
     auto dir = makeTempDir("stdlib_sock");
     ASSERT_FALSE(dir.empty());
 
-    // Test that we can create and close a socket
     std::string source =
         "from socket import TcpListener\n"
         "srv: TcpListener = TcpListener(\"127.0.0.1\", 0)\n"
@@ -1683,13 +1477,6 @@ TEST(InteropTest, StdlibSocketCreate) {
 
     std::error_code rmEc; std::filesystem::remove_all(dir, rmEc);
 }
-
-//===----------------------------------------------------------------------===//
-// Cross-module module-level globals: the forward-decl path used to inspect
-// only NamedTypeExpr and silently fell through to i64 for `dict[str, str]`,
-// `list[T]`, etc. The reader module then emitted typed dict/list ops
-// expecting `ptr`, tripping the LLVM verifier.
-//===----------------------------------------------------------------------===//
 
 TEST(InteropTest, CrossModuleGlobalDict) {
     auto dir = makeTempDir("xmod_global_dict");
@@ -1767,25 +1554,6 @@ TEST(InteropTest, CrossModuleGlobalList) {
     cleanupDir(dir, {"lib.dr"});
 }
 
-//===----------------------------------------------------------------------===//
-// Module-attribute access
-//===----------------------------------------------------------------------===//
-//
-// These tests exercise the cross-module function-reference paths that the
-// heaven-style HTTP server depends on for handler registration:
-//
-//  Pattern A (baseline): `from x import f` ; `f`
-//  Pattern B (submodule): `from x import sub` ; `sub.f`
-//  Pattern C (dotted): `import x.sub` ; `x.sub.f`
-//
-// All three lower to the same static LLVM Function* -- no runtime cost
-// vs. a bare-name function reference. The implementation lives in:
-//  src/TypeChecker.cpp (ModuleType resolution + AttributeExpr)
-//  src/codegen/Attributes.cpp (static fnptr emission)
-
-// Pattern A as a function-as-value: assign an imported function to a local,
-// then call through the local. Baseline -- establishes that cross-module
-// function pointers work before the fancier module-attr cases below.
 TEST(InteropTest, ImportedFunctionAsValue) {
     auto dir = makeTempDir("imp_fn_value");
     ASSERT_FALSE(dir.empty());
@@ -1810,16 +1578,10 @@ TEST(InteropTest, ImportedFunctionAsValue) {
     cleanupDir(dir, {"utils.dr"});
 }
 
-// Pattern B as function-as-value: `from controllers import health` brings
-// the submodule into scope, then `health.health_check` resolves through
-// ModuleType.exports to a static Function*.
 TEST(InteropTest, FromPackageImportSubmoduleAttrAsValue) {
     auto dir = makeTempDir("from_pkg_sub_attr");
     ASSERT_FALSE(dir.empty());
 
-    // Package layout: controllers/controllers.dr (package root) +
-    // controllers/health.dr (submodule). The "flat file XOR package"
-    // rule means no controllers.dr at the top level.
     std::filesystem::create_directory(dir + "/controllers");
     writeFile(dir + "/controllers/controllers.dr", "\n");
     writeFile(dir + "/controllers/health.dr",
@@ -1843,9 +1605,6 @@ TEST(InteropTest, FromPackageImportSubmoduleAttrAsValue) {
     cleanupDir(dir, {});
 }
 
-// Pattern C as function-as-value: `import controllers.health` binds the
-// package name; the chain `controllers.health.health_check` walks two
-// ModuleType nodes (controllers -> controllers.health -> fn export).
 TEST(InteropTest, ImportPackageDotSubmoduleAttrAsValue) {
     auto dir = makeTempDir("imp_pkg_sub_attr");
     ASSERT_FALSE(dir.empty());
@@ -1873,10 +1632,6 @@ TEST(InteropTest, ImportPackageDotSubmoduleAttrAsValue) {
     cleanupDir(dir, {});
 }
 
-// Pattern B direct call: `from x import sub; sub.f()` -- exercises the
-// module-attr path through CallExpr's callee dispatch (not just value
-// context). If this fails while the as-value test passes, the gap is in
-// CallExpr handling of AttributeExpr callees rooted in a module.
 TEST(InteropTest, FromPackageImportSubmoduleAttrDirectCall) {
     auto dir = makeTempDir("from_pkg_sub_call");
     ASSERT_FALSE(dir.empty());
@@ -1903,8 +1658,6 @@ TEST(InteropTest, FromPackageImportSubmoduleAttrDirectCall) {
     cleanupDir(dir, {});
 }
 
-// Pattern C direct call: `import x.sub; x.sub.f()` -- same dispatch
-// concern as the previous test, but with a longer module chain.
 TEST(InteropTest, ImportPackageDotSubmoduleAttrDirectCall) {
     auto dir = makeTempDir("imp_pkg_sub_call");
     ASSERT_FALSE(dir.empty());
@@ -1931,12 +1684,6 @@ TEST(InteropTest, ImportPackageDotSubmoduleAttrDirectCall) {
     cleanupDir(dir, {});
 }
 
-//===----------------------------------------------------------------------===//
-// stdlib/unittest.dr end-to-end (D033 method reflection + D039 deep equality +
-// first-class exceptions). Imports the real stdlib module via the resolver's
-// DRAGON_STDLIB_DIR search path and runs a TestCase through unittest.main.
-//===----------------------------------------------------------------------===//
-
 TEST(InteropTest, StdlibUnittestEndToEnd) {
     auto dir = makeTempDir("unittest_e2e");
     ASSERT_FALSE(dir.empty());
@@ -1959,12 +1706,7 @@ TEST(InteropTest, StdlibUnittestEndToEnd) {
     std::string output;
     int exitCode = compileAndRun(dir, dir + "/main.dr", source, output);
 
-    // The suite contains one deliberate failure, so unittest.main() must exit
-    // non-zero (1) -- the CI-gating contract: a failed `.dr` suite fails
-    // `dragon run` / ctest. main() calls sys.exit_code(); previously its int
-    // return was discarded at module scope and the process always exited 0.
     EXPECT_EQ(exitCode, 1) << "stdout: " << output;
-    // Six passing tests print `ok:`; the deliberate failure prints `FAIL:`.
     EXPECT_NE(output.find("ok: test_addition"), std::string::npos) << output;
     EXPECT_NE(output.find("ok: test_deep_list"), std::string::npos) << output;
     EXPECT_NE(output.find("ok: test_deep_dict"), std::string::npos) << output;
@@ -1976,12 +1718,6 @@ TEST(InteropTest, StdlibUnittestEndToEnd) {
     cleanupDir(dir, {});
 }
 
-//===----------------------------------------------------------------------===//
-// D045 -- member & module privacy (cross-package enforcement)
-//===----------------------------------------------------------------------===//
-
-// Two flat files in the same dir are DISTINCT singleton packages (ADR), so a
-// `_module-internal` name is NOT importable across them.
 TEST(InteropTest, D045_CrossPackageProtectedImportRejected) {
     auto dir = makeTempDir("d045_proto_import");
     ASSERT_FALSE(dir.empty());
@@ -1996,7 +1732,6 @@ TEST(InteropTest, D045_CrossPackageProtectedImportRejected) {
     cleanupDir(dir, {"lib.dr", "main.dr"});
 }
 
-// A public name from another package imports and runs fine (control).
 TEST(InteropTest, D045_CrossPackagePublicImportAllowed) {
     auto dir = makeTempDir("d045_pub_import");
     ASSERT_FALSE(dir.empty());
@@ -2013,8 +1748,6 @@ TEST(InteropTest, D045_CrossPackagePublicImportAllowed) {
     cleanupDir(dir, {"lib.dr", "main.dr", "test_output", "test_output.o"});
 }
 
-// A file-private `__name` is not importable even by a sibling -- and across
-// packages it is certainly rejected.
 TEST(InteropTest, D045_CrossPackageFilePrivateImportRejected) {
     auto dir = makeTempDir("d045_filepriv");
     ASSERT_FALSE(dir.empty());
@@ -2029,8 +1762,6 @@ TEST(InteropTest, D045_CrossPackageFilePrivateImportRejected) {
     cleanupDir(dir, {"lib.dr", "main.dr"});
 }
 
-// Qualified access `mod._secret` across packages is rejected too (same rule as
-// the from-import, enforced at the AttributeExpr module branch).
 TEST(InteropTest, D045_CrossPackageQualifiedProtectedRejected) {
     auto dir = makeTempDir("d045_qual");
     ASSERT_FALSE(dir.empty());
@@ -2044,8 +1775,6 @@ TEST(InteropTest, D045_CrossPackageQualifiedProtectedRejected) {
     cleanupDir(dir, {"lib.dr", "main.dr"});
 }
 
-// Same-PACKAGE protected import is allowed: a package `app/` (root app/app.dr)
-// importing a `_shared` name from sibling app/internal.dr compiles and runs.
 TEST(InteropTest, D045_SamePackageProtectedImportAllowed) {
     auto dir = makeTempDir("d045_samepkg");
     ASSERT_FALSE(dir.empty());

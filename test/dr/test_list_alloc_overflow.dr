@@ -1,29 +1,12 @@
-# test/dr/test_list_alloc_overflow.dr - `list * n` must never undersize its buffer.
-#
-# Pre-fix, `[1] * n` with n = 2^61+2 cleared dragon_list_repeat's
-# `count > INT64_MAX / size` element-count guard, then capacity(2^61+2) *
-# elem_size(8) WRAPPED inside dragon_list_new_tagged: malloc served 16 bytes
-# (24 usable), returned a valid heap pointer, and the repeat memcpy then marched
-# 2.3 quintillion elements through the heap. Verified under gdb - a controlled
-# heap overflow, not an allocation failure.
-#
-# Two distinct halves are pinned here, because fixing only one leaves a hole:
-#   1. WRAP  - the byte count is a lie. Trapped by dragon_alloc_bytes.
-#   2. NULL  - the byte count is honest but unservable (2^40 elems = 8TB).
-#              malloc returns NULL and the old code wrote straight through it
-#              at an attacker-scaled offset. Trapped by dragon_xmalloc.
-# Both must surface as a CATCHABLE MemoryError, never a SIGSEGV
-
 from unittest import TestCase, main
 
-# Kept behind a call so nothing can constant-fold the count at the use site.
 def wrapping_count() -> int {
-    base: int = 2305843009213693952   # 2^61; * 8 == 2^64 -> wraps to 0
-    return base + 2                   # -> a 16-byte request
+    base: int = 2305843009213693952
+    return base + 2
 }
 
 def unservable_count() -> int {
-    return 1099511627776              # 2^40 elems * 8B = 8TB, no wrap
+    return 1099511627776
 }
 
 class ListAllocOverflowTests(TestCase) {
@@ -41,9 +24,6 @@ class ListAllocOverflowTests(TestCase) {
         self.assertRaises(MemoryError, run)
     }
 
-    # bool lists use the 1-byte stride and the memset fast path, so they wrap at
-    # a different count - the trap must be on the byte count, not a hardcoded
-    # per-tag threshold.
     def test_repeat_bool_unservable_raises() {
         def run() -> None {
             flags: list[bool] = [True] * unservable_count()
@@ -51,17 +31,14 @@ class ListAllocOverflowTests(TestCase) {
         self.assertRaises(MemoryError, run)
     }
 
-    # list[Any] is a DragonListBox: 16B stride, so it wraps at 2^60, not 2^61.
-    # A trap written against the 8B layout would miss this one entirely.
     def test_repeat_box_wrapping_count_raises() {
         def run() -> None {
             src: list[Any] = [1]
-            xs: list[Any] = src * 1152921504606846978   # 2^60 + 2
+            xs: list[Any] = src * 1152921504606846978
         }
         self.assertRaises(MemoryError, run)
     }
 
-    # The guard must not have cost the ordinary cases their behavior.
     def test_normal_repeat_still_works() {
         xs: list[int] = [1, 2] * 3
         self.assertEqual(len(xs), 6)
@@ -86,9 +63,6 @@ class ListAllocOverflowTests(TestCase) {
         self.assertEqual(xs[2], "ab")
     }
 
-    # A trapped repeat must leave the process usable, not just un-crashed:
-    # the allocator raises by longjmp, so anything it had half-built has to be
-    # unwound cleanly.
     def test_process_survives_trapped_repeat() {
         def run() -> None {
             xs: list[int] = [1] * wrapping_count()

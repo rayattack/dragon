@@ -1,10 +1,3 @@
-# registry.dr - publish / browse / yank.
-#
-# All queries are template[SQL] (bound parameters). A package is owned by its
-# first publisher; only the owner may publish new versions or yank. Each version
-# is content-addressed: hash = "sha256:" + SHA-256(tarball), stored once in the
-# BlobStore. "latest" = most-recently-published (highest version row id).
-
 from time import now
 from hashlib import hexdigest
 from database import SQL, Results
@@ -21,7 +14,6 @@ class PublishResult {
     }
 }
 
-# One row of a search / index listing.
 class PackageSummary {
     def(name: str, description: str, latest: str) {
         self.name: str = name
@@ -37,8 +29,6 @@ class RegistryService {
         self.translog: TranslogService = translog
     }
 
-    # Author signature lookup (signed_by pubkey + detached signature, both hex);
-    # ("", "") if the version was published unsigned.
     def signature_for(name: str, version: str) -> tuple[str, str] {
         const rows: list[dict[str, Any]] = self.db.conn.all[dict[str, Any]](template[SQL] {
             select signed_by, signature from version_signatures where name = !{name} and version = !{version}
@@ -72,10 +62,6 @@ class RegistryService {
             return PublishResult(false, "", f"version {version} already published")
         }
 
-        # NB: build the digest by concatenation, NOT an f-string. An f-string
-        # with escaped quotes in the expression - f"sha256:{hexdigest(\"sha256\",
-        # tarball)}" - miscompiles to the literal "sha256:{}", silently breaking
-        # content-addressing (every package collapses to one hash).
         const hexd: str = hexdigest("sha256", tarball)
         const digest: str = "sha256:" + hexd
         self.blobs.put(digest, tarball)
@@ -85,10 +71,7 @@ class RegistryService {
             insert into versions (package_id, version, hash, published_at, published_by)
             values (!{pkg_id}, !{version}, !{digest}, !{ts}, !{uid})
         })
-        # Append to the transparency log with the SAME ts the version row carries,
-        # so the client can recompute the leaf hash from the version metadata.
         self.translog.append(name, version, digest, uid, ts)
-        # Record an author signature when one was supplied (dragon push --sign).
         if len(signed_by) > 0 {
             self.db.conn.run(template[SQL] {
                 insert into version_signatures (name, version, signed_by, signature)
@@ -110,9 +93,6 @@ class RegistryService {
         })
     }
 
-    # Content hash for a specific (name, version), or "" if absent. Pure lookup -
-    # yank policy is enforced at the download boundary (see find_version), so a
-    # pinned hash always resolves to its bytes for reproducibility.
     def resolve_hash(name: str, version: str) -> str {
         const pid: int = self._package_id(name)
         if pid == 0 {
@@ -128,8 +108,6 @@ class RegistryService {
         return h
     }
 
-    # Full version row for a specific (name, version): 0 or 1 element. The
-    # download handler uses this to honor a security-yank (yanked == 2).
     def find_version(name: str, version: str) -> list[Version] {
         const pid: int = self._package_id(name)
         if pid == 0 {
@@ -153,8 +131,6 @@ class RegistryService {
         })
     }
 
-    # Yank a version. severity: 1 = soft (deprecate; drop from "latest"), 2 =
-    # security (download hard-fails). Owner only. reason is surfaced to clients.
     def yank(uid: int, name: str, version: str, severity: int, reason: str) -> bool {
         const pid: int = self._package_id(name)
         if pid == 0 {
@@ -187,8 +163,6 @@ class RegistryService {
         const d: str = rows[0]["description"]
         return d
     }
-
-    #--- internals --------------------------------------------------------#
 
     def _package_id(name: str) -> int {
         const rows: list[dict[str, Any]] = self.db.conn.all[dict[str, Any]](template[SQL] {

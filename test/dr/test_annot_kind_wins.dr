@@ -22,17 +22,12 @@ class Box {
 }
 
 
-# A function whose local `r` IS a class instance, leaving a program-wide
-# `r -> Box` association behind for codegen.
 def uses_r_as_class() -> int {
     const r: Box = Box(9)
     return r.tag
 }
 
 
-# A function whose local `r` is an Any loop var, with `const name: str = r`
-# in the body - the exact shape the JSON Schema validator uses. `name` must
-# be treated as a str.
 def collect(items: list[Any]) -> str {
     out: list[str] = []
     for r in items {
@@ -45,8 +40,6 @@ def collect(items: list[Any]) -> str {
 
 class AnnotKindTests(TestCase) {
     def test_str_annotation_survives_rhs_class_bleed() -> None {
-        # Call the class-using function first so the stale association exists,
-        # then the str-binding loop must still treat `name` as a str.
         self.assertEqual(uses_r_as_class(), 9)
         const xs: list[Any] = ["alpha", "beta", "gamma"]
         self.assertEqual(collect(xs), "alpha|beta|gamma")

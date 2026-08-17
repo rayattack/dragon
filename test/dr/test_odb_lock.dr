@@ -1,9 +1,3 @@
-# ODB M7 regression suite: the multi-process lock sidecar. A non-blocking
-# exclusive writer lock (one writer at a time, tested with two open handles to
-# the same file), and the reader table - register / oldest-CSN / release plus
-# dead-reader reaping via pid liveness. Full cross-process crash testing is the
-# CI real-process loop (spec section 21); these prove the mechanisms.
-
 from unittest import TestCase, main
 from odb import ODB
 from odb.lock import WriterLock, ReaderTable
@@ -17,11 +11,11 @@ class WriterLockTest(TestCase) {
         a: WriterLock = WriterLock(path)
         b: WriterLock = WriterLock(path)
 
-        self.assertTrue(a.acquire())            # first writer wins
-        self.assertFalse(b.acquire())           # second is excluded
+        self.assertTrue(a.acquire())
+        self.assertFalse(b.acquire())
 
         a.release()
-        self.assertTrue(b.acquire())            # freed -> second can take it
+        self.assertTrue(b.acquire())
         b.close()
         a.close()
     }
@@ -33,7 +27,6 @@ class ReaderTableTest(TestCase) {
         path: str = mktemp("odb_rt_", ".readers")
         rt: ReaderTable = ReaderTable(path)
 
-        # no readers -> fallback
         self.assertEqual(rt.oldest_csn(100), 100)
 
         s1: int = rt.register(5)
@@ -41,13 +34,13 @@ class ReaderTableTest(TestCase) {
         self.assertEqual(rt.oldest_csn(100), 5)
 
         s2: int = rt.register(3)
-        self.assertEqual(rt.oldest_csn(100), 3)  # oldest of {5,3}
+        self.assertEqual(rt.oldest_csn(100), 3)
 
         rt.release(s2)
-        self.assertEqual(rt.oldest_csn(100), 5)  # back to just 5
+        self.assertEqual(rt.oldest_csn(100), 5)
 
         rt.release(s1)
-        self.assertEqual(rt.oldest_csn(100), 100)  # none live -> fallback
+        self.assertEqual(rt.oldest_csn(100), 100)
         rt.close()
     }
 
@@ -55,24 +48,20 @@ class ReaderTableTest(TestCase) {
         path: str = mktemp("odb_rt2_", ".readers")
         rt: ReaderTable = ReaderTable(path)
 
-        # a crashed reader pinned an old CSN, then a live reader registered
-        dead: int = rt.register_pid(1073741823, 1)   # pid that does not exist
+        dead: int = rt.register_pid(1073741823, 1)
         self.assertTrue(dead >= 0)
-        live: int = rt.register(9)                   # this process, alive
+        live: int = rt.register(9)
 
-        # the dead reader's CSN (1) must NOT hold reclamation back; it is reaped
         self.assertEqual(rt.oldest_csn(100), 9)
 
         rt.release(live)
-        self.assertEqual(rt.oldest_csn(100), 100)    # dead slot already reaped
+        self.assertEqual(rt.oldest_csn(100), 100)
         rt.close()
     }
 }
 
 
 class DbWriterLockTest(TestCase) {
-    # A file-backed ODB acquires the writer lock; a second open of the same
-    # file fails fast, and after close the lock frees for the next writer.
     def test_second_open_is_locked_out() -> None {
         path: str = mktemp("odb_dbl_", ".odb")
         db1: ODB = ODB(path)
@@ -85,7 +74,7 @@ class DbWriterLockTest(TestCase) {
         self.assertTrue(raised)
         db1.close()
 
-        db3: ODB = ODB(path)                    # freed -> reopen succeeds
+        db3: ODB = ODB(path)
         db3.close()
     }
 }

@@ -1,16 +1,5 @@
-# test/dr/test_with_object_rc.dr - the `with` context-manager OBJECT is released
-# at with-exit.
-#
-# Each `with CM()` used to leak the manager instance: the constructor temp the
-# `with` owns AND the second ref `__enter__` returns (the `as` binding, which the
-# return convention increfs) were never decref'd, so one CM instance leaked per
-# use (a single use happened to read clean only because the last instance stayed
-# reachable at exit). The fix decrefs BOTH refs on every exit path - normal,
-# exception, and early return/break/continue. These tests pin that __enter__ /
-# __exit__ run the right number of times across many uses; leak-freedom (no
-# per-use CM leak) AND double-free-freedom are verified under the ASan/LSan build
-# (a loop amplifies any per-use leak; an over-decref shows as a heap-use-after-
-# free / double-free).
+# `with CM()` leaked the manager: the with-owned ctor temp and __enter__'s returned second ref
+# were never decref'd. Both drop on every exit path; an over-decref shows as UAF under ASan.
 
 from unittest import TestCase, main
 
@@ -40,21 +29,21 @@ class WithObjectRcTests(TestCase) {
         i: int = 0
         while i < 500 { normal_use(); i = i + 1 }
         self.assertEqual(len(enters), 500)
-        self.assertEqual(len(exits), 500)   # every CM entered + exited (and freed - LSan)
+        self.assertEqual(len(exits), 500)
     }
 
     def test_early_return_runs_exit() {
         exits.clear()
         const r: int = early_return()
         self.assertEqual(r, 1)
-        self.assertEqual(len(exits), 1)     # __exit__ ran + object freed on early return
+        self.assertEqual(len(exits), 1)
     }
 
     def test_exception_runs_exit() {
         exits.clear()
         const r: int = via_exception()
         self.assertEqual(r, 1)
-        self.assertEqual(len(exits), 1)     # __exit__ ran + object freed on the exception path
+        self.assertEqual(len(exits), 1)
     }
 
     def test_nested_both_exit() {
@@ -70,7 +59,7 @@ class WithObjectRcTests(TestCase) {
         exits.clear()
         anonymous()
         self.assertEqual(len(enters), 1)
-        self.assertEqual(len(exits), 1)     # discarded __enter__ result also freed
+        self.assertEqual(len(exits), 1)
     }
 }
 

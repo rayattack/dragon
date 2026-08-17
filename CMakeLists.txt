@@ -12,7 +12,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Find LLVM.
+# First-party warning set. Applied per target so vendored code keeps its own flags.
+set(DRAGON_WARNINGS -Wall -Wextra)
+
 # Find LLVM.
 #
 # No version arg on find_package. LLVM's LLVMConfigVersion.cmake matches the
@@ -92,10 +94,11 @@ set(DRAGON_SOURCES
     src/codegen/ImplMethods.cpp
     src/codegen/ImplMethods2.cpp
     src/codegen/EscapeAnalysis.cpp
-    src/StdlibRegistry.cpp
     src/DiagnosticFormatter.cpp
     src/TypeHintEnforcer.cpp
     src/ModuleResolver.cpp
+    src/PythonMigrator.cpp
+    src/TypeInference.cpp
     src/Driver.cpp
     src/FfiSync.cpp
     src/Platform.cpp
@@ -105,6 +108,7 @@ set(DRAGON_SOURCES
 # Dragon library
 add_library(dragon_lib STATIC ${DRAGON_SOURCES})
 target_include_directories(dragon_lib PUBLIC ${CMAKE_SOURCE_DIR}/include)
+target_compile_options(dragon_lib PRIVATE ${DRAGON_WARNINGS})
 
 # Get LLVM libraries. Dragon is a pure AOT compiler (build Module -> PassBuilder
 # -> addPassesToEmitFile -> object -> system linker); it has no JIT, so the ORC
@@ -180,6 +184,9 @@ target_include_directories(dragon_runtime PRIVATE
     ${CMAKE_SOURCE_DIR}/lib/llhttp
     ${CMAKE_SOURCE_DIR}/lib/ed25519
     ${CMAKE_SOURCE_DIR}/lib/Runtime)
+# CXX-only so the vendored ed25519.c in this target keeps its own flags.
+target_compile_options(dragon_runtime PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:${DRAGON_WARNINGS}>)
 target_link_libraries(dragon_runtime PRIVATE dragon_llhttp)
 # mbedTLS engine for runtime_tls.cpp. Linking propagates dragon_mbedtls's PUBLIC
 # include dir + MBEDTLS_USER_CONFIG_FILE, so the shim compiles against the same
@@ -222,6 +229,7 @@ if(DRAGON_ASAN)
     target_compile_definitions(dragon_runtime_asan PRIVATE
         DRAGON_CA_BUNDLE="${CMAKE_SOURCE_DIR}/share/dragon/certs/cacert.pem")
     target_compile_options(dragon_runtime_asan PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:${DRAGON_WARNINGS}>
         -fsanitize=address -fno-omit-frame-pointer -g -O1)
     set(DRAGON_RUNTIME_FOR_PROGRAMS dragon_runtime_asan)
 endif()
@@ -246,8 +254,6 @@ set(PCRE2_SUPPORT_LIBBZ2 OFF CACHE BOOL "" FORCE)
 set(PCRE2_SUPPORT_LIBZ OFF CACHE BOOL "" FORCE)
 set(PCRE2_SUPPORT_LIBEDIT OFF CACHE BOOL "" FORCE)
 set(PCRE2_SUPPORT_LIBREADLINE OFF CACHE BOOL "" FORCE)
-set(PCRE2_BUILD_PCRE2GREP OFF CACHE BOOL "" FORCE)
-set(PCRE2_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 add_subdirectory(lib/PCRE2)
 
 # mbedTLS (bundled, static - TLS 1.2/1.3 + X.509 + crypto engine). Apache-2.0.
@@ -256,7 +262,7 @@ add_subdirectory(lib/PCRE2)
 # tarball's pre-generated headers (psa_crypto_driver_wrappers.h, version_features.c,
 # error.c) live there. Uses mbedTLS's default config for now; a trimmed in-scope
 # config (legacy protocols/ciphers compiled out) is a follow-up per the design spec.
-file(GLOB MBEDTLS_SOURCES ${CMAKE_SOURCE_DIR}/lib/mbedtls/library/*.c)
+file(GLOB MBEDTLS_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/lib/mbedtls/library/*.c)
 add_library(dragon_mbedtls STATIC ${MBEDTLS_SOURCES})
 target_include_directories(dragon_mbedtls PUBLIC
     ${CMAKE_SOURCE_DIR}/lib/mbedtls/include
@@ -293,12 +299,14 @@ target_compile_definitions(dragon_lib PRIVATE
     DRAGON_MBEDTLS_LIB="$<TARGET_FILE:dragon_mbedtls>"
     ${DRAGON_ZSTD_DEF}
     DRAGON_STDLIB_DIR="${CMAKE_SOURCE_DIR}/stdlib"
+    DRAGON_PLATFORM_DIR="${CMAKE_SOURCE_DIR}/platform"
     DRAGON_EGG_BIN="${DRAGON_EGG_OUT}"
     DRAGON_EGG_SRC="${DRAGON_EGG_SRC_FILE}"
     $<$<BOOL:${DRAGON_ASAN}>:DRAGON_ASAN_BUILD=1>)
 
 # dragon CLI tool
 add_executable(dragon tools/dragon/main.cpp)
+target_compile_options(dragon PRIVATE ${DRAGON_WARNINGS})
 target_link_libraries(dragon PRIVATE dragon_lib dragon_runtime)
 # Drop dylibs no symbol is used from: Homebrew LLVM puts libz3 on the link
 # line and Dragon uses no z3 symbols.
@@ -314,6 +322,7 @@ target_compile_definitions(dragon PRIVATE
     DRAGON_MBEDTLS_LIB="$<TARGET_FILE:dragon_mbedtls>"
     ${DRAGON_ZSTD_DEF}
     DRAGON_STDLIB_DIR="${CMAKE_SOURCE_DIR}/stdlib"
+    DRAGON_PLATFORM_DIR="${CMAKE_SOURCE_DIR}/platform"
     DRAGON_EGG_BIN="${DRAGON_EGG_OUT}"
     DRAGON_EGG_SRC="${DRAGON_EGG_SRC_FILE}"
     $<$<BOOL:${DRAGON_ASAN}>:DRAGON_ASAN_BUILD=1>)
@@ -379,6 +388,12 @@ endif()
 install(DIRECTORY stdlib/
     DESTINATION ${CMAKE_INSTALL_DATADIR}/dragon/stdlib
     FILES_MATCHING PATTERN "*.dr" PATTERN "*.py")
+
+# platform/ - native shim sources compiled into user programs on demand, shipped
+# as SOURCE so each machine builds against its own system webview.
+install(DIRECTORY platform/
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/dragon/platform
+    FILES_MATCHING PATTERN "*.cpp" PATTERN "*.mm" PATTERN "*.h")
 
 # Bundled Mozilla CA trust store (ssl.load_default_certs fallback).
 install(DIRECTORY share/dragon/certs/

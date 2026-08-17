@@ -254,8 +254,6 @@ class DeferBasicTests(TestCase) {
     }
 
     def test_borrowed_arg_reads_state_at_exit() {
-        # The documented idiom for late binding: pass the container, not the
-        # value - the deferred call READS it at exit time.
         log: list[str] = []
         borrow_reads_latest(log)
         self.assertEqual(len(log), 1)

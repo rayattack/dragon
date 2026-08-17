@@ -5,10 +5,6 @@
 
 namespace dragon {
 
-//===----------------------------------------------------------------------===//
-// Lexer Implementation
-//===----------------------------------------------------------------------===//
-
 struct Lexer::Impl {
     std::string_view source;
     LexerOptions options;
@@ -25,8 +21,6 @@ struct Lexer::Impl {
     int pendingDedents = 0;
     bool pendingIndent = false;
     bool atLineStart = true;
-    // Track nesting depth for brackets/parens/braces to supress NEWLINE inside them
-    // TODO: merge f-string lexing with normal string path
     int nestingDepth = 0;
 };
 
@@ -50,20 +44,17 @@ std::vector<Token> Lexer::tokenize() {
 }
 
 Token Lexer::nextToken() {
-    // Return buffered peek tokens first
     if (!impl_->peekedTokens.empty()) {
         Token tok = impl_->peekedTokens.front();
         impl_->peekedTokens.erase(impl_->peekedTokens.begin());
         return tok;
     }
 
-    // Emit pending DEDENT tokens (Python mode)
     if (impl_->pendingDedents > 0) {
         impl_->pendingDedents--;
         return makeToken(TokenType::DEDENT, "");
     }
 
-    // Emit pending INDENT token (Python mode)
     if (impl_->pendingIndent) {
         impl_->pendingIndent = false;
         impl_->start = impl_->current;
@@ -71,11 +62,8 @@ Token Lexer::nextToken() {
         return makeToken(TokenType::INDENT, "");
     }
 
-    // In Python mode at line start, handle indentation BEFORE skipWhitespace
-    // so handleIndentation() can measure the leading whitespace
     if (!impl_->options.useBraceBlocks && impl_->atLineStart) {
         handleIndentation();
-        // handleIndentation may set pendingIndent or pendingDedents
         if (impl_->pendingIndent) {
             impl_->pendingIndent = false;
             impl_->start = impl_->current;
@@ -91,11 +79,9 @@ Token Lexer::nextToken() {
     skipWhitespaceAndComments();
 
     if (isAtEnd()) {
-        // Emit remaining DEDENTs at EOF (Python mode)
         if (!impl_->options.useBraceBlocks && impl_->indentStack.size() > 1) {
             impl_->indentStack.pop();
             impl_->pendingDedents = static_cast<int>(impl_->indentStack.size()) - 1;
-            // Clear the stack
             while (impl_->indentStack.size() > 1) impl_->indentStack.pop();
             return makeToken(TokenType::DEDENT, "");
         }
@@ -115,9 +101,7 @@ Token Lexer::peek() {
 }
 
 Token Lexer::peekAhead(int n) {
-    // Ensure we have enough tokens buffered
     while (static_cast<int>(impl_->peekedTokens.size()) <= n) {
-        // Save and restore peeked tokens to call nextToken without consuming them
         auto saved = std::move(impl_->peekedTokens);
         impl_->peekedTokens.clear();
         Token tok = nextToken();
@@ -141,10 +125,6 @@ bool Lexer::hasErrors() const {
     }
     return false;
 }
-
-//===----------------------------------------------------------------------===//
-// Character Helpers
-//===----------------------------------------------------------------------===//
 
 char Lexer::advance() {
     char c = impl_->source[impl_->current++];
@@ -184,10 +164,6 @@ bool Lexer::isAtEnd(size_t offset) const {
     return (impl_->current + offset) >= impl_->source.length();
 }
 
-//===----------------------------------------------------------------------===//
-// Token Creation
-//===----------------------------------------------------------------------===//
-
 Token Lexer::makeToken(TokenType type) {
     SourceLocation loc{impl_->options.filename, impl_->line,
                        impl_->startColumn, impl_->start};
@@ -207,38 +183,30 @@ Token Lexer::errorToken(const std::string& message) {
     return makeToken(TokenType::ERROR);
 }
 
-//===----------------------------------------------------------------------===//
-// Main Scanner
-//===----------------------------------------------------------------------===//
-
 Token Lexer::scanToken() {
     char c = advance();
 
-    // Handle identifiers, keywords, and string prefixes (f, r, b, rb, br)
     if (std::isalpha(c) || c == '_') {
-        // Check for string prefixes: f"...", r"...", b"...", rb"...", br"..."
         if ((c == 'f' || c == 'r' || c == 'b' || c == 'F' || c == 'R' || c == 'B') &&
             !isAtEnd()) {
             char next = peekChar();
-            // Single prefix + quote
             if (next == '"' || next == '\'') {
-                advance(); // consume the quote
+                advance();
                 return scanString(next);
             }
-            // Double prefix: rb, br, Rb, bR, etc.
             if ((c == 'r' || c == 'R') && (next == 'b' || next == 'B') && !isAtEnd(1)) {
                 char next2 = impl_->source[impl_->current + 1];
                 if (next2 == '"' || next2 == '\'') {
-                    advance(); // consume 'b'
-                    advance(); // consume quote
+                    advance();
+                    advance();
                     return scanString(next2);
                 }
             }
             if ((c == 'b' || c == 'B') && (next == 'r' || next == 'R') && !isAtEnd(1)) {
                 char next2 = impl_->source[impl_->current + 1];
                 if (next2 == '"' || next2 == '\'') {
-                    advance(); // consume 'r'
-                    advance(); // consume quote
+                    advance();
+                    advance();
                     return scanString(next2);
                 }
             }
@@ -246,19 +214,15 @@ Token Lexer::scanToken() {
         return scanIdentifier();
     }
 
-    // Handle numbers
     if (std::isdigit(c)) {
         return scanNumber();
     }
 
-    // Handle strings
     if (c == '"' || c == '\'') {
         return scanString(c);
     }
 
-    // Handle operators and delimiters
     switch (c) {
-        // Grouping (track nesting)
         case '(':
             impl_->nestingDepth++;
             return makeToken(TokenType::LEFT_PAREN);
@@ -272,21 +236,15 @@ Token Lexer::scanToken() {
             if (impl_->nestingDepth > 0) impl_->nestingDepth--;
             return makeToken(TokenType::RIGHT_BRACKET);
         case '{':
-            // In brace mode, don't count {} for nesting (only () and [] suppress newlines)
             if (!impl_->options.useBraceBlocks) impl_->nestingDepth++;
             return makeToken(TokenType::LEFT_BRACE);
         case '}':
             if (!impl_->options.useBraceBlocks && impl_->nestingDepth > 0) impl_->nestingDepth--;
             return makeToken(TokenType::RIGHT_BRACE);
 
-        // Simple delimiters
         case ',': return makeToken(TokenType::COMMA);
         case ';': return makeToken(TokenType::SEMICOLON);
 
-        // Colon: : or := or :{ (template content alias inside !{} block).
-        // `:{` is only special when CodeGen is re-lexing the body of a
-        // template `!{...}` block-interpolation - outside that context the
-        // colon keeps its normal meaning (annotation, slice, dict, etc.).
         case ':':
             if (match('=')) return makeToken(TokenType::WALRUS);
             if (impl_->options.inTemplateInterpolation && peekChar() == '{') {
@@ -294,27 +252,23 @@ Token Lexer::scanToken() {
             }
             return makeToken(TokenType::COLON);
 
-        // Dot: . or ...
         case '.':
             if (peekChar() == '.' && peekNext() == '.') {
-                advance(); // second .
-                advance(); // third .
+                advance();
+                advance();
                 return makeToken(TokenType::ELLIPSIS);
             }
             return makeToken(TokenType::DOT);
 
-        // Plus: + or +=
         case '+':
             if (match('=')) return makeToken(TokenType::PLUS_EQUAL);
             return makeToken(TokenType::PLUS);
 
-        // Minus: - or -= or ->
         case '-':
             if (match('=')) return makeToken(TokenType::MINUS_EQUAL);
             if (match('>')) return makeToken(TokenType::ARROW);
             return makeToken(TokenType::MINUS);
 
-        // Star: * or ** or *= or **=
         case '*':
             if (match('*')) {
                 if (match('=')) return makeToken(TokenType::POWER_EQUAL);
@@ -323,7 +277,6 @@ Token Lexer::scanToken() {
             if (match('=')) return makeToken(TokenType::STAR_EQUAL);
             return makeToken(TokenType::STAR);
 
-        // Slash: / or // or /= or //=
         case '/':
             if (match('/')) {
                 if (match('=')) return makeToken(TokenType::DOUBLE_SLASH_EQUAL);
@@ -332,46 +285,37 @@ Token Lexer::scanToken() {
             if (match('=')) return makeToken(TokenType::SLASH_EQUAL);
             return makeToken(TokenType::SLASH);
 
-        // Percent: % or %=
         case '%':
             if (match('=')) return makeToken(TokenType::PERCENT_EQUAL);
             return makeToken(TokenType::PERCENT);
 
-        // At: @ or @=
         case '@':
             if (match('=')) return makeToken(TokenType::AT_EQUAL);
             return makeToken(TokenType::AT);
 
-        // Ampersand: & or &=
         case '&':
             if (match('=')) return makeToken(TokenType::AMPERSAND_EQUAL);
             return makeToken(TokenType::AMPERSAND);
 
-        // Pipe: | or |=
         case '|':
             if (match('=')) return makeToken(TokenType::PIPE_EQUAL);
             return makeToken(TokenType::PIPE);
 
-        // Caret: ^ or ^=
         case '^':
             if (match('=')) return makeToken(TokenType::CARET_EQUAL);
             return makeToken(TokenType::CARET);
 
-        // Tilde
         case '~':
             return makeToken(TokenType::TILDE);
 
-        // Equal: = or ==
         case '=':
             if (match('=')) return makeToken(TokenType::EQUAL_EQUAL);
             return makeToken(TokenType::EQUAL);
 
-        // Not equal: !=
         case '!':
             if (match('=')) return makeToken(TokenType::NOT_EQUAL);
             return errorToken("Unexpected character '!'. Use 'not' for boolean negation.");
 
-        // Less: < or <= or << or <<=
         case '<':
             if (match('<')) {
                 if (match('=')) return makeToken(TokenType::LEFT_SHIFT_EQUAL);
@@ -380,7 +324,6 @@ Token Lexer::scanToken() {
             if (match('=')) return makeToken(TokenType::LESS_EQUAL);
             return makeToken(TokenType::LESS);
 
-        // Greater: > or >= or >> or >>=
         case '>':
             if (match('>')) {
                 if (match('=')) return makeToken(TokenType::RIGHT_SHIFT_EQUAL);
@@ -389,14 +332,11 @@ Token Lexer::scanToken() {
             if (match('=')) return makeToken(TokenType::GREATER_EQUAL);
             return makeToken(TokenType::GREATER);
 
-        // Newline - significant in both Python mode and brace mode (at nesting depth 0)
         case '\n':
-            // advance() already updated line/column
             if (impl_->nestingDepth == 0) {
                 impl_->atLineStart = true;
                 return makeToken(TokenType::NEWLINE);
             }
-            // Inside () or [], newlines are whitespace -- skip and scan next token
             impl_->start = impl_->current;
             impl_->startColumn = impl_->column;
             skipWhitespaceAndComments();
@@ -409,16 +349,11 @@ Token Lexer::scanToken() {
     return errorToken(std::string("Unexpected character '") + c + "'");
 }
 
-//===----------------------------------------------------------------------===//
-// String Scanner
-//===----------------------------------------------------------------------===//
-
 Token Lexer::scanString(char quote) {
-    // Check for triple-quoted string
     bool isTriple = false;
     if (peekChar() == quote && peekNext() == quote) {
-        advance(); // second quote
-        advance(); // third quote
+        advance();
+        advance();
         isTriple = true;
     }
 
@@ -426,7 +361,6 @@ Token Lexer::scanString(char quote) {
         char c = peekChar();
 
         if (c == '\\') {
-            // Escape sequence - skip the backslash and the next character
             advance();
             if (!isAtEnd()) advance();
             continue;
@@ -434,19 +368,17 @@ Token Lexer::scanString(char quote) {
 
         if (c == quote) {
             if (isTriple) {
-                // Need three consecutive quotes to end
                 if (peekNext() == quote && !isAtEnd(2) &&
                     impl_->source[impl_->current + 2] == quote) {
-                    advance(); // first closing quote
-                    advance(); // second closing quote
-                    advance(); // third closing quote
+                    advance();
+                    advance();
+                    advance();
                     return makeToken(TokenType::STRING);
                 }
-                // Single quote inside triple-quoted string is fine
                 advance();
                 continue;
             } else {
-                advance(); // closing quote
+                advance();
                 return makeToken(TokenType::STRING);
             }
         }
@@ -455,7 +387,6 @@ Token Lexer::scanString(char quote) {
             if (!isTriple) {
                 return errorToken("Unterminated string literal");
             }
-            // Newlines allowed in triple-quoted strings
         }
 
         advance();
@@ -464,19 +395,13 @@ Token Lexer::scanString(char quote) {
     return errorToken("Unterminated string literal");
 }
 
-//===----------------------------------------------------------------------===//
-// Number Scanner
-//===----------------------------------------------------------------------===//
-
 Token Lexer::scanNumber() {
-    // The first digit has already been consumed by scanToken()
     char first = impl_->source[impl_->start];
 
-    // Check for hex, binary, octal
     if (first == '0' && !isAtEnd()) {
         char prefix = peekChar();
         if (prefix == 'x' || prefix == 'X') {
-            advance(); // consume x
+            advance();
             if (!isAtEnd() && (std::isxdigit(peekChar()) || peekChar() == '_')) {
                 while (!isAtEnd() && (std::isxdigit(peekChar()) || peekChar() == '_'))
                     advance();
@@ -485,7 +410,7 @@ Token Lexer::scanNumber() {
             return errorToken("Invalid hexadecimal literal");
         }
         if (prefix == 'b' || prefix == 'B') {
-            advance(); // consume b
+            advance();
             if (!isAtEnd() && (peekChar() == '0' || peekChar() == '1' || peekChar() == '_')) {
                 while (!isAtEnd() && (peekChar() == '0' || peekChar() == '1' || peekChar() == '_'))
                     advance();
@@ -494,7 +419,7 @@ Token Lexer::scanNumber() {
             return errorToken("Invalid binary literal");
         }
         if (prefix == 'o' || prefix == 'O') {
-            advance(); // consume o
+            advance();
             if (!isAtEnd() && ((peekChar() >= '0' && peekChar() <= '7') || peekChar() == '_')) {
                 while (!isAtEnd() && ((peekChar() >= '0' && peekChar() <= '7') || peekChar() == '_'))
                     advance();
@@ -504,26 +429,23 @@ Token Lexer::scanNumber() {
         }
     }
 
-    // Decimal integer or float
     while (!isAtEnd() && (std::isdigit(peekChar()) || peekChar() == '_'))
         advance();
 
     bool isFloat = false;
 
-    // Decimal point
     if (!isAtEnd() && peekChar() == '.' && !isAtEnd(1) && std::isdigit(peekNext())) {
         isFloat = true;
-        advance(); // consume '.'
+        advance();
         while (!isAtEnd() && (std::isdigit(peekChar()) || peekChar() == '_'))
             advance();
     }
 
-    // Scientific notation
     if (!isAtEnd() && (peekChar() == 'e' || peekChar() == 'E')) {
         isFloat = true;
-        advance(); // consume 'e'/'E'
+        advance();
         if (!isAtEnd() && (peekChar() == '+' || peekChar() == '-'))
-            advance(); // consume sign
+            advance();
         if (!isAtEnd() && std::isdigit(peekChar())) {
             while (!isAtEnd() && (std::isdigit(peekChar()) || peekChar() == '_'))
                 advance();
@@ -535,10 +457,6 @@ Token Lexer::scanNumber() {
     return makeToken(isFloat ? TokenType::FLOAT : TokenType::INTEGER);
 }
 
-//===----------------------------------------------------------------------===//
-// Identifier Scanner
-//===----------------------------------------------------------------------===//
-
 Token Lexer::scanIdentifier() {
     while (!isAtEnd() && (std::isalnum(peekChar()) || peekChar() == '_')) {
         advance();
@@ -547,8 +465,6 @@ Token Lexer::scanIdentifier() {
     std::string_view text = impl_->source.substr(
         impl_->start, impl_->current - impl_->start);
 
-    // Check for template { ... } or template[X] { ... } - contextual keyword
-    // Skip whitespace between "template" and "{" or "[" (but not newlines)
     if (text == "template") {
         size_t saved = impl_->current;
         while (!isAtEnd() && (peekChar() == ' ' || peekChar() == '\t')) {
@@ -557,10 +473,8 @@ Token Lexer::scanIdentifier() {
         if (!isAtEnd() && peekChar() == '{') {
             return scanTemplateBody();
         }
-        // template[ContentType] { ... } - typed template
         if (!isAtEnd() && peekChar() == '[') {
-            advance(); // consume '['
-            // Scan content type identifier
+            advance();
             std::string contentType;
             while (!isAtEnd() && peekChar() != ']') {
                 contentType += peekChar();
@@ -569,8 +483,7 @@ Token Lexer::scanIdentifier() {
             if (isAtEnd()) {
                 return errorToken("Unterminated template content type bracket");
             }
-            advance(); // consume ']'
-            // Skip whitespace between ']' and '{' or '('
+            advance();
             while (!isAtEnd() && (peekChar() == ' ' || peekChar() == '\t')) {
                 advance();
             }
@@ -578,23 +491,14 @@ Token Lexer::scanIdentifier() {
                 return scanTemplateBody(contentType);
             }
             if (!isAtEnd() && peekChar() == '(') {
-                // template[X]("file.html") - typed file template
-                // Emit TEMPLATE token with contentType prefix, empty body.
-                // Parser will detect '(' and handle the file path.
-                // Restore to just after ']' so parser sees '(' next.
-                // Actually, we need a different approach: emit the contentType
-                // as a TEMPLATE token and let Parser handle the '(' consumption.
-                // Use contentType + \0 + empty body to signal typed file template.
                 std::string lexeme = contentType;
                 lexeme += '\0';
                 SourceLocation loc{impl_->options.filename, impl_->line,
                                    impl_->startColumn, impl_->start};
                 return Token(TokenType::TEMPLATE, std::move(lexeme), loc);
             }
-            // Neither { nor ( after ] - error
             return errorToken("Expected '{' or '(' after template[" + contentType + "]");
         }
-        // Not a template block - restore position
         impl_->current = saved;
     }
 
@@ -603,10 +507,7 @@ Token Lexer::scanIdentifier() {
 }
 
 Token Lexer::scanTemplateContentBody() {
-    // We are sitting on '{' (the ':' was already consumed by scanToken).
-    // Same brace-depth scan as scanTemplateBody - `!{...}` interpolations
-    // are preserved as raw bytes for the recursive CodeGen pass.
-    advance(); // consume '{'
+    advance();
 
     int depth = 1;
     std::string body;
@@ -621,10 +522,6 @@ Token Lexer::scanTemplateContentBody() {
             if (depth > 0) body += c;
             advance();
         } else {
-            if (c == '\n') {
-                impl_->line++;
-                impl_->column = 0;
-            }
             body += c;
             advance();
         }
@@ -638,8 +535,7 @@ Token Lexer::scanTemplateContentBody() {
 }
 
 Token Lexer::scanTemplateBody(const std::string& contentType) {
-    // Current position: just after "template" (or "template[X]"), next char is '{'
-    advance(); // consume the '{'
+    advance();
 
     int depth = 1;
     std::string body;
@@ -657,10 +553,6 @@ Token Lexer::scanTemplateBody(const std::string& contentType) {
             }
             advance();
         } else {
-            if (c == '\n') {
-                impl_->line++;
-                impl_->column = 0;
-            }
             body += c;
             advance();
         }
@@ -670,7 +562,6 @@ Token Lexer::scanTemplateBody(const std::string& contentType) {
         return errorToken("Unterminated template block");
     }
 
-    // Encode content type as "TYPE\0body" for typed templates, or just "body" for untyped
     std::string lexeme;
     if (!contentType.empty()) {
         lexeme = contentType;
@@ -685,10 +576,6 @@ Token Lexer::scanTemplateBody(const std::string& contentType) {
     return Token(TokenType::TEMPLATE, std::move(lexeme), loc);
 }
 
-//===----------------------------------------------------------------------===//
-// Whitespace and Comments
-//===----------------------------------------------------------------------===//
-
 void Lexer::skipWhitespaceAndComments() {
     while (!isAtEnd()) {
         char c = peekChar();
@@ -700,20 +587,16 @@ void Lexer::skipWhitespaceAndComments() {
                 break;
             case '\n':
                 if (impl_->options.useBraceBlocks) {
-                    // In brace mode, newlines are significant at top level (like Go)
-                    // but suppressed inside () and []
                     if (impl_->nestingDepth > 0) {
                         advance();
                     } else {
-                        return; // Let scanToken handle it as NEWLINE
+                        return;
                     }
                 } else {
-                    // In Python mode, newlines are significant (handled in scanToken)
                     return;
                 }
                 break;
             case '#':
-                // Skip line comment
                 while (!isAtEnd() && peekChar() != '\n')
                     advance();
                 break;
@@ -723,12 +606,7 @@ void Lexer::skipWhitespaceAndComments() {
     }
 }
 
-//===----------------------------------------------------------------------===//
-// Indentation (Python mode)
-//===----------------------------------------------------------------------===//
-
 void Lexer::handleIndentation() {
-    // Count leading spaces/tabs
     int indent = 0;
     while (!isAtEnd()) {
         if (peekChar() == ' ') {
@@ -742,7 +620,6 @@ void Lexer::handleIndentation() {
         }
     }
 
-    // Skip blank lines and comment-only lines
     if (isAtEnd() || peekChar() == '\n' || peekChar() == '#') {
         return;
     }
@@ -785,4 +662,4 @@ void Lexer::addDiagnostic(LexerDiagnostic::Level level, const std::string& messa
     });
 }
 
-} // namespace dragon
+}

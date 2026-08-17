@@ -21,6 +21,11 @@ This chapter covers the first and default tier - green threads. The
 `fire` starts a green thread. You can fire a function call:
 
 ```dragon
+def log_event(kind: str, user_id: int) -> None {
+    print(f"{kind}: {user_id}")
+}
+
+user_id: int = 7
 fire log_event("user_login", user_id)
 ```
 
@@ -28,6 +33,9 @@ That's "fire and forget" - the work runs concurrently and you never look back. Y
 can also fire a **block**:
 
 ```dragon
+def cleanup_temp_files() -> None { print("cleaning up") }
+def send_notification(msg: str) -> None { print(msg) }
+
 fire {
     cleanup_temp_files()
     send_notification("done")
@@ -47,6 +55,7 @@ value that crosses the `fire` boundary must arrive in a way that cannot race.
 There are five doors, and anything else is a compile error at the fire line:
 
 ```dragon
+# doc: no-check
 req: Request = parse_request(conn)      # this function still owns req
 counts: dict[str, int] = load_counts()
 
@@ -138,6 +147,21 @@ A bound `Task[T]` is an ordinary scope-owned value, just like a `str` or a `list
 You never free it by hand, and you cannot leak one by forgetting to collect it:
 
 ```dragon
+class Data { }
+class Response { }
+class Request {
+    id: int
+    wants_detail: bool
+    def(id: int, wants_detail: bool) {
+        self.id = id
+        self.wants_detail = wants_detail
+    }
+}
+
+def load(id: int) -> Data { return Data() }
+def full(d: Data) -> Response { return Response() }
+def fast(req: Request) -> Response { return Response() }
+
 def maybe(req: Request) -> Response {
     t: Task[Data] = fire load(req.id)
     if req.wants_detail {

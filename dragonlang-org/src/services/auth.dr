@@ -1,10 +1,3 @@
-# auth.dr - accounts and publish tokens.
-#
-# All queries are template[SQL]: every `!{x}` is a bound parameter, never spliced
-# text. Passwords are argon2id (per-user random salt, PHC string stored). Publish
-# tokens are shown once; only their SHA-256 is stored, so a DB leak reveals no
-# usable token.
-
 from time import now
 from argon2id import hash as argon_hash, verify as argon_verify
 from secrets import token_urlsafe, token_bytes
@@ -13,7 +6,6 @@ from database import SQL, Results
 from storage.db import Db
 from models.records import User, Token, UserAuth
 
-# Outcome of a register/login attempt. `user_id` is 0 on failure.
 class AuthResult {
     def(ok: bool, user_id: int, error: str) {
         self.ok: bool = ok
@@ -22,8 +14,6 @@ class AuthResult {
     }
 }
 
-# Outcome of starting a signup. `token` is the ONE-TIME plaintext confirmation
-# token for the email link; only its SHA-256 is stored.
 class SignupStart {
     def(ok: bool, token: str, error: str) {
         self.ok: bool = ok
@@ -32,7 +22,6 @@ class SignupStart {
     }
 }
 
-# Confirmation links die after this long (seconds).
 const CONFIRM_TTL: int = 10800
 
 def _token_hash(plaintext: str) -> str {
@@ -43,8 +32,6 @@ class AuthService {
     def(db: Db) {
         self.db: Db = db
     }
-
-    #--- accounts ---------------------------------------------------------#
 
     def register(username: str, email: str, password: str) -> AuthResult {
         if len(username) < 2 {
@@ -70,12 +57,6 @@ class AuthService {
         return AuthResult(true, res.xid, "")
     }
 
-    #--- email-confirmed signup ------------------------------------------#
-
-    # Step 1: validate, park the signup in pending_signups, and hand back the
-    # plaintext confirmation token for the email link. No account exists yet.
-    # Re-running for the same username or email replaces the earlier pending
-    # row, so only the newest emailed link works.
     def begin_signup(username: str, email: str, password: str) -> SignupStart {
         if len(username) < 2 {
             return SignupStart(false, "", "username too short")
@@ -94,7 +75,6 @@ class AuthService {
         }
 
         const ts: int = now()
-        # Opportunistic sweep: expired invitations never accumulate.
         self.db.conn.run(template[SQL] {
             delete from pending_signups where expires_at < !{ts}
         })
@@ -114,10 +94,6 @@ class AuthService {
         return SignupStart(true, token, "")
     }
 
-    # Step 2: the emailed link. Creates the account iff the token matches a
-    # live pending signup AND the username/email are still free (someone may
-    # have claimed them since the email went out - re-check, never trust the
-    # step-1 snapshot).
     def confirm_signup(token: str) -> AuthResult {
         const ch: str = _token_hash(token)
         const ts: int = now()
@@ -191,9 +167,6 @@ class AuthService {
         return len(rows) > 0
     }
 
-    #--- publish tokens ---------------------------------------------------#
-
-    # Returns the plaintext token - the ONLY time it is ever available.
     def issue_token(uid: int, label: str) -> str {
         const plaintext: str = f"dgn_{token_urlsafe(24)}"
         const th: str = _token_hash(plaintext)
@@ -205,7 +178,6 @@ class AuthService {
         return plaintext
     }
 
-    # Returns the owning user id for a valid, non-revoked token, else 0.
     def verify_token(plaintext: str) -> int {
         const th: str = _token_hash(plaintext)
         const rows: list[dict[str, Any]] = self.db.conn.all[dict[str, Any]](template[SQL] {

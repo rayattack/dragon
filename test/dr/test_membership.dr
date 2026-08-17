@@ -25,7 +25,7 @@ class ListMembership(TestCase) {
 
     def test_str_in_value_equality() {
         const xs: list[str] = ["apple", "pear", "fig"]
-        const built: str = "pe" + "ar"           # distinct pointer, equal value
+        const built: str = "pe" + "ar"
         self.assertTrue(built in xs)
         self.assertTrue("fig" in xs)
         self.assertFalse("kiwi" in xs)

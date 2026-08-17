@@ -71,11 +71,13 @@ Because the API and the query text are identical, moving between databases is a
 one-line change to the DSN:
 
 ```dragon
+import database
+
 # development: a throwaway in-memory database
 db: database.Connection = database.open("sqlite::memory:")
 
 # production: Postgres - every query above is unchanged
-db: database.Connection = database.open("postgres://user:pass@prod-db/shop")
+db = database.open("postgres://user:pass@prod-db/shop")
 ```
 
 This is the payoff of treating the query as a typed `SQL` value rather than a

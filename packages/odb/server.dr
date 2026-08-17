@@ -1,14 +1,3 @@
-# odb.server - served mode, native protocol (spec section 18)
-#
-# A thin server owning one .odb file. Each connection runs a command loop over
-# the length-framed wire protocol (odb.wire): find / run / schemas / watch /
-# ping. Whole-document reads ship the stored DBON blobs straight from the leaf
-# pages (no re-encoding); shaped or aggregated reads ship JSON rows
-#
-# v1 serves connections sequentially: the engine has one writer, and embedded
-# served mode exists so several tools can share one file cleanly, not to serve
-# open internet traffic. Concurrent handling arrives with the lock work
-
 from odb import ODB, Document, Watch, Change
 from odb.wire import WireConn, SocketConn, Frame, read_frame, write_frame, write_json_frame
 from odb.wire import Q_HELLO, R_HELLO, Q_FIND, R_ROWS, R_DOCS, Q_RUN, R_COUNT
@@ -33,10 +22,6 @@ def _err_json(kind: str, message: str) -> str {
     return dumps(obj)
 }
 
-# How a server catches a read up to a client's CSN token (read-your-writes,
-# spec section 19). The base waiter cannot advance anything: a primary either
-# has the CSN already or never will by waiting. A follower server installs a
-# waiter that actively syncs from its primary (odb.repl.FollowerWaiter).
 class CsnWaiter {
     def wait_for(csn: int, timeout_ms: int) -> bool {
         return False
@@ -48,7 +33,7 @@ class ODBServer {
     host: str
     port: int
     waiter: CsnWaiter
-    rw_wait_ms: int          # how long a min_csn read may hold before failing
+    rw_wait_ms: int
 
     def(db: ODB, port: int) {
         self.db = db
@@ -66,13 +51,10 @@ class ODBServer {
         self.rw_wait_ms = 5000
     }
 
-    # Serve exactly n connections from an already-bound listener. The caller
-    # binds and listens first, so a client can connect the instant this is
-    # fired on a green thread (no accept race).
     def serve_on(lst: TcpListener, n: int) -> int {
         i: int = 0
         while i < n {
-            stream: TcpStream = lst.do_accept()
+            stream: TcpStream = lst.accept()
             conn: SocketConn = SocketConn(stream)
             self.serve_conn(conn)
             conn.close()
@@ -81,15 +63,13 @@ class ODBServer {
         return i
     }
 
-    # Serve exactly n connections, one at a time, then return how many were
-    # handled. serve() wraps this for the run-forever case.
     def serve_n(n: int) -> int {
         lst: TcpListener = TcpListener(self.host, self.port)
-        if lst.do_bind() != 0 {
+        if lst.bind() != 0 {
             lst.close()
             raise ODBError("odb server: cannot bind " + self.host + ":" + str(self.port))
         }
-        lst.do_listen(16)
+        lst.listen(16)
         served: int = self.serve_on(lst, n)
         lst.close()
         return served
@@ -97,21 +77,19 @@ class ODBServer {
 
     def serve() -> None {
         lst: TcpListener = TcpListener(self.host, self.port)
-        if lst.do_bind() != 0 {
+        if lst.bind() != 0 {
             lst.close()
             raise ODBError("odb server: cannot bind " + self.host + ":" + str(self.port))
         }
-        lst.do_listen(16)
+        lst.listen(16)
         while True {
-            stream: TcpStream = lst.do_accept()
+            stream: TcpStream = lst.accept()
             conn: SocketConn = SocketConn(stream)
             self.serve_conn(conn)
             conn.close()
         }
     }
 
-    # The per-connection command loop. Public and channel-agnostic so tests
-    # drive it with a MemoryConn, exactly like Router.serve_connection.
     def serve_conn(c: WireConn) -> None {
         going: bool = True
         while going {
@@ -124,9 +102,6 @@ class ODBServer {
         }
     }
 
-    # One request frame -> one (or one error) response frame. Returns False
-    # when the connection should end. Every engine error crosses the wire as
-    # its taxonomy name, never as a dropped connection.
     def _dispatch(c: WireConn, fr: Frame) -> bool {
         try {
             if fr.ftype == Q_HELLO {
@@ -204,10 +179,6 @@ class ODBServer {
         return q
     }
 
-    # Hold a read until this database has at least `csn` (a client's
-    # read-your-writes token, spec section 19). The waiter does the catching
-    # up; on a primary the token is either committed already or unknown, and
-    # waiting cannot conjure it.
     def _hold_for(csn: int) -> None {
         if csn <= self.db.csn() {
             return
@@ -218,9 +189,6 @@ class ODBServer {
         }
     }
 
-    # Whole-document reads take the zero-re-encode path: the filter is
-    # evaluated on the decoded view, but the bytes that cross the wire are the
-    # stored DBON blobs, untouched. Everything else goes as JSON rows.
     def _find(c: WireConn, text: str) -> None {
         req_any: Any = loads(text)
         if not isinstance(req_any, dict) {
@@ -302,14 +270,10 @@ class ODBServer {
         count: int = self.db._run(qtext, params)
         reply: dict[str, Any] = {}
         reply["count"] = count
-        # The commit's csn: the caller's read-your-writes token (section 19).
         reply["csn"] = self.db.csn()
         write_json_frame(c, R_COUNT, dumps(reply))
     }
 
-    # One-shot watch poll: everything committed after `since` that matches,
-    # plus the resume token to poll from next. Exactly the embedded Watch
-    # semantics, so feeds resume across connections and processes.
     def _watch(c: WireConn, text: str) -> None {
         obj_any: Any = loads(text)
         if not isinstance(obj_any, dict) {
@@ -340,10 +304,6 @@ class ODBServer {
         write_json_frame(c, R_CHANGES, dumps(reply))
     }
 
-    # Replication pull (spec section 19): every committed entry after the
-    # follower's csn, verbatim, then a stream-end frame carrying our csn so
-    # the follower can close op-less csn gaps. The uuid check refuses a
-    # follower paired to a different lineage before any history moves.
     def _stream(c: WireConn, text: str) -> None {
         obj_any: Any = loads(text)
         if not isinstance(obj_any, dict) {
@@ -376,7 +336,6 @@ class ODBServer {
     }
 }
 
-# A Change as a JSON-shaped value (shared with the HTTP gateway's SSE feed).
 def change_json(ch: Change) -> Any {
     rec: dict[str, Any] = {}
     rec["csn"] = ch.csn

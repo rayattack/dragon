@@ -13,6 +13,20 @@ tuple/list literal). The cases below assert:
     their slots afterward),
   - a BORROWED source (a named var) is NOT freed by the unpack (no double-free),
     and stays usable afterward.
+
+Also pins tuple[Any, ...] literal construction (TupleAnyElemTests). An Any
+element arrives as a {tag, payload} box, and codegen passed the whole box to
+dragon_tuple_set, whose slot is an i64 - an LLVM verification failure on every
+tuple literal with an Any element, e.g.:
+
+    a: Any = 1
+    t: tuple[Any, int] = (a, 5)   # DRAGON SCALE ERROR before the fix
+
+The fix extracts the box's payload and runtime tag and routes them through
+dragon_tuple_set_tagged (mirroring the dict-literal box branch). RC: a payload
+boxed from a BORROWED source gets its own ref (union incref) so the source's
+scope exit cannot free it out from under the tuple; an owned box temp already
+carries the +1 the tuple adopts.
 """
 
 from unittest import TestCase, main
@@ -34,13 +48,11 @@ class TupleUnpackRcTests(TestCase) {
             acc = acc + q + r
             i = i + 1
         }
-        # divmod(i,7): q*7 + r == i, so sum of (q+r) is bounded and deterministic.
-        self.assertEqual(q, 42)   # divmod(299,7) = (42, 5)
+        self.assertEqual(q, 42)
         self.assertEqual(r, 5)
     }
 
     def test_partition_heap_elements_survive() {
-        # The 3 str elements must outlive the source tuple's free.
         k: str = ""
         sep: str = ""
         v: str = ""
@@ -53,8 +65,6 @@ class TupleUnpackRcTests(TestCase) {
         self.assertEqual(k, "key199")
         self.assertEqual(sep, "=")
         self.assertEqual(v, "value")
-        # And the captured strings are still valid (a premature free would have
-        # corrupted these reads).
         self.assertEqual(len(sep), 1)
     }
 
@@ -71,17 +81,14 @@ class TupleUnpackRcTests(TestCase) {
     }
 
     def test_borrowed_source_not_double_freed() {
-        # Unpacking a NAMED tuple var must NOT free the source - it stays usable.
         t: tuple[int, int] = (7, 9)
         a: int = 0
         b: int = 0
         a, b = t
         self.assertEqual(a, 7)
         self.assertEqual(b, 9)
-        # Source still alive and correct after the unpack.
         self.assertEqual(t[0], 7)
         self.assertEqual(t[1], 9)
-        # Unpack it a second time - still valid (not freed by the first unpack).
         c: int = 0
         d: int = 0
         c, d = t
@@ -91,4 +98,104 @@ class TupleUnpackRcTests(TestCase) {
 }
 
 
-main([TupleUnpackRcTests()])
+def mk_any_str_tuple(i: int) -> tuple[Any, int] {
+    # The heap str is boxed from a local that DIES at return - the tuple must
+    # own its own ref or t[0] is a use-after-free in the caller.
+    s: str = "hydra" + str(i)
+    a: Any = s
+    return (a, i)
+}
+
+
+class TupleAnyElemTests(TestCase) {
+    def test_boxed_scalar_element() {
+        a: Any = 1
+        t: tuple[Any, int] = (a, 5)
+        self.assertEqual(t[1], 5)
+        e: Any = t[0]
+        matched: bool = False
+        if isinstance(e, int) {
+            ei: int = e
+            self.assertEqual(ei, 1)
+            matched = True
+        }
+        self.assertTrue(matched)
+    }
+
+    def test_boxed_heap_str_survives_source_scope() {
+        got: str = ""
+        i: int = 0
+        while i < 200 {
+            t: tuple[Any, int] = mk_any_str_tuple(i)
+            e: Any = t[0]
+            if isinstance(e, str) {
+                got = e
+            }
+            i = i + 1
+        }
+        self.assertEqual(got, "hydra199")
+    }
+
+    def test_borrowed_any_source_stays_valid() {
+        # Both the tuple's element ref and the original slots decref at scope
+        # exit; without the borrowed-box incref that is a double-free.
+        s: str = "al" + "pha"
+        a: Any = s
+        t: tuple[Any, int] = (a, 1)
+        self.assertEqual(s, "alpha")
+        e: Any = t[0]
+        matched: bool = False
+        if isinstance(e, str) {
+            es: str = e
+            self.assertEqual(es, "alpha")
+            matched = True
+        }
+        self.assertTrue(matched)
+    }
+
+    def test_boxed_list_element() {
+        xs: list[Any] = [1, 2, 3]
+        a: Any = xs
+        t: tuple[Any, int] = (a, 4)
+        self.assertEqual(t[1], 4)
+        e: Any = t[0]
+        matched: bool = False
+        if isinstance(e, list) {
+            el: list[Any] = e
+            self.assertEqual(len(el), 3)
+            matched = True
+        }
+        self.assertTrue(matched)
+    }
+
+    def test_concrete_str_in_any_slot() {
+        s: str = "hy" + "dra"
+        t: tuple[Any, int] = (s, 5)
+        self.assertEqual(t[1], 5)
+        e: Any = t[0]
+        matched: bool = False
+        if isinstance(e, str) {
+            es: str = e
+            self.assertEqual(es, "hydra")
+            matched = True
+        }
+        self.assertTrue(matched)
+        self.assertEqual(s, "hydra")
+    }
+
+    def test_nested_list_literal_in_any_slot_born_boxed() {
+        u: tuple[Any, int] = ([1, 2], 6)
+        self.assertEqual(u[1], 6)
+        e: Any = u[0]
+        matched: bool = False
+        if isinstance(e, list) {
+            el: list[Any] = e
+            self.assertEqual(len(el), 2)
+            matched = True
+        }
+        self.assertTrue(matched)
+    }
+}
+
+
+main([TupleUnpackRcTests(), TupleAnyElemTests()])

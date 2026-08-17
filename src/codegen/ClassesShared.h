@@ -1,9 +1,3 @@
-/// Dragon CodeGen - shared class-emission AST builders
-///
-/// cloneTypeExpr / makeSelfAssign are used by BOTH the class declaration
-/// emitter (Classes.cpp) and the @dataclass / NamedTuple / Enum synthesis
-/// (ClassSynthesis.cpp). `inline` so both TUs can include this without an
-/// ODR clash. Pure code motion from Classes.cpp - no behavior change.
 #ifndef DRAGON_CODEGEN_CLASSES_SHARED_H
 #define DRAGON_CODEGEN_CLASSES_SHARED_H
 
@@ -11,8 +5,6 @@
 
 namespace dragon {
 
-// Deep-clone a TypeExpr (used by @dataclass / NamedTuple synthesis to copy
-// class-body field annotations into synthesized __init__ parameter types).
 inline std::unique_ptr<TypeExpr> cloneTypeExpr(TypeExpr* t) {
     if (!t) return nullptr;
     if (auto* n = dynamic_cast<NamedTypeExpr*>(t)) {
@@ -56,7 +48,6 @@ inline std::unique_ptr<TypeExpr> cloneTypeExpr(TypeExpr* t) {
     return nullptr;
 }
 
-// Helper: build an AssignStmt for `self.<field> = <field>`.
 inline std::unique_ptr<Stmt> makeSelfAssign(const std::string& field, SourceLocation loc) {
     auto attrTarget = std::make_unique<AttributeExpr>();
     auto selfName = std::make_unique<NameExpr>();
@@ -77,6 +68,6 @@ inline std::unique_ptr<Stmt> makeSelfAssign(const std::string& field, SourceLoca
     return assign;
 }
 
-}  // namespace dragon
+}
 
-#endif  // DRAGON_CODEGEN_CLASSES_SHARED_H
+#endif

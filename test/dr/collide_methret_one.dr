@@ -1,0 +1,76 @@
+"""Declares Payload / Box / BoxHolder / Parent / Crate / CrateHolder;
+collide_methret_two.dr and the test entry reuse the names."""
+
+
+class Payload {
+    def() {
+        self.tag: str = "one-payload"
+    }
+
+    def shout() -> str {
+        return "shout:" + self.tag
+    }
+}
+
+
+class Box {
+    def() {
+        self.label: str = "one-box"
+    }
+
+    def describe() -> Payload {
+        return Payload()
+    }
+}
+
+
+class BoxHolder {
+    def() {
+        self.b: Box = Box()
+    }
+
+    def poke() -> str {
+        return self.b.describe().shout()
+    }
+}
+
+
+def one_poke() -> str {
+    h: BoxHolder = BoxHolder()
+    return h.poke()
+}
+
+
+class Parent {
+    def() {
+        self.kind: str = "one-parent"
+    }
+
+    def summon() -> Payload {
+        return Payload()
+    }
+}
+
+
+class Crate(Parent) {
+    def() {
+        self.kind: str = "one-crate"
+    }
+}
+
+
+class CrateHolder {
+    def() {
+        self.k: Crate = Crate()
+    }
+
+    def lift() -> str {
+        return self.k.summon().shout()
+    }
+}
+
+
+def one_lift() -> str {
+    ch: CrateHolder = CrateHolder()
+    return ch.lift()
+}

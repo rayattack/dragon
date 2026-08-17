@@ -1,20 +1,9 @@
-# datetime.dr - Dragon standard library: date and time
-#
-# Provides timedelta, date, time, and datetime classes with arithmetic,
-# comparisons, and ISO-8601 formatting. Decomposition of Unix timestamps
-# uses Howard Hinnant's days-from-civil algorithm in pure Dragon - no
-# C library calls beyond what `time` already exposes.
-#
-# Scope (v0.0.2): UTC-only. Local-timezone helpers and tzinfo are deferred.
+"""datetime.dr - timedelta/date/time/datetime with arithmetic, comparisons, ISO-8601
+formatting. UTC-only (v0.0.2); local-timezone/tzinfo deferred. Pure Dragon days-from-civil."""
 
 from time import now_float
 
-#===----------------------------------------------------------------------===#
-# Day arithmetic (Howard Hinnant: days-from-civil)
-#===----------------------------------------------------------------------===#
-
 def _days_from_civil(y: int, m: int, d: int) -> int {
-    # Days since 1970-01-01 for a proleptic Gregorian (y, m, d).
     if m <= 2 {
         y = y - 1
     }
@@ -27,7 +16,6 @@ def _days_from_civil(y: int, m: int, d: int) -> int {
 }
 
 def _civil_from_days(z: int) -> tuple[int, int, int] {
-    # Inverse of _days_from_civil. Returns (year, month, day).
     z = z + 719468
     const era: int = (z if z >= 0 else z - 146096) // 146097
     const doe: int = z - era * 146097
@@ -55,6 +43,33 @@ def _days_in_month(y: int, m: int) -> int {
     return 31
 }
 
+def _check_date(year: int, month: int, day: int) -> None {
+    if year < 1 or year > 9999 {
+        raise ValueError(f"year {year} is out of range")
+    }
+    if month < 1 or month > 12 {
+        raise ValueError("month must be in 1..12")
+    }
+    if day < 1 or day > _days_in_month(year, month) {
+        raise ValueError("day is out of range for month")
+    }
+}
+
+def _check_time(hour: int, minute: int, second: int, microsecond: int) -> None {
+    if hour < 0 or hour > 23 {
+        raise ValueError("hour must be in 0..23")
+    }
+    if minute < 0 or minute > 59 {
+        raise ValueError("minute must be in 0..59")
+    }
+    if second < 0 or second > 59 {
+        raise ValueError("second must be in 0..59")
+    }
+    if microsecond < 0 or microsecond > 999999 {
+        raise ValueError("microsecond must be in 0..999999")
+    }
+}
+
 def _pad2(n: int) -> str {
     if n < 10 {
         return "0" + str(n)
@@ -78,10 +93,6 @@ def _pad6(n: int) -> str {
     return str(n)
 }
 
-#===----------------------------------------------------------------------===#
-# timedelta - duration in days/seconds/microseconds
-#===----------------------------------------------------------------------===#
-
 const SECONDS_PER_DAY: int = 86400
 const MICROS_PER_SECOND: int = 1000000
 const SECONDS_PER_HOUR: int = 3600
@@ -89,11 +100,10 @@ const SECONDS_PER_MINUTE: int = 60
 
 class timedelta {
     days: int
-    seconds: int       # [0, 86400)
-    microseconds: int  # [0, 1_000_000)
+    seconds: int
+    microseconds: int
 
     def(days: int, seconds: int, microseconds: int) {
-        # Normalize to canonical form: 0 <= seconds < 86400, 0 <= microseconds < 1_000_000
         const us_carry: int = microseconds // MICROS_PER_SECOND
         microseconds = microseconds - us_carry * MICROS_PER_SECOND
         seconds = seconds + us_carry
@@ -154,24 +164,19 @@ class timedelta {
     }
 }
 
-#===----------------------------------------------------------------------===#
-# date - calendar date (UTC, proleptic Gregorian)
-#===----------------------------------------------------------------------===#
-
 class date {
     year: int
     month: int
     day: int
 
     def(year: int, month: int, day: int) {
+        _check_date(year, month, day)
         self.year = year
         self.month = month
         self.day = day
     }
 
     def toordinal() -> int {
-        # Days since 0001-01-01 (Python compatibility).
-        # Our internal helper uses 1970-01-01 epoch; shift by 719162.
         return _days_from_civil(self.year, self.month, self.day) + 719162
     }
 
@@ -197,7 +202,6 @@ class date {
 }
 
 def date_today() -> date {
-    # Today's date in UTC (no timezone conversion).
     const ts: float = now_float()
     const days: int = int(ts) // SECONDS_PER_DAY
     const ymd: tuple[int, int, int] = _civil_from_days(days)
@@ -205,14 +209,14 @@ def date_today() -> date {
 }
 
 def date_fromtimestamp(ts: float) -> date {
-    const days: int = int(ts) // SECONDS_PER_DAY
+    whole: int = int(ts)
+    if float(whole) > ts {
+        whole = whole - 1
+    }
+    const days: int = whole // SECONDS_PER_DAY
     const ymd: tuple[int, int, int] = _civil_from_days(days)
     return date(ymd[0], ymd[1], ymd[2])
 }
-
-#===----------------------------------------------------------------------===#
-# time - wall-clock time of day (no date, no timezone)
-#===----------------------------------------------------------------------===#
 
 class time_of_day {
     hour: int
@@ -241,10 +245,6 @@ class time_of_day {
     }
 }
 
-#===----------------------------------------------------------------------===#
-# datetime - combined date + time (UTC)
-#===----------------------------------------------------------------------===#
-
 class datetime {
     year: int
     month: int
@@ -256,6 +256,8 @@ class datetime {
 
     def(year: int, month: int, day: int,
         hour: int, minute: int, second: int, microsecond: int) {
+        _check_date(year, month, day)
+        _check_time(hour, minute, second, microsecond)
         self.year = year
         self.month = month
         self.day = day
@@ -274,7 +276,6 @@ class datetime {
     }
 
     def timestamp() -> float {
-        # Seconds since Unix epoch (UTC).
         const days: int = _days_from_civil(self.year, self.month, self.day)
         const wall: int = self.hour * SECONDS_PER_HOUR + self.minute * SECONDS_PER_MINUTE + self.second
         return float(days) * float(SECONDS_PER_DAY) + float(wall) + float(self.microsecond) / float(MICROS_PER_SECOND)
@@ -307,12 +308,10 @@ class datetime {
     }
 
     def __lt__(other: datetime) -> bool {
-        # Compare as Unix timestamps for correctness across calendar boundaries.
         return self.timestamp() < other.timestamp()
     }
 
     def __add__(td: timedelta) -> datetime {
-        # datetime + timedelta -> datetime
         const total_us: int = self.microsecond + td.microseconds
         const us_carry: int = total_us // MICROS_PER_SECOND
         const new_us: int = total_us - us_carry * MICROS_PER_SECOND
@@ -332,7 +331,6 @@ class datetime {
     }
 
     def __sub__(other: datetime) -> timedelta {
-        # datetime - datetime -> timedelta
         const my_days: int = _days_from_civil(self.year, self.month, self.day)
         const ot_days: int = _days_from_civil(other.year, other.month, other.day)
         const my_wall: int = self.hour * SECONDS_PER_HOUR + self.minute * SECONDS_PER_MINUTE + self.second
@@ -344,7 +342,10 @@ class datetime {
 }
 
 def datetime_fromtimestamp(ts: float) -> datetime {
-    const whole: int = int(ts)
+    whole: int = int(ts)
+    if float(whole) > ts {
+        whole = whole - 1
+    }
     const frac_us: int = int((ts - float(whole)) * float(MICROS_PER_SECOND))
     const days: int = whole // SECONDS_PER_DAY
     const wall: int = whole - days * SECONDS_PER_DAY
@@ -356,12 +357,10 @@ def datetime_fromtimestamp(ts: float) -> datetime {
 }
 
 def datetime_now() -> datetime {
-    # Current UTC datetime with sub-second precision from time.now_float().
     const ts: float = now_float()
     return datetime_fromtimestamp(ts)
 }
 
 def datetime_utcnow() -> datetime {
-    # Alias for datetime_now() - UTC-only in v0.0.2.
     return datetime_now()
 }

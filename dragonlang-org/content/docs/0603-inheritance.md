@@ -49,6 +49,12 @@ if a subclass constructor never calls `super(...)`, the parent constructor does
 constructors implicitly). To reach any parent *method*, use `super.method()`:
 
 ```dragon
+class Base {
+    def greet() -> str {
+        return "hello"
+    }
+}
+
 class Sub(Base) {
     def greet() -> str {
         return super.greet() + " (a Sub)"

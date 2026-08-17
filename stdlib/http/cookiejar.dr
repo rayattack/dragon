@@ -19,7 +19,7 @@ class Cookie {
     value: str
     domain: str
     path: str
-    expires: int           # 0 = session cookie
+    expires: int
     secure: bool
     http_only: bool
 

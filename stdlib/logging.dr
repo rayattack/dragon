@@ -1,22 +1,4 @@
-# logging.dr - Dragon standard library: simple structured logging
-#
-# Provides a Logger class plus module-level convenience functions
-# (debug/info/warning/error/critical). Output goes to stderr by default
-# with a fixed `LEVEL [name] message` format. Level filtering matches
-# Python's numeric levels: DEBUG=10, INFO=20, WARNING=30, ERROR=40,
-# CRITICAL=50.
-#
-# Scope (v0.0.2): single-handler, line-oriented, no rotating files,
-# no per-handler formatters. Sufficient for stdlib-internal logging
-# and library/server logs. The "root" level is held in a module
-# variable rather than a module-level Logger instance - a cross-module
-# class-instance global has known forward-decl gaps in v0.0.2.
-
 extern "C" def dragon_log_stderr(msg: str)
-
-#===----------------------------------------------------------------------===#
-# Levels
-#===----------------------------------------------------------------------===#
 
 const NOTSET: int = 0
 const DEBUG: int = 10
@@ -34,11 +16,6 @@ def _level_name(level: int) -> str {
     return "NOTSET"
 }
 
-#===----------------------------------------------------------------------===#
-# Module-level threshold (used by module-level convenience funcs and the
-# default Logger). Mutated via basicConfig().
-#===----------------------------------------------------------------------===#
-
 _root_level: int = WARNING
 
 def basicConfig(level: int) -> None {
@@ -54,10 +31,6 @@ def _emit_to_stderr(name: str, level: int, message: str) -> None {
                      + name + "] " + message)
     dragon_log_stderr(line)
 }
-
-#===----------------------------------------------------------------------===#
-# Logger
-#===----------------------------------------------------------------------===#
 
 class Logger {
     name: str
@@ -101,11 +74,6 @@ def getLogger(name: str) -> Logger {
     }
     return Logger(name)
 }
-
-#===----------------------------------------------------------------------===#
-# Module-level convenience helpers - write straight to stderr without
-# allocating a Logger. Useful for top-level scripts.
-#===----------------------------------------------------------------------===#
 
 def debug(message: str) -> None    { _emit_to_stderr("root", DEBUG,    message) }
 def info(message: str) -> None     { _emit_to_stderr("root", INFO,     message) }

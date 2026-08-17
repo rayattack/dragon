@@ -23,7 +23,6 @@ class RunsRoundTripTests(TestCase) {
         self.assertTrue(u.active)
     }
 
-    # Unrequested keys are skipped by decode[T], same as in-process decode.
     def test_extra_keys_skipped() {
         const body: bytes = '{"id": 1, "junk": {"a":[1,2]}, "tag": "t", "active": false}'.encode("utf-8")
         const u: User = runs[User](["cat"], body)
@@ -46,7 +45,6 @@ class RunsErrorTaxonomyTests(TestCase) {
         self.assertTrue(raised)
     }
 
-    # No decode is attempted on a crashed child, even when stdin was valid JSON.
     def test_foreign_error_on_nonzero_exit() {
         raised: bool = false
         try {
@@ -83,7 +81,6 @@ class RunsErrorTaxonomyTests(TestCase) {
         self.assertTrue(raised)
     }
 
-    # Valid JSON with a wrong field type is a SchemaError too, not just garbage input.
     def test_schema_error_on_type_mismatch() {
         raised: bool = false
         try {
@@ -97,7 +94,6 @@ class RunsErrorTaxonomyTests(TestCase) {
 
 
 class RunsOwnershipTests(TestCase) {
-    # A leaked pipe fd blows the open-files ulimit well before 1500 iterations.
     def test_no_leak() {
         const body: bytes = '{"id": 0, "tag": "some-owned-string", "active": false}'.encode("utf-8")
         i: int = 0

@@ -14,6 +14,8 @@ is an interpolation. What makes it a *query* rather than a string is **where tho
 interpolations go** - they don't go into the SQL text at all:
 
 ```dragon
+from database import SQL
+
 name: str = "'; DROP TABLE users; --"
 
 q: SQL = template[SQL] {
@@ -35,6 +37,13 @@ thing `template[SQL]` can do. **There is no `template[SQL]` form that interpolat
 into the text.**
 
 ```dragon
+import database
+from database import SQL
+
+db: database.Connection = database.open("sqlite::memory:")
+db.raw("create table t(name text)")
+evil: str = "'; DROP TABLE users; --"
+
 db.run(template[SQL] { insert into t(name) values(!{evil}) })
 cnt: int = db.val(template[SQL] { select count(*) from t })
 # cnt == 1 - the row was inserted, the table survived, the payload stored verbatim.
@@ -54,11 +63,18 @@ are part of the query's fixed text, decided at compile time, not data bound at r
 time:
 
 ```dragon
+import database
+from database import SQL
+
+db: database.Connection = database.open("sqlite::memory:")
+minimum: float = 10.0
+n: int = 5
+
 # values - fine, these are parameters:
-db.all(template[SQL] { select * from orders where total > !{minimum} limit !{n} })
+big: list[dict[str, Any]] = db.all(template[SQL] { select * from orders where total > !{minimum} limit !{n} })
 
 # an identifier is NOT a parameter - write it literally in the template:
-db.all(template[SQL] { select * from orders order by created_at })   # column name is literal
+recent: list[dict[str, Any]] = db.all(template[SQL] { select * from orders order by created_at })   # column name is literal
 ```
 
 If you genuinely need a dynamic column or table name (a sort key chosen at runtime),

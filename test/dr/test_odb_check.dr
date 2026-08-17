@@ -1,9 +1,3 @@
-# ODB M4(g) regression suite: `db.check()`, the one-pass whole-database verifier
-# (spec section 21). It composes the structural tree checks with index
-# completeness (one entry per document per index), unique-claim correctness, and
-# referential integrity. The counts are asserted exactly, so the pass is not
-# vacuous, and the check must stay clean across edits, wipes, and a reopen.
-
 from unittest import TestCase, main
 from odb import ODB, Documents, Document, CheckReport
 from odb.vfs import SimVFS
@@ -104,10 +98,7 @@ class CheckTest(TestCase) {
         _build(db)
         rep: CheckReport = db.check()
         self.assertTrue(rep.ok, rep.message)
-        # 3 customers + 4 orders
         self.assertEqual(rep.docs, 7)
-        # customers: pk + u:email + i:city = 3 indexes x 3 docs = 9
-        # orders:    pk + rev:customer_id  = 2 indexes x 4 docs = 8
         self.assertEqual(rep.index_entries, 17)
     }
 
@@ -117,18 +108,15 @@ class CheckTest(TestCase) {
         customers: Documents = cols[0]
         orders: Documents = cols[1]
 
-        # move a customer (updates the city index and the email unique index)
         ada: Document = customers.read(id=1)
         ada.edit({city: "Abuja", email: "ada@new.com"})
 
-        # wipe an order (updates the pk index and the reverse index)
         o12: Document = orders.read(id=12)
         o12.wipe()
 
         rep: CheckReport = db.check()
         self.assertTrue(rep.ok, rep.message)
-        self.assertEqual(rep.docs, 6)                 # 3 customers + 3 orders
-        # customers 3x3=9 ; orders 2x3=6
+        self.assertEqual(rep.docs, 6)
         self.assertEqual(rep.index_entries, 15)
     }
 
@@ -140,7 +128,6 @@ class CheckTest(TestCase) {
 
         p2: Pager = open_pager(sim)
         db2: ODB = ODB(sim, p2)
-        # touch the schemas so their handles/meta are live, then check
         db2.schema("customers")
         db2.schema("orders")
         rep: CheckReport = db2.check()

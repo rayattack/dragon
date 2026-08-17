@@ -1,0 +1,50 @@
+from unittest import TestCase, main
+from math import factorial, isqrt, log_int
+
+
+def _factorial_negative() -> None {
+    factorial(-1)
+}
+
+def _isqrt_negative() -> None {
+    isqrt(-1)
+}
+
+def _log_int_zero() -> None {
+    log_int(0, 2)
+}
+
+def _log_int_bad_base() -> None {
+    log_int(8, 1)
+}
+
+
+class MathDomainTests(TestCase) {
+    def test_factorial_negative_raises() {
+        self.assertRaises(ValueError, _factorial_negative)
+    }
+
+    def test_isqrt_negative_raises() {
+        self.assertRaises(ValueError, _isqrt_negative)
+    }
+
+    def test_log_int_zero_raises() {
+        self.assertRaises(ValueError, _log_int_zero)
+    }
+
+    def test_log_int_bad_base_raises() {
+        self.assertRaises(ValueError, _log_int_bad_base)
+    }
+
+    def test_valid_inputs_unchanged() {
+        self.assertEqual(factorial(0), 1)
+        self.assertEqual(factorial(5), 120)
+        self.assertEqual(isqrt(0), 0)
+        self.assertEqual(isqrt(17), 4)
+        self.assertEqual(log_int(8, 2), 3)
+        self.assertEqual(log_int(1, 2), 0)
+    }
+}
+
+
+main([MathDomainTests()])

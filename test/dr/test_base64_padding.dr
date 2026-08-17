@@ -1,0 +1,61 @@
+from unittest import TestCase, main
+from base64 import b64encode, b64decode, urlsafe_b64decode
+
+
+def _two_char_pad() {
+    const v: bytes = b64decode(b"A=")
+}
+
+def _three_char_pad() {
+    const v: bytes = b64decode(b"QQ=")
+}
+
+def _double_pad_short() {
+    const v: bytes = b64decode(b"A==")
+}
+
+def _pad_only() {
+    const v: bytes = b64decode(b"====")
+}
+
+def _urlsafe_two_char_pad() {
+    const v: bytes = urlsafe_b64decode(b"A=")
+}
+
+
+class Base64PaddingTests(TestCase) {
+    def test_two_char_quantum_with_pad_raises() {
+        self.assertRaises(ValueError, _two_char_pad)
+        self.assertRaises(ValueError, _urlsafe_two_char_pad)
+    }
+
+    def test_truncated_padded_quantum_raises() {
+        self.assertRaises(ValueError, _three_char_pad)
+        self.assertRaises(ValueError, _double_pad_short)
+    }
+
+    def test_pad_only_raises() {
+        self.assertRaises(ValueError, _pad_only)
+    }
+
+    def test_standard_vectors() {
+        self.assertEqual(b64decode(b"QQ==").decode(), "A")
+        self.assertEqual(b64decode(b"QUI=").decode(), "AB")
+        self.assertEqual(b64decode(b"QUJD").decode(), "ABC")
+        self.assertEqual(b64encode(b"ABC").decode(), "QUJD")
+        self.assertEqual(len(b64decode(b"")), 0)
+    }
+
+    def test_unpadded_tail_still_accepted() {
+        self.assertEqual(b64decode(b"QQ").decode(), "A")
+        self.assertEqual(b64decode(b"QUI").decode(), "AB")
+    }
+
+    def test_roundtrip_binary() {
+        const data: bytes = bytes([0, 1, 2, 127, 128, 250, 255])
+        self.assertEqual(b64decode(b64encode(data)).hex(), data.hex())
+    }
+}
+
+
+main([Base64PaddingTests()])

@@ -37,8 +37,6 @@ class WalrusOwnershipTests(TestCase) {
             total = total + len(w)
             i = i + 1
         }
-        # len("n" + str(i)) counted twice per iteration:
-        # 10 * 2 + 90 * 3 + 400 * 4 = 1890, doubled = 3780
         self.assertEqual(total, 3780)
     }
 }

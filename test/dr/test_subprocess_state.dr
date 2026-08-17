@@ -1,0 +1,41 @@
+from unittest import TestCase, main
+from subprocess import Popen
+
+
+class ProcessStateTests(TestCase) {
+    def test_running_then_exited() {
+        const proc: Popen = Popen(["/bin/sh", "-c", "sleep 0.3"], "", false, false, false)
+        self.assertTrue(proc.running())
+        self.assertEqual(proc.wait(), 0)
+        self.assertFalse(proc.running())
+        self.assertEqual(proc.returncode, 0)
+    }
+
+    def test_sighup_kill_disambiguated_from_running() {
+        const proc: Popen = Popen(["/bin/sh", "-c", "sleep 5"], "", false, false, false)
+        self.assertTrue(proc.running())
+        proc.send_signal(1)
+        self.assertEqual(proc.wait(), -1)
+        self.assertFalse(proc.running())
+        self.assertEqual(proc.returncode, -1)
+    }
+
+    def test_poll_after_exit_returns_code() {
+        const proc: Popen = Popen(["/bin/sh", "-c", "exit 7"], "", false, false, false)
+        proc.wait()
+        self.assertEqual(proc.poll(), 7)
+        self.assertFalse(proc.running())
+    }
+
+    def test_poll_while_running_is_minus_one() {
+        const proc: Popen = Popen(["/bin/sh", "-c", "sleep 5"], "", false, false, false)
+        self.assertEqual(proc.poll(), -1)
+        self.assertTrue(proc.running())
+        proc.kill()
+        self.assertEqual(proc.wait(), -9)
+        self.assertFalse(proc.running())
+    }
+}
+
+
+main([ProcessStateTests()])

@@ -1,26 +1,3 @@
-# Server-side syntax highlighter for fenced code blocks.
-#
-# A small hand-written lexer per language family. It walks the code once,
-# classifies each token, and wraps it in <span class="tok-..."> so app.css can
-# color it. Output is always HTML-escaped; an unrecognized language falls back
-# to a generic C-family pass, and plain/text falls back to bare escaping.
-#
-# This is the dogfood: the docs site highlights its own code samples with a
-# highlighter written in Dragon, no client-side JS and no third-party library.
-#
-# Token classes (see app.css): tok-comment, tok-string, tok-number, tok-kw,
-# tok-type, tok-builtin, tok-const, tok-fn, tok-decorator, tok-self, tok-var,
-# tok-op, tok-prompt.
-
-
-# --- keyword / type / builtin tables (Dragon + Python share these) ---
-#
-# Declared as set literals: literal sets hash string members correctly and
-# `w in S` is an O(1) test. They are written one-per-line because `.dr` mode
-# keeps newlines significant inside `{ }` (braces are blocks), so a set literal
-# cannot span lines; the larger tables are split across a few sets and combined
-# in the `_is_*` predicates below.
-
 const _KW: set[str] = {"if", "elif", "else", "while", "for", "break", "continue", "return", "pass", "yield", "raise", "try", "except", "catch", "finally", "with", "import", "from", "as", "fire", "thread", "async", "await", "template", "def", "class", "lambda", "global", "nonlocal", "assert", "del", "const", "static", "extern", "and", "or", "not", "is", "in", "match", "case", "default"}
 
 const _CONST: set[str] = {"True", "False", "None", "Ellipsis", "NotImplemented", "true", "false"}
@@ -54,8 +31,6 @@ def _is_ckw(w: str) -> bool {
     return w in _C_KW1 or w in _C_KW2
 }
 
-
-# --- character predicates ---
 
 def _is_ident_start(c: str) -> bool {
     return (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_"
@@ -102,10 +77,6 @@ def _span(cls: str, text: str) -> str {
 }
 
 
-# Index just past a string literal whose opening quote is at `code[i]`.
-# Handles triple-quoted strings and backslash escapes; a single-quoted string
-# that hits a newline before its close is treated as ending at the newline
-# (so a stray quote in prose doesn't swallow the rest of the block).
 def _string_end(code: str, i: int, n: int) -> int {
     const q: str = code[i]
     const triple: bool = i + 2 < n and code[i + 1] == q and code[i + 2] == q
@@ -141,8 +112,6 @@ def _string_end(code: str, i: int, n: int) -> int {
 }
 
 
-# Classify a bare identifier `word` (ending at code[j]) for the Dragon/Python
-# lexer. Returns the token class, or "" to emit the word unstyled.
 def _classify_dragon(word: str, code: str, j: int, n: int) -> str {
     if word in _KW {
         return "tok-kw"
@@ -159,7 +128,6 @@ def _classify_dragon(word: str, code: str, j: int, n: int) -> str {
     if _is_builtin(word) {
         return "tok-builtin"
     }
-    # A name immediately followed by "(" reads as a call/definition target.
     k: int = j
     while k < n and (code[k] == " " or code[k] == "\t") {
         k = k + 1
@@ -171,7 +139,6 @@ def _classify_dragon(word: str, code: str, j: int, n: int) -> str {
 }
 
 
-# Dragon (and Python - close enough) tokenizer.
 def _hl_dragon(code: str) -> str {
     out: str = ""
     i: int = 0
@@ -185,7 +152,6 @@ def _hl_dragon(code: str) -> str {
             continue
         }
 
-        # Line comment: # ... to end of line.
         if c == "#" {
             j: int = i
             while j < n and code[j] != "\n" {
@@ -196,7 +162,6 @@ def _hl_dragon(code: str) -> str {
             continue
         }
 
-        # String literal.
         if c == "\"" or c == "'" {
             const e: int = _string_end(code, i, n)
             out = out + _span("tok-string", code[i:e])
@@ -204,7 +169,6 @@ def _hl_dragon(code: str) -> str {
             continue
         }
 
-        # Number (decimal, hex, float, with underscores - coarse but enough).
         if _is_digit(c) {
             j: int = i
             while j < n and (_is_ident_char(code[j]) or code[j] == ".") {
@@ -215,7 +179,6 @@ def _hl_dragon(code: str) -> str {
             continue
         }
 
-        # Decorator @name (possibly dotted).
         if c == "@" {
             j: int = i + 1
             while j < n and (_is_ident_char(code[j]) or code[j] == ".") {
@@ -226,7 +189,6 @@ def _hl_dragon(code: str) -> str {
             continue
         }
 
-        # Identifier, keyword, or a string prefix (f"...", r'...', rb"...").
         if _is_ident_start(c) {
             j: int = i
             while j < n and _is_ident_char(code[j]) {
@@ -250,7 +212,6 @@ def _hl_dragon(code: str) -> str {
             continue
         }
 
-        # Operator run.
         if c in _OPS {
             j: int = i
             while j < n and code[j] in _OPS {
@@ -261,7 +222,6 @@ def _hl_dragon(code: str) -> str {
             continue
         }
 
-        # Punctuation / anything else: emit escaped, unstyled.
         out = out + _esc(c)
         i = i + 1
     }
@@ -269,8 +229,6 @@ def _hl_dragon(code: str) -> str {
 }
 
 
-# Shell tokenizer. Highlights comments, strings, $variables, numbers, the
-# leading "$"/"#" prompt, and a small set of shell keywords/builtins.
 def _hl_bash(code: str) -> str {
     out: str = ""
     i: int = 0
@@ -284,7 +242,6 @@ def _hl_bash(code: str) -> str {
             continue
         }
 
-        # A "$ " or "# " at the start of a line is a prompt, not code.
         const at_line_start: bool = i == 0 or code[i - 1] == "\n"
         if at_line_start and (c == "$" or c == "#") and i + 1 < n and code[i + 1] == " " {
             out = out + _span("tok-prompt", c)
@@ -292,7 +249,6 @@ def _hl_bash(code: str) -> str {
             continue
         }
 
-        # Comment (after whitespace or at a fresh line).
         if c == "#" and (i == 0 or _is_ws(code[i - 1])) {
             j: int = i
             while j < n and code[j] != "\n" {
@@ -303,7 +259,6 @@ def _hl_bash(code: str) -> str {
             continue
         }
 
-        # String.
         if c == "\"" or c == "'" {
             const e: int = _string_end(code, i, n)
             out = out + _span("tok-string", code[i:e])
@@ -311,7 +266,6 @@ def _hl_bash(code: str) -> str {
             continue
         }
 
-        # Variable: $name or ${...}.
         if c == "$" and i + 1 < n {
             if code[i + 1] == "{" {
                 j: int = i + 2
@@ -380,8 +334,6 @@ def _hl_bash(code: str) -> str {
 }
 
 
-# Generic C-family fallback: // and /* */ comments, strings, numbers, and a
-# C/C++ keyword set. Used for cpp/c/llvm and any unknown language.
 def _hl_generic(code: str) -> str {
     out: str = ""
     i: int = 0
@@ -395,7 +347,6 @@ def _hl_generic(code: str) -> str {
             continue
         }
 
-        # Line comment //
         if c == "/" and i + 1 < n and code[i + 1] == "/" {
             j: int = i
             while j < n and code[j] != "\n" {
@@ -406,7 +357,6 @@ def _hl_generic(code: str) -> str {
             continue
         }
 
-        # Block comment /* ... */
         if c == "/" and i + 1 < n and code[i + 1] == "*" {
             j: int = i + 2
             while j < n {
@@ -447,7 +397,6 @@ def _hl_generic(code: str) -> str {
             if _is_ckw(word) {
                 out = out + _span("tok-kw", word)
             } else {
-                # Call target?
                 k: int = j
                 while k < n and (code[k] == " " or code[k] == "\t") {
                     k = k + 1
@@ -479,8 +428,6 @@ def _hl_generic(code: str) -> str {
 }
 
 
-# Highlight `code` written in `lang`, returning HTML-escaped markup with token
-# spans. `lang` is the fence info string's first word (e.g. "dragon", "bash").
 def highlight(lang: str, code: str) -> str {
     if lang == "dragon" or lang == "dr" or lang == "python" or lang == "py" {
         return _hl_dragon(code)

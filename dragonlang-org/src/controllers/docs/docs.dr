@@ -1,10 +1,3 @@
-# docs.dr - the documentation-book controller (migrated from server/main.dr).
-#
-# Renders the dragonlang-org book (content/docs/*.md) as a Rust-Book-style
-# site: SUMMARY.md -> sidebar, markdown -> HTML, prev/next nav. Exposes the
-# docs_redirect + docs_page handlers, mounted by src/app.dr. Chrome (top bar
-# and footer) comes from views.www so the docs share the site-wide nav.
-
 from http.server import Request, Response, Context
 from io import open
 from os import listdir
@@ -16,11 +9,6 @@ import json
 from views.www import topbar, footer
 
 
-# Site root (the dragonlang-org/ directory) - resolved relative to wherever
-# the binary is run from. We probe for `content/docs/0001-foreword.md` (the
-# first chapter) at a few plausible cwd offsets so the server works whether
-# launched from dragonlang-org/, from dragonlang-org/server/, or from the
-# repository root.
 def _site_root() -> str {
     if exists("content/docs/0001-foreword.md") {
         return "."
@@ -39,15 +27,6 @@ const DOCS_DIR: str = path_join(ROOT, "content/docs")
 const STATIC_DIR: str = path_join(ROOT, "static")
 
 
-# A chapter entry in the sidebar.
-#
-# - `slug`     filename without ".md" (URL slug under /docs/...)
-# - `title`    display title from SUMMARY.md or the file's H1
-# - `kind`     URL prefix ("docs")
-# - `level`    0 = front matter (Foreword, Introduction, no number)
-#              1 = chapter heading (e.g. "1. Getting Started")
-#              2 = section under a chapter (e.g. "1.1. Installation")
-# - `number`   pre-rendered prefix label, "", "1.", "1.1.", "A.", etc.
 class Chapter {
     def(slug: str, title: str, kind: str, level: int, number: str) {
         self.slug = slug
@@ -60,8 +39,6 @@ class Chapter {
 
 
 def _extract_title(md: str, fallback: str) -> str {
-    # Lift the first `# Heading` line; markdown's H1 is the canonical doc
-    # title. Falls back to the slug if the file has no H1.
     const lines: list[str] = md.split("\n")
     i: int = 0
     while i < len(lines) {
@@ -75,11 +52,8 @@ def _extract_title(md: str, fallback: str) -> str {
 }
 
 
-# Parse one mdBook-style line. Returns (slug, title) or empty strings
-# if the line isn't a `[Title](slug.md)` or `- [Title](slug.md)` entry.
 def _parse_link_line(line: str) -> tuple[str, str] {
     s: str = line
-    # Trim leading whitespace + optional bullet ("- ").
     while len(s) > 0 and (s[0] == " " or s[0] == "\t") {
         s = s[1:]
     }
@@ -102,7 +76,6 @@ def _parse_link_line(line: str) -> tuple[str, str] {
     }
     const title: str = s[1:close_b]
     const href: str = s[close_b + 2:close_p]
-    # Strip ".md" suffix from the href to get the slug.
     if href.endswith(".md") {
         return (href[:len(href) - 3], title)
     }
@@ -110,8 +83,6 @@ def _parse_link_line(line: str) -> tuple[str, str] {
 }
 
 
-# Tag for whether a SUMMARY.md line is a chapter heading, a section
-# bullet, a front-matter entry, or none of the above.
 def _line_kind(line: str) -> str {
     s: str = line
     while len(s) > 0 and (s[0] == " " or s[0] == "\t") {
@@ -133,33 +104,19 @@ def _line_kind(line: str) -> str {
 }
 
 
-# Pad an integer to "N." without zero-padding ("1.", "10.").
 def _num_str(n: int) -> str {
     return f"{n}."
 }
 
 
-# Convert a 0-based index into "A.", "B.", ... for appendix labels.
-# Wraps to "ZA", "ZB", ... on overflow but in practice we never get
-# past F so it doesn't matter.
 def _alpha_label(idx: int) -> str {
     if idx < 0 or idx >= 26 {
         return f"Z{idx}."
     }
-    # A = 65, B = 66, ...
     return f"{chr(65 + idx)}."
 }
 
 
-# Read and parse `docs/SUMMARY.md` into a flat ordered list of chapters
-# with level/number metadata. The format is mdBook's:
-#
-#   [Title](slug.md)            ← front matter, level 0, no number
-#   # Chapter Heading           ← level 1 chapter, gets "1.", "2.", ...
-#   - [Title](slug.md)          ← section under chapter, "1.1.", "1.2.", ...
-#
-# Chapter headings whose title starts with "Appendix" or "Appendices"
-# switch numbering to alpha ("A.", "B.", ...).
 def _load_summary(docs_dir: str) -> list[Chapter] {
     const out: list[Chapter] = []
     const summary_path: str = path_join(docs_dir, "SUMMARY.md")
@@ -169,9 +126,9 @@ def _load_summary(docs_dir: str) -> list[Chapter] {
     const text: str = open(summary_path).text()
     const lines: list[str] = text.split("\n")
 
-    chapter_idx: int = 0          # 0 = no chapter yet (front matter only)
-    section_idx: int = 0          # resets per chapter
-    appendix_mode: bool = false   # toggled by an "Appendix*" chapter heading
+    chapter_idx: int = 0
+    section_idx: int = 0
+    appendix_mode: bool = false
     appendix_idx: int = 0
 
     i: int = 0
@@ -179,28 +136,19 @@ def _load_summary(docs_dir: str) -> list[Chapter] {
         const line: str = lines[i]
         const kind: str = _line_kind(line)
         if kind == "chapter" {
-            # `# Heading` - chapter heading. Strip the `# ` prefix and any
-            # extra whitespace.
             stripped: str = line
             while len(stripped) > 0 and (stripped[0] == "#" or stripped[0] == " " or stripped[0] == "\t") {
                 stripped = stripped[1:]
             }
             if stripped == "Summary" or stripped == "Contents" {
-                # The doc title of SUMMARY.md itself - skip silently. mdBook
-                # treats this as decorative, and we don't want it to count
-                # against the chapter sequence.
                 i = i + 1
                 continue
             }
             if stripped == "Appendices" or stripped == "Appendix" {
-                # The "Appendices" heading switches us into letter-numbering
-                # mode for the entries that follow. Emit it as a non-numbered
-                # level-1 row so the visual section break is still there.
                 appendix_mode = true
                 appendix_idx = 0
                 out.append(Chapter("", stripped, "docs", 1, ""))
             } else {
-                # Regular chapter heading.
                 chapter_idx = chapter_idx + 1
                 section_idx = 0
                 appendix_mode = false
@@ -212,7 +160,6 @@ def _load_summary(docs_dir: str) -> list[Chapter] {
             const title: str = parsed[1]
             if len(slug) > 0 {
                 if appendix_mode {
-                    # Letter-numbered section inside the appendix block.
                     out.append(Chapter(slug, title, "docs", 2, _alpha_label(appendix_idx)))
                     appendix_idx = appendix_idx + 1
                 } else {
@@ -222,8 +169,6 @@ def _load_summary(docs_dir: str) -> list[Chapter] {
                 }
             }
         } elif kind == "frontmatter" {
-            # `[Title](slug.md)` at column 0 - front matter (Foreword,
-            # Introduction, etc.). Level 0, no number.
             const parsed: tuple[str, str] = _parse_link_line(line)
             const slug: str = parsed[0]
             const title: str = parsed[1]
@@ -237,15 +182,9 @@ def _load_summary(docs_dir: str) -> list[Chapter] {
 }
 
 
-# Loaded once at startup.
 const DOCS_CHAPTERS: list[Chapter] = _load_summary(DOCS_DIR)
 
 
-# One in-page heading of a doc (an `##` or `###` line). `anchor` is the slug
-# the markdown renderer stamped as the heading's id, so a sidebar link
-# `/docs/<slug>#<anchor>` lands on it. `number` is the pre-rendered label
-# (e.g. "14.4.1" for the first `##` of section 14.4, "14.4.1.2" for its
-# second `###`). `level` is 2 (`##`) or 3 (`###`).
 class Heading {
     def(text: str, anchor: str, number: str, level: int) {
         self.text = text
@@ -256,16 +195,12 @@ class Heading {
 }
 
 
-# Crude inline-markdown stripper for search snippets: drop the markers that
-# would otherwise clutter a plain-text preview. Not a parser - just enough to
-# make a heading's following prose readable in a results dropdown.
 def _strip_md(s: str) -> str {
     out: list[str] = []
     i: int = 0
     while i < len(s) {
         const ch: str = s[i]
         if ch == "`" or ch == "*" or ch == "_" or ch == "[" or ch == "]" or ch == "#" or ch == ">" {
-            # skip marker
             i = i + 1
             continue
         }
@@ -276,9 +211,6 @@ def _strip_md(s: str) -> str {
 }
 
 
-# Extract a page's `##`/`###` headings, numbered relative to the page's own
-# section number (`page_number`, e.g. "14.4."). Fenced code blocks are skipped
-# so a `#` comment inside a ```dragon block is never mistaken for a heading.
 def _extract_headings(md: str, page_number: str) -> list[Heading] {
     const out: list[Heading] = []
     const lines: list[str] = md.split("\n")
@@ -302,7 +234,6 @@ def _extract_headings(md: str, page_number: str) -> list[Heading] {
             } elif line.startswith("### ") and not line.startswith("#### ") {
                 h3 = h3 + 1
                 const t: str = line[4:]
-                # `14.4.` + h2 + `.` + h3  ->  "14.4.2.1"
                 const num: str = f"{page_number}{h2}.{h3}"
                 out.append(Heading(t, slug(t), num, 3))
             }
@@ -313,9 +244,6 @@ def _extract_headings(md: str, page_number: str) -> list[Heading] {
 }
 
 
-# The first paragraph of a page's body, stripped and truncated - a search
-# result's preview line. Skips the H1 and any leading blanks; stops at the
-# first blank line after prose begins.
 def _first_paragraph(md: str) -> str {
     const lines: list[str] = md.split("\n")
     buf: list[str] = []
@@ -347,9 +275,6 @@ def _first_paragraph(md: str) -> str {
 }
 
 
-# Per-page heading lists (slug -> headings), and the search index, both built
-# once at startup by reading every summary page. The search index is a JSON
-# array of {t: title, p: page title, u: url with anchor, b: body preview}.
 def _build_docs_index(chapters: list[Chapter], docs_dir: str) -> tuple[dict[str, list[Heading]], str] {
     headings_by_slug: dict[str, list[Heading]] = {}
     entries: list[dict[str, Any]] = []
@@ -365,9 +290,7 @@ def _build_docs_index(chapters: list[Chapter], docs_dir: str) -> tuple[dict[str,
         const hs: list[Heading] = _extract_headings(md, c.number)
         headings_by_slug[c.slug] = hs
         const base_url: str = "/docs/" + c.slug
-        # Page-level result (the H1 / summary title).
         entries.append({"t": c.title, "p": "", "u": base_url, "b": _first_paragraph(md)})
-        # One result per in-page heading, linking straight to its anchor.
         for h in hs {
             entries.append({"t": h.text, "p": c.title, "u": base_url + "#" + h.anchor, "b": ""})
         }
@@ -381,9 +304,6 @@ const DOCS_HEADINGS: dict[str, list[Heading]] = _DOCS_INDEX[0]
 const SEARCH_INDEX_JSON: str = _DOCS_INDEX[1]
 
 
-# Render one in-page heading (`##`/`###`) as a third-level sidebar link, shown
-# only under the active page. Links to the heading's #anchor; the level drives
-# the indent (h3 nests under h2).
 def _render_subheading_li(h: Heading, page_slug: str) -> HTML {
     const href: str = "/docs/" + page_slug + "#" + h.anchor
     const cls: str = f"sb-sub sb-sub-{h.level}"
@@ -393,11 +313,6 @@ def _render_subheading_li(h: Heading, page_slug: str) -> HTML {
 }
 
 
-# Render one clickable section row (a level-2 entry under a chapter, or a
-# defensive non-link if a section somehow has no slug). When this row is the
-# ACTIVE page and the page has in-page headings, a nested list of those
-# headings (the third TOC level) is rendered beneath it so `##`/`###` sections
-# like "json" or "uuid" are visible and linkable instead of hidden in the body.
 def _render_section_li(s: Chapter, active_kind: str, active_slug: str) -> HTML {
     const is_active: bool = s.kind == active_kind and s.slug == active_slug and len(s.slug) > 0
     const cls: str = "sb-level-2 sb-active" if is_active else "sb-level-2"
@@ -426,8 +341,6 @@ def _render_section_li(s: Chapter, active_kind: str, active_slug: str) -> HTML {
 }
 
 
-# A front-matter entry (Foreword, Introduction): a flat top-level link with no
-# enclosing foldable chapter.
 def _render_front_link(c: Chapter, active_kind: str, active_slug: str) -> HTML {
     const is_active: bool = c.kind == active_kind and c.slug == active_slug and len(c.slug) > 0
     const cls: str = "sb-front sb-active" if is_active else "sb-front"
@@ -438,11 +351,6 @@ def _render_front_link(c: Chapter, active_kind: str, active_slug: str) -> HTML {
 }
 
 
-# One foldable chapter: a <details> whose <summary> is the disclosure toggle and
-# whose body is the chapter's sections. `idx` is the chapter's index in
-# DOCS_CHAPTERS (the data-ch key app.js uses to persist manual folds); the
-# chapter containing the active page additionally gets data-active so client JS
-# keeps it open even if the reader collapsed it earlier.
 def _render_chapter_group(c: Chapter, sections: list[Chapter], idx: int, active_kind: str, active_slug: str) -> HTML {
     group_active: bool = false
     for s in sections {
@@ -450,9 +358,6 @@ def _render_chapter_group(c: Chapter, sections: list[Chapter], idx: int, active_
             group_active = true
         }
     }
-    # `active_attr` is a trusted attribute fragment (carries `="1"` quotes that
-    # must not be escaped) - the one slot here that opts out with `| raw`. The
-    # number badge and section rows are HTML, so they compose automatically.
     const active_attr: str = " data-active=\"1\"" if group_active else ""
     num: HTML = template[HTML] {  }
     if len(c.number) > 0 {
@@ -467,34 +372,18 @@ def _render_chapter_group(c: Chapter, sections: list[Chapter], idx: int, active_
 }
 
 
-# Build the sidebar. Front matter (level 0) renders as flat top-level links;
-# each chapter heading (level 1) becomes a foldable <details> whose <summary>
-# is the disclosure toggle and whose body is the chapter's sections (level 2).
-#
-# Folding is native - no JS required for the open/close itself. The server
-# always emits chapters expanded (`open`); the chapter containing the active
-# page additionally gets `data-active` so client JS can keep it open even when
-# the reader has collapsed it before. Persistence of the reader's manual
-# folds lives in app.js, keyed by the `data-ch` index.
 def _render_sidebar(active_kind: str, active_slug: str) -> HTML {
-    # Each entry renders to a template[HTML] fragment; the run is spliced in
-    # order by a template loop. An HTML value composes into an HTML template
-    # raw (the type tracks that it is already safe) - no escaping, no concat.
     parts: list[HTML] = []
     const n: int = len(DOCS_CHAPTERS)
     i: int = 0
     while i < n {
         const c: Chapter = DOCS_CHAPTERS[i]
         if c.level == 0 {
-            # Front matter (Foreword, Introduction) - a flat top-level link,
-            # outside any foldable group.
             parts.append(_render_front_link(c, active_kind, active_slug))
             i = i + 1
             continue
         }
         if c.level == 1 {
-            # Chapter heading - gather the run of level-2 sections that follow it
-            # (up to the next chapter heading or end) into one foldable group.
             j: int = i + 1
             sections: list[Chapter] = []
             while j < n and DOCS_CHAPTERS[j].level == 2 {
@@ -505,8 +394,6 @@ def _render_sidebar(active_kind: str, active_slug: str) -> HTML {
             i = j
             continue
         }
-        # Defensive: a level-2 with no enclosing chapter (shouldn't occur given
-        # the SUMMARY format) - emit it as a flat section row so it isn't lost.
         parts.append(_render_section_li(c, active_kind, active_slug))
         i = i + 1
     }
@@ -534,8 +421,6 @@ def _find_chapter_index(chapters: list[Chapter], slug: str) -> int {
 
 
 def _render_prev_next(kind: str, slug: str) -> HTML {
-    # Bottom-of-page nav. We walk only the clickable entries (those with a slug)
-    # so prev/next steps over the level-1 chapter headings (no page of their own).
     pages: list[Chapter] = []
     for c in DOCS_CHAPTERS {
         if len(c.slug) > 0 {
@@ -566,8 +451,6 @@ def _render_prev_next(kind: str, slug: str) -> HTML {
 
 
 def _render_hero(slug: str) -> HTML {
-    # The foreword is the book's landing page - render a Cargo-Book-style hero
-    # block above the article: the Dragon logo and the book's title.
     if slug != "0001-foreword" {
         return template[HTML] {  }
     }
@@ -584,16 +467,9 @@ def _render_hero(slug: str) -> HTML {
 def _render_page(kind: str, slug: str, title: str, username: str, content_html: str) -> HTML {
     const sidebar_html: HTML = _render_sidebar(kind, slug)
     const prevnext_html: HTML = _render_prev_next(kind, slug)
-    # Hero section on the foreword (the landing page) only - large logo plus the
-    # book title above the article. Subsequent chapters keep the small brand
-    # mark in the topbar.
     const hero_html: HTML = _render_hero(slug)
-    # Shared site chrome - the same top-nav and footer the marketing pages use,
-    # so navigation is identical across docs and the landing site.
     const topbar_html: HTML = topbar("docs", username)
     const footer_html: HTML = footer(username)
-    # content_html is already-rendered markdown (trusted) so it composes raw;
-    # title is auto-escaped.
     return template[HTML] {
         <!DOCTYPE html>
         <html lang="en" data-theme="light">
@@ -642,11 +518,6 @@ def _serve_chapter(kind: str, dir: str, slug: str, username: str, res: Response)
 }
 
 
-# -- Redirects ----------------------------------------------------------------
-
-# Old slugs (pre-renumber) -> new clean PPCC slugs. The book was renumbered to
-# four-digit part-chapter slugs; this table keeps every previously-published URL
-# alive with a 301 so external links and bookmarks never break.
 const REDIRECTS: dict[str, str] = (
     {
     "000-foreword": "0001-foreword",
@@ -689,15 +560,12 @@ const REDIRECTS: dict[str, str] = (
 )
 
 
-# -- Route handlers (mounted by src/app.dr) -----------------------------------
-
 def docs_redirect(req: Request, res: Response, ctx: Context) -> None {
     res.redirect("/docs/0001-foreword")
 }
 
 def docs_page(req: Request, res: Response, ctx: Context) -> None {
     const slug: str = req.params["slug"] if "slug" in req.params else ""
-    # A pre-renumber URL gets a permanent redirect to its new home.
     if slug in REDIRECTS {
         res.redirect("/docs/" + REDIRECTS[slug], permanent=true)
         return
@@ -706,10 +574,6 @@ def docs_page(req: Request, res: Response, ctx: Context) -> None {
 }
 
 
-# GET /docs/search-index.json - the prebuilt search index (titles + every
-# in-page heading, each with its anchor URL and a preview). app.js fetches it
-# once on first use and filters client-side, so there is no per-keystroke
-# server round-trip. Built once at startup (SEARCH_INDEX_JSON).
 def docs_search_index(req: Request, res: Response, ctx: Context) -> None {
     res.json(SEARCH_INDEX_JSON)
 }

@@ -1,0 +1,97 @@
+"""csv module: quoted-field parsing and formatting.
+
+parse_row used to accumulate field text one character per concat and
+format_rows rebuilt the whole document per row (both quadratic); they now
+collect spans/parts and join. These tests pin the parse and format semantics,
+including escaped quotes, embedded delimiters, and round-trips.
+"""
+
+from unittest import TestCase, main
+from csv import parse_row, parse_rows, format_row, format_rows, quote_field, field_count
+
+
+class ParseTests(TestCase) {
+    def test_plain_fields() {
+        const row: list[str] = parse_row("a,b,c", ",")
+        self.assertEqual(len(row), 3)
+        self.assertEqual(row[0], "a")
+        self.assertEqual(row[1], "b")
+        self.assertEqual(row[2], "c")
+    }
+
+    def test_quoted_field_with_delimiter() {
+        const row: list[str] = parse_row("\"hello\",\"wor,ld\"", ",")
+        self.assertEqual(len(row), 2)
+        self.assertEqual(row[0], "hello")
+        self.assertEqual(row[1], "wor,ld")
+    }
+
+    def test_escaped_quotes() {
+        const row: list[str] = parse_row("\"say \"\"hi\"\"\",x", ",")
+        self.assertEqual(len(row), 2)
+        self.assertEqual(row[0], "say \"hi\"")
+        self.assertEqual(row[1], "x")
+    }
+
+    def test_empty_fields() {
+        const row: list[str] = parse_row("a,,c", ",")
+        self.assertEqual(len(row), 3)
+        self.assertEqual(row[1], "")
+        const single: list[str] = parse_row("", ",")
+        self.assertEqual(len(single), 1)
+        self.assertEqual(single[0], "")
+    }
+
+    def test_trailing_delimiter() {
+        const row: list[str] = parse_row("a,b,", ",")
+        self.assertEqual(len(row), 3)
+        self.assertEqual(row[2], "")
+    }
+
+    def test_quote_ends_line() {
+        const row: list[str] = parse_row("a,\"b\"", ",")
+        self.assertEqual(len(row), 2)
+        self.assertEqual(row[1], "b")
+    }
+
+    def test_unquoted_prefix_and_suffix() {
+        const row: list[str] = parse_row("ab\"cd\"ef", ",")
+        self.assertEqual(len(row), 1)
+        self.assertEqual(row[0], "abcdef")
+    }
+
+    def test_field_count() {
+        self.assertEqual(field_count("a,b,\"c,d\"", ","), 3)
+    }
+}
+
+
+class FormatTests(TestCase) {
+    def test_quote_field() {
+        self.assertEqual(quote_field("plain", ","), "plain")
+        self.assertEqual(quote_field("a,b", ","), "\"a,b\"")
+        self.assertEqual(quote_field("say \"hi\"", ","), "\"say \"\"hi\"\"\"")
+    }
+
+    def test_format_row() {
+        const line: str = format_row(["a", "b,c", "d"], ",")
+        self.assertEqual(line, "a,\"b,c\",d")
+    }
+
+    def test_format_rows_and_roundtrip() {
+        rows: list[list[str]] = []
+        rows.append(["name", "note"])
+        rows.append(["ada", "says \"hi\", twice"])
+        const text: str = format_rows(rows, ",")
+        self.assertEqual(text, "name,note\nada,\"says \"\"hi\"\", twice\"")
+
+        const back: list[list[str]] = parse_rows(text, ",")
+        self.assertEqual(len(back), 2)
+        self.assertEqual(back[1][0], "ada")
+        self.assertEqual(back[1][1], "says \"hi\", twice")
+    }
+}
+
+
+main([ParseTests(), FormatTests()])
+

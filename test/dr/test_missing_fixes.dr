@@ -9,7 +9,6 @@ from typing import Union, Optional
 from unittest import TestCase, main
 
 
-# --- shared fixtures: defined before the TestCases that reference them ---
 class Animal {
     def() {}
 }
@@ -17,7 +16,6 @@ class Dog(Animal) {
     def() {}
 }
 
-# Module-global union (declared at module top level).
 g: int | str = 5
 
 
@@ -99,8 +97,6 @@ class StringMethods(TestCase) {
         self.assertEqual("a,b,c,d".rsplit(",", 1), ["a,b,c", "d"])
     }
     def test_rsplit_maxsplit_bounds() {
-        # Pre-fix: maxsplit == INT64_MAX overflowed maxsplit + 1 to INT64_MIN
-        # and the tail-copy loop read from index -2^63 (wild read, SEGV).
         self.assertEqual("a,b,c,d".rsplit(",", 9223372036854775807), ["a", "b", "c", "d"])
         self.assertEqual("a,b,c,d".rsplit(",", 9223372036854775806), ["a", "b", "c", "d"])
         self.assertEqual("a,b,c,d".rsplit(",", 4), ["a", "b", "c", "d"])
@@ -223,7 +219,6 @@ class Exceptions(TestCase) {
         } except ValueError {
             ran.append("caught")
         }
-        # finally ran AND the exception propagated (not swallowed).
         self.assertEqual(ran, ["cleanup", "caught"])
     }
     def test_except_tuple() {
@@ -267,7 +262,6 @@ class CatchableBuiltinErrors(TestCase) {
         self.assertEqual(ran, ["key"])
     }
     def test_base_class_catch() {
-        # KeyError < LookupError < Exception - base handler matches.
         const d: dict[str, int] = {"a": 1}
         const ran: list[str] = []
         try { const x: int = d["nope"] } except Exception { ran.append("base") }

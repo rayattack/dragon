@@ -1,9 +1,3 @@
-# This program is EXPECTED TO DIE. Its ctest entry asserts exit 134 (SIGABRT)
-# and the "out of memory" diagnostic on stderr. it oft died with 139
-# (SIGSEGV) and printed nothing, which is the regression being pinned:
-# list.append and dict[k]=v under the identical cap already abort cleanly.
-
-
 def main() {
     s: set[int] = set()
     i: int = 0

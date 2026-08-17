@@ -1,21 +1,3 @@
-# odb.schema - the schema compiler (spec sections 4, 12).
-#
-# A JSON Schema (as a Dragon dict[str, Any]) compiles once into a CompiledSchema:
-#   - a symbol table interning each property name to a u16 field id,
-#   - a physical layout: required fields shredded to fixed offsets in the
-#     document's required region (the relational skeleton), optional fields
-#     living in the tagged tail,
-#   - a validator (required presence, type, numeric bounds, string length)
-#
-# Schemas compile, they are never interpreted (spec section 4). Ids are assigned
-# by sorted property name so recompiling the same schema on reopen reproduces
-# the exact layout, and stored documents decode identically
-#
-# M2 scope: scalar types boolean / integer / number / string. date-time, date,
-# decimal, bytes format, arrays, nested objects, discriminated unions, defaults,
-# enum/pattern, and additionalProperties (extras) storage are later milestones;
-# each is rejected loudly rather than mishandled silently
-
 from odb.errors import SchemaError
 
 const T_BOOL: int = 1
@@ -28,7 +10,7 @@ def slot_size(tag: int) -> int {
     if tag == T_BOOL {
         return 1
     }
-    return 8      # int / number inline, string / bytes as (u32 off, u32 len)
+    return 8
 }
 
 class FieldSpec {
@@ -36,7 +18,7 @@ class FieldSpec {
     field_id: int
     tag: int
     required: bool
-    slot_off: int       # offset within the required region (required fields)
+    slot_off: int
     has_min: bool
     min_v: float
     has_max: bool
@@ -67,12 +49,12 @@ class CompiledSchema {
     name: str
     schema_id: int
     version: int
-    required: list[FieldSpec]        # in slot order
-    optional: list[FieldSpec]        # tail fields, by field id
+    required: list[FieldSpec]
+    optional: list[FieldSpec]
     by_name: dict[str, FieldSpec]
     by_id: dict[int, FieldSpec]
     req_region_size: int
-    schema_json: str                 # original, for catalog persistence
+    schema_json: str
 
     def(name: str, schema_id: int, version: int) {
         self.name = name
@@ -119,8 +101,6 @@ def _tag_for_type(ty: str) -> int {
     raise SchemaError("unsupported type '" + ty + "' (M2 supports boolean/integer/number/string)")
 }
 
-# Compile a schema dict into a CompiledSchema. `schema_json` is retained verbatim
-# so the catalog can persist and later recompile it identically.
 def compile_schema(name: str, schema: dict[str, Any], schema_id: int, version: int, schema_json: str) -> CompiledSchema {
     cs: CompiledSchema = CompiledSchema(name, schema_id, version)
     cs.schema_json = schema_json
@@ -134,7 +114,6 @@ def compile_schema(name: str, schema: dict[str, Any], schema_id: int, version: i
     }
     props: dict[str, Any] = props_any
 
-    # Required-name set.
     req_set: dict[str, bool] = {}
     if "required" in schema {
         ra: Any = schema["required"]
@@ -149,14 +128,12 @@ def compile_schema(name: str, schema: dict[str, Any], schema_id: int, version: i
         }
     }
 
-    # Deterministic id order: sorted property names.
     names: list[str] = []
     for k in props {
         names.append(k)
     }
     names.sort()
 
-    # First pass: create every FieldSpec with an id; assign required slot offsets.
     off: int = 0
     fid: int = 0
     for nm in names {
@@ -198,11 +175,6 @@ def compile_schema(name: str, schema: dict[str, Any], schema_id: int, version: i
             fs.has_maxlen = True
             fs.maxlen = mxl
         }
-        # No schema-side defaults: a field is absent, null, or a value a
-        # writer actually wrote. Accepting the keyword and ignoring it would
-        # be a silent lie (a writer that omits the field expecting the
-        # default back would read absence), so it is refused outright.
-        # Fallbacks are a read-time decision: x ?? fallback.
         if "default" in sub {
             raise SchemaError("property '" + nm + "': 'default' is not supported; a field is absent, null, or written - coalesce at read time instead (x ?? fallback)")
         }
@@ -253,8 +225,6 @@ def _type_ok(field_tag: int, v: Any) -> bool {
     return False
 }
 
-# Validate a document against a compiled schema. Raises SchemaError on the first
-# violation. `_id` is reserved (the docid) and never validated as a field.
 def validate_doc(schema: CompiledSchema, doc: dict[str, Any]) -> None {
     for f in schema.required {
         if f.name not in doc {

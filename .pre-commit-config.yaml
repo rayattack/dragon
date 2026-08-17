@@ -1,0 +1,39 @@
+# Local pre-commit guard: blocks secrets and a few footguns before a commit is
+# ever created, so a key never reaches the remote in the first place.
+#
+# One-time setup:
+#   pipx install pre-commit   # or: pip install --user pre-commit
+#   pre-commit install        # installs the git hook in this repo
+#   pre-commit autoupdate     # locks each hook to its current release
+#
+# Run against the whole tree on demand:
+#   pre-commit run --all-files
+#
+# The `rev:` pins below are a starting point; run `pre-commit autoupdate` right
+# after `pre-commit install` to move them to the current releases.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks           # entropy + provider-pattern secret scan on staged diff
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: detect-private-key            # bare BEGIN ... PRIVATE KEY blocks
+      - id: check-added-large-files       # a stray key/dump is often large
+        args: ["--maxkb=2048"]
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: local
+    hooks:
+      # D052: a process-extern signature edited without re-syncing its stub is a
+      # silent zero-fill at runtime; catch it before the commit exists. Skips
+      # cleanly when the compiler is not built (CI's dr_ffi_sync_check still gates).
+      - id: dragon-ffi-sync-check
+        name: dragon ffi sync --check
+        language: system
+        files: '^(test/dr/test_ffi_python\.dr|test/dr/ffi_children/.*)$'
+        pass_filenames: false
+        entry: bash -c 'if [ -x build/dragon ]; then build/dragon ffi sync test/dr/test_ffi_python.dr --check; else echo "ffi sync check skipped (build/dragon not built)"; fi'

@@ -1,17 +1,6 @@
-# ipaddress.dr - IPv4 and IPv6 address / network helpers
-#
-# Python parity for the parts the registry rate limiter needs: parsing,
-# string round-trip, equality, and CIDR network membership.
-#
-# Coverage:
-#  IPv4Address - parse, str, packed (4 bytes), is_private, is_loopback,
-#  is_multicast, equality, ordering
-#  IPv6Address - parse, str (compressed), packed (16 bytes), equality
-#  IPv4Network - parse "a.b.c.d/n", contains(addr), network/broadcast/mask
-#  ip_address(s) / ip_network(s) - factories that pick v4 or v6
-
-
-# --- IPv4 -------------------------------------------------------------------
+"""ipaddress.dr - IPv4/IPv6 address and network helpers: parsing, string round-trip,
+equality, and CIDR membership (Python parity, for the registry rate limiter).
+"""
 
 class IPv4Address {
     def(packed: int) {
@@ -33,13 +22,13 @@ class IPv4Address {
         return bytes(out)
     }
 
-    # 127.0.0.0/8
     def is_loopback() -> bool {
+        """127.0.0.0/8"""
         return ((self.packed_int >> 24) & 0xFF) == 127
     }
 
-    # 10.0.0.0/8 + 172.16.0.0/12 + 192.168.0.0/16
     def is_private() -> bool {
+        """10.0.0.0/8 + 172.16.0.0/12 + 192.168.0.0/16"""
         v: int = self.packed_int
         a: int = (v >> 24) & 0xFF
         b: int = (v >> 16) & 0xFF
@@ -49,8 +38,8 @@ class IPv4Address {
         return False
     }
 
-    # 224.0.0.0/4
     def is_multicast() -> bool {
+        """224.0.0.0/4"""
         a: int = (self.packed_int >> 24) & 0xFF
         return a >= 224 and a <= 239
     }
@@ -106,14 +95,8 @@ def IPv4Address_from_str(s: str) -> IPv4Address {
 }
 
 
-# --- IPv6 -------------------------------------------------------------------
-
-# IPv6 addresses fit in 128 bits, which doesn't fit in a Dragon int (i64).
-# We store them as 8 16-bit groups in a list[int].
-
 class IPv6Address {
     def(groups: list[int]) {
-        # Defensive copy so caller mutations don't leak in.
         gs: list[int] = [0] * 8
         i: int = 0
         while i < 8 {
@@ -123,9 +106,8 @@ class IPv6Address {
         self.groups = gs
     }
 
-    # RFC 5952 compressed form: collapse the longest run of zero groups to "::".
     def __str__() -> str {
-        # Find the longest run of zeros (length >= 2 to be eligible).
+        """RFC 5952 compressed form: collapse the longest run of zero groups to "::"."""
         best_start: int = -1
         best_len: int = 0
         run_start: int = -1
@@ -151,11 +133,6 @@ class IPv6Address {
         }
         out: str = ""
         i = 0
-        # When the collapsed run starts at index 0, the literal "::" carries
-        # both the leading and trailing colons, so the next group must NOT
-        # add its own leading ":" - otherwise `::1` becomes `:::1`. When the
-        # run starts after the head, we only emitted one colon (`out + ":"`)
-        # so the trailing colon of `::` still needs to come from the loop.
         skip_next_colon: bool = False
         while i < 8 {
             if i == best_start {
@@ -225,7 +202,6 @@ def _parse_ipv6_group(s: str) -> int {
 
 
 def _parse_ipv6(s: str) -> list[int] {
-    # Locate the "::" zero-run if present.
     dd: int = s.find("::")
     parts_left: list[str] = []
     parts_right: list[str] = []
@@ -266,14 +242,11 @@ def IPv6Address_from_str(s: str) -> IPv6Address {
 }
 
 
-# --- IPv4 networks ----------------------------------------------------------
-
 class IPv4Network {
     def(network: int, prefixlen: int) {
         if prefixlen < 0 or prefixlen > 32 {
             raise ValueError(f"invalid IPv4 prefix length: {prefixlen}")
         }
-        # Build the netmask.
         m: int = 0
         if prefixlen == 0 {
             m = 0
@@ -282,7 +255,6 @@ class IPv4Network {
         }
         self.netmask = m
         self.prefixlen = prefixlen
-        # Mask host bits off so `network` is the canonical zero-host address.
         self.network_int = network & m
     }
 
@@ -317,7 +289,6 @@ def IPv4Network_from_str(s: str) -> IPv4Network {
     if slash >= 0 {
         addr_str = s[0:slash]
         prefix_str: str = s[slash + 1:len(s)]
-        # Parse prefix length as int
         prefixlen = 0
         i: int = 0
         while i < len(prefix_str) {
@@ -333,13 +304,7 @@ def IPv4Network_from_str(s: str) -> IPv4Network {
 }
 
 
-# --- Factory functions ------------------------------------------------------
-
 def ip_address(s: str) -> IPv4Address {
-    # Python's ip_address returns IPv4 or IPv6 depending on the input. Dragon
-    # doesn't have a Union return today, so callers that need v6 should call
-    # IPv6Address_from_str directly. For v4-shaped inputs this is the common
-    # path.
     return IPv4Address_from_str(s)
 }
 

@@ -28,6 +28,7 @@ nothing to infer from, and a mixed one has no single element type, so both are a
 compile error when left to inference:
 
 ```dragon
+# doc: no-check
 xs := [1, 2, 3]        # ok - list[int]
 ys := []               # error: cannot infer the element type - annotate it
 zs := [1, "a"]         # error: mixed literal has no single element type
@@ -62,6 +63,7 @@ the other's stride would corrupt memory, so the compiler stops the value at
 the boundary:
 
 ```dragon
+# doc: no-check
 names: list[str] = ["a", "b"]
 xs: list[Any] = names
 # error: cannot assign 'list[str]' to variable of type 'list[Any]' (the two
@@ -76,9 +78,9 @@ than misreading. Parsed JSON arrays are box lists, so reading them as
 `list[Any]` and narrowing per element is the natural path:
 
 ```dragon
-import json
+from json import decode
 
-const doc: dict[str, Any] = json.loads_obj('{"tags": ["a", "b"]}')
+const doc: dict[str, Any] = decode[dict[str, Any]]('{"tags": ["a", "b"]}'.encode("utf-8"))
 const tags: list[Any] = doc["tags"]    # parsed arrays are box lists - ok
 for t in tags {
     const s: str = t                   # narrow each element

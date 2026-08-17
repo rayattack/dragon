@@ -13,7 +13,6 @@ class DifflibTests(TestCase) {
     }
 
     def test_ratio_known_values() {
-        # CPython SequenceMatcher reference values.
         self.assertAlmostEqual(ratio("abcd", "abce"), 0.75)
         self.assertAlmostEqual(ratio("kitten", "sitting"), 0.6153846, 6)
     }

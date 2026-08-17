@@ -15,8 +15,6 @@ from http.multipart import Part
 const CRLF: bytes = bytes([13, 10])
 
 
-# Handler reports what it parsed back through the response body (the robust
-# handler->test channel). Top-level function - no captured locals.
 def _form_handler(req: Request, res: Response, ctx: Context) -> None {
     const fields: dict[str, str] = req.form()
     const files: list[Part] = req.files()
@@ -80,7 +78,6 @@ class HttpFormTests(TestCase) {
     }
 
     def test_binary_file_bytes_verbatim() {
-        # 0x00 and 0xFF are not valid UTF-8 - they must survive byte-exact.
         const app: Router = Router()
         app.POST("/upload", _form_handler)
         const sent: str = _serve(app, _build_multipart("----dragonW3", bytes([0, 255, 1, 254, 2, 253])))

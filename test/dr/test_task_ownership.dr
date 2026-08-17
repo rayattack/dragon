@@ -1,0 +1,101 @@
+"""Task result ownership (docs/1604 outbound edge): the result slot is an own
+field of the task, join/await moves it out, del detaches, and a task that dies
+unclaimed releases what it still owns. ASan CI proves the release; the value
+assertions here prove the moves and the del path still run the work."""
+
+from unittest import TestCase, main
+from time import sleep_ms
+from threading import Lock
+
+side_effects: int = 0
+effect_lock: Lock = Lock()
+
+def bump_effect() -> None {
+    global side_effects
+    with effect_lock { side_effects = side_effects + 1 }
+}
+
+def read_effects() -> int {
+    n: int = 0
+    with effect_lock { n = side_effects }
+    return n
+}
+
+def reset_effects() -> None {
+    global side_effects
+    with effect_lock { side_effects = 0 }
+}
+
+async def make_payload(n: int) -> str {
+    return "p" * 64 + str(n)
+}
+
+async def effectful(n: int) -> str {
+    bump_effect()
+    return f"ran:{n}"
+}
+
+async def nested_inner(n: int) -> str {
+    bump_effect()
+    return f"inner:{n}"
+}
+
+def wait_for_effects(target: int) -> int {
+    waited: int = 0
+    while read_effects() < target and waited < 400 {
+        sleep_ms(5)
+        waited = waited + 1
+    }
+    return read_effects()
+}
+
+class TaskOwnershipTests(TestCase) {
+    def test_await_moves_result_out() {
+        got: str = await make_payload(7)
+        self.assertEqual(got, "p" * 64 + "7")
+    }
+
+    def test_fanout_handles_each_own_their_result() {
+        a: Task[str] = make_payload(1)
+        b: Task[str] = make_payload(2)
+        ra: str = await a
+        rb: str = await b
+        self.assertEqual(ra, "p" * 64 + "1")
+        self.assertEqual(rb, "p" * 64 + "2")
+    }
+
+    def test_del_detaches_but_task_still_runs() {
+        reset_effects()
+        i: int = 0
+        while i < 50 {
+            t: Task[str] = effectful(i)
+            del t
+            i = i + 1
+        }
+        self.assertEqual(wait_for_effects(50), 50)
+    }
+
+    def test_dropped_bound_task_still_runs() {
+        reset_effects()
+        i: int = 0
+        while i < 50 {
+            t: Task[str] = effectful(i)
+            i = i + 1
+        }
+        self.assertEqual(wait_for_effects(50), 50)
+    }
+
+    def test_fire_on_async_def_runs_nested_task() {
+        reset_effects()
+        fire nested_inner(9)
+        self.assertEqual(wait_for_effects(1), 1)
+    }
+
+    def test_join_returns_the_moved_value() {
+        t: Task[str] = make_payload(3)
+        got: str = t.join()
+        self.assertEqual(got, "p" * 64 + "3")
+    }
+}
+
+main([TaskOwnershipTests()])

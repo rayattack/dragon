@@ -18,9 +18,9 @@ from hmac import new as _hmac_new
 from time import now as _now
 
 
-# Pack `counter` as an 8-byte big-endian moving factor (RFC 4226 §5.1). Built
-# inline (rather than via struct.emit_u64_be) so totp stays self-contained.
 def _counter_bytes(counter: int) -> bytes {
+    """Packs counter as an 8-byte big-endian moving factor (RFC 4226 §5.1),
+    inline so totp stays self-contained."""
     out: list[int] = []
     i: int = 7
     while i >= 0 {
@@ -31,9 +31,9 @@ def _counter_bytes(counter: int) -> bytes {
 }
 
 
-# RFC 4226 §5.3/§5.4: HMAC the moving factor, dynamic-truncate to a 31-bit
-# integer, reduce mod 10**digits, then left-zero-pad to `digits` characters.
 def hotp(secret: bytes, counter: int, digits: int = 6, algorithm: str = "sha1") -> str {
+    """RFC 4226 §5.3/§5.4: HMAC the moving factor, dynamic-truncate to 31 bits,
+    reduce mod 10**digits, zero-pad to `digits` characters."""
     if digits < 1 {
         raise ValueError("digits must be >= 1")
     }
@@ -43,9 +43,6 @@ def hotp(secret: bytes, counter: int, digits: int = 6, algorithm: str = "sha1") 
     if n < 20 {
         raise ValueError("HMAC digest too short for dynamic truncation")
     }
-    # Low 4 bits of the LAST digest byte select the truncation offset. For a
-    # 20-byte SHA-1 digest this is byte 19 (RFC 4226 §5.4); the last-byte form
-    # generalizes correctly to SHA-256/512 (RFC 6238 Appendix B vectors).
     offset: int = digest[n - 1] & 0x0F
     bin_code: int = ((digest[offset] & 0x7F) << 24) | ((digest[offset + 1] & 0xFF) << 16) | ((digest[offset + 2] & 0xFF) << 8) | (digest[offset + 3] & 0xFF)
     modulo: int = 10 ** digits
@@ -54,8 +51,8 @@ def hotp(secret: bytes, counter: int, digits: int = 6, algorithm: str = "sha1") 
 }
 
 
-# RFC 6238 §4: T = (current unix time) // time_step is the HOTP counter.
 def totp(secret: bytes, time_step: int = 30, digits: int = 6, algorithm: str = "sha1") -> str {
+    """RFC 6238 §4: T = (current unix time) // time_step is the HOTP counter."""
     if time_step < 1 {
         raise ValueError("time_step must be >= 1")
     }
@@ -64,9 +61,8 @@ def totp(secret: bytes, time_step: int = 30, digits: int = 6, algorithm: str = "
 }
 
 
-# Like totp() but for an explicit unix timestamp - the seam verify() drives,
-# and what callers use to reproduce a code at a fixed instant (RFC 6238 vectors).
 def totp_at(secret: bytes, for_time: int, time_step: int = 30, digits: int = 6, algorithm: str = "sha1") -> str {
+    """Like totp() but for an explicit unix timestamp (the seam verify() drives)."""
     if time_step < 1 {
         raise ValueError("time_step must be >= 1")
     }
@@ -75,11 +71,9 @@ def totp_at(secret: bytes, for_time: int, time_step: int = 30, digits: int = 6, 
 }
 
 
-# Constant-time string compare: walk every character of both strings,
-# accumulating a difference, so the loop cost is independent of where (or
-# whether) the strings first diverge. Kept local since hmac.compare_digest
-# operates on bytes; TOTP codes are str.
 def _constant_time_eq(a: str, b: str) -> bool {
+    """Constant-time compare: walks every char of both strings so cost doesn't
+    depend on where they diverge. Local because hmac.compare_digest takes bytes."""
     la: int = len(a)
     lb: int = len(b)
     diff: int = la ^ lb
@@ -94,11 +88,9 @@ def _constant_time_eq(a: str, b: str) -> bool {
 }
 
 
-# RFC 6238 §5.2 resynchronization: accept `code` if it matches the TOTP for any
-# counter in [T - skew, T + skew]. Every candidate is compared in constant time
-# and the loop is NOT short-circuited on the first match, so the answer reveals
-# nothing about which window matched.
 def verify(code: str, secret: bytes, time_step: int = 30, digits: int = 6, skew: int = 1, algorithm: str = "sha1") -> bool {
+    """RFC 6238 §5.2: accepts `code` if it matches any counter in [T-skew, T+skew].
+    Compares every candidate in constant time without short-circuiting."""
     if time_step < 1 {
         raise ValueError("time_step must be >= 1")
     }

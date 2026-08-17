@@ -24,7 +24,6 @@ const HEX: str = "0123456789abcdef"
 
 
 def sum_ord(n: int) -> int {
-    # ord(s[i]): owned 1-char temp fed straight into a borrow builtin
     acc: int = 0
     i: int = 0
     while i < n {
@@ -36,7 +35,6 @@ def sum_ord(n: int) -> int {
 
 
 def last_char(s: str, reps: int) -> str {
-    # c = s[i]: owned temp stored into a slot, repeatedly
     c: str = ""
     i: int = 0
     while i < reps {
@@ -49,21 +47,17 @@ def last_char(s: str, reps: int) -> str {
 
 class StrIndexArgRcTests(TestCase) {
     def test_ord_of_index_value() {
-        # Sum of ord over one full HEX cycle, computed independently
         expect: int = 0
         j: int = 0
         while j < 16 {
             expect = expect + ord(HEX[j])
             j = j + 1
         }
-        # The value must scale exactly across many cycles - a freed/resued temp
-        # would corrupt the running sum
         self.assertEqual(sum_ord(16), expect)
         self.assertEqual(sum_ord(160), expect * 10)
     }
 
     def test_assign_index_value() {
-        # The stored character must stay correct after may reassingments.
         self.assertEqual(last_char("dragon", 300), "n")
         self.assertEqual(last_char("0123456789abcdef", 300), "f")
     }
@@ -79,8 +73,6 @@ class StrIndexArgRcTests(TestCase) {
     }
 
     def test_index_char_roundtrip() {
-        # ord -> chr must round-trip the exact character across the alphabet,
-        # esercising ord(s[i]) (borrow arg) and chr(...) (owned result) together
         i: int = 0
         while i < 16 {
             const code: int = ord(HEX[i])

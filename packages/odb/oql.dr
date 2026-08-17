@@ -1,44 +1,6 @@
-# odb.oql - the Object Query Language: reads (spec sections 8, 10).
-#
-# OQL is parsed here into a small AST, type-checked against the compiled schemas
-# at PREPARE time (unknown schema/field, type-mismatched comparison, aggregate
-# misuse, ambiguity are errors before a document is touched), and executed by
-# odb.dr over the document trees. Queries arrive as runtime text
-# (`db.find(text)`, optionally with `$name` params) or as a `template[OQL]`
-# value (spec section 20): the literal folds to canonical `$$N` text with
-# extracted parameters, bound as values through this same prepare path.
-#
-# Covered so far (M5.1 + M5.2): one source; an optional `? filter` with
-# comparisons (== != < <= > >=), boolean `& | !` and parentheses, real
-# arithmetic (+ - * / %), membership `in [..]`, glob `~` / `~*`, coalesce `??`,
-# presence `exists!(f)` / `missing!(f)`, and the scalar intrinsics `len! lower!
-# upper! abs! round! floor! ceil!`; an optional `{ projection }` of plain fields
-# and computed fields (`margin: (price - cost) / price`); no block = the whole
-# document. Aggregates, grouping, ref joins, aliases, and pipeline stages arrive
-# in later M5 slices.
-#
-# Two-valued logic (spec section 10): a comparison touching an absent field is
-# false, never unknown; `!p` is pure boolean negation; `x ?? d` coalesces both
-# absence and (later) stored null
-
 from odb.schema import CompiledSchema, FieldSpec, T_BOOL, T_INT, T_NUM, T_STR
 from odb.errors import PrepareError
 from template import Template
-
-#===----------------------------------------------------------------------===#
-# OQL - the structured `template[OQL]` content type (Decision 032).
-#
-# Domain co-location: OQL is the object query language, so its content type
-# ships with the parser that consumes it; the package root re-exports it
-# (`from odb import OQL`).
-#
-# Like SQL (stdlib/database/base.dr), `template[OQL] { ... }` lowers to
-# parameter extraction: the literal text becomes a canonical `$$N` form and
-# every !{expr} becomes a bound parameter, never string-concatenated, so
-# injection-safety is carried by the type. The lexer below tokenizes `$$N` as
-# a positional parameter (digits-named), and `db.find(q: OQL)` binds q.params
-# through the same value-only injection path as `$name` params.
-#===----------------------------------------------------------------------===#
 
 extern "C" def dragon_str_fnv1a(s: str) -> int
 
@@ -58,20 +20,11 @@ class OQL(Template) {
         return self.canonical
     }
 
-    # The opt-in signal that selects parameter-extraction lowering (the
-    # compiler probes the content type for a `build` method). `template[OQL]`
-    # sites are lowered directly (interned canonical + native param pack) and
-    # do NOT call this; it survives as the runtime fallback for contexts the
-    # compiler does not constant-fold.
     @staticmethod
     def build(canonical: str, params: list[Any]) -> OQL {
         return OQL(canonical, dragon_str_fnv1a(canonical), params)
     }
 }
-
-#===----------------------------------------------------------------------===#
-# Tokens
-#===----------------------------------------------------------------------===#
 
 const TK_IDENT: int = 1
 const TK_STR: int = 2
@@ -105,9 +58,9 @@ const TK_TILDE: int = 29
 const TK_TILDE_I: int = 30
 const TK_COALESCE: int = 31
 const TK_COLON: int = 32
-const TK_PARAM: int = 33         # $name (text holds the name)
-const TK_AT: int = 34            # @ before csn(N) time travel
-const TK_DATE: int = 35          # @2026-07-11[Thh:mm:ss[Z]] (text sans @)
+const TK_PARAM: int = 33
+const TK_AT: int = 34
+const TK_DATE: int = 35
 
 class Token {
     kind: int
@@ -204,8 +157,6 @@ def tokenize(src: str) -> list[Token] {
             toks.append(Token(TK_IDENT, src[start3:i], start3))
             continue
         }
-        # @ = time travel: either `@csn(N)` (emit TK_AT, then csn lexes as an
-        # ident) or a date literal `@2026-07-11[Thh:mm:ss[Z]]` (one TK_DATE).
         if c == "@" {
             dstart: int = i
             i = i + 1
@@ -219,13 +170,9 @@ def tokenize(src: str) -> list[Token] {
             }
             continue
         }
-        # $name parameter
         if c == "$" {
             pstart: int = i
             i = i + 1
-            # $$N positional parameter: emitted only by the template[OQL]
-            # lowering. Digits-named on purpose so it binds through the same
-            # dict path as $name (find(OQL) binds {"0": v0, "1": v1, ...}).
             if i < n and src[i] == "$" {
                 i = i + 1
                 istart: int = i
@@ -251,7 +198,6 @@ def tokenize(src: str) -> list[Token] {
         if i + 1 < n {
             nxt = src[i + 1]
         }
-        # two-char operators
         if c == "=" and nxt == "=" {
             toks.append(Token(TK_EQ, "==", i))
             i = i + 2
@@ -282,7 +228,6 @@ def tokenize(src: str) -> list[Token] {
             i = i + 2
             continue
         }
-        # single-char tokens
         if c == "?" {
             toks.append(Token(TK_QUESTION, c, i))
         } else if c == "{" {
@@ -334,8 +279,6 @@ def tokenize(src: str) -> list[Token] {
     return toks
 }
 
-# Days between 1970-01-01 and y-m-d (proleptic Gregorian, UTC). The standard
-# civil-from-days inverse (Hinnant's algorithm), integer math only.
 def _days_from_civil(y: int, m: int, d: int) -> int {
     yy: int = y
     if m <= 2 {
@@ -355,7 +298,6 @@ def _days_from_civil(y: int, m: int, d: int) -> int {
     return era * 146097 + doe - 719468
 }
 
-# `2026-07-11`, `2026-07-11T10:00:00` or `...Z` -> unix seconds (UTC).
 def date_to_unix(text: str) -> int {
     s: str = text
     if len(s) > 0 and s[len(s) - 1:] == "Z" {
@@ -395,25 +337,21 @@ def date_to_unix(text: str) -> int {
     return secs
 }
 
-#===----------------------------------------------------------------------===#
-# AST (a tagged node; children carried in a list to avoid recursive optionals)
-#===----------------------------------------------------------------------===#
-
-const N_CMP: int = 1        # op holds the comparison; children [left, right]
-const N_AND: int = 2        # children [left, right]
-const N_OR: int = 3         # children [left, right]
-const N_NOT: int = 4        # children [operand]
-const N_FIELD: int = 5      # name
-const N_STR: int = 6        # sval
-const N_INT: int = 7        # ival
-const N_FLOAT: int = 8      # fval
-const N_BOOL: int = 9       # bval
-const N_ARITH: int = 10     # op in + - * / % ; children [left, right]
-const N_IN: int = 11        # children [target, item, item, ...]
-const N_GLOB: int = 12      # op "~" | "~*"; children [target, pattern]
-const N_COALESCE: int = 13  # children [primary, fallback]
-const N_INTRINSIC: int = 14 # name (len/lower/upper/abs/round/floor/ceil/exists/missing); children args
-const N_PARAM: int = 15     # name; replaced by a literal at bind time
+const N_CMP: int = 1
+const N_AND: int = 2
+const N_OR: int = 3
+const N_NOT: int = 4
+const N_FIELD: int = 5
+const N_STR: int = 6
+const N_INT: int = 7
+const N_FLOAT: int = 8
+const N_BOOL: int = 9
+const N_ARITH: int = 10
+const N_IN: int = 11
+const N_GLOB: int = 12
+const N_COALESCE: int = 13
+const N_INTRINSIC: int = 14
+const N_PARAM: int = 15
 
 class Node {
     kind: int
@@ -449,10 +387,6 @@ def _n_true() -> Node {
     return nd
 }
 
-# One projected column. A plain/computed field carries `expr`. A nested-ref
-# field (`is_ref`) carries a sub-block: the relationship name (the alias), an
-# optional filter over the related schema, and the nested projection (its own
-# ProjFields, hence self-recursive like Node.children - no mutual class cycle).
 class ProjField {
     alias: str
     is_ref: bool
@@ -473,9 +407,6 @@ class ProjField {
     }
 }
 
-# An existence constraint on the parent row set: `+ rel` (semijoin, keep parents
-# WITH a related row) or `- rel` (antijoin, keep parents with NONE), optionally
-# conditioned by a filter over the related schema.
 class ExistJoin {
     relname: str
     negate: bool
@@ -490,7 +421,6 @@ class ExistJoin {
     }
 }
 
-# A pipeline sort key: a field (or `_id`) with a descending flag.
 class SortKey {
     field: str
     desc: bool
@@ -505,8 +435,6 @@ const ST_SORT: int = 1
 const ST_TAKE: int = 2
 const ST_SKIP: int = 3
 
-# A pipeline stage applied to the result rows, in order: `| sort -a, b`,
-# `| take N`, `| skip N`.
 class Stage {
     kind: int
     sort_keys: list[SortKey]
@@ -529,7 +457,6 @@ class OqlQuery {
     project_all: bool
     fields: list[ProjField]
     stages: list[Stage]
-    # Time travel (spec section 17): 0 = now, 1 = at csn, 2 = at a date.
     at_kind: int
     at_csn: int
     at_ts: int
@@ -550,18 +477,12 @@ class OqlQuery {
     }
 }
 
-#===----------------------------------------------------------------------===#
-# Write statements (spec section 9): add / set / unset / put / del, optionally
-# grouped in an `atomic { ... }` block that commits as one transaction.
-#===----------------------------------------------------------------------===#
-
 const W_ADD: int = 1
 const W_SET: int = 2
 const W_UNSET: int = 3
 const W_PUT: int = 4
 const W_DEL: int = 5
 
-# One `field: expr` in a write body.
 class Assign {
     field: str
     expr: Node
@@ -572,7 +493,6 @@ class Assign {
     }
 }
 
-# A single document body `{ f: v, ... }` (an add doc, or a set/put patch).
 class WriteDoc {
     assigns: list[Assign]
 
@@ -586,8 +506,8 @@ class WriteStmt {
     source: str
     has_filter: bool
     filter: Node
-    docs: list[WriteDoc]         # add (1 or batched); set/put (exactly one)
-    unset_fields: list[str]      # unset
+    docs: list[WriteDoc]
+    unset_fields: list[str]
 
     def(kind: int, source: str) {
         self.kind = kind
@@ -606,12 +526,6 @@ class WriteProgram {
         self.stmts = []
     }
 }
-
-#===----------------------------------------------------------------------===#
-# Parser (recursive descent)
-#
-# or > and > not > relational (cmp / ~ / in) > coalesce > add > mul > primary
-#===----------------------------------------------------------------------===#
 
 class Parser {
     toks: list[Token]
@@ -648,7 +562,6 @@ class Parser {
         src_tok: Token = self._expect(TK_IDENT, "a source collection name")
         q: OqlQuery = OqlQuery(src_tok.text)
 
-        # time-travel suffix: source@csn(N) or source@2026-07-11[Thh:mm:ss[Z]]
         if self._at(TK_AT) {
             self._next()
             kw: Token = self._expect(TK_IDENT, "csn(N) or a date literal after '@'")
@@ -690,7 +603,6 @@ class Parser {
             q.fields = self._parse_projection()
         }
 
-        # pipeline stages: `| sort ... | take N | skip N`
         while self._at(TK_OR) {
             self._next()
             st: Token = self._expect(TK_IDENT, "a pipeline stage (sort/take/skip)")
@@ -737,7 +649,6 @@ class Parser {
         return out
     }
 
-    # `+ rel` / `- rel` / `+ (rel ? filter)` existence constraint.
     def _parse_exist(neg: bool) -> ExistJoin {
         if self._at(TK_LPAREN) {
             self._next()
@@ -755,7 +666,6 @@ class Parser {
         return ExistJoin(rn2.text, neg)
     }
 
-    # `by e1, e2, ...` - the grouping keys (M5.3: each must be a plain field).
     def _parse_group_exprs() -> list[Node] {
         out: list[Node] = []
         out.append(self._parse_or())
@@ -775,7 +685,6 @@ class Parser {
                 expr: Node = self._parse_or()
                 out.append(ProjField(name_tok.text, expr))
             } else if self._at(TK_QUESTION) or self._at(TK_LBRACE) {
-                # nested ref: relname [? filter] [{ subprojection }]
                 pf: ProjField = ProjField(name_tok.text, _n_true())
                 pf.is_ref = True
                 if self._at(TK_QUESTION) {
@@ -923,7 +832,6 @@ class Parser {
             return inner
         }
         if t.kind == TK_IDENT {
-            # intrinsic call: name!(args)
             if self.pos + 2 < len(self.toks) and self.toks[self.pos + 1].kind == TK_NOT and self.toks[self.pos + 2].kind == TK_LPAREN {
                 return self._parse_intrinsic()
             }
@@ -968,8 +876,8 @@ class Parser {
     }
 
     def _parse_intrinsic() -> Node {
-        name_tok: Token = self._next()          # the name
-        self._next()                            # the '!'
+        name_tok: Token = self._next()
+        self._next()
         self._expect(TK_LPAREN, "'(' after an intrinsic")
         args: list[Node] = []
         while not self._at(TK_RPAREN) {
@@ -989,8 +897,6 @@ class Parser {
         nd.children = args
         return nd
     }
-
-    #--- write statements -------------------------------------------------#
 
     def parse_program() -> WriteProgram {
         prog: WriteProgram = WriteProgram()
@@ -1119,11 +1025,6 @@ def parse_program(text: str) -> WriteProgram {
     return p.parse_program()
 }
 
-#===----------------------------------------------------------------------===#
-# Parameter binding: replace `$name` leaves with literal nodes before typecheck
-# and execution, so params are injected only as values (never as syntax).
-#===----------------------------------------------------------------------===#
-
 def _set_literal(n: Node, v: Any) -> None {
     if isinstance(v, bool) {
         const b: bool = v
@@ -1209,7 +1110,6 @@ def _is_aggregate(name: str) -> bool {
     return name == "count" or name == "sum" or name == "avg" or name == "min" or name == "max" or name == "any" or name == "all"
 }
 
-# Does this expression contain an aggregate call anywhere?
 def _has_aggregate(n: Node) -> bool {
     if n.kind == N_INTRINSIC and _is_aggregate(n.name) {
         return True
@@ -1222,9 +1122,6 @@ def _has_aggregate(n: Node) -> bool {
     return False
 }
 
-# True if the query nests related collections (ref projection fields) or
-# constrains the parent by existence (`+`/`-`). odb.dr drives those, since they
-# need the catalog + reverse indexes.
 def has_refs(q: OqlQuery) -> bool {
     if len(q.joins) > 0 {
         return True
@@ -1240,8 +1137,6 @@ def has_refs(q: OqlQuery) -> bool {
     return False
 }
 
-# A query is grouped/aggregate if it has a `by` clause or any aggregate in the
-# projection (a whole-set aggregate block).
 def is_aggregate(q: OqlQuery) -> bool {
     if q.has_by {
         return True
@@ -1261,10 +1156,6 @@ def parse(text: str) -> OqlQuery {
     p: Parser = Parser(tokenize(text))
     return p.parse()
 }
-
-#===----------------------------------------------------------------------===#
-# Values (runtime evaluation results)
-#===----------------------------------------------------------------------===#
 
 const VT_ABSENT: int = 0
 const VT_INT: int = 1
@@ -1327,7 +1218,6 @@ def _v_as_num(v: Val) -> float {
     return v.fval
 }
 
-# Unbox a stored field value (Any) into a Val, keyed by its schema tag.
 def _field_val(tag: int, x: Any) -> Val {
     if tag == T_BOOL {
         const b: bool = x
@@ -1349,10 +1239,6 @@ def _field_val(tag: int, x: Any) -> Val {
     return _v_str(s)
 }
 
-#===----------------------------------------------------------------------===#
-# Type checking (prepare time)
-#===----------------------------------------------------------------------===#
-
 def typecheck(cs: CompiledSchema, q: OqlQuery) -> None {
     if q.has_filter {
         _tc_pred(cs, q.filter)
@@ -1370,8 +1256,6 @@ def typecheck(cs: CompiledSchema, q: OqlQuery) -> None {
     }
 }
 
-# Public wrappers so odb.dr can type-check/evaluate a nested block's scalar
-# fields and filters against the related schema.
 def tc_pred(cs: CompiledSchema, n: Node) -> None {
     _tc_pred(cs, n)
 }
@@ -1384,13 +1268,10 @@ def pred(cs: CompiledSchema, n: Node, doc: dict[str, Any]) -> bool {
     return _eval_pred(cs, n, doc)
 }
 
-# Does a value expression evaluate to a present (non-absent) value for `doc`?
 def eval_present(cs: CompiledSchema, n: Node, doc: dict[str, Any]) -> bool {
     return eval_value(cs, n, doc).tag != VT_ABSENT
 }
 
-# Evaluate a value expression to its underlying Any (int/float/str/bool). Raises
-# if it is absent - callers gate with eval_present for optional writes.
 def eval_any(cs: CompiledSchema, n: Node, doc: dict[str, Any]) -> Any {
     v: Val = eval_value(cs, n, doc)
     if v.tag == VT_INT {
@@ -1412,9 +1293,6 @@ def eval_any(cs: CompiledSchema, n: Node, doc: dict[str, Any]) -> Any {
     raise PrepareError("OQL: expression is absent where a value is required")
 }
 
-# A grouped/aggregate query: group keys must be plain required fields, the
-# projection is mandatory, and every projected field must be a group key or an
-# aggregate (a bare non-grouped field would be ambiguous - a prepare error).
 def _tc_grouped(cs: CompiledSchema, q: OqlQuery) -> None {
     gk: dict[str, bool] = {}
     for ge in q.group_exprs {
@@ -1471,7 +1349,6 @@ def _tc_grouped_field(cs: CompiledSchema, gk: dict[str, bool], n: Node) -> int {
         return lt2
     }
     if n.kind == N_INTRINSIC {
-        # a scalar intrinsic over a group key
         _tc_grouped_field(cs, gk, n.children[0])
         return _tc_intrinsic(cs, n)
     }
@@ -1509,14 +1386,12 @@ def _tc_agg(cs: CompiledSchema, n: Node) -> int {
     if nm == "min" or nm == "max" {
         return at
     }
-    # any / all
     if at != T_BOOL {
         raise PrepareError("OQL: " + nm + "! needs a boolean field")
     }
     return T_BOOL
 }
 
-# Type-check a node used in boolean (predicate) position.
 def _tc_pred(cs: CompiledSchema, n: Node) -> None {
     if n.kind == N_AND or n.kind == N_OR {
         _tc_pred(cs, n.children[0])
@@ -1572,7 +1447,6 @@ def _tc_pred(cs: CompiledSchema, n: Node) -> None {
     raise PrepareError("OQL: expression is not a valid predicate")
 }
 
-# Type-check a node used in value position; returns its result tag.
 def _tc_value(cs: CompiledSchema, n: Node) -> int {
     if n.kind == N_INT {
         return T_INT
@@ -1645,7 +1519,6 @@ def _tc_intrinsic(cs: CompiledSchema, n: Node) -> int {
         }
         return T_STR
     }
-    # abs / round / floor / ceil
     if len(n.children) != 1 or not _is_num_tag(_tc_value(cs, n.children[0])) {
         raise PrepareError("OQL: " + nm + "! needs a numeric argument")
     }
@@ -1672,10 +1545,6 @@ def _kinds_comparable(a: int, b: int) -> bool {
     }
     return a == b
 }
-
-#===----------------------------------------------------------------------===#
-# Evaluation
-#===----------------------------------------------------------------------===#
 
 def eval_value(cs: CompiledSchema, n: Node, doc: dict[str, Any]) -> Val {
     if n.kind == N_INT {
@@ -1709,7 +1578,6 @@ def eval_value(cs: CompiledSchema, n: Node, doc: dict[str, Any]) -> Val {
     if n.kind == N_INTRINSIC {
         return _eval_intrinsic(cs, n, doc)
     }
-    # predicate node evaluated in value position -> boolean Val
     return _v_bool(_eval_pred(cs, n, doc))
 }
 
@@ -1719,7 +1587,6 @@ def _eval_arith(cs: CompiledSchema, n: Node, doc: dict[str, Any]) -> Val {
     return _arith_vals(n.op, l, r)
 }
 
-# Arithmetic on two evaluated Vals (shared by per-doc and aggregate evaluation).
 def _arith_vals(op: str, l: Val, r: Val) -> Val {
     if l.tag == VT_ABSENT or r.tag == VT_ABSENT {
         return _v_absent()
@@ -1742,7 +1609,6 @@ def _arith_vals(op: str, l: Val, r: Val) -> Val {
         }
         return _num_result(a - b * float(int(a / b)), both_int)
     }
-    # division is always float (spec: exact numeric semantics)
     if b == 0.0 {
         return _v_absent()
     }
@@ -1767,7 +1633,6 @@ def _eval_intrinsic(cs: CompiledSchema, n: Node, doc: dict[str, Any]) -> Val {
     return _apply_scalar(nm, eval_value(cs, n.children[0], doc))
 }
 
-# Apply a scalar intrinsic to an evaluated argument Val.
 def _apply_scalar(nm: str, arg: Val) -> Val {
     if arg.tag == VT_ABSENT {
         return _v_absent()
@@ -1802,14 +1667,12 @@ def _apply_scalar(nm: str, arg: Val) -> Val {
         }
         return _v_num(float(cl))
     }
-    # round (half away from zero)
     if x >= 0.0 {
         return _v_num(float(int(x + 0.5)))
     }
     return _v_num(float(int(x - 0.5)))
 }
 
-# Evaluate a node in boolean position (two-valued logic).
 def _eval_pred(cs: CompiledSchema, n: Node, doc: dict[str, Any]) -> bool {
     if n.kind == N_AND {
         return _eval_pred(cs, n.children[0], doc) and _eval_pred(cs, n.children[1], doc)
@@ -1947,7 +1810,6 @@ def _cmp_order_str(a: str, op: str, b: str) -> bool {
     return a >= b
 }
 
-# Glob: `*` matches any run (including empty), `?` matches one character.
 def _glob_match(text: str, pat: str) -> bool {
     ti: int = 0
     pi: int = 0
@@ -1977,11 +1839,6 @@ def _glob_match(text: str, pat: str) -> bool {
     return pi == pn
 }
 
-#===----------------------------------------------------------------------===#
-# Execution helpers used by odb.dr
-#===----------------------------------------------------------------------===#
-
-# True if `doc` passes the query's filter (or there is none).
 def matches(cs: CompiledSchema, q: OqlQuery, doc: dict[str, Any]) -> bool {
     if not q.has_filter {
         return True
@@ -1989,13 +1846,10 @@ def matches(cs: CompiledSchema, q: OqlQuery, doc: dict[str, Any]) -> bool {
     return _eval_pred(cs, q.filter, doc)
 }
 
-# Build the projected row for `doc` (without _id). Whole document if no block.
 def project(cs: CompiledSchema, q: OqlQuery, doc: dict[str, Any]) -> dict[str, Any] {
     return project_fields(cs, q.fields, q.project_all, doc)
 }
 
-# The scalar part of a projection field list. Ref fields are skipped here (odb.dr
-# resolves them against the catalog + reverse indexes and merges them in).
 def project_fields(cs: CompiledSchema, fields: list[ProjField], project_all: bool, doc: dict[str, Any]) -> dict[str, Any] {
     out: dict[str, Any] = {}
     if project_all {
@@ -2022,14 +1876,8 @@ def _store_val(out: dict[str, Any], alias: str, v: Val) -> None {
     } else if v.tag == VT_BOOL {
         out[alias] = v.bval
     }
-    # VT_ABSENT: omit the field (absent optional / null-ish), spec section 5
 }
 
-#===----------------------------------------------------------------------===#
-# Grouped / aggregate execution
-#===----------------------------------------------------------------------===#
-
-# Stable bucket string for a group-key Val list.
 def _key_str(vals: list[Val]) -> str {
     s: str = ""
     for v in vals {
@@ -2058,9 +1906,6 @@ class _Group {
     }
 }
 
-# Run a grouped/aggregate query over the already-filtered docs; returns one
-# result row per group (or one row for a whole-set aggregate, even over zero
-# docs). Group order is first-seen.
 def aggregate(cs: CompiledSchema, q: OqlQuery, docs: list[dict[str, Any]]) -> list[dict[str, Any]] {
     order: list[str] = []
     groups: dict[str, _Group] = {}
@@ -2093,7 +1938,6 @@ def aggregate(cs: CompiledSchema, q: OqlQuery, docs: list[dict[str, Any]]) -> li
     return out
 }
 
-# Evaluate a projection expression in aggregate context over a group's docs.
 def eval_agg(cs: CompiledSchema, expr: Node, docs: list[dict[str, Any]], rep: dict[str, Any]) -> Val {
     if expr.kind == N_INTRINSIC and _is_aggregate(expr.name) {
         return _compute_agg(cs, expr, docs)
@@ -2111,7 +1955,7 @@ def eval_agg(cs: CompiledSchema, expr: Node, docs: list[dict[str, Any]], rep: di
         return _v_bool(expr.bval)
     }
     if expr.kind == N_FIELD {
-        return eval_value(cs, expr, rep)         # a group-key field
+        return eval_value(cs, expr, rep)
     }
     if expr.kind == N_ARITH {
         l: Val = eval_agg(cs, expr.children[0], docs, rep)
@@ -2188,7 +2032,6 @@ def _compute_agg(cs: CompiledSchema, n: Node, docs: list[dict[str, Any]]) -> Val
         }
         return best
     }
-    # any / all over a boolean field
     if nm == "any" {
         for d in docs {
             av3: Val = eval_value(cs, n.children[0], d)

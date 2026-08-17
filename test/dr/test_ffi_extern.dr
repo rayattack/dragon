@@ -63,7 +63,6 @@ class ProcessExternTests(TestCase) {
     }
 
     def test_no_leak() {
-        # n starts at 1000: the child's 13/99 magic values must not fire here.
         i: int = 0
         while i < 300 {
             const back: EchoBack = echo(User(i, "t"), i + 1000)

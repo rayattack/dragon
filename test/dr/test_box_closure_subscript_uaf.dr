@@ -1,0 +1,37 @@
+"""Any-subscripting a monomorphic list of closures must incref the element.
+
+Regression for the closure-box use-after-free: `dragon_box_subscript`'s
+monomorphic-list switch increfed TAG_STR/LIST/DICT/BYTES to honor the
+owned-return contract, but DRAGON_TAG_CLOSURE fell into the not-refcounted
+default arm. The returned box aliased the list's closure with a refcount one
+short; dropping the box freed the closure while the list still referenced it.
+Indexing an Any-typed list of closures in a loop then using a live element was
+a heap-use-after-free (ASan: dragon_decref_callable). Must stay clean under
+ASAN_OPTIONS=detect_leaks=1.
+"""
+
+from unittest import TestCase, main
+
+def make_adder(n: int) -> Callable[[], int] {
+    x: int = n
+    def get() -> int { return x }
+    return get
+}
+
+class ClosureBoxSubscriptUAF(TestCase) {
+    def test_any_subscript_of_closure_list_keeps_element_alive() {
+        fns: list[Callable[[], int]] = [make_adder(10), make_adder(20)]
+        boxed: Any = fns
+        i: int = 0
+        while i < 2000 {
+            const got: Any = boxed[0]
+            i = i + 1
+        }
+        const first: Callable[[], int] = fns[0]
+        const second: Callable[[], int] = fns[1]
+        self.assertEqual(first(), 10)
+        self.assertEqual(second(), 20)
+    }
+}
+
+main([ClosureBoxSubscriptUAF()])

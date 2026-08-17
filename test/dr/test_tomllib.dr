@@ -1,0 +1,64 @@
+"""tomllib: escape handling, typed getters, sections.
+
+_unquote used to build the unescaped string one character per concat through a
+six-level if pyramid; it now joins verbatim spans. These tests pin the escape
+semantics (known escapes decode, unknown escapes keep their backslash) and the
+underscore-stripping typed getters.
+"""
+
+from unittest import TestCase, main
+import tomllib
+
+
+class UnquoteTests(TestCase) {
+    def test_basic_escapes() {
+        const doc: tomllib.TomlDoc = tomllib.loads("s = \"a\\nb\\tc\"")
+        self.assertEqual(doc.get("s"), "a\nb\tc")
+    }
+
+    def test_backslash_and_quote_escapes() {
+        const doc: tomllib.TomlDoc = tomllib.loads("s = \"a\\\\b \\\"q\\\"\"")
+        self.assertEqual(doc.get("s"), "a\\b \"q\"")
+    }
+
+    def test_unknown_escape_kept_verbatim() {
+        const doc: tomllib.TomlDoc = tomllib.loads("s = \"a\\xb\"")
+        self.assertEqual(doc.get("s"), "a\\xb")
+    }
+
+    def test_no_escapes_verbatim() {
+        const doc: tomllib.TomlDoc = tomllib.loads("s = \"plain value\"")
+        self.assertEqual(doc.get("s"), "plain value")
+    }
+
+    def test_literal_single_quoted() {
+        const doc: tomllib.TomlDoc = tomllib.loads("s = 'no \\n escapes here'")
+        self.assertEqual(doc.get("s"), "no \\n escapes here")
+    }
+}
+
+
+class GetterTests(TestCase) {
+    def test_int_with_underscores() {
+        const doc: tomllib.TomlDoc = tomllib.loads("n = 1_000_000")
+        self.assertEqual(doc.get_int("n"), 1000000)
+    }
+
+    def test_float_with_underscores() {
+        const doc: tomllib.TomlDoc = tomllib.loads("f = 1_0.5")
+        self.assertEqual(doc.get_float("f"), 10.5)
+    }
+
+    def test_bool_and_sections() {
+        const text: str = "[server]\nhost = \"localhost\"\nport = 8080\nsecure = true\n# comment\n"
+        const doc: tomllib.TomlDoc = tomllib.loads(text)
+        self.assertEqual(doc.get("server.host"), "localhost")
+        self.assertEqual(doc.get_int("server.port"), 8080)
+        self.assertEqual(doc.get_bool("server.secure"), true)
+        self.assertEqual(doc.has("server.missing"), false)
+    }
+}
+
+
+main([UnquoteTests(), GetterTests()])
+

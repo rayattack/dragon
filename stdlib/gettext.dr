@@ -103,7 +103,6 @@ class GNUTranslations {
                 cur_strs[0] = _unquote(line[7:len(line)].strip())
                 continue
             }
-            # Continuation line (a bare `"..."`).
             if line.startswith("\"") {
                 extra: str = _unquote(line)
                 if in_id {
@@ -193,7 +192,6 @@ def _unquote(s: str) -> str {
 }
 
 
-# Module-level "current translation" - `install` sets it, `gettext` reads it.
 _current: GNUTranslations = GNUTranslations()
 
 

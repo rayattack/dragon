@@ -40,7 +40,6 @@ class PythonExternTests(TestCase) {
     }
 
     def test_warm_across_calls() {
-        # Two more calls on the same declaration ride ONE child process.
         const again: list[Scored] = score([User(9, "warm")])
         self.assertEqual(again[0].score, 22)
         const more: list[Scored] = score([User(10, "warm")])
@@ -50,7 +49,6 @@ class PythonExternTests(TestCase) {
 
 
 class BytesExternTests(TestCase) {
-    # bytes cross as raw blobs both directions - no base64, exact lengths.
     def test_bytes_roundtrip() {
         const out: bytes = double("hello".encode("utf-8"), "t")
         self.assertEqual(out.decode("utf-8"), "hellohello")

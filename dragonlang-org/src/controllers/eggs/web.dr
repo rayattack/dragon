@@ -1,9 +1,3 @@
-# web.dr - browser-facing controllers for accounts + package browsing.
-#
-# Sessions: the signed cookie carries uid + uname. CSRF is handled manually
-# (stateless csrf_token/csrf_verify over the session sid) so the token-
-# authenticated /api endpoints stay exempt from cookie-based CSRF.
-
 from http.server import Router, Request, Response, Context
 from secrets import token_urlsafe, compare_digest
 from deps import AUTH, REG, MAILER, BASE_URL
@@ -11,8 +5,6 @@ from services.auth import AuthResult, SignupStart
 from models.records import Token
 from views.eggs.pages import render_login, render_signup, render_account, render_index, render_search, render_detail, render_not_found
 from views.eggs.pages import render_confirm_sent, render_confirm_error, confirm_email_body
-
-#--- session helpers ------------------------------------------------------#
 
 def _uid(req: Request) -> int {
     const s: str = req.session.get("uid", "")
@@ -26,9 +18,6 @@ def _uname(req: Request) -> str {
     return req.session.get("uname", "")
 }
 
-# Synchronizer-token CSRF: a random token lives in the session and forms echo
-# it in a hidden field. Uses only the public session API (no protected sid),
-# and reading it on a form GET persists the session cookie for the POST.
 def _csrf(req: Request) -> str {
     t: str = req.session.get("csrf", "")
     if len(t) == 0 {
@@ -48,14 +37,10 @@ def _check_csrf(req: Request) -> bool {
     return compare_digest(expected.encode("utf-8"), got.encode("utf-8"))
 }
 
-# 303 See Other: a POST handler redirects to a GET target (not 307, which would
-# replay the POST against a GET-only route).
 def _see_other(res: Response, url: str) -> None {
     res.status = 303
     res.set_header("location", url)
 }
-
-#--- auth -----------------------------------------------------------------#
 
 def login_page(req: Request, res: Response, ctx: Context) -> None {
     res.html(render_login(_csrf(req), ""))
@@ -85,10 +70,6 @@ def signup_page(req: Request, res: Response, ctx: Context) -> None {
     res.html(render_signup(_csrf(req), ""))
 }
 
-# Signup is two-step: park the request (no account row yet), email a one-time
-# confirmation link, and only /confirm creates the account. The mail failure
-# path is LOUD - a signup whose email never left would otherwise strand the
-# user with no account and no explanation.
 def signup_submit(req: Request, res: Response, ctx: Context) -> None {
     if not _check_csrf(req) {
         res.status = 400
@@ -115,7 +96,6 @@ def signup_submit(req: Request, res: Response, ctx: Context) -> None {
     res.html(render_confirm_sent(email))
 }
 
-# The emailed link. On success the fresh account is logged straight in.
 def confirm_email(req: Request, res: Response, ctx: Context) -> None {
     const token: str = req.query_str("token", "")
     if len(token) == 0 {
@@ -139,8 +119,6 @@ def logout(req: Request, res: Response, ctx: Context) -> None {
     req.session.clear()
     _see_other(res, "/")
 }
-
-#--- account + tokens -----------------------------------------------------#
 
 def account_page(req: Request, res: Response, ctx: Context) -> None {
     const uid: int = _uid(req)
@@ -169,7 +147,6 @@ def token_create(req: Request, res: Response, ctx: Context) -> None {
         label = "token"
     }
     const plaintext: str = AUTH.issue_token(uid, label)
-    # Render directly (not PRG) so the one-time plaintext is shown exactly once.
     res.html(render_account(_uname(req), AUTH.list_tokens(uid), plaintext, _csrf(req)))
 }
 
@@ -188,8 +165,6 @@ def token_revoke(req: Request, res: Response, ctx: Context) -> None {
     AUTH.revoke_token(uid, int(tid))
     _see_other(res, "/account")
 }
-
-#--- browse ---------------------------------------------------------------#
 
 def index_page(req: Request, res: Response, ctx: Context) -> None {
     res.html(render_index(REG.search(""), _uname(req)))

@@ -1,0 +1,82 @@
+from unittest import TestCase, main
+import random
+
+
+def _choice_empty() -> None {
+    xs: list[str] = []
+    random.choice(xs)
+}
+
+def _choice_int_empty() -> None {
+    xs: list[int] = []
+    random.choice_int(xs)
+}
+
+def _randint_off_by_one() -> None {
+    random.randint(5, 4)
+}
+
+def _randint_inverted() -> None {
+    random.randint(5, 2)
+}
+
+def _randrange_empty() -> None {
+    random.randrange(5, 5)
+}
+
+def _randrange_inverted() -> None {
+    random.randrange(7, 3)
+}
+
+def _sample_oversized() -> None {
+    random.sample([1, 2, 3], 5)
+}
+
+def _sample_negative() -> None {
+    random.sample([1, 2, 3], -1)
+}
+
+
+class RandomErrorTests(TestCase) {
+    def test_choice_empty_raises() {
+        self.assertRaises(IndexError, _choice_empty)
+    }
+
+    def test_choice_int_empty_raises() {
+        self.assertRaises(IndexError, _choice_int_empty)
+    }
+
+    def test_randrange_empty_raises() {
+        self.assertRaises(ValueError, _randrange_empty)
+        self.assertRaises(ValueError, _randrange_inverted)
+    }
+
+    def test_randint_empty_range_raises() {
+        self.assertRaises(ValueError, _randint_off_by_one)
+        self.assertRaises(ValueError, _randint_inverted)
+    }
+
+    def test_randint_single_value_range() {
+        random.seed(7)
+        self.assertEqual(random.randint(6, 6), 6)
+    }
+
+    def test_sample_oversized_raises() {
+        self.assertRaises(ValueError, _sample_oversized)
+        self.assertRaises(ValueError, _sample_negative)
+    }
+
+    def test_valid_calls_unchanged() {
+        random.seed(42)
+        self.assertEqual(random.choice(["only"]), "only")
+        self.assertEqual(random.choice_int([9]), 9)
+        self.assertEqual(random.randrange(3, 4), 3)
+        const s: list[int] = random.sample([1, 2, 3], 3)
+        self.assertEqual(len(s), 3)
+        const s2: list[int] = random.sample([1, 2, 3], 0)
+        self.assertEqual(len(s2), 0)
+    }
+}
+
+
+main([RandomErrorTests()])

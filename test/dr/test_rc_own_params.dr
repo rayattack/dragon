@@ -12,8 +12,6 @@ class Sink {
 }
 
 def consume(own s: str) -> int {
-    # callee owns s; nothing consumes it onward, so the callee's scope
-    # exit releases it.
     return len(s)
 }
 
@@ -40,13 +38,11 @@ class OwnParamTests(TestCase) {
     }
 
     def test_fresh_temp_exemption() {
-        # A nameless fresh temp passes an own param without the keyword.
         n: int = consume("fresh-" + "temp")
         self.assertEqual(n, 10)
     }
 
     def test_conditional_move_closed_with_del() {
-        # ADR case 13's fix shape: del closes the non-moving path.
         i: int = 0
         while i < 3000 {
             x: str = "job-" + str(i)

@@ -11,12 +11,25 @@ exception unwinding through. Whatever way control leaves the block, the call
 runs.
 
 ```dragon
+from io import open, Reader
+
+class CorruptionError(Exception) { }
+
+class Index {
+    lines: list[str]
+    def(lines: list[str]) { self.lines = lines }
+}
+
+def parse_index(f: Reader) -> Index {
+    return Index(f.lines())
+}
+
 def load_index(path: str) -> Index {
-    f: File = open(path, "rb")
+    f: Reader = open(path)
     defer f.close()                    # runs on return, raise, every exit
 
-    hdr: bytes = f.read(16)
-    if hdr[0:5] != b"ODB01" {
+    hdr: str = f.take(5)
+    if hdr != "ODB01" {
         raise CorruptionError("bad magic")     # close still runs
     }
     return parse_index(f)                      # close runs after the return
@@ -33,6 +46,11 @@ wanting it.
 A defer lives and dies within and with the BLOCK that declared it, like every other binding. The Zen line is literal here: a scope that ends frees what it held.
 
 ```dragon
+def log_bulk_mode() -> None { print("bulk mode done") }
+def reserve_capacity(items: list[str]) -> None { print(len(items)) }
+def count_one() -> None { print("one") }
+def handle(item: str) -> None { print(item) }
+
 def process(items: list[str]) {
     if len(items) > 100 {
         defer log_bulk_mode()      # runs at this closing brace,
@@ -64,6 +82,11 @@ You did nothing wrong if this surprises you. Ordinary, correct-looking code
 triggers it, and the mechanism is invisible from the source.
 
 ```dragon
+def record(log: list[str], i: int) -> None {
+    print(i)
+    log.append(str(i))
+}
+
 def report(log: list[str]) {
     i: int = 1
     defer record(log, i)    # captures 1 NOW
@@ -80,6 +103,10 @@ When you want the latest value at exit, defer a call that READS the state at
 call time instead of passing the value in:
 
 ```dragon
+def join_into(log: list[str], parts: list[str]) -> None {
+    log.append("-".join(parts))
+}
+
 def collect(log: list[str]) {
     parts: list[str] = ["a", "b"]
     defer join_into(log, parts)    # parts is a borrow; the call reads it at exit
@@ -91,9 +118,15 @@ The snapshot also protects you: rebinding a name after deferring it is safe,
 because the snapshot holds its own reference to the old value.
 
 ```dragon
-s: str = read_banner()
-defer show(s)          # holds the banner
-s = read_footer()      # rebind is fine; show still gets the banner
+def read_banner() -> str { return "banner" }
+def read_footer() -> str { return "footer" }
+def show(s: str) -> None { print(s) }
+
+def demo() -> None {
+    s: str = read_banner()
+    defer show(s)          # holds the banner
+    s = read_footer()      # rebind is fine; show still gets the banner
+}
 ```
 
 ## Ownership: the half Go does not have
@@ -120,6 +153,7 @@ defer: you can keep reading and mutating it, but you cannot `own`-move or
 explains why at the line that tries:
 
 ```dragon
+# doc: no-check
 r: Reader = open_reader()
 defer r.close()
 hand_off(own r)     # error: 'r' is pinned by a pending defer (the deferred
@@ -138,11 +172,16 @@ block runs its defers before the handler sees the exception, whether the
 handler is in the same function or ten frames up:
 
 ```dragon
+def record(log: list[str], msg: str) -> None {
+    log.append(msg)
+}
+
 def risky(log: list[str]) {
     defer record(log, "cleanup")
     raise ValueError("boom")
 }
 
+log: list[str] = []
 try {
     risky(log)
 } except ValueError {

@@ -1,12 +1,7 @@
 #include "CodeGenTestHelpers.h"
 
-//===----------------------------------------------------------------------===//
-// Template IR Tests
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenTest, TemplateSimpleIR) {
     auto ir = generateIR("x: str = template {hello}");
-    // Should produce a global string constant for "hello"
     EXPECT_NE(ir.find("hello"), std::string::npos);
 }
 
@@ -30,10 +25,6 @@ TEST(CodeGenTest, TemplatePipeUrlFilterIR) {
     auto ir = generateIR("x: str = \"test\"\ny: str = template {!{x | url}}");
     EXPECT_NE(ir.find("dragon_template_escape_url"), std::string::npos);
 }
-
-//===----------------------------------------------------------------------===//
-// Template E2E Tests
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenE2E, TemplateLiteralOnly) {
     auto output = compileAndRun(
@@ -76,9 +67,6 @@ TEST(CodeGenE2E, TemplateEscapedBang) {
 }
 
 TEST(CodeGenE2E, TemplateDoubleBangLiteral) {
-    // `!!` with no brace after it is plain template text (the JS `!!x`
-    // boolean-coercion idiom), not an escape prefix. Scanning it used to
-    // spin codegen forever.
     auto output = compileAndRun(
         "print(template {var a = !!b; t = !! q})"
     );
@@ -108,8 +96,6 @@ TEST(CodeGenE2E, TemplateBoolInterpolation) {
     );
     EXPECT_EQ(output, "flag=True\n");
 }
-
-// --- Phase 2: Pipe filter tests ---
 
 TEST(CodeGenE2E, TemplatePipeHtml) {
     auto output = compileAndRun(
@@ -172,7 +158,6 @@ TEST(CodeGenE2E, TemplatePipeUserDefined) {
 }
 
 TEST(CodeGenE2E, TemplatePipeMixed) {
-    // Mix filtered and unfiltered interpolations
     auto output = compileAndRun(
         "user: str = \"<admin>\"\n"
         "count: int = 5\n"
@@ -182,7 +167,6 @@ TEST(CodeGenE2E, TemplatePipeMixed) {
 }
 
 TEST(CodeGenE2E, TemplatePipeIntToHtml) {
-    // Filter applied to non-string (int gets converted to str first, then filtered)
     auto output = compileAndRun(
         "x: int = 42\n"
         "print(template {!{x | html}})"
@@ -190,12 +174,7 @@ TEST(CodeGenE2E, TemplatePipeIntToHtml) {
     EXPECT_EQ(output, "42\n");
 }
 
-//===----------------------------------------------------------------------===//
-// Template File E2E Tests
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, TemplateFileLiteralOnly) {
-    // Create a temp template file with no interpolation
     std::string tplPath = "/tmp/dragon_tpl_test_" + std::to_string(getpid()) + "_lit.html";
     {
         std::ofstream f(tplPath);
@@ -209,7 +188,6 @@ TEST(CodeGenE2E, TemplateFileLiteralOnly) {
 }
 
 TEST(CodeGenE2E, TemplateFileInterpolation) {
-    // File template with !{expr} interpolation
     std::string tplPath = "/tmp/dragon_tpl_test_" + std::to_string(getpid()) + "_interp.html";
     {
         std::ofstream f(tplPath);
@@ -224,7 +202,6 @@ TEST(CodeGenE2E, TemplateFileInterpolation) {
 }
 
 TEST(CodeGenE2E, TemplateFileMultipleExprs) {
-    // File template with multiple interpolations
     std::string tplPath = "/tmp/dragon_tpl_test_" + std::to_string(getpid()) + "_multi.html";
     {
         std::ofstream f(tplPath);
@@ -240,7 +217,6 @@ TEST(CodeGenE2E, TemplateFileMultipleExprs) {
 }
 
 TEST(CodeGenE2E, TemplateFileWithPipeFilter) {
-    // File template with pipe filter
     std::string tplPath = "/tmp/dragon_tpl_test_" + std::to_string(getpid()) + "_pipe.html";
     {
         std::ofstream f(tplPath);
@@ -255,7 +231,6 @@ TEST(CodeGenE2E, TemplateFileWithPipeFilter) {
 }
 
 TEST(CodeGenE2E, TemplateFileMultiline) {
-    // Multi-line file template
     std::string tplPath = "/tmp/dragon_tpl_test_" + std::to_string(getpid()) + "_ml.html";
     {
         std::ofstream f(tplPath);
@@ -270,7 +245,6 @@ TEST(CodeGenE2E, TemplateFileMultiline) {
 }
 
 TEST(CodeGenE2E, TemplateFileNotFound) {
-    // Non-existent file should produce codegen error
     auto output = compileAndRun(
         "print(template(\"/tmp/dragon_nonexistent_template_file.html\"))"
     );
@@ -278,7 +252,6 @@ TEST(CodeGenE2E, TemplateFileNotFound) {
 }
 
 TEST(CodeGenE2E, TemplateFileEscapedBang) {
-    // File template with !!{ escape
     std::string tplPath = "/tmp/dragon_tpl_test_" + std::to_string(getpid()) + "_esc.html";
     {
         std::ofstream f(tplPath);
@@ -292,7 +265,6 @@ TEST(CodeGenE2E, TemplateFileEscapedBang) {
 }
 
 TEST(CodeGenE2E, TemplateFileBalancedBraces) {
-    // File template with JSON-like balanced braces
     std::string tplPath = "/tmp/dragon_tpl_test_" + std::to_string(getpid()) + "_json.html";
     {
         std::ofstream f(tplPath);
@@ -306,20 +278,6 @@ TEST(CodeGenE2E, TemplateFileBalancedBraces) {
     EXPECT_EQ(output, "{\"name\": \"Dragon\"}\n");
 }
 
-//===----------------------------------------------------------------------===//
-// Typed Template Tests - template[X] { ... }
-//
-// All content types MUST extend Template (D017 Phase 4 §"Compiler
-// Resolution"). The TypeChecker enforces this - see TypeCheckerTest for
-// negative coverage. Tests below define a minimal Template base inline so
-// they don't depend on stdlib resolution (compileAndRun doesn't pull in
-// ModuleResolver).
-//===----------------------------------------------------------------------===//
-
-// Minimal Template base mirroring stdlib/template.dr. Each test extends
-// this and overrides escape() (or validate(), or neither - Template's
-// defaults are correct no-ops). Constructors aren't auto-inherited, so
-// every subclass also redeclares `def(inner: str)`.
 static const std::string TPL_BASE =
     "class Template {\n"
     "    def(inner: str) { self._inner = inner }\n"
@@ -332,7 +290,6 @@ static const std::string TPL_BASE =
     "}\n";
 
 TEST(CodeGenTest, TypedTemplateAutoEscapeIR) {
-    // IR should call the static escape method
     auto ir = generateIR(
         TPL_BASE +
         "class SAFE(Template) {\n"
@@ -350,7 +307,6 @@ TEST(CodeGenTest, TypedTemplateAutoEscapeIR) {
 }
 
 TEST(CodeGenTest, TypedTemplateRawFilterIR) {
-    // | raw should NOT call escape
     auto ir = generateIR(
         TPL_BASE +
         "class SAFE(Template) {\n"
@@ -362,15 +318,11 @@ TEST(CodeGenTest, TypedTemplateRawFilterIR) {
         "x: str = \"test\"\n"
         "y: SAFE = template[SAFE] {!{x | raw}}\n"
     );
-    // Should NOT call escape, and should NOT call built-in html/sql/url.
-    // The class vtable and runtime forward-decls always contain these names,
-    // so we must look for `call ` instructions specifically.
     EXPECT_EQ(ir.find("call ptr @SAFE_escape("), std::string::npos);
     EXPECT_EQ(ir.find("call ptr @dragon_template_escape"), std::string::npos);
 }
 
 TEST(CodeGenE2E, TypedTemplateAutoEscape) {
-    // Define a class that uppercases on escape
     auto output = compileAndRun(
         TPL_BASE +
         "class YELL(Template) {\n"
@@ -383,12 +335,10 @@ TEST(CodeGenE2E, TypedTemplateAutoEscape) {
         "y: YELL = template[YELL] {greeting: !{name}}\n"
         "print(y)\n"
     );
-    // "hello" should be uppercased by escape, literal text is not escaped
     EXPECT_EQ(output, "greeting: HELLO\n");
 }
 
 TEST(CodeGenE2E, TypedTemplateRawFilter) {
-    // | raw should skip auto-escape
     auto output = compileAndRun(
         TPL_BASE +
         "class YELL(Template) {\n"
@@ -401,12 +351,10 @@ TEST(CodeGenE2E, TypedTemplateRawFilter) {
         "y: YELL = template[YELL] {greeting: !{name | raw}}\n"
         "print(y)\n"
     );
-    // "hello" NOT uppercased - raw bypasses escape
     EXPECT_EQ(output, "greeting: hello\n");
 }
 
 TEST(CodeGenE2E, TypedTemplateLiteralOnly) {
-    // Template with no interpolation - just wraps in type
     auto output = compileAndRun(
         TPL_BASE +
         "class WRAP(Template) {\n"
@@ -422,7 +370,6 @@ TEST(CodeGenE2E, TypedTemplateLiteralOnly) {
 }
 
 TEST(CodeGenE2E, TypedTemplateMultipleExprs) {
-    // Multiple interpolations all get escaped
     auto output = compileAndRun(
         TPL_BASE +
         "class YELL(Template) {\n"
@@ -440,7 +387,6 @@ TEST(CodeGenE2E, TypedTemplateMultipleExprs) {
 }
 
 TEST(CodeGenE2E, TypedTemplateExplicitFilterOverride) {
-    // Explicit pipe filter takes precedence over auto-escape
     auto output = compileAndRun(
         TPL_BASE +
         "class YELL(Template) {\n"
@@ -453,17 +399,10 @@ TEST(CodeGenE2E, TypedTemplateExplicitFilterOverride) {
         "y: YELL = template[YELL] {!{x | html}}\n"
         "print(y)\n"
     );
-    // html filter applied instead of YELL.escape()
     EXPECT_EQ(output, "&lt;b&gt;hi&lt;/b&gt;\n");
 }
 
-//===----------------------------------------------------------------------===//
-// Phase 4.A additions: Template-protocol enforcement, parent-walk escape
-// resolution, validate hook, HTML/SQL behaviors, D037 reservation.
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, TypedTemplateHTMLEscape) {
-    // HTML.escape() escapes the standard 5 special chars.
     auto output = compileAndRun(
         TPL_BASE +
         "class HTML(Template) {\n"
@@ -485,7 +424,6 @@ TEST(CodeGenE2E, TypedTemplateHTMLEscape) {
 }
 
 TEST(CodeGenE2E, TypedTemplateSQLEscape) {
-    // SQL.escape() doubles single quotes.
     auto output = compileAndRun(
         TPL_BASE +
         "class SQL(Template) {\n"
@@ -502,9 +440,6 @@ TEST(CodeGenE2E, TypedTemplateSQLEscape) {
 }
 
 TEST(CodeGenE2E, TypedTemplateInheritedEscape) {
-    // A subclass (MyHTML) that doesn't override escape inherits HTML.escape()
-    // via the parent-walk in CodeGen. This is the "user-defined DSL on top of
-    // a built-in" case from D017 Phase 4.
     auto output = compileAndRun(
         TPL_BASE +
         "class HTML(Template) {\n"
@@ -521,12 +456,10 @@ TEST(CodeGenE2E, TypedTemplateInheritedEscape) {
         "p: MyHTML = template[MyHTML] {!{x}}\n"
         "print(p)\n"
     );
-    // MyHTML has no escape - must inherit HTML.escape via parent walk.
     EXPECT_EQ(output, "&lt;b&gt;hi&lt;/b&gt;\n");
 }
 
 TEST(CodeGenTest, TypedTemplateInheritedEscapeIR) {
-    // IR check that resolveMethodFunction walked the chain to HTML_escape.
     auto ir = generateIR(
         TPL_BASE +
         "class HTML(Template) {\n"
@@ -540,19 +473,12 @@ TEST(CodeGenTest, TypedTemplateInheritedEscapeIR) {
         "x: str = \"a\"\n"
         "p: MyHTML = template[MyHTML] {!{x}}\n"
     );
-    // Must call HTML_escape (inherited), not MyHTML_escape (doesn't exist),
-    // not Template_escape (one level too far up).
     EXPECT_NE(ir.find("call ptr @HTML_escape("), std::string::npos)
         << "Expected parent-walk to land on HTML_escape\nIR:\n" << ir;
     EXPECT_EQ(ir.find("call ptr @MyHTML_escape("), std::string::npos);
 }
 
 TEST(CodeGenTest, TypedTemplateValidateIR) {
-    // When the leaf content type defines `validate`, CodeGen must emit a
-    // call to `<X>_validate(result)` after the concat chain and before the
-    // instance wrap. (We deliberately don't parent-walk validate, so
-    // Template's no-op default is NEVER emitted as a call - only an
-    // explicit subclass override fires it.)
     auto ir = generateIR(
         TPL_BASE +
         "class CHECK(Template) {\n"
@@ -571,8 +497,6 @@ TEST(CodeGenTest, TypedTemplateValidateIR) {
 }
 
 TEST(CodeGenTest, TypedTemplateValidateOmittedWhenNotOverridden) {
-    // If the leaf class doesn't override validate, CodeGen must NOT emit a
-    // call to Template_validate (would just call the no-op). Wasted call.
     auto ir = generateIR(
         TPL_BASE +
         "class PLAIN(Template) {\n"
@@ -591,9 +515,6 @@ TEST(CodeGenTest, TypedTemplateValidateOmittedWhenNotOverridden) {
 }
 
 TEST(CodeGenE2E, TypedTemplateSameTypeNoDoubleEscape) {
-    // Composing an HTML inside template[HTML] must not double-escape.
-    // The same-type skip in CodeGen suppresses the escape call when the
-    // interpolated expression's class matches contentType exactly.
     auto output = compileAndRun(
         TPL_BASE +
         "class HTML(Template) {\n"
@@ -607,34 +528,10 @@ TEST(CodeGenE2E, TypedTemplateSameTypeNoDoubleEscape) {
         "outer: HTML = template[HTML] {<div>!{inner}</div>}\n"
         "print(outer)\n"
     );
-    // inner is "<b>x</b>" - must NOT be re-escaped when interpolated as HTML
-    // inside HTML.
     EXPECT_EQ(output, "<div><b>x</b></div>\n");
 }
 
-//===----------------------------------------------------------------------===//
-// Regression: template pipe filter pre-filter leak
-//
-// Pre-fix: when an interpolated expression produced an owned (freshly
-// allocated) string and was followed by a pipe filter, the pre-filter string
-// was abandoned and leaked. The fix tracks ownership (`strValOwned`) and
-// emits decref_str on the pre-filter value before overwriting strVal with
-// the filter's result.
-//
-// "Owned" = result of an int/float/bool conversion or a method-call chain
-// that returns a fresh DragonString*. "Borrowed" = a plain variable load.
-// Borrowed inputs to a filter must NOT be decref'd here (the variable still
-// owns the string).
-//
-// To run under valgrind:
-//  valgrind --leak-check=full ./dragon_codegen_tests \
-//  --gtest_filter='*TemplateFilter*Bounded*'
-// Bounded heap usage = success.
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenIR, TemplateFilterDecrefsOwnedIntInput) {
-    // !{n | html} where n is an int - int_to_str produces an owned string,
-    // and the html filter consumes it. Must see decref_str before the filter.
     auto ir = generateIR(
         "n: int = 42\n"
         "y: str = template {!{n | html}}\n"
@@ -647,8 +544,6 @@ TEST(CodeGenIR, TemplateFilterDecrefsOwnedIntInput) {
 }
 
 TEST(CodeGenIR, TemplateFilterDecrefsOwnedMethodCallInput) {
-    // !{s.upper() | html} - upper() returns a fresh string. The pre-filter
-    // value must be decref'd before the filter is applied.
     auto ir = generateIR(
         "s: str = \"hi\"\n"
         "y: str = template {!{s.upper() | html}}\n"
@@ -661,20 +556,11 @@ TEST(CodeGenIR, TemplateFilterDecrefsOwnedMethodCallInput) {
 }
 
 TEST(CodeGenIR, TemplateFilterBorrowedInputNotDoubleDecref) {
-    // !{s | html} where s is a borrowed variable - the filter input is not
-    // owned. We expect AT MOST one decref_str on the pre-filter value (none
-    // before the filter; the post-template scope cleanup may decref the
-    // variable itself, but that's a separate path).
     auto ir = generateIR(
         "s: str = \"<b>x</b>\"\n"
         "y: str = template {!{s | html}}\n"
     );
     EXPECT_NE(ir.find("dragon_template_escape_html"), std::string::npos);
-    // Must NOT see a decref of the borrowed variable's *contents* before the
-    // filter. Decrefs that DO appear are scope cleanup at the very end.
-    // Crude proxy: count decref_str - should be at most 2 (one for s scope
-    // exit, one for y scope exit). Pre-fix code emitted 0; over-decref would
-    // emit 3+ and crash on free.
     auto count = countSubstring(ir, "dragon_decref_str");
     EXPECT_LE(count, 2)
         << "Borrowed filter input must not be decref'd before the filter call.\n"
@@ -682,8 +568,6 @@ TEST(CodeGenIR, TemplateFilterBorrowedInputNotDoubleDecref) {
 }
 
 TEST(CodeGenE2E, TemplateFilterBoundedLoopOwnedInput) {
-    // Owned input (str(i)) into html filter, in a tight loop. Pre-fix this
-    // leaked one DragonString per iteration.
     auto output = compileAndRun(
         "last: str = \"\"\n"
         "for i in range(20000) {\n"
@@ -695,7 +579,6 @@ TEST(CodeGenE2E, TemplateFilterBoundedLoopOwnedInput) {
 }
 
 TEST(CodeGenE2E, TemplateFilterBoundedLoopMethodChain) {
-    // Method chain owned input + html filter in a loop.
     auto output = compileAndRun(
         "s: str = \"<value>\"\n"
         "last: str = \"\"\n"
@@ -708,7 +591,6 @@ TEST(CodeGenE2E, TemplateFilterBoundedLoopMethodChain) {
 }
 
 TEST(CodeGenE2E, TemplateFilterBoundedLoopUserFilter) {
-    // User-defined (str)->str filter applied to an owned input.
     auto output = compileAndRun(
         "def shout(s: str) -> str { return s.upper() }\n"
         "last: str = \"\"\n"
@@ -731,13 +613,7 @@ TEST(CodeGenE2E, TemplateFilterCorrectness) {
     EXPECT_EQ(output, "value=5\n");
 }
 
-//===----------------------------------------------------------------------===//
-// Phase 4.B - Block interpolation (`!{ ... }` with `:{}` content alias),
-// context inheritance, and parseExpression-fallback-to-parseBlock.
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, TemplateBlockForLoopWithContentAlias) {
-    // for-loop inside !{}; :{} fragments append to the block buffer.
     auto output = compileAndRun(
         "items: list[str] = [\"a\", \"b\", \"c\"]\n"
         "y: str = template {<ul>!{ for x in items { :{<li>!{x}</li>} } }</ul>}\n"
@@ -747,7 +623,6 @@ TEST(CodeGenE2E, TemplateBlockForLoopWithContentAlias) {
 }
 
 TEST(CodeGenE2E, TemplateBlockIfElseWithContentAlias) {
-    // if/else inside !{} drops back to content via :{}.
     auto output = compileAndRun(
         "logged_in: bool = True\n"
         "name: str = \"Ada\"\n"
@@ -758,7 +633,6 @@ TEST(CodeGenE2E, TemplateBlockIfElseWithContentAlias) {
 }
 
 TEST(CodeGenE2E, TemplateBlockMultiStatement) {
-    // Multiple statements inside one !{}; mixed declarations and fragments.
     auto output = compileAndRun(
         "items: list[str] = [\"x\", \"y\"]\n"
         "y: str = template {!{\n"
@@ -771,7 +645,6 @@ TEST(CodeGenE2E, TemplateBlockMultiStatement) {
 }
 
 TEST(CodeGenE2E, TemplateBlockContextInheritance) {
-    // :{} inside template[HTML]'s !{} block must inherit HTML's escape.
     auto output = compileAndRun(
         TPL_BASE +
         "class HTML(Template) {\n"
@@ -785,12 +658,10 @@ TEST(CodeGenE2E, TemplateBlockContextInheritance) {
         "page: HTML = template[HTML] {<ul>!{ for x in items { :{<li>!{x}</li>} } }</ul>}\n"
         "print(page)\n"
     );
-    // Each !{x} inside :{} should be HTML-escaped via the inherited context.
     EXPECT_EQ(output, "<ul><li>&lt;a&gt;</li><li>&lt;b&gt;</li></ul>\n");
 }
 
 TEST(CodeGenE2E, TemplateBlockEmptyLoop) {
-    // Loop with no iterations -> buffer is empty -> joined = "".
     auto output = compileAndRun(
         "items: list[str] = []\n"
         "y: str = template {[!{ for x in items { :{!{x}} } }]}\n"
@@ -800,7 +671,6 @@ TEST(CodeGenE2E, TemplateBlockEmptyLoop) {
 }
 
 TEST(CodeGenTest, TemplateBlockEmitsListAndJoinIR) {
-    // Block mode must allocate a runtime list[str] and call dragon_str_join_ptr.
     auto ir = generateIR(
         "items: list[str] = [\"a\"]\n"
         "y: str = template {!{ for x in items { :{!{x}} } }}\n"
@@ -813,12 +683,7 @@ TEST(CodeGenTest, TemplateBlockEmitsListAndJoinIR) {
         << "Block mode must join the buffer to a single string\nIR:\n" << ir;
 }
 
-//===----------------------------------------------------------------------===//
-// Phase 4.C - `!{*expr}` spread and `| join` / `| join(sep)` filter.
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, TemplateSpreadOperator) {
-    // !{*xs} is sugar for !{xs | join} with empty separator.
     auto output = compileAndRun(
         "items: list[str] = [\"foo\", \"bar\", \"baz\"]\n"
         "y: str = template {[!{*items}]}\n"
@@ -828,7 +693,6 @@ TEST(CodeGenE2E, TemplateSpreadOperator) {
 }
 
 TEST(CodeGenE2E, TemplateJoinFilterEmpty) {
-    // !{xs | join} - explicit empty separator, same as spread.
     auto output = compileAndRun(
         "items: list[str] = [\"a\", \"b\", \"c\"]\n"
         "y: str = template {!{items | join}}\n"
@@ -838,7 +702,6 @@ TEST(CodeGenE2E, TemplateJoinFilterEmpty) {
 }
 
 TEST(CodeGenE2E, TemplateJoinFilterWithSeparator) {
-    // !{xs | join(", ")} - explicit string separator.
     auto output = compileAndRun(
         "items: list[str] = [\"a\", \"b\", \"c\"]\n"
         "y: str = template {!{items | join(\", \")}}\n"
@@ -848,7 +711,6 @@ TEST(CodeGenE2E, TemplateJoinFilterWithSeparator) {
 }
 
 TEST(CodeGenE2E, TemplateJoinFilterWithExprSeparator) {
-    // Separator can be any Dragon expression (variable, concat, etc.).
     auto output = compileAndRun(
         "items: list[str] = [\"x\", \"y\"]\n"
         "sep: str = \" | \"\n"
@@ -859,7 +721,6 @@ TEST(CodeGenE2E, TemplateJoinFilterWithExprSeparator) {
 }
 
 TEST(CodeGenTest, TemplateSpreadDesugarsToJoinIR) {
-    // !{*xs} must lower to the same dragon_str_join_ptr call as !{xs | join}.
     auto ir = generateIR(
         "items: list[str] = [\"a\"]\n"
         "y: str = template {!{*items}}\n"
@@ -869,7 +730,6 @@ TEST(CodeGenTest, TemplateSpreadDesugarsToJoinIR) {
 }
 
 TEST(CodeGenE2E, TemplateBlockNestedLoops) {
-    // Nested for-loops with :{} fragments at each level.
     auto output = compileAndRun(
         "rows: list[str] = [\"r1\", \"r2\"]\n"
         "cols: list[str] = [\"c1\", \"c2\"]\n"
@@ -888,9 +748,6 @@ TEST(CodeGenE2E, TemplateBlockNestedLoops) {
 }
 
 TEST(CodeGenE2E, TemplateBlockTypedWithInheritance) {
-    // template[HTML] with block-interp and :{} that USES the inherited
-    // context to escape on each iteration - combines 4.A typed templates
-    // with 4.B block + alias + context inheritance.
     auto output = compileAndRun(
         TPL_BASE +
         "class HTML(Template) {\n"
@@ -908,7 +765,6 @@ TEST(CodeGenE2E, TemplateBlockTypedWithInheritance) {
 }
 
 TEST(CodeGenE2E, TemplateBlockSpreadInsideBlock) {
-    // Combine 4.B block-mode with 4.C spread on a list built inside.
     auto output = compileAndRun(
         "y: str = template {!{\n"
         "  parts: list[str] = []\n"
@@ -923,24 +779,10 @@ TEST(CodeGenE2E, TemplateBlockSpreadInsideBlock) {
 }
 
 TEST(ParserTest, ContentAliasOutsideInterpolationIsSyntaxError) {
-    // `:{` is contextual - the lexer ONLY recognizes it as
-    // TEMPLATE_CONTENT_OPEN when inTemplateInterpolation=true (i.e., when
-    // CodeGen is re-lexing the body of a !{} block). At regular source
-    // position the colon stays as a normal COLON, and `{` doesn't start a
-    // block here - so the parser MUST reject.
     auto diags = parseErrors("y: str = :{ this is bad }\n");
     EXPECT_FALSE(diags.empty())
         << "Top-level :{ ... } must be a syntax error";
 }
-
-//===----------------------------------------------------------------------===//
-// Decision 032: template[SQL] parameter-extraction lowering.
-//
-// A content type that declares `build` opts out of escape-and-concat: the
-// literal text is constant-folded into a canonical `$$N` string + FNV-1a hash,
-// and each !{expr} becomes a native-typed bound parameter in a list[Any] -
-// never string-concatenated. Injection-safety is carried by the type.
-//===----------------------------------------------------------------------===//
 
 static const std::string SQL_TPL_BASE =
     "class Template {\n"
@@ -963,7 +805,6 @@ static const std::string SQL_TPL_BASE =
     "}\n";
 
 TEST(CodeGenE2E, SqlTemplateParamExtraction) {
-    // Literal text -> canonical $$N; !{expr} -> bound params, in order.
     auto output = compileAndRun(
         SQL_TPL_BASE +
         "min_id: int = 5\n"
@@ -979,8 +820,6 @@ TEST(CodeGenE2E, SqlTemplateParamExtraction) {
 }
 
 TEST(CodeGenE2E, SqlTemplateInjectionSafety) {
-    // The malicious payload lands in params, NEVER in the canonical text -
-    // the structural guarantee that makes template[SQL] injection-proof.
     auto output = compileAndRun(
         SQL_TPL_BASE +
         "evil: str = \"'; DROP TABLE users; --\"\n"
@@ -1003,7 +842,6 @@ TEST(CodeGenE2E, SqlTemplateZeroParams) {
 }
 
 TEST(CodeGenE2E, SqlTemplateMixedParamTypes) {
-    // int / float / bool / str all flow into params at their native types.
     auto output = compileAndRun(
         SQL_TPL_BASE +
         "a: int = 7\n"
@@ -1026,17 +864,13 @@ TEST(CodeGenTest, SqlTemplateParamExtractionIR) {
         "x: int = 1\n"
         "q: SQL = template[SQL] {select * from t where id = !{x}}\n"
     );
-    // Param-extraction path: build a list[Any] and call the 3-arg ctor.
     EXPECT_NE(ir.find("dragon_list_box_new"), std::string::npos) << ir;
     EXPECT_NE(ir.find("dragon_list_box_append"), std::string::npos);
     EXPECT_NE(ir.find("SQL_new"), std::string::npos);
-    // The canonical $$0 text is a constant; the value is NOT concatenated in.
     EXPECT_NE(ir.find("$$0"), std::string::npos);
 }
 
 TEST(CodeGenTest, SqlTemplateInternsIdenticalCanonical) {
-    // Structurally identical sites share ONE interned canonical global, so a
-    // driver's prepared-statement cache can hit by pointer compare.
     auto ir = generateIR(
         SQL_TPL_BASE +
         "x: int = 1\n"

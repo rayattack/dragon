@@ -1,0 +1,33 @@
+from unittest import TestCase, main
+from urllib.parse import URL, quote, unquote
+
+
+class UrlTemplateEscapeTests(TestCase) {
+    def test_percent_is_escaped() {
+        self.assertEqual(URL.escape("50%"), "50%25")
+    }
+
+    def test_roundtrip_through_unquote() {
+        self.assertEqual(unquote(URL.escape("50% & more?")), "50% & more?")
+    }
+
+    def test_delegates_to_quote_empty_safe() {
+        self.assertEqual(URL.escape("a/b c"), quote("a/b c", ""))
+        self.assertEqual(URL.escape("a/b c"), "a%2Fb%20c")
+    }
+
+    def test_reserved_chars_escaped() {
+        self.assertEqual(URL.escape("a&b=c?d#e+f"), "a%26b%3Dc%3Fd%23e%2Bf")
+    }
+
+    def test_unreserved_untouched() {
+        self.assertEqual(URL.escape("AZaz09-._~"), "AZaz09-._~")
+    }
+
+    def test_non_ascii_utf8_encoded() {
+        self.assertEqual(URL.escape("é"), "%C3%A9")
+    }
+}
+
+
+main([UrlTemplateEscapeTests()])

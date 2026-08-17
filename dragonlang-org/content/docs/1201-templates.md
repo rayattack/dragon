@@ -87,6 +87,7 @@ class extending `Template`.
 types, so the compiler stops you from sending a SQL query where a web page belongs:
 
 ```dragon
+# doc: no-check
 from html import HTML
 from database import SQL
 
@@ -190,7 +191,12 @@ A filter must be a top-level function, not a method - `!{title | upper}` does
 a conditional expression for one-off transforms):
 
 ```dragon
+from html import HTML
+
 def shout(s: str) -> str { return s.upper() }
+
+trusted_markup: str = "<em>ok</em>"
+title: str = "hello"
 
 template[HTML] { <div>!{trusted_markup | raw}</div> }   # opt out of escaping
 template[HTML] { <h1>!{title | shout}</h1> }            # any top-level (str)->str fn

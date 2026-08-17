@@ -1,0 +1,55 @@
+"""Method return-class metadata must resolve by module-scoped identity.
+Pre-fix: chained calls resolved the receiver's module through a last-wins
+bare class map, then fell back to a bare Class_method key, so another
+module's (or the entry's) same-named class supplied the return class."""
+
+from unittest import TestCase, main
+from collide_methret_one import one_poke, one_lift
+from collide_methret_two import two_poke
+
+
+class Decoy {
+    def() {
+        self.d: str = "entry-decoy"
+    }
+
+    def flip() -> str {
+        return "flip:" + self.d
+    }
+}
+
+
+class Crate {
+    def() {
+        self.c: str = "entry-crate"
+    }
+
+    def summon() -> Decoy {
+        return Decoy()
+    }
+}
+
+
+def entry_summon() -> str {
+    c: Crate = Crate()
+    return c.summon().flip()
+}
+
+
+class CollideMethretTests(TestCase) {
+    def test_chained_call_return_class_stays_per_module() {
+        self.assertEqual(one_poke(), "shout:one-payload")
+        self.assertEqual(two_poke(), "rattle:two-gadget")
+    }
+
+    def test_inherited_return_class_resolves_through_parent_chain() {
+        self.assertEqual(one_lift(), "shout:one-payload")
+    }
+
+    def test_entry_module_classes_keep_bare_keys() {
+        self.assertEqual(entry_summon(), "flip:entry-decoy")
+    }
+}
+
+
+main([CollideMethretTests()])

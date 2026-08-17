@@ -4,7 +4,6 @@
 using namespace dragon;
 using namespace dragon::test;
 
-// Helper to run sema and check for no errors
 static bool analyzeOk(const std::string& source) {
     auto module = parse(source);
     if (!module) return false;
@@ -12,7 +11,6 @@ static bool analyzeOk(const std::string& source) {
     return sema.analyze(*module);
 }
 
-// Helper to run sema and check that errors occur
 static bool analyzeHasErrors(const std::string& source) {
     auto module = parse(source);
     if (!module) return false;
@@ -20,10 +18,6 @@ static bool analyzeHasErrors(const std::string& source) {
     sema.analyze(*module);
     return sema.hasErrors();
 }
-
-//===----------------------------------------------------------------------===//
-// Basic Tests
-//===----------------------------------------------------------------------===//
 
 TEST(SemaTest, EmptyModule) {
     EXPECT_TRUE(analyzeOk(""));
@@ -40,10 +34,6 @@ TEST(SemaTest, IntegerLiteral) {
 TEST(SemaTest, StringLiteral) {
     EXPECT_TRUE(analyzeOk("\"hello\""));
 }
-
-//===----------------------------------------------------------------------===//
-// Name Resolution
-//===----------------------------------------------------------------------===//
 
 TEST(SemaTest, BuiltinPrint) {
     EXPECT_TRUE(analyzeOk("print(\"hello\")"));
@@ -62,17 +52,11 @@ TEST(SemaTest, UndefinedName) {
 }
 
 TEST(SemaTest, LockIsImportGated) {
-    // Lock is NOT a global builtin (unlike Task) - it is import-gated, matching
-    // Python's `from threading import Lock`. Bare use is an undefined name.
     EXPECT_TRUE(analyzeHasErrors("lock: Lock = Lock()"));
-    // With the import it resolves (Sema binds imported names unconditionally).
     EXPECT_TRUE(analyzeOk("from threading import Lock\nlock: Lock = Lock()"));
 }
 
 TEST(SemaTest, BareAssignmentDoesNotDeclare) {
-    // A bare `x = 5` is a reassignment, not a declaration: the name must
-    // already exist in scope. Introducing a variable requires an annotation
-    // (`x: int = 5`), so first-use-by-bare-assignment is an error.
     EXPECT_TRUE(analyzeHasErrors("x = 5\nprint(x)"));
 }
 
@@ -81,17 +65,12 @@ TEST(SemaTest, DefinedByAnnotation) {
 }
 
 TEST(SemaTest, AnnotationOnlyDefinesVar) {
-    // Just annotation without value should define the variable
     EXPECT_TRUE(analyzeOk("x: int\nprint(x)"));
 }
 
 TEST(SemaTest, UseBeforeDefine) {
     EXPECT_TRUE(analyzeHasErrors("print(x)\nx = 5"));
 }
-
-//===----------------------------------------------------------------------===//
-// Scope Tests
-//===----------------------------------------------------------------------===//
 
 TEST(SemaTest, FunctionDefinesName) {
     EXPECT_TRUE(analyzeOk(
@@ -115,7 +94,7 @@ TEST(SemaTest, FunctionParamNotInOuterScope) {
         "def foo(x: int) {\n"
         "  pass\n"
         "}\n"
-        "print(x)"  // x is not defined outside
+        "print(x)"
     ));
 }
 
@@ -163,10 +142,6 @@ TEST(SemaTest, GlobalStatement) {
         "print(x)"
     ));
 }
-
-//===----------------------------------------------------------------------===//
-// Control Flow Context
-//===----------------------------------------------------------------------===//
 
 TEST(SemaTest, BreakInsideLoop) {
     EXPECT_TRUE(analyzeOk(
@@ -225,10 +200,6 @@ TEST(SemaTest, NestedLoopBreak) {
     ));
 }
 
-//===----------------------------------------------------------------------===//
-// Builtin Types and Functions
-//===----------------------------------------------------------------------===//
-
 TEST(SemaTest, TrueConstant) {
     EXPECT_TRUE(analyzeOk("print(True)"));
 }
@@ -249,10 +220,6 @@ TEST(SemaTest, AllBuiltinsAvailable) {
     EXPECT_TRUE(analyzeOk("print(abs(min(max(1, 2), 3)))"));
 }
 
-//===----------------------------------------------------------------------===//
-// Try/Catch
-//===----------------------------------------------------------------------===//
-
 TEST(SemaTest, TryCatchDefinesHandlerVar) {
     EXPECT_TRUE(analyzeOk(
         "try {\n"
@@ -262,10 +229,6 @@ TEST(SemaTest, TryCatchDefinesHandlerVar) {
         "}"
     ));
 }
-
-//===----------------------------------------------------------------------===//
-// With Statement
-//===----------------------------------------------------------------------===//
 
 TEST(SemaTest, WithStatementDefinesVar) {
     EXPECT_TRUE(analyzeOk(
@@ -279,10 +242,6 @@ TEST(SemaTest, WithStatementDefinesVar) {
     ));
 }
 
-//===----------------------------------------------------------------------===//
-// Complex Integration
-//===----------------------------------------------------------------------===//
-
 TEST(SemaTest, ClassWithMethodUsingSelf) {
     EXPECT_TRUE(analyzeOk(
         "class Foo {\n"
@@ -293,12 +252,7 @@ TEST(SemaTest, ClassWithMethodUsingSelf) {
     ));
 }
 
-//===----------------------------------------------------------------------===//
-// Implicit Self (Decision 006)
-//===----------------------------------------------------------------------===//
-
 TEST(SemaTest, ImplicitSelfResolvesInBody) {
-    // self.x should resolve without error - self is implicitly defined
     EXPECT_TRUE(analyzeOk(
         "class Point {\n"
         "  def move(dx: int) {\n"
@@ -309,7 +263,6 @@ TEST(SemaTest, ImplicitSelfResolvesInBody) {
 }
 
 TEST(SemaTest, ImplicitSelfNotInParams) {
-    // Method has 1 declared param (dx), but self is also in scope
     auto module = parse(
         "class Point {\n"
         "  def move(dx: int) {\n"
@@ -320,7 +273,6 @@ TEST(SemaTest, ImplicitSelfNotInParams) {
     ASSERT_NE(module, nullptr);
     Sema sema;
     EXPECT_TRUE(sema.analyze(*module));
-    // Verify the method only has 1 explicit param
     auto* cls = dynamic_cast<ClassDecl*>(module->body[0].get());
     ASSERT_NE(cls, nullptr);
     auto* method = dynamic_cast<FunctionDecl*>(cls->body[0].get());
@@ -350,10 +302,6 @@ TEST(SemaTest, AssignmentInCondition) {
     ));
 }
 
-//===----------------------------------------------------------------------===//
-// Decision 009: const, static, def() constructors
-//===----------------------------------------------------------------------===//
-
 TEST(SemaTest, ConstDeclOk) {
     EXPECT_TRUE(analyzeOk("const MAX: int = 100\nprint(MAX)"));
 }
@@ -381,7 +329,6 @@ TEST(SemaTest, DefCtorOk) {
 }
 
 TEST(SemaTest, MatchCaptureInOrSubPattern) {
-    // Capture inside Or sub-pattern should be properly defined
     EXPECT_TRUE(analyzeOk(
         "x: int = 5\n"
         "match x {\n"
@@ -389,11 +336,6 @@ TEST(SemaTest, MatchCaptureInOrSubPattern) {
         "}\n"
     ));
 }
-
-//===----------------------------------------------------------------------===//
-// defer placement: no defer at module top level (no scope to end before
-// process exit), same family as 'return' outside function.
-//===----------------------------------------------------------------------===//
 
 TEST(SemaTest, ModuleLevelDeferRejected) {
     EXPECT_TRUE(analyzeHasErrors(
@@ -407,4 +349,22 @@ TEST(SemaTest, DeferInsideFunctionAccepted) {
         "def g() -> None {\n"
         "    defer f()\n"
         "}\n"));
+}
+
+TEST(SemaTest, ExceptAsTargetIsHandlerLocal) {
+    EXPECT_TRUE(analyzeHasErrors(
+        "try {\n"
+        "    raise ValueError(\"x\")\n"
+        "} except ValueError as ex {\n"
+        "    print(ex)\n"
+        "}\n"
+        "print(ex)\n"));
+    EXPECT_TRUE(analyzeOk(
+        "e: str = \"outer\"\n"
+        "try {\n"
+        "    raise ValueError(\"x\")\n"
+        "} except ValueError as e {\n"
+        "    print(e)\n"
+        "}\n"
+        "print(e)\n"));
 }

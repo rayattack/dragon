@@ -1,21 +1,15 @@
-/// Dragon CodeGen - Comprehensions & Generator Expressions
 #include "../CodeGenImpl.h"
 
 namespace dragon {
 
 void CodeGen::visit(ListCompExpr& node) {
-    // List comprehension: [expr for varName in iterable if condition]
-    // Supports: range-based iteration, collection iteration, nested extraClauses.
     auto* func = impl_->currentFunction;
 
-    // Determine elem tag from the comprehension's element expression type
-    // so we can use tagged-list creation (and promote literals appropriately).
     int64_t elemTag = 0;
     if (node.element && node.element->type) {
         elemTag = impl_->typeKindToElemTag(node.element->type->kind());
     }
 
-    // Create the result list
     llvm::Value* capVal = llvm::ConstantInt::get(impl_->i64Type, 8);
     llvm::Value* list;
     if (elemTag != 0) {
@@ -29,43 +23,27 @@ void CodeGen::visit(ListCompExpr& node) {
     auto* listAlloca = impl_->createEntryAlloca(func, "__complist", impl_->i8PtrType);
     impl_->builder->CreateStore(list, listAlloca);
 
-    // Check if iterable is range()
     auto* callExpr = dynamic_cast<CallExpr*>(node.iterable.get());
     auto* calleeName = callExpr ? dynamic_cast<NameExpr*>(callExpr->callee.get()) : nullptr;
     bool isRange = calleeName && calleeName->name == "range";
 
-    // --- Helper lambda: emit the innermost body (element eval + condition + append) ---
-    // This is called from the innermost loop body.
     auto emitInnermostBody = [&]() {
-        // D030 Phase 3.C: pick the typed append matching the result list's
-        // variant (chosen at allocation by elemTag at the visit head).
         bool isF64 = (elemTag == 2);
         bool isPtr = (elemTag == 1 || elemTag == 5 || elemTag == 6 || elemTag == 7);
         const char* appendFn = isF64 ? "dragon_list_append_f64"
                               : isPtr ? "dragon_list_append_ptr"
                                       : "dragon_list_append";
 
-        // Evaluate the element, coerce it, co-own it if borrowed, and append.
-        // Kept in a lambda so it runs ONLY on the branch that keeps the element
-        // - the element must not be evaluated for a filtered-out item (see the
-        // condition handling below).
         auto evalCoerceAppend = [&]() {
             node.element->accept(*this);
             llvm::Value* elemVal = impl_->lastValue;
 
-            // Promote string literals to heap DragonStrings for str-typed lists.
-            if (elemTag == 1 && elemVal->getType()->isPointerTy()) { // TAG_STR
+            if (elemTag == TAG_STR && elemVal->getType()->isPointerTy()) {
                 elemVal = impl_->ensureHeapString(elemVal, node.element.get());
             }
 
-            // dragon_list_append_ptr ADOPTS the reference (it does not incref).
-            // A BORROWED element - the loop variable, a field, or a container
-            // read like xs[i] - must therefore be incref'd so the result list
-            // co-owns it; otherwise both the source container and the result
-            // list decref the same +1 at scope exit (double free). Owned temps
-            // (a concat, str(), or the ensureHeapString dup above) transfer
-            // their +1 and need no incref. Done while elemVal is still a
-            // pointer, before any ptrtoint coercion.
+            // dragon_list_append_ptr ADOPTS the reference: a BORROWED element (loop var, field, xs[i]) must be
+            // incref'd or the source and result both decref the same +1 (double free); an owned temp already carries its +1.
             if (isPtr && impl_->options.gcMode == GCMode::RC &&
                 elemVal->getType()->isPointerTy() &&
                 Impl::isBorrowedHeapExpr(node.element.get())) {
@@ -75,7 +53,6 @@ void CodeGen::visit(ListCompExpr& node) {
                     {elemVal});
             }
 
-            // Coerce element to the variant's native type.
             if (isF64) {
                 if (elemVal->getType() == impl_->i64Type)
                     elemVal = impl_->builder->CreateSIToFP(elemVal, impl_->f64Type);
@@ -85,7 +62,6 @@ void CodeGen::visit(ListCompExpr& node) {
                 if (!elemVal->getType()->isPointerTy())
                     elemVal = impl_->builder->CreateIntToPtr(elemVal, impl_->i8PtrType);
             } else {
-                // Legacy i64 path for int / bool / untyped result lists.
                 if (elemVal->getType() == impl_->i1Type) {
                     elemVal = impl_->builder->CreateZExt(elemVal, impl_->i64Type);
                 } else if (elemVal->getType() == impl_->f64Type) {
@@ -99,11 +75,6 @@ void CodeGen::visit(ListCompExpr& node) {
         };
 
         if (node.condition) {
-            // Evaluate the FILTER FIRST, and only evaluate/append the element on
-            // the keep branch. The old code evaluated the element before the
-            // condition, so `[10 // x for x in nums if x != 0]` divided by the
-            // excluded 0, and an owned element temp built for a filtered-out
-            // item leaked (it was computed but neither appended nor decref'd).
             node.condition->accept(*this);
             llvm::Value* filterCond = impl_->lastValue;
             if (filterCond->getType() == impl_->i64Type) {
@@ -127,9 +98,6 @@ void CodeGen::visit(ListCompExpr& node) {
         }
     };
 
-    // --- Helper lambda: emit nested extra clause loops, then the innermost body ---
-    // clauseIdx is the current index into node.extraClauses to process.
-    // When clauseIdx == extraClauses.size(), we emit the innermost body.
     std::function<void(size_t)> emitExtraClauses = [&](size_t clauseIdx) {
         if (clauseIdx >= node.extraClauses.size()) {
             emitInnermostBody();
@@ -138,13 +106,11 @@ void CodeGen::visit(ListCompExpr& node) {
         auto& clause = node.extraClauses[clauseIdx];
         std::string ecVarName = clause.varNames.empty() ? "__ec" : clause.varNames[0];
 
-        // Check if extra clause iterable is range()
         auto* ecCallExpr = dynamic_cast<CallExpr*>(clause.iterable.get());
         auto* ecCalleeName = ecCallExpr ? dynamic_cast<NameExpr*>(ecCallExpr->callee.get()) : nullptr;
         bool ecIsRange = ecCalleeName && ecCalleeName->name == "range";
 
         if (ecIsRange) {
-            // Range-based extra clause loop
             llvm::Value* ecStart = llvm::ConstantInt::get(impl_->i64Type, 0);
             llvm::Value* ecEnd = nullptr;
             llvm::Value* ecStep = llvm::ConstantInt::get(impl_->i64Type, 1);
@@ -178,7 +144,6 @@ void CodeGen::visit(ListCompExpr& node) {
             impl_->pushScope();
             impl_->setVar(ecVarName, ecVar, Impl::VarKind::Int);
 
-            // Handle extra clause condition
             if (clause.condition) {
                 clause.condition->accept(*this);
                 llvm::Value* ecFilter = impl_->lastValue;
@@ -213,10 +178,8 @@ void CodeGen::visit(ListCompExpr& node) {
             impl_->builder->CreateBr(ecCond);
             impl_->builder->SetInsertPoint(ecEndBB);
         } else {
-            // Collection-based extra clause loop
             clause.iterable->accept(*this);
             llvm::Value* ecColl = impl_->lastValue;
-            // A bare dict iterates its keys (owned temp, decref'd after loop).
             bool ecFromDict = impl_->isBareDictIterable(clause.iterable.get());
             if (ecFromDict)
                 ecColl = impl_->builder->CreateCall(
@@ -236,9 +199,6 @@ void CodeGen::visit(ListCompExpr& node) {
             impl_->builder->CreateCondBr(ecCmp, ecBody, ecEndBB);
             impl_->builder->SetInsertPoint(ecBody);
             impl_->pushScope();
-            // D030 Phase 2.B: bind extra-clause loop var at the iterable's
-            // native element type (was: hardcoded i64 + VarKind::Int, which
-            // silently lost f64/ptr typing for nested comp clauses).
             Type::Kind ecElemKind = impl_->getIterableElementKind(clause.iterable.get());
             Impl::VarKind ecLoopKind = Impl::typeKindToVarKind(ecElemKind);
             auto* ecVar = impl_->bindListElemTyped(
@@ -247,7 +207,6 @@ void CodeGen::visit(ListCompExpr& node) {
             if (Impl::isHeapKind(ecLoopKind))
                 impl_->scopes.back().borrowed.insert(ecVarName);
 
-            // Handle extra clause condition
             if (clause.condition) {
                 clause.condition->accept(*this);
                 llvm::Value* ecFilter = impl_->lastValue;
@@ -288,7 +247,6 @@ void CodeGen::visit(ListCompExpr& node) {
     };
 
     if (isRange) {
-        // --- Range-based main loop ---
         llvm::Value* startVal = llvm::ConstantInt::get(impl_->i64Type, 0);
         llvm::Value* endVal = nullptr;
         llvm::Value* stepVal = llvm::ConstantInt::get(impl_->i64Type, 1);
@@ -328,7 +286,6 @@ void CodeGen::visit(ListCompExpr& node) {
         impl_->pushScope();
         impl_->setVar(node.varName, loopVar, Impl::VarKind::Int);
 
-        // Emit nested extra clauses (or innermost body if none)
         emitExtraClauses(0);
 
         impl_->emitScopeCleanup();
@@ -344,19 +301,9 @@ void CodeGen::visit(ListCompExpr& node) {
 
         impl_->builder->SetInsertPoint(endBB);
     } else {
-        // --- Collection-based main loop ---
-        // Evaluate iterable once, loop with index, get each element
         node.iterable->accept(*this);
         llvm::Value* collVal = impl_->lastValue;
-        // A bare dict iterates its keys: convert to the keys list (owned temp,
-        // decref'd after the loop) so list-indexed iteration is well-defined.
         bool collFromDict = impl_->isBareDictIterable(node.iterable.get());
-        // An owned container iterable temp (comprehension, map()/filter(),
-        // list()/sorted() result, fresh literal) is a +1 nobody else holds -
-        // decref it after the loop or it leaks the whole container each pass.
-        // A borrowed iterable (Name/Attribute/element read) keeps its owner's
-        // reference and is left alone. Gated on heap-container static type so
-        // dragon_decref is the correct drop.
         bool ownedIterTemp = !collFromDict && node.iterable &&
             !Impl::isBorrowedHeapExpr(node.iterable.get()) && node.iterable->type &&
             (node.iterable->type->kind() == Type::Kind::List ||
@@ -386,19 +333,13 @@ void CodeGen::visit(ListCompExpr& node) {
         impl_->builder->SetInsertPoint(bodyBB);
         impl_->pushScope();
 
-        // D030 Phase 3.B: bind via the typed-dispatch helper. The list's
-        // allocation site already chose the matching variant from list[T];
-        // the typed get returns the native type without bitcast at the binding.
         Type::Kind elemKind = impl_->getIterableElementKind(node.iterable.get());
         Impl::VarKind loopKind = Impl::typeKindToVarKind(elemKind);
         auto* elemAlloca = impl_->bindListElemTyped(
             func, collVal, curIdx, node.varName, loopKind);
         impl_->setVar(node.varName, elemAlloca, loopKind);
-        // Loop var is a borrowed reference; mark so per-iter cleanup doesn't
-        // free heap elements still owned by the source list.
         if (Impl::isHeapKind(loopKind)) impl_->scopes.back().borrowed.insert(node.varName);
 
-        // Emit nested extra clauses (or innermost body if none)
         emitExtraClauses(0);
 
         impl_->emitScopeCleanup();
@@ -421,33 +362,21 @@ void CodeGen::visit(ListCompExpr& node) {
     impl_->lastValue = impl_->builder->CreateLoad(impl_->i8PtrType, listAlloca);
 }
 void CodeGen::visit(DictCompExpr& node) {
-    // Dict comprehension: {key: value for varName in iterable if condition}
-    // Supports: range-based iteration, collection iteration, nested extraClauses.
-    // For collection iteration with multiple varNames (e.g., for k, v in items),
-    // each element is a tuple that gets unpacked via dragon_tuple_get.
     auto* func = impl_->currentFunction;
 
-    // Create the result dict
     llvm::Value* capVal = llvm::ConstantInt::get(impl_->i64Type, 8);
     llvm::Value* dict = impl_->builder->CreateCall(
         impl_->runtimeFuncs["dragon_dict_new"], {capVal}, "compdict");
     auto* dictAlloca = impl_->createEntryAlloca(func, "__compdict", impl_->i8PtrType);
     impl_->builder->CreateStore(dict, dictAlloca);
 
-    // Check if iterable is range()
     auto* callExpr = dynamic_cast<CallExpr*>(node.iterable.get());
     auto* calleeName = callExpr ? dynamic_cast<NameExpr*>(callExpr->callee.get()) : nullptr;
     bool isRange = calleeName && calleeName->name == "range";
 
-    // --- Helper lambda: emit innermost body (key/value eval + condition + dict_set) ---
     auto emitInnermostBody = [&]() {
-        // Evaluate key expression
         node.key->accept(*this);
         llvm::Value* keyVal = impl_->lastValue;
-        // Dispatch on key type: a pointer key is string-keyed (dragon_dict_set_
-        // tagged takes a ptr key); an int/bool key is int-keyed. Without this an
-        // int-keyed comprehension passed an i64 to the ptr-key setter (LLVM
-        // verify failure).
         bool keyIsPtr = keyVal->getType()->isPointerTy();
         if (!keyIsPtr) {
             if (keyVal->getType() == impl_->i1Type)
@@ -458,33 +387,24 @@ void CodeGen::visit(DictCompExpr& node) {
         const std::string dictSetFn =
             keyIsPtr ? "dragon_dict_set_tagged" : "dragon_dict_int_set_tagged";
 
-        // Evaluate value expression
         node.value->accept(*this);
         llvm::Value* valVal = impl_->lastValue;
 
-        // Convert value to i64 for dict storage with tag
-        int64_t compTag = 0; // default: int
+        int64_t compTag = 0;
         if (valVal->getType() == impl_->i1Type) {
-            compTag = 3; // bool
+            compTag = 3;
             valVal = impl_->builder->CreateZExt(valVal, impl_->i64Type);
         } else if (valVal->getType() == impl_->f64Type) {
-            compTag = 2; // float
+            compTag = 2;
             valVal = impl_->builder->CreateBitCast(valVal, impl_->i64Type);
         } else if (valVal->getType()->isPointerTy()) {
-            compTag = 1; // str
+            compTag = 1;
             valVal = impl_->builder->CreatePtrToInt(valVal, impl_->i64Type);
         }
         llvm::Value* compTagVal = llvm::ConstantInt::get(impl_->i64Type, compTag);
 
-        // dragon_dict_set_tagged stores key/value pointers directly and expects
-        // caller to hand over exactly one owned ref each (see identical discipline
-        // in Assign.cpp's dict-store path). A BORROWED
-        // key/value - the comp loop var, a field read - must be incref'd; a
-        // literal key must be heap-promoted; an owned temp (f-string, concat)
-        // already carries its +1 and passes through. Without this the dict's
-        // keys aliased the source list's single ref, and freeing the source
-        // (the owned-iterable-temp fix) left the dict probing freed memory.
-        // Emitted at the INSERT site so a false condition doesn't leak refs.
+        // dragon_dict_set_tagged expects one owned ref per key/value: a BORROWED key/value must be incref'd, a literal
+        // key heap-promoted; without this the dict aliased the freed source list's ref (UAF). Emitted at the INSERT site.
         auto emitDictSet = [&]() {
             llvm::Value* k = keyVal;
             llvm::Value* v = valVal;
@@ -538,7 +458,6 @@ void CodeGen::visit(DictCompExpr& node) {
         }
     };
 
-    // --- Helper lambda: emit nested extra clause loops ---
     std::function<void(size_t)> emitExtraClauses = [&](size_t clauseIdx) {
         if (clauseIdx >= node.extraClauses.size()) {
             emitInnermostBody();
@@ -616,7 +535,6 @@ void CodeGen::visit(DictCompExpr& node) {
         } else {
             clause.iterable->accept(*this);
             llvm::Value* ecColl = impl_->lastValue;
-            // A bare dict iterates its keys (owned temp, decref'd after loop).
             bool ecFromDict = impl_->isBareDictIterable(clause.iterable.get());
             if (ecFromDict)
                 ecColl = impl_->builder->CreateCall(
@@ -636,9 +554,6 @@ void CodeGen::visit(DictCompExpr& node) {
             impl_->builder->CreateCondBr(ecCmp, ecBodyBB, ecEndBB);
             impl_->builder->SetInsertPoint(ecBodyBB);
             impl_->pushScope();
-            // D030 Phase 2.B: bind extra-clause loop var at the iterable's
-            // native element type (was: hardcoded i64 + VarKind::Int, which
-            // silently lost f64/ptr typing for nested comp clauses).
             Type::Kind ecElemKind = impl_->getIterableElementKind(clause.iterable.get());
             Impl::VarKind ecLoopKind = Impl::typeKindToVarKind(ecElemKind);
             auto* ecVar = impl_->bindListElemTyped(
@@ -682,7 +597,6 @@ void CodeGen::visit(DictCompExpr& node) {
     };
 
     if (isRange && !node.varNames.empty()) {
-        // --- Range-based main loop ---
         llvm::Value* startVal = llvm::ConstantInt::get(impl_->i64Type, 0);
         llvm::Value* endVal = nullptr;
         llvm::Value* stepVal = llvm::ConstantInt::get(impl_->i64Type, 1);
@@ -723,7 +637,6 @@ void CodeGen::visit(DictCompExpr& node) {
         impl_->pushScope();
         impl_->setVar(loopVarName, loopVar, Impl::VarKind::Int);
 
-        // Emit nested extra clauses (or innermost body if none)
         emitExtraClauses(0);
 
         impl_->emitScopeCleanup();
@@ -739,21 +652,9 @@ void CodeGen::visit(DictCompExpr& node) {
 
         impl_->builder->SetInsertPoint(endBB);
     } else if (!node.varNames.empty()) {
-        // --- Collection-based main loop ---
-        // Evaluate iterable once, loop with index, get each element.
-        // For multiple varNames (e.g., for k, v in items), each collection element
-        // is a tuple that needs unpacking via dragon_tuple_get.
         node.iterable->accept(*this);
         llvm::Value* collVal = impl_->lastValue;
-        // A bare dict iterates its keys: convert to the keys list (owned temp,
-        // decref'd after the loop) so list-indexed iteration is well-defined.
         bool collFromDict = impl_->isBareDictIterable(node.iterable.get());
-        // An owned container iterable temp (comprehension, map()/filter(),
-        // list()/sorted() result, fresh literal) is a +1 nobody else holds -
-        // decref it after the loop or it leaks the whole container each pass.
-        // A borrowed iterable (Name/Attribute/element read) keeps its owner's
-        // reference and is left alone. Gated on heap-container static type so
-        // dragon_decref is the correct drop.
         bool ownedIterTemp = !collFromDict && node.iterable &&
             !Impl::isBorrowedHeapExpr(node.iterable.get()) && node.iterable->type &&
             (node.iterable->type->kind() == Type::Kind::List ||
@@ -784,7 +685,6 @@ void CodeGen::visit(DictCompExpr& node) {
         impl_->pushScope();
 
         if (node.varNames.size() == 1) {
-            // D030 Phase 3.B: single-var bind via the typed-dispatch helper.
             Type::Kind elemKind = impl_->getIterableElementKind(node.iterable.get());
             Impl::VarKind loopKind = Impl::typeKindToVarKind(elemKind);
             auto* elemAlloca = impl_->bindListElemTyped(
@@ -793,18 +693,9 @@ void CodeGen::visit(DictCompExpr& node) {
             if (Impl::isHeapKind(loopKind))
                 impl_->scopes.back().borrowed.insert(node.varNames[0]);
         } else {
-            // Multiple variables: element is a tuple ptr, unpack with dragon_tuple_get.
-            // The element-as-tuple is a heap object, fetched via the polymorphic
-            // get (returns i64 containing a pointer); convert back to ptr.
             llvm::Value* rawElem = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_list_get"], {collVal, curIdx}, "rawelem");
             llvm::Value* tuplePtr = impl_->builder->CreateIntToPtr(rawElem, impl_->i8PtrType, "tupleptr");
-            // Per-var static type from the iterable's list[tuple[T1, T2, ...]]
-            // (d.items() now carries it). Each unpack var binds at its NATIVE
-            // slot - the old code bound every var in an i64 slot with a
-            // hardcoded StrLiteral/Int kind, so a str key flowed as i64, the
-            // insert routed to the INT-keyed setter, and `{k: v for k, v in
-            // d.items()}` built a dict whose str lookups all KeyError'd.
             std::vector<Type::Kind> ekinds(node.varNames.size(), Type::Kind::Int);
             if (node.iterable && node.iterable->type &&
                 node.iterable->type->kind() == Type::Kind::List) {
@@ -841,15 +732,11 @@ void CodeGen::visit(DictCompExpr& node) {
                 auto* fieldAlloca = impl_->createEntryAlloca(func, node.varNames[vi], slotTy);
                 impl_->builder->CreateStore(slotVal, fieldAlloca);
                 impl_->setVar(node.varNames[vi], fieldAlloca, vk);
-                // dragon_tuple_get returns a BORROW (the items() tuple co-owns
-                // its key/value) - mark so per-iteration cleanup doesn't drop
-                // a ref the tuple still holds.
                 if (Impl::isHeapKind(vk))
                     impl_->scopes.back().borrowed.insert(node.varNames[vi]);
             }
         }
 
-        // Emit nested extra clauses (or innermost body if none)
         emitExtraClauses(0);
 
         impl_->emitScopeCleanup();
@@ -872,17 +759,13 @@ void CodeGen::visit(DictCompExpr& node) {
     impl_->lastValue = impl_->builder->CreateLoad(impl_->i8PtrType, dictAlloca);
 }
 void CodeGen::visit(SetCompExpr& node) {
-    // Set comprehension: {expr for varName in iterable if condition}
-    // Supports: range-based iteration, collection iteration, nested extraClauses.
     auto* func = impl_->currentFunction;
 
-    // Determine element tag from comprehension element expression
     int64_t elemTag = 0;
     if (node.element && node.element->type) {
         elemTag = impl_->typeKindToElemTag(node.element->type->kind());
     }
 
-    // Create the result set
     llvm::Value* set;
     if (elemTag != 0) {
         auto* tagVal = llvm::ConstantInt::get(impl_->i64Type, elemTag);
@@ -895,17 +778,14 @@ void CodeGen::visit(SetCompExpr& node) {
     auto* setAlloca = impl_->createEntryAlloca(func, "__compset", impl_->i8PtrType);
     impl_->builder->CreateStore(set, setAlloca);
 
-    // Check if iterable is range()
     auto* callExpr = dynamic_cast<CallExpr*>(node.iterable.get());
     auto* calleeName = callExpr ? dynamic_cast<NameExpr*>(callExpr->callee.get()) : nullptr;
     bool isRange = calleeName && calleeName->name == "range";
 
-    // --- Helper lambda: emit innermost body (element eval + condition + set_add) ---
     auto emitInnermostBody = [&]() {
         node.element->accept(*this);
         llvm::Value* elemVal = impl_->lastValue;
 
-        // Convert element to i64 for set storage
         if (elemVal->getType() == impl_->i1Type) {
             elemVal = impl_->builder->CreateZExt(elemVal, impl_->i64Type);
         } else if (elemVal->getType() == impl_->f64Type) {
@@ -942,7 +822,6 @@ void CodeGen::visit(SetCompExpr& node) {
         }
     };
 
-    // --- Helper lambda: emit nested extra clause loops ---
     std::function<void(size_t)> emitExtraClauses = [&](size_t clauseIdx) {
         if (clauseIdx >= node.extraClauses.size()) {
             emitInnermostBody();
@@ -1020,7 +899,6 @@ void CodeGen::visit(SetCompExpr& node) {
         } else {
             clause.iterable->accept(*this);
             llvm::Value* ecColl = impl_->lastValue;
-            // A bare dict iterates its keys (owned temp, decref'd after loop).
             bool ecFromDict = impl_->isBareDictIterable(clause.iterable.get());
             if (ecFromDict)
                 ecColl = impl_->builder->CreateCall(
@@ -1040,9 +918,6 @@ void CodeGen::visit(SetCompExpr& node) {
             impl_->builder->CreateCondBr(ecCmp, ecBodyBB, ecEndBB);
             impl_->builder->SetInsertPoint(ecBodyBB);
             impl_->pushScope();
-            // D030 Phase 2.B: bind extra-clause loop var at the iterable's
-            // native element type (was: hardcoded i64 + VarKind::Int, which
-            // silently lost f64/ptr typing for nested comp clauses).
             Type::Kind ecElemKind = impl_->getIterableElementKind(clause.iterable.get());
             Impl::VarKind ecLoopKind = Impl::typeKindToVarKind(ecElemKind);
             auto* ecVar = impl_->bindListElemTyped(
@@ -1086,7 +961,6 @@ void CodeGen::visit(SetCompExpr& node) {
     };
 
     if (isRange) {
-        // --- Range-based main loop ---
         llvm::Value* startVal = llvm::ConstantInt::get(impl_->i64Type, 0);
         llvm::Value* endVal = nullptr;
         llvm::Value* stepVal = llvm::ConstantInt::get(impl_->i64Type, 1);
@@ -1126,7 +1000,6 @@ void CodeGen::visit(SetCompExpr& node) {
         impl_->pushScope();
         impl_->setVar(node.varName, loopVar, Impl::VarKind::Int);
 
-        // Emit nested extra clauses (or innermost body if none)
         emitExtraClauses(0);
 
         impl_->emitScopeCleanup();
@@ -1142,18 +1015,9 @@ void CodeGen::visit(SetCompExpr& node) {
 
         impl_->builder->SetInsertPoint(endBB);
     } else {
-        // --- Collection-based main loop ---
         node.iterable->accept(*this);
         llvm::Value* collVal = impl_->lastValue;
-        // A bare dict iterates its keys: convert to the keys list (owned temp,
-        // decref'd after the loop) so list-indexed iteration is well-defined.
         bool collFromDict = impl_->isBareDictIterable(node.iterable.get());
-        // An owned container iterable temp (comprehension, map()/filter(),
-        // list()/sorted() result, fresh literal) is a +1 nobody else holds -
-        // decref it after the loop or it leaks the whole container each pass.
-        // A borrowed iterable (Name/Attribute/element read) keeps its owner's
-        // reference and is left alone. Gated on heap-container static type so
-        // dragon_decref is the correct drop.
         bool ownedIterTemp = !collFromDict && node.iterable &&
             !Impl::isBorrowedHeapExpr(node.iterable.get()) && node.iterable->type &&
             (node.iterable->type->kind() == Type::Kind::List ||
@@ -1183,7 +1047,6 @@ void CodeGen::visit(SetCompExpr& node) {
         impl_->builder->SetInsertPoint(bodyBB);
         impl_->pushScope();
 
-        // D030 Phase 3.B: bind via the typed-dispatch helper (see ListCompExpr).
         Type::Kind elemKind = impl_->getIterableElementKind(node.iterable.get());
         Impl::VarKind loopKind = Impl::typeKindToVarKind(elemKind);
         auto* elemAlloca = impl_->bindListElemTyped(
@@ -1192,7 +1055,6 @@ void CodeGen::visit(SetCompExpr& node) {
         if (Impl::isHeapKind(loopKind))
             impl_->scopes.back().borrowed.insert(node.varName);
 
-        // Emit nested extra clauses (or innermost body if none)
         emitExtraClauses(0);
 
         impl_->emitScopeCleanup();
@@ -1215,9 +1077,6 @@ void CodeGen::visit(SetCompExpr& node) {
     impl_->lastValue = impl_->builder->CreateLoad(impl_->i8PtrType, setAlloca);
 }
 void CodeGen::visit(GeneratorExpr& node) {
-    // Generator expression: (expr for varName in iterable if condition)
-    // Eagerly evaluated as a list (same as ListCompExpr).
-    // Supports: range-based iteration, collection iteration, nested extraClauses.
     auto* func = impl_->currentFunction;
 
     int64_t elemTag = 0;
@@ -1225,7 +1084,6 @@ void CodeGen::visit(GeneratorExpr& node) {
         elemTag = impl_->typeKindToElemTag(node.element->type->kind());
     }
 
-    // Create the result list (generators are eagerly materialized)
     llvm::Value* capVal = llvm::ConstantInt::get(impl_->i64Type, 8);
     llvm::Value* list;
     if (elemTag != 0) {
@@ -1239,17 +1097,15 @@ void CodeGen::visit(GeneratorExpr& node) {
     auto* listAlloca = impl_->createEntryAlloca(func, "__genlist", impl_->i8PtrType);
     impl_->builder->CreateStore(list, listAlloca);
 
-    // Check if iterable is range()
     auto* callExpr = dynamic_cast<CallExpr*>(node.iterable.get());
     auto* calleeName = callExpr ? dynamic_cast<NameExpr*>(callExpr->callee.get()) : nullptr;
     bool isRange = calleeName && calleeName->name == "range";
 
-    // --- Helper lambda: emit innermost body (element eval + condition + list_append) ---
     auto emitInnermostBody = [&]() {
         node.element->accept(*this);
         llvm::Value* elemVal = impl_->lastValue;
 
-        if (elemTag == 1 && elemVal->getType()->isPointerTy()) { // TAG_STR
+        if (elemTag == TAG_STR && elemVal->getType()->isPointerTy()) {
             elemVal = impl_->ensureHeapString(elemVal, node.element.get());
         }
 
@@ -1289,7 +1145,6 @@ void CodeGen::visit(GeneratorExpr& node) {
         }
     };
 
-    // --- Helper lambda: emit nested extra clause loops ---
     std::function<void(size_t)> emitExtraClauses = [&](size_t clauseIdx) {
         if (clauseIdx >= node.extraClauses.size()) {
             emitInnermostBody();
@@ -1367,7 +1222,6 @@ void CodeGen::visit(GeneratorExpr& node) {
         } else {
             clause.iterable->accept(*this);
             llvm::Value* ecColl = impl_->lastValue;
-            // A bare dict iterates its keys (owned temp, decref'd after loop).
             bool ecFromDict = impl_->isBareDictIterable(clause.iterable.get());
             if (ecFromDict)
                 ecColl = impl_->builder->CreateCall(
@@ -1387,9 +1241,6 @@ void CodeGen::visit(GeneratorExpr& node) {
             impl_->builder->CreateCondBr(ecCmp, ecBodyBB, ecEndBB);
             impl_->builder->SetInsertPoint(ecBodyBB);
             impl_->pushScope();
-            // D030 Phase 2.B: bind extra-clause loop var at the iterable's
-            // native element type (was: hardcoded i64 + VarKind::Int, which
-            // silently lost f64/ptr typing for nested comp clauses).
             Type::Kind ecElemKind = impl_->getIterableElementKind(clause.iterable.get());
             Impl::VarKind ecLoopKind = Impl::typeKindToVarKind(ecElemKind);
             auto* ecVar = impl_->bindListElemTyped(
@@ -1433,7 +1284,6 @@ void CodeGen::visit(GeneratorExpr& node) {
     };
 
     if (isRange) {
-        // --- Range-based main loop ---
         llvm::Value* startVal = llvm::ConstantInt::get(impl_->i64Type, 0);
         llvm::Value* endVal = nullptr;
         llvm::Value* stepVal = llvm::ConstantInt::get(impl_->i64Type, 1);
@@ -1488,18 +1338,9 @@ void CodeGen::visit(GeneratorExpr& node) {
 
         impl_->builder->SetInsertPoint(endBB);
     } else {
-        // --- Collection-based main loop ---
         node.iterable->accept(*this);
         llvm::Value* collVal = impl_->lastValue;
-        // A bare dict iterates its keys: convert to the keys list (owned temp,
-        // decref'd after the loop) so list-indexed iteration is well-defined.
         bool collFromDict = impl_->isBareDictIterable(node.iterable.get());
-        // An owned container iterable temp (comprehension, map()/filter(),
-        // list()/sorted() result, fresh literal) is a +1 nobody else holds -
-        // decref it after the loop or it leaks the whole container each pass.
-        // A borrowed iterable (Name/Attribute/element read) keeps its owner's
-        // reference and is left alone. Gated on heap-container static type so
-        // dragon_decref is the correct drop.
         bool ownedIterTemp = !collFromDict && node.iterable &&
             !Impl::isBorrowedHeapExpr(node.iterable.get()) && node.iterable->type &&
             (node.iterable->type->kind() == Type::Kind::List ||
@@ -1529,7 +1370,6 @@ void CodeGen::visit(GeneratorExpr& node) {
         impl_->builder->SetInsertPoint(bodyBB);
         impl_->pushScope();
 
-        // D030 Phase 3.B: bind via the typed-dispatch helper (see ListCompExpr).
         Type::Kind elemKind = impl_->getIterableElementKind(node.iterable.get());
         Impl::VarKind loopKind = Impl::typeKindToVarKind(elemKind);
         auto* elemAlloca = impl_->bindListElemTyped(
@@ -1559,4 +1399,4 @@ void CodeGen::visit(GeneratorExpr& node) {
 
     impl_->lastValue = impl_->builder->CreateLoad(impl_->i8PtrType, listAlloca);
 }
-} // namespace dragon
+}

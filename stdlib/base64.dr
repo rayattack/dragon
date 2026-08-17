@@ -1,33 +1,21 @@
-# base64.dr - RFC 4648 Base64 encoding / decoding
-#
-# Python parity: matches the surface of `base64.b64encode`,
-# `base64.b64decode`, and the URL-safe variants. Inputs and outputs are
-# `bytes` to match Python; convenience accepts `str` on encode by encoding
-# UTF-8 first, since registry tokens, hashes, and signatures are all
-# byte-oriented but token APIs are convenient with strings.
-#
-# Algorithm: standard 6-bit grouping over 24-bit windows, with `=` padding
-# for tail groups of 1 or 2 bytes. Decoding tolerates either padding present
-# or absent (Python is strict, but jose / JWS commonly elides padding).
+"""base64.dr - RFC 4648 Base64 encoding/decoding, matching Python's base64 module surface.
+bytes in/out (str accepted on encode via UTF-8); decode tolerates padding present or absent."""
 
 
 const _STD_ALPHABET: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 const _URL_ALPHABET: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-const _PAD: int = 0x3D                 # '='
+const _PAD: int = 0x3D
 
 
-# Build a 256-entry decode table for the given alphabet. Invalid byte values
-# map to -1; '=' maps to -2 so the decoder can distinguish padding from junk.
 def _build_decode_table(alphabet: str) -> list[int] {
+    """Build a 256-entry decode table for the given alphabet. Invalid byte values
+    map to -1; '=' maps to -2 so the decoder can distinguish padding from junk."""
     t: list[int] = [0] * 256
     i: int = 0
     while i < 256 {
         t[i] = -1
         i = i + 1
     }
-    # Index the byte view (int code points) rather than ord(alphabet[j]): the
-    # str-subscript form allocates a 1-char string per char (and currently
-    # leaks it - str-index-arg codegen bug). bytes[j] is a scalar
     const ab: bytes = alphabet.encode()
     j: int = 0
     while j < len(alphabet) {
@@ -42,18 +30,12 @@ const _STD_DECODE: list[int] = _build_decode_table(_STD_ALPHABET)
 const _URL_DECODE: list[int] = _build_decode_table(_URL_ALPHABET)
 
 
-# --- Encode --------------------------------------------------------------------
-
 def _encode_into(data: bytes, alphabet: str) -> bytes {
     n: int = len(data)
     if n == 0 {
         return bytes()
     }
-    # Byte view of the alphabet: ab[i] is an int code point, so the encode loop
-    # never allocates a 1-char string per output symbol the way ord(alphabet[i])
-    # does (which currently leaks - str-index-arg codegen bug)
     const ab: bytes = alphabet.encode()
-    # Output length is always 4 * ceil(n / 3) (with `=` padding to align).
     out_len: int = 4 * ((n + 2) // 3)
     out: list[int] = [0] * out_len
     i: int = 0
@@ -103,12 +85,9 @@ def urlsafe_b64encode(data: bytes) -> bytes {
 }
 
 
-# --- Decode -----------------------------------------------------------------
-
-# Decode `data` using the supplied 256-entry decode table. Whitespace
-# (\r \n \t space) is ignored. Padding is optional. Any other invalid byte
-# raises ValueError.
 def _decode_with(data: bytes, table: list[int]) -> bytes {
+    """Decodes using the given 256-entry table; ignores whitespace, tolerates
+    missing padding, raises ValueError on other invalid bytes."""
     n: int = len(data)
     out: list[int] = []
     quad: list[int] = [0, 0, 0, 0]
@@ -136,11 +115,13 @@ def _decode_with(data: bytes, table: list[int]) -> bytes {
         }
         qi = qi + 1
         if qi == 4 {
-            # Emit 1, 2, or 3 bytes depending on how many `=` slots we saw.
             a: int = quad[0]
             b: int = quad[1]
             c: int = quad[2]
             d: int = quad[3]
+            if a == -2 or b == -2 {
+                raise ValueError("invalid base64 padding")
+            }
             out.append(((a << 2) | (b >> 4)) & 0xFF)
             if c != -2 {
                 out.append((((b & 0x0F) << 4) | (c >> 2)) & 0xFF)
@@ -156,16 +137,20 @@ def _decode_with(data: bytes, table: list[int]) -> bytes {
             quad[3] = 0
         }
     }
-    # Handle unpadded tail (RFC 4648 §3.2 - strict requires padding, but
-    # jose / JWS commonly elides it; we accept both).
     if qi == 2 {
         a: int = quad[0]
         b: int = quad[1]
+        if a == -2 or b == -2 {
+            raise ValueError("invalid base64 padding")
+        }
         out.append(((a << 2) | (b >> 4)) & 0xFF)
     } else if qi == 3 {
         a: int = quad[0]
         b: int = quad[1]
         c: int = quad[2]
+        if a == -2 or b == -2 or c == -2 {
+            raise ValueError("invalid base64 padding")
+        }
         out.append(((a << 2) | (b >> 4)) & 0xFF)
         out.append((((b & 0x0F) << 4) | (c >> 2)) & 0xFF)
     } else if qi == 1 {

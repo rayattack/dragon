@@ -1,10 +1,9 @@
-/// Dragon CodeGen - Public API
-/// Constructor, destructor, generate(), compile, link, diagnostics.
-// HACK: setjmp/longjmp exception path -- revisit invoke lowering
 #include "CodeGenImpl.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
+#include <algorithm>
 #include <cstdlib>
 #include <cstdio>
+#include <filesystem>
 
 #if defined(_WIN32)
   #include <windows.h>
@@ -33,20 +32,15 @@ bool CodeGen::generate(dragon::Module& module) {
 
 bool CodeGen::generate(dragon::Module& entryModule,
                        const std::vector<dragon::Module*>& depModules) {
-    // Detect .dr vs .py mode from Module flag (set by Parser from ParserOptions)
     impl_->isDragonFile = entryModule.isDragonFile;
     impl_->depModulePtrs = depModules;
     impl_->entryModulePtr = &entryModule;
 
-    // Track which modules were resolved as files (skip StdlibRegistry for them)
     for (auto* dep : depModules) {
         if (!dep->moduleName.empty())
             impl_->fileResolvedModules.insert(dep->moduleName);
     }
 
-    // Stash module docstrings by name so attribute-access of `m.__doc__`
-    // (handled in Attributes.cpp) can find the bytes. Entry module is keyed
-    // by "" - the same empty key `currentModuleName` uses for the entry.
     if (entryModule.docstring)
         impl_->moduleDocstrings[""] = *entryModule.docstring;
     for (auto* dep : depModules) {
@@ -54,21 +48,17 @@ bool CodeGen::generate(dragon::Module& entryModule,
             impl_->moduleDocstrings[dep->moduleName] = *dep->docstring;
     }
 
-    // Forward-declare classes first (so function signatures can reference class types),
-    // then functions from all modules (deps first). Each pass sets
-    // currentModuleName so per-module symbol mangling (mangleFunc) emits
-    // distinct symbols for same-named functions across modules - without
-    // this, stdlib modules that share Python-conventional names like
-    // `open` / `compress` / `decompress` would collapse onto one symbol
-    // and the second emit would silently overwrite (or be dropped by) the
-    // first. Restored to "" before entry-module emit so user code keeps
-    // bare names.
+    for (auto* dep : depModules) impl_->collectContracts(*dep);
+    impl_->collectContracts(entryModule);
+
     for (auto* dep : depModules) {
         impl_->currentModuleName = dep->moduleName;
         impl_->forwardDeclareClasses(*dep);
     }
     impl_->currentModuleName = "";
     impl_->forwardDeclareClasses(entryModule);
+
+    impl_->assignContractSlots();
     for (auto* dep : depModules) {
         impl_->currentModuleName = dep->moduleName;
         impl_->forwardDeclareFunctions(*dep);
@@ -76,13 +66,6 @@ bool CodeGen::generate(dragon::Module& entryModule,
     impl_->currentModuleName = "";
     impl_->forwardDeclareFunctions(entryModule);
 
-    // Decorator pre-pass: register each decorated top-level function's
-    // indirect-dispatch global + type BEFORE class bodies are emitted below. A
-    // class method that calls a decorated free function is lowered in the
-    // class-body pass (next), before that function's visit(FunctionDecl) runs
-    // its decorator block - without this, the call site misses the
-    // decoratedFunctions entry and binds the UNdecorated original (a wrapping
-    // decorator's effect silently vanishes when invoked from a method).
     for (auto* dep : depModules) {
         impl_->currentModuleName = dep->moduleName;
         for (auto& stmt : dep->body)
@@ -94,12 +77,6 @@ bool CodeGen::generate(dragon::Module& entryModule,
         if (auto* fd = dynamic_cast<FunctionDecl*>(stmt.get()))
             impl_->preregisterDecoratedFunction(*fd);
 
-    // Class-layout pre-pass: register EVERY class's field layout (struct type,
-    // field indices/types/kinds, list-elem/dict-value kinds) before any method
-    // body is emitted. Without this, a method in class A that references a class
-    // B defined later in the file saw empty layout metadata for B and miscompiled
-    // every B field access to offset 0 (silent wrong answer). visit(ClassDecl)
-    // returns right after layout registration while classLayoutPass is set.
     impl_->classLayoutPass = true;
     for (auto* dep : depModules) {
         impl_->currentModuleName = dep->moduleName;
@@ -111,17 +88,7 @@ bool CodeGen::generate(dragon::Module& entryModule,
         if (dynamic_cast<ClassDecl*>(stmt.get())) stmt->accept(*this);
     impl_->classLayoutPass = false;
 
-    // Forward-declare module-level globals from dependency modules.
-    // This creates GlobalVariable stubs so dependency functions can reference
-    // them. Actual initialization happens in main() (see below). The LLVM
-    // type and VarKind are derived from the full annotation via the same
-    // helpers the AnnAssignStmt path uses, so generic types like
-    // `dict[str, str]` and `list[T]` get a `ptr` global instead of `i64`
-    // (the previous `NamedTypeExpr`-only inspection silently fell through to
-    // `i64`, which then mismatched the `dragon_dict_get_str_*` ABI at the
-    // load site once the cross-module reader emitted the typed call).
     for (auto* dep : depModules) {
-        // Module context: a dep's global is keyed and class-resolved in the dep.
         impl_->currentModuleName = dep->moduleName;
         for (auto& stmt : dep->body) {
             auto* ann = dynamic_cast<AnnAssignStmt*>(stmt.get());
@@ -139,12 +106,7 @@ bool CodeGen::generate(dragon::Module& entryModule,
             Impl::VarKind vk = ann->annotation
                 ? impl_->typeExprToKind(ann->annotation.get())
                 : Impl::VarKind::Int;
-            // Given the code -> `X: deque[T] = deque(...)`: the annotation lowers
-            // list-like, but the val is a real DragonDeque. Correct the kidn + "__Deque"
-            // tag here - method bodies compile before the module-body stmnt runs its own
-            // correction (AugAnnAssign), and a method reading the global would misroute
-            // len/pop through list path (reads the deque header as a list - wrong values,
-            // runaway allocation on append)
+
             if (impl_->annAssignIsDeque(ann)) {
                 vk = Impl::VarKind::Deque;
                 impl_->varClassNames[name->name] = "__Deque";
@@ -152,43 +114,19 @@ bool CodeGen::generate(dragon::Module& entryModule,
             }
 
             auto* gv = new llvm::GlobalVariable(
-                *impl_->module, gvType, /*isConstant=*/false,
+                *impl_->module, gvType, false,
                 llvm::GlobalValue::InternalLinkage,
                 llvm::Constant::getNullValue(gvType),
                 gvName);
             impl_->moduleGlobals[gKey] = gv;
             impl_->moduleGlobalKinds[gKey] = vk;
 
-            // For class-typed globals, record the class name (and owning
-            // module) so attribute/method access through the cross-module
-            // reader resolves correctly. resolveAnnotationClassName handles a
-            // DOTTED annotation (`db: database.Connection`) by stripping to the
-            // leaf class; a bare classNames.count(nt->name) missed it, leaving
-            // the global's className empty. A method call on such a global then
-            // fell to the "class unknown" vtable path, which guesses the callee
-            // signature from an arbitrary same-named method and produced a
-            // wrong-arity indirect call (malformed IR) - order-dependent, so it
-            // only bit some multi-module builds. Mirrors the AnnAssignStmt path.
             impl_->bindGlobalClassVar(gKey, name->name, ann->annotation.get());
         }
     }
     impl_->currentModuleName = "";
 
-    // Forward-declare the ENTRY module's top-level globals too, BEFORE the
-    // entry-module class bodies are emitted below (line ~140). A class method
-    // that reads a module-level global/const is codegen'd before main() lazily
-    // creates that global, so without this stub the read resolves to a spurious
-    // "Undefined variable". (Entry-module free functions escape this: their
-    // bodies are emitted during the main-body iteration, after the top-level
-    // decl has already registered the global.) The module-level AnnAssign /
-    // Assign paths both reuse an existing moduleGlobals entry, so main() still
-    // creates the global exactly once and initializes it in place.
     for (auto& stmt : entryModule.body) {
-        // Module-level UNPACK targets (`const a: T, b: U = f()`, an AssignStmt
-        // with a TupleExpr target) are module globals too - forward declare
-        // them from the checker-resolved element types so class methods can
-        // reference them (methods compile before the module body initializes
-        // the slots, the unpack lowering in Assign.cpp reuses these gvs).
         if (auto* as = dynamic_cast<AssignStmt*>(stmt.get())) {
             if (as->targets.size() == 1) {
                 if (auto* tup = dynamic_cast<TupleExpr*>(as->targets[0].get())) {
@@ -205,7 +143,6 @@ bool CodeGen::generate(dragon::Module& entryModule,
                     for (size_t i = 0; i < tup->elements.size(); ++i) {
                         auto* nm = dynamic_cast<NameExpr*>(tup->elements[i].get());
                         if (!nm) continue;
-                        // Entry-module key: mangleGlobal("", name) == bare name.
                         std::string ugKey = Impl::mangleGlobal("", nm->name);
                         std::string ugvName = "global." + ugKey;
                         if (impl_->module->getGlobalVariable(ugvName)) continue;
@@ -237,7 +174,7 @@ bool CodeGen::generate(dragon::Module& entryModule,
                             }
                         }
                         auto* ugv = new llvm::GlobalVariable(
-                            *impl_->module, ugvType, /*isConstant=*/false,
+                            *impl_->module, ugvType, false,
                             llvm::GlobalValue::InternalLinkage,
                             llvm::Constant::getNullValue(ugvType), ugvName);
                         impl_->moduleGlobals[ugKey] = ugv;
@@ -253,7 +190,6 @@ bool CodeGen::generate(dragon::Module& entryModule,
         auto* name = dynamic_cast<NameExpr*>(ann->target.get());
         if (!name) continue;
 
-        // Entry-module key: mangleGlobal("", name) == bare name.
         std::string gKey = Impl::mangleGlobal("", name->name);
         std::string gvName = "global." + gKey;
         if (impl_->module->getGlobalVariable(gvName)) continue;
@@ -264,23 +200,18 @@ bool CodeGen::generate(dragon::Module& entryModule,
         Impl::VarKind vk = ann->annotation
             ? impl_->typeExprToKind(ann->annotation.get())
             : Impl::VarKind::Int;
-        // Deque-kind correction - see the dep-module loop above.
         if (impl_->annAssignIsDeque(ann)) {
             vk = Impl::VarKind::Deque;
             impl_->varClassNames[name->name] = "__Deque";
             impl_->moduleGlobalClassNames[gKey] = {"__Deque", ""};
         }
-        // Callable-typed global: register its signature now, for same ordering reason
-        // as deque correction - a class method calling `TAGGER(x)` compiles before module
-        // body registers the type, and untyped indirect call fallback it would take will
-        // not drain owned result temp (one leaked str per call site under LSan).
         if (auto* cte = dynamic_cast<CallableTypeExpr*>(ann->annotation.get())) {
             impl_->callableTypes[name->name] = impl_->callableTypeExprToFnType(cte);
             vk = Impl::VarKind::Closure;
         }
 
         auto* gv = new llvm::GlobalVariable(
-            *impl_->module, gvType, /*isConstant=*/false,
+            *impl_->module, gvType, false,
             llvm::GlobalValue::InternalLinkage,
             llvm::Constant::getNullValue(gvType),
             gvName);
@@ -291,10 +222,8 @@ bool CodeGen::generate(dragon::Module& entryModule,
         impl_->bindGlobalClassVar(gKey, name->name, ann->annotation.get());
     }
 
-    // Generate dependency module code (functions and classes only, no top-level exprs).
-    // currentModuleName is restored per dep so visit(FunctionDecl) and
-    // CallExpr's same-module call path resolve to the dep's mangled symbol
-    // namespace, not the entry's.
+    impl_->computeStackAllocSites(entryModule, depModules);
+
     for (auto* dep : depModules) {
         impl_->currentModuleName = dep->moduleName;
         for (auto& stmt : dep->body) {
@@ -308,16 +237,6 @@ bool CodeGen::generate(dragon::Module& entryModule,
     }
     impl_->currentModuleName = "";
 
-    // Process the entry module's own import statements BEFORE its class bodies
-    // are emitted below. The import visitors only populate alias maps
-    // (importedFuncAliasesByModule / symbolAliases) - no code emission, fully
-    // idempotent - so re-processing them during the main-body iteration is
-    // harmless. Without this, an entry-module method body is codegen'd with an
-    // empty alias table, and a `from mod import fn` call inside the method
-    // falls through to a 0 / "Unknown function" instead of the mangled symbol.
-    // (Dependency modules already get this via the loop above; entry-module
-    // free functions escape because their bodies emit during the main-body
-    // iteration, after the imports have been processed.)
     for (auto& stmt : entryModule.body) {
         if (dynamic_cast<ImportStmt*>(stmt.get()) ||
             dynamic_cast<FromImportStmt*>(stmt.get())) {
@@ -325,17 +244,12 @@ bool CodeGen::generate(dragon::Module& entryModule,
         }
     }
 
-    // Generate entry module class bodies BEFORE main,
-    // so their deferredClassInits are processed in the main preamble.
     for (auto& stmt : entryModule.body) {
         if (dynamic_cast<ClassDecl*>(stmt.get())) {
             stmt->accept(*this);
         }
     }
 
-    // Create main function for top-level code. Takes (argc, argv) so that
-    // sys.argv / argparse can read process args. Forwards them to the runtime
-    // via dragon_set_argv before any user code runs.
     auto* i32Ty = llvm::Type::getInt32Ty(*impl_->context);
     auto* charPtrPtrTy = llvm::PointerType::getUnqual(*impl_->context);
     auto* mainType = llvm::FunctionType::get(
@@ -347,7 +261,6 @@ bool CodeGen::generate(dragon::Module& entryModule,
     impl_->currentFunction = mainFunc;
     impl_->mainFunction = mainFunc;
     {
-        // Stash argc/argv into the runtime so user code can read them later.
         auto argIt = mainFunc->arg_begin();
         llvm::Value* argcArg = &*argIt++;
         llvm::Value* argvArg = &*argIt;
@@ -360,7 +273,6 @@ bool CodeGen::generate(dragon::Module& entryModule,
         impl_->builder->CreateCall(setArgvFn, {argcArg, argvArg});
     }
 
-    // Register user-defined exception types with the runtime
     for (auto& [code, parentCode] : impl_->userExcParentCodes) {
         impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_exc_register"],
@@ -368,54 +280,45 @@ bool CodeGen::generate(dragon::Module& entryModule,
              llvm::ConstantInt::get(impl_->i64Type, parentCode)});
     }
 
-    // Phase 5: Register per-class dealloc + traverse functions and store class_ids
     for (auto& dci : impl_->deferredClassInits) {
         auto* fnPtr = impl_->builder->CreateBitCast(dci.deallocFn, impl_->i8PtrType);
         auto* classId = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_class_register_dealloc"], {fnPtr}, "classid");
         impl_->builder->CreateStore(classId, dci.classIdGlobal);
-        // Register traverse function with same class_id
         if (dci.traverseFn) {
             auto* travPtr = impl_->builder->CreateBitCast(dci.traverseFn, impl_->i8PtrType);
             impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_class_register_traverse"], {classId, travPtr});
         }
-        // Register clear function with same class_id (cycle collector)
         if (dci.clearFn) {
             auto* clearPtr = impl_->builder->CreateBitCast(dci.clearFn, impl_->i8PtrType);
             impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_class_register_clear"], {classId, clearPtr});
         }
-        // D018: Register SHARED-mark function with same class_id
         if (dci.markSharedFn) {
             auto* msPtr = impl_->builder->CreateBitCast(dci.markSharedFn, impl_->i8PtrType);
             impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_class_register_mark_shared"], {classId, msPtr});
         }
 
-        // Decision 025: Create class descriptor after class_id is known
         {
-            std::string className = dci.className;            // bare (for metadata maps)
-            const std::string& clsSym = dci.classSymPrefix;   // <mod>__<className> (for LLVM symbols)
+            std::string className = dci.className;
+            const std::string& clsSym = dci.classSymPrefix;
 
-            // Find the constructor function pointer
             llvm::Value* ctorPtr = nullptr;
             auto ctorCountIt = impl_->classCtorCountBySym.find(clsSym);
             bool isMultiCtor = (ctorCountIt != impl_->classCtorCountBySym.end() && ctorCountIt->second > 1);
 
             if (isMultiCtor) {
-                // Multi-constructor: generate a dispatch wrapper that switches on nargs
                 std::string dispatchName = clsSym + "__dispatch";
                 auto* dispatchFn = impl_->module->getFunction(dispatchName);
                 if (!dispatchFn) {
-                    // i8* dispatch(i64* args, i64 nargs) - returns instance ptr
                     auto* dispatchFnType = llvm::FunctionType::get(
                         impl_->i8PtrType, {impl_->i8PtrType, impl_->i64Type}, false);
                     dispatchFn = llvm::Function::Create(
                         dispatchFnType, llvm::Function::InternalLinkage,
                         dispatchName, impl_->module.get());
 
-                    // Save current insert point
                     auto* savedBlock = impl_->builder->GetInsertBlock();
                     auto* savedPoint = impl_->builder->GetInsertPoint() != impl_->builder->GetInsertBlock()->end()
                         ? &*impl_->builder->GetInsertPoint() : nullptr;
@@ -443,7 +346,6 @@ bool CodeGen::generate(dragon::Module& entryModule,
                             caseBlock);
 
                         impl_->builder->SetInsertPoint(caseBlock);
-                        // Load args from array and call the specific _new_N
                         std::vector<llvm::Value*> callArgs;
                         auto newFnType = newFn->getFunctionType();
                         for (size_t ai = 0; ai < arity; ai++) {
@@ -459,13 +361,11 @@ bool CodeGen::generate(dragon::Module& entryModule,
                         impl_->builder->CreateRet(result);
                     }
 
-                    // Default: call first overload with 0 args (or return null)
                     impl_->builder->SetInsertPoint(defaultBlock);
                     impl_->builder->CreateRet(
                         llvm::ConstantPointerNull::get(
                             llvm::PointerType::getUnqual(*impl_->context)));
 
-                    // Restore insert point
                     if (savedBlock) {
                         if (savedPoint)
                             impl_->builder->SetInsertPoint(savedBlock, savedPoint->getIterator());
@@ -473,11 +373,8 @@ bool CodeGen::generate(dragon::Module& entryModule,
                             impl_->builder->SetInsertPoint(savedBlock);
                     }
                 }
-                // The dispatch wrapper returns i8*; descriptor_call expects i64 return.
-                // Cast dispatch fn ptr to i64 for the descriptor's constructor field.
                 ctorPtr = impl_->builder->CreatePtrToInt(dispatchFn, impl_->i64Type);
             } else {
-                // Single constructor: use <mod>__<className>_new directly
                 std::string newName = clsSym + "_new";
                 auto* newFn = impl_->module->getFunction(newName);
                 if (newFn) {
@@ -487,13 +384,9 @@ bool CodeGen::generate(dragon::Module& entryModule,
                 }
             }
 
-            // Look up parent descriptor (if class has a parent). Resolve the
-            // parent's owning module so two same-named parents from different
-            // modules don't last-write-wins through the bare-keyed map.
             llvm::Value* parentDesc = llvm::ConstantInt::get(impl_->i64Type, 0);
             auto parentIt = impl_->classParentNamesBySym.find(clsSym);
             if (parentIt != impl_->classParentNamesBySym.end()) {
-                // Parent entry IS its sym; the descriptor symbol is direct.
                 const std::string& parentSym = parentIt->second;
                 auto* parentDescGlobal = impl_->module->getNamedGlobal(parentSym + "__descriptor");
                 if (!parentDescGlobal) {
@@ -507,30 +400,22 @@ bool CodeGen::generate(dragon::Module& entryModule,
                 }
             }
 
-            // Create the name string as a global constant. The string is the
-            // bare class name (user-visible); the GLOBAL's symbol uses the
-            // mangled prefix to avoid collision when two same-named classes
-            // both reach this point.
             auto* nameStr = impl_->builder->CreateGlobalString(className, clsSym + "__name");
             auto* namePtr = impl_->builder->CreateBitCast(nameStr, impl_->i8PtrType);
 
-            // Use the per-instance descriptor pointer captured at visit time.
-            // This bypasses the bare-keyed classDescriptorGlobals last-wins
-            // and guarantees this dci writes into ITS module's descriptor.
             llvm::GlobalVariable* descGlobal = dci.descriptorGlobal;
             if (!descGlobal) {
-                // Defensive fallback (shouldn't happen for RC classes).
+                impl_->addError(
+                    "internal error: class '" + className +
+                    "' has no descriptor global; reflection metadata would "
+                    "have been written to a fresh unused slot");
                 descGlobal = new llvm::GlobalVariable(
-                    *impl_->module, impl_->i64Type, /*isConstant=*/false,
+                    *impl_->module, impl_->i64Type, false,
                     llvm::GlobalValue::InternalLinkage,
                     llvm::ConstantInt::get(impl_->i64Type, 0),
                     clsSym + "__descriptor");
             }
 
-            // Resolve the class docstring (if any) - emit it as a `.rodata`
-            // global C string so the descriptor's `doc` field is a plain
-            // const-char pointer. NULL when there's no docstring; that flows
-            // through the niche-ptr Optional[str] ABI as `None`.
             llvm::Value* docPtr = llvm::ConstantPointerNull::get(
                 llvm::cast<llvm::PointerType>(impl_->i8PtrType));
             auto docIt = impl_->classDocstringsBySym.find(clsSym);
@@ -540,28 +425,19 @@ bool CodeGen::generate(dragon::Module& entryModule,
                 docPtr = impl_->builder->CreateBitCast(docStr, impl_->i8PtrType);
             }
 
-            // Call dragon_class_descriptor_create(name, ctor, class_id, parent_desc, doc)
             auto* descVal = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_class_descriptor_create"],
                 {namePtr, ctorPtr, classId, parentDesc, docPtr}, clsSym + "_desc");
             impl_->builder->CreateStore(descVal, descGlobal);
 
-            // Emit field metadata for hasattr()/getattr() reflection
             auto fieldIt = impl_->classFieldIndicesBySym.find(clsSym);
             if (fieldIt != impl_->classFieldIndicesBySym.end() && !fieldIt->second.empty()) {
                 size_t nfields = fieldIt->second.size();
-                // Build sorted field list (deterministic order)
                 std::vector<std::pair<std::string, unsigned>> fieldList(
                     fieldIt->second.begin(), fieldIt->second.end());
                 std::sort(fieldList.begin(), fieldList.end(),
                     [](auto& a, auto& b) { return a.second < b.second; });
 
-                // Emit global constant arrays: field names (i8*[]), BYTE offsets
-                // (i64[]) and field byte widths (i64[]). getattr reads exactly
-                // `width` bytes at `offset`; fields are native-typed (bool=i1,
-                // float=f64), so the runtime must know the real byte offset and
-                // width rather than assume an 8-byte GEP slot - otherwise a
-                // narrow field misaligns or over-reads the allocation.
                 const llvm::DataLayout& dl = impl_->module->getDataLayout();
                 llvm::StructType* clsStruct = nullptr;
                 auto cstIt = impl_->classStructTypesBySym.find(clsSym);
@@ -573,32 +449,38 @@ bool CodeGen::generate(dragon::Module& entryModule,
                 for (auto& [fname, foffset] : fieldList) {
                     nameConsts.push_back(
                         impl_->builder->CreateGlobalString(fname, clsSym + "_fn_" + fname));
-                    // foffset is the LLVM struct element index. Translate to a
-                    // byte offset + the element's byte width via the layout.
-                    int64_t byteOff = (int64_t)foffset * 8;  // fallback if no layout
-                    int64_t byteW = 8;
+                    int64_t byteOff;
+                    int64_t byteW;
                     if (sl && clsStruct && foffset < clsStruct->getNumElements()) {
                         byteOff = (int64_t)sl->getElementOffset((unsigned)foffset);
                         byteW = (int64_t)dl.getTypeAllocSize(
                             clsStruct->getElementType((unsigned)foffset));
+                    } else {
+                        impl_->addError(
+                            "internal error: struct layout for class '" + className +
+                            "' is missing field '" + fname +
+                            "'; getattr/hasattr offsets would have been guessed "
+                            "at 8 bytes per field");
+                        byteOff = (int64_t)foffset * 8;
+                        byteW = 8;
                     }
                     offsetConsts.push_back(llvm::ConstantInt::get(impl_->i64Type, byteOff));
                     widthConsts.push_back(llvm::ConstantInt::get(impl_->i64Type, byteW));
                 }
                 auto* nameArrayType = llvm::ArrayType::get(impl_->i8PtrType, nfields);
                 auto* nameArray = new llvm::GlobalVariable(
-                    *impl_->module, nameArrayType, /*isConstant=*/true,
+                    *impl_->module, nameArrayType, true,
                     llvm::GlobalValue::InternalLinkage,
                     llvm::ConstantArray::get(nameArrayType, nameConsts),
                     clsSym + "__field_names");
                 auto* offsetArrayType = llvm::ArrayType::get(impl_->i64Type, nfields);
                 auto* offsetArray = new llvm::GlobalVariable(
-                    *impl_->module, offsetArrayType, /*isConstant=*/true,
+                    *impl_->module, offsetArrayType, true,
                     llvm::GlobalValue::InternalLinkage,
                     llvm::ConstantArray::get(offsetArrayType, offsetConsts),
                     clsSym + "__field_offsets");
                 auto* widthArray = new llvm::GlobalVariable(
-                    *impl_->module, offsetArrayType, /*isConstant=*/true,
+                    *impl_->module, offsetArrayType, true,
                     llvm::GlobalValue::InternalLinkage,
                     llvm::ConstantArray::get(offsetArrayType, widthConsts),
                     clsSym + "__field_widths");
@@ -615,11 +497,6 @@ bool CodeGen::generate(dragon::Module& entryModule,
                      llvm::ConstantInt::get(impl_->i64Type, (int64_t)nfields)});
             }
 
-            // D033: Emit method-name reflection metadata. Each class
-            // advertises its OWN methods; dragon_class_find_method walks the
-            // parent chain at lookup time, mirroring how _find_field_offset
-            // does it for fields. Skipped when the class has no own
-            // non-__init__ methods (e.g. data-only classes).
             auto ownMethodsIt = impl_->classOwnMethodsBySym.find(clsSym);
             if (ownMethodsIt != impl_->classOwnMethodsBySym.end() &&
                 !ownMethodsIt->second.empty()) {
@@ -648,20 +525,20 @@ bool CodeGen::generate(dragon::Module& entryModule,
                 size_t nmethods = ownMethods.size();
                 auto* mNameArrTy = llvm::ArrayType::get(impl_->i8PtrType, nmethods);
                 auto* mNameArr = new llvm::GlobalVariable(
-                    *impl_->module, mNameArrTy, /*isConstant=*/true,
+                    *impl_->module, mNameArrTy, true,
                     llvm::GlobalValue::InternalLinkage,
                     llvm::ConstantArray::get(mNameArrTy, mNameConsts),
                     clsSym + "__method_names");
                 auto* mFnArrTy = llvm::ArrayType::get(impl_->i8PtrType, nmethods);
                 auto* mFnArr = new llvm::GlobalVariable(
-                    *impl_->module, mFnArrTy, /*isConstant=*/true,
+                    *impl_->module, mFnArrTy, true,
                     llvm::GlobalValue::InternalLinkage,
                     llvm::ConstantArray::get(mFnArrTy, mFnConsts),
                     clsSym + "__method_fn_ptrs");
                 auto* mKindArrTy = llvm::ArrayType::get(
                     llvm::Type::getInt8Ty(*impl_->context), nmethods);
                 auto* mKindArr = new llvm::GlobalVariable(
-                    *impl_->module, mKindArrTy, /*isConstant=*/true,
+                    *impl_->module, mKindArrTy, true,
                     llvm::GlobalValue::InternalLinkage,
                     llvm::ConstantArray::get(mKindArrTy, mKindConsts),
                     clsSym + "__method_kinds");
@@ -673,11 +550,6 @@ bool CodeGen::generate(dragon::Module& entryModule,
                     {descVal, mNamePtr, mFnPtr, mKindPtr,
                      llvm::ConstantInt::get(impl_->i64Type, (int64_t)nmethods)});
 
-                // D033 Phase 3: parallel bound-thunks array. Same length as
-                // method_names; NULL slots for static methods are fine because
-                // dragon_getattr only consults this array for instance/class
-                // methods (kind 0 / 2). Emitted only when at least one thunk
-                // exists, to skip the work for purely-static classes.
                 auto thunkMapIt = impl_->classMethodBoundThunksBySym.find(clsSym);
                 bool anyThunk = false;
                 if (thunkMapIt != impl_->classMethodBoundThunksBySym.end()) {
@@ -700,7 +572,7 @@ bool CodeGen::generate(dragon::Module& entryModule,
                     }
                     auto* mThunkArrTy = llvm::ArrayType::get(impl_->i8PtrType, nmethods);
                     auto* mThunkArr = new llvm::GlobalVariable(
-                        *impl_->module, mThunkArrTy, /*isConstant=*/true,
+                        *impl_->module, mThunkArrTy, true,
                         llvm::GlobalValue::InternalLinkage,
                         llvm::ConstantArray::get(mThunkArrTy, thunkConsts),
                         clsSym + "__method_bound_thunks");
@@ -711,21 +583,14 @@ bool CodeGen::generate(dragon::Module& entryModule,
                         {descVal, mThunkPtr});
                 }
             }
-
-            // Class decorators (6.11) are NOT applied here - they run at the
-            // class's source position during entry-module-body processing so
-            // module-level globals referenced by the decorator are already
-            // initialized.
         }
     }
 
-    // Emit deferred static field initializers (collected from dep classes before main existed)
     for (auto& dsi : impl_->deferredStaticInits) {
         dsi.valueExpr->accept(*this);
         llvm::Value* val = impl_->lastValue;
         llvm::Type* fieldType = dsi.gv->getValueType();
 
-        // Type coercion to match the global's type
         if (val->getType() != fieldType) {
             if (fieldType == impl_->f64Type && val->getType() == impl_->i64Type)
                 val = impl_->builder->CreateSIToFP(val, impl_->f64Type);
@@ -738,19 +603,8 @@ bool CodeGen::generate(dragon::Module& entryModule,
         impl_->builder->CreateStore(val, dsi.gv);
     }
 
-    // Record the scope depth at module top level: declarations directly here
-    // (dependency AND entry module top-level) are module globals; declarations
-    // nested in a block scope (if/for/while) are block-locals, not globals.
-    // Captured BEFORE the dependency-init loop so dep-module consts/vars are
-    // gated as globals too (their init runs at this same top-level depth).
     impl_->moduleBodyScopeDepth = impl_->scopes.size();
 
-    // Emit dependency module top-level variable declarations (const/var).
-    // These create module globals that dependency functions can reference.
-    // currentModuleName is restored per dep so any same-module function
-    // call inside the initializer (e.g. `const TBL = _build()` where
-    // `_build` is private to the dep) resolves to the dep's mangled
-    // symbol instead of falling through to the bare name.
     for (auto* dep : depModules) {
         impl_->currentModuleName = dep->moduleName;
         for (auto& stmt : dep->body) {
@@ -761,15 +615,6 @@ bool CodeGen::generate(dragon::Module& entryModule,
     }
     impl_->currentModuleName = "";
 
-    // B Phase 1: decide which class constructions can be stack-allocated. Runs
-    // after class/function forward-declaration (classNames populated) and class
-    // bodies (classFieldKinds populated for the scalar-only gate at the fork),
-    // before any entry-body statement is lowered.
-    impl_->computeStackAllocSites(entryModule);
-
-    // Generate entry module code (skip ClassDecl bodies - already emitted pre-main).
-    // For decorated classes, apply decorators at the class's source position so
-    // any module-level state the decorator depends on is already initialized.
     for (auto& stmt : entryModule.body) {
         if (auto* cd = dynamic_cast<ClassDecl*>(stmt.get())) {
             if (impl_->decoratedClassesBySym.count(impl_->classSym(cd->name))) {
@@ -819,13 +664,6 @@ bool CodeGen::generate(dragon::Module& entryModule,
         stmt->accept(*this);
     }
 
-    // 4.7: emit one-shot init for non-ASCII string literals at the FRONT of
-    // module-main's entry block. Each literal becomes a dragon_str_intern
-    // call whose result (immortal heap DragonString) is stored into a
-    // per-literal i8* global. Use sites elsewhere just emit a load - zero
-    // per-access cost. Module-main is guaranteed to run because user
-    // functions named "main" are mangled (see Impl::userFuncName) so they
-    // never collide with the C entry point.
     if (!impl_->utf8LiteralOrder.empty()) {
         auto* savedBB = impl_->builder->GetInsertBlock();
         auto* mainEntry = &impl_->mainFunction->getEntryBlock();
@@ -843,13 +681,11 @@ bool CodeGen::generate(dragon::Module& entryModule,
         impl_->builder->SetInsertPoint(savedBB);
     }
 
-    // Add return 0 to main if the block isn't already terminated
     if (!impl_->builder->GetInsertBlock()->getTerminator()) {
         impl_->builder->CreateRet(
             llvm::ConstantInt::get(llvm::Type::getInt32Ty(*impl_->context), 0));
     }
 
-    // Verify the module
     std::string verifyErr;
     llvm::raw_string_ostream verifyStream(verifyErr);
     if (llvm::verifyModule(*impl_->module, &verifyStream)) {
@@ -904,13 +740,8 @@ bool CodeGen::compileToObject(const std::string& filename) {
 
     impl_->module->setDataLayout(targetMachine->createDataLayout());
 
-    // Run optimization passes (new PassManager)
     impl_->runOptimizationPasses();
 
-    // Debug: dump post-optimization IR when DRAGON_DUMP_IR=opt. The Driver's
-    // pre-optimization dump (DRAGON_DUMP_IR=1) runs before this call, so the
-    // -O2 result is invisible there; this captures the IR the backend actually
-    // lowers. Path optional via DRAGON_IR_FILE (shared with the pre-opt dump).
     if (const char* mode = std::getenv("DRAGON_DUMP_IR")) {
         if (std::string(mode) == "opt") {
             const char* irFile = std::getenv("DRAGON_IR_FILE");
@@ -940,10 +771,6 @@ bool CodeGen::compileToObject(const std::string& filename) {
     return true;
 }
 
-// ADR 041 - run a subprocess (compiler/linker driver) by argv. Returns true on
-// a clean exit(0). Shared by --cc-source shim compilation and the final link;
-// on POSIX it fork/execvp's (no shell, no injection), on Windows it _spawnvp's.
-// The child's stderr is merged into stdout so the user sees tool diagnostics.
 static bool runTool(const std::vector<std::string>& args) {
     std::vector<const char*> argv;
     for (const auto& a : args) argv.push_back(a.c_str());
@@ -958,7 +785,7 @@ static bool runTool(const std::vector<std::string>& args) {
     if (pid == 0) {
         dup2(STDOUT_FILENO, STDERR_FILENO);
         execvp(argv[0], const_cast<char* const*>(argv.data()));
-        _exit(127);  // execvp failed (tool not found on PATH)
+        _exit(127);
     }
     int status = 0;
     waitpid(pid, &status, 0);
@@ -967,9 +794,6 @@ static bool runTool(const std::vector<std::string>& args) {
 }
 
 #if !defined(_WIN32)
-// D031 - run a subprocess and capture its stdout (pkg-config queries for the
-// webview shell). Returns true on a clean exit(0) with `out` holding the raw
-// stdout text. Same no-shell fork/execvp discipline as runTool.
 static bool runToolCapture(const std::vector<std::string>& args,
                            std::string& out) {
     std::vector<const char*> argv;
@@ -988,7 +812,7 @@ static bool runToolCapture(const std::vector<std::string>& args,
         dup2(fds[1], STDOUT_FILENO);
         close(fds[1]);
         execvp(argv[0], const_cast<char* const*>(argv.data()));
-        _exit(127);  // execvp failed (tool not found on PATH)
+        _exit(127);
     }
     close(fds[1]);
     out.clear();
@@ -1001,7 +825,6 @@ static bool runToolCapture(const std::vector<std::string>& args,
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
-// Split pkg-config output into whitespace-separated flag tokens.
 static std::vector<std::string> splitFlagTokens(const std::string& s) {
     std::vector<std::string> toks;
     size_t i = 0;
@@ -1020,8 +843,6 @@ static std::vector<std::string> splitFlagTokens(const std::string& s) {
 }
 #endif
 
-// ADR 041 - does this --cc-source path name a C++ translation unit? Selects the
-// per-file compiler (c++ vs cc) and, transitively, the final link driver.
 static bool isCxxSource(const std::string& path) {
     auto dot = path.rfind('.');
     if (dot == std::string::npos) return false;
@@ -1032,9 +853,6 @@ static bool isCxxSource(const std::string& path) {
 
 bool CodeGen::linkExecutable(const std::string& outputFile,
                               const std::string& objectFile) {
-    // ADR 041 - compile any --cc-source FFI shims to temp objects first, so we
-    // know whether a C++ translation unit is present before choosing the link
-    // driver. Temp objects are anchored off objectFile's (writable temp) path.
     std::vector<std::string> shimObjects;
     bool anyCxxShim = false;
     for (size_t i = 0; i < impl_->options.ccSources.size(); ++i) {
@@ -1065,17 +883,87 @@ bool CodeGen::linkExecutable(const std::string& outputFile,
         shimObjects.push_back(shimObj);
     }
 
-    // D031 `import ui` - auto-compile and link the platform webview shell.
-    // The shell (stdlib/ui/desktop/webview_linux.cpp) is deliberately NOT in
-    // the runtime archive, so non-UI binaries never carry GTK/webkit. When the
-    // program references dragon_webview_* externs, compile the shell in like a
-    // --cc-source shim, with GTK/webkit include and link flags resolved via
-    // pkg-config. A user-supplied webview --cc-source (a custom or patched
-    // shell, the pre-auto-link recipe from docs 1802) takes precedence: any
-    // shim whose basename mentions "webview" skips the auto path entirely.
+#if defined(__APPLE__)
+#define DRAGON_WEBVIEW_SHIM_NAME "platform/webview_macos.mm"
+#else
+#define DRAGON_WEBVIEW_SHIM_NAME "platform/webview_linux.cpp"
+#endif
     std::vector<std::string> webviewLinkTokens;
-#if !defined(_WIN32) && !defined(__APPLE__)
+#if !defined(_WIN32)
     if (impl_->needsWebview) {
+        {
+            namespace fs = std::filesystem;
+            struct AssetEntry {
+                std::string rel;
+                std::string array;
+                unsigned long len;
+            };
+            std::vector<AssetEntry> entries;
+            std::string assetSrc = objectFile + ".uiassets.cpp";
+            std::ofstream out(assetSrc, std::ios::binary);
+            out << "// generated by dragon: assets embedded for the app:// "
+                   "scheme (D031)\n";
+            out << "extern \"C\" {\n";
+            out << "typedef struct { const char* path; const unsigned char* "
+                   "data; unsigned long len; } DragonUiAsset;\n";
+            if (!impl_->options.assetsDir.empty()) {
+                std::vector<fs::path> files;
+                std::error_code ec;
+                for (fs::recursive_directory_iterator
+                         it(impl_->options.assetsDir, ec), end;
+                     !ec && it != end; it.increment(ec)) {
+                    if (it->is_regular_file(ec)) files.push_back(it->path());
+                }
+                std::sort(files.begin(), files.end());
+                size_t idx = 0;
+                for (const auto& f : files) {
+                    std::ifstream in(f, std::ios::binary);
+                    if (!in) continue;
+                    std::string bytes((std::istreambuf_iterator<char>(in)),
+                                      std::istreambuf_iterator<char>());
+                    AssetEntry e;
+                    e.rel = fs::relative(f, impl_->options.assetsDir, ec)
+                                .generic_string();
+                    if (ec) continue;
+                    e.array = "dragon__ui_asset_" + std::to_string(idx++);
+                    e.len = (unsigned long) bytes.size();
+                    out << "static const unsigned char " << e.array << "[] = {";
+                    for (size_t i = 0; i < bytes.size(); ++i) {
+                        if (i % 24 == 0) out << "\n";
+                        out << (unsigned) (unsigned char) bytes[i] << ",";
+                    }
+                    out << "0};\n";
+                    entries.push_back(std::move(e));
+                }
+            }
+            out << "extern const DragonUiAsset dragon_ui_assets[] = {\n";
+            for (const auto& e : entries) {
+                out << "  {\"";
+                for (char c : e.rel) {
+                    if (c == '"' || c == '\\') out << '\\';
+                    out << c;
+                }
+                out << "\", " << e.array << ", " << e.len << "},\n";
+            }
+            out << "  {0, 0, 0}\n};\n";
+            out << "extern const unsigned long dragon_ui_asset_count = "
+                << entries.size() << ";\n";
+            out << "}\n";
+            out.close();
+            std::string assetObj = objectFile + ".uiassets.o";
+            std::vector<std::string> cc = {"c++",  "-c", assetSrc, "-o",
+                                           assetObj, "-fPIC"};
+            bool ok = runTool(cc);
+            std::remove(assetSrc.c_str());
+            if (!ok) {
+                impl_->addError(
+                    "import ui: failed to compile the embedded-assets object");
+                for (const auto& o : shimObjects) std::remove(o.c_str());
+                return false;
+            }
+            shimObjects.push_back(assetObj);
+            anyCxxShim = true;
+        }
         bool userShell = false;
         for (const auto& src : impl_->options.ccSources) {
             auto slash = src.find_last_of("/\\");
@@ -1090,14 +978,16 @@ bool CodeGen::linkExecutable(const std::string& outputFile,
             if (impl_->options.webviewShimPath.empty()) {
                 impl_->addError(
                     "import ui: cannot locate the webview shell source "
-                    "(stdlib/ui/desktop/webview_linux.cpp) next to the "
-                    "stdlib");
+                    "(" DRAGON_WEBVIEW_SHIM_NAME ") in the platform/ tree "
+                    "installed beside the stdlib");
                 for (const auto& o : shimObjects) std::remove(o.c_str());
                 return false;
             }
-            // webkit2gtk-4.1 (libsoup3) is the primary target; 4.0 is
-            // API-compatible for everything the shell uses and covers older
-            // distros that never shipped 4.1.
+            std::string cflags, libs;
+#if defined(__APPLE__)
+            cflags = "-fobjc-arc";
+            libs = "-framework Cocoa -framework WebKit";
+#else
             std::string pkg;
             for (const char* cand : {"webkit2gtk-4.1", "webkit2gtk-4.0"}) {
                 if (runTool({"pkg-config", "--exists", cand})) {
@@ -1105,7 +995,6 @@ bool CodeGen::linkExecutable(const std::string& outputFile,
                     break;
                 }
             }
-            std::string cflags, libs;
             if (pkg.empty() ||
                 !runToolCapture({"pkg-config", "--cflags", pkg}, cflags) ||
                 !runToolCapture({"pkg-config", "--libs", pkg}, libs)) {
@@ -1115,11 +1004,12 @@ bool CodeGen::linkExecutable(const std::string& outputFile,
                     "webkit2gtk-4.0). Install the development package "
                     "(Debian/Ubuntu: libwebkit2gtk-4.1-dev, Fedora: "
                     "webkit2gtk4.1-devel), or compile the shell yourself "
-                    "with --cc-source stdlib/ui/desktop/webview_linux.cpp "
+                    "with --cc-source platform/webview_linux.cpp "
                     "plus matching -I/-l flags (docs: 1802-windows)");
                 for (const auto& o : shimObjects) std::remove(o.c_str());
                 return false;
             }
+#endif
             std::string shimObj = objectFile + ".webview.o";
             std::vector<std::string> cc;
             cc.push_back("c++");
@@ -1142,19 +1032,13 @@ bool CodeGen::linkExecutable(const std::string& outputFile,
             shimObjects.push_back(shimObj);
             anyCxxShim = true;
             webviewLinkTokens = splitFlagTokens(libs);
-            impl_->needsPthread = true;  // the shell's loop serves fire/timers
+            impl_->needsPthread = true;
         }
     }
 #endif
 
-    // Build argv for the compiler driver. A C++ shim forces the C++ driver so
-    // libstdc++, static initializers, and exception/RTTI tables link correctly
-    // (bare `cc ... -lstdc++` is fragile for those). We avoid shell injection on
-    // POSIX by using execvp; on Windows we _spawnvp which takes argv directly.
     bool useCxxDriver = anyCxxShim;
 #ifdef DRAGON_ASAN_BUILD
-    // The instrumented runtime is C++ and needs libstdc++; the c++ driver pulls
-    // it (and the ASan runtime) cleanly. DEBUG-ONLY, compiled out otherwise.
     useCxxDriver = true;
 #endif
     std::vector<std::string> args;
@@ -1168,35 +1052,24 @@ bool CodeGen::linkExecutable(const std::string& outputFile,
     args.push_back(objectFile);
     for (const auto& o : shimObjects) args.push_back(o);
 #ifdef DRAGON_ASAN_BUILD
-    // DEBUG-ONLY (CMake -DDRAGON_ASAN=ON): runtimeLibPath already points at the
-    // instrumented runtime twin; add the sanitizer link flags so the compiled
-    // program is AddressSanitizer-checked. The `cc` driver doesn't pull
-    // libstdc++, so it's named explicitly. This `#ifdef` is compiled out
-    // entirely in a normal build - zero effect on shipped binaries.
     args.push_back("-fsanitize=address");
     args.push_back("-fno-omit-frame-pointer");
 #endif
     if (!impl_->options.runtimeLibPath.empty()) {
         args.push_back(impl_->options.runtimeLibPath);
     }
-    // Always link llhttp (runtime depends on it for HTTP parsing)
     if (!impl_->options.llhttpLibPath.empty()) {
         args.push_back(impl_->options.llhttpLibPath);
     }
-    // Link bundled sqlite3 if the program uses sqlite3 functions
     if (!impl_->options.sqlite3LibPath.empty() && impl_->needsSqlite3) {
         args.push_back(impl_->options.sqlite3LibPath);
 #if !defined(__APPLE__) && !defined(_WIN32)
         args.push_back("-ldl");
 #endif
     }
-    // Link bundled PCRE2 if the program uses pcre2 functions
     if (!impl_->options.pcre2LibPath.empty() && impl_->needsPcre2) {
         args.push_back(impl_->options.pcre2LibPath);
     }
-    // Link bundled mbedTLS if the program uses TLS. Placed after the runtime
-    // archive so the linker resolves runtime_tls.o's mbedtls_* references
-    // (mbedTLS is self-contained, so no back-reference into the runtime).
     if (!impl_->options.mbedtlsLibPath.empty() && impl_->needsMbedtls) {
         args.push_back(impl_->options.mbedtlsLibPath);
     }
@@ -1206,15 +1079,7 @@ bool CodeGen::linkExecutable(const std::string& outputFile,
 #if !defined(_WIN32)
     args.push_back("-lm");
 #endif
-    // zlib + zstd: dragon_runtime exports compression entry points
-    // (dragon_zlib_*, dragon_zstd_*) that depend on the system libz /
-    // libzstd. Gate on needsZ / needsZstd (set by forwardDeclareFunctions
-    // when an extern decl references those prefixes) so programs that
-    // never touch compression don't link against unused system libs -
-    // mirrors the sqlite3 / pcre2 gating pattern.
 #ifdef __APPLE__
-    // Dev-tree fallback when no bundled archive resolved: arm64 brew's
-    // /opt/homebrew is not on the default search path.
     if (impl_->needsZstd && impl_->options.zstdLibPath.empty()) {
         args.push_back("-L/opt/homebrew/lib");
         args.push_back("-L/usr/local/lib");
@@ -1223,7 +1088,6 @@ bool CodeGen::linkExecutable(const std::string& outputFile,
     if (impl_->needsZ) {
         args.push_back("-lz");
     }
-    // Bundled static archive on macOS (no system libzstd there); -lzstd on Linux.
     if (impl_->needsZstd) {
         if (!impl_->options.zstdLibPath.empty()) {
             args.push_back(impl_->options.zstdLibPath);
@@ -1234,18 +1098,14 @@ bool CodeGen::linkExecutable(const std::string& outputFile,
     for (const auto& lib : impl_->options.linkedLibraries) {
         args.push_back("-l" + lib);
     }
-    // Auto-link libraries from extern "C" from "lib" { } hints
     for (const auto& lib : impl_->externLibs) {
         args.push_back("-l" + lib);
     }
-    // D031: webkit2gtk link flags (pkg-config --libs) for `import ui`.
     for (const auto& tok : webviewLinkTokens) {
         args.push_back(tok);
     }
 
 #if defined(_WIN32)
-    // Windows MinGW: dlopen lives in libdl on POSIX but is in libdl/winpthread
-    // on MinGW. Threading and sockets need explicit libs.
     if (impl_->needsPthread) {
         args.push_back("-lpthread");
     }
@@ -1254,21 +1114,19 @@ bool CodeGen::linkExecutable(const std::string& outputFile,
     args.push_back("-lpsapi");
     args.push_back("-luserenv");
 #elif defined(__APPLE__)
-    // macOS: dlopen is in libSystem; pthreads is in libSystem too. No -ldl,
-    // no explicit -lpthread (linker handles it).
     if (impl_->needsPthread) {
         args.push_back("-lpthread");
     }
 #else
-    // Linux / generic POSIX
     if (impl_->needsPthread) {
         args.push_back("-lpthread");
     }
+#if !defined(__OpenBSD__)
     args.push_back("-ldl");
+#endif
 #endif
 
     bool ok = runTool(args);
-    // Clean up the temp shim objects regardless of link outcome.
     for (const auto& o : shimObjects) std::remove(o.c_str());
     if (!ok) {
         impl_->addError("Linking failed");
@@ -1288,10 +1146,6 @@ bool CodeGen::hasErrors() const {
     return false;
 }
 
-//===----------------------------------------------------------------------===//
-// Visitor: Type Expressions (no-op in codegen)
-//===----------------------------------------------------------------------===//
-
 void CodeGen::visit(NamedTypeExpr&) {}
 void CodeGen::visit(GenericTypeExpr&) {}
 void CodeGen::visit(OptionalTypeExpr&) {}
@@ -1299,4 +1153,4 @@ void CodeGen::visit(UnionTypeExpr&) {}
 void CodeGen::visit(CallableTypeExpr&) {}
 void CodeGen::visit(TupleTypeExpr&) {}
 
-} // namespace dragon
+}

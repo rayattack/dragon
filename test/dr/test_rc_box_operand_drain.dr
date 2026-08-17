@@ -11,8 +11,8 @@ class BoxOperandDrainRC(TestCase) {
         a: Any = b"xy"
         i: int = 0
         while i < 2000 {
-            r: Any = a + mk()          # owned call-result operand
-            s: Any = a + b"z"          # owned bytes-literal operand
+            r: Any = a + mk()
+            s: Any = a + b"z"
             self.assertEqual(r, b"xyz")
             self.assertEqual(s, b"xyz")
             i = i + 1
@@ -24,7 +24,6 @@ class BoxOperandDrainRC(TestCase) {
         tail: bytes = b"z"
         r: Any = a + tail
         self.assertEqual(r, b"xyz")
-        # tail must still be alive and intact after the op (no over-drain).
         self.assertEqual(len(tail), 1)
     }
 }

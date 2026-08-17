@@ -17,7 +17,6 @@ class CollideGenericMethodsTests(TestCase) {
     }
 
     def test_imported_holder_uses_its_own_template() {
-        # Pre-fix: the stamp landed in one's Holder, so this call had no target.
         self.assertEqual(importer_wrap(), "4#6")
     }
 }

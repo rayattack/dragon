@@ -1,9 +1,9 @@
-"""ui.desktop - desktop windows over the system webview (Decision 031).
+"""ui.desktop - desktop windows over the system webview (D031).
 
 `Window` wraps the platform webview shell (an opaque `ptr` handle) behind a typed
-Dragon API. The shell is selected at link time; on Linux it is webview_linux.cpp
-(GTK3 + webkit2gtk-4.1). The per-platform `extern "C"` surface is intentionally
-flat and stable so the `.dr` layer never changes when a new platform is added.
+Dragon API. The shell is selected at link time from the toolchain's platform/
+tree: webview_linux.cpp (GTK3 + webkit2gtk) or webview_macos.mm (Cocoa +
+WKWebView). The flat `extern "C"` surface below is what a new platform implements.
 """
 
 from html import HTML
@@ -13,6 +13,17 @@ extern "C" def dragon_webview_window_new(title: str, width: intc, height: intc) 
 extern "C" def dragon_webview_load_html(handle: ptr, html: str)
 extern "C" def dragon_webview_show(handle: ptr)
 extern "C" def dragon_webview_close(handle: ptr)
+extern "C" def dragon_webview_enable_inspector(handle: ptr)
+extern "C" def dragon_webview_pick_folder(title: str, start_dir: str) -> str
+
+
+def pick_folder(title: str = "Open Folder", start_dir: str = "") -> str {
+    """Open the OS-native folder chooser (the XDG portal dialog where one is
+    running) and return the chosen absolute path, or "" if the user cancels.
+    Blocks its caller until the dialog settles; call it from an rpc handler -
+    those run on green threads, so the window itself stays live."""
+    return dragon_webview_pick_folder(title, start_dir)
+}
 
 
 class Window {
@@ -33,12 +44,13 @@ class Window {
     handle: ptr
     _body: HTML
 
-    def(title: str, width: int, height: int) {
-        # gtk_init is idempotent; calling it per-window is safe and keeps the
-        # Window self-contained until a dedicated App.init() phase exists.
+    def(title: str, width: int, height: int, inspect: bool = false) {
         dragon_webview_init()
         self.handle = dragon_webview_window_new(title, width, height)
         self._body = HTML("")
+        if inspect {
+            dragon_webview_enable_inspector(self.handle)
+        }
     }
 
     @property
@@ -59,6 +71,13 @@ class Window {
         dragon_webview_show(self.handle)
     }
 
+    def enable_inspector() -> None {
+        """Make this window inspectable; how you open the inspector is platform
+        specific (Linux: right-click "Inspect Element", macOS: Safari's Develop
+        menu). Same switch as `inspect=true` or DRAGON_UI_INSPECT=1."""
+        dragon_webview_enable_inspector(self.handle)
+    }
+
     def close() -> None {
         """Close the window - the same path as the user clicking its close
         button. When the last open window closes, `ui.App.run()` returns.
@@ -66,3 +85,4 @@ class Window {
         dragon_webview_close(self.handle)
     }
 }
+

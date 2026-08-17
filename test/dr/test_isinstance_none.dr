@@ -1,13 +1,3 @@
-# isinstance(x, SomeClass) on an Optional[SomeClass] holding None must be
-# False. It was folded to compile-time True from the static class, so the
-# usual guard pattern
-#
-#   wl: Optional[WriterLock] = self._wlock
-#   if isinstance(wl, WriterLock) { wl.close() }
-#
-# passed for None and the call dereferenced a null receiver (a real SEGV).
-# The static fold now still tests the runtime pointer.
-
 from unittest import TestCase, main
 
 
@@ -49,7 +39,6 @@ class IsinstanceNoneTest(TestCase) {
         self.assertTrue(isinstance(v, Thing))
     }
 
-    # The guard pattern must actually protect the call.
     def test_guarded_call() -> None {
         h: Holder = Holder()
         total: int = 0
@@ -67,7 +56,6 @@ class IsinstanceNoneTest(TestCase) {
         self.assertEqual(total, 42)
     }
 
-    # Subclass instances still satisfy ancestor checks (and None still fails).
     def test_subclass_chain() -> None {
         h: Holder = Holder()
         h.t = SubThing()

@@ -30,7 +30,8 @@ dragon build hello.dr -o hello
 ```
 
 `import ui` is all the build needs to see. The `ui.desktop` shell is a small
-C++ file (`webview_linux.cpp`) wrapping the system webview; the compiler
+C++ file (`platform/webview_linux.cpp`, from the native-shim tree shipped
+beside the stdlib) wrapping the system webview; the compiler
 compiles it in automatically and resolves the GTK/webkit include and link
 flags through `pkg-config` (webkit2gtk-4.1, or 4.0 on older distros). The
 build machine needs the development package (Debian/Ubuntu
@@ -50,6 +51,9 @@ value, the same markup type the template system produces and the web
 framework's `res.body` carries. Assigning it paints the window:
 
 ```dragon
+from html import HTML
+from ui.desktop import Window
+
 win: Window = Window("Hello", 360, 200)
 win.body = template[HTML] { <h1>Hello, Dragon</h1> }   # paints now
 win.body = template[HTML] { <h1>Updated</h1> }         # repaints
@@ -88,6 +92,9 @@ serves them all, and it returns only when the *last* open window closes.
 Closing one of three keeps the other two alive.
 
 ```dragon
+import ui
+from ui.desktop import Window
+
 main_win: Window = Window("Post Office", 800, 600)
 inspector: Window = Window("Inspector", 400, 600)
 main_win.show()
@@ -99,6 +106,10 @@ ui.App.run()   # returns when BOTH windows have been closed
 its close button:
 
 ```dragon
+from ui.desktop import Window
+
+inspector: Window = Window("Inspector", 400, 600)
+
 def dismiss_inspector() -> None {
     inspector.close()
 }
@@ -106,3 +117,37 @@ def dismiss_inspector() -> None {
 
 A closed window stays closed: calling `show()`, `close()`, or assigning
 `body` on it is a no-op. To bring one back, construct a new `Window`.
+
+## Debugging with the Web Inspector
+
+Every window can host WebKit's Web Inspector - the same DOM, console, and
+network panel a browser's devtools give you, pointed at your window's
+document. It is off by default. From code, opt a window in at construction
+or later:
+
+```dragon
+from ui.desktop import Window
+
+win: Window = Window("Hello", 360, 200, inspect = true)   # on from birth
+
+win.enable_inspector()   # make this window inspectable
+```
+
+How you then open the inspector depends on the platform: on Linux the
+window's right-click menu gains "Inspect Element"; on macOS the window
+becomes attachable from Safari's **Develop** menu (Develop > your app >
+the page). There is no programmatic "open the pane now" call - WKWebView
+has no public API for it, so Dragon does not pretend to offer one.
+
+For a build you cannot or do not want to touch, set `DRAGON_UI_INSPECT=1`
+in the environment - every window of the app comes up inspectable, no
+recompile:
+
+```bash
+DRAGON_UI_INSPECT=1 ./hello
+```
+
+The console tab shows anything your view scripts log, plus errors from the
+`window.dr` bridge shim, which makes it the quickest way to see why a
+binding or an [`rpc` call](/docs/1807-the-bridge) is not doing what you
+expect.

@@ -1,0 +1,15 @@
+class FwdStore {
+    n: int
+
+    def(n: int) {
+        self.n = n
+    }
+
+    def close() -> None {
+    }
+}
+
+def fwd_connect(path: str) -> FwdStore {
+    return FwdStore(9)
+}
+

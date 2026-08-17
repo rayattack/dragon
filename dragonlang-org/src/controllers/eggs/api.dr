@@ -1,9 +1,3 @@
-# api.dr - the registry HTTP API the `dragon` CLI talks to.
-#
-# Auth is a bearer publish token (Authorization: Bearer dgn_...), so these
-# endpoints are inherently CSRF-proof. Responses are built as Dragon dicts/lists
-# and serialized with json.dumps - no string concatenation, no manual escaping.
-
 from http.server import Router, Request, Response, Context
 from base64 import b64decode, b64encode
 from json import dumps
@@ -29,7 +23,6 @@ def _fail(res: Response, status: int, msg: str) -> None {
     res.json(dumps(err))
 }
 
-# POST /api/publish?name=..&version=..   body = base64(tarball), desc in header.
 def api_publish(req: Request, res: Response, ctx: Context) -> None {
     const uid: int = AUTH.verify_token(_bearer(req))
     if uid == 0 {
@@ -40,8 +33,6 @@ def api_publish(req: Request, res: Response, ctx: Context) -> None {
     const version: str = req.query_str("version", "")
     const desc: str = req.headers.get("x-egg-description", "")
     const tarball: bytes = b64decode(req.body.encode("utf-8"))
-    # Optional author signature (dragon push --sign): Ed25519 pubkey + detached
-    # signature over the tarball, both hex.
     const signed_by: str = req.headers.get("x-egg-pubkey", "")
     const signature: str = req.headers.get("x-egg-signature", "")
     const r: PublishResult = REG.publish(uid, name, version, desc, tarball, signed_by, signature)
@@ -58,7 +49,6 @@ def api_publish(req: Request, res: Response, ctx: Context) -> None {
     res.json(dumps(out))
 }
 
-# GET /api/packages/:name/:version  -> the tarball bytes
 def api_download(req: Request, res: Response, ctx: Context) -> None {
     const name: str = req.params.get("name", "")
     const version: str = req.params.get("version", "")
@@ -68,19 +58,12 @@ def api_download(req: Request, res: Response, ctx: Context) -> None {
         return
     }
     const v: Version = vers[0]
-    # Security-yank: refuse the bytes (410 Gone) unless the caller explicitly
-    # overrides with ?force=1. A soft-yank (1) still downloads - a pinned hash
-    # must stay reproducible.
     if v.yanked == 2 {
         if req.query_str("force", "") != "1" {
             _fail(res, 410, "security-yanked: " + v.yank_reason)
             return
         }
     }
-    # R2 backend: hand the client a short-lived presigned URL so the bytes
-    # never transit the app. The hash header still rides on the redirect; the
-    # client verifies the digest of whatever it downloads, so the storage
-    # never has to be trusted.
     const url: str = REG.blobs.presign_get(v.hash, 300)
     if len(url) > 0 {
         res.set_header("x-content-hash", v.hash)
@@ -102,7 +85,6 @@ def api_download(req: Request, res: Response, ctx: Context) -> None {
     }
 }
 
-# GET /api/search?q=...
 def api_search(req: Request, res: Response, ctx: Context) -> None {
     const q: str = req.query_str("q", "")
     const results: list[PackageSummary] = REG.search(q)
@@ -122,7 +104,6 @@ def api_search(req: Request, res: Response, ctx: Context) -> None {
     res.json(dumps(out))
 }
 
-# POST /api/yank/:name/:version   (bearer token, owner only)
 def api_yank(req: Request, res: Response, ctx: Context) -> None {
     const uid: int = AUTH.verify_token(_bearer(req))
     if uid == 0 {
@@ -131,7 +112,6 @@ def api_yank(req: Request, res: Response, ctx: Context) -> None {
     }
     const name: str = req.params.get("name", "")
     const version: str = req.params.get("version", "")
-    # ?severity=soft (default) | security ; ?reason=<message shown to clients>
     const sev_str: str = req.query_str("severity", "soft")
     sev: int = 1
     if sev_str == "security" { sev = 2 }
@@ -145,8 +125,6 @@ def api_yank(req: Request, res: Response, ctx: Context) -> None {
     }
 }
 
-# GET /api/eggs/:name  -> JSON version list for the CLI's `grab` to pick from.
-# "latest" is the newest non-yanked version (mirrors search's latest).
 def api_eggs(req: Request, res: Response, ctx: Context) -> None {
     const name: str = req.params.get("name", "")
     const vers: list[Version] = REG.get_versions(name)
@@ -165,7 +143,7 @@ def api_eggs(req: Request, res: Response, ctx: Context) -> None {
         row["yanked"] = v.yanked
         rows.append(row)
         if v.yanked == 0 {
-            latest = v.version   # get_versions is ordered by id, so this ends on the newest live one
+            latest = v.version
         }
         i = i + 1
     }
@@ -177,13 +155,6 @@ def api_eggs(req: Request, res: Response, ctx: Context) -> None {
     res.json(dumps(out))
 }
 
-# GET /api/fetch/:name/:version  -> JSON metadata + receipt for the CLI.
-# With the R2 backend the envelope carries `url` - a short-lived presigned
-# GET the client downloads from directly, so tarball bytes never transit the
-# app. A disk backend inlines `tarball` (base64) instead. Either way the
-# client recomputes sha256 of the bytes it received and verifies it against
-# the hash pinned in dragon.drs plus the transparency receipt - neither the
-# registry nor the storage is ever trusted for integrity.
 def api_fetch(req: Request, res: Response, ctx: Context) -> None {
     const name: str = req.params.get("name", "")
     const version: str = req.params.get("version", "")
@@ -216,9 +187,6 @@ def api_fetch(req: Request, res: Response, ctx: Context) -> None {
         const tarball: bytes = REG.blobs.get(v.hash)
         out["tarball"] = b64encode(tarball).decode("utf-8")
     }
-    # Transparency receipt: the append-only log's leaf for this (name, version).
-    # The client recomputes leaf_hash from (name, version, hash, ts, published_by)
-    # and confirms the log commits to the exact bytes it is installing.
     const leaves: list[LogEntry] = TLOG.leaf_for(name, version)
     if len(leaves) > 0 {
         const lf: LogEntry = leaves[0]
@@ -230,14 +198,12 @@ def api_fetch(req: Request, res: Response, ctx: Context) -> None {
         log["chain_head"] = lf.chain_head
         out["log"] = log
     }
-    # Author signature, if the version was published with `dragon push --sign`.
     const sig: tuple[str, str] = REG.signature_for(name, version)
     out["signed_by"] = sig[0]
     out["signature"] = sig[1]
     res.json(dumps(out))
 }
 
-# GET /api/log/checkpoint -> the Ed25519-signed log head (size + Merkle root).
 def api_log_checkpoint(req: Request, res: Response, ctx: Context) -> None {
     const cp: Checkpoint = TLOG.checkpoint()
     out: dict[str, Any] = {}
@@ -249,8 +215,6 @@ def api_log_checkpoint(req: Request, res: Response, ctx: Context) -> None {
     res.json(dumps(out))
 }
 
-# GET /api/log/inclusion/:name/:version?tree_size=N -> an O(log n) proof that the
-# package's leaf is in the size-N Merkle tree (N defaults to the current size).
 def api_log_inclusion(req: Request, res: Response, ctx: Context) -> None {
     const name: str = req.params.get("name", "")
     const version: str = req.params.get("version", "")
@@ -271,8 +235,6 @@ def api_log_inclusion(req: Request, res: Response, ctx: Context) -> None {
     res.json(dumps(out))
 }
 
-# GET /api/log/consistency?from=M&to=N -> an O(log n) proof the size-M tree is a
-# prefix of the size-N tree (the log only ever appended). `to` defaults to size.
 def api_log_consistency(req: Request, res: Response, ctx: Context) -> None {
     const sz: int = TLOG.size()
     m: int = int(req.query_str("from", "0"))
@@ -287,8 +249,6 @@ def api_log_consistency(req: Request, res: Response, ctx: Context) -> None {
     res.json(dumps(out))
 }
 
-# GET /api/log/pubkey -> the registry's Ed25519 log public key + key_id, so a
-# client can verify checkpoint signatures (and pin the key trust-on-first-use).
 def api_log_pubkey(req: Request, res: Response, ctx: Context) -> None {
     out: dict[str, Any] = {}
     out["ok"] = true
@@ -297,9 +257,6 @@ def api_log_pubkey(req: Request, res: Response, ctx: Context) -> None {
     res.json(dumps(out))
 }
 
-# GET /api/log -> the full append-only log (sequence order) for audit / scan.
-# A client recomputes the chain over these leaves and checks the final head
-# against /api/log/checkpoint, then confirms each installed dep is present.
 def api_log(req: Request, res: Response, ctx: Context) -> None {
     const entries: list[LogEntry] = TLOG.entries()
     rows: list[dict[str, Any]] = []

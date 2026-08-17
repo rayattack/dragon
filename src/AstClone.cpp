@@ -1,9 +1,3 @@
-// Deep-clone utilities for the Decision 044 generics monomorphization engine.
-// See include/dragon/AstClone.h for the contract. Every Expr/Stmt/TypeExpr node
-// type is handled explicitly; a missing case returns nullptr (caught loudly in
-// testing rather than silently dropping a subtree). New AST nodes must be added
-// here - that coupling is the price of a faithful structural clone.
-
 #include "dragon/AstClone.h"
 
 #include <cassert>
@@ -13,31 +7,25 @@
 namespace dragon {
 
 namespace {
-// A missing clone case is an internal compiler error, not a silent drop: the
-// monomorphizer consumes a null clone with `if (!cloned) continue;`, so a new
-// AST node added without an AstClone case would silently omit a stamped
-// statement / null a sub-expression and miscompile the generic instantiation.
-// Fire loudly on every build (stderr) and abort under assertions so tests
-// catch it.
 [[maybe_unused]] std::nullptr_t cloneMissingCase(const char* kind,
                                                  const ASTNode& node) {
     std::fprintf(stderr,
         "internal compiler error: AstClone has no case for %s node '%s' "
         "(generic monomorphization would silently drop it); add a clone case\n",
         kind, typeid(node).name());
-    assert(false && "AstClone: missing node case (see stderr)");
-    return nullptr;
+    std::abort();
 }
-}  // namespace
-
-//===----------------------------------------------------------------------===//
-// Small helpers
-//===----------------------------------------------------------------------===//
+}
 
 namespace {
 
 template <typename T>
-void setLoc(T& dst, const ASTNode& src) { dst->setLocation(src.location()); }
+void setLoc(T& dst, const ASTNode& src) {
+    dst->setLocation(src.location());
+    if (auto* srcExpr = dynamic_cast<const Expr*>(&src)) {
+        if (auto* dstExpr = dynamic_cast<Expr*>(dst.get())) dstExpr->type = srcExpr->type;
+    }
+}
 
 std::vector<std::unique_ptr<TypeExpr>> cloneTypeVec(
     const std::vector<std::unique_ptr<TypeExpr>>& v, const TypeSubst& subst) {
@@ -82,16 +70,9 @@ std::vector<CompClause> cloneClauses(const std::vector<CompClause>& v,
     return out;
 }
 
-// Render a TypeExpr as the equivalent value-position expression, so a
-// type-parameter used as a call-site/construction type argument (`Inner[T]`,
-// `g[T](...)` - where the `[...]` is parsed as a value subscript, not a type
-// annotation) substitutes correctly: `T` -> `int` becomes the value `int`,
-// `T` -> `list[int]` becomes the value subscript `list[int]`, `T` -> a stamped
-// class becomes its name. Used by cloneExpr's NameExpr case.
 std::unique_ptr<Expr> typeExprToValueExpr(const TypeExpr* t) {
     if (!t) return nullptr;
     if (auto* n = dynamic_cast<const NamedTypeExpr*>(t)) {
-        // A dotted type name ("mod.Class") becomes an attribute chain.
         auto dot = n->name.find('.');
         if (dot == std::string::npos) {
             auto e = std::make_unique<NameExpr>();
@@ -128,15 +109,11 @@ std::unique_ptr<Expr> typeExprToValueExpr(const TypeExpr* t) {
         }
         return sub;
     }
-    // A union (`int | str`) used as a value-position type argument becomes a
-    // left-folded `|` BinaryExpr chain - exprToTypeExpr flattens it back to a
-    // UnionTypeExpr, so it round-trips. (Optional was normalized to a union with
-    // None at parse time, so it is covered here too.)
     if (auto* u = dynamic_cast<const UnionTypeExpr*>(t)) {
         std::unique_ptr<Expr> acc;
         for (auto& mem : u->types) {
             auto v = typeExprToValueExpr(mem.get());
-            if (!v) return nullptr;  // a member isn't value-denotable
+            if (!v) return nullptr;
             if (!acc) { acc = std::move(v); continue; }
             auto bin = std::make_unique<BinaryExpr>();
             bin->left = std::move(acc);
@@ -144,9 +121,8 @@ std::unique_ptr<Expr> typeExprToValueExpr(const TypeExpr* t) {
             bin->right = std::move(v);
             acc = std::move(bin);
         }
-        return acc;  // null only if the union was empty (never produced)
+        return acc;
     }
-    // Callables and bare tuple-type-exprs are not value-position type args.
     return nullptr;
 }
 
@@ -160,19 +136,11 @@ MatchPattern clonePattern(const MatchPattern& p, const TypeSubst& subst) {
     return q;
 }
 
-}  // namespace
-
-//===----------------------------------------------------------------------===//
-// Type expressions
-//===----------------------------------------------------------------------===//
+}
 
 std::unique_ptr<TypeExpr> cloneTypeExpr(const TypeExpr* t, const TypeSubst& subst) {
     if (!t) return nullptr;
     if (auto* n = dynamic_cast<const NamedTypeExpr*>(t)) {
-        // The substitution pivot: a bare type-parameter name is replaced by the
-        // concrete type argument's TypeExpr (cloned, so the request's template is
-        // not aliased into the stamped decl). Dotted names ("mod.Class") never
-        // match a type-param key.
         auto it = subst.find(n->name);
         if (it != subst.end()) return cloneTypeExpr(it->second, {});
         auto r = std::make_unique<NamedTypeExpr>();
@@ -212,12 +180,15 @@ std::unique_ptr<TypeExpr> cloneTypeExpr(const TypeExpr* t, const TypeSubst& subs
         setLoc(r, *t);
         return r;
     }
+    if (auto* cs = dynamic_cast<const ContractSetTypeExpr*>(t)) {
+        auto r = std::make_unique<ContractSetTypeExpr>();
+        r->names = cs->names;
+        setLoc(r, *t);
+        return r;
+    }
+    cloneMissingCase("TypeExpr", *t);
     return nullptr;
 }
-
-//===----------------------------------------------------------------------===//
-// Expressions
-//===----------------------------------------------------------------------===//
 
 std::unique_ptr<Expr> cloneExpr(const Expr* e, const TypeSubst& subst) {
     if (!e) return nullptr;
@@ -253,10 +224,6 @@ std::unique_ptr<Expr> cloneExpr(const Expr* e, const TypeSubst& subst) {
         auto r = std::make_unique<NoneLiteral>(); setLoc(r, *e); return r;
     }
     if (auto* n = dynamic_cast<const NameExpr*>(e)) {
-        // A type parameter used in VALUE position (the `T` in a `Inner[T]` /
-        // `g[T](...)` type-argument subscript) is substituted to the value-syntax
-        // form of its concrete type. In a generic body a bare `T` is always a
-        // type reference (never a value variable), so this rewrite is safe.
         auto it = subst.find(n->name);
         if (it != subst.end()) {
             if (auto v = typeExprToValueExpr(it->second)) { v->setLocation(e->location()); return v; }
@@ -424,6 +391,14 @@ std::unique_ptr<Expr> cloneExpr(const Expr* e, const TypeSubst& subst) {
         setLoc(r, *e);
         return r;
     }
+    if (auto* n = dynamic_cast<const AsCastExpr*>(e)) {
+        auto r = std::make_unique<AsCastExpr>();
+        r->operand = cloneExpr(n->operand.get(), subst);
+        r->contracts = n->contracts;
+        r->fromBracedSet = n->fromBracedSet;
+        setLoc(r, *e);
+        return r;
+    }
     if (auto* n = dynamic_cast<const FireExpr*>(e)) {
         auto r = std::make_unique<FireExpr>();
         r->operand = cloneExpr(n->operand.get(), subst);
@@ -452,10 +427,6 @@ std::unique_ptr<Expr> cloneExpr(const Expr* e, const TypeSubst& subst) {
         r->body = n->body;
         r->contentType = n->contentType;
         r->isContentAlias = n->isContentAlias;
-        // Deep-clone the pre-parsed interpolations so a template inside a
-        // generic body keeps its typed AST after monomorphization (mirrors the
-        // fstringParts clone above); without this the clone would carry `body`
-        // but no parts and lower to empty output.
         for (auto& part : n->templateParts) {
             TemplatePart tp;
             tp.kind = part.kind;
@@ -482,10 +453,6 @@ std::unique_ptr<Expr> cloneExpr(const Expr* e, const TypeSubst& subst) {
     }
     return cloneMissingCase("Expr", *e);
 }
-
-//===----------------------------------------------------------------------===//
-// Statements
-//===----------------------------------------------------------------------===//
 
 std::vector<std::unique_ptr<Stmt>> cloneBody(
     const std::vector<std::unique_ptr<Stmt>>& body, const TypeSubst& subst) {
@@ -528,6 +495,7 @@ std::unique_ptr<Stmt> cloneStmt(const Stmt* s, const TypeSubst& subst) {
         r->isConst = n->isConst;
         r->isStatic = n->isStatic;
         r->isOwn = n->isOwn;
+        r->valueIsFreshTask = n->valueIsFreshTask;
         setLoc(r, *s);
         return r;
     }
@@ -671,8 +639,6 @@ std::unique_ptr<Stmt> cloneStmt(const Stmt* s, const TypeSubst& subst) {
     if (auto* n = dynamic_cast<const FunctionDecl*>(s)) {
         auto r = std::make_unique<FunctionDecl>();
         r->name = n->name;
-        // typeParams intentionally copied verbatim; the monomorphizer clears
-        // them on a stamped instantiation (a concrete decl is not a template).
         for (auto& tp : n->typeParams) {
             TypeParam q;
             q.name = tp.name;
@@ -722,6 +688,21 @@ std::unique_ptr<Stmt> cloneStmt(const Stmt* s, const TypeSubst& subst) {
         r->body = cloneBody(n->body, subst);
         r->decorators = cloneExprVec(n->decorators, subst);
         r->docstring = n->docstring;
+        r->promises = n->promises;
+        setLoc(r, *s);
+        return r;
+    }
+    if (auto* n = dynamic_cast<const ContractDecl*>(s)) {
+        auto r = std::make_unique<ContractDecl>();
+        r->name = n->name;
+        r->bases = n->bases;
+        for (auto& m : n->methods) {
+            auto cloned = cloneStmt(m.get(), subst);
+            if (auto* fd = dynamic_cast<FunctionDecl*>(cloned.get())) {
+                cloned.release();
+                r->methods.emplace_back(fd);
+            }
+        }
         setLoc(r, *s);
         return r;
     }
@@ -735,4 +716,4 @@ std::unique_ptr<Stmt> cloneStmt(const Stmt* s, const TypeSubst& subst) {
     return cloneMissingCase("Stmt", *s);
 }
 
-}  // namespace dragon
+}

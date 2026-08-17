@@ -34,9 +34,6 @@ class ContainerClosureCycleTests(TestCase) {
         made: int = spin_dict_cycles(300)
         collected: int = dragon_gc_collect()
         self.assertEqual(made, 300)
-        # 3 tracked objects per cycle (dict + closure + env); before the fix
-        # this was 0. Assert at least one object per dropped cycle so the
-        # test stays robust to future enrollment tuning.
         self.assertTrue(collected >= 300)
     }
 
@@ -45,7 +42,6 @@ class ContainerClosureCycleTests(TestCase) {
         made: int = spin_tuple_cycles(300)
         collected: int = dragon_gc_collect()
         self.assertEqual(made, 300)
-        # 4 tracked objects per cycle (list + tuple + closure + env).
         self.assertTrue(collected >= 300)
     }
 

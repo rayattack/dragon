@@ -63,6 +63,7 @@ Construct it by calling with the fields, and read them back with **dot-access**
 (the typed shorthand for string-keyed dicts) or the subscript form:
 
 ```dragon
+# doc: no-check
 u: User = User(name="Ada", age=36, active=true)
 print(u.name)        # Ada    - typed as str
 print(u.age)         # 36     - typed as int

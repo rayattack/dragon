@@ -1,12 +1,6 @@
-# time.dr - Dragon standard library: time access and conversions
-#
-# Wraps POSIX time functions via extern "C". Provides current time,
-# process clock, sleep, and monotonic clock access.
-# All C functions use intc for correct ABI.
-
-#===----------------------------------------------------------------------===#
-# C time extern declarations
-#===----------------------------------------------------------------------===#
+"""time.dr - POSIX time access/conversions via extern "C" (current time,
+process clock, sleep, monotonic clock).
+"""
 
 extern "C" def time(tloc: ptr) -> int
 extern "C" def clock() -> int
@@ -19,17 +13,10 @@ extern "C" def malloc(size: int) -> ptr
 extern "C" def free(p: ptr)
 extern "C" def memset(s: ptr, c: intc, n: int) -> ptr
 
-# Runtime helpers for struct timespec access
 extern "C" def dragon_timespec_new(sec: int, nsec: int) -> ptr
 extern "C" def dragon_timespec_sec(ts: ptr) -> int
 extern "C" def dragon_timespec_nsec(ts: ptr) -> int
 
-# Clock IDs come from the runtime, which is compiled against the target's own
-# <time.h>. They used to be hardcoded to the Linux numbering (0/1/2); Darwin
-# agrees only on REALTIME - there MONOTONIC is 6 and PROCESS_CPUTIME_ID is 12 -
-# so clock_gettime(1, ...) was an invalid clockid on macOS. It failed with
-# EINVAL and left the timespec zeroed, which made monotonic() and
-# perf_counter() return 0.0 on every call instead of raising.
 extern "C" def dragon_clock_realtime_id() -> int
 extern "C" def dragon_clock_monotonic_id() -> int
 extern "C" def dragon_clock_process_id() -> int
@@ -38,20 +25,13 @@ CLOCK_REALTIME: int = dragon_clock_realtime_id()
 CLOCK_MONOTONIC: int = dragon_clock_monotonic_id()
 CLOCK_PROCESS: int = dragon_clock_process_id()
 
-# CLOCKS_PER_SEC is 1000000 on POSIX
 const CLOCKS_PER_SEC: int = 1000000
 
-#===----------------------------------------------------------------------===#
-# Time functions
-#===----------------------------------------------------------------------===#
-
 def now() -> int {
-    # Current time in seconds since epoch (1970-01-01 00:00:00 UTC)
     return time(none)
 }
 
 def now_float() -> float {
-    # Current time as float (seconds + nanoseconds)
     const ts: ptr = malloc(16)
     memset(ts, 0, 16)
     clock_gettime(CLOCK_REALTIME, ts)
@@ -62,7 +42,6 @@ def now_float() -> float {
 }
 
 def monotonic() -> float {
-    # Monotonic clock (not affected by system clock changes)
     const ts: ptr = malloc(16)
     memset(ts, 0, 16)
     clock_gettime(CLOCK_MONOTONIC, ts)
@@ -73,7 +52,6 @@ def monotonic() -> float {
 }
 
 def process_time() -> float {
-    # CPU time used by current process
     return float(clock()) / float(CLOCKS_PER_SEC)
 }
 
@@ -82,13 +60,11 @@ def sleep_secs(seconds: int) -> int {
 }
 
 def sleep_ms(milliseconds: int) -> int {
-    # Sleep for given milliseconds
     const us: int = milliseconds * 1000
     return usleep(us)
 }
 
 def sleep_float(seconds: float) -> int {
-    # Sleep with sub-second precision via nanosleep
     const sec: int = int(seconds)
     const nsec: int = int((seconds - float(sec)) * 1000000000.0)
     const ts: ptr = dragon_timespec_new(sec, nsec)
@@ -98,6 +74,5 @@ def sleep_float(seconds: float) -> int {
 }
 
 def perf_counter() -> float {
-    # High-resolution performance counter (alias for monotonic)
     return monotonic()
 }

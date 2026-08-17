@@ -1,9 +1,3 @@
-# ODB M8 regression suite: dump / load / compact (spec section 22). dump is
-# JSONL (schemas with metadata first, then documents with their _id); load is
-# its inverse in ONE transaction with integrity checked at commit, so ref
-# cycles load in any line order; compact rebuilds the live state into a fresh
-# packed file, preserving schema ids and docids and dropping history.
-
 from unittest import TestCase, main
 from odb import ODB, Documents, Document
 from odb.vfs import SimVFS
@@ -42,7 +36,6 @@ def _mem() -> ODB {
     return ODB(sim, p)
 }
 
-# customers + orders with a real ref, some churn, a deleted doc.
 def _build(db: ODB) -> None {
     cust: Documents = db.schema("customers", _customers()).meta({primary: ["id"]})
     orders: Documents = db.schema("orders", _orders()).meta({
@@ -68,7 +61,6 @@ class DumpLoadTest(TestCase) {
         n: int = db2.load(text)
         self.assertEqual(n, 5)
 
-        # documents, values, and docids all survive
         c2: Documents = db2.schema("customers")
         o2: Documents = db2.schema("orders")
         self.assertEqual(c2.count(), 2)
@@ -79,10 +71,8 @@ class DumpLoadTest(TestCase) {
         t: int = o2.read(id=10)["total"]
         self.assertEqual(t, 110)
 
-        # the loaded db is fully intact: indexes, uniques, refs
         self.assertTrue(db2.check().ok)
 
-        # metadata survived: the restrict ref still enforces
         raised: bool = False
         try {
             c2.wipe(ada.id)
@@ -91,20 +81,17 @@ class DumpLoadTest(TestCase) {
         }
         self.assertTrue(raised)
 
-        # docid allocation continues past the loaded ids
         fresh: Document = c2.save({id: 3, name: "New"})
         self.assertTrue(fresh.id > o2.read(id=12).id)
     }
 
-    # A reference cycle (self-referencing schema) loads regardless of order
-    # because integrity is validated at commit over the full set.
     def test_ref_cycle_loads() -> None {
         db: ODB = _mem()
         emp: Documents = db.schema("employees", _employees()).meta({
             primary: ["id"],
             refs: { manager_id: { to: "employees.id", on_delete: "restrict" } },
         })
-        emp.save({id: 1, manager_id: 1, name: "Root"})     # self-managing
+        emp.save({id: 1, manager_id: 1, name: "Root"})
         text: str = db.dump()
 
         db2: ODB = _mem()
@@ -125,12 +112,10 @@ class DumpLoadTest(TestCase) {
         self.assertTrue(raised)
     }
 
-    # A dangling ref in the dump is rejected and the load rolls back whole.
     def test_bad_load_rolls_back() -> None {
         db: ODB = _mem()
         _build(db)
         text: str = db.dump()
-        # drop the customers docs but keep orders referencing them
         lines: list[str] = []
         for line in text.split("\n") {
             if line.find("\"kind\": \"doc\"") >= 0 and line.find("\"customers\"") >= 0 {
@@ -148,7 +133,7 @@ class DumpLoadTest(TestCase) {
             raised = True
         }
         self.assertTrue(raised)
-        self.assertEqual(len(db2.changes(0)), 0)      # nothing committed
+        self.assertEqual(len(db2.changes(0)), 0)
     }
 }
 
@@ -159,7 +144,6 @@ class CompactTest(TestCase) {
         p: Pager = create(sim, 4096)
         db: ODB = ODB(sim, p)
         _build(db)
-        # churn to bloat the source file with history and dead pages
         o: Documents = db.schema("orders")
         i: int = 0
         while i < 60 {
@@ -179,16 +163,12 @@ class CompactTest(TestCase) {
         t: int = od.read(id=11)["total"]
         self.assertEqual(t, 109)
 
-        # docids preserved
         self.assertEqual(od.read(id=10).id, o.read(id=10).id)
 
-        # history dropped: the compacted file starts a fresh, empty feed
         self.assertEqual(len(dst.changes(0)), 0)
 
-        # packed: far fewer pages than the churned source
         self.assertTrue(dst.pager.high_water < db.pager.high_water)
 
-        # and the copy keeps working as a writable database
         c.save({id: 9, name: "Post"})
         self.assertTrue(dst.check().ok)
         dst.close()

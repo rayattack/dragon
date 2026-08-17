@@ -1,0 +1,159 @@
+"""Inline temp operands must be released when the callee raises (issue-3).
+
+Regression for the codegen unwind-bookkeeping leak: when a runtime call raises
+mid-expression (longjmp), the borrow temps of that expression were only drained
+on the normal-return path, so `b"abc".index(b"zz")` leaked the receiver and the
+argument on every caught ValueError. Binding operands to locals hides the leak
+(locals are cleanup-stack tracked); every case here deliberately keeps the
+operands INLINE.
+
+Each loop is bounded (3000 iterations) per the memory house rules; leaks are
+linear, so a few thousand iterations is plenty for LSan. This file must run
+clean under ASAN_OPTIONS=detect_leaks=1:hard_rss_limit_mb=2048.
+"""
+
+from unittest import TestCase, main
+
+class InlineTempLeakOnRaise(TestCase) {
+    def test_bytes_index_inline_receiver_and_arg() {
+        i: int = 0
+        hits: int = 0
+        while i < 3000 {
+            try {
+                b"abc".index(b"zz")
+            } except ValueError {
+                hits = hits + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(hits, 3000)
+    }
+
+    def test_list_remove_inline_receiver() {
+        i: int = 0
+        hits: int = 0
+        while i < 3000 {
+            try {
+                [1, 2].remove(9)
+            } except ValueError {
+                hits = hits + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(hits, 3000)
+    }
+
+    def test_list_index_inline_receiver() {
+        i: int = 0
+        hits: int = 0
+        while i < 3000 {
+            try {
+                [1, 2].index(9)
+            } except ValueError {
+                hits = hits + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(hits, 3000)
+    }
+
+    def test_str_index_computed_receiver_and_arg() {
+        i: int = 0
+        hits: int = 0
+        while i < 3000 {
+            try {
+                ("ab" + "cd").index("z" + "z")
+            } except ValueError {
+                hits = hits + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(hits, 3000)
+    }
+
+    def test_set_remove_inline_receiver() {
+        i: int = 0
+        hits: int = 0
+        while i < 3000 {
+            try {
+                {1, 2}.remove(9)
+            } except KeyError {
+                hits = hits + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(hits, 3000)
+    }
+
+    def test_bytes_fromhex_invalid() {
+        i: int = 0
+        hits: int = 0
+        while i < 3000 {
+            try {
+                bytes.fromhex("z" + "z")
+            } except ValueError {
+                hits = hits + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(hits, 3000)
+    }
+
+    def test_tuple_subscript_inline_receiver() {
+        i: int = 0
+        hits: int = 0
+        while i < 3000 {
+            try {
+                (1, 2)[9]
+            } except IndexError {
+                hits = hits + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(hits, 3000)
+    }
+
+    def test_list_subscript_inline_receiver() {
+        i: int = 0
+        hits: int = 0
+        while i < 3000 {
+            try {
+                [1, 2][9]
+            } except IndexError {
+                hits = hits + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(hits, 3000)
+    }
+
+    def test_dict_subscript_inline_receiver() {
+        i: int = 0
+        hits: int = 0
+        while i < 3000 {
+            try {
+                {1: 2}[9]
+            } except KeyError {
+                hits = hits + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(hits, 3000)
+    }
+
+    def test_str_subscript_inline_receiver() {
+        i: int = 0
+        hits: int = 0
+        while i < 3000 {
+            try {
+                ("ab" + "cd")[9]
+            } except IndexError {
+                hits = hits + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(hits, 3000)
+    }
+}
+
+main([InlineTempLeakOnRaise()])

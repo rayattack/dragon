@@ -1,0 +1,53 @@
+from unittest import TestCase, main
+from string import zfill, capwords
+
+
+class ZfillTests(TestCase) {
+    def test_negative_sign_stays_leading() {
+        self.assertEqual(zfill("-5", 4), "-005")
+        self.assertEqual(zfill("-42", 5), "-0042")
+    }
+
+    def test_plus_sign_stays_leading() {
+        self.assertEqual(zfill("+5", 4), "+005")
+    }
+
+    def test_no_padding_needed() {
+        self.assertEqual(zfill("-42", 2), "-42")
+        self.assertEqual(zfill("-42", 3), "-42")
+    }
+
+    def test_bare_sign() {
+        self.assertEqual(zfill("-", 3), "-00")
+        self.assertEqual(zfill("+", 2), "+0")
+    }
+
+    def test_unsigned_unchanged() {
+        self.assertEqual(zfill("42", 5), "00042")
+        self.assertEqual(zfill("", 3), "000")
+    }
+}
+
+
+class CapwordsTests(TestCase) {
+    def test_leading_whitespace_dropped() {
+        self.assertEqual(capwords(" hello"), "Hello")
+        self.assertEqual(capwords("  hello world"), "Hello World")
+    }
+
+    def test_trailing_and_repeated_whitespace_dropped() {
+        self.assertEqual(capwords("hello  world  "), "Hello World")
+    }
+
+    def test_tabs_and_newlines_split() {
+        self.assertEqual(capwords("a\tb\nc"), "A B C")
+    }
+
+    def test_plain() {
+        self.assertEqual(capwords("hello world"), "Hello World")
+        self.assertEqual(capwords(""), "")
+    }
+}
+
+
+main([ZfillTests(), CapwordsTests()])

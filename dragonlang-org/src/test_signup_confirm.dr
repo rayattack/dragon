@@ -26,7 +26,6 @@ class BeginSignupTests(TestCase) {
         const s: SignupStart = a.begin_signup("alice", "alice@example.com", "hunter2pass")
         self.assertTrue(s.ok)
         self.assertTrue(len(s.token) > 20)
-        # No account yet: login must fail until the link is followed.
         self.assertFalse(a.login("alice", "hunter2pass").ok)
     }
 
@@ -81,7 +80,6 @@ class ConfirmSignupTests(TestCase) {
         const r: AuthResult = a.confirm_signup(s.token)
         self.assertFalse(r.ok)
         self.assertEqual(r.error, "invalid or expired confirmation link")
-        # And the dead row is gone: nothing to confirm later either.
         self.assertFalse(a.confirm_signup(s.token).ok)
     }
 
@@ -99,7 +97,6 @@ class ConfirmSignupTests(TestCase) {
         const first: SignupStart = a.begin_signup("alice", "alice@example.com", "hunter2pass")
         const second: SignupStart = a.begin_signup("alice", "alice@example.com", "betterpass9")
         self.assertTrue(second.ok)
-        # Only the newest emailed link works.
         self.assertFalse(a.confirm_signup(first.token).ok)
         self.assertTrue(a.confirm_signup(second.token).ok)
         self.assertTrue(a.login("alice", "betterpass9").ok)
@@ -128,8 +125,6 @@ class MailerSeamTests(TestCase) {
     }
 
     def test_base_mailer_dispatches_to_override() {
-        # The deps seam holds a Mailer-typed reference; delivery must reach
-        # the subclass through virtual dispatch.
         m: Mailer = CaptureMailer()
         const body: HTML = confirm_email_body("bob", "https://example.com/x")
         self.assertEqual(m.send("bob@example.com", "s", body), "")

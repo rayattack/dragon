@@ -1,12 +1,4 @@
-"""functools - higher-order helpers (Python `functools`, monomorphic subset).
-
-Dragon has no generic functions (see operator.dr), so `reduce` is provided as
-concrete `int` / `float` variants rather than one generic definition. `cache` /
-`lru_cache` are a separate compiler-synthesized decorator (see ADR 042/043
-follow-up), not defined here. `partial`/`wraps` need first-class closure
-capture over arbitrary signatures and await a generic-functions language
-feature - intentionally omitted rather than shipped as `Any`-boxed stubs.
-"""
+"""functools - reduce as concrete int/float variants; a generic reduce awaits Callable[[T, T], T] parameter monomorphization."""
 
 
 def reduce(function: Callable[[int, int], int], iterable: list[int]) -> int {

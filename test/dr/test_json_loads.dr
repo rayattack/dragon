@@ -1,16 +1,5 @@
-# test/dr/test_json_loads.dr - generic JSON decode (D048): loads -> Any.
-#
-# The boxed convenience tier: a byte-scanning recursive-descent parser that
-# materializes objects -> dict[str, Any], arrays -> list[Any], scalars boxed.
-# Covers scalars, nesting, the dumps->loads round-trip, the `T(**loads_obj())`
-# typed-construction path, \uXXXX (incl. surrogate pairs) unescaping, and
-# malformed-input errors carrying the byte offset.
-#
-# (The zero-alloc schema-directed decode `decode[T]` rides D044 generics and is
-# deliberately out of scope here - ADR 048.)
-
 from unittest import TestCase, main
-from json import loads, loads_obj, loads_bytes, dumps, unescape
+from json import loads, loadb, dumps, unescape, decode
 
 
 class CustomerRec {
@@ -60,21 +49,17 @@ class JsonScalarTests(TestCase) {
     }
 
     def test_string_unicode_escape() {
-        # é = é (BMP)
         const v: Any = loads("\"caf\\u00e9\"")
         const s: str = v
         self.assertEqual(s, "café")
     }
 
-    #  is the UTF-16 surrogate pair for (U+1F600, astral plane).
-    # unescape combines the pair into the single code point.
     def test_string_surrogate_pair() {
         const v: Any = loads("\"a\\ud83d\\ude00b\"")
         const s: str = v
-        self.assertEqual(len(s), 3)        # 'a', , 'b' - one code point each
+        self.assertEqual(len(s), 3)
     }
 
-    # Leading/trailing whitespace is skipped.
     def test_whitespace_tolerated() {
         const v: Any = loads("   \n 99 \t ")
         const n: int = v
@@ -137,7 +122,6 @@ class JsonArrayTests(TestCase) {
 }
 
 
-# Helper: sum the "x" field across a list of objects (exercises nested narrowing).
 def _sum_x(xs: list[Any]) -> int {
     total: int = 0
     for item in xs {
@@ -164,9 +148,8 @@ class JsonRoundTripTests(TestCase) {
         self.assertEqual(n, 7)
     }
 
-    # loads_bytes is the entry Request.json_any() uses (verbatim body bytes).
-    def test_loads_bytes() {
-        const v: Any = loads_bytes(b"{\"ok\": true}")
+    def test_loadb() {
+        const v: Any = loadb(b"{\"ok\": true}")
         const m: dict[str, Any] = v
         self.assertTrue("ok" in m)
     }
@@ -174,18 +157,16 @@ class JsonRoundTripTests(TestCase) {
 
 
 class JsonTypedConstructionTests(TestCase) {
-    # The interim schema-directed path that works today: loads_obj -> dict[str,
-    # Any] spread into a class ctor (D032/D047). The zero-alloc version awaits D044.
-    def test_construct_from_loads_obj() {
-        const row: dict[str, Any] = loads_obj("{\"name\": \"Grace\", \"age\": 45}")
+    def test_construct_from_decoded_obj() {
+        const row: dict[str, Any] = decode[dict[str, Any]]("{\"name\": \"Grace\", \"age\": 45}".encode("utf-8"))
         const c: CustomerRec = CustomerRec(**row)
         self.assertEqual(c.name, "Grace")
         self.assertEqual(c.age, 45)
     }
 
-    def test_loads_obj_rejects_non_object() {
+    def test_decode_obj_rejects_non_object() {
         self.assertRaises(ValueError, lambda () -> None {
-            const r: dict[str, Any] = loads_obj("[1, 2, 3]")
+            const r: dict[str, Any] = decode[dict[str, Any]]("[1, 2, 3]".encode("utf-8"))
         })
     }
 }

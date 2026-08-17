@@ -1,17 +1,3 @@
-# odb.checker - `odb check`, the structural integrity pass (spec section 21).
-#
-# Walk a B+tree from its root and verify, in one pass:
-#   - every reachable page's crc32c (read_page raises CorruptionError on a bad
-#     one, so reading the whole tree checks every checksum),
-#   - keys strictly ascending within each node,
-#   - branch separator keys ascending,
-#   - key-range containment: every key in a subtree lies within the [lo, hi)
-#     bounds its parent's separators imply (catches a key filed under the wrong
-#     child, which a mere per-node sort check would miss).
-#
-# A clean check plus the crash harness is the M1 guarantee: the file on disk is
-# a well-formed tree, not just a bag of checksum-valid pages
-
 from odb.pager import Pager, PT_LEAF, PT_BRANCH, PT_IX_LEAF, PT_IX_BRANCH
 from odb.codec import get_u16, get_u64
 from odb.index import IndexTree, IxLeaf, IxBranch
@@ -37,7 +23,6 @@ class CheckResult {
     }
 }
 
-# Check the tree rooted at `root`. An empty tree (root 0) is trivially valid.
 def check_tree(pager: Pager, root: int) -> CheckResult {
     res: CheckResult = CheckResult()
     if root != 0 {
@@ -46,10 +31,8 @@ def check_tree(pager: Pager, root: int) -> CheckResult {
     return res
 }
 
-# lo/hi are the inclusive-lower, exclusive-upper key bounds for this subtree;
-# has_lo/has_hi say whether each bound is active (root has neither).
 def _walk(pager: Pager, pid: int, lo: int, has_lo: bool, hi: int, has_hi: bool, res: CheckResult) -> None {
-    page: bytes = pager.read_page(pid)      # verifies crc32c
+    page: bytes = pager.read_page(pid)
     res.pages = res.pages + 1
     t: int = pager.page_type(page)
 
@@ -92,7 +75,6 @@ def _walk(pager: Pager, pid: int, lo: int, has_lo: bool, hi: int, has_hi: bool, 
             res._bad("branch with no separators")
             return
         }
-        # separators strictly ascending
         j: int = 1
         while j < n {
             if keys[j] <= keys[j - 1] {
@@ -100,9 +82,7 @@ def _walk(pager: Pager, pid: int, lo: int, has_lo: bool, hi: int, has_hi: bool, 
             }
             j = j + 1
         }
-        # child0 covers [lo, keys[0])
         _walk(pager, child0, lo, has_lo, keys[0], True, res)
-        # children[i] covers [keys[i], keys[i+1]) or [keys[i], hi) for the last
         m: int = 0
         while m < n {
             sub_hi: int = hi
@@ -120,12 +100,6 @@ def _walk(pager: Pager, pid: int, lo: int, has_lo: bool, hi: int, has_hi: bool, 
     res._bad("unexpected page type in tree walk")
 }
 
-#===----------------------------------------------------------------------===#
-# Index trees: the same invariants over bytes keys (memcmp order + containment).
-# Parsing goes through IndexTree's own readers so there is one source of truth
-# for the slotted layout.
-#===----------------------------------------------------------------------===#
-
 def check_index_tree(pager: Pager, root: int) -> CheckResult {
     res: CheckResult = CheckResult()
     if root != 0 {
@@ -137,7 +111,7 @@ def check_index_tree(pager: Pager, root: int) -> CheckResult {
 }
 
 def _walk_ix(t: IndexTree, pager: Pager, pid: int, lo: bytes, has_lo: bool, hi: bytes, has_hi: bool, res: CheckResult) -> None {
-    page: bytes = pager.read_page(pid)      # verifies crc32c
+    page: bytes = pager.read_page(pid)
     res.pages = res.pages + 1
     ty: int = pager.page_type(page)
 

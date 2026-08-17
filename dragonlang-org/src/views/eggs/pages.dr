@@ -1,16 +1,7 @@
-# pages.dr - HTML for the egg (package) registry: auth + browse.
-#
-# Built with the `template[HTML]` content type (spec-32): bare `!{expr}` is
-# auto-escaped (XSS-safe), `!{frag | raw}` injects a trusted HTML fragment, and
-# `!{ for x in xs { :{ ... } } }` loops markup in place. No manual escaping, no
-# string concatenation.
-
 from html import HTML
 from views.www import page_shell
 from models.records import Token, Version
 from services.registry import PackageSummary
-
-#--- small text helpers (values are auto-escaped where interpolated) ------#
 
 def _latest(p: PackageSummary) -> str {
     if len(p.latest) == 0 {
@@ -42,8 +33,6 @@ def _short_hash(h: str) -> str {
     }
     return h
 }
-
-#--- reusable HTML fragments ----------------------------------------------#
 
 def _error_box(error: str) -> HTML {
     if len(error) == 0 {
@@ -130,8 +119,6 @@ def _version_table(versions: list[Version]) -> HTML {
     }
 }
 
-#--- pages -----------------------------------------------------------------#
-
 def render_login(csrf: str, error: str) -> HTML {
     const body: HTML = template[HTML] {
       <main class="www www-brand">
@@ -173,8 +160,6 @@ def render_signup(csrf: str, error: str) -> HTML {
     return page_shell("Sign up - Dragon", "login", "", body)
 }
 
-# The confirmation email body. Standalone fragment (email clients ignore
-# external CSS anyway); the link is the only action.
 def confirm_email_body(username: str, link: str) -> HTML {
     return template[HTML] {
       <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">

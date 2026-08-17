@@ -1,18 +1,3 @@
-# blobs.dr - content-addressed tarball storage.
-#
-# A published package version is stored once, under its SHA-256 digest. Two
-# uploads with identical bytes collapse to one blob (the registry is an
-# immutable content store, per the design spec).
-#
-# Two backends behind one seam:
-#   BlobStore    - local disk (dev, tests); downloads stream through the app.
-#   R2BlobStore  - Cloudflare R2 over the S3 API; downloads redirect to a
-#                  presigned URL, so tarball bytes never transit the app.
-# presign_get() is the capability probe: "" means "no presigning - serve the
-# local file"; a URL means "send the client there". Integrity never depends
-# on the backend either way: the transparency log pins every hash and the
-# client verifies the digest of whatever bytes it receives.
-
 from os import makedirs
 from os.path import join, exists
 from io import open, make
@@ -26,13 +11,11 @@ class BlobStore {
         }
     }
 
-    # digest is "sha256:<hex>"; the hex is the on-disk filename.
     def _path(digest: str) -> str {
         const hex: str = digest.replace("sha256:", "")
         return join(self.root, hex + ".tar.zst")
     }
 
-    # Public accessor so a download handler can serve the blob via Response.file.
     def path(digest: str) -> str {
         return self._path(digest)
     }
@@ -53,14 +36,11 @@ class BlobStore {
         return open(self._path(digest)).bytes()
     }
 
-    # Disk blobs are not presignable; callers fall back to serving the file.
     def presign_get(digest: str, expires: int) -> str {
         return ""
     }
 }
 
-# R2-backed blobs. Object keys mirror the on-disk names (<hex>.tar.zst) so a
-# bucket listing reads exactly like the blobs/ directory it replaces.
 class R2BlobStore(BlobStore) {
     s3: S3Client
     bucket: str
@@ -75,12 +55,10 @@ class R2BlobStore(BlobStore) {
         return digest.replace("sha256:", "") + ".tar.zst"
     }
 
-    # No local path exists; every caller must check presign_get first.
     def path(digest: str) -> str {
         raise ValueError("R2 blobs have no local path - use presign_get")
     }
 
-    # A publish whose blob upload fails must fail loudly, never half-publish.
     def put(digest: str, data: bytes) -> str {
         const key: str = self._key(digest)
         const err: str = self.s3.put_object(self.bucket, key, data)

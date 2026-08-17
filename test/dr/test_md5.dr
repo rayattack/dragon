@@ -1,10 +1,3 @@
-# test/dr/test_md5.dr - Known-answer tests for runtime MD5.
-#
-# Vectors: the full RFC 1321 Appendix A.5 test suite. MD5 is legacy/parity
-# only - never a TLS security primitive (ADR 038 §2) - but it's exposed via
-# hashlib for non-security uses (etags, legacy interop), so it must be correct.
-# These vectors also exercise the runtime's little-endian length padding.
-
 from unittest import TestCase, main
 from hashlib import md5, new, Hash
 

@@ -1,16 +1,8 @@
-# pathlib.dr - Dragon standard library: object-oriented filesystem paths
-#
-# Path class wraps os.path utilities with attribute-style access:
-#  Path("foo/bar.txt").suffix == ".txt"
-#  Path("foo") / "bar.txt" == Path("foo/bar.txt")
-#
-# Scope (v0.0.2): POSIX-style separators only. PurePath / WindowsPath
-# specializations are deferred.
+"""Path wraps os.path with attribute-style access, e.g. Path("foo/bar.txt").suffix == ".txt".
+POSIX separators only; PurePath / WindowsPath are deferred.
+"""
 
 from os.path import join, basename, dirname, splitext, abspath, isabs, exists, isfile, isdir, islink, getsize
-
-# Path is path manipulation only. To read or write a file's contents, use the
-# io surface on the path string: `open(p.raw).text()`, `make(p.raw).write(s)`.
 
 class Path {
     raw: str
@@ -19,10 +11,6 @@ class Path {
         self.raw = p
     }
 
-    #===-------------------------------------------------------------------===#
-    # Properties
-    #===-------------------------------------------------------------------===#
-
     @property
     def name() -> str {
         return basename(self.raw)
@@ -30,13 +18,13 @@ class Path {
 
     @property
     def stem() -> str {
-        const parts: list[str] = splitext(basename(self.raw))
+        const parts: tuple[str, str] = splitext(basename(self.raw))
         return parts[0]
     }
 
     @property
     def suffix() -> str {
-        const parts: list[str] = splitext(basename(self.raw))
+        const parts: tuple[str, str] = splitext(basename(self.raw))
         return parts[1]
     }
 
@@ -62,10 +50,6 @@ class Path {
         }
         return result
     }
-
-    #===-------------------------------------------------------------------===#
-    # Predicates
-    #===-------------------------------------------------------------------===#
 
     def exists() -> bool {
         return exists(self.raw)
@@ -95,22 +79,16 @@ class Path {
         return getsize(self.raw)
     }
 
-    #===-------------------------------------------------------------------===#
-    # Path composition
-    #===-------------------------------------------------------------------===#
-
     def joinpath(other: str) -> Path {
         return Path(join(self.raw, other))
     }
 
     def __truediv__(other: str) -> Path {
-        # Path("foo") / "bar" -> Path("foo/bar")
         return Path(join(self.raw, other))
     }
 
     def with_suffix(new_suffix: str) -> Path {
-        # Replace the extension. Empty new_suffix removes it.
-        const parts: list[str] = splitext(self.raw)
+        const parts: tuple[str, str] = splitext(self.raw)
         return Path(parts[0] + new_suffix)
     }
 
@@ -121,10 +99,6 @@ class Path {
         }
         return Path(join(parent_str, new_name))
     }
-
-    #===-------------------------------------------------------------------===#
-    # String conversion + dunders
-    #===-------------------------------------------------------------------===#
 
     def __str__() -> str {
         return self.raw
@@ -139,11 +113,6 @@ class Path {
     }
 }
 
-#===----------------------------------------------------------------------===#
-# Module-level helper
-#===----------------------------------------------------------------------===#
-
 def cwd() -> Path {
-    # Current working directory as a Path. Wraps os.path.abspath(".").
     return Path(abspath("."))
 }

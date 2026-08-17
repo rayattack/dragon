@@ -1,15 +1,7 @@
-# KAT for odb.keyenc: the memcomparable property. For values in known ascending
-# order, their encodings must be in strictly ascending BYTE order (Dragon's
-# `bytes <` is a memcmp), and the type markers must order null < bool < number <
-# string. Composites must order field-by-field. If any of these fail, index
-# lookups and range scans built on top would silently return wrong rows, so this
-# test is the wall the bytes-keyed B+tree stands on.
-
 from unittest import TestCase, main
 from odb.keyenc import enc_null, enc_bool, enc_int, enc_float, enc_str, enc_bytes, enc_composite
 
 
-# True iff items[i] < items[i+1] as bytes for every adjacent pair.
 def _ascending(items: list[bytes]) -> bool {
     i: int = 0
     while i + 1 < len(items) {
@@ -36,7 +28,6 @@ class IntOrderTest(TestCase) {
     }
 
     def test_int_width_fixed() -> None {
-        # Every integer key is exactly marker + 8 bytes, so composites split cleanly.
         self.assertEqual(len(enc_int(0)), 9)
         self.assertEqual(len(enc_int(-1)), 9)
         self.assertEqual(len(enc_int(1 << 62)), 9)
@@ -60,7 +51,6 @@ class FloatOrderTest(TestCase) {
 
 class StringOrderTest(TestCase) {
     def test_string_ordering() -> None {
-        # "" < "a" < "aa" < "ab" < "b"; a prefix sorts before its extension.
         vals: list[str] = ["", "a", "aa", "ab", "abc", "b", "ba"]
         enc: list[bytes] = []
         for v in vals {
@@ -70,8 +60,6 @@ class StringOrderTest(TestCase) {
     }
 
     def test_embedded_nul_ordering() -> None {
-        # The escape must keep raw byte order: NUL (0x00) < 'a' (0x61), and a
-        # value that is a prefix of another still sorts first.
         z: str = chr(0)
         vals: list[str] = ["a", "a" + z, "a" + z + "b", "aa"]
         enc: list[bytes] = []
@@ -84,7 +72,6 @@ class StringOrderTest(TestCase) {
 
 
 class MarkerOrderTest(TestCase) {
-    # null < bool < number < string, regardless of the values inside.
     def test_cross_type_markers() -> None {
         seq: list[bytes] = [
             enc_null(),
@@ -101,9 +88,6 @@ class MarkerOrderTest(TestCase) {
 
 
 class CompositeOrderTest(TestCase) {
-    # (1,"a") < (1,"b") < (2,"a"): the second field breaks ties, the first field
-    # dominates. This is what a non-unique index (value, docid) and a composite
-    # unique both rely on.
     def test_composite_ordering() -> None {
         a: bytes = enc_composite([enc_int(1), enc_str("a")])
         b: bytes = enc_composite([enc_int(1), enc_str("b")])
@@ -113,8 +97,6 @@ class CompositeOrderTest(TestCase) {
     }
 
     def test_composite_first_field_dominates() -> None {
-        # Even a large second field cannot lift a small-first-field key above a
-        # larger-first-field key.
         lo: bytes = enc_composite([enc_int(1), enc_str("zzzzzz")])
         hi: bytes = enc_composite([enc_int(2), enc_str("")])
         self.assertTrue(lo < hi)

@@ -1,25 +1,12 @@
-# glob.dr - Dragon standard library: Unix-style pathname pattern expansion
-#
-# Returns lists of paths matching shell glob patterns.
-# Minimal OS FFI inline; pattern matching delegates to the fnmatch module
-# (one matcher, no copy).
+"""glob.dr - Unix pathname pattern expansion; pattern matching delegates to fnmatch."""
 
 from fnmatch import fnmatchcase
-
-#===----------------------------------------------------------------------===#
-# POSIX / libc extern declarations (minimal set for globbing)
-#===----------------------------------------------------------------------===#
 
 extern "C" def opendir(path: str) -> ptr
 extern "C" def closedir(dirp: ptr) -> intc
 extern "C" def dragon_readdir_name(dirp: ptr) -> str
 extern "C" def access(path: str, mode: intc) -> intc
 extern "C" def dragon_stat_isdir(path: str) -> intc
-extern "C" def getcwd(buf: ptr, size: int) -> str
-
-#===----------------------------------------------------------------------===#
-# Internal OS helpers
-#===----------------------------------------------------------------------===#
 
 def _listdir(path: str) -> list[str] {
     const dirp: ptr = opendir(path)
@@ -53,36 +40,13 @@ def _path_join(a: str, b: str) -> str {
     return a + "/" + b
 }
 
-#===----------------------------------------------------------------------===#
-# Internal fnmatch (duplicated to avoid cross-module import)
-#===----------------------------------------------------------------------===#
-#===----------------------------------------------------------------------===#
-# Internal helpers
-#===----------------------------------------------------------------------===#
-
 def _split_path(pattern: str) -> list[str] {
-    # Split pattern on "/" into components
-    parts: list[str] = []
-    current: str = ""
-    i: int = 0
-    while i < len(pattern) {
-        if pattern[i] == "/" {
-            parts.append(current)
-            current = ""
-        } else {
-            current = current + pattern[i]
-        }
-        i = i + 1
-    }
-    parts.append(current)
-    return parts
+    return pattern.split("/")
 }
 
 def _glob_in_dir(dirname: str, pattern: str) -> list[str] {
-    # Match files in a single directory against a filename pattern
     result: list[str] = []
     if not has_magic(pattern) {
-        # No wildcards - just check if the path exists
         const full: str = _path_join(dirname, pattern)
         if _exists(full) { result.append(full) }
         return result
@@ -91,7 +55,6 @@ def _glob_in_dir(dirname: str, pattern: str) -> list[str] {
     i: int = 0
     while i < len(names) {
         const name: str = names[i]
-        # Skip hidden files unless pattern starts with "."
         skip: bool = false
         if len(name) > 0 {
             if name[0] == "." {
@@ -113,7 +76,6 @@ def _glob_in_dir(dirname: str, pattern: str) -> list[str] {
 }
 
 def _walk_dirs(base: str) -> list[str] {
-    # Recursively collect all directories under base (for ** support)
     result: list[str] = []
     result.append(base)
     const entries: list[str] = _listdir(base)
@@ -138,12 +100,7 @@ def _walk_dirs(base: str) -> list[str] {
     return result
 }
 
-#===----------------------------------------------------------------------===#
-# Public API
-#===----------------------------------------------------------------------===#
-
 def has_magic(pattern: str) -> bool {
-    # Check if pattern contains glob special characters
     i: int = 0
     while i < len(pattern) {
         const ch: str = pattern[i]
@@ -156,11 +113,8 @@ def has_magic(pattern: str) -> bool {
 }
 
 def glob(pattern: str) -> list[str] {
-    # Return list of paths matching a glob pattern
-    # Supports: *.txt, dir/*.py, /path/to/*.c, dir/**/file.txt
 
     if not has_magic(pattern) {
-        # No wildcards - return the path if it exists
         result: list[str] = []
         if _exists(pattern) { result.append(pattern) }
         return result
@@ -170,24 +124,19 @@ def glob(pattern: str) -> list[str] {
     const nparts: int = len(parts)
 
     if nparts == 1 {
-        # Simple pattern in current directory: *.txt
         return _glob_in_dir(".", parts[0])
     }
 
-    # Determine the root directory (all non-magic leading components)
     dirname: str = ""
     start: int = 0
 
-    # Handle absolute paths
     if len(pattern) > 0 {
         if pattern[0] == "/" {
             dirname = "/"
-            # First part will be empty string from leading /
             start = 1
         }
     }
 
-    # Collect non-magic prefix as directory
     while start < nparts - 1 {
         const part: str = parts[start]
         if has_magic(part) { break }
@@ -197,13 +146,10 @@ def glob(pattern: str) -> list[str] {
 
     if len(dirname) == 0 { dirname = "." }
 
-    # Check for ** (recursive globbing)
     if start < nparts {
         if parts[start] == "**" {
-            # Recursive: walk all dirs, then match remaining pattern
             const dirs: list[str] = _walk_dirs(dirname)
             result: list[str] = []
-            # The file pattern is the last component
             const file_pat: str = parts[nparts - 1]
             i: int = 0
             while i < len(dirs) {
@@ -219,8 +165,6 @@ def glob(pattern: str) -> list[str] {
         }
     }
 
-    # Non-recursive: glob each magic component in sequence
-    # Start with directories matching the first magic part
     candidates: list[str] = []
     candidates.append(dirname)
 
@@ -232,7 +176,6 @@ def glob(pattern: str) -> list[str] {
         while ci < len(candidates) {
             const cand: str = candidates[ci]
             if idx == nparts - 1 {
-                # Last component: match files and dirs
                 const matches: list[str] = _glob_in_dir(cand, part)
                 mi: int = 0
                 while mi < len(matches) {
@@ -240,7 +183,6 @@ def glob(pattern: str) -> list[str] {
                     mi = mi + 1
                 }
             } else {
-                # Intermediate component: match only directories
                 const matches: list[str] = _glob_in_dir(cand, part)
                 mi: int = 0
                 while mi < len(matches) {
@@ -260,6 +202,5 @@ def glob(pattern: str) -> list[str] {
 }
 
 def iglob(pattern: str) -> list[str] {
-    # Same as glob - Dragon does not have lazy iterators yet
     return glob(pattern)
 }

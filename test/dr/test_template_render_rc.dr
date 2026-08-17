@@ -21,15 +21,12 @@ from html import HTML
 
 
 def render_row(label: str, n: int) -> str {
-    # Interpolates an OWNED temp (str(n)) and a borrowed param (label) into a
-    # typed template, then wraps in HTML - exercises leaks #1 and #2.
     h: HTML = template[HTML] { <li>!{label} #!{str(n)}</li> }
     return h.to_str()
 }
 
 
 def render_list(items: list[str]) -> str {
-    # Block-interp buffer (leak #3).
     h: HTML = template[HTML] {
         <ul>!{ for it in items { :{ <li>!{it}</li> } } }</ul>
     }
@@ -45,15 +42,10 @@ class TemplateRenderRcTests(TestCase) {
             out = render_row("item", i)
             i = i + 1
         }
-        # str(n) interpolation must render correctly (the escape released the
-        # owned temp without corrupting it). strip() ignores template-formatting
-        # whitespace - this guards content integrity, not exact spacing.
         self.assertEqual(out.strip(), "<li>item #19</li>")
     }
 
     def test_typed_wrap_render_correct() {
-        # The wrapped HTML still produces the right string after the owned concat
-        # temp is dropped (and the borrowed `&` is auto-escaped).
         out: str = render_row("x&y", 3)
         self.assertEqual(out.strip(), "<li>x&amp;y #3</li>")
     }
@@ -66,7 +58,6 @@ class TemplateRenderRcTests(TestCase) {
             out = render_list(items)
             i = i + 1
         }
-        # Each fragment appended + joined; buffer freed per render, output stable.
         const trimmed: str = out.strip()
         self.assertTrue(trimmed.startswith("<ul>"))
         self.assertTrue(trimmed.endswith("</ul>"))

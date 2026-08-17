@@ -1,12 +1,3 @@
-// Tests for the ownership pass (del / own / dub, docs/001-memory.md + the
-// docs/002 ADR). Must-not-compile programs (the ADR's adversarial acceptance
-// list) drive the pass directly; the must-compile guards prove the discipline
-// is opt-in and refusal never hits correct unannotated code. Runtime behavior
-// (early release, the debug rc==1 tripwire) is covered by the dogfooded
-// test/dr/test_rc_del.dr and scratchpad tripwire probes - value-assertable
-// runtime behavior stays in .dr tests per the testing conventions; this gtest
-// exists because a program that must be REJECTED cannot be a .dr unittest
-
 #include "TestHelpers.h"
 #include "dragon/OwnershipCheck.h"
 #include <gtest/gtest.h>
@@ -16,10 +7,8 @@ using namespace dragon::test;
 
 namespace {
 
-// Parse + Sema + TypeChecker (the pass reads expression types) + ownership.
-// Returns the first diagnostic message, or "" when the program is accepted.
 std::string ownError(const std::string& src) {
-    auto mod = parse(src, /*isDragon=*/true);
+    auto mod = parse(src, true);
     Sema sema;
     sema.analyze(*mod);
     TypeChecker tc;
@@ -32,12 +21,7 @@ std::string ownError(const std::string& src) {
 
 bool ownAccepts(const std::string& src) { return ownError(src).empty(); }
 
-} // namespace
-
-//===----------------------------------------------------------------------===//
-// The adversarial acceptance list (ADR section 5) - each must refuse with a
-// diagnostic naming the cause.
-//===----------------------------------------------------------------------===//
+}
 
 TEST(OwnershipCheckTest, DelAfterContainerStoreErrors) {
     std::string e = ownError(
@@ -63,7 +47,6 @@ TEST(OwnershipCheckTest, DelOfCapturedLocalErrors) {
 }
 
 TEST(OwnershipCheckTest, DelOfAliasedOwnerErrors) {
-    // Q2 (signed off): one owner, one name - ambiguity is a compile error.
     std::string e = ownError(
         "def f() -> int {\n"
         "    x: str = \"a\" + \"b\"\n"
@@ -149,7 +132,6 @@ TEST(OwnershipCheckTest, UseAfterDelErrors) {
 }
 
 TEST(OwnershipCheckTest, DelOfPlainParamErrors) {
-    // Plain parameters are borrows (ADR 2.1); `own p` arrives in slice C.
     std::string e = ownError(
         "def f(s: str) -> int {\n"
         "    del s\n"
@@ -159,7 +141,6 @@ TEST(OwnershipCheckTest, DelOfPlainParamErrors) {
 }
 
 TEST(OwnershipCheckTest, DelOfWithSubjectErrors) {
-    // The with statement owns its subject's release (__exit__/cleanup).
     std::string e = ownError(
         "def f() -> int {\n"
         "    with open(\"x\") as r {\n"
@@ -169,24 +150,6 @@ TEST(OwnershipCheckTest, DelOfWithSubjectErrors) {
         "}\n");
     EXPECT_NE(e.find("not the owner"), std::string::npos) << e;
 }
-
-// NOTE deliberately ABSENT here: must-COMPILE guard cases (del after a plain
-// call, rebind after del, del on every branch, loop-local del, container-
-// element del, unannotated code). Those are real compilable Dragon and live
-// as dogfooded runtime tests in test/dr/test_rc_del.dr and
-// test/dr/test_rc_own_fields.dr - if one of them ever regressed into a
-// refusal, that .dr test would fail to compile and the dr ctest tier would
-// catch it. Only programs that must be REJECTED belong in this file.
-
-//===----------------------------------------------------------------------===//
-// own fields (slice B) - rejection cases only. Everything that COMPILES is
-// dogfooded (test/dr/test_rc_del.dr, test/dr/test_rc_own_fields.dr) per the
-// testing conventions; this suite exists solely because a program that must
-// be REJECTED cannot be a .dr unittest. The no-registered-releaser case is a
-// CODEGEN error (Classes.cpp), exercised at driver level, not this harness.
-// This harness type-checks in isolation (no module registry), so rejection
-// fixtures use import-free types (str), not threading.Lock
-//===----------------------------------------------------------------------===//
 
 TEST(OwnershipCheckTest, OwnFieldBorrowStoreErrors) {
     std::string e = ownError(
@@ -199,10 +162,6 @@ TEST(OwnershipCheckTest, OwnFieldBorrowStoreErrors) {
     EXPECT_NE(e.find("sole ownership"), std::string::npos) << e;
 }
 
-// The own-transfer slice: a bare name that is a LIVE sole owner - an `own`
-// parameter or a fresh-owned local - stored into an own field is an IMPLICIT
-// move, no `own` keyword needed at the store (matches the book's
-// `self._data = d`). Compiles.
 TEST(OwnershipCheckTest, OwnParamPlainStoreIntoOwnFieldCompiles) {
     EXPECT_TRUE(ownAccepts(
         "class Box {\n"
@@ -238,8 +197,6 @@ TEST(OwnershipCheckTest, PlainStoreIntoOwnFieldThenUseIsUseAfterMove) {
     EXPECT_NE(e.find("was moved into"), std::string::npos) << e;
 }
 
-// An ALIASED/escaped owner is not a sole owner, so a plain store into a
-// sole-owner field is still refused (only a live sole owner moves).
 TEST(OwnershipCheckTest, PlainStoreOfEscapedOwnerIntoOwnFieldErrors) {
     std::string e = ownError(
         "class Box {\n"
@@ -269,8 +226,6 @@ TEST(OwnershipCheckTest, OwnLocalErrors) {
     EXPECT_NE(e.find("class FIELD"), std::string::npos) << e;
 }
 
-// ADR 2.10 (acceptance case 11): a raw-resource field without own has no
-// owner to destroy it - both the declared and the ctor-assigned-only shape.
 TEST(OwnershipCheckTest, PlainLockFieldErrors) {
     std::string e = ownError(
         "class Router {\n"
@@ -290,14 +245,11 @@ TEST(OwnershipCheckTest, UndeclaredLockFieldStoreErrors) {
     EXPECT_NE(e.find("must be declared own"), std::string::npos) << e;
 }
 
-// ADR 2.10 (acceptance case 12): raw resources cannot be container elements.
 TEST(OwnershipCheckTest, ContainerOfLockErrors) {
     std::string e = ownError("locks: list[Lock] = []\n");
     EXPECT_NE(e.find("cannot hold raw Lock"), std::string::npos) << e;
 }
 
-// ADR 2.5 corrected + acceptance case 13: consumption must agree at the JOIN,
-// with or without a later use (a disagreement would need a runtime drop flag)
 TEST(OwnershipCheckTest, ConditionalDelNoUseErrorsAtJoin) {
     std::string e = ownError(
         "def branchy(cond: bool) {\n"
@@ -308,10 +260,6 @@ TEST(OwnershipCheckTest, ConditionalDelNoUseErrorsAtJoin) {
         "}\n");
     EXPECT_NE(e.find("every path"), std::string::npos) << e;
 }
-
-//===----------------------------------------------------------------------===//
-// Slice C: own parameters and moves (ADR 2.8, corrected 2.5).
-//===----------------------------------------------------------------------===//
 
 TEST(OwnershipCheckTest, UseAfterMoveErrors) {
     std::string e = ownError(
@@ -325,7 +273,6 @@ TEST(OwnershipCheckTest, UseAfterMoveErrors) {
 }
 
 TEST(OwnershipCheckTest, ConditionalMoveNoUseErrorsAtJoin) {
-    // ADR acceptance case 13: no later use required; the fix is else { del x }.
     std::string e = ownError(
         "def consume(own s: str) -> int { return len(s) }\n"
         "def f(c: bool) {\n"
@@ -369,13 +316,7 @@ TEST(OwnershipCheckTest, MoveOfEscapedOwnerErrors) {
     EXPECT_NE(e.find("escaped into"), std::string::npos) << e;
 }
 
-//===----------------------------------------------------------------------===//
-// Slice D: dub + E17 (ADR 2.7, 2.11 - the one mandatory-dub site).
-//===----------------------------------------------------------------------===//
-
 TEST(OwnershipCheckTest, MutationDuringIterationErrors) {
-    // The live-reproduced footgun: remove() shifts the next element past the
-    // loop cursor and the wrong list survives, silently.
     std::string e = ownError(
         "def f() {\n"
         "    names: list[str] = [\"a\", \"tmp1\", \"tmp2\", \"b\"]\n"
@@ -399,7 +340,6 @@ TEST(OwnershipCheckTest, SubscriptStoreDuringIterationErrors) {
 }
 
 TEST(OwnershipCheckTest, MutatingADifferentContainerCompiles) {
-    // Only the ITERATED binding is protected (ADR: v1 scope).
     EXPECT_TRUE(ownAccepts(
         "def f() {\n"
         "    xs: list[int] = [1, 2, 3]\n"
@@ -420,12 +360,6 @@ TEST(OwnershipCheckTest, DubImmutableIterableErrors) {
         "}\n");
     EXPECT_NE(e.find("immutable"), std::string::npos) << e;
 }
-
-//===----------------------------------------------------------------------===//
-// Slice E: the spawn boundary (ADR 2.9, E12) with the joined-Task borrow
-// door - LENT is a checker state (a Dead flavor with the machine's only
-// backwards transition at await/join), not a keyword.
-//===----------------------------------------------------------------------===//
 
 TEST(OwnershipCheckTest, TouchWhileLentErrors) {
     std::string e = ownError(
@@ -489,15 +423,6 @@ TEST(OwnershipCheckTest, LendThenAwaitThenUseCompiles) {
         "}\n"));
 }
 
-//===----------------------------------------------------------------------===//
-// ADR 2.9 door 5 - read-only shared borrow across `fire`.
-// A plain `fire worker(shared)` that COMPILES proves `worker` only reads its
-// parameter; a mutating worker misses the door and keeps the lend/E12 rules.
-//===----------------------------------------------------------------------===//
-
-// The worker-pool fan-out: one task per worker over the SAME shared list,
-// joined after the loop. Read-only worker -> door 5 accepts (pre-door this was
-// E10 on the loop back edge).
 TEST(OwnershipCheckTest, FireReadOnlyListFanOutAccepted) {
     EXPECT_TRUE(ownAccepts(
         "def worker(s: list[str]) -> int {\n"
@@ -524,8 +449,6 @@ TEST(OwnershipCheckTest, FireReadOnlyListFanOutAccepted) {
         "}\n"));
 }
 
-// A discarded handle firing a read-only worker is also fine: the worker holds
-// its own atomic-RC reference, so the value cannot dangle.
 TEST(OwnershipCheckTest, FireReadOnlyDiscardedHandleAccepted) {
     EXPECT_TRUE(ownAccepts(
         "def worker(s: list[str]) -> int { return len(s) }\n"
@@ -535,9 +458,6 @@ TEST(OwnershipCheckTest, FireReadOnlyDiscardedHandleAccepted) {
         "}\n"));
 }
 
-// The door is READ-ONLY: a worker that appends to its parameter mutates shared
-// state. Fired in a loop it must still be refused (it never reaches door 5, so
-// the loop back-edge lend kills it) - dub/own is the answer.
 TEST(OwnershipCheckTest, FireMutatingWorkerInLoopRejected) {
     std::string e = ownError(
         "def mutate(s: list[int]) -> int {\n"
@@ -558,8 +478,6 @@ TEST(OwnershipCheckTest, FireMutatingWorkerInLoopRejected) {
     EXPECT_FALSE(e.empty()) << "mutating worker fan-out must be refused";
 }
 
-// A read-only share ESCAPES: the value cannot be `del`'d while a thread may
-// still be reading it. This must be refused even though the worker is read-only.
 TEST(OwnershipCheckTest, DelAfterReadOnlyShareRejected) {
     std::string e = ownError(
         "def worker(s: list[str]) -> int { return len(s) }\n"
@@ -572,13 +490,8 @@ TEST(OwnershipCheckTest, DelAfterReadOnlyShareRejected) {
     EXPECT_FALSE(e.empty()) << "del of a value shared into a thread must refuse";
 }
 
-//===----------------------------------------------------------------------===//
-// defer: scope-exit calls with ownership. `defer f(own x)` moves x at the
-// STATEMENT; any later use is the same E-class as use-after-move. A pending
-// defer PINS every binding it references (args and receiver): a later own
-// move or del of a pinned binding would leave the defer holding a value
-// somebody else now owns, so it must refuse at compile time.
-//===----------------------------------------------------------------------===//
+// `defer f(own x)` moves x at the STATEMENT (a later use is the use-after-move E-class); a pending
+// defer PINS every referenced binding, so a later own move or del of it must refuse at compile time.
 
 TEST(OwnershipCheckTest, UseAfterDeferOwnMoveErrors) {
     std::string e = ownError(
@@ -640,8 +553,6 @@ TEST(OwnershipCheckTest, DelOfDeferPinnedBindingErrors) {
     EXPECT_NE(e.find("pending defer"), std::string::npos) << e;
 }
 
-// The pin dies with the defer's scope: after the block exits, the defer has
-// already run and the binding is movable again.
 TEST(OwnershipCheckTest, PinExpiresWithDeferScope) {
     EXPECT_TRUE(ownAccepts(
         "def use(d: list[int]) -> None { }\n"
@@ -686,19 +597,8 @@ TEST(OwnershipCheckTest, DeferDubLeavesSourceLive) {
         "}\n"));
 }
 
-//===----------------------------------------------------------------------===//
-// Identity resources (docs/1604 "Identity resources": the SocketHandle
-// shape). A handle class holds the one claim; an owner class takes it via an
-// own-param constructor. Each promise the book makes is a bouncer case here:
-// the borrow-forge, the stale toucher, the second claimant, and the copy all
-// get refused with a diagnostic naming the cause. The must-compile guards
-// prove the blessed spellings (fresh temporary, explicit move) stay friction-
-// free. Runtime poison semantics live in test/dr/test_socket_handle.dr.
-//===----------------------------------------------------------------------===//
-
 namespace {
 
-// The minimal identity-resource pair, shared by the cases below.
 const char* kHandlePair =
     "class H {\n"
     "    _fd: int\n"
@@ -715,15 +615,8 @@ std::string withPair(const std::string& body) {
     return std::string(kHandlePair) + body;
 }
 
-} // namespace
+}
 
-// The borrow-forge ("constructor takes ownership of its argument") and the
-// copy ("not dubable") are TYPECHECKER diagnostics, so those two bouncer
-// cases live in TypeCheckerTest.cpp (IdentityResource*). This suite owns the
-// move/claim cases below.
-
-// The stale toucher: the handle was moved into the reader; the old binding
-// is dead and every later use says so.
 TEST(OwnershipCheckTest, OwnCtorMoveThenUseErrors) {
     std::string e = ownError(withPair(
         "def f() -> int {\n"
@@ -734,7 +627,6 @@ TEST(OwnershipCheckTest, OwnCtorMoveThenUseErrors) {
     EXPECT_NE(e.find("was moved into"), std::string::npos) << e;
 }
 
-// The second claimant: one claim cannot be moved into two owners.
 TEST(OwnershipCheckTest, OwnCtorDoubleMoveErrors) {
     std::string e = ownError(withPair(
         "def f() -> int {\n"
@@ -746,8 +638,6 @@ TEST(OwnershipCheckTest, OwnCtorDoubleMoveErrors) {
     EXPECT_NE(e.find("already moved"), std::string::npos) << e;
 }
 
-// Guard: a FRESH temporary (the adopt_raw shape) carries its own +1 into the
-// own-param constructor with no `own` spelled at the call site.
 TEST(OwnershipCheckTest, OwnCtorFreshTemporaryAccepted) {
     EXPECT_TRUE(ownAccepts(withPair(
         "def f() -> int {\n"
@@ -756,8 +646,6 @@ TEST(OwnershipCheckTest, OwnCtorFreshTemporaryAccepted) {
         "}\n")));
 }
 
-// Guard: the explicit move with no later use of the source compiles, and the
-// new owner reads through its claim.
 TEST(OwnershipCheckTest, OwnCtorMoveAccepted) {
     EXPECT_TRUE(ownAccepts(withPair(
         "def f() -> int {\n"
@@ -765,4 +653,154 @@ TEST(OwnershipCheckTest, OwnCtorMoveAccepted) {
         "    r: R = R(own h)\n"
         "    return r.probe()\n"
         "}\n")));
+}
+
+TEST(OwnershipCheckTest, DelOfLentTaskErrorsAtDelSite) {
+    std::string e = ownError(
+        "class Counter {\n"
+        "    n: int\n"
+        "    def(n: int) {\n"
+        "        self.n = n\n"
+        "    }\n"
+        "}\n"
+        "def worker(c: Counter) -> int {\n"
+        "    c.n = c.n + 1\n"
+        "    return c.n\n"
+        "}\n"
+        "def run() -> int {\n"
+        "    c: Counter = Counter(7)\n"
+        "    t: Task[int] = fire worker(c)\n"
+        "    del t\n"
+        "    return 0\n"
+        "}\n");
+    EXPECT_NE(e.find("cannot del task 't'"), std::string::npos) << e;
+}
+
+TEST(OwnershipCheckTest, DelOfUnlentTaskAccepted) {
+    EXPECT_TRUE(ownAccepts(
+        "async def make(n: int) -> str {\n"
+        "    return \"x\"\n"
+        "}\n"
+        "def run() -> None {\n"
+        "    t: Task[str] = make(1)\n"
+        "    del t\n"
+        "}\n"));
+}
+
+TEST(OwnershipCheckTest, DoubleAwaitRejected) {
+    std::string e = ownError(
+        "async def make(n: int) -> str {\n"
+        "    return str(n)\n"
+        "}\n"
+        "def run() -> str {\n"
+        "    t: Task[str] = make(1)\n"
+        "    a: str = await t\n"
+        "    b: str = await t\n"
+        "    return a + b\n"
+        "}\n");
+    EXPECT_NE(e.find("moves out exactly once"), std::string::npos) << e;
+}
+
+TEST(OwnershipCheckTest, AwaitThenJoinRejected) {
+    std::string e = ownError(
+        "async def make(n: int) -> str {\n"
+        "    return str(n)\n"
+        "}\n"
+        "def run() -> str {\n"
+        "    t: Task[str] = make(1)\n"
+        "    a: str = await t\n"
+        "    return t.join()\n"
+        "}\n");
+    EXPECT_NE(e.find("moves out exactly once"), std::string::npos) << e;
+}
+
+TEST(OwnershipCheckTest, IsAliveAfterAwaitRejected) {
+    std::string e = ownError(
+        "async def make(n: int) -> str {\n"
+        "    return str(n)\n"
+        "}\n"
+        "def run() -> bool {\n"
+        "    t: Task[str] = make(1)\n"
+        "    a: str = await t\n"
+        "    return t.is_alive()\n"
+        "}\n");
+    EXPECT_NE(e.find("moves out exactly once"), std::string::npos) << e;
+}
+
+TEST(OwnershipCheckTest, AwaitInLoopOfOuterTaskRejected) {
+    std::string e = ownError(
+        "async def make(n: int) -> str {\n"
+        "    return str(n)\n"
+        "}\n"
+        "def run() -> int {\n"
+        "    t: Task[str] = make(1)\n"
+        "    total: int = 0\n"
+        "    i: int = 0\n"
+        "    while i < 3 {\n"
+        "        s: str = await t\n"
+        "        total = total + len(s)\n"
+        "        i = i + 1\n"
+        "    }\n"
+        "    return total\n"
+        "}\n");
+    EXPECT_NE(e.find("awaited on iteration 1"), std::string::npos) << e;
+}
+
+TEST(OwnershipCheckTest, ConditionalAwaitThenSecondAwaitRejected) {
+    std::string e = ownError(
+        "async def make(n: int) -> str {\n"
+        "    return str(n)\n"
+        "}\n"
+        "def run(ready: bool) -> str {\n"
+        "    t: Task[str] = make(1)\n"
+        "    early: str = \"\"\n"
+        "    if ready {\n"
+        "        early = await t\n"
+        "    }\n"
+        "    late: str = await t\n"
+        "    return early + late\n"
+        "}\n");
+    EXPECT_NE(e.find("moves out exactly once"), std::string::npos) << e;
+}
+
+TEST(OwnershipCheckTest, ConditionalAwaitAloneAccepted) {
+    EXPECT_TRUE(ownAccepts(
+        "async def make(n: int) -> str {\n"
+        "    return str(n)\n"
+        "}\n"
+        "def run(ready: bool) -> str {\n"
+        "    t: Task[str] = make(1)\n"
+        "    if ready {\n"
+        "        return await t\n"
+        "    }\n"
+        "    return \"skipped\"\n"
+        "}\n"));
+}
+
+TEST(OwnershipCheckTest, PollThenAwaitAccepted) {
+    EXPECT_TRUE(ownAccepts(
+        "async def make(n: int) -> str {\n"
+        "    return str(n)\n"
+        "}\n"
+        "def run() -> str {\n"
+        "    t: Task[str] = make(1)\n"
+        "    while t.is_alive() {\n"
+        "        pass\n"
+        "    }\n"
+        "    return await t\n"
+        "}\n"));
+}
+
+TEST(OwnershipCheckTest, RebindThenAwaitAccepted) {
+    EXPECT_TRUE(ownAccepts(
+        "async def make(n: int) -> str {\n"
+        "    return str(n)\n"
+        "}\n"
+        "def run() -> str {\n"
+        "    t: Task[str] = make(1)\n"
+        "    a: str = await t\n"
+        "    t = make(2)\n"
+        "    b: str = await t\n"
+        "    return a + b\n"
+        "}\n"));
 }

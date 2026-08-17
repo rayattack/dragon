@@ -21,7 +21,6 @@ extern "C" def pause() -> intc
 extern "C" def strsignal(sig: intc) -> str
 
 
-# POSIX-standard signal numbers (Linux/glibc values).
 const SIGHUP: int = 1
 const SIGINT: int = 2
 const SIGQUIT: int = 3

@@ -20,7 +20,6 @@ class DequeGcTests(TestCase) {
             ys: list[int] = d.pop()
             total = total + ys[0]
         }
-        # sum 0..49
         self.assertEqual(total, 1225)
     }
 
@@ -38,13 +37,10 @@ class DequeGcTests(TestCase) {
             f: Callable[[], int] = fns.pop()
             csum = csum + f()
         }
-        # sum 0..19
         self.assertEqual(csum, 190)
     }
 
     def test_bounded_deque_eviction_stays_balanced() {
-        # Bounded deque of lists: eviction decref + gc tracking must not
-        # double-release or leak under churn.
         d: deque[list[int]] = deque([], maxlen=4)
         i: int = 0
         while i < 200 {

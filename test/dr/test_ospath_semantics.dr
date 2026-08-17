@@ -1,0 +1,84 @@
+from unittest import TestCase, main
+from os.path import join, split, splitext, expandvars
+import os
+
+
+class JoinTests(TestCase) {
+    def test_absolute_second_discards_first() {
+        self.assertEqual(join("/usr", "/etc"), "/etc")
+        self.assertEqual(join("a/b", "/c"), "/c")
+        self.assertEqual(join("", "/x"), "/x")
+    }
+
+    def test_relative_join_unchanged() {
+        self.assertEqual(join("/usr", "lib"), "/usr/lib")
+        self.assertEqual(join("/usr/", "lib"), "/usr/lib")
+        self.assertEqual(join("", "b"), "b")
+        self.assertEqual(join("a", ""), "a/")
+    }
+}
+
+
+class SplitPairTests(TestCase) {
+    def test_split_pair() {
+        const parts: tuple[str, str] = split("/a/b/c.txt")
+        self.assertEqual(len(parts), 2)
+        self.assertEqual(parts[0], "/a/b")
+        self.assertEqual(parts[1], "c.txt")
+    }
+
+    def test_splitext_pair() {
+        const parts: tuple[str, str] = splitext("/a/b.tar.gz")
+        self.assertEqual(len(parts), 2)
+        self.assertEqual(parts[0], "/a/b.tar")
+        self.assertEqual(parts[1], ".gz")
+        const bare: tuple[str, str] = splitext("noext")
+        self.assertEqual(bare[0], "noext")
+        self.assertEqual(bare[1], "")
+    }
+}
+
+
+class ExpandvarsTests(TestCase) {
+    def test_literal_text_unchanged() {
+        self.assertEqual(expandvars("no dollars here"), "no dollars here")
+        self.assertEqual(expandvars("100$"), "100$")
+    }
+
+    def test_unknown_var_stays_literal() {
+        self.assertEqual(expandvars("$DRAGON_NO_SUCH_VAR_XYZ"), "$DRAGON_NO_SUCH_VAR_XYZ")
+        self.assertEqual(expandvars("${DRAGON_NO_SUCH_VAR_XYZ}"), "${DRAGON_NO_SUCH_VAR_XYZ}")
+    }
+
+    def test_known_var_expands() {
+        const v: str = expandvars("$HOME/x")
+        self.assertFalse(v.startswith("$"))
+        self.assertTrue(v.endswith("/x"))
+        const w: str = expandvars("a${HOME}b")
+        self.assertTrue(w.startswith("a"))
+        self.assertTrue(w.endswith("b"))
+        self.assertFalse(w.contains("$"))
+    }
+
+    def test_long_input() {
+        parts: list[str] = []
+        i: int = 0
+        while i < 2000 {
+            parts.append("ab")
+            i = i + 1
+        }
+        const s: str = "".join(parts)
+        self.assertEqual(expandvars(s), s)
+    }
+}
+
+
+class ShellTests(TestCase) {
+    def test_shell_runs_through_a_shell() {
+        self.assertEqual(os.shell("true"), 0)
+        self.assertNotEqual(os.shell("false"), 0)
+        self.assertEqual(os.shell("echo pipe | grep -q pipe"), 0)
+    }
+}
+
+main([JoinTests(), SplitPairTests(), ExpandvarsTests(), ShellTests()])

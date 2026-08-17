@@ -12,12 +12,6 @@ grammar but does not yet have a working implementation, it is listed in
 [Not yet available](#not-yet-available) with the exact error - so you always
 know what is real.
 
-> **One caveat threads through this page.** A builtin (or operator) that
-> returns a value works reliably when you **bind it to a typed variable first**,
-> then use that variable. Passing certain expressions *inline* to `print(...)`
-> can mis-render, because the inline result does not always carry its type to
-> the print site. When in doubt, write `const r: T = f(...)` then `print(r)`.
-
 ## Output and input
 
 | Function | Signature | Description |
@@ -79,7 +73,7 @@ print(str([1, 2, 3]))    # [1, 2, 3]
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `abs` | `abs(x: int) -> int` | Absolute value of an **integer**. |
+| `abs` | `abs(x: int) -> int` / `abs(x: float) -> float` | Absolute value; the result type matches the argument. |
 | `min` | `min(a, b)` / `min(xs: list)` | Smaller of two values, or the minimum of a list. |
 | `max` | `max(a, b)` / `max(xs: list)` | Larger of two values, or the maximum of a list. |
 | `sum` | `sum(xs: list)` | Sum of a list of numbers. |
@@ -102,8 +96,7 @@ print(sum([1, 2, 3, 4])) # 10
 | `any` | `any(xs: list[bool]) -> bool` | `True` if any element is truthy. |
 | `all` | `all(xs: list[bool]) -> bool` | `True` if every element is truthy. |
 
-`sorted` and `reversed` return a `list[T]`; **bind the result to a typed
-variable** before printing, otherwise the inline `print(sorted(...))` mis-renders:
+`sorted` and `reversed` return a new `list[T]`:
 
 ```dragon
 const s: list[int] = sorted([3, 1, 2])
@@ -206,6 +199,21 @@ print(len(d))            # 0
 > copy form is likewise not yet wired - copy with a comprehension,
 > `[x for x in src]`.
 
+## Numeric and functional builtins
+
+These mirror Python's names in the forms the typed model supports. A few carry a
+caveat worth knowing, noted in the table.
+
+| Function | Signature | Notes |
+|----------|-----------|-------|
+| `pow` | `pow(base: int, exp: int) -> int` | Integer power; same as `base ** exp`. |
+| `round` | `round(x: float) -> int` | Rounds to the nearest integer. The 2-arg `round(x, ndigits)` form is not available. |
+| `divmod` | `divmod(a: int, b: int) -> tuple[int, int]` | `(quotient, remainder)`. |
+| `map` | `map(fn, xs) -> list` | Eager: returns a `list`, not a lazy iterator. A comprehension is the idiomatic form. |
+| `filter` | `filter(fn, xs) -> list` | Eager: returns a `list`. |
+| `tuple` | `tuple(iterable) -> tuple` | Builds a tuple from an iterable; a list literal argument gives an exact-arity `tuple[...]`. |
+| `type` | `type(x) -> str` | Returns the type name, e.g. `"int"`, `"str"`, `"list"`. |
+
 ## Not yet available
 
 These names are recognized by the grammar (they highlight as builtins) but do
@@ -214,25 +222,13 @@ exactly where the boundary is.
 
 | Function | Status | Error when used |
 |----------|--------|-----------------|
-| `pow` | Front-end rejects the name | `undefined name 'pow'` |
-| `round` | Front-end rejects the name | `undefined name 'round'` |
-| `divmod` | Front-end rejects the name | `undefined name 'divmod'` |
-| `map` | No codegen implementation | `Unknown function: map` |
-| `filter` | No codegen implementation | `Unknown function: filter` |
-| `tuple` | No codegen implementation | `Unknown function: tuple` |
-| `type` | Returns a stub | always prints `object` |
-| `iter`, `next`, `getattr`, `setattr`, `hasattr`, `delattr`, `dir`, `vars`, `globals`, `locals`, `eval`, `exec`, `compile`, `callable`, `format`, `issubclass`, `slice`, `frozenset` | Reserved, unverified | varies - not yet usable as documented |
+| `iter`, `next`, `getattr`, `setattr`, `hasattr`, `delattr`, `dir`, `vars`, `globals`, `locals`, `eval`, `exec`, `compile`, `callable`, `format`, `issubclass`, `slice`, `frozenset` | Reserved, unverified | `undefined name '...'` / `Unknown function: ...` |
 
-Workarounds for the most common gaps:
-
-- **`pow(a, b)`** - use the exponent operator `a ** b`, or `math.pow` from the
-  [math stdlib](/docs/2004-appendix-stdlib).
-- **`round`, `divmod`** - implement inline (`q = a // b`, `r = a % b`) or reach
-  for the math module.
-- **`map`, `filter`** - use a [comprehension](/docs/0501-lists):
-  `[f(x) for x in xs]` and `[x for x in xs if cond]`. These are also the
-  faster, more idiomatic Dragon form.
-- **`tuple(xs)`** - build the tuple literal directly: `(a, b, c)`.
+The dynamic-reflection names (`eval`, `exec`, `compile`, `getattr`, `setattr`,
+`vars`, `globals`, `locals`) are excluded on purpose: they are the dynamic
+crutches Dragon rejects, not gaps waiting to be filled. A comprehension
+(`[f(x) for x in xs]`, `[x for x in xs if cond]`) is still the idiomatic and
+faster form even though `map`/`filter` now work.
 
 ## At a glance
 
@@ -252,8 +248,8 @@ Workarounds for the most common gaps:
 | Any / all true | `any(flags)` / `all(flags)` |
 | Char and code | `chr(n)` / `ord(c)` |
 | Number base | `hex(n)` / `oct(n)` / `bin(n)` |
-| Transform a list | `[f(x) for x in xs]` (no `map`) |
-| Filter a list | `[x for x in xs if c]` (no `filter`) |
+| Transform a list | `[f(x) for x in xs]` or `map(f, xs)` |
+| Filter a list | `[x for x in xs if c]` or `filter(f, xs)` |
 
 For the operators (`**`, `//`, `in`, `not in`, comparison, bitwise) see the
 [operators appendix](/docs/2002-appendix-operators); for keywords see the

@@ -1,13 +1,3 @@
-# Minimal markdown→HTML renderer.
-#
-# Covers what the in-tree docs/ and  pages actually use: ATX headings,
-# fenced code blocks, paragraphs, unordered/ordered lists, blockquotes, inline
-# code, bold/italic, and links. Tables and HTML pass-through are out of scope.
-#
-# All output is HTML-escaped; the only place the source is emitted verbatim is
-# inside <pre><code>, where escaping still applies but no inline parsing runs.
-# Fenced code blocks are additionally tokenized and colored by highlight.dr.
-
 from highlight import highlight
 
 
@@ -90,12 +80,6 @@ def _rstrip(s: str) -> str {
 }
 
 
-# --- Inline rendering (single line, no block context) ---
-#
-# Walks the line left-to-right, emitting escaped text by default and switching
-# into one of the small set of inline constructs when a marker appears. Each
-# construct must close on the same line; a stray opener is emitted literally.
-
 def _render_inline(line: str) -> str {
     out: str = ""
     i: int = 0
@@ -103,7 +87,6 @@ def _render_inline(line: str) -> str {
     while i < n {
         const c: str = line[i]
 
-        # Inline code `…`
         if c == "`" {
             const close: int = line.find("`", i + 1)
             if close > i {
@@ -117,7 +100,6 @@ def _render_inline(line: str) -> str {
             continue
         }
 
-        # Bold **…**
         if c == "*" and i + 1 < n and line[i + 1] == "*" {
             const close: int = line.find("**", i + 2)
             if close > i {
@@ -128,7 +110,6 @@ def _render_inline(line: str) -> str {
             }
         }
 
-        # Italic *…*  (only when not the start of **)
         if c == "*" {
             const close: int = line.find("*", i + 1)
             if close > i and (close + 1 >= n or line[close + 1] != "*") {
@@ -139,7 +120,6 @@ def _render_inline(line: str) -> str {
             }
         }
 
-        # Link [text](url)
         if c == "[" {
             const closeB: int = line.find("]", i + 1)
             if closeB > i and closeB + 1 < n and line[closeB + 1] == "(" {
@@ -155,7 +135,6 @@ def _render_inline(line: str) -> str {
             }
         }
 
-        # Default: escape and emit one char
         if c == "&" {
             out = out + "&amp;"
         } elif c == "<" {
@@ -171,18 +150,7 @@ def _render_inline(line: str) -> str {
 }
 
 
-# --- Tables (GitHub-flavored markdown) ---
-#
-# A table has a header row, a separator line of dashes/pipes, and zero or more
-# body rows - each line bounded by `|` characters and split into cells on
-# inner `|`s. The separator line may contain `:---`, `:---:`, or `---:` for
-# left/center/right alignment but we currently emit the same `<th>` / `<td>`
-# regardless; CSS handles visual alignment by column index if needed later.
-
 def _is_table_row(line: str) -> bool {
-    # A pipe-bounded row: stripped, starts with `|`, contains at least one
-    # additional `|`. Non-table single-pipe lines (e.g. inline `|` in
-    # paragraphs without bookend pipes) are rejected.
     const s: str = _strip(line)
     if len(s) < 2 {
         return false
@@ -194,16 +162,12 @@ def _is_table_row(line: str) -> bool {
 }
 
 def _split_table_row(line: str) -> list[str] {
-    # Split a `|a|b|c|` row into ["a", "b", "c"]. The bookend pipes produce
-    # empty leading and trailing cells which we discard. Cells are stripped
-    # of surrounding whitespace.
     const s: str = _strip(line)
     const raw: list[str] = s.split("|")
     const out: list[str] = []
     i: int = 0
     while i < len(raw) {
         const cell: str = _strip(raw[i])
-        # Drop the empty bookend cells that come from the leading/trailing `|`.
         if i == 0 and len(cell) == 0 {
             i = i + 1
             continue
@@ -219,10 +183,6 @@ def _split_table_row(line: str) -> list[str] {
 }
 
 def _is_table_separator(line: str) -> bool {
-    # Separator line: pipe-bounded, every cell is dashes (with optional
-    # leading/trailing colon and surrounding spaces). One `---` minimum per
-    # cell. `_split_table_row` handles the trim, so we only need to inspect
-    # the cell contents.
     if not _is_table_row(line) {
         return false
     }
@@ -236,7 +196,6 @@ def _is_table_separator(line: str) -> bool {
         if len(c) == 0 {
             return false
         }
-        # Allow leading `:` and trailing `:` for alignment markers.
         lo: int = 0
         hi: int = len(c)
         if c[0] == ":" {
@@ -277,8 +236,6 @@ def _is_digits(s: str) -> bool {
 }
 
 
-# First whitespace-delimited word of a fence info string, e.g. "dragon" from
-# "dragon" or "dragon title=...". Lowercased so "Dragon" and "BASH" route too.
 def _first_word(s: str) -> str {
     i: int = 0
     const n: int = len(s)
@@ -293,9 +250,6 @@ def _first_word(s: str) -> str {
 }
 
 
-# Render one fenced code block: the language class plus the highlighted body.
-# The body is highlighted as a unit (one pass over the whole block) so the
-# tokenizer sees multi-line constructs whole.
 def _render_code_block(lang: str, lines: list[str]) -> str {
     body: str = ""
     i: int = 0
@@ -313,13 +267,6 @@ def _render_code_block(lang: str, lines: list[str]) -> str {
     return open_tag + highlight(lang, body) + "</code></pre>\n"
 }
 
-
-# --- Block rendering ---
-#
-# Stateful: walks lines top-to-bottom, opens and closes <ul>/<ol>/<blockquote>
-# wrappers as runs of like-kind lines start and end. Fenced code blocks
-# (```...```) consume verbatim until the matching fence; everything else is
-# either a heading, list item, or paragraph.
 
 def render(md: str) -> str {
     const lines: list[str] = md.split("\n")
@@ -402,9 +349,6 @@ def render(md: str) -> str {
             continue
         }
 
-        # GFM tables. Need the next line to be a separator (`|---|---|`)
-        # before we commit - otherwise a single pipe-leading line is just
-        # a paragraph that happens to start with `|`.
         const is_table_start: bool = _is_table_row(raw) and i + 1 < len(lines) and _is_table_separator(lines[i + 1])
         if is_table_start {
             close_para()
@@ -417,7 +361,7 @@ def render(md: str) -> str {
                 h = h + 1
             }
             out = out + "</tr></thead>\n<tbody>\n"
-            i = i + 2  # skip header + separator
+            i = i + 2
             while i < len(lines) and _is_table_row(_rstrip(lines[i])) {
                 const cells: list[str] = _split_table_row(_rstrip(lines[i]))
                 out = out + "<tr>"
@@ -433,7 +377,6 @@ def render(md: str) -> str {
             continue
         }
 
-        # Headings: # … ######
         if _starts_with(stripped, "# ") {
             close_para(); close_lists()
             out = out + "<h1>" + _render_inline(stripped[2:]) + "</h1>\n"
@@ -459,7 +402,6 @@ def render(md: str) -> str {
             continue
         }
 
-        # Horizontal rule
         if stripped == "---" or stripped == "***" or stripped == "___" {
             close_para(); close_lists()
             out = out + "<hr>\n"
@@ -467,7 +409,6 @@ def render(md: str) -> str {
             continue
         }
 
-        # Blockquote
         if _starts_with(stripped, "> ") {
             close_para()
             if in_ul { out = out + "</ul>\n"; in_ul = false }
@@ -481,13 +422,6 @@ def render(md: str) -> str {
             continue
         }
 
-        # Unordered list. After the bullet marker, gather continuation lines
-        # that are wrapped onto subsequent lines (typical in 80-column source).
-        # Continuation lines either start with whitespace (the conventional
-        # GFM indent under the bullet) OR are non-empty, non-special lines
-        # immediately following - paragraph rewrap. A blank line, a new
-        # bullet, or any block-level marker (heading, fence, hr, blockquote)
-        # closes the current item.
         if _starts_with(stripped, "- ") or _starts_with(stripped, "* ") {
             close_para()
             if in_ol { out = out + "</ol>\n"; in_ol = false }
@@ -511,13 +445,11 @@ def render(md: str) -> str {
                 if _starts_with(next_strip, "```") { break }
                 if _starts_with(next_strip, "> ") { break }
                 if next_strip == "---" or next_strip == "***" or next_strip == "___" { break }
-                # Numbered "N. " also closes the bullet - different list kind.
                 const ndot: int = next_strip.find(". ")
                 if ndot > 0 and ndot < 4 {
                     const nprefix: str = next_strip[0:ndot]
                     if _is_digits(nprefix) { break }
                 }
-                # GFM table starts also close.
                 const tbl_close: bool = _is_table_row(next_strip) and i + 1 < len(lines) and _is_table_separator(lines[i + 1])
                 if tbl_close { break }
                 item = item + " " + next_strip
@@ -527,8 +459,6 @@ def render(md: str) -> str {
             continue
         }
 
-        # Ordered list (only matches "N. " for small N to keep it cheap).
-        # Same continuation-line gathering as the unordered branch.
         const dot: int = stripped.find(". ")
         if dot > 0 and dot < 4 {
             const prefix: str = stripped[0:dot]
@@ -570,7 +500,6 @@ def render(md: str) -> str {
             }
         }
 
-        # Default: paragraph line
         close_lists()
         para.append(stripped)
         i = i + 1

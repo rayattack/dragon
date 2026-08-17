@@ -57,6 +57,7 @@ live binding - no `effect`, no node id, no update function on your part:
 
 ```dragon
 import ui
+from ui import Signal
 from html import HTML
 from ui.desktop import Window
 
@@ -98,6 +99,9 @@ Reactive interpolations are ordinary expressions, so derived values work
 without a separate "computed" primitive - just read the signals you need:
 
 ```dragon
+from ui import Signal
+from html import HTML
+
 celsius: Signal[int] = Signal(20)
 
 view: HTML = template[HTML] {

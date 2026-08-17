@@ -1,28 +1,13 @@
-# urllib/parse.dr - URL parsing and percent-encoding (RFC 3986).
-#
-# Surface mirrors CPython's `urllib.parse`. Inputs are treated as UTF-8.
-# Bytes outside the unreserved set get percent-encoded as `%HH` with
-# uppercase hex (matching Python's quote()).
-#
-# Coverage: urlsplit / urlparse / urlunsplit / urlunparse / urldefrag,
-# urljoin, quote / unquote / quote_plus / unquote_plus, parse_qs / parse_qsl,
-# urlencode. Enough for both server route parsing and client URL building.
-#
-# Also home to the `template[URL]` content type (D032 domain co-location):
-# URL percent-encoding is this module's domain (CPython's urllib.parse.quote).
-
 from template import Template
 
 const _HEX_UPPER: str = "0123456789ABCDEF"
 
 
-# RFC 3986 unreserved set: alphanumeric + "-._~". Always kept verbatim by
-# `quote` regardless of the `safe` argument.
 def _is_unreserved(b: int) -> bool {
-    if b >= 0x30 and b <= 0x39 { return True }   # 0-9
-    if b >= 0x41 and b <= 0x5A { return True }   # A-Z
-    if b >= 0x61 and b <= 0x7A { return True }   # a-z
-    if b == 0x2D or b == 0x2E or b == 0x5F or b == 0x7E { return True }  # - . _ ~
+    if b >= 0x30 and b <= 0x39 { return True }
+    if b >= 0x41 and b <= 0x5A { return True }
+    if b >= 0x61 and b <= 0x7A { return True }
+    if b == 0x2D or b == 0x2E or b == 0x5F or b == 0x7E { return True }
     return False
 }
 
@@ -35,9 +20,6 @@ def _hex_value(c: int) -> int {
 }
 
 
-# Append the UTF-8 byte sequence for codepoint `cp` to `out`.
-# Used by both quote (per-byte safe-set check) and unquote (mixing decoded
-# %HH bytes with literal codepoints in a single buffer before final decode).
 def _emit_utf8(cp: int, out: list[int]) -> None {
     if cp < 0x80 {
         out.append(cp)
@@ -56,8 +38,6 @@ def _emit_utf8(cp: int, out: list[int]) -> None {
     }
 }
 
-
-# --- Result types ---------------------------------------------------------
 
 class SplitResult {
     def(scheme: str, netloc: str, path: str, query: str, fragment: str) {
@@ -90,11 +70,7 @@ class ParseResult {
 }
 
 
-# --- Percent-encoding -----------------------------------------------------
-
 def quote(s: str, safe: str = "/") -> str {
-    # Build a 128-entry table of ASCII bytes that should NOT be encoded.
-    # Anything outside ASCII falls through to UTF-8 + %-escape on each byte.
     safe_bytes: list[bool] = [False] * 128
     si: int = 0
     while si < len(safe) {
@@ -130,10 +106,6 @@ def quote(s: str, safe: str = "/") -> str {
 
 
 def quote_plus(s: str, safe: str = "") -> str {
-    # Form-encoded variant: spaces become '+'. Strategy mirrors CPython -
-    # extend the safe set with ' ' so quote() keeps spaces literal, then
-    # post-substitute ' ' -> '+'. Pre-substituting "%20" first would re-encode
-    # the '%' itself ('%' isn't unreserved) and produce "%2520".
     if s.find(" ") < 0 {
         return quote(s, safe)
     }
@@ -142,13 +114,9 @@ def quote_plus(s: str, safe: str = "") -> str {
 
 
 def unquote(s: str) -> str {
-    # Fast path: nothing percent-encoded, return as-is.
     if s.find("%") < 0 {
         return s
     }
-    # Mixed-encoding buffer: decoded %HH bytes interleave with the UTF-8
-    # bytes of any literal codepoints, so a multibyte UTF-8 sequence split
-    # across `%E2%9C%93` (the check mark) reassembles correctly.
     out: list[int] = []
     i: int = 0
     n: int = len(s)
@@ -171,13 +139,9 @@ def unquote(s: str) -> str {
 
 
 def unquote_plus(s: str) -> str {
-    # application/x-www-form-urlencoded: '+' represents space. Substitute
-    # first so the underlying unquote sees a clean string.
     return unquote(s.replace("+", " "))
 }
 
-
-# --- Query strings --------------------------------------------------------
 
 def parse_qsl(qs: str, keep_blank_values: bool = False) -> list[tuple[str, str]] {
     out: list[tuple[str, str]] = []
@@ -197,8 +161,6 @@ def parse_qsl(qs: str, keep_blank_values: bool = False) -> list[tuple[str, str]]
             val = unquote_plus(pair[eq + 1:len(pair)])
         } else {
             key = unquote_plus(pair)
-            # Keys without '=' are blank-valued. Python drops them by
-            # default and only keeps when keep_blank_values is set.
             if keep_blank_values == False {
                 continue
             }
@@ -237,14 +199,11 @@ def urlencode(query: dict[str, str]) -> str {
 }
 
 
-# --- Splitting ------------------------------------------------------------
-
-# Valid scheme character per RFC 3986 §3.1: ALPHA / DIGIT / "+" / "-" / "."
 def _is_scheme_char(c: int) -> bool {
-    if c >= 0x30 and c <= 0x39 { return True }   # 0-9
-    if c >= 0x41 and c <= 0x5A { return True }   # A-Z
-    if c >= 0x61 and c <= 0x7A { return True }   # a-z
-    if c == 0x2B or c == 0x2D or c == 0x2E { return True }   # + - .
+    if c >= 0x30 and c <= 0x39 { return True }
+    if c >= 0x41 and c <= 0x5A { return True }
+    if c >= 0x61 and c <= 0x7A { return True }
+    if c == 0x2B or c == 0x2D or c == 0x2E { return True }
     return False
 }
 
@@ -253,8 +212,6 @@ def urlsplit(url: str) -> SplitResult {
     scheme: str = ""
     rest: str = url
     n: int = len(url)
-    # Peel scheme: `<alpha><scheme-char>*:`. Lower-case it to match Python's
-    # canonicalization (callers compare with bare "https"/"http").
     if n > 0 {
         first: int = ord(url[0])
         is_alpha: bool = (first >= 0x41 and first <= 0x5A) or (first >= 0x61 and first <= 0x7A)
@@ -262,7 +219,7 @@ def urlsplit(url: str) -> SplitResult {
             j: int = 1
             while j < n {
                 c: int = ord(url[j])
-                if c == 0x3A {       # ':'
+                if c == 0x3A {
                     scheme = url[0:j].lower()
                     rest = url[j + 1:n]
                     break
@@ -274,7 +231,6 @@ def urlsplit(url: str) -> SplitResult {
             }
         }
     }
-    # netloc: present when `rest` starts with '//'. Terminates at /, ?, or #.
     netloc: str = ""
     if len(rest) >= 2 and rest[0:2] == "//" {
         rest = rest[2:len(rest)]
@@ -291,8 +247,6 @@ def urlsplit(url: str) -> SplitResult {
         netloc = rest[0:end]
         rest = rest[end:len(rest)]
     }
-    # Pull off fragment (#...) BEFORE query, since '?' inside a fragment is
-    # data, not a query separator. urlsplit("a#b?c") splits to ("a", "b?c").
     fragment: str = ""
     h: int = rest.find("#")
     if h >= 0 {
@@ -310,9 +264,6 @@ def urlsplit(url: str) -> SplitResult {
 
 
 def urlparse(url: str) -> ParseResult {
-    # urlparse extends urlsplit by extracting `;params` from the path.
-    # The parameters segment is rarely used today (HTTP doesn't use it);
-    # most callers want urlsplit.
     sr: SplitResult = urlsplit(url)
     params: str = ""
     path: str = sr.path
@@ -365,12 +316,6 @@ def urldefrag(url: str) -> tuple[str, str] {
 
 
 def urljoin(base: str, ref: str) -> str {
-    # RFC 3986 §5.3 simplified merge:
-    # - empty ref -> base
-    # - ref has scheme -> ref wins
-    # - ref starts with '//' -> inherit base scheme, replace netloc/path
-    # - ref starts with '/' -> base scheme+netloc + ref path
-    # - otherwise -> merge ref into base path's directory
     if len(ref) == 0 {
         return base
     }
@@ -395,8 +340,6 @@ def urljoin(base: str, ref: str) -> str {
     } else if rs.path[0:1] == "/" {
         new_path = rs.path
     } else {
-        # Drop everything after the last '/' of base path, then append ref.
-        # Empty base path becomes '/' + ref.
         base_path: str = bs.path
         slash: int = base_path.rfind("/")
         if slash >= 0 {
@@ -408,17 +351,6 @@ def urljoin(base: str, ref: str) -> str {
     return urlunsplit(SplitResult(new_scheme, new_netloc, new_path, new_query, new_fragment))
 }
 
-#===----------------------------------------------------------------------===#
-# template[URL] content type (D032 domain co-location). Auto-escapes each
-# !{expr} as a percent-encoded URL component, then the compiler concatenates.
-#
-# NOTE: the escape body below is preserved verbatim from its previous home in
-# template.dr - an ad-hoc subset encoder. Now co-located with the full
-# RFC 3986 `quote()`, it should delegate to `quote(s, "")` for complete and
-# parity-correct encoding; left as a follow-up so this relocation stays a pure
-# move and does not silently change URL-escaping semantics.
-#===----------------------------------------------------------------------===#
-
 class URL(Template) {
     def(inner: str) {
         self._inner = inner
@@ -426,7 +358,7 @@ class URL(Template) {
 
     @staticmethod
     def escape(s: str) -> str {
-        return s.replace(" ", "%20").replace("&", "%26").replace("=", "%3D").replace("?", "%3F").replace("#", "%23").replace("+", "%2B")
+        return quote(s, "")
     }
 }
 

@@ -92,11 +92,10 @@ rather than `str(e)`. Both work, but they differ in what they carry:
 What Dragon does *not* capture is a traceback - there's no stack-frame list, so a
 `traceback.format_exc()`-style render of where the error came from isn't available.
 
-## Wrapping: `raise X from Y`
+## Wrapping a low-level failure
 
-To translate a low-level failure into a domain-specific one, raise a new exception
-inside the handler. The `from` clause records that the new error was *caused by* the
-original:
+To translate a low-level failure into a domain-specific one, catch it and raise a
+new exception inside the handler:
 
 ```dragon
 class ConfigError(Exception) {
@@ -109,21 +108,22 @@ def load() -> None {
     try {
         const port: int = int("not-a-number")
     } except ValueError as e {
-        raise ConfigError("config file is malformed") from e
+        raise ConfigError("config file is malformed: " + str(e))
     }
 }
 
 try {
     load()
 } except ConfigError as e {
-    print("startup failed: " + str(e))   # startup failed: config file is malformed
+    print("startup failed: " + str(e))
 }
 ```
 
 This is how you build a clean, layered error API where callers see *your* exception
-type instead of the plumbing underneath. You can also wrap without `from` - a plain
-`raise ConfigError(...)` inside the handler - when you don't need to record the
-cause.
+type instead of the plumbing underneath. Fold whatever context you want to keep
+into the new message. Dragon does not have Python's `raise X from Y` chaining -
+there is no traceback to attach a cause to, so `from` is rejected at compile time
+rather than silently discarded.
 
 ## At a glance
 
@@ -134,7 +134,7 @@ cause.
 | Carry structured detail | store fields in the constructor; read `e.message`, `e.status`, … |
 | Build an error family | one root subclass, specific subtypes under it |
 | Catch the whole family | `except RootError as e { ... }` |
-| Translate a failure | `raise MyError("...") from e` |
+| Translate a failure | catch it, then `raise MyError("... " + str(e))` |
 
 Custom exceptions give your modules a clean error contract. The last piece of this
 part is the `with` statement that guarantees cleanup runs:

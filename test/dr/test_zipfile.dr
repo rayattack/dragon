@@ -24,13 +24,10 @@ extern "C" def dragon_read_file_bytes(path: str) -> bytes
 const _ROOT: str = "/tmp/dr_zipfile_test"
 
 
-# A long, highly repetitive string that deflate crushes - guarantees the
-# DEFLATED branch is exercised and beats STORED.
 def _compressible() -> bytes {
     parts: list[int] = []
     i: int = 0
     while i < 2000 {
-        # ASCII 'A'..'A' repeated - maximal redundancy.
         parts.append(0x41)
         i = i + 1
     }
@@ -38,8 +35,6 @@ def _compressible() -> bytes {
 }
 
 
-# Binary payload with the bytes a naive text path would corrupt: NUL, 0xFF,
-# CR, LF, high bytes, plus an embedded ASCII run.
 def _binary() -> bytes {
     return bytes([0, 255, 13, 10, 0x48, 0x69, 0, 254, 127, 128, 65, 66, 67])
 }
@@ -58,11 +53,8 @@ class ZipFileTests(TestCase) {
         path: str = self._archive_path()
 
         zf: zipfile.ZipFile = zipfile.open(path, "w")
-        # 1) STORED entry - short, incompressible-enough to keep verbatim.
         zf.writestr("stored.txt", "hi".encode("utf-8"), zipfile.ZIP_STORED)
-        # 2) DEFLATED entry - compressible text.
         zf.writestr("deflated.txt", _compressible(), zipfile.ZIP_DEFLATED)
-        # 3) Binary entry - DEFLATED method requested; bytes must survive.
         zf.writestr("blob.bin", _binary(), zipfile.ZIP_DEFLATED)
         zf.close()
         return path
@@ -100,7 +92,6 @@ class ZipFileTests(TestCase) {
         original: bytes = _compressible()
         zf: zipfile.ZipFile = zipfile.open(path, "r")
         got: bytes = zf.read("deflated.txt")
-        # Byte-for-byte recovery of the uncompressed payload.
         self.assertEqual(len(got), len(original))
         i: int = 0
         while i < len(original) {
@@ -110,7 +101,6 @@ class ZipFileTests(TestCase) {
         info: zipfile.ZipInfo = zf.getinfo("deflated.txt")
         self.assertEqual(info.compress_type, zipfile.ZIP_DEFLATED)
         self.assertEqual(info.file_size, len(original))
-        # The whole point of DEFLATE: compressed is strictly smaller.
         self.assertTrue(info.compress_size < info.file_size)
         zf.close()
         shutil.rmtree(_ROOT)
@@ -127,12 +117,11 @@ class ZipFileTests(TestCase) {
             self.assertEqual(got[j], payload[j])
             j = j + 1
         }
-        # Spot-check the dangerous bytes.
-        self.assertEqual(got[0], 0)       # NUL preserved
-        self.assertEqual(got[1], 255)     # 0xFF preserved
-        self.assertEqual(got[6], 0)       # embedded NUL preserved
-        self.assertEqual(got[7], 254)     # 0xFE preserved
-        self.assertEqual(got[9], 128)     # high bit preserved
+        self.assertEqual(got[0], 0)
+        self.assertEqual(got[1], 255)
+        self.assertEqual(got[6], 0)
+        self.assertEqual(got[7], 254)
+        self.assertEqual(got[9], 128)
         zf.close()
         shutil.rmtree(_ROOT)
     }
@@ -140,8 +129,6 @@ class ZipFileTests(TestCase) {
     def test_crc_matches_binascii() {
         path: str = self._build()
         zf: zipfile.ZipFile = zipfile.open(path, "r")
-        # The CRC stored in the central directory must equal an independent
-        # IEEE-802.3 CRC-32 over the decompressed bytes.
         data: bytes = zf.read("deflated.txt")
         info: zipfile.ZipInfo = zf.getinfo("deflated.txt")
         self.assertEqual(info.CRC, binascii.crc32(data, 0))
@@ -152,8 +139,6 @@ class ZipFileTests(TestCase) {
     def test_signatures_present() {
         path: str = self._build()
         raw: bytes = dragon_read_file_bytes(path)
-        # The archive must open with a local file header signature and end
-        # (modulo the empty comment) with the EOCD signature.
         self.assertEqual(struct.unpack_u32_le(raw, 0), 0x04034b50)
         eocd_at: int = len(raw) - 22
         self.assertEqual(struct.unpack_u32_le(raw, eocd_at), 0x06054b50)

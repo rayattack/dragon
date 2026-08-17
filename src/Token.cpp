@@ -3,10 +3,6 @@
 
 namespace dragon {
 
-//===----------------------------------------------------------------------===//
-// Token Implementation
-//===----------------------------------------------------------------------===//
-
 Token::Token() : type_(TokenType::ERROR), lexeme_(""), location_{} {}
 
 Token::Token(TokenType type, std::string lexeme, SourceLocation location)
@@ -30,7 +26,6 @@ std::string Token::toString() const {
 
 const char* Token::tokenTypeName(TokenType type) {
     switch (type) {
-        // Literals
         case TokenType::INTEGER: return "INTEGER";
         case TokenType::FLOAT: return "FLOAT";
         case TokenType::STRING: return "STRING";
@@ -39,10 +34,8 @@ const char* Token::tokenTypeName(TokenType type) {
         case TokenType::FALSE: return "FALSE";
         case TokenType::NONE: return "NONE";
 
-        // Identifiers
         case TokenType::IDENTIFIER: return "IDENTIFIER";
 
-        // Keywords
         case TokenType::AND: return "AND";
         case TokenType::AS: return "AS";
         case TokenType::ASSERT: return "ASSERT";
@@ -83,7 +76,6 @@ const char* Token::tokenTypeName(TokenType type) {
         case TokenType::THREAD: return "THREAD";
         case TokenType::ENUM: return "ENUM";
 
-        // Operators
         case TokenType::PLUS: return "PLUS";
         case TokenType::MINUS: return "MINUS";
         case TokenType::STAR: return "STAR";
@@ -99,7 +91,6 @@ const char* Token::tokenTypeName(TokenType type) {
         case TokenType::LEFT_SHIFT: return "LEFT_SHIFT";
         case TokenType::RIGHT_SHIFT: return "RIGHT_SHIFT";
 
-        // Comparison
         case TokenType::LESS: return "LESS";
         case TokenType::GREATER: return "GREATER";
         case TokenType::LESS_EQUAL: return "LESS_EQUAL";
@@ -109,7 +100,6 @@ const char* Token::tokenTypeName(TokenType type) {
         case TokenType::NOT_IN: return "NOT_IN";
         case TokenType::IS_NOT: return "IS_NOT";
 
-        // Assignment
         case TokenType::EQUAL: return "EQUAL";
         case TokenType::PLUS_EQUAL: return "PLUS_EQUAL";
         case TokenType::MINUS_EQUAL: return "MINUS_EQUAL";
@@ -126,7 +116,6 @@ const char* Token::tokenTypeName(TokenType type) {
         case TokenType::RIGHT_SHIFT_EQUAL: return "RIGHT_SHIFT_EQUAL";
         case TokenType::WALRUS: return "WALRUS";
 
-        // Delimiters
         case TokenType::LEFT_PAREN: return "LEFT_PAREN";
         case TokenType::RIGHT_PAREN: return "RIGHT_PAREN";
         case TokenType::LEFT_BRACKET: return "LEFT_BRACKET";
@@ -140,25 +129,18 @@ const char* Token::tokenTypeName(TokenType type) {
         case TokenType::ARROW: return "ARROW";
         case TokenType::ELLIPSIS: return "ELLIPSIS";
 
-        // Indentation
         case TokenType::INDENT: return "INDENT";
         case TokenType::DEDENT: return "DEDENT";
         case TokenType::NEWLINE: return "NEWLINE";
 
-        // Template
         case TokenType::TEMPLATE: return "TEMPLATE";
         case TokenType::TEMPLATE_CONTENT_OPEN: return "TEMPLATE_CONTENT_OPEN";
 
-        // Special
         case TokenType::END_OF_FILE: return "EOF";
         case TokenType::ERROR: return "ERROR";
     }
     return "UNKNOWN";
 }
-
-//===----------------------------------------------------------------------===//
-// Keyword Handling
-//===----------------------------------------------------------------------===//
 
 static const std::unordered_map<std::string_view, TokenType> keywords = {
     {"and", TokenType::AND},
@@ -197,16 +179,13 @@ static const std::unordered_map<std::string_view, TokenType> keywords = {
     {"True", TokenType::TRUE},
     {"False", TokenType::FALSE},
     {"None", TokenType::NONE},
-    {"true", TokenType::TRUE},      // .dr mode alias
-    {"false", TokenType::FALSE},    // .dr mode alias
-    {"none", TokenType::NONE},      // .dr mode alias
-    {"catch", TokenType::CATCH},    // Dragon extension
-    {"const", TokenType::CONST},    // Dragon extension
-    {"static", TokenType::STATIC},  // Dragon extension
-    {"extern", TokenType::EXTERN},  // Dragon extension (C FFI)
-    // NOTE: "thread" is a contextual keyword - resolved in Parser::statement(),
-    // NOT in the lexer. This allows "thread" as an identifier in all other positions
-    // (parameter names, variable names, etc.).
+    {"true", TokenType::TRUE},
+    {"false", TokenType::FALSE},
+    {"none", TokenType::NONE},
+    {"catch", TokenType::CATCH},
+    {"const", TokenType::CONST},
+    {"static", TokenType::STATIC},
+    {"extern", TokenType::EXTERN},
 };
 
 bool isKeyword(std::string_view name) {
@@ -221,4 +200,4 @@ TokenType keywordType(std::string_view name) {
     return TokenType::IDENTIFIER;
 }
 
-} // namespace dragon
+}

@@ -1,22 +1,3 @@
-# odb.sim - the deterministic crash-recovery harness (spec section 21).
-#
-# The single most important M0 property: after a crash at ANY I/O boundary, the
-# database reopens to a consistent snapshot with no recovery pass. This harness
-# proves it by brute force. For each seed it:
-#
-#   1. builds a database and applies a random number of clean commits,
-#   2. arms the SimVFS to crash at a random I/O boundary of the NEXT commit,
-#   3. attempts that commit (the crash fires somewhere inside it),
-#   4. reopens the frozen post-crash disk and checks the invariant:
-#        - the recovered CSN is exactly the previous one or the attempted one
-#          (atomicity: all-or-nothing, never a partial state),
-#        - the state read back matches whichever CSN won,
-#        - every referenced page passes its crc32c (integrity).
-#
-# The workload is a copy-on-write counter: each commit writes a fresh data page
-# holding (counter, csn) and frees the previous one. Any failing seed is
-# returned by number so it replays the exact same run
-
 from odb.vfs import SimVFS
 from odb.pager import create, open_pager, Pager, PT_DATA
 from odb.codec import blank, put_u64, get_u64
@@ -28,7 +9,6 @@ from odb.checker import check_tree, check_index_tree, CheckResult
 from odb.keyenc import enc_int
 from odb.raftlog import RaftTail
 
-# 64-byte payload: the visible counter and the CSN it was written at.
 def _payload(counter: int, csn: int) -> bytes {
     buf: list[int] = blank(64)
     put_u64(buf, 0, counter)
@@ -36,29 +16,17 @@ def _payload(counter: int, csn: int) -> bytes {
     return bytes(buf)
 }
 
-# Pages the pager holds as free: unconsumed entries awaiting reuse plus the
-# pages of the persisted freelist chunks themselves. Kept in one place so the
-# crash trials' accounting checks survive freelist representation changes.
 def _freelist_page_count(p: Pager) -> int {
     total: int = 0
     for c in p.chunks {
         total = total + len(c.pages) + len(c.entries)
     }
-    # Entries already consumed off the floor chunk are live pages counted
-    # elsewhere (or freed again into a newer chunk).
     if len(p.chunks) > 0 and p.floor_csn == p.chunks[0].csn {
         total = total - p.floor_idx
     }
     return total
 }
 
-# The page-accounting partition invariant for the counter workload. At a
-# committed state every allocated page (id 3..high_water-1) must be exactly one
-# of: the catalog root, a page of a persisted freelist chunk, a freed page
-# awaiting reuse, or a page of the raft tail chain (format v3). A page in none
-# of the buckets is unreachable file bloat; a page in two of them will
-# eventually be handed out twice. Returns "" when the partition holds, else a
-# description of the first violation.
 def check_accounting(p: Pager) -> str {
     seen: dict[int, bool] = {}
     if p.catalog_root != 0 {
@@ -113,8 +81,7 @@ def check_accounting(p: Pager) -> str {
     return ""
 }
 
-# One copy-on-write commit. Returns the page id it installed as the new root.
-def _do_commit(p: Pager, counter: int) -> int {
+def _commit_once(p: Pager, counter: int) -> int {
     newpg: int = p.alloc()
     pending_csn: int = p.last_csn + 1
     p.stage(newpg, PT_DATA, _payload(counter, pending_csn))
@@ -129,8 +96,8 @@ def _do_commit(p: Pager, counter: int) -> int {
 
 class SimResult {
     trials: int
-    recovered_old: int      # crash lost the in-flight commit
-    recovered_new: int      # in-flight commit's writes durably landed
+    recovered_old: int
+    recovered_new: int
     failures: int
     first_bad_seed: int
     message: str
@@ -162,7 +129,6 @@ def run_crash_trials(n_seeds: int) -> SimResult {
         v: SimVFS = SimVFS()
         p: Pager = create(v, 4096)
 
-        # Baseline = the committed empty database.
         old_csn: int = p.last_csn
         old_root: int = p.catalog_root
         old_counter: int = 0
@@ -172,23 +138,19 @@ def run_crash_trials(n_seeds: int) -> SimResult {
         i: int = 0
         while i < k {
             counter = counter + 1
-            r: int = _do_commit(p, counter)
+            r: int = _commit_once(p, counter)
             old_csn = p.last_csn
             old_root = r
             old_counter = counter
             i = i + 1
         }
 
-        # Attempt one more commit, crashing at a random boundary of it.
         budget: int = rng.below(7)
         v.arm(budget, Rng((seed * 2654435761) & 0xFFFFFFFF))
         counter = counter + 1
-        new_root: int = _do_commit(p, counter)
+        new_root: int = _commit_once(p, counter)
         expect_new_csn: int = old_csn + 1
 
-        # Reopen the frozen post-crash disk into a fresh pager. A CorruptionError
-        # here would mean the recovered meta pointed at a page that never became
-        # durable - a real bug - so it counts as a failure naming the seed.
         fail_before: int = res.failures
         try {
             rp: Pager = open_pager(v)
@@ -197,9 +159,7 @@ def run_crash_trials(n_seeds: int) -> SimResult {
                 res._fail(seed, "csn " + str(rp.last_csn) + " not in {" + str(old_csn) + "," + str(expect_new_csn) + "}")
             } else {
                 if rp.last_csn == old_csn {
-                    # Recovered to the previous consistent state.
                     if old_root == 0 {
-                        # empty database - nothing to read
                         res.recovered_old = res.recovered_old + 1
                     } else {
                         page: bytes = rp.read_page(rp.catalog_root)
@@ -211,8 +171,6 @@ def run_crash_trials(n_seeds: int) -> SimResult {
                         }
                     }
                 } else {
-                    # The in-flight commit's writes reached disk: new state must
-                    # be complete and consistent.
                     page2: bytes = rp.read_page(rp.catalog_root)
                     c2: int = get_u64(page2, 0)
                     pcsn: int = get_u64(page2, 8)
@@ -224,10 +182,6 @@ def run_crash_trials(n_seeds: int) -> SimResult {
                 }
             }
 
-            # The crash is over: disarm the disk and prove the recovered pager
-            # is a fully working database, not just a readable one. Reuse,
-            # freeing and page accounting must all hold across more commits
-            # and a clean reopen.
             if res.failures == fail_before {
                 v.armed = False
                 v.crashed = False
@@ -238,7 +192,7 @@ def run_crash_trials(n_seeds: int) -> SimResult {
                 j: int = 0
                 while j < 3 and res.failures == fail_before {
                     cval: int = 1000 + j
-                    _do_commit(rp, cval)
+                    _commit_once(rp, cval)
                     readback: bytes = rp.read_page(rp.catalog_root)
                     if get_u64(readback, 0) != cval {
                         res._fail(seed, "post-recovery commit read back " + str(get_u64(readback, 0)))
@@ -275,18 +229,6 @@ def run_crash_trials(n_seeds: int) -> SimResult {
 }
 
 
-#===----------------------------------------------------------------------===#
-# B+tree crash proof: the same all-or-nothing guarantee, end to end through a
-# real ordered tree. Each trial builds a committed tree, then crashes an
-# in-flight insert+commit and reopens; the recovered tree must pass `odb check`
-# and hold EXACTLY the pre-crash key set or that set plus the one in-flight key.
-# There are two variants: the u64-keyed doc/catalog tree and the bytes-keyed
-# index tree, so both storage substrates are crash-proven identically.
-#===----------------------------------------------------------------------===#
-
-# Distinct, scattered keys: i * odd is injective modulo 2^30 over our range, so
-# no collisions (collisions would make the count check ambiguous) while still
-# exercising routing rather than pure append.
 def _tree_key(i: int) -> int {
     return (i * 2654435761) & 0x3FFFFFFF
 }
@@ -318,8 +260,6 @@ def run_btree_crash_trials(n_seeds: int) -> SimResult {
 
         committed: list[int] = []
         k_count: int = rng.below(400)
-        # Build the baseline tree in a single batched transaction (fast: fresh
-        # pages mutate in place), then commit it once.
         i: int = 0
         while i < k_count {
             key: int = _tree_key(i)
@@ -333,9 +273,6 @@ def run_btree_crash_trials(n_seeds: int) -> SimResult {
         }
         old_csn: int = p.last_csn
 
-        # In-flight insert + commit into the committed tree, crashing at a
-        # random boundary. This copy-on-writes the root-to-leaf path of an
-        # existing multi-level tree, then the crash tests atomicity of the flip.
         newk: int = _tree_key(k_count)
         t.insert(newk, _tree_val(newk))
         p.set_catalog_root(t.root)
@@ -353,8 +290,6 @@ def run_btree_crash_trials(n_seeds: int) -> SimResult {
             if not chk.ok {
                 res._fail(seed, "check failed: " + chk.message)
             } else {
-                # Count accounting: tree pages + free pages must exactly fill
-                # the file (ids 0-2 are the header and the two metas).
                 accounted: int = chk.pages + _freelist_page_count(rp) + 3
                 if accounted != rp.high_water {
                     res._fail(seed, "page accounting: " + str(accounted) + " accounted, high water " + str(rp.high_water))
@@ -396,15 +331,6 @@ def run_btree_crash_trials(n_seeds: int) -> SimResult {
 }
 
 
-#===----------------------------------------------------------------------===#
-# Consensus-state crash proof (format v3). commit_state() flips the meta
-# without advancing the CSN; a crash at any I/O boundary of either commit kind
-# must recover to exactly the pre- or post-state of the interrupted operation:
-# the CSN untouched by state flips, the raft fields all-or-nothing, the tail
-# chain loadable, and the page-accounting partition intact - then keep working
-# as a full database across further commits, flips, and a clean reopen.
-#===----------------------------------------------------------------------===#
-
 def _tail_payload(i: int) -> bytes {
     buf: list[int] = blank(48)
     put_u64(buf, 0, i * 7 + 3)
@@ -412,8 +338,7 @@ def _tail_payload(i: int) -> bytes {
     return bytes(buf)
 }
 
-# One raft flush: append entry `idx` at `term`, stamp term/vote, flip.
-def _do_state_flush(p: Pager, tail: RaftTail, idx: int, term: int) -> None {
+def _flush_state(p: Pager, tail: RaftTail, idx: int, term: int) -> None {
     tail.append(idx, term, _tail_payload(idx))
     p.raft_term = term
     p.raft_vote = (idx % 5) + 1
@@ -430,7 +355,6 @@ def run_state_crash_trials(n_seeds: int) -> SimResult {
         p: Pager = create(v, 4096)
         tail: RaftTail = RaftTail(p)
 
-        # Baseline: an interleaving of data commits and state flips.
         counter: int = 0
         idx: int = 0
         term: int = 2
@@ -439,10 +363,10 @@ def run_state_crash_trials(n_seeds: int) -> SimResult {
         while i < steps {
             if rng.flip() {
                 counter = counter + 1
-                _do_commit(p, counter)
+                _commit_once(p, counter)
             } else {
                 idx = idx + 1
-                _do_state_flush(p, tail, idx, term)
+                _flush_state(p, tail, idx, term)
             }
             i = i + 1
         }
@@ -455,16 +379,15 @@ def run_state_crash_trials(n_seeds: int) -> SimResult {
         old_counter: int = counter
         old_root: int = p.catalog_root
 
-        # Crash inside ONE more operation, of either kind.
         budget: int = rng.below(7)
         v.arm(budget, Rng((seed * 2246822519) & 0xFFFFFFFF))
         crash_state: bool = rng.flip()
         if crash_state {
             idx = idx + 1
-            _do_state_flush(p, tail, idx, term + 1)
+            _flush_state(p, tail, idx, term + 1)
         } else {
             counter = counter + 1
-            _do_commit(p, counter)
+            _commit_once(p, counter)
         }
 
         fail_before: int = res.failures
@@ -472,12 +395,10 @@ def run_state_crash_trials(n_seeds: int) -> SimResult {
             rp: Pager = open_pager(v)
 
             if crash_state {
-                # A state flip never moves the CSN, whatever else happened.
                 if rp.last_csn != old_csn {
                     res._fail(seed, "state flip moved csn " + str(old_csn) + " -> " + str(rp.last_csn))
                 }
                 if rp.meta_seq == old_seq {
-                    # Old state won: every raft field must be exactly the old set.
                     if rp.raft_term != old_term or rp.raft_vote != old_vote or rp.raft_root != old_rroot {
                         res._fail(seed, "torn state flip leaked partial raft fields")
                     } else {
@@ -512,15 +433,11 @@ def run_state_crash_trials(n_seeds: int) -> SimResult {
                         }
                     }
                 }
-                # A data commit carries the raft fields through unchanged.
                 if rp.raft_term != old_term or rp.raft_root != old_rroot {
                     res._fail(seed, "data commit disturbed raft state")
                 }
             }
 
-            # The recovered file is a fully working database: the tail chain
-            # loads, accounting holds, both commit kinds still work, and a
-            # clean reopen agrees.
             if res.failures == fail_before {
                 v.armed = False
                 v.crashed = False
@@ -530,10 +447,10 @@ def run_state_crash_trials(n_seeds: int) -> SimResult {
                     res._fail(seed, "post-recovery accounting: " + acct)
                 } else {
                     nidx: int = idx + 10
-                    _do_state_flush(rp, rtail, nidx, term + 2)
+                    _flush_state(rp, rtail, nidx, term + 2)
                     cval: int = 500
-                    _do_commit(rp, cval)
-                    _do_commit(rp, cval + 1)
+                    _commit_once(rp, cval)
+                    _commit_once(rp, cval + 1)
                     acct2: str = check_accounting(rp)
                     if acct2 != "" {
                         res._fail(seed, "post-recovery accounting after work: " + acct2)
@@ -577,10 +494,6 @@ def _ix_all_present(t: IndexTree, keys: list[int]) -> bool {
     return True
 }
 
-# The bytes-keyed index tree, crashed the same way as the u64 tree above. Keys
-# are memcomparable-encoded scattered integers; recovery must pass the index
-# check and hold exactly the committed key set or that set plus the one in-flight
-# key.
 def run_index_crash_trials(n_seeds: int) -> SimResult {
     res: SimResult = SimResult()
     seed: int = 1

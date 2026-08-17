@@ -18,10 +18,10 @@ class Color(Enum) {
 }
 
 class Mixed(Enum) {
-    A: int = auto()      # 1
+    A: int = auto()
     B: int = 10
-    C: int = auto()      # 11 (resumes after explicit)
-    D: int = auto()      # 12
+    C: int = auto()
+    D: int = auto()
 }
 
 class Priority(IntEnum) {
@@ -36,7 +36,6 @@ class FileMode(StrEnum) {
     APPEND: str = "a"
 }
 
-# Native `enum` keyword - fast int constants, must coexist with class enums.
 enum Token { LPAREN, RPAREN, COMMA }
 
 
@@ -76,7 +75,6 @@ class EnumTests(TestCase) {
         got: Color = Color(2)
         self.assertEqual(got.name, "GREEN")
         self.assertEqual(got.value, 2)
-        # Lookup returns the SAME singleton (identity).
         self.assertTrue(Color(1) == Color.RED)
     }
 
@@ -96,7 +94,6 @@ class EnumTests(TestCase) {
         self.assertTrue(Priority.LOW == 1)
         self.assertTrue(Priority.HIGH == 10)
         self.assertFalse(Priority.LOW == 10)
-        # member-vs-member still correct
         self.assertTrue(Priority.LOW == Priority.LOW)
         self.assertFalse(Priority.LOW == Priority.HIGH)
     }
@@ -117,7 +114,6 @@ class EnumTests(TestCase) {
     }
 
     def test_native_keyword_coexists() {
-        # Native enum keyword stays fast int constants.
         self.assertEqual(Token.LPAREN, 0)
         self.assertEqual(Token.RPAREN, 1)
         self.assertEqual(Token.COMMA, 2)

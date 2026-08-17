@@ -38,8 +38,6 @@ def build_manifest_schema() -> Schema {
 
 class ImportClassCollisionTests(TestCase) {
     def test_schema_resolves_to_drs_not_json() {
-        # If `Schema` had mis-resolved to json.Schema this would not compile
-        # (no `field`/`optional`); reaching a value assertion proves drs won.
         s: Schema = build_manifest_schema()
         self.assertEqual(len(s.fields), 3)
         self.assertFalse(s.allow_unknown)
@@ -53,8 +51,6 @@ class ImportClassCollisionTests(TestCase) {
     }
 
     def test_json_loads_still_usable() {
-        # The other import is genuinely used, so json is a real co-compiled dep
-        # (this is what triggered the collision in the first place).
         d: dict[str, Any] = loads("{\"k\": 1}")
         self.assertEqual(d["k"], 1)
     }

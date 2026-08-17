@@ -1,8 +1,3 @@
-# ODB M6 regression suite: OQL writes. add (single + batch), set (deep-merge,
-# expressions over the current doc), unset (optional fields), put (full
-# replace), del, $params, and atomic { ... } blocks that commit as ONE
-# transaction (a failure rolls the whole block back).
-
 from unittest import TestCase, main
 from odb import ODB, Documents, Document
 from odb.vfs import SimVFS
@@ -17,7 +12,7 @@ def _schema() -> dict[str, Any] {
     props["email"] = {"type": "string"}
     props["city"] = {"type": "string"}
     props["visits"] = {"type": "integer"}
-    props["nickname"] = {"type": "string"}        # optional
+    props["nickname"] = {"type": "string"}
     req: list[Any] = ["id", "name", "email", "city", "visits"]
     s: dict[str, Any] = {}
     s["type"] = "object"
@@ -82,7 +77,7 @@ class AddTest(TestCase) {
             raised = True
         }
         self.assertTrue(raised)
-        self.assertEqual(_count(db), 1)         # rejected add rolled back
+        self.assertEqual(_count(db), 1)
     }
 }
 
@@ -110,7 +105,6 @@ class SetUnsetPutDelTest(TestCase) {
         nk0: str = rows0[0]["nickname"]
         self.assertEqual(nk0, "Ace")
         db.run("unset customers ? id == 1 { nickname }")
-        # nickname now absent -> reading it raises KeyError (omitted from output)
         rows1: list[Document] = db.find("customers ? id == 1 { nickname }")
         missing: bool = False
         try {
@@ -138,7 +132,6 @@ class SetUnsetPutDelTest(TestCase) {
         self._seed(db)
         db.run("put customers ? id == 1 { id: 1, name: \"Ada2\", email: \"ada@x.com\", city: \"Kano\", visits: 0 }")
         self.assertEqual(_city_of(db, 1), "Kano")
-        # nickname (previously set) is gone after a full replace
         rows: list[Document] = db.find("customers ? id == 1 { nickname }")
         missing: bool = False
         try {
@@ -155,7 +148,7 @@ class SetUnsetPutDelTest(TestCase) {
         db.run("add customers { id: 2, name: \"B\", email: \"b@x.com\", city: \"Kano\", visits: 0 }")
         n: int = db.run("del customers ? city == \"Kano\"")
         self.assertEqual(n, 1)
-        self.assertEqual(_count(db), 1)         # only Ada (Lagos) remains
+        self.assertEqual(_count(db), 1)
     }
 }
 
@@ -202,13 +195,12 @@ class AtomicTest(TestCase) {
         db.run("add customers { id: 1, name: \"Ada\", email: \"ada@x.com\", city: \"Lagos\", visits: 0 }")
         raised: bool = False
         try {
-            # first add is valid, second dupes Ada's email -> the whole block aborts
             db.run("atomic { add customers { id: 2, name: \"B\", email: \"b@x.com\", city: \"Kano\", visits: 0 } add customers { id: 3, name: \"C\", email: \"ada@x.com\", city: \"Jos\", visits: 0 } }")
         } except IntegrityError {
             raised = True
         }
         self.assertTrue(raised)
-        self.assertEqual(_count(db), 1)         # neither id 2 nor id 3 landed
+        self.assertEqual(_count(db), 1)
     }
 }
 

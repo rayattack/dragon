@@ -1,0 +1,100 @@
+from unittest import TestCase, main
+from time import monotonic
+import hashlib
+
+const UPDATE_COUNT: int = 20000
+const UPDATE_BUDGET_SECS: float = 2.0
+
+class IncrementalUpdatePerfTests(TestCase) {
+    def test_many_small_updates_within_time_budget() {
+        const piece: bytes = b"0123456789abcdef" * 4
+        const t0: float = monotonic()
+        h: hashlib.Hash = hashlib.sha256()
+        i: int = 0
+        while i < UPDATE_COUNT {
+            h.update(piece)
+            i = i + 1
+        }
+        const d: str = h.hexdigest()
+        const elapsed: float = monotonic() - t0
+        one_shot: hashlib.Hash = hashlib.sha256(piece * UPDATE_COUNT)
+        self.assertEqual(d, one_shot.hexdigest())
+        self.assertTrue(elapsed < UPDATE_BUDGET_SECS)
+    }
+}
+
+class IncrementalSemanticsTests(TestCase) {
+    def test_incremental_equals_one_shot() {
+        h: hashlib.Hash = hashlib.sha256()
+        h.update(b"hello ")
+        h.update(b"world")
+        self.assertEqual(h.hexdigest(), hashlib.sha256(b"hello world").hexdigest())
+    }
+
+    def test_known_vector_abc() {
+        h: hashlib.Hash = hashlib.sha256(b"a")
+        h.update(b"bc")
+        self.assertEqual(
+            h.hexdigest(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+    }
+
+    def test_digest_then_more_updates() {
+        h: hashlib.Hash = hashlib.sha512(b"first")
+        const d1: bytes = h.digest()
+        self.assertEqual(d1, hashlib.sha512(b"first").digest())
+        h.update(b"second")
+        self.assertEqual(h.digest(), hashlib.sha512(b"firstsecond").digest())
+    }
+
+    def test_digest_twice_is_stable() {
+        h: hashlib.Hash = hashlib.md5(b"stable")
+        self.assertEqual(h.digest(), h.digest())
+    }
+
+    def test_copy_diverges_independently() {
+        base: hashlib.Hash = hashlib.sha1(b"shared-")
+        fork: hashlib.Hash = base.copy()
+        base.update(b"left")
+        fork.update(b"right")
+        self.assertEqual(base.hexdigest(), hashlib.sha1(b"shared-left").hexdigest())
+        self.assertEqual(fork.hexdigest(), hashlib.sha1(b"shared-right").hexdigest())
+    }
+
+    def test_all_algorithms_incremental_match_one_shot() {
+        for alg in hashlib.algorithms_available() {
+            h: hashlib.Hash = hashlib.new(alg)
+            h.update(b"part-one|")
+            h.update(b"part-two")
+            self.assertEqual(
+                h.hexdigest(),
+                hashlib.new(alg, b"part-one|part-two").hexdigest())
+        }
+    }
+
+    def test_interleaved_copy_update_chains() {
+        a: hashlib.Hash = hashlib.sha256(b"seed")
+        b: hashlib.Hash = a.copy()
+        c: hashlib.Hash = b.copy()
+        a.update(b"-a1")
+        b.update(b"-b1")
+        a.update(b"-a2")
+        c.update(b"-c1")
+        self.assertEqual(a.hexdigest(), hashlib.sha256(b"seed-a1-a2").hexdigest())
+        self.assertEqual(b.hexdigest(), hashlib.sha256(b"seed-b1").hexdigest())
+        self.assertEqual(c.hexdigest(), hashlib.sha256(b"seed-c1").hexdigest())
+    }
+
+    def test_update_spanning_block_boundaries() {
+        const chunk: bytes = b"z" * 61
+        h: hashlib.Hash = hashlib.sha384()
+        i: int = 0
+        while i < 5 {
+            h.update(chunk)
+            i = i + 1
+        }
+        self.assertEqual(h.hexdigest(), hashlib.sha384(chunk * 5).hexdigest())
+    }
+}
+
+main([IncrementalUpdatePerfTests(), IncrementalSemanticsTests()])

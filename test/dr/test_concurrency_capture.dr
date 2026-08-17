@@ -1,11 +1,5 @@
-# test/dr/test_concurrency_capture.dr - fire/thread block capture (Bug 2).
-#
-# Regression guard for the live-audit finding: a `fire { ... }` or `thread { ... }`
-# block that references an enclosing local used to emit invalid cross-function
-# IR ("Referring to an instruction in another function"). The fix marshals the
-# captured locals as spawn args (read-only borrow; the racy nonlocal-mutate case
-# is a compile error, tested separately by the compiler suite). Heap captures
-# are exercised to pin the refcount/no-double-free path.
+# fire/thread block capture: referencing an enclosing local used to emit invalid cross-function IR.
+# Captured locals marshal as spawn args (read-only borrow); heap captures pin the no-double-free path.
 
 from unittest import TestCase, main
 

@@ -120,8 +120,6 @@ class DictTests(TestCase) {
         self.assertEqual(back.tail, 5)
     }
 
-    # An EMPTY dict mid-object: the field after it must still parse (the nested
-    # object resets the cursor's comma flag; the restore is what this pins).
     def test_empty_dict_field_with_trailing_field() {
         const nothing: dict[str, int] = {}
         const back: Ratings = decode[Ratings](encode[Ratings](Ratings("e", nothing, 9)))
@@ -168,7 +166,6 @@ class TopLevelListTests(TestCase) {
 
 
 class TopLevelScalarTests(TestCase) {
-    # The uniform extern wrapper leans on these: encode[int]("n" arg) etc.
     def test_scalar_roundtrip() {
         self.assertEqual(encode[int](42).decode("utf-8"), "42")
         self.assertEqual(decode[int](b"42"), 42)

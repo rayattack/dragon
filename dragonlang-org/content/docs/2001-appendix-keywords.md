@@ -60,6 +60,8 @@ ordinary names. The `.dr` form uses braces and **no colon** after the
 pattern:
 
 ```dragon
+command: str = "start"
+
 match command {
     case "start" {
         print("starting")

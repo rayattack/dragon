@@ -5,35 +5,28 @@
 using namespace dragon;
 using namespace dragon::test;
 
-// Helper: parse as Python (.py), then run enforcer
 static bool enforceOk(const std::string& source, EnforcerOptions opts = {}) {
-    auto module = parse(source, /*isDragon=*/false);
+    auto module = parse(source, false);
     if (!module) return false;
     TypeHintEnforcer enforcer(opts);
     return enforcer.enforce(*module);
 }
 
-// Helper: parse as Python, run enforcer, return diagnostics
 static std::vector<EnforcerDiagnostic> enforceDiags(const std::string& source,
                                                       EnforcerOptions opts = {}) {
-    auto module = parse(source, /*isDragon=*/false);
+    auto module = parse(source, false);
     if (!module) return {};
     TypeHintEnforcer enforcer(opts);
     enforcer.enforce(*module);
     return enforcer.diagnostics();
 }
 
-// Helper: parse as Dragon (.dr), then run enforcer
 static bool enforceDragonOk(const std::string& source) {
-    auto module = parse(source, /*isDragon=*/true);
+    auto module = parse(source, true);
     if (!module) return false;
     TypeHintEnforcer enforcer;
     return enforcer.enforce(*module);
 }
-
-//===----------------------------------------------------------------------===//
-// Fully typed .py functions should pass
-//===----------------------------------------------------------------------===//
 
 TEST(TypeHintEnforcer, TypedFunctionPasses) {
     EXPECT_TRUE(enforceOk(
@@ -55,10 +48,6 @@ TEST(TypeHintEnforcer, TypedFunctionReturnsNone) {
         "    pass\n"
     ));
 }
-
-//===----------------------------------------------------------------------===//
-// Missing parameter types
-//===----------------------------------------------------------------------===//
 
 TEST(TypeHintEnforcer, MissingParamType) {
     EXPECT_FALSE(enforceOk(
@@ -82,10 +71,6 @@ TEST(TypeHintEnforcer, AllParamsMissingTypes) {
     EXPECT_EQ(diags.size(), 3u);
 }
 
-//===----------------------------------------------------------------------===//
-// Missing return type
-//===----------------------------------------------------------------------===//
-
 TEST(TypeHintEnforcer, MissingReturnType) {
     EXPECT_FALSE(enforceOk(
         "def add(x: int, y: int):\n"
@@ -100,10 +85,6 @@ TEST(TypeHintEnforcer, MissingReturnType) {
     EXPECT_NE(diags[0].message.find("add"), std::string::npos);
 }
 
-//===----------------------------------------------------------------------===//
-// __init__ is exempt from return type
-//===----------------------------------------------------------------------===//
-
 TEST(TypeHintEnforcer, InitNoReturnTypeOk) {
     EXPECT_TRUE(enforceOk(
         "class Foo:\n"
@@ -111,10 +92,6 @@ TEST(TypeHintEnforcer, InitNoReturnTypeOk) {
         "        pass\n"
     ));
 }
-
-//===----------------------------------------------------------------------===//
-// Class methods - self/cls parameter exempt
-//===----------------------------------------------------------------------===//
 
 TEST(TypeHintEnforcer, MethodSelfExempt) {
     EXPECT_TRUE(enforceOk(
@@ -140,10 +117,6 @@ TEST(TypeHintEnforcer, MethodNonSelfParamMissingType) {
     ));
 }
 
-//===----------------------------------------------------------------------===//
-// Module-level variables
-//===----------------------------------------------------------------------===//
-
 TEST(TypeHintEnforcer, ModuleVarWithTypeOk) {
     EXPECT_TRUE(enforceOk(
         "x: int = 5\n"
@@ -160,15 +133,10 @@ TEST(TypeHintEnforcer, ModuleVarWithoutType) {
 }
 
 TEST(TypeHintEnforcer, DunderVarExempt) {
-    // __all__, __version__, etc. are exempt
     EXPECT_TRUE(enforceOk(
         "__version__ = \"1.0\"\n"
     ));
 }
-
-//===----------------------------------------------------------------------===//
-// Options: disable specific checks
-//===----------------------------------------------------------------------===//
 
 TEST(TypeHintEnforcer, DisableParamTypeCheck) {
     EnforcerOptions opts;
@@ -196,10 +164,6 @@ TEST(TypeHintEnforcer, DisableModuleVarCheck) {
     EXPECT_TRUE(enforceOk("x = 5\n", opts));
 }
 
-//===----------------------------------------------------------------------===//
-// Empty module
-//===----------------------------------------------------------------------===//
-
 TEST(TypeHintEnforcer, EmptyModulePasses) {
     EXPECT_TRUE(enforceOk(""));
 }
@@ -208,37 +172,22 @@ TEST(TypeHintEnforcer, PassOnlyPasses) {
     EXPECT_TRUE(enforceOk("pass"));
 }
 
-//===----------------------------------------------------------------------===//
-// Multiple errors accumulated
-//===----------------------------------------------------------------------===//
-
 TEST(TypeHintEnforcer, MultipleErrors) {
     auto diags = enforceDiags(
         "x = 5\n"
         "def foo(a, b):\n"
         "    return 0\n"
     );
-    // x missing type, a missing type, b missing type, foo missing return type
     EXPECT_GE(diags.size(), 3u);
 }
 
-//===----------------------------------------------------------------------===//
-// Dragon .dr files - enforcer still works but typically not called
-//===----------------------------------------------------------------------===//
-
 TEST(TypeHintEnforcer, DragonFileWithTypesOk) {
-    // Dragon files parsed with isDragon=true should also pass
-    // (In practice, the Driver only calls enforcer for .py files)
     EXPECT_TRUE(enforceDragonOk(
         "def add(x: int, y: int) -> int {\n"
         "    return x + y\n"
         "}\n"
     ));
 }
-
-//===----------------------------------------------------------------------===//
-// Mixed: some functions typed, some not
-//===----------------------------------------------------------------------===//
 
 TEST(TypeHintEnforcer, MixedFunctions) {
     auto diags = enforceDiags(
@@ -247,6 +196,5 @@ TEST(TypeHintEnforcer, MixedFunctions) {
         "def untyped(y):\n"
         "    return y\n"
     );
-    // untyped: missing type for 'y' + missing return type = 2 errors
     EXPECT_EQ(diags.size(), 2u);
 }

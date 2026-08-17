@@ -1,9 +1,5 @@
 #include "CodeGenTestHelpers.h"
 
-//===----------------------------------------------------------------------===//
-// D033 Phase 1: Method-name reflection metadata
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenTest, MethodReflectionGlobalsEmitted) {
     auto ir = generateIR(
         "class Foo {\n"
@@ -26,17 +22,7 @@ TEST(CodeGenTest, MethodReflectionGlobalsEmitted) {
     EXPECT_NE(ir.find("baz"), std::string::npos);
 }
 
-//===----------------------------------------------------------------------===//
-// Inheritance fundamentals surfaced by the unittest framework:
-//  - subclass struct inherits parent fields (prefix-compatible layout)
-//  - default constructor synthesis (no explicit def())
-//  - nominal instance subtyping + expected-type-directed list covariance
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, SubclassInheritsParentFieldLayout) {
-    // Sub's empty constructor doesn't re-assign the inherited field; the
-    // struct must still include it (else a parent-typed write corrupts the
-    // heap and dragon_decref segfaults on the OLD value).
     auto out = compileAndRun(
         "class Res { n: int\n def() { self.n = 7 } }\n"
         "class Base { r: Res\n def() { self.r = Res() } }\n"
@@ -61,8 +47,6 @@ TEST(CodeGenE2E, DefaultConstructorSynthesisBare) {
 }
 
 TEST(CodeGenE2E, DefaultConstructorSynthesisSubclassDelegates) {
-    // Sub has no def(); its synthesized ctor must call Base's zero-arg ctor
-    // so the inherited field is initialized.
     auto out = compileAndRun(
         "class Base {\n"
         "    tag: int\n"
@@ -78,11 +62,6 @@ TEST(CodeGenE2E, DefaultConstructorSynthesisSubclassDelegates) {
 }
 
 TEST(CodeGenE2E, ListCovarianceFreshLiteral) {
-    // A fresh list literal of subclass instances satisfies list[Base]
-    // (expected-type-directed covariance - sound because the literal has no
-    // prior alias). This checks the assignment is ACCEPTED and the list is
-    // iterable; it deliberately does not exercise virtual dispatch (a
-    // separate feature).
     auto out = compileAndRun(
         "class Animal { tag: int\n def() { self.tag = 0 } }\n"
         "class Dog(Animal) { def() { self.tag = 1 } }\n"
@@ -94,10 +73,6 @@ TEST(CodeGenE2E, ListCovarianceFreshLiteral) {
     EXPECT_EQ(out, "2\n1\n2\n");
 }
 
-
-//===----------------------------------------------------------------------===//
-// D033 Phase 3: method-aware getattr / hasattr
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenE2E, HasattrFindsMethod) {
     auto out = compileAndRun(
@@ -150,8 +125,6 @@ TEST(CodeGenE2E, GetattrBoundMethodInvocationFunctionScope) {
 }
 
 TEST(CodeGenE2E, GetattrMethodFromInheritedParent) {
-    // dragon_class_find_method walks the parent chain - verify that's
-    // wired through getattr's bound-call path as well.
     auto out = compileAndRun(
         "class Animal {\n"
         "    name: str\n"
@@ -211,16 +184,10 @@ TEST(CodeGenE2E, DirWalksParentChain) {
         "names: list[str] = dir(d)\n"
         "for n in names { print(n) }\n"
     );
-    // sorted: __init__, fetch (Dog), name (field), speak (Animal)
     EXPECT_EQ(out, "__init__\nfetch\nname\nspeak\n");
 }
 
 TEST(CodeGenE2E, MethodFindWalksParentChain) {
-    // Subclass adds its own method; the parent's method must still resolve
-    // through dragon_class_find_method's parent-chain walk (used by Phase 2/3
-    // dir() / getattr()). We can't call find_method from .dr until Phase 2/3
-    // wire it up, so for now we just confirm inheritance + override codegen
-    // still works with the new metadata emission attached.
     auto out = compileAndRun(
         "class Animal {\n"
         "    name: str\n"
@@ -238,12 +205,7 @@ TEST(CodeGenE2E, MethodFindWalksParentChain) {
     EXPECT_EQ(out, "generic sound\ngot it\n");
 }
 
-//===----------------------------------------------------------------------===//
-// Class IR Tests
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenTest, ClassDeclStructType) {
-    // Verify class creates __init__ and _new functions in IR
     auto ir = generateIR(
         "class Counter {\n"
         "  def(n: int) {\n"
@@ -260,7 +222,6 @@ TEST(CodeGenTest, ClassDeclStructType) {
 }
 
 TEST(CodeGenTest, ClassMethodDecl) {
-    // Verify method generates a function with self param
     auto ir = generateIR(
         "class Adder {\n"
         "  def(x: int) {\n"
@@ -278,7 +239,6 @@ TEST(CodeGenTest, ClassMethodDecl) {
 }
 
 TEST(CodeGenTest, ClassConstructorCall) {
-    // Verify constructor call routes to _new
     auto ir = generateIR(
         "class Box {\n"
         "  def(v: int) {\n"
@@ -292,7 +252,6 @@ TEST(CodeGenTest, ClassConstructorCall) {
 }
 
 TEST(CodeGenTest, ClassFieldAccess) {
-    // Verify field access uses GEP
     auto ir = generateIR(
         "class Pair {\n"
         "  def(a: int, b: int) {\n"
@@ -304,13 +263,11 @@ TEST(CodeGenTest, ClassFieldAccess) {
         "  }\n"
         "}\n"
     );
-    // GEP instruction for field access should appear
     EXPECT_NE(ir.find("getelementptr"), std::string::npos)
         << "Expected GEP for field access in IR";
 }
 
 TEST(CodeGenTest, ClassMethodCall) {
-    // Verify method call generates correct dispatch
     auto ir = generateIR(
         "class Val {\n"
         "  def(n: int) {\n"
@@ -328,7 +285,6 @@ TEST(CodeGenTest, ClassMethodCall) {
 }
 
 TEST(CodeGenTest, ClassModuleVerifies) {
-    // Verify the complete class IR passes LLVM verification
     auto ir = generateIR(
         "class Point {\n"
         "  def(x: int, y: int) {\n"
@@ -346,12 +302,7 @@ TEST(CodeGenTest, ClassModuleVerifies) {
         << "Expected IR generation to succeed, got: " << ir;
 }
 
-//===----------------------------------------------------------------------===//
-// GC Header IR Tests
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenIR, ClassGCHeaderInStruct) {
-    // Verify class struct type includes GC header + vtable ptr (D026)
     auto ir = generateIR(
         "class Widget {\n"
         "  def(v: int) {\n"
@@ -359,14 +310,11 @@ TEST(CodeGenIR, ClassGCHeaderInStruct) {
         "  }\n"
         "}\n"
     );
-    // struct should be { i64, i64, ptr, i64 } - 2 GC header + vtable ptr + 1 user field
     EXPECT_NE(ir.find("%Widget = type { i64, i64, ptr, i64 }"), std::string::npos)
         << "Expected GC header (2 x i64) + vtable ptr prepended to class struct";
 }
 
 TEST(CodeGenIR, ClassGCHeaderInit) {
-    // Verify _new function initializes refcount=1 and packed header word
-    // Phase 5: header word = type_tag(7) | gc_track_idx(-1) | class_id (dynamic)
     auto ir = generateIR(
         "class Obj {\n"
         "  def(x: int) {\n"
@@ -374,12 +322,10 @@ TEST(CodeGenIR, ClassGCHeaderInit) {
         "  }\n"
         "}\n"
     );
-    // Check that refcount (index 0) is stored in _new
     EXPECT_NE(ir.find("getelementptr inbounds"), std::string::npos)
         << "Expected GEP for header init\nIR:\n" << ir;
     EXPECT_NE(ir.find("store i64 1,"), std::string::npos)
         << "Expected refcount = 1 store\nIR:\n" << ir;
-    // Phase 5: class_id global and dealloc registration
     EXPECT_NE(ir.find("@__class_id_Obj"), std::string::npos)
         << "Expected class_id global for Obj\nIR:\n" << ir;
     EXPECT_NE(ir.find("dragon_class_register_dealloc"), std::string::npos)
@@ -387,7 +333,6 @@ TEST(CodeGenIR, ClassGCHeaderInit) {
 }
 
 TEST(CodeGenIR, ClassInstanceDecrefAtScopeExit) {
-    // Verify dragon_decref is called for class instance at scope exit
     auto ir = generateIR(
         "class Foo {\n"
         "  def(x: int) {\n"
@@ -405,7 +350,6 @@ TEST(CodeGenIR, ClassInstanceDecrefAtScopeExit) {
 }
 
 TEST(CodeGenIR, AtomicIncrefDeclared) {
-    // Verify atomic incref/decref runtime functions are declared in IR
     auto ir = generateIR("x: int = 1\n");
     EXPECT_NE(ir.find("dragon_incref_atomic"), std::string::npos)
         << "Expected dragon_incref_atomic to be declared";
@@ -418,7 +362,6 @@ TEST(CodeGenIR, AtomicIncrefDeclared) {
 }
 
 TEST(CodeGenIR, FireListArgAtomicIncref) {
-    // When fire fn(args) passes a heap arg (list), atomic incref should appear
     auto ir = generateIR(
         "def process(data: list[int]) -> int {\n"
         "  return 0\n"
@@ -426,31 +369,22 @@ TEST(CodeGenIR, FireListArgAtomicIncref) {
         "items: list[int] = [1, 2, 3]\n"
         "t: Task[int] = fire process(items)\n"
     );
-    // The fire spawn site should call dragon_incref_atomic on the list arg
     EXPECT_NE(ir.find("dragon_incref_atomic"), std::string::npos)
         << "Expected atomic incref for list arg passed to fire";
 }
 
 TEST(CodeGenIR, FireIntArgNoAtomicIncref) {
-    // When fire fn(args) passes only scalar args, no atomic incref should appear in main
     auto ir = generateIR(
         "def compute(n: int) -> int {\n"
         "  return n + 1\n"
         "}\n"
         "t: Task[int] = fire compute(42)\n"
     );
-    // dragon_incref_atomic is declared but should NOT be called in main
-    // (scalar args don't need refcounting)
-    // Just verify no call to it appears (function is declared but not called)
-    // Check that "call void @dragon_incref_atomic" does NOT appear
     EXPECT_EQ(ir.find("call void @dragon_incref_atomic"), std::string::npos)
         << "Scalar args should not get atomic incref";
 }
 
 TEST(CodeGenIR, FireTrampolineDecrefsHeapArgs) {
-    // D030: fire fn(heap_arg) emits a per-callsite trampoline that loads the
-    // arg from the typed args struct, calls the target, then atomically
-    // decrefs heap args (replacing the old fire_wrap function).
     auto ir = generateIR(
         "def process(items: list[int]) -> int {\n"
         "  return 1\n"
@@ -458,19 +392,15 @@ TEST(CodeGenIR, FireTrampolineDecrefsHeapArgs) {
         "data: list[int] = [1, 2, 3]\n"
         "t: Task[int] = fire process(data)\n"
     );
-    // Per-callsite fire trampoline should exist
     EXPECT_NE(ir.find("__dragon_fire_tramp_"), std::string::npos)
         << "Expected fire trampoline function\nIR:\n" << ir;
-    // Trampoline should call dragon_decref_atomic to balance the incref
     EXPECT_NE(ir.find("dragon_decref_atomic"), std::string::npos)
         << "Expected atomic decref in fire trampoline\nIR:\n" << ir;
-    // Spawn site uses the typed entry point
     EXPECT_NE(ir.find("dragon_vthread_spawn_typed"), std::string::npos)
         << "Expected dragon_vthread_spawn_typed call\nIR:\n" << ir;
 }
 
 TEST(CodeGenIR, GCPhase5FunctionsDecl) {
-    // Verify all Phase 5 GC functions are declared
     auto ir = generateIR(
         "x: list[int] = [1, 2, 3]\n"
         "print(x[0])\n"
@@ -484,7 +414,6 @@ TEST(CodeGenIR, GCPhase5FunctionsDecl) {
 }
 
 TEST(CodeGenIR, ClassDeallocAndTraverse) {
-    // Verify per-class dealloc and traverse functions are generated
     auto ir = generateIR(
         "class Node {\n"
         "  def(val: int, child: Node) {\n"
@@ -501,7 +430,6 @@ TEST(CodeGenIR, ClassDeallocAndTraverse) {
         << "Expected dealloc registration\nIR:\n" << ir;
     EXPECT_NE(ir.find("dragon_class_register_traverse"), std::string::npos)
         << "Expected traverse registration\nIR:\n" << ir;
-    // Phase 1b: per-class clear function for cycle collector
     EXPECT_NE(ir.find("__dragon_clear_Node"), std::string::npos)
         << "Expected clear function for Node\nIR:\n" << ir;
     EXPECT_NE(ir.find("dragon_class_register_clear"), std::string::npos)
@@ -509,8 +437,6 @@ TEST(CodeGenIR, ClassDeallocAndTraverse) {
 }
 
 TEST(CodeGenIR, ClassClearZerosFields) {
-    // The __clear__ function should decref heap fields AND zero them
-    // (to prevent double-decref when dealloc runs after cycle collection)
     auto ir = generateIR(
         "class Container {\n"
         "  def(name: str, items: list[int]) {\n"
@@ -521,29 +447,20 @@ TEST(CodeGenIR, ClassClearZerosFields) {
     );
     EXPECT_NE(ir.find("__dragon_clear_Container"), std::string::npos)
         << "Expected clear function for Container\nIR:\n" << ir;
-    // The clear function should contain store null/zero to zero out fields
-    // Find the clear function and check it stores zeros
     auto clearPos = ir.find("define internal void @__dragon_clear_Container");
     ASSERT_NE(clearPos, std::string::npos)
         << "Expected clear function definition\nIR:\n" << ir;
     auto clearEnd = ir.find("\n}\n", clearPos);
     auto clearBody = ir.substr(clearPos, clearEnd - clearPos);
-    // Should call decref_str for str field
     EXPECT_NE(clearBody.find("dragon_decref_str"), std::string::npos)
         << "Expected decref_str call in clear function\nBody:\n" << clearBody;
-    // Should call dragon_decref for list field
     EXPECT_NE(clearBody.find("dragon_decref"), std::string::npos)
         << "Expected dragon_decref call in clear function\nBody:\n" << clearBody;
-    // Should store null/zero to break cycles
     EXPECT_NE(clearBody.find("store"), std::string::npos)
         << "Expected store (zero) in clear function\nBody:\n" << clearBody;
 }
 
 TEST(CodeGenIR, AcyclicClassNotTracked) {
-    // Acyclic-class optimization: an instance whose fields are all scalars or
-    // strings (heap leaves) can never form a reference cycle, so _new must NOT
-    // emit dragon_gc_track - RC reclaims it and the per-object gc_lock would be
-    // pure overhead. The header still leaves GC_FLAG_TRACKED clear / idx = -1.
     auto ir = generateIR(
         "class Obj {\n"
         "  def(x: int, name: str) {\n"
@@ -557,9 +474,6 @@ TEST(CodeGenIR, AcyclicClassNotTracked) {
 }
 
 TEST(CodeGenIR, CyclicCapableClassTracked) {
-    // A class with a container field CAN participate in a reference cycle, so
-    // _new must still emit dragon_gc_track for the cyclic collector to reclaim
-    // it. This guards the acyclic optimization from over-applying.
     auto ir = generateIR(
         "class Node {\n"
         "  kids: list[int]\n"
@@ -572,14 +486,7 @@ TEST(CodeGenIR, CyclicCapableClassTracked) {
         << "Cyclic-capable class (list field) must still be gc_tracked\nIR:\n" << ir;
 }
 
-//===----------------------------------------------------------------------===//
-// B Phase 1: escape analysis -> stack allocation
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenIR, StackAllocNonEscapingInstance) {
-    // A scalar-only instance declared in a block and used only via field reads
-    // does not escape -> constructed in an entry alloca (no malloc, no _new
-    // call, no gc_track), which LLVM then SROAs away.
     auto ir = generateIR(
         "class P {\n"
         "  def(x: int) { self.x = x }\n"
@@ -600,8 +507,6 @@ TEST(CodeGenIR, StackAllocNonEscapingInstance) {
 }
 
 TEST(CodeGenIR, EscapingInstanceStaysHeap) {
-    // `return p` lets the instance escape its frame -> must stay heap (call
-    // _new), never stack-allocated.
     auto ir = generateIR(
         "class P {\n"
         "  def(x: int) { self.x = x }\n"
@@ -619,7 +524,6 @@ TEST(CodeGenIR, EscapingInstanceStaysHeap) {
 }
 
 TEST(CodeGenE2E, StackInstanceFieldReadsCorrect) {
-    // Non-escaping stack instances in a hot loop produce correct results.
     auto out = compileAndRun(
         "class Pt {\n"
         "  x: int\n"
@@ -635,13 +539,10 @@ TEST(CodeGenE2E, StackInstanceFieldReadsCorrect) {
         "}\n"
         "print(total)\n"
     );
-    EXPECT_EQ(out, "1000000\n");  // sum of (i + i+1) for i in 0..999 = 1000000
+    EXPECT_EQ(out, "1000000\n");
 }
 
 TEST(CodeGenE2E, EscapingInstancesDistinctAfterReturn) {
-    // If `return p` were wrongly stack-allocated, the three returned pointers
-    // would alias one dead frame slot and read the same value. Distinct values
-    // prove they are heap-allocated and independently live.
     auto out = compileAndRun(
         "class P {\n"
         "  def(x: int) { self.x = x }\n"
@@ -657,10 +558,6 @@ TEST(CodeGenE2E, EscapingInstancesDistinctAfterReturn) {
     );
     EXPECT_EQ(out, "60\n");
 }
-
-//===----------------------------------------------------------------------===//
-// Const/Static IR Tests
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenIR, ConstIR) {
     auto ir = generateIR(
@@ -681,7 +578,6 @@ TEST(CodeGenIR, StaticFieldIR) {
         "}\n"
         "print(Counter.count)\n"
     );
-    // Static field should be a global variable
     EXPECT_NE(ir.find("@Counter_count"), std::string::npos);
     EXPECT_NE(ir.find("dragon_print_int"), std::string::npos);
 }
@@ -699,17 +595,10 @@ TEST(CodeGenIR, StaticMethodIR) {
         "x: int = MathUtil.add(3, 4)\n"
         "print(x)\n"
     );
-    // Static method function should exist
     EXPECT_NE(ir.find("MathUtil_add"), std::string::npos);
     EXPECT_NE(ir.find("dragon_print_int"), std::string::npos);
 }
 
-//===----------------------------------------------------------------------===//
-// Multi-Constructor IR Tests
-//===----------------------------------------------------------------------===//
-
-// IR-level test: verify that multi-constructor classes produce the correct
-// mangled function names (___init___0, ___init___1, _new_0, _new_1).
 TEST(CodeGenIR, MultiConstructorIR) {
     auto ir = generateIR(
         "class Point {\n"
@@ -725,17 +614,14 @@ TEST(CodeGenIR, MultiConstructorIR) {
         "p1: Point = Point(3, 4)\n"
         "p2: Point = Point()\n"
     );
-    // Multi-ctor: mangled names with _0 and _1 suffixes
     EXPECT_NE(ir.find("Point___init___0"), std::string::npos);
     EXPECT_NE(ir.find("Point___init___1"), std::string::npos);
     EXPECT_NE(ir.find("Point_new_0"), std::string::npos);
     EXPECT_NE(ir.find("Point_new_1"), std::string::npos);
-    // Single-ctor un-suffixed names should NOT appear
     EXPECT_EQ(ir.find("Point___init__("), std::string::npos);
     EXPECT_EQ(ir.find("Point_new("), std::string::npos);
 }
 
-// IR-level test: single constructor should still use un-suffixed names.
 TEST(CodeGenIR, SingleConstructorUnchangedIR) {
     auto ir = generateIR(
         "class Simple {\n"
@@ -745,17 +631,11 @@ TEST(CodeGenIR, SingleConstructorUnchangedIR) {
         "}\n"
         "s: Simple = Simple(42)\n"
     );
-    // Single-ctor: un-suffixed names
     EXPECT_NE(ir.find("Simple___init__"), std::string::npos);
     EXPECT_NE(ir.find("Simple_new"), std::string::npos);
-    // Suffixed names should NOT appear
     EXPECT_EQ(ir.find("Simple___init___0"), std::string::npos);
     EXPECT_EQ(ir.find("Simple_new_0"), std::string::npos);
 }
-
-//===----------------------------------------------------------------------===//
-// Super/MRO IR Tests
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenIR, SuperCallIR) {
     auto ir = generateIR(
@@ -768,13 +648,11 @@ TEST(CodeGenIR, SuperCallIR) {
         "    }\n"
         "}\n"
     );
-    // Animal should have __init__ and speak methods (implicit self in .dr mode)
     EXPECT_NE(ir.find("Animal___init__"), std::string::npos);
     EXPECT_NE(ir.find("Animal_speak"), std::string::npos);
 }
 
 TEST(CodeGenIR, MROMethodLookupIR) {
-    // Child class calls a method defined only on grandparent via MRO
     auto ir = generateIR(
         "class A {\n"
         "    def(v: int) {\n"
@@ -792,7 +670,6 @@ TEST(CodeGenIR, MROMethodLookupIR) {
         "b: B = B(5)\n"
         "print(b.greet())\n"
     );
-    // Should contain A's greet method and the call to it via MRO
     EXPECT_NE(ir.find("A_greet"), std::string::npos);
     EXPECT_NE(ir.find("dragon_print_int"), std::string::npos);
 }
@@ -814,12 +691,7 @@ TEST(CodeGenIR, PyClassInheritanceIR) {
     EXPECT_NE(ir.find("dragon_print_int"), std::string::npos);
 }
 
-//===----------------------------------------------------------------------===//
-// First-Class Class IR Tests
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenTest, FirstClassClassStaticDispatchUnchanged) {
-    // Direct constructor call still uses static dispatch (fast path)
     auto output = compileAndRun(
         "class Point {\n"
         "    def(x: int, y: int) {\n"
@@ -835,7 +707,6 @@ TEST(CodeGenTest, FirstClassClassStaticDispatchUnchanged) {
 }
 
 TEST(CodeGenTest, FirstClassClassDescriptorIR) {
-    // Verify descriptor global and creation call appear in IR
     auto ir = generateIR(
         "class Foo {\n"
         "    def(x: int) {\n"
@@ -849,14 +720,7 @@ TEST(CodeGenTest, FirstClassClassDescriptorIR) {
         << "Expected descriptor create call in IR";
 }
 
-//===----------------------------------------------------------------------===//
-// First-Class Class - `: type` parameter, `-> type` return, list[type]
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, FirstClassClassTypeParam) {
-    // ADR 025 removal: a `cls: type` parameter holds a class value whose class
-    // is not known at compile time. Constructing through it is a compile error
-    // (classes are compile-time entities, D021), not a runtime descriptor call.
     auto out = compileAndRun(
         "class Animal {\n"
         "    def(name: str) {\n"
@@ -875,8 +739,6 @@ TEST(CodeGenE2E, FirstClassClassTypeParam) {
 }
 
 TEST(CodeGenE2E, FirstClassClassReturnTypeAnnotation) {
-    // ADR 025 removal: a `-> type` return is a class value not known at compile
-    // time; constructing through the receiving variable is a compile error.
     auto out = compileAndRun(
         "class Animal {\n"
         "    def(name: str) {\n"
@@ -895,8 +757,6 @@ TEST(CodeGenE2E, FirstClassClassReturnTypeAnnotation) {
 }
 
 TEST(CodeGenE2E, FirstClassClassListIteration) {
-    // ADR 025 removal: a `list[type]` element is a class value not known at
-    // compile time; constructing through the loop variable is a compile error.
     auto out = compileAndRun(
         "class Animal {\n"
         "    def(name: str) {\n"
@@ -914,8 +774,6 @@ TEST(CodeGenE2E, FirstClassClassListIteration) {
 }
 
 TEST(CodeGenE2E, FirstClassClassDictLookup) {
-    // ADR 025 removal: a `dict[K, type]` subscript is a class value not known
-    // at compile time; constructing through it is a compile error.
     auto out = compileAndRun(
         "class Animal {\n"
         "    def(name: str) {\n"
@@ -932,10 +790,6 @@ TEST(CodeGenE2E, FirstClassClassDictLookup) {
 }
 
 TEST(CodeGenE2E, ClassValueBindingRejected) {
-    // ADR 025 removal: classes are not values. Binding a class name to a
-    // variable (`X: type = SomeClass`, the would-be compile-time alias) is a
-    // compile error at the declaration site. (Real-driver-valid form: `:`
-    // declares, so this is rejected by the compiler, not just the harness.)
     auto out = compileAndRun(
         "class Router {\n"
         "    def(name: str) {\n"
@@ -951,7 +805,6 @@ TEST(CodeGenE2E, ClassValueBindingRejected) {
 }
 
 TEST(CodeGenE2E, FirstClassClassUnannotatedParamErrors) {
-    // Unannotated parameter holding a class is a compile error, not a segfault.
     auto out = compileAndRun(
         "class Animal {\n"
         "    def(name: str) {\n"
@@ -967,14 +820,7 @@ TEST(CodeGenE2E, FirstClassClassUnannotatedParamErrors) {
     EXPECT_NE(out.find("cannot call 'cls'"), std::string::npos);
 }
 
-//===----------------------------------------------------------------------===//
-// 6.11 - Runtime user-defined class decorators (D024 Phase 2)
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, ClassDecoratorIdentity) {
-    // Class decorators (`@dec class C`) are dropped - they
-    // would require runtime descriptor construction, which ADR 025 removed.
-    // Constructing a decorated class is a compile error.
     auto out = compileAndRun(
         "def identity(cls: type) -> type {\n"
         "    return cls\n"
@@ -993,9 +839,6 @@ TEST(CodeGenE2E, ClassDecoratorIdentity) {
 }
 
 TEST(CodeGenE2E, ClassDecoratorRegistry) {
-    // ADR 025 removal: class decorator + registry pattern relies on classes as
-    // runtime values (a `list[type]` of class descriptors). Constructing
-    // through the iterated class value is a compile error.
     auto out = compileAndRun(
         "registry: list[type] = []\n"
         "def reg(cls: type) -> type {\n"
@@ -1024,8 +867,6 @@ TEST(CodeGenE2E, ClassDecoratorRegistry) {
 }
 
 TEST(CodeGenE2E, ClassDecoratorStacking) {
-    // ADR 025 removal: stacked class decorators are dropped - constructing a
-    // decorated class is a compile error.
     auto out = compileAndRun(
         "log: list[str] = []\n"
         "def t1(cls: type) -> type {\n"
@@ -1053,8 +894,6 @@ TEST(CodeGenE2E, ClassDecoratorStacking) {
 }
 
 TEST(CodeGenE2E, ClassDecoratorIsinstanceWorks) {
-    // ADR 025 removal: class decorators are dropped; constructing a decorated
-    // class is a compile error.
     auto out = compileAndRun(
         "def identity(cls: type) -> type { return cls }\n"
         "@identity\n"
@@ -1075,8 +914,6 @@ TEST(CodeGenE2E, ClassDecoratorIsinstanceWorks) {
 }
 
 TEST(CodeGenE2E, ClassDecoratorPreservesAttribute) {
-    // ADR 025 removal: class decorators are dropped; constructing a decorated
-    // class is a compile error.
     auto out = compileAndRun(
         "def identity(cls: type) -> type { return cls }\n"
         "@identity\n"
@@ -1094,12 +931,7 @@ TEST(CodeGenE2E, ClassDecoratorPreservesAttribute) {
     EXPECT_NE(out.find("class decorators are not supported"), std::string::npos);
 }
 
-//===----------------------------------------------------------------------===//
-// 6.18 - @dataclass / NamedTuple compile-time synthesis
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, DataclassConstruction) {
-    // @dataclass synthesizes __init__ from class-body field annotations.
     auto out = compileAndRun(
         "@dataclass\n"
         "class Point {\n"
@@ -1114,7 +946,6 @@ TEST(CodeGenE2E, DataclassConstruction) {
 }
 
 TEST(CodeGenE2E, DataclassEqualByFields) {
-    // Synthesized __eq__ compares field-by-field.
     auto out = compileAndRun(
         "@dataclass\n"
         "class Point {\n"
@@ -1131,7 +962,6 @@ TEST(CodeGenE2E, DataclassEqualByFields) {
 }
 
 TEST(CodeGenE2E, DataclassReprFormat) {
-    // Synthesized __repr__ formats as "ClassName(f1=v1, f2=v2)".
     auto out = compileAndRun(
         "@dataclass\n"
         "class Point {\n"
@@ -1145,7 +975,6 @@ TEST(CodeGenE2E, DataclassReprFormat) {
 }
 
 TEST(CodeGenE2E, DataclassDefaultValues) {
-    // Field defaults flow through to constructor parameter defaults.
     auto out = compileAndRun(
         "@dataclass\n"
         "class Config {\n"
@@ -1161,7 +990,6 @@ TEST(CodeGenE2E, DataclassDefaultValues) {
 }
 
 TEST(CodeGenE2E, DataclassUserInitOverrides) {
-    // If the user wrote __init__ explicitly, no synthesis happens for it.
     auto out = compileAndRun(
         "@dataclass\n"
         "class Box {\n"
@@ -1177,7 +1005,6 @@ TEST(CodeGenE2E, DataclassUserInitOverrides) {
 }
 
 TEST(CodeGenE2E, DataclassMixedFieldTypes) {
-    // Mix of int / str / bool fields across __init__, __eq__, __repr__.
     auto out = compileAndRun(
         "@dataclass\n"
         "class Person {\n"
@@ -1196,7 +1023,6 @@ TEST(CodeGenE2E, DataclassMixedFieldTypes) {
 }
 
 TEST(CodeGenE2E, NamedTupleConstruction) {
-    // class Foo(NamedTuple) - same synthesis as @dataclass, marker base dropped.
     auto out = compileAndRun(
         "class Vec(NamedTuple) {\n"
         "    x: int\n"
@@ -1211,9 +1037,6 @@ TEST(CodeGenE2E, NamedTupleConstruction) {
 }
 
 TEST(CodeGenE2E, DataclassWithRuntimeDecorator) {
-    // ADR 025 removal: @dataclass is compile-time synthesis (still supported),
-    // but stacking a runtime class decorator (`@reg`) on top is dropped -
-    // constructing the decorated class is a compile error.
     auto out = compileAndRun(
         "registry: list[type] = []\n"
         "def reg(cls: type) -> type {\n"
@@ -1233,12 +1056,7 @@ TEST(CodeGenE2E, DataclassWithRuntimeDecorator) {
     EXPECT_NE(out.find("codegen failed"), std::string::npos);
 }
 
-//===----------------------------------------------------------------------===//
-// Vtable IR Tests
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenIR, VtableGlobalInIR) {
-    // Verify vtable global constant appears in IR for a class with methods
     auto ir = generateIR(
         "class Dog {\n"
         "    def(name: str) {\n"
@@ -1256,7 +1074,6 @@ TEST(CodeGenIR, VtableGlobalInIR) {
 }
 
 TEST(CodeGenIR, VtableStructLayout) {
-    // Verify struct has vtable pointer field (ptr at index 2)
     auto ir = generateIR(
         "class Point {\n"
         "    def(x: int, y: int) {\n"
@@ -1268,13 +1085,11 @@ TEST(CodeGenIR, VtableStructLayout) {
         "    }\n"
         "}\n"
     );
-    // struct: { i64 refcount, i64 type_tag, ptr vtable, i64 x, i64 y }
     EXPECT_NE(ir.find("%Point = type { i64, i64, ptr, i64, i64 }"), std::string::npos)
         << "Expected vtable ptr in struct layout at index 2";
 }
 
 TEST(CodeGenTest, VtableDynamicMethodDispatch) {
-    // Core D026 test: dynamic dispatch through first-class class value
     auto output = compileAndRun(
         "class Dog {\n"
         "    def(name: str) {\n"
@@ -1291,7 +1106,6 @@ TEST(CodeGenTest, VtableDynamicMethodDispatch) {
 }
 
 TEST(CodeGenTest, VtableInheritanceDispatch) {
-    // Child overrides parent method, vtable dispatches to child version
     auto output = compileAndRun(
         "class Animal {\n"
         "    def(name: str) {\n"
@@ -1316,7 +1130,6 @@ TEST(CodeGenTest, VtableInheritanceDispatch) {
 }
 
 TEST(CodeGenTest, VtableInheritedMethod) {
-    // Child class inherits parent method (not overridden), vtable dispatches to parent
     auto output = compileAndRun(
         "class Animal {\n"
         "    def(name: str) {\n"
@@ -1338,7 +1151,6 @@ TEST(CodeGenTest, VtableInheritedMethod) {
 }
 
 TEST(CodeGenTest, VtableStaticDispatchUnchanged) {
-    // When type is known at compile time, static dispatch (no vtable) still works
     auto output = compileAndRun(
         "class Cat {\n"
         "    def(name: str) {\n"
@@ -1355,7 +1167,6 @@ TEST(CodeGenTest, VtableStaticDispatchUnchanged) {
 }
 
 TEST(CodeGenTest, VtableMultipleMethods) {
-    // Class with multiple methods, all dispatched through vtable
     auto output = compileAndRun(
         "class Calc {\n"
         "    def(v: int) {\n"
@@ -1376,7 +1187,6 @@ TEST(CodeGenTest, VtableMultipleMethods) {
 }
 
 TEST(CodeGenTest, VtableVoidMethod) {
-    // Void method dispatched through vtable
     auto output = compileAndRun(
         "class Printer {\n"
         "    def(msg: str) {\n"
@@ -1392,12 +1202,7 @@ TEST(CodeGenTest, VtableVoidMethod) {
     EXPECT_EQ(output, "hello\n");
 }
 
-//===----------------------------------------------------------------------===//
-// Bug Repro / Field Inference IR Tests
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenTest, BugReproStrFieldCmp) {
-    // Reproduce: self.field == "literal" where field is str but no annotation on assignment
     auto ir = generateIR(
         "class Greeter {\n"
         "  def(name: str) {\n"
@@ -1413,13 +1218,11 @@ TEST(CodeGenTest, BugReproStrFieldCmp) {
         "g: Greeter = Greeter(\"world\")\n"
         "print(g.greet())\n"
     );
-    // Should contain dragon_str_eq call, not raw ICmpEQ with mismatched types
     EXPECT_NE(ir.find("dragon_str_eq"), std::string::npos)
         << "Expected dragon_str_eq for string field comparison\nIR:\n" << ir;
 }
 
 TEST(CodeGenTest, FloatFieldInference) {
-    // Verify float field inference from parameter type
     auto ir = generateIR(
         "class Pt {\n"
         "  def(x: float, y: float) {\n"
@@ -1431,13 +1234,11 @@ TEST(CodeGenTest, FloatFieldInference) {
         "  }\n"
         "}\n"
     );
-    // float fields should use fadd, not iadd
     EXPECT_NE(ir.find("fadd"), std::string::npos)
         << "Expected fadd for float field addition\nIR:\n" << ir;
 }
 
 TEST(CodeGenTest, BoolFieldInference) {
-    // Verify bool field inference from parameter type
     std::string out = compileAndRun(
         "class Flag {\n"
         "  def(active: bool) {\n"
@@ -1454,7 +1255,6 @@ TEST(CodeGenTest, BoolFieldInference) {
 }
 
 TEST(CodeGenTest, StrFieldLiteralInit) {
-    // Verify field type inference from string literal RHS
     auto ir = generateIR(
         "class Config {\n"
         "  def() {\n"
@@ -1471,10 +1271,6 @@ TEST(CodeGenTest, StrFieldLiteralInit) {
     EXPECT_NE(ir.find("dragon_str_eq"), std::string::npos)
         << "Expected dragon_str_eq for string field comparison\nIR:\n" << ir;
 }
-
-//===----------------------------------------------------------------------===//
-// Class E2E Tests
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenE2E, ClassBasic) {
     auto output = compileAndRun(
@@ -1494,7 +1290,6 @@ TEST(CodeGenE2E, ClassBasic) {
 }
 
 TEST(CodeGenE2E, ClassGCFieldAccess) {
-    // Verify field access works correctly with GC header offset
     auto out = compileAndRun(
         "class Point {\n"
         "  def(x: int, y: int) {\n"
@@ -1510,7 +1305,6 @@ TEST(CodeGenE2E, ClassGCFieldAccess) {
 }
 
 TEST(CodeGenE2E, ClassGCMethodAccess) {
-    // Verify methods work correctly with GC header
     auto out = compileAndRun(
         "class Counter {\n"
         "  def(v: int) {\n"
@@ -1527,7 +1321,6 @@ TEST(CodeGenE2E, ClassGCMethodAccess) {
 }
 
 TEST(CodeGenE2E, ClassGCMultipleFields) {
-    // Verify multiple field access with GC header offset
     auto out = compileAndRun(
         "class Rect {\n"
         "  def(w: int, h: int) {\n"
@@ -1545,7 +1338,6 @@ TEST(CodeGenE2E, ClassGCMultipleFields) {
 }
 
 TEST(CodeGenE2E, ClassGCFieldMutation) {
-    // Verify field mutation works with GC header
     auto out = compileAndRun(
         "class Box {\n"
         "  def(v: int) {\n"
@@ -1567,7 +1359,6 @@ TEST(CodeGenE2E, ClassGCFieldMutation) {
 }
 
 TEST(CodeGenE2E, ClassGCReturnInstance) {
-    // Verify returning a class instance from a function works (incref before cleanup)
     auto out = compileAndRun(
         "class Val {\n"
         "  def(n: int) {\n"
@@ -1581,12 +1372,10 @@ TEST(CodeGenE2E, ClassGCReturnInstance) {
         "r: Val = make(7)\n"
     );
     // Just verify it doesn't crash (return incref prevents use-after-free)
-    EXPECT_FALSE(out.empty() && false);  // always passes if no crash
+    EXPECT_FALSE(out.empty() && false);
 }
 
 TEST(CodeGenE2E, CycleCollectorFreesObjects) {
-    // Create a reference cycle between two class instances,
-    // drop all external refs, trigger GC, verify no crash.
     auto out = compileAndRun(
         "class Node {\n"
         "  def(val: int) {\n"
@@ -1607,10 +1396,6 @@ TEST(CodeGenE2E, CycleCollectorFreesObjects) {
 }
 
 TEST(CodeGenE2E, CycleCollectorReentrancyGuard) {
-    // Stress cycle collection: create enough cycles to repeatedly cross the
-    // gc_threshold (default 700) so dragon_gc_collect runs many times. If a
-    // dealloc/clear path ever allocates and re-enters dragon_gc_collect, the
-    // re-entrancy guard must prevent corruption of gc_tracked / __gc_refs.
     auto out = compileAndRun(
         "class Node {\n"
         "  def(val: int) {\n"
@@ -1634,7 +1419,6 @@ TEST(CodeGenE2E, CycleCollectorReentrancyGuard) {
 }
 
 TEST(CodeGenE2E, ClassInstanceCreateDestroyE2E) {
-    // Class instance with GC header: create, use, and scope-exit decref
     auto out = compileAndRun(
         "class Box {\n"
         "  def(v: int) {\n"
@@ -1650,7 +1434,6 @@ TEST(CodeGenE2E, ClassInstanceCreateDestroyE2E) {
     EXPECT_EQ(out, "42\n");
 }
 
-// E2E test: multi-constructor dispatch by arity (2-arg vs 0-arg)
 TEST(CodeGenE2E, MultiConstructorDispatchE2E) {
     auto out = compileAndRun(
         "class Point {\n"
@@ -1673,7 +1456,6 @@ TEST(CodeGenE2E, MultiConstructorDispatchE2E) {
     EXPECT_EQ(out, "10\n20\n0\n0\n");
 }
 
-// E2E test: three-constructor class with different arities
 TEST(CodeGenE2E, ThreeConstructorsE2E) {
     auto out = compileAndRun(
         "class Vec {\n"
@@ -1703,7 +1485,6 @@ TEST(CodeGenE2E, ThreeConstructorsE2E) {
     EXPECT_EQ(out, "0\n5\n3\n");
 }
 
-// E2E test: multi-constructor class with methods
 TEST(CodeGenE2E, MultiConstructorWithMethodsE2E) {
     auto out = compileAndRun(
         "class Rect {\n"
@@ -1745,7 +1526,6 @@ TEST(CodeGenE2E, SelfCtorSingleE2E) {
 }
 
 TEST(CodeGenE2E, DefInitBackcompatE2E) {
-    // def __init__() still works in .dr mode
     auto out = compileAndRun(
         "class Box {\n"
         "  def __init__(val: int) {\n"
@@ -1762,7 +1542,6 @@ TEST(CodeGenE2E, DefInitBackcompatE2E) {
 }
 
 TEST(CodeGenE2E, PrintClassInstanceVar) {
-    // print(obj) where obj is a class instance should print <ClassName instance>
     auto out = compileAndRun(
         "class Point {\n"
         "  def(x: int, y: int) {\n"
@@ -1777,7 +1556,6 @@ TEST(CodeGenE2E, PrintClassInstanceVar) {
 }
 
 TEST(CodeGenE2E, PrintClassInstanceDirect) {
-    // print(MyClass(...)) directly should also print <ClassName instance>
     auto out = compileAndRun(
         "class Box {\n"
         "  def(val: int) {\n"
@@ -1805,7 +1583,6 @@ TEST(CodeGenE2E, StaticFieldE2E) {
 }
 
 TEST(CodeGenE2E, StaticmethodDr) {
-    // @staticmethod in .dr mode class
     auto out = compileAndRun(
         "class Math {\n"
         "  @staticmethod\n"
@@ -1819,7 +1596,6 @@ TEST(CodeGenE2E, StaticmethodDr) {
 }
 
 TEST(CodeGenE2E, StaticmethodPy) {
-    // @staticmethod in .py mode class
     auto out = compileAndRunPy(
         "class Math:\n"
         "    @staticmethod\n"
@@ -1831,7 +1607,6 @@ TEST(CodeGenE2E, StaticmethodPy) {
 }
 
 TEST(CodeGenE2E, ClassmethodPy) {
-    // @classmethod in .py mode - cls param is skipped, callable on class
     auto out = compileAndRunPy(
         "class Counter:\n"
         "    def __init__(self, n: int):\n"
@@ -1848,7 +1623,6 @@ TEST(CodeGenE2E, ClassmethodPy) {
 }
 
 TEST(CodeGenE2E, StaticAndInstanceMethodCoexist) {
-    // Both static and instance methods on the same class
     auto out = compileAndRun(
         "class Calc {\n"
         "  def(base: int) {\n"
@@ -1894,7 +1668,6 @@ TEST(CodeGenE2E, SuperMethodCall) {
 }
 
 TEST(CodeGenE2E, MROInheritedMethod) {
-    // Child class inherits method from parent (MRO lookup)
     auto out = compileAndRun(
         "class Animal {\n"
         "    def(x: int) {\n"
@@ -1950,7 +1723,6 @@ TEST(CodeGenE2E, PySuperMethodE2E) {
 }
 
 TEST(CodeGenTest, StrFieldCmpE2E) {
-    // E2E: class with str field from param (no annotation on self.x = x)
     std::string out = compileAndRun(
         "class Greeter {\n"
         "  def(name: str) {\n"
@@ -1970,7 +1742,6 @@ TEST(CodeGenTest, StrFieldCmpE2E) {
 }
 
 TEST(CodeGenTest, StrFieldCmpNotEqual) {
-    // E2E: str field != comparison
     std::string out = compileAndRun(
         "class Tag {\n"
         "  def(label: str) {\n"
@@ -1989,12 +1760,7 @@ TEST(CodeGenTest, StrFieldCmpNotEqual) {
     EXPECT_EQ(out, "not admin\n");
 }
 
-//===----------------------------------------------------------------------===//
-// Union Type Tests
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenTest, UnionParamIsinstanceNarrowing) {
-    // Basic union param with isinstance narrowing
     auto output = compileAndRun(
         "def show(x: int | str) {\n"
         "    if isinstance(x, int) {\n"
@@ -2010,7 +1776,6 @@ TEST(CodeGenTest, UnionParamIsinstanceNarrowing) {
 }
 
 TEST(CodeGenTest, UnionParamPrintDispatch) {
-    // print() directly on union-typed variable (no narrowing)
     auto output = compileAndRun(
         "def show(x: int | str) {\n"
         "    print(x)\n"
@@ -2022,7 +1787,6 @@ TEST(CodeGenTest, UnionParamPrintDispatch) {
 }
 
 TEST(CodeGenTest, UnionParamIntFloat) {
-    // Union of int and float
     auto output = compileAndRun(
         "def show(x: int | float) {\n"
         "    if isinstance(x, int) {\n"
@@ -2038,7 +1802,6 @@ TEST(CodeGenTest, UnionParamIntFloat) {
 }
 
 TEST(CodeGenTest, UnionParamMultiple) {
-    // Multiple union params
     auto output = compileAndRun(
         "def add_or_cat(a: int | str, b: int | str) {\n"
         "    if isinstance(a, int) {\n"
@@ -2053,7 +1816,6 @@ TEST(CodeGenTest, UnionParamMultiple) {
 }
 
 TEST(CodeGenTest, UnionTypeBuiltin) {
-    // type() on union-typed variable
     auto output = compileAndRun(
         "def show_type(x: int | str) {\n"
         "    print(type(x))\n"
@@ -2065,7 +1827,6 @@ TEST(CodeGenTest, UnionTypeBuiltin) {
 }
 
 TEST(CodeGenTest, UnionThreeTypes) {
-    // Three-member union
     auto output = compileAndRun(
         "def show(x: int | str | float) {\n"
         "    if isinstance(x, int) {\n"
@@ -2084,7 +1845,6 @@ TEST(CodeGenTest, UnionThreeTypes) {
 }
 
 TEST(CodeGenTest, UnionNarrowedArithmetic) {
-    // Arithmetic after isinstance narrowing
     auto output = compileAndRun(
         "def double_it(x: int | str) -> int {\n"
         "    if isinstance(x, int) {\n"
@@ -2098,7 +1858,6 @@ TEST(CodeGenTest, UnionNarrowedArithmetic) {
 }
 
 TEST(CodeGenTest, UnionPassThrough) {
-    // Passing union arg to another function expecting union
     auto output = compileAndRun(
         "def inner(x: int | str) {\n"
         "    print(x)\n"
@@ -2113,7 +1872,6 @@ TEST(CodeGenTest, UnionPassThrough) {
 }
 
 TEST(CodeGenTest, UnionLocalVariable) {
-    // Union-typed local variable with reassignment inside a function
     auto output = compileAndRun(
         "def test() {\n"
         "    x: int | str = 42\n"
@@ -2127,7 +1885,6 @@ TEST(CodeGenTest, UnionLocalVariable) {
 }
 
 TEST(CodeGenTest, UnionParamBool) {
-    // Union with bool member
     auto output = compileAndRun(
         "def show(x: int | bool) {\n"
         "    if isinstance(x, bool) {\n"
@@ -2142,13 +1899,7 @@ TEST(CodeGenTest, UnionParamBool) {
     EXPECT_EQ(output, "True\n11\n");
 }
 
-//===----------------------------------------------------------------------===//
-// D025 Phase 4: type() returns descriptor, print(descriptor)
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenTest, PrintClassDescriptor) {
-    // ADR 025 removal: a bare class name is not a runtime value (classes are
-    // compile-time entities). print(ClassName) is a compile error.
     auto output = compileAndRun(
         "class Foo {\n"
         "    def() {}\n"
@@ -2159,16 +1910,7 @@ TEST(CodeGenTest, PrintClassDescriptor) {
     EXPECT_NE(output.find("not values"), std::string::npos);
 }
 
-// Class-alias behavior coverage now lives in test/dr/test_class_aliases.dr
-// (runs through the real driver; the bare-`=` form these once used is rejected
-// by the real compiler and only ever passed under the compileAndRun harness).
-
-//===----------------------------------------------------------------------===//
-// 4.1 @property - getter and setter dispatch
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, PropertyGetterBareAccess) {
-    // @property getter is invoked on bare attribute access (no parens).
     auto out = compileAndRun(
         "class Box {\n"
         "  def(v: int) {\n"
@@ -2186,7 +1928,6 @@ TEST(CodeGenE2E, PropertyGetterBareAccess) {
 }
 
 TEST(CodeGenE2E, PropertySetterRoundTrip) {
-    // @<name>.setter intercepts assignment; getter and setter share source name.
     auto out = compileAndRun(
         "class Box {\n"
         "  def(v: int) {\n"
@@ -2210,7 +1951,6 @@ TEST(CodeGenE2E, PropertySetterRoundTrip) {
 }
 
 TEST(CodeGenE2E, PropertyComputedDerived) {
-    // Property may compute a derived value from multiple fields.
     auto out = compileAndRun(
         "class Rect {\n"
         "  def(w: int, h: int) {\n"
@@ -2247,7 +1987,6 @@ TEST(CodeGenE2E, PropertyReturnsString) {
 }
 
 TEST(CodeGenE2E, PropertyInheritedFromBase) {
-    // Subclass with its own constructor inherits the parent's @property.
     auto out = compileAndRun(
         "class Base {\n"
         "  def(v: int) {\n"
@@ -2270,7 +2009,6 @@ TEST(CodeGenE2E, PropertyInheritedFromBase) {
 }
 
 TEST(CodeGenE2E, PropertyAssignedToTypedLocal) {
-    // Typed local read - exercises type-checker path for property attribute access.
     auto out = compileAndRun(
         "class Box {\n"
         "  def(v: int) {\n"
@@ -2292,7 +2030,6 @@ TEST(CodeGenE2E, PropertyAssignedToTypedLocal) {
 }
 
 TEST(CodeGenE2E, PropertyGetterCalledOnce) {
-    // Side-effecting getter - accessed once per attribute read.
     auto out = compileAndRun(
         "class Counter {\n"
         "  def() {\n"
@@ -2313,7 +2050,6 @@ TEST(CodeGenE2E, PropertyGetterCalledOnce) {
 }
 
 TEST(CodeGenIR, PropertyEmitsMethodCallNotFieldLoad) {
-    // IR check: bare property access emits a call to the getter, not a struct GEP/load.
     auto ir = generateIR(
         "class Box {\n"
         "  def(v: int) {\n"
@@ -2327,17 +2063,12 @@ TEST(CodeGenIR, PropertyEmitsMethodCallNotFieldLoad) {
         "b: Box = Box(1)\n"
         "x: int = b.value\n"
     );
-    // The getter function exists and is called from main.
     EXPECT_NE(ir.find("define"), std::string::npos);
     EXPECT_NE(ir.find("Box_value"), std::string::npos)
         << "Expected getter Box_value to be defined";
     EXPECT_NE(ir.find("call i64 @Box_value"), std::string::npos)
         << "Expected getter call site at b.value access";
 }
-
-//===----------------------------------------------------------------------===//
-// 4.2 enum: int-backed enum type (Dragon extension, .dr mode only)
-//===----------------------------------------------------------------------===//
 
 TEST(CodeGenE2E, EnumAutoNumbered) {
     auto out = compileAndRun(
@@ -2368,8 +2099,6 @@ TEST(CodeGenE2E, EnumExplicitValues) {
 }
 
 TEST(CodeGenE2E, EnumMixedAutoAndExplicit) {
-    // Explicit value resets the running counter - subsequent auto-numbered
-    // members continue from the explicit value + 1.
     auto out = compileAndRun(
         "enum Mixed {\n"
         "    A,\n"
@@ -2450,7 +2179,6 @@ TEST(CodeGenE2E, EnumUsedInIfElif) {
 }
 
 TEST(CodeGenE2E, EnumTrailingCommaOptional) {
-    // Trailing comma allowed but not required.
     auto out = compileAndRun(
         "enum E { A, B, C, }\n"
         "print(E.A)\n"
@@ -2461,7 +2189,6 @@ TEST(CodeGenE2E, EnumTrailingCommaOptional) {
 }
 
 TEST(CodeGenIR, PropertySetterMangledInVtable) {
-    // IR check: setter is registered under the mangled name "<prop>__setter".
     auto ir = generateIR(
         "class Box {\n"
         "  def(v: int) {\n"
@@ -2485,13 +2212,6 @@ TEST(CodeGenIR, PropertySetterMangledInVtable) {
         << "Expected setter to be emitted/called as @Box_value__setter";
 }
 
-//===----------------------------------------------------------------------===//
-// for-in iteration over class-field dicts and strings
-// (D030 alignment - the iterable-kind dispatch must consult the tracked
-// class-field VarKind on AttributeExpr iterables; otherwise the loop variable
-// is mis-allocated as i64 and dragon_dict_get(ptr, ptr) crashes the verifier.)
-//===----------------------------------------------------------------------===//
-
 TEST(CodeGenE2E, ForInClassFieldDictWithExplicitFieldAnnotation) {
     auto out = compileAndRun(
         "class Foo {\n"
@@ -2511,9 +2231,6 @@ TEST(CodeGenE2E, ForInClassFieldDictWithExplicitFieldAnnotation) {
 }
 
 TEST(CodeGenE2E, ForInClassFieldDictInferredFromDictLiteral) {
-    // No type annotation anywhere - V is inferred from the dict literal RHS
-    // in the constructor. Both the loop key and the typed subscript routing
-    // must work.
     auto out = compileAndRun(
         "class Foo {\n"
         "    def() { self.data = {\"a\": \"1\", \"b\": \"2\"} }\n"
@@ -2531,8 +2248,6 @@ TEST(CodeGenE2E, ForInClassFieldDictInferredFromDictLiteral) {
 }
 
 TEST(CodeGenE2E, ForInOtherObjectDictField) {
-    // Iteration over `obj.field` (not `self.field`) - owner class is resolved
-    // via varClassNames.
     auto out = compileAndRun(
         "class Foo {\n"
         "    data: dict[str, str]\n"
@@ -2551,7 +2266,6 @@ TEST(CodeGenE2E, ForInOtherObjectDictField) {
 }
 
 TEST(CodeGenE2E, ForInClassFieldString) {
-    // String-typed field iteration must yield character strs, not i64 indices.
     auto out = compileAndRun(
         "class Foo {\n"
         "    body: str\n"
@@ -2565,7 +2279,6 @@ TEST(CodeGenE2E, ForInClassFieldString) {
 }
 
 TEST(CodeGenE2E, ForInClassFieldDictKeysMethodOnAttribute) {
-    // `for k in self.data.keys()` - dict-method-call on attribute expression.
     auto out = compileAndRun(
         "class Foo {\n"
         "    data: dict[str, str]\n"
@@ -2581,8 +2294,6 @@ TEST(CodeGenE2E, ForInClassFieldDictKeysMethodOnAttribute) {
 }
 
 TEST(CodeGenE2E, ForInClassFieldDictHeterogeneousStaysPolymorphic) {
-    // Heterogeneous dict literal must NOT be typed-narrowed (otherwise we'd
-    // silently mis-route the typed subscript). Iteration of keys must still work.
     auto out = compileAndRun(
         "class Foo {\n"
         "    def() { self.data = {\"a\": \"x\", \"b\": 1} }\n"
@@ -2597,19 +2308,6 @@ TEST(CodeGenE2E, ForInClassFieldDictHeterogeneousStaysPolymorphic) {
 }
 
 TEST(CodeGenE2E, CapturingClosureStoredOnClassFieldInvokedThroughField) {
-    // Bug A: a Callable[[...], R] field can hold either a bare LLVM fn
-    // pointer (non-capturing lambda / top-level def) or a DragonClosure*
-    // (capturing lambda). The class field must:
-    //  1) keep the closure alive (RC-track Callable fields via tag-aware
-    //  incref/decref helpers that no-op on bare fn pointers and run
-    //  real RC when type_tag == DRAGON_TAG_CLOSURE).
-    //  2) dispatch by runtime tag at the call site - type_tag at offset 8
-    //  of the field value picks the closure path (unwrap fn_ptr+env
-    //  from DragonClosure, append env to args) vs the bare path.
-    //
-    // Repro builds the closure inside `make`, whose locals die before
-    // `h.handler(5)` runs - without RC tracking the field dangles, without
-    // tag dispatch the call jumps into the closure's header bytes.
     auto out = compileAndRun(
         "class Holder {\n"
         "    def(handler: Callable[[int], int]) {\n"
@@ -2630,12 +2328,6 @@ TEST(CodeGenE2E, CapturingClosureStoredOnClassFieldInvokedThroughField) {
 }
 
 TEST(CodeGenE2E, BareFnPointerOnClassFieldInvokedThroughField) {
-    // Bug A complement: a Callable field holding a bare fn pointer (non-
-    // capturing case) must still call cleanly through the same field path.
-    // The tag check on type_tag reads bytes of the function entry's
-    // prologue - almost never DRAGON_TAG_CLOSURE - so the bare path runs;
-    // tag-aware decref on dealloc must be a no-op so we don't try to
-    // mutate refcount bytes in .text.
     auto out = compileAndRun(
         "class Holder {\n"
         "    def(handler: Callable[[int], int]) {\n"
@@ -2651,7 +2343,3 @@ TEST(CodeGenE2E, BareFnPointerOnClassFieldInvokedThroughField) {
     );
     EXPECT_EQ(out, "15\n");
 }
-
-// NOTE: virtual-dispatch behavior is covered by the dogfooded `.dr` unittest
-// suite (test/dr/test_virtual_dispatch.dr) per ADR 021 - E2E behavior lives in
-// Dragon, GoogleTest is reserved for IR-shape + compiler-internal checks.

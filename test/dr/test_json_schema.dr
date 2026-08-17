@@ -12,7 +12,7 @@ runs by name. Registered schemas reference each other with
 
 from unittest import TestCase, main
 import json
-from json import Schema, ValidationResult, ValidationError
+from json import Schema, ValidationResult, ValidationError, decode
 
 
 class TestEntryPoint(TestCase) {
@@ -28,9 +28,8 @@ class TestEntryPoint(TestCase) {
     }
 
     def test_register_parsed_text() -> None {
-        # schemas arriving as text (an HTTP body, a DB column) parse then register
         s: Schema = Schema("draft-07")
-        s.register("evt", json.loads_obj('{"type": "object", "required": ["id"]}'))
+        s.register("evt", decode[dict[str, Any]]('{"type": "object", "required": ["id"]}'.encode("utf-8")))
         self.assertEqual(s.validate("evt", json.loads('{"id": 1}')).ok, True)
         const r: ValidationResult = s.validate("evt", json.loads('{}'))
         self.assertEqual(r.errors[0].path, "$.id")
@@ -77,8 +76,6 @@ class TestRefs(TestCase) {
     }
 
     def test_ref_registered_later_resolves() -> None {
-        # refs resolve at validation time through the registry, so a schema
-        # may reference one registered after it
         s: Schema = Schema("draft-07")
         s.register("person", {"type": "object", "properties": {"home": {"$ref": "address"}}})
         s.register("address", {"type": "object", "required": ["city"]})
@@ -115,8 +112,6 @@ class TestRefs(TestCase) {
     }
 
     def test_recursive_schema_on_finite_value() -> None {
-        # a self-referencing schema is fine when each hop consumes value
-        # structure - a tree validates its own children
         s: Schema = Schema("draft-07")
         s.register("node", {"type": "object", "required": ["v"], "properties": {"v": {"type": "integer"}, "kids": {"type": "array", "items": {"$ref": "node"}}}})
         const tree: Any = json.loads('{"v": 1, "kids": [{"v": 2, "kids": []}, {"v": 3, "kids": [{"v": 4, "kids": []}]}]}')
@@ -190,8 +185,6 @@ class TestKeywords(TestCase) {
 
 class TestPayloadRepresentations(TestCase) {
     def test_dict_literal_payload() -> None {
-        # payloads are Any: a Dragon dict literal (bare identifier keys)
-        # validates without any JSON text round-trip
         s: Schema = Schema("draft-07")
         s.register("order", {type: "object", required: ["order"], properties: {order: {type: "integer", minimum: 1}}})
         self.assertEqual(s.validate("order", {order: 7}).ok, True)
@@ -199,9 +192,6 @@ class TestPayloadRepresentations(TestCase) {
     }
 
     def test_native_list_payload() -> None {
-        # a monomorphized Dragon list validates identically to a parsed box
-        # list - the walker sizes and iterates through the Any value, which
-        # dispatches on the payload header
         s: Schema = Schema("draft-07")
         s.register("tags", {type: "array", items: {type: "string", minLength: 1}, minItems: 1})
         self.assertEqual(s.validate("tags", ["a", "b"]).ok, True)
@@ -231,14 +221,6 @@ class TestPayloadRepresentations(TestCase) {
 
 
 class TestPartialRequired(TestCase) {
-    # Regression: a `required` list with >=2 entries where SOME are present
-    # and some missing. The validator iterates the required list through Any
-    # (box-iteration) with `const name: str = r` in the body. A codegen bug
-    # mis-classified that str local as a class instance (a stale program-wide
-    # varClassNames entry for the loop-var name bled through resolveExprClassName
-    # on the Union loop var), decref'ing the string with the generic
-    # dragon_decref at scope exit - heap corruption / a garbled error path
-    # ($.nrder instead of $.items). The explicit `str` annotation must win.
     def test_first_present_second_missing() -> None {
         s: Schema = Schema("draft-07")
         s.register("order", {type: "object", required: ["order", "items"]})

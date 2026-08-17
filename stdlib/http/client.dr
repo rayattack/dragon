@@ -1,18 +1,3 @@
-# http/client.dr - HTTP/1.1 client.
-#
-# CPython parity for the calling surface most code touches:
-#
-#  conn = HTTPConnection("example.com", 80)
-#  conn.request("GET", "/api/foo")
-#  resp = conn.getresponse()
-#  print(resp.status, resp.reason)
-#  body = resp.read()
-#  conn.close()
-#
-# Built on Dragon's `socket.TcpStream`. Plain HTTP only; HTTPS comes once the
-# `ssl` module lands. Bodies are returned as `str` (bytes-clean for ASCII;
-# binary downloads will need a future bytes-typed read path).
-
 from socket import TcpStream, SocketHandle
 from ssl import SSLContext, SSLSocket, create_default_context
 from urllib.parse import urlsplit, SplitResult
@@ -20,9 +5,6 @@ from urllib.parse import urlsplit, SplitResult
 extern "C" def dragon_int_to_str(n: int) -> str
 
 
-# Map status codes to canonical reason phrases per RFC 7231 + IANA registry
-# additions. Used when a response line lacks a reason phrase or for client
-# code that only got a status code from a redirect chain.
 def _reason_for(status: int) -> str {
     if status == 200 { return "OK" }
     if status == 201 { return "Created" }
@@ -51,8 +33,6 @@ def _reason_for(status: int) -> str {
 }
 
 
-# Parse a status line: `HTTP/1.1 200 OK\r\n` -> (200, "OK").
-# A missing reason phrase falls back to the IANA canonical phrase.
 def _parse_status_line(line: str) -> tuple[int, str] {
     sp1: int = line.find(" ")
     if sp1 < 0 {
@@ -75,11 +55,6 @@ def _parse_status_line(line: str) -> tuple[int, str] {
 }
 
 
-# Split a `Header-Name: value` line into a (key, value) pair. Both sides are
-# whitespace-stripped. Header names are normalized to title-case so the
-# returned dict is comparable across servers - Python's HTTPMessage exposes
-# them case-insensitively via getheader(), but we go further by storing
-# canonical case so direct dict access matches CPython's most common pattern.
 def _parse_header_line(line: str) -> tuple[str, str] {
     colon: int = line.find(":")
     if colon < 0 {
@@ -88,6 +63,129 @@ def _parse_header_line(line: str) -> tuple[str, str] {
     key: str = line[0:colon].strip()
     val: str = line[colon + 1:len(line)].strip()
     return (key, val)
+}
+
+
+class _ResponseHead {
+    status: int
+    reason: str
+    headers: dict[str, str]
+
+    def(status: int, reason: str, headers: dict[str, str]) {
+        self.status = status
+        self.reason = reason
+        self.headers = headers
+    }
+}
+
+
+def _parse_head(head: str) -> _ResponseHead {
+    const lines: list[str] = head.split("\r\n")
+    if len(lines) == 0 {
+        raise ValueError("malformed HTTP response: empty head")
+    }
+    const status_pair: tuple[int, str] = _parse_status_line(lines[0])
+    headers: dict[str, str] = {}
+    i: int = 1
+    while i < len(lines) {
+        const line: str = lines[i]
+        if len(line) > 0 {
+            const kv: tuple[str, str] = _parse_header_line(line)
+            if len(kv[0]) > 0 {
+                headers[kv[0]] = kv[1]
+            }
+        }
+        i = i + 1
+    }
+    return _ResponseHead(status_pair[0], status_pair[1], headers)
+}
+
+
+def _header_value(headers: dict[str, str], name: str) -> str {
+    const target: str = name.lower()
+    for k in headers {
+        if k.lower() == target {
+            return headers[k]
+        }
+    }
+    return ""
+}
+
+
+def _chunk_size(line: str) -> int {
+    s: str = line
+    const semi: int = s.find(";")
+    if semi >= 0 {
+        s = s[0:semi]
+    }
+    s = s.strip()
+    if len(s) == 0 {
+        raise ValueError("malformed chunked body: empty chunk-size line")
+    }
+    size: int = 0
+    i: int = 0
+    while i < len(s) {
+        const c: int = ord(s[i])
+        d: int = -1
+        if c >= 48 and c <= 57 { d = c - 48 }
+        if c >= 97 and c <= 102 { d = c - 87 }
+        if c >= 65 and c <= 70 { d = c - 55 }
+        if d < 0 {
+            raise ValueError("malformed chunked body: invalid chunk size '" + line + "'")
+        }
+        size = size * 16 + d
+        i = i + 1
+    }
+    return size
+}
+
+
+def _dechunk(body: str) -> str {
+    parts: list[str] = []
+    pos: int = 0
+    const n: int = len(body)
+    done: bool = False
+    while not done {
+        const eol: int = body.find("\r\n", pos)
+        if eol < 0 {
+            raise ValueError("malformed chunked body: missing chunk-size terminator")
+        }
+        const size: int = _chunk_size(body[pos:eol])
+        pos = eol + 2
+        if size == 0 {
+            done = True
+        } else {
+            if pos + size + 2 > n {
+                raise ValueError("malformed chunked body: chunk data truncated")
+            }
+            parts.append(body[pos:pos + size])
+            if body[pos + size:pos + size + 2] != "\r\n" {
+                raise ValueError("malformed chunked body: missing chunk-data terminator")
+            }
+            pos = pos + size + 2
+        }
+    }
+    return "".join(parts)
+}
+
+
+def _request_head(method: str, url: str, host: str, port: int,
+                  content_len: int, headers: dict[str, str]) -> str {
+    host_hdr: str = host
+    if port != 80 and port != 443 {
+        host_hdr = host + ":" + dragon_int_to_str(port)
+    }
+    parts: list[str] = [method + " " + url + " HTTP/1.1\r\n"]
+    parts.append("Host: " + host_hdr + "\r\n")
+    parts.append("Connection: close\r\n")
+    if content_len >= 0 {
+        parts.append("Content-Length: " + dragon_int_to_str(content_len) + "\r\n")
+    }
+    for k in headers {
+        parts.append(k + ": " + headers[k] + "\r\n")
+    }
+    parts.append("\r\n")
+    return "".join(parts)
 }
 
 
@@ -101,10 +199,6 @@ class HTTPResponse {
         self._consumed = False
     }
 
-    # Return the response body once. CPython's read() also accepts an `amt`
-    # argument; that streams from the socket. We've already buffered the
-    # full body into self._body, so a subsequent read() returns "" - the
-    # contract matches Python (a fully-consumed response is empty on re-read).
     def read() -> str {
         if self._consumed {
             return ""
@@ -113,7 +207,6 @@ class HTTPResponse {
         return self._body
     }
 
-    # Case-insensitive single-header lookup. Mirrors HTTPResponse.getheader.
     def getheader(name: str, default: str = "") -> str {
         target: str = name.lower()
         for k in self.headers {
@@ -142,7 +235,7 @@ class HTTPConnection {
     def(host: str, port: int) {
         self.host = host
         self.port = port
-        self.stream = TcpStream(SocketHandle.adopt_raw(-1))   # born-dead placeholder until connect()
+        self.stream = TcpStream(SocketHandle.adopt_raw(-1))
         self._connected = False
     }
 
@@ -154,74 +247,39 @@ class HTTPConnection {
         self._connected = True
     }
 
-    # Send `method url HTTP/1.1` plus host/connection headers, optional body.
-    # `headers` overrides defaults; the only headers we always set are Host
-    # (from self.host:port) and Connection: close (so getresponse() can read
-    # until EOF without parsing Content-Length / chunked yet - that's a
-    # follow-up).
     def request(method: str, url: str, body: str, headers: dict[str, str]) -> None {
         self.connect()
-        host_hdr: str = self.host
-        if self.port != 80 and self.port != 443 {
-            host_hdr = self.host + ":" + dragon_int_to_str(self.port)
-        }
-        req: str = method + " " + url + " HTTP/1.1\r\n"
-        req = req + "Host: " + host_hdr + "\r\n"
-        req = req + "Connection: close\r\n"
+        content_len: int = -1
         if len(body) > 0 {
-            req = req + "Content-Length: " + dragon_int_to_str(len(body)) + "\r\n"
+            content_len = len(body)
         }
-        for k in headers {
-            req = req + k + ": " + headers[k] + "\r\n"
-        }
-        req = req + "\r\n"
+        req: str = _request_head(method, url, self.host, self.port, content_len, headers)
         if len(body) > 0 {
             req = req + body
         }
-        self.stream.do_send(req)
+        self.stream.send(req)
     }
 
-    # Read the full response off the socket and parse it. Connection: close
-    # means we read until EOF (zero-byte recv). When Content-Length / chunked
-    # parsing lands, this can early-exit instead.
     def getresponse() -> HTTPResponse {
-        raw: str = ""
+        chunks: list[str] = []
         while True {
-            chunk: str = self.stream.do_recv(8192)
+            const chunk: str = self.stream.recv(8192)
             if len(chunk) == 0 {
                 break
             }
-            raw = raw + chunk
+            chunks.append(chunk)
         }
-        # Find header/body boundary.
-        sep: int = raw.find("\r\n\r\n")
+        const raw: str = "".join(chunks)
+        const sep: int = raw.find("\r\n\r\n")
         if sep < 0 {
             raise ValueError("malformed HTTP response: no header terminator")
         }
-        head: str = raw[0:sep]
+        const h: _ResponseHead = _parse_head(raw[0:sep])
         body: str = raw[sep + 4:len(raw)]
-
-        lines: list[str] = head.split("\r\n")
-        if len(lines) == 0 {
-            raise ValueError("malformed HTTP response: empty head")
+        if "chunked" in _header_value(h.headers, "Transfer-Encoding").lower() {
+            body = _dechunk(body)
         }
-        status_pair: tuple[int, str] = _parse_status_line(lines[0])
-        status: int = status_pair[0]
-        reason: str = status_pair[1]
-
-        headers: dict[str, str] = {}
-        i: int = 1
-        while i < len(lines) {
-            line: str = lines[i]
-            if len(line) > 0 {
-                kv: tuple[str, str] = _parse_header_line(line)
-                if len(kv[0]) > 0 {
-                    headers[kv[0]] = kv[1]
-                }
-            }
-            i = i + 1
-        }
-        return HTTPResponse(self.stream, status, reason, headers, body)
+        return HTTPResponse(self.stream, h.status, h.reason, h.headers, body)
     }
 
     def close() -> None {
@@ -232,13 +290,6 @@ class HTTPConnection {
     }
 }
 
-
-#===----------------------------------------------------------------------===#
-# HTTPS - same shape as HTTPConnection/HTTPResponse but over an ssl.SSLSocket.
-# Separate classes (not a shared base) because Dragon dispatches methods on the
-# static type, so a TcpStream/SSLSocket common base wouldn't dispatch through
-# the http logic. The status/header parse helpers (_parse_*) are shared.
-#===----------------------------------------------------------------------===#
 
 class HTTPSResponse {
     def(stream: SSLSocket, status: int, reason: str, headers: dict[str, str], body: str) {
@@ -294,7 +345,6 @@ class HTTPSConnection {
         self.port = port
         self._ctx = create_default_context()
         self._connected = False
-        # self.stream (declared above) is assigned on the first connect().
     }
 
     def connect() -> None {
@@ -302,102 +352,58 @@ class HTTPSConnection {
             return
         }
         raw: TcpStream = TcpStream.open(self.host, self.port)
-        # server_hostname drives SNI + certificate hostname verification.
         self.stream = self._ctx.wrap_socket(raw, False, self.host)
         self._connected = True
     }
 
     def request(method: str, url: str, body: str, headers: dict[str, str]) -> None {
         self.connect()
-        host_hdr: str = self.host
-        if self.port != 80 and self.port != 443 {
-            host_hdr = self.host + ":" + dragon_int_to_str(self.port)
-        }
-        req: str = method + " " + url + " HTTP/1.1\r\n"
-        req = req + "Host: " + host_hdr + "\r\n"
-        req = req + "Connection: close\r\n"
+        content_len: int = -1
         if len(body) > 0 {
-            req = req + "Content-Length: " + dragon_int_to_str(len(body)) + "\r\n"
+            content_len = len(body)
         }
-        for k in headers {
-            req = req + k + ": " + headers[k] + "\r\n"
-        }
-        req = req + "\r\n"
+        req: str = _request_head(method, url, self.host, self.port, content_len, headers)
         if len(body) > 0 {
             req = req + body
         }
-        self.stream.do_send(req)
+        self.stream.send(req)
     }
 
     def getresponse() -> HTTPSResponse {
-        raw: str = ""
+        chunks: list[str] = []
         while True {
-            chunk: str = self.stream.do_recv(8192)
+            const chunk: str = self.stream.recv(8192)
             if len(chunk) == 0 {
                 break
             }
-            raw = raw + chunk
+            chunks.append(chunk)
         }
-        sep: int = raw.find("\r\n\r\n")
+        const raw: str = "".join(chunks)
+        const sep: int = raw.find("\r\n\r\n")
         if sep < 0 {
             raise ValueError("malformed HTTP response: no header terminator")
         }
-        head: str = raw[0:sep]
+        const h: _ResponseHead = _parse_head(raw[0:sep])
         body: str = raw[sep + 4:len(raw)]
-
-        lines: list[str] = head.split("\r\n")
-        if len(lines) == 0 {
-            raise ValueError("malformed HTTP response: empty head")
+        if "chunked" in _header_value(h.headers, "Transfer-Encoding").lower() {
+            body = _dechunk(body)
         }
-        status_pair: tuple[int, str] = _parse_status_line(lines[0])
-        status: int = status_pair[0]
-        reason: str = status_pair[1]
-
-        headers: dict[str, str] = {}
-        i: int = 1
-        while i < len(lines) {
-            line: str = lines[i]
-            if len(line) > 0 {
-                kv: tuple[str, str] = _parse_header_line(line)
-                if len(kv[0]) > 0 {
-                    headers[kv[0]] = kv[1]
-                }
-            }
-            i = i + 1
-        }
-        return HTTPSResponse(self.stream, status, reason, headers, body)
+        return HTTPSResponse(self.stream, h.status, h.reason, h.headers, body)
     }
 
-    # Binary-safe request: the head travels as ASCII text, the payload goes
-    # through SSLSocket.send_bytes - never through a str, whose non-ASCII
-    # widening would corrupt raw bytes (tarballs, images).
     def request_bytes(method: str, url: str, body: bytes, headers: dict[str, str]) -> None {
         self.connect()
-        host_hdr: str = self.host
-        if self.port != 80 and self.port != 443 {
-            host_hdr = self.host + ":" + dragon_int_to_str(self.port)
-        }
-        req: str = method + " " + url + " HTTP/1.1\r\n"
-        req = req + "Host: " + host_hdr + "\r\n"
-        req = req + "Connection: close\r\n"
-        req = req + "Content-Length: " + dragon_int_to_str(len(body)) + "\r\n"
-        for k in headers {
-            req = req + k + ": " + headers[k] + "\r\n"
-        }
-        req = req + "\r\n"
-        self.stream.do_send(req)
+        self.stream.send(_request_head(method, url, self.host, self.port,
+                                          len(body), headers))
         if len(body) > 0 {
             self.stream.send_bytes(body)
         }
     }
 
-    # Read a whole response with a BYTES body (binary-safe download). Reads to
-    # EOF (every request here sends Connection: close), splits head/body at
-    # the first CRLFCRLF, and decodes only the ASCII head.
     def getresponse_bytes() -> HTTPSBytesResponse {
         chunks: list[bytes] = []
         while True {
-            c: bytes = self.stream.recv(65536)
+            c: bytes = self.stream.recv_bytes(65536)
             if len(c) == 0 {
                 break
             }
@@ -405,7 +411,6 @@ class HTTPSConnection {
         }
         raw: bytes = b"".join(chunks)
         n: int = len(raw)
-        # Locate \r\n\r\n without lifting the payload into a str.
         sep: int = -1
         i: int = 0
         while i + 3 < n {
@@ -418,39 +423,19 @@ class HTTPSConnection {
         if sep < 0 {
             raise ValueError("malformed HTTP response: no header terminator")
         }
-        head: str = raw[0:sep].decode("utf-8")
+        const h: _ResponseHead = _parse_head(raw[0:sep].decode("utf-8"))
         body: bytes = raw[sep + 4:n]
 
-        lines: list[str] = head.split("\r\n")
-        if len(lines) == 0 {
-            raise ValueError("malformed HTTP response: empty head")
-        }
-        status_pair: tuple[int, str] = _parse_status_line(lines[0])
-        headers: dict[str, str] = {}
-        j: int = 1
-        while j < len(lines) {
-            line: str = lines[j]
-            if len(line) > 0 {
-                kv: tuple[str, str] = _parse_header_line(line)
-                if len(kv[0]) > 0 {
-                    headers[kv[0]] = kv[1]
-                }
-            }
-            j = j + 1
-        }
-        # Chunked bodies are refused loudly rather than mis-assembled; every
-        # server this client targets responds with Content-Length (and the
-        # Connection: close EOF bounds the read regardless).
         te: str = ""
-        for hk in headers {
+        for hk in h.headers {
             if hk.lower() == "transfer-encoding" {
-                te = headers[hk]
+                te = h.headers[hk]
             }
         }
         if "chunked" in te.lower() {
             raise ValueError("chunked response bodies are not supported by getresponse_bytes")
         }
-        return HTTPSBytesResponse(status_pair[0], status_pair[1], headers, body)
+        return HTTPSBytesResponse(h.status, h.reason, h.headers, body)
     }
 
     def close() -> None {
@@ -461,8 +446,6 @@ class HTTPSConnection {
     }
 }
 
-# A fully-read HTTPS response whose body is raw bytes. No stream handle: the
-# connection is already drained and closed by the time one exists.
 class HTTPSBytesResponse {
     status: int
     reason: str
@@ -490,3 +473,4 @@ class HTTPSBytesResponse {
         return default
     }
 }
+

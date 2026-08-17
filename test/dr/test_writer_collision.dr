@@ -9,8 +9,6 @@ from os.path import join
 
 
 class WriterCollisionTests(TestCase) {
-    # The crash shape: with-statement through io.make's RETURN type while the
-    # fixture's same-named Writer sits later in the dep graph.
     def test_with_uses_ios_writer() {
         const dir: str = mkdtemp("drtest-", "-wc")
         const path: str = join(dir, "out.txt")

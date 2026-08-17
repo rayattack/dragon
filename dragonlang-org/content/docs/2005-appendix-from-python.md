@@ -119,6 +119,7 @@ n = "hello"   # n is now a str
 ```
 
 ```dragon
+# doc: no-check
 # Dragon
 n: int = 5
 n = "hello"
@@ -145,6 +146,7 @@ print(z)   # 99
 ```
 
 ```dragon
+# doc: no-check
 # Dragon - z is local to the if block
 if true {
     z: int = 99
@@ -359,6 +361,7 @@ does not have, so a named concrete list is rejected at the boundary instead
 of being silently misread:
 
 ```dragon
+# doc: no-check
 def first_len(xs: list[Any]) -> int {
     return len(xs)
 }
@@ -498,9 +501,9 @@ checks them at compile time and runs them at C speed.
 The stdlib tracks Python 3 names and signatures wherever it can, but a few
 modules and types diverge on purpose. Check these before you port:
 
-- **`re` returns no `Match` object.** `re.match(pattern, subject)` returns an
-  `int` - positive when the pattern matches, `0` or negative when it does not -
-  and `re.search` returns the matched substring as a `str` (`""` for no match).
+- **`re` returns no `Match` object.** `re.match(pattern, subject)` returns a
+  `bool`, so `if re.match(...)` behaves as it does in Python, and `re.search`
+  returns the matched substring as a `str` (`""` for no match).
   Captured groups come from a compiled `Pattern`:
   `re.compile(p).group(subject, n)`. There is no `Match`, no
   `.start()`/`.end()`/`.span()`.

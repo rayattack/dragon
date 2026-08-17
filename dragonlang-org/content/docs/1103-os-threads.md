@@ -12,6 +12,9 @@ When you need true hardware parallelism for a CPU-bound chunk of work, use a
 `thread { }` block:
 
 ```dragon
+def compute_heavy_task() -> None { print("computing") }
+def write_results_to_disk() -> None { print("writing") }
+
 thread {
     compute_heavy_task()
     write_results_to_disk()
@@ -27,6 +30,9 @@ for hardware threads.
 Launch several and let them all join together at the scope boundary:
 
 ```dragon
+def process_batch_a() -> None { print("batch a") }
+def process_batch_b() -> None { print("batch b") }
+
 thread { process_batch_a() }
 thread { process_batch_b() }
 # both have joined before execution continues past this point

@@ -1,0 +1,72 @@
+from unittest import TestCase, main
+from json import loads
+
+
+def _bad_escape() {
+    const v: Any = loads("\"a\\xb\"")
+}
+
+def _raw_newline() {
+    const v: Any = loads("\"a\nb\"")
+}
+
+def _raw_tab() {
+    const v: Any = loads("[\"a\tb\"]")
+}
+
+def _bad_unicode() {
+    const v: Any = loads("\"\\uZZZZ\"")
+}
+
+def _truncated_unicode() {
+    const v: Any = loads("\"\\u12\"")
+}
+
+
+class JsonStrictnessTests(TestCase) {
+    def test_unknown_escape_raises() {
+        self.assertRaises(ValueError, _bad_escape)
+    }
+
+    def test_raw_control_char_raises() {
+        self.assertRaises(ValueError, _raw_newline)
+        self.assertRaises(ValueError, _raw_tab)
+    }
+
+    def test_malformed_unicode_escape_raises() {
+        self.assertRaises(ValueError, _bad_unicode)
+        self.assertRaises(ValueError, _truncated_unicode)
+    }
+
+    def test_error_carries_byte_position() {
+        msg: str = ""
+        try {
+            const v: Any = loads("\"ok\\x\"")
+        } except ValueError as e {
+            msg = str(e)
+        }
+        self.assertIn("byte", msg)
+    }
+
+    def test_valid_escapes_still_parse() {
+        const v: Any = loads("\"a\\n\\t\\\"\\\\\\/x\\u0041\"")
+        const s: str = v
+        self.assertEqual(s, "a\n\t\"\\/xA")
+    }
+
+    def test_surrogate_pair_still_parses() {
+        const v: Any = loads("\"\\ud83d\\ude00\"")
+        const s: str = v
+        self.assertEqual(len(s), 1)
+    }
+
+    def test_escaped_control_still_parses() {
+        const v: Any = loads("{\"k\": \"line1\\nline2\"}")
+        const m: dict[str, Any] = v
+        const s: str = m["k"]
+        self.assertEqual(s, "line1\nline2")
+    }
+}
+
+
+main([JsonStrictnessTests()])

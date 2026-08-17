@@ -23,7 +23,6 @@ from unittest import TestCase, main
 from html import HTML
 
 
-# A long-lived holder whose string field is borrowed when interpolated.
 class Node {
     def(label: str) {
         self.label = label
@@ -32,13 +31,10 @@ class Node {
 
 
 def render(n: Node) -> HTML {
-    # Auto-escapes n.label (a borrowed field) - the over-decref site.
     return template[HTML] { <span class="x">!{n.label}</span> }
 }
 
 
-# Mirrors HTML.escape's shape: reassign a borrowed str parameter via replace,
-# which always returns a fresh string.
 def munge(s: str) -> str {
     s = s.replace("&", "&amp;")
     s = s.replace("<", "&lt;")
@@ -48,10 +44,8 @@ def munge(s: str) -> str {
 
 class BorrowedFieldRCTests(TestCase) {
     def test_template_html_escape_preserves_field() {
-        # Module-globalish long-lived list of holders with heap-string fields.
         nodes: list[Node] = [Node(f"alpha{0}"), Node(f"beta{1}"),
                              Node(f"gamma{2}"), Node(f"delta{3}")]
-        # Render each node's escaped field far more times than any refcount margin.
         r: int = 0
         while r < 300 {
             for nd in nodes {
@@ -59,7 +53,6 @@ class BorrowedFieldRCTests(TestCase) {
             }
             r = r + 1
         }
-        # The borrowed fields must be intact (not freed / reused).
         self.assertEqual(nodes[0].label, "alpha0")
         self.assertEqual(nodes[1].label, "beta1")
         self.assertEqual(nodes[2].label, "gamma2")
@@ -106,16 +99,9 @@ class BorrowedFieldRCTests(TestCase) {
             self.assertEqual(e, "a&amp;b&lt;c&gt;")
             r = r + 1
         }
-        # A field that actually contains escapable characters is escaped but the
-        # stored field is untouched.
         const n: Node = Node("x&y<z>")
         const h: HTML = render(n)
         self.assertEqual(n.label, "x&y<z>")
-        # render()'s template has a space after `{` and before `}`; template
-        # render()'s template has a space after `{` and before `}`; template whitespace
-        # is emitted verbatim by design - so strip() before comparing the content - exactly
-        # as the sibling render tests do. The point of this assert is tht the field is escaped
-        # correctly, not to pin the incidental surrounding whitespace
         self.assertEqual(h.to_str().strip(), "<span class=\"x\">x&amp;y&lt;z&gt;</span>")
     }
 }

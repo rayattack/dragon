@@ -15,8 +15,6 @@ proves the legitimate side compiles AND runs:
 
 from unittest import TestCase, main
 
-# __private: the balance is mutated/read ONLY via methods. Outside code cannot
-# touch self.__balance (enforced at compile time; see the negative tests).
 class Account {
     __balance: int
     def(opening: int) {
@@ -37,8 +35,6 @@ class Account {
     }
 }
 
-# _protected: same-package code and subclasses share it. Logger declares
-# _prefix; AuditLogger (subclass) reads it directly.
 class Logger {
     _prefix: str
     _count: int
@@ -56,19 +52,15 @@ class AuditLogger(Logger) {
     def(prefix: str) {
         super(prefix)
     }
-    # Reaches the inherited _protected members directly (subclass access).
     def banner() -> str {
         return "[" + self._prefix + "]#" + str(self._count)
     }
 }
 
-# Same-package (same-file) free function reaching a _protected member - legal
-# under the `_` tier even though it is not a method of Logger.
 def prefix_of(lg: Logger) -> str {
     return lg._prefix
 }
 
-# Protocol dunders must still be public/dispatched after D045.
 class Tag {
     _name: str
     def(name: str) {
@@ -85,7 +77,6 @@ class Tag {
     }
 }
 
-# Context-manager dunders (__enter__/__exit__) drive `with`.
 class Guard {
     _open: bool
     def() {
@@ -111,7 +102,7 @@ class PrivacyTests(TestCase) {
         ok: bool = a.withdraw(30)
         self.assertTrue(ok)
         self.assertEqual(a.balance(), 120)
-        self.assertFalse(a.withdraw(9999))   # overdraw refused
+        self.assertFalse(a.withdraw(9999))
         self.assertEqual(a.balance(), 120)
     }
 

@@ -1,12 +1,3 @@
-# test/dr/test_box_comparison.dr - ordering comparison on Any/Union (box).
-#
-# Regression guard for a compiler crash: `a < b` (also <=, >, >=) on two Any
-# values emitted an ICmp on a {tag,payload} struct and aborted codegen
-# (ICmpInst::AssertOK). `==`/`!=` already had a handler (dragon_box_eq); ordering
-# did not. The fix routes ordering through dragon_box_cmp (numeric by value, str
-# /bytes lexicographic; TypeError for incomparable pairs), for both single
-# (BinaryExpr) and chained (ChainedCompExpr) comparisons.
-
 from unittest import TestCase, main
 
 

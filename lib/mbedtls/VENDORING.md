@@ -21,6 +21,13 @@ Built SQLite-style by Dragon's top-level `CMakeLists.txt` (target `dragon_mbedtl
 
 Config: uses mbedTLS's **default** `include/mbedtls/mbedtls_config.h` for now. A trimmed, in-scope-only config (TLS 1.2/1.3, modern AEAD suites, X25519/P-256, ECDSA/RSA, X.509; legacy compiled out) is a follow-up per ADR 038.
 
+## Local patches (re-apply on every update)
+
+- `library/x509_crt.c` `x509_check_wildcard`: added a minimum-label rule - a
+  wildcard SAN/CN entry must contain at least two dots, so `*.com` cannot match
+  every second-level name (OpenSSL `valid_star()` parity). Marked with
+  `DRAGON PATCH` in the source; pinned by `test/dr/test_ssl_wildcard.dr`.
+
 ## Updating
 
 Re-fetch the next `3.6.x` LTS tarball, replace `library/` `include/` `3rdparty/`, and update the version + SHA-256 above. **Track mbedTLS security advisories for the 3.6 LTS line** — each relevant CVE is a Dragon release.

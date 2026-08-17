@@ -1,19 +1,9 @@
-# test/dr/test_aead.dr - KATs for the AEAD ciphers (crypto.dr superset surface).
-#
-# Vectors:
-#  - AES-128-GCM: NIST GCM spec Test Case 4 (with AAD).
-#  - ChaCha20-Poly1305: RFC 8439 §2.8.2.
-# encrypt() output is ciphertext||tag, so each KAT checks the concatenation.
-# Decrypt is checked for round-trip AND for raising ValueError on a bad tag /
-# wrong AAD (it must never return unauthenticated plaintext).
-
 from unittest import TestCase, main
 from binascii import unhexlify
 from crypto import aes_gcm_encrypt, aes_gcm_decrypt
 from crypto import chacha20poly1305_encrypt, chacha20poly1305_decrypt
 
 class AeadTests(TestCase) {
-    # --- AES-128-GCM (NIST Test Case 4) ---
     def test_aes_gcm_encrypt_kat() {
         const key: bytes = unhexlify("feffe9928665731c6d6a8f9467308308")
         const iv: bytes = unhexlify("cafebabefacedbaddecaf888")
@@ -49,7 +39,6 @@ class AeadTests(TestCase) {
         self.assertTrue(raised)
     }
 
-    # --- ChaCha20-Poly1305 (RFC 8439 §2.8.2) ---
     def test_chacha20poly1305_encrypt_kat() {
         const key: bytes = unhexlify("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f")
         const nonce: bytes = unhexlify("070000004041424344454647")
@@ -78,7 +67,6 @@ class AeadTests(TestCase) {
         const ct: bytes = chacha20poly1305_encrypt(key, nonce, pt, b"")
         raised: bool = false
         try {
-            # flip the key: a different key must fail authentication
             const wrong: bytes = unhexlify("00000000000000000000000000000000000000000000000000000000000000ff")
             const back: bytes = chacha20poly1305_decrypt(wrong, nonce, ct, b"")
         } except ValueError {

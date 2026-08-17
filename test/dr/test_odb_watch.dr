@@ -1,7 +1,3 @@
-# ODB M8 regression suite: watch (spec section 17). A watch is an OQL query
-# over the commit log: it streams matching post-images committed after its
-# resume token, projects like a read, and resumes exactly or fails loudly.
-
 from unittest import TestCase, main
 from odb import ODB, Documents, Document, Watch, Change
 from odb.vfs import SimVFS
@@ -25,14 +21,13 @@ def _mem() -> ODB {
 
 
 class WatchTest(TestCase) {
-    # A watch opened now sees only commits that happen after it.
     def test_only_future_commits() -> None {
         db: ODB = _mem()
         orders: Documents = db.schema("orders", _schema())
         orders.save({id: 1, status: "paid", total: 10})
 
         w: Watch = db.watch("orders ? status == \"paid\"")
-        self.assertEqual(len(w.poll()), 0)         # nothing yet
+        self.assertEqual(len(w.poll()), 0)
 
         orders.save({id: 2, status: "paid", total: 20})
         hits: list[Change] = w.poll()
@@ -41,18 +36,16 @@ class WatchTest(TestCase) {
         self.assertEqual(t, 20)
         self.assertEqual(hits[0].kind, "add")
 
-        # drained: a second poll returns nothing new
         self.assertEqual(len(w.poll()), 0)
     }
 
-    # The filter applies to post-images: only matching writes stream.
     def test_filter_applies() -> None {
         db: ODB = _mem()
         orders: Documents = db.schema("orders", _schema())
         w: Watch = db.watch("orders ? status == \"paid\" & total >= 15")
 
-        orders.save({id: 1, status: "paid", total: 10})     # total too low
-        orders.save({id: 2, status: "draft", total: 99})    # wrong status
+        orders.save({id: 1, status: "paid", total: 10})
+        orders.save({id: 2, status: "draft", total: 99})
         r: Document = orders.save({id: 3, status: "paid", total: 50})
 
         hits: list[Change] = w.poll()
@@ -60,7 +53,6 @@ class WatchTest(TestCase) {
         self.assertEqual(hits[0].docid, r.id)
     }
 
-    # An edit whose post-image ENTERS the filtered set streams as a set.
     def test_set_streams_post_image() -> None {
         db: ODB = _mem()
         orders: Documents = db.schema("orders", _schema())
@@ -75,7 +67,6 @@ class WatchTest(TestCase) {
         self.assertEqual(st, "paid")
     }
 
-    # The projection block shapes the streamed documents.
     def test_projection() -> None {
         db: ODB = _mem()
         orders: Documents = db.schema("orders", _schema())
@@ -88,7 +79,6 @@ class WatchTest(TestCase) {
         self.assertTrue("status" not in d)
     }
 
-    # Resume: a new Watch from an old token replays exactly the missed tail.
     def test_resume_token() -> None {
         db: ODB = _mem()
         orders: Documents = db.schema("orders", _schema())
@@ -107,7 +97,6 @@ class WatchTest(TestCase) {
         self.assertEqual(t, 20)
     }
 
-    # Deletes do not stream post-images; changes() carries them with the pk.
     def test_delete_in_changes_not_watch() -> None {
         db: ODB = _mem()
         orders: Documents = db.schema("orders", _schema()).meta({primary: ["id"]})
@@ -127,7 +116,6 @@ class WatchTest(TestCase) {
         self.assertEqual(pk, 5)
     }
 
-    # Watch prepares like a read: bad queries are rejected before streaming.
     def test_prepare_errors() -> None {
         db: ODB = _mem()
         db.schema("orders", _schema())
@@ -157,8 +145,6 @@ class WatchTest(TestCase) {
         self.assertTrue(raised)
     }
 
-    # A resume token that predates the retention window fails loudly rather
-    # than silently skipping trimmed changes.
     def test_resume_before_retention_raises() -> None {
         db: ODB = _mem()
         orders: Documents = db.schema("orders", _schema())
@@ -178,7 +164,6 @@ class WatchTest(TestCase) {
         self.assertTrue(raised)
     }
 
-    # Watch on a database without history is refused up front.
     def test_watch_requires_retention() -> None {
         db: ODB = _mem()
         db.retain("none")
@@ -192,7 +177,6 @@ class WatchTest(TestCase) {
         self.assertTrue(raised)
     }
 
-    # Watch with $params binds like find.
     def test_watch_params() -> None {
         db: ODB = _mem()
         orders: Documents = db.schema("orders", _schema())
