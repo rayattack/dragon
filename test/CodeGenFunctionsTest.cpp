@@ -2,7 +2,7 @@
 
 TEST(CodeGenTest, FunctionDecl) {
     auto ir = generateIR("def add(a: int, b: int) -> int {\n  return a + b\n}");
-    EXPECT_NE(ir.find("define i64 @add(i64"), std::string::npos);
+    EXPECT_NE(ir.find("define internal i64 @add(i64"), std::string::npos);
     EXPECT_NE(ir.find("ret i64"), std::string::npos);
 }
 
@@ -11,13 +11,13 @@ TEST(CodeGenTest, FunctionCall) {
         "def double_(x: int) -> int {\n  return x * 2\n}\n"
         "print(double_(21))"
     );
-    EXPECT_NE(ir.find("define i64 @double_"), std::string::npos);
+    EXPECT_NE(ir.find("define internal i64 @double_"), std::string::npos);
     EXPECT_NE(ir.find("call i64 @double_"), std::string::npos);
 }
 
 TEST(CodeGenTest, VoidFunction) {
     auto ir = generateIR("def greet() -> None {\n  print(\"hi\")\n}");
-    EXPECT_NE(ir.find("define void @greet()"), std::string::npos);
+    EXPECT_NE(ir.find("define internal void @greet()"), std::string::npos);
 }
 
 TEST(CodeGenTest, ForwardDeclaration) {
@@ -25,8 +25,8 @@ TEST(CodeGenTest, ForwardDeclaration) {
         "def foo() -> int {\n  return bar()\n}\n"
         "def bar() -> int {\n  return 42\n}"
     );
-    EXPECT_NE(ir.find("define i64 @foo()"), std::string::npos);
-    EXPECT_NE(ir.find("define i64 @bar()"), std::string::npos);
+    EXPECT_NE(ir.find("define internal i64 @foo()"), std::string::npos);
+    EXPECT_NE(ir.find("define internal i64 @bar()"), std::string::npos);
 }
 
 TEST(CodeGenTest, LambdaSimple) {

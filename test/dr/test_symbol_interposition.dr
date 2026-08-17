@@ -1,0 +1,29 @@
+from unittest import TestCase, main
+from io import make, open
+
+def _write(path: str, body: str) -> None {
+    with make(path) as w {
+        w.write(body)
+    }
+}
+
+def _read(path: str) -> str {
+    return open(path).text()
+}
+
+def _close(x: int) -> int {
+    return x
+}
+
+class SymbolInterpositionTests(TestCase) {
+    def test_libc_named_helpers_do_not_interpose() {
+        _write("/tmp/dr_interpose.txt", "alpha")
+        self.assertEqual(_read("/tmp/dr_interpose.txt"), "alpha")
+        _write("/tmp/dr_interpose.txt", "beta")
+        self.assertEqual(_read("/tmp/dr_interpose.txt"), "beta")
+        self.assertEqual(_close(7), 7)
+    }
+}
+
+main([SymbolInterpositionTests()])
+

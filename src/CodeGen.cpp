@@ -686,6 +686,20 @@ bool CodeGen::generate(dragon::Module& entryModule,
             llvm::ConstantInt::get(llvm::Type::getInt32Ty(*impl_->context), 0));
     }
 
+    // One module = every Dragon symbol goes internal (main + the ui asset table stay external):
+    auto keepExternal = [](llvm::StringRef n) {
+        return n == "main" || n == "dragon_ui_assets" || n == "dragon_ui_asset_count" ||
+               n.starts_with("llvm.");
+    };
+    for (auto& fn : *impl_->module) {
+        if (fn.isDeclaration() || keepExternal(fn.getName())) continue;
+        fn.setLinkage(llvm::GlobalValue::InternalLinkage);
+    }
+    for (auto& gv : impl_->module->globals()) {
+        if (gv.isDeclaration() || keepExternal(gv.getName())) continue;
+        gv.setLinkage(llvm::GlobalValue::InternalLinkage);
+    }
+
     std::string verifyErr;
     llvm::raw_string_ostream verifyStream(verifyErr);
     if (llvm::verifyModule(*impl_->module, &verifyStream)) {

@@ -2,8 +2,6 @@
 #include "runtime_internal.h"
 #include <errno.h>
 #include <time.h>
-#include <cstdio>
-#include <cstdlib>
 #ifdef _WIN32
   #include <vector>
   #include <chrono>
@@ -1601,17 +1599,6 @@ static int nb_wait_fd_timeout(int fd, short events, int timeout_ms) {
 }
 #endif
 
-static int nb_debug_enabled() {
-    static int v = -1;
-    if (v < 0) {
-        const char* e = getenv("DRAGON_NB_DEBUG");
-        v = (e && *e) ? 1 : 0;
-    }
-    return v;
-}
-
-#define NB_DBG(...) do { if (nb_debug_enabled()) fprintf(stderr, __VA_ARGS__); } while (0)
-
 static inline bool dragon_sock_wouldblock() {
 #ifdef _WIN32
     int e = WSAGetLastError();
@@ -1631,24 +1618,17 @@ int64_t dragon_nb_accept(int64_t server_fd, void* addr, void* addrlen) {
         int client = accept((int)server_fd, (struct sockaddr*)addr,
                             (socklen_t*)addrlen);
 #endif
-        if (client >= 0) {
-            NB_DBG("[nb] accept fd=%lld -> client=%d\n", (long long)server_fd, client);
-            return (int64_t)client;
-        }
+        if (client >= 0) return (int64_t)client;
         if (dragon_sock_wouldblock()) {
             DragonVThread* vt = __current_vthread;
             if (vt && vt->coro) {
-                NB_DBG("[nb] accept fd=%lld park\n", (long long)server_fd);
                 dragon_io_watch_fd((int)server_fd, IO_EVENT_FD_READ, vt);
                 mco_yield(vt->coro);
-                NB_DBG("[nb] accept fd=%lld resume timed_out=%d\n",
-                       (long long)server_fd, (int)vt->io_timed_out);
                 continue;
             }
             if (nb_wait_fd((int)server_fd, POLLIN) < 0) return -1;
             continue;
         }
-        NB_DBG("[nb] accept fd=%lld err errno=%d\n", (long long)server_fd, errno);
         return -1;
     }
 }
@@ -1661,24 +1641,17 @@ int64_t dragon_nb_recv(int64_t fd, void* buf, int64_t max_len) {
 #else
         ssize_t n = recv((int)fd, buf, (size_t)max_len, 0);
 #endif
-        if (n >= 0) {
-            NB_DBG("[nb] recv fd=%lld n=%lld\n", (long long)fd, (long long)n);
-            return (int64_t)n;
-        }
+        if (n >= 0) return (int64_t)n;
         if (dragon_sock_wouldblock()) {
             DragonVThread* vt = __current_vthread;
             if (vt && vt->coro) {
-                NB_DBG("[nb] recv fd=%lld park\n", (long long)fd);
                 dragon_io_watch_fd((int)fd, IO_EVENT_FD_READ, vt);
                 mco_yield(vt->coro);
-                NB_DBG("[nb] recv fd=%lld resume timed_out=%d\n",
-                       (long long)fd, (int)vt->io_timed_out);
                 continue;
             }
             if (nb_wait_fd((int)fd, POLLIN) < 0) return -1;
             continue;
         }
-        NB_DBG("[nb] recv fd=%lld err errno=%d\n", (long long)fd, errno);
         return -1;
     }
 }
@@ -1699,7 +1672,6 @@ int64_t dragon_nb_send(int64_t fd, const char* buf, int64_t len) {
         if (dragon_sock_wouldblock()) {
             DragonVThread* vt = __current_vthread;
             if (vt && vt->coro) {
-                NB_DBG("[nb] send fd=%lld park total=%lld\n", (long long)fd, (long long)total);
                 dragon_io_watch_fd((int)fd, IO_EVENT_FD_WRITE, vt);
                 mco_yield(vt->coro);
                 continue;
@@ -1707,11 +1679,8 @@ int64_t dragon_nb_send(int64_t fd, const char* buf, int64_t len) {
             if (nb_wait_fd((int)fd, POLLOUT) < 0) return -1;
             continue;
         }
-        NB_DBG("[nb] send fd=%lld err errno=%d total=%lld\n",
-               (long long)fd, errno, (long long)total);
         return -1;
     }
-    NB_DBG("[nb] send fd=%lld done total=%lld\n", (long long)fd, (long long)total);
     return total;
 }
 
@@ -1815,10 +1784,8 @@ int64_t dragon_nb_connect(int64_t fd, void* addr, int64_t addrlen) {
 #ifndef _WIN32
         errno = err;
 #endif
-        NB_DBG("[nb] connect fd=%lld err so_error=%d\n", (long long)fd, err);
         return -1;
     }
-    NB_DBG("[nb] connect fd=%lld ok\n", (long long)fd);
     return 0;
 }
 
