@@ -210,6 +210,8 @@ void CodeGen::Impl::declareRuntimeFunctions() {
         llvm::FunctionType::get(i64Type, {i8PtrType, i64Type}, false));
     getOrDeclareRuntime("dragon_list_to_str",
         llvm::FunctionType::get(i8PtrType, {i8PtrType}, false));
+    getOrDeclareRuntime("dragon_bytes_to_str",
+        llvm::FunctionType::get(i8PtrType, {i8PtrType}, false));
     getOrDeclareRuntime("dragon_list_box_to_str",
         llvm::FunctionType::get(i8PtrType, {i8PtrType}, false));
     getOrDeclareRuntime("dragon_dict_to_str",

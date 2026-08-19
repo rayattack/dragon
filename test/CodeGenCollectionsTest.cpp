@@ -1632,3 +1632,110 @@ TEST(CodeGenE2E, DictIntAnyHoldingListPrintsTagAware) {
         "print(d)\n");
     EXPECT_EQ(out, "{1: ['x', 'y']}\n");
 }
+
+TEST(CodeGenE2E, StrOfBytesDoesNotCrash) {
+    auto out = compileAndRun(
+        "a: bytes = bytes([1, 2, 3])\n"
+        "sa: str = str(a)\n"
+        "print(sa)\n"
+    );
+    EXPECT_EQ(out, "b'\\x01\\x02\\x03'\n");
+}
+
+TEST(CodeGenE2E, StrOfBytesIsInjective) {
+    auto out = compileAndRun(
+        "seen: dict[str, int] = {}\n"
+        "n: int = 0\n"
+        "i: int = 0\n"
+        "while i < 256 {\n"
+        "  seen[str(bytes([i]))] = i\n"
+        "  n = n + 1\n"
+        "  i = i + 1\n"
+        "}\n"
+        "j: int = 0\n"
+        "while j < 64 {\n"
+        "  k: int = 0\n"
+        "  while k < 4 {\n"
+        "    seen[str(bytes([j, k]))] = j\n"
+        "    n = n + 1\n"
+        "    k = k + 1\n"
+        "  }\n"
+        "  j = j + 1\n"
+        "}\n"
+        "print(n)\n"
+        "print(len(seen))\n"
+    );
+    EXPECT_EQ(out, "512\n512\n");
+}
+
+TEST(CodeGenE2E, StrOfBytesSurvivesNulAndHighBytes) {
+    auto out = compileAndRun(
+        "b: bytes = bytes([2, 128, 0, 0, 10])\n"
+        "c: bytes = bytes([2, 128, 0, 0, 99])\n"
+        "print(str(b))\n"
+        "print(str(c))\n"
+        "print(str(b) == str(c))\n"
+    );
+    EXPECT_EQ(out, "b'\\x02\\x80\\x00\\x00\\n'\nb'\\x02\\x80\\x00\\x00c'\nFalse\n");
+}
+
+TEST(CodeGenE2E, StrOfBytesAgreesWithPrintAndInterpolation) {
+    auto out = compileAndRun(
+        "t: bytes = bytes([9, 10, 13, 65])\n"
+        "print(t)\n"
+        "print(str(t))\n"
+        "print(f\"{t}\")\n"
+        "print(str([t]))\n"
+    );
+    EXPECT_EQ(out, "b'\\t\\n\\rA'\nb'\\t\\n\\rA'\nb'\\t\\n\\rA'\n[b'\\t\\n\\rA']\n");
+}
+
+TEST(CodeGenE2E, DictLiteralClosureValueSurvivesScope) {
+    auto out = compileAndRun(
+        "cap: str = \"held\"\n"
+        "cb: Callable[[], None] = lambda () -> None { print(len(cap)) }\n"
+        "d: dict[str, Callable[[], None]] = {\"f\": cb}\n"
+        "d[\"f\"]()\n"
+        "cb()\n"
+    );
+    EXPECT_EQ(out, "4\n4\n");
+}
+
+TEST(CodeGenE2E, DictComprehensionContainerValuesKeepTheirTag) {
+    auto out = compileAndRun(
+        "src: list[str] = [\"a\", \"bb\"]\n"
+        "d: dict[str, list[int]] = {k: [len(k), 1] for k in src}\n"
+        "print(len(d))\n"
+        "print(d[\"a\"][0])\n"
+        "print(d[\"bb\"][0])\n"
+    );
+    EXPECT_EQ(out, "2\n1\n2\n");
+}
+
+TEST(CodeGenE2E, DictComprehensionSharedValueOutlivesSource) {
+    auto out = compileAndRun(
+        "src: list[str] = [\"a\", \"bb\"]\n"
+        "shared: list[int] = [7, 8]\n"
+        "d: dict[str, list[int]] = {k: shared for k in src}\n"
+        "print(len(d))\n"
+        "print(d[\"a\"][0] + d[\"bb\"][1])\n"
+        "print(shared[0])\n"
+    );
+    EXPECT_EQ(out, "2\n15\n7\n");
+}
+
+TEST(CodeGenE2E, DictDotAssignStrOutlivesSource) {
+    auto out = compileAndRun(
+        "class Point(TypedDict) {\n"
+        "  id: int\n"
+        "  name: str\n"
+        "}\n"
+        "def build(n: int) -> str { return \"n-\" + str(n) }\n"
+        "p: Point = Point({id: 0, name: \"x\"})\n"
+        "s: str = build(4)\n"
+        "p.name = s\n"
+        "print(p.name)\n"
+        "print(s)\n"
+    );
+    EXPECT_EQ(out, "n-4\nn-4\n");
+}

@@ -43,6 +43,25 @@ static void sb_put_dstr(DragonStrBuf* b, const char* s) {
     if (enc) free(enc);
 }
 
+static void dragon_repr_bytes(DragonStrBuf* out, const DragonBytes* b) {
+    sb_puts(out, "b'");
+    if (b) {
+        for (int64_t i = 0; i < b->len; i++) {
+            uint8_t c = b->data[i];
+            char tmp[8];
+            if (c == '\\')      { tmp[0] = '\\'; tmp[1] = '\\'; tmp[2] = '\0'; }
+            else if (c == '\'') { tmp[0] = '\\'; tmp[1] = '\''; tmp[2] = '\0'; }
+            else if (c == '\t') { tmp[0] = '\\'; tmp[1] = 't';  tmp[2] = '\0'; }
+            else if (c == '\n') { tmp[0] = '\\'; tmp[1] = 'n';  tmp[2] = '\0'; }
+            else if (c == '\r') { tmp[0] = '\\'; tmp[1] = 'r';  tmp[2] = '\0'; }
+            else if (c >= 32 && c < 127) { tmp[0] = (char)c; tmp[1] = '\0'; }
+            else snprintf(tmp, sizeof(tmp), "\\x%02x", c);
+            sb_puts(out, tmp);
+        }
+    }
+    sb_putc(out, '\'');
+}
+
 static void dragon_repr_list(DragonStrBuf* out, DragonList* l);
 static void dragon_repr_list_box(DragonStrBuf* out, DragonListBox* l);
 static void dragon_repr_dict(DragonStrBuf* out, DragonDict* d);
@@ -82,19 +101,7 @@ static void dragon_repr_value(DragonStrBuf* out, int64_t val, uint8_t tag) {
         case TAG_BYTES: {
             DragonObjectHeader* h = (DragonObjectHeader*)(uintptr_t)val;
             if (h && h->type_tag == DRAGON_TAG_BYTES) {
-                auto* bv = (DragonBytes*)h;
-                sb_puts(out, "b'");
-                for (int64_t bi = 0; bi < bv->len; bi++) {
-                    uint8_t c = bv->data[bi];
-                    char tmp[8];
-                    if (c >= 32 && c < 127 && c != '\\' && c != '\'') {
-                        tmp[0] = (char)c; tmp[1] = '\0';
-                    } else if (c == '\\') { snprintf(tmp, sizeof(tmp), "\\\\"); }
-                    else if (c == '\'')  { snprintf(tmp, sizeof(tmp), "\\'"); }
-                    else { snprintf(tmp, sizeof(tmp), "\\x%02x", c); }
-                    sb_puts(out, tmp);
-                }
-                sb_putc(out, '\'');
+                dragon_repr_bytes(out, (DragonBytes*)h);
             } else if (!h) {
                 sb_puts(out, "None");
             } else {
@@ -997,21 +1004,17 @@ uint8_t* dragon_bytes_data(DragonBytes* b) {
     return b ? b->data : nullptr;
 }
 
+const char* dragon_bytes_to_str(DragonBytes* b) {
+    DragonStrBuf sb; sb_init(&sb); dragon_repr_bytes(&sb, b);
+    const char* r = dragon_string_alloc(sb.buf, (int64_t)sb.len);
+    free(sb.buf);
+    return r;
+}
+
 void dragon_print_bytes_raw(DragonBytes* b) {
-    printf("b'");
-    if (b) {
-        for (int64_t i = 0; i < b->len; i++) {
-            uint8_t c = b->data[i];
-            if (c == '\\') printf("\\\\");
-            else if (c == '\'') printf("\\'");
-            else if (c == '\t') printf("\\t");
-            else if (c == '\n') printf("\\n");
-            else if (c == '\r') printf("\\r");
-            else if (c >= 32 && c < 127) printf("%c", c);
-            else printf("\\x%02x", c);
-        }
-    }
-    printf("'");
+    DragonStrBuf sb; sb_init(&sb); dragon_repr_bytes(&sb, b);
+    fwrite(sb.buf, 1, sb.len, stdout);
+    free(sb.buf);
 }
 void dragon_print_bytes(DragonBytes* b) {
     dragon_print_bytes_raw(b);

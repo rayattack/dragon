@@ -828,6 +828,8 @@ int64_t CodeGen::Impl::typeKindToElemTag(dragon::Type::Kind k) {
 
 std::string CodeGen::Impl::containerReprFn(Expr* e) {
         if (!e) return "";
+        if (e->type && e->type->kind() == Type::Kind::Bytes)
+            return "dragon_bytes_to_str";
         VarKind vk = resolveExprVarKind(e);
         if (vk == VarKind::List || dynamic_cast<ListExpr*>(e) ||
             dynamic_cast<ListCompExpr*>(e)) {
@@ -973,6 +975,27 @@ int64_t CodeGen::Impl::inferPtrValueTag(Expr* expr) {
             }
         }
         return 1;
+    }
+
+void CodeGen::Impl::increfBorrowedContainerValue(llvm::Value* ptr, Expr* expr,
+                                                 int64_t tag) {
+        if (options.gcMode != GCMode::RC) return;
+        if (tag != TAG_STR && tag != TAG_LIST && tag != TAG_DICT &&
+            tag != TAG_BYTES && tag != TAG_CALLABLE) return;
+        if (!isBorrowedHeapExpr(expr)) return;
+        if (tag == TAG_STR)
+            builder->CreateCall(runtimeFuncs["dragon_incref_str"], {ptr});
+        else if (tag == TAG_CALLABLE)
+            builder->CreateCall(runtimeFuncs["dragon_incref_callable"], {ptr});
+        else
+            builder->CreateCall(runtimeFuncs["dragon_incref"], {ptr});
+    }
+
+std::pair<llvm::Value*, int64_t> CodeGen::Impl::adoptPtrValueForTaggedDict(
+        llvm::Value* val, Expr* expr) {
+        int64_t tag = inferPtrValueTag(expr);
+        increfBorrowedContainerValue(val, expr, tag);
+        return {builder->CreatePtrToInt(val, i64Type), tag};
     }
 
 void CodeGen::Impl::emitCleanupPush(const std::string& name, llvm::Value* value,

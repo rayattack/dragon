@@ -209,20 +209,9 @@ void CodeGen::visit(AssignStmt& node) {
                 if (val->getType()->isPointerTy()) {
                     int64_t tag = impl_->inferPtrValueTag(node.value.get());
                     llvm::Value* pval = val;
-                    if (tag == 1) pval = impl_->ensureHeapString(pval, node.value.get());
-                    if (impl_->options.gcMode == GCMode::RC &&
-                        (tag == 1 || tag == 5 || tag == 6 || tag == 7 || tag == 10) &&
-                        Impl::isBorrowedHeapExpr(node.value.get())) {
-                        if (tag == 1)
-                            impl_->builder->CreateCall(
-                                impl_->runtimeFuncs["dragon_incref_str"], {pval});
-                        else if (tag == 10)
-                            impl_->builder->CreateCall(
-                                impl_->runtimeFuncs["dragon_incref_callable"], {pval});
-                        else
-                            impl_->builder->CreateCall(
-                                impl_->runtimeFuncs["dragon_incref"], {pval});
-                    }
+                    if (tag == TAG_STR)
+                        pval = impl_->ensureHeapString(pval, node.value.get());
+                    impl_->increfBorrowedContainerValue(pval, node.value.get(), tag);
                     impl_->builder->CreateCall(
                         impl_->runtimeFuncs["dragon_dict_set_str_ptr"],
                         {dict, key, pval, llvm::ConstantInt::get(impl_->i64Type, tag)});
@@ -416,7 +405,8 @@ void CodeGen::visit(AssignStmt& node) {
                             storeVal = impl_->builder->CreateBitCast(storeVal, impl_->i64Type);
                         } else if (storeVal->getType()->isPointerTy()) {
                             tag = impl_->inferPtrValueTag(node.value.get());
-                            if (tag == 1) storeVal = impl_->ensureHeapString(storeVal, node.value.get());
+                            if (tag == TAG_STR) storeVal = impl_->ensureHeapString(storeVal, node.value.get());
+                            impl_->increfBorrowedContainerValue(storeVal, node.value.get(), tag);
                             storeVal = impl_->builder->CreatePtrToInt(storeVal, impl_->i64Type);
                         }
                         llvm::Value* tagVal = llvm::ConstantInt::get(impl_->i64Type, tag);

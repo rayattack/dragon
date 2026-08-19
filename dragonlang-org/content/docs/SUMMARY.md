@@ -52,6 +52,7 @@
 - [Any](0703-any.md)
 - [Callable, TypedDict, and intc](0704-callable-and-typeddict.md)
 - [Generics](0705-generics.md)
+- [Type Contracts](0706-contracts.md)
 
 # Advanced Functions
 

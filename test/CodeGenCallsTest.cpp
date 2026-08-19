@@ -479,3 +479,138 @@ TEST(CodeGenE2E, HasattrInherited) {
     );
     EXPECT_EQ(out, "has x\nhas y\n");
 }
+
+TEST(CodeGenE2E, AnyKwargToVarKwargsFunction) {
+    auto out = compileAndRun(
+        "def kw(**keys: Any) -> int {\n"
+        "  n: int = 0\n"
+        "  for k in keys { n = n + 1 }\n"
+        "  return n\n"
+        "}\n"
+        "d: dict[str, Any] = {}\n"
+        "d[\"id\"] = 5\n"
+        "d[\"name\"] = \"ada\"\n"
+        "print(kw(a=d[\"id\"], b=d[\"name\"]))\n"
+    );
+    EXPECT_EQ(out, "2\n");
+}
+
+TEST(CodeGenE2E, AnyKwargKeepsRuntimeTypeAndValue) {
+    auto out = compileAndRun(
+        "def kw(**keys: Any) -> str {\n"
+        "  return str(keys[\"a\"]) + \"|\" + str(keys[\"b\"])\n"
+        "}\n"
+        "d: dict[str, Any] = {}\n"
+        "d[\"id\"] = 5\n"
+        "d[\"name\"] = \"ada\"\n"
+        "print(kw(a=d[\"id\"], b=d[\"name\"]))\n"
+    );
+    EXPECT_EQ(out, "5|ada\n");
+}
+
+TEST(CodeGenE2E, AnyKwargToVarKwargsMethod) {
+    auto out = compileAndRun(
+        "class Bag {\n"
+        "  data: dict[str, Any]\n"
+        "  def(d: dict[str, Any]) { self.data = d }\n"
+        "  def get(k: str) -> Any { return self.data[k] }\n"
+        "  def kw(**keys: Any) -> int {\n"
+        "    n: int = 0\n"
+        "    for k in keys { n = n + 1 }\n"
+        "    return n\n"
+        "  }\n"
+        "}\n"
+        "d: dict[str, Any] = {}\n"
+        "d[\"id\"] = 5\n"
+        "b: Bag = Bag(d)\n"
+        "print(b.kw(a=d[\"id\"], c=b.get(\"id\")))\n"
+    );
+    EXPECT_EQ(out, "2\n");
+}
+
+TEST(CodeGenE2E, AnyKwargToTypedDictConstructor) {
+    auto out = compileAndRun(
+        "class Point(TypedDict) {\n"
+        "  id: int\n"
+        "  name: str\n"
+        "}\n"
+        "d: dict[str, Any] = {}\n"
+        "d[\"id\"] = 7\n"
+        "p: Point = Point(id=d[\"id\"], name=\"a\")\n"
+        "print(p.id)\n"
+    );
+    EXPECT_EQ(out, "7\n");
+}
+
+TEST(CodeGenE2E, ContainerKwargKeepsItsOwnTag) {
+    auto out = compileAndRun(
+        "def kw(**keys: Any) -> int {\n"
+        "  n: int = 0\n"
+        "  for k in keys { n = n + 1 }\n"
+        "  return n\n"
+        "}\n"
+        "l: list[int] = [1, 2, 3]\n"
+        "d: dict[str, int] = {}\n"
+        "d[\"k\"] = 1\n"
+        "b: bytes = bytes([1, 2])\n"
+        "print(kw(a=l, b=d, c=b))\n"
+    );
+    EXPECT_EQ(out, "3\n");
+}
+
+TEST(CodeGenE2E, ContainerKwargValuesReadBackInCallee) {
+    auto out = compileAndRun(
+        "def kw(**keys: Any) -> str {\n"
+        "  xs: list[int] = keys[\"a\"]\n"
+        "  name: str = keys[\"b\"]\n"
+        "  return str(xs[0] + xs[1] + xs[2]) + \"|\" + name\n"
+        "}\n"
+        "l: list[int] = [1, 2, 3]\n"
+        "s: str = \"ada\"\n"
+        "print(kw(a=l, b=s))\n"
+        "print(l[0])\n"
+        "print(s)\n"
+    );
+    EXPECT_EQ(out, "6|ada\n1\nada\n");
+}
+
+TEST(CodeGenE2E, InstanceKwargToVarKwargsMethod) {
+    auto out = compileAndRun(
+        "class Node {\n"
+        "  v: int\n"
+        "  def(v: int) { self.v = v }\n"
+        "}\n"
+        "class Holder {\n"
+        "  def kwm(**keys: Any) -> int {\n"
+        "    n: int = 0\n"
+        "    for k in keys { n = n + 1 }\n"
+        "    return n\n"
+        "  }\n"
+        "}\n"
+        "h: Holder = Holder()\n"
+        "nd: Node = Node(3)\n"
+        "l: list[int] = [1]\n"
+        "print(h.kwm(a=nd, b=l))\n"
+    );
+    EXPECT_EQ(out, "2\n");
+}
+
+TEST(CodeGenE2E, TypedDictKwargStrOutlivesConstruction) {
+    auto out = compileAndRun(
+        "class Point(TypedDict) {\n"
+        "  id: int\n"
+        "  name: str\n"
+        "}\n"
+        "def build(n: int) -> str { return \"name-\" + str(n) }\n"
+        "i: int = 0\n"
+        "last: str = \"\"\n"
+        "while i < 3 {\n"
+        "  s: str = build(i)\n"
+        "  p: Point = Point(id=i, name=s)\n"
+        "  last = p.name\n"
+        "  i = i + 1\n"
+        "}\n"
+        "print(last)\n"
+    );
+    EXPECT_EQ(out, "name-2\n");
+}

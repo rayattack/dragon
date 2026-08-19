@@ -188,14 +188,30 @@ void CodeGen::visit(CallExpr& node) {
                             tag = Impl::typeKindToTag(fIt->second);
                         if (tag < 0) tag = 0;
                     }
+                    llvm::Value* boxTagVal = nullptr;
                     if (val->getType() == impl_->i1Type)
                         val = impl_->builder->CreateZExt(val, impl_->i64Type);
                     else if (val->getType() == impl_->f64Type)
                         val = impl_->builder->CreateBitCast(val, impl_->i64Type);
-                    else if (val->getType()->isPointerTy())
-                        val = impl_->builder->CreatePtrToInt(val, impl_->i64Type);
+                    else if (val->getType() == impl_->boxType) {
+                        boxTagVal = impl_->boxTag(val, "td.tag");
+                        llvm::Value* payload =
+                            impl_->boxPayloadI64(val, "td.payload");
+                        if (impl_->options.gcMode == GCMode::RC &&
+                            !impl_->isOwnedBoxResult(val))
+                            impl_->emitUnionIncref(payload, boxTagVal);
+                        val = payload;
+                    }
+                    else if (val->getType()->isPointerTy()) {
+                        auto adopted =
+                            impl_->adoptPtrValueForTaggedDict(val, kwVal.get());
+                        val = adopted.first;
+                        tag = adopted.second;
+                    }
                     auto* keyStr = impl_->builder->CreateGlobalString(kwName);
-                    auto* tagVal = llvm::ConstantInt::get(impl_->i64Type, tag);
+                    llvm::Value* tagVal =
+                        boxTagVal ? boxTagVal
+                                  : llvm::ConstantInt::get(impl_->i64Type, tag);
                     impl_->builder->CreateCall(
                         impl_->runtimeFuncs["dragon_dict_set_tagged"],
                         {dict, keyStr, val, tagVal});
@@ -1383,25 +1399,30 @@ void CodeGen::emitVarArgCall(llvm::Function* func, CallExpr& node) {
             node.kwArgs[ki].second->accept(*this);
             llvm::Value* val = impl_->lastValue;
             int64_t tag = TAG_INT;
+            llvm::Value* tagVal = nullptr;
             if (val->getType() == impl_->i1Type) {
                 tag = TAG_BOOL;
                 val = impl_->builder->CreateZExt(val, impl_->i64Type);
             } else if (val->getType() == impl_->f64Type) {
                 tag = TAG_FLOAT;
                 val = impl_->builder->CreateBitCast(val, impl_->i64Type);
+            } else if (val->getType() == impl_->boxType) {
+                tagVal = impl_->boxTag(val, "kw.tag");
+                llvm::Value* payload = impl_->boxPayloadI64(val, "kw.payload");
+                if (impl_->options.gcMode == GCMode::RC &&
+                    !impl_->isOwnedBoxResult(val))
+                    impl_->emitUnionIncref(payload, tagVal);
+                val = payload;
             } else if (val->getType()->isPointerTy()) {
-                tag = TAG_STR;
                 // The dict-set adopts one ref, so incref a borrowed source (f(a=s))
                 // or the dict frees the caller's string (UAF); owned temps already carry +1.
-                if (impl_->options.gcMode == GCMode::RC &&
-                    Impl::isBorrowedHeapExpr(node.kwArgs[ki].second.get())) {
-                    impl_->builder->CreateCall(
-                        impl_->runtimeFuncs["dragon_incref_str"], {val});
-                }
-                val = impl_->builder->CreatePtrToInt(val, impl_->i64Type);
+                auto adopted = impl_->adoptPtrValueForTaggedDict(
+                    val, node.kwArgs[ki].second.get());
+                val = adopted.first;
+                tag = adopted.second;
             }
             auto* keyStr = impl_->builder->CreateGlobalString(kwName);
-            auto* tagVal = llvm::ConstantInt::get(impl_->i64Type, tag);
+            if (!tagVal) tagVal = llvm::ConstantInt::get(impl_->i64Type, tag);
             impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_dict_set_tagged"],
                 {kwargsDict, keyStr, val, tagVal});

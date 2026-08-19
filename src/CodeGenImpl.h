@@ -777,6 +777,9 @@ struct CodeGen::Impl {
     bool isBareDictIterable(Expr* expr);
 
     int64_t inferPtrValueTag(Expr* expr);
+    void increfBorrowedContainerValue(llvm::Value* ptr, Expr* expr, int64_t tag);
+    std::pair<llvm::Value*, int64_t> adoptPtrValueForTaggedDict(llvm::Value* val,
+                                                               Expr* expr);
 
     llvm::Value* ensureHeapString(llvm::Value* val, Expr* expr) {
         if (options.gcMode != GCMode::RC) return val;

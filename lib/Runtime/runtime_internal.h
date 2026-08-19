@@ -591,6 +591,7 @@ int64_t dragon_list_index(DragonList* list, int64_t value);
 int64_t dragon_list_count(DragonList* list, int64_t value);
 int64_t dragon_list_contains(DragonList* list, int64_t value);
 const char* dragon_list_to_str(DragonList* list);
+const char* dragon_bytes_to_str(DragonBytes* b);
 const char* dragon_dict_to_str(DragonDict* d);
 const char* dragon_dict_int_to_str(DragonDict* d);
 const char* dragon_set_to_str(DragonSet* s);

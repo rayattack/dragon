@@ -274,17 +274,9 @@ void CodeGen::visit(DictExpr& node) {
         if (val->getType()->isPointerTy()) {
             int64_t tag = impl_->inferPtrValueTag(entry.second.get());
             llvm::Value* pval = val;
-            if (tag == 1) pval = impl_->ensureHeapString(pval, entry.second.get());
-            if (impl_->options.gcMode == GCMode::RC &&
-                (tag == 1 || tag == 5 || tag == 6 || tag == 7) &&
-                Impl::isBorrowedHeapExpr(entry.second.get())) {
-                if (tag == 1)
-                    impl_->builder->CreateCall(
-                        impl_->runtimeFuncs["dragon_incref_str"], {pval});
-                else
-                    impl_->builder->CreateCall(
-                        impl_->runtimeFuncs["dragon_incref"], {pval});
-            }
+            if (tag == TAG_STR)
+                pval = impl_->ensureHeapString(pval, entry.second.get());
+            impl_->increfBorrowedContainerValue(pval, entry.second.get(), tag);
             impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_dict_set_str_ptr"],
                 {dict, key, pval, llvm::ConstantInt::get(impl_->i64Type, tag)});

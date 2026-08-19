@@ -104,23 +104,29 @@ bool CodeGen::Impl::packVarArgMethodArgs(
             node.kwArgs[ki].second->accept(cg);
             llvm::Value* val = lastValue;
             int64_t tag = TAG_INT;
+            llvm::Value* tagVal = nullptr;
             if (val->getType() == i1Type) {
                 tag = TAG_BOOL;
                 val = builder->CreateZExt(val, i64Type);
             } else if (val->getType() == f64Type) {
                 tag = TAG_FLOAT;
                 val = builder->CreateBitCast(val, i64Type);
+            } else if (val->getType() == boxType) {
+                tagVal = boxTag(val, "kw.tag");
+                llvm::Value* payload = boxPayloadI64(val, "kw.payload");
+                if (options.gcMode == GCMode::RC && !isOwnedBoxResult(val))
+                    emitUnionIncref(payload, tagVal);
+                val = payload;
             } else if (val->getType()->isPointerTy()) {
-                tag = TAG_STR;
-                if (options.gcMode == GCMode::RC &&
-                    isBorrowedHeapExpr(node.kwArgs[ki].second.get()))
-                    builder->CreateCall(runtimeFuncs["dragon_incref_str"], {val});
-                val = builder->CreatePtrToInt(val, i64Type);
+                auto adopted = adoptPtrValueForTaggedDict(
+                    val, node.kwArgs[ki].second.get());
+                val = adopted.first;
+                tag = adopted.second;
             }
+            if (!tagVal) tagVal = llvm::ConstantInt::get(i64Type, tag);
             auto* keyStr = builder->CreateGlobalString(kwName);
             builder->CreateCall(runtimeFuncs["dragon_dict_set_tagged"],
-                {kwargsDict, keyStr, val,
-                 llvm::ConstantInt::get(i64Type, tag)});
+                {kwargsDict, keyStr, val, tagVal});
         }
         args.push_back(kwargsDict);
         argTemps.emplace_back(kwargsDict, VarKind::Dict);

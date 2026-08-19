@@ -391,6 +391,7 @@ void CodeGen::visit(DictCompExpr& node) {
         llvm::Value* valVal = impl_->lastValue;
 
         int64_t compTag = 0;
+        bool valIsPtr = false;
         if (valVal->getType() == impl_->i1Type) {
             compTag = 3;
             valVal = impl_->builder->CreateZExt(valVal, impl_->i64Type);
@@ -398,7 +399,8 @@ void CodeGen::visit(DictCompExpr& node) {
             compTag = 2;
             valVal = impl_->builder->CreateBitCast(valVal, impl_->i64Type);
         } else if (valVal->getType()->isPointerTy()) {
-            compTag = 1;
+            compTag = impl_->inferPtrValueTag(node.value.get());
+            valIsPtr = true;
             valVal = impl_->builder->CreatePtrToInt(valVal, impl_->i64Type);
         }
         llvm::Value* compTagVal = llvm::ConstantInt::get(impl_->i64Type, compTag);
@@ -422,12 +424,10 @@ void CodeGen::visit(DictCompExpr& node) {
                     impl_->builder->CreateCall(
                         impl_->runtimeFuncs["dragon_incref_str"], {k});
             }
-            if (impl_->options.gcMode == GCMode::RC && compTag == 1 &&
-                Impl::isBorrowedHeapExpr(node.value.get())) {
+            if (impl_->options.gcMode == GCMode::RC && valIsPtr) {
                 auto* vp = impl_->builder->CreateIntToPtr(
                     v, impl_->i8PtrType, "dcomp.v");
-                impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_incref_str"], {vp});
+                impl_->increfBorrowedContainerValue(vp, node.value.get(), compTag);
             }
             llvm::Value* curDict = impl_->builder->CreateLoad(impl_->i8PtrType, dictAlloca);
             impl_->builder->CreateCall(
