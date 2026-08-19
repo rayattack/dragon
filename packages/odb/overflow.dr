@@ -1,0 +1,140 @@
+from odb.pager import Pager, PT_OVERFLOW
+from odb.codec import blank, put_u32, put_u64, get_u32, get_u64, get_bytes
+from odb.errors import CorruptionError, ODBError
+
+const _OV_NEXT: int = 0
+const _OV_LEN: int = 8
+const _OV_DATA: int = 12
+
+const STUB_BYTES: int = 12
+const VLEN_OVERFLOW: int = 0xFFFF
+const _STUB_TOTAL: int = 0
+const _STUB_HEAD: int = 4
+
+const MAX_VALUE_BYTES: int = 16777216
+
+
+def capacity(pager: Pager) -> int {
+    return pager.payload_size() - _OV_DATA
+}
+
+
+def build_stub(total: int, head: int) -> bytes {
+    buf: list[int] = blank(STUB_BYTES)
+    put_u32(buf, _STUB_TOTAL, total)
+    put_u64(buf, _STUB_HEAD, head)
+    return bytes(buf)
+}
+
+
+def stub_total(stub: bytes) -> int {
+    return get_u32(stub, _STUB_TOTAL)
+}
+
+
+def stub_head(stub: bytes) -> int {
+    return get_u64(stub, _STUB_HEAD)
+}
+
+
+def write_chain(pager: Pager, data: bytes) -> int {
+    const n: int = len(data)
+    if n > MAX_VALUE_BYTES {
+        raise ODBError("value of " + str(n) + " bytes exceeds the " + str(MAX_VALUE_BYTES) + " byte document limit")
+    }
+    const cap: int = capacity(pager)
+    n_pages: int = (n + cap - 1) // cap
+    if n_pages == 0 {
+        n_pages = 1
+    }
+    ids: list[int] = []
+    i: int = 0
+    while i < n_pages {
+        ids.append(pager.alloc())
+        i = i + 1
+    }
+    p: int = 0
+    off: int = 0
+    while p < n_pages {
+        buf: list[int] = blank(_OV_DATA)
+        if p + 1 < n_pages {
+            put_u64(buf, _OV_NEXT, ids[p + 1])
+        }
+        take: int = n - off
+        if take > cap {
+            take = cap
+        }
+        put_u32(buf, _OV_LEN, take)
+        pager.stage(ids[p], PT_OVERFLOW, bytes(buf) + get_bytes(data, off, take))
+        off = off + take
+        p = p + 1
+    }
+    return ids[0]
+}
+
+
+def _merge(parts: list[bytes]) -> bytes {
+    if len(parts) == 0 {
+        return bytes([])
+    }
+    cur: list[bytes] = parts
+    while len(cur) > 1 {
+        nxt: list[bytes] = []
+        i: int = 0
+        while i + 1 < len(cur) {
+            nxt.append(cur[i] + cur[i + 1])
+            i = i + 2
+        }
+        if i < len(cur) {
+            nxt.append(cur[i])
+        }
+        cur = nxt
+    }
+    return cur[0]
+}
+
+
+def read_chain(pager: Pager, head: int, total: int) -> bytes {
+    parts: list[bytes] = []
+    seen: int = 0
+    pg: int = head
+    while pg != 0 {
+        page: bytes = pager.read_page(pg)
+        if pager.page_type(page) != PT_OVERFLOW {
+            raise CorruptionError("page " + str(pg) + " in an overflow chain is not an overflow page")
+        }
+        n: int = get_u32(page, _OV_LEN)
+        if n > capacity(pager) {
+            raise CorruptionError("overflow page " + str(pg) + " declares " + str(n) + " bytes, past its capacity")
+        }
+        parts.append(get_bytes(page, _OV_DATA, n))
+        seen = seen + n
+        pg = get_u64(page, _OV_NEXT)
+    }
+    if seen != total {
+        raise CorruptionError("overflow chain at page " + str(head) + " holds " + str(seen) + " bytes, expected " + str(total))
+    }
+    return _merge(parts)
+}
+
+
+def chain_pages(pager: Pager, head: int) -> list[int] {
+    out: list[int] = []
+    pg: int = head
+    while pg != 0 {
+        page: bytes = pager.read_page(pg)
+        if pager.page_type(page) != PT_OVERFLOW {
+            raise CorruptionError("page " + str(pg) + " in an overflow chain is not an overflow page")
+        }
+        out.append(pg)
+        pg = get_u64(page, _OV_NEXT)
+    }
+    return out
+}
+
+
+def free_chain(pager: Pager, head: int) -> None {
+    for pg in chain_pages(pager, head) {
+        pager.free(pg)
+    }
+}

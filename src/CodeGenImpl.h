@@ -684,6 +684,8 @@ struct CodeGen::Impl {
 
     bool isOwnedBoxResult(llvm::Value* v);
 
+    bool isOwnedResultByKind(llvm::Value* v, VarKind kind);
+
     static int64_t typeKindToTag(Type::Kind k);
 
     static int64_t varKindToTag(VarKind vk);

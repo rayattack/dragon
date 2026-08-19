@@ -7,6 +7,7 @@ const _IXL_ENT: int = 8
 const _IXB_CHILD0: int = 8
 const _IXB_DIR: int = 16
 const _IXB_ENT: int = 12
+const MAX_KEY_BYTES: int = 1024
 
 class IxLeaf {
     keys: list[bytes]
@@ -268,8 +269,11 @@ class IndexTree {
     }
 
     def insert(k: bytes, v: bytes) -> None {
+        if len(k) > MAX_KEY_BYTES {
+            raise ODBError("index key of " + str(len(k)) + " bytes exceeds the " + str(MAX_KEY_BYTES) + " byte limit; set a maxLength on the indexed field so its keys stay bounded")
+        }
         if _IXL_DIR + _IXL_ENT + len(k) + len(v) > self.pager.payload_size() {
-            raise ODBError("index entry too large for inline storage (overflow pages pending)")
+            raise ODBError("index entry of " + str(len(k) + len(v)) + " bytes does not fit a page")
         }
 
         if self.root == 0 {

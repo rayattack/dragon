@@ -1,4 +1,7 @@
 from odb.schema import CompiledSchema, FieldSpec, T_BOOL, T_INT, T_NUM, T_STR
+from odb.schema import T_NULL, T_ARRAY, T_OBJECT
+from odb.schema import T_BYTES, T_DATETIME, T_DATE, T_DECIMAL
+from odb.schema import order_key, is_formatted, cmp_keys, type_name
 from odb.errors import PrepareError
 from template import Template
 
@@ -352,6 +355,8 @@ const N_GLOB: int = 12
 const N_COALESCE: int = 13
 const N_INTRINSIC: int = 14
 const N_PARAM: int = 15
+const N_NULL: int = 16
+const N_UNDEFINED: int = 17
 
 class Node {
     kind: int
@@ -378,6 +383,23 @@ class Node {
 def _n_field(name: str) -> Node {
     nd: Node = Node(N_FIELD)
     nd.name = name
+    return nd
+}
+
+def _desugar_undefined(left: Node, right: Node, op: str) -> Node {
+    if op != "==" and op != "!=" {
+        raise PrepareError("OQL: undefined supports only == and !=")
+    }
+    field: Node = left
+    if left.kind == N_UNDEFINED {
+        field = right
+    }
+    if field.kind != N_FIELD {
+        raise PrepareError("OQL: undefined compares against a field, as `field == undefined`")
+    }
+    nd: Node = Node(N_INTRINSIC)
+    nd.name = "missing" if op == "==" else "exists"
+    nd.children = [field]
     return nd
 }
 
@@ -752,6 +774,12 @@ class Parser {
         if k == TK_EQ or k == TK_NE or k == TK_LT or k == TK_LE or k == TK_GT or k == TK_GE {
             optok: Token = self._next()
             right: Node = self._parse_coalesce()
+            if left.kind == N_UNDEFINED or right.kind == N_UNDEFINED {
+                return _desugar_undefined(left, right, optok.text)
+            }
+            if left.kind == N_NULL and right.kind == N_NULL {
+                raise PrepareError("OQL: comparing null with null is always the same answer; test a field instead")
+            }
             nd: Node = Node(N_CMP)
             nd.op = optok.text
             nd.children = [left, right]
@@ -845,6 +873,12 @@ class Parser {
                 nd2: Node = Node(N_BOOL)
                 nd2.bval = False
                 return nd2
+            }
+            if t.text == "null" {
+                return Node(N_NULL)
+            }
+            if t.text == "undefined" {
+                return Node(N_UNDEFINED)
             }
             return _n_field(t.text)
         }
@@ -1162,6 +1196,9 @@ const VT_INT: int = 1
 const VT_NUM: int = 2
 const VT_STR: int = 3
 const VT_BOOL: int = 4
+const VT_NULL: int = 5
+const VT_JSON: int = 6
+const VT_ORD: int = 7
 
 class Val {
     tag: int
@@ -1169,6 +1206,8 @@ class Val {
     fval: float
     sval: str
     bval: bool
+    aval: Any
+    oval: bytes
 
     def(tag: int) {
         self.tag = tag
@@ -1176,11 +1215,61 @@ class Val {
         self.fval = 0.0
         self.sval = ""
         self.bval = False
+        self.aval = None
+        self.oval = bytes([])
     }
+}
+
+
+def _v_ord(tag: int, s: str) -> Val {
+    v: Val = Val(VT_ORD)
+    v.ival = tag
+    v.sval = s
+    v.oval = order_key(tag, s)
+    return v
+}
+
+
+def _ord_key(v: Val, other: Val) -> bytes {
+    if v.tag == VT_ORD {
+        return v.oval
+    }
+    const tag: int = other.ival
+    if v.tag == VT_STR {
+        const s: Any = v.sval
+        return order_key(tag, s)
+    }
+    if v.tag == VT_INT {
+        const i: Any = v.ival
+        return order_key(tag, i)
+    }
+    if v.tag == VT_NUM {
+        const f: Any = v.fval
+        return order_key(tag, f)
+    }
+    raise PrepareError("OQL: that value cannot be compared against a " + type_name(tag) + " field")
 }
 
 def _v_absent() -> Val {
     return Val(VT_ABSENT)
+}
+
+def _v_null() -> Val {
+    return Val(VT_NULL)
+}
+
+def _v_json(x: Any) -> Val {
+    v: Val = Val(VT_JSON)
+    v.aval = x
+    return v
+}
+
+def _v_missing(v: Val) -> bool {
+    return v.tag == VT_ABSENT or v.tag == VT_NULL
+}
+
+def _v_uncomparable(v: Val) -> bool {
+    return v.tag == VT_ABSENT or v.tag == VT_NULL or v.tag == VT_JSON
 }
 
 def _v_int(i: int) -> Val {
@@ -1219,6 +1308,12 @@ def _v_as_num(v: Val) -> float {
 }
 
 def _field_val(tag: int, x: Any) -> Val {
+    if x is None {
+        return _v_null()
+    }
+    if isinstance(x, list) or isinstance(x, dict) {
+        return _v_json(x)
+    }
     if tag == T_BOOL {
         const b: bool = x
         return _v_bool(b)
@@ -1236,10 +1331,40 @@ def _field_val(tag: int, x: Any) -> Val {
         return _v_num(f)
     }
     const s: str = x
+    if is_formatted(tag) {
+        return _v_ord(tag, s)
+    }
     return _v_str(s)
 }
 
+def _tc_sort_keys(cs: CompiledSchema, q: OqlQuery) -> None {
+    for stg in q.stages {
+        if stg.kind != ST_SORT {
+            continue
+        }
+        for k in stg.sort_keys {
+            if k.field not in cs.by_name {
+                continue
+            }
+            const t: int = cs.by_name[k.field].tag
+            if t == T_ARRAY or t == T_OBJECT {
+                raise PrepareError("OQL: `sort " + k.field + "` cannot order by " + type_name(t) + "; sort by a scalar path instead")
+            }
+        }
+    }
+}
+
+
+def sort_tag(cs: CompiledSchema, field: str) -> int {
+    if field in cs.by_name {
+        return cs.by_name[field].tag
+    }
+    return -1
+}
+
+
 def typecheck(cs: CompiledSchema, q: OqlQuery) -> None {
+    _tc_sort_keys(cs, q)
     if q.has_filter {
         _tc_pred(cs, q.filter)
     }
@@ -1326,6 +1451,9 @@ def _tc_grouped_field(cs: CompiledSchema, gk: dict[str, bool], n: Node) -> int {
     if n.kind == N_BOOL {
         return T_BOOL
     }
+    if n.kind == N_NULL {
+        return T_NULL
+    }
     if n.kind == N_FIELD {
         if n.name not in gk {
             raise PrepareError("OQL: field '" + n.name + "' must be grouped (in `by`) or aggregated")
@@ -1335,6 +1463,9 @@ def _tc_grouped_field(cs: CompiledSchema, gk: dict[str, bool], n: Node) -> int {
     if n.kind == N_ARITH {
         lt: int = _tc_grouped_field(cs, gk, n.children[0])
         rt: int = _tc_grouped_field(cs, gk, n.children[1])
+        if lt == T_DECIMAL or rt == T_DECIMAL {
+            raise PrepareError("OQL: arithmetic on a decimal field needs the Dragon decimal stdlib module, which has not landed; odb refuses rather than coercing money to f64 (spec section 4a)")
+        }
         if not _is_num_tag(lt) or not _is_num_tag(rt) {
             raise PrepareError("OQL: arithmetic needs numeric operands")
         }
@@ -1371,17 +1502,17 @@ def _tc_agg(cs: CompiledSchema, n: Node) -> int {
         raise PrepareError("OQL: " + nm + "! takes one argument")
     }
     at: int = _tc_value(cs, n.children[0])
-    if nm == "sum" {
+    if nm == "sum" or nm == "avg" {
+        if at == T_DECIMAL {
+            raise PrepareError("OQL: " + nm + "! over a decimal field needs the Dragon decimal stdlib module, which has not landed; odb refuses rather than coercing money to f64 (spec section 4a)")
+        }
         if not _is_num_tag(at) {
-            raise PrepareError("OQL: sum! needs a numeric field")
+            raise PrepareError("OQL: " + nm + "! needs a numeric field")
+        }
+        if nm == "avg" {
+            return T_NUM
         }
         return at
-    }
-    if nm == "avg" {
-        if not _is_num_tag(at) {
-            raise PrepareError("OQL: avg! needs a numeric field")
-        }
-        return T_NUM
     }
     if nm == "min" or nm == "max" {
         return at
@@ -1405,6 +1536,12 @@ def _tc_pred(cs: CompiledSchema, n: Node) -> None {
     if n.kind == N_BOOL {
         return
     }
+    if n.kind == N_NULL {
+        return
+    }
+    if n.kind == N_UNDEFINED {
+        raise PrepareError("OQL: undefined is only valid as `field == undefined` or `field != undefined`")
+    }
     if n.kind == N_FIELD {
         fs: FieldSpec = _tc_field(cs, n.name)
         if fs.tag != T_BOOL {
@@ -1419,6 +1556,10 @@ def _tc_pred(cs: CompiledSchema, n: Node) -> None {
     if n.kind == N_CMP {
         lt: int = _tc_value(cs, n.children[0])
         rt: int = _tc_value(cs, n.children[1])
+        if not (lt == T_NULL or rt == T_NULL) {
+            _reject_composite_compare(cs, n.children[0], "a comparison")
+            _reject_composite_compare(cs, n.children[1], "a comparison")
+        }
         if not _kinds_comparable(lt, rt) {
             raise PrepareError("OQL: type mismatch in comparison")
         }
@@ -1427,13 +1568,14 @@ def _tc_pred(cs: CompiledSchema, n: Node) -> None {
     if n.kind == N_GLOB {
         lt2: int = _tc_value(cs, n.children[0])
         rt2: int = _tc_value(cs, n.children[1])
-        if lt2 != T_STR or rt2 != T_STR {
+        if not (lt2 == T_STR or is_formatted(lt2)) or rt2 != T_STR {
             raise PrepareError("OQL: glob '~' needs string operands")
         }
         return
     }
     if n.kind == N_IN {
         base: int = _tc_value(cs, n.children[0])
+        _reject_composite_compare(cs, n.children[0], "an `in` list")
         j: int = 1
         while j < len(n.children) {
             it: int = _tc_value(cs, n.children[j])
@@ -1460,12 +1602,21 @@ def _tc_value(cs: CompiledSchema, n: Node) -> int {
     if n.kind == N_BOOL {
         return T_BOOL
     }
+    if n.kind == N_NULL {
+        return T_NULL
+    }
+    if n.kind == N_UNDEFINED {
+        raise PrepareError("OQL: undefined is only valid as `field == undefined` or `field != undefined`")
+    }
     if n.kind == N_FIELD {
         return _tc_field(cs, n.name).tag
     }
     if n.kind == N_ARITH {
         lt: int = _tc_value(cs, n.children[0])
         rt: int = _tc_value(cs, n.children[1])
+        if lt == T_DECIMAL or rt == T_DECIMAL {
+            raise PrepareError("OQL: arithmetic on a decimal field needs the Dragon decimal stdlib module, which has not landed; odb refuses rather than coercing money to f64 (spec section 4a)")
+        }
         if not _is_num_tag(lt) or not _is_num_tag(rt) {
             raise PrepareError("OQL: arithmetic needs numeric operands")
         }
@@ -1539,8 +1690,40 @@ def _is_num_tag(t: int) -> bool {
     return t == T_INT or t == T_NUM
 }
 
+def _reject_composite_compare(cs: CompiledSchema, n: Node, what: str) -> None {
+    if n.kind != N_FIELD {
+        return
+    }
+    if n.name not in cs.by_name {
+        return
+    }
+    const t: int = cs.by_name[n.name].tag
+    if t == T_ARRAY {
+        raise PrepareError("OQL: field '" + n.name + "' is an array, so it cannot be used in " + what + "; test an element with `in`, or use exists/missing")
+    }
+    if t == T_OBJECT {
+        raise PrepareError("OQL: field '" + n.name + "' is an object, so it cannot be used in " + what + "; compare a scalar path inside it instead")
+    }
+}
+
+
 def _kinds_comparable(a: int, b: int) -> bool {
+    if a == T_NULL or b == T_NULL {
+        return True
+    }
     if _is_num_tag(a) and _is_num_tag(b) {
+        return True
+    }
+    if is_formatted(a) and b == T_STR {
+        return True
+    }
+    if is_formatted(b) and a == T_STR {
+        return True
+    }
+    if a == T_DECIMAL and _is_num_tag(b) {
+        return True
+    }
+    if b == T_DECIMAL and _is_num_tag(a) {
         return True
     }
     return a == b
@@ -1559,6 +1742,9 @@ def eval_value(cs: CompiledSchema, n: Node, doc: dict[str, Any]) -> Val {
     if n.kind == N_BOOL {
         return _v_bool(n.bval)
     }
+    if n.kind == N_NULL {
+        return _v_null()
+    }
     if n.kind == N_FIELD {
         if n.name not in doc {
             return _v_absent()
@@ -1570,7 +1756,7 @@ def eval_value(cs: CompiledSchema, n: Node, doc: dict[str, Any]) -> Val {
     }
     if n.kind == N_COALESCE {
         l: Val = eval_value(cs, n.children[0], doc)
-        if l.tag == VT_ABSENT {
+        if _v_missing(l) {
             return eval_value(cs, n.children[1], doc)
         }
         return l
@@ -1712,8 +1898,20 @@ def _eval_pred(cs: CompiledSchema, n: Node, doc: dict[str, Any]) -> bool {
 def _eval_cmp(cs: CompiledSchema, n: Node, doc: dict[str, Any]) -> bool {
     l: Val = eval_value(cs, n.children[0], doc)
     r: Val = eval_value(cs, n.children[1], doc)
-    if l.tag == VT_ABSENT or r.tag == VT_ABSENT {
+    if l.tag == VT_NULL or r.tag == VT_NULL {
+        if n.op == "==" {
+            return l.tag == VT_NULL and r.tag == VT_NULL
+        }
+        if n.op == "!=" {
+            return not (l.tag == VT_NULL and r.tag == VT_NULL)
+        }
         return False
+    }
+    if _v_uncomparable(l) or _v_uncomparable(r) {
+        return False
+    }
+    if l.tag == VT_ORD or r.tag == VT_ORD {
+        return cmp_keys(_ord_key(l, r), n.op, _ord_key(r, l))
     }
     if l.tag == VT_STR and r.tag == VT_STR {
         return _cmp_order_str(l.sval, n.op, r.sval)
@@ -1733,6 +1931,12 @@ def _eval_cmp(cs: CompiledSchema, n: Node, doc: dict[str, Any]) -> bool {
 def _eval_glob(cs: CompiledSchema, n: Node, doc: dict[str, Any]) -> bool {
     l: Val = eval_value(cs, n.children[0], doc)
     r: Val = eval_value(cs, n.children[1], doc)
+    if l.tag == VT_ORD {
+        l = _v_str(l.sval)
+    }
+    if r.tag == VT_ORD {
+        r = _v_str(r.sval)
+    }
     if l.tag != VT_STR or r.tag != VT_STR {
         return False
     }
@@ -1873,8 +2077,15 @@ def _store_val(out: dict[str, Any], alias: str, v: Val) -> None {
         out[alias] = v.fval
     } else if v.tag == VT_STR {
         out[alias] = v.sval
+    } else if v.tag == VT_ORD {
+        out[alias] = v.sval
     } else if v.tag == VT_BOOL {
         out[alias] = v.bval
+    } else if v.tag == VT_NULL {
+        nv: Any = None
+        out[alias] = nv
+    } else if v.tag == VT_JSON {
+        out[alias] = v.aval
     }
 }
 
@@ -1889,6 +2100,8 @@ def _key_str(vals: list[Val]) -> str {
             s = s + "n" + str(v.fval) + "|"
         } else if v.tag == VT_STR {
             s = s + "s" + v.sval + "|"
+        } else if v.tag == VT_ORD {
+            s = s + "o" + str(v.ival) + ":" + v.sval + "|"
         } else {
             s = s + "b" + str(v.bval) + "|"
         }
@@ -1953,6 +2166,9 @@ def eval_agg(cs: CompiledSchema, expr: Node, docs: list[dict[str, Any]], rep: di
     }
     if expr.kind == N_BOOL {
         return _v_bool(expr.bval)
+    }
+    if expr.kind == N_NULL {
+        return _v_null()
     }
     if expr.kind == N_FIELD {
         return eval_value(cs, expr, rep)
@@ -2051,6 +2267,9 @@ def _compute_agg(cs: CompiledSchema, n: Node, docs: list[dict[str, Any]]) -> Val
 }
 
 def _val_lt(a: Val, b: Val) -> bool {
+    if a.tag == VT_ORD or b.tag == VT_ORD {
+        return cmp_keys(_ord_key(a, b), "<", _ord_key(b, a))
+    }
     if a.tag == VT_STR and b.tag == VT_STR {
         return a.sval < b.sval
     }

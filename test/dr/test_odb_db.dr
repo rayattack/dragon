@@ -103,21 +103,50 @@ class CrudTest(TestCase) {
 
 
 class SchemaKeywordTest(TestCase) {
-    def test_default_keyword_is_rejected_loudly() -> None {
+    def test_required_default_is_materialised_at_write() -> None {
+        db: ODB = _mem()
+        things: Documents = db.schema("things", { "type": "object",
+                                                 "properties": { "a": {"type": "integer", "default": 7},
+                                                                 "b": {"type": "string"} },
+                                                 "required": ["a", "b"] })
+        const d: Document = things.save({b: "written"})
+        const a: int = d["a"]
+        self.assertEqual(a, 7)
+    }
+
+    def test_optional_default_is_virtual_at_read() -> None {
+        db: ODB = _mem()
+        things: Documents = db.schema("opts", { "type": "object",
+                                               "properties": { "id": {"type": "integer"},
+                                                               "tier": {"type": "string", "default": "free"} },
+                                               "required": ["id"] })
+        const d: Document = things.save({id: 1})
+        const tier: str = d["tier"]
+        self.assertEqual(tier, "free")
+    }
+
+    def test_a_written_value_beats_the_default() -> None {
+        db: ODB = _mem()
+        things: Documents = db.schema("beats", { "type": "object",
+                                                "properties": { "a": {"type": "integer", "default": 7} },
+                                                "required": ["a"] })
+        const d: Document = things.save({a: 3})
+        const a: int = d["a"]
+        self.assertEqual(a, 3)
+    }
+
+    def test_a_default_that_violates_the_field_is_refused() -> None {
         db: ODB = _mem()
         raised: bool = False
         try {
-            db.schema("things", { "type": "object",
-                                  "properties": { "a": {"type": "integer", "default": 7} },
-                                  "required": ["a"] })
+            db.schema("bad", { "type": "object",
+                               "properties": { "a": {"type": "integer", "default": "seven"} },
+                               "required": ["a"] })
         } except SchemaError as e {
             raised = True
             self.assertTrue("default" in str(e))
         }
         self.assertTrue(raised)
-        db.schema("things", { "type": "object",
-                              "properties": { "a": {"type": "integer"} },
-                              "required": ["a"] })
     }
 }
 

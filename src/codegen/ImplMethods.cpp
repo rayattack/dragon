@@ -675,6 +675,13 @@ bool CodeGen::Impl::isOwnedBoxResult(llvm::Value* v) {
         return kBorrowedBoxReturners.count(fn->getName().str()) == 0;
     }
 
+bool CodeGen::Impl::isOwnedResultByKind(llvm::Value* v, VarKind kind) {
+        if (!v) return false;
+        if (kind == VarKind::Str) return isOwnedStrResult(v);
+        if (kind == VarKind::Union) return isOwnedBoxResult(v);
+        return isOwnedPtrResult(v);
+    }
+
 int64_t CodeGen::Impl::typeKindToTag(Type::Kind k) {
         switch (k) {
             case Type::Kind::Int:      return TAG_INT;

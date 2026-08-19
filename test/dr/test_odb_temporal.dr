@@ -1,0 +1,167 @@
+from unittest import TestCase, main
+from odb.temporal import days_from_civil, civil_from_days, parse_date, format_date
+from odb.temporal import parse_datetime, format_datetime, is_leap_year, days_in_month
+from odb.errors import SchemaError
+
+
+def _bad_date(s: str) -> bool {
+    try {
+        parse_date(s)
+    } except SchemaError {
+        return True
+    }
+    return False
+}
+
+
+def _bad_datetime(s: str) -> bool {
+    try {
+        parse_datetime(s)
+    } except SchemaError {
+        return True
+    }
+    return False
+}
+
+
+
+class CivilDaysTest(TestCase) {
+    def test_epoch_is_day_zero() -> None {
+        self.assertEqual(days_from_civil(1970, 1, 1), 0)
+    }
+
+    def test_known_days() -> None {
+        self.assertEqual(days_from_civil(1970, 1, 2), 1)
+        self.assertEqual(days_from_civil(1969, 12, 31), -1)
+        self.assertEqual(days_from_civil(2000, 3, 1), 11017)
+        self.assertEqual(days_from_civil(2026, 8, 19), 20684)
+    }
+
+    def test_round_trip_across_a_wide_range() -> None {
+        d: int = -719162
+        while d < 2932897 {
+            const ymd: tuple[int, int, int] = civil_from_days(d)
+            self.assertEqual(days_from_civil(ymd[0], ymd[1], ymd[2]), d)
+            d = d + 7919
+        }
+    }
+
+    def test_round_trip_every_day_of_a_leap_year() -> None {
+        m: int = 1
+        while m <= 12 {
+            d: int = 1
+            while d <= days_in_month(2024, m) {
+                const days: int = days_from_civil(2024, m, d)
+                const back: tuple[int, int, int] = civil_from_days(days)
+                self.assertEqual(back[0], 2024)
+                self.assertEqual(back[1], m)
+                self.assertEqual(back[2], d)
+                d = d + 1
+            }
+            m = m + 1
+        }
+    }
+
+    def test_leap_year_rules() -> None {
+        self.assertTrue(is_leap_year(2024))
+        self.assertTrue(is_leap_year(2000))
+        self.assertFalse(is_leap_year(1900))
+        self.assertFalse(is_leap_year(2023))
+        self.assertEqual(days_in_month(2024, 2), 29)
+        self.assertEqual(days_in_month(1900, 2), 28)
+    }
+}
+
+
+class DateFormatTest(TestCase) {
+    def test_parse_and_format_round_trip() -> None {
+        self.assertEqual(format_date(parse_date("2026-08-19")), "2026-08-19")
+        self.assertEqual(format_date(parse_date("1970-01-01")), "1970-01-01")
+        self.assertEqual(format_date(parse_date("1969-12-31")), "1969-12-31")
+        self.assertEqual(format_date(parse_date("2024-02-29")), "2024-02-29")
+        self.assertEqual(format_date(parse_date("0001-01-01")), "0001-01-01")
+        self.assertEqual(format_date(parse_date("9999-12-31")), "9999-12-31")
+    }
+
+    def test_epoch_days() -> None {
+        self.assertEqual(parse_date("1970-01-01"), 0)
+        self.assertEqual(parse_date("1970-01-02"), 1)
+    }
+
+    def test_rejects_non_dates() -> None {
+        self.assertTrue(_bad_date("not-a-date"))
+        self.assertTrue(_bad_date("2026-13-01"))
+        self.assertTrue(_bad_date("2026-02-30"))
+        self.assertTrue(_bad_date("2023-02-29"))
+        self.assertTrue(_bad_date("2026-8-19"))
+        self.assertTrue(_bad_date("2026-08-19T00:00:00Z"))
+        self.assertTrue(_bad_date(""))
+        self.assertTrue(_bad_date("0000-01-01"))
+    }
+}
+
+
+class DateTimeFormatTest(TestCase) {
+    def test_utc_round_trip() -> None {
+        self.assertEqual(format_datetime(parse_datetime("2026-08-19T12:34:56Z")), "2026-08-19T12:34:56Z")
+        self.assertEqual(format_datetime(parse_datetime("1970-01-01T00:00:00Z")), "1970-01-01T00:00:00Z")
+    }
+
+    def test_epoch_is_zero_micros() -> None {
+        self.assertEqual(parse_datetime("1970-01-01T00:00:00Z"), 0)
+        self.assertEqual(parse_datetime("1970-01-01T00:00:01Z"), 1000000)
+    }
+
+    def test_fractional_seconds() -> None {
+        self.assertEqual(parse_datetime("1970-01-01T00:00:00.5Z"), 500000)
+        self.assertEqual(parse_datetime("1970-01-01T00:00:00.000001Z"), 1)
+        self.assertEqual(format_datetime(parse_datetime("2026-08-19T12:34:56.123456Z")), "2026-08-19T12:34:56.123456Z")
+    }
+
+    def test_sub_microsecond_digits_truncate() -> None {
+        self.assertEqual(parse_datetime("1970-01-01T00:00:00.000000999Z"), 0)
+        self.assertEqual(parse_datetime("1970-01-01T00:00:00.1234567Z"), 123456)
+    }
+
+    def test_offsets_normalise_to_utc() -> None {
+        const a: int = parse_datetime("2026-08-19T12:00:00+01:00")
+        const b: int = parse_datetime("2026-08-19T11:00:00Z")
+        self.assertEqual(a, b)
+        const c: int = parse_datetime("2026-08-19T12:00:00-05:30")
+        const d: int = parse_datetime("2026-08-19T17:30:00Z")
+        self.assertEqual(c, d)
+        self.assertEqual(format_datetime(a), "2026-08-19T11:00:00Z")
+    }
+
+    def test_pre_epoch_round_trips() -> None {
+        const t: int = parse_datetime("1969-12-31T23:59:59Z")
+        self.assertEqual(t, -1000000)
+        self.assertEqual(format_datetime(t), "1969-12-31T23:59:59Z")
+        const u: int = parse_datetime("1901-05-06T07:08:09.000123Z")
+        self.assertEqual(format_datetime(u), "1901-05-06T07:08:09.000123Z")
+    }
+
+    def test_lowercase_separator_accepted() -> None {
+        self.assertEqual(parse_datetime("1970-01-01t00:00:00z"), 0)
+    }
+
+    def test_rejects_bad_datetimes() -> None {
+        self.assertTrue(_bad_datetime("not-a-date"))
+        self.assertTrue(_bad_datetime("2026-08-19T12:34:56"))
+        self.assertTrue(_bad_datetime("2026-08-19"))
+        self.assertTrue(_bad_datetime("2026-08-19T25:00:00Z"))
+        self.assertTrue(_bad_datetime("2026-08-19T12:60:00Z"))
+        self.assertTrue(_bad_datetime("2026-08-19T12:00:60Z"))
+        self.assertTrue(_bad_datetime("2026-08-19T12:00:00.Z"))
+        self.assertTrue(_bad_datetime("2026-08-19T12:00:00Zx"))
+        self.assertTrue(_bad_datetime("2026-08-19T12:00:00+1:00"))
+        self.assertTrue(_bad_datetime("2026-08-19T12:00:00+01"))
+    }
+
+    def test_leap_second_is_refused_loudly() -> None {
+        self.assertTrue(_bad_datetime("2016-12-31T23:59:60Z"))
+    }
+}
+
+
+main([CivilDaysTest(), DateFormatTest(), DateTimeFormatTest()])

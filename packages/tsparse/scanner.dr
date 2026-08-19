@@ -1,0 +1,990 @@
+const TK_UNKNOWN: int = 0
+const TK_EOF: int = 1
+const TK_NUMERIC_LITERAL: int = 2
+const TK_BIGINT_LITERAL: int = 3
+const TK_STRING_LITERAL: int = 4
+const TK_REGEX_LITERAL: int = 5
+const TK_NO_SUB_TEMPLATE: int = 6
+const TK_TEMPLATE_HEAD: int = 7
+const TK_TEMPLATE_MIDDLE: int = 8
+const TK_TEMPLATE_TAIL: int = 9
+const TK_OPEN_BRACE: int = 10
+const TK_CLOSE_BRACE: int = 11
+const TK_OPEN_PAREN: int = 12
+const TK_CLOSE_PAREN: int = 13
+const TK_OPEN_BRACKET: int = 14
+const TK_CLOSE_BRACKET: int = 15
+const TK_DOT: int = 16
+const TK_DOT_DOT_DOT: int = 17
+const TK_SEMICOLON: int = 18
+const TK_COMMA: int = 19
+const TK_QUESTION_DOT: int = 20
+const TK_LT: int = 21
+const TK_LT_SLASH: int = 22
+const TK_GT: int = 23
+const TK_LT_EQ: int = 24
+const TK_GT_EQ: int = 25
+const TK_EQ_EQ: int = 26
+const TK_EXCL_EQ: int = 27
+const TK_EQ_EQ_EQ: int = 28
+const TK_EXCL_EQ_EQ: int = 29
+const TK_ARROW: int = 30
+const TK_PLUS: int = 31
+const TK_MINUS: int = 32
+const TK_ASTERISK: int = 33
+const TK_ASTERISK_ASTERISK: int = 34
+const TK_SLASH: int = 35
+const TK_PERCENT: int = 36
+const TK_PLUS_PLUS: int = 37
+const TK_MINUS_MINUS: int = 38
+const TK_LT_LT: int = 39
+const TK_GT_GT: int = 40
+const TK_GT_GT_GT: int = 41
+const TK_AMP: int = 42
+const TK_BAR: int = 43
+const TK_CARET: int = 44
+const TK_EXCL: int = 45
+const TK_TILDE: int = 46
+const TK_AMP_AMP: int = 47
+const TK_BAR_BAR: int = 48
+const TK_QUESTION: int = 49
+const TK_COLON: int = 50
+const TK_AT: int = 51
+const TK_QUESTION_QUESTION: int = 52
+const TK_BACKTICK: int = 53
+const TK_HASH: int = 54
+const TK_EQ: int = 55
+const TK_PLUS_EQ: int = 56
+const TK_MINUS_EQ: int = 57
+const TK_ASTERISK_EQ: int = 58
+const TK_ASTERISK_ASTERISK_EQ: int = 59
+const TK_SLASH_EQ: int = 60
+const TK_PERCENT_EQ: int = 61
+const TK_LT_LT_EQ: int = 62
+const TK_GT_GT_EQ: int = 63
+const TK_GT_GT_GT_EQ: int = 64
+const TK_AMP_EQ: int = 65
+const TK_BAR_EQ: int = 66
+const TK_BAR_BAR_EQ: int = 67
+const TK_AMP_AMP_EQ: int = 68
+const TK_QUESTION_QUESTION_EQ: int = 69
+const TK_CARET_EQ: int = 70
+const TK_IDENTIFIER: int = 71
+const TK_PRIVATE_IDENTIFIER: int = 72
+
+const TK_KW_FIRST: int = 73
+const TK_ABSTRACT: int = 73
+const TK_ACCESSOR: int = 74
+const TK_ANY: int = 75
+const TK_AS: int = 76
+const TK_ASSERTS: int = 77
+const TK_ASSERT: int = 78
+const TK_ASYNC: int = 79
+const TK_AWAIT: int = 80
+const TK_BIGINT: int = 81
+const TK_BOOLEAN: int = 82
+const TK_BREAK: int = 83
+const TK_CASE: int = 84
+const TK_CATCH: int = 85
+const TK_CLASS: int = 86
+const TK_CONST: int = 87
+const TK_CONSTRUCTOR: int = 88
+const TK_CONTINUE: int = 89
+const TK_DEBUGGER: int = 90
+const TK_DECLARE: int = 91
+const TK_DEFAULT: int = 92
+const TK_DELETE: int = 93
+const TK_DO: int = 94
+const TK_ELSE: int = 95
+const TK_ENUM: int = 96
+const TK_EXPORT: int = 97
+const TK_EXTENDS: int = 98
+const TK_FALSE: int = 99
+const TK_FINALLY: int = 100
+const TK_FOR: int = 101
+const TK_FROM: int = 102
+const TK_FUNCTION: int = 103
+const TK_GET: int = 104
+const TK_GLOBAL: int = 105
+const TK_IF: int = 106
+const TK_IMPLEMENTS: int = 107
+const TK_IMPORT: int = 108
+const TK_IN: int = 109
+const TK_INFER: int = 110
+const TK_INSTANCEOF: int = 111
+const TK_INTERFACE: int = 112
+const TK_INTRINSIC: int = 113
+const TK_IS: int = 114
+const TK_KEYOF: int = 115
+const TK_LET: int = 116
+const TK_MODULE: int = 117
+const TK_NAMESPACE: int = 118
+const TK_NEVER: int = 119
+const TK_NEW: int = 120
+const TK_NULL: int = 121
+const TK_NUMBER: int = 122
+const TK_OBJECT: int = 123
+const TK_OF: int = 124
+const TK_OUT: int = 125
+const TK_OVERRIDE: int = 126
+const TK_PACKAGE: int = 127
+const TK_PRIVATE: int = 128
+const TK_PROTECTED: int = 129
+const TK_PUBLIC: int = 130
+const TK_READONLY: int = 131
+const TK_REQUIRE: int = 132
+const TK_RETURN: int = 133
+const TK_SATISFIES: int = 134
+const TK_SET: int = 135
+const TK_STATIC: int = 136
+const TK_STRING: int = 137
+const TK_SUPER: int = 138
+const TK_SWITCH: int = 139
+const TK_SYMBOL: int = 140
+const TK_THIS: int = 141
+const TK_THROW: int = 142
+const TK_TRUE: int = 143
+const TK_TRY: int = 144
+const TK_TYPE: int = 145
+const TK_TYPEOF: int = 146
+const TK_UNDEFINED: int = 147
+const TK_UNIQUE: int = 148
+const TK_UNKNOWN_KW: int = 149
+const TK_USING: int = 150
+const TK_VAR: int = 151
+const TK_VOID: int = 152
+const TK_WHILE: int = 153
+const TK_WITH: int = 154
+const TK_YIELD: int = 155
+const TK_DEFER: int = 156
+const TK_KW_LAST: int = 156
+
+const TOKEN_NAMES: list[str] = [
+    "Unknown", "EndOfFileToken", "NumericLiteral", "BigIntLiteral",
+    "StringLiteral", "RegularExpressionLiteral", "NoSubstitutionTemplateLiteral",
+    "TemplateHead", "TemplateMiddle", "TemplateTail",
+    "OpenBraceToken", "CloseBraceToken", "OpenParenToken", "CloseParenToken",
+    "OpenBracketToken", "CloseBracketToken", "DotToken", "DotDotDotToken",
+    "SemicolonToken", "CommaToken", "QuestionDotToken", "LessThanToken",
+    "LessThanSlashToken", "GreaterThanToken", "LessThanEqualsToken",
+    "GreaterThanEqualsToken", "EqualsEqualsToken", "ExclamationEqualsToken",
+    "EqualsEqualsEqualsToken", "ExclamationEqualsEqualsToken",
+    "EqualsGreaterThanToken", "PlusToken", "MinusToken", "AsteriskToken",
+    "AsteriskAsteriskToken", "SlashToken", "PercentToken", "PlusPlusToken",
+    "MinusMinusToken", "LessThanLessThanToken", "GreaterThanGreaterThanToken",
+    "GreaterThanGreaterThanGreaterThanToken", "AmpersandToken", "BarToken",
+    "CaretToken", "ExclamationToken", "TildeToken", "AmpersandAmpersandToken",
+    "BarBarToken", "QuestionToken", "ColonToken", "AtToken",
+    "QuestionQuestionToken", "BacktickToken", "HashToken", "EqualsToken",
+    "PlusEqualsToken", "MinusEqualsToken", "AsteriskEqualsToken",
+    "AsteriskAsteriskEqualsToken", "SlashEqualsToken", "PercentEqualsToken",
+    "LessThanLessThanEqualsToken", "GreaterThanGreaterThanEqualsToken",
+    "GreaterThanGreaterThanGreaterThanEqualsToken", "AmpersandEqualsToken",
+    "BarEqualsToken", "BarBarEqualsToken", "AmpersandAmpersandEqualsToken",
+    "QuestionQuestionEqualsToken", "CaretEqualsToken",
+    "Identifier", "PrivateIdentifier",
+    "AbstractKeyword", "AccessorKeyword", "AnyKeyword", "AsKeyword",
+    "AssertsKeyword", "AssertKeyword", "AsyncKeyword", "AwaitKeyword",
+    "BigIntKeyword", "BooleanKeyword", "BreakKeyword", "CaseKeyword",
+    "CatchKeyword", "ClassKeyword", "ConstKeyword", "ConstructorKeyword",
+    "ContinueKeyword", "DebuggerKeyword", "DeclareKeyword", "DefaultKeyword",
+    "DeleteKeyword", "DoKeyword", "ElseKeyword", "EnumKeyword",
+    "ExportKeyword", "ExtendsKeyword", "FalseKeyword", "FinallyKeyword",
+    "ForKeyword", "FromKeyword", "FunctionKeyword", "GetKeyword",
+    "GlobalKeyword", "IfKeyword", "ImplementsKeyword", "ImportKeyword",
+    "InKeyword", "InferKeyword", "InstanceOfKeyword", "InterfaceKeyword",
+    "IntrinsicKeyword", "IsKeyword", "KeyOfKeyword", "LetKeyword",
+    "ModuleKeyword", "NamespaceKeyword", "NeverKeyword", "NewKeyword",
+    "NullKeyword", "NumberKeyword", "ObjectKeyword", "OfKeyword",
+    "OutKeyword", "OverrideKeyword", "PackageKeyword", "PrivateKeyword",
+    "ProtectedKeyword", "PublicKeyword", "ReadonlyKeyword", "RequireKeyword",
+    "ReturnKeyword", "SatisfiesKeyword", "SetKeyword", "StaticKeyword",
+    "StringKeyword", "SuperKeyword", "SwitchKeyword", "SymbolKeyword",
+    "ThisKeyword", "ThrowKeyword", "TrueKeyword", "TryKeyword",
+    "TypeKeyword", "TypeOfKeyword", "UndefinedKeyword", "UniqueKeyword",
+    "UnknownKeyword", "UsingKeyword", "VarKeyword", "VoidKeyword",
+    "WhileKeyword", "WithKeyword", "YieldKeyword", "DeferKeyword",
+]
+
+const KEYWORDS: dict[str, int] = {
+    "abstract": 73, "accessor": 74, "any": 75, "as": 76, "asserts": 77,
+    "assert": 78, "async": 79, "await": 80, "bigint": 81, "boolean": 82,
+    "break": 83, "case": 84, "catch": 85, "class": 86, "const": 87,
+    "constructor": 88, "continue": 89, "debugger": 90, "declare": 91,
+    "default": 92, "delete": 93, "do": 94, "else": 95, "enum": 96,
+    "export": 97, "extends": 98, "false": 99, "finally": 100, "for": 101,
+    "from": 102, "function": 103, "get": 104, "global": 105, "if": 106,
+    "implements": 107, "import": 108, "in": 109, "infer": 110,
+    "instanceof": 111, "interface": 112, "intrinsic": 113, "is": 114,
+    "keyof": 115, "let": 116, "module": 117, "namespace": 118, "never": 119,
+    "new": 120, "null": 121, "number": 122, "object": 123, "of": 124,
+    "out": 125, "override": 126, "package": 127, "private": 128,
+    "protected": 129, "public": 130, "readonly": 131, "require": 132,
+    "return": 133, "satisfies": 134, "set": 135, "static": 136,
+    "string": 137, "super": 138, "switch": 139, "symbol": 140, "this": 141,
+    "throw": 142, "true": 143, "try": 144, "type": 145, "typeof": 146,
+    "undefined": 147, "unique": 148, "unknown": 149, "using": 150,
+    "var": 151, "void": 152, "while": 153, "with": 154, "yield": 155,
+    "defer": 156,
+}
+
+def token_name(kind: int) -> str {
+    return TOKEN_NAMES[kind]
+}
+
+def is_keyword(kind: int) -> bool {
+    return kind >= TK_KW_FIRST and kind <= TK_KW_LAST
+}
+
+def _is_ident_start(c: int) -> bool {
+    if c >= 97 and c <= 122 { return true }
+    if c >= 65 and c <= 90 { return true }
+    if c == 95 or c == 36 { return true }
+    return c >= 128
+}
+
+def _is_ident_part(c: int) -> bool {
+    if c >= 97 and c <= 122 { return true }
+    if c >= 65 and c <= 90 { return true }
+    if c >= 48 and c <= 57 { return true }
+    if c == 95 or c == 36 { return true }
+    return c >= 128
+}
+
+def _is_digit(c: int) -> bool {
+    return c >= 48 and c <= 57
+}
+
+def _hex_val(c: int) -> int {
+    if c >= 48 and c <= 57 { return c - 48 }
+    if c >= 97 and c <= 102 { return c - 87 }
+    if c >= 65 and c <= 70 { return c - 55 }
+    return -1
+}
+
+class Scanner {
+    src: bytes = b""
+    n: int = 0
+    pos: int = 0
+    token: int = 0
+    tok_start: int = 0
+    full_start: int = 0
+    token_value: str = ""
+    line_break_before: bool = false
+
+    def(raw: bytes) {
+        self.src = raw + b"\x00\x00\x00"
+        self.n = len(raw)
+        self.pos = 0
+    }
+
+    def scan() -> int {
+        self.full_start = self.pos
+        self.line_break_before = false
+        pos: int = self.pos
+        const n: int = self.n
+
+        while pos < n {
+            const c: int = self.src[pos]
+            if c == 32 or c == 9 or c == 11 or c == 12 {
+                pos = pos + 1
+            } elif c == 10 or c == 13 {
+                self.line_break_before = true
+                pos = pos + 1
+            } elif c == 47 {
+                const c2: int = self.src[pos + 1]
+                if c2 == 47 {
+                    pos = pos + 2
+                    while pos < n {
+                        const cc: int = self.src[pos]
+                        if cc == 10 or cc == 13 { break }
+                        pos = pos + 1
+                    }
+                } elif c2 == 42 {
+                    pos = pos + 2
+                    closed: bool = false
+                    while pos < n {
+                        const cc: int = self.src[pos]
+                        if cc == 42 and self.src[pos + 1] == 47 {
+                            pos = pos + 2
+                            closed = true
+                            break
+                        }
+                        if cc == 10 or cc == 13 {
+                            self.line_break_before = true
+                        }
+                        pos = pos + 1
+                    }
+                    if not closed {
+                        pos = n
+                    }
+                } else {
+                    break
+                }
+            } else {
+                break
+            }
+        }
+
+        self.tok_start = pos
+        if pos >= n {
+            self.pos = pos
+            self.token = TK_EOF
+            return TK_EOF
+        }
+
+        const c: int = self.src[pos]
+
+        if _is_ident_start(c) {
+            return self._identifier(pos)
+        }
+        if _is_digit(c) {
+            return self._number(pos)
+        }
+
+        if c == 40 {
+            self.pos = pos + 1
+            self.token = TK_OPEN_PAREN
+            return self.token
+        }
+        if c == 41 {
+            self.pos = pos + 1
+            self.token = TK_CLOSE_PAREN
+            return self.token
+        }
+        if c == 44 {
+            self.pos = pos + 1
+            self.token = TK_COMMA
+            return self.token
+        }
+        if c == 46 {
+            if _is_digit(self.src[pos + 1]) {
+                return self._number(pos)
+            }
+            if self.src[pos + 1] == 46 and self.src[pos + 2] == 46 {
+                self.pos = pos + 3
+                self.token = TK_DOT_DOT_DOT
+                return self.token
+            }
+            self.pos = pos + 1
+            self.token = TK_DOT
+            return self.token
+        }
+        if c == 59 {
+            self.pos = pos + 1
+            self.token = TK_SEMICOLON
+            return self.token
+        }
+        if c == 58 {
+            self.pos = pos + 1
+            self.token = TK_COLON
+            return self.token
+        }
+        if c == 123 {
+            self.pos = pos + 1
+            self.token = TK_OPEN_BRACE
+            return self.token
+        }
+        if c == 125 {
+            self.pos = pos + 1
+            self.token = TK_CLOSE_BRACE
+            return self.token
+        }
+        if c == 91 {
+            self.pos = pos + 1
+            self.token = TK_OPEN_BRACKET
+            return self.token
+        }
+        if c == 93 {
+            self.pos = pos + 1
+            self.token = TK_CLOSE_BRACKET
+            return self.token
+        }
+        if c == 61 {
+            const c2: int = self.src[pos + 1]
+            if c2 == 61 {
+                if self.src[pos + 2] == 61 {
+                    self.pos = pos + 3
+                    self.token = TK_EQ_EQ_EQ
+                    return self.token
+                }
+                self.pos = pos + 2
+                self.token = TK_EQ_EQ
+                return self.token
+            }
+            if c2 == 62 {
+                self.pos = pos + 2
+                self.token = TK_ARROW
+                return self.token
+            }
+            self.pos = pos + 1
+            self.token = TK_EQ
+            return self.token
+        }
+        if c == 34 or c == 39 {
+            return self._string(c)
+        }
+        if c == 96 {
+            return self._template(false)
+        }
+        if c == 60 {
+            const c2: int = self.src[pos + 1]
+            if c2 == 61 {
+                self.pos = pos + 2
+                self.token = TK_LT_EQ
+                return self.token
+            }
+            if c2 == 60 {
+                if self.src[pos + 2] == 61 {
+                    self.pos = pos + 3
+                    self.token = TK_LT_LT_EQ
+                    return self.token
+                }
+                self.pos = pos + 2
+                self.token = TK_LT_LT
+                return self.token
+            }
+            self.pos = pos + 1
+            self.token = TK_LT
+            return self.token
+        }
+        if c == 62 {
+            self.pos = pos + 1
+            self.token = TK_GT
+            return self.token
+        }
+        if c == 33 {
+            if self.src[pos + 1] == 61 {
+                if self.src[pos + 2] == 61 {
+                    self.pos = pos + 3
+                    self.token = TK_EXCL_EQ_EQ
+                    return self.token
+                }
+                self.pos = pos + 2
+                self.token = TK_EXCL_EQ
+                return self.token
+            }
+            self.pos = pos + 1
+            self.token = TK_EXCL
+            return self.token
+        }
+        if c == 43 {
+            const c2: int = self.src[pos + 1]
+            if c2 == 43 {
+                self.pos = pos + 2
+                self.token = TK_PLUS_PLUS
+                return self.token
+            }
+            if c2 == 61 {
+                self.pos = pos + 2
+                self.token = TK_PLUS_EQ
+                return self.token
+            }
+            self.pos = pos + 1
+            self.token = TK_PLUS
+            return self.token
+        }
+        if c == 45 {
+            const c2: int = self.src[pos + 1]
+            if c2 == 45 {
+                self.pos = pos + 2
+                self.token = TK_MINUS_MINUS
+                return self.token
+            }
+            if c2 == 61 {
+                self.pos = pos + 2
+                self.token = TK_MINUS_EQ
+                return self.token
+            }
+            self.pos = pos + 1
+            self.token = TK_MINUS
+            return self.token
+        }
+        if c == 42 {
+            const c2: int = self.src[pos + 1]
+            if c2 == 42 {
+                if self.src[pos + 2] == 61 {
+                    self.pos = pos + 3
+                    self.token = TK_ASTERISK_ASTERISK_EQ
+                    return self.token
+                }
+                self.pos = pos + 2
+                self.token = TK_ASTERISK_ASTERISK
+                return self.token
+            }
+            if c2 == 61 {
+                self.pos = pos + 2
+                self.token = TK_ASTERISK_EQ
+                return self.token
+            }
+            self.pos = pos + 1
+            self.token = TK_ASTERISK
+            return self.token
+        }
+        if c == 47 {
+            if self.src[pos + 1] == 61 {
+                self.pos = pos + 2
+                self.token = TK_SLASH_EQ
+                return self.token
+            }
+            self.pos = pos + 1
+            self.token = TK_SLASH
+            return self.token
+        }
+        if c == 37 {
+            if self.src[pos + 1] == 61 {
+                self.pos = pos + 2
+                self.token = TK_PERCENT_EQ
+                return self.token
+            }
+            self.pos = pos + 1
+            self.token = TK_PERCENT
+            return self.token
+        }
+        if c == 38 {
+            const c2: int = self.src[pos + 1]
+            if c2 == 38 {
+                if self.src[pos + 2] == 61 {
+                    self.pos = pos + 3
+                    self.token = TK_AMP_AMP_EQ
+                    return self.token
+                }
+                self.pos = pos + 2
+                self.token = TK_AMP_AMP
+                return self.token
+            }
+            if c2 == 61 {
+                self.pos = pos + 2
+                self.token = TK_AMP_EQ
+                return self.token
+            }
+            self.pos = pos + 1
+            self.token = TK_AMP
+            return self.token
+        }
+        if c == 124 {
+            const c2: int = self.src[pos + 1]
+            if c2 == 124 {
+                if self.src[pos + 2] == 61 {
+                    self.pos = pos + 3
+                    self.token = TK_BAR_BAR_EQ
+                    return self.token
+                }
+                self.pos = pos + 2
+                self.token = TK_BAR_BAR
+                return self.token
+            }
+            if c2 == 61 {
+                self.pos = pos + 2
+                self.token = TK_BAR_EQ
+                return self.token
+            }
+            self.pos = pos + 1
+            self.token = TK_BAR
+            return self.token
+        }
+        if c == 63 {
+            const c2: int = self.src[pos + 1]
+            if c2 == 46 and not _is_digit(self.src[pos + 2]) {
+                self.pos = pos + 2
+                self.token = TK_QUESTION_DOT
+                return self.token
+            }
+            if c2 == 63 {
+                if self.src[pos + 2] == 61 {
+                    self.pos = pos + 3
+                    self.token = TK_QUESTION_QUESTION_EQ
+                    return self.token
+                }
+                self.pos = pos + 2
+                self.token = TK_QUESTION_QUESTION
+                return self.token
+            }
+            self.pos = pos + 1
+            self.token = TK_QUESTION
+            return self.token
+        }
+        if c == 94 {
+            if self.src[pos + 1] == 61 {
+                self.pos = pos + 2
+                self.token = TK_CARET_EQ
+                return self.token
+            }
+            self.pos = pos + 1
+            self.token = TK_CARET
+            return self.token
+        }
+        if c == 126 {
+            self.pos = pos + 1
+            self.token = TK_TILDE
+            return self.token
+        }
+        if c == 64 {
+            self.pos = pos + 1
+            self.token = TK_AT
+            return self.token
+        }
+        if c == 35 {
+            if _is_ident_start(self.src[pos + 1]) {
+                p: int = pos + 1
+                while _is_ident_part(self.src[p]) {
+                    p = p + 1
+                }
+                self.token_value = self.src[pos:p].decode()
+                self.pos = p
+                self.token = TK_PRIVATE_IDENTIFIER
+                return self.token
+            }
+            self.pos = pos + 1
+            self.token = TK_HASH
+            return self.token
+        }
+
+        self.pos = pos + 1
+        self.token = TK_UNKNOWN
+        return self.token
+    }
+
+    def _identifier(start: int) -> int {
+        p: int = start + 1
+        while _is_ident_part(self.src[p]) {
+            p = p + 1
+        }
+        const text: str = self.src[start:p].decode()
+        self.token_value = text
+        self.pos = p
+        const c0: int = self.src[start]
+        const ln: int = p - start
+        if c0 >= 97 and c0 <= 122 and ln >= 2 and ln <= 11 {
+            self.token = KEYWORDS.get(text, TK_IDENTIFIER)
+        } else {
+            self.token = TK_IDENTIFIER
+        }
+        return self.token
+    }
+
+    def _number(start: int) -> int {
+        p: int = start
+        const c0: int = self.src[p]
+        is_int_like: bool = true
+        if c0 == 48 and (self.src[p + 1] == 120 or self.src[p + 1] == 88) {
+            p = p + 2
+            while _hex_val(self.src[p]) >= 0 or self.src[p] == 95 {
+                p = p + 1
+            }
+        } elif c0 == 48 and (self.src[p + 1] == 98 or self.src[p + 1] == 66) {
+            p = p + 2
+            while self.src[p] == 48 or self.src[p] == 49 or self.src[p] == 95 {
+                p = p + 1
+            }
+        } elif c0 == 48 and (self.src[p + 1] == 111 or self.src[p + 1] == 79) {
+            p = p + 2
+            while (self.src[p] >= 48 and self.src[p] <= 55) or self.src[p] == 95 {
+                p = p + 1
+            }
+        } else {
+            while _is_digit(self.src[p]) or self.src[p] == 95 {
+                p = p + 1
+            }
+            if self.src[p] == 46 {
+                is_int_like = false
+                p = p + 1
+                while _is_digit(self.src[p]) or self.src[p] == 95 {
+                    p = p + 1
+                }
+            }
+            if self.src[p] == 101 or self.src[p] == 69 {
+                const c1: int = self.src[p + 1]
+                if _is_digit(c1) {
+                    is_int_like = false
+                    p = p + 2
+                    while _is_digit(self.src[p]) or self.src[p] == 95 {
+                        p = p + 1
+                    }
+                } elif (c1 == 43 or c1 == 45) and _is_digit(self.src[p + 2]) {
+                    is_int_like = false
+                    p = p + 3
+                    while _is_digit(self.src[p]) or self.src[p] == 95 {
+                        p = p + 1
+                    }
+                }
+            }
+        }
+        if is_int_like and self.src[p] == 110 {
+            p = p + 1
+            self.token = TK_BIGINT_LITERAL
+        } else {
+            self.token = TK_NUMERIC_LITERAL
+        }
+        self.token_value = self.src[start:p].decode()
+        self.pos = p
+        return self.token
+    }
+
+    def _string(quote: int) -> int {
+        const start: int = self.tok_start
+        p: int = start + 1
+        has_escape: bool = false
+        const n: int = self.n
+        while p < n {
+            const c: int = self.src[p]
+            if c == quote {
+                p = p + 1
+                break
+            }
+            if c == 92 {
+                has_escape = true
+                if self.src[p + 1] == 13 and self.src[p + 2] == 10 {
+                    p = p + 3
+                } else {
+                    p = p + 2
+                }
+                continue
+            }
+            if c == 10 or c == 13 {
+                break
+            }
+            p = p + 1
+        }
+        if has_escape {
+            self.token_value = self._cook(start + 1, p - 1)
+        } else {
+            self.token_value = self.src[start + 1:p - 1].decode()
+        }
+        self.pos = p
+        self.token = TK_STRING_LITERAL
+        return self.token
+    }
+
+    def _cook(a: int, b: int) -> str {
+        parts: list[str] = []
+        run_start: int = a
+        p: int = a
+        while p < b {
+            if self.src[p] != 92 {
+                p = p + 1
+                continue
+            }
+            if p > run_start {
+                parts.append(self.src[run_start:p].decode())
+            }
+            const e: int = self.src[p + 1]
+            if e == 110 {
+                parts.append("\n")
+                p = p + 2
+            } elif e == 116 {
+                parts.append("\t")
+                p = p + 2
+            } elif e == 114 {
+                parts.append("\r")
+                p = p + 2
+            } elif e == 98 {
+                parts.append("\x08")
+                p = p + 2
+            } elif e == 102 {
+                parts.append("\x0c")
+                p = p + 2
+            } elif e == 118 {
+                parts.append("\x0b")
+                p = p + 2
+            } elif e == 48 and not _is_digit(self.src[p + 2]) {
+                parts.append("\x00")
+                p = p + 2
+            } elif e == 120 {
+                const h1: int = _hex_val(self.src[p + 2])
+                const h2: int = _hex_val(self.src[p + 3])
+                if h1 >= 0 and h2 >= 0 {
+                    parts.append(chr(h1 * 16 + h2))
+                    p = p + 4
+                } else {
+                    parts.append("x")
+                    p = p + 2
+                }
+            } elif e == 117 {
+                if self.src[p + 2] == 123 {
+                    q: int = p + 3
+                    v: int = 0
+                    while _hex_val(self.src[q]) >= 0 {
+                        v = v * 16 + _hex_val(self.src[q])
+                        q = q + 1
+                    }
+                    if self.src[q] == 125 {
+                        q = q + 1
+                    }
+                    parts.append(chr(v))
+                    p = q
+                } else {
+                    v4: int = 0
+                    ok: bool = true
+                    j: int = 0
+                    while j < 4 {
+                        const hv: int = _hex_val(self.src[p + 2 + j])
+                        if hv < 0 {
+                            ok = false
+                            break
+                        }
+                        v4 = v4 * 16 + hv
+                        j = j + 1
+                    }
+                    if ok {
+                        parts.append(chr(v4))
+                        p = p + 6
+                    } else {
+                        parts.append("u")
+                        p = p + 2
+                    }
+                }
+            } elif e == 13 {
+                if self.src[p + 2] == 10 {
+                    p = p + 3
+                } else {
+                    p = p + 2
+                }
+            } elif e == 10 {
+                p = p + 2
+            } else {
+                parts.append(self.src[p + 1:p + 2].decode())
+                p = p + 2
+            }
+            run_start = p
+        }
+        if p > run_start {
+            parts.append(self.src[run_start:p].decode())
+        }
+        return "".join(parts)
+    }
+
+    def _template(rescan: bool) -> int {
+        const start: int = self.tok_start
+        p: int = start + 1
+        const n: int = self.n
+        ended_backtick: bool = false
+        hit_dollar: bool = false
+        has_escape: bool = false
+        while p < n {
+            const c: int = self.src[p]
+            if c == 96 {
+                p = p + 1
+                ended_backtick = true
+                break
+            }
+            if c == 36 and self.src[p + 1] == 123 {
+                p = p + 2
+                hit_dollar = true
+                break
+            }
+            if c == 92 {
+                has_escape = true
+                if self.src[p + 1] == 13 and self.src[p + 2] == 10 {
+                    p = p + 3
+                } else {
+                    p = p + 2
+                }
+                continue
+            }
+            p = p + 1
+        }
+        if hit_dollar {
+            if rescan {
+                self.token = TK_TEMPLATE_MIDDLE
+            } else {
+                self.token = TK_TEMPLATE_HEAD
+            }
+            if has_escape {
+                self.token_value = self._cook(start + 1, p - 2)
+            } else {
+                self.token_value = self.src[start + 1:p - 2].decode()
+            }
+        } else {
+            if rescan {
+                self.token = TK_TEMPLATE_TAIL
+            } else {
+                self.token = TK_NO_SUB_TEMPLATE
+            }
+            content_end: int = p
+            if ended_backtick {
+                content_end = p - 1
+            }
+            if has_escape {
+                self.token_value = self._cook(start + 1, content_end)
+            } else {
+                self.token_value = self.src[start + 1:content_end].decode()
+            }
+        }
+        self.pos = p
+        return self.token
+    }
+
+    def re_scan_template() -> int {
+        return self._template(true)
+    }
+
+    def re_scan_slash() -> int {
+        const start: int = self.tok_start
+        p: int = start + 1
+        const n: int = self.n
+        in_class: bool = false
+        while p < n {
+            const c: int = self.src[p]
+            if c == 10 or c == 13 {
+                break
+            }
+            if c == 92 {
+                p = p + 2
+                continue
+            }
+            if c == 91 {
+                in_class = true
+            } elif c == 93 {
+                in_class = false
+            } elif c == 47 and not in_class {
+                p = p + 1
+                break
+            }
+            p = p + 1
+        }
+        while _is_ident_part(self.src[p]) {
+            p = p + 1
+        }
+        self.token_value = self.src[start:p].decode()
+        self.pos = p
+        self.token = TK_REGEX_LITERAL
+        return self.token
+    }
+
+    def re_scan_greater() -> int {
+        const start: int = self.tok_start
+        const c1: int = self.src[start + 1]
+        if c1 == 62 {
+            const c2: int = self.src[start + 2]
+            if c2 == 62 {
+                if self.src[start + 3] == 61 {
+                    self.pos = start + 4
+                    self.token = TK_GT_GT_GT_EQ
+                    return self.token
+                }
+                self.pos = start + 3
+                self.token = TK_GT_GT_GT
+                return self.token
+            }
+            if c2 == 61 {
+                self.pos = start + 3
+                self.token = TK_GT_GT_EQ
+                return self.token
+            }
+            self.pos = start + 2
+            self.token = TK_GT_GT
+            return self.token
+        }
+        if c1 == 61 {
+            self.pos = start + 2
+            self.token = TK_GT_EQ
+            return self.token
+        }
+        return self.token
+    }
+
+    def token_text() -> str {
+        return self.src[self.tok_start:self.pos].decode()
+    }
+}

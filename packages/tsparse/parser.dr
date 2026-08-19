@@ -1,0 +1,3256 @@
+from scanner import Scanner, token_name
+from scanner import TK_UNKNOWN, TK_EOF, TK_NUMERIC_LITERAL, TK_BIGINT_LITERAL, TK_STRING_LITERAL, TK_REGEX_LITERAL, TK_NO_SUB_TEMPLATE, TK_TEMPLATE_HEAD, TK_TEMPLATE_MIDDLE, TK_TEMPLATE_TAIL
+from scanner import TK_OPEN_BRACE, TK_CLOSE_BRACE, TK_OPEN_PAREN, TK_CLOSE_PAREN, TK_OPEN_BRACKET, TK_CLOSE_BRACKET, TK_DOT, TK_DOT_DOT_DOT, TK_SEMICOLON, TK_COMMA, TK_QUESTION_DOT
+from scanner import TK_LT, TK_GT, TK_LT_EQ, TK_GT_EQ, TK_EQ_EQ, TK_EXCL_EQ, TK_EQ_EQ_EQ, TK_EXCL_EQ_EQ, TK_ARROW, TK_PLUS, TK_MINUS, TK_ASTERISK, TK_ASTERISK_ASTERISK, TK_SLASH, TK_PERCENT
+from scanner import TK_PLUS_PLUS, TK_MINUS_MINUS, TK_LT_LT, TK_GT_GT, TK_GT_GT_GT, TK_AMP, TK_BAR, TK_CARET, TK_EXCL, TK_TILDE, TK_AMP_AMP, TK_BAR_BAR, TK_QUESTION, TK_COLON, TK_AT
+from scanner import TK_QUESTION_QUESTION, TK_BACKTICK, TK_HASH, TK_EQ, TK_PLUS_EQ, TK_MINUS_EQ, TK_ASTERISK_EQ, TK_ASTERISK_ASTERISK_EQ, TK_SLASH_EQ, TK_PERCENT_EQ, TK_LT_LT_EQ
+from scanner import TK_GT_GT_EQ, TK_GT_GT_GT_EQ, TK_AMP_EQ, TK_BAR_EQ, TK_BAR_BAR_EQ, TK_AMP_AMP_EQ, TK_QUESTION_QUESTION_EQ, TK_CARET_EQ, TK_IDENTIFIER, TK_PRIVATE_IDENTIFIER
+from scanner import TK_KW_FIRST, TK_KW_LAST, TK_ABSTRACT, TK_ACCESSOR, TK_ANY, TK_AS, TK_ASSERTS, TK_ASSERT, TK_ASYNC, TK_AWAIT, TK_BIGINT, TK_BOOLEAN, TK_BREAK, TK_CASE, TK_CATCH
+from scanner import TK_CLASS, TK_CONST, TK_CONSTRUCTOR, TK_CONTINUE, TK_DEBUGGER, TK_DECLARE, TK_DEFAULT, TK_DELETE, TK_DO, TK_ELSE, TK_ENUM, TK_EXPORT, TK_EXTENDS, TK_FALSE
+from scanner import TK_FINALLY, TK_FOR, TK_FROM, TK_FUNCTION, TK_GET, TK_GLOBAL, TK_IF, TK_IMPLEMENTS, TK_IMPORT, TK_IN, TK_INFER, TK_INSTANCEOF, TK_INTERFACE, TK_INTRINSIC
+from scanner import TK_IS, TK_KEYOF, TK_LET, TK_MODULE, TK_NAMESPACE, TK_NEVER, TK_NEW, TK_NULL, TK_NUMBER, TK_OBJECT, TK_OF, TK_OUT, TK_OVERRIDE, TK_PACKAGE, TK_PRIVATE
+from scanner import TK_PROTECTED, TK_PUBLIC, TK_READONLY, TK_REQUIRE, TK_RETURN, TK_SATISFIES, TK_SET, TK_STATIC, TK_STRING, TK_SUPER, TK_SWITCH, TK_SYMBOL, TK_THIS, TK_THROW
+from scanner import TK_TRUE, TK_TRY, TK_TYPE, TK_TYPEOF, TK_UNDEFINED, TK_UNIQUE, TK_UNKNOWN_KW, TK_USING, TK_VAR, TK_VOID, TK_WHILE, TK_WITH, TK_YIELD, TK_DEFER
+
+const NK_SOURCE_FILE: int = 200
+const NK_QUALIFIED_NAME: int = 201
+const NK_COMPUTED_PROPERTY_NAME: int = 202
+const NK_TYPE_PARAMETER: int = 203
+const NK_PARAMETER: int = 204
+const NK_DECORATOR: int = 205
+const NK_PROPERTY_SIGNATURE: int = 206
+const NK_PROPERTY_DECLARATION: int = 207
+const NK_METHOD_SIGNATURE: int = 208
+const NK_METHOD_DECLARATION: int = 209
+const NK_CLASS_STATIC_BLOCK: int = 210
+const NK_CONSTRUCTOR: int = 211
+const NK_GET_ACCESSOR: int = 212
+const NK_SET_ACCESSOR: int = 213
+const NK_CALL_SIGNATURE: int = 214
+const NK_CONSTRUCT_SIGNATURE: int = 215
+const NK_INDEX_SIGNATURE: int = 216
+const NK_TYPE_PREDICATE: int = 217
+const NK_TYPE_REFERENCE: int = 218
+const NK_FUNCTION_TYPE: int = 219
+const NK_CONSTRUCTOR_TYPE: int = 220
+const NK_TYPE_QUERY: int = 221
+const NK_TYPE_LITERAL: int = 222
+const NK_ARRAY_TYPE: int = 223
+const NK_TUPLE_TYPE: int = 224
+const NK_OPTIONAL_TYPE: int = 225
+const NK_REST_TYPE: int = 226
+const NK_UNION_TYPE: int = 227
+const NK_INTERSECTION_TYPE: int = 228
+const NK_CONDITIONAL_TYPE: int = 229
+const NK_INFER_TYPE: int = 230
+const NK_PARENTHESIZED_TYPE: int = 231
+const NK_THIS_TYPE: int = 232
+const NK_TYPE_OPERATOR: int = 233
+const NK_INDEXED_ACCESS_TYPE: int = 234
+const NK_MAPPED_TYPE: int = 235
+const NK_LITERAL_TYPE: int = 236
+const NK_NAMED_TUPLE_MEMBER: int = 237
+const NK_TEMPLATE_LITERAL_TYPE: int = 238
+const NK_TEMPLATE_LITERAL_TYPE_SPAN: int = 239
+const NK_IMPORT_TYPE: int = 240
+const NK_OBJECT_BINDING_PATTERN: int = 241
+const NK_ARRAY_BINDING_PATTERN: int = 242
+const NK_BINDING_ELEMENT: int = 243
+const NK_ARRAY_LITERAL: int = 244
+const NK_OBJECT_LITERAL: int = 245
+const NK_PROPERTY_ACCESS: int = 246
+const NK_ELEMENT_ACCESS: int = 247
+const NK_CALL: int = 248
+const NK_NEW: int = 249
+const NK_TAGGED_TEMPLATE: int = 250
+const NK_TYPE_ASSERTION: int = 251
+const NK_PAREN_EXPR: int = 252
+const NK_FUNCTION_EXPR: int = 253
+const NK_ARROW_FUNCTION: int = 254
+const NK_DELETE_EXPR: int = 255
+const NK_TYPEOF_EXPR: int = 256
+const NK_VOID_EXPR: int = 257
+const NK_AWAIT_EXPR: int = 258
+const NK_PREFIX_UNARY: int = 259
+const NK_POSTFIX_UNARY: int = 260
+const NK_BINARY: int = 261
+const NK_CONDITIONAL_EXPR: int = 262
+const NK_TEMPLATE_EXPR: int = 263
+const NK_YIELD_EXPR: int = 264
+const NK_SPREAD: int = 265
+const NK_CLASS_EXPR: int = 266
+const NK_OMITTED: int = 267
+const NK_EXPR_WITH_TYPE_ARGS: int = 268
+const NK_AS_EXPR: int = 269
+const NK_NON_NULL: int = 270
+const NK_META_PROPERTY: int = 271
+const NK_SATISFIES_EXPR: int = 272
+const NK_TEMPLATE_SPAN: int = 273
+const NK_BLOCK: int = 274
+const NK_EMPTY_STATEMENT: int = 275
+const NK_VARIABLE_STATEMENT: int = 276
+const NK_EXPRESSION_STATEMENT: int = 277
+const NK_IF_STATEMENT: int = 278
+const NK_DO_STATEMENT: int = 279
+const NK_WHILE_STATEMENT: int = 280
+const NK_FOR_STATEMENT: int = 281
+const NK_FOR_IN_STATEMENT: int = 282
+const NK_FOR_OF_STATEMENT: int = 283
+const NK_CONTINUE_STATEMENT: int = 284
+const NK_BREAK_STATEMENT: int = 285
+const NK_RETURN_STATEMENT: int = 286
+const NK_WITH_STATEMENT: int = 287
+const NK_SWITCH_STATEMENT: int = 288
+const NK_LABELED_STATEMENT: int = 289
+const NK_THROW_STATEMENT: int = 290
+const NK_TRY_STATEMENT: int = 291
+const NK_DEBUGGER_STATEMENT: int = 292
+const NK_VARIABLE_DECLARATION: int = 293
+const NK_VARIABLE_DECLARATION_LIST: int = 294
+const NK_FUNCTION_DECLARATION: int = 295
+const NK_CLASS_DECLARATION: int = 296
+const NK_INTERFACE_DECLARATION: int = 297
+const NK_TYPE_ALIAS_DECLARATION: int = 298
+const NK_ENUM_DECLARATION: int = 299
+const NK_MODULE_DECLARATION: int = 300
+const NK_MODULE_BLOCK: int = 301
+const NK_CASE_BLOCK: int = 302
+const NK_CASE_CLAUSE: int = 303
+const NK_DEFAULT_CLAUSE: int = 304
+const NK_HERITAGE_CLAUSE: int = 305
+const NK_CATCH_CLAUSE: int = 306
+const NK_PROPERTY_ASSIGNMENT: int = 307
+const NK_SHORTHAND_PROPERTY: int = 308
+const NK_SPREAD_ASSIGNMENT: int = 309
+const NK_ENUM_MEMBER: int = 310
+const NK_IMPORT_DECLARATION: int = 311
+const NK_IMPORT_CLAUSE: int = 312
+const NK_NAMESPACE_IMPORT: int = 313
+const NK_NAMED_IMPORTS: int = 314
+const NK_IMPORT_SPECIFIER: int = 315
+const NK_EXPORT_ASSIGNMENT: int = 316
+const NK_EXPORT_DECLARATION: int = 317
+const NK_NAMED_EXPORTS: int = 318
+const NK_EXPORT_SPECIFIER: int = 319
+const NK_NAMESPACE_EXPORT: int = 320
+const NK_EXTERNAL_MODULE_REF: int = 321
+const NK_IMPORT_EQUALS: int = 322
+const NK_IMPORT_ATTRIBUTES: int = 323
+const NK_IMPORT_ATTRIBUTE: int = 324
+const NK_NAMESPACE_EXPORT_DECL: int = 325
+const NK_SEMICOLON_CLASS_ELEMENT: int = 326
+
+const MOD_EXPORT: int = 1
+const MOD_DECLARE: int = 2
+const MOD_ABSTRACT: int = 4
+const MOD_ASYNC: int = 8
+const MOD_STATIC: int = 16
+const MOD_PUBLIC: int = 32
+const MOD_PRIVATE: int = 64
+const MOD_PROTECTED: int = 128
+const MOD_READONLY: int = 256
+const MOD_OVERRIDE: int = 512
+const MOD_ACCESSOR: int = 1024
+const MOD_DEFAULT: int = 2048
+const MOD_CONST_KW: int = 4096
+const MOD_IN: int = 8192
+const MOD_OUT: int = 16384
+
+def _build_kw_ident_ok() -> list[int] {
+    ok: list[int] = [0] * 157
+    const kinds: list[int] = [
+        TK_ABSTRACT, TK_ACCESSOR, TK_ANY, TK_AS, TK_ASSERTS, TK_ASSERT,
+        TK_ASYNC, TK_BIGINT, TK_BOOLEAN, TK_CONSTRUCTOR, TK_DECLARE,
+        TK_FROM, TK_GET, TK_GLOBAL, TK_INFER, TK_INTRINSIC, TK_IS,
+        TK_KEYOF, TK_MODULE, TK_NAMESPACE, TK_NEVER, TK_NUMBER, TK_OBJECT,
+        TK_OF, TK_OUT, TK_OVERRIDE, TK_READONLY, TK_REQUIRE, TK_SATISFIES,
+        TK_SET, TK_STRING, TK_SYMBOL, TK_TYPE, TK_UNDEFINED, TK_UNIQUE,
+        TK_UNKNOWN_KW, TK_USING, TK_DEFER,
+    ]
+    for k in kinds {
+        ok[k] = 1
+    }
+    return ok
+}
+
+const KW_IDENT_OK: list[int] = _build_kw_ident_ok()
+
+class Node {
+    kind: int = 0
+    pos: int = 0
+    end: int = 0
+    op: int = 0
+    flags: int = 0
+    text: str = ""
+    a: Node | None = none
+    b: Node | None = none
+    c: Node | None = none
+    d: Node | None = none
+    kids: list[Node] | None = none
+    def(kind: int, pos: int) {
+        self.kind = kind
+        self.pos = pos
+    }
+}
+
+class Snap {
+    pos: int = 0
+    tok: int = 0
+    tok_start: int = 0
+    full_start: int = 0
+    lb: bool = false
+    tval: str = ""
+    prev_end: int = 0
+    def(pos: int, tok: int, tok_start: int, full_start: int, lb: bool, tval: str, prev_end: int) {
+        self.pos = pos
+        self.tok = tok
+        self.tok_start = tok_start
+        self.full_start = full_start
+        self.lb = lb
+        self.tval = tval
+        self.prev_end = prev_end
+    }
+}
+
+class Parser {
+    sc: Scanner
+    tok: int = 0
+    prev_end: int = 0
+    node_count: int = 0
+    no_in: bool = false
+    no_cond_type: bool = false
+
+    def(src: bytes) {
+        self.sc = Scanner(src)
+        self.tok = self.sc.scan()
+    }
+
+    def bump() -> None {
+        self.prev_end = self.sc.pos
+        self.tok = self.sc.scan()
+    }
+
+    def at(k: int) -> bool {
+        return self.tok == k
+    }
+
+    def eat(k: int) -> bool {
+        if self.tok == k {
+            self.bump()
+            return true
+        }
+        return false
+    }
+
+    def expect(k: int) -> None {
+        if self.tok != k {
+            self.fail(f"expected {token_name(k)}, found {token_name(self.tok)}")
+        }
+        self.bump()
+    }
+
+    def fail(msg: str) -> None {
+        raise ValueError(f"parse error at byte {self.sc.tok_start}: {msg}")
+    }
+
+    def pos_of() -> int {
+        return self.sc.tok_start
+    }
+
+    def mk(kind: int) -> Node {
+        self.node_count = self.node_count + 1
+        return Node(kind, self.sc.tok_start)
+    }
+
+    def mkat(kind: int, pos: int) -> Node {
+        self.node_count = self.node_count + 1
+        return Node(kind, pos)
+    }
+
+    def fin(n: Node) -> Node {
+        n.end = self.prev_end
+        return n
+    }
+
+    def mark() -> Snap {
+        return Snap(self.sc.pos, self.tok, self.sc.tok_start, self.sc.full_start,
+                    self.sc.line_break_before, self.sc.token_value, self.prev_end)
+    }
+
+    def restore(s: Snap) -> None {
+        self.sc.pos = s.pos
+        self.sc.token = s.tok
+        self.sc.tok_start = s.tok_start
+        self.sc.full_start = s.full_start
+        self.sc.line_break_before = s.lb
+        self.sc.token_value = s.tval
+        self.tok = s.tok
+        self.prev_end = s.prev_end
+    }
+
+    def is_ident_like(t: int) -> bool {
+        if t == TK_IDENTIFIER {
+            return true
+        }
+        if t >= TK_KW_FIRST and t <= TK_KW_LAST {
+            return KW_IDENT_OK[t] == 1
+        }
+        return false
+    }
+
+    def is_ident_name_tok(t: int) -> bool {
+        return t == TK_IDENTIFIER or (t >= TK_KW_FIRST and t <= TK_KW_LAST)
+    }
+
+    def can_semi() -> bool {
+        if self.tok == TK_SEMICOLON or self.tok == TK_CLOSE_BRACE or self.tok == TK_EOF {
+            return true
+        }
+        return self.sc.line_break_before
+    }
+
+    def semi() -> None {
+        if self.eat(TK_SEMICOLON) {
+            return
+        }
+        if self.tok == TK_CLOSE_BRACE or self.tok == TK_EOF or self.sc.line_break_before {
+            return
+        }
+        self.fail(f"expected semicolon, found {token_name(self.tok)}")
+    }
+
+    def peek() -> int {
+        const s: Snap = self.mark()
+        self.bump()
+        const t: int = self.tok
+        self.restore(s)
+        return t
+    }
+
+    def peek_no_lb() -> int {
+        const s: Snap = self.mark()
+        self.bump()
+        t: int = self.tok
+        if self.sc.line_break_before {
+            t = 0 - 1
+        }
+        self.restore(s)
+        return t
+    }
+
+    def parse_ident() -> Node {
+        if not self.is_ident_like(self.tok) {
+            self.fail(f"expected identifier, found {token_name(self.tok)}")
+        }
+        const n: Node = self.mk(TK_IDENTIFIER)
+        n.text = self.sc.token_value
+        self.bump()
+        return self.fin(n)
+    }
+
+    def parse_ident_name() -> Node {
+        if not self.is_ident_name_tok(self.tok) {
+            self.fail(f"expected name, found {token_name(self.tok)}")
+        }
+        const n: Node = self.mk(TK_IDENTIFIER)
+        n.text = self.sc.token_value
+        self.bump()
+        return self.fin(n)
+    }
+
+    def parse_entity_name() -> Node {
+        left: Node = self.parse_ident()
+        while self.at(TK_DOT) {
+            self.bump()
+            const q: Node = self.mkat(NK_QUALIFIED_NAME, left.pos)
+            q.a = left
+            q.b = self.parse_ident_name()
+            left = self.fin(q)
+        }
+        return left
+    }
+
+    def parse_property_name() -> Node {
+        const t: int = self.tok
+        if t == TK_STRING_LITERAL or t == TK_NO_SUB_TEMPLATE {
+            const s: Node = self.mk(TK_STRING_LITERAL)
+            s.text = self.sc.token_value
+            self.bump()
+            return self.fin(s)
+        }
+        if t == TK_NUMERIC_LITERAL or t == TK_BIGINT_LITERAL {
+            const m: Node = self.mk(t)
+            m.text = self.sc.token_value
+            self.bump()
+            return self.fin(m)
+        }
+        if t == TK_OPEN_BRACKET {
+            const c: Node = self.mk(NK_COMPUTED_PROPERTY_NAME)
+            self.bump()
+            c.a = self.parse_assign()
+            self.expect(TK_CLOSE_BRACKET)
+            return self.fin(c)
+        }
+        if t == TK_PRIVATE_IDENTIFIER {
+            const p: Node = self.mk(TK_PRIVATE_IDENTIFIER)
+            p.text = self.sc.token_value
+            self.bump()
+            return self.fin(p)
+        }
+        return self.parse_ident_name()
+    }
+
+    def parse_binding_name() -> Node {
+        if self.at(TK_OPEN_BRACE) {
+            return self.parse_object_binding()
+        }
+        if self.at(TK_OPEN_BRACKET) {
+            return self.parse_array_binding()
+        }
+        return self.parse_ident()
+    }
+
+    def parse_object_binding() -> Node {
+        const n: Node = self.mk(NK_OBJECT_BINDING_PATTERN)
+        self.expect(TK_OPEN_BRACE)
+        ks: list[Node] = []
+        while not self.at(TK_CLOSE_BRACE) {
+            const e: Node = self.mk(NK_BINDING_ELEMENT)
+            if self.eat(TK_DOT_DOT_DOT) {
+                e.op = 1
+            }
+            const name: Node = self.parse_property_name()
+            if self.eat(TK_COLON) {
+                e.a = name
+                e.b = self.parse_binding_name()
+            } else {
+                e.b = name
+            }
+            if self.eat(TK_EQ) {
+                e.c = self.parse_assign()
+            }
+            ks.append(self.fin(e))
+            if not self.eat(TK_COMMA) {
+                break
+            }
+        }
+        self.expect(TK_CLOSE_BRACE)
+        n.kids = ks
+        return self.fin(n)
+    }
+
+    def parse_array_binding() -> Node {
+        const n: Node = self.mk(NK_ARRAY_BINDING_PATTERN)
+        self.expect(TK_OPEN_BRACKET)
+        ks: list[Node] = []
+        while not self.at(TK_CLOSE_BRACKET) {
+            if self.at(TK_COMMA) {
+                const o: Node = self.mk(NK_OMITTED)
+                ks.append(self.fin(o))
+                self.bump()
+                continue
+            }
+            const e: Node = self.mk(NK_BINDING_ELEMENT)
+            if self.eat(TK_DOT_DOT_DOT) {
+                e.op = 1
+            }
+            e.b = self.parse_binding_name()
+            if self.eat(TK_EQ) {
+                e.c = self.parse_assign()
+            }
+            ks.append(self.fin(e))
+            if not self.eat(TK_COMMA) {
+                break
+            }
+        }
+        self.expect(TK_CLOSE_BRACKET)
+        n.kids = ks
+        return self.fin(n)
+    }
+
+    def parse_type() -> Node {
+        if self.is_fn_type_start() {
+            return self.parse_fn_or_ctor_type()
+        }
+        const t: Node = self.parse_union_type()
+        if self.at(TK_EXTENDS) and not self.no_cond_type {
+            const n: Node = self.mkat(NK_CONDITIONAL_TYPE, t.pos)
+            n.a = t
+            self.bump()
+            const saved: bool = self.no_cond_type
+            self.no_cond_type = true
+            n.b = self.parse_type()
+            self.no_cond_type = saved
+            self.expect(TK_QUESTION)
+            const saved2: bool = self.no_cond_type
+            self.no_cond_type = false
+            n.c = self.parse_type()
+            self.expect(TK_COLON)
+            n.d = self.parse_type()
+            self.no_cond_type = saved2
+            return self.fin(n)
+        }
+        return t
+    }
+
+    def is_fn_type_start() -> bool {
+        const t: int = self.tok
+        if t == TK_LT {
+            return true
+        }
+        if t == TK_NEW {
+            return true
+        }
+        if t == TK_ABSTRACT and self.peek() == TK_NEW {
+            return true
+        }
+        if t != TK_OPEN_PAREN {
+            return false
+        }
+        const s: Snap = self.mark()
+        self.bump()
+        result: bool = false
+        if self.at(TK_CLOSE_PAREN) {
+            self.bump()
+            result = self.at(TK_ARROW)
+        } elif self.at(TK_DOT_DOT_DOT) {
+            result = true
+        } elif self.is_ident_like(self.tok) or self.at(TK_THIS) or self.at(TK_OPEN_BRACE) or self.at(TK_OPEN_BRACKET) {
+            self.bump()
+            const t2: int = self.tok
+            if t2 == TK_COLON or t2 == TK_COMMA or t2 == TK_QUESTION or t2 == TK_EQ {
+                result = true
+            } elif t2 == TK_CLOSE_PAREN {
+                self.bump()
+                result = self.at(TK_ARROW)
+            }
+        }
+        self.restore(s)
+        return result
+    }
+
+    def parse_fn_or_ctor_type() -> Node {
+        const pos: int = self.pos_of()
+        is_ctor: bool = false
+        is_abstract: bool = false
+        if self.at(TK_ABSTRACT) {
+            is_abstract = true
+            self.bump()
+        }
+        if self.eat(TK_NEW) {
+            is_ctor = true
+        }
+        kind: int = NK_FUNCTION_TYPE
+        if is_ctor {
+            kind = NK_CONSTRUCTOR_TYPE
+        }
+        const n: Node = self.mkat(kind, pos)
+        if is_abstract {
+            n.flags = MOD_ABSTRACT
+        }
+        if self.at(TK_LT) {
+            n.a = self.parse_type_params()
+        }
+        n.kids = self.parse_params()
+        self.expect(TK_ARROW)
+        n.b = self.parse_type_or_predicate()
+        return self.fin(n)
+    }
+
+    def parse_union_type() -> Node {
+        const pos: int = self.pos_of()
+        self.eat(TK_BAR)
+        first: Node = self.parse_intersection_type()
+        if not self.at(TK_BAR) {
+            return first
+        }
+        const n: Node = self.mkat(NK_UNION_TYPE, pos)
+        ks: list[Node] = [first]
+        while self.eat(TK_BAR) {
+            ks.append(self.parse_intersection_type())
+        }
+        n.kids = ks
+        return self.fin(n)
+    }
+
+    def parse_intersection_type() -> Node {
+        const pos: int = self.pos_of()
+        self.eat(TK_AMP)
+        first: Node = self.parse_type_operator()
+        if not self.at(TK_AMP) {
+            return first
+        }
+        const n: Node = self.mkat(NK_INTERSECTION_TYPE, pos)
+        ks: list[Node] = [first]
+        while self.eat(TK_AMP) {
+            ks.append(self.parse_type_operator())
+        }
+        n.kids = ks
+        return self.fin(n)
+    }
+
+    def parse_type_operator() -> Node {
+        const t: int = self.tok
+        if t == TK_KEYOF or t == TK_UNIQUE or t == TK_READONLY {
+            const n: Node = self.mk(NK_TYPE_OPERATOR)
+            n.op = t
+            self.bump()
+            n.a = self.parse_type_operator()
+            return self.fin(n)
+        }
+        if t == TK_INFER {
+            const inf: Node = self.mk(NK_INFER_TYPE)
+            self.bump()
+            const tp: Node = self.mk(NK_TYPE_PARAMETER)
+            tp.a = self.parse_ident()
+            if self.at(TK_EXTENDS) and not self.no_cond_type {
+                const s: Snap = self.mark()
+                self.bump()
+                const saved: bool = self.no_cond_type
+                self.no_cond_type = true
+                worked: bool = true
+                try {
+                    tp.b = self.parse_type()
+                } except ValueError {
+                    worked = false
+                }
+                self.no_cond_type = saved
+                if not worked or self.at(TK_QUESTION) {
+                    tp.b = none
+                    self.restore(s)
+                }
+            } elif self.at(TK_EXTENDS) and self.no_cond_type {
+                self.bump()
+                const saved3: bool = self.no_cond_type
+                self.no_cond_type = true
+                tp.b = self.parse_type()
+                self.no_cond_type = saved3
+            }
+            inf.a = self.fin(tp)
+            return self.fin(inf)
+        }
+        return self.parse_postfix_type()
+    }
+
+    def parse_postfix_type() -> Node {
+        n: Node = self.parse_primary_type()
+        while self.at(TK_OPEN_BRACKET) and not self.sc.line_break_before {
+            self.bump()
+            if self.eat(TK_CLOSE_BRACKET) {
+                const arr: Node = self.mkat(NK_ARRAY_TYPE, n.pos)
+                arr.a = n
+                n = self.fin(arr)
+            } else {
+                const idx: Node = self.mkat(NK_INDEXED_ACCESS_TYPE, n.pos)
+                idx.a = n
+                idx.b = self.parse_type()
+                self.expect(TK_CLOSE_BRACKET)
+                n = self.fin(idx)
+            }
+        }
+        return n
+    }
+
+    def parse_primary_type() -> Node {
+        const t: int = self.tok
+        if t == TK_ANY or t == TK_UNKNOWN_KW or t == TK_STRING or t == TK_NUMBER or t == TK_BOOLEAN or t == TK_OBJECT or t == TK_SYMBOL or t == TK_BIGINT or t == TK_VOID or t == TK_UNDEFINED or t == TK_NEVER or t == TK_INTRINSIC {
+            const k: Node = self.mk(t)
+            self.bump()
+            return self.fin(k)
+        }
+        if t == TK_CONST {
+            const n: Node = self.mk(NK_TYPE_REFERENCE)
+            const id: Node = self.mk(TK_IDENTIFIER)
+            id.text = "const"
+            self.bump()
+            n.a = self.fin(id)
+            return self.fin(n)
+        }
+        if t == TK_THIS {
+            const th: Node = self.mk(NK_THIS_TYPE)
+            self.bump()
+            return self.fin(th)
+        }
+        if t == TK_TYPEOF {
+            const q: Node = self.mk(NK_TYPE_QUERY)
+            self.bump()
+            if self.at(TK_IMPORT) {
+                q.a = self.parse_import_type()
+            } else {
+                q.a = self.parse_entity_name()
+                if self.at(TK_LT) {
+                    q.b = self.parse_type_args()
+                }
+            }
+            return self.fin(q)
+        }
+        if t == TK_OPEN_BRACE {
+            if self.is_mapped_type_start() {
+                return self.parse_mapped_type()
+            }
+            return self.parse_type_literal()
+        }
+        if t == TK_OPEN_BRACKET {
+            return self.parse_tuple_type()
+        }
+        if t == TK_OPEN_PAREN {
+            const p: Node = self.mk(NK_PARENTHESIZED_TYPE)
+            self.bump()
+            p.a = self.parse_type()
+            self.expect(TK_CLOSE_PAREN)
+            return self.fin(p)
+        }
+        if t == TK_STRING_LITERAL or t == TK_NO_SUB_TEMPLATE or t == TK_NUMERIC_LITERAL or t == TK_BIGINT_LITERAL {
+            const lt: Node = self.mk(NK_LITERAL_TYPE)
+            const lit: Node = self.mk(t)
+            lit.text = self.sc.token_value
+            self.bump()
+            lt.a = self.fin(lit)
+            return self.fin(lt)
+        }
+        if t == TK_MINUS {
+            const neg: Node = self.mk(NK_LITERAL_TYPE)
+            const pre: Node = self.mk(NK_PREFIX_UNARY)
+            pre.op = TK_MINUS
+            self.bump()
+            const num: Node = self.mk(self.tok)
+            num.text = self.sc.token_value
+            if not (self.at(TK_NUMERIC_LITERAL) or self.at(TK_BIGINT_LITERAL)) {
+                self.fail("expected numeric literal after - in type")
+            }
+            self.bump()
+            pre.a = self.fin(num)
+            neg.a = self.fin(pre)
+            return self.fin(neg)
+        }
+        if t == TK_TRUE or t == TK_FALSE or t == TK_NULL {
+            const bl: Node = self.mk(NK_LITERAL_TYPE)
+            const kw: Node = self.mk(t)
+            self.bump()
+            bl.a = self.fin(kw)
+            return self.fin(bl)
+        }
+        if t == TK_TEMPLATE_HEAD {
+            return self.parse_template_type()
+        }
+        if t == TK_IMPORT {
+            return self.parse_import_type()
+        }
+        if t == TK_ASSERTS {
+            return self.parse_type_predicate_asserts()
+        }
+        if self.is_ident_like(t) {
+            const r: Node = self.mk(NK_TYPE_REFERENCE)
+            r.a = self.parse_entity_name()
+            if self.at(TK_LT) {
+                r.b = self.parse_type_args()
+            }
+            return self.fin(r)
+        }
+        self.fail(f"unexpected token in type: {token_name(t)}")
+        return self.mk(NK_TYPE_REFERENCE)
+    }
+
+    def parse_template_type() -> Node {
+        const n: Node = self.mk(NK_TEMPLATE_LITERAL_TYPE)
+        const head: Node = self.mk(TK_TEMPLATE_HEAD)
+        head.text = self.sc.token_value
+        self.bump()
+        n.a = self.fin(head)
+        ks: list[Node] = []
+        while true {
+            const span: Node = self.mk(NK_TEMPLATE_LITERAL_TYPE_SPAN)
+            span.a = self.parse_type()
+            if not self.at(TK_CLOSE_BRACE) {
+                self.fail("unterminated template literal type span")
+            }
+            self.tok = self.sc.re_scan_template()
+            const lit: Node = self.mk(self.tok)
+            lit.text = self.sc.token_value
+            const was_tail: bool = self.at(TK_TEMPLATE_TAIL)
+            self.bump()
+            span.b = self.fin(lit)
+            ks.append(self.fin(span))
+            if was_tail {
+                break
+            }
+        }
+        n.kids = ks
+        return self.fin(n)
+    }
+
+    def parse_import_type() -> Node {
+        const n: Node = self.mk(NK_IMPORT_TYPE)
+        self.expect(TK_IMPORT)
+        self.expect(TK_OPEN_PAREN)
+        const arg: Node = self.mk(NK_LITERAL_TYPE)
+        const s: Node = self.mk(TK_STRING_LITERAL)
+        s.text = self.sc.token_value
+        self.expect(TK_STRING_LITERAL)
+        arg.a = self.fin(s)
+        n.a = self.fin(arg)
+        if self.eat(TK_COMMA) {
+            n.c = self.parse_object_literal()
+        }
+        self.expect(TK_CLOSE_PAREN)
+        if self.eat(TK_DOT) {
+            n.b = self.parse_entity_name()
+        }
+        if self.at(TK_LT) {
+            n.d = self.parse_type_args()
+        }
+        return self.fin(n)
+    }
+
+    def is_mapped_type_start() -> bool {
+        const s: Snap = self.mark()
+        self.bump()
+        if self.at(TK_PLUS) or self.at(TK_MINUS) {
+            self.restore(s)
+            return true
+        }
+        if self.at(TK_READONLY) {
+            self.bump()
+        }
+        result: bool = false
+        if self.at(TK_OPEN_BRACKET) {
+            self.bump()
+            if self.is_ident_like(self.tok) {
+                self.bump()
+                result = self.at(TK_IN)
+            }
+        }
+        self.restore(s)
+        return result
+    }
+
+    def parse_mapped_type() -> Node {
+        const n: Node = self.mk(NK_MAPPED_TYPE)
+        self.expect(TK_OPEN_BRACE)
+        if self.at(TK_PLUS) or self.at(TK_MINUS) {
+            n.op = self.tok
+            self.bump()
+            self.expect(TK_READONLY)
+            n.flags = n.flags + MOD_READONLY
+        } elif self.eat(TK_READONLY) {
+            n.flags = n.flags + MOD_READONLY
+        }
+        self.expect(TK_OPEN_BRACKET)
+        const tp: Node = self.mk(NK_TYPE_PARAMETER)
+        tp.a = self.parse_ident()
+        self.expect(TK_IN)
+        tp.b = self.parse_type()
+        n.a = self.fin(tp)
+        if self.eat(TK_AS) {
+            n.b = self.parse_type()
+        }
+        self.expect(TK_CLOSE_BRACKET)
+        if self.at(TK_PLUS) or self.at(TK_MINUS) {
+            self.bump()
+            self.expect(TK_QUESTION)
+        } else {
+            self.eat(TK_QUESTION)
+        }
+        if self.eat(TK_COLON) {
+            n.c = self.parse_type()
+        }
+        self.eat(TK_SEMICOLON)
+        self.expect(TK_CLOSE_BRACE)
+        return self.fin(n)
+    }
+
+    def parse_tuple_type() -> Node {
+        const n: Node = self.mk(NK_TUPLE_TYPE)
+        self.expect(TK_OPEN_BRACKET)
+        ks: list[Node] = []
+        while not self.at(TK_CLOSE_BRACKET) {
+            ks.append(self.parse_tuple_member())
+            if not self.eat(TK_COMMA) {
+                break
+            }
+        }
+        self.expect(TK_CLOSE_BRACKET)
+        n.kids = ks
+        return self.fin(n)
+    }
+
+    def parse_tuple_member() -> Node {
+        const pos: int = self.pos_of()
+        has_dots: bool = false
+        if self.eat(TK_DOT_DOT_DOT) {
+            has_dots = true
+        }
+        if self.is_ident_like(self.tok) {
+            const nt: int = self.peek()
+            if nt == TK_COLON or (nt == TK_QUESTION and true) {
+                named: bool = nt == TK_COLON
+                if nt == TK_QUESTION {
+                    const s: Snap = self.mark()
+                    self.bump()
+                    self.bump()
+                    named = self.at(TK_COLON)
+                    self.restore(s)
+                }
+                if named {
+                    const m: Node = self.mkat(NK_NAMED_TUPLE_MEMBER, pos)
+                    if has_dots {
+                        m.op = 1
+                    }
+                    m.a = self.parse_ident()
+                    if self.eat(TK_QUESTION) {
+                        m.flags = 1
+                    }
+                    self.expect(TK_COLON)
+                    m.b = self.parse_type()
+                    return self.fin(m)
+                }
+            }
+        }
+        if has_dots {
+            const r: Node = self.mkat(NK_REST_TYPE, pos)
+            r.a = self.parse_type()
+            return self.fin(r)
+        }
+        const t: Node = self.parse_type()
+        if self.at(TK_QUESTION) {
+            self.bump()
+            const o: Node = self.mkat(NK_OPTIONAL_TYPE, pos)
+            o.a = t
+            return self.fin(o)
+        }
+        return t
+    }
+
+    def parse_type_literal() -> Node {
+        const n: Node = self.mk(NK_TYPE_LITERAL)
+        self.expect(TK_OPEN_BRACE)
+        n.kids = self.parse_type_members()
+        self.expect(TK_CLOSE_BRACE)
+        return self.fin(n)
+    }
+
+    def parse_type_members() -> list[Node] {
+        ks: list[Node] = []
+        while not (self.at(TK_CLOSE_BRACE) or self.at(TK_EOF)) {
+            ks.append(self.parse_type_member())
+            if self.eat(TK_SEMICOLON) {
+                continue
+            }
+            if self.eat(TK_COMMA) {
+                continue
+            }
+            if self.at(TK_CLOSE_BRACE) {
+                break
+            }
+            if not self.sc.line_break_before {
+                self.fail(f"expected type-member separator, found {token_name(self.tok)}")
+            }
+        }
+        return ks
+    }
+
+    def parse_type_member() -> Node {
+        if self.at(TK_OPEN_PAREN) or self.at(TK_LT) {
+            const cs: Node = self.mk(NK_CALL_SIGNATURE)
+            self.parse_sig_tail(cs)
+            return self.fin(cs)
+        }
+        if self.at(TK_NEW) {
+            const nt: int = self.peek()
+            if nt == TK_OPEN_PAREN or nt == TK_LT {
+                const ns: Node = self.mk(NK_CONSTRUCT_SIGNATURE)
+                self.bump()
+                self.parse_sig_tail(ns)
+                return self.fin(ns)
+            }
+        }
+        pos: int = self.pos_of()
+        flags: int = 0
+        if self.at(TK_READONLY) {
+            const nt2: int = self.peek()
+            if self.is_ident_name_tok(nt2) or nt2 == TK_OPEN_BRACKET or nt2 == TK_STRING_LITERAL or nt2 == TK_NUMERIC_LITERAL {
+                self.bump()
+                flags = flags + MOD_READONLY
+            }
+        }
+        if self.at(TK_OPEN_BRACKET) and self.is_index_sig_start() {
+            const ix: Node = self.mkat(NK_INDEX_SIGNATURE, pos)
+            ix.flags = flags
+            self.bump()
+            const prm: Node = self.mk(NK_PARAMETER)
+            prm.a = self.parse_ident()
+            self.expect(TK_COLON)
+            prm.b = self.parse_type()
+            ix.a = self.fin(prm)
+            self.expect(TK_CLOSE_BRACKET)
+            if self.eat(TK_COLON) {
+                ix.b = self.parse_type()
+            }
+            return self.fin(ix)
+        }
+        const name: Node = self.parse_property_name()
+        opt: bool = self.eat(TK_QUESTION)
+        if self.at(TK_OPEN_PAREN) or self.at(TK_LT) {
+            const ms: Node = self.mkat(NK_METHOD_SIGNATURE, pos)
+            ms.flags = flags
+            ms.a = name
+            if opt {
+                ms.op = 1
+            }
+            self.parse_sig_tail(ms)
+            return self.fin(ms)
+        }
+        const ps: Node = self.mkat(NK_PROPERTY_SIGNATURE, pos)
+        ps.flags = flags
+        ps.a = name
+        if opt {
+            ps.op = 1
+        }
+        if self.eat(TK_COLON) {
+            ps.b = self.parse_type_or_predicate()
+        }
+        return self.fin(ps)
+    }
+
+    def parse_sig_tail(n: Node) -> None {
+        if self.at(TK_LT) {
+            n.c = self.parse_type_params()
+        }
+        n.kids = self.parse_params()
+        if self.eat(TK_COLON) {
+            n.b = self.parse_type_or_predicate()
+        }
+    }
+
+    def is_index_sig_start() -> bool {
+        const s: Snap = self.mark()
+        self.bump()
+        result: bool = false
+        if self.is_ident_like(self.tok) {
+            self.bump()
+            result = self.at(TK_COLON)
+        }
+        self.restore(s)
+        return result
+    }
+
+    def parse_type_predicate_asserts() -> Node {
+        const n: Node = self.mk(NK_TYPE_PREDICATE)
+        n.op = 1
+        self.expect(TK_ASSERTS)
+        if self.at(TK_THIS) {
+            const th: Node = self.mk(NK_THIS_TYPE)
+            self.bump()
+            n.a = self.fin(th)
+        } else {
+            n.a = self.parse_ident()
+        }
+        if self.eat(TK_IS) {
+            n.b = self.parse_type()
+        }
+        return self.fin(n)
+    }
+
+    def parse_type_or_predicate() -> Node {
+        if self.at(TK_ASSERTS) {
+            const nt: int = self.peek_no_lb()
+            if nt == TK_THIS or (nt > 0 and self.is_ident_like(nt)) {
+                return self.parse_type_predicate_asserts()
+            }
+        }
+        if self.at(TK_THIS) and self.peek() == TK_IS {
+            const n: Node = self.mk(NK_TYPE_PREDICATE)
+            const th: Node = self.mk(NK_THIS_TYPE)
+            self.bump()
+            n.a = self.fin(th)
+            self.expect(TK_IS)
+            n.b = self.parse_type()
+            return self.fin(n)
+        }
+        if self.is_ident_like(self.tok) and self.peek() == TK_IS {
+            const p: Node = self.mk(NK_TYPE_PREDICATE)
+            p.a = self.parse_ident()
+            self.expect(TK_IS)
+            p.b = self.parse_type()
+            return self.fin(p)
+        }
+        return self.parse_type()
+    }
+
+    def parse_type_args() -> Node {
+        const n: Node = self.mk(NK_TYPE_REFERENCE)
+        n.kind = 0
+        self.node_count = self.node_count - 1
+        self.expect(TK_LT)
+        ks: list[Node] = []
+        while true {
+            ks.append(self.parse_type())
+            if not self.eat(TK_COMMA) {
+                break
+            }
+        }
+        self.expect(TK_GT)
+        n.kids = ks
+        return n
+    }
+
+    def parse_type_params() -> Node {
+        const n: Node = Node(0, self.pos_of())
+        self.expect(TK_LT)
+        ks: list[Node] = []
+        while true {
+            const tp: Node = self.mk(NK_TYPE_PARAMETER)
+            while self.at(TK_CONST) or self.at(TK_IN) or self.at(TK_OUT) {
+                if self.at(TK_CONST) {
+                    tp.flags = tp.flags + MOD_CONST_KW
+                } elif self.at(TK_IN) {
+                    tp.flags = tp.flags + MOD_IN
+                } else {
+                    tp.flags = tp.flags + MOD_OUT
+                }
+                self.bump()
+            }
+            tp.a = self.parse_ident()
+            if self.eat(TK_EXTENDS) {
+                tp.b = self.parse_type()
+            }
+            if self.eat(TK_EQ) {
+                tp.c = self.parse_type()
+            }
+            ks.append(self.fin(tp))
+            if not self.eat(TK_COMMA) {
+                break
+            }
+        }
+        self.expect(TK_GT)
+        n.kids = ks
+        return n
+    }
+
+    def parse_params() -> list[Node] {
+        self.expect(TK_OPEN_PAREN)
+        ks: list[Node] = []
+        while not self.at(TK_CLOSE_PAREN) {
+            ks.append(self.parse_param())
+            if not self.eat(TK_COMMA) {
+                break
+            }
+        }
+        self.expect(TK_CLOSE_PAREN)
+        return ks
+    }
+
+    def parse_param() -> Node {
+        const n: Node = self.mk(NK_PARAMETER)
+        while self.at(TK_PUBLIC) or self.at(TK_PRIVATE) or self.at(TK_PROTECTED) or self.at(TK_READONLY) or self.at(TK_OVERRIDE) {
+            const t: int = self.tok
+            const nt: int = self.peek()
+            if not (self.is_ident_like(nt) or nt == TK_THIS or nt == TK_OPEN_BRACE or nt == TK_OPEN_BRACKET or nt == TK_DOT_DOT_DOT or nt == TK_READONLY or nt == TK_PUBLIC or nt == TK_PRIVATE or nt == TK_PROTECTED or nt == TK_OVERRIDE) {
+                break
+            }
+            if t == TK_PUBLIC {
+                n.flags = n.flags + MOD_PUBLIC
+            } elif t == TK_PRIVATE {
+                n.flags = n.flags + MOD_PRIVATE
+            } elif t == TK_PROTECTED {
+                n.flags = n.flags + MOD_PROTECTED
+            } elif t == TK_READONLY {
+                n.flags = n.flags + MOD_READONLY
+            } else {
+                n.flags = n.flags + MOD_OVERRIDE
+            }
+            self.bump()
+        }
+        if self.eat(TK_DOT_DOT_DOT) {
+            n.op = 1
+        }
+        if self.at(TK_THIS) {
+            const th: Node = self.mk(TK_IDENTIFIER)
+            th.text = "this"
+            self.bump()
+            n.a = self.fin(th)
+        } else {
+            n.a = self.parse_binding_name()
+        }
+        if self.eat(TK_QUESTION) {
+            n.flags = n.flags + MOD_DEFAULT
+        }
+        if self.eat(TK_COLON) {
+            n.b = self.parse_type()
+        }
+        if self.eat(TK_EQ) {
+            n.c = self.parse_assign()
+        }
+        return self.fin(n)
+    }
+
+    def parse_expression() -> Node {
+        left: Node = self.parse_assign()
+        while self.at(TK_COMMA) {
+            const n: Node = self.mkat(NK_BINARY, left.pos)
+            n.op = TK_COMMA
+            n.a = left
+            self.bump()
+            n.b = self.parse_assign()
+            left = self.fin(n)
+        }
+        return left
+    }
+
+    def parse_assign() -> Node {
+        if self.at(TK_YIELD) {
+            const nt: int = self.peek_no_lb()
+            if nt == TK_ASTERISK or (nt > 0 and self.is_start_of_expr(nt)) {
+                return self.parse_yield()
+            }
+            if nt < 0 {
+                return self.parse_yield()
+            }
+        }
+        if self.at(TK_LT) {
+            const ga: Node | None = self.try_parse_typed_arrow()
+            if isinstance(ga, Node) {
+                return ga
+            }
+        }
+        if self.at(TK_OPEN_PAREN) {
+            const st: int = self.paren_arrow_state()
+            if st == 1 {
+                return self.parse_arrow_tail(0, none)
+            }
+            if st == 2 {
+                const tryres: Node | None = self.try_parse_paren_arrow(0)
+                if isinstance(tryres, Node) {
+                    return tryres
+                }
+            }
+        } elif self.at(TK_ASYNC) {
+            const an: Node | None = self.try_parse_async_arrow()
+            if isinstance(an, Node) {
+                return an
+            }
+        } elif self.is_ident_like(self.tok) {
+            if self.peek_no_lb() == TK_ARROW {
+                return self.parse_simple_arrow(0)
+            }
+        }
+
+        left: Node = self.parse_binary(1)
+
+        if self.at(TK_QUESTION) {
+            const cond: Node = self.mkat(NK_CONDITIONAL_EXPR, left.pos)
+            cond.a = left
+            self.bump()
+            const saved: bool = self.no_in
+            self.no_in = false
+            cond.b = self.parse_assign()
+            self.no_in = saved
+            self.expect(TK_COLON)
+            cond.c = self.parse_assign()
+            left = self.fin(cond)
+            return left
+        }
+        if self.tok >= TK_EQ and self.tok <= TK_CARET_EQ {
+            const asg: Node = self.mkat(NK_BINARY, left.pos)
+            asg.op = self.tok
+            asg.a = left
+            self.bump()
+            asg.b = self.parse_assign()
+            return self.fin(asg)
+        }
+        return left
+    }
+
+    def parse_yield() -> Node {
+        const n: Node = self.mk(NK_YIELD_EXPR)
+        self.expect(TK_YIELD)
+        if not self.sc.line_break_before {
+            if self.eat(TK_ASTERISK) {
+                n.op = 1
+                n.a = self.parse_assign()
+            } elif self.is_start_of_expr(self.tok) {
+                n.a = self.parse_assign()
+            }
+        }
+        return self.fin(n)
+    }
+
+    def op_prec(t: int) -> int {
+        if t == TK_QUESTION_QUESTION {
+            return 4
+        }
+        if t == TK_BAR_BAR {
+            return 5
+        }
+        if t == TK_AMP_AMP {
+            return 6
+        }
+        if t == TK_BAR {
+            return 7
+        }
+        if t == TK_CARET {
+            return 8
+        }
+        if t == TK_AMP {
+            return 9
+        }
+        if t == TK_EQ_EQ or t == TK_EXCL_EQ or t == TK_EQ_EQ_EQ or t == TK_EXCL_EQ_EQ {
+            return 10
+        }
+        if t == TK_LT or t == TK_GT or t == TK_LT_EQ or t == TK_GT_EQ or t == TK_INSTANCEOF or t == TK_IN {
+            return 11
+        }
+        if t == TK_LT_LT or t == TK_GT_GT or t == TK_GT_GT_GT {
+            return 12
+        }
+        if t == TK_PLUS or t == TK_MINUS {
+            return 13
+        }
+        if t == TK_ASTERISK or t == TK_SLASH or t == TK_PERCENT {
+            return 14
+        }
+        if t == TK_ASTERISK_ASTERISK {
+            return 15
+        }
+        return 0
+    }
+
+    def parse_binary(min_prec: int) -> Node {
+        left: Node = self.parse_unary()
+        return self.parse_binary_rest(left, min_prec)
+    }
+
+    def parse_binary_rest(start_left: Node, min_prec: int) -> Node {
+        left: Node = start_left
+        while true {
+            if self.at(TK_GT) {
+                self.tok = self.sc.re_scan_greater()
+            }
+            const t: int = self.tok
+            if (t == TK_AS or t == TK_SATISFIES) and min_prec <= 11 {
+                if self.sc.line_break_before {
+                    break
+                }
+                kind: int = NK_AS_EXPR
+                if t == TK_SATISFIES {
+                    kind = NK_SATISFIES_EXPR
+                }
+                const ae: Node = self.mkat(kind, left.pos)
+                ae.a = left
+                self.bump()
+                ae.b = self.parse_type()
+                left = self.fin(ae)
+                continue
+            }
+            const prec: int = self.op_prec(t)
+            if prec == 0 or prec < min_prec {
+                break
+            }
+            if t == TK_IN and self.no_in {
+                break
+            }
+            const n: Node = self.mkat(NK_BINARY, left.pos)
+            n.op = t
+            n.a = left
+            self.bump()
+            if t == TK_ASTERISK_ASTERISK {
+                n.b = self.parse_binary(prec)
+            } else {
+                n.b = self.parse_binary(prec + 1)
+            }
+            left = self.fin(n)
+        }
+        return left
+    }
+
+    def parse_unary() -> Node {
+        const t: int = self.tok
+        if t == TK_PLUS or t == TK_MINUS or t == TK_TILDE or t == TK_EXCL or t == TK_PLUS_PLUS or t == TK_MINUS_MINUS {
+            const n: Node = self.mk(NK_PREFIX_UNARY)
+            n.op = t
+            self.bump()
+            n.a = self.parse_unary()
+            return self.fin(n)
+        }
+        if t == TK_DELETE or t == TK_TYPEOF or t == TK_VOID {
+            kind: int = NK_DELETE_EXPR
+            if t == TK_TYPEOF {
+                kind = NK_TYPEOF_EXPR
+            } elif t == TK_VOID {
+                kind = NK_VOID_EXPR
+            }
+            const u: Node = self.mk(kind)
+            self.bump()
+            u.a = self.parse_unary()
+            return self.fin(u)
+        }
+        if t == TK_AWAIT {
+            const nt: int = self.peek_no_lb()
+            if nt > 0 and self.is_start_of_expr(nt) {
+                const aw: Node = self.mk(NK_AWAIT_EXPR)
+                self.bump()
+                aw.a = self.parse_unary()
+                return self.fin(aw)
+            }
+        }
+        if t == TK_LT {
+            const ta: Node = self.mk(NK_TYPE_ASSERTION)
+            self.bump()
+            ta.a = self.parse_type()
+            self.expect(TK_GT)
+            ta.b = self.parse_unary()
+            return self.fin(ta)
+        }
+        return self.parse_postfix()
+    }
+
+    def parse_postfix() -> Node {
+        n: Node = self.parse_lhs()
+        if (self.at(TK_PLUS_PLUS) or self.at(TK_MINUS_MINUS)) and not self.sc.line_break_before {
+            const p: Node = self.mkat(NK_POSTFIX_UNARY, n.pos)
+            p.op = self.tok
+            p.a = n
+            self.bump()
+            return self.fin(p)
+        }
+        return n
+    }
+
+    def parse_lhs() -> Node {
+        base: Node = Node(0, 0)
+        if self.at(TK_NEW) {
+            base = self.parse_new()
+        } elif self.at(TK_SLASH) or self.at(TK_SLASH_EQ) {
+            self.tok = self.sc.re_scan_slash()
+            const re: Node = self.mk(TK_REGEX_LITERAL)
+            re.text = self.sc.token_value
+            self.bump()
+            base = self.fin(re)
+        } else {
+            base = self.parse_primary()
+        }
+        return self.parse_member_rest(base, true)
+    }
+
+    def parse_new() -> Node {
+        const n: Node = self.mk(NK_NEW)
+        self.expect(TK_NEW)
+        if self.at(TK_DOT) {
+            const mp: Node = self.mkat(NK_META_PROPERTY, n.pos)
+            self.bump()
+            mp.a = self.parse_ident_name()
+            self.node_count = self.node_count - 1
+            return self.fin(mp)
+        }
+        prim: Node = Node(0, 0)
+        if self.at(TK_NEW) {
+            prim = self.parse_new()
+        } else {
+            prim = self.parse_primary()
+        }
+        n.a = self.parse_member_rest(prim, false)
+        if self.at(TK_LT) {
+            const ta: Node | None = self.try_parse_type_args_in_expr()
+            if isinstance(ta, Node) {
+                n.c = ta
+            }
+        }
+        if self.at(TK_OPEN_PAREN) {
+            n.kids = self.parse_args()
+        }
+        return self.fin(n)
+    }
+
+    def parse_args() -> list[Node] {
+        self.expect(TK_OPEN_PAREN)
+        ks: list[Node] = []
+        while not self.at(TK_CLOSE_PAREN) {
+            if self.at(TK_DOT_DOT_DOT) {
+                const sp: Node = self.mk(NK_SPREAD)
+                self.bump()
+                sp.a = self.parse_assign()
+                ks.append(self.fin(sp))
+            } else {
+                ks.append(self.parse_assign())
+            }
+            if not self.eat(TK_COMMA) {
+                break
+            }
+        }
+        self.expect(TK_CLOSE_PAREN)
+        return ks
+    }
+
+    def parse_member_rest(start_base: Node, allow_call: bool) -> Node {
+        base: Node = start_base
+        while true {
+            const t: int = self.tok
+            if t == TK_DOT {
+                self.bump()
+                const pa: Node = self.mkat(NK_PROPERTY_ACCESS, base.pos)
+                pa.a = base
+                if self.at(TK_PRIVATE_IDENTIFIER) {
+                    const pv: Node = self.mk(TK_PRIVATE_IDENTIFIER)
+                    pv.text = self.sc.token_value
+                    self.bump()
+                    pa.b = self.fin(pv)
+                } else {
+                    pa.b = self.parse_ident_name()
+                }
+                base = self.fin(pa)
+                continue
+            }
+            if t == TK_QUESTION_DOT {
+                self.bump()
+                if self.at(TK_OPEN_PAREN) and allow_call {
+                    const oc: Node = self.mkat(NK_CALL, base.pos)
+                    oc.a = base
+                    oc.op = 1
+                    oc.kids = self.parse_args()
+                    base = self.fin(oc)
+                    continue
+                }
+                if self.at(TK_OPEN_BRACKET) {
+                    self.bump()
+                    const oe: Node = self.mkat(NK_ELEMENT_ACCESS, base.pos)
+                    oe.a = base
+                    oe.op = 1
+                    oe.b = self.parse_expression()
+                    self.expect(TK_CLOSE_BRACKET)
+                    base = self.fin(oe)
+                    continue
+                }
+                const opa: Node = self.mkat(NK_PROPERTY_ACCESS, base.pos)
+                opa.a = base
+                opa.op = 1
+                if self.at(TK_PRIVATE_IDENTIFIER) {
+                    const pv2: Node = self.mk(TK_PRIVATE_IDENTIFIER)
+                    pv2.text = self.sc.token_value
+                    self.bump()
+                    opa.b = self.fin(pv2)
+                } else {
+                    opa.b = self.parse_ident_name()
+                }
+                base = self.fin(opa)
+                continue
+            }
+            if t == TK_OPEN_BRACKET {
+                self.bump()
+                const ea: Node = self.mkat(NK_ELEMENT_ACCESS, base.pos)
+                ea.a = base
+                ea.b = self.parse_expression()
+                self.expect(TK_CLOSE_BRACKET)
+                base = self.fin(ea)
+                continue
+            }
+            if t == TK_OPEN_PAREN and allow_call {
+                const call: Node = self.mkat(NK_CALL, base.pos)
+                call.a = base
+                call.kids = self.parse_args()
+                base = self.fin(call)
+                continue
+            }
+            if t == TK_EXCL and not self.sc.line_break_before {
+                const nn: Node = self.mkat(NK_NON_NULL, base.pos)
+                nn.a = base
+                self.bump()
+                base = self.fin(nn)
+                continue
+            }
+            if t == TK_LT and allow_call {
+                const ta: Node | None = self.try_parse_type_args_in_expr()
+                if isinstance(ta, Node) {
+                    if self.at(TK_OPEN_PAREN) {
+                        const gcall: Node = self.mkat(NK_CALL, base.pos)
+                        gcall.a = base
+                        gcall.c = ta
+                        gcall.kids = self.parse_args()
+                        base = self.fin(gcall)
+                        continue
+                    }
+                    if self.at(TK_NO_SUB_TEMPLATE) or self.at(TK_TEMPLATE_HEAD) {
+                        const gt: Node = self.mkat(NK_TAGGED_TEMPLATE, base.pos)
+                        gt.a = base
+                        gt.c = ta
+                        gt.b = self.parse_template_literal()
+                        base = self.fin(gt)
+                        continue
+                    }
+                    const ewta: Node = self.mkat(NK_EXPR_WITH_TYPE_ARGS, base.pos)
+                    ewta.a = base
+                    ewta.c = ta
+                    base = self.fin(ewta)
+                    continue
+                }
+                break
+            }
+            if t == TK_NO_SUB_TEMPLATE or t == TK_TEMPLATE_HEAD {
+                const tt: Node = self.mkat(NK_TAGGED_TEMPLATE, base.pos)
+                tt.a = base
+                tt.b = self.parse_template_literal()
+                base = self.fin(tt)
+                continue
+            }
+            break
+        }
+        return base
+    }
+
+    def parse_template_literal() -> Node {
+        if self.at(TK_NO_SUB_TEMPLATE) {
+            const lit: Node = self.mk(TK_NO_SUB_TEMPLATE)
+            lit.text = self.sc.token_value
+            self.bump()
+            return self.fin(lit)
+        }
+        const n: Node = self.mk(NK_TEMPLATE_EXPR)
+        const head: Node = self.mk(TK_TEMPLATE_HEAD)
+        head.text = self.sc.token_value
+        self.expect(TK_TEMPLATE_HEAD)
+        n.a = self.fin(head)
+        ks: list[Node] = []
+        while true {
+            const span: Node = self.mk(NK_TEMPLATE_SPAN)
+            span.a = self.parse_expression()
+            if not self.at(TK_CLOSE_BRACE) {
+                self.fail("unterminated template span")
+            }
+            self.tok = self.sc.re_scan_template()
+            const lit2: Node = self.mk(self.tok)
+            lit2.text = self.sc.token_value
+            const was_tail: bool = self.at(TK_TEMPLATE_TAIL)
+            self.bump()
+            span.b = self.fin(lit2)
+            ks.append(self.fin(span))
+            if was_tail {
+                break
+            }
+        }
+        n.kids = ks
+        return self.fin(n)
+    }
+
+    def is_start_of_expr(t: int) -> bool {
+        if self.is_ident_like(t) {
+            return true
+        }
+        if t == TK_NUMERIC_LITERAL or t == TK_BIGINT_LITERAL or t == TK_STRING_LITERAL or t == TK_NO_SUB_TEMPLATE or t == TK_TEMPLATE_HEAD {
+            return true
+        }
+        if t == TK_OPEN_PAREN or t == TK_OPEN_BRACKET or t == TK_OPEN_BRACE {
+            return true
+        }
+        if t == TK_PLUS or t == TK_MINUS or t == TK_TILDE or t == TK_EXCL or t == TK_PLUS_PLUS or t == TK_MINUS_MINUS {
+            return true
+        }
+        if t == TK_SLASH or t == TK_SLASH_EQ or t == TK_LT {
+            return true
+        }
+        if t == TK_THIS or t == TK_SUPER or t == TK_NEW or t == TK_DELETE or t == TK_TYPEOF or t == TK_VOID or t == TK_AWAIT or t == TK_YIELD {
+            return true
+        }
+        if t == TK_TRUE or t == TK_FALSE or t == TK_NULL or t == TK_FUNCTION or t == TK_CLASS or t == TK_IMPORT {
+            return true
+        }
+        return false
+    }
+
+    def paren_arrow_state() -> int {
+        const s: Snap = self.mark()
+        self.bump()
+        result: int = 0
+        if self.at(TK_CLOSE_PAREN) {
+            self.bump()
+            if self.at(TK_ARROW) or self.at(TK_COLON) {
+                result = 1
+            }
+        } elif self.at(TK_DOT_DOT_DOT) {
+            result = 1
+        } elif self.at(TK_OPEN_BRACE) or self.at(TK_OPEN_BRACKET) {
+            result = 2
+        } elif self.is_ident_like(self.tok) or self.at(TK_THIS) {
+            self.bump()
+            const t2: int = self.tok
+            if t2 == TK_COLON {
+                result = 1
+            } elif t2 == TK_COMMA or t2 == TK_EQ {
+                result = 2
+            } elif t2 == TK_QUESTION {
+                self.bump()
+                const t3: int = self.tok
+                if t3 == TK_COMMA or t3 == TK_CLOSE_PAREN or t3 == TK_COLON or t3 == TK_EQ {
+                    result = 1
+                }
+            } elif t2 == TK_CLOSE_PAREN {
+                self.bump()
+                if self.at(TK_ARROW) or self.at(TK_COLON) {
+                    result = 1
+                }
+            }
+        }
+        self.restore(s)
+        return result
+    }
+
+    def parse_arrow_tail(mods: int, typarams: Node | None) -> Node {
+        const n: Node = self.mk(NK_ARROW_FUNCTION)
+        n.flags = mods
+        if isinstance(typarams, Node) {
+            n.d = typarams
+        }
+        n.kids = self.parse_params()
+        if self.eat(TK_COLON) {
+            n.b = self.parse_type_or_predicate()
+        }
+        self.expect(TK_ARROW)
+        if self.at(TK_OPEN_BRACE) {
+            n.a = self.parse_block()
+        } else {
+            const saved: bool = self.no_in
+            self.no_in = false
+            n.a = self.parse_assign()
+            self.no_in = saved
+        }
+        return self.fin(n)
+    }
+
+    def try_parse_paren_arrow(mods: int) -> Node | None {
+        const s: Snap = self.mark()
+        const saved_count: int = self.node_count
+        try {
+            return self.parse_arrow_tail(mods, none)
+        } except ValueError {
+            self.restore(s)
+            self.node_count = saved_count
+            return none
+        }
+    }
+
+    def try_parse_typed_arrow() -> Node | None {
+        const s: Snap = self.mark()
+        const saved_count: int = self.node_count
+        try {
+            const tps: Node = self.parse_type_params()
+            if not self.at(TK_OPEN_PAREN) {
+                self.fail("not an arrow")
+            }
+            return self.parse_arrow_tail(0, tps)
+        } except ValueError {
+            self.restore(s)
+            self.node_count = saved_count
+            return none
+        }
+    }
+
+    def parse_simple_arrow(mods: int) -> Node {
+        const n: Node = self.mk(NK_ARROW_FUNCTION)
+        n.flags = mods
+        const prm: Node = self.mk(NK_PARAMETER)
+        prm.a = self.parse_ident()
+        ps: list[Node] = [self.fin(prm)]
+        n.kids = ps
+        self.expect(TK_ARROW)
+        if self.at(TK_OPEN_BRACE) {
+            n.a = self.parse_block()
+        } else {
+            n.a = self.parse_assign()
+        }
+        return self.fin(n)
+    }
+
+    def try_parse_async_arrow() -> Node | None {
+        const nt: int = self.peek_no_lb()
+        if nt < 0 {
+            return none
+        }
+        if self.is_ident_like(nt) and nt != TK_ASYNC {
+            const s: Snap = self.mark()
+            self.bump()
+            ok: bool = false
+            if self.is_ident_like(self.tok) {
+                if self.peek_no_lb() == TK_ARROW {
+                    ok = true
+                }
+            }
+            if ok {
+                return self.parse_simple_arrow(MOD_ASYNC)
+            }
+            self.restore(s)
+            return none
+        }
+        if nt == TK_OPEN_PAREN {
+            const s2: Snap = self.mark()
+            const saved_count: int = self.node_count
+            self.bump()
+            const st: int = self.paren_arrow_state()
+            if st == 1 {
+                return self.parse_arrow_tail(MOD_ASYNC, none)
+            }
+            if st == 2 {
+                try {
+                    return self.parse_arrow_tail(MOD_ASYNC, none)
+                } except ValueError {
+                    self.restore(s2)
+                    self.node_count = saved_count
+                    return none
+                }
+            }
+            self.restore(s2)
+            return none
+        }
+        if nt == TK_LT {
+            const s3: Snap = self.mark()
+            const saved_count2: int = self.node_count
+            self.bump()
+            try {
+                const tps: Node = self.parse_type_params()
+                if not self.at(TK_OPEN_PAREN) {
+                    self.fail("not an arrow")
+                }
+                return self.parse_arrow_tail(MOD_ASYNC, tps)
+            } except ValueError {
+                self.restore(s3)
+                self.node_count = saved_count2
+                return none
+            }
+        }
+        return none
+    }
+
+    def try_parse_type_args_in_expr() -> Node | None {
+        const s: Snap = self.mark()
+        const saved_count: int = self.node_count
+        try {
+            const ta: Node = self.parse_type_args()
+            const t: int = self.tok
+            if t == TK_OPEN_PAREN or t == TK_NO_SUB_TEMPLATE or t == TK_TEMPLATE_HEAD {
+                return ta
+            }
+            if not self.is_start_of_expr(t) {
+                return ta
+            }
+            self.restore(s)
+            self.node_count = saved_count
+            return none
+        } except ValueError {
+            self.restore(s)
+            self.node_count = saved_count
+            return none
+        }
+    }
+
+    def parse_primary() -> Node {
+        const t: int = self.tok
+        if t == TK_NUMERIC_LITERAL or t == TK_BIGINT_LITERAL or t == TK_STRING_LITERAL or t == TK_NO_SUB_TEMPLATE or t == TK_REGEX_LITERAL {
+            const lit: Node = self.mk(t)
+            lit.text = self.sc.token_value
+            self.bump()
+            return self.fin(lit)
+        }
+        if t == TK_TEMPLATE_HEAD {
+            return self.parse_template_literal()
+        }
+        if t == TK_OPEN_PAREN {
+            const p: Node = self.mk(NK_PAREN_EXPR)
+            self.bump()
+            const saved: bool = self.no_in
+            self.no_in = false
+            p.a = self.parse_expression()
+            self.no_in = saved
+            self.expect(TK_CLOSE_PAREN)
+            return self.fin(p)
+        }
+        if t == TK_OPEN_BRACKET {
+            return self.parse_array_literal()
+        }
+        if t == TK_OPEN_BRACE {
+            return self.parse_object_literal()
+        }
+        if t == TK_FUNCTION {
+            return self.parse_function_expr()
+        }
+        if t == TK_CLASS {
+            return self.parse_class_like(NK_CLASS_EXPR, 0)
+        }
+        if t == TK_THIS or t == TK_SUPER or t == TK_TRUE or t == TK_FALSE or t == TK_NULL {
+            const kw: Node = self.mk(t)
+            self.bump()
+            return self.fin(kw)
+        }
+        if t == TK_IMPORT {
+            const pos: int = self.pos_of()
+            self.bump()
+            if self.at(TK_DOT) {
+                self.bump()
+                const mp: Node = self.mkat(NK_META_PROPERTY, pos)
+                mp.a = self.parse_ident_name()
+                return self.fin(mp)
+            }
+            const imp: Node = self.mkat(TK_IMPORT, pos)
+            self.node_count = self.node_count + 1
+            imp.end = pos + 6
+            return imp
+        }
+        if t == TK_ASYNC {
+            if self.peek_no_lb() == TK_FUNCTION {
+                self.bump()
+                return self.parse_function_expr_flags(MOD_ASYNC)
+            }
+        }
+        if self.is_ident_like(t) {
+            const id: Node = self.mk(TK_IDENTIFIER)
+            id.text = self.sc.token_value
+            self.bump()
+            return self.fin(id)
+        }
+        self.fail(f"unexpected token in expression: {token_name(t)}")
+        return self.mk(NK_OMITTED)
+    }
+
+    def parse_array_literal() -> Node {
+        const n: Node = self.mk(NK_ARRAY_LITERAL)
+        self.expect(TK_OPEN_BRACKET)
+        ks: list[Node] = []
+        while not self.at(TK_CLOSE_BRACKET) {
+            if self.at(TK_COMMA) {
+                const o: Node = self.mk(NK_OMITTED)
+                ks.append(self.fin(o))
+                self.bump()
+                continue
+            }
+            if self.at(TK_DOT_DOT_DOT) {
+                const sp: Node = self.mk(NK_SPREAD)
+                self.bump()
+                sp.a = self.parse_assign()
+                ks.append(self.fin(sp))
+            } else {
+                ks.append(self.parse_assign())
+            }
+            if not self.eat(TK_COMMA) {
+                break
+            }
+        }
+        self.expect(TK_CLOSE_BRACKET)
+        n.kids = ks
+        return self.fin(n)
+    }
+
+    def parse_object_literal() -> Node {
+        const n: Node = self.mk(NK_OBJECT_LITERAL)
+        self.expect(TK_OPEN_BRACE)
+        ks: list[Node] = []
+        while not self.at(TK_CLOSE_BRACE) {
+            ks.append(self.parse_object_member())
+            if not self.eat(TK_COMMA) {
+                break
+            }
+        }
+        self.expect(TK_CLOSE_BRACE)
+        n.kids = ks
+        return self.fin(n)
+    }
+
+    def parse_object_member() -> Node {
+        const pos: int = self.pos_of()
+        if self.at(TK_DOT_DOT_DOT) {
+            const sp: Node = self.mk(NK_SPREAD_ASSIGNMENT)
+            self.bump()
+            sp.a = self.parse_assign()
+            return self.fin(sp)
+        }
+        mods: int = 0
+        if self.at(TK_ASYNC) {
+            const nt: int = self.peek_no_lb()
+            if nt > 0 and (self.is_ident_name_tok(nt) or nt == TK_OPEN_BRACKET or nt == TK_STRING_LITERAL or nt == TK_NUMERIC_LITERAL or nt == TK_ASTERISK) {
+                mods = mods + MOD_ASYNC
+                self.bump()
+            }
+        }
+        is_gen: bool = false
+        if self.at(TK_ASTERISK) {
+            is_gen = true
+            self.bump()
+        }
+        if (self.at(TK_GET) or self.at(TK_SET)) and mods == 0 and not is_gen {
+            const which: int = self.tok
+            const nt2: int = self.peek()
+            if self.is_ident_name_tok(nt2) or nt2 == TK_OPEN_BRACKET or nt2 == TK_STRING_LITERAL or nt2 == TK_NUMERIC_LITERAL {
+                kind: int = NK_GET_ACCESSOR
+                if which == TK_SET {
+                    kind = NK_SET_ACCESSOR
+                }
+                const acc: Node = self.mkat(kind, pos)
+                self.bump()
+                acc.a = self.parse_property_name()
+                acc.kids = self.parse_params()
+                if self.eat(TK_COLON) {
+                    acc.b = self.parse_type_or_predicate()
+                }
+                acc.c = self.parse_block()
+                return self.fin(acc)
+            }
+        }
+        const name: Node = self.parse_property_name()
+        if self.at(TK_OPEN_PAREN) or self.at(TK_LT) {
+            const m: Node = self.mkat(NK_METHOD_DECLARATION, pos)
+            m.flags = mods
+            if is_gen {
+                m.op = 2
+            }
+            m.a = name
+            self.parse_sig_tail(m)
+            m.d = self.parse_block()
+            return self.fin(m)
+        }
+        if self.eat(TK_COLON) {
+            const pa: Node = self.mkat(NK_PROPERTY_ASSIGNMENT, pos)
+            pa.a = name
+            pa.b = self.parse_assign()
+            return self.fin(pa)
+        }
+        const sh: Node = self.mkat(NK_SHORTHAND_PROPERTY, pos)
+        sh.a = name
+        if self.eat(TK_EQ) {
+            sh.b = self.parse_assign()
+        }
+        return self.fin(sh)
+    }
+
+    def parse_function_expr() -> Node {
+        return self.parse_function_expr_flags(0)
+    }
+
+    def parse_function_expr_flags(mods: int) -> Node {
+        const n: Node = self.mk(NK_FUNCTION_EXPR)
+        n.flags = mods
+        self.expect(TK_FUNCTION)
+        if self.eat(TK_ASTERISK) {
+            n.op = 2
+        }
+        if self.is_ident_like(self.tok) {
+            n.a = self.parse_ident()
+        }
+        self.parse_sig_tail(n)
+        n.d = self.parse_block()
+        return self.fin(n)
+    }
+
+    def parse_source_file() -> Node {
+        const n: Node = self.mk(NK_SOURCE_FILE)
+        ks: list[Node] = []
+        while not self.at(TK_EOF) {
+            ks.append(self.parse_statement())
+        }
+        n.kids = ks
+        return self.fin(n)
+    }
+
+    def parse_block() -> Node {
+        const n: Node = self.mk(NK_BLOCK)
+        self.expect(TK_OPEN_BRACE)
+        ks: list[Node] = []
+        while not (self.at(TK_CLOSE_BRACE) or self.at(TK_EOF)) {
+            ks.append(self.parse_statement())
+        }
+        self.expect(TK_CLOSE_BRACE)
+        n.kids = ks
+        return self.fin(n)
+    }
+
+    def parse_statement() -> Node {
+        const t: int = self.tok
+        if t == TK_OPEN_BRACE {
+            return self.parse_block()
+        }
+        if t == TK_SEMICOLON {
+            const e: Node = self.mk(NK_EMPTY_STATEMENT)
+            self.bump()
+            return self.fin(e)
+        }
+        if t == TK_VAR {
+            return self.parse_var_stmt(0)
+        }
+        if t == TK_CONST {
+            if self.peek() == TK_ENUM {
+                return self.parse_enum(0)
+            }
+            return self.parse_var_stmt(0)
+        }
+        if t == TK_LET {
+            const nt: int = self.peek()
+            if self.is_ident_like(nt) or nt == TK_OPEN_BRACE or nt == TK_OPEN_BRACKET {
+                return self.parse_var_stmt(0)
+            }
+        }
+        if t == TK_USING {
+            const nt2: int = self.peek_no_lb()
+            if nt2 > 0 and self.is_ident_like(nt2) {
+                return self.parse_var_stmt(0)
+            }
+        }
+        if t == TK_AWAIT {
+            const s: Snap = self.mark()
+            self.bump()
+            if self.at(TK_USING) and not self.sc.line_break_before {
+                const nt3: int = self.peek_no_lb()
+                if nt3 > 0 and self.is_ident_like(nt3) {
+                    self.restore(s)
+                    self.bump()
+                    return self.parse_var_stmt(0)
+                }
+            }
+            self.restore(s)
+        }
+        if t == TK_FUNCTION {
+            return self.parse_function_decl(0)
+        }
+        if t == TK_CLASS {
+            return self.parse_class_like(NK_CLASS_DECLARATION, 0)
+        }
+        if t == TK_IF {
+            return self.parse_if()
+        }
+        if t == TK_DO {
+            return self.parse_do()
+        }
+        if t == TK_WHILE {
+            return self.parse_while()
+        }
+        if t == TK_FOR {
+            return self.parse_for()
+        }
+        if t == TK_CONTINUE {
+            return self.parse_jump(NK_CONTINUE_STATEMENT)
+        }
+        if t == TK_BREAK {
+            return self.parse_jump(NK_BREAK_STATEMENT)
+        }
+        if t == TK_RETURN {
+            return self.parse_return()
+        }
+        if t == TK_WITH {
+            return self.parse_with()
+        }
+        if t == TK_SWITCH {
+            return self.parse_switch()
+        }
+        if t == TK_THROW {
+            return self.parse_throw()
+        }
+        if t == TK_TRY {
+            return self.parse_try()
+        }
+        if t == TK_DEBUGGER {
+            const d: Node = self.mk(NK_DEBUGGER_STATEMENT)
+            self.bump()
+            self.semi()
+            return self.fin(d)
+        }
+        if t == TK_AT {
+            return self.parse_decorated_declaration()
+        }
+        if t == TK_IMPORT {
+            const nt4: int = self.peek()
+            if nt4 != TK_OPEN_PAREN and nt4 != TK_DOT {
+                return self.parse_import()
+            }
+        }
+        if t == TK_EXPORT {
+            return self.parse_export()
+        }
+        if t == TK_INTERFACE {
+            return self.parse_interface(0)
+        }
+        if t == TK_ENUM {
+            return self.parse_enum(0)
+        }
+        if t == TK_TYPE {
+            if self.is_type_alias_start() {
+                return self.parse_type_alias(0)
+            }
+        }
+        if t == TK_NAMESPACE or t == TK_MODULE {
+            const nt5: int = self.peek_no_lb()
+            if nt5 > 0 and (self.is_ident_like(nt5) or nt5 == TK_STRING_LITERAL) {
+                return self.parse_module(0)
+            }
+        }
+        if t == TK_GLOBAL and self.peek() == TK_OPEN_BRACE {
+            return self.parse_module(0)
+        }
+        if t == TK_DECLARE or t == TK_ABSTRACT or t == TK_ASYNC {
+            const found: int = self.find_decl_after_mods()
+            if found != 0 {
+                return self.parse_decl_with_mods(0)
+            }
+        }
+        if self.is_ident_like(t) and self.peek() == TK_COLON {
+            const lbl: Node = self.mk(NK_LABELED_STATEMENT)
+            lbl.a = self.parse_ident()
+            self.expect(TK_COLON)
+            lbl.b = self.parse_statement()
+            return self.fin(lbl)
+        }
+        const es: Node = self.mk(NK_EXPRESSION_STATEMENT)
+        es.a = self.parse_expression()
+        self.semi()
+        return self.fin(es)
+    }
+
+    def is_type_alias_start() -> bool {
+        const s: Snap = self.mark()
+        self.bump()
+        result: bool = false
+        if self.is_ident_like(self.tok) and not self.sc.line_break_before {
+            self.bump()
+            result = self.at(TK_LT) or self.at(TK_EQ)
+        }
+        self.restore(s)
+        return result
+    }
+
+    def find_decl_after_mods() -> int {
+        const s: Snap = self.mark()
+        found: int = 0
+        steps: int = 0
+        while steps < 8 {
+            const t: int = self.tok
+            if t == TK_DECLARE or t == TK_ABSTRACT or t == TK_ASYNC or t == TK_EXPORT or t == TK_DEFAULT {
+                self.bump()
+                steps = steps + 1
+                continue
+            }
+            if t == TK_CLASS or t == TK_FUNCTION or t == TK_INTERFACE or t == TK_ENUM or t == TK_VAR or t == TK_LET or t == TK_CONST or t == TK_TYPE or t == TK_NAMESPACE or t == TK_MODULE or t == TK_GLOBAL or t == TK_IMPORT {
+                found = t
+            }
+            break
+        }
+        self.restore(s)
+        return found
+    }
+
+    def parse_decl_with_mods(start_mods: int) -> Node {
+        mods: int = start_mods
+        while true {
+            const t: int = self.tok
+            if t == TK_DECLARE {
+                mods = mods + MOD_DECLARE
+                self.bump()
+                continue
+            }
+            if t == TK_ABSTRACT {
+                mods = mods + MOD_ABSTRACT
+                self.bump()
+                continue
+            }
+            if t == TK_ASYNC {
+                mods = mods + MOD_ASYNC
+                self.bump()
+                continue
+            }
+            break
+        }
+        const t2: int = self.tok
+        if t2 == TK_CLASS {
+            return self.parse_class_like(NK_CLASS_DECLARATION, mods)
+        }
+        if t2 == TK_FUNCTION {
+            return self.parse_function_decl(mods)
+        }
+        if t2 == TK_INTERFACE {
+            return self.parse_interface(mods)
+        }
+        if t2 == TK_ENUM or (t2 == TK_CONST and self.peek() == TK_ENUM) {
+            return self.parse_enum(mods)
+        }
+        if t2 == TK_TYPE {
+            return self.parse_type_alias(mods)
+        }
+        if t2 == TK_NAMESPACE or t2 == TK_MODULE or t2 == TK_GLOBAL {
+            return self.parse_module(mods)
+        }
+        if t2 == TK_VAR or t2 == TK_LET or t2 == TK_CONST or t2 == TK_USING {
+            return self.parse_var_stmt(mods)
+        }
+        if t2 == TK_IMPORT {
+            return self.parse_import()
+        }
+        self.fail(f"expected declaration after modifiers, found {token_name(t2)}")
+        return self.mk(NK_EMPTY_STATEMENT)
+    }
+
+    def parse_decorated_declaration() -> Node {
+        decorators: list[Node] = []
+        while self.at(TK_AT) {
+            const d: Node = self.mk(NK_DECORATOR)
+            self.bump()
+            d.a = self.parse_lhs()
+            decorators.append(self.fin(d))
+        }
+        mods: int = 0
+        while self.at(TK_EXPORT) or self.at(TK_DECLARE) or self.at(TK_ABSTRACT) or self.at(TK_DEFAULT) {
+            if self.at(TK_EXPORT) {
+                mods = mods + MOD_EXPORT
+            } elif self.at(TK_DECLARE) {
+                mods = mods + MOD_DECLARE
+            } elif self.at(TK_DEFAULT) {
+                mods = mods + MOD_DEFAULT
+            } else {
+                mods = mods + MOD_ABSTRACT
+            }
+            self.bump()
+        }
+        const cls: Node = self.parse_class_like(NK_CLASS_DECLARATION, mods)
+        cls.d = self.wrap_list(decorators)
+        return cls
+    }
+
+    def wrap_list(items: list[Node]) -> Node {
+        const w: Node = Node(0, 0)
+        w.kids = items
+        return w
+    }
+
+    def parse_var_stmt(mods: int) -> Node {
+        const n: Node = self.mk(NK_VARIABLE_STATEMENT)
+        n.flags = mods
+        n.a = self.parse_var_decl_list()
+        self.semi()
+        return self.fin(n)
+    }
+
+    def parse_var_decl_list() -> Node {
+        const lst: Node = self.mk(NK_VARIABLE_DECLARATION_LIST)
+        const t: int = self.tok
+        if t == TK_VAR or t == TK_LET or t == TK_CONST or t == TK_USING {
+            lst.op = t
+            self.bump()
+        } else {
+            self.fail(f"expected var/let/const/using, found {token_name(t)}")
+        }
+        ks: list[Node] = []
+        while true {
+            const d: Node = self.mk(NK_VARIABLE_DECLARATION)
+            d.a = self.parse_binding_name()
+            if self.eat(TK_EXCL) {
+                d.op = 1
+            }
+            if self.eat(TK_COLON) {
+                d.b = self.parse_type()
+            }
+            if self.eat(TK_EQ) {
+                d.c = self.parse_assign()
+            }
+            ks.append(self.fin(d))
+            if not self.eat(TK_COMMA) {
+                break
+            }
+        }
+        lst.kids = ks
+        return self.fin(lst)
+    }
+
+    def parse_if() -> Node {
+        const n: Node = self.mk(NK_IF_STATEMENT)
+        self.expect(TK_IF)
+        self.expect(TK_OPEN_PAREN)
+        n.a = self.parse_expression()
+        self.expect(TK_CLOSE_PAREN)
+        n.b = self.parse_statement()
+        if self.eat(TK_ELSE) {
+            n.c = self.parse_statement()
+        }
+        return self.fin(n)
+    }
+
+    def parse_do() -> Node {
+        const n: Node = self.mk(NK_DO_STATEMENT)
+        self.expect(TK_DO)
+        n.a = self.parse_statement()
+        self.expect(TK_WHILE)
+        self.expect(TK_OPEN_PAREN)
+        n.b = self.parse_expression()
+        self.expect(TK_CLOSE_PAREN)
+        self.eat(TK_SEMICOLON)
+        return self.fin(n)
+    }
+
+    def parse_while() -> Node {
+        const n: Node = self.mk(NK_WHILE_STATEMENT)
+        self.expect(TK_WHILE)
+        self.expect(TK_OPEN_PAREN)
+        n.a = self.parse_expression()
+        self.expect(TK_CLOSE_PAREN)
+        n.b = self.parse_statement()
+        return self.fin(n)
+    }
+
+    def parse_for() -> Node {
+        const pos: int = self.pos_of()
+        self.expect(TK_FOR)
+        is_await: bool = false
+        if self.eat(TK_AWAIT) {
+            is_await = true
+        }
+        self.expect(TK_OPEN_PAREN)
+        init: Node | None = none
+        const t: int = self.tok
+        if t == TK_SEMICOLON {
+        } elif t == TK_VAR or t == TK_LET or t == TK_CONST or (t == TK_USING and self.is_ident_like(self.peek())) {
+            const saved: bool = self.no_in
+            self.no_in = true
+            init = self.parse_var_decl_list()
+            self.no_in = saved
+        } else {
+            const saved2: bool = self.no_in
+            self.no_in = true
+            init = self.parse_expression()
+            self.no_in = saved2
+        }
+        if self.at(TK_OF) {
+            const fo: Node = self.mkat(NK_FOR_OF_STATEMENT, pos)
+            if is_await {
+                fo.flags = 1
+            }
+            fo.a = init
+            self.bump()
+            fo.b = self.parse_assign()
+            self.expect(TK_CLOSE_PAREN)
+            fo.c = self.parse_statement()
+            return self.fin(fo)
+        }
+        if self.at(TK_IN) {
+            const fi: Node = self.mkat(NK_FOR_IN_STATEMENT, pos)
+            fi.a = init
+            self.bump()
+            fi.b = self.parse_expression()
+            self.expect(TK_CLOSE_PAREN)
+            fi.c = self.parse_statement()
+            return self.fin(fi)
+        }
+        const n: Node = self.mkat(NK_FOR_STATEMENT, pos)
+        n.a = init
+        self.expect(TK_SEMICOLON)
+        if not self.at(TK_SEMICOLON) {
+            n.b = self.parse_expression()
+        }
+        self.expect(TK_SEMICOLON)
+        if not self.at(TK_CLOSE_PAREN) {
+            n.c = self.parse_expression()
+        }
+        self.expect(TK_CLOSE_PAREN)
+        n.d = self.parse_statement()
+        return self.fin(n)
+    }
+
+    def parse_jump(kind: int) -> Node {
+        const n: Node = self.mk(kind)
+        self.bump()
+        if not self.can_semi() and self.is_ident_like(self.tok) {
+            n.a = self.parse_ident()
+        }
+        self.semi()
+        return self.fin(n)
+    }
+
+    def parse_return() -> Node {
+        const n: Node = self.mk(NK_RETURN_STATEMENT)
+        self.expect(TK_RETURN)
+        if not self.can_semi() {
+            n.a = self.parse_expression()
+        }
+        self.semi()
+        return self.fin(n)
+    }
+
+    def parse_with() -> Node {
+        const n: Node = self.mk(NK_WITH_STATEMENT)
+        self.expect(TK_WITH)
+        self.expect(TK_OPEN_PAREN)
+        n.a = self.parse_expression()
+        self.expect(TK_CLOSE_PAREN)
+        n.b = self.parse_statement()
+        return self.fin(n)
+    }
+
+    def parse_switch() -> Node {
+        const n: Node = self.mk(NK_SWITCH_STATEMENT)
+        self.expect(TK_SWITCH)
+        self.expect(TK_OPEN_PAREN)
+        n.a = self.parse_expression()
+        self.expect(TK_CLOSE_PAREN)
+        const cb: Node = self.mk(NK_CASE_BLOCK)
+        self.expect(TK_OPEN_BRACE)
+        ks: list[Node] = []
+        while not (self.at(TK_CLOSE_BRACE) or self.at(TK_EOF)) {
+            if self.at(TK_CASE) {
+                const cc: Node = self.mk(NK_CASE_CLAUSE)
+                self.bump()
+                cc.a = self.parse_expression()
+                self.expect(TK_COLON)
+                stmts: list[Node] = []
+                while not (self.at(TK_CASE) or self.at(TK_DEFAULT) or self.at(TK_CLOSE_BRACE) or self.at(TK_EOF)) {
+                    stmts.append(self.parse_statement())
+                }
+                cc.kids = stmts
+                ks.append(self.fin(cc))
+            } elif self.at(TK_DEFAULT) {
+                const dc: Node = self.mk(NK_DEFAULT_CLAUSE)
+                self.bump()
+                self.expect(TK_COLON)
+                stmts2: list[Node] = []
+                while not (self.at(TK_CASE) or self.at(TK_DEFAULT) or self.at(TK_CLOSE_BRACE) or self.at(TK_EOF)) {
+                    stmts2.append(self.parse_statement())
+                }
+                dc.kids = stmts2
+                ks.append(self.fin(dc))
+            } else {
+                self.fail(f"expected case or default, found {token_name(self.tok)}")
+            }
+        }
+        self.expect(TK_CLOSE_BRACE)
+        cb.kids = ks
+        n.b = self.fin(cb)
+        return self.fin(n)
+    }
+
+    def parse_throw() -> Node {
+        const n: Node = self.mk(NK_THROW_STATEMENT)
+        self.expect(TK_THROW)
+        n.a = self.parse_expression()
+        self.semi()
+        return self.fin(n)
+    }
+
+    def parse_try() -> Node {
+        const n: Node = self.mk(NK_TRY_STATEMENT)
+        self.expect(TK_TRY)
+        n.a = self.parse_block()
+        if self.at(TK_CATCH) {
+            const cc: Node = self.mk(NK_CATCH_CLAUSE)
+            self.bump()
+            if self.eat(TK_OPEN_PAREN) {
+                const vd: Node = self.mk(NK_VARIABLE_DECLARATION)
+                vd.a = self.parse_binding_name()
+                if self.eat(TK_COLON) {
+                    vd.b = self.parse_type()
+                }
+                cc.a = self.fin(vd)
+                self.expect(TK_CLOSE_PAREN)
+            }
+            cc.b = self.parse_block()
+            n.b = self.fin(cc)
+        }
+        if self.eat(TK_FINALLY) {
+            n.c = self.parse_block()
+        }
+        return self.fin(n)
+    }
+
+    def parse_function_decl(mods: int) -> Node {
+        const n: Node = self.mk(NK_FUNCTION_DECLARATION)
+        n.flags = mods
+        self.expect(TK_FUNCTION)
+        if self.eat(TK_ASTERISK) {
+            n.op = 2
+        }
+        if self.is_ident_like(self.tok) {
+            n.a = self.parse_ident()
+        }
+        self.parse_sig_tail(n)
+        if self.at(TK_OPEN_BRACE) {
+            n.d = self.parse_block()
+        } else {
+            self.semi()
+        }
+        return self.fin(n)
+    }
+
+    def parse_class_like(kind: int, mods: int) -> Node {
+        const n: Node = self.mk(kind)
+        n.flags = mods
+        self.expect(TK_CLASS)
+        if self.is_ident_like(self.tok) and not self.at(TK_EXTENDS) {
+            n.a = self.parse_ident()
+        }
+        if self.at(TK_LT) {
+            n.b = self.parse_type_params()
+        }
+        heritage: list[Node] = []
+        while self.at(TK_EXTENDS) or self.at(TK_IMPLEMENTS) {
+            const hc: Node = self.mk(NK_HERITAGE_CLAUSE)
+            hc.op = self.tok
+            self.bump()
+            hks: list[Node] = []
+            while true {
+                const ew: Node = self.mk(NK_EXPR_WITH_TYPE_ARGS)
+                ew.a = self.parse_member_rest(self.parse_primary(), false)
+                if self.at(TK_LT) {
+                    ew.c = self.parse_type_args()
+                }
+                hks.append(self.fin(ew))
+                if not self.eat(TK_COMMA) {
+                    break
+                }
+            }
+            hc.kids = hks
+            heritage.append(self.fin(hc))
+        }
+        const members: Node = Node(0, 0)
+        self.expect(TK_OPEN_BRACE)
+        mks: list[Node] = []
+        while not (self.at(TK_CLOSE_BRACE) or self.at(TK_EOF)) {
+            mks.append(self.parse_class_member())
+        }
+        self.expect(TK_CLOSE_BRACE)
+        members.kids = mks
+        n.c = members
+        if len(heritage) > 0 {
+            n.d = self.wrap_list(heritage)
+        }
+        return self.fin(n)
+    }
+
+    def parse_class_member() -> Node {
+        const pos: int = self.pos_of()
+        if self.at(TK_SEMICOLON) {
+            const sc_el: Node = self.mk(NK_SEMICOLON_CLASS_ELEMENT)
+            self.bump()
+            return self.fin(sc_el)
+        }
+        decorators: list[Node] = []
+        while self.at(TK_AT) {
+            const d: Node = self.mk(NK_DECORATOR)
+            self.bump()
+            d.a = self.parse_lhs()
+            decorators.append(self.fin(d))
+        }
+        if self.at(TK_STATIC) and self.peek() == TK_OPEN_BRACE {
+            const sb: Node = self.mkat(NK_CLASS_STATIC_BLOCK, pos)
+            self.bump()
+            sb.a = self.parse_block()
+            return self.fin(sb)
+        }
+        mods: int = 0
+        while true {
+            const t: int = self.tok
+            is_mod: bool = false
+            bit: int = 0
+            if t == TK_PUBLIC {
+                bit = MOD_PUBLIC
+            } elif t == TK_PRIVATE {
+                bit = MOD_PRIVATE
+            } elif t == TK_PROTECTED {
+                bit = MOD_PROTECTED
+            } elif t == TK_STATIC {
+                bit = MOD_STATIC
+            } elif t == TK_READONLY {
+                bit = MOD_READONLY
+            } elif t == TK_ABSTRACT {
+                bit = MOD_ABSTRACT
+            } elif t == TK_OVERRIDE {
+                bit = MOD_OVERRIDE
+            } elif t == TK_DECLARE {
+                bit = MOD_DECLARE
+            } elif t == TK_ACCESSOR {
+                bit = MOD_ACCESSOR
+            } elif t == TK_ASYNC {
+                bit = MOD_ASYNC
+            }
+            if bit != 0 {
+                const nt: int = self.peek()
+                if self.is_ident_name_tok(nt) or nt == TK_OPEN_BRACKET or nt == TK_STRING_LITERAL or nt == TK_NUMERIC_LITERAL or nt == TK_ASTERISK or nt == TK_PRIVATE_IDENTIFIER or (t == TK_STATIC and nt == TK_OPEN_BRACE) {
+                    if t == TK_STATIC and nt == TK_OPEN_BRACE {
+                        is_mod = false
+                    } else {
+                        mods = mods + bit
+                        self.bump()
+                        is_mod = true
+                    }
+                }
+            }
+            if not is_mod {
+                break
+            }
+        }
+        is_gen: bool = false
+        if self.at(TK_ASTERISK) {
+            is_gen = true
+            self.bump()
+        }
+        if self.at(TK_OPEN_BRACKET) and self.is_index_sig_start() {
+            const ix: Node = self.mkat(NK_INDEX_SIGNATURE, pos)
+            ix.flags = mods
+            self.bump()
+            const prm: Node = self.mk(NK_PARAMETER)
+            prm.a = self.parse_ident()
+            self.expect(TK_COLON)
+            prm.b = self.parse_type()
+            ix.a = self.fin(prm)
+            self.expect(TK_CLOSE_BRACKET)
+            if self.eat(TK_COLON) {
+                ix.b = self.parse_type()
+            }
+            self.eat(TK_SEMICOLON)
+            return self.fin(ix)
+        }
+        if (self.at(TK_GET) or self.at(TK_SET)) and not is_gen {
+            const which: int = self.tok
+            const nt2: int = self.peek()
+            if self.is_ident_name_tok(nt2) or nt2 == TK_OPEN_BRACKET or nt2 == TK_STRING_LITERAL or nt2 == TK_NUMERIC_LITERAL or nt2 == TK_PRIVATE_IDENTIFIER {
+                kind: int = NK_GET_ACCESSOR
+                if which == TK_SET {
+                    kind = NK_SET_ACCESSOR
+                }
+                const acc: Node = self.mkat(kind, pos)
+                acc.flags = mods
+                self.bump()
+                acc.a = self.parse_property_name()
+                acc.kids = self.parse_params()
+                if self.eat(TK_COLON) {
+                    acc.b = self.parse_type_or_predicate()
+                }
+                if self.at(TK_OPEN_BRACE) {
+                    acc.c = self.parse_block()
+                } else {
+                    self.semi()
+                }
+                return self.fin(acc)
+            }
+        }
+        if self.at(TK_CONSTRUCTOR) and (self.peek() == TK_OPEN_PAREN or self.peek() == TK_LT) {
+            const ctor: Node = self.mkat(NK_CONSTRUCTOR, pos)
+            ctor.flags = mods
+            self.bump()
+            self.parse_sig_tail(ctor)
+            if self.at(TK_OPEN_BRACE) {
+                ctor.d = self.parse_block()
+            } else {
+                self.semi()
+            }
+            return self.fin(ctor)
+        }
+        const name: Node = self.parse_property_name()
+        opt: bool = self.eat(TK_QUESTION)
+        excl: bool = false
+        if not opt {
+            excl = self.eat(TK_EXCL)
+        }
+        if self.at(TK_OPEN_PAREN) or self.at(TK_LT) {
+            const m: Node = self.mkat(NK_METHOD_DECLARATION, pos)
+            m.flags = mods
+            if is_gen {
+                m.op = 2
+            }
+            m.a = name
+            self.parse_sig_tail(m)
+            if self.at(TK_OPEN_BRACE) {
+                m.d = self.parse_block()
+            } else {
+                self.semi()
+            }
+            return self.fin(m)
+        }
+        const p: Node = self.mkat(NK_PROPERTY_DECLARATION, pos)
+        p.flags = mods
+        p.a = name
+        if opt {
+            p.op = 1
+        }
+        if excl {
+            p.op = 3
+        }
+        if self.eat(TK_COLON) {
+            p.b = self.parse_type()
+        }
+        if self.eat(TK_EQ) {
+            p.c = self.parse_assign()
+        }
+        self.semi()
+        return self.fin(p)
+    }
+
+    def parse_interface(mods: int) -> Node {
+        const n: Node = self.mk(NK_INTERFACE_DECLARATION)
+        n.flags = mods
+        self.expect(TK_INTERFACE)
+        n.a = self.parse_ident()
+        if self.at(TK_LT) {
+            n.b = self.parse_type_params()
+        }
+        heritage: list[Node] = []
+        while self.at(TK_EXTENDS) {
+            const hc: Node = self.mk(NK_HERITAGE_CLAUSE)
+            hc.op = TK_EXTENDS
+            self.bump()
+            hks: list[Node] = []
+            while true {
+                const ew: Node = self.mk(NK_EXPR_WITH_TYPE_ARGS)
+                ew.a = self.parse_member_rest(self.parse_primary(), false)
+                if self.at(TK_LT) {
+                    ew.c = self.parse_type_args()
+                }
+                hks.append(self.fin(ew))
+                if not self.eat(TK_COMMA) {
+                    break
+                }
+            }
+            hc.kids = hks
+            heritage.append(self.fin(hc))
+        }
+        self.expect(TK_OPEN_BRACE)
+        const body: Node = Node(0, 0)
+        body.kids = self.parse_type_members()
+        self.expect(TK_CLOSE_BRACE)
+        n.c = body
+        if len(heritage) > 0 {
+            n.d = self.wrap_list(heritage)
+        }
+        return self.fin(n)
+    }
+
+    def parse_type_alias(mods: int) -> Node {
+        const n: Node = self.mk(NK_TYPE_ALIAS_DECLARATION)
+        n.flags = mods
+        self.expect(TK_TYPE)
+        n.a = self.parse_ident()
+        if self.at(TK_LT) {
+            n.b = self.parse_type_params()
+        }
+        self.expect(TK_EQ)
+        n.c = self.parse_type()
+        self.semi()
+        return self.fin(n)
+    }
+
+    def parse_enum(mods: int) -> Node {
+        const n: Node = self.mk(NK_ENUM_DECLARATION)
+        n.flags = mods
+        if self.eat(TK_CONST) {
+            n.op = 1
+        }
+        self.expect(TK_ENUM)
+        n.a = self.parse_ident()
+        self.expect(TK_OPEN_BRACE)
+        ks: list[Node] = []
+        while not self.at(TK_CLOSE_BRACE) {
+            const m: Node = self.mk(NK_ENUM_MEMBER)
+            m.a = self.parse_property_name()
+            if self.eat(TK_EQ) {
+                m.b = self.parse_assign()
+            }
+            ks.append(self.fin(m))
+            if not self.eat(TK_COMMA) {
+                break
+            }
+        }
+        self.expect(TK_CLOSE_BRACE)
+        n.kids = ks
+        return self.fin(n)
+    }
+
+    def parse_module(mods: int) -> Node {
+        const n: Node = self.mk(NK_MODULE_DECLARATION)
+        n.flags = mods
+        if self.at(TK_GLOBAL) {
+            n.a = self.parse_ident()
+        } else {
+            if self.at(TK_NAMESPACE) {
+                n.op = 1
+            }
+            self.bump()
+            if self.at(TK_STRING_LITERAL) {
+                const s: Node = self.mk(TK_STRING_LITERAL)
+                s.text = self.sc.token_value
+                self.bump()
+                n.a = self.fin(s)
+            } else {
+                n.a = self.parse_entity_name()
+            }
+        }
+        if self.at(TK_OPEN_BRACE) {
+            const mb: Node = self.mk(NK_MODULE_BLOCK)
+            self.bump()
+            ks: list[Node] = []
+            while not (self.at(TK_CLOSE_BRACE) or self.at(TK_EOF)) {
+                ks.append(self.parse_statement())
+            }
+            self.expect(TK_CLOSE_BRACE)
+            mb.kids = ks
+            n.b = self.fin(mb)
+        } else {
+            self.semi()
+        }
+        return self.fin(n)
+    }
+
+    def parse_import() -> Node {
+        const pos: int = self.pos_of()
+        self.expect(TK_IMPORT)
+        if self.at(TK_STRING_LITERAL) {
+            const n: Node = self.mkat(NK_IMPORT_DECLARATION, pos)
+            const s: Node = self.mk(TK_STRING_LITERAL)
+            s.text = self.sc.token_value
+            self.bump()
+            n.b = self.fin(s)
+            n.c = self.parse_import_attributes_opt()
+            self.semi()
+            return self.fin(n)
+        }
+        clause: Node = self.mkat(NK_IMPORT_CLAUSE, pos)
+        is_type_only: bool = false
+        phase: int = 0
+        if self.at(TK_TYPE) {
+            const nt: int = self.peek()
+            if nt == TK_ASTERISK or nt == TK_OPEN_BRACE or (self.is_ident_like(nt) and nt != TK_FROM) {
+                is_type_only = true
+                self.bump()
+            } elif self.is_ident_like(nt) {
+                is_type_only = false
+            }
+        } elif self.at(TK_DEFER) {
+            if self.peek() == TK_ASTERISK {
+                phase = 1
+                self.bump()
+            }
+        }
+        if is_type_only {
+            clause.op = 1
+        }
+        if phase == 1 {
+            clause.flags = 1
+        }
+        if self.is_ident_like(self.tok) {
+            clause.a = self.parse_ident()
+            if self.eat(TK_EQ) {
+                const ie: Node = self.mkat(NK_IMPORT_EQUALS, pos)
+                ie.a = clause.a
+                if self.at(TK_REQUIRE) and self.peek() == TK_OPEN_PAREN {
+                    const ext: Node = self.mk(NK_EXTERNAL_MODULE_REF)
+                    self.bump()
+                    self.expect(TK_OPEN_PAREN)
+                    const ms: Node = self.mk(TK_STRING_LITERAL)
+                    ms.text = self.sc.token_value
+                    self.expect(TK_STRING_LITERAL)
+                    ext.a = self.fin(ms)
+                    self.expect(TK_CLOSE_PAREN)
+                    ie.b = self.fin(ext)
+                } else {
+                    ie.b = self.parse_entity_name()
+                }
+                self.semi()
+                return self.fin(ie)
+            }
+            if self.eat(TK_COMMA) {
+                if self.at(TK_ASTERISK) {
+                    clause.b = self.parse_namespace_import()
+                } else {
+                    clause.b = self.parse_named_imports()
+                }
+            }
+        } elif self.at(TK_ASTERISK) {
+            clause.b = self.parse_namespace_import()
+        } elif self.at(TK_OPEN_BRACE) {
+            clause.b = self.parse_named_imports()
+        }
+        const n2: Node = self.mkat(NK_IMPORT_DECLARATION, pos)
+        n2.a = self.fin(clause)
+        self.expect(TK_FROM)
+        const spec: Node = self.mk(TK_STRING_LITERAL)
+        spec.text = self.sc.token_value
+        self.expect(TK_STRING_LITERAL)
+        n2.b = self.fin(spec)
+        n2.c = self.parse_import_attributes_opt()
+        self.semi()
+        return self.fin(n2)
+    }
+
+    def parse_namespace_import() -> Node {
+        const n: Node = self.mk(NK_NAMESPACE_IMPORT)
+        self.expect(TK_ASTERISK)
+        self.expect(TK_AS)
+        n.a = self.parse_ident()
+        return self.fin(n)
+    }
+
+    def parse_named_imports() -> Node {
+        const n: Node = self.mk(NK_NAMED_IMPORTS)
+        self.expect(TK_OPEN_BRACE)
+        ks: list[Node] = []
+        while not self.at(TK_CLOSE_BRACE) {
+            const sp: Node = self.mk(NK_IMPORT_SPECIFIER)
+            if self.at(TK_TYPE) {
+                const nt: int = self.peek()
+                if self.is_ident_name_tok(nt) and nt != TK_AS {
+                    sp.op = 1
+                    self.bump()
+                } elif nt == TK_AS and true {
+                    const s: Snap = self.mark()
+                    self.bump()
+                    self.bump()
+                    const t3: int = self.tok
+                    self.restore(s)
+                    if self.is_ident_name_tok(t3) {
+                        sp.op = 0
+                    }
+                }
+            }
+            const nm: Node = self.parse_ident_name()
+            if self.eat(TK_AS) {
+                sp.a = nm
+                sp.b = self.parse_ident()
+            } else {
+                sp.b = nm
+            }
+            ks.append(self.fin(sp))
+            if not self.eat(TK_COMMA) {
+                break
+            }
+        }
+        self.expect(TK_CLOSE_BRACE)
+        n.kids = ks
+        return self.fin(n)
+    }
+
+    def parse_import_attributes_opt() -> Node | None {
+        if (self.at(TK_WITH) or self.at(TK_ASSERT)) and not self.sc.line_break_before {
+            const n: Node = self.mk(NK_IMPORT_ATTRIBUTES)
+            self.bump()
+            self.expect(TK_OPEN_BRACE)
+            ks: list[Node] = []
+            while not self.at(TK_CLOSE_BRACE) {
+                const at_n: Node = self.mk(NK_IMPORT_ATTRIBUTE)
+                at_n.a = self.parse_property_name()
+                self.expect(TK_COLON)
+                at_n.b = self.parse_assign()
+                ks.append(self.fin(at_n))
+                if not self.eat(TK_COMMA) {
+                    break
+                }
+            }
+            self.expect(TK_CLOSE_BRACE)
+            n.kids = ks
+            return self.fin(n)
+        }
+        return none
+    }
+
+    def parse_export() -> Node {
+        const pos: int = self.pos_of()
+        self.expect(TK_EXPORT)
+        if self.at(TK_EQ) {
+            const ea: Node = self.mkat(NK_EXPORT_ASSIGNMENT, pos)
+            ea.op = 1
+            self.bump()
+            ea.a = self.parse_assign()
+            self.semi()
+            return self.fin(ea)
+        }
+        if self.at(TK_DEFAULT) {
+            self.bump()
+            const t: int = self.tok
+            if t == TK_FUNCTION or (t == TK_ASYNC and self.peek_no_lb() == TK_FUNCTION) {
+                mods: int = MOD_EXPORT + MOD_DEFAULT
+                if t == TK_ASYNC {
+                    mods = mods + MOD_ASYNC
+                    self.bump()
+                }
+                return self.parse_function_decl(mods)
+            }
+            if t == TK_CLASS {
+                return self.parse_class_like(NK_CLASS_DECLARATION, MOD_EXPORT + MOD_DEFAULT)
+            }
+            if t == TK_ABSTRACT and self.peek() == TK_CLASS {
+                self.bump()
+                return self.parse_class_like(NK_CLASS_DECLARATION, MOD_EXPORT + MOD_DEFAULT + MOD_ABSTRACT)
+            }
+            if t == TK_INTERFACE {
+                return self.parse_interface(MOD_EXPORT + MOD_DEFAULT)
+            }
+            const ea2: Node = self.mkat(NK_EXPORT_ASSIGNMENT, pos)
+            ea2.a = self.parse_assign()
+            self.semi()
+            return self.fin(ea2)
+        }
+        if self.at(TK_ASTERISK) {
+            const ed: Node = self.mkat(NK_EXPORT_DECLARATION, pos)
+            self.bump()
+            if self.eat(TK_AS) {
+                const ne: Node = self.mk(NK_NAMESPACE_EXPORT)
+                ne.a = self.parse_ident_name()
+                ed.a = self.fin(ne)
+            }
+            self.expect(TK_FROM)
+            const spec: Node = self.mk(TK_STRING_LITERAL)
+            spec.text = self.sc.token_value
+            self.expect(TK_STRING_LITERAL)
+            ed.b = self.fin(spec)
+            ed.c = self.parse_import_attributes_opt()
+            self.semi()
+            return self.fin(ed)
+        }
+        if self.at(TK_OPEN_BRACE) or (self.at(TK_TYPE) and self.peek() == TK_OPEN_BRACE) {
+            const ed2: Node = self.mkat(NK_EXPORT_DECLARATION, pos)
+            if self.at(TK_TYPE) {
+                ed2.op = 1
+                self.bump()
+            }
+            const ne2: Node = self.mk(NK_NAMED_EXPORTS)
+            self.expect(TK_OPEN_BRACE)
+            ks: list[Node] = []
+            while not self.at(TK_CLOSE_BRACE) {
+                const sp: Node = self.mk(NK_EXPORT_SPECIFIER)
+                if self.at(TK_TYPE) {
+                    const nt: int = self.peek()
+                    if self.is_ident_name_tok(nt) and nt != TK_AS {
+                        sp.op = 1
+                        self.bump()
+                    }
+                }
+                const nm: Node = self.parse_ident_name()
+                if self.eat(TK_AS) {
+                    sp.a = nm
+                    sp.b = self.parse_ident_name()
+                } else {
+                    sp.b = nm
+                }
+                ks.append(self.fin(sp))
+                if not self.eat(TK_COMMA) {
+                    break
+                }
+            }
+            self.expect(TK_CLOSE_BRACE)
+            ne2.kids = ks
+            ed2.a = self.fin(ne2)
+            if self.eat(TK_FROM) {
+                const spec2: Node = self.mk(TK_STRING_LITERAL)
+                spec2.text = self.sc.token_value
+                self.expect(TK_STRING_LITERAL)
+                ed2.b = self.fin(spec2)
+                ed2.c = self.parse_import_attributes_opt()
+            }
+            self.semi()
+            return self.fin(ed2)
+        }
+        if self.at(TK_AS) {
+            const nsd: Node = self.mkat(NK_NAMESPACE_EXPORT_DECL, pos)
+            self.bump()
+            self.expect(TK_NAMESPACE)
+            nsd.a = self.parse_ident()
+            self.semi()
+            return self.fin(nsd)
+        }
+        if self.at(TK_IMPORT) {
+            return self.parse_import()
+        }
+        return self.parse_exported_decl()
+    }
+
+    def parse_exported_decl() -> Node {
+        const t: int = self.tok
+        if t == TK_VAR or t == TK_LET or (t == TK_CONST and self.peek() != TK_ENUM) or t == TK_USING {
+            return self.parse_var_stmt(MOD_EXPORT)
+        }
+        if t == TK_FUNCTION {
+            return self.parse_function_decl(MOD_EXPORT)
+        }
+        if t == TK_CLASS {
+            return self.parse_class_like(NK_CLASS_DECLARATION, MOD_EXPORT)
+        }
+        if t == TK_INTERFACE {
+            return self.parse_interface(MOD_EXPORT)
+        }
+        if t == TK_TYPE {
+            return self.parse_type_alias(MOD_EXPORT)
+        }
+        if t == TK_ENUM or (t == TK_CONST and self.peek() == TK_ENUM) {
+            return self.parse_enum(MOD_EXPORT)
+        }
+        if t == TK_NAMESPACE or t == TK_MODULE or t == TK_GLOBAL {
+            return self.parse_module(MOD_EXPORT)
+        }
+        if t == TK_AT {
+            return self.parse_decorated_declaration()
+        }
+        if t == TK_DECLARE or t == TK_ABSTRACT or t == TK_ASYNC {
+            return self.parse_decl_with_mods(MOD_EXPORT)
+        }
+        self.fail(f"expected declaration after export, found {token_name(t)}")
+        return self.mk(NK_EMPTY_STATEMENT)
+    }
+}
+
+const COUNT_KINDS: list[int] = [
+    NK_ARROW_FUNCTION, NK_AS_EXPR, NK_BINARY, NK_BLOCK, NK_CALL,
+    NK_CLASS_DECLARATION, NK_CONDITIONAL_EXPR, NK_CONDITIONAL_TYPE,
+    NK_CONSTRUCTOR, NK_DECORATOR, NK_ENUM_DECLARATION, NK_EXPORT_DECLARATION,
+    NK_FOR_OF_STATEMENT, NK_FUNCTION_DECLARATION, NK_FUNCTION_EXPR,
+    NK_GET_ACCESSOR, NK_IF_STATEMENT, NK_IMPORT_DECLARATION,
+    NK_INTERFACE_DECLARATION, NK_INTERSECTION_TYPE, NK_MAPPED_TYPE,
+    NK_METHOD_DECLARATION, NK_MODULE_DECLARATION, NK_NEW, 2,
+    NK_OBJECT_LITERAL, NK_PROPERTY_ACCESS, NK_PROPERTY_DECLARATION, 5,
+    NK_RETURN_STATEMENT, NK_SATISFIES_EXPR, NK_SET_ACCESSOR, 4,
+    NK_SWITCH_STATEMENT, NK_TEMPLATE_EXPR, NK_TRY_STATEMENT, NK_TUPLE_TYPE,
+    NK_TYPE_ALIAS_DECLARATION, NK_TYPE_REFERENCE, NK_UNION_TYPE,
+    NK_VARIABLE_DECLARATION, NK_VARIABLE_STATEMENT,
+]
+
+const COUNT_NAMES: list[str] = [
+    "ArrowFunction", "AsExpression", "BinaryExpression", "Block",
+    "CallExpression", "ClassDeclaration", "ConditionalExpression",
+    "ConditionalType", "Constructor", "Decorator", "EnumDeclaration",
+    "ExportDeclaration", "ForOfStatement", "FunctionDeclaration",
+    "FunctionExpression", "GetAccessor", "IfStatement", "ImportDeclaration",
+    "InterfaceDeclaration", "IntersectionType", "MappedType",
+    "MethodDeclaration", "ModuleDeclaration", "NewExpression",
+    "NumericLiteral", "ObjectLiteralExpression", "PropertyAccessExpression",
+    "PropertyDeclaration", "RegularExpressionLiteral", "ReturnStatement",
+    "SatisfiesExpression", "SetAccessor", "StringLiteral", "SwitchStatement",
+    "TemplateExpression", "TryStatement", "TupleType", "TypeAliasDeclaration",
+    "TypeReference", "UnionType", "VariableDeclaration", "VariableStatement",
+]
+
+def count_walk(n: Node, acc: dict[int, int]) -> None {
+    acc[n.kind] = acc.get(n.kind, 0) + 1
+    const a: Node | None = n.a
+    if isinstance(a, Node) {
+        count_walk(a, acc)
+    }
+    const b: Node | None = n.b
+    if isinstance(b, Node) {
+        count_walk(b, acc)
+    }
+    const c: Node | None = n.c
+    if isinstance(c, Node) {
+        count_walk(c, acc)
+    }
+    const d: Node | None = n.d
+    if isinstance(d, Node) {
+        count_walk(d, acc)
+    }
+    const ks: list[Node] | None = n.kids
+    if isinstance(ks, list) {
+        for k in ks {
+            count_walk(k, acc)
+        }
+    }
+}
+
+def count_output(root: Node) -> str {
+    acc: dict[int, int] = {}
+    count_walk(root, acc)
+    lines: list[str] = []
+    kids: list[Node] | None = root.kids
+    n_stmts: int = 0
+    if isinstance(kids, list) {
+        n_stmts = len(kids)
+    }
+    lines.append(f"statements {n_stmts}")
+    i: int = 0
+    while i < len(COUNT_KINDS) {
+        const k: int = COUNT_KINDS[i]
+        lines.append(f"{COUNT_NAMES[i]} {acc.get(k, 0)}")
+        i = i + 1
+    }
+    return "\n".join(lines)
+}

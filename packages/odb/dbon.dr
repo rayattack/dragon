@@ -1,11 +1,18 @@
-from odb.schema import CompiledSchema, FieldSpec, validate_doc, slot_size
-from odb.schema import T_BOOL, T_INT, T_NUM, T_STR, T_BYTES
+from odb.schema import CompiledSchema, FieldSpec, validate_doc, slot_size, is_composite
+from odb.schema import T_BOOL, T_INT, T_NUM, T_STR, T_BYTES, T_NULL, T_ARRAY, T_OBJECT
+from odb.schema import T_DATETIME, T_DATE, T_DECIMAL
+from odb.schema import _value_tag, decode_b64, encode_b64
+from odb.schema import apply_write_defaults, apply_read_defaults, EXTRAS_ID
+from odb.temporal import parse_date, format_date, parse_datetime, format_datetime
 from odb.codec import blank, put_u8, put_u16, put_u32, put_u64, put_bytes
 from odb.codec import get_u8, get_u16, get_u32, get_u64, get_bytes
 from struct import pack_f64_le, unpack_f64_le
 
 const _HEADER: int = 12
 const _TAIL_ENT: int = 12
+const _EXTRAS_ID: int = EXTRAS_ID
+const DBON_V3: int = 0
+const DBON_V4: int = 1
 
 def _int_of(v: Any) -> int {
     const i: int = v
@@ -37,6 +44,14 @@ def _append(dst: list[int], src: list[int]) -> None {
     }
 }
 
+def _payload_bytes(tag: int, v: Any) -> bytes {
+    if tag == T_BYTES {
+        return decode_b64("a format bytes field", _str_of(v))
+    }
+    return _str_of(v).encode()
+}
+
+
 def _write_slot(buf: list[int], off: int, tag: int, v: Any, var: list[int], var_base: int) -> None {
     if tag == T_BOOL {
         b: int = 0
@@ -54,7 +69,15 @@ def _write_slot(buf: list[int], off: int, tag: int, v: Any, var: list[int], var_
         put_bytes(buf, off, pack_f64_le(_float_of(v)))
         return
     }
-    sb: bytes = _str_of(v).encode()
+    if tag == T_DATETIME {
+        put_u64(buf, off, parse_datetime(_str_of(v)))
+        return
+    }
+    if tag == T_DATE {
+        put_u32(buf, off, parse_date(_str_of(v)) & 0xFFFFFFFF)
+        return
+    }
+    sb: bytes = _payload_bytes(tag, v)
     start: int = var_base + len(var)
     _append(var, _bytes_to_ints(sb))
     put_u32(buf, off, start)
@@ -88,9 +111,27 @@ def _read_slot(data: bytes, off: int, tag: int) -> Any {
         rf: Any = fv
         return rf
     }
+    if tag == T_DATETIME {
+        const micros: int = get_u64(data, off)
+        rt: Any = format_datetime(micros)
+        return rt
+    }
+    if tag == T_DATE {
+        raw32: int = get_u32(data, off)
+        if raw32 >= 0x80000000 {
+            raw32 = raw32 - 0x100000000
+        }
+        rd: Any = format_date(raw32)
+        return rd
+    }
     voff: int = get_u32(data, off)
     vlen: int = get_u32(data, off + 4)
-    sv: str = get_bytes(data, voff, vlen).decode()
+    const payload: bytes = get_bytes(data, voff, vlen)
+    if tag == T_BYTES {
+        rb64: Any = encode_b64(payload)
+        return rb64
+    }
+    sv: str = payload.decode()
     rs: Any = sv
     return rs
 }
@@ -109,10 +150,173 @@ def _sort_by_id(fields: list[FieldSpec]) -> None {
     }
 }
 
-def encode(schema: CompiledSchema, doc: dict[str, Any]) -> bytes {
+def _put_val(out: list[int], v: Any) -> None {
+    const tag: int = _value_tag(v)
+    out.append(tag)
+    if tag == T_NULL {
+        return
+    }
+    if tag == T_BOOL {
+        b: int = 0
+        if _bool_of(v) {
+            b = 1
+        }
+        out.append(b)
+        return
+    }
+    if tag == T_INT {
+        slot: list[int] = blank(8)
+        put_u64(slot, 0, _int_of(v))
+        _append(out, slot)
+        return
+    }
+    if tag == T_NUM {
+        _append(out, _bytes_to_ints(pack_f64_le(_float_of(v))))
+        return
+    }
+    if tag == T_STR {
+        sb: bytes = _str_of(v).encode()
+        hdr: list[int] = blank(4)
+        put_u32(hdr, 0, len(sb))
+        _append(out, hdr)
+        _append(out, _bytes_to_ints(sb))
+        return
+    }
+    if tag == T_ARRAY {
+        const items: list[Any] = v
+        chdr: list[int] = blank(4)
+        put_u32(chdr, 0, len(items))
+        _append(out, chdr)
+        for e in items {
+            _put_val(out, e)
+        }
+        return
+    }
+    const m: dict[str, Any] = v
+    keys: list[str] = []
+    for k in m {
+        keys.append(k)
+    }
+    keys.sort()
+    ohdr: list[int] = blank(4)
+    put_u32(ohdr, 0, len(keys))
+    _append(out, ohdr)
+    for k in keys {
+        kb: bytes = k.encode()
+        khdr: list[int] = blank(4)
+        put_u32(khdr, 0, len(kb))
+        _append(out, khdr)
+        _append(out, _bytes_to_ints(kb))
+        _put_val(out, m[k])
+    }
+}
+
+class _Cursor {
+    off: int
+
+    def(off: int) {
+        self.off = off
+    }
+}
+
+def _get_val(data: bytes, c: _Cursor) -> Any {
+    const tag: int = get_u8(data, c.off)
+    c.off = c.off + 1
+    if tag == T_NULL {
+        n: Any = None
+        return n
+    }
+    if tag == T_BOOL {
+        rb: bool = get_u8(data, c.off) != 0
+        c.off = c.off + 1
+        ab: Any = rb
+        return ab
+    }
+    if tag == T_INT {
+        ri: int = get_u64(data, c.off)
+        c.off = c.off + 8
+        ai: Any = ri
+        return ai
+    }
+    if tag == T_NUM {
+        rf: float = unpack_f64_le(data, c.off)
+        c.off = c.off + 8
+        af: Any = rf
+        return af
+    }
+    if tag == T_STR {
+        const slen: int = get_u32(data, c.off)
+        c.off = c.off + 4
+        rs: str = get_bytes(data, c.off, slen).decode()
+        c.off = c.off + slen
+        as_: Any = rs
+        return as_
+    }
+    if tag == T_ARRAY {
+        const n_items: int = get_u32(data, c.off)
+        c.off = c.off + 4
+        arr: list[Any] = []
+        i: int = 0
+        while i < n_items {
+            arr.append(_get_val(data, c))
+            i = i + 1
+        }
+        aa: Any = arr
+        return aa
+    }
+    const n_keys: int = get_u32(data, c.off)
+    c.off = c.off + 4
+    m: dict[str, Any] = {}
+    j: int = 0
+    while j < n_keys {
+        const klen: int = get_u32(data, c.off)
+        c.off = c.off + 4
+        const key: str = get_bytes(data, c.off, klen).decode()
+        c.off = c.off + klen
+        m[key] = _get_val(data, c)
+        j = j + 1
+    }
+    am: Any = m
+    return am
+}
+
+def _write_composite(buf: list[int], off: int, v: Any, var: list[int], var_base: int) -> None {
+    const start: int = var_base + len(var)
+    _put_val(var, v)
+    put_u32(buf, off, start)
+    put_u32(buf, off + 4, var_base + len(var) - start)
+}
+
+def _read_composite(data: bytes, off: int) -> Any {
+    c: _Cursor = _Cursor(get_u32(data, off))
+    return _get_val(data, c)
+}
+
+def _slot_out(buf: list[int], off: int, tag: int, v: Any, var: list[int], var_base: int) -> None {
+    if is_composite(tag) {
+        _write_composite(buf, off, v, var, var_base)
+        return
+    }
+    _write_slot(buf, off, tag, v, var, var_base)
+}
+
+def _slot_in(data: bytes, off: int, tag: int) -> Any {
+    if tag == T_NULL {
+        n: Any = None
+        return n
+    }
+    if is_composite(tag) {
+        return _read_composite(data, off)
+    }
+    return _read_slot(data, off, tag)
+}
+
+def encode(schema: CompiledSchema, doc0: dict[str, Any]) -> bytes {
+    const doc: dict[str, Any] = apply_write_defaults(schema, doc0)
     validate_doc(schema, doc)
 
     req_size: int = schema.req_region_size
+    const nb_size: int = schema.null_bitmap_size
 
     present_opt: list[FieldSpec] = []
     for f in schema.optional {
@@ -121,46 +325,87 @@ def encode(schema: CompiledSchema, doc: dict[str, Any]) -> bytes {
         }
     }
     _sort_by_id(present_opt)
+
+    extras: dict[str, Any] = {}
+    has_extras: bool = False
+    for k in doc {
+        if k != "_id" and k not in schema.by_name {
+            extras[k] = doc[k]
+            has_extras = True
+        }
+    }
+
     tail_count: int = len(present_opt)
+    if has_extras {
+        tail_count = tail_count + 1
+    }
     tail_size: int = 2 + tail_count * _TAIL_ENT
 
-    var_base: int = _HEADER + req_size + tail_size
+    var_base: int = _HEADER + nb_size + req_size + tail_size
 
+    nb_buf: list[int] = blank(nb_size)
     req_buf: list[int] = blank(req_size)
     var_buf: list[int] = []
 
     for f in schema.required {
-        _write_slot(req_buf, f.slot_off, f.tag, doc[f.name], var_buf, var_base)
+        v: Any = doc[f.name]
+        if v is None {
+            nb_buf[f.null_index // 8] = nb_buf[f.null_index // 8] | (1 << (f.null_index % 8))
+        } else {
+            _slot_out(req_buf, f.slot_off, f.tag, v, var_buf, var_base)
+        }
     }
 
     tail_buf: list[int] = blank(tail_size)
     put_u16(tail_buf, 0, tail_count)
     i: int = 0
-    while i < tail_count {
+    while i < len(present_opt) {
         f: FieldSpec = present_opt[i]
         eoff: int = 2 + i * _TAIL_ENT
+        ov: Any = doc[f.name]
+        etag: int = f.tag
+        if ov is None {
+            etag = T_NULL
+        }
         put_u16(tail_buf, eoff, f.field_id)
-        put_u8(tail_buf, eoff + 2, f.tag)
-        _write_slot(tail_buf, eoff + 4, f.tag, doc[f.name], var_buf, var_base)
+        put_u8(tail_buf, eoff + 2, etag)
+        if etag != T_NULL {
+            _slot_out(tail_buf, eoff + 4, etag, ov, var_buf, var_base)
+        }
         i = i + 1
+    }
+    if has_extras {
+        eoff2: int = 2 + len(present_opt) * _TAIL_ENT
+        put_u16(tail_buf, eoff2, _EXTRAS_ID)
+        put_u8(tail_buf, eoff2 + 2, T_OBJECT)
+        ex: Any = extras
+        _write_composite(tail_buf, eoff2 + 4, ex, var_buf, var_base)
     }
 
     total: int = var_base + len(var_buf)
     out: list[int] = blank(_HEADER)
     put_u16(out, 0, schema.schema_id)
     put_u16(out, 2, schema.version)
-    put_u8(out, 4, 0)
+    put_u8(out, 4, DBON_V4)
     put_u32(out, 8, total)
+    _append(out, nb_buf)
     _append(out, req_buf)
     _append(out, tail_buf)
     _append(out, var_buf)
     return bytes(out)
 }
 
-def decode(schema: CompiledSchema, data: bytes) -> dict[str, Any] {
+def _current_name(naming: CompiledSchema, fid: int, fallback: str) -> str {
+    if fid in naming.by_id {
+        return naming.by_id[fid].name
+    }
+    return fallback
+}
+
+def _decode_v3(schema: CompiledSchema, naming: CompiledSchema, data: bytes) -> dict[str, Any] {
     doc: dict[str, Any] = {}
     for f in schema.required {
-        doc[f.name] = _read_slot(data, _HEADER + f.slot_off, f.tag)
+        doc[_current_name(naming, f.field_id, f.name)] = _read_slot(data, _HEADER + f.slot_off, f.tag)
     }
     tail_off: int = _HEADER + schema.req_region_size
     count: int = get_u16(data, tail_off)
@@ -171,19 +416,117 @@ def decode(schema: CompiledSchema, data: bytes) -> dict[str, Any] {
         tag: int = get_u8(data, eoff + 2)
         if fid in schema.by_id {
             f: FieldSpec = schema.by_id[fid]
-            doc[f.name] = _read_slot(data, eoff + 4, tag)
+            doc[_current_name(naming, fid, f.name)] = _read_slot(data, eoff + 4, tag)
         }
         i = i + 1
     }
     return doc
 }
 
+def _decode_v4(schema: CompiledSchema, naming: CompiledSchema, data: bytes) -> dict[str, Any] {
+    doc: dict[str, Any] = {}
+    const nb_off: int = _HEADER
+    const req_off: int = _HEADER + schema.null_bitmap_size
+    for f in schema.required {
+        const rname: str = _current_name(naming, f.field_id, f.name)
+        if f.null_index >= 0 and (get_u8(data, nb_off + f.null_index // 8) >> (f.null_index % 8)) & 1 == 1 {
+            nv: Any = None
+            doc[rname] = nv
+        } else {
+            doc[rname] = _slot_in(data, req_off + f.slot_off, f.tag)
+        }
+    }
+    tail_off: int = req_off + schema.req_region_size
+    count: int = get_u16(data, tail_off)
+    i: int = 0
+    while i < count {
+        eoff: int = tail_off + 2 + i * _TAIL_ENT
+        fid: int = get_u16(data, eoff)
+        tag: int = get_u8(data, eoff + 2)
+        if fid == _EXTRAS_ID {
+            const ex: Any = _read_composite(data, eoff + 4)
+            const exm: dict[str, Any] = ex
+            for k in exm {
+                doc[k] = exm[k]
+            }
+        } else if fid in schema.by_id {
+            f: FieldSpec = schema.by_id[fid]
+            doc[_current_name(naming, fid, f.name)] = _slot_in(data, eoff + 4, tag)
+        }
+        i = i + 1
+    }
+    return doc
+}
+
+def record_version(data: bytes) -> int {
+    return get_u8(data, 4)
+}
+
+def doc_schema_version(data: bytes) -> int {
+    return get_u16(data, 2)
+}
+
+def layout_for(schema: CompiledSchema, data: bytes) -> CompiledSchema {
+    const stamped: int = doc_schema_version(data)
+    if stamped == schema.version {
+        return schema
+    }
+    if stamped in schema.prior {
+        return schema.prior[stamped]
+    }
+    return schema
+}
+
+def decode(schema: CompiledSchema, data: bytes) -> dict[str, Any] {
+    const layout: CompiledSchema = layout_for(schema, data)
+    if record_version(data) == DBON_V4 {
+        return _decode_v4(layout, schema, data)
+    }
+    return _decode_v3(layout, schema, data)
+}
+
+def decode_for_read(schema: CompiledSchema, data: bytes) -> dict[str, Any] {
+    doc: dict[str, Any] = decode(schema, data)
+    apply_read_defaults(schema, doc)
+    return doc
+}
+
+
 def read_field(schema: CompiledSchema, data: bytes, name: str) -> Any {
-    f: FieldSpec = schema.field(name)
+    const layout: CompiledSchema = layout_for(schema, data)
+    if name not in schema.by_name {
+        raise KeyError("field '" + name + "' absent from document")
+    }
+    const wanted: int = schema.by_name[name].field_id
+    if wanted not in layout.by_id {
+        raise KeyError("field '" + name + "' absent from document")
+    }
+    f: FieldSpec = layout.by_id[wanted]
+    if record_version(data) == DBON_V4 {
+        const req_off: int = _HEADER + layout.null_bitmap_size
+        if f.required {
+            if f.null_index >= 0 and (get_u8(data, _HEADER + f.null_index // 8) >> (f.null_index % 8)) & 1 == 1 {
+                nv: Any = None
+                return nv
+            }
+            return _slot_in(data, req_off + f.slot_off, f.tag)
+        }
+        tail4: int = req_off + layout.req_region_size
+        n4: int = get_u16(data, tail4)
+        j: int = 0
+        while j < n4 {
+            eoff4: int = tail4 + 2 + j * _TAIL_ENT
+            if get_u16(data, eoff4) == f.field_id {
+                return _slot_in(data, eoff4 + 4, get_u8(data, eoff4 + 2))
+            }
+            j = j + 1
+        }
+        raise KeyError("field '" + name + "' absent from document")
+    }
     if f.required {
         return _read_slot(data, _HEADER + f.slot_off, f.tag)
     }
-    tail_off: int = _HEADER + schema.req_region_size
+    tail_off: int = _HEADER + layout.req_region_size
     count: int = get_u16(data, tail_off)
     i: int = 0
     while i < count {

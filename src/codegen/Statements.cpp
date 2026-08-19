@@ -534,6 +534,7 @@ void CodeGen::visit(ReturnStmt& node) {
             if (auto* nameExpr = dynamic_cast<NameExpr*>(retSrc)) {
                 increfIfHeap(impl_->lookupVarKind(nameExpr->name));
             } else if (auto* attrExpr = dynamic_cast<AttributeExpr*>(retSrc)) {
+                Impl::VarKind fieldKind = Impl::VarKind::Other;
                 if (auto* objName = dynamic_cast<NameExpr*>(attrExpr->object.get())) {
                     auto objKind = impl_->lookupVarKind(objName->name);
                     if (objKind == Impl::VarKind::ClassInstance) {
@@ -544,7 +545,6 @@ void CodeGen::visit(ReturnStmt& node) {
                             auto it = impl_->varClassNames.find(objName->name);
                             if (it != impl_->varClassNames.end()) className = it->second;
                         }
-                        Impl::VarKind fieldKind = Impl::VarKind::Other;
                         for (std::string cls = className; !cls.empty(); ) {
                             auto fkIt = impl_->classFieldKindsBySym.find(impl_->classSym(cls));
                             if (fkIt != impl_->classFieldKindsBySym.end()) {
@@ -560,10 +560,17 @@ void CodeGen::visit(ReturnStmt& node) {
                             else
                                 break;
                         }
-                        if (Impl::isHeapKind(fieldKind)) {
-                            impl_->emitIncrefByKind(retVal, fieldKind);
-                        }
                     }
+                }
+                if (!Impl::isHeapKind(fieldKind) && retSrc->type) {
+                    auto borrowedKind =
+                        Impl::typeKindToVarKind(retSrc->type->kind());
+                    if (Impl::isHeapKind(borrowedKind) &&
+                        !impl_->isOwnedResultByKind(retVal, borrowedKind))
+                        fieldKind = borrowedKind;
+                }
+                if (Impl::isHeapKind(fieldKind)) {
+                    impl_->emitIncrefByKind(retVal, fieldKind);
                 }
             } else if (auto* subExpr = dynamic_cast<SubscriptExpr*>(retSrc)) {
                 bool ownedStrElem = subExpr->object && subExpr->object->type &&

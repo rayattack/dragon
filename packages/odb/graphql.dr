@@ -1,5 +1,7 @@
 from odb import ODB, Documents, Document
 from odb.schema import CompiledSchema, FieldSpec, T_BOOL, T_INT, T_NUM, T_STR
+from odb.schema import T_NULL, T_ARRAY, T_OBJECT
+from odb.schema import T_BYTES, T_DATETIME, T_DATE, T_DECIMAL
 from odb.meta import CompiledMeta, RefDecl
 from odb.errors import ODBError, PrepareError, IntegrityError, NotFound, SchemaError, ConflictError
 from json import dumps, loads
@@ -181,7 +183,8 @@ class _P {
             return rf
         }
         if word == "null" {
-            raise GqlError("graphql: null literals are not supported in v1")
+            rn: Any = None
+            return rn
         }
         re: Any = word
         return re
@@ -254,6 +257,9 @@ def parse_graphql(text: str) -> GqlDoc {
 }
 
 def _oql_value(v: Any) -> str {
+    if v is None {
+        return "null"
+    }
     if isinstance(v, bool) {
         b: bool = v
         if b {
@@ -600,16 +606,44 @@ def _by_pk(db: ODB, schema: str, args: dict[str, Any]) -> Document {
     return db._read_by(db._schemas[schema], keys)
 }
 
-def _gql_type(fs: FieldSpec) -> str {
-    base: str = "String"
-    if fs.tag == T_INT {
-        base = "Int"
-    } else if fs.tag == T_NUM {
-        base = "Float"
-    } else if fs.tag == T_BOOL {
-        base = "Boolean"
+def _gql_scalar(tag: int) -> str {
+    if tag == T_INT {
+        return "Int"
     }
-    if fs.required {
+    if tag == T_NUM {
+        return "Float"
+    }
+    if tag == T_BOOL {
+        return "Boolean"
+    }
+    if tag == T_OBJECT or tag == T_ARRAY {
+        return "JSON"
+    }
+    if tag == T_DATETIME {
+        return "DateTime"
+    }
+    if tag == T_DATE {
+        return "Date"
+    }
+    if tag == T_DECIMAL {
+        return "Decimal"
+    }
+    if tag == T_BYTES {
+        return "Bytes"
+    }
+    return "String"
+}
+
+def _gql_type(fs: FieldSpec) -> str {
+    base: str = _gql_scalar(fs.tag)
+    if fs.tag == T_ARRAY {
+        inner: str = "JSON"
+        if fs.has_item_tag {
+            inner = _gql_scalar(fs.item_tag)
+        }
+        base = "[" + inner + "]"
+    }
+    if fs.required and not fs.nullable {
         return base + "!"
     }
     return base
@@ -638,6 +672,12 @@ def _type_name(schema_name: str) -> str {
 
 def graphql_sdl(db: ODB) -> str {
     lines: list[str] = []
+    lines.append("scalar JSON")
+    lines.append("scalar DateTime")
+    lines.append("scalar Date")
+    lines.append("scalar Decimal")
+    lines.append("scalar Bytes")
+    lines.append("")
     for sid in db._sorted_sids() {
         name: str = db._by_sid[sid]
         cs: CompiledSchema = db._schemas[name]

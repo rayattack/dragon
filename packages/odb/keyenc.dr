@@ -1,8 +1,11 @@
 from struct import pack_f64_be
+from odb.decimal import enc_decimal_body
 
 const MARK_NULL: int = 0x00
 const MARK_BOOL: int = 0x01
 const MARK_NUM: int = 0x02
+const MARK_DATE: int = 0x03
+const MARK_DATETIME: int = 0x04
 const MARK_STR: int = 0x05
 const MARK_BYTES: int = 0x06
 
@@ -18,13 +21,33 @@ def enc_bool(b: bool) -> bytes {
     return bytes([MARK_BOOL, v])
 }
 
-def enc_int(x: int) -> bytes {
-    out: list[int] = [MARK_NUM]
+def _enc_signed(mark: int, x: int) -> bytes {
+    out: list[int] = [mark]
     out.append(((x >> 56) & 0xFF) ^ 0x80)
     i: int = 6
     while i >= 0 {
         out.append((x >> (i * 8)) & 0xFF)
         i = i - 1
+    }
+    return bytes(out)
+}
+
+def enc_int(x: int) -> bytes {
+    return _enc_signed(MARK_NUM, x)
+}
+
+def enc_date(days: int) -> bytes {
+    return _enc_signed(MARK_DATE, days)
+}
+
+def enc_datetime(micros: int) -> bytes {
+    return _enc_signed(MARK_DATETIME, micros)
+}
+
+def enc_decimal(s: str) -> bytes {
+    out: list[int] = [MARK_NUM]
+    for b in enc_decimal_body(s) {
+        out.append(b)
     }
     return bytes(out)
 }

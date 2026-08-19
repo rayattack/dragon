@@ -19,6 +19,7 @@ const PT_IX_LEAF: int = 7
 const PT_IX_BRANCH: int = 8
 const PT_LOG: int = 9
 const PT_RAFT: int = 10
+const PT_OVERFLOW: int = 11
 
 const RETAIN_NONE: int = 0
 const RETAIN_TXNS: int = 1

@@ -1,6 +1,7 @@
 from odb.pager import Pager, PT_LEAF, PT_BRANCH, PT_IX_LEAF, PT_IX_BRANCH
-from odb.codec import get_u16, get_u64
+from odb.codec import get_u16, get_u64, get_bytes
 from odb.index import IndexTree, IxLeaf, IxBranch
+from odb.overflow import STUB_BYTES, VLEN_OVERFLOW, stub_total, stub_head, chain_pages
 
 class CheckResult {
     ok: bool
@@ -31,6 +32,29 @@ def check_tree(pager: Pager, root: int) -> CheckResult {
     return res
 }
 
+def _check_overflow(pager: Pager, page: bytes, eoff: int, res: CheckResult) -> None {
+    if get_u16(page, eoff + 10) != VLEN_OVERFLOW {
+        return
+    }
+    const stub: bytes = get_bytes(page, get_u16(page, eoff + 8), STUB_BYTES)
+    const head: int = stub_head(stub)
+    if head == 0 {
+        res._bad("overflow stub names page 0 as its chain head")
+        return
+    }
+    try {
+        const pages: list[int] = chain_pages(pager, head)
+        res.pages = res.pages + len(pages)
+        const cap: int = pager.payload_size() - 12
+        const total: int = stub_total(stub)
+        if len(pages) != (total + cap - 1) // cap {
+            res._bad("overflow chain at page " + str(head) + " has the wrong page count for " + str(total) + " bytes")
+        }
+    } except Exception as e {
+        res._bad(str(e))
+    }
+}
+
 def _walk(pager: Pager, pid: int, lo: int, has_lo: bool, hi: int, has_hi: bool, res: CheckResult) -> None {
     page: bytes = pager.read_page(pid)
     res.pages = res.pages + 1
@@ -55,6 +79,7 @@ def _walk(pager: Pager, pid: int, lo: int, has_lo: bool, hi: int, has_hi: bool, 
             prev = k
             havep = True
             res.keys = res.keys + 1
+            _check_overflow(pager, page, 2 + i * 12, res)
             i = i + 1
         }
         return

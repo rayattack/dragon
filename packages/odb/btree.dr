@@ -1,6 +1,8 @@
 from odb.pager import Pager, PT_LEAF, PT_BRANCH
 from odb.codec import blank, put_u16, put_u64, put_bytes, get_u16, get_u64, get_bytes
 from odb.errors import ODBError
+from odb.overflow import STUB_BYTES, VLEN_OVERFLOW, build_stub, stub_total, stub_head
+from odb.overflow import write_chain, read_chain, free_chain
 
 const _LEAF_DIR: int = 2
 const _LEAF_ENT: int = 12
@@ -11,10 +13,12 @@ const _BR_ENT: int = 16
 class LeafNode {
     keys: list[int]
     vals: list[bytes]
+    heads: list[int]
 
-    def(keys: list[int], vals: list[bytes]) {
+    def(keys: list[int], vals: list[bytes], heads: list[int]) {
         self.keys = keys
         self.vals = vals
+        self.heads = heads
     }
 }
 
@@ -76,7 +80,11 @@ class BTree {
             eoff: int = _LEAF_DIR + i * _LEAF_ENT
             put_u64(buf, eoff, node.keys[i])
             put_u16(buf, eoff + 8, end)
-            put_u16(buf, eoff + 10, vlen)
+            if node.heads[i] != 0 {
+                put_u16(buf, eoff + 10, VLEN_OVERFLOW)
+            } else {
+                put_u16(buf, eoff + 10, vlen)
+            }
             i = i + 1
         }
         self.pager.stage(pgid, PT_LEAF, bytes(buf))
@@ -103,16 +111,24 @@ class BTree {
         n: int = get_u16(page, 0)
         keys: list[int] = []
         vals: list[bytes] = []
+        heads: list[int] = []
         i: int = 0
         while i < n {
             eoff: int = _LEAF_DIR + i * _LEAF_ENT
             keys.append(get_u64(page, eoff))
             voff: int = get_u16(page, eoff + 8)
             vlen: int = get_u16(page, eoff + 10)
-            vals.append(get_bytes(page, voff, vlen))
+            if vlen == VLEN_OVERFLOW {
+                stub: bytes = get_bytes(page, voff, STUB_BYTES)
+                vals.append(stub)
+                heads.append(stub_head(stub))
+            } else {
+                vals.append(get_bytes(page, voff, vlen))
+                heads.append(0)
+            }
             i = i + 1
         }
-        return LeafNode(keys, vals)
+        return LeafNode(keys, vals, heads)
     }
 
     def _read_branch(pgid: int) -> BranchNode {
@@ -210,10 +226,17 @@ class BTree {
             leaf: LeafNode = self._read_leaf(pid)
             idx: int = self._find(leaf.keys, k)
             if idx >= 0 {
-                return leaf.vals[idx]
+                return self._materialize(leaf, idx)
             }
         }
         raise KeyError("key " + str(k) + " not in tree")
+    }
+
+    def _materialize(node: LeafNode, idx: int) -> bytes {
+        if node.heads[idx] == 0 {
+            return node.vals[idx]
+        }
+        return read_chain(self.pager, node.heads[idx], stub_total(node.vals[idx]))
     }
 
     def _split_leaf(node: LeafNode) -> list[LeafNode] {
@@ -221,6 +244,7 @@ class BTree {
         target: int = total // 2
         lk: list[int] = []
         lv: list[bytes] = []
+        lh: list[int] = []
         acc: int = _LEAF_DIR
         i: int = 0
         n: int = len(node.keys)
@@ -231,22 +255,32 @@ class BTree {
             }
             lk.append(node.keys[i])
             lv.append(node.vals[i])
+            lh.append(node.heads[i])
             acc = acc + entry_sz
             i = i + 1
         }
         rk: list[int] = node.keys[i:]
         rv: list[bytes] = node.vals[i:]
-        return [LeafNode(lk, lv), LeafNode(rk, rv)]
+        rh: list[int] = node.heads[i:]
+        return [LeafNode(lk, lv, lh), LeafNode(rk, rv, rh)]
+    }
+
+    def _spill(v: bytes) -> bytes {
+        return build_stub(len(v), write_chain(self.pager, v))
     }
 
     def insert(k: int, v: bytes) -> None {
-        if len(v) > self._max_val() {
-            raise ODBError("value too large for M1 inline storage (overflow pages pending)")
+        const spilled: bool = len(v) > self._max_val()
+        stored: bytes = v
+        head: int = 0
+        if spilled {
+            stored = self._spill(v)
+            head = stub_head(stored)
         }
 
         if self.root == 0 {
             pid: int = self.pager.alloc()
-            self._stage_leaf(pid, LeafNode([k], [v]))
+            self._stage_leaf(pid, LeafNode([k], [stored], [head]))
             self.root = pid
             return
         }
@@ -264,10 +298,15 @@ class BTree {
         leaf: LeafNode = self._read_leaf(pid2)
         pos: int = self._lower_bound(leaf.keys, k)
         if pos < len(leaf.keys) and leaf.keys[pos] == k {
-            leaf.vals[pos] = v
+            if leaf.heads[pos] != 0 {
+                free_chain(self.pager, leaf.heads[pos])
+            }
+            leaf.vals[pos] = stored
+            leaf.heads[pos] = head
         } else {
             leaf.keys.insert(pos, k)
-            leaf.vals.insert(pos, v)
+            leaf.vals.insert(pos, stored)
+            leaf.heads.insert(pos, head)
         }
 
         if self._leaf_fits(leaf) {
@@ -380,8 +419,12 @@ class BTree {
         if idx < 0 {
             return False
         }
+        if leaf.heads[idx] != 0 {
+            free_chain(self.pager, leaf.heads[idx])
+        }
         leaf.keys.pop(idx)
         leaf.vals.pop(idx)
+        leaf.heads.pop(idx)
         newpid: int = self._writable(pid)
         self._stage_leaf(newpid, leaf)
         self._propagate(path, pid, newpid)
@@ -402,7 +445,7 @@ class BTree {
             leaf: LeafNode = self._read_leaf(pid)
             i: int = 0
             while i < len(leaf.keys) {
-                pair: list[bytes] = [_key_bytes(leaf.keys[i]), leaf.vals[i]]
+                pair: list[bytes] = [_key_bytes(leaf.keys[i]), self._materialize(leaf, i)]
                 out.append(pair)
                 i = i + 1
             }

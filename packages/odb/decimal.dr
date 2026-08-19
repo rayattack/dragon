@@ -1,0 +1,180 @@
+from odb.errors import SchemaError
+
+const MAX_COEFF_DIGITS: int = 4096
+const EXP_BIAS: int = 8192
+const MAX_ABS_EXP: int = 8191
+
+
+class DecParts {
+    negative: bool
+    coeff: str
+    exp: int
+    is_zero: bool
+
+    def(negative: bool, coeff: str, exp: int, is_zero: bool) {
+        self.negative = negative
+        self.coeff = coeff
+        self.exp = exp
+        self.is_zero = is_zero
+    }
+}
+
+
+def _strip_leading_zeros(d: str) -> str {
+    const b: bytes = d.encode()
+    i: int = 0
+    while i < len(b) - 1 and b[i] == 48 {
+        i = i + 1
+    }
+    return d[i:]
+}
+
+
+def _strip_trailing_zeros(d: str) -> int {
+    const b: bytes = d.encode()
+    n: int = 0
+    while n < len(b) and b[len(b) - 1 - n] == 48 {
+        n = n + 1
+    }
+    return n
+}
+
+
+def _all_zero(d: str) -> bool {
+    const b: bytes = d.encode()
+    i: int = 0
+    while i < len(b) {
+        if b[i] != 48 {
+            return False
+        }
+        i = i + 1
+    }
+    return True
+}
+
+
+def parse_decimal(s: str) -> DecParts {
+    const b: bytes = s.encode()
+    if len(b) != len(s) {
+        raise SchemaError("decimal '" + s + "' contains non-ASCII characters")
+    }
+    if len(b) == 0 {
+        raise SchemaError("decimal is empty")
+    }
+
+    off: int = 0
+    negative: bool = False
+    if b[0] == 43 or b[0] == 45 {
+        negative = b[0] == 45
+        off = 1
+    }
+
+    int_start: int = off
+    while off < len(b) and b[off] >= 48 and b[off] <= 57 {
+        off = off + 1
+    }
+    const int_digits: str = s[int_start:off]
+
+    frac_digits: str = ""
+    if off < len(b) and b[off] == 46 {
+        off = off + 1
+        const frac_start: int = off
+        while off < len(b) and b[off] >= 48 and b[off] <= 57 {
+            off = off + 1
+        }
+        frac_digits = s[frac_start:off]
+    }
+
+    if len(int_digits) == 0 and len(frac_digits) == 0 {
+        raise SchemaError("decimal '" + s + "' has no digits")
+    }
+
+    exp: int = 0
+    if off < len(b) and (b[off] == 101 or b[off] == 69) {
+        off = off + 1
+        eneg: bool = False
+        if off < len(b) and (b[off] == 43 or b[off] == 45) {
+            eneg = b[off] == 45
+            off = off + 1
+        }
+        const e_start: int = off
+        while off < len(b) and b[off] >= 48 and b[off] <= 57 {
+            off = off + 1
+        }
+        if off == e_start {
+            raise SchemaError("decimal '" + s + "' has an exponent marker with no digits")
+        }
+        if off - e_start > 5 {
+            raise SchemaError("decimal '" + s + "' has an exponent that is far outside the supported range")
+        }
+        exp = int(s[e_start:off])
+        if eneg {
+            exp = -exp
+        }
+    }
+
+    if off != len(b) {
+        raise SchemaError("decimal '" + s + "' has trailing characters at position " + str(off) + "; a decimal is [sign] digits [.digits] [e[sign]digits]")
+    }
+
+    const all_digits: str = int_digits + frac_digits
+    if len(all_digits) > MAX_COEFF_DIGITS {
+        raise SchemaError("decimal '" + s + "' has more than " + str(MAX_COEFF_DIGITS) + " significant digits")
+    }
+    const scaled_exp: int = exp - len(frac_digits)
+
+    if _all_zero(all_digits) {
+        return DecParts(negative, "0", 0, True)
+    }
+
+    const coeff: str = _strip_leading_zeros(all_digits)
+    const e_out: int = len(coeff) + scaled_exp
+    if e_out > MAX_ABS_EXP or e_out < -MAX_ABS_EXP {
+        raise SchemaError("decimal '" + s + "' has a magnitude outside the range odb can index (10^" + str(MAX_ABS_EXP) + ")")
+    }
+    return DecParts(negative, coeff, scaled_exp, False)
+}
+
+
+def check_decimal(s: str) -> None {
+    parse_decimal(s)
+}
+
+
+def enc_decimal_body(s: str) -> list[int] {
+    const p: DecParts = parse_decimal(s)
+    out: list[int] = []
+    if p.is_zero {
+        out.append(0x80)
+        return out
+    }
+
+    const tz: int = _strip_trailing_zeros(p.coeff)
+    const mant: str = p.coeff[0:len(p.coeff) - tz]
+    const e: int = len(p.coeff) + p.exp + EXP_BIAS
+    const mb: bytes = mant.encode()
+
+    if not p.negative {
+        out.append(0x81)
+        out.append((e >> 8) & 0xFF)
+        out.append(e & 0xFF)
+        i: int = 0
+        while i < len(mb) {
+            out.append(mb[i] - 48 + 1)
+            i = i + 1
+        }
+        out.append(0x00)
+        return out
+    }
+
+    out.append(0x7F)
+    out.append(0xFF - ((e >> 8) & 0xFF))
+    out.append(0xFF - (e & 0xFF))
+    j: int = 0
+    while j < len(mb) {
+        out.append(0xFF - (mb[j] - 48 + 1))
+        j = j + 1
+    }
+    out.append(0xFF)
+    return out
+}

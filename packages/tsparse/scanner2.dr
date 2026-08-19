@@ -1,0 +1,660 @@
+from scanner import KEYWORDS
+from scanner import TK_UNKNOWN, TK_EOF, TK_NUMERIC_LITERAL, TK_BIGINT_LITERAL, TK_STRING_LITERAL, TK_REGEX_LITERAL, TK_NO_SUB_TEMPLATE, TK_TEMPLATE_HEAD, TK_TEMPLATE_MIDDLE, TK_TEMPLATE_TAIL
+from scanner import TK_OPEN_BRACE, TK_CLOSE_BRACE, TK_OPEN_PAREN, TK_CLOSE_PAREN, TK_OPEN_BRACKET, TK_CLOSE_BRACKET, TK_DOT, TK_DOT_DOT_DOT, TK_SEMICOLON, TK_COMMA, TK_QUESTION_DOT
+from scanner import TK_LT, TK_GT, TK_LT_EQ, TK_GT_EQ, TK_EQ_EQ, TK_EXCL_EQ, TK_EQ_EQ_EQ, TK_EXCL_EQ_EQ, TK_ARROW, TK_PLUS, TK_MINUS, TK_ASTERISK, TK_ASTERISK_ASTERISK, TK_SLASH, TK_PERCENT
+from scanner import TK_PLUS_PLUS, TK_MINUS_MINUS, TK_LT_LT, TK_GT_GT, TK_GT_GT_GT, TK_AMP, TK_BAR, TK_CARET, TK_EXCL, TK_TILDE, TK_AMP_AMP, TK_BAR_BAR, TK_QUESTION, TK_COLON, TK_AT
+from scanner import TK_QUESTION_QUESTION, TK_HASH, TK_EQ, TK_PLUS_EQ, TK_MINUS_EQ, TK_ASTERISK_EQ, TK_ASTERISK_ASTERISK_EQ, TK_SLASH_EQ, TK_PERCENT_EQ, TK_LT_LT_EQ
+from scanner import TK_GT_GT_EQ, TK_GT_GT_GT_EQ, TK_AMP_EQ, TK_BAR_EQ, TK_BAR_BAR_EQ, TK_AMP_AMP_EQ, TK_QUESTION_QUESTION_EQ, TK_CARET_EQ, TK_IDENTIFIER, TK_PRIVATE_IDENTIFIER
+
+def _build_kw_trie() -> list[int] {
+    trie: list[int] = [0] * 18900
+    next_free: int = 2
+    for kw, kind in KEYWORDS.items() {
+        state: int = 1
+        i: int = 0
+        const ln: int = len(kw)
+        while i < ln {
+            const c: int = ord(kw[i]) - 97
+            const slot: int = state * 27 + c
+            if trie[slot] == 0 {
+                trie[slot] = next_free
+                next_free = next_free + 1
+            }
+            state = trie[slot]
+            i = i + 1
+        }
+        trie[state * 27 + 26] = kind
+    }
+    return trie
+}
+
+const KW_TRIE: list[int] = _build_kw_trie()
+
+class Scanner2 {
+    src: bytes = b""
+    n: int = 0
+    pos: int = 0
+    token: int = 0
+    tok_start: int = 0
+    line_break_before: bool = false
+
+    def(raw: bytes) {
+        self.src = raw + b"\x00\x00\x00"
+        self.n = len(raw)
+        self.pos = 0
+    }
+
+    def scan() -> int {
+        self.line_break_before = false
+        const src: bytes = self.src
+        const n: int = self.n
+        pos: int = self.pos
+
+        while pos < n {
+            const c: int = src[pos]
+            if c == 32 or c == 9 or c == 11 or c == 12 {
+                pos = pos + 1
+            } elif c == 10 or c == 13 {
+                self.line_break_before = true
+                pos = pos + 1
+            } elif c == 47 {
+                const c2: int = src[pos + 1]
+                if c2 == 47 {
+                    pos = pos + 2
+                    while pos < n {
+                        const cc: int = src[pos]
+                        if cc == 10 or cc == 13 { break }
+                        pos = pos + 1
+                    }
+                } elif c2 == 42 {
+                    pos = pos + 2
+                    closed: bool = false
+                    while pos < n {
+                        const cc: int = src[pos]
+                        if cc == 42 and src[pos + 1] == 47 {
+                            pos = pos + 2
+                            closed = true
+                            break
+                        }
+                        if cc == 10 or cc == 13 {
+                            self.line_break_before = true
+                        }
+                        pos = pos + 1
+                    }
+                    if not closed {
+                        pos = n
+                    }
+                } else {
+                    break
+                }
+            } else {
+                break
+            }
+        }
+
+        self.tok_start = pos
+        if pos >= n {
+            self.pos = pos
+            self.token = TK_EOF
+            return TK_EOF
+        }
+
+        const c: int = src[pos]
+
+        if (c >= 97 and c <= 122) or (c >= 65 and c <= 90) or c == 95 or c == 36 or c >= 128 {
+            state: int = 0
+            if c >= 97 and c <= 122 {
+                state = KW_TRIE[27 + (c - 97)]
+            }
+            p: int = pos + 1
+            while true {
+                const cc: int = src[p]
+                if cc >= 97 and cc <= 122 {
+                    if state != 0 {
+                        state = KW_TRIE[state * 27 + (cc - 97)]
+                    }
+                    p = p + 1
+                    continue
+                }
+                if (cc >= 65 and cc <= 90) or (cc >= 48 and cc <= 57) or cc == 95 or cc == 36 or cc >= 128 {
+                    state = 0
+                    p = p + 1
+                    continue
+                }
+                break
+            }
+            kind: int = TK_IDENTIFIER
+            if state != 0 {
+                const kw: int = KW_TRIE[state * 27 + 26]
+                if kw != 0 {
+                    kind = kw
+                }
+            }
+            self.pos = p
+            self.token = kind
+            return kind
+        }
+
+        if c >= 48 and c <= 57 {
+            return self._number(pos)
+        }
+
+        if c == 40 {
+            self.pos = pos + 1
+            self.token = TK_OPEN_PAREN
+            return self.token
+        }
+        if c == 41 {
+            self.pos = pos + 1
+            self.token = TK_CLOSE_PAREN
+            return self.token
+        }
+        if c == 44 {
+            self.pos = pos + 1
+            self.token = TK_COMMA
+            return self.token
+        }
+        if c == 46 {
+            if src[pos + 1] >= 48 and src[pos + 1] <= 57 {
+                return self._number(pos)
+            }
+            if src[pos + 1] == 46 and src[pos + 2] == 46 {
+                self.pos = pos + 3
+                self.token = TK_DOT_DOT_DOT
+                return self.token
+            }
+            self.pos = pos + 1
+            self.token = TK_DOT
+            return self.token
+        }
+        if c == 59 {
+            self.pos = pos + 1
+            self.token = TK_SEMICOLON
+            return self.token
+        }
+        if c == 58 {
+            self.pos = pos + 1
+            self.token = TK_COLON
+            return self.token
+        }
+        if c == 123 {
+            self.pos = pos + 1
+            self.token = TK_OPEN_BRACE
+            return self.token
+        }
+        if c == 125 {
+            self.pos = pos + 1
+            self.token = TK_CLOSE_BRACE
+            return self.token
+        }
+        if c == 91 {
+            self.pos = pos + 1
+            self.token = TK_OPEN_BRACKET
+            return self.token
+        }
+        if c == 93 {
+            self.pos = pos + 1
+            self.token = TK_CLOSE_BRACKET
+            return self.token
+        }
+        if c == 61 {
+            const c2: int = src[pos + 1]
+            if c2 == 61 {
+                if src[pos + 2] == 61 {
+                    self.pos = pos + 3
+                    self.token = TK_EQ_EQ_EQ
+                    return self.token
+                }
+                self.pos = pos + 2
+                self.token = TK_EQ_EQ
+                return self.token
+            }
+            if c2 == 62 {
+                self.pos = pos + 2
+                self.token = TK_ARROW
+                return self.token
+            }
+            self.pos = pos + 1
+            self.token = TK_EQ
+            return self.token
+        }
+        if c == 34 or c == 39 {
+            return self._string(pos, c)
+        }
+        if c == 96 {
+            return self._template(pos, false)
+        }
+        if c == 60 {
+            const c2: int = src[pos + 1]
+            if c2 == 61 {
+                self.pos = pos + 2
+                self.token = TK_LT_EQ
+                return self.token
+            }
+            if c2 == 60 {
+                if src[pos + 2] == 61 {
+                    self.pos = pos + 3
+                    self.token = TK_LT_LT_EQ
+                    return self.token
+                }
+                self.pos = pos + 2
+                self.token = TK_LT_LT
+                return self.token
+            }
+            self.pos = pos + 1
+            self.token = TK_LT
+            return self.token
+        }
+        if c == 62 {
+            self.pos = pos + 1
+            self.token = TK_GT
+            return self.token
+        }
+        if c == 33 {
+            if src[pos + 1] == 61 {
+                if src[pos + 2] == 61 {
+                    self.pos = pos + 3
+                    self.token = TK_EXCL_EQ_EQ
+                    return self.token
+                }
+                self.pos = pos + 2
+                self.token = TK_EXCL_EQ
+                return self.token
+            }
+            self.pos = pos + 1
+            self.token = TK_EXCL
+            return self.token
+        }
+        if c == 43 {
+            const c2: int = src[pos + 1]
+            if c2 == 43 {
+                self.pos = pos + 2
+                self.token = TK_PLUS_PLUS
+                return self.token
+            }
+            if c2 == 61 {
+                self.pos = pos + 2
+                self.token = TK_PLUS_EQ
+                return self.token
+            }
+            self.pos = pos + 1
+            self.token = TK_PLUS
+            return self.token
+        }
+        if c == 45 {
+            const c2: int = src[pos + 1]
+            if c2 == 45 {
+                self.pos = pos + 2
+                self.token = TK_MINUS_MINUS
+                return self.token
+            }
+            if c2 == 61 {
+                self.pos = pos + 2
+                self.token = TK_MINUS_EQ
+                return self.token
+            }
+            self.pos = pos + 1
+            self.token = TK_MINUS
+            return self.token
+        }
+        if c == 42 {
+            const c2: int = src[pos + 1]
+            if c2 == 42 {
+                if src[pos + 2] == 61 {
+                    self.pos = pos + 3
+                    self.token = TK_ASTERISK_ASTERISK_EQ
+                    return self.token
+                }
+                self.pos = pos + 2
+                self.token = TK_ASTERISK_ASTERISK
+                return self.token
+            }
+            if c2 == 61 {
+                self.pos = pos + 2
+                self.token = TK_ASTERISK_EQ
+                return self.token
+            }
+            self.pos = pos + 1
+            self.token = TK_ASTERISK
+            return self.token
+        }
+        if c == 47 {
+            if src[pos + 1] == 61 {
+                self.pos = pos + 2
+                self.token = TK_SLASH_EQ
+                return self.token
+            }
+            self.pos = pos + 1
+            self.token = TK_SLASH
+            return self.token
+        }
+        if c == 37 {
+            if src[pos + 1] == 61 {
+                self.pos = pos + 2
+                self.token = TK_PERCENT_EQ
+                return self.token
+            }
+            self.pos = pos + 1
+            self.token = TK_PERCENT
+            return self.token
+        }
+        if c == 38 {
+            const c2: int = src[pos + 1]
+            if c2 == 38 {
+                if src[pos + 2] == 61 {
+                    self.pos = pos + 3
+                    self.token = TK_AMP_AMP_EQ
+                    return self.token
+                }
+                self.pos = pos + 2
+                self.token = TK_AMP_AMP
+                return self.token
+            }
+            if c2 == 61 {
+                self.pos = pos + 2
+                self.token = TK_AMP_EQ
+                return self.token
+            }
+            self.pos = pos + 1
+            self.token = TK_AMP
+            return self.token
+        }
+        if c == 124 {
+            const c2: int = src[pos + 1]
+            if c2 == 124 {
+                if src[pos + 2] == 61 {
+                    self.pos = pos + 3
+                    self.token = TK_BAR_BAR_EQ
+                    return self.token
+                }
+                self.pos = pos + 2
+                self.token = TK_BAR_BAR
+                return self.token
+            }
+            if c2 == 61 {
+                self.pos = pos + 2
+                self.token = TK_BAR_EQ
+                return self.token
+            }
+            self.pos = pos + 1
+            self.token = TK_BAR
+            return self.token
+        }
+        if c == 63 {
+            const c2: int = src[pos + 1]
+            if c2 == 46 and not (src[pos + 2] >= 48 and src[pos + 2] <= 57) {
+                self.pos = pos + 2
+                self.token = TK_QUESTION_DOT
+                return self.token
+            }
+            if c2 == 63 {
+                if src[pos + 2] == 61 {
+                    self.pos = pos + 3
+                    self.token = TK_QUESTION_QUESTION_EQ
+                    return self.token
+                }
+                self.pos = pos + 2
+                self.token = TK_QUESTION_QUESTION
+                return self.token
+            }
+            self.pos = pos + 1
+            self.token = TK_QUESTION
+            return self.token
+        }
+        if c == 94 {
+            if src[pos + 1] == 61 {
+                self.pos = pos + 2
+                self.token = TK_CARET_EQ
+                return self.token
+            }
+            self.pos = pos + 1
+            self.token = TK_CARET
+            return self.token
+        }
+        if c == 126 {
+            self.pos = pos + 1
+            self.token = TK_TILDE
+            return self.token
+        }
+        if c == 64 {
+            self.pos = pos + 1
+            self.token = TK_AT
+            return self.token
+        }
+        if c == 35 {
+            const c2: int = src[pos + 1]
+            if (c2 >= 97 and c2 <= 122) or (c2 >= 65 and c2 <= 90) or c2 == 95 or c2 == 36 or c2 >= 128 {
+                p: int = pos + 1
+                while true {
+                    const cc: int = src[p]
+                    if (cc >= 97 and cc <= 122) or (cc >= 65 and cc <= 90) or (cc >= 48 and cc <= 57) or cc == 95 or cc == 36 or cc >= 128 {
+                        p = p + 1
+                        continue
+                    }
+                    break
+                }
+                self.pos = p
+                self.token = TK_PRIVATE_IDENTIFIER
+                return self.token
+            }
+            self.pos = pos + 1
+            self.token = TK_HASH
+            return self.token
+        }
+
+        self.pos = pos + 1
+        self.token = TK_UNKNOWN
+        return self.token
+    }
+
+    def _number(start: int) -> int {
+        const src: bytes = self.src
+        p: int = start
+        const c0: int = src[p]
+        is_int_like: bool = true
+        if c0 == 48 and (src[p + 1] == 120 or src[p + 1] == 88) {
+            p = p + 2
+            while true {
+                const cc: int = src[p]
+                if (cc >= 48 and cc <= 57) or (cc >= 97 and cc <= 102) or (cc >= 65 and cc <= 70) or cc == 95 {
+                    p = p + 1
+                    continue
+                }
+                break
+            }
+        } elif c0 == 48 and (src[p + 1] == 98 or src[p + 1] == 66) {
+            p = p + 2
+            while src[p] == 48 or src[p] == 49 or src[p] == 95 {
+                p = p + 1
+            }
+        } elif c0 == 48 and (src[p + 1] == 111 or src[p + 1] == 79) {
+            p = p + 2
+            while (src[p] >= 48 and src[p] <= 55) or src[p] == 95 {
+                p = p + 1
+            }
+        } else {
+            while (src[p] >= 48 and src[p] <= 57) or src[p] == 95 {
+                p = p + 1
+            }
+            if src[p] == 46 {
+                is_int_like = false
+                p = p + 1
+                while (src[p] >= 48 and src[p] <= 57) or src[p] == 95 {
+                    p = p + 1
+                }
+            }
+            if src[p] == 101 or src[p] == 69 {
+                const c1: int = src[p + 1]
+                if c1 >= 48 and c1 <= 57 {
+                    is_int_like = false
+                    p = p + 2
+                    while (src[p] >= 48 and src[p] <= 57) or src[p] == 95 {
+                        p = p + 1
+                    }
+                } elif (c1 == 43 or c1 == 45) and (src[p + 2] >= 48 and src[p + 2] <= 57) {
+                    is_int_like = false
+                    p = p + 3
+                    while (src[p] >= 48 and src[p] <= 57) or src[p] == 95 {
+                        p = p + 1
+                    }
+                }
+            }
+        }
+        if is_int_like and src[p] == 110 {
+            p = p + 1
+            self.token = TK_BIGINT_LITERAL
+        } else {
+            self.token = TK_NUMERIC_LITERAL
+        }
+        self.pos = p
+        return self.token
+    }
+
+    def _string(start: int, quote: int) -> int {
+        const src: bytes = self.src
+        const n: int = self.n
+        p: int = start + 1
+        while p < n {
+            const c: int = src[p]
+            if c == quote {
+                p = p + 1
+                break
+            }
+            if c == 92 {
+                if src[p + 1] == 13 and src[p + 2] == 10 {
+                    p = p + 3
+                } else {
+                    p = p + 2
+                }
+                continue
+            }
+            if c == 10 or c == 13 {
+                break
+            }
+            p = p + 1
+        }
+        self.pos = p
+        self.token = TK_STRING_LITERAL
+        return self.token
+    }
+
+    def _template(start: int, rescan: bool) -> int {
+        const src: bytes = self.src
+        const n: int = self.n
+        p: int = start + 1
+        ended_backtick: bool = false
+        hit_dollar: bool = false
+        while p < n {
+            const c: int = src[p]
+            if c == 96 {
+                p = p + 1
+                ended_backtick = true
+                break
+            }
+            if c == 36 and src[p + 1] == 123 {
+                p = p + 2
+                hit_dollar = true
+                break
+            }
+            if c == 92 {
+                if src[p + 1] == 13 and src[p + 2] == 10 {
+                    p = p + 3
+                } else {
+                    p = p + 2
+                }
+                continue
+            }
+            p = p + 1
+        }
+        if hit_dollar {
+            if rescan {
+                self.token = TK_TEMPLATE_MIDDLE
+            } else {
+                self.token = TK_TEMPLATE_HEAD
+            }
+        } else {
+            if rescan {
+                self.token = TK_TEMPLATE_TAIL
+            } else {
+                self.token = TK_NO_SUB_TEMPLATE
+            }
+        }
+        self.pos = p
+        return self.token
+    }
+
+    def re_scan_template() -> int {
+        return self._template(self.tok_start, true)
+    }
+
+    def re_scan_slash() -> int {
+        const src: bytes = self.src
+        const n: int = self.n
+        const start: int = self.tok_start
+        p: int = start + 1
+        in_class: bool = false
+        while p < n {
+            const c: int = src[p]
+            if c == 10 or c == 13 {
+                break
+            }
+            if c == 92 {
+                p = p + 2
+                continue
+            }
+            if c == 91 {
+                in_class = true
+            } elif c == 93 {
+                in_class = false
+            } elif c == 47 and not in_class {
+                p = p + 1
+                break
+            }
+            p = p + 1
+        }
+        while true {
+            const cc: int = src[p]
+            if (cc >= 97 and cc <= 122) or (cc >= 65 and cc <= 90) or (cc >= 48 and cc <= 57) or cc == 95 or cc == 36 or cc >= 128 {
+                p = p + 1
+                continue
+            }
+            break
+        }
+        self.pos = p
+        self.token = TK_REGEX_LITERAL
+        return self.token
+    }
+
+    def re_scan_greater() -> int {
+        const src: bytes = self.src
+        const start: int = self.tok_start
+        const c1: int = src[start + 1]
+        if c1 == 62 {
+            const c2: int = src[start + 2]
+            if c2 == 62 {
+                if src[start + 3] == 61 {
+                    self.pos = start + 4
+                    self.token = TK_GT_GT_GT_EQ
+                    return self.token
+                }
+                self.pos = start + 3
+                self.token = TK_GT_GT_GT
+                return self.token
+            }
+            if c2 == 61 {
+                self.pos = start + 3
+                self.token = TK_GT_GT_EQ
+                return self.token
+            }
+            self.pos = start + 2
+            self.token = TK_GT_GT
+            return self.token
+        }
+        if c1 == 61 {
+            self.pos = start + 2
+            self.token = TK_GT_EQ
+            return self.token
+        }
+        return self.token
+    }
+}

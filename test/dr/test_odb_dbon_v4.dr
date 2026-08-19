@@ -1,0 +1,408 @@
+from unittest import TestCase, main
+from odb.schema import compile_schema, CompiledSchema, MAX_DEPTH
+from odb.dbon import encode, decode, record_version, DBON_V3, DBON_V4
+from odb.errors import SchemaError
+
+
+def _prop(ty: Any) -> dict[str, Any] {
+    p: dict[str, Any] = {}
+    p["type"] = ty
+    return p
+}
+
+def _schema(props: dict[str, Any], required: list[Any]) -> CompiledSchema {
+    s: dict[str, Any] = {}
+    s["type"] = "object"
+    s["properties"] = props
+    s["required"] = required
+    return compile_schema("t", s, 1, 1, "{}")
+}
+
+def _nullable(ty: str) -> dict[str, Any] {
+    lst: list[Any] = [ty, "null"]
+    return _prop(lst)
+}
+
+
+class NullTest(TestCase) {
+    def test_required_nullable_field_round_trips_null() -> None {
+        props: dict[str, Any] = {}
+        props["id"] = _prop("integer")
+        props["note"] = _nullable("string")
+        req: list[Any] = ["id", "note"]
+        cs: CompiledSchema = _schema(props, req)
+
+        doc: dict[str, Any] = {}
+        doc["id"] = 7
+        doc["note"] = None
+        const back: dict[str, Any] = decode(cs, encode(cs, doc))
+        self.assertTrue(back["note"] is None)
+        const idv: int = back["id"]
+        self.assertEqual(idv, 7)
+    }
+
+    def test_required_nullable_field_round_trips_a_value() -> None {
+        props: dict[str, Any] = {}
+        props["id"] = _prop("integer")
+        props["note"] = _nullable("string")
+        req: list[Any] = ["id", "note"]
+        cs: CompiledSchema = _schema(props, req)
+
+        doc: dict[str, Any] = {}
+        doc["id"] = 7
+        doc["note"] = "hello"
+        const back: dict[str, Any] = decode(cs, encode(cs, doc))
+        const nv: str = back["note"]
+        self.assertEqual(nv, "hello")
+    }
+
+    def test_optional_nullable_field_round_trips_null() -> None {
+        props: dict[str, Any] = {}
+        props["id"] = _prop("integer")
+        props["note"] = _nullable("string")
+        req: list[Any] = ["id"]
+        cs: CompiledSchema = _schema(props, req)
+
+        doc: dict[str, Any] = {}
+        doc["id"] = 1
+        doc["note"] = None
+        const back: dict[str, Any] = decode(cs, encode(cs, doc))
+        self.assertTrue("note" in back)
+        self.assertTrue(back["note"] is None)
+    }
+
+    def test_null_is_distinct_from_absent() -> None {
+        props: dict[str, Any] = {}
+        props["id"] = _prop("integer")
+        props["note"] = _nullable("string")
+        req: list[Any] = ["id"]
+        cs: CompiledSchema = _schema(props, req)
+
+        with_null: dict[str, Any] = {}
+        with_null["id"] = 1
+        with_null["note"] = None
+        absent: dict[str, Any] = {}
+        absent["id"] = 1
+
+        const a: dict[str, Any] = decode(cs, encode(cs, with_null))
+        const b: dict[str, Any] = decode(cs, encode(cs, absent))
+        self.assertTrue("note" in a)
+        self.assertFalse("note" in b)
+    }
+
+    def test_non_nullable_field_refuses_null() -> None {
+        props: dict[str, Any] = {}
+        props["id"] = _prop("integer")
+        props["note"] = _prop("string")
+        req: list[Any] = ["id"]
+        cs: CompiledSchema = _schema(props, req)
+
+        doc: dict[str, Any] = {}
+        doc["id"] = 1
+        doc["note"] = None
+        raised: bool = False
+        try {
+            encode(cs, doc)
+        } except SchemaError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+
+    def test_many_nullable_required_fields_use_the_bitmap() -> None {
+        props: dict[str, Any] = {}
+        req: list[Any] = []
+        i: int = 0
+        while i < 20 {
+            props["f" + str(i)] = _nullable("integer")
+            req.append("f" + str(i))
+            i = i + 1
+        }
+        cs: CompiledSchema = _schema(props, req)
+
+        doc: dict[str, Any] = {}
+        i = 0
+        while i < 20 {
+            if i % 3 == 0 {
+                doc["f" + str(i)] = None
+            } else {
+                doc["f" + str(i)] = i
+            }
+            i = i + 1
+        }
+        const back: dict[str, Any] = decode(cs, encode(cs, doc))
+        i = 0
+        while i < 20 {
+            if i % 3 == 0 {
+                self.assertTrue(back["f" + str(i)] is None)
+            } else {
+                const got: int = back["f" + str(i)]
+                self.assertEqual(got, i)
+            }
+            i = i + 1
+        }
+    }
+}
+
+
+class ArrayTest(TestCase) {
+    def test_array_of_scalars_round_trips() -> None {
+        props: dict[str, Any] = {}
+        props["id"] = _prop("integer")
+        props["tags"] = _prop("array")
+        req: list[Any] = ["id"]
+        cs: CompiledSchema = _schema(props, req)
+
+        tags: list[Any] = ["a", "b", "c"]
+        doc: dict[str, Any] = {}
+        doc["id"] = 1
+        doc["tags"] = tags
+        const back: dict[str, Any] = decode(cs, encode(cs, doc))
+        const got: list[Any] = back["tags"]
+        self.assertEqual(len(got), 3)
+        const g0: str = got[0]
+        const g2: str = got[2]
+        self.assertEqual(g0, "a")
+        self.assertEqual(g2, "c")
+    }
+
+    def test_empty_array_round_trips() -> None {
+        props: dict[str, Any] = {}
+        props["id"] = _prop("integer")
+        props["tags"] = _prop("array")
+        req: list[Any] = ["id"]
+        cs: CompiledSchema = _schema(props, req)
+
+        empty: list[Any] = []
+        doc: dict[str, Any] = {}
+        doc["id"] = 1
+        doc["tags"] = empty
+        const back: dict[str, Any] = decode(cs, encode(cs, doc))
+        const got: list[Any] = back["tags"]
+        self.assertEqual(len(got), 0)
+    }
+
+    def test_mixed_element_types_round_trip() -> None {
+        props: dict[str, Any] = {}
+        props["id"] = _prop("integer")
+        props["mix"] = _prop("array")
+        req: list[Any] = ["id"]
+        cs: CompiledSchema = _schema(props, req)
+
+        mix: list[Any] = [1, "two", True, None, 4.5]
+        doc: dict[str, Any] = {}
+        doc["id"] = 1
+        doc["mix"] = mix
+        const back: dict[str, Any] = decode(cs, encode(cs, doc))
+        const got: list[Any] = back["mix"]
+        self.assertEqual(len(got), 5)
+        const g0: int = got[0]
+        self.assertEqual(g0, 1)
+        const g1: str = got[1]
+        self.assertEqual(g1, "two")
+        const g2: bool = got[2]
+        self.assertTrue(g2)
+        self.assertTrue(got[3] is None)
+        const g4: float = got[4]
+        self.assertAlmostEqual(g4, 4.5, 6)
+    }
+
+    def test_items_type_is_enforced() -> None {
+        item: dict[str, Any] = {}
+        item["type"] = "integer"
+        arr_s: dict[str, Any] = {}
+        arr_s["type"] = "array"
+        arr_s["items"] = item
+
+        props: dict[str, Any] = {}
+        props["id"] = _prop("integer")
+        props["nums"] = arr_s
+        req: list[Any] = ["id"]
+        cs: CompiledSchema = _schema(props, req)
+
+        bad_items: list[Any] = [1, "two"]
+        doc: dict[str, Any] = {}
+        doc["id"] = 1
+        doc["nums"] = bad_items
+        raised: bool = False
+        try {
+            encode(cs, doc)
+        } except SchemaError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+}
+
+
+class NestingTest(TestCase) {
+    def test_nested_object_round_trips() -> None {
+        props: dict[str, Any] = {}
+        props["id"] = _prop("integer")
+        props["user"] = _prop("object")
+        req: list[Any] = ["id"]
+        cs: CompiledSchema = _schema(props, req)
+
+        roles: list[Any] = ["admin", "dev"]
+        inner: dict[str, Any] = {}
+        inner["name"] = "ada"
+        inner["roles"] = roles
+        doc: dict[str, Any] = {}
+        doc["id"] = 1
+        doc["user"] = inner
+
+        const back: dict[str, Any] = decode(cs, encode(cs, doc))
+        const u: dict[str, Any] = back["user"]
+        const nm: str = u["name"]
+        self.assertEqual(nm, "ada")
+        const rs: list[Any] = u["roles"]
+        self.assertEqual(len(rs), 2)
+        const r1: str = rs[1]
+        self.assertEqual(r1, "dev")
+    }
+
+    def test_objects_inside_arrays_round_trip() -> None {
+        props: dict[str, Any] = {}
+        props["id"] = _prop("integer")
+        props["items"] = _prop("array")
+        req: list[Any] = ["id"]
+        cs: CompiledSchema = _schema(props, req)
+
+        a: dict[str, Any] = {}
+        a["sku"] = "X1"
+        a["qty"] = 2
+        b: dict[str, Any] = {}
+        b["sku"] = "Y2"
+        b["qty"] = 5
+        items: list[Any] = [a, b]
+        doc: dict[str, Any] = {}
+        doc["id"] = 1
+        doc["items"] = items
+
+        const back: dict[str, Any] = decode(cs, encode(cs, doc))
+        const got: list[Any] = back["items"]
+        self.assertEqual(len(got), 2)
+        const e1: dict[str, Any] = got[1]
+        const sku: str = e1["sku"]
+        const qty: int = e1["qty"]
+        self.assertEqual(sku, "Y2")
+        self.assertEqual(qty, 5)
+    }
+
+    def test_deep_nesting_round_trips() -> None {
+        props: dict[str, Any] = {}
+        props["id"] = _prop("integer")
+        props["deep"] = _prop("array")
+        req: list[Any] = ["id"]
+        cs: CompiledSchema = _schema(props, req)
+
+        cur: Any = 42
+        i: int = 0
+        while i < 30 {
+            wrap: list[Any] = [cur]
+            cur = wrap
+            i = i + 1
+        }
+        doc: dict[str, Any] = {}
+        doc["id"] = 1
+        doc["deep"] = cur
+
+        const back: dict[str, Any] = decode(cs, encode(cs, doc))
+        probe: Any = back["deep"]
+        i = 0
+        while i < 30 {
+            const lvl: list[Any] = probe
+            probe = lvl[0]
+            i = i + 1
+        }
+        const leaf: int = probe
+        self.assertEqual(leaf, 42)
+    }
+
+    def test_nesting_past_the_depth_limit_is_refused() -> None {
+        props: dict[str, Any] = {}
+        props["id"] = _prop("integer")
+        props["deep"] = _prop("array")
+        req: list[Any] = ["id"]
+        cs: CompiledSchema = _schema(props, req)
+
+        cur: Any = 1
+        i: int = 0
+        while i < MAX_DEPTH + 5 {
+            wrap: list[Any] = [cur]
+            cur = wrap
+            i = i + 1
+        }
+        doc: dict[str, Any] = {}
+        doc["id"] = 1
+        doc["deep"] = cur
+        raised: bool = False
+        try {
+            encode(cs, doc)
+        } except SchemaError {
+            raised = True
+        }
+        self.assertTrue(raised)
+    }
+}
+
+
+class AdditionalPropertiesTest(TestCase) {
+    def test_extras_round_trip_by_default() -> None {
+        props: dict[str, Any] = {}
+        props["id"] = _prop("integer")
+        req: list[Any] = ["id"]
+        cs: CompiledSchema = _schema(props, req)
+
+        nested: dict[str, Any] = {}
+        nested["k"] = "v"
+        extras_list: list[Any] = [1, 2]
+        doc: dict[str, Any] = {}
+        doc["id"] = 1
+        doc["who"] = "ada"
+        doc["count"] = 9
+        doc["obj"] = nested
+        doc["arr"] = extras_list
+
+        const back: dict[str, Any] = decode(cs, encode(cs, doc))
+        const who: str = back["who"]
+        self.assertEqual(who, "ada")
+        const cnt: int = back["count"]
+        self.assertEqual(cnt, 9)
+        const ob: dict[str, Any] = back["obj"]
+        const kv: str = ob["k"]
+        self.assertEqual(kv, "v")
+        const ar: list[Any] = back["arr"]
+        self.assertEqual(len(ar), 2)
+    }
+
+    def test_null_extra_round_trips() -> None {
+        props: dict[str, Any] = {}
+        props["id"] = _prop("integer")
+        req: list[Any] = ["id"]
+        cs: CompiledSchema = _schema(props, req)
+
+        doc: dict[str, Any] = {}
+        doc["id"] = 1
+        doc["maybe"] = None
+        const back: dict[str, Any] = decode(cs, encode(cs, doc))
+        self.assertTrue("maybe" in back)
+        self.assertTrue(back["maybe"] is None)
+    }
+}
+
+
+class RecordVersionTest(TestCase) {
+    def test_new_records_are_v4() -> None {
+        props: dict[str, Any] = {}
+        props["id"] = _prop("integer")
+        req: list[Any] = ["id"]
+        cs: CompiledSchema = _schema(props, req)
+        doc: dict[str, Any] = {}
+        doc["id"] = 1
+        self.assertEqual(record_version(encode(cs, doc)), DBON_V4)
+    }
+}
+
+
+main([NullTest(), ArrayTest(), NestingTest(), AdditionalPropertiesTest(), RecordVersionTest()])

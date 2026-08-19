@@ -4,10 +4,11 @@ from odb.commitlog import CommitLog, LogEntry, LogOp, parse_retain
 from odb.commitlog import OP_ADD, OP_SET, OP_DEL, OP_PUT, OP_DEFINE
 from odb.btree import BTree
 from odb.index import IndexTree
-from odb.schema import compile_schema, CompiledSchema
-from odb.meta import compile_meta, CompiledMeta, IndexDecl, RefDecl, enc_decl_key, enc_field_value
+from odb.schema import compile_schema, compile_schema_with_symbols, CompiledSchema, apply_write_defaults, apply_read_defaults
+from odb.schema import order_key, is_formatted, cmp_keys, type_name, validate_doc, FieldSpec
+from odb.meta import compile_meta, CompiledMeta, IndexDecl, RefDecl, enc_decl_key, enc_decl_keys, enc_field_value, elem_values, elem_tag_of
 from odb.meta import IK_REVERSE
-from odb.dbon import encode, decode
+from odb.dbon import encode, decode, decode_for_read
 from odb.lock import WriterLock
 from odb.oql import parse, typecheck, matches, project, project_fields, is_aggregate, aggregate
 from odb.oql import has_refs, tc_pred, tc_value, pred, eval_present, eval_any, OqlQuery, ProjField, ExistJoin
@@ -74,11 +75,65 @@ def _app_u16(out: list[int], v: int) -> None {
     out.append((v >> 8) & 0xFF)
 }
 
+def _app_u32(out: list[int], v: int) -> None {
+    i: int = 0
+    while i < 4 {
+        out.append((v >> (i * 8)) & 0xFF)
+        i = i + 1
+    }
+}
+
 def _app_u64(out: list[int], v: int) -> None {
     i: int = 0
     while i < 8 {
         out.append((v >> (i * 8)) & 0xFF)
         i = i + 1
+    }
+}
+
+def _sort_ints(xs: list[int]) -> None {
+    i: int = 1
+    while i < len(xs) {
+        j: int = i
+        while j > 0 and xs[j - 1] > xs[j] {
+            const t: int = xs[j - 1]
+            xs[j - 1] = xs[j]
+            xs[j] = t
+            j = j - 1
+        }
+        i = i + 1
+    }
+}
+
+def _read_symbols(val: bytes, start: int, into: dict[str, int]) -> int {
+    off: int = start
+    const count: int = get_u16(val, off)
+    off = off + 2
+    i: int = 0
+    while i < count {
+        const nlen: int = get_u16(val, off)
+        off = off + 2
+        const nm: str = get_bytes(val, off, nlen).decode()
+        off = off + nlen
+        into[nm] = get_u16(val, off)
+        off = off + 2
+        i = i + 1
+    }
+    return off
+}
+
+def _app_symbols(out: list[int], symbols: dict[str, int]) -> None {
+    names: list[str] = []
+    for k in symbols {
+        names.append(k)
+    }
+    names.sort()
+    _app_u16(out, len(names))
+    for nm in names {
+        const nb: bytes = nm.encode()
+        _app_u16(out, len(nb))
+        _app_bytes(out, nb)
+        _app_u16(out, symbols[nm])
     }
 }
 
@@ -291,12 +346,40 @@ class ODB {
             k = k + 1
         }
 
+        stored_symbols: dict[str, int] = {}
+        if off < len(val) {
+            const read: int = _read_symbols(val, off, stored_symbols)
+            off = read
+        }
+
         sd_any: Any = loads(schema_json)
         if not isinstance(sd_any, dict) {
             raise SchemaError("stored schema '" + name + "' is not an object")
         }
         sd: dict[str, Any] = sd_any
-        cs: CompiledSchema = compile_schema(name, sd, sid, version, schema_json)
+        cs: CompiledSchema = compile_schema_with_symbols(name, sd, sid, version, schema_json, stored_symbols)
+
+        if off < len(val) {
+            const hist_count: int = get_u16(val, off)
+            off = off + 2
+            hi: int = 0
+            while hi < hist_count {
+                const hver: int = get_u16(val, off)
+                off = off + 2
+                const hjlen: int = get_u32(val, off)
+                off = off + 4
+                const hjson: str = get_bytes(val, off, hjlen).decode()
+                off = off + hjlen
+                hsym: dict[str, int] = {}
+                off = _read_symbols(val, off, hsym)
+                const hd_any: Any = loads(hjson)
+                if isinstance(hd_any, dict) {
+                    const hd: dict[str, Any] = hd_any
+                    cs.prior[hver] = compile_schema_with_symbols(name, hd, sid, hver, hjson, hsym)
+                }
+                hi = hi + 1
+            }
+        }
         self._schemas[name] = cs
         self._by_sid[sid] = name
         self._roots[sid] = doc_root
@@ -340,6 +423,25 @@ class ODB {
             count = count + 1
         }
 
+        sym: list[int] = []
+        _app_symbols(sym, cs.symbols)
+
+        hist_versions: list[int] = []
+        for pv in cs.prior {
+            hist_versions.append(pv)
+        }
+        _sort_ints(hist_versions)
+        hist: list[int] = []
+        _app_u16(hist, len(hist_versions))
+        for hv in hist_versions {
+            const prior: CompiledSchema = cs.prior[hv]
+            const pjb: bytes = prior.schema_json.encode()
+            _app_u16(hist, hv)
+            _app_u32(hist, len(pjb))
+            _app_bytes(hist, pjb)
+            _app_symbols(hist, prior.symbols)
+        }
+
         buf: list[int] = blank(_E_HEAD)
         put_u64(buf, _E_DOC_ROOT, doc_root)
         put_u16(buf, _E_SID, sid)
@@ -349,7 +451,7 @@ class ODB {
         put_u32(buf, _E_MJLEN, len(mj_b))
         put_u16(buf, _E_IXCOUNT, count)
         head: bytes = bytes(buf)
-        return head + name_b + sj_b + mj_b + bytes(ix)
+        return head + name_b + sj_b + mj_b + bytes(ix) + bytes(sym) + bytes(hist)
     }
 
     def _write_entry(cs: CompiledSchema) -> None {
@@ -446,18 +548,19 @@ class ODB {
         sid: int = cs.schema_id
         ik: str = _ikey(sid, decl.name)
         t: IndexTree = IndexTree(self.pager, self._index_roots[ik])
-        key: bytes = enc_decl_key(decl, doc)
-        if decl.unique {
-            if t.contains(key) {
-                existing: int = _be_to_docid(t.get(key))
-                if existing != docid {
-                    raise IntegrityError("unique constraint '" + decl.name + "' on schema '" + cs.name + "' violated")
+        for key in enc_decl_keys(decl, doc) {
+            if decl.unique {
+                if t.contains(key) {
+                    existing: int = _be_to_docid(t.get(key))
+                    if existing != docid {
+                        raise IntegrityError("unique constraint '" + decl.name + "' on schema '" + cs.name + "' violated")
+                    }
+                } else {
+                    t.insert(key, _docid_be(docid))
                 }
             } else {
-                t.insert(key, _docid_be(docid))
+                t.insert(key + _docid_be(docid), bytes([]))
             }
-        } else {
-            t.insert(key + _docid_be(docid), bytes([]))
         }
         self._index_roots[ik] = t.root
         self._mark(sid)
@@ -467,11 +570,12 @@ class ODB {
         sid: int = cs.schema_id
         ik: str = _ikey(sid, decl.name)
         t: IndexTree = IndexTree(self.pager, self._index_roots[ik])
-        key: bytes = enc_decl_key(decl, doc)
-        if decl.unique {
-            t.delete(key)
-        } else {
-            t.delete(key + _docid_be(docid))
+        for key in enc_decl_keys(decl, doc) {
+            if decl.unique {
+                t.delete(key)
+            } else {
+                t.delete(key + _docid_be(docid))
+            }
         }
         self._index_roots[ik] = t.root
         self._mark(sid)
@@ -501,7 +605,11 @@ class ODB {
         tcm: CompiledMeta = self._metac[r.target_schema]
         tdecl: IndexDecl = _unique_index_on(tcm, r.target_field, r.target_schema)
         t: IndexTree = self._index_tree(tcs.schema_id, tdecl)
-        key: bytes = enc_field_value(r.source_tag, val)
+        etag: int = r.source_tag
+        if r.is_array {
+            etag = elem_tag_of(val)
+        }
+        key: bytes = enc_field_value(etag, val)
         if not t.contains(key) {
             raise IntegrityError("ref '" + r.source_path + "' -> " + r.target_schema + "." + r.target_field + ": no matching target")
         }
@@ -537,6 +645,15 @@ class ODB {
 
     def _refs_add(cs: CompiledSchema, cm: CompiledMeta, doc: dict[str, Any], docid: int) -> None {
         for r in cm.refs {
+            if doc[r.source_path] is None {
+                continue
+            }
+            if r.is_array {
+                for e in elem_values(doc[r.source_path]) {
+                    self._rev_add(cs.schema_id, r.rev_name, self._resolve_ref(r, e), docid)
+                }
+                continue
+            }
             target_docid: int = self._resolve_ref(r, doc[r.source_path])
             self._rev_add(cs.schema_id, r.rev_name, target_docid, docid)
         }
@@ -544,9 +661,32 @@ class ODB {
 
     def _refs_remove(cs: CompiledSchema, cm: CompiledMeta, doc: dict[str, Any], docid: int) -> None {
         for r in cm.refs {
+            if doc[r.source_path] is None {
+                continue
+            }
+            if r.is_array {
+                for e in elem_values(doc[r.source_path]) {
+                    self._rev_remove(cs.schema_id, r.rev_name, self._resolve_ref(r, e), docid)
+                }
+                continue
+            }
             target_docid: int = self._resolve_ref(r, doc[r.source_path])
             self._rev_remove(cs.schema_id, r.rev_name, target_docid, docid)
         }
+    }
+
+    def _detach_element(scs: CompiledSchema, source_docid: int, r: RefDecl, target_cs: CompiledSchema, target_docid: int) -> None {
+        const current: dict[str, Any] = decode(scs, self._tree(scs).get(source_docid))
+        kept: list[Any] = []
+        for e in elem_values(current[r.source_path]) {
+            if self._resolve_ref(r, e) != target_docid {
+                kept.append(e)
+            }
+        }
+        patch: dict[str, Any] = {}
+        kv: Any = kept
+        patch[r.source_path] = kv
+        self._edit_internal(scs, source_docid, patch)
     }
 
     def _handle_incoming_refs(target_cs: CompiledSchema, target_docid: int, visited: dict[str, bool]) -> None {
@@ -560,6 +700,21 @@ class ODB {
                         if r.on_delete == "restrict" {
                             raise IntegrityError("delete of " + target_cs.name + " #" + str(target_docid) + " blocked by ref '" + r.source_path + "' from '" + sname + "' (on_delete restrict)")
                         }
+                        if r.on_delete == "detach" {
+                            for rd3 in referrers {
+                                self._detach_element(scs, rd3, r, target_cs, target_docid)
+                            }
+                            continue
+                        }
+                        if r.on_delete == "set_null" {
+                            for rd2 in referrers {
+                                patch: dict[str, Any] = {}
+                                nv: Any = None
+                                patch[r.source_path] = nv
+                                self._edit_internal(scs, rd2, patch)
+                            }
+                            continue
+                        }
                         for rd in referrers {
                             vkey: str = str(scs.schema_id) + ":" + str(rd)
                             if vkey not in visited {
@@ -570,6 +725,125 @@ class ODB {
                     }
                 }
             }
+        }
+    }
+
+    def redefine(name: str, definition: dict[str, Any]) -> Documents {
+        fresh: dict[str, str] = {}
+        return self.redefine(name, definition, fresh)
+    }
+
+    def redefine(name: str, definition: dict[str, Any], renames: dict[str, str]) -> Documents {
+        self._assert_writable()
+        self._assert_not_following()
+        self._ensure_log()
+        if name not in self._schemas {
+            raise NotFound("no schema named '" + name + "' to redefine")
+        }
+        const old: CompiledSchema = self._schemas[name]
+        const sid: int = old.schema_id
+
+        carried: dict[str, int] = {}
+        for k in old.symbols {
+            if k in renames {
+                carried[renames[k]] = old.symbols[k]
+            } else {
+                carried[k] = old.symbols[k]
+            }
+        }
+        for rk in renames {
+            if rk not in old.symbols {
+                raise SchemaError("renames names '" + rk + "', which is not a field of schema '" + name + "'")
+            }
+        }
+
+        const sj: str = dumps(definition)
+        const fresh: CompiledSchema = compile_schema_with_symbols(name, definition, sid, old.version + 1, sj, carried)
+        self._classify_change(old, fresh, renames)
+
+        for pv in old.prior {
+            fresh.prior[pv] = old.prior[pv]
+        }
+        fresh.prior[old.version] = old
+
+        md: dict[str, Any] = {}
+        const md_any: Any = loads(self._metas[name])
+        if isinstance(md_any, dict) {
+            md = md_any
+        }
+
+        sr: dict[int, int] = self._snap_ii()
+        si: dict[str, int] = self._snap_si()
+        self.pager.begin()
+        try {
+            self._schemas[name] = fresh
+            self._metac[name] = compile_meta(fresh, md)
+            self._validate_existing(fresh)
+            self._record_define(fresh, self._metas[name])
+            self._mark(sid)
+            self._flush()
+        } except Exception as e {
+            self._schemas[name] = old
+            self._metac[name] = compile_meta(old, md)
+            self._rollback(sr, si)
+            raise e
+        }
+        return Documents(self, fresh)
+    }
+
+    def _classify_change(old: CompiledSchema, fresh: CompiledSchema, renames: dict[str, str]) -> None {
+        cm: CompiledMeta = self._metac[old.name]
+        for nm in old.by_name {
+            target: str = nm
+            if nm in renames {
+                target = renames[nm]
+            }
+            if target not in fresh.by_name {
+                for decl in cm.indexes {
+                    for fld in decl.fields {
+                        if fld == nm or fld.startswith(nm + ".") or fld.startswith(nm + "[]") {
+                            raise SchemaError("redefine of '" + old.name + "' drops field '" + nm + "', which index '" + decl.name + "' still uses; drop the index first (spec section 6, rewriting)")
+                        }
+                    }
+                }
+                continue
+            }
+            const before: FieldSpec = old.by_name[nm]
+            const after: FieldSpec = fresh.by_name[target]
+            if before.tag != after.tag {
+                raise SchemaError("redefine of '" + old.name + "' changes field '" + nm + "' from " + type_name(before.tag) + " to " + type_name(after.tag) + "; a type change needs an explicit migration, not a version bump (spec section 6, rewriting)")
+            }
+            if before.required and not after.required {
+                raise SchemaError("redefine of '" + old.name + "' makes required field '" + nm + "' optional; every stored document already carries it, so this needs an explicit migration (spec section 6, rewriting)")
+            }
+        }
+        for nm2 in fresh.by_name {
+            if nm2 in old.by_name {
+                continue
+            }
+            const added: FieldSpec = fresh.by_name[nm2]
+            if added.required and not added.has_default {
+                raise SchemaError("redefine of '" + old.name + "' adds required field '" + nm2 + "' with no default; stored documents have no value for it, so give it a default or run an explicit migration (spec section 6)")
+            }
+        }
+    }
+
+    def _validate_existing(fresh: CompiledSchema) -> None {
+        tree: BTree = self._tree(fresh)
+        bad: list[str] = []
+        for pair in tree.items() {
+            const docid: int = _decode_key(pair[0])
+            const doc: dict[str, Any] = decode(fresh, pair[1])
+            try {
+                validate_doc(fresh, doc)
+            } except SchemaError as e {
+                if len(bad) < 10 {
+                    bad.append(str(docid) + " (" + str(e) + ")")
+                }
+            }
+        }
+        if len(bad) > 0 {
+            raise SchemaError("redefine of '" + fresh.name + "' rejects stored documents: " + ", ".join(bad))
         }
     }
 
@@ -699,7 +973,7 @@ class ODB {
         if is_aggregate(q) {
             hits: list[dict[str, Any]] = []
             for pair in tree.items() {
-                doc: dict[str, Any] = decode(cs, pair[1])
+                doc: dict[str, Any] = decode_for_read(cs, pair[1])
                 if matches(cs, q, doc) {
                     hits.append(doc)
                 }
@@ -713,7 +987,7 @@ class ODB {
 
         for pair in tree.items() {
             docid: int = _decode_key(pair[0])
-            doc2: dict[str, Any] = decode(cs, pair[1])
+            doc2: dict[str, Any] = decode_for_read(cs, pair[1])
             if not matches(cs, q, doc2) {
                 continue
             }
@@ -806,7 +1080,7 @@ class ODB {
         ids: list[int] = []
         for pair in tree.items() {
             docid: int = _decode_key(pair[0])
-            doc: dict[str, Any] = decode(cs, pair[1])
+            doc: dict[str, Any] = decode_for_read(cs, pair[1])
             if not st.has_filter or pred(cs, st.filter, doc) {
                 ids.append(docid)
             }
@@ -839,7 +1113,7 @@ class ODB {
     }
 
     def _build_patch(cs: CompiledSchema, docid: int, wd: WriteDoc) -> dict[str, Any] {
-        doc: dict[str, Any] = decode(cs, self._tree(cs).get(docid))
+        doc: dict[str, Any] = decode_for_read(cs, self._tree(cs).get(docid))
         patch: dict[str, Any] = {}
         for a in wd.assigns {
             if eval_present(cs, a.expr, doc) {
@@ -860,7 +1134,7 @@ class ODB {
         tree: BTree = self._tree(cs)
         for pair in tree.items() {
             docid: int = _decode_key(pair[0])
-            doc: dict[str, Any] = decode(cs, pair[1])
+            doc: dict[str, Any] = decode_for_read(cs, pair[1])
             if q.has_filter and not pred(cs, q.filter, doc) {
                 continue
             }
@@ -1775,10 +2049,11 @@ class ODB {
         sr: dict[int, int] = self._snap_ii()
         si: dict[str, int] = self._snap_si()
 
+        const eff: dict[str, Any] = apply_write_defaults(cs, doc)
         self.pager.begin()
         docid: int = 0
         try {
-            docid = self._save_internal(cs, doc)
+            docid = self._save_internal(cs, eff)
             self._flush()
         } except Exception as e {
             self._rollback(sr, si)
@@ -1786,16 +2061,18 @@ class ODB {
         }
 
         data: dict[str, Any] = {}
-        for k in doc {
-            data[k] = doc[k]
+        for k in eff {
+            data[k] = eff[k]
         }
         data["_id"] = docid
+        apply_read_defaults(cs, data)
         return Document(self, cs, docid, data)
     }
 
-    def _save_internal(cs: CompiledSchema, doc: dict[str, Any]) -> int {
+    def _save_internal(cs: CompiledSchema, doc0: dict[str, Any]) -> int {
         cm: CompiledMeta = self._metac[cs.name]
         sid: int = cs.schema_id
+        const doc: dict[str, Any] = apply_write_defaults(cs, doc0)
         blob: bytes = encode(cs, doc)
         docid: int = self.pager.docid_counter + 1
         self.pager.set_docid_counter(docid)
@@ -1817,7 +2094,7 @@ class ODB {
         } except KeyError {
             raise NotFound("no document " + str(docid) + " in '" + cs.name + "'")
         }
-        data: dict[str, Any] = decode(cs, blob)
+        data: dict[str, Any] = decode_for_read(cs, blob)
         data["_id"] = docid
         return Document(self, cs, docid, data)
     }
@@ -1863,15 +2140,16 @@ class ODB {
             }
         }
 
-        merged: dict[str, Any] = {}
+        base: dict[str, Any] = {}
         for k in old {
-            merged[k] = old[k]
+            base[k] = old[k]
         }
         for k in patch {
             if k != "_id" {
-                merged[k] = patch[k]
+                base[k] = patch[k]
             }
         }
+        const merged: dict[str, Any] = apply_write_defaults(cs, base)
 
         self._index_remove_all(cs, cm, old, docid)
         self._refs_remove(cs, cm, old, docid)
@@ -2008,7 +2286,7 @@ class ODB {
         out: list[Document] = []
         for pair in pairs {
             docid: int = _decode_key(pair[0])
-            data: dict[str, Any] = decode(cs, pair[1])
+            data: dict[str, Any] = decode_for_read(cs, pair[1])
             data["_id"] = docid
             out.append(Document(self, cs, docid, data))
         }
@@ -2231,11 +2509,31 @@ def _cmp_key(a: Document, b: Document, k: SortKey) -> int {
     if not bp {
         return -1
     }
-    c: int = _cmp_present(_row_value(a, k.field), _row_value(b, k.field))
+    c: int = _cmp_row(a, b, k.field)
     if k.desc {
         return -c
     }
     return c
+}
+
+def _cmp_row(a: Document, b: Document, field: str) -> int {
+    const x: Any = _row_value(a, field)
+    const y: Any = _row_value(b, field)
+    if field in a.cs.by_name {
+        const tag: int = a.cs.by_name[field].tag
+        if is_formatted(tag) and x is not None and y is not None {
+            const ka: bytes = order_key(tag, x)
+            const kb: bytes = order_key(tag, y)
+            if cmp_keys(ka, "<", kb) {
+                return -1
+            }
+            if cmp_keys(ka, ">", kb) {
+                return 1
+            }
+            return 0
+        }
+    }
+    return _cmp_present(x, y)
 }
 
 def _row_present(d: Document, field: str) -> bool {
@@ -2254,6 +2552,18 @@ def _row_value(d: Document, field: str) -> Any {
 }
 
 def _cmp_present(x: Any, y: Any) -> int {
+    if x is None or y is None {
+        if x is None and y is None {
+            return 0
+        }
+        if x is None {
+            return -1
+        }
+        return 1
+    }
+    if isinstance(x, list) or isinstance(y, list) or isinstance(x, dict) or isinstance(y, dict) {
+        return 0
+    }
     if isinstance(x, bool) {
         const bx: bool = x
         const by: bool = y

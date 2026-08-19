@@ -160,7 +160,33 @@ class DbonValidationTest(TestCase) {
         unknown["name"] = "X"
         unknown["email"] = "e"
         unknown["nickname"] = "xx"
-        self.assertTrue(self._bad(cs, unknown))
+        self.assertFalse(self._bad(cs, unknown))
+        const back: dict[str, Any] = decode(cs, encode(cs, unknown))
+        const nick: str = back["nickname"]
+        self.assertEqual(nick, "xx")
+    }
+
+    def test_additional_properties_false_rejects_extras() -> None {
+        props: dict[str, Any] = {}
+        id_s: dict[str, Any] = {}
+        id_s["type"] = "integer"
+        props["id"] = id_s
+        schema: dict[str, Any] = {}
+        schema["type"] = "object"
+        schema["properties"] = props
+        req: list[Any] = ["id"]
+        schema["required"] = req
+        schema["additionalProperties"] = False
+        strict: CompiledSchema = compile_schema("strict", schema, 9, 1, "{}")
+
+        ok_doc: dict[str, Any] = {}
+        ok_doc["id"] = 1
+        self.assertFalse(self._bad(strict, ok_doc))
+
+        extra: dict[str, Any] = {}
+        extra["id"] = 1
+        extra["nope"] = "x"
+        self.assertTrue(self._bad(strict, extra))
     }
 }
 
