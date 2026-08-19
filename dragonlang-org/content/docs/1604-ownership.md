@@ -335,6 +335,21 @@ can quietly consume a value the other would have rejected. `own` still moves a
 BINDING only: `set_moved(d=own cfg.headers)` is an error in keyword position
 exactly as it is positionally.
 
+An `own` parameter accepts either mark. A move hands over the value you hold; a
+`dub` hands over a copy and keeps yours:
+
+```dragon
+# doc: no-check
+cfg.set_moved(own headers)   # headers is Moved, the name is dead after this
+cfg.set_moved(dub headers)   # a fresh copy is consumed, headers is still yours
+print(headers)               # fine after the dub, error E1 after the own
+```
+
+Both satisfy the declaration, because both hand the callee a value it is the sole
+owner of, which is the only thing `own d` in the signature asked for. What an
+`own` parameter refuses is an *unmarked* binding, where nothing at the call site
+would show that your value is about to be freed.
+
 Mismatches are compile errors, not coercions:
 
 ```dragon

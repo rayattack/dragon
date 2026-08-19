@@ -658,3 +658,34 @@ TEST(CodeGenE2E, KeywordDubLeavesSourceUsable) {
     );
     EXPECT_EQ(out, "3\nm-7\n");
 }
+
+TEST(CodeGenE2E, DubIntoOwnParamLeavesSourceIntact) {
+    auto out = compileAndRun(
+        "def archive(own name: str) -> int { return len(name) }\n"
+        "def count(own xs: list[int]) -> int { return len(xs) }\n"
+        "def tally(own d: dict[str, str]) -> int { return len(d) }\n"
+        "label: str = \"report-\" + \"2026\"\n"
+        "xs: list[int] = [1, 2, 3]\n"
+        "d: dict[str, str] = {\"a\": \"1\", \"b\": \"2\"}\n"
+        "print(archive(dub label))\n"
+        "print(label)\n"
+        "print(count(dub xs))\n"
+        "print(len(xs))\n"
+        "print(tally(dub d))\n"
+        "print(len(d))\n"
+    );
+    EXPECT_EQ(out, "11\nreport-2026\n3\n3\n2\n2\n");
+}
+
+TEST(CodeGenE2E, DubIntoOwnParamByKeywordLeavesSourceIntact) {
+    auto out = compileAndRun(
+        "class Sink {\n"
+        "  def archive(own name: str) -> int { return len(name) }\n"
+        "}\n"
+        "k: Sink = Sink()\n"
+        "label: str = \"report-\" + \"2026\"\n"
+        "print(k.archive(name=dub label))\n"
+        "print(label)\n"
+    );
+    EXPECT_EQ(out, "11\nreport-2026\n");
+}

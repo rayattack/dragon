@@ -80,6 +80,8 @@ private:
     std::unique_ptr<Expr> attribute();
     std::unique_ptr<Expr> finishCall(std::unique_ptr<Expr> callee);
     std::unique_ptr<Expr> ownershipMarkedName();
+    void rejectNonBindingOwnershipTarget(bool isDub);
+    void discardOwnershipTargetSuffix();
 
     std::unique_ptr<Expr> parseLambda();
     std::unique_ptr<Expr> parseList();

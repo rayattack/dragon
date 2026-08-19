@@ -148,32 +148,8 @@ std::unique_ptr<Stmt> Parser::simpleStatement() {
 std::unique_ptr<Stmt> Parser::compoundStatement() { return statement(); }
 
 std::unique_ptr<Expr> Parser::maybeMoveRhs() {
-    if (impl_->options.isDragonFile && check(TokenType::IDENTIFIER) &&
-        current().lexeme() == "own" &&
-        peekNext().type() == TokenType::IDENTIFIER) {
-        advance();
-        auto moved = std::make_unique<NameExpr>();
-        moved->name = std::string(
-            consume(TokenType::IDENTIFIER,
-                    "Expect binding name after 'own'").lexeme());
-        moved->setLocation(previous().location());
-        moved->isMoveMarked = true;
-        if (check(TokenType::DOT) || check(TokenType::LEFT_BRACKET))
-            error("own moves a BINDING; a field or element cannot be moved "
-                  "(its container owns it) - bind it first or dub it");
-        return moved;
-    }
-    if (impl_->options.isDragonFile && check(TokenType::IDENTIFIER) &&
-        current().lexeme() == "dub" &&
-        peekNext().type() == TokenType::IDENTIFIER) {
-        advance();
-        auto dubbed = std::make_unique<NameExpr>();
-        dubbed->name = std::string(
-            consume(TokenType::IDENTIFIER,
-                    "Expect binding name after 'dub'").lexeme());
-        dubbed->setLocation(previous().location());
-        dubbed->isDubMarked = true;
-        return dubbed;
+    if (impl_->options.isDragonFile) {
+        if (auto marked = ownershipMarkedName()) return marked;
     }
     return expression();
 }

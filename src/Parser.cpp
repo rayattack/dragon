@@ -704,11 +704,52 @@ std::unique_ptr<Expr> Parser::ownershipMarkedName() {
     marked->setLocation(previous().location());
     if (isDub) marked->isDubMarked = true;
     else marked->isMoveMarked = true;
-    if (isOwn && (check(TokenType::DOT) || check(TokenType::LEFT_BRACKET)))
+    rejectNonBindingOwnershipTarget(isDub);
+    return marked;
+}
+
+void Parser::rejectNonBindingOwnershipTarget(bool isDub) {
+    const bool targetIsCall = check(TokenType::LEFT_PAREN);
+    const bool targetIsMember =
+        check(TokenType::DOT) || check(TokenType::LEFT_BRACKET);
+    if (!targetIsCall && !targetIsMember) return;
+    if (targetIsCall && isDub)
+        error("dub copies a BINDING; a call result is already a fresh value "
+              "with one owner - pass it directly, without 'dub'");
+    else if (targetIsCall)
+        error("own moves a BINDING; a call result is already owned, so there "
+              "is nothing to move out of - pass it directly, without 'own'");
+    else if (isDub)
+        error("dub copies a BINDING; a field or element cannot be dubbed "
+              "(its container owns it) - bind it first");
+    else
         error("own moves a BINDING; a field or element cannot be "
               "moved (its container owns it) - bind it first or "
               "dub it");
-    return marked;
+    discardOwnershipTargetSuffix();
+}
+
+void Parser::discardOwnershipTargetSuffix() {
+    int depth = 0;
+    while (!isAtEnd()) {
+        if (check(TokenType::LEFT_PAREN) || check(TokenType::LEFT_BRACKET)) {
+            depth++;
+            advance();
+            continue;
+        }
+        if (depth > 0) {
+            if (check(TokenType::RIGHT_PAREN) ||
+                check(TokenType::RIGHT_BRACKET))
+                depth--;
+            advance();
+            continue;
+        }
+        if (match(TokenType::DOT)) {
+            if (check(TokenType::IDENTIFIER)) advance();
+            continue;
+        }
+        return;
+    }
 }
 
 std::unique_ptr<Expr> Parser::subscript() { return attribute(); }

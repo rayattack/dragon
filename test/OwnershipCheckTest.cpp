@@ -833,3 +833,12 @@ TEST(OwnershipCheckTest, KeywordDubKeepsBindingUsable) {
         "    return borrows(s=dub b) + len(b)\n"
         "}\n"));
 }
+
+TEST(OwnershipCheckTest, DubIntoOwnParamKeepsBindingUsable) {
+    EXPECT_TRUE(ownAccepts(
+        "def take(own s: str) -> int { return len(s) }\n"
+        "def f() -> int {\n"
+        "    b: str = \"abc\" + \"def\"\n"
+        "    return take(dub b) + len(b)\n"
+        "}\n"));
+}

@@ -2458,3 +2458,38 @@ TEST(TypeCheckerTest, BorrowParamByKeywordRejectsOwn) {
         "}\n"
         "main()\n"));
 }
+
+TEST(TypeCheckerTest, DubSatisfiesOwnParam) {
+    EXPECT_TRUE(checkOk(
+        "def take(own s: str) -> int { return len(s) }\n"
+        "def mk() -> str { return \"a\" + \"b\" }\n"
+        "def main() {\n"
+        "    b: str = mk()\n"
+        "    print(take(dub b))\n"
+        "    print(len(b))\n"
+        "}\n"
+        "main()\n"));
+}
+
+TEST(TypeCheckerTest, DubSatisfiesOwnParamByKeyword) {
+    EXPECT_TRUE(checkOk(
+        "def take(own s: str) -> int { return len(s) }\n"
+        "def mk() -> str { return \"a\" + \"b\" }\n"
+        "def main() {\n"
+        "    b: str = mk()\n"
+        "    print(take(s=dub b))\n"
+        "    print(len(b))\n"
+        "}\n"
+        "main()\n"));
+}
+
+TEST(TypeCheckerTest, UnmarkedBindingStillRejectedByOwnParam) {
+    EXPECT_TRUE(checkHasErrors(
+        "def take(own s: str) -> int { return len(s) }\n"
+        "def mk() -> str { return \"a\" + \"b\" }\n"
+        "def main() {\n"
+        "    b: str = mk()\n"
+        "    print(take(b))\n"
+        "}\n"
+        "main()\n"));
+}

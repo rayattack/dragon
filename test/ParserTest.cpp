@@ -2732,3 +2732,138 @@ TEST(ParserTest, InlineTemplateBadInterpolationSurfacesError) {
         if (d.level == ParserDiagnostic::Level::Error) hasError = true;
     EXPECT_TRUE(hasError);
 }
+
+TEST(ParserTest, OwnOnCallResultTeachesTheRule) {
+    auto errs = parseErrors(
+        "def take(own s: str) -> int {\n"
+        "  return len(s)\n"
+        "}\n"
+        "def mk() -> str {\n"
+        "  return \"a\" + \"b\"\n"
+        "}\n"
+        "print(take(own mk()))\n");
+    ASSERT_EQ(errs.size(), 1u);
+    EXPECT_NE(errs[0].message.find("own moves a BINDING"), std::string::npos)
+        << errs[0].message;
+    EXPECT_NE(errs[0].message.find("without 'own'"), std::string::npos)
+        << errs[0].message;
+}
+
+TEST(ParserTest, DubOnCallResultTeachesTheRule) {
+    auto errs = parseErrors(
+        "def borrows(s: str) -> int {\n"
+        "  return len(s)\n"
+        "}\n"
+        "def mk() -> str {\n"
+        "  return \"a\" + \"b\"\n"
+        "}\n"
+        "print(borrows(dub mk()))\n");
+    ASSERT_EQ(errs.size(), 1u);
+    EXPECT_NE(errs[0].message.find("dub copies a BINDING"), std::string::npos)
+        << errs[0].message;
+    EXPECT_NE(errs[0].message.find("without 'dub'"), std::string::npos)
+        << errs[0].message;
+}
+
+TEST(ParserTest, OwnOnFieldTeachesTheRuleWithoutCascade) {
+    auto errs = parseErrors(
+        "class W {\n"
+        "  v: str\n"
+        "  def(v: str) {\n"
+        "    self.v = v\n"
+        "  }\n"
+        "}\n"
+        "def take(own s: str) -> int {\n"
+        "  return len(s)\n"
+        "}\n"
+        "w: W = W(\"a\")\n"
+        "print(take(own w.v))\n");
+    ASSERT_EQ(errs.size(), 1u);
+    EXPECT_NE(errs[0].message.find("a field or element cannot be moved"),
+              std::string::npos) << errs[0].message;
+}
+
+TEST(ParserTest, DubOnFieldTeachesTheRule) {
+    auto errs = parseErrors(
+        "class W {\n"
+        "  v: str\n"
+        "  def(v: str) {\n"
+        "    self.v = v\n"
+        "  }\n"
+        "}\n"
+        "def borrows(s: str) -> int {\n"
+        "  return len(s)\n"
+        "}\n"
+        "w: W = W(\"a\")\n"
+        "print(borrows(dub w.v))\n");
+    ASSERT_EQ(errs.size(), 1u);
+    EXPECT_NE(errs[0].message.find("cannot be dubbed"), std::string::npos)
+        << errs[0].message;
+}
+
+TEST(ParserTest, OwnMarkOnCallResultTeachesTheRuleByKeyword) {
+    auto errs = parseErrors(
+        "def take(own s: str) -> int {\n"
+        "  return len(s)\n"
+        "}\n"
+        "def mk() -> str {\n"
+        "  return \"a\" + \"b\"\n"
+        "}\n"
+        "print(take(s=own mk()))\n");
+    ASSERT_EQ(errs.size(), 1u);
+    EXPECT_NE(errs[0].message.find("own moves a BINDING"), std::string::npos)
+        << errs[0].message;
+}
+
+TEST(ParserTest, OwnAndDubRemainOrdinaryIdentifiers) {
+    EXPECT_TRUE(parseErrors("own: int = 5\nprint(own)\n").empty());
+    EXPECT_TRUE(parseErrors("dub: int = 7\nprint(dub)\n").empty());
+    EXPECT_TRUE(parseErrors(
+        "def f(own: int) -> int {\n"
+        "  return own\n"
+        "}\n"
+        "print(f(own=3))\n").empty());
+}
+
+TEST(ParserTest, OwnOnCallResultInAssignmentTeachesTheRule) {
+    auto errs = parseErrors(
+        "def mk() -> str {\n"
+        "  return \"a\" + \"b\"\n"
+        "}\n"
+        "x: str = own mk()\n");
+    ASSERT_EQ(errs.size(), 1u);
+    EXPECT_NE(errs[0].message.find("own moves a BINDING"), std::string::npos)
+        << errs[0].message;
+    EXPECT_NE(errs[0].message.find("without 'own'"), std::string::npos)
+        << errs[0].message;
+}
+
+TEST(ParserTest, DubOnFieldInAssignmentTeachesTheRule) {
+    auto errs = parseErrors(
+        "class W {\n"
+        "  v: str\n"
+        "  def(v: str) {\n"
+        "    self.v = v\n"
+        "  }\n"
+        "}\n"
+        "w: W = W(\"a\")\n"
+        "x: str = dub w.v\n");
+    ASSERT_EQ(errs.size(), 1u);
+    EXPECT_NE(errs[0].message.find("cannot be dubbed"), std::string::npos)
+        << errs[0].message;
+}
+
+TEST(ParserTest, OwnAndDubOnBareNameInAssignmentStillParse) {
+    EXPECT_TRUE(parseErrors(
+        "def mk() -> str {\n"
+        "  return \"a\" + \"b\"\n"
+        "}\n"
+        "b: str = mk()\n"
+        "x: str = dub b\n").empty());
+    EXPECT_TRUE(parseErrors(
+        "def mk() -> str {\n"
+        "  return \"a\" + \"b\"\n"
+        "}\n"
+        "b: str = mk()\n"
+        "x: str = own b\n").empty());
+}

@@ -378,7 +378,8 @@ void TypeChecker::visit(CallExpr& node) {
         for (size_t i = 0; i < node.args.size() && i < ft.paramOwns.size(); ++i) {
             auto* nm = dynamic_cast<NameExpr*>(node.args[i].get());
             bool argMoved = nm && nm->isMoveMarked;
-            if (ft.paramOwns[i] && nm && !argMoved) {
+            bool argCopied = nm && nm->isDubMarked;
+            if (ft.paramOwns[i] && nm && !argMoved && !argCopied) {
                 error(node.args[i]->location(),
                       dispName + " takes ownership of its argument; move it "
                       "with 'own " + nm->name + "', or pass a fresh value");
@@ -411,7 +412,8 @@ void TypeChecker::visit(CallExpr& node) {
             if (idx < ft.paramOwns.size()) {
                 auto* knm = dynamic_cast<NameExpr*>(kw.second.get());
                 bool kwMoved = knm && knm->isMoveMarked;
-                if (ft.paramOwns[idx] && knm && !kwMoved) {
+                bool kwCopied = knm && knm->isDubMarked;
+                if (ft.paramOwns[idx] && knm && !kwMoved && !kwCopied) {
                     error(kw.second->location(),
                           dispName + " takes ownership of its argument; move it "
                           "with 'own " + knm->name + "', or pass a fresh value");
