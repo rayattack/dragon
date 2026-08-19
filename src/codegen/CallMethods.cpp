@@ -2159,7 +2159,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                             }
                             kwVal->accept(*this);
                             llvm::Value* arg = impl_->lastValue;
-                            if (mpkIt != impl_->funcParamKinds.end() &&
+                            if (!impl_->paramIsOwn(methodFuncName, (unsigned)idx) &&
+                                mpkIt != impl_->funcParamKinds.end() &&
                                 idx < mpkIt->second.size()) {
                                 Impl::VarKind dk = impl_->argTempDecrefKind(
                                     kwVal.get(), mpkIt->second[idx], arg);
@@ -2514,7 +2515,8 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                             }
                             kwVal->accept(*this);
                             llvm::Value* arg = impl_->lastValue;
-                            if (mpkIt != impl_->funcParamKinds.end() &&
+                            if (!impl_->paramIsOwn(methodFuncName, (unsigned)idx) &&
+                                mpkIt != impl_->funcParamKinds.end() &&
                                 idx < mpkIt->second.size()) {
                                 Impl::VarKind dk = impl_->argTempDecrefKind(
                                     kwVal.get(), mpkIt->second[idx], arg);

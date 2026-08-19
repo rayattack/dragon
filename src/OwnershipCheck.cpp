@@ -893,7 +893,15 @@ struct OwnershipCheck::Impl {
                     checkExpr(a.get(), flow);
                 }
             }
-            for (auto& kw : call->kwArgs) checkExpr(kw.second.get(), flow);
+            for (auto& kw : call->kwArgs) {
+                if (auto* mv = dynamic_cast<NameExpr*>(kw.second.get());
+                    mv && mv->isMoveMarked) {
+                    consumeBinding(mv, flow, false,
+                                   atLine(calleeDesc, call->location()));
+                    continue;
+                }
+                checkExpr(kw.second.get(), flow);
+            }
             return;
         }
         if (auto* at = dynamic_cast<AttributeExpr*>(e)) {

@@ -631,7 +631,8 @@ void CodeGen::visit(CallExpr& node) {
                         }
                         kwVal->accept(*this);
                         llvm::Value* arg = impl_->lastValue;
-                        if (fpkIt != impl_->funcParamKinds.end() &&
+                        if (!impl_->paramIsOwn(calleeSym, (unsigned)idx) &&
+                            fpkIt != impl_->funcParamKinds.end() &&
                             idx < fpkIt->second.size()) {
                             Impl::VarKind dk = impl_->argTempDecrefKind(
                                 kwVal.get(), fpkIt->second[idx], arg);
@@ -1451,6 +1452,8 @@ void CodeGen::emitVarArgCall(llvm::Function* func, CallExpr& node) {
             impl_->builder->CreateCall(func, args, "call"));
     }
 
+    impl_->emitMoveOutSlots(node);
+
     if (spreadCleanupBase) impl_->emitCleanupPopTemp(spreadCleanupBase);
     if (packedArgsCleanupBase) impl_->emitCleanupPopTemp(packedArgsCleanupBase);
 
@@ -1765,7 +1768,8 @@ bool CodeGen::Impl::expandSpreadCallArgs(
                             kwName + "'", node.location());
             kwVal->accept(cg);
             llvm::Value* v = lastValue;
-            if (fpkIt != funcParamKinds.end() && idx < fpkIt->second.size()) {
+            if (!paramIsOwn(symName, (unsigned)idx) &&
+                fpkIt != funcParamKinds.end() && idx < fpkIt->second.size()) {
                 VarKind dk = argTempDecrefKind(kwVal.get(), fpkIt->second[idx], v);
                 if (dk != VarKind::Other) argTemps.emplace_back(v, dk);
             }

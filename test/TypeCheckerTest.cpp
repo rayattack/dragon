@@ -2415,3 +2415,46 @@ TEST(TypeCheckerTest, RaiseFromCauseRejected) {
         "    raise E(\"high\") from e\n"
         "}\n"));
 }
+
+TEST(TypeCheckerTest, OwnParamByKeywordRequiresOwn) {
+    EXPECT_TRUE(checkHasErrors(
+        "def take(own s: str) -> int { return len(s) }\n"
+        "def mk() -> str { return \"a\" + \"b\" }\n"
+        "def main() {\n"
+        "    b: str = mk()\n"
+        "    print(take(s=b))\n"
+        "}\n"
+        "main()\n"));
+}
+
+TEST(TypeCheckerTest, OwnParamByKeywordAcceptsOwnMarkedArg) {
+    EXPECT_TRUE(checkOk(
+        "def take(own s: str) -> int { return len(s) }\n"
+        "def mk() -> str { return \"a\" + \"b\" }\n"
+        "def main() {\n"
+        "    b: str = mk()\n"
+        "    print(take(s=own b))\n"
+        "}\n"
+        "main()\n"));
+}
+
+TEST(TypeCheckerTest, OwnParamByKeywordAcceptsFreshValue) {
+    EXPECT_TRUE(checkOk(
+        "def take(own s: str) -> int { return len(s) }\n"
+        "def mk() -> str { return \"a\" + \"b\" }\n"
+        "def main() {\n"
+        "    print(take(s=mk()))\n"
+        "}\n"
+        "main()\n"));
+}
+
+TEST(TypeCheckerTest, BorrowParamByKeywordRejectsOwn) {
+    EXPECT_TRUE(checkHasErrors(
+        "def borrows(s: str) -> int { return len(s) }\n"
+        "def mk() -> str { return \"a\" + \"b\" }\n"
+        "def main() {\n"
+        "    b: str = mk()\n"
+        "    print(borrows(s=own b))\n"
+        "}\n"
+        "main()\n"));
+}

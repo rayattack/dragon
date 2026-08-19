@@ -673,31 +673,12 @@ std::unique_ptr<Expr> Parser::finishCall(std::unique_ptr<Expr> callee) {
                 std::string name = std::string(peek().lexeme());
                 advance();
                 advance();
-                callExpr->kwArgs.emplace_back(name, expression());
-            } else if (check(TokenType::IDENTIFIER) && peek().lexeme() == "dub" &&
-                       peekNext().type() == TokenType::IDENTIFIER) {
-                advance();
-                auto dubbed = std::make_unique<NameExpr>();
-                dubbed->name = std::string(
-                    consume(TokenType::IDENTIFIER,
-                            "Expect binding name after 'dub'").lexeme());
-                dubbed->setLocation(previous().location());
-                dubbed->isDubMarked = true;
-                callExpr->args.push_back(std::move(dubbed));
-            } else if (check(TokenType::IDENTIFIER) && peek().lexeme() == "own" &&
-                       peekNext().type() == TokenType::IDENTIFIER) {
-                advance();
-                auto moved = std::make_unique<NameExpr>();
-                moved->name = std::string(
-                    consume(TokenType::IDENTIFIER,
-                            "Expect binding name after 'own'").lexeme());
-                moved->setLocation(previous().location());
-                moved->isMoveMarked = true;
-                if (check(TokenType::DOT) || check(TokenType::LEFT_BRACKET))
-                    error("own moves a BINDING; a field or element cannot be "
-                          "moved (its container owns it) - bind it first or "
-                          "dub it");
-                callExpr->args.push_back(std::move(moved));
+                if (auto marked = ownershipMarkedName())
+                    callExpr->kwArgs.emplace_back(name, std::move(marked));
+                else
+                    callExpr->kwArgs.emplace_back(name, expression());
+            } else if (auto marked = ownershipMarkedName()) {
+                callExpr->args.push_back(std::move(marked));
             } else {
                 callExpr->args.push_back(expression());
             }
@@ -705,6 +686,29 @@ std::unique_ptr<Expr> Parser::finishCall(std::unique_ptr<Expr> callee) {
     }
     consume(TokenType::RIGHT_PAREN, "Expect ')' after arguments");
     return callExpr;
+}
+
+std::unique_ptr<Expr> Parser::ownershipMarkedName() {
+    if (!check(TokenType::IDENTIFIER) ||
+        peekNext().type() != TokenType::IDENTIFIER)
+        return nullptr;
+    const bool isDub = peek().lexeme() == "dub";
+    const bool isOwn = peek().lexeme() == "own";
+    if (!isDub && !isOwn) return nullptr;
+    advance();
+    auto marked = std::make_unique<NameExpr>();
+    marked->name = std::string(
+        consume(TokenType::IDENTIFIER,
+                isDub ? "Expect binding name after 'dub'"
+                      : "Expect binding name after 'own'").lexeme());
+    marked->setLocation(previous().location());
+    if (isDub) marked->isDubMarked = true;
+    else marked->isMoveMarked = true;
+    if (isOwn && (check(TokenType::DOT) || check(TokenType::LEFT_BRACKET)))
+        error("own moves a BINDING; a field or element cannot be "
+              "moved (its container owns it) - bind it first or "
+              "dub it");
+    return marked;
 }
 
 std::unique_ptr<Expr> Parser::subscript() { return attribute(); }

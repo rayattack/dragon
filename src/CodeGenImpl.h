@@ -1139,18 +1139,10 @@ struct CodeGen::Impl {
 
     void emitMoveOutSlots(CallExpr& node) {
         if (options.gcMode != GCMode::RC) return;
-        for (auto& a : node.args) {
-            auto* nm = dynamic_cast<NameExpr*>(a.get());
-            if (!nm || !nm->isMoveMarked) continue;
-            if (auto* alloca = lookupVar(nm->name)) {
-                emitNullSlot(alloca);
-                emitCleanupUpdate(
-                    nm->name,
-                    llvm::ConstantPointerNull::get(
-                        llvm::cast<llvm::PointerType>(i8PtrType)),
-                    nullptr);
-            }
-        }
+        for (auto& a : node.args)
+            emitMoveOutIfMarked(a.get());
+        for (auto& kw : node.kwArgs)
+            emitMoveOutIfMarked(kw.second.get());
     }
 
     void increfBorrowedSetdefaultKey(Expr* keyExpr, llvm::Value* key) {

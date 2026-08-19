@@ -408,6 +408,21 @@ void TypeChecker::visit(CallExpr& node) {
                       dispName + " got multiple values for argument '" + kw.first + "'");
                 err = true; continue;
             }
+            if (idx < ft.paramOwns.size()) {
+                auto* knm = dynamic_cast<NameExpr*>(kw.second.get());
+                bool kwMoved = knm && knm->isMoveMarked;
+                if (ft.paramOwns[idx] && knm && !kwMoved) {
+                    error(kw.second->location(),
+                          dispName + " takes ownership of its argument; move it "
+                          "with 'own " + knm->name + "', or pass a fresh value");
+                    err = true;
+                } else if (!ft.paramOwns[idx] && kwMoved) {
+                    error(kw.second->location(),
+                          dispName +
+                              " borrows its argument; own has no meaning here");
+                    err = true;
+                }
+            }
             filled[idx] = true;
         }
         for (size_t i = 0; i < ft.requiredParams && i < nParams; ++i) {

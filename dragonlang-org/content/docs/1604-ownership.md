@@ -321,6 +321,20 @@ Consumption must be visible where it happens. (Rust requires `&mut` at both
 the signature and the call site for the same reason; Dragon requires `own` at
 both ends.)
 
+The mark goes wherever the argument goes, positional or keyword:
+
+```dragon
+# doc: no-check
+cfg.set_moved(own headers)     # positional
+cfg.set_moved(d=own headers)   # keyword, identical meaning
+cfg.set_copied(d=dub headers)  # keyword copy, headers stays yours
+```
+
+Keyword and positional arguments are checked the same way, so neither spelling
+can quietly consume a value the other would have rejected. `own` still moves a
+BINDING only: `set_moved(d=own cfg.headers)` is an error in keyword position
+exactly as it is positionally.
+
 Mismatches are compile errors, not coercions:
 
 ```dragon

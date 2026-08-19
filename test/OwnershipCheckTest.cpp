@@ -804,3 +804,32 @@ TEST(OwnershipCheckTest, RebindThenAwaitAccepted) {
         "    return a + b\n"
         "}\n"));
 }
+
+TEST(OwnershipCheckTest, KeywordMoveMarksBindingMoved) {
+    std::string e = ownError(
+        "def take(own s: str) -> int { return len(s) }\n"
+        "def f() -> int {\n"
+        "    b: str = \"abc\" + \"def\"\n"
+        "    take(s=own b)\n"
+        "    return len(b)\n"
+        "}\n");
+    EXPECT_NE(e.find("was moved into"), std::string::npos) << e;
+}
+
+TEST(OwnershipCheckTest, KeywordMoveWithoutReuseAccepted) {
+    EXPECT_TRUE(ownAccepts(
+        "def take(own s: str) -> int { return len(s) }\n"
+        "def f() -> int {\n"
+        "    b: str = \"abc\" + \"def\"\n"
+        "    return take(s=own b)\n"
+        "}\n"));
+}
+
+TEST(OwnershipCheckTest, KeywordDubKeepsBindingUsable) {
+    EXPECT_TRUE(ownAccepts(
+        "def borrows(s: str) -> int { return len(s) }\n"
+        "def f() -> int {\n"
+        "    b: str = \"abc\" + \"def\"\n"
+        "    return borrows(s=dub b) + len(b)\n"
+        "}\n"));
+}

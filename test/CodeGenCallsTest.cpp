@@ -614,3 +614,47 @@ TEST(CodeGenE2E, TypedDictKwargStrOutlivesConstruction) {
     );
     EXPECT_EQ(out, "name-2\n");
 }
+
+TEST(CodeGenE2E, KeywordMoveTransfersOwnership) {
+    auto out = compileAndRun(
+        "def take(own s: str) -> int { return len(s) }\n"
+        "def mk(n: int) -> str { return \"m-\" + str(n) }\n"
+        "i: int = 0\n"
+        "t: int = 0\n"
+        "while i < 3 {\n"
+        "  b: str = mk(i)\n"
+        "  t = t + take(s=own b)\n"
+        "  t = t + take(s=mk(i))\n"
+        "  i = i + 1\n"
+        "}\n"
+        "print(t)\n"
+    );
+    EXPECT_EQ(out, "18\n");
+}
+
+TEST(CodeGenE2E, KeywordMoveOnMethodAndVarArgs) {
+    auto out = compileAndRun(
+        "class Sink {\n"
+        "  def take(own s: str) -> int { return len(s) }\n"
+        "}\n"
+        "def va(own s: str, *rest: int) -> int { return len(s) }\n"
+        "def mk(n: int) -> str { return \"m-\" + str(n) }\n"
+        "k: Sink = Sink()\n"
+        "a: str = mk(1)\n"
+        "b: str = mk(2)\n"
+        "print(k.take(s=own a))\n"
+        "print(va(s=own b))\n"
+    );
+    EXPECT_EQ(out, "3\n3\n");
+}
+
+TEST(CodeGenE2E, KeywordDubLeavesSourceUsable) {
+    auto out = compileAndRun(
+        "def borrows(s: str) -> int { return len(s) }\n"
+        "def mk(n: int) -> str { return \"m-\" + str(n) }\n"
+        "d: str = mk(7)\n"
+        "print(borrows(s=dub d))\n"
+        "print(d)\n"
+    );
+    EXPECT_EQ(out, "3\nm-7\n");
+}
