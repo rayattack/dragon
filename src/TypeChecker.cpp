@@ -1051,6 +1051,13 @@ std::shared_ptr<Type> TypeChecker::resolveType(TypeExpr* typeExpr) {
 std::shared_ptr<Type> TypeChecker::inferType(Expr* expr) {
     if (!expr) return impl_->unknownType;
     expr->accept(*this);
+    if (auto* at = dynamic_cast<AttributeExpr*>(expr);
+        at && at->isDubMarked && at->type) {
+        std::string why;
+        if (!typeIsDubable(at->type.get(), why))
+            error(at->location(),
+                  "'" + at->attribute + "' is not dubable: " + why);
+    }
     return expr->type ? expr->type : impl_->unknownType;
 }
 

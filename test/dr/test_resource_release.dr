@@ -1,0 +1,136 @@
+"""Resource release for stdlib handles that outlive no scope of their own.
+
+A compiled pattern, a sqlite connection or statement, and a child process's
+pipe ends are raw resources: no reference count destroys them, so the class
+holding one declares the field `own` and the compiler generates the release.
+These tests assert the observable consequence - sqlite's allocator returns to
+its baseline and the process's descriptor table does not grow - for objects
+dropped without any explicit close, and that an explicit close remains
+idempotent so the early release and the generated one cannot both fire.
+"""
+
+import os
+import re
+import sqlite
+from subprocess import Popen
+from unittest import TestCase, main
+
+extern "C" def sqlite3_memory_used() -> int
+
+
+def _fdcount() -> int {
+    return len(os.listdir("/dev/fd"))
+}
+
+
+class PatternReleaseTests(TestCase) {
+    def test_dropped_patterns_stay_usable() {
+        i: int = 0
+        hits: int = 0
+        while i < 500 {
+            const p: re.Pattern = re.compile("a(b+)c")
+            if p.match("abbbc") {
+                hits = hits + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(hits, 500)
+    }
+
+    def test_destroy_is_idempotent() {
+        i: int = 0
+        while i < 200 {
+            const p: re.Pattern = re.compile("[0-9]+")
+            p.destroy()
+            p.destroy()
+            i = i + 1
+        }
+        self.assertEqual(re.search("[0-9]+", "ab123"), "123")
+    }
+}
+
+
+class SqliteReleaseTests(TestCase) {
+    def test_dropped_cursors_return_memory() {
+        const db: sqlite.Database = sqlite.Database(":memory:")
+        db.execute("CREATE TABLE t (id INTEGER, name TEXT)")
+        db.execute("INSERT INTO t VALUES (1, 'one')")
+        const c0: sqlite.Cursor = db.prepare("SELECT id FROM t")
+        c0.step()
+        c0.finalize()
+        const before: int = sqlite3_memory_used()
+        i: int = 0
+        rows: int = 0
+        while i < 500 {
+            const c: sqlite.Cursor = db.prepare("SELECT id, name FROM t WHERE id = 1")
+            if c.step() == 100 {
+                rows = rows + c.column_int(0)
+            }
+            i = i + 1
+        }
+        const after: int = sqlite3_memory_used()
+        db.close()
+        self.assertEqual(rows, 500)
+        self.assertEqual(after, before)
+    }
+
+    def test_dropped_databases_return_memory() {
+        const warm: sqlite.Database = sqlite.Database(":memory:")
+        warm.execute("CREATE TABLE t (a INTEGER)")
+        warm.close()
+        const before: int = sqlite3_memory_used()
+        i: int = 0
+        opened: int = 0
+        while i < 100 {
+            const d: sqlite.Database = sqlite.Database(":memory:")
+            d.execute("CREATE TABLE t (a INTEGER)")
+            if d.ok {
+                opened = opened + 1
+            }
+            i = i + 1
+        }
+        const after: int = sqlite3_memory_used()
+        self.assertEqual(opened, 100)
+        self.assertEqual(after, before)
+    }
+
+    def test_close_and_finalize_are_idempotent() {
+        const db: sqlite.Database = sqlite.Database(":memory:")
+        db.execute("CREATE TABLE t (a INTEGER)")
+        db.execute("INSERT INTO t VALUES (42)")
+        const c: sqlite.Cursor = db.prepare("SELECT a FROM t")
+        self.assertEqual(c.step(), 100)
+        self.assertEqual(c.column_int(0), 42)
+        c.finalize()
+        c.finalize()
+        db.close()
+        db.close()
+    }
+}
+
+
+class PopenReleaseTests(TestCase) {
+    def test_dropped_popen_closes_pipe_ends() {
+        const warm: Popen = Popen(["/bin/sh", "-c", "exit 0"], "", true, true, false)
+        warm.wait()
+        const before: int = _fdcount()
+        i: int = 0
+        while i < 100 {
+            const p: Popen = Popen(["/bin/sh", "-c", "exit 0"], "", true, true, false)
+            i = i + 1
+        }
+        const after: int = _fdcount()
+        self.assertEqual(after, before)
+    }
+
+    def test_close_is_idempotent_and_wait_still_reaps() {
+        const p: Popen = Popen(["/bin/sh", "-c", "exit 7"], "", true, true, false)
+        p.close()
+        p.close()
+        self.assertEqual(p.wait(), 7)
+        self.assertFalse(p.running())
+    }
+}
+
+
+main([PatternReleaseTests(), SqliteReleaseTests(), PopenReleaseTests()])

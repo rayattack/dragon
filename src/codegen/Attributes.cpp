@@ -3,6 +3,31 @@
 namespace dragon {
 
 void CodeGen::visit(AttributeExpr& node) {
+    if (node.isDubMarked && impl_->options.gcMode == GCMode::RC) {
+        node.isDubMarked = false;
+        node.accept(*this);
+        node.isDubMarked = true;
+        llvm::Value* v = impl_->lastValue;
+        auto k = node.type ? node.type->kind() : Type::Kind::Unknown;
+        const char* fn = nullptr;
+        switch (k) {
+            case Type::Kind::Str:   fn = "dragon_str_retain"; break;
+            case Type::Kind::List:  fn = "dragon_list_deep_copy"; break;
+            case Type::Kind::Dict:  fn = "dragon_dict_deep_copy"; break;
+            case Type::Kind::Set:   fn = "dragon_set_copy"; break;
+            case Type::Kind::Bytes:
+            case Type::Kind::Tuple: fn = "dragon_obj_retain"; break;
+            default: break;
+        }
+        if (fn && v->getType()->isPointerTy()) {
+            auto* callee = impl_->getOrDeclareRuntime(fn,
+                llvm::FunctionType::get(impl_->i8PtrType, {impl_->i8PtrType},
+                                        false));
+            impl_->lastValue =
+                impl_->builder->CreateCall(callee, {impl_->toI8Ptr(v)}, "dub");
+        }
+        return;
+    }
     if (node.attribute == "__doc__") {
         if (node.object->type && node.object->type->kind() == Type::Kind::Module) {
             const std::string& modName =

@@ -110,6 +110,12 @@ couldn't be taken in time) - so the shape you learned for `Lock` carries over un
 | `Condition` | `Condition()` | `acquire()` / `wait()` / `notify()` / `notify_all()` / `release()` | wait for a state change |
 | `Event` | `Event()` | `set()` / `clear()` / `is_set()` / `wait()` | a one-shot/broadcast flag |
 
+Every primitive in that table holds its OS state in an `own` field, so all six
+release when their holder dies, the same way `Lock` does. You never have to
+remember a teardown call. Each also has a `destroy()` if you want the release
+to happen at a point you choose rather than at scope exit; it is idempotent,
+and calling it does not double-free against the automatic release.
+
 An `RWLock` lets **many readers** share access **or** give **one writer** exclusive
 access. `acquire()` takes the shared read lock; `acquire(write=True)` takes the
 exclusive write lock - one verb, one `write` flag:

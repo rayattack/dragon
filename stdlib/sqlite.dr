@@ -3,15 +3,14 @@
 All C functions use intc (C's int = i32) for correct ABI.
 """
 
-extern "C" def malloc(size: int) -> ptr
-extern "C" def free(p: ptr)
+extern "C" def dragon_sqlite_open(path: ptr) -> ptr
+extern "C" def dragon_sqlite_close(db: ptr) -> int
+extern "C" def dragon_sqlite_prepare(db: ptr, sql: ptr, nbytes: int) -> ptr
+extern "C" def dragon_sqlite_finalize(stmt: ptr) -> int
 
-extern "C" def sqlite3_open(filename: ptr, ppDb: ptr) -> intc
-extern "C" def sqlite3_close(db: ptr) -> intc
+extern "C" def sqlite3_errcode(db: ptr) -> intc
 extern "C" def sqlite3_exec(db: ptr, sql: ptr, callback: ptr, arg: ptr, errmsg: ptr) -> intc
-extern "C" def sqlite3_prepare_v2(db: ptr, sql: ptr, nByte: intc, ppStmt: ptr, pzTail: ptr) -> intc
 extern "C" def sqlite3_step(stmt: ptr) -> intc
-extern "C" def sqlite3_finalize(stmt: ptr) -> intc
 extern "C" def sqlite3_reset(stmt: ptr) -> intc
 extern "C" def sqlite3_column_count(stmt: ptr) -> intc
 extern "C" def sqlite3_column_int(stmt: ptr, iCol: intc) -> intc
@@ -26,21 +25,19 @@ extern "C" def sqlite3_errmsg(db: ptr) -> ptr
 extern "C" def sqlite3_changes(db: ptr) -> intc
 extern "C" def sqlite3_last_insert_rowid(db: ptr) -> int
 
-extern "C" def dragon_ptr_deref(pp: ptr) -> ptr
-
 extern "C" def dragon_str_to_utf8_bytes(s: str) -> bytes
 extern "C" def dragon_bytes_data(b: bytes) -> ptr
 
 extern "C" def dragon_string_dup_cstr(s: ptr) -> str
 
 class Database {
+    own db: ptr
+
     def(path: str) {
-        self.dbpp = malloc(8)
         const pathb: bytes = dragon_str_to_utf8_bytes(path)
-        const rc: int = sqlite3_open(dragon_bytes_data(pathb), self.dbpp)
-        self.db = dragon_ptr_deref(self.dbpp)
+        self.db = dragon_sqlite_open(dragon_bytes_data(pathb))
         self.path = path
-        self.ok = rc == 0
+        self.ok = sqlite3_errcode(self.db) == 0
     }
 
     def execute(sql: str) -> int {
@@ -65,8 +62,10 @@ class Database {
     }
 
     def close() -> int {
-        const rc: int = sqlite3_close(self.db)
-        free(self.dbpp)
+        """Close the connection now instead of at instance death. Idempotent:
+        nulling the own field disarms the generated release."""
+        const rc: int = dragon_sqlite_close(self.db)
+        self.db = 0
         return rc
     }
 
@@ -81,13 +80,13 @@ class Database {
 }
 
 class Cursor {
+    own stmt: ptr
     pins: list[bytes]
 
     def(db: ptr, sql: str) {
-        self.stmtpp = malloc(8)
         const sqlb: bytes = dragon_str_to_utf8_bytes(sql)
-        self.rc = sqlite3_prepare_v2(db, dragon_bytes_data(sqlb), len(sqlb), self.stmtpp, none)
-        self.stmt = dragon_ptr_deref(self.stmtpp)
+        self.stmt = dragon_sqlite_prepare(db, dragon_bytes_data(sqlb), len(sqlb))
+        self.rc = sqlite3_errcode(db)
         self.db = db
         self.pins = []
     }
@@ -139,8 +138,10 @@ class Cursor {
     }
 
     def finalize() -> int {
-        const rc: int = sqlite3_finalize(self.stmt)
-        free(self.stmtpp)
+        """Release the prepared statement now instead of at instance death.
+        Idempotent: nulling the own field disarms the generated release."""
+        const rc: int = dragon_sqlite_finalize(self.stmt)
+        self.stmt = 0
         return rc
     }
 }

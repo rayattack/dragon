@@ -1170,6 +1170,17 @@ void CodeGen::visit(ClassDecl& node) {
                         {"Lock", "dragon_lock_destroy"},
                         {"dragon_lock_new", "dragon_lock_destroy"},
                         {"dragon_tls_ctx_new", "dragon_tls_ctx_free"},
+                        {"dragon_rwlock_new", "dragon_rwlock_free"},
+                        {"dragon_cond_new", "dragon_cond_free"},
+                        {"dragon_mutex_new", "dragon_mutex_free"},
+                        {"dragon_flag_new", "dragon_flag_free"},
+                        {"dragon_sem_new", "dragon_sem_free"},
+                        {"dragon_barrier_new", "dragon_barrier_destroy"},
+                        {"pcre2_compile_8", "pcre2_code_free_8"},
+                        {"dragon_sqlite_open", "dragon_sqlite_close"},
+                        {"dragon_sqlite_prepare", "dragon_sqlite_finalize"},
+                        {"dragon_subprocess_child_new",
+                         "dragon_subprocess_child_free"},
                         {"malloc", "free"},
                     };
                 std::unordered_map<std::string, std::string> fieldAllocCallee;
@@ -1209,7 +1220,7 @@ void CodeGen::visit(ClassDecl& node) {
                         if (fn->name == "__init__") scanBody(fn->body);
                 static const std::unordered_map<std::string, std::string>
                     kOwnFieldReleaserRegistry = {
-                        {"SSLSocket._conn", "dragon_tls_conn_free"},
+                        {"ssl__SSLSocket._conn", "dragon_tls_conn_free"},
                     };
                 for (const auto& fname : ownFieldNames) {
                     bool isHeapField = false;
@@ -1228,7 +1239,7 @@ void CodeGen::visit(ClassDecl& node) {
                     }
                     if (releaser.empty()) {
                         auto frIt = kOwnFieldReleaserRegistry.find(
-                            node.name + "." + fname);
+                            clsSym + "." + fname);
                         if (frIt != kOwnFieldReleaserRegistry.end())
                             releaser = frIt->second;
                     }

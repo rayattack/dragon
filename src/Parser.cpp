@@ -704,8 +704,33 @@ std::unique_ptr<Expr> Parser::ownershipMarkedName() {
     marked->setLocation(previous().location());
     if (isDub) marked->isDubMarked = true;
     else marked->isMoveMarked = true;
+    if (isDub && check(TokenType::DOT)) {
+        marked->isDubMarked = false;
+        std::unique_ptr<Expr> path = std::move(marked);
+        AttributeExpr* last = nullptr;
+        while (match(TokenType::DOT)) {
+            auto at = std::make_unique<AttributeExpr>();
+            at->object = std::move(path);
+            at->attribute = std::string(
+                consume(TokenType::IDENTIFIER,
+                        "Expect field name after '.' in a dub path").lexeme());
+            at->setLocation(previous().location());
+            last = at.get();
+            path = std::move(at);
+        }
+        if (last) last->isDubMarked = true;
+        rejectNonBindingOwnershipTarget(isDub);
+        return path;
+    }
     rejectNonBindingOwnershipTarget(isDub);
     return marked;
+}
+
+bool Parser::matchOwnReturnMarker() {
+    if (!check(TokenType::IDENTIFIER) || current().lexeme() != "own")
+        return false;
+    advance();
+    return true;
 }
 
 void Parser::rejectNonBindingOwnershipTarget(bool isDub) {
@@ -720,7 +745,7 @@ void Parser::rejectNonBindingOwnershipTarget(bool isDub) {
         error("own moves a BINDING; a call result is already owned, so there "
               "is nothing to move out of - pass it directly, without 'own'");
     else if (isDub)
-        error("dub copies a BINDING; a field or element cannot be dubbed "
+        error("dub copies a binding or a field; an element cannot be dubbed "
               "(its container owns it) - bind it first");
     else
         error("own moves a BINDING; a field or element cannot be "

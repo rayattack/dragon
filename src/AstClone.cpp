@@ -276,6 +276,7 @@ std::unique_ptr<Expr> cloneExpr(const Expr* e, const TypeSubst& subst) {
         auto r = std::make_unique<AttributeExpr>();
         r->object = cloneExpr(n->object.get(), subst);
         r->attribute = n->attribute;
+        r->isDubMarked = n->isDubMarked;
         setLoc(r, *e);
         return r;
     }
@@ -647,6 +648,7 @@ std::unique_ptr<Stmt> cloneStmt(const Stmt* s, const TypeSubst& subst) {
         }
         for (auto& p : n->params) r->params.push_back(cloneParam(p, subst));
         r->returnType = cloneTypeExpr(n->returnType.get(), subst);
+        r->returnsOwn = n->returnsOwn;
         r->body = cloneBody(n->body, subst);
         r->decorators = cloneExprVec(n->decorators, subst);
         r->isAsync = n->isAsync;

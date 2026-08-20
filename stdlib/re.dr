@@ -41,6 +41,8 @@ const PCRE2_MULTILINE: int = 2
 const PCRE2_DOTALL: int = 4
 
 class Pattern {
+    own code: ptr
+
     def(pattern: str) {
         const errcode: ptr = malloc(8)
         const erroffset: ptr = malloc(8)
@@ -257,7 +259,10 @@ class Pattern {
     }
 
     def destroy() {
+        """Release the compiled pattern now instead of at instance death.
+        Idempotent: nulling the own field disarms the generated release."""
         pcre2_code_free_8(self.code)
+        self.code = 0
     }
 }
 

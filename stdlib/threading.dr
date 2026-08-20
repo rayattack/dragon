@@ -52,13 +52,22 @@ extern "C" def dragon_sizeof_mutex() -> int
 extern "C" def dragon_sizeof_rwlock() -> int
 extern "C" def dragon_sizeof_cond() -> int
 
+extern "C" def dragon_rwlock_new() -> ptr
+extern "C" def dragon_rwlock_free(rw: ptr)
+extern "C" def dragon_cond_new() -> ptr
+extern "C" def dragon_cond_free(cond: ptr)
+extern "C" def dragon_mutex_new() -> ptr
+extern "C" def dragon_mutex_free(mtx: ptr)
+extern "C" def dragon_flag_new() -> ptr
+extern "C" def dragon_flag_free(flag: ptr)
+
 const _EVENT_FLAG_SIZE: int = 8
 
 class RWLock {
+    own rw: ptr
+
     def() {
-        self.rw = malloc(dragon_sizeof_rwlock())
-        memset(self.rw, 0, dragon_sizeof_rwlock())
-        pthread_rwlock_init(self.rw, none)
+        self.rw = dragon_rwlock_new()
     }
 
     def acquire(write: bool = False, blocking: bool = True, timeout: float = -1.0) -> bool {
@@ -87,9 +96,11 @@ class RWLock {
     }
 
     def destroy() -> int {
-        const result: int = pthread_rwlock_destroy(self.rw)
-        free(self.rw)
-        return result
+        """Release the OS lock now instead of at instance death. Idempotent:
+        nulling the own field disarms the generated release."""
+        dragon_rwlock_free(self.rw)
+        self.rw = 0
+        return 0
     }
 
     def __enter__() -> RWLock {
@@ -104,6 +115,8 @@ class RWLock {
 }
 
 class Semaphore {
+    own sem: ptr
+
     def(value: int) {
         self.sem = dragon_sem_new(value)
     }
@@ -125,7 +138,11 @@ class Semaphore {
     }
 
     def destroy() -> int {
-        return dragon_sem_free(self.sem)
+        """Release the permits now instead of at instance death. Idempotent:
+        nulling the own field disarms the generated release."""
+        const result: int = dragon_sem_free(self.sem)
+        self.sem = 0
+        return result
     }
 
     def __enter__() -> Semaphore {
@@ -140,6 +157,8 @@ class Semaphore {
 }
 
 class Barrier {
+    own bar: ptr
+
     def(count: int) {
         self.bar = dragon_barrier_new(count)
         self.count = count
@@ -150,18 +169,21 @@ class Barrier {
     }
 
     def destroy() -> int {
-        return dragon_barrier_destroy(self.bar)
+        """Release the rendezvous state now instead of at instance death.
+        Idempotent: nulling the own field disarms the generated release."""
+        const result: int = dragon_barrier_destroy(self.bar)
+        self.bar = 0
+        return result
     }
 }
 
 class Condition {
+    own cond: ptr
+    own mtx: ptr
+
     def() {
-        self.cond = malloc(dragon_sizeof_cond())
-        memset(self.cond, 0, dragon_sizeof_cond())
-        pthread_cond_init(self.cond, none)
-        self.mtx = malloc(dragon_sizeof_mutex())
-        memset(self.mtx, 0, dragon_sizeof_mutex())
-        pthread_mutex_init(self.mtx, none)
+        self.cond = dragon_cond_new()
+        self.mtx = dragon_mutex_new()
     }
 
     def acquire() -> int {
@@ -185,10 +207,12 @@ class Condition {
     }
 
     def destroy() -> int {
-        pthread_cond_destroy(self.cond)
-        pthread_mutex_destroy(self.mtx)
-        free(self.cond)
-        free(self.mtx)
+        """Release the OS primitives now instead of at instance death.
+        Idempotent: nulling the own fields disarms the generated release."""
+        dragon_cond_free(self.cond)
+        dragon_mutex_free(self.mtx)
+        self.cond = 0
+        self.mtx = 0
         return 0
     }
 
@@ -204,15 +228,14 @@ class Condition {
 }
 
 class Event {
+    own flag: ptr
+    own cond: ptr
+    own mtx: ptr
+
     def() {
-        self.flag = malloc(_EVENT_FLAG_SIZE)
-        memset(self.flag, 0, _EVENT_FLAG_SIZE)
-        self.cond = malloc(dragon_sizeof_cond())
-        memset(self.cond, 0, dragon_sizeof_cond())
-        pthread_cond_init(self.cond, none)
-        self.mtx = malloc(dragon_sizeof_mutex())
-        memset(self.mtx, 0, dragon_sizeof_mutex())
-        pthread_mutex_init(self.mtx, none)
+        self.flag = dragon_flag_new()
+        self.cond = dragon_cond_new()
+        self.mtx = dragon_mutex_new()
     }
 
     def is_set() -> bool {
@@ -242,11 +265,14 @@ class Event {
     }
 
     def destroy() -> int {
-        pthread_cond_destroy(self.cond)
-        pthread_mutex_destroy(self.mtx)
-        free(self.cond)
-        free(self.mtx)
-        free(self.flag)
+        """Release the OS primitives now instead of at instance death.
+        Idempotent: nulling the own fields disarms the generated release."""
+        dragon_cond_free(self.cond)
+        dragon_mutex_free(self.mtx)
+        dragon_flag_free(self.flag)
+        self.cond = 0
+        self.mtx = 0
+        self.flag = 0
         return 0
     }
 }

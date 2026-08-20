@@ -36,7 +36,11 @@ scheduler between poll slices so it does not monopolise the carrier OS thread
 extern "C" def dragon_subprocess_spawn(argv: list[str], cap_in: intc, cap_out: intc, cap_err: intc, cwd: str) -> list[int]
 extern "C" def dragon_subprocess_drain(fd: intc) -> bytes
 extern "C" def dragon_subprocess_write(fd: intc, data: bytes) -> int
-extern "C" def dragon_subprocess_close(fd: intc)
+extern "C" def dragon_subprocess_child_new(pid: int, in_fd: int, out_fd: int, err_fd: int) -> ptr
+extern "C" def dragon_subprocess_child_take_fd(child: ptr, which: int) -> int
+extern "C" def dragon_subprocess_child_close_fds(child: ptr)
+extern "C" def dragon_subprocess_child_reaped(child: ptr)
+extern "C" def dragon_subprocess_child_free(child: ptr)
 
 extern "C" def dragon_subprocess_pump(in_fd: intc, stdin_data: bytes, out_fd: intc, err_fd: intc, timeout_ms: int) -> list[bytes]
 
@@ -129,9 +133,7 @@ class Popen {
     args: list[str]
     pid: int
     returncode: int
-    _stdin_fd: int
-    _stdout_fd: int
-    _stderr_fd: int
+    own _child: ptr
     _reaped: bool
 
     def(args: list[str], cwd: str = "", capture_stdout: bool = true, capture_stderr: bool = true, capture_stdin: bool = false) {
@@ -145,13 +147,11 @@ class Popen {
         const co: int = 1 if capture_stdout else 0
         const ce: int = 1 if capture_stderr else 0
         const r: list[int] = dragon_subprocess_spawn(args, ci, co, ce, cwd)
+        self.pid = r[0]
+        self._child = dragon_subprocess_child_new(r[0], r[1], r[2], r[3])
         if r[0] < 0 {
             raise OSError(f"failed to spawn '{args[0]}'")
         }
-        self.pid = r[0]
-        self._stdin_fd = r[1]
-        self._stdout_fd = r[2]
-        self._stderr_fd = r[3]
     }
 
     def communicate(input: bytes = b"", timeout: int = -1) -> tuple[bytes, bytes] {
@@ -168,10 +168,10 @@ class Popen {
         indefinitely. On expiry the child is killed and reaped and
         `TimeoutExpired` is raised carrying the partial output captured so far
         (Python parity)."""
-        const r: list[bytes] = dragon_subprocess_pump(self._stdin_fd, input, self._stdout_fd, self._stderr_fd, timeout)
-        self._stdin_fd = -1
-        self._stdout_fd = -1
-        self._stderr_fd = -1
+        const in_fd: int = dragon_subprocess_child_take_fd(self._child, 0)
+        const out_fd: int = dragon_subprocess_child_take_fd(self._child, 1)
+        const err_fd: int = dragon_subprocess_child_take_fd(self._child, 2)
+        const r: list[bytes] = dragon_subprocess_pump(in_fd, input, out_fd, err_fd, timeout)
         const out: bytes = r[0]
         const err: bytes = r[1]
         const flag: bytes = r[2]
@@ -186,20 +186,9 @@ class Popen {
     }
 
     def _close_fds() -> None {
-        """Idempotent pipe-end close (-1 = already closed/never captured); without it
-        Popen leaks parent-held fds and a chatty child can deadlock on a full pipe."""
-        if self._stdin_fd >= 0 {
-            dragon_subprocess_close(self._stdin_fd)
-            self._stdin_fd = -1
-        }
-        if self._stdout_fd >= 0 {
-            dragon_subprocess_close(self._stdout_fd)
-            self._stdout_fd = -1
-        }
-        if self._stderr_fd >= 0 {
-            dragon_subprocess_close(self._stderr_fd)
-            self._stderr_fd = -1
-        }
+        """Idempotent pipe-end close; without it a chatty child can deadlock on a
+        full pipe. A dropped Popen closes these through the own field instead."""
+        dragon_subprocess_child_close_fds(self._child)
     }
 
     def close() -> None {
@@ -227,6 +216,7 @@ class Popen {
         }
         self.returncode = _decode_status(r[1])
         self._reaped = true
+        dragon_subprocess_child_reaped(self._child)
         self._close_fds()
         return self.returncode
     }
@@ -245,6 +235,7 @@ class Popen {
         }
         self.returncode = _decode_status(r[1])
         self._reaped = true
+        dragon_subprocess_child_reaped(self._child)
         self._close_fds()
         return false
     }

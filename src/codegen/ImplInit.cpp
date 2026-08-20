@@ -1090,7 +1090,8 @@ void CodeGen::Impl::forwardDeclareFunctions(dragon::Module& mod) {
             if (func->isExtern && !func->externLib.empty()) {
                 externLibs.insert(func->externLib);
             }
-            if (func->isExtern && externLinkName.substr(0, 7) == "sqlite3") {
+            if (func->isExtern && (externLinkName.substr(0, 7) == "sqlite3" ||
+                                   externLinkName.substr(0, 14) == "dragon_sqlite_")) {
                 needsSqlite3 = true;
             }
             if (func->isExtern && externLinkName.substr(0, 5) == "pcre2") {

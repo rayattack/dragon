@@ -284,7 +284,7 @@ std::unique_ptr<Stmt> Parser::returnStatement() {
     stmt->setLocation(previous().location());
     if (!check(TokenType::NEWLINE) && !check(TokenType::RIGHT_BRACE) &&
         !check(TokenType::DEDENT) && !isAtEnd()) {
-        stmt->value = expression();
+        stmt->value = maybeMoveRhs();
     }
     return stmt;
 }
@@ -454,14 +454,7 @@ std::unique_ptr<Stmt> Parser::forStatement() {
     if (impl_->options.isDragonFile && check(TokenType::IDENTIFIER) &&
         current().lexeme() == "dub" &&
         peekNext().type() == TokenType::IDENTIFIER) {
-        advance();
-        auto dubbed = std::make_unique<NameExpr>();
-        dubbed->name = std::string(
-            consume(TokenType::IDENTIFIER,
-                    "Expect binding name after 'dub'").lexeme());
-        dubbed->setLocation(previous().location());
-        dubbed->isDubMarked = true;
-        stmt->iterable = std::move(dubbed);
+        stmt->iterable = ownershipMarkedName();
     } else {
         stmt->iterable = expression();
     }
@@ -748,6 +741,7 @@ std::unique_ptr<Stmt> Parser::parseExternFuncSig(const std::string& libHint) {
     consume(TokenType::RIGHT_PAREN, "Expect ')' after parameters");
 
     if (match(TokenType::ARROW)) {
+        decl->returnsOwn = matchOwnReturnMarker();
         decl->returnType = parseType();
     }
     if (match(TokenType::AS)) {
@@ -1296,6 +1290,7 @@ std::unique_ptr<Stmt> Parser::functionDeclaration() {
     }
 
     if (match(TokenType::ARROW)) {
+        decl->returnsOwn = matchOwnReturnMarker();
         decl->returnType = parseType();
     }
 
@@ -1397,7 +1392,10 @@ std::unique_ptr<Stmt> Parser::contractDeclaration(std::string name) {
         consume(TokenType::LEFT_PAREN, "Expect '(' after method name");
         method->params = parseParameters();
         consume(TokenType::RIGHT_PAREN, "Expect ')' after parameters");
-        if (match(TokenType::ARROW)) method->returnType = parseType();
+        if (match(TokenType::ARROW)) {
+            method->returnsOwn = matchOwnReturnMarker();
+            method->returnType = parseType();
+        }
         method->isMethod = true;
         method->hasImplicitSelf = true;
         if (check(TokenType::LEFT_BRACE)) {

@@ -34,9 +34,11 @@ static int make_pipe_cloexec(int fds[2]) {
 extern "C" {
 
 void dragon_vthread_yield(void);
+void dragon_subprocess_reap_orphans(void);
 
 DragonList* dragon_subprocess_spawn(DragonList* argv, int cap_in, int cap_out,
                                     int cap_err, const char* cwd) {
+    dragon_subprocess_reap_orphans();
     DragonList* result = dragon_list_new_tagged(4, TAG_INT);
 #ifdef _WIN32
     (void)argv; (void)cap_in; (void)cap_out; (void)cap_err; (void)cwd;
@@ -522,6 +524,92 @@ int64_t dragon_subprocess_write_all(int fd, DragonBytes* data) {
     }
     return 0;
 #endif
+}
+
+typedef struct {
+    int fds[3];
+    int pid;
+} DragonChild;
+
+#ifndef _WIN32
+static pthread_mutex_t g_orphan_mu = PTHREAD_MUTEX_INITIALIZER;
+static int* g_orphans = nullptr;
+static size_t g_orphan_len = 0;
+static size_t g_orphan_cap = 0;
+
+static void orphan_sweep_locked(void) {
+    size_t keep = 0;
+    for (size_t i = 0; i < g_orphan_len; ++i) {
+        int status = 0;
+        if (waitpid((pid_t)g_orphans[i], &status, WNOHANG) == 0)
+            g_orphans[keep++] = g_orphans[i];
+    }
+    g_orphan_len = keep;
+}
+
+static void orphan_adopt(int pid) {
+    pthread_mutex_lock(&g_orphan_mu);
+    orphan_sweep_locked();
+    if (g_orphan_len == g_orphan_cap) {
+        size_t next = g_orphan_cap ? g_orphan_cap * 2 : 16;
+        int* grown = (int*)dragon_realloc_nullable(g_orphans, next * sizeof(int));
+        if (grown) { g_orphans = grown; g_orphan_cap = next; }
+    }
+    if (g_orphan_len < g_orphan_cap) g_orphans[g_orphan_len++] = pid;
+    pthread_mutex_unlock(&g_orphan_mu);
+}
+#endif
+
+void dragon_subprocess_reap_orphans(void) {
+#ifndef _WIN32
+    pthread_mutex_lock(&g_orphan_mu);
+    orphan_sweep_locked();
+    pthread_mutex_unlock(&g_orphan_mu);
+#endif
+}
+
+void* dragon_subprocess_child_new(int64_t pid, int64_t in_fd, int64_t out_fd,
+                                  int64_t err_fd) {
+    auto* c = (DragonChild*)dragon_xmalloc(sizeof(DragonChild));
+    c->fds[0] = (int)in_fd;
+    c->fds[1] = (int)out_fd;
+    c->fds[2] = (int)err_fd;
+    c->pid = (int)pid;
+    return c;
+}
+
+int64_t dragon_subprocess_child_take_fd(void* handle, int64_t which) {
+    auto* c = (DragonChild*)handle;
+    if (!c || which < 0 || which > 2) return -1;
+    int fd = c->fds[which];
+    c->fds[which] = -1;
+    return fd;
+}
+
+void dragon_subprocess_child_close_fds(void* handle) {
+    auto* c = (DragonChild*)handle;
+    if (!c) return;
+    for (int i = 0; i < 3; ++i) {
+#ifndef _WIN32
+        if (c->fds[i] >= 0) close(c->fds[i]);
+#endif
+        c->fds[i] = -1;
+    }
+}
+
+void dragon_subprocess_child_reaped(void* handle) {
+    auto* c = (DragonChild*)handle;
+    if (c) c->pid = 0;
+}
+
+void dragon_subprocess_child_free(void* handle) {
+    auto* c = (DragonChild*)handle;
+    if (!c) return;
+    dragon_subprocess_child_close_fds(c);
+#ifndef _WIN32
+    if (c->pid > 0) orphan_adopt(c->pid);
+#endif
+    free(c);
 }
 
 }

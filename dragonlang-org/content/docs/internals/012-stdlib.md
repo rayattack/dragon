@@ -43,7 +43,7 @@ Calling `math.sqrt(4.0)` compiles to a direct, native `f64` call into libm - no 
 Modules range from "thin wrapper" to "almost entirely Dragon":
 
 - **`stdlib/re.dr`** compiles patterns through the bundled **PCRE2 10.44** static library. It declares the PCRE2 C API (`pcre2_compile_8`, `pcre2_match_8`, ...) with `extern "C"`, then exposes a Dragon `Pattern` class plus `match` / `search` / `sub` / `findall` / `split` convenience functions. No external dependency.
-- **`stdlib/sqlite.dr`** wraps the bundled **SQLite3** amalgamation (`sqlite3_open`, `sqlite3_prepare_v2`, `sqlite3_step`, ...) and presents a typed connection/cursor surface in Dragon.
+- **`stdlib/sqlite.dr`** wraps the bundled **SQLite3** amalgamation (`sqlite3_step`, `sqlite3_bind_text`, `sqlite3_column_text`, ...) and presents a typed connection/cursor surface in Dragon.
 - **`stdlib/threading.dr`** wraps POSIX pthreads and presents `Lock`, `RWLock`, `Semaphore`, `Barrier`, `Condition`, and `Event` classes, all usable as context managers (`with` statement).
 - **`stdlib/json.dr`** is mostly Dragon: structural traversal and value building happen in Dragon, with `extern "C"` reserved for string<->number conversion and a byte-level scanner that traverses the raw buffer with zero per-character allocation. The module also co-locates the `template[JSON]` content type (spec-32).
 - **`stdlib/datetime.dr`** is almost pure Dragon: it provides `timedelta`, `date`, `time`, and `datetime` with arithmetic, comparison, and ISO-8601 formatting. Timestamp decomposition uses Howard Hinnant's days-from-civil algorithm written directly in Dragon, with no C calls beyond what `time` already exposes.

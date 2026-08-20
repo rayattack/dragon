@@ -371,6 +371,189 @@ misread it:
 cfg.set_moved({"Accept": "text/html"})   # ok: a fresh temp transfers directly
 ```
 
+## own on returns - what a call hands you
+
+A call result is not automatically yours. It depends on what the callee did,
+and the compiler works that out by reading the body:
+
+```dragon
+class Source {
+    rows: list[str]
+
+    def() {
+        self.rows = ["a", "b", "c"]
+    }
+
+    def view() -> list[str] {
+        return self.rows          # co-owned: Source still holds it
+    }
+
+    def snapshot() -> list[str] {
+        return dub self.rows      # sole owner: minted on this line
+    }
+}
+```
+
+`snapshot()` hands you a value nothing else holds, so you may `del` it, move it
+into an `own` field, or send it across a `fire`. `view()` hands you a second
+name for state `Source` is still using, so you may not:
+
+```dragon
+# doc: no-check
+mine: list[str] = src.snapshot()
+fire worker(own mine)         # fine: nothing else holds it
+
+borrowed: list[str] = src.view()
+fire worker(own borrowed)     # error: 'borrowed' co-owns the value 'view()'
+                              # returned; the callee's owner is still live, so
+                              # it cannot be moved - declare the callee
+                              # '-> own' if it really hands over a value
+                              # nothing else holds, or dub it here
+```
+
+This matters more than it looks. `own` across `fire` is what lets a green
+thread skip atomic reference counts: the value is single-threaded *by proof*.
+Applied to a value the main thread still holds, that proof is worthless and you
+get the race back. Note also that the three ways of spelling the same aliasing
+are now caught the same way - `x = src`, `x = src.rows`, and `x = src.view()`
+all refuse a later move. Passing an alias through a call no longer launders it.
+
+Nothing above required an annotation. Inference reads every `return` in the
+function and marks the result sole-owner only when all of them mint a fresh
+value. You write `-> own T` where inference cannot reach, or where you want the
+promise pinned so a later edit cannot quietly weaken it:
+
+```dragon
+# doc: no-check
+def snapshot() -> own list[str] {
+    return dub self.rows
+}
+
+def peek() -> own list[str] {
+    return self.rows       # error: this function declares '-> own', which
+}                          # promises the caller sole ownership, but this
+                           # return hands back a value its owner still holds;
+                           # return a fresh value, dub it, or drop the own
+```
+
+The annotation is a claim the compiler *checks*, never an instruction to copy
+on your behalf. Three places are worth writing it: `extern "C"` declarations
+(there is no body to read), methods a subclass can override (one signature, one
+meaning, the same argument as for `own` parameters), and `Callable` types.
+
+A return already hands the caller its own reference, so `own` on the returned
+expression adds nothing and is refused:
+
+```dragon
+# doc: no-check
+return own s     # error: a return already hands the caller its own reference;
+                 # 'own s' adds nothing here - declare the function '-> own'
+                 # to promise sole ownership
+```
+
+## own on a collection - sealing both edges
+
+Everything above is about *facts*: is this value aliased, right now. The
+compiler works those out by reading your code, because they have answers.
+
+Whether anyone outside a class may hold a handle to its list is not a fact. It
+is a decision about that one class, and `return self.rows` looks identical
+whether you meant "here is a cheap view, help yourself" or "that was never
+supposed to leave." So Dragon does not guess. You say it, with the same `own`
+you already use on fields:
+
+```dragon
+class Config {
+    own headers: dict[str, str]
+
+    def() {
+        self.headers = {"Accept": "text/html"}
+    }
+}
+```
+
+You have seen half of what that buys already: a borrow cannot be stored *into*
+an own field. It seals the other edge too, so a handle cannot get *out*:
+
+```dragon
+# doc: no-check
+def get_headers() -> dict[str, str] {
+    return self.headers    # error: 'headers' is an own field, so 'Config' is
+}                          # its sole owner; returning it hands out a second
+                           # handle - copy it out (dub self.headers) or expose
+                           # a method that does the work
+```
+
+One sentence covers both directions: **an `own` field cannot be aliased in or
+out.** Binding it to a local first does not launder it; the local remembers
+where it came from and the return still refuses.
+
+The check sits at the return rather than at whatever the caller eventually
+does, and that is what makes it complete. Nothing gets out, so there is no
+escaped handle to track through containers, no stale view held across a field
+reassignment, and no chain of calls to chase. Guard the door and you never have
+to catch the escapee.
+
+What you write instead is a class that exposes operations rather than its
+container:
+
+```dragon
+class Config {
+    own headers: dict[str, str]
+
+    def() {
+        self.headers = {"Accept": "text/html"}
+    }
+
+    def header(k: str) -> str {
+        return self.headers.get(k, "")     # zero-copy read
+    }
+
+    def set_header(k: str, v: str) -> None {
+        self.headers[k] = v                 # mutation lives with the owner
+    }
+
+    def count() -> int {
+        return len(self.headers)
+    }
+
+    def snapshot() -> dict[str, str] {
+        return dub self.headers             # a copy, priced and visible
+    }
+}
+```
+
+Reads stay free. Nothing is copied to answer `count()`, and no defensive copy
+is ever taken on your behalf - if a copy happens in your program, you wrote
+`dub` on the line where it happens.
+
+This is opt-in like everything else in the chapter. A plain `headers:
+dict[str, str]` field behaves exactly as it always did: the getter hands back a
+borrow, reference counting keeps it alive, and who may hold it is your
+business. Reach for `own` on the classes where that answer should be "only me".
+
+One boundary is worth knowing, and it is a rule you have already met rather
+than a list to memorise. The seal exists to stop a second holder *changing*
+what the class owns, so it governs exactly the types where `dub` makes a real
+copy:
+
+| Field type | what `dub` does | sealed |
+|---|---|---|
+| `list`, `dict`, `set` | deep copy | yes |
+| a class instance | refused, but the value is mutable | yes, and the fix is a method rather than `dub` |
+| `str`, `bytes`, `tuple` | a retain | no |
+| `ptr` | nothing | no |
+
+The bottom two rows are the same reason stated twice. A `str` field is not
+sealed because a shared string is *indistinguishable from a copy* - that is the
+identical argument that makes `dub tag` free on a string. If nobody can change
+it, nobody needs protecting from it. And a raw `ptr` is not sealed because
+`ptr` is already the "you are on your own" type; saying so is the whole point
+of returning one. That is how `SSLSocket.conn()` hands its mbedTLS handle to a
+caller driving its own wire protocol, the same way a socket hands out a file
+descriptor. On a raw handle, `own` keeps meaning what it always meant: who
+frees it.
+
 ## Moves and control flow
 
 A move must happen on every path or on none. There is no runtime flag
@@ -502,7 +685,34 @@ print(names)                   # ['a', 'b']
 
 Collecting the changes in the body and applying them after the loop compiles
 too, and mutating a *different* container inside the loop was always fine -
-only the binding being iterated is protected.
+only the container being iterated is protected.
+
+The rule follows the container, not the spelling, so iterating a field is
+checked exactly like iterating a local, and `dub` takes the field directly:
+
+```dragon
+class Registry {
+    names: list[str]
+
+    def() {
+        self.names = ["a", "tmp1", "tmp2", "b"]
+    }
+
+    def purge() -> None {
+        for n in dub self.names {
+            if n.startswith("tmp") {
+                self.names.remove(n)
+            }
+        }
+    }
+}
+```
+
+Drop the `dub` there and you get E17 naming `self.names`, the same as for a
+local. `dub` copies a binding or a field; an *element* (`dub xs[0]`) is still
+refused, because the container owns it. And `own` on a field stays refused for
+the reason it always was: a move would leave the field dangling, while a copy
+takes nothing away.
 
 ## Identity resources: the socket handle
 
@@ -687,6 +897,15 @@ explicitly:
 Nothing else changes. A program with no `del`, no `own`, and no `dub`
 compiles byte-identical to what it compiled before the feature existed.
 
+Two things that emit *nothing* are worth naming, because both look like they
+should cost something and neither does. `-> own T` is a claim the compiler
+checks against the function body; it never inserts a copy, and a function is
+lowered the same whether the annotation is present or not. The read-only rule
+for borrowed handles is a compile-time refusal, so reading through a getter
+stays exactly as cheap as it was - no defensive copy is taken on your behalf,
+ever. If a copy happens in your program, you wrote `dub` on the line where it
+happens.
+
 ## Where the keywords are mandatory
 
 Most of this chapter is opt-in: a program with no `del`, no `own`, and no
@@ -736,6 +955,10 @@ without sharing, `dub` to make every copy in the program greppable.
 | E15 | a field of raw resource type (Lock, handles) without `own` |
 | E16 | a raw resource as a container element (wrap it in a class) |
 | E17 | mutating a container while iterating it (iterate `dub xs` or apply after) |
+| E18 | `del`/move of a call result the callee still owns (declare the callee `-> own`, or dub it) |
+| E19 | a `-> own` function returning a value its owner still holds |
+| E20 | `own` on a returned expression (a return already hands over its own reference) |
+| E21 | returning an `own` field (dub it out, or expose a method that does the work) |
 
 One line to hold the whole chapter: `Owned` is yours, an escape makes it
 `Owned*` and the compiler tells you where, `own` moves it (visibly, at both

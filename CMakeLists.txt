@@ -135,6 +135,7 @@ add_library(dragon_runtime STATIC
     lib/Runtime/runtime_zstd.cpp
     lib/Runtime/runtime_box.cpp
     lib/Runtime/runtime_sqltemplate.cpp
+    lib/Runtime/runtime_sqlite.cpp
     lib/Runtime/runtime_crypto.cpp
     lib/Runtime/runtime_tls.cpp
     lib/Runtime/runtime_ed25519.cpp
@@ -146,6 +147,7 @@ target_include_directories(dragon_runtime PRIVATE
     ${CMAKE_SOURCE_DIR}/lib/Minicoro
     ${CMAKE_SOURCE_DIR}/lib/llhttp
     ${CMAKE_SOURCE_DIR}/lib/ed25519
+    ${CMAKE_SOURCE_DIR}/lib/SQLite
     ${CMAKE_SOURCE_DIR}/lib/Runtime)
 target_compile_options(dragon_runtime PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:${DRAGON_WARNINGS}>)
@@ -168,7 +170,8 @@ if(DRAGON_ASAN)
     add_library(dragon_runtime_asan STATIC ${_dragon_rt_srcs})
     target_include_directories(dragon_runtime_asan PRIVATE
         ${CMAKE_SOURCE_DIR}/lib/Minicoro ${CMAKE_SOURCE_DIR}/lib/llhttp
-        ${CMAKE_SOURCE_DIR}/lib/ed25519 ${CMAKE_SOURCE_DIR}/lib/Runtime)
+        ${CMAKE_SOURCE_DIR}/lib/ed25519 ${CMAKE_SOURCE_DIR}/lib/SQLite
+        ${CMAKE_SOURCE_DIR}/lib/Runtime)
     target_link_libraries(dragon_runtime_asan PRIVATE
         dragon_llhttp dragon_mbedtls ZLIB::ZLIB ${ZSTD_LIBRARY})
     target_compile_definitions(dragon_runtime_asan PRIVATE

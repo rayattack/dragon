@@ -842,3 +842,72 @@ TEST(OwnershipCheckTest, DubIntoOwnParamKeepsBindingUsable) {
         "    return take(dub b) + len(b)\n"
         "}\n"));
 }
+
+TEST(OwnershipCheckTest, ReturningAnOwnCollectionFieldErrors) {
+    std::string e = ownError(
+        "class Config {\n"
+        "    own headers: dict[str, str]\n"
+        "    def() { self.headers = {\"Accept\": \"text/html\"} }\n"
+        "    def get_headers() -> dict[str, str] { return self.headers }\n"
+        "}\n");
+    EXPECT_NE(e.find("is an own field"), std::string::npos) << e;
+    EXPECT_NE(e.find("dub self.headers"), std::string::npos) << e;
+}
+
+TEST(OwnershipCheckTest, ReturningAnOwnFieldViaALocalStillErrors) {
+    std::string e = ownError(
+        "class Config {\n"
+        "    own headers: dict[str, str]\n"
+        "    def() { self.headers = {\"Accept\": \"text/html\"} }\n"
+        "    def leak() -> dict[str, str] {\n"
+        "        h: dict[str, str] = self.headers\n"
+        "        return h\n"
+        "    }\n"
+        "}\n");
+    EXPECT_NE(e.find("is an own field"), std::string::npos) << e;
+}
+
+TEST(OwnershipCheckTest, ReturningAnOwnInstanceFieldAdvisesAMethod) {
+    std::string e = ownError(
+        "class Inner {\n"
+        "    n: int\n"
+        "    def() { self.n = 1 }\n"
+        "}\n"
+        "class Holder {\n"
+        "    own inst: Inner\n"
+        "    def() { self.inst = Inner() }\n"
+        "    def leak() -> Inner { return self.inst }\n"
+        "}\n");
+    EXPECT_NE(e.find("is an own field"), std::string::npos) << e;
+    EXPECT_EQ(e.find("dub self.inst"), std::string::npos) << e;
+}
+
+TEST(OwnershipCheckTest, DubbingAnOwnFieldOutIsTheSanctionedExit) {
+    EXPECT_TRUE(ownAccepts(
+        "class Config {\n"
+        "    own headers: dict[str, str]\n"
+        "    def() { self.headers = {\"Accept\": \"text/html\"} }\n"
+        "    def snapshot() -> dict[str, str] { return dub self.headers }\n"
+        "    def header(k: str) -> str { return self.headers.get(k, \"\") }\n"
+        "    def set_header(k: str, v: str) -> None { self.headers[k] = v }\n"
+        "    def count() -> int { return len(self.headers) }\n"
+        "}\n"));
+}
+
+TEST(OwnershipCheckTest, ImmutableOwnFieldsAreNotSealed) {
+    EXPECT_TRUE(ownAccepts(
+        "class Sink {\n"
+        "    own payload: str\n"
+        "    def(own payload: str) { self.payload = own payload }\n"
+        "    def read() -> str { return self.payload }\n"
+        "}\n"));
+}
+
+TEST(OwnershipCheckTest, PlainCollectionFieldStaysUnsealed) {
+    EXPECT_TRUE(ownAccepts(
+        "class Config {\n"
+        "    headers: dict[str, str]\n"
+        "    def() { self.headers = {\"Accept\": \"text/html\"} }\n"
+        "    def get_headers() -> dict[str, str] { return self.headers }\n"
+        "}\n"));
+}

@@ -23,6 +23,9 @@ struct BindState {
     std::string factDesc;
     bool factIsCapture = false;
     std::string borrowOwner;
+    bool borrowIsCallResult = false;
+    std::string borrowedOwnField;
+    bool borrowedOwnFieldDubable = false;
     SourceLocation killLoc;
     SourceLocation condLiveLoc;
     bool killWasDel = true;
@@ -52,6 +55,7 @@ struct OwnershipCheck::Impl {
 
     std::vector<std::unordered_map<std::string, VarSlot>> scopes;
     std::vector<std::vector<Flow>> loopBreaks;
+    std::vector<std::vector<Flow>> loopContinues;
     std::unordered_set<std::string> globalNames;
     std::unordered_set<int> reported;
     int nextId = 0;
@@ -63,6 +67,13 @@ struct OwnershipCheck::Impl {
     std::unordered_set<std::string> e15Reported;
     std::unordered_set<std::string> lockGuardedClasses;
     std::unordered_map<std::string, FunctionDecl*> funcsByName;
+
+    std::unordered_map<std::string, bool> funcReturnOwned;
+    std::string currentFnKey;
+    bool currentFnReturnsSoleOwner = true;
+    bool currentFnDeclaresOwn = false;
+    bool inferPass = false;
+    bool suppressDiags = false;
 
     void pushFrame() { scopes.emplace_back(); }
     void popFrame() { scopes.pop_back(); }
@@ -83,6 +94,7 @@ struct OwnershipCheck::Impl {
     }
 
     void error(SourceLocation loc, const std::string& msg) {
+        if (suppressDiags) return;
         diags.push_back(OwnDiagnostic{loc, msg});
     }
 
@@ -129,6 +141,60 @@ struct OwnershipCheck::Impl {
         if (cls.empty()) return false;
         auto it = classOwnFields.find(cls);
         return it != classOwnFields.end() && it->second.count(at->attribute) != 0;
+    }
+
+    // The seal protects against a second holder MUTATING what the class owns,
+    // so it governs exactly the types where `dub` deep-copies. Where `dub` is
+    // a retain (str, bytes, tuple) the payload is immutable and a shared handle
+    // is indistinguishable from a copy, so there is nothing to protect. A raw
+    // `ptr` is already the "you are on your own" type - that is what
+    // SSLSocket.conn() and a socket's fileno() hand back.
+    static bool sealGovernsType(const Type* t) {
+        if (!t) return false;
+        switch (t->kind()) {
+            case Type::Kind::List:
+            case Type::Kind::Dict:
+            case Type::Kind::Set:
+            case Type::Kind::Instance:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    static bool typeIsDubable_(const Type* t) {
+        if (!t) return false;
+        auto k = t->kind();
+        return k == Type::Kind::List || k == Type::Kind::Dict ||
+               k == Type::Kind::Set;
+    }
+
+    std::string ownFieldSealedBy(Expr* e) {
+        auto* at = dynamic_cast<AttributeExpr*>(e);
+        if (!at || at->isDubMarked) return "";
+        if (!sealGovernsType(at->type.get())) return "";
+        if (!isOwnFieldStore(at)) return "";
+        const std::string cls = resolveFieldClass(at);
+        return cls.empty() ? at->attribute : cls + "." + at->attribute;
+    }
+
+    void refuseOwnFieldEscape(const std::string& sealed, bool dubable,
+                              SourceLocation loc, const std::string& how) {
+        const size_t dot = sealed.rfind('.');
+        const std::string fieldName =
+            dot == std::string::npos ? sealed : sealed.substr(dot + 1);
+        const std::string owner =
+            dot == std::string::npos ? std::string("its class")
+                                     : "'" + sealed.substr(0, dot) + "'";
+        const std::string fix =
+            dubable ? "copy it out (dub self." + fieldName +
+                          ") or expose a method that does the work"
+                    : "expose a method that does the work, or drop the own if "
+                      "this handle is meant to be shared";
+        error(loc,
+              "'" + fieldName + "' is an own field, so " + owner +
+                  " is its sole owner; " + how + " hands out a second handle - " +
+                  fix);
     }
 
     static bool isRawResourceTypeName(const std::string& n) {
@@ -181,6 +247,89 @@ struct OwnershipCheck::Impl {
                     funcsByName[fn->name] = fn;
             }
         }
+    }
+
+    static std::string methodKey(const std::string& cls,
+                                 const std::string& name) {
+        return cls + "." + name;
+    }
+
+    void seedReturnModes(Module& module) {
+        for (auto& s : module.body) {
+            if (auto* fn = dynamic_cast<FunctionDecl*>(s.get())) {
+                if (!fn->isMethod) funcReturnOwned[fn->name] = true;
+                continue;
+            }
+            if (auto* cd = dynamic_cast<ClassDecl*>(s.get()))
+                for (auto& member : cd->body)
+                    if (auto* mfn = dynamic_cast<FunctionDecl*>(member.get()))
+                        funcReturnOwned[methodKey(cd->name, mfn->name)] = true;
+        }
+    }
+
+    std::string calleeKey(CallExpr* call) {
+        if (auto* cn = dynamic_cast<NameExpr*>(call->callee.get()))
+            return cn->name;
+        auto* at = dynamic_cast<AttributeExpr*>(call->callee.get());
+        if (!at) return "";
+        if (auto* obj = dynamic_cast<NameExpr*>(at->object.get()))
+            if (obj->name == "self" && !currentClassName.empty())
+                return methodKey(currentClassName, at->attribute);
+        if (at->object && at->object->type &&
+            at->object->type->kind() == Type::Kind::Instance) {
+            auto& inst = static_cast<InstanceType&>(*at->object->type);
+            if (inst.classType)
+                return methodKey(inst.classType->name, at->attribute);
+        }
+        return "";
+    }
+
+    static std::string calleeLabel(CallExpr* call) {
+        if (auto* cn = dynamic_cast<NameExpr*>(call->callee.get()))
+            return cn->name + "()";
+        if (auto* at = dynamic_cast<AttributeExpr*>(call->callee.get()))
+            return at->attribute + "()";
+        return "a call";
+    }
+
+    bool calleeReturnsSoleOwner(CallExpr* call) {
+        const std::string key = calleeKey(call);
+        if (key.empty()) return true;
+        auto it = funcReturnOwned.find(key);
+        return it == funcReturnOwned.end() ? true : it->second;
+    }
+
+    void checkOwnReturnAnnotation(FunctionDecl* fn) {
+        if (!fn->returnsOwn) return;
+        auto* named = dynamic_cast<NamedTypeExpr*>(fn->returnType.get());
+        if (named && (named->name == "int" || named->name == "float" ||
+                      named->name == "bool" || named->name == "None")) {
+            error(fn->location(),
+                  "own has no meaning for a '" + named->name +
+                      "' return (it is copied, not owned)");
+            return;
+        }
+        if (!fn->returnType)
+            error(fn->location(),
+                  "own on a return needs a return type to own");
+    }
+
+    bool exprYieldsSoleOwner(Expr* v, Flow& flow) {
+        if (!v || !typeIsHeap(v->type.get())) return true;
+        if (auto* n = dynamic_cast<NameExpr*>(v)) {
+            if (n->isDubMarked || n->isMoveMarked) return true;
+            BindState* b = stateOf(n->name, flow);
+            if (!b) return false;
+            return b->st == St::Owned || b->st == St::Untracked;
+        }
+        if (auto* call = dynamic_cast<CallExpr*>(v))
+            return calleeReturnsSoleOwner(call);
+        if (auto* tern = dynamic_cast<IfExpr*>(v))
+            return exprYieldsSoleOwner(tern->thenExpr.get(), flow) &&
+                   exprYieldsSoleOwner(tern->elseExpr.get(), flow);
+        if (auto* ac = dynamic_cast<AsCastExpr*>(v))
+            return exprYieldsSoleOwner(ac->operand.get(), flow);
+        return classifyRhs(v).st == St::Owned;
     }
 
     bool paramIsReadOnly(FunctionDecl* fn, size_t idx) {
@@ -243,7 +392,15 @@ struct OwnershipCheck::Impl {
             b.borrowOwner = n->name;
             return b;
         }
-        if (dynamic_cast<WalrusExpr*>(v) || dynamic_cast<AttributeExpr*>(v)) {
+        if (auto* at = dynamic_cast<AttributeExpr*>(v)) {
+            b.st = at->isDubMarked ? St::Owned : St::Borrowed;
+            if (b.st == St::Borrowed) {
+                b.borrowedOwnField = ownFieldSealedBy(at);
+                b.borrowedOwnFieldDubable = typeIsDubable_(at->type.get());
+            }
+            return b;
+        }
+        if (dynamic_cast<WalrusExpr*>(v)) {
             b.st = St::Borrowed;
             return b;
         }
@@ -264,7 +421,17 @@ struct OwnershipCheck::Impl {
                                                             : St::Borrowed;
             return b;
         }
-        if (dynamic_cast<CallExpr*>(v) || dynamic_cast<BinaryExpr*>(v) ||
+        if (auto* call = dynamic_cast<CallExpr*>(v)) {
+            if (calleeReturnsSoleOwner(call)) {
+                b.st = St::Owned;
+                return b;
+            }
+            b.st = St::Borrowed;
+            b.borrowOwner = calleeLabel(call);
+            b.borrowIsCallResult = true;
+            return b;
+        }
+        if (dynamic_cast<BinaryExpr*>(v) ||
             dynamic_cast<UnaryExpr*>(v) || dynamic_cast<ListExpr*>(v) ||
             dynamic_cast<DictExpr*>(v) || dynamic_cast<SetExpr*>(v) ||
             dynamic_cast<TupleExpr*>(v) || dynamic_cast<StringLiteral*>(v) ||
@@ -371,12 +538,22 @@ struct OwnershipCheck::Impl {
                           : "'" + n->name + "' escaped into " + b.factDesc);
                 return 0;
             case St::Borrowed:
-                error(n->location(),
-                      "'" + n->name + "' is not the owner" +
-                          (b.borrowOwner.empty()
-                               ? std::string("")
-                               : " (it borrows '" + b.borrowOwner + "')") +
-                          "; only the sole owner can be " + verb);
+                if (b.borrowIsCallResult)
+                    error(n->location(),
+                          "'" + n->name + "' co-owns the value '" +
+                              b.borrowOwner +
+                              "' returned; the callee's owner is still live, "
+                              "so it cannot be " + verb +
+                              " - declare the callee '-> own' if it really "
+                              "hands over a value nothing else holds, or dub "
+                              "it here");
+                else
+                    error(n->location(),
+                          "'" + n->name + "' is not the owner" +
+                              (b.borrowOwner.empty()
+                                   ? std::string("")
+                                   : " (it borrows '" + b.borrowOwner + "')") +
+                              "; only the sole owner can be " + verb);
                 return 0;
             case St::Dead:
                 if (b.killWasAwait)
@@ -558,17 +735,26 @@ struct OwnershipCheck::Impl {
         }
         return false;
     }
+    static std::string exprPath(Expr* e) {
+        if (auto* n = dynamic_cast<NameExpr*>(e)) return n->name;
+        if (auto* at = dynamic_cast<AttributeExpr*>(e)) {
+            const std::string base = exprPath(at->object.get());
+            return base.empty() ? std::string() : base + "." + at->attribute;
+        }
+        return "";
+    }
+
     bool exprMutatesBinding(Expr* e, const std::string& name,
                             SourceLocation& where, std::string& how) {
         if (!e) return false;
         if (auto* call = dynamic_cast<CallExpr*>(e)) {
             if (auto* at = dynamic_cast<AttributeExpr*>(call->callee.get()))
-                if (auto* obj = dynamic_cast<NameExpr*>(at->object.get()))
-                    if (obj->name == name && isMutatingMethod(at->attribute)) {
-                        where = call->location();
-                        how = "'" + name + "." + at->attribute + "()'";
-                        return true;
-                    }
+                if (exprPath(at->object.get()) == name &&
+                    isMutatingMethod(at->attribute)) {
+                    where = call->location();
+                    how = "'" + name + "." + at->attribute + "()'";
+                    return true;
+                }
             for (auto& a : call->args)
                 if (exprMutatesBinding(a.get(), name, where, how)) return true;
         }
@@ -578,19 +764,23 @@ struct OwnershipCheck::Impl {
                             SourceLocation& where, std::string& how) {
         auto tgtHits = [&](Expr* t) {
             if (auto* sub = dynamic_cast<SubscriptExpr*>(t))
-                if (auto* obj = dynamic_cast<NameExpr*>(sub->object.get()))
-                    if (obj->name == name) {
-                        where = t->location();
-                        how = "a subscript store on '" + name + "'";
-                        return true;
-                    }
-            if (auto* at = dynamic_cast<AttributeExpr*>(t))
-                if (auto* obj = dynamic_cast<NameExpr*>(at->object.get()))
-                    if (obj->name == name) {
-                        where = t->location();
-                        how = "a field store on '" + name + "'";
-                        return true;
-                    }
+                if (exprPath(sub->object.get()) == name) {
+                    where = t->location();
+                    how = "a subscript store on '" + name + "'";
+                    return true;
+                }
+            if (auto* at = dynamic_cast<AttributeExpr*>(t)) {
+                if (exprPath(at) == name) {
+                    where = t->location();
+                    how = "a rebind of '" + name + "'";
+                    return true;
+                }
+                if (exprPath(at->object.get()) == name) {
+                    where = t->location();
+                    how = "a field store on '" + name + "'";
+                    return true;
+                }
+            }
             return false;
         };
         if (auto* e = dynamic_cast<ExprStmt*>(s))
@@ -1199,11 +1389,16 @@ struct OwnershipCheck::Impl {
                           "awaited on iteration 1; iteration 2 would await an "
                           "already-consumed task - bind a fresh task inside "
                           "the loop");
-                else
+                else if (it->second.killWasDel)
                     error(it->second.killLoc.line ? it->second.killLoc
                                                   : loopLoc,
                           "deleted on iteration 1; iteration 2 would use a dead "
                           "name - delete it after the loop instead");
+                else
+                    error(it->second.killLoc.line ? it->second.killLoc
+                                                  : loopLoc,
+                          "moved on iteration 1; iteration 2 would use a dead "
+                          "name - bind a fresh value inside the loop");
                 it->second = st;
             }
         }
@@ -1284,10 +1479,15 @@ struct OwnershipCheck::Impl {
             checkExpr(wh->condition.get(), flow);
             Flow entry = flow;
             loopBreaks.emplace_back();
+            loopContinues.emplace_back();
             Flow bodyOut = analyzeBlock(wh->body, flow);
+            std::vector<Flow> conts = std::move(loopContinues.back());
+            loopContinues.pop_back();
             checkBackEdge(entry, bodyOut, wh->location());
+            for (Flow& c : conts) checkBackEdge(entry, c, wh->location());
             std::vector<Flow> outs = std::move(loopBreaks.back());
             loopBreaks.pop_back();
+            for (Flow& c : conts) outs.push_back(std::move(c));
             outs.push_back(std::move(bodyOut));
             outs.push_back(entry);
             Flow out = merge(outs);
@@ -1296,16 +1496,22 @@ struct OwnershipCheck::Impl {
         }
         if (auto* fo = dynamic_cast<ForStmt*>(s)) {
             checkExpr(fo->iterable.get(), flow);
-            if (auto* itn = dynamic_cast<NameExpr*>(fo->iterable.get());
-                itn && !itn->isDubMarked) {
+            auto* iterName = dynamic_cast<NameExpr*>(fo->iterable.get());
+            const bool iterIsDubbed =
+                (iterName && iterName->isDubMarked) ||
+                (dynamic_cast<AttributeExpr*>(fo->iterable.get()) &&
+                 static_cast<AttributeExpr*>(fo->iterable.get())->isDubMarked);
+            const std::string iterPath =
+                iterIsDubbed ? std::string() : exprPath(fo->iterable.get());
+            if (!iterPath.empty()) {
                 SourceLocation where;
                 std::string how;
-                if (bodyMutatesBinding(fo->body, itn->name, where, how)) {
+                if (bodyMutatesBinding(fo->body, iterPath, where, how)) {
                     error(where,
-                          how + " mutates '" + itn->name + "' while the loop "
+                          how + " mutates '" + iterPath + "' while the loop "
                           "iterates it - the loop would observe its own "
                           "mutations; iterate a snapshot (for ... in dub " +
-                          itn->name + ") or collect the changes and apply "
+                          iterPath + ") or collect the changes and apply "
                           "them after the loop");
                 }
             } else if (auto* dn = dynamic_cast<NameExpr*>(fo->iterable.get());
@@ -1320,6 +1526,7 @@ struct OwnershipCheck::Impl {
             }
             Flow entry = flow;
             loopBreaks.emplace_back();
+            loopContinues.emplace_back();
             pushFrame();
             bindTarget(fo->target.get(), nullptr, flow);
             Flow bodyOut = flow;
@@ -1327,9 +1534,13 @@ struct OwnershipCheck::Impl {
                 bodyOut = analyzeStmt(st.get(), std::move(bodyOut));
             popFrame();
             clearExpiredPins(bodyOut);
+            std::vector<Flow> conts = std::move(loopContinues.back());
+            loopContinues.pop_back();
             checkBackEdge(entry, bodyOut, fo->location());
+            for (Flow& c : conts) checkBackEdge(entry, c, fo->location());
             std::vector<Flow> outs = std::move(loopBreaks.back());
             loopBreaks.pop_back();
+            for (Flow& c : conts) outs.push_back(std::move(c));
             outs.push_back(std::move(bodyOut));
             outs.push_back(entry);
             Flow out = merge(outs);
@@ -1403,6 +1614,36 @@ struct OwnershipCheck::Impl {
             return merge(branches);
         }
         if (auto* r = dynamic_cast<ReturnStmt*>(s)) {
+            if (auto* mv = dynamic_cast<NameExpr*>(r->value.get());
+                mv && mv->isMoveMarked)
+                error(r->value->location(),
+                      "a return already hands the caller its own reference; "
+                      "'own " + mv->name +
+                          "' adds nothing here - declare the function "
+                          "'-> own' to promise sole ownership");
+            if (r->value) {
+                std::string sealed = ownFieldSealedBy(r->value.get());
+                bool dubable = typeIsDubable_(r->value->type.get());
+                if (sealed.empty())
+                    if (auto* rn = dynamic_cast<NameExpr*>(r->value.get()))
+                        if (BindState* b = stateOf(rn->name, flow)) {
+                            sealed = b->borrowedOwnField;
+                            dubable = b->borrowedOwnFieldDubable;
+                        }
+                if (!sealed.empty())
+                    refuseOwnFieldEscape(sealed, dubable,
+                                         r->value->location(), "returning it");
+            }
+            if (r->value && (!currentFnKey.empty() || currentFnDeclaresOwn)) {
+                const bool sole = exprYieldsSoleOwner(r->value.get(), flow);
+                if (!sole) currentFnReturnsSoleOwner = false;
+                if (!sole && currentFnDeclaresOwn)
+                    error(r->location(),
+                          "this function declares '-> own', which promises the "
+                          "caller sole ownership, but this return hands back a "
+                          "value its owner still holds; return a fresh value, "
+                          "dub it, or drop the own");
+            }
             checkExpr(r->value.get(), flow);
             checkNoOutstandingLends(flow, r->location(), "this return");
             flow.terminated = true;
@@ -1420,6 +1661,7 @@ struct OwnershipCheck::Impl {
             return flow;
         }
         if (dynamic_cast<ContinueStmt*>(s)) {
+            if (!loopContinues.empty()) loopContinues.back().push_back(flow);
             flow.terminated = true;
             return flow;
         }
@@ -1452,18 +1694,27 @@ struct OwnershipCheck::Impl {
             for (const auto& p : fn->params)
                 checkE16(p.type.get(), fn->location());
             checkE16(fn->returnType.get(), fn->location());
-            analyzeCallable(fn->params, fn->body, fn->isMethod);
+            checkOwnReturnAnnotation(fn);
+            const bool tracked = atModuleLevel && !fn->isMethod;
+            analyzeCallable(fn->params, fn->body, fn->isMethod,
+                            tracked ? fn->name : "", fn->returnsOwn);
             return flow;
         }
         if (auto* cd = dynamic_cast<ClassDecl*>(s)) {
             std::string savedClass = currentClassName;
+            const bool trackedClass = atModuleLevel;
             currentClassName = cd->name;
             for (auto& member : cd->body)
                 if (auto* mfn = dynamic_cast<FunctionDecl*>(member.get())) {
                     for (const auto& p : mfn->params)
                         checkE16(p.type.get(), mfn->location());
                     checkE16(mfn->returnType.get(), mfn->location());
-                    analyzeCallable(mfn->params, mfn->body, true);
+                    checkOwnReturnAnnotation(mfn);
+                    analyzeCallable(mfn->params, mfn->body, true,
+                                    trackedClass
+                                        ? methodKey(cd->name, mfn->name)
+                                        : std::string(),
+                                    mfn->returnsOwn);
                 }
             currentClassName = savedClass;
             return flow;
@@ -1492,14 +1743,23 @@ struct OwnershipCheck::Impl {
 
     void analyzeCallable(const std::vector<Parameter>& params,
                          const std::vector<std::unique_ptr<Stmt>>& body,
-                         bool isMethod) {
+                         bool isMethod, const std::string& fnKey = "",
+                         bool declaresOwn = false) {
         auto savedScopes = std::move(scopes);
         auto savedLoops = std::move(loopBreaks);
+        auto savedConts = std::move(loopContinues);
         auto savedGlobals = globalNames;
         bool savedModule = atModuleLevel;
+        auto savedFnKey = currentFnKey;
+        bool savedSole = currentFnReturnsSoleOwner;
+        bool savedDeclares = currentFnDeclaresOwn;
         scopes.clear();
         loopBreaks.clear();
+        loopContinues.clear();
         atModuleLevel = false;
+        currentFnKey = fnKey;
+        currentFnReturnsSoleOwner = true;
+        currentFnDeclaresOwn = declaresOwn;
 
         pushFrame();
         Flow flow;
@@ -1520,18 +1780,27 @@ struct OwnershipCheck::Impl {
             checkNoOutstandingLends(out, SourceLocation{}, "the end of the function");
         popFrame();
 
+        if (inferPass && !fnKey.empty() && !declaresOwn)
+            funcReturnOwned[fnKey] = currentFnReturnsSoleOwner;
+
         scopes = std::move(savedScopes);
         loopBreaks = std::move(savedLoops);
+        loopContinues = std::move(savedConts);
         globalNames = std::move(savedGlobals);
         atModuleLevel = savedModule;
+        currentFnKey = savedFnKey;
+        currentFnReturnsSoleOwner = savedSole;
+        currentFnDeclaresOwn = savedDeclares;
     }
 
     void analyzeLambdaBody(LambdaExpr* lam) {
         auto savedScopes = std::move(scopes);
         auto savedLoops = std::move(loopBreaks);
+        auto savedConts = std::move(loopContinues);
         bool savedModule = atModuleLevel;
         scopes.clear();
         loopBreaks.clear();
+        loopContinues.clear();
         atModuleLevel = false;
 
         pushFrame();
@@ -1548,6 +1817,7 @@ struct OwnershipCheck::Impl {
 
         scopes = std::move(savedScopes);
         loopBreaks = std::move(savedLoops);
+        loopContinues = std::move(savedConts);
         atModuleLevel = savedModule;
     }
 
@@ -1564,6 +1834,7 @@ bool OwnershipCheck::analyze(Module& module) {
     impl_->diags.clear();
     impl_->scopes.clear();
     impl_->loopBreaks.clear();
+    impl_->loopContinues.clear();
     impl_->globalNames.clear();
     impl_->reported.clear();
     impl_->nextId = 0;
@@ -1571,8 +1842,46 @@ bool OwnershipCheck::analyze(Module& module) {
     impl_->classOwnFields.clear();
     impl_->currentClassName.clear();
     impl_->funcsByName.clear();
+    impl_->funcReturnOwned.clear();
+    impl_->e15Reported.clear();
+    impl_->lockGuardedClasses.clear();
     impl_->collectOwnFields(module);
     impl_->collectFunctions(module);
+    impl_->seedReturnModes(module);
+
+    const auto e15AfterCollect = impl_->e15Reported;
+    const auto diagsAfterCollect = impl_->diags;
+
+    impl_->inferPass = true;
+    impl_->suppressDiags = true;
+    for (int round = 0; round < 4; ++round) {
+        const auto before = impl_->funcReturnOwned;
+        impl_->reported.clear();
+        impl_->nextId = 0;
+        impl_->globalNames.clear();
+        impl_->scopes.clear();
+        impl_->loopBreaks.clear();
+        impl_->loopContinues.clear();
+        impl_->currentClassName.clear();
+        impl_->atModuleLevel = true;
+        impl_->pushFrame();
+        Flow seed;
+        for (const auto& s : module.body)
+            seed = impl_->analyzeStmt(s.get(), std::move(seed));
+        impl_->popFrame();
+        if (impl_->funcReturnOwned == before) break;
+    }
+    impl_->inferPass = false;
+    impl_->suppressDiags = false;
+    impl_->diags = diagsAfterCollect;
+    impl_->e15Reported = e15AfterCollect;
+    impl_->reported.clear();
+    impl_->nextId = 0;
+    impl_->globalNames.clear();
+    impl_->scopes.clear();
+    impl_->loopBreaks.clear();
+    impl_->loopContinues.clear();
+    impl_->currentClassName.clear();
 
     impl_->atModuleLevel = true;
     impl_->pushFrame();

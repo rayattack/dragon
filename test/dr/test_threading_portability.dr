@@ -1,5 +1,5 @@
 from unittest import TestCase, main
-from threading import Barrier, Semaphore, RWLock, Thread, Lock
+from threading import Barrier, Semaphore, RWLock, Thread, Lock, Event, Condition
 import time
 
 const N: int = 4
@@ -93,6 +93,50 @@ class RWLockTests(TestCase) {
     }
 }
 
+class ResourceLifetimeTests(TestCase) {
+    def test_destroy_is_idempotent() {
+        rw: RWLock = RWLock()
+        self.assertEqual(rw.destroy(), 0)
+        self.assertEqual(rw.destroy(), 0)
+        sem: Semaphore = Semaphore(1)
+        self.assertEqual(sem.destroy(), 0)
+        self.assertEqual(sem.destroy(), -1)
+        ev: Event = Event()
+        self.assertEqual(ev.destroy(), 0)
+        self.assertEqual(ev.destroy(), 0)
+        cond: Condition = Condition()
+        self.assertEqual(cond.destroy(), 0)
+        self.assertEqual(cond.destroy(), 0)
+        bar: Barrier = Barrier(1)
+        self.assertEqual(bar.destroy(), 0)
+        self.assertEqual(bar.destroy(), -1)
+    }
+
+    def test_churn_without_destroy_stays_correct() {
+        n: int = 0
+        i: int = 0
+        while i < 200 {
+            rw: RWLock = RWLock()
+            if rw.acquire(write=True) {
+                n = n + rw.release()
+            }
+            sem: Semaphore = Semaphore(1)
+            if sem.acquire() {
+                n = n + sem.release()
+            }
+            ev: Event = Event()
+            ev.set()
+            if ev.is_set() {
+                n = n + 1
+            }
+            cond: Condition = Condition()
+            n = n + cond.acquire() + cond.release()
+            i = i + 1
+        }
+        self.assertEqual(n, 200)
+    }
+}
+
 class ClockTests(TestCase) {
     def test_monotonic_is_not_stuck_at_zero() {
         const a: float = time.monotonic()
@@ -116,4 +160,5 @@ class ClockTests(TestCase) {
     }
 }
 
-main([BarrierTests(), SemaphoreTests(), RWLockTests(), ClockTests()])
+main([BarrierTests(), SemaphoreTests(), RWLockTests(), ResourceLifetimeTests(),
+      ClockTests()])

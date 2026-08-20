@@ -1296,6 +1296,54 @@ void dragon_lock_destroy(void* lock) {
     free(lock);
 }
 
+void* dragon_rwlock_new() {
+    pthread_rwlock_t* rw =
+        (pthread_rwlock_t*)dragon_xmalloc(sizeof(pthread_rwlock_t));
+    pthread_rwlock_init(rw, NULL);
+    return rw;
+}
+
+void dragon_rwlock_free(void* rw) {
+    if (!rw) return;
+    pthread_rwlock_destroy((pthread_rwlock_t*)rw);
+    free(rw);
+}
+
+void* dragon_cond_new() {
+    pthread_cond_t* c = (pthread_cond_t*)dragon_xmalloc(sizeof(pthread_cond_t));
+    pthread_cond_init(c, NULL);
+    return c;
+}
+
+void dragon_cond_free(void* cond) {
+    if (!cond) return;
+    pthread_cond_destroy((pthread_cond_t*)cond);
+    free(cond);
+}
+
+void* dragon_mutex_new() {
+    pthread_mutex_t* m =
+        (pthread_mutex_t*)dragon_xmalloc(sizeof(pthread_mutex_t));
+    pthread_mutex_init(m, NULL);
+    return m;
+}
+
+void dragon_mutex_free(void* mtx) {
+    if (!mtx) return;
+    pthread_mutex_destroy((pthread_mutex_t*)mtx);
+    free(mtx);
+}
+
+void* dragon_flag_new() {
+    int64_t* f = (int64_t*)dragon_xmalloc(sizeof(int64_t));
+    __atomic_store_n(f, (int64_t)0, __ATOMIC_RELEASE);
+    return f;
+}
+
+void dragon_flag_free(void* flag) {
+    free(flag);
+}
+
 typedef struct {
     DragonList* list;
     pthread_mutex_t mtx;

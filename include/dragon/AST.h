@@ -202,6 +202,7 @@ class AttributeExpr : public Expr {
 public:
     std::unique_ptr<Expr> object;
     std::string attribute;
+    bool isDubMarked = false;
     void accept(ASTVisitor& visitor) override;
 };
 
@@ -576,6 +577,7 @@ public:
     std::vector<TypeParam> typeParams;
     std::vector<Parameter> params;
     std::unique_ptr<TypeExpr> returnType;
+    bool returnsOwn = false;
     std::vector<std::unique_ptr<Stmt>> body;
     std::vector<std::unique_ptr<Expr>> decorators;
     bool isAsync = false;

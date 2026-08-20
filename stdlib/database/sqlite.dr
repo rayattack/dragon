@@ -15,8 +15,11 @@ extern "C" def malloc(size: int) -> ptr
 extern "C" def free(p: ptr)
 extern "C" def dragon_ptr_deref(pp: ptr) -> ptr
 
-extern "C" def sqlite3_open(filename: str, ppDb: ptr) -> intc
-extern "C" def sqlite3_close(db: ptr) -> intc
+extern "C" def dragon_sqlite_open(path: ptr) -> ptr
+extern "C" def dragon_sqlite_close(db: ptr) -> int
+extern "C" def dragon_str_to_utf8_bytes(s: str) -> bytes
+extern "C" def dragon_bytes_data(b: bytes) -> ptr
+extern "C" def sqlite3_errcode(db: ptr) -> intc
 extern "C" def sqlite3_exec(db: ptr, sql: str, cb: ptr, arg: ptr, errmsg: ptr) -> intc
 extern "C" def sqlite3_prepare_v2(db: ptr, sql: str, nByte: intc, ppStmt: ptr, pzTail: ptr) -> intc
 extern "C" def sqlite3_step(stmt: ptr) -> intc
@@ -48,13 +51,14 @@ const SQLITE_NULL: int = 5
 
 
 class SqliteConnection(Connection) {
+    own db: ptr
+
     def(path: str) {
-        self.dbpp = malloc(8)
-        const rc: int = sqlite3_open(path, self.dbpp)
-        self.db = dragon_ptr_deref(self.dbpp)
-        if rc != SQLITE_OK {
-            const ignored: int = sqlite3_close(self.db)
-            free(self.dbpp)
+        const pathb: bytes = dragon_str_to_utf8_bytes(path)
+        self.db = dragon_sqlite_open(dragon_bytes_data(pathb))
+        if sqlite3_errcode(self.db) != SQLITE_OK {
+            const ignored: int = dragon_sqlite_close(self.db)
+            self.db = 0
             raise ConnectionError("cannot open database: " + path)
         }
     }
@@ -142,6 +146,7 @@ class SqliteConnection(Connection) {
 
     def run(sql: SQL) -> Results {
         stmt: ptr = self._prepare(sql)
+        defer sqlite3_finalize(stmt)
         names: list[str] = self._column_names(stmt)
         rows: list[dict[str, Any]] = []
         rc: int = sqlite3_step(stmt)
@@ -149,7 +154,6 @@ class SqliteConnection(Connection) {
             rows.append(self._read_row(stmt, names))
             rc = sqlite3_step(stmt)
         }
-        sqlite3_finalize(stmt)
         if rc != SQLITE_DONE and rc != SQLITE_ROW {
             raise QueryError(sqlite3_errmsg(self.db))
         }
@@ -166,8 +170,10 @@ class SqliteConnection(Connection) {
     }
 
     def close() -> int {
-        const rc: int = sqlite3_close(self.db)
-        free(self.dbpp)
+        """Close the connection now instead of at instance death. Idempotent:
+        nulling the own field disarms the generated release."""
+        const rc: int = dragon_sqlite_close(self.db)
+        self.db = 0
         return rc
     }
 }

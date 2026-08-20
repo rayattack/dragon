@@ -82,6 +82,7 @@ private:
     std::unique_ptr<Expr> ownershipMarkedName();
     void rejectNonBindingOwnershipTarget(bool isDub);
     void discardOwnershipTargetSuffix();
+    bool matchOwnReturnMarker();
 
     std::unique_ptr<Expr> parseLambda();
     std::unique_ptr<Expr> parseList();

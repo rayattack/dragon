@@ -2783,8 +2783,8 @@ TEST(ParserTest, OwnOnFieldTeachesTheRuleWithoutCascade) {
               std::string::npos) << errs[0].message;
 }
 
-TEST(ParserTest, DubOnFieldTeachesTheRule) {
-    auto errs = parseErrors(
+TEST(ParserTest, DubOnFieldIsACopyNotAnError) {
+    EXPECT_TRUE(parseErrors(
         "class W {\n"
         "  v: str\n"
         "  def(v: str) {\n"
@@ -2795,9 +2795,16 @@ TEST(ParserTest, DubOnFieldTeachesTheRule) {
         "  return len(s)\n"
         "}\n"
         "w: W = W(\"a\")\n"
-        "print(borrows(dub w.v))\n");
+        "print(borrows(dub w.v))\n").empty());
+}
+
+TEST(ParserTest, DubOnElementTeachesTheRule) {
+    auto errs = parseErrors(
+        "xs: list[str] = [\"a\"]\n"
+        "x: str = dub xs[0]\n");
     ASSERT_EQ(errs.size(), 1u);
-    EXPECT_NE(errs[0].message.find("cannot be dubbed"), std::string::npos)
+    EXPECT_NE(errs[0].message.find("an element cannot be dubbed"),
+              std::string::npos)
         << errs[0].message;
 }
 
@@ -2838,8 +2845,8 @@ TEST(ParserTest, OwnOnCallResultInAssignmentTeachesTheRule) {
         << errs[0].message;
 }
 
-TEST(ParserTest, DubOnFieldInAssignmentTeachesTheRule) {
-    auto errs = parseErrors(
+TEST(ParserTest, DubOnFieldInAssignmentIsACopy) {
+    EXPECT_TRUE(parseErrors(
         "class W {\n"
         "  v: str\n"
         "  def(v: str) {\n"
@@ -2847,10 +2854,27 @@ TEST(ParserTest, DubOnFieldInAssignmentTeachesTheRule) {
         "  }\n"
         "}\n"
         "w: W = W(\"a\")\n"
-        "x: str = dub w.v\n");
-    ASSERT_EQ(errs.size(), 1u);
-    EXPECT_NE(errs[0].message.find("cannot be dubbed"), std::string::npos)
-        << errs[0].message;
+        "x: str = dub w.v\n").empty());
+}
+
+TEST(ParserTest, DubOnNestedFieldPathIsACopy) {
+    EXPECT_TRUE(parseErrors(
+        "class Inner {\n"
+        "  xs: list[str]\n"
+        "  def() {\n"
+        "    self.xs = [\"a\"]\n"
+        "  }\n"
+        "}\n"
+        "class Outer {\n"
+        "  inner: Inner\n"
+        "  def() {\n"
+        "    self.inner = Inner()\n"
+        "  }\n"
+        "}\n"
+        "o: Outer = Outer()\n"
+        "for x in dub o.inner.xs {\n"
+        "  print(x)\n"
+        "}\n").empty());
 }
 
 TEST(ParserTest, OwnAndDubOnBareNameInAssignmentStillParse) {

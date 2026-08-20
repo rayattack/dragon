@@ -65,4 +65,84 @@ class DubTests(TestCase) {
     }
 }
 
-main([DubTests()])
+class Registry {
+    names: list[str]
+    tags: dict[str, str]
+
+    def() {
+        self.names = ["a", "tmp1", "tmp2", "b"]
+        self.tags = {"k": "v"}
+    }
+
+    def purge() -> None {
+        for n in dub self.names {
+            if n.startswith("tmp") {
+                self.names.remove(n)
+            }
+        }
+    }
+
+    def snapshot() -> list[str] {
+        return dub self.names
+    }
+
+    def declared_snapshot() -> own dict[str, str] {
+        return dub self.tags
+    }
+}
+
+def consumes(own xs: list[str]) -> int {
+    return len(xs)
+}
+
+class DubFieldTests(TestCase) {
+    def test_snapshot_iteration_over_a_field() {
+        r: Registry = Registry()
+        r.purge()
+        self.assertEqual(r.names, ["a", "b"])
+    }
+
+    def test_dub_of_a_field_is_independent() {
+        r: Registry = Registry()
+        snapshot: dict[str, str] = dub r.tags
+        snapshot["extra"] = "x"
+        self.assertEqual(len(r.tags), 1)
+        self.assertEqual(len(snapshot), 2)
+    }
+
+    def test_dub_field_through_a_non_self_receiver() {
+        r: Registry = Registry()
+        seen: int = 0
+        for n in dub r.names {
+            seen = seen + 1
+            r.names.remove(n)
+        }
+        self.assertEqual(seen, 4)
+        self.assertEqual(len(r.names), 0)
+    }
+
+    def test_returning_a_dubbed_field_is_independent() {
+        r: Registry = Registry()
+        copy: list[str] = r.snapshot()
+        copy.append("extra")
+        self.assertEqual(len(r.names), 4)
+        self.assertEqual(len(copy), 5)
+    }
+
+    def test_a_dubbed_return_satisfies_an_own_parameter() {
+        r: Registry = Registry()
+        mine: list[str] = r.snapshot()
+        self.assertEqual(consumes(own mine), 4)
+        self.assertEqual(len(r.names), 4)
+    }
+
+    def test_declared_own_return_is_independent() {
+        r: Registry = Registry()
+        copy: dict[str, str] = r.declared_snapshot()
+        copy["extra"] = "x"
+        self.assertEqual(len(r.tags), 1)
+        self.assertEqual(len(copy), 2)
+    }
+}
+
+main([DubTests(), DubFieldTests()])
