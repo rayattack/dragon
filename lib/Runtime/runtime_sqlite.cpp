@@ -12,6 +12,23 @@ void* dragon_sqlite_open(const char* path) {
     return db;
 }
 
+int64_t dragon_sqlite_bind_text(void* stmt, int64_t index, const char* value) {
+    if (!stmt) return SQLITE_MISUSE;
+    char* owned = nullptr;
+    int64_t blen = 0;
+    const char* utf8 = dragon_cstr_open(value, &owned, &blen);
+    if (!utf8) { dragon_cstr_close(owned); return sqlite3_bind_null((sqlite3_stmt*)stmt, (int)index); }
+    if (blen > INT32_MAX) {
+        dragon_cstr_close(owned);
+        dragon_raise_exc_cstr(90, "ValueError: sqlite text parameter exceeds 2 GiB");
+        return SQLITE_MISUSE;
+    }
+    int rc = sqlite3_bind_text((sqlite3_stmt*)stmt, (int)index, utf8, (int)blen,
+                               SQLITE_TRANSIENT);
+    dragon_cstr_close(owned);
+    return rc;
+}
+
 int64_t dragon_sqlite_close(void* db) {
     if (!db) return SQLITE_OK;
     return sqlite3_close_v2((sqlite3*)db);

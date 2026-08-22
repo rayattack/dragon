@@ -14,6 +14,10 @@ const OPCODE_PONG: int = 0xA
 
 const _WS_GUID: str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
+const MAX_PAYLOAD_BYTES: int = 16777216
+const MAX_MESSAGE_BYTES: int = 67108864
+const _MAX_INBUF_BYTES: int = 20971520
+
 def compute_accept_key(key: str) -> str {
     combined: str = key + _WS_GUID
     digest: bytes = hashlib.sha1(combined.encode("utf-8")).digest()
@@ -70,6 +74,16 @@ class IncompleteFrameError(Exception) {}
 
 class ProtocolError(Exception) {}
 
+def _extended_length(data: bytes, offset: int) -> int {
+    const hi: int = data[offset]
+    if (hi & 0x80) != 0 {
+        raise ProtocolError("64-bit payload length has reserved bit 63 set")
+    }
+    return (hi << 56) | (data[offset + 1] << 48) | (data[offset + 2] << 40) |
+           (data[offset + 3] << 32) | (data[offset + 4] << 24) |
+           (data[offset + 5] << 16) | (data[offset + 6] << 8) | data[offset + 7]
+}
+
 def parse_frame(data: bytes) -> Frame {
     n: int = len(data)
     if n < 2 {
@@ -101,8 +115,12 @@ def parse_frame(data: bytes) -> Frame {
         if n < offset + 8 {
             raise IncompleteFrameError("need 8 bytes for 64-bit extended length")
         }
-        length = (data[offset] << 56) | (data[offset + 1] << 48) | (data[offset + 2] << 40) | (data[offset + 3] << 32) | (data[offset + 4] << 24) | (data[offset + 5] << 16) | (data[offset + 6] << 8) | data[offset + 7]
+        length = _extended_length(data, offset)
         offset = offset + 8
+    }
+
+    if length > MAX_PAYLOAD_BYTES {
+        raise ProtocolError(f"frame payload of {length} bytes exceeds the {MAX_PAYLOAD_BYTES}-byte limit")
     }
 
     if (opcode & 0x08) != 0 {
@@ -166,8 +184,11 @@ def frame_length(data: bytes) -> int {
         if n < offset + 8 {
             raise IncompleteFrameError("need 8 bytes for 64-bit extended length")
         }
-        length = (data[offset] << 56) | (data[offset + 1] << 48) | (data[offset + 2] << 40) | (data[offset + 3] << 32) | (data[offset + 4] << 24) | (data[offset + 5] << 16) | (data[offset + 6] << 8) | data[offset + 7]
+        length = _extended_length(data, offset)
         offset = offset + 8
+    }
+    if length > MAX_PAYLOAD_BYTES {
+        raise ProtocolError(f"frame payload of {length} bytes exceeds the {MAX_PAYLOAD_BYTES}-byte limit")
     }
     if masked {
         offset = offset + 4
@@ -278,6 +299,10 @@ class MessageReassembler {
             if not self._active {
                 raise ProtocolError("CONT frame with no message in progress")
             }
+            if len(self._buffer) + len(frame.payload) > MAX_MESSAGE_BYTES {
+                self.reset()
+                raise ProtocolError(f"fragmented message exceeds the {MAX_MESSAGE_BYTES}-byte limit")
+            }
             self._buffer = self._buffer + frame.payload
         } else {
             if self._active {
@@ -319,6 +344,9 @@ class WebSocket {
     }
 
     def _fill() -> int {
+        if len(self._inbuf) >= _MAX_INBUF_BYTES {
+            raise ProtocolError(f"unparsed read buffer exceeds the {_MAX_INBUF_BYTES}-byte limit")
+        }
         chunk: bytes = dragon_nb_recv_bytes(self.fd, 65536)
         got: int = len(chunk)
         if got > 0 {
@@ -333,6 +361,9 @@ class WebSocket {
                 try {
                     frame: Frame = parse_frame(self._inbuf)
                     consumed: int = frame_length(self._inbuf)
+                    if consumed <= 0 or consumed > len(self._inbuf) {
+                        raise ProtocolError("frame length disagrees with the buffered bytes")
+                    }
                     self._inbuf = self._inbuf[consumed:]
                     return frame
                 } except IncompleteFrameError as e {

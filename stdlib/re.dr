@@ -1,174 +1,195 @@
 """Regular expressions over bundled PCRE2 (10.44), no external deps. Pattern class
 for compiled regex, plus match/search/sub/findall/split convenience functions.
 C externs below use `intc` (not `int`) for correct ABI.
+
+Subjects cross into PCRE2 as their UTF-8 `bytes`, and every offset PCRE2 returns is
+a byte offset into that encoding, so slicing goes through dragon_re_slice.
 """
 
 extern "C" def malloc(size: int) -> ptr
 extern "C" def free(p: ptr)
 extern "C" def memset(s: ptr, c: intc, n: int) -> ptr
-extern "C" def memcpy(dst: ptr, src: ptr, n: int) -> ptr
 
-extern "C" def pcre2_compile_8(pattern: str, length: int, options: intc,
+extern "C" def pcre2_compile_8(pattern: ptr, length: int, options: intc,
                                 errorcode: ptr, erroroffset: ptr, ccontext: ptr) -> ptr
 extern "C" def pcre2_get_error_message_8(errorcode: intc, buffer: ptr, bufflen: int) -> intc
 extern "C" def pcre2_match_data_create_from_pattern_8(code: ptr, gcontext: ptr) -> ptr
-extern "C" def pcre2_match_8(code: ptr, subject: str, length: int, startoffset: int,
+extern "C" def pcre2_match_8(code: ptr, subject: ptr, length: int, startoffset: int,
                               options: intc, match_data: ptr, mcontext: ptr) -> intc
 extern "C" def pcre2_get_ovector_pointer_8(match_data: ptr) -> ptr
 extern "C" def pcre2_match_data_free_8(match_data: ptr)
 extern "C" def pcre2_code_free_8(code: ptr)
+extern "C" def pcre2_match_context_create_8(gcontext: ptr) -> ptr
+extern "C" def pcre2_match_context_free_8(mcontext: ptr)
+extern "C" def pcre2_set_match_limit_8(mcontext: ptr, limit: intc) -> intc
+extern "C" def pcre2_set_depth_limit_8(mcontext: ptr, limit: intc) -> intc
+extern "C" def pcre2_set_heap_limit_8(mcontext: ptr, limit: intc) -> intc
 
-extern "C" def dragon_re_get_match(subject: str, ovector: ptr, index: intc) -> str
-extern "C" def dragon_re_ovector_get(ovector: ptr, index: intc) -> int
+extern "C" def dragon_bytes_data(b: bytes) -> ptr
+extern "C" def dragon_re_group_at(subject: ptr, subject_len: int, ovector: ptr,
+                               pair_count: int, index: int) -> str
+extern "C" def dragon_re_slice(subject: ptr, subject_len: int, start: int, end: int) -> str
+extern "C" def dragon_re_ovector_at(ovector: ptr, pair_count: int, index: int) -> int
+extern "C" def dragon_re_next_offset(subject: ptr, subject_len: int, offset: int) -> int
 extern "C" def dragon_string_alloc(src: ptr, byte_len: int) -> str
 
 
 class error(Exception) {}
 
-def _raise_match_error(rc: int) -> None {
-    const buf: ptr = malloc(256)
-    const mlen: int = pcre2_get_error_message_8(rc, buf, 256)
-    msg: str = f"pcre2 match error {rc}"
-    if mlen > 0 {
-        msg = dragon_string_alloc(buf, mlen)
-    }
-    free(buf)
-    raise error(msg)
-}
-
 const PCRE2_CASELESS: int = 1
 const PCRE2_MULTILINE: int = 2
 const PCRE2_DOTALL: int = 4
 
+const _PCRE2_UTF: int = 0x00080000
+
+const _MATCH_LIMIT: int = 200000
+const _DEPTH_LIMIT: int = 2000
+const _HEAP_LIMIT_KB: int = 8192
+
+
+def _error_message(code: int, fallback: str) -> str {
+    const buf: ptr = malloc(256)
+    if not buf {
+        return fallback
+    }
+    const mlen: int = pcre2_get_error_message_8(code, buf, 256)
+    msg: str = fallback
+    if mlen > 0 {
+        msg = dragon_string_alloc(buf, mlen)
+    }
+    free(buf)
+    return msg
+}
+
+def _raise_match_error(rc: int) -> None {
+    raise error(_error_message(rc, f"pcre2 match error {rc}"))
+}
+
+
 class Pattern {
     own code: ptr
+    own mcontext: ptr
 
     def(pattern: str) {
+        const pb: bytes = pattern.encode("utf-8")
         const errcode: ptr = malloc(8)
         const erroffset: ptr = malloc(8)
+        if not errcode or not erroffset {
+            free(errcode)
+            free(erroffset)
+            raise MemoryError("re: could not allocate the compile error slots")
+        }
         memset(errcode, 0, 8)
         memset(erroffset, 0, 8)
-        self.code = pcre2_compile_8(pattern, len(pattern), 0, errcode, erroffset, none)
+        self.code = pcre2_compile_8(dragon_bytes_data(pb), len(pb), _PCRE2_UTF,
+                                    errcode, erroffset, none)
         self.pattern = pattern
-        const ec: int = dragon_re_ovector_get(errcode, 0)
-        const eo: int = dragon_re_ovector_get(erroffset, 0)
+        const ec: int = dragon_re_ovector_at(errcode, 1, 0)
+        const eo: int = dragon_re_ovector_at(erroffset, 1, 0)
         free(errcode)
         free(erroffset)
         if not self.code {
-            const buf: ptr = malloc(256)
-            const mlen: int = pcre2_get_error_message_8(ec, buf, 256)
-            msg: str = f"pcre2 compile error {ec}"
-            if mlen > 0 {
-                msg = dragon_string_alloc(buf, mlen)
-            }
-            free(buf)
+            self.mcontext = 0
+            const msg: str = _error_message(ec, f"pcre2 compile error {ec}")
             raise error(f"{msg} at position {eo} in pattern '{pattern}'")
+        }
+        self.mcontext = pcre2_match_context_create_8(none)
+        if self.mcontext {
+            pcre2_set_match_limit_8(self.mcontext, _MATCH_LIMIT)
+            pcre2_set_depth_limit_8(self.mcontext, _DEPTH_LIMIT)
+            pcre2_set_heap_limit_8(self.mcontext, _HEAP_LIMIT_KB)
         }
     }
 
-    def match(subject: str) -> bool {
-        const md: ptr = pcre2_match_data_create_from_pattern_8(self.code, none)
-        const rc: int = pcre2_match_8(self.code, subject, len(subject), 0, 0, md, none)
-        pcre2_match_data_free_8(md)
+    def _run(sb: bytes, offset: int, md: ptr) -> int {
+        const rc: int = pcre2_match_8(self.code, dragon_bytes_data(sb), len(sb),
+                                      offset, 0, md, self.mcontext)
         if rc < -1 {
+            pcre2_match_data_free_8(md)
             _raise_match_error(rc)
         }
+        return rc
+    }
+
+    def match(subject: str) -> bool {
+        const sb: bytes = subject.encode("utf-8")
+        const md: ptr = pcre2_match_data_create_from_pattern_8(self.code, none)
+        const rc: int = self._run(sb, 0, md)
+        pcre2_match_data_free_8(md)
         return rc >= 1
     }
 
     def find(subject: str) -> str {
-        const md: ptr = pcre2_match_data_create_from_pattern_8(self.code, none)
-        const rc: int = pcre2_match_8(self.code, subject, len(subject), 0, 0, md, none)
-        if rc < 1 {
-            pcre2_match_data_free_8(md)
-            if rc < -1 {
-                _raise_match_error(rc)
-            }
-            return ""
-        }
-        const ovector: ptr = pcre2_get_ovector_pointer_8(md)
-        const result: str = dragon_re_get_match(subject, ovector, 0)
-        pcre2_match_data_free_8(md)
-        return result
+        return self.group(subject, 0)
     }
 
     def group(subject: str, index: int) -> str {
+        const sb: bytes = subject.encode("utf-8")
         const md: ptr = pcre2_match_data_create_from_pattern_8(self.code, none)
-        const rc: int = pcre2_match_8(self.code, subject, len(subject), 0, 0, md, none)
+        const rc: int = self._run(sb, 0, md)
         if rc < 1 {
             pcre2_match_data_free_8(md)
-            if rc < -1 {
-                _raise_match_error(rc)
-            }
             return ""
         }
         const ovector: ptr = pcre2_get_ovector_pointer_8(md)
-        const result: str = dragon_re_get_match(subject, ovector, index)
+        const result: str = dragon_re_group_at(dragon_bytes_data(sb), len(sb),
+                                            ovector, rc, index)
         pcre2_match_data_free_8(md)
         return result
     }
 
     def findall(subject: str) -> list[str] {
         results: list[str] = []
+        const sb: bytes = subject.encode("utf-8")
+        const slen: int = len(sb)
+        const data: ptr = dragon_bytes_data(sb)
         offset: int = 0
-        const slen: int = len(subject)
         const md: ptr = pcre2_match_data_create_from_pattern_8(self.code, none)
         while offset < slen {
-            const rc: int = pcre2_match_8(self.code, subject, slen, offset, 0, md, none)
+            const rc: int = self._run(sb, offset, md)
             if rc < 1 {
-                if rc < -1 {
-                    pcre2_match_data_free_8(md)
-                    _raise_match_error(rc)
-                }
                 break
             }
             const ovector: ptr = pcre2_get_ovector_pointer_8(md)
-            const matched: str = dragon_re_get_match(subject, ovector, 0)
-            results.append(matched)
-            const match_end: int = dragon_re_ovector_get(ovector, 1)
-            if match_end <= offset {
-                offset = offset + 1
-            } else {
-                offset = match_end
-            }
+            results.append(dragon_re_group_at(data, slen, ovector, rc, 0))
+            const match_end: int = dragon_re_ovector_at(ovector, rc, 1)
+            offset = self._advance(data, slen, offset, match_end)
         }
         pcre2_match_data_free_8(md)
         return results
     }
 
+    def _advance(data: ptr, slen: int, offset: int, match_end: int) -> int {
+        if match_end <= offset {
+            return dragon_re_next_offset(data, slen, offset)
+        }
+        return match_end
+    }
+
     def split(subject: str) -> list[str] {
         parts: list[str] = []
+        const sb: bytes = subject.encode("utf-8")
+        const slen: int = len(sb)
+        const data: ptr = dragon_bytes_data(sb)
         offset: int = 0
-        const slen: int = len(subject)
         const md: ptr = pcre2_match_data_create_from_pattern_8(self.code, none)
         while offset <= slen {
-            const rc: int = pcre2_match_8(self.code, subject, slen, offset, 0, md, none)
+            const rc: int = self._run(sb, offset, md)
             if rc < 1 {
-                if rc < -1 {
-                    pcre2_match_data_free_8(md)
-                    _raise_match_error(rc)
-                }
-                parts.append(subject[offset:])
+                parts.append(dragon_re_slice(data, slen, offset, slen))
                 break
             }
             const ovector: ptr = pcre2_get_ovector_pointer_8(md)
-            const match_start: int = dragon_re_ovector_get(ovector, 0)
-            const match_end: int = dragon_re_ovector_get(ovector, 1)
-            parts.append(subject[offset:match_start])
-            if match_end <= offset {
-                offset = offset + 1
-            } else {
-                offset = match_end
-            }
+            const match_start: int = dragon_re_ovector_at(ovector, rc, 0)
+            const match_end: int = dragon_re_ovector_at(ovector, rc, 1)
+            parts.append(dragon_re_slice(data, slen, offset, match_start))
+            offset = self._advance(data, slen, offset, match_end)
         }
         pcre2_match_data_free_8(md)
         return parts
     }
 
-    def _expand(tmpl: str, subject: str, ovector: ptr, ngroups: int) -> str {
-        """Expand backreferences (`\1`-`\9`, `\g<N>`, `\\\\`) against the match; an
-        out-of-range or non-participating group expands to "". Named `\g<name>` is unsupported (index-only externs).
-        """
+    def _expand(tmpl: str, data: ptr, slen: int, ovector: ptr, ngroups: int) -> str {
         parts: list[str] = []
         i: int = 0
         const tlen: int = len(tmpl)
@@ -182,7 +203,7 @@ class Pattern {
                 } else if nxt >= "0" and nxt <= "9" {
                     const gid: int = int(nxt)
                     if gid < ngroups {
-                        parts.append(dragon_re_get_match(subject, ovector, gid))
+                        parts.append(dragon_re_group_at(data, slen, ovector, ngroups, gid))
                     }
                     i = i + 2
                 } else if nxt == "g" and i + 2 < tlen and tmpl[i + 2] == "<" {
@@ -195,7 +216,7 @@ class Pattern {
                     if j < tlen and len(digits) > 0 and self._all_digits(digits) {
                         const gid2: int = int(digits)
                         if gid2 < ngroups {
-                            parts.append(dragon_re_get_match(subject, ovector, gid2))
+                            parts.append(dragon_re_group_at(data, slen, ovector, ngroups, gid2))
                         }
                         i = j + 1
                     } else {
@@ -230,31 +251,25 @@ class Pattern {
 
     def sub(replacement: str, subject: str) -> str {
         parts: list[str] = []
+        const sb: bytes = subject.encode("utf-8")
+        const slen: int = len(sb)
+        const data: ptr = dragon_bytes_data(sb)
         offset: int = 0
-        const slen: int = len(subject)
         const md: ptr = pcre2_match_data_create_from_pattern_8(self.code, none)
         while offset < slen {
-            const rc: int = pcre2_match_8(self.code, subject, slen, offset, 0, md, none)
+            const rc: int = self._run(sb, offset, md)
             if rc < 1 {
-                if rc < -1 {
-                    pcre2_match_data_free_8(md)
-                    _raise_match_error(rc)
-                }
                 break
             }
             const ovector: ptr = pcre2_get_ovector_pointer_8(md)
-            const match_start: int = dragon_re_ovector_get(ovector, 0)
-            const match_end: int = dragon_re_ovector_get(ovector, 1)
-            parts.append(subject[offset:match_start])
-            parts.append(self._expand(replacement, subject, ovector, rc))
-            if match_end <= offset {
-                offset = offset + 1
-            } else {
-                offset = match_end
-            }
+            const match_start: int = dragon_re_ovector_at(ovector, rc, 0)
+            const match_end: int = dragon_re_ovector_at(ovector, rc, 1)
+            parts.append(dragon_re_slice(data, slen, offset, match_start))
+            parts.append(self._expand(replacement, data, slen, ovector, rc))
+            offset = self._advance(data, slen, offset, match_end)
         }
         pcre2_match_data_free_8(md)
-        parts.append(subject[offset:])
+        parts.append(dragon_re_slice(data, slen, offset, slen))
         return "".join(parts)
     }
 
@@ -263,6 +278,8 @@ class Pattern {
         Idempotent: nulling the own field disarms the generated release."""
         pcre2_code_free_8(self.code)
         self.code = 0
+        pcre2_match_context_free_8(self.mcontext)
+        self.mcontext = 0
     }
 }
 

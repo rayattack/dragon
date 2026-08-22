@@ -1,0 +1,163 @@
+from unittest import TestCase, main
+
+from json import loads
+from re import Pattern, findall, split, sub
+from http.websocket import parse_frame, frame_length, Frame, ProtocolError
+from io import open, Reader
+from socket import UdpSocket
+from os.path import exists, isfile
+from syslog import syslog_open, info, LOG_USER
+
+
+def _json_deep() {
+    loads("[" * 4000 + "]" * 4000)
+}
+
+
+def _io_read_directory() {
+    const r: Reader = open("/")
+    r.text()
+}
+
+
+def _ws_reserved_length_bit() {
+    parse_frame(bytes([0x82, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0xAA]))
+}
+
+
+def _ws_reserved_length_bit_framelen() {
+    frame_length(bytes([0x82, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0xAA]))
+}
+
+
+def _ws_oversize_payload() {
+    parse_frame(bytes([0x82, 0x7F, 0, 0, 0, 1, 0, 0, 0, 0, 0xAA]))
+}
+
+
+def _udp_negative_size() {
+    const s: UdpSocket = UdpSocket("127.0.0.1", 0)
+    defer s.close()
+    s.recvfrom(-1)
+}
+
+
+def _udp_oversize() {
+    const s: UdpSocket = UdpSocket("127.0.0.1", 0)
+    defer s.close()
+    s.recvfrom(4611686018427387904)
+}
+
+
+class JsonNestingTests(TestCase) {
+    def test_nesting_within_limit_parses() {
+        const v: Any = loads("[" * 190 + "]" * 190)
+        self.assertEqual(len(v), 1)
+    }
+
+    def test_deep_nesting_raises_instead_of_killing_the_process() {
+        self.assertRaises(ValueError, _json_deep)
+    }
+}
+
+
+class RegexBoundaryTests(TestCase) {
+    def test_blocklist_is_not_bypassed_by_a_non_ascii_prefix() {
+        const p: Pattern = Pattern("<script>")
+        defer p.destroy()
+        self.assertTrue(p.match("<script>alert(1)</script>"))
+        self.assertTrue(p.match("é<script>alert(1)</script>"))
+    }
+
+    def test_sanitizer_strips_from_a_non_ascii_subject() {
+        self.assertEqual(sub("[<>]", "", "héllo<script>"), "hélloscript")
+    }
+
+    def test_group_index_past_the_capture_count_is_empty() {
+        const p: Pattern = Pattern("(a)(b)")
+        defer p.destroy()
+        self.assertEqual(p.group("ab", 0), "ab")
+        self.assertEqual(p.group("ab", 1), "a")
+        self.assertEqual(p.group("ab", 2), "b")
+        self.assertEqual(p.group("ab", 3), "")
+        self.assertEqual(p.group("ab", 5000), "")
+        self.assertEqual(p.group("ab", 4611686018427387904), "")
+    }
+
+    def test_offsets_stay_in_codepoints_for_the_caller() {
+        const parts: list[str] = split(",", "é,b,ç")
+        self.assertEqual(len(parts), 3)
+        self.assertEqual(parts[0], "é")
+        self.assertEqual(parts[2], "ç")
+        const hits: list[str] = findall("l+", "héllo")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0], "ll")
+        self.assertEqual(sub("é", "e", "héllo"), "hello")
+    }
+}
+
+
+class WebsocketFrameTests(TestCase) {
+    def test_reserved_length_bit_is_refused() {
+        self.assertRaises(ProtocolError, _ws_reserved_length_bit)
+        self.assertRaises(ProtocolError, _ws_reserved_length_bit_framelen)
+    }
+
+    def test_oversize_payload_is_refused() {
+        self.assertRaises(ProtocolError, _ws_oversize_payload)
+    }
+
+    def test_well_formed_frame_still_parses() {
+        const f: Frame = parse_frame(bytes([0x81, 0x03, 104, 105, 33]))
+        self.assertEqual(f.opcode, 1)
+        self.assertTrue(f.fin)
+        self.assertEqual(len(f.payload), 3)
+        self.assertEqual(frame_length(bytes([0x81, 0x03, 104, 105, 33])), 5)
+    }
+}
+
+
+class WholeFileReadTests(TestCase) {
+    def test_unsizeable_stream_raises_instead_of_a_wild_fread() {
+        self.assertRaises(OSError, _io_read_directory)
+    }
+}
+
+
+class SocketSizeTests(TestCase) {
+    def test_negative_recv_size_raises() {
+        self.assertRaises(ValueError, _udp_negative_size)
+    }
+
+    def test_oversize_recv_size_raises() {
+        self.assertRaises(MemoryError, _udp_oversize)
+    }
+}
+
+
+class NonAsciiPathTests(TestCase) {
+    def test_missing_non_ascii_path_does_not_report_as_existing() {
+        self.assertFalse(exists("/tmp/dragon-audit-does-not-exist-ï-Ā-😀"))
+        self.assertFalse(isfile("/tmp/dragon-audit-does-not-exist-ï-Ā-😀"))
+    }
+
+    def test_ascii_paths_still_resolve() {
+        self.assertTrue(exists("/"))
+    }
+}
+
+
+class SyslogFormatTests(TestCase) {
+    def test_message_is_data_not_a_format_string() {
+        syslog_open("dragon-audit", 0, LOG_USER)
+        info("%n%n%n%n%s%s%s%s%x%x")
+        info("héllo %n")
+        self.assertTrue(True)
+    }
+}
+
+
+main([JsonNestingTests(), RegexBoundaryTests(), WebsocketFrameTests(),
+      WholeFileReadTests(), SocketSizeTests(), NonAsciiPathTests(),
+      SyslogFormatTests()])
+

@@ -177,9 +177,15 @@ int64_t dragon_tls_ctx_load_ca_file(void* handle, const char* path) {
 }
 
 int64_t dragon_tls_ctx_load_ca_data(void* handle, const char* data, int64_t len) {
+    if (!handle || !data || len <= 0) return -1;
     DragonTlsCtx* c = (DragonTlsCtx*)handle;
-    int ret = mbedtls_x509_crt_parse(&c->cacert, (const unsigned char*)data,
+    char* pem = (char*)dragon_malloc_nullable((size_t)len + 1);
+    if (!pem) return -1;
+    memcpy(pem, data, (size_t)len);
+    pem[len] = '\0';
+    int ret = mbedtls_x509_crt_parse(&c->cacert, (const unsigned char*)pem,
                                      (size_t)len + 1);
+    free(pem);
     if (ret < 0) return ret;
     c->has_ca = true;
     mbedtls_ssl_conf_ca_chain(&c->conf, &c->cacert, nullptr);
@@ -264,6 +270,9 @@ int64_t dragon_tls_handshake(void* handle) {
 }
 
 int64_t dragon_tls_read(void* handle, void* buf, int64_t len) {
+    if (!handle || !buf || len <= 0) return 0;
+    if (len > DRAGON_MAX_RECV_BYTES)
+        dragon_raise_exc_cstr(43, "MemoryError: receive size exceeds the 1 GiB per-call limit");
     DragonTlsConn* conn = (DragonTlsConn*)handle;
     for (;;) {
         int ret = mbedtls_ssl_read(&conn->ssl, (unsigned char*)buf, (size_t)len);
@@ -281,6 +290,7 @@ int64_t dragon_tls_send_bytes(void* handle, DragonBytes* data) {
 }
 
 int64_t dragon_tls_write(void* handle, const void* buf, int64_t len) {
+    if (!handle || !buf || len <= 0) return 0;
     DragonTlsConn* conn = (DragonTlsConn*)handle;
     size_t off = 0;
     while (off < (size_t)len) {
@@ -297,6 +307,8 @@ int64_t dragon_tls_write(void* handle, const void* buf, int64_t len) {
 
 const char* dragon_tls_recv_str(void* handle, int64_t maxlen) {
     if (maxlen <= 0) maxlen = 8192;
+    if (maxlen > DRAGON_MAX_RECV_BYTES)
+        dragon_raise_exc_cstr(43, "MemoryError: receive size exceeds the 1 GiB per-call limit");
     unsigned char* buf = (unsigned char*)dragon_malloc_nullable((size_t)maxlen);
     if (!buf) {
         DragonString* ds = dragon_string_alloc_raw(0);

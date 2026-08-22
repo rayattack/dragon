@@ -26,7 +26,9 @@ extern "C" def dragon_getpass_pwname() -> str
 
 extern "C" def isatty(fd: intc) -> intc
 
-extern "C" def getenv(name: str) -> str
+extern "C" def dragon_getenv(name: str) -> str
+
+def getenv(name: str) -> str { return dragon_getenv(name) }
 
 const GetPassWarning: str = "GetPassWarning"
 

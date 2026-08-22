@@ -2,7 +2,7 @@
 with context-manager support, plus the in-memory BytesIO/StringIO streams.
 """
 
-extern "C" def fopen(path: str, mode: str) -> ptr
+extern "C" def dragon_path_fopen(path: str, mode: str) -> ptr
 extern "C" def fclose(handle: ptr) -> intc
 extern "C" def fread(buf: ptr, size: int, count: int, handle: ptr) -> int
 extern "C" def fwrite(buf: str, size: int, count: int, handle: ptr) -> int
@@ -37,6 +37,11 @@ const SEEK_SET: int = 0
 const SEEK_CUR: int = 1
 const SEEK_END: int = 2
 
+const _MAX_SLURP_BYTES: int = 1073741824
+
+
+def fopen(path: str, mode: str) -> ptr { return dragon_path_fopen(path, mode) }
+
 class Reader {
     def(path: str) {
         self.handle = fopen(path, "r")
@@ -51,10 +56,16 @@ class Reader {
         if self.closed {
             return ""
         }
-        fseek(self.handle, 0, SEEK_END)
-        const size: int = ftell(self.handle)
-        fseek(self.handle, 0, SEEK_SET)
+        const size: int = self._slurp_size()
+        if size == 0 {
+            self.close()
+            return ""
+        }
         const buf: ptr = malloc(size + 1)
+        if not buf {
+            self.close()
+            raise MemoryError(f"read '{self.path}': could not allocate {size} bytes")
+        }
         memset(buf, 0, size + 1)
         const n: int = fread(buf, 1, size, self.handle)
         const result: str = dragon_string_alloc(buf, n)
@@ -67,15 +78,38 @@ class Reader {
         if self.closed {
             return b""
         }
-        fseek(self.handle, 0, SEEK_END)
-        const size: int = ftell(self.handle)
-        fseek(self.handle, 0, SEEK_SET)
+        const size: int = self._slurp_size()
+        if size == 0 {
+            self.close()
+            return b""
+        }
         const buf: ptr = malloc(size + 1)
+        if not buf {
+            self.close()
+            raise MemoryError(f"read '{self.path}': could not allocate {size} bytes")
+        }
         const n: int = fread(buf, 1, size, self.handle)
         const result: bytes = dragon_bytes_new(buf, n)
         free(buf)
         self.close()
         return result
+    }
+
+    def _slurp_size() -> int {
+        if fseek(self.handle, 0, SEEK_END) != 0 {
+            raise OSError(f"read '{self.path}': stream is not seekable; read it line by line")
+        }
+        const size: int = ftell(self.handle)
+        if size < 0 {
+            raise OSError(f"read '{self.path}': cannot determine the stream length")
+        }
+        if size > _MAX_SLURP_BYTES {
+            raise OSError(f"read '{self.path}': {size} bytes exceeds the 1 GiB whole-file read limit")
+        }
+        if fseek(self.handle, 0, SEEK_SET) != 0 {
+            raise OSError(f"read '{self.path}': cannot rewind the stream")
+        }
+        return size
     }
 
     def lines() -> list[str] {

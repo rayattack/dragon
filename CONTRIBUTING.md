@@ -188,7 +188,8 @@ small reproducer is worth a great deal.
 For security issues, please do **not** open a public issue. Use GitHub's private
 vulnerability reporting on the repository's Security tab so it can be fixed before it
 is public. We would rather hear from you privately and awkwardly than read about it
-on the internet.
+on the internet. [`SECURITY.md`](SECURITY.md) has the details, including why a
+security release means rebuilding your binaries and not just upgrading the compiler.
 
 ## Licensing
 

@@ -1,6 +1,9 @@
 extern "C" def dragon_realpath(path: str) -> str
-extern "C" def access(path: str, mode: intc) -> intc
-extern "C" def getenv(name: str) -> str
+extern "C" def dragon_path_access(path: str, mode: intc) -> intc
+extern "C" def dragon_getenv(name: str) -> str
+
+def access(path: str, mode: int) -> int { return dragon_path_access(path, mode) }
+def getenv(name: str) -> str { return dragon_getenv(name) }
 extern "C" def dragon_stat_size(path: str) -> int
 extern "C" def dragon_stat_mtime(path: str) -> int
 extern "C" def dragon_stat_atime(path: str) -> int

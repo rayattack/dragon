@@ -1,24 +1,40 @@
 extern "C" def dragon_getcwd() -> str
-extern "C" def chdir(path: str) -> intc
-extern "C" def mkdir(path: str, mode: intc) -> intc
-extern "C" def rmdir(path: str) -> intc
-extern "C" def unlink(path: str) -> intc
-extern "C" def rename(oldpath: str, newpath: str) -> intc
-extern "C" def access(path: str, mode: intc) -> intc
-extern "C" def chmod(path: str, mode: intc) -> intc
-extern "C" def link(oldpath: str, newpath: str) -> intc
-extern "C" def symlink(target: str, linkpath: str) -> intc
-extern "C" def truncate(path: str, length: int) -> intc
+extern "C" def dragon_path_chdir(path: str) -> intc
+extern "C" def dragon_path_mkdir(path: str, mode: intc) -> intc
+extern "C" def dragon_path_rmdir(path: str) -> intc
+extern "C" def dragon_path_unlink(path: str) -> intc
+extern "C" def dragon_path_rename(oldpath: str, newpath: str) -> intc
+extern "C" def dragon_path_access(path: str, mode: intc) -> intc
+extern "C" def dragon_path_chmod(path: str, mode: intc) -> intc
+extern "C" def dragon_path_link(oldpath: str, newpath: str) -> intc
+extern "C" def dragon_path_symlink(target: str, linkpath: str) -> intc
+extern "C" def dragon_path_truncate(path: str, length: int) -> intc
 extern "C" def kill(pid: intc, sig: intc) -> intc
 
-extern "C" def opendir(path: str) -> ptr
+extern "C" def dragon_path_opendir(path: str) -> ptr
 extern "C" def closedir(dirp: ptr) -> intc
 extern "C" def dragon_readdir_name(dirp: ptr) -> str
 
-extern "C" def getenv(name: str) -> str
-extern "C" def setenv(name: str, value: str, overwrite: intc) -> intc
-extern "C" def unsetenv(name: str) -> intc
+extern "C" def dragon_getenv(name: str) -> str
+extern "C" def dragon_setenv(name: str, value: str, overwrite: intc) -> intc
+extern "C" def dragon_unsetenv(name: str) -> intc
 extern "C" def dragon_environ_dict() -> dict[str, str]
+
+
+def chdir(path: str) -> int { return dragon_path_chdir(path) }
+def mkdir(path: str, mode: int) -> int { return dragon_path_mkdir(path, mode) }
+def rmdir(path: str) -> int { return dragon_path_rmdir(path) }
+def unlink(path: str) -> int { return dragon_path_unlink(path) }
+def rename(oldpath: str, newpath: str) -> int { return dragon_path_rename(oldpath, newpath) }
+def access(path: str, mode: int) -> int { return dragon_path_access(path, mode) }
+def chmod(path: str, mode: int) -> int { return dragon_path_chmod(path, mode) }
+def link(oldpath: str, newpath: str) -> int { return dragon_path_link(oldpath, newpath) }
+def symlink(target: str, linkpath: str) -> int { return dragon_path_symlink(target, linkpath) }
+def truncate(path: str, length: int) -> int { return dragon_path_truncate(path, length) }
+def opendir(path: str) -> ptr { return dragon_path_opendir(path) }
+def getenv(name: str) -> str { return dragon_getenv(name) }
+def setenv(name: str, value: str, overwrite: int) -> int { return dragon_setenv(name, value, overwrite) }
+def unsetenv(name: str) -> int { return dragon_unsetenv(name) }
 
 extern "C" def getpid() -> intc
 extern "C" def getppid() -> intc

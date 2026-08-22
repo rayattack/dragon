@@ -41,6 +41,8 @@ const SHUT_RD: int = 0
 const SHUT_WR: int = 1
 const SHUT_RDWR: int = 2
 
+const _MAX_RECV_BYTES: int = 1073741824
+
 
 def gethostbyname(host: str) -> str {
     """Resolve a hostname to a dotted IPv4 address (Python parity); literal IPs
@@ -231,7 +233,19 @@ class UdpSocket {
     }
 
     def recvfrom(size: int) -> str {
+        if size < 0 {
+            raise ValueError("recvfrom: size must not be negative")
+        }
+        if size > _MAX_RECV_BYTES {
+            raise MemoryError("recvfrom: size exceeds the 1 GiB per-call limit")
+        }
+        if size == 0 {
+            return ""
+        }
         const buf: ptr = malloc(size + 1)
+        if not buf {
+            raise MemoryError("recvfrom: could not allocate the read buffer")
+        }
         memset(buf, 0, size + 1)
         const result: str = dragon_recv_to_str(self._sock.fd(), buf, size, 0)
         free(buf)

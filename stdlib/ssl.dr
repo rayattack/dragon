@@ -3,7 +3,13 @@
 Known limitation: no certificate revocation checking (no CRL/OCSP API exists yet).
 
 Mirrors CPython 3.12 (SSLContext, wrap_socket, SSLSocket, create_default_context,
-CERT_*/PROTOCOL_* constants, SSLError hierarchy); security policy is fixed in the C shim, not user-weakenable.
+CERT_*/PROTOCOL_* constants, SSLError hierarchy).
+
+The C shim fixes the parts a caller must not be able to weaken: TLS 1.2 floor, the
+group/sigalg/ciphersuite lists, and a refusal to hand back a CERT_REQUIRED
+connection with no server_hostname to check the certificate against. Verify mode
+itself IS caller-settable, exactly as in CPython: set_verify_mode(CERT_NONE) turns
+peer verification off and is a deliberate choice, not a default.
 """
 
 from socket import TcpStream
@@ -40,6 +46,8 @@ const PROTOCOL_TLS_SERVER: int = 1
 const CERT_NONE: int = 0
 const CERT_OPTIONAL: int = 1
 const CERT_REQUIRED: int = 2
+
+const _MAX_RECV_BYTES: int = 1073741824
 
 
 class SSLError(OSError) {
@@ -96,7 +104,19 @@ class SSLSocket {
     def recv_bytes(n: int = 8192) -> bytes {
         """Read up to `n` decrypted bytes. Returns b"" on a clean peer close (EOF).
         Mirrors TcpStream.recv_bytes; recv(size) is the str-typed read."""
+        if n < 0 {
+            raise ValueError("recv_bytes: size must not be negative")
+        }
+        if n > _MAX_RECV_BYTES {
+            raise MemoryError("recv_bytes: size exceeds the 1 GiB per-call limit")
+        }
+        if n == 0 {
+            return b""
+        }
         buf: ptr = malloc(n)
+        if not buf {
+            raise MemoryError("recv_bytes: could not allocate the read buffer")
+        }
         got: int = dragon_tls_read(self._conn, buf, n)
         if got < 0 {
             free(buf)
@@ -192,6 +212,10 @@ class SSLContext {
             srv = 1
         }
         self._ctx = dragon_tls_ctx_new(srv)
+        if not self._ctx {
+            self._closed = True
+            raise SSLError("could not create a TLS context (entropy source unavailable?)")
+        }
         self._closed = False
     }
 

@@ -2,11 +2,14 @@
 
 from fnmatch import fnmatchcase
 
-extern "C" def opendir(path: str) -> ptr
+extern "C" def dragon_path_opendir(path: str) -> ptr
 extern "C" def closedir(dirp: ptr) -> intc
 extern "C" def dragon_readdir_name(dirp: ptr) -> str
-extern "C" def access(path: str, mode: intc) -> intc
+extern "C" def dragon_path_access(path: str, mode: intc) -> intc
 extern "C" def dragon_stat_isdir(path: str) -> intc
+
+def opendir(path: str) -> ptr { return dragon_path_opendir(path) }
+def access(path: str, mode: int) -> int { return dragon_path_access(path, mode) }
 
 def _listdir(path: str) -> list[str] {
     const dirp: ptr = opendir(path)

@@ -1681,7 +1681,16 @@ int64_t dragon_nb_accept(int64_t server_fd, void* addr, void* addrlen) {
     }
 }
 
+static int64_t dragon_recv_len_or_raise(int64_t max_len) {
+    if (__builtin_expect(max_len < 0, 0))
+        dragon_raise_exc_cstr(90, "ValueError: receive size must not be negative");
+    if (__builtin_expect(max_len > DRAGON_MAX_RECV_BYTES, 0))
+        dragon_raise_exc_cstr(43, "MemoryError: receive size exceeds the 1 GiB per-call limit");
+    return max_len;
+}
+
 int64_t dragon_nb_recv(int64_t fd, void* buf, int64_t max_len) {
+    if (max_len <= 0) return 0;
     make_nonblocking((int)fd);
     while (1) {
 #ifdef _WIN32
@@ -1733,6 +1742,7 @@ int64_t dragon_nb_send(int64_t fd, const char* buf, int64_t len) {
 }
 
 const char* dragon_nb_recv_str(int64_t fd, int64_t max_len) {
+    dragon_recv_len_or_raise(max_len);
     int64_t cap = max_len > 0 ? max_len : 1;
     char* buf = (char*)dragon_xmalloc_ex(cap, 1, 1);
     int64_t n = dragon_nb_recv(fd, buf, max_len);
@@ -1747,6 +1757,7 @@ const char* dragon_nb_recv_str(int64_t fd, int64_t max_len) {
 }
 
 DragonBytes* dragon_nb_recv_bytes(int64_t fd, int64_t max_len) {
+    dragon_recv_len_or_raise(max_len);
     int64_t cap = max_len > 0 ? max_len : 1;
     uint8_t* buf = (uint8_t*)dragon_xmalloc_n(cap, 1);
     int64_t n = dragon_nb_recv(fd, buf, max_len);
@@ -1757,7 +1768,9 @@ DragonBytes* dragon_nb_recv_bytes(int64_t fd, int64_t max_len) {
 }
 
 DragonBytes* dragon_nb_recv_timeout(int64_t fd, int64_t max_len, int64_t timeout_ms) {
+    dragon_recv_len_or_raise(max_len);
     if (timeout_ms <= 0) return dragon_nb_recv_bytes(fd, max_len);
+    if (max_len == 0) return dragon_bytes_new(nullptr, 0);
     make_nonblocking((int)fd);
     int64_t cap = max_len > 0 ? max_len : 1;
     uint8_t* buf = (uint8_t*)dragon_xmalloc_n(cap, 1);

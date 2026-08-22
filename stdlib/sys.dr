@@ -2,7 +2,9 @@
 
 extern "C" def exit(status: intc) as _libc_exit
 extern "C" def abort()
-extern "C" def getenv(name: str) -> str
+extern "C" def dragon_getenv(name: str) -> str
+
+def getenv(name: str) -> str { return dragon_getenv(name) }
 extern "C" def dragon_argv_count() -> int
 extern "C" def dragon_argv_at(i: int) -> str
 

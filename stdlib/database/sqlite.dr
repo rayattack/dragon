@@ -21,7 +21,6 @@ extern "C" def dragon_str_to_utf8_bytes(s: str) -> bytes
 extern "C" def dragon_bytes_data(b: bytes) -> ptr
 extern "C" def sqlite3_errcode(db: ptr) -> intc
 extern "C" def sqlite3_exec(db: ptr, sql: str, cb: ptr, arg: ptr, errmsg: ptr) -> intc
-extern "C" def sqlite3_prepare_v2(db: ptr, sql: str, nByte: intc, ppStmt: ptr, pzTail: ptr) -> intc
 extern "C" def sqlite3_step(stmt: ptr) -> intc
 extern "C" def sqlite3_finalize(stmt: ptr) -> intc
 extern "C" def sqlite3_reset(stmt: ptr) -> intc
@@ -35,7 +34,8 @@ extern "C" def sqlite3_column_bytes(stmt: ptr, iCol: intc) -> intc
 extern "C" def dragon_string_alloc(src: str, byte_len: int) -> str
 extern "C" def sqlite3_bind_int64(stmt: ptr, index: intc, value: int) -> intc
 extern "C" def sqlite3_bind_double(stmt: ptr, index: intc, value: float) -> intc
-extern "C" def sqlite3_bind_text(stmt: ptr, index: intc, value: str, n: intc, dtor: ptr) -> intc
+extern "C" def dragon_sqlite_bind_text(stmt: ptr, index: int, value: str) -> int
+extern "C" def dragon_sqlite_prepare(db: ptr, sql: ptr, nbytes: int) -> ptr
 extern "C" def sqlite3_bind_null(stmt: ptr, index: intc) -> intc
 extern "C" def sqlite3_errmsg(db: ptr) -> str
 extern "C" def sqlite3_changes(db: ptr) -> intc
@@ -76,11 +76,9 @@ class SqliteConnection(Connection) {
     def _prepare(sql: SQL) -> ptr {
         nparams: int = len(sql.params)
         text: str = self._to_sqlite(sql.canonical, nparams)
-        stmtpp: ptr = malloc(8)
-        const rc: int = sqlite3_prepare_v2(self.db, text, -1, stmtpp, none)
-        stmt: ptr = dragon_ptr_deref(stmtpp)
-        free(stmtpp)
-        if rc != SQLITE_OK {
+        const textb: bytes = dragon_str_to_utf8_bytes(text)
+        stmt: ptr = dragon_sqlite_prepare(self.db, dragon_bytes_data(textb), len(textb))
+        if not stmt {
             raise QueryError(sqlite3_errmsg(self.db))
         }
         i: int = 0
@@ -102,7 +100,7 @@ class SqliteConnection(Connection) {
                 sqlite3_bind_double(stmt, idx, fv)
             } else if isinstance(p, str) {
                 sv: str = p
-                sqlite3_bind_text(stmt, idx, sv, -1, none)
+                dragon_sqlite_bind_text(stmt, idx, sv)
             } else {
                 sqlite3_bind_null(stmt, idx)
             }

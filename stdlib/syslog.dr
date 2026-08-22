@@ -3,9 +3,9 @@
 Linux/macOS only, not available on Windows.
 """
 
-extern "C" def openlog(ident: str, option: intc, facility: intc)
-extern "C" def syslog(priority: intc, format: str)
-extern "C" def closelog()
+extern "C" def dragon_openlog(ident: str, option: int, facility: int)
+extern "C" def dragon_syslog(priority: int, message: str)
+extern "C" def dragon_closelog()
 
 const LOG_EMERG: int = 0
 const LOG_ALERT: int = 1
@@ -43,45 +43,45 @@ const LOG_NOWAIT: int = 16
 const LOG_PERROR: int = 32
 
 def syslog_open(ident: str, option: int, facility: int) {
-    openlog(ident, option, facility)
+    dragon_openlog(ident, option, facility)
 }
 
 def syslog_log(priority: int, message: str) {
-    syslog(priority, message)
+    dragon_syslog(priority, message)
 }
 
 def syslog_close() {
-    closelog()
+    dragon_closelog()
 }
 
 def emergency(msg: str) {
-    syslog(LOG_EMERG, msg)
+    dragon_syslog(LOG_EMERG, msg)
 }
 
 def alert(msg: str) {
-    syslog(LOG_ALERT, msg)
+    dragon_syslog(LOG_ALERT, msg)
 }
 
 def critical(msg: str) {
-    syslog(LOG_CRIT, msg)
+    dragon_syslog(LOG_CRIT, msg)
 }
 
 def error(msg: str) {
-    syslog(LOG_ERR, msg)
+    dragon_syslog(LOG_ERR, msg)
 }
 
 def warning(msg: str) {
-    syslog(LOG_WARNING, msg)
+    dragon_syslog(LOG_WARNING, msg)
 }
 
 def notice(msg: str) {
-    syslog(LOG_NOTICE, msg)
+    dragon_syslog(LOG_NOTICE, msg)
 }
 
 def info(msg: str) {
-    syslog(LOG_INFO, msg)
+    dragon_syslog(LOG_INFO, msg)
 }
 
 def debug(msg: str) {
-    syslog(LOG_DEBUG, msg)
+    dragon_syslog(LOG_DEBUG, msg)
 }

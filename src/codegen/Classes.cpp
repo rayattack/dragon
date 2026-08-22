@@ -1177,6 +1177,8 @@ void CodeGen::visit(ClassDecl& node) {
                         {"dragon_sem_new", "dragon_sem_free"},
                         {"dragon_barrier_new", "dragon_barrier_destroy"},
                         {"pcre2_compile_8", "pcre2_code_free_8"},
+                        {"pcre2_match_context_create_8",
+                         "pcre2_match_context_free_8"},
                         {"dragon_sqlite_open", "dragon_sqlite_close"},
                         {"dragon_sqlite_prepare", "dragon_sqlite_finalize"},
                         {"dragon_subprocess_child_new",

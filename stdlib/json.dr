@@ -141,6 +141,8 @@ def dumps(obj: Any) -> str {
 }
 
 
+const _MAX_NESTING: int = 200
+
 const _B_LBRACE: int = 123
 const _B_RBRACE: int = 125
 const _B_LBRACKET: int = 91
@@ -174,11 +176,25 @@ class _JsonParser {
     buf: bytes
     pos: int
     n: int
+    depth: int
 
     def(buf: bytes) {
         self.buf = buf
         self.pos = 0
         self.n = len(buf)
+        self.depth = 0
+    }
+
+    def _enter() -> None {
+        self.depth = self.depth + 1
+        if self.depth > _MAX_NESTING {
+            raise ValueError(
+                f"JSON decode error at byte {self.pos}: nesting deeper than {_MAX_NESTING} levels")
+        }
+    }
+
+    def _leave() -> None {
+        self.depth = self.depth - 1
     }
 
     def _fail(msg: str) -> None {
@@ -341,10 +357,12 @@ class _JsonParser {
 
     def _parse_array() -> list[Any] {
         const arr: list[Any] = []
+        self._enter()
         self.pos = self.pos + 1
         self._skip_ws()
         if self._peek() == _B_RBRACKET {
             self.pos = self.pos + 1
+            self._leave()
             return arr
         }
         while true {
@@ -362,15 +380,18 @@ class _JsonParser {
             }
             self._fail("expected ',' or ']' in array")
         }
+        self._leave()
         return arr
     }
 
     def _parse_object() -> dict[str, Any] {
         const obj: dict[str, Any] = {}
+        self._enter()
         self.pos = self.pos + 1
         self._skip_ws()
         if self._peek() == _B_RBRACE {
             self.pos = self.pos + 1
+            self._leave()
             return obj
         }
         while true {
@@ -398,6 +419,7 @@ class _JsonParser {
             }
             self._fail("expected ',' or '}' in object")
         }
+        self._leave()
         return obj
     }
 }

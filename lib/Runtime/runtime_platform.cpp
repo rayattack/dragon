@@ -25,6 +25,7 @@
 #include "llhttp.h"
 #ifndef _WIN32
   #include <regex.h>
+  #include <syslog.h>
 #endif
 
 extern "C" {
@@ -117,11 +118,13 @@ void dragon_ptr_write_i32(void* p, int64_t offset, int64_t val) {
 }
 
 const char* dragon_recv_to_str(int64_t fd, void* buf, int64_t length, int64_t flags) {
+    if (!buf || length <= 0) return dragon_string_alloc("", 0);
+    if (length > DRAGON_MAX_RECV_BYTES)
+        dragon_raise_exc_cstr(43, "MemoryError: receive size exceeds the 1 GiB per-call limit");
 #ifdef _WIN32
-    int n = recv((SOCKET)fd, (char*)buf,
-                 (int)(length > 0 ? length - 1 : 0), (int)flags);
+    int n = recv((SOCKET)fd, (char*)buf, (int)(length - 1), (int)flags);
 #else
-    ssize_t n = recv((int)fd, buf, (size_t)(length > 0 ? length - 1 : 0), (int)flags);
+    ssize_t n = recv((int)fd, buf, (size_t)(length - 1), (int)flags);
 #endif
     if (n < 0) n = 0;
     ((char*)buf)[n] = '\0';
@@ -130,6 +133,7 @@ const char* dragon_recv_to_str(int64_t fd, void* buf, int64_t length, int64_t fl
 
 int64_t dragon_udp_sendto(int64_t fd, const char* buf, int64_t len,
                           int64_t flags, void* addr, int64_t addrlen) {
+    if (!buf || len <= 0) return 0;
 #ifdef _WIN32
     return (int64_t)sendto((SOCKET)fd, buf, (int)len, (int)flags,
                            (struct sockaddr*)addr, (int)addrlen);
@@ -587,21 +591,54 @@ const char* dragon_re_search_str(const char*, const char*) { return dragon_strin
 
 #endif
 
-const char* dragon_re_get_match(const char* subject, int64_t* ovector, int64_t index) {
-    int64_t start = ovector[index * 2];
-    int64_t end = ovector[index * 2 + 1];
-    if (start < 0 || end < start) return dragon_string_alloc("", 0);
-    int64_t len = end - start;
-    return dragon_string_alloc(subject + start, len);
+int64_t dragon_re_ovector_at(const int64_t* ovector, int64_t pair_count,
+                             int64_t index) {
+    if (!ovector || index < 0 || pair_count <= 0 || index >= pair_count * 2)
+        return -1;
+    return ovector[index];
+}
+
+const char* dragon_re_slice(const void* subject, int64_t subject_len,
+                            int64_t start, int64_t end) {
+    if (!subject || start < 0 || end < start ||
+        start > subject_len || end > subject_len)
+        return dragon_string_alloc("", 0);
+    return dragon_string_alloc((const char*)subject + start, end - start);
+}
+
+const char* dragon_re_group_at(const void* subject, int64_t subject_len,
+                               const int64_t* ovector, int64_t pair_count,
+                               int64_t index) {
+    int64_t start = dragon_re_ovector_at(ovector, pair_count, index * 2);
+    int64_t end = dragon_re_ovector_at(ovector, pair_count, index * 2 + 1);
+    if (start < 0 || end < 0) return dragon_string_alloc("", 0);
+    return dragon_re_slice(subject, subject_len, start, end);
+}
+
+int64_t dragon_re_next_offset(const void* subject, int64_t subject_len,
+                              int64_t offset) {
+    if (!subject || offset < 0 || offset >= subject_len) return subject_len;
+    const unsigned char* p = (const unsigned char*)subject;
+    int64_t i = offset + 1;
+    while (i < subject_len && (p[i] & 0xC0) == 0x80) i++;
+    return i;
 }
 
 #ifdef _WIN32
 typedef struct _stat dragon_stat_t;
-static int dragon_stat(const char* path, dragon_stat_t* st) { return _stat(path, st); }
+static int dragon_stat_raw(const char* path, dragon_stat_t* st) { return _stat(path, st); }
 #else
 typedef struct stat dragon_stat_t;
-static int dragon_stat(const char* path, dragon_stat_t* st) { return stat(path, st); }
+static int dragon_stat_raw(const char* path, dragon_stat_t* st) { return stat(path, st); }
 #endif
+
+static int dragon_stat(const char* path, dragon_stat_t* st) {
+    char* owned = nullptr;
+    const char* p = dragon_cstr_open(path, &owned, nullptr);
+    int rc = p ? dragon_stat_raw(p, st) : -1;
+    dragon_cstr_close(owned);
+    return rc;
+}
 
 #ifdef _WIN32
   #ifndef S_ISREG
@@ -657,15 +694,21 @@ const char* dragon_readdir_name(void* dirp) {
 }
 
 int32_t dragon_stat_islink(const char* path) {
+    char* owned = nullptr;
+    const char* p = dragon_cstr_open(path, &owned, nullptr);
+    int32_t out = 0;
+    if (p) {
 #ifdef _WIN32
-    DWORD attrs = GetFileAttributesA(path);
-    if (attrs == INVALID_FILE_ATTRIBUTES) return 0;
-    return (attrs & FILE_ATTRIBUTE_REPARSE_POINT) ? 1 : 0;
+        DWORD attrs = GetFileAttributesA(p);
+        if (attrs != INVALID_FILE_ATTRIBUTES)
+            out = (attrs & FILE_ATTRIBUTE_REPARSE_POINT) ? 1 : 0;
 #else
-    struct stat st;
-    if (lstat(path, &st) != 0) return 0;
-    return S_ISLNK(st.st_mode) ? 1 : 0;
+        struct stat st;
+        if (lstat(p, &st) == 0) out = S_ISLNK(st.st_mode) ? 1 : 0;
 #endif
+    }
+    dragon_cstr_close(owned);
+    return out;
 }
 
 int64_t dragon_stat_atime(const char* path) {
@@ -699,11 +742,20 @@ int64_t dragon_stat_ino(const char* path) {
 }
 
 #ifdef _WIN32
-static int dragon_lstat(const char* path, dragon_stat_t* st) { return _stat(path, st); }
+typedef dragon_stat_t dragon_lstat_t;
+static int dragon_lstat_raw(const char* path, dragon_lstat_t* st) { return _stat(path, st); }
 #else
 typedef struct stat dragon_lstat_t;
-static int dragon_lstat(const char* path, dragon_lstat_t* st) { return lstat(path, st); }
+static int dragon_lstat_raw(const char* path, dragon_lstat_t* st) { return lstat(path, st); }
 #endif
+
+static int dragon_lstat(const char* path, dragon_lstat_t* st) {
+    char* owned = nullptr;
+    const char* p = dragon_cstr_open(path, &owned, nullptr);
+    int rc = p ? dragon_lstat_raw(p, st) : -1;
+    dragon_cstr_close(owned);
+    return rc;
+}
 
 #ifndef _WIN32
 int64_t dragon_lstat_size(const char* path) {
@@ -769,7 +821,11 @@ int32_t dragon_chown(const char* path, int32_t uid, int32_t gid) {
     errno = EINVAL;
     return -1;
 #else
-    return chown(path, (uid_t)uid, (gid_t)gid);
+    char* owned = nullptr;
+    const char* p = dragon_cstr_open(path, &owned, nullptr);
+    int rc = p ? chown(p, (uid_t)uid, (gid_t)gid) : -1;
+    dragon_cstr_close(owned);
+    return rc;
 #endif
 }
 
@@ -779,7 +835,11 @@ int32_t dragon_chroot(const char* path) {
     errno = EINVAL;
     return -1;
 #else
-    return chroot(path);
+    char* owned = nullptr;
+    const char* p = dragon_cstr_open(path, &owned, nullptr);
+    int rc = p ? chroot(p) : -1;
+    dragon_cstr_close(owned);
+    return rc;
 #endif
 }
 
@@ -864,8 +924,11 @@ const char* dragon_readlink(const char* path) {
     (void)path;
     return dragon_string_alloc("", 0);
 #else
+    char* owned = nullptr;
+    const char* p = dragon_cstr_open(path, &owned, nullptr);
     char buf[4096];
-    ssize_t len = readlink(path, buf, sizeof(buf) - 1);
+    ssize_t len = p ? readlink(p, buf, sizeof(buf) - 1) : -1;
+    dragon_cstr_close(owned);
     if (len < 0) return dragon_string_alloc("", 0);
     buf[len] = '\0';
     return dragon_string_alloc(buf, (int64_t)len);
@@ -888,7 +951,7 @@ const char* dragon_getcwd(void) {
     return out;
 }
 
-const char* dragon_realpath(const char* path) {
+static const char* dragon_realpath_raw(const char* path) {
     if (!path) return dragon_string_alloc("", 0);
 #ifdef _WIN32
     char* resolved = _fullpath(nullptr, path, 0);
@@ -922,8 +985,18 @@ const char* dragon_realpath(const char* path) {
 #endif
 }
 
-int32_t dragon_create_excl(const char* path) {
-    if (!path) return -1;
+const char* dragon_realpath(const char* path) {
+    char* owned = nullptr;
+    const char* p = dragon_cstr_open(path, &owned, nullptr);
+    const char* out = dragon_realpath_raw(p);
+    dragon_cstr_close(owned);
+    return out;
+}
+
+int32_t dragon_create_excl(const char* raw_path) {
+    char* owned = nullptr;
+    const char* path = dragon_cstr_open(raw_path, &owned, nullptr);
+    if (!path) { dragon_cstr_close(owned); return -1; }
 #ifdef _WIN32
     int fd = _open(path, _O_RDWR | _O_CREAT | _O_EXCL | _O_BINARY,
                    _S_IREAD | _S_IWRITE);
@@ -934,6 +1007,7 @@ int32_t dragon_create_excl(const char* path) {
     #endif
     int fd = open(path, flags, 0600);
 #endif
+    dragon_cstr_close(owned);
     if (fd < 0) return -1;
 #ifdef _WIN32
     _close(fd);
@@ -943,7 +1017,7 @@ int32_t dragon_create_excl(const char* path) {
     return 0;
 }
 
-int32_t dragon_makedirs(const char* path, int32_t mode) {
+static int32_t dragon_makedirs_raw(const char* path, int32_t mode) {
 #ifdef _WIN32
     (void)mode;
     if (_mkdir(path) == 0) return 0;
@@ -960,7 +1034,7 @@ int32_t dragon_makedirs(const char* path, int32_t mode) {
     }
     if (slash && slash != tmp) {
         *slash = '\0';
-        if (dragon_makedirs(tmp, mode) != 0) { free(tmp); return -1; }
+        if (dragon_makedirs_raw(tmp, mode) != 0) { free(tmp); return -1; }
     }
     free(tmp);
     if (_mkdir(path) == 0) return 0;
@@ -980,7 +1054,7 @@ int32_t dragon_makedirs(const char* path, int32_t mode) {
     char* slash = strrchr(tmp, '/');
     if (slash && slash != tmp) {
         *slash = '\0';
-        if (dragon_makedirs(tmp, mode) != 0) {
+        if (dragon_makedirs_raw(tmp, mode) != 0) {
             free(tmp);
             return -1;
         }
@@ -990,6 +1064,14 @@ int32_t dragon_makedirs(const char* path, int32_t mode) {
     if (errno == EEXIST) return eexist_is_real_dir(path) ? 0 : -1;
     return -1;
 #endif
+}
+
+int32_t dragon_makedirs(const char* path, int32_t mode) {
+    char* owned = nullptr;
+    const char* p = dragon_cstr_open(path, &owned, nullptr);
+    int32_t rc = p ? dragon_makedirs_raw(p, mode) : -1;
+    dragon_cstr_close(owned);
+    return rc;
 }
 
 const char* dragon_uname_sysname() {
@@ -1206,5 +1288,236 @@ DragonDict* dragon_environ_dict(void) {
     return d;
 }
 
+int32_t dragon_path_access(const char* path, int32_t mode) {
+    char* owned = nullptr;
+    const char* p = dragon_cstr_open(path, &owned, nullptr);
+    int rc = p ? access(p, mode) : -1;
+    dragon_cstr_close(owned);
+    return rc;
+}
+
+int32_t dragon_path_chdir(const char* path) {
+    char* owned = nullptr;
+    const char* p = dragon_cstr_open(path, &owned, nullptr);
+    int rc = p ? chdir(p) : -1;
+    dragon_cstr_close(owned);
+    return rc;
+}
+
+int32_t dragon_path_mkdir(const char* path, int32_t mode) {
+    char* owned = nullptr;
+    const char* p = dragon_cstr_open(path, &owned, nullptr);
+#ifdef _WIN32
+    (void)mode;
+    int rc = p ? _mkdir(p) : -1;
+#else
+    int rc = p ? mkdir(p, (mode_t)mode) : -1;
+#endif
+    dragon_cstr_close(owned);
+    return rc;
+}
+
+int32_t dragon_path_rmdir(const char* path) {
+    char* owned = nullptr;
+    const char* p = dragon_cstr_open(path, &owned, nullptr);
+#ifdef _WIN32
+    int rc = p ? _rmdir(p) : -1;
+#else
+    int rc = p ? rmdir(p) : -1;
+#endif
+    dragon_cstr_close(owned);
+    return rc;
+}
+
+int32_t dragon_path_unlink(const char* path) {
+    char* owned = nullptr;
+    const char* p = dragon_cstr_open(path, &owned, nullptr);
+#ifdef _WIN32
+    int rc = p ? _unlink(p) : -1;
+#else
+    int rc = p ? unlink(p) : -1;
+#endif
+    dragon_cstr_close(owned);
+    return rc;
+}
+
+int32_t dragon_path_rename(const char* oldpath, const char* newpath) {
+    char* o1 = nullptr;
+    char* o2 = nullptr;
+    const char* a = dragon_cstr_open(oldpath, &o1, nullptr);
+    const char* b = dragon_cstr_open(newpath, &o2, nullptr);
+    int rc = (a && b) ? rename(a, b) : -1;
+    dragon_cstr_close(o1);
+    dragon_cstr_close(o2);
+    return rc;
+}
+
+int32_t dragon_path_chmod(const char* path, int32_t mode) {
+    char* owned = nullptr;
+    const char* p = dragon_cstr_open(path, &owned, nullptr);
+#ifdef _WIN32
+    int rc = p ? _chmod(p, mode) : -1;
+#else
+    int rc = p ? chmod(p, (mode_t)mode) : -1;
+#endif
+    dragon_cstr_close(owned);
+    return rc;
+}
+
+int32_t dragon_path_truncate(const char* path, int64_t length) {
+    if (length < 0) {
+        dragon_raise_exc_cstr(90, "ValueError: truncate length must not be negative");
+        return -1;
+    }
+    char* owned = nullptr;
+    const char* p = dragon_cstr_open(path, &owned, nullptr);
+#ifdef _WIN32
+    (void)p;
+    int rc = -1;
+    errno = EINVAL;
+#else
+    int rc = p ? truncate(p, (off_t)length) : -1;
+#endif
+    dragon_cstr_close(owned);
+    return rc;
+}
+
+void* dragon_path_opendir(const char* path) {
+#ifdef _WIN32
+    (void)path;
+    return nullptr;
+#else
+    char* owned = nullptr;
+    const char* p = dragon_cstr_open(path, &owned, nullptr);
+    void* d = p ? (void*)opendir(p) : nullptr;
+    dragon_cstr_close(owned);
+    return d;
+#endif
+}
+
+const char* dragon_getenv(const char* name) {
+    char* owned = nullptr;
+    const char* n = dragon_cstr_open(name, &owned, nullptr);
+    const char* v = n ? getenv(n) : nullptr;
+    dragon_cstr_close(owned);
+    return dragon_string_dup_cstr(v ? v : "");
+}
+
+int32_t dragon_setenv(const char* name, const char* value, int32_t overwrite) {
+    char* o1 = nullptr;
+    char* o2 = nullptr;
+    const char* n = dragon_cstr_open(name, &o1, nullptr);
+    const char* v = dragon_cstr_open(value, &o2, nullptr);
+    int rc = -1;
+    if (n && v) {
+#ifdef _WIN32
+        rc = _putenv_s(n, v);
+        (void)overwrite;
+#else
+        rc = setenv(n, v, overwrite);
+#endif
+    }
+    dragon_cstr_close(o1);
+    dragon_cstr_close(o2);
+    return rc;
+}
+
+int32_t dragon_unsetenv(const char* name) {
+    char* owned = nullptr;
+    const char* n = dragon_cstr_open(name, &owned, nullptr);
+    int rc = -1;
+    if (n) {
+#ifdef _WIN32
+        rc = _putenv_s(n, "");
+#else
+        rc = unsetenv(n);
+#endif
+    }
+    dragon_cstr_close(owned);
+    return rc;
+}
+
+void* dragon_path_fopen(const char* path, const char* mode) {
+    char* o1 = nullptr;
+    char* o2 = nullptr;
+    const char* p = dragon_cstr_open(path, &o1, nullptr);
+    const char* m = dragon_cstr_open(mode, &o2, nullptr);
+    FILE* f = (p && m) ? fopen(p, m) : nullptr;
+    dragon_cstr_close(o1);
+    dragon_cstr_close(o2);
+    return (void*)f;
+}
+
+int32_t dragon_path_symlink(const char* target, const char* linkpath) {
+#ifdef _WIN32
+    (void)target; (void)linkpath;
+    errno = EINVAL;
+    return -1;
+#else
+    char* o1 = nullptr;
+    char* o2 = nullptr;
+    const char* t = dragon_cstr_open(target, &o1, nullptr);
+    const char* l = dragon_cstr_open(linkpath, &o2, nullptr);
+    int rc = (t && l) ? symlink(t, l) : -1;
+    dragon_cstr_close(o1);
+    dragon_cstr_close(o2);
+    return rc;
+#endif
+}
+
+int32_t dragon_path_link(const char* oldpath, const char* newpath) {
+#ifdef _WIN32
+    (void)oldpath; (void)newpath;
+    errno = EINVAL;
+    return -1;
+#else
+    char* o1 = nullptr;
+    char* o2 = nullptr;
+    const char* a = dragon_cstr_open(oldpath, &o1, nullptr);
+    const char* b = dragon_cstr_open(newpath, &o2, nullptr);
+    int rc = (a && b) ? link(a, b) : -1;
+    dragon_cstr_close(o1);
+    dragon_cstr_close(o2);
+    return rc;
+#endif
+}
+
+#ifndef _WIN32
+
+static char* dragon_syslog_ident = nullptr;
+
+void dragon_openlog(const char* ident, int64_t option, int64_t facility) {
+    char* owned = nullptr;
+    const char* id = dragon_cstr_open(ident, &owned, nullptr);
+    char* fresh = strdup(id ? id : "");
+    dragon_cstr_close(owned);
+    if (!fresh) return;
+    openlog(fresh, (int)option, (int)facility);
+    if (dragon_syslog_ident) free(dragon_syslog_ident);
+    dragon_syslog_ident = fresh;
+}
+
+void dragon_syslog(int64_t priority, const char* message) {
+    char* owned = nullptr;
+    const char* msg = dragon_cstr_open(message, &owned, nullptr);
+    syslog((int)priority, "%s", msg ? msg : "");
+    dragon_cstr_close(owned);
+}
+
+void dragon_closelog(void) {
+    closelog();
+    if (dragon_syslog_ident) {
+        free(dragon_syslog_ident);
+        dragon_syslog_ident = nullptr;
+    }
+}
+
+#else
+
+void dragon_openlog(const char*, int64_t, int64_t) {}
+void dragon_syslog(int64_t, const char*) {}
+void dragon_closelog(void) {}
+
+#endif
 
 }

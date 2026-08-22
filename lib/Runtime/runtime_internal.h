@@ -838,6 +838,20 @@ const char* dragon_str_intern(const char* utf8_bytes, int64_t byte_len);
 DragonString* dragon_string_alloc_raw(int64_t len);
 char* dragon_str_to_utf8_alloc(const char* s, int64_t* out_byte_len);
 
+#define DRAGON_MAX_RECV_BYTES (1LL << 30)
+
+static inline const char* dragon_cstr_open(const char* s, char** owned,
+                                           int64_t* byte_len) {
+    int64_t n = 0;
+    *owned = s ? dragon_str_to_utf8_alloc(s, &n) : nullptr;
+    if (byte_len) *byte_len = n;
+    return *owned ? *owned : s;
+}
+
+static inline void dragon_cstr_close(char* owned) {
+    if (owned) free(owned);
+}
+
 void dragon_print_tagged(int64_t value, int64_t tag);
 
 const char* dragon_int_to_str(int64_t value);

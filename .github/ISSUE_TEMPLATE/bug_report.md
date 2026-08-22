@@ -7,6 +7,13 @@ assignees: ''
 
 ---
 
+**Stop if this is a security problem.** A crash on untrusted input, memory
+corruption, disclosure of memory you should not see, or anything an attacker could
+use: do not file it here, because this issue is public the moment you submit it.
+[Report it privately instead](https://github.com/rayattack/dragon/security/advisories/new),
+or email security@dragonlang.org. See the
+[security policy](https://github.com/rayattack/dragon/blob/main/SECURITY.md).
+
 ## Environment
 
 * `dragon --version` output:

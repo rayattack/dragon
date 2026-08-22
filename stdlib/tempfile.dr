@@ -1,10 +1,16 @@
 """tempfile.dr - temporary file/directory creation, wrapping POSIX/libc via extern "C"."""
 
-extern "C" def getenv(name: str) -> str
-extern "C" def access(path: str, mode: intc) -> intc
-extern "C" def mkdir(path: str, mode: intc) -> intc
-extern "C" def unlink(path: str) -> intc
-extern "C" def rmdir(path: str) -> intc
+extern "C" def dragon_getenv(name: str) -> str
+extern "C" def dragon_path_access(path: str, mode: intc) -> intc
+extern "C" def dragon_path_mkdir(path: str, mode: intc) -> intc
+extern "C" def dragon_path_unlink(path: str) -> intc
+extern "C" def dragon_path_rmdir(path: str) -> intc
+
+def getenv(name: str) -> str { return dragon_getenv(name) }
+def access(path: str, mode: int) -> int { return dragon_path_access(path, mode) }
+def mkdir(path: str, mode: int) -> int { return dragon_path_mkdir(path, mode) }
+def unlink(path: str) -> int { return dragon_path_unlink(path) }
+def rmdir(path: str) -> int { return dragon_path_rmdir(path) }
 
 extern "C" def dragon_urandom(n: int) -> bytes
 
@@ -73,14 +79,11 @@ def mkdtemp(prefix: str, suffix: str) -> str {
     while attempts < 100 {
         const name: str = prefix + _random_name(8) + suffix
         const path: str = tmpdir + "/" + name
-        if not _exists(path) {
-            const rc: int = mkdir(path, 0o700)
-            if rc == 0 { return path }
+        if mkdir(path, 0o700) == 0 {
+            return path
         }
         attempts = attempts + 1
     }
-    const fallback: str = tmpdir + "/" + prefix + _random_name(8) + suffix
-    mkdir(fallback, 0o700)
-    return fallback
+    raise OSError("mkdtemp: could not create a unique temporary directory")
 }
 

@@ -10,7 +10,10 @@ DragonBytes* dragon_read_file_bytes(const char* path) {
         dragon_raise_exc_cstr(50 , "read_file_bytes: null path");
         return nullptr;
     }
-    FILE* f = std::fopen(path, "rb");
+    char* owned = nullptr;
+    const char* cpath = dragon_cstr_open(path, &owned, nullptr);
+    FILE* f = std::fopen(cpath, "rb");
+    dragon_cstr_close(owned);
     if (!f) {
         dragon_raise_exc_cstr(50, "read_file_bytes: cannot open file");
         return nullptr;
@@ -46,7 +49,10 @@ int64_t dragon_write_file_bytes(const char* path, DragonBytes* data) {
         dragon_raise_exc_cstr(50, "write_file_bytes: null path");
         return 0;
     }
-    FILE* f = std::fopen(path, "wb");
+    char* owned = nullptr;
+    const char* cpath = dragon_cstr_open(path, &owned, nullptr);
+    FILE* f = std::fopen(cpath, "wb");
+    dragon_cstr_close(owned);
     if (!f) {
         dragon_raise_exc_cstr(50, "write_file_bytes: cannot open file");
         return 0;
