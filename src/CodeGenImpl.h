@@ -1619,6 +1619,75 @@ struct CodeGen::Impl {
         return true;
     }
 
+    struct NameSlot {
+        llvm::Value* ptr = nullptr;
+        llvm::Type* type = nullptr;
+    };
+
+    NameSlot resolveNameSlot(const std::string& name) {
+        if (auto* alloca = lookupVar(name))
+            return {alloca, alloca->getAllocatedType()};
+        auto* gv = lookupModuleGlobal(name);
+        if (gv && shouldUseModuleGlobal(name))
+            return {gv, gv->getValueType()};
+        return {};
+    }
+
+    VarKind lookupFieldKind(const std::string& className,
+                            const std::string& fieldName) {
+        auto fkIt = classFieldKindsBySym.find(classSym(className));
+        if (fkIt == classFieldKindsBySym.end()) return VarKind::Other;
+        auto it = fkIt->second.find(fieldName);
+        return it != fkIt->second.end() ? it->second : VarKind::Other;
+    }
+
+    std::string resolveAttrTargetClass(AttributeExpr* attrExpr) {
+        if (auto* objName = dynamic_cast<NameExpr*>(attrExpr->object.get())) {
+            if (objName->name == "self" && !currentClassName.empty())
+                return currentClassName;
+            auto vit = varClassNames.find(objName->name);
+            return vit != varClassNames.end() ? vit->second : "";
+        }
+        return resolveExprClassName(attrExpr->object.get());
+    }
+
+    llvm::Value* coerceAssignedFieldValue(llvm::Value* v, llvm::Type* fieldType) {
+        if (v->getType() == fieldType) return v;
+        if (fieldType == f64Type && v->getType() == i64Type)
+            return builder->CreateSIToFP(v, f64Type);
+        if (fieldType == i64Type && v->getType() == i1Type)
+            return builder->CreateZExt(v, i64Type);
+        if (fieldType == i64Type && v->getType() == f64Type)
+            return builder->CreateFPToSI(v, i64Type);
+        return v;
+    }
+
+    VarKind fieldStoreNewKind(Expr* value, VarKind fieldKind) {
+        if (auto* sl = dynamic_cast<StringLiteral*>(value))
+            return sl->isBytes ? VarKind::List : VarKind::StrLiteral;
+        return fieldKind;
+    }
+
+    std::pair<llvm::Value*, llvm::Value*> taggedPrimStore(llvm::Value* v) {
+        int64_t tag = 0;
+        if (v->getType() == i1Type) {
+            tag = 3;
+            v = builder->CreateZExt(v, i64Type);
+        }
+        return {v, llvm::ConstantInt::get(i64Type, tag)};
+    }
+
+    VarKind inferAssignedVarKind(AssignStmt& node, llvm::Value* rhsVal);
+    void recordAssignedCallableType(const std::string& name, llvm::Value* val,
+                                    Expr* rhs);
+    void storeUnpackedI64Elem(NameExpr* nameTarget, llvm::Value* elem);
+    void storeUnpackedElemToName(NameExpr* nameTarget, llvm::Value* elem,
+                                 llvm::Type* slotTy, VarKind newKind,
+                                 const std::string& elemClassName, bool isConst);
+    void emitListPrimInlineStore(SubscriptExpr& sub, Type::Kind elemKind,
+                                 llvm::Value* list, llvm::Value* idx,
+                                 llvm::Value* storeVal, llvm::Value* rawVal);
+
     llvm::AllocaInst* createEntryAlloca(llvm::Function* func,
                                          const std::string& name,
                                          llvm::Type* type);

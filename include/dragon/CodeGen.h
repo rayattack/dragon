@@ -14,6 +14,7 @@ class FunctionType;
 class Value;
 class Type;
 class BasicBlock;
+class AllocaInst;
 }
 
 namespace dragon {
@@ -174,6 +175,30 @@ public:
     void emitNestedFunctionDecl(FunctionDecl& node);
 
 private:
+    bool tryEmitStrSelfAppend(AssignStmt& node);
+    bool tryEmitSetitemOverloadStore(SubscriptExpr& sub, llvm::Value* val);
+    bool tryEmitDictSubscriptStore(SubscriptExpr& sub, AssignStmt& node,
+                                   llvm::Value* val);
+    bool tryEmitListSubscriptStore(SubscriptExpr& sub, AssignStmt& node,
+                                   llvm::Value* val);
+    bool tryEmitDictAttrStore(AttributeExpr& attr, AssignStmt& node,
+                              llvm::Value* val);
+    bool tryEmitStaticFieldStore(AttributeExpr& attr, AssignStmt& node,
+                                 llvm::Value* val);
+    bool tryEmitPropertySetterStore(AttributeExpr& attr, AssignStmt& node,
+                                    llvm::Value* val);
+    bool tryEmitInstanceFieldStore(AttributeExpr& attr, AssignStmt& node,
+                                   llvm::Value* val);
+    void emitTupleUnpackAssign(TupleExpr& tupleTarget, AssignStmt& node,
+                               llvm::Value* val);
+    void emitNameAssign(NameExpr& name, AssignStmt& node, llvm::Value* val);
+    bool tryEmitExistingGlobalStore(NameExpr& name, AssignStmt& node,
+                                    llvm::Value* val);
+    void emitNewModuleGlobalStore(NameExpr& name, AssignStmt& node,
+                                  llvm::Value* val);
+    void emitLocalSlotStore(NameExpr& name, AssignStmt& node, llvm::Value* val,
+                            llvm::AllocaInst* alloca, bool hadExistingSlot);
+
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
