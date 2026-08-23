@@ -2,8 +2,10 @@
 #define DRAGON_CODEGEN_H
 
 #include "dragon/AST.h"
+#include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace llvm {
@@ -11,6 +13,7 @@ class LLVMContext;
 class Module;
 class Function;
 class FunctionType;
+class StructType;
 class Value;
 class Type;
 class BasicBlock;
@@ -175,6 +178,53 @@ public:
     void emitNestedFunctionDecl(FunctionDecl& node);
 
 private:
+    void emitCompAppendBody(Expr* element, Expr* condition,
+                            llvm::AllocaInst* listAlloca, int64_t elemTag,
+                            const std::string& bbPrefix);
+    llvm::Value* emitCompFilterTruth(llvm::Value* cond);
+    struct FnCapture;
+    std::vector<FnCapture> collectFnCaptures(
+        const std::vector<std::string>& capturedVars,
+        const std::vector<std::string>& mutatedCapturedVars);
+    void bindFnParams(llvm::Function* fn, llvm::FunctionType* fnType,
+                      const std::vector<std::pair<std::string, TypeExpr*>>& params);
+    llvm::StructType* buildFnEnvStruct(const std::string& envName,
+                                       const std::vector<FnCapture>& captures);
+    llvm::Value* bindFnEnvCaptures(llvm::Function* fn,
+                                   llvm::StructType* envStructType,
+                                   const std::vector<FnCapture>& captures);
+    llvm::Value* materializeClosureEnv(const std::string& fnName,
+                                       llvm::Function* fn,
+                                       llvm::StructType* envStructType,
+                                       const std::vector<FnCapture>& captures);
+    void emitCompRangeArgs(CallExpr* call, llvm::Value*& start,
+                           llvm::Value*& end, llvm::Value*& step);
+    void bindCompElemVar(Expr* iterable, const std::string& varName,
+                         llvm::Value* collVal, llvm::Value* curIdx);
+    void emitCompExtraClauses(std::vector<CompClause>& clauses, size_t clauseIdx,
+                              const std::function<void()>& innermost);
+    void emitCompLoopNest(Expr* iterable, const std::vector<std::string>& varNames,
+                          std::vector<CompClause>& extraClauses,
+                          const std::string& bbPrefix,
+                          const std::string& idxAllocaName,
+                          const std::function<void()>& innermost,
+                          const std::function<void(llvm::Value*, llvm::Value*)>&
+                              bindElemVars);
+    struct BuiltinLowering;
+    struct MethodCallLowering;
+    void emitResolvedMethodCall(CallExpr& node, MethodCallLowering& ml);
+    bool emitBuiltinCallInner(CallExpr& node, const std::string& name,
+                              BuiltinLowering& bl);
+    bool emitLenBuiltin(CallExpr& node, BuiltinLowering& bl);
+    bool emitIsinstanceBuiltin(CallExpr& node);
+    bool tryEmitIsinstanceNicheCheck(CallExpr& node, const std::string& typeName);
+    bool emitTypeBuiltin(CallExpr& node, BuiltinLowering& bl);
+    bool tryEmitListFromRange(CallExpr& node);
+    bool tryEmitPrintDictSubscriptRaw(SubscriptExpr& sub, llvm::Value* arg,
+                                      bool staticContainerVal);
+    bool tryEmitPrintDictAttrRaw(AttributeExpr& attr, llvm::Value* arg,
+                                 bool staticContainerVal);
+    bool tryEmitPrintUnionRaw(Expr* argExpr, llvm::Value* arg);
     bool tryEmitStrSelfAppend(AssignStmt& node);
     bool tryEmitSetitemOverloadStore(SubscriptExpr& sub, llvm::Value* val);
     bool tryEmitDictSubscriptStore(SubscriptExpr& sub, AssignStmt& node,

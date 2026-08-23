@@ -1,8 +1,13 @@
 #include <gtest/gtest.h>
 #include "TestHelpers.h"
+#include "CodeBlock.h"
 
 using namespace dragon;
 using namespace dragon::test;
+
+static std::string code(const std::string& block) {
+    return extractCode("SemaTest.md", block);
+}
 
 static bool analyzeOk(const std::string& source) {
     auto module = parse(source);
@@ -73,82 +78,43 @@ TEST(SemaTest, UseBeforeDefine) {
 }
 
 TEST(SemaTest, FunctionDefinesName) {
-    EXPECT_TRUE(analyzeOk(
-        "def foo() {\n"
-        "  pass\n"
-        "}\n"
-        "foo()"
-    ));
+    EXPECT_TRUE(analyzeOk(code("function_defines_name")));
 }
 
 TEST(SemaTest, FunctionParams) {
-    EXPECT_TRUE(analyzeOk(
-        "def add(x: int, y: int) -> int {\n"
-        "  return x + y\n"
-        "}"
-    ));
+    EXPECT_TRUE(analyzeOk(code("function_params")));
 }
 
 TEST(SemaTest, FunctionParamNotInOuterScope) {
-    EXPECT_TRUE(analyzeHasErrors(
-        "def foo(x: int) {\n"
-        "  pass\n"
-        "}\n"
-        "print(x)"
-    ));
+    EXPECT_TRUE(analyzeHasErrors(code("function_param_not_in_outer_scope")));
 }
 
 TEST(SemaTest, ClassDefinesName) {
-    EXPECT_TRUE(analyzeOk(
-        "class Foo {\n"
-        "  pass\n"
-        "}\n"
-        "Foo()"
-    ));
+    EXPECT_TRUE(analyzeOk(code("class_defines_name")));
 }
 
 TEST(SemaTest, ForLoopDefinesVariable) {
-    EXPECT_TRUE(analyzeOk(
-        "for i in range(10) {\n"
-        "  print(i)\n"
-        "}"
-    ));
+    EXPECT_TRUE(analyzeOk(code("for_loop_defines_variable")));
 }
 
 TEST(SemaTest, ImportDefinesName) {
-    EXPECT_TRUE(analyzeOk(
-        "import os\n"
-        "print(os)"
-    ));
+    EXPECT_TRUE(analyzeOk(code("import_defines_name")));
 }
 
 TEST(SemaTest, FromImportDefinesName) {
-    EXPECT_TRUE(analyzeOk(
-        "from os import path\n"
-        "print(path)"
-    ));
+    EXPECT_TRUE(analyzeOk(code("from_import_defines_name")));
 }
 
 TEST(SemaTest, ImportAlias) {
-    EXPECT_TRUE(analyzeOk(
-        "import numpy as np\n"
-        "print(np)"
-    ));
+    EXPECT_TRUE(analyzeOk(code("import_alias")));
 }
 
 TEST(SemaTest, GlobalStatement) {
-    EXPECT_TRUE(analyzeOk(
-        "global x\n"
-        "print(x)"
-    ));
+    EXPECT_TRUE(analyzeOk(code("global_statement")));
 }
 
 TEST(SemaTest, BreakInsideLoop) {
-    EXPECT_TRUE(analyzeOk(
-        "while True {\n"
-        "  break\n"
-        "}"
-    ));
+    EXPECT_TRUE(analyzeOk(code("break_inside_loop")));
 }
 
 TEST(SemaTest, BreakOutsideLoop) {
@@ -156,11 +122,7 @@ TEST(SemaTest, BreakOutsideLoop) {
 }
 
 TEST(SemaTest, ContinueInsideLoop) {
-    EXPECT_TRUE(analyzeOk(
-        "while True {\n"
-        "  continue\n"
-        "}"
-    ));
+    EXPECT_TRUE(analyzeOk(code("continue_inside_loop")));
 }
 
 TEST(SemaTest, ContinueOutsideLoop) {
@@ -168,11 +130,7 @@ TEST(SemaTest, ContinueOutsideLoop) {
 }
 
 TEST(SemaTest, ReturnInsideFunction) {
-    EXPECT_TRUE(analyzeOk(
-        "def foo() {\n"
-        "  return 42\n"
-        "}"
-    ));
+    EXPECT_TRUE(analyzeOk(code("return_inside_function")));
 }
 
 TEST(SemaTest, ReturnOutsideFunction) {
@@ -180,24 +138,11 @@ TEST(SemaTest, ReturnOutsideFunction) {
 }
 
 TEST(SemaTest, BreakInFor) {
-    EXPECT_TRUE(analyzeOk(
-        "for i in range(10) {\n"
-        "  if i == 5 {\n"
-        "    break\n"
-        "  }\n"
-        "}"
-    ));
+    EXPECT_TRUE(analyzeOk(code("break_in_for")));
 }
 
 TEST(SemaTest, NestedLoopBreak) {
-    EXPECT_TRUE(analyzeOk(
-        "while True {\n"
-        "  for i in range(10) {\n"
-        "    break\n"
-        "  }\n"
-        "  break\n"
-        "}"
-    ));
+    EXPECT_TRUE(analyzeOk(code("nested_loop_break")));
 }
 
 TEST(SemaTest, TrueConstant) {
@@ -221,55 +166,23 @@ TEST(SemaTest, AllBuiltinsAvailable) {
 }
 
 TEST(SemaTest, TryCatchDefinesHandlerVar) {
-    EXPECT_TRUE(analyzeOk(
-        "try {\n"
-        "  pass\n"
-        "} catch ValueError as e {\n"
-        "  print(e)\n"
-        "}"
-    ));
+    EXPECT_TRUE(analyzeOk(code("try_catch_defines_handler_var")));
 }
 
 TEST(SemaTest, WithStatementDefinesVar) {
-    EXPECT_TRUE(analyzeOk(
-        "class Ctx {\n"
-        "  def __enter__() -> Ctx { return self }\n"
-        "  def __exit__() -> int { return 0 }\n"
-        "}\n"
-        "with Ctx() as f {\n"
-        "  print(f)\n"
-        "}"
-    ));
+    EXPECT_TRUE(analyzeOk(code("with_statement_defines_var")));
 }
 
 TEST(SemaTest, ClassWithMethodUsingSelf) {
-    EXPECT_TRUE(analyzeOk(
-        "class Foo {\n"
-        "  def bar() {\n"
-        "    print(self)\n"
-        "  }\n"
-        "}"
-    ));
+    EXPECT_TRUE(analyzeOk(code("class_with_method_using_self")));
 }
 
 TEST(SemaTest, ImplicitSelfResolvesInBody) {
-    EXPECT_TRUE(analyzeOk(
-        "class Point {\n"
-        "  def move(dx: int) {\n"
-        "    self.x = dx\n"
-        "  }\n"
-        "}"
-    ));
+    EXPECT_TRUE(analyzeOk(code("implicit_self_resolves_in_body")));
 }
 
 TEST(SemaTest, ImplicitSelfNotInParams) {
-    auto module = parse(
-        "class Point {\n"
-        "  def move(dx: int) {\n"
-        "    self.x = dx\n"
-        "  }\n"
-        "}"
-    );
+    auto module = parse(code("implicit_self_not_in_params"));
     ASSERT_NE(module, nullptr);
     Sema sema;
     EXPECT_TRUE(sema.analyze(*module));
@@ -282,24 +195,11 @@ TEST(SemaTest, ImplicitSelfNotInParams) {
 }
 
 TEST(SemaTest, FunctionCallingFunction) {
-    EXPECT_TRUE(analyzeOk(
-        "def add(a: int, b: int) -> int {\n"
-        "  return a + b\n"
-        "}\n"
-        "def main() {\n"
-        "  x: int = add(1, 2)\n"
-        "  print(x)\n"
-        "}"
-    ));
+    EXPECT_TRUE(analyzeOk(code("function_calling_function")));
 }
 
 TEST(SemaTest, AssignmentInCondition) {
-    EXPECT_TRUE(analyzeOk(
-        "x: int = 10\n"
-        "if x {\n"
-        "  print(x)\n"
-        "}"
-    ));
+    EXPECT_TRUE(analyzeOk(code("assignment_in_condition")));
 }
 
 TEST(SemaTest, ConstDeclOk) {
@@ -319,52 +219,22 @@ TEST(SemaTest, StaticFieldOk) {
 }
 
 TEST(SemaTest, DefCtorOk) {
-    EXPECT_TRUE(analyzeOk(
-        "class Foo {\n"
-        "  def(x: int) {\n"
-        "    self.x = x\n"
-        "  }\n"
-        "}"
-    ));
+    EXPECT_TRUE(analyzeOk(code("def_ctor_ok")));
 }
 
 TEST(SemaTest, MatchCaptureInOrSubPattern) {
-    EXPECT_TRUE(analyzeOk(
-        "x: int = 5\n"
-        "match x {\n"
-        "  case 1 | n { print(n) }\n"
-        "}\n"
-    ));
+    EXPECT_TRUE(analyzeOk(code("match_capture_in_or_sub_pattern")));
 }
 
 TEST(SemaTest, ModuleLevelDeferRejected) {
-    EXPECT_TRUE(analyzeHasErrors(
-        "def f() -> None { pass }\n"
-        "defer f()\n"));
+    EXPECT_TRUE(analyzeHasErrors(code("module_level_defer_rejected")));
 }
 
 TEST(SemaTest, DeferInsideFunctionAccepted) {
-    EXPECT_TRUE(analyzeOk(
-        "def f() -> None { pass }\n"
-        "def g() -> None {\n"
-        "    defer f()\n"
-        "}\n"));
+    EXPECT_TRUE(analyzeOk(code("defer_inside_function_accepted")));
 }
 
 TEST(SemaTest, ExceptAsTargetIsHandlerLocal) {
-    EXPECT_TRUE(analyzeHasErrors(
-        "try {\n"
-        "    raise ValueError(\"x\")\n"
-        "} except ValueError as ex {\n"
-        "    print(ex)\n"
-        "}\n"
-        "print(ex)\n"));
-    EXPECT_TRUE(analyzeOk(
-        "e: str = \"outer\"\n"
-        "try {\n"
-        "    raise ValueError(\"x\")\n"
-        "} except ValueError as e {\n"
-        "    print(e)\n"
-        "}\n"
-        "print(e)\n"));
+    EXPECT_TRUE(analyzeHasErrors(code("except_as_target_is_handler_local")));
+    EXPECT_TRUE(analyzeOk(code("except_as_target_is_handler_local_2")));
 }

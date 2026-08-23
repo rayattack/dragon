@@ -156,6 +156,11 @@ private:
     void popScope();
     Scope* currentScope();
 
+    void checkComprehension(const std::vector<std::string>& varNames,
+                            Expr* iterable, Expr* condition,
+                            std::vector<CompClause>& extraClauses,
+                            std::initializer_list<Expr*> results);
+
     void defineBuiltins();
     void resolveImport(const std::string& moduleName);
     bool isValidAssignmentTarget(Expr* expr);

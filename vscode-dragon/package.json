@@ -3,7 +3,7 @@
     "publisher": "tbhi",
     "displayName": "Dragon Language Support",
     "description": "Language support for Dragon (.dr)",
-    "version": "0.0.8",
+    "version": "0.0.9",
     "engines": {
         "vscode": "^1.74.0"
     },
@@ -33,6 +33,16 @@
                 "language": "dragon",
                 "scopeName": "source.dragon",
                 "path": "./syntaxes/dragon.tmLanguage.json"
+            },
+            {
+                "scopeName": "markdown.dragon.codeblock",
+                "path": "./syntaxes/dragon-markdown-injection.json",
+                "injectTo": [
+                    "text.html.markdown"
+                ],
+                "embeddedLanguages": {
+                    "meta.embedded.block.dragon": "dragon"
+                }
             }
         ]
     },

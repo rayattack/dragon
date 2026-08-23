@@ -233,6 +233,150 @@ bool CodeGen::Impl::emitContractMethodCall(CodeGen& cg, CallExpr& node,
     return true;
 }
 
+struct CodeGen::MethodCallLowering {
+    const std::string& method;
+    const std::string& className;
+    const std::string& methodFuncName;
+    llvm::Function* methodFunc;
+    bool isStaticCall;
+    std::vector<llvm::Value*>& args;
+    std::vector<std::pair<llvm::Value*, Impl::VarKind>>& argTemps;
+};
+
+void CodeGen::emitResolvedMethodCall(CallExpr& node, MethodCallLowering& ml) {
+    auto methodFuncType = ml.methodFunc->getFunctionType();
+    auto mpkIt = impl_->funcParamKinds.find(ml.methodFuncName);
+    unsigned paramOffset = ml.isStaticCall ? 0 : 1;
+    if (impl_->funcVarArgInfo.count(ml.methodFuncName)) {
+        if (!impl_->packVarArgMethodArgs(
+                *this, node, ml.methodFuncName, methodFuncType, ml.args,
+                ml.argTemps, "method '" + ml.method + "'"))
+            return;
+    } else if (callHasSpread(node)) {
+        if (!impl_->expandSpreadCallArgs(
+                *this, ml.methodFunc, node, ml.args, ml.argTemps,
+                "method '" + ml.method + "'"))
+            return;
+    } else {
+        for (size_t i = 0; i < node.args.size(); ++i) {
+            node.args[i]->accept(*this);
+            llvm::Value* arg = impl_->lastValue;
+            unsigned paramIdx = (unsigned)(i + paramOffset);
+            // An own param ADOPTS the arg's +1: the callee releases it; a
+            // caller drain would double-free (A/B-proven fresh-temp probe).
+            bool argDrained = impl_->paramIsOwn(ml.methodFuncName, paramIdx);
+            if (!argDrained &&
+                mpkIt != impl_->funcParamKinds.end() &&
+                paramIdx < mpkIt->second.size()) {
+                Impl::VarKind dk = impl_->argTempDecrefKind(
+                    node.args[i].get(), mpkIt->second[paramIdx], arg);
+                if (dk != Impl::VarKind::Other) {
+                    ml.argTemps.emplace_back(arg, dk);
+                    argDrained = true;
+                }
+            }
+            if (!argDrained) {
+                if (arg->getType() == impl_->boxType) {
+                    if (impl_->isOwnedBoxResult(arg))
+                        ml.argTemps.emplace_back(arg, Impl::VarKind::Union);
+                } else {
+                    // ownedTempDrainKind gates on the expression first, so a borrowed
+                    // read never double-frees (A/B-proven UAF, test_augassign_targets).
+                    Impl::VarKind dk = impl_->ownedTempDrainKind(
+                        node.args[i].get(), arg);
+                    if (dk != Impl::VarKind::Other)
+                        ml.argTemps.emplace_back(arg, dk);
+                }
+            }
+            if (paramIdx < methodFuncType->getNumParams())
+                arg = impl_->coerceArgFromExpr(node.args[i].get(), arg, methodFuncType->getParamType(paramIdx));
+            ml.args.push_back(arg);
+        }
+        if (!node.kwArgs.empty()) {
+            auto pnIt = impl_->funcParamNames.find(ml.methodFuncName);
+            if (pnIt != impl_->funcParamNames.end()) {
+                const auto& paramNames = pnIt->second;
+                size_t numParams = methodFuncType->getNumParams();
+                if (ml.args.size() < numParams)
+                    ml.args.resize(numParams, nullptr);
+                for (auto& [kwName, kwVal] : node.kwArgs) {
+                    auto nameIt = std::find(paramNames.begin(),
+                                            paramNames.end(), kwName);
+                    if (nameIt == paramNames.end()) {
+                        impl_->addError(
+                            "method '" + ml.method +
+                            "' got an unexpected keyword argument '" +
+                            kwName + "'",
+                            node.location());
+                        return;
+                    }
+                    size_t idx = (size_t)std::distance(
+                        paramNames.begin(), nameIt);
+                    if (idx >= numParams || ml.args[idx] != nullptr) {
+                        impl_->addError(
+                            "method '" + ml.method +
+                            "' got multiple values for argument '" +
+                            kwName + "'",
+                            node.location());
+                        return;
+                    }
+                    kwVal->accept(*this);
+                    llvm::Value* arg = impl_->lastValue;
+                    if (!impl_->paramIsOwn(ml.methodFuncName, (unsigned)idx) &&
+                        mpkIt != impl_->funcParamKinds.end() &&
+                        idx < mpkIt->second.size()) {
+                        Impl::VarKind dk = impl_->argTempDecrefKind(
+                            kwVal.get(), mpkIt->second[idx], arg);
+                        if (dk != Impl::VarKind::Other)
+                            ml.argTemps.emplace_back(arg, dk);
+                    }
+                    ml.args[idx] = impl_->coerceArgFromExpr(
+                        kwVal.get(), arg,
+                        methodFuncType->getParamType(idx));
+                }
+            }
+        }
+    }
+    impl_->fillDefaultArgs(ml.methodFuncName, ml.methodFunc, ml.args, *this,
+                           &ml.argTemps);
+
+    llvm::Value* callee = ml.methodFunc;
+    if (!ml.isStaticCall && impl_->methodIsOverridden(ml.className, ml.method)) {
+        auto idxIt = impl_->classMethodVtableIndicesBySym.find(impl_->classSym(ml.className));
+        if (idxIt != impl_->classMethodVtableIndicesBySym.end()) {
+            auto mIt = idxIt->second.find(ml.method);
+            if (mIt != idxIt->second.end()) {
+                auto* headerTy = llvm::StructType::get(*impl_->context,
+                    {impl_->i64Type, impl_->i64Type, impl_->i8PtrType});
+                auto* vtSlot = impl_->builder->CreateStructGEP(
+                    headerTy, ml.args[0], 2, "vt_slot");
+                auto* vtPtr = impl_->builder->CreateLoad(
+                    impl_->i8PtrType, vtSlot, "vtable");
+                auto* vtArrTy = llvm::ArrayType::get(impl_->i8PtrType, 0);
+                auto* mSlot = impl_->builder->CreateGEP(vtArrTy, vtPtr,
+                    {impl_->builder->getInt64(0),
+                     impl_->builder->getInt64((int64_t)mIt->second)},
+                    "method_slot");
+                callee = impl_->builder->CreateLoad(
+                    impl_->i8PtrType, mSlot, "method_ptr");
+            }
+        }
+    }
+
+    auto argTempBases = impl_->pushArgTempCleanups(ml.argTemps);
+    if (methodFuncType->getReturnType()->isVoidTy()) {
+        impl_->builder->CreateCall(methodFuncType, callee, ml.args);
+        impl_->lastValue = llvm::ConstantPointerNull::get(
+            llvm::PointerType::getUnqual(*impl_->context));
+    } else {
+        impl_->lastValue = impl_->normalizeIntC(
+            impl_->builder->CreateCall(methodFuncType, callee, ml.args, "mcall"));
+    }
+    impl_->popArgTempCleanups(argTempBases);
+    impl_->drainBorrowTemps(ml.argTemps);
+    impl_->emitMoveOutSlots(node);
+}
+
 bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
     std::string method = attr.attribute;
     if (node.resolvedMethodOverload >= 0)
@@ -2071,7 +2215,6 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             if (methodFunc) {
                 bool isStaticCall = impl_->staticMethods.count(methodFuncName) > 0;
                 std::vector<llvm::Value*> args;
-                auto methodFuncType = methodFunc->getFunctionType();
 
                 if (!isStaticCall) {
                     attr.object->accept(*this);
@@ -2082,136 +2225,9 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 }
 
                 std::vector<std::pair<llvm::Value*, Impl::VarKind>> argTemps;
-                auto mpkIt = impl_->funcParamKinds.find(methodFuncName);
-                unsigned paramOffset = isStaticCall ? 0 : 1;
-                if (impl_->funcVarArgInfo.count(methodFuncName)) {
-                    if (!impl_->packVarArgMethodArgs(
-                            *this, node, methodFuncName, methodFuncType, args,
-                            argTemps, "method '" + method + "'"))
-                        return true;
-                } else if (callHasSpread(node)) {
-                    if (!impl_->expandSpreadCallArgs(
-                            *this, methodFunc, node, args, argTemps,
-                            "method '" + method + "'"))
-                        return true;
-                } else {
-                for (size_t i = 0; i < node.args.size(); ++i) {
-                    node.args[i]->accept(*this);
-                    llvm::Value* arg = impl_->lastValue;
-                    unsigned paramIdx = (unsigned)(i + paramOffset);
-                    // An own param ADOPTS the arg's +1: the callee releases it; a
-                    // caller drain would double-free (A/B-proven fresh-temp probe).
-                    bool argDrained = impl_->paramIsOwn(methodFuncName, paramIdx);
-                    if (!argDrained &&
-                        mpkIt != impl_->funcParamKinds.end() &&
-                        paramIdx < mpkIt->second.size()) {
-                        Impl::VarKind dk = impl_->argTempDecrefKind(
-                            node.args[i].get(), mpkIt->second[paramIdx], arg);
-                        if (dk != Impl::VarKind::Other) {
-                            argTemps.emplace_back(arg, dk);
-                            argDrained = true;
-                        }
-                    }
-                    if (!argDrained) {
-                        if (arg->getType() == impl_->boxType) {
-                            if (impl_->isOwnedBoxResult(arg))
-                                argTemps.emplace_back(arg, Impl::VarKind::Union);
-                        } else {
-                            // ownedTempDrainKind gates on the expression first, so a borrowed
-                            // read never double-frees (A/B-proven UAF, test_augassign_targets).
-                            Impl::VarKind dk = impl_->ownedTempDrainKind(
-                                node.args[i].get(), arg);
-                            if (dk != Impl::VarKind::Other)
-                                argTemps.emplace_back(arg, dk);
-                        }
-                    }
-                    if (paramIdx < methodFuncType->getNumParams())
-                        arg = impl_->coerceArgFromExpr(node.args[i].get(), arg, methodFuncType->getParamType(paramIdx));
-                    args.push_back(arg);
-                }
-                if (!node.kwArgs.empty()) {
-                    auto pnIt = impl_->funcParamNames.find(methodFuncName);
-                    if (pnIt != impl_->funcParamNames.end()) {
-                        const auto& paramNames = pnIt->second;
-                        size_t numParams = methodFuncType->getNumParams();
-                        if (args.size() < numParams)
-                            args.resize(numParams, nullptr);
-                        for (auto& [kwName, kwVal] : node.kwArgs) {
-                            auto nameIt = std::find(paramNames.begin(),
-                                                    paramNames.end(), kwName);
-                            if (nameIt == paramNames.end()) {
-                                impl_->addError(
-                                    "method '" + method +
-                                    "' got an unexpected keyword argument '" +
-                                    kwName + "'",
-                                    node.location());
-                                return true;
-                            }
-                            size_t idx = (size_t)std::distance(
-                                paramNames.begin(), nameIt);
-                            if (idx >= numParams || args[idx] != nullptr) {
-                                impl_->addError(
-                                    "method '" + method +
-                                    "' got multiple values for argument '" +
-                                    kwName + "'",
-                                    node.location());
-                                return true;
-                            }
-                            kwVal->accept(*this);
-                            llvm::Value* arg = impl_->lastValue;
-                            if (!impl_->paramIsOwn(methodFuncName, (unsigned)idx) &&
-                                mpkIt != impl_->funcParamKinds.end() &&
-                                idx < mpkIt->second.size()) {
-                                Impl::VarKind dk = impl_->argTempDecrefKind(
-                                    kwVal.get(), mpkIt->second[idx], arg);
-                                if (dk != Impl::VarKind::Other)
-                                    argTemps.emplace_back(arg, dk);
-                            }
-                            args[idx] = impl_->coerceArgFromExpr(
-                                kwVal.get(), arg,
-                                methodFuncType->getParamType(idx));
-                        }
-                    }
-                }
-                }
-                impl_->fillDefaultArgs(methodFuncName, methodFunc, args, *this,
-                                       &argTemps);
-
-                llvm::Value* callee = methodFunc;
-                if (!isStaticCall && impl_->methodIsOverridden(className, method)) {
-                    auto idxIt = impl_->classMethodVtableIndicesBySym.find(impl_->classSym(className));
-                    if (idxIt != impl_->classMethodVtableIndicesBySym.end()) {
-                        auto mIt = idxIt->second.find(method);
-                        if (mIt != idxIt->second.end()) {
-                            auto* headerTy = llvm::StructType::get(*impl_->context,
-                                {impl_->i64Type, impl_->i64Type, impl_->i8PtrType});
-                            auto* vtSlot = impl_->builder->CreateStructGEP(
-                                headerTy, args[0], 2, "vt_slot");
-                            auto* vtPtr = impl_->builder->CreateLoad(
-                                impl_->i8PtrType, vtSlot, "vtable");
-                            auto* vtArrTy = llvm::ArrayType::get(impl_->i8PtrType, 0);
-                            auto* mSlot = impl_->builder->CreateGEP(vtArrTy, vtPtr,
-                                {impl_->builder->getInt64(0),
-                                 impl_->builder->getInt64((int64_t)mIt->second)},
-                                "method_slot");
-                            callee = impl_->builder->CreateLoad(
-                                impl_->i8PtrType, mSlot, "method_ptr");
-                        }
-                    }
-                }
-
-                auto argTempBases = impl_->pushArgTempCleanups(argTemps);
-                if (methodFuncType->getReturnType()->isVoidTy()) {
-                    impl_->builder->CreateCall(methodFuncType, callee, args);
-                    impl_->lastValue = llvm::ConstantPointerNull::get(
-                        llvm::PointerType::getUnqual(*impl_->context));
-                } else {
-                    impl_->lastValue = impl_->normalizeIntC(
-                        impl_->builder->CreateCall(methodFuncType, callee, args, "mcall"));
-                }
-                impl_->popArgTempCleanups(argTempBases);
-                impl_->drainBorrowTemps(argTemps);
-                impl_->emitMoveOutSlots(node);
+                MethodCallLowering ml{method, className, methodFuncName,
+                                      methodFunc, isStaticCall, args, argTemps};
+                emitResolvedMethodCall(node, ml);
                 return true;
             }
 
@@ -2427,7 +2443,6 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 owningModule, className, method, &methodFuncName);
             if (methodFunc) {
                 bool isStaticCall = impl_->staticMethods.count(methodFuncName) > 0;
-                auto methodFuncType = methodFunc->getFunctionType();
                 std::vector<llvm::Value*> args;
                 std::vector<std::pair<llvm::Value*, Impl::VarKind>> argTemps;
                 if (!isStaticCall) {
@@ -2440,134 +2455,9 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                         argTemps.emplace_back(obj, Impl::VarKind::ClassInstance);
                     args.push_back(obj);
                 }
-                auto mpkIt = impl_->funcParamKinds.find(methodFuncName);
-                unsigned paramOffset = isStaticCall ? 0 : 1;
-                if (impl_->funcVarArgInfo.count(methodFuncName)) {
-                    if (!impl_->packVarArgMethodArgs(
-                            *this, node, methodFuncName, methodFuncType, args,
-                            argTemps, "method '" + method + "'"))
-                        return true;
-                } else if (callHasSpread(node)) {
-                    if (!impl_->expandSpreadCallArgs(
-                            *this, methodFunc, node, args, argTemps,
-                            "method '" + method + "'"))
-                        return true;
-                } else {
-                for (size_t i = 0; i < node.args.size(); ++i) {
-                    node.args[i]->accept(*this);
-                    llvm::Value* arg = impl_->lastValue;
-                    unsigned paramIdx = (unsigned)(i + paramOffset);
-                    // An own param ADOPTS the arg's +1: the callee releases it; a
-                    // caller drain would double-free (A/B-proven fresh-temp probe).
-                    bool argDrained = impl_->paramIsOwn(methodFuncName, paramIdx);
-                    if (!argDrained &&
-                        mpkIt != impl_->funcParamKinds.end() &&
-                        paramIdx < mpkIt->second.size()) {
-                        Impl::VarKind dk = impl_->argTempDecrefKind(
-                            node.args[i].get(), mpkIt->second[paramIdx], arg);
-                        if (dk != Impl::VarKind::Other) {
-                            argTemps.emplace_back(arg, dk);
-                            argDrained = true;
-                        }
-                    }
-                    if (!argDrained) {
-                        if (arg->getType() == impl_->boxType) {
-                            if (impl_->isOwnedBoxResult(arg))
-                                argTemps.emplace_back(arg, Impl::VarKind::Union);
-                        } else {
-                            Impl::VarKind dk = impl_->ownedTempDrainKind(
-                                node.args[i].get(), arg);
-                            if (dk != Impl::VarKind::Other)
-                                argTemps.emplace_back(arg, dk);
-                        }
-                    }
-                    if (paramIdx < methodFuncType->getNumParams())
-                        arg = impl_->coerceArgFromExpr(node.args[i].get(), arg, methodFuncType->getParamType(paramIdx));
-                    args.push_back(arg);
-                }
-                if (!node.kwArgs.empty()) {
-                    auto pnIt = impl_->funcParamNames.find(methodFuncName);
-                    if (pnIt != impl_->funcParamNames.end()) {
-                        const auto& paramNames = pnIt->second;
-                        size_t numParams = methodFuncType->getNumParams();
-                        if (args.size() < numParams)
-                            args.resize(numParams, nullptr);
-                        for (auto& [kwName, kwVal] : node.kwArgs) {
-                            auto nameIt = std::find(paramNames.begin(),
-                                                    paramNames.end(), kwName);
-                            if (nameIt == paramNames.end()) {
-                                impl_->addError(
-                                    "method '" + method +
-                                    "' got an unexpected keyword argument '" +
-                                    kwName + "'",
-                                    node.location());
-                                return true;
-                            }
-                            size_t idx = (size_t)std::distance(
-                                paramNames.begin(), nameIt);
-                            if (idx >= numParams || args[idx] != nullptr) {
-                                impl_->addError(
-                                    "method '" + method +
-                                    "' got multiple values for argument '" +
-                                    kwName + "'",
-                                    node.location());
-                                return true;
-                            }
-                            kwVal->accept(*this);
-                            llvm::Value* arg = impl_->lastValue;
-                            if (!impl_->paramIsOwn(methodFuncName, (unsigned)idx) &&
-                                mpkIt != impl_->funcParamKinds.end() &&
-                                idx < mpkIt->second.size()) {
-                                Impl::VarKind dk = impl_->argTempDecrefKind(
-                                    kwVal.get(), mpkIt->second[idx], arg);
-                                if (dk != Impl::VarKind::Other)
-                                    argTemps.emplace_back(arg, dk);
-                            }
-                            args[idx] = impl_->coerceArgFromExpr(
-                                kwVal.get(), arg,
-                                methodFuncType->getParamType(idx));
-                        }
-                    }
-                }
-                }
-                impl_->fillDefaultArgs(methodFuncName, methodFunc, args, *this,
-                                       &argTemps);
-
-                llvm::Value* callee = methodFunc;
-                if (!isStaticCall && impl_->methodIsOverridden(className, method)) {
-                    auto idxIt = impl_->classMethodVtableIndicesBySym.find(impl_->classSym(className));
-                    if (idxIt != impl_->classMethodVtableIndicesBySym.end()) {
-                        auto mIt = idxIt->second.find(method);
-                        if (mIt != idxIt->second.end()) {
-                            auto* headerTy = llvm::StructType::get(*impl_->context,
-                                {impl_->i64Type, impl_->i64Type, impl_->i8PtrType});
-                            auto* vtSlot = impl_->builder->CreateStructGEP(
-                                headerTy, args[0], 2, "vt_slot");
-                            auto* vtPtr = impl_->builder->CreateLoad(
-                                impl_->i8PtrType, vtSlot, "vtable");
-                            auto* vtArrTy = llvm::ArrayType::get(impl_->i8PtrType, 0);
-                            auto* mSlot = impl_->builder->CreateGEP(vtArrTy, vtPtr,
-                                {impl_->builder->getInt64(0),
-                                 impl_->builder->getInt64((int64_t)mIt->second)},
-                                "method_slot");
-                            callee = impl_->builder->CreateLoad(
-                                impl_->i8PtrType, mSlot, "method_ptr");
-                        }
-                    }
-                }
-
-                auto argTempBases = impl_->pushArgTempCleanups(argTemps);
-                if (methodFuncType->getReturnType()->isVoidTy()) {
-                    impl_->builder->CreateCall(methodFuncType, callee, args);
-                    impl_->lastValue = llvm::ConstantPointerNull::get(
-                        llvm::PointerType::getUnqual(*impl_->context));
-                } else {
-                    impl_->lastValue = impl_->normalizeIntC(
-                        impl_->builder->CreateCall(methodFuncType, callee, args, "mcall"));
-                }
-                impl_->popArgTempCleanups(argTempBases);
-                impl_->drainBorrowTemps(argTemps);
-                impl_->emitMoveOutSlots(node);
+                MethodCallLowering ml{method, className, methodFuncName,
+                                      methodFunc, isStaticCall, args, argTemps};
+                emitResolvedMethodCall(node, ml);
                 return true;
             }
         }

@@ -2,6 +2,147 @@
 
 namespace dragon {
 
+struct CodeGen::BuiltinLowering {
+    std::vector<std::pair<llvm::Value*, Impl::VarKind>> temps;
+    std::vector<llvm::Value*> bases;
+};
+
+bool CodeGen::tryEmitPrintDictSubscriptRaw(SubscriptExpr& sub, llvm::Value* arg,
+                                           bool staticContainerVal) {
+    bool isSubDict = dynamic_cast<DictExpr*>(sub.object.get()) != nullptr ||
+                     impl_->exprNameHasVarKind(sub.object.get(), Impl::VarKind::Dict);
+    if (!isSubDict || staticContainerVal) return false;
+
+    llvm::Type* argType = arg->getType();
+    if (argType == impl_->f64Type) {
+        impl_->builder->CreateCall(
+            impl_->runtimeFuncs["dragon_print_float_raw"], {arg});
+        return true;
+    }
+    if (argType->isPointerTy() && argType != impl_->i64Type) {
+        impl_->builder->CreateCall(
+            impl_->runtimeFuncs["dragon_print_str_raw"], {arg});
+        return true;
+    }
+    Type::Kind subDictKk = impl_->resolveDictKeyKind(sub.object.get());
+    bool intKeyedSub = subDictKk == Type::Kind::Int ||
+                       subDictKk == Type::Kind::Float;
+    sub.object->accept(*this);
+    llvm::Value* dict = impl_->lastValue;
+    sub.index->accept(*this);
+    llvm::Value* key = impl_->lastValue;
+    if (intKeyedSub) {
+        if (subDictKk == Type::Kind::Float)
+            key = impl_->emitFloatDictKeyBits(key);
+        if (key->getType() == impl_->i1Type)
+            key = impl_->builder->CreateZExt(key, impl_->i64Type);
+        else if (key->getType()->isPointerTy())
+            key = impl_->builder->CreatePtrToInt(key, impl_->i64Type);
+        else if (key->getType() != impl_->i64Type)
+            key = impl_->builder->CreateZExtOrTrunc(key, impl_->i64Type);
+        auto* tag = impl_->builder->CreateCall(
+            impl_->runtimeFuncs["dragon_dict_int_get_tag"], {dict, key}, "dtag.i");
+        impl_->builder->CreateCall(
+            impl_->runtimeFuncs["dragon_print_tagged_raw"], {arg, tag});
+    } else {
+        auto* tag = impl_->builder->CreateCall(
+            impl_->runtimeFuncs["dragon_dict_get_tag"], {dict, key}, "dtag");
+        impl_->builder->CreateCall(
+            impl_->runtimeFuncs["dragon_print_tagged_raw"], {arg, tag});
+    }
+    return true;
+}
+
+bool CodeGen::tryEmitPrintDictAttrRaw(AttributeExpr& attr, llvm::Value* arg,
+                                      bool staticContainerVal) {
+    auto* objName = dynamic_cast<NameExpr*>(attr.object.get());
+    if (!objName || staticContainerVal) return false;
+    if (impl_->lookupVarKind(objName->name) != Impl::VarKind::Dict) return false;
+
+    llvm::Type* argType = arg->getType();
+    if (argType == impl_->f64Type) {
+        impl_->builder->CreateCall(
+            impl_->runtimeFuncs["dragon_print_float_raw"], {arg});
+        return true;
+    }
+    if (argType->isPointerTy() && argType != impl_->i64Type) {
+        impl_->builder->CreateCall(
+            impl_->runtimeFuncs["dragon_print_str_raw"], {arg});
+        return true;
+    }
+    attr.object->accept(*this);
+    llvm::Value* dict = impl_->lastValue;
+    auto* keyStr = impl_->builder->CreateGlobalString(attr.attribute);
+    auto* tag = impl_->builder->CreateCall(
+        impl_->runtimeFuncs["dragon_dict_get_tag"], {dict, keyStr}, "dtag");
+    impl_->builder->CreateCall(
+        impl_->runtimeFuncs["dragon_print_tagged_raw"], {arg, tag});
+    return true;
+}
+
+bool CodeGen::tryEmitPrintUnionRaw(Expr* argExpr, llvm::Value* arg) {
+    auto* argName = dynamic_cast<NameExpr*>(argExpr);
+    if (!argName) return false;
+    if (impl_->lookupVarKind(argName->name) != Impl::VarKind::Union ||
+        arg->getType() != impl_->boxType)
+        return false;
+
+    auto* tag = impl_->boxTag(arg, "print.tag");
+    auto* payload = impl_->boxPayloadI64(arg, "print.payload");
+    auto* func2 = impl_->currentFunction;
+    auto* mergePrint = llvm::BasicBlock::Create(
+        *impl_->context, "print.union.end", func2);
+    auto* defaultBB = llvm::BasicBlock::Create(
+        *impl_->context, "print.union.default", func2);
+    auto* sw = impl_->builder->CreateSwitch(tag, defaultBB, 6);
+
+    auto* intBB = llvm::BasicBlock::Create(*impl_->context, "print.int", func2);
+    sw->addCase(llvm::cast<llvm::ConstantInt>(llvm::ConstantInt::get(impl_->i64Type, 0)), intBB);
+    impl_->builder->SetInsertPoint(intBB);
+    impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_print_int_raw"], {payload});
+    impl_->builder->CreateBr(mergePrint);
+
+    auto* strBB = llvm::BasicBlock::Create(*impl_->context, "print.str", func2);
+    sw->addCase(llvm::cast<llvm::ConstantInt>(llvm::ConstantInt::get(impl_->i64Type, 1)), strBB);
+    impl_->builder->SetInsertPoint(strBB);
+    auto* strPtr = impl_->builder->CreateIntToPtr(payload, impl_->i8PtrType);
+    impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_print_str_raw"], {strPtr});
+    impl_->builder->CreateBr(mergePrint);
+
+    auto* floatBB = llvm::BasicBlock::Create(*impl_->context, "print.float", func2);
+    sw->addCase(llvm::cast<llvm::ConstantInt>(llvm::ConstantInt::get(impl_->i64Type, 2)), floatBB);
+    impl_->builder->SetInsertPoint(floatBB);
+    auto* floatVal = impl_->builder->CreateBitCast(payload, impl_->f64Type);
+    impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_print_float_raw"], {floatVal});
+    impl_->builder->CreateBr(mergePrint);
+
+    auto* boolBB = llvm::BasicBlock::Create(*impl_->context, "print.bool", func2);
+    sw->addCase(llvm::cast<llvm::ConstantInt>(llvm::ConstantInt::get(impl_->i64Type, 3)), boolBB);
+    impl_->builder->SetInsertPoint(boolBB);
+    impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_print_bool_raw"], {payload});
+    impl_->builder->CreateBr(mergePrint);
+
+    auto* listBB = llvm::BasicBlock::Create(*impl_->context, "print.list", func2);
+    sw->addCase(llvm::cast<llvm::ConstantInt>(llvm::ConstantInt::get(impl_->i64Type, 5)), listBB);
+    impl_->builder->SetInsertPoint(listBB);
+    auto* listPtr = impl_->builder->CreateIntToPtr(payload, impl_->i8PtrType);
+    impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_print_list_int_raw"], {listPtr});
+    impl_->builder->CreateBr(mergePrint);
+
+    auto* dictBB = llvm::BasicBlock::Create(*impl_->context, "print.dict", func2);
+    sw->addCase(llvm::cast<llvm::ConstantInt>(llvm::ConstantInt::get(impl_->i64Type, 6)), dictBB);
+    impl_->builder->SetInsertPoint(dictBB);
+    auto* dictPtr = impl_->builder->CreateIntToPtr(payload, impl_->i8PtrType);
+    impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_print_dict_raw"], {dictPtr});
+    impl_->builder->CreateBr(mergePrint);
+
+    impl_->builder->SetInsertPoint(defaultBB);
+    impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_print_int_raw"], {payload});
+    impl_->builder->CreateBr(mergePrint);
+
+    impl_->builder->SetInsertPoint(mergePrint);
+    return true;
+}
 
 void CodeGen::emitPrintArgRaw(Expr* argExpr) {
     argExpr->accept(*this);
@@ -27,76 +168,12 @@ void CodeGen::emitPrintArgRaw(Expr* argExpr) {
     }
 
     if (auto* subscript = dynamic_cast<SubscriptExpr*>(argExpr)) {
-        bool isSubDict = dynamic_cast<DictExpr*>(subscript->object.get()) != nullptr;
-        if (!isSubDict) {
-            if (auto* sn = dynamic_cast<NameExpr*>(subscript->object.get())) {
-                isSubDict = impl_->lookupVarKind(sn->name) == Impl::VarKind::Dict;
-            }
-        }
-        if (isSubDict && !staticContainerVal) {
-            if (argType == impl_->f64Type) {
-                impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_print_float_raw"], {arg});
-                return;
-            }
-            if (argType->isPointerTy() && argType != impl_->i64Type) {
-                impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_print_str_raw"], {arg});
-                return;
-            }
-            Type::Kind subDictKk =
-                impl_->resolveDictKeyKind(subscript->object.get());
-            bool intKeyedSub = subDictKk == Type::Kind::Int ||
-                               subDictKk == Type::Kind::Float;
-            subscript->object->accept(*this);
-            llvm::Value* dict = impl_->lastValue;
-            subscript->index->accept(*this);
-            llvm::Value* key = impl_->lastValue;
-            if (intKeyedSub) {
-                if (subDictKk == Type::Kind::Float)
-                    key = impl_->emitFloatDictKeyBits(key);
-                if (key->getType() == impl_->i1Type)
-                    key = impl_->builder->CreateZExt(key, impl_->i64Type);
-                else if (key->getType()->isPointerTy())
-                    key = impl_->builder->CreatePtrToInt(key, impl_->i64Type);
-                else if (key->getType() != impl_->i64Type)
-                    key = impl_->builder->CreateZExtOrTrunc(key, impl_->i64Type);
-                auto* tag = impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_dict_int_get_tag"], {dict, key}, "dtag.i");
-                impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_print_tagged_raw"], {arg, tag});
-            } else {
-                auto* tag = impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_dict_get_tag"], {dict, key}, "dtag");
-                impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_print_tagged_raw"], {arg, tag});
-            }
+        if (tryEmitPrintDictSubscriptRaw(*subscript, arg, staticContainerVal))
             return;
-        }
     }
     if (auto* dotAccess = dynamic_cast<AttributeExpr*>(argExpr)) {
-        if (auto* objName = dynamic_cast<NameExpr*>(dotAccess->object.get())) {
-            if (impl_->lookupVarKind(objName->name) == Impl::VarKind::Dict && !staticContainerVal) {
-                if (argType == impl_->f64Type) {
-                    impl_->builder->CreateCall(
-                        impl_->runtimeFuncs["dragon_print_float_raw"], {arg});
-                    return;
-                }
-                if (argType->isPointerTy() && argType != impl_->i64Type) {
-                    impl_->builder->CreateCall(
-                        impl_->runtimeFuncs["dragon_print_str_raw"], {arg});
-                    return;
-                }
-                dotAccess->object->accept(*this);
-                llvm::Value* dict = impl_->lastValue;
-                auto* keyStr = impl_->builder->CreateGlobalString(dotAccess->attribute);
-                auto* tag = impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_dict_get_tag"], {dict, keyStr}, "dtag");
-                impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_print_tagged_raw"], {arg, tag});
-                return;
-            }
-        }
+        if (tryEmitPrintDictAttrRaw(*dotAccess, arg, staticContainerVal))
+            return;
     }
 
     if (auto* argName = dynamic_cast<NameExpr*>(argExpr)) {
@@ -113,102 +190,25 @@ void CodeGen::emitPrintArgRaw(Expr* argExpr) {
         }
     }
 
-    if (auto* argName = dynamic_cast<NameExpr*>(argExpr)) {
-        if (impl_->lookupVarKind(argName->name) == Impl::VarKind::Union &&
-            arg->getType() == impl_->boxType) {
-            auto* tag = impl_->boxTag(arg, "print.tag");
-            auto* payload = impl_->boxPayloadI64(arg, "print.payload");
-            auto* func2 = impl_->currentFunction;
-            auto* mergePrint = llvm::BasicBlock::Create(
-                *impl_->context, "print.union.end", func2);
-            auto* defaultBB = llvm::BasicBlock::Create(
-                *impl_->context, "print.union.default", func2);
-            auto* sw = impl_->builder->CreateSwitch(tag, defaultBB, 6);
+    if (tryEmitPrintUnionRaw(argExpr, arg)) return;
 
-            auto* intBB = llvm::BasicBlock::Create(*impl_->context, "print.int", func2);
-            sw->addCase(llvm::cast<llvm::ConstantInt>(llvm::ConstantInt::get(impl_->i64Type, 0)), intBB);
-            impl_->builder->SetInsertPoint(intBB);
-            impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_print_int_raw"], {payload});
-            impl_->builder->CreateBr(mergePrint);
-
-            auto* strBB = llvm::BasicBlock::Create(*impl_->context, "print.str", func2);
-            sw->addCase(llvm::cast<llvm::ConstantInt>(llvm::ConstantInt::get(impl_->i64Type, 1)), strBB);
-            impl_->builder->SetInsertPoint(strBB);
-            auto* strPtr = impl_->builder->CreateIntToPtr(payload, impl_->i8PtrType);
-            impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_print_str_raw"], {strPtr});
-            impl_->builder->CreateBr(mergePrint);
-
-            auto* floatBB = llvm::BasicBlock::Create(*impl_->context, "print.float", func2);
-            sw->addCase(llvm::cast<llvm::ConstantInt>(llvm::ConstantInt::get(impl_->i64Type, 2)), floatBB);
-            impl_->builder->SetInsertPoint(floatBB);
-            auto* floatVal = impl_->builder->CreateBitCast(payload, impl_->f64Type);
-            impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_print_float_raw"], {floatVal});
-            impl_->builder->CreateBr(mergePrint);
-
-            auto* boolBB = llvm::BasicBlock::Create(*impl_->context, "print.bool", func2);
-            sw->addCase(llvm::cast<llvm::ConstantInt>(llvm::ConstantInt::get(impl_->i64Type, 3)), boolBB);
-            impl_->builder->SetInsertPoint(boolBB);
-            impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_print_bool_raw"], {payload});
-            impl_->builder->CreateBr(mergePrint);
-
-            auto* listBB = llvm::BasicBlock::Create(*impl_->context, "print.list", func2);
-            sw->addCase(llvm::cast<llvm::ConstantInt>(llvm::ConstantInt::get(impl_->i64Type, 5)), listBB);
-            impl_->builder->SetInsertPoint(listBB);
-            auto* listPtr = impl_->builder->CreateIntToPtr(payload, impl_->i8PtrType);
-            impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_print_list_int_raw"], {listPtr});
-            impl_->builder->CreateBr(mergePrint);
-
-            auto* dictBB = llvm::BasicBlock::Create(*impl_->context, "print.dict", func2);
-            sw->addCase(llvm::cast<llvm::ConstantInt>(llvm::ConstantInt::get(impl_->i64Type, 6)), dictBB);
-            impl_->builder->SetInsertPoint(dictBB);
-            auto* dictPtr = impl_->builder->CreateIntToPtr(payload, impl_->i8PtrType);
-            impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_print_dict_raw"], {dictPtr});
-            impl_->builder->CreateBr(mergePrint);
-
-            impl_->builder->SetInsertPoint(defaultBB);
-            impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_print_int_raw"], {payload});
-            impl_->builder->CreateBr(mergePrint);
-
-            impl_->builder->SetInsertPoint(mergePrint);
-            return;
-        }
-    }
-
-    bool isPrintDict = dynamic_cast<DictExpr*>(argExpr) != nullptr;
-    if (!isPrintDict) {
-        if (auto* argName = dynamic_cast<NameExpr*>(argExpr)) {
-            isPrintDict = impl_->lookupVarKind(argName->name) == Impl::VarKind::Dict;
-        }
-    }
+    auto* argNameExpr = dynamic_cast<NameExpr*>(argExpr);
+    bool isPrintDict = dynamic_cast<DictExpr*>(argExpr) != nullptr ||
+                       impl_->exprNameHasVarKind(argExpr, Impl::VarKind::Dict);
     bool isPrintBytes = impl_->exprIsBytes(argExpr);
-    bool isPrintList = !isPrintBytes && dynamic_cast<ListExpr*>(argExpr) != nullptr;
-    if (!isPrintList && !isPrintBytes) {
-        if (auto* argName = dynamic_cast<NameExpr*>(argExpr)) {
-            isPrintList = impl_->lookupVarKind(argName->name) == Impl::VarKind::List;
-        }
-    }
-    bool isPrintTuple = dynamic_cast<TupleExpr*>(argExpr) != nullptr;
-    if (!isPrintTuple) {
-        if (auto* argName = dynamic_cast<NameExpr*>(argExpr)) {
-            isPrintTuple = impl_->lookupVarKind(argName->name) == Impl::VarKind::Tuple;
-        }
-    }
-    bool isPrintSet = dynamic_cast<SetExpr*>(argExpr) != nullptr;
-    if (!isPrintSet) {
-        if (auto* argName = dynamic_cast<NameExpr*>(argExpr)) {
-            isPrintSet = impl_->lookupVarKind(argName->name) == Impl::VarKind::Set;
-        }
-    }
-    if (!isPrintSet && impl_->resolveExprVarKind(argExpr) == Impl::VarKind::Set)
-        isPrintSet = true;
-    bool isPrintDeque = false;
-    if (auto* argName = dynamic_cast<NameExpr*>(argExpr)) {
-        isPrintDeque = impl_->lookupVarKind(argName->name) == Impl::VarKind::Deque;
-        if (!isPrintDeque) {
-            auto dqIt = impl_->varClassNames.find(argName->name);
-            isPrintDeque = dqIt != impl_->varClassNames.end() &&
-                           dqIt->second == "__Deque";
-        }
+    bool isPrintList = !isPrintBytes &&
+                       (dynamic_cast<ListExpr*>(argExpr) != nullptr ||
+                        impl_->exprNameHasVarKind(argExpr, Impl::VarKind::List));
+    bool isPrintTuple = dynamic_cast<TupleExpr*>(argExpr) != nullptr ||
+                        impl_->exprNameHasVarKind(argExpr, Impl::VarKind::Tuple);
+    bool isPrintSet = dynamic_cast<SetExpr*>(argExpr) != nullptr ||
+                      impl_->exprNameHasVarKind(argExpr, Impl::VarKind::Set) ||
+                      impl_->resolveExprVarKind(argExpr) == Impl::VarKind::Set;
+    bool isPrintDeque = impl_->exprNameHasVarKind(argExpr, Impl::VarKind::Deque);
+    if (!isPrintDeque && argNameExpr) {
+        auto dqIt = impl_->varClassNames.find(argNameExpr->name);
+        isPrintDeque = dqIt != impl_->varClassNames.end() &&
+                       dqIt->second == "__Deque";
     }
     if (!isPrintBytes && !isPrintList && !isPrintDict && !isPrintTuple && !isPrintSet &&
         !isPrintDeque && argExpr->type) {
@@ -325,9 +325,397 @@ void CodeGen::emitPrintArgRaw(Expr* argExpr) {
 }
 
 bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
-    std::vector<std::pair<llvm::Value*, Impl::VarKind>> argTemps;
-    std::vector<llvm::Value*> argTempBases;
-    bool builtinHandled = [&]() -> bool {
+    BuiltinLowering bl;
+    bool handled = emitBuiltinCallInner(node, name, bl);
+    impl_->popArgTempCleanups(bl.bases);
+    if (!handled) return false;
+    impl_->drainBorrowTemps(bl.temps);
+    return true;
+}
+
+bool CodeGen::emitLenBuiltin(CallExpr& node, BuiltinLowering& bl) {
+    Expr* a0 = node.args[0].get();
+    bool isDict = dynamic_cast<DictExpr*>(a0) != nullptr ||
+                  impl_->exprNameHasVarKind(a0, Impl::VarKind::Dict);
+    bool isList = dynamic_cast<ListExpr*>(a0) != nullptr ||
+                  impl_->exprNameHasVarKind(a0, Impl::VarKind::List);
+    bool isTuple = dynamic_cast<TupleExpr*>(a0) != nullptr ||
+                   impl_->exprNameHasVarKind(a0, Impl::VarKind::Tuple);
+    bool isSet = dynamic_cast<SetExpr*>(a0) != nullptr ||
+                 impl_->exprNameHasVarKind(a0, Impl::VarKind::Set) ||
+                 impl_->resolveExprVarKind(a0) == Impl::VarKind::Set;
+    if (!isList && !isDict && !isTuple && !isSet) {
+        if (auto* argAttr = dynamic_cast<AttributeExpr*>(a0)) {
+            std::string className;
+            if (auto* objName = dynamic_cast<NameExpr*>(argAttr->object.get()))
+                className = impl_->nameExprClass(objName);
+            if (!className.empty()) {
+                switch (impl_->lookupFieldKind(className, argAttr->attribute)) {
+                    case Impl::VarKind::List:  isList  = true; break;
+                    case Impl::VarKind::Dict:  isDict  = true; break;
+                    case Impl::VarKind::Tuple: isTuple = true; break;
+                    case Impl::VarKind::Set:   isSet   = true; break;
+                    default: break;
+                }
+            }
+        }
+    }
+    if (!isList && !isDict && !isTuple && !isSet && a0->type) {
+        switch (a0->type->kind()) {
+            case Type::Kind::List:  isList  = true; break;
+            case Type::Kind::Dict:  isDict  = true; break;
+            case Type::Kind::Tuple: isTuple = true; break;
+            case Type::Kind::Set:   isSet   = true; break;
+            default: break;
+        }
+    }
+    bool isDeque = impl_->exprNameHasVarKind(a0, Impl::VarKind::Deque);
+    bool isBytes = impl_->exprIsBytes(a0);
+    std::string lenClassName = impl_->resolveExprClassName(a0);
+    a0->accept(*this);
+    llvm::Value* arg = impl_->trackBorrowTempGuarded(a0, impl_->lastValue, bl.temps, bl.bases);
+    if (!lenClassName.empty() && impl_->hasDunder(lenClassName, "__len__") &&
+        (arg->getType() == impl_->i8PtrType || arg->getType()->isPointerTy())) {
+        impl_->lastValue = impl_->callDunder(lenClassName, "__len__", arg);
+        return true;
+    }
+    if (arg->getType() == impl_->boxType) {
+        impl_->lastValue = impl_->builder->CreateCall(
+            impl_->runtimeFuncs["dragon_box_len"], {arg}, "len");
+    } else if (isDeque) {
+        impl_->lastValue = impl_->builder->CreateCall(
+            impl_->runtimeFuncs["dragon_deque_len"], {arg}, "len");
+    } else if (isBytes) {
+        impl_->lastValue = impl_->builder->CreateCall(
+            impl_->runtimeFuncs["dragon_bytes_len"], {arg}, "len");
+    } else if (isTuple) {
+        impl_->lastValue = impl_->builder->CreateCall(
+            impl_->runtimeFuncs["dragon_tuple_len"], {arg}, "len");
+    } else if (isSet) {
+        impl_->lastValue = impl_->builder->CreateCall(
+            impl_->runtimeFuncs["dragon_set_len"], {arg}, "len");
+    } else if (isDict) {
+        impl_->lastValue = impl_->builder->CreateCall(
+            impl_->runtimeFuncs["dragon_dict_len"], {arg}, "len");
+    } else if (isList) {
+        impl_->lastValue = impl_->builder->CreateCall(
+            impl_->runtimeFuncs["dragon_list_len"], {arg}, "len");
+    } else if (arg->getType() == impl_->i8PtrType || arg->getType()->isPointerTy()) {
+        impl_->lastValue = impl_->builder->CreateCall(
+            impl_->runtimeFuncs["dragon_str_len"], {arg}, "len");
+    } else {
+        impl_->addError(
+            "len() operand lowered to a non-container scalar; the call "
+            "would have silently produced 0",
+            node.location());
+        impl_->lastValue = llvm::ConstantInt::get(impl_->i64Type, 0);
+    }
+    return true;
+}
+
+bool CodeGen::tryEmitIsinstanceNicheCheck(CallExpr& node, const std::string& typeName) {
+    const Type* argT = node.args[0]->type.get();
+    if (!argT || argT->kind() != Type::Kind::Union) return false;
+
+    auto& ut = static_cast<const UnionType&>(*argT);
+    const Type* other = nullptr;
+    bool hasNone = false;
+    if (ut.types.size() == 2) {
+        for (auto& m : ut.types) {
+            if (!m) continue;
+            if (m->kind() == Type::Kind::None_) hasNone = true;
+            else other = m.get();
+        }
+    }
+    if (!hasNone || !other) return false;
+
+    const Type* nicheT = nullptr;
+    switch (other->kind()) {
+        case Type::Kind::Str: case Type::Kind::Bytes:
+        case Type::Kind::List: case Type::Kind::Dict:
+        case Type::Kind::Tuple: case Type::Kind::Set:
+        case Type::Kind::Instance:
+            nicheT = other; break;
+        default: break;
+    }
+    if (!nicheT) return false;
+
+    bool matches = false;
+    switch (nicheT->kind()) {
+        case Type::Kind::Str:   matches = (typeName == "str"); break;
+        case Type::Kind::Bytes: matches = (typeName == "bytes"); break;
+        case Type::Kind::List:  matches = (typeName == "list"); break;
+        case Type::Kind::Dict:  matches = (typeName == "dict"); break;
+        case Type::Kind::Tuple: matches = (typeName == "tuple"); break;
+        case Type::Kind::Set:   matches = (typeName == "set"); break;
+        case Type::Kind::Instance: {
+            auto& inst = static_cast<const InstanceType&>(*nicheT);
+            matches = impl_->classIsSubclassOf(
+                inst.classType ? inst.classType->name : "", typeName);
+            break;
+        }
+        default: break;
+    }
+    node.args[0]->accept(*this);
+    llvm::Value* recv = impl_->lastValue;
+    if (!matches) {
+        impl_->lastValue = llvm::ConstantInt::get(impl_->i1Type, 0);
+        return true;
+    }
+    if (recv && recv->getType()->isPointerTy())
+        impl_->lastValue =
+            impl_->builder->CreateIsNotNull(recv, "isinstance.nn");
+    else if (recv && recv->getType() == impl_->i64Type)
+        impl_->lastValue = impl_->builder->CreateICmpNE(
+            recv, llvm::ConstantInt::get(impl_->i64Type, 0),
+            "isinstance.nn");
+    else
+        impl_->lastValue = llvm::ConstantInt::get(impl_->i1Type, 1);
+    return true;
+}
+
+bool CodeGen::emitIsinstanceBuiltin(CallExpr& node) {
+    std::string typeName;
+    if (auto* typeNameExpr = dynamic_cast<NameExpr*>(node.args[1].get())) {
+        typeName = typeNameExpr->name;
+    }
+
+    if (auto* typeNameExpr = dynamic_cast<NameExpr*>(node.args[1].get())) {
+        if (impl_->lookupVarKind(typeNameExpr->name) == Impl::VarKind::Type) {
+            impl_->addError(
+                "classes are not values: cannot use '" + typeNameExpr->name +
+                "' as the type in isinstance; the type must be a class name "
+                "known at compile time (e.g. isinstance(x, ClassName)).",
+                node.location());
+            node.args[0]->accept(*this);
+            impl_->lastValue = llvm::ConstantInt::get(impl_->i1Type, 0);
+            return true;
+        }
+    }
+
+    if (typeName.empty()) {
+        impl_->addError(
+            "internal error: isinstance type argument did not resolve at "
+            "codegen; the front end should have rejected it",
+            node.location());
+        impl_->lastValue = llvm::ConstantInt::get(impl_->i1Type, 0);
+        return true;
+    }
+
+    Impl::VarKind argKind = Impl::VarKind::Other;
+    std::string argClassName;
+    std::string argVarName;
+    if (auto* argName = dynamic_cast<NameExpr*>(node.args[0].get())) {
+        argKind = impl_->lookupVarKind(argName->name);
+        argVarName = argName->name;
+        auto it = impl_->varClassNames.find(argName->name);
+        if (it != impl_->varClassNames.end())
+            argClassName = it->second;
+    }
+    if (argClassName.empty())
+        argClassName = impl_->resolveExprClassName(node.args[0].get());
+
+    if (tryEmitIsinstanceNicheCheck(node, typeName)) return true;
+
+    if (argKind == Impl::VarKind::Union) {
+        int64_t targetTag = -1;
+        if (typeName == "int")        targetTag = 0;
+        else if (typeName == "str")   targetTag = 1;
+        else if (typeName == "float") targetTag = 2;
+        else if (typeName == "bool")  targetTag = 3;
+        else if (typeName == "list")  targetTag = 5;
+        else if (typeName == "dict")  targetTag = 6;
+        else if (typeName == "bytes") targetTag = 7;
+        else if (impl_->classNames.count(typeName)) targetTag = 7;
+        if (targetTag >= 0) {
+            llvm::Value* slotPtr = impl_->lookupVar(argVarName);
+            if (!slotPtr)
+                slotPtr = impl_->lookupModuleGlobal(argVarName);
+            if (slotPtr) {
+                node.args[0]->accept(*this);
+                auto* box = impl_->builder->CreateLoad(
+                    impl_->boxType, slotPtr, argVarName + ".box");
+                auto* tagVal = impl_->boxTag(box, argVarName + ".tag");
+                impl_->lastValue = impl_->builder->CreateICmpEQ(
+                    tagVal, llvm::ConstantInt::get(impl_->i64Type, targetTag),
+                    "isinstance");
+                return true;
+            }
+        }
+    }
+
+    bool result = false;
+    if (typeName == "int")
+        result = (argKind == Impl::VarKind::Int);
+    else if (typeName == "float")
+        result = (argKind == Impl::VarKind::Float);
+    else if (typeName == "bool")
+        result = (argKind == Impl::VarKind::Bool);
+    else if (typeName == "str")
+        result = (argKind == Impl::VarKind::Str ||
+                  argKind == Impl::VarKind::StrLiteral);
+    else if (typeName == "list")
+        result = (argKind == Impl::VarKind::List);
+    else if (typeName == "dict")
+        result = (argKind == Impl::VarKind::Dict);
+    else if (typeName == "tuple")
+        result = (argKind == Impl::VarKind::Tuple);
+    else if (typeName == "set")
+        result = (argKind == Impl::VarKind::Set);
+    else if (typeName == "bytes") {
+        result = node.args[0] && node.args[0]->type &&
+                 node.args[0]->type->kind() == Type::Kind::Bytes;
+        (void)argKind;
+    }
+    bool classCheck = false;
+    if (typeName != "int" && typeName != "float" && typeName != "bool" &&
+        typeName != "str" && typeName != "list" && typeName != "dict" &&
+        typeName != "tuple" && typeName != "set" && typeName != "bytes") {
+        classCheck = true;
+        result = impl_->classIsSubclassOf(argClassName, typeName);
+    }
+    node.args[0]->accept(*this);
+    if (result && classCheck) {
+        llvm::Value* recv = impl_->lastValue;
+        if (recv && recv->getType()->isPointerTy()) {
+            impl_->lastValue = impl_->builder->CreateIsNotNull(recv, "isinstance.nn");
+            return true;
+        }
+        if (recv && recv->getType() == impl_->i64Type) {
+            impl_->lastValue = impl_->builder->CreateICmpNE(
+                recv, llvm::ConstantInt::get(impl_->i64Type, 0), "isinstance.nn");
+            return true;
+        }
+    }
+    impl_->lastValue = llvm::ConstantInt::get(impl_->i1Type, result ? 1 : 0);
+    return true;
+}
+
+bool CodeGen::emitTypeBuiltin(CallExpr& node, BuiltinLowering& bl) {
+    Impl::VarKind argKind = Impl::VarKind::Other;
+    std::string argClassName;
+    if (auto* argName = dynamic_cast<NameExpr*>(node.args[0].get())) {
+        argKind = impl_->lookupVarKind(argName->name);
+        auto it = impl_->varClassNames.find(argName->name);
+        if (it != impl_->varClassNames.end())
+            argClassName = it->second;
+    }
+
+    if (argKind == Impl::VarKind::Union) {
+        if (auto* argName = dynamic_cast<NameExpr*>(node.args[0].get())) {
+            auto* alloca = impl_->lookupVar(argName->name);
+            if (alloca) {
+                node.args[0]->accept(*this);
+                auto* box = impl_->builder->CreateLoad(
+                    impl_->boxType, alloca, "type.box");
+                auto* tag = impl_->boxTag(box, "type.tag");
+                auto* func2 = impl_->currentFunction;
+                auto* mergeBB = llvm::BasicBlock::Create(*impl_->context, "type.end", func2);
+                auto* result = impl_->createEntryAlloca(func2, "type.result", impl_->i8PtrType);
+                auto* defaultBB = llvm::BasicBlock::Create(*impl_->context, "type.default", func2);
+                auto* sw = impl_->builder->CreateSwitch(tag, defaultBB, 7);
+
+                auto emitTypeCase = [&](int64_t tagVal, const char* bbName, const char* typStr) {
+                    auto* bb = llvm::BasicBlock::Create(*impl_->context, bbName, func2);
+                    sw->addCase(llvm::cast<llvm::ConstantInt>(llvm::ConstantInt::get(impl_->i64Type, tagVal)), bb);
+                    impl_->builder->SetInsertPoint(bb);
+                    impl_->builder->CreateStore(impl_->builder->CreateGlobalString(typStr), result);
+                    impl_->builder->CreateBr(mergeBB);
+                };
+                emitTypeCase(0, "type.int", "int");
+                emitTypeCase(1, "type.str", "str");
+                emitTypeCase(2, "type.float", "float");
+                emitTypeCase(3, "type.bool", "bool");
+                emitTypeCase(5, "type.list", "list");
+                emitTypeCase(6, "type.dict", "dict");
+                emitTypeCase(7, "type.bytes", "bytes");
+
+                impl_->builder->SetInsertPoint(defaultBB);
+                impl_->builder->CreateStore(impl_->builder->CreateGlobalString("object"), result);
+                impl_->builder->CreateBr(mergeBB);
+
+                impl_->builder->SetInsertPoint(mergeBB);
+                impl_->lastValue = impl_->builder->CreateLoad(impl_->i8PtrType, result, "type.name");
+                return true;
+            }
+        }
+    }
+
+    std::string typeName;
+    Type::Kind stKind = (node.args[0] && node.args[0]->type)
+        ? node.args[0]->type->kind() : Type::Kind::Unknown;
+    switch (stKind) {
+        case Type::Kind::Int:   typeName = "int";   break;
+        case Type::Kind::Float: typeName = "float"; break;
+        case Type::Kind::Bool:  typeName = "bool";  break;
+        case Type::Kind::Str:   typeName = "str";   break;
+        case Type::Kind::Bytes: typeName = "bytes"; break;
+        case Type::Kind::List:  typeName = "list";  break;
+        case Type::Kind::Dict:  typeName = "dict";  break;
+        case Type::Kind::Tuple: typeName = "tuple"; break;
+        case Type::Kind::Set:   typeName = "set";   break;
+        case Type::Kind::Instance: {
+            auto& inst = static_cast<InstanceType&>(*node.args[0]->type);
+            if (inst.classType) typeName = inst.classType->name;
+            break;
+        }
+        default: break;
+    }
+    if (typeName.empty()) switch (argKind) {
+        case Impl::VarKind::Int:   typeName = "int"; break;
+        case Impl::VarKind::Float: typeName = "float"; break;
+        case Impl::VarKind::Bool:  typeName = "bool"; break;
+        case Impl::VarKind::Str:
+        case Impl::VarKind::StrLiteral: typeName = "str"; break;
+        case Impl::VarKind::List:  typeName = "list"; break;
+        case Impl::VarKind::Dict:  typeName = "dict"; break;
+        case Impl::VarKind::Tuple: typeName = "tuple"; break;
+        case Impl::VarKind::Set:   typeName = "set"; break;
+        case Impl::VarKind::File:  typeName = "file"; break;
+        case Impl::VarKind::ClassInstance:
+            typeName = argClassName.empty() ? "object" : argClassName;
+            break;
+        default: typeName = "object"; break;
+    }
+    node.args[0]->accept(*this);
+    impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, bl.temps, bl.bases);
+    impl_->lastValue = impl_->builder->CreateGlobalString(typeName);
+    return true;
+}
+
+bool CodeGen::tryEmitListFromRange(CallExpr& node) {
+    auto* rcall = dynamic_cast<CallExpr*>(node.args[0].get());
+    if (!rcall) return false;
+    auto* rcn = dynamic_cast<NameExpr*>(rcall->callee.get());
+    if (!rcn || rcn->name != "range" || rcall->args.empty()) return false;
+
+    auto evalI64 = [&](Expr* e) -> llvm::Value* {
+        e->accept(*this);
+        llvm::Value* v = impl_->lastValue;
+        if (v->getType() == impl_->i1Type)
+            v = impl_->builder->CreateZExt(v, impl_->i64Type);
+        return v;
+    };
+    llvm::Value* start = llvm::ConstantInt::get(impl_->i64Type, 0);
+    llvm::Value* stop;
+    llvm::Value* step = llvm::ConstantInt::get(impl_->i64Type, 1);
+    if (rcall->args.size() == 1) {
+        stop = evalI64(rcall->args[0].get());
+    } else {
+        start = evalI64(rcall->args[0].get());
+        stop = evalI64(rcall->args[1].get());
+        if (rcall->args.size() >= 3) step = evalI64(rcall->args[2].get());
+    }
+    auto* fn = impl_->getOrDeclareRuntime("dragon_list_from_range",
+        llvm::FunctionType::get(impl_->i8PtrType,
+            {impl_->i64Type, impl_->i64Type, impl_->i64Type}, false));
+    impl_->lastValue = impl_->builder->CreateCall(
+        fn, {start, stop, step}, "rangelist");
+    return true;
+}
+
+bool CodeGen::emitBuiltinCallInner(CallExpr& node, const std::string& name,
+                                   BuiltinLowering& bl) {
     if (name == "print") {
         if (node.args.empty()) {
             impl_->builder->CreateCall(
@@ -373,6 +761,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
         impl_->lastValue = llvm::ConstantInt::get(impl_->i1Type, result ? 1 : 0);
         return true;
     }
+
     if (name == "map" && node.args.size() == 2) {
         std::shared_ptr<Type> elemType;
         if (node.args[0]->type && node.args[0]->type->kind() == Type::Kind::Function)
@@ -426,117 +815,13 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
     }
 
     if (name == "len" && node.args.size() == 1) {
-        bool isDict = dynamic_cast<DictExpr*>(node.args[0].get()) != nullptr;
-        if (!isDict) {
-            if (auto* argName = dynamic_cast<NameExpr*>(node.args[0].get())) {
-                isDict = impl_->lookupVarKind(argName->name) == Impl::VarKind::Dict;
-            }
-        }
-        bool isList = dynamic_cast<ListExpr*>(node.args[0].get()) != nullptr;
-        if (!isList) {
-            if (auto* argName = dynamic_cast<NameExpr*>(node.args[0].get())) {
-                isList = impl_->lookupVarKind(argName->name) == Impl::VarKind::List;
-            }
-        }
-        bool isTuple = dynamic_cast<TupleExpr*>(node.args[0].get()) != nullptr;
-        if (!isTuple) {
-            if (auto* argName = dynamic_cast<NameExpr*>(node.args[0].get())) {
-                isTuple = impl_->lookupVarKind(argName->name) == Impl::VarKind::Tuple;
-            }
-        }
-        bool isSet = dynamic_cast<SetExpr*>(node.args[0].get()) != nullptr;
-        if (!isSet) {
-            if (auto* argName = dynamic_cast<NameExpr*>(node.args[0].get())) {
-                isSet = impl_->lookupVarKind(argName->name) == Impl::VarKind::Set;
-            }
-        }
-        if (!isSet && impl_->resolveExprVarKind(node.args[0].get()) == Impl::VarKind::Set)
-            isSet = true;
-        if (!isList && !isDict && !isTuple && !isSet) {
-            if (auto* argAttr = dynamic_cast<AttributeExpr*>(node.args[0].get())) {
-                std::string className;
-                if (auto* objName = dynamic_cast<NameExpr*>(argAttr->object.get())) {
-                    if (objName->name == "self" && !impl_->currentClassName.empty())
-                        className = impl_->currentClassName;
-                    else {
-                        auto vit = impl_->varClassNames.find(objName->name);
-                        if (vit != impl_->varClassNames.end()) className = vit->second;
-                    }
-                }
-                if (!className.empty()) {
-                    auto fkIt = impl_->classFieldKindsBySym.find(impl_->classSym(className));
-                    if (fkIt != impl_->classFieldKindsBySym.end()) {
-                        auto fkIt2 = fkIt->second.find(argAttr->attribute);
-                        if (fkIt2 != fkIt->second.end()) {
-                            if (fkIt2->second == Impl::VarKind::List) isList = true;
-                            else if (fkIt2->second == Impl::VarKind::Dict) isDict = true;
-                            else if (fkIt2->second == Impl::VarKind::Tuple) isTuple = true;
-                            else if (fkIt2->second == Impl::VarKind::Set) isSet = true;
-                        }
-                    }
-                }
-            }
-        }
-        if (!isList && !isDict && !isTuple && !isSet && node.args[0]->type) {
-            switch (node.args[0]->type->kind()) {
-                case Type::Kind::List:  isList  = true; break;
-                case Type::Kind::Dict:  isDict  = true; break;
-                case Type::Kind::Tuple: isTuple = true; break;
-                case Type::Kind::Set:   isSet   = true; break;
-                default: break;
-            }
-        }
-        bool isDeque = false;
-        if (auto* argName = dynamic_cast<NameExpr*>(node.args[0].get())) {
-            isDeque = impl_->lookupVarKind(argName->name) == Impl::VarKind::Deque;
-        }
-        bool isBytes = impl_->exprIsBytes(node.args[0].get());
-        std::string lenClassName = impl_->resolveExprClassName(node.args[0].get());
-        node.args[0]->accept(*this);
-        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
-        if (!lenClassName.empty() && impl_->hasDunder(lenClassName, "__len__") &&
-            (arg->getType() == impl_->i8PtrType || arg->getType()->isPointerTy())) {
-            impl_->lastValue = impl_->callDunder(lenClassName, "__len__", arg);
-            return true;
-        }
-        if (arg->getType() == impl_->boxType) {
-            impl_->lastValue = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_box_len"], {arg}, "len");
-        } else if (isDeque) {
-            impl_->lastValue = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_deque_len"], {arg}, "len");
-        } else if (isBytes) {
-            impl_->lastValue = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_bytes_len"], {arg}, "len");
-        } else if (isTuple) {
-            impl_->lastValue = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_tuple_len"], {arg}, "len");
-        } else if (isSet) {
-            impl_->lastValue = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_set_len"], {arg}, "len");
-        } else if (isDict) {
-            impl_->lastValue = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_dict_len"], {arg}, "len");
-        } else if (isList) {
-            impl_->lastValue = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_list_len"], {arg}, "len");
-        } else if (arg->getType() == impl_->i8PtrType || arg->getType()->isPointerTy()) {
-            impl_->lastValue = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_str_len"], {arg}, "len");
-        } else {
-            impl_->addError(
-                "len() operand lowered to a non-container scalar; the call "
-                "would have silently produced 0",
-                node.location());
-            impl_->lastValue = llvm::ConstantInt::get(impl_->i64Type, 0);
-        }
-        return true;
+        return emitLenBuiltin(node, bl);
     }
 
     if (name == "abs" && node.args.size() == 1) {
         std::string absClassName = impl_->resolveExprClassName(node.args[0].get());
         node.args[0]->accept(*this);
-        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, bl.temps, bl.bases);
         if (!absClassName.empty() && impl_->hasDunder(absClassName, "__abs__") &&
             (arg->getType() == impl_->i8PtrType || arg->getType()->isPointerTy())) {
             impl_->lastValue = impl_->callDunder(absClassName, "__abs__", arg);
@@ -557,7 +842,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
     if (name == "int" && node.args.size() == 1) {
         std::string intClassName = impl_->resolveExprClassName(node.args[0].get());
         node.args[0]->accept(*this);
-        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, bl.temps, bl.bases);
         if (!intClassName.empty() && impl_->hasDunder(intClassName, "__int__")) {
             llvm::Value* r = impl_->callDunder(intClassName, "__int__", arg);
             if (r->getType() == impl_->i1Type)
@@ -586,7 +871,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
     if (name == "float" && node.args.size() == 1) {
         std::string floatClassName = impl_->resolveExprClassName(node.args[0].get());
         node.args[0]->accept(*this);
-        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, bl.temps, bl.bases);
         if (!floatClassName.empty() && impl_->hasDunder(floatClassName, "__float__")) {
             llvm::Value* r = impl_->callDunder(floatClassName, "__float__", arg);
             impl_->lastValue = impl_->coerceArg(r, impl_->f64Type);
@@ -612,7 +897,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
     if (name == "str" && node.args.size() == 1) {
         std::string strClassName = impl_->resolveExprClassName(node.args[0].get());
         node.args[0]->accept(*this);
-        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, bl.temps, bl.bases);
         if (!strClassName.empty() && impl_->hasDunder(strClassName, "__str__")) {
             impl_->lastValue = impl_->callDunder(strClassName, "__str__", arg);
         } else if (!strClassName.empty() && impl_->hasDunder(strClassName, "__repr__")) {
@@ -656,7 +941,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
     if (name == "bool" && node.args.size() == 1) {
         node.args[0]->accept(*this);
         llvm::Value* arg = impl_->trackBorrowTempGuarded(
-            node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+            node.args[0].get(), impl_->lastValue, bl.temps, bl.bases);
         impl_->lastValue = impl_->toBool(arg, node.args[0].get());
         return true;
     }
@@ -672,7 +957,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
         }
         if (node.args.size() == 1) {
             node.args[0]->accept(*this);
-            llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+            llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, bl.temps, bl.bases);
             if (arg->getType() == impl_->i64Type) {
                 llvm::Value* nullData = llvm::ConstantPointerNull::get(
                 llvm::PointerType::getUnqual(*impl_->context));
@@ -713,7 +998,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
         bool isMin = (name == "min");
         if (node.args.size() == 1) {
             node.args[0]->accept(*this);
-            llvm::Value* mmArg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+            llvm::Value* mmArg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, bl.temps, bl.bases);
             Type::Kind elemKind = Type::Kind::Unknown;
             if (node.args[0]->type) {
                 if (auto* lt = dynamic_cast<ListType*>(node.args[0]->type.get())) {
@@ -738,7 +1023,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
         bool anyFloat = false;
         for (auto& arg : node.args) {
             arg->accept(*this);
-            llvm::Value* v = impl_->trackBorrowTempGuarded(arg.get(), impl_->lastValue, argTemps, argTempBases);
+            llvm::Value* v = impl_->trackBorrowTempGuarded(arg.get(), impl_->lastValue, bl.temps, bl.bases);
             if (v->getType() == impl_->i1Type) v = impl_->builder->CreateZExt(v, impl_->i64Type);
             if (v->getType() == impl_->f64Type) anyFloat = true;
             vals.push_back(v);
@@ -758,7 +1043,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
 
     if (name == "sum" && node.args.size() == 1) {
         node.args[0]->accept(*this);
-        llvm::Value* sumArg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+        llvm::Value* sumArg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, bl.temps, bl.bases);
         Type::Kind elemKind = Type::Kind::Unknown;
         if (node.args[0]->type) {
             if (auto* lt = dynamic_cast<ListType*>(node.args[0]->type.get())) {
@@ -774,7 +1059,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
 
     if (name == "any" && node.args.size() == 1) {
         node.args[0]->accept(*this);
-        llvm::Value* anyArg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+        llvm::Value* anyArg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, bl.temps, bl.bases);
         llvm::Value* result = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_any_list"], {anyArg}, "any");
         impl_->lastValue = impl_->builder->CreateICmpNE(
@@ -784,7 +1069,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
 
     if (name == "all" && node.args.size() == 1) {
         node.args[0]->accept(*this);
-        llvm::Value* allArg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+        llvm::Value* allArg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, bl.temps, bl.bases);
         llvm::Value* result = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_all_list"], {allArg}, "all");
         impl_->lastValue = impl_->builder->CreateICmpNE(
@@ -795,7 +1080,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
     if (name == "enumerate") {
         if (node.args.size() >= 1) {
             node.args[0]->accept(*this);
-            llvm::Value* list = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+            llvm::Value* list = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, bl.temps, bl.bases);
             llvm::Value* start = llvm::ConstantInt::get(impl_->i64Type, 0);
             if (node.args.size() >= 2) {
                 node.args[1]->accept(*this);
@@ -809,9 +1094,9 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
 
     if (name == "zip" && node.args.size() == 2) {
         node.args[0]->accept(*this);
-        llvm::Value* a = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+        llvm::Value* a = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, bl.temps, bl.bases);
         node.args[1]->accept(*this);
-        llvm::Value* b = impl_->trackBorrowTempGuarded(node.args[1].get(), impl_->lastValue, argTemps, argTempBases);
+        llvm::Value* b = impl_->trackBorrowTempGuarded(node.args[1].get(), impl_->lastValue, bl.temps, bl.bases);
         impl_->lastValue = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_zip"], {a, b}, "zip");
         return true;
@@ -822,7 +1107,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
         for (auto& kw : node.kwArgs)
             if (kw.first == "reverse") reverseArg = kw.second.get();
         node.args[0]->accept(*this);
-        llvm::Value* listv = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+        llvm::Value* listv = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, bl.temps, bl.bases);
         if (listv->getType() == impl_->i64Type)
             listv = impl_->builder->CreateIntToPtr(listv, impl_->i8PtrType);
         if (reverseArg) {
@@ -843,7 +1128,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
 
     if (name == "reversed" && node.args.size() == 1) {
         node.args[0]->accept(*this);
-        llvm::Value* revArg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+        llvm::Value* revArg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, bl.temps, bl.bases);
         impl_->lastValue = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_reversed"], {revArg}, "reversed");
         return true;
@@ -852,7 +1137,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
     if (name == "hash" && node.args.size() == 1) {
         std::string hashClassName = impl_->resolveExprClassName(node.args[0].get());
         node.args[0]->accept(*this);
-        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, bl.temps, bl.bases);
         if (!hashClassName.empty() && impl_->hasDunder(hashClassName, "__hash__") &&
             (arg->getType() == impl_->i8PtrType || arg->getType()->isPointerTy())) {
             impl_->lastValue = impl_->callDunder(hashClassName, "__hash__", arg);
@@ -876,7 +1161,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
 
     if (name == "id" && node.args.size() == 1) {
         node.args[0]->accept(*this);
-        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, bl.temps, bl.bases);
         if (arg->getType()->isPointerTy()) {
             arg = impl_->builder->CreatePtrToInt(arg, impl_->i64Type);
         } else if (arg->getType() == impl_->i1Type) {
@@ -890,7 +1175,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
     if (name == "repr" && node.args.size() == 1) {
         std::string reprClassName = impl_->resolveExprClassName(node.args[0].get());
         node.args[0]->accept(*this);
-        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, bl.temps, bl.bases);
         if (!reprClassName.empty() && impl_->hasDunder(reprClassName, "__repr__") &&
             (arg->getType() == impl_->i8PtrType || arg->getType()->isPointerTy())) {
             impl_->lastValue = impl_->callDunder(reprClassName, "__repr__", arg);
@@ -915,7 +1200,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
 
     if (name == "ord" && node.args.size() == 1) {
         node.args[0]->accept(*this);
-        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, bl.temps, bl.bases);
         impl_->lastValue = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_ord"], {arg}, "ord");
         return true;
@@ -923,7 +1208,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
 
     if (name == "chr" && node.args.size() == 1) {
         node.args[0]->accept(*this);
-        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, bl.temps, bl.bases);
         if (arg->getType() == impl_->i1Type)
             arg = impl_->builder->CreateZExt(arg, impl_->i64Type);
         impl_->lastValue = impl_->builder->CreateCall(
@@ -983,284 +1268,16 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
     }
 
     if (name == "isinstance" && node.args.size() == 2) {
-        std::string typeName;
-        if (auto* typeNameExpr = dynamic_cast<NameExpr*>(node.args[1].get())) {
-            typeName = typeNameExpr->name;
-        }
-
-        if (auto* typeNameExpr = dynamic_cast<NameExpr*>(node.args[1].get())) {
-            if (impl_->lookupVarKind(typeNameExpr->name) == Impl::VarKind::Type) {
-                impl_->addError(
-                    "classes are not values: cannot use '" + typeNameExpr->name +
-                    "' as the type in isinstance; the type must be a class name "
-                    "known at compile time (e.g. isinstance(x, ClassName)).",
-                    node.location());
-                node.args[0]->accept(*this);
-                impl_->lastValue = llvm::ConstantInt::get(impl_->i1Type, 0);
-                return true;
-            }
-        }
-
-        if (!typeName.empty()) {
-            Impl::VarKind argKind = Impl::VarKind::Other;
-            std::string argClassName;
-            std::string argVarName;
-            if (auto* argName = dynamic_cast<NameExpr*>(node.args[0].get())) {
-                argKind = impl_->lookupVarKind(argName->name);
-                argVarName = argName->name;
-                auto it = impl_->varClassNames.find(argName->name);
-                if (it != impl_->varClassNames.end())
-                    argClassName = it->second;
-            }
-            if (argClassName.empty())
-                argClassName = impl_->resolveExprClassName(node.args[0].get());
-
-            if (const Type* argT = node.args[0]->type.get()) {
-                const Type* nicheT = nullptr;
-                if (argT->kind() == Type::Kind::Union) {
-                    auto& ut = static_cast<const UnionType&>(*argT);
-                    const Type* other = nullptr;
-                    bool hasNone = false;
-                    if (ut.types.size() == 2) {
-                        for (auto& m : ut.types) {
-                            if (!m) continue;
-                            if (m->kind() == Type::Kind::None_) hasNone = true;
-                            else other = m.get();
-                        }
-                    }
-                    if (hasNone && other) {
-                        switch (other->kind()) {
-                            case Type::Kind::Str: case Type::Kind::Bytes:
-                            case Type::Kind::List: case Type::Kind::Dict:
-                            case Type::Kind::Tuple: case Type::Kind::Set:
-                            case Type::Kind::Instance:
-                                nicheT = other; break;
-                            default: break;
-                        }
-                    }
-                }
-                if (nicheT) {
-                    bool matches = false;
-                    switch (nicheT->kind()) {
-                        case Type::Kind::Str:   matches = (typeName == "str"); break;
-                        case Type::Kind::Bytes: matches = (typeName == "bytes"); break;
-                        case Type::Kind::List:  matches = (typeName == "list"); break;
-                        case Type::Kind::Dict:  matches = (typeName == "dict"); break;
-                        case Type::Kind::Tuple: matches = (typeName == "tuple"); break;
-                        case Type::Kind::Set:   matches = (typeName == "set"); break;
-                        case Type::Kind::Instance: {
-                            auto& inst = static_cast<const InstanceType&>(*nicheT);
-                            std::string c = inst.classType ? inst.classType->name : "";
-                            while (!c.empty()) {
-                                if (c == typeName) { matches = true; break; }
-                                auto pit = impl_->classParentNamesBySym.find(impl_->classSym(c));
-                                c = (pit != impl_->classParentNamesBySym.end()) ? pit->second
-                                                                           : std::string();
-                            }
-                            break;
-                        }
-                        default: break;
-                    }
-                    node.args[0]->accept(*this);
-                    llvm::Value* recv = impl_->lastValue;
-                    if (!matches) {
-                        impl_->lastValue = llvm::ConstantInt::get(impl_->i1Type, 0);
-                        return true;
-                    }
-                    if (recv && recv->getType()->isPointerTy())
-                        impl_->lastValue =
-                            impl_->builder->CreateIsNotNull(recv, "isinstance.nn");
-                    else if (recv && recv->getType() == impl_->i64Type)
-                        impl_->lastValue = impl_->builder->CreateICmpNE(
-                            recv, llvm::ConstantInt::get(impl_->i64Type, 0),
-                            "isinstance.nn");
-                    else
-                        impl_->lastValue = llvm::ConstantInt::get(impl_->i1Type, 1);
-                    return true;
-                }
-            }
-
-            if (argKind == Impl::VarKind::Union) {
-                int64_t targetTag = -1;
-                if (typeName == "int")        targetTag = 0;
-                else if (typeName == "str")   targetTag = 1;
-                else if (typeName == "float") targetTag = 2;
-                else if (typeName == "bool")  targetTag = 3;
-                else if (typeName == "list")  targetTag = 5;
-                else if (typeName == "dict")  targetTag = 6;
-                else if (typeName == "bytes") targetTag = 7;
-                else if (impl_->classNames.count(typeName)) targetTag = 7;
-                if (targetTag >= 0) {
-                    llvm::Value* slotPtr = impl_->lookupVar(argVarName);
-                    if (!slotPtr)
-                        slotPtr = impl_->lookupModuleGlobal(argVarName);
-                    if (slotPtr) {
-                        node.args[0]->accept(*this);
-                        auto* box = impl_->builder->CreateLoad(
-                            impl_->boxType, slotPtr, argVarName + ".box");
-                        auto* tagVal = impl_->boxTag(box, argVarName + ".tag");
-                        impl_->lastValue = impl_->builder->CreateICmpEQ(
-                            tagVal, llvm::ConstantInt::get(impl_->i64Type, targetTag),
-                            "isinstance");
-                        return true;
-                    }
-                }
-            }
-
-            bool result = false;
-            if (typeName == "int")
-                result = (argKind == Impl::VarKind::Int);
-            else if (typeName == "float")
-                result = (argKind == Impl::VarKind::Float);
-            else if (typeName == "bool")
-                result = (argKind == Impl::VarKind::Bool);
-            else if (typeName == "str")
-                result = (argKind == Impl::VarKind::Str ||
-                          argKind == Impl::VarKind::StrLiteral);
-            else if (typeName == "list")
-                result = (argKind == Impl::VarKind::List);
-            else if (typeName == "dict")
-                result = (argKind == Impl::VarKind::Dict);
-            else if (typeName == "tuple")
-                result = (argKind == Impl::VarKind::Tuple);
-            else if (typeName == "set")
-                result = (argKind == Impl::VarKind::Set);
-            else if (typeName == "bytes") {
-                result = node.args[0] && node.args[0]->type &&
-                         node.args[0]->type->kind() == Type::Kind::Bytes;
-                (void)argKind;
-            }
-            bool classCheck = false;
-            if (typeName != "int" && typeName != "float" && typeName != "bool" &&
-                typeName != "str" && typeName != "list" && typeName != "dict" &&
-                typeName != "tuple" && typeName != "set" && typeName != "bytes") {
-                classCheck = true;
-                std::string c = argClassName;
-                while (!c.empty()) {
-                    if (c == typeName) { result = true; break; }
-                    auto pit = impl_->classParentNamesBySym.find(impl_->classSym(c));
-                    c = (pit != impl_->classParentNamesBySym.end()) ? pit->second : std::string();
-                }
-            }
-            node.args[0]->accept(*this);
-            if (result && classCheck) {
-                llvm::Value* recv = impl_->lastValue;
-                if (recv && recv->getType()->isPointerTy()) {
-                    impl_->lastValue = impl_->builder->CreateIsNotNull(recv, "isinstance.nn");
-                    return true;
-                }
-                if (recv && recv->getType() == impl_->i64Type) {
-                    impl_->lastValue = impl_->builder->CreateICmpNE(
-                        recv, llvm::ConstantInt::get(impl_->i64Type, 0), "isinstance.nn");
-                    return true;
-                }
-            }
-            impl_->lastValue = llvm::ConstantInt::get(impl_->i1Type, result ? 1 : 0);
-            return true;
-        }
-        impl_->addError(
-            "internal error: isinstance type argument did not resolve at "
-            "codegen; the front end should have rejected it",
-            node.location());
-        impl_->lastValue = llvm::ConstantInt::get(impl_->i1Type, 0);
-        return true;
+        return emitIsinstanceBuiltin(node);
     }
 
     if (name == "type" && node.args.size() == 1) {
-        Impl::VarKind argKind = Impl::VarKind::Other;
-        std::string argClassName;
-        if (auto* argName = dynamic_cast<NameExpr*>(node.args[0].get())) {
-            argKind = impl_->lookupVarKind(argName->name);
-            auto it = impl_->varClassNames.find(argName->name);
-            if (it != impl_->varClassNames.end())
-                argClassName = it->second;
-        }
-
-        if (argKind == Impl::VarKind::Union) {
-            if (auto* argName = dynamic_cast<NameExpr*>(node.args[0].get())) {
-                auto* alloca = impl_->lookupVar(argName->name);
-                if (alloca) {
-                    node.args[0]->accept(*this);
-                    auto* box = impl_->builder->CreateLoad(
-                        impl_->boxType, alloca, "type.box");
-                    auto* tag = impl_->boxTag(box, "type.tag");
-                    auto* func2 = impl_->currentFunction;
-                    auto* mergeBB = llvm::BasicBlock::Create(*impl_->context, "type.end", func2);
-                    auto* result = impl_->createEntryAlloca(func2, "type.result", impl_->i8PtrType);
-                    auto* defaultBB = llvm::BasicBlock::Create(*impl_->context, "type.default", func2);
-                    auto* sw = impl_->builder->CreateSwitch(tag, defaultBB, 7);
-
-                    auto emitTypeCase = [&](int64_t tagVal, const char* bbName, const char* typStr) {
-                        auto* bb = llvm::BasicBlock::Create(*impl_->context, bbName, func2);
-                        sw->addCase(llvm::cast<llvm::ConstantInt>(llvm::ConstantInt::get(impl_->i64Type, tagVal)), bb);
-                        impl_->builder->SetInsertPoint(bb);
-                        impl_->builder->CreateStore(impl_->builder->CreateGlobalString(typStr), result);
-                        impl_->builder->CreateBr(mergeBB);
-                    };
-                    emitTypeCase(0, "type.int", "int");
-                    emitTypeCase(1, "type.str", "str");
-                    emitTypeCase(2, "type.float", "float");
-                    emitTypeCase(3, "type.bool", "bool");
-                    emitTypeCase(5, "type.list", "list");
-                    emitTypeCase(6, "type.dict", "dict");
-                    emitTypeCase(7, "type.bytes", "bytes");
-
-                    impl_->builder->SetInsertPoint(defaultBB);
-                    impl_->builder->CreateStore(impl_->builder->CreateGlobalString("object"), result);
-                    impl_->builder->CreateBr(mergeBB);
-
-                    impl_->builder->SetInsertPoint(mergeBB);
-                    impl_->lastValue = impl_->builder->CreateLoad(impl_->i8PtrType, result, "type.name");
-                    return true;
-                }
-            }
-        }
-
-        std::string typeName;
-        Type::Kind stKind = (node.args[0] && node.args[0]->type)
-            ? node.args[0]->type->kind() : Type::Kind::Unknown;
-        switch (stKind) {
-            case Type::Kind::Int:   typeName = "int";   break;
-            case Type::Kind::Float: typeName = "float"; break;
-            case Type::Kind::Bool:  typeName = "bool";  break;
-            case Type::Kind::Str:   typeName = "str";   break;
-            case Type::Kind::Bytes: typeName = "bytes"; break;
-            case Type::Kind::List:  typeName = "list";  break;
-            case Type::Kind::Dict:  typeName = "dict";  break;
-            case Type::Kind::Tuple: typeName = "tuple"; break;
-            case Type::Kind::Set:   typeName = "set";   break;
-            case Type::Kind::Instance: {
-                auto& inst = static_cast<InstanceType&>(*node.args[0]->type);
-                if (inst.classType) typeName = inst.classType->name;
-                break;
-            }
-            default: break;
-        }
-        if (typeName.empty()) switch (argKind) {
-            case Impl::VarKind::Int:   typeName = "int"; break;
-            case Impl::VarKind::Float: typeName = "float"; break;
-            case Impl::VarKind::Bool:  typeName = "bool"; break;
-            case Impl::VarKind::Str:
-            case Impl::VarKind::StrLiteral: typeName = "str"; break;
-            case Impl::VarKind::List:  typeName = "list"; break;
-            case Impl::VarKind::Dict:  typeName = "dict"; break;
-            case Impl::VarKind::Tuple: typeName = "tuple"; break;
-            case Impl::VarKind::Set:   typeName = "set"; break;
-            case Impl::VarKind::File:  typeName = "file"; break;
-            case Impl::VarKind::ClassInstance:
-                typeName = argClassName.empty() ? "object" : argClassName;
-                break;
-            default: typeName = "object"; break;
-        }
-        node.args[0]->accept(*this);
-        impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
-        impl_->lastValue = impl_->builder->CreateGlobalString(typeName);
-        return true;
+        return emitTypeBuiltin(node, bl);
     }
 
     if (name == "round" && node.args.size() == 1) {
         node.args[0]->accept(*this);
-        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, bl.temps, bl.bases);
         if (arg->getType() == impl_->i64Type) {
             impl_->lastValue = arg;
         } else {
@@ -1306,7 +1323,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
 
     if (name == "hex" && node.args.size() == 1) {
         node.args[0]->accept(*this);
-        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, bl.temps, bl.bases);
         if (arg->getType() == impl_->i1Type) arg = impl_->builder->CreateZExt(arg, impl_->i64Type);
         impl_->lastValue = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_hex"], {arg}, "hex");
@@ -1314,7 +1331,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
     }
     if (name == "oct" && node.args.size() == 1) {
         node.args[0]->accept(*this);
-        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, bl.temps, bl.bases);
         if (arg->getType() == impl_->i1Type) arg = impl_->builder->CreateZExt(arg, impl_->i64Type);
         impl_->lastValue = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_oct"], {arg}, "oct");
@@ -1322,7 +1339,7 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
     }
     if (name == "bin" && node.args.size() == 1) {
         node.args[0]->accept(*this);
-        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+        llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, bl.temps, bl.bases);
         if (arg->getType() == impl_->i1Type) arg = impl_->builder->CreateZExt(arg, impl_->i64Type);
         impl_->lastValue = impl_->builder->CreateCall(
             impl_->runtimeFuncs["dragon_bin"], {arg}, "bin");
@@ -1337,36 +1354,8 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
     }
 
     if (name == "list" && node.args.size() == 1) {
+        if (tryEmitListFromRange(node)) return true;
         Expr* a = node.args[0].get();
-        if (auto* rcall = dynamic_cast<CallExpr*>(a)) {
-            if (auto* rcn = dynamic_cast<NameExpr*>(rcall->callee.get())) {
-                if (rcn->name == "range" && !rcall->args.empty()) {
-                    auto evalI64 = [&](Expr* e) -> llvm::Value* {
-                        e->accept(*this);
-                        llvm::Value* v = impl_->lastValue;
-                        if (v->getType() == impl_->i1Type)
-                            v = impl_->builder->CreateZExt(v, impl_->i64Type);
-                        return v;
-                    };
-                    llvm::Value* start = llvm::ConstantInt::get(impl_->i64Type, 0);
-                    llvm::Value* stop;
-                    llvm::Value* step = llvm::ConstantInt::get(impl_->i64Type, 1);
-                    if (rcall->args.size() == 1) {
-                        stop = evalI64(rcall->args[0].get());
-                    } else {
-                        start = evalI64(rcall->args[0].get());
-                        stop = evalI64(rcall->args[1].get());
-                        if (rcall->args.size() >= 3) step = evalI64(rcall->args[2].get());
-                    }
-                    auto* fn = impl_->getOrDeclareRuntime("dragon_list_from_range",
-                        llvm::FunctionType::get(impl_->i8PtrType,
-                            {impl_->i64Type, impl_->i64Type, impl_->i64Type}, false));
-                    impl_->lastValue = impl_->builder->CreateCall(
-                        fn, {start, stop, step}, "rangelist");
-                    return true;
-                }
-            }
-        }
         bool isSet = impl_->resolveExprVarKind(a) == Impl::VarKind::Set;
         if (!isSet && a->type && a->type->kind() == Type::Kind::List) {
             a->accept(*this);
@@ -1421,13 +1410,12 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
     if (name == "tuple" && node.args.size() == 1) {
         node.args[0]->accept(*this);
         llvm::Value* arg = impl_->trackBorrowTempGuarded(
-            node.args[0].get(), impl_->lastValue, argTemps, argTempBases);
+            node.args[0].get(), impl_->lastValue, bl.temps, bl.bases);
         auto* fn = impl_->getOrDeclareRuntime("dragon_tuple_from_list",
             llvm::FunctionType::get(impl_->i8PtrType, {impl_->i8PtrType}, false));
         impl_->lastValue = impl_->builder->CreateCall(fn, {arg}, "tuplefromlist");
         return true;
     }
-
 
     if (name == "Lock") {
         impl_->needsPthread = true;
@@ -1589,13 +1577,6 @@ bool CodeGen::emitBuiltinCall(CallExpr& node, const std::string& name) {
         return true;
     }
 
-    return false;
-    }();
-    impl_->popArgTempCleanups(argTempBases);
-    if (builtinHandled) {
-        impl_->drainBorrowTemps(argTemps);
-        return true;
-    }
     return false;
 }
 

@@ -2,6 +2,333 @@
 
 namespace dragon {
 
+llvm::Value* CodeGen::emitCompFilterTruth(llvm::Value* cond) {
+    if (cond->getType() == impl_->i64Type)
+        return impl_->builder->CreateICmpNE(
+            cond, llvm::ConstantInt::get(impl_->i64Type, 0));
+    if (cond->getType() == impl_->f64Type)
+        return impl_->builder->CreateFCmpONE(
+            cond, llvm::ConstantFP::get(impl_->f64Type, 0.0));
+    return cond;
+}
+
+void CodeGen::emitCompRangeArgs(CallExpr* call, llvm::Value*& start,
+                                llvm::Value*& end, llvm::Value*& step) {
+    start = llvm::ConstantInt::get(impl_->i64Type, 0);
+    end = nullptr;
+    step = llvm::ConstantInt::get(impl_->i64Type, 1);
+    if (call->args.size() == 1) {
+        call->args[0]->accept(*this);
+        end = impl_->lastValue;
+    } else if (call->args.size() >= 2) {
+        call->args[0]->accept(*this);
+        start = impl_->lastValue;
+        call->args[1]->accept(*this);
+        end = impl_->lastValue;
+        if (call->args.size() >= 3) {
+            call->args[2]->accept(*this);
+            step = impl_->lastValue;
+        }
+    } else {
+        end = llvm::ConstantInt::get(impl_->i64Type, 0);
+    }
+}
+
+void CodeGen::emitCompAppendBody(Expr* element, Expr* condition,
+                                 llvm::AllocaInst* listAlloca, int64_t elemTag,
+                                 const std::string& bbPrefix) {
+    auto* func = impl_->currentFunction;
+    bool isF64 = (elemTag == 2);
+    bool isPtr = (elemTag == 1 || elemTag == 5 || elemTag == 6 || elemTag == 7);
+    const char* appendFn = isF64 ? "dragon_list_append_f64"
+                          : isPtr ? "dragon_list_append_ptr"
+                                  : "dragon_list_append";
+
+    auto evalCoerceAppend = [&]() {
+        element->accept(*this);
+        llvm::Value* elemVal = impl_->lastValue;
+
+        if (elemTag == TAG_STR && elemVal->getType()->isPointerTy()) {
+            elemVal = impl_->ensureHeapString(elemVal, element);
+        }
+
+        // dragon_list_append_ptr ADOPTS the reference: a BORROWED element (loop var, field, xs[i]) must be
+        // incref'd or the source and result both decref the same +1 (double free); an owned temp already carries its +1.
+        if (isPtr && impl_->options.gcMode == GCMode::RC &&
+            elemVal->getType()->isPointerTy() &&
+            Impl::isBorrowedHeapExpr(element)) {
+            impl_->builder->CreateCall(
+                impl_->runtimeFuncs[elemTag == 1 ? "dragon_incref_str"
+                                                 : "dragon_incref"],
+                {elemVal});
+        }
+
+        if (isF64) {
+            if (elemVal->getType() == impl_->i64Type)
+                elemVal = impl_->builder->CreateSIToFP(elemVal, impl_->f64Type);
+            else if (elemVal->getType() == impl_->i1Type)
+                elemVal = impl_->builder->CreateUIToFP(elemVal, impl_->f64Type);
+        } else if (isPtr) {
+            if (!elemVal->getType()->isPointerTy())
+                elemVal = impl_->builder->CreateIntToPtr(elemVal, impl_->i8PtrType);
+        } else {
+            if (elemVal->getType() == impl_->i1Type) {
+                elemVal = impl_->builder->CreateZExt(elemVal, impl_->i64Type);
+            } else if (elemVal->getType() == impl_->f64Type) {
+                elemVal = impl_->builder->CreateBitCast(elemVal, impl_->i64Type);
+            } else if (elemVal->getType()->isPointerTy()) {
+                elemVal = impl_->builder->CreatePtrToInt(elemVal, impl_->i64Type);
+            }
+        }
+        llvm::Value* curList = impl_->builder->CreateLoad(impl_->i8PtrType, listAlloca);
+        impl_->builder->CreateCall(impl_->runtimeFuncs[appendFn], {curList, elemVal});
+    };
+
+    if (condition) {
+        condition->accept(*this);
+        llvm::Value* filterCond = emitCompFilterTruth(impl_->lastValue);
+        auto* appendBB = llvm::BasicBlock::Create(*impl_->context, bbPrefix + "append", func);
+        auto* skipBB = llvm::BasicBlock::Create(*impl_->context, bbPrefix + "skip", func);
+        impl_->builder->CreateCondBr(filterCond, appendBB, skipBB);
+
+        impl_->builder->SetInsertPoint(appendBB);
+        evalCoerceAppend();
+        impl_->builder->CreateBr(skipBB);
+
+        impl_->builder->SetInsertPoint(skipBB);
+    } else {
+        evalCoerceAppend();
+    }
+}
+
+void CodeGen::bindCompElemVar(Expr* iterable, const std::string& varName,
+                              llvm::Value* collVal, llvm::Value* curIdx) {
+    Type::Kind elemKind = impl_->getIterableElementKind(iterable);
+    Impl::VarKind loopKind = Impl::typeKindToVarKind(elemKind);
+    auto* elemAlloca = impl_->bindListElemTyped(
+        impl_->currentFunction, collVal, curIdx, varName, loopKind);
+    impl_->setVar(varName, elemAlloca, loopKind);
+    if (Impl::isHeapKind(loopKind))
+        impl_->scopes.back().borrowed.insert(varName);
+}
+
+void CodeGen::emitCompExtraClauses(std::vector<CompClause>& clauses, size_t clauseIdx,
+                                   const std::function<void()>& innermost) {
+    if (clauseIdx >= clauses.size()) {
+        innermost();
+        return;
+    }
+    auto* func = impl_->currentFunction;
+    auto& clause = clauses[clauseIdx];
+    std::string ecVarName = clause.varNames.empty() ? "__ec" : clause.varNames[0];
+
+    auto* ecCallExpr = dynamic_cast<CallExpr*>(clause.iterable.get());
+    auto* ecCalleeName = ecCallExpr ? dynamic_cast<NameExpr*>(ecCallExpr->callee.get()) : nullptr;
+    bool ecIsRange = ecCalleeName && ecCalleeName->name == "range";
+
+    auto emitFilteredRecurse = [&]() {
+        if (clause.condition) {
+            clause.condition->accept(*this);
+            llvm::Value* ecFilter = emitCompFilterTruth(impl_->lastValue);
+            auto* ecPassBB = llvm::BasicBlock::Create(*impl_->context, "ecpass", func);
+            auto* ecSkipBB = llvm::BasicBlock::Create(*impl_->context, "ecskip", func);
+            impl_->builder->CreateCondBr(ecFilter, ecPassBB, ecSkipBB);
+            impl_->builder->SetInsertPoint(ecPassBB);
+            emitCompExtraClauses(clauses, clauseIdx + 1, innermost);
+            if (!impl_->builder->GetInsertBlock()->getTerminator())
+                impl_->builder->CreateBr(ecSkipBB);
+            impl_->builder->SetInsertPoint(ecSkipBB);
+        } else {
+            emitCompExtraClauses(clauses, clauseIdx + 1, innermost);
+        }
+    };
+
+    if (ecIsRange) {
+        llvm::Value* ecStart;
+        llvm::Value* ecEnd;
+        llvm::Value* ecStep;
+        emitCompRangeArgs(ecCallExpr, ecStart, ecEnd, ecStep);
+        auto* ecVar = impl_->createEntryAlloca(func, ecVarName, impl_->i64Type);
+        impl_->builder->CreateStore(ecStart, ecVar);
+        auto* ecCondBB = llvm::BasicBlock::Create(*impl_->context, "eccond", func);
+        auto* ecBodyBB = llvm::BasicBlock::Create(*impl_->context, "ecbody", func);
+        auto* ecIncBB = llvm::BasicBlock::Create(*impl_->context, "ecinc", func);
+        auto* ecEndBB = llvm::BasicBlock::Create(*impl_->context, "ecend", func);
+        impl_->builder->CreateBr(ecCondBB);
+        impl_->builder->SetInsertPoint(ecCondBB);
+        llvm::Value* ecCur = impl_->builder->CreateLoad(impl_->i64Type, ecVar, "eci");
+        llvm::Value* ecCmp = impl_->builder->CreateICmpSLT(ecCur, ecEnd, "eccmp");
+        impl_->builder->CreateCondBr(ecCmp, ecBodyBB, ecEndBB);
+        impl_->builder->SetInsertPoint(ecBodyBB);
+        impl_->pushScope();
+        impl_->setVar(ecVarName, ecVar, Impl::VarKind::Int);
+
+        emitFilteredRecurse();
+
+        impl_->emitScopeCleanup();
+        impl_->popScope();
+        if (!impl_->builder->GetInsertBlock()->getTerminator())
+            impl_->builder->CreateBr(ecIncBB);
+        impl_->builder->SetInsertPoint(ecIncBB);
+        ecCur = impl_->builder->CreateLoad(impl_->i64Type, ecVar, "eci");
+        llvm::Value* ecNext = impl_->builder->CreateAdd(ecCur, ecStep, "ecinc");
+        impl_->builder->CreateStore(ecNext, ecVar);
+        impl_->builder->CreateBr(ecCondBB);
+        impl_->builder->SetInsertPoint(ecEndBB);
+    } else {
+        clause.iterable->accept(*this);
+        llvm::Value* ecColl = impl_->lastValue;
+        bool ecFromDict = impl_->isBareDictIterable(clause.iterable.get());
+        bool ecOwnedIterTemp = !ecFromDict &&
+            !Impl::isBorrowedHeapExpr(clause.iterable.get()) &&
+            clause.iterable->type &&
+            (clause.iterable->type->kind() == Type::Kind::List ||
+             clause.iterable->type->kind() == Type::Kind::Set ||
+             clause.iterable->type->kind() == Type::Kind::Tuple);
+        if (ecFromDict)
+            ecColl = impl_->builder->CreateCall(
+                impl_->runtimeFuncs["dragon_dict_keys"], {ecColl}, "compdictkeys");
+        llvm::Value* ecLen = impl_->builder->CreateCall(
+            impl_->runtimeFuncs["dragon_list_len"], {ecColl}, "eclen");
+        auto* ecIdx = impl_->createEntryAlloca(func, "__ecidx", impl_->i64Type);
+        impl_->builder->CreateStore(llvm::ConstantInt::get(impl_->i64Type, 0), ecIdx);
+        auto* ecCondBB = llvm::BasicBlock::Create(*impl_->context, "eccond", func);
+        auto* ecBodyBB = llvm::BasicBlock::Create(*impl_->context, "ecbody", func);
+        auto* ecIncBB = llvm::BasicBlock::Create(*impl_->context, "ecinc", func);
+        auto* ecEndBB = llvm::BasicBlock::Create(*impl_->context, "ecend", func);
+        impl_->builder->CreateBr(ecCondBB);
+        impl_->builder->SetInsertPoint(ecCondBB);
+        llvm::Value* ecCurIdx = impl_->builder->CreateLoad(impl_->i64Type, ecIdx, "ecidx");
+        llvm::Value* ecCmp = impl_->builder->CreateICmpSLT(ecCurIdx, ecLen, "eccmp");
+        impl_->builder->CreateCondBr(ecCmp, ecBodyBB, ecEndBB);
+        impl_->builder->SetInsertPoint(ecBodyBB);
+        impl_->pushScope();
+        bindCompElemVar(clause.iterable.get(), ecVarName, ecColl, ecCurIdx);
+
+        emitFilteredRecurse();
+
+        impl_->emitScopeCleanup();
+        impl_->popScope();
+        if (!impl_->builder->GetInsertBlock()->getTerminator())
+            impl_->builder->CreateBr(ecIncBB);
+        impl_->builder->SetInsertPoint(ecIncBB);
+        ecCurIdx = impl_->builder->CreateLoad(impl_->i64Type, ecIdx, "ecidx");
+        llvm::Value* ecNextIdx = impl_->builder->CreateAdd(
+            ecCurIdx, llvm::ConstantInt::get(impl_->i64Type, 1), "ecinc");
+        impl_->builder->CreateStore(ecNextIdx, ecIdx);
+        impl_->builder->CreateBr(ecCondBB);
+        impl_->builder->SetInsertPoint(ecEndBB);
+        if (ecFromDict || ecOwnedIterTemp)
+            impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {ecColl});
+    }
+}
+
+void CodeGen::emitCompLoopNest(
+    Expr* iterable, const std::vector<std::string>& varNames,
+    std::vector<CompClause>& extraClauses, const std::string& bbPrefix,
+    const std::string& idxAllocaName, const std::function<void()>& innermost,
+    const std::function<void(llvm::Value*, llvm::Value*)>& bindElemVars) {
+    if (varNames.empty()) return;
+    auto* func = impl_->currentFunction;
+
+    auto* callExpr = dynamic_cast<CallExpr*>(iterable);
+    auto* calleeName = callExpr ? dynamic_cast<NameExpr*>(callExpr->callee.get()) : nullptr;
+    bool isRange = calleeName && calleeName->name == "range";
+
+    if (isRange) {
+        llvm::Value* startVal;
+        llvm::Value* endVal;
+        llvm::Value* stepVal;
+        emitCompRangeArgs(callExpr, startVal, endVal, stepVal);
+
+        auto* loopVar = impl_->createEntryAlloca(func, varNames[0], impl_->i64Type);
+        impl_->builder->CreateStore(startVal, loopVar);
+
+        auto* condBB = llvm::BasicBlock::Create(*impl_->context, bbPrefix + "cond", func);
+        auto* bodyBB = llvm::BasicBlock::Create(*impl_->context, bbPrefix + "body", func);
+        auto* incBB = llvm::BasicBlock::Create(*impl_->context, bbPrefix + "inc", func);
+        auto* endBB = llvm::BasicBlock::Create(*impl_->context, bbPrefix + "end", func);
+
+        impl_->builder->CreateBr(condBB);
+
+        impl_->builder->SetInsertPoint(condBB);
+        llvm::Value* current = impl_->builder->CreateLoad(impl_->i64Type, loopVar, "i");
+        llvm::Value* cond = impl_->builder->CreateICmpSLT(current, endVal, "cmp");
+        impl_->builder->CreateCondBr(cond, bodyBB, endBB);
+
+        impl_->builder->SetInsertPoint(bodyBB);
+        impl_->pushScope();
+        impl_->setVar(varNames[0], loopVar, Impl::VarKind::Int);
+
+        emitCompExtraClauses(extraClauses, 0, innermost);
+
+        impl_->emitScopeCleanup();
+        impl_->popScope();
+        if (!impl_->builder->GetInsertBlock()->getTerminator())
+            impl_->builder->CreateBr(incBB);
+
+        impl_->builder->SetInsertPoint(incBB);
+        current = impl_->builder->CreateLoad(impl_->i64Type, loopVar, "i");
+        llvm::Value* next = impl_->builder->CreateAdd(current, stepVal, "inc");
+        impl_->builder->CreateStore(next, loopVar);
+        impl_->builder->CreateBr(condBB);
+
+        impl_->builder->SetInsertPoint(endBB);
+    } else {
+        iterable->accept(*this);
+        llvm::Value* collVal = impl_->lastValue;
+        bool collFromDict = impl_->isBareDictIterable(iterable);
+        bool ownedIterTemp = !collFromDict && iterable &&
+            !Impl::isBorrowedHeapExpr(iterable) && iterable->type &&
+            (iterable->type->kind() == Type::Kind::List ||
+             iterable->type->kind() == Type::Kind::Set ||
+             iterable->type->kind() == Type::Kind::Tuple);
+        if (collFromDict)
+            collVal = impl_->builder->CreateCall(
+                impl_->runtimeFuncs["dragon_dict_keys"], {collVal}, "compdictkeys");
+        llvm::Value* collLen = impl_->builder->CreateCall(
+            impl_->runtimeFuncs["dragon_list_len"], {collVal}, "colllen");
+
+        auto* idxAlloca = impl_->createEntryAlloca(func, idxAllocaName, impl_->i64Type);
+        impl_->builder->CreateStore(llvm::ConstantInt::get(impl_->i64Type, 0), idxAlloca);
+
+        auto* condBB = llvm::BasicBlock::Create(*impl_->context, bbPrefix + "cond", func);
+        auto* bodyBB = llvm::BasicBlock::Create(*impl_->context, bbPrefix + "body", func);
+        auto* incBB = llvm::BasicBlock::Create(*impl_->context, bbPrefix + "inc", func);
+        auto* endBB = llvm::BasicBlock::Create(*impl_->context, bbPrefix + "end", func);
+
+        impl_->builder->CreateBr(condBB);
+
+        impl_->builder->SetInsertPoint(condBB);
+        llvm::Value* curIdx = impl_->builder->CreateLoad(impl_->i64Type, idxAlloca, "idx");
+        llvm::Value* cond = impl_->builder->CreateICmpSLT(curIdx, collLen, "cmp");
+        impl_->builder->CreateCondBr(cond, bodyBB, endBB);
+
+        impl_->builder->SetInsertPoint(bodyBB);
+        impl_->pushScope();
+
+        bindElemVars(collVal, curIdx);
+
+        emitCompExtraClauses(extraClauses, 0, innermost);
+
+        impl_->emitScopeCleanup();
+        impl_->popScope();
+        if (!impl_->builder->GetInsertBlock()->getTerminator())
+            impl_->builder->CreateBr(incBB);
+
+        impl_->builder->SetInsertPoint(incBB);
+        curIdx = impl_->builder->CreateLoad(impl_->i64Type, idxAlloca, "idx");
+        llvm::Value* nextIdx = impl_->builder->CreateAdd(
+            curIdx, llvm::ConstantInt::get(impl_->i64Type, 1), "inc");
+        impl_->builder->CreateStore(nextIdx, idxAlloca);
+        impl_->builder->CreateBr(condBB);
+
+        impl_->builder->SetInsertPoint(endBB);
+        if (collFromDict || ownedIterTemp)
+            impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {collVal});
+    }
+}
+
 void CodeGen::visit(ListCompExpr& node) {
     auto* func = impl_->currentFunction;
 
@@ -23,344 +350,20 @@ void CodeGen::visit(ListCompExpr& node) {
     auto* listAlloca = impl_->createEntryAlloca(func, "__complist", impl_->i8PtrType);
     impl_->builder->CreateStore(list, listAlloca);
 
-    auto* callExpr = dynamic_cast<CallExpr*>(node.iterable.get());
-    auto* calleeName = callExpr ? dynamic_cast<NameExpr*>(callExpr->callee.get()) : nullptr;
-    bool isRange = calleeName && calleeName->name == "range";
-
-    auto emitInnermostBody = [&]() {
-        bool isF64 = (elemTag == 2);
-        bool isPtr = (elemTag == 1 || elemTag == 5 || elemTag == 6 || elemTag == 7);
-        const char* appendFn = isF64 ? "dragon_list_append_f64"
-                              : isPtr ? "dragon_list_append_ptr"
-                                      : "dragon_list_append";
-
-        auto evalCoerceAppend = [&]() {
-            node.element->accept(*this);
-            llvm::Value* elemVal = impl_->lastValue;
-
-            if (elemTag == TAG_STR && elemVal->getType()->isPointerTy()) {
-                elemVal = impl_->ensureHeapString(elemVal, node.element.get());
-            }
-
-            // dragon_list_append_ptr ADOPTS the reference: a BORROWED element (loop var, field, xs[i]) must be
-            // incref'd or the source and result both decref the same +1 (double free); an owned temp already carries its +1.
-            if (isPtr && impl_->options.gcMode == GCMode::RC &&
-                elemVal->getType()->isPointerTy() &&
-                Impl::isBorrowedHeapExpr(node.element.get())) {
-                impl_->builder->CreateCall(
-                    impl_->runtimeFuncs[elemTag == 1 ? "dragon_incref_str"
-                                                     : "dragon_incref"],
-                    {elemVal});
-            }
-
-            if (isF64) {
-                if (elemVal->getType() == impl_->i64Type)
-                    elemVal = impl_->builder->CreateSIToFP(elemVal, impl_->f64Type);
-                else if (elemVal->getType() == impl_->i1Type)
-                    elemVal = impl_->builder->CreateUIToFP(elemVal, impl_->f64Type);
-            } else if (isPtr) {
-                if (!elemVal->getType()->isPointerTy())
-                    elemVal = impl_->builder->CreateIntToPtr(elemVal, impl_->i8PtrType);
-            } else {
-                if (elemVal->getType() == impl_->i1Type) {
-                    elemVal = impl_->builder->CreateZExt(elemVal, impl_->i64Type);
-                } else if (elemVal->getType() == impl_->f64Type) {
-                    elemVal = impl_->builder->CreateBitCast(elemVal, impl_->i64Type);
-                } else if (elemVal->getType()->isPointerTy()) {
-                    elemVal = impl_->builder->CreatePtrToInt(elemVal, impl_->i64Type);
-                }
-            }
-            llvm::Value* curList = impl_->builder->CreateLoad(impl_->i8PtrType, listAlloca);
-            impl_->builder->CreateCall(impl_->runtimeFuncs[appendFn], {curList, elemVal});
-        };
-
-        if (node.condition) {
-            node.condition->accept(*this);
-            llvm::Value* filterCond = impl_->lastValue;
-            if (filterCond->getType() == impl_->i64Type) {
-                filterCond = impl_->builder->CreateICmpNE(
-                    filterCond, llvm::ConstantInt::get(impl_->i64Type, 0));
-            } else if (filterCond->getType() == impl_->f64Type) {
-                filterCond = impl_->builder->CreateFCmpONE(
-                    filterCond, llvm::ConstantFP::get(impl_->f64Type, 0.0));
-            }
-            auto* appendBB = llvm::BasicBlock::Create(*impl_->context, "compappend", func);
-            auto* skipBB = llvm::BasicBlock::Create(*impl_->context, "compskip", func);
-            impl_->builder->CreateCondBr(filterCond, appendBB, skipBB);
-
-            impl_->builder->SetInsertPoint(appendBB);
-            evalCoerceAppend();
-            impl_->builder->CreateBr(skipBB);
-
-            impl_->builder->SetInsertPoint(skipBB);
-        } else {
-            evalCoerceAppend();
-        }
-    };
-
-    std::function<void(size_t)> emitExtraClauses = [&](size_t clauseIdx) {
-        if (clauseIdx >= node.extraClauses.size()) {
-            emitInnermostBody();
-            return;
-        }
-        auto& clause = node.extraClauses[clauseIdx];
-        std::string ecVarName = clause.varNames.empty() ? "__ec" : clause.varNames[0];
-
-        auto* ecCallExpr = dynamic_cast<CallExpr*>(clause.iterable.get());
-        auto* ecCalleeName = ecCallExpr ? dynamic_cast<NameExpr*>(ecCallExpr->callee.get()) : nullptr;
-        bool ecIsRange = ecCalleeName && ecCalleeName->name == "range";
-
-        if (ecIsRange) {
-            llvm::Value* ecStart = llvm::ConstantInt::get(impl_->i64Type, 0);
-            llvm::Value* ecEnd = nullptr;
-            llvm::Value* ecStep = llvm::ConstantInt::get(impl_->i64Type, 1);
-            if (ecCallExpr->args.size() == 1) {
-                ecCallExpr->args[0]->accept(*this);
-                ecEnd = impl_->lastValue;
-            } else if (ecCallExpr->args.size() >= 2) {
-                ecCallExpr->args[0]->accept(*this);
-                ecStart = impl_->lastValue;
-                ecCallExpr->args[1]->accept(*this);
-                ecEnd = impl_->lastValue;
-                if (ecCallExpr->args.size() >= 3) {
-                    ecCallExpr->args[2]->accept(*this);
-                    ecStep = impl_->lastValue;
-                }
-            } else {
-                ecEnd = llvm::ConstantInt::get(impl_->i64Type, 0);
-            }
-            auto* ecVar = impl_->createEntryAlloca(func, ecVarName, impl_->i64Type);
-            impl_->builder->CreateStore(ecStart, ecVar);
-            auto* ecCond = llvm::BasicBlock::Create(*impl_->context, "eccond", func);
-            auto* ecBody = llvm::BasicBlock::Create(*impl_->context, "ecbody", func);
-            auto* ecInc = llvm::BasicBlock::Create(*impl_->context, "ecinc", func);
-            auto* ecEndBB = llvm::BasicBlock::Create(*impl_->context, "ecend", func);
-            impl_->builder->CreateBr(ecCond);
-            impl_->builder->SetInsertPoint(ecCond);
-            llvm::Value* ecCur = impl_->builder->CreateLoad(impl_->i64Type, ecVar, "eci");
-            llvm::Value* ecCmp = impl_->builder->CreateICmpSLT(ecCur, ecEnd, "eccmp");
-            impl_->builder->CreateCondBr(ecCmp, ecBody, ecEndBB);
-            impl_->builder->SetInsertPoint(ecBody);
-            impl_->pushScope();
-            impl_->setVar(ecVarName, ecVar, Impl::VarKind::Int);
-
-            if (clause.condition) {
-                clause.condition->accept(*this);
-                llvm::Value* ecFilter = impl_->lastValue;
-                if (ecFilter->getType() == impl_->i64Type) {
-                    ecFilter = impl_->builder->CreateICmpNE(
-                        ecFilter, llvm::ConstantInt::get(impl_->i64Type, 0));
-                } else if (ecFilter->getType() == impl_->f64Type) {
-                    ecFilter = impl_->builder->CreateFCmpONE(
-                        ecFilter, llvm::ConstantFP::get(impl_->f64Type, 0.0));
-                }
-                auto* ecPassBB = llvm::BasicBlock::Create(*impl_->context, "ecpass", func);
-                auto* ecSkipBB = llvm::BasicBlock::Create(*impl_->context, "ecskip", func);
-                impl_->builder->CreateCondBr(ecFilter, ecPassBB, ecSkipBB);
-                impl_->builder->SetInsertPoint(ecPassBB);
-                emitExtraClauses(clauseIdx + 1);
-                if (!impl_->builder->GetInsertBlock()->getTerminator())
-                    impl_->builder->CreateBr(ecSkipBB);
-                impl_->builder->SetInsertPoint(ecSkipBB);
-            } else {
-                emitExtraClauses(clauseIdx + 1);
-            }
-
-            impl_->emitScopeCleanup();
-            impl_->emitScopeCleanup();
-        impl_->popScope();
-            if (!impl_->builder->GetInsertBlock()->getTerminator())
-                impl_->builder->CreateBr(ecInc);
-            impl_->builder->SetInsertPoint(ecInc);
-            ecCur = impl_->builder->CreateLoad(impl_->i64Type, ecVar, "eci");
-            llvm::Value* ecNext = impl_->builder->CreateAdd(ecCur, ecStep, "ecinc");
-            impl_->builder->CreateStore(ecNext, ecVar);
-            impl_->builder->CreateBr(ecCond);
-            impl_->builder->SetInsertPoint(ecEndBB);
-        } else {
-            clause.iterable->accept(*this);
-            llvm::Value* ecColl = impl_->lastValue;
-            bool ecFromDict = impl_->isBareDictIterable(clause.iterable.get());
-            if (ecFromDict)
-                ecColl = impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_dict_keys"], {ecColl}, "compdictkeys");
-            llvm::Value* ecLen = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_list_len"], {ecColl}, "eclen");
-            auto* ecIdx = impl_->createEntryAlloca(func, "__ecidx", impl_->i64Type);
-            impl_->builder->CreateStore(llvm::ConstantInt::get(impl_->i64Type, 0), ecIdx);
-            auto* ecCond = llvm::BasicBlock::Create(*impl_->context, "eccond", func);
-            auto* ecBody = llvm::BasicBlock::Create(*impl_->context, "ecbody", func);
-            auto* ecInc = llvm::BasicBlock::Create(*impl_->context, "ecinc", func);
-            auto* ecEndBB = llvm::BasicBlock::Create(*impl_->context, "ecend", func);
-            impl_->builder->CreateBr(ecCond);
-            impl_->builder->SetInsertPoint(ecCond);
-            llvm::Value* ecCurIdx = impl_->builder->CreateLoad(impl_->i64Type, ecIdx, "ecidx");
-            llvm::Value* ecCmp = impl_->builder->CreateICmpSLT(ecCurIdx, ecLen, "eccmp");
-            impl_->builder->CreateCondBr(ecCmp, ecBody, ecEndBB);
-            impl_->builder->SetInsertPoint(ecBody);
-            impl_->pushScope();
-            Type::Kind ecElemKind = impl_->getIterableElementKind(clause.iterable.get());
-            Impl::VarKind ecLoopKind = Impl::typeKindToVarKind(ecElemKind);
-            auto* ecVar = impl_->bindListElemTyped(
-                func, ecColl, ecCurIdx, ecVarName, ecLoopKind);
-            impl_->setVar(ecVarName, ecVar, ecLoopKind);
-            if (Impl::isHeapKind(ecLoopKind))
-                impl_->scopes.back().borrowed.insert(ecVarName);
-
-            if (clause.condition) {
-                clause.condition->accept(*this);
-                llvm::Value* ecFilter = impl_->lastValue;
-                if (ecFilter->getType() == impl_->i64Type) {
-                    ecFilter = impl_->builder->CreateICmpNE(
-                        ecFilter, llvm::ConstantInt::get(impl_->i64Type, 0));
-                } else if (ecFilter->getType() == impl_->f64Type) {
-                    ecFilter = impl_->builder->CreateFCmpONE(
-                        ecFilter, llvm::ConstantFP::get(impl_->f64Type, 0.0));
-                }
-                auto* ecPassBB = llvm::BasicBlock::Create(*impl_->context, "ecpass", func);
-                auto* ecSkipBB = llvm::BasicBlock::Create(*impl_->context, "ecskip", func);
-                impl_->builder->CreateCondBr(ecFilter, ecPassBB, ecSkipBB);
-                impl_->builder->SetInsertPoint(ecPassBB);
-                emitExtraClauses(clauseIdx + 1);
-                if (!impl_->builder->GetInsertBlock()->getTerminator())
-                    impl_->builder->CreateBr(ecSkipBB);
-                impl_->builder->SetInsertPoint(ecSkipBB);
-            } else {
-                emitExtraClauses(clauseIdx + 1);
-            }
-
-            impl_->emitScopeCleanup();
-            impl_->emitScopeCleanup();
-        impl_->popScope();
-            if (!impl_->builder->GetInsertBlock()->getTerminator())
-                impl_->builder->CreateBr(ecInc);
-            impl_->builder->SetInsertPoint(ecInc);
-            ecCurIdx = impl_->builder->CreateLoad(impl_->i64Type, ecIdx, "ecidx");
-            llvm::Value* ecNextIdx = impl_->builder->CreateAdd(
-                ecCurIdx, llvm::ConstantInt::get(impl_->i64Type, 1), "ecinc");
-            impl_->builder->CreateStore(ecNextIdx, ecIdx);
-            impl_->builder->CreateBr(ecCond);
-            impl_->builder->SetInsertPoint(ecEndBB);
-            if (ecFromDict)
-                impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {ecColl});
-        }
-    };
-
-    if (isRange) {
-        llvm::Value* startVal = llvm::ConstantInt::get(impl_->i64Type, 0);
-        llvm::Value* endVal = nullptr;
-        llvm::Value* stepVal = llvm::ConstantInt::get(impl_->i64Type, 1);
-
-        if (callExpr->args.size() == 1) {
-            callExpr->args[0]->accept(*this);
-            endVal = impl_->lastValue;
-        } else if (callExpr->args.size() >= 2) {
-            callExpr->args[0]->accept(*this);
-            startVal = impl_->lastValue;
-            callExpr->args[1]->accept(*this);
-            endVal = impl_->lastValue;
-            if (callExpr->args.size() >= 3) {
-                callExpr->args[2]->accept(*this);
-                stepVal = impl_->lastValue;
-            }
-        } else {
-            endVal = llvm::ConstantInt::get(impl_->i64Type, 0);
-        }
-
-        auto* loopVar = impl_->createEntryAlloca(func, node.varName, impl_->i64Type);
-        impl_->builder->CreateStore(startVal, loopVar);
-
-        auto* condBB = llvm::BasicBlock::Create(*impl_->context, "compcond", func);
-        auto* bodyBB = llvm::BasicBlock::Create(*impl_->context, "compbody", func);
-        auto* incBB = llvm::BasicBlock::Create(*impl_->context, "compinc", func);
-        auto* endBB = llvm::BasicBlock::Create(*impl_->context, "compend", func);
-
-        impl_->builder->CreateBr(condBB);
-
-        impl_->builder->SetInsertPoint(condBB);
-        llvm::Value* current = impl_->builder->CreateLoad(impl_->i64Type, loopVar, "i");
-        llvm::Value* cond = impl_->builder->CreateICmpSLT(current, endVal, "cmp");
-        impl_->builder->CreateCondBr(cond, bodyBB, endBB);
-
-        impl_->builder->SetInsertPoint(bodyBB);
-        impl_->pushScope();
-        impl_->setVar(node.varName, loopVar, Impl::VarKind::Int);
-
-        emitExtraClauses(0);
-
-        impl_->emitScopeCleanup();
-        impl_->popScope();
-        if (!impl_->builder->GetInsertBlock()->getTerminator())
-            impl_->builder->CreateBr(incBB);
-
-        impl_->builder->SetInsertPoint(incBB);
-        current = impl_->builder->CreateLoad(impl_->i64Type, loopVar, "i");
-        llvm::Value* next = impl_->builder->CreateAdd(current, stepVal, "inc");
-        impl_->builder->CreateStore(next, loopVar);
-        impl_->builder->CreateBr(condBB);
-
-        impl_->builder->SetInsertPoint(endBB);
-    } else {
-        node.iterable->accept(*this);
-        llvm::Value* collVal = impl_->lastValue;
-        bool collFromDict = impl_->isBareDictIterable(node.iterable.get());
-        bool ownedIterTemp = !collFromDict && node.iterable &&
-            !Impl::isBorrowedHeapExpr(node.iterable.get()) && node.iterable->type &&
-            (node.iterable->type->kind() == Type::Kind::List ||
-             node.iterable->type->kind() == Type::Kind::Set ||
-             node.iterable->type->kind() == Type::Kind::Tuple);
-        if (collFromDict)
-            collVal = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_dict_keys"], {collVal}, "compdictkeys");
-        llvm::Value* collLen = impl_->builder->CreateCall(
-            impl_->runtimeFuncs["dragon_list_len"], {collVal}, "colllen");
-
-        auto* idxAlloca = impl_->createEntryAlloca(func, "__compidx", impl_->i64Type);
-        impl_->builder->CreateStore(llvm::ConstantInt::get(impl_->i64Type, 0), idxAlloca);
-
-        auto* condBB = llvm::BasicBlock::Create(*impl_->context, "compcond", func);
-        auto* bodyBB = llvm::BasicBlock::Create(*impl_->context, "compbody", func);
-        auto* incBB = llvm::BasicBlock::Create(*impl_->context, "compinc", func);
-        auto* endBB = llvm::BasicBlock::Create(*impl_->context, "compend", func);
-
-        impl_->builder->CreateBr(condBB);
-
-        impl_->builder->SetInsertPoint(condBB);
-        llvm::Value* curIdx = impl_->builder->CreateLoad(impl_->i64Type, idxAlloca, "idx");
-        llvm::Value* cond = impl_->builder->CreateICmpSLT(curIdx, collLen, "cmp");
-        impl_->builder->CreateCondBr(cond, bodyBB, endBB);
-
-        impl_->builder->SetInsertPoint(bodyBB);
-        impl_->pushScope();
-
-        Type::Kind elemKind = impl_->getIterableElementKind(node.iterable.get());
-        Impl::VarKind loopKind = Impl::typeKindToVarKind(elemKind);
-        auto* elemAlloca = impl_->bindListElemTyped(
-            func, collVal, curIdx, node.varName, loopKind);
-        impl_->setVar(node.varName, elemAlloca, loopKind);
-        if (Impl::isHeapKind(loopKind)) impl_->scopes.back().borrowed.insert(node.varName);
-
-        emitExtraClauses(0);
-
-        impl_->emitScopeCleanup();
-        impl_->popScope();
-        if (!impl_->builder->GetInsertBlock()->getTerminator())
-            impl_->builder->CreateBr(incBB);
-
-        impl_->builder->SetInsertPoint(incBB);
-        curIdx = impl_->builder->CreateLoad(impl_->i64Type, idxAlloca, "idx");
-        llvm::Value* nextIdx = impl_->builder->CreateAdd(
-            curIdx, llvm::ConstantInt::get(impl_->i64Type, 1), "inc");
-        impl_->builder->CreateStore(nextIdx, idxAlloca);
-        impl_->builder->CreateBr(condBB);
-
-        impl_->builder->SetInsertPoint(endBB);
-        if (collFromDict || ownedIterTemp)
-            impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {collVal});
-    }
+    emitCompLoopNest(
+        node.iterable.get(), {node.varName}, node.extraClauses, "comp",
+        "__compidx",
+        [&]() {
+            emitCompAppendBody(node.element.get(), node.condition.get(),
+                               listAlloca, elemTag, "comp");
+        },
+        [&](llvm::Value* collVal, llvm::Value* curIdx) {
+            bindCompElemVar(node.iterable.get(), node.varName, collVal, curIdx);
+        });
 
     impl_->lastValue = impl_->builder->CreateLoad(impl_->i8PtrType, listAlloca);
 }
+
 void CodeGen::visit(DictCompExpr& node) {
     auto* func = impl_->currentFunction;
 
@@ -369,10 +372,6 @@ void CodeGen::visit(DictCompExpr& node) {
         impl_->runtimeFuncs["dragon_dict_new"], {capVal}, "compdict");
     auto* dictAlloca = impl_->createEntryAlloca(func, "__compdict", impl_->i8PtrType);
     impl_->builder->CreateStore(dict, dictAlloca);
-
-    auto* callExpr = dynamic_cast<CallExpr*>(node.iterable.get());
-    auto* calleeName = callExpr ? dynamic_cast<NameExpr*>(callExpr->callee.get()) : nullptr;
-    bool isRange = calleeName && calleeName->name == "range";
 
     auto emitInnermostBody = [&]() {
         node.key->accept(*this);
@@ -436,14 +435,7 @@ void CodeGen::visit(DictCompExpr& node) {
 
         if (node.condition) {
             node.condition->accept(*this);
-            llvm::Value* filterCond = impl_->lastValue;
-            if (filterCond->getType() == impl_->i64Type) {
-                filterCond = impl_->builder->CreateICmpNE(
-                    filterCond, llvm::ConstantInt::get(impl_->i64Type, 0));
-            } else if (filterCond->getType() == impl_->f64Type) {
-                filterCond = impl_->builder->CreateFCmpONE(
-                    filterCond, llvm::ConstantFP::get(impl_->f64Type, 0.0));
-            }
+            llvm::Value* filterCond = emitCompFilterTruth(impl_->lastValue);
             auto* insertBB = llvm::BasicBlock::Create(*impl_->context, "dcompinsert", func);
             auto* skipBB = llvm::BasicBlock::Create(*impl_->context, "dcompskip", func);
             impl_->builder->CreateCondBr(filterCond, insertBB, skipBB);
@@ -458,241 +450,15 @@ void CodeGen::visit(DictCompExpr& node) {
         }
     };
 
-    std::function<void(size_t)> emitExtraClauses = [&](size_t clauseIdx) {
-        if (clauseIdx >= node.extraClauses.size()) {
-            emitInnermostBody();
-            return;
-        }
-        auto& clause = node.extraClauses[clauseIdx];
-        std::string ecVarName = clause.varNames.empty() ? "__ec" : clause.varNames[0];
-
-        auto* ecCallExpr = dynamic_cast<CallExpr*>(clause.iterable.get());
-        auto* ecCalleeName = ecCallExpr ? dynamic_cast<NameExpr*>(ecCallExpr->callee.get()) : nullptr;
-        bool ecIsRange = ecCalleeName && ecCalleeName->name == "range";
-
-        if (ecIsRange) {
-            llvm::Value* ecStart = llvm::ConstantInt::get(impl_->i64Type, 0);
-            llvm::Value* ecEnd = nullptr;
-            llvm::Value* ecStep = llvm::ConstantInt::get(impl_->i64Type, 1);
-            if (ecCallExpr->args.size() == 1) {
-                ecCallExpr->args[0]->accept(*this);
-                ecEnd = impl_->lastValue;
-            } else if (ecCallExpr->args.size() >= 2) {
-                ecCallExpr->args[0]->accept(*this);
-                ecStart = impl_->lastValue;
-                ecCallExpr->args[1]->accept(*this);
-                ecEnd = impl_->lastValue;
-                if (ecCallExpr->args.size() >= 3) {
-                    ecCallExpr->args[2]->accept(*this);
-                    ecStep = impl_->lastValue;
-                }
-            } else {
-                ecEnd = llvm::ConstantInt::get(impl_->i64Type, 0);
+    emitCompLoopNest(
+        node.iterable.get(), node.varNames, node.extraClauses, "dcomp",
+        "__dcompidx", emitInnermostBody,
+        [&](llvm::Value* collVal, llvm::Value* curIdx) {
+            if (node.varNames.size() == 1) {
+                bindCompElemVar(node.iterable.get(), node.varNames[0], collVal,
+                                curIdx);
+                return;
             }
-            auto* ecVar = impl_->createEntryAlloca(func, ecVarName, impl_->i64Type);
-            impl_->builder->CreateStore(ecStart, ecVar);
-            auto* ecCondBB = llvm::BasicBlock::Create(*impl_->context, "eccond", func);
-            auto* ecBodyBB = llvm::BasicBlock::Create(*impl_->context, "ecbody", func);
-            auto* ecIncBB = llvm::BasicBlock::Create(*impl_->context, "ecinc", func);
-            auto* ecEndBB = llvm::BasicBlock::Create(*impl_->context, "ecend", func);
-            impl_->builder->CreateBr(ecCondBB);
-            impl_->builder->SetInsertPoint(ecCondBB);
-            llvm::Value* ecCur = impl_->builder->CreateLoad(impl_->i64Type, ecVar, "eci");
-            llvm::Value* ecCmp = impl_->builder->CreateICmpSLT(ecCur, ecEnd, "eccmp");
-            impl_->builder->CreateCondBr(ecCmp, ecBodyBB, ecEndBB);
-            impl_->builder->SetInsertPoint(ecBodyBB);
-            impl_->pushScope();
-            impl_->setVar(ecVarName, ecVar, Impl::VarKind::Int);
-            if (clause.condition) {
-                clause.condition->accept(*this);
-                llvm::Value* ecFilter = impl_->lastValue;
-                if (ecFilter->getType() == impl_->i64Type)
-                    ecFilter = impl_->builder->CreateICmpNE(ecFilter, llvm::ConstantInt::get(impl_->i64Type, 0));
-                else if (ecFilter->getType() == impl_->f64Type)
-                    ecFilter = impl_->builder->CreateFCmpONE(ecFilter, llvm::ConstantFP::get(impl_->f64Type, 0.0));
-                auto* ecPassBB = llvm::BasicBlock::Create(*impl_->context, "ecpass", func);
-                auto* ecSkipBB = llvm::BasicBlock::Create(*impl_->context, "ecskip", func);
-                impl_->builder->CreateCondBr(ecFilter, ecPassBB, ecSkipBB);
-                impl_->builder->SetInsertPoint(ecPassBB);
-                emitExtraClauses(clauseIdx + 1);
-                if (!impl_->builder->GetInsertBlock()->getTerminator())
-                    impl_->builder->CreateBr(ecSkipBB);
-                impl_->builder->SetInsertPoint(ecSkipBB);
-            } else {
-                emitExtraClauses(clauseIdx + 1);
-            }
-            impl_->emitScopeCleanup();
-            impl_->emitScopeCleanup();
-        impl_->popScope();
-            if (!impl_->builder->GetInsertBlock()->getTerminator())
-                impl_->builder->CreateBr(ecIncBB);
-            impl_->builder->SetInsertPoint(ecIncBB);
-            ecCur = impl_->builder->CreateLoad(impl_->i64Type, ecVar, "eci");
-            llvm::Value* ecNext = impl_->builder->CreateAdd(ecCur, ecStep, "ecinc");
-            impl_->builder->CreateStore(ecNext, ecVar);
-            impl_->builder->CreateBr(ecCondBB);
-            impl_->builder->SetInsertPoint(ecEndBB);
-        } else {
-            clause.iterable->accept(*this);
-            llvm::Value* ecColl = impl_->lastValue;
-            bool ecFromDict = impl_->isBareDictIterable(clause.iterable.get());
-            if (ecFromDict)
-                ecColl = impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_dict_keys"], {ecColl}, "compdictkeys");
-            llvm::Value* ecLen = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_list_len"], {ecColl}, "eclen");
-            auto* ecIdx = impl_->createEntryAlloca(func, "__ecidx", impl_->i64Type);
-            impl_->builder->CreateStore(llvm::ConstantInt::get(impl_->i64Type, 0), ecIdx);
-            auto* ecCondBB = llvm::BasicBlock::Create(*impl_->context, "eccond", func);
-            auto* ecBodyBB = llvm::BasicBlock::Create(*impl_->context, "ecbody", func);
-            auto* ecIncBB = llvm::BasicBlock::Create(*impl_->context, "ecinc", func);
-            auto* ecEndBB = llvm::BasicBlock::Create(*impl_->context, "ecend", func);
-            impl_->builder->CreateBr(ecCondBB);
-            impl_->builder->SetInsertPoint(ecCondBB);
-            llvm::Value* ecCurIdx = impl_->builder->CreateLoad(impl_->i64Type, ecIdx, "ecidx");
-            llvm::Value* ecCmp = impl_->builder->CreateICmpSLT(ecCurIdx, ecLen, "eccmp");
-            impl_->builder->CreateCondBr(ecCmp, ecBodyBB, ecEndBB);
-            impl_->builder->SetInsertPoint(ecBodyBB);
-            impl_->pushScope();
-            Type::Kind ecElemKind = impl_->getIterableElementKind(clause.iterable.get());
-            Impl::VarKind ecLoopKind = Impl::typeKindToVarKind(ecElemKind);
-            auto* ecVar = impl_->bindListElemTyped(
-                func, ecColl, ecCurIdx, ecVarName, ecLoopKind);
-            impl_->setVar(ecVarName, ecVar, ecLoopKind);
-            if (Impl::isHeapKind(ecLoopKind))
-                impl_->scopes.back().borrowed.insert(ecVarName);
-            if (clause.condition) {
-                clause.condition->accept(*this);
-                llvm::Value* ecFilter = impl_->lastValue;
-                if (ecFilter->getType() == impl_->i64Type)
-                    ecFilter = impl_->builder->CreateICmpNE(ecFilter, llvm::ConstantInt::get(impl_->i64Type, 0));
-                else if (ecFilter->getType() == impl_->f64Type)
-                    ecFilter = impl_->builder->CreateFCmpONE(ecFilter, llvm::ConstantFP::get(impl_->f64Type, 0.0));
-                auto* ecPassBB = llvm::BasicBlock::Create(*impl_->context, "ecpass", func);
-                auto* ecSkipBB = llvm::BasicBlock::Create(*impl_->context, "ecskip", func);
-                impl_->builder->CreateCondBr(ecFilter, ecPassBB, ecSkipBB);
-                impl_->builder->SetInsertPoint(ecPassBB);
-                emitExtraClauses(clauseIdx + 1);
-                if (!impl_->builder->GetInsertBlock()->getTerminator())
-                    impl_->builder->CreateBr(ecSkipBB);
-                impl_->builder->SetInsertPoint(ecSkipBB);
-            } else {
-                emitExtraClauses(clauseIdx + 1);
-            }
-            impl_->emitScopeCleanup();
-            impl_->emitScopeCleanup();
-        impl_->popScope();
-            if (!impl_->builder->GetInsertBlock()->getTerminator())
-                impl_->builder->CreateBr(ecIncBB);
-            impl_->builder->SetInsertPoint(ecIncBB);
-            ecCurIdx = impl_->builder->CreateLoad(impl_->i64Type, ecIdx, "ecidx");
-            llvm::Value* ecNextIdx = impl_->builder->CreateAdd(
-                ecCurIdx, llvm::ConstantInt::get(impl_->i64Type, 1), "ecinc");
-            impl_->builder->CreateStore(ecNextIdx, ecIdx);
-            impl_->builder->CreateBr(ecCondBB);
-            impl_->builder->SetInsertPoint(ecEndBB);
-            if (ecFromDict)
-                impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {ecColl});
-        }
-    };
-
-    if (isRange && !node.varNames.empty()) {
-        llvm::Value* startVal = llvm::ConstantInt::get(impl_->i64Type, 0);
-        llvm::Value* endVal = nullptr;
-        llvm::Value* stepVal = llvm::ConstantInt::get(impl_->i64Type, 1);
-
-        if (callExpr->args.size() == 1) {
-            callExpr->args[0]->accept(*this);
-            endVal = impl_->lastValue;
-        } else if (callExpr->args.size() >= 2) {
-            callExpr->args[0]->accept(*this);
-            startVal = impl_->lastValue;
-            callExpr->args[1]->accept(*this);
-            endVal = impl_->lastValue;
-            if (callExpr->args.size() >= 3) {
-                callExpr->args[2]->accept(*this);
-                stepVal = impl_->lastValue;
-            }
-        } else {
-            endVal = llvm::ConstantInt::get(impl_->i64Type, 0);
-        }
-
-        std::string loopVarName = node.varNames[0];
-        auto* loopVar = impl_->createEntryAlloca(func, loopVarName, impl_->i64Type);
-        impl_->builder->CreateStore(startVal, loopVar);
-
-        auto* condBB = llvm::BasicBlock::Create(*impl_->context, "dcompcond", func);
-        auto* bodyBB = llvm::BasicBlock::Create(*impl_->context, "dcompbody", func);
-        auto* incBB = llvm::BasicBlock::Create(*impl_->context, "dcompinc", func);
-        auto* endBB = llvm::BasicBlock::Create(*impl_->context, "dcompend", func);
-
-        impl_->builder->CreateBr(condBB);
-
-        impl_->builder->SetInsertPoint(condBB);
-        llvm::Value* current = impl_->builder->CreateLoad(impl_->i64Type, loopVar, "i");
-        llvm::Value* cond = impl_->builder->CreateICmpSLT(current, endVal, "cmp");
-        impl_->builder->CreateCondBr(cond, bodyBB, endBB);
-
-        impl_->builder->SetInsertPoint(bodyBB);
-        impl_->pushScope();
-        impl_->setVar(loopVarName, loopVar, Impl::VarKind::Int);
-
-        emitExtraClauses(0);
-
-        impl_->emitScopeCleanup();
-        impl_->popScope();
-        if (!impl_->builder->GetInsertBlock()->getTerminator())
-            impl_->builder->CreateBr(incBB);
-
-        impl_->builder->SetInsertPoint(incBB);
-        current = impl_->builder->CreateLoad(impl_->i64Type, loopVar, "i");
-        llvm::Value* next = impl_->builder->CreateAdd(current, stepVal, "inc");
-        impl_->builder->CreateStore(next, loopVar);
-        impl_->builder->CreateBr(condBB);
-
-        impl_->builder->SetInsertPoint(endBB);
-    } else if (!node.varNames.empty()) {
-        node.iterable->accept(*this);
-        llvm::Value* collVal = impl_->lastValue;
-        bool collFromDict = impl_->isBareDictIterable(node.iterable.get());
-        bool ownedIterTemp = !collFromDict && node.iterable &&
-            !Impl::isBorrowedHeapExpr(node.iterable.get()) && node.iterable->type &&
-            (node.iterable->type->kind() == Type::Kind::List ||
-             node.iterable->type->kind() == Type::Kind::Set ||
-             node.iterable->type->kind() == Type::Kind::Tuple);
-        if (collFromDict)
-            collVal = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_dict_keys"], {collVal}, "compdictkeys");
-        llvm::Value* collLen = impl_->builder->CreateCall(
-            impl_->runtimeFuncs["dragon_list_len"], {collVal}, "colllen");
-
-        auto* idxAlloca = impl_->createEntryAlloca(func, "__dcompidx", impl_->i64Type);
-        impl_->builder->CreateStore(llvm::ConstantInt::get(impl_->i64Type, 0), idxAlloca);
-
-        auto* condBB = llvm::BasicBlock::Create(*impl_->context, "dcompcond", func);
-        auto* bodyBB = llvm::BasicBlock::Create(*impl_->context, "dcompbody", func);
-        auto* incBB = llvm::BasicBlock::Create(*impl_->context, "dcompinc", func);
-        auto* endBB = llvm::BasicBlock::Create(*impl_->context, "dcompend", func);
-
-        impl_->builder->CreateBr(condBB);
-
-        impl_->builder->SetInsertPoint(condBB);
-        llvm::Value* curIdx = impl_->builder->CreateLoad(impl_->i64Type, idxAlloca, "idx");
-        llvm::Value* cond = impl_->builder->CreateICmpSLT(curIdx, collLen, "cmp");
-        impl_->builder->CreateCondBr(cond, bodyBB, endBB);
-
-        impl_->builder->SetInsertPoint(bodyBB);
-        impl_->pushScope();
-
-        if (node.varNames.size() == 1) {
-            Type::Kind elemKind = impl_->getIterableElementKind(node.iterable.get());
-            Impl::VarKind loopKind = Impl::typeKindToVarKind(elemKind);
-            auto* elemAlloca = impl_->bindListElemTyped(
-                func, collVal, curIdx, node.varNames[0], loopKind);
-            impl_->setVar(node.varNames[0], elemAlloca, loopKind);
-            if (Impl::isHeapKind(loopKind))
-                impl_->scopes.back().borrowed.insert(node.varNames[0]);
-        } else {
             llvm::Value* rawElem = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_list_get"], {collVal, curIdx}, "rawelem");
             llvm::Value* tuplePtr = impl_->builder->CreateIntToPtr(rawElem, impl_->i8PtrType, "tupleptr");
@@ -735,29 +501,11 @@ void CodeGen::visit(DictCompExpr& node) {
                 if (Impl::isHeapKind(vk))
                     impl_->scopes.back().borrowed.insert(node.varNames[vi]);
             }
-        }
-
-        emitExtraClauses(0);
-
-        impl_->emitScopeCleanup();
-        impl_->popScope();
-        if (!impl_->builder->GetInsertBlock()->getTerminator())
-            impl_->builder->CreateBr(incBB);
-
-        impl_->builder->SetInsertPoint(incBB);
-        curIdx = impl_->builder->CreateLoad(impl_->i64Type, idxAlloca, "idx");
-        llvm::Value* nextIdx = impl_->builder->CreateAdd(
-            curIdx, llvm::ConstantInt::get(impl_->i64Type, 1), "inc");
-        impl_->builder->CreateStore(nextIdx, idxAlloca);
-        impl_->builder->CreateBr(condBB);
-
-        impl_->builder->SetInsertPoint(endBB);
-        if (collFromDict || ownedIterTemp)
-            impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {collVal});
-    }
+        });
 
     impl_->lastValue = impl_->builder->CreateLoad(impl_->i8PtrType, dictAlloca);
 }
+
 void CodeGen::visit(SetCompExpr& node) {
     auto* func = impl_->currentFunction;
 
@@ -778,304 +526,61 @@ void CodeGen::visit(SetCompExpr& node) {
     auto* setAlloca = impl_->createEntryAlloca(func, "__compset", impl_->i8PtrType);
     impl_->builder->CreateStore(set, setAlloca);
 
-    auto* callExpr = dynamic_cast<CallExpr*>(node.iterable.get());
-    auto* calleeName = callExpr ? dynamic_cast<NameExpr*>(callExpr->callee.get()) : nullptr;
-    bool isRange = calleeName && calleeName->name == "range";
-
     auto emitInnermostBody = [&]() {
-        node.element->accept(*this);
-        llvm::Value* elemVal = impl_->lastValue;
+        auto evalCoerceAdd = [&]() {
+            node.element->accept(*this);
+            llvm::Value* elemVal = impl_->lastValue;
+            llvm::Value* elemPtr =
+                elemVal->getType()->isPointerTy() ? elemVal : nullptr;
 
-        if (elemVal->getType() == impl_->i1Type) {
-            elemVal = impl_->builder->CreateZExt(elemVal, impl_->i64Type);
-        } else if (elemVal->getType() == impl_->f64Type) {
-            elemVal = impl_->builder->CreateBitCast(elemVal, impl_->i64Type);
-        } else if (elemVal->getType()->isPointerTy()) {
-            elemVal = impl_->builder->CreatePtrToInt(elemVal, impl_->i64Type);
-        }
+            if (elemVal->getType() == impl_->i1Type) {
+                elemVal = impl_->builder->CreateZExt(elemVal, impl_->i64Type);
+            } else if (elemVal->getType() == impl_->f64Type) {
+                elemVal = impl_->builder->CreateBitCast(elemVal, impl_->i64Type);
+            } else if (elemPtr) {
+                elemVal = impl_->builder->CreatePtrToInt(elemVal, impl_->i64Type);
+            }
+
+            llvm::Value* curSet = impl_->builder->CreateLoad(impl_->i8PtrType, setAlloca);
+            impl_->builder->CreateCall(
+                impl_->runtimeFuncs["dragon_set_add"], {curSet, elemVal});
+
+            if (elemPtr && elemTag != 0 && impl_->options.gcMode == GCMode::RC &&
+                !Impl::isBorrowedHeapExpr(node.element.get())) {
+                impl_->builder->CreateCall(
+                    impl_->runtimeFuncs[elemTag == 1 ? "dragon_decref_str"
+                                                     : "dragon_decref"],
+                    {elemPtr});
+            }
+        };
 
         if (node.condition) {
             node.condition->accept(*this);
-            llvm::Value* filterCond = impl_->lastValue;
-            if (filterCond->getType() == impl_->i64Type) {
-                filterCond = impl_->builder->CreateICmpNE(
-                    filterCond, llvm::ConstantInt::get(impl_->i64Type, 0));
-            } else if (filterCond->getType() == impl_->f64Type) {
-                filterCond = impl_->builder->CreateFCmpONE(
-                    filterCond, llvm::ConstantFP::get(impl_->f64Type, 0.0));
-            }
+            llvm::Value* filterCond = emitCompFilterTruth(impl_->lastValue);
             auto* addBB = llvm::BasicBlock::Create(*impl_->context, "scompadd", func);
             auto* skipBB = llvm::BasicBlock::Create(*impl_->context, "scompskip", func);
             impl_->builder->CreateCondBr(filterCond, addBB, skipBB);
 
             impl_->builder->SetInsertPoint(addBB);
-            llvm::Value* curSet = impl_->builder->CreateLoad(impl_->i8PtrType, setAlloca);
-            impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_set_add"], {curSet, elemVal});
+            evalCoerceAdd();
             impl_->builder->CreateBr(skipBB);
 
             impl_->builder->SetInsertPoint(skipBB);
         } else {
-            llvm::Value* curSet = impl_->builder->CreateLoad(impl_->i8PtrType, setAlloca);
-            impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_set_add"], {curSet, elemVal});
+            evalCoerceAdd();
         }
     };
 
-    std::function<void(size_t)> emitExtraClauses = [&](size_t clauseIdx) {
-        if (clauseIdx >= node.extraClauses.size()) {
-            emitInnermostBody();
-            return;
-        }
-        auto& clause = node.extraClauses[clauseIdx];
-        std::string ecVarName = clause.varNames.empty() ? "__ec" : clause.varNames[0];
-
-        auto* ecCallExpr = dynamic_cast<CallExpr*>(clause.iterable.get());
-        auto* ecCalleeName = ecCallExpr ? dynamic_cast<NameExpr*>(ecCallExpr->callee.get()) : nullptr;
-        bool ecIsRange = ecCalleeName && ecCalleeName->name == "range";
-
-        if (ecIsRange) {
-            llvm::Value* ecStart = llvm::ConstantInt::get(impl_->i64Type, 0);
-            llvm::Value* ecEnd = nullptr;
-            llvm::Value* ecStep = llvm::ConstantInt::get(impl_->i64Type, 1);
-            if (ecCallExpr->args.size() == 1) {
-                ecCallExpr->args[0]->accept(*this);
-                ecEnd = impl_->lastValue;
-            } else if (ecCallExpr->args.size() >= 2) {
-                ecCallExpr->args[0]->accept(*this);
-                ecStart = impl_->lastValue;
-                ecCallExpr->args[1]->accept(*this);
-                ecEnd = impl_->lastValue;
-                if (ecCallExpr->args.size() >= 3) {
-                    ecCallExpr->args[2]->accept(*this);
-                    ecStep = impl_->lastValue;
-                }
-            } else {
-                ecEnd = llvm::ConstantInt::get(impl_->i64Type, 0);
-            }
-            auto* ecVar = impl_->createEntryAlloca(func, ecVarName, impl_->i64Type);
-            impl_->builder->CreateStore(ecStart, ecVar);
-            auto* ecCondBB = llvm::BasicBlock::Create(*impl_->context, "eccond", func);
-            auto* ecBodyBB = llvm::BasicBlock::Create(*impl_->context, "ecbody", func);
-            auto* ecIncBB = llvm::BasicBlock::Create(*impl_->context, "ecinc", func);
-            auto* ecEndBB = llvm::BasicBlock::Create(*impl_->context, "ecend", func);
-            impl_->builder->CreateBr(ecCondBB);
-            impl_->builder->SetInsertPoint(ecCondBB);
-            llvm::Value* ecCur = impl_->builder->CreateLoad(impl_->i64Type, ecVar, "eci");
-            llvm::Value* ecCmp = impl_->builder->CreateICmpSLT(ecCur, ecEnd, "eccmp");
-            impl_->builder->CreateCondBr(ecCmp, ecBodyBB, ecEndBB);
-            impl_->builder->SetInsertPoint(ecBodyBB);
-            impl_->pushScope();
-            impl_->setVar(ecVarName, ecVar, Impl::VarKind::Int);
-            if (clause.condition) {
-                clause.condition->accept(*this);
-                llvm::Value* ecFilter = impl_->lastValue;
-                if (ecFilter->getType() == impl_->i64Type)
-                    ecFilter = impl_->builder->CreateICmpNE(ecFilter, llvm::ConstantInt::get(impl_->i64Type, 0));
-                else if (ecFilter->getType() == impl_->f64Type)
-                    ecFilter = impl_->builder->CreateFCmpONE(ecFilter, llvm::ConstantFP::get(impl_->f64Type, 0.0));
-                auto* ecPassBB = llvm::BasicBlock::Create(*impl_->context, "ecpass", func);
-                auto* ecSkipBB = llvm::BasicBlock::Create(*impl_->context, "ecskip", func);
-                impl_->builder->CreateCondBr(ecFilter, ecPassBB, ecSkipBB);
-                impl_->builder->SetInsertPoint(ecPassBB);
-                emitExtraClauses(clauseIdx + 1);
-                if (!impl_->builder->GetInsertBlock()->getTerminator())
-                    impl_->builder->CreateBr(ecSkipBB);
-                impl_->builder->SetInsertPoint(ecSkipBB);
-            } else {
-                emitExtraClauses(clauseIdx + 1);
-            }
-            impl_->emitScopeCleanup();
-            impl_->emitScopeCleanup();
-        impl_->popScope();
-            if (!impl_->builder->GetInsertBlock()->getTerminator())
-                impl_->builder->CreateBr(ecIncBB);
-            impl_->builder->SetInsertPoint(ecIncBB);
-            ecCur = impl_->builder->CreateLoad(impl_->i64Type, ecVar, "eci");
-            llvm::Value* ecNext = impl_->builder->CreateAdd(ecCur, ecStep, "ecinc");
-            impl_->builder->CreateStore(ecNext, ecVar);
-            impl_->builder->CreateBr(ecCondBB);
-            impl_->builder->SetInsertPoint(ecEndBB);
-        } else {
-            clause.iterable->accept(*this);
-            llvm::Value* ecColl = impl_->lastValue;
-            bool ecFromDict = impl_->isBareDictIterable(clause.iterable.get());
-            if (ecFromDict)
-                ecColl = impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_dict_keys"], {ecColl}, "compdictkeys");
-            llvm::Value* ecLen = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_list_len"], {ecColl}, "eclen");
-            auto* ecIdx = impl_->createEntryAlloca(func, "__ecidx", impl_->i64Type);
-            impl_->builder->CreateStore(llvm::ConstantInt::get(impl_->i64Type, 0), ecIdx);
-            auto* ecCondBB = llvm::BasicBlock::Create(*impl_->context, "eccond", func);
-            auto* ecBodyBB = llvm::BasicBlock::Create(*impl_->context, "ecbody", func);
-            auto* ecIncBB = llvm::BasicBlock::Create(*impl_->context, "ecinc", func);
-            auto* ecEndBB = llvm::BasicBlock::Create(*impl_->context, "ecend", func);
-            impl_->builder->CreateBr(ecCondBB);
-            impl_->builder->SetInsertPoint(ecCondBB);
-            llvm::Value* ecCurIdx = impl_->builder->CreateLoad(impl_->i64Type, ecIdx, "ecidx");
-            llvm::Value* ecCmp = impl_->builder->CreateICmpSLT(ecCurIdx, ecLen, "eccmp");
-            impl_->builder->CreateCondBr(ecCmp, ecBodyBB, ecEndBB);
-            impl_->builder->SetInsertPoint(ecBodyBB);
-            impl_->pushScope();
-            Type::Kind ecElemKind = impl_->getIterableElementKind(clause.iterable.get());
-            Impl::VarKind ecLoopKind = Impl::typeKindToVarKind(ecElemKind);
-            auto* ecVar = impl_->bindListElemTyped(
-                func, ecColl, ecCurIdx, ecVarName, ecLoopKind);
-            impl_->setVar(ecVarName, ecVar, ecLoopKind);
-            if (Impl::isHeapKind(ecLoopKind))
-                impl_->scopes.back().borrowed.insert(ecVarName);
-            if (clause.condition) {
-                clause.condition->accept(*this);
-                llvm::Value* ecFilter = impl_->lastValue;
-                if (ecFilter->getType() == impl_->i64Type)
-                    ecFilter = impl_->builder->CreateICmpNE(ecFilter, llvm::ConstantInt::get(impl_->i64Type, 0));
-                else if (ecFilter->getType() == impl_->f64Type)
-                    ecFilter = impl_->builder->CreateFCmpONE(ecFilter, llvm::ConstantFP::get(impl_->f64Type, 0.0));
-                auto* ecPassBB = llvm::BasicBlock::Create(*impl_->context, "ecpass", func);
-                auto* ecSkipBB = llvm::BasicBlock::Create(*impl_->context, "ecskip", func);
-                impl_->builder->CreateCondBr(ecFilter, ecPassBB, ecSkipBB);
-                impl_->builder->SetInsertPoint(ecPassBB);
-                emitExtraClauses(clauseIdx + 1);
-                if (!impl_->builder->GetInsertBlock()->getTerminator())
-                    impl_->builder->CreateBr(ecSkipBB);
-                impl_->builder->SetInsertPoint(ecSkipBB);
-            } else {
-                emitExtraClauses(clauseIdx + 1);
-            }
-            impl_->emitScopeCleanup();
-            impl_->emitScopeCleanup();
-        impl_->popScope();
-            if (!impl_->builder->GetInsertBlock()->getTerminator())
-                impl_->builder->CreateBr(ecIncBB);
-            impl_->builder->SetInsertPoint(ecIncBB);
-            ecCurIdx = impl_->builder->CreateLoad(impl_->i64Type, ecIdx, "ecidx");
-            llvm::Value* ecNextIdx = impl_->builder->CreateAdd(
-                ecCurIdx, llvm::ConstantInt::get(impl_->i64Type, 1), "ecinc");
-            impl_->builder->CreateStore(ecNextIdx, ecIdx);
-            impl_->builder->CreateBr(ecCondBB);
-            impl_->builder->SetInsertPoint(ecEndBB);
-            if (ecFromDict)
-                impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {ecColl});
-        }
-    };
-
-    if (isRange) {
-        llvm::Value* startVal = llvm::ConstantInt::get(impl_->i64Type, 0);
-        llvm::Value* endVal = nullptr;
-        llvm::Value* stepVal = llvm::ConstantInt::get(impl_->i64Type, 1);
-
-        if (callExpr->args.size() == 1) {
-            callExpr->args[0]->accept(*this);
-            endVal = impl_->lastValue;
-        } else if (callExpr->args.size() >= 2) {
-            callExpr->args[0]->accept(*this);
-            startVal = impl_->lastValue;
-            callExpr->args[1]->accept(*this);
-            endVal = impl_->lastValue;
-            if (callExpr->args.size() >= 3) {
-                callExpr->args[2]->accept(*this);
-                stepVal = impl_->lastValue;
-            }
-        } else {
-            endVal = llvm::ConstantInt::get(impl_->i64Type, 0);
-        }
-
-        auto* loopVar = impl_->createEntryAlloca(func, node.varName, impl_->i64Type);
-        impl_->builder->CreateStore(startVal, loopVar);
-
-        auto* condBB = llvm::BasicBlock::Create(*impl_->context, "scompcond", func);
-        auto* bodyBB = llvm::BasicBlock::Create(*impl_->context, "scompbody", func);
-        auto* incBB = llvm::BasicBlock::Create(*impl_->context, "scompinc", func);
-        auto* endBB = llvm::BasicBlock::Create(*impl_->context, "scompend", func);
-
-        impl_->builder->CreateBr(condBB);
-
-        impl_->builder->SetInsertPoint(condBB);
-        llvm::Value* current = impl_->builder->CreateLoad(impl_->i64Type, loopVar, "i");
-        llvm::Value* cond = impl_->builder->CreateICmpSLT(current, endVal, "cmp");
-        impl_->builder->CreateCondBr(cond, bodyBB, endBB);
-
-        impl_->builder->SetInsertPoint(bodyBB);
-        impl_->pushScope();
-        impl_->setVar(node.varName, loopVar, Impl::VarKind::Int);
-
-        emitExtraClauses(0);
-
-        impl_->emitScopeCleanup();
-        impl_->popScope();
-        if (!impl_->builder->GetInsertBlock()->getTerminator())
-            impl_->builder->CreateBr(incBB);
-
-        impl_->builder->SetInsertPoint(incBB);
-        current = impl_->builder->CreateLoad(impl_->i64Type, loopVar, "i");
-        llvm::Value* next = impl_->builder->CreateAdd(current, stepVal, "inc");
-        impl_->builder->CreateStore(next, loopVar);
-        impl_->builder->CreateBr(condBB);
-
-        impl_->builder->SetInsertPoint(endBB);
-    } else {
-        node.iterable->accept(*this);
-        llvm::Value* collVal = impl_->lastValue;
-        bool collFromDict = impl_->isBareDictIterable(node.iterable.get());
-        bool ownedIterTemp = !collFromDict && node.iterable &&
-            !Impl::isBorrowedHeapExpr(node.iterable.get()) && node.iterable->type &&
-            (node.iterable->type->kind() == Type::Kind::List ||
-             node.iterable->type->kind() == Type::Kind::Set ||
-             node.iterable->type->kind() == Type::Kind::Tuple);
-        if (collFromDict)
-            collVal = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_dict_keys"], {collVal}, "compdictkeys");
-        llvm::Value* collLen = impl_->builder->CreateCall(
-            impl_->runtimeFuncs["dragon_list_len"], {collVal}, "colllen");
-
-        auto* idxAlloca = impl_->createEntryAlloca(func, "__scompidx", impl_->i64Type);
-        impl_->builder->CreateStore(llvm::ConstantInt::get(impl_->i64Type, 0), idxAlloca);
-
-        auto* condBB = llvm::BasicBlock::Create(*impl_->context, "scompcond", func);
-        auto* bodyBB = llvm::BasicBlock::Create(*impl_->context, "scompbody", func);
-        auto* incBB = llvm::BasicBlock::Create(*impl_->context, "scompinc", func);
-        auto* endBB = llvm::BasicBlock::Create(*impl_->context, "scompend", func);
-
-        impl_->builder->CreateBr(condBB);
-
-        impl_->builder->SetInsertPoint(condBB);
-        llvm::Value* curIdx = impl_->builder->CreateLoad(impl_->i64Type, idxAlloca, "idx");
-        llvm::Value* cond = impl_->builder->CreateICmpSLT(curIdx, collLen, "cmp");
-        impl_->builder->CreateCondBr(cond, bodyBB, endBB);
-
-        impl_->builder->SetInsertPoint(bodyBB);
-        impl_->pushScope();
-
-        Type::Kind elemKind = impl_->getIterableElementKind(node.iterable.get());
-        Impl::VarKind loopKind = Impl::typeKindToVarKind(elemKind);
-        auto* elemAlloca = impl_->bindListElemTyped(
-            func, collVal, curIdx, node.varName, loopKind);
-        impl_->setVar(node.varName, elemAlloca, loopKind);
-        if (Impl::isHeapKind(loopKind))
-            impl_->scopes.back().borrowed.insert(node.varName);
-
-        emitExtraClauses(0);
-
-        impl_->emitScopeCleanup();
-        impl_->popScope();
-        if (!impl_->builder->GetInsertBlock()->getTerminator())
-            impl_->builder->CreateBr(incBB);
-
-        impl_->builder->SetInsertPoint(incBB);
-        curIdx = impl_->builder->CreateLoad(impl_->i64Type, idxAlloca, "idx");
-        llvm::Value* nextIdx = impl_->builder->CreateAdd(
-            curIdx, llvm::ConstantInt::get(impl_->i64Type, 1), "inc");
-        impl_->builder->CreateStore(nextIdx, idxAlloca);
-        impl_->builder->CreateBr(condBB);
-
-        impl_->builder->SetInsertPoint(endBB);
-        if (collFromDict || ownedIterTemp)
-            impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {collVal});
-    }
+    emitCompLoopNest(
+        node.iterable.get(), {node.varName}, node.extraClauses, "scomp",
+        "__scompidx", emitInnermostBody,
+        [&](llvm::Value* collVal, llvm::Value* curIdx) {
+            bindCompElemVar(node.iterable.get(), node.varName, collVal, curIdx);
+        });
 
     impl_->lastValue = impl_->builder->CreateLoad(impl_->i8PtrType, setAlloca);
 }
+
 void CodeGen::visit(GeneratorExpr& node) {
     auto* func = impl_->currentFunction;
 
@@ -1097,305 +602,16 @@ void CodeGen::visit(GeneratorExpr& node) {
     auto* listAlloca = impl_->createEntryAlloca(func, "__genlist", impl_->i8PtrType);
     impl_->builder->CreateStore(list, listAlloca);
 
-    auto* callExpr = dynamic_cast<CallExpr*>(node.iterable.get());
-    auto* calleeName = callExpr ? dynamic_cast<NameExpr*>(callExpr->callee.get()) : nullptr;
-    bool isRange = calleeName && calleeName->name == "range";
-
-    auto emitInnermostBody = [&]() {
-        node.element->accept(*this);
-        llvm::Value* elemVal = impl_->lastValue;
-
-        if (elemTag == TAG_STR && elemVal->getType()->isPointerTy()) {
-            elemVal = impl_->ensureHeapString(elemVal, node.element.get());
-        }
-
-        if (elemVal->getType() == impl_->i1Type) {
-            elemVal = impl_->builder->CreateZExt(elemVal, impl_->i64Type);
-        } else if (elemVal->getType() == impl_->f64Type) {
-            elemVal = impl_->builder->CreateBitCast(elemVal, impl_->i64Type);
-        } else if (elemVal->getType()->isPointerTy()) {
-            elemVal = impl_->builder->CreatePtrToInt(elemVal, impl_->i64Type);
-        }
-
-        if (node.condition) {
-            node.condition->accept(*this);
-            llvm::Value* filterCond = impl_->lastValue;
-            if (filterCond->getType() == impl_->i64Type) {
-                filterCond = impl_->builder->CreateICmpNE(
-                    filterCond, llvm::ConstantInt::get(impl_->i64Type, 0));
-            } else if (filterCond->getType() == impl_->f64Type) {
-                filterCond = impl_->builder->CreateFCmpONE(
-                    filterCond, llvm::ConstantFP::get(impl_->f64Type, 0.0));
-            }
-            auto* appendBB = llvm::BasicBlock::Create(*impl_->context, "genappend", func);
-            auto* skipBB = llvm::BasicBlock::Create(*impl_->context, "genskip", func);
-            impl_->builder->CreateCondBr(filterCond, appendBB, skipBB);
-
-            impl_->builder->SetInsertPoint(appendBB);
-            llvm::Value* curList = impl_->builder->CreateLoad(impl_->i8PtrType, listAlloca);
-            impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_list_append"], {curList, elemVal});
-            impl_->builder->CreateBr(skipBB);
-
-            impl_->builder->SetInsertPoint(skipBB);
-        } else {
-            llvm::Value* curList = impl_->builder->CreateLoad(impl_->i8PtrType, listAlloca);
-            impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_list_append"], {curList, elemVal});
-        }
-    };
-
-    std::function<void(size_t)> emitExtraClauses = [&](size_t clauseIdx) {
-        if (clauseIdx >= node.extraClauses.size()) {
-            emitInnermostBody();
-            return;
-        }
-        auto& clause = node.extraClauses[clauseIdx];
-        std::string ecVarName = clause.varNames.empty() ? "__ec" : clause.varNames[0];
-
-        auto* ecCallExpr = dynamic_cast<CallExpr*>(clause.iterable.get());
-        auto* ecCalleeName = ecCallExpr ? dynamic_cast<NameExpr*>(ecCallExpr->callee.get()) : nullptr;
-        bool ecIsRange = ecCalleeName && ecCalleeName->name == "range";
-
-        if (ecIsRange) {
-            llvm::Value* ecStart = llvm::ConstantInt::get(impl_->i64Type, 0);
-            llvm::Value* ecEnd = nullptr;
-            llvm::Value* ecStep = llvm::ConstantInt::get(impl_->i64Type, 1);
-            if (ecCallExpr->args.size() == 1) {
-                ecCallExpr->args[0]->accept(*this);
-                ecEnd = impl_->lastValue;
-            } else if (ecCallExpr->args.size() >= 2) {
-                ecCallExpr->args[0]->accept(*this);
-                ecStart = impl_->lastValue;
-                ecCallExpr->args[1]->accept(*this);
-                ecEnd = impl_->lastValue;
-                if (ecCallExpr->args.size() >= 3) {
-                    ecCallExpr->args[2]->accept(*this);
-                    ecStep = impl_->lastValue;
-                }
-            } else {
-                ecEnd = llvm::ConstantInt::get(impl_->i64Type, 0);
-            }
-            auto* ecVar = impl_->createEntryAlloca(func, ecVarName, impl_->i64Type);
-            impl_->builder->CreateStore(ecStart, ecVar);
-            auto* ecCondBB = llvm::BasicBlock::Create(*impl_->context, "eccond", func);
-            auto* ecBodyBB = llvm::BasicBlock::Create(*impl_->context, "ecbody", func);
-            auto* ecIncBB = llvm::BasicBlock::Create(*impl_->context, "ecinc", func);
-            auto* ecEndBB = llvm::BasicBlock::Create(*impl_->context, "ecend", func);
-            impl_->builder->CreateBr(ecCondBB);
-            impl_->builder->SetInsertPoint(ecCondBB);
-            llvm::Value* ecCur = impl_->builder->CreateLoad(impl_->i64Type, ecVar, "eci");
-            llvm::Value* ecCmp = impl_->builder->CreateICmpSLT(ecCur, ecEnd, "eccmp");
-            impl_->builder->CreateCondBr(ecCmp, ecBodyBB, ecEndBB);
-            impl_->builder->SetInsertPoint(ecBodyBB);
-            impl_->pushScope();
-            impl_->setVar(ecVarName, ecVar, Impl::VarKind::Int);
-            if (clause.condition) {
-                clause.condition->accept(*this);
-                llvm::Value* ecFilter = impl_->lastValue;
-                if (ecFilter->getType() == impl_->i64Type)
-                    ecFilter = impl_->builder->CreateICmpNE(ecFilter, llvm::ConstantInt::get(impl_->i64Type, 0));
-                else if (ecFilter->getType() == impl_->f64Type)
-                    ecFilter = impl_->builder->CreateFCmpONE(ecFilter, llvm::ConstantFP::get(impl_->f64Type, 0.0));
-                auto* ecPassBB = llvm::BasicBlock::Create(*impl_->context, "ecpass", func);
-                auto* ecSkipBB = llvm::BasicBlock::Create(*impl_->context, "ecskip", func);
-                impl_->builder->CreateCondBr(ecFilter, ecPassBB, ecSkipBB);
-                impl_->builder->SetInsertPoint(ecPassBB);
-                emitExtraClauses(clauseIdx + 1);
-                if (!impl_->builder->GetInsertBlock()->getTerminator())
-                    impl_->builder->CreateBr(ecSkipBB);
-                impl_->builder->SetInsertPoint(ecSkipBB);
-            } else {
-                emitExtraClauses(clauseIdx + 1);
-            }
-            impl_->emitScopeCleanup();
-            impl_->emitScopeCleanup();
-        impl_->popScope();
-            if (!impl_->builder->GetInsertBlock()->getTerminator())
-                impl_->builder->CreateBr(ecIncBB);
-            impl_->builder->SetInsertPoint(ecIncBB);
-            ecCur = impl_->builder->CreateLoad(impl_->i64Type, ecVar, "eci");
-            llvm::Value* ecNext = impl_->builder->CreateAdd(ecCur, ecStep, "ecinc");
-            impl_->builder->CreateStore(ecNext, ecVar);
-            impl_->builder->CreateBr(ecCondBB);
-            impl_->builder->SetInsertPoint(ecEndBB);
-        } else {
-            clause.iterable->accept(*this);
-            llvm::Value* ecColl = impl_->lastValue;
-            bool ecFromDict = impl_->isBareDictIterable(clause.iterable.get());
-            if (ecFromDict)
-                ecColl = impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_dict_keys"], {ecColl}, "compdictkeys");
-            llvm::Value* ecLen = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_list_len"], {ecColl}, "eclen");
-            auto* ecIdx = impl_->createEntryAlloca(func, "__ecidx", impl_->i64Type);
-            impl_->builder->CreateStore(llvm::ConstantInt::get(impl_->i64Type, 0), ecIdx);
-            auto* ecCondBB = llvm::BasicBlock::Create(*impl_->context, "eccond", func);
-            auto* ecBodyBB = llvm::BasicBlock::Create(*impl_->context, "ecbody", func);
-            auto* ecIncBB = llvm::BasicBlock::Create(*impl_->context, "ecinc", func);
-            auto* ecEndBB = llvm::BasicBlock::Create(*impl_->context, "ecend", func);
-            impl_->builder->CreateBr(ecCondBB);
-            impl_->builder->SetInsertPoint(ecCondBB);
-            llvm::Value* ecCurIdx = impl_->builder->CreateLoad(impl_->i64Type, ecIdx, "ecidx");
-            llvm::Value* ecCmp = impl_->builder->CreateICmpSLT(ecCurIdx, ecLen, "eccmp");
-            impl_->builder->CreateCondBr(ecCmp, ecBodyBB, ecEndBB);
-            impl_->builder->SetInsertPoint(ecBodyBB);
-            impl_->pushScope();
-            Type::Kind ecElemKind = impl_->getIterableElementKind(clause.iterable.get());
-            Impl::VarKind ecLoopKind = Impl::typeKindToVarKind(ecElemKind);
-            auto* ecVar = impl_->bindListElemTyped(
-                func, ecColl, ecCurIdx, ecVarName, ecLoopKind);
-            impl_->setVar(ecVarName, ecVar, ecLoopKind);
-            if (Impl::isHeapKind(ecLoopKind))
-                impl_->scopes.back().borrowed.insert(ecVarName);
-            if (clause.condition) {
-                clause.condition->accept(*this);
-                llvm::Value* ecFilter = impl_->lastValue;
-                if (ecFilter->getType() == impl_->i64Type)
-                    ecFilter = impl_->builder->CreateICmpNE(ecFilter, llvm::ConstantInt::get(impl_->i64Type, 0));
-                else if (ecFilter->getType() == impl_->f64Type)
-                    ecFilter = impl_->builder->CreateFCmpONE(ecFilter, llvm::ConstantFP::get(impl_->f64Type, 0.0));
-                auto* ecPassBB = llvm::BasicBlock::Create(*impl_->context, "ecpass", func);
-                auto* ecSkipBB = llvm::BasicBlock::Create(*impl_->context, "ecskip", func);
-                impl_->builder->CreateCondBr(ecFilter, ecPassBB, ecSkipBB);
-                impl_->builder->SetInsertPoint(ecPassBB);
-                emitExtraClauses(clauseIdx + 1);
-                if (!impl_->builder->GetInsertBlock()->getTerminator())
-                    impl_->builder->CreateBr(ecSkipBB);
-                impl_->builder->SetInsertPoint(ecSkipBB);
-            } else {
-                emitExtraClauses(clauseIdx + 1);
-            }
-            impl_->emitScopeCleanup();
-            impl_->emitScopeCleanup();
-        impl_->popScope();
-            if (!impl_->builder->GetInsertBlock()->getTerminator())
-                impl_->builder->CreateBr(ecIncBB);
-            impl_->builder->SetInsertPoint(ecIncBB);
-            ecCurIdx = impl_->builder->CreateLoad(impl_->i64Type, ecIdx, "ecidx");
-            llvm::Value* ecNextIdx = impl_->builder->CreateAdd(
-                ecCurIdx, llvm::ConstantInt::get(impl_->i64Type, 1), "ecinc");
-            impl_->builder->CreateStore(ecNextIdx, ecIdx);
-            impl_->builder->CreateBr(ecCondBB);
-            impl_->builder->SetInsertPoint(ecEndBB);
-            if (ecFromDict)
-                impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {ecColl});
-        }
-    };
-
-    if (isRange) {
-        llvm::Value* startVal = llvm::ConstantInt::get(impl_->i64Type, 0);
-        llvm::Value* endVal = nullptr;
-        llvm::Value* stepVal = llvm::ConstantInt::get(impl_->i64Type, 1);
-
-        if (callExpr->args.size() == 1) {
-            callExpr->args[0]->accept(*this);
-            endVal = impl_->lastValue;
-        } else if (callExpr->args.size() >= 2) {
-            callExpr->args[0]->accept(*this);
-            startVal = impl_->lastValue;
-            callExpr->args[1]->accept(*this);
-            endVal = impl_->lastValue;
-            if (callExpr->args.size() >= 3) {
-                callExpr->args[2]->accept(*this);
-                stepVal = impl_->lastValue;
-            }
-        } else {
-            endVal = llvm::ConstantInt::get(impl_->i64Type, 0);
-        }
-
-        auto* loopVar = impl_->createEntryAlloca(func, node.varName, impl_->i64Type);
-        impl_->builder->CreateStore(startVal, loopVar);
-
-        auto* condBB = llvm::BasicBlock::Create(*impl_->context, "gencond", func);
-        auto* bodyBB = llvm::BasicBlock::Create(*impl_->context, "genbody", func);
-        auto* incBB = llvm::BasicBlock::Create(*impl_->context, "geninc", func);
-        auto* endBB = llvm::BasicBlock::Create(*impl_->context, "genend", func);
-
-        impl_->builder->CreateBr(condBB);
-
-        impl_->builder->SetInsertPoint(condBB);
-        llvm::Value* current = impl_->builder->CreateLoad(impl_->i64Type, loopVar, "i");
-        llvm::Value* cond = impl_->builder->CreateICmpSLT(current, endVal, "cmp");
-        impl_->builder->CreateCondBr(cond, bodyBB, endBB);
-
-        impl_->builder->SetInsertPoint(bodyBB);
-        impl_->pushScope();
-        impl_->setVar(node.varName, loopVar, Impl::VarKind::Int);
-
-        emitExtraClauses(0);
-
-        impl_->emitScopeCleanup();
-        impl_->popScope();
-        if (!impl_->builder->GetInsertBlock()->getTerminator())
-            impl_->builder->CreateBr(incBB);
-
-        impl_->builder->SetInsertPoint(incBB);
-        current = impl_->builder->CreateLoad(impl_->i64Type, loopVar, "i");
-        llvm::Value* next = impl_->builder->CreateAdd(current, stepVal, "inc");
-        impl_->builder->CreateStore(next, loopVar);
-        impl_->builder->CreateBr(condBB);
-
-        impl_->builder->SetInsertPoint(endBB);
-    } else {
-        node.iterable->accept(*this);
-        llvm::Value* collVal = impl_->lastValue;
-        bool collFromDict = impl_->isBareDictIterable(node.iterable.get());
-        bool ownedIterTemp = !collFromDict && node.iterable &&
-            !Impl::isBorrowedHeapExpr(node.iterable.get()) && node.iterable->type &&
-            (node.iterable->type->kind() == Type::Kind::List ||
-             node.iterable->type->kind() == Type::Kind::Set ||
-             node.iterable->type->kind() == Type::Kind::Tuple);
-        if (collFromDict)
-            collVal = impl_->builder->CreateCall(
-                impl_->runtimeFuncs["dragon_dict_keys"], {collVal}, "compdictkeys");
-        llvm::Value* collLen = impl_->builder->CreateCall(
-            impl_->runtimeFuncs["dragon_list_len"], {collVal}, "colllen");
-
-        auto* idxAlloca = impl_->createEntryAlloca(func, "__genidx", impl_->i64Type);
-        impl_->builder->CreateStore(llvm::ConstantInt::get(impl_->i64Type, 0), idxAlloca);
-
-        auto* condBB = llvm::BasicBlock::Create(*impl_->context, "gencond", func);
-        auto* bodyBB = llvm::BasicBlock::Create(*impl_->context, "genbody", func);
-        auto* incBB = llvm::BasicBlock::Create(*impl_->context, "geninc", func);
-        auto* endBB = llvm::BasicBlock::Create(*impl_->context, "genend", func);
-
-        impl_->builder->CreateBr(condBB);
-
-        impl_->builder->SetInsertPoint(condBB);
-        llvm::Value* curIdx = impl_->builder->CreateLoad(impl_->i64Type, idxAlloca, "idx");
-        llvm::Value* cond = impl_->builder->CreateICmpSLT(curIdx, collLen, "cmp");
-        impl_->builder->CreateCondBr(cond, bodyBB, endBB);
-
-        impl_->builder->SetInsertPoint(bodyBB);
-        impl_->pushScope();
-
-        Type::Kind elemKind = impl_->getIterableElementKind(node.iterable.get());
-        Impl::VarKind loopKind = Impl::typeKindToVarKind(elemKind);
-        auto* elemAlloca = impl_->bindListElemTyped(
-            func, collVal, curIdx, node.varName, loopKind);
-        impl_->setVar(node.varName, elemAlloca, loopKind);
-        if (Impl::isHeapKind(loopKind))
-            impl_->scopes.back().borrowed.insert(node.varName);
-
-        emitExtraClauses(0);
-
-        impl_->emitScopeCleanup();
-        impl_->popScope();
-        if (!impl_->builder->GetInsertBlock()->getTerminator())
-            impl_->builder->CreateBr(incBB);
-
-        impl_->builder->SetInsertPoint(incBB);
-        curIdx = impl_->builder->CreateLoad(impl_->i64Type, idxAlloca, "idx");
-        llvm::Value* nextIdx = impl_->builder->CreateAdd(
-            curIdx, llvm::ConstantInt::get(impl_->i64Type, 1), "inc");
-        impl_->builder->CreateStore(nextIdx, idxAlloca);
-        impl_->builder->CreateBr(condBB);
-
-        impl_->builder->SetInsertPoint(endBB);
-        if (collFromDict || ownedIterTemp)
-            impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {collVal});
-    }
+    emitCompLoopNest(
+        node.iterable.get(), {node.varName}, node.extraClauses, "gen",
+        "__genidx",
+        [&]() {
+            emitCompAppendBody(node.element.get(), node.condition.get(),
+                               listAlloca, elemTag, "gen");
+        },
+        [&](llvm::Value* collVal, llvm::Value* curIdx) {
+            bindCompElemVar(node.iterable.get(), node.varName, collVal, curIdx);
+        });
 
     impl_->lastValue = impl_->builder->CreateLoad(impl_->i8PtrType, listAlloca);
 }

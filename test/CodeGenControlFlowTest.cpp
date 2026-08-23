@@ -1,4 +1,9 @@
 #include "CodeGenTestHelpers.h"
+#include "CodeBlock.h"
+
+static std::string code(const std::string& block) {
+    return extractCode("CodeGenControlFlowTest.md", block);
+}
 
 TEST(CodeGenTest, IfStatement) {
     auto ir = generateIR("x: int = 5\nif x > 3 {\n  print(x)\n}");
@@ -7,11 +12,7 @@ TEST(CodeGenTest, IfStatement) {
 }
 
 TEST(CodeGenTest, IfElseStatement) {
-    auto ir = generateIR(
-        "x: int = 5\n"
-        "if x > 10 {\n  print(1)\n"
-        "} else {\n  print(2)\n}"
-    );
+    auto ir = generateIR(code("if_else_statement"));
     EXPECT_NE(ir.find("then"), std::string::npos);
     EXPECT_NE(ir.find("else"), std::string::npos);
 }
@@ -34,34 +35,12 @@ TEST(CodeGenTest, WhileFloatConditionCoercion) {
 }
 
 TEST(CodeGenTest, ElifFloatConditionCoercion) {
-    auto ir = generateIR(
-        "x: int = 0\n"
-        "y: float = 1.0\n"
-        "if x {\n  print(1)\n} elif y {\n  print(2)\n}");
+    auto ir = generateIR(code("elif_float_condition_coercion"));
     EXPECT_NE(ir.find("tobool"), std::string::npos);
 }
 
 TEST(CodeGenE2E, ElseIfChainSameAsElif) {
-    auto out = compileAndRun(
-        "def cls(x: int) -> str {\n"
-        "    if x > 100 {\n"
-        "        return \"huge\"\n"
-        "    } else if x > 50 {\n"
-        "        return \"big\"\n"
-        "    } elif x > 10 {\n"
-        "        return \"medium\"\n"
-        "    } else if x > 0 {\n"
-        "        return \"tiny\"\n"
-        "    } else {\n"
-        "        return \"zero\"\n"
-        "    }\n"
-        "}\n"
-        "print(cls(200))\n"
-        "print(cls(75))\n"
-        "print(cls(25))\n"
-        "print(cls(5))\n"
-        "print(cls(0))\n"
-    );
+    auto out = compileAndRun(code("else_if_chain_same_as_elif"));
     EXPECT_EQ(out, "huge\nbig\nmedium\ntiny\nzero\n");
 }
 
@@ -116,12 +95,7 @@ TEST(CodeGenTest, ForInString) {
 }
 
 TEST(CodeGenTest, ForInDictKeys) {
-    auto ir = generateIR(
-        "d: dict[str, int] = {\"a\": 1, \"b\": 2}\n"
-        "for k in d {\n"
-        "  print(k)\n"
-        "}\n"
-    );
+    auto ir = generateIR(code("for_in_dict_keys"));
     EXPECT_NE(ir.find("dragon_dict_keys"), std::string::npos)
         << "Expected dragon_dict_keys call for 'for k in d'";
     EXPECT_NE(ir.find("dragon_list_len"), std::string::npos);
@@ -129,12 +103,7 @@ TEST(CodeGenTest, ForInDictKeys) {
 }
 
 TEST(CodeGenTest, ForInDictItems) {
-    auto ir = generateIR(
-        "d: dict[str, int] = {\"a\": 1}\n"
-        "for k, v in d.items() {\n"
-        "  print(k)\n"
-        "}\n"
-    );
+    auto ir = generateIR(code("for_in_dict_items"));
     EXPECT_NE(ir.find("dragon_dict_items"), std::string::npos)
         << "Expected dragon_dict_items call for 'd.items()'";
     EXPECT_NE(ir.find("dragon_tuple_get"), std::string::npos)
@@ -142,114 +111,56 @@ TEST(CodeGenTest, ForInDictItems) {
 }
 
 TEST(CodeGenE2E, ForRangeThreeArgs) {
-    auto output = compileAndRun(
-        "for i in range(0, 10, 3) {\n"
-        "  print(i)\n"
-        "}"
-    );
+    auto output = compileAndRun(code("for_range_three_args"));
     EXPECT_EQ(output, "0\n3\n6\n9\n");
 }
 
 TEST(CodeGenE2E, BreakContinue) {
-    auto output = compileAndRun(
-        "for i in range(10) {\n"
-        "  if i == 3 {\n"
-        "    continue\n"
-        "  }\n"
-        "  if i == 6 {\n"
-        "    break\n"
-        "  }\n"
-        "  print(i)\n"
-        "}"
-    );
+    auto output = compileAndRun(code("break_continue"));
     EXPECT_EQ(output, "0\n1\n2\n4\n5\n");
 }
 
 TEST(CodeGenE2E, NestedLoops) {
-    auto output = compileAndRun(
-        "for i in range(3) {\n"
-        "  for j in range(3) {\n"
-        "    if i == j {\n"
-        "      print(i)\n"
-        "    }\n"
-        "  }\n"
-        "}"
-    );
+    auto output = compileAndRun(code("nested_loops"));
     EXPECT_EQ(output, "0\n1\n2\n");
 }
 
 TEST(CodeGenE2E, AssertPass) {
-    auto output = compileAndRun(
-        "assert True\n"
-        "assert 1 + 1 == 2\n"
-        "print(\"ok\")"
-    );
+    auto output = compileAndRun(code("assert_pass"));
     EXPECT_EQ(output, "ok\n");
 }
 
 TEST(CodeGenE2E, ForInDict) {
-    auto output = compileAndRun(
-        "d: dict[str, int] = {\"x\": 10, \"y\": 20}\n"
-        "for k in d {\n"
-        "  print(k)\n"
-        "}\n"
-    );
+    auto output = compileAndRun(code("for_in_dict"));
     EXPECT_EQ(output, "x\ny\n");
 }
 
 TEST(CodeGenE2E, ForInDictKeys) {
-    auto output = compileAndRun(
-        "d: dict[str, int] = {\"a\": 1, \"b\": 2}\n"
-        "for k in d.keys() {\n"
-        "  print(k)\n"
-        "}\n"
-    );
+    auto output = compileAndRun(code("for_in_dict_keys_2"));
     EXPECT_EQ(output, "a\nb\n");
 }
 
 TEST(CodeGenE2E, ForInDictItems) {
-    auto output = compileAndRun(
-        "d: dict[str, int] = {\"a\": 1, \"b\": 2}\n"
-        "for k, v in d.items() {\n"
-        "  print(k)\n"
-        "  print(v)\n"
-        "}\n"
-    );
+    auto output = compileAndRun(code("for_in_dict_items_2"));
     EXPECT_EQ(output, "a\n1\nb\n2\n");
 }
 
 TEST(CodeGenE2E, ForInDictValues) {
-    auto output = compileAndRun(
-        "d: dict[str, int] = {\"x\": 100, \"y\": 200}\n"
-        "for v in d.values() {\n"
-        "  print(v)\n"
-        "}\n"
-    );
+    auto output = compileAndRun(code("for_in_dict_values"));
     EXPECT_EQ(output, "100\n200\n");
 }
 
 TEST(CodeGenE2E, DeleteStmtBasic) {
-    auto output = compileAndRun(
-        "x: int = 42\n"
-        "del x\n"
-        "print(\"ok\")\n"
-    );
+    auto output = compileAndRun(code("delete_stmt_basic"));
     EXPECT_EQ(output, "ok\n");
 }
 
 TEST(CodeGenE2E, DeleteStmtString) {
-    auto output = compileAndRun(
-        "s: str = \"hello\" + \" world\"\n"
-        "del s\n"
-        "print(\"ok\")\n"
-    );
+    auto output = compileAndRun(code("delete_stmt_string"));
     EXPECT_EQ(output, "ok\n");
 }
 
 TEST(CodeGenTest, DeleteStmtIR) {
-    auto ir = generateIR(
-        "s: str = \"hello\" + \" world\"\n"
-        "del s\n"
-    );
+    auto ir = generateIR(code("delete_stmt_ir"));
     EXPECT_NE(ir.find("dragon_decref_str"), std::string::npos);
 }

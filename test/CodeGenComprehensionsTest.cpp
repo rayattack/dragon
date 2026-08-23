@@ -1,4 +1,9 @@
 #include "CodeGenTestHelpers.h"
+#include "CodeBlock.h"
+
+static std::string code(const std::string& block) {
+    return extractCode("CodeGenComprehensionsTest.md", block);
+}
 
 TEST(CodeGenTest, ListCompRange) {
     auto ir = generateIR("xs: list[int] = [i * 2 for i in range(5)]");
@@ -14,243 +19,121 @@ TEST(CodeGenTest, ListCompWithCond) {
 }
 
 TEST(CodeGenE2E, ForInAndListComp) {
-    auto output = compileAndRun(
-        "nums: list[int] = [10, 20, 30]\n"
-        "for x in nums {\n"
-        "  print(x)\n"
-        "}\n"
-        "doubled: list[int] = [i * 2 for i in range(3)]\n"
-        "print(doubled)"
-    );
+    auto output = compileAndRun(code("for_in_and_list_comp"));
     EXPECT_EQ(output, "10\n20\n30\n[0, 2, 4]\n");
 }
 
 TEST(CodeGenE2E, ListCompOverList) {
-    auto output = compileAndRun(
-        "nums: list[int] = [1, 2, 3, 4, 5]\n"
-        "doubled: list[int] = [x * 2 for x in nums]\n"
-        "print(len(doubled))\n"
-        "print(doubled[0])\n"
-        "print(doubled[4])"
-    );
+    auto output = compileAndRun(code("list_comp_over_list"));
     EXPECT_EQ(output, "5\n2\n10\n");
 }
 
 TEST(CodeGenE2E, ListCompOverListWithFilter) {
-    auto output = compileAndRun(
-        "nums: list[int] = [1, 2, 3, 4, 5, 6]\n"
-        "evens: list[int] = [x for x in nums if x % 2 == 0]\n"
-        "print(len(evens))\n"
-        "print(evens[0])\n"
-        "print(evens[1])\n"
-        "print(evens[2])"
-    );
+    auto output = compileAndRun(code("list_comp_over_list_with_filter"));
     EXPECT_EQ(output, "3\n2\n4\n6\n");
 }
 
 TEST(CodeGenE2E, SetCompOverRange) {
-    auto output = compileAndRun(
-        "s: set[int] = {x * x for x in range(5)}\n"
-        "print(len(s))"
-    );
+    auto output = compileAndRun(code("set_comp_over_range"));
     EXPECT_EQ(output, "5\n");
 }
 
 TEST(CodeGenE2E, SetCompOverRangeWithFilter) {
-    auto output = compileAndRun(
-        "s: set[int] = {x for x in range(10) if x % 2 == 0}\n"
-        "print(len(s))"
-    );
+    auto output = compileAndRun(code("set_comp_over_range_with_filter"));
     EXPECT_EQ(output, "5\n");
 }
 
 TEST(CodeGenE2E, SetCompOverList) {
-    auto output = compileAndRun(
-        "nums: list[int] = [1, 2, 2, 3, 3, 3]\n"
-        "unique: set[int] = {x for x in nums}\n"
-        "print(len(unique))"
-    );
+    auto output = compileAndRun(code("set_comp_over_list"));
     EXPECT_EQ(output, "3\n");
 }
 
 TEST(CodeGenE2E, DictCompOverRange) {
-    auto output = compileAndRun(
-        "d: dict[str, int] = {\"k\": i for i in range(3)}\n"
-        "print(len(d))"
-    );
+    auto output = compileAndRun(code("dict_comp_over_range"));
     EXPECT_EQ(output, "1\n");
 }
 
 TEST(CodeGenE2E, GeneratorOverRange) {
-    auto output = compileAndRun(
-        "g: list[int] = (x * 3 for x in range(4))\n"
-        "print(len(g))\n"
-        "print(g[0])\n"
-        "print(g[3])"
-    );
+    auto output = compileAndRun(code("generator_over_range"));
     EXPECT_EQ(output, "4\n0\n9\n");
 }
 
 TEST(CodeGenE2E, GeneratorOverList) {
-    auto output = compileAndRun(
-        "nums: list[int] = [10, 20, 30]\n"
-        "doubled: list[int] = (x * 2 for x in nums)\n"
-        "print(len(doubled))\n"
-        "print(doubled[2])"
-    );
+    auto output = compileAndRun(code("generator_over_list"));
     EXPECT_EQ(output, "3\n60\n");
 }
 
 TEST(CodeGenE2E, NestedListCompRange) {
-    auto output = compileAndRun(
-        "pairs: list[int] = [x + y for x in range(3) for y in range(3) if x != y]\n"
-        "print(len(pairs))\n"
-        "print(pairs[0])\n"
-        "print(pairs[1])"
-    );
+    auto output = compileAndRun(code("nested_list_comp_range"));
     EXPECT_EQ(output, "6\n1\n2\n");
 }
 
 TEST(CodeGenE2E, ListCompRangeStillWorks) {
-    auto output = compileAndRun(
-        "xs: list[int] = [i * 2 for i in range(5)]\n"
-        "print(len(xs))\n"
-        "print(xs[4])\n"
-    );
+    auto output = compileAndRun(code("list_comp_range_still_works"));
     EXPECT_EQ(output, "5\n8\n");
 }
 
 TEST(CodeGenE2E, ListCompCollectionStillWorks) {
-    auto output = compileAndRun(
-        "src: list[int] = [1, 2, 3, 4, 5]\n"
-        "doubled: list[int] = [x * 2 for x in src]\n"
-        "print(doubled[4])\n"
-    );
+    auto output = compileAndRun(code("list_comp_collection_still_works"));
     EXPECT_EQ(output, "10\n");
 }
 
 TEST(CodeGenE2E, NestedListCompStillWorks) {
-    auto output = compileAndRun(
-        "pairs: list[int] = [x + y for x in range(3) for y in range(3) if x != y]\n"
-        "print(len(pairs))\n"
-    );
+    auto output = compileAndRun(code("nested_list_comp_still_works"));
     EXPECT_EQ(output, "6\n");
 }
 
 TEST(CodeGenE2E, ListCompLoopBounded) {
-    auto output = compileAndRun(
-        "last_len: int = 0\n"
-        "for i in range(10000) {\n"
-        "  out: list[int] = [x * 2 for x in range(50)]\n"
-        "  last_len = len(out)\n"
-        "}\n"
-        "print(last_len)\n"
-    );
+    auto output = compileAndRun(code("list_comp_loop_bounded"));
     EXPECT_EQ(output, "50\n");
 }
 
 TEST(CodeGenE2E, SetCompStillWorks) {
-    auto output = compileAndRun(
-        "nums: list[int] = [1, 2, 2, 3, 3, 3]\n"
-        "unique: set[int] = {x for x in nums}\n"
-        "print(len(unique))\n"
-    );
+    auto output = compileAndRun(code("set_comp_still_works"));
     EXPECT_EQ(output, "3\n");
 }
 
 TEST(CodeGenE2E, DictCompStillWorks) {
-    auto output = compileAndRun(
-        "d: dict[str, int] = {\"k\" + str(i): i for i in range(3)}\n"
-        "print(len(d))\n"
-    );
+    auto output = compileAndRun(code("dict_comp_still_works"));
     EXPECT_EQ(output, "3\n");
 }
 
 TEST(CodeGenE2E, GeneratorExprStillWorks) {
-    auto output = compileAndRun(
-        "g: list[int] = (x * 2 for x in range(5))\n"
-        "print(len(g))\n"
-        "print(g[2])\n"
-    );
+    auto output = compileAndRun(code("generator_expr_still_works"));
     EXPECT_EQ(output, "5\n4\n");
 }
 
 TEST(CodeGenE2E, ListCompStrIdentity) {
-    auto output = compileAndRun(
-        "names: list[str] = [\"alice\", \"bob\", \"carol\"]\n"
-        "copies: list[str] = [n for n in names]\n"
-        "print(copies[0])\n"
-        "print(copies[2])\n"
-    );
+    auto output = compileAndRun(code("list_comp_str_identity"));
     EXPECT_EQ(output, "alice\ncarol\n");
 }
 
 TEST(CodeGenE2E, ListCompStrMethodCall) {
-    auto output = compileAndRun(
-        "names: list[str] = [\"alice\", \"bob\", \"carol\"]\n"
-        "shouts: list[str] = [n.upper() for n in names]\n"
-        "print(shouts[0])\n"
-        "print(shouts[1])\n"
-        "print(shouts[2])\n"
-    );
+    auto output = compileAndRun(code("list_comp_str_method_call"));
     EXPECT_EQ(output, "ALICE\nBOB\nCAROL\n");
 }
 
 TEST(CodeGenE2E, ListCompStrConcat) {
-    auto output = compileAndRun(
-        "names: list[str] = [\"alice\", \"bob\"]\n"
-        "greetings: list[str] = [\"hi \" + n for n in names]\n"
-        "print(greetings[0])\n"
-        "print(greetings[1])\n"
-    );
+    auto output = compileAndRun(code("list_comp_str_concat"));
     EXPECT_EQ(output, "hi alice\nhi bob\n");
 }
 
 TEST(CodeGenE2E, ListCompStrSourcePreserved) {
-    auto output = compileAndRun(
-        "names: list[str] = [\"alice\", \"bob\"]\n"
-        "copies: list[str] = [n for n in names]\n"
-        "print(names[0])\n"
-        "print(names[1])\n"
-        "more: list[str] = [\"hi \" + n for n in names]\n"
-        "print(more[0])\n"
-        "print(more[1])\n"
-    );
+    auto output = compileAndRun(code("list_comp_str_source_preserved"));
     EXPECT_EQ(output, "alice\nbob\nhi alice\nhi bob\n");
 }
 
 TEST(CodeGenE2E, ListCompStrNested) {
-    auto output = compileAndRun(
-        "letters: list[str] = [\"a\", \"b\"]\n"
-        "digits: list[str] = [\"1\", \"2\"]\n"
-        "pairs: list[str] = [l + d for l in letters for d in digits]\n"
-        "print(len(pairs))\n"
-        "print(pairs[0])\n"
-        "print(pairs[3])\n"
-    );
+    auto output = compileAndRun(code("list_comp_str_nested"));
     EXPECT_EQ(output, "4\na1\nb2\n");
 }
 
 TEST(CodeGenE2E, ForInOverStrComprehension) {
-    auto output = compileAndRun(
-        "names: list[str] = [\"alice\", \"bob\", \"carol\"]\n"
-        "shouts: list[str] = [n.upper() for n in names]\n"
-        "for s in shouts {\n"
-        "  print(s)\n"
-        "}\n"
-    );
+    auto output = compileAndRun(code("for_in_over_str_comprehension"));
     EXPECT_EQ(output, "ALICE\nBOB\nCAROL\n");
 }
 
 TEST(CodeGenE2E, ListCompStrLoopBounded) {
-    auto output = compileAndRun(
-        "src: list[str] = [\"foo\", \"bar\", \"baz\"]\n"
-        "last: int = 0\n"
-        "for i in range(2000) {\n"
-        "  out: list[str] = [s + \"!\" for s in src]\n"
-        "  last = len(out)\n"
-        "}\n"
-        "print(last)\n"
-    );
+    auto output = compileAndRun(code("list_comp_str_loop_bounded"));
     EXPECT_EQ(output, "3\n");
 }

@@ -1,9 +1,14 @@
 #include "TestHelpers.h"
 #include "dragon/DefiniteAssignment.h"
 #include <gtest/gtest.h>
+#include "CodeBlock.h"
 
 using namespace dragon;
 using namespace dragon::test;
+
+static std::string code(const std::string& block) {
+    return extractCode("ModuleInitOrderTest.md", block);
+}
 
 namespace {
 
@@ -18,102 +23,46 @@ bool daHasError(const std::string& src, bool isDragon = true) {
 }
 
 TEST(ModuleInitOrderTest, DirectForwardConstRead_ClassTyped) {
-    EXPECT_TRUE(daHasError(
-        "class Dep {\n"
-        "    v: int\n"
-        "    def(x: int) { self.v = x }\n"
-        "}\n"
-        "class Svc {\n"
-        "    d: Dep\n"
-        "    def(dep: Dep) { self.d = dep }\n"
-        "    def get() -> int { return self.d.v }\n"
-        "}\n"
-        "const S: Svc = Svc(D)\n"
-        "const D: Dep = Dep(42)\n"
-        "print(S.get())\n"));
+    EXPECT_TRUE(daHasError(code("direct_forward_const_read__class_typed")));
 }
 
 TEST(ModuleInitOrderTest, DirectForwardConstRead_Scalar) {
-    EXPECT_TRUE(daHasError(
-        "const A: int = B + 1\n"
-        "const B: int = 41\n"
-        "print(A)\n"));
+    EXPECT_TRUE(daHasError(code("direct_forward_const_read__scalar")));
 }
 
 TEST(ModuleInitOrderTest, InterprocForwardConstRead) {
-    EXPECT_TRUE(daHasError(
-        "def read_later() -> int { return LATER }\n"
-        "const A: int = read_later()\n"
-        "const LATER: int = 42\n"
-        "print(A)\n"));
+    EXPECT_TRUE(daHasError(code("interproc_forward_const_read")));
 }
 
 TEST(ModuleInitOrderTest, TwoConstInitCycle) {
-    EXPECT_TRUE(daHasError(
-        "const X: int = Y + 1\n"
-        "const Y: int = X + 1\n"
-        "print(X)\n"
-        "print(Y)\n"));
+    EXPECT_TRUE(daHasError(code("two_const_init_cycle")));
 }
 
 TEST(ModuleInitOrderTest, InterprocInitCycle) {
-    EXPECT_TRUE(daHasError(
-        "def f() -> int { return B }\n"
-        "def g() -> int { return A }\n"
-        "const A: int = f()\n"
-        "const B: int = g()\n"
-        "print(A)\n"));
+    EXPECT_TRUE(daHasError(code("interproc_init_cycle")));
 }
 
 TEST(ModuleInitOrderTest, CorrectOrderConstChain_ClassTyped) {
-    EXPECT_FALSE(daHasError(
-        "class Dep {\n"
-        "    v: int\n"
-        "    def(x: int) { self.v = x }\n"
-        "}\n"
-        "class Svc {\n"
-        "    d: Dep\n"
-        "    def(dep: Dep) { self.d = dep }\n"
-        "    def get() -> int { return self.d.v }\n"
-        "}\n"
-        "const D: Dep = Dep(42)\n"
-        "const S: Svc = Svc(D)\n"
-        "print(S.get())\n"));
+    EXPECT_FALSE(daHasError(code("correct_order_const_chain__class_typed")));
 }
 
 TEST(ModuleInitOrderTest, CorrectOrderConstChain_Scalar) {
-    EXPECT_FALSE(daHasError(
-        "const B: int = 41\n"
-        "const A: int = B + 1\n"
-        "print(A)\n"));
+    EXPECT_FALSE(daHasError(code("correct_order_const_chain__scalar")));
 }
 
 TEST(ModuleInitOrderTest, ForwardFunctionRefPureHelper) {
-    EXPECT_FALSE(daHasError(
-        "const A: int = compute()\n"
-        "def compute() -> int { return 7 }\n"
-        "print(A)\n"));
+    EXPECT_FALSE(daHasError(code("forward_function_ref_pure_helper")));
 }
 
 TEST(ModuleInitOrderTest, ForwardFunctionReadsConstButNotCalledDuringInit) {
-    EXPECT_FALSE(daHasError(
-        "def check(n: int) -> bool { return n < LIMIT }\n"
-        "const LIMIT: int = 100\n"
-        "print(LIMIT)\n"));
+    EXPECT_FALSE(daHasError(code("forward_function_reads_const_but_not_called_during_init")));
 }
 
 TEST(ModuleInitOrderTest, InterprocConstReadConstDefinedEarlier) {
-    EXPECT_FALSE(daHasError(
-        "const DATA_DIR: str = \"data\"\n"
-        "def ensure() -> str { return DATA_DIR }\n"
-        "const READY: str = ensure()\n"
-        "print(READY)\n"));
+    EXPECT_FALSE(daHasError(code("interproc_const_read_const_defined_earlier")));
 }
 
 
 TEST(ModuleInitOrderTest, MainAtTopCallsHelpersBelow) {
-    EXPECT_FALSE(daHasError(
-        "def main() -> None { helper() }\n"
-        "def helper() -> None { print(\"hi\") }\n"
-        "main()\n"));
+    EXPECT_FALSE(daHasError(code("main_at_top_calls_helpers_below")));
 }

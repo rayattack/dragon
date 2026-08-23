@@ -1,4 +1,9 @@
 #include "CodeGenTestHelpers.h"
+#include "CodeBlock.h"
+
+static std::string code(const std::string& block) {
+    return extractCode("CodeGenTemplateTest.md", block);
+}
 
 TEST(CodeGenTest, TemplateSimpleIR) {
     auto ir = generateIR("x: str = template {hello}");
@@ -27,35 +32,22 @@ TEST(CodeGenTest, TemplatePipeUrlFilterIR) {
 }
 
 TEST(CodeGenE2E, TemplateLiteralOnly) {
-    auto output = compileAndRun(
-        "x: str = template {hello world}\n"
-        "print(x)"
-    );
+    auto output = compileAndRun(code("template_literal_only"));
     EXPECT_EQ(output, "hello world\n");
 }
 
 TEST(CodeGenE2E, TemplateIntInterpolation) {
-    auto output = compileAndRun(
-        "x: int = 42\n"
-        "print(template {value is !{x}})"
-    );
+    auto output = compileAndRun(code("template_int_interpolation"));
     EXPECT_EQ(output, "value is 42\n");
 }
 
 TEST(CodeGenE2E, TemplateStringInterpolation) {
-    auto output = compileAndRun(
-        "name: str = \"World\"\n"
-        "print(template {Hello !{name}!})"
-    );
+    auto output = compileAndRun(code("template_string_interpolation"));
     EXPECT_EQ(output, "Hello World!\n");
 }
 
 TEST(CodeGenE2E, TemplateMultipleExprs) {
-    auto output = compileAndRun(
-        "a: int = 10\n"
-        "b: int = 20\n"
-        "print(template {!{a} + !{b} = !{a + b}})"
-    );
+    auto output = compileAndRun(code("template_multiple_exprs"));
     EXPECT_EQ(output, "10 + 20 = 30\n");
 }
 
@@ -74,103 +66,62 @@ TEST(CodeGenE2E, TemplateDoubleBangLiteral) {
 }
 
 TEST(CodeGenE2E, TemplateBalancedBraces) {
-    auto output = compileAndRun(
-        "name: str = \"test\"\n"
-        "print(template {{\"key\": \"!{name}\"}})"
-    );
+    auto output = compileAndRun(code("template_balanced_braces"));
     EXPECT_EQ(output, "{\"key\": \"test\"}\n");
 }
 
 TEST(CodeGenE2E, TemplateFloatInterpolation) {
-    auto output = compileAndRun(
-        "x: float = 3.14\n"
-        "print(template {pi=!{x}})"
-    );
+    auto output = compileAndRun(code("template_float_interpolation"));
     EXPECT_EQ(output, "pi=3.14\n");
 }
 
 TEST(CodeGenE2E, TemplateBoolInterpolation) {
-    auto output = compileAndRun(
-        "x: bool = True\n"
-        "print(template {flag=!{x}})"
-    );
+    auto output = compileAndRun(code("template_bool_interpolation"));
     EXPECT_EQ(output, "flag=True\n");
 }
 
 TEST(CodeGenE2E, TemplatePipeHtml) {
-    auto output = compileAndRun(
-        "s: str = \"<b>hello</b>\"\n"
-        "print(template {!{s | html}})"
-    );
+    auto output = compileAndRun(code("template_pipe_html"));
     EXPECT_EQ(output, "&lt;b&gt;hello&lt;/b&gt;\n");
 }
 
 TEST(CodeGenE2E, TemplatePipeHtmlAmpersand) {
-    auto output = compileAndRun(
-        "s: str = \"a&b\"\n"
-        "print(template {!{s | html}})"
-    );
+    auto output = compileAndRun(code("template_pipe_html_ampersand"));
     EXPECT_EQ(output, "a&amp;b\n");
 }
 
 TEST(CodeGenE2E, TemplatePipeHtmlQuotes) {
-    auto output = compileAndRun(
-        "s: str = \"a'b\"\n"
-        "print(template {!{s | html}})"
-    );
+    auto output = compileAndRun(code("template_pipe_html_quotes"));
     EXPECT_EQ(output, "a&#x27;b\n");
 }
 
 TEST(CodeGenE2E, TemplatePipeSql) {
-    auto output = compileAndRun(
-        "name: str = \"O'Brien\"\n"
-        "print(template {WHERE name = '!{name | sql}'})"
-    );
+    auto output = compileAndRun(code("template_pipe_sql"));
     EXPECT_EQ(output, "WHERE name = 'O''Brien'\n");
 }
 
 TEST(CodeGenE2E, TemplatePipeUrl) {
-    auto output = compileAndRun(
-        "q: str = \"hello world\"\n"
-        "print(template {?q=!{q | url}})"
-    );
+    auto output = compileAndRun(code("template_pipe_url"));
     EXPECT_EQ(output, "?q=hello%20world\n");
 }
 
 TEST(CodeGenE2E, TemplatePipeUrlSpecialChars) {
-    auto output = compileAndRun(
-        "s: str = \"a+b=c&d\"\n"
-        "print(template {!{s | url}})"
-    );
+    auto output = compileAndRun(code("template_pipe_url_special_chars"));
     EXPECT_EQ(output, "a%2Bb%3Dc%26d\n");
 }
 
 TEST(CodeGenE2E, TemplatePipeUserDefined) {
-    auto output = compileAndRun(
-        "def exclaim(s: str) -> str {\n"
-        "    return s + \"!!!\"\n"
-        "}\n"
-        "\n"
-        "name: str = \"World\"\n"
-        "print(template {Hello !{name | exclaim}})"
-    );
+    auto output = compileAndRun(code("template_pipe_user_defined"));
     EXPECT_EQ(output, "Hello World!!!\n");
 }
 
 TEST(CodeGenE2E, TemplatePipeMixed) {
-    auto output = compileAndRun(
-        "user: str = \"<admin>\"\n"
-        "count: int = 5\n"
-        "print(template {User: !{user | html}, count: !{count}})"
-    );
+    auto output = compileAndRun(code("template_pipe_mixed"));
     EXPECT_EQ(output, "User: &lt;admin&gt;, count: 5\n");
 }
 
 TEST(CodeGenE2E, TemplatePipeIntToHtml) {
-    auto output = compileAndRun(
-        "x: int = 42\n"
-        "print(template {!{x | html}})"
-    );
+    auto output = compileAndRun(code("template_pipe_int_to_html"));
     EXPECT_EQ(output, "42\n");
 }
 
@@ -532,10 +483,7 @@ TEST(CodeGenE2E, TypedTemplateSameTypeNoDoubleEscape) {
 }
 
 TEST(CodeGenIR, TemplateFilterDecrefsOwnedIntInput) {
-    auto ir = generateIR(
-        "n: int = 42\n"
-        "y: str = template {!{n | html}}\n"
-    );
+    auto ir = generateIR(code("template_filter_decrefs_owned_int_input"));
     EXPECT_NE(ir.find("dragon_int_to_str"), std::string::npos);
     EXPECT_NE(ir.find("dragon_template_escape_html"), std::string::npos);
     EXPECT_NE(ir.find("dragon_decref_str"), std::string::npos)
@@ -544,10 +492,7 @@ TEST(CodeGenIR, TemplateFilterDecrefsOwnedIntInput) {
 }
 
 TEST(CodeGenIR, TemplateFilterDecrefsOwnedMethodCallInput) {
-    auto ir = generateIR(
-        "s: str = \"hi\"\n"
-        "y: str = template {!{s.upper() | html}}\n"
-    );
+    auto ir = generateIR(code("template_filter_decrefs_owned_method_call_input"));
     EXPECT_NE(ir.find("dragon_str_upper"), std::string::npos);
     EXPECT_NE(ir.find("dragon_template_escape_html"), std::string::npos);
     EXPECT_NE(ir.find("dragon_decref_str"), std::string::npos)
@@ -556,10 +501,7 @@ TEST(CodeGenIR, TemplateFilterDecrefsOwnedMethodCallInput) {
 }
 
 TEST(CodeGenIR, TemplateFilterBorrowedInputNotDoubleDecref) {
-    auto ir = generateIR(
-        "s: str = \"<b>x</b>\"\n"
-        "y: str = template {!{s | html}}\n"
-    );
+    auto ir = generateIR(code("template_filter_borrowed_input_not_double_decref"));
     EXPECT_NE(ir.find("dragon_template_escape_html"), std::string::npos);
     auto count = countSubstring(ir, "dragon_decref_str");
     EXPECT_LE(count, 2)
@@ -568,79 +510,39 @@ TEST(CodeGenIR, TemplateFilterBorrowedInputNotDoubleDecref) {
 }
 
 TEST(CodeGenE2E, TemplateFilterBoundedLoopOwnedInput) {
-    auto output = compileAndRun(
-        "last: str = \"\"\n"
-        "for i in range(20000) {\n"
-        "  last = template {!{str(i) | html}}\n"
-        "}\n"
-        "print(last)\n"
-    );
+    auto output = compileAndRun(code("template_filter_bounded_loop_owned_input"));
     EXPECT_EQ(output, "19999\n");
 }
 
 TEST(CodeGenE2E, TemplateFilterBoundedLoopMethodChain) {
-    auto output = compileAndRun(
-        "s: str = \"<value>\"\n"
-        "last: str = \"\"\n"
-        "for i in range(10000) {\n"
-        "  last = template {!{s.upper() | html}}\n"
-        "}\n"
-        "print(last)\n"
-    );
+    auto output = compileAndRun(code("template_filter_bounded_loop_method_chain"));
     EXPECT_EQ(output, "&lt;VALUE&gt;\n");
 }
 
 TEST(CodeGenE2E, TemplateFilterBoundedLoopUserFilter) {
-    auto output = compileAndRun(
-        "def shout(s: str) -> str { return s.upper() }\n"
-        "last: str = \"\"\n"
-        "for i in range(10000) {\n"
-        "  last = template {!{str(i) | shout}}\n"
-        "}\n"
-        "print(last)\n"
-    );
+    auto output = compileAndRun(code("template_filter_bounded_loop_user_filter"));
     EXPECT_EQ(output, "9999\n");
 }
 
 TEST(CodeGenE2E, TemplateFilterCorrectness) {
     // Correctness of the filter chain itself - confirms decref doesn't
     // accidentally use-after-free the filter result.
-    auto output = compileAndRun(
-        "n: int = 5\n"
-        "y: str = template {value=!{n | html}}\n"
-        "print(y)\n"
-    );
+    auto output = compileAndRun(code("template_filter_correctness"));
     EXPECT_EQ(output, "value=5\n");
 }
 
 TEST(CodeGenE2E, TemplateBlockForLoopWithContentAlias) {
-    auto output = compileAndRun(
-        "items: list[str] = [\"a\", \"b\", \"c\"]\n"
-        "y: str = template {<ul>!{ for x in items { :{<li>!{x}</li>} } }</ul>}\n"
-        "print(y)\n"
-    );
+    auto output = compileAndRun(code("template_block_for_loop_with_content_alias"));
     EXPECT_EQ(output, "<ul><li>a</li><li>b</li><li>c</li></ul>\n");
 }
 
 TEST(CodeGenE2E, TemplateBlockIfElseWithContentAlias) {
-    auto output = compileAndRun(
-        "logged_in: bool = True\n"
-        "name: str = \"Ada\"\n"
-        "y: str = template {!{ if logged_in { :{Hi !{name}} } else { :{Please sign in} } }}\n"
-        "print(y)\n"
-    );
+    auto output = compileAndRun(code("template_block_if_else_with_content_alias"));
     EXPECT_EQ(output, "Hi Ada\n");
 }
 
 TEST(CodeGenE2E, TemplateBlockMultiStatement) {
-    auto output = compileAndRun(
-        "items: list[str] = [\"x\", \"y\"]\n"
-        "y: str = template {!{\n"
-        "    label: str = \"item\"\n"
-        "    for x in items { :{[!{label}=!{x}]} }\n"
-        "}}\n"
-        "print(y)\n"
-    );
+    auto output = compileAndRun(code("template_block_multi_statement"));
     EXPECT_EQ(output, "[item=x][item=y]\n");
 }
 
@@ -662,19 +564,12 @@ TEST(CodeGenE2E, TemplateBlockContextInheritance) {
 }
 
 TEST(CodeGenE2E, TemplateBlockEmptyLoop) {
-    auto output = compileAndRun(
-        "items: list[str] = []\n"
-        "y: str = template {[!{ for x in items { :{!{x}} } }]}\n"
-        "print(y)\n"
-    );
+    auto output = compileAndRun(code("template_block_empty_loop"));
     EXPECT_EQ(output, "[]\n");
 }
 
 TEST(CodeGenTest, TemplateBlockEmitsListAndJoinIR) {
-    auto ir = generateIR(
-        "items: list[str] = [\"a\"]\n"
-        "y: str = template {!{ for x in items { :{!{x}} } }}\n"
-    );
+    auto ir = generateIR(code("template_block_emits_list_and_join_ir"));
     EXPECT_NE(ir.find("dragon_list_new_ptr"), std::string::npos)
         << "Block mode must allocate a list[str] buffer\nIR:\n" << ir;
     EXPECT_NE(ir.find("dragon_list_append_ptr"), std::string::npos)
@@ -684,66 +579,33 @@ TEST(CodeGenTest, TemplateBlockEmitsListAndJoinIR) {
 }
 
 TEST(CodeGenE2E, TemplateSpreadOperator) {
-    auto output = compileAndRun(
-        "items: list[str] = [\"foo\", \"bar\", \"baz\"]\n"
-        "y: str = template {[!{*items}]}\n"
-        "print(y)\n"
-    );
+    auto output = compileAndRun(code("template_spread_operator"));
     EXPECT_EQ(output, "[foobarbaz]\n");
 }
 
 TEST(CodeGenE2E, TemplateJoinFilterEmpty) {
-    auto output = compileAndRun(
-        "items: list[str] = [\"a\", \"b\", \"c\"]\n"
-        "y: str = template {!{items | join}}\n"
-        "print(y)\n"
-    );
+    auto output = compileAndRun(code("template_join_filter_empty"));
     EXPECT_EQ(output, "abc\n");
 }
 
 TEST(CodeGenE2E, TemplateJoinFilterWithSeparator) {
-    auto output = compileAndRun(
-        "items: list[str] = [\"a\", \"b\", \"c\"]\n"
-        "y: str = template {!{items | join(\", \")}}\n"
-        "print(y)\n"
-    );
+    auto output = compileAndRun(code("template_join_filter_with_separator"));
     EXPECT_EQ(output, "a, b, c\n");
 }
 
 TEST(CodeGenE2E, TemplateJoinFilterWithExprSeparator) {
-    auto output = compileAndRun(
-        "items: list[str] = [\"x\", \"y\"]\n"
-        "sep: str = \" | \"\n"
-        "y: str = template {!{items | join(sep)}}\n"
-        "print(y)\n"
-    );
+    auto output = compileAndRun(code("template_join_filter_with_expr_separator"));
     EXPECT_EQ(output, "x | y\n");
 }
 
 TEST(CodeGenTest, TemplateSpreadDesugarsToJoinIR) {
-    auto ir = generateIR(
-        "items: list[str] = [\"a\"]\n"
-        "y: str = template {!{*items}}\n"
-    );
+    auto ir = generateIR(code("template_spread_desugars_to_join_ir"));
     EXPECT_NE(ir.find("dragon_str_join_ptr"), std::string::npos)
         << "Spread must lower to dragon_str_join_ptr\nIR:\n" << ir;
 }
 
 TEST(CodeGenE2E, TemplateBlockNestedLoops) {
-    auto output = compileAndRun(
-        "rows: list[str] = [\"r1\", \"r2\"]\n"
-        "cols: list[str] = [\"c1\", \"c2\"]\n"
-        "y: str = template {!{\n"
-        "  for r in rows {\n"
-        "    :{[!{r}:}\n"
-        "    for c in cols {\n"
-        "      :{!{c},}\n"
-        "    }\n"
-        "    :{]}\n"
-        "  }\n"
-        "}}\n"
-        "print(y)\n"
-    );
+    auto output = compileAndRun(code("template_block_nested_loops"));
     EXPECT_EQ(output, "[r1:c1,c2,][r2:c1,c2,]\n");
 }
 
@@ -765,16 +627,7 @@ TEST(CodeGenE2E, TemplateBlockTypedWithInheritance) {
 }
 
 TEST(CodeGenE2E, TemplateBlockSpreadInsideBlock) {
-    auto output = compileAndRun(
-        "y: str = template {!{\n"
-        "  parts: list[str] = []\n"
-        "  for i in range(3) {\n"
-        "    parts.append(str(i))\n"
-        "  }\n"
-        "  :{!{*parts}}\n"
-        "}}\n"
-        "print(y)\n"
-    );
+    auto output = compileAndRun(code("template_block_spread_inside_block"));
     EXPECT_EQ(output, "012\n");
 }
 

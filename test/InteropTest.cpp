@@ -11,6 +11,7 @@
 #include <fstream>
 #include <cstdlib>
 #include <cstdio>
+#include "CodeBlock.h"
 #if defined(_WIN32)
   #include <process.h>
 #else
@@ -22,6 +23,10 @@
 
 using namespace dragon;
 using namespace dragon::test;
+
+static std::string code(const std::string& block) {
+    return extractCode("InteropTest.md", block);
+}
 
 struct LLVMInit {
     LLVMInit() {
@@ -236,10 +241,7 @@ TEST(InteropTest, DragonImportsDragon) {
     auto dir = makeTempDir("dr_dr");
     ASSERT_FALSE(dir.empty());
 
-    writeFile(dir + "/utils.dr",
-        "def double_it(x: int) -> int {\n"
-        "    return x * 2\n"
-        "}\n"
+    writeFile(dir + "/utils.dr", code("dragon_imports_dragon")
     );
 
     std::string source =
@@ -259,17 +261,7 @@ TEST(InteropTest, CrossModulePropertyGetterSetter) {
     auto dir = makeTempDir("xmod_property");
     ASSERT_FALSE(dir.empty());
 
-    writeFile(dir + "/shapes.dr",
-        "class Box {\n"
-        "    _v: int = 0\n"
-        "    @property\n"
-        "    def val() -> int { return self._v }\n"
-        "    @val.setter\n"
-        "    def val(n: int) -> None { self._v = n }\n"
-        "    @property\n"
-        "    def twin() -> Box { return self }\n"
-        "    def __str__() -> str { return \"box\" }\n"
-        "}\n"
+    writeFile(dir + "/shapes.dr", code("cross_module_property_getter_setter")
     );
 
     std::string source =
@@ -294,12 +286,7 @@ TEST(InteropTest, ImportedFunctionDocstring) {
     auto dir = makeTempDir("docstring_fromimport");
     ASSERT_FALSE(dir.empty());
 
-    writeFile(dir + "/lib.dr",
-        "\"\"\"library doc.\"\"\"\n"
-        "def hello() -> str {\n"
-        "    \"\"\"library hello.\"\"\"\n"
-        "    return \"hi\"\n"
-        "}\n"
+    writeFile(dir + "/lib.dr", code("imported_function_docstring")
     );
 
     std::string source =
@@ -319,9 +306,7 @@ TEST(InteropTest, ImportedModuleDocstring) {
     auto dir = makeTempDir("docstring_moduledoc");
     ASSERT_FALSE(dir.empty());
 
-    writeFile(dir + "/lib.dr",
-        "\"\"\"library module docstring.\"\"\"\n"
-        "def hi() -> int { return 0 }\n"
+    writeFile(dir + "/lib.dr", code("imported_module_docstring")
     );
 
     std::string source =
@@ -341,9 +326,7 @@ TEST(InteropTest, DragonImportsTypedPython) {
     auto dir = makeTempDir("dr_py");
     ASSERT_FALSE(dir.empty());
 
-    writeFile(dir + "/pyutils.py",
-        "def square(x: int) -> int:\n"
-        "    return x * x\n"
+    writeFile(dir + "/pyutils.py", code("dragon_imports_typed_python")
     );
 
     std::string source =
@@ -378,22 +361,11 @@ TEST(InteropTest, DiamondImportCompiles) {
     auto dir = makeTempDir("diamond_e2e");
     ASSERT_FALSE(dir.empty());
 
-    writeFile(dir + "/base.dr",
-        "def base_val() -> int {\n"
-        "    return 10\n"
-        "}\n"
+    writeFile(dir + "/base.dr", code("diamond_import_compiles")
     );
-    writeFile(dir + "/left.dr",
-        "from base import base_val\n"
-        "def left_val() -> int {\n"
-        "    return base_val() + 1\n"
-        "}\n"
+    writeFile(dir + "/left.dr", code("diamond_import_compiles_2")
     );
-    writeFile(dir + "/right.dr",
-        "from base import base_val\n"
-        "def right_val() -> int {\n"
-        "    return base_val() + 2\n"
-        "}\n"
+    writeFile(dir + "/right.dr", code("diamond_import_compiles_3")
     );
 
     std::string source =
@@ -414,9 +386,7 @@ TEST(InteropTest, UntypedPyImportRejected) {
     auto dir = makeTempDir("untyped_py");
     ASSERT_FALSE(dir.empty());
 
-    writeFile(dir + "/bad_module.py",
-        "def process(data):\n"
-        "    return data\n"
+    writeFile(dir + "/bad_module.py", code("untyped_py_import_rejected")
     );
 
     std::string source = "from bad_module import process\nprint(process(5))\n";
@@ -448,10 +418,7 @@ TEST(InteropTest, StringConcatAcrossModules) {
     auto dir = makeTempDir("str_concat");
     ASSERT_FALSE(dir.empty());
 
-    writeFile(dir + "/greet.dr",
-        "def greet(name: str) -> str {\n"
-        "    return \"Hello, \" + name\n"
-        "}\n"
+    writeFile(dir + "/greet.dr", code("string_concat_across_modules")
     );
 
     std::string source =
@@ -471,10 +438,7 @@ TEST(InteropTest, FunctionNameAcrossModules) {
     auto dir = makeTempDir("funcname");
     ASSERT_FALSE(dir.empty());
 
-    writeFile(dir + "/ops.dr",
-        "def double(x: int) -> int {\n"
-        "    return x * 2\n"
-        "}\n"
+    writeFile(dir + "/ops.dr", code("function_name_across_modules")
     );
 
     std::string source =
@@ -494,26 +458,10 @@ TEST(InteropTest, ClassNameAcrossModules) {
     auto dir = makeTempDir("classname");
     ASSERT_FALSE(dir.empty());
 
-    writeFile(dir + "/a.dr",
-        "class Conflict {\n"
-        "    def(x: int) {\n"
-        "        self.x = x\n"
-        "    }\n"
-        "    def value() -> int {\n"
-        "        return self.x\n"
-        "    }\n"
-        "}\n"
+    writeFile(dir + "/a.dr", code("class_name_across_modules")
     );
 
-    writeFile(dir + "/b.dr",
-        "class Conflict {\n"
-        "    def(x: int) {\n"
-        "        self.x = x\n"
-        "    }\n"
-        "    def value() -> int {\n"
-        "        return self.x\n"
-        "    }\n"
-        "}\n"
+    writeFile(dir + "/b.dr", code("class_name_across_modules_2")
     );
 
     std::string source =
@@ -1482,22 +1430,7 @@ TEST(InteropTest, CrossModuleGlobalDict) {
     auto dir = makeTempDir("xmod_global_dict");
     ASSERT_FALSE(dir.empty());
 
-    writeFile(dir + "/lib.dr",
-        "def _build() -> dict[str, str] {\n"
-        "    m: dict[str, str] = {}\n"
-        "    m[\"a\"] = \"alpha\"\n"
-        "    m[\"b\"] = \"beta\"\n"
-        "    return m\n"
-        "}\n"
-        "\n"
-        "const TBL: dict[str, str] = _build()\n"
-        "\n"
-        "def lookup(k: str) -> str {\n"
-        "    if k in TBL {\n"
-        "        return TBL[k]\n"
-        "    }\n"
-        "    return \"missing\"\n"
-        "}\n"
+    writeFile(dir + "/lib.dr", code("cross_module_global_dict")
     );
 
     std::string source =
@@ -1521,24 +1454,7 @@ TEST(InteropTest, CrossModuleGlobalList) {
     auto dir = makeTempDir("xmod_global_list");
     ASSERT_FALSE(dir.empty());
 
-    writeFile(dir + "/lib.dr",
-        "def _build() -> list[int] {\n"
-        "    xs: list[int] = []\n"
-        "    xs.append(10)\n"
-        "    xs.append(20)\n"
-        "    xs.append(30)\n"
-        "    return xs\n"
-        "}\n"
-        "\n"
-        "const NUMS: list[int] = _build()\n"
-        "\n"
-        "def total() -> int {\n"
-        "    s: int = 0\n"
-        "    for n in NUMS {\n"
-        "        s = s + n\n"
-        "    }\n"
-        "    return s\n"
-        "}\n"
+    writeFile(dir + "/lib.dr", code("cross_module_global_list")
     );
 
     std::string source =
@@ -1558,10 +1474,7 @@ TEST(InteropTest, ImportedFunctionAsValue) {
     auto dir = makeTempDir("imp_fn_value");
     ASSERT_FALSE(dir.empty());
 
-    writeFile(dir + "/utils.dr",
-        "def double_it(x: int) -> int {\n"
-        "    return x * 2\n"
-        "}\n"
+    writeFile(dir + "/utils.dr", code("imported_function_as_value")
     );
 
     std::string source =
@@ -1584,10 +1497,7 @@ TEST(InteropTest, FromPackageImportSubmoduleAttrAsValue) {
 
     std::filesystem::create_directory(dir + "/controllers");
     writeFile(dir + "/controllers/controllers.dr", "\n");
-    writeFile(dir + "/controllers/health.dr",
-        "def health_check() -> int {\n"
-        "    return 200\n"
-        "}\n"
+    writeFile(dir + "/controllers/health.dr", code("from_package_import_submodule_attr_as_value")
     );
 
     std::string source =
@@ -1611,10 +1521,7 @@ TEST(InteropTest, ImportPackageDotSubmoduleAttrAsValue) {
 
     std::filesystem::create_directory(dir + "/controllers");
     writeFile(dir + "/controllers/controllers.dr", "\n");
-    writeFile(dir + "/controllers/health.dr",
-        "def health_check() -> int {\n"
-        "    return 201\n"
-        "}\n"
+    writeFile(dir + "/controllers/health.dr", code("import_package_dot_submodule_attr_as_value")
     );
 
     std::string source =
@@ -1638,10 +1545,7 @@ TEST(InteropTest, FromPackageImportSubmoduleAttrDirectCall) {
 
     std::filesystem::create_directory(dir + "/controllers");
     writeFile(dir + "/controllers/controllers.dr", "\n");
-    writeFile(dir + "/controllers/health.dr",
-        "def health_check() -> int {\n"
-        "    return 202\n"
-        "}\n"
+    writeFile(dir + "/controllers/health.dr", code("from_package_import_submodule_attr_direct_call")
     );
 
     std::string source =
@@ -1664,10 +1568,7 @@ TEST(InteropTest, ImportPackageDotSubmoduleAttrDirectCall) {
 
     std::filesystem::create_directory(dir + "/controllers");
     writeFile(dir + "/controllers/controllers.dr", "\n");
-    writeFile(dir + "/controllers/health.dr",
-        "def health_check() -> int {\n"
-        "    return 203\n"
-        "}\n"
+    writeFile(dir + "/controllers/health.dr", code("import_package_dot_submodule_attr_direct_call")
     );
 
     std::string source =
@@ -1721,12 +1622,8 @@ TEST(InteropTest, StdlibUnittestEndToEnd) {
 TEST(InteropTest, D045_CrossPackageProtectedImportRejected) {
     auto dir = makeTempDir("d045_proto_import");
     ASSERT_FALSE(dir.empty());
-    writeFile(dir + "/lib.dr",
-        "_secret: int = 42\n"
-        "public_val: int = 7\n");
-    auto errs = typeCheckProjectErrors(dir, dir + "/main.dr",
-        "from lib import _secret, public_val\n"
-        "print(_secret)\n");
+    writeFile(dir + "/lib.dr", code("d045__cross_package_protected_import_rejected"));
+    auto errs = typeCheckProjectErrors(dir, dir + "/main.dr", code("d045__cross_package_protected_import_rejected_2"));
     EXPECT_TRUE(anyContains(errs, "module-private")) << "expected a privacy error";
     EXPECT_TRUE(anyContains(errs, "_secret")) << "error should name _secret";
     cleanupDir(dir, {"lib.dr", "main.dr"});
@@ -1735,14 +1632,9 @@ TEST(InteropTest, D045_CrossPackageProtectedImportRejected) {
 TEST(InteropTest, D045_CrossPackagePublicImportAllowed) {
     auto dir = makeTempDir("d045_pub_import");
     ASSERT_FALSE(dir.empty());
-    writeFile(dir + "/lib.dr",
-        "def public_add(a: int, b: int) -> int {\n"
-        "    return a + b\n"
-        "}\n");
+    writeFile(dir + "/lib.dr", code("d045__cross_package_public_import_allowed"));
     std::string out;
-    int rc = compileAndRun(dir, dir + "/main.dr",
-        "from lib import public_add\n"
-        "print(public_add(2, 3))\n", out);
+    int rc = compileAndRun(dir, dir + "/main.dr", code("d045__cross_package_public_import_allowed_2"), out);
     EXPECT_EQ(rc, 0);
     EXPECT_NE(out.find("5"), std::string::npos) << out;
     cleanupDir(dir, {"lib.dr", "main.dr", "test_output", "test_output.o"});
@@ -1751,12 +1643,8 @@ TEST(InteropTest, D045_CrossPackagePublicImportAllowed) {
 TEST(InteropTest, D045_CrossPackageFilePrivateImportRejected) {
     auto dir = makeTempDir("d045_filepriv");
     ASSERT_FALSE(dir.empty());
-    writeFile(dir + "/lib.dr",
-        "__hidden: int = 99\n"
-        "public_val: int = 1\n");
-    auto errs = typeCheckProjectErrors(dir, dir + "/main.dr",
-        "from lib import __hidden\n"
-        "print(__hidden)\n");
+    writeFile(dir + "/lib.dr", code("d045__cross_package_file_private_import_rejected"));
+    auto errs = typeCheckProjectErrors(dir, dir + "/main.dr", code("d045__cross_package_file_private_import_rejected_2"));
     EXPECT_TRUE(anyContains(errs, "__hidden")) << "error should name __hidden";
     EXPECT_TRUE(anyContains(errs, "file-private")) << "should mention file-private";
     cleanupDir(dir, {"lib.dr", "main.dr"});
@@ -1765,12 +1653,8 @@ TEST(InteropTest, D045_CrossPackageFilePrivateImportRejected) {
 TEST(InteropTest, D045_CrossPackageQualifiedProtectedRejected) {
     auto dir = makeTempDir("d045_qual");
     ASSERT_FALSE(dir.empty());
-    writeFile(dir + "/lib.dr",
-        "_secret: int = 42\n"
-        "public_val: int = 7\n");
-    auto errs = typeCheckProjectErrors(dir, dir + "/main.dr",
-        "import lib\n"
-        "print(lib._secret)\n");
+    writeFile(dir + "/lib.dr", code("d045__cross_package_qualified_protected_rejected"));
+    auto errs = typeCheckProjectErrors(dir, dir + "/main.dr", code("d045__cross_package_qualified_protected_rejected_2"));
     EXPECT_TRUE(anyContains(errs, "module-private")) << "expected a privacy error";
     cleanupDir(dir, {"lib.dr", "main.dr"});
 }
@@ -1782,9 +1666,7 @@ TEST(InteropTest, D045_SamePackageProtectedImportAllowed) {
     writeFile(dir + "/app/internal.dr",
         "_shared: int = 123\n");
     std::string out;
-    int rc = compileAndRun(dir, dir + "/app/app.dr",
-        "from app.internal import _shared\n"
-        "print(_shared)\n", out);
+    int rc = compileAndRun(dir, dir + "/app/app.dr", code("d045__same_package_protected_import_allowed"), out);
     EXPECT_EQ(rc, 0) << out;
     EXPECT_NE(out.find("123"), std::string::npos) << out;
     std::filesystem::remove_all(dir, ec);

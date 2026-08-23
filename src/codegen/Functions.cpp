@@ -129,6 +129,206 @@ llvm::Function* CodeGen::Impl::emitEnvGcFn(
     return gcFn;
 }
 
+struct CodeGen::FnCapture {
+    std::string name;
+    llvm::Value* value = nullptr;
+    Impl::VarKind kind = Impl::VarKind::Other;
+    std::string className;
+    bool isCellRelay = false;
+};
+
+std::vector<CodeGen::FnCapture> CodeGen::collectFnCaptures(
+    const std::vector<std::string>& capturedVars,
+    const std::vector<std::string>& mutatedCapturedVars) {
+    std::unordered_set<std::string> innerCellRelayed(
+        mutatedCapturedVars.begin(), mutatedCapturedVars.end());
+    std::vector<FnCapture> captures;
+    for (auto& capName : capturedVars) {
+        FnCapture ci;
+        ci.name = capName;
+        ci.kind = impl_->lookupVarKind(capName);
+        ci.isCellRelay = innerCellRelayed.count(capName) > 0;
+        auto cnIt = impl_->varClassNames.find(capName);
+        if (cnIt != impl_->varClassNames.end())
+            ci.className = cnIt->second;
+        auto* alloca = impl_->lookupVar(capName);
+        if (alloca) {
+            ci.value = impl_->builder->CreateLoad(
+                alloca->getAllocatedType(), alloca, capName + ".cap");
+        } else {
+            auto* gv = impl_->lookupModuleGlobal(capName);
+            if (gv) {
+                ci.value = impl_->builder->CreateLoad(
+                    gv->getValueType(), gv, capName + ".cap");
+            } else {
+                ci.value = llvm::ConstantInt::get(impl_->i64Type, 0);
+            }
+        }
+        captures.push_back(ci);
+    }
+    return captures;
+}
+
+void CodeGen::bindFnParams(
+    llvm::Function* fn, llvm::FunctionType* fnType,
+    const std::vector<std::pair<std::string, TypeExpr*>>& params) {
+    size_t idx = 0;
+    for (auto& arg : fn->args()) {
+        if (idx >= params.size()) break;
+        const std::string& paramName = params[idx].first;
+        TypeExpr* paramType = params[idx].second;
+        arg.setName(paramName);
+        auto* alloca = impl_->createEntryAlloca(fn, paramName, fnType->getParamType(idx));
+        impl_->builder->CreateStore(&arg, alloca);
+        auto paramKind = impl_->typeExprToKind(paramType);
+        impl_->setVar(paramName, alloca, paramKind);
+        impl_->trackPtrParam(paramName, paramType);
+        if (paramKind == Impl::VarKind::ClassInstance) {
+            impl_->bindClassVar(paramName, paramType);
+        }
+        if (Impl::isHeapKind(paramKind))
+            impl_->scopes.back().borrowed.insert(paramName);
+        idx++;
+    }
+}
+
+llvm::StructType* CodeGen::buildFnEnvStruct(
+    const std::string& envName, const std::vector<FnCapture>& captures) {
+    auto kindToCaptureLLVM = [&](Impl::VarKind k) -> llvm::Type* {
+        switch (k) {
+            case Impl::VarKind::Float: return impl_->f64Type;
+            case Impl::VarKind::Bool:  return impl_->i1Type;
+            case Impl::VarKind::Str:
+            case Impl::VarKind::StrLiteral:
+            case Impl::VarKind::List:
+            case Impl::VarKind::Dict:
+            case Impl::VarKind::Tuple:
+            case Impl::VarKind::Set:
+            case Impl::VarKind::File:
+            case Impl::VarKind::ClassInstance:
+            case Impl::VarKind::Generator:
+            case Impl::VarKind::Closure:
+                return impl_->i8PtrType;
+            default:
+                return impl_->i64Type;
+        }
+    };
+
+    std::vector<llvm::Type*> envFields;
+    envFields.push_back(llvm::ArrayType::get(
+        llvm::Type::getInt8Ty(*impl_->context), 24));
+    for (auto& cap : captures) {
+        envFields.push_back(cap.isCellRelay
+            ? impl_->i8PtrType : kindToCaptureLLVM(cap.kind));
+    }
+    return llvm::StructType::create(*impl_->context, envFields, envName);
+}
+
+llvm::Value* CodeGen::bindFnEnvCaptures(llvm::Function* fn,
+                                        llvm::StructType* envStructType,
+                                        const std::vector<FnCapture>& captures) {
+    llvm::Value* envArg = &*(fn->arg_end() - 1);
+    envArg->setName("__env");
+    llvm::Value* envTyped = impl_->builder->CreateBitCast(
+        envArg, llvm::PointerType::getUnqual(*impl_->context), "__env.typed");
+
+    for (size_t i = 0; i < captures.size(); i++) {
+        auto& cap = captures[i];
+        llvm::Type* fieldType = envStructType->getElementType((unsigned)(i + 1));
+
+        auto* fieldPtr = impl_->builder->CreateStructGEP(
+            envStructType, envTyped, (unsigned)(i + 1), cap.name + ".env.ptr");
+        auto* typedVal = impl_->builder->CreateLoad(
+            fieldType, fieldPtr, cap.name + ".env");
+
+        auto* alloca = impl_->createEntryAlloca(fn, cap.name, fieldType);
+        impl_->builder->CreateStore(typedVal, alloca);
+        impl_->setVar(cap.name, alloca, cap.kind);
+        if (!cap.className.empty())
+            impl_->varClassNames[cap.name] = cap.className;
+        impl_->scopes.back().borrowed.insert(cap.name);
+        if (cap.isCellRelay) {
+            impl_->markCellBacked(cap.name);
+        }
+    }
+    return envArg;
+}
+
+llvm::Value* CodeGen::materializeClosureEnv(const std::string& fnName,
+                                            llvm::Function* fn,
+                                            llvm::StructType* envStructType,
+                                            const std::vector<FnCapture>& captures) {
+    std::vector<Impl::EnvCaptureDesc> capDescs;
+    capDescs.reserve(captures.size());
+    bool envTrackable = false;
+    for (auto& cap : captures) {
+        capDescs.push_back({cap.kind, cap.isCellRelay});
+        if (Impl::envCaptureIsCyclic(cap.kind, cap.isCellRelay))
+            envTrackable = true;
+    }
+    auto* gcFn = impl_->emitEnvGcFn(fnName, envStructType, capDescs);
+
+    const auto& dl = impl_->module->getDataLayout();
+    uint64_t envSize = dl.getTypeAllocSize(envStructType);
+
+    auto* envVal = impl_->builder->CreateCall(
+        impl_->runtimeFuncs["dragon_env_alloc"],
+        {llvm::ConstantInt::get(impl_->i64Type, (int64_t)envSize),
+         impl_->builder->CreateBitCast(gcFn, impl_->i8PtrType),
+         llvm::ConstantInt::get(llvm::Type::getInt32Ty(*impl_->context),
+                                envTrackable ? 1 : 0)},
+        "closure.env");
+
+    llvm::Value* envTyped = impl_->builder->CreateBitCast(
+        envVal, llvm::PointerType::getUnqual(*impl_->context), "closure.env.typed");
+
+    for (size_t i = 0; i < captures.size(); i++) {
+        auto& cap = captures[i];
+        llvm::Type* fieldType = envStructType->getElementType((unsigned)(i + 1));
+        llvm::Value* storeVal = cap.value;
+
+        if (storeVal->getType() != fieldType) {
+            if (fieldType == impl_->f64Type && storeVal->getType() == impl_->i64Type)
+                storeVal = impl_->builder->CreateSIToFP(storeVal, fieldType);
+            else if (fieldType == impl_->i64Type && storeVal->getType() == impl_->i1Type)
+                storeVal = impl_->builder->CreateZExt(storeVal, fieldType);
+            else if (fieldType == impl_->i8PtrType && storeVal->getType()->isIntegerTy())
+                storeVal = impl_->builder->CreateIntToPtr(storeVal, fieldType);
+            else if (fieldType->isIntegerTy() && storeVal->getType()->isPointerTy())
+                storeVal = impl_->builder->CreatePtrToInt(storeVal, fieldType);
+            else
+                storeVal = impl_->builder->CreateBitCast(storeVal, fieldType);
+        }
+
+        auto* fieldPtr = impl_->builder->CreateStructGEP(
+            envStructType, envTyped, (unsigned)(i + 1), cap.name + ".env.slot");
+        impl_->builder->CreateStore(storeVal, fieldPtr);
+
+        if (impl_->options.gcMode == GCMode::RC) {
+            if (cap.isCellRelay) {
+                impl_->builder->CreateCall(
+                    impl_->runtimeFuncs["dragon_incref"], {storeVal});
+            } else if (Impl::isHeapKind(cap.kind)) {
+                if (cap.kind == Impl::VarKind::Str) {
+                    impl_->builder->CreateCall(
+                        impl_->runtimeFuncs["dragon_incref_str"], {storeVal});
+                } else if (cap.kind == Impl::VarKind::Closure) {
+                    impl_->builder->CreateCall(
+                        impl_->runtimeFuncs["dragon_incref_callable"], {storeVal});
+                } else {
+                    impl_->builder->CreateCall(
+                        impl_->runtimeFuncs["dragon_incref"], {storeVal});
+                }
+            }
+        }
+    }
+
+    return impl_->builder->CreateCall(
+        impl_->runtimeFuncs["dragon_closure_create"],
+        {impl_->builder->CreateBitCast(fn, impl_->i8PtrType), envVal},
+        "closure");
+}
+
 void CodeGen::visit(LambdaExpr& node) {
     Impl::VarMetaScope _varMeta(*impl_);
 
@@ -156,41 +356,8 @@ void CodeGen::visit(LambdaExpr& node) {
     auto* lambdaFunc = llvm::Function::Create(
         funcType, llvm::Function::InternalLinkage, lambdaName, impl_->module.get());
 
-    std::unordered_set<std::string> innerCellRelayed(
-        node.mutatedCapturedVars.begin(), node.mutatedCapturedVars.end());
-    struct CaptureInfo {
-        std::string name;
-        llvm::Value* value;
-        Impl::VarKind kind;
-        std::string className;
-        bool isCellRelay = false;
-    };
-    std::vector<CaptureInfo> captures;
-    if (hasCaptures) {
-        for (auto& capName : node.capturedVars) {
-            CaptureInfo ci;
-            ci.name = capName;
-            ci.kind = impl_->lookupVarKind(capName);
-            ci.isCellRelay = innerCellRelayed.count(capName) > 0;
-            auto cnIt = impl_->varClassNames.find(capName);
-            if (cnIt != impl_->varClassNames.end())
-                ci.className = cnIt->second;
-            auto* alloca = impl_->lookupVar(capName);
-            if (alloca) {
-                ci.value = impl_->builder->CreateLoad(
-                    alloca->getAllocatedType(), alloca, capName + ".cap");
-            } else {
-                auto* gv = impl_->lookupModuleGlobal(capName);
-                if (gv) {
-                    ci.value = impl_->builder->CreateLoad(
-                        gv->getValueType(), gv, capName + ".cap");
-                } else {
-                    ci.value = llvm::ConstantInt::get(impl_->i64Type, 0);
-                }
-            }
-            captures.push_back(ci);
-        }
-    }
+    std::vector<FnCapture> captures =
+        collectFnCaptures(node.capturedVars, node.mutatedCapturedVars);
 
     auto* prevFunc = impl_->currentFunction;
     auto* prevBlock = impl_->builder->GetInsertBlock();
@@ -215,83 +382,15 @@ void CodeGen::visit(LambdaExpr& node) {
     impl_->builder->SetInsertPoint(entry);
 
     impl_->pushScope();
-    size_t idx = 0;
-    for (auto& arg : lambdaFunc->args()) {
-        if (idx >= node.params.size()) break;
-        std::string paramName = node.params[idx].name;
-        arg.setName(paramName);
-        auto* alloca = impl_->createEntryAlloca(lambdaFunc, paramName, funcType->getParamType(idx));
-        impl_->builder->CreateStore(&arg, alloca);
-        auto paramKind = impl_->typeExprToKind(node.params[idx].type.get());
-        impl_->setVar(paramName, alloca, paramKind);
-        impl_->trackPtrParam(paramName, node.params[idx].type.get());
-        if (paramKind == Impl::VarKind::ClassInstance) {
-            impl_->bindClassVar(paramName, node.params[idx].type.get());
-        }
-        if (Impl::isHeapKind(paramKind))
-            impl_->scopes.back().borrowed.insert(paramName);
-        idx++;
-    }
+    std::vector<std::pair<std::string, TypeExpr*>> paramBinds;
+    paramBinds.reserve(node.params.size());
+    for (auto& p : node.params) paramBinds.emplace_back(p.name, p.type.get());
+    bindFnParams(lambdaFunc, funcType, paramBinds);
 
-    auto kindToCaptureLLVM = [&](Impl::VarKind k) -> llvm::Type* {
-        switch (k) {
-            case Impl::VarKind::Float: return impl_->f64Type;
-            case Impl::VarKind::Bool:  return impl_->i1Type;
-            case Impl::VarKind::Str:
-            case Impl::VarKind::StrLiteral:
-            case Impl::VarKind::List:
-            case Impl::VarKind::Dict:
-            case Impl::VarKind::Tuple:
-            case Impl::VarKind::Set:
-            case Impl::VarKind::File:
-            case Impl::VarKind::ClassInstance:
-            case Impl::VarKind::Generator:
-            case Impl::VarKind::Closure:
-                return impl_->i8PtrType;
-            default:
-                return impl_->i64Type;
-        }
-    };
+    llvm::StructType* envStructType =
+        hasCaptures ? buildFnEnvStruct(lambdaName + ".env", captures) : nullptr;
 
-    llvm::StructType* envStructType = nullptr;
-    if (hasCaptures) {
-        std::vector<llvm::Type*> envFields;
-        envFields.push_back(llvm::ArrayType::get(
-            llvm::Type::getInt8Ty(*impl_->context), 24));
-        for (auto& cap : captures) {
-            envFields.push_back(cap.isCellRelay
-                ? impl_->i8PtrType : kindToCaptureLLVM(cap.kind));
-        }
-        envStructType = llvm::StructType::create(
-            *impl_->context, envFields, lambdaName + ".env");
-    }
-
-    if (hasCaptures) {
-        llvm::Value* envArg = &*(lambdaFunc->arg_end() - 1);
-        envArg->setName("__env");
-        llvm::Value* envTyped = impl_->builder->CreateBitCast(
-            envArg, llvm::PointerType::getUnqual(*impl_->context), "__env.typed");
-
-        for (size_t i = 0; i < captures.size(); i++) {
-            auto& cap = captures[i];
-            llvm::Type* fieldType = envStructType->getElementType((unsigned)(i + 1));
-
-            auto* fieldPtr = impl_->builder->CreateStructGEP(
-                envStructType, envTyped, (unsigned)(i + 1), cap.name + ".env.ptr");
-            auto* typedVal = impl_->builder->CreateLoad(
-                fieldType, fieldPtr, cap.name + ".env");
-
-            auto* alloca = impl_->createEntryAlloca(lambdaFunc, cap.name, fieldType);
-            impl_->builder->CreateStore(typedVal, alloca);
-            impl_->setVar(cap.name, alloca, cap.kind);
-            if (!cap.className.empty())
-                impl_->varClassNames[cap.name] = cap.className;
-            impl_->scopes.back().borrowed.insert(cap.name);
-            if (cap.isCellRelay) {
-                impl_->markCellBacked(cap.name);
-            }
-        }
-    }
+    if (hasCaptures) bindFnEnvCaptures(lambdaFunc, envStructType, captures);
 
     if (node.body) {
         node.body->accept(*this);
@@ -340,76 +439,8 @@ void CodeGen::visit(LambdaExpr& node) {
     if (prevBlock) impl_->builder->SetInsertPoint(prevBlock);
 
     if (hasCaptures) {
-        std::vector<Impl::EnvCaptureDesc> capDescs;
-        capDescs.reserve(captures.size());
-        bool envTrackable = false;
-        for (auto& cap : captures) {
-            capDescs.push_back({cap.kind, cap.isCellRelay});
-            if (Impl::envCaptureIsCyclic(cap.kind, cap.isCellRelay))
-                envTrackable = true;
-        }
-        auto* gcFn = impl_->emitEnvGcFn(lambdaName, envStructType, capDescs);
-
-        const auto& dl = impl_->module->getDataLayout();
-        uint64_t envSize = dl.getTypeAllocSize(envStructType);
-
-        auto* envVal = impl_->builder->CreateCall(
-            impl_->runtimeFuncs["dragon_env_alloc"],
-            {llvm::ConstantInt::get(impl_->i64Type, (int64_t)envSize),
-             impl_->builder->CreateBitCast(gcFn, impl_->i8PtrType),
-             llvm::ConstantInt::get(llvm::Type::getInt32Ty(*impl_->context),
-                                    envTrackable ? 1 : 0)},
-            "closure.env");
-
-        llvm::Value* envTyped = impl_->builder->CreateBitCast(
-            envVal, llvm::PointerType::getUnqual(*impl_->context), "closure.env.typed");
-
-        for (size_t i = 0; i < captures.size(); i++) {
-            auto& cap = captures[i];
-            llvm::Type* fieldType = envStructType->getElementType((unsigned)(i + 1));
-            llvm::Value* storeVal = cap.value;
-
-            if (storeVal->getType() != fieldType) {
-                if (fieldType == impl_->f64Type && storeVal->getType() == impl_->i64Type)
-                    storeVal = impl_->builder->CreateSIToFP(storeVal, fieldType);
-                else if (fieldType == impl_->i64Type && storeVal->getType() == impl_->i1Type)
-                    storeVal = impl_->builder->CreateZExt(storeVal, fieldType);
-                else if (fieldType == impl_->i8PtrType && storeVal->getType()->isIntegerTy())
-                    storeVal = impl_->builder->CreateIntToPtr(storeVal, fieldType);
-                else if (fieldType->isIntegerTy() && storeVal->getType()->isPointerTy())
-                    storeVal = impl_->builder->CreatePtrToInt(storeVal, fieldType);
-                else
-                    storeVal = impl_->builder->CreateBitCast(storeVal, fieldType);
-            }
-
-            auto* fieldPtr = impl_->builder->CreateStructGEP(
-                envStructType, envTyped, (unsigned)(i + 1), cap.name + ".env.slot");
-            impl_->builder->CreateStore(storeVal, fieldPtr);
-
-            if (impl_->options.gcMode == GCMode::RC) {
-                if (cap.isCellRelay) {
-                    impl_->builder->CreateCall(
-                        impl_->runtimeFuncs["dragon_incref"], {storeVal});
-                } else if (Impl::isHeapKind(cap.kind)) {
-                    if (cap.kind == Impl::VarKind::Str) {
-                        impl_->builder->CreateCall(
-                            impl_->runtimeFuncs["dragon_incref_str"], {storeVal});
-                    } else if (cap.kind == Impl::VarKind::Closure) {
-                        impl_->builder->CreateCall(
-                            impl_->runtimeFuncs["dragon_incref_callable"], {storeVal});
-                    } else {
-                        impl_->builder->CreateCall(
-                            impl_->runtimeFuncs["dragon_incref"], {storeVal});
-                    }
-                }
-            }
-        }
-
-        impl_->lastValue = impl_->builder->CreateCall(
-            impl_->runtimeFuncs["dragon_closure_create"],
-            {impl_->builder->CreateBitCast(lambdaFunc, impl_->i8PtrType), envVal},
-            "closure");
-
+        impl_->lastValue =
+            materializeClosureEnv(lambdaName, lambdaFunc, envStructType, captures);
         impl_->lastClosureCallableType = llvm::FunctionType::get(
             retType, userParamTypes, false);
     } else {
@@ -1197,41 +1228,8 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
     auto* nestedFunc = llvm::Function::Create(
         funcType, llvm::Function::InternalLinkage, mangledName, impl_->module.get());
 
-    std::unordered_set<std::string> innerCellRelayed(
-        node.mutatedCapturedVars.begin(), node.mutatedCapturedVars.end());
-    struct CaptureInfo {
-        std::string name;
-        llvm::Value* value;
-        Impl::VarKind kind;
-        std::string className;
-        bool isCellRelay = false;
-    };
-    std::vector<CaptureInfo> captures;
-    if (hasCaptures) {
-        for (auto& capName : node.capturedVars) {
-            CaptureInfo ci;
-            ci.name = capName;
-            ci.kind = impl_->lookupVarKind(capName);
-            ci.isCellRelay = innerCellRelayed.count(capName) > 0;
-            auto cnIt = impl_->varClassNames.find(capName);
-            if (cnIt != impl_->varClassNames.end())
-                ci.className = cnIt->second;
-            auto* alloca = impl_->lookupVar(capName);
-            if (alloca) {
-                ci.value = impl_->builder->CreateLoad(
-                    alloca->getAllocatedType(), alloca, capName + ".cap");
-            } else {
-                auto* gv = impl_->lookupModuleGlobal(capName);
-                if (gv) {
-                    ci.value = impl_->builder->CreateLoad(
-                        gv->getValueType(), gv, capName + ".cap");
-                } else {
-                    ci.value = llvm::ConstantInt::get(impl_->i64Type, 0);
-                }
-            }
-            captures.push_back(ci);
-        }
-    }
+    std::vector<FnCapture> captures =
+        collectFnCaptures(node.capturedVars, node.mutatedCapturedVars);
 
     std::optional<Impl::VarMetaScope> bodyMeta(*impl_);
     auto* prevFunc = impl_->currentFunction;
@@ -1260,83 +1258,17 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
     impl_->builder->SetInsertPoint(entry);
     impl_->pushScope();
 
-    size_t idx = 0;
-    for (auto& arg : nestedFunc->args()) {
-        if (idx >= node.params.size()) break;
-        std::string paramName = node.params[idx].name;
-        arg.setName(paramName);
-        auto* alloca = impl_->createEntryAlloca(
-            nestedFunc, paramName, funcType->getParamType(idx));
-        impl_->builder->CreateStore(&arg, alloca);
-        auto paramKind = impl_->typeExprToKind(node.params[idx].type.get());
-        impl_->setVar(paramName, alloca, paramKind);
-        impl_->trackPtrParam(paramName, node.params[idx].type.get());
-        if (paramKind == Impl::VarKind::ClassInstance) {
-            impl_->bindClassVar(paramName, node.params[idx].type.get());
-        }
-        if (Impl::isHeapKind(paramKind))
-            impl_->scopes.back().borrowed.insert(paramName);
-        idx++;
-    }
+    std::vector<std::pair<std::string, TypeExpr*>> paramBinds;
+    paramBinds.reserve(node.params.size());
+    for (auto& p : node.params) paramBinds.emplace_back(p.name, p.type.get());
+    bindFnParams(nestedFunc, funcType, paramBinds);
 
-    auto kindToCaptureLLVM = [&](Impl::VarKind k) -> llvm::Type* {
-        switch (k) {
-            case Impl::VarKind::Float: return impl_->f64Type;
-            case Impl::VarKind::Bool:  return impl_->i1Type;
-            case Impl::VarKind::Str:
-            case Impl::VarKind::StrLiteral:
-            case Impl::VarKind::List:
-            case Impl::VarKind::Dict:
-            case Impl::VarKind::Tuple:
-            case Impl::VarKind::Set:
-            case Impl::VarKind::File:
-            case Impl::VarKind::ClassInstance:
-            case Impl::VarKind::Generator:
-            case Impl::VarKind::Closure:
-                return impl_->i8PtrType;
-            default:
-                return impl_->i64Type;
-        }
-    };
-
-    llvm::StructType* envStructType = nullptr;
-    if (hasCaptures) {
-        std::vector<llvm::Type*> envFields;
-        envFields.push_back(llvm::ArrayType::get(
-            llvm::Type::getInt8Ty(*impl_->context), 24));
-        for (auto& cap : captures) {
-            envFields.push_back(cap.isCellRelay
-                ? impl_->i8PtrType : kindToCaptureLLVM(cap.kind));
-        }
-        envStructType = llvm::StructType::create(
-            *impl_->context, envFields, mangledName + ".env");
-    }
+    llvm::StructType* envStructType =
+        hasCaptures ? buildFnEnvStruct(mangledName + ".env", captures) : nullptr;
 
     llvm::Value* envArgValue = nullptr;
-    if (hasCaptures) {
-        envArgValue = &*(nestedFunc->arg_end() - 1);
-        envArgValue->setName("__env");
-        llvm::Value* envTyped = impl_->builder->CreateBitCast(
-            envArgValue, llvm::PointerType::getUnqual(*impl_->context), "__env.typed");
-
-        for (size_t i = 0; i < captures.size(); i++) {
-            auto& cap = captures[i];
-            llvm::Type* fieldType = envStructType->getElementType((unsigned)(i + 1));
-            auto* fieldPtr = impl_->builder->CreateStructGEP(
-                envStructType, envTyped, (unsigned)(i + 1), cap.name + ".env.ptr");
-            auto* typedVal = impl_->builder->CreateLoad(
-                fieldType, fieldPtr, cap.name + ".env");
-            auto* alloca = impl_->createEntryAlloca(nestedFunc, cap.name, fieldType);
-            impl_->builder->CreateStore(typedVal, alloca);
-            impl_->setVar(cap.name, alloca, cap.kind);
-            if (!cap.className.empty())
-                impl_->varClassNames[cap.name] = cap.className;
-            impl_->scopes.back().borrowed.insert(cap.name);
-            if (cap.isCellRelay) {
-                impl_->markCellBacked(cap.name);
-            }
-        }
-    }
+    if (hasCaptures)
+        envArgValue = bindFnEnvCaptures(nestedFunc, envStructType, captures);
 
     Impl::NestedAliasInfo savedAlias;
     bool hadPriorAlias = false;
@@ -1388,72 +1320,8 @@ void CodeGen::emitNestedFunctionDecl(FunctionDecl& node) {
         boundValue = impl_->builder->CreateBitCast(nestedFunc, impl_->i8PtrType);
         boundKind = Impl::VarKind::Other;
     } else {
-        std::vector<Impl::EnvCaptureDesc> capDescs;
-        capDescs.reserve(captures.size());
-        bool envTrackable = false;
-        for (auto& cap : captures) {
-            capDescs.push_back({cap.kind, cap.isCellRelay});
-            if (Impl::envCaptureIsCyclic(cap.kind, cap.isCellRelay))
-                envTrackable = true;
-        }
-        auto* gcFn = impl_->emitEnvGcFn(mangledName, envStructType, capDescs);
-
-        const auto& dl = impl_->module->getDataLayout();
-        uint64_t envSize = dl.getTypeAllocSize(envStructType);
-
-        auto* envVal = impl_->builder->CreateCall(
-            impl_->runtimeFuncs["dragon_env_alloc"],
-            {llvm::ConstantInt::get(impl_->i64Type, (int64_t)envSize),
-             impl_->builder->CreateBitCast(gcFn, impl_->i8PtrType),
-             llvm::ConstantInt::get(llvm::Type::getInt32Ty(*impl_->context),
-                                    envTrackable ? 1 : 0)},
-            "closure.env");
-
-        llvm::Value* envTyped = impl_->builder->CreateBitCast(
-            envVal, llvm::PointerType::getUnqual(*impl_->context), "closure.env.typed");
-
-        for (size_t i = 0; i < captures.size(); i++) {
-            auto& cap = captures[i];
-            llvm::Type* fieldType = envStructType->getElementType((unsigned)(i + 1));
-            llvm::Value* storeVal = cap.value;
-            if (storeVal->getType() != fieldType) {
-                if (fieldType == impl_->f64Type && storeVal->getType() == impl_->i64Type)
-                    storeVal = impl_->builder->CreateSIToFP(storeVal, fieldType);
-                else if (fieldType == impl_->i64Type && storeVal->getType() == impl_->i1Type)
-                    storeVal = impl_->builder->CreateZExt(storeVal, fieldType);
-                else if (fieldType == impl_->i8PtrType && storeVal->getType()->isIntegerTy())
-                    storeVal = impl_->builder->CreateIntToPtr(storeVal, fieldType);
-                else if (fieldType->isIntegerTy() && storeVal->getType()->isPointerTy())
-                    storeVal = impl_->builder->CreatePtrToInt(storeVal, fieldType);
-                else
-                    storeVal = impl_->builder->CreateBitCast(storeVal, fieldType);
-            }
-            auto* fieldPtr = impl_->builder->CreateStructGEP(
-                envStructType, envTyped, (unsigned)(i + 1), cap.name + ".env.slot");
-            impl_->builder->CreateStore(storeVal, fieldPtr);
-            if (impl_->options.gcMode == GCMode::RC) {
-                if (cap.isCellRelay) {
-                    impl_->builder->CreateCall(
-                        impl_->runtimeFuncs["dragon_incref"], {storeVal});
-                } else if (Impl::isHeapKind(cap.kind)) {
-                    if (cap.kind == Impl::VarKind::Str) {
-                        impl_->builder->CreateCall(
-                            impl_->runtimeFuncs["dragon_incref_str"], {storeVal});
-                    } else if (cap.kind == Impl::VarKind::Closure) {
-                        impl_->builder->CreateCall(
-                            impl_->runtimeFuncs["dragon_incref_callable"], {storeVal});
-                    } else {
-                        impl_->builder->CreateCall(
-                            impl_->runtimeFuncs["dragon_incref"], {storeVal});
-                    }
-                }
-            }
-        }
-
-        boundValue = impl_->builder->CreateCall(
-            impl_->runtimeFuncs["dragon_closure_create"],
-            {impl_->builder->CreateBitCast(nestedFunc, impl_->i8PtrType), envVal},
-            "closure");
+        boundValue =
+            materializeClosureEnv(mangledName, nestedFunc, envStructType, captures);
         boundKind = Impl::VarKind::Closure;
         isClosure = true;
     }

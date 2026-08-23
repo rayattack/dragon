@@ -2,9 +2,14 @@
 #include "dragon/PythonMigrator.h"
 #include "dragon/TypeInference.h"
 #include "TestHelpers.h"
+#include "CodeBlock.h"
 
 using namespace dragon;
 using namespace dragon::test;
+
+static std::string code(const std::string& block) {
+    return extractCode("MigratorTest.md", block);
+}
 
 static std::string migrate(const std::string& source, bool addTypes = true) {
     MigrationOptions opts;
@@ -189,12 +194,7 @@ TEST(MigratorTest, MultipleStatements) {
 }
 
 TEST(MigratorTest, NestedBlocks) {
-    auto result = migrate(
-        "def foo():\n"
-        "    if True:\n"
-        "        return 1\n"
-        "    return 0\n"
-    );
+    auto result = migrate(code("nested_blocks"));
     EXPECT_NE(result.find("def foo("), std::string::npos);
     EXPECT_NE(result.find("if True {"), std::string::npos);
     EXPECT_NE(result.find("return 1"), std::string::npos);
@@ -202,21 +202,14 @@ TEST(MigratorTest, NestedBlocks) {
 }
 
 TEST(MigratorTest, ClassWithMethod) {
-    auto result = migrate(
-        "class Dog:\n"
-        "    def bark(self):\n"
-        "        print(\"Woof\")\n"
-    );
+    auto result = migrate(code("class_with_method"));
     EXPECT_NE(result.find("class Dog {"), std::string::npos);
     EXPECT_NE(result.find("def bark("), std::string::npos);
     EXPECT_NE(result.find("print(\"Woof\")"), std::string::npos);
 }
 
 TEST(MigratorTest, ForLoopWithBody) {
-    auto result = migrate(
-        "for i in range(5):\n"
-        "    print(i)\n"
-    );
+    auto result = migrate(code("for_loop_with_body"));
     EXPECT_NE(result.find("for i in range(5) {"), std::string::npos);
     EXPECT_NE(result.find("print(i)"), std::string::npos);
 }
@@ -237,12 +230,7 @@ TEST(MigratorTest, DictLiteral) {
 }
 
 TEST(MigratorTest, TryCatch) {
-    auto result = migrate(
-        "try:\n"
-        "    pass\n"
-        "except:\n"
-        "    pass\n"
-    );
+    auto result = migrate(code("try_catch"));
     EXPECT_NE(result.find("try {"), std::string::npos);
     EXPECT_NE(result.find("catch"), std::string::npos);
 }

@@ -1,4 +1,9 @@
 #include "CodeGenTestHelpers.h"
+#include "CodeBlock.h"
+
+static std::string code(const std::string& block) {
+    return extractCode("CodeGenLiteralsTest.md", block);
+}
 
 TEST(CodeGenTest, IntegerLiteral) {
     auto ir = generateIR("print(42)");
@@ -58,11 +63,7 @@ TEST(CodeGenTest, StringIsDigit) {
 }
 
 TEST(CodeGenIR, StringCmpDeclared) {
-    auto ir = generateIR(
-        "a: str = \"x\"\n"
-        "b: str = \"y\"\n"
-        "c: bool = a < b\n"
-    );
+    auto ir = generateIR(code("string_cmp_declared"));
     EXPECT_NE(ir.find("dragon_str_cmp"), std::string::npos)
         << "Expected dragon_str_cmp call for string < comparison\nIR:\n" << ir;
 }
@@ -74,19 +75,12 @@ TEST(CodeGenTest, FStringSimple) {
 }
 
 TEST(CodeGenTest, FStringFormatSpecIR) {
-    auto ir = generateIR(
-        "x: float = 1.0\n"
-        "s: str = f\"{x:.2f}\"\n"
-    );
+    auto ir = generateIR(code("f_string_format_spec_ir"));
     EXPECT_NE(ir.find("dragon_float_format"), std::string::npos);
 }
 
 TEST(CodeGenIR, FStringIntermediateDecref) {
-    auto ir = generateIR(
-        "x: int = 1\n"
-        "y: int = 2\n"
-        "s: str = f\"a {x} b {y} c\"\n"
-    );
+    auto ir = generateIR(code("f_string_intermediate_decref"));
     auto count = 0;
     std::string::size_type pos = 0;
     while ((pos = ir.find("dragon_decref_str", pos)) != std::string::npos) {
@@ -98,283 +92,148 @@ TEST(CodeGenIR, FStringIntermediateDecref) {
 }
 
 TEST(CodeGenIR, BinaryStringConcatChainDecref) {
-    auto ir = generateIR(
-        "a: str = \"x\"\n"
-        "b: str = \"y\"\n"
-        "c: str = \"z\"\n"
-        "s: str = a + b + c\n"
-    );
+    auto ir = generateIR(code("binary_string_concat_chain_decref"));
     EXPECT_NE(ir.find("dragon_decref_str"), std::string::npos)
         << "Expected decref_str for concat chain intermediate\nIR:\n" << ir;
 }
 
 TEST(CodeGenE2E, FStringArithmetic) {
-    auto output = compileAndRun(
-        "x: int = 3\n"
-        "y: int = 4\n"
-        "print(f\"{x + y}\")"
-    );
+    auto output = compileAndRun(code("f_string_arithmetic"));
     EXPECT_EQ(output, "7\n");
 }
 
 TEST(CodeGenE2E, FStringFunctionCall) {
-    auto output = compileAndRun(
-        "nums: list[int] = [1, 2, 3]\n"
-        "print(f\"len={len(nums)}\")"
-    );
+    auto output = compileAndRun(code("f_string_function_call"));
     EXPECT_EQ(output, "len=3\n");
 }
 
 TEST(CodeGenE2E, FStringMultipleExprs) {
-    auto output = compileAndRun(
-        "a: int = 10\n"
-        "b: int = 20\n"
-        "print(f\"{a} + {b} = {a + b}\")"
-    );
+    auto output = compileAndRun(code("f_string_multiple_exprs"));
     EXPECT_EQ(output, "10 + 20 = 30\n");
 }
 
 TEST(CodeGenE2E, FStringFloatFormat) {
-    auto output = compileAndRun(
-        "x: float = 3.14159\n"
-        "print(f\"{x:.2f}\")\n"
-    );
+    auto output = compileAndRun(code("f_string_float_format"));
     EXPECT_EQ(output, "3.14\n");
 }
 
 TEST(CodeGenE2E, FStringFloatFormat3) {
-    auto output = compileAndRun(
-        "pi: float = 3.14159265\n"
-        "print(f\"{pi:.4f}\")\n"
-    );
+    auto output = compileAndRun(code("f_string_float_format3"));
     EXPECT_EQ(output, "3.1416\n");
 }
 
 TEST(CodeGenE2E, FStringIntHex) {
-    auto output = compileAndRun(
-        "x: int = 255\n"
-        "print(f\"{x:x}\")\n"
-    );
+    auto output = compileAndRun(code("f_string_int_hex"));
     EXPECT_EQ(output, "ff\n");
 }
 
 TEST(CodeGenE2E, FStringIntHexUpper) {
-    auto output = compileAndRun(
-        "x: int = 255\n"
-        "print(f\"{x:X}\")\n"
-    );
+    auto output = compileAndRun(code("f_string_int_hex_upper"));
     EXPECT_EQ(output, "FF\n");
 }
 
 TEST(CodeGenE2E, FStringIntOctal) {
-    auto output = compileAndRun(
-        "x: int = 8\n"
-        "print(f\"{x:o}\")\n"
-    );
+    auto output = compileAndRun(code("f_string_int_octal"));
     EXPECT_EQ(output, "10\n");
 }
 
 TEST(CodeGenE2E, FStringIntBinary) {
-    auto output = compileAndRun(
-        "x: int = 10\n"
-        "print(f\"{x:b}\")\n"
-    );
+    auto output = compileAndRun(code("f_string_int_binary"));
     EXPECT_EQ(output, "1010\n");
 }
 
 TEST(CodeGenE2E, FStringIntZeroPad) {
-    auto output = compileAndRun(
-        "x: int = 42\n"
-        "print(f\"{x:05d}\")\n"
-    );
+    auto output = compileAndRun(code("f_string_int_zero_pad"));
     EXPECT_EQ(output, "00042\n");
 }
 
 TEST(CodeGenE2E, FStringMixed) {
-    auto output = compileAndRun(
-        "name: str = \"pi\"\n"
-        "val: float = 3.14159\n"
-        "print(f\"{name} = {val:.2f}\")\n"
-    );
+    auto output = compileAndRun(code("f_string_mixed"));
     EXPECT_EQ(output, "pi = 3.14\n");
 }
 
 TEST(CodeGenE2E, FStringMultiInterpolation) {
-    auto output = compileAndRun(
-        "x: int = 1\n"
-        "y: int = 2\n"
-        "z: int = 3\n"
-        "print(f\"{x} + {y} = {z}\")\n"
-    );
+    auto output = compileAndRun(code("f_string_multi_interpolation"));
     EXPECT_EQ(output, "1 + 2 = 3\n");
 }
 
 TEST(CodeGenE2E, FStringRejectsPercentN) {
-    auto output = compileAndRun(
-        "x: int = 42\n"
-        "try {\n"
-        "  print(f\"{x:%n}\")\n"
-        "} except ValueError {\n"
-        "  print(\"caught\")\n"
-        "}\n"
-    );
+    auto output = compileAndRun(code("f_string_rejects_percent_n"));
     EXPECT_EQ(output, "caught\n");
 }
 
 TEST(CodeGenE2E, FStringRejectsPercentS) {
-    auto output = compileAndRun(
-        "x: int = 42\n"
-        "try {\n"
-        "  print(f\"{x:%s}\")\n"
-        "} except ValueError {\n"
-        "  print(\"caught\")\n"
-        "}\n"
-    );
+    auto output = compileAndRun(code("f_string_rejects_percent_s"));
     EXPECT_EQ(output, "caught\n");
 }
 
 TEST(CodeGenE2E, FStringLongAllZeroSpec) {
-    auto output = compileAndRun(
-        "x: int = 42\n"
-        "print(f\"{x:00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d}\")\n"
-    );
+    auto output = compileAndRun(code("f_string_long_all_zero_spec"));
     EXPECT_EQ(output, "42\n");
 }
 
 TEST(CodeGenE2E, FStringRejectsHugeWidth) {
-    auto output = compileAndRun(
-        "x: int = 42\n"
-        "try {\n"
-        "  print(f\"{x:999999999d}\")\n"
-        "} except ValueError {\n"
-        "  print(\"caught\")\n"
-        "}\n"
-    );
+    auto output = compileAndRun(code("f_string_rejects_huge_width"));
     EXPECT_EQ(output, "caught\n");
 }
 
 TEST(CodeGenE2E, FStringRejectsFloatPercentN) {
-    auto output = compileAndRun(
-        "v: float = 3.14\n"
-        "try {\n"
-        "  print(f\"{v:%n}\")\n"
-        "} except ValueError {\n"
-        "  print(\"caught\")\n"
-        "}\n"
-    );
+    auto output = compileAndRun(code("f_string_rejects_float_percent_n"));
     EXPECT_EQ(output, "caught\n");
 }
 
 TEST(CodeGenE2E, FStringValidSpecsStillWork) {
-    auto output = compileAndRun(
-        "v: float = 3.14159\n"
-        "x: int = 42\n"
-        "print(f\"{v:.2f}\")\n"
-        "print(f\"{x:x}\")\n"
-        "print(f\"{x:X}\")\n"
-        "print(f\"{x:o}\")\n"
-        "print(f\"{x:b}\")\n"
-        "print(f\"{x:05d}\")\n"
-    );
+    auto output = compileAndRun(code("f_string_valid_specs_still_work"));
     EXPECT_EQ(output, "3.14\n2a\n2A\n52\n101010\n00042\n");
 }
 
 TEST(CodeGenE2E, StringOperations) {
-    auto output = compileAndRun(
-        "s: str = \"hello\"\n"
-        "print(len(s))\n"
-        "t: str = s + \" world\"\n"
-        "print(t)"
-    );
+    auto output = compileAndRun(code("string_operations"));
     EXPECT_EQ(output, "5\nhello world\n");
 }
 
 TEST(CodeGenE2E, StringIndexing) {
-    auto output = compileAndRun(
-        "s: str = \"Dragon\"\n"
-        "print(s[0])\n"
-        "print(s[-1])"
-    );
+    auto output = compileAndRun(code("string_indexing"));
     EXPECT_EQ(output, "D\nn\n");
 }
 
 TEST(CodeGenE2E, StringMethods) {
-    auto output = compileAndRun(
-        "s: str = \"hello\"\n"
-        "print(s.upper())\n"
-        "print(s.find(\"ll\"))"
-    );
+    auto output = compileAndRun(code("string_methods"));
     EXPECT_EQ(output, "HELLO\n2\n");
 }
 
 TEST(CodeGenE2E, StringSlice) {
-    auto output = compileAndRun(
-        "s: str = \"hello world\"\n"
-        "print(s[0:5])\n"
-        "print(s[6:11])"
-    );
+    auto output = compileAndRun(code("string_slice"));
     EXPECT_EQ(output, "hello\nworld\n");
 }
 
 TEST(CodeGenE2E, ExprStmtStringMethodNoLeak) {
-    auto output = compileAndRun(
-        "s: str = \"hello\"\n"
-        "s.upper()\n"
-        "print(s)\n"
-    );
+    auto output = compileAndRun(code("expr_stmt_string_method_no_leak"));
     EXPECT_EQ(output, "hello\n");
 }
 
 TEST(CodeGenE2E, StringConcatChainE2E) {
-    auto output = compileAndRun(
-        "a: str = \"hello\"\n"
-        "b: str = \" \"\n"
-        "c: str = \"world\"\n"
-        "print(a + b + c)\n"
-    );
+    auto output = compileAndRun(code("string_concat_chain_e2_e"));
     EXPECT_EQ(output, "hello world\n");
 }
 
 TEST(CodeGenE2E, StringOrdering) {
-    auto output = compileAndRun(
-        "print(\"apple\" < \"banana\")\n"
-        "print(\"cat\" > \"bat\")\n"
-        "print(\"abc\" <= \"abc\")\n"
-        "print(\"xyz\" >= \"xyz\")\n"
-    );
+    auto output = compileAndRun(code("string_ordering"));
     EXPECT_EQ(output, "True\nTrue\nTrue\nTrue\n");
 }
 
 TEST(CodeGenE2E, StringOrderingVariables) {
-    auto output = compileAndRun(
-        "ch: str = \"d\"\n"
-        "lo: str = \"a\"\n"
-        "hi: str = \"z\"\n"
-        "if ch >= lo {\n"
-        "  if ch <= hi {\n"
-        "    print(\"in range\")\n"
-        "  }\n"
-        "}\n"
-    );
+    auto output = compileAndRun(code("string_ordering_variables"));
     EXPECT_EQ(output, "in range\n");
 }
 
 TEST(CodeGenE2E, ListStrSubscript) {
-    auto output = compileAndRun(
-        "names: list[str] = [\"alice\", \"bob\", \"charlie\"]\n"
-        "print(names[0])\n"
-        "print(names[1])\n"
-    );
+    auto output = compileAndRun(code("list_str_subscript"));
     EXPECT_EQ(output, "alice\nbob\n");
 }
 
 TEST(CodeGenE2E, ListFloatSubscript) {
-    auto output = compileAndRun(
-        "vals: list[float] = [1.5, 2.3, 3.5]\n"
-        "x: float = vals[0]\n"
-        "y: float = vals[1]\n"
-        "print(x + y)\n"
-    );
+    auto output = compileAndRun(code("list_float_subscript"));
     EXPECT_EQ(output, "3.8\n");
 }
 
@@ -384,35 +243,22 @@ TEST(CodeGenTest, BytesLiteralIR) {
 }
 
 TEST(CodeGenTest, BytesConcatIR) {
-    auto ir = generateIR(
-        "a: bytes = b\"hello\"\n"
-        "b: bytes = b\" world\"\n"
-        "c: bytes = a + b\n"
-    );
+    auto ir = generateIR(code("bytes_concat_ir"));
     EXPECT_NE(ir.find("dragon_bytes_concat"), std::string::npos);
 }
 
 TEST(CodeGenTest, BytesLenIR) {
-    auto ir = generateIR(
-        "b: bytes = b\"hello\"\n"
-        "print(len(b))\n"
-    );
+    auto ir = generateIR(code("bytes_len_ir"));
     EXPECT_NE(ir.find("dragon_bytes_len"), std::string::npos);
 }
 
 TEST(CodeGenTest, BytesDecodeIR) {
-    auto ir = generateIR(
-        "b: bytes = b\"hello\"\n"
-        "s: str = b.decode()\n"
-    );
+    auto ir = generateIR(code("bytes_decode_ir"));
     EXPECT_NE(ir.find("dragon_bytes_decode"), std::string::npos);
 }
 
 TEST(CodeGenTest, StrEncodeIR) {
-    auto ir = generateIR(
-        "s: str = \"hello\"\n"
-        "b: bytes = s.encode()\n"
-    );
+    auto ir = generateIR(code("str_encode_ir"));
     EXPECT_NE(ir.find("dragon_str_encode"), std::string::npos);
 }
 
@@ -422,208 +268,117 @@ TEST(CodeGenE2E, BytesLiteralPrint) {
 }
 
 TEST(CodeGenE2E, BytesLen) {
-    auto output = compileAndRun(
-        "b: bytes = b\"hello\"\n"
-        "print(len(b))\n"
-    );
+    auto output = compileAndRun(code("bytes_len"));
     EXPECT_EQ(output, "5\n");
 }
 
 TEST(CodeGenE2E, BytesIndex) {
-    auto output = compileAndRun(
-        "b: bytes = b\"hello\"\n"
-        "print(b[0])\n"
-    );
+    auto output = compileAndRun(code("bytes_index"));
     EXPECT_EQ(output, "104\n");
 }
 
 TEST(CodeGenE2E, BytesNegIndex) {
-    auto output = compileAndRun(
-        "b: bytes = b\"hello\"\n"
-        "print(b[-1])\n"
-    );
+    auto output = compileAndRun(code("bytes_neg_index"));
     EXPECT_EQ(output, "111\n");
 }
 
 TEST(CodeGenE2E, BytesSlice) {
-    auto output = compileAndRun(
-        "b: bytes = b\"hello world\"\n"
-        "print(b[0:5])\n"
-    );
+    auto output = compileAndRun(code("bytes_slice"));
     EXPECT_EQ(output, "b'hello'\n");
 }
 
 TEST(CodeGenE2E, BytesConcat) {
-    auto output = compileAndRun(
-        "a: bytes = b\"hello\"\n"
-        "b: bytes = b\" world\"\n"
-        "print(a + b)\n"
-    );
+    auto output = compileAndRun(code("bytes_concat"));
     EXPECT_EQ(output, "b'hello world'\n");
 }
 
 TEST(CodeGenE2E, BytesRepeat) {
-    auto output = compileAndRun(
-        "b: bytes = b\"ab\"\n"
-        "print(b * 3)\n"
-    );
+    auto output = compileAndRun(code("bytes_repeat"));
     EXPECT_EQ(output, "b'ababab'\n");
 }
 
 TEST(CodeGenE2E, BytesEq) {
-    auto output = compileAndRun(
-        "a: bytes = b\"abc\"\n"
-        "b: bytes = b\"abc\"\n"
-        "if a == b {\n"
-        "    print(\"True\")\n"
-        "} else {\n"
-        "    print(\"False\")\n"
-        "}\n"
-    );
+    auto output = compileAndRun(code("bytes_eq"));
     EXPECT_EQ(output, "True\n");
 }
 
 TEST(CodeGenE2E, BytesNeq) {
-    auto output = compileAndRun(
-        "a: bytes = b\"abc\"\n"
-        "b: bytes = b\"def\"\n"
-        "if a != b {\n"
-        "    print(\"True\")\n"
-        "} else {\n"
-        "    print(\"False\")\n"
-        "}\n"
-    );
+    auto output = compileAndRun(code("bytes_neq"));
     EXPECT_EQ(output, "True\n");
 }
 
 TEST(CodeGenE2E, BytesLt) {
-    auto output = compileAndRun(
-        "a: bytes = b\"abc\"\n"
-        "b: bytes = b\"abd\"\n"
-        "if a < b {\n"
-        "    print(\"True\")\n"
-        "} else {\n"
-        "    print(\"False\")\n"
-        "}\n"
-    );
+    auto output = compileAndRun(code("bytes_lt"));
     EXPECT_EQ(output, "True\n");
 }
 
 TEST(CodeGenE2E, BytesContainsInt) {
-    auto output = compileAndRun(
-        "b: bytes = b\"hello\"\n"
-        "if 104 in b {\n"
-        "    print(\"True\")\n"
-        "} else {\n"
-        "    print(\"False\")\n"
-        "}\n"
-    );
+    auto output = compileAndRun(code("bytes_contains_int"));
     EXPECT_EQ(output, "True\n");
 }
 
 TEST(CodeGenE2E, BytesDecode) {
-    auto output = compileAndRun(
-        "b: bytes = b\"hello\"\n"
-        "s: str = b.decode()\n"
-        "print(s)\n"
-    );
+    auto output = compileAndRun(code("bytes_decode"));
     EXPECT_EQ(output, "hello\n");
 }
 
 TEST(CodeGenE2E, StrEncode) {
-    auto output = compileAndRun(
-        "s: str = \"hello\"\n"
-        "b: bytes = s.encode()\n"
-        "print(b)\n"
-    );
+    auto output = compileAndRun(code("str_encode"));
     EXPECT_EQ(output, "b'hello'\n");
 }
 
 TEST(CodeGenE2E, BytesHex) {
-    auto output = compileAndRun(
-        "b: bytes = b\"hello\"\n"
-        "print(b.hex())\n"
-    );
+    auto output = compileAndRun(code("bytes_hex"));
     EXPECT_EQ(output, "68656c6c6f\n");
 }
 
 TEST(CodeGenE2E, BytesFromhex) {
-    auto output = compileAndRun(
-        "b: bytes = bytes.fromhex(\"68656c6c6f\")\n"
-        "print(b)\n"
-    );
+    auto output = compileAndRun(code("bytes_fromhex"));
     EXPECT_EQ(output, "b'hello'\n");
 }
 
 TEST(CodeGenE2E, BytesFind) {
-    auto output = compileAndRun(
-        "b: bytes = b\"hello\"\n"
-        "print(b.find(b\"ll\"))\n"
-    );
+    auto output = compileAndRun(code("bytes_find"));
     EXPECT_EQ(output, "2\n");
 }
 
 TEST(CodeGenE2E, BytesRfind) {
-    auto output = compileAndRun(
-        "b: bytes = b\"hello hello\"\n"
-        "print(b.rfind(b\"hello\"))\n"
-    );
+    auto output = compileAndRun(code("bytes_rfind"));
     EXPECT_EQ(output, "6\n");
 }
 
 TEST(CodeGenE2E, BytesCount) {
-    auto output = compileAndRun(
-        "b: bytes = b\"abcabc\"\n"
-        "print(b.count(b\"abc\"))\n"
-    );
+    auto output = compileAndRun(code("bytes_count"));
     EXPECT_EQ(output, "2\n");
 }
 
 TEST(CodeGenE2E, BytesReplace) {
-    auto output = compileAndRun(
-        "b: bytes = b\"hello\"\n"
-        "print(b.replace(b\"l\", b\"r\"))\n"
-    );
+    auto output = compileAndRun(code("bytes_replace"));
     EXPECT_EQ(output, "b'herro'\n");
 }
 
 TEST(CodeGenE2E, BytesStartswith) {
-    auto output = compileAndRun(
-        "b: bytes = b\"hello\"\n"
-        "print(b.startswith(b\"hel\"))\n"
-    );
+    auto output = compileAndRun(code("bytes_startswith"));
     EXPECT_EQ(output, "True\n");
 }
 
 TEST(CodeGenE2E, BytesUpper) {
-    auto output = compileAndRun(
-        "b: bytes = b\"hello\"\n"
-        "print(b.upper())\n"
-    );
+    auto output = compileAndRun(code("bytes_upper"));
     EXPECT_EQ(output, "b'HELLO'\n");
 }
 
 TEST(CodeGenE2E, BytesLower) {
-    auto output = compileAndRun(
-        "b: bytes = b\"HELLO\"\n"
-        "print(b.lower())\n"
-    );
+    auto output = compileAndRun(code("bytes_lower"));
     EXPECT_EQ(output, "b'hello'\n");
 }
 
 TEST(CodeGenE2E, BytesStrip) {
-    auto output = compileAndRun(
-        "b: bytes = b\" hello \"\n"
-        "print(b.strip())\n"
-    );
+    auto output = compileAndRun(code("bytes_strip"));
     EXPECT_EQ(output, "b'hello'\n");
 }
 
 TEST(CodeGenE2E, BytesSplit) {
-    auto output = compileAndRun(
-        "parts: list = b\"a,b,c\".split(b\",\")\n"
-        "print(len(parts))\n"
-    );
+    auto output = compileAndRun(code("bytes_split"));
     EXPECT_EQ(output, "3\n");
 }
 
@@ -635,70 +390,32 @@ TEST(CodeGenE2E, BytesIsDigit) {
 }
 
 TEST(CodeGenE2E, ConcatIntermediateUpperLowerLoop) {
-    auto output = compileAndRun(
-        "s: str = \"AbCdE\"\n"
-        "last: str = \"\"\n"
-        "for i in range(10000) {\n"
-        "  last = s.upper() + s.lower()\n"
-        "}\n"
-        "print(last)\n"
-    );
+    auto output = compileAndRun(code("concat_intermediate_upper_lower_loop"));
     EXPECT_EQ(output, "ABCDEabcde\n");
 }
 
 TEST(CodeGenE2E, ConcatIntermediateStrCoercionLoop) {
-    auto output = compileAndRun(
-        "last: str = \"\"\n"
-        "for i in range(10000) {\n"
-        "  last = str(i) + str(i + 1)\n"
-        "}\n"
-        "print(last)\n"
-    );
+    auto output = compileAndRun(code("concat_intermediate_str_coercion_loop"));
     EXPECT_EQ(output, "999910000\n");
 }
 
 TEST(CodeGenE2E, ConcatIntermediateSliceLoop) {
-    auto output = compileAndRun(
-        "s: str = \"abcdef\"\n"
-        "last: str = \"\"\n"
-        "for i in range(10000) {\n"
-        "  last = s[0:3] + s[3:6]\n"
-        "}\n"
-        "print(last)\n"
-    );
+    auto output = compileAndRun(code("concat_intermediate_slice_loop"));
     EXPECT_EQ(output, "abcdef\n");
 }
 
 TEST(CodeGenE2E, ConcatIntermediateTriple) {
-    auto output = compileAndRun(
-        "a: str = \"AAA\"\n"
-        "b: str = \"BBB\"\n"
-        "c: str = \"xCx\"\n"
-        "last: str = \"\"\n"
-        "for i in range(10000) {\n"
-        "  last = a.upper() + b.lower() + c.replace(\"x\", \"y\")\n"
-        "}\n"
-        "print(last)\n"
-    );
+    auto output = compileAndRun(code("concat_intermediate_triple"));
     EXPECT_EQ(output, "AAAbbbyCy\n");
 }
 
 TEST(CodeGenE2E, ConcatIntermediateLiteralPlusStrPlusLiteral) {
-    auto output = compileAndRun(
-        "last: str = \"\"\n"
-        "for i in range(10000) {\n"
-        "  last = \"prefix-\" + str(i) + \"-suffix\"\n"
-        "}\n"
-        "print(last)\n"
-    );
+    auto output = compileAndRun(code("concat_intermediate_literal_plus_str_plus_literal"));
     EXPECT_EQ(output, "prefix-9999-suffix\n");
 }
 
 TEST(CodeGenIR, ConcatBroadDecrefUpperLower) {
-    auto ir = generateIR(
-        "s: str = \"AbCdE\"\n"
-        "r: str = s.upper() + s.lower()\n"
-    );
+    auto ir = generateIR(code("concat_broad_decref_upper_lower"));
     EXPECT_NE(ir.find("dragon_str_upper"), std::string::npos);
     EXPECT_NE(ir.find("dragon_str_lower"), std::string::npos);
     EXPECT_NE(ir.find("dragon_str_concat"), std::string::npos);
@@ -714,11 +431,7 @@ TEST(CodeGenIR, ConcatBroadDecrefUpperLower) {
 }
 
 TEST(CodeGenIR, ConcatBroadDecrefIntToStr) {
-    auto ir = generateIR(
-        "x: int = 1\n"
-        "y: int = 2\n"
-        "r: str = str(x) + str(y)\n"
-    );
+    auto ir = generateIR(code("concat_broad_decref_int_to_str"));
     EXPECT_NE(ir.find("dragon_int_to_str"), std::string::npos);
     EXPECT_NE(ir.find("dragon_str_concat"), std::string::npos);
     auto count = 0;
@@ -733,277 +446,132 @@ TEST(CodeGenIR, ConcatBroadDecrefIntToStr) {
 }
 
 TEST(CodeGenE2E, StrJoinEmptyList) {
-    auto output = compileAndRun(
-        "xs: list[str] = []\n"
-        "r: str = \", \".join(xs)\n"
-        "print(\"[\" + r + \"]\")\n"
-    );
+    auto output = compileAndRun(code("str_join_empty_list"));
     EXPECT_EQ(output, "[]\n");
 }
 
 TEST(CodeGenE2E, StrJoinSingleElement) {
-    auto output = compileAndRun(
-        "xs: list[str] = [\"only\"]\n"
-        "r: str = \", \".join(xs)\n"
-        "print(r)\n"
-    );
+    auto output = compileAndRun(code("str_join_single_element"));
     EXPECT_EQ(output, "only\n");
 }
 
 TEST(CodeGenE2E, StrJoinAllEmptyStrings) {
-    auto output = compileAndRun(
-        "xs: list[str] = [\"\", \"\", \"\"]\n"
-        "r: str = \"|\".join(xs)\n"
-        "print(\"[\" + r + \"]\")\n"
-    );
+    auto output = compileAndRun(code("str_join_all_empty_strings"));
     EXPECT_EQ(output, "[||]\n");
 }
 
 TEST(CodeGenE2E, StrJoinMixedEmpty) {
-    auto output = compileAndRun(
-        "xs: list[str] = [\"a\", \"\", \"b\", \"\", \"c\"]\n"
-        "r: str = \",\".join(xs)\n"
-        "print(r)\n"
-    );
+    auto output = compileAndRun(code("str_join_mixed_empty"));
     EXPECT_EQ(output, "a,,b,,c\n");
 }
 
 TEST(CodeGenE2E, StrJoinEmptySeparator) {
-    auto output = compileAndRun(
-        "xs: list[str] = [\"foo\", \"bar\", \"baz\"]\n"
-        "r: str = \"\".join(xs)\n"
-        "print(r)\n"
-    );
+    auto output = compileAndRun(code("str_join_empty_separator"));
     EXPECT_EQ(output, "foobarbaz\n");
 }
 
 TEST(CodeGenE2E, StrJoinLoopBounded) {
-    auto output = compileAndRun(
-        "xs: list[str] = [\"alpha\", \"\", \"beta\"]\n"
-        "last: str = \"\"\n"
-        "for i in range(5000) {\n"
-        "  last = \"-\".join(xs)\n"
-        "}\n"
-        "print(last)\n"
-    );
+    auto output = compileAndRun(code("str_join_loop_bounded"));
     EXPECT_EQ(output, "alpha--beta\n");
 }
 
 TEST(CodeGenE2E, StrReplaceShrink) {
-    auto output = compileAndRun(
-        "s: str = \"xxxxxxxx\"\n"
-        "r: str = s.replace(\"xx\", \"y\")\n"
-        "print(r)\n"
-    );
+    auto output = compileAndRun(code("str_replace_shrink"));
     EXPECT_EQ(output, "yyyy\n");
 }
 
 TEST(CodeGenE2E, StrReplaceExpand) {
-    auto output = compileAndRun(
-        "s: str = \"abcabc\"\n"
-        "r: str = s.replace(\"a\", \"AAA\")\n"
-        "print(r)\n"
-    );
+    auto output = compileAndRun(code("str_replace_expand"));
     EXPECT_EQ(output, "AAAbcAAAbc\n");
 }
 
 TEST(CodeGenE2E, StrReplaceEqualLength) {
-    auto output = compileAndRun(
-        "s: str = \"hello world\"\n"
-        "r: str = s.replace(\"o\", \"0\")\n"
-        "print(r)\n"
-    );
+    auto output = compileAndRun(code("str_replace_equal_length"));
     EXPECT_EQ(output, "hell0 w0rld\n");
 }
 
 TEST(CodeGenE2E, StrReplaceNoMatch) {
-    auto output = compileAndRun(
-        "s: str = \"hello\"\n"
-        "r: str = s.replace(\"z\", \"Q\")\n"
-        "print(r)\n"
-    );
+    auto output = compileAndRun(code("str_replace_no_match"));
     EXPECT_EQ(output, "hello\n");
 }
 
 TEST(CodeGenE2E, StrReplaceShrinkToEmpty) {
-    auto output = compileAndRun(
-        "s: str = \"a-b-c-d\"\n"
-        "r: str = s.replace(\"-\", \"\")\n"
-        "print(r)\n"
-    );
+    auto output = compileAndRun(code("str_replace_shrink_to_empty"));
     EXPECT_EQ(output, "abcd\n");
 }
 
 TEST(CodeGenE2E, StrReplaceFullString) {
-    auto output = compileAndRun(
-        "s: str = \"foobar\"\n"
-        "r: str = s.replace(\"foobar\", \"\")\n"
-        "print(\"[\" + r + \"]\")\n"
-    );
+    auto output = compileAndRun(code("str_replace_full_string"));
     EXPECT_EQ(output, "[]\n");
 }
 
 TEST(CodeGenE2E, Utf8LenIsCodePointCount) {
-    auto output = compileAndRun(
-        "a: str = \"hello\"\n"
-        "b: str = \"caf\xc3\xa9\"\n"
-        "c: str = \"h\xc3\xa9llo w\xc3\xb6rld\"\n"
-        "d: str = \"\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\"\n"
-        "print(len(a))\n"
-        "print(len(b))\n"
-        "print(len(c))\n"
-        "print(len(d))\n"
-    );
+    auto output = compileAndRun(code("utf8_len_is_code_point_count"));
     EXPECT_EQ(output, "5\n4\n11\n3\n");
 }
 
 TEST(CodeGenE2E, Utf8IndexingByCodePoint) {
-    auto output = compileAndRun(
-        "s: str = \"caf\xc3\xa9\"\n"
-        "print(s[0])\n"
-        "print(s[1])\n"
-        "print(s[2])\n"
-        "print(s[3])\n"
-        "print(s[-1])\n"
-    );
+    auto output = compileAndRun(code("utf8_indexing_by_code_point"));
     EXPECT_EQ(output, "c\na\nf\n\xc3\xa9\n\xc3\xa9\n");
 }
 
 TEST(CodeGenE2E, Utf8IndexingMultiByteOnlyString) {
-    auto output = compileAndRun(
-        "s: str = \"\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\"\n"
-        "print(s[0])\n"
-        "print(s[1])\n"
-        "print(s[2])\n"
-    );
+    auto output = compileAndRun(code("utf8_indexing_multi_byte_only_string"));
     EXPECT_EQ(output, "\xe6\x97\xa5\n\xe6\x9c\xac\n\xe8\xaa\x9e\n");
 }
 
 TEST(CodeGenE2E, Utf8SlicePreservesValidEncoding) {
-    auto output = compileAndRun(
-        "s: str = \"h\xc3\xa9llo w\xc3\xb6rld\"\n"
-        "print(s[0:5])\n"
-        "print(s[6:11])\n"
-        "print(s[1:3])\n"
-    );
+    auto output = compileAndRun(code("utf8_slice_preserves_valid_encoding"));
     EXPECT_EQ(output, "h\xc3\xa9llo\nw\xc3\xb6rld\n\xc3\xa9l\n");
 }
 
 TEST(CodeGenE2E, Utf8ConcatMixedKind) {
-    auto output = compileAndRun(
-        "a: str = \"hello \"\n"
-        "b: str = \"w\xc3\xb6rld\"\n"
-        "print(a + b)\n"
-        "print(\"prefix \" + b + \" suffix\")\n"
-    );
+    auto output = compileAndRun(code("utf8_concat_mixed_kind"));
     EXPECT_EQ(output, "hello w\xc3\xb6rld\nprefix w\xc3\xb6rld suffix\n");
 }
 
 TEST(CodeGenE2E, Utf8ConcatCanonicalDowngrade) {
-    auto output = compileAndRun(
-        "s: str = \"h\xc3\xa9llo\"\n"
-        "r: str = s.replace(\"\xc3\xa9\", \"e\")\n"
-        "print(r)\n"
-        "print(len(r))\n"
-        "print(r[1])\n"
-    );
+    auto output = compileAndRun(code("utf8_concat_canonical_downgrade"));
     EXPECT_EQ(output, "hello\n5\ne\n");
 }
 
 TEST(CodeGenE2E, Utf8FindAndContains) {
-    auto output = compileAndRun(
-        "s: str = \"h\xc3\xa9llo w\xc3\xb6rld\"\n"
-        "print(s.find(\"w\xc3\xb6rld\"))\n"
-        "print(s.find(\"xyz\"))\n"
-        "if \"w\xc3\xb6rld\" in s {\n"
-        "    print(\"yes\")\n"
-        "}\n"
-        "if \"missing\" in s {\n"
-        "    print(\"x\")\n"
-        "} else {\n"
-        "    print(\"no\")\n"
-        "}\n"
-    );
+    auto output = compileAndRun(code("utf8_find_and_contains"));
     EXPECT_EQ(output, "6\n-1\nyes\nno\n");
 }
 
 TEST(CodeGenE2E, Utf8StartswithEndswith) {
-    auto output = compileAndRun(
-        "s: str = \"h\xc3\xa9llo w\xc3\xb6rld\"\n"
-        "if s.startswith(\"h\xc3\xa9llo\") {\n"
-        "    print(\"sp\")\n"
-        "}\n"
-        "if s.endswith(\"w\xc3\xb6rld\") {\n"
-        "    print(\"ep\")\n"
-        "}\n"
-        "if s.startswith(\"goodbye\") {\n"
-        "    print(\"x\")\n"
-        "} else {\n"
-        "    print(\"sn\")\n"
-        "}\n"
-    );
+    auto output = compileAndRun(code("utf8_startswith_endswith"));
     EXPECT_EQ(output, "sp\nep\nsn\n");
 }
 
 TEST(CodeGenE2E, Utf8Replace) {
-    auto output = compileAndRun(
-        "s: str = \"caf\xc3\xa9 au lait\"\n"
-        "print(s.replace(\"\xc3\xa9\", \"e\"))\n"
-        "print(s.replace(\"au lait\", \"noir\"))\n"
-        "print(s.replace(\"caf\xc3\xa9\", \"th\xc3\xa9\"))\n"
-    );
+    auto output = compileAndRun(code("utf8_replace"));
     EXPECT_EQ(output, "cafe au lait\ncaf\xc3\xa9 noir\nth\xc3\xa9 au lait\n");
 }
 
 TEST(CodeGenE2E, Utf8DictKeys) {
-    auto output = compileAndRun(
-        "d: dict[str, int] = {\"caf\xc3\xa9\": 1, \"tea\": 2, \"\xe6\x97\xa5\xe6\x9c\xac\": 3}\n"
-        "print(d[\"caf\xc3\xa9\"])\n"
-        "print(d[\"tea\"])\n"
-        "print(d[\"\xe6\x97\xa5\xe6\x9c\xac\"])\n"
-        "h1: bool = \"caf\xc3\xa9\" in d\n"
-        "h2: bool = \"missing\" in d\n"
-        "print(h1)\n"
-        "print(h2)\n"
-    );
+    auto output = compileAndRun(code("utf8_dict_keys"));
     EXPECT_EQ(output, "1\n2\n3\nTrue\nFalse\n");
 }
 
 TEST(CodeGenE2E, Utf8PrintRoundTrip) {
-    auto output = compileAndRun(
-        "print(\"caf\xc3\xa9\")\n"
-        "print(\"\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\")\n"
-        "print(\"\xce\xb1\xce\xb2\xce\xb3\")\n"
-    );
+    auto output = compileAndRun(code("utf8_print_round_trip"));
     EXPECT_EQ(output, "caf\xc3\xa9\n\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\n\xce\xb1\xce\xb2\xce\xb3\n");
 }
 
 TEST(CodeGenE2E, Utf8AsciiUpperLowerStillWork) {
-    auto output = compileAndRun(
-        "print(\"Hello\".upper())\n"
-        "print(\"Hello\".lower())\n"
-    );
+    auto output = compileAndRun(code("utf8_ascii_upper_lower_still_work"));
     EXPECT_EQ(output, "HELLO\nhello\n");
 }
 
 TEST(CodeGenE2E, Utf8CaseMapsLatin1) {
-    auto output = compileAndRun(
-        "s: str = \"h\xc3\xa9llo w\xc3\xb6rld\"\n"
-        "print(s.upper())\n"
-    );
+    auto output = compileAndRun(code("utf8_case_maps_latin1"));
     EXPECT_EQ(output, "H\xc3\x89LLO W\xc3\x96RLD\n");
 }
 
 TEST(CodeGenE2E, Utf8ByteLenPubReturnsWireBytes) {
-    auto output = compileAndRun(
-        "extern \"C\" def dragon_str_byte_len_pub(s: str) -> int\n"
-        "a: str = \"caf\xc3\xa9\"\n"
-        "b: str = \"\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\"\n"
-        "c: str = \"hello\"\n"
-        "print(dragon_str_byte_len_pub(a))\n"
-        "print(dragon_str_byte_len_pub(b))\n"
-        "print(dragon_str_byte_len_pub(c))\n"
-    );
+    auto output = compileAndRun(code("utf8_byte_len_pub_returns_wire_bytes"));
     EXPECT_EQ(output, "5\n9\n5\n")
         << "byte_len_pub must return UTF-8 wire bytes, not 4×cp_count for "
            "kind=4 (would yield 16 / 12 / 5 instead of 5 / 9 / 5):\n"
@@ -1025,17 +593,12 @@ TEST(CodeGenE2E, PrintMultiArgMixedTypes) {
 }
 
 TEST(CodeGenE2E, PrintMultiArgVariables) {
-    EXPECT_EQ(compileAndRun(
-        "a: int = 10\n"
-        "b: str = \"hi\"\n"
-        "print(a, b)\n"),
+    EXPECT_EQ(compileAndRun(code("print_multi_arg_variables")),
         "10 hi\n");
 }
 
 TEST(CodeGenE2E, PrintMultiArgWithList) {
-    EXPECT_EQ(compileAndRun(
-        "xs: list[int] = [1, 2, 3]\n"
-        "print(\"xs:\", xs)\n"),
+    EXPECT_EQ(compileAndRun(code("print_multi_arg_with_list")),
         "xs: [1, 2, 3]\n");
 }
 

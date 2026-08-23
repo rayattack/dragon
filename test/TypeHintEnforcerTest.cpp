@@ -1,9 +1,14 @@
 #include <gtest/gtest.h>
 #include "TestHelpers.h"
 #include "dragon/TypeHintEnforcer.h"
+#include "CodeBlock.h"
 
 using namespace dragon;
 using namespace dragon::test;
+
+static std::string code(const std::string& block) {
+    return extractCode("TypeHintEnforcerTest.md", block);
+}
 
 static bool enforceOk(const std::string& source, EnforcerOptions opts = {}) {
     auto module = parse(source, false);
@@ -29,92 +34,52 @@ static bool enforceDragonOk(const std::string& source) {
 }
 
 TEST(TypeHintEnforcer, TypedFunctionPasses) {
-    EXPECT_TRUE(enforceOk(
-        "def add(x: int, y: int) -> int:\n"
-        "    return x + y\n"
-    ));
+    EXPECT_TRUE(enforceOk(code("typed_function_passes")));
 }
 
 TEST(TypeHintEnforcer, TypedFunctionNoParams) {
-    EXPECT_TRUE(enforceOk(
-        "def greet() -> str:\n"
-        "    return \"hello\"\n"
-    ));
+    EXPECT_TRUE(enforceOk(code("typed_function_no_params")));
 }
 
 TEST(TypeHintEnforcer, TypedFunctionReturnsNone) {
-    EXPECT_TRUE(enforceOk(
-        "def do_stuff(x: int) -> None:\n"
-        "    pass\n"
-    ));
+    EXPECT_TRUE(enforceOk(code("typed_function_returns_none")));
 }
 
 TEST(TypeHintEnforcer, MissingParamType) {
-    EXPECT_FALSE(enforceOk(
-        "def add(x, y: int) -> int:\n"
-        "    return x + y\n"
-    ));
-    auto diags = enforceDiags(
-        "def add(x, y: int) -> int:\n"
-        "    return x + y\n"
-    );
+    EXPECT_FALSE(enforceOk(code("missing_param_type")));
+    auto diags = enforceDiags(code("missing_param_type_2"));
     ASSERT_EQ(diags.size(), 1u);
     EXPECT_NE(diags[0].message.find("'x'"), std::string::npos);
     EXPECT_NE(diags[0].message.find("add"), std::string::npos);
 }
 
 TEST(TypeHintEnforcer, AllParamsMissingTypes) {
-    auto diags = enforceDiags(
-        "def process(a, b, c) -> int:\n"
-        "    return 0\n"
-    );
+    auto diags = enforceDiags(code("all_params_missing_types"));
     EXPECT_EQ(diags.size(), 3u);
 }
 
 TEST(TypeHintEnforcer, MissingReturnType) {
-    EXPECT_FALSE(enforceOk(
-        "def add(x: int, y: int):\n"
-        "    return x + y\n"
-    ));
-    auto diags = enforceDiags(
-        "def add(x: int, y: int):\n"
-        "    return x + y\n"
-    );
+    EXPECT_FALSE(enforceOk(code("missing_return_type")));
+    auto diags = enforceDiags(code("missing_return_type_2"));
     ASSERT_EQ(diags.size(), 1u);
     EXPECT_NE(diags[0].message.find("return type"), std::string::npos);
     EXPECT_NE(diags[0].message.find("add"), std::string::npos);
 }
 
 TEST(TypeHintEnforcer, InitNoReturnTypeOk) {
-    EXPECT_TRUE(enforceOk(
-        "class Foo:\n"
-        "    def __init__(self, x: int):\n"
-        "        pass\n"
-    ));
+    EXPECT_TRUE(enforceOk(code("init_no_return_type_ok")));
 }
 
 TEST(TypeHintEnforcer, MethodSelfExempt) {
-    EXPECT_TRUE(enforceOk(
-        "class Foo:\n"
-        "    def bar(self, x: int) -> int:\n"
-        "        return x\n"
-    ));
+    EXPECT_TRUE(enforceOk(code("method_self_exempt")));
 }
 
 TEST(TypeHintEnforcer, ClassMethodClsExempt) {
-    EXPECT_TRUE(enforceOk(
-        "class Foo:\n"
-        "    def create(cls, name: str) -> str:\n"
-        "        return name\n"
-    ));
+    EXPECT_TRUE(enforceOk(code("class_method_cls_exempt")));
 }
 
 TEST(TypeHintEnforcer, MethodNonSelfParamMissingType) {
-    EXPECT_FALSE(enforceOk(
-        "class Foo:\n"
-        "    def bar(self, x) -> int:\n"
-        "        return 0\n"
-    ));
+    EXPECT_FALSE(enforceOk(code("method_non_self_param_missing_type")));
 }
 
 TEST(TypeHintEnforcer, ModuleVarWithTypeOk) {
@@ -142,8 +107,7 @@ TEST(TypeHintEnforcer, DisableParamTypeCheck) {
     EnforcerOptions opts;
     opts.requireFunctionParamTypes = false;
     EXPECT_TRUE(enforceOk(
-        "def add(x, y) -> int:\n"
-        "    return 0\n",
+        code("disable_param_type_check"),
         opts
     ));
 }
@@ -152,8 +116,7 @@ TEST(TypeHintEnforcer, DisableReturnTypeCheck) {
     EnforcerOptions opts;
     opts.requireReturnTypes = false;
     EXPECT_TRUE(enforceOk(
-        "def add(x: int, y: int):\n"
-        "    return x + y\n",
+        code("disable_return_type_check"),
         opts
     ));
 }
@@ -173,28 +136,15 @@ TEST(TypeHintEnforcer, PassOnlyPasses) {
 }
 
 TEST(TypeHintEnforcer, MultipleErrors) {
-    auto diags = enforceDiags(
-        "x = 5\n"
-        "def foo(a, b):\n"
-        "    return 0\n"
-    );
+    auto diags = enforceDiags(code("multiple_errors"));
     EXPECT_GE(diags.size(), 3u);
 }
 
 TEST(TypeHintEnforcer, DragonFileWithTypesOk) {
-    EXPECT_TRUE(enforceDragonOk(
-        "def add(x: int, y: int) -> int {\n"
-        "    return x + y\n"
-        "}\n"
-    ));
+    EXPECT_TRUE(enforceDragonOk(code("dragon_file_with_types_ok")));
 }
 
 TEST(TypeHintEnforcer, MixedFunctions) {
-    auto diags = enforceDiags(
-        "def typed(x: int) -> int:\n"
-        "    return x\n"
-        "def untyped(y):\n"
-        "    return y\n"
-    );
+    auto diags = enforceDiags(code("mixed_functions"));
     EXPECT_EQ(diags.size(), 2u);
 }

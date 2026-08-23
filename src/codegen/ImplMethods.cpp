@@ -1,4 +1,5 @@
 #include "../CodeGenImpl.h"
+#include "dragon/ExceptionNames.h"
 
 namespace dragon {
 
@@ -127,26 +128,7 @@ int64_t CodeGen::Impl::excTypeCode(const std::string& name) {
     }
 
 bool CodeGen::Impl::isBuiltinExcName(const std::string& name) {
-        static const std::unordered_set<std::string> names = {
-            "BaseException", "SystemExit", "KeyboardInterrupt", "GeneratorExit",
-            "Exception", "StopIteration",
-            "ArithmeticError", "FloatingPointError", "OverflowError", "ZeroDivisionError",
-            "AssertionError", "AttributeError", "BufferError", "EOFError",
-            "ImportError", "ModuleNotFoundError",
-            "LookupError", "IndexError", "KeyError",
-            "MemoryError", "NameError", "UnboundLocalError",
-            "OSError", "IOError", "FileNotFoundError", "FileExistsError", "IsADirectoryError",
-            "NotADirectoryError", "PermissionError", "TimeoutError",
-            "ConnectionError", "BrokenPipeError", "ConnectionAbortedError",
-            "ConnectionRefusedError", "ConnectionResetError",
-            "RuntimeError", "NotImplementedError", "RecursionError",
-            "StopAsyncIteration", "SyntaxError", "TypeError",
-            "ValueError", "UnicodeError", "UnicodeDecodeError",
-            "UnicodeEncodeError", "UnicodeTranslateError",
-            "Warning", "DeprecationWarning", "FutureWarning",
-            "ResourceWarning", "RuntimeWarning", "UserWarning"
-        };
-        return names.count(name) > 0;
+        return isBuiltinExceptionName(name);
     }
 
 bool CodeGen::Impl::methodIsOverridden(const std::string& baseClass,

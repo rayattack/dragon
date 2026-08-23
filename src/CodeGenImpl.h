@@ -1641,14 +1641,31 @@ struct CodeGen::Impl {
         return it != fkIt->second.end() ? it->second : VarKind::Other;
     }
 
+    std::string nameExprClass(NameExpr* objName) {
+        if (objName->name == "self" && !currentClassName.empty())
+            return currentClassName;
+        auto vit = varClassNames.find(objName->name);
+        return vit != varClassNames.end() ? vit->second : "";
+    }
+
     std::string resolveAttrTargetClass(AttributeExpr* attrExpr) {
-        if (auto* objName = dynamic_cast<NameExpr*>(attrExpr->object.get())) {
-            if (objName->name == "self" && !currentClassName.empty())
-                return currentClassName;
-            auto vit = varClassNames.find(objName->name);
-            return vit != varClassNames.end() ? vit->second : "";
-        }
+        if (auto* objName = dynamic_cast<NameExpr*>(attrExpr->object.get()))
+            return nameExprClass(objName);
         return resolveExprClassName(attrExpr->object.get());
+    }
+
+    bool exprNameHasVarKind(Expr* e, VarKind k) {
+        auto* n = dynamic_cast<NameExpr*>(e);
+        return n && lookupVarKind(n->name) == k;
+    }
+
+    bool classIsSubclassOf(std::string c, const std::string& base) {
+        while (!c.empty()) {
+            if (c == base) return true;
+            auto pit = classParentNamesBySym.find(classSym(c));
+            c = (pit != classParentNamesBySym.end()) ? pit->second : std::string();
+        }
+        return false;
     }
 
     llvm::Value* coerceAssignedFieldValue(llvm::Value* v, llvm::Type* fieldType) {

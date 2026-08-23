@@ -1,7 +1,5 @@
 # --- Build output ---
-build/
-build-asan/
-build*/
+/build*
 cmake-build-*/
 
 # Personal DEbug notes
@@ -69,3 +67,18 @@ Thumbs.db
 issues/
 
 decisions/
+
+# -- Temporary Ignores
+book/
+.github/ISSUE_TEMPLATE/config.yml
+
+simd.*
+port.*
+odb.*
+borrow.*
+HANDOVER-resource-leaks.*
+
+objectbase.*
+perf.*
+vscode-dragon/
+

@@ -434,27 +434,31 @@ void CodeGen::visit(WithStmt& node) {
             impl_->builder->CreateBr(cleanupBB);
         }
 
+        auto emitContextExits = [&]() {
+            for (auto& ci : contextHandles) {
+                if (ci.isClassCtx) {
+                    if (ci.exitFn) impl_->emitDunderCall(ci.exitFn, "__exit__", ci.val);
+                    else impl_->callDunder(ci.className, "__exit__", ci.val);
+                    if (impl_->options.gcMode == GCMode::RC) {
+                        if (ci.subjectOwned)
+                            impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {ci.val});
+                        if (ci.enterResult && ci.enterResult->getType()->isPointerTy())
+                            impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {ci.enterResult});
+                    }
+                } else if (ci.isLock) {
+                    impl_->builder->CreateCall(
+                        impl_->runtimeFuncs["dragon_lock_release"], {ci.val});
+                    if (ci.isLockTemp)
+                        impl_->builder->CreateCall(
+                            impl_->runtimeFuncs["dragon_lock_destroy"], {ci.val});
+                }
+            }
+        };
+
         impl_->builder->SetInsertPoint(excBB);
         impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_exc_cleanup_unwind"], {});
         impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_exc_pop_frame"], {});
-        for (auto& ci : contextHandles) {
-            if (ci.isClassCtx) {
-                if (ci.exitFn) impl_->emitDunderCall(ci.exitFn, "__exit__", ci.val);
-                else impl_->callDunder(ci.className, "__exit__", ci.val);
-                if (impl_->options.gcMode == GCMode::RC) {
-                    if (ci.subjectOwned)
-                        impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {ci.val});
-                    if (ci.enterResult && ci.enterResult->getType()->isPointerTy())
-                        impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {ci.enterResult});
-                }
-            } else if (ci.isLock) {
-                impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_lock_release"], {ci.val});
-                if (ci.isLockTemp)
-                    impl_->builder->CreateCall(
-                        impl_->runtimeFuncs["dragon_lock_destroy"], {ci.val});
-            }
-        }
+        emitContextExits();
         {
             auto* reType = impl_->builder->CreateCall(
                 impl_->runtimeFuncs["dragon_exc_get_type"], {}, "reraise.type");
@@ -472,24 +476,7 @@ void CodeGen::visit(WithStmt& node) {
         impl_->builder->CreateUnreachable();
 
         impl_->builder->SetInsertPoint(cleanupBB);
-        for (auto& ci : contextHandles) {
-            if (ci.isClassCtx) {
-                if (ci.exitFn) impl_->emitDunderCall(ci.exitFn, "__exit__", ci.val);
-                else impl_->callDunder(ci.className, "__exit__", ci.val);
-                if (impl_->options.gcMode == GCMode::RC) {
-                    if (ci.subjectOwned)
-                        impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {ci.val});
-                    if (ci.enterResult && ci.enterResult->getType()->isPointerTy())
-                        impl_->builder->CreateCall(impl_->runtimeFuncs["dragon_decref"], {ci.enterResult});
-                }
-            } else if (ci.isLock) {
-                impl_->builder->CreateCall(
-                    impl_->runtimeFuncs["dragon_lock_release"], {ci.val});
-                if (ci.isLockTemp)
-                    impl_->builder->CreateCall(
-                        impl_->runtimeFuncs["dragon_lock_destroy"], {ci.val});
-            }
-        }
+        emitContextExits();
         impl_->builder->CreateBr(endBB);
 
         impl_->builder->SetInsertPoint(endBB);

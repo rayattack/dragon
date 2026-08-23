@@ -1,8 +1,13 @@
 #include <gtest/gtest.h>
 #include "TestHelpers.h"
+#include "CodeBlock.h"
 
 using namespace dragon;
 using namespace dragon::test;
+
+static std::string code(const std::string& block) {
+    return extractCode("ParserTest.md", block);
+}
 
 TEST(ParserTest, EmptyModule) {
     auto module = parse("");
@@ -74,10 +79,7 @@ TEST(ParserTest, ModuleDocstringLifted) {
 }
 
 TEST(ParserTest, FunctionDocstringLifted) {
-    auto module = parse(
-        "def foo() -> int:\n"
-        "    \"\"\"foo's doc.\"\"\"\n"
-        "    return 0\n");
+    auto module = parse(code("function_docstring_lifted"));
     ASSERT_NE(module, nullptr);
     ASSERT_FALSE(module->body.empty());
     auto* fn = dynamic_cast<FunctionDecl*>(module->body[0].get());
@@ -87,10 +89,7 @@ TEST(ParserTest, FunctionDocstringLifted) {
 }
 
 TEST(ParserTest, ClassDocstringLifted) {
-    auto module = parse(
-        "class C:\n"
-        "    \"\"\"class doc.\"\"\"\n"
-        "    pass\n");
+    auto module = parse(code("class_docstring_lifted"));
     ASSERT_NE(module, nullptr);
     ASSERT_FALSE(module->body.empty());
     auto* cls = dynamic_cast<ClassDecl*>(module->body[0].get());
@@ -100,10 +99,7 @@ TEST(ParserTest, ClassDocstringLifted) {
 }
 
 TEST(ParserTest, FStringNotLiftedAsDocstring) {
-    auto module = parse(
-        "def foo() -> int:\n"
-        "    f\"hello {1}\"\n"
-        "    return 0\n");
+    auto module = parse(code("f_string_not_lifted_as_docstring"));
     ASSERT_NE(module, nullptr);
     auto* fn = dynamic_cast<FunctionDecl*>(module->body[0].get());
     ASSERT_NE(fn, nullptr);
@@ -1204,11 +1200,7 @@ TEST(ParserTest, VariableDeclarationAndUse) {
 }
 
 TEST(ParserTest, FunctionWithBody) {
-    auto module = parse(
-        "def add(a: int, b: int) -> int {\n"
-        "  return a + b\n"
-        "}"
-    );
+    auto module = parse(code("function_with_body"));
     ASSERT_NE(module, nullptr);
     auto* func = dynamic_cast<FunctionDecl*>(module->body[0].get());
     ASSERT_NE(func, nullptr);
@@ -1224,17 +1216,7 @@ TEST(ParserTest, FunctionWithBody) {
 }
 
 TEST(ParserTest, ClassWithMethods) {
-    auto module = parse(
-        "class Point {\n"
-        "  def(x: int, y: int) {\n"
-        "    self.x = x\n"
-        "    self.y = y\n"
-        "  }\n"
-        "  def distance() -> float {\n"
-        "    return 0.0\n"
-        "  }\n"
-        "}"
-    );
+    auto module = parse(code("class_with_methods"));
     ASSERT_NE(module, nullptr);
     auto* cls = dynamic_cast<ClassDecl*>(module->body[0].get());
     ASSERT_NE(cls, nullptr);
@@ -1243,11 +1225,7 @@ TEST(ParserTest, ClassWithMethods) {
 }
 
 TEST(ParserTest, ForWithRange) {
-    auto module = parse(
-        "for i in range(10) {\n"
-        "  print(i)\n"
-        "}"
-    );
+    auto module = parse(code("for_with_range"));
     ASSERT_NE(module, nullptr);
     auto* forStmt = dynamic_cast<ForStmt*>(module->body[0].get());
     ASSERT_NE(forStmt, nullptr);
@@ -1259,13 +1237,7 @@ TEST(ParserTest, ForWithRange) {
 }
 
 TEST(ParserTest, NestedIfWhile) {
-    auto module = parse(
-        "if True {\n"
-        "  while x {\n"
-        "    break\n"
-        "  }\n"
-        "}"
-    );
+    auto module = parse(code("nested_if_while"));
     ASSERT_NE(module, nullptr);
     auto* ifStmt = dynamic_cast<IfStmt*>(module->body[0].get());
     ASSERT_NE(ifStmt, nullptr);
@@ -1278,15 +1250,7 @@ TEST(ParserTest, NestedIfWhile) {
 }
 
 TEST(ParserTest, TryCatchFinallyFull) {
-    auto module = parse(
-        "try {\n"
-        "  pass\n"
-        "} catch ValueError as e {\n"
-        "  pass\n"
-        "} finally {\n"
-        "  pass\n"
-        "}"
-    );
+    auto module = parse(code("try_catch_finally_full"));
     ASSERT_NE(module, nullptr);
     auto* tryStmt = dynamic_cast<TryStmt*>(module->body[0].get());
     ASSERT_NE(tryStmt, nullptr);
@@ -1408,13 +1372,7 @@ TEST(ParserTest, SliceAllOpen) {
 }
 
 TEST(ParserTest, ImplicitSelfMethod) {
-    auto module = parse(
-        "class Point {\n"
-        "  def distance(other: Point) -> float {\n"
-        "    return 0.0\n"
-        "  }\n"
-        "}"
-    );
+    auto module = parse(code("implicit_self_method"));
     ASSERT_NE(module, nullptr);
     auto* cls = dynamic_cast<ClassDecl*>(module->body[0].get());
     ASSERT_NE(cls, nullptr);
@@ -1427,22 +1385,14 @@ TEST(ParserTest, ImplicitSelfMethod) {
 }
 
 TEST(ParserTest, ExplicitSelfInDragonIsError) {
-    auto errors = parseErrors(
-        "class Foo {\n"
-        "  def bar(self) {\n"
-        "    pass\n"
-        "  }\n"
-        "}"
-    );
+    auto errors = parseErrors(code("explicit_self_in_dragon_is_error"));
     ASSERT_FALSE(errors.empty());
     EXPECT_NE(errors[0].message.find("self"), std::string::npos);
 }
 
 TEST(ParserTest, ExplicitSelfInPyModeOk) {
     auto module = parse(
-        "class Foo:\n"
-        "    def bar(self):\n"
-        "        pass\n",
+        code("explicit_self_in_py_mode_ok"),
         false
     );
     ASSERT_NE(module, nullptr);
@@ -1885,11 +1835,7 @@ TEST(ParserTest, MultipleInheritanceParsed) {
 
 TEST(ParserTest, PyMatchIntLiteralCases) {
     auto module = parse(
-        "match x:\n"
-        "    case 1:\n"
-        "        pass\n"
-        "    case 2:\n"
-        "        pass\n",
+        code("py_match_int_literal_cases"),
         false);
     ASSERT_NE(module, nullptr);
     auto* ms = dynamic_cast<MatchStmt*>(module->body[0].get());
@@ -1901,11 +1847,7 @@ TEST(ParserTest, PyMatchIntLiteralCases) {
 
 TEST(ParserTest, PyMatchWildcardCase) {
     auto module = parse(
-        "match x:\n"
-        "    case 1:\n"
-        "        pass\n"
-        "    case _:\n"
-        "        pass\n",
+        code("py_match_wildcard_case"),
         false);
     ASSERT_NE(module, nullptr);
     auto* ms = dynamic_cast<MatchStmt*>(module->body[0].get());
@@ -1916,9 +1858,7 @@ TEST(ParserTest, PyMatchWildcardCase) {
 
 TEST(ParserTest, PyMatchOrPattern) {
     auto module = parse(
-        "match x:\n"
-        "    case 1 | 2 | 3:\n"
-        "        pass\n",
+        code("py_match_or_pattern"),
         false);
     ASSERT_NE(module, nullptr);
     auto* ms = dynamic_cast<MatchStmt*>(module->body[0].get());
@@ -1929,9 +1869,7 @@ TEST(ParserTest, PyMatchOrPattern) {
 
 TEST(ParserTest, PyMatchSequencePattern) {
     auto module = parse(
-        "match point:\n"
-        "    case [x, y]:\n"
-        "        pass\n",
+        code("py_match_sequence_pattern"),
         false);
     ASSERT_NE(module, nullptr);
     auto* ms = dynamic_cast<MatchStmt*>(module->body[0].get());
@@ -1942,9 +1880,7 @@ TEST(ParserTest, PyMatchSequencePattern) {
 
 TEST(ParserTest, PyMatchWithGuard) {
     auto module = parse(
-        "match x:\n"
-        "    case n if n > 0:\n"
-        "        pass\n",
+        code("py_match_with_guard"),
         false);
     ASSERT_NE(module, nullptr);
     auto* ms = dynamic_cast<MatchStmt*>(module->body[0].get());
@@ -1954,12 +1890,7 @@ TEST(ParserTest, PyMatchWithGuard) {
 
 TEST(ParserTest, PyMatchMultipleBodies) {
     auto module = parse(
-        "match x:\n"
-        "    case 1:\n"
-        "        pass\n"
-        "        pass\n"
-        "    case _:\n"
-        "        pass\n",
+        code("py_match_multiple_bodies"),
         false);
     ASSERT_NE(module, nullptr);
     auto* ms = dynamic_cast<MatchStmt*>(module->body[0].get());
@@ -1987,10 +1918,7 @@ TEST(ParserTest, PyTypeAliasUnion) {
 
 TEST(ParserTest, PyExceptStarParsed) {
     auto module = parse(
-        "try:\n"
-        "    pass\n"
-        "except* ValueError:\n"
-        "    pass\n",
+        code("py_except_star_parsed"),
         false);
     ASSERT_NE(module, nullptr);
     auto* tryStmt = dynamic_cast<TryStmt*>(module->body[0].get());
@@ -2001,10 +1929,7 @@ TEST(ParserTest, PyExceptStarParsed) {
 
 TEST(ParserTest, PyExceptStarWithAs) {
     auto module = parse(
-        "try:\n"
-        "    pass\n"
-        "except* ValueError as eg:\n"
-        "    pass\n",
+        code("py_except_star_with_as"),
         false);
     ASSERT_NE(module, nullptr);
     auto* tryStmt = dynamic_cast<TryStmt*>(module->body[0].get());
@@ -2016,8 +1941,7 @@ TEST(ParserTest, PyExceptStarWithAs) {
 
 TEST(ParserTest, PyMultipleInheritanceParsed) {
     auto module = parse(
-        "class Child(Base1, Base2):\n"
-        "    pass\n",
+        code("py_multiple_inheritance_parsed"),
         false);
     ASSERT_NE(module, nullptr);
     auto* cls = dynamic_cast<ClassDecl*>(module->body[0].get());
@@ -2027,11 +1951,7 @@ TEST(ParserTest, PyMultipleInheritanceParsed) {
 
 TEST(ParserTest, PyClassMethodExplicitSelf) {
     auto module = parse(
-        "class Dog(Animal):\n"
-        "    def __init__(self, x):\n"
-        "        self.x = x\n"
-        "    def speak(self):\n"
-        "        return self.x\n",
+        code("py_class_method_explicit_self"),
         false);
     ASSERT_NE(module, nullptr);
     auto* cls = dynamic_cast<ClassDecl*>(module->body[0].get());
@@ -2042,8 +1962,7 @@ TEST(ParserTest, PyClassMethodExplicitSelf) {
 
 TEST(ParserTest, PyWithStatement) {
     auto module = parse(
-        "with open(\"test.txt\", \"r\") as f:\n"
-        "    pass\n",
+        code("py_with_statement"),
         false);
     ASSERT_NE(module, nullptr);
     auto* ws = dynamic_cast<WithStmt*>(module->body[0].get());
@@ -2054,8 +1973,7 @@ TEST(ParserTest, PyWithStatement) {
 
 TEST(ParserTest, PyForLoop) {
     auto module = parse(
-        "for i in range(10):\n"
-        "    pass\n",
+        code("py_for_loop"),
         false);
     ASSERT_NE(module, nullptr);
     auto* fs = dynamic_cast<ForStmt*>(module->body[0].get());
@@ -2064,14 +1982,7 @@ TEST(ParserTest, PyForLoop) {
 
 TEST(ParserTest, PyTryExceptElseFinally) {
     auto module = parse(
-        "try:\n"
-        "    pass\n"
-        "except ValueError:\n"
-        "    pass\n"
-        "else:\n"
-        "    pass\n"
-        "finally:\n"
-        "    pass\n",
+        code("py_try_except_else_finally"),
         false);
     ASSERT_NE(module, nullptr);
     auto* tryStmt = dynamic_cast<TryStmt*>(module->body[0].get());
@@ -2084,8 +1995,7 @@ TEST(ParserTest, PyTryExceptElseFinally) {
 
 TEST(ParserTest, PyFunctionPosOnlyKwOnly) {
     auto module = parse(
-        "def foo(a, b, /, c, *, d, e):\n"
-        "    pass\n",
+        code("py_function_pos_only_kw_only"),
         false);
     ASSERT_NE(module, nullptr);
     auto* fn = dynamic_cast<FunctionDecl*>(module->body[0].get());
@@ -2097,8 +2007,7 @@ TEST(ParserTest, PyFunctionPosOnlyKwOnly) {
 
 TEST(ParserTest, PyWalrusOperator) {
     auto module = parse(
-        "if (n := 10) > 5:\n"
-        "    pass\n",
+        code("py_walrus_operator"),
         false);
     ASSERT_NE(module, nullptr);
     auto* ifStmt = dynamic_cast<IfStmt*>(module->body[0].get());
@@ -2188,17 +2097,7 @@ TEST(ParserTest, DefCtorBasic) {
 }
 
 TEST(ParserTest, DefCtorMultiple) {
-    auto module = parse(
-        "class Point {\n"
-        "  def(x: int, y: int) {\n"
-        "    self.x = x\n"
-        "    self.y = y\n"
-        "  }\n"
-        "  def(xy: int) {\n"
-        "    self.x = xy\n"
-        "    self.y = xy\n"
-        "  }\n"
-        "}");
+    auto module = parse(code("def_ctor_multiple"));
     ASSERT_NE(module, nullptr);
     auto* cls = dynamic_cast<ClassDecl*>(module->body[0].get());
     ASSERT_NE(cls, nullptr);
@@ -2213,28 +2112,24 @@ TEST(ParserTest, DefCtorMultiple) {
     EXPECT_EQ(fn1->params.size(), 1u);
 }
 
-TEST(ParserTest, DefCtorWithDefInit) {
+TEST(ParserTest, DunderInitInDragonIsError) {
+    auto errors = parseErrors(code("dunder_init_in_dragon_is_error"));
+    ASSERT_FALSE(errors.empty());
+    EXPECT_NE(errors[0].message.find("__init__"), std::string::npos);
+    EXPECT_NE(errors[0].message.find("nameless def"), std::string::npos);
+}
+
+TEST(ParserTest, DunderInitInPyModeOk) {
     auto module = parse(
-        "class Foo {\n"
-        "  def(x: int) {\n"
-        "    self.x = x\n"
-        "  }\n"
-        "  def __init__(y: int, z: int) {\n"
-        "    self.y = y\n"
-        "    self.z = z\n"
-        "  }\n"
-        "}");
+        code("dunder_init_in_py_mode_ok"),
+        false);
     ASSERT_NE(module, nullptr);
     auto* cls = dynamic_cast<ClassDecl*>(module->body[0].get());
     ASSERT_NE(cls, nullptr);
-    auto* fn0 = dynamic_cast<FunctionDecl*>(cls->body[0].get());
-    auto* fn1 = dynamic_cast<FunctionDecl*>(cls->body[1].get());
-    EXPECT_EQ(fn0->name, "__init__");
-    EXPECT_EQ(fn1->name, "__init__");
-    EXPECT_EQ(fn0->constructorIndex, 0);
-    EXPECT_EQ(fn1->constructorIndex, 1);
-    EXPECT_TRUE(fn0->isConstructor);
-    EXPECT_FALSE(fn1->isConstructor);
+    ASSERT_FALSE(cls->body.empty());
+    auto* fn = dynamic_cast<FunctionDecl*>(cls->body[0].get());
+    ASSERT_NE(fn, nullptr);
+    EXPECT_EQ(fn->name, "__init__");
 }
 
 TEST(ParserTest, ExternCSingleFunc) {
@@ -2253,12 +2148,7 @@ TEST(ParserTest, ExternCSingleFunc) {
 }
 
 TEST(ParserTest, ExternCFromLib) {
-    auto module = parse(
-        "extern \"C\" from \"curl\" {\n"
-        "  def curl_easy_init() -> ptr\n"
-        "  def curl_easy_cleanup(handle: ptr) -> int\n"
-        "}\n"
-    );
+    auto module = parse(code("extern_c_from_lib"));
     ASSERT_NE(module, nullptr);
     ASSERT_EQ(module->body.size(), 2u);
 
@@ -2278,10 +2168,7 @@ TEST(ParserTest, ExternCFromLib) {
 }
 
 TEST(ParserTest, ExternCWithPtrType) {
-    auto module = parse(
-        "extern \"C\" def malloc(size: int) -> ptr\n"
-        "extern \"C\" def free(p: ptr)\n"
-    );
+    auto module = parse(code("extern_c_with_ptr_type"));
     ASSERT_NE(module, nullptr);
     ASSERT_EQ(module->body.size(), 2u);
 
@@ -2384,10 +2271,7 @@ TEST(ParserTest, ProcessExternRequiresReturnType) {
 
 TEST(ParserTest, StaticmethodDecoratorPy) {
     auto module = parse(
-        "class Foo:\n"
-        "    @staticmethod\n"
-        "    def bar(x: int) -> int:\n"
-        "        return x * 2\n",
+        code("staticmethod_decorator_py"),
         false);
     ASSERT_NE(module, nullptr);
     auto* cls = dynamic_cast<ClassDecl*>(module->body[0].get());
@@ -2402,10 +2286,7 @@ TEST(ParserTest, StaticmethodDecoratorPy) {
 
 TEST(ParserTest, ClassmethodDecoratorPy) {
     auto module = parse(
-        "class Foo:\n"
-        "    @classmethod\n"
-        "    def create(cls) -> Foo:\n"
-        "        pass\n",
+        code("classmethod_decorator_py"),
         false);
     ASSERT_NE(module, nullptr);
     auto* cls = dynamic_cast<ClassDecl*>(module->body[0].get());
@@ -2419,13 +2300,7 @@ TEST(ParserTest, ClassmethodDecoratorPy) {
 }
 
 TEST(ParserTest, StaticmethodDecoratorDr) {
-    auto module = parse(
-        "class Foo {\n"
-        "  @staticmethod\n"
-        "  def bar(x: int) -> int {\n"
-        "    return x * 2\n"
-        "  }\n"
-        "}\n");
+    auto module = parse(code("staticmethod_decorator_dr"));
     ASSERT_NE(module, nullptr);
     auto* cls = dynamic_cast<ClassDecl*>(module->body[0].get());
     ASSERT_NE(cls, nullptr);
@@ -2436,11 +2311,7 @@ TEST(ParserTest, StaticmethodDecoratorDr) {
 }
 
 TEST(ParserTest, NonMethodDecoratorNoEffect) {
-    auto module = parse(
-        "@staticmethod\n"
-        "def foo(x: int) -> int {\n"
-        "  return x\n"
-        "}\n");
+    auto module = parse(code("non_method_decorator_no_effect"));
     ASSERT_NE(module, nullptr);
     auto* func = dynamic_cast<FunctionDecl*>(module->body[0].get());
     ASSERT_NE(func, nullptr);
@@ -2604,11 +2475,7 @@ TEST(ParserTest, UntypedTemplateHasEmptyContentType) {
 }
 
 TEST(ParserTest, DeferFunctionCallParses) {
-    auto module = parse(
-        "def f(n: int) -> None { pass }\n"
-        "def g() -> None {\n"
-        "    defer f(1)\n"
-        "}\n");
+    auto module = parse(code("defer_function_call_parses"));
     ASSERT_NE(module, nullptr);
     auto* fn = dynamic_cast<FunctionDecl*>(module->body[1].get());
     ASSERT_NE(fn, nullptr);
@@ -2618,10 +2485,7 @@ TEST(ParserTest, DeferFunctionCallParses) {
 }
 
 TEST(ParserTest, DeferMethodCallParses) {
-    auto module = parse(
-        "def g(s: str) -> None {\n"
-        "    defer s.upper()\n"
-        "}\n");
+    auto module = parse(code("defer_method_call_parses"));
     ASSERT_NE(module, nullptr);
     auto* fn = dynamic_cast<FunctionDecl*>(module->body[0].get());
     ASSERT_NE(fn, nullptr);
@@ -2629,30 +2493,17 @@ TEST(ParserTest, DeferMethodCallParses) {
 }
 
 TEST(ParserTest, DeferNonCallRejected) {
-    auto errs = parseErrors(
-        "def g() -> None {\n"
-        "    x: int = 1\n"
-        "    defer x\n"
-        "}\n");
+    auto errs = parseErrors(code("defer_non_call_rejected"));
     EXPECT_FALSE(errs.empty());
 }
 
 TEST(ParserTest, DeferBinaryExprRejected) {
-    auto errs = parseErrors(
-        "def f() -> int { return 1 }\n"
-        "def g() -> None {\n"
-        "    defer f() + f()\n"
-        "}\n");
+    auto errs = parseErrors(code("defer_binary_expr_rejected"));
     EXPECT_FALSE(errs.empty());
 }
 
 TEST(ParserTest, DeferRemainsUsableAsIdentifier) {
-    auto module = parse(
-        "def defer_task(defer: int) -> int { return defer }\n"
-        "def g() -> int {\n"
-        "    defer: int = 3\n"
-        "    return defer_task(defer)\n"
-        "}\n");
+    auto module = parse(code("defer_remains_usable_as_identifier"));
     ASSERT_NE(module, nullptr);
 }
 
@@ -2734,14 +2585,7 @@ TEST(ParserTest, InlineTemplateBadInterpolationSurfacesError) {
 }
 
 TEST(ParserTest, OwnOnCallResultTeachesTheRule) {
-    auto errs = parseErrors(
-        "def take(own s: str) -> int {\n"
-        "  return len(s)\n"
-        "}\n"
-        "def mk() -> str {\n"
-        "  return \"a\" + \"b\"\n"
-        "}\n"
-        "print(take(own mk()))\n");
+    auto errs = parseErrors(code("own_on_call_result_teaches_the_rule"));
     ASSERT_EQ(errs.size(), 1u);
     EXPECT_NE(errs[0].message.find("own moves a BINDING"), std::string::npos)
         << errs[0].message;
@@ -2750,14 +2594,7 @@ TEST(ParserTest, OwnOnCallResultTeachesTheRule) {
 }
 
 TEST(ParserTest, DubOnCallResultTeachesTheRule) {
-    auto errs = parseErrors(
-        "def borrows(s: str) -> int {\n"
-        "  return len(s)\n"
-        "}\n"
-        "def mk() -> str {\n"
-        "  return \"a\" + \"b\"\n"
-        "}\n"
-        "print(borrows(dub mk()))\n");
+    auto errs = parseErrors(code("dub_on_call_result_teaches_the_rule"));
     ASSERT_EQ(errs.size(), 1u);
     EXPECT_NE(errs[0].message.find("dub copies a BINDING"), std::string::npos)
         << errs[0].message;
@@ -2766,42 +2603,18 @@ TEST(ParserTest, DubOnCallResultTeachesTheRule) {
 }
 
 TEST(ParserTest, OwnOnFieldTeachesTheRuleWithoutCascade) {
-    auto errs = parseErrors(
-        "class W {\n"
-        "  v: str\n"
-        "  def(v: str) {\n"
-        "    self.v = v\n"
-        "  }\n"
-        "}\n"
-        "def take(own s: str) -> int {\n"
-        "  return len(s)\n"
-        "}\n"
-        "w: W = W(\"a\")\n"
-        "print(take(own w.v))\n");
+    auto errs = parseErrors(code("own_on_field_teaches_the_rule_without_cascade"));
     ASSERT_EQ(errs.size(), 1u);
     EXPECT_NE(errs[0].message.find("a field or element cannot be moved"),
               std::string::npos) << errs[0].message;
 }
 
 TEST(ParserTest, DubOnFieldIsACopyNotAnError) {
-    EXPECT_TRUE(parseErrors(
-        "class W {\n"
-        "  v: str\n"
-        "  def(v: str) {\n"
-        "    self.v = v\n"
-        "  }\n"
-        "}\n"
-        "def borrows(s: str) -> int {\n"
-        "  return len(s)\n"
-        "}\n"
-        "w: W = W(\"a\")\n"
-        "print(borrows(dub w.v))\n").empty());
+    EXPECT_TRUE(parseErrors(code("dub_on_field_is_a_copy_not_an_error")).empty());
 }
 
 TEST(ParserTest, DubOnElementTeachesTheRule) {
-    auto errs = parseErrors(
-        "xs: list[str] = [\"a\"]\n"
-        "x: str = dub xs[0]\n");
+    auto errs = parseErrors(code("dub_on_element_teaches_the_rule"));
     ASSERT_EQ(errs.size(), 1u);
     EXPECT_NE(errs[0].message.find("an element cannot be dubbed"),
               std::string::npos)
@@ -2809,14 +2622,7 @@ TEST(ParserTest, DubOnElementTeachesTheRule) {
 }
 
 TEST(ParserTest, OwnMarkOnCallResultTeachesTheRuleByKeyword) {
-    auto errs = parseErrors(
-        "def take(own s: str) -> int {\n"
-        "  return len(s)\n"
-        "}\n"
-        "def mk() -> str {\n"
-        "  return \"a\" + \"b\"\n"
-        "}\n"
-        "print(take(s=own mk()))\n");
+    auto errs = parseErrors(code("own_mark_on_call_result_teaches_the_rule_by_keyword"));
     ASSERT_EQ(errs.size(), 1u);
     EXPECT_NE(errs[0].message.find("own moves a BINDING"), std::string::npos)
         << errs[0].message;
@@ -2825,19 +2631,11 @@ TEST(ParserTest, OwnMarkOnCallResultTeachesTheRuleByKeyword) {
 TEST(ParserTest, OwnAndDubRemainOrdinaryIdentifiers) {
     EXPECT_TRUE(parseErrors("own: int = 5\nprint(own)\n").empty());
     EXPECT_TRUE(parseErrors("dub: int = 7\nprint(dub)\n").empty());
-    EXPECT_TRUE(parseErrors(
-        "def f(own: int) -> int {\n"
-        "  return own\n"
-        "}\n"
-        "print(f(own=3))\n").empty());
+    EXPECT_TRUE(parseErrors(code("own_and_dub_remain_ordinary_identifiers")).empty());
 }
 
 TEST(ParserTest, OwnOnCallResultInAssignmentTeachesTheRule) {
-    auto errs = parseErrors(
-        "def mk() -> str {\n"
-        "  return \"a\" + \"b\"\n"
-        "}\n"
-        "x: str = own mk()\n");
+    auto errs = parseErrors(code("own_on_call_result_in_assignment_teaches_the_rule"));
     ASSERT_EQ(errs.size(), 1u);
     EXPECT_NE(errs[0].message.find("own moves a BINDING"), std::string::npos)
         << errs[0].message;
@@ -2846,48 +2644,14 @@ TEST(ParserTest, OwnOnCallResultInAssignmentTeachesTheRule) {
 }
 
 TEST(ParserTest, DubOnFieldInAssignmentIsACopy) {
-    EXPECT_TRUE(parseErrors(
-        "class W {\n"
-        "  v: str\n"
-        "  def(v: str) {\n"
-        "    self.v = v\n"
-        "  }\n"
-        "}\n"
-        "w: W = W(\"a\")\n"
-        "x: str = dub w.v\n").empty());
+    EXPECT_TRUE(parseErrors(code("dub_on_field_in_assignment_is_a_copy")).empty());
 }
 
 TEST(ParserTest, DubOnNestedFieldPathIsACopy) {
-    EXPECT_TRUE(parseErrors(
-        "class Inner {\n"
-        "  xs: list[str]\n"
-        "  def() {\n"
-        "    self.xs = [\"a\"]\n"
-        "  }\n"
-        "}\n"
-        "class Outer {\n"
-        "  inner: Inner\n"
-        "  def() {\n"
-        "    self.inner = Inner()\n"
-        "  }\n"
-        "}\n"
-        "o: Outer = Outer()\n"
-        "for x in dub o.inner.xs {\n"
-        "  print(x)\n"
-        "}\n").empty());
+    EXPECT_TRUE(parseErrors(code("dub_on_nested_field_path_is_a_copy")).empty());
 }
 
 TEST(ParserTest, OwnAndDubOnBareNameInAssignmentStillParse) {
-    EXPECT_TRUE(parseErrors(
-        "def mk() -> str {\n"
-        "  return \"a\" + \"b\"\n"
-        "}\n"
-        "b: str = mk()\n"
-        "x: str = dub b\n").empty());
-    EXPECT_TRUE(parseErrors(
-        "def mk() -> str {\n"
-        "  return \"a\" + \"b\"\n"
-        "}\n"
-        "b: str = mk()\n"
-        "x: str = own b\n").empty());
+    EXPECT_TRUE(parseErrors(code("own_and_dub_on_bare_name_in_assignment_still_parse")).empty());
+    EXPECT_TRUE(parseErrors(code("own_and_dub_on_bare_name_in_assignment_still_parse_2")).empty());
 }

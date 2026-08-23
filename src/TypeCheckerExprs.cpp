@@ -2,6 +2,7 @@
 #include "dragon/Privacy.h"
 #include "TypeCheckerImpl.h"
 #include "dragon/AstClone.h"
+#include "dragon/ExceptionNames.h"
 #include <algorithm>
 #include <cassert>
 #include <filesystem>
@@ -16,6 +17,50 @@ static bool aggregateElemSupported(const std::string& fn, Type::Kind ek) {
                    ek == Type::Kind::Bool || ek == Type::Kind::Any ||
                    ek == Type::Kind::Unknown;
     return numeric || (fn != "sum" && ek == Type::Kind::Str);
+}
+
+static bool hasDeclaredBase(const ClassType& ct, const char* baseName) {
+    if (!ct.decl) return false;
+    for (auto& base : ct.decl->bases) {
+        if (auto* bn = dynamic_cast<NameExpr*>(base.get()))
+            if (bn->name == baseName) return true;
+        if (auto* ba = dynamic_cast<AttributeExpr*>(base.get()))
+            if (ba->attribute == baseName) return true;
+    }
+    return false;
+}
+
+static bool hasDataclassDecorator(const ClassType& ct) {
+    if (!ct.decl) return false;
+    for (auto& d : ct.decl->decorators) {
+        if (auto* n = dynamic_cast<NameExpr*>(d.get()))
+            if (n->name == "dataclass") return true;
+        if (auto* c = dynamic_cast<CallExpr*>(d.get()))
+            if (auto* cn = dynamic_cast<NameExpr*>(c->callee.get()))
+                if (cn->name == "dataclass") return true;
+    }
+    return false;
+}
+
+static bool derivesFromBuiltinException(const ClassType* c) {
+    int guard = 0;
+    while (c && guard++ < 64) {
+        if (isBuiltinExceptionName(c->name)) return true;
+        if (c->decl) {
+            for (auto& base : c->decl->bases) {
+                std::string bare;
+                if (auto* bn = dynamic_cast<NameExpr*>(base.get()))
+                    bare = bn->name;
+                else if (auto* ba = dynamic_cast<AttributeExpr*>(base.get()))
+                    bare = ba->attribute;
+                if (!bare.empty() && isBuiltinExceptionName(bare)) return true;
+            }
+        }
+        c = (c->parentClass && c->parentClass->kind() == Type::Kind::Class)
+                ? static_cast<const ClassType*>(c->parentClass.get())
+                : nullptr;
+    }
+    return false;
 }
 
 void TypeChecker::visit(CallExpr& node) {
@@ -651,6 +696,16 @@ void TypeChecker::visit(CallExpr& node) {
                 if (node.kwArgs.empty() &&
                     node.args.size() == ift.paramTypes.size())
                     checkPositionalArgs(ift);
+            } else if (!ct.isEnum && !ct.isTypedDict && ct.constructorCount == 0 &&
+                       !hasDataclassDecorator(ct) &&
+                       !hasDeclaredBase(ct, "NamedTuple") &&
+                       !derivesFromBuiltinException(&ct) &&
+                       (!node.args.empty() || !node.kwArgs.empty())) {
+                error(node.location(),
+                      "class '" + ct.name + "' declares no constructor, so it is "
+                      "constructed with no arguments; a base class constructor is "
+                      "not inherited. Define 'def (...)' on '" + ct.name +
+                      "' and delegate with 'super(...)'");
             }
         }
         node.type = std::make_shared<InstanceType>(

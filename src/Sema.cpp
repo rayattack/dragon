@@ -253,42 +253,21 @@ void Sema::visit(SetExpr& node) {
     for (auto& e : node.elements) e->accept(*this);
 }
 
-void Sema::visit(ListCompExpr& node) {
+void Sema::checkComprehension(const std::vector<std::string>& varNames,
+                              Expr* iterable, Expr* condition,
+                              std::vector<CompClause>& extraClauses,
+                              std::initializer_list<Expr*> results) {
     pushScope(Scope::Kind::Block);
-    Symbol varSym;
-    varSym.name = node.varName;
-    varSym.kind = Symbol::Kind::Variable;
-    varSym.isInitialized = true;
-    currentScope()->define(varSym);
-    node.iterable->accept(*this);
-    if (node.condition) node.condition->accept(*this);
-    for (auto& clause : node.extraClauses) {
-        for (auto& name : clause.varNames) {
-            Symbol s;
-            s.name = name;
-            s.kind = Symbol::Kind::Variable;
-            s.isInitialized = true;
-            currentScope()->define(s);
-        }
-        clause.iterable->accept(*this);
-        if (clause.condition) clause.condition->accept(*this);
-    }
-    node.element->accept(*this);
-    popScope();
-}
-
-void Sema::visit(DictCompExpr& node) {
-    pushScope(Scope::Kind::Block);
-    for (auto& name : node.varNames) {
+    for (const auto& name : varNames) {
         Symbol varSym;
         varSym.name = name;
         varSym.kind = Symbol::Kind::Variable;
         varSym.isInitialized = true;
         currentScope()->define(varSym);
     }
-    node.iterable->accept(*this);
-    if (node.condition) node.condition->accept(*this);
-    for (auto& clause : node.extraClauses) {
+    iterable->accept(*this);
+    if (condition) condition->accept(*this);
+    for (auto& clause : extraClauses) {
         for (auto& name : clause.varNames) {
             Symbol s;
             s.name = name;
@@ -299,57 +278,28 @@ void Sema::visit(DictCompExpr& node) {
         clause.iterable->accept(*this);
         if (clause.condition) clause.condition->accept(*this);
     }
-    node.key->accept(*this);
-    node.value->accept(*this);
+    for (Expr* result : results) result->accept(*this);
     popScope();
+}
+
+void Sema::visit(ListCompExpr& node) {
+    checkComprehension({node.varName}, node.iterable.get(), node.condition.get(),
+                       node.extraClauses, {node.element.get()});
+}
+
+void Sema::visit(DictCompExpr& node) {
+    checkComprehension(node.varNames, node.iterable.get(), node.condition.get(),
+                       node.extraClauses, {node.key.get(), node.value.get()});
 }
 
 void Sema::visit(SetCompExpr& node) {
-    pushScope(Scope::Kind::Block);
-    Symbol varSym;
-    varSym.name = node.varName;
-    varSym.kind = Symbol::Kind::Variable;
-    varSym.isInitialized = true;
-    currentScope()->define(varSym);
-    node.iterable->accept(*this);
-    node.element->accept(*this);
-    if (node.condition) node.condition->accept(*this);
-    for (auto& clause : node.extraClauses) {
-        for (auto& name : clause.varNames) {
-            Symbol s;
-            s.name = name;
-            s.kind = Symbol::Kind::Variable;
-            s.isInitialized = true;
-            currentScope()->define(s);
-        }
-        clause.iterable->accept(*this);
-        if (clause.condition) clause.condition->accept(*this);
-    }
-    popScope();
+    checkComprehension({node.varName}, node.iterable.get(), node.condition.get(),
+                       node.extraClauses, {node.element.get()});
 }
 
 void Sema::visit(GeneratorExpr& node) {
-    pushScope(Scope::Kind::Block);
-    Symbol varSym;
-    varSym.name = node.varName;
-    varSym.kind = Symbol::Kind::Variable;
-    varSym.isInitialized = true;
-    currentScope()->define(varSym);
-    node.iterable->accept(*this);
-    node.element->accept(*this);
-    if (node.condition) node.condition->accept(*this);
-    for (auto& clause : node.extraClauses) {
-        for (auto& name : clause.varNames) {
-            Symbol s;
-            s.name = name;
-            s.kind = Symbol::Kind::Variable;
-            s.isInitialized = true;
-            currentScope()->define(s);
-        }
-        clause.iterable->accept(*this);
-        if (clause.condition) clause.condition->accept(*this);
-    }
-    popScope();
+    checkComprehension({node.varName}, node.iterable.get(), node.condition.get(),
+                       node.extraClauses, {node.element.get()});
 }
 
 void Sema::visit(LambdaExpr& node) {

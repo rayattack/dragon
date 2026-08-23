@@ -1265,6 +1265,16 @@ std::unique_ptr<Stmt> Parser::functionDeclaration() {
         decl->isMethod = true;
     } else {
         decl->name = std::string(consume(TokenType::IDENTIFIER, "Expect function name").lexeme());
+        if (impl_->inClassBody && impl_->options.isDragonFile &&
+            decl->name == "__init__") {
+            impl_->diagnostics.push_back({
+                ParserDiagnostic::Level::Error,
+                decl->location(),
+                "'__init__' is not the Dragon constructor. The constructor is a nameless def.\n"
+                "  Write: def (<params>) { ... }\n"
+                "  For __init__, use a .py file instead."
+            });
+        }
     }
     decl->typeParams = parseTypeParams();
     consume(TokenType::LEFT_PAREN, "Expect '('");

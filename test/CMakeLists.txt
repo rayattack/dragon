@@ -14,6 +14,10 @@ include_directories(${CMAKE_SOURCE_DIR}/include)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
+add_compile_definitions(
+    DRAGON_ROOT_DIR="${CMAKE_SOURCE_DIR}"
+    DRAGON_TEST_CASES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/cases")
+
 add_executable(dragon_lexer_tests LexerTest.cpp)
 target_link_libraries(dragon_lexer_tests PRIVATE dragon_lib gtest_main)
 add_test(NAME LexerTests COMMAND dragon_lexer_tests)

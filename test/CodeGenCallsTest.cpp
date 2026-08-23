@@ -1,4 +1,9 @@
 #include "CodeGenTestHelpers.h"
+#include "CodeBlock.h"
+
+static std::string code(const std::string& block) {
+    return extractCode("CodeGenCallsTest.md", block);
+}
 
 TEST(CodeGenTest, PrintIntCall) {
     auto ir = generateIR("print(42)");
@@ -21,18 +26,12 @@ TEST(CodeGenTest, PrintList) {
 }
 
 TEST(CodeGenTest, PrintListStrDispatch) {
-    auto ir = generateIR(
-        "x: list[str] = [\"a\", \"b\"]\n"
-        "print(x)\n"
-    );
+    auto ir = generateIR(code("print_list_str_dispatch"));
     EXPECT_NE(ir.find("dragon_print_list_str"), std::string::npos);
 }
 
 TEST(CodeGenTest, PrintListFloatDispatch) {
-    auto ir = generateIR(
-        "x: list[float] = [1.0, 2.0]\n"
-        "print(x)\n"
-    );
+    auto ir = generateIR(code("print_list_float_dispatch"));
     EXPECT_NE(ir.find("dragon_print_list_float"), std::string::npos);
 }
 
@@ -132,12 +131,7 @@ TEST(CodeGenTest, ExternCSingleDeclIR) {
 }
 
 TEST(CodeGenTest, ExternCFromLibIR) {
-    auto ir = generateIR(
-        "extern \"C\" from \"mylib\" {\n"
-        "  def foo(x: int) -> int\n"
-        "  def bar(s: str) -> ptr\n"
-        "}\n"
-    );
+    auto ir = generateIR(code("extern_c_from_lib_ir"));
     EXPECT_NE(ir.find("declare i64 @foo(i64)"), std::string::npos)
         << "Expected foo declaration:\n" << ir;
     EXPECT_NE(ir.find("declare ptr @bar(ptr)"), std::string::npos)
@@ -145,10 +139,7 @@ TEST(CodeGenTest, ExternCFromLibIR) {
 }
 
 TEST(CodeGenTest, ExternCPtrTypeIR) {
-    auto ir = generateIR(
-        "extern \"C\" def malloc(size: int) -> ptr\n"
-        "extern \"C\" def free(p: ptr)\n"
-    );
+    auto ir = generateIR(code("extern_c_ptr_type_ir"));
     EXPECT_NE(ir.find("declare ptr @malloc(i64)"), std::string::npos)
         << "Expected malloc declaration:\n" << ir;
     EXPECT_NE(ir.find("declare void @free(ptr)"), std::string::npos)
@@ -156,113 +147,68 @@ TEST(CodeGenTest, ExternCPtrTypeIR) {
 }
 
 TEST(CodeGenTest, ExprStmtDiscardingPtrReturnNoDecrefStr) {
-    auto ir = generateIR(
-        "extern \"C\" def malloc(size: int) -> ptr\n"
-        "extern \"C\" def memset(s: ptr, c: intc, n: int) -> ptr\n"
-        "extern \"C\" def free(p: ptr)\n"
-        "const buf: ptr = malloc(64)\n"
-        "memset(buf, 0, 64)\n"
-        "free(buf)\n"
-    );
+    auto ir = generateIR(code("expr_stmt_discarding_ptr_return_no_decref_str"));
     EXPECT_EQ(ir.find("call void @dragon_decref_str"), std::string::npos)
         << "Spurious dragon_decref_str on discarded ptr-returning call:\n" << ir;
 }
 
 TEST(CodeGenE2E, IsinstanceInt) {
-    auto output = compileAndRun(
-        "x: int = 42\n"
-        "print(isinstance(x, int))\n"
-    );
+    auto output = compileAndRun(code("isinstance_int"));
     EXPECT_EQ(output, "True\n");
 }
 
 TEST(CodeGenE2E, IsinstanceStr) {
-    auto output = compileAndRun(
-        "x: str = \"hello\"\n"
-        "print(isinstance(x, str))\n"
-        "print(isinstance(x, int))\n"
-    );
+    auto output = compileAndRun(code("isinstance_str"));
     EXPECT_EQ(output, "True\nFalse\n");
 }
 
 TEST(CodeGenE2E, IsinstanceBool) {
-    auto output = compileAndRun(
-        "x: bool = True\n"
-        "print(isinstance(x, bool))\n"
-    );
+    auto output = compileAndRun(code("isinstance_bool"));
     EXPECT_EQ(output, "True\n");
 }
 
 TEST(CodeGenE2E, IsinstanceList) {
-    auto output = compileAndRun(
-        "x: list[int] = [1, 2, 3]\n"
-        "print(isinstance(x, list))\n"
-        "print(isinstance(x, dict))\n"
-    );
+    auto output = compileAndRun(code("isinstance_list"));
     EXPECT_EQ(output, "True\nFalse\n");
 }
 
 TEST(CodeGenE2E, TypeInt) {
-    auto output = compileAndRun(
-        "x: int = 42\n"
-        "print(type(x))\n"
-    );
+    auto output = compileAndRun(code("type_int"));
     EXPECT_EQ(output, "int\n");
 }
 
 TEST(CodeGenE2E, TypeStr) {
-    auto output = compileAndRun(
-        "x: str = \"hello\"\n"
-        "print(type(x))\n"
-    );
+    auto output = compileAndRun(code("type_str"));
     EXPECT_EQ(output, "str\n");
 }
 
 TEST(CodeGenE2E, TypeFloat) {
-    auto output = compileAndRun(
-        "x: float = 3.14\n"
-        "print(type(x))\n"
-    );
+    auto output = compileAndRun(code("type_float"));
     EXPECT_EQ(output, "float\n");
 }
 
 TEST(CodeGenE2E, TypeBool) {
-    auto output = compileAndRun(
-        "x: bool = True\n"
-        "print(type(x))\n"
-    );
+    auto output = compileAndRun(code("type_bool"));
     EXPECT_EQ(output, "bool\n");
 }
 
 TEST(CodeGenE2E, PrintListStr) {
-    auto output = compileAndRun(
-        "x: list[str] = [\"hello\", \"world\"]\n"
-        "print(x)\n"
-    );
+    auto output = compileAndRun(code("print_list_str"));
     EXPECT_EQ(output, "['hello', 'world']\n");
 }
 
 TEST(CodeGenE2E, PrintListFloat) {
-    auto output = compileAndRun(
-        "x: list[float] = [1.5, 2.0, 3.14]\n"
-        "print(x)\n"
-    );
+    auto output = compileAndRun(code("print_list_float"));
     EXPECT_EQ(output, "[1.5, 2.0, 3.14]\n");
 }
 
 TEST(CodeGenE2E, PrintListBool) {
-    auto output = compileAndRun(
-        "x: list[bool] = [True, False, True]\n"
-        "print(x)\n"
-    );
+    auto output = compileAndRun(code("print_list_bool"));
     EXPECT_EQ(output, "[True, False, True]\n");
 }
 
 TEST(CodeGenE2E, PrintList) {
-    auto output = compileAndRun(
-        "x: list[int] = [1, 2, 3]\n"
-        "print(x)"
-    );
+    auto output = compileAndRun(code("print_list"));
     EXPECT_EQ(output, "[1, 2, 3]\n");
 }
 
@@ -272,32 +218,17 @@ TEST(CodeGenE2E, MinMaxTwoArgs) {
 }
 
 TEST(CodeGenE2E, MinMaxList) {
-    auto out = compileAndRun(
-        "xs: list[int] = [5, 2, 8, 1, 9]\n"
-        "print(min(xs))\n"
-        "print(max(xs))\n"
-    );
+    auto out = compileAndRun(code("min_max_list"));
     EXPECT_EQ(out, "1\n9\n");
 }
 
 TEST(CodeGenE2E, SumList) {
-    auto out = compileAndRun(
-        "xs: list[int] = [1, 2, 3, 4, 5]\n"
-        "print(sum(xs))\n"
-    );
+    auto out = compileAndRun(code("sum_list"));
     EXPECT_EQ(out, "15\n");
 }
 
 TEST(CodeGenE2E, AnyAllList) {
-    auto out = compileAndRun(
-        "xs: list[int] = [0, 0, 1]\n"
-        "ys: list[int] = [1, 2, 3]\n"
-        "zs: list[int] = [0, 0, 0]\n"
-        "print(any(xs))\n"
-        "print(all(ys))\n"
-        "print(any(zs))\n"
-        "print(all(xs))\n"
-    );
+    auto out = compileAndRun(code("any_all_list"));
     EXPECT_EQ(out, "True\nTrue\nFalse\nFalse\n");
 }
 
@@ -327,365 +258,121 @@ TEST(CodeGenE2E, HashBuiltin) {
 }
 
 TEST(CodeGenE2E, SortedReversed) {
-    auto out = compileAndRun(
-        "xs: list[int] = [3, 1, 4, 1, 5]\n"
-        "ys: list[int] = sorted(xs)\n"
-        "zs: list[int] = reversed(xs)\n"
-        "print(ys[0])\nprint(ys[4])\n"
-        "print(zs[0])\nprint(zs[4])\n"
-    );
+    auto out = compileAndRun(code("sorted_reversed"));
     EXPECT_EQ(out, "1\n5\n5\n3\n");
 }
 
 TEST(CodeGenE2E, ExternCCallPuts) {
-    auto out = compileAndRun(
-        "extern \"C\" def puts(s: str) -> int\n"
-        "puts(\"hello from C\")\n"
-    );
+    auto out = compileAndRun(code("extern_c_call_puts"));
     EXPECT_EQ(out, "hello from C\n");
 }
 
 TEST(CodeGenE2E, ExternCCallAbs) {
-    auto out = compileAndRun(
-        "extern \"C\" def abs(x: int) -> int\n"
-        "x: int = abs(-42)\n"
-        "print(x)\n"
-    );
+    auto out = compileAndRun(code("extern_c_call_abs"));
     EXPECT_EQ(out, "42\n");
 }
 
 TEST(CodeGenIR, HasattrIR) {
-    auto ir = generateIR(
-        "class Foo {\n"
-        "  def(x: int) {\n"
-        "    self.x = x\n"
-        "  }\n"
-        "}\n"
-        "f: Foo = Foo(1)\n"
-        "b: bool = hasattr(f, \"x\")\n"
-    );
+    auto ir = generateIR(code("hasattr_ir"));
     EXPECT_NE(ir.find("dragon_hasattr"), std::string::npos);
 }
 
 TEST(CodeGenIR, GetattrIR) {
-    auto ir = generateIR(
-        "class Foo {\n"
-        "  def(x: int) {\n"
-        "    self.x = x\n"
-        "  }\n"
-        "}\n"
-        "f: Foo = Foo(1)\n"
-        "v: int = getattr(f, \"x\")\n"
-    );
+    auto ir = generateIR(code("getattr_ir"));
     EXPECT_NE(ir.find("dragon_getattr"), std::string::npos);
 }
 
 TEST(CodeGenE2E, HasattrTrue) {
-    auto out = compileAndRun(
-        "class Point {\n"
-        "  def(x: int, y: int) {\n"
-        "    self.x = x\n"
-        "    self.y = y\n"
-        "  }\n"
-        "}\n"
-        "p: Point = Point(1, 2)\n"
-        "if hasattr(p, \"x\") {\n"
-        "  print(\"yes\")\n"
-        "}\n"
-    );
+    auto out = compileAndRun(code("hasattr_true"));
     EXPECT_EQ(out, "yes\n");
 }
 
 TEST(CodeGenE2E, HasattrFalse) {
-    auto out = compileAndRun(
-        "class Point {\n"
-        "  def(x: int, y: int) {\n"
-        "    self.x = x\n"
-        "    self.y = y\n"
-        "  }\n"
-        "}\n"
-        "p: Point = Point(1, 2)\n"
-        "if hasattr(p, \"z\") {\n"
-        "  print(\"yes\")\n"
-        "} else {\n"
-        "  print(\"no\")\n"
-        "}\n"
-    );
+    auto out = compileAndRun(code("hasattr_false"));
     EXPECT_EQ(out, "no\n");
 }
 
 TEST(CodeGenE2E, GetattrField) {
-    auto out = compileAndRun(
-        "class Dog {\n"
-        "  def(name: str) {\n"
-        "    self.name = name\n"
-        "  }\n"
-        "}\n"
-        "d: Dog = Dog(\"Rex\")\n"
-        "n: str = getattr(d, \"name\")\n"
-        "print(n)\n"
-    );
+    auto out = compileAndRun(code("getattr_field"));
     EXPECT_EQ(out, "Rex\n");
 }
 
 TEST(CodeGenE2E, GetattrInt) {
-    auto out = compileAndRun(
-        "class Box {\n"
-        "  def(val: int) {\n"
-        "    self.val = val\n"
-        "  }\n"
-        "}\n"
-        "b: Box = Box(42)\n"
-        "v: int = getattr(b, \"val\")\n"
-        "print(v)\n"
-    );
+    auto out = compileAndRun(code("getattr_int"));
     EXPECT_EQ(out, "42\n");
 }
 
 TEST(CodeGenE2E, GetattrDefault) {
-    auto out = compileAndRun(
-        "class Cfg {\n"
-        "  def(port: int) {\n"
-        "    self.port = port\n"
-        "  }\n"
-        "}\n"
-        "c: Cfg = Cfg(8080)\n"
-        "v: int = getattr(c, \"missing\", 9999)\n"
-        "print(v)\n"
-    );
+    auto out = compileAndRun(code("getattr_default"));
     EXPECT_EQ(out, "9999\n");
 }
 
 TEST(CodeGenE2E, HasattrInherited) {
-    auto out = compileAndRun(
-        "class Base {\n"
-        "  def(x: int) {\n"
-        "    self.x = x\n"
-        "  }\n"
-        "}\n"
-        "class Child(Base) {\n"
-        "  def(x: int, y: int) {\n"
-        "    self.x = x\n"
-        "    self.y = y\n"
-        "  }\n"
-        "}\n"
-        "c: Child = Child(1, 2)\n"
-        "if hasattr(c, \"x\") {\n"
-        "  print(\"has x\")\n"
-        "}\n"
-        "if hasattr(c, \"y\") {\n"
-        "  print(\"has y\")\n"
-        "}\n"
-    );
+    auto out = compileAndRun(code("hasattr_inherited"));
     EXPECT_EQ(out, "has x\nhas y\n");
 }
 
 TEST(CodeGenE2E, AnyKwargToVarKwargsFunction) {
-    auto out = compileAndRun(
-        "def kw(**keys: Any) -> int {\n"
-        "  n: int = 0\n"
-        "  for k in keys { n = n + 1 }\n"
-        "  return n\n"
-        "}\n"
-        "d: dict[str, Any] = {}\n"
-        "d[\"id\"] = 5\n"
-        "d[\"name\"] = \"ada\"\n"
-        "print(kw(a=d[\"id\"], b=d[\"name\"]))\n"
-    );
+    auto out = compileAndRun(code("any_kwarg_to_var_kwargs_function"));
     EXPECT_EQ(out, "2\n");
 }
 
 TEST(CodeGenE2E, AnyKwargKeepsRuntimeTypeAndValue) {
-    auto out = compileAndRun(
-        "def kw(**keys: Any) -> str {\n"
-        "  return str(keys[\"a\"]) + \"|\" + str(keys[\"b\"])\n"
-        "}\n"
-        "d: dict[str, Any] = {}\n"
-        "d[\"id\"] = 5\n"
-        "d[\"name\"] = \"ada\"\n"
-        "print(kw(a=d[\"id\"], b=d[\"name\"]))\n"
-    );
+    auto out = compileAndRun(code("any_kwarg_keeps_runtime_type_and_value"));
     EXPECT_EQ(out, "5|ada\n");
 }
 
 TEST(CodeGenE2E, AnyKwargToVarKwargsMethod) {
-    auto out = compileAndRun(
-        "class Bag {\n"
-        "  data: dict[str, Any]\n"
-        "  def(d: dict[str, Any]) { self.data = d }\n"
-        "  def get(k: str) -> Any { return self.data[k] }\n"
-        "  def kw(**keys: Any) -> int {\n"
-        "    n: int = 0\n"
-        "    for k in keys { n = n + 1 }\n"
-        "    return n\n"
-        "  }\n"
-        "}\n"
-        "d: dict[str, Any] = {}\n"
-        "d[\"id\"] = 5\n"
-        "b: Bag = Bag(d)\n"
-        "print(b.kw(a=d[\"id\"], c=b.get(\"id\")))\n"
-    );
+    auto out = compileAndRun(code("any_kwarg_to_var_kwargs_method"));
     EXPECT_EQ(out, "2\n");
 }
 
 TEST(CodeGenE2E, AnyKwargToTypedDictConstructor) {
-    auto out = compileAndRun(
-        "class Point(TypedDict) {\n"
-        "  id: int\n"
-        "  name: str\n"
-        "}\n"
-        "d: dict[str, Any] = {}\n"
-        "d[\"id\"] = 7\n"
-        "p: Point = Point(id=d[\"id\"], name=\"a\")\n"
-        "print(p.id)\n"
-    );
+    auto out = compileAndRun(code("any_kwarg_to_typed_dict_constructor"));
     EXPECT_EQ(out, "7\n");
 }
 
 TEST(CodeGenE2E, ContainerKwargKeepsItsOwnTag) {
-    auto out = compileAndRun(
-        "def kw(**keys: Any) -> int {\n"
-        "  n: int = 0\n"
-        "  for k in keys { n = n + 1 }\n"
-        "  return n\n"
-        "}\n"
-        "l: list[int] = [1, 2, 3]\n"
-        "d: dict[str, int] = {}\n"
-        "d[\"k\"] = 1\n"
-        "b: bytes = bytes([1, 2])\n"
-        "print(kw(a=l, b=d, c=b))\n"
-    );
+    auto out = compileAndRun(code("container_kwarg_keeps_its_own_tag"));
     EXPECT_EQ(out, "3\n");
 }
 
 TEST(CodeGenE2E, ContainerKwargValuesReadBackInCallee) {
-    auto out = compileAndRun(
-        "def kw(**keys: Any) -> str {\n"
-        "  xs: list[int] = keys[\"a\"]\n"
-        "  name: str = keys[\"b\"]\n"
-        "  return str(xs[0] + xs[1] + xs[2]) + \"|\" + name\n"
-        "}\n"
-        "l: list[int] = [1, 2, 3]\n"
-        "s: str = \"ada\"\n"
-        "print(kw(a=l, b=s))\n"
-        "print(l[0])\n"
-        "print(s)\n"
-    );
+    auto out = compileAndRun(code("container_kwarg_values_read_back_in_callee"));
     EXPECT_EQ(out, "6|ada\n1\nada\n");
 }
 
 TEST(CodeGenE2E, InstanceKwargToVarKwargsMethod) {
-    auto out = compileAndRun(
-        "class Node {\n"
-        "  v: int\n"
-        "  def(v: int) { self.v = v }\n"
-        "}\n"
-        "class Holder {\n"
-        "  def kwm(**keys: Any) -> int {\n"
-        "    n: int = 0\n"
-        "    for k in keys { n = n + 1 }\n"
-        "    return n\n"
-        "  }\n"
-        "}\n"
-        "h: Holder = Holder()\n"
-        "nd: Node = Node(3)\n"
-        "l: list[int] = [1]\n"
-        "print(h.kwm(a=nd, b=l))\n"
-    );
+    auto out = compileAndRun(code("instance_kwarg_to_var_kwargs_method"));
     EXPECT_EQ(out, "2\n");
 }
 
 TEST(CodeGenE2E, TypedDictKwargStrOutlivesConstruction) {
-    auto out = compileAndRun(
-        "class Point(TypedDict) {\n"
-        "  id: int\n"
-        "  name: str\n"
-        "}\n"
-        "def build(n: int) -> str { return \"name-\" + str(n) }\n"
-        "i: int = 0\n"
-        "last: str = \"\"\n"
-        "while i < 3 {\n"
-        "  s: str = build(i)\n"
-        "  p: Point = Point(id=i, name=s)\n"
-        "  last = p.name\n"
-        "  i = i + 1\n"
-        "}\n"
-        "print(last)\n"
-    );
+    auto out = compileAndRun(code("typed_dict_kwarg_str_outlives_construction"));
     EXPECT_EQ(out, "name-2\n");
 }
 
 TEST(CodeGenE2E, KeywordMoveTransfersOwnership) {
-    auto out = compileAndRun(
-        "def take(own s: str) -> int { return len(s) }\n"
-        "def mk(n: int) -> str { return \"m-\" + str(n) }\n"
-        "i: int = 0\n"
-        "t: int = 0\n"
-        "while i < 3 {\n"
-        "  b: str = mk(i)\n"
-        "  t = t + take(s=own b)\n"
-        "  t = t + take(s=mk(i))\n"
-        "  i = i + 1\n"
-        "}\n"
-        "print(t)\n"
-    );
+    auto out = compileAndRun(code("keyword_move_transfers_ownership"));
     EXPECT_EQ(out, "18\n");
 }
 
 TEST(CodeGenE2E, KeywordMoveOnMethodAndVarArgs) {
-    auto out = compileAndRun(
-        "class Sink {\n"
-        "  def take(own s: str) -> int { return len(s) }\n"
-        "}\n"
-        "def va(own s: str, *rest: int) -> int { return len(s) }\n"
-        "def mk(n: int) -> str { return \"m-\" + str(n) }\n"
-        "k: Sink = Sink()\n"
-        "a: str = mk(1)\n"
-        "b: str = mk(2)\n"
-        "print(k.take(s=own a))\n"
-        "print(va(s=own b))\n"
-    );
+    auto out = compileAndRun(code("keyword_move_on_method_and_var_args"));
     EXPECT_EQ(out, "3\n3\n");
 }
 
 TEST(CodeGenE2E, KeywordDubLeavesSourceUsable) {
-    auto out = compileAndRun(
-        "def borrows(s: str) -> int { return len(s) }\n"
-        "def mk(n: int) -> str { return \"m-\" + str(n) }\n"
-        "d: str = mk(7)\n"
-        "print(borrows(s=dub d))\n"
-        "print(d)\n"
-    );
+    auto out = compileAndRun(code("keyword_dub_leaves_source_usable"));
     EXPECT_EQ(out, "3\nm-7\n");
 }
 
 TEST(CodeGenE2E, DubIntoOwnParamLeavesSourceIntact) {
-    auto out = compileAndRun(
-        "def archive(own name: str) -> int { return len(name) }\n"
-        "def count(own xs: list[int]) -> int { return len(xs) }\n"
-        "def tally(own d: dict[str, str]) -> int { return len(d) }\n"
-        "label: str = \"report-\" + \"2026\"\n"
-        "xs: list[int] = [1, 2, 3]\n"
-        "d: dict[str, str] = {\"a\": \"1\", \"b\": \"2\"}\n"
-        "print(archive(dub label))\n"
-        "print(label)\n"
-        "print(count(dub xs))\n"
-        "print(len(xs))\n"
-        "print(tally(dub d))\n"
-        "print(len(d))\n"
-    );
+    auto out = compileAndRun(code("dub_into_own_param_leaves_source_intact"));
     EXPECT_EQ(out, "11\nreport-2026\n3\n3\n2\n2\n");
 }
 
 TEST(CodeGenE2E, DubIntoOwnParamByKeywordLeavesSourceIntact) {
-    auto out = compileAndRun(
-        "class Sink {\n"
-        "  def archive(own name: str) -> int { return len(name) }\n"
-        "}\n"
-        "k: Sink = Sink()\n"
-        "label: str = \"report-\" + \"2026\"\n"
-        "print(k.archive(name=dub label))\n"
-        "print(label)\n"
-    );
+    auto out = compileAndRun(code("dub_into_own_param_by_keyword_leaves_source_intact"));
     EXPECT_EQ(out, "11\nreport-2026\n");
 }
