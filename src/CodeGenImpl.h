@@ -1108,7 +1108,7 @@ struct CodeGen::Impl {
             if (sub->object && dynamic_cast<CallExpr*>(sub->object.get()) &&
                 sub->object->type &&
                 sub->object->type->kind() == Type::Kind::Dict && expr->type) {
-                switch (expr->type->kind()) {
+                switch (arrivalKind(expr)) {
                     case Type::Kind::Str:
                     case Type::Kind::Bytes:
                     case Type::Kind::List:
@@ -1295,6 +1295,7 @@ struct CodeGen::Impl {
     llvm::Value* trackBorrowTempGuarded(Expr* e, llvm::Value* v,
                                  std::vector<std::pair<llvm::Value*, VarKind>>& sink,
                                  std::vector<llvm::Value*>& bases) {
+        v = narrowBoxForExpr(e, v);
         VarKind k = ownedTempDrainKind(e, v);
         if (k != VarKind::Other) {
             sink.emplace_back(v, k);
@@ -1881,6 +1882,26 @@ struct CodeGen::Impl {
                                        int64_t wantListElemTag = kNoListElemCheck,
                                        Type::Kind staticKind = Type::Kind::Unknown);
 
+    void raiseUnlessBoxTag(llvm::Value* box, int64_t expectedTag,
+                           const std::string& wantName);
+
+    llvm::Value* narrowBoxToKind(llvm::Value* val, Type::Kind want);
+
+    llvm::Value* narrowBoxToParam(llvm::Value* val, Type* paramType) {
+        return paramType ? narrowBoxToKind(val, paramType->kind()) : val;
+    }
+
+    llvm::Value* narrowBoxForExpr(Expr* e, llvm::Value* val) {
+        if (!e || !e->narrowTo || !val || val->getType() != boxType) return val;
+        return narrowBoxToKind(val, e->narrowTo->kind());
+    }
+
+    static Type::Kind arrivalKind(Expr* e) {
+        if (!e) return Type::Kind::Unknown;
+        if (e->narrowTo) return e->narrowTo->kind();
+        return e->type ? e->type->kind() : Type::Kind::Unknown;
+    }
+
     int64_t listViewWantElemTag(TypeExpr* ann);
 
     llvm::Value* containerSlotToNative(llvm::Value* raw, Type* elemType) {
@@ -1915,7 +1936,7 @@ struct CodeGen::Impl {
             auto tp = boxArgTagPayload(expr, arg, false);
             return makeBox(tp.first, tp.second);
         }
-        return coerceArg(arg, paramType);
+        return coerceArg(narrowBoxForExpr(expr, arg), paramType);
     }
 
     llvm::Value* emitTagForExprNoCG(Expr* expr);

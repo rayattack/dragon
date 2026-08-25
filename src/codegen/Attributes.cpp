@@ -752,6 +752,8 @@ void CodeGen::visit(SubscriptExpr& node) {
         int64_t checkTag = impl_->pendingDictCheckTag;
         int64_t pendingListElem = impl_->pendingListViewElemTag;
         impl_->pendingListViewElemTag = Impl::kNoListElemCheck;
+        if (checkTag < 0 && node.narrowTo)
+            checkTag = Impl::typeKindToTag(node.narrowTo->kind());
         if (checkTag < 0) {
             if (auto* objName = dynamic_cast<NameExpr*>(node.object.get())) {
                 auto tdIt = impl_->varTypedDictClass.find(objName->name);

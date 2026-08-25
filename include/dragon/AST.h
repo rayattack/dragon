@@ -29,6 +29,7 @@ protected:
 class Expr : public ASTNode {
 public:
     std::shared_ptr<Type> type;
+    std::shared_ptr<Type> narrowTo;
 };
 
 class Stmt : public ASTNode {};

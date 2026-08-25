@@ -1367,6 +1367,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                     llvm::PointerType::getUnqual(*impl_->context));
                 return true;
             }
+            val = impl_->narrowBoxForExpr(node.args[0].get(), val);
             if (appendElemKind == Type::Kind::Float) {
                 if (val->getType() == impl_->i64Type)
                     val = impl_->builder->CreateSIToFP(val, impl_->f64Type);
@@ -1896,12 +1897,12 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             llvm::Value* v;
             llvm::Value* ownedStrArg = nullptr;
             node.args[0]->accept(*this);
-            v = impl_->lastValue;
+            Type::Kind addKind = Impl::arrivalKind(node.args[0].get());
+            v = impl_->narrowBoxForExpr(node.args[0].get(), impl_->lastValue);
             if (v->getType()->isPointerTy()) {
                 v = impl_->ensureHeapString(v, node.args[0].get());
                 bool argIsStr =
-                    (node.args[0]->type &&
-                     node.args[0]->type->kind() == Type::Kind::Str) ||
+                    addKind == Type::Kind::Str ||
                     dynamic_cast<StringLiteral*>(node.args[0].get());
                 if (impl_->options.gcMode == GCMode::RC && argIsStr &&
                     impl_->isOwnedStrResult(v))
@@ -1913,9 +1914,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 v = impl_->builder->CreateBitCast(v, impl_->i64Type);
             }
             {
-                int64_t addTag = 0;
-                if (node.args[0]->type)
-                    addTag = impl_->typeKindToElemTag(node.args[0]->type->kind());
+                int64_t addTag = impl_->typeKindToElemTag(addKind);
                 if (addTag == 0 && dynamic_cast<StringLiteral*>(node.args[0].get()))
                     addTag = TAG_STR;
                 if (addTag != 0) {

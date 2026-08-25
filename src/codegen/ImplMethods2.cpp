@@ -559,6 +559,16 @@ llvm::Value* CodeGen::Impl::unboxBoxResultChecked(llvm::Value* box, llvm::Type* 
             }
         }
         if (expectedTag < 0) return box;
+        raiseUnlessBoxTag(box, expectedTag, tagName);
+        llvm::Value* out = boxPayloadAsKind(box, vk);
+        if (expectedTag == 5 && wantListElemTag != kNoListElemCheck)
+            builder->CreateCall(runtimeFuncs["dragon_list_view_check"],
+                {out, llvm::ConstantInt::get(i64Type, wantListElemTag)});
+        return out;
+    }
+
+void CodeGen::Impl::raiseUnlessBoxTag(llvm::Value* box, int64_t expectedTag,
+                                      const std::string& wantName) {
         auto* func = currentFunction;
         auto* tagV = boxTag(box, "ub.tag");
         auto* match = builder->CreateICmpEQ(
@@ -567,25 +577,46 @@ llvm::Value* CodeGen::Impl::unboxBoxResultChecked(llvm::Value* box, llvm::Type* 
         auto* failBB = llvm::BasicBlock::Create(*context, "ub.fail", func);
         builder->CreateCondBr(match, okBB, failBB);
         builder->SetInsertPoint(failBB);
-        std::string msg = std::string("TypeError: expected ") + tagName +
+        std::string msg = "TypeError: expected " + wantName +
                           " but got value with different runtime type";
         builder->CreateCall(runtimeFuncs["dragon_raise_exc_cstr"],
             {llvm::ConstantInt::get(i64Type, 80),
              builder->CreateGlobalString(msg)});
         builder->CreateUnreachable();
         builder->SetInsertPoint(okBB);
-        llvm::Value* out = boxPayloadAsKind(box, vk);
-        if (expectedTag == 5 && wantListElemTag != kNoListElemCheck)
-            builder->CreateCall(runtimeFuncs["dragon_list_view_check"],
-                {out, llvm::ConstantInt::get(i64Type, wantListElemTag)});
-        return out;
+    }
+
+static std::string typeKindDisplayName(Type::Kind k) {
+    switch (k) {
+        case Type::Kind::Int:      return "int";
+        case Type::Kind::Float:    return "float";
+        case Type::Kind::Bool:     return "bool";
+        case Type::Kind::Str:      return "str";
+        case Type::Kind::Bytes:    return "bytes";
+        case Type::Kind::List:     return "list";
+        case Type::Kind::Dict:     return "dict";
+        case Type::Kind::Set:      return "set";
+        case Type::Kind::Tuple:    return "tuple";
+        case Type::Kind::Function: return "callable";
+        case Type::Kind::Instance:
+        case Type::Kind::Contract: return "class";
+        default:                   return "value";
+    }
+}
+
+llvm::Value* CodeGen::Impl::narrowBoxToKind(llvm::Value* val, Type::Kind want) {
+        if (!val || val->getType() != boxType) return val;
+        int64_t expectedTag = typeKindToTag(want);
+        if (expectedTag < 0) return val;
+        raiseUnlessBoxTag(val, expectedTag, typeKindDisplayName(want));
+        return boxPayloadAsKind(val, typeKindToVarKind(want));
     }
 
 int64_t CodeGen::Impl::listViewWantElemTag(TypeExpr* ann) {
         auto* g = dynamic_cast<GenericTypeExpr*>(ann);
         if (!g || g->typeArgs.size() != 1) return kNoListElemCheck;
         auto* base = dynamic_cast<NamedTypeExpr*>(g->base.get());
-        if (!base || (base->name != "list" && base->name != "List"))
+        if (!base || base->name != "list")
             return kNoListElemCheck;
         if (auto* n = dynamic_cast<NamedTypeExpr*>(g->typeArgs[0].get()))
             if (n->name == "type") return kNoListElemCheck;

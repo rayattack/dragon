@@ -350,6 +350,7 @@ private:
     std::shared_ptr<Type> dictGetResultType(CallExpr& node,
                                             const std::shared_ptr<Type>& declared);
     bool tryExpectedTypeLiteral(Expr* value, const std::shared_ptr<Type>& expected);
+    static void markNarrowTarget(Expr& value, const std::shared_ptr<Type>& want);
     void boxNestedContainerLiteralForAny(Expr* value);
     static std::string listReprMismatchHint(const Type& from, const Type& to);
     bool diagnoseHeterogeneousLiteral(Expr* value,

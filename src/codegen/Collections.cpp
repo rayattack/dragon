@@ -32,6 +32,7 @@ void CodeGen::Impl::emitTypedListAppend(llvm::Value* list, llvm::Value* val,
     bool isF64 = (elemTag == 2);
     bool isPtr = (elemTag == 1 || elemTag == 5 || elemTag == 6 || elemTag == 7 ||
                   elemTag == 10);
+    val = narrowBoxForExpr(elemExpr, val);
     if (isAny) {
         auto tp = boxArgTagPayload(elemExpr, val, true);
         builder->CreateCall(

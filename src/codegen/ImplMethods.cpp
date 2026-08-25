@@ -1046,9 +1046,12 @@ bool CodeGen::Impl::isBareDictIterable(Expr* expr) {
     }
 
 int64_t CodeGen::Impl::inferPtrValueTag(Expr* expr) {
-        if (expr && expr->type) {
-            if (expr->type->kind() == Type::Kind::Instance) return 7;
-            return typeKindToElemTag(expr->type->kind());
+        const Type* arrived = nullptr;
+        if (expr && expr->narrowTo) arrived = expr->narrowTo.get();
+        else if (expr && expr->type) arrived = expr->type.get();
+        if (arrived) {
+            if (arrived->kind() == Type::Kind::Instance) return 7;
+            return typeKindToElemTag(arrived->kind());
         }
         if (auto* sl = dynamic_cast<StringLiteral*>(expr))
             return sl->isBytes ? TAG_BYTES : TAG_STR;

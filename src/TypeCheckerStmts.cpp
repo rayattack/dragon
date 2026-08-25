@@ -64,6 +64,22 @@ bool TypeChecker::diagnoseHeterogeneousLiteral(
     return false;
 }
 
+void TypeChecker::markNarrowTarget(Expr& value,
+                                   const std::shared_ptr<Type>& want) {
+    if (!want || !value.type || value.type->kind() != Type::Kind::Any) return;
+    switch (want->kind()) {
+        case Type::Kind::Any:
+        case Type::Kind::Unknown:
+        case Type::Kind::Union:
+        case Type::Kind::Optional:
+        case Type::Kind::TypeVar:
+        case Type::Kind::Never:
+            return;
+        default:
+            value.narrowTo = want;
+    }
+}
+
 bool TypeChecker::tryExpectedTypeLiteral(Expr* value, const std::shared_ptr<Type>& expected) {
     if (!value || !expected) return false;
     if (expected->kind() == Type::Kind::List) {
@@ -85,6 +101,7 @@ bool TypeChecker::tryExpectedTypeLiteral(Expr* value, const std::shared_ptr<Type
             if (!el->type) return false;
             if (!el->type->isSubtypeOf(*base)) return false;
         }
+        for (auto& el : lit->elements) markNarrowTarget(*el, base);
         if (base->kind() == Type::Kind::Any) {
             for (auto& el : lit->elements)
                 if (el->type && el->type->kind() == Type::Kind::Class)
@@ -111,6 +128,8 @@ bool TypeChecker::tryExpectedTypeLiteral(Expr* value, const std::shared_ptr<Type
                 if (!v->type || !v->type->isSubtypeOf(*dt.valueType)) return false;
             }
         }
+        for (auto& [k, v] : lit->entries)
+            if (v) markNarrowTarget(*v, dt.valueType);
         if (dt.valueType && dt.valueType->kind() == Type::Kind::Any) {
             for (auto& [k, v] : lit->entries)
                 if (v) boxNestedContainerLiteralForAny(v.get());
@@ -135,6 +154,7 @@ bool TypeChecker::tryExpectedTypeLiteral(Expr* value, const std::shared_ptr<Type
         }
         for (size_t i = 0; i < lit->elements.size(); ++i) {
             const auto& want = tt.elementTypes[i];
+            markNarrowTarget(*lit->elements[i], want);
             if (want->kind() == Type::Kind::Any) {
                 boxNestedContainerLiteralForAny(lit->elements[i].get());
             } else if (want->kind() == Type::Kind::List ||

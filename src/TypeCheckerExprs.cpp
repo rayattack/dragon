@@ -506,6 +506,7 @@ void TypeChecker::visit(CallExpr& node) {
             const auto& pt = ft.paramTypes[i];
             if (!at || !pt) continue;
             auto ak = at->kind(), pk = pt->kind();
+            if (ak == Type::Kind::Any) markNarrowTarget(*node.args[i], pt);
             if (ak == Type::Kind::Unknown || ak == Type::Kind::Any ||
                 pk == Type::Kind::Unknown)
                 continue;
