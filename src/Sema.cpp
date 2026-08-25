@@ -152,7 +152,18 @@ void Sema::visit(StringLiteral& node) {
         }
     }
 }
-void Sema::visit(TemplateExpr&) {}
+void Sema::visit(TemplateExpr& node) {
+    for (auto& part : node.templateParts) {
+        if (part.kind == TemplatePart::Kind::Interpolation) {
+            if (part.expr) part.expr->accept(*this);
+            continue;
+        }
+        if (part.kind != TemplatePart::Kind::Block) continue;
+        for (auto& stmt : part.blockStmts) {
+            if (stmt) stmt->accept(*this);
+        }
+    }
+}
 void Sema::visit(TemplateFileExpr&) {}
 void Sema::visit(BooleanLiteral&) {}
 void Sema::visit(NoneLiteral&) {}

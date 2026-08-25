@@ -35,6 +35,8 @@ returning `HTML` rather than `str`:
 ```dragon
 from html import HTML
 
+user_input: str = "<script>alert('xss')</script>"
+
 def badge(text: str) -> HTML {
     return template[HTML] { <span class="badge">!{text}</span> }
 }

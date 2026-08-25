@@ -28,6 +28,7 @@ Lexer::Lexer(std::string_view source, LexerOptions options)
     : impl_(std::make_unique<Impl>()) {
     impl_->source = source;
     impl_->options = options;
+    impl_->line = options.startLine;
     impl_->indentStack.push(0);
 }
 

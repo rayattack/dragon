@@ -249,3 +249,41 @@ try {
 }
 print(e)
 ```
+
+#### :template_interp_undefined_name
+
+A name inside a `!{...}` interpolation is resolved like any other name, so
+`dragon check` rejects it instead of deferring the failure to codegen.
+
+```dr
+greeting: str = template {Hello !{missing_name}}
+print(greeting)
+```
+
+#### :template_interp_undefined_call
+
+```dr
+out: str = template {Total: !{missing_fn()}}
+print(out)
+```
+
+#### :template_block_undefined_iterable
+
+The iterable of a `for` block inside a template is resolved too.
+
+```dr
+out: str = template {!{ for x in missing_items { :{ item } } }}
+print(out)
+```
+
+#### :template_block_binds_loop_variable
+
+A loop variable declared by a template block is in scope for the interpolations
+nested inside that block, so this must resolve cleanly.
+
+```dr
+def render(items: list[str], title: str) -> str {
+    return template {<h1>!{title}</h1>!{ for it in items { :{ <li>!{it}</li> } } }}
+}
+print(render(["a"], "T"))
+```

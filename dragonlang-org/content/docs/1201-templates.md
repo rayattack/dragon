@@ -40,6 +40,7 @@ That single decision is why Dragon templates emit JSON, CSS, and JavaScript with
 any escaping ceremony:
 
 ```dragon
+name: str = "World"
 config: str = template {
 {"name": "!{name}", "theme": {"color": "red"}}
 }

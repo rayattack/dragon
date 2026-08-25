@@ -22,6 +22,8 @@ struct LexerOptions {
     std::string filename = "<stdin>";
 
     bool inTemplateInterpolation = false;
+
+    size_t startLine = 1;
 };
 
 class Lexer {

@@ -238,3 +238,10 @@ TEST(SemaTest, ExceptAsTargetIsHandlerLocal) {
     EXPECT_TRUE(analyzeHasErrors(code("except_as_target_is_handler_local")));
     EXPECT_TRUE(analyzeOk(code("except_as_target_is_handler_local_2")));
 }
+
+TEST(SemaTest, TemplateInterpolationResolvesNames) {
+    EXPECT_TRUE(analyzeHasErrors(code("template_interp_undefined_name")));
+    EXPECT_TRUE(analyzeHasErrors(code("template_interp_undefined_call")));
+    EXPECT_TRUE(analyzeHasErrors(code("template_block_undefined_iterable")));
+    EXPECT_TRUE(analyzeOk(code("template_block_binds_loop_variable")));
+}

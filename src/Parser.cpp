@@ -155,6 +155,7 @@ std::vector<TemplatePart> Parser::parseTemplateBody(
             LexerOptions fLexOpts;
             fLexOpts.filename = "<template>";
             fLexOpts.inTemplateInterpolation = true;
+            fLexOpts.startLine = loc.line - (lineOf(val.size()) - lineOf(bangPos));
             Lexer fLexer(parseText, fLexOpts);
             auto fTokens = fLexer.tokenize();
             ParserOptions fOpts;
@@ -979,6 +980,7 @@ std::unique_ptr<Expr> Parser::primary() {
                     LexerOptions fLexOpts;
                     fLexOpts.filename = "<fstring>";
                     fLexOpts.useBraceBlocks = impl_->options.isDragonFile;
+                    fLexOpts.startLine = lit->location().line;
                     Lexer fLexer(exprText, fLexOpts);
                     auto fTokens = fLexer.tokenize();
                     ParserOptions fOpts;
