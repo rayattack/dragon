@@ -19,6 +19,20 @@ static bool aggregateElemSupported(const std::string& fn, Type::Kind ek) {
     return numeric || (fn != "sum" && ek == Type::Kind::Str);
 }
 
+static std::shared_ptr<Type> dunderReturnType(const ClassType* cls,
+                                              const char* dunder) {
+    for (int guard = 0; cls && guard < 64; ++guard) {
+        auto it = cls->methods.find(dunder);
+        if (it != cls->methods.end() && it->second &&
+            it->second->kind() == Type::Kind::Function)
+            return static_cast<FunctionType&>(*it->second).returnType;
+        cls = (cls->parentClass && cls->parentClass->kind() == Type::Kind::Class)
+                  ? static_cast<const ClassType*>(cls->parentClass.get())
+                  : nullptr;
+    }
+    return nullptr;
+}
+
 static bool hasDeclaredBase(const ClassType& ct, const char* baseName) {
     if (!ct.decl) return false;
     for (auto& base : ct.decl->bases) {
@@ -1522,6 +1536,12 @@ void TypeChecker::visit(SubscriptExpr& node) {
             }
             node.type = impl_->unknownType;
             return;
+        }
+        if (inst.classType && !isSlice) {
+            if (auto rt = dunderReturnType(inst.classType.get(), "__getitem__")) {
+                node.type = rt;
+                return;
+            }
         }
     }
     if (objType->kind() == Type::Kind::Tuple) {
