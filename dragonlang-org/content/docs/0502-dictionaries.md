@@ -29,6 +29,38 @@ print(ages.Ada)             # 36  - dot-access (string keys)
 print(ages.get("Bob", 0))   # 0   - default for a missing key
 ```
 
+The two loud readers and the safe one are worth keeping straight. `d[key]` and
+`d.key` are the same operation - dot-access is sugar for the bracket - and both
+raise `KeyError` when the key is absent. `get` is the reader that does not raise:
+
+```dragon
+ages: dict[str, int] = {"Ada": 36}
+found: int | None = ages.get("Ada")
+missing: int | None = ages.get("Bob")
+print(found)                # 36
+print(missing is none)      # True
+print(ages.get("Bob", 0))   # 0
+```
+
+One-argument `get` returns `T | None`, so you narrow it before use, or reach for
+`or` to supply a default in one line:
+
+```dragon
+ages: dict[str, int] = {"Ada": 36}
+age: int | None = ages.get("Bob")
+if age is not none {
+    print(age + 1)
+}
+name: dict[str, str] = {"a": "Ada"}
+label: str = name.get("zz") or "unknown"
+print(label)                # unknown
+```
+
+For a pointer-shaped value type - `str`, `bytes`, a `list`, a `dict`, a class
+instance - `T | None` is a single nullable pointer, so the safe reader costs
+nothing over the raising one. Two-argument `get(key, default)` returns a plain
+`T` and needs no narrowing.
+
 Inside an f-string, remember the quote rule from
 [F-strings](/docs/0402-formatting): use a single-quoted key or dot-access, since
 a double quote would close the string - `f"{ages['Ada']}"` or `f"{ages.Ada}"`.

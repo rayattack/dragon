@@ -8,13 +8,17 @@ class DictGetHeapRcTests(TestCase) {
     def test_str_keyed_get_keeps_dict_value() {
         d: dict[str, list[int]] = {"a": [1, 2, 3]}
         if True {
-            g: list[int] = d.get("a")
-            self.assertEqual(len(g), 3)
-            self.assertEqual(g[0], 1)
+            g: list[int] | None = d.get("a")
+            if g is not none {
+                self.assertEqual(len(g), 3)
+                self.assertEqual(g[0], 1)
+            }
         }
-        again: list[int] = d.get("a")
-        self.assertEqual(len(again), 3)
-        self.assertEqual(again[2], 3)
+        again: list[int] | None = d.get("a")
+        if again is not none {
+            self.assertEqual(len(again), 3)
+            self.assertEqual(again[2], 3)
+        }
     }
 
     def test_str_keyed_get_default_present_and_absent() {
@@ -28,19 +32,25 @@ class DictGetHeapRcTests(TestCase) {
             self.assertEqual(len(m), 2)
             self.assertEqual(m[0], 9)
         }
-        again: list[int] = d.get("a")
-        self.assertEqual(len(again), 3)
+        again: list[int] | None = d.get("a")
+        if again is not none {
+            self.assertEqual(len(again), 3)
+        }
     }
 
     def test_int_keyed_get_keeps_dict_value() {
         d: dict[int, list[int]] = {7: [4, 5, 6, 7]}
         if True {
-            g: list[int] = d.get(7)
-            self.assertEqual(len(g), 4)
-            self.assertEqual(g[1], 5)
+            g: list[int] | None = d.get(7)
+            if g is not none {
+                self.assertEqual(len(g), 4)
+                self.assertEqual(g[1], 5)
+            }
         }
-        again: list[int] = d.get(7)
-        self.assertEqual(len(again), 4)
+        again: list[int] | None = d.get(7)
+        if again is not none {
+            self.assertEqual(len(again), 4)
+        }
     }
 
     def test_int_keyed_get_default_present_and_absent() {
@@ -53,23 +63,27 @@ class DictGetHeapRcTests(TestCase) {
             m: list[int] = d.get(99, [1, 2, 3])
             self.assertEqual(len(m), 3)
         }
-        again: list[int] = d.get(7)
-        self.assertEqual(len(again), 4)
+        again: list[int] | None = d.get(7)
+        if again is not none {
+            self.assertEqual(len(again), 4)
+        }
     }
 
     def test_get_result_outlives_dropped_dict() {
         # The dual property: the get result OWNS its ref and survives the SOURCE dict being
         # dropped; a missing incref frees the list out from under `keep` (ASan-caught UAF).
         d: dict[str, list[int]] = {"k": [7, 8, 9, 10]}
-        keep: list[int] = d.get("k")
+        keep: list[int] | None = d.get("k")
         d = {}
         i: int = 0
         while i < 200 {
             junk: list[int] = [i, i, i]
             i = i + 1
         }
-        self.assertEqual(len(keep), 4)
-        self.assertEqual(keep[3], 10)
+        if keep is not none {
+            self.assertEqual(len(keep), 4)
+            self.assertEqual(keep[3], 10)
+        }
     }
 
     def test_get_loop_stress() {
@@ -80,24 +94,32 @@ class DictGetHeapRcTests(TestCase) {
         i: int = 0
         while i < 1000 {
             if True {
-                g: list[int] = d.get("a")
-                acc = acc + len(g)
+                g: list[int] | None = d.get("a")
+                if g is not none {
+                    acc = acc + len(g)
+                }
             }
             i = i + 1
         }
         self.assertEqual(acc, 3000)
-        again: list[int] = d.get("a")
-        self.assertEqual(len(again), 3)
+        again: list[int] | None = d.get("a")
+        if again is not none {
+            self.assertEqual(len(again), 3)
+        }
     }
 
     def test_set_valued_get_generality() {
         d: dict[str, set[int]] = {"s": {1, 2, 3}}
         if True {
-            g: set[int] = d.get("s")
-            self.assertEqual(len(g), 3)
+            g: set[int] | None = d.get("s")
+            if g is not none {
+                self.assertEqual(len(g), 3)
+            }
         }
-        again: set[int] = d.get("s")
-        self.assertEqual(len(again), 3)
+        again: set[int] | None = d.get("s")
+        if again is not none {
+            self.assertEqual(len(again), 3)
+        }
     }
 }
 

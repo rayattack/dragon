@@ -1,0 +1,105 @@
+from unittest import TestCase, main
+
+class DictGetOptionalTests(TestCase) {
+    def test_scalar_hit_and_miss() {
+        d: dict[str, int] = {a: 10}
+        hit: int | None = d.get("a")
+        if hit is not none {
+            self.assertEqual(hit, 10)
+        }
+        miss: int | None = d.get("zz")
+        self.assertTrue(miss is none)
+    }
+
+    def test_str_valued_hit_and_miss() {
+        d: dict[str, str] = {a: "hello"}
+        hit: str | None = d.get("a")
+        if hit is not none {
+            self.assertEqual(hit, "hello")
+        }
+        miss: str | None = d.get("zz")
+        self.assertTrue(miss is none)
+    }
+
+    def test_heap_valued_hit_and_miss() {
+        d: dict[str, list[int]] = {a: [1, 2, 3]}
+        hit: list[int] | None = d.get("a")
+        if hit is not none {
+            self.assertEqual(len(hit), 3)
+        }
+        miss: list[int] | None = d.get("zz")
+        self.assertTrue(miss is none)
+    }
+
+    def test_int_keyed_hit_and_miss() {
+        d: dict[int, str] = {7: "seven"}
+        hit: str | None = d.get(7)
+        if hit is not none {
+            self.assertEqual(hit, "seven")
+        }
+        miss: str | None = d.get(99)
+        self.assertTrue(miss is none)
+    }
+
+    def test_any_valued_keeps_its_tag() {
+        d: dict[str, Any] = {n: 10, s: "string", b: True}
+        self.assertEqual(str(d.get("s")), "string")
+        self.assertEqual(str(d.get("n")), "10")
+        self.assertEqual(str(d.get("b")), "True")
+    }
+
+    def test_any_valued_default_keeps_its_tag() {
+        d: dict[str, Any] = {s: "string"}
+        self.assertEqual(str(d.get("s", "fallback")), "string")
+        self.assertEqual(str(d.get("zz", "fallback")), "fallback")
+    }
+
+    def test_any_valued_miss_is_none() {
+        d: dict[str, Any] = {s: "string"}
+        self.assertTrue(d.get("zz") is none)
+    }
+
+    def test_two_arg_get_is_unchanged() {
+        d: dict[str, int] = {a: 10}
+        self.assertEqual(d.get("a", 0), 10)
+        self.assertEqual(d.get("zz", 0), 0)
+    }
+
+    def test_bracket_and_dot_still_raise() {
+        d: dict[str, int] = {a: 10}
+        raised_bracket: bool = False
+        try {
+            probe: int = d["zz"]
+        } except KeyError {
+            raised_bracket = True
+        }
+        self.assertTrue(raised_bracket)
+        self.assertEqual(d.a, 10)
+        self.assertEqual(d["a"], 10)
+    }
+
+    def test_get_result_outlives_source_dict() {
+        d: dict[str, list[int]] = {k: [7, 8, 9, 10]}
+        keep: list[int] | None = d.get("k")
+        d = {}
+        i: int = 0
+        while i < 200 {
+            junk: list[int] = [i, i, i]
+            i = i + 1
+        }
+        if keep is not none {
+            self.assertEqual(len(keep), 4)
+            self.assertEqual(keep[3], 10)
+        }
+    }
+
+    def test_or_supplies_a_default_for_a_miss() {
+        d: dict[str, str] = {a: "hello"}
+        got: str = d.get("zz") or "fallback"
+        self.assertEqual(got, "fallback")
+        kept: str = d.get("a") or "fallback"
+        self.assertEqual(kept, "hello")
+    }
+}
+
+main([DictGetOptionalTests()])

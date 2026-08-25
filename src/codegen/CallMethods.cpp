@@ -1634,17 +1634,25 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             llvm::Value* key = normDictKey(impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases));
             // Heap-valued dict: own the returned value (the getter increfs) so
             // the binding's scope-decref balances - a bare borrow would UAF.
-            if (isHeapValueKind(dictValueKind())) {
+            Type::Kind oneArgVk = dictValueKind();
+            if (oneArgVk == Type::Kind::Str) {
                 impl_->lastValue = impl_->builder->CreateCall(
-                    impl_->runtimeFuncs[intKeyed ? "dragon_dict_int_get_owned"
-                                                 : "dragon_dict_get_ptr"],
-                    {obj, key}, "dictget.owned");
+                    impl_->runtimeFuncs[intKeyed ? "dragon_dict_int_get_str_or_null"
+                                                 : "dragon_dict_get_str_or_null"],
+                    {obj, key}, "dictget.strornull");
                 return true;
             }
-            llvm::Value* raw = impl_->builder->CreateCall(
-                impl_->runtimeFuncs[intKeyed ? "dragon_dict_int_get" : "dragon_dict_get"],
-                {obj, key}, "dictget");
-            impl_->lastValue = coerceDictValue(raw);
+            if (isHeapValueKind(oneArgVk)) {
+                impl_->lastValue = impl_->builder->CreateCall(
+                    impl_->runtimeFuncs[intKeyed ? "dragon_dict_int_get_ptr_or_null"
+                                                 : "dragon_dict_get_ptr_or_null"],
+                    {obj, key}, "dictget.ornull");
+                return true;
+            }
+            impl_->lastValue = impl_->builder->CreateCall(
+                impl_->runtimeFuncs[intKeyed ? "dragon_dict_int_get_box_or_none"
+                                             : "dragon_dict_get_box_or_none"],
+                {obj, key}, "dictget.ornone");
             return true;
         }
 
@@ -1662,6 +1670,19 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
                 impl_->lastValue = impl_->builder->CreateCall(
                     impl_->runtimeFuncs["dragon_dict_get_str_default"],
                     {obj, key, defVal}, "dictgetstrdef");
+                return true;
+            }
+            if (getVk == Type::Kind::Any) {
+                Impl::VarKind bdk = impl_->ownedTempDrainKind(node.args[1].get(), defVal);
+                llvm::Value* defBox = defVal->getType() == impl_->boxType
+                    ? defVal
+                    : impl_->makeBox(impl_->emitTagForExpr(node.args[1].get(), *this),
+                                     defVal);
+                impl_->lastValue = impl_->builder->CreateCall(
+                    impl_->runtimeFuncs[intKeyed ? "dragon_dict_int_get_box_default"
+                                                 : "dragon_dict_get_box_default"],
+                    {obj, key, defBox}, "dictgetboxdef");
+                if (bdk != Impl::VarKind::Other) impl_->emitDecrefByKind(defVal, bdk);
                 return true;
             }
             if (isHeapValueKind(getVk)) {

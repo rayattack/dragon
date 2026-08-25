@@ -243,6 +243,16 @@ const char* dragon_string_alloc(const char* src, int64_t byte_len);
 
 // Str-valued get(key, default) returns an OWNED reference (incref'd stored
 // value or a fresh default copy); the generic BORROW variant double-freed here (registry CSRF/login form UAF).
+const char* dragon_dict_get_str_or_null(DragonDict* d, const char* key) {
+    uint64_t h = dict_hash(key);
+    int64_t slot = dict_probe(d, key, h);
+    int64_t idx = d->indices[slot];
+    if (idx < 0) return nullptr;
+    const char* v = (const char*)(uintptr_t)d->entries[idx].value;
+    if (v) dragon_incref_str(v);
+    return v;
+}
+
 const char* dragon_dict_get_str_default(DragonDict* d, const char* key, const char* def) {
     uint64_t h = dict_hash(key);
     int64_t slot = dict_probe(d, key, h);
@@ -261,6 +271,35 @@ int64_t dragon_dict_get_tag(DragonDict* d, const char* key) {
     int64_t idx = d->indices[slot];
     if (idx >= 0) return d->entries[idx].tag;
     return TAG_INT;
+}
+
+DragonBox dragon_dict_get_box_default(DragonDict* d, const char* key,
+                                      DragonBox def) {
+    uint64_t h = dict_hash(key);
+    int64_t slot = dict_probe(d, key, h);
+    int64_t idx = d->indices[slot];
+    DragonBox box = def;
+    if (idx >= 0) {
+        box.tag = (int64_t)d->entries[idx].tag;
+        box.payload = d->entries[idx].value;
+    }
+    dragon_incref_tagged(box.payload, (uint8_t)box.tag);
+    return box;
+}
+
+DragonBox dragon_dict_get_box_or_none(DragonDict* d, const char* key) {
+    uint64_t h = dict_hash(key);
+    int64_t slot = dict_probe(d, key, h);
+    int64_t idx = d->indices[slot];
+    DragonBox box;
+    if (idx < 0) {
+        box.tag = TAG_NONE;
+        box.payload = 0;
+        return box;
+    }
+    box.tag = (int64_t)d->entries[idx].tag;
+    box.payload = d->entries[idx].value;
+    return box;
 }
 
 DragonBox dragon_dict_get_box(DragonDict* d, const char* key) {
@@ -402,6 +441,16 @@ void* dragon_dict_get_ptr(DragonDict* d, const char* key) {
     }
     dragon_raise_keyerror(key);
     return nullptr;
+}
+
+void* dragon_dict_get_ptr_or_null(DragonDict* d, const char* key) {
+    uint64_t h = dict_hash(key);
+    int64_t slot = dict_probe(d, key, h);
+    int64_t idx = d->indices[slot];
+    if (idx < 0) return nullptr;
+    void* v = (void*)(uintptr_t)d->entries[idx].value;
+    if (v) dragon_incref(v);
+    return v;
 }
 
 void* dragon_dict_get_ptr_default(DragonDict* d, const char* key, void* def) {
@@ -1021,9 +1070,48 @@ const char* dragon_dict_int_get_str(DragonDict* d, int64_t key) {
     return (const char*)(uintptr_t)bits;
 }
 
+const char* dragon_dict_int_get_str_or_null(DragonDict* d, int64_t key) {
+    uint64_t h = dict_hash_i64(key);
+    int64_t slot = dict_probe_i64(d, key, h);
+    int64_t idx = d->indices[slot];
+    if (idx < 0) return nullptr;
+    const char* v = (const char*)(uintptr_t)d->entries[idx].value;
+    if (v) dragon_incref_str(v);
+    return v;
+}
+
 void* dragon_dict_int_get_ptr(DragonDict* d, int64_t key, int64_t expected_tag) {
     int64_t bits = dragon_dict_int_get_checked(d, key, expected_tag);
     return (void*)(uintptr_t)bits;
+}
+
+DragonBox dragon_dict_int_get_box_default(DragonDict* d, int64_t key,
+                                          DragonBox def) {
+    uint64_t h = dict_hash_i64(key);
+    int64_t slot = dict_probe_i64(d, key, h);
+    int64_t idx = d->indices[slot];
+    DragonBox box = def;
+    if (idx >= 0) {
+        box.tag = (int64_t)d->entries[idx].tag;
+        box.payload = d->entries[idx].value;
+    }
+    dragon_incref_tagged(box.payload, (uint8_t)box.tag);
+    return box;
+}
+
+DragonBox dragon_dict_int_get_box_or_none(DragonDict* d, int64_t key) {
+    uint64_t h = dict_hash_i64(key);
+    int64_t slot = dict_probe_i64(d, key, h);
+    int64_t idx = d->indices[slot];
+    DragonBox box;
+    if (idx < 0) {
+        box.tag = TAG_NONE;
+        box.payload = 0;
+        return box;
+    }
+    box.tag = (int64_t)d->entries[idx].tag;
+    box.payload = d->entries[idx].value;
+    return box;
 }
 
 DragonBox dragon_dict_int_get_box(DragonDict* d, int64_t key) {
@@ -1061,6 +1149,16 @@ void* dragon_dict_int_get_owned(DragonDict* d, int64_t key) {
     }
     dragon_raise_keyerror_int(key);
     return nullptr;
+}
+
+void* dragon_dict_int_get_ptr_or_null(DragonDict* d, int64_t key) {
+    uint64_t h = dict_hash_i64(key);
+    int64_t slot = dict_probe_i64(d, key, h);
+    int64_t idx = d->indices[slot];
+    if (idx < 0) return nullptr;
+    void* v = (void*)(uintptr_t)d->entries[idx].value;
+    if (v) dragon_incref(v);
+    return v;
 }
 
 void* dragon_dict_int_get_owned_default(DragonDict* d, int64_t key, void* def) {

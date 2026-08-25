@@ -765,6 +765,8 @@ bool CodeGen::Impl::isOwnedBoxResult(llvm::Value* v) {
         static const std::unordered_set<std::string> kBorrowedBoxReturners = {
             "dragon_dict_get_box",
             "dragon_dict_int_get_box",
+            "dragon_dict_get_box_or_none",
+            "dragon_dict_int_get_box_or_none",
             "dragon_list_box_get",
             "dragon_tuple_box_get",
         };

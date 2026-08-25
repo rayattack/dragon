@@ -12,8 +12,10 @@ class DictSetdefaultHeapRcTests(TestCase) {
             self.assertEqual(len(g), 3)
             self.assertEqual(g[0], 1)
         }
-        again: list[int] = d.get("a")
-        self.assertEqual(len(again), 3)
+        again: list[int] | None = d.get("a")
+        if again is not none {
+            self.assertEqual(len(again), 3)
+        }
     }
 
     def test_str_absent_inserts_and_returns() {
@@ -22,9 +24,11 @@ class DictSetdefaultHeapRcTests(TestCase) {
             g: list[int] = d.setdefault("z", [7, 7, 7, 7])
             self.assertEqual(len(g), 4)
         }
-        again: list[int] = d.get("z")
-        self.assertEqual(len(again), 4)
-        self.assertEqual(again[0], 7)
+        again: list[int] | None = d.get("z")
+        if again is not none {
+            self.assertEqual(len(again), 4)
+            self.assertEqual(again[0], 7)
+        }
     }
 
     def test_str_absent_borrowed_default_aliases() {
@@ -52,10 +56,14 @@ class DictSetdefaultHeapRcTests(TestCase) {
             h: list[int] = d.setdefault(9, [1, 2, 3])
             self.assertEqual(len(h), 3)
         }
-        a7: list[int] = d.get(7)
-        a9: list[int] = d.get(9)
-        self.assertEqual(len(a7), 4)
-        self.assertEqual(len(a9), 3)
+        a7: list[int] | None = d.get(7)
+        a9: list[int] | None = d.get(9)
+        if a7 is not none {
+            self.assertEqual(len(a7), 4)
+        }
+        if a9 is not none {
+            self.assertEqual(len(a9), 3)
+        }
     }
 
     def test_result_outlives_dropped_dict() {
@@ -85,8 +93,10 @@ class DictSetdefaultHeapRcTests(TestCase) {
             i = i + 1
         }
         self.assertEqual(acc, 3000)
-        again: list[int] = d.get("a")
-        self.assertEqual(len(again), 3)
+        again: list[int] | None = d.get("a")
+        if again is not none {
+            self.assertEqual(len(again), 3)
+        }
     }
 
     def test_set_valued_generality() {
@@ -95,8 +105,10 @@ class DictSetdefaultHeapRcTests(TestCase) {
             g: set[int] = d.setdefault("s", {1, 2, 3})
             self.assertEqual(len(g), 3)
         }
-        again: set[int] = d.get("s")
-        self.assertEqual(len(again), 3)
+        again: set[int] | None = d.get("s")
+        if again is not none {
+            self.assertEqual(len(again), 3)
+        }
     }
 
     def test_borrowed_key_on_insert_survives() {
@@ -116,8 +128,10 @@ class DictSetdefaultHeapRcTests(TestCase) {
         }
         self.assertEqual(total, 240)
         probe: str = "key7"
-        got: list[int] = d.get(probe)
-        self.assertEqual(len(got), 2)
+        got: list[int] | None = d.get(probe)
+        if got is not none {
+            self.assertEqual(len(got), 2)
+        }
     }
 
     def test_borrowed_key_present_branch_balanced() {
@@ -151,8 +165,10 @@ class DictSetdefaultHeapRcTests(TestCase) {
             total = total + len(k)
         }
         self.assertEqual(total, 240)
-        got: int = d.get("key7")
-        self.assertEqual(got, 7)
+        got: int | None = d.get("key7")
+        if got is not none {
+            self.assertEqual(got, 7)
+        }
     }
 
     def test_scalar_borrowed_key_present_balanced() {

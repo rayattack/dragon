@@ -259,6 +259,14 @@ void CodeGen::Impl::declareRuntimeFunctions() {
         llvm::FunctionType::get(i64Type, {i8PtrType, i8PtrType, i64Type}, false));
     getOrDeclareRuntime("dragon_dict_get_box",
         llvm::FunctionType::get(boxType, {i8PtrType, i8PtrType}, false));
+    getOrDeclareRuntime("dragon_dict_get_box_or_none",
+        llvm::FunctionType::get(boxType, {i8PtrType, i8PtrType}, false));
+    getOrDeclareRuntime("dragon_dict_int_get_box_or_none",
+        llvm::FunctionType::get(boxType, {i8PtrType, i64Type}, false));
+    getOrDeclareRuntime("dragon_dict_get_box_default",
+        llvm::FunctionType::get(boxType, {i8PtrType, i8PtrType, boxType}, false));
+    getOrDeclareRuntime("dragon_dict_int_get_box_default",
+        llvm::FunctionType::get(boxType, {i8PtrType, i64Type, boxType}, false));
     getOrDeclareRuntime("dragon_print_box",
         llvm::FunctionType::get(voidType, {boxType}, false));
 
@@ -377,6 +385,14 @@ void CodeGen::Impl::declareRuntimeFunctions() {
         llvm::FunctionType::get(i8PtrType, {i8PtrType, i8PtrType, i8PtrType}, false));
     getOrDeclareRuntime("dragon_dict_get_ptr",
         llvm::FunctionType::get(i8PtrType, {i8PtrType, i8PtrType}, false));
+    getOrDeclareRuntime("dragon_dict_get_ptr_or_null",
+        llvm::FunctionType::get(i8PtrType, {i8PtrType, i8PtrType}, false));
+    getOrDeclareRuntime("dragon_dict_int_get_ptr_or_null",
+        llvm::FunctionType::get(i8PtrType, {i8PtrType, i64Type}, false));
+    getOrDeclareRuntime("dragon_dict_get_str_or_null",
+        llvm::FunctionType::get(i8PtrType, {i8PtrType, i8PtrType}, false));
+    getOrDeclareRuntime("dragon_dict_int_get_str_or_null",
+        llvm::FunctionType::get(i8PtrType, {i8PtrType, i64Type}, false));
     getOrDeclareRuntime("dragon_dict_get_ptr_default",
         llvm::FunctionType::get(i8PtrType, {i8PtrType, i8PtrType, i8PtrType}, false));
     getOrDeclareRuntime("dragon_dict_int_get_owned",

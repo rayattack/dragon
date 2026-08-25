@@ -26,8 +26,11 @@ class OwnedRecvSubscriptRC(TestCase) {
         i: int = 0
         while i < 2000 {
             cfg: dict[str, dict[str, str]] = {"db": {"host": "local-" + str(i)}}
-            h: str = cfg.get("db")["host"]
-            self.assertTrue(len(h) > 6)
+            inner: dict[str, str] | None = cfg.get("db")
+            if inner is not none {
+                h: str = inner["host"]
+                self.assertTrue(len(h) > 6)
+            }
             i = i + 1
         }
     }

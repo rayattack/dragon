@@ -347,6 +347,8 @@ private:
     std::shared_ptr<Type> joinBranchTypes(const std::shared_ptr<Type>& left,
                                           const std::shared_ptr<Type>& right);
 
+    std::shared_ptr<Type> dictGetResultType(CallExpr& node,
+                                            const std::shared_ptr<Type>& declared);
     bool tryExpectedTypeLiteral(Expr* value, const std::shared_ptr<Type>& expected);
     void boxNestedContainerLiteralForAny(Expr* value);
     static std::string listReprMismatchHint(const Type& from, const Type& to);

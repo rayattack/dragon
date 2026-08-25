@@ -681,7 +681,7 @@ void TypeChecker::visit(CallExpr& node) {
                 return;
             }
         }
-        node.type = ft.returnType;
+        node.type = dictGetResultType(node, ft.returnType);
         return;
     }
 
@@ -925,6 +925,36 @@ void TypeChecker::visit(AsCastExpr& node) {
 }
 
 void TypeChecker::visit(ContractSetTypeExpr&) {}
+
+std::shared_ptr<Type> TypeChecker::dictGetResultType(
+        CallExpr& node, const std::shared_ptr<Type>& declared) {
+    if (node.args.size() != 1 || !node.kwArgs.empty()) return declared;
+    auto* attr = dynamic_cast<AttributeExpr*>(node.callee.get());
+    if (!attr || attr->attribute != "get") return declared;
+    auto recv = attr->object ? attr->object->type : nullptr;
+    if (!recv || recv->kind() != Type::Kind::Dict) return declared;
+    auto value = static_cast<DictType&>(*recv).valueType;
+    if (!value) return declared;
+    switch (value->kind()) {
+        case Type::Kind::Any:
+        case Type::Kind::Unknown:
+        case Type::Kind::Union:
+        case Type::Kind::None_:
+            return declared;
+        default:
+            break;
+    }
+    return std::make_shared<UnionType>(
+        std::vector<std::shared_ptr<Type>>{value, impl_->noneType});
+}
+
+static bool unionIncludesNone(const std::shared_ptr<Type>& t) {
+    if (!t || t->kind() != Type::Kind::Union) return false;
+    for (auto& m : static_cast<UnionType&>(*t).types) {
+        if (m && m->kind() == Type::Kind::None_) return true;
+    }
+    return false;
+}
 
 static bool builtinMembersAreClosed(const std::shared_ptr<Type>& t) {
     if (!t) return false;
@@ -1419,6 +1449,14 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
 void TypeChecker::visit(SubscriptExpr& node) {
     auto objType = inferType(node.object.get());
     auto idxType = inferType(node.index.get());
+
+    if (unionIncludesNone(objType)) {
+        error(node.location(), "cannot index a possibly-none value of type '" +
+              objType->toString() + "'; narrow it first, e.g. "
+              "`if v is not none { v[...] }`");
+        node.type = impl_->unknownType;
+        return;
+    }
 
     if (objType && objType->kind() == Type::Kind::TypeVar) {
         auto& tv = static_cast<TypeVarType&>(*objType);
