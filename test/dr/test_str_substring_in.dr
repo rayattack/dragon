@@ -1,0 +1,86 @@
+from unittest import TestCase, main
+
+class StrSubstringInTests(TestCase) {
+    def test_substring_present_and_absent() {
+        s: str = "Hello, World"
+        self.assertTrue("Hello" in s)
+        self.assertTrue("o, W" in s)
+        self.assertTrue("World" in s)
+        self.assertFalse("xyz" in s)
+    }
+
+    def test_is_case_sensitive() {
+        s: str = "Hello"
+        self.assertTrue("Hello" in s)
+        self.assertFalse("hello" in s)
+        self.assertFalse("HELLO" in s)
+    }
+
+    def test_whole_string_and_overlong_needle() {
+        s: str = "hello world"
+        self.assertTrue("hello world" in s)
+        self.assertFalse("hello world!" in s)
+    }
+
+    def test_empty_needle_is_always_present() {
+        self.assertTrue("" in "anything")
+        empty: str = ""
+        self.assertTrue("" in empty)
+        self.assertFalse("a" in empty)
+    }
+
+    def test_matches_whole_code_points_not_bytes() {
+        u: str = "café über"
+        self.assertTrue("é" in u)
+        self.assertTrue("über" in u)
+        self.assertTrue("café" in u)
+        self.assertFalse("cafe" in u)
+        self.assertFalse("CAFÉ" in u)
+    }
+
+    def test_agrees_with_find() {
+        s: str = "Dragon Lang"
+        self.assertEqual("rag" in s, s.find("rag") >= 0)
+        self.assertEqual("zzz" in s, s.find("zzz") >= 0)
+        u: str = "café über"
+        self.assertEqual("é" in u, u.find("é") >= 0)
+        self.assertEqual("cafe" in u, u.find("cafe") >= 0)
+    }
+
+    def test_not_in_negates() {
+        s: str = "Dragon Lang"
+        self.assertTrue("zzz" not in s)
+        self.assertFalse("rag" not in s)
+    }
+
+    def test_owned_temporary_operand() {
+        raw: str = "  Dragon Lang  "
+        self.assertTrue("lang" in raw.strip().lower())
+        self.assertFalse("Lang" in raw.strip().lower())
+    }
+
+    def test_heap_built_operands() {
+        i: int = 7
+        built: str = "key-" + str(i)
+        needle: str = "y-" + str(i)
+        self.assertTrue(needle in built)
+        self.assertFalse("y-8" in built)
+    }
+
+    def test_loop_stress_keeps_operand_intact() {
+        base: str = "abcdefghij"
+        hits: int = 0
+        i: int = 0
+        while i < 2000 {
+            probe: str = "de" + ""
+            if probe in base {
+                hits = hits + 1
+            }
+            i = i + 1
+        }
+        self.assertEqual(hits, 2000)
+        self.assertEqual(len(base), 10)
+    }
+}
+
+main([StrSubstringInTests()])

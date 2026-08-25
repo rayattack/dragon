@@ -1626,3 +1626,21 @@ name on a dict receiver must not be rejected.
 ages: dict[str, int] = {"Ada": 36}
 print(ages.Ada)
 ```
+
+#### :str_contains_method_rejected
+
+`str.contains()` was retired in favour of the `in` operator, which is the same
+operation. The diagnostic names the replacement.
+
+```dr
+s: str = "hello"
+print(s.contains("ell"))
+```
+
+#### :str_substring_in_accepted
+
+```dr
+s: str = "hello"
+print("ell" in s)
+print("zzz" not in s)
+```

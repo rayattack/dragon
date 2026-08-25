@@ -1787,3 +1787,8 @@ TEST(TypeCheckerTest, BuiltinAttributeMembersAreChecked) {
     EXPECT_TRUE(checkOk(code("builtin_attr_known_methods_accepted")));
     EXPECT_TRUE(checkOk(code("dict_dot_access_is_not_an_attribute_error")));
 }
+
+TEST(TypeCheckerTest, StrContainsRetiredForInOperator) {
+    EXPECT_TRUE(checkHasErrors(code("str_contains_method_rejected")));
+    EXPECT_TRUE(checkOk(code("str_substring_in_accepted")));
+}

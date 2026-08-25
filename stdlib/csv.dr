@@ -123,9 +123,9 @@ def parse_row_simple(line: str, delimiter: str) -> list[str] {
 
 
 def quote_field(field: str, delimiter: str) -> str {
-    const has_delim: bool = field.contains(delimiter)
-    const has_quote: bool = field.contains("\"")
-    const has_newline: bool = field.contains("\n")
+    const has_delim: bool = delimiter in field
+    const has_quote: bool = "\"" in field
+    const has_newline: bool = "\n" in field
 
     if has_delim or has_quote or has_newline {
         escaped: str = field.replace("\"", "\"\"")

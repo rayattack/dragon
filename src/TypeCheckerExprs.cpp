@@ -1148,6 +1148,14 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
             node.type = impl_->unknownType;
             return;
         }
+        if (node.attribute == "contains") {
+            error(node.location(),
+                  "str.contains() is not supported - use the `in` operator "
+                  "instead, e.g. `sub in s` (Dragon's one obvious way to test "
+                  "for a substring)");
+            node.type = impl_->unknownType;
+            return;
+        }
         if (node.attribute == "upper" || node.attribute == "lower" ||
             node.attribute == "strip" || node.attribute == "lstrip" ||
             node.attribute == "rstrip" || node.attribute == "replace" ||

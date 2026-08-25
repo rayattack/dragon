@@ -941,7 +941,7 @@ bool CodeGen::emitMethodCall(CallExpr& node, AttributeExpr& attr) {
             return true;
         }
 
-        if ((method == "startswith" || method == "endswith" || method == "contains") &&
+        if ((method == "startswith" || method == "endswith") &&
             node.args.size() >= 1) {
             node.args[0]->accept(*this);
             llvm::Value* arg = impl_->trackBorrowTempGuarded(node.args[0].get(), impl_->lastValue, argTemps, argTempBases);

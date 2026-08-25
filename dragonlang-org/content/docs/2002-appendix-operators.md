@@ -82,9 +82,14 @@ Identity (`is`, `is not`) is primarily used to test against `None`.
 | Operator | Meaning | Example |
 |---|---|---|
 | `in` | member of a container | `2 in [1, 2, 3]` is `True` |
+| `in` (on a `str`) | substring test | `"rag" in "Dragon"` is `True` |
 | `not in` | not a member | `5 not in [1, 2, 3]` is `True` |
 | `is` | identity test | `n is None` |
 | `is not` | negated identity | `n is not None` |
+
+On a `str`, `in` is a substring test, and it is the only way to spell one - there
+is no `.contains()` method. It is case-sensitive and matches whole code points.
+See [Strings](/docs/0401-strings).
 
 ## Assignment and augmented assignment
 

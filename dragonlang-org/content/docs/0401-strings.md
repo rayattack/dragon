@@ -111,6 +111,32 @@ print(s.count("o"))           # 2
 print(s.startswith("Hello"))  # True
 print(s.endswith("World"))    # True
 print("rag" in "Dragon")      # True - substring test
+print("xyz" not in "Dragon")  # True
+```
+
+`in` is the one way to test for a substring; there is no `.contains()` method.
+It works on any string expression, including one you just built:
+
+```dragon
+raw: str = "  Dragon Lang  "
+print("lang" in raw.strip().lower())   # True
+```
+
+It is case-sensitive and matches whole code points, not bytes, so non-ASCII text
+behaves the way it reads:
+
+```dragon
+const u: str = "café über"
+print("é" in u)               # True
+print("über" in u)            # True
+print("cafe" in u)            # False  - "cafe" is not in "café"
+print("CAFÉ" in u)            # False  - case-sensitive
+```
+
+An empty needle is always present, matching Python:
+
+```dragon
+print("" in "anything")       # True
 ```
 
 ## Splitting and joining
@@ -192,7 +218,7 @@ for ch in "abc" {
 | Upper / lower / title | `s.upper()`, `s.lower()`, `s.title()` |
 | Trim | `s.strip()`, `s.strip("x")`, `s.lstrip(...)` |
 | Find (or `-1`) | `s.find(sub)`, `s.rfind(sub)` |
-| Membership | `sub in s` |
+| Membership | `sub in s`, `sub not in s` |
 | Split / join | `s.split(",")`, `"-".join(parts)` |
 | Replace | `s.replace(old, new)`, `s.replace(old, new, 1)` |
 | Pad | `s.rjust(n, ".")`, `s.zfill(n)` |

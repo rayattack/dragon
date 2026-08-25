@@ -57,7 +57,7 @@ class ExpandvarsTests(TestCase) {
         const w: str = expandvars("a${HOME}b")
         self.assertTrue(w.startswith("a"))
         self.assertTrue(w.endswith("b"))
-        self.assertFalse(w.contains("$"))
+        self.assertFalse("$" in w)
     }
 
     def test_long_input() {
