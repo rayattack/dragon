@@ -32,8 +32,7 @@ void CodeGen::Impl::trackPtrParam(const std::string& paramName, TypeExpr* typeEx
         if (auto* generic = dynamic_cast<GenericTypeExpr*>(typeExpr)) {
             auto* base = dynamic_cast<NamedTypeExpr*>(generic->base.get());
             if (!base) return;
-            if ((base->name == "list" || base->name == "List") &&
-                !generic->typeArgs.empty()) {
+            if (base->name == "list" && !generic->typeArgs.empty()) {
                 TypeExpr* elemTy = generic->typeArgs[0].get();
                 VarKind ek = typeExprToKind(elemTy);
                 varListElemKinds[paramName] = elemVarKindToTypeKind(ek);
@@ -48,8 +47,7 @@ void CodeGen::Impl::trackPtrParam(const std::string& paramName, TypeExpr* typeEx
                     varListElemCallableType[paramName] =
                         callableTypeExprToFnType(cte);
                 }
-            } else if ((base->name == "dict" || base->name == "Dict") &&
-                       generic->typeArgs.size() == 2) {
+            } else if (base->name == "dict" && generic->typeArgs.size() == 2) {
                 TypeExpr* keyTy = generic->typeArgs[0].get();
                 TypeExpr* valTy = generic->typeArgs[1].get();
                 VarKind kk = typeExprToKind(keyTy);

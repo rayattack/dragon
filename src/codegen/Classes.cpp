@@ -93,13 +93,13 @@ void CodeGen::visit(ClassDecl& node) {
         if (!base) continue;
         const std::string& baseName = base->name;
         Type::Kind ek = impl_->typeExprToTypeKind(generic->typeArgs[0].get());
-        if (baseName == "list" || baseName == "List") {
+        if (baseName == "list") {
             impl_->classFieldListElemKindsBySym[clsSym][tgt->name] = ek;
             if (auto* elemNamed = dynamic_cast<NamedTypeExpr*>(generic->typeArgs[0].get())) {
                 if (impl_->classNames.count(elemNamed->name))
                     impl_->classFieldListElemClassNameBySym[clsSym][tgt->name] = elemNamed->name;
             }
-        } else if ((baseName == "dict" || baseName == "Dict") && generic->typeArgs.size() >= 2) {
+        } else if (baseName == "dict" && generic->typeArgs.size() >= 2) {
             Type::Kind kk = impl_->typeExprToTypeKind(generic->typeArgs[0].get());
             Type::Kind vk = impl_->typeExprToTypeKind(generic->typeArgs[1].get());
             impl_->classFieldDictKeyKindsBySym[clsSym][tgt->name] = kk;
@@ -424,8 +424,7 @@ void CodeGen::visit(ClassDecl& node) {
                                 }
                                 if (auto* generic = dynamic_cast<GenericTypeExpr*>(annAssign->annotation.get())) {
                                     if (auto* baseN = dynamic_cast<NamedTypeExpr*>(generic->base.get())) {
-                                        if ((baseN->name == "list" || baseN->name == "List") &&
-                                            !generic->typeArgs.empty()) {
+                                        if (baseN->name == "list" && !generic->typeArgs.empty()) {
                                             Type::Kind ek = impl_->typeExprToTypeKind(generic->typeArgs[0].get());
                                             impl_->classFieldListElemKindsBySym[clsSym][attrExpr->attribute] = ek;
                                             if (auto* elemNamed = dynamic_cast<NamedTypeExpr*>(generic->typeArgs[0].get())) {

@@ -29,11 +29,10 @@ static bool containerElementAnnotationIsType(TypeExpr* ann) {
         auto* n = dynamic_cast<NamedTypeExpr*>(a);
         return n && n->name == "type";
     };
-    bool listLike = base->name == "list" || base->name == "List" ||
-                    base->name == "set" || base->name == "Set";
+    bool listLike = base->name == "list" || base->name == "set";
     if (listLike && g->typeArgs.size() == 1)
         return isTypeArg(g->typeArgs[0].get());
-    if ((base->name == "dict" || base->name == "Dict") && g->typeArgs.size() == 2)
+    if (base->name == "dict" && g->typeArgs.size() == 2)
         return isTypeArg(g->typeArgs[1].get());
     return false;
 }

@@ -367,14 +367,14 @@ std::string CodeGen::Impl::typeExprCanonicalName(TypeExpr* t) const {
         if (auto* g = dynamic_cast<GenericTypeExpr*>(t)) {
             auto* base = dynamic_cast<NamedTypeExpr*>(g->base.get());
             std::string b = base ? base->name : "";
-            if ((b == "list" || b == "List") && g->typeArgs.size() == 1)
+            if (b == "list" && g->typeArgs.size() == 1)
                 return "list[" + typeExprCanonicalName(g->typeArgs[0].get()) + "]";
-            if ((b == "set" || b == "Set") && g->typeArgs.size() == 1)
+            if (b == "set" && g->typeArgs.size() == 1)
                 return "list[" + typeExprCanonicalName(g->typeArgs[0].get()) + "]";
-            if ((b == "dict" || b == "Dict") && g->typeArgs.size() == 2)
+            if (b == "dict" && g->typeArgs.size() == 2)
                 return "dict[" + typeExprCanonicalName(g->typeArgs[0].get()) + ", " +
                        typeExprCanonicalName(g->typeArgs[1].get()) + "]";
-            if (b == "tuple" || b == "Tuple") {
+            if (b == "tuple") {
                 std::string s = "tuple[";
                 for (size_t i = 0; i < g->typeArgs.size(); ++i) {
                     if (i) s += ", ";
@@ -402,10 +402,10 @@ Type::Kind CodeGen::Impl::typeExprToTypeKind(TypeExpr* typeExpr) {
             if (named->name == "bool") return Type::Kind::Bool;
             if (named->name == "str") return Type::Kind::Str;
             if (named->name == "bytes") return Type::Kind::Bytes;
-            if (named->name == "list" || named->name == "List") return Type::Kind::List;
-            if (named->name == "dict" || named->name == "Dict") return Type::Kind::Dict;
-            if (named->name == "tuple" || named->name == "Tuple") return Type::Kind::Tuple;
-            if (named->name == "set" || named->name == "Set") return Type::Kind::Set;
+            if (named->name == "list") return Type::Kind::List;
+            if (named->name == "dict") return Type::Kind::Dict;
+            if (named->name == "tuple") return Type::Kind::Tuple;
+            if (named->name == "set") return Type::Kind::Set;
             if (named->name == "Any" || named->name == "object") return Type::Kind::Any;
             if (typedDictClassesBySym.count(classSym(named->name))) return Type::Kind::Dict;
             if (!resolveAnnotationClassName(named->name).empty())
@@ -415,10 +415,10 @@ Type::Kind CodeGen::Impl::typeExprToTypeKind(TypeExpr* typeExpr) {
         }
         if (auto* generic = dynamic_cast<GenericTypeExpr*>(typeExpr)) {
             if (auto* base = dynamic_cast<NamedTypeExpr*>(generic->base.get())) {
-                if (base->name == "list" || base->name == "List")  return Type::Kind::List;
-                if (base->name == "dict" || base->name == "Dict")  return Type::Kind::Dict;
-                if (base->name == "tuple" || base->name == "Tuple") return Type::Kind::Tuple;
-                if (base->name == "set" || base->name == "Set")    return Type::Kind::Set;
+                if (base->name == "list")  return Type::Kind::List;
+                if (base->name == "dict")  return Type::Kind::Dict;
+                if (base->name == "tuple") return Type::Kind::Tuple;
+                if (base->name == "set")   return Type::Kind::Set;
             }
             if (!genericInstanceClassName(typeExpr).empty()) return Type::Kind::Instance;
             return Type::Kind::Int;
@@ -443,10 +443,10 @@ CodeGen::Impl::VarKind CodeGen::Impl::typeExprToKind(TypeExpr* typeExpr) {
             if (named->name == "str") return VarKind::Str;
             if (named->name == "bytes") return VarKind::List;
             if (named->name == "type") return VarKind::Type;
-            if (named->name == "list" || named->name == "List") return VarKind::List;
-            if (named->name == "dict" || named->name == "Dict") return VarKind::Dict;
-            if (named->name == "tuple" || named->name == "Tuple") return VarKind::Tuple;
-            if (named->name == "set" || named->name == "Set") return VarKind::Set;
+            if (named->name == "list") return VarKind::List;
+            if (named->name == "dict") return VarKind::Dict;
+            if (named->name == "tuple") return VarKind::Tuple;
+            if (named->name == "set") return VarKind::Set;
             if (named->name == "Any" || named->name == "object") return VarKind::Union;
             if (named->name == "Lock") return VarKind::Other;
             if (typedDictClassesBySym.count(classSym(named->name)))
@@ -459,13 +459,13 @@ CodeGen::Impl::VarKind CodeGen::Impl::typeExprToKind(TypeExpr* typeExpr) {
         }
         if (auto* generic = dynamic_cast<GenericTypeExpr*>(typeExpr)) {
             if (auto* base = dynamic_cast<NamedTypeExpr*>(generic->base.get())) {
-                if (base->name == "list" || base->name == "List")
+                if (base->name == "list")
                     return VarKind::List;
-                if (base->name == "dict" || base->name == "Dict")
+                if (base->name == "dict")
                     return VarKind::Dict;
-                if (base->name == "tuple" || base->name == "Tuple")
+                if (base->name == "tuple")
                     return VarKind::Tuple;
-                if (base->name == "set" || base->name == "Set")
+                if (base->name == "set")
                     return VarKind::Set;
             }
             if (!genericInstanceClassName(typeExpr).empty())
@@ -719,10 +719,10 @@ llvm::Type* CodeGen::Impl::typeExprToLLVM(TypeExpr* typeExpr) {
             if (named->name == "type") return i64Type;
             if (named->name == "None") return voidType;
             if (named->name == "Any" || named->name == "object") return boxType;
-            if (named->name == "list" || named->name == "List") return i8PtrType;
-            if (named->name == "dict" || named->name == "Dict") return i8PtrType;
-            if (named->name == "tuple" || named->name == "Tuple") return i8PtrType;
-            if (named->name == "set" || named->name == "Set") return i8PtrType;
+            if (named->name == "list") return i8PtrType;
+            if (named->name == "dict") return i8PtrType;
+            if (named->name == "tuple") return i8PtrType;
+            if (named->name == "set") return i8PtrType;
             if (named->name == "ptr") return i8PtrType;
             if (named->name == "Task") return i8PtrType;
             if (named->name == "Lock") return i8PtrType;

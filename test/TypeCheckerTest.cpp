@@ -1763,3 +1763,18 @@ TEST(TypeCheckerTest, ExceptionSubclassMessageConstructionOk) {
 TEST(TypeCheckerTest, NoConstructorSubclassZeroArgsOk) {
     EXPECT_TRUE(checkOk(code("no_ctor_subclass_zero_args_ok")));
 }
+
+TEST(TypeCheckerTest, CapitalCollectionAliasesRejected) {
+    EXPECT_TRUE(checkHasErrors("d: Dict = {}"));
+    EXPECT_TRUE(checkHasErrors("xs: List = []"));
+    EXPECT_TRUE(checkHasErrors("t: Tuple = (1, 2)"));
+    EXPECT_TRUE(checkHasErrors("s: Set = []"))
+        << "capital Set resolved to a list type, so a list literal was accepted";
+}
+
+TEST(TypeCheckerTest, LowercaseCollectionNamesStillResolve) {
+    EXPECT_TRUE(checkOk("d: dict = {}"));
+    EXPECT_TRUE(checkOk("xs: list = []"));
+    EXPECT_TRUE(checkOk("t: tuple = (1, 2)"));
+    EXPECT_TRUE(checkOk("s: set = set()"));
+}

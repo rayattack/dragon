@@ -696,13 +696,9 @@ void TypeChecker::initBuiltinTypes() {
     impl_->typeNames["ptr"] = std::make_shared<PtrType>();
     impl_->typeNames["type"] = impl_->anyType;
     impl_->typeNames["dict"] = std::make_shared<DictType>(impl_->strType, impl_->anyType);
-    impl_->typeNames["Dict"] = std::make_shared<DictType>(impl_->strType, impl_->anyType);
     impl_->typeNames["list"] = std::make_shared<ListType>(impl_->anyType);
-    impl_->typeNames["List"] = std::make_shared<ListType>(impl_->anyType);
     impl_->typeNames["tuple"] = std::make_shared<TupleType>(std::vector<std::shared_ptr<Type>>{impl_->anyType});
-    impl_->typeNames["Tuple"] = std::make_shared<TupleType>(std::vector<std::shared_ptr<Type>>{impl_->anyType});
     impl_->typeNames["set"] = std::make_shared<SetType>(impl_->anyType);
-    impl_->typeNames["Set"] = std::make_shared<ListType>(impl_->anyType);
     impl_->typeNames["deque"] = std::make_shared<ListType>(impl_->anyType);
     impl_->typeNames["Task"] = std::make_shared<TaskType>(impl_->anyType);
 }
