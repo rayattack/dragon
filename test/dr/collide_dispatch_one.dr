@@ -1,7 +1,33 @@
-"""Declares Worker / WorkerIter with module-one method bodies;
-collide_dispatch_two.dr reuses the names with identical layouts."""
+"""Declares Worker / WorkerIter / Store / MemStore with module-one method
+bodies; collide_dispatch_two.dr reuses the names with identical layouts."""
 
 LOG: list[str] = []
+
+
+class Store {
+    def size() -> str {
+        return "one:base"
+    }
+}
+
+
+class MemStore(Store) {
+    def size() -> str {
+        return "one:leaf"
+    }
+}
+
+
+def one_leaf_override() -> str {
+    v: MemStore = MemStore()
+    return v.size()
+}
+
+
+def one_leaf_through_base_slot() -> str {
+    v: Store = MemStore()
+    return v.size()
+}
 
 
 class Worker {

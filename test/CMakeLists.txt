@@ -111,8 +111,7 @@ add_test(NAME CodeGenTests COMMAND dragon_codegen_tests)
 file(GLOB DR_TEST_FILES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/dr/test_*.dr)
 foreach(_dr ${DR_TEST_FILES})
     get_filename_component(_name ${_dr} NAME_WE)
-    add_test(NAME dr_${_name} COMMAND $<TARGET_FILE:dragon> run ${_dr}
-        -I ${CMAKE_SOURCE_DIR}/packages)
+    add_test(NAME dr_${_name} COMMAND $<TARGET_FILE:dragon> run ${_dr})
 endforeach()
 
 # Linux-only: macOS accepts but does not enforce RLIMIT_AS, and it lazily grants
@@ -179,20 +178,6 @@ add_test(NAME dr_ffi_cxx_shim
     COMMAND $<TARGET_FILE:dragon> run
         ${CMAKE_CURRENT_SOURCE_DIR}/dr/ffi_cxx/app.dr
         --cc-source ${CMAKE_CURRENT_SOURCE_DIR}/dr/ffi_cxx/shim.cpp)
-
-add_test(NAME dr_test_raft
-    COMMAND $<TARGET_FILE:dragon> run
-        ${CMAKE_CURRENT_SOURCE_DIR}/dr/raft/test_raft.dr
-        -I ${CMAKE_SOURCE_DIR}/packages)
-add_test(NAME dr_test_odb_raft
-    COMMAND $<TARGET_FILE:dragon> run
-        ${CMAKE_CURRENT_SOURCE_DIR}/dr/raft/test_odb_raft.dr
-        -I ${CMAKE_SOURCE_DIR}/packages)
-
-add_test(NAME dr_test_frames
-    COMMAND $<TARGET_FILE:dragon> run
-        ${CMAKE_SOURCE_DIR}/packages/frames/test_frames.dr
-        -I ${CMAKE_SOURCE_DIR}/packages)
 
 file(GLOB DRAGON_EXAMPLE_FILES CONFIGURE_DEPENDS
     ${CMAKE_SOURCE_DIR}/examples/*.dr

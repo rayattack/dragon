@@ -3,8 +3,8 @@
 
 A block is skipped when its first line is `# doc: no-check`, when it contains
 placeholder ellipses ("..."), or (heuristic) when an import names a module that
-exists neither under stdlib/ nor packages/, meaning the snippet references
-reader-authored files that do not exist in this repo.
+does not exist under stdlib/, meaning the snippet references reader-authored
+files that do not exist in this repo.
 
 Usage: check_doc_samples.py <dragon-binary> <docs-dir>
 Exits non-zero if any checked block fails to compile.
@@ -21,16 +21,16 @@ IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+([A-Za-z_][A-Za-z0-9_]*)")
 
 
 def known_module_roots(repo: Path) -> set:
-    """Top-level module names resolvable from stdlib/ or packages/."""
+    """Top-level module names resolvable from stdlib/."""
     roots = set()
-    for base in (repo / "stdlib", repo / "packages"):
-        if not base.is_dir():
-            continue
-        for entry in base.iterdir():
-            if entry.is_dir():
-                roots.add(entry.name)
-            elif entry.suffix == ".dr":
-                roots.add(entry.stem)
+    base = repo / "stdlib"
+    if not base.is_dir():
+        return roots
+    for entry in base.iterdir():
+        if entry.is_dir():
+            roots.add(entry.name)
+        elif entry.suffix == ".dr":
+            roots.add(entry.stem)
     return roots
 
 
@@ -90,8 +90,7 @@ def main() -> int:
                 sample.write_text(code, encoding="utf-8")
                 try:
                     proc = subprocess.run(
-                        [str(dragon), "check", str(sample),
-                         "-I", str(repo / "packages")],
+                        [str(dragon), "check", str(sample)],
                         capture_output=True, text=True, timeout=60)
                 except subprocess.TimeoutExpired:
                     failures.append((md.name, start, "dragon check timed out"))

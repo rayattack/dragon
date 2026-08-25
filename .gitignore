@@ -74,11 +74,9 @@ book/
 
 simd.*
 port.*
-odb.*
 borrow.*
 HANDOVER-resource-leaks.*
 
-objectbase.*
 perf.*
 vscode-dragon/
 

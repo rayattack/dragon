@@ -1,7 +1,33 @@
-"""Same Worker / WorkerIter names and layouts as collide_dispatch_one.dr;
-the method bodies stamp module two."""
+"""Same Worker / WorkerIter / Store / MemStore names and layouts as
+collide_dispatch_one.dr; the method bodies stamp module two."""
 
 LOG: list[str] = []
+
+
+class Store {
+    def size() -> str {
+        return "two:base"
+    }
+}
+
+
+class MemStore(Store) {
+    def size() -> str {
+        return "two:leaf"
+    }
+}
+
+
+def two_leaf_override() -> str {
+    v: MemStore = MemStore()
+    return v.size()
+}
+
+
+def two_leaf_through_base_slot() -> str {
+    v: Store = MemStore()
+    return v.size()
+}
 
 
 class Worker {

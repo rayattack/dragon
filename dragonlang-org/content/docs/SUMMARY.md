@@ -94,15 +94,6 @@
 - [Transactions](1303-transactions.md)
 - [SQLite, PostgreSQL, and MySQL](1304-backends.md)
 
-# ODB: The Object Database
-
-- [ODB: The Object Database](1311-odb.md)
-- [Schemas, Metadata, and Integrity](1312-odb-schemas.md)
-- [OQL: Reading](1313-odb-oql-reads.md)
-- [OQL: Writing and Transactions](1314-odb-oql-writes.md)
-- [History: Watch, Time Travel, and Retention](1315-odb-history.md)
-- [Replication and HA](1316-odb-replication.md)
-
 # The Standard Library
 
 - [Overview and Module Index](1401-stdlib-overview.md)

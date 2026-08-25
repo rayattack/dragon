@@ -29,7 +29,7 @@ def load_index(path: str) -> Index {
     defer f.close()                    # runs on return, raise, every exit
 
     hdr: str = f.take(5)
-    if hdr != "ODB01" {
+    if hdr != "IDX01" {
         raise CorruptionError("bad magic")     # close still runs
     }
     return parse_index(f)                      # close runs after the return
