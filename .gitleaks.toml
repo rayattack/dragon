@@ -1,0 +1,7 @@
+[extend]
+useDefault = true
+
+# Synthetic self-signed certs/keys baked into the SSL test suite as fixtures
+# ("Dragon Wildcard Test CA"); they protect nothing and never leave the tests.
+[allowlist]
+paths = ['''test/dr/test_ssl.*\.dr''']
