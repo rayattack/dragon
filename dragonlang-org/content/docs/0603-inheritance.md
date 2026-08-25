@@ -46,7 +46,24 @@ print(d.describe())  # Rex: Rex barks  - inherited method calling the override
 `def()`, calling `super` with arguments delegates to it. Delegation is **opt-in**:
 if a subclass constructor never calls `super(...)`, the parent constructor does
 *not* run and inherited fields keep their defaults (Dragon does not chain base
-constructors implicitly). To reach any parent *method*, use `super.method()`:
+constructors implicitly). The same rule covers a subclass that declares no
+constructor at all: it is constructed with **no arguments**, and handing it the
+parent's arguments is a compile error, not an inherited signature:
+
+```dragon
+# doc: no-check
+class Dog(Animal) {
+    def speak() -> str {
+        return self.name + " barks"
+    }
+}
+
+const d: Dog = Dog("Rex")   # error: 'Dog' declares no constructor
+const ok: Dog = Dog()       # fine - fields keep their defaults
+```
+
+To take the parent's arguments, declare `def(name: str) { super(name) }` on the
+subclass. To reach any parent *method*, use `super.method()`:
 
 ```dragon
 class Base {

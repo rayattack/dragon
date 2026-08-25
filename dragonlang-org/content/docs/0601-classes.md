@@ -63,6 +63,22 @@ If you're writing `.py`-mode source, the constructor is spelled the Python way -
 to the same thing; it's purely the surface convention of the two file modes (see
 [How a Program Runs](/docs/0103-how-a-program-runs)).
 
+The two spellings are mode-exclusive, and the compiler enforces it. Writing
+`def __init__` inside a `.dr` class body is a compile error, not an alias:
+
+```text
+'__init__' is not the Dragon constructor. The constructor is a nameless def.
+  Write: def (<params>) { ... }
+  For __init__, use a .py file instead.
+```
+
+A class that declares no constructor is constructed with **no arguments**, and
+its fields keep their defaults. Calling it with arguments is a compile error
+telling you to define `def (...)`. The exceptions are the class families whose
+construction the compiler or runtime supplies for you: `@dataclass` classes
+(field constructor), `TypedDict` (dict literal), `NamedTuple` (positional
+fields), exception subclasses (a message), and enums (member lookup by value).
+
 ## `self` is implicit in methods
 
 This is the one thing to internalize coming from Python. In a `.dr` method,
