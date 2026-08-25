@@ -926,6 +926,22 @@ void TypeChecker::visit(AsCastExpr& node) {
 
 void TypeChecker::visit(ContractSetTypeExpr&) {}
 
+static bool builtinMembersAreClosed(const std::shared_ptr<Type>& t) {
+    if (!t) return false;
+    switch (t->kind()) {
+        case Type::Kind::Int:
+        case Type::Kind::Float:
+        case Type::Kind::Bool:
+        case Type::Kind::Str:
+        case Type::Kind::Bytes:
+        case Type::Kind::List:
+        case Type::Kind::Set:
+            return true;
+        default:
+            return false;
+    }
+}
+
 void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
     const Expr* savedMethodOk = impl_->methodRefOkExpr;
     if (node.attribute == "__doc__")
@@ -1198,10 +1214,23 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
         }
         if (node.attribute == "upper" || node.attribute == "lower" ||
             node.attribute == "strip" || node.attribute == "lstrip" ||
-            node.attribute == "rstrip") {
+            node.attribute == "rstrip" || node.attribute == "replace") {
             node.type = std::make_shared<FunctionType>(
                 std::vector<std::shared_ptr<Type>>{},
                 impl_->bytesType);
+            return;
+        }
+        if (node.attribute == "join") {
+            node.type = std::make_shared<FunctionType>(
+                std::vector<std::shared_ptr<Type>>{
+                    std::make_shared<ListType>(impl_->bytesType)},
+                impl_->bytesType);
+            return;
+        }
+        if (node.attribute == "split" || node.attribute == "rsplit") {
+            node.type = std::make_shared<FunctionType>(
+                std::vector<std::shared_ptr<Type>>{impl_->bytesType},
+                std::make_shared<ListType>(impl_->bytesType));
             return;
         }
         if (node.attribute == "isdigit" || node.attribute == "isalpha" ||
@@ -1224,7 +1253,14 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
 
     if (objType->kind() == Type::Kind::List) {
         auto& lt = static_cast<ListType&>(*objType);
-        if (node.attribute == "append" || node.attribute == "insert" ||
+        if (node.attribute == "insert") {
+            node.type = std::make_shared<FunctionType>(
+                std::vector<std::shared_ptr<Type>>{impl_->intType,
+                                                   lt.elementType},
+                impl_->noneType);
+            return;
+        }
+        if (node.attribute == "append" || node.attribute == "appendleft" ||
             node.attribute == "remove") {
             node.type = std::make_shared<FunctionType>(
                 std::vector<std::shared_ptr<Type>>{lt.elementType},
@@ -1285,6 +1321,12 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
         if (node.attribute == "copy") {
             node.type = std::make_shared<FunctionType>(
                 std::vector<std::shared_ptr<Type>>{}, setT);
+            return;
+        }
+        if (node.attribute == "update") {
+            node.type = std::make_shared<FunctionType>(
+                std::vector<std::shared_ptr<Type>>{objType},
+                impl_->noneType);
             return;
         }
         if (node.attribute == "add" || node.attribute == "remove" ||
@@ -1359,6 +1401,10 @@ void TypeChecker::resolveAttributeExpr(AttributeExpr& node) {
         }
     }
 
+    if (builtinMembersAreClosed(objType)) {
+        error(node.location(), "'" + objType->toString() +
+              "' has no attribute '" + node.attribute + "'");
+    }
     node.type = impl_->unknownType;
 }
 

@@ -1778,3 +1778,12 @@ TEST(TypeCheckerTest, LowercaseCollectionNamesStillResolve) {
     EXPECT_TRUE(checkOk("t: tuple = (1, 2)"));
     EXPECT_TRUE(checkOk("s: set = set()"));
 }
+
+TEST(TypeCheckerTest, BuiltinAttributeMembersAreChecked) {
+    EXPECT_TRUE(checkHasErrors(code("builtin_attr_unknown_on_int")));
+    EXPECT_TRUE(checkHasErrors(code("builtin_attr_unknown_on_str")));
+    EXPECT_TRUE(checkHasErrors(code("builtin_attr_unknown_method_on_str")));
+    EXPECT_TRUE(checkHasErrors(code("builtin_attr_unknown_on_list")));
+    EXPECT_TRUE(checkOk(code("builtin_attr_known_methods_accepted")));
+    EXPECT_TRUE(checkOk(code("dict_dot_access_is_not_an_attribute_error")));
+}

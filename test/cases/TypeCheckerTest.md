@@ -1566,3 +1566,63 @@ def boom() {
     raise error("bad")
 }
 ```
+
+#### :builtin_attr_unknown_on_int
+
+A builtin receiver has a closed member set, so an attribute that is not one of
+its methods is rejected at check time rather than deferred to codegen.
+
+```dr
+n: int = 5
+print(n.no_such_attr)
+```
+
+#### :builtin_attr_unknown_on_str
+
+```dr
+s: str = "x"
+print(s.no_such_attr)
+```
+
+#### :builtin_attr_unknown_method_on_str
+
+```dr
+s: str = "x"
+print(s.no_such_method())
+```
+
+#### :builtin_attr_unknown_on_list
+
+```dr
+xs: list[int] = [1]
+print(xs.no_such_attr)
+```
+
+#### :builtin_attr_known_methods_accepted
+
+The member tables must stay complete, or valid programs break. These are all
+real methods and must type-check cleanly.
+
+```dr
+s: str = "ab"
+xs: list[int] = [1]
+b: bytes = b"a,b"
+st: set[int] = {1}
+print(s.upper())
+print(b.join([b"x", b"y"]))
+print(len(b.split(b",")))
+print(b.replace(b"a", b"z"))
+xs.append(2)
+st.update({2})
+print(len(xs) + len(st))
+```
+
+#### :dict_dot_access_is_not_an_attribute_error
+
+A dict has open members because dot-access reads string keys, so an unknown
+name on a dict receiver must not be rejected.
+
+```dr
+ages: dict[str, int] = {"Ada": 36}
+print(ages.Ada)
+```

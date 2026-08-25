@@ -485,7 +485,7 @@ print(b.strip())
 #### :bytes_split
 
 ```dr
-parts: list = b"a,b,c".split(b",")
+parts: list[bytes] = b"a,b,c".split(b",")
 print(len(parts))
 ```
 
