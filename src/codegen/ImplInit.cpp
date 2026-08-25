@@ -270,6 +270,8 @@ void CodeGen::Impl::declareRuntimeFunctions() {
         llvm::FunctionType::get(voidType, {i8PtrType, i64Type}, false));
     getOrDeclareRuntime("dragon_box_len",
         llvm::FunctionType::get(i64Type, {boxType}, false));
+    getOrDeclareRuntime("dragon_box_truthy",
+        llvm::FunctionType::get(i1Type, {boxType}, false));
     getOrDeclareRuntime("dragon_list_box_set",
         llvm::FunctionType::get(voidType, {i8PtrType, i64Type, i64Type, i64Type}, false));
     getOrDeclareRuntime("dragon_list_box_append",

@@ -96,6 +96,48 @@ print(False or True)    # True
 print(not True)         # False
 ```
 
+`and` and `or` evaluate to the **operand they stopped on**, not to a `bool`, so
+they read as "pick the first usable value":
+
+```dragon
+name: str = "" or "anon"
+print(name)             # anon
+count: int = 0 or 7
+print(count)            # 7
+first: str = "a" and "b"
+print(first)            # b
+```
+
+Both operands must be the same type, and that type is the type of the result.
+Mixing an `int` with a `float` promotes to `float`, exactly as arithmetic does.
+Mixing unrelated types gives the union of the two, which you must annotate:
+
+```dragon
+score: float = 0 or 2.5
+print(score)            # 2.5
+either: int | str = 0 or "x"
+print(either)           # x
+```
+
+`or` is the idiomatic way to supply a default for a `T | None`, because a truthy
+value is never `None`. Dragon drops `None` from the left operand's type, so the
+result is a plain `T` and needs no narrowing:
+
+```dragon
+def lookup(k: str) -> str | None {
+    if k == "a" {
+        return "found"
+    }
+    return none
+}
+
+label: str = lookup("zz") or "default"
+print(label)            # default
+```
+
+Falsiness follows the same rule as a condition: `0`, `0.0`, `False`, `""`, an
+empty `list`, `dict`, or `set`, and `None` are falsy, everything else is truthy.
+
 `not` binds *looser* than comparison, so `not 5 == 5` parses as `not (5 == 5)`,
 which is `False`.
 

@@ -1238,6 +1238,98 @@ static bool setOperandsCompatible(const std::shared_ptr<Type>& l,
     return le->equals(*re);
 }
 
+static bool unresolvedType(const std::shared_ptr<Type>& t) {
+    return !t || t->kind() == Type::Kind::Unknown;
+}
+
+static bool numericKind(Type::Kind k) {
+    return k == Type::Kind::Int || k == Type::Kind::Float ||
+           k == Type::Kind::Bool;
+}
+
+static std::shared_ptr<Type> withoutNone(const std::shared_ptr<Type>& t) {
+    if (!t || t->kind() != Type::Kind::Union) return t;
+    auto& members = static_cast<UnionType&>(*t).types;
+    std::vector<std::shared_ptr<Type>> kept;
+    for (auto& m : members) {
+        if (m && m->kind() != Type::Kind::None_) kept.push_back(m);
+    }
+    if (kept.empty() || kept.size() == members.size()) return t;
+    if (kept.size() == 1) return kept[0];
+    return std::make_shared<UnionType>(std::move(kept));
+}
+
+static void collectUnionMembers(const std::shared_ptr<Type>& t,
+                               std::vector<std::shared_ptr<Type>>& out) {
+    if (t->kind() == Type::Kind::Union) {
+        for (auto& m : static_cast<UnionType&>(*t).types) collectUnionMembers(m, out);
+        return;
+    }
+    for (auto& seen : out) {
+        if (seen->equals(*t)) return;
+    }
+    out.push_back(t);
+}
+
+static std::shared_ptr<Type> flattenedUnion(const std::shared_ptr<Type>& l,
+                                            const std::shared_ptr<Type>& r) {
+    std::vector<std::shared_ptr<Type>> members;
+    collectUnionMembers(l, members);
+    collectUnionMembers(r, members);
+    if (members.size() == 1) return members[0];
+    return std::make_shared<UnionType>(std::move(members));
+}
+
+static bool containerParamsUnresolved(const std::shared_ptr<Type>& t) {
+    switch (t->kind()) {
+        case Type::Kind::List:
+            return unresolvedType(static_cast<ListType&>(*t).elementType);
+        case Type::Kind::Set:
+            return unresolvedType(static_cast<SetType&>(*t).elementType);
+        case Type::Kind::Dict: {
+            auto& d = static_cast<DictType&>(*t);
+            return unresolvedType(d.keyType) || unresolvedType(d.valueType);
+        }
+        default:
+            return false;
+    }
+}
+
+static std::shared_ptr<Type> resolvedContainer(const std::shared_ptr<Type>& l,
+                                               const std::shared_ptr<Type>& r) {
+    if (l->kind() != r->kind()) return nullptr;
+    if (containerParamsUnresolved(l) && !containerParamsUnresolved(r)) return r;
+    if (containerParamsUnresolved(r) && !containerParamsUnresolved(l)) return l;
+    return nullptr;
+}
+
+static std::shared_ptr<Type> promotedNumeric(const std::shared_ptr<Type>& l,
+                                             const std::shared_ptr<Type>& r) {
+    if (l->kind() == Type::Kind::Float || r->kind() == Type::Kind::Float)
+        return std::make_shared<PrimitiveType>(Type::Kind::Float);
+    if (l->kind() == Type::Kind::Int || r->kind() == Type::Kind::Int)
+        return std::make_shared<PrimitiveType>(Type::Kind::Int);
+    return std::make_shared<PrimitiveType>(Type::Kind::Bool);
+}
+
+static std::shared_ptr<Type> joinTypes(const std::shared_ptr<Type>& l,
+                                       const std::shared_ptr<Type>& r) {
+    if (unresolvedType(l)) return r;
+    if (unresolvedType(r)) return l;
+    if (l->equals(*r)) return l;
+    if (l->kind() == Type::Kind::Any || r->kind() == Type::Kind::Any)
+        return std::make_shared<AnyType>();
+    if (numericKind(l->kind()) && numericKind(r->kind()))
+        return promotedNumeric(l, r);
+    if (auto merged = resolvedContainer(l, r)) return merged;
+    return flattenedUnion(l, r);
+}
+
+std::shared_ptr<Type> TypeChecker::joinBranchTypes(
+        const std::shared_ptr<Type>& left, const std::shared_ptr<Type>& right) {
+    return joinTypes(left, right);
+}
+
 static bool foldedConstInt(
     const std::unordered_map<const Expr*, long long>& folds, Expr* e,
     long long& out) {
@@ -1464,11 +1556,8 @@ void TypeChecker::visit(BinaryExpr& node) {
     }
 
     if (op == TokenType::AND || op == TokenType::OR) {
-        if (op == TokenType::OR) {
-            node.type = leftType;
-        } else {
-            node.type = rightType;
-        }
+        auto effectiveLeft = op == TokenType::OR ? withoutNone(leftType) : leftType;
+        node.type = joinTypes(effectiveLeft, rightType);
         return;
     }
 

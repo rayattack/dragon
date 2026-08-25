@@ -190,6 +190,18 @@ std::string TypeChecker::listReprMismatchHint(const Type& from, const Type& to) 
 void TypeChecker::propagateAnnotationToEmptyLiteral(Expr* value, const std::shared_ptr<Type>& annotType) {
     if (!value || !annotType) return;
 
+    if (auto* tern = dynamic_cast<IfExpr*>(value)) {
+        propagateAnnotationToEmptyLiteral(tern->thenExpr.get(), annotType);
+        propagateAnnotationToEmptyLiteral(tern->elseExpr.get(), annotType);
+        return;
+    }
+    if (auto* bin = dynamic_cast<BinaryExpr*>(value)) {
+        auto op = bin->op.type();
+        if (op != TokenType::AND && op != TokenType::OR) return;
+        propagateAnnotationToEmptyLiteral(bin->left.get(), annotType);
+        propagateAnnotationToEmptyLiteral(bin->right.get(), annotType);
+        return;
+    }
     if (auto* list = dynamic_cast<ListExpr*>(value)) {
         if (list->elements.empty() && annotType->kind() == Type::Kind::List) {
             list->type = annotType;
@@ -905,6 +917,9 @@ void TypeChecker::visit(MatchStmt& node) {
 
 void TypeChecker::visit(ReturnStmt& node) {
     if (node.value) {
+        if (!impl_->returnTypeStack.empty())
+            propagateAnnotationToEmptyLiteral(node.value.get(),
+                                              impl_->returnTypeStack.back());
         auto retType = inferType(node.value.get());
         if (!impl_->returnTypeStack.empty()) {
             auto& expected = impl_->returnTypeStack.back();

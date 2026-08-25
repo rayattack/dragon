@@ -529,6 +529,10 @@ llvm::Value* CodeGen::Impl::emitDunderCall(llvm::Function* func, const std::stri
 
 llvm::Value* CodeGen::Impl::toBool(llvm::Value* val, Expr* exprNode) {
         if (val->getType() == i1Type) return val;
+        if (val->getType() == boxType) {
+            return builder->CreateCall(runtimeFuncs["dragon_box_truthy"], {val},
+                                       "tobool");
+        }
         if (val->getType() == i64Type) {
             return builder->CreateICmpNE(val, llvm::ConstantInt::get(i64Type, 0), "tobool");
         }
@@ -572,6 +576,118 @@ llvm::Value* CodeGen::Impl::toBool(llvm::Value* val, Expr* exprNode) {
                 val, llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(val->getType())), "tobool");
         }
         return val;
+    }
+
+llvm::Value* CodeGen::Impl::normalizeMergeArmOwnership(Expr* armExpr,
+                                                       llvm::Value* val,
+                                                       Type* resultType,
+                                                       const char* retainName) {
+        if (options.gcMode != GCMode::RC) return val;
+        if (!val || !val->getType()->isPointerTy()) return val;
+        Type::Kind tk = resultType ? resultType->kind() : Type::Kind::Unknown;
+        const char* fn = nullptr;
+        switch (tk) {
+            case Type::Kind::Str:      fn = "dragon_str_retain"; break;
+            case Type::Kind::Bytes:
+            case Type::Kind::List:
+            case Type::Kind::Dict:
+            case Type::Kind::Set:
+            case Type::Kind::Tuple:
+            case Type::Kind::Instance: fn = "dragon_obj_retain"; break;
+            default: {
+                if (!isBorrowedHeapExpr(armExpr)) return val;
+                VarKind k = resolveExprVarKind(armExpr);
+                if (!isHeapKind(k) || k == VarKind::Union) return val;
+                emitIncrefByKind(val, k);
+                return val;
+            }
+        }
+        bool alreadyOwned = !isBorrowedHeapExpr(armExpr) &&
+            (tk == Type::Kind::Str ? isOwnedStrResult(val)
+                                   : isOwnedPtrResult(val));
+        if (alreadyOwned) return val;
+        auto* callee = getOrDeclareRuntime(fn,
+            llvm::FunctionType::get(i8PtrType, {i8PtrType}, false));
+        return builder->CreateCall(callee, {toI8Ptr(val)}, retainName);
+    }
+
+llvm::Value* CodeGen::Impl::widenNumericArm(MergeArm& arm, llvm::Type* target) {
+        if (arm.value->getType() == target) return arm.value;
+        builder->SetInsertPoint(arm.block);
+        if (target != f64Type)
+            return builder->CreateZExt(arm.value, i64Type, "b2i");
+        llvm::Value* v = arm.value;
+        if (v->getType() == i1Type) v = builder->CreateZExt(v, i64Type, "b2i");
+        return builder->CreateSIToFP(v, f64Type, "i2f");
+    }
+
+llvm::Value* CodeGen::Impl::boxMergeArm(CodeGen& cg, MergeArm& arm) {
+        if (arm.value->getType() == boxType) return arm.value;
+        builder->SetInsertPoint(arm.block);
+        return makeBox(emitTagForExpr(arm.expr, cg), arm.value);
+    }
+
+llvm::Value* CodeGen::Impl::mergeArmValues(CodeGen& cg, Type* resultType,
+                                           MergeArm& a, MergeArm& b,
+                                           llvm::BasicBlock* mergeBB,
+                                           const char* phiName) {
+        auto isNumeric = [&](llvm::Type* t) {
+            return t == i1Type || t == i64Type || t == f64Type;
+        };
+        bool typesDiffer = a.value->getType() != b.value->getType();
+        bool resultIsUnion = resultType && resultType->kind() == Type::Kind::Union;
+        llvm::Type* phiType = a.value->getType();
+
+        if (typesDiffer && isNumeric(a.value->getType()) &&
+            isNumeric(b.value->getType())) {
+            phiType = (a.value->getType() == f64Type ||
+                       b.value->getType() == f64Type) ? f64Type : i64Type;
+            a.value = widenNumericArm(a, phiType);
+            b.value = widenNumericArm(b, phiType);
+        } else if (typesDiffer || (resultIsUnion && phiType != boxType)) {
+            phiType = boxType;
+            a.value = boxMergeArm(cg, a);
+            b.value = boxMergeArm(cg, b);
+        }
+
+        builder->SetInsertPoint(a.block);
+        builder->CreateBr(mergeBB);
+        a.block = builder->GetInsertBlock();
+        builder->SetInsertPoint(b.block);
+        builder->CreateBr(mergeBB);
+        b.block = builder->GetInsertBlock();
+
+        builder->SetInsertPoint(mergeBB);
+        auto* phi = builder->CreatePHI(phiType, 2, phiName);
+        phi->addIncoming(a.value, a.block);
+        phi->addIncoming(b.value, b.block);
+        return phi;
+    }
+
+CodeGen::Impl::VarKind CodeGen::Impl::discardableHeapKind(Expr* armExpr) {
+        VarKind resolved = resolveExprVarKind(armExpr);
+        if (isHeapKind(resolved)) return resolved;
+        if (!armExpr || !armExpr->type) return resolved;
+        switch (armExpr->type->kind()) {
+            case Type::Kind::Str:      return VarKind::Str;
+            case Type::Kind::Bytes:
+            case Type::Kind::List:     return VarKind::List;
+            case Type::Kind::Dict:     return VarKind::Dict;
+            case Type::Kind::Set:      return VarKind::Set;
+            case Type::Kind::Tuple:    return VarKind::Tuple;
+            case Type::Kind::Instance: return VarKind::ClassInstance;
+            default:                   return resolved;
+        }
+    }
+
+void CodeGen::Impl::releaseDiscardedArm(Expr* armExpr, llvm::Value* val) {
+        if (options.gcMode != GCMode::RC) return;
+        if (!val || !val->getType()->isPointerTy()) return;
+        if (isBorrowedHeapExpr(armExpr)) return;
+        VarKind kind = discardableHeapKind(armExpr);
+        if (!isHeapKind(kind)) return;
+        if (!isOwnedResultByKind(val, kind)) return;
+        emitDecrefByKind(val, kind);
     }
 
 bool CodeGen::Impl::isOwnedStrResult(llvm::Value* v) {

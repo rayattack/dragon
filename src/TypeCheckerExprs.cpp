@@ -1727,6 +1727,7 @@ void TypeChecker::visit(LambdaExpr& node) {
         impl_->define(node.params[i].name, paramTypes[i]);
     }
     if (node.body) {
+        propagateAnnotationToEmptyLiteral(node.body.get(), retType);
         auto bodyType = inferType(node.body.get());
         if (retType->kind() != Type::Kind::Unknown &&
             bodyType->kind() != Type::Kind::Unknown &&
@@ -1807,12 +1808,7 @@ void TypeChecker::visit(IfExpr& node) {
         elseType = inferType(node.elseExpr.get());
     }
 
-    if (thenType->equals(*elseType)) {
-        node.type = thenType;
-    } else {
-        std::vector<std::shared_ptr<Type>> types = {thenType, elseType};
-        node.type = std::make_shared<UnionType>(std::move(types));
-    }
+    node.type = joinBranchTypes(thenType, elseType);
 }
 
 void TypeChecker::visit(AwaitExpr& node) {

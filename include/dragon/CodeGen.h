@@ -225,6 +225,7 @@ private:
     bool tryEmitPrintDictAttrRaw(AttributeExpr& attr, llvm::Value* arg,
                                  bool staticContainerVal);
     bool tryEmitPrintUnionRaw(Expr* argExpr, llvm::Value* arg);
+    void emitShortCircuit(BinaryExpr& node);
     bool tryEmitStrSelfAppend(AssignStmt& node);
     bool tryEmitSetitemOverloadStore(SubscriptExpr& sub, llvm::Value* val);
     bool tryEmitDictSubscriptStore(SubscriptExpr& sub, AssignStmt& node,

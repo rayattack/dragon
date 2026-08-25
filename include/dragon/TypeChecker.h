@@ -343,6 +343,10 @@ private:
         const ClassType& cls, const ContractType& ct);
     std::shared_ptr<Type> inferType(Expr* expr);
     void propagateAnnotationToEmptyLiteral(Expr* value, const std::shared_ptr<Type>& annotType);
+
+    std::shared_ptr<Type> joinBranchTypes(const std::shared_ptr<Type>& left,
+                                          const std::shared_ptr<Type>& right);
+
     bool tryExpectedTypeLiteral(Expr* value, const std::shared_ptr<Type>& expected);
     void boxNestedContainerLiteralForAny(Expr* value);
     static std::string listReprMismatchHint(const Type& from, const Type& to);

@@ -147,47 +147,7 @@ void CodeGen::visit(BinaryExpr& node) {
     }
 
     if (node.op.type() == TokenType::AND || node.op.type() == TokenType::OR) {
-        node.left->accept(*this);
-        llvm::Value* lhs = impl_->lastValue;
-
-        if (lhs->getType() == impl_->i64Type) {
-            lhs = impl_->builder->CreateICmpNE(
-                lhs, llvm::ConstantInt::get(impl_->i64Type, 0), "tobool");
-        } else if (lhs->getType() == impl_->f64Type) {
-            lhs = impl_->builder->CreateFCmpONE(
-                lhs, llvm::ConstantFP::get(impl_->f64Type, 0.0), "tobool");
-        }
-
-        auto* func = impl_->currentFunction;
-        auto* rhsBlock = llvm::BasicBlock::Create(*impl_->context, "rhs", func);
-        auto* mergeBlock = llvm::BasicBlock::Create(*impl_->context, "merge", func);
-
-        if (node.op.type() == TokenType::AND) {
-            impl_->builder->CreateCondBr(lhs, rhsBlock, mergeBlock);
-        } else {
-            impl_->builder->CreateCondBr(lhs, mergeBlock, rhsBlock);
-        }
-
-        auto* lhsBlock = impl_->builder->GetInsertBlock();
-
-        impl_->builder->SetInsertPoint(rhsBlock);
-        node.right->accept(*this);
-        llvm::Value* rhs = impl_->lastValue;
-        if (rhs->getType() == impl_->i64Type) {
-            rhs = impl_->builder->CreateICmpNE(
-                rhs, llvm::ConstantInt::get(impl_->i64Type, 0), "tobool");
-        } else if (rhs->getType() == impl_->f64Type) {
-            rhs = impl_->builder->CreateFCmpONE(
-                rhs, llvm::ConstantFP::get(impl_->f64Type, 0.0), "tobool");
-        }
-        impl_->builder->CreateBr(mergeBlock);
-        rhsBlock = impl_->builder->GetInsertBlock();
-
-        impl_->builder->SetInsertPoint(mergeBlock);
-        auto* phi = impl_->builder->CreatePHI(impl_->i1Type, 2);
-        phi->addIncoming(lhs, lhsBlock);
-        phi->addIncoming(rhs, rhsBlock);
-        impl_->lastValue = phi;
+        emitShortCircuit(node);
         return;
     }
 
@@ -1706,6 +1666,43 @@ void CodeGen::visit(UnaryExpr& node) {
     }
 }
 
+void CodeGen::emitShortCircuit(BinaryExpr& node) {
+    bool isAnd = node.op.type() == TokenType::AND;
+    Type* resultType = node.type.get();
+
+    node.left->accept(*this);
+    llvm::Value* lhsVal = impl_->lastValue;
+    llvm::Value* lhsTest = impl_->toBool(lhsVal, node.left.get());
+
+    auto* func = impl_->currentFunction;
+    auto* keepBB = llvm::BasicBlock::Create(*impl_->context, "sc.keep", func);
+    auto* restBB = llvm::BasicBlock::Create(*impl_->context, "sc.rest", func);
+    auto* mergeBB = llvm::BasicBlock::Create(*impl_->context, "sc.merge", func);
+
+    if (isAnd) {
+        impl_->builder->CreateCondBr(lhsTest, restBB, keepBB);
+    } else {
+        impl_->builder->CreateCondBr(lhsTest, keepBB, restBB);
+    }
+
+    impl_->builder->SetInsertPoint(keepBB);
+    llvm::Value* keptVal = impl_->normalizeMergeArmOwnership(
+        node.left.get(), lhsVal, resultType, "logic.retain");
+    llvm::BasicBlock* keepEnd = impl_->builder->GetInsertBlock();
+
+    impl_->builder->SetInsertPoint(restBB);
+    impl_->releaseDiscardedArm(node.left.get(), lhsVal);
+    node.right->accept(*this);
+    llvm::Value* rhsVal = impl_->normalizeMergeArmOwnership(
+        node.right.get(), impl_->lastValue, resultType, "logic.retain");
+    llvm::BasicBlock* restEnd = impl_->builder->GetInsertBlock();
+
+    Impl::MergeArm keptArm{node.left.get(), keptVal, keepEnd};
+    Impl::MergeArm restArm{node.right.get(), rhsVal, restEnd};
+    impl_->lastValue = impl_->mergeArmValues(*this, resultType, keptArm, restArm,
+                                             mergeBB, "shortcircuit");
+}
+
 void CodeGen::visit(IfExpr& node) {
     auto detectNarrowing = [this](Expr* cond) -> std::pair<std::string, Impl::VarKind> {
         if (auto* bin = dynamic_cast<BinaryExpr*>(cond)) {
@@ -1798,35 +1795,8 @@ void CodeGen::visit(IfExpr& node) {
     // ternary otherwise use-after-frees the slot's only +1, and a void incref leaks once per eval (gzip ternary bug).
     auto normalizeBranchOwnership = [&](Expr* branchExpr,
                                         llvm::Value* val) -> llvm::Value* {
-        if (impl_->options.gcMode != GCMode::RC) return val;
-        if (!val || !val->getType()->isPointerTy()) return val;
-        Type::Kind tk = node.type ? node.type->kind() : Type::Kind::Unknown;
-        const char* fn = nullptr;
-        switch (tk) {
-            case Type::Kind::Str:      fn = "dragon_str_retain"; break;
-            case Type::Kind::Bytes:
-            case Type::Kind::List:
-            case Type::Kind::Dict:
-            case Type::Kind::Set:
-            case Type::Kind::Tuple:
-            case Type::Kind::Instance: fn = "dragon_obj_retain"; break;
-            default: {
-                if (!Impl::isBorrowedHeapExpr(branchExpr)) return val;
-                Impl::VarKind k = impl_->resolveExprVarKind(branchExpr);
-                if (!Impl::isHeapKind(k) || k == Impl::VarKind::Union) return val;
-                impl_->emitIncrefByKind(val, k);
-                return val;
-            }
-        }
-        bool alreadyOwned = !Impl::isBorrowedHeapExpr(branchExpr) &&
-            (tk == Type::Kind::Str ? impl_->isOwnedStrResult(val)
-                                   : impl_->isOwnedPtrResult(val));
-        if (alreadyOwned) return val;
-        auto* callee = impl_->getOrDeclareRuntime(fn,
-            llvm::FunctionType::get(impl_->i8PtrType, {impl_->i8PtrType},
-                                    false));
-        return impl_->builder->CreateCall(callee, {impl_->toI8Ptr(val)},
-                                          "tern.retain");
+        return impl_->normalizeMergeArmOwnership(branchExpr, val,
+                                                 node.type.get(), "tern.retain");
     };
 
     auto enterNarrowing = [&](const std::string& varName, Impl::VarKind kind) -> bool {
@@ -1881,51 +1851,10 @@ void CodeGen::visit(IfExpr& node) {
     }
     llvm::BasicBlock* elseEnd = impl_->builder->GetInsertBlock();
 
-    auto isNumeric = [&](llvm::Type* t) {
-        return t == impl_->i1Type || t == impl_->i64Type || t == impl_->f64Type;
-    };
-    auto boxArm = [&](Expr* e, llvm::Value* v, llvm::BasicBlock* bb) -> llvm::Value* {
-        if (v->getType() == impl_->boxType) return v;
-        impl_->builder->SetInsertPoint(bb);
-        return impl_->makeBox(impl_->emitTagForExpr(e, *this), v);
-    };
-    bool typesDiffer = thenVal->getType() != elseVal->getType();
-    bool nodeIsUnion = node.type && node.type->kind() == Type::Kind::Union;
-    llvm::Type* resultType = thenVal->getType();
-    if (typesDiffer && isNumeric(thenVal->getType()) && isNumeric(elseVal->getType())) {
-        bool anyFloat = thenVal->getType() == impl_->f64Type ||
-                        elseVal->getType() == impl_->f64Type;
-        resultType = anyFloat ? impl_->f64Type : impl_->i64Type;
-        auto widen = [&](llvm::Value* v, llvm::BasicBlock* bb) -> llvm::Value* {
-            if (v->getType() == resultType) return v;
-            impl_->builder->SetInsertPoint(bb);
-            if (resultType == impl_->f64Type) {
-                if (v->getType() == impl_->i1Type)
-                    v = impl_->builder->CreateZExt(v, impl_->i64Type, "b2i");
-                return impl_->builder->CreateSIToFP(v, impl_->f64Type, "i2f");
-            }
-            return impl_->builder->CreateZExt(v, impl_->i64Type, "b2i");
-        };
-        thenVal = widen(thenVal, thenEnd);
-        elseVal = widen(elseVal, elseEnd);
-    } else if (typesDiffer || (nodeIsUnion && thenVal->getType() != impl_->boxType)) {
-        resultType = impl_->boxType;
-        thenVal = boxArm(node.thenExpr.get(), thenVal, thenEnd);
-        elseVal = boxArm(node.elseExpr.get(), elseVal, elseEnd);
-    }
-
-    impl_->builder->SetInsertPoint(thenEnd);
-    impl_->builder->CreateBr(mergeBB);
-    thenEnd = impl_->builder->GetInsertBlock();
-    impl_->builder->SetInsertPoint(elseEnd);
-    impl_->builder->CreateBr(mergeBB);
-    elseEnd = impl_->builder->GetInsertBlock();
-
-    impl_->builder->SetInsertPoint(mergeBB);
-    auto* phi = impl_->builder->CreatePHI(resultType, 2, "ternary");
-    phi->addIncoming(thenVal, thenEnd);
-    phi->addIncoming(elseVal, elseEnd);
-    impl_->lastValue = phi;
+    Impl::MergeArm thenArm{node.thenExpr.get(), thenVal, thenEnd};
+    Impl::MergeArm elseArm{node.elseExpr.get(), elseVal, elseEnd};
+    impl_->lastValue = impl_->mergeArmValues(*this, node.type.get(), thenArm,
+                                             elseArm, mergeBB, "ternary");
 }
 
 }

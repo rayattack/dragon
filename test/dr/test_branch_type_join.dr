@@ -1,0 +1,69 @@
+from unittest import TestCase, main
+
+def empty_list() -> list[int] {
+    return []
+}
+
+def empty_dict() -> dict[str, int] {
+    return {}
+}
+
+def pick_list(c: bool) -> list[int] {
+    return [1] if c else []
+}
+
+def or_list(xs: list[int]) -> list[int] {
+    return xs or []
+}
+
+class BranchTypeJoinTests(TestCase) {
+    def test_bare_empty_list_return() {
+        self.assertEqual(len(empty_list()), 0)
+    }
+
+    def test_bare_empty_dict_return() {
+        self.assertEqual(len(empty_dict()), 0)
+    }
+
+    def test_ternary_unifies_empty_arm() {
+        c: bool = True
+        xs: list[int] = [1] if c else []
+        self.assertEqual(len(xs), 1)
+        ys: list[int] = [] if c else [1, 2]
+        self.assertEqual(len(ys), 0)
+    }
+
+    def test_ternary_return_unifies_empty_arm() {
+        self.assertEqual(len(pick_list(True)), 1)
+        self.assertEqual(len(pick_list(False)), 0)
+    }
+
+    def test_or_return_unifies_empty_arm() {
+        self.assertEqual(len(or_list([1, 2])), 2)
+        self.assertEqual(len(or_list([])), 0)
+    }
+
+    def test_ternary_promotes_int_and_float() {
+        c: bool = False
+        v: float = 0 if c else 2.5
+        self.assertEqual(v, 2.5)
+        kept: float = 3 if not c else 2.5
+        self.assertEqual(kept, 3.0)
+    }
+
+    def test_ternary_keeps_same_type() {
+        c: bool = False
+        s: str = "a" if c else "b"
+        self.assertEqual(s, "b")
+        n: int = 1 if c else 2
+        self.assertEqual(n, 2)
+    }
+
+    def test_ternary_empty_dict_arm() {
+        c: bool = False
+        d: dict[str, int] = {"a": 1} if c else {}
+        self.assertEqual(len(d), 0)
+    }
+}
+
+main([BranchTypeJoinTests()])

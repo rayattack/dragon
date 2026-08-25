@@ -4,9 +4,8 @@ namespace dragon {
 
 void CodeGen::visit(AssertStmt& node) {
     node.test->accept(*this);
-    llvm::Value* cond = impl_->lastValue;
-    if (cond->getType() == impl_->i64Type) {
-    } else if (cond->getType() == impl_->i1Type) {
+    llvm::Value* cond = impl_->toBool(impl_->lastValue, node.test.get());
+    if (cond->getType() == impl_->i1Type) {
         cond = impl_->builder->CreateZExt(cond, impl_->i64Type);
     }
 

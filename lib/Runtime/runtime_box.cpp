@@ -602,6 +602,30 @@ int64_t dragon_box_len(DragonBox box) {
     return 0;
 }
 
+bool dragon_box_truthy(DragonBox box) {
+    switch (box.tag) {
+        case TAG_NONE:
+            return false;
+        case TAG_INT:
+        case TAG_BOOL:
+            return box.payload != 0;
+        case TAG_FLOAT: {
+            double d;
+            memcpy(&d, &box.payload, sizeof(double));
+            return d != 0.0;
+        }
+        case TAG_STR:
+            return box.payload != 0 &&
+                   dragon_str_len((const char*)(uintptr_t)box.payload) != 0;
+        case TAG_LIST:
+        case TAG_DICT:
+        case TAG_BYTES:
+            return box.payload != 0 && dragon_box_len(box) != 0;
+        default:
+            return box.payload != 0;
+    }
+}
+
 void dragon_box_decref(DragonBox box) {
     dragon_decref_tagged(box.payload, (uint8_t)box.tag);
 }

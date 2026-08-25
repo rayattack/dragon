@@ -686,6 +686,28 @@ struct CodeGen::Impl {
 
     bool isOwnedResultByKind(llvm::Value* v, VarKind kind);
 
+    llvm::Value* normalizeMergeArmOwnership(Expr* armExpr, llvm::Value* val,
+                                            Type* resultType,
+                                            const char* retainName);
+
+    VarKind discardableHeapKind(Expr* armExpr);
+
+    void releaseDiscardedArm(Expr* armExpr, llvm::Value* val);
+
+    struct MergeArm {
+        Expr* expr;
+        llvm::Value* value;
+        llvm::BasicBlock* block;
+    };
+
+    llvm::Value* widenNumericArm(MergeArm& arm, llvm::Type* target);
+
+    llvm::Value* boxMergeArm(CodeGen& cg, MergeArm& arm);
+
+    llvm::Value* mergeArmValues(CodeGen& cg, Type* resultType, MergeArm& a,
+                                MergeArm& b, llvm::BasicBlock* mergeBB,
+                                const char* phiName);
+
     static int64_t typeKindToTag(Type::Kind k);
 
     static int64_t varKindToTag(VarKind vk);
